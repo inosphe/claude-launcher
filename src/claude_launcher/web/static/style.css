@@ -2314,6 +2314,17 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 /* put this session into another mesh, from the same section that lists the
    ones it is already in — the mesh page's enrol form with the session answered */
 .sess-mesh-join { margin-top: 10px; }
+.sess-role-edit { margin-top: 8px; }
+.sess-role-edit summary { cursor: pointer; }
+.sess-role-edit-body {
+  display: flex; flex-direction: column; gap: 6px; margin-top: 6px;
+}
+.sess-role-edit-primary { display: flex; gap: 8px; align-items: center; }
+.sess-role-edit-primary select { flex: 1 1 auto; min-width: 0; }
+.sess-role-edit-label { font-size: 0.85em; opacity: 0.75; }
+.sess-role-edit-subs { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+.sess-role-edit-sub { display: inline-flex; gap: 4px; align-items: center; }
+.sess-role-edit .wf-btn { align-self: flex-start; margin-right: 0; }
 .sess-mesh-join-row {
   display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap;
 }
@@ -4262,6 +4273,22 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .install-files tr.install-unchanged td { color: #7d8590; }
 .install-diff, .install-lines { max-height: 320px; overflow: auto; white-space: pre-wrap; font-size: 12px; }
 .install-effects li { margin: 2px 0; }
+.prompt-packs { margin-top: 18px; }
+.prompt-pack-table, .prompt-pack-roles { width: 100%; }
+.prompt-pack-table td { vertical-align: top; }
+.prompt-pack-table td .wf-note { overflow-wrap: anywhere; }
+.prompt-pack-table td.prompt-pack-current > div:first-child { color: #7ee787; }
+.prompt-pack-table td.prompt-pack-stale > div:first-child { color: #e3b341; }
+.prompt-pack-table td.prompt-pack-edited > div:first-child { color: #d29922; }
+.prompt-pack-table td.prompt-pack-missing > div:first-child { color: #7d8590; }
+.prompt-pack-catalog li { margin: 2px 0; }
+.prompt-pack-add-role { margin: 6px 0; }
+/* The create form's Subroles and Prompt packs rows: a label, then boxes. */
+.new-check-row { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; margin: 4px 0; font-size: 12px; }
+.new-check-row .new-check-label { min-width: 90px; }
+.new-check-list { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+.new-check-list label.check { display: inline-flex; gap: 4px; align-items: baseline; margin: 0; }
+.new-check-row .wf-error { flex-basis: 100%; margin: 2px 0; font-size: 12px; }
 .profile-ok { color: #7ee787; }
 .profile-pending { color: #e3b341; }
 .profile-muted { color: #6e7681; }

@@ -12,7 +12,11 @@ const src = fs.readFileSync(
 const a = src.indexOf("const RING = {");
 const b = src.indexOf("/* The send/add forms must survive the 2s poll");
 if (a < 0 || b <= a) throw new Error("cannot locate the topology section");
-const code = src.slice(a, b);
+// The roster's role helpers live beside the rail code, outside this section.
+const h = src.indexOf("/* Every role a roster row holds");
+const hEnd = src.indexOf("/* The meshes a rail row speaks for", h);
+if (h < 0 || hEnd <= h) throw new Error("cannot locate the role helpers");
+const code = src.slice(h, hEnd) + src.slice(a, b);
 
 /* ---- stub DOM --------------------------------------------------------- */
 function node(tag) {

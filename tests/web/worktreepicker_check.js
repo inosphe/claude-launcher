@@ -143,6 +143,9 @@ new Function(
    slice("renderWorktreeSessionOptions"), slice("pickWorktreeSession"),
    slice("renderWorktreeFromOptions"), slice("worktreeFromBranch"),
    slice("syncNewWorktree"),
+   // The pack offer rides the same directory edges; its own check is
+   // prompt_packs_check.js.
+   `function refreshPromptPackOffer() {}`,
    slice("refreshNewWorktree"),
    // The registry poll, which rebuilds the Directory row behind the form's
    // back. Everything it closes over that is a function arrives as a

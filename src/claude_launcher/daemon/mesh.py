@@ -3209,14 +3209,18 @@ class MeshManager:
         """The ``project:`` line of the briefing, or ``""`` for a member whose
         record this daemon does not hold (remote, or gone).
 
-        The session's own project, not the mesh's: they usually agree, but
-        the line answers "which project am I filed under" — the scope
-        ``claunch sessions`` and ``claunch mesh ls`` narrow to inside the
-        session — and that is a fact about the session. The hint about
-        ``--project all`` rides here because the briefing is the one block a
-        member is guaranteed to read; s769 (2026-09-24) listed every
+        The session's own project, not the mesh's: the line answers "which
+        project am I filed under" — the scope ``claunch sessions`` narrows to
+        inside the session — and that is a fact about the session. The hint
+        about ``--project all`` rides here because the briefing is the one
+        block a member is guaranteed to read; s769 (2026-09-24) listed every
         default-project session because nothing had ever told it there was
         a project to be in.
+
+        The mesh is not narrowed, and the line says so: members of other
+        projects are on the roster above and are messaged like any other
+        (claunch-6deos). Without that clause a member reads "this project
+        only" as a limit on who it may talk to.
         """
         if not self._is_local(mesh, member):
             return ""
@@ -3226,9 +3230,10 @@ class MeshManager:
             return ""
         project = projects.normalize(getattr(sdef, "project", None))
         return (
-            f"project: {project} -- 'claunch sessions' and 'claunch mesh ls' "
-            f"show this project only; add '--project {projects.ALL}' for every "
-            "project\n"
+            f"project: {project} -- 'claunch sessions' shows this project only; "
+            f"add '--project {projects.ALL}' for every project. The mesh spans "
+            "projects: members of any project are on its roster and can be "
+            "messaged\n"
         )
 
     async def _brief(self, mesh: Mesh, member: Member, *, hold: float = 30.0) -> None:
@@ -4383,46 +4388,196 @@ class MeshManager:
         add: Sequence[str] = (), remove: Sequence[str] = (),
         replace: Optional[Sequence[str]] = None,
     ) -> Member:
-        """Change a live member's subroles — the one role edit a roster allows.
+        """Change a live member's subroles, leaving its primary role alone.
 
-        The primary role stays what the join settled: it is the member's
-        stance and identity, and a member that changes what it IS should
-        re-join. A subrole is what it additionally answers for, and that is
-        a leader's (or a person's) decision to make after the fact — the
-        case this exists for is a leader taking ``reviewer`` so a workflow's
-        ``from: [{role: reviewer}]`` finds it. ``replace`` sets the whole
-        list; otherwise ``remove`` is applied, then ``add``. Every name is
-        resolved through the vocabulary and an exclusive role is refused
-        while somebody else holds it live. Membership is the authority's, so
-        on a mirror this is refused with the daemon to ask.
+        :meth:`set_member_roles` with no ``role`` — kept under this name for the
+        callers that only ever meant the subroles.
+        """
+        return self.set_member_roles(
+            name, handle, add=add, remove=remove, replace=replace
+        )
+
+    def set_member_roles(
+        self, name: str, handle: str, *,
+        role: Optional[str] = None,
+        add: Sequence[str] = (), remove: Sequence[str] = (),
+        replace: Optional[Sequence[str]] = None,
+    ) -> Member:
+        """Change a live member's roles: its primary and/or its subroles.
+
+        ``role`` replaces the primary — what the member IS: its stance, its
+        briefing, the label the roster prints first. ``replace`` sets the
+        whole subrole list; otherwise ``remove`` is applied, then ``add``.
+        A name given as the new primary is dropped from the subroles, and the
+        old primary is not kept unless it is named among them. Every name is
+        resolved through the vocabulary exactly as a join resolves it, and an
+        exclusive role is refused while somebody ELSE holds it live.
+
+        Every lookup that asks "who holds role X" reads :attr:`Member.roles`
+        at call time, so the change is in force as soon as this returns. What
+        cannot follow on its own is the member's terminal: a local member is
+        typed a notice of the change, carrying the new primary's stance when
+        the primary moved (:meth:`role_change_block`), and the edges the
+        mesh's ``auto_link`` rules grant the new roles are opened
+        (:meth:`_rewire_roles`). Membership is the authority's, so on a
+        mirror this is refused with the daemon to ask.
         """
         mesh = self.get(name)
         self._require_authority(mesh, "membership")
         member = mesh.members.get(handle)
         if member is None:
             raise MeshError(f"no member {handle!r} in mesh {name!r}")
-        if replace is not None:
-            wanted = list(replace)
-        else:
-            drop = set(_read_subroles(list(remove)))
-            drop |= {
-                c for c in (mesh.roleset.canonical(n) for n in drop) if c
-            }
-            wanted = [r for r in member.subroles if r not in drop] + list(add)
+        before_role, before_subs = member.role, list(member.subroles)
         # Resolve against a roster that no longer counts this member's own
-        # holdings, so keeping a subrole it already has is not refused as a
+        # holdings, so keeping a role it already has is not refused as a
         # second holder of it.
-        before = member.subroles
-        member.subroles = []
+        member.role, member.subroles = "", []
         try:
-            resolved = self._resolve_subroles(mesh, member.role, wanted)
+            primary = before_role
+            if role is not None and str(role).strip():
+                given = str(role).strip().lower()
+                canon = mesh.roleset.canonical(given)
+                if canon is None:
+                    known = ", ".join(sorted(mesh.roleset.roles))
+                    raise MeshError(f"unknown role {role!r} (known: {known})")
+                role_def = mesh.roleset.get(canon)
+                if role_def is not None and role_def.exclusive:
+                    holder = self._live_holder(mesh, canon)
+                    if holder is not None:
+                        raise MeshConflict(
+                            f"role {canon!r} is exclusive in mesh "
+                            f"{mesh.name!r} and {holder.handle!r} already "
+                            f"holds it"
+                        )
+                primary = canon
+            if replace is not None:
+                wanted = list(replace)
+            else:
+                drop = set(_read_subroles(list(remove)))
+                drop |= {
+                    c for c in (mesh.roleset.canonical(n) for n in drop) if c
+                }
+                wanted = [r for r in before_subs if r not in drop] + list(add)
+            resolved = self._resolve_subroles(mesh, primary, wanted)
         except MeshError:
-            member.subroles = before
+            member.role, member.subroles = before_role, before_subs
             raise
-        member.subroles = resolved
-        if resolved != before:
+        member.role, member.subroles = primary, resolved
+        if (primary, resolved) != (before_role, before_subs):
+            log.info(
+                "mesh %r: %r roles %s -> %s", mesh.name, handle,
+                "+".join([before_role, *before_subs]), member.role_label(),
+            )
+            opened = self._rewire_roles(mesh, member)
             self._roster_changed(mesh)
+            self._role_notice_soon(
+                mesh, member, before_role, before_subs, opened
+            )
         return member
+
+    def _rewire_roles(self, mesh: Mesh, member: Member) -> List[str]:
+        """Open the edges ``auto_link`` grants ``member`` under its new roles.
+
+        The same rule evaluation :meth:`_wire_member` runs at join, applied
+        additively: a pair already written down either way is left as it is
+        — an explicit disconnect is somebody's decision, and an edge the old
+        roles earned is not taken away from a member mid-conversation. Only a
+        ``wired`` member needs it; for anyone else an unrecorded pair is
+        already open.
+        """
+        if not member.wired:
+            return []
+        facts = self._link_facts(mesh, dict(self._lineage_map(mesh)))
+        mine = facts.get(member.handle)
+        if mine is None:
+            return []
+        auto = mesh.roleset.auto_link
+        opened = []
+        for other in sorted(mesh.members):
+            if other == member.handle or other not in facts:
+                continue
+            key = Mesh.member_key(member.handle, other)
+            if key in mesh.member_edges:
+                continue
+            if auto.decide(mine, facts[other]):
+                mesh.member_edges[key] = True
+                opened.append(other)
+        return opened
+
+    def role_change_block(
+        self, mesh: Mesh, member: Member, before_role: str,
+        before_subs: Sequence[str], opened: Sequence[str] = (),
+    ) -> str:
+        """The notice typed into a member whose roles were just changed.
+
+        A changed primary carries the new stance in full, with its text id,
+        exactly as the join briefing does (:meth:`_stance_lines`): the
+        session reminder that follows names only that id, and an id with no
+        text beside it in the conversation would send the agent to rebrief
+        for something it could simply have been handed.
+        """
+        added = [r for r in member.subroles if r not in before_subs]
+        dropped = [r for r in before_subs if r not in member.subroles]
+        lines = [
+            "---",
+            "# claunch mesh: role change -- machine-generated, not typed by "
+            "the user",
+            f"mesh: {mesh.name}",
+            f"you: {member.handle}",
+            f"roles: {'+'.join([before_role, *before_subs])} -> "
+            f"{member.role_label()}",
+        ]
+        if member.role != before_role:
+            lines.append(
+                f"primary role: {before_role} -> {member.role} — the stance "
+                f"below replaces the {before_role} stance you were given; act "
+                "on it from now on"
+            )
+        if added:
+            lines.append(
+                f"subroles added: {', '.join(added)} — you now also answer "
+                "for these when a workflow or a peer looks one up"
+            )
+        if dropped:
+            lines.append(
+                f"subroles removed: {', '.join(dropped)} — you are no longer "
+                "found under these"
+            )
+        if opened:
+            lines.append(
+                f"connected: {', '.join(opened)} (this mesh's auto-link "
+                "rules for your new roles)"
+            )
+        text = "\n".join(lines) + "\n"
+        if member.role != before_role:
+            text += self._stance_lines(mesh, member)
+        return text + "---"
+
+    def _role_notice_soon(
+        self, mesh: Mesh, member: Member, before_role: str,
+        before_subs: Sequence[str], opened: Sequence[str],
+    ) -> None:
+        """Queue :meth:`role_change_block` into a local member's terminal.
+
+        Through the session's notification queue, as the cflow clock's blocks
+        go: it waits out a draft being typed instead of skipping, so a member
+        that was mid-turn when its role changed still receives the notice.
+        """
+        if not self._is_local(mesh, member):
+            return
+        try:
+            session = self.manager.get(member.session)
+        except ManagerError:
+            return
+        if getattr(session, "exited", False):
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        session.queue_delivery(self.role_change_block(
+            mesh, member, before_role, before_subs, opened
+        ))
 
     def _live_holder(self, mesh: Mesh, role_name: str) -> Optional[Member]:
         """The member holding ``role_name`` whose session is still alive.

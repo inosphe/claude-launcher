@@ -244,6 +244,14 @@ class SessionDef:
     #: ``project`` or, failing all of those, the parent's) and carried on
     #: restores like the rest of the definition.
     project: Optional[str] = None
+    #: The prompt packs chosen at creation, as ``({"id", "text"}, ...)`` in
+    #: the order they went into the opening (see :mod:`claude_launcher.
+    #: prompt_packs`). Kept as a *record*, like :attr:`task`: the live copy
+    #: went in once, and this is what a re-briefing hands back by text id
+    #: after a compaction. The text is stored rather than re-read because
+    #: the workspace's copy may be edited or removed afterwards, and the id
+    #: the session was given names what it was given.
+    prompt_packs: Tuple[Dict[str, str], ...] = ()
 
     def to_dict(self) -> dict:
         out = {
@@ -297,6 +305,9 @@ class SessionDef:
             out["project"] = self.project
         if self.disable_artifact_tool:
             out["disable_artifact_tool"] = True
+        # Absent when none were chosen, like the fields above.
+        if self.prompt_packs:
+            out["prompt_packs"] = [dict(p) for p in self.prompt_packs]
         return out
 
     @classmethod
@@ -338,7 +349,21 @@ class SessionDef:
             quick_fork_of=str(data.get("quick_fork_of") or "").strip() or None,
             note=str(data.get("note") or "").strip() or None,
             project=str(data.get("project") or "").strip() or None,
+            prompt_packs=_prompt_packs_field(data.get("prompt_packs")),
         )
+
+
+def _prompt_packs_field(raw) -> Tuple[Dict[str, str], ...]:
+    """The recorded prompt packs; anything malformed is dropped, not raised.
+
+    A restart record is read back on every daemon start, and a hand-edited
+    entry must not keep a session from being listed.
+    """
+    out = []
+    for item in raw or ():
+        if isinstance(item, dict) and item.get("id") and item.get("text"):
+            out.append({"id": str(item["id"]), "text": str(item["text"])})
+    return tuple(out)
 
 
 def _tools_field(value) -> Tuple[str, ...]:
@@ -1124,8 +1149,9 @@ def build_command(
     # it, mapping each session 1:1 to its own workflow run.
     env["CLAUNCH_SESSION"] = sdef.name
     # The project the session is filed under, spelled out even for the
-    # default one. ``claunch sessions`` / ``claunch mesh ls`` read it to
-    # narrow themselves to the caller's project: without it a session in
+    # default one. ``claunch sessions`` reads it to narrow itself to the
+    # caller's project (meshes span projects and are not narrowed,
+    # claunch-6deos): without it a session in
     # project 'gds6' listed every default-project session as if it were its
     # own roster (s769, 2026-09-24) — the record knew the project, the
     # session had no way to.

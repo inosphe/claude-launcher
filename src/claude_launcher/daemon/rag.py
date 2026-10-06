@@ -8,7 +8,10 @@ matches on any of its parts. The **fleet** (one index per daemon): every
 session's opening task, identity, linked issue and the cached briefing, so
 "which session is working on X" is a query rather than a scroll.
 
-The pipeline is retrieve-then-rerank. A query is embedded once, ranked by
+The pipeline is retrieve-then-rerank. Unified search also retrieves BM25
+title/body hits and fuses source ranks before optional reranking. An issue's
+description and comments consume one candidate and one displayed result.
+A query is embedded once, ranked by
 cosine against every stored vector (they are unit vectors, so a dot product
 is the cosine), the top ``candidates`` are widened with lexical hits (an id
 or title containing every query word — the one thing an embedding is worse
@@ -73,7 +76,7 @@ from typing import Any, AsyncIterator, Callable, Dict, Iterable, List, NamedTupl
 import aiohttp
 
 from .. import atomic, beads_db, cli_beads, store
-from . import paths
+from . import paths, search_keywords
 
 try:
     import ssl as _ssl
@@ -460,6 +463,7 @@ class VectorIndex:
         self.model = model
         self.dims = dims
         self.entries: Dict[str, Entry] = {}
+        self.keywords = search_keywords.KeywordIndex()
         self.updated_at: Optional[str] = None
         self._loaded = False
         self._lock: Optional[asyncio.Lock] = None
@@ -560,6 +564,7 @@ class VectorIndex:
         for doc_id, chunks in seen.items():
             entry = self.entries[doc_id]
             self.entries[doc_id] = Entry(entry.hash, chunks, entry.meta)
+            self.keywords.put(doc_id, entry.meta)
         self.updated_at = data.get("updated_at")
 
     def save(self) -> None:
@@ -630,6 +635,7 @@ class VectorIndex:
                 col.destroy()
             self._col = None
         self.entries.clear()
+        self.keywords = search_keywords.KeywordIndex()
         self._loaded = True
         self.updated_at = _now_iso()
 
@@ -663,6 +669,7 @@ class VectorIndex:
         for start in range(0, len(rows), WRITE_BATCH):
             col.upsert(rows[start:start + WRITE_BATCH])
         self.entries[doc.id] = Entry(doc.hash, len(vecs), meta)
+        self.keywords.put(doc.id, meta)
         self.updated_at = _now_iso()
 
     def refresh_meta(self, doc: Doc) -> None:
@@ -680,6 +687,7 @@ class VectorIndex:
                     for i in range(entry.chunks)
                 ])
         self.entries[doc.id] = Entry(entry.hash, entry.chunks, dict(doc.meta))
+        self.keywords.put(doc.id, doc.meta)
 
     def drop(self, doc_id: str) -> None:
         entry = self.entries.get(doc_id)
@@ -690,6 +698,7 @@ class VectorIndex:
             with contextlib.suppress(Exception):
                 col.delete([vector_id(doc_id, i) for i in range(entry.chunks)])
         del self.entries[doc_id]
+        self.keywords.drop(doc_id)
         self.updated_at = _now_iso()
 
     # -- queries -------------------------------------------------------- #
@@ -1465,23 +1474,39 @@ class RagService:
         candidates = max(limit, int(cfg.get("candidates") or limit))
         excluded = self._inactive_documents(index) if mode == "active" else set()
         rank_args = {"include": set(index.entries) - excluded} if mode == "active" else {}
-        ranked = await asyncio.to_thread(index.rank, qvec, candidates, **rank_args)
-        scores: Dict[str, float] = dict(ranked)
-        order = [doc_id for doc_id, _ in ranked]
-        lexical = set()
-        for doc_id in index.lexical(query, limit, exclude=excluded):
-            lexical.add(doc_id)
-            if doc_id not in scores:
-                scores[doc_id] = 0.0
-                order.insert(0, doc_id)
-            else:
-                order.remove(doc_id)
+        # Retrieve enough passages to avoid spending the candidate budget on
+        # one issue's comments. Bound widening to keep vector lookup predictable.
+        passages = {}
+        if kind == "all":
+            window = candidates
+            while True:
+                ranked = await asyncio.to_thread(index.rank, qvec, window, **rank_args)
+                groups = {search_keywords.group_key(d, index.entries[d].meta) for d, _ in ranked
+                          if d in index.entries}
+                if len(groups) >= candidates or len(ranked) < window or window >= candidates * 16:
+                    break
+                window *= 2
+            keywords = await asyncio.to_thread(index.keywords.rank, query, len(index.entries), exclude=excluded)
+            exact = index.lexical(query, len(index.entries), exclude=excluded)
+            order, scores, passages = search_keywords.fuse(index, ranked, keywords, exact, candidates)
+            lexical = {doc_id for doc_id, _ in keywords} | set(exact)
+        else:
+            ranked = await asyncio.to_thread(index.rank, qvec, candidates, **rank_args)
+            scores = dict(ranked)
+            order = [doc_id for doc_id, _ in ranked]
+            lexical = set()
+            for doc_id in index.lexical(query, limit, exclude=excluded):
+                lexical.add(doc_id)
+                scores.setdefault(doc_id, 0.0)
+                if doc_id in order:
+                    order.remove(doc_id)
                 order.insert(0, doc_id)
         timing = {"embed_ms": embed_ms, "rerank_ms": None, "embed_cached": embed_cached}
         pending = bool(rerank and cfg.get("rerank_model") and order)
         first = self._search_view(
             kind, query, root, index, prog, order, scores, lexical, {},
             limit=limit, timing=timing, pending=pending,
+            passages=passages,
         )
         yield "ranked", first
         if not pending:
@@ -1491,8 +1516,8 @@ class RagService:
         # widen a 12-document rerank to 30 (0.2-0.35 s each on the
         # measured endpoint). Candidates past it keep their vector order
         # behind the reranked head.
-        top = order[: max(1, int(cfg.get("rerank_top") or limit))]
-        texts = [self._rerank_text(index, doc_id) for doc_id in top]
+        top = [d for d in order if d in index.entries][: max(1, int(cfg.get("rerank_top") or limit))]
+        texts = [self._rerank_group_text(index, doc_id, passages.get(doc_id, [])) for doc_id in top]
         started = time.monotonic()
         try:
             pairs = await client.rerank(query, texts, len(top))
@@ -1521,6 +1546,7 @@ class RagService:
         yield "reranked", self._search_view(
             kind, query, root, index, prog, order, scores, lexical, rerank_scores,
             limit=limit, timing=timing, pending=False,
+            passages=passages,
         )
 
     async def search(
@@ -1594,6 +1620,7 @@ class RagService:
         limit: int,
         timing: dict,
         pending: bool,
+        passages: Optional[dict] = None,
     ) -> dict:
         """One answer to a search, from an ordering of the index's ids."""
         results = []
@@ -1609,6 +1636,14 @@ class RagService:
             if doc_id in rerank_scores:
                 row["rerank_score"] = round(rerank_scores[doc_id], 4)
             row.update(entry.meta)
+            matches = (passages or {}).get(doc_id, [])
+            if len(matches) > 1:
+                row["matches"] = [
+                    {"id": match, "kind": index.entries[match].meta.get("kind"),
+                     "excerpt": index.entries[match].meta.get("excerpt", ""),
+                     "source_url": index.entries[match].meta.get("source_url")}
+                    for match in matches if match != doc_id and match in index.entries
+                ]
             results.append(row)
         # A search answer is asked for *now*, so the session state on it is
         # read now: the index is embedded in the background, and a status
@@ -1625,6 +1660,15 @@ class RagService:
             "index": prog.view(),
             "timing": dict(timing),
         }
+
+    def _rerank_group_text(self, index, doc_id, matches):
+        matches = [m for m in matches if m in index.entries]
+        if len(matches) <= 1:
+            return self._rerank_text(index, doc_id)
+        meta = index.entries[doc_id].meta
+        width = RERANK_CHARS // len(matches)
+        body = "\n".join(str(index.entries[m].meta.get("excerpt") or "")[:width] for m in matches)
+        return str(meta.get("title") or meta.get("name") or doc_id) + "\n" + body[:RERANK_CHARS]
 
     def _live_states(self, rows: List[dict]) -> None:
         """Put the fleet's *current* session state on each result row, in place.

@@ -47,7 +47,7 @@ from .. import install_plan
 from .. import session_commits
 from .. import beads_db, beads_meta
 from .. import ghcli, prflow, projects, spawn as spawn_mod, store, workspaces
-from .. import plugins, settings
+from .. import plugins, prompt_packs, settings
 from .. import worktree as worktree_mod
 from . import beads as beads_mod, channel, clipboard, connections
 from . import p2p
@@ -538,6 +538,11 @@ def build_app(
     r.add_post("/api/worktrees/remove", h_worktrees_remove)
     r.add_post("/api/workspaces", h_workspace_add)
     r.add_delete("/api/workspaces/{name}", h_workspace_remove)
+    r.add_get("/api/prompt-packs", h_prompt_packs)
+    r.add_get("/api/prompt-packs/offer", h_prompt_packs_offer)
+    r.add_post("/api/prompt-packs/install", h_prompt_packs_install)
+    r.add_post("/api/prompt-packs/remove", h_prompt_packs_remove)
+    r.add_put("/api/prompt-packs/role-packs", h_prompt_packs_role_packs)
     r.add_get("/api/briefing/llm", h_briefing_llm)
     r.add_put("/api/briefing/llm", h_briefing_llm_save)
     r.add_get("/api/briefing/faq", h_briefing_faq)
@@ -606,6 +611,7 @@ def build_app(
     r.add_post("/api/mesh/{mesh}/members", h_mesh_join)
     r.add_delete("/api/mesh/{mesh}/members/{handle}", h_mesh_leave)
     r.add_patch("/api/mesh/{mesh}/members/{handle}/subroles", h_mesh_member_subroles)
+    r.add_patch("/api/mesh/{mesh}/members/{handle}/roles", h_mesh_member_roles)
     r.add_post("/api/mesh/{mesh}/messages", h_mesh_send)
     r.add_post("/api/mesh/{mesh}/urgent", h_mesh_urgent)
     r.add_get("/api/mesh/{mesh}/messages", h_mesh_history)
@@ -2573,6 +2579,103 @@ async def h_workspace_remove(request: web.Request) -> web.Response:
     except workspaces.WorkspaceError as exc:
         return json_error(404, str(exc))
     return json_response({"workspace": removed.to_dict()})
+
+
+def _prompt_packs_doc() -> dict:
+    """Everything the Settings ▸ Install card draws, in one read."""
+    roleset = mesh_roles.resolve()
+    return {
+        "catalog": [p.to_dict() for p in prompt_packs.catalog()],
+        "workspaces": [
+            {**w.to_dict(), "packs": prompt_packs.workspace_rows(Path(w.path))}
+            for w in workspaces.list_all()
+        ],
+        "role_packs": prompt_packs.role_packs(),
+        "default_role_packs": prompt_packs.DEFAULT_ROLE_PACKS,
+        "default_packs": prompt_packs.default_packs(),
+        "roles": sorted(roleset.roles),
+    }
+
+
+async def h_prompt_packs(request: web.Request) -> web.Response:
+    """Shipped packs, what each workspace holds, and the two settings."""
+    return json_response(await asyncio.to_thread(_prompt_packs_doc))
+
+
+async def h_prompt_packs_offer(request: web.Request) -> web.Response:
+    """What the create form offers for one directory.
+
+    The packs installed in the workspace that owns ``cwd`` (none when no
+    workspace does), which of them start ticked, and the role → pack mapping
+    so the form can lock the ones a chosen role or subrole requires.
+    """
+    cwd = cflow_state.resolve_cwd(request.query.get("cwd") or None)
+    owner = workspaces.owning(str(cwd))
+    packs = (
+        [p.to_dict() for p in prompt_packs.installed(Path(owner.path))]
+        if owner is not None else []
+    )
+    return json_response({
+        "cwd": str(cwd),
+        "workspace": owner.to_dict() if owner is not None else None,
+        "packs": packs,
+        "default_packs": prompt_packs.default_packs(),
+        "role_packs": prompt_packs.role_packs(),
+    })
+
+
+def _pack_target(body: dict):
+    ws = workspaces.find(str(body.get("workspace") or ""))
+    if ws is None:
+        raise prompt_packs.PackError(
+            f"no registered workspace {body.get('workspace')!r}"
+        )
+    return Path(ws.path), str(body.get("pack") or "")
+
+
+async def h_prompt_packs_install(request: web.Request) -> web.Response:
+    """Copy a shipped pack into a workspace (``force`` over an edited copy)."""
+    body = await _json_body(request)
+    try:
+        root, pack_id = _pack_target(body)
+        before = prompt_packs.install(root, pack_id, force=body.get("force") is True)
+    except prompt_packs.PackError as exc:
+        return json_error(400, str(exc))
+    return json_response({"pack": pack_id, "was": before, **_prompt_packs_doc()})
+
+
+async def h_prompt_packs_remove(request: web.Request) -> web.Response:
+    """Delete a workspace's copy (``force`` for an edited or local one)."""
+    body = await _json_body(request)
+    try:
+        root, pack_id = _pack_target(body)
+        before = prompt_packs.remove(root, pack_id, force=body.get("force") is True)
+    except prompt_packs.PackError as exc:
+        return json_error(400, str(exc))
+    return json_response({"pack": pack_id, "was": before, **_prompt_packs_doc()})
+
+
+async def h_prompt_packs_role_packs(request: web.Request) -> web.Response:
+    """Save the role → required packs mapping and/or the default-ticked list.
+
+    Each key is optional; ``null`` restores that setting's default.
+    """
+    body = await _json_body(request)
+    if "role_packs" not in body and "default_packs" not in body:
+        return json_error(400, "send role_packs and/or default_packs")
+    try:
+        # Both checked before either is written, so a bad half saves nothing.
+        if body.get("role_packs") is not None:
+            prompt_packs.clean_role_packs(body["role_packs"])
+        if isinstance(body.get("default_packs"), list):
+            [prompt_packs.check_id(str(i)) for i in body["default_packs"]]
+        if "role_packs" in body:
+            prompt_packs.set_role_packs(body["role_packs"])
+        if "default_packs" in body:
+            prompt_packs.set_default_packs(body["default_packs"])
+    except prompt_packs.PackError as exc:
+        return json_error(400, str(exc))
+    return json_response(_prompt_packs_doc())
 
 
 #: The ``llm`` block fields the Settings page may write. ``params`` is left
@@ -4679,14 +4782,16 @@ async def h_mesh_member_subroles(request: web.Request) -> web.Response:
     """Change one live member's subroles.
 
     Body: ``{"add": [...]}`` and/or ``{"remove": [...]}``, or ``{"set":
-    [...]}`` for the whole list. The primary role is not editable here — a
-    member that changes what it is re-joins.
+    [...]}`` for the whole list. The primary role is not edited here:
+    :func:`h_mesh_member_roles` takes it, so a caller that meant only the
+    subroles cannot move the primary by a stray field.
     """
     body = await _json_body(request)
     if "role" in body:
         return json_error(
-            400, "the primary 'role' is settled at join and not edited here — "
-            "send 'add', 'remove' or 'set' for the subroles"
+            400, "the primary 'role' is not edited here — PATCH "
+            ".../members/<handle>/roles changes it; send 'add', 'remove' or "
+            "'set' for the subroles"
         )
     replace = None
     if "set" in body:
@@ -4694,6 +4799,38 @@ async def h_mesh_member_subroles(request: web.Request) -> web.Response:
     member = _mesh_mgr(request).set_subroles(
         request.match_info["mesh"],
         request.match_info["handle"],
+        add=_subroles_in({"subroles": body.get("add")}),
+        remove=_subroles_in({"subroles": body.get("remove")}),
+        replace=replace,
+    )
+    return json_response(member.to_dict())
+
+
+async def h_mesh_member_roles(request: web.Request) -> web.Response:
+    """Change one live member's roles: its primary and/or its subroles.
+
+    Body: ``{"role": "leader"}`` for the primary, and ``add``/``remove`` or
+    ``set`` for the subroles as :func:`h_mesh_member_subroles` takes them;
+    any combination in one call, applied as one change. The member is typed
+    a notice of the change, with the new stance when the primary moved.
+    """
+    body = await _json_body(request)
+    fields = ("role", "add", "remove", "set")
+    if not any(k in body for k in fields):
+        return json_error(
+            400, "send 'role' for the primary and/or 'add', 'remove' or "
+            "'set' for the subroles"
+        )
+    role = body.get("role")
+    if role is not None and not isinstance(role, str):
+        return json_error(400, "'role' is one role name")
+    replace = None
+    if "set" in body:
+        replace = _subroles_in({"subroles": body.get("set")})
+    member = _mesh_mgr(request).set_member_roles(
+        request.match_info["mesh"],
+        request.match_info["handle"],
+        role=role,
         add=_subroles_in({"subroles": body.get("add")}),
         remove=_subroles_in({"subroles": body.get("remove")}),
         replace=replace,
@@ -6119,6 +6256,13 @@ async def _create_session(request: web.Request, body: dict) -> Tuple[int, dict]:
         }
     if not str(body.get("profile") or "").strip():
         return 400, {"error": "a session needs profile; its harness comes from it"}
+    # The prompt packs the form's checkboxes left on: only their shape is
+    # checked here. They are read from the workspace (together with the ones
+    # the session's roles require) in _onboard_and_launch, which spawns share.
+    try:
+        body["prompt_packs"] = _asked_prompt_packs(body)
+    except prompt_packs.PackError as exc:
+        return 400, {"error": str(exc)}
     body.setdefault("restore", manager.restore_default)
     body.setdefault("name", "")
     # ``role`` is onboarding state owned by the selected mesh. Keep the
@@ -6132,6 +6276,7 @@ async def _create_session(request: web.Request, body: dict) -> Tuple[int, dict]:
     # session-definition copy (or a future SessionDef field could retain the
     # specification in the daemon's restart record).
     definition.pop("issue_text", None)
+    definition.pop("prompt_packs", None)
     try:
         sdef = SessionDef.from_dict(definition)
     except (KeyError, ValueError, TypeError) as exc:
@@ -6145,6 +6290,53 @@ async def _create_session(request: web.Request, body: dict) -> Tuple[int, dict]:
     except onboard.OnboardError as exc:
         return 400, {"error": str(exc)}
     return 201, {**session.info(), **result}
+
+
+def _asked_prompt_packs(body: dict) -> List[str]:
+    """``body["prompt_packs"]`` as a list of pack ids (a comma string too)."""
+    raw = body.get("prompt_packs")
+    if raw in (None, "", []):
+        return []
+    if isinstance(raw, str):
+        raw = [part.strip() for part in raw.split(",") if part.strip()]
+    if not isinstance(raw, list):
+        raise prompt_packs.PackError("prompt_packs must be a list of pack ids")
+    return [prompt_packs.check_id(str(x)) for x in raw]
+
+
+def _session_prompt_packs(
+    request: web.Request, body: dict, plan, *, name: str, cwd: str
+):
+    """The packs a session is given: ticked ones plus role-required ones.
+
+    Roles are matched by their canonical names on the mesh being joined, so
+    an alias the roleset knows brings the same packs as the role itself.
+    Read from the workspace that owns ``cwd``; see :func:`prompt_packs.choose`.
+    """
+    roles = [r for r in (plan.role, *plan.subroles) if r]
+    mm = _mesh_mgr(request)
+    if plan.mesh and "@" not in plan.mesh and mm is not None:
+        try:
+            roleset = mm.get(plan.mesh).roleset
+        except MeshError:
+            roleset = None
+        if roleset is not None:
+            # The primary role as the join will store it: an explicit one
+            # through the aliases, else inferred from the handle -- so a
+            # member named ``unreal1`` gets the packs ``--role unreal`` would.
+            try:
+                primary = roleset.resolve(plan.handle or name, plan.role)
+            except mesh_roles.RoleError:
+                primary = plan.role
+            roles = [primary, *(roleset.canonical(r) or r for r in plan.subroles)]
+    asked = _asked_prompt_packs(body)
+    required = prompt_packs.required_for(roles)
+    if not asked and not required:
+        return [], {}
+    owner = workspaces.owning(str(cflow_state.resolve_cwd(cwd or None)))
+    return prompt_packs.choose(
+        Path(owner.path) if owner is not None else None, asked, roles
+    )
 
 
 async def _onboard_and_launch(
@@ -6206,6 +6398,18 @@ async def _onboard_and_launch(
             parent=parent or "",
             parent_cwd=manager.get(parent).sdef.cwd if parent else "",
         )
+        # Checked before anything is arranged, like the board answer above: a
+        # pack that is not installed where the session will run is a refused
+        # request, never a session that started without guidance it was
+        # promised -- whether the form ticked it or a role requires it.
+        try:
+            packs, packs_required = _session_prompt_packs(
+                request, body, plan, name=name, cwd=cwd
+            )
+        except prompt_packs.PackError as exc:
+            raise onboard.OnboardError(str(exc)) from None
+        if packs:
+            session.sdef = replace(session.sdef, prompt_packs=tuple(packs))
     except Exception:
         manager.discard(name)
         raise
@@ -6276,6 +6480,15 @@ async def _onboard_and_launch(
             plan, name=name, cwd=cwd, mesh_mgr=_mesh_mgr(request)
         )
         report.update(arranged)
+    if session.sdef.prompt_packs:
+        # Ahead of the arranged part, so the opening still ends with the task:
+        # the packs are standing rules for the whole session, and the task is
+        # what it acts on first.
+        rules = prompt_packs.opening(session.sdef.prompt_packs)
+        opening = rules + ("\n\n" + opening if opening else "")
+        report["prompt_packs"] = [p["id"] for p in session.sdef.prompt_packs]
+        if packs_required:
+            report["prompt_packs_required"] = packs_required
     if selected:
         # The goal is the head of the opening itself — one block either way
         # it travels (argv or typed in), never a slash command.

@@ -1260,6 +1260,25 @@ names like the primary — uploads do not rewrite them. The case that
 motivated it: a leader that must also be found as the reviewer a workflow
 delegates to, without a second session.
 
+**Editing roles after the join** (claunch-a6azt). The primary is editable
+too: `PATCH /api/mesh/{mesh}/members/{handle}/roles` takes `role` with the
+same `add`/`remove`/`set` as `/subroles` (which keeps refusing `role`, so a
+caller that meant only the subroles cannot move the primary by a stray
+field); the CLI is `claunch mesh subroles MESH HANDLE --primary ROLE`, and
+the dashboard's session detail panel has a Roles editor per membership. The
+new primary resolves like a join's (aliases, unknown refused, an exclusive
+role refused while somebody *else* holds it live) and leaves the subroles;
+the old primary is kept only when named among them. Lookups read
+`Member.roles` at call time, so they follow at once; three things would not
+on their own, and the edit does them (`MeshManager.set_member_roles`):
+a local member is queued a `role change` notice — carrying the new stance
+and its text id when the primary moved, so the session reminder's stance id
+has its text beside it in the conversation; the reminder's Role entry lists
+the subroles and its position key includes them, so a subrole-only edit is
+delivered as a new position; and the `auto_link` edges the new roles earn
+are opened, additively — a pair recorded either way (an explicit disconnect,
+or an edge the old roles earned) is left as it is.
+
 **What a role drives** today: the stance and content id in the join briefing,
 `stall_watch` (who receives a stuck-member warning), `exclusive` (at most one
 live holder), `task_poll` wording, and `cflow_reminder`. The last field is a

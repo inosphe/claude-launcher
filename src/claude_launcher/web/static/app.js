@@ -3777,9 +3777,15 @@ async function refreshSessions(options) {
     }
   }
   // What the rail draws: the cache narrowed to the picked project. Reduced
-  // harnesses define no project state and draw the whole cache.
-  const railList = typeof railSessions === "function"
-    ? railSessions(sessionsCache) : sessionsCache;
+  // harnesses define no project state and draw the whole cache. Grouped by
+  // mesh, a mesh group also draws its members from other projects: meshes
+  // span projects (claunch-6deos), and a group missing half its roster
+  // reads as if those members were not there to talk to.
+  const meshGrouped = typeof sessionGroupOrder === "undefined"
+    ? sessionGroupByMesh : sessionGroupOrder.includes("mesh");
+  const railList = typeof railSessions !== "function" ? sessionsCache
+    : meshGrouped && typeof railSessionsWithMeshPeers === "function"
+      ? railSessionsWithMeshPeers(sessionsCache) : railSessions(sessionsCache);
   // Other daemons' sessions the rail files among these (remote-shadow rows,
   // refreshShadows). They are drawn in this same list but never enter
   // sessionsCache: every reader of that cache keys on the bare name.
@@ -4427,6 +4433,20 @@ async function refreshSessions(options) {
   // The grid keeps its own signature, so it follows every poll whether or
   // not the list above was rebuilt.
   if (typeof renderSessionGrid === "function") renderSessionGrid();
+}
+
+/* Every role a roster row holds — the primary first, then its subroles —
+   and the roster's one-word spelling of them (`leader+reviewer`). A row from
+   a daemon that predates subroles carries no `roles` and reads as its
+   primary alone. */
+function memberRoles(m) {
+  const held = m && Array.isArray(m.roles) && m.roles.length
+    ? m.roles : [(m && m.role) || ""];
+  return held.filter(Boolean);
+}
+
+function memberRoleLabel(m) {
+  return memberRoles(m).join("+");
 }
 
 /* The meshes a rail row speaks for — the rooms that session is in.
@@ -8624,7 +8644,10 @@ let workspacesRendered = null;
 
 /* Projects: the tier above meshes and sessions (see projects.py). The rail's
    selector picks one, or "" for every project; the choice narrows the rail's
-   session and mesh lists and seeds the create form's Project row.
+   session list and seeds the create form's Project row. The mesh list is
+   not narrowed: a mesh may hold members of several projects, and one the
+   rail hid is one nobody in the other project would think to talk in
+   (claunch-6deos). A mesh's project is shown as a tag instead.
 
    The choice is part of the address (`?project=<name>` beside `?detail=`),
    so a reload, a bookmark and Back all land on the project they were taken
@@ -8632,9 +8655,9 @@ let workspacesRendered = null;
    bare `#/` typed by hand). "All projects" is the address with no
    `project` at all.
 
-   The narrowing is done here, not by the daemon: both polls fetch every
-   project and the rail filters what it draws (sessionInCurrentProject,
-   meshInCurrentProject). A pick then redraws from what is already in hand
+   The narrowing is done here, not by the daemon: the session poll fetches
+   every project and the rail filters what it draws
+   (sessionInCurrentProject). A pick then redraws from what is already in hand
    instead of waiting for a round trip, and a session of another project
    that is open in a tab stays a real record — its tab shows its real state
    instead of the "unknown" a filtered poll left it with. */
@@ -8664,14 +8687,26 @@ function sessionInCurrentProject(s) {
   return !currentProject || recordProject(s) === currentProject;
 }
 
-/* The same question for a mesh in the rail's mesh list. */
-function meshInCurrentProject(m) {
-  return !currentProject || recordProject(m) === currentProject;
-}
-
 /* The sessions the rail draws: the cache, narrowed to the picked project. */
 function railSessions(list = sessionsCache) {
   return (list || []).filter(sessionInCurrentProject);
+}
+
+/* The rail grouped by mesh: the picked project's sessions, plus every session
+   of another project that shares a mesh with one of them. A mesh spans
+   projects (claunch-6deos), so its group shows its whole local roster; a
+   mesh with no member in the picked project stays out, or picking a project
+   would narrow nothing on a daemon where most sessions are in some mesh.
+   Needs sessMeshes (the mesh poll); without it the rail is railSessions. */
+function railSessionsWithMeshPeers(list = sessionsCache) {
+  const own = railSessions(list);
+  if (!currentProject || typeof sessMeshes !== "function") return own;
+  const meshes = new Set();
+  for (const s of own) for (const m of sessMeshes(s.name)) meshes.add(m.mesh);
+  if (!meshes.size) return own;
+  const shown = new Set(own.map((s) => s.name));
+  return (list || []).filter((s) => shown.has(s.name) ||
+    sessMeshes(s.name).some((m) => meshes.has(m.mesh)));
 }
 
 /* The same address with the project set to `name`, or taken out ("" = all). */
@@ -9212,6 +9247,9 @@ function syncNewWorktree() {
 async function refreshNewWorktree() {
   const f = $("new-session");
   if (!f || !f.worktree_mode) return;
+  // The packs are the workspace's, and every edge that moves the directory
+  // lands here; not awaited, like the worktree list itself.
+  Promise.resolve(refreshPromptPackOffer()).catch(() => {});
   const cwd = newSessionCwd();
   if (cwd === newWorktreeFor) {
     // Same directory, so nothing to fetch -- but the rows are not only the
@@ -9383,6 +9421,150 @@ function renderRoleStance() {
   const role = rolesByName[select.value];
   box.textContent = role ? (role.stance || "(this role declares no stance)") : "";
   box.classList.toggle("hidden", !role);
+  renderSubroles();
+}
+
+/* Subroles: roles held beside the primary one (a worker that is also the
+   Unreal hand-off desk). Offered from the same vocabulary as the Role row,
+   and only once a mesh is in play — the daemon refuses a subrole with no
+   mesh to join. The ticks are kept by name across a vocabulary rebuild. */
+let newSubroleTicks = new Set();
+
+function newSubrolesMeshless(f) {
+  const mesh = f.mesh.value || "";
+  return mesh === "-" || (!mesh && !spawnParent());
+}
+
+function renderSubroles() {
+  const f = $("new-session");
+  const row = $("new-subroles-row");
+  if (!f || !row) return;
+  const primary = f.role.value || "";
+  const names = Object.keys(rolesByName).filter((n) => n !== primary).sort();
+  row.innerHTML = "";
+  const hidden = newSubrolesMeshless(f) || !names.length;
+  row.classList.toggle("hidden", hidden);
+  if (!hidden) {
+    row.appendChild(el("span", "new-check-label", "Subroles"));
+    const list = el("span", "new-check-list");
+    for (const name of names) {
+      const label = el("label", "check");
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.name = `subrole_${name}`;
+      box.value = name;
+      box.checked = newSubroleTicks.has(name);
+      box.addEventListener("change", () => {
+        if (box.checked) newSubroleTicks.add(name);
+        else newSubroleTicks.delete(name);
+        renderPromptPackRow();
+      });
+      label.appendChild(box);
+      label.appendChild(el("span", null, name));
+      list.appendChild(label);
+    }
+    row.appendChild(list);
+  }
+  renderPromptPackRow();
+}
+
+/* The subroles the form would send: ticked, still offered, mesh in play. */
+function newSubroles(f) {
+  if (newSubrolesMeshless(f)) return [];
+  const primary = f.role.value || "";
+  return [...newSubroleTicks].filter((n) => n !== primary && rolesByName[n]).sort();
+}
+
+/* Prompt packs: the ones installed in the workspace the session will stand
+   in (Settings ▸ Install puts them there), one checkbox each. A pack the
+   chosen role or a ticked subrole requires is ticked and locked, with the
+   role named beside it; one that is required but not installed is said out
+   loud, because the daemon will refuse the create over it. */
+let newPackOffer = null;       // /api/prompt-packs/offer's answer
+let newPackOfferFor = null;    // the directory it answers for
+let newPackTicks = new Map();  // pack id -> the operator's own tick
+
+async function refreshPromptPackOffer() {
+  const cwd = newSessionCwd();
+  if (cwd === newPackOfferFor && newPackOffer) { renderPromptPackRow(); return; }
+  newPackOfferFor = cwd;
+  let offer = null;
+  try {
+    const resp = await api(`/api/prompt-packs/offer?cwd=${encodeURIComponent(cwd)}`);
+    offer = resp.ok ? await resp.json() : null;
+  } catch { offer = null; }
+  if (cwd !== newPackOfferFor) return;
+  if (!offer) newPackOfferFor = null;   // no answer is not "no packs"
+  const before = newPackOffer && (newPackOffer.workspace || {}).path;
+  const after = offer && (offer.workspace || {}).path;
+  // Another workspace's packs are another list: ticks start from its
+  // defaults again rather than carrying ids across.
+  if (before !== after) newPackTicks = new Map();
+  newPackOffer = offer;
+  renderPromptPackRow();
+}
+
+/* {pack id: [roles]} for the role row and the ticked subroles. */
+function newRequiredPacks(f) {
+  const mapping = (newPackOffer && newPackOffer.role_packs) || {};
+  const roles = [f.role.value || "", ...newSubroles(f)].filter(Boolean);
+  const out = {};
+  for (const role of roles) {
+    for (const id of mapping[role] || []) (out[id] = out[id] || []).push(role);
+  }
+  return out;
+}
+
+function newPackTicked(id) {
+  if (newPackTicks.has(id)) return newPackTicks.get(id);
+  return ((newPackOffer && newPackOffer.default_packs) || []).includes(id);
+}
+
+function renderPromptPackRow() {
+  const f = $("new-session");
+  const row = $("new-packs-row");
+  if (!f || !row) return;
+  row.innerHTML = "";
+  const offer = newPackOffer;
+  const required = newRequiredPacks(f);
+  const packs = (offer && offer.packs) || [];
+  const have = new Set(packs.map((p) => p.id));
+  const missing = Object.keys(required).filter((id) => !have.has(id));
+  row.classList.toggle("hidden", !packs.length && !missing.length);
+  if (!packs.length && !missing.length) return;
+  row.appendChild(el("span", "new-check-label", "Prompt packs"));
+  const list = el("span", "new-check-list");
+  for (const p of packs) {
+    const label = el("label", "check");
+    label.title = p.description || "";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.name = `prompt_pack_${p.id}`;
+    box.value = p.id;
+    const by = required[p.id];
+    box.checked = by ? true : newPackTicked(p.id);
+    box.disabled = !!by;
+    box.addEventListener("change", () => newPackTicks.set(p.id, box.checked));
+    label.appendChild(box);
+    label.appendChild(el("span", null, p.title || p.id));
+    if (by) label.appendChild(el("span", "wf-note", ` (required by ${by.join(", ")})`));
+    list.appendChild(label);
+  }
+  row.appendChild(list);
+  if (missing.length) {
+    row.appendChild(el("p", "wf-error",
+      missing.map((id) => `${id} is required by ${required[id].join(", ")}`).join("; ") +
+      ` but is not installed in ${offer && offer.workspace ? offer.workspace.name : "this directory's workspace"}` +
+      " — install it in Settings ▸ Install, or the create will be refused."));
+  }
+}
+
+/* The ids the form sends: ticked, installed. Required ones are added by the
+   daemon itself, so a locked box is sent too but needs no special case. */
+function newPromptPacks(f) {
+  const packs = (newPackOffer && newPackOffer.packs) || [];
+  const required = newRequiredPacks(f);
+  return packs.map((p) => p.id).filter((id) => required[id] || newPackTicked(id));
 }
 
 /* The resume picker: claude's own interactive picker, or the conversation of
@@ -10514,6 +10696,11 @@ $("new-session").addEventListener("submit", async (e) => {
       f.worktree_rebase.value.trim())
     body.rebase_onto = f.worktree_rebase.value.trim();
   if (f.role.value) body.role = f.role.value;
+  const subroles = newSubroles(f);
+  if (subroles.length) body.subroles = subroles;
+  // Sent even when empty once an offer was read: an empty list is "none of
+  // the defaults", and the daemon still adds what the roles require.
+  if (newPackOffer) body.prompt_packs = newPromptPacks(f);
   if (!parent && f.borrow.value) body.borrow = f.borrow.value;
   if (!parent && f.null_token.checked) body.null_token = true;
   // Onboarding: only sent when chosen. The daemon checks each before it
@@ -16170,6 +16357,7 @@ function syncOnboardPickers() {
   }
   wf.value = [...wf.options].some((o) => o.value === keptWf) ? keptWf : "";
   $("new-context-row").classList.toggle("hidden", !wf.value);
+  renderSubroles();
 }
 
 /* Workflows are declared per directory, so the list follows the Directory
@@ -17121,6 +17309,7 @@ function openSettings(section) {
   }
   if (wsSection === "install") {
     refreshInstallOverview();
+    refreshPromptPacks();
     return;
   }
   if (wsSection === "vscode") {
@@ -21872,6 +22061,263 @@ function installPanel() {
   return panel;
 }
 
+/* Prompt packs (Settings ▸ Install): the guidance claunch ships as Markdown,
+   copied into a workspace's .claunch/prompts/ from here — per workspace and
+   never per profile, since a pack describes one repository's working rules.
+   Below the matrix, the two settings the create form reads: which packs
+   start ticked, and which packs a role or subrole forces on. */
+let promptPacksDoc = null;
+let promptPacksError = "";
+let promptPacksBusy = "";
+let promptPacksDraft = null;   // {role_packs, default_packs} being edited
+
+async function refreshPromptPacks() {
+  try {
+    const resp = await api("/api/prompt-packs");
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    promptPacksDoc = data;
+    promptPacksError = "";
+  } catch (err) { promptPacksError = String(err); }
+  if (wsOpen) renderWorkspaces();
+}
+
+async function promptPackCall(method, path, payload, busy) {
+  promptPacksBusy = busy;
+  if (wsOpen) renderWorkspaces();
+  try {
+    const resp = await api(path, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    promptPacksDoc = data;
+    promptPacksError = "";
+    return true;
+  } catch (err) {
+    promptPacksError = String(err);
+    return false;
+  } finally {
+    promptPacksBusy = "";
+    // The create form's offer came from the same files; re-read it on its
+    // next open rather than trusting a list this just changed.
+    newPackOfferFor = null;
+    if (wsOpen) renderWorkspaces();
+  }
+}
+
+function promptPackAction(ws, row, verb) {
+  const force = row.status === "edited" || row.status === "local";
+  if (force) {
+    const what = row.status === "edited"
+      ? `The copy of "${row.id}" in ${ws.name} was edited there.`
+      : `"${row.id}" exists only in ${ws.name} (it was written there).`;
+    const doing = verb === "remove" ? "Delete it" : "Replace it with the shipped text";
+    if (!confirm(`${what}\n\n${doing}? The workspace's version is lost.`)) return;
+  }
+  promptPackCall("POST", `/api/prompt-packs/${verb}`,
+    { workspace: ws.name, pack: row.id, force }, `${ws.name}/${row.id}`);
+}
+
+const PROMPT_PACK_STATUS = {
+  missing: "not installed",
+  current: "installed",
+  stale: "update available",
+  edited: "edited here",
+  local: "local pack",
+};
+
+function promptPacksCard() {
+  const card = el("section", "ws-add prompt-packs");
+  card.appendChild(el("h3", null, "Prompt packs"));
+  card.appendChild(el("p", "wf-note",
+    "Guidance that ships with claunch as Markdown. Installing copies it into " +
+    "the workspace's .claunch/prompts/ (profiles are never a target). The " +
+    "create form then offers every pack installed in the session's " +
+    "workspace as a checkbox, and the ticked ones open the session. A copy " +
+    "edited in the workspace is kept on update unless you confirm; a .md " +
+    "file you add to that directory yourself is offered too."));
+  if (promptPacksError) card.appendChild(el("p", "wf-error", promptPacksError));
+  const doc = promptPacksDoc;
+  if (!doc) {
+    card.appendChild(el("p", "wf-note", "Reading the prompt packs…"));
+    return card;
+  }
+  const catalog = doc.catalog || [];
+  const shippedIds = catalog.map((p) => p.id);
+  const localIds = [];
+  for (const ws of doc.workspaces || []) {
+    for (const r of ws.packs || []) {
+      if (r.status === "local" && !localIds.includes(r.id)) localIds.push(r.id);
+    }
+  }
+  const ids = [...shippedIds, ...localIds];
+  const titles = Object.fromEntries(catalog.map((p) => [p.id, p]));
+
+  const about = el("ul", "prompt-pack-catalog");
+  for (const p of catalog) {
+    const li = el("li", null);
+    li.appendChild(el("b", null, p.title || p.id));
+    li.appendChild(document.createTextNode(` (${p.id}) — ${p.description || ""}`));
+    about.appendChild(li);
+  }
+  card.appendChild(about);
+
+  if (!(doc.workspaces || []).length) {
+    card.appendChild(el("p", "wf-note",
+      "No workspace is registered yet. Add one under Settings ▸ Workspaces first."));
+  } else {
+    const table = el("table", "md-table prompt-pack-table");
+    const head = el("tr", null);
+    head.appendChild(el("th", null, "Workspace"));
+    for (const id of ids) head.appendChild(el("th", null, (titles[id] || {}).title || id));
+    table.appendChild(head);
+    for (const ws of doc.workspaces) {
+      const tr = el("tr", null);
+      const name = el("td", null);
+      name.appendChild(el("b", null, ws.name));
+      name.appendChild(el("div", "wf-note", ws.path));
+      tr.appendChild(name);
+      const rows = Object.fromEntries((ws.packs || []).map((r) => [r.id, r]));
+      for (const id of ids) {
+        const row = rows[id] || { id, status: "missing", local: true };
+        const td = el("td", `prompt-pack-${row.status}`);
+        const busy = promptPacksBusy === `${ws.name}/${id}`;
+        if (!rows[id] && localIds.includes(id)) {
+          td.appendChild(el("span", "wf-note", "—"));
+          tr.appendChild(td);
+          continue;
+        }
+        td.appendChild(el("div", null, busy ? "…" : (PROMPT_PACK_STATUS[row.status] || row.status)));
+        const act = el("div", "install-actions");
+        const add = (label, verb) => {
+          const b = el("button", "wf-btn", label);
+          b.disabled = !!promptPacksBusy;
+          b.addEventListener("click", () => promptPackAction(ws, row, verb));
+          act.appendChild(b);
+        };
+        if (row.status === "missing") add("Install", "install");
+        if (row.status === "stale") add("Update", "install");
+        if (row.status === "edited") add("Overwrite", "install");
+        if (row.status !== "missing") add("Remove", "remove");
+        td.appendChild(act);
+        tr.appendChild(td);
+      }
+      table.appendChild(tr);
+    }
+    card.appendChild(table);
+  }
+  card.appendChild(promptPackSettings(doc, ids));
+  return card;
+}
+
+/* The two settings, edited as one draft and saved together. */
+function promptPackSettings(doc, ids) {
+  const box = el("div", "prompt-pack-settings");
+  if (!promptPacksDraft) {
+    promptPacksDraft = {
+      role_packs: JSON.parse(JSON.stringify(doc.role_packs || {})),
+      default_packs: [...(doc.default_packs || [])],
+    };
+  }
+  const draft = promptPacksDraft;
+  const check = (checked, onChange) => {
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = checked;
+    input.addEventListener("change", () => onChange(input.checked));
+    return input;
+  };
+  const toggle = (list, id, on) => {
+    const at = list.indexOf(id);
+    if (on && at < 0) list.push(id);
+    if (!on && at >= 0) list.splice(at, 1);
+  };
+
+  box.appendChild(el("h4", null, "Ticked by default"));
+  box.appendChild(el("p", "wf-note",
+    "Packs the create form ticks before anyone touches it (when the " +
+    "workspace has them installed). \"common\" is the shipped default."));
+  const defaults = el("div", "new-check-list");
+  for (const id of ids) {
+    const label = el("label", "check");
+    label.appendChild(check(draft.default_packs.includes(id),
+      (on) => toggle(draft.default_packs, id, on)));
+    label.appendChild(el("span", null, id));
+    defaults.appendChild(label);
+  }
+  box.appendChild(defaults);
+
+  box.appendChild(el("h4", null, "Required by role"));
+  box.appendChild(el("p", "wf-note",
+    "A session whose role or one of whose subroles is listed here gets these " +
+    "packs whether ticked or not; the create form shows them locked on, and " +
+    "a create in a workspace that has not installed them is refused."));
+  const table = el("table", "md-table prompt-pack-roles");
+  const head = el("tr", null);
+  head.appendChild(el("th", null, "Role"));
+  for (const id of ids) head.appendChild(el("th", null, id));
+  head.appendChild(el("th", null, ""));
+  table.appendChild(head);
+  for (const role of Object.keys(draft.role_packs).sort()) {
+    const tr = el("tr", null);
+    tr.appendChild(el("td", null, role));
+    for (const id of ids) {
+      const td = el("td", null);
+      td.appendChild(check((draft.role_packs[role] || []).includes(id),
+        (on) => toggle(draft.role_packs[role], id, on)));
+      tr.appendChild(td);
+    }
+    const td = el("td", null);
+    const rm = el("button", "wf-btn clear", "Remove");
+    rm.addEventListener("click", () => { delete draft.role_packs[role]; renderWorkspaces(); });
+    td.appendChild(rm);
+    tr.appendChild(td);
+    table.appendChild(tr);
+  }
+  box.appendChild(table);
+  const addRow = el("div", "prompt-pack-add-role");
+  const pick = document.createElement("select");
+  pick.id = "prompt-pack-role-pick";
+  pick.appendChild(new Option("(add a role)", ""));
+  for (const r of doc.roles || []) {
+    if (!draft.role_packs[r]) pick.appendChild(new Option(r, r));
+  }
+  pick.addEventListener("change", () => {
+    if (!pick.value) return;
+    draft.role_packs[pick.value] = [];
+    renderWorkspaces();
+  });
+  addRow.appendChild(pick);
+  box.appendChild(addRow);
+
+  const actions = el("div", "install-actions");
+  const save = el("button", "wf-btn", promptPacksBusy === "settings" ? "Saving…" : "Save");
+  save.disabled = !!promptPacksBusy;
+  save.addEventListener("click", async () => {
+    const ok = await promptPackCall("PUT", "/api/prompt-packs/role-packs",
+      draft, "settings");
+    if (ok) { promptPacksDraft = null; renderWorkspaces(); }
+  });
+  actions.appendChild(save);
+  const reset = el("button", "wf-btn clear", "Restore defaults");
+  reset.disabled = !!promptPacksBusy;
+  reset.addEventListener("click", async () => {
+    if (!confirm("Restore the shipped defaults for both settings?")) return;
+    const ok = await promptPackCall("PUT", "/api/prompt-packs/role-packs",
+      { role_packs: null, default_packs: null }, "settings");
+    if (ok) { promptPacksDraft = null; renderWorkspaces(); }
+  });
+  actions.appendChild(reset);
+  const discard = el("button", "wf-btn clear", "Discard changes");
+  discard.addEventListener("click", () => { promptPacksDraft = null; renderWorkspaces(); });
+  actions.appendChild(discard);
+  box.appendChild(actions);
+  return box;
+}
+
 function renderWorkspaces() {
   const view = $("ws-view");
   const focused = document.activeElement && document.activeElement.id;
@@ -21889,6 +22335,7 @@ function renderWorkspaces() {
   // below: they are machine settings, this is the list of storage roots.
   if (wsSection === "install") {
     view.appendChild(installPanel());
+    view.appendChild(promptPacksCard());
     return;
   }
   if (wsSection === "vscode") {
@@ -26586,9 +27033,18 @@ function renderSession(data) {
       "this session is a copy of that session's conversation, marked 'forked " +
       "from here'; merge sends its wrap-up back there"
     );
+    // The memberships are where a role lives now (a new session's definition
+    // carries none), so they answer first: every role held, per mesh. The
+    // definition's role is the fallback for a legacy record in no mesh.
+    const heldIn = (data.meshes || [])
+      .map((m) => `${memberRoleLabel(m)} (in ${m.mesh})`);
     metaRow(
-      dl, "role", data.role ? data.role.name : (s.role || "free-role"),
-      data.role ? data.role.stance : ""
+      dl, "role",
+      heldIn.length ? heldIn.join(", ")
+        : (data.role ? data.role.name : (s.role || "free-role")),
+      heldIn.length
+        ? "change these under Meshes → Roles"
+        : (data.role ? data.role.stance : "")
     );
     // Beside the role, because the two are one fact between them: what this
     // session is on a mesh, and what it is called there. Spelt out as a row
@@ -26723,11 +27179,15 @@ function renderSession(data) {
       meshBox.appendChild(el("p", "wf-note", "not a member of any mesh"));
     }
     for (const m of meshes) {
-      const chip = el("a", "sess-mesh", `${m.mesh} · ${m.handle} (${m.role})`);
+      const chip = el("a", "sess-mesh", `${m.mesh} · ${m.handle} (${memberRoleLabel(m)})`);
       chip.href = "#/mesh/" + encodeURIComponent(m.mesh);
       chip.title = `${m.members} member(s); joined ${(m.joined_at || "").replace("T", " ")}`;
       meshBox.appendChild(chip);
     }
+    // One role editor per membership, under the chips that name them: the
+    // roles are a property of each membership, and a session in two meshes
+    // may hold different ones in each.
+    for (const m of meshes) meshBox.appendChild(sessRoleEditor(data, m));
     // The chips above say which rooms this session is in; this reads what was
     // actually said in them, as a sequence. Only offered when there is a room:
     // a session in no mesh has no traffic to draw, and the note above already
@@ -26945,6 +27405,166 @@ function sessMeshJoin(data) {
 
   sessJoinBox.append(row, btn, status);
   return box;
+}
+
+/* The role editor of one membership: its primary role and its subroles.
+
+   Built once per (session, mesh, handle) and moved into each repaint, like the
+   join form above: the panel repaints every two seconds, and a choice half
+   made must survive that. A kept editor is rebuilt only when the roster's
+   roles for it moved AND the reader has not touched it — someone else's edit
+   then shows, and a pending edit of the reader's is never thrown away.
+
+   Apply sends one PATCH of the whole set. The daemon types the member a notice
+   of the change, with the new role's stance when the primary moved, so what
+   the reader picks here is what the session is told it now is. */
+const sessRoleEditors = new Map();
+
+function sessRoleEditor(data, m) {
+  const s = data.session || {};
+  const key = `${s.name || ""}|${m.mesh}|${m.handle}`;
+  const current = [m.role || "", ...(m.subroles || [])].join(",");
+  const kept = sessRoleEditors.get(key);
+  if (kept && (kept.dirty || kept.baseline === current)) return kept.node;
+
+  const node = el("details", "sess-role-edit");
+  if (kept && kept.node.open) node.open = true;
+  const state = { node, baseline: current, dirty: false };
+  sessRoleEditors.set(key, state);
+  node.appendChild(el(
+    "summary", null, `Roles in ${m.mesh}: ${memberRoleLabel(m)}`
+  ));
+  if (s.status === "exited") {
+    node.appendChild(el(
+      "p", "wf-note", "this session has exited — its roles can no longer change"
+    ));
+    return node;
+  }
+
+  const body = el("div", "sess-role-edit-body");
+  node.appendChild(body);
+  const primaryRow = el("label", "sess-role-edit-primary");
+  primaryRow.appendChild(el("span", null, "primary"));
+  const primary = document.createElement("select");
+  primary.title =
+    "what this member IS on the mesh: its stance, and the role the roster " +
+    "names first";
+  primaryRow.appendChild(primary);
+  const subs = el("div", "sess-role-edit-subs");
+  subs.title =
+    "further roles it answers for: a workflow or a peer looking one of these " +
+    "up finds this member too";
+  const status = el("p", "wf-note hidden");
+  const btn = el("button", "wf-btn approve", "Apply roles");
+  btn.disabled = true;
+  body.append(
+    primaryRow, el("span", "sess-role-edit-label", "subroles"), subs, btn, status
+  );
+  const say = (msg, cls) => {
+    status.className = cls || "wf-note";
+    status.textContent = msg;
+  };
+
+  let vocab = [];
+  const chosen = () => ({
+    role: primary.value,
+    subroles: [...subs.querySelectorAll("input:checked")]
+      .map((i) => i.value).filter((r) => r !== primary.value),
+  });
+  const touched = () => {
+    const pick = chosen();
+    state.dirty = [pick.role, ...pick.subroles].join(",") !== state.baseline;
+    btn.disabled = !state.dirty;
+  };
+  const drawSubs = () => {
+    // Redrawn when the primary moves: the new primary leaves the list, the
+    // old one joins it unticked, and every other tick is carried over.
+    const held = new Set(
+      subs.childElementCount ? chosen().subroles : (m.subroles || [])
+    );
+    subs.innerHTML = "";
+    for (const r of vocab) {
+      if (r.name === primary.value) continue;
+      const lab = el("label", "sess-role-edit-sub");
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.value = r.name;
+      box.checked = held.has(r.name);
+      box.addEventListener("change", touched);
+      lab.title = (r.stance || "").slice(0, 300);
+      lab.append(box, document.createTextNode(
+        r.exclusive ? `${r.name} (exclusive)` : r.name
+      ));
+      subs.appendChild(lab);
+    }
+  };
+  primary.addEventListener("change", () => { drawSubs(); touched(); });
+
+  (async () => {
+    let doc = null;
+    try {
+      const resp = await api(`/api/mesh/${encodeURIComponent(m.mesh)}/roles`);
+      doc = resp.ok ? await resp.json().catch(() => null) : null;
+    } catch { doc = null; }
+    vocab = ((doc && doc.roles) || []).filter((r) => r && r.name);
+    if (!vocab.length) {
+      say("could not read this mesh's roles — nothing can be picked", "wf-warning");
+      return;
+    }
+    // A role the member holds that the vocabulary has since dropped is still
+    // offered, so opening the editor never silently strips it.
+    for (const r of [m.role, ...(m.subroles || [])]) {
+      if (r && !vocab.some((v) => v.name === r)) vocab.push({ name: r, stance: "" });
+    }
+    for (const r of vocab) {
+      const opt = document.createElement("option");
+      opt.value = r.name;
+      opt.textContent = r.exclusive ? `${r.name} (exclusive)` : r.name;
+      if (r.name === m.role) opt.selected = true;
+      primary.appendChild(opt);
+    }
+    drawSubs();
+  })();
+
+  btn.addEventListener("click", async () => {
+    if (btn.disabled) return;
+    const pick = chosen();
+    btn.disabled = true;
+    say("applying…");
+    let resp;
+    let doc = {};
+    try {
+      resp = await api(
+        `/api/mesh/${encodeURIComponent(m.mesh)}/members/` +
+        `${encodeURIComponent(m.handle)}/roles`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ role: pick.role, set: pick.subroles }),
+        },
+      );
+      doc = await resp.json().catch(() => ({}));
+    } catch {
+      btn.disabled = false;
+      say("could not reach the daemon — nothing was changed", "wf-warning");
+      return;
+    }
+    if (!resp.ok) {
+      btn.disabled = false;
+      say(doc.error || `HTTP ${resp.status}`, "wf-warning");
+      return;
+    }
+    // Settled: the next repaint may replace this editor with one drawn from
+    // the roster, which now says what was just applied.
+    const now = [doc.role || pick.role, ...(doc.subroles || [])];
+    state.baseline = now.join(",");
+    state.dirty = false;
+    say(`now ${now.filter(Boolean).join("+")} — the session was sent a ` +
+      "notice of the change");
+    refreshMeshList();
+    refreshSession();
+  });
+  return node;
 }
 
 /* Durable history for the native session-line control.  This is separate
@@ -28822,17 +29442,20 @@ function sessionFormConfig(mode) {
     "mesh", "handle", "role", "workflow", "context", "borrow", "null_token",
     "resume", "fork", "skip_permissions", "codex_yolo", "codex_sandbox", "args",
     "worktree_mode", "worktree_name", "worktree_existing", "worktree_session",
-    "worktree_rebase", "worktree_from", "task", "score_goal", "beads", "issue_text", "issue_filter", "issue", "pi_tool_*"];
+    "worktree_rebase", "worktree_from", "task", "score_goal", "beads", "issue_text", "issue_filter", "issue", "pi_tool_*",
+    "subrole_*", "prompt_pack_*"];
   const modes = {
     new: { title: "New session", submit: "Create", sections, editable,
       payload: ["name", "profile", "project", "cwd", "args", "model", "effort", "tools", "worktree",
-        "rebase_onto", "branch_from", "role", "borrow", "null_token", "mesh", "handle", "workflow",
-        "context", "task", "score_goal", "beads", "issue", "issue_text", "resume", "fork_session"] },
+        "rebase_onto", "branch_from", "role", "subroles", "borrow", "null_token", "mesh", "handle", "workflow",
+        "context", "task", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
+        "resume", "fork_session"] },
     spawn: { title: "Spawn child", submit: "Spawn child", sections,
       editable: [...editable, "parent", "fork_parent", "over_limit"],
       payload: ["name", "profile", "project", "workspace", "cwd", "args", "model", "effort", "tools", "worktree",
-        "rebase_onto", "branch_from", "role", "borrow", "null_token", "mesh", "handle", "workflow",
-        "context", "task", "score_goal", "beads", "issue", "issue_text", "fork", "connect", "over_limit"] },
+        "rebase_onto", "branch_from", "role", "subroles", "borrow", "null_token", "mesh", "handle", "workflow",
+        "context", "task", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
+        "fork", "connect", "over_limit"] },
     fork: { title: "Quick fork", submit: "Fork", sections: ["new-quick-fork"],
       editable: ["quick_fork_carry", "quick_fork_task"], payload: ["task", "mesh", "workflow"] },
   };
@@ -30101,10 +30724,9 @@ async function refreshMeshList(options) {
   }
   renderRelayBadge(data.relay);
   const oldMeshSignature = JSON.stringify(meshCache);
-  // meshCache stays what it has always been to its readers -- the meshes of
-  // the project the rail shows -- and is re-derived from the full answer.
-  meshCache = (data.meshes || []).filter((m) =>
-    typeof meshInCurrentProject !== "function" || meshInCurrentProject(m));
+  // Every mesh, whatever project the rail shows: meshes span projects
+  // (claunch-6deos), so the list is not narrowed with the sessions.
+  meshCache = data.meshes || [];
   if (sessionGroupByMesh && oldMeshSignature !== JSON.stringify(meshCache)) {
     refreshSessions(options && options.cached ? { cached: true } : undefined);
   }
@@ -30127,10 +30749,10 @@ async function refreshMeshList(options) {
     // a mirror is somebody else's mesh: say so before the counts, since what
     // you can do here (no invites, no policy edits) depends on it
     if (m.primary) li.appendChild(el("span", "mesh-tag", `mirror · ${m.primary}`));
-    // Which project the mesh is filed under, only on the unfiltered list
-    // (one project picked = every row is that project) and only off the
-    // default (the unfiled majority would tag every row the same).
-    if (!currentProject && m.project && m.project !== "default") {
+    // Which project the mesh is filed under, only off the default (the
+    // unfiled majority would tag every row the same). Drawn whatever the
+    // rail shows, since the list is never narrowed to one project.
+    if (m.project && m.project !== "default") {
       li.appendChild(el("span", "mesh-tag", `project · ${m.project}`));
     }
     const inbound = Array.isArray(m.requests)
@@ -30275,7 +30897,7 @@ $("new-mesh").addEventListener("submit", async (e) => {
     return;
   }
   // Filed where the rail is looking: a mesh created while one project is
-  // picked belongs to it, or the list that just gained it could not show it.
+  // picked is tagged with it (the list shows every project's meshes).
   const meshBody = currentProject ? { name, project: currentProject } : { name };
   const resp = await api("/api/mesh", {
     method: "POST",
@@ -30639,8 +31261,8 @@ function renamePeerButton(info, machine) {
    member it hosts, and the mirror here is removed. When the owner cannot be
    told, the operator may drop the mirror here only (the owner keeps a stale
    guest entry its operator can revoke). */
-/* Which project this daemon files the mesh under: a local listing choice
-   (the rail and the create form show one project's meshes), allowed on a
+/* Which project this daemon files the mesh under: a local tag (the rail's
+   mesh list shows every project and names this one), allowed on a
    mirror as well, and never sent to the peers. A mirror attached before
    it could be given one lands in the default project, and this is how it
    is moved to the project its sessions are in. */
@@ -30776,7 +31398,7 @@ function renderRemoteMeshes() {
       const btn = el("button", "wf-btn approve", "Attach");
       btn.addEventListener("click", async () => {
         btn.disabled = true;
-        // Filed under the project the rail shows, so it appears in that list.
+        // Filed under the project the rail shows (a tag on the mesh list).
         const resp = await api(`/api/mesh/${encodeURIComponent(addr)}/attach`, {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify(currentProject ? { project: currentProject } : {}),
@@ -31642,7 +32264,7 @@ function renderTopology(info) {
     ));
     const owed = m.owed ? `${m.owed} unanswered` : null;
     g.appendChild(svg("title", {}, [
-      `${m.handle} (${m.role})`, m.session, m.reachability,
+      `${m.handle} (${memberRoleLabel(m)})`, m.session, m.reachability,
       m.parent ? `spawned by ${m.parent}` : "not spawned by a member",
       owed,
     ].filter(Boolean).join(" · ")));
@@ -31720,7 +32342,7 @@ function renderWiring(info) {
   blank.value = "";
   pick.appendChild(blank);
   for (const m of members) {
-    const opt = el("option", null, `${m.handle} (${m.role})`);
+    const opt = el("option", null, `${m.handle} (${memberRoleLabel(m)})`);
     opt.value = m.handle;
     if (m.handle === meshFocus) opt.selected = true;
     pick.appendChild(opt);
@@ -31813,7 +32435,7 @@ function renderWiring(info) {
     linkDot.title = (typeof meshDotTitle === "function" ? meshDotTitle(m) : "") || m.reachability || "";
     row.appendChild(linkDot);
     row.appendChild(el("span", "mesh-handle", m.handle));
-    row.appendChild(el("span", "mesh-role", m.role));
+    row.appendChild(el("span", "mesh-role", memberRoleLabel(m)));
     // Lineage, where there is any. Cutting the edge along a spawn is the one
     // disconnect with a second consequence: the briefing a child was given
     // tells it to report to its parent, and a report it cannot send is a run
@@ -32126,7 +32748,7 @@ function renderMesh(info, history, force, owed, historyPage) {
       + (category === "paused" ? " paused" : "") + (typeof meshDotGrade === "function" ? meshDotGrade(m) : ""));
     dot.title = (typeof meshDotTitle === "function" ? meshDotTitle(m) : "") || m.reachability || "";
     const name = el("span", "mesh-handle", m.handle);
-    const role = el("span", "mesh-role", m.role);
+    const role = el("span", "mesh-role", memberRoleLabel(m));
     const machineLabel = m.machine || (isMirror ? info.primary : "");
     const where = el(
       "span", "mesh-session mono",
@@ -32900,7 +33522,11 @@ function renderMeshRoles(info) {
   ));
   const chips = el("div", "mesh-role-chips");
   const held = {};
-  for (const m of info.members || []) held[m.role] = (held[m.role] || 0) + 1;
+  for (const m of info.members || []) {
+    // Every role a member holds counts toward that role's chip: a leader
+    // holding `reviewer` is one of the reviewers a lookup finds.
+    for (const r of memberRoles(m)) held[r] = (held[r] || 0) + 1;
+  }
   for (const name of roles.names || []) {
     const chip = el("span", "mesh-role-chip", `${name} · ${held[name] || 0}`);
     if (held[name]) chip.classList.add("held");
@@ -33339,7 +33965,7 @@ function flowCardSvg(member, f, wf, m) {
     ));
   }
   g.appendChild(svg("title", {}, [
-    `${member.handle} (${member.role})`,
+    `${member.handle} (${memberRoleLabel(member)})`,
     member.session,
     wfName ? `workflow ${wfName}` : "no workflow run",
     flowStateWord(state, f),
@@ -33538,7 +34164,7 @@ function flowWaitingRow(member, f) {
   who.addEventListener("click", () => {
     location.hash = "#/s/" + encodeURIComponent(f.session || member.session);
   });
-  row.append(who, el("span", "mesh-role", member.role));
+  row.append(who, el("span", "mesh-role", memberRoleLabel(member)));
   row.appendChild(el("span", "flow-waiting-what",
     f.gate || f.prompt || `step ${f.step_id || "?"}`));
   const act = el("span", "flow-waiting-acts");
@@ -33573,7 +34199,7 @@ function flowWaitingRow(member, f) {
 function flowDetail(info, member, f, wf) {
   const box = el("div", "flow-detail");
   const head = el("div", "flow-detail-head");
-  head.appendChild(el("h3", null, `${member.handle} · ${member.role}`));
+  head.appendChild(el("h3", null, `${member.handle} · ${memberRoleLabel(member)}`));
   const close = el("button", "wf-btn clear", "Close");
   close.addEventListener("click", () => {
     flowPick = null;
@@ -35114,11 +35740,15 @@ function shadowRow(machine, name) {
    of the records kept here -- but every mesh it sits in does: each entry
    carries the project that mesh is filed under here (daemon/shadow.py). So
    the shadow belongs to exactly the projects of its meshes, and to no other.
-   "All projects" owns every mesh. */
+   "All projects" owns every mesh.
+
+   The test is spelt out here rather than borrowed from the mesh list: that
+   list is no longer narrowed to a project (claunch-6deos), but the session
+   list -- these cards are part of it -- still is. */
 function shadowMeshes(row) {
   return (row && Array.isArray(row.meshes) ? row.meshes : []).filter((m) =>
     m && m.mesh
-    && (typeof meshInCurrentProject !== "function" || meshInCurrentProject(m)));
+    && (!currentProject || recordProject(m) === currentProject));
 }
 
 /* The shadows the rail draws: those the picked project owns through at

@@ -379,6 +379,17 @@ TOOLS = [
                         "rather than letting it mint a duplicate"
                     ),
                 },
+                "prompt_packs": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "prompt pack ids to put into the child's opening, "
+                        "read from the workspace it will run in (installed "
+                        "there in Settings > Install). Packs its role or "
+                        "subroles require are added whether listed or not; "
+                        "one that is not installed there refuses the spawn"
+                    ),
+                },
                 "issue_text": {
                     "type": "string",
                     "description": (
@@ -1051,7 +1062,7 @@ _SPAWN_KEYS = (
     "name", "mesh", "handle", "role", "subroles", "connect", "workflow", "context",
     "task", "issue", "issue_text", "harness", "workspace", "worktree",
     "rebase_onto", "branch_from", "profile", "borrow", "null_token", "cwd", "args", "env",
-    "fork", "tools", "project",
+    "fork", "tools", "project", "prompt_packs",
 )
 
 

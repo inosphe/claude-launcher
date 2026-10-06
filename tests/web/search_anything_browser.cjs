@@ -47,6 +47,14 @@ const server = http.createServer(async (req,res) => {
       send('ranked',{results:[{id:'race',kind:'beads',title:mode,href:'#/beads/race'}],index:{indexed:1,total:1},warnings:[],rerank_pending:false});
       res.end(); return;
     }
+    if(q==='grouped') {
+      send('ranked',{results:[{id:'group',kind:'beads',title:'grouped issue',excerpt:'best passage',
+        href:'#/beads/x',source_url:'api/beads/x',matches:[
+          {kind:'comment',excerpt:'additional evidence'},
+          {kind:'comment',excerpt:'<img src=x onerror=alert(1)>'}]}],
+        index:{indexed:3,total:3},warnings:[],rerank_pending:false});
+      res.end(); return;
+    }
     if(q==='rerank-offer') {
       // The reranker reverses the ranked order. The page must keep the ranked
       // list until the reader applies the new one.
@@ -239,6 +247,19 @@ const server = http.createServer(async (req,res) => {
     await page.getByRole('button',{name:'연결 테스트',exact:true}).click();await page.getByText(/실제 차원 2560/).waitFor();
     await page.getByRole('button',{name:'저장',exact:true}).click();await page.getByText(/저장됨 · 검색 색인/).waitFor();
     assert.equal(writes.at(-1).body.embedding_model,'replacement');assert.equal(writes.at(-1).body.api_key,'');
+    await page.locator('#search-anything-open').click();
+    await page.locator('dialog input[type=search]').fill('grouped');await page.keyboard.press('Enter');
+    await page.locator('dialog .search-anything-matches').waitFor();
+    assert.equal(await page.locator('dialog .search-anything-result').count(),1);
+    assert.equal(await page.locator('dialog .search-anything-matches summary').textContent(),'관련 구절 2개');
+    await page.locator('dialog .search-anything-matches summary').click();
+    assert.deepEqual(await page.locator('dialog .search-anything-matches p').allTextContents(),
+      ['additional evidence','<img src=x onerror=alert(1)>']);
+    assert.equal(await page.locator('dialog .search-anything-matches img').count(),0);
+    await page.locator('dialog .search-anything-filter[data-kind="comment"]').click();
+    assert.equal(await page.locator('dialog .search-anything-result').count(),1);
+    assert.equal(await page.locator('dialog .search-anything-filter[data-kind="comment"] .search-anything-filter-count').textContent(),'1');
+    await page.keyboard.press('Escape');
     await page.setViewportSize({width:390,height:844});await page.locator('#search-anything-open').click();
     assert.ok(await page.locator('dialog').evaluate(n=>n.getBoundingClientRect().width<=innerWidth));
     if (process.env.CLAUNCH_SCREENSHOT) await page.screenshot({path:process.env.CLAUNCH_SCREENSHOT});

@@ -465,6 +465,79 @@ def _stream_corpus(service):
     service.all_docs = docs
 
 
+def test_body_keyword_rescues_a_document_outside_the_vector_candidates(tmp_path):
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        service = rag.RagService(config=lambda: _cfg(server, candidates=3, rerank_model=""),
+                                 root_dir=tmp_path / "index")
+
+        async def docs():
+            out = search_anything.documents("target", "pytest 프로필 지침",
+                "`.beads/issues.jsonl`을 직접 수정 금지", kind="beads", root="A", issue="target")
+            for i in range(8):
+                out += search_anything.documents(f"noise{i}", "beads unrelated",
+                    "ordinary workflow", kind="checks")
+            return out
+
+        service.all_docs = docs
+        try:
+            view = await service.search("all", "issues.jsonl", limit=3, wait=10)
+            assert view["results"][0]["id"] == "target:0"
+            assert view["results"][0]["lexical"] is True
+            assert "직접 수정 금지" in view["results"][0]["excerpt"]
+            # The keyword postings are reconstructed from durable metadata.
+            await service.shutdown()
+            service = rag.RagService(config=lambda: _cfg(server, candidates=3, rerank_model=""),
+                                     root_dir=tmp_path / "index")
+            service.all_docs = docs
+            again = await service.search("all", "issues.jsonl", limit=3, wait=10)
+            assert again["results"][0]["id"] == "target:0"
+        finally:
+            await service.shutdown()
+            await server.close()
+    asyncio.run(run())
+
+
+def test_grouped_search_has_diverse_candidates_before_and_after_reranking(tmp_path):
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        service = rag.RagService(config=lambda: _cfg(server, candidates=3, rerank_top=3),
+                                 root_dir=tmp_path / "index")
+
+        async def docs():
+            out = []
+            for i in range(20):
+                out += search_anything.documents(f"comment:A:x:{i}", "relay issue",
+                    "relay " * (i + 1), kind="comment", root="A", issue="x",
+                    source_url="api/beads/x?cwd=A")
+            out += search_anything.documents("beads:B:x", "relay issue",
+                "relay another board", kind="beads", root="B", issue="x")
+            out += search_anything.documents("beads:A:y", "relay issue",
+                "relay other issue", kind="beads", root="A", issue="y")
+            return out
+
+        service.all_docs = docs
+        try:
+            events = [v async for v in service.search_stream("all", "relay", limit=3, wait=10)]
+            assert [event for event, _ in events] == ["ranked", "reranked"]
+            for _, view in events:
+                rows = view["results"]
+                assert len(rows) == 3
+                assert {(r["root"], r["issue"]) for r in rows} == {("A", "x"), ("B", "x"), ("A", "y")}
+                grouped = next(r for r in rows if (r["root"], r["issue"]) == ("A", "x"))
+                assert len(grouped["matches"]) == 2
+                assert grouped["source_url"] == "api/beads/x?cwd=A"
+            assert len(endpoint.rerank_calls[-1]["documents"]) == 3
+            assert all(len(t.partition("\n")[2]) <= rag.RERANK_CHARS
+                       for t in endpoint.rerank_calls[-1]["documents"])
+        finally:
+            await service.shutdown()
+            await server.close()
+    asyncio.run(run())
+
+
 def test_search_stream_answers_ranked_before_the_reranker_returns(tmp_path):
     """The first answer does not wait on the reranker.
 
@@ -613,10 +686,11 @@ def test_active_search_filters_before_limits_and_refreshes_liveness(tmp_path):
             active = await service.search("all", "relay", limit=3, mode="active", wait=10)
             assert {r["id"] for r in active["results"]} == {"live-task:0", "board:0", "comment:0"}
             assert all("dead" not in text for text in endpoint.rerank_calls[-1]["documents"])
-            vector_only = await service.search("all", "relay unmatched-title-word", limit=2, mode="active", wait=0)
-            assert len(vector_only["results"]) == 2
-            assert all(not r["lexical"] and r["id"] in {"live-task:0", "board:0", "comment:0"}
-                       for r in vector_only["results"])
+            partial = await service.search("all", "relay unmatched-title-word", limit=2, mode="active", wait=0)
+            assert len(partial["results"]) == 2
+            # BM25 admits the matching term even when another query term is absent.
+            assert all(r["lexical"] and r["id"] in {"live-task:0", "board:0", "comment:0"}
+                       for r in partial["results"])
             stream = service.search_stream("all", "relay", limit=3, mode="active", wait=0)
             _, first = await stream.__anext__()
             assert any(r["id"] == "live-task:0" for r in first["results"])
@@ -667,19 +741,25 @@ def test_active_beads_ownership_changes_without_text_changes(tmp_path):
             await service.wait_sync(service.ensure_sync("all", None), 10)
             return [r for r in result["results"] if r["kind"] in ("beads", "comment")]
 
+        async def assert_owned_group():
+            rows = await board_results()
+            assert len(rows) == 1
+            assert rows[0]["issue"] == issue["id"]
+            assert {rows[0]["kind"], *(m["kind"] for m in rows[0].get("matches", []))} == {"beads", "comment"}
+
         try:
             assert await board_results() == []
             issue["assignee"] = "s1"
-            assert {r["kind"] for r in await board_results()} == {"beads", "comment"}
+            await assert_owned_group()
             issue["assignee"] = "unknown"
             assert await board_results() == []
             issue["created_by"] = "s2"
-            assert {r["kind"] for r in await board_results()} == {"beads", "comment"}
+            await assert_owned_group()
             sessions[2].exited = True
             assert await board_results() == []
             # An active assignee still qualifies an issue with a dead creator.
             issue["assignee"] = "s1"
-            assert {r["kind"] for r in await board_results()} == {"beads", "comment"}
+            await assert_owned_group()
             sessions[1].archived_at = "now"
             assert await board_results() == []
         finally:

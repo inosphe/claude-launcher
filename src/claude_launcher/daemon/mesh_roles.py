@@ -647,6 +647,20 @@ roles:
       corrupting it. Work requests in order and report each outcome back to
       whoever asked. You produce rather than audit, so escalate scope and
       priority calls to the leader like any other producer.
+
+  unreal:
+    # A domain subrole, not a job: it is held beside a primary role (worker,
+    # leader...) to say the member works in an Unreal project. What that
+    # changes is written in the unreal-operator prompt pack, which the
+    # daemon puts into the member's opening whenever this role is chosen
+    # (prompt_packs.role_packs, editable in Settings > Install).
+    stance: |
+      You work in an Unreal Engine project. Editor-only work — creating or
+      choosing assets, wiring Blueprints, Project Settings, PIE and visual
+      checks — is not yours to finish from code: hand it to a person as a
+      board issue, following the unreal-operator prompt pack in your
+      opening, and keep going with the code work that does not depend on it.
+      Your primary role decides everything else.
 """
 
 
