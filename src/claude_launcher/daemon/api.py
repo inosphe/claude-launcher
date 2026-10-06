@@ -34,10 +34,12 @@ from .. import (
     lineage,
     metering,
     profile as profile_mod,
+    provider_spec,
     providers,
     quickjob,
     reports as reports_mod,
     runner,
+    translators,
     usage,
 )
 from .. import install
@@ -1634,6 +1636,68 @@ async def h_restart_request_extend(request: web.Request) -> web.Response:
     return json_response({"ok": True, "extended": True, "request": record})
 
 
+class _EffortSource:
+    """What a profile's launches read their reasoning effort from.
+
+    Resolved once per profile and asked once per harness row. ``spec`` is the
+    profile's spec with the template under the provider and the profile chain
+    over it (:func:`providers.spec_for`, the launch's own resolution);
+    ``claude_env`` is the chain's Claude-vocabulary env, which the Claude
+    launch applies *after* the provider translation, so a
+    ``CLAUDE_CODE_EFFORT_LEVEL`` written there is the one Claude Code reads.
+    ``error`` is why either could not be read -- a launch of this profile
+    fails on the same error.
+    """
+
+    def __init__(self, profile_obj, doc: dict):
+        self.spec = None
+        self.claude_env: dict = {}
+        self.error: Optional[str] = None
+        try:
+            self.spec = providers.spec_for(profile_obj, doc=doc)
+            self.claude_env = runner._claude_profile_env(profile_obj)
+        except (
+            providers.ProviderError,
+            lineage.LineageError,
+            runner.RunnerError,
+        ) as exc:
+            self.spec = None
+            self.error = str(exc)
+
+    def row(self, harness_name: str) -> dict:
+        """``reasoning_effort`` and ``reasoning_effort_problem`` for one row.
+
+        ``reasoning_effort`` is the value a launch on ``harness_name`` applies,
+        None when nothing is configured (the harness's own default decides).
+        ``reasoning_effort_problem`` is None unless that launch is refused
+        over it: a harness with no translation for the field cannot launch a
+        profile that sets one (:func:`runner.harness_translation`), so its row
+        carries the configured value *and* says why it will not run, rather
+        than reading as "unset".
+        """
+        if self.spec is None:
+            return {"reasoning_effort": None, "reasoning_effort_problem": self.error}
+        if harness_name == harness_registry.CLAUDE_HARNESS:
+            var = provider_spec.CLAUDE_REASONING_EFFORT
+            env = translators.claude(self.spec).env
+            if var in self.claude_env:
+                env = self.claude_env
+            return {
+                "reasoning_effort": str(env.get(var) or "").strip() or None,
+                "reasoning_effort_problem": None,
+            }
+        value = self.spec.reasoning_effort or None
+        problem = None
+        if value and "reasoning_effort" in (
+            translators.for_harness(harness_name, self.spec).missing
+        ):
+            problem = (
+                f"harness {harness_name!r} cannot translate configured "
+                "provider field(s): reasoning_effort"
+            )
+        return {"reasoning_effort": value, "reasoning_effort_problem": problem}
+
+
 def _profile_default_tools(profile_obj, entry) -> Optional[list]:
     """The builtin tools a session of this profile+harness gets by default.
 
@@ -1838,6 +1902,12 @@ async def h_profiles(request: web.Request) -> web.Response:
             # A profile whose provider cannot be read is reported as such by
             # its own rows below; this map simply has nothing to say.
             model_ids = {}
+        # The reasoning effort a launch of this profile applies, resolved the
+        # way the launch resolves it. The session form shows it as the
+        # "profile default" effort: for a harness that declares no
+        # ``efforts`` this setting is the only source of the value, and the
+        # form cannot resolve the layers itself.
+        effort = _EffortSource(p, doc)
         try:
             name = lineage.effective_harness(p, doc)
             default_name = name
@@ -1854,6 +1924,7 @@ async def h_profiles(request: web.Request) -> web.Response:
                     "harness": name,
                     "default": True,
                     "harness_available": available.get(name, False),
+                    **effort.row(name),
                 }
             )
             items.append(
@@ -1869,6 +1940,7 @@ async def h_profiles(request: web.Request) -> web.Response:
                     "explicit": False,
                     "tools": _profile_default_tools(p, registry.get(name)),
                     "model_ids": model_ids.get(name, {}),
+                    **effort.row(name),
                     # Where the profile actually lives. The management page
                     # shows it because a profile IS a directory, and the one
                     # question that needs it ("which of these is the one I am
@@ -1944,6 +2016,7 @@ async def h_profiles(request: web.Request) -> web.Response:
                         "harness": harness_name,
                         "default": False,
                         "harness_available": available.get(harness_name, False),
+                        **effort.row(harness_name),
                     }
                 )
             items.append(
@@ -1959,6 +2032,7 @@ async def h_profiles(request: web.Request) -> web.Response:
                     "explicit": True,
                     "tools": _profile_default_tools(p, registry.get(harness_name)),
                     "model_ids": model_ids.get(harness_name, {}),
+                    **effort.row(harness_name),
                 }
             )
     return json_response(
