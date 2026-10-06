@@ -146,10 +146,10 @@ def run_probe(probe: Any, cwd: str, timeout: float = PROBE_TIMEOUT,
     import subprocess
     import sys
 
-    cmd = probe if isinstance(probe, list) else str(probe)
     full_env = dict(os.environ)
     if env:
         full_env.update({str(k): str(v) for k, v in env.items()})
+    cmd = runtime.expand_argv(probe, full_env) if isinstance(probe, list) else str(probe)
     kwargs: Dict[str, Any] = {}
     if sys.platform != "win32":
         kwargs["start_new_session"] = True

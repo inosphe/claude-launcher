@@ -565,9 +565,15 @@ v1 `checklist:`의 대응:
 하면 환경 변수로 읽는다: param은 `CFLOW_IN_<NAME>`, 최상위 `data`의 스칼라 값은
 `CFLOW_DATA_<NAME>`(이름은 대문자, 영숫자 외 문자는 `_`). wait와 모니터의 `probe`는
 스칼라가 아닌 최상위 `data`도 JSON 텍스트로 받는다(64KB 이하, `runtime._value_env`).
-예: improv-worker-v2의 착지 대기는 `--landing "$CFLOW_DATA_LANDING"`으로 착지 기록 맵을
-넘긴다. 셸이 하는 `$VAR` 전개는
-엔진이 값을 끼워 넣는 것이 아니므로 허용된다. 근거: 렌더한 값을 셸 문자열에
+예: improv-worker-v2의 착지 대기는 값 없는 `--landing`으로 `landed_check`가
+`CFLOW_DATA_LANDING`을 직접 읽게 한다. 셸이 하는 `$VAR` 전개는
+엔진이 값을 끼워 넣는 것이 아니므로 허용된다. 단 문자열 명령은 Windows에서
+cmd.exe가 실행하므로 `$VAR`가 전개되지 않는다 — 이식성이 필요하면 명령이 환경을
+직접 읽거나 argv 형태를 쓴다. argv 명령(작업의 `verify`, wait·모니터의 `probe`,
+컬렉션 `watch.probe`)은 셸 없이 실행되므로 엔진이 각 항목 안의 `$CFLOW_<NAME>`을
+그 명령의 환경 값으로 바꾼다(없으면 빈 문자열, `runtime.expand_argv`). 값은 그
+항목 하나 안에 머물고 명령으로 해석되지 않는다. `CFLOW_`로 시작하지 않는 이름
+(`$HOME` 등)은 그대로 둔다(claunch-yq80p.14). 근거: 렌더한 값을 셸 문자열에
 붙이면 값(`x || true` 등)이 명령이 되어 verify를 우회할 수 있다(리뷰 E1).
 
 ### 2.4 식(expression)
@@ -2122,7 +2128,8 @@ v2 워커의 착지 요청은 기본으로 pull request를 거친다. 로컬 착
   `landing-queue` 타입이 이 필드를 선언한다. `pr_url`이 있는 행은 리더의 PR 후보
   (`gh pr merge --merge --match-head-commit <tip>`, claunch-yq80p.6)이고 없으면 로컬
   후보다. 마커는 `LANDING REQUEST @ <sha> @ <remote>/<브랜치> pr: <url>`이다.
-- 착지 판정: 착지 대기 프로브는 `tools/landed_check.py --landing "$CFLOW_DATA_LANDING"`이다.
+- 착지 판정: 착지 대기 프로브는 `tools/landed_check.py --landing`이다(값 없이 주면
+  `CFLOW_DATA_LANDING`을 읽는다).
   기록의 `medium`이 `pr`이면 `--target <remote>/<base> --fetch`와 같은 질문이 된다 —
   리더가 원격 base에서 `gh pr merge`로 만든 머지는 fetch 전에는 이 저장소에 없다.
   `pr`인데 `remote`·`base`가 없으면 판정 불가(2)다. 그 밖의 매체와 기록이 없을 때는

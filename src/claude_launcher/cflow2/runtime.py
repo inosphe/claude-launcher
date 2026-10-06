@@ -2573,6 +2573,23 @@ def verify_env(r: Run, iid: str, node: Optional[ir.Node] = None,
     return env
 
 
+#: ``$CFLOW_<NAME>`` inside an argv item (docs 2.3, 명령 안의 값 참조).
+_ARGV_REF = re.compile(r"\$(CFLOW_[A-Za-z0-9_]*)")
+
+
+def expand_argv(command: Any, env: Dict[str, str]) -> Any:
+    """An argv command with each ``$CFLOW_<NAME>`` replaced by that
+    variable of ``env`` (empty when unset), as a shell would for the string
+    form. An argv runs without a shell, so nothing else would expand it --
+    and on Windows the string form goes to cmd.exe, which does not read
+    ``$VAR`` either. Each value stays inside its one argument; it is never
+    parsed as a command. A string command is returned unchanged."""
+    if not isinstance(command, list):
+        return command
+    return [_ARGV_REF.sub(lambda m: str(env.get(m.group(1), "")), str(part))
+            for part in command]
+
+
 def default_verify_runner(command: Any, cwd: str, env: Dict[str, str],
                           timeout: float) -> Tuple[int, str, bool]:
     """Run a verify command: ``(exit code, output, timed_out)``. Output goes
@@ -2582,6 +2599,7 @@ def default_verify_runner(command: Any, cwd: str, env: Dict[str, str],
     import tempfile
 
     shell = not isinstance(command, list)
+    command = expand_argv(command, env)
     kwargs: Dict[str, Any] = {}
     if os.name == "posix":
         kwargs["start_new_session"] = True
@@ -3588,9 +3606,9 @@ def default_probe_runner(probe: Any, cwd: str, timeout: float = 60.0,
         run_probe = None
     if run_probe is not None:
         return run_probe(probe, cwd, timeout, env=env)
-    cmd = probe if isinstance(probe, list) else str(probe)
     full = dict(os.environ)
     full.update(env or {})
+    cmd = expand_argv(probe, full) if isinstance(probe, list) else str(probe)
     try:
         proc = subprocess.run(cmd, shell=isinstance(cmd, str), cwd=cwd, capture_output=True,
                               text=True, timeout=timeout, env=full)

@@ -2867,7 +2867,9 @@ procedures:
               # landed_check가 착지 기록(프로브 환경의 CFLOW_DATA_LANDING, JSON)을 받아
               # <remote>/<base>를 fetch한 뒤 묻는다
               # (claunch-yq80p.4). 로컬 착지와 기록이 없을 때는 이전과 같은 질문이다.
-              probe: 'uv run --no-sync python tools/landed_check.py --landing "$CFLOW_DATA_LANDING" && git diff --quiet && git diff --cached --quiet'
+              # 값 없는 --landing은 그 변수를 직접 읽는다 — cmd.exe는 "$VAR"를
+              # 전개하지 않는다(claunch-yq80p.13).
+              probe: 'uv run --no-sync python tools/landed_check.py --landing && git diff --quiet && git diff --cached --quiet'
               poll: 60
               seconds: 86400
               undecided_max: 3
