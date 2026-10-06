@@ -482,7 +482,14 @@ class _Builder:
             return
         elif op == ir.CTL_RETURN:
             outcome = str(node.get("outcome") or ir.OUTCOME_OK)
-            scope = next((a for a in chart.ancestors(nid) if chart.node(a).type == ir.T_SCOPE), None)
+            target = node.get("target")
+            if target == ir.RETURN_RUN:
+                scope = None  # a workflow-body block spliced into a procedure
+            elif target:
+                scope = target if target in chart.nodes else None
+            else:
+                scope = next((a for a in chart.ancestors(nid)
+                              if chart.node(a).type == ir.T_SCOPE), None)
             if scope is not None:
                 stop = scope
                 if outcome == ir.OUTCOME_OK:
@@ -802,6 +809,12 @@ def _param_literal(chart: ir.Chart, node: ir.Node, pname: str) -> Tuple[bool, An
     cur = node.parent
     while cur:
         sc = chart.node(cur)
+        splice = sc.get("splice")
+        if splice and splice.get("call"):
+            # a spliced block reads the params of the call it was written at:
+            # continue above the call it was spliced into (docs 2.2)
+            cur = chart.node(splice["call"]).parent
+            continue
         if sc.type == ir.T_SCOPE:
             given = (sc.get("with_") or {}).get(pname)
             if isinstance(given, dict) and "lit" in given:

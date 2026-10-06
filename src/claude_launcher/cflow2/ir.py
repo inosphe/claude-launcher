@@ -105,6 +105,11 @@ CTL_RAISE = "raise"
 CTL_RETURN = "return"
 CTL_END = "end"
 CONTROL_OPS = (CTL_CONTINUE, CTL_BREAK, CTL_RAISE, CTL_RETURN, CTL_END)
+#: A ``return``'s ``target`` when it ends the run itself: a return written in
+#: a workflow body and spliced into a procedure (docs 2.2, block params).
+#: Other returns name their call's scope node, or carry no target (the
+#: nearest enclosing scope).
+RETURN_RUN = "$run"
 
 EXEC_INLINE = "inline"
 EXEC_SUBAGENT = "subagent"

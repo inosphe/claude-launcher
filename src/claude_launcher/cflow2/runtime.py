@@ -521,12 +521,32 @@ def _question_field(name: str, qname: str, v: Any, qtypes: Optional[Dict[str, An
 # entering nodes
 
 
+def _splice_env(r: Run, parent: Optional[str], splice: Dict[str, Any],
+                base: Dict[str, Any]) -> Dict[str, Any]:
+    """A spliced block sees the environment of the call it was written at
+    (``$params``, a foreach item, waterfall ``$prev``), not the procedure's:
+    the env the call's scope instance saved before binding its params. A
+    block written in the workflow body sees the run's params."""
+    call = splice.get("call")
+    cur = parent
+    while cur is not None and cur in r.inst:
+        if r.inst[cur]["node"] == call:
+            saved = r.inst[cur]["frame"].get("caller_env")
+            return dict(saved) if saved is not None else base
+        cur = r.inst[cur].get("parent")
+    return base
+
+
 def _enter(r: Run, node_id: str, parent: Optional[str], role: str,
            env: Optional[Dict[str, Any]] = None) -> str:
     node = r.chart.node(node_id)
     iid = r.new_id(node_id)
     base = dict(r.inst[parent]["env"]) if parent and parent in r.inst else {}
-    if env:
+    if node.get("splice"):
+        # the procedure's own bindings (its foreach item, waterfall prev) are
+        # not the block's: only the call site's environment
+        base = _splice_env(r, parent, node.get("splice") or {}, base)
+    elif env:
         base.update(env)
     r.inst[iid] = {
         "id": iid, "node": node_id, "parent": parent, "role": role,
@@ -677,6 +697,8 @@ def _scope_params(r: Run, iid: str, node: ir.Node) -> bool:
     """Bind a scope's ``params`` (its ``with_`` evaluated in the caller's
     environment; a group member also gets the fork's ``with``)."""
     inst = r.inst[iid]
+    # the call site's environment: a spliced block runs in it (docs 2.2)
+    inst["frame"]["caller_env"] = dict(inst["env"])
     params: Dict[str, Any] = {}
     if inst["role"] == "member":
         params.update(inst["env"].get("params") or {})
@@ -1226,7 +1248,8 @@ def _propagate(r: Run, start: str, sig: Dict[str, Any]) -> None:
             frame["signal"] = sig
             _enter_child(r, cur, node.get("finally_child"), "finally")
             return
-        if node.type == ir.T_SCOPE and op == ir.CTL_RETURN:
+        if node.type == ir.T_SCOPE and op == ir.CTL_RETURN \
+                and sig.get("target") in (None, node.id):
             _cancel_children(r, cur, "return")
             _complete(r, cur, sig.get("outcome") or ir.OUTCOME_OK, sig.get("value"))
             return

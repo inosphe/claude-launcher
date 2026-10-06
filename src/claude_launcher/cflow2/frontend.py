@@ -221,6 +221,11 @@ SIBLINGS = {
 RETURN_TYPES = ("str", "int", "float", "bool", "list", "dict", "any")
 PROC_KEYS = ("description", "params", "returns", "nodes", "body")
 PARAM_KEYS = ("type", "required", "default", "description")
+#: A procedure param of this type takes a tree (``with: {p: <tree>}``) that the
+#: body places with ``splice: p`` (docs 2.2, block params).
+PARAM_BLOCK = "block"
+#: The tree mapping head that places a block param.
+SPLICE = "splice"
 RULE_KEYS = ("text", "why", "deliver", "effect")
 SPEC_KEYS = ("invariants", "paths", "ensures", "monitors")
 MONITOR_KEYS = ("always", "probe", "every", "on_violation", "when", "within", "expect")
@@ -266,6 +271,14 @@ class _Scope:
     trys: Tuple[Tuple[str, Tuple[str, ...]], ...] = ()  # (id, catch outcomes)
     procs: Tuple[str, ...] = ()           # call stack of procedure names
     in_proc: bool = False
+    #: the T_SCOPE node of the call this tree sits in (None: the run itself);
+    #: a ``return`` here ends that call
+    scope_id: Optional[str] = None
+    #: block params of the procedure being compiled -> (raw tree, the call
+    #: site's scope, line): ``splice`` compiles the tree in that scope
+    blocks: Optional[Dict[str, Tuple[Any, "_Scope", int]]] = None
+    #: inside a spliced block: returns name their target explicitly
+    in_splice: bool = False
 
 
 @dataclass
@@ -367,14 +380,23 @@ def _expr_text(ctx: _Ctx, file: str, value: Any, what: str, line: int) -> str:
 
 
 def _values(ctx: _Ctx, file: str, value: Any, what: str, line: int) -> Dict[str, Dict[str, Any]]:
-    """``with:`` / ``value:`` entries -> ``{name: {"expr": t} | {"lit": v}}``."""
+    """``with:`` / ``value:`` entries -> ``{name: {"expr": t} | {"lit": v}}``.
+    A string holding ``$`` is an expression, anything else a literal; the
+    explicit forms ``{lit: V}`` and ``{expr: E}`` say which (a literal string
+    with ``$`` in it, an expression without one)."""
     if value is None:
         return {}
     mapping = _need_map(ctx, file, value, what, line)
     out: Dict[str, Dict[str, Any]] = {}
     for key, raw in mapping.items():
         kline = _key_line(mapping, key, line)
-        if isinstance(raw, str) and "$" in raw:
+        if isinstance(raw, dict) and len(raw) == 1 and next(iter(raw)) in ("lit", "expr"):
+            form = next(iter(raw))
+            if form == "lit":
+                out[str(key)] = {"lit": _plain(raw["lit"])}
+            else:
+                out[str(key)] = {"expr": _expr_text(ctx, file, raw["expr"], f"{what}.{key}", kline)}
+        elif isinstance(raw, str) and "$" in raw:
             out[str(key)] = {"expr": _expr_text(ctx, file, raw, f"{what}.{key}", kline)}
         else:
             out[str(key)] = {"lit": _plain(raw)}
@@ -445,7 +467,21 @@ def _params(ctx: _Ctx, file: str, value: Any, line: int) -> Dict[str, Any]:
             decl = {}
         decl = _need_map(ctx, file, decl, f"params.{name}", pline)
         _check_keys(ctx, file, decl, PARAM_KEYS, f"params.{name}")
+        if decl.get("type") == PARAM_BLOCK:
+            # the default stays a raw tree: it is compiled where it is spliced
+            out[str(name)] = {k: (v if k == "default" else _plain(v)) for k, v in decl.items()}
+            continue
         out[str(name)] = _plain(decl)
+    return out
+
+
+def _workflow_params(ctx: _Ctx, file: str, doc: Dict[str, Any]) -> Dict[str, Any]:
+    out = _params(ctx, file, doc.get("params"), _key_line(doc, "params"))
+    for name, decl in out.items():
+        if decl.get("type") == PARAM_BLOCK:
+            raise ctx.err(file, _key_line(doc, "params"),
+                          f"params.{name}: type block is a procedure param (a run is "
+                          f"started, not called, so nothing passes it a tree)")
     return out
 
 
@@ -1051,6 +1087,8 @@ def _ask(ctx: _Ctx, file: str, name: str, value: Any, line: int) -> Dict[str, An
 
 def _compile_mapping(ctx: _Ctx, sc: _Scope, m: Dict[str, Any], parent: Optional[str],
                      path_id: str, line: int) -> str:
+    if SPLICE in m:
+        return _compile_splice(ctx, sc, m, parent, path_id, line)
     heads = [k for k in m if k in COMBINATORS or k in CONTROLS]
     if len(heads) != 1:
         if not heads:
@@ -1136,8 +1174,37 @@ def _compile_control(ctx: _Ctx, sc: _Scope, op: str, m: Dict[str, Any], parent: 
             raise ctx.err(sc.file, line, "return needs an outcome name")
         props["outcome"] = value
         props["value"] = _values(ctx, sc.file, m.get("value"), "return value", line)
+        if sc.in_splice:
+            # a block's return ends the call (or run) it was written in, not
+            # the procedure it was spliced into (docs 2.2, hygiene)
+            props["target"] = sc.scope_id or ir.RETURN_RUN
     nid = _alloc(ctx, path_id)
     _add(ctx, ir.Node(id=nid, type=ir.T_CONTROL, parent=parent, src=_where(sc.file, line), props=props))
+    return nid
+
+
+def _compile_splice(ctx: _Ctx, sc: _Scope, m: Dict[str, Any], parent: Optional[str],
+                    path_id: str, line: int) -> str:
+    """``{splice: <block param>}``: the block the call site passed, compiled in
+    the call site's scope (its tasks, loops, catches, ``$params``, the target
+    of its ``return``) and placed here. Node ids carry this procedure's
+    prefix; nodes keep the call site's file:line."""
+    _check_keys(ctx, sc.file, m, (SPLICE,), "splice")
+    name = m[SPLICE]
+    blocks = sc.blocks or {}
+    if not isinstance(name, str) or name not in blocks:
+        known = ", ".join(sorted(blocks)) or "(none)"
+        where = f"procedure {sc.procs[-1]!r}" if sc.procs else "a workflow body"
+        raise ctx.err(sc.file, line, f"splice {name!r}: not a block param of {where} "
+                                     f"(block params: {known})")
+    raw, site, bline = blocks[name]
+    nid = _alloc(ctx, path_id)
+    node = _add(ctx, ir.Node(id=nid, type=ir.T_SEQ, parent=parent, src=_where(sc.file, line),
+                             props={"children": [], "pass_prev": False,
+                                    "splice": {"block": name, "call": sc.scope_id}}))
+    inner = _Scope(**{**site.__dict__, "prefix": sc.prefix, "procs": sc.procs,
+                      "in_splice": True})
+    node.props["children"] = [_compile_tree(ctx, inner, raw, nid, f"{nid}.{name}", bline)]
     return nid
 
 
@@ -1359,19 +1426,43 @@ def _inline(ctx: _Ctx, sc: _Scope, scope_node: ir.Node, pname: str, with_raw: An
         cycle = " -> ".join(sc.procs[sc.procs.index(pname):] + (pname,))
         raise ctx.err(sc.file, line, f"recursive call: {cycle}")
     proc = _procedure(ctx, pname, sc.file, line)
-    with_ = _values(ctx, sc.file, with_raw, "with", line)
+    block_names = {pn for pn, decl in proc.params.items() if decl.get("type") == PARAM_BLOCK}
+    raw_with = _need_map(ctx, sc.file, with_raw, "with", line) if with_raw is not None else {}
+    with_ = _values(ctx, sc.file, {k: v for k, v in raw_with.items() if k not in block_names},
+                    "with", line)
     for k in with_:
         if proc.params and k not in proc.params:
             raise ctx.err(sc.file, line, f"call {pname!r}: unknown parameter {k!r} "
                           f"(declared: {', '.join(proc.params)})")
+    blocks: Dict[str, Tuple[Any, _Scope, int]] = {}
+    callee_scope = _Scope(file=proc.file, tasks=proc.tasks, prefix=scope_node.id + "/",
+                          loops=(), trys=sc.trys, procs=sc.procs + (pname,), in_proc=True,
+                          scope_id=scope_node.id)
+    for pn in block_names:
+        decl = proc.params[pn]
+        if pn in raw_with:
+            if raw_with[pn] is None:
+                raise ctx.err(sc.file, line, f"call {pname!r}: block parameter {pn!r} needs a "
+                                             f"tree (a task name, a list or a mapping)")
+            blocks[pn] = (raw_with[pn], sc, _key_line(raw_with, pn, line))
+        elif decl.get("default") is not None:
+            # a default block is the procedure's own text: its own scope
+            blocks[pn] = (decl["default"], callee_scope, proc.line)
+        elif not check_required:
+            raise ctx.err(sc.file, line, f"procedure {pname!r}: block parameter {pn!r} has no "
+                                         f"default; a group member has no call site to pass it")
+        else:
+            raise ctx.err(sc.file, line, f"call {pname!r}: missing block parameter {pn!r}")
     for pn, decl in proc.params.items():
+        if pn in block_names:
+            continue
         if check_required and decl.get("required") and pn not in with_ and "default" not in decl:
             raise ctx.err(sc.file, line, f"call {pname!r}: missing required parameter {pn!r}")
     scope_node.type = ir.T_SCOPE
     scope_node.props = {"proc": pname, "child": None, "with_": with_, "returns": proc.returns,
-                        "params": proc.params}
-    inner = _Scope(file=proc.file, tasks=proc.tasks, prefix=scope_node.id + "/",
-                   loops=(), trys=sc.trys, procs=sc.procs + (pname,), in_proc=True)
+                        "params": {pn: d for pn, d in proc.params.items()
+                                   if pn not in block_names}}
+    inner = _Scope(**{**callee_scope.__dict__, "blocks": blocks})
     scope_node.props["child"] = _compile_tree(ctx, inner, proc.body, scope_node.id,
                                               f"{scope_node.id}.{key}", proc.line)
 
@@ -1996,7 +2087,7 @@ def compile_text(text: str, *, source: str = "",
             # recur: {"auto": bool} when declared (docs 2.1, recur)
             **({"recur": recur} if recur is not None else {}),
         },
-        params=_params(ctx, file, doc.get("params"), _key_line(doc, "params")),
+        params=_workflow_params(ctx, file, doc),
         returns=_returns(ctx, file, doc["returns"], _key_line(doc, "returns"))
         if doc.get("returns") is not None else {},
         data=_plain(data or {}),
