@@ -86,8 +86,11 @@ body: {seq: [a, b]}
 def test_state_initialised_from_chart(tmp_path):
     st = _start(tmp_path, TWO)
     s = _state(tmp_path)
-    assert s["collections"] == {"landing": {"kind": "queue", "items": [], "seq": 0},
-                                "signals": {"kind": "log", "items": [], "seq": 0}}
+    # epoch: the run that opened the collection (a peer's cursor, doc 2.9)
+    assert s["collections"] == {"landing": {"kind": "queue", "items": [], "seq": 0,
+                                            "epoch": s["run_id"]},
+                                "signals": {"kind": "log", "items": [], "seq": 0,
+                                            "epoch": s["run_id"]}}
     assert s["cursors"] == {} and s["triggers"] == []
     assert st["collections"]["landing"]["count"] == 0
     assert st["pending_triggers"] == 0

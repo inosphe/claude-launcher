@@ -50,9 +50,13 @@ LOCK_TIMEOUT = 10.0
 LOCK_STALE_AFTER = 120.0
 
 #: A scope is a session name; ``~`` joins a nested delegation run's scope to
-#: its parent's (``<scope>~<delegation id>``, doc 7).
-_SCOPE_RE = re.compile(r"^[A-Za-z0-9._~-]+$")
+#: its parent's (``<scope>~<delegation id>``, doc 7) and ``+`` a side run's
+#: name to its session's (``<session>+<side>``, doc 2.9).
+_SCOPE_RE = re.compile(r"^[A-Za-z0-9._~+-]+$")
 NESTED_SEP = "~"
+SIDE_SEP = "+"
+#: A side run's name (``sides:`` keys, doc 2.9).
+SIDE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
 
 
 class StoreError(Exception):
@@ -69,9 +73,31 @@ def normalize_scope(scope: Optional[str]) -> str:
     if not _SCOPE_RE.match(scope) or scope in (".", ".."):
         raise StoreError(
             f"invalid cflow2 scope {scope!r}: a scope is a session name -- "
-            f"letters, digits, '.', '_', '-' (and '~' for a nested delegation run)"
+            f"letters, digits, '.', '_', '-' (and '~' for a nested delegation run, "
+            f"'+' for a side run)"
         )
     return scope
+
+
+def side_scope(session: str, side: str) -> str:
+    """The slot of ``session``'s side run ``side``: ``<session>+<side>``."""
+    if not SIDE_NAME_RE.match(str(side or "")):
+        raise StoreError(f"invalid side run name {side!r}: a letter or '_', then letters, "
+                         f"digits, '_', '-'")
+    return normalize_scope(f"{main_scope(session)}{SIDE_SEP}{side}")
+
+
+def main_scope(scope: str) -> str:
+    """The session slot a scope belongs to: ``s1`` for ``s1``, ``s1+stack``
+    and a nested run under either (``s1+stack~d2``)."""
+    return str(scope or "").split(NESTED_SEP, 1)[0].split(SIDE_SEP, 1)[0]
+
+
+def side_of(scope: str) -> Optional[str]:
+    """The side run name of a side slot (``stack`` for ``s1+stack``); None for
+    a main slot. A nested run's scope reads as its top run's."""
+    top = str(scope or "").split(NESTED_SEP, 1)[0]
+    return top.split(SIDE_SEP, 1)[1] if SIDE_SEP in top else None
 
 
 def resolve_cwd(cwd: Optional[str] = None) -> Path:

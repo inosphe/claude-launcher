@@ -66,11 +66,11 @@ v1(`src/claude_launcher/cflow/`)과 병행한다.
 | `nodes` | 이름 붙은 작업(task) 정의 |
 | `body` | 조합자 트리. 런의 시작점 |
 | `spec` | 명세(8절) |
-| `max_visits` | 한 노드가 런 전체에서 들어갈 수 있는 횟수의 상한. 정수 1 이상, 기본 200. IR의 `meta.max_visits`. 넘으면 그 인스턴스가 `waiting_approval`(reason `visit_limit`)로 멈추고 사람이 `extend --visits`(웹 UI의 「Allow one more visit」, `POST /api/cflow2/extend` 본문 `visits: true`)로 답한다 |
+| `max_visits` | 한 노드가 런 전체에서 들어갈 수 있는 횟수의 상한. 정수 0 이상, 기본 200. IR의 `meta.max_visits`. 넘으면 그 인스턴스가 `waiting_approval`(reason `visit_limit`)로 멈추고 사람이 `extend --visits`(웹 UI의 「Allow one more visit」, `POST /api/cflow2/extend` 본문 `visits: true`)로 답한다. `0`은 상한 없음이다(세션 수명의 side 런처럼 회차 경계가 없는 정의). 검사 경고 `unbounded-visits`가 붙고, 반복의 `max`는 그대로 필요하다 |
 | `inputs` | 시작 입력 선언(2.6). IR의 `meta.inputs` |
 | `collections`, `collection_types` | 컬렉션 선언과 재사용할 선언(2.7). IR의 `meta.collections` |
 | `question_types` | 질문 형식 선언(2.10). IR의 `meta.question_types` |
-| `sides` | side 런 선언(2.9, 2단계) |
+| `sides` | side 런 선언 `{<이름>: <정의 이름>}`(2.9). IR의 `meta.sides` |
 
 ### 2.2 작업(task)
 
@@ -344,6 +344,11 @@ rules:
   페이로드에 싣지 않고 `rule` 조회로 읽는다.
 - 규칙의 `effect`는 정적 명세 검사에 들어간다(8절).
 - `include`는 정의 이름만 받는다(1절).
+- `include`는 포함한 파일의 `collections`와 `sides`도 가져온다. 그 파일의
+  프로시저가 자기 컬렉션에 쓰거나 side 런을 읽기 때문이다(예: `improv-worker-v2`의
+  `land`가 `signals`에 쓴다). 포함하는 파일이 같은 이름을 선언하면 그 선언이
+  쓰인다. 같은 이름을 여러 포함 파일이 선언하면 먼저 포함된 것이 쓰인다(2.7
+  「include로 따라오는 컬렉션」과 같은 규칙).
 
 ### 2.6 시작 입력(inputs)
 
@@ -515,14 +520,16 @@ collections:
 | `driver` | 런의 드라이버 세션. 중첩 위임 런이면 그 위임의 담당 세션 |
 | `daemon` | 데몬의 clock(watch, trigger 실행) |
 | `child` | 부모가 이 런의 드라이버인 세션. trigger의 `push`로만 쓴다 |
-| `peer` | 같은 세션의 다른 런(메인 런과 side 런, 2.9) |
+| `peer` | 예약. 같은 세션의 다른 런(메인 런과 side 런, 2.9)은 서로의 컬렉션을 읽기만 하므로 지금 이 주체로 실행되는 연산은 없다 |
 | `person` | 사람의 CLI(`claunch cflow2 collection …`)와 웹 UI(`set`, `remove`만) |
 
 **주소**
 
 `[대상:]컬렉션`. 대상은 `self`(생략 시), `main`, `side:<이름>`, `parent`다.
-`main`과 `side:<이름>`은 같은 세션의 런을 가리킨다(2.9). `parent`는 부모 세션의
-런 중 그 이름의 컬렉션을 선언한 런이며 trigger(2.8)에서만 쓴다.
+`main`과 `side:<이름>`은 같은 세션의 런을 가리킨다(2.9). 읽기(식 함수, `wait
+until`)와 `consume`에만 쓰고, `push`·`set`·`remove`는 자기 런의 컬렉션에만 한다
+(검사 오류 `peer-write`). `parent`는 부모 세션의 런 중 그 이름의 컬렉션을 선언한
+런이며 trigger(2.8)에서만 쓴다.
 
 **연산**
 
@@ -531,7 +538,7 @@ collections:
 | `push` | `{push: {to: ADDR, item: {필드: EXPR}}}` | 추가. `queue`는 key가 같으면 교체 |
 | `set` | `{set: {in: ADDR, key: EXPR, fields: {필드: EXPR}}}` | 레코드의 필드나 상태 변경. `queue`만 |
 | `remove` | `{remove: {in: ADDR, key: EXPR}}` | 레코드 삭제. `queue`만 |
-| `consume` | `{consume: ADDR}` | 이 런의 cursor를 그 `log`의 끝으로 옮긴다 |
+| `consume` | `{consume: ADDR}` 또는 `{consume: {from: ADDR, name: NAME}}` | 이 런의 cursor를 그 `log`의 끝으로 옮긴다. `name`을 주면 그 이름의 레코드에 대한 cursor만 옮긴다(아래 「이름별 cursor」) |
 
 - 노드의 `do:` 목록에 쓴다. 각 항목에 `at: enter|leave`(기본 `leave`)와
   `when: EXPR`을 붙일 수 있다. `leave`에서는 식에서 `$outcome`을 읽을 수 있다.
@@ -548,19 +555,29 @@ collections:
 | `items(ADDR, STATUS)` | 그 상태의 레코드 목록 |
 | `count(ADDR)`, `count(ADDR, STATUS)` | 개수 |
 | `fresh(ADDR)` | `log`에서 이 런의 cursor 뒤에 레코드가 있으면 참 |
-| `fresh(ADDR, NAME)` | 그 중 `name` 필드가 NAME인 레코드가 있으면 참 |
+| `fresh(ADDR, NAME)` | 그 중 `name` 필드가 NAME인 레코드가 있으면 참. 위치는 log 전체 cursor와 NAME의 cursor 중 뒤의 것 |
 | `exists(ADDR)` | 주소의 런이 살아 있고 그 컬렉션을 선언했으면 참 |
+| `side(NAME)` | 이 세션의 side 런 NAME: `{name, scope, live, status, run, workflow}`. 경로로 읽는다: `side('stack').live` |
 
 `ADDR`은 문자열이다(`items('landing')`, `fresh('side:stack:signals', 'cut')`).
 프롬프트에서는 `${col.<이름>}`이 `self`의 레코드 목록을 JSON으로 렌더한다.
+
+**이름별 cursor.** 한 log에 여러 이름의 신호가 섞이면(`cut-wanted`, `frozen`,
+`landed`) 한 이름을 처리하며 log 전체 cursor를 옮기면 아직 처리하지 않은 다른
+이름이 사라진다. `{consume: {from: ADDR, name: NAME}}`은 NAME의 cursor만 옮긴다.
+`fresh(ADDR, NAME)`은 두 cursor 중 뒤의 것 다음에 NAME 레코드가 있는지 본다.
+`fresh(ADDR)`(이름 없음)은 전체 cursor만 본다. `wait until`의 `consume` 목록도 같은
+두 형태를 받는다.
 
 **wait until**
 
 `wait: {until: EXPR, seconds: N, consume: [ADDR]}`는 셸 명령 없이 엔진이 판정하는
 대기다. 런을 바꾸는 호출과 clock의 시간 틱마다 식을 평가하고, 참이 되면 결과
-`ok`로 끝나며 `consume`에 적은 주소의 cursor를 옮긴다. 식이 읽는 주소의 런이 없거나
-끝났으면 결과 `absent`로 끝난다. `seconds`가 지나면 `timeout`이다. `probe`와 함께
-쓸 수 없다.
+`ok`로 끝나며 `consume`에 적은 주소의 cursor를 옮긴다. 식이 거짓이고 식이 읽은
+다른 런의 주소 중 하나라도 런이 없거나, 끝났거나, 그 컬렉션을 선언하지 않았으면
+결과 `absent`로 끝난다(끝난 런의 log도 레코드는 남아 있으므로 식이 참이면 `ok`다).
+`seconds`가 지나면 `timeout`이다. `probe`와 함께 쓸 수 없다. 같은 세션의 다른 런이
+컬렉션을 바꾸면 그 런의 저장 직후 이 런의 `wait until`을 다시 평가한다(2.9).
 
 **watch**
 
@@ -665,12 +682,107 @@ nodes:
   하위 런) 중 `landing_queue:`를 선언한 런. 정확히 하나여야 한다. v1 런이면 v1 엔진의
   `enqueue_landing(issues, branch, tip, by=…)`로 넣는다(10절 「v1 연결」).
 
-### 2.9 side 런 (2단계, claunch-yq80p.2)
+### 2.9 side 런
 
-세션이 끝날 때까지 메인 런 옆에서 도는 런이다(v1의 하위 런, 예: `stack`). scope는
-`<세션>+<이름>`이고, 메인 정의의 `sides: {<이름>: <정의 이름>}`에 선언한 것만 시작할
-수 있다. 주소 `main:`과 `side:<이름>:`은 이 기능이 들어오기 전까지 검사 오류
-(`side-runs-unavailable`)다. 상세는 2단계에서 이 절에 쓴다.
+세션이 끝날 때까지 메인 런 옆에서 도는 런이다(v1의 하위 런, 예: `stack`). 한
+세션은 메인 런 하나와 이름이 다른 side 런 여럿을 가질 수 있다. 구현은
+`cflow2/runtime.py`(`start_side`, `abort_sides`, `_ColResolver`)와
+`daemon/cflow2_clock.py`(세션 종료)다.
+
+```yaml
+# 메인 정의 (improv-worker-v2)
+sides:
+  stack: stack-v2
+collections:
+  signals: {type: signals}        # 메인 -> stack 신호
+nodes:
+  stack-cut:
+    do:
+      - push: {to: signals, item: {name: "'cut-wanted'"}}
+        when: "$outcome == 'ok'"
+body:
+  - cond:
+      - if: "side('stack').live"
+        then:
+          - stack-cut
+          - wait:
+              until: "fresh('side:stack:signals', 'cut')"
+              consume: [{from: "side:stack:signals", name: cut}]
+              seconds: 14400
+```
+
+**선언과 slot.**
+
+- 메인 정의의 `sides: {<이름>: <정의 이름>}`에 적은 것만 시작할 수 있다. 이름은
+  영문자나 `_`로 시작하고 영숫자·`_`·`-`로 이어진다.
+- slot(scope)은 `<세션>+<이름>`이다(`.cflow2/runs/w1+stack/`). 메인 런과 같은
+  디렉터리(cwd)에 놓인다. side 런의 중첩 위임 런은 `<세션>+<이름>~<위임 id>`다.
+- side 런은 일반 `start`로 시작할 수 없다(그 slot을 주면 거절). 정의는 보통의
+  `kind: workflow`다.
+
+**시작.** `runtime.start_side(name, main=<세션>)`, MCP `flow_start`의 `side`
+인자(`workflow`는 생략 가능, 주면 선언과 같아야 한다).
+
+- 메인 런이 살아 있고(`running`, `waiting_approval`) 그 이름을 선언해야 한다.
+  메인 런이 없거나 끝났으면 거절한다.
+- side 런의 드라이버는 메인 런의 드라이버다. `state.json`의 `side`에 `{name, main,
+  main_run}`이 실린다(저널 `started`의 `side`).
+- 같은 slot에 살아 있는 side 런이 있으면 거절한다(`force`는 일반 시작과 같다).
+  끝난 side 런은 보관(archive)되고, 같은 정의면 `lifecycle.inherit` 컬렉션을
+  넘겨받는다.
+
+**도구.** 모든 `flow_*` 툴(`flow_start`, `flow_status`, `flow_report`,
+`flow_select`, `flow_fork`, `flow_approve`, `flow_collection`, `flow_rule`)이
+`side` 인자를 받는다. `side: stack`은 호출 세션의 slot `<세션>+stack`이다. `scope`와
+함께 주면 거절한다. 권한은 일반 런과 같다(드라이버만).
+
+**서로 읽기.** 같은 세션의 런은 주소 `main:<컬렉션>`과 `side:<이름>:<컬렉션>`으로
+서로의 컬렉션을 읽는다(2.7 「읽기」, `wait until`). 메인 런에서 `main:`은 자기
+자신이다.
+
+- 쓰기는 자기 컬렉션에만 한다. 신호를 보내는 런이 자기 log에 쓰고, 받는 런이
+  읽는다. 다른 런의 log를 `consume`하면 바뀌는 것은 읽는 런의 cursor뿐이다.
+- 다른 런의 log에 대한 cursor는 그 log의 `epoch`(log를 연 런의 id)와 함께
+  저장된다. 읽는 시점의 log epoch가 다르면(상대가 log를 넘겨받지 않고 새로 시작한
+  런) cursor는 0으로 본다. 넘겨받은 log는 epoch가 유지되므로 cursor가 계속 맞는다.
+  메인 런이 같은 정의로 새로 시작해도 다른 런의 log에 대한 cursor를 넘겨받는다.
+- 가드·효과의 식(strict)에서: 상대 런이 없으면 빈 log로 읽는다. 살아 있는 상대가
+  그 컬렉션을 선언하지 않았으면 식 오류다. 끝난 상대는 남은 레코드를 읽는다.
+- `wait until`에서는 위 경우가 모두 `absent` 후보다(2.7).
+- 즉시 반영: 컬렉션을 바꾸거나(`collection_pushed`, `collection_set`,
+  `collection_removed`, `collection_reset`, `collection_watch`) 끝난(`done`,
+  `aborted`) 런은 저장 뒤, 잠금을 놓은 다음에 같은 세션의 다른 런 중 `wait`가 있는
+  런의 시간 틱(`wait until` 재평가)을 한 번 돌린다(`poke_peers`). 그 런이 바빠 잠금을
+  얻지 못하면 데몬 clock의 다음 틱이 한다.
+
+**`side(NAME)`.** 식 함수. 이 세션의 side 런 NAME에 대해 `{name, scope, live,
+status, run, workflow}`를 돌려준다. 런이 없으면 `live: false`, 나머지는 `null`이다.
+`side('stack').live`처럼 경로로 읽는다(함수 호출 뒤의 `.필드`와 `[식]`).
+
+**상태 표시.** 메인 런의 `flow_status`에 `sides: {<이름>: {name, scope, live,
+status, run, workflow, declared, how?}}`가 실린다(아직 없으면 `how`가 시작 방법을
+적는다). side 런의 `flow_status`에는 `side`가 실린다.
+
+**세션 종료.** 세션 프로세스가 끝나면(일시정지 제외) 데몬 clock이 그 세션의 살아
+있는 side 런을 `aborted`(reason `session <세션> ended`)로 끝낸다. 종료 훅
+(`Cflow2Clock.session_exited`)은 기록만 하고 다음 패스 시작(`end_sides`)에서
+처리한다. 그때 세션이 다시 살아 있으면(redefine, respawn) 중단하지 않는다. 데몬
+재기동은 종료가 아니다. `daemon.cflow2_clock`이 꺼져 있으면 이 처리도 없다. 메인
+런은 건드리지 않는다.
+
+**검사.**
+
+| 코드 | 내용 |
+|---|---|
+| `unknown-side` | `sides:`를 선언한 차트에서 `side:<이름>:` 주소나 `side('<이름>')`이 선언에 없는 이름을 씀. side 런 정의 쪽의 `main:`·형제 주소는 실행 시점에 해석한다 |
+| `peer-write` | `do:`의 `push`·`set`·`remove`가 `main:`·`side:` 주소를 씀 |
+| `unbounded-visits` (경고) | `max_visits: 0` |
+
+**v1과의 차이.** v1 하위 런(`runs/<세션>/sub/<이름>/`)은 `publishes`/`awaits`의
+게시 횟수로 만났다. v2는 log 컬렉션과 이름별 cursor로 만난다. v1 하위 런 도구의
+`run: stack` 인자는 v2의 `side: stack`이다. v1 `landing_queue:`는 side 런의
+`landing` 컬렉션이다(자식의 `parent:landing` push는 부모 세션의 v2 런 중 그 컬렉션을
+선언한 런, 즉 side 런으로 간다. 2.8).
 
 ### 2.10 질문 형식(question_types)과 공용 프로시저 ask-user (claunch-yq80p.8)
 
@@ -1135,8 +1247,9 @@ wait 노드에는 `undecided_max`가 붙는다.
 
 ### 4.5 컬렉션과 trigger의 실행
 
-**상태.** `state.json`에 `collections: {이름: {kind, items: [...], seq}}`,
-`cursors: {주소: seq}`, `triggers: [{id, run, node, instance, at, do, push?, queued_at, claimed_at?, claim_boot?}]`를
+**상태.** `state.json`에 `collections: {이름: {kind, items: [...], seq, epoch}}`,
+`cursors: {주소: seq}`(자기 log는 이름, 다른 런의 log는 주소 전체, 이름별 cursor는
+`<키>#<이름>`), `cursor_epochs: {키: epoch}`(다른 런의 log), `triggers: [{id, run, node, instance, at, do, push?, queued_at, claimed_at?, claim_boot?}]`를
 둔다. 컬렉션 선언은 `chart.json`의 `meta.collections`, trigger와 `do:` 효과는 노드의
 `triggers`, `do` 필드다.
 
@@ -1166,6 +1279,10 @@ wait 노드에는 `undecided_max`가 붙는다.
 | `collections.normalize(spec, types) -> dict` | `cflow2/collections.py` | 선언 검사와 `type:` 펼치기. 프런트엔드가 부른다 |
 | `collections.apply_push/apply_set/apply_remove(col_state, spec, ..., principal)` | 같은 곳 | 순수 함수. 접근·형식 검사 후 상태를 바꾸고 이벤트 dict를 돌려준다 |
 | `collections.reset(col_state, spec) -> summary` | 같은 곳 | lifecycle 정리 |
+| `runtime.start_side(name, *, cwd, main, workflow, params, inputs, caps, force, driver, caller)` | `cflow2/runtime.py` | side 런 시작(2.9) |
+| `runtime.abort_sides(session, cwd, reason) -> list` | 같은 곳 | 세션의 살아 있는 side 런 중단(데몬) |
+| `runtime.poke_peers(cwd, scope, now) -> list` | 같은 곳 | 같은 세션의 다른 런의 `wait until` 재평가 |
+| `runtime.side_info(cwd, main, name) -> dict` | 같은 곳 | `side(NAME)`의 값 |
 | `runtime.collection_op(op, name, *, cwd, scope, principal, session, key=None, item=None, fields=None, tid=None)` | `cflow2/runtime.py` | 외부(데몬, MCP, CLI)의 연산. 런 잠금 안에서 적용하고 status를 돌려준다. `tid`는 trigger push의 `_tid` |
 | `runtime.collection_view(cwd, scope) -> dict` | 같은 곳 | 컬렉션 요약(웹, MCP, status) |
 | `runtime.claim_triggers(cwd, scope, *, boot, now, held=()) -> list` | 같은 곳 | 표시되지 않은 trigger와 풀린 trigger에 표시하고 돌려준다(기록은 남는다). `held`는 호출자가 아직 들고 있는 id |

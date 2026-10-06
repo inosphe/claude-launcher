@@ -199,6 +199,9 @@ class Run:
         return cls(st, st.load_chart(), st.load_state(), now)
 
     def save(self) -> None:
+        if any(ev.get("event") in PEER_VISIBLE for ev in self.events) and _has_peers(self):
+            cwd, scope, now = str(self.store.cwd), self.store.scope, self.now
+            self.after.append(lambda: poke_peers(cwd, scope, now))
         _sync_waiting(self)
         self.state["active"] = sorted(
             iid for iid, inst in self.state["inst"].items() if inst.get("await")
@@ -276,10 +279,11 @@ class Run:
             "probe": self.state.get("probe", {}),
         })
         if _col_specs(self):
-            # ``${col.<name>}`` (prompts) and items()/count()/fresh()/exists()
+            # ``${col.<name>}`` (prompts)
             out["col"] = {name: col_mod.items(cs)
                           for name, cs in (self.state.get("collections") or {}).items()}
-            out[expr_mod.COLLECTIONS_KEY] = _ColResolver(self)
+        # items()/count()/fresh()/exists() and side() (doc 2.7, 2.9)
+        out[expr_mod.COLLECTIONS_KEY] = _ColResolver(self)
         qtypes = (self.chart.meta or {}).get("question_types")
         if qtypes:
             out[expr_mod.QUESTIONS_KEY] = qtypes  # guide(name), docs 2.10
@@ -533,7 +537,8 @@ def _enter(r: Run, node_id: str, parent: Optional[str], role: str,
     visits = r.state.setdefault("visits", {})
     visits[key] = int(visits.get(key) or 0) + 1
     r.emit("entered", node=node_id, instance=iid, type=node.type, label=node.label or None)
-    if visits[key] > _max_visits(r, key):
+    limit = _max_visits(r, key)
+    if limit is not None and visits[key] > limit:
         _visit_limit(r, iid, node)
         return iid
     _enter_body(r, iid, node)
@@ -557,12 +562,16 @@ def _enter_body(r: Run, iid: str, node: ir.Node) -> None:
 # -- the run-wide visit limit (chart meta ``max_visits``) ----------------------
 
 
-def _max_visits(r: Run, key: str) -> int:
-    base = (r.chart.meta or {}).get("max_visits") or ir.DEFAULT_MAX_VISITS
+def _max_visits(r: Run, key: str) -> Optional[int]:
+    """The visits ``key`` may have; ``None`` when the chart sets
+    ``max_visits: 0`` (no limit, doc 2.1)."""
+    base = (r.chart.meta or {}).get("max_visits")
     try:
-        base = int(base)
+        base = ir.DEFAULT_MAX_VISITS if base is None else int(base)
     except (TypeError, ValueError):
         base = ir.DEFAULT_MAX_VISITS
+    if base == 0:
+        return None
     return base + int((r.state.get("visit_extra") or {}).get(key) or 0)
 
 
@@ -1978,7 +1987,8 @@ def _new_run(st: RunStore, chart: ir.Chart, *, params: Dict[str, Any], data: Any
              caps: Any, driver: str, now: Optional[float],
              parent: Optional[Dict[str, Any]] = None,
              inputs: Optional[Dict[str, Any]] = None,
-             previous: Optional[Dict[str, Any]] = None) -> Run:
+             previous: Optional[Dict[str, Any]] = None,
+             side: Optional[Dict[str, Any]] = None) -> Run:
     """A fresh run in ``st`` (lock held, slot empty): snapshot, state, root
     entered. The caller saves."""
     run_id = time.strftime("%Y%m%d-%H%M%S", time.gmtime(now if now is not None else None)) \
@@ -1995,10 +2005,12 @@ def _new_run(st: RunStore, chart: ir.Chart, *, params: Dict[str, Any], data: Any
     }
     if parent:
         state["parent"] = parent
+    if side:
+        state["side"] = side
     st.write_chart(chart)
     r = Run(st, chart, state, now)
     r.emit("started", run=run_id, workflow=chart.name, source=chart.source or None,
-           params=params, driver=driver or None, parent=parent, inputs=inputs)
+           params=params, driver=driver or None, parent=parent, inputs=inputs, side=side)
     _init_collections(r, previous)
     _enter(r, chart.root, None, "root")
     _tick_time(r)
@@ -2118,7 +2130,8 @@ def start(chart: ir.Chart, *, cwd: Optional[str] = None, scope: Optional[str] = 
           params: Optional[Dict[str, Any]] = None, caps: Any = None,
           force: bool = False, now: Optional[float] = None,
           driver: Optional[str] = None, caller: str = CALLER_USER,
-          inputs: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+          inputs: Optional[Dict[str, Any]] = None,
+          side: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Start a run of ``chart`` in the (cwd, scope) slot; returns :func:`status`.
 
     ``driver`` is the session that drives the run -- its identity for asks
@@ -2130,6 +2143,9 @@ def start(chart: ir.Chart, *, cwd: Optional[str] = None, scope: Optional[str] = 
     if chart.kind != ir.KIND_WORKFLOW:
         raise FlowError(f"{chart.name} is a {chart.kind}; only a workflow can be started")
     ir.validate(chart)
+    if store_mod.side_of(store_mod.normalize_scope(scope)) and side is None:
+        raise FlowError(f"scope {scope!r} is a side run's slot; a side run is started "
+                        f"from its session's main run (start_side, flow_start side)")
     if force and caller != CALLER_USER:
         inputs = _carry_checks(chart, inputs, RunStore(cwd, scope))
     chart, input_values = _apply_inputs(chart, inputs)
@@ -2169,7 +2185,7 @@ def start(chart: ir.Chart, *, cwd: Optional[str] = None, scope: Optional[str] = 
         r = _new_run(st, chart, params=values, data=chart.data, caps=_caps_to_json(caps),
                      driver=who, now=now, inputs=input_values,
                      previous=previous if (previous or {}).get("workflow") == chart.name
-                     else None)
+                     else None, side=side)
         r.save()
     r.run_after()
     return status(cwd=cwd, scope=scope, now=now, tick=False)
@@ -3722,6 +3738,22 @@ def describe(r: Run) -> Dict[str, Any]:
         out["collections"] = _col_summary(r)
     if _col_specs(r) or s.get("triggers"):
         out["pending_triggers"] = len(s.get("triggers") or [])
+    if s.get("side"):
+        out["side"] = s["side"]
+    sides = (r.chart.meta or {}).get("sides") or {}
+    if sides and store_mod.NESTED_SEP not in r.store.scope:
+        main = store_mod.main_scope(r.store.scope)
+        out["sides"] = {}
+        for name, wf in sides.items():
+            try:
+                info = side_info(r.store.cwd, main, name)
+            except StoreError:
+                continue
+            info["declared"] = wf
+            if info["run"] is None:
+                info["how"] = (f"not started: flow_start with side {name!r} (runs {wf}); "
+                               f"its tools take side {name!r}")
+            out["sides"][name] = info
     if s.get("status") in FINISHED_STATUSES:
         out["outcome"] = s.get("outcome")
         out["value"] = s.get("value")
@@ -4527,7 +4559,10 @@ def open_asks(r: Run) -> List[Dict[str, Any]]:
 # State (``state.json``):
 #   collections: {name: {kind, items: [...], seq}}   (col_mod owns the shape)
 #   cursors:     {address: seq}   -- a log's read position for this run; the
-#                address is the collection name for this run's own log
+#                address is the collection name for this run's own log and the
+#                full address (``side:stack:signals``) for a peer's;
+#                ``<key>#<record name>`` is a named consume's position
+#   cursor_epochs: {address: epoch} -- the peer log a peer cursor was moved on
 #   triggers:    [{id, node, label, instance, at, do, push?, queued_at}]
 #   trigger_seq: the last trigger id's number
 #   watch_checked: {name: {str(key): epoch}} -- the last watch probe of a record
@@ -4566,91 +4601,344 @@ def _col_state(r: "Run", name: str) -> Dict[str, Any]:
             f"no collection {name!r} in this run (declared: {', '.join(specs) or 'none'})")
     cols = r.state.setdefault("collections", {})
     if not isinstance(cols.get(name), dict):
-        cols[name] = col_mod.empty(specs[name])
+        cols[name] = _new_col(r, specs[name])
     return cols[name]
 
 
+def _new_col(r: "Run", spec: Dict[str, Any]) -> Dict[str, Any]:
+    """An empty collection of this run. ``epoch`` names the run that opened
+    the log: a peer's cursor on it (doc 2.9) counts in that log's ``seq`` and
+    is void on a log another run opened."""
+    cs = col_mod.empty(spec)
+    cs["epoch"] = str(r.state.get("run_id") or "")
+    return cs
+
+
 def _self_name(r: "Run", addr: Any) -> str:
-    """The collection an effect or a function names; only this run's own
-    collections are reachable from inside a run in this version."""
+    """The collection an effect names: a run writes only its own collections
+    (doc 2.9: peers read each other, nobody writes another run's)."""
     target, name = col_mod.parse_address(addr)
-    if target != "self":
+    if _peer_scope(r, target) is not None:
         raise col_mod.CollectionError(
-            f"collection address {addr!r}: only this run's own collections (self) can be "
-            f"used here")
+            f"collection address {addr!r}: a run writes only its own collections; "
+            f"another run's are read (items, fresh, wait until) and consumed")
     _col_state(r, name)
     return name
 
 
+# -- side runs (doc 2.9): the session's other runs -----------------------------
+
+
+def _peer_scope(r: "Run", target: str) -> Optional[str]:
+    """The slot an address target names, ``None`` for this run itself.
+    ``main`` is the session's main run, ``side:<name>`` its side run
+    ``name``; ``parent`` is not readable from inside a run (doc 2.8)."""
+    if target == "self":
+        return None
+    if target == "parent":
+        raise col_mod.CollectionError("parent: addresses are only for triggers")
+    own = r.store.scope
+    main = store_mod.main_scope(own)
+    if target == "main":
+        scope = main
+    elif target.startswith("side:"):
+        try:
+            scope = store_mod.side_scope(main, target.split(":", 1)[1])
+        except StoreError as exc:
+            raise col_mod.CollectionError(str(exc)) from None
+    else:
+        raise col_mod.CollectionError(f"unknown address target {target!r}")
+    return None if scope == own else scope
+
+
+def _load_peer(cwd: Path, scope: str) -> Optional[Dict[str, Any]]:
+    """A peer run read without its lock (state files are replaced whole):
+    ``{scope, state, specs, live}``, or None when the slot holds no run."""
+    st = RunStore(str(cwd), scope)
+    if not st.exists():
+        return None
+    try:
+        state = st.load_state()
+        chart = st.load_chart()
+    except StoreError:
+        return None
+    return {"scope": scope, "state": state, "specs": _chart_col_specs(chart), "chart": chart,
+            "live": state.get("status") in LIVE_STATUSES}
+
+
+#: Joins a log's cursor key to a record name: the cursor a named consume
+#: moves (``{from, name}``, doc 2.7).
+NAME_SEP = "#"
+
+
+def _cursor_key(own: bool, name: str, addr: str, record: Optional[str] = None) -> str:
+    """The ``cursors`` key of a log: the collection name for this run's own
+    log, the address for a peer's; ``#<record name>`` for a named cursor."""
+    key = name if own else str(addr)
+    return f"{key}{NAME_SEP}{record}" if record else key
+
+
+def _cursor(r: "Run", key: str, cs: Optional[Dict[str, Any]], own: bool) -> int:
+    """One cursor (0 when unset). A cursor on a peer's log is void when the
+    log is not the one it was moved on (another epoch: a new run that did not
+    inherit the log)."""
+    cursor = (r.state.get("cursors") or {}).get(key)
+    if cursor is None:
+        return 0
+    if not own and (r.state.get("cursor_epochs") or {}).get(key) != (cs or {}).get("epoch"):
+        return 0
+    return int(cursor)
+
+
+def _log_position(r: "Run", addr: str, cs: Optional[Dict[str, Any]], own: bool,
+                  record: Optional[str]) -> int:
+    """Where this run stands in a log for ``fresh``: its whole-log cursor, or
+    -- asking about one record name -- the later of that and the name's own."""
+    _target, name = col_mod.parse_address(addr)
+    pos = _cursor(r, _cursor_key(own, name, addr), cs, own)
+    if record:
+        pos = max(pos, _cursor(r, _cursor_key(own, name, addr, record), cs, own))
+    return pos
+
+
+def side_info(cwd: Any, main: str, name: str) -> Dict[str, Any]:
+    """What ``side(name)`` reads (doc 2.9): the session's side run ``name``."""
+    scope = store_mod.side_scope(main, name)
+    peer = _load_peer(Path(str(cwd)), scope)
+    if peer is None:
+        return {"name": name, "scope": scope, "live": False, "status": None, "run": None,
+                "workflow": None}
+    st = peer["state"]
+    return {"name": name, "scope": scope, "live": peer["live"], "status": st.get("status"),
+            "run": st.get("run_id"), "workflow": st.get("workflow")}
+
+
+#: Journal events that change what a peer reads off this run.
+PEER_VISIBLE = ("collection_pushed", "collection_set", "collection_removed",
+                "collection_reset", "collection_watch", "done", "aborted")
+
+
+def _has_peers(r: "Run") -> bool:
+    """A main run that declares sides, or a side run."""
+    if store_mod.NESTED_SEP in r.store.scope:
+        return False
+    return bool((r.chart.meta or {}).get("sides")) or bool(store_mod.side_of(r.store.scope))
+
+
+
+def peer_scopes(cwd: Any, scope: str) -> List[str]:
+    """The other top-level slots of ``scope``'s session in ``cwd``: its main
+    run and its side runs."""
+    main = store_mod.main_scope(scope)
+    out = []
+    for other in store_mod.list_scopes(str(cwd)):
+        if other == scope or store_mod.NESTED_SEP in other or store_mod.main_scope(other) != main:
+            continue
+        out.append(other)
+    return out
+
+
+def poke_peers(cwd: str, scope: str, now: Optional[float] = None) -> List[str]:
+    """After a run changed what its peers read, re-evaluate the peers'
+    ``wait: until`` now instead of on the clock's next pass. Runs after the
+    changing run's lock is released; a busy peer is left to the clock."""
+    poked = []
+    for other in peer_scopes(cwd, scope):
+        st = RunStore(cwd, other)
+        try:
+            state = st.load_state()
+        except StoreError:
+            continue
+        if state.get("status") not in LIVE_STATUSES:
+            continue
+        if not any((i or {}).get("await") == AW_WAIT for i in (state.get("inst") or {}).values()):
+            continue
+        try:
+            _mutate(cwd, other, now, lambda r: None)
+            poked.append(other)
+        except (FlowError, StoreError):
+            continue
+    return poked
+
+
+def start_side(name: str, *, cwd: Optional[str] = None, main: Optional[str] = None,
+               workflow: Optional[str] = None, params: Optional[Dict[str, Any]] = None,
+               inputs: Optional[Dict[str, Any]] = None, caps: Any = None,
+               force: bool = False, now: Optional[float] = None,
+               driver: Optional[str] = None, caller: str = CALLER_USER) -> Dict[str, Any]:
+    """Start the side run ``name`` of the session whose main run is in slot
+    ``main`` (doc 2.9): the main run must be live and declare it under
+    ``sides:``; the side runs that definition in slot ``<main>+<name>``,
+    driven by the main run's driver."""
+    main = store_mod.normalize_scope(main)
+    if store_mod.side_of(main) or store_mod.NESTED_SEP in main:
+        raise FlowError(f"slot {main!r} is not a session's main run; a side run is started "
+                        f"beside the main run")
+    mst = RunStore(cwd, main)
+    if not mst.exists():
+        raise FlowError(f"no cflow2 run in slot {main!r}: a side run starts beside a live "
+                        f"main run that declares it (sides:)")
+    mstate = mst.load_state()
+    mchart = mst.load_chart()
+    if mstate.get("status") not in LIVE_STATUSES:
+        raise FlowError(f"the main run ({mstate.get('workflow')}) is {mstate.get('status')}; "
+                        f"side runs start only beside a live main run")
+    sides = (mchart.meta or {}).get("sides") or {}
+    if name not in sides:
+        raise FlowError(f"{mchart.name} declares no side run {name!r} "
+                        f"(sides: {', '.join(sides) or 'none'})")
+    if workflow and str(workflow) != str(sides[name]):
+        raise FlowError(f"side run {name!r} runs {sides[name]}, as {mchart.name} declares; "
+                        f"got {workflow!r}")
+    chart = load_definition(str(sides[name]), str(mst.cwd))
+    who = driver_of(mstate) if driver is None else str(driver or "")
+    return start(chart, cwd=str(mst.cwd), scope=store_mod.side_scope(main, name),
+                 params=params, caps=caps, force=force, now=now, driver=who, caller=caller,
+                 inputs=inputs, side={"name": name, "main": main,
+                                      "main_run": mstate.get("run_id")})
+
+
+def abort_sides(session: str, cwd: str, reason: str,
+                now: Optional[float] = None) -> List[str]:
+    """Abort every live side run of ``session`` in ``cwd`` (the daemon, when
+    the session ended: doc 2.9). Returns the slots aborted."""
+    out = []
+    main = store_mod.main_scope(str(session or ""))
+    if not main:
+        return out
+    for scope in peer_scopes(cwd, main):
+        if not store_mod.side_of(scope):
+            continue
+        try:
+            state = RunStore(cwd, scope).load_state()
+        except StoreError:
+            continue
+        if state.get("status") not in LIVE_STATUSES:
+            continue
+        try:
+            abort(reason, cwd=cwd, scope=scope, now=now)
+            out.append(scope)
+        except (FlowError, StoreError):
+            continue
+    return out
+
+
 class _ColResolver:
     """What :mod:`.expr` reads collections through (``items``, ``count``,
-    ``fresh``, ``exists``). ``strict`` (guards, effects): an address of
-    another run is an error. Not strict (``wait: until``): such an address
-    reads as empty and is noted in ``absent`` -- the wait ends ``absent``."""
+    ``fresh``, ``exists``, ``side``). ``strict`` (guards, effects): a
+    collection a live peer does not declare is an error; a missing or
+    finished peer reads as what it holds (nothing when there is no run).
+    Not strict (``wait: until``): every such address is noted in ``absent``
+    -- the wait ends ``absent`` unless the expression holds anyway."""
 
     def __init__(self, r: "Run", strict: bool = True) -> None:
         self.r = r
         self.strict = strict
         self.absent: List[str] = []
+        self._peers: Dict[str, Optional[Dict[str, Any]]] = {}
 
-    def _name(self, addr: str) -> Optional[str]:
-        target, name = col_mod.parse_address(addr)
-        if target != "self":
-            if self.strict:
+    def _miss(self, addr: str) -> None:
+        if addr not in self.absent:
+            self.absent.append(addr)
+
+    def _peer(self, scope: str) -> Optional[Dict[str, Any]]:
+        if scope not in self._peers:
+            self._peers[scope] = _load_peer(self.r.store.cwd, scope)
+        return self._peers[scope]
+
+    def _col(self, addr: str) -> Tuple[Optional[Dict[str, Any]], bool]:
+        """``(col_state, own)`` the address reads; ``(None, False)`` for a peer
+        that holds nothing to read."""
+        try:
+            target, name = col_mod.parse_address(addr)
+            if target == "parent" and not self.strict:
+                self._miss(addr)  # trigger-only (check refuses it); absent here
+                return None, False
+            scope = _peer_scope(self.r, target)
+        except col_mod.CollectionError as exc:
+            raise expr_mod.ExprError(str(exc)) from None
+        if scope is None:
+            specs = _col_specs(self.r)
+            if name not in specs:
                 raise expr_mod.ExprError(
-                    f"collection address {addr!r}: only this run's own collections can be "
-                    f"read here")
-            if addr not in self.absent:
-                self.absent.append(addr)
-            return None
-        specs = _col_specs(self.r)
-        if name not in specs:
-            raise expr_mod.ExprError(
-                f"no collection {name!r} in this run (declared: {', '.join(specs) or 'none'})")
-        return name
+                    f"no collection {name!r} in this run (declared: "
+                    f"{', '.join(specs) or 'none'})")
+            return (self.r.state.get("collections") or {}).get(name), True
+        peer = self._peer(scope)
+        if peer is None:
+            self._miss(addr)
+            return None, False
+        if name not in peer["specs"]:
+            if self.strict and peer["live"]:
+                raise expr_mod.ExprError(
+                    f"{addr!r}: the run in slot {scope!r} ({peer['state'].get('workflow')}) "
+                    f"declares no collection {name!r}")
+            self._miss(addr)
+            return None, False
+        if not peer["live"]:
+            self._miss(addr)
+        return (peer["state"].get("collections") or {}).get(name), False
 
     def items(self, addr: str, status: Optional[str] = None) -> List[Dict[str, Any]]:
-        name = self._name(addr)
-        if name is None:
-            return []
-        return col_mod.items((self.r.state.get("collections") or {}).get(name), status)
+        cs, _own = self._col(addr)
+        return col_mod.items(cs, status)
 
     def fresh(self, addr: str, field: Optional[str] = None) -> bool:
-        name = self._name(addr)
-        if name is None:
-            return False
-        cursor = (self.r.state.get("cursors") or {}).get(name)
-        return col_mod.fresh((self.r.state.get("collections") or {}).get(name), cursor, field)
+        cs, own = self._col(addr)
+        return col_mod.fresh(cs, _log_position(self.r, addr, cs, own, field), field)
 
     def exists(self, addr: str) -> bool:
-        target, name = col_mod.parse_address(addr)
-        # phase 1: other runs (main, side, parent) are not resolvable yet
-        return target == "self" and name in _col_specs(self.r)
+        try:
+            target, name = col_mod.parse_address(addr)
+            scope = _peer_scope(self.r, target)
+        except col_mod.CollectionError:
+            return False
+        if scope is None:
+            return name in _col_specs(self.r)
+        peer = self._peer(scope)
+        return bool(peer and peer["live"] and name in peer["specs"])
+
+    def side(self, name: str) -> Dict[str, Any]:
+        try:
+            return side_info(self.r.store.cwd, store_mod.main_scope(self.r.store.scope), name)
+        except StoreError as exc:
+            raise expr_mod.ExprError(str(exc)) from None
 
 
 def _init_collections(r: "Run", previous: Optional[Dict[str, Any]]) -> None:
     """A new run's collections: empty, or -- ``lifecycle.inherit`` -- the
     previous run's in this slot (same workflow name), cleaned up, with this
-    run's cursors on them."""
+    run's cursors on them. Cursors on peers' logs (doc 2.9) carry over with
+    their epochs: they are this slot's place in another run's log."""
+    old_cursors = (previous or {}).get("cursors") or {}
+    old_epochs = (previous or {}).get("cursor_epochs") or {}
+    for key in [k for k in old_cursors if ":" in str(k) and k in old_epochs]:
+        r.state.setdefault("cursors", {})[key] = old_cursors[key]
+        r.state.setdefault("cursor_epochs", {})[key] = old_epochs[key]
     specs = _col_specs(r)
     if not specs:
         return
     cols = r.state.setdefault("collections", {})
     cursors = r.state.setdefault("cursors", {})
     old_cols = (previous or {}).get("collections") or {}
-    old_cursors = (previous or {}).get("cursors") or {}
     for name, spec in specs.items():
         if previous is not None and spec["lifecycle"].get("inherit"):
             cols[name], summary = col_mod.inherit_report(old_cols.get(name), spec)
-            if summary.get("inherited"):
-                if name in old_cursors:
-                    cursors[name] = old_cursors[name]
+            if not summary.get("inherited"):
+                cols[name] = _new_col(r, spec)
+            else:
+                # an inherited log keeps its epoch: peers' cursors stay valid
+                cols[name]["epoch"] = ((old_cols.get(name) or {}).get("epoch")
+                                       or str(previous.get("run_id") or ""))
+                for key in old_cursors:
+                    if key == name or str(key).startswith(name + NAME_SEP):
+                        cursors[key] = old_cursors[key]
                 ev = dict(summary)
                 ev.pop("event", None)
                 r.emit("collection_inherited", run_from=previous.get("run_id"),
                        cursor=cursors.get(name), **ev)
             continue
-        cols[name] = col_mod.empty(spec)
+        cols[name] = _new_col(r, spec)
     r.state.setdefault("triggers", [])
 
 
@@ -4674,15 +4962,35 @@ def _col_apply(r: "Run", op: str, name: str, *, principal: str, by: str, key: An
     return ev
 
 
-def _consume(r: "Run", addr: Any, by: str) -> None:
-    name = _self_name(r, addr)
-    cs = _col_state(r, name)
+def _consume(r: "Run", addr: Any, by: str, record: Optional[str] = None) -> None:
+    """Move this run's cursor to the end of a log -- its own, or a peer's
+    (the cursor is this run's, so nothing is written to the peer). With
+    ``record``, only the cursor for records of that name moves: the log's
+    other names stay fresh."""
+    if isinstance(addr, dict):
+        addr, record = addr.get("addr"), addr.get("name") or record
+    target, name = col_mod.parse_address(addr)
+    scope = _peer_scope(r, target)
+    key = _cursor_key(scope is None, name, str(addr), record)
+    if scope is None:
+        cs = _col_state(r, name)
+        epoch = None
+    else:
+        peer = _load_peer(r.store.cwd, scope)
+        if peer is None or name not in peer["specs"]:
+            raise col_mod.CollectionError(
+                f"consume {addr!r}: no run in slot {scope!r} declares {name!r}")
+        cs = (peer["state"].get("collections") or {}).get(name) or col_mod.empty(
+            peer["specs"][name])
+        epoch = cs.get("epoch")
     if cs.get("kind") != "log":
         raise col_mod.CollectionError(f"consume {addr!r}: only a log has a cursor")
     cursors = r.state.setdefault("cursors", {})
-    before = cursors.get(name)
-    cursors[name] = col_mod.end_cursor(cs)
-    r.emit("cursor_moved", address=name, before=before, after=cursors[name], by=by)
+    before = cursors.get(key)
+    cursors[key] = col_mod.end_cursor(cs)
+    if scope is not None:
+        r.state.setdefault("cursor_epochs", {})[key] = epoch
+    r.emit("cursor_moved", address=key, before=before, after=cursors[key], by=by)
 
 
 # -- node effects ('do:') ------------------------------------------------------------
@@ -4746,8 +5054,9 @@ def _apply_effects(r: "Run", iid: str, node: ir.Node, at: str,
                 continue
             if op == "consume":
                 addrs = body.get("addr") if isinstance(body, dict) else body
+                record = body.get("name") if isinstance(body, dict) else None
                 for addr in (addrs if isinstance(addrs, list) else [addrs]):
-                    _consume(r, addr, by)
+                    _consume(r, addr, by, record)
                 continue
             if not isinstance(body, dict):
                 raise col_mod.CollectionError(f"{op}: needs a mapping, got {body!r}")
@@ -4983,7 +5292,7 @@ def _until_step(r: "Run", iid: str, node: ir.Node) -> bool:
     except expr_mod.ExprError as exc:
         _complete(r, iid, ir.OUTCOME_FAIL, {"reason": f"until: {exc}"})
         return True
-    if resolver.absent:
+    if not held and resolver.absent:
         _complete(r, iid, OUTCOME_ABSENT, {"absent": resolver.absent})
         return True
     if held:

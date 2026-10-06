@@ -435,8 +435,12 @@ nodes:
   등록하라는 산문). 같은 요청이 두 번 들어간다.
 - `push`와 `enqueue-landing`은 위임된 하위 트리 안에서 쓸 수 없다
   (`trigger-in-delegation`). `briefing`과 `checks`는 쓸 수 있다.
-- `parent:` 주소는 trigger에서만 쓴다. `main:`·`side:` 주소는 side 런이 들어오기
-  전까지 검사 오류(`side-runs-unavailable`)다.
+- `parent:` 주소는 trigger에서만 쓴다. `main:`·`side:` 주소(같은 세션의 다른 런,
+  규격 2.9)는 읽기와 `consume`에만 쓴다. 다른 런에 신호를 보내려면 자기 log에
+  쓰고, 받는 런이 `fresh('main:signals', NAME)`으로 읽게 한다(`peer-write`).
+- 한 log에 이름이 다른 신호가 섞이면 `consume: {from: ADDR, name: NAME}`으로 그
+  이름만 소비한다. 이름 없는 `consume`은 log 전체를 소비해 처리하지 않은 다른 신호도
+  지운다.
 
 ---
 

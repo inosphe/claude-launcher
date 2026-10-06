@@ -29,8 +29,16 @@ Collections and triggers (docs/cflow-v2.md 2.7, 2.8; :func:`_collection_checks`)
                         with a literal address) or a prompt ``${col.<name>}``
                         names a ``self`` collection the chart does not declare;
                         also a ``lifecycle.reset_at`` entry that is not a node
-- ``side-runs-unavailable`` a ``main:`` or ``side:<run>:`` address (side runs
-                        are phase 2)
+- ``unknown-side``      a ``side:<name>:`` address or a ``side('<name>')`` call
+                        naming a side run the chart's ``sides:`` does not
+                        declare (checked only in a chart that declares
+                        ``sides:``; a side run's reads of its main run and
+                        siblings are resolved at run time)
+- ``peer-write``        a ``do:`` ``push``/``set``/``remove`` on a ``main:`` or
+                        ``side:`` address: a run writes only its own
+                        collections (doc 2.9); peers read and consume them
+- ``unbounded-visits`` (warning) ``max_visits: 0`` -- no node is ever held for
+                        a person by the visit limit
 - ``parent-outside-trigger`` a ``parent:`` address anywhere but a trigger
 - ``trigger-target``    a trigger ``push`` whose ``to`` is not ``parent:``
 - ``facts-outside-trigger`` ``$facts`` or ``$each`` in an expression that is
@@ -749,6 +757,10 @@ def check(chart: ir.Chart) -> List[Finding]:
                                        f"serialize them", n.id))
 
     out.extend(_collection_checks(chart, nodes))
+    if (chart.meta or {}).get("max_visits") == 0:
+        out.append(Finding(WARNING, "unbounded-visits",
+                           "max_visits: 0 -- no node is held by the visit limit; every loop "
+                           "still needs its own max"))
 
     graph = _build(chart)
     if _path(chart, graph, {END}, set()) is None:
@@ -902,8 +914,16 @@ def _collection_checks(chart: ir.Chart, nodes: List[ir.Node]) -> List[Finding]:
     cols: Dict[str, dict] = (chart.meta or {}).get("collections") or {}
     read: Set[str] = set()
 
+    sides: Dict[str, str] = (chart.meta or {}).get("sides") or {}
+
+    def side_known(side: object, where: str, nid: Optional[str]) -> None:
+        if sides and side not in sides:
+            out.append(Finding(ERROR, "unknown-side",
+                               f"{where}: no side run {side!r} (sides: "
+                               f"{', '.join(sorted(sides))})", nid))
+
     def resolve(addr: object, where: str, nid: Optional[str], *,
-                reading: bool = False) -> Optional[dict]:
+                reading: bool = False, writing: bool = False) -> Optional[dict]:
         """The self collection an address names (None when it is not a
         self address or does not resolve; findings are added)."""
         try:
@@ -912,9 +932,14 @@ def _collection_checks(chart: ir.Chart, nodes: List[ir.Node]) -> List[Finding]:
             out.append(Finding(ERROR, "unknown-collection", f"{where}: {exc}", nid))
             return None
         if target == "main" or target.startswith("side:"):
-            out.append(Finding(ERROR, "side-runs-unavailable",
-                               f"{where}: address {addr!r} names a side run; side runs are not "
-                               f"available yet (docs/cflow-v2.md 2.9)", nid))
+            # another run of the session (doc 2.9): its declarations are
+            # not in this chart
+            if target.startswith("side:"):
+                side_known(target.split(":", 1)[1], where, nid)
+            if writing:
+                out.append(Finding(ERROR, "peer-write",
+                                   f"{where}: address {addr!r} is another run's collection; a "
+                                   f"run writes only its own (peers read and consume it)", nid))
             return None
         if target == "parent":
             out.append(Finding(ERROR, "parent-outside-trigger",
@@ -958,7 +983,7 @@ def _collection_checks(chart: ir.Chart, nodes: List[ir.Node]) -> List[Finding]:
                                    f"{where}: the node is inside a subtree delegated to "
                                    f"{', '.join(remote)}; put collection effects on the "
                                    f"delegation root", n.id))
-            spec = resolve(op.get("addr"), where, n.id)
+            spec = resolve(op.get("addr"), where, n.id, writing=kind != "consume")
             if spec is None:
                 continue
             if kind in ("set", "remove") and spec["kind"] != "queue":
@@ -1037,7 +1062,8 @@ def _collection_checks(chart: ir.Chart, nodes: List[ir.Node]) -> List[Finding]:
                                f"the delegation root or outside the subtree", n.id))
 
         if n.type == ir.T_WAIT:
-            for addr in n.get("consume") or []:
+            for entry in n.get("consume") or []:
+                addr = entry.get("addr") if isinstance(entry, dict) else entry
                 if remote:
                     read_in_delegation(f"wait consume {addr}")
                 spec = resolve(addr, f"wait {n.id} consume", n.id)
@@ -1068,6 +1094,9 @@ def _collection_checks(chart: ir.Chart, nodes: List[ir.Node]) -> List[Finding]:
                                        f"node {n.id} {what}: {fn}() reads a collection; a "
                                        f"trigger push expression reads only $facts and $each",
                                        n.id))
+                elif fn == "side":
+                    if addr is not None:
+                        side_known(addr, f"node {n.id} {what}", n.id)
                 else:
                     if remote:
                         read_in_delegation(f"{what}: {fn}()")
@@ -1100,8 +1129,10 @@ def _collection_checks(chart: ir.Chart, nodes: List[ir.Node]) -> List[Finding]:
         for root in sorted(roots & set(TRIGGER_ROOTS)):
             out.append(Finding(ERROR, "facts-outside-trigger",
                                f"{what}: ${root} is only set in a trigger push expression"))
-        for _fn, addr in calls:
-            if addr is not None:
+        for fn, addr in calls:
+            if addr is not None and fn == "side":
+                side_known(addr, what, None)
+            elif addr is not None:
                 resolve(addr, what, None, reading=True)
 
     for name, spec in cols.items():

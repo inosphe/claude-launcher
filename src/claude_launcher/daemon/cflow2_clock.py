@@ -41,7 +41,12 @@ session name, as for v1 -- that does what no agent call does:
 * **watch**: collection ``watch:`` probes that are due
   (:func:`..cflow2.runtime.watch_due`) run like a wait probe, with
   :data:`WATCH_TIMEOUT`; the exit code is applied by
-  :func:`..cflow2.runtime.watch_apply` (a timed-out probe skips that round).
+  :func:`..cflow2.runtime.watch_apply` (a timed-out probe skips that round);
+* **side runs**: a session that exited (any reason but a pause) has its live
+  side runs (slots ``<session>+<side>``, doc 2.9) aborted on the next pass
+  (:meth:`Cflow2Clock.session_exited` records, :meth:`Cflow2Clock.end_sides`
+  aborts through :func:`..cflow2.runtime.abort_sides`). A session that is
+  back by then (redefine, respawn) keeps them; a daemon restart is no exit.
 
 Every tick also writes the dispatch heartbeat
 (:func:`..cflow2.executors.write_heartbeat`) listing the directories it
@@ -58,6 +63,7 @@ runs, no heartbeat is written, and v2 delegations fall back at once.
 from __future__ import annotations
 
 import asyncio
+import collections
 import contextlib
 import hmac
 import json
@@ -224,6 +230,10 @@ class Cflow2Clock:
         #: ``(cwd, scope, trigger id)`` claimed and not completed yet, so a
         #: stale re-claim of one still waiting here is not performed twice.
         self._pending_triggers: Set[Tuple[str, str, str]] = set()
+        #: ``(session, cwd)`` of exits heard since the last pass: their side
+        #: runs are aborted by :meth:`end_sides` (filled on the loop by
+        #: :meth:`session_exited`, drained in the scan thread).
+        self._exits: "collections.deque[Tuple[str, str]]" = collections.deque()
 
     # -- lifecycle -------------------------------------------------------
     def start(self) -> None:
@@ -330,6 +340,41 @@ class Cflow2Clock:
         except Exception:
             log.exception("cflow2 notice delivery to %r failed", name)
 
+    # -- side runs (doc 2.9) --------------------------------------------
+    def session_exited(self, session: Any) -> None:
+        """Exit hook (``SessionManager.exit_hooks``): the session's side runs
+        end with it. Runs on the loop, so it only records; the next pass
+        aborts them. A pause is not an ending (the session comes back)."""
+        if getattr(session, "paused_at", None):
+            return
+        sdef = getattr(session, "sdef", None)
+        name = str(getattr(sdef, "name", "") or "")
+        cwd = str(getattr(sdef, "cwd", "") or "")
+        if not name or not cwd:
+            return
+        self._exits.append((name, cwd))
+        loop, wake = self._loop, self._wake
+        if loop is not None and wake is not None:
+            with contextlib.suppress(RuntimeError):
+                loop.call_soon_threadsafe(wake.set)
+
+    def end_sides(self, now: Optional[float] = None) -> List[Tuple[str, str]]:
+        """Abort the live side runs of the sessions :meth:`session_exited`
+        recorded, unless the session is live again. ``(cwd, slot)`` aborted."""
+        out: List[Tuple[str, str]] = []
+        while self._exits:
+            name, cwd = self._exits.popleft()
+            if self._live(name) is not None:
+                continue  # back already (redefine, respawn): the sides go on
+            try:
+                resolved = _resolve(cwd)
+                for scope in runtime.abort_sides(name, resolved, f"session {name} ended",
+                                                 now=now):
+                    out.append((resolved, scope))
+            except Exception:
+                log.exception("cflow2 clock could not end the side runs of %r", name)
+        return out
+
     # -- what to scan ----------------------------------------------------
     def _live_sessions(self) -> List[Any]:
         try:
@@ -425,6 +470,7 @@ class Cflow2Clock:
         self._mark()
         self._beat(force=True)
         notices: List[Notice] = []
+        self.end_sides(now)
         try:
             for cwd in cwds:
                 for scope in cstore.list_scopes(cwd):
