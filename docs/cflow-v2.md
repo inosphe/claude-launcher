@@ -563,7 +563,10 @@ v1 `checklist:`의 대응:
 엔진이 실행하는 명령(작업의 `verify`, wait의 `probe`, 모니터의 `probe`)은
 템플릿이 아니다. 이 문자열 안의 `${...}`는 컴파일 오류다. 명령이 런의 값을 읽어야
 하면 환경 변수로 읽는다: param은 `CFLOW_IN_<NAME>`, 최상위 `data`의 스칼라 값은
-`CFLOW_DATA_<NAME>`(이름은 대문자, 영숫자 외 문자는 `_`). 셸이 하는 `$VAR` 전개는
+`CFLOW_DATA_<NAME>`(이름은 대문자, 영숫자 외 문자는 `_`). wait와 모니터의 `probe`는
+스칼라가 아닌 최상위 `data`도 JSON 텍스트로 받는다(64KB 이하, `runtime._value_env`).
+예: improv-worker-v2의 착지 대기는 `--landing "$CFLOW_DATA_LANDING"`으로 착지 기록 맵을
+넘긴다. 셸이 하는 `$VAR` 전개는
 엔진이 값을 끼워 넣는 것이 아니므로 허용된다. 근거: 렌더한 값을 셸 문자열에
 붙이면 값(`x || true` 등)이 명령이 되어 verify를 우회할 수 있다(리뷰 E1).
 
@@ -2098,6 +2101,12 @@ v2 워커의 착지 요청은 기본으로 pull request를 거친다. 로컬 착
   `landing-queue` 타입이 이 필드를 선언한다. `pr_url`이 있는 행은 리더의 PR 후보
   (`gh pr merge --merge --match-head-commit <tip>`, claunch-yq80p.6)이고 없으면 로컬
   후보다. 마커는 `LANDING REQUEST @ <sha> @ <remote>/<브랜치> pr: <url>`이다.
+- 착지 판정: 착지 대기 프로브는 `tools/landed_check.py --landing "$CFLOW_DATA_LANDING"`이다.
+  기록의 `medium`이 `pr`이면 `--target <remote>/<base> --fetch`와 같은 질문이 된다 —
+  리더가 원격 base에서 `gh pr merge`로 만든 머지는 fetch 전에는 이 저장소에 없다.
+  `pr`인데 `remote`·`base`가 없으면 판정 불가(2)다. 그 밖의 매체와 기록이 없을 때는
+  로컬 질문(머지 부모 검사) 그대로다(claunch-yq80p.4). v1 `improv-worker-remote`는
+  이 경로로 대체되었다.
 - 웹 UI: 런 패널의 컬렉션 표는 값이 http(s) URL인 필드를 텍스트에서 빼고 새 탭
   링크로 보인다. `url`·`pr_url`이 `/pull/<N>` 형태면 링크 이름은 `PR #N`(번호는
   같은 행의 `number`·`pr_number`가 우선)이고, 그 밖의 URL은 필드 이름이다. 그래서

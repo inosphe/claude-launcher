@@ -2785,7 +2785,11 @@ procedures:
               # 그 밖(landed_check의 2 = 판정 불가, git의 128) = 판정 불가.
               # 판정 불가가 세 번 이어지면 undecidable, 하루가 지나면 timeout으로
               # 끝나고 사람이 고른다 — 「아직」과 섞여 영원히 기다리지 않는다.
-              probe: "uv run --no-sync python tools/landed_check.py && git diff --quiet && git diff --cached --quiet"
+              # PR 착지(data.landing.medium == 'pr')는 리더가 원격 base에서 머지하므로
+              # landed_check가 착지 기록(프로브 환경의 CFLOW_DATA_LANDING, JSON)을 받아
+              # <remote>/<base>를 fetch한 뒤 묻는다
+              # (claunch-yq80p.4). 로컬 착지와 기록이 없을 때는 이전과 같은 질문이다.
+              probe: 'uv run --no-sync python tools/landed_check.py --landing "$CFLOW_DATA_LANDING" && git diff --quiet && git diff --cached --quiet'
               poll: 60
               seconds: 86400
               undecided_max: 3
