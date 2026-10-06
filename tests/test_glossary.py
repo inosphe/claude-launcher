@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 import pytest
 from claude_launcher import glossary as g, workspaces
 
@@ -72,6 +73,20 @@ def test_duplicate_accept_rolls_back_without_losing_the_proposal(ws):
     assert exc.value.status == 409
     assert g.suggestions(ws)[0]["id"] == proposal["id"]
     assert len(g.entries(ws)) == 1
+
+
+def test_concurrent_identical_suggestions_return_one_pending_proposal(ws):
+    g.entries(ws)  # Initialize an empty DB before concurrent requests.
+    start = Barrier(12)
+    def propose(_):
+        start.wait(timeout=10)
+        return g.suggest(ws, term(source="same context"), "s94")
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        results = list(pool.map(propose, range(12)))
+    assert len({row["id"] for row in results}) == 1
+    assert len(g.suggestions(ws)) == 1
+    assert all(row["status"] == "pending" for row in results)
+    assert g.entries(ws) == []
 
 
 def test_concurrent_review_creates_one_term(ws):

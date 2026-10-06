@@ -167,6 +167,9 @@ def suggest(ws, body, proposed_by=""):
     value = clean(body)
     proposed_by = _text(proposed_by, "proposed_by", 200)
     with connection(ws) as db:
+        # Hold the write lock before reading: concurrent retries must observe
+        # the preceding caller's insert instead of each creating a proposal.
+        db.execute("BEGIN IMMEDIATE")
         # Repeated tool calls for the same proposal do not fill the review queue.
         encoded = json.dumps(value["aliases"], ensure_ascii=False)
         existing = db.execute("SELECT * FROM suggestions WHERE status='pending' AND term=? AND definition=? AND aliases=? AND source=? AND proposed_by=?", (
