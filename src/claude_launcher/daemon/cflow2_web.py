@@ -414,6 +414,8 @@ def node_view(node: ir.Node, prompts: bool = False) -> dict:
             out["outcome"] = node.get("outcome")
     elif t == ir.T_WAIT:
         out["describe"] = node.get("describe") or node.get("probe") or (
+            "checks: " + ", ".join(c.get("id") or "" for c in node.get("checks"))
+            if node.get("checks") else None) or (
             f"{node.get('seconds')}s" if node.get("seconds") else None)
     elif t == ir.T_TIMEOUT:
         out["seconds"] = node.get("seconds")

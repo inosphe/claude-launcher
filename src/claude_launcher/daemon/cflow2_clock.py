@@ -38,6 +38,17 @@ session name, as for v1 -- that does what no agent call does:
   one left by an earlier boot (a restart or a stop between claim and
   completion) or older than :data:`..cflow2.runtime.TRIGGER_CLAIM_STALE` is
   released (``trigger_requeued``) and performed again;
+* **rounds**: a finished run of a ``recur: {auto: true}`` definition whose
+  next round is requested is started again (:func:`..cflow2.runtime.start_next_round`)
+  and the driver is told;
+* **restarts**: an active task with ``restart:`` has its command claimed once
+  per visit (:func:`..cflow2.runtime.claim_restarts`) and run after the pass
+  in a worker thread with the driver's ``CLAUNCH_SESSION`` (v1's
+  :meth:`.cflow_clock.RestartClock._execute`), its result recorded with
+  :func:`..cflow2.runtime.complete_restart`;
+* **wake-up**: a pass that moved a run on its own (a wait passed or timed
+  out, a held choice's window opened) tells the driver when the run now
+  waits on it (a task, or an agent's choice);
 * **watch**: collection ``watch:`` probes that are due
   (:func:`..cflow2.runtime.watch_due`) run like a wait probe, with
   :data:`WATCH_TIMEOUT`; the exit code is applied by
@@ -174,6 +185,8 @@ class Cflow2Clock:
         find_child: Optional[cflow2_exec.FindChild] = None,
         kill_child: Optional[Callable[[str, str], Any]] = None,
         facts_fn: Optional[Callable[[str, str], Dict[str, Any]]] = None,
+        restart_runner: Optional[Callable[[str, Dict[str, Any], str], Dict[str, Any]]] = None,
+        platform: Optional[str] = None,
     ) -> None:
         self.manager = manager
         self.poll = float(poll if poll is not None else DEFAULT_POLL)
@@ -197,6 +210,13 @@ class Cflow2Clock:
         #: ``(cwd, session) -> $facts`` for trigger pushes (tests stub it;
         #: None measures git and the board, :func:`.cflow2_triggers.measure_facts`).
         self.facts_fn = facts_fn
+        #: ``(cwd, action, session) -> {exit_code, output}`` runs a claimed
+        #: restart command (tests stub it; None is v1's RestartClock._execute).
+        self.restart_runner = restart_runner
+        #: Host platform for a restart's command (None: platform.system()).
+        self.platform = platform
+        #: Restarts claimed during a pass, run after it: ``(cwd, scope, action)``.
+        self.restarts: List[Tuple[str, str, Dict[str, Any]]] = []
         #: Identifies this daemon process on a claimed delegation; a running
         #: headless record carrying another boot was orphaned by a restart.
         self.boot = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
@@ -276,6 +296,7 @@ class Cflow2Clock:
                 self._wake.clear()
                 for cwd, name, text in await asyncio.to_thread(self.scan):
                     self._deliver(cwd, name, text)
+                self._start_restarts()
                 await self.run_triggers()
             except asyncio.CancelledError:
                 raise
@@ -484,9 +505,16 @@ class Cflow2Clock:
             # finished (a leave of the last node) is still performed.
             self._claim(cwd, scope, first)
         if first.get("status") not in runtime.LIVE_STATUSES:
+            if (first.get("next_round") or {}).get("auto") and not self.stop.is_set():
+                started = runtime.start_next_round(cwd, scope, now)
+                if started:
+                    notices.append((cwd, started.get("driver") or scope, round_block(started)))
             return
         probe = self._probe if self.probe_runner is not None else None
-        runtime.wait_tick(now, probe, cwd=cwd, scope=scope)
+        payload = runtime.wait_tick(now, probe, cwd=cwd, scope=scope)
+        if payload.get("ticked") and _waits_on_driver(payload):
+            notices.append((cwd, payload.get("driver") or scope, moved_block(scope, payload)))
+        self._claim_restarts(cwd, scope, now, notices)
         for text in asks.tick(cwd=cwd, scope=scope, now=now, pool_fn=self.ask_pool,
                               deliver_fn=self.ask_deliver):
             notices.append((cwd, scope, text))
@@ -513,6 +541,64 @@ class Cflow2Clock:
                 self._session(cwd, scope, did, rec, clock_now, notices, halted)
             elif ex == ir.EXEC_SUBAGENT:
                 self._budget(cwd, scope, did, rec, clock_now, notices)
+
+    # -- restarts (docs 2.2, restart) ----------------------------------------
+    def _claim_restarts(self, cwd: str, scope: str, now: Optional[float],
+                        notices: List[Notice]) -> None:
+        if self.stop.is_set():
+            return
+        import platform as platform_mod
+
+        system = self.platform or platform_mod.system()
+        try:
+            actions = runtime.claim_restarts(platform=system, boot=self.boot, cwd=cwd,
+                                             scope=scope, now=now)
+        except (runtime.FlowError, cstore.StoreError) as exc:
+            log.debug("cflow2 restart claim skipped %s/%s: %s", cwd, scope, exc)
+            return
+        for action in actions:
+            notices.append((cwd, action.get("driver") or scope, restart_block(action)))
+            if action.get("kind") == "run":
+                with self._lock:
+                    self.restarts.append((cwd, scope, action))
+
+    def _start_restarts(self) -> None:
+        """Run the restarts the last pass claimed, each in its own task (a
+        restart may take up to its timeout; the clock keeps ticking)."""
+        with self._lock:
+            todo, self.restarts = self.restarts, []
+        loop = self._loop
+        for cwd, scope, action in todo:
+            if loop is None:
+                continue
+            loop.create_task(self._restart_task(cwd, scope, action))
+
+    async def _restart_task(self, cwd: str, scope: str, action: Dict[str, Any]) -> None:
+        try:
+            for c, name, text in await asyncio.to_thread(self.perform_restart, cwd, scope,
+                                                         action):
+                self._deliver(c, name, text)
+        except Exception:  # noqa: BLE001 - one restart must not stop the clock
+            log.exception("cflow2 restart %s/%s failed", cwd, scope)
+
+    def perform_restart(self, cwd: str, scope: str, action: Dict[str, Any]) -> List[Notice]:
+        """Run one claimed restart and record it. Blocking. The command runs
+        with the driver's ``CLAUNCH_SESSION`` so a ``claunch daemon restart``
+        inside it goes through the web UI's approval gate."""
+        session = str(action.get("driver") or scope)
+        runner = self.restart_runner
+        if runner is None:
+            from .cflow_clock import RestartClock
+
+            def runner(c: str, a: Dict[str, Any], sess: str) -> Dict[str, Any]:
+                return RestartClock._execute(c, a, sess)
+        result = runner(cwd, action, session)
+        done = runtime.complete_restart(str(action.get("instance")), str(action.get("token")),
+                                        result.get("exit_code"), str(result.get("output") or ""),
+                                        cwd=cwd, scope=scope)
+        if not done:
+            return []
+        return [(cwd, done.get("driver") or scope, restart_result_block(done))]
 
     # -- triggers and collection watch ---------------------------------------
     def _claim(self, cwd: str, scope: str, state: Dict[str, Any]) -> None:
@@ -915,6 +1001,76 @@ def default_kill_child(parent: str, child: str) -> Any:
     if client is None:
         raise RuntimeError("the daemon API is not reachable")
     return client.post(f"/api/sessions/{parent}/children/{child}/kill", {}, timeout=60.0)
+
+
+def _waits_on_driver(payload: Dict[str, Any]) -> bool:
+    """The run now needs its driver: an active task or an agent's choice."""
+    if payload.get("tasks"):
+        return True
+    return any(c.get("chooser") == ir.CHOOSER_AGENT and not c.get("held")
+               for c in payload.get("choices") or [])
+
+
+def moved_block(scope: str, payload: Dict[str, Any]) -> str:
+    """The wake-up after the clock moved a run (a wait, a window)."""
+    at = [t.get("label") or t.get("instance") for t in payload.get("tasks") or []]
+    at += [c.get("label") or c.get("instance") for c in payload.get("choices") or []
+           if c.get("chooser") == ir.CHOOSER_AGENT and not c.get("held")]
+    return "\n".join([
+        "---",
+        "# claunch cflow2: the run moved -- machine-generated, not typed by the user",
+        f"run: {scope} ({payload.get('workflow')}, {payload.get('run')})",
+        f"waiting on you: {', '.join(str(a) for a in at)}",
+        "protocol: the daemon's clock moved the run on its own (a wait passed or timed out, "
+        "or a held choice's window opened). Call flow_status and continue.",
+        "---"])
+
+
+def round_block(started: Dict[str, Any]) -> str:
+    """The wake-up after the clock started a recurring run's next round."""
+    return "\n".join([
+        "---",
+        "# claunch cflow2: next round started -- machine-generated, not typed by the user",
+        f"workflow: {started.get('workflow')}",
+        f"round: {started.get('round')} (run {started.get('run')}, after {started.get('previous')})",
+        "protocol: the definition declares recur {auto: true}, so the daemon started this "
+        "round. Call flow_status and continue. A person stops the loop with "
+        "'claunch cflow2 recur --cancel' once a round has finished.",
+        "---"])
+
+
+def restart_block(action: Dict[str, Any]) -> str:
+    kind = action.get("kind")
+    if kind == "run":
+        event = ("the daemon is running this task's restart command from the run's directory "
+                 "on the workflow's behalf -- do not run it yourself: an agent session has no "
+                 "authority to restart or stop the daemon")
+    elif kind == "interrupted":
+        event = ("the daemon boot that ran this restart stopped while it was running; it is "
+                 "recorded as interrupted and will not run twice in this visit")
+    else:
+        event = f"no restart command is declared for platform {action.get('platform')!r}"
+    return "\n".join([
+        "---",
+        "# claunch cflow2: restart -- machine-generated, not typed by the user",
+        f"workflow: {action.get('workflow')}",
+        f"task: {action.get('label')} ({action.get('instance')})",
+        f"event: {event}",
+        "protocol: read flow_status after this message; the task's report is accepted once "
+        "the restart result is in, and the run's wait decides whether deployment advances.",
+        "---"])
+
+
+def restart_result_block(done: Dict[str, Any]) -> str:
+    return "\n".join([
+        "---",
+        "# claunch cflow2: restart result -- machine-generated, not typed by the user",
+        f"workflow: {done.get('workflow')}",
+        f"task: {done.get('label')} ({done.get('instance')})",
+        f"exit code: {done.get('exit_code')} ({done.get('status')})",
+        "protocol: the result is journalled (restart_completed); report the task with the "
+        "evidence its done_when asks for.",
+        "---"])
 
 
 def monitor_block(scope: str, v: Dict[str, Any]) -> str:

@@ -387,6 +387,21 @@ def _cmd_abort(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_recur(args: argparse.Namespace) -> int:
+    from .cflow2 import runtime
+
+    if not args.cancel:
+        payload = runtime.status(cwd=os.getcwd(), scope=args.scope, tick=False)
+        nxt = payload.get("next_round")
+        print(f"next round: {json.dumps(nxt, ensure_ascii=False)}" if nxt
+              else "no next round is requested here")
+        return 0
+    _refuse_own_session(args.scope, "recur --cancel")
+    _print_status(runtime.cancel_next_round(args.reason, cwd=os.getcwd(), scope=args.scope),
+                  False)
+    return 0
+
+
 def _cmd_select(args: argparse.Namespace) -> int:
     from .cflow2 import runtime
 
@@ -621,6 +636,12 @@ def register(sub) -> None:
     q = scoped(csub.add_parser("abort", help="abort the v2 run here"))
     q.add_argument("--reason", required=True)
     q.set_defaults(func=_guarded(_cmd_abort))
+
+    q = scoped(csub.add_parser("recur", help="a recurring run's next-round request: show it, "
+                               "or --cancel it (stops the loop after the finished round)"))
+    q.add_argument("--cancel", action="store_true", help="drop the pending next-round request")
+    q.add_argument("--reason")
+    q.set_defaults(func=_guarded(_cmd_recur))
 
     q = scoped(csub.add_parser("select", help="answer a choice (including chooser: user)"))
     q.add_argument("node", help="choice instance id or label")
