@@ -35,6 +35,18 @@ Decisions this module makes where the spec leaves room:
   :func:`_ask`).
 - A ``scope`` node carries its procedure's ``params`` declarations; the
   runtime applies their defaults when the scope starts.
+- Commands the engine runs (task ``verify``, wait ``probe``, monitor
+  ``probe``) are never templates: ``${...}`` in them is a compile error. A
+  value reaches a command through the environment (``CFLOW_IN_<NAME>`` for
+  params, ``CFLOW_DATA_<NAME>`` for top-level data scalars), so no run value
+  is ever spliced into shell text.
+- ``include``/``call``/``group.run`` take a definition *name*: a path (or a
+  name holding a path separator or a ``.yaml`` suffix) is refused. The name
+  is looked up only through ``resolve_include`` (the v2 layers).
+- Top-level ``inputs`` (typed start inputs) is checked by
+  :func:`inputs.schema` and kept in ``chart.meta['inputs']``.
+- Top-level ``max_visits`` (integer >= 1, default
+  :data:`ir.DEFAULT_MAX_VISITS`) lands in ``chart.meta['max_visits']``.
 """
 
 from __future__ import annotations
@@ -155,7 +167,8 @@ def _key_line(mapping: Any, key: Any, default: int = 0) -> int:
 TOP_KEYS = (
     "cflow", "name", "description", "kind", "default_role", "filter_roles",
     "default_child_cflow", "priority", "params", "returns", "data", "include",
-    "fragments", "rules", "procedures", "nodes", "body", "spec",
+    "fragments", "rules", "procedures", "nodes", "body", "spec", "max_visits",
+    "inputs",
 )
 TASK_KEYS = (
     "title", "prompt", "done_when", "verify", "ask", "executor", "needs",
@@ -184,6 +197,14 @@ END = "end"
 FOREACH_DEFAULT_MAX = 1000
 
 _FRAG_RE = re.compile(r"\$\{frag:([^}]*)\}")
+#: A value reference in text (``${...}``), refused in commands the engine runs.
+_TEMPLATE_RE = re.compile(r"\$\{[^}]*\}")
+#: Where a command reads run values instead (docs/cflow-v2.md 2.2 verify).
+_ENV_HINT = ("commands are not templates -- read run values from the environment: "
+             "CFLOW_IN_<NAME> for params, CFLOW_DATA_<NAME> for top-level data scalars")
+#: Default ``wait.undecided_max``: consecutive undecided probe results (exit
+#: code other than 0 or 1) before the wait finishes ``undecidable``.
+WAIT_UNDECIDED_MAX = 3
 _RULES_HEADER = "── 규칙 ──"
 
 
@@ -517,7 +538,21 @@ def _check_header(ctx: _Ctx, doc: Any, file: str) -> Dict[str, Any]:
     return doc
 
 
+_NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
+
+
+def _definition_name(ctx: _Ctx, name: Any, file: str, line: int, what: str) -> str:
+    """``name`` when it is a bare definition name; a path is refused (C3:
+    definitions are found by name in the v2 layers, never by path)."""
+    if not isinstance(name, str) or not _NAME_RE.match(name) or name.endswith((".yaml", ".yml")) \
+            or name in (".", ".."):
+        raise ctx.err(file, line, f"{what} {name!r}: give a definition name (a file stem in "
+                      f"a v2 layer), not a path")
+    return name
+
+
 def _resolve(ctx: _Ctx, name: str, file: str, line: int, what: str) -> Path:
+    name = _definition_name(ctx, name, file, line, what)
     path = ctx.resolve_include(name) if ctx.resolve_include else None
     if path is None:
         raise ctx.err(file, line, f"{what} {name!r}: no v2 definition by that name")
@@ -544,6 +579,7 @@ def _include(ctx: _Ctx, name: str, file: str, line: int) -> Optional[Dict[str, A
 def _procedure(ctx: _Ctx, name: str, file: str, line: int) -> _Proc:
     if name in ctx.procs:
         return ctx.procs[name]
+    name = _definition_name(ctx, name, file, line, "call")
     path = ctx.resolve_include(name) if ctx.resolve_include else None
     if path is None:
         known = ", ".join(sorted(ctx.procs)) or "(none)"
@@ -670,6 +706,9 @@ def _compile_task(ctx: _Ctx, sc: _Scope, name: str, parent: Optional[str], line:
             "ask": ask,
             "returns": _plain(returns),
             "effects": _str_list(ctx, tfile, raw.get("effects"), "effects", tline),
+            # ``effects: []`` (declared: none) and no key (unknown) read the
+            # same in ``effects``; the checker tells them apart by this.
+            "effects_declared": raw.get("effects") is not None,
             "paths": _str_list(ctx, tfile, raw.get("paths"), "paths", tline),
             "rules": rule_ids,
             "strict_budget": strict,
@@ -690,6 +729,29 @@ _OUTCOME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
 ASK_ABSTAIN = "abstain"
 ASK_APPROVE = "approve"
 ASK_DECLINE = "decline"
+
+
+def _no_template(ctx: _Ctx, file: str, line: int, command: Any, what: str) -> None:
+    """Refuse ``${...}`` in a command string or argv list (see module doc)."""
+    parts = command if isinstance(command, list) else [command]
+    for part in parts:
+        if isinstance(part, str):
+            m = _TEMPLATE_RE.search(part)
+            if m:
+                raise ctx.err(file, line, f"{what}: {m.group(0)!r} is not substituted; {_ENV_HINT}")
+
+
+def _command(ctx: _Ctx, file: str, line: int, value: Any, what: str) -> Any:
+    """A command the engine runs: a non-empty string or argv list, no ``${...}``."""
+    if isinstance(value, list):
+        if not value or not all(isinstance(x, (str, int, float)) and not isinstance(x, bool)
+                                for x in value):
+            raise ctx.err(file, line, f"{what}: an argv list needs string items")
+        value = [str(x) for x in value]
+    elif not isinstance(value, str) or not value.strip():
+        raise ctx.err(file, line, f"{what} must be a command string or an argv list")
+    _no_template(ctx, file, line, value, what)
+    return _plain(value)
 
 
 def _verify(ctx: _Ctx, file: str, name: str, value: Any, line: int) -> Optional[Dict[str, Any]]:
@@ -719,6 +781,7 @@ def _verify(ctx: _Ctx, file: str, name: str, value: Any, line: int) -> Optional[
     elif not isinstance(run, str) or not run.strip():
         raise ctx.err(file, line, f"task {name!r}: verify must be a command string, an argv "
                       f"list, or {{run, timeout}}")
+    _no_template(ctx, file, line, run, f"task {name!r} verify")
     return {"run": _plain(run), "timeout": timeout}
 
 
@@ -766,11 +829,19 @@ def _ask(ctx: _Ctx, file: str, name: str, value: Any, line: int) -> Dict[str, An
         if not omap:
             raise ctx.err(file, oline0, f"task {name!r}: ask.options is empty")
         options = []
+        folded: Dict[str, str] = {}
         for oname, body in omap.items():
             oline = _key_line(omap, oname, oline0)
             oname = str(oname)
-            if not _OUTCOME_RE.match(oname) or oname == ASK_ABSTAIN:
+            if not _OUTCOME_RE.match(oname) or oname.lower() == ASK_ABSTAIN:
                 raise ctx.err(file, oline, f"task {name!r}: bad ask option name {oname!r}")
+            # Answers are matched without regard to case, so two names that
+            # differ only in case could not both be chosen.
+            if oname.lower() in folded:
+                raise ctx.err(file, oline, f"task {name!r}: ask options {folded[oname.lower()]!r} "
+                              f"and {oname!r} differ only in case; answers are matched "
+                              f"case-insensitively")
+            folded[oname.lower()] = oname
             if body is None:
                 body = {}
             if isinstance(body, str):
@@ -1131,11 +1202,20 @@ def _b_call(ctx, sc, node, value, m, line):
 def _b_wait(ctx, sc, node, value, m, line):
     node.type = ir.T_WAIT
     spec = _need_map(ctx, sc.file, value, "wait", line)
-    _check_keys(ctx, sc.file, spec, ("probe", "poll", "seconds", "describe"), "wait")
+    _check_keys(ctx, sc.file, spec, ("probe", "poll", "seconds", "describe", "undecided_max"),
+                "wait")
     if spec.get("probe") is None and spec.get("seconds") is None:
         raise ctx.err(sc.file, line, "wait needs probe or seconds")
+    probe = spec.get("probe")
+    if probe is not None:
+        probe = _command(ctx, sc.file, _key_line(spec, "probe", line), probe, "wait.probe")
+    elif spec.get("undecided_max") is not None:
+        raise ctx.err(sc.file, line, "wait.undecided_max applies to a probe")
+    undecided = (_int(ctx, sc.file, spec.get("undecided_max", WAIT_UNDECIDED_MAX),
+                      "wait.undecided_max", line, 1) if probe is not None else None)
     node.props = {
-        "probe": _plain(spec.get("probe")),
+        "probe": probe,
+        "undecided_max": undecided,
         "poll": _number(ctx, sc.file, spec["poll"], "wait.poll", line) if spec.get("poll") is not None else None,
         "seconds": _number(ctx, sc.file, spec["seconds"], "wait.seconds", line)
         if spec.get("seconds") is not None else None,
@@ -1220,6 +1300,11 @@ def _spec(ctx: _Ctx, file: str, value: Any, line: int) -> Dict[str, Any]:
             _check_keys(ctx, file, body, MONITOR_KEYS, f"monitor {name!r}")
             if ("always" in body) == ("within" in body):
                 raise ctx.err(file, bline, f"monitor {name!r} needs exactly one of always / within")
+            if body.get("probe") is not None:
+                probes = _need_map(ctx, file, body["probe"], f"monitor {name!r} probe", bline)
+                for pkey, cmd in probes.items():
+                    _command(ctx, file, _key_line(probes, pkey, bline), cmd,
+                             f"monitor {name!r} probe {pkey}")
             if "always" in body:
                 _expr_text(ctx, file, body["always"], f"monitor {name!r} always", bline)
             else:
@@ -1238,19 +1323,11 @@ def _spec(ctx: _Ctx, file: str, value: Any, line: int) -> Dict[str, Any]:
 
 
 def _default_resolver(base: Optional[Path]) -> ResolveInclude:
-    def resolve(name: str) -> Optional[Path]:
-        from . import layers
+    """Names through the v2 layers of the process cwd (``layers.resolver``).
+    ``base`` is not consulted: a file's neighbours are not a layer (C3)."""
+    from . import layers
 
-        found = layers.find(name)
-        if found is not None:
-            return found
-        if base is not None:
-            sibling = base / f"{name}.yaml"
-            if sibling.is_file():
-                return sibling
-        return None
-
-    return resolve
+    return layers.resolver(None)
 
 
 def compile_text(text: str, *, source: str = "",
@@ -1287,6 +1364,14 @@ def compile_text(text: str, *, source: str = "",
     data = doc.get("data")
     if data is not None:
         _need_map(ctx, file, data, "data", _key_line(doc, "data"))
+    max_visits = _int(ctx, file, doc.get("max_visits", ir.DEFAULT_MAX_VISITS), "max_visits",
+                      _key_line(doc, "max_visits", 1), 1)
+    from . import inputs as _inputs
+
+    try:
+        input_schema = _inputs.schema(_plain(doc.get("inputs")))
+    except _inputs.InputsError as exc:
+        raise ctx.err(file, _key_line(doc, "inputs", 1), str(exc)) from None
 
     if "body" not in doc:
         raise ctx.err(file, 1, "a definition needs a body")
@@ -1306,6 +1391,10 @@ def compile_text(text: str, *, source: str = "",
             "filter_roles": filter_roles,
             "default_child_cflow": doc.get("default_child_cflow"),
             "priority": priority,
+            "max_visits": max_visits,
+            # typed start inputs (cflow2/inputs.py); folded into the chart
+            # at start by inputs.apply
+            "inputs": input_schema,
         },
         params=_params(ctx, file, doc.get("params"), _key_line(doc, "params")),
         returns=_returns(ctx, file, doc["returns"], _key_line(doc, "returns"))

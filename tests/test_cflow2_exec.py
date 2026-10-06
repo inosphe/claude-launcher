@@ -50,8 +50,17 @@ def test_claude_argv_inline_schema_tools_restrict_budget():
     assert json.loads(argv[i + 1]) == schema
     assert argv[argv.index("--output-format") + 1] == "json"
     assert plan["readonly"]["route"] == "tools-restrict"
-    tools = argv[argv.index("--allowedTools") + 1].split(",")
-    assert "Read" in tools and not {"Edit", "Write", "Bash"} & set(tools)
+    # --tools is the available set (removes the rest); --allowedTools only
+    # auto-approves and is not used (A4)
+    assert "--allowedTools" not in argv
+    tools = argv[argv.index("--tools") + 1].split(",")
+    assert "Read" in tools and not {"Edit", "Write", "Bash", "MultiEdit"} & set(tools)
+    deny = argv[argv.index("--disallowedTools") + 1].split(",")
+    assert {"Edit", "Write", "MultiEdit", "NotebookEdit", "Bash"} <= set(deny)
+    assert argv[argv.index("--permission-mode") + 1] == "dontAsk"
+    assert "--strict-mcp-config" in argv
+    # the prompt stays right after -p, ahead of the variadic tool flags
+    assert argv.index("PROMPT") < argv.index("--tools")
     assert argv[argv.index("--max-budget-usd") + 1] == "2"
 
 
@@ -277,17 +286,48 @@ RO_SRC = """
 """
 
 
-def test_readonly_tools_route_porcelain_violation(tmp_path):
+def test_pi_argv_tools_allowlist():
+    argv, _stdin, plan, _schema = _argv("pi")
+    assert plan["readonly"]["route"] == "tools-restrict"
+    assert argv[argv.index("--tools") + 1] == "read,grep,find,ls"
+
+
+RESTRICT_CAPS = {"headless.run": caps_mod.Capability(True, ["-p"]),
+                 "headless.tools.restrict": caps_mod.Capability(True, ["--tools", "{tools}"])}
+
+
+def test_readonly_tools_route_porcelain_violation_fails_delegation(tmp_path):
     repo = _git_repo(tmp_path / "repo")
-    caps = {"headless.run": caps_mod.Capability(True, ["-p"]),
-            "headless.tools.restrict": caps_mod.Capability(True, ["--allowedTools", "{tools}"])}
     f = Fake(tmp_path, [{"out": FENCED, "write": str(repo / "new.txt")}], cwd=repo,
-             caps=caps, src=RO_SRC)
+             caps=RESTRICT_CAPS, src=RO_SRC)
     res = f.run()
-    assert res["result"] == "returned" and res.get("readonly_violation")
-    assert "--allowedTools" in f.argv(1)["argv"]
+    assert res["result"] == "readonly-violation" and res.get("readonly_violation")
+    assert "new.txt" in res["changed"]
+    assert "--tools" in f.argv(1)["argv"]
     ev = f.events("monitor_violation")
     assert ev and ev[0]["kind"] == "readonly"
+    assert f.rec()["status"] == "failed"
+    st = f.status()
+    assert st["status"] == "failed" and st["outcome"] == "fail"
+    assert any("read-only" in (e.get("reason") or "") for e in f.events("delegate_failed"))
+
+
+def test_readonly_tools_route_clean_run_returns(tmp_path):
+    repo = _git_repo(tmp_path / "repo")
+    f = Fake(tmp_path, [{"out": FENCED}], cwd=repo, caps=RESTRICT_CAPS, src=RO_SRC)
+    assert f.run()["result"] == "returned"
+
+
+def test_readonly_throwaway_worktree_unavailable_reroutes(tmp_path):
+    # not a git repository: no worktree, no sandbox, no restriction -> the
+    # delegate must not run in the checkout at all
+    f = Fake(tmp_path, [{"out": FENCED, "write": "inside.txt"}], caps=TEXT_CAPS,
+             src=RO_SRC.replace("executor: [headless]", "executor: [headless, inline]"))
+    assert f.rec()["route"]["readonly"]["route"] == "throwaway-worktree"
+    res = f.run()
+    assert res["result"] == "rerouted" and res["executor"] == "inline"
+    assert not (f.dir / "n").exists()  # the harness never ran
+    assert [t["label"] for t in f.status()["tasks"]] == ["t"]
 
 
 def test_readonly_throwaway_worktree(tmp_path):
@@ -336,3 +376,107 @@ def test_launch_takes_the_owning_sessions_profile_env(home, tmp_path, monkeypatc
     assert launch.extra_args == ["-c", "model=gpt-5.6-luna"]
     # the interactive full-access args are not carried into the headless run
     assert not set(entry.args) & set(launch.command + launch.extra_args)
+
+
+# -- A5: interruption, attempt numbering, runner marker ---------------------------
+
+
+def _claim(f, runner=None):
+    runtime.delegate_update(f.did, cwd=f.cwd, scope=f.scope, status="running",
+                            runner=runner or {"boot": "b"})
+
+
+def test_runner_marker_records_pid_and_attempt(tmp_path):
+    f = Fake(tmp_path, [{"out": "nothing"}, {"out": FENCED}])
+    _claim(f)
+    seen = []
+    orig = runtime.delegate_update
+
+    def spy(did, **kw):
+        if kw.get("runner"):
+            seen.append(dict(kw["runner"]))
+        return orig(did, **kw)
+
+    import unittest.mock as um
+    with um.patch.object(runtime, "delegate_update", spy):
+        assert f.run(runner={"boot": "b"})["result"] == "returned"
+    assert [m["attempt"] for m in seen] == [1, 2]
+    assert all(m["pid"] > 0 and m["boot"] == "b" and m["argv0"] for m in seen)
+
+
+def test_shutdown_kill_requeues_without_retry(tmp_path):
+    import threading
+
+    f = Fake(tmp_path, [{"sleep": 30, "out": FENCED}, {"out": FENCED}])
+    _claim(f)
+    procs = cflow2_exec.Procs()
+    key = ("k",)
+    out = {}
+    t = threading.Thread(target=lambda: out.update(f.run(procs=procs, key=key)))
+    t.start()
+    deadline = time.monotonic() + 10
+    while not procs.keys() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    procs.kill_all()
+    t.join(15)
+    assert out["result"] == "interrupted" and out["why"] == "shutdown"
+    rec = f.rec()
+    assert rec["status"] == "queued" and rec["attempts"] == 0 and rec.get("runner") is None
+    assert int((f.dir / "n").read_text()) == 1  # no second attempt was started
+    assert not [e for e in f.events("delegate_failed")]
+    assert f.events("delegate_interrupted")
+
+
+def test_cancel_kill_writes_nothing(tmp_path):
+    import threading
+
+    f = Fake(tmp_path, [{"sleep": 30, "out": FENCED}])
+    _claim(f)
+    procs = cflow2_exec.Procs()
+    out = {}
+    t = threading.Thread(target=lambda: out.update(f.run(procs=procs, key="k")))
+    t.start()
+    deadline = time.monotonic() + 10
+    while not procs.keys() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    runtime.abort("stop", cwd=f.cwd, scope=f.scope)
+    assert procs.kill("k", cflow2_exec.KILL_CANCELLED)
+    t.join(15)
+    assert out["result"] == "cancelled"
+    assert f.rec()["status"] == "cancelled"
+
+
+def test_rerun_after_restart_continues_attempt_count(tmp_path):
+    f = Fake(tmp_path, [{"out": "still nothing"}])
+    _claim(f)
+    runtime.delegate_reject(f.did, ["no JSON"], cwd=f.cwd, scope=f.scope)  # attempt 1 refused
+    res = f.run()
+    assert res["result"] == "failed" and res["attempts"] == 2
+    assert "Previous attempt was refused" in f.argv(1)["argv"][1]
+    assert RunStore(f.cwd, f.scope).receipt_path(f.did, ".2.out").is_file()
+
+
+def test_process_alive_identifies_by_argv0():
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                            start_new_session=True)
+    try:
+        assert cflow2_exec.process_alive(proc.pid, sys.executable) in (True, None)
+        if sys.platform.startswith("linux"):
+            assert cflow2_exec.process_alive(proc.pid, sys.executable) is True
+            assert cflow2_exec.process_alive(proc.pid, "/bin/not-this") is False
+    finally:
+        cflow2_exec.kill_group(proc.pid)
+        proc.wait(10)
+    assert cflow2_exec.process_alive(proc.pid, sys.executable) is False
+    assert cflow2_exec.process_alive(None) is False
+
+
+def test_a_nested_session_delegation_is_told_to_drive_its_run():
+    from claude_launcher.cflow2 import executors as ex
+
+    brief = {"delegation": "d1", "node": "n", "tasks": [], "returns": {},
+             "nested": {"cwd": "/w", "scope": "s1~d1"},
+             "submit": "drive the nested run under scope 's1~d1' with flow_*"}
+    text = ex.session_task(brief, cwd="/w", scope="s1", receipt_path="/w/r.json")
+    assert "scope 's1~d1'" in text
+    assert "flow_delegate" not in text

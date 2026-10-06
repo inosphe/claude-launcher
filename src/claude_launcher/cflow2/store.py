@@ -49,7 +49,10 @@ LOCK_TIMEOUT = 10.0
 #: ``flock`` locks die with their holder).
 LOCK_STALE_AFTER = 120.0
 
-_SCOPE_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+#: A scope is a session name; ``~`` joins a nested delegation run's scope to
+#: its parent's (``<scope>~<delegation id>``, doc 7).
+_SCOPE_RE = re.compile(r"^[A-Za-z0-9._~-]+$")
+NESTED_SEP = "~"
 
 
 class StoreError(Exception):
@@ -66,7 +69,7 @@ def normalize_scope(scope: Optional[str]) -> str:
     if not _SCOPE_RE.match(scope) or scope in (".", ".."):
         raise StoreError(
             f"invalid cflow2 scope {scope!r}: a scope is a session name -- "
-            f"letters, digits, '.', '_' or '-'"
+            f"letters, digits, '.', '_', '-' (and '~' for a nested delegation run)"
         )
     return scope
 

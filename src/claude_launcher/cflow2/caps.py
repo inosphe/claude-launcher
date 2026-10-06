@@ -45,6 +45,27 @@ CAPABILITIES: Dict[str, str] = {
     "session.spawn": "claunch spawn can create a child session (daemon policy)",
 }
 
+#: Capabilities whose route works only through harness flags: enabled with
+#: an empty ``args`` they would be *selected* and add nothing to the argv
+#: (a read-only route without a sandbox flag, a dollar ceiling nobody
+#: enforces). :func:`resolve` turns such a value off with a warning and
+#: :func:`enabled` treats it as off. The others are features of the harness
+#: itself (the Agent tool, MCP) or of the daemon and take no arguments.
+NEEDS_ARGS = frozenset({
+    "headless.run",
+    "headless.output.schema",
+    "headless.output.json",
+    "headless.tools.restrict",
+    "headless.sandbox.readonly",
+    "headless.budget.usd",
+    "headless.resume",
+})
+
+#: The planner's reason for passing over an executor that cannot run a
+#: subtree with control structure (doc 6.4, A2): headless always, and
+#: subagent/session without ``mcp.claunch`` (they cannot drive a nested run).
+NOT_FLAT = "subtree not flat"
+
 SOURCE_DEFAULT = "default"
 SOURCE_DAEMON = "daemon-policy"
 SESSION_SPAWN = "session.spawn"
@@ -84,11 +105,36 @@ class CapSet(Dict[str, Capability]):
 CapsLike = Mapping[str, Union[Capability, bool]]
 
 
+#: The source the runtime stamps on a capability its caller passed as a
+#: bare bool (``runtime._caps_to_json``): no layer was consulted, so it is
+#: taken as given, like a plain bool (tests, hand-written maps).
+SOURCE_GIVEN = "given"
+
+
+def usable(capability: Capability, cap_id: str) -> bool:
+    """On, and for a :data:`NEEDS_ARGS` capability, with arguments to add
+    (unless it is a bare bool the caller gave, :data:`SOURCE_GIVEN`)."""
+    if not capability.enabled:
+        return False
+    if cap_id not in NEEDS_ARGS or capability.source == SOURCE_GIVEN:
+        return True
+    return bool(capability.args)
+
+
 def enabled(caps: CapsLike, cap_id: str) -> bool:
-    """Whether ``cap_id`` is on in ``caps`` (Capability values or plain bools)."""
+    """Whether ``cap_id`` is on in ``caps`` (Capability values or plain bools).
+
+    A :class:`Capability` that needs arguments (:data:`NEEDS_ARGS`) and has
+    none is off: its route would add nothing to the harness command. Plain
+    bools (tests, hand-written maps) are taken as they are.
+    """
     value = caps.get(cap_id) if caps else None
     if isinstance(value, Capability):
-        return value.enabled
+        return usable(value, cap_id)
+    if isinstance(value, dict):
+        return usable(Capability(enabled=bool(value.get("enabled")),
+                                 args=list(value.get("args") or []),
+                                 source=str(value.get("source") or SOURCE_DEFAULT)), cap_id)
     return bool(value)
 
 
@@ -228,6 +274,13 @@ def resolve(
     for cap_id in CAPABILITIES:
         if cap_id not in out:
             out[cap_id] = Capability(enabled=False, source=SOURCE_DEFAULT)
+        elif not usable(out[cap_id], cap_id) and out[cap_id].enabled:
+            # ``true`` with no args anywhere below it: the route would be
+            # chosen and the harness given no flag (A3). Off, and said so.
+            out.warnings.append(
+                f"{out[cap_id].source}: capability {cap_id!r} enabled without args "
+                f"(no lower layer of harness {harness!r} gives them): treated as disabled")
+            out[cap_id] = Capability(enabled=False, args=[], source=out[cap_id].source)
     ordered = CapSet((k, out[k]) for k in CAPABILITIES)
     ordered.warnings = out.warnings
     return ordered
@@ -238,10 +291,10 @@ _PLACEHOLDER = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 def render_args(capability: Capability, **values: Any) -> List[str]:
     """The capability's ``args`` with ``{schema}``, ``{schema_file}``,
-    ``{tools}``, ``{usd}``, ``{session_id}`` filled in.
+    ``{tools}``, ``{deny}``, ``{usd}``, ``{session_id}`` filled in.
 
-    A list value (``tools``) is joined with commas. A disabled capability
-    renders no arguments. A placeholder without a value raises ``ValueError``.
+    A list value (``tools``, ``deny``) is joined with commas. A disabled
+    capability (or one that needs args and has none) renders no arguments. A placeholder without a value raises ``ValueError``.
     """
     if not capability.enabled:
         return []
@@ -284,7 +337,8 @@ class ExecutorChoice:
 
     @property
     def degraded(self) -> List[str]:
-        return [f"executor {ex} skipped: {cap} unavailable" for ex, cap in self.skipped]
+        return [f"executor {ex} skipped: {cap}" if cap == NOT_FLAT
+                else f"executor {ex} skipped: {cap} unavailable" for ex, cap in self.skipped]
 
     def to_dict(self) -> Dict[str, Any]:
         return {"executor": self.executor, "route": self.route,
@@ -375,9 +429,24 @@ def need_applies(cap_id: str, executor: str) -> bool:
     return True
 
 
-def _missing_for(executor: str, caps: CapsLike, needs: Iterable[str]) -> Optional[str]:
+def flat_blocks(executor: str, caps: CapsLike) -> bool:
+    """Whether ``executor`` cannot run a subtree that is not flat (has
+    control structure beyond task/seq): headless always (one prompt, no
+    engine underneath), subagent/session when ``mcp.claunch`` is off (the
+    delegate cannot drive the nested run through the flow tools)."""
+    if executor == ir.EXEC_HEADLESS:
+        return True
+    if executor in (ir.EXEC_SUBAGENT, ir.EXEC_SESSION):
+        return not enabled(caps, "mcp.claunch")
+    return False
+
+
+def _missing_for(executor: str, caps: CapsLike, needs: Iterable[str],
+                 flat: bool = True) -> Optional[str]:
     if executor not in EXECUTOR_REQUIRES:
         return "unknown executor"
+    if not flat and flat_blocks(executor, caps):
+        return NOT_FLAT
     required = EXECUTOR_REQUIRES[executor]
     if required and not enabled(caps, required):
         return required
@@ -388,14 +457,17 @@ def _missing_for(executor: str, caps: CapsLike, needs: Iterable[str]) -> Optiona
 
 
 def choose_executor(
-    preferences: List[str], caps: CapsLike, *, needs: Iterable[str] = ()
+    preferences: List[str], caps: CapsLike, *, needs: Iterable[str] = (),
+    flat: bool = True,
 ) -> ExecutorChoice:
     """The first executor in ``preferences`` whose requirement (and the
-    node's applicable ``needs``) holds; ``inline`` when none does."""
+    node's applicable ``needs``) holds; ``inline`` when none does. With
+    ``flat`` false, executors that cannot run a non-flat subtree
+    (:func:`flat_blocks`) are skipped with :data:`NOT_FLAT`."""
     needs = list(needs)
     skipped: List[Tuple[str, str]] = []
     for executor in preferences or []:
-        missing = _missing_for(executor, caps, needs)
+        missing = _missing_for(executor, caps, needs, flat)
         if missing is None:
             return ExecutorChoice(executor=executor, skipped=skipped)
         skipped.append((executor, missing))
@@ -564,14 +636,16 @@ def _width(node: ir.Node) -> int:
     return 1
 
 
-def plan_node(node: ir.Node, caps: CapsLike) -> NodePlan:
+def plan_node(node: ir.Node, caps: CapsLike, flat: bool = True) -> NodePlan:
     """Every fallback decision for one delegation point.
 
     Reads ``node.executor`` (preference order), ``node.needs``, and from
     ``props``: ``effects``, ``returns``, ``budget`` (or the common
     ``node.budget``), ``strict_budget``, ``settle``, ``carry``. An executor
     whose required or needed capability is missing, or that cannot enforce
-    a strict dollar budget, is skipped.
+    a strict dollar budget, is skipped. ``flat`` is the caller's verdict on
+    the subtree (only task/seq below the point); when false, executors that
+    cannot run control structure are skipped with :data:`NOT_FLAT`.
     """
     budget = node.budget or node.get("budget")
     strict = bool(node.get("strict_budget"))
@@ -580,7 +654,7 @@ def plan_node(node: ir.Node, caps: CapsLike) -> NodePlan:
     skipped: List[Tuple[str, str]] = []
     chosen = ir.EXEC_INLINE
     for executor in prefs:
-        missing = _missing_for(executor, caps, needs)
+        missing = _missing_for(executor, caps, needs, flat)
         if missing is None and strict and executor != ir.EXEC_INLINE:
             if plan_budget(executor, caps, budget, True).blocked:
                 missing = "headless.budget.usd"

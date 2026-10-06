@@ -60,6 +60,7 @@ from . import vscode as vscode_mod
 from . import cflow2_approve, cflow2_web
 from ..cflow2 import expr as cflow2_expr, frontend as cflow2_frontend
 from ..cflow2 import ir as cflow2_ir, runtime as cflow2_runtime, store as cflow2_store
+from ..cflow2 import layers as cflow2_layers
 from . import (
     briefing, cflow_clock, clipty, ctxsize, loops, onboard, prompt_presets, prompter,
     rebrief, session_input, status_checks,
@@ -242,6 +243,9 @@ async def error_middleware(request: web.Request, handler):
         BeadsError,
         cflow2_web.ChoiceError,
     ) as exc:
+        if isinstance(exc, cflow2_web.InputsInvalid):
+            # per-field errors for the start form (docs/cflow-v2.md 2.6)
+            return json_response({"error": str(exc), "errors": exc.errors}, status=400)
         return json_error(400, str(exc))
     except _CFLOW2_ERRORS as exc:
         return json_error(400, str(exc))
@@ -4160,7 +4164,8 @@ async def h_cflow_definitions(request: web.Request) -> web.Response:
     """Source declarations for the editor, including shadowed layers."""
     cwd = cflow_state.resolve_cwd(request.query.get("cwd"))
     try:
-        v2 = cflow2_web.definitions(cwd)
+        # Compiles every v2 file (cached by layer stamp): off the event loop.
+        v2 = await asyncio.to_thread(cflow2_web.definitions, cwd)
     except Exception as exc:  # noqa: BLE001 - a broken v2 layer must not hide v1
         log.warning("could not list cflow v2 definitions in %s: %s", cwd, exc)
         v2 = []
@@ -4324,11 +4329,12 @@ async def _cflow2_start(request: web.Request, cwd: str, scope: str, body: dict,
         return None
     ref, chart = chosen
     params = cflow2_web.params_for(chart, body.get("workflow_params"), context or "")
+    values = cflow2_web.check_inputs(chart, body.get("cflow_inputs"))  # InputsInvalid -> 400
     profile = _scope_profile(request.app["manager"], scope)
 
     def start() -> dict:
-        return cflow2_runtime.start(
-            chart, cwd=cwd, scope=scope, params=params,
+        return cflow2_web.start_run(
+            chart, inputs=values, cwd=cwd, scope=scope, params=params,
             caps=cflow2_runtime.resolve_caps(profile),
         )
 
@@ -4389,6 +4395,9 @@ async def h_cflow2_definition(request: web.Request) -> web.Response:
     name = str(request.query.get("name") or "").strip()
     if not name:
         return json_error(400, "'name' query parameter required")
+    if not cflow2_layers.is_name(name):
+        # Name only (docs/cflow-v2.md 1): no path reads a file outside the layers.
+        return json_error(400, f"'name' must be a v2 definition name, not a path: {name!r}")
     cwd = cflow_state.resolve_cwd(request.query.get("cwd"))
     try:
         data = await asyncio.to_thread(cflow2_web.definition_view, name, cwd)
@@ -4423,8 +4432,10 @@ async def h_cflow2_select(request: web.Request) -> web.Response:
 
 async def h_cflow2_extend(request: web.Request) -> web.Response:
     """Answer a v2 ``loop_limit`` hold: allow ``by`` more iterations, or
-    ``stop`` the loop (it finishes ``fail``). Body: cwd, scope, node
-    (optional with one hold), by, stop."""
+    ``stop`` the loop (it finishes ``fail``). With ``visits: true`` it
+    answers a ``visit_limit`` hold instead (``runtime.extend_visits``: ``by``
+    more visits of the node over the run, or ``stop``). Body: cwd, scope,
+    node (optional with one hold), by, stop, visits."""
     resolved, err = await _cflow_action_cwd(request)
     if err:
         return err
@@ -4435,8 +4446,11 @@ async def h_cflow2_extend(request: web.Request) -> web.Response:
     except (TypeError, ValueError):
         return json_error(400, "'by' must be a whole number")
     stop = bool(body.get("stop"))
+    # ``visits: true`` answers a ``visit_limit`` hold (the chart's
+    # max_visits) instead of a loop's ``loop_limit``.
+    extend = cflow2_runtime.extend_visits if body.get("visits") else cflow2_runtime.extend_loop
     payload = await asyncio.to_thread(
-        cflow2_runtime.extend_loop, node, by, stop=stop, cwd=cwd, scope=scope,
+        extend, node, by, stop=stop, cwd=cwd, scope=scope,
     )
     payload["nudge_scheduled_sessions"] = await _nudge_sessions(
         request.app["manager"], cwd, scope, NUDGE_CFLOW2_ANSWERED
@@ -6516,6 +6530,8 @@ async def _create_session(request: web.Request, body: dict) -> Tuple[int, dict]:
     # specification in the daemon's restart record).
     definition.pop("issue_text", None)
     definition.pop("prompt_packs", None)
+    # v2 start inputs belong to the run (chart.json), not to the session.
+    definition.pop("cflow_inputs", None)
     try:
         sdef = SessionDef.from_dict(definition)
     except (KeyError, ValueError, TypeError) as exc:
@@ -6527,7 +6543,7 @@ async def _create_session(request: web.Request, body: dict) -> Tuple[int, dict]:
     try:
         result = await _onboard_and_launch(request, session, body)
     except onboard.OnboardError as exc:
-        return 400, {"error": str(exc)}
+        return 400, onboard.error_body(exc)
     return 201, {**session.info(), **result}
 
 
@@ -6892,7 +6908,7 @@ async def h_session_spawn(request: web.Request) -> web.Response:
     try:
         result = await _onboard_and_launch(request, session, body, parent=parent)
     except onboard.OnboardError as exc:
-        return json_error(400, str(exc))
+        return json_response(onboard.error_body(exc), status=400)
     except (HarnessError, ValueError, TypeError) as exc:
         return json_error(400, f"bad spawn request: {exc}")
     body_out = {"session": session.info(), "parent": parent, **result}

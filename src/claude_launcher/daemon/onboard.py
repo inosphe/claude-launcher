@@ -64,7 +64,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 from ..cflow import engine as cflow_engine
 from ..cflow import state as cflow_state
@@ -93,7 +93,21 @@ class OnboardError(Exception):
 
     Mapped to 400. Distinct from the per-leg failures reported in
     :func:`run`'s result: those happened to a session that exists.
+    ``errors`` (when set) maps a v2 start input to why it was refused.
     """
+
+    def __init__(self, message: str = "", errors: Optional[Dict[str, str]] = None) -> None:
+        super().__init__(message)
+        self.errors = dict(errors or {})
+
+
+def error_body(exc: OnboardError) -> dict:
+    """The 400 body for ``exc``: the message, plus per-field ``errors`` for
+    the start form when the v2 inputs were refused."""
+    out: dict = {"error": str(exc)}
+    if getattr(exc, "errors", None):
+        out["errors"] = dict(exc.errors)
+    return out
 
 
 def _subroles(raw) -> Tuple[str, ...]:
@@ -144,6 +158,9 @@ class Plan:
     #: A v2 run's params (``workflow_params`` in the request), checked against
     #: the chart's declarations in preflight.
     workflow_params: Optional[dict] = None
+    #: A v2 run's start inputs (``cflow_inputs``), normalised against the
+    #: chart's ``inputs`` schema in preflight; ``None`` when it declares none.
+    cflow_inputs: Optional[dict] = None
     #: The new session's profile: a v2 run resolves its capabilities from it.
     profile: str = ""
 
@@ -456,6 +473,7 @@ def preflight(
     # side by side.
     workflow_version = 1
     workflow_params = None
+    cflow_inputs = None
     if workflow:
         try:
             chosen = cflow2_web.choose(
@@ -471,11 +489,19 @@ def preflight(
                     chart, body.get("workflow_params"), str(body.get("context") or "")
                 )
                 cflow2_web.check_params(chart, workflow_params)
+                cflow_inputs = cflow2_web.check_inputs(chart, body.get("cflow_inputs"))
                 workflow_version = 2
+        except cflow2_web.InputsInvalid as exc:
+            raise OnboardError(str(exc), exc.errors) from None
         except cflow2_web.ChoiceError as exc:
             raise OnboardError(str(exc)) from None
         except Exception as exc:  # noqa: BLE001 - compile errors of every kind
             raise OnboardError(f"v2 workflow {workflow!r}: {exc}") from None
+    if workflow_version != 2 and body.get("cflow_inputs"):
+        raise OnboardError(
+            "'cflow_inputs' are the start inputs of a cflow v2 workflow; "
+            f"{workflow or 'no workflow'!r} is not one"
+        )
     if workflow_version == 2:
         pass  # resolved, compiled and its params checked above
     elif workflow and workflow.endswith((".yaml", ".yml")):
@@ -529,6 +555,7 @@ def preflight(
         ),
         workflow_version=workflow_version,
         workflow_params=workflow_params,
+        cflow_inputs=cflow_inputs,
         profile=profile,
     )
 
@@ -822,8 +849,8 @@ def _start_v2(plan: Plan, *, name: str, cwd: str) -> dict:
         from ..cflow2 import runtime as cflow2_runtime
 
         chart = cflow2_web.load(plan.workflow, cwd)
-        payload = cflow2_runtime.start(
-            chart, cwd=cwd, scope=name, params=plan.workflow_params,
+        payload = cflow2_web.start_run(
+            chart, inputs=plan.cflow_inputs, cwd=cwd, scope=name, params=plan.workflow_params,
             caps=cflow2_runtime.resolve_caps(plan.profile or None),
         )
     except Exception as exc:  # noqa: BLE001 — compile, params, a live run...

@@ -18,6 +18,7 @@ spells the name ``v2:<name>``); a name declared only in v2 needs neither.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from pathlib import Path
@@ -45,10 +46,24 @@ _FORMAT_RE = re.compile(r"^cflow\s*:\s*['\"]?2['\"]?\s*(#.*)?$", re.MULTILINE)
 
 #: cwd -> (stamp, entries)
 _LISTS: Dict[str, Tuple[tuple, List[dict]]] = {}
+#: cwd -> (stamp, rows) for :func:`definitions`
+_DEFS: Dict[str, Tuple[tuple, List[dict]]] = {}
+
+log = logging.getLogger(__name__)
 
 
 class ChoiceError(ValueError):
     """A request naming a v2 workflow that cannot be honoured."""
+
+
+class InputsInvalid(ChoiceError):
+    """``cflow_inputs`` that do not satisfy the chart's ``inputs`` schema;
+    ``errors`` maps each input (or unknown key) to why -- the 400 body
+    carries it so a form can mark the field."""
+
+    def __init__(self, message: str, errors: Dict[str, str]) -> None:
+        super().__init__(message)
+        self.errors = dict(errors)
 
 
 # --------------------------------------------------------------------------- #
@@ -97,7 +112,7 @@ def _entry(item: "layers.Located2", cwd: str) -> Optional[dict]:
     if item.kind == ir.KIND_PROCEDURE:
         return None  # called by other definitions, never started on its own
     try:
-        chart = layers.load(str(item.path), cwd)
+        chart = layers.load_file(item.path, cwd)
     except Exception as exc:  # noqa: BLE001 - a listing must survive any file
         entry["error"] = str(exc) or type(exc).__name__
         return entry
@@ -112,6 +127,8 @@ def _entry(item: "layers.Located2", cwd: str) -> Optional[dict]:
         priority=meta.get("priority") or 0,
         filter_roles=meta.get("filter_roles"),
         recur=False,
+        # the start form draws its fields from this (docs/cflow-v2.md 2.6)
+        inputs=_inputs_view(chart),
     )
     return entry
 
@@ -234,6 +251,18 @@ def choose(
                 f"{', '.join(str(h) for h in homes) or str(GENERATED_V2)}"
             )
         return None
+    if want != 2:
+        # Nothing in the request asked for v2: whatever goes wrong while the
+        # v2 layers are consulted (an unreadable directory, a definition that
+        # breaks the compiler) must not refuse a v1 spawn -- the request is
+        # read as v1 and the v2 problem is logged.
+        try:
+            if workflow in v2_names(cwd) and workflow not in v1_names(cwd):
+                return workflow, layers.load(workflow, cwd)
+        except Exception as exc:  # noqa: BLE001 - see above
+            log.warning("cflow v2: could not decide whether %r is a v2 workflow in %s; "
+                        "treating it as v1: %s", workflow, cwd, exc)
+        return None
     v2 = v2_names(cwd)
     if want == 2:
         if workflow not in v2:
@@ -242,8 +271,6 @@ def choose(
                 f"available: {', '.join(v2) or '(none)'}"
             )
         return workflow, layers.load(workflow, cwd)
-    if workflow in v2 and workflow not in v1_names(cwd):
-        return workflow, layers.load(workflow, cwd)
     return None
 
 
@@ -251,7 +278,7 @@ def _compile_path(path: Path, cwd: str) -> ir.Chart:
     from ..cflow2 import frontend
 
     try:
-        return frontend.compile_file(path, resolve_include=layers.resolver(cwd))
+        return layers.load_file(path, cwd)
     except (frontend.FrontendError, ir.IRError) as exc:
         raise ChoiceError(f"generated workflow {str(path)!r}: {exc}") from None
 
@@ -271,6 +298,43 @@ def check_params(chart: ir.Chart, params: Optional[dict]) -> dict:
         return runtime._validate_params(chart, params)  # noqa: SLF001 - same rule as start
     except runtime.FlowError as exc:
         raise ChoiceError(f"{chart.name}: {exc}") from None
+
+
+def check_inputs(chart: ir.Chart, raw: Any) -> Optional[dict]:
+    """The start inputs a request carries (``cflow_inputs``), normalised
+    against the chart's ``inputs`` schema (``cflow2/inputs.py``); ``None``
+    when the chart declares none and the request sent none. Raises
+    :class:`InputsInvalid` with per-field errors."""
+    from ..cflow2 import inputs as inputs_mod
+
+    schema = (chart.meta or {}).get("inputs") or {}
+    if raw is not None and not isinstance(raw, dict):
+        raise InputsInvalid("cflow_inputs must be an object of name -> value",
+                            {"_": "cflow_inputs must be an object"})
+    if not schema and not raw:
+        return None
+    values, errors = inputs_mod.normalize(schema, raw or {})
+    if errors:
+        raise InputsInvalid(
+            f"{chart.name}: invalid inputs: " + "; ".join(f"{k}: {v}" for k, v in errors.items()),
+            errors)
+    return values
+
+
+def start_run(chart: ir.Chart, *, inputs: Optional[dict] = None, **kwargs: Any) -> dict:
+    """``runtime.start`` with the start inputs folded in. The runtime takes
+    ``inputs=`` itself (it calls ``inputs.apply`` before the snapshot); a
+    runtime without that keyword gets a chart already applied here."""
+    import inspect
+
+    from ..cflow2 import inputs as inputs_mod, runtime
+
+    if inputs is not None:
+        if "inputs" in inspect.signature(runtime.start).parameters:
+            kwargs["inputs"] = inputs
+        else:
+            chart = inputs_mod.apply(chart, inputs)
+    return runtime.start(chart, **kwargs)
 
 
 def params_for(chart: ir.Chart, params: Any, context: Optional[str]) -> dict:
@@ -546,6 +610,9 @@ def definition_view(name: str, cwd: str) -> dict:
     findings and the source text of one v2 definition (read-only)."""
     from ..cflow2 import check
 
+    if not layers.is_name(name):
+        raise ChoiceError(f"{name!r} is not a definition name; the definition view reads "
+                          f"v2 definitions by name from the layers only")
     path = layers.find(name, cwd)
     if path is None:
         raise ChoiceError(f"no v2 definition named {name!r}")
@@ -555,11 +622,12 @@ def definition_view(name: str, cwd: str) -> dict:
         raise ChoiceError(f"{path}: {exc}") from None
     out: Dict[str, Any] = {"name": name, "path": str(path), "text": text, "version": 2}
     try:
-        chart = layers.load(str(path), cwd)
+        chart = layers.load_file(path, cwd)
     except Exception as exc:  # noqa: BLE001 - the error is the answer
         out["error"] = str(exc) or type(exc).__name__
         return out
     out["chart"] = chart_view(chart, prompts=False)
+    out["inputs"] = _inputs_view(chart)
     out["findings"] = [
         {"level": f.level, "code": f.code, "message": f.message, "node": f.node}
         for f in check.check(chart)
@@ -568,10 +636,24 @@ def definition_view(name: str, cwd: str) -> dict:
     return out
 
 
+def _inputs_view(chart: ir.Chart) -> List[dict]:
+    from ..cflow2 import inputs as inputs_mod
+
+    return inputs_mod.view((chart.meta or {}).get("inputs") or {})
+
+
 def definitions(cwd: str) -> List[dict]:
-    """The v2 rows of the definition editor's picker (procedures included)."""
-    return [
+    """The v2 rows of the definition editor's picker (procedures included),
+    cached against the layer directories like :func:`startable` -- listing
+    compiles every file. Call it off the event loop."""
+    stamp = _stamp(cwd)
+    hit = _DEFS.get(cwd)
+    if hit is not None and hit[0] == stamp:
+        return [dict(row) for row in hit[1]]
+    rows = [
         {"name": i.name, "layer": i.layer, "path": str(i.path), "version": 2,
          "kind": i.kind, "error": i.error, "active": True}
         for i in layers.list_definitions(cwd)
     ]
+    _DEFS[cwd] = (stamp, rows)
+    return [dict(row) for row in rows]

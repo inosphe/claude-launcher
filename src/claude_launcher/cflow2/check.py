@@ -12,21 +12,36 @@ Every check reads only the IR. Codes:
                         ``paths`` overlap or are undeclared
 - ``unknown-capability`` a ``needs`` entry that ``caps.CAPABILITIES`` lacks
 - ``unknown-rule``      a task names a rule the chart does not define
-- ``delegated-ask``     a task with ``ask`` under a non-inline executor
+- ``delegated-ask``     a task with ``ask`` inside a subtree delegated to a
+                        non-inline executor
+- ``delegated-user-gate`` a ``choose`` with ``chooser: user`` inside such a
+                        subtree (with ``delegated-ask``: no gate that waits
+                        for a person may sit inside a delegation -- the
+                        delegate would answer it, or skip it)
+- ``effects-undeclared`` (warning) a task without ``effects`` in a chart
+                        that has a ``never_effect`` invariant or a rule
+                        ``effect``: the never-effect check cannot see it
 
 Effects may carry a target: ``git.merge:master`` or ``git.merge(master)``.
 An effect without a target may hit any target.
 
-The control-flow graph (:func:`cfg`) models normal completion only: a node's
-declared outcomes (plus the engine outcomes ``fail``/``timeout``) lead to the
-``on`` handlers and the ``catch`` of enclosing ``try`` nodes, any other
-outcome is taken to continue normally. An unhandled failure aborting the run
-is not a path to ``END``. ``par`` with ``all``/``allSettled`` runs every
-branch (modelled one after another in declaration order); ``race``/``any``/
-``quorum`` branches are alternatives. A ``group`` member runs zero or more
-times before its ``do`` tree. ``while``/``until``/``foreach`` may run zero
-times; ``retry`` runs at least once, and a ``continue`` inside it always
-starts another attempt (the loop limit is not a path to ``END``).
+The control-flow graph (:func:`cfg`) follows the runtime's outcome
+propagation (``runtime._complete``): an atomic node's possible outcomes are
+its ``returns`` keys, its ask's outcomes, ``fail`` and ``timeout`` (a probing
+wait adds ``undecidable``). ``ok`` continues normally; any other outcome
+travels up to the nearest ``on`` handler for it on the node or an
+ancestor, or the ``catch`` of an enclosing ``try`` (``*`` catches all), with
+every ``finally`` on the way run first; a retry tries again; a par settles
+by its mode. An outcome nothing handles ends the run: a path to ``END`` only
+when the chart's ``returns`` declares it. Control signals (``end``,
+``return``, ``break``, ``continue``) also run every ``finally`` they leave.
+A cond with no true guard and no ``else`` finishes ``fail``. ``par`` with
+``all``/``allSettled`` runs every branch (modelled one after another in
+declaration order); ``race``/``any``/``quorum`` branches are alternatives.
+A ``group`` member runs zero or more times before its ``do`` tree.
+``while``/``until``/``foreach`` may run zero times; ``retry`` runs at least
+once, and a ``continue`` inside it always starts another attempt (a loop
+limit held for a person is not a path to ``END``).
 """
 
 from __future__ import annotations
@@ -60,6 +75,16 @@ class Finding:
 
 # ---------------------------------------------------------------------------
 # control-flow graph
+#
+# Vertices are strings: ``START``/``END``; ``in:<id>``, ``done:<id>``,
+# ``out:<id>`` around every node (``done`` = the node finished, before its
+# ``on`` handlers; ``out`` = left to its parent); and the atomic node ids
+# themselves. A ``finally`` subtree that some exit runs before continuing
+# elsewhere (a control signal, or a non-ok outcome on its way up) is built
+# again as a *copy* under a prefix ``f<k>|`` whose end leads only to that
+# continuation -- otherwise every normal pass through the finally could
+# follow the signal (a path that does not exist). An atomic vertex in a copy
+# stands for the same node: ``_base`` strips the prefix.
 
 
 class _Graph:
@@ -69,6 +94,9 @@ class _Graph:
     def add(self, a: str, b: str) -> None:
         self.edges.setdefault(a, set()).add(b)
         self.edges.setdefault(b, set())
+
+    def touch(self, a: str) -> None:
+        self.edges.setdefault(a, set())
 
 
 def _in(nid: str) -> str:
@@ -83,12 +111,25 @@ def _out(nid: str) -> str:
     return "out:" + nid
 
 
+def _base(vertex: str) -> str:
+    return vertex.rsplit("|", 1)[-1]
+
+
 def _possible_outcomes(node: ir.Node) -> Set[str]:
+    """Every outcome a node may finish with by itself."""
     outs = {ir.OUTCOME_FAIL, ir.OUTCOME_TIMEOUT}
     if node.type == ir.T_TASK:
         outs |= set((node.get("returns") or {ir.OUTCOME_OK: {}}).keys())
+        ask = node.get("ask") or {}
+        if ask:
+            if ask.get("options"):
+                outs |= {o.get("outcome") or o.get("name") for o in ask["options"]}
+            else:
+                outs.add(ask.get("on_decline") or "declined")
     else:
         outs.add(ir.OUTCOME_OK)
+        if node.type == ir.T_WAIT and node.get("probe"):
+            outs.add(ir.OUTCOME_UNDECIDABLE)
     return outs
 
 
@@ -104,102 +145,301 @@ def _region(chart: ir.Chart, nid: str) -> Optional[Tuple[str, str]]:
     return parent.id, "on"
 
 
+def _ensured(chart: ir.Chart) -> Set[str]:
+    """Node ids/labels some ``spec.ensures`` key names."""
+    return {ir.ensures_target(k) for k in ((chart.spec or {}).get("ensures") or {})}
+
+
+class _Space:
+    """Where vertex names come from: the chart itself, or a copy of one
+    ``finally`` subtree (``members``) under ``prefix`` inside ``parent``."""
+
+    def __init__(self, prefix: str = "", members: Optional[Set[str]] = None,
+                 parent: Optional["_Space"] = None) -> None:
+        self.prefix = prefix
+        self.members = members
+        self.parent = parent
+
+    def v(self, vertex: str) -> str:
+        """The name of a base vertex (``in:x``, an atomic id ...) here."""
+        if vertex in (START, END):
+            return vertex
+        nid = vertex.split(":", 1)[1] if ":" in vertex else vertex
+        if self.members is None or nid in self.members:
+            return self.prefix + vertex
+        return self.parent.v(vertex) if self.parent else vertex
+
+
+class _Builder:
+    def __init__(self, chart: ir.Chart) -> None:
+        self.chart = chart
+        self.g = _Graph()
+        self.copies: Dict[Tuple[str, str, Tuple[str, ...]], str] = {}
+        self.ensured = _ensured(chart)
+        # group id -> non-ok outcomes its members can settle it with
+        self.group_fail: Dict[Tuple[str, str], Set[str]] = {}
+
+    # -- whole chart / one copy ---------------------------------------------
+    def build(self) -> _Graph:
+        top = _Space()
+        for node in self.chart.walk():
+            self.node(top, node)
+        self.g.add(START, _in(self.chart.root))
+        self.g.add(_out(self.chart.root), END)
+        return self.g
+
+    def copy_finally(self, sp: _Space, try_id: str, conts: List[str]) -> str:
+        """Entry vertex of a copy of ``try_id``'s finally whose end goes to
+        ``conts`` (vertices already named in ``sp``)."""
+        fin = self.chart.node(try_id).get("finally_child")
+        key = (sp.prefix, try_id, tuple(sorted(conts)))
+        if key in self.copies:
+            return self.copies[key]
+        prefix = f"f{len(self.copies)}|"
+        inner = _Space(prefix, {n.id for n in self.chart.walk(fin)}, sp)
+        entry = inner.v(_in(fin))
+        self.copies[key] = entry
+        for node in self.chart.walk(fin):
+            self.node(inner, node)
+        for c in conts:
+            self.g.add(inner.v(_out(fin)), c)
+        if not conts:
+            self.g.touch(inner.v(_out(fin)))
+        return entry
+
+    # -- a non-ok outcome travelling up (runtime ``_complete``) --------------
+    def propagate(self, sp: _Space, nid: str, outcome: str, skip_on: bool = True) -> List[str]:
+        """Vertices a node finishing ``outcome`` (non-ok) leads to: the
+        nearest ``on`` handler for it, a ``catch`` (``*`` included), the
+        settle rule of a parallel region, a retry's next attempt -- running
+        any ``finally`` on the way first. ``[]`` when the run ends failed;
+        ``[END]`` when the chart's ``returns`` declares the outcome."""
+        chart = self.chart
+        cur, skip = nid, skip_on
+        while True:
+            node = chart.node(cur)
+            if not skip and outcome in node.on:
+                return [sp.v(_in(node.on[outcome]))]
+            reg = _region(chart, cur)
+            if reg is None:
+                return [END] if outcome in (chart.returns or {}) else []
+            pid, key = reg
+            parent = chart.node(pid)
+            skip = False
+            if key == "on":
+                cur, skip = pid, True
+                continue
+            t = parent.type
+            if t == ir.T_TRY:
+                if key == "child":
+                    catch = parent.get("catch") or {}
+                    handler = catch.get(outcome) or catch.get("*")
+                    if handler:
+                        return [sp.v(_in(handler))]
+                if key in ("child", "catch") and parent.get("finally_child"):
+                    conts = self.propagate(sp, pid, outcome, skip_on=False)
+                    return [self.copy_finally(sp, pid, conts)]
+                cur = pid
+                continue
+            if t == ir.T_LOOP:
+                if key == "child" and parent.get("mode") == ir.LOOP_RETRY:
+                    return [sp.v(_loop_again(parent))] + self.propagate(sp, pid, outcome, False)
+                cur = pid
+                continue
+            if t == ir.T_PAR:
+                settle = str(parent.get("settle") or ir.SETTLE_ALL).split(":", 1)[0]
+                if settle == ir.SETTLE_ALL_SETTLED:
+                    kids = list((parent.get("branches") or {}).values())
+                    i = kids.index(cur)
+                    return [sp.v(_in(kids[i + 1]) if i + 1 < len(kids) else _done(pid))]
+                if settle in (ir.SETTLE_ANY, ir.SETTLE_QUORUM):
+                    return [sp.v(_done(pid))] + self.propagate(sp, pid, ir.OUTCOME_FAIL, False)
+                cur = pid
+                continue
+            if t == ir.T_GROUP and key == "member":
+                settle = str(parent.get("settle") or ir.SETTLE_ALL_SETTLED).split(":", 1)[0]
+                if settle != ir.SETTLE_ALL_SETTLED:
+                    out = outcome if settle in (ir.SETTLE_ALL, ir.SETTLE_RACE) else ir.OUTCOME_FAIL
+                    self.group_fail.setdefault((sp.prefix, pid), set()).add(out)
+                    for target in self.propagate(sp, pid, out, False):
+                        self.g.add(sp.v(_out(parent.get("child"))), target)
+                # the group settles after its do tree; members keep coming
+                return [sp.v(_in(cur)), sp.v(_in(parent.get("child")))]
+            cur = pid
+
+    # -- control signals (runtime ``_propagate``) ----------------------------
+    def signal(self, sp: _Space, ctrl: str, stop: Optional[str], targets: List[str]) -> List[str]:
+        """``targets`` reached from ``ctrl`` through every ``try`` with a
+        ``finally`` whose body or catch holds it, below ``stop`` (the loop or
+        scope the signal ends at; ``None`` = the run)."""
+        chart = self.chart
+        fins: List[str] = []
+        cur = ctrl
+        while True:
+            reg = _region(chart, cur)
+            if reg is None:
+                break
+            pid, key = reg
+            if pid == stop:
+                break
+            parent = chart.node(pid)
+            if parent.type == ir.T_TRY and key in ("child", "catch") and parent.get("finally_child"):
+                fins.append(pid)
+            cur = pid
+        conts = list(targets)
+        for tid in reversed(fins):
+            conts = [self.copy_finally(sp, tid, conts)]
+        return conts
+
+    # -- one node --------------------------------------------------------------
+    def node(self, sp: _Space, node: ir.Node) -> None:
+        chart, add, v = self.chart, self.g.add, sp.v
+        nid, t, p = node.id, node.type, node.props
+        add(v(_done(nid)), v(_out(nid)))
+        for handler in node.on.values():
+            add(v(_done(nid)), v(_in(handler)))
+            add(v(_out(handler)), v(_out(nid)))
+        if t not in ir.ATOMIC_TYPES and (nid in self.ensured or node.label in self.ensured):
+            for target in self.propagate(sp, nid, ir.OUTCOME_FAIL, skip_on=False):
+                add(v(_done(nid)), target)
+
+        if t in ir.ATOMIC_TYPES:
+            add(v(_in(nid)), v(nid))
+            add(v(nid), v(_done(nid)))
+            for outcome in sorted(_possible_outcomes(node) - {ir.OUTCOME_OK}):
+                if outcome in node.on:
+                    continue  # done -> the handler, above
+                for target in self.propagate(sp, nid, outcome):
+                    add(v(nid), target)
+                self.g.touch(v(nid))
+        elif t == ir.T_SEQ:
+            kids = list(p.get("children") or [])
+            if not kids:
+                add(v(_in(nid)), v(_done(nid)))
+            else:
+                add(v(_in(nid)), v(_in(kids[0])))
+                for a, b in zip(kids, kids[1:]):
+                    add(v(_out(a)), v(_in(b)))
+                add(v(_out(kids[-1])), v(_done(nid)))
+        elif t == ir.T_COND:
+            has_else = False
+            for br in p.get("branches") or []:
+                add(v(_in(nid)), v(_in(br["child"])))
+                add(v(_out(br["child"])), v(_done(nid)))
+                has_else = has_else or br.get("guard") is None
+            if not has_else:
+                # no guard held and no else: the cond finishes ``fail``
+                for target in self.propagate(sp, nid, ir.OUTCOME_FAIL, skip_on=False):
+                    add(v(_in(nid)), target)
+                self.g.touch(v(_in(nid)))
+        elif t == ir.T_CHOOSE:
+            for opt in p.get("options") or []:
+                add(v(_in(nid)), v(_in(opt["child"])))
+                add(v(_out(opt["child"])), v(_done(nid)))
+        elif t == ir.T_LOOP:
+            child = p["child"]
+            between = p.get("between")
+            add(v(_in(nid)), v(_in(child)))
+            if p.get("mode") != ir.LOOP_RETRY:
+                add(v(_in(nid)), v(_done(nid)))
+            add(v(_out(child)), v(_done(nid)))
+            add(v(_out(child)), v(_loop_again(node)))
+            if between:
+                add(v(_out(between)), v(_in(child)))
+        elif t == ir.T_PAR:
+            kids = list((p.get("branches") or {}).values())
+            settle = str(p.get("settle") or ir.SETTLE_ALL)
+            if settle in (ir.SETTLE_ALL, ir.SETTLE_ALL_SETTLED):
+                add(v(_in(nid)), v(_in(kids[0])))
+                for a, b in zip(kids, kids[1:]):
+                    add(v(_out(a)), v(_in(b)))
+                add(v(_out(kids[-1])), v(_done(nid)))
+            else:
+                for k in kids:
+                    add(v(_in(nid)), v(_in(k)))
+                    add(v(_out(k)), v(_done(nid)))
+        elif t == ir.T_GROUP:
+            child, member = p["child"], p.get("member")
+            add(v(_in(nid)), v(_in(child)))
+            if member:
+                add(v(_in(nid)), v(_in(member)))
+                add(v(_out(member)), v(_in(member)))
+                add(v(_out(member)), v(_in(child)))
+            add(v(_out(child)), v(_done(nid)))
+        elif t == ir.T_TIMEOUT:
+            child, other = p["child"], p.get("else_child")
+            add(v(_in(nid)), v(_in(child)))
+            add(v(_out(child)), v(_done(nid)))
+            if other:
+                fire = [v(_in(other))]
+                add(v(_out(other)), v(_done(nid)))
+            else:
+                fire = self.propagate(sp, nid, ir.OUTCOME_TIMEOUT, skip_on=False)
+            for a in _atomics_under(chart, child):
+                for target in fire:
+                    add(v(a), target)
+        elif t == ir.T_TRY:
+            child, fin = p["child"], p.get("finally_child")
+            after = v(_in(fin)) if fin else v(_done(nid))
+            add(v(_in(nid)), v(_in(child)))
+            add(v(_out(child)), after)
+            for handler in (p.get("catch") or {}).values():
+                add(v(_out(handler)), after)
+            if fin:
+                add(v(_out(fin)), v(_done(nid)))
+        elif t == ir.T_SCOPE:
+            add(v(_in(nid)), v(_in(p["child"])))
+            add(v(_out(p["child"])), v(_done(nid)))
+        elif t == ir.T_CONTROL:
+            self.control(sp, node)
+
+    def control(self, sp: _Space, node: ir.Node) -> None:
+        chart, v = self.chart, sp.v
+        op = node.get("op")
+        nid = node.id
+        entry = v(_in(nid))
+        self.g.touch(entry)
+        targets: List[str] = []
+        stop: Optional[str] = None
+        if op == ir.CTL_END:
+            targets = [END]
+        elif op in (ir.CTL_CONTINUE, ir.CTL_BREAK):
+            target = node.get("target")
+            if not (target and target in chart.nodes):
+                return
+            loop = chart.node(target)
+            stop = target
+            if op == ir.CTL_BREAK:
+                targets = [v(_done(target))]
+            else:
+                targets = [v(_loop_again(loop))]
+                # the guard (or the item list) may end the loop; a retry's
+                # next attempt is unconditional up to its max
+                if loop.get("mode") != ir.LOOP_RETRY:
+                    targets.append(v(_done(target)))
+        elif op == ir.CTL_RAISE:
+            # a raise finishes the control node with that outcome
+            for target in self.propagate(sp, nid, str(node.get("outcome")), skip_on=False):
+                self.g.add(entry, target)
+            return
+        elif op == ir.CTL_RETURN:
+            outcome = str(node.get("outcome") or ir.OUTCOME_OK)
+            scope = next((a for a in chart.ancestors(nid) if chart.node(a).type == ir.T_SCOPE), None)
+            if scope is not None:
+                stop = scope
+                if outcome == ir.OUTCOME_OK:
+                    targets = [v(_done(scope))]
+                else:  # the scope finishes with that outcome: it travels on
+                    targets = self.propagate(sp, scope, outcome, skip_on=False)
+            else:
+                ok = outcome == ir.OUTCOME_OK or outcome in (chart.returns or {})
+                targets = [END] if ok else []
+        for target in self.signal(sp, nid, stop, targets):
+            self.g.add(entry, target)
+
+
 def _build(chart: ir.Chart) -> _Graph:
-    g = _Graph()
-    for node in chart.walk():
-        _build_node(chart, g, node)
-    g.add(START, _in(chart.root))
-    g.add(_out(chart.root), END)
-    return g
-
-
-def _build_node(chart: ir.Chart, g: _Graph, node: ir.Node) -> None:
-    nid = node.id
-    t = node.type
-    p = node.props
-    g.add(_done(nid), _out(nid))
-    for handler in node.on.values():
-        g.add(_done(nid), _in(handler))
-        g.add(_out(handler), _out(nid))
-
-    if t in ir.ATOMIC_TYPES:
-        g.add(_in(nid), nid)
-        g.add(nid, _done(nid))
-        _atomic_exceptional(chart, g, node)
-    elif t == ir.T_SEQ:
-        kids = list(p.get("children") or [])
-        if not kids:
-            g.add(_in(nid), _done(nid))
-        else:
-            g.add(_in(nid), _in(kids[0]))
-            for a, b in zip(kids, kids[1:]):
-                g.add(_out(a), _in(b))
-            g.add(_out(kids[-1]), _done(nid))
-    elif t == ir.T_COND:
-        has_else = False
-        for br in p.get("branches") or []:
-            g.add(_in(nid), _in(br["child"]))
-            g.add(_out(br["child"]), _done(nid))
-            has_else = has_else or br.get("guard") is None
-        if not has_else:
-            g.add(_in(nid), _done(nid))
-    elif t == ir.T_CHOOSE:
-        for opt in p.get("options") or []:
-            g.add(_in(nid), _in(opt["child"]))
-            g.add(_out(opt["child"]), _done(nid))
-    elif t == ir.T_LOOP:
-        child = p["child"]
-        between = p.get("between")
-        g.add(_in(nid), _in(child))
-        if p.get("mode") != ir.LOOP_RETRY:
-            g.add(_in(nid), _done(nid))
-        g.add(_out(child), _done(nid))
-        g.add(_out(child), _loop_again(node))
-        if between:
-            g.add(_out(between), _in(child))
-    elif t == ir.T_PAR:
-        kids = list((p.get("branches") or {}).values())
-        settle = str(p.get("settle") or ir.SETTLE_ALL)
-        if settle in (ir.SETTLE_ALL, ir.SETTLE_ALL_SETTLED):
-            g.add(_in(nid), _in(kids[0]))
-            for a, b in zip(kids, kids[1:]):
-                g.add(_out(a), _in(b))
-            g.add(_out(kids[-1]), _done(nid))
-        else:
-            for k in kids:
-                g.add(_in(nid), _in(k))
-                g.add(_out(k), _done(nid))
-    elif t == ir.T_GROUP:
-        child, member = p["child"], p.get("member")
-        g.add(_in(nid), _in(child))
-        if member:
-            g.add(_in(nid), _in(member))
-            g.add(_out(member), _in(member))
-            g.add(_out(member), _in(child))
-        g.add(_out(child), _done(nid))
-    elif t == ir.T_TIMEOUT:
-        child, other = p["child"], p.get("else_child")
-        g.add(_in(nid), _in(child))
-        g.add(_out(child), _done(nid))
-        fire = _in(other) if other else _done(nid)
-        for a in _atomics_under(chart, child):
-            g.add(a, fire)
-        if other:
-            g.add(_out(other), _done(nid))
-    elif t == ir.T_TRY:
-        child, fin = p["child"], p.get("finally_child")
-        after = _in(fin) if fin else _done(nid)
-        g.add(_in(nid), _in(child))
-        g.add(_out(child), after)
-        for handler in (p.get("catch") or {}).values():
-            g.add(_out(handler), after)
-        if fin:
-            g.add(_out(fin), _done(nid))
-    elif t == ir.T_SCOPE:
-        g.add(_in(nid), _in(p["child"]))
-        g.add(_out(p["child"]), _done(nid))
-    elif t == ir.T_CONTROL:
-        _control(chart, g, node)
+    return _Builder(chart).build()
 
 
 def _loop_again(loop: ir.Node) -> str:
@@ -211,103 +451,64 @@ def _atomics_under(chart: ir.Chart, nid: str) -> List[str]:
     return [n.id for n in chart.walk(nid) if n.type in ir.ATOMIC_TYPES]
 
 
-def _catching_try(chart: ir.Chart, nid: str, outcome: str) -> Optional[ir.Node]:
-    """Nearest try whose ``child`` region holds ``nid`` and catches ``outcome``."""
-    cur = nid
-    while True:
-        reg = _region(chart, cur)
-        if reg is None:
-            return None
-        pid, key = reg
-        parent = chart.node(pid)
-        if parent.type == ir.T_TRY and key == "child" and outcome in (parent.get("catch") or {}):
-            return parent
-        cur = pid
-
-
-def _atomic_exceptional(chart: ir.Chart, g: _Graph, node: ir.Node) -> None:
-    for outcome in _possible_outcomes(node):
-        if outcome in node.on:
-            continue
-        tnode = _catching_try(chart, node.id, outcome)
-        if tnode is not None:
-            g.add(node.id, _in(tnode.get("catch")[outcome]))
-
-
-def _control(chart: ir.Chart, g: _Graph, node: ir.Node) -> None:
-    op = node.get("op")
-    nid = node.id
-    if op == ir.CTL_END:
-        g.add(_in(nid), END)
-    elif op in (ir.CTL_CONTINUE, ir.CTL_BREAK):
-        target = node.get("target")
-        if target and target in chart.nodes:
-            loop = chart.node(target)
-            if op == ir.CTL_BREAK:
-                g.add(_in(nid), _done(target))
-            else:
-                g.add(_in(nid), _loop_again(loop))
-                # the guard (or the item list) may end the loop; a retry's
-                # next attempt is unconditional up to its max
-                if loop.get("mode") != ir.LOOP_RETRY:
-                    g.add(_in(nid), _done(target))
-    elif op == ir.CTL_RAISE:
-        tnode = _catching_try(chart, nid, node.get("outcome"))
-        if tnode is not None:
-            g.add(_in(nid), _in(tnode.get("catch")[node.get("outcome")]))
-        else:
-            g.edges.setdefault(_in(nid), set())
-    elif op == ir.CTL_RETURN:
-        for anc in chart.ancestors(nid):
-            if chart.node(anc).type == ir.T_SCOPE:
-                g.add(_in(nid), _done(anc))
-                break
-        else:
-            g.add(_in(nid), END)
+def _is_atomic(chart: ir.Chart, vertex: str) -> bool:
+    base = _base(vertex)
+    return base in chart.nodes and chart.nodes[base].type in ir.ATOMIC_TYPES and ":" not in base
 
 
 def cfg(chart: ir.Chart) -> Dict[str, List[str]]:
     """Successor map over atomic node ids (``task``, ``wait``) plus the
     synthetic ``START`` and ``END``: ``succ[a]`` lists the atomic nodes (or
-    ``END``) that can run next after ``a`` completes."""
+    ``END``) that can run next after ``a`` completes (whatever its outcome).
+    A finally copy's nodes are reported under their own ids."""
     g = _build(chart)
-    keep = [START] + [n.id for n in chart.walk() if n.type in ir.ATOMIC_TYPES]
-    out: Dict[str, List[str]] = {}
-    for a in keep:
+    out: Dict[str, Set[str]] = {START: set()}
+    for n in chart.walk():
+        if n.type in ir.ATOMIC_TYPES:
+            out.setdefault(n.id, set())
+    starts = [START] + [vx for vx in g.edges if _is_atomic(chart, vx)]
+    for a in starts:
         found: Set[str] = set()
         seen: Set[str] = set()
         stack = list(g.edges.get(a, ()))
         while stack:
-            v = stack.pop()
-            if v in seen:
+            vx = stack.pop()
+            if vx in seen:
                 continue
-            seen.add(v)
-            if v == END or v in chart.nodes:
-                found.add(v)
+            seen.add(vx)
+            if vx == END or _is_atomic(chart, vx):
+                found.add(_base(vx))
                 continue
-            stack.extend(g.edges.get(v, ()))
-        out[a] = sorted(found)
-    out[END] = []
-    return out
+            stack.extend(g.edges.get(vx, ()))
+        out.setdefault(_base(a), set()).update(found)
+    result = {k: sorted(vs) for k, vs in out.items()}
+    result[END] = []
+    return result
 
 
-def _path(succ: Dict[str, List[str]], goals: Set[str], banned: Set[str]) -> Optional[List[str]]:
-    """Shortest START -> goal path avoiding ``banned``; ``None`` if none."""
+def _path(chart: ir.Chart, g: _Graph, goals: Set[str], banned: Set[str]) -> Optional[List[str]]:
+    """Shortest START -> goal path over the full graph avoiding atomic
+    vertices whose node is in ``banned``; the atomic nodes on it (and
+    ``START``/``END``), or ``None``."""
     prev: Dict[str, Optional[str]] = {START: None}
     q = deque([START])
     while q:
-        v = q.popleft()
-        if v in goals:
+        vx = q.popleft()
+        if vx != START and (vx == END and END in goals or
+                            _is_atomic(chart, vx) and _base(vx) in goals):
             path = []
-            cur: Optional[str] = v
+            cur: Optional[str] = vx
             while cur is not None:
-                path.append(cur)
+                if cur in (START, END) or _is_atomic(chart, cur):
+                    path.append(_base(cur))
                 cur = prev[cur]
             return list(reversed(path))
-        for w in succ.get(v, ()):
-            if w in banned or w in prev:
+        for w in sorted(g.edges.get(vx, ())):
+            if w in prev:
                 continue
-            prev[w] = v
+            if _is_atomic(chart, w) and _base(w) in banned:
+                continue
+            prev[w] = vx
             q.append(w)
     return None
 
@@ -382,14 +583,15 @@ def _branch_writes(chart: ir.Chart, root: str) -> Tuple[bool, Optional[List[str]
     return writes, paths
 
 
-def _effective_executor(chart: ir.Chart, node: ir.Node) -> List[str]:
-    if node.executor:
-        return node.executor
-    for anc in chart.ancestors(node.id):
-        ex = chart.node(anc).executor
-        if ex:
-            return ex
-    return []
+def _delegated_by(chart: ir.Chart, node: ir.Node) -> List[str]:
+    """Non-inline executors of ``node`` or any ancestor (a delegated subtree
+    runs whole in its executor, whatever its inner nodes say)."""
+    out: List[str] = []
+    for nid in [node.id] + chart.ancestors(node.id):
+        for e in chart.node(nid).executor:
+            if e != ir.EXEC_INLINE and e not in out:
+                out.append(e)
+    return out
 
 
 def _known_caps() -> Optional[Set[str]]:
@@ -440,12 +642,27 @@ def check(chart: ir.Chart) -> List[Finding]:
             if rid not in (chart.rules or {}):
                 out.append(Finding(ERROR, "unknown-rule", f"task {t.id} names unknown rule {rid!r}", t.id))
         if t.get("ask"):
-            ex = _effective_executor(chart, t)
-            remote = [e for e in ex if e != ir.EXEC_INLINE]
+            remote = _delegated_by(chart, t)
             if remote:
                 out.append(Finding(ERROR, "delegated-ask",
                                    f"task {t.id} asks for approval but may run under executor "
                                    f"{', '.join(remote)}; approvals cannot run inside a delegate", t.id))
+    for n in nodes:
+        if n.type == ir.T_CHOOSE and n.get("chooser") == ir.CHOOSER_USER:
+            remote = _delegated_by(chart, n)
+            if remote:
+                out.append(Finding(ERROR, "delegated-user-gate",
+                                   f"choose {n.id} waits for the user but may run under executor "
+                                   f"{', '.join(remote)}; a person's choice cannot run inside a "
+                                   f"delegate -- move it out of the delegated subtree", n.id))
+    if denials:
+        for t in tasks:
+            if not t.get("effects_declared", True):
+                out.append(Finding(WARNING, "effects-undeclared",
+                                   f"task {t.id} declares no effects; this chart forbids effects "
+                                   f"({', '.join(sorted({src for src, _, _ in denials}))}) and the "
+                                   f"check reads an undeclared task as doing nothing -- declare "
+                                   f"effects (or effects: [] for none)", t.id))
 
     for n in nodes:
         if n.type == ir.T_PAR:
@@ -480,8 +697,8 @@ def check(chart: ir.Chart) -> List[Finding]:
                                        f"paths {hit[0]!r} / {hit[1]!r}; the runtime will isolate or "
                                        f"serialize them", n.id))
 
-    succ = cfg(chart)
-    if _path(succ, {END}, set()) is None:
+    graph = _build(chart)
+    if _path(chart, graph, {END}, set()) is None:
         out.append(Finding(ERROR, "no-end", "no path from the start reaches completion", chart.root))
 
     for name, spec in ((chart.spec or {}).get("paths") or {}).items():
@@ -495,7 +712,7 @@ def check(chart: ir.Chart) -> List[Finding]:
             if not must:
                 out.append(Finding(ERROR, "must-pass", f"path {name}: unknown node {label!r}"))
                 continue
-            witness = _path(succ, goals - must, must)
+            witness = _path(chart, graph, goals - must, must)
             if witness is not None:
                 out.append(Finding(ERROR, "must-pass",
                                    f"path {name}: {' -> '.join(witness)} reaches {to} without passing "

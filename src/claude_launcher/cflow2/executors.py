@@ -153,26 +153,39 @@ class InlineFallback:
     """What a dispatched executor becomes when no dispatcher is registered."""
 
     @staticmethod
-    def next_executor(node: ir.Node, current: str, caps: Mapping[str, Any]) -> str:
+    def next_executor(node: ir.Node, current: str, caps: Mapping[str, Any],
+                      flat: bool = True) -> str:
         """The first executor after ``current`` in the node's preference list
-        that does not need a dispatcher and whose capabilities hold; ``inline``
-        when none does."""
+        that does not need a dispatcher and whose capabilities hold (and, for
+        a subtree that is not ``flat``, that can run one); ``inline`` when
+        none does."""
         from . import caps as caps_mod
 
         prefs: List[str] = list(node.executor or [])
         rest = prefs[prefs.index(current) + 1:] if current in prefs else []
         rest = [ex for ex in rest if ex not in DISPATCHED]
-        return caps_mod.choose_executor(rest, caps, needs=node.needs or []).executor
+        return caps_mod.choose_executor(rest, caps, needs=node.needs or [],
+                                        flat=flat).executor
 
 
 # ---------------------------------------------------------------------------
 # headless: schema, prompt, argv, result extraction
 
 #: Tools a read-only headless run may use, per harness, for the
-#: ``headless.tools.restrict`` route (an allow-list without any write tool).
+#: ``headless.tools.restrict`` route (``{tools}``: an allow-list without any
+#: write or command tool; the harness args must make it the *available* set,
+#: claude ``--tools``, pi ``--tools``).
 READONLY_TOOLS: Dict[str, List[str]] = {
-    "claude": ["Read", "Grep", "Glob", "LS", "WebFetch", "WebSearch", "TodoWrite"],
+    "claude": ["Read", "Grep", "Glob", "WebFetch", "WebSearch"],
     "pi": ["read", "grep", "find", "ls"],
+}
+
+#: Tools denied by name on the same route (``{deny}``), for a harness whose
+#: args also take a deny list (claude ``--disallowedTools``): a second wall
+#: in case the allow-list flag ever stops removing a tool.
+READONLY_DENY: Dict[str, List[str]] = {
+    "claude": ["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash"],
+    "pi": ["edit", "write", "bash"],
 }
 
 #: Above this many characters the prompt goes to stdin instead of argv.
@@ -293,7 +306,7 @@ def build_argv(command: List[str], caps: Mapping[str, Any], plan: Mapping[str, A
     ``command`` is the harness executable (``[claude]``, ``[codex]`` ...);
     ``plan`` is the delegation's ``route`` (``caps.NodePlan.to_dict()``).
     The prompt is the positional argument right after ``headless.run``'s
-    args (so a variadic flag like claude's ``--allowedTools`` cannot swallow
+    args (so a variadic flag like claude's ``--tools`` cannot swallow
     it), or stdin when it is too long for a command line.
     """
     from . import caps as caps_mod
@@ -318,7 +331,8 @@ def build_argv(command: List[str], caps: Mapping[str, Any], plan: Mapping[str, A
         argv += caps_mod.render_args(_cap(caps, "headless.sandbox.readonly"))
     elif readonly == "tools-restrict":
         argv += caps_mod.render_args(_cap(caps, "headless.tools.restrict"),
-                                     tools=READONLY_TOOLS.get(harness, READONLY_TOOLS["claude"]))
+                                     tools=READONLY_TOOLS.get(harness, READONLY_TOOLS["claude"]),
+                                     deny=READONLY_DENY.get(harness, READONLY_DENY["claude"]))
     budget = plan.get("budget") if plan else None
     if isinstance(budget, dict) and budget.get("usd_enforced") and budget.get("usd") is not None:
         argv += caps_mod.render_args(_cap(caps, "headless.budget.usd"), usd=f"{float(budget['usd']):g}")
@@ -434,6 +448,11 @@ def session_task(brief: Mapping[str, Any], *, cwd: str, scope: str, receipt_path
                  mcp: bool = True) -> str:
     """The opening task of a child session running a ``session`` delegation."""
     did = brief.get("delegation")
+    if brief.get("nested"):
+        # A nested delegation run is driven with flow_*; its finish is the
+        # result, so there is nothing to submit (the planner keeps a
+        # non-flat subtree off this executor when MCP is unavailable).
+        return build_prompt(brief, result=str(brief.get("submit") or ""))
     if mcp:
         submit = (
             f"When done, submit ONE result with the claunch MCP tool flow_delegate("
@@ -445,7 +464,9 @@ def session_task(brief: Mapping[str, Any], *, cwd: str, scope: str, receipt_path
     else:
         submit = (
             f"When done, write {{\"outcome\": ..., \"value\": {{...}}}} as JSON to "
-            f"{receipt_path}."
+            f"{receipt_path}.tmp first and then rename (mv) it to {receipt_path}: the "
+            "daemon reads that file as soon as it appears, so it must never exist "
+            "half-written."
         )
     shape = (f"The result is {{\"outcome\": ..., \"value\": {{...}}}} matching the declared "
              f"returns: {json.dumps(dict(brief.get('returns') or {}))}. ")

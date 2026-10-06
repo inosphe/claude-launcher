@@ -18,8 +18,19 @@ await          completed by
 ``delegation`` :func:`delegate_submit` (or a dispatcher, later)
 ``pause``      :func:`wait_tick` (a loop's ``every`` between iterations)
 ``limit``      :func:`extend_loop` (a loop at its ``max``; the run is
-               ``waiting_approval`` with reason ``loop_limit``)
+               ``waiting_approval`` with reason ``loop_limit``) or
+               :func:`extend_visits` (a node entered more than the chart's
+               ``max_visits`` times; reason ``visit_limit``)
+``approval``   an ask's answer (:func:`approve`, :func:`answer`)
+``verifying``  a background ``verify`` of an ``ok`` report
 =============  ==============================================================
+
+What holds what (``docs/cflow-v2.md`` 4.2): a halting monitor holds the WHOLE
+run -- no report, select, fork, delegation result, answer or time-based move
+applies until a person resumes it (:func:`release_halt`); a result a daemon
+executor brings in meanwhile is kept and applied on resume. An ask holds only
+its own task instance, a loop or visit limit only that loop or node instance;
+the rest of the run moves on.
 
 Everything else is completed by the engine from its children (``advance``).
 
@@ -42,7 +53,10 @@ report that introduced it):
 - ``between`` runs only when another iteration follows; ``every`` pauses after
   ``between``. Both apply to every loop mode.
 - A ``cond`` with no true guard and no ``else`` finishes with ``fail``.
-- ``bind`` stores the node's value whatever its outcome.
+- ``bind`` stores the node's own value whatever its outcome -- the value
+  before ``spec.ensures`` is applied (a failed ensures changes the outcome to
+  ``fail`` and the value the parent sees to ``{reason, original}``; the bound
+  variable keeps the node's own return shape).
 - ``on`` handlers run as a child of the node; the handler's outcome replaces
   the node's. ``spec.ensures`` is checked on the node's own outcome first.
 - par ``all`` fails fast with the failing branch's outcome/value; ``any`` with
@@ -66,6 +80,7 @@ import re
 import secrets
 import signal
 import subprocess
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -98,6 +113,21 @@ AW_LIMIT = "limit"
 #: A task whose ``ask`` has not been answered yet: entering it needs an
 #: approval (or, for an ask with ``options``, the decision is its result).
 AW_APPROVAL = "approval"
+#: A task whose ``ok`` report waits on its ``verify`` running in the background.
+AW_VERIFY = "verifying"
+
+#: Hold kinds (``state["approvals"]``). ``monitor_violation`` holds the whole
+#: run; the others hold one instance.
+HOLD_HALT = "monitor_violation"
+HOLD_LOOP = "loop_limit"
+HOLD_VISIT = "visit_limit"
+#: An ``ok`` finish whose acceptance probes did not all pass.
+HOLD_ACCEPTANCE = "acceptance"
+#: How often a failed acceptance check is run again (flow_status, the clock).
+ACCEPTANCE_RECHECK = 30.0
+#: A verify that has not come back this long after its own timeout is
+#: treated as lost (the process running it went away).
+VERIFY_LOST_GRACE = 120.0
 
 #: v1's default for a verify command (``cflow.model.DEFAULT_VERIFY_TIMEOUT``).
 DEFAULT_VERIFY_TIMEOUT = 900.0
@@ -151,6 +181,14 @@ class Run:
         self.events: List[Dict[str, Any]] = []
         self.deferred_error: Optional[str] = None
         self._caps: Optional[Dict[str, Any]] = None
+        #: Questions closed without an answer (timeout hop, cancellation,
+        #: abstention): their responders are told after the lock is released.
+        self.withdrawals: List[Dict[str, Any]] = []
+        #: Work that must happen after this run's lock is released (verify
+        #: jobs, a nested run's result for its parent).
+        self.after: List[Callable[[], Any]] = []
+        #: Nested delegation runs to abort with this run's save.
+        self.nested_aborts: List[Dict[str, Any]] = []
 
     # -- persistence -----------------------------------------------------
     @classmethod
@@ -166,6 +204,25 @@ class Run:
         self.store.save_state(self.state)
         self.store.append(self.events)
         self.events = []
+        for link in self.nested_aborts:
+            _abort_nested(link)
+        self.nested_aborts = []
+        if self.state.get("parent") and self.state.get("status") in FINISHED_STATUSES \
+                and not self.state.get("delivered"):
+            self.after.append(lambda: deliver_nested(str(self.store.cwd), self.store.scope))
+        if self.withdrawals:
+            pending, self.withdrawals = self.withdrawals, []
+            sender = driver_of(self.state)
+            self.after.append(lambda: _send_withdrawals(pending, sender))
+
+    def run_after(self) -> None:
+        """Run the work queued for after the lock (best effort)."""
+        todo, self.after = self.after, []
+        for fn in todo:
+            try:
+                fn()
+            except Exception:  # noqa: BLE001 - recorded state is already safe
+                pass
 
     def emit(self, event: str, **fields: Any) -> None:
         rec = {"ts": store_mod.utcnow(), "event": event}
@@ -221,7 +278,10 @@ class Run:
 def _sync_waiting(r: "Run") -> None:
     """``status``/``reason`` from the open approvals: the run is
     ``waiting_approval`` while something only a person can release holds it
-    (a loop limit, a halting monitor, an ask that fell to ``human``)."""
+    (a loop or visit limit, a halting monitor, an ask that fell to
+    ``human``). Every path that adds or removes a hold -- including every
+    cancellation -- goes through here on save, so status and reason never
+    outlive the hold that set them. A halt names the reason whenever present."""
     if r.state.get("status") not in LIVE_STATUSES:
         return
     holds = [a for a in r.state.get("approvals") or []
@@ -229,11 +289,28 @@ def _sync_waiting(r: "Run") -> None:
     if holds:
         kinds = [a.get("kind") for a in holds]
         r.state["status"] = ST_WAITING
-        if r.state.get("reason") not in kinds:
+        if HOLD_HALT in kinds:
+            r.state["reason"] = HOLD_HALT
+        elif r.state.get("reason") not in kinds:
             r.state["reason"] = kinds[0]
     else:
         r.state["status"] = ST_RUNNING
         r.state["reason"] = None
+
+
+def _halted(r: "Run") -> List[str]:
+    """Names of the halting monitors that hold the run (empty: not halted)."""
+    return [str(a.get("monitor")) for a in r.state.get("approvals") or []
+            if a.get("kind") == HOLD_HALT]
+
+
+def driver_of(state: Dict[str, Any]) -> str:
+    """The session that drives a run (recorded at start; older runs: the
+    scope when it names a session)."""
+    if "driver" in state:
+        return str(state.get("driver") or "")
+    scope = str(state.get("scope") or "")
+    return "" if scope in ("", store_mod.DEFAULT_SCOPE) else scope
 
 
 def _cap_on(value: Any) -> bool:
@@ -322,13 +399,13 @@ def render(text: Optional[str], env: Dict[str, Any]) -> str:
         src = inner if inner.startswith("$") else "$" + inner
         try:
             value = expr_mod.evaluate(src, env)
-        except expr_mod.ExprError:
+            if value is None:
+                return m.group(0)
+            if isinstance(value, str):
+                return value
+            return json.dumps(value, ensure_ascii=False)
+        except (expr_mod.ExprError, TypeError, ValueError, RecursionError, OverflowError):
             return m.group(0)
-        if value is None:
-            return m.group(0)
-        if isinstance(value, str):
-            return value
-        return json.dumps(value, ensure_ascii=False)
 
     return _REF.sub(repl, text)
 
@@ -412,13 +489,47 @@ def _enter(r: Run, node_id: str, parent: Optional[str], role: str,
     visits = r.state.setdefault("visits", {})
     visits[key] = int(visits.get(key) or 0) + 1
     r.emit("entered", node=node_id, instance=iid, type=node.type, label=node.label or None)
-
-    if node.type == ir.T_SCOPE and not _scope_params(r, iid, node):
+    if visits[key] > _max_visits(r, key):
+        _visit_limit(r, iid, node)
         return iid
-    if node.executor and node.executor != [ir.EXEC_INLINE] and _delegate(r, iid):
-        return iid
-    _ENTER[node.type](r, iid, node)
+    _enter_body(r, iid, node)
     return iid
+
+
+def _enter_body(r: Run, iid: str, node: ir.Node) -> None:
+    if node.type == ir.T_SCOPE and not _scope_params(r, iid, node):
+        return
+    if node.executor and node.executor != [ir.EXEC_INLINE] and _delegate(r, iid):
+        return
+    _ENTER[node.type](r, iid, node)
+
+
+# -- the run-wide visit limit (chart meta ``max_visits``) ----------------------
+
+
+def _max_visits(r: Run, key: str) -> int:
+    base = (r.chart.meta or {}).get("max_visits") or ir.DEFAULT_MAX_VISITS
+    try:
+        base = int(base)
+    except (TypeError, ValueError):
+        base = ir.DEFAULT_MAX_VISITS
+    return base + int((r.state.get("visit_extra") or {}).get(key) or 0)
+
+
+def _visit_limit(r: Run, iid: str, node: ir.Node) -> None:
+    """Entering ``node`` once more would pass the run's ``max_visits``: the
+    instance is parked before its body starts and the run holds for a person
+    (``claunch cflow2 extend --visits``). Only this instance waits."""
+    key = node_key(node)
+    inst = r.inst[iid]
+    inst["await"] = AW_LIMIT
+    inst["frame"]["visit_limit"] = True
+    visits = int(r.state["visits"].get(key) or 0)
+    approval = {"kind": HOLD_VISIT, "instance": iid, "node": node.id,
+                "label": node.label or None, "visits": visits, "max": _max_visits(r, key)}
+    r.state.setdefault("approvals", []).append(approval)
+    r.emit("waiting", node=node.id, instance=iid, kind=HOLD_VISIT, visits=visits,
+           max=approval["max"])
 
 
 def _enter_child(r: Run, parent: str, node_id: Optional[str], role: str,
@@ -516,8 +627,8 @@ def _scope_params(r: Run, iid: str, node: ir.Node) -> bool:
         _complete(r, iid, ir.OUTCOME_FAIL, {"reason": f"call arguments: {exc}"})
         return False
     for name, decl in (node.get("params") or {}).items():
-        if name in params:
-            continue
+        if params.get(name) is not None:
+            continue  # null is no value: the default applies
         decl = decl or {}
         # A required param without a value never gets here: a call site is
         # checked by the compiler, a group member by :func:`fork`.
@@ -903,10 +1014,13 @@ def _complete(r: Run, iid: str, outcome: str, value: Any, handled: bool = False)
     if not handled:
         key = node_key(node)
         r.state.setdefault("result", {})[key] = {"outcome": outcome, "value": value}
+        own = value
         outcome, value = _ensures(r, iid, node, outcome, value)
         r.state["result"][key] = {"outcome": outcome, "value": value}
         if node.bind:
-            r.state.setdefault("data", {})[node.bind] = value
+            # the node's own value, before ensures (doc 4.2): the variable
+            # keeps the shape the node returns
+            r.state.setdefault("data", {})[node.bind] = own
             r.emit("bound", node=node.id, instance=iid, var=node.bind)
         handler = node.on.get(outcome) if node.on else None
         if handler:
@@ -1016,7 +1130,16 @@ def _propagate(r: Run, start: str, sig: Dict[str, Any]) -> None:
             if op == ir.CTL_BREAK:
                 _cancel_children(r, cur, "break")
                 frame["decided"] = True
-                vals = frame.get("values") if node.get("mode") != ir.LOOP_RETRY else frame.get("last")
+                if node.get("mode") == ir.LOOP_RETRY:
+                    vals = frame.get("last")
+                elif node.get("parallel") and frame.get("results") is not None:
+                    # a parallel foreach: the items that finished ok before
+                    # the break, in item order
+                    res = frame.get("results") or {}
+                    vals = [res[k]["value"] for k in sorted(res, key=int)
+                            if res[k].get("outcome") == ir.OUTCOME_OK]
+                else:
+                    vals = frame.get("values")
                 _complete(r, cur, ir.OUTCOME_OK, vals)
                 return
             if role.startswith("item:"):
@@ -1058,16 +1181,24 @@ def _propagate(r: Run, start: str, sig: Dict[str, Any]) -> None:
 
 
 def _forget(r: Run, iid: str) -> None:
+    """Remove an instance with everything it held: its open delegation (a
+    nested delegation run is aborted with the save), its hold, its open ask
+    (responders that still had the question are told). Status and reason are
+    recomputed from what holds remain."""
     r.inst.pop(iid, None)
     for d in r.state.get("delegations", {}).values():
-        if d.get("instance") == iid and d.get("status") in ("pending", "queued", "running"):
+        if d.get("instance") == iid and d.get("status") in OPEN_DELEGATION + ("verifying",):
             d["status"] = "cancelled"
             d["finished"] = store_mod.utcnow()
+            if d.get("nested"):
+                r.nested_aborts.append(dict(d["nested"]))
     r.state["approvals"] = [a for a in r.state.get("approvals", []) if a.get("instance") != iid]
     for rec in (r.state.get("asks") or {}).values():
         if rec.get("instance") == iid and rec.get("status") == "open":
             rec["status"] = "cancelled"
             rec["closed"] = store_mod.utcnow()
+            _withdraw(r, rec, "cancelled")
+    _sync_waiting(r)
 
 
 def _drop(r: Run, iid: str, why: str) -> None:
@@ -1091,27 +1222,187 @@ def _finish_run(r: Run, outcome: str, value: Any, how: Optional[str] = None) -> 
             _drop(r, iid, how or "run finished")
     declared = r.chart.returns or {}
     ok = outcome == ir.OUTCOME_OK or outcome in declared
+    if ok and _acceptance_probes(r) and not (r.state.get("acceptance") or {}).get("passed"):
+        _acceptance_begin(r, outcome, value, how)
+        return
+    _finish_final(r, outcome, value, how)
+
+
+def _finish_final(r: Run, outcome: str, value: Any, how: Optional[str] = None) -> None:
+    declared = r.chart.returns or {}
+    ok = outcome == ir.OUTCOME_OK or outcome in declared
+    r.state["approvals"] = [a for a in r.state.get("approvals") or []
+                            if a.get("kind") != HOLD_ACCEPTANCE]
     r.state["status"] = ST_DONE if ok else ST_FAILED
     r.state["reason"] = None
-    r.state["approvals"] = []
+    # instance holds went with their instances; a run-wide hold (a halt) is
+    # kept on record -- progress is refused while it stands, so a run cannot
+    # finish past one, and a person can still see and release it
+    r.state["approvals"] = [a for a in r.state.get("approvals") or []
+                            if a.get("instance") is None]
     r.state["outcome"] = outcome
     r.state["value"] = value
     r.state["finished"] = store_mod.utcnow()
     r.emit("done", outcome=outcome, value=value, how=how, status=r.state["status"])
 
 
+# -- acceptance (typed start inputs, doc 2.6) ---------------------------------------
+
+#: ``probe_runner`` for acceptance checks; ``None`` is :func:`default_probe_runner`.
+ACCEPTANCE_RUNNER: Optional[ProbeRunner] = None
+
+
+def _acceptance_probes(r: Run) -> List[Dict[str, Any]]:
+    """The acceptance items with a probe (``spec.acceptance``, written by
+    :func:`.inputs.apply`); text-only items are the agent's own check."""
+    if r.state.get("parent"):
+        return []  # a nested delegation run: the delegating run checks at its end
+    items = (r.chart.spec or {}).get("acceptance") or []
+    return [dict(i) for i in items if isinstance(i, dict) and i.get("probe")]
+
+
+def _acceptance_begin(r: Run, outcome: str, value: Any, how: Optional[str]) -> None:
+    """Hold an ``ok`` finish until the acceptance probes ran (outside the
+    lock, in the background)."""
+    token = secrets.token_hex(4)
+    r.state["acceptance"] = {"status": "checking", "outcome": outcome, "value": value,
+                             "how": how, "token": token, "checked_at": r.now, "failed": []}
+    r.emit("acceptance_checking", items=[i.get("id") for i in _acceptance_probes(r)])
+    st, now = r.store, r.now
+    r.after.append(lambda: _launch(_acceptance_job, str(st.cwd), st.scope, token, now))
+
+
+def _acceptance_job(cwd: str, scope: str, token: str, now: Optional[float]) -> None:
+    st = RunStore(cwd, scope)
+    try:
+        snap = Run.load(st, now)
+    except StoreError:
+        return
+    acc = snap.state.get("acceptance") or {}
+    if acc.get("token") != token or snap.status not in LIVE_STATUSES:
+        return
+    runner = ACCEPTANCE_RUNNER or default_probe_runner
+    results = []
+    for item in _acceptance_probes(snap):
+        verdict, output, code = _probe_verdict(_run_probe(snap, None, runner, item["probe"]))
+        results.append({"id": item.get("id"), "text": item.get("text"), "probe": item["probe"],
+                        "met": verdict == PROBE_HOLDS, "exit": code,
+                        "output": _tail(str(output or ""))[-1000:]})
+
+    def op(r: Run) -> None:
+        acc = r.state.get("acceptance") or {}
+        if acc.get("token") != token or r.status not in LIVE_STATUSES:
+            return
+        failed = [x for x in results if not x["met"]]
+        acc["checked_at"] = r.now
+        if not failed:
+            acc.update(status="passed", passed=True, failed=[])
+            r.emit("acceptance_passed", items=[x["id"] for x in results])
+            _finish_final(r, acc["outcome"], acc.get("value"), acc.get("how"))
+            return
+        acc.update(status="failed", failed=failed)
+        r.state["approvals"] = [a for a in r.state.get("approvals") or []
+                                if a.get("kind") != HOLD_ACCEPTANCE]
+        r.state["approvals"].append({"kind": HOLD_ACCEPTANCE, "instance": None,
+                                     "failed": [x["id"] for x in failed]})
+        r.emit("acceptance_failed", failed=[{k: x[k] for k in ("id", "text", "exit")}
+                                            for x in failed])
+    try:
+        _mutate(cwd, scope, now, op)
+    except (FlowError, StoreError):
+        pass
+
+
+def _acceptance_recheck_due(r: Run) -> Optional[str]:
+    acc = r.state.get("acceptance") or {}
+    if acc.get("status") != "failed" or r.status not in LIVE_STATUSES:
+        return None
+    if r.now - float(acc.get("checked_at") or 0) < ACCEPTANCE_RECHECK:
+        return None
+    return acc.get("token")
+
+
+def accept_anyway(reason: Optional[str] = None, *, by: str = CALLER_USER,
+                  cwd: Optional[str] = None, scope: Optional[str] = None,
+                  now: Optional[float] = None) -> Dict[str, Any]:
+    """A person accepts a finish whose acceptance probes failed: the run
+    finishes with the outcome it reached (``acceptance_waived``)."""
+    def op(r: Run) -> None:
+        _require_progress(r)
+        acc = r.state.get("acceptance") or {}
+        if acc.get("status") != "failed":
+            raise FlowError("no failed acceptance check holds this run")
+        acc.update(status="waived", passed=True)
+        r.emit("acceptance_waived", by=by, reason=reason,
+               failed=[x.get("id") for x in acc.get("failed") or []])
+        _finish_final(r, acc["outcome"], acc.get("value"), acc.get("how"))
+    _mutate(cwd, scope, now, op)
+    return status(cwd=cwd, scope=scope, now=now, tick=False)
+
+
 # ---------------------------------------------------------------------------
 # delegation
 
 
+VIA_INTERNAL = "internal"
+VIA_MCP = "mcp"
+VIA_NESTED = "nested"
+
+
+def _subtree(chart: ir.Chart, node_id: str) -> List[ir.Node]:
+    """The nodes a delegation of ``node_id`` runs (without the node's own
+    ``on`` handlers, which run in the delegating run)."""
+    return list(ir.subtree_nodes(chart, node_id))
+
+
+def _subtree_flat(chart: ir.Chart, node_id: str) -> bool:
+    """Only task/seq nodes, no ``on``/``bind``/``ensures`` below the root
+    (``ir.subtree_is_flat``)."""
+    return bool(ir.subtree_is_flat(chart, node_id))
+
+
+def _user_gates(chart: ir.Chart, node_id: str) -> List[str]:
+    """A person's gates inside a subtree: a ``chooser: user`` choice, a task
+    with ``ask``. A delegate has no person to put them to."""
+    out = []
+    for n in _subtree(chart, node_id):
+        if n.type == ir.T_CHOOSE and (n.get("chooser") or ir.CHOOSER_AGENT) == ir.CHOOSER_USER:
+            out.append(f"choose {n.label or n.id} (chooser: user)")
+        elif n.type == ir.T_TASK and n.get("ask"):
+            out.append(f"task {n.label or n.id} (ask)")
+    return out
+
+
+def _plan(node: ir.Node, caps: Any, flat: bool) -> Any:
+    return caps_mod.plan_node(node, caps, flat=flat)
+
+
+def _next_undispatched(node: ir.Node, current: str, caps: Any, flat: bool) -> str:
+    return executors.InlineFallback.next_executor(node, current, caps, flat=flat)
+
+
 def _delegate(r: Run, iid: str) -> bool:
-    """Enter a delegation point. True when the subtree is NOT expanded here."""
+    """Enter a delegation point. True when the subtree is NOT expanded here.
+
+    A subtree with a person's gate in it (``chooser: user``, ``ask``) is never
+    delegated: it runs inline (``fallback``; the static check reports it as an
+    error). A flat subtree (task/seq only) goes out as one brief and comes
+    back as one result. Any other subtree, for a ``subagent`` or ``session``
+    executor, becomes a nested delegation run the delegate drives with the
+    flow_* tools (doc 7); ``headless`` takes flat subtrees only."""
     node = r.node_of(iid)
     if caps_mod is None:
         r.emit("fallback", node=node.id, cause="caps module unavailable", route="inline")
         return False
+    gates = _user_gates(r.chart, node.id)
+    if gates:
+        r.emit("fallback", node=node.id, instance=iid, decision="executor",
+               cause="a person's gate inside the delegated subtree: " + ", ".join(gates),
+               route=f"{', '.join(node.executor)} -> inline")
+        return False
+    flat = _subtree_flat(r.chart, node.id)
     caps = r.caps
-    plan = caps_mod.plan_node(node, caps)
+    plan = _plan(node, caps, flat)
     for ex, cap in plan.executor.skipped:
         r.emit("fallback", node=node.id, instance=iid, cause=cap,
                route=f"{ex} -> next preference", decision="executor")
@@ -1123,14 +1414,19 @@ def _delegate(r: Run, iid: str) -> bool:
                    route=part.route, decision=part_name, detail=list(part.degraded))
     executor = plan.route
     if executor in executors.DISPATCHED and not executors.available(str(r.store.cwd)):
-        nxt = executors.InlineFallback.next_executor(node, executor, caps)
+        nxt = _next_undispatched(node, executor, caps, flat)
         r.emit("fallback", node=node.id, instance=iid,
                cause=f"no {executor} dispatcher available (no daemon clock watching "
                      f"this directory)",
                route=f"{executor} -> {nxt}", decision="executor")
         executor = nxt
         if executor != plan.route:
-            plan = caps_mod.plan_node(_with_executor(node, executor), caps)
+            plan = _plan(_with_executor(node, executor), caps, flat)
+    if not flat and executor == ir.EXEC_HEADLESS:
+        r.emit("fallback", node=node.id, instance=iid, decision="executor",
+               cause="headless runs only a flat subtree (task/seq)",
+               route="headless -> inline")
+        executor = ir.EXEC_INLINE
     if executor == ir.EXEC_INLINE:
         return False
 
@@ -1141,13 +1437,17 @@ def _delegate(r: Run, iid: str) -> bool:
         "executor": executor, "status": "pending" if executor == ir.EXEC_SUBAGENT else "queued",
         "route": plan.to_dict(), "receipt": None, "started": store_mod.utcnow(),
         "started_at": r.now, "finished": None, "attempts": 0, "errors": [],
-        "returns": returns_of(node),
+        "returns": returns_of(node), "flat": flat,
     }
     dels[did] = rec
     r.inst[iid]["await"] = AW_DELEGATION
     r.inst[iid]["frame"]["delegation"] = did
     r.emit("delegate_started", node=node.id, instance=iid, delegation=did,
-           executor=executor, route=plan.route)
+           executor=executor, route=plan.route, nested=None if flat else True)
+    if not flat:
+        _open_nested(r, iid, rec)
+        if rec["status"] not in OPEN_DELEGATION:
+            return True  # the nested run finished on entry; already applied
     if executor in executors.DISPATCHED:
         executors.dispatch(rec, r)
     return True
@@ -1159,16 +1459,213 @@ def _with_executor(node: ir.Node, executor: str) -> ir.Node:
     return clone
 
 
+# -- nested delegation runs ----------------------------------------------------
+
+
+def nested_scope(scope: str, did: str) -> str:
+    return f"{scope}{store_mod.NESTED_SEP}{did}"
+
+
+def _nested_chart(r: Run, node: ir.Node) -> ir.Chart:
+    """The delegation node's subtree as a chart of its own: the root keeps
+    its body but not its executor, ``on``, ``bind`` or ensures (the
+    delegating run applies those when the result comes back)."""
+    nodes: Dict[str, ir.Node] = {}
+    for n in _subtree(r.chart, node.id):
+        nodes[n.id] = ir.Node.from_dict(n.to_dict())
+    root = nodes[node.id]
+    root.parent = None
+    root.executor = []
+    root.on = {}
+    root.bind = None
+    labels = {x for n in nodes.values() if n.id != node.id for x in (n.id, n.label) if x}
+    spec = json.loads(json.dumps(r.chart.spec or {}))
+    spec.pop("monitors", None)  # run-wide: the delegating run watches them
+    spec["ensures"] = {k: v for k, v in (spec.get("ensures") or {}).items()
+                       if str(k).rsplit(".", 1)[0] in labels}
+    return ir.Chart(
+        name=f"{r.chart.name}~{node.label or node.id}", nodes=nodes, root=node.id,
+        kind=ir.KIND_WORKFLOW, description=f"nested delegation run of {node.label or node.id}",
+        meta=dict(r.chart.meta or {}), params={}, returns=returns_of(node), data={},
+        rules=dict(r.chart.rules or {}), spec=spec, source=r.chart.source,
+    )
+
+
+def _open_nested(r: Run, iid: str, rec: Dict[str, Any]) -> None:
+    """Start the nested run of a delegation whose subtree is not flat, in the
+    same directory under scope ``<scope>~<delegation id>``, with the
+    delegation's params and a snapshot of the run data. Its driver is the
+    delegate: the delegating run's driver for ``subagent`` (a sub-agent calls
+    the tools from the driver's session), the assigned child session for
+    ``session``."""
+    node = r.node_of(iid)
+    scope = nested_scope(r.store.scope, rec["id"])
+    link = {"cwd": str(r.store.cwd), "scope": r.store.scope, "delegation": rec["id"],
+            "run": r.state.get("run_id")}
+    rec["nested"] = {"cwd": str(r.store.cwd), "scope": scope}
+    chart = _nested_chart(r, node)
+    params = json.loads(json.dumps(r.env(iid).get("params") or {}, default=str))
+    data = json.loads(json.dumps(r.state.get("data") or {}, default=str))
+    st = RunStore(str(r.store.cwd), scope)
+    driver = driver_of(r.state) if rec["executor"] == ir.EXEC_SUBAGENT else ""
+    with st.lock():
+        if st.exists():
+            _abort_nested({"cwd": str(st.cwd), "scope": scope}, locked=True)
+            st.archive()
+        elif st.chart_path.exists():
+            st.chart_path.unlink()
+        child = _new_run(st, chart, params=params, data=data, caps=r.state.get("caps"),
+                         driver=driver, now=r.now, parent=link)
+        done = child.state.get("status") in FINISHED_STATUSES
+        if done:
+            child.state["delivered"] = True  # applied below, in this lock
+        child.save()
+        child.after = []  # nothing of the child's may wait on this run's lock
+        outcome, value = child.state.get("outcome"), child.state.get("value")
+    r.emit("nested_started", delegation=rec["id"], node=node.id, instance=iid, scope=scope)
+    if done:
+        _nested_result(r, rec, child.state.get("status"), outcome, value)
+
+
+def _abort_nested(link: Dict[str, Any], locked: bool = False) -> None:
+    """Abort a nested delegation run (its delegation was cancelled). Marked
+    delivered: nothing goes back to the parent."""
+    try:
+        st = RunStore(link["cwd"], link["scope"])
+        if not st.exists():
+            return
+
+        def go() -> None:
+            child = Run.load(st)
+            if child.status in LIVE_STATUSES:
+                _abort(child, "its delegation was cancelled in the delegating run")
+            child.state["delivered"] = True
+            child.store.save_state(child.state)
+            child.store.append(child.events)
+
+        if locked:
+            go()
+        else:
+            with st.lock():
+                go()
+    except (StoreError, OSError, KeyError):
+        pass
+
+
+def _nested_result(r: Run, rec: Dict[str, Any], status_: Optional[str], outcome: Any,
+                   value: Any) -> None:
+    """A nested run finished: its root outcome/value is the delegation's
+    result, validated against ``returns`` like any submission."""
+    if rec["status"] not in OPEN_DELEGATION:
+        return
+    if status_ == ST_ABORTED:
+        _fail_delegation(r, rec, "the nested delegation run was aborted")
+        return
+    outcome = str(outcome or ir.OUTCOME_FAIL)
+    rec["attempts"] = int(rec.get("attempts") or 0) + 1
+    errors = validate_result(rec.get("returns") or {ir.OUTCOME_OK: {}}, outcome, value)
+    if errors:
+        # the nested run cannot be re-run: an invalid result fails at once
+        rec["attempts"] = max(int(rec["attempts"]), 2)
+        _reject(r, rec, errors)
+        return
+    _accept(r, rec, outcome, value, f"nested run {rec['nested']['scope']}")
+
+
+def deliver_nested(cwd: str, scope: str) -> bool:
+    """Hand a finished nested run's result to its delegating run (called
+    after the nested run's lock is released, and by the parent's status
+    reconcile). True when something was delivered."""
+    st = RunStore(cwd, scope)
+    try:
+        state = st.load_state()
+    except StoreError:
+        return False
+    link = state.get("parent")
+    if not link or state.get("delivered") or state.get("status") not in FINISHED_STATUSES:
+        return False
+
+    def op(r: Run) -> None:
+        rec = (r.state.get("delegations") or {}).get(link["delegation"])
+        if r.status not in LIVE_STATUSES or rec is None \
+                or (rec.get("nested") or {}).get("scope") != scope:
+            return
+        _nested_result(r, rec, state.get("status"), state.get("outcome"), state.get("value"))
+    try:
+        _mutate(link["cwd"], link["scope"], None, op)
+    except (FlowError, StoreError):
+        return False
+    with st.lock():
+        cur = st.load_state()
+        cur["delivered"] = True
+        st.save_state(cur)
+    return True
+
+
+def _reconcile_nested(st: RunStore) -> None:
+    """Deliver results of nested runs that finished without handing them on
+    (the process finishing them went away first)."""
+    try:
+        state = st.load_state()
+    except StoreError:
+        return
+    for rec in (state.get("delegations") or {}).values():
+        nested = rec.get("nested")
+        if nested and rec.get("status") in OPEN_DELEGATION:
+            deliver_nested(nested["cwd"], nested["scope"])
+
+
+# -- accepting a delegation result ----------------------------------------------
+
+
+def _accept(r: Run, rec: Dict[str, Any], outcome: str, value: Any, source: str) -> None:
+    """Apply a valid delegation result. While a monitor halts the run the
+    result is kept (``held``) and applied when a person resumes it."""
+    did = rec["id"]
+    if _halted(r):
+        rec["held"] = {"outcome": outcome, "value": value, "source": source}
+        r.emit("delegate_held", delegation=did, node=rec["node"], outcome=outcome,
+               reason="the run is halted by a monitor; applied on resume")
+        return
+    receipt = r.store.write_receipt(did, {
+        "delegation": did, "node": rec["node"], "outcome": outcome,
+        "value": value, "source": source, "submitted": store_mod.utcnow(),
+    })
+    rec.pop("held", None)
+    rec.update({"status": "returned", "receipt": str(receipt),
+                "finished": store_mod.utcnow(), "outcome": outcome})
+    r.emit("delegate_returned", delegation=did, node=rec["node"],
+           outcome=outcome, receipt=str(receipt))
+    _complete(r, rec["instance"], outcome, value)
+
+
+def _fail_delegation(r: Run, rec: Dict[str, Any], reason: str,
+                     outcome: str = ir.OUTCOME_FAIL) -> None:
+    rec["status"] = "timeout" if outcome == ir.OUTCOME_TIMEOUT else "failed"
+    rec["finished"] = store_mod.utcnow()
+    rec.setdefault("errors", []).append([reason])
+    r.emit("delegate_failed", delegation=rec["id"], node=rec["node"], reason=reason,
+           outcome=outcome)
+    _complete(r, rec["instance"], outcome, {"reason": reason})
+
+
+def _delegation_verifies(r: Run, rec: Dict[str, Any]) -> List[ir.Node]:
+    """Tasks of a flat delegated subtree that declare ``verify``."""
+    return [n for n in _subtree(r.chart, rec["node"])
+            if n.type == ir.T_TASK and verify_spec(n)]
+
+
 def brief(r: Run, did: str) -> Dict[str, Any]:
     """What a delegate gets: rendered prompts of the subtree's tasks in order,
-    the return schema, the rules, the route plan."""
+    the return schema, the rules, the route plan -- and, for a subtree with
+    control structure, the nested run it drives."""
     rec = r.state["delegations"][did]
     iid = rec["instance"]
     node = r.chart.node(rec["node"])
     env = r.env(iid) if iid in r.inst else r.env(None)
     tasks = []
     rule_ids: List[str] = []
-    for n in r.chart.walk(node.id):
+    for n in _subtree(r.chart, node.id):
         if n.type != ir.T_TASK:
             continue
         tasks.append({
@@ -1182,21 +1679,40 @@ def brief(r: Run, did: str) -> Dict[str, Any]:
                 rule_ids.append(rid)
     rules = [{"id": rid, "text": (r.chart.rules.get(rid) or {}).get("text")} for rid in rule_ids]
     receipt = str(r.store.receipt_path(did))
-    return {
+    out = {
         "delegation": did, "node": node.id, "label": node.label or None,
         "type": node.type, "executor": rec["executor"], "status": rec["status"],
         "with": env.get("params") if node.type == ir.T_SCOPE else None,
         "tasks": tasks, "returns": rec.get("returns") or returns_of(node),
         "rules": rules, "route": rec.get("route"),
         "receipt_path": receipt,
-        "submit": (
+    }
+    nested = rec.get("nested")
+    if nested:
+        out["nested"] = dict(nested)
+        out["tasks_outline_only"] = True
+        out["submit"] = (
+            f"this subtree has control structure, so the engine drives it as a nested run "
+            f"in {nested['cwd']} under scope {nested['scope']!r}. Drive it like any run, "
+            f"passing scope={nested['scope']!r} (and cwd={nested['cwd']!r} when you stand "
+            f"in another directory) to every flow_* call: flow_status for what is active, "
+            f"flow_report for each task, flow_select for each choice, until it is done. "
+            f"Its final outcome and value become this delegation's result on their own -- "
+            f"do not submit with flow_delegate. The task list above is an outline; the "
+            f"nested run's flow_status is what to follow."
+        )
+    else:
+        verifies = [t["label"] or t["node"] for t in tasks if t.get("verify")]
+        out["submit"] = (
             "run the tasks above in order in a fresh context, then submit ONE result "
             "for the whole delegation with flow_delegate(delegation, outcome, value) "
             "matching 'returns'. Without MCP access the delegate writes "
             f'{{"outcome": ..., "value": {{...}}}} to {receipt} and the driver '
             "submits that path as receipt_path."
-        ),
-    }
+            + (f" An ok result is accepted only after the verify of "
+               f"{', '.join(verifies)} passes (the engine runs it)." if verifies else "")
+        )
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1205,11 +1721,17 @@ def brief(r: Run, did: str) -> Dict[str, Any]:
 
 def _mutate(cwd: Optional[str], scope: Optional[str], now: Optional[float],
             fn: Callable[[Run], Any]) -> Any:
+    """Load, apply ``fn`` under the run lock, save. Time-based moves that are
+    due (an ask's deadline, a timeout, a wait's seconds) apply first, so an
+    operation never lands on a state the clock has already moved past."""
     st = RunStore(cwd, scope)
     with st.lock():
         r = Run.load(st, now)
-        out = fn(r)
+        if r.status in LIVE_STATUSES:
+            _tick_time(r)
+        out = fn(r)  # a refusal raises before save: nothing is written
         r.save()
+    r.run_after()
     if r.deferred_error:
         raise FlowError(r.deferred_error)
     return out
@@ -1222,6 +1744,21 @@ def _require_live(r: Run) -> None:
         )
 
 
+def _require_progress(r: Run) -> None:
+    """Live and not halted: a halting monitor stops every move of the run."""
+    _require_live(r)
+    halted = _halted(r)
+    if halted:
+        raise FlowError(
+            f"run {r.state.get('run_id')} is halted by monitor {', '.join(halted)}: nothing "
+            f"moves until a person resumes it ('claunch cflow2 resume' or the web UI). Tell "
+            f"the user what the monitor found; do not work around it")
+
+
+def _absent(value: Any) -> bool:
+    return value is None
+
+
 def _validate_params(chart: ir.Chart, params: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     params = dict(params or {})
     decls = chart.params or {}
@@ -1232,12 +1769,12 @@ def _validate_params(chart: ir.Chart, params: Optional[Dict[str, Any]]) -> Dict[
     out: Dict[str, Any] = {}
     for name, decl in decls.items():
         decl = decl or {}
-        if name in params:
+        if not _absent(params.get(name)):
             out[name] = params[name]
         elif "default" in decl:
-            out[name] = decl["default"]
+            out[name] = json.loads(json.dumps(decl["default"]))
         elif decl.get("required"):
-            raise FlowError(f"missing required param {name!r}")
+            raise FlowError(f"missing required param {name!r} (null is no value)")
         else:
             out[name] = None
     for name, value in params.items():
@@ -1245,19 +1782,244 @@ def _validate_params(chart: ir.Chart, params: Optional[Dict[str, Any]]) -> Dict[
     return out
 
 
+# -- values in shell commands (verify) -------------------------------------------
+
+#: The only value references a ``verify`` command string may hold: a param or a
+#: top-level data name. Each becomes a reference to an environment variable
+#: (``CFLOW_IN_<NAME>`` / ``CFLOW_DATA_<NAME>``); the value itself never
+#: becomes shell text.
+_SHELL_REF = re.compile(r"^\$?(params|data)\.([A-Za-z_][A-Za-z0-9_-]*)$")
+
+
+def _data_env_name(name: str) -> str:
+    return "CFLOW_DATA_" + re.sub(r"[^A-Za-z0-9]", "_", str(name)).upper()
+
+
+#: Root names of the run's expression environment; ``${name...}`` with one of
+#: these (or with a ``.``/``[`` path) is a cflow value reference. Anything
+#: else -- ``${HOME}``, ``${CFLOW_IN_X}``, ``${VAR:-x}`` -- is the shell's own.
+_VALUE_ROOTS = ("params", "data", "prev", "item", "result", "visits", "caps", "probe",
+                "inputs")
+
+
+def _is_value_ref(inner: str) -> bool:
+    inner = inner.strip()
+    if not inner or inner.startswith("frag:"):
+        return False
+    if inner.startswith("$"):
+        return True
+    m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)(.*)$", inner, re.S)
+    if not m:
+        return False
+    root, rest = m.group(1), m.group(2)
+    return root in _VALUE_ROOTS or rest[:1] in (".", "[")
+
+
+def _shell_refs(text: str) -> List[Tuple[int, int, str]]:
+    """``(start, end, quoting)`` of every cflow value reference in ``text``
+    where quoting is ``none``/``double``/``single`` -- the shell quoting
+    state the reference sits in. Shell parameter expansions are not
+    references (:func:`_is_value_ref`)."""
+    out: List[Tuple[int, int, str]] = []
+    state = "none"
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch == "$" and text.startswith("${", i):
+            end = text.find("}", i + 2)
+            if end != -1:
+                if _is_value_ref(text[i + 2:end]):
+                    out.append((i, end + 1, state))
+                i = end + 1
+                continue
+        if state == "single":
+            if ch == "'":
+                state = "none"
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            i += 2
+            continue
+        if ch == "'" and state == "none":
+            state = "single"
+        elif ch == '"':
+            state = "double" if state == "none" else "none"
+        i += 1
+    return out
+
+
+def shell_ref_problems(text: Any, what: str) -> List[str]:
+    """Why ``text`` (a shell command) cannot be run with its value references
+    turned into environment variables; empty when it can."""
+    if isinstance(text, (list, tuple)):
+        return [f"{what}: value reference in argv item {x!r} -- read the value from the "
+                f"environment (CFLOW_IN_NAME / CFLOW_DATA_NAME) instead"
+                for x in text if "${" in str(x)]
+    if not isinstance(text, str):
+        return []
+    problems = []
+    for a, b, quoting in _shell_refs(text):
+        ref = text[a + 2:b - 1].strip()
+        if not _SHELL_REF.match(ref):
+            problems.append(f"{what}: value reference ${{{ref}}} -- a shell command may only "
+                            f"name ${{params.NAME}} or ${{data.NAME}} (passed as environment "
+                            f"variables CFLOW_IN_NAME / CFLOW_DATA_NAME)")
+        elif quoting == "single":
+            problems.append(f"{what}: ${{{ref}}} sits inside single quotes, where the shell "
+                            f"does not expand the variable it becomes")
+    return problems
+
+
+def _shell_command(text: str) -> str:
+    """``text`` with each ``${params.X}``/``${data.X}`` replaced by a quoted
+    reference to its environment variable (``"${CFLOW_IN_X}"``, bare inside
+    double quotes). Callers checked :func:`shell_ref_problems` first."""
+    out, last = [], 0
+    for a, b, quoting in _shell_refs(text):
+        m = _SHELL_REF.match(text[a + 2:b - 1].strip())
+        if not m:
+            raise FlowError(f"verify {text!r}: unsupported value reference "
+                            f"{text[a:b]!r}")
+        var = _env_name(m.group(2)) if m.group(1) == "params" else _data_env_name(m.group(2))
+        out.append(text[last:a])
+        out.append(f"${{{var}}}" if quoting == "double" else f'"${{{var}}}"')
+        last = b
+    out.append(text[last:])
+    return "".join(out)
+
+
+def check_shell_refs(chart: ir.Chart) -> List[str]:
+    """Every ``verify`` string and every probe (wait and monitor) of ``chart``
+    checked against the shell value rule (probes follow the same rule:
+    ``${params.X}``/``${data.X}`` become environment variable references)."""
+    problems: List[str] = []
+    for n in chart.nodes.values():
+        if n.type == ir.T_TASK:
+            spec = verify_spec(n)
+            if spec:
+                problems += shell_ref_problems(spec["run"], f"task {n.label or n.id} verify")
+        if n.type == ir.T_WAIT:
+            problems += shell_ref_problems(n.get("probe"), f"wait {n.label or n.id} probe")
+    for name, body in ((chart.spec or {}).get("monitors") or {}).items():
+        for pname, cmd in _monitor_probes(dict(body or {}), str(name)).items():
+            problems += shell_ref_problems(cmd, f"monitor {name} probe {pname}")
+    return problems
+
+
+# -- starting ----------------------------------------------------------------------
+
+
+def _new_run(st: RunStore, chart: ir.Chart, *, params: Dict[str, Any], data: Any,
+             caps: Any, driver: str, now: Optional[float],
+             parent: Optional[Dict[str, Any]] = None,
+             inputs: Optional[Dict[str, Any]] = None) -> Run:
+    """A fresh run in ``st`` (lock held, slot empty): snapshot, state, root
+    entered. The caller saves."""
+    run_id = time.strftime("%Y%m%d-%H%M%S", time.gmtime(now if now is not None else None)) \
+        + "-" + uuid.uuid4().hex[:6]
+    state: Dict[str, Any] = {
+        "version": 1, "run_id": run_id, "workflow": chart.name, "source": chart.source,
+        "status": ST_RUNNING, "reason": None, "started": store_mod.utcnow(),
+        "updated": None, "finished": None, "params": params,
+        "data": json.loads(json.dumps(data or {})), "result": {}, "visits": {},
+        "inst": {}, "active": [], "delegations": {}, "approvals": [], "seq": 0,
+        "caps": caps if isinstance(caps, dict) or caps is None else _caps_to_json(caps),
+        "probe": {}, "outcome": None, "value": None,
+        "scope": st.scope, "cwd": str(st.cwd), "driver": driver or "",
+    }
+    if parent:
+        state["parent"] = parent
+    st.write_chart(chart)
+    r = Run(st, chart, state, now)
+    r.emit("started", run=run_id, workflow=chart.name, source=chart.source or None,
+           params=params, driver=driver or None, parent=parent, inputs=inputs)
+    _enter(r, chart.root, None, "root")
+    _tick_time(r)
+    return r
+
+
+def _apply_inputs(chart: ir.Chart, raw: Optional[Dict[str, Any]]
+                  ) -> Tuple[ir.Chart, Optional[Dict[str, Any]]]:
+    """Fold typed start inputs into the chart before it is snapshotted
+    (:mod:`.inputs`): ``data.inputs``, invariant rules and monitors,
+    acceptance checks. ``(chart, values)``; values ``None`` when the chart
+    declares no inputs and none were given."""
+    schema = (chart.meta or {}).get("inputs") or {}
+    if (chart.meta or {}).get("inputs_applied"):
+        if raw:
+            raise FlowError(f"{chart.name}: this chart was already started with inputs")
+        return chart, (chart.data or {}).get("inputs")
+    if not schema and not raw:
+        return chart, None
+    try:
+        from . import inputs as inputs_mod
+    except ImportError:  # pragma: no cover - a runtime without typed inputs
+        raise FlowError("typed start inputs are not available in this version")
+    if raw is not None and not isinstance(raw, dict):
+        raise FlowError("inputs must be an object of name -> value")
+    values, errors = inputs_mod.normalize(schema, raw or {})
+    if errors:
+        raise FlowError("invalid inputs: " + "; ".join(f"{k}: {v}" for k, v in errors.items()))
+    try:
+        return inputs_mod.apply(chart, values), values
+    except ValueError as exc:
+        raise FlowError(str(exc))
+
+
+def _gate_waits(state: Dict[str, Any], chart: Optional[ir.Chart]) -> List[str]:
+    """What only a person may release in a run: a user choice, an open ask,
+    a halt, a loop or visit limit."""
+    out = []
+    for a in state.get("approvals") or []:
+        kind = a.get("kind")
+        out.append(f"monitor {a.get('monitor')}" if kind == HOLD_HALT
+                   else f"{kind} on {a.get('label') or a.get('node') or a.get('instance')}")
+    if chart is not None:
+        for iid, inst in (state.get("inst") or {}).items():
+            if inst.get("await") != AW_CHOOSE:
+                continue
+            try:
+                node = chart.node(inst["node"])
+            except ir.IRError:
+                continue
+            if (node.get("chooser") or ir.CHOOSER_AGENT) == ir.CHOOSER_USER:
+                out.append(f"user choice {node.label or iid}")
+    return out
+
+
+def default_driver(scope: Optional[str] = None) -> str:
+    """The session a run started now belongs to: the starter's session
+    (``$CLAUNCH_SESSION``), else the session the scope names."""
+    env = os.environ.get(store_mod.SESSION_ENV, "").strip()
+    if env:
+        return env
+    scope = (scope or "").strip()
+    return "" if scope in ("", store_mod.DEFAULT_SCOPE) else scope
+
+
 def start(chart: ir.Chart, *, cwd: Optional[str] = None, scope: Optional[str] = None,
           params: Optional[Dict[str, Any]] = None, caps: Any = None,
-          force: bool = False, now: Optional[float] = None) -> Dict[str, Any]:
+          force: bool = False, now: Optional[float] = None,
+          driver: Optional[str] = None, caller: str = CALLER_USER,
+          inputs: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Start a run of ``chart`` in the (cwd, scope) slot; returns :func:`status`.
 
-    A finished run in the slot is archived first. A live one refuses the start
-    unless ``force`` (it is then aborted and archived).
+    ``driver`` is the session that drives the run -- its identity for asks
+    and for the MCP tools' authority (default :func:`default_driver`). A
+    finished run in the slot is archived first. A live one refuses the start
+    unless ``force`` (it is then aborted and archived); an agent's force
+    (``caller`` agent) is refused while that run waits on a person.
     """
     if chart.kind != ir.KIND_WORKFLOW:
         raise FlowError(f"{chart.name} is a {chart.kind}; only a workflow can be started")
     ir.validate(chart)
+    chart, input_values = _apply_inputs(chart, inputs)
+    problems = check_shell_refs(chart)
+    if problems:
+        raise FlowError("refused: " + "; ".join(problems))
     values = _validate_params(chart, params)
     st = RunStore(cwd, scope)
+    who = default_driver(st.scope) if driver is None else str(driver or "")
     with st.lock():
         if st.exists():
             try:
@@ -1271,34 +2033,28 @@ def start(chart: ir.Chart, *, cwd: Optional[str] = None, scope: Optional[str] = 
                         f"{old.get('status')} here; continue it, or abort it first"
                     )
                 old_run = Run.load(st, now)
+                gates = _gate_waits(old_run.state, old_run.chart)
+                if caller != CALLER_USER and gates:
+                    raise FlowError(
+                        f"refused: the live run waits on a person ({'; '.join(gates)}); a "
+                        f"forced start would discard that. Ask the user to answer it, or to "
+                        f"abort the run themselves ('claunch cflow2 abort')")
                 _abort(old_run, "replaced by a forced start")
                 old_run.save()
             st.archive(old.get("run_id"))
         elif st.chart_path.exists():
             st.chart_path.unlink()
-        run_id = time.strftime("%Y%m%d-%H%M%S", time.gmtime(now if now is not None else None)) \
-            + "-" + uuid.uuid4().hex[:6]
-        state: Dict[str, Any] = {
-            "version": 1, "run_id": run_id, "workflow": chart.name, "source": chart.source,
-            "status": ST_RUNNING, "reason": None, "started": store_mod.utcnow(),
-            "updated": None, "finished": None, "params": values,
-            "data": json.loads(json.dumps(chart.data or {})), "result": {}, "visits": {},
-            "inst": {}, "active": [], "delegations": {}, "approvals": [], "seq": 0,
-            "caps": _caps_to_json(caps), "probe": {}, "outcome": None, "value": None,
-            "scope": st.scope, "cwd": str(st.cwd),
-        }
-        st.write_chart(chart)
-        r = Run(st, chart, state, now)
-        r.emit("started", run=run_id, workflow=chart.name, source=chart.source or None,
-               params=values)
-        _enter(r, chart.root, None, "root")
-        _tick_time(r)
+        r = _new_run(st, chart, params=values, data=chart.data, caps=_caps_to_json(caps),
+                     driver=who, now=now, inputs=input_values)
         r.save()
+    r.run_after()
     return status(cwd=cwd, scope=scope, now=now, tick=False)
 
 
-def _find(r: Run, ref: Optional[str], kinds: Tuple[str, ...], what: str) -> str:
-    cands = [iid for iid, inst in r.inst.items() if inst.get("await") in kinds]
+def _find(r: Run, ref: Optional[str], kinds: Tuple[str, ...], what: str,
+          pred: Optional[Callable[[str], bool]] = None) -> str:
+    cands = [iid for iid, inst in r.inst.items() if inst.get("await") in kinds
+             and (pred is None or pred(iid))]
     if ref:
         if ref in cands:
             return ref
@@ -1317,10 +2073,121 @@ def _find(r: Run, ref: Optional[str], kinds: Tuple[str, ...], what: str) -> str:
     raise FlowError(f"several {what}s are active ({', '.join(sorted(cands))}); name one")
 
 
+# -- authority (the MCP tools) ---------------------------------------------------
+
+
+def _assignee(state: Dict[str, Any], rec: Dict[str, Any]) -> str:
+    """Who carries out a delegation: the driver for a sub-agent, the child
+    session for a session delegation (``assignee``, else ``child``)."""
+    if rec.get("executor") == ir.EXEC_SUBAGENT:
+        return driver_of(state)
+    if rec.get("executor") == ir.EXEC_SESSION:
+        return str(rec.get("assignee") or rec.get("child") or "")
+    return ""
+
+
+def may_drive(state: Dict[str, Any], session: str) -> bool:
+    """Whether ``session`` may operate the run ``state``: it is the run's
+    driver, or the run is a nested delegation run and ``session`` is the
+    assignee of that delegation."""
+    session = str(session or "").strip()
+    drv = driver_of(state)
+    if drv:
+        if session == drv:
+            return True
+    elif not session and not state.get("parent"):
+        return True  # an unmanaged run operated from an unmanaged shell
+    link = state.get("parent")
+    if link and session:
+        try:
+            pstate = RunStore(link["cwd"], link["scope"]).load_state()
+        except (StoreError, KeyError):
+            return False
+        rec = (pstate.get("delegations") or {}).get(link.get("delegation"))
+        if rec is not None and rec.get("status") in OPEN_DELEGATION \
+                and _assignee(pstate, rec) == session:
+            return True
+    return False
+
+
+def authorize(*, cwd: Optional[str], scope: Optional[str], session: str) -> None:
+    """Refuse an agent's call on a run it does not drive (no run: nothing to
+    refuse; starting is checked by the caller)."""
+    st = RunStore(cwd, scope)
+    if not st.exists():
+        return
+    try:
+        state = st.load_state()
+    except StoreError:
+        return
+    if may_drive(state, session):
+        return
+    drv = driver_of(state) or "no session"
+    raise FlowError(
+        f"the cflow2 run in {st.cwd} scope {st.scope!r} is driven by {drv}; "
+        f"{session or 'an unmanaged caller'} may not operate it. Work your own run "
+        f"(omit scope and cwd)")
+
+
+def _check_delegation_authority(r: Run, rec: Dict[str, Any], session: str,
+                                what: str) -> None:
+    session = str(session or "").strip()
+    ex = rec.get("executor")
+    if rec.get("nested") and what == "submit":
+        raise FlowError(
+            f"delegation {rec['id']} runs as the nested run {rec['nested']['scope']!r}: "
+            f"drive it with the flow_* tools under that scope; its result comes back on its "
+            f"own")
+    if ex == ir.EXEC_HEADLESS:
+        if what == "submit":
+            raise FlowError(f"delegation {rec['id']} is headless: only the daemon's executor "
+                            f"brings its result back")
+        if may_drive(r.state, session):
+            return
+    elif ex == ir.EXEC_SUBAGENT:
+        if may_drive(r.state, session):
+            return
+    elif ex == ir.EXEC_SESSION:
+        assignee = _assignee(r.state, rec)
+        if session and session == assignee:
+            return
+        if what == "brief" and may_drive(r.state, session):
+            return
+        raise FlowError(f"delegation {rec['id']} is carried out by session "
+                        f"{assignee or '(not spawned yet)'}; only it may {what} here")
+    raise FlowError(f"delegation {rec['id']} belongs to the run driven by "
+                    f"{driver_of(r.state) or 'no session'}; {session or 'this caller'} may "
+                    f"not {what} it")
+
+
+def _receipt_ok(r: Run, path: Path) -> bool:
+    """A receipt is read only from the run's receipts directory or the
+    caller's ``$CLAUNCH_SCRATCH`` (real paths: no link leads out)."""
+    try:
+        real = Path(os.path.realpath(str(path)))
+    except (OSError, ValueError):
+        return False
+    roots = [r.store.receipts_dir]
+    scratch = os.environ.get("CLAUNCH_SCRATCH", "").strip()
+    if scratch:
+        roots.append(Path(scratch))
+    for root in roots:
+        try:
+            base = Path(os.path.realpath(str(root)))
+        except (OSError, ValueError):
+            continue
+        if real == base or base in real.parents:
+            return True
+    return False
+
+
 # -- verify ------------------------------------------------------------------
 
 #: ``(command, cwd, env, timeout) -> (exit code, output[, timed_out])``
 VerifyRunner = Callable[[Any, str, Dict[str, str], float], Tuple[Any, ...]]
+
+_VERIFY_THREADS: List[threading.Thread] = []
+_VERIFY_GUARD = threading.Lock()
 
 
 def verify_spec(node: ir.Node) -> Optional[Dict[str, Any]]:
@@ -1343,12 +2210,26 @@ def _env_name(name: str) -> str:
     return "CFLOW_IN_" + re.sub(r"[^A-Za-z0-9]", "_", str(name)).upper()
 
 
-def verify_env(r: Run, iid: str) -> Dict[str, str]:
+def _env_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False, default=str)
+    except (TypeError, ValueError, RecursionError):
+        return ""
+
+
+def verify_env(r: Run, iid: str, node: Optional[ir.Node] = None,
+               data_names: Tuple[str, ...] = ()) -> Dict[str, str]:
     """The environment a verify command runs with: the process environment
-    plus ``CFLOW2_RUN``, ``CFLOW2_NODE``, ``CFLOW2_INSTANCE``, ``CFLOW2_SCOPE``
-    and every param as ``CFLOW_IN_<NAME>`` (the run's params, overlaid by the
-    params of the procedure the task runs in)."""
-    node = r.node_of(iid)
+    plus ``CFLOW2_RUN``, ``CFLOW2_NODE``, ``CFLOW2_INSTANCE``, ``CFLOW2_SCOPE``,
+    every param as ``CFLOW_IN_<NAME>`` (the run's params, overlaid by the
+    params of the procedure the task runs in), every top-level scalar of the
+    run data as ``CFLOW_DATA_<NAME>`` and the data names in ``data_names``
+    whatever their type (JSON text)."""
+    node = node or r.node_of(iid)
     env = dict(os.environ)
     env.update({
         "CFLOW2_RUN": str(r.state.get("run_id") or ""),
@@ -1357,48 +2238,60 @@ def verify_env(r: Run, iid: str) -> Dict[str, str]:
         "CFLOW2_SCOPE": str(r.state.get("scope") or ""),
     })
     params: Dict[str, Any] = dict(r.state.get("params") or {})
-    params.update(r.env(iid).get("params") or {})
+    params.update((r.env(iid) if iid in r.inst else {}).get("params") or {})
     for name, value in params.items():
-        if value is None:
-            text = ""
-        elif isinstance(value, str):
-            text = value
-        else:
-            text = json.dumps(value, ensure_ascii=False)
-        env[_env_name(name)] = text
+        env[_env_name(name)] = _env_text(value)
+    for name, value in (r.state.get("data") or {}).items():
+        if value is None or isinstance(value, (str, int, float, bool)) or name in data_names:
+            env[_data_env_name(name)] = _env_text(value)
     return env
 
 
 def default_verify_runner(command: Any, cwd: str, env: Dict[str, str],
                           timeout: float) -> Tuple[int, str, bool]:
-    """Run a verify command: ``(exit code, output, timed_out)``. A command
-    past ``timeout`` is killed with its process group (exit 124)."""
+    """Run a verify command: ``(exit code, output, timed_out)``. Output goes
+    to a file, never a pipe, so a descendant that outlives the command cannot
+    keep the reader waiting. Past ``timeout`` the whole process group is
+    killed (exit 124)."""
+    import tempfile
+
     shell = not isinstance(command, list)
     kwargs: Dict[str, Any] = {}
     if os.name == "posix":
         kwargs["start_new_session"] = True
-    try:
-        proc = subprocess.Popen(command, shell=shell, cwd=cwd, env=env,
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                text=True, errors="replace", **kwargs)
-    except OSError as exc:
-        return 127, f"verify could not start: {exc}", False
-    try:
-        out, _ = proc.communicate(timeout=timeout)
-        return proc.returncode, out or "", False
-    except subprocess.TimeoutExpired:
+    with tempfile.TemporaryFile() as out:
+        try:
+            proc = subprocess.Popen(command, shell=shell, cwd=cwd, env=env, stdout=out,
+                                    stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                    **kwargs)
+        except OSError as exc:
+            return 127, f"verify could not start: {exc}", False
+        timed_out = False
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
         if os.name == "posix":
+            # the command's whole group goes, also when it finished but left
+            # children behind
             try:
                 os.killpg(proc.pid, signal.SIGKILL)
             except OSError:
+                pass
+        if timed_out:
+            try:
                 proc.kill()
-        else:
-            proc.kill()
-        try:
-            out, _ = proc.communicate(timeout=10)
-        except subprocess.TimeoutExpired:
-            out = ""
-        return 124, (out or "") + f"\nverify timed out after {timeout:g}s", True
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+        out.seek(0)
+        text = out.read(4 * 1024 * 1024).decode("utf-8", errors="replace")
+    if timed_out:
+        return 124, text + f"\nverify timed out after {timeout:g}s", True
+    return proc.returncode, text, False
 
 
 def _tail(text: str) -> str:
@@ -1407,22 +2300,125 @@ def _tail(text: str) -> str:
     return out[-VERIFY_TAIL_CHARS:]
 
 
-def _verify_command(r: Run, iid: str, spec: Dict[str, Any]) -> Any:
+def _verify_prepare(r: Run, iid: str, node: ir.Node,
+                    spec: Dict[str, Any]) -> Tuple[Any, Dict[str, str]]:
+    """The command to run and its environment. A command string's value
+    references become environment variable references (E1: no value is ever
+    spliced into shell text); an argv list is used as written (a ``${...}``
+    in it is refused, as the compiler does)."""
     run = spec["run"]
     if isinstance(run, str):
-        return render(run, r.env(iid))
-    return [render(str(x), r.env(iid)) for x in run]
+        problems = shell_ref_problems(run, f"task {node.label or node.id} verify")
+        if problems:
+            raise FlowError("; ".join(problems))
+        names = tuple(m.group(2) for a, b, _q in _shell_refs(run)
+                      for m in [_SHELL_REF.match(run[a + 2:b - 1].strip())]
+                      if m and m.group(1) == "data")
+        return _shell_command(run), verify_env(r, iid, node, names)
+    problems = shell_ref_problems(run, f"task {node.label or node.id} verify")
+    if problems:
+        raise FlowError("; ".join(problems))
+    return [str(x) for x in run], verify_env(r, iid, node)
+
+
+def _run_verify(runner: Optional[VerifyRunner], command: Any, cwd: str,
+                env: Dict[str, str], timeout: float) -> Dict[str, Any]:
+    started = time.monotonic()
+    try:
+        res = tuple((runner or default_verify_runner)(command, cwd, env, timeout))
+    except Exception as exc:  # noqa: BLE001 - a runner failure is a failed verify
+        res = (127, f"verify could not run: {exc}", False)
+    return {"code": res[0], "output": res[1] if len(res) > 1 else "",
+            "timed_out": bool(res[2]) if len(res) > 2 else False,
+            "seconds": round(time.monotonic() - started, 3)}
+
+
+def _launch(fn: Callable[..., Any], *args: Any) -> None:
+    """Run a verify job in the background (the MCP call that started it has
+    already returned)."""
+    t = threading.Thread(target=fn, args=args, daemon=True, name="cflow2-verify")
+    with _VERIFY_GUARD:
+        _VERIFY_THREADS[:] = [x for x in _VERIFY_THREADS if x.is_alive()]
+        _VERIFY_THREADS.append(t)
+    t.start()
+
+
+def verify_join(timeout: Optional[float] = None) -> None:
+    """Wait for the background verify jobs of this process (tests, shutdown)."""
+    with _VERIFY_GUARD:
+        threads = list(_VERIFY_THREADS)
+    for t in threads:
+        t.join(timeout)
+
+
+def _verify_task_job(cwd: str, scope: str, iid: str, token: str,
+                     runner: Optional[VerifyRunner], now: Optional[float]) -> None:
+    st = RunStore(cwd, scope)
+    try:
+        snap = Run.load(st, now)
+        inst = snap.inst.get(iid)
+        if not inst or inst.get("await") != AW_VERIFY \
+                or (inst["frame"].get("verify") or {}).get("token") != token:
+            return
+        node = snap.node_of(iid)
+        spec = verify_spec(node) or {"run": "", "timeout": DEFAULT_VERIFY_TIMEOUT}
+        command, env = _verify_prepare(snap, iid, node, spec)
+        res = _run_verify(runner, command, str(st.cwd), env, spec["timeout"])
+    except (FlowError, StoreError) as exc:
+        command, res = None, {"code": 127, "output": str(exc), "timed_out": False, "seconds": 0}
+
+    def op(r: Run) -> None:
+        inst = r.inst.get(iid)
+        if not inst or inst.get("await") != AW_VERIFY \
+                or (inst["frame"].get("verify") or {}).get("token") != token:
+            return
+        _verify_apply(r, iid, command, res)
+    try:
+        _mutate(cwd, scope, now, op)
+    except (FlowError, StoreError):
+        pass
+
+
+def _verify_apply(r: Run, iid: str, command: Any, res: Dict[str, Any]) -> None:
+    inst = r.inst[iid]
+    n = r.node_of(iid)
+    v = inst["frame"]["verify"]
+    tail = _tail(res["output"])
+    fields = dict(node=n.id, instance=iid, command=command, exit=res["code"],
+                  seconds=res["seconds"])
+    if res["code"] != 0:
+        inst["frame"].pop("verify", None)
+        inst["await"] = AW_TASK
+        why = (f"timed out after {v.get('timeout') or 0:g}s" if res["timed_out"]
+               else f"exit {res['code']}")
+        inst["frame"]["last_verify"] = {"exit": res["code"], "why": why, "tail": tail,
+                                        "command": command}
+        r.emit("verify_failed", tail=tail, timed_out=res["timed_out"] or None, **fields)
+        return
+    r.emit("verify_passed", **fields)
+    if _halted(r):
+        v["passed"] = True  # applied when the halt is released
+        return
+    inst["frame"].pop("verify", None)
+    inst["frame"].pop("last_verify", None)
+    r.emit("reported", node=n.id, instance=iid, outcome=v["outcome"], value=v.get("value"),
+           text=v.get("text"))
+    _complete(r, iid, v["outcome"], v.get("value"))
 
 
 def _task_for_report(r: Run, node: Optional[str]) -> str:
     """The task instance a report names; an instance still waiting for its
-    ``ask`` is refused with who decides it."""
+    ``ask`` (or its verify) is refused with what it waits on."""
     try:
         return _find(r, node, (AW_TASK,), "task")
     except FlowError:
-        held = [iid for iid, inst in r.inst.items() if inst.get("await") == AW_APPROVAL
+        held = [iid for iid, inst in r.inst.items()
+                if inst.get("await") in (AW_APPROVAL, AW_VERIFY)
                 and (node in (None, "", iid, inst["node"], r.node_of(iid).label))]
         if len(held) == 1:
+            if r.inst[held[0]].get("await") == AW_VERIFY:
+                raise FlowError(f"task {r.node_of(held[0]).label or held[0]} was reported and "
+                                f"its verify is running; call flow_status later") from None
             rec = (r.state.get("asks") or {}).get(r.inst[held[0]]["frame"].get("ask") or "")
             how = _ask_how(held[0], rec) if rec else ""
             raise FlowError(f"task {r.node_of(held[0]).label or held[0]} is not entered yet: "
@@ -1436,70 +2432,46 @@ def report(node: Optional[str], outcome: str = ir.OUTCOME_OK, value: Any = None,
            verify_runner: Optional[VerifyRunner] = None) -> Dict[str, Any]:
     """Report an active task's result and advance.
 
-    An ``ok`` report of a task with ``verify`` runs the command first, outside
-    the run lock (a verify can take minutes; nothing else may wait on it): the
-    instance is read off an unlocked snapshot, the command runs, then the lock
-    is taken and the report applies only if that same instance is still the
-    active task. A non-zero exit refuses the report (``verify_failed``, the
-    output's tail in the error) and the task stays active."""
-    st = RunStore(cwd, scope)
-    measured: Optional[Dict[str, Any]] = None
-    if outcome == ir.OUTCOME_OK and st.exists():
-        snap = Run.load(st, now)
-        iid0: Optional[str] = None
-        if snap.status in LIVE_STATUSES:
-            try:
-                iid0 = _task_for_report(snap, node)
-            except FlowError:
-                iid0 = None  # the locked pass below raises the real error
-        spec = verify_spec(snap.node_of(iid0)) if iid0 else None
-        if iid0 and spec:
-            n0 = snap.node_of(iid0)
-            errors = validate_result(returns_of(n0), outcome, value)
-            if errors:
-                raise FlowError(f"report for {n0.label or n0.id} refused: " + "; ".join(errors)
-                                + f". Declared returns: {json.dumps(returns_of(n0))}")
-            command = _verify_command(snap, iid0, spec)
-            runner = verify_runner or default_verify_runner
-            started = time.monotonic()
-            res = tuple(runner(command, str(st.cwd), verify_env(snap, iid0), spec["timeout"]))
-            measured = {
-                "instance": iid0, "code": res[0], "output": res[1] if len(res) > 1 else "",
-                "timed_out": bool(res[2]) if len(res) > 2 else False,
-                "seconds": round(time.monotonic() - started, 3), "command": command,
-                "timeout": spec["timeout"],
-            }
+    An ``ok`` report of a task with ``verify`` does not apply at once: the
+    task goes to ``verifying`` (journal ``verify_started``) and the command
+    runs in the background, outside the run lock. This call returns at once
+    with ``verifying``. When the command exits 0 the report applies
+    (``verify_passed``, ``reported``); otherwise the task is active again with
+    the output's tail in ``last_verify`` (``verify_failed``)."""
+    job: Dict[str, Any] = {}
 
     def op(r: Run) -> None:
-        _require_live(r)
+        _require_progress(r)
         iid = _task_for_report(r, node)
         n = r.node_of(iid)
         errors = validate_result(returns_of(n), outcome, value)
         if errors:
             raise FlowError(f"report for {n.label or n.id} refused: " + "; ".join(errors)
                             + f". Declared returns: {json.dumps(returns_of(n))}")
-        if outcome == ir.OUTCOME_OK and verify_spec(n):
-            if measured is None or measured["instance"] != iid:
-                raise FlowError(f"task {n.label or n.id} changed while its verify ran; "
-                                f"nothing was applied -- call flow_status and report again")
-            tail = _tail(measured["output"])
-            fields = dict(node=n.id, instance=iid, command=measured["command"],
-                          exit=measured["code"], seconds=measured["seconds"])
-            if measured["code"] != 0:
-                r.emit("verify_failed", tail=tail, timed_out=measured["timed_out"] or None,
-                       **fields)
-                why = (f"timed out after {measured['timeout']:g}s" if measured["timed_out"]
-                       else f"exit {measured['code']}")
-                r.deferred_error = (
-                    f"report for {n.label or n.id} refused: verify failed ({why}): "
-                    f"{measured['command']}\n{tail}\nThe task stays active; fix what the "
-                    f"output says and report again.")
-                return
-            r.emit("verify_passed", **fields)
+        spec = verify_spec(n) if outcome == ir.OUTCOME_OK else None
+        if spec:
+            token = secrets.token_hex(4)
+            r.inst[iid]["await"] = AW_VERIFY
+            r.inst[iid]["frame"]["verify"] = {
+                "token": token, "started_at": r.now, "timeout": spec["timeout"],
+                "outcome": outcome, "value": value, "text": text,
+            }
+            r.emit("verify_started", node=n.id, instance=iid, timeout=spec["timeout"])
+            job.update(instance=iid, task=n.label or n.id, timeout=spec["timeout"])
+            st = r.store
+            r.after.append(lambda: _launch(_verify_task_job, str(st.cwd), st.scope, iid, token,
+                                           verify_runner, now))
+            return
         r.emit("reported", node=n.id, instance=iid, outcome=outcome, value=value, text=text)
         _complete(r, iid, outcome, value)
     _mutate(cwd, scope, now, op)
-    return status(cwd=cwd, scope=scope, now=now, tick=False)
+    payload = status(cwd=cwd, scope=scope, now=now, tick=False)
+    if job:
+        payload["verifying"] = job
+        payload["note"] = (f"task {job['task']} is verifying (up to {job['timeout']:g}s, in the "
+                           f"background); the report applies when it passes. Call flow_status "
+                           f"later: a failure puts the task back with the output")
+    return payload
 
 
 def select(node: Optional[str], option: str, reason: Optional[str] = None, *,
@@ -1507,7 +2479,7 @@ def select(node: Optional[str], option: str, reason: Optional[str] = None, *,
            scope: Optional[str] = None, now: Optional[float] = None) -> Dict[str, Any]:
     """Pick an option of an active ``choose``."""
     def op(r: Run) -> None:
-        _require_live(r)
+        _require_progress(r)
         iid = _find(r, node, (AW_CHOOSE,), "choice")
         n = r.node_of(iid)
         chooser = n.get("chooser") or ir.CHOOSER_AGENT
@@ -1543,11 +2515,14 @@ def select(node: Optional[str], option: str, reason: Optional[str] = None, *,
 def fork(group: Optional[str], with_: Optional[Dict[str, Any]] = None, *,
          cwd: Optional[str] = None, scope: Optional[str] = None,
          now: Optional[float] = None) -> Dict[str, Any]:
-    """Add a member to a running ``group`` (its ``do`` must still be running)."""
+    """Add a member to a running ``group`` (its ``do`` must still be running).
+    ``with`` may name only the procedure's declared params (none declared:
+    no key at all); a required param without a default needs a non-null
+    value."""
     out: Dict[str, Any] = {}
 
     def op(r: Run) -> None:
-        _require_live(r)
+        _require_progress(r)
         groups = [iid for iid, inst in r.inst.items()
                   if r.chart.node(inst["node"]).type == ir.T_GROUP]
         if group and group in groups:
@@ -1571,17 +2546,18 @@ def fork(group: Optional[str], with_: Optional[Dict[str, Any]] = None, *,
             raise FlowError("'with' must be an object of parameter -> value")
         args = dict(with_ or {})
         decls = r.chart.node(n.get("member")).get("params") or {}
-        if decls:
-            unknown = sorted(set(args) - set(decls))
-            if unknown:
-                raise FlowError(f"group {n.get('name')}: fork refused -- unknown param(s) "
-                                f"{', '.join(unknown)} (declared: {', '.join(decls)})")
-            missing = [k for k, d in decls.items()
-                       if (d or {}).get("required") and k not in args and "default" not in (d or {})]
-            if missing:
-                raise FlowError(f"group {n.get('name')}: fork refused -- missing required "
-                                f"param(s) {', '.join(missing)} of procedure "
-                                f"{r.chart.node(n.get('member')).get('proc')}; pass them in 'with'")
+        unknown = sorted(set(args) - set(decls))
+        if unknown:
+            raise FlowError(f"group {n.get('name')}: fork refused -- unknown param(s) "
+                            f"{', '.join(unknown)} (declared: {', '.join(decls) or 'none'})")
+        missing = [k for k, d in decls.items()
+                   if (d or {}).get("required") and _absent(args.get(k))
+                   and "default" not in (d or {})]
+        if missing:
+            raise FlowError(f"group {n.get('name')}: fork refused -- missing required "
+                            f"param(s) {', '.join(missing)} of procedure "
+                            f"{r.chart.node(n.get('member')).get('proc')}; pass them in 'with' "
+                            f"(null is no value)")
         # registered before entering: a member may finish synchronously
         member = f"{n.get('member')}@{int(r.state.get('seq') or 0) + 1}"
         frame["members"].append({"instance": member, "with": args})
@@ -1594,29 +2570,57 @@ def fork(group: Optional[str], with_: Optional[Dict[str, Any]] = None, *,
     return payload
 
 
+OPEN_DELEGATION = ("pending", "queued", "running")
+
+
 def delegate_submit(delegation: str, outcome: Optional[str] = None, value: Any = None,
                     receipt_path: Optional[str] = None, *, cwd: Optional[str] = None,
-                    scope: Optional[str] = None, now: Optional[float] = None) -> Dict[str, Any]:
+                    scope: Optional[str] = None, now: Optional[float] = None,
+                    session: Optional[str] = None, via: str = VIA_INTERNAL,
+                    verify_runner: Optional[VerifyRunner] = None) -> Dict[str, Any]:
     """Submit a delegate's result (directly, or as a receipt file to read).
+
+    ``via`` is who calls: ``internal`` (the daemon's executors) or ``mcp``
+    (an agent; ``session`` is its identity). An agent may submit a
+    ``subagent`` delegation only as the run's driver and a ``session``
+    delegation only as its assigned child session; a ``headless`` result
+    comes only from the daemon, a nested run's result only from the nested
+    run. A receipt is read only from the run's receipts directory or
+    ``$CLAUNCH_SCRATCH``.
 
     An invalid result is refused once with the problems listed (the delegate
     is re-run with them); a second invalid one fails the delegation and the
-    node finishes ``fail`` (``delegate_failed``).
+    node finishes ``fail`` (``delegate_failed``). An ``ok`` result of a flat
+    subtree whose tasks declare ``verify`` is accepted only after those
+    commands pass; they run in the background (``verifying``) and a failure
+    counts as an invalid result.
     """
+    job: Dict[str, Any] = {}
+
     def op(r: Run) -> None:
         _require_live(r)
+        if via != VIA_INTERNAL:
+            _require_progress(r)
         dels = r.state.get("delegations", {})
         rec = dels.get(delegation)
         if rec is None:
             raise FlowError(f"no delegation {delegation!r} (known: {', '.join(dels) or 'none'})")
-        if rec["status"] not in ("pending", "queued", "running"):
+        if via == VIA_MCP:
+            _check_delegation_authority(r, rec, session or "", "submit")
+        if rec["status"] not in OPEN_DELEGATION:
             raise FlowError(f"delegation {delegation} is {rec['status']}; nothing to submit")
+        if rec.get("held"):
+            raise FlowError(f"delegation {delegation} already has a result, kept until the "
+                            f"run's halt is released")
         res_outcome, res_value = outcome, value
         source = "direct"
         if receipt_path:
             path = Path(receipt_path)
             if not path.is_absolute():
                 path = r.store.cwd / path
+            if not _receipt_ok(r, path):
+                raise FlowError(f"receipt {path} refused: a receipt is read only from "
+                                f"{r.store.receipts_dir} or this session's $CLAUNCH_SCRATCH")
             try:
                 doc = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError) as exc:
@@ -1631,7 +2635,6 @@ def delegate_submit(delegation: str, outcome: Optional[str] = None, value: Any =
         res_outcome = res_outcome or ir.OUTCOME_OK
         rec["attempts"] = int(rec.get("attempts") or 0) + 1
         errors = validate_result(rec.get("returns") or {ir.OUTCOME_OK: {}}, res_outcome, res_value)
-        iid = rec["instance"]
         if errors:
             if _reject(r, rec, errors):
                 r.deferred_error = (
@@ -1640,20 +2643,99 @@ def delegate_submit(delegation: str, outcome: Optional[str] = None, value: Any =
                     f"result fails the node. Declared returns: {json.dumps(rec.get('returns'))}"
                 )
             return
-        receipt = r.store.write_receipt(delegation, {
-            "delegation": delegation, "node": rec["node"], "outcome": res_outcome,
-            "value": res_value, "source": source, "submitted": store_mod.utcnow(),
-        })
-        rec.update({"status": "returned", "receipt": str(receipt),
-                    "finished": store_mod.utcnow(), "outcome": res_outcome})
-        r.emit("delegate_returned", delegation=delegation, node=rec["node"],
-               outcome=res_outcome, receipt=str(receipt))
-        _complete(r, iid, res_outcome, res_value)
+        verifies = _delegation_verifies(r, rec) \
+            if res_outcome == ir.OUTCOME_OK and not rec.get("nested") else []
+        if verifies:
+            token = secrets.token_hex(4)
+            total = sum((verify_spec(n) or {}).get("timeout") or 0 for n in verifies)
+            rec["verify"] = {"token": token, "started_at": r.now, "timeout": total,
+                             "outcome": res_outcome, "value": res_value, "source": source,
+                             "before": rec["status"]}
+            rec["status"] = "verifying"
+            r.emit("verify_started", delegation=delegation, node=rec["node"],
+                   tasks=[n.label or n.id for n in verifies], timeout=total)
+            job.update(delegation=delegation, tasks=[n.label or n.id for n in verifies])
+            st = r.store
+            r.after.append(lambda: _launch(_verify_delegation_job, str(st.cwd), st.scope,
+                                           delegation, token, verify_runner, now))
+            return
+        _accept(r, rec, res_outcome, res_value, source)
     _mutate(cwd, scope, now, op)
-    return status(cwd=cwd, scope=scope, now=now, tick=False)
+    payload = status(cwd=cwd, scope=scope, now=now, tick=False)
+    if job:
+        payload["verifying"] = job
+        payload["note"] = (f"delegation {delegation}: the verify of {', '.join(job['tasks'])} "
+                           f"runs in the background; the result is accepted when it passes. "
+                           f"Call flow_status later")
+    return payload
 
 
-OPEN_DELEGATION = ("pending", "queued", "running")
+def executor_submit(delegation: str, outcome: Optional[str] = None, value: Any = None, *,
+                    receipt_path: Optional[str] = None, cwd: Optional[str] = None,
+                    scope: Optional[str] = None, now: Optional[float] = None,
+                    verify_runner: Optional[VerifyRunner] = None) -> Dict[str, Any]:
+    """The daemon's door for a delegation result (a headless executor, a
+    session child's receipt picked up by the clock). Never offered through
+    MCP: an agent's submission goes through :func:`delegate_submit` with
+    ``via='mcp'`` and its authority checks. A result that arrives while a
+    monitor halts the run is kept and applied on resume."""
+    return delegate_submit(delegation, outcome, value, receipt_path, cwd=cwd, scope=scope,
+                           now=now, via=VIA_INTERNAL, verify_runner=verify_runner)
+
+
+def _verify_delegation_job(cwd: str, scope: str, did: str, token: str,
+                           runner: Optional[VerifyRunner], now: Optional[float]) -> None:
+    st = RunStore(cwd, scope)
+    results: List[Tuple[ir.Node, Any, Dict[str, Any]]] = []
+    try:
+        snap = Run.load(st, now)
+        rec = (snap.state.get("delegations") or {}).get(did)
+        if not rec or rec.get("status") != "verifying" \
+                or (rec.get("verify") or {}).get("token") != token:
+            return
+        iid = rec["instance"]
+        for n in _delegation_verifies(snap, rec):
+            spec = verify_spec(n) or {"run": "", "timeout": DEFAULT_VERIFY_TIMEOUT}
+            try:
+                command, env = _verify_prepare(snap, iid, n, spec)
+            except FlowError as exc:
+                results.append((n, None, {"code": 127, "output": str(exc), "timed_out": False,
+                                          "seconds": 0}))
+                break
+            res = _run_verify(runner, command, str(st.cwd), env, spec["timeout"])
+            results.append((n, command, res))
+            if res["code"] != 0:
+                break
+    except StoreError:
+        return
+
+    def op(r: Run) -> None:
+        rec = (r.state.get("delegations") or {}).get(did)
+        if not rec or rec.get("status") != "verifying" \
+                or (rec.get("verify") or {}).get("token") != token:
+            return
+        v = rec.pop("verify")
+        rec["status"] = v.get("before") or "pending"
+        errors = []
+        for n, command, res in results:
+            fields = dict(node=n.id, delegation=did, command=command, exit=res["code"],
+                          seconds=res["seconds"])
+            if res["code"] != 0:
+                tail = _tail(res["output"])
+                r.emit("verify_failed", tail=tail, timed_out=res["timed_out"] or None, **fields)
+                errors.append(f"verify of task {n.label or n.id} failed "
+                              f"({'timed out' if res['timed_out'] else 'exit ' + str(res['code'])}"
+                              f"): {tail[-1500:]}")
+            else:
+                r.emit("verify_passed", **fields)
+        if errors:
+            _reject(r, rec, errors)
+            return
+        _accept(r, rec, v["outcome"], v.get("value"), v.get("source") or "direct")
+    try:
+        _mutate(cwd, scope, now, op)
+    except (FlowError, StoreError):
+        pass
 
 
 def _reject(r: Run, rec: Dict[str, Any], errors: List[str]) -> bool:
@@ -1717,6 +2799,8 @@ def delegate_fail(delegation: str, reason: str, *, outcome: str = ir.OUTCOME_FAI
                outcome=outcome)
         value = {"reason": reason}
         value.update(detail or {})
+        if rec.get("nested"):
+            r.nested_aborts.append(dict(rec["nested"]))
         _complete(r, rec["instance"], outcome, value)
     _mutate(cwd, scope, now, op)
     return status(cwd=cwd, scope=scope, now=now, tick=False)
@@ -1761,14 +2845,21 @@ def delegate_reroute(delegation: str, cause: str, *, cwd: Optional[str] = None,
         _require_live(r)
         rec = _open_delegation(r, delegation)
         node = r.chart.node(rec["node"])
+        flat = bool(rec.get("flat", True))
         prefs = list(node.executor or [])
         old = rec["executor"]
         rest = prefs[prefs.index(old) + 1:] if old in prefs else []
         nxt = ir.EXEC_INLINE
         if caps_mod is not None:
-            nxt = caps_mod.choose_executor(rest, r.caps, needs=node.needs or []).executor
+            try:
+                nxt = caps_mod.choose_executor(rest, r.caps, needs=node.needs or [],
+                                               flat=flat).executor
+            except TypeError:
+                nxt = caps_mod.choose_executor(rest, r.caps, needs=node.needs or []).executor
         if nxt in executors.DISPATCHED and not executors.available(str(r.store.cwd)):
-            nxt = executors.InlineFallback.next_executor(node, nxt, r.caps)
+            nxt = _next_undispatched(node, nxt, r.caps, flat)
+        if not flat and nxt == ir.EXEC_HEADLESS:
+            nxt = ir.EXEC_INLINE
         out["executor"] = nxt
         iid = rec["instance"]
         r.emit("fallback", node=node.id, instance=iid, delegation=delegation, cause=cause,
@@ -1776,16 +2867,28 @@ def delegate_reroute(delegation: str, cause: str, *, cwd: Optional[str] = None,
         if nxt == ir.EXEC_INLINE:
             rec["status"] = "rerouted"
             rec["finished"] = store_mod.utcnow()
+            if rec.get("nested"):
+                r.nested_aborts.append(dict(rec["nested"]))
             r.inst[iid]["await"] = None
             r.inst[iid]["frame"].pop("delegation", None)
             _ENTER[node.type](r, iid, node)
             return
-        plan = caps_mod.plan_node(_with_executor(node, nxt), r.caps)
+        plan = _plan(_with_executor(node, nxt), r.caps, flat)
         rec.update({"executor": nxt, "route": plan.to_dict(), "started_at": r.now,
                     "status": "pending" if nxt == ir.EXEC_SUBAGENT else "queued",
-                    "child": None, "runner": None})
+                    "child": None, "runner": None, "assignee": None})
         r.emit("delegate_started", node=node.id, instance=iid, delegation=delegation,
                executor=nxt, route=nxt, rerouted_from=old)
+        if rec.get("nested") and nxt == ir.EXEC_SUBAGENT:
+            # the nested run's driver becomes the delegating run's driver
+            try:
+                nst = RunStore(rec["nested"]["cwd"], rec["nested"]["scope"])
+                with nst.lock():
+                    ns = nst.load_state()
+                    ns["driver"] = driver_of(r.state)
+                    nst.save_state(ns)
+            except (StoreError, OSError):
+                pass
         if nxt in executors.DISPATCHED:
             executors.dispatch(rec, r)
     _mutate(cwd, scope, now, op)
@@ -1805,17 +2908,20 @@ def note(event: str, *, cwd: Optional[str] = None, scope: Optional[str] = None,
 
 
 def delegate_brief(delegation: Optional[str] = None, *, cwd: Optional[str] = None,
-                   scope: Optional[str] = None) -> Dict[str, Any]:
+                   scope: Optional[str] = None, session: Optional[str] = None,
+                   via: str = VIA_INTERNAL) -> Dict[str, Any]:
     st = RunStore(cwd, scope)
     r = Run.load(st)
     dels = r.state.get("delegations", {})
-    open_ids = [d for d, rec in dels.items() if rec["status"] in ("pending", "queued", "running")]
+    open_ids = [d for d, rec in dels.items() if rec["status"] in OPEN_DELEGATION]
     if not delegation:
         if len(open_ids) != 1:
             raise FlowError(f"name a delegation (open: {', '.join(open_ids) or 'none'})")
         delegation = open_ids[0]
     if delegation not in dels:
         raise FlowError(f"no delegation {delegation!r} (known: {', '.join(dels) or 'none'})")
+    if via == VIA_MCP:
+        _check_delegation_authority(r, dels[delegation], session or "", "brief")
     return brief(r, delegation)
 
 
@@ -1825,25 +2931,22 @@ def extend_loop(node: Optional[str] = None, by: int = 1, *, stop: bool = False,
     """Answer a ``loop_limit``: allow ``by`` more iterations, or ``stop`` the
     loop (it finishes ``fail``)."""
     def op(r: Run) -> None:
-        _require_live(r)
-        iid = _find(r, node, (AW_LIMIT,), "loop limit")
+        _require_progress(r)
+        iid = _find(r, node, (AW_LIMIT,), "loop limit",
+                    pred=lambda i: not r.inst[i]["frame"].get("visit_limit"))
         n = r.node_of(iid)
         frame = r.inst[iid]["frame"]
+        if not stop and by < 1:
+            raise FlowError("extend by at least 1 (or stop the loop)")
         r.inst[iid]["await"] = None
-        r.state["approvals"] = [a for a in r.state.get("approvals", []) if a["instance"] != iid]
-        if not r.state["approvals"] and r.state["status"] == ST_WAITING:
-            r.state["status"] = ST_RUNNING
-            r.state["reason"] = None
-        elif r.state["approvals"] and r.state["status"] == ST_WAITING:
-            r.state["reason"] = r.state["approvals"][0].get("kind")
+        r.state["approvals"] = [a for a in r.state.get("approvals", [])
+                                if a.get("instance") != iid]
         if stop:
-            r.emit("selected", node=n.id, instance=iid, option="stop", kind="loop_limit")
+            r.emit("selected", node=n.id, instance=iid, option="stop", kind=HOLD_LOOP)
             _complete(r, iid, ir.OUTCOME_FAIL, {"reason": "loop_limit", "iterations": frame["iter"]})
             return
-        if by < 1:
-            raise FlowError("extend by at least 1 (or stop the loop)")
         frame["extra"] = int(frame.get("extra") or 0) + int(by)
-        r.emit("selected", node=n.id, instance=iid, option="extend", by=by, kind="loop_limit")
+        r.emit("selected", node=n.id, instance=iid, option="extend", by=by, kind=HOLD_LOOP)
         if frame.get("phase") == "limit_par":
             if len(frame["items"]) > _loop_max(r, iid):
                 _loop_limit(r, iid)
@@ -1857,13 +2960,47 @@ def extend_loop(node: Optional[str] = None, by: int = 1, *, stop: bool = False,
     return status(cwd=cwd, scope=scope, now=now, tick=False)
 
 
+def extend_visits(node: Optional[str] = None, by: int = 1, *, stop: bool = False,
+                  cwd: Optional[str] = None, scope: Optional[str] = None,
+                  now: Optional[float] = None) -> Dict[str, Any]:
+    """Answer a ``visit_limit``: allow the node ``by`` more visits over the
+    run (its parked instance then starts), or ``stop`` it (the instance
+    finishes ``fail``)."""
+    def op(r: Run) -> None:
+        _require_progress(r)
+        iid = _find(r, node, (AW_LIMIT,), "visit limit",
+                    pred=lambda i: bool(r.inst[i]["frame"].get("visit_limit")))
+        n = r.node_of(iid)
+        key = node_key(n)
+        if not stop and by < 1:
+            raise FlowError("extend by at least 1 (or stop)")
+        inst = r.inst[iid]
+        inst["await"] = None
+        inst["frame"].pop("visit_limit", None)
+        r.state["approvals"] = [a for a in r.state.get("approvals", [])
+                                if a.get("instance") != iid]
+        if stop:
+            r.emit("selected", node=n.id, instance=iid, option="stop", kind=HOLD_VISIT)
+            _complete(r, iid, ir.OUTCOME_FAIL,
+                      {"reason": "visit_limit", "visits": r.state["visits"].get(key)})
+            return
+        extra = r.state.setdefault("visit_extra", {})
+        extra[key] = int(extra.get(key) or 0) + int(by)
+        r.emit("selected", node=n.id, instance=iid, option="extend", by=by, kind=HOLD_VISIT)
+        _enter_body(r, iid, n)
+    _mutate(cwd, scope, now, op)
+    return status(cwd=cwd, scope=scope, now=now, tick=False)
+
+
 def _abort(r: Run, reason: str) -> None:
     for iid in list(r.inst):
         if iid in r.inst and r.inst[iid].get("parent") is None:
             _drop(r, iid, "aborted")
     for rec in r.state.get("delegations", {}).values():
-        if rec["status"] in ("pending", "queued", "running"):
+        if rec["status"] in OPEN_DELEGATION + ("verifying",):
             rec["status"] = "cancelled"
+            if rec.get("nested"):
+                r.nested_aborts.append(dict(rec["nested"]))
     r.state.update({"status": ST_ABORTED, "reason": reason, "approvals": [],
                     "finished": store_mod.utcnow()})
     r.emit("aborted", reason=reason)
@@ -1881,17 +3018,75 @@ def abort(reason: str, *, cwd: Optional[str] = None, scope: Optional[str] = None
 # -- time and probes ---------------------------------------------------------
 
 
-def default_probe_runner(probe: Any, cwd: str, timeout: float = 60.0) -> Tuple[int, str]:
-    """Run a wait's probe command in ``cwd``: ``(exit code, output)``."""
+def default_probe_runner(probe: Any, cwd: str, timeout: float = 60.0,
+                         env: Optional[Dict[str, str]] = None) -> Tuple[int, str]:
+    """Run a wait's or monitor's probe in ``cwd``: ``(exit code, output)``.
+    The daemon clock's runner (own process group, killed whole on timeout);
+    ``env`` is added to the process environment -- values reach a probe only
+    that way."""
+    try:
+        from ..daemon.cflow2_clock import run_probe
+    except ImportError:  # pragma: no cover - a runtime without the daemon
+        run_probe = None
+    if run_probe is not None:
+        return run_probe(probe, cwd, timeout, env=env)
     cmd = probe if isinstance(probe, list) else str(probe)
+    full = dict(os.environ)
+    full.update(env or {})
     try:
         proc = subprocess.run(cmd, shell=isinstance(cmd, str), cwd=cwd, capture_output=True,
-                              text=True, timeout=timeout)
+                              text=True, timeout=timeout, env=full)
     except subprocess.TimeoutExpired:
         return 124, "probe timed out"
     except OSError as exc:
         return 127, str(exc)
     return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+
+
+def _takes_env(fn: Callable[..., Any]) -> bool:
+    import inspect
+
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return "env" in params or any(p.kind == p.VAR_KEYWORD for p in params.values())
+
+
+def _value_env(r: Run, iid: Optional[str]) -> Dict[str, str]:
+    """``CFLOW2_*``, ``CFLOW_IN_*`` and ``CFLOW_DATA_*`` (top-level data,
+    scalars as text, the rest as JSON) for a probe."""
+    env = {"CFLOW2_RUN": str(r.state.get("run_id") or ""),
+           "CFLOW2_SCOPE": str(r.state.get("scope") or "")}
+    params: Dict[str, Any] = dict(r.state.get("params") or {})
+    if iid and iid in r.inst:
+        params.update(r.env(iid).get("params") or {})
+        env["CFLOW2_INSTANCE"] = iid
+    for name, value in params.items():
+        env[_env_name(name)] = _env_text(value)
+    for name, value in (r.state.get("data") or {}).items():
+        text = _env_text(value)
+        if len(text) <= 64 * 1024:
+            env[_data_env_name(name)] = text
+    return env
+
+
+def _run_probe(r: Run, iid: Optional[str], runner: ProbeRunner, probe: Any) -> Any:
+    """Run one probe: value references become environment variable
+    references (as in verify), the values go in ``env``."""
+    problems = shell_ref_problems(probe, "probe")
+    if problems:
+        return (127, "; ".join(problems))
+    cmd = _shell_command(probe) if isinstance(probe, str) else probe
+    try:
+        if _takes_env(runner):
+            try:
+                return runner(cmd, str(r.store.cwd), env=_value_env(r, iid))
+            except TypeError:
+                pass  # a wrapper passing **kwargs on to a runner without env
+        return runner(cmd, str(r.store.cwd))
+    except Exception as exc:  # noqa: BLE001 - a broken probe is an undecided one
+        return (127, f"probe could not run: {exc}")
 
 
 def _probe_ok(result: Any) -> Tuple[bool, Any]:
@@ -1904,6 +3099,39 @@ def _probe_ok(result: Any) -> Tuple[bool, Any]:
     if isinstance(result, dict):
         return bool(result.get("ok")), result.get("output")
     return bool(result), None
+
+
+PROBE_HOLDS = "holds"
+PROBE_NOT_YET = "not_yet"
+PROBE_UNDECIDED = "undecided"
+#: Consecutive undecided probe results after which a wait gives up.
+DEFAULT_UNDECIDED_MAX = 3
+OUTCOME_UNDECIDABLE = ir.OUTCOME_UNDECIDABLE
+
+
+def _probe_verdict(result: Any) -> Tuple[str, Any, Any]:
+    """A wait probe's result: exit 0 holds, exit 1 not yet, anything else
+    (a command that could not tell: 2, 124 timeout, 127 not found ...) is
+    undecided. ``(verdict, output, exit)``."""
+    if isinstance(result, bool):
+        return (PROBE_HOLDS if result else PROBE_NOT_YET), None, None
+    code: Any = None
+    output: Any = None
+    if isinstance(result, tuple) and result:
+        code, output = result[0], (result[1] if len(result) > 1 else None)
+    elif isinstance(result, int):
+        code = result
+    elif isinstance(result, dict):
+        if result.get("undecided"):
+            return PROBE_UNDECIDED, result.get("output"), result.get("exit")
+        return (PROBE_HOLDS if result.get("ok") else PROBE_NOT_YET), result.get("output"), None
+    else:
+        return (PROBE_HOLDS if result else PROBE_NOT_YET), None, None
+    if code == 0:
+        return PROBE_HOLDS, output, code
+    if code == 1:
+        return PROBE_NOT_YET, output, code
+    return PROBE_UNDECIDED, output, code
 
 
 def _probe_due(r: Run, iid: str) -> bool:
@@ -1930,7 +3158,11 @@ def _tick_time(r: Run, probe_runner: Optional[ProbeRunner] = None,
     Probes come either from ``probe_results`` (``{instance: result}``, run
     by the caller before it took the lock -- :func:`wait_tick`) or, when only
     ``probe_runner`` is given, are run here."""
+    if _halted(r):
+        return 0  # a halt stops the clock's moves too
     moved = 0
+    if _lost_verifies(r):
+        moved += 1
     for _ in range(1000):
         fired = False
         for iid in sorted(r.inst, key=lambda k: int(k.rsplit("@", 1)[1])):
@@ -1952,7 +3184,13 @@ def _tick_time(r: Run, probe_runner: Optional[ProbeRunner] = None,
             if inst.get("await") == AW_WAIT:
                 due = frame.get("due")
                 if due is not None and r.now >= due:
-                    _complete(r, iid, ir.OUTCOME_OK, {"waited": node.get("seconds")})
+                    if node.get("probe"):
+                        # with a probe, seconds is the upper bound (doc 2.3, wait)
+                        _complete(r, iid, ir.OUTCOME_TIMEOUT,
+                                  {"seconds": node.get("seconds"),
+                                   "polls": int(frame.get("polls") or 0)})
+                    else:
+                        _complete(r, iid, ir.OUTCOME_OK, {"waited": node.get("seconds")})
                     fired = True
                     break
                 have = probe_results is not None and iid in probe_results
@@ -1961,13 +3199,27 @@ def _tick_time(r: Run, probe_runner: Optional[ProbeRunner] = None,
                     if _probe_due(r, iid):
                         frame["last_poll"] = r.now
                         result = probe_results.pop(iid) if have else \
-                            probe_runner(node.get("probe"), str(r.store.cwd))
-                        ok, output = _probe_ok(result)
+                            _run_probe(r, iid, probe_runner, node.get("probe"))
+                        verdict, output, code = _probe_verdict(result)
                         frame["polls"] = int(frame.get("polls") or 0) + 1
-                        if ok:
+                        if verdict == PROBE_HOLDS:
+                            frame["undecided"] = 0
                             _complete(r, iid, ir.OUTCOME_OK, {"output": output})
                             fired = True
                             break
+                        if verdict == PROBE_UNDECIDED:
+                            frame["undecided"] = int(frame.get("undecided") or 0) + 1
+                            limit = int(node.get("undecided_max") or DEFAULT_UNDECIDED_MAX)
+                            r.emit("probe_undecided", node=node.id, instance=iid, exit=code,
+                                   count=frame["undecided"], max=limit)
+                            if frame["undecided"] >= limit:
+                                _complete(r, iid, OUTCOME_UNDECIDABLE,
+                                          {"exit": code, "output": output,
+                                           "undecided": frame["undecided"]})
+                                fired = True
+                                break
+                        else:
+                            frame["undecided"] = 0
             if inst.get("await") == AW_PAUSE and r.now >= float(frame.get("resume_at") or 0):
                 inst["await"] = None
                 _loop_iterate(r, iid)
@@ -1978,6 +3230,36 @@ def _tick_time(r: Run, probe_runner: Optional[ProbeRunner] = None,
         if not fired:
             break
         moved += 1
+    return moved
+
+
+def _lost_verifies(r: Run) -> bool:
+    """A verify that has not come back well past its own timeout ran in a
+    process that went away: the task is active again (``verify_failed``,
+    ``lost``); a delegation's result counts as invalid."""
+    moved = False
+    for iid, inst in list(r.inst.items()):
+        v = inst["frame"].get("verify") if inst.get("await") == AW_VERIFY else None
+        if not v or v.get("passed"):
+            continue
+        if r.now > float(v.get("started_at") or 0) + float(v.get("timeout") or 0) \
+                + VERIFY_LOST_GRACE:
+            inst["frame"].pop("verify", None)
+            inst["await"] = AW_TASK
+            inst["frame"]["last_verify"] = {"exit": None, "why": "lost", "tail": "",
+                                            "command": None}
+            r.emit("verify_failed", node=inst["node"], instance=iid, lost=True,
+                   tail="the verify never reported back (its process went away)")
+            moved = True
+    for rec in (r.state.get("delegations") or {}).values():
+        v = rec.get("verify") if rec.get("status") == "verifying" else None
+        if v and r.now > float(v.get("started_at") or 0) + float(v.get("timeout") or 0) \
+                + VERIFY_LOST_GRACE:
+            rec.pop("verify", None)
+            rec["status"] = v.get("before") or "pending"
+            r.emit("verify_failed", delegation=rec["id"], node=rec["node"], lost=True)
+            _reject(r, rec, ["the verify of the delegated tasks never reported back"])
+            moved = True
     return moved
 
 
@@ -1997,12 +3279,19 @@ def wait_tick(now: Optional[float] = None, probe_runner: Optional[ProbeRunner] =
     """
     st = RunStore(cwd, scope)
     moved = 0
+    if probe_runner is not None and st.exists():
+        try:
+            token = _acceptance_recheck_due(Run.load(st, now))
+        except StoreError:
+            token = None
+        if token:
+            _acceptance_job(str(st.cwd), st.scope, token, now)
     for _round in range(3):
         results: Optional[Dict[str, Any]] = None
         if probe_runner is not None:
             snap = Run.load(st, now)
             due = _due_probes(snap)
-            results = {iid: probe_runner(probe, str(snap.store.cwd))
+            results = {iid: _run_probe(snap, iid, probe_runner, probe)
                        for iid, probe in due.items()}
 
         def op(r: Run) -> int:
@@ -2126,7 +3415,7 @@ def monitors_tick(now: Optional[float] = None, probe_runner: Optional[ProbeRunne
         for pname, cmd in _monitor_probes(body, name).items():
             if probe_runner is None:
                 continue
-            ok, output = _probe_ok(probe_runner(cmd, str(st.cwd)))
+            ok, output = _probe_ok(_run_probe(snap, None, probe_runner, cmd))
             vals[pname] = (str(output).strip() if output is not None else "") if ok else None
         values[name] = vals
     wall = time.time() if journal_now is None else float(journal_now)
@@ -2183,9 +3472,11 @@ def monitors_tick(now: Optional[float] = None, probe_runner: Optional[ProbeRunne
 def release_halt(monitor: Optional[str] = None, *, cwd: Optional[str] = None,
                  scope: Optional[str] = None, now: Optional[float] = None) -> Dict[str, Any]:
     """A person resumes a run a ``halt`` monitor stopped (all of them, or one
-    by name). The monitor keeps watching; a new violation halts again."""
+    by name). The monitor keeps watching; a new violation halts again.
+    Results that arrived during the halt (a verify that passed, a daemon
+    executor's delegation result) apply now. A run that finished keeps its
+    halt on record and can be released the same way."""
     def op(r: Run) -> None:
-        _require_live(r)
         before = list(r.state.get("approvals", []))
         r.state["approvals"] = [
             a for a in before if not (a.get("kind") == "monitor_violation"
@@ -2195,16 +3486,26 @@ def release_halt(monitor: Optional[str] = None, *, cwd: Optional[str] = None,
             raise FlowError("no monitor holds this run" if monitor is None
                             else f"monitor {monitor!r} does not hold this run")
         r.emit("selected", option="resume", kind="monitor_violation", monitor=monitor)
-        rest = r.state["approvals"]
-        if r.state["status"] == ST_WAITING and r.state.get("reason") == "monitor_violation" \
-                and not any(a.get("kind") == "monitor_violation" for a in rest):
-            if rest:
-                r.state["reason"] = rest[0].get("kind")
-            else:
-                r.state["status"] = ST_RUNNING
-                r.state["reason"] = None
+        _sync_waiting(r)
+        if r.status in LIVE_STATUSES and not _halted(r):
+            _apply_held(r)
     _mutate(cwd, scope, now, op)
     return status(cwd=cwd, scope=scope, now=now, tick=False)
+
+def _apply_held(r: Run) -> None:
+    for iid, inst in list(r.inst.items()):
+        v = inst["frame"].get("verify")
+        if inst.get("await") == AW_VERIFY and v and v.get("passed"):
+            inst["frame"].pop("verify", None)
+            n = r.node_of(iid)
+            r.emit("reported", node=n.id, instance=iid, outcome=v["outcome"],
+                   value=v.get("value"), text=v.get("text"))
+            _complete(r, iid, v["outcome"], v.get("value"))
+    for rec in list((r.state.get("delegations") or {}).values()):
+        held = rec.get("held")
+        if held and rec.get("status") in OPEN_DELEGATION:
+            rec.pop("held", None)
+            _accept(r, rec, held["outcome"], held.get("value"), held.get("source") or "held")
 
 # -- reading -----------------------------------------------------------------
 
@@ -2230,10 +3531,12 @@ def status(*, cwd: Optional[str] = None, scope: Optional[str] = None,
         return {"status": "idle", "scope": st.scope, "cwd": str(st.cwd),
                 "note": "no cflow2 run here; start one with flow_start"}
     if tick:
+        _reconcile_nested(st)
         with st.lock():
             r = Run.load(st, now)
             if r.status in LIVE_STATUSES and _tick_time(r):
                 r.save()
+        r.run_after()
     r = Run.load(st, now)
     return describe(r)
 
@@ -2243,15 +3546,28 @@ def describe(r: Run) -> Dict[str, Any]:
     out: Dict[str, Any] = {
         "run": s.get("run_id"), "workflow": s.get("workflow"), "status": s.get("status"),
         "scope": s.get("scope"), "started": s.get("started"),
+        "driver": driver_of(s) or None,
     }
+    if s.get("parent"):
+        out["parent"] = s["parent"]
+    inputs = (s.get("data") or {}).get("inputs")
+    if inputs is not None:
+        out["inputs"] = inputs
     if s.get("reason"):
         out["reason"] = s["reason"]
+    halts = _halted(r)
+    if halts:
+        out["halted"] = halts
+    acc = s.get("acceptance")
+    if acc:
+        out["acceptance"] = {k: acc.get(k) for k in ("status", "failed", "checked_at")}
     if s.get("status") in FINISHED_STATUSES:
         out["outcome"] = s.get("outcome")
         out["value"] = s.get("value")
         out["note"] = f"the run is {s.get('status')}"
         return out
     tasks, choices, waits, groups, limits, asks = [], [], [], [], [], []
+    verifying, visit_limits = [], []
     for iid in sorted(r.inst, key=lambda k: int(k.rsplit("@", 1)[1])):
         inst = r.inst[iid]
         node = r.chart.node(inst["node"])
@@ -2268,6 +3584,13 @@ def describe(r: Run) -> Dict[str, Any]:
                 "ask": node.get("ask"),
                 "item": env.get("item"),
             })
+            if inst["frame"].get("last_verify"):
+                tasks[-1]["last_verify"] = inst["frame"]["last_verify"]
+        elif aw == AW_VERIFY:
+            v = inst["frame"].get("verify") or {}
+            verifying.append({"instance": iid, "node": node.id, "label": node.label or None,
+                              "verify": node.get("verify"), "started_at": v.get("started_at"),
+                              "timeout": v.get("timeout"), "passed": bool(v.get("passed"))})
         elif aw == AW_CHOOSE:
             avail, unavail = [], []
             for opt in node.get("options") or []:
@@ -2298,6 +3621,11 @@ def describe(r: Run) -> Dict[str, Any]:
             rec = (s.get("asks") or {}).get(inst["frame"].get("ask") or "")
             if rec:
                 asks.append(_describe_ask(r, iid, node, rec, env))
+        elif aw == AW_LIMIT and inst["frame"].get("visit_limit"):
+            key = node_key(node)
+            visit_limits.append({"instance": iid, "node": node.id, "label": node.label or None,
+                                 "visits": (s.get("visits") or {}).get(key),
+                                 "max": _max_visits(r, key)})
         elif aw == AW_LIMIT:
             limits.append({"instance": iid, "node": node.id, "label": node.label or None,
                            "iterations": inst["frame"].get("iter"), "max": _loop_max(r, iid)})
@@ -2313,8 +3641,15 @@ def describe(r: Run) -> Dict[str, Any]:
     for did, rec in (s.get("delegations") or {}).items():
         entry = {k: rec.get(k) for k in ("id", "node", "label", "executor", "status",
                                          "receipt", "started", "finished")}
-        if rec["status"] in ("pending", "queued", "running"):
+        for k in ("nested", "assignee", "child"):
+            if rec.get(k):
+                entry[k] = rec[k]
+        if rec.get("held"):
+            entry["held"] = True
+        if rec["status"] in OPEN_DELEGATION:
             entry["brief"] = brief(r, did)
+            if rec.get("errors"):
+                entry["errors"] = rec["errors"][-1]
         dels.append(entry)
     out.update({
         "active": sorted(iid for iid, inst in r.inst.items() if inst.get("await")),
@@ -2326,6 +3661,10 @@ def describe(r: Run) -> Dict[str, Any]:
         out["delegations"] = dels
     if limits:
         out["loop_limits"] = limits
+    if visit_limits:
+        out["visit_limits"] = visit_limits
+    if verifying:
+        out["verifying"] = verifying
     if asks:
         out["asks"] = asks
     out["data"] = s.get("data")
@@ -2345,6 +3684,20 @@ def describe(r: Run) -> Dict[str, Any]:
         hints.append("waits fire on their own; call flow_status again later")
     if limits:
         hints.append("a loop hit its max: the user decides with 'claunch cflow2 extend'")
+    if visit_limits:
+        hints.append("a node passed the run's max_visits: the user decides with "
+                     "'claunch cflow2 extend --visits'")
+    if verifying:
+        hints.append("verify commands are running; call flow_status again later")
+    if acc and acc.get("status") == "failed":
+        hints.append("the run reached its end but acceptance checks failed: fix what they "
+                     "found (flow_status checks again), or a person accepts it anyway with "
+                     "'claunch cflow2 approve acceptance'")
+    elif acc and acc.get("status") == "checking":
+        hints.append("the run reached its end; its acceptance checks are running")
+    if halts:
+        hints.insert(0, f"HALTED by monitor {', '.join(halts)}: nothing moves until a person "
+                        f"resumes the run ('claunch cflow2 resume'); tell the user")
     for a in asks:
         hints.append(f"{a['instance']}: {a['how']}")
     out["next"] = "; ".join(hints) or None
@@ -2358,6 +3711,29 @@ def journal(*, cwd: Optional[str] = None, scope: Optional[str] = None,
 
 # ---------------------------------------------------------------------------
 # capability resolution for a driver
+
+
+def load_definition(ref: str, cwd: Optional[str] = None) -> ir.Chart:
+    """Compile ``ref``: a bare name loads from the layers; a path is
+    accepted only when its real path lies inside ``<cwd>/.cflow2/generated/``
+    (a generated procedure). Any other path is refused."""
+    from . import layers
+
+    ref = str(ref or "").strip()
+    if layers.is_name(ref):
+        return layers.load(ref, cwd)
+    base = store_mod.resolve_cwd(cwd)
+    home = os.path.realpath(str(base / store_mod.BASE_DIR / "generated"))
+    path = Path(os.path.expanduser(ref))
+    if not path.is_absolute():
+        path = base / path
+    real = os.path.realpath(str(path))
+    if os.path.commonpath([home, real]) != home or real == home:
+        raise FlowError(f"{ref!r} is a path outside {home}; a v2 definition is loaded "
+                        f"by name, or by path only from .cflow2/generated/")
+    if not os.path.isfile(real):
+        raise FlowError(f"generated definition not found: {ref}")
+    return layers.load_file(real, cwd)
 
 
 def resolve_caps(profile: Optional[str] = None, harness: Optional[str] = None) -> Any:
@@ -2504,17 +3880,59 @@ def _ask_fall(r: Run, rec: Dict[str, Any], cause: str) -> None:
     rec["resolution"] = RES_SELF if otherwise == ASK_OTHERWISE_SELF else RES_HUMAN
     _ask_sync_approval(r, rec)
     if default:
+        try:
+            default = _ask_decision(rec, default)
+        except FlowError:
+            return  # a default naming no option: the driver decides
         _ask_resolve(r, rec, default, by="unanswered",
                      reason="declared default, taken unanswered", channel="default")
 
 
+def _withdraw(r: Run, rec: Dict[str, Any], why: str,
+              skip: Tuple[str, ...] = ()) -> None:
+    """Responders that still had ``rec``'s question are told it is closed
+    (sent after the lock is released)."""
+    pending = [dict(e) for e in rec.get("asked") or []
+               if e.get("session") not in skip
+               and e.get("session") not in (rec.get("abstained") or [])]
+    if rec.get("resolution") != RES_ASKED or not pending or not rec.get("mesh"):
+        return
+    r.withdrawals.append({
+        "ask": rec["id"], "instance": rec.get("instance"), "node": rec.get("node"),
+        "label": rec.get("label"), "decision": why, "workflow": r.state.get("workflow"),
+        "mesh": rec.get("mesh"), "prompt": rec.get("prompt"), "pending": pending,
+        "reason_kind": "closed",
+    })
+    r.emit("ask_withdrawn", ask=rec["id"], node=rec.get("node"), reason=why,
+           to=[e.get("handle") for e in pending])
+
+
+#: ``(answered, sender=...)`` -- how withdraw notices go out; ``None`` is
+#: :func:`.asks.default_withdraw` (the mesh). Tests replace it.
+WITHDRAW_FN: Optional[Callable[..., Any]] = None
+
+
+def _send_withdrawals(items: List[Dict[str, Any]], sender: str) -> None:
+    fn = WITHDRAW_FN
+    if fn is None:
+        from . import asks as asks_mod
+        fn = asks_mod.default_withdraw
+    for item in items:
+        try:
+            fn(item, sender=sender)
+        except Exception:  # noqa: BLE001 - a notice; the state is recorded
+            pass
+
+
 def _ask_escalate(r: Run, rec: Dict[str, Any], why: str) -> None:
     """The group that had the question produced no answer: the next one."""
+    _withdraw(r, rec, why)
     who = ", ".join(e.get("handle") or e.get("session") or "?" for e in rec.get("asked") or [])
     rec.setdefault("skipped", []).append(
         {"group": rec.get("group"), "candidate": who or "nobody", "reason": why})
     rec["group"] = int(rec.get("group") or 0) + 1
     rec["asked"], rec["deadline"], rec["retry_at"] = [], None, None
+    rec["abstained"] = []
     if rec["group"] >= len(rec.get("from") or []):
         _ask_fall(r, rec, f"{why}; no candidate group left")
         return
@@ -2524,10 +3942,15 @@ def _ask_escalate(r: Run, rec: Dict[str, Any], why: str) -> None:
 
 def _ask_decision(rec: Dict[str, Any], decision: Optional[str], *,
                   allow_abstain: bool = False) -> str:
-    choice = str(decision or "").strip().lower()
+    """The option ``decision`` names, compared without case on both sides;
+    returns the option's own spelling (``LGTM`` stays ``LGTM``)."""
+    choice = str(decision or "").strip().casefold()
     names = [o["name"] for o in _ask_choices(rec)]
-    if choice in names or (allow_abstain and choice == ASK_ABSTAIN):
-        return choice
+    for name in names:
+        if str(name).casefold() == choice:
+            return name
+    if allow_abstain and choice == ASK_ABSTAIN:
+        return ASK_ABSTAIN
     extra = f", or {ASK_ABSTAIN!r} if you have no basis to decide" if allow_abstain else ""
     raise FlowError(f"unknown decision {decision!r} for {rec['id']} -- answer with one of: "
                     f"{', '.join(names)}{extra}")
@@ -2567,6 +3990,7 @@ def _expire_asks(r: Run) -> bool:
         who = [e.get("handle") or e.get("session") for e in rec.get("asked") or []]
         r.emit("ask_timeout", ask=rec["id"], node=rec["node"], instance=rec["instance"],
                group=rec.get("group"), asked=who, timeout=rec.get("timeout"))
+        # _ask_escalate tells the responders the question moved on
         _ask_escalate(r, rec, f"no answer from {', '.join(map(str, who))} within "
                               f"{float(rec.get('timeout') or 0):g}s")
         moved = True
@@ -2657,8 +4081,8 @@ def _ask_how(iid: str, rec: Dict[str, Any]) -> str:
                 f"may answer first with {cli}")
     if res == RES_SELF:
         return f"nobody could be asked and the workflow leaves it to you: {tool}"
-    return (f"a person decides: {cli} (inside a chat session: '! claunch cflow2 approve ...') "
-            f"or the web UI. Do not work around it; tell the user what is waiting")
+    return (f"a person decides: {cli} from a terminal that is not the run's own session, or "
+            f"the web UI. Do not work around it; tell the user what is waiting")
 
 
 def _describe_ask(r: Run, iid: str, node: ir.Node, rec: Dict[str, Any],
@@ -2692,8 +4116,22 @@ def approve(node: Optional[str] = None, *, decision: Optional[str] = None,
     caller can tell them it is closed (:func:`.asks.withdraw`)."""
     answered: Dict[str, Any] = {}
 
+    acc_state = None
+    try:
+        acc_state = (RunStore(cwd, scope).load_state().get("acceptance") or {}).get("status")
+    except StoreError:
+        pass
+    if acc_state == "failed" and node in (None, "", HOLD_ACCEPTANCE):
+        if caller != CALLER_USER:
+            raise FlowError("the run's acceptance check failed; a person accepts it anyway "
+                            "('claunch cflow2 approve acceptance') or you fix what failed "
+                            "and call flow_status, which checks again")
+        payload = accept_anyway(reason, by=by or CALLER_USER, cwd=cwd, scope=scope, now=now)
+        payload["answered"] = {"acceptance": "waived"}
+        return payload
+
     def op(r: Run) -> None:
-        _require_live(r)
+        _require_progress(r)
         iid = _find(r, node, (AW_APPROVAL,), "ask")
         rec = r.state["asks"][r.inst[iid]["frame"]["ask"]]
         if caller != CALLER_USER and rec.get("resolution") != RES_SELF:
@@ -2750,13 +4188,17 @@ def answer(ask_id: str, decision: str, reason: Optional[str] = None, *,
         if not session:
             raise FlowError("this call carries no session identity, so it cannot be "
                             "attributed; answer from a managed session")
-        if session == str(r.state.get("scope") or ""):
+        if session in (driver_of(r.state), str(r.state.get("scope") or "")):
             raise FlowError("this is your own run -- a task cannot approve itself. That is "
                             "the point of delegating the decision")
+        _require_progress(r)
         mine = [e for e in rec.get("asked") or [] if e.get("session") == session]
         if not mine:
             who = ", ".join(e.get("handle") or "?" for e in rec.get("asked") or []) or "nobody"
             raise FlowError(f"{session!r} was not asked this -- it is with {who}")
+        if session in (rec.get("abstained") or []):
+            raise FlowError(f"you already abstained on {ask_id}; the others asked may still "
+                            f"answer")
         handle = str(mine[0].get("handle") or session)
         choice = _ask_decision(rec, decision, allow_abstain=True)
         receipt.update({"ask": ask_id, "decision": choice, "reason": reason, "as": handle,
@@ -2766,10 +4208,24 @@ def answer(ask_id: str, decision: str, reason: Optional[str] = None, *,
             r.emit("ask_answered", ask=ask_id, node=rec["node"], instance=rec["instance"],
                    decision=ASK_ABSTAIN, by=handle, by_session=session, reason=reason,
                    channel="responder")
-            _ask_escalate(r, rec, f"{handle} abstained" + (f": {reason}" if reason else ""))
-            receipt["note"] = ("recorded as an abstention; the question moved on to the next "
-                               "candidate group (or to its fallback)")
+            # one member's abstention leaves the question with the rest of
+            # its group; it moves on when every member abstained (or the
+            # group's deadline passes)
+            rec.setdefault("abstained", []).append(session)
+            asked = {e.get("session") for e in rec.get("asked") or []}
+            if asked <= set(rec["abstained"]):
+                _ask_escalate(r, rec, "every responder of the group abstained"
+                              + (f" (last: {handle}: {reason})" if reason else ""))
+                receipt["moved"] = True
+                receipt["note"] = ("recorded as an abstention; everyone asked abstained, so "
+                                   "the question moved on to the next candidate group (or to "
+                                   "its fallback)")
+            else:
+                receipt["moved"] = False
+                receipt["note"] = ("recorded as an abstention; the others asked with you may "
+                                   "still answer")
             return
+        _withdraw(r, rec, f"answered by {handle}: {choice}", skip=(session,))
         _ask_resolve(r, rec, choice, by=handle, reason=reason, channel="responder")
         receipt["note"] = "decision recorded; the asking session continues from it"
     _mutate(cwd, scope, now, op)

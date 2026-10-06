@@ -1021,11 +1021,65 @@ def _workflow_entry(raw) -> dict:
             # daemon says neither, and its entries read as plain v1.
             "version": 2 if raw.get("version") == 2 else 1,
             "deprecated": bool(raw.get("deprecated")),
+            # a v2 workflow's typed start inputs (docs/cflow-v2.md 2.6)
+            "inputs": list(raw.get("inputs") or []) if raw.get("version") == 2 else [],
         }
     return {
         "name": str(raw or ""), "description": "", "default_role": "",
         "priority": 0, "filter_roles": None, "version": 1, "deprecated": False,
+        "inputs": [],
     }
+
+
+def ask_inputs(fields: List[dict], ask=input, say=print) -> dict:
+    """Prompt each declared start input of a v2 workflow on the terminal,
+    one line at a time (``fields`` = the list entry's ``inputs``). Kept
+    plain on purpose: the dashboard's form is the rich surface. A blank
+    answer leaves the input to its default; the daemon validates the result
+    (``cflow2/inputs.normalize``) and refuses the create naming the field.
+
+    ``text`` and ``list`` read lines until a blank one; ``invariants`` and
+    ``acceptance`` read a text and an optional probe per item until a blank
+    text."""
+    out: dict = {}
+    if not fields:
+        return out
+    say("This workflow takes start inputs (blank = default/none):")
+    for f in fields:
+        name, typ = f.get("name"), f.get("type")
+        label = f.get("label") or name
+        mark = " *" if f.get("required") else ""
+        if f.get("help"):
+            say(f"  {label}: {f['help']}")
+        if typ in ("text", "list"):
+            say(f"  {label}{mark} -- one line each, blank line to finish")
+            lines = []
+            while True:
+                line = ask("    > ")
+                if not line.strip():
+                    break
+                lines.append(line)
+            if lines:
+                out[name] = "\n".join(lines) if typ == "text" else lines
+        elif typ in ("invariants", "acceptance"):
+            say(f"  {label}{mark} -- a text, then its probe command (blank: none); "
+                f"blank text to finish")
+            items = []
+            while True:
+                text = ask("    text  > ")
+                if not text.strip():
+                    break
+                probe = ask("    probe > ").strip()
+                items.append({"text": text.strip(), "probe": probe or None})
+            if items:
+                out[name] = items
+        else:
+            hint = f" ({'/'.join(f.get('choices') or [])})" if typ == "enum" else \
+                (" (y/n)" if typ == "bool" else "")
+            value = ask(f"  {label}{mark}{hint}: ")
+            if value.strip():
+                out[name] = value.strip()
+    return out
 
 
 def _workflow_admits(entry: dict, role: str) -> bool:

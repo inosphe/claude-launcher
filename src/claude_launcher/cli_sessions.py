@@ -27,7 +27,7 @@ import sys
 import time
 import webbrowser
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from urllib.parse import quote
 
 from . import (
@@ -75,6 +75,51 @@ def _print_relay_status(client) -> None:
 # --------------------------------------------------------------------------- #
 # session commands
 # --------------------------------------------------------------------------- #
+INPUT_HELP = (
+    "a start input of a cflow v2 workflow that declares 'inputs:', NAME=VALUE "
+    "(repeatable; a name given twice becomes a list). Lists take one item per "
+    "line or commas; invariants/acceptance take a JSON list of {text, probe}"
+)
+INPUTS_FILE_HELP = (
+    "a JSON object of cflow v2 start inputs (name -> value); --input values "
+    "are applied over it"
+)
+
+
+def _cflow_inputs(args: argparse.Namespace) -> Tuple[Optional[dict], Optional[str]]:
+    """``(inputs, error)`` from ``--inputs-file`` and ``--input NAME=VALUE``;
+    ``(None, None)`` when neither was given. The daemon validates the values
+    against the workflow's declaration (``cflow2/inputs.py``)."""
+    path = getattr(args, "inputs_file", None)
+    pairs = getattr(args, "input", None) or []
+    asked = getattr(args, "wizard_inputs", None)
+    if not path and not pairs:
+        return (dict(asked), None) if asked else (None, None)
+    out: dict = {}
+    if path:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                loaded = json.load(fh)
+        except (OSError, ValueError) as exc:
+            return None, f"--inputs-file {path}: {exc}"
+        if not isinstance(loaded, dict):
+            return None, f"--inputs-file {path}: expected a JSON object"
+        out.update(loaded)
+    seen = set()
+    for item in pairs:
+        name, sep, value = str(item).partition("=")
+        name = name.strip()
+        if not sep or not name:
+            return None, f"--input expects NAME=VALUE, got {item!r}"
+        if name in seen:
+            prev = out[name]
+            out[name] = (prev if isinstance(prev, list) else [prev]) + [value]
+        else:
+            out[name] = value
+            seen.add(name)
+    return out, None
+
+
 def _cmd_new_session(args: argparse.Namespace) -> int:
     inside = os.environ.get("CLAUNCH_SESSION") or ""
     if inside and not args.detached:
@@ -268,6 +313,12 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
     ):
         if value:
             body[key] = value
+    inputs, bad = _cflow_inputs(args)
+    if bad:
+        print(f"error: {bad}", file=sys.stderr)
+        return 1
+    if inputs is not None:
+        body["cflow_inputs"] = inputs
     # Only sent when it is the answer: a missing key means "mint one", which
     # is what every caller that has never heard of these flags wants. False is
     # the older spelling of "no issue, and do not go looking" and stays that,
@@ -335,14 +386,30 @@ def _run_wizard(args: argparse.Namespace, *, spawn: bool = False) -> bool:
 
     wizard_mod.require_terminal()
     client = daemon_client.ensure_running()
-    return wizard_mod.run(
+    sources = wizard_mod.DaemonSources(client)
+    cwd = os.path.abspath(args.cwd) if getattr(args, "cwd", None) else os.getcwd()
+    done = wizard_mod.run(
         args,
-        sources=wizard_mod.DaemonSources(client),
-        cwd=(
-            os.path.abspath(args.cwd) if getattr(args, "cwd", None) else os.getcwd()
-        ),
+        sources=sources,
+        cwd=cwd,
         form=wizard_mod.SpawnWizard if spawn else wizard_mod.Wizard,
     )
+    # A v2 workflow that declares start inputs: ask them now, unless the
+    # command line already gave some (docs/cflow-v2.md 2.6).
+    chosen = str(getattr(args, "workflow", "") or "")
+    if done and chosen and not getattr(args, "input", None) \
+            and not getattr(args, "inputs_file", None):
+        name = chosen[3:] if chosen.startswith("v2:") else chosen
+        where = os.path.abspath(args.cwd) if getattr(args, "cwd", None) else cwd
+        try:
+            entries = sources.workflows(where)
+        except Exception:  # noqa: BLE001 - no list, no form: the daemon still validates
+            entries = []
+        entry = next((e for e in entries if e.get("name") == name and e.get("version") == 2),
+                     None)
+        if entry and entry.get("inputs"):
+            args.wizard_inputs = wizard_mod.ask_inputs(entry["inputs"])
+    return done
 
 
 def _warn_dropped_auth(args: argparse.Namespace, info: dict) -> None:
@@ -575,6 +642,10 @@ def _cmd_spawn(args: argparse.Namespace) -> int:
     extra = list(args.args or [])
     if extra and extra[0] == "--":
         extra = extra[1:]
+    inputs, bad = _cflow_inputs(args)
+    if bad:
+        print(f"error: {bad}", file=sys.stderr)
+        return 1
     client = daemon_client.ensure_running()
     parent = args.parent or os.environ.get("CLAUNCH_SESSION")
     if not parent:
@@ -620,6 +691,7 @@ def _cmd_spawn(args: argparse.Namespace) -> int:
             ("worktree", args.worktree),
             ("rebase_onto", args.rebase_onto),
             ("branch_from", getattr(args, "branch_from", None)),
+            ("cflow_inputs", inputs),
         )
         if v
     }
@@ -2639,6 +2711,8 @@ def register(sub) -> None:
     )
     p_new.add_argument("--workflow", help="cflow workflow to start for it")
     p_new.add_argument("--context", help="context string for that workflow run")
+    p_new.add_argument("--input", action="append", metavar="NAME=VALUE", help=INPUT_HELP)
+    p_new.add_argument("--inputs-file", metavar="PATH", help=INPUTS_FILE_HELP)
     p_new.add_argument(
         "--task", help="opening instruction typed in once it has booted"
     )
@@ -2755,6 +2829,8 @@ def register(sub) -> None:
              "'-' declines that pair",
     )
     p_spawn.add_argument("--context", help="context string for that workflow run")
+    p_spawn.add_argument("--input", action="append", metavar="NAME=VALUE", help=INPUT_HELP)
+    p_spawn.add_argument("--inputs-file", metavar="PATH", help=INPUTS_FILE_HELP)
     p_spawn.add_argument("--task", help="opening instruction typed into the child")
     s_issue = p_spawn.add_mutually_exclusive_group()
     s_issue.add_argument("--issue", metavar="ID", help=ISSUE_HELP)

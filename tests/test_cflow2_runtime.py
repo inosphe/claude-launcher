@@ -13,6 +13,13 @@ from claude_launcher.cflow2.store import RunStore
 T0 = 1_000_000.0
 
 
+@pytest.fixture(autouse=True)
+def _no_session(monkeypatch):
+    # the run's driver defaults to $CLAUNCH_SESSION; tests are unmanaged
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    monkeypatch.delenv("CLAUNCH_SCRATCH", raising=False)
+
+
 class Drv:
     """A driver over one run in a tmp cwd."""
 
@@ -636,7 +643,7 @@ def test_subagent_second_invalid_result_fails_node(tmp_path):
     assert d.events("delegate_failed")
 
 
-def test_subagent_receipt_path_submit(tmp_path):
+def test_subagent_receipt_path_submit(tmp_path, monkeypatch):
     d = Drv(tmp_path, """
         nodes:
           a: {prompt: A}
@@ -647,7 +654,14 @@ def test_subagent_receipt_path_submit(tmp_path):
     """, caps=SUBAGENT_CAPS)
     dl = d.st["delegations"][0]
     assert [t["label"] for t in dl["brief"]["tasks"]] == ["a", "b"]
-    receipt = tmp_path / "r.json"
+    outside = tmp_path / "r.json"
+    outside.write_text(json.dumps({"outcome": "ok", "value": {}}))
+    with pytest.raises(runtime.FlowError, match="receipt .* refused"):
+        runtime.delegate_submit(dl["id"], receipt_path=str(outside), **d.kw())
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.setenv("CLAUNCH_SCRATCH", str(scratch))
+    receipt = scratch / "r.json"
     receipt.write_text(json.dumps({"outcome": "ok", "value": {}}))
     d.st = runtime.delegate_submit(dl["id"], receipt_path=str(receipt), **d.kw())
     assert d.st["status"] == "done"

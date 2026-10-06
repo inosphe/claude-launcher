@@ -44,14 +44,25 @@ body:
   - a
   - cond:
       - {if: "$data.x", then: b}
+      - {else: []}
   - loop: {while: "$data.y", max: 3, do: c}
 """)
     succ = check.cfg(chart)
     assert succ["START"] == ["a"]
-    assert succ["a"] == ["END", "b", "c"]          # cond without else may skip; loop may run 0 times
+    assert succ["a"] == ["END", "b", "c"]          # an empty else skips; loop may run 0 times
     assert succ["b"] == ["END", "c"]
     assert succ["c"] == ["END", "c"]
     assert succ["END"] == []
+    # without an else, no true guard finishes the cond ``fail`` (the run
+    # fails): only the guarded branch continues
+    no_else = C(SIMPLE + """
+body:
+  - a
+  - cond:
+      - {if: "$data.x", then: b}
+  - c
+""")
+    assert check.cfg(no_else)["a"] == ["b"]
 
 
 def test_cfg_try_catch_finally_and_raise():
@@ -67,7 +78,9 @@ body:
     finally: d
 """)
     succ = check.cfg(chart)
-    assert succ["a"] == ["b", "c"]  # blocked -> catch; ok -> raise oops -> catch
+    # blocked -> catch; ok -> raise oops -> catch; fail/timeout -> the
+    # finally d runs, then the run fails
+    assert succ["a"] == ["b", "c", "d"]
     assert succ["b"] == ["d"] and succ["c"] == ["d"] and succ["d"] == ["END"]
 
 
@@ -256,3 +269,225 @@ def test_split_effect():
     assert check.split_effect("git.merge") == ("git.merge", None)
     assert check.split_effect("git.merge:master") == ("git.merge", "master")
     assert check.split_effect("git.merge(master)") == ("git.merge", "master")
+
+
+# -- B3: non-ok outcomes reach ancestor ``on`` handlers and ``*`` catches -------
+
+
+def test_must_pass_sees_a_failure_routed_by_an_ancestor_on_handler():
+    chart = C(SIMPLE + """
+body:
+  seq: [a, b, c]
+  on: {fail: end}
+spec:
+  paths: {p: {to: end, must_pass: [b]}}
+""")
+    found = findings(chart, "must-pass")
+    assert len(found) == 1 and "START -> a -> END" in found[0].message
+
+
+def test_must_pass_sees_a_wildcard_catch():
+    chart = C(SIMPLE + """
+body:
+  - try: [a, b]
+    catch: {"*": end}
+  - c
+spec:
+  paths: {p: {to: end, must_pass: [b]}}
+""")
+    assert "START -> a -> END" in findings(chart, "must-pass")[0].message
+    succ = check.cfg(chart)
+    assert "END" in succ["a"]
+
+
+def test_ask_outcomes_are_possible_outcomes():
+    chart = C("""
+nodes:
+  g: {prompt: g, ask: {prompt: "go?"}}
+  b: {prompt: b}
+body:
+  seq: [g, b]
+  on: {declined: end}
+spec:
+  paths: {p: {to: end, must_pass: [b]}}
+""")
+    assert "START -> g -> END" in findings(chart, "must-pass")[0].message
+
+
+# -- B4: signals and failures run every finally they leave ---------------------
+
+
+def test_end_inside_try_runs_the_finally():
+    chart = C(SIMPLE + """
+body:
+  try: [a, end]
+  finally: c
+spec:
+  paths: {p: {to: end, must_pass: [c]}}
+""")
+    assert findings(chart, "must-pass") == []
+    assert check.cfg(chart)["a"] == ["c"]
+
+
+def test_finally_copy_does_not_leak_the_signal_to_normal_paths():
+    # the end path runs c then ends; the normal path runs c then b. A shared
+    # finally would also let the normal path end right after c (skipping b).
+    chart = C(SIMPLE + """
+body:
+  - try:
+      cond:
+        - {if: "$data.stop", then: [a, end]}
+        - {else: []}
+    finally: c
+  - b
+spec:
+  paths: {p: {to: end, must_pass: [b, c]}}
+""")
+    msgs = [f.message for f in findings(chart, "must-pass")]
+    # the only path skipping b is the real one through a
+    assert len(msgs) == 1 and "START -> a -> c -> END" in msgs[0]
+
+
+def test_return_break_continue_run_the_finally():
+    chart = C(SIMPLE + """
+procedures:
+  p:
+    body:
+      try: [a, {return: ok}]
+      finally: b
+body:
+  - call: p
+  - loop:
+      while: "true"
+      max: 3
+      do:
+        try: [{break: null}]
+        finally: c
+spec:
+  paths:
+    p1: {to: end, must_pass: [b]}
+    p2: {to: end, must_pass: [c]}
+""")
+    succ = check.cfg(chart)
+    assert succ["body.0/a"] == ["body.0/b"]        # return runs the finally
+    assert not any("p1" in f.message for f in findings(chart, "must-pass"))
+    # the loop may run zero times (p2 fails for that reason only), and a
+    # break inside it runs c before leaving
+    assert "c" in succ["body.0/b"]
+    assert [f.message for f in findings(chart, "must-pass")] == [
+        "path p2: START -> body.0/a -> body.0/b -> END reaches end without passing c"]
+
+
+def test_uncaught_failure_runs_nested_finallys_in_order():
+    chart = C("""
+nodes:
+  a: {prompt: a}
+  b: {prompt: b}
+  c: {prompt: c}
+  d: {prompt: d}
+body:
+  try:
+    try: a
+    finally: b
+  catch: {fail: d}
+  finally: c
+""")
+    succ = check.cfg(chart)
+    assert "b" in succ["a"]           # a fails: the inner finally first
+    # after the inner finally (in the failing copy) the outer catch runs
+    assert "d" in succ["b"] and "c" in succ["d"]
+
+
+def test_improv_worker_settle_before_end_holds_with_an_end_in_the_round_body():
+    import yaml as _yaml
+    from claude_launcher.cflow2 import layers
+    from claude_launcher.cflow2.frontend import _load_yaml, _plain
+
+    path = layers.find("improv-worker-v2")
+    doc = _plain(_load_yaml(path.read_text(encoding="utf-8"), path.name))
+    body = doc["body"]["try"]["loop"]["do"]
+    body.insert(1, "end")
+    text = _yaml.safe_dump(doc, allow_unicode=True, sort_keys=False)
+    chart = compile_text(text, source=str(path), resolve_include=layers.resolver())
+    assert any(n.type == "control" and n.get("op") == "end" and n.parent == "rounds.do"
+               for n in chart.nodes.values())
+    assert [f for f in findings(chart, "must-pass") if "settle-before-end" in f.message] == []
+    # and the property is not vacuous: without the finally it fails
+    doc["body"] = {"seq": [doc["body"]["try"], doc["body"]["finally"]]}
+    chart = compile_text(_yaml.safe_dump(doc, allow_unicode=True, sort_keys=False),
+                         source=str(path), resolve_include=layers.resolver())
+    assert [f for f in findings(chart, "must-pass") if "settle-before-end" in f.message]
+
+
+# -- A2: no person's gate inside a delegation -----------------------------------
+
+
+def test_delegated_user_gate():
+    tree = """
+nodes:
+  a: {prompt: a}
+  b: {prompt: b}
+body:
+  seq:
+    - a
+    - choose:
+        chooser: %s
+        options: {x: {then: b}, y: {then: []}}
+  executor: %s
+"""
+    assert "delegated-user-gate" in codes(C(tree % ("user", "subagent")), "error")
+    assert "delegated-user-gate" in codes(C(tree % ("user", "[headless, inline]")), "error")
+    assert "delegated-user-gate" not in codes(C(tree % ("user", "inline")))
+    assert "delegated-user-gate" not in codes(C(tree % ("agent", "subagent")))
+
+
+# -- C4: effects-undeclared ------------------------------------------------------
+
+
+def test_effects_undeclared_only_where_effects_are_forbidden():
+    base = """
+nodes:
+  a: {prompt: a}
+  b: {prompt: b, effects: []}
+  c: {prompt: c, effects: [fs.read]}
+body: [a, b, c]
+"""
+    assert "effects-undeclared" not in codes(C(base))
+    inv = C(base + "spec:\n  invariants: {x: {never_effect: git.push}}\n")
+    found = findings(inv, "effects-undeclared")
+    assert [f.node for f in found] == ["a"] and found[0].level == "warning"
+    rule = C(base + "rules:\n  r: {text: R, effect: {deny: git.push}}\n")
+    assert [f.node for f in findings(rule, "effects-undeclared")] == ["a"]
+
+
+def test_bundled_definitions_declare_every_effect():
+    from claude_launcher.cflow2 import layers
+
+    for name in ("improv-worker-v2", "improv-common", "sample-v2"):
+        assert findings(layers.load(name), "effects-undeclared") == [], name
+
+
+# -- ir.subtree_is_flat ------------------------------------------------------------
+
+
+def test_subtree_is_flat():
+    chart = C(SIMPLE + """
+body:
+  - id: flat
+    seq: [a, b]
+    bind: x
+    on: {fail: c}
+  - id: nested
+    seq: [a, {id: inner, seq: [b], bind: y}]
+  - id: ctl
+    seq: [a, {cond: [{if: "true", then: b}]}]
+  - id: ens
+    seq: [c]
+spec:
+  ensures: {"c#2.ok": "true"}
+""")
+    assert ir.subtree_is_flat(chart, "flat")      # the root's own on/bind run outside
+    assert ir.subtree_is_flat(chart, "a")
+    assert not ir.subtree_is_flat(chart, "nested")
+    assert not ir.subtree_is_flat(chart, "ctl")
+    assert not ir.subtree_is_flat(chart, "ens")

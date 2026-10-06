@@ -448,3 +448,355 @@ def test_session_budget_timeout_tells_child(tmp_path):
     clock.scan(now=T0)
     notices = clock.scan(now=T0 + 20)
     assert {n[1] for n in notices} == {"own", "kid"}
+
+
+# -- A5 / B5: shutdown, reaping, halts, orphans --------------------------------------
+
+SLOW = r'''
+import os, sys, time
+d = os.environ["FAKE_DIR"]
+open(os.path.join(d, "pid"), "w").write(str(os.getpid()))
+n = os.path.join(d, "n")
+open(n, "a").write("x")
+time.sleep(30)
+'''
+
+
+def _slow_launch(tmp_path):
+    d = tmp_path / "slow"
+    d.mkdir(exist_ok=True)
+    script = d / "h.py"
+    script.write_text(SLOW)
+    return d, cflow2_exec.Launch(harness="claude", command=[sys.executable, str(script)],
+                                 env=dict(os.environ, FAKE_DIR=str(d)))
+
+
+def _wait_for(pred, timeout=10.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pred():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _rec(cwd, did, scope="own"):
+    return RunStore(str(cwd), scope).load_state()["delegations"][did]
+
+
+def _started_slow(tmp_path):
+    d, launch = _slow_launch(tmp_path)
+    clock = _clock(FakeManager(FakeSession("own", str(tmp_path))),
+                   launch_for=lambda s: launch, threaded=True)
+    clock.scan()
+    st = _start(tmp_path, HEADLESS, caps=JSON_CAPS)
+    did = st["delegations"][0]["id"]
+    clock.scan()
+    assert _wait_for(lambda: clock.procs.keys() and (d / "pid").exists())
+    return d, clock, did
+
+
+def test_shutdown_requeues_with_attempt_unchanged_and_starts_nothing(tmp_path):
+    import asyncio
+
+    d, clock, did = _started_slow(tmp_path)
+    assert _wait_for(lambda: (_rec(tmp_path, did).get("runner") or {}).get("pid"))
+    runner = _rec(tmp_path, did)["runner"]
+    assert runner["pid"] == int((d / "pid").read_text()) and runner["attempt"] == 1
+    asyncio.run(clock.shutdown())
+    clock.wait_jobs(15)
+    rec = _rec(tmp_path, did)
+    assert rec["status"] == "queued" and rec["attempts"] == 0
+    assert (d / "n").read_text() == "x"  # no second attempt
+    assert clock.results[0]["result"] == "interrupted"
+    assert clock.scan() == [] and _rec(tmp_path, did)["status"] == "queued"
+    assert not cflow2_exec.process_alive(runner["pid"], runner["argv0"])
+
+
+def test_aborted_run_kills_headless_process_group(tmp_path):
+    d, clock, did = _started_slow(tmp_path)
+    pid = int((d / "pid").read_text())
+    runtime.abort("stop", cwd=str(tmp_path), scope="own")
+    clock.scan()
+    clock.wait_jobs(15)
+    assert not cflow2_exec.process_alive(pid, sys.executable)
+    assert _rec(tmp_path, did)["status"] == "cancelled"
+    assert clock.results[0]["result"] == "cancelled"
+    assert _events(tmp_path, "delegate_killed")[0]["why"] == "cancelled"
+
+
+def test_halt_kills_and_requeues_and_holds_dispatch(tmp_path):
+    d, clock, did = _started_slow(tmp_path)
+    pid = int((d / "pid").read_text())
+
+    def halt(r):
+        r.state["status"] = runtime.ST_WAITING
+        r.state["reason"] = "monitor_violation"
+        r.state["approvals"] = [{"kind": "monitor_violation", "monitor": "m", "instance": None}]
+    runtime._mutate(str(tmp_path), "own", None, halt)
+    clock.scan()
+    clock.wait_jobs(15)
+    assert not cflow2_exec.process_alive(pid, sys.executable)
+    rec = _rec(tmp_path, did)
+    assert rec["status"] == "queued" and rec["attempts"] == 0
+    clock.scan()  # still halted: not dispatched again
+    assert _rec(tmp_path, did)["status"] == "queued" and not clock.procs.keys()
+
+
+def test_boot_kills_surviving_process_then_requeues(tmp_path):
+    import subprocess
+
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                            start_new_session=True)
+    try:
+        clock = _clock(FakeManager(FakeSession("own", str(tmp_path))), launch_for=lambda s: None)
+        clock.scan()
+        st = _start(tmp_path, HEADLESS, caps=JSON_CAPS)
+        did = st["delegations"][0]["id"]
+        runtime.delegate_update(did, cwd=str(tmp_path), scope="own", status="running",
+                                runner={"boot": "old", "pid": proc.pid,
+                                        "argv0": sys.executable, "attempt": 1})
+        clock.max_headless = 0
+        clock.scan()
+        assert proc.wait(10) is not None
+        assert _rec(tmp_path, did)["status"] == "queued"
+        clock.scan()  # requeued once: nothing more happens
+        assert len([e for e in _events(tmp_path, "fallback") if e.get("route") == "requeue"]) == 1
+    finally:
+        cflow2_exec.kill_group(proc.pid)
+
+
+def test_stopped_clock_claims_nothing(tmp_path):
+    d, launch = _fake_launch(tmp_path)
+    clock = _clock(FakeManager(FakeSession("own", str(tmp_path))), launch_for=lambda s: launch)
+    clock.scan()
+    st = _start(tmp_path, HEADLESS, caps=JSON_CAPS)
+    clock.stop.set()
+    assert clock.scan() == []
+    assert _rec(tmp_path, st["delegations"][0]["id"])["status"] == "queued"
+
+
+# -- B6: session spawn bookkeeping ----------------------------------------------------
+
+
+class KidManager(FakeManager):
+    def __init__(self, *sessions):
+        super().__init__(*sessions)
+        self.kids = {}
+        self.killed = []
+
+    def children(self, name):
+        return [k for k, p in self.kids.items() if p == name]
+
+    def add_kid(self, name, parent, task, cwd):
+        s = FakeSession(name, cwd)
+        s.sdef.task = task
+        self.sessions[name] = s
+        self.kids[name] = parent
+        return s
+
+
+def test_spawning_persisted_before_post_and_assignee_written(tmp_path):
+    mgr = KidManager(FakeSession("own", str(tmp_path)))
+    seen = {}
+
+    def spawn(parent, body):
+        st = RunStore(str(tmp_path), "own").load_state()
+        rec = list(st["delegations"].values())[0]
+        seen.update(status=rec["status"], runner=rec["runner"])
+        mgr.add_kid("kid", parent, body["task"], str(tmp_path))
+        return "kid"
+
+    clock = _clock(mgr, spawn=spawn)
+    clock.scan()
+    st = _start(tmp_path, SESSION, caps=SESSION_CAPS)
+    did = st["delegations"][0]["id"]
+    clock.scan()
+    assert seen["status"] == "running" and seen["runner"]["phase"] == "spawning"
+    assert seen["runner"]["marker"] in mgr.sessions["kid"].sdef.task
+    rec = _rec(tmp_path, did)
+    assert rec["child"] == "kid" and rec["assignee"] == "kid"
+    assert rec["runner"]["phase"] == "spawned"
+
+
+def test_spawn_timeout_adopts_existing_child(tmp_path):
+    mgr = KidManager(FakeSession("own", str(tmp_path)))
+
+    def spawn(parent, body):
+        mgr.add_kid("kid", parent, body["task"], str(tmp_path))  # created, answer lost
+        raise cflow2_exec.SpawnRefused("timed out")
+
+    clock = _clock(mgr, spawn=spawn)
+    clock.scan()
+    st = _start(tmp_path, SESSION, caps=SESSION_CAPS)
+    did = st["delegations"][0]["id"]
+    clock.scan()
+    rec = _rec(tmp_path, did)
+    assert rec["executor"] == "session" and rec["child"] == "kid" and rec["assignee"] == "kid"
+    assert clock.results[0]["result"] == "adopted"
+
+
+def test_orphan_child_appearing_after_reroute_is_killed(tmp_path):
+    mgr = KidManager(FakeSession("own", str(tmp_path)))
+    bodies = []
+    killed = []
+
+    def spawn(parent, body):
+        bodies.append(body)
+        raise cflow2_exec.SpawnRefused("timed out")
+
+    clock = _clock(mgr, spawn=spawn, kill_child=lambda p, c: killed.append((p, c)))
+    clock.scan()
+    st = _start(tmp_path, SESSION, caps=SESSION_CAPS)
+    did = st["delegations"][0]["id"]
+    clock.scan()
+    assert _rec(tmp_path, did)["executor"] == "subagent"
+    mgr.add_kid("late", "own", bodies[0]["task"], str(tmp_path))  # the daemon finished later
+    clock.scan()
+    assert killed == [("own", "late")]
+    ev = _events(tmp_path, "orphan_child")
+    assert ev and ev[0]["child"] == "late" and ev[0]["outcome"] == "killed"
+    clock.scan()
+    assert killed == [("own", "late")]  # once
+
+
+def test_boot_requeues_spawning_without_child_once_then_reroutes(tmp_path):
+    mgr = KidManager(FakeSession("own", str(tmp_path)))
+    clock = _clock(mgr, spawn=lambda p, b: (_ for _ in ()).throw(AssertionError("no spawn")))
+    clock.scan()
+    st = _start(tmp_path, SESSION, caps=SESSION_CAPS)
+    did = st["delegations"][0]["id"]
+    spawning = {"boot": "old", "phase": "spawning", "marker": "[cflow2-delegation own/x/d1]"}
+    runtime.delegate_update(did, cwd=str(tmp_path), scope="own", status="running",
+                            runner=spawning)
+    clock._session(str(tmp_path), "own", did, _rec(tmp_path, did), time.time(), [])
+    rec = _rec(tmp_path, did)
+    assert rec["status"] == "queued" and rec["respawns"] == 1
+    runtime.delegate_update(did, cwd=str(tmp_path), scope="own", status="running",
+                            runner=spawning)
+    clock._session(str(tmp_path), "own", did, _rec(tmp_path, did), time.time(), [])
+    rec = _rec(tmp_path, did)
+    assert rec["executor"] == "subagent" and rec["status"] == "pending"
+
+
+def test_boot_adopts_child_of_interrupted_spawn(tmp_path):
+    mgr = KidManager(FakeSession("own", str(tmp_path)))
+    clock = _clock(mgr)
+    clock.scan()
+    st = _start(tmp_path, SESSION, caps=SESSION_CAPS)
+    did = st["delegations"][0]["id"]
+    marker = "[cflow2-delegation own/x/d1]"
+    runtime.delegate_update(did, cwd=str(tmp_path), scope="own", status="running",
+                            runner={"boot": "old", "phase": "spawning", "marker": marker})
+    mgr.add_kid("kid", "own", "task\n" + marker, str(tmp_path))
+    clock.scan()
+    rec = _rec(tmp_path, did)
+    assert rec["status"] == "running" and rec["child"] == "kid" and rec["assignee"] == "kid"
+
+
+# -- D: child receipt and heartbeat --------------------------------------------------
+
+
+def _receipt_setup(tmp_path):
+    mgr = FakeManager(FakeSession("own", str(tmp_path)))
+
+    def spawn(parent_name, body):
+        mgr.sessions["kid"] = FakeSession("kid", str(tmp_path))
+        return "kid"
+
+    clock = _clock(mgr, spawn=spawn)
+    clock.scan()
+    st = _start(tmp_path, SESSION, caps={"session.spawn": True})
+    did = st["delegations"][0]["id"]
+    clock.scan()
+    return clock, did, RunStore(str(tmp_path), "own").receipt_path(did, ".child.json")
+
+
+def test_partial_child_receipt_waits(tmp_path):
+    clock, did, receipt = _receipt_setup(tmp_path)
+    receipt.write_text('{"outcome": "ok", "val')
+    clock.scan()
+    assert receipt.exists() and _rec(tmp_path, did)["status"] == "running"
+    receipt.write_text(json.dumps({"outcome": "ok", "value": {"verdict": "v"}}))
+    clock.scan()
+    assert _rec(tmp_path, did)["status"] == "returned"
+
+
+def test_stale_partial_receipt_is_submitted_and_refused(tmp_path):
+    clock, did, receipt = _receipt_setup(tmp_path)
+    receipt.write_text('{"outcome": "ok", "val')
+    old = time.time() - cflow2_clock.RECEIPT_SETTLE - 5
+    os.utime(receipt, (old, old))
+    notices = clock.scan()
+    assert any(n[1] == "kid" and "refused" in n[2] for n in notices)
+
+
+def test_receipt_rename_failure_submits_nothing(tmp_path, monkeypatch):
+    clock, did, receipt = _receipt_setup(tmp_path)
+    receipt.write_text(json.dumps({"outcome": "ok", "value": {"verdict": "v"}}))
+    submitted = []
+    monkeypatch.setattr(runtime, "delegate_submit", lambda *a, **k: submitted.append(k))
+    from pathlib import Path
+
+    def boom(self, target):
+        raise OSError("busy")
+    monkeypatch.setattr(Path, "rename", boom)
+    clock.scan()
+    assert submitted == [] and receipt.exists()
+
+
+def test_heartbeat_refreshed_between_probes(tmp_path, monkeypatch):
+    monkeypatch.setattr(cflow2_clock, "HEARTBEAT_EVERY", 0.0)
+    _start(tmp_path, """
+        nodes:
+          a: {prompt: A}
+        body:
+          seq:
+            - wait: {probe: "p1", poll: 10}
+            - a
+    """)
+    _start(tmp_path, """
+        nodes:
+          b: {prompt: B}
+        body:
+          seq:
+            - wait: {probe: "p2", poll: 10}
+            - b
+    """, scope="two")
+    stamps = []
+
+    def probe(cmd, cwd):
+        stamps.append(executors.read_heartbeat()["ts"])
+        time.sleep(0.05)
+        return (1, "")
+
+    clock = _clock(FakeManager(FakeSession("own", str(tmp_path))), probe_runner=probe,
+                   heartbeat=True)
+    clock.scan(now=T0 + 1)
+    assert len(stamps) == 2 and stamps[1] > stamps[0]
+
+
+def test_stuck_pass_lets_heartbeat_go_stale(tmp_path, monkeypatch):
+    monkeypatch.setattr(cflow2_clock, "HEARTBEAT_EVERY", 0.0)
+    clock = _clock(FakeManager(), heartbeat=True)
+    clock._beat(force=True)
+    first = executors.read_heartbeat()["ts"]
+    clock._scanning = True
+    clock._progress = time.time() - cflow2_clock.PROGRESS_MAX - 1
+    time.sleep(0.01)
+    clock._beat()
+    assert executors.read_heartbeat()["ts"] == first
+
+
+# -- E1: probes get run values through the environment only ---------------------------
+
+
+def test_run_probe_env_and_timeout_kills_group(tmp_path):
+    code, out = cflow2_clock.run_probe('printf %s "$CFLOW_IN_TARGET"', str(tmp_path),
+                                       env={"CFLOW_IN_TARGET": "x || true; false"})
+    assert code == 0 and out == "x || true; false"
+    code, _ = cflow2_clock.run_probe("exit 3", str(tmp_path))
+    assert code == 3
+    t0 = time.monotonic()
+    code, out = cflow2_clock.run_probe("sleep 30 & sleep 30", str(tmp_path), timeout=0.5)
+    assert code == 124 and time.monotonic() - t0 < 10

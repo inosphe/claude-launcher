@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import sys
 import textwrap
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -51,7 +52,11 @@ class Drv:
         return [t["label"] for t in self.st.get("tasks", [])]
 
     def report(self, ref, outcome="ok", value=None, runner=None, now=None):
+        """Report and wait for a background verify to come back."""
         self.st = runtime.report(ref, outcome, value, verify_runner=runner, **self.kw(now))
+        if self.st.get("verifying"):
+            runtime.verify_join(30)
+            self.st = runtime.status(**self.kw(now))
         return self.st
 
     def events(self, name):
@@ -91,7 +96,7 @@ def test_verify_pass_carries_run_env_and_proceeds(tmp_path):
     d = Drv(tmp_path, """
         params: {who: {default: me}, n: {default: 3}}
         nodes:
-          a: {prompt: a, verify: "check ${params.who}"}
+          a: {prompt: a, verify: 'check "$CFLOW_IN_WHO"'}
           b: {prompt: b}
         body: [a, b]
     """)
@@ -102,9 +107,13 @@ def test_verify_pass_carries_run_env_and_proceeds(tmp_path):
                     env={k: v for k, v in env.items() if k.startswith(("CFLOW2_", "CFLOW_IN_"))})
         return 0, "fine"
 
-    d.report("a", runner=runner)
+    first = runtime.report("a", verify_runner=runner, **d.kw())
+    assert first["verifying"]["task"] == "a"  # the call returns before verify ran
+    runtime.verify_join(30)
+    d.status()
     assert d.tasks() == ["b"]
-    assert seen["cmd"] == "check me" and seen["timeout"] == 900.0
+    # E1: the value reaches the command only as an environment variable
+    assert seen["cmd"] == 'check "$CFLOW_IN_WHO"' and seen["timeout"] == 900.0
     assert seen["cwd"] == str(tmp_path.resolve())
     env = seen["env"]
     assert env["CFLOW2_RUN"] == d.state()["run_id"] and env["CFLOW2_NODE"] == "a"
@@ -116,13 +125,14 @@ def test_verify_pass_carries_run_env_and_proceeds(tmp_path):
 def test_verify_failure_refuses_the_report_and_keeps_the_task(tmp_path):
     d = Drv(tmp_path, "nodes:\n  a: {prompt: a, verify: t}\n  b: {prompt: b}\nbody: [a, b]\n")
     out = "\n".join(f"line {i}" for i in range(100)) + "\nFAILED test_x"
-    with pytest.raises(runtime.FlowError) as ei:
-        d.report("a", runner=lambda *a: (1, out))
-    msg = str(ei.value)
-    assert "verify failed (exit 1)" in msg and "FAILED test_x" in msg and "line 0\n" not in msg
-    assert d.status()["tasks"][0]["label"] == "a"
+    st = d.report("a", runner=lambda *a: (1, out))
+    (task,) = st["tasks"]
+    assert task["label"] == "a"
+    lv = task["last_verify"]
+    assert lv["why"] == "exit 1" and "FAILED test_x" in lv["tail"] and "line 0\n" not in lv["tail"]
     ev = d.events("verify_failed")[0]
     assert ev["exit"] == 1 and "FAILED test_x" in ev["tail"]
+    assert d.events("verify_started")
     assert not d.events("reported")
     # a non-ok outcome is not verified
     d.report("a", "fail", runner=lambda *a: pytest.fail("verify ran for a fail report"))
@@ -133,8 +143,8 @@ def test_verify_timeout_kills_the_command(tmp_path):
     cmd = [sys.executable, "-c", "import time; time.sleep(30)"]
     d = Drv(tmp_path, "nodes:\n  a: {prompt: a, verify: {run: %s, timeout: 0.5}}\nbody: a\n"
             % json.dumps(cmd))
-    with pytest.raises(runtime.FlowError, match="timed out after 0.5s"):
-        d.report("a")
+    st = d.report("a")
+    assert st["tasks"][0]["last_verify"]["why"] == "timed out after 0.5s"
     assert d.events("verify_failed")[0]["timed_out"] is True
     assert d.status()["tasks"][0]["label"] == "a"
 
@@ -183,9 +193,9 @@ def test_a_run_that_moved_while_verify_ran_applies_nothing(tmp_path):
         runtime.report("b", cwd=d.cwd, scope=d.scope, now=T0)
         return 0, ""
 
-    with pytest.raises(runtime.FlowError):
-        d.report("a", runner=runner)
+    d.report("a", runner=runner)
     assert [e["node"] for e in d.events("reported")] == ["b"]
+    assert not d.events("verify_passed")
     assert d.state()["status"] == "done"
 
 
@@ -293,8 +303,8 @@ def test_self_fallthrough_lets_the_driver_approve(tmp_path, monkeypatch):
     assert st["status"] == "running" and st["asks"][0]["resolution"] == "self"
     assert "flow_approve" in st["asks"][0]["how"]
     monkeypatch.chdir(tmp_path)
-    out = cflow2_mcp.call_tool("flow_approve", {"node": "a", "reason": "nobody else",
-                                                "scope": SCOPE})
+    monkeypatch.setenv("CLAUNCH_SESSION", SCOPE)  # the driver's own MCP server
+    out = cflow2_mcp.call_tool("flow_approve", {"node": "a", "reason": "nobody else"})
     assert [t["label"] for t in out["tasks"]] == ["a"]
     assert d.events("ask_answered")[0]["channel"] == "self"
 
@@ -515,7 +525,7 @@ def test_delegated_decision_maps_the_option_to_the_outcome(tmp_path):
 
 def test_a_person_answers_over_the_responders_and_they_are_told(tmp_path):
     d = Drv(tmp_path, DELEGATED)
-    _route(d)
+    _route(d, now=time.time())  # the web handler answers on the real clock
     told = []
     out = cflow2_approve.approve(d.cwd, d.scope, {"node": "a", "decision": "approve",
                                                    "reason": "mine"},
@@ -562,7 +572,7 @@ def test_mcp_lists_the_new_tools_and_answers_by_identity(tmp_path, monkeypatch):
     names = {t["name"] for t in cflow2_mcp.TOOLS}
     assert {"flow_approve", "flow_answer", "flow_asks"} <= names
     d = Drv(tmp_path, DELEGATED)
-    _route(d)
+    _route(d, now=time.time())  # flow_answer runs on the real clock
     rec = next(iter(d.state()["asks"].values()))
     monkeypatch.setattr(asks, "default_nudge", lambda *a: None)
     monkeypatch.setenv("CLAUNCH_SESSION", "s-rev")

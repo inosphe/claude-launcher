@@ -177,6 +177,31 @@ v2에서는 호출하는 쪽이 프로시저의 내용을 바꿀 문법이 없�
 둔다. probe는 git이나 보드를 읽는 명령이다. 메시지로 「끝나면 알려 줄게」를
 약속하지 않는다(v1 `improv-pm`과 같은 원칙).
 
+probe의 종료 코드는 0 = 성립, 1 = 아직, 그 밖 = 판정 불가다(규격 2.3 「wait」).
+판정 불가가 `undecided_max`(기본 3)번 이어지면 wait는 `undecidable`로, `seconds`
+상한을 넘기면 `timeout`으로 끝난다. 둘 다 처리하는 곳이 없으면 런이 실패하므로
+`on`으로 받는다. 기계가 답할 수 없는 상황이므로 보통 `chooser: user` 선택으로
+보낸다.
+
+```yaml
+- id: wait-for-a
+  wait:
+    probe: "git merge-base --is-ancestor 1a2b3c4 HEAD"   # 0/1, git 오류는 128
+    poll: 120
+    seconds: 86400
+    describe: 선행 갈래 A의 tip이 기준 브랜치에 실렸다
+  on:
+    undecidable: {call: ask-the-user, with: {why: undecidable}}
+    timeout: {call: ask-the-user, with: {why: timeout}}
+```
+
+「아직」과 「판정 불가」를 같은 종료 코드로 내는 명령(예: `&&`로 이어 붙인 명령의
+마지막이 실패 시 1을 내는 경우)은 이 구분을 잃는다. 판정 불가가 있는 도구는
+2로 끝나게 쓴다.
+
+probe·`verify`에는 `${...}`를 쓸 수 없다(컴파일 오류). 런의 값은 환경 변수
+`CFLOW_IN_<NAME>`(param), `CFLOW_DATA_<NAME>`(최상위 data의 스칼라)로 읽는다.
+
 ### 3.3 위임을 정한다
 
 작업이나 하위 트리에 `executor`를 붙이면 그 부분이 다른 컨텍스트에서
@@ -202,8 +227,10 @@ v2에서는 호출하는 쪽이 프로시저의 내용을 바꿀 문법이 없�
   앞에서부터 가능한 것을 고르고, 어느 것도 안 되면 `inline`이다. `inline`은 어떤
   capability에도 기대지 않으므로 항상 마지막 경로로 존재한다.
 - 하나만 고정해야 할 이유가 없으면 목록으로 쓴다.
-- 위임된 작업에는 `ask`(승인)를 넣을 수 없다. 비대화형 프로세스 안에서는 승인을
-  받을 수 없기 때문이다. 승인은 위임 노드 밖에 둔다.
+- 위임된 하위 트리에는 `ask`(승인)도, `chooser: user`인 `choose`도 넣을 수 없다
+  (`delegated-ask`, `delegated-user-gate` 오류). 위임받은 실행 주체가 사람 대신
+  답하거나 게이트를 건너뛰게 되기 때문이다. 사람을 기다리는 게이트는 위임 노드
+  밖에 둔다.
 
 모든 것을 위임하면 메인의 공유 맥락이 사라지고, 같은 파일을 여러 컨텍스트가
 다시 읽느라 전체 토큰 사용량은 늘어난다. 위임은 메인 컨텍스트를 줄이는
@@ -225,9 +252,13 @@ spec:
 ```
 
 - `invariants.never_effect`: 어느 작업도 이 효과를 선언하지 않았는지 컴파일 시점에
-  검사한다. 작업의 `effects`를 정확히 적어야 의미가 있다.
+  검사한다. 작업의 `effects`를 정확히 적어야 의미가 있다. 이 불변식(또는 규칙의
+  `effect`)이 있는 차트에서 `effects` 키가 없는 작업은 `effects-undeclared` 경고가
+  난다. 효과가 없는 작업은 `effects: []`로 적는다.
 - `paths.must_pass`: 시작부터 `to`까지의 모든 경로가 지정 노드를 지나는지 검사한다.
-  실패하면 반례 경로를 보여 준다.
+  실패하면 반례 경로를 보여 준다. 실패 결과가 조상의 `on`이나 `catch: {"*": …}`로
+  가는 경로, `end`·`return`이 `finally`를 거쳐 나가는 경로도 계산에 들어간다.
+  그래서 「반드시 지나야 하는 정리」는 `try … finally`로 쓰면 검사가 통과한다.
 - `monitors`: 실행 중 데몬이 검사한다(단계 4).
 
 ### 3.6 검증한다
@@ -240,7 +271,7 @@ claunch cflow2 validate <절차 파일 경로> --profile <자식 프로필>     
 
 출력 내용:
 - 컴파일 오류(파일:줄)
-- 정적 검사 결과(`unbounded-loop`, `never-effect`, `must-pass`, `par-write-overlap`, `delegated-ask` 등)
+- 정적 검사 결과(`unbounded-loop`, `never-effect`, `must-pass`, `par-write-overlap`, `delegated-ask`, `delegated-user-gate`, `effects-undeclared` 등)
 - 위임 노드마다 그 프로필에서 선택될 실행 주체와 fallback 경로
 
 fallback 경로가 기대와 다르면 노드의 `executor` 목록이나 `needs`를 고친다.
@@ -250,6 +281,48 @@ fallback 경로가 기대와 다르면 노드의 `executor` 목록이나 `needs`
 spawn의 `workflow`에 v2 절차 파일 경로를 준다(단계 4). v1과 같이 런 시작
 시점에 스냅샷되므로, 이후 파일을 고쳐도 그 자식은 바뀌지 않는다. 재계획은
 「지금 회차를 끝내고 새 파일로 새 런」이다.
+
+경로로 줄 수 있는 것은 `.cflow2/generated/` 아래의 생성 파일뿐이다. 그 파일 안의
+`include`·`call`은 경로가 아니라 이름이고, 레이어(프로젝트 → 전역 → 패키지)에서
+찾는다. 같은 디렉터리의 다른 생성 파일을 이름으로 부를 수는 없다.
+
+### 3.8 시작 입력을 선언한다
+
+자식에게 줄 목표·범위·불변식·완료 기준을 오프닝 태스크 산문 대신 형식 있는
+입력으로 줄 수 있다. 정의가 `inputs`를 선언하면(규격 2.6) 새 세션 폼과 spawn
+모달이 칸을 그리고, spawn 도구와 CLI는 같은 이름으로 값을 받는다.
+
+```yaml
+inputs:
+  goal:       {type: text, label: 목표, required: true}
+  scope:      {type: list, label: 범위(경로·glob)}
+  invariants: {type: invariants, label: 불변식}
+  acceptance: {type: acceptance, label: 완료 기준}
+nodes:
+  intake:
+    prompt: |
+      목표: ${data.inputs.goal}
+      범위: ${data.inputs.scope}
+```
+
+- 값은 런 데이터 `data.inputs`에 실리고, 프롬프트는 `${data.inputs.<이름>}`으로,
+  식은 `$data.inputs.<이름>`으로 읽는다.
+- `invariants`의 각 항목은 모든 작업에 전달되는 규칙이 된다. `probe`를 적은 항목은
+  데몬이 300초마다 실행하는 모니터도 되며, 종료 코드가 0이 아니면 런이 멈춘다.
+  예: `{text: master는 움직이지 않는다, probe: "test \"$(git rev-parse master)\" = 1a2b3c4"}`.
+- `acceptance`의 각 항목은 런이 `ok`로 끝나기 직전에 확인된다. `probe`가 있으면
+  엔진이 실행하고(0 = 충족), 없으면 모든 작업의 규칙 절에 실려 마지막 작업에서
+  에이전트가 대조한다.
+- probe는 적힌 그대로 셸에서 실행된다. 값을 끼워 넣는 문법은 없다.
+- PM이 자식을 spawn할 때: MCP `spawn`의 `cflow_inputs`에
+  `{"goal": "...", "invariants": [{"text": "...", "probe": "..."}]}`처럼 준다.
+  CLI는 `--input goal=... --input scope=src/a --input scope=src/b` 또는
+  `--inputs-file inputs.json`이다. 필수 입력이 없거나 선언에 없는 이름이 있으면
+  spawn이 400으로 거절되고, 응답의 `errors`가 입력 이름별 이유를 싣는다.
+- `improv-worker-v2`는 `goal`, `issue`, `scope`, `invariants`, `acceptance`,
+  `max_rounds`를 선언한다. `goal`은 필수가 아니다: 데몬이 오프닝 태스크로 만든
+  이슈나 리더 브리핑이 목표를 주는 경로가 있으므로, 비어 있으면 intake가 이슈·사용자·
+  브리핑에서 목표를 정한다.
 
 ---
 
@@ -305,8 +378,10 @@ spawn 전에 확인한다.
 - [ ] 파일 첫 키가 `cflow: 2`이고, 파일이 `v2/` 디렉터리나 `.cflow2/generated/` 아래에 있다
 - [ ] 모든 `loop`·`retry`에 `max`가 있다
 - [ ] 위임 노드마다 `returns`가 있고, 다음 분기가 쓰는 값이 스키마에 있다
-- [ ] 위임 노드 안에 `ask`가 없다
-- [ ] 쓰기를 하는 작업에 `effects`가 적혀 있다(읽기만 하면 `fs.read`, `test.run`)
+- [ ] 위임 노드 안에 `ask`도 `chooser: user`인 `choose`도 없다
+- [ ] 모든 작업에 `effects`가 적혀 있다(읽기만 하면 `fs.read`, `test.run`, 효과가 없으면 `[]`)
+- [ ] probe가 있는 `wait`는 `seconds` 상한이 있고 `undecidable`·`timeout`을 `on`으로 받는다
+- [ ] `verify`·probe에 `${...}`가 없다(값은 `CFLOW_IN_*`·`CFLOW_DATA_*` 환경 변수)
 - [ ] 병렬 분기 중 쓰기를 하는 것은 `paths`가 서로 겹치지 않는다
 - [ ] 의존은 `wait`의 probe로 적었고, 메시지 약속에 기대지 않는다
 - [ ] `claunch cflow2 validate --profile <자식 프로필>` 출력이 보고에 있고, 경고마다 받아들이는 이유가 있다
@@ -320,7 +395,9 @@ spawn 전에 확인한다.
 | prompt에 「끝나면 X 단계로 간다」를 적음 | 문법의 흐름과 산문이 어긋남 | 흐름은 조합자로만 쓴다 |
 | `returns` 없이 위임 | 메인이 결과 내용을 받지 못함 | 필요한 필드를 스키마에 넣는다 |
 | `executor: headless` 하나만 지정 | 비대화형 실행이 없는 하네스에서 바로 `inline`으로 내려감 | 선호 순서 목록으로 쓴다 |
-| `effects`를 비워 둠 | 읽기 전용 위임으로 처리되어 쓰기가 버려지거나 위반으로 기록됨 | 쓰기가 있으면 반드시 적는다 |
+| `effects`를 비워 둠 | 실행기는 쓰기 가능으로 보고(읽기 전용 경로를 쓰지 않음), 정적 검사는 효과 없음으로 봄(`never-effect`가 놓침, `effects-undeclared` 경고) | 모든 작업에 적는다. 효과가 없으면 `effects: []` |
+| `verify`에 `${params.x}`를 씀 | 컴파일 오류(값이 셸 명령이 되어 verify를 우회할 수 있음) | `"$CFLOW_IN_X"`처럼 환경 변수로 읽는다 |
+| probe가 있는 `wait`에 상한이 없음 | 조건을 판정할 수 없는 상태에서 무기한 대기 | `seconds`를 주고 `undecidable`·`timeout`을 `on`으로 받는다 |
 | 위임 노드 안에 `choose`의 `chooser: user` | 비대화형 프로세스 안에서 사용자 선택을 받을 수 없음 | 사용자 선택은 위임 노드 밖에 둔다 |
 | 프로시저가 자기 자신을 호출 | 컴파일 오류(같은 런 안의 재귀는 금지) | 재귀가 필요하면 자식 세션 spawn으로 |
 

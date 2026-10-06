@@ -4,6 +4,12 @@ Three layers, nearest first: the project's ``.claunch/workflows/v2/``, the
 global ``<launcher home>/workflows/v2/``, and the package's
 ``workflows/v2/``. A name is a file stem; the nearest layer wins and the
 files it hides are reported as ``shadows``.
+
+Definitions are found by *name* only (doc section 1): :func:`find` refuses
+a path, so ``include``/``call``, the definition API and a start by name
+read nothing outside these three directories. The one path-based load is
+starting a generated file (``.cflow2/generated/*.yaml``), whose containment
+the daemon checks (``daemon/cflow2_web.choose``) before :func:`load_file`.
 """
 
 from __future__ import annotations
@@ -67,7 +73,12 @@ def _candidates(cwd: Optional[str] = None) -> Dict[str, List[Tuple[str, Path]]]:
             resolved = base.resolve()
         except OSError:
             continue
-        if resolved in seen:  # e.g. cwd is this checkout: project == package
+        # The same directory reached twice is listed once, under the nearer
+        # layer: e.g. a launcher home whose workflows/v2 is a symlink to the
+        # package's, or a project layer pointing at the global one. (The
+        # project layer of this checkout is .claunch/workflows/v2, which is
+        # not the package directory src/claude_launcher/workflows/v2.)
+        if resolved in seen:
             continue
         seen.add(resolved)
         for path in sorted(base.glob("*.yaml")):
@@ -75,13 +86,20 @@ def _candidates(cwd: Optional[str] = None) -> Dict[str, List[Tuple[str, Path]]]:
     return hits
 
 
+def is_name(name: str) -> bool:
+    """Whether ``name`` is a bare definition name (no path separator, no
+    ``.yaml`` suffix, not ``.``/``..``)."""
+    name = str(name or "")
+    return bool(name) and "/" not in name and "\\" not in name \
+        and not name.endswith((".yaml", ".yml")) and name not in (".", "..") \
+        and not name.startswith("~")
+
+
 def find(name: str, cwd: Optional[str] = None) -> Optional[Path]:
-    """The file a name (or an explicit ``.yaml`` path) resolves to."""
-    if name.endswith((".yaml", ".yml")):
-        path = Path(name).expanduser()
-        if not path.is_absolute():
-            path = Path(cwd or os.getcwd()) / path
-        return path if path.is_file() else None
+    """The layer file a definition name resolves to; ``None`` for an
+    unknown name and for anything that is not a bare name (a path)."""
+    if not is_name(name):
+        return None
     hits = _candidates(cwd).get(name)
     return hits[0][1] if hits else None
 
@@ -111,14 +129,30 @@ def list_definitions(cwd: Optional[str] = None) -> List[Located2]:
     return out
 
 
-def load(name_or_path: Union[str, Path], cwd: Optional[str] = None) -> ir.Chart:
+def load(name: str, cwd: Optional[str] = None) -> ir.Chart:
+    """Compile the definition ``name`` from the layers (a path is refused)."""
     from . import frontend
 
-    path = find(str(name_or_path), cwd)
+    if not is_name(str(name)):
+        raise frontend.FrontendError(
+            f"{name!r} is a path; v2 definitions are loaded by name from the layers "
+            f"(a generated file is started through its .cflow2/generated path)"
+        )
+    path = find(str(name), cwd)
     if path is None:
         names = ", ".join(sorted(_candidates(cwd))) or "(none)"
         raise frontend.FrontendError(
-            f"no v2 definition named {name_or_path!r} (available: {names}; searched "
+            f"no v2 definition named {name!r} (available: {names}; searched "
             f"{', '.join(str(d) for _, d in search_dirs(cwd))})"
         )
     return frontend.compile_file(path, resolve_include=resolver(cwd))
+
+
+def load_file(path: Union[str, Path], cwd: Optional[str] = None) -> ir.Chart:
+    """Compile a file the caller already located: a layer file from
+    :func:`list_definitions`, or a generated file whose containment the
+    caller checked. Its includes and calls resolve by name in ``cwd``'s
+    layers."""
+    from . import frontend
+
+    return frontend.compile_file(Path(path), resolve_include=resolver(cwd))

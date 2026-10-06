@@ -93,6 +93,7 @@ def proj(home, tmp_path, monkeypatch):
     # session's work in progress, and their compile state is not this test's.
     monkeypatch.setattr(layers, "package_dir", lambda: tmp_path / "no-package-v2")
     monkeypatch.setattr(cflow2_web, "_LISTS", {})
+    monkeypatch.setattr(cflow2_web, "_DEFS", {})
     monkeypatch.setattr(api_mod, "_WORKFLOW_LISTS", {})
     monkeypatch.setattr(api_mod, "_WORKFLOW_BASES", {})
     monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
@@ -477,3 +478,141 @@ def test_the_user_answers_an_ask_from_the_dashboard(proj):
     st = runtime.status(cwd=cwd, scope="g1")
     assert not st.get("asks") and st["tasks"][0]["label"] == "ship"
     assert out["again"] == 400   # nothing left to approve
+
+
+# --------------------------------------------------------------------------- #
+# typed start inputs (docs/cflow-v2.md 2.6), the definition by name only,
+# a v2 problem that must not refuse a v1 spawn, the visit-limit answer
+# --------------------------------------------------------------------------- #
+INPUTS_DEF = """\
+cflow: 2
+name: asks-inputs
+inputs:
+  goal: {type: text, required: true, label: Goal}
+  rounds: {type: int}
+  invariants: {type: invariants}
+nodes:
+  w: {title: W, prompt: "goal ${data.inputs.goal}"}
+body: w
+"""
+
+
+@pytest.fixture
+def with_inputs(proj):
+    (proj / ".claunch" / "workflows" / "v2" / "asks-inputs.yaml").write_text(
+        INPUTS_DEF, encoding="utf-8")
+    return proj
+
+
+def test_the_list_and_definition_carry_the_inputs_schema(with_inputs):
+    cwd = str(with_inputs)
+    entry = next(w for w in cflow2_web.startable(cwd) if w["name"] == "asks-inputs")
+    assert [f["name"] for f in entry["inputs"]] == ["goal", "rounds", "invariants"]
+    assert entry["inputs"][0]["required"] is True and entry["inputs"][0]["label"] == "Goal"
+    doc = cflow2_web.definition_view("asks-inputs", cwd)
+    assert doc["inputs"] == entry["inputs"]
+    assert cflow2_web.definition_view("pick", cwd)["inputs"] == []
+
+
+def test_preflight_validates_cflow_inputs_per_field(with_inputs):
+    cwd = str(with_inputs)
+    with pytest.raises(onboard.OnboardError) as info:
+        _preflight({"workflow": "asks-inputs", "cflow_inputs": {"rounds": "x", "nope": 1}}, cwd)
+    assert set(info.value.errors) == {"goal", "rounds", "nope"}
+    assert onboard.error_body(info.value)["errors"] == info.value.errors
+    with pytest.raises(onboard.OnboardError, match="cflow_inputs"):
+        _preflight({"workflow": "demo", "cflow_inputs": {"goal": "g"}}, cwd)  # v1
+    plan = _preflight({"workflow": "asks-inputs", "cflow_inputs": {
+        "goal": "ship it", "rounds": "2",
+        "invariants": [{"text": "master unmoved", "probe": "git diff --quiet master"}]}}, cwd)
+    assert plan.cflow_inputs["rounds"] == 2
+    report, _ = asyncio.run(onboard.arrange(plan, name="w9", cwd=cwd, mesh_mgr=None))
+    assert report["workflow"]["ok"] is True, report
+    st = RunStore(cwd, "w9")
+    assert st.load_state()["data"]["inputs"]["goal"] == "ship it"
+    chart = st.load_chart()
+    assert "input-invariant-1" in chart.rules
+    assert chart.spec["monitors"]["input-invariant-1"]["probe"] == {
+        "input_invariant_1": "git diff --quiet master"}
+
+
+def test_the_dashboard_start_returns_field_errors(with_inputs):
+    cwd = str(with_inputs)
+
+    async def go(client, bearer):
+        bad = await client.post("/api/cflow/start", headers=bearer, json={
+            "cwd": cwd, "scope": "i1", "workflow": "asks-inputs",
+            "cflow_inputs": {"rounds": "many"}})
+        good = await client.post("/api/cflow/start", headers=bearer, json={
+            "cwd": cwd, "scope": "i1", "workflow": "asks-inputs",
+            "cflow_inputs": {"goal": "g"}})
+        return (bad.status, await bad.json()), good.status
+
+    (status, doc), good = _http(go)
+    assert status == 400 and set(doc["errors"]) == {"goal", "rounds"}
+    assert good == 200
+    assert RunStore(cwd, "i1").load_state()["data"]["inputs"] == {
+        "goal": "g", "rounds": None, "invariants": []}
+
+
+@pytest.mark.parametrize("name", ["../../etc/passwd", "/etc/passwd", "pick.yaml", "a/b"])
+def test_the_definition_endpoint_takes_a_name_only(proj, name):
+    from urllib.parse import quote
+
+    async def go(client, bearer):
+        resp = await client.get(f"/api/cflow2/definition?cwd={proj}&name={quote(name)}",
+                                headers=bearer)
+        return resp.status, await resp.json()
+
+    status, doc = _http(go)
+    assert status == 400 and "not a path" in doc["error"]
+    with pytest.raises(cflow2_web.ChoiceError, match="not a definition name"):
+        cflow2_web.definition_view(name, str(proj))
+
+
+def test_a_broken_v2_layer_does_not_refuse_a_v1_spawn(proj, monkeypatch, caplog):
+    def boom(cwd):
+        raise RuntimeError("v2 layer exploded")
+
+    monkeypatch.setattr(cflow2_web, "v2_names", boom)
+    with caplog.at_level("WARNING"):
+        assert cflow2_web.choose("demo", cwd=str(proj)) is None
+    assert "treating it as v1" in caplog.text
+    plan = _preflight({"workflow": "demo"}, str(proj))
+    assert plan.workflow_version == 1
+    # asked for v2 explicitly, the problem is still the answer
+    with pytest.raises(RuntimeError):
+        cflow2_web.choose("demo", 2, cwd=str(proj))
+
+
+def test_definitions_are_cached_by_layer_stamp(proj, monkeypatch):
+    calls = []
+    real = layers.list_definitions
+    monkeypatch.setattr(layers, "list_definitions",
+                        lambda cwd=None: calls.append(cwd) or real(cwd))
+    first = cflow2_web.definitions(str(proj))
+    assert cflow2_web.definitions(str(proj)) == first and len(calls) == 1
+    (proj / ".claunch" / "workflows" / "v2" / "new.yaml").write_text(KID.replace(
+        "name: kid", "name: new"), encoding="utf-8")
+    assert "new" in {d["name"] for d in cflow2_web.definitions(str(proj))}
+    assert len(calls) == 2
+
+
+def test_extend_with_visits_answers_a_visit_limit(proj, monkeypatch):
+    seen = {}
+
+    def fake(node, by, *, stop=False, cwd=None, scope=None):
+        seen.update(node=node, by=by, stop=stop, scope=scope)
+        return {"status": "running"}
+
+    monkeypatch.setattr(runtime, "extend_visits", fake)
+    monkeypatch.setattr(runtime, "extend_loop",
+                        lambda *a, **k: pytest.fail("loop answer used for a visit limit"))
+
+    async def go(client, bearer):
+        resp = await client.post("/api/cflow2/extend", headers=bearer, json={
+            "cwd": str(proj), "scope": "v1s", "node": "x@3", "by": 2, "visits": True})
+        return resp.status
+
+    assert _http(go) == 200
+    assert seen == {"node": "x@3", "by": 2, "stop": False, "scope": "v1s"}

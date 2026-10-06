@@ -24,7 +24,15 @@ v1(`src/claude_launcher/cflow/`)과 병행한다.
 - 우선순위는 v1과 같다: 프로젝트 → 전역 → 패키지.
 - 생성 파일(PM이 자식마다 쓰는 절차 파일): `<세션 디렉터리>/.cflow2/generated/*.yaml`.
   레이어 탐색 대상이 아니며 spawn의 `workflow`에 절대 경로로 넘긴다(v1의
-  `.cflow/generated/`와 같은 규칙). `include`는 레이어에서 이름으로 찾는다.
+  `.cflow/generated/`와 같은 규칙). 데몬은 그 경로가 요청 세션(또는 부모 세션)의
+  `.cflow2/generated` 디렉터리 안에 있는지 확인한 뒤에만 읽는다
+  (`daemon/cflow2_web.choose`).
+- 정의는 이름으로만 찾는다. `include`, `call`, `group.run`, `GET /api/cflow2/definition`,
+  이름으로 시작하는 런은 정의 이름(레이어 파일의 stem)만 받고, 절대 경로·상대
+  경로·경로 구분자가 든 이름·`.yaml` 접미사는 거절한다(`layers.find`, 프런트엔드
+  `_definition_name`). 경로로 읽는 유일한 경우는 위의 생성 파일을 시작하는 것이며,
+  생성 파일 안의 `include`도 레이어에서 이름으로 찾는다. 포함하는 파일의 디렉터리
+  (형제 파일)는 레이어가 아니므로 탐색하지 않는다.
 - `include`는 대상 파일의 `kind`와 관계없이 그 파일의 `fragments`·`rules`·
   `procedures`를 가져온다. 그래서 `improv-worker-v2`는 회차의 구간을
   `procedures`로 정의하고 `body`에서 호출하는 형태로 작성한다
@@ -58,6 +66,8 @@ v1(`src/claude_launcher/cflow/`)과 병행한다.
 | `nodes` | 이름 붙은 작업(task) 정의 |
 | `body` | 조합자 트리. 런의 시작점 |
 | `spec` | 명세(8절) |
+| `max_visits` | 한 노드가 런 전체에서 들어갈 수 있는 횟수의 상한. 정수 1 이상, 기본 200. IR의 `meta.max_visits`. 넘으면 그 인스턴스가 `waiting_approval`(reason `visit_limit`)로 멈추고 사람이 `extend --visits`(웹 UI의 「Allow one more visit」, `POST /api/cflow2/extend` 본문 `visits: true`)로 답한다 |
+| `inputs` | 시작 입력 선언(2.6). IR의 `meta.inputs` |
 
 ### 2.2 작업(task)
 
@@ -92,19 +102,42 @@ nodes:
 
 - 표기: 명령 문자열, argv 목록, 또는 `{run, timeout}`(`run` 대신 v1 키 `command`도
   받는다). 컴파일러는 `{run, timeout}`으로 정규화해 IR에 싣는다. `timeout`을
-  생략하면 런타임이 v1 기본값 900초를 쓴다. 문자열 명령의 `${...}` 값 참조는 실행
-  직전에 렌더한다.
+  생략하면 런타임이 v1 기본값 900초를 쓴다.
+- 값 참조: 아래 「명령 안의 값 참조」를 따른다. 명령 문자열과 argv 항목 안의
+  `${...}`는 컴파일 오류이고, 엔진은 명령을 렌더하지 않는다. 값은 환경 변수로만
+  전달된다(아래 「실행 위치와 환경」). 런타임은 다른 경로로 만들어진 차트(컴파일을
+  거치지 않은 IR)에 대해 시작 시점에 한 번 더 검사한다. 그 검사에서 문자열 명령의
+  `${params.NAME}`·`${data.NAME}`은 환경 변수 참조 `"${CFLOW_IN_NAME}"`·
+  `"${CFLOW_DATA_NAME}"`로 바뀌고(큰따옴표 안에서는 따옴표 없이), 그 밖의 참조,
+  작은따옴표 안의 참조, argv 항목 안의 참조는 시작 오류다. 이 런타임 검사는
+  `${HOME}`처럼 런 값 이름이 아닌 참조를 셸의 전개로 보고 그대로 둔다(컴파일러는
+  이 형태도 거절하므로 정의 파일에서는 `$HOME`으로 쓴다).
 - 실행 시점: 작업이 `ok`로 보고될 때. 다른 결과(`fail` 등)는 verify를 거치지 않는다.
-- 실행 위치: 런의 cwd. 환경은 프로세스 환경에 `CFLOW2_RUN`, `CFLOW2_NODE`,
-  `CFLOW2_INSTANCE`, `CFLOW2_SCOPE`와 param마다 `CFLOW_IN_<NAME>`(런의 params 위에
-  작업이 속한 프로시저의 params를 덮은 값)을 더한 것이다.
-- 런 잠금 밖에서 실행한다. 잠금 없이 읽은 스냅샷에서 인스턴스를 찾고, 명령을
-  실행하고, 잠금을 잡은 뒤 같은 인스턴스가 아직 활성 작업일 때만 결과를 적용한다.
-  그사이 인스턴스가 바뀌었으면 아무것도 적용하지 않고 보고를 거절한다.
-- 종료 코드 0: `verify_passed`를 남기고 보고를 진행한다. 0이 아니거나 시간 초과
-  (프로세스 그룹 종료, 코드 124): `verify_failed`(출력의 마지막 40줄 포함)를 남기고
-  보고를 거절한다. 오류 메시지에 출력의 끝부분이 실린다. 작업은 활성 상태로 남는다.
-- 위임 실행 단위(`flow_delegate`)로 들어온 결과에는 verify를 적용하지 않는다.
+- 실행 위치와 환경: 런의 cwd. 프로세스 환경에 `CFLOW2_RUN`, `CFLOW2_NODE`,
+  `CFLOW2_INSTANCE`, `CFLOW2_SCOPE`, param마다 `CFLOW_IN_<NAME>`(런의 params 위에
+  작업이 속한 프로시저의 params를 덮은 값), 최상위 `data`의 스칼라마다
+  `CFLOW_DATA_<NAME>`을 더한다.
+- 비동기 실행: `flow_report`는 작업을 `verifying` 상태로 두고(저널
+  `verify_started`) 바로 돌아온다. 응답에 `verifying`이 실린다. 명령은 MCP 서버
+  프로세스의 백그라운드 스레드에서 런 잠금 밖으로 실행된다. 끝나면 잠금을 잡고, 같은
+  인스턴스가 아직 같은 verify를 기다릴 때만 결과를 적용한다. 그사이 인스턴스가
+  사라졌으면 아무것도 적용하지 않는다. `flow_status`의 `verifying`이 진행 중인
+  verify를 보여 준다.
+- 종료 코드 0: `verify_passed`와 `reported`를 남기고 보고를 적용한다. 0이 아니거나
+  시간 초과(코드 124): `verify_failed`(출력의 마지막 40줄 포함)를 남기고 작업을 다시
+  활성 상태로 둔다. `flow_status`의 그 작업에 `last_verify`(종료 코드, 사유, 출력 끝)가
+  실린다.
+- 프로세스 처리: 명령은 자기 프로세스 그룹에서 실행되고, 출력은 파이프 대신 임시
+  파일로 받는다. 종료 후(시간 초과 포함) 그룹 전체를 종료한다. 명령이 남긴 자손
+  프로세스가 출력을 붙잡아 결과 수집이 멈추는 일이 없다.
+- 유실: verify를 실행하던 프로세스가 사라져 `timeout + 120`초가 지나도 결과가 없으면
+  다음 시간 틱이 `verify_failed`(`lost`)를 남기고 작업을 다시 활성 상태로 둔다.
+- halt 중에 통과한 verify는 결과를 보관했다가 halt가 해제될 때 적용한다.
+- 위임 결과: 평탄한 위임(아래 7절)의 `ok` 결과는 하위 트리에서 `verify`를 선언한
+  작업마다 그 명령을 순서대로 실행해 모두 통과해야 받아들인다(같은 비동기 방식,
+  위임 레코드 상태 `verifying`). 실패는 잘못된 결과 1회로 센다(첫 번째는 재실행
+  요청, 두 번째는 노드 `fail`). 중첩 위임 런의 작업은 그 런 안에서 보고되므로 보고
+  시점에 각자 verify를 거친다.
 
 #### ask
 
@@ -157,18 +190,41 @@ ask:
   시도하며 최대 4회까지 미룬다(`ask_deferred`). 질문은 v1과 같은 경로
   (`POST /api/mesh/<mesh>/messages`, type `decide`)로 전달되고, ask id → 런 위치
   색인이 `<런처 홈>/cflow2/asks/`에 기록된다. 응답자는 id만으로 답한다.
+- 런의 신원: 런은 시작 시점에 드라이버 세션을 `state.json`의 `driver`로 기록한다
+  (시작한 셸의 `CLAUNCH_SESSION`, 없으면 scope가 가리키는 세션). 명단 조회의 기준
+  세션, 자기 응답 거절, 질문 발신자, 통지 대상은 모두 이 값을 쓴다. scope는 신원으로
+  쓰지 않는다(다른 이름의 slot에 런을 시작해도 기준 세션은 바뀌지 않는다).
 - 응답 권한: `flow_answer`의 세션 신원은 MCP 서버 환경의 `CLAUNCH_SESSION`에서
-  읽는다. 라우팅 시점에 기록된 그룹의 세션만 답할 수 있고, 런 자신의 세션은 답할
-  수 없다. `abstain`은 다음 그룹으로 넘긴다.
+  읽는다. 라우팅 시점에 기록된 그룹의 세션만 답할 수 있고, 드라이버 세션은 답할 수
+  없다(드라이버의 하위 세션은 명단에서 이미 빠진다).
+- 답의 이름: 옵션 이름은 대소문자를 구별하지 않고 비교하며, 기록과 결과에는 정의에
+  적힌 철자를 쓴다(`LGTM`에 `lgtm`으로 답하면 결과 `LGTM`).
+- 기권: `abstain`은 그 응답자만 질문에서 빠지게 한다. 같은 그룹의 다른 응답자는 계속
+  답할 수 있다. 그룹의 모든 응답자가 기권하거나 그룹의 `deadline`이 지나면 다음
+  그룹으로 간다. 이미 기권한 응답자의 두 번째 답은 거절된다.
+- 질문 철회 통지: 질문을 받고 아직 답하지 않은 응답자에게는 질문이 닫힐 때 `fyi`
+  메시지가 간다. 닫히는 경우는 사람의 답, 다른 응답자의 답, 기한 초과로 다음
+  그룹으로 이동, 작업 인스턴스 취소(par 결정, abort 등), 그룹 전원 기권이다. 저널에
+  `ask_withdrawn`이 남는다.
 - 기한: 데몬 클럭이 매 틱 `asks.tick`을 호출한다. `asked` 그룹이 `deadline`을
   넘기면 `ask_timeout`을 남기고 다음 그룹으로 간다. 그룹이 남지 않으면 `otherwise`로
-  간다. `human`·`self`로 넘어간 ask는 런의 세션에 한 번 통지된다.
-- CLI 보호: `claunch cflow2 approve`는 사람의 경로다. v1의 `claunch cflow approve`와
-  같이 CLI는 사람과 에이전트의 셸 호출을 구별하지 못하므로, 하네스 거부 규칙
-  (`install.GATE_DENY_RULES`)에 `claunch cflow2 approve|select|extend|resume`을
-  넣어 에이전트의 셸 호출을 막는다. 드라이버가 직접 답할 수 있는 경로는
-  `self` 해소 단계의 `flow_approve` 하나다.
-- 위임 실행 단위 아래의 작업에 `ask`가 있으면 정적 검사 오류(`delegated-ask`)다.
+  간다. `human`·`self`로 넘어간 ask는 드라이버 세션에 한 번 통지된다. 런을 바꾸는
+  모든 호출은 적용 전에 시간 틱을 먼저 돌리므로, 기한이 지난 응답은 다음 클럭 틱
+  전이라도 거절된다.
+- 사람의 명령: `claunch cflow2 approve|select|extend|resume|abort`와 살아 있는 런
+  위의 `start --force`는 사람의 경로다. CLI는 셸의 `CLAUNCH_SESSION`이 그 런의
+  드라이버(또는 중첩 위임 런의 담당 세션)이면 실행을 거절한다. 사람은 그 세션 밖의
+  터미널이나 웹 UI에서 답한다. 이 검사가 실제로 적용되는 검사다. 하네스 거부 규칙
+  (`install.GATE_DENY_RULES`)은 같은 명령을 다른 철자로 쓰는 경우(`uv run claunch`,
+  절대 경로, `env X=… claunch`, `python -m claude_launcher`, `start … --force`)까지
+  에이전트의 셸 호출을 막는 보조 장치다. 두 장치 모두 런타임을 직접 import하는 코드
+  (`python -c`)는 막지 못한다. 보안 경계로 설계된 것은 없다.
+- 드라이버가 MCP로 ask에 답할 수 있는 경로는 `self` 해소 단계의 `flow_approve`
+  하나다. 위의 셸 경로는 CLI 검사와 거부 규칙이 막지만, 런타임 직접 호출은 막지
+  못한다.
+- 위임 실행 단위 아래의 작업에 `ask`가 있거나 `chooser: user` 선택이 있으면 정적
+  검사 오류다. 런타임은 그런 위임 지점을 위임하지 않고 그 자리에서(inline) 실행하며
+  `fallback`을 남긴다.
 
 #### 프로시저 params 기본값
 
@@ -195,7 +251,7 @@ scope에 들어갈 때 `with`에 없는 param에 `default`를 채우고, 기본�
 | `timeout` | `timeout: {do: T, seconds: N, else: T}` | 기한 초과 시 `else`로 감 |
 | `try` | `try: T, catch: {OUTCOME: T}, finally: T` | 결과 종류로 예외 경로를 처리하고, 마지막에 정리 트리를 실행 |
 | `call` | `call: PROC, with: {…}, bind: VAR` | 프로시저 호출. 컴파일 시 펼친다 |
-| `wait` | `wait: {probe: CMD, poll: S, describe: …}` 또는 `wait: {seconds: N}` | 외부 신호 대기 |
+| `wait` | `wait: {probe: CMD, poll: S, seconds: N, undecided_max: K, describe: …}` 또는 `wait: {seconds: N}` | 외부 신호 대기(아래 「wait」) |
 | `group` | `group: {name, run: PROC, limit, settle, do: T}` | 동적 분기. `do` 실행 중 에이전트가 `fork`로 멤버를 추가하고, `do`를 떠나기 전에 합류 |
 
 모든 조합자 매핑에 붙일 수 있는 공통 키:
@@ -217,6 +273,36 @@ scope에 들어갈 때 `with`에 없는 param에 `default`를 채우고, 기본�
 
 `goto`는 없다. 앞 단계로 되돌아가는 경로는 반복 조합자와 `continue`로 쓴다.
 
+#### wait
+
+- `probe`가 없으면 `seconds`초 뒤에 결과 `ok`로 끝나는 타이머다.
+- `probe`가 있으면 데몬 클럭이 `poll`초(기본 60)마다 셸 명령을 실행하고 종료 코드로
+  판정한다.
+
+  | 종료 코드 | 판정 | 다음 |
+  |---|---|---|
+  | 0 | 조건이 성립함 | 결과 `ok`로 끝남 |
+  | 1 | 아직 아님 | 다음 poll까지 대기. 연속 판정 불가 횟수를 0으로 되돌림 |
+  | 그 밖(2, 124, 127, 128 등) | 판정 불가 | 연속 판정 불가 횟수를 1 늘림(저널 `probe_undecided`). `undecided_max`(기본 3)에 닿으면 결과 `undecidable`로 끝남 |
+
+- `probe`와 `seconds`를 함께 쓰면 `seconds`는 상한이다. 그 안에 0이 나오지 않으면
+  결과 `timeout`으로 끝난다.
+- `undecidable`과 `timeout`은 비-ok 결과이므로 처리하는 곳(`on`, `catch`)이 없으면
+  런이 `failed`로 끝난다. 정의는 둘을 명시적으로 처리한다 — 예: `improv-worker-v2`의
+  `cut-wait`·`landed-wait`는 둘 다 `chooser: user` 선택(`cut-unreachable`,
+  `landed-unclear`)으로 보내 사람이 확인하거나 `held`로 마감하게 한다.
+- `undecided_max`는 `probe`가 있을 때만 쓸 수 있다(정수 1 이상).
+- `probe`는 명령 문자열이나 argv 목록이다. 아래 「명령 안의 값 참조」를 따른다.
+
+#### 명령 안의 값 참조
+
+엔진이 실행하는 명령(작업의 `verify`, wait의 `probe`, 모니터의 `probe`)은
+템플릿이 아니다. 이 문자열 안의 `${...}`는 컴파일 오류다. 명령이 런의 값을 읽어야
+하면 환경 변수로 읽는다: param은 `CFLOW_IN_<NAME>`, 최상위 `data`의 스칼라 값은
+`CFLOW_DATA_<NAME>`(이름은 대문자, 영숫자 외 문자는 `_`). 셸이 하는 `$VAR` 전개는
+엔진이 값을 끼워 넣는 것이 아니므로 허용된다. 근거: 렌더한 값을 셸 문자열에
+붙이면 값(`x || true` 등)이 명령이 되어 verify를 우회할 수 있다(리뷰 E1).
+
 ### 2.4 식(expression)
 
 `cond.if`, `loop.while`, `choose.options.*.when`, `foreach.in`, `with` 값에 쓰는
@@ -224,7 +310,8 @@ scope에 들어갈 때 `with`에 없는 param에 `default`를 채우고, 기본�
 
 - 값: 문자열, 정수, 실수, `true`/`false`/`null`, 목록 `[…]`
 - 참조: `$params.x`, `$data.x.y`, `$prev`, `$item`, `$result.<node>`,
-  `$visits.<node>`, `$caps.<capability>`
+  `$visits.<node>`, `$caps.<capability>`. 시작 입력은 `$data.inputs.<name>`
+  (프롬프트에서는 `${data.inputs.<name>}`)
 - 연산: `== != < <= > >=`, `in`, `not in`, `and`, `or`, `not`, 괄호
 - 함수: `len(x)`, `empty(x)`
 
@@ -248,6 +335,71 @@ rules:
 - 규칙의 `text`는 `deliver`에 적힌 작업의 프롬프트 끝에 붙는다. `why`는 기본
   페이로드에 싣지 않고 `rule` 조회로 읽는다.
 - 규칙의 `effect`는 정적 명세 검사에 들어간다(8절).
+- `include`는 정의 이름만 받는다(1절).
+
+### 2.6 시작 입력(inputs)
+
+정의는 런을 시작하는 사람이 채울 입력을 형식과 함께 선언할 수 있다. 새 세션 폼과
+spawn 모달은 이 선언으로 입력 칸을 그리고, 데몬은 같은 선언으로 값을 검사한다.
+구현은 `src/claude_launcher/cflow2/inputs.py`다.
+
+```yaml
+inputs:
+  goal:       {type: text, label: 목표, required: true, help: …, placeholder: …}
+  issue:      {type: string, default: ""}
+  rounds:     {type: int, default: 3}
+  dry_run:    {type: bool}
+  mode:       {type: enum, choices: [full, quick], default: full}
+  scope:      {type: list}
+  invariants: {type: invariants}
+  acceptance: {type: acceptance}
+```
+
+| type | 값 | 폼의 칸 |
+|---|---|---|
+| `string` | 한 줄 문자열 | 한 줄 입력 |
+| `text` | 여러 줄 문자열 | textarea |
+| `int` | 정수 | 숫자 입력 |
+| `bool` | `true`/`false` | 체크박스 |
+| `enum` | `choices` 중 하나 | 선택 목록 |
+| `list` | 문자열 목록 | 행 추가·삭제 |
+| `invariants` | `[{text, probe?}]` | 행마다 문장과 probe 명령 |
+| `acceptance` | `[{text, probe?}]` | 행마다 문장과 probe 명령 |
+
+- 선언 키: `type`(기본 `string`), `label`, `help`, `required`(기본 false),
+  `default`, `choices`(`enum`만), `placeholder`. 이름은 식별자 규칙을 따른다.
+  모르는 type, type과 맞지 않는 `default`, `enum`이 아닌 입력의 `choices`는
+  컴파일 오류다.
+- 값 검사(`inputs.normalize`): 폼·CLI에서 온 문자열을 type으로 바꾼다(`int`,
+  `bool`의 `true/false/yes/no/1/0`, `list`는 줄바꿈 또는 쉼표로 나눔,
+  `invariants`·`acceptance`는 JSON 목록 또는 한 줄에 문장 하나). 비었거나 없는
+  값은 `default`를, 없으면 형식의 빈 값(`null`, `[]`, `false`)을 쓴다. 필수 입력은
+  `null`, 빈 문자열, 빈 목록으로 채워지지 않는다. 선언에 없는 이름은 거절한다.
+  오류는 입력 이름별로 모아 돌려준다.
+- 런에 싣기(`inputs.apply`): 런타임이 시작할 때 차트에 적용하고 그 결과를
+  `chart.json`으로 저장하므로 스냅샷이 시작 입력을 기록한다.
+  - 모든 값이 `data.inputs`에 실린다. 프롬프트는 `${data.inputs.goal}`로 읽는다.
+  - `invariants`의 항목마다 규칙 `input-invariant-<n>`이 생긴다(`why`: user-declared
+    invariant, 모든 작업에 전달). `probe`가 있는 항목은 같은 이름의 `always`
+    모니터도 된다: probe의 종료 코드 0이 지켜짐이고, 어기면 런이 멈춘다
+    (`on_violation: halt`, 300초마다).
+  - `acceptance` 항목은 `spec.acceptance`(`[{id, input, text, probe}]`)에 실린다.
+    런타임은 런이 `ok`로 끝나기 직전에 probe가 있는 항목을 실행해 종료 코드 0을
+    충족으로 본다. 모든 항목은 규칙 `input-acceptance` 하나로 모든 작업에
+    전달되므로, probe가 없는 항목은 마지막 작업의 프롬프트에서 에이전트가 스스로
+    대조한다.
+  - probe는 사람이 입력한 셸 명령이며 적힌 그대로 실행한다. 런의 값을 끼워 넣지
+    않는다(2.3 「명령 안의 값 참조」).
+- 전달 경로:
+  - `GET /api/cflow/workflows`의 v2 항목과 `GET /api/cflow2/definition`이
+    `inputs`(선언 목록)를 싣는다.
+  - 새 세션(`POST /api/sessions`), spawn(`POST /api/sessions/<부모>/children`),
+    대시보드 시작(`POST /api/cflow/start`)은 본문 `cflow_inputs`(객체)를 받는다.
+    검사에 실패하면 400과 함께 `errors: {이름: 이유}`를 돌려준다. v2가 아닌
+    워크플로에 `cflow_inputs`를 보내면 거절한다.
+  - MCP `spawn` 도구(`mesh_mcp.py`)의 `cflow_inputs`, CLI `claunch new-session`·
+    `claunch spawn`의 `--input NAME=VALUE`(반복 가능, 같은 이름을 두 번 쓰면 목록)와
+    `--inputs-file PATH.json`, `--wizard`는 선언된 입력을 한 줄씩 묻는다.
 
 ## 3. IR
 
@@ -271,6 +423,12 @@ IR은 JSON으로 직렬화되는 statechart다. 버전은 `ir_version`(현재 1)
 }
 ```
 
+`meta`에는 위 네 키 외에 `max_visits`(2.1)와 `inputs`(2.6, 컴파일러가 채운
+선언)가 실린다. 런타임이 시작 입력을 적용한 스냅샷에는 `meta.inputs_applied:
+true`가 붙는다. 작업 노드에는 `effects_declared`(작성자가 `effects` 키를 썼는지)가
+붙는다 — `effects: []`(효과 없음 선언)와 키 생략(알 수 없음)을 구분하기 위해서다.
+wait 노드에는 `undecided_max`가 붙는다.
+
 | 노드 type | statechart 대응 | 필드 |
 |---|---|---|
 | `task` | 원자 상태 | 2.2절 필드 + `label` |
@@ -281,7 +439,7 @@ IR은 JSON으로 직렬화되는 statechart다. 버전은 `ir_version`(현재 1)
 | `par` | 병렬 영역 | `branches: {name: child}`, `settle` |
 | `timeout` | 시간 전이를 가진 복합 상태 | `child`, `seconds`, `else` |
 | `try` | 복합 상태 + 결과 전이 | `child`, `catch: {outcome: child}`, `finally` |
-| `wait` | 외부 이벤트 대기 원자 상태 | `probe`, `poll`, `seconds`, `describe` |
+| `wait` | 외부 이벤트 대기 원자 상태 | `probe`, `poll`, `seconds`, `undecided_max`, `describe` |
 | `group` | 동적 병렬 영역 | `child`, `member`(펼친 프로시저의 루트), `limit`, `settle`, `name` |
 | `control` | 전이 | `op`(continue/break/raise/return/end), `target`, `outcome`, `value` |
 | `scope` | `call`을 펼친 복합 상태 | `proc`, `child`, `with`, `bind` |
@@ -300,10 +458,12 @@ IR은 JSON으로 직렬화되는 statechart다. 버전은 `ir_version`(현재 1)
 
 | 파일 | 내용 |
 |---|---|
-| `chart.json` | 시작 시점의 IR 스냅샷. 런은 이 파일만 읽는다 |
-| `state.json` | 활성 구성(active configuration), 데이터 모델, 노드별 방문 수, 위임 실행 단위 |
+| `chart.json` | 시작 시점의 IR 스냅샷. 런은 이 파일만 읽는다. 시작 입력(2.6)은 스냅샷 전에 차트에 반영된다 |
+| `state.json` | 활성 구성(active configuration), 데이터 모델, 노드별 방문 수, 위임 실행 단위, 드라이버 세션(`driver`), 중첩 위임 런이면 상위 런 위치(`parent`) |
 | `journal.jsonl` | 추가만 하는 이벤트 로그 |
 | `receipts/` | 위임 실행 단위의 영수증 |
+
+중첩 위임 런(7절)은 같은 디렉터리의 `.cflow2/runs/<scope>~<위임 id>/`에 놓인다.
 
 ### 4.2 실행 의미
 
@@ -313,23 +473,77 @@ IR은 JSON으로 직렬화되는 statechart다. 버전은 `ir_version`(현재 1)
 - 결과가 나오면 엔진은 부모로 올라가며 다음 활성 상태를 정한다(`advance`).
   `on` 매핑, `try`의 `catch`, 반복의 `continue`/`break`, `par`의 `settle`이
   이 단계에서 평가된다.
-- 방문 수는 노드별로 런 전체에서 센다. `loop.max`를 넘으면 런이
-  `waiting_approval`(reason `loop_limit`)로 멈춘다.
-- `bind`가 있으면 결과 값을 `data`에 저장한다.
+- 반복 상한: `loop.max`(`retry`·`foreach`의 `max` 포함)는 반복에 한 번 들어갈
+  때마다의 회차 상한이다. 반복을 다시 들어가면 다시 0부터 센다. 상한에 닿았는데
+  조건이 계속을 요구하면 그 반복 인스턴스가 `waiting_approval`(reason `loop_limit`)로
+  멈춘다(`claunch cflow2 extend`).
+- 방문 상한: 방문 수는 노드별로 런 전체에서 센다. 차트 최상위 `max_visits`(기본
+  200)를 넘는 진입은 그 노드의 본문이 시작되기 전에 멈추고, 런은
+  `waiting_approval`(reason `visit_limit`)가 된다. 사람이
+  `claunch cflow2 extend --visits [--by N | --stop]`(웹 `POST /api/cflow2/extend`,
+  `kind: visits`)로 그 노드의 허용 방문 수를 늘리거나 그 인스턴스를 `fail`로 끝낸다.
+- 멈춤의 범위:
+
+  | 대기 | 범위 |
+  |---|---|
+  | `halt` 모니터 위반(`monitor_violation`) | 런 전체. 보고, 선택, fork, 위임 결과 제출, 응답, 시간 기반 진행(wait, timeout, 반복 간격)이 모두 거절되거나 보류된다. 데몬 실행기가 가져온 위임 결과와 통과한 verify는 보관했다가 `claunch cflow2 resume` 시점에 적용한다 |
+  | `human` 단계의 ask | 그 ask를 연 작업 인스턴스만. 다른 분기는 계속 진행한다 |
+  | `loop_limit`, `visit_limit` | 그 반복 또는 노드 인스턴스만 |
+  | `acceptance`(2.6) | 런의 마지막 단계. 진행 중인 인스턴스는 이미 없다 |
+
+- 런 전체 대기(halt)가 기록된 채 런이 끝나는 경로는 없다. 끝난 런에서도 그 기록은
+  남고 `resume`으로 지울 수 있다. 인스턴스에 묶인 대기는 인스턴스와 함께 지워진다.
+- 취소: 어떤 경로로 인스턴스가 사라지든(timeout 만료, par 결정, group 취소,
+  break/continue/return 전파, abort) 그 인스턴스의 대기·위임·ask가 함께 정리되고,
+  런의 `status`/`reason`은 남은 대기 항목에서 다시 계산된다.
+- `bind`가 있으면 노드 자신의 결과 값을 `data`에 저장한다. `spec.ensures`가 실패해
+  결과가 `fail`로 바뀌어도 저장되는 값은 노드가 낸 값이다. 부모가 받는 값은
+  `{reason, original}`이다.
+- 병렬 `foreach` 안의 `break`는 그때까지 `ok`로 끝난 항목들의 값을 항목 순서대로
+  모은 목록을 반복의 값으로 남긴다.
+- 식 오류: 식 평가는 `ExprError`만 낸다(깊이 64 초과, 30자리를 넘는 정수 리터럴,
+  목록·매핑을 키로 쓴 색인, 그 밖에 Python이 거절한 연산 포함). 렌더는 해석하지
+  못한 참조를 원문 그대로 둔다. 가드(`cond`, `loop`, `retry.until`), `with`,
+  `foreach.in`, `return` 값에서의 오류는 그 노드를 `fail`(값의 `reason`에 오류 문구)로
+  끝낸다. `spec.ensures`·`monitors`의 오류는 위반으로 기록된다(`error` 필드).
+  선택지 가드 오류는 그 선택을 거절한다.
+- 동시 호출: 런을 바꾸는 모든 호출은 런 잠금 안에서 먼저 시간 틱(기한이 지난
+  wait·timeout·ask)을 적용한 뒤 요청을 적용한다.
 
 ### 4.3 저널 이벤트
 
-`started`, `entered`, `left`(outcome 포함), `selected`, `reported`, `bound`,
-`delegate_started`, `delegate_returned`, `delegate_failed`, `fallback`(원인과 경로),
-`group_fork`, `group_settled`, `monitor_violation`, `waiting`, `done`, `aborted`,
-`verify_passed`, `verify_failed`(종료 코드, 출력 끝부분), `ask_routed`(그룹, 응답자),
-`ask_answered`(결정, 답한 쪽, 경로), `ask_timeout`, `ask_deferred`,
-`ask_undelivered`. ask가 그룹을 건너뛰거나 `otherwise`로 넘어갈 때는
-`fallback`(`decision: ask`)을 남긴다.
+`started`(params, inputs, driver), `entered`, `left`(outcome 포함), `selected`,
+`reported`, `bound`, `delegate_started`, `delegate_returned`, `delegate_failed`,
+`delegate_held`, `nested_started`, `fallback`(원인과 경로), `group_fork`,
+`group_settled`, `monitor_violation`, `waiting`, `done`, `aborted`, `verify_started`,
+`verify_passed`, `verify_failed`(종료 코드, 출력 끝부분, `lost`), `probe_undecided`,
+`ask_routed`(그룹, 응답자), `ask_answered`(결정, 답한 쪽, 경로), `ask_timeout`,
+`ask_deferred`, `ask_undelivered`, `ask_withdrawn`, `acceptance_checking`,
+`acceptance_passed`, `acceptance_failed`, `acceptance_waived`. ask가 그룹을
+건너뛰거나 `otherwise`로 넘어갈 때는 `fallback`(`decision: ask`)을 남긴다.
 
-- 런의 `waiting_approval`은 열린 승인 항목에서 계산한다: `loop_limit`,
-  `monitor_violation`, `human` 단계의 ask가 하나라도 있으면 `waiting_approval`,
-  없으면 `running`.
+- 런의 `waiting_approval`은 열린 대기 항목에서 계산한다: `loop_limit`,
+  `visit_limit`, `monitor_violation`, `acceptance`, `human` 단계의 ask가 하나라도
+  있으면 `waiting_approval`, 없으면 `running`. halt가 있으면 reason은
+  `monitor_violation`이다.
+
+### 4.4 완료 기준(acceptance) 검사
+
+시작 입력의 `acceptance` 항목 중 `probe`가 있는 것(`spec.acceptance`)은 런이
+`ok`(또는 차트가 선언한 결과)로 끝나기 직전에 검사한다.
+
+- 검사는 백그라운드에서 런 잠금 밖으로 실행한다(`acceptance_checking`). probe는
+  wait·모니터 probe와 같은 방식(환경 변수로 값 전달, 종료 코드 0이 충족)으로 실행한다.
+- 모두 충족: `acceptance_passed` 후 런이 끝난다.
+- 하나라도 미충족: 런은 끝나지 않고 `waiting_approval`(reason `acceptance`)가 된다.
+  `flow_status`의 `acceptance.failed`에 항목(`id`, `text`, 종료 코드, 출력 끝)이
+  실린다. 해소 경로는 둘이다. (1) 작업을 계속해 원인을 고친다. `flow_status`(30초
+  간격) 또는 데몬 클럭 틱이 검사를 다시 실행하고, 모두 충족되면 런이 끝난다.
+  (2) 사람이 `claunch cflow2 approve acceptance`(웹 approve의 `node: "acceptance"`)로
+  그대로 받아들인다(`acceptance_waived`). 에이전트의 `flow_approve`는 거절된다.
+- `probe`가 없는 항목은 엔진이 검사하지 않는다. 규칙 `input-acceptance`로 모든
+  작업 프롬프트에 실린다.
+- 중첩 위임 런은 이 검사를 하지 않는다.
 
 ## 5. 에이전트 인터페이스(MCP)
 
@@ -337,17 +551,36 @@ v1 툴과 이름이 겹치지 않도록 `flow_` 접두어를 쓴다.
 
 | 툴 | 의미 |
 |---|---|
-| `flow_start` | v2 런 시작(`workflow`, `params`, `scope`) |
-| `flow_status` | 활성 구성, 렌더된 현재 작업 프롬프트, 고를 수 있는 옵션 |
-| `flow_report` | 작업 결과 보고(`node`, `outcome`, `value`, `text`) |
+| `flow_start` | v2 런 시작(`workflow`, `params`, `inputs`, `force`). 호출 세션의 slot에만 시작한다. 그 세션이 런의 드라이버가 된다 |
+| `flow_status` | 활성 구성, 렌더된 현재 작업 프롬프트, 고를 수 있는 옵션, 시작 입력, 진행 중인 verify, 대기 항목 |
+| `flow_report` | 작업 결과 보고(`node`, `outcome`, `value`, `text`). verify가 있으면 `verifying`으로 바로 돌아온다 |
 | `flow_select` | `choose` 노드의 옵션 선택(`node`, `option`, `reason`) |
 | `flow_fork` | `group`에 멤버 추가(`group`, `with`) |
-| `flow_delegate` | 위임 노드의 브리프 조회와 결과 제출(`subagent` 실행 주체에서 사용) |
+| `flow_delegate` | 위임 노드의 브리프 조회와 결과 제출(`delegation`, `outcome`, `value`, `receipt_path`, `scope`, `cwd`) |
 | `flow_rule` | 규칙의 `text`·`why` 조회 |
-| `flow_abort` | 런 중단 |
 | `flow_approve` | `self` 단계로 넘어간 자기 런의 ask에 답함(`node`, `option`, `decline`, `reason`). 다른 단계에서는 거절 |
 | `flow_answer` | 다른 세션의 런이 라우팅한 ask에 응답자로서 답함(`ask_id`, `decision`, `reason`) |
 | `flow_asks` | 이 세션의 답을 기다리는 ask 목록 |
+
+런 중단(abort)은 MCP 툴이 없다. 사람이 `claunch cflow2 abort`로 한다.
+
+권한(`cflow2/mcp.py`, `runtime.may_drive`):
+
+- 호출 세션은 MCP 서버 환경의 `CLAUNCH_SESSION`이다. 인자로 정하지 않는다.
+- `scope`·`cwd`를 생략하면 호출 세션의 slot이다. 모든 툴은 대상 런의 드라이버만
+  쓸 수 있다. 예외는 중첩 위임 런이다. 그 런은 해당 위임의 담당 세션(`subagent`면
+  상위 런의 드라이버, `session`이면 배정된 자식 세션)이 `scope`(와 필요하면 `cwd`)를
+  지정해 쓸 수 있다.
+- `flow_start`는 다른 scope나 `cwd`를 받지 않는다. `force`는 기존 런의 드라이버만
+  쓸 수 있고, 기존 런이 사람을 기다리는 동안(`chooser: user` 선택, 열린 ask, halt,
+  `loop_limit`, `visit_limit`, `acceptance`) 거절된다.
+- `flow_delegate` 제출: `subagent` 위임은 런의 드라이버만, `session` 위임은 배정된
+  자식 세션(`assignee`, 없으면 `child`)만 제출한다. `headless` 결과와 데몬이 가져온
+  영수증은 데몬 내부 함수(`runtime.executor_submit`)로만 들어온다. 중첩 위임 런으로
+  실행되는 위임은 제출을 받지 않는다. 브리프 조회는 드라이버와 담당 세션이 할 수
+  있다.
+- `receipt_path`는 실제 경로(심볼릭 링크 해석 후)가 런의 `receipts/` 또는 호출
+  세션의 `CLAUNCH_SCRATCH` 아래일 때만 읽는다.
 
 ## 6. capability와 provider 기술
 
@@ -397,8 +630,18 @@ providers:
 
 값은 `true`, `false`, 또는 매핑 `{enabled: bool, args: [...]}`이다. `args`는
 그 기능을 켤 때 하네스 명령에 붙일 인자 템플릿이다(`{schema}`, `{schema_file}`,
-`{tools}`, `{usd}`, `{session_id}` 치환). `{tools}`에 목록을 주면 쉼표로 잇는다.
-`true`만 적은 층은 아래 층의 `args`를 그대로 쓴다.
+`{tools}`, `{deny}`, `{usd}`, `{session_id}` 치환). `{tools}`·`{deny}`에 목록을 주면
+쉼표로 잇는다. `true`만 적은 층은 같은 하네스의 아래 층 `args`를 그대로 쓴다.
+
+인자가 있어야 동작하는 capability가 있다: `headless.run`, `headless.output.schema`,
+`headless.output.json`, `headless.tools.restrict`, `headless.sandbox.readonly`,
+`headless.budget.usd`, `headless.resume` (`caps.NEEDS_ARGS`). 합성 결과가 켜져
+있는데 `args`가 비어 있으면(예: 하네스가 선언하지 않은 `headless.sandbox.readonly`를
+프로필에서 `true`로만 켬) 그 capability는 꺼진 것으로 바뀌고 합성 경고
+「enabled without args」가 남는다. 플래그 없는 경로가 선택되어 읽기 전용·스키마·
+비용 상한이 실제로는 걸리지 않는 일을 막기 위해서다. 그래서 `strict_budget`은
+이 경우 그 실행 주체를 건너뛴다. `subagent.*`, `mcp.claunch`, `session.spawn`은
+하네스·데몬의 기능이라 인자가 없어도 된다.
 
 기술되지 않은 capability는 `false`로 본다.
 
@@ -415,7 +658,7 @@ providers:
 | `headless.run` | true (`-p`) | true (`exec`) | true (`-p`) | true (`-p`) | false |
 | `headless.output.schema` | true (`--json-schema`) | true (`--output-schema`) | false | false | false |
 | `headless.output.json` | true (`--output-format json`) | true (`--json`) | true (`--mode json`) | false | false |
-| `headless.tools.restrict` | true (`--allowedTools`/`--disallowedTools`) | false | true (`--tools`/`--exclude-tools`) | false | false |
+| `headless.tools.restrict` | true (`--tools` + `--disallowedTools` + `--permission-mode dontAsk` + `--strict-mcp-config`) | false | true (`--tools`) | false | false |
 | `headless.sandbox.readonly` | false | true (`-s read-only`) | false | false | false |
 | `headless.budget.usd` | true (`--max-budget-usd`) | false | false | false | false |
 | `headless.resume` | true (`--resume`) | false | false | false | false |
@@ -426,6 +669,17 @@ providers:
   `--json-schema`는 스키마 JSON 문자열을 직접 받고(`{schema}`), codex의
   `--output-schema`는 파일 경로를 받는다(`{schema_file}`).
 - `headless.run` 인자: claude `-p`, codex는 하위 명령 `exec`, pi `-p`, devin `-p`.
+- `headless.tools.restrict`는 도구를 **제거**하는 플래그만 쓴다(claude 2.1.291,
+  pi `--help`로 확인). claude: `--tools <목록>`이 쓸 수 있는 내장 도구 집합을 정하고
+  (나머지는 없음), `--disallowedTools <목록>`이 이름으로 금지한다(`{deny}`:
+  Edit, Write, MultiEdit, NotebookEdit, Bash). `--allowedTools`는 나열한 도구를
+  자동 승인할 뿐 다른 도구를 없애지 않으므로 쓰지 않는다. `--permission-mode dontAsk`는
+  미리 승인되지 않은 도구 호출을 묻지 않고 거부한다(`--print`에서는 아무도 답하지
+  않는다). `--strict-mcp-config`를 `--mcp-config` 없이 주면 MCP 서버가 하나도 뜨지
+  않는다(MCP 도구는 `--tools` 대상이 아니다). pi: `--tools <목록>`은 내장·확장·사용자
+  도구 전체에 대한 허용 목록이고 pi에는 권한 확인 단계가 없다. 읽기 전용 허용
+  목록(`{tools}`)은 claude `Read, Grep, Glob, WebFetch, WebSearch`, pi
+  `read, grep, find, ls`이다(`executors.READONLY_TOOLS`).
 - `headless.resume`: codex(`codex exec resume <id>`, `exec`를 대체하는 하위 명령),
   pi(`--session <id>`), devin(`-r <id>`)에도 재개 수단이 있으나 연결하지 않았으므로
   기본값은 `false`다.
@@ -441,6 +695,11 @@ providers:
 **실행 주체 선택.** 노드의 `executor` 목록을 앞에서부터 보고, 아래 조건을
 만족하는 첫 항목을 쓴다. 하나도 만족하지 않으면 `inline`이다. `inline`은 어떤
 capability에도 기대지 않으므로 마지막 경로는 항상 존재한다.
+
+위임 서브트리가 평탄하지 않으면(task·seq 이외의 제어 구조를 포함) 플래너
+(`caps.plan_node(node, caps, flat=False)`)가 `headless`를 항상 건너뛰고,
+`mcp.claunch`가 꺼져 있으면 `subagent`·`session`도 건너뛴다. 건너뛴 사유는
+`subtree not flat`으로 `fallback` 이벤트에 남는다.
 
 | 실행 주체 | 필요 조건 | 조건이 깨졌을 때 |
 |---|---|---|
@@ -465,9 +724,16 @@ capability에도 기대지 않으므로 마지막 경로는 항상 존재한다.
 
 | 실행 주체 | 1순위 | 2순위 | 3순위 |
 |---|---|---|---|
-| headless | `headless.sandbox.readonly` | `headless.tools.restrict`로 쓰기 도구 금지 | 위임 시점 tip에 detach한 일회용 worktree에서 실행하고, 끝난 뒤 미커밋 변경을 버린다(쓰기는 일어나도 반영되지 않음) |
+| headless | `headless.sandbox.readonly` | `headless.tools.restrict`로 쓰기 도구 제거 | 위임 시점 tip에 detach한 일회용 worktree에서 실행하고, 끝난 뒤 미커밋 변경을 버린다(쓰기는 일어나도 반영되지 않음) |
 | subagent | `subagent.tools.restrict` | `subagent.worktree` | 브리프에 읽기 전용 규칙을 적고, 끝난 뒤 `git status --porcelain`이 위임 전과 같은지 검사. 다르면 `monitor_violation` |
 | session | 자식 세션의 worktree | — | — |
+
+headless 2순위(샌드박스·worktree 없이 실행 디렉터리에서 실행)는 시도마다 프로세스가
+끝난 직후 `git status --porcelain`을 위임 전과 비교한다. 다르면 `monitor_violation`
+(kind `readonly`)을 남기고 위임을 `fail`로 끝낸다(사유에 바뀐 줄). 결과 값은 쓰지
+않는다. 이 비교는 gitignore 대상 파일과 저장소 밖 쓰기를 보지 못한다. 3순위에서
+일회용 worktree를 만들 수 없으면(git 저장소가 아님 등) 실행 디렉터리에서 실행하지
+않고 노드의 다음 실행 주체로 넘긴다.
 
 **쓰기 효과가 있는 병렬 위임.**
 
@@ -500,6 +766,49 @@ capability에도 기대지 않으므로 마지막 경로는 항상 존재한다.
 | `retry.carry: resume` + `headless.resume` | 이전 실행을 `--resume`으로 이어서 실패 사유를 전달 |
 | 그 밖 | 새 실행에 이전 결과의 요약(`carry`)만 실어 보낸다 |
 
+### 6.5 데몬 실행기의 수명
+
+데몬의 cflow2 clock(`daemon/cflow2_clock.py`)과 실행기(`daemon/cflow2_exec.py`)가
+지키는 규칙이다.
+
+**headless 프로세스.**
+
+| 상황 | 처리 |
+|---|---|
+| 시도 시작 | 프로세스가 뜬 직후 위임 기록의 `runner`에 `pid`, `argv0`, `attempt`를 저장한다 |
+| 데몬 종료(shutdown) | 정지 이벤트를 먼저 세운다. 실행 중 프로세스 그룹을 죽이고, 그 시도는 실패로 세지 않고 위임을 `queued`로 되돌린다(`attempts` 그대로, `delegate_interrupted` 이벤트). 2차 시도는 시작하지 않는다 |
+| 다음 부팅 | 다른 boot가 잡은 `running` 기록: 기록된 pid가 없으면 `queued`로 한 번 되돌린다. pid가 살아 있고 `/proc/<pid>/cmdline`으로 같은 프로그램임이 확인되면 그 그룹을 죽인 뒤 되돌린다. 살아 있으나 확인할 수 없으면 예산 시간이 지날 때까지 기다린다. 다시 실행하는 시도 번호는 저장된 `attempts` 다음부터다 |
+| 런 종료·중단, 위임 취소(par 정리, timeout) | 매 tick 끝에 해당 프로세스 그룹을 죽이고 `delegate_killed`를 남긴다. 위임은 런타임이 이미 `cancelled`로 바꿔 둔 상태이며 실행기는 더 쓰지 않는다 |
+| halt 모니터 | 프로세스 그룹을 죽이고 위임을 `queued`로 되돌린다(`attempts` 그대로). halt가 풀릴 때까지 새로 띄우지 않는다 |
+
+**session 자식.**
+
+- spawn 호출 전에 위임을 `running` + `runner.phase: spawning`으로 저장한다. 오프닝
+  태스크 끝줄에 표식 `[cflow2-delegation <scope>/<run_id>/<did>]`을 넣는다.
+- 자식 이름을 받으면 `child`와 `assignee`(제출할 수 있는 세션)를 기록한다.
+- spawn 호출이 실패(타임아웃 포함)하면 먼저 부모의 자식 목록에서 표식을 가진
+  세션을 찾는다. 있으면 그 자식을 채택하고, 없으면 다음 실행 주체로 넘긴다. 넘긴
+  뒤 `LOST_WATCH`(900초) 동안 표식을 가진 자식이 나타나면 부모-자식 kill 경로
+  (`POST /api/sessions/<parent>/children/<child>/kill`)로 종료하고 `orphan_child`
+  이벤트를 남긴다. 같은 브리프로 두 곳에서 작업이 진행되는 것을 막는 쪽을 택했다.
+- 부팅 시 자식 기록이 없는 `running` 위임: 표식을 가진 자식이 있으면 채택하고,
+  없으면 `queued`로 한 번 되돌린다(`respawns`). 두 번째에는 다음 실행 주체로 넘긴다.
+- 영수증 파일(`receipts/<did>.child.json`): 자식은 `.tmp`에 쓴 뒤 이름을 바꾼다.
+  clock은 `outcome`을 가진 완전한 JSON일 때, 또는 `RECEIPT_SETTLE`(30초) 동안
+  바뀌지 않았을 때만 읽는다. 읽기 전에 다른 이름으로 옮기고, 옮기기에 실패하면
+  제출하지 않고 다음 tick에 다시 본다.
+
+**heartbeat.** 한 패스가 probe(최대 60초)나 spawn 호출(최대 120초)에서 오래
+멈춰도 `HEARTBEAT_STALE`(90초)를 넘기지 않도록, 패스 중에도 20초마다 다시 쓴다.
+패스가 `PROGRESS_MAX`(600초) 동안 진척이 없으면 쓰기를 멈춰 다른 프로세스가
+fallback하게 한다.
+
+**probe.** wait·monitor probe는 적힌 명령 그대로 자기 프로세스 그룹에서 실행하고,
+타임아웃이면 그룹 전체를 죽인다(종료 코드 124). 런의 값은 명령 문자열에 넣지 않고
+환경 변수로만 전달한다(`CFLOW_IN_<NAME>`/`CFLOW_DATA_<NAME>`, 런타임이 정함).
+종료 코드의 뜻(0 성립, 1 아직, 그 밖 판정 불가)과 판정 불가 횟수 세기는 런타임이
+정한다.
+
 ## 7. 위임 실행
 
 - 위임 지점은 `executor`가 붙은 노드다. 그 하위 트리 전체가 실행 주체 하나에서
@@ -508,11 +817,34 @@ capability에도 기대지 않으므로 마지막 경로는 항상 존재한다.
   적용 규칙. 메인 런의 대화 맥락은 넘기지 않는다.
 - 결과: `returns` 스키마의 값 + 영수증 경로. 메인 드라이버에게는 이 둘만 보인다.
 - 엔진은 `spec.ensures`를 영수증에 대해 평가한다(8절).
+- 하위 트리의 모양에 따라 실행 방식이 둘로 나뉜다(`ir.subtree_is_flat`).
+
+  | 하위 트리 | 실행 방식 | 실행 주체 |
+  |---|---|---|
+  | 평탄함(task·seq만, 루트 아래에 `on`·`bind`·`ensures` 없음) | 브리프 하나, 결과 제출 하나. `ok` 결과는 하위 작업의 verify가 통과해야 받아들인다(2.2) | `headless`, `subagent`, `session` |
+  | 그 밖(loop, cond, choose(agent), par, try, on, ensures 등) | 중첩 위임 런 | `subagent`, `session`. `headless`는 건너뛰고 다음 선호로 간다(`fallback`) |
+  | `chooser: user` 선택이나 `ask`가 있음 | 위임하지 않음. 그 자리에서 실행하고 `fallback`을 남긴다(정적 검사 오류이기도 하다) | `inline` |
+
+- 중첩 위임 런: 엔진이 같은 디렉터리에 scope `<scope>~<위임 id>`로 새 런을 시작한다.
+  차트는 위임 노드의 하위 트리다(루트의 `executor`·`on`·`bind`·루트 대상 `ensures`는
+  상위 런이 적용하므로 빠진다. 모니터는 상위 런만 돈다). 규칙, 하위 트리 대상
+  `ensures`, `max_visits`, 위임 지점의 params, 상위 런 `data`의 사본을 가져간다.
+  담당 세션이 그 scope를 지정해 `flow_status`·`flow_report`·`flow_select` 등으로
+  진행한다(브리프의 `nested`와 `submit` 안내). 작업 보고는 각자 verify를 거친다.
+  중첩 런이 끝나면 루트의 결과·값이 위임 결과가 되고 `returns`로 검증된다(중첩 런은
+  다시 실행할 수 없으므로 잘못된 결과는 바로 노드 `fail`). 중첩 런이 abort되면 위임은
+  `fail`로 끝난다. 상위 런에서 위임이 취소되면(취소 경로 4.2) 중첩 런도 abort된다.
+  결과 전달은 중첩 런을 끝낸 호출이 잠금을 놓은 뒤 하고, 놓친 경우 상위 런의
+  `flow_status`가 다시 전달한다.
 - `headless`: 데몬이 하네스의 비대화형 명령을 프로필 환경으로 실행한다. 표준
-  출력은 `receipts/<id>.out`에 저장된다.
+  출력은 `receipts/<id>.out`에 저장된다. 결과는 `runtime.executor_submit`으로 들어온다.
 - `subagent`: 드라이버가 `flow_status`에서 브리프를 받아 하네스의 하위 에이전트
-  기능으로 실행하고 결과를 `flow_delegate`로 제출한다.
-- `session`: 데몬이 자식 세션을 spawn하고 브리프를 오프닝 태스크로 준다.
+  기능으로 실행하고 결과를 `flow_delegate`로 제출한다(중첩 런이면 하위 에이전트가
+  그 런을 진행한다).
+- `session`: 데몬이 자식 세션을 spawn하고 브리프를 오프닝 태스크로 준다. 자식
+  세션은 상위 런의 `scope`·`cwd`를 지정해 `flow_delegate`로 제출하거나(평탄),
+  중첩 런을 진행한다. 다른 실행 주체로 재배정되면 `assignee`가 지워져 이전 자식의
+  제출은 거절된다.
 
 ## 8. 명세(spec)
 
@@ -545,6 +877,34 @@ spec:
 | `monitors.always` | 실행(데몬 주기) | probe 값으로 식을 평가. 위반 시 `on_violation`(`halt`, `notify`, `record`) |
 | `monitors.within` | 실행(데몬 주기) | `when` 이벤트 뒤 `within`초 안에 `expect` 이벤트가 없으면 위반 |
 
+정적 검사(`cflow2/check.py`)의 코드:
+
+| 코드 | 수준 | 내용 |
+|---|---|---|
+| `unbounded-loop` | 오류 | `max`가 없는 반복 |
+| `never-effect` | 오류 | 불변식이나 규칙 `effect`가 금지한 효과를 선언한 작업 |
+| `must-pass` | 오류 | `to`에 닿는 경로 중 `must_pass` 노드를 지나지 않는 것이 있음(메시지에 경로) |
+| `no-end` | 오류 | 완료에 닿는 경로가 없음 |
+| `unknown-capability`, `unknown-rule` | 오류 | 모르는 capability·규칙 이름 |
+| `delegated-ask` | 오류 | `ask`가 있는 작업이 위임 실행 단위(비-inline `executor`를 가진 노드나 그 조상의 하위 트리) 안에 있음 |
+| `delegated-user-gate` | 오류 | `chooser: user`인 `choose`가 위임 실행 단위 안에 있음. `delegated-ask`와 같은 규칙(사람을 기다리는 게이트는 위임 안에 둘 수 없다 — 위임받은 쪽이 답하거나 건너뛴다)이며, 기존 코드를 유지하려고 두 코드로 나눴다 |
+| `par-write-overlap` | 경고 | 병렬 분기가 겹치는(또는 선언되지 않은) 경로에 씀 |
+| `effects-undeclared` | 경고 | `never_effect` 불변식이나 규칙 `effect`가 있는 차트에서 `effects` 키가 없는 작업. 그 작업은 `never-effect` 검사에 보이지 않는다. 효과가 없으면 `effects: []`로 선언한다 |
+
+`must-pass`·`no-end`가 쓰는 제어 흐름 그래프는 런타임의 결과 전파를 따른다:
+
+- 원자 노드의 가능한 결과는 `returns`의 키, `ask`의 결과(옵션의 `outcome` 또는
+  `on_decline`), `fail`, `timeout`이다. probe가 있는 wait는 `undecidable`이 더해진다.
+- `ok`가 아닌 결과는 노드 자신과 조상의 `on` 처리기, 감싸는 `try`의 `catch`
+  (`*` 포함) 중 가장 가까운 것으로 간다. 처리하는 곳이 없으면 런이 끝나며, 차트의
+  `returns`가 그 결과를 선언할 때만 완료로 본다. `retry`는 다시 시도하고, `par`는
+  `settle`에 따라 정한다.
+- 결과 전파와 제어(`end`, `return`, `break`, `continue`)는 빠져나가는 모든
+  `finally`를 먼저 지난다. 그래프는 그 경로마다 `finally` 하위 트리의 사본을 두어
+  `finally`가 끝난 뒤 원래 목적지로만 이어지게 한다(정상 경로가 제어의 목적지로
+  새지 않는다).
+- `else`가 없는 `cond`에서 참인 가드가 없으면 `fail`로 끝난다.
+
 ## 9. 화면과 CLI
 
 - CLI: `claunch cflow2 ls | show | validate | compile | caps | start | status | journal | abort`,
@@ -560,16 +920,28 @@ spec:
   - v2 런의 params는 요청의 `workflow_params`로 넘긴다. 차트가 `context`
     param을 선언하면 `context`가 그 값이 된다.
   - 그 밖의 API: `GET /api/cflow2/runs`(v2 런 목록), `GET /api/cflow2/definition?name`
-    (컴파일 트리와 검사 결과, 읽기 전용), `POST /api/cflow2/select`(사용자 선택,
-    `caller=user`), `POST /api/cflow2/extend`(`loop_limit` 응답). v2 런만 있는
-    슬롯에서 `GET /api/cflow/run`은 `v2: true`를 싣는다.
+    (컴파일 트리, 검사 결과, 시작 입력 선언, 읽기 전용. `name`은 정의 이름만 받고
+    경로면 400), `POST /api/cflow2/select`(사용자 선택, `caller=user`),
+    `POST /api/cflow2/extend`(`loop_limit` 응답, 본문에 `visits: true`면
+    `visit_limit` 응답). v2 런만 있는 슬롯에서 `GET /api/cflow/run`은 `v2: true`를
+    싣는다.
+  - `GET /api/cflow/definitions`의 v2 목록은 레이어 디렉터리의 파일 목록·수정
+    시각으로 만든 스탬프로 캐시하며, 이벤트 루프 밖 스레드에서 컴파일한다.
+  - 요청이 v2를 명시하지 않았는데(`workflow_version` 없음, `v2:` 접두어 없음, 생성
+    파일 경로 아님) v2 레이어를 읽는 중 예외가 나면 데몬은 경고를 남기고 v1 요청으로
+    처리한다. v2 레이어의 문제가 v1 spawn을 거절시키지 않는다.
   - v2 부모 세션의 자식은 부모 런의 `chart.json`의 `meta.default_child_cflow`를
     물려받는다.
 - 새 세션 폼과 spawn 모달(같은 폼, `index.html`의 `#new-session`): 워크플로 선택
   목록에 버전 표시를 붙이고, v1 항목에는 deprecated 표시를 붙인다. v2를 고르면
-  데몬이 v2 런으로 시작한다.
+  데몬이 v2 런으로 시작한다. 고른 v2 항목이 `inputs`를 선언하면 Workflow 행 아래에
+  입력 칸을 그린다(2.6). 워크플로를 바꾸면 칸을 비우고 다시 그린다. 400 응답의
+  `errors`는 해당 칸 아래에 표시한다.
 - 실행 패널: v2 런이면 IR 트리를 들여쓰기 목록으로 그리고, 활성 구성의 노드와
-  위임 실행 단위(실행 주체, 상태, 영수증)를 표시한다.
+  위임 실행 단위(실행 주체, 상태, 영수증)를 표시한다. 그 밖에 런의 시작 입력
+  (`data.inputs`, 접힌 블록), 완료 기준 확인 상태, `verifying` 중인 작업과 그
+  명령, `visit_limit` 대기(「Allow one more visit」/「Stop here」 버튼), probe가
+  연속으로 판정하지 못한 횟수와 `undecidable`로 끝난 wait를 표시한다.
 
 ## 10. v1 deprecation
 

@@ -141,6 +141,30 @@ def default_deliver(rec: Dict[str, Any], ctx: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _closed_notice(item: Dict[str, Any], *, sender: str, to: List[str]) -> Optional[str]:
+    """An ``fyi`` that a question is closed without a person's answer (it
+    timed out to the next group, its task was cancelled, another responder
+    answered, or the whole group abstained)."""
+    from .. import daemon_client
+    from ..cflow import responders
+
+    client, why = daemon_client.connect_with_diagnosis()
+    if client is None:
+        return f"the claunch {daemon_client.unreachable_reason(why)}, so nobody was told"
+    body = (f"cflow2: the question I sent you ({item.get('ask')}, {item.get('workflow')}/"
+            f"{item.get('label') or item.get('node')}) is closed: {item.get('decision')}. "
+            f"There is nothing left to decide here; do not answer it.")
+    try:
+        client.post(f"/api/mesh/{item['mesh']}/messages",
+                    {"from": sender, "to": to, "body": body, "type": "fyi",
+                     "ref": {"kind": "cflow2.ask.withdrawn", "id": item.get("ask"),
+                             "task": item.get("label") or item.get("node")}},
+                    timeout=responders.CALL_TIMEOUT)
+    except daemon_client.DaemonClientError as exc:
+        return f"the withdrawal could not be delivered: {exc}"
+    return None
+
+
 def default_nudge(session: str, message: str, cwd: str) -> Any:
     from ..cflow import responders
 
@@ -148,11 +172,16 @@ def default_nudge(session: str, message: str, cwd: str) -> Any:
 
 
 def default_withdraw(answered: Dict[str, Any], *, sender: str) -> Optional[str]:
+    """Tell the responders in ``answered['pending']`` the question is closed
+    (answered, timed out to the next group, cancelled, or everyone of the
+    group abstained); ``decision`` says which."""
     from ..cflow import responders
 
     to = [e.get("handle") for e in answered.get("pending") or [] if e.get("handle")]
     if not to or not answered.get("mesh"):
         return None
+    if answered.get("reason_kind") == "closed":
+        return _closed_notice(answered, sender=sender, to=to)
     return responders.withdraw(
         {"id": answered.get("ask"), "step": answered.get("label") or answered.get("node")},
         mesh=str(answered["mesh"]), sender=sender, workflow=str(answered.get("workflow") or ""),
@@ -164,6 +193,16 @@ def default_withdraw(answered: Dict[str, Any], *, sender: str) -> Optional[str]:
 
 def _session_of(scope: str) -> str:
     return "" if scope in ("", store_mod.DEFAULT_SCOPE) else scope
+
+
+def _driver(st: RunStore, state: Optional[Dict[str, Any]] = None) -> str:
+    """The session a run's asks speak for: the driver recorded at start
+    (never the scope a caller named -- a scope can be any slot)."""
+    try:
+        state = state if state is not None else st.load_state()
+    except store_mod.StoreError:
+        return ""
+    return runtime.driver_of(state)
 
 
 def plan_route(rec: Dict[str, Any], pool: Any) -> Dict[str, Any]:
@@ -208,7 +247,7 @@ def route(*, cwd: Optional[str] = None, scope: Optional[str] = None,
     todo = runtime.asks_to_route(snap)
     if not todo:
         return []
-    session = _session_of(st.scope)
+    session = _driver(st, snap.state)
     pool = (pool_fn or default_pool)(session=session, mesh=str(todo[0].get("mesh") or ""),
                                      cwd=str(st.cwd))
     plans = [plan_route(rec, pool) for rec in todo]
@@ -294,11 +333,14 @@ def answer_by_id(ask_id: str, decision: str, reason: Optional[str] = None, *,
     receipt = runtime.answer(ask_id, decision, reason, by_session=by_session, cwd=cwd,
                              scope=scope, now=now)
     if receipt.get("decision") == runtime.ASK_ABSTAIN:
+        if not receipt.get("moved"):
+            return receipt  # the rest of the group still has it
         # the next group is asked now rather than on the clock's next tick
         route(cwd=cwd, scope=scope, now=now, pool_fn=pool_fn, deliver_fn=deliver_fn)
     else:
         _index_drop(ask_id)
-    woken = (nudge_fn or default_nudge)(scope, NUDGE_ANSWERED, cwd)
+    driver = _driver(RunStore(cwd, scope)) or scope
+    woken = (nudge_fn or default_nudge)(driver, NUDGE_ANSWERED, cwd)
     receipt["nudged"] = woken or None
     return receipt
 
@@ -336,7 +378,8 @@ def pending_for(session: str) -> List[Dict[str, Any]]:
             "ask_id": rec["id"], "kind": rec.get("kind"), "prompt": rec.get("prompt"),
             "options": [o["name"] for o in runtime._ask_choices(rec)] + [runtime.ASK_ABSTAIN],
             "deadline": rec.get("deadline"), "workflow": state.get("workflow"),
-            "task": rec.get("label") or rec.get("node"), "from_session": entry["scope"],
+            "task": rec.get("label") or rec.get("node"),
+            "from_session": runtime.driver_of(state) or entry["scope"],
             "cwd": entry["cwd"],
         })
     return out
@@ -354,8 +397,9 @@ def human_approve(node: Optional[str] = None, *, decision: Optional[str] = None,
                               caller=runtime.CALLER_USER, by=by, cwd=cwd, scope=scope, now=now)
     answered = payload.get("answered") or {}
     st = RunStore(cwd, scope)
+    driver = _driver(st) or _session_of(st.scope)
     if answered.get("pending"):
-        sender = _session_of(st.scope)
+        sender = driver
         try:
             (withdraw_fn or default_withdraw)(answered, sender=sender)
         except Exception:  # noqa: BLE001 - best effort, the answer is recorded
@@ -364,7 +408,7 @@ def human_approve(node: Optional[str] = None, *, decision: Optional[str] = None,
         _index_drop(answered["ask"])
     try:
         payload["nudged"] = (nudge_fn or default_nudge)(
-            st.scope, "[cflow2] a person answered an ask of your run "
+            driver or st.scope, "[cflow2] a person answered an ask of your run "
             f"({answered.get('decision')}). Call flow_status and continue.", str(st.cwd)) or None
     except Exception:  # noqa: BLE001
         payload["nudged"] = None

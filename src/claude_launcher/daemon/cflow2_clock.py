@@ -4,9 +4,9 @@ One periodic loop over every v2 run slot (``<cwd>/.cflow2/runs/<scope>``) in
 the directories the daemon's live sessions stand in -- the scope is the
 session name, as for v1 -- that does what no agent call does:
 
-* **waits**: :func:`..cflow2.runtime.wait_tick` with the default probe runner
-  (probes run outside the run lock; the runtime applies their results under
-  it), so time/probe waits, timeouts and loop pauses fire without the driver
+* **waits**: :func:`..cflow2.runtime.wait_tick` with :func:`run_probe` (its
+  own process group, run values only through the environment; probes run
+  outside the run lock and the runtime applies their results under it), so time/probe waits, timeouts and loop pauses fire without the driver
   calling ``flow_status``;
 * **monitors**: :func:`..cflow2.runtime.monitors_tick` (``always`` probes on
   their ``every``, ``within`` deadlines over the journal); ``halt`` stops the
@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import threading
@@ -74,6 +75,66 @@ def _resolve(cwd: str) -> str:
         return str(cwd)
 
 
+#: How often the heartbeat is rewritten while a pass is in progress (doc:
+#: executors.HEARTBEAT_STALE is 90s; a pass blocked on a probe or a spawn
+#: call must not let it go stale).
+HEARTBEAT_EVERY = 20.0
+#: A pass that has made no progress (no slot, probe or spawn started) for
+#: this long is stuck: the heartbeat stops so delegations fall back.
+PROGRESS_MAX = 600.0
+#: How long a lost spawn's child is looked for after its delegation was
+#: rerouted (the spawn call timed out at 120s; the daemon may finish later).
+LOST_WATCH = 900.0
+#: A child receipt that is not a complete ``{"outcome": ...}`` document is
+#: left alone this long (it may still be being written) before it is
+#: submitted anyway for validation to refuse.
+RECEIPT_SETTLE = 30.0
+#: Probe wall clock.
+PROBE_TIMEOUT = 60.0
+
+
+def run_probe(probe: Any, cwd: str, timeout: float = PROBE_TIMEOUT,
+              env: Optional[Dict[str, str]] = None) -> Tuple[int, str]:
+    """Run a wait or monitor probe: ``(exit code, output)``.
+
+    The probe text is run as written; run values reach it only through
+    ``env`` (the runtime's ``CFLOW_IN_*``/``CFLOW_DATA_*`` variables, added
+    to the daemon's environment), never by being pasted into the command.
+    The command runs in its own process group, killed whole on timeout
+    (exit 124). Exit codes are returned as they are; what 0, 1 and others
+    mean is the runtime's (doc 2.3, wait).
+    """
+    import signal
+    import subprocess
+    import sys
+
+    cmd = probe if isinstance(probe, list) else str(probe)
+    full_env = dict(os.environ)
+    if env:
+        full_env.update({str(k): str(v) for k, v in env.items()})
+    kwargs: Dict[str, Any] = {}
+    if sys.platform != "win32":
+        kwargs["start_new_session"] = True
+    try:
+        proc = subprocess.Popen(cmd, shell=isinstance(cmd, str), cwd=cwd, env=full_env,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                stdin=subprocess.DEVNULL, text=True, **kwargs)
+    except OSError as exc:
+        return 127, str(exc)
+    try:
+        out, _ = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(OSError, ProcessLookupError):
+            if sys.platform != "win32":
+                os.killpg(proc.pid, signal.SIGKILL)
+            else:  # pragma: no cover - windows
+                proc.kill()
+        with contextlib.suppress(Exception):
+            proc.communicate(timeout=5)
+        return 124, "probe timed out"
+    return proc.returncode, out or ""
+
+
 class Cflow2Clock:
     def __init__(
         self,
@@ -82,13 +143,15 @@ class Cflow2Clock:
         poll: Optional[float] = None,
         spawn: Optional[Callable[[str, Dict[str, Any]], str]] = None,
         launch_for: Optional[Callable[[str], Optional[cflow2_exec.Launch]]] = None,
-        probe_runner: Optional[Callable[..., Any]] = runtime.default_probe_runner,
+        probe_runner: Optional[Callable[..., Any]] = run_probe,
         max_headless: Optional[int] = None,
         heartbeat: bool = True,
         threaded: bool = True,
         default_seconds: float = cflow2_exec.DEFAULT_SECONDS,
         ask_pool: Optional[Callable[..., Any]] = None,
         ask_deliver: Optional[Callable[..., Any]] = None,
+        find_child: Optional[cflow2_exec.FindChild] = None,
+        kill_child: Optional[Callable[[str, str], Any]] = None,
     ) -> None:
         self.manager = manager
         self.poll = float(poll if poll is not None else DEFAULT_POLL)
@@ -104,19 +167,31 @@ class Cflow2Clock:
         #: runs in a worker thread, so the HTTP call does not block the loop).
         self.ask_pool = ask_pool
         self.ask_deliver = ask_deliver
+        #: ``(parent, marker) -> child name``: a child created for a session
+        #: delegation, recognised by the marker line of its task.
+        self.find_child = find_child or self._find_child
+        #: ``(parent, child)``: end a child through the daemon's kill path.
+        self.kill_child = kill_child or default_kill_child
         #: Identifies this daemon process on a claimed delegation; a running
         #: headless record carrying another boot was orphaned by a restart.
         self.boot = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
         self.procs = cflow2_exec.Procs()
-        self.jobs: Dict[Tuple[str, str, str], threading.Thread] = {}
+        #: Set by :meth:`shutdown`: no new claim, spawn or attempt starts.
+        self.stop = threading.Event()
+        self.jobs: Dict[Tuple[str, str, str, str], threading.Thread] = {}
         self.results: List[Dict[str, Any]] = []
         #: Directories a run was started in through this process's runtime
         #: (the in-process dispatcher saw it) without a session standing there.
         self.extra_cwds: Set[str] = set()
         self._lock = threading.Lock()
         self._task: Optional[asyncio.Task] = None
+        self._beat_task: Optional[asyncio.Task] = None
         self._wake: Optional[asyncio.Event] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._cwds: List[str] = []
+        self._scanning = False
+        self._progress = 0.0
+        self._last_beat = 0.0
 
     # -- lifecycle -------------------------------------------------------
     def start(self) -> None:
@@ -126,19 +201,28 @@ class Cflow2Clock:
         self._wake = asyncio.Event()
         executors.register(self._dispatch_hook)
         self._task = self._loop.create_task(self._run())
+        if self.heartbeat:
+            self._beat_task = self._loop.create_task(self._beat_loop())
 
     async def shutdown(self) -> None:
+        # Stop first: a worker whose process is killed below must requeue
+        # its delegation, not start the second attempt (A5).
+        self.stop.set()
         executors.register(None)
-        task, self._task = self._task, None
-        if task is not None:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
+        self.procs.kill_all()
+        for attr in ("_task", "_beat_task"):
+            task = getattr(self, attr)
+            setattr(self, attr, None)
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
         if self.heartbeat:
             executors.clear_heartbeat()
-        # A restart requeues these delegations; a process left running would
-        # deliver its result next to the re-run's.
-        self.procs.kill_all()
+        # Let the killed workers write their requeue; whatever does not land
+        # is requeued by the next boot (the record's pid is gone).
+        with contextlib.suppress(Exception):
+            await asyncio.to_thread(self.wait_jobs, 5.0)
 
     def _dispatch_hook(self, rec: dict, run: Any) -> str:
         """The in-process dispatcher: the runtime ran inside the daemon (an API
@@ -153,7 +237,7 @@ class Cflow2Clock:
 
     async def _run(self) -> None:
         assert self._wake is not None
-        while True:
+        while not self.stop.is_set():
             try:
                 with contextlib.suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(self._wake.wait(), timeout=self.poll)
@@ -164,6 +248,42 @@ class Cflow2Clock:
                 raise
             except Exception:
                 log.exception("cflow2 clock tick failed")
+
+    async def _beat_loop(self) -> None:
+        """Keep the heartbeat fresh while a long pass blocks on a probe or a
+        spawn call (D): written every :data:`HEARTBEAT_EVERY` as long as the
+        pass keeps making progress."""
+        while not self.stop.is_set():
+            await asyncio.sleep(HEARTBEAT_EVERY)
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(self._beat)
+
+    def _mark(self) -> None:
+        """A pass made progress (a slot, a probe, a spawn started)."""
+        self._progress = time.time()
+
+    def _beat(self, force: bool = False) -> None:
+        if not self.heartbeat or self.stop.is_set():
+            return
+        now = time.time()
+        if not force:
+            if now - self._last_beat < HEARTBEAT_EVERY:
+                return
+            if self._scanning and now - self._progress > PROGRESS_MAX:
+                return  # stuck: let it go stale so runs fall back
+        try:
+            executors.write_heartbeat(self._cwds, self.poll)
+            self._last_beat = now
+        except OSError:
+            log.exception("cannot write the cflow2 dispatch heartbeat")
+
+    def _probe(self, probe: Any, cwd: str, *args: Any, **kwargs: Any) -> Any:
+        """The probe runner the runtime gets: marks progress and keeps the
+        heartbeat fresh between probes."""
+        self._mark()
+        self._beat()
+        assert self.probe_runner is not None
+        return self.probe_runner(probe, cwd, *args, **kwargs)
 
     def _deliver(self, cwd: str, name: str, text: str) -> None:
         try:
@@ -193,6 +313,23 @@ class Cflow2Clock:
         except Exception:
             return None
         return None if getattr(session, "exited", True) else session
+
+    def _find_child(self, parent: str, marker: str) -> Optional[str]:
+        """A child of ``parent`` whose task carries ``marker`` (live first)."""
+        try:
+            names = list(self.manager.children(parent))
+        except Exception:
+            return None
+        found: List[Tuple[bool, str]] = []
+        for name in names:
+            try:
+                session = self.manager.get(name)
+            except Exception:
+                continue
+            task = str(getattr(getattr(session, "sdef", None), "task", "") or "")
+            if marker in task:
+                found.append((bool(getattr(session, "exited", False)), name))
+        return sorted(found)[0][1] if found else None
 
     def cwds(self) -> List[str]:
         out: Set[str] = set()
@@ -232,7 +369,7 @@ class Cflow2Clock:
             return len(self.jobs)
 
     def wait_jobs(self, timeout: float = 30.0) -> None:
-        """Join the headless workers (tests)."""
+        """Join the headless workers (tests, shutdown)."""
         deadline = time.monotonic() + timeout
         while self.running_jobs():
             with self._lock:
@@ -247,53 +384,109 @@ class Cflow2Clock:
         """One pass over every run. Blocking (probes, file writes, a spawn
         call to this daemon's API): run it in a thread. Returns the notices
         to type into sessions."""
+        if self.stop.is_set():
+            return []
         cwds = self.cwds()
-        if self.heartbeat:
-            try:
-                executors.write_heartbeat(cwds, self.poll)
-            except OSError:
-                log.exception("cannot write the cflow2 dispatch heartbeat")
+        self._cwds = cwds
+        self._scanning = True
+        self._mark()
+        self._beat(force=True)
         notices: List[Notice] = []
-        for cwd in cwds:
-            for scope in cstore.list_scopes(cwd):
-                try:
-                    self.tick_slot(cwd, scope, now, notices)
-                except (runtime.FlowError, cstore.StoreError) as exc:
-                    log.debug("cflow2 clock skipped %s/%s: %s", cwd, scope, exc)
-                except Exception:
-                    log.exception("cflow2 clock failed on %s/%s", cwd, scope)
+        try:
+            for cwd in cwds:
+                for scope in cstore.list_scopes(cwd):
+                    if self.stop.is_set():
+                        return notices
+                    self._mark()
+                    self._beat()
+                    try:
+                        self.tick_slot(cwd, scope, now, notices)
+                    except (runtime.FlowError, cstore.StoreError) as exc:
+                        log.debug("cflow2 clock skipped %s/%s: %s", cwd, scope, exc)
+                    except Exception:
+                        log.exception("cflow2 clock failed on %s/%s", cwd, scope)
+            self.reap()
+        finally:
+            self._scanning = False
         return notices
+
+    def reap(self) -> List[Tuple[str, str, str, str]]:
+        """End the headless processes whose work is gone (B5): the run is no
+        longer live or is another run now, the delegation is no longer open
+        (cancelled by a par settle, a timeout, an abort), or a halt monitor
+        stopped the run. Returns the job keys killed."""
+        killed = []
+        for key in self.procs.keys():
+            if not (isinstance(key, tuple) and len(key) == 4):
+                continue
+            cwd, scope, run_id, did = key
+            try:
+                state = cstore.RunStore(cwd, scope).load_state()
+            except Exception:  # noqa: BLE001 - the slot is gone
+                state = {}
+            rec = (state.get("delegations") or {}).get(did) or {}
+            why = None
+            if state.get("run_id") != run_id or state.get("status") not in runtime.LIVE_STATUSES:
+                why = cflow2_exec.KILL_CANCELLED
+            elif rec.get("status") not in runtime.OPEN_DELEGATION:
+                why = cflow2_exec.KILL_CANCELLED
+            elif _halted(state):
+                why = cflow2_exec.KILL_HALT
+            if why and self.procs.kill(key, why):
+                killed.append(key)
+                with contextlib.suppress(Exception):
+                    runtime.note("delegate_killed", cwd=cwd, scope=scope, delegation=did,
+                                 node=rec.get("node"), why=why,
+                                 detail="the run finished, was aborted or halted, or the "
+                                        "delegation was cancelled: its headless process "
+                                        "group was killed")
+        return killed
 
     def tick_slot(self, cwd: str, scope: str, now: Optional[float],
                   notices: List[Notice]) -> None:
         st = cstore.RunStore(cwd, scope)
         if st.load_state().get("status") not in runtime.LIVE_STATUSES:
             return
-        runtime.wait_tick(now, self.probe_runner, cwd=cwd, scope=scope)
+        probe = self._probe if self.probe_runner is not None else None
+        runtime.wait_tick(now, probe, cwd=cwd, scope=scope)
         for text in asks.tick(cwd=cwd, scope=scope, now=now, pool_fn=self.ask_pool,
                               deliver_fn=self.ask_deliver):
             notices.append((cwd, scope, text))
-        for v in runtime.monitors_tick(now, self.probe_runner, cwd=cwd, scope=scope):
+        for v in runtime.monitors_tick(now, probe, cwd=cwd, scope=scope):
             if v["action"] in (runtime.MON_NOTIFY, runtime.MON_HALT):
                 notices.append((cwd, scope, monitor_block(scope, v)))
+        self._watch_lost(cwd, scope)
         state = st.load_state()
         if state.get("status") not in runtime.LIVE_STATUSES:
             return
+        halted = _halted(state)
         clock_now = time.time() if now is None else float(now)
+        run_id = str(state.get("run_id") or "")
         for did, rec in (state.get("delegations") or {}).items():
+            if self.stop.is_set():
+                return
             if rec.get("status") not in runtime.OPEN_DELEGATION:
                 continue
             ex = rec.get("executor")
             if ex == ir.EXEC_HEADLESS:
-                self._headless(cwd, scope, did, rec, clock_now)
+                self._headless(cwd, scope, run_id, did, rec, clock_now, halted)
             elif ex == ir.EXEC_SESSION:
-                self._session(cwd, scope, did, rec, clock_now, notices)
+                self._session(cwd, scope, did, rec, clock_now, notices, halted)
             elif ex == ir.EXEC_SUBAGENT:
                 self._budget(cwd, scope, did, rec, clock_now, notices)
 
     # -- executors ---------------------------------------------------------
-    def _headless(self, cwd: str, scope: str, did: str, rec: dict, now: float) -> None:
-        key = (cwd, scope, did)
+    def _requeue_orphan(self, cwd: str, scope: str, did: str, cause: str) -> bool:
+        return runtime.delegate_update(
+            did, expect=("running",), cwd=cwd, scope=scope, status="queued",
+            runner=None, child=None, attempt_running=None,
+            event={"event": "fallback", "cause": cause, "route": "requeue",
+                   "decision": "executor"},
+        )
+
+    def _headless(self, cwd: str, scope: str, run_id: str, did: str, rec: dict,
+                  now: float, halted: bool = False) -> None:
+        key = (cwd, scope, run_id, did)
         status = rec.get("status")
         if status == "running":
             runner = rec.get("runner") or {}
@@ -302,19 +495,32 @@ class Cflow2Clock:
             if mine:
                 return
             if runner.get("boot") != self.boot:
-                runtime.delegate_update(
-                    did, expect=("running",), cwd=cwd, scope=scope, status="queued",
-                    runner=None,
-                    event={"event": "fallback", "cause": "the daemon that ran this headless "
-                           "delegation is gone", "route": "requeue", "decision": "executor"},
-                )
+                # Claimed by a daemon that is gone (A5). Its process may
+                # have outlived it: end it first, never run the work twice.
+                alive = cflow2_exec.process_alive(runner.get("pid"), runner.get("argv0"))
+                if alive is None:
+                    # A live pid we cannot identify: wait for it to go, or
+                    # for the budget to run out, before running it again.
+                    started = float(runner.get("started_at") or rec.get("dispatched_at") or now)
+                    seconds = float(((rec.get("route") or {}).get("budget") or {}).get("seconds")
+                                    or self.default_seconds)
+                    if now - started <= seconds:
+                        return
+                elif alive:
+                    cflow2_exec.kill_group(int(runner["pid"]))
+                self._requeue_orphan(
+                    cwd, scope, did,
+                    "the daemon that ran this headless delegation is gone"
+                    + (" (its process was killed)" if alive else ""))
                 return
             # Our own worker finished without closing the record.
             with contextlib.suppress(runtime.FlowError):
                 runtime.delegate_fail(did, "the headless executor ended without a result",
                                       cwd=cwd, scope=scope)
             return
-        if status != "queued" or self.running_jobs() >= self._headless_max():
+        if status != "queued" or halted or self.stop.is_set():
+            return
+        if self.running_jobs() >= self._headless_max():
             return
         launch = self.launch_for(scope)
         if launch is None:
@@ -322,9 +528,10 @@ class Cflow2Clock:
                 did, f"no live session {scope!r} to take the profile environment from",
                 cwd=cwd, scope=scope)
             return
+        runner = {"boot": self.boot, "harness": launch.harness}
         claimed = runtime.delegate_update(
             did, expect=("queued",), cwd=cwd, scope=scope, status="running",
-            runner={"boot": self.boot, "harness": launch.harness}, dispatched_at=now,
+            runner=runner, dispatched_at=now,
             event={"event": "delegate_started", "phase": "dispatched",
                    "executor": ir.EXEC_HEADLESS, "harness": launch.harness},
         )
@@ -335,13 +542,16 @@ class Cflow2Clock:
             try:
                 result = cflow2_exec.run_headless(
                     cwd, scope, did, launch, default_seconds=self.default_seconds,
-                    procs=self.procs)
+                    procs=self.procs, key=key, runner=runner)
             except Exception as exc:  # noqa: BLE001 - must not leave it running forever
                 log.exception("headless delegation %s/%s/%s crashed", cwd, scope, did)
-                with contextlib.suppress(Exception):
-                    runtime.delegate_fail(did, f"headless executor error: {exc}",
-                                          cwd=cwd, scope=scope)
-                result = {"delegation": did, "result": "error", "error": str(exc)}
+                if self.stop.is_set():
+                    result = {"delegation": did, "result": "interrupted", "error": str(exc)}
+                else:
+                    with contextlib.suppress(Exception):
+                        runtime.delegate_fail(did, f"headless executor error: {exc}",
+                                              cwd=cwd, scope=scope)
+                    result = {"delegation": did, "result": "error", "error": str(exc)}
             log.info("cflow2 headless %s/%s %s: %s", scope, did, cwd, result.get("result"))
             with self._lock:
                 self.results.append(result)
@@ -356,45 +566,157 @@ class Cflow2Clock:
         thread.start()
 
     def _session(self, cwd: str, scope: str, did: str, rec: dict, now: float,
-                 notices: List[Notice]) -> None:
+                 notices: List[Notice], halted: bool = False) -> None:
         status = rec.get("status")
+        st = cstore.RunStore(cwd, scope)
         if status == "queued":
+            if halted or self.stop.is_set():
+                return
             if self._live(scope) is None:
                 runtime.delegate_reroute(
                     did, f"no live session {scope!r} to spawn a child session from",
                     cwd=cwd, scope=scope)
                 return
+            run_id = st.load_state().get("run_id")
+            runner = {"boot": self.boot, "phase": cflow2_exec.PHASE_SPAWNING,
+                      "marker": cflow2_exec.delegation_marker(st, run_id, did)}
+            # Persisted before the spawn call (B6): a daemon that dies in
+            # between leaves a record the next boot recognises.
             claimed = runtime.delegate_update(
                 did, expect=("queued",), cwd=cwd, scope=scope, status="running",
-                runner={"boot": self.boot}, dispatched_at=now)
+                runner=runner, dispatched_at=now)
             if claimed:
-                result = cflow2_exec.spawn_session(cwd, scope, did, spawn=self.spawn)
+                self._mark()
+                self._beat()
+                result = cflow2_exec.spawn_session(
+                    cwd, scope, did, spawn=self.spawn, find_child=self.find_child,
+                    runner=runner, lost=lambda marker: self._remember_lost(st, did, marker))
                 with self._lock:
                     self.results.append(result)
             return
         if status != "running":
             return
+        runner = rec.get("runner") or {}
+        if not rec.get("child"):
+            # Claimed, child never recorded: the spawn was interrupted (a
+            # restart between the claim and the answer) or crashed.
+            marker = runner.get("marker")
+            found = None
+            if marker:
+                with contextlib.suppress(Exception):
+                    found = self.find_child(scope, marker)
+            if found:
+                cflow2_exec._record_child(cwd, scope, did, found,
+                                          dict(runner, boot=self.boot), marker,
+                                          adopted="spawn interrupted")
+                return
+            if int(rec.get("respawns") or 0) >= 1:
+                runtime.delegate_reroute(
+                    did, "session spawn was interrupted twice without a child",
+                    cwd=cwd, scope=scope)
+                return
+            runtime.delegate_update(
+                did, expect=("running",), cwd=cwd, scope=scope, status="queued",
+                runner=None, respawns=int(rec.get("respawns") or 0) + 1,
+                event={"event": "fallback", "cause": "session spawn interrupted before a "
+                       "child was recorded", "route": "requeue", "decision": "executor"})
+            return
         if self._budget(cwd, scope, did, rec, now, notices):
             return
-        st = cstore.RunStore(cwd, scope)
-        receipt = st.receipt_path(did, ".child.json")
-        if receipt.is_file():
-            taken = receipt.with_name(f"{did}.child.{int(time.time())}.json")
-            with contextlib.suppress(OSError):
-                receipt.rename(taken)
-            try:
-                runtime.delegate_submit(did, receipt_path=str(taken), cwd=cwd, scope=scope)
-            except runtime.FlowError as exc:
-                child = rec.get("child")
-                if child:
-                    notices.append((cwd, child, f"[cflow2] your result for delegation {did} "
-                                    f"was refused: {exc}"))
+        if self._child_receipt(cwd, scope, did, rec, notices):
             return
         child = rec.get("child")
         if child and self._live(child) is None:
             runtime.delegate_fail(
                 did, f"child session {child!r} ended without submitting a result",
                 cwd=cwd, scope=scope)
+
+    def _child_receipt(self, cwd: str, scope: str, did: str, rec: dict,
+                       notices: List[Notice]) -> bool:
+        """Submit a child's receipt file (no MCP route), only once it is
+        complete (D): a whole JSON document with an ``outcome``, or one that
+        has not changed for :data:`RECEIPT_SETTLE` seconds. It is renamed
+        aside first; a failed rename submits nothing (next tick retries)."""
+        st = cstore.RunStore(cwd, scope)
+        receipt = st.receipt_path(did, ".child.json")
+        try:
+            text = receipt.read_text(encoding="utf-8")
+            age = time.time() - receipt.stat().st_mtime
+        except OSError:
+            return False
+        try:
+            doc = json.loads(text)
+            complete = isinstance(doc, dict) and "outcome" in doc
+        except ValueError:
+            complete = False
+        if not complete and age < RECEIPT_SETTLE:
+            return False
+        taken = receipt.with_name(f"{did}.child.{int(time.time() * 1000)}.json")
+        try:
+            receipt.rename(taken)
+        except OSError as exc:
+            log.warning("cannot take child receipt %s: %s", receipt, exc)
+            return False
+        try:
+            runtime.delegate_submit(did, receipt_path=str(taken), cwd=cwd, scope=scope)
+        except runtime.FlowError as exc:
+            child = rec.get("child")
+            if child:
+                notices.append((cwd, child, f"[cflow2] your result for delegation {did} "
+                                f"was refused: {exc}"))
+        return True
+
+    # -- lost spawns -------------------------------------------------------
+    def _remember_lost(self, st: cstore.RunStore, did: str, marker: str) -> None:
+        """A spawn call failed after it may have reached the daemon: watch
+        for a child carrying ``marker`` and end it (B6)."""
+        with contextlib.suppress(OSError):
+            st.write_receipt(did, json.dumps({"marker": marker, "since": time.time(),
+                                              "parent": st.scope}), ".lost.json")
+
+    def _watch_lost(self, cwd: str, scope: str) -> None:
+        st = cstore.RunStore(cwd, scope)
+        try:
+            files = sorted(st.receipts_dir.glob("*.lost.json"))
+        except OSError:
+            return
+        if not files:
+            return
+        dels = st.load_state().get("delegations") or {}
+        for path in files:
+            did = path.name[: -len(".lost.json")]
+            try:
+                doc = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                doc = {}
+            marker = doc.get("marker")
+            child = None
+            if marker:
+                with contextlib.suppress(Exception):
+                    child = self.find_child(scope, marker)
+            rec = dels.get(did) or {}
+            if child and child == rec.get("child"):
+                with contextlib.suppress(OSError):
+                    path.unlink()  # it was adopted after all
+                continue
+            if child:
+                outcome = "killed"
+                try:
+                    self.kill_child(scope, child)
+                except Exception as exc:  # noqa: BLE001 - journal what we could not do
+                    outcome = f"kill failed: {exc}"
+                with contextlib.suppress(Exception):
+                    runtime.note("orphan_child", cwd=cwd, scope=scope, delegation=did,
+                                 child=child, outcome=outcome,
+                                 detail="a child spawned for this delegation appeared after "
+                                        "the spawn call failed and the delegation was "
+                                        "rerouted; it was ended through the daemon's kill path")
+                with contextlib.suppress(OSError):
+                    path.unlink()
+                continue
+            if time.time() - float(doc.get("since") or 0) > LOST_WATCH:
+                with contextlib.suppress(OSError):
+                    path.unlink()
 
     def _budget(self, cwd: str, scope: str, did: str, rec: dict, now: float,
                 notices: List[Notice]) -> bool:
@@ -423,6 +745,25 @@ class Cflow2Clock:
                 "was ended as 'timeout' in your parent's run. Stop working on it; do not "
                 "submit a result.")))
         return True
+
+
+def _halted(state: Dict[str, Any]) -> bool:
+    """A ``halt`` monitor stopped the run (until a person releases it)."""
+    return any((a or {}).get("kind") == "monitor_violation"
+               for a in state.get("approvals") or [])
+
+
+def default_kill_child(parent: str, child: str) -> Any:
+    """End ``child`` through the daemon's own route for a parent ending a
+    session it spawned (``POST /api/sessions/<parent>/children/<child>/kill``):
+    the same policy check, wind-down and exit handling as any kill. Blocking
+    (an HTTP call to this daemon): the clock's pass runs in a worker thread."""
+    from .. import daemon_client
+
+    client = daemon_client.connect()
+    if client is None:
+        raise RuntimeError("the daemon API is not reachable")
+    return client.post(f"/api/sessions/{parent}/children/{child}/kill", {}, timeout=60.0)
 
 
 def monitor_block(scope: str, v: Dict[str, Any]) -> str:

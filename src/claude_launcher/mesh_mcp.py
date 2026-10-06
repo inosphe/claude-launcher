@@ -360,6 +360,16 @@ TOOLS = [
                     "type": "string",
                     "description": "context string for that workflow run",
                 },
+                "cflow_inputs": {
+                    "type": "object",
+                    "description": (
+                        "start inputs of a cflow v2 workflow that declares "
+                        "'inputs:' (name -> value; e.g. {\"goal\": \"...\", "
+                        "\"invariants\": [{\"text\": \"...\", \"probe\": \"cmd\"}]}). "
+                        "Read the declaration with 'claunch cflow2 show <name>'. "
+                        "A missing required input or an unknown name refuses the spawn"
+                    ),
+                },
                 "task": {
                     "type": "string",
                     "description": (
@@ -1065,6 +1075,7 @@ _SPAWN_KEYS = (
     "task", "issue", "issue_text", "harness", "workspace", "worktree",
     "rebase_onto", "branch_from", "profile", "borrow", "null_token", "cwd", "args", "env",
     "fork", "tools", "project", "prompt_packs", "workflow_version", "workflow_params",
+    "cflow_inputs",
 )
 
 

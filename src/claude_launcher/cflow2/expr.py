@@ -22,6 +22,13 @@ Grammar (lowest precedence first)::
 A reference whose root or path does not exist evaluates to ``null``. Ordering
 comparisons need two numbers or two strings; anything else (``1 < "a"``,
 ``null < 3``) raises :class:`ExprError` at evaluation.
+
+:class:`ExprError` is the only exception :func:`parse` and :func:`evaluate`
+raise, whatever the text or the run data: nesting deeper than
+:data:`MAX_DEPTH`, an integer literal longer than :data:`MAX_INT_DIGITS`, an
+index that cannot be a key (a list or mapping) and anything Python itself
+refuses on the way (``TypeError``, ``ValueError``, ``RecursionError``,
+``OverflowError``) all become one.
 """
 
 from __future__ import annotations
@@ -60,6 +67,15 @@ class Expr:
 
 
 # --- tokens ------------------------------------------------------------------
+
+#: Deepest nesting of brackets/``not``/references the parser accepts.
+MAX_DEPTH = 64
+#: Longest integer literal (digits) the tokeniser accepts.
+MAX_INT_DIGITS = 30
+#: Longest expression text accepted.
+MAX_LENGTH = 20000
+
+_INTERNAL = (TypeError, ValueError, RecursionError, OverflowError, MemoryError)
 
 _KEYWORDS = {"and", "or", "not", "in", "true", "false", "null"}
 _FUNCTIONS = {"len", "empty"}
@@ -124,6 +140,8 @@ def _tokenize(text: str) -> List[_Tok]:
             if j < n and _is_name_char(text[j]):
                 raise ExprError(f"malformed number {text[i:j + 1]!r}", col, text)
             raw = text[i:j]
+            if len(raw.lstrip("-").split(".")[0]) > MAX_INT_DIGITS:
+                raise ExprError(f"number literal longer than {MAX_INT_DIGITS} digits", col, text)
             toks.append(_Tok("num", float(raw) if is_float else int(raw), col))
             i = j
             continue
@@ -176,6 +194,12 @@ class _Parser:
         self.text = text
         self.toks = _tokenize(text)
         self.pos = 0
+        self.depth = 0
+
+    def deeper(self) -> None:
+        self.depth += 1
+        if self.depth > MAX_DEPTH:
+            raise self.error(f"expression nested deeper than {MAX_DEPTH} levels")
 
     def peek(self, offset: int = 0) -> _Tok:
         return self.toks[min(self.pos + offset, len(self.toks) - 1)]
@@ -214,10 +238,12 @@ class _Parser:
         return node
 
     def parse_or(self) -> tuple:
+        self.deeper()
         node = self.parse_and()
         while self.is_kw("or"):
             self.next()
             node = ("or", node, self.parse_and())
+        self.depth -= 1
         return node
 
     def parse_and(self) -> tuple:
@@ -230,7 +256,10 @@ class _Parser:
     def parse_not(self) -> tuple:
         if self.is_kw("not"):
             self.next()
-            return ("not", self.parse_not())
+            self.deeper()
+            node = ("not", self.parse_not())
+            self.depth -= 1
+            return node
         return self.parse_cmp()
 
     def parse_cmp(self) -> tuple:
@@ -333,7 +362,15 @@ class _Parser:
 
 @lru_cache(maxsize=512)
 def _parse_cached(text: str) -> Expr:
-    return Expr(source=text, ast=_Parser(text).parse())
+    if len(text) > MAX_LENGTH:
+        raise ExprError(f"expression longer than {MAX_LENGTH} characters")
+    try:
+        return Expr(source=text, ast=_Parser(text).parse())
+    except ExprError:
+        raise
+    except _INTERNAL as exc:
+        raise ExprError(f"malformed expression ({type(exc).__name__})", None,
+                        text[:200]) from None
 
 
 def parse(text: str) -> Expr:
@@ -393,6 +430,8 @@ def _equal(a: Any, b: Any) -> bool:
 
 
 def _step(value: Any, key: Any) -> Any:
+    if isinstance(key, (list, tuple, dict, set)):
+        raise ExprError(f"a {_type_name(key)} cannot be used as an index or key")
     if isinstance(value, dict):
         if key in value:
             return value[key]
@@ -486,9 +525,18 @@ class _Eval:
 
 
 def evaluate(expr_or_text: Union[Expr, str], env: Dict[str, Any]) -> Any:
-    """Evaluate against ``env`` (root names without ``$``: ``{"data": ...}``)."""
+    """Evaluate against ``env`` (root names without ``$``: ``{"data": ...}``).
+    Raises :class:`ExprError` and nothing else."""
     expr = parse(expr_or_text)
-    return _Eval(expr, env or {}).run(expr.ast)
+    try:
+        return _Eval(expr, env or {}).run(expr.ast)
+    except ExprError as exc:
+        if exc.source is None:
+            raise ExprError(exc.message, exc.column, expr.source) from None
+        raise
+    except _INTERNAL as exc:
+        raise ExprError(f"cannot evaluate ({type(exc).__name__}: {str(exc)[:120]})", None,
+                        expr.source) from None
 
 
 def references(expr_or_text: Union[Expr, str]) -> Set[str]:

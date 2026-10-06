@@ -114,12 +114,20 @@ CHOOSER_AGENT = "agent"
 CHOOSER_USER = "user"
 CHOOSERS = (CHOOSER_AGENT, CHOOSER_USER)
 
+#: Default of the top-level ``max_visits`` (``chart.meta['max_visits']``): how
+#: many times one node may be entered over a whole run before the run holds
+#: for a person (reason ``visit_limit``), whatever loop got it there.
+DEFAULT_MAX_VISITS = 200
+
 #: The outcome a node reports when nothing more specific is declared.
 OUTCOME_OK = "ok"
 #: The outcome the engine assigns when something failed (a delegate that
 #: returned nothing usable, an ``ensures`` that did not hold, a timeout).
 OUTCOME_FAIL = "fail"
 OUTCOME_TIMEOUT = "timeout"
+#: A ``wait`` whose probe could not decide (exit code other than 0/1)
+#: ``undecided_max`` times in a row.
+OUTCOME_UNDECIDABLE = "undecidable"
 
 #: Effect vocabulary. Free-form strings are allowed (``a.b``), these are the
 #: ones the checker and the fallback planner know about.
@@ -355,6 +363,60 @@ def _ids_in(value: Any) -> List[str]:
             out.extend(_ids_in(item if not isinstance(item, dict) else item.get("child")))
         return out
     return []
+
+
+def ensures_target(key: str) -> str:
+    """The node part of a ``spec.ensures`` key ``<node>.<outcome>`` (a node id
+    may itself hold dots, the outcome does not)."""
+    return str(key).rsplit(".", 1)[0]
+
+
+def subtree_nodes(chart: Chart, node_id: str) -> List[Node]:
+    """The nodes a delegation of ``node_id`` runs: the node and everything
+    under it, without the node's own ``on`` handlers (those run after the
+    delegation returned, in the delegating run)."""
+    root = chart.node(node_id)
+    skip = set(root.on.values())
+    out: List[Node] = [root]
+    stack = [c for c in reversed(chart.children(node_id)) if c not in skip]
+    seen = {node_id}
+    while stack:
+        nid = stack.pop()
+        if nid in seen:
+            continue
+        seen.add(nid)
+        node = chart.node(nid)
+        out.append(node)
+        stack.extend(reversed(chart.children(nid)))
+    return out
+
+
+def subtree_is_flat(chart: Chart, node_id: str) -> bool:
+    """Whether the subtree under ``node_id`` is a plain list of tasks.
+
+    Flat: every node is a ``task`` or a ``seq``; no node below the root
+    carries ``on`` or ``bind``; and no ``spec.ensures`` key targets a node
+    below the root. The root's own ``on``/``bind``/``ensures`` do not count:
+    the delegating run applies them when the delegation returns (the
+    runtime's completion of the delegation node). A flat subtree can be
+    handed to an executor as one brief whose tasks run in order; anything
+    else needs the engine to drive it (doc section 7).
+    """
+    nodes = subtree_nodes(chart, node_id)
+    inside = set()
+    for node in nodes:
+        if node.type not in (T_TASK, T_SEQ):
+            return False
+        if node.id != node_id:
+            if node.on or node.bind:
+                return False
+            inside.add(node.id)
+            if node.label:
+                inside.add(node.label)
+    for key in ((chart.spec or {}).get("ensures") or {}):
+        if ensures_target(key) in inside:
+            return False
+    return True
 
 
 def text_id(*parts: str) -> str:

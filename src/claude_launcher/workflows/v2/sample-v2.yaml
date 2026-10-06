@@ -5,6 +5,14 @@ description: v2 문법 예시 — 조합자, 프로시저, fragment, 규칙, 명
 params:
   goal: {type: str, required: true}
 
+# 시작 입력(2.6): 새 세션 폼이 이 선언으로 칸을 그리고, 값은 $data.inputs에 실린다.
+inputs:
+  reviewer_note:
+    type: text
+    label: 리뷰 메모
+    help: 자체 리뷰에서 특히 볼 것(선택)
+    default: ""
+
 fragments:
   scope-note: |
     범위 밖의 파일은 고치지 않는다.
@@ -61,14 +69,18 @@ nodes:
     effects: [test.run]
   review:
     title: 자체 리뷰
-    prompt: diff를 읽고 문제를 적는다.
+    prompt: |
+      diff를 읽고 문제를 적는다.
+      시작할 때 받은 리뷰 메모: ${data.inputs.reviewer_note}
     effects: [fs.read]
   report-blocked:
     title: 막힘 보고
     prompt: 막힌 이유를 리더에게 보고한다.
+    effects: [mesh.send]
   wrapup:
     title: 마무리
     prompt: 결과를 정리하고 런을 끝낸다.
+    effects: [fs.read]
 
 body:
   seq:

@@ -2,9 +2,16 @@
 
 Served by the merged ``claunch mcp`` server next to the v1 cflow tools, whose
 names they never share. The run is the one in this process's working
-directory under the session's scope (``$CLAUNCH_SESSION``, else ``default``);
-every tool takes an optional ``scope`` for the rare driver that works a run
-of another slot.
+directory under the session's scope (``$CLAUNCH_SESSION``, else ``default``).
+
+Authority: the caller is the session in ``$CLAUNCH_SESSION`` (never an
+argument). A run records its driver at start; every tool works only a run the
+caller drives. ``scope``/``cwd`` name another run only for the cases the
+runtime allows (:func:`.runtime.may_drive`): a nested delegation run the
+caller is the delegate of, and -- through ``flow_delegate`` -- a ``session``
+delegation the caller was spawned for. ``flow_start`` starts only in the
+caller's own slot. Aborting a run is a person's act (``claunch cflow2 abort``)
+and has no tool.
 """
 
 from __future__ import annotations
@@ -23,12 +30,19 @@ AUTHORITY = (
     "by a person with 'claunch cflow2 select'. A task's ask is answered by the "
     "responders it was routed to (flow_answer) or a person ('claunch cflow2 "
     "approve'); flow_approve is accepted only for an ask that fell through to "
-    "'otherwise: self'."
+    "'otherwise: self'. A halted run refuses every move until a person resumes it. "
+    "Aborting a run is the user's ('claunch cflow2 abort'); there is no tool for it."
 )
 
 _SCOPE = {
     "type": "string",
-    "description": "run slot (session name). Omit: this session's run",
+    "description": "run slot. Omit: this session's run. Name another slot only for a "
+    "nested delegation run you were briefed to drive (scope '<parent>~<delegation>')",
+}
+_CWD = {
+    "type": "string",
+    "description": "directory of the run. Omit: this session's directory. Only with a "
+    "nested run's scope, when its brief names another directory",
 }
 
 TOOLS = [
@@ -37,23 +51,26 @@ TOOLS = [
         "description": (
             "Start a cflow v2 run here. 'workflow' is a v2 definition name (found "
             "in .claunch/workflows/v2/, the global workflows/v2/, or the package) "
-            "or a path to a v2 .yaml file (for example a generated procedure "
-            "under .cflow2/generated/). The definition is compiled and its IR is "
+            "or the path of a generated procedure under .cflow2/generated/ (any "
+            "other path is refused). The definition is compiled and its IR is "
             "snapshotted, so later edits do not change this run. Returns the "
             "same payload as flow_status: the active tasks with rendered prompts, "
             "choices, waits and delegations. Refused while a run is still live "
-            "here (continue it with flow_status). A finished run is archived."
+            "here (continue it with flow_status). A finished run is archived. The "
+            "run belongs to this session (its driver)."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "workflow": {"type": "string", "description": "v2 definition name or .yaml path"},
                 "params": {"type": "object", "description": "values for the definition's params"},
-                "scope": _SCOPE,
+                "inputs": {"type": "object", "description": "values for the definition's "
+                           "typed start inputs (its 'inputs' schema)"},
                 "force": {
                     "type": "boolean",
-                    "description": "abort and archive a live run first -- only with the "
-                    "user's explicit go-ahead",
+                    "description": "abort and archive a live run of yours first -- only "
+                    "with the user's explicit go-ahead; refused while that run waits on a "
+                    "person (a user choice, an ask, a halt, a loop or visit limit)",
                 },
             },
             "required": ["workflow"],
@@ -72,7 +89,7 @@ TOOLS = [
             "its max and a person must extend it. Several tasks can be active at "
             "once under par/foreach/group: each has its own 'instance' id."
         ),
-        "inputSchema": {"type": "object", "properties": {"scope": _SCOPE}},
+        "inputSchema": {"type": "object", "properties": {"scope": _SCOPE, "cwd": _CWD}},
     },
     {
         "name": "flow_report",
@@ -93,7 +110,7 @@ TOOLS = [
                 "outcome": {"type": "string", "description": "declared outcome (default ok)"},
                 "value": {"type": "object", "description": "the outcome's fields"},
                 "text": {"type": "string", "description": "markdown summary of what happened"},
-                "scope": _SCOPE,
+                "scope": _SCOPE, "cwd": _CWD,
             },
         },
     },
@@ -112,7 +129,7 @@ TOOLS = [
                 "node": {"type": "string", "description": "choice instance id or label"},
                 "option": {"type": "string"},
                 "reason": {"type": "string", "description": "why; journaled"},
-                "scope": _SCOPE,
+                "scope": _SCOPE, "cwd": _CWD,
             },
             "required": ["option"],
         },
@@ -131,7 +148,7 @@ TOOLS = [
             "properties": {
                 "group": {"type": "string", "description": "group instance id or name"},
                 "with": {"type": "object", "description": "the member's params"},
-                "scope": _SCOPE,
+                "scope": _SCOPE, "cwd": _CWD,
             },
         },
     },
@@ -148,7 +165,12 @@ TOOLS = [
             "first invalid result is refused with the problems (re-run once with "
             "them), the second fails the node. A child session spawned for a "
             "'session' delegation calls this with the 'scope' and 'cwd' of its "
-            "parent's run."
+            "parent's run. A delegation whose brief names a 'nested' run is not "
+            "submitted here: drive that run with the flow_* tools under its scope. "
+            "Only the run's driver submits a subagent delegation and only the "
+            "assigned child session a session delegation; headless results come "
+            "from the daemon. 'receipt_path' must be in the run's receipts directory "
+            "or this session's $CLAUNCH_SCRATCH."
         ),
         "inputSchema": {
             "type": "object",
@@ -190,7 +212,7 @@ TOOLS = [
                 "option": {"type": "string", "description": "the option (asks with options)"},
                 "decline": {"type": "boolean"},
                 "reason": {"type": "string"},
-                "scope": _SCOPE,
+                "scope": _SCOPE, "cwd": _CWD,
             },
         },
     },
@@ -232,21 +254,8 @@ TOOLS = [
         ),
         "inputSchema": {
             "type": "object",
-            "properties": {"name": {"type": "string"}, "scope": _SCOPE},
+            "properties": {"name": {"type": "string"}, "scope": _SCOPE, "cwd": _CWD},
             "required": ["name"],
-        },
-    },
-    {
-        "name": "flow_abort",
-        "description": (
-            "Abort the v2 run here (everything active is cancelled and "
-            "journaled). Only when the user asked for it or the run cannot "
-            "continue; say why in 'reason'."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {"reason": {"type": "string"}, "scope": _SCOPE},
-            "required": ["reason"],
         },
     },
 ]
@@ -254,6 +263,19 @@ TOOLS = [
 
 def _scope(args: dict) -> Any:
     return str(args.get("scope") or "").strip() or None
+
+
+def _session() -> str:
+    return os.environ.get(store.SESSION_ENV, "").strip()
+
+
+def _where(args: dict) -> tuple:
+    """``(cwd, scope)`` a tool works on, refused unless the caller may drive
+    that run (:func:`runtime.authorize`)."""
+    cwd = str(args.get("cwd") or "").strip() or os.getcwd()
+    scope = _scope(args)
+    runtime.authorize(cwd=cwd, scope=scope, session=_session())
+    return cwd, scope
 
 
 def _route(cwd: str, scope: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -274,60 +296,82 @@ def call_tool(name: str, args: dict) -> Dict[str, Any]:
     out = _call(name, args)
     if name in ("flow_start", "flow_status", "flow_report", "flow_select", "flow_fork",
                 "flow_approve", "flow_delegate") and isinstance(out, dict) and "run" in out:
-        cwd = str(args.get("cwd") or "").strip() if name == "flow_delegate" else ""
-        out = _route(cwd or os.getcwd(), _scope(args), out)
+        cwd = str(args.get("cwd") or "").strip() or os.getcwd()
+        out = _route(cwd, _scope(args), out)
     return out
 
 
 def _call(name: str, args: dict) -> Dict[str, Any]:
-    cwd = os.getcwd()
-    scope = _scope(args)
+    session = _session()
     if name == "flow_start":
-        from . import layers
-
+        cwd = os.getcwd()
+        own = store.normalize_scope(None)
+        scope = _scope(args)
+        if scope and scope != own:
+            raise runtime.FlowError(
+                f"a run starts in this session's own slot ({own!r}); scope {scope!r} is "
+                f"another's")
+        if args.get("cwd"):
+            raise runtime.FlowError("a run starts in this session's own directory")
         workflow = str(args.get("workflow") or "").strip()
         if not workflow:
             raise runtime.FlowError("'workflow' is required")
         params = args.get("params")
         if params is not None and not isinstance(params, dict):
             raise runtime.FlowError("'params' must be an object")
-        chart = layers.load(workflow, cwd)
-        return runtime.start(chart, cwd=cwd, scope=scope, params=params,
-                             caps=runtime.resolve_caps(), force=bool(args.get("force")))
+        inputs = args.get("inputs")
+        if inputs is not None and not isinstance(inputs, dict):
+            raise runtime.FlowError("'inputs' must be an object")
+        force = bool(args.get("force"))
+        if force:
+            runtime.authorize(cwd=cwd, scope=own, session=session)
+        chart = runtime.load_definition(workflow, cwd)
+        return runtime.start(chart, cwd=cwd, scope=own, params=params, inputs=inputs,
+                             caps=runtime.resolve_caps(), force=force,
+                             driver=session, caller=runtime.CALLER_AGENT)
     if name == "flow_status":
+        cwd, scope = _where(args)
         st = store.RunStore(cwd, scope)
         if st.exists() and st.load_state().get("status") in runtime.LIVE_STATUSES:
             return runtime.wait_tick(probe_runner=runtime.default_probe_runner,
                                      cwd=cwd, scope=scope)
         return runtime.status(cwd=cwd, scope=scope)
     if name == "flow_report":
+        cwd, scope = _where(args)
         return runtime.report(
             str(args.get("node") or "").strip() or None,
             str(args.get("outcome") or ir.OUTCOME_OK), args.get("value"),
             args.get("text"), cwd=cwd, scope=scope,
         )
     if name == "flow_select":
+        cwd, scope = _where(args)
         return runtime.select(
             str(args.get("node") or "").strip() or None, str(args.get("option") or ""),
             args.get("reason"), caller=runtime.CALLER_AGENT, cwd=cwd, scope=scope,
         )
     if name == "flow_fork":
+        cwd, scope = _where(args)
         return runtime.fork(str(args.get("group") or "").strip() or None,
                             args.get("with"), cwd=cwd, scope=scope)
     if name == "flow_delegate":
         # A 'session' delegation is submitted by a child session that stands
         # in its own directory (often its own worktree) under its own name:
-        # it names the run's slot explicitly.
-        cwd = str(args.get("cwd") or "").strip() or cwd
+        # it names the run's slot explicitly. The runtime checks it is that
+        # delegation's assignee (or, for a subagent, the run's driver).
+        cwd = str(args.get("cwd") or "").strip() or os.getcwd()
+        scope = _scope(args)
         did = str(args.get("delegation") or "").strip() or None
         submitting = any(args.get(k) is not None for k in ("outcome", "value", "receipt_path"))
         if not submitting:
-            return runtime.delegate_brief(did, cwd=cwd, scope=scope)
+            return runtime.delegate_brief(did, cwd=cwd, scope=scope, session=session,
+                                          via=runtime.VIA_MCP)
         if not did:
             raise runtime.FlowError("submitting needs 'delegation'")
         return runtime.delegate_submit(did, args.get("outcome"), args.get("value"),
-                                       args.get("receipt_path"), cwd=cwd, scope=scope)
+                                       args.get("receipt_path"), cwd=cwd, scope=scope,
+                                       session=session, via=runtime.VIA_MCP)
     if name == "flow_approve":
+        cwd, scope = _where(args)
         option = str(args.get("option") or "").strip() or None
         return runtime.approve(
             str(args.get("node") or "").strip() or None, decision=option,
@@ -336,19 +380,16 @@ def _call(name: str, args: dict) -> Dict[str, Any]:
     if name == "flow_answer":
         from . import asks
 
-        session = os.environ.get(store.SESSION_ENV, "").strip()
         return asks.answer_by_id(str(args.get("ask_id") or "").strip(),
                                  str(args.get("decision") or ""), args.get("reason"),
                                  by_session=session)
     if name == "flow_asks":
         from . import asks
 
-        session = os.environ.get(store.SESSION_ENV, "").strip()
         return {"session": session or None, "asks": asks.pending_for(session)}
     if name == "flow_rule":
+        cwd, scope = _where(args)
         return runtime.rule(str(args.get("name") or ""), cwd=cwd, scope=scope)
-    if name == "flow_abort":
-        return runtime.abort(str(args.get("reason") or ""), cwd=cwd, scope=scope)
     raise runtime.FlowError(f"unknown tool {name!r}")
 
 

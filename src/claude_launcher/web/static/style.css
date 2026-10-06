@@ -5515,3 +5515,17 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .cf2-receipt { color: #6e7681; }
 .cf2-fallback { margin: 0 0 2px 12px; font-size: 12px; }
 .cf2-v1-note { margin-top: 4px; }
+/* cflow v2 start inputs (new-session / spawn form) and the run's inputs */
+.cf2-inputs { border: 1px solid #30363d; border-radius: 6px; padding: 6px 8px; margin: 6px 0; }
+.cf2-input { margin: 6px 0; }
+.cf2-input-label { display: block; font-weight: 600; }
+.cf2-input-control textarea, .cf2-input-control input[type=text],
+.cf2-input-control input[type=number], .cf2-input-control select { width: 100%; box-sizing: border-box; }
+.cf2-input-row { display: flex; gap: 4px; margin: 2px 0; }
+.cf2-input-row input { flex: 1 1 0; min-width: 0; }
+.cf2-input-help { margin: 2px 0 0; }
+.cf2-input.invalid .cf2-input-control { outline: 1px solid #f85149; border-radius: 4px; }
+.cf2-input-error { color: #f85149; margin: 2px 0 0; }
+.cf2-run-inputs { margin: 6px 0; }
+.cf2-run-input-value { white-space: pre-wrap; }
+.cf2-undecidable { color: #d29922; }

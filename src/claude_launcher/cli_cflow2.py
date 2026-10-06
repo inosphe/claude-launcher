@@ -4,9 +4,17 @@
 ``start``/``status``/``journal``/``abort`` operate the run in this directory;
 ``select``, ``extend`` and ``approve`` are the person's side of a run (a
 ``chooser: user`` choice, a loop that reached its ``max``, a task's ``ask``),
-which the agent's tools refuse. Like v1's ``claunch cflow approve``, the CLI
-cannot tell a person from an agent's shell tool; the harness deny rules
-``install.GATE_DENY_RULES`` keep the agent's hands off these commands.
+which the agent's tools refuse.
+
+The person's commands (``approve``, ``select``, ``extend``, ``resume``,
+``abort``, ``start --force`` over a live run) refuse to run in a shell whose
+``$CLAUNCH_SESSION`` is the session that drives the run (or carries out its
+nested delegation): that shell is the agent's. A person answers from another
+terminal or the web UI. This is the check that holds; the harness deny rules
+(``install.GATE_DENY_RULES``) only keep the agent from typing the commands in
+the first place. Neither stops code that imports the runtime directly
+(``python -c``) -- the gates are a guard against drift, not a security
+boundary.
 """
 
 from __future__ import annotations
@@ -60,9 +68,9 @@ def _cmd_ls(_args: argparse.Namespace) -> int:
 
 
 def _load(ref: str) -> ir.Chart:
-    from .cflow2 import layers
+    from .cflow2 import runtime
 
-    return layers.load(ref, os.getcwd())
+    return runtime.load_definition(ref, os.getcwd())
 
 
 def _tree_lines(chart: ir.Chart, nid: str, depth: int = 0, role: str = "") -> List[str]:
@@ -235,6 +243,28 @@ def _cmd_caps(args: argparse.Namespace) -> int:
 # -- runs ---------------------------------------------------------------------
 
 
+def _refuse_own_session(scope: Optional[str], what: str) -> None:
+    """A person's command run from the shell of the session that drives the
+    run is the agent answering its own gate: refused."""
+    from .cflow2 import runtime, store
+
+    session = os.environ.get(store.SESSION_ENV, "").strip()
+    if not session:
+        return
+    st = store.RunStore(os.getcwd(), scope)
+    if not st.exists():
+        return
+    try:
+        state = st.load_state()
+    except store.StoreError:
+        return
+    if runtime.may_drive(state, session):
+        raise runtime.FlowError(
+            f"'claunch cflow2 {what}' is a person's answer, and this shell belongs to "
+            f"session {session}, which drives this run. Run it from a terminal outside the "
+            f"session, or use the web UI")
+
+
 def _print_status(payload: Dict[str, Any], as_json: bool) -> None:
     if as_json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -261,6 +291,19 @@ def _print_status(payload: Dict[str, Any], as_json: bool) -> None:
         print(f"  ask {a['instance']} [{a['ask']}] {a.get('resolution')}: "
               f"{(a.get('prompt') or '').strip().splitlines()[0] if a.get('prompt') else ''}")
         print(f"    {a.get('how')}")
+    if payload.get("inputs") is not None:
+        print(f"  inputs: {json.dumps(payload['inputs'], ensure_ascii=False)}")
+    if payload.get("halted"):
+        print(f"  HALTED by monitor {', '.join(payload['halted'])} (claunch cflow2 resume)")
+    for v in payload.get("verifying") or []:
+        print(f"  verifying {v['instance']}: {v.get('label') or v.get('node')}")
+    acc = payload.get("acceptance") or {}
+    if acc.get("status") == "failed":
+        print("  acceptance failed: " + ", ".join(str(x.get("id")) for x in acc.get("failed")
+                                                 or []) + " (claunch cflow2 approve acceptance)")
+    for lim in payload.get("visit_limits") or []:
+        print(f"  visit limit {lim['instance']}: {lim['visits']}/{lim['max']} "
+              f"(claunch cflow2 extend --visits {lim['instance']} [--by N | --stop])")
     for lim in payload.get("loop_limits") or []:
         print(f"  loop limit {lim['instance']}: {lim['iterations']}/{lim['max']} "
               f"(claunch cflow2 extend {lim['instance']} [--by N | --stop])")
@@ -279,12 +322,36 @@ def _parse_params(items: List[str]) -> Dict[str, Any]:
     return out
 
 
+def _parse_inputs(items: List[str], path: Optional[str]) -> Optional[Dict[str, Any]]:
+    """``--inputs-file`` (a JSON object) overlaid by each ``--input k=v``
+    (raw text; the definition's input types coerce it)."""
+    out: Dict[str, Any] = {}
+    if path:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                doc = json.load(fh)
+        except (OSError, ValueError) as exc:
+            raise SystemExit(f"error: --inputs-file {path}: {exc}")
+        if not isinstance(doc, dict):
+            raise SystemExit(f"error: --inputs-file {path}: must hold a JSON object")
+        out.update(doc)
+    for item in items or []:
+        if "=" not in item:
+            raise SystemExit(f"error: --input needs name=value, got {item!r}")
+        key, _, raw = item.partition("=")
+        out[key.strip()] = raw
+    return out if (out or path) else None
+
+
 def _cmd_start(args: argparse.Namespace) -> int:
     from .cflow2 import runtime
 
+    if args.force:
+        _refuse_own_session(args.scope, "start --force")
     chart = _load(args.workflow)
     payload = runtime.start(chart, cwd=os.getcwd(), scope=args.scope,
                             params=_parse_params(args.param),
+                            inputs=_parse_inputs(args.input, args.inputs_file),
                             caps=runtime.resolve_caps(args.profile), force=args.force)
     _print_status(payload, args.json)
     return 0
@@ -309,6 +376,7 @@ def _cmd_journal(args: argparse.Namespace) -> int:
 def _cmd_abort(args: argparse.Namespace) -> int:
     from .cflow2 import runtime
 
+    _refuse_own_session(args.scope, "abort")
     _print_status(runtime.abort(args.reason, cwd=os.getcwd(), scope=args.scope), False)
     return 0
 
@@ -316,6 +384,7 @@ def _cmd_abort(args: argparse.Namespace) -> int:
 def _cmd_select(args: argparse.Namespace) -> int:
     from .cflow2 import runtime
 
+    _refuse_own_session(args.scope, "select")
     payload = runtime.select(args.node, args.option, args.reason, caller=runtime.CALLER_USER,
                              cwd=os.getcwd(), scope=args.scope)
     _print_status(payload, False)
@@ -325,8 +394,13 @@ def _cmd_select(args: argparse.Namespace) -> int:
 def _cmd_extend(args: argparse.Namespace) -> int:
     from .cflow2 import runtime
 
-    payload = runtime.extend_loop(args.node, args.by, stop=args.stop, cwd=os.getcwd(),
-                                  scope=args.scope)
+    _refuse_own_session(args.scope, "extend")
+    if args.visits:
+        payload = runtime.extend_visits(args.node, args.by, stop=args.stop, cwd=os.getcwd(),
+                                        scope=args.scope)
+    else:
+        payload = runtime.extend_loop(args.node, args.by, stop=args.stop, cwd=os.getcwd(),
+                                      scope=args.scope)
     _print_status(payload, False)
     return 0
 
@@ -334,9 +408,14 @@ def _cmd_extend(args: argparse.Namespace) -> int:
 def _cmd_approve(args: argparse.Namespace) -> int:
     from .cflow2 import asks
 
+    _refuse_own_session(args.scope, "approve")
     payload = asks.human_approve(args.node, decision=args.option, decline=args.decline,
                                  reason=args.reason, cwd=os.getcwd(), scope=args.scope)
     ans = payload.get("answered") or {}
+    if ans.get("acceptance"):
+        print("accepted the run's finish over its failed acceptance checks")
+        _print_status(payload, False)
+        return 0
     print(f"answered {ans.get('ask')} on {ans.get('label') or ans.get('node')}: "
           f"{ans.get('decision')}")
     _print_status(payload, False)
@@ -346,6 +425,7 @@ def _cmd_approve(args: argparse.Namespace) -> int:
 def _cmd_resume(args: argparse.Namespace) -> int:
     from .cflow2 import runtime
 
+    _refuse_own_session(args.scope, "resume")
     payload = runtime.release_halt(args.monitor, cwd=os.getcwd(), scope=args.scope)
     _print_status(payload, False)
     return 0
@@ -392,6 +472,10 @@ def register(sub) -> None:
     q.add_argument("--param", action="append", default=[], metavar="K=V",
                    help="a param value (JSON or plain string); repeatable")
     q.add_argument("--profile", help="resolve capabilities for this profile")
+    q.add_argument("--input", action="append", default=[], metavar="NAME=VALUE",
+                   help="a typed start input (the definition's 'inputs'); repeatable")
+    q.add_argument("--inputs-file", metavar="PATH",
+                   help="a JSON object of start inputs (--input overrides its keys)")
     q.add_argument("--force", action="store_true", help="abort and archive a live run first")
     q.add_argument("--json", action="store_true")
     q.set_defaults(func=_guarded(_cmd_start))
@@ -416,15 +500,20 @@ def register(sub) -> None:
 
     q = scoped(csub.add_parser("extend", help="answer a loop_limit: allow more iterations "
                                "or stop the loop"))
-    q.add_argument("node", nargs="?", help="loop instance id (default: the only one)")
+    q.add_argument("node", nargs="?", help="loop (or, with --visits, node) instance id "
+                   "(default: the only one)")
     q.add_argument("--by", type=int, default=1)
     q.add_argument("--stop", action="store_true", help="end the loop with outcome fail")
+    q.add_argument("--visits", action="store_true",
+                   help="answer a visit_limit (a node past the run's max_visits) instead of "
+                   "a loop's max: --by more visits, or --stop")
     q.set_defaults(func=_guarded(_cmd_extend))
 
     q = scoped(csub.add_parser("approve", help="answer a task's ask as a person: approve "
                                "(enter the task), --decline, or --option for an ask with options"))
     q.add_argument("node", nargs="?", help="the waiting task's instance id or name "
-                   "(default: the only open ask)")
+                   "(default: the only open ask), or 'acceptance' to accept a finish whose "
+                   "acceptance checks failed")
     g = q.add_mutually_exclusive_group()
     g.add_argument("--decline", action="store_true", help="refuse: the task finishes with its "
                    "on_decline outcome (default 'declined')")

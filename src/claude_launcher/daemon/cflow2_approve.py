@@ -17,6 +17,22 @@ is closed and nudges the run's session through this daemon's own API, so it
 must run off the event loop: ``await asyncio.to_thread(approve, cwd, scope,
 body)``.
 
+``node: "acceptance"`` accepts a finish whose acceptance checks failed.
+
+``extend`` answers a run's limit the same way (the person's side of
+``claunch cflow2 extend``)::
+
+    POST /api/cflow2/extend
+    body: {"cwd": str, "scope": str, "node": str?,
+           "kind": "loop" | "visits",   # default loop
+           "by": int?,                  # default 1
+           "stop": bool?}
+    200: the run's status payload; 400: {"error": ...}
+
+``resume`` releases a halting monitor (``claunch cflow2 resume``)::
+
+    POST /api/cflow2/resume   body: {"cwd", "scope", "monitor": str?}
+
 ``pending`` lists the open asks of a run for a UI that wants them without the
 whole status payload: ``GET /api/cflow2/asks?cwd&scope`` -> ``{"asks": [...]}``
 (each entry is the status payload's ``asks`` item).
@@ -53,6 +69,32 @@ def approve(cwd: str, scope: Optional[str], args: Dict[str, Any], *,
     return asks.human_approve(node, decision=decision, decline=decline, reason=reason,
                               by=by, cwd=cwd, scope=scope or None,
                               withdraw_fn=withdraw_fn, nudge_fn=nudge_fn)
+
+
+def extend(cwd: str, scope: Optional[str], args: Dict[str, Any]) -> Dict[str, Any]:
+    """Answer a loop limit or a visit limit as a person."""
+    args = dict(args or {})
+    if not cwd:
+        raise runtime.FlowError("cwd is required")
+    node = str(args.get("node") or "").strip() or None
+    try:
+        by = int(args.get("by") if args.get("by") is not None else 1)
+    except (TypeError, ValueError):
+        raise runtime.FlowError("'by' must be an integer")
+    stop = bool(args.get("stop"))
+    kind = str(args.get("kind") or "loop").strip()
+    if kind not in ("loop", "visits"):
+        raise runtime.FlowError("'kind' is loop or visits")
+    fn = runtime.extend_visits if kind == "visits" else runtime.extend_loop
+    return fn(node, by, stop=stop, cwd=cwd, scope=scope or None)
+
+
+def resume(cwd: str, scope: Optional[str], args: Dict[str, Any]) -> Dict[str, Any]:
+    """Release a halting monitor as a person."""
+    if not cwd:
+        raise runtime.FlowError("cwd is required")
+    monitor = str((args or {}).get("monitor") or "").strip() or None
+    return runtime.release_halt(monitor, cwd=cwd, scope=scope or None)
 
 
 def pending(cwd: str, scope: Optional[str]) -> Dict[str, Any]:

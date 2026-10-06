@@ -10832,6 +10832,11 @@ $("new-session").addEventListener("submit", async (e) => {
     // declare starts the one that was picked; see cflowPickBody.
     Object.assign(body, cflowPickBody(f.workflow.value, workflowsCache));
     if (f.context.value.trim()) body.context = f.context.value.trim();
+    const inputsBox = $("new-inputs");
+    if (inputsBox && !inputsBox.classList.contains("hidden")) {
+      cflowInputsErrors(inputsBox, {});
+      body.cflow_inputs = cflowInputsValues(inputsBox);
+    }
   } else if (parent && newSpawnReportFor === parent.name &&
              (newSpawnReport || {}).child_cflow) {
     // "" is not silence on a child: the daemon reads an absent workflow as
@@ -10884,6 +10889,8 @@ $("new-session").addEventListener("submit", async (e) => {
       const doc = await resp.json().catch(() => ({}));
       err.textContent = doc.error || `HTTP ${resp.status}`;
       err.classList.remove("hidden");
+      // per-field start input errors (docs/cflow-v2.md 2.6)
+      if (doc.errors && $("new-inputs")) cflowInputsErrors($("new-inputs"), doc.errors);
       return;
     }
     f.name.value = "";
@@ -16495,6 +16502,162 @@ function syncOnboardPickers() {
     const picked = options.find((o) => (o.value || o.name) === wf.value);
     v1Note.classList.toggle("hidden", !(picked && picked.deprecated));
   }
+  // Guarded: harnesses that slice this function alone do not carry it.
+  if (typeof syncCflowInputs === "function") syncCflowInputs();
+}
+
+/* The start inputs of the picked v2 workflow (docs/cflow-v2.md 2.6): the
+   list entry carries the schema (`inputs`), and the box under the Workflow
+   row draws one field per input. Rebuilt -- so cleared -- whenever the pick
+   changes; kept while the same workflow stays picked. */
+let newInputsFor = null;
+function syncCflowInputs() {
+  const f = $("new-session");
+  const box = $("new-inputs");
+  if (!f || !box) return;
+  const entry = f.workflow.value ? cflowPickEntry(f.workflow.value, workflowsCache) : null;
+  const fields = (entry && Number(entry.version) === 2 && entry.inputs) || [];
+  const key = fields.length ? `${entry.name}|${JSON.stringify(fields)}` : "";
+  if (key === newInputsFor) return;
+  newInputsFor = key;
+  box.innerHTML = "";
+  box.classList.toggle("hidden", !fields.length);
+  if (fields.length) cflowInputsForm(box, fields);
+}
+
+const CFLOW_INPUT_CHECK_TYPES = ["invariants", "acceptance"];
+
+/* One input's control. Lists and check lists are rows with add/remove;
+   every control carries data-input so the collector and the error marker
+   find it again. */
+function cflowInputControl(field) {
+  const t = field.type || "string";
+  const wrap = el("div", "cf2-input-control");
+  const text = (cls, value, ph) => {
+    const i = document.createElement("input");
+    i.type = "text";
+    i.className = cls;
+    i.value = value == null ? "" : String(value);
+    i.placeholder = ph || "";
+    return i;
+  };
+  if (t === "text") {
+    const ta = document.createElement("textarea");
+    ta.rows = 3;
+    ta.className = "cf2-input-value";
+    ta.placeholder = field.placeholder || "";
+    ta.value = field.default == null ? "" : String(field.default);
+    wrap.appendChild(ta);
+  } else if (t === "int") {
+    const i = document.createElement("input");
+    i.type = "number";
+    i.step = "1";
+    i.className = "cf2-input-value";
+    i.placeholder = field.placeholder || "";
+    if (field.default != null) i.value = String(field.default);
+    wrap.appendChild(i);
+  } else if (t === "bool") {
+    const i = document.createElement("input");
+    i.type = "checkbox";
+    i.className = "cf2-input-value";
+    i.checked = !!field.default;
+    wrap.appendChild(i);
+  } else if (t === "enum") {
+    const sel = document.createElement("select");
+    sel.className = "cf2-input-value";
+    if (!field.required || field.default == null) sel.appendChild(new Option("(none)", ""));
+    for (const c of field.choices || []) sel.appendChild(new Option(c, c));
+    sel.value = field.default == null ? "" : String(field.default);
+    wrap.appendChild(sel);
+  } else if (t === "list" || CFLOW_INPUT_CHECK_TYPES.includes(t)) {
+    const rows = el("div", "cf2-input-rows");
+    const check = CFLOW_INPUT_CHECK_TYPES.includes(t);
+    const addRow = (item) => {
+      const row = el("div", "cf2-input-row");
+      row.appendChild(text("cf2-input-text", check ? (item || {}).text : item,
+                           check ? "text" : (field.placeholder || "")));
+      if (check) {
+        row.appendChild(text("cf2-input-probe mono", (item || {}).probe,
+                             "probe command (optional; exit 0 = holds)"));
+      }
+      const rm = el("button", "wf-btn cf2-input-remove", "×");
+      rm.type = "button";
+      rm.title = "remove this row";
+      rm.addEventListener("click", () => row.remove());
+      row.appendChild(rm);
+      rows.appendChild(row);
+    };
+    for (const item of field.default || []) addRow(item);
+    if (!(field.default || []).length) addRow(null);
+    const add = el("button", "wf-btn cf2-input-add", "+ add");
+    add.type = "button";
+    add.addEventListener("click", () => addRow(null));
+    wrap.append(rows, add);
+  } else {
+    wrap.appendChild(text("cf2-input-value", field.default, field.placeholder));
+  }
+  return wrap;
+}
+
+function cflowInputsForm(box, fields) {
+  box.appendChild(el("p", "wf-note", "Start inputs of this workflow (* = required)"));
+  for (const field of fields) {
+    const row = el("div", "cf2-input");
+    row.dataset.input = field.name;
+    row.dataset.type = field.type || "string";
+    const label = el("label", "cf2-input-label",
+                     (field.label || field.name) + (field.required ? " *" : ""));
+    row.appendChild(label);
+    row.appendChild(cflowInputControl(field));
+    if (field.help) row.appendChild(el("p", "wf-note cf2-input-help", field.help));
+    row.appendChild(el("p", "cf2-input-error hidden"));
+    box.appendChild(row);
+  }
+}
+
+/* What the box holds, as the API's `cflow_inputs`: empty values are left
+   out (the daemon applies the default and says when a required one is
+   missing). */
+function cflowInputsValues(box) {
+  const out = {};
+  for (const row of box.querySelectorAll(".cf2-input")) {
+    const name = row.dataset.input, t = row.dataset.type;
+    if (t === "list" || CFLOW_INPUT_CHECK_TYPES.includes(t)) {
+      const items = [];
+      for (const r of row.querySelectorAll(".cf2-input-row")) {
+        const text = r.querySelector(".cf2-input-text").value.trim();
+        if (CFLOW_INPUT_CHECK_TYPES.includes(t)) {
+          const probe = (r.querySelector(".cf2-input-probe") || {}).value || "";
+          if (text || probe.trim()) items.push({ text, probe: probe.trim() || null });
+        } else if (text) items.push(text);
+      }
+      if (items.length) out[name] = items;
+      continue;
+    }
+    const c = row.querySelector(".cf2-input-value");
+    if (!c) continue;
+    if (t === "bool") out[name] = !!c.checked;
+    else if (t === "int") { if (c.value.trim() !== "") out[name] = Number(c.value); }
+    else if (c.value.trim() !== "") out[name] = c.value;
+  }
+  return out;
+}
+
+/* Mark the fields a 400's `errors` names; clears the rest. Returns whether
+   any field was marked (an error about something else is shown elsewhere). */
+function cflowInputsErrors(box, errors) {
+  let marked = false;
+  for (const row of box.querySelectorAll(".cf2-input")) {
+    const msg = (errors || {})[row.dataset.input];
+    const p = row.querySelector(".cf2-input-error");
+    row.classList.toggle("invalid", !!msg);
+    if (p) {
+      p.textContent = msg || "";
+      p.classList.toggle("hidden", !msg);
+    }
+    marked = marked || !!msg;
+  }
+  return marked;
 }
 
 /* Workflows are declared per directory, so the list follows the Directory
@@ -25482,6 +25645,14 @@ function renderCflow2Into(box, data, ui) {
   if (run.outcome !== undefined && run.outcome !== null) {
     box.appendChild(el("p", "wf-note", `outcome: ${run.outcome}`));
   }
+  const runInputs = run.inputs || ((run.data || {}).inputs);
+  if (runInputs && typeof runInputs === "object" && Object.keys(runInputs).length) {
+    box.appendChild(cflow2InputsBlock(runInputs));
+  }
+  if (run.acceptance && run.acceptance.status) {
+    box.appendChild(el("p", "wf-note", `acceptance: ${run.acceptance.status}` +
+      ((run.acceptance.failed || []).length ? ` (failed: ${run.acceptance.failed.join(", ")})` : "")));
+  }
 
   const post = async (path, body) => {
     const doc = await cflowPost(path, { cwd: data.cwd, scope: data.scope, ...body });
@@ -25567,13 +25738,50 @@ function renderCflow2Into(box, data, ui) {
     box.appendChild(card);
   }
 
+  for (const lim of run.visit_limits || []) {
+    // The chart's max_visits: one node entered that many times over the run.
+    const card = el("div", "cf2-choice");
+    card.appendChild(el("h4", null,
+      `node ${lim.label || lim.node} reached the run's visit limit (${lim.visits ?? "?"}/${lim.max ?? "?"})`));
+    const btns = el("div", "wf-actions");
+    const more = el("button", "wf-btn approve", "Allow one more visit");
+    more.addEventListener("click", async () => {
+      more.disabled = true;
+      await post("/api/cflow2/extend", { node: lim.instance, by: 1, visits: true });
+    });
+    const stop = el("button", "wf-btn", "Stop here");
+    stop.title = "the node finishes with outcome fail";
+    stop.addEventListener("click", async () => {
+      if (!confirm("Stop at the visit limit? The node finishes with outcome fail.")) return;
+      stop.disabled = true;
+      await post("/api/cflow2/extend", { node: lim.instance, stop: true, visits: true });
+    });
+    btns.append(more, stop);
+    card.appendChild(btns);
+    box.appendChild(card);
+  }
+
   for (const t of run.tasks || []) {
     box.appendChild(el("p", "wf-note",
       `task ${t.label || t.node}: ${t.title || ""} — waiting for the agent's flow_report`));
   }
+  for (const v of run.verifying || []) {
+    const cmd = v.verify && v.verify.run;
+    box.appendChild(el("p", "wf-note cf2-verifying",
+      `task ${v.label || v.node}: verifying` +
+      (cmd ? ` — ${Array.isArray(cmd) ? cmd.join(" ") : cmd}` : "") +
+      (v.started_at ? ` (since ${String(v.started_at).replace("T", " ")})` : "")));
+  }
+  const undecided = cflow2UndecidedCounts(data.journal || []);
   for (const w of run.waits || []) {
+    const n = undecided[w.instance] || 0;
     box.appendChild(el("p", "wf-note",
-      `${w.kind} ${w.node}${w.describe ? ": " + w.describe : ""}`));
+      `${w.kind} ${w.node}${w.describe ? ": " + w.describe : ""}` +
+      (n ? ` — probe could not decide ${n}× in a row` : "")));
+  }
+  for (const e of cflow2Undecidable(data.journal || [])) {
+    box.appendChild(el("p", "wf-note cf2-undecidable",
+      `wait ${e.node} gave up: its probe could not decide (undecidable)`));
   }
 
   if (data.chart) {
@@ -25611,6 +25819,41 @@ function renderCflow2Into(box, data, ui) {
       `${String(e.ts || "").replace("T", " ")}  ${e.event || ""}  ${rest}`));
   }
   box.appendChild(journal);
+}
+
+/* The run's start inputs (data.inputs), folded shut. */
+function cflow2InputsBlock(values) {
+  const box = document.createElement("details");
+  box.className = "cf2-run-inputs";
+  box.appendChild(el("summary", null, `inputs (${Object.keys(values).length})`));
+  for (const [k, v] of Object.entries(values)) {
+    const row = el("div", "cf2-run-input");
+    row.appendChild(el("span", "mono", `${k}: `));
+    let text;
+    if (Array.isArray(v)) {
+      text = v.map((x) => (x && typeof x === "object")
+        ? (x.text || "") + (x.probe ? `  [probe: ${x.probe}]` : "") : String(x)).join("\n");
+    } else text = v == null ? "" : String(v);
+    row.appendChild(el("span", "cf2-run-input-value", text));
+    box.appendChild(row);
+  }
+  return box;
+}
+
+/* Consecutive undecided probe results per live wait instance, from the
+   journal tail (probe_undecided events; any other result of the same
+   instance's probe resets the count). */
+function cflow2UndecidedCounts(journal) {
+  const out = {};
+  for (const e of journal || []) {
+    if (e.event === "probe_undecided" && e.instance) out[e.instance] = Number(e.count || 0);
+  }
+  return out;
+}
+
+/* Waits that finished `undecidable`, newest last. */
+function cflow2Undecidable(journal) {
+  return (journal || []).filter((e) => e.event === "left" && e.outcome === "undecidable");
 }
 
 async function fetchCflow2Run(cwd, scope) {
@@ -29946,12 +30189,14 @@ function sessionFormConfig(mode) {
     new: { title: "New session", submit: "Create", sections, editable,
       payload: ["name", "profile", "project", "cwd", "args", "model", "effort", "tools", "worktree",
         "rebase_onto", "branch_from", "role", "subroles", "borrow", "null_token", "mesh", "handle", "workflow",
+        "workflow_version", "cflow_inputs",
         "context", "task", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
         "resume", "fork_session"] },
     spawn: { title: "Spawn child", submit: "Spawn child", sections,
       editable: [...editable, "parent", "fork_parent", "over_limit"],
       payload: ["name", "profile", "project", "workspace", "cwd", "args", "model", "effort", "tools", "worktree",
         "rebase_onto", "branch_from", "role", "subroles", "borrow", "null_token", "mesh", "handle", "workflow",
+        "workflow_version", "cflow_inputs",
         "context", "task", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
         "fork", "connect", "over_limit"] },
     fork: { title: "Quick fork", submit: "Fork", sections: ["new-quick-fork"],

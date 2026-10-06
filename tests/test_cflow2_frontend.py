@@ -69,7 +69,8 @@ def test_meta_and_top_level_fields():
     """)
     assert chart.meta == {"default_role": "worker",
                           "filter_roles": {"type": "whitelist", "roles": ["worker"]},
-                          "default_child_cflow": None, "priority": 5}
+                          "default_child_cflow": None, "priority": 5, "max_visits": 200,
+                          "inputs": {}}
     assert chart.params == {"goal": {"type": "str", "required": True}}
     assert chart.returns == {"ok": {"summary": "str"}}
     assert chart.data == {"count": 0}
@@ -530,7 +531,9 @@ body:
     assert again.to_dict() == chart.to_dict()
 
 
-def test_compile_file_uses_sibling_include(tmp_path, monkeypatch):
+def test_include_does_not_read_a_sibling_file(tmp_path, monkeypatch):
+    """C3: an include is a name in the v2 layers; the including file's own
+    directory is not a layer."""
     monkeypatch.chdir(tmp_path)
     _write(tmp_path / "defs" / "frag.yaml", "cflow: 2\nname: frag\nfragments: {f: FFF}\n")
     path = _write(tmp_path / "defs" / "main.yaml", """
@@ -540,9 +543,40 @@ def test_compile_file_uses_sibling_include(tmp_path, monkeypatch):
         nodes: {x: {prompt: "${frag:f}"}}
         body: x
     """)
+    with pytest.raises(FrontendError, match="include 'frag': no v2 definition"):
+        compile_file(path)
+    # the same name in the project layer of the cwd is found
+    _write(tmp_path / ".claunch" / "workflows" / "v2" / "frag.yaml",
+           "cflow: 2\nname: frag\nfragments: {f: LAYER}\n")
     chart = compile_file(path)
-    assert chart.node("x").get("prompt") == "FFF" and chart.source == str(path)
+    assert chart.node("x").get("prompt") == "LAYER" and chart.source == str(path)
     assert chart.node("x").src == "main.yaml:5"
+
+
+@pytest.mark.parametrize("ref", ["/etc/passwd", "../x", "sub/frag", "frag.yaml", "~/x", ".."])
+def test_include_and_call_refuse_paths(ref):
+    seen = []
+
+    def resolve(name):
+        seen.append(name)
+        return None
+
+    for doc in (f"include: [{ref!r}]\nnodes: {{a: {{prompt: a}}}}\nbody: a\n",
+                f"body:\n  call: {ref!r}\n",
+                f"procedures: {{p: {{body: a}}}}\nnodes: {{a: {{prompt: a}}}}\n"
+                f"body:\n  group: {{run: {ref!r}, do: a}}\n"):
+        with pytest.raises(FrontendError, match="not a path"):
+            compile_text("cflow: 2\nname: t\n" + doc, source="t.yaml", resolve_include=resolve)
+    assert seen == []  # never handed to the resolver
+
+
+def test_layers_find_and_load_refuse_paths(tmp_path):
+    outside = _write(tmp_path / "evil.yaml", "cflow: 2\nname: evil\nnodes: {a: {prompt: a}}\nbody: a\n")
+    assert layers.find(str(outside), str(tmp_path)) is None
+    assert layers.find("evil.yaml", str(tmp_path)) is None
+    with pytest.raises(FrontendError, match="is a path"):
+        layers.load(str(outside), str(tmp_path))
+    assert layers.load_file(outside, str(tmp_path)).name == "evil"
 
 
 def test_layers_priority_listing_and_errors(tmp_path, monkeypatch):
@@ -576,3 +610,77 @@ def test_sample_v2_compiles_without_check_errors():
     assert {"seq", "choose", "loop", "try", "par", "scope", "task"} <= types
     assert check.errors(chart) == []
     assert ir.Chart.from_json(chart.to_json()) == chart
+
+
+# -- E1: commands the engine runs are not templates ---------------------------
+
+
+@pytest.mark.parametrize("doc", [
+    "nodes:\n  a: {prompt: a, verify: 'false ${params.target}'}\nbody: a\n",
+    "nodes:\n  a: {prompt: a, verify: ['check', '${data.x}']}\nbody: a\n",
+    "nodes:\n  a: {prompt: a, verify: {run: 'echo ${prev}'}}\nbody: a\n",
+    "body:\n  wait: {probe: 'test -f ${params.f}'}\n",
+    "nodes:\n  a: {prompt: a}\nbody: a\nspec:\n  monitors:\n    m:\n      always: '$probe.x != null'\n"
+    "      probe: {x: 'git rev-parse ${data.branch}'}\n",
+])
+def test_value_references_in_commands_are_compile_errors(doc):
+    with pytest.raises(FrontendError, match="CFLOW_IN_<NAME>.*CFLOW_DATA_<NAME>"):
+        compile_text("cflow: 2\nname: t\n" + doc, source="t.yaml", resolve_include=lambda n: None)
+
+
+def test_shell_variables_in_commands_are_fine():
+    chart = compile_text(
+        "cflow: 2\nname: t\nnodes:\n  a: {prompt: 'x ${params.t}', verify: 'test -n \"$CFLOW_IN_T\"'}\n"
+        "body: a\n", source="t.yaml", resolve_include=lambda n: None)
+    assert chart.node("a").get("verify")["run"] == 'test -n "$CFLOW_IN_T"'
+    assert "${params.t}" in chart.node("a").get("prompt")  # prompts stay templates
+
+
+# -- E2: ask options differing only in case ------------------------------------
+
+
+def test_ask_options_colliding_case_insensitively_are_refused():
+    doc = ("cflow: 2\nname: t\nnodes:\n  a:\n    prompt: a\n    ask:\n      prompt: ok\n"
+           "      options: {%s}\nbody: a\n")
+    with pytest.raises(FrontendError, match="differ only in case"):
+        compile_text(doc % "LGTM: {}, lgtm: {}", source="t.yaml", resolve_include=lambda n: None)
+    with pytest.raises(FrontendError, match="bad ask option name"):
+        compile_text(doc % "ABSTAIN: {}", source="t.yaml", resolve_include=lambda n: None)
+    chart = compile_text(doc % "LGTM: {}, Changes: {}", source="t.yaml",
+                         resolve_include=lambda n: None)
+    assert [o["name"] for o in chart.node("a").get("ask")["options"]] == ["LGTM", "Changes"]
+
+
+# -- wait: undecided_max, probe shape ---------------------------------------------
+
+
+def test_wait_undecided_max():
+    w = compile_text("cflow: 2\nname: t\nbody:\n  wait: {probe: 'true', seconds: 60}\n",
+                     source="t.yaml", resolve_include=lambda n: None).node("body")
+    assert w.get("undecided_max") == 3 and w.get("seconds") == 60
+    w = compile_text("cflow: 2\nname: t\nbody:\n  wait: {probe: 'true', undecided_max: 1}\n",
+                     source="t.yaml", resolve_include=lambda n: None).node("body")
+    assert w.get("undecided_max") == 1
+    w = compile_text("cflow: 2\nname: t\nbody:\n  wait: {seconds: 5}\n",
+                     source="t.yaml", resolve_include=lambda n: None).node("body")
+    assert w.get("undecided_max") is None
+    for bad, msg in (("{probe: 'true', undecided_max: 0}", "undecided_max must be an integer >= 1"),
+                     ("{seconds: 5, undecided_max: 2}", "applies to a probe"),
+                     ("{probe: {x: 1}}", "command string or an argv list")):
+        with pytest.raises(FrontendError, match=msg):
+            compile_text(f"cflow: 2\nname: t\nbody:\n  wait: {bad}\n", source="t.yaml",
+                         resolve_include=lambda n: None)
+
+
+# -- C1: max_visits ------------------------------------------------------------
+
+
+def test_max_visits():
+    def mk(extra):
+        return compile_text(f"cflow: 2\nname: t\n{extra}nodes: {{a: {{prompt: a}}}}\nbody: a\n",
+                            source="t.yaml", resolve_include=lambda n: None)
+    assert mk("").meta["max_visits"] == ir.DEFAULT_MAX_VISITS == 200
+    assert mk("max_visits: 7\n").meta["max_visits"] == 7
+    for bad in ("0", "-1", "true", "'many'"):
+        with pytest.raises(FrontendError, match="max_visits must be an integer >= 1"):
+            mk(f"max_visits: {bad}\n")

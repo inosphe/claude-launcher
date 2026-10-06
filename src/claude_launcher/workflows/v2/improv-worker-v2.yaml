@@ -107,6 +107,42 @@ include: [improv-common]
 # - `claunch cflow responders peer-review`는 v1 런의 chooser를 읽는다. v2의
 #   ask(from) 응답자 해석은 런타임 단계의 일이다.
 
+# ── 시작 입력(docs/cflow-v2.md 2.6) ─────────────────────────────────────
+# 새 세션·자식 spawn 폼이 이 선언으로 입력 칸을 그린다. 값은 런 데이터
+# $data.inputs에 실리고, invariants·acceptance는 엔진이 규칙·모니터·마감 확인으로
+# 바꾼다(cflow2/inputs.py). goal은 필수가 아니다: 데몬이 오프닝 태스크로 이슈를
+# 만들거나(issue: <id>) 리더 브리핑이 목표를 주는 기존 경로가 그대로 살아 있어야
+# 하므로, 비어 있으면 intake가 지금까지처럼 이슈·사용자·브리핑에서 목표를 정한다.
+inputs:
+  goal:
+    type: text
+    label: 목표
+    help: 이번 회차가 끝났을 때 참이어야 할 것. 비우면 이슈 본문·사용자 지시·리더 브리핑에서 intake가 정한다
+    placeholder: 예) cflow2 check의 must-pass 오탐을 고친다
+    default: ""
+  issue:
+    type: string
+    label: beads 이슈
+    help: 이 회차가 맡을 기존 이슈 id(선택). 오프닝 태스크의 issue:와 같은 뜻이다
+    placeholder: claunch-xxxxx
+    default: ""
+  scope:
+    type: list
+    label: 범위(경로·glob)
+    help: 이 회차가 고쳐도 되는 경로. 비우면 intake가 목표에서 정한다. 범위 밖은 scope-discipline 규칙대로 이슈로 남긴다
+  invariants:
+    type: invariants
+    label: 불변식
+    help: 런 내내 지켜야 할 것. probe(셸 명령, 종료 코드 0 = 지켜짐)를 주면 데몬이 주기적으로 재고 어기면 런을 세운다
+  acceptance:
+    type: acceptance
+    label: 완료 기준
+    help: 런이 끝나기 전에 충족돼야 할 것. probe가 있으면 엔진이 마감 직전에 재고(0 = 충족), 없으면 마지막 작업에서 스스로 대조한다
+  max_rounds:
+    type: int
+    label: 최대 회차 수
+    help: 이 런이 도는 회차의 상한(비우면 큐가 빌 때까지, 최대 25)
+
 params:
   verify:
     type: str
@@ -171,9 +207,19 @@ nodes:
   intake:
     title: 목표 수립
     prompt: |
-      새 회차다 — 이번 회차의 목표 하나를 확정한다. 출처는 둘 중 하나다:
-      터미널 사용자의 직접 지시, 또는 리더의 브리핑. 목표가 아직 없으면
-      여기서 대기한다(회차는 목표가 생길 때 시작된다). 다음을 정해 보고에
+      새 회차다 — 이번 회차의 목표 하나를 확정한다.
+
+      ── 시작 입력 ──
+      런을 시작한 사람이 폼(또는 --input)으로 준 값이다. 첫 회차에서는 이것이
+      목표의 출처다. 빈 값은 「주지 않았다」는 뜻이다.
+      - 목표: ${data.inputs.goal}
+      - 이슈: ${data.inputs.issue}
+      - 범위(고쳐도 되는 경로): ${data.inputs.scope}
+      목표가 비어 있거나 둘째 회차부터는 출처가 둘 중 하나다: 터미널 사용자의
+      직접 지시, 또는 리더의 브리핑(이슈가 주어졌으면 그 이슈 본문). 목표가
+      아직 없으면 여기서 대기한다(회차는 목표가 생길 때 시작된다). 범위가
+      주어졌으면 그 밖의 경로는 이 회차의 범위 밖이다(scope-discipline). 사용자
+      불변식·완료 기준이 선언됐으면 아래 규칙 절에 실려 있다. 다음을 정해 보고에
       남긴다:
       - 목표와 범위(무엇이 포함되고 무엇이 제외되는가)
       - 브랜치 요지: 목표·범위에서 짧은 이름 요지를 정한다. 실제 브랜치
@@ -2381,10 +2427,79 @@ procedures:
               # merged: 동결된 내 tip을 부모로 갖는 머지 커밋이 통합 대상에 있다
               #   (contains가 아니다 — 후손은 통합이 아니다. 0=착지/1=아직/2=판정 불가).
               # frozen: 추적 파일에 미커밋 변경이 없다(브랜치가 동결된 상태다).
+              # 종료 코드는 그대로 wait의 판정이다(2.3 wait): 0 = 착지, 1 = 아직,
+              # 그 밖(landed_check의 2 = 판정 불가, git의 128) = 판정 불가.
+              # 판정 불가가 세 번 이어지면 undecidable, 하루가 지나면 timeout으로
+              # 끝나고 사람이 고른다 — 「아직」과 섞여 영원히 기다리지 않는다.
               probe: "uv run --no-sync python tools/landed_check.py && git diff --quiet && git diff --cached --quiet"
               poll: 60
+              seconds: 86400
+              undecided_max: 3
               describe: 동결된 tip이 통합 대상에 실제로 실렸는가(merged + frozen)
+            on:
+              undecidable: {call: landed-unclear, with: {why: undecidable}}
+              timeout: {call: landed-unclear, with: {why: timeout}}
           record: landed
+
+  cut-unreachable:
+    description: >-
+      스택 컷 대기(cut-wait)가 기계로 끝나지 못했다: 이 범위에 v1 stack 런이 없어
+      프로브가 판정하지 못했거나(undecidable), 4시간 안에 컷이 오지 않았다(timeout).
+      v2 런은 v1 stack 런과 마일스톤을 주고받지 못하므로(후속 과제) 사람이 고른다.
+    params:
+      why: {type: str, default: undecidable}
+    body:
+      id: cut-unreachable-choice
+      choose:
+        chooser: user
+        require_reason: true
+        prompt: |
+          스택 컷을 기계로 확인하지 못했다(사유: ${params.why}). undecidable은
+          `claunch cflow published stack cut --step stack-merge`가 세 번 연속 종료
+          코드 2(이 범위에 v1 stack 런이 없다)를 냈다는 뜻이다 — 그 상태에서는 기다려도
+          컷이 오지 않는다. timeout은 stack 런이 서 있지만 4시간 동안 컷이 없었다는
+          뜻이다. 스택 브랜치(`<세션>-stack`)의 tip과 자식 브랜치들의 머지 여부를 git에서
+          보고 고른다. 무엇을 보고 골랐는지 reason에 적는다.
+          주의: v2 런은 컷 소비를 v1 런에 표시하지 못한다. 다음 회차의 프로브가 같은
+          컷을 「새 컷」으로 다시 읽을 수 있으니, confirmed는 이번 착지에 실을 컷을
+          git에서 직접 확인했을 때만 고른다.
+        options:
+          confirmed:
+            description: 스택 브랜치에 이번 착지에 실을 컷이 있음을 git에서 확인했다 — stack-merge로 간다
+            then: []
+          held:
+            description: 컷을 받을 수 없다(stack 런이 없거나 멈췄다) — 이 착지를 held로 마감한다
+            then:
+              return: held
+              value: {reason: "$params.why", rework: false}
+
+  landed-unclear:
+    description: >-
+      착지 프로브가 판정하지 못했거나(undecidable) 하루 안에 착지를 보지 못했다(timeout).
+      기계가 답할 수 없으니 사람이 git을 보고 고른다. confirmed는 프로브 자리를 사람의
+      확인으로 채우고(landed 기록은 그대로 남는다), held는 이 착지를 held로 마감한다.
+    params:
+      why: {type: str, default: undecidable}
+    body:
+      id: landed-unclear-choice
+      choose:
+        chooser: user
+        require_reason: true
+        prompt: |
+          착지 프로브(`tools/landed_check.py` + 깨끗한 트리)가 답을 내지 못했다(사유:
+          ${params.why}). undecidable은 판정 불가(종료 코드 2: 저장소·브랜치를 읽지
+          못했다)가 세 번 이어졌다는 뜻이고, timeout은 하루 동안 「아직」이었다는 뜻이다.
+          `git log --merges --format='%H %P' <대상>`에서 동결된 tip을 부모로 갖는 머지
+          커밋을 직접 찾아 고른다. 무엇을 보고 골랐는지 reason에 적는다.
+        options:
+          confirmed:
+            description: 사람이 git에서 착지(머지 커밋)를 확인했다 — 프로브 대신 이 확인으로 지나간다
+            then: []
+          held:
+            description: 착지를 확인하지 못했다 — 이 착지를 held로 마감하고 회차를 닫는다
+            then:
+              return: held
+              value: {reason: "$params.why", rework: false}
 
   land:
     description: >-
@@ -2409,9 +2524,20 @@ procedures:
                 wait:
                   # v1: stack-merge의 awaits {sub: stack, at: cut} + verify. 컷이 오기
                   # 전에 떠나면 소비가 한 회차 어긋난다(claunch-u8wjx.2).
+                  # 종료 코드(v1 published): 0 = 소비하지 않은 컷이 있다, 1 = 아직,
+                  # 2 = 이 범위에 v1 stack 런이 없다(판정 불가). v2 런은 v1 stack 런을
+                  # 띄우지도 컷 소비를 표시하지도 못하므로, stack 런이 없는 회차
+                  # (mode stack-only 포함)는 여기서 기계로 진행할 수 없다 — 판정 불가
+                  # 세 번(3분)이면 undecidable로 끝나 사람이 고른다. 컷이 4시간 안에
+                  # 오지 않아도(timeout) 같다. 「아직」과 섞여 조용히 기다리지 않는다.
                   probe: "claunch cflow published stack cut --step stack-merge"
                   poll: 60
+                  seconds: 14400
+                  undecided_max: 3
                   describe: 자식 스택이 이번 착지의 컷을 냈다
+                on:
+                  undecidable: {call: cut-unreachable, with: {why: undecidable}}
+                  timeout: {call: cut-unreachable, with: {why: timeout}}
               - stack-merge
           - else: []
       - id: landing
@@ -2991,7 +3117,9 @@ body:
   try:
     id: rounds
     loop:
-      while: "$data.recheck.next != 'done'"
+      # max_rounds 입력이 있으면 그 수만큼만 돈다($visits.round = 끝난 회차 수).
+      # 25를 넘는 값은 25에서 사람의 승인(loop_limit)에 선다.
+      while: "$data.recheck.next != 'done' and ($data.inputs.max_rounds == null or $visits.round == null or $visits.round < $data.inputs.max_rounds)"
       max: 25
       do:
         - id: round

@@ -11,7 +11,7 @@ from claude_launcher import mcp_server
 from claude_launcher.cflow2 import mcp as cflow2_mcp
 
 FLOW_TOOLS = {"flow_start", "flow_status", "flow_report", "flow_select", "flow_fork",
-              "flow_delegate", "flow_rule", "flow_abort"}
+              "flow_delegate", "flow_rule"}
 
 DEF = textwrap.dedent("""
     cflow: 2
@@ -89,8 +89,9 @@ def test_start_refused_while_live_and_abort(project):
     _call("flow_start", {"workflow": "demo2"})
     _, err = _call("flow_start", {"workflow": "demo2"})
     assert err and "still" in err
-    st, err = _call("flow_abort", {"reason": "user asked"})
-    assert st["status"] == "aborted"
+    assert "flow_abort" not in {t["name"] for t in mcp_server.TOOLS}  # a person's act
+    _, err = _call("flow_abort", {"reason": "user asked"})
+    assert err
 
 
 def test_unknown_definition_is_a_tool_error(project):

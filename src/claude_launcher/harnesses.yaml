@@ -29,11 +29,18 @@ harnesses:
       tool_access: none
       response_mode: single-response
     # cflow v2 capabilities (docs/cflow-v2.md 6.1/6.3). Verified against
-    # `claude --help` on 2026-10-06: -p/--print, --json-schema <schema> (the
-    # schema JSON inline, not a file), --output-format json (only with
-    # --print), --allowedTools (comma or space separated), --max-budget-usd
-    # <amount> (only with --print), -r/--resume <session id>. The subagent.*
-    # entries are the Agent tool (isolation: worktree), not CLI flags.
+    # `claude --help` (2.1.291) on 2026-10-06: -p/--print, --json-schema
+    # <schema> (the schema JSON inline, not a file), --output-format json
+    # (only with --print), --max-budget-usd <amount> (only with --print),
+    # -r/--resume <session id>. headless.tools.restrict must REMOVE tools:
+    # --tools <list> is the set of available built-in tools and
+    # --disallowedTools <list> denies by name, while --allowedTools only
+    # auto-approves the listed tools and removes nothing (so it is not used).
+    # --permission-mode dontAsk denies anything not pre-approved instead of
+    # prompting (nobody answers a prompt under --print), and
+    # --strict-mcp-config without --mcp-config drops every MCP server (their
+    # tools are outside --tools). The subagent.* entries are the Agent tool
+    # (isolation: worktree), not CLI flags.
     capabilities:
       subagent.spawn: true
       subagent.parallel: true
@@ -42,7 +49,10 @@ harnesses:
       headless.run: {enabled: true, args: [-p]}
       headless.output.schema: {enabled: true, args: [--json-schema, "{schema}"]}
       headless.output.json: {enabled: true, args: [--output-format, json]}
-      headless.tools.restrict: {enabled: true, args: [--allowedTools, "{tools}"]}
+      headless.tools.restrict:
+        enabled: true
+        args: [--tools, "{tools}", --disallowedTools, "{deny}",
+               --permission-mode, dontAsk, --strict-mcp-config]
       headless.budget.usd: {enabled: true, args: [--max-budget-usd, "{usd}"]}
       headless.resume: {enabled: true, args: [--resume, "{session_id}"]}
       mcp.claunch: true
@@ -126,8 +136,12 @@ harnesses:
     heartbeat_args: [-p]
     # cflow v2 capabilities (docs/cflow-v2.md 6.1/6.3). Verified against
     # `pi --help` on 2026-10-06: --print/-p, --mode json, --tools <comma
-    # separated allowlist> (and --exclude-tools). --session <id> resumes a
-    # stored session but is not wired here, so headless.resume stays off.
+    # separated allowlist> (and --exclude-tools). --tools is an allowlist over
+    # built-in, extension and custom tools alike -- every tool not named is
+    # removed (pi's own help gives `--tools read,grep,find,ls` as its
+    # read-only mode) -- and pi has no permission prompts to answer.
+    # --session <id> resumes a stored session but is not wired here, so
+    # headless.resume stays off.
     capabilities:
       headless.run: {enabled: true, args: [-p]}
       headless.output.json: {enabled: true, args: [--mode, json]}

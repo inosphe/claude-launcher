@@ -287,8 +287,10 @@ def test_render_args():
     claude = caps.resolve("claude", doc={})
     assert caps.render_args(claude["headless.output.schema"], schema='{"type":"object"}') == [
         "--json-schema", '{"type":"object"}']
-    assert caps.render_args(claude["headless.tools.restrict"], tools=["Read", "Grep"]) == [
-        "--allowedTools", "Read,Grep"]
+    assert caps.render_args(claude["headless.tools.restrict"], tools=["Read", "Grep"],
+                            deny=["Edit", "Bash"]) == [
+        "--tools", "Read,Grep", "--disallowedTools", "Edit,Bash",
+        "--permission-mode", "dontAsk", "--strict-mcp-config"]
     assert caps.render_args(claude["headless.budget.usd"], usd=1.5) == ["--max-budget-usd", "1.5"]
     assert caps.render_args(claude["headless.resume"], session_id="abc") == ["--resume", "abc"]
     codex = caps.resolve("codex", doc={})
@@ -298,3 +300,87 @@ def test_render_args():
     assert caps.render_args(Capability(False, ["-x"], "default")) == []
     with pytest.raises(ValueError):
         caps.render_args(claude["headless.resume"])
+
+
+# -- A3: a flag route without flags is never selected ---------------------------
+
+
+def _doc_profile(block):
+    return {"profiles": {"p": {"capabilities": block}}}
+
+
+def test_needs_args_ids():
+    assert caps.NEEDS_ARGS == {
+        "headless.run", "headless.output.schema", "headless.output.json",
+        "headless.tools.restrict", "headless.sandbox.readonly", "headless.budget.usd",
+        "headless.resume"}
+    assert not caps.NEEDS_ARGS & {"subagent.spawn", "subagent.parallel", "mcp.claunch",
+                                  "session.spawn", "subagent.tools.restrict",
+                                  "subagent.worktree"}
+
+
+def test_true_on_higher_layer_inherits_args_of_the_same_harness():
+    got = caps.resolve("claude", profile="p", doc=_doc_profile({"headless.output.schema": True}))
+    assert got["headless.output.schema"] == Capability(
+        True, ["--json-schema", "{schema}"], "profile:p")
+    assert got.warnings == []
+
+
+def test_sandbox_readonly_true_without_args_is_disabled_with_warning():
+    # reviewer repro: claude declares no sandbox flag; a profile says true
+    got = caps.resolve("claude", profile="p",
+                       doc=_doc_profile({"headless.sandbox.readonly": True}))
+    assert got["headless.sandbox.readonly"].enabled is False
+    assert any("headless.sandbox.readonly" in w and "enabled without args" in w
+               for w in got.warnings)
+    node = _node(executor=["headless"], props={"effects": ["fs.read"]})
+    plan = caps.plan_node(node, got)
+    assert plan.readonly.route == "tools-restrict"  # claude's real restriction
+
+
+def test_schema_true_without_args_falls_to_fenced_block():
+    got = caps.resolve("devin", profile="p", doc=_doc_profile({"headless.output.schema": True}))
+    assert got["headless.output.schema"].enabled is False
+    assert any("enabled without args" in w for w in got.warnings)
+    node = _node(executor=["headless"], props={"returns": {"ok": {"x": "str"}}})
+    assert caps.plan_node(node, got).returns.route == "text+fenced-block"
+
+
+def test_budget_usd_true_without_args_strict_budget_blocks():
+    got = caps.resolve("codex", profile="p", doc=_doc_profile({"headless.budget.usd": True}))
+    assert got["headless.budget.usd"].enabled is False
+    node = _node(executor=["headless", "inline"], budget={"usd": 1},
+                 props={"strict_budget": True})
+    plan = caps.plan_node(node, got)
+    assert plan.route == "inline"
+    assert plan.executor.skipped == [("headless", "headless.budget.usd")]
+    # an unresolved map carrying an argless Capability is treated the same
+    raw = {"headless.run": Capability(True, ["exec"]), "headless.budget.usd": Capability(True, [])}
+    assert not caps.enabled(raw, "headless.budget.usd")
+    assert caps.plan_budget("headless", raw, {"usd": 1}, True).blocked
+    assert not caps.enabled({"headless.budget.usd": {"enabled": True, "args": []}},
+                            "headless.budget.usd")
+
+
+def test_argless_features_stay_enabled():
+    got = caps.resolve("codex", profile="p",
+                       doc=_doc_profile({"subagent.spawn": True, "mcp.claunch": True}))
+    assert got["subagent.spawn"].enabled and got["mcp.claunch"].enabled
+    assert got.warnings == []
+
+
+# -- A2: non-flat subtrees ------------------------------------------------------------
+
+
+def test_plan_node_not_flat_skips_headless_and_mcp_less_delegates():
+    node = _node(type=ir.T_SEQ, executor=["headless", "subagent", "session"])
+    plan = caps.plan_node(node, ALL, flat=False)
+    assert plan.route == "subagent"
+    assert plan.executor.skipped == [("headless", caps.NOT_FLAT)]
+    assert "executor headless skipped: subtree not flat" in plan.degraded
+    no_mcp = {**ALL, "mcp.claunch": False}
+    plan = caps.plan_node(node, no_mcp, flat=False)
+    assert plan.route == "inline"
+    assert [s[1] for s in plan.executor.skipped] == [caps.NOT_FLAT] * 3
+    assert caps.plan_node(node, no_mcp).route == "headless"  # flat (default)
+    assert caps.choose_executor(["headless"], ALL, flat=False).executor == "inline"
