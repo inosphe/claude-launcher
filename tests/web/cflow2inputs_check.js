@@ -45,8 +45,9 @@ new Function("ctx",
   `const CFLOW_INPUT_CHECK_TYPES = ["invariants", "acceptance"];
    ${slice("cflowInputsValues")} ${slice("cflowInputsErrors")}
    ${slice("cflow2UndecidedCounts")} ${slice("cflow2Undecidable")}
+   ${slice("cflowGhVerdict")}
    Object.assign(ctx, { cflowInputsValues, cflowInputsErrors,
-                        cflow2UndecidedCounts, cflow2Undecidable });`)(ctx);
+                        cflow2UndecidedCounts, cflow2Undecidable, cflowGhVerdict });`)(ctx);
 
 const rows = [
   row("goal", "text", { value: { value: "ship it" } }),
@@ -81,3 +82,30 @@ const journal = [
 assert.deepStrictEqual(ctx.cflow2UndecidedCounts(journal), { "w@4": 2 });
 assert.deepStrictEqual(ctx.cflow2Undecidable(journal).map((e) => e.node), ["cut-wait"]);
 console.log("cflow2inputs_check: ok");
+
+// The gh readiness line under an input declared `precheck: gh`
+// (claunch-yq80p.5): ok only when gh is installed and signed in to every
+// host the directory pushes to; otherwise the guide's commands come along.
+{
+  const v = ctx.cflowGhVerdict;
+  assert.strictEqual(v(null).ok, false);
+  const missing = v({ client: { installed: false }, guide: [{ run: "sudo apt install gh" }] });
+  assert.strictEqual(missing.ok, false);
+  assert.match(missing.text, /not installed/);
+  assert.deepStrictEqual(missing.guide.map((g) => g.run), ["sudo apt install gh"]);
+  const noRemote = v({ client: { installed: true, version: "2.60" }, hosts: [] });
+  assert.strictEqual(noRemote.ok, false);
+  assert.match(noRemote.text, /no GitHub remote/);
+  const out = v({ client: { installed: true, version: "2.60" },
+                  hosts: [{ host: "ghe.example", authenticated: false }],
+                  guide: [{ run: "gh auth login --hostname ghe.example" }] });
+  assert.strictEqual(out.ok, false);
+  assert.match(out.text, /not signed in to ghe\.example/);
+  const ok = v({ client: { installed: true, version: "2.60" },
+                 hosts: [{ host: "ghe.example", authenticated: true, account: "me" }],
+                 guide: [{ run: "git config claunch.pr.remote <remote name>" }] });
+  assert.strictEqual(ok.ok, true);
+  assert.match(ok.text, /signed in to ghe\.example as me/);
+  assert.deepStrictEqual(ok.guide, []);
+}
+

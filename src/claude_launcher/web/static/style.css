@@ -5545,3 +5545,14 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .cf2-run-inputs { margin: 6px 0; }
 .cf2-run-input-value { white-space: pre-wrap; }
 .cf2-undecidable { color: #d29922; }
+
+/* Start inputs: a readiness check beside an input (precheck: gh) and the
+   cross-input rules under the fields (docs/cflow-v2.md 2.6). */
+.cf2-precheck { display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  font-size: 12px; margin-top: 4px; color: #8b949e; }
+.cf2-precheck.ok .cf2-precheck-text { color: #3fb950; }
+.cf2-precheck.bad .cf2-precheck-text { color: #f85149; }
+.cf2-precheck-run { font-family: var(--mono, monospace); padding: 0 4px;
+  border: 1px solid var(--border, #ccc); border-radius: 3px; }
+.cf2-constraints { margin-top: 6px; }
+.cf2-constraint { margin: 2px 0; }

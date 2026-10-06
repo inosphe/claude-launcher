@@ -37,6 +37,15 @@ What :func:`apply` does with the values:
 
 Probes are shell commands a person typed. They run as written; no run value
 is ever substituted into them (the same rule as ``verify``).
+
+Constraints across inputs (top-level ``input_constraints:``) are checked by
+:func:`constraints` at compile time and kept in ``chart.meta['input_constraints']``.
+Each is ``{assert, fields, message}``: ``assert`` is an expression
+(``cflow2/expr.py``) over ``$inputs.<name>`` that must be true for the values
+to be accepted; ``fields`` (default: the inputs it reads) are the inputs a
+form marks when it is false. :func:`normalize` evaluates them after the
+per-field checks, so a start, the dashboard's ``POST /api/cflow2/inputs/check``
+and the CLI refuse the same values with the same message.
 """
 
 from __future__ import annotations
@@ -62,7 +71,12 @@ LIST_TYPES = (T_LIST, T_INVARIANTS, T_ACCEPTANCE)
 #: Types whose items are ``{text, probe}``.
 CHECK_TYPES = (T_INVARIANTS, T_ACCEPTANCE)
 
-KEYS = ("type", "label", "help", "required", "default", "choices", "placeholder")
+KEYS = ("type", "label", "help", "required", "default", "choices", "placeholder", "precheck")
+#: What ``precheck:`` may name: a readiness check the start form runs before
+#: the user may turn the input on (``gh``: GET /api/tools/gh?cwd= says the
+#: client is installed and signed in to the repository's host). Advisory --
+#: the run checks again when it acts on the value.
+PRECHECKS = ("gh",)
 NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 RULE_INVARIANT = "input-invariant-{n}"
@@ -76,6 +90,12 @@ RULES_HEADER = "── 규칙 ──"
 
 _TRUE = ("true", "yes", "y", "1", "on")
 _FALSE = ("false", "no", "n", "0", "off", "")
+
+
+CONSTRAINT_KEYS = ("assert", "fields", "message")
+#: The error key a violated constraint is reported under when it names no
+#: field (an ``errors`` mapping is name -> why).
+CONSTRAINT_ERROR_KEY = "_constraints"
 
 
 class InputsError(ValueError):
@@ -126,6 +146,10 @@ def schema(raw: Any) -> Dict[str, Dict[str, Any]]:
                 raise InputsError(f"input {name!r}: choices repeat a value")
         elif choices is not None:
             raise InputsError(f"input {name!r}: choices apply to type enum only")
+        precheck = decl.get("precheck")
+        if precheck is not None and precheck not in PRECHECKS:
+            raise InputsError(f"input {name!r}: unknown precheck {precheck!r} "
+                              f"(allowed: {', '.join(PRECHECKS)})")
         entry = {
             "type": typ,
             "label": decl.get("label") or name,
@@ -134,6 +158,7 @@ def schema(raw: Any) -> Dict[str, Dict[str, Any]]:
             "default": None,
             "choices": list(choices) if typ == T_ENUM else None,
             "placeholder": decl.get("placeholder") or "",
+            "precheck": precheck,
         }
         if decl.get("default") is not None:
             value, err = _coerce(entry, decl["default"], strict=True)
@@ -141,6 +166,110 @@ def schema(raw: Any) -> Dict[str, Dict[str, Any]]:
                 raise InputsError(f"input {name!r}: default {decl['default']!r} {err}")
             entry["default"] = value
         out[name] = entry
+    return out
+
+
+def _input_refs(text: str) -> List[str]:
+    """The input names an assert reads (``$inputs.<name>``), in order."""
+    from . import expr
+
+    names: List[str] = []
+
+    def walk(node: Any) -> None:
+        if not isinstance(node, tuple) or not node:
+            return
+        if node[0] == "ref":
+            if node[1] == "inputs" and node[2] and node[2][0][0] == "field":
+                if node[2][0][1] not in names:
+                    names.append(node[2][0][1])
+            for seg in node[2]:
+                if seg[0] == "index":
+                    walk(seg[1])
+            return
+        for item in node[1:]:
+            if isinstance(item, (list, tuple)):
+                if isinstance(item, list):
+                    for sub in item:
+                        walk(sub)
+                else:
+                    walk(item)
+
+    walk(expr.parse(text).ast)
+    return names
+
+
+def constraints(raw: Any, schema_: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The ``input_constraints:`` declaration checked against the inputs
+    schema: a list of ``{assert, fields, message}``. The assert must parse,
+    read only ``$inputs`` (no collection functions) and name declared
+    inputs; ``fields`` defaults to the inputs it reads. Raises
+    :class:`InputsError` naming the constraint (1-based)."""
+    from . import expr
+
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise InputsError("input_constraints must be a list of {assert, fields, message}")
+    out: List[Dict[str, Any]] = []
+    for n, item in enumerate(raw, 1):
+        where = f"input_constraints[{n}]"
+        if isinstance(item, str):
+            item = {"assert": item}
+        if not isinstance(item, dict):
+            raise InputsError(f"{where}: must be a mapping with assert (or the assert text)")
+        unknown = [k for k in item if k not in CONSTRAINT_KEYS]
+        if unknown:
+            raise InputsError(f"{where}: unknown key {unknown[0]!r} "
+                              f"(allowed: {', '.join(CONSTRAINT_KEYS)})")
+        text = item.get("assert")
+        if not isinstance(text, str) or not text.strip():
+            raise InputsError(f"{where}: assert must be a non-empty expression")
+        try:
+            roots = expr.references(text)
+            calls = expr.collection_calls(text)
+            reads = _input_refs(text)
+        except expr.ExprError as exc:
+            raise InputsError(f"{where}: assert does not parse: {exc}") from None
+        other = sorted(r for r in roots if r != "inputs")
+        if other:
+            raise InputsError(f"{where}: assert may read only $inputs, not ${other[0]}")
+        if calls:
+            raise InputsError(f"{where}: assert may not call collection functions")
+        undeclared = [r for r in reads if r not in schema_]
+        if undeclared:
+            raise InputsError(f"{where}: $inputs.{undeclared[0]} is not a declared input")
+        fields = item.get("fields")
+        if fields is None:
+            fields = reads
+        if not isinstance(fields, list) or not all(isinstance(f, str) for f in fields):
+            raise InputsError(f"{where}: fields must be a list of input names")
+        bad = [f for f in fields if f not in schema_]
+        if bad:
+            raise InputsError(f"{where}: field {bad[0]!r} is not a declared input")
+        message = item.get("message")
+        if message is not None and (not isinstance(message, str) or not message.strip()):
+            raise InputsError(f"{where}: message must be a non-empty string")
+        out.append({"assert": text.strip(), "fields": list(fields),
+                    "message": (message or "").strip() or f"constraint not met: {text.strip()}"})
+    return out
+
+
+def violations(constraints_: Optional[List[Dict[str, Any]]], values: Dict[str, Any]
+               ) -> List[Dict[str, Any]]:
+    """The constraints that do not hold for ``values`` (normalized), each
+    ``{assert, fields, message}``. An assert that cannot be evaluated counts
+    as not holding, with the evaluation error appended to its message."""
+    from . import expr
+
+    out: List[Dict[str, Any]] = []
+    for c in constraints_ or []:
+        try:
+            ok = expr.truthy(expr.evaluate(c["assert"], {"inputs": values}))
+            message = c["message"]
+        except expr.ExprError as exc:
+            ok, message = False, f"{c['message']} (cannot evaluate: {exc})"
+        if not ok:
+            out.append({**c, "message": message})
     return out
 
 
@@ -245,7 +374,8 @@ def _coerce(decl: Dict[str, Any], value: Any, strict: bool = False) -> Tuple[Any
     return items, None
 
 
-def normalize(schema_: Dict[str, Dict[str, Any]], raw: Optional[Dict[str, Any]]
+def normalize(schema_: Dict[str, Dict[str, Any]], raw: Optional[Dict[str, Any]],
+              constraints_: Optional[List[Dict[str, Any]]] = None
               ) -> Tuple[Dict[str, Any], Dict[str, str]]:
     """``(values, errors)`` for the raw values a form, CLI or tool sent.
 
@@ -255,7 +385,11 @@ def normalize(schema_: Dict[str, Dict[str, Any]], raw: Optional[Dict[str, Any]]
     ``false``). ``errors`` maps an input name (or an unknown key) to why it
     was refused: a required input with no value (``None``, empty text and
     an empty list do not satisfy it), a value of the wrong type, a key the
-    schema does not declare."""
+    schema does not declare.
+
+    ``constraints_`` (:func:`constraints`) are evaluated when every input
+    they read passed its own check; a violated one is reported under each
+    of its ``fields`` (or :data:`CONSTRAINT_ERROR_KEY` when it has none)."""
     raw = raw or {}
     errors: Dict[str, str] = {}
     values: Dict[str, Any] = {}
@@ -279,13 +413,20 @@ def normalize(schema_: Dict[str, Dict[str, Any]], raw: Optional[Dict[str, Any]]
             errors[name] = f"{decl['label']} is required"
             continue
         values[name] = value
+    ready = [c for c in constraints_ or []
+             if all(r in values for r in _input_refs(c["assert"]))]
+    for c in violations(ready, values):
+        for key in c["fields"] or [CONSTRAINT_ERROR_KEY]:
+            if key not in errors:
+                errors[key] = c["message"]
     return values, errors
 
 
-def check(schema_: Dict[str, Dict[str, Any]], raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+def check(schema_: Dict[str, Dict[str, Any]], raw: Optional[Dict[str, Any]],
+          constraints_: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     """:func:`normalize` that raises :class:`InputsError` (message lists
     every field; ``.errors`` holds the mapping)."""
-    values, errors = normalize(schema_, raw)
+    values, errors = normalize(schema_, raw, constraints_)
     if errors:
         exc = InputsError("invalid inputs: " + "; ".join(f"{k}: {v}" for k, v in errors.items()))
         exc.errors = errors  # type: ignore[attr-defined]
@@ -373,4 +514,5 @@ def view(schema_: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [{"name": name, **copy.deepcopy(decl)} for name, decl in (schema_ or {}).items()]
 
 
-__all__ = ("TYPES", "InputsError", "schema", "normalize", "check", "apply", "view")
+__all__ = ("TYPES", "InputsError", "schema", "constraints", "violations", "normalize", "check",
+           "apply", "view")

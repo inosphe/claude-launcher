@@ -139,6 +139,20 @@ inputs:
     type: int
     label: 최대 회차 수
     help: 이 런이 도는 회차의 상한(비우면 큐가 빌 때까지, 최대 25)
+  force_pr:
+    type: bool
+    label: PR 강제(force to make PR)
+    precheck: gh
+    help: 착지를 PR로만 한다. PR을 만들 수 없으면(gh 미설치·미로그인·원격 없음) 로컬 착지로 바꾸지 않고 BLOCKED로 멈춘다
+  force_no_pr:
+    type: bool
+    label: PR 금지(force not to make PR)
+    help: PR을 만들지 않고 기존의 로컬 착지(리더의 --no-ff 머지)만 쓴다. 둘 다 끄면 PR을 먼저 시도하고, 만들 수 없으면 사유를 남기고 로컬 착지로 대체한다
+
+input_constraints:
+  - assert: not ($inputs.force_pr and $inputs.force_no_pr)
+    fields: [force_pr, force_no_pr]
+    message: PR 강제와 PR 금지는 함께 켤 수 없다
 
 params:
   verify:

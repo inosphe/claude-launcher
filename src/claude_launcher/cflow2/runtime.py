@@ -2024,7 +2024,8 @@ def _apply_inputs(chart: ir.Chart, raw: Optional[Dict[str, Any]]
         raise FlowError("typed start inputs are not available in this version")
     if raw is not None and not isinstance(raw, dict):
         raise FlowError("inputs must be an object of name -> value")
-    values, errors = inputs_mod.normalize(schema, raw or {})
+    values, errors = inputs_mod.normalize(schema, raw or {},
+                                          (chart.meta or {}).get("input_constraints"))
     if errors:
         raise FlowError("invalid inputs: " + "; ".join(f"{k}: {v}" for k, v in errors.items()))
     try:

@@ -555,6 +555,36 @@ def test_the_dashboard_start_returns_field_errors(with_inputs):
         "goal": "g", "rounds": None, "invariants": []}
 
 
+def test_inputs_check_answers_constraints_without_starting(proj):
+    (proj / ".claunch" / "workflows" / "v2" / "pair.yaml").write_text(
+        "cflow: 2\nname: pair\ninputs: {a: {type: bool}, b: {type: bool}}\n"
+        "input_constraints:\n  - {assert: 'not ($inputs.a and $inputs.b)', message: not both}\n"
+        "nodes: {w: {prompt: w}}\nbody: w\n", encoding="utf-8")
+    cwd = str(proj)
+    entry = next(w for w in cflow2_web.startable(cwd) if w["name"] == "pair")
+    assert entry["input_constraints"][0]["fields"] == ["a", "b"]
+
+    async def go(client, bearer):
+        out = []
+        for raw in ({"a": True, "b": True}, {"a": True}):
+            r = await client.post("/api/cflow2/inputs/check", headers=bearer, json={
+                "cwd": cwd, "workflow": "pair", "workflow_version": 2, "cflow_inputs": raw})
+            out.append((r.status, await r.json()))
+        r = await client.post("/api/cflow2/inputs/check", headers=bearer,
+                              json={"cwd": cwd, "workflow": "no-such", "workflow_version": 2})
+        out.append((r.status, None))
+        r = await client.post("/api/cflow/start", headers=bearer, json={
+            "cwd": cwd, "scope": "p1", "workflow": "pair", "cflow_inputs": {"a": True, "b": True}})
+        out.append((r.status, await r.json()))
+        return out
+
+    (s1, bad), (s2, good), (s3, _), (s4, start) = _http(go)
+    assert s1 == 200 and bad["ok"] is False and bad["errors"] == {"a": "not both", "b": "not both"}
+    assert s2 == 200 and good["ok"] is True and good["values"] == {"a": True, "b": False}
+    assert s3 == 404
+    assert s4 == 400 and set(start["errors"]) == {"a", "b"}
+
+
 @pytest.mark.parametrize("name", ["../../etc/passwd", "/etc/passwd", "pick.yaml", "a/b"])
 def test_the_definition_endpoint_takes_a_name_only(proj, name):
     from urllib.parse import quote

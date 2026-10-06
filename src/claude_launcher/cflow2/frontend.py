@@ -184,7 +184,8 @@ TOP_KEYS = (
     "cflow", "name", "description", "kind", "default_role", "filter_roles",
     "default_child_cflow", "priority", "params", "returns", "data", "include",
     "fragments", "rules", "procedures", "nodes", "body", "spec", "max_visits",
-    "inputs", "collections", "collection_types", "question_types", "sides",
+    "inputs", "input_constraints", "collections", "collection_types", "question_types",
+    "sides",
 )
 #: Top-level keys a ``kind: library`` file may carry (docs/cflow-v2.md 2.10).
 LIBRARY_KEYS = ("cflow", "name", "description", "kind", "include", "fragments", "rules",
@@ -1744,6 +1745,11 @@ def compile_text(text: str, *, source: str = "",
         input_schema = _inputs.schema(_plain(doc.get("inputs")))
     except _inputs.InputsError as exc:
         raise ctx.err(file, _key_line(doc, "inputs", 1), str(exc)) from None
+    try:
+        input_constraints = _inputs.constraints(_plain(doc.get("input_constraints")),
+                                                input_schema)
+    except _inputs.InputsError as exc:
+        raise ctx.err(file, _key_line(doc, "input_constraints", 1), str(exc)) from None
 
     collections = _collection_decls(ctx, file, doc)
     sides = doc.get("sides")
@@ -1784,6 +1790,8 @@ def compile_text(text: str, *, source: str = "",
             # typed start inputs (cflow2/inputs.py); folded into the chart
             # at start by inputs.apply
             "inputs": input_schema,
+            # cross-input asserts, evaluated by inputs.normalize
+            **({"input_constraints": input_constraints} if input_constraints else {}),
             # normalized collection declarations (cflow2/collections.py)
             "collections": collections,
             **({"sides": sides} if sides is not None else {}),
