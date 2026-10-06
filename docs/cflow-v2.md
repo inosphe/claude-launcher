@@ -68,6 +68,8 @@ v1(`src/claude_launcher/cflow/`)과 병행한다.
 | `spec` | 명세(8절) |
 | `max_visits` | 한 노드가 런 전체에서 들어갈 수 있는 횟수의 상한. 정수 1 이상, 기본 200. IR의 `meta.max_visits`. 넘으면 그 인스턴스가 `waiting_approval`(reason `visit_limit`)로 멈추고 사람이 `extend --visits`(웹 UI의 「Allow one more visit」, `POST /api/cflow2/extend` 본문 `visits: true`)로 답한다 |
 | `inputs` | 시작 입력 선언(2.6). IR의 `meta.inputs` |
+| `collections`, `collection_types` | 컬렉션 선언과 재사용할 선언(2.7). IR의 `meta.collections` |
+| `sides` | side 런 선언(2.9, 2단계) |
 
 ### 2.2 작업(task)
 
@@ -404,6 +406,206 @@ inputs:
     `claunch spawn`의 `--input NAME=VALUE`(반복 가능, 같은 이름을 두 번 쓰면 목록)와
     `--inputs-file PATH.json`, `--wizard`는 선언된 입력을 한 줄씩 묻는다.
 
+### 2.7 컬렉션(collections)
+
+런이 여러 단계와 여러 런에 걸쳐 쌓고 고치는 기록을 형식과 함께 선언한다. v1의
+`landing_queue`(착지 큐)와 `publishes`/`awaits`(런 사이 신호)는 각각 전용 기능이었다.
+v2에서는 둘 다 컬렉션 하나와 그 연산으로 쓴다. 구현은
+`src/claude_launcher/cflow2/collections.py`다.
+
+```yaml
+collections:
+  landing:
+    kind: queue
+    key: issue
+    item: {issue: str, branch: str, tip: str, requested_by: str, note: "str?"}
+    status:
+      values: [requested, waiting, deferred, landed, rejected]
+      initial: requested
+      settled: [landed, rejected]
+    access:
+      push: [child, daemon]
+      set: [driver]
+      set.landed: [daemon]
+      remove: [driver]
+    env: {TARGET: master}
+    watch:
+      every: 60
+      probe: [git, merge-base, --is-ancestor, "$CFLOW_ITEM_TIP", "$CFLOW_TARGET"]
+      on: {0: {set: {status: landed}}}
+    lifecycle:
+      reset_at: [finish]
+      drop: settled
+      remap: {deferred: requested}
+      inherit: true
+  signals:
+    kind: log
+    item: {name: str}
+    access: {push: [driver, peer]}
+    lifecycle: {inherit: true}
+```
+
+**종류(`kind`)**
+
+| kind | 구조 | 용도 |
+|---|---|---|
+| `queue` | `key` 필드로 구분되는 레코드의 순서 있는 목록. 같은 key로 `push`하면 그 레코드를 바꾸고 상태를 `initial`로 되돌린다 | 착지 큐, 작업 목록 |
+| `log` | 추가만 하는 레코드 목록. 레코드마다 일련번호(`seq`), 시각(`at`), 쓴 주체(`by`)가 붙는다. 읽는 런은 자기 처리 위치(cursor)를 따로 가진다 | 런 사이 신호 |
+
+**키**
+
+| 키 | 의미 |
+|---|---|
+| `key` | `queue`에서 필수. `item`의 필드 이름 |
+| `item` | 필드 이름 → 형식(`str`, `int`, `bool`, `list`, `map`, `any`). 끝에 `?`가 붙은 형식은 생략할 수 있다. 선언에 없는 필드는 거절한다 |
+| `status` | 선택. 두면 레코드마다 `status` 필드가 생긴다. `settled`는 `values`의 부분집합이다 |
+| `access` | 연산별로 쓸 수 있는 주체 목록. `set.<상태값>`은 그 상태로 바꾸는 `set`에만 적용되고 `set`보다 우선한다. 생략한 연산은 `[driver]`다. 읽기는 같은 세션 트리 안의 주체 모두에게 열려 있다 |
+| `env` | `watch` probe에 `CFLOW_<NAME>`으로 전달되는 값. 값 안의 `{session}`은 런의 드라이버 세션 이름으로 바뀐다 |
+| `watch` | 데몬이 정해진 간격으로 레코드마다 확인하는 명령. 아래 「watch」 |
+| `lifecycle` | 비우는 시점과 다음 런으로 넘기는 규칙. 아래 「lifecycle」 |
+| `type` | 포함한 파일의 `collection_types` 이름. 그 선언을 복사한 뒤 이 매핑의 다른 키(보통 `env`)로 덮어쓴다 |
+
+**주체(principal)**
+
+| 주체 | 누구 |
+|---|---|
+| `driver` | 런의 드라이버 세션. 중첩 위임 런이면 그 위임의 담당 세션 |
+| `daemon` | 데몬의 clock(watch, trigger 실행) |
+| `child` | 부모가 이 런의 드라이버인 세션. trigger의 `push`로만 쓴다 |
+| `peer` | 같은 세션의 다른 런(메인 런과 side 런, 2.9) |
+| `person` | 사람의 CLI(`claunch cflow2 collection …`)와 웹 UI |
+
+**주소**
+
+`[대상:]컬렉션`. 대상은 `self`(생략 시), `main`, `side:<이름>`, `parent`다.
+`main`과 `side:<이름>`은 같은 세션의 런을 가리킨다(2.9). `parent`는 부모 세션의
+런 중 그 이름의 컬렉션을 선언한 런이며 trigger(2.8)에서만 쓴다.
+
+**연산**
+
+| 연산 | 형태 | 효과 |
+|---|---|---|
+| `push` | `{push: {to: ADDR, item: {필드: EXPR}}}` | 추가. `queue`는 key가 같으면 교체 |
+| `set` | `{set: {in: ADDR, key: EXPR, fields: {필드: EXPR}}}` | 레코드의 필드나 상태 변경. `queue`만 |
+| `remove` | `{remove: {in: ADDR, key: EXPR}}` | 레코드 삭제. `queue`만 |
+| `consume` | `{consume: ADDR}` | 이 런의 cursor를 그 `log`의 끝으로 옮긴다 |
+
+- 노드의 `do:` 목록에 쓴다. 각 항목에 `at: enter|leave`(기본 `leave`)와
+  `when: EXPR`을 붙일 수 있다. `leave`에서는 식에서 `$outcome`을 읽을 수 있다.
+- 필드 값은 식(2.4)이다. 문자열 상수는 따옴표로 쓴다.
+- 위임된 하위 트리(실행 주체가 `inline`이 아닌 하위 트리) 안의 노드에는 `do:`를
+  쓸 수 없다(검사 오류 `effect-in-delegation`). 위임 결과는 하위 트리의 루트가
+  받으므로 효과는 그 루트에 둔다.
+
+**읽기(식 함수)**
+
+| 함수 | 값 |
+|---|---|
+| `items(ADDR)` | 레코드 목록(`queue`는 순서대로, `log`는 전부) |
+| `items(ADDR, STATUS)` | 그 상태의 레코드 목록 |
+| `count(ADDR)`, `count(ADDR, STATUS)` | 개수 |
+| `fresh(ADDR)` | `log`에서 이 런의 cursor 뒤에 레코드가 있으면 참 |
+| `fresh(ADDR, NAME)` | 그 중 `name` 필드가 NAME인 레코드가 있으면 참 |
+| `exists(ADDR)` | 주소의 런이 살아 있고 그 컬렉션을 선언했으면 참 |
+
+`ADDR`은 문자열이다(`items('landing')`, `fresh('side:stack:signals', 'cut')`).
+프롬프트에서는 `${col.<이름>}`이 `self`의 레코드 목록을 JSON으로 렌더한다.
+
+**wait until**
+
+`wait: {until: EXPR, seconds: N, consume: [ADDR]}`는 셸 명령 없이 엔진이 판정하는
+대기다. 런을 바꾸는 호출과 clock의 시간 틱마다 식을 평가하고, 참이 되면 결과
+`ok`로 끝나며 `consume`에 적은 주소의 cursor를 옮긴다. 식이 읽는 주소의 런이 없거나
+끝났으면 결과 `absent`로 끝난다. `seconds`가 지나면 `timeout`이다. `probe`와 함께
+쓸 수 없다.
+
+**watch**
+
+- 데몬 clock이 `every`초(최소 15, 기본 60)마다 `queue`의 레코드 중 `settled`가 아닌
+  것마다 `probe`를 실행한다.
+- 레코드의 필드는 `CFLOW_ITEM_<FIELD>`, 컬렉션 `env`는 `CFLOW_<NAME>`, 드라이버
+  세션은 `CFLOW_SESSION`으로 전달한다. probe 문자열 안의 `${...}`는 컴파일
+  오류다(2.3 「명령 안의 값 참조」).
+- `on`은 종료 코드 → `{set: {필드: 상수}}` 또는 `{remove: true}`다. 적지 않은 종료
+  코드는 아무것도 바꾸지 않는다. watch가 하는 변경의 주체는 `daemon`이다.
+- 실행 위치는 런의 cwd이고 제한 시간은 30초다(넘으면 그 회차를 건너뛴다).
+
+**lifecycle**
+
+| 키 | 의미 |
+|---|---|
+| `reset_at` | 노드 id 목록과 `finish`. 그 노드를 떠날 때(`finish`는 런이 어떤 상태로든 끝날 때) 정리를 실행한다 |
+| `drop` | 정리 때 버리는 레코드: `settled`(기본), `all`, `none` |
+| `remap` | 정리 때 남는 레코드의 상태 변환 |
+| `inherit` | 같은 slot(cwd, scope)에서 같은 이름의 정의로 새 런이 시작되면 이전 런의 컬렉션을 정리한 뒤 넘겨받는다. `log`의 레코드와 이 런의 cursor도 넘겨받는다 |
+
+정리는 저널 `collection_reset`(버린 것, 남긴 것)으로 남는다.
+
+**재사용**
+
+`include`한 파일의 최상위 `collection_types:`(이름 → 컬렉션 선언)를 `type:`으로
+가져온다. 패키지의 `improv-common`은 `landing-queue`(위 예의 `landing`, `env.TARGET`
+필수)와 `signals`(위 예의 `signals`)를 제공한다.
+
+```yaml
+include: [improv-common]
+collections:
+  landing: {type: landing-queue, env: {TARGET: master}}
+```
+
+### 2.8 trigger
+
+노드에 들어가거나 떠나는 순간 데몬에게 부수 작업을 요청한다. v1의 `triggers:`와 같은
+형태이며 v1 구현(`daemon/cflow_clock.TriggerClock`)의 동작을 그대로 쓴다.
+
+```yaml
+nodes:
+  integration-request:
+    prompt: …
+    triggers:
+      - briefing                          # at: enter
+      - {do: checks, at: leave}
+      - {do: enqueue-landing, at: leave}
+      - at: leave
+        push:
+          to: parent:landing
+          each: "$facts.in_review"
+          item: {issue: "$each", tip: "$facts.head", branch: "$facts.branch",
+                 requested_by: "$facts.session"}
+```
+
+| 동작 | 내용 | 건너뛰는 경우(`trigger_skipped`의 사유) |
+|---|---|---|
+| `briefing` | 드라이버 세션의 LLM 브리핑을 다시 구성 | llm 설정 없음, 엔드포인트 실패, 드라이버 세션 없음 |
+| `checks` | 드라이버 세션에 상태 점검 재보고 요청을 전달 | 켜진 상태 점검 없음, 전달 실패, 드라이버 세션 없음 |
+| `push` | 다른 런의 컬렉션에 레코드 추가(주체 `child`) | 부모 세션 없음, 그 컬렉션을 가진 부모 런이 없음 또는 둘 이상, 접근 거절, `each`가 빈 목록, 형식 오류 |
+| `enqueue-landing` | 아래 `push`의 축약형: `to: parent:landing`, `each: $facts.in_review`, `item: {issue: $each, tip: $facts.head, branch: $facts.branch, requested_by: $facts.session}` | `push`와 같음. in_review 이슈 없음 |
+
+- 실행 시점: 엔진은 노드 인스턴스에 들어가거나 떠나는 변경 안에서 요청을
+  `state.triggers`에 기록하고(`trigger_queued`) 바로 다음으로 진행한다. 반복으로 같은
+  노드를 여러 번 지나면 지날 때마다 기록한다.
+- 실행: cflow2 clock이 기록을 한 번만 가져가(가져간 기록은 지운다) 실행하고
+  `trigger_done` 또는 `trigger_skipped`(사유)를 남긴다. 데몬이 실행 중에 멈추면 그
+  요청은 다시 실행되지 않고, 저널에 `trigger_queued`만 남는다.
+- trigger는 런을 멈추지 않는다. 실패는 사유를 남기고 끝난다.
+- `$facts`는 trigger의 `push` 식에서만 읽는다. 데몬이 실행 시점에 잰다:
+  `head`(드라이버 세션 checkout의 HEAD), `branch`, `in_review`(드라이버 세션이
+  assignee인 in_review 이슈 id 목록), `session`. `$each`는 `each` 목록의 항목이다.
+- 위임된 하위 트리 안의 노드에는 `push`와 `enqueue-landing`을 쓸 수 없다(검사 오류
+  `trigger-in-delegation`). `briefing`과 `checks`는 쓸 수 있고 런의 드라이버 세션을
+  대상으로 실행한다.
+- `parent:<이름>`의 대상 찾기: 부모 세션이 드라이버인 v2 런(메인 slot과 side 런) 중
+  그 이름의 컬렉션을 선언한 런, 그리고 이름이 `landing`이면 부모 세션의 v1 런(메인과
+  하위 런) 중 `landing_queue:`를 선언한 런. 정확히 하나여야 한다. v1 런이면 v1 엔진의
+  `enqueue_landing(issues, branch, tip, by=…)`로 넣는다(10절 「v1 연결」).
+
+### 2.9 side 런 (2단계, claunch-yq80p.2)
+
+세션이 끝날 때까지 메인 런 옆에서 도는 런이다(v1의 하위 런, 예: `stack`). scope는
+`<세션>+<이름>`이고, 메인 정의의 `sides: {<이름>: <정의 이름>}`에 선언한 것만 시작할
+수 있다. 주소 `main:`과 `side:<이름>:`은 이 기능이 들어오기 전까지 검사 오류
+(`side-runs-unavailable`)다. 상세는 2단계에서 이 절에 쓴다.
+
 ## 3. IR
 
 IR은 JSON으로 직렬화되는 statechart다. 버전은 `ir_version`(현재 1)으로 표시한다.
@@ -548,6 +750,39 @@ wait 노드에는 `undecided_max`가 붙는다.
   작업 프롬프트에 실린다.
 - 중첩 위임 런은 이 검사를 하지 않는다.
 
+### 4.5 컬렉션과 trigger의 실행
+
+**상태.** `state.json`에 `collections: {이름: {kind, items: [...], seq}}`,
+`cursors: {주소: seq}`, `triggers: [{id, node, instance, at, do, push?, queued_at}]`를
+둔다. 컬렉션 선언은 `chart.json`의 `meta.collections`, trigger와 `do:` 효과는 노드의
+`triggers`, `do` 필드다.
+
+**적용 순서.** 노드 인스턴스에 들어갈 때: `do`(at enter) → trigger(at enter) 기록 →
+본문 시작. 떠날 때: 결과 확정 → `do`(at leave) → trigger(at leave) 기록 →
+`lifecycle.reset_at`의 정리 → 부모로 진행. 런이 끝날 때: `reset_at: [finish]` 정리.
+`do` 효과가 실패하면(접근 거절, 형식 오류, 식 오류) 그 노드의 결과를 `fail`로
+바꾸고 값의 `reason`에 사유를 적는다.
+
+**저널.** `collection_pushed`, `collection_set`, `collection_removed`,
+`collection_reset`, `collection_inherited`, `collection_watch`(코드, 바꾼 필드),
+`cursor_moved`, `trigger_queued`, `trigger_done`, `trigger_skipped`(사유).
+
+**구현 계약** (모듈 사이의 경계. 이름이 바뀌면 이 표도 바꾼다)
+
+| 함수 | 위치 | 하는 일 |
+|---|---|---|
+| `collections.normalize(spec, types) -> dict` | `cflow2/collections.py` | 선언 검사와 `type:` 펼치기. 프런트엔드가 부른다 |
+| `collections.apply_push/apply_set/apply_remove(col_state, spec, ..., principal)` | 같은 곳 | 순수 함수. 접근·형식 검사 후 상태를 바꾸고 이벤트 dict를 돌려준다 |
+| `collections.reset(col_state, spec) -> summary` | 같은 곳 | lifecycle 정리 |
+| `runtime.collection_op(op, name, *, cwd, scope, principal, session, key=None, item=None, fields=None)` | `cflow2/runtime.py` | 외부(데몬, MCP, CLI)의 연산. 런 잠금 안에서 적용하고 status를 돌려준다 |
+| `runtime.collection_view(cwd, scope) -> dict` | 같은 곳 | 컬렉션 요약(웹, MCP, status) |
+| `runtime.claim_triggers(cwd, scope) -> list` | 같은 곳 | 기록된 trigger를 가져가고 지운다 |
+| `runtime.complete_trigger(cwd, scope, tid, performed, detail)` | 같은 곳 | `trigger_done`/`trigger_skipped` 기록 |
+| `runtime.watch_due(cwd, scope, now) -> list` | 같은 곳 | 지금 확인할 (컬렉션, key, probe, env, on) 목록 |
+| `runtime.watch_apply(cwd, scope, name, key, code, now)` | 같은 곳 | probe 결과를 `on`대로 적용(주체 daemon) |
+| `runtime.holders(name, session, cwds) -> list` | 같은 곳 | 드라이버가 `session`이고 컬렉션 `name`을 선언한 살아 있는 v2 런의 (cwd, scope) |
+| `cflow2_triggers.perform(...)` | `daemon/cflow2_triggers.py` | trigger 실행(briefing, checks, push, enqueue-landing), facts 측정, 부모 대상 찾기, v1 연결 |
+
 ## 5. 에이전트 인터페이스(MCP)
 
 v1 툴과 이름이 겹치지 않도록 `flow_` 접두어를 쓴다.
@@ -564,6 +799,7 @@ v1 툴과 이름이 겹치지 않도록 `flow_` 접두어를 쓴다.
 | `flow_approve` | `self` 단계로 넘어간 자기 런의 ask에 답함(`node`, `option`, `decline`, `reason`). 다른 단계에서는 거절 |
 | `flow_answer` | 다른 세션의 런이 라우팅한 ask에 응답자로서 답함(`ask_id`, `decision`, `reason`) |
 | `flow_asks` | 이 세션의 답을 기다리는 ask 목록 |
+| `flow_collection` | 컬렉션 조회와 연산(`action`: `list`, `push`, `set`, `remove`; `collection`, `key`, `item`, `fields`). 주체는 `driver`이고 `access`를 따른다(2.7) |
 
 런 중단(abort)은 MCP 툴이 없다. 사람이 `claunch cflow2 abort`로 한다.
 
@@ -969,6 +1205,20 @@ spec:
   deprecation을 금지하는 `tests/test_cflow_layers.py`의 검사는 v1 문법 내부의
   옛 표기를 잡는 용도이므로 그대로 둔다). 형식 자체의 deprecation은 별도 필드
   `format_deprecated`로 싣는다.
+
+
+### v1 연결 (착지 큐)
+
+- v2 워커 → v1 부모: `enqueue-landing`이나 `push: {to: parent:landing}`의 대상이
+  v1 런(`landing_queue:` 선언)이면 데몬이 v1 `engine.enqueue_landing`을 부른다. 레코드
+  필드 `issue`, `branch`, `tip`, `requested_by`가 v1 항목의 같은 이름 필드가 된다.
+- v1 워커 → v2 부모: v1 `TriggerClock._enqueue_landing`은 부모 세션의 v1 런에서 큐를
+  찾지 못하면 `runtime.holders("landing", parent)`로 v2 런을 찾아
+  `runtime.collection_op("push", "landing", principal="child")`로 넣는다.
+- MCP `landing_queue` 도구는 호출 세션의 v1 런에 `landing_queue`가 없고 v2 런이
+  `landing` 컬렉션을 가지면 그 컬렉션을 보여 주고 바꾼다(`status` 값은 v1과 같다).
+- 한 세션에서 v1 `landing_queue`와 v2 `landing` 컬렉션을 동시에 가진 런이 있으면
+  대상이 둘이므로 push는 건너뛰고(`trigger_skipped`) 경고를 남긴다.
 
 ## 11. 단계
 
