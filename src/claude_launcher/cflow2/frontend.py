@@ -45,14 +45,15 @@ Decisions this module makes where the spec leaves room:
   is looked up only through ``resolve_include`` (the v2 layers).
 - Top-level ``inputs`` (typed start inputs) is checked by
   :func:`inputs.schema` and kept in ``chart.meta['inputs']``.
-- Top-level ``max_visits`` (integer >= 1, default
-  :data:`ir.DEFAULT_MAX_VISITS`) lands in ``chart.meta['max_visits']``.
+- Top-level ``max_visits`` (integer >= 0, default
+  :data:`ir.DEFAULT_MAX_VISITS`; 0 is no limit) lands in
+  ``chart.meta['max_visits']``.
 - Top-level ``collections`` are normalized by :func:`collections.normalize`
   into ``chart.meta['collections']`` (always present, ``{}`` when none).
   ``type:`` names a ``collection_types`` entry of this file or of an
   included file (found by name through the layers, like everything else
-  ``include`` brings in). ``sides`` (phase 2) is kept as declared in
-  ``chart.meta['sides']`` when present.
+  ``include`` brings in). ``sides`` (side run name -> definition name,
+  doc 2.9) is kept in ``chart.meta['sides']`` when present.
 - A task or combinator mapping may carry ``do:`` (collection effects) and
   ``triggers:`` (daemon side requests). They land in the node's ``do`` and
   ``triggers`` props, only when declared (see :func:`_do_list` and
@@ -60,7 +61,8 @@ Decisions this module makes where the spec leaves room:
   strings (2.4), parsed here and evaluated by the runtime; a non-string
   scalar becomes its expression text (``3``, ``true``, ``null``).
 - ``wait: {until, seconds, consume}`` stores ``until`` (expression text) and
-  ``consume`` (address list) on the wait node, only when ``until`` is given.
+  ``consume`` (list of an address or ``{addr, name}``) on the wait node, only
+  when ``until`` is given.
 """
 
 from __future__ import annotations
@@ -75,6 +77,7 @@ import yaml
 from . import collections as _collections
 from . import question as _question
 from . import ir
+from . import store as _store
 
 ResolveInclude = Callable[[str], Optional[Path]]
 
@@ -288,6 +291,9 @@ class _Ctx:
     #: its procedures may operate on them, so the including chart gets them
     #: unless it declares the same name itself
     included_collections: Dict[str, Tuple[Any, str, int]] = field(default_factory=dict)
+    #: ``sides`` of included files -> (declaration, file, line); the
+    #: including file's own declaration of a name replaces the included one
+    included_sides: Dict[str, Tuple[Any, str, int]] = field(default_factory=dict)
 
     def err(self, file: str, line: int, msg: str) -> FrontendError:
         return FrontendError(f"{file}:{line}: {msg}" if line else f"{file}: {msg}")
@@ -660,9 +666,24 @@ def _include(ctx: _Ctx, name: str, file: str, line: int) -> Optional[Dict[str, A
                 # the first include that declares a name keeps it
                 ctx.included_collections.setdefault(
                     str(cname), (raw, path.name, _key_line(cols, cname, cline)))
+        _absorb_sides(ctx, doc, path.name)
     finally:
         ctx.including.pop()
     return doc
+
+
+def _absorb_sides(ctx: _Ctx, doc: Dict[str, Any], file: str) -> None:
+    """Keep an included file's ``sides``: a procedure it exports may read
+    its side runs, so a file that calls that procedure has them too (doc
+    2.5). The first include that declares a name keeps it."""
+    raw = doc.get("sides")
+    if raw is None:
+        return
+    kline = _key_line(doc, "sides", 1)
+    raw = _need_map(ctx, file, raw, "sides", kline)
+    for name, decl in raw.items():
+        ctx.included_sides.setdefault(
+            str(name), (_plain(decl), file, _key_line(raw, name, kline)))
 
 
 def _procedure(ctx: _Ctx, name: str, file: str, line: int) -> _Proc:
@@ -1436,10 +1457,28 @@ def _b_wait(ctx, sc, node, value, m, line):
         uline = _key_line(spec, "until", line)
         node.props["until"] = _expr_text(ctx, sc.file, until, "wait.until", uline)
         cline = _key_line(spec, "consume", line)
-        node.props["consume"] = [
-            _address(ctx, sc.file, a, "wait.consume", cline)
-            for a in _str_list(ctx, sc.file, spec.get("consume"), "wait.consume", cline)
-        ]
+        raw = spec.get("consume")
+        if raw is None:
+            raw = []
+        elif isinstance(raw, (str, dict)):
+            raw = [raw]
+        raw = _need_list(ctx, sc.file, raw, "wait.consume", cline)
+        node.props["consume"] = [_consume_entry(ctx, sc.file, a, "wait.consume", cline)
+                                 for a in raw]
+
+
+def _consume_entry(ctx: _Ctx, file: str, value: Any, what: str, line: int) -> Any:
+    """A consume target: a log address (the whole log), or ``{from: ADDR,
+    name: NAME}`` -- only the records named NAME (doc 2.7: a cursor per name,
+    so consuming one signal leaves the others fresh). IR: the address string
+    or ``{addr, name}``."""
+    if isinstance(value, dict):
+        _check_keys(ctx, file, value, ("from", "name"), what)
+        if not isinstance(value.get("name"), str) or not value.get("name"):
+            raise ctx.err(file, line, f"{what}: {{from, name}} needs a name string")
+        return {"addr": _address(ctx, file, value.get("from"), what, line),
+                "name": str(value["name"])}
+    return _address(ctx, file, value, what, line)
 
 
 def _b_group(ctx, sc, node, value, m, line):
@@ -1666,7 +1705,11 @@ def _do_list(ctx: _Ctx, file: str, value: Any, line: int) -> List[Dict[str, Any]
         what = f"do: {op}"
         rec: Dict[str, Any] = {"op": op}
         if op == "consume":
-            rec["addr"] = _address(ctx, file, body, what, eline)
+            target = _consume_entry(ctx, file, body, what, eline)
+            if isinstance(target, dict):
+                rec.update(target)
+            else:
+                rec["addr"] = target
         else:
             body = _need_map(ctx, file, body, what, eline)
             addr_key = "to" if op == "push" else "in"
@@ -1874,8 +1917,9 @@ def compile_text(text: str, *, source: str = "",
     data = doc.get("data")
     if data is not None:
         _need_map(ctx, file, data, "data", _key_line(doc, "data"))
+    # 0: no limit (doc 2.1; check warns unbounded-visits)
     max_visits = _int(ctx, file, doc.get("max_visits", ir.DEFAULT_MAX_VISITS), "max_visits",
-                      _key_line(doc, "max_visits", 1), 1)
+                      _key_line(doc, "max_visits", 1), 0)
     from . import inputs as _inputs
 
     try:
@@ -1891,12 +1935,15 @@ def compile_text(text: str, *, source: str = "",
     collections = _collection_decls(ctx, file, doc)
     recur = _recur(ctx, file, doc, kind)
     sides = doc.get("sides")
-    if sides is not None:
+    if sides is not None or ctx.included_sides:
         sline = _key_line(doc, "sides", 1)
-        sides = _need_map(ctx, file, sides, "sides", sline)
+        own = _need_map(ctx, file, sides, "sides", sline) if sides is not None else {}
+        sides = {name: entry[0] for name, entry in ctx.included_sides.items()}
+        sides.update(own)
         for sname, sdef in sides.items():
-            if not isinstance(sname, str) or not sname:
-                raise ctx.err(file, sline, f"sides: bad side name {sname!r}")
+            if not isinstance(sname, str) or not _store.SIDE_NAME_RE.match(sname):
+                raise ctx.err(file, sline, f"sides: bad side name {sname!r} (a letter or '_', "
+                                           f"then letters, digits, '_', '-')")
             _definition_name(ctx, sdef, file, _key_line(sides, sname, sline), f"side {sname!r}")
         sides = _plain(sides)
 

@@ -240,6 +240,8 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
             manager, poll=cflow2_clock_mod.poll_from()
         )
         cflow2_clock.start()
+        # A session's side runs end with it (docs/cflow-v2.md 2.9).
+        manager.exit_hooks.append(cflow2_clock.session_exited)
     app["cflow2_clock"] = cflow2_clock
     # Published so the dashboard can report what these two are holding. Only
     # the two that type into a driving session on a timer: those are the ones

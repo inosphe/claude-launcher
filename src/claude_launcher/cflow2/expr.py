@@ -13,20 +13,25 @@ Grammar (lowest precedence first)::
     and      := not ("and" not)*
     not      := "not" not | cmp
     cmp      := primary (op primary)?      op: == != < <= > >= in "not in"
-    primary  := literal | list | ref | call | "(" expr ")"
+    primary  := literal | list | ref | call path? | "(" expr ")"
     literal  := 'str' | "str" | int | float | true | false | null
     list     := "[" (expr ("," expr)*)? ","? "]"
     ref      := "$" name ("." field | "[" expr "]")*
     call     := ("len" | "empty" | "guide") "(" expr ")"
               | ("items" | "count" | "fresh") "(" expr ("," expr)? ")"
               | "exists" "(" expr ")"
+              | "side" "(" expr ")"
+    path     := ("." field | "[" expr "]")+
 
 The collection functions (``docs/cflow-v2.md`` 2.7, 「읽기」) read records
 through a resolver the runtime puts in the environment under
 :data:`COLLECTIONS_KEY` (an object with ``items(addr, status)``,
-``fresh(addr, name)`` and ``exists(addr)``); this module stays free of run
-state. Without a resolver they raise :class:`ExprError`. ``guide(name)``
-(2.10) reads the question type declarations under :data:`QUESTIONS_KEY`. Root names that
+``fresh(addr, name)``, ``exists(addr)`` and ``side(name)``); this module stays
+free of run state. ``side(name)`` (doc 2.9) is the mapping the resolver
+returns for the session's side run ``name`` (``live``, ``status``, ``run``,
+``workflow``, ``scope``), read with a path: ``side('stack').live``. Without a
+resolver they raise :class:`ExprError`. ``guide(name)`` (2.10) reads the
+question type declarations under :data:`QUESTIONS_KEY`. Root names that
 start with ``__`` are never readable as references.
 
 A reference whose root or path does not exist evaluates to ``null``. Ordering
@@ -95,9 +100,10 @@ MAX_LENGTH = 20000
 _INTERNAL = (TypeError, ValueError, RecursionError, OverflowError, MemoryError)
 
 _KEYWORDS = {"and", "or", "not", "in", "true", "false", "null"}
-_FUNCTIONS = {"len", "empty", "guide", "items", "count", "fresh", "exists"}
+_FUNCTIONS = {"len", "empty", "guide", "items", "count", "fresh", "exists", "side"}
 #: Functions over a collection address; name -> (min args, max args).
-COLLECTION_FUNCTIONS = {"items": (1, 2), "count": (1, 2), "fresh": (1, 2), "exists": (1, 1)}
+COLLECTION_FUNCTIONS = {"items": (1, 2), "count": (1, 2), "fresh": (1, 2), "exists": (1, 1),
+                        "side": (1, 1)}
 _CMP_OPS = ("==", "!=", "<=", ">=", "<", ">")
 _PUNCT = "()[],."
 
@@ -206,7 +212,8 @@ def _tokenize(text: str) -> List[_Tok]:
 #   ("not", node)                 ("and", a, b)   ("or", a, b)
 #   ("cmp", op, a, b, col)        op in _CMP_OPS + ("in", "not in")
 #   ("call", name, arg, col)       len/empty: one argument
-#   ("ccall", name, (arg, ...), col)  a collection function
+#   ("ccall", name, (arg, ...), col)  a collection function (or side())
+#   ("post", call, (seg, ...))    a path after a call: side('stack').live
 
 
 class _Parser:
@@ -351,7 +358,7 @@ class _Parser:
                     raise self.error(f"{word}() takes " + (
                         f"{lo} argument" if lo == hi else f"{lo} or {hi} arguments"), tok)
                 self.expect_punct(")")
-                return ("ccall", word, tuple(args), tok.col)
+                return self.parse_post(("ccall", word, tuple(args), tok.col))
             if word in _FUNCTIONS:
                 self.next()
                 self.expect_punct("(")
@@ -359,7 +366,7 @@ class _Parser:
                 if self.is_punct(","):
                     raise self.error(f"{word}() takes one argument")
                 self.expect_punct(")")
-                return ("call", word, arg, tok.col)
+                return self.parse_post(("call", word, arg, tok.col))
             if word in _KEYWORDS:
                 raise self.error(f"unexpected keyword {word!r}", tok)
             raise self.error(
@@ -371,7 +378,15 @@ class _Parser:
             raise self.error("unexpected end of expression")
         raise self.error(f"unexpected {tok.value!r}")
 
+    def parse_post(self, node: tuple) -> tuple:
+        """A path after a call (``side('stack').live``)."""
+        segs = self.parse_segs()
+        return ("post", node, segs) if segs else node
+
     def parse_path(self, root: _Tok) -> tuple:
+        return ("ref", root.value, self.parse_segs())
+
+    def parse_segs(self) -> tuple:
         segs: List[tuple] = []
         while True:
             if self.is_punct("."):
@@ -390,7 +405,7 @@ class _Parser:
                 self.expect_punct("]")
             else:
                 break
-        return ("ref", root.value, tuple(segs))
+        return tuple(segs)
 
 
 @lru_cache(maxsize=512)
@@ -515,6 +530,14 @@ class _Eval:
             return self.call(node[1], self.run(node[2]), node[3])
         if kind == "ccall":
             return self.collection_call(node[1], [self.run(a) for a in node[2]], node[3])
+        if kind == "post":
+            value = self.run(node[1])
+            for seg in node[2]:
+                if value is None:
+                    return None
+                key = seg[1] if seg[0] == "field" else self.run(seg[1])
+                value = _step(value, key)
+            return value
         raise self.fail(f"internal: unknown node {kind!r}")
 
     def compare(self, op: str, a: Any, b: Any, col: int) -> bool:
@@ -573,8 +596,8 @@ class _Eval:
             raise self.fail(f"{name}() reads a run's collections; none are available here", col)
         addr = args[0]
         if not isinstance(addr, str) or not addr:
-            raise self.fail(f"{name}() needs a collection address string, got "
-                            f"{_type_name(addr)}", col)
+            what = "a side run name" if name == "side" else "a collection address"
+            raise self.fail(f"{name}() needs {what} string, got {_type_name(addr)}", col)
         extra = args[1] if len(args) > 1 else None
         if extra is not None and not isinstance(extra, str):
             raise self.fail(f"{name}() second argument must be a string, got "
@@ -586,6 +609,8 @@ class _Eval:
                 return len(resolver.items(addr, extra))
             if name == "fresh":
                 return bool(resolver.fresh(addr, extra))
+            if name == "side":
+                return dict(resolver.side(addr))
             return bool(resolver.exists(addr))
         except ExprError as exc:
             raise self.fail(exc.message, col)
@@ -626,6 +651,12 @@ def references(expr_or_text: Union[Expr, str]) -> Set[str]:
             for item in node[1]:
                 walk(item)
             return
+        if node[0] == "post":
+            walk(node[1])
+            for seg in node[2]:
+                if seg[0] == "index":
+                    walk(seg[1])
+            return
         if node[0] == "ccall":
             for item in node[2]:
                 walk(item)
@@ -657,6 +688,12 @@ def collection_calls(expr_or_text: Union[Expr, str]) -> List[Tuple[str, Any]]:
         if node[0] == "list":
             for item in node[1]:
                 walk(item)
+            return
+        if node[0] == "post":
+            walk(node[1])
+            for seg in node[2]:
+                if seg[0] == "index":
+                    walk(seg[1])
             return
         if node[0] == "ref":
             for seg in node[2]:

@@ -6,7 +6,10 @@ directory under the session's scope (``$CLAUNCH_SESSION``, else ``default``).
 
 Authority: the caller is the session in ``$CLAUNCH_SESSION`` (never an
 argument). A run records its driver at start; every tool works only a run the
-caller drives. ``scope``/``cwd`` name another run only for the cases the
+caller drives. ``side`` names one of the session's side runs (slot
+``<session>+<side>``, doc 2.9) -- the caller drives those too, and
+``flow_start`` with ``side`` starts one beside the main run that declares it.
+``scope``/``cwd`` name another run only for the cases the
 runtime allows (:func:`.runtime.may_drive`): a nested delegation run the
 caller is the delegate of, and -- through ``flow_delegate`` -- a ``session``
 delegation the caller was spawned for. ``flow_start`` starts only in the
@@ -39,6 +42,12 @@ _SCOPE = {
     "description": "run slot. Omit: this session's run. Name another slot only for a "
     "nested delegation run you were briefed to drive (scope '<parent>~<delegation>')",
 }
+_SIDE = {
+    "type": "string",
+    "description": "a side run of this session (the main run's 'sides:' names them, e.g. "
+    "'stack'): the tool works that run (slot '<session>+<side>') instead of the main run. "
+    "Omit for the main run",
+}
 _CWD = {
     "type": "string",
     "description": "directory of the run. Omit: this session's directory. Only with a "
@@ -57,12 +66,17 @@ TOOLS = [
             "same payload as flow_status: the active tasks with rendered prompts, "
             "choices, waits and delegations. Refused while a run is still live "
             "here (continue it with flow_status). A finished run is archived. The "
-            "run belongs to this session (its driver)."
+            "run belongs to this session (its driver). With 'side' it starts that "
+            "side run of this session instead (the live main run must declare it "
+            "under 'sides:'; 'workflow' may be omitted and must match if given); "
+            "the side runs until it finishes or the session ends."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "workflow": {"type": "string", "description": "v2 definition name or .yaml path"},
+                "side": {"type": "string", "description": "start this session's side run of "
+                         "that name (declared by the main run's 'sides:')"},
                 "params": {"type": "object", "description": "values for the definition's params"},
                 "inputs": {"type": "object", "description": "values for the definition's "
                            "typed start inputs (its 'inputs' schema)"},
@@ -73,7 +87,6 @@ TOOLS = [
                     "person (a user choice, an ask, a halt, a loop or visit limit)",
                 },
             },
-            "required": ["workflow"],
         },
     },
     {
@@ -89,7 +102,8 @@ TOOLS = [
             "its max and a person must extend it. Several tasks can be active at "
             "once under par/foreach/group: each has its own 'instance' id."
         ),
-        "inputSchema": {"type": "object", "properties": {"scope": _SCOPE, "cwd": _CWD}},
+        "inputSchema": {"type": "object",
+                        "properties": {"scope": _SCOPE, "cwd": _CWD, "side": _SIDE}},
     },
     {
         "name": "flow_report",
@@ -110,7 +124,7 @@ TOOLS = [
                 "outcome": {"type": "string", "description": "declared outcome (default ok)"},
                 "value": {"type": "object", "description": "the outcome's fields"},
                 "text": {"type": "string", "description": "markdown summary of what happened"},
-                "scope": _SCOPE, "cwd": _CWD,
+                "scope": _SCOPE, "cwd": _CWD, "side": _SIDE,
             },
         },
     },
@@ -129,7 +143,7 @@ TOOLS = [
                 "node": {"type": "string", "description": "choice instance id or label"},
                 "option": {"type": "string"},
                 "reason": {"type": "string", "description": "why; journaled"},
-                "scope": _SCOPE, "cwd": _CWD,
+                "scope": _SCOPE, "cwd": _CWD, "side": _SIDE,
             },
             "required": ["option"],
         },
@@ -148,7 +162,7 @@ TOOLS = [
             "properties": {
                 "group": {"type": "string", "description": "group instance id or name"},
                 "with": {"type": "object", "description": "the member's params"},
-                "scope": _SCOPE, "cwd": _CWD,
+                "scope": _SCOPE, "cwd": _CWD, "side": _SIDE,
             },
         },
     },
@@ -212,7 +226,7 @@ TOOLS = [
                 "option": {"type": "string", "description": "the option (asks with options)"},
                 "decline": {"type": "boolean"},
                 "reason": {"type": "string"},
-                "scope": _SCOPE, "cwd": _CWD,
+                "scope": _SCOPE, "cwd": _CWD, "side": _SIDE,
             },
         },
     },
@@ -268,7 +282,7 @@ TOOLS = [
                 "key": {"description": "the queue record's key (set, remove)"},
                 "item": {"type": "object", "description": "the record to push"},
                 "fields": {"type": "object", "description": "fields to change (set)"},
-                "scope": _SCOPE, "cwd": _CWD,
+                "scope": _SCOPE, "cwd": _CWD, "side": _SIDE,
             },
             "required": ["action"],
         },
@@ -281,7 +295,7 @@ TOOLS = [
         ),
         "inputSchema": {
             "type": "object",
-            "properties": {"name": {"type": "string"}, "scope": _SCOPE, "cwd": _CWD},
+            "properties": {"name": {"type": "string"}, "scope": _SCOPE, "cwd": _CWD, "side": _SIDE},
             "required": ["name"],
         },
     },
@@ -289,7 +303,15 @@ TOOLS = [
 
 
 def _scope(args: dict) -> Any:
-    return str(args.get("scope") or "").strip() or None
+    """The slot a call names: ``side`` (this session's side run) or
+    ``scope``; None for the session's own slot."""
+    side = str(args.get("side") or "").strip()
+    scope = str(args.get("scope") or "").strip() or None
+    if not side:
+        return scope
+    if scope:
+        raise runtime.FlowError("give 'side' or 'scope', not both")
+    return store.side_scope(store.normalize_scope(None), side)
 
 
 def _session() -> str:
@@ -333,6 +355,9 @@ def _call(name: str, args: dict) -> Dict[str, Any]:
     if name == "flow_start":
         cwd = os.getcwd()
         own = store.normalize_scope(None)
+        side = str(args.get("side") or "").strip()
+        if side:
+            return _start_side(side, args, cwd, own, session)
         scope = _scope(args)
         if scope and scope != own:
             raise runtime.FlowError(
@@ -445,6 +470,26 @@ def _call(name: str, args: dict) -> Dict[str, Any]:
         cwd, scope = _where(args)
         return runtime.rule(str(args.get("name") or ""), cwd=cwd, scope=scope)
     raise runtime.FlowError(f"unknown tool {name!r}")
+
+
+def _start_side(side: str, args: dict, cwd: str, own: str, session: str) -> Dict[str, Any]:
+    if args.get("scope") or args.get("cwd"):
+        raise runtime.FlowError("a side run starts beside this session's own main run; "
+                                "give 'side' without 'scope' or 'cwd'")
+    if store.side_of(own):
+        raise runtime.FlowError("a side run is started from the session's main run")
+    for key in ("params", "inputs"):
+        if args.get(key) is not None and not isinstance(args.get(key), dict):
+            raise runtime.FlowError(f"'{key}' must be an object")
+    runtime.authorize(cwd=cwd, scope=own, session=session)
+    force = bool(args.get("force"))
+    if force:
+        runtime.authorize(cwd=cwd, scope=store.side_scope(own, side), session=session)
+    return runtime.start_side(side, cwd=cwd, main=own,
+                              workflow=str(args.get("workflow") or "").strip() or None,
+                              params=args.get("params"), inputs=args.get("inputs"),
+                              caps=runtime.resolve_caps(), force=force, driver=session,
+                              caller=runtime.CALLER_AGENT)
 
 
 def _errors() -> tuple:

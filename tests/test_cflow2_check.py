@@ -535,8 +535,9 @@ a:
 
 @pytest.mark.parametrize("do,code", [
     ("[{push: {to: nope, item: {name: \"'x'\"}}}]", "unknown-collection"),
-    ("[{push: {to: 'main:sig', item: {name: \"'x'\"}}}]", "side-runs-unavailable"),
-    ("[{push: {to: 'side:stack:sig', item: {name: \"'x'\"}}}]", "side-runs-unavailable"),
+    ("[{push: {to: 'main:sig', item: {name: \"'x'\"}}}]", "peer-write"),
+    ("[{push: {to: 'side:stack:sig', item: {name: \"'x'\"}}}]", "peer-write"),
+    ("[{remove: {in: 'main:sig', key: '1'}}]", "peer-write"),
     ("[{push: {to: 'parent:sig', item: {name: \"'x'\"}}}]", "parent-outside-trigger"),
     ("[{set: {in: sig, key: '1', fields: {name: \"'y'\"}}}]", "collection-op-kind"),
     ("[{remove: {in: sig, key: '1'}}]", "collection-op-kind"),
@@ -584,7 +585,8 @@ body:
 """)
     found = codes(chart, "error")
     assert found.count("unknown-collection") == 2
-    assert "side-runs-unavailable" in found and "parent-outside-trigger" in found
+    # a peer's collection (doc 2.9) is resolved at run time: no finding
+    assert "parent-outside-trigger" in found
     assert "collection-op-kind" in found
 
 

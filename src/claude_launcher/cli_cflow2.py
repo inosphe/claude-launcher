@@ -545,7 +545,13 @@ def _cmd_pr_preflight(args: argparse.Namespace) -> int:
     repository with a commit, a remote on a GitHub host, ``gh`` installed
     and signed in to that host. Prints one JSON object (``ready``,
     ``remote``, ``host``, ``slug``, ``repo`` = the ``-R`` value, ``base``,
-    ``head``, ``gh``, ``account``, ``blockers``); exit 0 = ready, 1 = not."""
+    ``head``, ``gh``, ``account``, ``blockers``); exit 0 = ready, 1 = not.
+
+    ``--base`` names the PR's base instead of the configured one: a stack
+    child's base is its parent's ``<parent>-stack`` (claunch-yq80p.2). That
+    branch must already be on the chosen remote -- ``git ls-remote`` says so,
+    and ``base_sha`` carries what it points at -- or it is a blocker: a PR
+    cannot target a branch the remote does not have."""
     from . import prflow
 
     cwd = os.path.abspath(args.cwd or os.getcwd())
@@ -555,6 +561,19 @@ def _cmd_pr_preflight(args: argparse.Namespace) -> int:
     if doc.get("repo") and doc.get("remote") and not host:
         doc["blockers"].append(f"the chosen remote {doc['remote']!r} is not on a GitHub host")
     auth = (doc.get("auth") or {}).get(host or "", {})
+    base_sha = None
+    if args.base:
+        doc["base"] = args.base
+        if doc.get("remote"):
+            code, line, err = prflow._git(cwd, "ls-remote", "--exit-code", doc["remote"],
+                                          f"refs/heads/{args.base}")
+            if code == 0 and line:
+                base_sha = line.split()[0]
+            else:
+                doc["blockers"].append(
+                    f"the base {doc['remote']}/{args.base} is not on the remote"
+                    + (f" ({err})" if code not in (0, 2) and err else "")
+                    + " -- a stack child's base is pushed by its parent")
     out = {
         "ready": not doc["blockers"],
         "remote": doc.get("remote") or None,
@@ -562,6 +581,7 @@ def _cmd_pr_preflight(args: argparse.Namespace) -> int:
         "host": host, "slug": slug,
         "repo": f"{host}/{slug}" if host and slug else None,
         "base": doc.get("base") or "master",
+        "base_sha": base_sha,
         "branch": doc.get("branch") or None,
         "head": doc.get("head") or None,
         "gh": (doc.get("gh") or {}).get("version"),
@@ -699,6 +719,8 @@ def register(sub) -> None:
     q = csub.add_parser("pr-preflight", help="can this directory land through a pull "
                         "request now (remote, host, gh, sign-in)? JSON; exit 0 ready, 1 not")
     q.add_argument("--cwd", help="the repository directory (default: here)")
+    q.add_argument("--base", help="the PR's base branch, which must be on the remote "
+                   "(a stack child's <parent>-stack); default: the configured base")
     q.add_argument("--compact", action="store_true", help="one line of JSON")
     q.set_defaults(func=_cmd_pr_preflight)
 
