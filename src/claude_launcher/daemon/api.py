@@ -54,6 +54,7 @@ from . import loop_lag as loop_lag_mod
 from . import notice as notice_mod
 from . import rag as rag_mod
 from . import worktree_inventory
+from . import vscode as vscode_mod
 from . import (
     briefing, cflow_clock, clipty, ctxsize, loops, onboard, prompt_presets, prompter,
     rebrief, session_input, status_checks,
@@ -262,7 +263,10 @@ def build_auth_middleware(token: str, cookie_sessions: set):
     @web.middleware
     async def auth_middleware(request: web.Request, handler):
         path = request.path
-        if not path.startswith("/api/") or path == "/api/health" or path == "/api/auth/session":
+        # /vscode/ is a proxy into code-server, which runs with no auth of its
+        # own (daemon/vscode.py): this gate is the only one in front of it.
+        gated = path.startswith("/api/") or path.startswith("/vscode/")
+        if not gated or path == "/api/health" or path == "/api/auth/session":
             return await handler(request)
         auth = request.headers.get("Authorization", "")
         if auth.startswith("Bearer ") and _token_eq(auth[7:], token):
@@ -288,6 +292,14 @@ def build_auth_middleware(token: str, cookie_sessions: set):
             )
         except Exception:  # noqa: BLE001 -- diagnosis must not fail a request
             log.debug("could not record a refusal", exc_info=True)
+        if path.startswith("/vscode/"):
+            # An editor tab is a page, not a fetch: say where to log in.
+            return web.Response(
+                status=401, content_type="text/html",
+                text="<!doctype html><meta charset=utf-8><title>VS Code</title>"
+                "<p style='font:15px system-ui;margin:2em'>Log in to the claunch "
+                "dashboard first, then open VS Code from it again.</p>",
+            )
         return json_error(401, "authentication required")
 
     return auth_middleware
@@ -338,6 +350,7 @@ def build_app(
     operator_bot.install(app, create=_create_session, gates=_operator_gates,
                          work=lambda sessions: _operator_work(app, sessions))
     clipboard.install(app)
+    vscode_mod.install(app)
     app["relay_state"] = relay_state if relay_state is not None else _relay_unconfigured
     app["token"] = token
     app["cookie_sessions"] = cookie_sessions

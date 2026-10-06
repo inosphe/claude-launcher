@@ -16929,11 +16929,16 @@ function openSettings(section) {
     refreshInstallOverview();
     return;
   }
+  if (wsSection === "vscode") {
+    refreshVscode();
+    return;
+  }
   if (wsSection === "workspaces") {
     // The registry itself came with openWorkspaces above; these are the two
-    // cards keyed by it.
+    // cards keyed by it, and the VS Code buttons on its rows.
     refreshProjects().then(() => { if (wsOpen) renderWorkspaces(); });
     refreshBeadsBoards();
+    refreshVscode();
     return;
   }
   refreshHarnesses().then(() => { if (wsOpen) renderWorkspaces(); });
@@ -21130,6 +21135,7 @@ function settingsTabs() {
     ["workspaces", "Workspaces", "#/settings/workspaces"],
     ["profiles", "Profiles", "#/settings/profiles"],
     ["install", "Install", "#/settings/install"],
+    ["vscode", "VS Code", "#/settings/vscode"],
   ]) {
     const tab = el("a", "seq-tab" + (wsSection === section ? " on" : ""), label);
     tab.href = href;
@@ -21691,6 +21697,11 @@ function renderWorkspaces() {
     view.appendChild(installPanel());
     return;
   }
+  if (wsSection === "vscode") {
+    view.appendChild(vscodePanel());
+    refocusSettingsField(focused);
+    return;
+  }
   if (wsSection === "profiles") {
     view.appendChild(profilesPanel());
     if (focused) {
@@ -21727,6 +21738,329 @@ function renderWorkspaces() {
   view.appendChild(relaySettingsCard());
 
   refocusSettingsField(focused);
+}
+
+/* ------------------------------------------------------------------ */
+/* VS Code (#/settings/vscode) — code-server per workspace / worktree  */
+/* ------------------------------------------------------------------ */
+/* The daemon runs one code-server per registered workspace root, per
+   worktree under it, and per session directory outside the registry
+   (daemon/vscode.py), behind its own auth at vscode/<key>/ — relative to
+   BASE, so the same link works through a relay's /t/<name>/. This tab is
+   the one place its settings, its install and its running servers are
+   read and changed; the Workspaces rows and the session panel only open. */
+let vscodeState = null;
+let vscodeError = "";
+let vscodeBusy = "";
+let vscodeDraft = null;     // settings form, while it differs from the saved
+let vscodeInstallPoll = null;
+
+async function refreshVscode() {
+  try {
+    const resp = await api("/api/vscode");
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    vscodeState = data;
+    vscodeError = "";
+  } catch (err) { vscodeError = String(err); }
+  if (wsOpen) renderWorkspaces();
+  return vscodeState;
+}
+
+function vscodeWaitInstall() {
+  return new Promise((resolve) => {
+    clearInterval(vscodeInstallPoll);
+    vscodeInstallPoll = setInterval(async () => {
+      const st = await refreshVscode();
+      const inst = (st && st.install) || {};
+      if (inst.installed || inst.state === "failed") {
+        clearInterval(vscodeInstallPoll);
+        vscodeInstallPoll = null;
+        resolve(inst);
+      }
+    }, 1000);
+  });
+}
+
+async function vscodeInstall() {
+  const ver = ((vscodeState || {}).install || {}).version || "";
+  if (!confirm(`Download and install code-server ${ver} (about 220 MB) on the daemon's machine?`)) {
+    return false;
+  }
+  const resp = await api("/api/vscode/install", { method: "POST" });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+  await refreshVscode();
+  const inst = await vscodeWaitInstall();
+  if (!inst.installed) throw new Error(inst.error || "install failed");
+  return true;
+}
+
+/* Open a server in a new tab. The tab is opened before the first await —
+   a popup blocker allows window.open only inside the click itself — and
+   shows a line while the server starts (a cold start takes a second or two,
+   an install minutes). */
+async function vscodeOpen(body) {
+  const tab = window.open("", "_blank");
+  const say = (text) => {
+    try { if (tab && !tab.closed) tab.document.body.textContent = text; } catch { /* navigated */ }
+  };
+  say("Starting VS Code…");
+  vscodeBusy = JSON.stringify(body);
+  if (wsOpen) renderWorkspaces();
+  try {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const resp = await api("/api/vscode/open", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (resp.status === 409 && data.needs_install && attempt === 0) {
+        if (!vscodeState) await refreshVscode();
+        say("Waiting for code-server to be installed…");
+        if (!(await vscodeInstall())) { if (tab) tab.close(); return; }
+        continue;
+      }
+      if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+      if (tab && !tab.closed) tab.location.href = url(data.path);
+      else window.open(url(data.path), "_blank");
+      vscodeError = "";
+      break;
+    }
+  } catch (err) {
+    vscodeError = String(err);
+    say(`Could not open VS Code: ${err}`);
+  } finally {
+    vscodeBusy = "";
+    refreshVscode();
+  }
+}
+
+async function vscodeStop(key) {
+  vscodeBusy = "stop:" + key;
+  if (wsOpen) renderWorkspaces();
+  try {
+    const resp = await api("/api/vscode/stop", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+  } catch (err) { vscodeError = String(err); }
+  vscodeBusy = "";
+  refreshVscode();
+}
+
+async function vscodeSaveSettings(changes) {
+  vscodeBusy = "settings";
+  if (wsOpen) renderWorkspaces();
+  try {
+    const resp = await api("/api/vscode/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(changes),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    vscodeDraft = null;
+    vscodeError = "";
+  } catch (err) { vscodeError = String(err); }
+  vscodeBusy = "";
+  refreshVscode();
+}
+
+/* The button every surface uses; disabled with the reason as its title when
+   the daemon cannot serve one (Windows, turned off). */
+function vscodeButton(label, body, extraClass = "") {
+  const btn = el("button", "wf-btn " + extraClass, label);
+  const st = vscodeState;
+  const why = !st ? "" : !st.supported ? st.reason
+    : !(st.settings || {}).enabled ? "VS Code servers are turned off (Settings → VS Code)" : "";
+  btn.disabled = Boolean(why) || vscodeBusy === JSON.stringify(body);
+  btn.title = why || "open in VS Code in a new tab (code-server, behind this dashboard's login)";
+  btn.addEventListener("click", () => vscodeOpen(body));
+  return btn;
+}
+
+function vscodePanel() {
+  const wrap = el("div", "vscode-panel");
+  const st = vscodeState;
+  wrap.appendChild(el(
+    "p", "wf-note",
+    "One code-server per registered workspace, per worktree under it, and per " +
+    "session directory outside the registry. Servers start when opened and stop " +
+    "after the idle timeout; they are served at vscode/<key>/ behind this " +
+    "dashboard's login, also through a relay."
+  ));
+  if (vscodeError) wrap.appendChild(el("p", "error", vscodeError));
+  if (!st) {
+    wrap.appendChild(el("p", "wf-note", "loading…"));
+    return wrap;
+  }
+  if (!st.supported) wrap.appendChild(el("p", "error", st.reason));
+
+  // install
+  const inst = st.install || {};
+  const ic = el("section", "prompt-preset-settings");
+  ic.appendChild(el("h3", null, "code-server"));
+  if (inst.state === "installing") {
+    const pct = inst.total ? Math.floor((inst.done / inst.total) * 100) : 0;
+    ic.appendChild(el("p", "wf-note",
+      `installing ${inst.version}: ${(inst.done / 1048576).toFixed(0)} / ` +
+      `${(inst.total / 1048576).toFixed(0)} MB (${pct}%)`));
+  } else if (inst.installed) {
+    ic.appendChild(el("p", "wf-note", `installed: ${inst.binary}`));
+  } else {
+    ic.appendChild(el("p", "wf-note",
+      `not installed. Opening any workspace offers to download code-server ${inst.version} ` +
+      "(about 220 MB, sha256-checked) into the daemon's home."));
+    if (inst.state === "failed") ic.appendChild(el("p", "error", `last install failed: ${inst.error}`));
+    const b = el("button", "wf-btn", "Install now");
+    b.disabled = !st.supported;
+    b.addEventListener("click", () => vscodeInstall().catch((err) => {
+      vscodeError = String(err); renderWorkspaces();
+    }));
+    ic.appendChild(b);
+  }
+  ic.appendChild(el("p", "wf-note mono", `data: ${st.root}`));
+  wrap.appendChild(ic);
+
+  // settings
+  const cur = st.settings || {};
+  const draft = vscodeDraft || { ...cur };
+  const sc = el("section", "prompt-preset-settings");
+  sc.appendChild(el("h3", null, "settings (vscode: in ~/.claunch.yaml)"));
+  const form = el("form", "vscode-settings");
+  const row = (labelText, input, note) => {
+    const r = el("label", "vscode-setting");
+    r.appendChild(el("span", "vscode-setting-name", labelText));
+    r.appendChild(input);
+    if (note) r.appendChild(el("span", "wf-note", note));
+    form.appendChild(r);
+  };
+  const check = (key) => {
+    const i = document.createElement("input");
+    i.type = "checkbox";
+    i.checked = Boolean(draft[key]);
+    i.addEventListener("change", () => {
+      vscodeDraft = { ...(vscodeDraft || draft), [key]: i.checked };
+      renderWorkspaces();
+    });
+    return i;
+  };
+  row("enabled", check("enabled"), "serve /vscode/ at all");
+  const idle = document.createElement("input");
+  idle.type = "number"; idle.min = "1"; idle.step = "1"; idle.id = "vscode-idle";
+  idle.value = String(Math.round((draft.idle_timeout || 1800) / 60));
+  idle.addEventListener("input", () => {
+    vscodeDraft = { ...(vscodeDraft || draft), idle_timeout: Number(idle.value) * 60 };
+  });
+  row("idle timeout (minutes)", idle, "stop a server after this long with no open connection");
+  row("port proxy", check("port_proxy"),
+    "code-server's /proxy/<port>/: exposes this machine's local ports through the dashboard " +
+    "and the relay. Applies to servers started after the change.");
+  const cmd = document.createElement("input");
+  cmd.type = "text"; cmd.id = "vscode-command"; cmd.placeholder = "(the installed code-server)";
+  cmd.value = draft.command || "";
+  cmd.addEventListener("input", () => { vscodeDraft = { ...(vscodeDraft || draft), command: cmd.value }; });
+  row("command", cmd, "a code-server executable to run instead of the installed one");
+  const save = el("button", "wf-btn approve", "Save");
+  save.type = "submit";
+  save.disabled = vscodeBusy === "settings";
+  form.appendChild(save);
+  form.addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    const d = vscodeDraft || draft;
+    vscodeSaveSettings({
+      enabled: Boolean(d.enabled),
+      port_proxy: Boolean(d.port_proxy),
+      idle_timeout: Number(d.idle_timeout),
+      command: (d.command || "").trim() || null,
+    });
+  });
+  sc.appendChild(form);
+  wrap.appendChild(sc);
+
+  // servers
+  const servers = st.servers || [];
+  const sv = el("section", "prompt-preset-settings");
+  sv.appendChild(el("h3", null, `servers (${servers.filter((s) => s.state === "running").length} running)`));
+  const refresh = el("button", "wf-btn clear", "Refresh");
+  refresh.addEventListener("click", () => refreshVscode());
+  sv.appendChild(refresh);
+  if (!servers.length) sv.appendChild(el("p", "wf-note", "none started since the daemon came up"));
+  for (const s of servers) {
+    const r = el("div", "ws-row vscode-server");
+    const text = el("div", "ws-text");
+    text.appendChild(el("span", "ws-name", s.key));
+    text.appendChild(el("span", "ws-path mono", s.folder));
+    const facts = [`pid ${s.pid || "-"}`, `${s.connections} connection(s)`,
+      `last active ${(s.last_active || "").replace("T", " ")}`];
+    if (s.port_proxy) facts.push("port proxy on");
+    text.appendChild(el("span", "wf-note", facts.join(" · ")));
+    if (s.error) text.appendChild(el("span", "error", s.error));
+    r.appendChild(text);
+    r.appendChild(el("span", "badge " + (s.state === "running" ? "idle" : "exited"), s.state));
+    const body = s.kind === "adhoc" ? null
+      : s.kind === "worktree" ? { workspace: s.workspace, worktree: s.worktree }
+      : { workspace: s.workspace };
+    if (body) r.appendChild(vscodeButton("Open", body));
+    if (s.state === "running") {
+      const stop = el("button", "wf-btn clear", "Stop");
+      stop.disabled = vscodeBusy === "stop:" + s.key;
+      stop.addEventListener("click", () => vscodeStop(s.key));
+      r.appendChild(stop);
+    }
+    sv.appendChild(r);
+  }
+  wrap.appendChild(sv);
+  return wrap;
+}
+
+/* The Workspaces row's share: the root's button, and a picker over the
+   worktrees under it (a workspace with twenty worktrees would otherwise be
+   twenty buttons). Nothing until /api/vscode has answered. */
+function wsVscodeControls(w) {
+  const box = el("span", "ws-vscode");
+  const st = vscodeState;
+  if (!st) return box;
+  box.appendChild(vscodeButton("VS Code", { workspace: w.name }));
+  const trees = (st.targets || []).filter((t) => t.kind === "worktree" && t.workspace === w.name);
+  if (trees.length) {
+    const pick = document.createElement("select");
+    pick.className = "ws-vscode-pick";
+    pick.appendChild(new Option(`worktree… (${trees.length})`, ""));
+    for (const t of trees) {
+      const running = t.server && t.server.state === "running" ? " ●" : "";
+      pick.appendChild(new Option(t.worktree + running, t.worktree));
+    }
+    pick.title = "open one of this workspace's worktrees in its own VS Code server";
+    pick.addEventListener("change", () => {
+      if (pick.value) vscodeOpen({ workspace: w.name, worktree: pick.value });
+      pick.value = "";
+    });
+    box.appendChild(pick);
+  }
+  return box;
+}
+
+/* The session panel's share: open the server for this session's directory
+   — its worktree's, its workspace's, or one of its own when the directory
+   is outside the registry. */
+function sessVscode(data) {
+  const s = data.session || {};
+  const box = el("div", "sess-vscode");
+  box.appendChild(el("h3", null, "VS Code"));
+  if (!vscodeState) { refreshVscode(); }
+  if (!s.cwd) {
+    box.appendChild(el("p", "wf-note", "this session has no directory"));
+    return box;
+  }
+  box.appendChild(el("p", "wf-note mono", s.cwd));
+  box.appendChild(vscodeButton("Open in VS Code", { session: s.name }));
+  return box;
 }
 
 /* The Workspaces section (#/settings/workspaces, and the older #/workspaces):
@@ -23172,6 +23506,8 @@ function wsRow(w) {
       here.length === 1 ? "1 session" : `${here.length} sessions`
     ));
   }
+
+  if (w.exists) row.appendChild(wsVscodeControls(w));
 
   const rm = el("button", "wf-btn clear", "Unregister");
   rm.addEventListener("click", () => wsRemove(w, here));
@@ -26231,6 +26567,8 @@ function renderSession(data) {
     // round reports because the three are one answer read from three places:
     // what it was asked to do, what it wrote up, what it committed.
     view.appendChild(sessCommits(data));
+    // And the editor for that directory, beside what was committed in it.
+    view.appendChild(sessVscode(data));
 
     // What this session is FOR, by role: a leader gets its dispatch and reaping
     // panels here, other roles whatever ROLE_PANELS declares for them. Between

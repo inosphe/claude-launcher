@@ -85,7 +85,7 @@ let refreshed = 0;
 const sections = [
   "sessFlags", "sessNote", "sessTask", "sessBriefSection", "sessInputJournal",
   "sessHandoff", "sessSend", "sessMeshJoin", "sessBeads", "sessCommits",
-  "sessReborrow", "sessPerms", "sessMigrate",
+  "sessVscode", "sessReborrow", "sessPerms", "sessMigrate",
 ];
 const stubs = `
 let sessName = "coder1", sessRunFold = null;
@@ -190,7 +190,7 @@ const OVERVIEW = ["sess-meta", "sessFlags", "sessNote", "sessTask",
                   "sessBriefSection"];
 const MESSAGES = ["sessInputJournal", "sessHandoff", "sessSend", "sessQueued",
                   "sess-meshes"];
-const WORK = ["sessBeads", "sessCommits", "roleQuickJob"];
+const WORK = ["sessBeads", "sessCommits", "sessVscode", "roleQuickJob"];
 const SETTINGS = ["sessReborrow", "sessPerms", "sessMigrate"];
 const TOP = ["sess-head", "sess-tabs", "sess-subtabs"];
 

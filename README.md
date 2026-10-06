@@ -1766,6 +1766,7 @@ and a form painted into its PTY would hang the session it was creating.
 | `resize S COLS ROWS`  | Resize the session's terminal. |
 | `harnesses`           | List the declared harnesses (`claude`, `codex`, `pi`, `kimi`, `agent`, plus your own) and whether each is installed here. |
 | `workspace add\|ls\|rm` (`ws`) | Register / list / unregister the directories a session may be spawned in — the web UI's Directory picker is exactly this list, and (unless `spawn.allow_workspace` is off) where an agent may send a child (see [Workspaces](#workspaces-where-a-session-may-be-spawned)). `add` defaults to the current directory and refuses one that does not exist. |
+| `workspace code [WS] [--worktree NAME] [--session S] [--install] [--stop]` | Open a workspace, one of its worktrees, or a session's directory in VS Code in the browser (code-server run by the daemon) and print the URL; with no workspace, list the running servers (see [VS Code in the browser](#vs-code-in-the-browser-one-code-server-per-workspace-and-worktree)). |
 | `daemon start\|stop\|status\|restart` | Explicit daemon control (session commands auto-start it, tmux-style). |
 | `daemon token [--rotate]` | Print (or rotate) the API/web auth token. |
 | `daemon config [KEY [VALUE]]` | Show or set daemon settings (stored in `~/.claunch.yaml`). |
@@ -2289,6 +2290,58 @@ straight into it — register it like any other directory:
 
 ```bash
 claunch workspace add .claude/worktrees/review --name review
+```
+
+### VS Code in the browser (one code-server per workspace and worktree)
+
+The daemon can run [code-server](https://github.com/coder/code-server) next to
+the sessions and serve it at `/vscode/<key>/`, behind the dashboard's own login:
+
+| Target | Key | Opens |
+|---|---|---|
+| a registered workspace | `<workspace>` | its root |
+| a linked worktree under it | `<workspace>~<name>` | `<root>/.claude/worktrees/<name>` |
+| a session directory outside every workspace | `adhoc-<hash>` | that directory (only from the session's panel) |
+
+Each target is its own code-server process. It starts when first opened and
+stops after `vscode.idle_timeout` seconds without an open connection; the next
+open starts it again. Extensions and `User/settings.json`·`keybindings.json`
+are shared by every server; each server keeps its own state (open editors,
+unsaved-buffer backups) under `~/.claude-launcher/vscode/servers/`.
+
+- **Opening**: the VS Code button on each row of Settings → Workspaces (with a
+  picker for that workspace's worktrees), the VS Code block of a session's
+  panel, or `claunch workspace code <workspace> [--worktree NAME]`, which
+  prints the URL. With no workspace it lists the running servers.
+- **Installing**: code-server is not bundled. The first open asks, then the
+  daemon downloads the pinned release (about 220 MB), checks its published
+  sha256 and unpacks it under `~/.claude-launcher/vscode/code-server/`.
+  `claunch workspace code <ws> --install` does the same from a shell.
+- **Auth**: code-server runs with `--auth none` on a unix socket (mode 0600).
+  The only gate is the daemon's Bearer token or login cookie, which the
+  middleware applies to `/vscode/` exactly as to `/api/`. The proxy removes
+  `Authorization` and the `claunch_session`/`relay_session` cookies before a
+  request reaches code-server.
+- **Relay**: through a relay the same server is at
+  `/t/<name>/vscode/<key>/`; code-server builds its URLs relative to the page,
+  and WebSockets pass through.
+- **Same origin**: the editor runs on the dashboard's origin (a relay cannot
+  give it another). Scripts in it — extensions, webviews — can call the
+  daemon's API with the browser's login, which is the same reach a terminal
+  of the daemon already has.
+- **Port forwarding** (code-server's `/proxy/<port>/`) is off: servers start
+  with `--disable-proxy` and the proxy refuses those paths.
+- **Not on a Windows daemon** (code-server needs Linux, macOS or WSL).
+
+Settings → VS Code shows and edits the `vscode:` block, the install and the
+running servers (with Stop):
+
+```yaml
+vscode:
+  enabled: true        # serve /vscode/ at all
+  idle_timeout: 1800   # seconds without a connection before a server stops
+  port_proxy: false    # code-server's /proxy/<port>/; applies to servers started after
+  command: null        # a code-server to run instead of the installed one
 ```
 
 ### Each workspace's issue board

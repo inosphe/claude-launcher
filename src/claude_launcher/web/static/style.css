@@ -5422,3 +5422,21 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 }
 #shadow-input-field:focus { outline: none; border-color: #1f6feb; }
 #shadow-input-field:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* VS Code (#/settings/vscode, Workspaces rows, session panel) */
+.vscode-settings { display: flex; flex-direction: column; gap: 8px; }
+.vscode-setting { display: grid; grid-template-columns: 180px auto; gap: 4px 12px; align-items: center; }
+.vscode-setting .wf-note { grid-column: 2; }
+.vscode-setting-name { color: #c9d1d9; }
+.vscode-setting input[type="number"], .vscode-setting input[type="text"] { max-width: 360px; }
+.vscode-setting input[type="checkbox"] { justify-self: start; }
+.vscode-settings > .wf-btn { align-self: flex-start; }
+.vscode-panel > .wf-note { margin: 10px 0; }
+.ws-vscode { display: inline-flex; gap: 6px; align-items: center; flex: none; }
+.ws-vscode-pick { max-width: 220px; }
+.vscode-server .ws-text .error { display: block; }
+.sess-vscode { margin: 14px 0; }
+@media (max-width: 640px) {
+  .vscode-setting { grid-template-columns: 1fr; }
+  .vscode-setting .wf-note { grid-column: 1; }
+}
