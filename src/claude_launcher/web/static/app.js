@@ -12340,6 +12340,15 @@ function installOsc52(t) {
     }
     const text = decodeOsc52(data);
     if (text === null) return true;
+    // The Clipboard menu lists the daemon's history, which reads the daemon
+    // machine's clipboard — not this browser's — so hand it the copy too
+    // (claunch-fqw4k). Also when the browser refuses it: the menu's Copy is
+    // then the way to reach it.
+    api("/api/clipboard", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    }).catch(() => {});
     copyToBrowserClipboard(text, document.body).then((ok) => {
       if (!ok) {
         notify(

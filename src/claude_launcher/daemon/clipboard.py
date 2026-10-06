@@ -5,7 +5,9 @@ Two directions, both about the same shared resource.
 *Reading* keeps a bounded in-memory history of the host's copied text, which
 the web session composer offers back. It never modifies the clipboard. On
 Windows it is read in-process; under WSL it is the Windows clipboard, asked of
-one long-lived PowerShell; on other Linux it is wl-paste or xclip/xsel.
+one long-lived PowerShell; on other Linux it is wl-paste or xclip/xsel. The
+web terminal adds to the same history what an OSC 52 write put on the
+browser's clipboard, which may be another machine's (claunch-fqw4k).
 
 *Writing* is how an image reaches a harness. A program reading a PTY cannot
 be handed an attachment, but a harness does take an image off the clipboard --
@@ -437,11 +439,24 @@ class History:
             self.last = text
             if not text:
                 return
-            self.serial += 1
-            self.items = [item for item in self.items if item["text"] != text]
-            self.items.insert(0, {"id": str(self.serial), "text": text,
-                                  "copied_at": datetime.now(timezone.utc).isoformat()})
-            del self.items[MAX_ITEMS:]
+            self._record(text)
+
+    async def add(self, text: str):
+        """Record text a browser copied (an OSC 52 write the web terminal
+        took, claunch-fqw4k). The host clipboard is neither read nor written,
+        and ``last`` stays the host's, so the next sample still compares
+        against what the host holds."""
+        async with self.lock:
+            return self._record(text)
+
+    def _record(self, text: str):
+        self.serial += 1
+        self.items = [item for item in self.items if item["text"] != text]
+        item = {"id": str(self.serial), "text": text,
+                "copied_at": datetime.now(timezone.utc).isoformat()}
+        self.items.insert(0, item)
+        del self.items[MAX_ITEMS:]
+        return item
 
     async def watch(self):
         while True:
@@ -467,6 +482,23 @@ async def get_history(request):
                              headers={"Cache-Control": "no-store"})
 
 
+async def add_history(request):
+    """A copy that reached the browser's clipboard, not this machine's: the
+    web terminal posts what an OSC 52 write put there, so the history the
+    session line offers holds it too."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    text = body.get("text") if isinstance(body, dict) else None
+    if not isinstance(text, str) or not text:
+        return web.json_response({"error": "'text' must be a non-empty string"}, status=400)
+    if len(text) > MAX_TEXT:
+        return web.json_response({"error": TOO_LONG}, status=413)
+    item = await request.app["clipboard"].add(text)
+    return web.json_response({"item": item}, headers={"Cache-Control": "no-store"})
+
+
 async def delete_history(request):
     history = request.app["clipboard"]
     async with history.lock:
@@ -479,6 +511,7 @@ def install(app):
     app["clipboard"] = History()
     app.cleanup_ctx.append(lifecycle)
     app.router.add_get("/api/clipboard", get_history)
+    app.router.add_post("/api/clipboard", add_history)
     app.router.add_delete("/api/clipboard", delete_history)
     app.router.add_delete("/api/clipboard/{item_id}", delete_history)
 

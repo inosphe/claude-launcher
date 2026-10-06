@@ -2,7 +2,9 @@
 // browser runs on (claunch-yr3yu). Slices the real block out of app.js and
 // drives it against a stub xterm: the parser handler, the input gate (DOM
 // user events only -- never xterm's own onData), the query/clear/oversize
-// refusals, UTF-8 decoding, and the notice on refusal.
+// refusals, UTF-8 decoding, and the notice on refusal. Every copy taken is
+// also posted to the daemon's history, which the Clipboard menu lists, and
+// nothing refused is (claunch-fqw4k).
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
@@ -30,6 +32,7 @@ const b64 = (s) => Buffer.from(s, 'utf8').toString('base64');
 
 const written = [];
 const notices = [];
+const posted = [];
 let now = 1_000_000;
 const ctx = vm.createContext({
   atob: (s) => { if (!/^[A-Za-z0-9+/]*={0,2}$/.test(s)) throw new Error('bad'); return Buffer.from(s, 'base64').toString('latin1'); },
@@ -37,6 +40,12 @@ const ctx = vm.createContext({
   Date: { now: () => now },
   navigator: { clipboard: { writeText: async (text) => { written.push(text); } } },
   notify: (title, sub, opts) => { notices.push([title, opts && opts.key]); },
+  api: async (path, opts) => {
+    assert.equal(path, '/api/clipboard');
+    assert.equal(opts.method, 'POST');
+    posted.push(JSON.parse(opts.body).text);
+    return { ok: true };
+  },
   document: { body: {}, activeElement: null },
   $: (id) => (id === 'term-input' ? sessionLine : null),
   term: null,
@@ -63,6 +72,7 @@ const flush = () => new Promise((r) => setImmediate(r));
   await flush();
   assert.deepEqual(written, [], 'terminal-generated onData does not open the gate');
   assert.deepEqual(notices, [], 'and raises no notice either');
+  assert.deepEqual(posted, [], 'a copy the gate refused is not posted to the history');
 
   // The session line counts for the terminal on screen, and only for it.
   sessionLine.fire('keydown');
@@ -73,6 +83,7 @@ const flush = () => new Promise((r) => setImmediate(r));
   osc('c;' + b64('/copy via the session line'));
   await flush();
   assert.deepEqual(written, ['/copy via the session line']);
+  assert.deepEqual(posted, ['/copy via the session line'], 'the copy taken is posted to the history');
   ctx.term = null;
   now += vm.runInContext('OSC52_INPUT_MS', ctx) + 1;
   written.length = 0;
@@ -105,18 +116,21 @@ const flush = () => new Promise((r) => setImmediate(r));
   await flush();
   assert.equal(written.length, count, 'query/clear/invalid payloads write nothing');
   assert.deepEqual(notices, []);
+  const postedCount = posted.length;
 
   // Oversized: refused with a notice, nothing written.
   osc('c;' + 'A'.repeat(vm.runInContext('OSC52_MAX_BASE64', ctx) + 4));
   await flush();
   assert.equal(written.length, count);
   assert.deepEqual(notices.at(-1), ['Copy not taken', 'osc52']);
+  assert.equal(posted.length, postedCount, 'query/clear/invalid/oversized payloads are not posted');
 
   // The gate closes OSC52_INPUT_MS after the last input.
   now += vm.runInContext('OSC52_INPUT_MS', ctx) + 1;
   osc('c;' + b64('late'));
   await flush();
   assert.equal(written.length, count, 'no copy long after the last input');
+  assert.equal(posted.length, postedCount, 'nor posted');
 
   // Browser refuses both routes (plain http, no activation): a notice says so.
   term.type('x');
@@ -127,6 +141,7 @@ const flush = () => new Promise((r) => setImmediate(r));
   osc('c;' + b64('refused'));
   await flush();
   assert.deepEqual(notices.at(-1), ["Copy did not reach this computer's clipboard", 'osc52']);
+  assert.equal(posted.at(-1), 'refused', "a copy the browser refused is still posted: the menu's Copy reaches it");
 
   // The execCommand fallback that succeeds raises no notice.
   const before = notices.length;
@@ -138,5 +153,11 @@ const flush = () => new Promise((r) => setImmediate(r));
   // Both terminals that take input install it; the read-only shadow does not.
   assert.match(source, /term\.onData\(sendInput\);[\s\S]{0,200}installOsc52\(term\)/);
   assert.match(source, /installOsc52\(cliTerm\)/);
-  console.log('osc52: input gate, UTF-8 write, query/clear/invalid ignored, size cap, refusal notice, both terminals wired passed');
+  // A history the daemon cannot take (offline, 413) leaves the copy alone.
+  ctx.api = async () => { throw new Error('offline'); };
+  ctx.document.execCommand = () => true;
+  osc('c;' + b64('offline'));
+  await flush();
+  assert.equal(notices.length, before, 'a failed post raises no notice');
+  console.log('osc52: input gate, UTF-8 write, query/clear/invalid ignored, size cap, refusal notice, history post, both terminals wired passed');
 })().catch((error) => { console.error(error); process.exitCode = 1; });
