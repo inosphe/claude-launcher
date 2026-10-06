@@ -457,6 +457,7 @@ CHECKS = [
         "settingsworkspaces_check.js",
         "beadsboardsetup_check.js",
         "installsettings_check.js",
+        "prompt_packs_check.js",
         "beadskanban_check.js",
         "beadsgroups_check.js",
         "beadsworkspace_check.js",
