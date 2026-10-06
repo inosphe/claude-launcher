@@ -482,6 +482,7 @@ CHECKS = [
         "reports_check.js",
         "beadslayout_check.js",
         "sesscommits_check.js",
+        "vscode_check.js",
         "sesstask_check.js",
         "railprofile_check.js",
         "railcompacting_check.js",
