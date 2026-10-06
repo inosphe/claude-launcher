@@ -3090,10 +3090,36 @@ class MeshManager:
             return
         asyncio.ensure_future(self._brief(mesh, member))
 
+    def subrole_stances(
+        self, mesh: Mesh, member: Member
+    ) -> List[Tuple[str, str]]:
+        """``[(subrole, stance)]`` for the subroles this mesh gives a stance.
+
+        In the member's order. A subrole whose role declares no stance, that
+        the vocabulary no longer defines, or whose stance is word for word one
+        already listed (the primary's included) is left out: there is nothing
+        further for the member to read under that name. The one list the
+        briefing, :func:`rebrief.addressable` and the session reminder all
+        read, so the stance an agent is handed, the id it is reminded of and
+        the text the rebrief tool serves for that id cannot drift apart.
+        """
+        primary = mesh.roleset.get(member.role)
+        seen = {primary.stance.strip()} if primary and primary.stance.strip() else set()
+        out: List[Tuple[str, str]] = []
+        for name in member.subroles:
+            role = mesh.roleset.get(name)
+            text = role.stance.strip() if role else ""
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            out.append((name, text))
+        return out
+
     def _stance_lines(
-        self, mesh: Mesh, member: Member, *, inline: bool = True
+        self, mesh: Mesh, member: Member, *, inline: bool = True,
+        primary: bool = True, subroles: Optional[Sequence[str]] = None,
     ) -> str:
-        """The role stance supplied by every local member's briefing.
+        """The role stances supplied by every local member's briefing.
 
         Role is a mesh membership property and every harness receives the
         same opening block.  The full stance therefore arrives here, named by
@@ -3101,13 +3127,28 @@ class MeshManager:
         :func:`rebrief.recall` can serve.  ``inline=False`` remains the
         rebrief budget fallback, and a remote member is left to the daemon
         hosting its terminal.
+
+        A subrole is a role the member also answers for, so its stance binds
+        the member too and rides after the primary's, each with its own id
+        (:meth:`subrole_stances`). ``primary=False`` leaves the primary's
+        out and ``subroles`` narrows the subroles to those named — what a
+        role-change notice uses to hand over only the stances it adds.
         """
         role = mesh.roleset.get(member.role)
-        if not (role and role.stance.strip()):
+        entries: List[Tuple[str, str]] = []
+        if primary and role and role.stance.strip():
+            entries.append((member.role, role.stance.strip()))
+        entries += [
+            (f"subrole {name}", text)
+            for name, text in self.subrole_stances(mesh, member)
+            if subroles is None or name in subroles
+        ]
+        if not entries:
             return ""
+        also = " and its subroles" if member.subroles else ""
         pointer = (
             f"stance: run 'claunch mesh stance {mesh.name}' now — it prints "
-            f"what a {member.role} is on this mesh, and it is binding\n"
+            f"what a {member.role}{also} is on this mesh, and it is binding\n"
         )
         if not inline or not self._is_local(mesh, member):
             # The caller has a harder budget than the join does and would
@@ -3116,24 +3157,23 @@ class MeshManager:
             # one command away — the owed ledger and the opening task have
             # none. See :func:`rebrief.compose`.
             return pointer
-        whole = role.stance.strip()
-        body = whole
-        if len(body) > _INLINE_STANCE:
-            body = body[:_INLINE_STANCE].rstrip() + " [...]"
-        # The id names the WHOLE stance, not the copy below it, which may
-        # have been cut at :data:`_INLINE_STANCE`. That is the point rather
-        # than a discrepancy: an agent that finds the id here knows it still
-        # has a starting position, and one that wants the part the cap took
-        # pulls it by the same id (:func:`rebrief.recall`). It rides here and
-        # only here, next to the prose, because an id delivered on its own
-        # would let "is this id in my context?" answer yes for text that
-        # never arrived.
-        ident = digests.text_digest(whole)
-        marker = f" [text id: {ident}]" if ident else ""
-        return (
-            f"{pointer}stance ({member.role}), binding{marker}:\n"
-            f"{body}\n"
-        )
+        out = pointer
+        for label, whole in entries:
+            body = whole
+            if len(body) > _INLINE_STANCE:
+                body = body[:_INLINE_STANCE].rstrip() + " [...]"
+            # The id names the WHOLE stance, not the copy below it, which may
+            # have been cut at :data:`_INLINE_STANCE`. That is the point
+            # rather than a discrepancy: an agent that finds the id here
+            # knows it still has a starting position, and one that wants the
+            # part the cap took pulls it by the same id
+            # (:func:`rebrief.recall`). It rides here and only here, next to
+            # the prose, because an id delivered on its own would let "is
+            # this id in my context?" answer yes for text that never arrived.
+            ident = digests.text_digest(whole)
+            marker = f" [text id: {ident}]" if ident else ""
+            out += f"stance ({label}), binding{marker}:\n{body}\n"
+        return out
 
     def stance_given(self, mesh: Mesh, member: Member) -> bool:
         """Whether this daemon supplied the stance and its id to the member."""
@@ -4549,8 +4589,13 @@ class MeshManager:
                 "rules for your new roles)"
             )
         text = "\n".join(lines) + "\n"
-        if member.role != before_role:
-            text += self._stance_lines(mesh, member)
+        # The stances that are new to the member, and only those: a changed
+        # primary's, and each added subrole's. The session reminder that
+        # follows names their ids, so the text has to be here beside them.
+        text += self._stance_lines(
+            mesh, member, primary=member.role != before_role,
+            subroles=[r for r in added if r != before_role],
+        )
         return text + "---"
 
     def _role_notice_soon(

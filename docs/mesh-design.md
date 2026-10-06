@@ -1260,6 +1260,18 @@ names like the primary — uploads do not rewrite them. The case that
 motivated it: a leader that must also be found as the reviewer a workflow
 delegates to, without a second session.
 
+A subrole binds the member as its primary does, so its **stance is handed
+over the same way** (claunch-bwukr): the join briefing pastes each
+subrole's stance after the primary's, as `stance (subrole <name>), binding
+[text id: …]`, and every path that carries or recovers a stance reads one
+list, `MeshManager.subrole_stances` (subroles in the member's order, minus
+those whose role has no stance, is no longer in the vocabulary, or repeats
+a stance already listed) — the rebrief tool serves those ids, the session
+reminder's Role entry names them (`subrole stance text id (<name>)`) and
+folds them into its position key, and `claunch mesh stance` prints them
+after the primary's. The rebrief budget fallback and a remote member get
+the pointer alone, as for the primary.
+
 **Editing roles after the join** (claunch-a6azt). The primary is editable
 too: `PATCH /api/mesh/{mesh}/members/{handle}/roles` takes `role` with the
 same `add`/`remove`/`set` as `/subroles` (which keeps refusing `role`, so a
@@ -1272,14 +1284,16 @@ the old primary is kept only when named among them. Lookups read
 `Member.roles` at call time, so they follow at once; three things would not
 on their own, and the edit does them (`MeshManager.set_member_roles`):
 a local member is queued a `role change` notice — carrying the new stance
-and its text id when the primary moved, so the session reminder's stance id
-has its text beside it in the conversation; the reminder's Role entry lists
+and its text id when the primary moved, and each added subrole's stance and
+id, so every stance id the session reminder names has its text beside it in
+the conversation; the reminder's Role entry lists
 the subroles and its position key includes them, so a subrole-only edit is
 delivered as a new position; and the `auto_link` edges the new roles earn
 are opened, additively — a pair recorded either way (an explicit disconnect,
 or an edge the old roles earned) is left as it is.
 
-**What a role drives** today: the stance and content id in the join briefing,
+**What a role drives** today: the stance and content id in the join briefing
+(as primary or as subrole),
 `stall_watch` (who receives a stuck-member warning), `exclusive` (at most one
 live holder), `task_poll` wording, and `cflow_reminder`. The last field is a
 capped role-specific correction for a cflow position that stopped moving.

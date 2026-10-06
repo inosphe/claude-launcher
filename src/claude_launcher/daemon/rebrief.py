@@ -92,6 +92,12 @@ def block_digest(text: str) -> str:
     return digests.text_digest((text or "").strip())
 
 
+def _subrole_stances(mesh_mgr, mesh, member) -> List[Tuple[str, str]]:
+    """``MeshManager.subrole_stances``, or none from a manager without it."""
+    read = getattr(mesh_mgr, "subrole_stances", None)
+    return list(read(mesh, member)) if read else []
+
+
 def addressable(name: str, *, manager, mesh_mgr) -> Dict[str, dict]:
     """This session's id-addressable blocks, keyed by content id.
 
@@ -153,14 +159,23 @@ def addressable(name: str, *, manager, mesh_mgr) -> Dict[str, dict]:
                 # get by asking — not this module's rendering of it.
                 role = mesh.roleset.get(member.role)
                 stance = (getattr(role, "stance", "") or "").strip()
-                if not stance:
-                    continue
-                stance_found = True
-                out[block_digest(stance)] = {
-                    "kind": f"stance ({mesh.name})",
-                    "text": stance,
-                    "given": mesh_mgr.stance_given(mesh, member),
-                }
+                given = mesh_mgr.stance_given(mesh, member)
+                if stance:
+                    stance_found = True
+                    out[block_digest(stance)] = {
+                        "kind": f"stance ({mesh.name})",
+                        "text": stance,
+                        "given": given,
+                    }
+                # A subrole's stance is handed beside its own id in the same
+                # briefing (``MeshManager._stance_lines``), from the same list.
+                for sub, text in _subrole_stances(mesh_mgr, mesh, member):
+                    stance_found = True
+                    out.setdefault(block_digest(text), {
+                        "kind": f"stance ({mesh.name}, subrole {sub})",
+                        "text": text,
+                        "given": given,
+                    })
             except Exception:  # noqa: BLE001 — one broken mesh, not all of them
                 continue
     # Compatibility for a persisted pre-session-reminder definition that has
