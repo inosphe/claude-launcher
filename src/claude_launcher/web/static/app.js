@@ -1523,8 +1523,10 @@ function forgetDeadSessions() {
 
 /* The rail holds still while a pointer is down on it.
 
-   Every poll rebuilds the whole list from scratch (`list.innerHTML` below,
-   driven by a five-second dashboard poll). A press is not an instant, though:
+   A poll that changes the rail redraws it in place (refreshSessions): a row
+   whose record did not change keeps its node, but a row whose record did is
+   built again and its old node leaves the document. A press is not an
+   instant, though:
    pointerdown, then pointerup, and only then the click the handler is
    waiting for. A rebuild landing between the first two takes the node the
    press started on out of the document, and the browser is then left with no
@@ -1542,7 +1544,12 @@ function forgetDeadSessions() {
    The hold carries its own deadline instead of trusting a pointerup to
    arrive. One can be lost -- the pointer leaves the window, another element
    captures it, the tab is hidden mid-press -- and a rail frozen for the rest
-   of the session would be a far worse bug than the one this fixes. */
+   of the session would be a far worse bug than the one this fixes.
+
+   The in-place redraw (claunch-v87) narrowed the hold's reach to the rows
+   that changed under the press; it did not remove it. The row a press lands
+   on is often the one that is changing -- its session is the busy one the
+   reader came to act on -- so the hold stays. */
 const RAIL_HOLD_MS = 1200;
 let railHeldUntil = 0;
 let railRedrawPending = false;
@@ -3807,17 +3814,18 @@ async function refreshSessions(options) {
   // feeds the seen line's "now".
   // Pin controls reflect the same state as the main session tabs.
   const pins = typeof sessionPinnedNames === "function" ? sessionPinnedNames() : [];
+  const unstamped = (key, value) => (
+    key === "due_in" || key === "fired_ago" ||
+    key === "last_visited_at" || key === "last_input_at" ||
+    key === "last_activity_at" || key === "last_output_at" ||
+    key === "viewers" || key === "moved_rows" || key === "tool_calls"
+  ) ? undefined : value;
   const signature = JSON.stringify(
     // The project is outside the old tuple so the tuple keeps its shape;
     // a pick changes what the rail draws out of the same cache.
     [[briefingLLM, sessionsCache, groupOrder, meshCache, pins],
      typeof currentProject === "string" ? currentProject : "", shadowList],
-    (key, value) => (
-      key === "due_in" || key === "fired_ago" ||
-      key === "last_visited_at" || key === "last_input_at" ||
-      key === "last_activity_at" || key === "last_output_at" ||
-      key === "viewers" || key === "moved_rows" || key === "tool_calls"
-    ) ? undefined : value,
+    unstamped,
   );
   // See the hold above: a press in flight keeps the rows it started on, and
   // the redraw it postpones is owed back the moment the press ends.
@@ -3843,7 +3851,64 @@ async function refreshSessions(options) {
   // transcript pane and the beads canvas hold theirs.
   const keptScrollTop = rebuild && typeof list.scrollTop === "number"
     ? list.scrollTop : 0;
-  if (rebuild) list.innerHTML = "";
+  // A redraw updates the rail in place (claunch-v87): a row whose own
+  // signature (rowSignature below) is unchanged keeps its node -- with its
+  // listeners, hover, focus and any text selection in it -- and a group keeps
+  // its container. Only rows that changed are built again, nodes are moved
+  // only where the order changed, and what the poll no longer draws is
+  // removed at the end. Tearing the whole list down every time a single
+  // session changed cost two hundred rows and their listeners per poll, and
+  // dropped every hover and selection on the rail. The reduced harnesses whose
+  // stub DOM cannot move a node (no insertBefore/removeChild) keep the
+  // teardown they were written against.
+  const inPlace = rebuild && typeof document.createDocumentFragment === "function"
+    && typeof list.insertBefore === "function"
+    && typeof list.removeChild === "function" && !!list.childNodes;
+  const keptRows = new Map();
+  const keptGroups = new Map();
+  if (inPlace) {
+    const harvest = (box) => {
+      for (const n of Array.from(box.childNodes)) {
+        if (n._railGroupKey) {
+          keptGroups.set(n._railGroupKey, n);
+          harvest(n._railGroupBody);
+        } else if (n._railRowSig && n.dataset && n.dataset.name) {
+          if (!keptRows.has(n.dataset.name)) keptRows.set(n.dataset.name, []);
+          keptRows.get(n.dataset.name).push(n);
+        }
+      }
+    };
+    harvest(list);
+  } else if (rebuild) {
+    list.innerHTML = "";
+  }
+  // Where the next node goes in each container this pass writes to. A node
+  // already at that position stays where it is.
+  const placed = new Map();
+  const place = (box, node) => {
+    if (!inPlace) {
+      box.appendChild(node);
+      return;
+    }
+    const at = placed.get(box) || 0;
+    const kids = box.childNodes;
+    if (kids[at] !== node) box.insertBefore(node, kids[at] || null);
+    placed.set(box, at + 1);
+  };
+  // Everything a row draws from, other than the stamps refreshRailSeen moves
+  // on in place. The same row is drawn twice under two mesh headings, so the
+  // heading it sits under is part of it.
+  const rowSignature = (s, depth, meshGroup) => JSON.stringify(
+    [s, depth, meshGroup || null, s.name === currentName, s.name === sessName,
+     pins.includes(s.name), briefingLLM, sessMeshes(s.name), handleTag(s.name),
+     railMeshTags(s.name, meshGroup || null), railMetaText(s)],
+    unstamped,
+  );
+  const takeKeptRow = (name, sig) => {
+    const kept = keptRows.get(name);
+    const at = kept ? kept.findIndex((li) => li._railRowSig === sig) : -1;
+    return at < 0 ? null : kept.splice(at, 1)[0];
+  };
   // Wrapped, not passed straight to filter: Array.filter calls its callback
   // with (element, index, array), and sessionMatchesFilter's second
   // parameter is the filter name, which defaults to the rail's current
@@ -3888,6 +3953,9 @@ async function refreshSessions(options) {
   // group containers while those reduced consumers retain their old shape.
   const nestedGroupContainers = typeof document.createDocumentFragment === "function";
   const groupBodies = [];
+  // The reuse key of each open heading, one per level: a group is the same
+  // group only under the same headings above it.
+  const groupKeys = [];
   // The count each open heading shows, one per level, kept alongside the
   // bodies so a row appended at any depth raises every heading above it.
   const groupCounts = [];
@@ -3920,6 +3988,25 @@ async function refreshSessions(options) {
         continue;
       }
       const parent = groupBodies[row.level - 1] || list;
+      const groupKey = `${row.level ? groupKeys[row.level - 1] : ""}/` +
+        `${row.level}:${row.group}=${row.value}`;
+      const keptGroup = inPlace ? keptGroups.get(groupKey) : null;
+      if (keptGroup) {
+        keptGroups.delete(groupKey);
+        const keptCount = keptGroup._railGroupCount;
+        keptCount._sessionCount = 0;
+        keptCount.textContent = "0";
+        keptGroup._railPaintFold(isSessionGroupCollapsed(row.group, row.value));
+        place(parent, keptGroup);
+        placed.set(keptGroup._railGroupBody, 0);
+        groupBodies.length = row.level;
+        groupBodies[row.level] = keptGroup._railGroupBody;
+        groupCounts.length = row.level;
+        groupCounts[row.level] = keptCount;
+        groupKeys.length = row.level;
+        groupKeys[row.level] = groupKey;
+        continue;
+      }
       const group = document.createElement("li");
       group.className = `session-group session-group-level-${row.level}`;
       group.dataset.group = row.group;
@@ -4014,11 +4101,18 @@ async function refreshSessions(options) {
         }
       });
       group.append(heading, body);
-      parent.appendChild(group);
+      group._railGroupKey = groupKey;
+      group._railGroupBody = body;
+      group._railGroupCount = count;
+      group._railPaintFold = paintFold;
+      place(parent, group);
+      if (inPlace) placed.set(body, 0);
       groupBodies.length = row.level;
       groupBodies[row.level] = body;
       groupCounts.length = row.level;
       groupCounts[row.level] = count;
+      groupKeys.length = row.level;
+      groupKeys[row.level] = groupKey;
       continue;
     }
     if (row.type === "shadow") {
@@ -4028,12 +4122,25 @@ async function refreshSessions(options) {
       // record lookup -- can be handed it.
       const parent = nestedGroupContainers
         ? (groupBodies[groupBodies.length - 1] || list) : list;
-      parent.appendChild(renderShadowCard(row.shadow, { depth: row.depth || 0 }));
+      place(parent, renderShadowCard(row.shadow, { depth: row.depth || 0 }));
       countRow();
       continue;
     }
     const { session: s, depth } = row;
+    const rowSig = inPlace ? rowSignature(s, depth, row.meshGroup) : "";
+    const keptRow = inPlace ? takeKeptRow(s.name, rowSig) : null;
+    if (keptRow) {
+      // Both decorations read state beside the record (the note editor that
+      // is open, the briefing one-line), and both are idempotent.
+      decorateBriefingRow(keptRow, s);
+      decorateNoteRow(keptRow, s);
+      place(nestedGroupContainers
+        ? (groupBodies[groupBodies.length - 1] || list) : list, keptRow);
+      countRow();
+      continue;
+    }
     const li = document.createElement("li");
+    li._railRowSig = rowSig;
     li.dataset.name = s.name;
     // The row is a card the keyboard can hold. `sess-card` is what the focus
     // helpers match on -- the ⓘ and + buttons inside carry this same
@@ -4158,6 +4265,10 @@ async function refreshSessions(options) {
     // bar beside the short count, so twenty rows can be compared at a
     // glance. The line is a flex line-breaker like the cflow badge below
     // it, and nothing at all where a harness keeps no transcript.
+    // The titles as they stand before the context note: the note carries the
+    // reading's age, so refreshRailSeen writes it again onto these.
+    li._railTitleBase = li.title;
+    label._railTitleBase = label.title;
     ctxNoteOnRow(li, label, s);
     const railCtx = ctxRailLine(s);
     // And how fast its backend answered last time, for a session that goes
@@ -4300,8 +4411,17 @@ async function refreshSessions(options) {
     decorateNoteRow(li, s);
     const parent = nestedGroupContainers
       ? (groupBodies[groupBodies.length - 1] || list) : list;
-    parent.appendChild(li);
+    place(parent, li);
     countRow();
+  }
+  // What this poll did not draw: every container keeps the nodes placed into
+  // it and loses the rest. A group the poll dropped goes with its parent's
+  // tail, and a row that moved under another heading has already left.
+  if (inPlace) {
+    if (!placed.has(list)) placed.set(list, 0);
+    for (const [box, used] of placed) {
+      while (box.childNodes.length > used) box.removeChild(box.childNodes[used]);
+    }
   }
   if (rebuild && typeof syncShadowActive === "function") syncShadowActive();
   if (rebuild && nestedGroupContainers && typeof syncSessionGroupStickyOffsets === "function") {
@@ -4319,7 +4439,7 @@ async function refreshSessions(options) {
   // signature above for why the stamps are not a reason to rebuild). Not
   // while a press is in flight: swapping the node under the pointer is the
   // lost click the hold exists to prevent, and the redraw it owes covers it.
-  if (!rebuild && !railHeld() && typeof refreshRailSeen === "function") {
+  if ((!rebuild || inPlace) && !railHeld() && typeof refreshRailSeen === "function") {
     refreshRailSeen(list);
   }
   refreshResumeChoices();  // the spawn form offers these same conversations
@@ -6608,6 +6728,30 @@ function refreshRailSeen(list) {
     // that is just as time-based as the seen line above, so it needs the same
     // tick even though the report itself did not change.
     decorateBriefingRow(li, s);
+    // So do the tps line ("N ago", and its stale class past max_age_s) and the
+    // context reading's age in the gauge's and the row's tooltips. A row the
+    // in-place redraw keeps would otherwise show the ages it was built with
+    // for as long as its session's record stays the same (claunch-v87).
+    // Neither line carries a listener, so the swap loses nothing.
+    const tps = li.querySelector(".rail-tps-line");
+    if (tps && typeof tpsRailLine === "function") {
+      const fresh = tpsRailLine(s);
+      if (fresh) tps.replaceWith(fresh);
+      else tps.remove();
+    }
+    const ctx = li.querySelector(".rail-ctx-line");
+    if (ctx && typeof ctxRailLine === "function") {
+      const fresh = ctxRailLine(s);
+      if (fresh) ctx.replaceWith(fresh);
+      else ctx.remove();
+    }
+    const name = li.querySelector(".rail-name");
+    if (typeof li._railTitleBase === "string" && name &&
+        typeof name._railTitleBase === "string" && typeof ctxNoteOnRow === "function") {
+      li.title = li._railTitleBase;
+      name.title = name._railTitleBase;
+      ctxNoteOnRow(li, name, s);
+    }
   }
 }
 
