@@ -38,7 +38,7 @@ def test_meta_and_collection():
     meta = chart.meta
     assert meta["recur"] == {"auto": True}
     assert meta["filter_roles"] == {"type": "whitelist", "roles": ["leader"]}
-    assert meta["default_role"] == "leader"
+    assert meta["default_role"] is None  # v1 improv-leader keeps the default
     assert meta["default_child_cflow"] == "improv-worker-v2"
     landing = meta["collections"]["landing"]
     assert landing["env"] == {"TARGET": "master"}
@@ -216,3 +216,26 @@ def test_wind_down_needs_a_person_and_ends_the_loop(tmp_path):
     ld.report("wrapup")
     assert ld.st["status"] == "done" and ld.st["outcome"] == "wound_down"
     assert "next_round" not in ld.st
+
+
+def test_pr_candidates_follow_the_measured_merge_procedure():
+    by_label = {n.label: n for n in _chart().nodes.values() if n.label}
+    for label in ("integrate-preflight", "integrate"):
+        prompt = by_label[label].get("prompt")
+        for needle in ("headRefOid", "UNKNOWN", "gh pr diff", "gh pr review",
+                       "--match-head-commit <tip>", "commit_check.py", "--ff-only",
+                       "다시 조회한다"):
+            assert needle in prompt, (label, needle)
+    assert "git.push" in by_label["integrate"].get("effects")
+
+
+def test_the_leader_registers_a_remote_workers_pr_request(tmp_path):
+    ld = Leader(tmp_path)
+    item = {"issue": "x-9", "branch": "origin/s9-x", "tip": "c" * 40, "requested_by": "s9",
+            "medium": "pr", "pr_url": "https://github.example/o/r/pull/7", "pr_number": 7,
+            "base": "master"}
+    runtime.collection_op("push", "landing", cwd=ld.cwd, scope="lead",
+                          principal=runtime.PR_DRIVER, session="lead", item=item)
+    view = runtime.collection_view(ld.cwd, "lead")
+    rows = view["landing"]["items"] if "items" in view.get("landing", {}) else view
+    assert "x-9" in str(rows) and "pull/7" in str(rows)

@@ -11,20 +11,22 @@ description: >
   스윕은 리더의 턴에서 일어나지 않는다 — subagent가 실행하고 리더는 돌아온
   값을 값싼 읽기로 되확인한다. 회차가 ok로 끝나면 데몬이 다음 회차를 시작한다
   (recur auto). 교대 종료는 결과 wound_down으로 끝나 루프도 함께 끝난다.
-  골격 단계: 로컬 후보(--no-ff)만 정의한다. PR 후보 리뷰·머지는 단계 B에서
-  improv-worker-v2의 착지 항목 PR 필드(pr_url, pr_number, base, head_sha=tip)가
-  확정된 뒤 integrate-preflight·integrate에 들어간다.
+  통합 후보는 두 매체로 온다: 착지 항목에 pr_url이 있으면 PR 후보(리뷰를
+  gh pr review로 기록하고 gh pr merge --merge --match-head-commit <tip>, 사용자
+  승인 없음), 없으면 로컬 후보(master에 --no-ff). 심사·창·스윕·마감은 매체와
+  무관하게 하나다(docs/cflow-v2.md 10a).
 
 # 회차마다 다음 회차를 요청하고 데몬이 시작한다(docs/cflow-v2.md 2.1 recur).
 # 마지막 단계가 라이브 재기동이라 회차를 닫는 턴이 재기동과 함께 사라질 수
 # 있으므로 시작을 드라이버에게 맡기지 않는다(v1 improv-leader와 같은 이유).
 recur: {auto: true}
 
-# 관제 런은 leader 역할 세션만 몬다.
+# 관제 런은 leader 역할 세션만 몬다. default_role은 두지 않는다: v1
+# improv-leader가 leader 역할의 기본값이고, 둘이 함께 주장하면 위저드·폼의
+# 자동 선택이 바뀐다(improv-worker-v2와 같은 이유). v1 퇴역 때 함께 넣는다.
 filter_roles:
   type: whitelist
   roles: [leader]
-default_role: leader
 # 이 런을 모는 리더가 spawn한 자식은 v2 워커 런을 돈다.
 default_child_cflow: improv-worker-v2
 
@@ -60,6 +62,38 @@ fragments:
       collection landing)으로 직접 넣는다: issue, branch(`<remote>/<브랜치>`),
       tip(40자 sha), requested_by.
     · rebase 기준은 언제나 `<remote>/<base>`로 지시한다.
+  pr-merge: |
+    ── PR 후보 머지 절차(착지 항목에 pr_url이 있는 행) ──
+    PR 후보의 머지는 원격에서 일어나고 로컬 master는 fetch로 따라간다. 그래서
+    배치 안의 순서는 PR 후보 먼저, 로컬 후보 나중이다. 배치를 시작하기 전에
+    로컬 master와 `<remote>/master`가 같은지 본다
+    (`git fetch <remote>` 뒤 `git rev-list --left-right --count master...<remote>/master`가
+    `0 0`). 로컬이 앞서면 먼저 push(fast-forward만), 뒤면 `git merge --ff-only`.
+    항목의 base가 master가 아니면(중간 워커의 스택 등) 이 리더의 큐가 아니다 —
+    deferred로 두고 note에 base를 적은 뒤 요청자에게 알린다.
+    PR마다(-R <host>/<owner>/<repo>는 원격에서 도출한 값):
+    1. `gh pr view <pr_number> --json headRefOid,baseRefName,state,mergeable,mergeStateStatus`.
+       mergeable이 UNKNOWN이면 판정하지 않고 수 초 뒤 다시 조회한다(실측: 직후
+       UNKNOWN, 수 초 뒤 CONFLICTING). state가 OPEN이 아니면 제외하고 사유를 적는다.
+    2. headRefOid가 착지 항목의 tip(40자)과 같아야 한다. 다르면 바로 판정하지
+       않고 수 초 뒤 다시 조회한다(실측: force push 직후 headRefOid가 이전 SHA로
+       남아 있었다 — UNKNOWN과 같은 처리). 재조회에도 다르면 머지하지 않고
+       워커에게 「tip 불일치: 큐 <tip>, PR head <headRefOid>」로 알린다.
+    3. `gh pr diff <pr_number>`로 변경을 읽고 판정을 `gh pr review <pr_number>
+       --approve --body <근거>` 또는 `--request-changes --body <사유>`로 남긴다.
+       request-changes면 그 항목은 rejected(사유를 워커와 보드에)다.
+    4. `gh pr merge <pr_number> --merge --match-head-commit <tip>`. 다른 tip이면
+       gh가 거절한다(실측 `Head branch was modified`) — 그때는 1부터 다시 한다.
+       CONFLICTING/DIRTY면 머지하지 않고 워커에게 `<remote>/master @ <sha>` 기준
+       rebase를 요청한다(deferred).
+    5. `git fetch <remote>` 뒤 머지 커밋을 찾고(`gh pr view --json mergeCommit`)
+       그 둘째 부모가 tip인지 `git log -1 --format=%P <merge>`로 확인한다.
+       원격 base가 그 tip을 포함하는지 `tools/commit_check.py --remote <remote>
+       --ref master --sha <tip> --contains`로 확인한다.
+    6. 로컬 master를 `git merge --ff-only <remote>/master`로 맞춘다. 착지 큐의
+       landed는 데몬 watch가 로컬 master 기준으로 잰다 — 손으로 set하지 않는다.
+    7. 워커에게 `<merge sha> @ <remote>/master`를 통지한다(landed-notice에서
+       반영 결과와 함께 한 번 더).
   subagent-runs: |
     ── 실행은 subagent, 심사는 리더 ──
     머지와 전체 스윕은 리더의 턴에서 돌리지 않는다. 한 subagent = 한 일(스윕
@@ -102,21 +136,25 @@ nodes:
          다르면 그 후보는 이번 배치에서 빼고 워커에게 tip 불일치를 알린다.
       3. 통과한 후보는 flow_collection set으로 status waiting, 이번에 넣지 않는
          후보는 deferred(사유 note), 거절은 rejected(사유를 워커와 보드에).
-      4. PR 후보(착지 항목에 pr_url이 있음)는 단계 B 전까지 이 런에서 머지하지
-         않는다 — deferred로 두고 note에 「PR 경로 미구현(.6 단계 B)」을 적는다.
+      4. PR 후보(pr_url이 있음)는 아래 PR 절차의 1–2(상태·mergeable·head 일치)까지
+         여기서 확인한다. base가 master가 아닌 항목은 deferred.
+      ${frag:pr-merge}
       ${frag:subagent-runs}
       ${frag:remote-mesh}
     returns:
       ok: {batch: list}
       empty: {reason: str}
     done_when: |
-      배치에 넣은 후보(issue, branch, tip)와 각각의 merge_ready 결과, 뺀 후보의
-      사유가 보고에 있다. 넣을 후보가 없으면 결과 empty로 관제 대기로 돌아간다.
+      배치에 넣은 후보(issue, branch, tip, 매체, PR이면 번호·headRefOid·mergeable)와
+      각각의 merge_ready 결과, 뺀 후보의 사유가 보고에 있다. 넣을 후보가 없으면
+      결과 empty로 관제 대기로 돌아간다.
     effects: [board.write]
 
   integrate:
-    title: 로컬 후보 머지(--no-ff)
+    title: 배치 머지(PR 후보, 로컬 후보 --no-ff)
     prompt: |
+      먼저 PR 후보를 아래 PR 절차(3–7: 리뷰 기록, --match-head-commit 머지, fetch
+      뒤 확인, 로컬 master fast-forward)대로 머지한다. 그다음
       배치의 로컬 후보를 master에 `git merge --no-ff <브랜치>`로 차례로 머지한다.
       실행은 subagent 하나가 한다(머지 하나 = subagent 하나, 또는 배치 전체를
       한 subagent에 차례로 — 리더가 정한 순서대로). 충돌이 나면 그 후보는
@@ -125,13 +163,17 @@ nodes:
       머지 뒤: master tip을 리더가 `git rev-parse master`로 되확인하고, 각 머지
       커밋의 둘째 부모가 큐의 tip과 같은지 `git log -1 --format=%P <merge>`로
       확인한다. landed 표시는 데몬의 watch가 한다 — 손으로 set하지 않는다.
-      원격 편성이면 원격 base를 master와 맞춘다(원격 메시 규칙).
+      원격이 있으면(PR 후보가 있었거나 원격 편성) 로컬 후보 머지 뒤 원격 base를
+      master와 맞춘다(fast-forward push, 원격 메시 규칙).
+      ${frag:pr-merge}
       ${frag:subagent-runs}
       ${frag:remote-mesh}
     returns:
       ok: {merges: list, master: str}
-    done_when: 머지 커밋마다 (issue, tip, merge sha)와 머지 후 master tip이 보고에 있다
-    effects: [git.merge, board.write]
+    done_when: |
+      머지 커밋마다 (issue, 매체, tip, merge sha; PR이면 번호와 리뷰 판정)와 머지 후
+      master tip(원격이 있으면 `<remote>/master`와 같음)이 보고에 있다
+    effects: [git.merge, git.push, board.write]
 
   sweep:
     title: 머지 결과 트리의 전체 스윕
