@@ -384,6 +384,7 @@ CHECKS = [
         "panel_check.js",
         "sesssend_check.js",
         "meshjoin_check.js",
+        "createonboard_check.js",
         "meshattach_check.js",
         "reborrow_check.js",
         "borrowform_check.js",
