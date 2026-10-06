@@ -579,6 +579,18 @@ def _what(act: dict) -> str:
     return ""
 
 
+def board_dir(doc: dict, default: str = "") -> str:
+    """Where the board lives and ``file`` references resolve: the spec's
+    registered workspace, else ``default`` (the current directory)."""
+    if doc.get("workspace"):
+        from .spawn import SpawnDenied, resolve_workspace
+        try:
+            return resolve_workspace(str(doc["workspace"]))
+        except SpawnDenied as exc:
+            raise workspec.SpecError(str(exc)) from None
+    return default or os.getcwd()
+
+
 def describe(act: dict) -> str:
     """One dry-run line for ``claunch spec plan``."""
     do = act["do"]
