@@ -12,7 +12,8 @@ A. The edit
 
 B. What the member is told
    B1 a primary change queues a notice carrying the new stance and its text id
-   B2 a subrole-only change queues a notice without a stance
+   B2 a subrole-only change queues a notice without the primary's stance
+      (an added subrole's own stance rides it — claunch-bwukr)
    B3 an edit that changes nothing queues nothing
 
 C. The lookups follow
@@ -140,11 +141,14 @@ def test_the_member_is_typed_a_notice_with_the_new_stance(home, tmp_path):
         assert stance and stance[:60] in notice
         assert f"[text id: {digests.text_digest(stance)}]" in notice
 
-        # B2: subroles only — no stance, the change spelt out.
+        # B2: subroles only — the primary's stance is not repeated, the
+        # change is spelt out, and the added subrole's stance rides with its
+        # id (claunch-bwukr; tests/test_subrole_stance.py).
         mm.set_member_roles("m", "w1", add=["reviewer"])
         assert len(sent) == 2
         assert "subroles added: reviewer" in sent[1]
-        assert "stance (" not in sent[1]
+        assert "stance (leader)" not in sent[1]
+        assert "stance (subrole reviewer)" in sent[1]
         mm.set_subroles("m", "w1", remove=["reviewer"])
         assert "subroles removed: reviewer" in sent[2]
 

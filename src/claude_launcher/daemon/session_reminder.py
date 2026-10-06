@@ -77,6 +77,12 @@ def role_entries(name: str, manager, mesh_mgr, *, session=None) -> List[dict]:
                         "subroles": list(getattr(member, "subroles", None) or ()),
                         "stance": stance,
                         "digest": digests.text_digest(stance),
+                        # The subroles' stances bind as well and were handed
+                        # beside their own ids (``MeshManager._stance_lines``).
+                        "subrole_stances": [
+                            {"name": sub, "digest": digests.text_digest(text)}
+                            for sub, text in rebrief._subrole_stances(mesh_mgr, mesh, member)
+                        ],
                         "cflow_reminder": (role.cflow_reminder or "").strip(),
                     }
                 )
@@ -108,7 +114,8 @@ def role_entries(name: str, manager, mesh_mgr, *, session=None) -> List[dict]:
 def role_key(entries: List[dict]) -> tuple:
     """The role source's stable position key."""
     return tuple(
-        (e["mesh"], e["name"], e["digest"], tuple(e.get("subroles") or ()))
+        (e["mesh"], e["name"], e["digest"], tuple(e.get("subroles") or ()),
+         tuple(s["digest"] for s in e.get("subrole_stances") or ()))
         for e in entries
     )
 
@@ -136,6 +143,13 @@ def role_section(entries: List[dict], *, cflow_guidance: bool) -> List[str]:
                     f"with id {ident}; this id line alone is not the stance.",
                 ]
             )
+        for sub in entry.get("subrole_stances") or ():
+            if sub.get("digest"):
+                lines.append(
+                    f"subrole stance text id ({sub['name']}): {sub['digest']} "
+                    "— find it beside that stance text in this conversation, "
+                    "or call the mesh 'rebrief' tool with that id"
+                )
         if cflow_guidance and entry.get("cflow_reminder"):
             lines.append(f"at this cflow position: {entry['cflow_reminder']}")
     return lines

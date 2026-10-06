@@ -97,12 +97,11 @@ human_steps: [...]
 - `roles` 는 `claunch mesh roles --file` 이 받는 문서와 같은 형식이다. 검증기는 데몬과 같은
   파서(`daemon/mesh_roles.resolve`)로 읽는다. 따라서 명세가 통과하면 메시도 그 어휘를
   받는다. 커스텀 주 역할과 그 stance 는 여기에 둔다.
-- `subroles.<이름>.prompt` 는 서브롤 프롬프트다. import 는 서브롤마다 두 가지를 한다.
-  1. 같은 이름의 메시 역할을 어휘에 추가한다(stance = prompt). 데몬은 어휘에 없는 서브롤을
-     거절하기 때문이다(`daemon/mesh.py:4314-4318`).
-  2. 그 서브롤을 가진 에이전트의 오프닝 태스크 앞에 prompt 를 붙인다. 현재 브리핑에는 주
-     역할의 stance 만 실리고(`daemon/mesh.py:3093-3136`) 서브롤의 stance 는 전달되지 않기
-     때문이다.
+- `subroles.<이름>.prompt` 는 서브롤 프롬프트다. import 는 서브롤마다 같은 이름의 메시 역할을
+  어휘에 추가한다(stance = prompt). 데몬은 어휘에 없는 서브롤을 거절하기 때문이다
+  (`daemon/mesh.py` `_resolve_subroles`). 그 서브롤을 가진 에이전트는 join 브리핑에서 주 역할
+  stance 뒤에 서브롤 stance 를 text id 와 함께 받는다(`MeshManager._stance_lines`,
+  claunch-bwukr). 그래서 prompt 를 오프닝 태스크에 다시 붙이지 않는다.
 - 서브롤 이름이 기존 역할 이름이나 별칭과 같으면 거절된다. 그 이름은 이미 다른 의미로 쓰이고
   있다.
 
@@ -175,7 +174,7 @@ epic 은 sub-lead 만 가질 수 있다. sub-lead 는 epic 을 주 이슈로 잡
 | leader | `leader` (exclusive) | `improv-leader` | own: spawn / shared: 기존 세션을 `mesh join` |
 | sub-lead (2nd leader) | `worker` | `improv-worker` + `stack` 서브 런 | 리더의 자식으로 spawn |
 | worker | `worker` | `improv-worker` | 부모(리더 또는 sub-lead)의 자식으로 spawn |
-| worker + 서브롤 | `worker` + 서브롤 | `improv-worker` | 위와 같고, `subroles` 와 태스크 앞 prompt 가 붙는다 |
+| worker + 서브롤 | `worker` + 서브롤 | `improv-worker` | 위와 같고, `subroles` 가 붙는다(서브롤 prompt 는 브리핑의 서브롤 stance 로 전달된다) |
 | reviewer | `reviewer` | 없음(ask 응답) | 리더의 자식으로 spawn. 리뷰어-워커 연결은 어휘의 `auto_link` 규칙이 만든다(`daemon/mesh_roles.py:377-397`) |
 
 2nd leader 를 메시 역할 `leader` 로 두지 않는 이유는 다음과 같다. 메시 하나에서 `leader` 는

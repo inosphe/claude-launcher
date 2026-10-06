@@ -336,15 +336,18 @@ binding.
 A member may also hold **subroles** — further roles it answers for besides
 its primary one (`claunch mesh join --subrole reviewer`, `spawn` with
 `subroles`, or later `claunch mesh subroles MESH HANDLE --add reviewer`).
-The primary role is still what sets its stance; a subrole is where a
-workflow's delegated decision (`from: [{role: reviewer}]`), a `filter_roles`
-check or the policy engine also finds it. The roster spells the set as
+A subrole is where a workflow's delegated decision (`from: [{role:
+reviewer}]`), a `filter_roles` check or the policy engine also finds it, and
+its stance binds you too: the join briefing carries each subrole's stance
+after the primary's, each with its own text id, and `claunch mesh stance
+MESH` prints them in the same order. The roster spells the set as
 `leader+reviewer`, and the join briefing lists yours on a `subroles:` line.
 Roles are not fixed at the join: `claunch mesh subroles MESH HANDLE
 --primary ROLE` (or the Roles editor in the dashboard's session panel)
 changes the primary too. When yours change, a `role change` block is typed
 into your terminal — for a new primary it carries the new stance with its
-text id, and that stance replaces the one you joined with.
+text id, and that stance replaces the one you joined with; an added
+subrole's stance rides the same block.
 
 A mesh may define its own vocabulary, so do not assume the names above:
 `claunch mesh roles MESH` lists the roles this mesh actually has, and
