@@ -434,3 +434,97 @@ def test_two_profiles_are_told_apart(home):
     assert rows["bare"]["converged"] is False
     assert rows["bare"]["allow"]["missing"] == ["mcp__claunch"]
     assert len(rows["bare"]["deny"]["missing"]) == 20
+
+
+# --------------------------------------------------------------------------- #
+# reasoning_effort: the effort a launch of the profile applies
+# --------------------------------------------------------------------------- #
+def _efforts(body, profile_name):
+    """``{harness: reasoning_effort}`` for one profile's explicit rows."""
+    return {
+        row["harness"]: row["reasoning_effort"]
+        for row in body["profile_details"]
+        if row["profile"] == profile_name and row.get("explicit") is True
+    }
+
+
+def _default_row(body, profile_name):
+    return next(
+        row
+        for row in body["profile_details"]
+        if row["profile"] == profile_name and row.get("explicit") is False
+    )
+
+
+def _default_option(body, profile_name):
+    return next(
+        opt
+        for opt in body["profile_options"]
+        if opt["profile"] == profile_name and opt["default"] is True
+    )
+
+
+def test_a_profile_with_no_effort_reports_null_on_every_row(home):
+    """Nothing configured: the harness's own default decides, and null says so."""
+    profile.create("work")
+    body = listing()
+    assert _default_row(body, "work")["reasoning_effort"] is None
+    assert _default_option(body, "work")["reasoning_effort"] is None
+    assert set(_efforts(body, "work").values()) == {None}
+    assert all(
+        opt["reasoning_effort"] is None
+        for opt in body["profile_options"]
+        if opt["profile"] == "work"
+    )
+
+
+def test_a_profile_effort_is_reported_on_its_rows_and_options(home):
+    profile.create("work")
+    profile.create("plain")
+    store.set_profile_field("work", "reasoning_effort", "high")
+    body = listing()
+    assert _default_row(body, "work")["reasoning_effort"] == "high"
+    assert _default_option(body, "work")["reasoning_effort"] == "high"
+    efforts = _efforts(body, "work")
+    # Every harness whose translator carries the field applies it at launch.
+    assert efforts["claude"] == efforts["codex"] == efforts["pi"] == "high"
+    # The other profile is told apart: its value is its own, not the listing's.
+    assert _default_row(body, "plain")["reasoning_effort"] is None
+
+
+def test_a_harness_that_cannot_carry_the_effort_reports_null(home):
+    """No translator for the field means the launch applies no effort there."""
+    profile.create("work")
+    store.set_profile_field("work", "reasoning_effort", "high")
+    efforts = _efforts(listing(), "work")
+    for harness_name in ("agent", "devin", "kimi"):
+        assert efforts[harness_name] is None
+
+
+def test_the_effort_resolves_template_then_provider_then_profile(home):
+    store.update(lambda doc: doc.update({"template": {"reasoning_effort": "low"}}))
+    store.update(
+        lambda doc: doc.setdefault("providers", {}).update(
+            {"ds": {"reasoning_effort": "medium"}}
+        )
+    )
+    profile.create("on-template")
+    profile.create("on-provider")
+    store.set_profile_field("on-provider", "provider", "ds")
+    profile.create("own")
+    store.set_profile_field("own", "provider", "ds")
+    store.set_profile_field("own", "reasoning_effort", "high")
+    body = listing()
+    assert _default_row(body, "on-template")["reasoning_effort"] == "low"
+    assert _default_row(body, "on-provider")["reasoning_effort"] == "medium"
+    assert _default_row(body, "own")["reasoning_effort"] == "high"
+
+
+def test_an_unreadable_provider_reports_null_rather_than_failing(home):
+    """A profile naming a provider that is not declared still lists."""
+    profile.create("work")
+    store.set_profile_field("work", "provider", "nowhere")
+    body = listing()
+    rows = [r for r in body["profile_details"] if r["profile"] == "work"]
+    assert rows
+    assert all(r.get("reasoning_effort") is None for r in rows)
