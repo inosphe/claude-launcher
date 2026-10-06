@@ -634,7 +634,7 @@ def _truncated(
 
 
 def cmd_run(args) -> int:
-    repo = args.repo.resolve()
+    repo = (args.repo or Path(".")).resolve()
     try:
         commit = _git(repo, "rev-parse", args.branch)
         tree = _git(repo, "rev-parse", args.branch + "^{tree}")
@@ -886,8 +886,55 @@ def cmd_run(args) -> int:
     return 0 if proc.returncode == 0 else 1
 
 
+def merged_repo(env_name: str, environ=None) -> Path:
+    """The repository a leader's integrate step merged into, read from the
+    run record the step bound (``bind: merged`` in improv-leader-v2, handed to
+    verify as JSON in ``CFLOW_DATA_MERGED``).
+
+    There is no fallback to the working directory, and that is the point
+    (claunch-6xg). The verify runs in the leader's run directory, and a batch
+    may have been merged into another repository entirely -- measured on
+    run-945d034a, where the leader sat in claude-launcher and the batch
+    landed in gds5. A fallback answers about the leader's repository: a
+    receipt for a tree the batch never touched would turn the gate green,
+    and a missing one would send the leader to sweep an unrelated suite.
+    Without the record the gate cannot tell which repository to judge.
+    """
+    environ = os.environ if environ is None else environ
+    text = environ.get(env_name)
+    if text is None or not text.strip():
+        raise LookupError(
+            f"${env_name} is not set: no record of which repository the "
+            f"batch was merged into (the integrate step's 'repo')")
+    try:
+        record = json.loads(text)
+    except ValueError as exc:
+        raise LookupError(f"${env_name} is not JSON: {exc}") from None
+    repo = record.get("repo") if isinstance(record, dict) else None
+    if not isinstance(repo, str) or not repo.strip():
+        raise LookupError(
+            f"${env_name} carries no 'repo': the integrate step did not "
+            f"record which repository it merged into")
+    path = Path(repo)
+    if not path.is_absolute():
+        raise LookupError(f"${env_name}.repo is not an absolute path: {repo!r}")
+    return path
+
+
 def cmd_check(args) -> int:
-    repo = args.repo.resolve()
+    if args.merged_env:
+        if args.repo is not None:
+            print("cannot tell: --repo and --merged-env name the repository "
+                  "twice; pass one", file=sys.stderr)
+            return CANNOT_TELL
+        try:
+            repo = merged_repo(args.merged_env).resolve()
+        except LookupError as exc:
+            print(f"cannot tell: {exc}", file=sys.stderr)
+            return CANNOT_TELL
+        print(f"judging the merged repository {repo} (${args.merged_env})")
+    else:
+        repo = (args.repo or Path(".")).resolve()
     try:
         commit = _git(repo, "rev-parse", args.branch)
         tree = _git(repo, "rev-parse", args.branch + "^{tree}")
@@ -1077,7 +1124,7 @@ def main(argv: Optional[list] = None) -> int:
         p.add_argument(
             "--repo",
             type=Path,
-            default=Path("."),
+            default=None,
             help=(
                 "the checkout to work in (default: the working directory). "
                 "For 'run' this is the tree the suite executes in, so point "
@@ -1091,6 +1138,18 @@ def main(argv: Optional[list] = None) -> int:
             default=None,
             help="override the receipt root (tests)",
         )
+        if name == "check":
+            p.add_argument(
+                "--merged-env",
+                default=None,
+                metavar="NAME",
+                help=(
+                    "read the repository from the JSON record in environment "
+                    "variable NAME (its 'repo' field, an absolute path) "
+                    "instead of --repo; exit 2 when the record is missing. "
+                    "improv-leader-v2's sweep verify passes CFLOW_DATA_MERGED"
+                ),
+            )
         if name == "run":
             p.add_argument(
                 "--command", default=None, help="sweep command (default: this repo's)"

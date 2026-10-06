@@ -2552,9 +2552,15 @@ def verify_env(r: Run, iid: str, node: Optional[ir.Node] = None,
     """The environment a verify command runs with: the process environment
     plus ``CFLOW2_RUN``, ``CFLOW2_NODE``, ``CFLOW2_INSTANCE``, ``CFLOW2_SCOPE``,
     every param as ``CFLOW_IN_<NAME>`` (the run's params, overlaid by the
-    params of the procedure the task runs in), every top-level scalar of the
-    run data as ``CFLOW_DATA_<NAME>`` and the data names in ``data_names``
-    whatever their type (JSON text)."""
+    params of the procedure the task runs in), and the top-level run data as
+    ``CFLOW_DATA_<NAME>``: scalars as text, the rest as JSON text up to 64KB,
+    as a probe gets them (:func:`_value_env`; a scalar is passed whatever its
+    size, as before). A name in ``data_names``
+    (a ``${data.NAME}`` the runtime rewrote) is passed whatever its size.
+
+    Non-scalars used to be left out, which left a verify no way to read a
+    result a node had bound -- improv-leader-v2's sweep gate needs the
+    repository its integrate step merged into (claunch-6xg)."""
     node = node or r.node_of(iid)
     env = dict(os.environ)
     env.update({
@@ -2568,8 +2574,10 @@ def verify_env(r: Run, iid: str, node: Optional[ir.Node] = None,
     for name, value in params.items():
         env[_env_name(name)] = _env_text(value)
     for name, value in (r.state.get("data") or {}).items():
-        if value is None or isinstance(value, (str, int, float, bool)) or name in data_names:
-            env[_data_env_name(name)] = _env_text(value)
+        text = _env_text(value)
+        scalar = value is None or isinstance(value, (str, int, float, bool))
+        if scalar or len(text) <= 64 * 1024 or name in data_names:
+            env[_data_env_name(name)] = text
     return env
 
 

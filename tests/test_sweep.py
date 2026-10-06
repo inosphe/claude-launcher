@@ -1614,3 +1614,65 @@ def test_the_repo_option_says_what_it_means(capsys):
     rendered = " ".join(capsys.readouterr().out.split())
     assert "default: the working directory" in rendered
     assert "the tree the suite executes in" in rendered
+
+
+# ---------------------------------------------------------------------------
+# --merged-env: the repository comes from the leader's run record (claunch-6xg)
+
+
+@pytest.fixture
+def leader(tmp_path, repo_template) -> Path:
+    """The leader's own checkout -- where the gate runs -- which is NOT the
+    repository the batch was merged into."""
+    return repo_template("sweep", _build_repo, tmp_path / "leader")
+
+
+def _merged(monkeypatch, value) -> None:
+    if value is None:
+        monkeypatch.delenv("CFLOW_DATA_MERGED", raising=False)
+    else:
+        monkeypatch.setenv("CFLOW_DATA_MERGED", value)
+
+
+def _check_merged(receipts: Path, *args: str) -> int:
+    return sweep.main(["check", "--merged-env", "CFLOW_DATA_MERGED",
+                       "--receipts", str(receipts), *args])
+
+
+def test_merged_env_judges_the_merged_repository_not_the_working_directory(
+        repo, leader, receipts, monkeypatch, capsys):
+    """run-945d034a: the leader stood in one repository and the batch landed
+    in another. The gate must ask for the merged repository's tip -- red
+    without its receipt, green with it -- whatever the leader's own checkout
+    holds."""
+    monkeypatch.chdir(leader)
+    assert _run(leader, receipts, "--command", GREEN) == 0  # the wrong tree is green
+    _merged(monkeypatch, json.dumps({"repo": str(repo), "master": "x", "merges": []}))
+    assert _check_merged(receipts) == 1
+    captured = capsys.readouterr()
+    tip = _git(repo, "rev-parse", "master").strip()
+    assert tip[:12] in captured.err and "no sweep receipt" in captured.err
+    assert str(repo.resolve()) in captured.out
+    assert _run(repo, receipts, "--command", GREEN) == 0
+    assert _check_merged(receipts) == 0
+
+
+@pytest.mark.parametrize("value", [
+    None, "", "not json", json.dumps({"master": "x"}), json.dumps({"repo": ""}),
+    json.dumps({"repo": "relative/path"}), json.dumps(["/abs"]),
+])
+def test_without_a_merge_record_the_gate_cannot_tell_and_never_falls_back(
+        leader, receipts, monkeypatch, capsys, value):
+    """No record of where the batch went is "cannot tell" (2). Falling back to
+    the working directory would answer about the leader's checkout, which
+    here holds a green receipt -- so a fallback would show up as 0."""
+    monkeypatch.chdir(leader)
+    assert _run(leader, receipts, "--command", GREEN) == 0
+    _merged(monkeypatch, value)
+    assert _check_merged(receipts) == sweep.CANNOT_TELL
+    assert "cannot tell" in capsys.readouterr().err
+
+
+def test_merged_env_and_repo_together_are_refused(repo, receipts, monkeypatch):
+    _merged(monkeypatch, json.dumps({"repo": str(repo)}))
+    assert _check_merged(receipts, "--repo", str(repo)) == sweep.CANNOT_TELL
