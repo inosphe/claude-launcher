@@ -655,6 +655,46 @@ def test_a_wait_probe_reads_a_map_of_data_as_json(tmp_path):
     assert d.tasks() == ["a"]
 
 
+def test_a_verify_reads_a_map_of_data_as_json_like_a_probe(tmp_path):
+    # improv-leader-v2's sweep verify reads the integrate step's bound result
+    # (data.merged, a map) through CFLOW_DATA_MERGED (claunch-6xg). A verify
+    # used to get the scalars only, so the map never reached it.
+    chart = _compile("""
+        data:
+          merged: {repo: /elsewhere, master: abc}
+          note: plain
+        nodes:
+          a: {prompt: A}
+          b: {prompt: B}
+        body: [a, b]
+    """)
+    check = ("import json, os, sys; m = json.loads(os.environ['CFLOW_DATA_MERGED']); "
+             "sys.exit(0 if m == {'repo': '/elsewhere', 'master': 'abc'} "
+             "and os.environ['CFLOW_DATA_NOTE'] == 'plain' else 1)")
+    chart.by_label("a").props["verify"] = {"run": [sys.executable, "-c", check],
+                                           "timeout": 30}
+    d = Drv(tmp_path, "", chart=chart)
+    d.report(d.inst("a"))
+    assert d.events("verify_passed") and not d.events("verify_failed")
+    assert d.tasks() == ["b"]
+
+
+def test_a_verify_gets_no_map_past_the_probe_size_cap(tmp_path):
+    big = "x" * (64 * 1024 + 1)
+    chart = _compile("""
+        nodes:
+          a: {prompt: A}
+          b: {prompt: B}
+        body: [a, b]
+    """)
+    d = Drv(tmp_path, "", chart=chart)
+    run = runtime.Run.load(runtime.RunStore(d.cwd, d.scope))
+    run.state.setdefault("data", {}).update({"huge": {"v": big}, "long": big})
+    env = runtime.verify_env(run, d.inst("a"))
+    assert "CFLOW_DATA_HUGE" not in env       # a map past 64KB, as for a probe
+    assert env["CFLOW_DATA_LONG"] == big      # a scalar whatever its size
+
+
 # ---------------------------------------------------------------------------
 # E2: ask options without case
 

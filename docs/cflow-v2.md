@@ -157,8 +157,12 @@ nodes:
 - 실행 시점: 작업이 `ok`로 보고될 때. 다른 결과(`fail` 등)는 verify를 거치지 않는다.
 - 실행 위치와 환경: 런의 cwd. 프로세스 환경에 `CFLOW2_RUN`, `CFLOW2_NODE`,
   `CFLOW2_INSTANCE`, `CFLOW2_SCOPE`, param마다 `CFLOW_IN_<NAME>`(런의 params 위에
-  작업이 속한 프로시저의 params를 덮은 값), 최상위 `data`의 스칼라마다
-  `CFLOW_DATA_<NAME>`을 더한다.
+  작업이 속한 프로시저의 params를 덮은 값), 최상위 `data`마다
+  `CFLOW_DATA_<NAME>`을 더한다. 스칼라는 텍스트로, 스칼라가 아닌 값(`bind`로
+  묶인 결과 등)은 JSON 텍스트로 싣는다. JSON이 64KB를 넘는 값은 빠진다(wait·
+  모니터의 probe와 같은 규칙, `runtime.verify_env`). 예: improv-leader-v2의
+  sweep verify는 integrate가 묶은 `data.merged`를 `CFLOW_DATA_MERGED`로 읽어
+  머지한 저장소를 판정한다(claunch-6xg).
 - 비동기 실행: `flow_report`는 작업을 `verifying` 상태로 두고(저널
   `verify_started`) 바로 돌아온다. 응답에 `verifying`이 실린다. 명령은 MCP 서버
   프로세스의 백그라운드 스레드에서 런 잠금 밖으로 실행된다. 끝나면 잠금을 잡고, 같은
@@ -563,8 +567,10 @@ v1 `checklist:`의 대응:
 엔진이 실행하는 명령(작업의 `verify`, wait의 `probe`, 모니터의 `probe`)은
 템플릿이 아니다. 이 문자열 안의 `${...}`는 컴파일 오류다. 명령이 런의 값을 읽어야
 하면 환경 변수로 읽는다: param은 `CFLOW_IN_<NAME>`, 최상위 `data`의 스칼라 값은
-`CFLOW_DATA_<NAME>`(이름은 대문자, 영숫자 외 문자는 `_`). wait와 모니터의 `probe`는
-스칼라가 아닌 최상위 `data`도 JSON 텍스트로 받는다(64KB 이하, `runtime._value_env`).
+`CFLOW_DATA_<NAME>`(이름은 대문자, 영숫자 외 문자는 `_`). 작업의 `verify`와 wait·
+모니터의 `probe`는 스칼라가 아닌 최상위 `data`도 JSON 텍스트로 받는다(64KB 이하,
+`runtime.verify_env`·`runtime._value_env`). verify가 스칼라만 받던 때는 `bind`로 묶인
+결과를 verify가 읽을 길이 없었다(claunch-6xg).
 예: improv-worker-v2의 착지 대기는 값 없는 `--landing`으로 `landed_check`가
 `CFLOW_DATA_LANDING`을 직접 읽게 한다. 셸이 하는 `$VAR` 전개는
 엔진이 값을 끼워 넣는 것이 아니므로 허용된다. 단 문자열 명령은 Windows에서

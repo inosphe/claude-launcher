@@ -61,7 +61,10 @@ def test_restart_interval_and_checks_are_declared():
     assert [c["id"] for c in wait.get("checks")] == ["deployed"]
     assert wait.get("seconds") == 600 and wait.get("poll") == 30
     assert by_label["sweep"].executor == ["subagent", "inline"]
-    assert "sweep.py check" in by_label["sweep"].get("verify")["run"]
+    run = by_label["sweep"].get("verify")["run"]
+    # the merged repository, never the working directory (claunch-6xg)
+    assert run[4:6] == ["tools/sweep.py", "check"]
+    assert run[-2:] == ["--merged-env", "CFLOW_DATA_MERGED"] and "--repo" not in run
 
 
 class Leader:
@@ -131,13 +134,14 @@ def test_a_round_end_to_end(tmp_path):
     ld.tick()
     assert ld.tasks() == ["integrate-preflight"]
 
-    ld.report("integrate-preflight", "ok", {"batch": ["x-1"]})
-    ld.report("integrate", "ok", {"merges": [["x-1", "a" * 40, "b" * 40]], "master": "b" * 40})
+    ld.report("integrate-preflight", "ok", {"batch": ["x-1"], "repo": "/repo"})
+    ld.report("integrate", "ok", {"merges": [["x-1", "a" * 40, "b" * 40]], "master": "b" * 40,
+                                  "repo": "/repo"})
     assert ld.tasks() == ["sweep"]
     ran = []
     ld.report("sweep", "ok", {"tip": "b" * 40, "passed": 10, "failed": 0, "receipt": "r"},
               verify=lambda cmd, cwd, env, timeout: ran.append(cmd) or (0, "green"))
-    assert ran and "sweep.py check" in ran[0]
+    assert ran and ran[0][4:6] == ["tools/sweep.py", "check"]
     assert ld.tasks() == ["reflect"]
 
     # the report waits for the daemon's restart
@@ -182,7 +186,7 @@ def test_a_round_end_to_end(tmp_path):
 def _to_sweep(ld):
     ld.report("intake")
     ld.select("integrate")
-    ld.report("integrate-preflight", "ok", {"batch": ["x"]})
+    ld.report("integrate-preflight", "ok", {"batch": ["x"], "repo": "/repo"})
 
 
 def _deploy_ok(ld):
@@ -197,7 +201,8 @@ def test_a_red_sweep_keeps_the_round_and_still_reflects(tmp_path):
     follow-up is requested and the merged items go on to reflect and notice."""
     ld = Leader(tmp_path)
     _to_sweep(ld)
-    ld.report("integrate", "ok", {"merges": [["x", "a" * 40, "b" * 40]], "master": "b" * 40})
+    ld.report("integrate", "ok", {"merges": [["x", "a" * 40, "b" * 40]], "master": "b" * 40,
+                                  "repo": "/repo"})
     ld.report("sweep", "fail", {"reason": "2 failed: tests/test_x.py"})
     assert ld.st["status"] == "running" and ld.tasks() == ["batch-failed"]
     ld.report("batch-failed", "ok", {"failed": "sweep", "cause": "test_x after x",
@@ -242,7 +247,7 @@ def test_exhausted_reflect_retries_close_the_round(tmp_path):
     so recur continues) instead of failing the run."""
     ld = Leader(tmp_path)
     _to_sweep(ld)
-    ld.report("integrate", "ok", {"merges": [], "master": "m"})
+    ld.report("integrate", "ok", {"merges": [], "master": "m", "repo": "/repo"})
     ld.report("sweep", "ok", {"tip": "m", "passed": 1, "failed": 0, "receipt": "r"},
               verify=lambda *a: (0, ""))
     for attempt in range(5):
@@ -266,8 +271,8 @@ def test_close_ends_the_round_without_deploy(tmp_path):
     ld = Leader(tmp_path)
     ld.report("intake")
     ld.select("integrate")
-    ld.report("integrate-preflight", "ok", {"batch": ["x"]})
-    ld.report("integrate", "ok", {"merges": [], "master": "m"})
+    ld.report("integrate-preflight", "ok", {"batch": ["x"], "repo": "/repo"})
+    ld.report("integrate", "ok", {"merges": [], "master": "m", "repo": "/repo"})
     ld.report("sweep", "ok", {"tip": "m", "passed": 1, "failed": 0, "receipt": "r"},
               verify=lambda *a: (0, ""))
     ld.restart(1)
@@ -372,3 +377,81 @@ def test_the_leader_registers_a_remote_workers_pr_request(tmp_path):
     view = runtime.collection_view(ld.cwd, "lead")
     rows = view["landing"]["items"] if "items" in view.get("landing", {}) else view
     assert "x-9" in str(rows) and "pull/7" in str(rows)
+
+
+# ---------------------------------------------------------------------------
+# claunch-6xg: the sweep gate judges the repository the batch was merged into
+
+
+def _load_sweep():
+    import importlib.util
+    from pathlib import Path
+    path = Path(__file__).resolve().parents[1] / "tools" / "sweep.py"
+    spec = importlib.util.spec_from_file_location("sweep_6xg", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _commit_repo(path):
+    import subprocess
+    for args in (["init", "-q"], ["config", "user.name", "t"],
+                 ["config", "user.email", "t@t"]):
+        subprocess.run(["git", *args], cwd=path, check=True)
+    (path / "a.txt").write_text("one\n", encoding="utf-8")
+    for args in (["add", "-A"], ["commit", "-q", "-m", "first"], ["branch", "-M", "master"]):
+        subprocess.run(["git", *args], cwd=path, check=True)
+
+
+def test_the_sweep_gate_judges_the_merged_repository(tmp_path, repo_template, monkeypatch):
+    """The leader's run sits in one repository and the batch is merged into
+    another (run-945d034a). The integrate step's `repo` is bound to
+    data.merged, the verify reads it through CFLOW_DATA_MERGED, and the gate
+    asks for THAT repository's receipt: red without it, green with it. The
+    leader's own checkout holds a green receipt the whole time -- a fallback
+    to the working directory would turn the first answer green."""
+    import json
+    import os
+    import sys
+    from unittest import mock
+
+    sweep = _load_sweep()
+    for key in (sweep.test_window.WINDOW_GRANT_ENV, sweep.test_window.WINDOW_CLASS_ENV,
+                sweep.test_window.WINDOW_WORKERS_ENV):
+        monkeypatch.delenv(key, raising=False)
+    home = repo_template("leader-6xg", _commit_repo, tmp_path / "leader")
+    merged = repo_template("leader-6xg", _commit_repo, tmp_path / "merged")
+    (merged / "b.txt").write_text("two\n", encoding="utf-8")  # a different tip
+    import subprocess
+    subprocess.run(["git", "add", "-A"], cwd=merged, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "batch"], cwd=merged, check=True)
+    receipts = tmp_path / "receipts"
+    green = f'"{sys.executable}" -c "print(\'3 passed in 0.1s\')"'
+    assert sweep.main(["run", "--repo", str(home), "--receipts", str(receipts),
+                       "--command", green]) == 0
+
+    tip = subprocess.run(["git", "rev-parse", "master"], cwd=merged, check=True,
+                         capture_output=True, text=True).stdout.strip()
+    ld = Leader(home)
+    _to_sweep(ld)
+    ld.report("integrate", "ok", {"merges": [["x", "a" * 40, tip]], "master": tip,
+                                  "repo": str(merged)})
+    assert ld.tasks() == ["sweep"]
+    seen = []
+
+    def gate(cmd, cwd, env, timeout):
+        # the packaged argv after `uv run --no-sync python tools/sweep.py`
+        assert cmd[:5] == ["uv", "run", "--no-sync", "python", "tools/sweep.py"]
+        seen.append((cwd, json.loads(env["CFLOW_DATA_MERGED"])["repo"]))
+        with mock.patch.dict(os.environ, env, clear=True):
+            code = sweep.main([*cmd[5:], "--receipts", str(receipts)])
+        return (code, f"sweep check exit {code}")
+
+    value = {"tip": "b" * 40, "passed": 3, "failed": 0, "receipt": "r"}
+    ld.report("sweep", "ok", value, verify=gate)
+    assert seen == [(str(home), str(merged))]
+    assert ld.tasks() == ["sweep"]  # red: no receipt for the merged repository's tip
+    assert sweep.main(["run", "--repo", str(merged), "--receipts", str(receipts),
+                       "--command", green]) == 0
+    ld.report("sweep", "ok", value, verify=gate)
+    assert ld.tasks() == ["reflect"]  # green: the merged repository's receipt
