@@ -8,6 +8,7 @@
 <link rel="stylesheet" href="static/style.css">
 <link rel="stylesheet" href="static/observer.css">
 <link rel="stylesheet" href="static/operator.css">
+<link rel="stylesheet" href="static/chat.css">
 </head>
 <body>
 <div id="auth-overlay" class="hidden">
@@ -209,6 +210,7 @@
       <a href="#/" data-page="home"><span>⌂</span>Home</a>
       <a href="#/new" data-page="new"><span>+</span>New</a>
       <a href="#/mesh" data-page="meshes"><span>◉</span>Mesh</a>
+      <a href="#/chat" data-page="chat"><span>✉</span>Chat<span id="chat-nav-badge" class="chat-badge-count" hidden></span></a>
       <a href="#/flows" data-page="flows"><span>⇶</span>Flows</a>
       <a href="#/window" data-page="window"><span>▦</span>Window</a>
       <a href="#/stats" data-page="stats"><span>▤</span>Stats</a>
@@ -231,6 +233,9 @@
     <!-- The project Operator bot's conversation (operator.js builds it; the
          same view also opens as a modal over any page). -->
     <section id="operator-view" class="hidden" aria-label="Operator"></section>
+    <!-- The people's room of each mesh (chat.js builds it; the same view
+         also opens as a modal over any page). -->
+    <section id="chat-view" class="hidden" aria-label="Chat"></section>
     <section id="observer-view" class="hidden">
       <header class="wf-head"><h1>관찰 대시보드</h1><label id="observer-scope-control" title="켜면 observe-pin 한 세션만 관찰합니다. 관찰 API 호출이 그 수에 비례해 줄어듭니다. 세션 레일의 체크박스와 카드의 「관찰 고정」이 같은 표시입니다."><input type="checkbox" id="observer-scope-pinned"> 고정만 관찰</label><button id="observer-monitor">관찰 시작</button></header>
       <section id="observer-token-summary" aria-label="관찰 API 토큰 사용량">
@@ -1169,6 +1174,7 @@
 <script src="static/glossary-page.js"></script>
 <script src="static/spec-page.js"></script>
 <script src="static/operator.js"></script>
+<script src="static/chat.js"></script>
 <script src="static/session-tabs.js"></script>
 <script src="static/session-grid.js"></script>
 <script src="static/p2p.js"></script>
