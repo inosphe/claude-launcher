@@ -64,6 +64,7 @@ assert.deepStrictEqual(Array.from(ctx.WorktreesPage.filterItems(combinations, 'k
 // interpretation of repository-controlled filenames.
 class Element {
   constructor(tag) { this.tagName = tag; this.children = []; this.textContent = ''; }
+  setAttribute(key, value) { this[key] = value; }
   appendChild(child) { this.children.push(child); return child; }
   append(...children) { this.children.push(...children); }
   replaceChildren(...children) { this.children = children; }
@@ -71,6 +72,31 @@ class Element {
 ctx.document.createElement = tag => new Element(tag);
 const textOf = el => el.textContent + el.children.map(textOf).join('');
 (async () => {
+  const fullPath = 'F:\\한 글\\worktrees\\<example>';
+  let copied = null;
+  let copyResult = true;
+  ctx.copyToBrowserClipboard = async (text, host) => {
+    copied = { text, host };
+    return copyResult;
+  };
+  const pathRow = ctx.WorktreesPage.pathRow({ path: fullPath });
+  assert.strictEqual(pathRow.children[0].textContent, fullPath);
+  assert.strictEqual(pathRow.children[0].children.length, 0);
+  assert.strictEqual(pathRow.children[2].role, 'status');
+  await pathRow.children[1].onclick();
+  assert.strictEqual(copied.text, fullPath);
+  assert.strictEqual(copied.host, pathRow);
+  assert(textOf(pathRow).includes('복사됨'));
+  assert.strictEqual(pathRow.children[1].disabled, false);
+  copyResult = false;
+  await pathRow.children[1].onclick();
+  assert(textOf(pathRow).includes('복사하지 못했습니다'));
+  ctx.copyToBrowserClipboard = async () => { throw Error('denied'); };
+  await pathRow.children[1].onclick();
+  assert(textOf(pathRow).includes('복사하지 못했습니다'));
+  assert.strictEqual(pathRow.children[1].disabled, false);
+  assert.strictEqual(ctx.WorktreesPage.pathRow({}).children[1].disabled, true);
+
   let calls = 0;
   let reply = { files: [{ status: 'RM', original_path: 'old.txt', path: '<img>.txt' },
     { status: '??', path: '한 글.txt' }] };

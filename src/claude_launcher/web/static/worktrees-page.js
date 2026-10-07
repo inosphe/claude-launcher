@@ -242,6 +242,30 @@ globalThis.WorktreesPage = (() => {
     return panel;
   }
 
+  function pathRow(w) {
+    const row = node("div", "wt-path-row");
+    const path = node("code", "wt-path", w.path || "");
+    const copy = node("button", "wf-btn wt-copy-path", "경로 복사");
+    copy.type = "button";
+    copy.disabled = !w.path;
+    const status = node("span", "wt-muted wt-copy-status");
+    status.setAttribute("role", "status");
+    copy.onclick = async () => {
+      copy.disabled = true;
+      status.textContent = "";
+      try {
+        const ok = await copyToBrowserClipboard(w.path, row);
+        status.textContent = ok ? "복사됨" : "복사하지 못했습니다. 경로를 선택해 복사해 주세요.";
+      } catch {
+        status.textContent = "복사하지 못했습니다. 경로를 선택해 복사해 주세요.";
+      } finally {
+        copy.disabled = !w.path;
+      }
+    };
+    row.append(path, copy, status);
+    return row;
+  }
+
   function card(w) {
     const box = node("div", `wt-card ${w.state}`);
     const top = node("div", "wt-card-top");
@@ -252,6 +276,7 @@ globalThis.WorktreesPage = (() => {
     state.title = STATE_TITLE[w.state] || "";
     top.appendChild(state);
     box.appendChild(top);
+    box.appendChild(pathRow(w));
     const branchLine = node("div", "wt-line");
     branchLine.appendChild(node("span", "wt-branch",
       w.branch || `detached @ ${w.head || "?"}`));
@@ -380,5 +405,5 @@ globalThis.WorktreesPage = (() => {
 
   function stop() { sequence++; loading = false; }
 
-  return { open, stop, bucketOf, mergeLabel, changesPanel, filterItems };
+  return { open, stop, bucketOf, mergeLabel, changesPanel, filterItems, pathRow };
 })();
