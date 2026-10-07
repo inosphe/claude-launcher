@@ -324,7 +324,11 @@ def test_the_route_is_the_payload_behind_the_token(monkeypatch):
             resp = await client.get("/api/tools/gh?cwd=/work/repo",
                                     headers={"Authorization": "Bearer sekrit"})
             assert resp.status == 200
-            assert seen["repositories"] == [("repo", "/work/repo")]
+            # the route resolves the cwd the way every cflow surface does; on
+            # Windows "/work/repo" becomes "<drive>:\work\repo"
+            from claude_launcher.cflow import state as cflow_state
+
+            assert seen["repositories"] == [("repo", cflow_state.resolve_cwd("/work/repo"))]
         finally:
             await client.close()
 

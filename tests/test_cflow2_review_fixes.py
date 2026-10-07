@@ -487,10 +487,17 @@ def test_delegation_results_by_executor_and_receipt_paths(tmp_path, monkeypatch)
     secret = tmp_path / "secret.json"
     secret.write_text(json.dumps({"outcome": "ok", "value": {}}))
     link = st.receipts_dir / "link.json"
-    os.symlink(secret, link)
+    try:
+        os.symlink(secret, link)
+    except (OSError, NotImplementedError):
+        link = None  # no symlink privilege here (Windows without developer mode)
     with pytest.raises(runtime.FlowError, match="refused"):
-        runtime.delegate_submit(did, receipt_path=str(link), via=runtime.VIA_MCP,
+        runtime.delegate_submit(did, receipt_path=str(secret), via=runtime.VIA_MCP,
                                 session="drv", **d.kw())
+    if link is not None:
+        with pytest.raises(runtime.FlowError, match="refused"):
+            runtime.delegate_submit(did, receipt_path=str(link), via=runtime.VIA_MCP,
+                                    session="drv", **d.kw())
     good = st.receipts_dir / f"{did}.child.123.json"
     good.write_text(json.dumps({"outcome": "ok", "value": {}}))
     d.st = runtime.delegate_submit(did, receipt_path=str(good), via=runtime.VIA_MCP,
@@ -593,6 +600,10 @@ def test_verify_values_reach_the_shell_only_as_env(tmp_path):
     assert not d.events("verify_passed")
 
 
+@pytest.mark.skipif(os.name != "posix", reason=(
+    "a string verify runs through cmd.exe on Windows, which neither expands "
+    "${VAR} nor has 'test' (runtime.expand_argv); the quoting rule is a POSIX "
+    "shell's"))
 def test_verify_value_in_double_quotes_stays_one_word(tmp_path):
     d = Drv(tmp_path, "", chart=_chart_with_verify('test "${params.target}" = "a b; true"'),
             params={"target": "a b; true"})
@@ -937,12 +948,16 @@ def test_a_path_loads_only_from_the_generated_directory(tmp_path):
     (gen / "p.yaml").write_text(GEN)
     outside = tmp_path / "elsewhere.yaml"
     outside.write_text(GEN)
-    (gen / "link.yaml").symlink_to(outside)
+    bads = [str(outside), "elsewhere.yaml", ".cflow2/generated/../../elsewhere.yaml"]
+    try:
+        (gen / "link.yaml").symlink_to(outside)
+        bads.append(".cflow2/generated/link.yaml")
+    except (OSError, NotImplementedError):
+        pass  # no symlink privilege here (Windows without developer mode)
     cwd = str(tmp_path)
     assert runtime.load_definition(".cflow2/generated/p.yaml", cwd).name == "gen"
     assert runtime.load_definition(str(gen / "p.yaml"), cwd).name == "gen"
-    for bad in (str(outside), "elsewhere.yaml", ".cflow2/generated/../../elsewhere.yaml",
-                ".cflow2/generated/link.yaml"):
+    for bad in bads:
         with pytest.raises(runtime.FlowError, match="outside"):
             runtime.load_definition(bad, cwd)
     with pytest.raises(runtime.FlowError, match="not found"):

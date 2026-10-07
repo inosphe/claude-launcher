@@ -46,7 +46,7 @@ from .. import install
 from .. import install_plan
 from .. import session_commits
 from .. import beads_db, beads_meta
-from .. import ghcli, prflow, projects, spawn as spawn_mod, store, workspaces
+from .. import ghcli, prflow, projects, reposync, spawn as spawn_mod, store, workspaces
 from .. import plugins, prompt_packs, settings
 from .. import worktree as worktree_mod
 from . import beads as beads_mod, channel, clipboard, connections
@@ -79,6 +79,7 @@ from ..cflow.state import LockBusy, StateError
 from ..profile import ProfileError
 from . import goto_gate
 from . import mesh_roles
+from . import reposync_gate
 from . import restart_gate
 from . import restart_notice
 from .harness import HarnessError, SessionDef
@@ -392,6 +393,9 @@ def build_app(
     #: The approval gate a leader's child-run goto waits behind; see
     #: goto_gate. Its nudge is the cflow action handlers' own helper, so the
     #: settled move reaches the child driver the same way a human's goto does.
+    #: The approval gate a session's repository sync waits behind; see
+    #: reposync_gate. Unanswered expires as a refusal.
+    app["reposync_gate"] = reposync_gate.ReposyncGate()
     app["goto_gate"] = goto_gate.GotoGate(
         app,
         manager=manager,
@@ -699,6 +703,16 @@ def build_app(
     r.add_post("/api/relays", h_relay_save)
     r.add_get("/api/relay/peers", h_relay_peers)
     r.add_get("/api/relay/peers/{machine}/sessions", h_relay_peer_sessions)
+    # Repository sync across machines (reposync, claunch-dh73y): what a peer's
+    # registered workspaces look like (remote address keys and branch tips,
+    # read-only) and the approval gate a sync that pushes waits behind.
+    r.add_get("/api/relay/peers/{machine}/repos", h_relay_peer_repos)
+    r.add_get("/api/reposync/repos", h_reposync_repos)
+    r.add_get("/api/reposync/requests", h_reposync_requests_list)
+    r.add_post("/api/reposync/requests", h_reposync_request_submit)
+    r.add_get("/api/reposync/requests/{rid}", h_reposync_request_get)
+    r.add_post("/api/reposync/requests/{rid}/approve", h_reposync_request_approve)
+    r.add_post("/api/reposync/requests/{rid}/reject", h_reposync_request_reject)
     r.add_get("/api/relay/meshes", h_relay_meshes)
     # A relay daemon was renamed: rewrite every mesh reference to it here.
     r.add_post("/api/relay/peers/{machine}/rename", h_relay_peer_rename)
@@ -736,6 +750,10 @@ def build_app(
     r.add_post("/peer/ops/file", h_peer_ops_file)
     r.add_post("/peer/ops/git", h_peer_ops_git)
     r.add_post("/peer/ops/lease", h_peer_ops_lease)
+    # Same trust as /peer/sessions (any backend on a relay this daemon is
+    # registered with): workspace names, remote address KEYS (never URLs, so
+    # no credentials) and branch tips. Read-only; nothing is fetched.
+    r.add_post("/peer/repos", h_peer_repos)
     # Remote-shadow sessions (daemon/shadow.py): a linked peer's operator
     # LOOKS at this daemon's members of the mesh that link belongs to -- a
     # card, an output-only terminal, the session line, the transcript.
@@ -5674,6 +5692,84 @@ async def h_relay_peer_sessions(request: web.Request) -> web.Response:
     return json_response(
         {"machine": machine, "sessions": payload.get("sessions", [])}
     )
+
+
+def _describe_workspaces() -> list:
+    """Every registered workspace as :func:`reposync.describe` sees it. A
+    workspace that is not a readable git repository is listed with its error,
+    so the asker can tell "not here" from "here but broken"."""
+    rows = []
+    for ws in workspaces.list_all():
+        try:
+            doc = reposync.describe(reposync.toplevel(ws.path))
+        except reposync.SyncError as exc:
+            rows.append({"workspace": ws.name, "error": str(exc)})
+            continue
+        rows.append({"workspace": ws.name, **doc})
+    return rows
+
+
+async def h_peer_repos(request: web.Request) -> web.Response:
+    return json_response({"repos": await asyncio.to_thread(_describe_workspaces)})
+
+
+async def h_reposync_repos(request: web.Request) -> web.Response:
+    """This daemon's own answer to /peer/repos, for the CLI and the web UI."""
+    return json_response({
+        "repos": await asyncio.to_thread(_describe_workspaces),
+        "relay": request.app["relay_state"](),
+    })
+
+
+async def h_relay_peer_repos(request: web.Request) -> web.Response:
+    mm = _mesh_mgr(request)
+    if mm.peer_transport is None:
+        return json_error(400, "relay uplink is not running")
+    machine = request.match_info["machine"]
+    try:
+        payload = await mm.peer_transport(machine, "/peer/repos", {})
+    except Exception as exc:  # noqa: BLE001 — PeerError, an old peer's 404
+        return json_error(502, f"{machine}: {exc}")
+    return json_response({"machine": machine, "repos": payload.get("repos", [])})
+
+
+async def h_reposync_request_submit(request: web.Request) -> web.Response:
+    """A session's sync plan, waiting for a person. The CLI decided that the
+    caller is a managed session and that the setting asks for approval; the
+    daemon only holds the question."""
+    body = await _json_body(request)
+    try:
+        record = request.app["reposync_gate"].submit(
+            session=str(body.get("session") or ""), plan=body.get("plan") or {},
+        )
+    except ValueError as exc:
+        return json_error(400, str(exc))
+    return json_response({"ok": True, "request": record})
+
+
+async def h_reposync_requests_list(request: web.Request) -> web.Response:
+    return json_response({"requests": request.app["reposync_gate"].list()})
+
+
+async def h_reposync_request_get(request: web.Request) -> web.Response:
+    record = request.app["reposync_gate"].get(request.match_info["rid"])
+    if record is None:
+        return json_error(404, "no reposync request with that id")
+    return json_response({"request": record})
+
+
+async def h_reposync_request_approve(request: web.Request) -> web.Response:
+    record = request.app["reposync_gate"].approve(request.match_info["rid"], decided_by="web")
+    if record is None:
+        return json_error(409, "no pending reposync request with that id")
+    return json_response({"ok": True, "request": record})
+
+
+async def h_reposync_request_reject(request: web.Request) -> web.Response:
+    record = request.app["reposync_gate"].reject(request.match_info["rid"], decided_by="web")
+    if record is None:
+        return json_error(409, "no pending reposync request with that id")
+    return json_response({"ok": True, "request": record})
 
 
 async def h_relay_meshes(request: web.Request) -> web.Response:

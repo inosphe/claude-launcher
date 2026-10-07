@@ -2236,7 +2236,14 @@ _LIVE_KEYS = (
     "cflow_reminder", "cflow_reminder_interval",
     "cflow_ping", "cflow_ping_interval", "cflow_ping_message",
     "cflow_events", "prompter_url", "cflow2_headless_max",
+    # read by the reposync CLI itself on every sync, never by the daemon
+    "reposync_push",
 )
+
+
+#: Keys that set whether a person approves what an agent does. A managed
+#: session (CLAUNCH_SESSION set) may read them but not write them.
+_PERSON_ONLY_KEYS = ("reposync_push",)
 
 
 def _cmd_daemon_config(args: argparse.Namespace) -> int:
@@ -2255,6 +2262,14 @@ def _cmd_daemon_config(args: argparse.Namespace) -> int:
     if args.value is None:
         print(cfg[args.key])
         return 0
+    if args.key in _PERSON_ONLY_KEYS and os.environ.get("CLAUNCH_SESSION"):
+        print(
+            f"error: {args.key} decides whether a person approves what an agent "
+            "does, so an agent session cannot change it -- ask the user to set "
+            "it from their own shell",
+            file=sys.stderr,
+        )
+        return 1
     store.set_daemon_field(args.key, _parse_value(args.value))
     print(f"{args.key} = {args.value}")
     if daemon_client.connect() is not None:

@@ -2362,6 +2362,45 @@ straight into it — register it like any other directory:
 claunch workspace add .claude/worktrees/review --name review
 ```
 
+### Syncing a repository across machines (`claunch reposync`)
+
+Two machines often hold clones of one repository under different workspace
+names and different remote names — this machine's `github.ncsoft.com` remote
+and another machine's `origin` can be the same URL. `reposync` ties them by the
+remote's *address* (`host/owner/repo`, no credentials), and each machine syncs
+its own half through that shared remote: fetch, bring the local branch onto
+it, push. Run it on A, then B, then A again and all three refs agree. Nothing
+writes to the other machine; a peer's clones are only *read*, over the relay
+(`/peer/repos`: workspace names, address keys, branch tips).
+
+```bash
+claunch reposync status [WORKSPACE]          # remotes here, peers sharing them, what a sync would do
+claunch reposync master [WORKSPACE] --dry-run
+claunch reposync master [WORKSPACE]          # ff, or rebase --rebase-merges when both moved; then push
+claunch reposync branch push s875-x          # -> <this machine>/s875-x on the shared remote
+claunch reposync branch pull shared-daemon-main s120-y   # ff only
+```
+
+How master is brought onto the remote: work-unit branches still land with
+`--no-ff`; master itself stays on one line — fast-forward when one side moved,
+`git rebase --rebase-merges` when both did (the landing merges are recreated,
+no sync merge commit is made). A rebase rewrites the unpushed commits, so the
+result lists every local branch still built on the old ones with the
+`git rebase --onto` that would move it (it moves none), and comments
+`REBASED <old> -> <new>` on board issues whose close reason cited a rewritten
+merge. A conflict aborts with nothing moved; when the only conflict is the
+board export `.beads/issues.jsonl`, untrack it (the repository's board lives
+in `.beads/beads.db`) or merge the boards with `claunch beads sync --merge`.
+
+A push waits for a person by default (`daemon.reposync_push: ask`): at your
+own terminal you answer y/N (or pass `--yes`); an agent session's push files
+its plan as an approval card in the web UI, bound to the plan's tips, and an
+unanswered card expires as a refusal. `claunch daemon config reposync_push
+auto` lifts the gate — from your own shell; an agent session cannot change
+it. Agents use the MCP tool `repo_sync` (`status` / `plan` / `sync` /
+`branch_push` / `branch_pull`); its push answers `waiting_approval` with a
+request id and is carried out by a second call once approved.
+
 ### VS Code in the browser (one code-server per workspace and worktree)
 
 The daemon can run [code-server](https://github.com/coder/code-server) next to
