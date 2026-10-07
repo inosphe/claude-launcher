@@ -1302,6 +1302,54 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 }
 
 #new-session { padding: 0; width: 100%; max-width: 1100px; }
+/* The form can live in the page or a manually resized dialog. Fit columns
+   to its own width so a narrow dialog also gets the single-column layout.
+   Auto placement follows DOM order, including keyboard navigation. */
+#new-session {
+  display: grid; gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 390px), 1fr));
+  align-items: start;
+}
+#new-session > * { grid-column: 1 / -1; min-width: 0; }
+#new-session > :is(#new-where, #new-identity, #new-runs-on, #new-onboard) {
+  grid-column: auto; align-self: stretch;
+}
+#new-session > fieldset, #new-session > details {
+  margin: 0; min-width: 0;
+}
+#new-session > .sess-modal-tabs, #new-session > .page-head { margin-bottom: 0; }
+#new-session :is(#new-where, #new-runs-on, #new-onboard, #new-beads):not(.session-field-hidden) {
+  display: grid; column-gap: 14px; align-content: start;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr));
+}
+#new-session :is(#new-where, #new-runs-on, #new-onboard, #new-beads) > * {
+  min-width: 0;
+}
+#new-session :is(#new-where, #new-runs-on, #new-onboard, #new-beads) > :is(p, div, legend),
+#new-session #new-onboard > label:has([name="workflow"], [name="context"]),
+#new-session #new-beads > label:not(.check) { grid-column: 1 / -1; }
+#new-session-footer {
+  position: sticky; bottom: 0; z-index: 1;
+  padding: 12px 0 4px; background: #14161a;
+  border-top: 1px solid #30363d;
+  box-shadow: 0 -8px 14px #14161a;
+}
+#new-session-footer #new-session-actions { flex-wrap: wrap; }
+#new-session-footer #new-session-actions button { margin-top: 0; }
+#new-session-footer :is(.submit-status, .error) { overflow-wrap: anywhere; }
+#new-view { scroll-padding-bottom: 90px; }
+#modal-overlay.spawn-open #new-session-footer {
+  background: #1b1e24; box-shadow: 0 -8px 14px #1b1e24;
+}
+#new-session #new-beads {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr));
+}
+@media (max-width: 820px) {
+  /* Leave room for the floating Operator button beside modal actions. */
+  #modal-overlay.spawn-open #new-session-footer #new-session-actions {
+    padding-right: 64px;
+  }
+}
 #new-session label { display: block; font-size: 12px; color: #9da5b0; margin-bottom: 6px; }
 /* WHERE it works — the first fence on the form, styled like the ones below
    it. The step badge and blurb reuse the spawn modal's own classes
@@ -4672,7 +4720,9 @@ body.embed #main { width: 100%; }
 }
 /* The body takes the slack a taller box creates — without this it keeps its
    content height and the extra pixels open as dead space under the form. */
-#modal-overlay.spawn-open #modal-body { white-space: normal; flex: 1 1 auto; }
+#modal-overlay.spawn-open #modal-body {
+  white-space: normal; flex: 1 1 auto; scroll-padding-bottom: 90px;
+}
 /* One scroller, not two. The form carried its own 58vh cap, which fought the
    box: dragging the modal taller grew the box and not the form, and while the
    two were both scrollable a wheel over the form moved whichever the pointer
