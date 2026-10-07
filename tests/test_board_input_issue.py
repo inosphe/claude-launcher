@@ -202,7 +202,6 @@ def test_v1_no_workflow_and_no_issue_input_are_unchanged(proj):  # (f)
     pytest.param({"task": "do it", **V2, "cflow_inputs": {"issue": "claunch-typo"}},
                  id="v2-input"),
     pytest.param({"task": "do it", "issue": "claunch-typo"}, id="board-pick-or-cli"),
-    pytest.param({"task": "do it\nissue: claunch-typo"}, id="task-reference"),
 ])
 def test_a_named_issue_not_on_the_board_is_refused(proj, body):
     status, doc, creates, names = _create(proj, body)
@@ -210,6 +209,20 @@ def test_a_named_issue_not_on_the_board_is_refused(proj, body):
     assert "'claunch-typo' is not on the board at" in doc["error"]
     assert str(proj) in doc["error"]
     assert creates == [] and names == []
+
+
+@pytest.mark.parametrize("task", [
+    "Known issue: flaky tests on CI, fix the retry",
+    "do it\nissue: claunch-typo",
+])
+def test_a_reference_in_the_task_prose_is_never_refused(proj, task):
+    """s88 P1: the task's `issue: <word>` is prose the reference pattern also
+    matches. Only the `issue` field refuses; a reference read out of the
+    text keeps the old answer -- logged, and the session starts without it
+    (nothing named, so nothing is minted from that task either)."""
+    status, doc, creates, names = _create(proj, {"task": task})
+    assert status == 201, doc
+    assert "w1" in names and creates == []
 
 
 def test_a_spawn_naming_an_issue_not_on_the_board_is_refused(proj):

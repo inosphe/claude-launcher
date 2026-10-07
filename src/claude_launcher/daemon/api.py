@@ -6790,8 +6790,10 @@ async def _onboard_and_launch(
     #
     # The one exception (claunch-z7b0n, W1): a request that names an issue the
     # board was read and does not hold is refused like any other bad request
-    # -- whichever way the id came (the Board pick, --issue, an `issue: <id>`
-    # in the task, a v2 input folded in above). A board that cannot be read is
+    # -- whichever field the id came in (the Board pick, --issue, spawn's
+    # issue, a v2 input folded in above). An `issue: <id>` read out of the
+    # task or context is not refused: prose like "Known issue: flaky tests"
+    # matches the same pattern (s88 P1). A board that cannot be read is
     # still no reason to refuse; that is reported in `unsettled` below.
     unsettled: dict = {}
     try:

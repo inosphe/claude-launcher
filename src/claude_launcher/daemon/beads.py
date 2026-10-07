@@ -790,7 +790,8 @@ class BoardRequestError(ValueError):
 
 
 class IssueNotOnBoard(BoardRequestError):
-    """A creation request named an issue the board says does not exist.
+    """A creation request's ``issue`` field names an issue the board says
+    does not exist (a reference in the task's prose never raises this).
 
     Raised by :meth:`Board.ensure_issue` only when the board was read and the
     id is not on it -- a typo, or an issue of another board. A request that
@@ -2439,9 +2440,11 @@ class Board:
         A board that cannot be read or written must not cost a session its
         launch: that is ``None``, and when the request named an issue,
         ``unsettled`` (if given) is filled with ``{"issue": id, "why": ...}``
-        so the caller can say so. The one refusal is a named issue the board
-        was read and does not hold: :class:`IssueNotOnBoard` (claunch-z7b0n,
-        W1 -- a typo must not start a session silently without its issue).
+        so the caller can say so. The one refusal is an issue named in the
+        ``issue`` field that the board was read and does not hold:
+        :class:`IssueNotOnBoard` (claunch-z7b0n, W1 -- a typo must not start
+        a session silently without its issue). A reference read out of the
+        task or context that is not on the board is logged and is ``None``.
         Returns ``{"issue": id, "created": bool, "mode": ...,
         "held_by": name|None, "from_issue_text": bool, "why": str}`` on
         success, where ``mode`` is one of :data:`MINTED`, :data:`TAKE`,
@@ -2491,7 +2494,15 @@ class Board:
                 current = next((r for r in rows if r.get("id") == iid), None)
                 if current is None:
                     log.info("session %r names issue %r that is not on the board", name, iid)
-                    raise IssueNotOnBoard(iid, str(root))
+                    # Refused only when the id came in a field that names an
+                    # issue and nothing else (body/sdef `issue`: the Board
+                    # pick, --issue, spawn's issue, a folded v2 input). A
+                    # reference read out of the task or context prose is a
+                    # guess -- "Known issue: flaky tests" reads as one -- and
+                    # keeps the old answer: logged, and no issue (s88 P1).
+                    if iid == explicit:
+                        raise IssueNotOnBoard(iid, str(root))
+                    return None
                 verdict = adoption(
                     current, session=name, running=self._running(manager)
                 )
