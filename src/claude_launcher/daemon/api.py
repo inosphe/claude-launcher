@@ -66,6 +66,7 @@ from . import (
     rebrief, session_input, status_checks,
 )
 from . import paths
+from . import daemon_prompt
 from . import sessionstats, statscompare, statsworker
 from . import tokenusage
 from . import transcript_view
@@ -571,6 +572,9 @@ def build_app(
     r.add_delete("/api/workspaces/{name}", h_workspace_remove)
     r.add_get("/api/prompt-packs", h_prompt_packs)
     r.add_get("/api/prompt-packs/offer", h_prompt_packs_offer)
+    r.add_get("/api/prompt-packs/text", h_prompt_packs_text)
+    r.add_get("/api/daemon-prompt", h_daemon_prompt_get)
+    r.add_put("/api/daemon-prompt", h_daemon_prompt_put)
     r.add_post("/api/prompt-packs/install", h_prompt_packs_install)
     r.add_post("/api/prompt-packs/remove", h_prompt_packs_remove)
     r.add_put("/api/prompt-packs/role-packs", h_prompt_packs_role_packs)
@@ -2752,7 +2756,54 @@ async def h_prompt_packs_offer(request: web.Request) -> web.Response:
         "default_packs": prompt_packs.default_packs(),
         "role_packs": prompt_packs.role_packs(),
         "shipped": [p.to_dict() for p in prompt_packs.catalog()],
+        # This daemon's own prompt, null when it has none: the form draws it
+        # first and ticked, and sends daemon_prompt: false when unticked.
+        "daemon_prompt": daemon_prompt.offer(),
     })
+
+
+async def h_prompt_packs_text(request: web.Request) -> web.Response:
+    """One pack's text as a session created in ``cwd`` would be given it.
+
+    The create form's preview: the workspace's copy when installed (edits
+    included), else claunch's, with where it came from
+    (prompt_packs.preview). 404 for an id that is neither.
+    """
+    pack_id = request.query.get("id") or ""
+    cwd = cflow_state.resolve_cwd(request.query.get("cwd") or None)
+    owner = workspaces.owning(str(cwd))
+    try:
+        doc = await asyncio.to_thread(
+            prompt_packs.preview,
+            Path(owner.path) if owner is not None else None,
+            pack_id,
+        )
+    except prompt_packs.PackError as exc:
+        return json_error(404, str(exc))
+    doc["workspace"] = owner.to_dict() if owner is not None else None
+    return json_response(doc)
+
+
+async def h_daemon_prompt_get(request: web.Request) -> web.Response:
+    """This daemon's own prompt: where it lives, what it says."""
+    return json_response(await asyncio.to_thread(daemon_prompt.read))
+
+
+async def h_daemon_prompt_put(request: web.Request) -> web.Response:
+    """Replace this daemon's prompt (``text``; empty turns it off).
+
+    ``by`` names the writer for the log beside the file -- the MCP tool sends
+    the calling session, Settings sends nothing and is logged as the web UI.
+    """
+    body = await _json_body(request)
+    by = str(body.get("by") or "web")
+    try:
+        doc = await asyncio.to_thread(
+            daemon_prompt.write, body.get("text", ""), by=by
+        )
+    except daemon_prompt.DaemonPromptError as exc:
+        return json_error(400, str(exc))
+    return json_response(doc)
 
 
 def _pack_target(body: dict):
@@ -6869,12 +6920,17 @@ def _session_prompt_packs(
             roles = [primary, *(roleset.canonical(r) or r for r in plan.subroles)]
     asked = _asked_prompt_packs(body)
     required = prompt_packs.required_for(roles)
+    # The daemon's own prompt comes first, for every role, unless the
+    # request turned it off (daemon_prompt.wanted).
+    own = daemon_prompt.pack() if daemon_prompt.wanted(body) else None
+    head = prompt_packs.records([own]) if own is not None else []
     if not asked and not required:
-        return [], {}
+        return head, {}
     owner = workspaces.owning(str(cflow_state.resolve_cwd(cwd or None)))
-    return prompt_packs.choose(
+    recs, required = prompt_packs.choose(
         Path(owner.path) if owner is not None else None, asked, roles
     )
+    return head + recs, required
 
 
 async def _onboard_and_launch(

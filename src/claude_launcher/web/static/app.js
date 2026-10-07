@@ -9945,6 +9945,18 @@ function newSubroles(f) {
 let newPackOffer = null;       // /api/prompt-packs/offer's answer
 let newPackOfferFor = null;    // the directory it answers for
 let newPackTicks = new Map();  // pack id -> the operator's own tick
+// The daemon's own prompt (offer.daemon_prompt): one per daemon, so a tick
+// outlives a change of workspace. null = untouched = ticked.
+let newDaemonPromptTick = null;
+let newPackRolesOpen = false;  // the folded role packs are shown
+let newPackPreview = null;     // {id, daemon, doc, error}: the text being shown
+
+/* Whether the opening takes this daemon's prompt: only when it has one, and
+   then unless the operator unticked it. */
+function newDaemonPromptWanted() {
+  if (!(newPackOffer && newPackOffer.daemon_prompt)) return false;
+  return newDaemonPromptTick !== false;
+}
 
 async function refreshPromptPackOffer() {
   const cwd = newSessionCwd();
@@ -10027,38 +10039,112 @@ function renderPromptPackRow() {
   const shippedIds = new Set(fromPackage.map((p) => p.id));
   const missing = Object.keys(required).filter((id) => !have.has(id) && !shippedIds.has(id));
   const wsName = offer && offer.workspace ? offer.workspace.name : "this directory's workspace";
-  const empty = !packs.length && !fromPackage.length && !missing.length;
+  const own = offer && offer.daemon_prompt;
+  const empty = !own && !packs.length && !fromPackage.length && !missing.length;
   row.classList.toggle("hidden", empty);
   if (empty) return;
   row.appendChild(el("span", "new-check-label", "Prompt packs"));
-  const list = el("span", "new-check-list");
-  const addBox = (p, by, packaged) => {
-    const label = el("label", "check");
+  const body = el("div", "pack-groups");
+
+  /* One chip: the box (the form's state), the title, why it is locked and
+     where its text comes from as badges, and a button that shows the text. */
+  const chip = (p, opts) => {
+    const wrap = el("span", "pack-chip" + (opts.checked ? " on" : "") +
+      (opts.locked ? " locked" : "") +
+      (newPackPreview && newPackPreview.id === p.id ? " previewing" : ""));
+    const label = el("label", "pack-chip-label");
     label.title = p.description || "";
     const box = document.createElement("input");
     box.type = "checkbox";
-    box.name = `prompt_pack_${p.id}`;
-    box.value = p.id;
-    box.checked = by ? true : newPackTicked(p.id);
-    box.disabled = !!by;
-    box.addEventListener("change", () => {
-      newPackTicks.set(p.id, box.checked);
+    box.className = "pack-chip-box";
+    box.name = opts.name;
+    if (opts.value) box.value = opts.value;
+    box.checked = !!opts.checked;
+    box.disabled = !!opts.locked;
+    box.addEventListener("change", () => opts.onChange(box.checked));
+    label.appendChild(box);
+    label.appendChild(el("span", "pack-chip-title", p.title || p.id));
+    if (opts.locked) {
+      const lock = el("span", "pack-chip-badge lock", `🔒 ${opts.locked.join(", ")}`);
+      lock.title = `required by ${opts.locked.join(", ")}`;
+      label.appendChild(lock);
+    }
+    const src = el("span", `pack-chip-badge src-${opts.source}`, opts.sourceLabel);
+    src.title = opts.sourceTitle;
+    label.appendChild(src);
+    wrap.appendChild(label);
+    const view = el("button", "pack-chip-view", "view");
+    view.type = "button";
+    view.title = `Show the text of ${p.title || p.id}`;
+    view.addEventListener("click", () => togglePackPreview(p.id, opts.daemon));
+    wrap.appendChild(view);
+    return wrap;
+  };
+  const packChip = (p, packaged) => {
+    const by = required[p.id];
+    return chip(p, {
+      name: `prompt_pack_${p.id}`, value: p.id,
+      checked: by ? true : newPackTicked(p.id), locked: by,
+      source: packaged ? "package" : "workspace",
+      sourceLabel: packaged ? "claunch" : "installed",
+      sourceTitle: packaged
+        ? `claunch's copy, not installed in ${wsName}`
+        : `installed in ${wsName}`,
+      onChange: (on) => { newPackTicks.set(p.id, on); renderPromptPackRow(); },
+    });
+  };
+  const group = (name, chips, more) => {
+    if (!chips.length && !more) return;
+    const g = el("div", "pack-group");
+    g.appendChild(el("span", "pack-group-name", name));
+    const list = el("span", "new-check-list pack-chips");
+    for (const c of chips) list.appendChild(c);
+    if (more) list.appendChild(more);
+    g.appendChild(list);
+    body.appendChild(g);
+  };
+
+  // General: this daemon's prompt first (the daemon puts it first), then
+  // every pack that is not a role's own.
+  const every = [...packs.map((p) => [p, false]), ...fromPackage.map((p) => [p, true])];
+  const isRole = (p) => p.id.startsWith("role-");
+  const general = [];
+  if (own) {
+    general.push(chip(own, {
+      name: "daemon_prompt", daemon: true,
+      checked: newDaemonPromptWanted(),
+      source: "daemon", sourceLabel: "daemon",
+      sourceTitle: "this daemon's own prompt, given to every session it starts",
+      onChange: (on) => { newDaemonPromptTick = on; renderPromptPackRow(); },
+    }));
+  }
+  for (const [p, packaged] of every) if (!isRole(p)) general.push(packChip(p, packaged));
+  group("General", general, null);
+
+  // Roles: the ones in play (required or ticked) are shown; the rest of the
+  // role packs fold behind one button so the row stays short.
+  const roles = every.filter(([p]) => isRole(p));
+  const inPlay = ([p]) => !!required[p.id] || newPackTicked(p.id);
+  const shown = roles.filter((r) => newPackRolesOpen || inPlay(r));
+  const folded = roles.filter((r) => !inPlay(r)).length;
+  let more = null;
+  if (folded) {
+    more = el("button", "pack-chip-more", newPackRolesOpen ? "fewer" : `+${folded} more`);
+    more.type = "button";
+    more.addEventListener("click", () => {
+      newPackRolesOpen = !newPackRolesOpen;
       renderPromptPackRow();
     });
-    label.appendChild(box);
-    label.appendChild(el("span", null, p.title || p.id));
-    const why = [];
-    if (by) why.push(`required by ${by.join(", ")}`);
-    if (packaged) why.push(`claunch's copy, not installed in ${wsName}`);
-    if (why.length) label.appendChild(el("span", "wf-note", ` (${why.join(" · ")})`));
-    list.appendChild(label);
-  };
-  for (const p of packs) addBox(p, required[p.id], false);
-  for (const p of fromPackage) addBox(p, required[p.id], true);
-  row.appendChild(list);
-  // What the opening will actually carry, in the daemon's order (ticked,
-  // then required), each with why it is there -- the boxes alone do not say
-  // which role a locked one came from when the Role row was left blank.
+  }
+  group("Roles", shown.map(([p, packaged]) => packChip(p, packaged)), more);
+  row.appendChild(body);
+
+  if (newPackPreview) row.appendChild(packPreviewPanel(newPackPreview, wsName));
+
+  // What the opening will actually carry, in the daemon's order (its own
+  // prompt, ticked, then required), each with why it is there -- the chips
+  // alone do not say which role a locked one came from when the Role row
+  // was left blank.
   const chosen = [...newPromptPacks(f), ...Object.keys(required).filter((id) => shippedIds.has(id))]
     .filter((id, i, a) => a.indexOf(id) === i);
   const primary = newPrimaryRole(f);
@@ -10066,19 +10152,98 @@ function renderPromptPackRow() {
     const why = required[id] ? `role ${required[id].join(", ")}` : "ticked";
     return `${id} (${why}${shippedIds.has(id) ? ", claunch's copy" : ""})`;
   });
-  let summary = parts.length
-    ? `The opening will include: ${parts.join(" · ")}.`
-    : "The opening will include no prompt pack.";
-  if (primary.inferred && primary.role) {
-    summary += ` Role ${primary.role} is inferred from the handle (no Role picked).`;
+  if (newDaemonPromptWanted()) parts.unshift("daemon prompt (this daemon's, every session)");
+  const summary = el("p", "wf-note new-packs-summary");
+  if (parts.length) {
+    summary.appendChild(document.createTextNode("The opening will include: "));
+    parts.forEach((part, i) => {
+      if (i) summary.appendChild(document.createTextNode(" · "));
+      summary.appendChild(el("span", "pack-chip-mini", part));
+    });
+    summary.appendChild(document.createTextNode("."));
+  } else {
+    summary.appendChild(document.createTextNode("The opening will include no prompt pack."));
   }
-  row.appendChild(el("p", "wf-note new-packs-summary", summary));
+  if (primary.inferred && primary.role) {
+    summary.appendChild(document.createTextNode(
+      ` Role ${primary.role} is inferred from the handle (no Role picked).`));
+  }
+  row.appendChild(summary);
   if (missing.length) {
     row.appendChild(el("p", "wf-error",
       missing.map((id) => `${id} is required by ${required[id].join(", ")}`).join("; ") +
       ` but is neither installed in ${wsName} nor shipped with claunch` +
       " — fix the mapping in Settings ▸ Install, or the create will be refused."));
   }
+}
+
+/* The text a chip's "view" shows, fetched the way the opening will get it:
+   the workspace's copy (edits and all) or claunch's, through
+   /api/prompt-packs/text for this form's directory; the daemon's own prompt
+   through /api/daemon-prompt. A second click on the same chip closes it. */
+async function togglePackPreview(id, daemon) {
+  if (newPackPreview && newPackPreview.id === id) {
+    newPackPreview = null;
+    renderPromptPackRow();
+    return;
+  }
+  const want = { id, daemon: !!daemon, doc: null, error: "" };
+  newPackPreview = want;
+  renderPromptPackRow();
+  try {
+    const url = daemon
+      ? "/api/daemon-prompt"
+      : `/api/prompt-packs/text?id=${encodeURIComponent(id)}` +
+        `&cwd=${encodeURIComponent(newSessionCwd())}`;
+    const resp = await api(url);
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    const text = daemon ? String(data.text || "") : "";
+    want.doc = daemon
+      ? { title: `Daemon prompt (${data.instance})`, body: text, source: "daemon",
+          lines: text ? text.split("\n").length : 0 }
+      : data;
+  } catch (err) {
+    want.error = String((err && err.message) || err);
+  }
+  if (newPackPreview === want) renderPromptPackRow();
+}
+
+/* Where a previewed text comes from, in the words the chips' badges use. */
+function packPreviewOrigin(doc, wsName) {
+  if (doc.source === "daemon") return "this daemon's prompt, every session";
+  if (doc.source === "package") return `claunch's copy, not installed in ${wsName}`;
+  return {
+    current: `installed in ${wsName}`,
+    stale: `installed in ${wsName}, older than claunch's`,
+    edited: `edited in ${wsName}`,
+    local: `${wsName}'s own pack`,
+  }[doc.status] || `installed in ${wsName}`;
+}
+
+/* The panel under the chips: title, origin, length, then the text itself. */
+function packPreviewPanel(view, wsName) {
+  const panel = el("div", "pack-preview");
+  const head = el("div", "pack-preview-head");
+  const doc = view.doc;
+  head.appendChild(el("b", null, doc ? (doc.title || view.id) : view.id));
+  if (doc) {
+    head.appendChild(el("span", "wf-note",
+      `${packPreviewOrigin(doc, wsName)} · ${doc.lines} line${doc.lines === 1 ? "" : "s"}`));
+  }
+  const close = el("button", "pack-chip-view", "close");
+  close.type = "button";
+  close.addEventListener("click", () => { newPackPreview = null; renderPromptPackRow(); });
+  head.appendChild(close);
+  panel.appendChild(head);
+  if (view.error) {
+    panel.appendChild(el("p", "wf-error", view.error));
+  } else if (!doc) {
+    panel.appendChild(el("p", "wf-note", "Reading…"));
+  } else {
+    mdInto(panel.appendChild(el("div", "pack-preview-body md")), doc.body || "");
+  }
+  return panel;
 }
 
 /* The ids the form sends: the ticked ones, installed or claunch's copy.
@@ -11317,6 +11482,10 @@ $("new-session").addEventListener("submit", async (e) => {
   // Sent even when empty once an offer was read: an empty list is "none of
   // the defaults", and the daemon still adds what the roles require.
   if (newPackOffer) body.prompt_packs = newPromptPacks(f);
+  // Sent only to say no: the daemon gives its prompt unless told otherwise.
+  if (newPackOffer && newPackOffer.daemon_prompt && !newDaemonPromptWanted()) {
+    body.daemon_prompt = false;
+  }
   if (!parent && f.borrow.value) body.borrow = f.borrow.value;
   if (!parent && f.null_token.checked) body.null_token = true;
   // Onboarding: only sent when chosen. The daemon checks each before it
@@ -18332,6 +18501,7 @@ function openSettings(section) {
   if (wsSection === "install") {
     refreshInstallOverview();
     refreshPromptPacks();
+    refreshDaemonPrompt();
     return;
   }
   if (wsSection === "vscode") {
@@ -23106,6 +23276,101 @@ async function refreshPromptPacks() {
   if (wsOpen) renderWorkspaces();
 }
 
+/* The daemon prompt (Settings ▸ Install): one text THIS daemon gives every
+   session it starts, whatever the role, as the first prompt pack of the
+   opening. It lives in this daemon's own state directory, so another daemon
+   on the machine neither shows nor uses it. Agents can read and replace it
+   too (MCP tool daemon_prompt); every save keeps the text it replaced. */
+let daemonPromptDoc = null;
+let daemonPromptError = "";
+let daemonPromptBusy = false;
+let daemonPromptDraft = null;   // the textarea's text while it differs
+
+async function refreshDaemonPrompt() {
+  try {
+    const resp = await api("/api/daemon-prompt");
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    daemonPromptDoc = data;
+    daemonPromptError = "";
+  } catch (err) { daemonPromptError = String(err); }
+  if (wsOpen) renderWorkspaces();
+}
+
+async function saveDaemonPrompt(text) {
+  daemonPromptBusy = true;
+  if (wsOpen) renderWorkspaces();
+  try {
+    const resp = await api("/api/daemon-prompt", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, by: "web" }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    daemonPromptDoc = data;
+    daemonPromptDraft = null;
+    daemonPromptError = "";
+  } catch (err) {
+    daemonPromptError = String(err);
+  } finally {
+    daemonPromptBusy = false;
+    newPackOfferFor = null;   // the create form's offer carries it
+    if (wsOpen) renderWorkspaces();
+  }
+}
+
+function daemonPromptCard() {
+  const card = el("section", "ws-add daemon-prompt");
+  card.appendChild(el("h3", null, "Daemon prompt"));
+  card.appendChild(el("p", "wf-note",
+    "One prompt this daemon gives every session it starts, whatever the " +
+    "role: the create form shows it as the first prompt pack, ticked (it " +
+    "can be unticked per session). It is this daemon's configuration, kept " +
+    "in its own state directory; other daemons on this machine have their " +
+    "own. Empty means none. Agents can read and replace it with the MCP " +
+    "tool daemon_prompt; each save keeps the text it replaced. A change " +
+    "reaches sessions created after it."));
+  if (daemonPromptError) card.appendChild(el("p", "wf-error", daemonPromptError));
+  const doc = daemonPromptDoc;
+  if (!doc) {
+    card.appendChild(el("p", "wf-note", "Reading the daemon prompt…"));
+    return card;
+  }
+  const where = el("p", "wf-note");
+  where.appendChild(document.createTextNode(`Daemon ${doc.instance} · `));
+  where.appendChild(el("code", null, doc.path));
+  where.appendChild(document.createTextNode(doc.enabled
+    ? ` · ${doc.chars} characters${doc.updated_at ? ` · saved ${doc.updated_at}` : ""}`
+    : " · empty (off)"));
+  card.appendChild(where);
+  const area = document.createElement("textarea");
+  area.id = "daemon-prompt-text";
+  area.className = "daemon-prompt-text";
+  area.rows = 10;
+  area.spellcheck = false;
+  area.placeholder = "Rules every session this daemon starts should follow…";
+  area.value = daemonPromptDraft !== null ? daemonPromptDraft : (doc.text || "");
+  const actions = el("div", "install-actions");
+  const save = el("button", "wf-btn", daemonPromptBusy ? "Saving…" : "Save");
+  const discard = el("button", "wf-btn clear", "Discard changes");
+  const sync = () => {
+    const changed = daemonPromptDraft !== null && daemonPromptDraft !== (doc.text || "");
+    save.disabled = daemonPromptBusy || !changed;
+    discard.disabled = !changed;
+  };
+  // Typing is kept in the draft without a re-render, so the caret stays put.
+  area.addEventListener("input", () => { daemonPromptDraft = area.value; sync(); });
+  save.addEventListener("click", () => saveDaemonPrompt(area.value));
+  discard.addEventListener("click", () => { daemonPromptDraft = null; renderWorkspaces(); });
+  sync();
+  card.appendChild(area);
+  actions.appendChild(save);
+  actions.appendChild(discard);
+  card.appendChild(actions);
+  return card;
+}
+
 async function promptPackCall(method, path, payload, busy) {
   promptPacksBusy = busy;
   if (wsOpen) renderWorkspaces();
@@ -23361,6 +23626,7 @@ function renderWorkspaces() {
   // below: they are machine settings, this is the list of storage roots.
   if (wsSection === "install") {
     view.appendChild(installPanel());
+    view.appendChild(daemonPromptCard());
     view.appendChild(promptPacksCard());
     return;
   }
@@ -31315,13 +31581,14 @@ function sessionFormConfig(mode) {
     "resume", "fork", "skip_permissions", "codex_yolo", "codex_sandbox", "args",
     "worktree_mode", "worktree_name", "worktree_existing", "worktree_session",
     "worktree_rebase", "worktree_from", "task", "score_goal", "beads", "issue_text", "issue_filter", "issue", "pi_tool_*",
-    "subrole_*", "prompt_pack_*"];
+    "subrole_*", "prompt_pack_*", "daemon_prompt"];
   const modes = {
     new: { title: "New session", submit: "Create", sections, editable,
       payload: ["name", "profile", "project", "cwd", "args", "model", "effort", "tools", "worktree",
         "rebase_onto", "branch_from", "role", "subroles", "borrow", "null_token", "mesh", "handle", "workflow",
         "workflow_version", "cflow_inputs",
         "context", "task", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
+        "daemon_prompt",
         "resume", "fork_session"] },
     spawn: { title: "Spawn child", submit: "Spawn child", sections,
       editable: [...editable, "parent", "fork_parent", "over_limit"],
@@ -31329,6 +31596,7 @@ function sessionFormConfig(mode) {
         "rebase_onto", "branch_from", "role", "subroles", "borrow", "null_token", "mesh", "handle", "workflow",
         "workflow_version", "cflow_inputs",
         "context", "task", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
+        "daemon_prompt",
         "fork", "connect", "over_limit"] },
     fork: { title: "Quick fork", submit: "Fork", sections: ["new-quick-fork"],
       editable: ["quick_fork_carry", "quick_fork_task"], payload: ["task", "mesh", "workflow"] },

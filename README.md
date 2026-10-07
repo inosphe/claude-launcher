@@ -2561,9 +2561,15 @@ The workflow has two steps:
    untouched), *edited here* (Overwrite/Remove ask first), and *local pack*
    (a `.md` the workspace wrote itself, which is offered at creation too).
 2. **Choose at session creation.** The create and spawn forms offer every pack
-   as a checkbox: the ones installed in the session's workspace first, then
-   every pack claunch ships that the workspace has not installed, marked
-   "claunch's copy". Any of them can be ticked, whatever the role and with no
+   as a chip you click on or off: the ones installed in the session's
+   workspace first, then every pack claunch ships that the workspace has not
+   installed, badged "claunch" (an installed one is badged "installed").
+   The chips sit in two groups, **General** and **Roles** (the `role-*`
+   packs); a role pack that is neither ticked nor required is folded behind
+   a "+N more" button. Every chip has a **view** button that shows the pack's
+   text under the chips, read the same way the opening would read it (the
+   workspace's copy with its edits, else claunch's) and saying which it is.
+   Any of them can be ticked, whatever the role and with no
    mesh at all. The ticked packs go into the opening, after the score goal
    and before the mesh/workflow briefing, so the opening still ends with the
    task. The workspace's copy is read when it has one, so a workspace that
@@ -2586,10 +2592,10 @@ Two settings sit under the matrix, stored in `~/.claunch.yaml` under
   `default: true` (`common`).
 - **Required by role** (`role_packs`): role → packs. A session whose primary
   role or one of whose subroles is listed gets those packs whether ticked or
-  not; the form shows them ticked and locked with "required by <role>". A
+  not; the form shows them ticked and locked with a 🔒 <role> badge. A
   required pack needs no install: the workspace's copy is used when it has
   one (an edit there wins), and the copy claunch ships otherwise — the form
-  marks it "claunch's copy", the opening block says "shipped with claunch",
+  badges it "claunch", the opening block says "shipped with claunch",
   and the create response lists it under `prompt_packs_shipped`. Only a
   mapped pack that exists in neither place refuses the create, with the role
   named. Roles are matched by canonical name on the joined mesh, so aliases and
@@ -2599,7 +2605,7 @@ Two settings sit under the matrix, stored in `~/.claunch.yaml` under
   `--role worker --subrole unreal`) to `unreal-operator`.
 
 The create and spawn forms end the Prompt packs row with one line naming
-every pack the opening will carry and why (ticked, or the role that requires
+every pack the opening will carry and why, one chip each (ticked, or the role that requires
 it, and whether it is claunch's copy). When the Role row is blank it says
 which role the handle will resolve to, since that role decides the packs.
 
@@ -2611,9 +2617,42 @@ joined by hand, without a create-time opening, reads them.
 
 HTTP: `GET /api/prompt-packs` (catalog, per-workspace status, both settings),
 `GET /api/prompt-packs/offer?cwd=` (what the form offers there),
+`GET /api/prompt-packs/text?id=&cwd=` (one pack's text as a session there
+would get it, with `source` — `workspace` or `package` — and for a workspace
+copy its `status`: `current`, `stale`, `edited` or `local`; 404 for an id
+that is neither installed nor shipped),
 `POST /api/prompt-packs/install|remove` (`{workspace, pack, force}`),
 `PUT /api/prompt-packs/role-packs` (`{role_packs?, default_packs?}`; `null`
 restores a default).
+
+### The daemon prompt (one text every session of this daemon gets)
+
+Each daemon instance can hold one prompt of its own that it puts into the
+opening of **every** session it starts, whatever the role or mesh, as the
+first prompt pack (id `daemon`, header `-- this daemon's own prompt`). It is
+daemon configuration, not source code and not a workspace file: it lives in
+the instance's state directory, `~/.claude-launcher/daemon/daemon-prompt.md`
+for the default daemon and `daemons/<name>/daemon-prompt.md` for `-L <name>`,
+so two daemons on one machine never read or show each other's. Empty (or no
+file) means the daemon has none.
+
+Edit it under **Settings ▸ Install ▸ Daemon prompt**. The create form shows it
+as the first chip of the Prompt packs row (badged "daemon", its **view** shows
+the text), ticked; untick it to leave it out of
+one session (`daemon_prompt: false` in the body, `--no-daemon-prompt` on
+`claunch new-session`/`spawn`, `no_daemon_prompt` on the MCP `spawn` tool). A
+change reaches sessions created after it, not running ones.
+
+Agents see and change it through the session MCP tool `daemon_prompt`
+(`op: get`, or `op: set` with the whole new `text`; empty turns it off). Every
+save, from the web or an agent, keeps the text it replaced in
+`daemon-prompt.prev.md` and appends `{at, by, chars, previous_chars}` to
+`daemon-prompt.log.jsonl` beside it, so a bad edit can be traced and undone.
+The text is limited to 32,000 characters.
+
+HTTP: `GET /api/daemon-prompt` (instance, path, text, size), `PUT
+/api/daemon-prompt` (`{text, by?}`); `GET /api/prompt-packs/offer` carries it
+as `daemon_prompt`.
 
 ### Joining with a role, or opening another session's conversation
 
