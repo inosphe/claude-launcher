@@ -5354,6 +5354,12 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 .wt-branch { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1 1 auto; }
 .wt-repo { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.wt-path-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }
+.wt-path { flex: 1 1 200px; min-width: 0; font-size: 12px; white-space: pre-wrap;
+  overflow-wrap: anywhere; user-select: text; }
+.wt-copy-path { flex: 0 0 auto; margin-right: 0; }
+.wt-copy-status { flex-basis: 100%; }
+.wt-copy-status:empty { display: none; }
 .wt-chip { font-size: 11px; padding: 1px 7px; border-radius: 10px; background: #30363d;
   color: #c9d1d9; white-space: nowrap; }
 .wt-chip.active, .wt-chip.running { background: #1a3d24; color: #7ee787; }
