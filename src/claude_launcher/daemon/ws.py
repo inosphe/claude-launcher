@@ -29,7 +29,10 @@ nothing gets what it always got.
   ``{"type":"scroll","lines":N}`` (view history held by the daemon: N>0 moves
   further back, N<0 back toward live, anything past the bounds clamps —
   ``-999999`` snaps to live), ``{"type":"focus","focused":bool}`` (whether
-  this retained viewer is currently on screen), and ``{"type":"ping"}``.
+  this retained viewer is currently on screen),
+  ``{"type":"line_sync","text":..,"client":..,"if_text":..}`` (a write to
+  the shared session line -- see ``daemon/line_sync.py``), and
+  ``{"type":"ping"}``.
   server: ``{"type":"state","status":...}``, ``{"type":"exit","code":...}``,
   ``{"type":"resize","cols":..,"rows":..}``,
   ``{"type":"size_owner","owner":bool,"held":bool}``, ``{"type":"buffer","alt":..}``
@@ -42,7 +45,10 @@ nothing gets what it always got.
   repaint answering a ``scroll``), ``{"type":"pong"}``,
   ``{"type":"notice","id":..,"text":..,"ttl":..,"level":..}`` (a line for
   the person at this viewer, to show over the terminal for ``ttl`` seconds —
-  see "Notices" below), and
+  see "Notices" below),
+  ``{"type":"line_sync","mode":..,"text":..,"rev":..,"at":..,"client":..}``
+  (the shared session line changed; also sent right after ``init`` for a
+  session whose line has ever been touched), and
   ``{"type":"shutdown"}`` — the daemon itself is stopping/restarting, sent
   before its sessions are terminated so a viewer can tell this apart from the
   session's program exiting on its own.
@@ -132,6 +138,7 @@ from typing import Optional
 from aiohttp import WSMsgType, web
 
 from . import connections as conn_mod
+from . import line_sync
 from .notice import Notice, Overlay
 from .session import Session, SessionGone
 
@@ -526,6 +533,13 @@ async def attach_terminal(
                 }
             )
         )
+        # The shared session line, for a session that has ever had one
+        # (daemon/line_sync.py): a page opening on a session in remote-sync
+        # mode learns it before the first key, and a page reconnecting after
+        # the mode changed learns that too. Untouched sessions send nothing.
+        shared = line_sync.get(session.sdef.name)
+        if shared.rev:
+            await ws.send_str(json.dumps(shared.frame()))
         await _synced(session)
         # On the main buffer, hand the viewer the scrollback before the grid,
         # so its own terminal holds what the daemon holds and the wheel below
@@ -843,6 +857,8 @@ async def _pump_to_client(
             await ws.send_str(json.dumps({"type": "mouse", "tracking": payload}))
         elif kind == "state":
             await ws.send_str(json.dumps({"type": "state", "status": payload}))
+        elif kind == "line_sync":
+            await ws.send_str(json.dumps(payload))
         elif kind == "size_owner":
             await ws.send_str(_size_owner_frame(state, payload))
         elif kind == "resize":
@@ -1018,6 +1034,31 @@ async def _handle_control(
         session.note_human_input(
             at_terminal=True, composing=bool(msg.get("draft"))
         )
+    elif kind == "line_sync":
+        # A keystroke in the shared session line (daemon/line_sync.py): the
+        # whole text, last writer wins, fanned out to every viewer -- the
+        # writer included, whose page reads its own ``client`` id off the
+        # echo. ``if_text`` is the conditional clear after a send. Refused
+        # writes (the session is not in remote-sync mode, the text is too
+        # long) answer this socket alone with the state as it stands, so the
+        # page that wrote drops back to the truth.
+        text = msg.get("text")
+        if_text = msg.get("if_text")
+        client = str(msg.get("client") or "")[:64]
+        try:
+            shared, changed = line_sync.set_text(
+                session.sdef.name,
+                text,
+                client=client,
+                if_text=if_text if isinstance(if_text, str) else None,
+            )
+        except line_sync.LineSyncError:
+            await ws.send_str(json.dumps(line_sync.get(session.sdef.name).frame()))
+            return
+        if changed:
+            line_sync.publish(session, shared)
+        else:
+            await ws.send_str(json.dumps(shared.frame()))
     elif kind == "focus":
         # Parked web terminals retain their sockets to preserve their local
         # state. Attachment alone therefore does not say which terminal is

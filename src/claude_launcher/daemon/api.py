@@ -53,6 +53,7 @@ from . import beads as beads_mod, channel, clipboard, connections
 from . import p2p
 from . import handoff as handoff_mod
 from . import loop_lag as loop_lag_mod
+from . import line_sync
 from . import notice as notice_mod
 from . import rag as rag_mod
 from . import worktree_inventory
@@ -810,6 +811,12 @@ def build_app(
     r.add_get("/api/sessions/{name}/pr/preview", h_session_pr_preview)
     r.add_post("/api/sessions/{name}/pr", h_session_pr)
     r.add_post("/api/sessions/{name}/notice", h_session_notice)
+    # The session line's sync mode and its shared text (daemon/line_sync.py).
+    # Keystrokes ride the terminal socket; this is the door for the mode
+    # switch, for a page reading the state as it attaches, and for a writer
+    # with no socket open.
+    r.add_get("/api/sessions/{name}/line-sync", h_session_line_sync)
+    r.add_post("/api/sessions/{name}/line-sync", h_session_line_sync)
     # One composition, two verbs: GET hands the text to whoever will read it
     # into context (the SessionStart hook, the MCP tool, the CLI); POST types
     # it into the terminal — the operator's push for a session that does not
@@ -9162,6 +9169,47 @@ async def h_session_notice(request: web.Request) -> web.Response:
         return json_error(400, "'level' must be one of " + ", ".join(notice_mod.LEVELS))
     viewers = session.notify(text, ttl=ttl, level=level)
     return json_response({"ok": True, "viewers": viewers})
+
+
+async def h_session_line_sync(request: web.Request) -> web.Response:
+    """The session line's shared state (:mod:`line_sync`).
+
+    GET answers the state. POST changes it: ``mode`` (``local`` /
+    ``remote``) switches the session -- every viewer is moved with it -- and
+    ``text`` (with ``if_text`` for a conditional write) replaces the shared
+    text, which is refused with 409 while the session is ``local``. ``client``
+    is the writing page's own id, echoed back so it can tell its write from
+    somebody else's. Either change goes out to every attached viewer as a
+    ``line_sync`` frame; ``viewers`` says how many."""
+    session = _session(request)
+    name = session.sdef.name
+    if request.method == "GET":
+        return json_response(line_sync.get(name).frame())
+    body = await _json_body(request)
+    client = str(body.get("client") or "")[:64]
+    mode = body.get("mode")
+    has_text = "text" in body
+    if mode is None and not has_text:
+        return json_error(400, "give 'mode' or 'text'")
+    changed = False
+    try:
+        if mode is not None:
+            _, moved = line_sync.set_mode(name, mode, client=client)
+            changed = changed or moved
+        if has_text:
+            if_text = body.get("if_text")
+            if if_text is not None and not isinstance(if_text, str):
+                return json_error(400, "'if_text' must be a string")
+            _, wrote = line_sync.set_text(
+                name, body.get("text"), client=client, if_text=if_text
+            )
+            changed = changed or wrote
+    except line_sync.LineSyncError as exc:
+        status = 409 if isinstance(exc, line_sync.NotRemote) else 400
+        return json_error(status, str(exc))
+    state = line_sync.get(name)
+    viewers = line_sync.publish(session, state) if changed else 0
+    return json_response({**state.frame(), "changed": changed, "viewers": viewers})
 
 
 async def h_session_rebrief(request: web.Request) -> web.Response:
