@@ -483,21 +483,22 @@ def _rebased_tip(p: Plan, scratch: str) -> str:
         git(p.repo, "worktree", "prune", check=False)
 
 
-def _move_branch(p: Plan, new: str) -> None:
-    """Move ``refs/heads/<branch>`` from ``p.local`` to ``new``.
+def _move_branch(p: Plan, new: str, *, old: Optional[str] = None) -> None:
+    """Move ``refs/heads/<branch>`` from ``old`` (default ``p.local``) to ``new``.
 
     A checked-out branch moves with ``reset --keep``: the tree follows, local
     edits survive, and git refuses (moving nothing) when an edited file is one
     the move would change. An idle branch moves with a compare-and-swap
     ``update-ref`` so a concurrent writer is detected, not overwritten.
     """
+    old = old or p.local
     if p.checkout:
         head = git(p.checkout, "rev-parse", "HEAD")
-        if head != p.local:
-            raise SyncError(f"{p.branch} moved under the sync ({head[:8]} != {p.local[:8]}) -- run it again")
+        if head != old:
+            raise SyncError(f"{p.branch} moved under the sync ({head[:8]} != {old[:8]}) -- run it again")
         git(p.checkout, "reset", "--keep", new)
     else:
-        git(p.repo, "update-ref", f"refs/heads/{p.branch}", new, p.local)
+        git(p.repo, "update-ref", f"refs/heads/{p.branch}", new, old)
 
 
 def _push(p: Plan, sha: str) -> None:
@@ -518,8 +519,22 @@ def execute(p: Plan, *, scratch: str) -> Result:
         return Result(plan=p, new=p.local, pushed=True)
     new = _rebased_tip(p, scratch)
     rewritten = rewritten_map(p.repo, p.upstream, p.local, new)
+    # the local move goes first because it is the step that can refuse on
+    # its own (reset --keep over an edited file); a refused push then puts
+    # the branch back, so a failure leaves the local branch where the plan
+    # found it and a rerun plans from the same old commits
     _move_branch(p, new)
-    _push(p, new)
+    try:
+        _push(p, new)
+    except SyncError as exc:
+        try:
+            _move_branch(p, p.local, old=new)
+        except SyncError as back:
+            raise SyncError(
+                f"{exc}; and {p.branch} could not be put back to {p.local[:8]} "
+                f"({back}) -- it is at the unpushed rebase {new[:8]}"
+            ) from None
+        raise
     trees = worktrees_by_branch(p.repo)
     restack = [
         {

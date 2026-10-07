@@ -257,6 +257,32 @@ def test_rejected_push_after_a_late_remote_move(world):
         reposync.execute(p, scratch=world["scratch"])
 
 
+@pytest.mark.parametrize("checked_out", [True, False])
+def test_rejected_push_after_a_rebase_leaves_master_where_it_was(world, checked_out):
+    a, b = world["a"], world["b"]
+    _commit(b, "theirs.txt")
+    _git(b, "push", "-q", "origin", "master")
+    _commit(a, "mine.txt")
+    if not checked_out:
+        _git(a, "switch", "-q", "-c", "elsewhere")
+    p = reposync.plan(str(a), "github.ncsoft.com")
+    assert p.action == reposync.REBASE and bool(p.checkout) == checked_out
+    _commit(b, "late.txt")
+    _git(b, "push", "-q", "origin", "master")
+    with pytest.raises(reposync.SyncError, match="push"):
+        reposync.execute(p, scratch=world["scratch"])
+    assert _git(a, "rev-parse", "master") == p.local
+    if checked_out:
+        assert _git(a, "rev-parse", "HEAD") == p.local
+        assert _git(a, "status", "--porcelain") == ""
+    # the rerun plans from the same old commits, so the old->new map and the
+    # restack commands come out on the run that succeeds
+    again = reposync.plan(str(a), "github.ncsoft.com")
+    assert again.local == p.local
+    done = reposync.execute(again, scratch=world["scratch"])
+    assert done.pushed and p.local in done.rewritten
+
+
 def test_three_runs_converge_both_machines(world):
     a, b = world["a"], world["b"]
     _land(a, "s1-x", "x.txt")
