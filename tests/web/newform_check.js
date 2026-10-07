@@ -384,12 +384,18 @@ check("the create form provides an announced pending status",
    of both keys. A request that says nothing gets an issue minted from its
    task, which is what every client written before this row still sends — so
    the default answer must produce exactly that request. */
-check("only the three non-default answers put a board key on the request",
+check("only the non-default answers put a board key on the request",
       [/body\.beads = false/.test(submit),
        /body\.beads = "none-auto"/.test(submit),
        /body\.issue = f\.issue\.value/.test(submit),
        /body\.beads = true/.test(submit)],
       [true, true, true, false]);
+
+/* "existing" with nothing picked is its own answer (claunch-5p2j4): sending
+   no key there read as "new" and minted an issue from the task for work
+   that already had one. */
+check("an existing answer with no pick says so instead of sending nothing",
+      /else body\.beads = "existing-pending"/.test(submit), true);
 
 /* ...and the text rides only under "new". Sent beside "existing" or "none"
    it is a contradiction the daemon refuses outright (beads.check_request),

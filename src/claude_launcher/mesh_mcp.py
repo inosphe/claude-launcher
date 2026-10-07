@@ -440,6 +440,17 @@ TOOLS = [
                         "you meant"
                     ),
                 },
+                "issue_pending": {
+                    "type": "boolean",
+                    "description": (
+                        "the child works an EXISTING issue you have not "
+                        "named yet: nothing is minted or assigned, and it "
+                        "waits until you send it the id, then records it "
+                        "(a v2 run's start input 'issue') and takes it. "
+                        "Without this a child with a task gets one minted "
+                        "for it"
+                    ),
+                },
                 "fork": {
                     "type": "boolean",
                     "description": (
@@ -1089,6 +1100,7 @@ _SPAWN_KEYS = (
 #: order, so a caller that sets both gets the auto answer: it is the one that
 #: says what the child should DO, and the one it would have had to ask about.
 _SPAWN_RENAMED = {
+    "issue_pending": ("beads", "existing-pending"),
     "no_issue": ("beads", False),
     "no_issue_auto": ("beads", "none-auto"),
 }

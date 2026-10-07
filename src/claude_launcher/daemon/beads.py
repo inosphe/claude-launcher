@@ -130,6 +130,15 @@ MINTED = "created"
 #: issue" ended up searching the board for one.
 NONE_WAIT = "none-wait"
 NONE_AUTO = "none-auto"
+#: The third answer that leaves the board alone at creation (claunch-5p2j4):
+#: the operator chose "an existing issue" and named none yet. Nothing is
+#: minted or adopted, as with the two "no issue" answers, but the session is
+#: told that its start issue is still to come -- it waits for the user or its
+#: parent to name it, then writes it into the run's start input with
+#: ``flow_input`` (claunch-7d4nt). Minting from the task here, which is what
+#: an empty "existing" pick used to fall through to, filed a second issue for
+#: work that already had one.
+ISSUE_PENDING = "existing-pending"
 
 #: What the wire accepts for :data:`NONE_WAIT`. ``False`` is the spelling
 #: every caller that predates the split sends (``--no-issue``, the forms'
@@ -742,6 +751,8 @@ def none_mode(body: dict) -> Optional[str]:
             return NONE_WAIT
         if key == NONE_AUTO:
             return NONE_AUTO
+        if key == ISSUE_PENDING:
+            return ISSUE_PENDING
     return None
 
 
@@ -762,6 +773,23 @@ def compose_none_note(mode: str, *, session: str = "") -> str:
     one is helpful.
     """
     who = session or "$CLAUNCH_SESSION"
+    if mode == ISSUE_PENDING:
+        # Its own first word, not "no issue:": the session does have an
+        # issue, it has not been told which yet -- a session that read this
+        # as either "no issue" answer would wait forever or go shopping.
+        return (
+            "start issue pending: this session was created with the board "
+            "answer \"an existing issue\" and no issue was picked yet. Nothing "
+            "was minted for you and nothing is assigned to you, and the run's "
+            "start input 'issue' is empty. Do NOT search the board for work "
+            "to adopt and do not mint an issue. Wait for the user or your "
+            "parent to name the issue. When they do, write it into the run "
+            "with the flow_input tool (name 'issue', value the id; without "
+            "MCP: `claunch cflow2 input issue <id>`) if your run declares that "
+            "input, then read it (`claunch beads show <id> --json`) and take "
+            "it as an assigned issue (`claunch beads update <id> --assignee "
+            + who + " --status in_progress`)."
+        )
     if mode == NONE_AUTO:
         return (
             "no issue: this session was created with the board answer "
@@ -829,7 +857,27 @@ def check_request(body: dict) -> None:
     keys, so there is no conflict here that the body does not already show.
     Raises :class:`BoardRequestError` (a ``ValueError``); the HTTP layer turns
     that into a 400 before anything is created.
+
+    :data:`ISSUE_PENDING` ("an existing issue, not picked yet") is refused
+    beside any issue the request does name -- the ``issue`` field or an
+    ``issue: <id>`` in the task or context: an issue cannot be both named and
+    still to come (claunch-5p2j4).
     """
+    if none_mode(body) == ISSUE_PENDING:
+        named = str(body.get("issue") or "").strip()
+        if named:
+            raise BoardRequestError(
+                f"'beads: {ISSUE_PENDING}' says the issue is not picked yet and "
+                f"'issue' names {named!r} — a request cannot mean both. Send "
+                "one: drop 'beads' to work the issue you named"
+            )
+        refs = issue_refs(body.get("task"), body.get("context"))
+        if refs:
+            raise BoardRequestError(
+                f"'beads: {ISSUE_PENDING}' says the issue is not picked yet, but "
+                f"the task or context names issue {refs[0]!r} ('issue: "
+                f"{refs[0]}') — a request cannot mean both. Send one"
+            )
     text = str(body.get("issue_text") or "").strip()
     if not text:
         return

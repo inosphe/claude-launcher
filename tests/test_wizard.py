@@ -3089,7 +3089,11 @@ def test_the_issue_picker_says_which_rows_would_only_be_joined():
     wiz = form()
     pick(wiz, "beads", "an existing issue")
     rows = {o.value: o for o in wiz.field("issue").options}
-    assert set(rows) == {"cl-1", "cl-2"}
+    # the last row is "not picked yet" (claunch-5p2j4), and the first real
+    # issue stays the default
+    assert set(rows) == {"cl-1", "cl-2", ""}
+    assert wiz.field("issue").options[-1].value == ""
+    assert wiz.value("issue") == "cl-1"
     assert rows["cl-1"].label.startswith("cl-1")
     assert "wire the rail" in rows["cl-1"].label
     assert "JOIN" not in rows["cl-1"].detail
@@ -3162,6 +3166,24 @@ def test_flags_typed_alongside_the_wizard_prefill_the_board_rows():
     args = argparse.Namespace()
     wiz.apply(args)
     assert args.no_issue_auto is True and args.no_issue is False
+
+    # --issue-pending opens the pick row with nothing in it, and an empty
+    # pick goes back out as that answer -- not as "new", which minted an
+    # issue from the task for work that already had one (claunch-5p2j4)
+    wiz = wizard.Wizard(
+        FakeSources(), cwd="/work/repo",
+        defaults=argparse.Namespace(issue=None, issue_pending=True),
+    )
+    assert wiz.value("beads") == wizard.BEADS_PICK
+    assert not wiz.value("issue")
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.issue_pending is True and args.issue is None
+    assert "not picked yet" in wizard._issue_summary(wiz)
+    wiz.field("issue").select("cl-2")
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.issue_pending is False and args.issue == "cl-2"
 
 
 def test_an_id_this_board_does_not_have_is_kept_and_marked_rather_than_dropped():

@@ -11211,11 +11211,17 @@ $("new-session").addEventListener("submit", async (e) => {
   // that has never heard of this field still wants. The two "no issue" rows
   // are one key with two values: `false` is the older spelling and keeps
   // meaning "no issue, and do not go looking", "none-auto" is the opposite
-  // instruction about the same empty board.
+  // instruction about the same empty board. "existing" with nothing picked
+  // is a third answer, "existing-pending": no issue is minted and the
+  // session waits to be told which issue it is (claunch-5p2j4) — sending
+  // nothing there read as "new" and minted one from the task.
   const beads = f.beads.value;
   if (beads === "none") body.beads = false;
   else if (beads === "none-auto") body.beads = "none-auto";
-  else if (beads === "existing" && f.issue.value) body.issue = f.issue.value;
+  else if (beads === "existing") {
+    if (f.issue.value) body.issue = f.issue.value;
+    else body.beads = "existing-pending";
+  }
   // Only under the answer it belongs to: the box keeps its text while the
   // radios are being tried out, and sending it alongside "existing" or
   // "none" is a contradiction the daemon refuses (beads.check_request).

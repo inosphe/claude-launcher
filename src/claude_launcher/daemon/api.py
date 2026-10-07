@@ -6875,7 +6875,8 @@ async def _onboard_and_launch(
         # is what it would do regardless. NONE_AUTO is always added, because
         # there the block IS the instruction -- go and take work off the
         # board -- and a session that never receives it does the opposite of
-        # what was asked.
+        # what was asked. ISSUE_PENDING likewise: it tells the session that an
+        # issue is coming and how to record it (claunch-5p2j4).
         none = beads_mod.none_mode(body)
         if unsettled:
             # The request named an issue and the board could not be asked:
@@ -6890,7 +6891,8 @@ async def _onboard_and_launch(
                   f"session but is not linked: {unsettled['why']}. Link it "
                   "once the board is reachable, or ask whoever started you.",
             )
-        elif none and (plan.wanted or none == beads_mod.NONE_AUTO):
+        elif none and (plan.wanted
+                       or none in (beads_mod.NONE_AUTO, beads_mod.ISSUE_PENDING)):
             report["beads"] = {"issue": None, "mode": none}
             plan = replace(
                 plan,
