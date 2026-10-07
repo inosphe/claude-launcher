@@ -28,9 +28,9 @@ pack too (``local``): it is offered at creation like the shipped ones.
 A mesh role may also *require* packs (:func:`role_packs`). The packaged
 roles keep a one- or two-sentence stance and put the rest of their guidance
 in a ``role-<name>`` pack, so a session created with a role gets that pack
-in its opening whether or not it was ticked. A required pack does not need
-installing: the workspace's copy is read when it has one, and the shipped
-copy otherwise (:func:`required_pack`).
+in its opening whether or not it was ticked. No pack needs installing to be
+given, ticked or required: the workspace's copy is read when it has one, and
+the shipped copy otherwise (:func:`pack_copy`).
 """
 
 from __future__ import annotations
@@ -85,7 +85,7 @@ class Pack:
     #: The header's ``default: true``: ticked on the create form unless
     #: Settings saved its own list (:func:`default_packs`).
     default: bool = False
-    #: :data:`WORKSPACE` or :data:`PACKAGE`; see :func:`required_pack`.
+    #: :data:`WORKSPACE` or :data:`PACKAGE`; see :func:`pack_copy`.
     source: str = WORKSPACE
 
     def to_dict(self) -> dict:
@@ -283,31 +283,6 @@ def workspace_rows(workspace: Path) -> List[dict]:
     return rows
 
 
-def resolve(workspace: Optional[Path], ids: List[str]) -> List[Pack]:
-    """The workspace's copies of ``ids``, in the order asked.
-
-    Raises for an id that is not installed there: a checkbox the form offered
-    names a file that exists, so a miss is a stale form or a typo, and a
-    session started without guidance it was promised is worse than a 400.
-    """
-    ids = [check_id(i) for i in dict.fromkeys(ids or [])]
-    if not ids:
-        return []
-    if workspace is None:
-        raise PackError(
-            "prompt packs are installed per workspace, and this directory is "
-            "in no registered workspace"
-        )
-    have = {p.id: p for p in installed(workspace)}
-    missing = [i for i in ids if i not in have]
-    if missing:
-        raise PackError(
-            f"not installed in {workspace}: {', '.join(missing)} — install "
-            "it in Settings ▸ Install first"
-        )
-    return [have[i] for i in ids]
-
-
 def text_id(body: str) -> str:
     """The content id a session is handed beside a pack's text."""
     return digests.text_digest((body or "").strip())
@@ -449,8 +424,9 @@ def default_packs(doc: Optional[dict] = None) -> List[str]:
     """The pack ids the create form ticks before anyone touches it.
 
     Saved in Settings as ``prompt_packs.default_packs``; until then, every
-    shipped pack whose header says ``default: true`` (``common``). A pack on
-    this list that a workspace has not installed is simply not offered there.
+    shipped pack whose header says ``default: true`` (``common``). The form
+    ticks only the ones the workspace installed; claunch's copy of one it has
+    not installed is offered unticked.
     """
     from . import store
 
@@ -517,40 +493,35 @@ def choose(
     """The packs a session gets: what was ticked, plus what its roles require.
 
     Returns ``(records, required)``, where ``required`` is
-    :func:`required_for`'s answer. A ticked pack must be installed in the
-    workspace (:func:`resolve`); a required one is read through
-    :func:`required_pack`, so it falls back to the shipped copy. The order is
-    the ticked ones first, then the required ones, each once.
+    :func:`required_for`'s answer. Every pack is read through
+    :func:`pack_copy`, so a ticked one needs no install either: the form
+    offers claunch's own packs beside the workspace's, picked freely whatever
+    the role. The order is the ticked ones first, then the required ones,
+    each once.
     """
     required = required_for(roles, mapping)
     asked = [check_id(i) for i in dict.fromkeys(chosen or [])]
-    plain = {
-        p.id: p
-        for p in resolve(workspace, [i for i in asked if i not in required])
-    }
     packs = []
     for pack_id in dict.fromkeys([*asked, *required]):
-        if pack_id in plain:
-            packs.append(plain[pack_id])
-            continue
         try:
-            packs.append(required_pack(workspace, pack_id))
+            packs.append(pack_copy(workspace, pack_id))
         except PackError as exc:
+            if pack_id not in required:
+                raise
             raise PackError(
                 f"{exc} (required by role {', '.join(required[pack_id])})"
             ) from None
     return records(packs), required
 
 
-def required_pack(workspace: Optional[Path], pack_id: str) -> Pack:
-    """The text a role-required pack is given as.
+def pack_copy(workspace: Optional[Path], pack_id: str) -> Pack:
+    """The text a session is given for ``pack_id``, ticked or role-required.
 
     The workspace's copy when it installed one (an edit there wins), else the
-    copy claunch ships, marked :data:`PACKAGE`. A role's guidance is part of
-    what the role is, so a workspace that never installed it still gets it
-    instead of a refused create; a ticked pack has no such fallback
-    (:func:`resolve`). Raises only for an id that is neither installed nor
-    shipped -- a mapping naming a pack that exists nowhere.
+    copy claunch ships, marked :data:`PACKAGE`. So a workspace that never
+    installed a pack still gets it instead of a refused create. Raises only
+    for an id that is neither installed nor shipped -- a stale form, a typo,
+    or a role mapping naming a pack that exists nowhere.
     """
     pack_id = check_id(pack_id)
     if workspace is not None:

@@ -1,9 +1,10 @@
 /* Prompt packs in the browser, run against the real functions from app.js.
 
-   Two places: the create form's Prompt packs row (installed packs as
-   checkboxes, the defaults ticked, a pack the role or a ticked subrole
-   requires locked on with the role named, and one that is required but not
-   installed said out loud), and the Settings ▸ Install card (one cell per
+   Two places: the create form's Prompt packs row (installed packs and then
+   claunch's own copies as checkboxes, any of them tickable with no role or
+   mesh, the defaults ticked only where installed, a pack the role or a
+   ticked subrole requires locked on with the role named, and one that is
+   required but exists nowhere said out loud), and the Settings ▸ Install card (one cell per
    workspace × pack whose buttons follow the copy's status, force only after
    a confirm for an edited or local copy). */
 const fs = require("fs");
@@ -108,13 +109,18 @@ check("no offer, no row", () => {
   assert.deepEqual(env.packs(form), []);
 });
 
-check("installed packs are boxes, the default ticked", () => {
+const ALL_BOXES = ["prompt_pack_beads", "prompt_pack_common",
+  "prompt_pack_unreal-operator", "prompt_pack_role-worker"];
+
+check("installed packs, then claunch's copies, are boxes; the default ticked", () => {
   env.offer = OFFER;
   env.render();
   assert.equal(row.classList.hidden, false);
   const b = boxes();
-  assert.deepEqual(b.map((x) => x.name), ["prompt_pack_beads", "prompt_pack_common"]);
-  assert.deepEqual(b.map((x) => x.checked), [false, true]);
+  assert.deepEqual(b.map((x) => x.name), ALL_BOXES);
+  assert.deepEqual(b.map((x) => x.checked), [false, true, false, false]);
+  assert.deepEqual(b.map((x) => x.disabled), [false, false, false, false]);
+  assert.match(text(row), /Role — worker {2}\(claunch's copy, not installed in proj\)/);
   assert.deepEqual(env.packs(form), ["common"]);
 });
 
@@ -143,8 +149,7 @@ check("a ticked subrole's uninstalled pack is shown as claunch's copy", () => {
   env.render();
   assert.deepEqual(env.required(form), { "unreal-operator": ["unreal"] });
   const b = boxes();
-  assert.deepEqual(b.map((x) => x.name),
-    ["prompt_pack_beads", "prompt_pack_common", "prompt_pack_unreal-operator"]);
+  assert.deepEqual(b.map((x) => x.name), ALL_BOXES);
   assert.equal(b[2].checked, true);
   assert.equal(b[2].disabled, true);
   assert.match(text(row), /required by unreal · claunch's copy, not installed in proj/);
@@ -202,9 +207,36 @@ check("subroles do not count without a mesh", () => {
   form.mesh.value = "";
   assert.deepEqual(env.required(form), {});
   env.render();
-  assert.doesNotMatch(text(row), /not installed/);
+  assert.doesNotMatch(text(row), /required by/);
+  assert.equal(boxes().every((b) => !b.disabled), true);
   form.mesh.value = "team";
   env.subTicks().clear();
+});
+
+check("with no mesh and nothing installed, any of claunch's packs can be ticked", () => {
+  // The user's case: no mesh, so no role and nothing required, and a
+  // workspace that installed no pack. The row still offers every pack.
+  env.offer = { ...OFFER, workspace: null, packs: [] };
+  form.mesh.value = "";
+  form.role.value = "worker";
+  env.render();
+  assert.equal(row.classList.hidden, false);
+  assert.deepEqual(boxes().map((x) => x.name), ALL_BOXES);
+  // Nobody touched the row: the default does not tick an uninstalled copy.
+  assert.deepEqual(boxes().map((x) => x.checked), [false, false, false, false]);
+  assert.deepEqual(env.packs(form), []);
+  assert.equal(summary(), "The opening will include no prompt pack.");
+  newTick("role-worker", true);
+  newTick("beads", true);
+  assert.deepEqual(env.packs(form), ["beads", "role-worker"]);
+  assert.equal(summary(),
+    "The opening will include: beads (ticked, claunch's copy) · " +
+    "role-worker (ticked, claunch's copy).");
+  newTick("role-worker", false);
+  newTick("beads", false);
+  form.role.value = "";
+  form.mesh.value = "team";
+  env.offer = OFFER;
 });
 
 function newTick(id, on) {

@@ -2404,23 +2404,28 @@ The workflow has two steps:
    untouched), *edited here* (Overwrite/Remove ask first), and *local pack*
    (a `.md` the workspace wrote itself, which is offered at creation too).
 2. **Choose at session creation.** The create and spawn forms offer every pack
-   installed in the session's workspace as a checkbox. The ticked packs go
-   into the opening, after the score goal and before the mesh/workflow
-   briefing, so the opening still ends with the task. The workspace's copy is
-   what is read, so a workspace that edited its copy gets its edit. The text
-   is recorded in the session definition, and each block carries a `text id`
+   as a checkbox: the ones installed in the session's workspace first, then
+   every pack claunch ships that the workspace has not installed, marked
+   "claunch's copy". Any of them can be ticked, whatever the role and with no
+   mesh at all. The ticked packs go into the opening, after the score goal
+   and before the mesh/workflow briefing, so the opening still ends with the
+   task. The workspace's copy is read when it has one, so a workspace that
+   edited its copy gets its edit, and the shipped copy otherwise. The text is
+   recorded in the session definition, and each block carries a `text id`
    that `rebrief` answers after a compaction.
 
 From the CLI: `claunch new-session --prompt-pack beads --prompt-pack common`
 (also on `claunch spawn`), and `prompt_packs` on the MCP `spawn` tool. A pack
-that is not installed in the session's workspace refuses the create with a 400
-and nothing is staged.
+the workspace has not installed goes in as claunch's copy and the create
+response lists it under `prompt_packs_shipped`; one that exists in neither
+place refuses the create with a 400 and nothing is staged.
 
 Two settings sit under the matrix, stored in `~/.claunch.yaml` under
 `prompt_packs`:
 
 - **Ticked by default** (`default_packs`): packs the create form ticks before
-  anyone touches it. Until saved, every pack whose header says
+  anyone touches it, where the workspace installed them (claunch's copies
+  start unticked). Until saved, every pack whose header says
   `default: true` (`common`).
 - **Required by role** (`role_packs`): role → packs. A session whose primary
   role or one of whose subroles is listed gets those packs whether ticked or
