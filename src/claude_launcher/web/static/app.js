@@ -2237,6 +2237,7 @@ function syncSessionView() {
     input.checked = input.value === sessionView;
   });
   if (grid) renderSessionGrid(true);
+  else drawSessionGridLineage();   // clears it: the list has no overlay
 }
 
 /* The sessions the grid draws: those the rail's state filter admits. A
@@ -2271,7 +2272,7 @@ function renderSessionGrid(force = false) {
                         searching ? sessionMatchesSearch(s) : true,
                         s.briefing?.one_line || null,
                         sessionGridChecks(s).map(statusCheckText),
-                        sessionGridGated(s.name)]),
+                        sessionGridGated(s.name), s.parent || null]),
   ]);
   if (!force && host._gridSignature === signature) return;
   host._gridSignature = signature;
@@ -2352,6 +2353,103 @@ function renderSessionGrid(force = false) {
       closeSessionGridTip();
     }
   }
+  drawSessionGridLineage();
+}
+
+/* The selected session's lineage over the grid: an arrow from its parent's
+   cell to its own and from its own to each child's, in the spawn direction,
+   the parent link purple and the child links teal, with the same colour as a
+   ring on the cells at the far ends. An SVG laid over the scrolled content,
+   so it scrolls with the cells; it takes no pointer events, so every press
+   still lands on the cell under it. Only cells actually drawn get an arrow:
+   a relative with no cell, or one in a folded stretch, has none. Redrawn
+   with the grid, on a click that selects a cell, and when the grid's box
+   changes size (the cells reflow). */
+const SESSION_GRID_LINEAGE_KINDS = ["parent", "child"];
+function drawSessionGridLineage(selected = currentName) {
+  const host = $("session-grid");
+  if (!host) return;
+  host.querySelector(".sg-lineage")?.remove();
+  host.querySelectorAll(".sg-cell.lineage-parent, .sg-cell.lineage-child")
+    .forEach((el) => el.classList.remove("lineage-parent", "lineage-child"));
+  if (!selected || sessionView !== "grid" || typeof SessionGridLineage !== "object") return;
+  const all = typeof railSessions === "function" ? railSessions() : sessionsCache;
+  const links = SessionGridLineage.links(selected, all);
+  if (!links.length) return;
+  const cellOf = (name) => host.querySelector(`.sg-cell[data-name="${CSS.escape(name)}"]`);
+  const self = cellOf(selected);
+  if (!self) return;
+  const origin = host.getBoundingClientRect();
+  const box = (el) => {
+    const r = el.getBoundingClientRect();
+    return { x: r.left - origin.left - host.clientLeft + host.scrollLeft,
+             y: r.top - origin.top - host.clientTop + host.scrollTop,
+             w: r.width, h: r.height };
+  };
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("class", "sg-lineage");
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("width", String(host.scrollWidth));
+  svg.setAttribute("height", String(host.scrollHeight));
+  const defs = document.createElementNS(NS, "defs");
+  for (const kind of SESSION_GRID_LINEAGE_KINDS) {
+    const marker = document.createElementNS(NS, "marker");
+    marker.setAttribute("id", `sg-lineage-head-${kind}`);
+    marker.setAttribute("class", `sg-lineage-head ${kind}`);
+    marker.setAttribute("viewBox", "0 0 10 10");
+    marker.setAttribute("refX", "9");
+    marker.setAttribute("refY", "5");
+    marker.setAttribute("markerWidth", "4");
+    marker.setAttribute("markerHeight", "4");
+    marker.setAttribute("orient", "auto");
+    const head = document.createElementNS(NS, "path");
+    head.setAttribute("d", "M0 0 L10 5 L0 10 z");
+    marker.append(head);
+    defs.append(marker);
+  }
+  svg.append(defs);
+  let drawn = 0;
+  for (const link of links) {
+    const other = cellOf(link.kind === "parent" ? link.from : link.to);
+    if (!other || other === self) continue;
+    const [a, b] = link.kind === "parent" ? [other, self] : [self, other];
+    const arrow = SessionGridLineage.arrow(box(a), box(b));
+    if (!arrow) continue;
+    const path = document.createElementNS(NS, "path");
+    path.setAttribute("class", `sg-lineage-arrow ${link.kind}`);
+    path.setAttribute("d", arrow.d);
+    path.setAttribute("marker-end", `url(#sg-lineage-head-${link.kind})`);
+    path.dataset.from = link.from;
+    path.dataset.to = link.to;
+    // A dot where the arrow leaves, so its tail reads as a start and not as
+    // a line that happens to stop.
+    const tail = document.createElementNS(NS, "circle");
+    tail.setAttribute("class", `sg-lineage-tail ${link.kind}`);
+    tail.setAttribute("cx", String(arrow.start.x));
+    tail.setAttribute("cy", String(arrow.start.y));
+    tail.setAttribute("r", "2.5");
+    svg.append(path, tail);
+    other.classList.add(`lineage-${link.kind}`);
+    drawn++;
+  }
+  if (drawn) host.append(svg);
+}
+if (typeof ResizeObserver === "function") {
+  // The cells share the rail's width, so a wider or narrower rail moves every
+  // cell, and the arrows with them.
+  let lineageWidth = null;
+  const watch = () => {
+    const host = $("session-grid");
+    if (!host) return;
+    new ResizeObserver(() => {
+      if (host.clientWidth === lineageWidth) return;
+      lineageWidth = host.clientWidth;
+      if (host.querySelector(".sg-lineage")) drawSessionGridLineage();
+    }).observe(host);
+  };
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", watch);
+  else watch();
 }
 
 /* The marker a folded stretch leaves: a wavy break across the full width
@@ -2670,6 +2768,7 @@ function sessionGridCell(layout, row, r, c, records, present, searching) {
       document.querySelectorAll("#session-grid .sg-cell.active")
         .forEach((el) => el.classList.remove("active"));
       cell.classList.add("active");
+      drawSessionGridLineage(name);
       location.hash = "#/s/" + encodeURIComponent(name);
     });
     cell.addEventListener("keydown", (ev) => {
@@ -8880,6 +8979,7 @@ const PICKER = "@picker";
    without a second round-trip. The vocabulary is fixed for the daemon's
    lifetime — fetched once at boot, never polled. */
 let rolesByName = {};
+let rolesDefault = "";   // the role a handle naming none resolves to
 let rolesRequest = 0;
 
 /* Signature of the workspace list currently rendered. The registry changes
@@ -9636,6 +9736,7 @@ async function refreshRoles(meshName = "") {
     const data = await resp.json();
     if (request !== rolesRequest) return;
     rolesByName = {};
+    rolesDefault = String(data.default || "");
     select.innerHTML = "";
     select.appendChild(new Option("(no role)", ""));
     for (const role of data.roles || []) {
@@ -9651,6 +9752,7 @@ async function refreshRoles(meshName = "") {
   } catch {
     if (request !== rolesRequest) return;
     rolesByName = {};
+    rolesDefault = "";
     select.innerHTML = "";
     select.appendChild(new Option("(no roles available)", ""));
     select.value = "";
@@ -9724,8 +9826,10 @@ function newSubroles(f) {
 /* Prompt packs: the ones installed in the workspace the session will stand
    in (Settings ▸ Install puts them there), one checkbox each. A pack the
    chosen role or a ticked subrole requires is ticked and locked, with the
-   role named beside it; one that is required but not installed is said out
-   loud, because the daemon will refuse the create over it. */
+   role named beside it; one that is required but not installed is shown the
+   same way and marked as claunch's copy, which is what the daemon puts in
+   (prompt_packs.required_pack). A summary line names every pack the opening
+   will carry and why, including a role inferred from the handle. */
 let newPackOffer = null;       // /api/prompt-packs/offer's answer
 let newPackOfferFor = null;    // the directory it answers for
 let newPackTicks = new Map();  // pack id -> the operator's own tick
@@ -9750,10 +9854,35 @@ async function refreshPromptPackOffer() {
   renderPromptPackRow();
 }
 
-/* {pack id: [roles]} for the role row and the ticked subroles. */
+/* The primary role the join will store, the way the daemon resolves it
+   (mesh_roles.RoleSet.resolve): the Role row when one is picked, else the
+   handle's (or name's) leading word through the role names and aliases,
+   else the vocabulary's default. No mesh in play means no role at all.
+   `inferred` says the Role row was blank, so the form can say where the
+   role -- and with it the role's prompt pack -- came from. */
+function newPrimaryRole(f) {
+  if (newSubrolesMeshless(f)) return { role: "", inferred: false };
+  if (f.role.value) return { role: f.role.value, inferred: false };
+  const handle = String((f.handle && f.handle.value.trim()) ||
+    (f.name && f.name.value.trim()) || "").toLowerCase();
+  let head = "";
+  for (const ch of handle) {
+    if ("._-".includes(ch) || (ch >= "0" && ch <= "9")) break;
+    head += ch;
+  }
+  let role = "";
+  if (head) {
+    for (const [name, r] of Object.entries(rolesByName)) {
+      if (name === head || ((r && r.aliases) || []).includes(head)) { role = name; break; }
+    }
+  }
+  return { role: role || rolesDefault || "", inferred: true };
+}
+
+/* {pack id: [roles]} for the primary role and the ticked subroles. */
 function newRequiredPacks(f) {
   const mapping = (newPackOffer && newPackOffer.role_packs) || {};
-  const roles = [f.role.value || "", ...newSubroles(f)].filter(Boolean);
+  const roles = [newPrimaryRole(f).role, ...newSubroles(f)].filter(Boolean);
   const out = {};
   for (const role of roles) {
     for (const id of mapping[role] || []) (out[id] = out[id] || []).push(role);
@@ -9775,33 +9904,63 @@ function renderPromptPackRow() {
   const required = newRequiredPacks(f);
   const packs = (offer && offer.packs) || [];
   const have = new Set(packs.map((p) => p.id));
-  const missing = Object.keys(required).filter((id) => !have.has(id));
-  row.classList.toggle("hidden", !packs.length && !missing.length);
-  if (!packs.length && !missing.length) return;
+  // A required pack the workspace has not installed goes in as claunch's
+  // own copy (prompt_packs.required_pack); only one that is not shipped
+  // either refuses the create.
+  const shipped = Object.fromEntries(((offer && offer.shipped) || []).map((p) => [p.id, p]));
+  const notHere = Object.keys(required).filter((id) => !have.has(id));
+  const fromPackage = notHere.filter((id) => shipped[id]);
+  const missing = notHere.filter((id) => !shipped[id]);
+  const wsName = offer && offer.workspace ? offer.workspace.name : "this directory's workspace";
+  row.classList.toggle("hidden", !packs.length && !notHere.length);
+  if (!packs.length && !notHere.length) return;
   row.appendChild(el("span", "new-check-label", "Prompt packs"));
   const list = el("span", "new-check-list");
-  for (const p of packs) {
+  const addBox = (p, by, packaged) => {
     const label = el("label", "check");
     label.title = p.description || "";
     const box = document.createElement("input");
     box.type = "checkbox";
     box.name = `prompt_pack_${p.id}`;
     box.value = p.id;
-    const by = required[p.id];
     box.checked = by ? true : newPackTicked(p.id);
     box.disabled = !!by;
-    box.addEventListener("change", () => newPackTicks.set(p.id, box.checked));
+    box.addEventListener("change", () => {
+      newPackTicks.set(p.id, box.checked);
+      renderPromptPackRow();
+    });
     label.appendChild(box);
     label.appendChild(el("span", null, p.title || p.id));
-    if (by) label.appendChild(el("span", "wf-note", ` (required by ${by.join(", ")})`));
+    const why = [];
+    if (by) why.push(`required by ${by.join(", ")}`);
+    if (packaged) why.push(`claunch's copy, not installed in ${wsName}`);
+    if (why.length) label.appendChild(el("span", "wf-note", ` (${why.join(" · ")})`));
     list.appendChild(label);
-  }
+  };
+  for (const p of packs) addBox(p, required[p.id], false);
+  for (const id of fromPackage) addBox(shipped[id], required[id], true);
   row.appendChild(list);
+  // What the opening will actually carry, in the daemon's order (ticked,
+  // then required), each with why it is there -- the boxes alone do not say
+  // which role a locked one came from when the Role row was left blank.
+  const chosen = [...newPromptPacks(f), ...fromPackage].filter((id, i, a) => a.indexOf(id) === i);
+  const primary = newPrimaryRole(f);
+  const parts = chosen.map((id) => {
+    const why = required[id] ? `role ${required[id].join(", ")}` : "ticked";
+    return `${id} (${why}${fromPackage.includes(id) ? ", claunch's copy" : ""})`;
+  });
+  let summary = parts.length
+    ? `The opening will include: ${parts.join(" · ")}.`
+    : "The opening will include no prompt pack.";
+  if (primary.inferred && primary.role) {
+    summary += ` Role ${primary.role} is inferred from the handle (no Role picked).`;
+  }
+  row.appendChild(el("p", "wf-note new-packs-summary", summary));
   if (missing.length) {
     row.appendChild(el("p", "wf-error",
       missing.map((id) => `${id} is required by ${required[id].join(", ")}`).join("; ") +
-      ` but is not installed in ${offer && offer.workspace ? offer.workspace.name : "this directory's workspace"}` +
-      " — install it in Settings ▸ Install, or the create will be refused."));
+      ` but is neither installed in ${wsName} nor shipped with claunch` +
+      " — fix the mapping in Settings ▸ Install, or the create will be refused."));
   }
 }
 
@@ -10791,6 +10950,13 @@ document
     applySessionParentChange();
     syncSessionModalChrome();
   });
+
+// A blank Role row is filled from the handle (or the name) at join, and the
+// role decides the required prompt packs, so typing either redraws the row.
+for (const field of ["handle", "name"]) {
+  const input = document.querySelector(`#new-session input[name=${field}]`);
+  if (input) input.addEventListener("input", () => renderPromptPackRow());
+}
 
 document
   .querySelector("#new-session select[name=role]")
@@ -14586,6 +14752,28 @@ function openCli() {
   cliRefit(0);
 }
 
+/* Draw a terminal on a WebGL canvas instead of xterm's default DOM rows.
+   The DOM renderer rewrites a row's spans for every line of output, and each
+   rewrite is a mutation that every content script observing the page walks
+   the document for: a busy session's terminal kept a password manager's
+   MutationObserver scanning for 5.2 s of every 12 s, and typing waited
+   behind it (claunch-i9oms). On a canvas the output is no mutation at all.
+   Called after open(), which the addon needs. Where WebGL is missing or the
+   context is lost later (the browser caps live contexts per page), the addon
+   is disposed and xterm falls back to its DOM renderer by itself -- the
+   terminal keeps working, only at the old cost. */
+function attachGpuRenderer(t) {
+  if (typeof WebglAddon === "undefined" || !WebglAddon.WebglAddon) return null;
+  try {
+    const gl = new WebglAddon.WebglAddon();
+    gl.onContextLoss(() => { try { gl.dispose(); } catch {} });
+    t.loadAddon(gl);
+    return gl;
+  } catch {
+    return null;
+  }
+}
+
 function buildCliTerm() {
   cliTerm = new Terminal({
     fontFamily: "Cascadia Mono, Consolas, Menlo, monospace",
@@ -14603,6 +14791,7 @@ function buildCliTerm() {
   cliFit = new FitAddon.FitAddon();
   cliTerm.loadAddon(cliFit);
   cliTerm.open($("cli-term"));
+  attachGpuRenderer(cliTerm);
   cliTerm.onData((data) => {
     if (cliWs && cliWs.readyState === WebSocket.OPEN && cliStatus !== "exited") {
       // A binary frame, on purpose: the daemon reads TEXT frames as JSON
@@ -14867,6 +15056,7 @@ function freshAttach(name) {
   fitAddon = new FitAddon.FitAddon();
   term.loadAddon(fitAddon);
   term.open($("terminal"));
+  if (typeof attachGpuRenderer === "function") attachGpuRenderer(term);
   localFit();
 
   // Wired once, for the life of this terminal object: the link swaps sockets
@@ -15373,6 +15563,47 @@ function fmtLogTime(iso) {
   return new Date(t).toLocaleTimeString();
 }
 
+/* A page's own poll, held while the tab is hidden. The dashboard tick
+   (pollTick) slows down behind another tab; a page poll -- a workflow, a session's
+   detail, the beads board, a transcript -- stops outright, because what it
+   redraws is a page nobody is reading, and each redraw is a DOM rebuild that
+   every content script observing the page then walks again (claunch-dumca:
+   a hidden dashboard tab spent 3.4 s of CPU in 12 s on it). A tick that
+   comes due while hidden is remembered rather than run, and runs once the
+   moment the tab is shown again -- but only if its timer is still the live
+   one (`alive`), so a page closed in the meantime is not redrawn. */
+const hiddenSkippedPolls = new Map();
+
+function visiblePoll(fn, alive) {
+  const tick = () => {
+    if (typeof document !== "undefined" && document.hidden === true) {
+      hiddenSkippedPolls.set(tick, alive);
+      return undefined;
+    }
+    hiddenSkippedPolls.delete(tick);
+    return fn();
+  };
+  return tick;
+}
+
+function runSkippedPolls() {
+  const due = [...hiddenSkippedPolls];
+  hiddenSkippedPolls.clear();
+  for (const [tick, alive] of due) {
+    if (alive && !alive()) continue;
+    try {
+      const out = tick();
+      if (out && typeof out.catch === "function") out.catch(() => {});
+    } catch {}
+  }
+}
+
+if (typeof document !== "undefined" && document.addEventListener) {
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden !== true) runSkippedPolls();
+  });
+}
+
 /* The follow-forward: while the pane is open and the reader is sitting at the
    bottom of it, new turns arrive under them the way the terminal's own output
    does. Scrolled up, nothing moves — a reader who went looking for something
@@ -15387,7 +15618,8 @@ let transcriptTimer = null;
 
 function startTranscriptPoll() {
   if (transcriptTimer) return;
-  transcriptTimer = setInterval(pollTranscript, TRANSCRIPT_POLL_MS);
+  transcriptTimer = setInterval(
+    visiblePoll(pollTranscript, () => transcriptTimer), TRANSCRIPT_POLL_MS);
 }
 
 function stopTranscriptPoll() {
@@ -15917,7 +16149,7 @@ async function openWorkflow(cwd, scope) {
   showView("wf");
   $("wf-view").innerHTML = "<p class='wf-note'>loading…</p>";
   await refreshWf();
-  wfPollTimer = setInterval(refreshWf, 5000);
+  wfPollTimer = setInterval(visiblePoll(refreshWf, () => wfPollTimer), 5000);
 }
 
 async function refreshWf() {
@@ -16010,7 +16242,7 @@ function openSplit(name) {
   splitFor = name;
   $("term-wf").innerHTML = "<p class='wf-note'>loading…</p>";
   refreshSplit();
-  splitPollTimer = setInterval(refreshSplit, 5000);
+  splitPollTimer = setInterval(visiblePoll(refreshSplit, () => splitPollTimer), 5000);
 }
 
 function closeSplit() {
@@ -18421,7 +18653,7 @@ function openBeads(id, section) {
     // The Queues tab reads its own endpoint; without this first read it sat
     // on "loading…" until the 15 s poll came round.
     if (beadsSection === "queues") refreshQueues();
-    if (!beadsTimer) beadsTimer = setInterval(refreshBeads, 15000);
+    if (!beadsTimer) beadsTimer = setInterval(visiblePoll(refreshBeads, () => beadsTimer), 15000);
   }
 }
 
@@ -20883,7 +21115,7 @@ function openWindowPage() {
   showView("window");
   renderWindow();
   refreshWindow();
-  if (!windowTimer) windowTimer = setInterval(refreshWindow, 5000);
+  if (!windowTimer) windowTimer = setInterval(visiblePoll(refreshWindow, () => windowTimer), 5000);
 }
 
 function stopWindowPoll() {
@@ -21895,7 +22127,9 @@ function openReports() {
   // 30 s, not the rail's 2. A report is written once per round — tens of
   // minutes apart at the very best — and each tick costs the daemon a
   // listdir per session plus a read per file to tell a page from a stub.
-  if (!reportsTimer) reportsTimer = setInterval(refreshReports, 30000);
+  if (!reportsTimer) {
+    reportsTimer = setInterval(visiblePoll(refreshReports, () => reportsTimer), 30000);
+  }
 }
 
 function stopReportsPoll() {
@@ -22878,8 +23112,10 @@ function promptPackSettings(doc, ids) {
   box.appendChild(el("h4", null, "Required by role"));
   box.appendChild(el("p", "wf-note",
     "A session whose role or one of whose subroles is listed here gets these " +
-    "packs whether ticked or not; the create form shows them locked on, and " +
-    "a create in a workspace that has not installed them is refused."));
+    "packs whether ticked or not; the create form shows them locked on. A " +
+    "workspace that installed one gives its own copy; one that did not gets " +
+    "the copy claunch ships. The packaged roles keep a short stance and put " +
+    "their working rules in a role-<name> pack listed here."));
   const table = el("table", "md-table prompt-pack-roles");
   const head = el("tr", null);
   head.appendChild(el("th", null, "Role"));
@@ -27746,7 +27982,7 @@ function repointDetail(name) {
   $("sess-view").innerHTML = "<p class='wf-note'>loading…</p>";
   markDetailRow();
   refreshSession();
-  sessPollTimer = setInterval(refreshSession, 5000);
+  sessPollTimer = setInterval(visiblePoll(refreshSession, () => sessPollTimer), 5000);
 }
 
 /* The same address without `?detail=`. On a phone that hands the page slot
@@ -29324,14 +29560,14 @@ function sessPerms(data) {
    the daemon stops the session, re-files its conversation under the target
    directory's slug, and relaunches it there — same name, same conversation,
    same mesh memberships. The picker offers the checkouts that make sense
-   from where the session stands: its repository's existing worktrees, or a
-   new one cut on the spot. Directories outside the repository stay a CLI
-   affair (`--to DIR`), the same way free-text paths are kept out of the
-   create form. */
+   from where the session stands: the repository's original checkout, its
+   existing worktrees, or a new one cut on the spot. Directories outside the
+   repository stay a CLI affair (`--to DIR`), the same way free-text paths
+   are kept out of the create form. */
 function sessMigrate(data) {
   const s = data.session || {};
   const box = el("div", "sess-migrate");
-  box.appendChild(el("h3", null, "Move to worktree"));
+  box.appendChild(el("h3", null, "Move to checkout"));
 
   // Rebuilt only when the session or its directory changes — the 2s poll
   // must not wipe a picked destination, and after a successful move the cwd
@@ -29375,6 +29611,7 @@ function sessMigrate(data) {
     status.className = cls || "wf-note";
     status.textContent = msg;
   };
+  let root = ""; // the repository's own checkout, once the daemon has said
 
   // The choices are the daemon's answer, not a guess: which worktrees
   // already stand beside this session's checkout, and whether there is a
@@ -29399,17 +29636,26 @@ function sessMigrate(data) {
       return;
     }
     dest.innerHTML = "";
-    for (const w of info.worktrees || []) {
+    root = info.root;
+    // The repository's own checkout first: a session in a worktree has no
+    // other way back to it from here. Whichever checkout the session already
+    // stands in is shown but cannot be picked — moving there is no move.
+    const here = worktreePathKey(s.cwd);
+    const paths = info.paths || {};
+    const offer = (value, label, path) => {
       const opt = document.createElement("option");
-      opt.value = `wt:${w}`;
-      opt.textContent = `worktree: ${w}`;
+      opt.value = value;
+      const current = worktreePathKey(path) === here;
+      opt.textContent = current ? `${label} (here)` : label;
+      opt.disabled = current;
       dest.appendChild(opt);
+    };
+    offer("root", `original: ${info.root}`, info.root);
+    for (const w of info.worktrees || []) {
+      offer(`wt:${w}`, `worktree: ${w}`, paths[w]);
     }
-    const fresh = document.createElement("option");
-    fresh.value = "new";
-    fresh.textContent = "new worktree…";
-    dest.appendChild(fresh);
-    if (!(info.worktrees || []).length) dest.value = "new";
+    offer("new", "new worktree…", "");
+    dest.value = [...dest.options].find((o) => !o.disabled).value;
     const sync = () =>
       nameIn.classList.toggle("hidden", dest.value !== "new");
     dest.addEventListener("change", sync);
@@ -29421,7 +29667,11 @@ function sessMigrate(data) {
   moveBtn.addEventListener("click", async () => {
     if (moveBtn.disabled) return;
     const name = s.name;
-    const wt = dest.value === "new" ? nameIn.value.trim() : dest.value.slice(3);
+    // The original checkout is a directory, not a launcher worktree, so it
+    // goes as 'cwd' — 'worktree' would cut a new one under .claude/worktrees.
+    const target = dest.value === "root"
+      ? { cwd: root }
+      : { worktree: dest.value === "new" ? nameIn.value.trim() : dest.value.slice(3) };
     moveBtn.disabled = true;
     say("migrating… (stopping it, moving its transcript, relaunching)");
     let doc = {};
@@ -29430,7 +29680,7 @@ function sessMigrate(data) {
       resp = await api(`/api/sessions/${encodeURIComponent(name)}/migrate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ worktree: wt, children: kidsBox.checked }),
+        body: JSON.stringify({ ...target, children: kidsBox.checked }),
       });
       doc = await resp.json().catch(() => ({}));
     } catch {
@@ -29965,7 +30215,7 @@ function sessRunFoldFor(flow, unfold) {
     stopSessRun();
     if (!fold.open) return;
     refreshSessRun();
-    sessRunTimer = setInterval(refreshSessRun, 5000);
+    sessRunTimer = setInterval(visiblePoll(refreshSessRun, () => sessRunTimer), 5000);
   });
   sessRunFold = fold;
   // On creation only, so shutting it stays shut across the panel's rebuilds:
@@ -31801,7 +32051,7 @@ function sessChildren(data) {
   refreshSessKids();
   // Its own poll, slower than the panel's: statuses drift in seconds, but a
   // roster is glanced at, not watched.
-  sessKidsTimer = setInterval(refreshSessKids, 5000);
+  sessKidsTimer = setInterval(visiblePoll(refreshSessKids, () => sessKidsTimer), 5000);
   return box;
 }
 

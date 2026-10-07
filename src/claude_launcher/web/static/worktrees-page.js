@@ -89,9 +89,13 @@ globalThis.WorktreesPage = (() => {
     return out;
   }
 
-  function visible(all) {
-    const q = query.trim().toLowerCase();
-    return all.filter(w => (stateFilter === "all" || w.state === stateFilter) &&
+  function filterItems(all, filter, search = "") {
+    const q = search.trim().toLowerCase();
+    return all.filter(w => (filter === "all" ||
+      (["archived", "killed"].includes(filter)
+        ? (w.sessions || []).length > 0 && w.sessions.every(s =>
+          s.category === "archived" || (filter === "killed" && s.category === "killed"))
+        : w.state === filter)) &&
       (!q || [w.name, w.branch, w.path, ...(w.sessions || []).map(s => s.name)]
         .some(v => String(v || "").toLowerCase().includes(q))));
   }
@@ -191,6 +195,77 @@ globalThis.WorktreesPage = (() => {
     return a;
   }
 
+  function changesPanel(w) {
+    const panel = node("details", "wt-changes");
+    const summary = node("summary", null, "커밋되지 않은 파일");
+    const content = node("div", "wt-changes-content");
+    const refresh = node("button", "wf-btn", "새로 고침");
+    refresh.type = "button";
+    let pending = false, loaded = false;
+    async function read() {
+      if (pending) return;
+      pending = true; refresh.disabled = true;
+      content.replaceChildren(node("p", "wt-muted", "읽는 중…"));
+      try {
+        const response = await api(`/api/worktrees/changes?path=${encodeURIComponent(w.path)}`);
+        const body = await response.json();
+        if (!response.ok) throw Error(body.error || `HTTP ${response.status}`);
+        const files = body.files || [];
+        summary.textContent = `커밋되지 않은 파일 · ${files.length}개`;
+        content.replaceChildren();
+        if (!files.length) content.appendChild(node("p", "wt-muted", "커밋되지 않은 파일이 없습니다."));
+        else {
+          content.appendChild(node("p", "wt-muted",
+            "상태: 첫째 칸은 스테이징, 둘째 칸은 작업 폴더 · M 수정, A 추가, D 삭제, R 이름 변경, C 복사, U 충돌, ? 미추적"));
+          const list = node("ul", "wt-change-list");
+          for (const file of files) {
+            const row = node("li");
+            row.appendChild(node("code", "wt-change-status", file.status));
+            row.appendChild(node("span", "wt-change-path", file.original_path != null
+              ? `${file.original_path} → ${file.path}` : file.path));
+            list.appendChild(row);
+          }
+          content.appendChild(list);
+        }
+        loaded = true;
+      } catch (exc) {
+        loaded = false;
+        summary.textContent = "커밋되지 않은 파일 · 조회 실패";
+        content.replaceChildren(node("p", "wt-error", `읽기 실패: ${exc.message || exc}`));
+      } finally {
+        pending = false; refresh.disabled = false;
+      }
+    }
+    panel.ontoggle = () => { if (panel.open && !loaded) return read(); };
+    refresh.onclick = read;
+    panel.append(summary, content, refresh);
+    return panel;
+  }
+
+  function pathRow(w) {
+    const row = node("div", "wt-path-row");
+    const path = node("code", "wt-path", w.path || "");
+    const copy = node("button", "wf-btn wt-copy-path", "경로 복사");
+    copy.type = "button";
+    copy.disabled = !w.path;
+    const status = node("span", "wt-muted wt-copy-status");
+    status.setAttribute("role", "status");
+    copy.onclick = async () => {
+      copy.disabled = true;
+      status.textContent = "";
+      try {
+        const ok = await copyToBrowserClipboard(w.path, row);
+        status.textContent = ok ? "복사됨" : "복사하지 못했습니다. 경로를 선택해 복사해 주세요.";
+      } catch {
+        status.textContent = "복사하지 못했습니다. 경로를 선택해 복사해 주세요.";
+      } finally {
+        copy.disabled = !w.path;
+      }
+    };
+    row.append(path, copy, status);
+    return row;
+  }
+
   function card(w) {
     const box = node("div", `wt-card ${w.state}`);
     const top = node("div", "wt-card-top");
@@ -201,6 +276,7 @@ globalThis.WorktreesPage = (() => {
     state.title = STATE_TITLE[w.state] || "";
     top.appendChild(state);
     box.appendChild(top);
+    box.appendChild(pathRow(w));
     const branchLine = node("div", "wt-line");
     branchLine.appendChild(node("span", "wt-branch",
       w.branch || `detached @ ${w.head || "?"}`));
@@ -221,6 +297,7 @@ globalThis.WorktreesPage = (() => {
     if ((w.sessions || []).length) for (const s of w.sessions) sessions.appendChild(sessionRow(s));
     else sessions.appendChild(node("span", "wt-muted", "연결된 세션 없음"));
     box.appendChild(sessions);
+    box.appendChild(changesPanel(w));
     const actions = node("div", "wt-actions");
     const del = node("button", "wf-btn wt-danger",
       w.state === "active" ? "archive + 삭제" : "삭제");
@@ -255,9 +332,15 @@ globalThis.WorktreesPage = (() => {
     filter.oninput = () => { query = filter.value; renderBody(); };
     bar.appendChild(filter);
     for (const [value, label] of [["all", "전체"], ["active", "세션 연결됨"],
+      ["archived", "세션 archived"], ["killed", "세션 killed"],
       ["orphaned", "orphaned"], ["unlinked", "세션 기록 없음"]]) {
       const b = node("button", `wf-btn wt-filter-btn${stateFilter === value ? " on" : ""}`, label);
       b.type = "button";
+      if (["archived", "killed"].includes(value)) {
+        b.title = value === "archived"
+          ? "연결된 모든 세션이 archived인 워크트리"
+          : "연결된 모든 세션이 archived 또는 killed인 워크트리";
+      }
       b.onclick = () => { stateFilter = value; render(); };
       bar.appendChild(b);
     }
@@ -282,7 +365,7 @@ globalThis.WorktreesPage = (() => {
       body.appendChild(node("p", "wt-muted", loading ? "읽는 중…" : ""));
       return;
     }
-    const all = visible(items());
+    const all = filterItems(items(), stateFilter, query);
     if (!all.length) {
       body.appendChild(node("p", "wt-muted", "표시할 워크트리가 없다."));
       return;
@@ -322,5 +405,5 @@ globalThis.WorktreesPage = (() => {
 
   function stop() { sequence++; loading = false; }
 
-  return { open, stop, bucketOf, mergeLabel };
+  return { open, stop, bucketOf, mergeLabel, changesPanel, filterItems, pathRow };
 })();

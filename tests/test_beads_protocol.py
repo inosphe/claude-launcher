@@ -510,12 +510,19 @@ def test_the_mesh_skill_forbids_it_in_the_layer_every_session_reads():
 
 def test_the_packaged_stances_know_a_record_has_a_home():
     """A stance that never names the board leaves `mesh send` the only channel
-    an agent knows it has."""
+    an agent knows it has. The stance is one or two sentences and the rest of
+    a packaged role's guidance is its role pack, so the two are read
+    together, the way a session created with the role receives them."""
+    from claude_launcher import prompt_packs
     from claude_launcher.daemon import mesh_roles
 
     rs = mesh_roles.resolve()
-    assert "board" in rs.get("leader").stance
-    assert "board" in rs.get("worker").stance
+    for name in ("leader", "worker"):
+        guidance = rs.get(name).stance + "".join(
+            prompt_packs.shipped(p).body
+            for p in prompt_packs.DEFAULT_ROLE_PACKS[name]
+        )
+        assert "board" in guidance, name
 
 
 # --------------------------------------------------------------------------- #

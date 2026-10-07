@@ -385,3 +385,78 @@ globalThis.SessionGridLayout = class SessionGridLayout {
     return this.move(name, this.rows[to.row].id, to.col, present);
   }
 };
+
+/* The lineage overlay: with a session selected, arrows run from its parent's
+   cell to it and from it to each child's cell, in the spawn direction, the
+   parent link and the child links in two colours (app.js draws them). These
+   are the parts that need no page: which links there are, and the curve of
+   one arrow between two cell boxes ({x, y, w, h}, in the grid's scrolled
+   content coordinates). */
+globalThis.SessionGridLineage = {
+  /* The selected session's lineage as links, parent first, then the
+     children in the order the sessions came. A session that names itself as
+     its parent is no lineage. */
+  links(selected, sessions) {
+    if (!selected) return [];
+    const list = sessions || [];
+    const out = [];
+    const me = list.find((s) => s && s.name === selected);
+    if (me && me.parent && me.parent !== selected) {
+      out.push({ from: me.parent, to: selected, kind: "parent" });
+    }
+    for (const s of list) {
+      if (s && s.parent === selected && s.name !== selected) {
+        out.push({ from: selected, to: s.name, kind: "child" });
+      }
+    }
+    return out;
+  },
+
+  /* Where the line from the box's centre towards a point leaves the box. */
+  edgePoint(box, toward) {
+    const cx = box.x + box.w / 2;
+    const cy = box.y + box.h / 2;
+    const dx = toward.x - cx;
+    const dy = toward.y - cy;
+    if (!dx && !dy) return { x: cx, y: cy };
+    const t = Math.min(dx ? (box.w / 2) / Math.abs(dx) : Infinity,
+                       dy ? (box.h / 2) / Math.abs(dy) : Infinity);
+    return { x: cx + dx * t, y: cy + dy * t };
+  },
+
+  /* One arrow from box a to box b: a quadratic curve bowed to one side, so
+     an arrow between cells on one line clears the cells between them. It starts
+     inside a, halfway from its centre to its border (at its centre when
+     that leaves less than 24px to go), and ends on b's border,
+     each end along the curve's own tangent so the arrowhead points into b.
+     Starting inside matters for neighbours: the gap between two cells is a
+     few pixels, and a curve from border to border would be nothing but its
+     arrowhead. Null for one box. */
+  arrow(a, b) {
+    const ax = a.x + a.w / 2, ay = a.y + a.h / 2;
+    const bx = b.x + b.w / 2, by = b.y + b.h / 2;
+    const dx = bx - ax, dy = by - ay;
+    const dist = Math.hypot(dx, dy);
+    if (dist < 1) return null;
+    // Gentle for neighbours, so the curve stays inside the cells' band and
+    // enters the target from its side, not from below; up to 24px for long
+    // arrows so they clear the cells they pass.
+    const bend = Math.max(6, Math.min(24, dist * 0.15));
+    // Bow upwards (leftwards for a vertical arrow): a link along a line then
+    // arcs over the row heading's side of the cells, clear of the arrows
+    // that leave the same cell for the line below.
+    let px = -dy / dist, py = dx / dist;
+    if (py > 0 || (py === 0 && px > 0)) { px = -px; py = -py; }
+    const control = { x: (ax + bx) / 2 + px * bend, y: (ay + by) / 2 + py * bend };
+    const end = this.edgePoint(b, control);
+    const rim = this.edgePoint(a, control);
+    let start = { x: (ax + rim.x) / 2, y: (ay + rim.y) / 2 };
+    // Cells one above the other leave even less: start from the centre.
+    if (Math.hypot(end.x - start.x, end.y - start.y) < 24) start = { x: ax, y: ay };
+    const r = (n) => Math.round(n * 10) / 10;
+    return {
+      start, end, control,
+      d: `M${r(start.x)} ${r(start.y)} Q${r(control.x)} ${r(control.y)} ${r(end.x)} ${r(end.y)}`,
+    };
+  },
+};

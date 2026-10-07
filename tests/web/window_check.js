@@ -104,6 +104,7 @@ new Function(
   "exports", "document", "el", "view", "fetched", "shown", "timers",
   "answer",
   stubs
+  + "const hiddenSkippedPolls = new Map();\n" + slice("visiblePoll")
   + slice("openWindowPage") + slice("stopWindowPoll")
   + slice("refreshWindow") + slice("windowOwner") + slice("windowAge")
   + slice("windowEntry") + slice("windowSummary") + slice("renderWindow")

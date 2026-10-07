@@ -486,7 +486,12 @@ def test_remote_shadow_over_real_relay(home, tmp_path):
                     init = json.loads((await asyncio.wait_for(ws.receive(), 15)).data)
                     assert init["type"] == "init"
                     repaint = await asyncio.wait_for(ws.receive(), 15)
-                    assert b"READY" in repaint.data
+                    # The repaint is sa's current 30-row screen. The join
+                    # briefing is typed into sa after READY and echoed back,
+                    # so depending on when it lands the screen shows READY or
+                    # the tail of that echo (claunch-6deos.1) -- either way it
+                    # is sa's terminal, which is what the bridge must carry.
+                    assert b"READY" in repaint.data or b"echo:" in repaint.data
                     # more output than one relay frame (64 KiB) carries: 25
                     # lines of ~3000 characters (under a tty's 4095-byte
                     # canonical line), each typed and echoed back

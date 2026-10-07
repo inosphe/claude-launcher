@@ -125,6 +125,7 @@ new Function(
   "exports", "document", "el", "view", "fetched", "answer", "timers",
   stubs
   + sliceConst("REPORT_STATES")
+  + "const hiddenSkippedPolls = new Map();\n" + slice("visiblePoll")
   + slice("openReports") + slice("stopReportsPoll") + slice("refreshReports")
   + slice("reportSessionState") + slice("reportsShown")
   + slice("url")

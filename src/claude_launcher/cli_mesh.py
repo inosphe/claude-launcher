@@ -1084,7 +1084,36 @@ def _cmd_stance(args: argparse.Namespace) -> int:
         seen.add(text)
         print(f"\n# subrole {sub}\n")
         print(text)
+    _print_role_packs([member.get("role"), *(member.get("subroles") or [])])
     return 0
+
+
+def _print_role_packs(roles) -> None:
+    """The text of the packs ``roles`` require, after the stance.
+
+    The stance says what a role is and the role's prompt pack says how it
+    works (prompt_packs.role_packs). A session created with the role got the
+    pack in its opening; this is where one that joined by hand, or lost its
+    opening to a compaction, reads the same text: the copy installed in this
+    directory's workspace when there is one, else the copy claunch ships.
+    """
+    from pathlib import Path
+
+    from . import prompt_packs, workspaces
+
+    required = prompt_packs.required_for([r for r in roles if r])
+    if not required:
+        return
+    owner = workspaces.owning(os.getcwd())
+    root = Path(owner.path) if owner is not None else None
+    for pack_id, by in required.items():
+        print()
+        try:
+            pack = prompt_packs.required_pack(root, pack_id)
+        except prompt_packs.PackError as exc:
+            print(f"# prompt pack {pack_id} (required by {', '.join(by)}): {exc}")
+            continue
+        print(prompt_packs.opening_block(pack.id, pack.body, pack.source))
 
 
 def _cmd_mcp(_args: argparse.Namespace) -> int:

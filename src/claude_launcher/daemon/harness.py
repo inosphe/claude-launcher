@@ -362,7 +362,11 @@ def _prompt_packs_field(raw) -> Tuple[Dict[str, str], ...]:
     out = []
     for item in raw or ():
         if isinstance(item, dict) and item.get("id") and item.get("text"):
-            out.append({"id": str(item["id"]), "text": str(item["text"])})
+            rec = {"id": str(item["id"]), "text": str(item["text"])}
+            # Only a package copy carries it (prompt_packs.records).
+            if item.get("source"):
+                rec["source"] = str(item["source"])
+            out.append(rec)
     return tuple(out)
 
 

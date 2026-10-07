@@ -130,8 +130,26 @@ option:disabled { color: #6b7280; }
    follow from its column alone (session-grid.js span), so the same column
    sits at the same place in every row. */
 #session-grid {
+  position: relative;
   flex: 1; overflow-x: hidden; overflow-y: auto; padding: 4px 6px 8px; font-size: 12px;
 }
+/* The selected session's lineage (drawSessionGridLineage in app.js): an
+   arrow from the parent's cell and one to each child's, laid over the cells
+   and scrolling with them. Purple for the parent link, teal for the child
+   links -- neither is a state colour the cells already use (green, red and
+   amber are the checks and the gate). The cell at the far end of each arrow
+   takes the same colour as an inset ring, so it reads even where the arrows
+   cross other cells. */
+#session-grid .sg-lineage {
+  position: absolute; left: 0; top: 0; pointer-events: none; overflow: visible; z-index: 1;
+}
+#session-grid .sg-lineage-arrow { fill: none; stroke-width: 2; stroke-linecap: round; opacity: 0.9; }
+#session-grid .sg-lineage-arrow.parent { stroke: #bc8cff; }
+#session-grid .sg-lineage-arrow.child { stroke: #39c5cf; }
+#session-grid .sg-lineage-head.parent path, #session-grid .sg-lineage-tail.parent { fill: #bc8cff; }
+#session-grid .sg-lineage-head.child path, #session-grid .sg-lineage-tail.child { fill: #39c5cf; }
+#session-grid .sg-cell.lineage-parent { box-shadow: inset 0 0 0 1px #bc8cff; }
+#session-grid .sg-cell.lineage-child { box-shadow: inset 0 0 0 1px #39c5cf; }
 #session-grid .sg-per-line {
   display: flex; align-items: center; gap: 2px; margin: 0 0 4px; padding: 0; border: 0;
   color: #7d8590; font-size: 11px;
@@ -5369,6 +5387,12 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 .wt-branch { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1 1 auto; }
 .wt-repo { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.wt-path-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }
+.wt-path { flex: 1 1 200px; min-width: 0; font-size: 12px; white-space: pre-wrap;
+  overflow-wrap: anywhere; user-select: text; }
+.wt-copy-path { flex: 0 0 auto; margin-right: 0; }
+.wt-copy-status { flex-basis: 100%; }
+.wt-copy-status:empty { display: none; }
 .wt-chip { font-size: 11px; padding: 1px 7px; border-radius: 10px; background: #30363d;
   color: #c9d1d9; white-space: nowrap; }
 .wt-chip.active, .wt-chip.running { background: #1a3d24; color: #7ee787; }
@@ -5384,6 +5408,12 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
   color: #c9d1d9; background: #161b22; border: 1px solid #30363d; border-radius: 4px; padding: 1px 6px; }
 .wt-session:hover { border-color: #58a6ff; }
 .wt-actions { display: flex; justify-content: flex-end; }
+.wt-changes { margin: 8px 0; font-size: 12px; }
+.wt-changes summary { cursor: pointer; }
+.wt-change-list { list-style: none; margin: 8px 0; padding: 0; max-height: 280px; overflow: auto; }
+.wt-change-list li { display: flex; gap: 10px; padding: 3px 0; }
+.wt-change-status { white-space: pre; flex: 0 0 2ch; }
+.wt-change-path { white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; }
 .wt-actions .wf-btn { margin-right: 0; padding: 4px 12px; }
 .wf-btn.wt-danger { background: #3a2422; color: #ffa198; }
 .wf-btn.wt-danger:hover:not(:disabled) { background: #5c2a28; }

@@ -929,8 +929,9 @@ def install(app, *, create=None, gates=None, work=None):
         spec = {"profile": profile, "project": project, "mesh": mesh, "role": "operator",
                 "workflow": "operator", "context": json.dumps({"project": project}),
                 "beads": False, "name": str(body.get("name") or "").strip(),
-                "task": (f"너는 프로젝트 {project}의 Operator bot이다. stance와 operator 워크플로가 "
-                         "규칙이다. 사용자와의 대화는 터미널이 아니라 operator_* 도구로 한다.")}
+                "task": (f"너는 프로젝트 {project}의 Operator bot이다. stance, 오프닝의 "
+                         "role-operator prompt pack, operator 워크플로가 규칙이다. 사용자와의 "
+                         "대화는 터미널이 아니라 operator_* 도구로 한다.")}
         # The model and effort are the new-session form's own fields, checked
         # by the same create path against the profile's harness; an empty
         # answer is the harness default and is not sent at all.

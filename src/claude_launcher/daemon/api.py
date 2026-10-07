@@ -555,6 +555,7 @@ def build_app(
     r.add_get("/api/workspaces", h_workspaces)
     r.add_get("/api/git", h_git)
     r.add_get("/api/worktrees", h_worktrees)
+    r.add_get("/api/worktrees/changes", h_worktree_changes)
     r.add_post("/api/worktrees/remove", h_worktrees_remove)
     r.add_post("/api/workspaces", h_workspace_add)
     r.add_delete("/api/workspaces/{name}", h_workspace_remove)
@@ -2489,6 +2490,28 @@ async def h_worktrees(request: web.Request) -> web.Response:
     return json_response(answer)
 
 
+async def h_worktree_changes(request: web.Request) -> web.Response:
+    """Read changes only for a registered launcher checkout, on expansion."""
+    path = request.query.get("path", "")
+    if not path:
+        return json_response({"error": "path is required"}, status=400)
+    sessions = _worktree_sessions(request.app["manager"])
+
+    def read():
+        found = worktree_inventory.find(_worktree_roots(sessions), path)
+        if found is None:
+            return None
+        return worktree_inventory.changes(path)
+
+    try:
+        files = await asyncio.to_thread(read)
+    except worktree_mod.WorktreeError as exc:
+        return json_response({"error": str(exc)}, status=500)
+    if files is None:
+        return json_response({"error": "워크트리를 찾을 수 없습니다"}, status=404)
+    return json_response({"path": path, "files": files})
+
+
 async def h_worktrees_remove(request: web.Request) -> web.Response:
     """Remove launcher worktrees, one or a batch; the branches stay.
 
@@ -2640,6 +2663,9 @@ async def h_prompt_packs_offer(request: web.Request) -> web.Response:
     The packs installed in the workspace that owns ``cwd`` (none when no
     workspace does), which of them start ticked, and the role → pack mapping
     so the form can lock the ones a chosen role or subrole requires.
+    ``shipped`` is the package catalog: a required pack the workspace has not
+    installed goes in as the shipped copy (prompt_packs.required_pack), and
+    the form names it as such.
     """
     cwd = cflow_state.resolve_cwd(request.query.get("cwd") or None)
     owner = workspaces.owning(str(cwd))
@@ -2653,6 +2679,7 @@ async def h_prompt_packs_offer(request: web.Request) -> web.Response:
         "packs": packs,
         "default_packs": prompt_packs.default_packs(),
         "role_packs": prompt_packs.role_packs(),
+        "shipped": [p.to_dict() for p in prompt_packs.catalog()],
     })
 
 
@@ -3142,6 +3169,9 @@ async def h_roles(request: web.Request) -> web.Response:
     roleset = mesh_roles.resolve()
     return json_response(
         {
+            # What a blank role resolves to when nothing in the handle names
+            # one -- the create form needs it to say which role packs follow.
+            "default": roleset.default,
             "roles": [
                 {
                     "name": r.name,
@@ -6758,9 +6788,10 @@ async def _onboard_and_launch(
             profile=session.sdef.profile or "",
         )
         # Checked before anything is arranged, like the board answer above: a
-        # pack that is not installed where the session will run is a refused
-        # request, never a session that started without guidance it was
-        # promised -- whether the form ticked it or a role requires it.
+        # ticked pack that is not installed where the session will run is a
+        # refused request, never a session that started without guidance it
+        # was promised. A role-required one falls back to claunch's copy
+        # (prompt_packs.required_pack) and refuses only when it exists nowhere.
         try:
             packs, packs_required = _session_prompt_packs(
                 request, body, plan, name=name, cwd=cwd
@@ -6889,10 +6920,24 @@ async def _onboard_and_launch(
         # the packs are standing rules for the whole session, and the task is
         # what it acts on first.
         rules = prompt_packs.opening(session.sdef.prompt_packs)
-        opening = rules + ("\n\n" + opening if opening else "")
+        # A child's parent block still leads (onboard.arrange: the frame the
+        # rest is read in); the packs follow it. Every spawned member with a
+        # role now carries its role pack, so this is the common case.
+        head = onboard._parent_block(plan) if plan.parent and plan.wanted else ""
+        if head and opening.startswith(head):
+            rest = opening[len(head):].lstrip("\n")
+            opening = head + "\n\n" + rules + ("\n\n" + rest if rest else "")
+        else:
+            opening = rules + ("\n\n" + opening if opening else "")
         report["prompt_packs"] = [p["id"] for p in session.sdef.prompt_packs]
         if packs_required:
             report["prompt_packs_required"] = packs_required
+        shipped_copies = [
+            p["id"] for p in session.sdef.prompt_packs
+            if p.get("source") == prompt_packs.PACKAGE
+        ]
+        if shipped_copies:
+            report["prompt_packs_shipped"] = shipped_copies
     if selected:
         # The goal is the head of the opening itself — one block either way
         # it travels (argv or typed in), never a slash command.

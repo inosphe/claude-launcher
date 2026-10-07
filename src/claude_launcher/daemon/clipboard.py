@@ -76,8 +76,22 @@ def _read_linux() -> str:
     return read_command(native_text_command())
 
 
+#: One Windows clipboard read at a time in this process. ``OpenClipboard(NULL)``
+#: ties the open to the process, not the thread, so a second thread's open
+#: succeeds while the first still holds the data, and its ``CloseClipboard``
+#: frees what the first is reading -- a heap corruption (0xc0000374) that
+#: killed test processes serving two apps, each sampling once a second
+#: (claunch-lxwwf). The per-app :class:`History` lock cannot see the other app.
+_windows_guard = threading.Lock()
+
+
 def _read_windows():
     """Read Unicode text without modifying the Windows clipboard."""
+    with _windows_guard:
+        return _read_windows_locked()
+
+
+def _read_windows_locked():
     from ctypes import wintypes
 
     user = ctypes.WinDLL("user32", use_last_error=True)

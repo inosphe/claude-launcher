@@ -146,6 +146,44 @@ def test_find_answers_only_launcher_worktrees(repo):
     assert inv.find([str(repo)], str(repo)) is None
 
 
+def test_changes_reads_staged_unstaged_untracked_and_renames(repo):
+    wt = worktree.create(repo, "changes").path
+    assert inv.changes(str(wt)) == []
+    git("mv", "a.txt", "이름 변경.txt", cwd=wt)
+    (wt / "이름 변경.txt").write_text("changed\n", encoding="utf-8")
+    (wt / "new.txt").write_text("staged\n", encoding="utf-8")
+    git("add", "new.txt", cwd=wt)
+    (wt / "nested").mkdir()
+    (wt / "nested" / "한 글.txt").write_text("untracked\n", encoding="utf-8")
+    (wt / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
+    (wt / "ignored.txt").write_text("ignored\n", encoding="utf-8")
+    by = {f["path"]: f for f in inv.changes(str(wt))}
+    assert by["이름 변경.txt"] == {"path": "이름 변경.txt", "status": "RM", "original_path": "a.txt"}
+    assert by["new.txt"]["status"] == "A "
+    assert by["nested/한 글.txt"]["status"] == "??"
+    assert "ignored.txt" not in by
+    (wt / "new.txt").unlink()
+    assert {f["path"]: f["status"] for f in inv.changes(str(wt))}["new.txt"] == "AD"
+
+
+def test_changes_preserves_nul_delimited_paths_and_conflicts(monkeypatch):
+    def status(args, cwd):
+        assert "-z" in args and "--no-optional-locks" in args
+        return subprocess.CompletedProcess(args, 0, ' M line\nbreak.txt\0UU conflict.txt\0?? <tag>.txt\0', '')
+    monkeypatch.setattr(inv, "_git", status)
+    assert inv.changes("unused") == [
+        {"path": "line\nbreak.txt", "status": " M"},
+        {"path": "conflict.txt", "status": "UU"},
+        {"path": "<tag>.txt", "status": "??"},
+    ]
+
+
+def test_changes_failure_is_not_an_empty_list(monkeypatch):
+    monkeypatch.setattr(inv, "_git", lambda *a, **k: subprocess.CompletedProcess([], 1, "", "timeout"))
+    with pytest.raises(worktree.WorktreeError, match="timeout"):
+        inv.changes("unused")
+
+
 # --------------------------------------------------------------------------- #
 # the route: the archive gate
 # --------------------------------------------------------------------------- #
@@ -195,6 +233,28 @@ class _Request:
 
     async def json(self):
         return self._body
+
+
+def test_changes_route_validates_path_and_returns_files(repo, monkeypatch):
+    import json
+
+    wt = worktree.create(repo, "read-changes").path
+    (wt / "a.txt").write_text("modified\n", encoding="utf-8")
+    request = _Request(_Manager([]), {})
+    monkeypatch.setattr(api, "_worktree_roots", lambda sessions: [str(repo)])
+    request.query = {"path": str(wt)}
+    response = asyncio.run(api.h_worktree_changes(request))
+    assert response.status == 200
+    assert json.loads(response.text)["files"] == [{"path": "a.txt", "status": " M"}]
+    request.query = {"path": str(repo)}
+    assert asyncio.run(api.h_worktree_changes(request)).status == 404
+    request.query = {}
+    assert asyncio.run(api.h_worktree_changes(request)).status == 400
+    request.query = {"path": str(wt)}
+    monkeypatch.setattr(inv, "changes", lambda path: (_ for _ in ()).throw(worktree.WorktreeError("failed")))
+    response = asyncio.run(api.h_worktree_changes(request))
+    assert response.status == 500
+    assert json.loads(response.text)["error"] == "failed"
 
 
 def _call(manager, body, monkeypatch, repo):
