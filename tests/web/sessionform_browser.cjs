@@ -36,6 +36,58 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
    return openNewSession();
   });
   assert.equal(await page.locator('#modal-overlay').isVisible(), false);
+  // Measure the shared form in both hosts. A saved narrow dialog must respond
+  // to its own width, and sticky actions must remain clickable above the
+  // scrolled fields (including the floating Operator control).
+  const rect = selector => page.locator(selector).boundingBox();
+  async function checkLayout(host, columns) {
+   const where=await rect('#new-where'), identity=await rect('#new-identity');
+   const form=await rect('#new-session'), task=await rect('#new-task');
+   if(columns===2) {
+    assert.ok(Math.abs(where.y-identity.y)<1, `${host}: settings share a row`);
+    assert.ok(identity.x>where.x+where.width, `${host}: settings use two columns`);
+   } else {
+    assert.ok(identity.y>=where.y+where.height, `${host}: settings stack`);
+    assert.ok(Math.abs(identity.x-where.x)<1, `${host}: columns align`);
+   }
+   assert.ok(Math.abs(task.width-form.width)<1, `${host}: task uses full width`);
+   const scroller=host==='page'?'#new-view':'#modal-body';
+   for(const fraction of [0,0.5,1]) {
+    await page.locator(scroller).evaluate((el,f)=>{el.scrollTop=(el.scrollHeight-el.clientHeight)*f;},fraction);
+    const geometry=await page.locator(scroller).evaluate(el=>({w:el.clientWidth,scroll:el.scrollWidth}));
+    assert.ok(geometry.scroll<=geometry.w+1, `${host}: no horizontal overflow`);
+    for(const button of await page.locator('#new-session-actions button').all()) {
+     const clickable=await button.evaluate(el=>{
+      const r=el.getBoundingClientRect(), x=r.x+r.width/2, y=r.y+r.height/2;
+      return y>=0 && y<innerHeight && el.contains(document.elementFromPoint(x,y));
+     });
+     assert.ok(clickable, `${host}: actions reachable at scroll ${fraction}`);
+    }
+   }
+   await page.locator(scroller).evaluate(el=>{el.scrollTop=0;});
+  }
+  for(const width of [1440,768,390,320]) {
+   await page.setViewportSize({width,height:900});
+   await checkLayout('page',width===1440?2:1);
+  }
+  await page.setViewportSize({width:1440,height:900});
+  await page.locator('#new-session [name=name]').focus();
+  await page.keyboard.press('Tab');
+  assert.equal(await page.evaluate(()=>document.activeElement.name),'profile');
+  await page.keyboard.press('Tab');
+  assert.equal(await page.evaluate(()=>document.activeElement.name),'harness');
+  await page.evaluate(()=>openSpawnModal('lead'));
+  await checkLayout('modal',2);
+  await page.locator('.modal-box').evaluate(el=>{el.style.width='420px';});
+  await checkLayout('modal',1);
+  for(const width of [390,320]) {
+   await page.setViewportSize({width,height:900});
+   await checkLayout('modal',1);
+  }
+  await page.setViewportSize({width:390,height:600});
+  await checkLayout('modal',1);
+  await page.evaluate(()=>sessionModalClose());
+  await page.setViewportSize({width:1280,height:900});
   await page.locator('[name=task]').fill('page draft');
   await page.locator('#new-tab-spawn').click();
   assert.equal(await page.locator('#modal-overlay').isVisible(), false);
@@ -65,7 +117,12 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
   await page.evaluate(()=>openQuickForkModal('lead'));
   assert.equal(await page.locator('#new-tabs').isVisible(),false);
   assert.equal(await page.locator('#new-quick-fork').isVisible(),true);
-  assert.equal(await page.locator('#new-identity').isVisible(),false);
+  assert.ok(Math.abs((await rect('#new-quick-fork')).width-(await rect('#new-session')).width)<1,
+    'Fork keeps the full form width when the other sections are hidden');
+  for(const id of ['new-where','new-identity','new-runs-on','new-onboard',
+   'new-runtime','new-worktree','new-task','new-beads']) {
+   assert.equal(await page.locator('#'+id).isVisible(),false, `Fork hides ${id}`);
+  }
   assert.equal(await page.locator('[name=task]').isEnabled(),false);
   await page.locator('[name=quick_fork_task]').fill('fork task');
   await page.locator('[name=quick_fork_carry]').selectOption('inherit');
