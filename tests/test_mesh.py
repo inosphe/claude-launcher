@@ -1842,7 +1842,10 @@ def test_mesh_mcp_tools(home, monkeypatch):
         "peer_file", "peer_git", "lease",
         # ... building the team that does it: made, counted, re-oriented,
         # ended, re-drawn, wired
-        "spawn", "children", "rebrief", "kill", "handoff", "deep_think",
+        "spawn", "children",
+        # (what every session this daemon starts is told: daemon_prompt)
+        "daemon_prompt",
+        "rebrief", "kill", "handoff", "deep_think",
         "reparent", "connect",
         "disconnect",
         # ... and answering the members who asked to be wired themselves
