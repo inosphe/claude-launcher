@@ -638,6 +638,74 @@ TOOLS = [
         },
     },
     {
+        "name": "deep_think",
+        "description": (
+            "Ask YOURSELF a question and have a copy of you answer it, so the "
+            "exploration costs the copy's context instead of yours. 'ask' "
+            "quick-forks this session (the copy holds your whole conversation "
+            "up to now, so the question may lean on it), puts the question on "
+            "top, and RETURNS AT ONCE with an id: the answer is NOT in the "
+            "reply. It arrives LATER, typed into your terminal as a fenced "
+            "'claunch deep-think: ANSWER from <id>' block that starts a new "
+            "turn. So do not wait, sleep or poll for it, and do not redo the "
+            "same exploration meanwhile: carry on with other work, or end "
+            "your turn. Good for code exploration and deep reasoning whose "
+            "path you do not need to read, only its conclusion. The copy "
+            "stands in YOUR checkout and may edit; it tells you what it "
+            "changes with notes (op 'notify', typed into your terminal) "
+            "before the answer. Optional 'model'/'effort' run the copy "
+            "differently (the spawn policy decides whether you may). Past "
+            "its deadline you are asked to 'extend' or 'cancel'; say "
+            "neither and it is asked for what it has, then ended. 'status' "
+            "lists your running questions; 'cancel' ends one unanswered. "
+            "Inside a copy, 'notify' is how you tell the asker, and the "
+            "answer goes in with the 'handoff' tool, not here."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "op": {
+                    "type": "string",
+                    "enum": ["ask", "status", "cancel", "extend", "notify"],
+                    "description": "what to do; default 'ask'",
+                },
+                "question": {
+                    "type": "string",
+                    "description": (
+                        "ask: the question, stated so it can be answered "
+                        "without asking you back -- what you want to know, "
+                        "where to look, and what shape the answer should take"
+                    ),
+                },
+                "model": {
+                    "type": "string",
+                    "description": "ask: the model the copy runs on (default: yours)",
+                },
+                "effort": {
+                    "type": "string",
+                    "description": "ask: the reasoning effort the copy runs at (default: yours)",
+                },
+                "minutes": {
+                    "type": "number",
+                    "description": (
+                        "ask: how long before you are asked to extend or "
+                        "cancel (default daemon.deep_think_timeout, 30 min); "
+                        "extend: how much more time from now"
+                    ),
+                },
+                "id": {
+                    "type": "string",
+                    "description": "cancel/extend: the question's id, as 'ask' or 'status' gave it",
+                },
+                "text": {
+                    "type": "string",
+                    "description": "notify (inside a copy): the note for the asker -- which files and why",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "reparent",
         "description": (
             "Move a session you spawned (or a descendant of one) — with its "
@@ -918,6 +986,8 @@ def call_tool(name: str, args: dict) -> dict:
         if args.get("to"):
             body["to"] = str(args["to"])
         return _client().post(f"/api/sessions/{_session()}/handoff", body)
+    if name == "deep_think":
+        return _deep_think(args)
     if name == "reparent":
         child = str(args.get("session") or "")
         parent = str(args.get("parent") or "")
@@ -1099,6 +1169,46 @@ def _spawn(args: dict) -> dict:
         if args.get(offered):
             payload[key] = value
     return _client().post(f"/api/sessions/{_session()}/children", payload)
+
+
+def _deep_think(args: dict) -> dict:
+    op = str(args.get("op") or "ask").strip()
+    me = quote(_session(), safe="")
+    base = f"/api/sessions/{me}/deep-think"
+    minutes = args.get("minutes")
+    seconds = None
+    if minutes not in (None, ""):
+        try:
+            seconds = float(minutes) * 60.0
+        except (TypeError, ValueError):
+            raise MeshMcpError(f"'minutes' must be a number, not {minutes!r}") from None
+    if op == "ask":
+        question = str(args.get("question") or "").strip()
+        if not question:
+            raise MeshMcpError("'question' is required for op 'ask'")
+        body = {"question": question}
+        for key in ("model", "effort"):
+            if args.get(key):
+                body[key] = str(args[key])
+        if seconds is not None:
+            body["timeout"] = seconds
+        return _client().post(base, body)
+    if op == "status":
+        return _client().get(base)
+    if op == "notify":
+        text = str(args.get("text") or "").strip()
+        if not text:
+            raise MeshMcpError("'text' is required for op 'notify'")
+        return _client().post(f"{base}/notify", {"text": text})
+    if op in ("cancel", "extend"):
+        ident = str(args.get("id") or "").strip()
+        if not ident:
+            raise MeshMcpError(f"'id' is required for op {op!r}")
+        body = {"timeout": seconds} if op == "extend" and seconds is not None else {}
+        return _client().post(f"{base}/{quote(ident, safe='')}/{op}", body)
+    raise MeshMcpError(
+        f"unknown op {op!r}: one of ask, status, cancel, extend, notify"
+    )
 
 
 def _relay_summary(relay) -> str:

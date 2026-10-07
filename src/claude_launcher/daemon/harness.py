@@ -229,6 +229,13 @@ class SessionDef:
     #: a name for the same reason ``parent`` is: the origin may exit first,
     #: and the record still has to say where this copy came from.
     quick_fork_of: Optional[str] = None
+    #: The question this quick-fork was started to answer, when it was started
+    #: by the ``deep_think`` MCP tool rather than by a person's press (see
+    #: :mod:`claude_launcher.daemon.deep_think`): ``question``, ``asked_at``,
+    #: ``deadline`` and the timeout ladder's ``state``. Persisted so the
+    #: deadline sweep picks a running question back up after a daemon restart.
+    #: Only ever set together with ``quick_fork_of``.
+    deep_think: Optional[dict] = None
     #: A person's own free-text annotation on this session, written from the
     #: web UI and read back in the rail row, the session header and the detail
     #: panel. It belongs to the *user*, not to the session: nothing injects it
@@ -295,6 +302,8 @@ class SessionDef:
             out["tools"] = list(self.tools)
         if self.quick_fork_of:
             out["quick_fork_of"] = self.quick_fork_of
+        if self.deep_think:
+            out["deep_think"] = dict(self.deep_think)
         # Same rule as the two blocks above: a session with no note writes no
         # key, so the common record on disk is unchanged by this field.
         if self.note:
@@ -347,6 +356,11 @@ class SessionDef:
             user_reward=score_goal.count(data.get("user_reward", 0)),
             user_penalty=score_goal.count(data.get("user_penalty", 0)),
             quick_fork_of=str(data.get("quick_fork_of") or "").strip() or None,
+            deep_think=(
+                dict(data["deep_think"])
+                if isinstance(data.get("deep_think"), dict) and data["deep_think"]
+                else None
+            ),
             note=str(data.get("note") or "").strip() or None,
             project=str(data.get("project") or "").strip() or None,
             prompt_packs=_prompt_packs_field(data.get("prompt_packs")),
