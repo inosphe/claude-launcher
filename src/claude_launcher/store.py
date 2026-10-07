@@ -52,6 +52,7 @@ Schema::
     projects:                   # the tier above meshes/sessions; see :mod:`projects`
       <name>:
         default_workspace: <workspace name>   # optional
+        default_mesh: <mesh name> | null      # optional; absent = never set
 
 The on-disk file is first created from a bootstrap *template* (``template.yaml``,
 see :mod:`template`); after that this file is authoritative and is read live —

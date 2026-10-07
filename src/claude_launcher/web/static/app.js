@@ -9060,11 +9060,12 @@ function followSessionProject(name) {
    directory the operator chose by hand. */
 function applyProjectDefaultCwd(form) {
   const f = form.form || form.closest && form.closest("form") || $("new-session");
-  const cwd = f && f.cwd;
-  if (!cwd) return;
   const picked = projectsCache.find((p) => p.name === form.value);
   const previous = projectsCache.find((p) => p.name === (form._lastProject || ""));
   form._lastProject = form.value;
+  applyProjectDefaultMesh(f, picked, previous);
+  const cwd = f && f.cwd;
+  if (!cwd) return;
   const untouched = !cwd.value || (previous && cwd.value === previous.default_cwd);
   if (!untouched) return;
   const target = picked && picked.default_cwd;
@@ -9075,6 +9076,28 @@ function applyProjectDefaultCwd(form) {
     // leaving the old project's directory in place would file the session
     // under one project and start it in another's checkout.
     if (previous && cwd.value === previous.default_cwd) cwd.value = "";
+  }
+}
+
+/* The Mesh row follows the picked project's default mesh by the directory's
+   rule: only over a row that is still empty or still holds the previous
+   project's default. A default of none (null) and no setting at all
+   (undefined) both leave an untouched row empty. A child spawn is left
+   alone: its empty answer means "inherit the parent's mesh". */
+function applyProjectDefaultMesh(f, picked, previous) {
+  const mesh = f && f.mesh;
+  if (!mesh) return;
+  if (typeof spawnParent === "function" && spawnParent()) return;
+  const before = (previous && previous.default_mesh) || "";
+  if (mesh.value && mesh.value !== before) return;
+  const target = (picked && picked.default_mesh) || "";
+  const next = target && [...mesh.options].some((o) => o.value === target)
+    ? target : "";
+  if (next === mesh.value) return;
+  mesh.value = next;
+  // The roles, handle and peer rows hang off the mesh's change handler.
+  if (typeof mesh.dispatchEvent === "function") {
+    mesh.dispatchEvent(new Event("change"));
   }
 }
 
@@ -23627,7 +23650,32 @@ function wsAddCard() {
    or drop one. The default project is listed but has no remove button —
    it is where every unfiled session and mesh lives. */
 let projectError = "";
-let projectDraft = { name: "", workspace: "" };
+let projectDraft = { name: "", workspace: "", mesh: undefined };
+
+/* A project's default mesh has three states (projects.py): the field
+   absent from the record (undefined: nobody set it), null (set to no mesh)
+   and a mesh name. The pickers carry the first two as values no mesh name
+   can take (':' is outside the name alphabet). */
+const PROJECT_MESH_UNSET = ":unset";
+const PROJECT_MESH_NONE = ":none";
+
+function projectMeshChoice(p) {
+  if (!p || !("default_mesh" in p) || p.default_mesh === undefined) {
+    return PROJECT_MESH_UNSET;
+  }
+  return p.default_mesh === null ? PROJECT_MESH_NONE : p.default_mesh;
+}
+
+function projectMeshValue(choice) {
+  if (choice === PROJECT_MESH_UNSET) return undefined;
+  if (choice === PROJECT_MESH_NONE) return null;
+  return choice;
+}
+
+/* The request body that writes one default-mesh state. */
+function projectMeshBody(mesh) {
+  return mesh === undefined ? { default_mesh_unset: true } : { default_mesh: mesh };
+}
 
 function projectsCard() {
   const card = el("div", "ws-add");
@@ -23635,8 +23683,11 @@ function projectsCard() {
   card.appendChild(el(
     "p", "wf-note",
     "The tier above meshes and sessions. Each project keeps its own session " +
-    "and mesh lists (the rail's Project selector), and a default workspace: " +
-    "the directory a session created in it starts in when no other is chosen."
+    "and mesh lists (the rail's Project selector), a default workspace " +
+    "(the directory a session created in it starts in when no other is " +
+    "chosen) and a default mesh (the Mesh row the new-session form picks " +
+    "for it). A default mesh is unset until someone sets it, which is " +
+    "kept apart from setting it to none."
   ));
 
   const workspaceOptions = (select, chosen) => {
@@ -23644,6 +23695,19 @@ function projectsCard() {
     select.appendChild(new Option("(no default workspace)", ""));
     for (const w of workspacesCache) select.appendChild(new Option(w.name, w.name));
     select.value = [...select.options].some((o) => o.value === chosen) ? chosen : "";
+  };
+
+  const meshOptions = (select, p) => {
+    select.innerHTML = "";
+    select.appendChild(new Option("(default mesh unset)", PROJECT_MESH_UNSET));
+    select.appendChild(new Option("(no default mesh)", PROJECT_MESH_NONE));
+    for (const m of meshCache) select.appendChild(new Option(m.name, m.name));
+    const chosen = projectMeshChoice(p);
+    // A mesh deleted since it was chosen stays visible as what is stored.
+    if (![...select.options].some((o) => o.value === chosen)) {
+      select.appendChild(new Option(`${chosen} (no such mesh)`, chosen));
+    }
+    select.value = chosen;
   };
 
   const form = el("form", "project-add-row");
@@ -23657,14 +23721,22 @@ function projectsCard() {
   ws.id = "project-workspace";
   workspaceOptions(ws, projectDraft.workspace);
   ws.addEventListener("change", () => { projectDraft.workspace = ws.value; });
+  const addMesh = el("select");
+  addMesh.id = "project-mesh";
+  meshOptions(addMesh, projectDraft.mesh === undefined ? {}
+    : { default_mesh: projectDraft.mesh });
+  addMesh.addEventListener("change", () => {
+    projectDraft.mesh = projectMeshValue(addMesh.value);
+  });
   const submit = el("button", "wf-btn approve", "Add project");
   submit.type = "submit";
   form.appendChild(name);
   form.appendChild(ws);
+  form.appendChild(addMesh);
   form.appendChild(submit);
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
-    await projectAdd(name.value, ws.value);
+    await projectAdd(name.value, ws.value, projectMeshValue(addMesh.value));
   });
   card.appendChild(form);
   if (projectError) card.appendChild(el("p", "error", projectError));
@@ -23680,6 +23752,12 @@ function projectsCard() {
     if (p.default_workspace && !p.default_cwd) {
       row.appendChild(el("span", "badge exited", "workspace not registered"));
     }
+    const meshPick = el("select");
+    meshPick.id = `project-mesh-${p.name}`;
+    meshOptions(meshPick, p);
+    meshPick.addEventListener("change", () =>
+      projectSetMesh(p.name, projectMeshValue(meshPick.value)));
+    row.appendChild(meshPick);
     const here = sessionsCache.filter(
       (s) => (s.project || "default") === p.name).length;
     if (here) row.appendChild(el("span", "badge idle", plural(here, "session")));
@@ -23717,7 +23795,7 @@ async function projectRequest(method, url, body) {
   return true;
 }
 
-async function projectAdd(rawName, workspace) {
+async function projectAdd(rawName, workspace, mesh) {
   const name = (rawName || "").trim();
   if (!name) {
     projectError = "a project needs a name";
@@ -23726,8 +23804,10 @@ async function projectAdd(rawName, workspace) {
   }
   const body = { name };
   if (workspace) body.default_workspace = workspace;
+  // A new project left at "unset" sends nothing: the field stays absent.
+  if (mesh !== undefined) body.default_mesh = mesh;
   if (await projectRequest("POST", "/api/projects", body)) {
-    projectDraft = { name: "", workspace: "" };
+    projectDraft = { name: "", workspace: "", mesh: undefined };
     renderWorkspaces();
   }
 }
@@ -23736,6 +23816,12 @@ async function projectSetWorkspace(name, workspace) {
   await projectRequest(
     "PATCH", `/api/projects/${encodeURIComponent(name)}`,
     { default_workspace: workspace || null }
+  );
+}
+
+async function projectSetMesh(name, mesh) {
+  await projectRequest(
+    "PATCH", `/api/projects/${encodeURIComponent(name)}`, projectMeshBody(mesh)
   );
 }
 

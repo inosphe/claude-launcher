@@ -2201,6 +2201,7 @@ sessions for *this* piece of work":
 claunch project add launcher --default-workspace claude-launcher
 claunch project ls
 claunch project set-workspace launcher hq   # '' clears the default
+claunch project set-mesh launcher room      # --none: no mesh; --unset: never set
 claunch project rm launcher                 # records keep the name; nothing is killed
 
 claunch new-session --profile nc --project launcher   # filed under it, started in its default workspace
@@ -2227,6 +2228,18 @@ claunch mesh ls --project launcher
   name. A session created in the project with no directory of its own starts
   there — a default only; `-c`, `--workspace`, `--worktree` and the form's
   Directory row still win, and a session in the project may sit anywhere.
+- A project's **default mesh** is the mesh the web UI's new-session form and
+  the `new-session` wizard pick in their Mesh row when that project is
+  chosen (by the Directory row's rule: never over a mesh picked by hand, and
+  not for a child, whose empty row means its parent's mesh). It has three
+  states: *unset* (no `default_mesh` key; every project made before the
+  setting existed reads this way, and the API leaves the field out), *none*
+  (`default_mesh: null`) and a mesh name. `claunch project set-mesh NAME
+  MESH | --none | --unset` writes them, as do `project add --default-mesh /
+  --no-default-mesh`, the Projects card and `PATCH /api/projects/NAME` with
+  `default_mesh` (a name or null) or `default_mesh_unset: true`. The CLI's
+  `new-session` and the create API do not join it on their own: `--mesh` is
+  still how a session is put in a mesh there.
 - Workspaces are not filed under projects: two projects may point at the
   same directory.
 - The web UI's rail has a **Project** selector that narrows the session

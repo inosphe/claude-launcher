@@ -119,3 +119,68 @@ def test_a_hand_edited_file_with_a_bare_name_still_lists_it(home):
 
 def test_default_cwd_of_an_unknown_project_is_none(home):
     assert projects.default_cwd("nobody") is None
+
+
+# --------------------------------------------------------------------------- #
+# the default mesh: unset (no key), none (null), or a mesh name
+# --------------------------------------------------------------------------- #
+def test_an_existing_project_reads_its_default_mesh_as_unset(home, tmp_path):
+    """Projects written before the field existed carry no key, and read as
+    UNSET: distinct from None, and left out of the API row."""
+    _workspace(tmp_path)
+    store.update(lambda doc: doc.setdefault("projects", {}).update(
+        {"old": {"default_workspace": "hq"}}))
+    old = projects.get("old")
+    assert old.default_mesh is projects.UNSET
+    assert old.default_mesh is not None and not old.default_mesh_set
+    assert "default_mesh" not in old.to_dict()
+    assert "default_mesh" not in projects.get(DEFAULT).to_dict()
+    # Reading does not write the key back.
+    assert store.load()["projects"]["old"] == {"default_workspace": "hq"}
+
+
+def test_set_default_mesh_walks_the_three_states(home):
+    projects.add("p")
+    assert projects.get("p").default_mesh is projects.UNSET
+
+    p = projects.set_default_mesh("p", "mesh-1")
+    assert p.default_mesh == "mesh-1"
+    assert store.load()["projects"]["p"] == {"default_mesh": "mesh-1"}
+    assert projects.get("p").to_dict()["default_mesh"] == "mesh-1"
+
+    p = projects.set_default_mesh("p", None)
+    assert p.default_mesh is None and p.default_mesh_set
+    assert store.load()["projects"]["p"] == {"default_mesh": None}
+    assert projects.get("p").to_dict()["default_mesh"] is None
+
+    p = projects.set_default_mesh("p", projects.UNSET)
+    assert p.default_mesh is projects.UNSET
+    assert store.load()["projects"]["p"] == {}
+    assert "default_mesh" not in projects.get("p").to_dict()
+
+
+def test_add_keeps_the_default_mesh_unless_told(home, tmp_path):
+    _workspace(tmp_path)
+    projects.add("p", default_mesh="m")
+    p = projects.add("p", default_workspace="hq")
+    assert p.default_mesh == "m"
+    assert store.load()["projects"]["p"] == {
+        "default_mesh": "m", "default_workspace": "hq"}
+    assert projects.add("p") == p
+    # The default project takes a default mesh like any other.
+    assert projects.set_default_mesh(DEFAULT, "m").default_mesh == "m"
+
+
+def test_a_default_mesh_name_is_checked_for_shape(home):
+    projects.add("p")
+    with pytest.raises(ProjectError, match="invalid mesh name"):
+        projects.set_default_mesh("p", "has space")
+    assert projects.set_default_mesh("p", "dev@pca").default_mesh == "dev@pca"
+    with pytest.raises(ProjectError, match="no project named"):
+        projects.set_default_mesh("ghost", "m")
+
+
+def test_a_blank_default_mesh_in_the_file_reads_as_none(home):
+    store.update(lambda doc: doc.setdefault("projects", {}).update(
+        {"p": {"default_mesh": "  "}}))
+    assert projects.get("p").default_mesh is None
