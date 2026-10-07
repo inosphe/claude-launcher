@@ -3268,3 +3268,93 @@ def test_the_daemon_declares_the_custom_statuses_and_notices_a_lost_policy(repo)
         assert policy.is_file()
 
     asyncio.run(run())
+
+
+# --- claunch-5p2j4: "an existing issue", none picked yet --------------------
+
+
+def test_an_existing_answer_with_no_pick_is_its_own_answer(repo):
+    """The forms used to send nothing for it, which reads as "new" and minted
+    an issue from the task for work that already had one."""
+    assert beads_mod.none_mode({"beads": "existing-pending"}) == beads_mod.ISSUE_PENDING
+    assert beads_mod.none_mode({"beads": " Existing-Pending "}) == beads_mod.ISSUE_PENDING
+    br = FakeBr()
+    board = _board(br, repo)
+
+    async def run():
+        assert await board.ensure_issue(
+            _Sess(_sdef("w1", repo)),
+            body={"task": "go", "beads": "existing-pending"}, parent=None,
+        ) is None
+        assert br.calls == []                  # nothing minted, nothing read
+
+    asyncio.run(run())
+
+
+def test_the_pending_note_is_neither_no_issue_answer():
+    """A session that read it as "no issue" would either wait forever with no
+    way to record the issue or go and pick one off the board."""
+    note = beads_mod.compose_none_note(beads_mod.ISSUE_PENDING, session="w1")
+    assert note.startswith("start issue pending:")
+    assert not note.startswith("no issue:")
+    assert "Do NOT search the board" in note and "do not mint" in note
+    assert "Wait for the user or your parent to name the issue" in note
+    assert "flow_input" in note and "claunch cflow2 input issue <id>" in note
+    assert "--assignee w1 --status in_progress" in note
+
+
+def test_a_pending_answer_beside_a_named_issue_is_refused():
+    check = beads_mod.check_request
+    assert check({"beads": "existing-pending", "task": "go"}) is None
+    for body, expect in (
+        ({"beads": "existing-pending", "issue": "x-1"}, "'x-1'"),
+        ({"beads": "existing-pending", "task": "go\nissue: x-9"}, "'x-9'"),
+        ({"beads": "existing-pending", "context": "issue: x-9"}, "'x-9'"),
+        ({"beads": "existing-pending", "issue_text": "spec"}, "issue_text"),
+    ):
+        with pytest.raises(beads_mod.BoardRequestError) as exc:
+            check(body)
+        assert "existing-pending" in str(exc.value) and expect in str(exc.value)
+
+
+def test_a_pending_session_is_told_its_issue_is_coming(home, tmp_path, repo):
+    from claude_launcher.daemon import onboard
+
+    _register_py_harness()
+    br = FakeBr()
+    board = _board(br, repo)
+    seen = {}
+    real = onboard.arrange
+
+    async def spy(plan, **kw):
+        seen[kw["name"]] = plan.task
+        return await real(plan, **kw)
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm, board)
+        onboard.arrange = spy
+        try:
+            for name, extra in (("a", {"task": "do the thing"}), ("b", {})):
+                resp = await client.post(
+                    "/api/sessions",
+                    json={"name": name, "profile": "py", "cwd": str(repo),
+                          "beads": "existing-pending", **extra},
+                    headers=BEARER,
+                )
+                doc = await resp.json()
+                assert resp.status == 201, doc
+                assert doc["beads"] == {"issue": None,
+                                        "mode": beads_mod.ISSUE_PENDING}
+            assert br.calls == []                # no mint from the task
+            assert seen["a"].startswith("do the thing\n\nstart issue pending:")
+            # with no task at all the block still arrives: it is the only
+            # place the session learns that an issue is coming
+            assert seen["b"].startswith("start issue pending:")
+            await mgr.shutdown_all()
+        finally:
+            onboard.arrange = real
+            await client.close()
+
+    asyncio.run(run())

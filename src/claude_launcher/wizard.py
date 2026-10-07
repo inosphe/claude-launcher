@@ -687,7 +687,7 @@ BEADS_NONE_AUTO = "none-auto"
 
 def issue_fields(
     preset: str = "", *, none: bool = False, none_auto: bool = False,
-    text: str = "", section: str = "",
+    pending: bool = False, text: str = "", section: str = "",
 ) -> List[Field]:
     """The board rows, asked identically by ``new-session`` and ``spawn``.
 
@@ -726,7 +726,7 @@ def issue_fields(
     mode.select(
         BEADS_NONE_AUTO if none_auto
         else BEADS_NONE if none
-        else BEADS_PICK if preset
+        else BEADS_PICK if preset or pending
         else BEADS_NEW
     )
     issue_text = TextField(
@@ -747,7 +747,19 @@ def issue_fields(
         # Carried even when the daemon cannot list the board, so a preset id
         # from the command line is never silently dropped.
         issue.options = [Option(preset, preset)]
+    elif pending:
+        issue.options = [_PENDING_OPTION]
     return [mode, issue_text, issue]
+
+
+#: The pick row's last entry: "an existing issue", none named yet
+#: (claunch-5p2j4). Its value is the empty id, which :func:`issue_pending`
+#: reads as that answer. Without it the row could not be left empty unless the
+#: board had nothing on it -- and an empty row used to go out as "new".
+_PENDING_OPTION = Option(
+    "(not picked yet -- name it later)", "",
+    "nothing is minted; the session waits to be told which",
+)
 
 
 def _issue_option(row: dict) -> Option:
@@ -786,8 +798,10 @@ def sync_issues(form: "Form", cwd: str, *, parent: str = "") -> None:
         form._issues_for = key
         chosen = issue.value
         rows = form.sources.issues(cwd, parent) or []
-        issue.options = [_issue_option(r) for r in rows]
-        if chosen and not issue.select(chosen):
+        issue.options = [_issue_option(r) for r in rows] + [_PENDING_OPTION]
+        if chosen == "":
+            issue.select("")
+        elif chosen and not issue.select(chosen):
             # A preset (or a previous directory's pick) that this board does
             # not have: kept as its own row rather than dropped, so the user
             # sees the id they asked for instead of a silently different one.
@@ -812,6 +826,18 @@ def issue_answers(form: "Form") -> "tuple":
     if mode == BEADS_PICK:
         return (form.value("issue") or None), False, False, None
     return None, False, False, (form.value("issue_text") or None)
+
+
+def issue_pending(form: "Form") -> bool:
+    """True when the answer is "an existing issue" with none picked yet
+    (``--issue-pending``, claunch-5p2j4).
+
+    Kept out of :func:`issue_answers` so its four callers keep their shape:
+    this is the one answer that the pick row reaches with nothing in it, and
+    sending nothing there used to read as "new issue" and mint one from the
+    task for work that already had an issue.
+    """
+    return form.value("beads") == BEADS_PICK and not form.value("issue")
 
 
 def worktree_fields(auto_detail: str, section: str = "") -> List[Field]:
@@ -2249,6 +2275,7 @@ class Wizard(Form):
             *issue_fields(
                 get("issue") or "", none=bool(get("no_issue")),
                 none_auto=bool(get("no_issue_auto")),
+                pending=bool(get("issue_pending")),
                 text=get("issue_text") or "",
             ),
             restore, attach,
@@ -2591,6 +2618,7 @@ class Wizard(Form):
         (
             args.issue, args.no_issue, args.no_issue_auto, args.issue_text
         ) = issue_answers(self)
+        args.issue_pending = issue_pending(self)
         args.restore = self.value("restore")
         args.attach = bool(self.value("attach"))
         return args
@@ -2649,6 +2677,8 @@ def _issue_summary(form: "Form") -> str:
     read off the task, which is the half that decides where to go looking for
     what this session was actually asked to do."""
     issue, none, none_auto, text = issue_answers(form)
+    if issue_pending(form):
+        return "existing issue, not picked yet -- waits to be told which"
     if none_auto:
         # Which of the two it was, because they are the same on the board and
         # opposite in the session: a line reading only "no issue" would hide
@@ -3060,6 +3090,7 @@ class SpawnWizard(Form):
             *issue_fields(
                 get("issue") or "", none=bool(get("no_issue")),
                 none_auto=bool(get("no_issue_auto")),
+                pending=bool(get("issue_pending")),
                 text=get("issue_text") or "",
             ), attach,
             ActionField(key="create", label="Spawn child"),
@@ -3849,6 +3880,7 @@ class SpawnWizard(Form):
         (
             args.issue, args.no_issue, args.no_issue_auto, args.issue_text
         ) = issue_answers(self)
+        args.issue_pending = issue_pending(self)
         args.attach = bool(self.value("attach"))
         return args
 
