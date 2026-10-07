@@ -209,4 +209,54 @@ const tipRule = css.match(/#sg-tip \{[^}]*\}/);
 assert.ok(tipRule, "#sg-tip rule present");
 const tipWidth = Number((tipRule[0].match(/[\s;]width:\s*(\d+)px/) || [])[1]);
 assert.ok(tipWidth >= 520, `#sg-tip is ${tipWidth}px; the card's first line needs at least 520px`);
+// The lineage overlay: the selected session's parent link first, then one
+// link per child, all in the spawn direction (claunch-86740).
+const L = SessionGridLineage;
+const fleet = [
+  { name: "lead" }, { name: "w1", parent: "lead" }, { name: "w2", parent: "lead" },
+  { name: "g1", parent: "w1" }, { name: "odd", parent: "odd" },
+];
+assert.deepEqual(L.links("w1", fleet), [
+  { from: "lead", to: "w1", kind: "parent" },
+  { from: "w1", to: "g1", kind: "child" },
+]);
+assert.deepEqual(L.links("lead", fleet).map((l) => [l.to, l.kind]),
+  [["w1", "child"], ["w2", "child"]], "a root has only child links");
+assert.deepEqual(L.links("g1", fleet), [{ from: "w1", to: "g1", kind: "parent" }],
+  "a leaf has only its parent link");
+assert.deepEqual(L.links("odd", fleet), [], "a session that names itself is no lineage");
+assert.deepEqual(L.links(null, fleet), []);
+assert.deepEqual(L.links("gone", fleet), [], "an unknown name has no links");
+// A parent the list does not hold still gets its link: the cell may be there.
+assert.deepEqual(L.links("x", [{ name: "x", parent: "far" }]),
+  [{ from: "far", to: "x", kind: "parent" }]);
+
+// Edge points sit on the box border, on the line to the target.
+const box = { x: 0, y: 0, w: 40, h: 20 };
+assert.deepEqual(L.edgePoint(box, { x: 100, y: 10 }), { x: 40, y: 10 });
+assert.deepEqual(L.edgePoint(box, { x: 20, y: -50 }), { x: 20, y: 0 });
+assert.deepEqual(L.edgePoint(box, { x: 20, y: 10 }), { x: 20, y: 10 }, "the centre itself");
+// An arrow between two cells on one line starts inside the first (halfway to
+// its border), ends on the second's border, bows off the line so it clears
+// the cells between, and there is none for one box.
+const left = { x: 0, y: 0, w: 40, h: 20 };
+const right = { x: 200, y: 0, w: 40, h: 20 };
+const arrow = L.arrow(left, right);
+assert.ok(arrow.d.startsWith("M") && arrow.d.includes("Q"), arrow.d);
+const onBorder = (b, p) => Math.abs(p.x - b.x) < 1e-6 || Math.abs(p.x - b.x - b.w) < 1e-6
+  || Math.abs(p.y - b.y) < 1e-6 || Math.abs(p.y - b.y - b.h) < 1e-6;
+const inside = (b, p) => p.x > b.x && p.x < b.x + b.w && p.y > b.y && p.y < b.y + b.h;
+assert.ok(inside(left, arrow.start) && onBorder(right, arrow.end), JSON.stringify(arrow));
+// Neighbours three pixels apart still get a curve longer than an arrowhead:
+// from border to border it would be three pixels long.
+const near = L.arrow(left, { x: 43, y: 0, w: 40, h: 20 });
+assert.ok(Math.hypot(near.end.x - near.start.x, near.end.y - near.start.y) > 15, JSON.stringify(near));
+assert.ok(Math.abs(arrow.control.y - 10) >= 20, "the curve bows off the line between the two cells");
+assert.equal(L.arrow(left, { ...left }), null);
+// Along a line the curve bows upwards whichever way it runs; a vertical one
+// bows to the left.
+assert.ok(arrow.control.y < 10 && L.arrow(right, left).control.y < 10, "bows up both ways");
+const below = { x: 0, y: 100, w: 40, h: 20 };
+assert.ok(L.arrow(left, below).control.x < 20 && L.arrow(below, left).control.x < 20, "bows left both ways");
+
 console.log("sessiongrid_check: ok");
