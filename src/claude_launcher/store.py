@@ -19,11 +19,12 @@ Schema::
       <name>:
         service: <name>        # optional; authentication/usage service identity
         env: {KEY: VALUE, ...}
+        harness: <name>        # optional; default harness for profiles on it
         allowed_harnesses: [claude, ...]  # optional; missing = unrestricted
     profiles:
       <name>:
         parent: <other>         # optional
-        harness: <name>         # optional; inherited, default claude
+        harness: <name>         # optional; inherited, else the provider's, else claude
         provider: <name>        # optional; Claude Code only
         allowed_harnesses: [claude, pi]  # optional; inherited by intersection
         env: {KEY: VALUE, ...}
