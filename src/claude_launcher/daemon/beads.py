@@ -2438,7 +2438,7 @@ class Board:
         which is what every caller that predates the field still gets.
 
         A board that cannot be read or written must not cost a session its
-        launch: that is ``None``, and when the request named an issue,
+        launch: that is ``None``, and when the ``issue`` field named an issue,
         ``unsettled`` (if given) is filled with ``{"issue": id, "why": ...}``
         so the caller can say so. The one refusal is an issue named in the
         ``issue`` field that the board was read and does not hold:
@@ -2463,11 +2463,14 @@ class Board:
         ]
 
         def not_settled(why: str) -> None:
-            # A named issue the board could not be asked about: the session
-            # still starts (a board that cannot be written is never a reason
-            # to refuse one), and the caller is told which id and why.
-            if refs and unsettled is not None:
-                unsettled.update({"issue": refs[0], "why": why})
+            # An issue named in the ``issue`` field that the board could not
+            # be asked about: the session still starts (a board that cannot be
+            # written is never a reason to refuse one), and the caller is told
+            # which id and why. A reference read out of the task or context
+            # prose is not reported -- "Known issue: flaky" would otherwise
+            # reach the opening as a named issue (claunch-z7b0n.1).
+            if explicit and unsettled is not None:
+                unsettled.update({"issue": explicit, "why": why})
             return None
 
         if not cfg.get("beads_auto_issue", True):

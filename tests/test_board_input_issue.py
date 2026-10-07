@@ -276,3 +276,31 @@ def test_adopt_input_issue_rules():
     body = {"task": "issue: claunch-x"}
     beads_mod.adopt_input_issue(body, {"issue": "claunch-x"})   # agrees
     assert body["issue"] == "claunch-x"
+
+@pytest.mark.parametrize("how", ["no-board", "auto-off"])
+def test_a_board_that_cannot_be_asked_does_not_name_a_prose_reference(
+        proj, how, monkeypatch):
+    """claunch-z7b0n.1 (s88 N1): with the board out of reach, a word the
+    reference pattern read out of the task ("Known issue: flaky") is not
+    reported as the session's named issue -- only the `issue` field is."""
+    from claude_launcher.daemon import harness as harness_mod
+
+    openings = {}
+    real = harness_mod.build_command
+
+    def spy(sdef, **kw):
+        openings[sdef.name] = kw.get("opening", "")
+        return real(sdef, **kw)
+
+    monkeypatch.setattr(harness_mod, "build_command", spy)
+    if how == "auto-off":
+        store.update(lambda doc: doc.setdefault("daemon", {}).update(
+            {"beads_auto_issue": False}))
+    status, doc, _, names = _create(
+        proj, {"task": "Known issue: flaky tests on CI, fix the retry", **V2},
+        board=(how != "no-board"))
+    assert status == 201, doc
+    assert "w1" in names
+    assert (doc.get("beads") or {}).get("input_issue") is None
+    assert "was named for this session but is not linked" not in openings["w1"]
+    assert _run_inputs(proj)["issue"] == ""

@@ -65,7 +65,8 @@
   확인되면(오타, 다른 보드의 id) 세션을 만들지 않고 400으로 거절한다
   (`beads.IssueNotOnBoard`). task·context 산문에서 읽은 참조는 거절하지 않는다. 보드를 쓸 수 없으면(br 없음, 보드
   없음, `beads_auto_issue` off) 거절하지 않고 이슈 없이 시작하며, 응답의
-  `beads`(`input_issue`, `settled: false`, `why`)와 오프닝 한 줄에 이유를 남긴다.
+  `beads`(`input_issue`, `settled: false`, `why`)와 오프닝 한 줄에 이유를 남긴다 —
+  이 보고는 `issue` 필드로 준 id에만 낸다(산문 참조는 보고하지 않는다).
   무이슈 답은 둘로 갈린다 — 둘 다 아무것도 만들지 않지만 오프닝에 남기는 안내가
   다르다: `--no-issue`(웹 폼의 "No issue — wait for my instructions", 바디
   `beads: false` 또는 `"none"`)면 보드를 뒤지지 말라고 오프닝에 적고(NONE_WAIT),
