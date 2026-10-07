@@ -721,17 +721,21 @@ def test_the_resolved_issue_is_bound_to_data_claim():
 
 
 def test_a_pending_start_issue_is_waited_for_then_recorded(tmp_path):
-    """claunch-5p2j4: a session created with "an existing issue" and none
-    picked waits for the id, writes it into the start input with flow_input
-    (B) and takes it; resolve-issue then reads it as claimed and the bind
-    records it in $data.claim (A). Neither writes the other's value."""
+    """claunch-5p2j4, the workflow text only: a session created with "an
+    existing issue" and none picked waits in intake for the id, intake-issue
+    takes it (and records the start input under its existing flow_input
+    clause, pinned by test_cflow2_input_set), and issue-check reads the line
+    as claimed rather than as either "no issue" answer. That the daemon
+    leaves inputs.issue empty is test_board_input_issue's."""
     import yaml
     from pathlib import Path
     root = Path(__file__).resolve().parents[1] / "src/claude_launcher/workflows"
     v2 = yaml.safe_load((root / "v2/improv-worker-v2.yaml").read_text())
     intake = v2["nodes"]["intake"]["prompt"]
     assert "start issue pending:" in intake
-    assert "flow_input" in intake and "보드를 뒤지거나" in intake
+    assert "보드를 뒤지거나" in intake and "intake-issue가 한다" in intake
+    # the one node that names the start-input tool stays intake-issue
+    assert "flow_input" not in intake
     assert "start issue pending:" in v2["nodes"]["intake-issue"]["prompt"]
     check = v2["procedures"]["resolve-issue"]["body"]["choose"]["prompt"]
     assert "`start issue pending:` 줄은 무이슈 답이 아니다" in check

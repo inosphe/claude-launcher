@@ -152,7 +152,7 @@ def test_an_input_with_no_board_answer_is_adopted_not_minted(proj):  # (c)
     ({"issue": "claunch-held"}, "adopts 'claunch-held'"),
     ({"beads": False}, "asks for none"),
     ({"beads": "none-auto"}, "asks for none"),
-    ({"beads": "existing-pending"}, "asks for none"),
+    ({"beads": "existing-pending"}, "not picked yet"),
     ({"issue_text": "write a new one"}, "issue_text"),
     ({"task": "do it\nissue: claunch-held"}, "names issue 'claunch-held'"),
 ])

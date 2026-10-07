@@ -936,6 +936,13 @@ def adopt_input_issue(body: dict, inputs: Optional[dict]) -> None:
             "the input, or pick the same issue on the board"
         )
     none = none_mode(body)
+    if none == ISSUE_PENDING:
+        raise BoardRequestError(
+            f"the workflow input 'issue' is {wanted!r} and the board answer "
+            f"'beads: {none}' says the issue is not picked yet — a request "
+            "cannot mean both. Send one: pick that issue on the board, or "
+            "clear the input"
+        )
     if none:
         raise BoardRequestError(
             f"the workflow input 'issue' is {wanted!r} and the board answer "
