@@ -1721,7 +1721,7 @@ def test_an_untouched_project_row_travels_as_nothing():
     assert args.project is None
 
 
-def test_the_project_travels_in_the_answers():
+def test_the_spawn_project_travels_in_the_answers():
     wiz = spawn_form()
     pick(wiz, "project", "api")
     args = argparse.Namespace()
@@ -1784,7 +1784,7 @@ def test_a_typed_project_opens_the_workspace_row_on_its_own():
     assert wiz.value("workspace") == "api"
 
 
-def test_a_project_the_daemon_does_not_list_still_reaches_the_check():
+def test_a_spawn_project_the_daemon_does_not_list_still_reaches_the_check():
     """`projects.require` refuses an unknown name and says which ones exist.
     Dropping it here would file the child under its parent's project instead
     of refusing anything."""
