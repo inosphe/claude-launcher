@@ -308,3 +308,16 @@ def test_set_by_with_an_empty_default_or_none_is_quiet():
         if d.layer == "package" and d.error is None:
             codes = [f.code for f in check.check(layers.load(d.name))]
             assert "set-by-default" not in codes, d.name
+
+
+def test_set_by_on_a_required_input_warns():
+    from claude_launcher.cflow2 import check
+
+    chart = _chart("inputs:\n"
+                   "  issue: {type: string, required: true, set_by: [agent]}\n"
+                   "  goal: {type: text, required: true}\n"
+                   "nodes:\n  a: {prompt: A}\nbody: a\n")
+    got = [(f.level, f.code, f.message) for f in check.check(chart)
+           if f.code.startswith("set-by-")]
+    assert [(lvl, code) for lvl, code, _ in got] == [("warning", "set-by-required")]
+    assert "'issue'" in got[0][2]
