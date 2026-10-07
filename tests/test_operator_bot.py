@@ -428,7 +428,14 @@ def test_mcp_tools_and_workflow_and_stance_agree():
     assert wf.steps["watch"].next == "wait"
     assert wf.steps["wait"].timer.then == "watch" and wf.steps["wait"].timer.after == "end"
     watch = " ".join(wf.steps["watch"].instructions.split())
-    stance = mesh_roles.resolve(None).roles["operator"].stance
+    # The operator's working rules are its role pack; the stance is the
+    # one-line summary beside it, and the session receives both.
+    from claude_launcher import prompt_packs
+
+    stance = mesh_roles.resolve(None).roles["operator"].stance + "".join(
+        prompt_packs.shipped(p).body
+        for p in prompt_packs.DEFAULT_ROLE_PACKS["operator"]
+    )
     for tool in names:
         assert tool in watch, tool
         assert tool in stance, tool

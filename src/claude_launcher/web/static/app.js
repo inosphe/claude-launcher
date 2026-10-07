@@ -8733,6 +8733,7 @@ const PICKER = "@picker";
    without a second round-trip. The vocabulary is fixed for the daemon's
    lifetime — fetched once at boot, never polled. */
 let rolesByName = {};
+let rolesDefault = "";   // the role a handle naming none resolves to
 let rolesRequest = 0;
 
 /* Signature of the workspace list currently rendered. The registry changes
@@ -9415,6 +9416,7 @@ async function refreshRoles(meshName = "") {
     const data = await resp.json();
     if (request !== rolesRequest) return;
     rolesByName = {};
+    rolesDefault = String(data.default || "");
     select.innerHTML = "";
     select.appendChild(new Option("(no role)", ""));
     for (const role of data.roles || []) {
@@ -9430,6 +9432,7 @@ async function refreshRoles(meshName = "") {
   } catch {
     if (request !== rolesRequest) return;
     rolesByName = {};
+    rolesDefault = "";
     select.innerHTML = "";
     select.appendChild(new Option("(no roles available)", ""));
     select.value = "";
@@ -9503,8 +9506,10 @@ function newSubroles(f) {
 /* Prompt packs: the ones installed in the workspace the session will stand
    in (Settings ▸ Install puts them there), one checkbox each. A pack the
    chosen role or a ticked subrole requires is ticked and locked, with the
-   role named beside it; one that is required but not installed is said out
-   loud, because the daemon will refuse the create over it. */
+   role named beside it; one that is required but not installed is shown the
+   same way and marked as claunch's copy, which is what the daemon puts in
+   (prompt_packs.required_pack). A summary line names every pack the opening
+   will carry and why, including a role inferred from the handle. */
 let newPackOffer = null;       // /api/prompt-packs/offer's answer
 let newPackOfferFor = null;    // the directory it answers for
 let newPackTicks = new Map();  // pack id -> the operator's own tick
@@ -9529,10 +9534,35 @@ async function refreshPromptPackOffer() {
   renderPromptPackRow();
 }
 
-/* {pack id: [roles]} for the role row and the ticked subroles. */
+/* The primary role the join will store, the way the daemon resolves it
+   (mesh_roles.RoleSet.resolve): the Role row when one is picked, else the
+   handle's (or name's) leading word through the role names and aliases,
+   else the vocabulary's default. No mesh in play means no role at all.
+   `inferred` says the Role row was blank, so the form can say where the
+   role -- and with it the role's prompt pack -- came from. */
+function newPrimaryRole(f) {
+  if (newSubrolesMeshless(f)) return { role: "", inferred: false };
+  if (f.role.value) return { role: f.role.value, inferred: false };
+  const handle = String((f.handle && f.handle.value.trim()) ||
+    (f.name && f.name.value.trim()) || "").toLowerCase();
+  let head = "";
+  for (const ch of handle) {
+    if ("._-".includes(ch) || (ch >= "0" && ch <= "9")) break;
+    head += ch;
+  }
+  let role = "";
+  if (head) {
+    for (const [name, r] of Object.entries(rolesByName)) {
+      if (name === head || ((r && r.aliases) || []).includes(head)) { role = name; break; }
+    }
+  }
+  return { role: role || rolesDefault || "", inferred: true };
+}
+
+/* {pack id: [roles]} for the primary role and the ticked subroles. */
 function newRequiredPacks(f) {
   const mapping = (newPackOffer && newPackOffer.role_packs) || {};
-  const roles = [f.role.value || "", ...newSubroles(f)].filter(Boolean);
+  const roles = [newPrimaryRole(f).role, ...newSubroles(f)].filter(Boolean);
   const out = {};
   for (const role of roles) {
     for (const id of mapping[role] || []) (out[id] = out[id] || []).push(role);
@@ -9554,33 +9584,63 @@ function renderPromptPackRow() {
   const required = newRequiredPacks(f);
   const packs = (offer && offer.packs) || [];
   const have = new Set(packs.map((p) => p.id));
-  const missing = Object.keys(required).filter((id) => !have.has(id));
-  row.classList.toggle("hidden", !packs.length && !missing.length);
-  if (!packs.length && !missing.length) return;
+  // A required pack the workspace has not installed goes in as claunch's
+  // own copy (prompt_packs.required_pack); only one that is not shipped
+  // either refuses the create.
+  const shipped = Object.fromEntries(((offer && offer.shipped) || []).map((p) => [p.id, p]));
+  const notHere = Object.keys(required).filter((id) => !have.has(id));
+  const fromPackage = notHere.filter((id) => shipped[id]);
+  const missing = notHere.filter((id) => !shipped[id]);
+  const wsName = offer && offer.workspace ? offer.workspace.name : "this directory's workspace";
+  row.classList.toggle("hidden", !packs.length && !notHere.length);
+  if (!packs.length && !notHere.length) return;
   row.appendChild(el("span", "new-check-label", "Prompt packs"));
   const list = el("span", "new-check-list");
-  for (const p of packs) {
+  const addBox = (p, by, packaged) => {
     const label = el("label", "check");
     label.title = p.description || "";
     const box = document.createElement("input");
     box.type = "checkbox";
     box.name = `prompt_pack_${p.id}`;
     box.value = p.id;
-    const by = required[p.id];
     box.checked = by ? true : newPackTicked(p.id);
     box.disabled = !!by;
-    box.addEventListener("change", () => newPackTicks.set(p.id, box.checked));
+    box.addEventListener("change", () => {
+      newPackTicks.set(p.id, box.checked);
+      renderPromptPackRow();
+    });
     label.appendChild(box);
     label.appendChild(el("span", null, p.title || p.id));
-    if (by) label.appendChild(el("span", "wf-note", ` (required by ${by.join(", ")})`));
+    const why = [];
+    if (by) why.push(`required by ${by.join(", ")}`);
+    if (packaged) why.push(`claunch's copy, not installed in ${wsName}`);
+    if (why.length) label.appendChild(el("span", "wf-note", ` (${why.join(" · ")})`));
     list.appendChild(label);
-  }
+  };
+  for (const p of packs) addBox(p, required[p.id], false);
+  for (const id of fromPackage) addBox(shipped[id], required[id], true);
   row.appendChild(list);
+  // What the opening will actually carry, in the daemon's order (ticked,
+  // then required), each with why it is there -- the boxes alone do not say
+  // which role a locked one came from when the Role row was left blank.
+  const chosen = [...newPromptPacks(f), ...fromPackage].filter((id, i, a) => a.indexOf(id) === i);
+  const primary = newPrimaryRole(f);
+  const parts = chosen.map((id) => {
+    const why = required[id] ? `role ${required[id].join(", ")}` : "ticked";
+    return `${id} (${why}${fromPackage.includes(id) ? ", claunch's copy" : ""})`;
+  });
+  let summary = parts.length
+    ? `The opening will include: ${parts.join(" · ")}.`
+    : "The opening will include no prompt pack.";
+  if (primary.inferred && primary.role) {
+    summary += ` Role ${primary.role} is inferred from the handle (no Role picked).`;
+  }
+  row.appendChild(el("p", "wf-note new-packs-summary", summary));
   if (missing.length) {
     row.appendChild(el("p", "wf-error",
       missing.map((id) => `${id} is required by ${required[id].join(", ")}`).join("; ") +
-      ` but is not installed in ${offer && offer.workspace ? offer.workspace.name : "this directory's workspace"}` +
-      " — install it in Settings ▸ Install, or the create will be refused."));
+      ` but is neither installed in ${wsName} nor shipped with claunch` +
+      " — fix the mapping in Settings ▸ Install, or the create will be refused."));
   }
 }
 
@@ -10570,6 +10630,13 @@ document
     applySessionParentChange();
     syncSessionModalChrome();
   });
+
+// A blank Role row is filled from the handle (or the name) at join, and the
+// role decides the required prompt packs, so typing either redraws the row.
+for (const field of ["handle", "name"]) {
+  const input = document.querySelector(`#new-session input[name=${field}]`);
+  if (input) input.addEventListener("input", () => renderPromptPackRow());
+}
 
 document
   .querySelector("#new-session select[name=role]")
@@ -22152,8 +22219,10 @@ function promptPackSettings(doc, ids) {
   box.appendChild(el("h4", null, "Required by role"));
   box.appendChild(el("p", "wf-note",
     "A session whose role or one of whose subroles is listed here gets these " +
-    "packs whether ticked or not; the create form shows them locked on, and " +
-    "a create in a workspace that has not installed them is refused."));
+    "packs whether ticked or not; the create form shows them locked on. A " +
+    "workspace that installed one gives its own copy; one that did not gets " +
+    "the copy claunch ships. The packaged roles keep a short stance and put " +
+    "their working rules in a role-<name> pack listed here."));
   const table = el("table", "md-table prompt-pack-roles");
   const head = el("tr", null);
   head.appendChild(el("th", null, "Role"));

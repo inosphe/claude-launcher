@@ -75,8 +75,16 @@ def test_pm_is_a_packaged_role():
     assert rs.infer("planner2") == "pm"
     role = rs.get("pm")
     assert role.stall_watch is True
-    assert ".cflow/generated/" in role.stance
-    assert "never merge" in role.stance
+    # The stance is short; the procedure is the role's pack, which every
+    # session created with the role receives in its opening.
+    from claude_launcher import prompt_packs
+
+    assert prompt_packs.DEFAULT_ROLE_PACKS["pm"] == ["role-pm"]
+    guidance = " ".join(
+        (role.stance + " " + prompt_packs.shipped("role-pm").body).split()
+    )
+    assert ".cflow/generated/" in guidance
+    assert "never merge" in guidance
 
 
 def test_improv_pm_is_bundled_and_driven_by_the_pm_role():

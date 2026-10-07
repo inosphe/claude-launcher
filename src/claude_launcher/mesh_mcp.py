@@ -386,8 +386,10 @@ TOOLS = [
                         "prompt pack ids to put into the child's opening, "
                         "read from the workspace it will run in (installed "
                         "there in Settings > Install). Packs its role or "
-                        "subroles require are added whether listed or not; "
-                        "one that is not installed there refuses the spawn"
+                        "subroles require are added whether listed or not "
+                        "(claunch's copy when the workspace has none); a "
+                        "listed pack that is not installed there refuses "
+                        "the spawn"
                     ),
                 },
                 "issue_text": {

@@ -33,9 +33,13 @@ CHILD = (
 # --------------------------------------------------------------------------- #
 # module
 # --------------------------------------------------------------------------- #
-def test_the_catalog_ships_the_three_packs_and_common_is_the_default():
+def test_the_catalog_ships_the_packs_and_common_is_the_default():
     ids = [p.id for p in prompt_packs.catalog()]
     assert {"beads", "common", "unreal-operator"} <= set(ids)
+    # Every pack the default role mapping names ships, so a role's guidance
+    # never depends on a workspace having installed it.
+    for packs in prompt_packs.DEFAULT_ROLE_PACKS.values():
+        assert set(packs) <= set(ids)
     assert [p.id for p in prompt_packs.catalog() if p.default] == ["common"]
     for pack in prompt_packs.catalog():
         assert pack.title and pack.body and not pack.body.startswith("---")
@@ -104,7 +108,9 @@ def test_opening_block_names_the_id_rebrief_uses():
 
 
 def test_role_packs_default_save_and_clear(home):
-    assert prompt_packs.role_packs() == {"unreal": ["unreal-operator"]}
+    assert prompt_packs.role_packs() == prompt_packs.DEFAULT_ROLE_PACKS
+    assert prompt_packs.role_packs()["unreal"] == ["unreal-operator"]
+    assert prompt_packs.role_packs()["worker"] == ["role-worker"]
     saved = prompt_packs.set_role_packs({"Worker": "beads, common", "pm": []})
     assert saved == {"worker": ["beads", "common"]}
     assert prompt_packs.required_for(["worker", "unreal"]) == {
@@ -112,7 +118,7 @@ def test_role_packs_default_save_and_clear(home):
     }
     # Clearing every row is kept as cleared, not read back as the default.
     assert prompt_packs.set_role_packs({}) == {}
-    assert prompt_packs.set_role_packs(None) == {"unreal": ["unreal-operator"]}
+    assert prompt_packs.set_role_packs(None) == prompt_packs.DEFAULT_ROLE_PACKS
     with pytest.raises(prompt_packs.PackError):
         prompt_packs.set_role_packs({"unreal": ["Bad Id"]})
 
@@ -129,14 +135,100 @@ def test_choose_adds_required_packs_and_names_the_role(tmp_path):
     ws.mkdir()
     prompt_packs.install(ws, "common")
     mapping = {"unreal": ["unreal-operator"]}
-    with pytest.raises(prompt_packs.PackError, match="required by role unreal"):
-        prompt_packs.choose(ws, ["common"], ["worker", "unreal"], mapping=mapping)
-    prompt_packs.install(ws, "unreal-operator")
+    # Required but not installed: the shipped copy goes in, marked as such.
     recs, required = prompt_packs.choose(
         ws, ["common"], ["worker", "unreal"], mapping=mapping
     )
     assert [r["id"] for r in recs] == ["common", "unreal-operator"]
+    assert "source" not in recs[0]
+    assert recs[1]["source"] == prompt_packs.PACKAGE
+    assert recs[1]["text"] == prompt_packs.shipped("unreal-operator").body
     assert required == {"unreal-operator": ["unreal"]}
+    # ...also with no workspace at all, and when the form sent it as a tick.
+    recs, _ = prompt_packs.choose(
+        None, ["unreal-operator"], ["unreal"], mapping=mapping
+    )
+    assert recs == [{
+        "id": "unreal-operator", "source": prompt_packs.PACKAGE,
+        "text": prompt_packs.shipped("unreal-operator").body,
+    }]
+
+    # An installed copy wins, edits included.
+    prompt_packs.install(ws, "unreal-operator")
+    copy = ws / ".claunch" / "prompts" / "unreal-operator.md"
+    copy.write_text(copy.read_text(encoding="utf-8") + "\nhouse rule\n",
+                    encoding="utf-8")
+    recs, _ = prompt_packs.choose(
+        ws, ["common"], ["worker", "unreal"], mapping=mapping
+    )
+    assert recs[1]["text"].endswith("house rule") and "source" not in recs[1]
+
+    # A ticked pack still has to be installed; a required one that exists
+    # nowhere is refused with the role named.
+    with pytest.raises(prompt_packs.PackError, match="not installed"):
+        prompt_packs.choose(ws, ["beads"], ["unreal"], mapping=mapping)
+    with pytest.raises(prompt_packs.PackError, match="required by role ghost"):
+        prompt_packs.choose(ws, [], ["ghost"], mapping={"ghost": ["no-such-pack"]})
+
+
+def test_a_package_copy_says_so_in_the_opening():
+    block = prompt_packs.opening([
+        {"id": "role-worker", "text": "be a worker", "source": prompt_packs.PACKAGE},
+        {"id": "common", "text": "house"},
+    ])
+    first, second = block.split("\n\n---\n")
+    assert "# claunch prompt pack: role-worker -- shipped with claunch" in first
+    assert "not installed in this workspace" in first
+    assert "# claunch prompt pack: common -- installed in this workspace" in second
+    assert "file: .claunch/prompts/common.md" in second
+    sdef = SessionDef.from_dict({
+        "name": "s",
+        "prompt_packs": [{"id": "role-worker", "text": "t", "source": "package"}],
+    })
+    assert sdef.prompt_packs == ({"id": "role-worker", "text": "t", "source": "package"},)
+
+
+def test_the_stance_command_prints_the_role_packs(home, tmp_path, monkeypatch, capsys):
+    from claude_launcher import cli_mesh
+
+    # Outside any workspace: claunch's copy, for the primary and a subrole.
+    monkeypatch.chdir(tmp_path)
+    cli_mesh._print_role_packs(["worker", "unreal", ""])
+    out = capsys.readouterr().out
+    assert "# claunch prompt pack: role-worker -- shipped with claunch" in out
+    assert prompt_packs.shipped("role-worker").body in out
+    assert "# claunch prompt pack: unreal-operator -- shipped with claunch" in out
+
+    # Inside a workspace that installed and edited one: its copy.
+    ws = tmp_path / "proj"
+    ws.mkdir()
+    workspaces.add(str(ws), "proj")
+    prompt_packs.install(ws, "role-worker")
+    copy = ws / ".claunch" / "prompts" / "role-worker.md"
+    copy.write_text(copy.read_text(encoding="utf-8") + "\nhouse rule\n",
+                    encoding="utf-8")
+    monkeypatch.chdir(ws)
+    cli_mesh._print_role_packs(["worker"])
+    out = capsys.readouterr().out
+    assert "role-worker -- installed in this workspace" in out
+    assert out.rstrip().endswith("house rule")
+
+    # A role with no packs prints nothing.
+    prompt_packs.set_role_packs({})
+    cli_mesh._print_role_packs(["worker"])
+    assert capsys.readouterr().out == ""
+
+
+def test_packaged_roles_keep_a_short_stance_and_a_pack():
+    from claude_launcher.daemon import mesh_roles
+
+    rs = mesh_roles.resolve()
+    for name, role in rs.roles.items():
+        # One or two sentences: the working rules live in the role's pack.
+        assert len(role.stance) < 400, name
+        assert prompt_packs.DEFAULT_ROLE_PACKS.get(name), name
+        for pack_id in prompt_packs.DEFAULT_ROLE_PACKS[name]:
+            assert prompt_packs.shipped(pack_id).body
 
 
 def test_session_def_keeps_the_recorded_text():
@@ -192,7 +284,7 @@ def test_settings_routes_install_remove_and_save_the_mapping(home, tmp_path):
         client = await _serve(mgr, None)
         try:
             doc = await (await client.get("/api/prompt-packs", headers=BEARER)).json()
-            assert doc["role_packs"] == {"unreal": ["unreal-operator"]}
+            assert doc["role_packs"] == prompt_packs.DEFAULT_ROLE_PACKS
             assert doc["default_packs"] == ["common"]
             assert "unreal" in doc["roles"]
             row = next(w for w in doc["workspaces"] if w["name"] == "proj")
@@ -214,6 +306,9 @@ def test_settings_routes_install_remove_and_save_the_mapping(home, tmp_path):
             )).json()
             assert offer["workspace"]["name"] == "proj"
             assert [p["id"] for p in offer["packs"]] == ["beads"]
+            # The catalog rides along so the form can name a required pack
+            # that goes in as claunch's copy.
+            assert "role-worker" in [p["id"] for p in offer["shipped"]]
 
             resp = await client.put("/api/prompt-packs/role-packs", headers=BEARER,
                                     json={"role_packs": {"unreal": ["x y"]},
@@ -300,22 +395,35 @@ def test_the_unreal_subrole_forces_its_pack(home, tmp_path):
                 "beads": False, "mesh": "team", "role": "worker",
                 "subroles": ["unreal"],
             }
-            # Required but not installed: refused, and the role is named.
+            # Required but not installed: claunch's copy goes in, and the
+            # report and the opening both say so.
             resp = await client.post("/api/sessions", headers=BEARER,
                                      json={**body, "name": "u1"})
-            assert resp.status == 400
-            err = (await resp.json())["error"]
-            assert "unreal-operator" in err and "required by role unreal" in err
+            doc = await resp.json()
+            assert resp.status == 201, doc
+            assert doc["prompt_packs"] == ["role-worker", "unreal-operator"]
+            assert doc["prompt_packs_required"] == {
+                "role-worker": ["worker"], "unreal-operator": ["unreal"],
+            }
+            assert doc["prompt_packs_shipped"] == ["role-worker", "unreal-operator"]
+            assert (
+                "# claunch prompt pack: unreal-operator -- shipped with claunch"
+                in seen["u1"]
+            )
 
             prompt_packs.install(ws, "unreal-operator")
             resp = await client.post("/api/sessions", headers=BEARER,
                                      json={**body, "name": "u2"})
             doc = await resp.json()
             assert resp.status == 201, doc
-            assert doc["prompt_packs"] == ["unreal-operator"]
-            assert doc["prompt_packs_required"] == {"unreal-operator": ["unreal"]}
+            assert doc["prompt_packs"] == ["role-worker", "unreal-operator"]
+            assert doc["prompt_packs_shipped"] == ["role-worker"]
             u2 = seen["u2"]
             assert u2.index("# claunch prompt pack: unreal-operator") < u2.index("build it")
+            assert "# claunch prompt pack: unreal-operator -- installed" in u2
+            # The briefing's stance is the short one; the pack holds the rest.
+            assert "You are a PRODUCER" in u2
+            assert "role prompt packs: role-worker, unreal-operator" in u2
 
             # A spawned child gets the same rule.
             resp = await client.post("/api/sessions/u2/children", headers=BEARER,

@@ -63,23 +63,27 @@ const form = { role: { value: "" }, mesh: { value: "team" } };
 const env = new Function(
   "$", "el", "document", "rolesByName", "spawnParent",
   [`let newSubroleTicks = new Set();`,
+   `let rolesDefault = "";`,
    `let newPackOffer = null, newPackOfferFor = null, newPackTicks = new Map();`,
-   slice("newSubrolesMeshless"), slice("newSubroles"),
+   slice("newSubrolesMeshless"), slice("newSubroles"), slice("newPrimaryRole"),
    slice("newRequiredPacks"), slice("newPackTicked"),
    slice("renderPromptPackRow"), slice("newPromptPacks"),
    `return {
       set offer(v) { newPackOffer = v; },
+      set roleDefault(v) { rolesDefault = v; },
       ticks: () => newPackTicks, subTicks: () => newSubroleTicks,
       render: renderPromptPackRow, packs: newPromptPacks,
-      required: newRequiredPacks,
+      required: newRequiredPacks, primary: newPrimaryRole,
     };`].join("\n")
 )(
   (id) => (id === "new-session" ? form : id === "new-packs-row" ? row : null),
   el,
   { createElement: (tag) => node(tag), createTextNode: (t) => node("#text", "", t) },
-  { worker: {}, unreal: {}, leader: {} },
+  { worker: { aliases: ["coder"] }, unreal: {}, leader: {}, "free-role": {} },
   () => null,
 );
+const summary = () =>
+  all(row, (n) => n.className === "wf-note new-packs-summary").map((n) => n.textContent)[0] || "";
 
 const OFFER = {
   workspace: { name: "proj", path: "F:/proj" },
@@ -89,6 +93,12 @@ const OFFER = {
   ],
   default_packs: ["common"],
   role_packs: { unreal: ["unreal-operator"], leader: ["beads"] },
+  shipped: [
+    { id: "beads", title: "Beads board" },
+    { id: "common", title: "Common" },
+    { id: "unreal-operator", title: "Unreal — operator" },
+    { id: "role-worker", title: "Role — worker" },
+  ],
 };
 const boxes = () => all(row, (n) => n.tag === "input");
 
@@ -128,14 +138,64 @@ check("the role locks its pack on and names itself", () => {
   form.role.value = "";
 });
 
-check("a ticked subrole requiring a missing pack is said out loud", () => {
+check("a ticked subrole's uninstalled pack is shown as claunch's copy", () => {
   env.subTicks().add("unreal");
   env.render();
   assert.deepEqual(env.required(form), { "unreal-operator": ["unreal"] });
-  assert.match(text(row), /unreal-operator is required by unreal but is not installed in proj/);
-  // Not sent as a tick: the daemon adds required packs itself, and names
-  // the missing one in its refusal.
+  const b = boxes();
+  assert.deepEqual(b.map((x) => x.name),
+    ["prompt_pack_beads", "prompt_pack_common", "prompt_pack_unreal-operator"]);
+  assert.equal(b[2].checked, true);
+  assert.equal(b[2].disabled, true);
+  assert.match(text(row), /required by unreal · claunch's copy, not installed in proj/);
+  assert.doesNotMatch(text(row), /refused/);
+  assert.equal(summary(),
+    "The opening will include: unreal-operator (role unreal, claunch's copy).");
+  // Not sent as a tick: the daemon adds required packs itself.
   assert.deepEqual(env.packs(form), []);
+});
+
+check("the summary names every pack and why it is there", () => {
+  newTick("common", true);
+  env.render();
+  assert.equal(summary(),
+    "The opening will include: common (ticked) · unreal-operator (role unreal, claunch's copy).");
+  newTick("common", false);
+});
+
+check("a blank Role row is inferred from the handle, alias included", () => {
+  env.subTicks().clear();
+  env.offer = { ...OFFER, role_packs: { ...OFFER.role_packs, worker: ["role-worker"] } };
+  form.handle = { value: "coder2" };
+  assert.deepEqual(env.primary(form), { role: "worker", inferred: true });
+  env.render();
+  assert.equal(summary(),
+    "The opening will include: role-worker (role worker, claunch's copy)." +
+    " Role worker is inferred from the handle (no Role picked).");
+  // A handle naming no role falls to the vocabulary's default.
+  form.handle.value = "zed";
+  env.roleDefault = "free-role";
+  assert.deepEqual(env.primary(form), { role: "free-role", inferred: true });
+  // A picked role is not inferred, and no mesh means no role at all.
+  form.role.value = "leader";
+  assert.deepEqual(env.primary(form), { role: "leader", inferred: false });
+  form.role.value = "";
+  form.mesh.value = "";
+  assert.deepEqual(env.primary(form), { role: "", inferred: false });
+  form.mesh.value = "team";
+  delete form.handle;
+  env.roleDefault = "";
+  env.offer = OFFER;
+});
+
+check("a required pack that exists nowhere refuses the create", () => {
+  env.offer = { ...OFFER, role_packs: { leader: ["ghost"] } };
+  form.role.value = "leader";
+  env.render();
+  assert.match(text(row),
+    /ghost is required by leader but is neither installed in proj nor shipped with claunch/);
+  form.role.value = "";
+  env.offer = OFFER;
 });
 
 check("subroles do not count without a mesh", () => {
@@ -146,6 +206,12 @@ check("subroles do not count without a mesh", () => {
   form.mesh.value = "team";
   env.subTicks().clear();
 });
+
+function newTick(id, on) {
+  const box = boxes().find((b) => b.value === id);
+  box.checked = on;
+  box.handlers.change[0]();
+}
 
 /* ---- the Settings card -------------------------------------------------- */
 const calls = [];
