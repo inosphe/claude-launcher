@@ -38,7 +38,7 @@ def test_schema_lands_in_meta():
     assert list(sch) == ["goal", "issue", "rounds", "dry", "mode", "scope", "invariants", "acceptance"]
     assert sch["goal"] == {"type": "text", "label": "목표", "help": "", "required": True,
                            "default": None, "choices": None, "placeholder": "",
-                           "precheck": None}
+                           "precheck": None, "set_by": []}
     assert sch["rounds"]["default"] == 3 and sch["mode"]["choices"] == ["full", "quick"]
     assert C("nodes: {a: {prompt: a}}\nbody: a\n").meta["inputs"] == {}
 

@@ -11,7 +11,7 @@ from claude_launcher import mcp_server
 from claude_launcher.cflow2 import mcp as cflow2_mcp
 
 FLOW_TOOLS = {"flow_start", "flow_status", "flow_report", "flow_select", "flow_fork",
-              "flow_delegate", "flow_rule", "flow_collection"}
+              "flow_delegate", "flow_rule", "flow_collection", "flow_input"}
 
 DEF = textwrap.dedent("""
     cflow: 2

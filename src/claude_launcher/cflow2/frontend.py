@@ -198,6 +198,12 @@ TASK_KEYS = (
     "returns", "effects", "paths", "budget", "rules", "strict_budget",
     "do", "triggers", "restart",
 )
+#: ``$data.inputs`` is the run's start inputs (docs 2.6): written by the start
+#: request and, for an input declared ``set_by: [agent]``, once by the driver
+#: through ``flow_input`` -- never by a node. A ``bind`` or ``data:`` key of
+#: this name is a compile error (claunch-7d4nt).
+DATA_INPUTS = "inputs"
+
 COMMON_KEYS = ("id", "executor", "needs", "budget", "bind", "on", "do", "triggers")
 #: ``do:`` operations (docs/cflow-v2.md 2.7) and the moments they run at.
 DO_OPS = ("push", "set", "remove", "consume")
@@ -1128,6 +1134,10 @@ def _compile_mapping(ctx: _Ctx, sc: _Scope, m: Dict[str, Any], parent: Optional[
     if bind is not None:
         if not isinstance(bind, str) or not bind:
             raise ctx.err(sc.file, _key_line(m, "bind", line), "bind must be a variable name")
+        if bind == DATA_INPUTS:
+            raise ctx.err(sc.file, _key_line(m, "bind", line),
+                          f"bind {DATA_INPUTS!r} is reserved: $data.{DATA_INPUTS} holds the "
+                          f"run's start inputs, which no node writes (docs 2.6)")
         node.bind = bind
 
     builder = _BUILDERS[head]
@@ -2111,6 +2121,10 @@ def compile_text(text: str, *, source: str = "",
     data = doc.get("data")
     if data is not None:
         _need_map(ctx, file, data, "data", _key_line(doc, "data"))
+        if DATA_INPUTS in data:
+            raise ctx.err(file, _key_line(data, DATA_INPUTS, _key_line(doc, "data")),
+                          f"data key {DATA_INPUTS!r} is reserved for the run's start inputs "
+                          f"(declare them under inputs:, docs 2.6)")
     # 0: no limit (doc 2.1; check warns unbounded-visits)
     max_visits = _int(ctx, file, doc.get("max_visits", ir.DEFAULT_MAX_VISITS), "max_visits",
                       _key_line(doc, "max_visits", 1), 0)
