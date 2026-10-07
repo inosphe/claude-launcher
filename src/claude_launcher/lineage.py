@@ -175,7 +175,8 @@ def effective_env(profile: Profile, doc: Optional[dict] = None) -> Dict[str, str
 def effective_harness(profile: Profile, doc: Optional[dict] = None) -> str:
     """Harness selected by the nearest profile in the inheritance chain.
 
-    Profiles created before harness selection existed have no field and keep
+    Without a pin anywhere in the chain the effective provider decides
+    (:func:`harness_policy.provider_default`), and failing that profiles keep
     the historical ``claude`` default. The returned name is validated against
     the live registry so a deleted/tombstoned harness fails at the profile
     boundary rather than much later at process spawn.
@@ -185,27 +186,51 @@ def effective_harness(profile: Profile, doc: Optional[dict] = None) -> str:
     Without it each link of each chain re-reads and re-parses
     ``~/.claunch.yaml``, and so does each registry lookup below.
     """
-    name = profile.harness_override or harnesses.CLAUDE_HARNESS
-    if not profile.harness_override:
+    return harness_with_source(profile, doc)[0]
+
+
+def harness_with_source(
+    profile: Profile, doc: Optional[dict] = None
+) -> Tuple[str, str]:
+    """:func:`effective_harness` plus a human-readable note on where it came from."""
+    # Late import: harness_policy reads this module's chain(), while this
+    # function is the final boundary that applies the policy to every caller.
+    from . import harness_policy, providers as providers_mod
+
+    name, source = profile.harness_override or "", f"selector {profile.selector!r}"
+    if not name:
         for item in chain(profile, doc):
             own = str(store.profile_entry(item.name, doc).get("harness") or "").strip()
             if own:
                 name = own
+                source = (
+                    f"set on profile {item.name!r}"
+                    if item.name == profile.name
+                    else f"inherited from profile {item.name!r}"
+                )
+    if not name:
+        # No pin anywhere in the chain: the effective provider's own harness
+        # (or its allow-list) is the default, so a profile that only says
+        # ``provider: codex`` does not also have to say ``harness: codex``.
+        provider = providers_mod.resolve_name(profile, doc)
+        try:
+            name = harness_policy.provider_default(provider, doc) or ""
+        except harness_policy.HarnessPolicyError as exc:
+            raise LineageError(str(exc)) from exc
+        source = f"default of provider {provider!r}"
+    if not name:
+        name, source = harnesses.CLAUDE_HARNESS, "built-in default"
     if harnesses.get(name, doc) is None:
         known = ", ".join(harnesses.names(doc))
         raise LineageError(
             f"profile {profile.selector!r} selects unknown harness {name!r} "
             f"(known: {known})"
         )
-    # Late import: harness_policy reads this module's chain(), while this
-    # function is the final boundary that applies the policy to every caller.
-    from . import harness_policy, providers as providers_mod
-
     try:
         harness_policy.require(profile, name, doc=doc)
     except (harness_policy.HarnessPolicyError, providers_mod.ProviderError) as exc:
         raise LineageError(str(exc)) from exc
-    return name
+    return name, source
 
 
 def set_harness(profile: Profile, name: str) -> None:
@@ -224,7 +249,7 @@ def set_harness(profile: Profile, name: str) -> None:
 
 
 def clear_harness(profile: Profile) -> None:
-    """Drop the local pin, inheriting an ancestor or the claude default."""
+    """Drop the local pin, inheriting an ancestor, the provider's or the claude default."""
     doc = store.load()
     section = doc.get("profiles")
     entry = section.get(profile.name) if isinstance(section, dict) else None

@@ -166,3 +166,94 @@ def test_unknown_future_names_are_retained_but_not_offered(home):
         ("work", ("future-agent", "pi")),
     )
     assert harness_policy.allowed_names(p) == ["pi"]
+
+
+def _provider_entry(name: str, **fields) -> None:
+    doc = store.load()
+    spec = {"env": {"ANTHROPIC_BASE_URL": f"https://{name}.invalid"}, **fields}
+    doc.setdefault("providers", {})[name] = spec
+    store.save(doc)
+
+
+def test_provider_harness_is_the_default_without_a_profile_pin(home):
+    _provider_entry("codex", harness="codex")
+    p = profile.create("work")
+    providers.set_profile_selection(p, "codex")
+    assert lineage.effective_harness(p) == "codex"
+
+
+def test_provider_allow_list_without_claude_names_the_default(home):
+    _provider_entry("codex", allowed_harnesses=["codex"])
+    p = profile.create("work")
+    providers.set_profile_selection(p, "codex")
+    assert lineage.effective_harness(p) == "codex"
+
+
+def test_provider_allow_list_admitting_claude_keeps_claude_default(home):
+    _provider_entry("mixed", allowed_harnesses=["pi", "claude"])
+    p = profile.create("work")
+    providers.set_profile_selection(p, "mixed")
+    assert lineage.effective_harness(p) == "claude"
+
+
+def test_provider_default_follows_inherited_and_global_selection(home):
+    _provider_entry("codex", harness="codex", allowed_harnesses=["codex"])
+    parent = profile.create("account")
+    child = profile.create("work")
+    lineage.set_parent(child, parent.name)
+    providers.set_profile_selection(parent, "codex")
+    assert lineage.effective_harness(child) == "codex"
+
+    providers.clear_profile_selection(parent)
+    providers.set_active("codex")
+    assert lineage.effective_harness(child) == "codex"
+
+
+def test_profile_pin_overrides_the_provider_default(home):
+    _provider_entry("codex", harness="codex", allowed_harnesses=["codex", "pi"])
+    parent = profile.create("account")
+    child = profile.create("work")
+    lineage.set_parent(child, parent.name)
+    providers.set_profile_selection(child, "codex")
+    lineage.set_harness(parent, "pi")
+    assert lineage.effective_harness(child) == "pi"
+    assert lineage.effective_harness(profile.resolve_selector("work:codex")) == "codex"
+
+
+def test_provider_default_is_still_checked_against_profile_policy(home):
+    _provider_entry("codex", harness="codex")
+    p = profile.create("work")
+    _profile_limit(p.name, ["claude"])
+    doc = store.load()
+    doc["profiles"][p.name]["provider"] = "codex"
+    store.save(doc)
+    with pytest.raises(lineage.LineageError, match="allows only"):
+        lineage.effective_harness(p)
+
+
+def test_setting_a_provider_switches_an_unpinned_profile(home):
+    _provider_entry("codex", harness="codex", allowed_harnesses=["codex"])
+    p = profile.create("work")
+    assert lineage.effective_harness(p) == "claude"
+    providers.set_profile_selection(p, "codex")
+    assert lineage.effective_harness(p) == "codex"
+    providers.clear_profile_selection(p)
+    assert lineage.effective_harness(p) == "claude"
+
+
+@pytest.mark.parametrize("value", [["codex"], "bad:name"])
+def test_malformed_provider_harness_fails_closed(home, value):
+    _provider_entry("broken", harness=value)
+    p = profile.create("work")
+    doc = store.load()
+    doc["profiles"][p.name]["provider"] = "broken"
+    store.save(doc)
+    with pytest.raises(lineage.LineageError, match="must be a harness name"):
+        lineage.effective_harness(p)
+
+
+def test_provider_allow_list_default_skips_undeclared_future_names(home):
+    _provider_entry("codex", allowed_harnesses=["future-agent", "codex"])
+    p = profile.create("work")
+    providers.set_profile_selection(p, "codex")
+    assert lineage.effective_harness(p) == "codex"

@@ -97,6 +97,38 @@ def provider_constraint(
     return _names(spec, f"providers.{name}")
 
 
+def provider_default(name: str, doc: Optional[dict] = None) -> Optional[str]:
+    """Harness provider ``name`` runs on when no profile in the chain pins one.
+
+    The provider's own ``harness`` wins. Without it, an ``allowed_harnesses``
+    list that excludes the historical ``claude`` default names the harness
+    instead (its first declared entry), so ``provider: codex`` with
+    ``allowed_harnesses: [codex]`` needs no matching ``harness:`` on every
+    profile. ``None`` means the provider has no opinion.
+    """
+    doc = store.load() if doc is None else doc
+    section = doc.get("providers")
+    spec = section.get(name) if isinstance(section, dict) else None
+    if not isinstance(spec, dict):
+        return None
+    own = spec.get("harness")
+    if own is not None and own != "":
+        if not isinstance(own, str) or not _NAME_RE.fullmatch(own.strip()):
+            raise HarnessPolicyError(
+                f"providers.{name}.harness must be a harness name, got {own!r}"
+            )
+        return own.strip()
+    allowed = _names(spec, f"providers.{name}")
+    if allowed and harnesses.CLAUDE_HARNESS not in allowed:
+        # Unknown future names may sit in the list (see allowed_names); the
+        # default is the first one this build actually declares.
+        for candidate in allowed:
+            if harnesses.get(candidate, doc) is not None:
+                return candidate
+        return allowed[0]
+    return None
+
+
 def evaluate(
     profile: Profile,
     harness_name: str,
