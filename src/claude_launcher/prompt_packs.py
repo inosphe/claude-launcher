@@ -521,6 +521,32 @@ def choose(
     return records(packs), required
 
 
+def preview(workspace: Optional[Path], pack_id: str) -> dict:
+    """What the create form shows when a pack's text is asked for.
+
+    The same copy :func:`pack_copy` would put into the opening, plus where it
+    came from: ``source`` (:data:`WORKSPACE` or :data:`PACKAGE`) and, for a
+    workspace copy, ``status`` -- :data:`CURRENT`, :data:`STALE` or
+    :data:`EDITED` against the shipped text, :data:`LOCAL` when claunch ships
+    no pack of that id. Raises :class:`PackError` as :func:`pack_copy` does.
+    """
+    pack = pack_copy(workspace, pack_id)
+    out = {
+        **pack.to_dict(),
+        "body": pack.body,
+        "source": pack.source,
+        "lines": len(pack.body.splitlines()),
+        "text_id": text_id(pack.body),
+    }
+    if pack.source == WORKSPACE and workspace is not None:
+        try:
+            out["status"] = status(workspace, shipped(pack.id))
+        except PackError:
+            out["status"] = LOCAL
+        out["path"] = str(install_dir(workspace) / f"{pack.id}.md")
+    return out
+
+
 def pack_copy(workspace: Optional[Path], pack_id: str) -> Pack:
     """The text a session is given for ``pack_id``, ticked or role-required.
 

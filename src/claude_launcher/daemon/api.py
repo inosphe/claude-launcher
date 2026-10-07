@@ -572,6 +572,7 @@ def build_app(
     r.add_delete("/api/workspaces/{name}", h_workspace_remove)
     r.add_get("/api/prompt-packs", h_prompt_packs)
     r.add_get("/api/prompt-packs/offer", h_prompt_packs_offer)
+    r.add_get("/api/prompt-packs/text", h_prompt_packs_text)
     r.add_get("/api/daemon-prompt", h_daemon_prompt_get)
     r.add_put("/api/daemon-prompt", h_daemon_prompt_put)
     r.add_post("/api/prompt-packs/install", h_prompt_packs_install)
@@ -2759,6 +2760,28 @@ async def h_prompt_packs_offer(request: web.Request) -> web.Response:
         # first and ticked, and sends daemon_prompt: false when unticked.
         "daemon_prompt": daemon_prompt.offer(),
     })
+
+
+async def h_prompt_packs_text(request: web.Request) -> web.Response:
+    """One pack's text as a session created in ``cwd`` would be given it.
+
+    The create form's preview: the workspace's copy when installed (edits
+    included), else claunch's, with where it came from
+    (prompt_packs.preview). 404 for an id that is neither.
+    """
+    pack_id = request.query.get("id") or ""
+    cwd = cflow_state.resolve_cwd(request.query.get("cwd") or None)
+    owner = workspaces.owning(str(cwd))
+    try:
+        doc = await asyncio.to_thread(
+            prompt_packs.preview,
+            Path(owner.path) if owner is not None else None,
+            pack_id,
+        )
+    except prompt_packs.PackError as exc:
+        return json_error(404, str(exc))
+    doc["workspace"] = owner.to_dict() if owner is not None else None
+    return json_response(doc)
 
 
 async def h_daemon_prompt_get(request: web.Request) -> web.Response:

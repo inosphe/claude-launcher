@@ -448,3 +448,62 @@ def test_the_unreal_subrole_forces_its_pack(home, tmp_path):
             await client.close()
 
     asyncio.run(run())
+
+
+def test_the_text_route_shows_what_the_opening_would_get(home, tmp_path):
+    ws = tmp_path / "proj"
+    ws.mkdir()
+    workspaces.add(str(ws), "proj")
+    prompt_packs.install(ws, "common")
+    prompt_packs.install(ws, "beads")
+    beads = ws / ".claunch" / "prompts" / "beads.md"
+    beads.write_text(beads.read_text(encoding="utf-8") + "\nOUR OWN RULE\n", encoding="utf-8")
+    (ws / ".claunch" / "prompts" / "house.md").write_text(
+        "---\ntitle: House\n---\nonly here\n", encoding="utf-8"
+    )
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        client = await _serve(mgr, None)
+
+        async def text(pack_id, cwd=ws / "sub"):
+            resp = await client.get("/api/prompt-packs/text", headers=BEARER,
+                                    params={"id": pack_id, "cwd": str(cwd)})
+            return resp.status, await resp.json()
+
+        try:
+            status, doc = await text("common")
+            assert status == 200, doc
+            assert (doc["source"], doc["status"]) == ("workspace", "current")
+            assert doc["body"] == prompt_packs.shipped("common").body
+            assert doc["lines"] == len(doc["body"].splitlines())
+            assert doc["workspace"]["name"] == "proj"
+            # The id the opening prints beside the same text.
+            assert doc["text_id"] == prompt_packs.text_id(doc["body"])
+
+            # An edit in the workspace is what the session would read.
+            status, doc = await text("beads")
+            assert (doc["source"], doc["status"]) == ("workspace", "edited")
+            assert "OUR OWN RULE" in doc["body"]
+
+            status, doc = await text("house")
+            assert (doc["source"], doc["status"]) == ("workspace", "local")
+
+            # Not installed here: claunch's copy, as pack_copy would give it.
+            status, doc = await text("role-worker")
+            assert status == 200 and doc["source"] == "package"
+            assert "status" not in doc
+            assert doc["body"] == prompt_packs.shipped("role-worker").body
+
+            # Outside any workspace, the shipped copy too.
+            status, doc = await text("beads", cwd=tmp_path / "elsewhere")
+            assert doc["source"] == "package" and "OUR OWN RULE" not in doc["body"]
+            assert doc["workspace"] is None
+
+            for bad in ("ghost", "Bad Id", ""):
+                status, doc = await text(bad)
+                assert status == 404, (bad, doc)
+        finally:
+            await client.close()
+
+    asyncio.run(run())
