@@ -16224,6 +16224,7 @@ const VIEWS = {
   home: "home-view",
   observer: "observer-view",
   operator: "operator-view",
+  chat: "chat-view",
   new: "new-view",
   meshes: "meshes-view",
   flows: "flows-view",
@@ -16816,6 +16817,7 @@ function parseHash(h) {
     return { page: "new", mesh: parts[1] ? decodeURIComponent(parts[1]) : "" };
   }
   if (parts[0] === "operator") return { page: "operator" };
+  if (parts[0] === "chat") return { page: "chat", name: parts[1] || "" };
   if (parts[0] === "observer") return {
     page: "observer",
     scope: ["session", "mesh"].includes(parts[1]) ? parts[1] : "global",
@@ -16895,6 +16897,7 @@ function route() {
   // open function never has to know which other pages exist.
   if (r.page !== "observer") globalThis.ObserverPage?.stop();
   if (r.page !== "operator") globalThis.OperatorPanel?.stop();
+  if (r.page !== "chat") globalThis.ChatPanel?.stop();
   if (r.page !== "wf") stopWfPoll();
   if (r.page !== "msg") stopMsgPoll();
   if (r.page !== "mesh") stopMeshPoll();
@@ -16932,6 +16935,7 @@ function route() {
     case "shadow": openShadow(r.machine, r.name); break;
     case "observer": showView("observer"); globalThis.ObserverPage.open(r.scope, r.name); break;
     case "operator": showView("operator"); globalThis.OperatorPanel.open(); break;
+    case "chat": showView("chat"); globalThis.ChatPanel.open(r.name); break;
     case "wf": openWorkflow(r.cwd, r.scope); break;
     case "log": openTranscript(r.name, r.machine); break;
     case "msg": openTrace(r.name, r.mesh); break;

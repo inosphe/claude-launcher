@@ -511,6 +511,7 @@ CHECKS = [
         "beadsstill_check.js",
         "observerpin_check.js",
         "operator_check.js",
+        "chat_check.js",
         "worktreespage_check.js",
         "glossarypage_check.js",
         "specpage_check.js",
@@ -545,6 +546,7 @@ BROWSER_CHECKS = [
         "railchildline_browser.cjs",
         "termfit_browser.cjs",
         "quietpoll_browser.cjs",
+        "chat_browser.cjs",
 ]
 
 

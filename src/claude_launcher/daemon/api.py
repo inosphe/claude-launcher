@@ -365,8 +365,9 @@ def build_app(
     )
     app["manager"] = manager
     app["mesh"] = mesh if mesh is not None else MeshManager(manager)
-    from . import observer, operator_bot
+    from . import mesh_chat, observer, operator_bot
     observer.install(app)
+    mesh_chat.install(app)
     operator_bot.install(app, create=_create_session, gates=_operator_gates,
                          work=lambda sessions: _operator_work(app, sessions))
     clipboard.install(app)
