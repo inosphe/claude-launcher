@@ -412,6 +412,8 @@ CHECKS = [
         "notice_check.js",
         "restartgate_check.js",
         "termcache_check.js",
+        "gpurender_check.js",
+        "hiddenpoll_check.js",
         "briefcard_check.js",
         "briefingtop_check.js",
         "briefmodel_check.js",

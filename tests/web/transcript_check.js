@@ -160,6 +160,7 @@ function build() {
     slice("renderTranscriptRecord"), slice("renderTranscriptBlock"),
     slice("transcriptClipped"), slice("fmtLogTime"),
     slice("renderTranscriptProse"), slice("setTranscriptFormat"),
+    "const hiddenSkippedPolls = new Map();", slice("visiblePoll"),
     slice("startTranscriptPoll"), slice("stopTranscriptPoll"), slice("pollTranscript"),
   ].join("\n");
   new Function(
