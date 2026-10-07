@@ -28,7 +28,7 @@ CHILD = (
     "for line in sys.stdin:\n"
     "    print('echo:' + line.strip())\n"
 )
-HEAD = "# claunch prompt pack: daemon"
+HEAD = "# claunch prompt pack: @daemon"
 
 
 # --------------------------------------------------------------------------- #
@@ -100,7 +100,7 @@ def test_the_opening_names_it_as_this_daemons_prompt(tmp_path):
     assert "this daemon's own prompt" in block
     assert "be brief" in block
     rec = prompt_packs.records([daemon_prompt.pack(tmp_path)])[0]
-    assert rec["id"] == "daemon" and rec["source"] == prompt_packs.DAEMON
+    assert rec["id"] == daemon_prompt.PACK_ID and rec["source"] == prompt_packs.DAEMON
 
 
 # --------------------------------------------------------------------------- #
@@ -163,7 +163,7 @@ def test_settings_routes_read_and_replace_it(home, tmp_path):
                 "/api/prompt-packs/offer", params={"cwd": str(tmp_path)},
                 headers=BEARER,
             )).json()
-            assert offer["daemon_prompt"]["id"] == "daemon"
+            assert offer["daemon_prompt"]["id"] == daemon_prompt.PACK_ID
             assert offer["daemon_prompt"]["default"] is True
         finally:
             await client.close()
@@ -195,7 +195,7 @@ def test_every_session_gets_it_unless_the_request_says_no(home, tmp_path):
             assert opening.index("DAEMON RULE") < opening.index("do the thing")
             assert f"{HEAD} -- this daemon's own prompt" in opening
             recorded = mgr.get("d1").sdef.prompt_packs
-            assert [r["id"] for r in recorded] == ["daemon"]
+            assert [r["id"] for r in recorded] == [daemon_prompt.PACK_ID]
 
             # First of the packs when others are ticked too.
             resp = await client.post("/api/sessions", headers=BEARER, json={
@@ -203,7 +203,7 @@ def test_every_session_gets_it_unless_the_request_says_no(home, tmp_path):
                 "task": "x", "beads": False, "prompt_packs": ["beads"],
             })
             assert resp.status == 201, await resp.json()
-            assert [r["id"] for r in mgr.get("d2").sdef.prompt_packs] == ["daemon", "beads"]
+            assert [r["id"] for r in mgr.get("d2").sdef.prompt_packs] == [daemon_prompt.PACK_ID, "beads"]
 
             # Unticked: left out.
             resp = await client.post("/api/sessions", headers=BEARER, json={
@@ -223,6 +223,49 @@ def test_every_session_gets_it_unless_the_request_says_no(home, tmp_path):
                                            "daemon_prompt": False})
             assert resp.status == 201, await resp.json()
             assert "DAEMON RULE" not in seen["d5"]
+        finally:
+            restore()
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_a_workspace_pack_named_daemon_is_a_different_pack(home, tmp_path):
+    # Pack files are named by id; the daemon's prompt has an id no file can
+    # have, so a workspace's own daemon.md rides beside it instead of
+    # recording a second "daemon" -- and cannot be asked for by that id.
+    _register_py_harness()
+    ws = tmp_path / "proj"
+    (ws / prompt_packs.INSTALL_DIR).mkdir(parents=True)
+    (ws / prompt_packs.INSTALL_DIR / "daemon.md").write_text(
+        "WORKSPACE DAEMON NOTES\n", encoding="utf-8")
+    workspaces.add(str(ws), "proj")
+    daemon_prompt.write("DAEMON RULE: cite files", by="web")
+    with pytest.raises(prompt_packs.PackError):
+        prompt_packs.check_id(daemon_prompt.PACK_ID)
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        seen, restore = _spy_openings()
+        try:
+            resp = await client.post("/api/sessions", headers=BEARER, json={
+                "name": "w1", "profile": "py", "cwd": str(ws),
+                "task": "x", "beads": False, "prompt_packs": ["daemon"],
+            })
+            assert resp.status == 201, await resp.json()
+            ids = [r["id"] for r in mgr.get("w1").sdef.prompt_packs]
+            assert len(set(ids)) == len(ids), ids
+            assert ids == [daemon_prompt.PACK_ID, "daemon"]
+            assert "DAEMON RULE" in seen["w1"] and "WORKSPACE DAEMON NOTES" in seen["w1"]
+
+            resp = await client.post("/api/sessions", headers=BEARER, json={
+                "name": "w2", "profile": "py", "cwd": str(ws),
+                "task": "x", "beads": False, "prompt_packs": [daemon_prompt.PACK_ID],
+            })
+            assert resp.status == 400, await resp.json()
         finally:
             restore()
             await mgr.shutdown_all()

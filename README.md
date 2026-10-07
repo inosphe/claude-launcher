@@ -2629,7 +2629,8 @@ restores a default).
 
 Each daemon instance can hold one prompt of its own that it puts into the
 opening of **every** session it starts, whatever the role or mesh, as the
-first prompt pack (id `daemon`, header `-- this daemon's own prompt`). It is
+first prompt pack (id `@daemon`, header `-- this daemon's own prompt`; no pack
+file can have that id, so a workspace's own `daemon.md` is a separate pack). It is
 daemon configuration, not source code and not a workspace file: it lives in
 the instance's state directory, `~/.claude-launcher/daemon/daemon-prompt.md`
 for the default daemon and `daemons/<name>/daemon-prompt.md` for `-L <name>`,

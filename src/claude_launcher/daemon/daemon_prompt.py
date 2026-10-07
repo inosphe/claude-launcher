@@ -27,8 +27,12 @@ from typing import Optional
 from .. import atomic, prompt_packs
 from . import paths
 
-#: The pack id a session's record and opening carry the prompt under.
-PACK_ID = "daemon"
+#: The pack id a session's record and opening carry the prompt under. The
+#: ``@`` keeps it out of the pack-file namespace (``prompt_packs.check_id``
+#: refuses it), so a workspace's own ``daemon.md`` is a different pack, not a
+#: second record under the same id; and nobody can ask for it by id -- it
+#: comes in through ``daemon_prompt``, not ``prompt_packs``.
+PACK_ID = "@daemon"
 FILE = "daemon-prompt.md"
 PREV_FILE = "daemon-prompt.prev.md"
 LOG_FILE = "daemon-prompt.log.jsonl"
