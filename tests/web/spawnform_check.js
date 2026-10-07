@@ -89,6 +89,7 @@ function box(id) {
 for (const id of ["parent-hint", "new-fork-row", "new-over-row", "new-over-text",
                   "new-model-row",
                   "new-claude-runtime", "new-claude-runtime-hint",
+                  "new-claude-compact-hint",
                   "new-codex-runtime", "new-codex-runtime-hint",
                   "new-pi-runtime", "new-pi-runtime-hint"]) {
   box_[id] = box(id);
@@ -128,6 +129,7 @@ const form = {
   project: picker([["default", "default"], ["repo — F:/repo", "repo"]]),
   args: control(""), resume: control(""), fork: control(""),
   skip_permissions: control(""),
+  auto_compact: control(""), auto_compact_window: control(""),
   codex_yolo: control(""), codex_sandbox: control(""),
   fork_parent: control(""),
   role: picker([["(no role)", ""], ["worker", "worker"]]),
@@ -198,6 +200,12 @@ new Function(
    slice("codexRuntimeArgs"), slice("codexRuntimeText"),
    slice("seedNewCodexRuntime"), slice("renderNewCodexRuntime"),
    slice("renderNewClaudeRuntime"),
+   src.match(/const AUTO_COMPACT_OFF_ENV = [^\n]*;/)[0],
+   src.match(/const COMPACT_OFF_ENV = [^\n]*;/)[0],
+   src.match(/const COMPACT_WINDOW_ENV = [^\n]*;/)[0],
+   slice("envAutoCompactOff"), slice("envCompactWindow"),
+   slice("newCompactWindow"), slice("renderNewClaudeCompact"),
+   slice("newClaudeCompactOverride"),
    slice("ensureNewPiTools"), slice("piToolsDefault"),
    slice("newPiToolsChecked"), slice("piToolsText"),
    slice("seedNewPiTools"), slice("newPiToolsOverride"),
@@ -365,6 +373,31 @@ async function main() {
   check("the Claude child shows its own inherited runtime panel",
         [box_["new-claude-runtime"].classList.contains("hidden"),
          form.skip_permissions.disabled], [false, true]);
+  /* Auto-compact is ungated (it grants the child nothing): the rows open
+     even with no report, start on the parent's env (copied by spawn.py),
+     and travel as `auto_compact` only once they differ from it. */
+  check("the auto-compact rows start on the parent's answer, open",
+        [form.auto_compact.checked, form.auto_compact_window.value,
+         form.auto_compact.disabled, form.auto_compact_window.disabled],
+        [true, "", false, false]);
+  check("...the hint says so",
+        box_["new-claude-compact-hint"].textContent.includes(
+          "inherited from lead"), true);
+  check("...and an untouched pair is not sent",
+        ctx.fields(form, {}).auto_compact, undefined);
+  form.auto_compact_window.value = "150000";
+  check("a typed threshold travels as the child's own",
+        ctx.fields(form, {}).auto_compact, { enabled: true, window: 150000 });
+  form.auto_compact.checked = false;
+  ctx.sync();
+  check("switching it off sends the switch, without a threshold",
+        [ctx.fields(form, {}).auto_compact, form.auto_compact_window.disabled],
+        [{ enabled: false, window: null }, true]);
+  form.auto_compact.checked = true;
+  form.auto_compact_window.value = "";
+  ctx.sync();
+  check("back to the parent's answer, nothing is sent",
+        ctx.fields(form, {}).auto_compact, undefined);
 
   /* The policy arrives. Every row it opens is handed back — this is the case
      the form used to get wrong: `allow_profile: true` in ~/.claunch.yaml, the

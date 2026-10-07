@@ -85,7 +85,7 @@ let refreshed = 0;
 const sections = [
   "sessFlags", "sessNote", "sessTask", "sessBriefSection", "sessInputJournal",
   "sessHandoff", "sessSend", "sessMeshJoin", "sessBeads", "sessCommits",
-  "sessVscode", "sessReborrow", "sessPerms", "sessMigrate",
+  "sessVscode", "sessReborrow", "sessPerms", "sessCompact", "sessMigrate",
 ];
 const stubs = `
 let sessName = "coder1", sessRunFold = null;
@@ -191,7 +191,7 @@ const OVERVIEW = ["sess-meta", "sessFlags", "sessNote", "sessTask",
 const MESSAGES = ["sessInputJournal", "sessHandoff", "sessSend", "sessQueued",
                   "sess-meshes"];
 const WORK = ["sessBeads", "sessCommits", "sessVscode", "roleQuickJob"];
-const SETTINGS = ["sessReborrow", "sessPerms", "sessMigrate"];
+const SETTINGS = ["sessReborrow", "sessPerms", "sessCompact", "sessMigrate"];
 const TOP = ["sess-head", "sess-tabs", "sess-subtabs"];
 
 check("All draws every group, in order, each under its name",
@@ -210,7 +210,7 @@ check("Work draws its group alone", renderWith("work"), [...TOP, ...WORK]);
 check("Settings draws its group alone", renderWith("settings"),
       [...TOP, ...SETTINGS]);
 check("...and builds nothing else", built.slice().sort(),
-      ["sessMigrate", "sessPerms", "sessReborrow"]);
+      ["sessCompact", "sessMigrate", "sessPerms", "sessReborrow"]);
 
 /* The sub-tabs belong to Details: the Workflow and Beads panels keep the
    column to themselves. */
