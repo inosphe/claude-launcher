@@ -70,7 +70,7 @@ def test_install_status_edit_and_remove(tmp_path):
         prompt_packs.install(ws, "beads")
     with pytest.raises(prompt_packs.PackError, match="needs force"):
         prompt_packs.remove(ws, "beads")
-    assert prompt_packs.resolve(ws, ["beads"])[0].body.endswith("local rule")
+    assert prompt_packs.pack_copy(ws, "beads").body.endswith("local rule")
     assert prompt_packs.remove(ws, "beads", force=True) == prompt_packs.EDITED
     assert not copy.exists()
     assert prompt_packs._record(ws) == {}
@@ -88,16 +88,6 @@ def test_a_local_pack_is_offered_and_needs_force_to_remove(tmp_path):
     with pytest.raises(prompt_packs.PackError, match="needs force"):
         prompt_packs.remove(ws, "house")
     assert prompt_packs.remove(ws, "house", force=True) == prompt_packs.LOCAL
-
-
-def test_resolve_refuses_what_is_not_installed(tmp_path):
-    with pytest.raises(prompt_packs.PackError, match="no registered workspace"):
-        prompt_packs.resolve(None, ["beads"])
-    with pytest.raises(prompt_packs.PackError, match="not installed"):
-        prompt_packs.resolve(tmp_path, ["beads"])
-    with pytest.raises(prompt_packs.PackError, match="bad prompt pack id"):
-        prompt_packs.resolve(tmp_path, ["../x"])
-    assert prompt_packs.resolve(None, []) == []
 
 
 def test_opening_block_names_the_id_rebrief_uses():
@@ -163,10 +153,18 @@ def test_choose_adds_required_packs_and_names_the_role(tmp_path):
     )
     assert recs[1]["text"].endswith("house rule") and "source" not in recs[1]
 
-    # A ticked pack still has to be installed; a required one that exists
-    # nowhere is refused with the role named.
-    with pytest.raises(prompt_packs.PackError, match="not installed"):
-        prompt_packs.choose(ws, ["beads"], ["unreal"], mapping=mapping)
+    # A ticked pack needs no install either, whatever the role: claunch's
+    # copy goes in. One that exists nowhere is refused, a required one with
+    # the role named.
+    recs, required = prompt_packs.choose(ws, ["beads"], [], mapping=mapping)
+    assert recs == [{
+        "id": "beads", "source": prompt_packs.PACKAGE,
+        "text": prompt_packs.shipped("beads").body,
+    }] and required == {}
+    recs, _ = prompt_packs.choose(None, ["beads"], [])
+    assert recs[0]["source"] == prompt_packs.PACKAGE
+    with pytest.raises(prompt_packs.PackError, match="nor shipped with claunch"):
+        prompt_packs.choose(ws, ["ghost"], [], mapping=mapping)
     with pytest.raises(prompt_packs.PackError, match="required by role ghost"):
         prompt_packs.choose(ws, [], ["ghost"], mapping={"ghost": ["no-such-pack"]})
 
@@ -361,14 +359,26 @@ def test_create_puts_ticked_packs_ahead_of_the_task(home, tmp_path):
             ids = rebrief.addressable("p1", manager=mgr, mesh_mgr=None)
             assert any(v["kind"] == "prompt pack (common)" for v in ids.values())
 
-            # A pack the workspace does not hold is refused, nothing staged.
+            # A pack the workspace does not hold, ticked with no mesh and no
+            # role, goes in as claunch's copy and is reported as such.
             resp = await client.post("/api/sessions", headers=BEARER, json={
                 "name": "p2", "profile": "py", "cwd": str(ws),
                 "task": "x", "beads": False, "prompt_packs": ["beads"],
             })
+            doc = await resp.json()
+            assert resp.status == 201, doc
+            assert doc["prompt_packs"] == ["beads"]
+            assert doc["prompt_packs_shipped"] == ["beads"]
+            assert "# claunch prompt pack: beads -- shipped with claunch" in seen["p2"]
+
+            # One that exists nowhere is refused, nothing staged.
+            resp = await client.post("/api/sessions", headers=BEARER, json={
+                "name": "p3", "profile": "py", "cwd": str(ws),
+                "task": "x", "beads": False, "prompt_packs": ["ghost"],
+            })
             assert resp.status == 400
-            assert "not installed" in (await resp.json())["error"]
-            assert "p2" not in [s.sdef.name for s in mgr.list()]
+            assert "nor shipped with claunch" in (await resp.json())["error"]
+            assert "p3" not in [s.sdef.name for s in mgr.list()]
         finally:
             restore()
             await mgr.shutdown_all()

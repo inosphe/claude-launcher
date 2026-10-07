@@ -702,12 +702,13 @@
           <div id="new-connect-row" class="hidden"></div>
           <label>Role <select name="role"></select></label>
           <p id="role-stance" class="hidden"></p>
-          <!-- Roles held beside the primary one, and the prompt packs the
-               session's workspace has installed (Settings > Install). A pack
-               a chosen role or subrole requires is locked on (the mapping is
-               in Settings > Install too), and a summary line names every pack
-               the opening will carry and why. Both rows are drawn by
-               renderSubroles / renderPromptPackRow. -->
+          <!-- Roles held beside the primary one, and the prompt packs: the
+               ones the session's workspace has installed (Settings > Install),
+               then claunch's own copies of the rest, any of them tickable with
+               or without a role. A pack a chosen role or subrole requires is
+               locked on (the mapping is in Settings > Install too), and a
+               summary line names every pack the opening will carry and why.
+               Both rows are drawn by renderSubroles / renderPromptPackRow. -->
           <div id="new-subroles-row" class="new-check-row hidden"></div>
           <div id="new-packs-row" class="new-check-row hidden"></div>
           <label>Workflow <select name="workflow"></select></label>

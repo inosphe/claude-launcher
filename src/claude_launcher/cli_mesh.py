@@ -1097,7 +1097,7 @@ def _print_role_packs(roles) -> None:
     for pack_id, by in required.items():
         print()
         try:
-            pack = prompt_packs.required_pack(root, pack_id)
+            pack = prompt_packs.pack_copy(root, pack_id)
         except prompt_packs.PackError as exc:
             print(f"# prompt pack {pack_id} (required by {', '.join(by)}): {exc}")
             continue

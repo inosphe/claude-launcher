@@ -383,13 +383,12 @@ TOOLS = [
                     "type": "array",
                     "items": {"type": "string"},
                     "description": (
-                        "prompt pack ids to put into the child's opening, "
-                        "read from the workspace it will run in (installed "
-                        "there in Settings > Install). Packs its role or "
-                        "subroles require are added whether listed or not "
-                        "(claunch's copy when the workspace has none); a "
-                        "listed pack that is not installed there refuses "
-                        "the spawn"
+                        "prompt pack ids to put into the child's opening: "
+                        "the copy installed in the workspace it will run in "
+                        "(Settings > Install), else claunch's own. Packs its "
+                        "role or subroles require are added whether listed "
+                        "or not; a listed pack that exists in neither place "
+                        "refuses the spawn"
                     ),
                 },
                 "issue_text": {

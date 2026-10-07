@@ -2542,9 +2542,9 @@ async def h_prompt_packs_offer(request: web.Request) -> web.Response:
     The packs installed in the workspace that owns ``cwd`` (none when no
     workspace does), which of them start ticked, and the role → pack mapping
     so the form can lock the ones a chosen role or subrole requires.
-    ``shipped`` is the package catalog: a required pack the workspace has not
-    installed goes in as the shipped copy (prompt_packs.required_pack), and
-    the form names it as such.
+    ``shipped`` is the package catalog: the form offers those the workspace
+    has not installed as boxes too, and one that is ticked or required goes in
+    as the shipped copy (prompt_packs.pack_copy), named as such.
     """
     cwd = cflow_state.resolve_cwd(request.query.get("cwd") or None)
     owner = workspaces.owning(str(cwd))
@@ -6338,10 +6338,10 @@ async def _onboard_and_launch(
             parent_cwd=manager.get(parent).sdef.cwd if parent else "",
         )
         # Checked before anything is arranged, like the board answer above: a
-        # ticked pack that is not installed where the session will run is a
-        # refused request, never a session that started without guidance it
-        # was promised. A role-required one falls back to claunch's copy
-        # (prompt_packs.required_pack) and refuses only when it exists nowhere.
+        # pack, ticked or role-required, that exists neither where the session
+        # will run nor in claunch is a refused request, never a session that
+        # started without guidance it was promised. One the workspace has not
+        # installed goes in as claunch's copy (prompt_packs.pack_copy).
         try:
             packs, packs_required = _session_prompt_packs(
                 request, body, plan, name=name, cwd=cwd

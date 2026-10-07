@@ -9503,13 +9503,14 @@ function newSubroles(f) {
   return [...newSubroleTicks].filter((n) => n !== primary && rolesByName[n]).sort();
 }
 
-/* Prompt packs: the ones installed in the workspace the session will stand
-   in (Settings ▸ Install puts them there), one checkbox each. A pack the
-   chosen role or a ticked subrole requires is ticked and locked, with the
-   role named beside it; one that is required but not installed is shown the
-   same way and marked as claunch's copy, which is what the daemon puts in
-   (prompt_packs.required_pack). A summary line names every pack the opening
-   will carry and why, including a role inferred from the handle. */
+/* Prompt packs: one checkbox per pack, the workspace's installed ones first
+   (Settings ▸ Install puts them there), then every pack claunch ships that
+   the workspace has not installed, marked as claunch's copy -- which is what
+   the daemon puts in (prompt_packs.pack_copy). Any of them can be ticked,
+   whatever the role and with no mesh at all. A pack the chosen role or a
+   ticked subrole requires is ticked and locked, with the role named beside
+   it. A summary line names every pack the opening will carry and why,
+   including a role inferred from the handle. */
 let newPackOffer = null;       // /api/prompt-packs/offer's answer
 let newPackOfferFor = null;    // the directory it answers for
 let newPackTicks = new Map();  // pack id -> the operator's own tick
@@ -9570,9 +9571,13 @@ function newRequiredPacks(f) {
   return out;
 }
 
+/* The operator's own tick, else the default -- which only ticks a pack the
+   workspace installed, so offering claunch's copies puts nothing new into a
+   session nobody touched the row for. */
 function newPackTicked(id) {
   if (newPackTicks.has(id)) return newPackTicks.get(id);
-  return ((newPackOffer && newPackOffer.default_packs) || []).includes(id);
+  const installed = ((newPackOffer && newPackOffer.packs) || []).some((p) => p.id === id);
+  return installed && ((newPackOffer && newPackOffer.default_packs) || []).includes(id);
 }
 
 function renderPromptPackRow() {
@@ -9584,16 +9589,16 @@ function renderPromptPackRow() {
   const required = newRequiredPacks(f);
   const packs = (offer && offer.packs) || [];
   const have = new Set(packs.map((p) => p.id));
-  // A required pack the workspace has not installed goes in as claunch's
-  // own copy (prompt_packs.required_pack); only one that is not shipped
+  // A pack the workspace has not installed goes in as claunch's own copy
+  // (prompt_packs.pack_copy); only a required one that is not shipped
   // either refuses the create.
-  const shipped = Object.fromEntries(((offer && offer.shipped) || []).map((p) => [p.id, p]));
-  const notHere = Object.keys(required).filter((id) => !have.has(id));
-  const fromPackage = notHere.filter((id) => shipped[id]);
-  const missing = notHere.filter((id) => !shipped[id]);
+  const fromPackage = ((offer && offer.shipped) || []).filter((p) => !have.has(p.id));
+  const shippedIds = new Set(fromPackage.map((p) => p.id));
+  const missing = Object.keys(required).filter((id) => !have.has(id) && !shippedIds.has(id));
   const wsName = offer && offer.workspace ? offer.workspace.name : "this directory's workspace";
-  row.classList.toggle("hidden", !packs.length && !notHere.length);
-  if (!packs.length && !notHere.length) return;
+  const empty = !packs.length && !fromPackage.length && !missing.length;
+  row.classList.toggle("hidden", empty);
+  if (empty) return;
   row.appendChild(el("span", "new-check-label", "Prompt packs"));
   const list = el("span", "new-check-list");
   const addBox = (p, by, packaged) => {
@@ -9618,16 +9623,17 @@ function renderPromptPackRow() {
     list.appendChild(label);
   };
   for (const p of packs) addBox(p, required[p.id], false);
-  for (const id of fromPackage) addBox(shipped[id], required[id], true);
+  for (const p of fromPackage) addBox(p, required[p.id], true);
   row.appendChild(list);
   // What the opening will actually carry, in the daemon's order (ticked,
   // then required), each with why it is there -- the boxes alone do not say
   // which role a locked one came from when the Role row was left blank.
-  const chosen = [...newPromptPacks(f), ...fromPackage].filter((id, i, a) => a.indexOf(id) === i);
+  const chosen = [...newPromptPacks(f), ...Object.keys(required).filter((id) => shippedIds.has(id))]
+    .filter((id, i, a) => a.indexOf(id) === i);
   const primary = newPrimaryRole(f);
   const parts = chosen.map((id) => {
     const why = required[id] ? `role ${required[id].join(", ")}` : "ticked";
-    return `${id} (${why}${fromPackage.includes(id) ? ", claunch's copy" : ""})`;
+    return `${id} (${why}${shippedIds.has(id) ? ", claunch's copy" : ""})`;
   });
   let summary = parts.length
     ? `The opening will include: ${parts.join(" · ")}.`
@@ -9644,12 +9650,19 @@ function renderPromptPackRow() {
   }
 }
 
-/* The ids the form sends: ticked, installed. Required ones are added by the
-   daemon itself, so a locked box is sent too but needs no special case. */
+/* The ids the form sends: the ticked ones, installed or claunch's copy.
+   Required ones are added by the daemon itself: an installed locked box is
+   sent too and needs no special case, an uninstalled one is left to it. */
 function newPromptPacks(f) {
-  const packs = (newPackOffer && newPackOffer.packs) || [];
+  const installed = ((newPackOffer && newPackOffer.packs) || []).map((p) => p.id);
+  const have = new Set(installed);
+  const others = ((newPackOffer && newPackOffer.shipped) || [])
+    .map((p) => p.id).filter((id) => !have.has(id));
   const required = newRequiredPacks(f);
-  return packs.map((p) => p.id).filter((id) => required[id] || newPackTicked(id));
+  return [
+    ...installed.filter((id) => required[id] || newPackTicked(id)),
+    ...others.filter((id) => !required[id] && newPackTicked(id)),
+  ];
 }
 
 /* The resume picker: claude's own interactive picker, or the conversation of
