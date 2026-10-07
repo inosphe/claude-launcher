@@ -141,6 +141,7 @@ def test_choose_adds_required_packs_and_names_the_role(tmp_path):
     assert recs == [{
         "id": "unreal-operator", "source": prompt_packs.PACKAGE,
         "text": prompt_packs.shipped("unreal-operator").body,
+        "required_by": ["unreal"], "ticked": True,
     }]
 
     # An installed copy wins, edits included.
@@ -159,7 +160,7 @@ def test_choose_adds_required_packs_and_names_the_role(tmp_path):
     recs, required = prompt_packs.choose(ws, ["beads"], [], mapping=mapping)
     assert recs == [{
         "id": "beads", "source": prompt_packs.PACKAGE,
-        "text": prompt_packs.shipped("beads").body,
+        "text": prompt_packs.shipped("beads").body, "ticked": True,
     }] and required == {}
     recs, _ = prompt_packs.choose(None, ["beads"], [])
     assert recs[0]["source"] == prompt_packs.PACKAGE
@@ -186,6 +187,44 @@ def test_a_package_copy_says_so_in_the_opening():
     assert sdef.prompt_packs == ({"id": "role-worker", "text": "t", "source": "package"},)
 
 
+def test_a_package_copy_says_why_it_went_in():
+    # The roles that require it, else that it was ticked; a record from before
+    # the reason was kept says neither.
+    recs = prompt_packs.records(
+        [prompt_packs.pack_copy(None, "role-worker"),
+         prompt_packs.pack_copy(None, "unreal-operator"),
+         prompt_packs.pack_copy(None, "beads")],
+        required={"role-worker": ["worker", "lead"], "unreal-operator": ["unreal"]},
+        asked=["unreal-operator", "beads"],
+    )
+    assert [(r.get("required_by"), r.get("ticked")) for r in recs] == [
+        (["worker", "lead"], None), (["unreal"], True), (None, True),
+    ]
+    heads = [line for line in prompt_packs.opening(recs).splitlines()
+             if line.startswith("# claunch prompt pack:")]
+    assert heads[0].endswith(
+        "role-worker -- shipped with claunch, required by roles worker, lead, "
+        "not installed in this workspace")
+    # Required wins over ticked: the role is why it cannot be unticked.
+    assert heads[1].endswith(
+        "unreal-operator -- shipped with claunch, required by role unreal, "
+        "not installed in this workspace")
+    assert heads[2].endswith(
+        "beads -- shipped with claunch, ticked at session creation, "
+        "not installed in this workspace")
+    legacy = prompt_packs.opening([{"id": "beads", "text": "t", "source": "package"}])
+    assert "beads -- shipped with claunch, not installed in this workspace" in legacy
+    # A workspace copy's record is unchanged: no reason keys.
+    ws_rec = prompt_packs.records(
+        [prompt_packs.Pack(id="common", title="c", description="", body="b", raw="b")],
+        required={"common": ["worker"]}, asked=["common"],
+    )
+    assert ws_rec == [{"id": "common", "text": "b"}]
+    # The session definition keeps the reason across a restart record.
+    sdef = SessionDef.from_dict({"name": "s", "prompt_packs": recs})
+    assert [dict(r) for r in sdef.prompt_packs] == recs
+
+
 def test_the_stance_command_prints_the_role_packs(home, tmp_path, monkeypatch, capsys):
     from claude_launcher import cli_mesh
 
@@ -193,7 +232,8 @@ def test_the_stance_command_prints_the_role_packs(home, tmp_path, monkeypatch, c
     monkeypatch.chdir(tmp_path)
     cli_mesh._print_role_packs(["worker", "unreal", ""])
     out = capsys.readouterr().out
-    assert "# claunch prompt pack: role-worker -- shipped with claunch" in out
+    assert ("# claunch prompt pack: role-worker -- shipped with claunch, "
+            "required by role worker") in out
     assert prompt_packs.shipped("role-worker").body in out
     assert "# claunch prompt pack: unreal-operator -- shipped with claunch" in out
 
@@ -369,7 +409,8 @@ def test_create_puts_ticked_packs_ahead_of_the_task(home, tmp_path):
             assert resp.status == 201, doc
             assert doc["prompt_packs"] == ["beads"]
             assert doc["prompt_packs_shipped"] == ["beads"]
-            assert "# claunch prompt pack: beads -- shipped with claunch" in seen["p2"]
+            assert ("# claunch prompt pack: beads -- shipped with claunch, "
+                    "ticked at session creation") in seen["p2"]
 
             # One that exists nowhere is refused, nothing staged.
             resp = await client.post("/api/sessions", headers=BEARER, json={
@@ -417,8 +458,8 @@ def test_the_unreal_subrole_forces_its_pack(home, tmp_path):
             }
             assert doc["prompt_packs_shipped"] == ["role-worker", "unreal-operator"]
             assert (
-                "# claunch prompt pack: unreal-operator -- shipped with claunch"
-                in seen["u1"]
+                "# claunch prompt pack: unreal-operator -- shipped with claunch, "
+                "required by role unreal" in seen["u1"]
             )
 
             prompt_packs.install(ws, "unreal-operator")

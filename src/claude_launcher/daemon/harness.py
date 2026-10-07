@@ -367,7 +367,7 @@ class SessionDef:
         )
 
 
-def _prompt_packs_field(raw) -> Tuple[Dict[str, str], ...]:
+def _prompt_packs_field(raw) -> Tuple[dict, ...]:
     """The recorded prompt packs; anything malformed is dropped, not raised.
 
     A restart record is read back on every daemon start, and a hand-edited
@@ -380,6 +380,11 @@ def _prompt_packs_field(raw) -> Tuple[Dict[str, str], ...]:
             # Only a package copy carries it (prompt_packs.records).
             if item.get("source"):
                 rec["source"] = str(item["source"])
+            # Why a package copy went in, for its opening header.
+            if isinstance(item.get("required_by"), list):
+                rec["required_by"] = [str(r) for r in item["required_by"]]
+            if item.get("ticked") is True:
+                rec["ticked"] = True
             out.append(rec)
     return tuple(out)
 
