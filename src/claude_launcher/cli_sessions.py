@@ -784,7 +784,26 @@ def _print_onboarding(result: dict) -> None:
             for peer, err in sorted((mesh.get("connect_errors") or {}).items()):
                 print(f"  could not connect to {peer}: {err}")
         else:
-            print(f"  mesh join failed: {mesh.get('error') or mesh.get('pending')}")
+            # A remote join that pended is a WAIT, not a failure: the primary
+            # has not answered yet. Collapsed into one line with `or`, this
+            # printed "mesh join failed: {'pending': True, ...}" -- the reader
+            # was told the join had failed, and handed a dict. The round-1
+            # incident (claunch-ryvvf) read exactly that for s59/s60, which
+            # were waiting on an answer, and the diagnosis took a round.
+            # The web card takes the same branch (claunch-mv4nu, d8408352);
+            # the two paths saying the same sentence is the point.
+            error = mesh.get("error")
+            pending = mesh.get("pending")
+            if error:
+                print(f"  mesh join failed: {error}")
+            elif pending:
+                who = pending.get("primary") if isinstance(pending, dict) else None
+                print(
+                    "  mesh join pending: waiting for "
+                    f"{who or 'the mesh owner'} to approve"
+                )
+            else:
+                print("  mesh join failed: no reason given")
     flow = result.get("workflow") or {}
     if flow:
         print(
