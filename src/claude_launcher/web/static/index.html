@@ -459,6 +459,13 @@
          keystrokes keep the keyboard busy). Rendered by renderTermQueued();
          hidden whenever the backlog is empty. -->
     <div id="term-queued" class="hidden"></div>
+    <!-- The attached session's cflow run is stopped on a person: one line
+         with the step, the question and a button per answer, the same
+         presses the run page makes. Rendered by renderTermCflow(); hidden
+         whenever the run is not waiting on a person. Its height comes out
+         of the terminal's, which is refitted when the strip changes. -->
+    <div id="term-cflow" class="hidden" role="region"
+         aria-label="cflow answer needed"></div>
     <!-- The briefing card the top toggle folds open: the strip that belongs to
          the summary, between the header and the terminal, so the answer sits
          on top of the thing it is about. Empty and hidden except while the
