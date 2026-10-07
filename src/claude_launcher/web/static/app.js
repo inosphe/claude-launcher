@@ -16724,6 +16724,18 @@ function syncCflowInputs() {
   if (fields.length) {
     cflowInputsForm(box, fields, entry.input_constraints || []);
     cflowInputsLive(box, f.workflow.value, newSessionCwd);
+    // TEMPORARY (claunch-z7b0n, v1 -> v2 migration): the daemon writes the
+    // issue the Board answer settles into the run's `issue` input. The field
+    // stays; it says so. Remove with api.py's overwrite once no v2 workflow
+    // declares an `issue` input.
+    const issueRow = box.querySelector('.cf2-input[data-input="issue"]');
+    if (issueRow) {
+      issueRow.appendChild(el("p", "wf-note cf2-input-board",
+        "Temporary: the run starts with the issue the Board answer settles " +
+        "here. With Board left on New, an id typed here is taken or joined " +
+        "instead of a new issue being written; with any other Board answer " +
+        "it has to agree, or the create is refused."));
+    }
   }
 }
 

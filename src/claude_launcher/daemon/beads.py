@@ -836,6 +836,58 @@ def check_request(body: dict) -> None:
         )
 
 
+def adopt_input_issue(body: dict, inputs: Optional[dict]) -> None:
+    """Fold a v2 run's ``inputs.issue`` into the board answer of ``body``.
+
+    TEMPORARY (claunch-z7b0n), for the v1 -> v2 migration: a v2 workflow
+    still declares an ``issue`` start input, while the board link is the
+    daemon's (``Board.ensure_issue`` reads ``body["issue"]`` only). Two
+    places then name the session's issue, and the run's copy is overwritten
+    with the board's after the link is made (``_onboard_and_launch``). Remove
+    this function, its call and that overwrite once no v2 workflow declares
+    an ``issue`` input -- the board link is then the one answer.
+
+    An input that arrives with no board answer (no ``issue``, no "no issue"
+    answer, no ``issue_text``, no ``issue: <id>`` in the task or context)
+    becomes the board answer: it is moved into ``body["issue"]`` so the
+    adoption rules take or join it, instead of a new issue being minted for
+    the same work. An input that contradicts the board answer is refused, as
+    :func:`check_request` refuses two board answers -- neither half is
+    dropped without a word. Raises :class:`BoardRequestError`.
+    """
+    wanted = str((inputs or {}).get("issue") or "").strip()
+    if not wanted:
+        return
+    named = str(body.get("issue") or "").strip()
+    if named and named != wanted:
+        raise BoardRequestError(
+            f"the workflow input 'issue' is {wanted!r} and the board answer "
+            f"adopts {named!r} — a request cannot mean both. Send one: clear "
+            "the input, or pick the same issue on the board"
+        )
+    none = none_mode(body)
+    if none:
+        raise BoardRequestError(
+            f"the workflow input 'issue' is {wanted!r} and the board answer "
+            f"'beads: {none}' asks for none — a request cannot mean both. "
+            "Send one"
+        )
+    if str(body.get("issue_text") or "").strip():
+        raise BoardRequestError(
+            f"the workflow input 'issue' is {wanted!r} and 'issue_text' writes "
+            "a new issue — a request cannot mean both. Send one"
+        )
+    refs = issue_refs(body.get("task"), body.get("context"))
+    if not named and refs and refs[0] != wanted:
+        raise BoardRequestError(
+            f"the workflow input 'issue' is {wanted!r}, but the task or "
+            f"context names issue {refs[0]!r} ('issue: {refs[0]}') — a request "
+            "cannot mean both. Send one"
+        )
+    if not named:
+        body["issue"] = wanted
+
+
 def adoption(
     issue: dict, *, session: str, running: Callable[[str], Optional[bool]]
 ) -> dict:

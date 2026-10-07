@@ -6769,6 +6769,14 @@ async def _onboard_and_launch(
             raise onboard.OnboardError(str(exc)) from None
         if packs:
             session.sdef = replace(session.sdef, prompt_packs=tuple(packs))
+        # TEMPORARY (claunch-z7b0n): a v2 start input 'issue' is folded into
+        # the board answer, or refused when it contradicts it. Removed with
+        # the overwrite below once no v2 workflow declares that input.
+        if plan.workflow_version == 2 and plan.cflow_inputs:
+            try:
+                beads_mod.adopt_input_issue(body, plan.cflow_inputs)
+            except beads_mod.BoardRequestError as exc:
+                raise onboard.OnboardError(str(exc)) from None
     except Exception:
         manager.discard(name)
         raise
@@ -6832,6 +6840,17 @@ async def _onboard_and_launch(
                 task=(plan.task + "\n\n" if plan.task else "")
                 + beads_mod.compose_none_note(none, session=name),
             )
+
+    # TEMPORARY (claunch-z7b0n), during the v1 -> v2 migration: the run's
+    # inputs.issue is the issue the board settled -- minted, taken or joined
+    # -- and empty when there is none. The input stays declared so the
+    # workflows keep their text, but the daemon's answer is the only one a
+    # run starts with. Remove this, and beads.adopt_input_issue, once no v2
+    # workflow declares an 'issue' input.
+    if (plan.workflow_version == 2 and plan.cflow_inputs is not None
+            and "issue" in plan.cflow_inputs):
+        plan = replace(plan, cflow_inputs={
+            **plan.cflow_inputs, "issue": linked["issue"] if linked else ""})
 
     opening = ""
     if plan.wanted:
