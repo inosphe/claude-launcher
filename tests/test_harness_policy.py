@@ -250,3 +250,10 @@ def test_malformed_provider_harness_fails_closed(home, value):
     store.save(doc)
     with pytest.raises(lineage.LineageError, match="must be a harness name"):
         lineage.effective_harness(p)
+
+
+def test_provider_allow_list_default_skips_undeclared_future_names(home):
+    _provider_entry("codex", allowed_harnesses=["future-agent", "codex"])
+    p = profile.create("work")
+    providers.set_profile_selection(p, "codex")
+    assert lineage.effective_harness(p) == "codex"

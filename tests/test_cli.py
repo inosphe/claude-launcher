@@ -856,3 +856,39 @@ def test_a_transient_store_error_from_bootstrap_is_reported_not_a_traceback(
     err = capsys.readouterr().err
     assert "error:" in err
     assert "run the command again" in err
+
+
+def test_set_harness_shows_where_the_effective_harness_comes_from(home, capsys):
+    doc = store.load()
+    doc.setdefault("providers", {})["codex"] = {
+        "env": {"ANTHROPIC_BASE_URL": "https://codex.invalid"},
+        "harness": "codex",
+    }
+    store.save(doc)
+    run("create", "plain", "--no-seed")
+    run("create", "base", "--no-seed", "--harness", "pi")
+    run("create", "child", "--no-seed", "--parent", "base")
+    run("create", "coder", "--no-seed")
+    store.set_profile_field("coder", "provider", "codex")
+    capsys.readouterr()
+
+    assert run("set-harness", "plain") == 0
+    assert capsys.readouterr().out.strip() == "harness: claude (built-in default)"
+    assert run("set-harness", "base") == 0
+    assert capsys.readouterr().out.strip() == "harness: pi (set on profile 'base')"
+    assert run("set-harness", "child") == 0
+    assert capsys.readouterr().out.strip() == (
+        "harness: pi (inherited from profile 'base')"
+    )
+    assert run("set-harness", "coder") == 0
+    assert capsys.readouterr().out.strip() == (
+        "harness: codex (default of provider 'codex')"
+    )
+
+    assert run("set-harness", "coder", "codex") == 0
+    capsys.readouterr()
+    assert run("set-harness", "coder", "--clear") == 0
+    assert capsys.readouterr().out.strip() == (
+        "cleared harness override on 'coder' "
+        "(effective: codex, default of provider 'codex')"
+    )

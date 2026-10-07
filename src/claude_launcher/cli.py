@@ -488,16 +488,15 @@ def _cmd_set_harness(args: argparse.Namespace) -> int:
         raise LineageError("give a harness name or --clear, not both")
     if args.clear:
         lineage.clear_harness(p)
+        effective, source = lineage.harness_with_source(p)
         print(
             f"cleared harness override on {p.name!r} "
-            f"(effective: {lineage.effective_harness(p)})"
+            f"(effective: {effective}, {source})"
         )
         return 0
     if not args.harness:
-        own = store.profile_entry(p.name).get("harness")
-        effective = lineage.effective_harness(p)
-        suffix = "" if own else " (inherited/default)"
-        print(f"harness: {effective}{suffix}")
+        effective, source = lineage.harness_with_source(p)
+        print(f"harness: {effective} ({source})")
         return 0
     lineage.set_harness(p, args.harness)
     print(f"profile {p.name!r} now runs harness {args.harness!r}")
@@ -1336,7 +1335,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_create.add_argument(
         "--harness",
-        help="harness this profile runs (default: inherit, then claude)",
+        help="harness this profile runs (default: inherit, then the provider's, then claude)",
     )
     p_create.set_defaults(func=_cmd_create)
 

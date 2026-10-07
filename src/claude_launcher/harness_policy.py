@@ -102,7 +102,7 @@ def provider_default(name: str, doc: Optional[dict] = None) -> Optional[str]:
 
     The provider's own ``harness`` wins. Without it, an ``allowed_harnesses``
     list that excludes the historical ``claude`` default names the harness
-    instead (its first entry), so ``provider: codex`` with
+    instead (its first declared entry), so ``provider: codex`` with
     ``allowed_harnesses: [codex]`` needs no matching ``harness:`` on every
     profile. ``None`` means the provider has no opinion.
     """
@@ -120,6 +120,11 @@ def provider_default(name: str, doc: Optional[dict] = None) -> Optional[str]:
         return own.strip()
     allowed = _names(spec, f"providers.{name}")
     if allowed and harnesses.CLAUDE_HARNESS not in allowed:
+        # Unknown future names may sit in the list (see allowed_names); the
+        # default is the first one this build actually declares.
+        for candidate in allowed:
+            if harnesses.get(candidate, doc) is not None:
+                return candidate
         return allowed[0]
     return None
 

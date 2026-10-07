@@ -530,7 +530,9 @@ spin off variants. Children inherit the parent's `harness`, `env` (child keys
 win), API-key route and applicable login secret. Every `allowed_harnesses`
 constraint in the parent chain also applies; a child list intersects it and
 therefore cannot widen it. A local `set-harness` pin wins;
-`set-harness --clear` returns to the inherited/default (`claude`) choice.
+`set-harness --clear` returns to the inherited choice, else the provider's
+default harness, else `claude`. `set-harness PROFILE` with no name prints the
+effective harness and which of these it came from.
 
 ```bash
 claunch create company                       # base profile
