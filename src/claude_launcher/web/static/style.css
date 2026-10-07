@@ -1283,7 +1283,7 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   line-height: 1; font-style: normal;
 }
 
-#new-session { padding: 0; max-width: 520px; }
+#new-session { padding: 0; width: 100%; max-width: 1100px; }
 #new-session label { display: block; font-size: 12px; color: #9da5b0; margin-bottom: 6px; }
 /* WHERE it works — the first fence on the form, styled like the ones below
    it. The step badge and blurb reuse the spawn modal's own classes
@@ -4590,9 +4590,7 @@ body.embed #main { width: 100%; }
 .sess-modal-tab[aria-selected="true"] {
   background: #172947; border-color: #58a6ff; color: #cfe2ff; cursor: default;
 }
-/* The page caps the form at a readable column; inside the box the box IS the
-   column, and a 520px form in a 700px dialog leaves a stripe of empty sheet
-   down one side. */
+/* In a dialog the session form fills the available body width. */
 #modal-overlay.spawn-open #new-session { max-width: none; }
 #new-session-actions { display: flex; align-items: center; gap: 8px; }
 #new-session .session-field-hidden { display: none; }
@@ -4616,6 +4614,12 @@ body.embed #main { width: 100%; }
   /* narrower and the 130px label column eats the control; shorter and the
      form is a slit. Both are floors the grip cannot cross. */
   min-width: 420px; min-height: 240px;
+}
+/* Session forms need room for option labels and help text. Keep the page and
+   dialog widths aligned, with viewport margins on small screens. */
+#modal-overlay.spawn-open .modal-box:has(#new-session) {
+  width: 1100px;
+  min-width: min(420px, calc(100vw - 32px));
 }
 /* The body takes the slack a taller box creates — without this it keeps its
    content height and the extra pixels open as dead space under the form. */
