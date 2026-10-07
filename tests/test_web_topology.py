@@ -386,6 +386,7 @@ CHECKS = [
         "meshjoin_check.js",
         "meshattach_check.js",
         "reborrow_check.js",
+        "sessmigrate_check.js",
         "borrowform_check.js",
         "sessrun_check.js",
         "wfstart_check.js",
