@@ -719,7 +719,8 @@ inputs:
 - 덮어쓰기 금지: 현재 값이 비어 있을 때(`null`, 빈 문자열, 빈 목록)만 쓴다. 값이
   있으면 거절하고 오류에 현재 값을 싣는다. 시작할 때 데몬이 넣은 Board 이슈도
   이 규칙으로 보호된다. `default`가 비어 있지 않은 입력은 시작 때 그 값을 가지므로
-  쓸 수 없다. 사람이 값을 덮어쓰는 경로는 없다.
+  쓸 수 없다(검사 경고 `set-by-default`). `required: true`인 입력도 시작 때
+  반드시 채워지므로 같다(검사 경고 `set-by-required`). 사람이 값을 덮어쓰는 경로는 없다.
 - 값 검사는 시작 입력과 같다(`inputs.settle`이 `inputs.normalize`와 같은 형식
   변환과 `enum` 검사를 쓴다). 빈 값은 쓰지 않는다. 그 입력을 읽는
   `input_constraints`는 새 값을 넣은 전체 입력으로 다시 평가해 어기면 거절한다.
@@ -1133,6 +1134,8 @@ status, run, workflow, declared, how?}}`가 실린다(아직 없으면 `how`가 
 | `unknown-side` | `sides:`를 선언한 차트에서 `side:<이름>:` 주소나 `side('<이름>')`이 선언에 없는 이름을 씀. side 런 정의 쪽의 `main:`·형제 주소는 실행 시점에 해석한다 |
 | `peer-write` | `do:`의 `push`·`set`·`remove`가 `main:`·`side:` 주소를 씀 |
 | `unbounded-visits` (경고) | `max_visits: 0` |
+| `set-by-default` (경고) | `set_by`를 선언한 입력에 비어 있지 않은 `default`가 있다. 시작 때부터 그 값을 가지므로 시작 뒤에 쓸 수 없다(2.6) |
+| `set-by-required` (경고) | `set_by`를 선언한 입력이 `required: true`다. 시작 검사가 빈 값을 거절하므로 시작 뒤에 쓸 수 없다(2.6) |
 
 **v1과의 차이.** v1 하위 런(`runs/<세션>/sub/<이름>/`)은 `publishes`/`awaits`의
 게시 횟수로 만났다. v2는 log 컬렉션과 이름별 cursor로 만난다. v1 하위 런 도구의

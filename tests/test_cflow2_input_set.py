@@ -273,3 +273,51 @@ def test_improv_worker_names_the_tool_only_for_the_start_issue():
     window = prompt[max(0, at - 300): at + 400]
     assert "시작" in window and "비어 있고" in window
     assert "data.claim" not in window and "resolve-issue" not in window
+
+
+# -- set_by with a default that is never empty (claunch-7d4nt.1) --------------
+
+def _input_warnings(decls: str):
+    from claude_launcher.cflow2 import check
+
+    chart = _chart(f"inputs:\n{textwrap.indent(textwrap.dedent(decls), '  ')}"
+                   "nodes:\n  a: {prompt: A}\nbody: a\n")
+    return [(f.level, f.message) for f in check.check(chart) if f.code == "set-by-default"]
+
+
+def test_set_by_with_a_filled_default_warns():
+    got = _input_warnings("""
+        rounds: {type: int, default: 3, set_by: [agent]}
+        mode: {type: enum, choices: [full, quick], default: full, set_by: [agent]}
+    """)
+    assert [lvl for lvl, _ in got] == ["warning", "warning"]
+    assert "'rounds'" in got[0][1] and "3" in got[0][1]
+    assert "'mode'" in got[1][1]
+
+
+def test_set_by_with_an_empty_default_or_none_is_quiet():
+    assert _input_warnings("""
+        issue: {type: string, default: "", set_by: [agent]}
+        tags: {type: list, default: [], set_by: [agent]}
+        n: {type: int, set_by: [agent]}
+        fixed: {type: int, default: 3}
+    """) == []
+    from claude_launcher.cflow2 import check
+
+    for d in layers.list_definitions(None):
+        if d.layer == "package" and d.error is None:
+            codes = [f.code for f in check.check(layers.load(d.name))]
+            assert "set-by-default" not in codes, d.name
+
+
+def test_set_by_on_a_required_input_warns():
+    from claude_launcher.cflow2 import check
+
+    chart = _chart("inputs:\n"
+                   "  issue: {type: string, required: true, set_by: [agent]}\n"
+                   "  goal: {type: text, required: true}\n"
+                   "nodes:\n  a: {prompt: A}\nbody: a\n")
+    got = [(f.level, f.code, f.message) for f in check.check(chart)
+           if f.code.startswith("set-by-")]
+    assert [(lvl, code) for lvl, code, _ in got] == [("warning", "set-by-required")]
+    assert "'issue'" in got[0][2]
