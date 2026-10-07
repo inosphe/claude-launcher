@@ -3383,6 +3383,114 @@ function sessionGroupStickyLayout(headings, viewport = 0) {
   return { stacked: true, offsets };
 }
 
+/* The rail as a reconcile, not a teardown (claunch-v87).
+
+   refreshSessions still builds the whole rail, but into a detached list;
+   railMorph then walks it against the one on the page and keeps every node
+   whose build came out the same, so the page only sees the rows that
+   changed. Nothing about what a row shows is decided here: equality is the
+   row's own markup as built, read before the painters that run after a
+   rebuild (cflow badge, beads line, briefing card), and those painters run
+   over kept rows exactly as they run over new ones.
+
+   Two parts of a row move on their own clock and are left out of that
+   reading -- the status dot's grade and the seen line, both read off
+   activity stamps -- so a row that only aged is kept and has those two
+   brought up to date in place, the same as refreshRailSeen does between
+   rebuilds. A kept row keeps its listeners; they read the session by name
+   (or from sessionsCache at click time), and the name is part of the key. */
+function canMorphRail(list) {
+  return !!list && typeof document.createDocumentFragment === "function" &&
+    typeof list.insertBefore === "function" && typeof list.outerHTML === "string";
+}
+
+// "as of 3h08m ago" in the context tooltip, "5m ago" on the tps line: an age
+// moves every minute on every row, so it is read out of the comparison, and
+// railKeepRow carries the fresh wording over to a kept row.
+const RAIL_AGE = /\b\d+[smhd](?:\d+[smhd])* ago\b/g;
+
+function railRowSig(li, dot, seen) {
+  let html = li.outerHTML;
+  for (const part of [dot, seen]) {
+    if (part && typeof part.outerHTML === "string") html = html.replace(part.outerHTML, "");
+  }
+  return html.replace(RAIL_AGE, "· ago");
+}
+
+// The parts of a row whose wording carries an age (see RAIL_AGE): the row's
+// and the name's tooltip, and the tps line.
+function railKeepAges(old, fresh) {
+  if (old.title !== fresh.title) old.title = fresh.title;
+  const name = old.querySelector(".rail-name");
+  const freshName = fresh.querySelector(".rail-name");
+  if (name && freshName && name.title !== freshName.title) name.title = freshName.title;
+  const tps = old.querySelector(".rail-tps-line");
+  const freshTps = fresh.querySelector(".rail-tps-line");
+  if (tps && freshTps && tps.outerHTML !== freshTps.outerHTML) tps.replaceWith(freshTps);
+}
+
+function railNodeKey(node) {
+  if (!node || node.nodeType !== 1) return null;
+  if (node.dataset && node.dataset.name && node.classList.contains("sess-card")) {
+    return "s:" + node.dataset.name;
+  }
+  if (node.classList && node.classList.contains("session-group")) {
+    return `g:${node.dataset.group}\u0000${node.dataset.value}`;
+  }
+  return "h:" + (node._railSig || node.outerHTML);
+}
+
+/* A kept row takes the fresh reading of what it does not compare on. */
+function railKeepRow(old, fresh) {
+  const s = fresh._railSession;
+  if (!s) return;
+  old._railSession = s;
+  const seen = old.querySelector(".rail-seen");
+  const freshSeen = fresh.querySelector(".rail-seen");
+  if (seen && freshSeen && seen.outerHTML !== freshSeen.outerHTML) seen.replaceWith(freshSeen);
+  railKeepAges(old, fresh);
+  const dot = old.firstElementChild;
+  if (dot && dot.classList.contains("dot") && typeof applyDotGrade === "function") {
+    applyDotGrade(dot, s);
+  }
+  decorateBriefingRow(old, s);
+  decorateNoteRow(old, s);
+}
+
+function railMorph(oldParent, freshParent) {
+  const pool = new Map();
+  for (const node of [...oldParent.children]) {
+    const key = railNodeKey(node);
+    if (key && !pool.has(key)) pool.set(key, node);
+  }
+  const wanted = [];
+  for (const fresh of [...freshParent.children]) {
+    const key = railNodeKey(fresh);
+    const old = key && pool.get(key);
+    if (old && old._railSig !== undefined && old._railSig === fresh._railSig) {
+      pool.delete(key);
+      if (old._railBody && fresh._railBody) {
+        old._railCount.textContent = fresh._railCount.textContent;
+        railMorph(old._railBody, fresh._railBody);
+      } else {
+        railKeepRow(old, fresh);
+      }
+      wanted.push(old);
+    } else {
+      wanted.push(fresh);
+    }
+  }
+  // Drop what is gone first, so a row leaving the middle does not shift
+  // every row after it into a move of its own.
+  const keep = new Set(wanted);
+  for (const node of [...oldParent.children]) if (!keep.has(node)) node.remove();
+  let cursor = oldParent.firstElementChild;
+  for (const node of wanted) {
+    if (node === cursor) { cursor = cursor.nextElementSibling; continue; }
+    oldParent.insertBefore(node, cursor);
+  }
+}
+
 function syncSessionGroupStickyOffsets(list) {
   const headings = [...list.querySelectorAll(".session-group-heading")];
   const layout = sessionGroupStickyLayout(headings, list.clientHeight || 0);
@@ -3942,7 +4050,15 @@ async function refreshSessions(options) {
   // transcript pane and the beads canvas hold theirs.
   const keptScrollTop = rebuild && typeof list.scrollTop === "number"
     ? list.scrollTop : 0;
-  if (rebuild) list.innerHTML = "";
+  // A rebuild draws the rail off-page and then keeps every row, heading and
+  // card that came out the same (railMorph), so a poll that changed one
+  // session swaps one row. Tearing the whole list down instead cost a
+  // mutation record per node per poll; a page-watching extension rescanned
+  // the document for each batch, which was the input lag of claunch-v87.
+  // The reduced harnesses whose stub DOM cannot serialize keep the teardown.
+  const morph = rebuild && typeof canMorphRail === "function" && canMorphRail(list);
+  const root = morph ? document.createElement(list.tagName || "ul") : list;
+  if (rebuild && !morph) list.innerHTML = "";
   // Wrapped, not passed straight to filter: Array.filter calls its callback
   // with (element, index, array), and sessionMatchesFilter's second
   // parameter is the filter name, which defaults to the rail's current
@@ -4015,10 +4131,10 @@ async function refreshSessions(options) {
           ? sessionWorkspaceLabel(row.value) : row.value;
         heading.textContent = `${row.group} · ${label}`;
         heading.title = `${row.group} group ${row.value}`;
-        list.appendChild(heading);
+        root.appendChild(heading);
         continue;
       }
-      const parent = groupBodies[row.level - 1] || list;
+      const parent = groupBodies[row.level - 1] || root;
       const group = document.createElement("li");
       group.className = `session-group session-group-level-${row.level}`;
       group.dataset.group = row.group;
@@ -4113,6 +4229,13 @@ async function refreshSessions(options) {
         }
       });
       group.append(heading, body);
+      // The heading as drawn, count still at its "0": the count is the one
+      // part railMorph carries over to a kept heading instead of comparing.
+      if (morph) {
+        group._railSig = heading.outerHTML;
+        group._railBody = body;
+        group._railCount = count;
+      }
       parent.appendChild(group);
       groupBodies.length = row.level;
       groupBodies[row.level] = body;
@@ -4126,8 +4249,10 @@ async function refreshSessions(options) {
       // local row by name -- kill, pin, the keyboard card, the filters'
       // record lookup -- can be handed it.
       const parent = nestedGroupContainers
-        ? (groupBodies[groupBodies.length - 1] || list) : list;
-      parent.appendChild(renderShadowCard(row.shadow, { depth: row.depth || 0 }));
+        ? (groupBodies[groupBodies.length - 1] || root) : root;
+      const card = renderShadowCard(row.shadow, { depth: row.depth || 0 });
+      if (morph) card._railSig = card.outerHTML;
+      parent.appendChild(card);
       countRow();
       continue;
     }
@@ -4393,15 +4518,23 @@ async function refreshSessions(options) {
       location.hash = "#/s/" + encodeURIComponent(s.name);
     });
     li.addEventListener("keydown", (ev) => railCardKey(ev, s.name));
+    // What the row was built from, read before the decorations below: a row
+    // already on the rail with the same reading is kept instead of this one
+    // (railMorph), and only the decorations are run again over it.
+    if (morph) {
+      li._railSig = railRowSig(li, dot, railSeen);
+      li._railSession = s;
+    }
     // The briefing's one-line and the collapsed ⟳, always on the row.
     decorateBriefingRow(li, s);
     // The reader's own note for this session, when there is one.
     decorateNoteRow(li, s);
     const parent = nestedGroupContainers
-      ? (groupBodies[groupBodies.length - 1] || list) : list;
+      ? (groupBodies[groupBodies.length - 1] || root) : root;
     parent.appendChild(li);
     countRow();
   }
+  if (morph) railMorph(list, root);
   if (rebuild && typeof syncShadowActive === "function") syncShadowActive();
   if (rebuild && nestedGroupContainers && typeof syncSessionGroupStickyOffsets === "function") {
     syncSessionGroupStickyOffsets(list);
@@ -4528,7 +4661,9 @@ async function refreshSessions(options) {
   // Assigning past the content's height is not an error -- the browser clamps
   // it -- so a poll that drops rows lands at the new bottom rather than
   // refusing to move, and a rail too short to scroll takes the 0 it had.
-  if (rebuild && keptScrollTop) list.scrollTop = keptScrollTop;
+  // A morphed rail was never emptied, so it has no position to put back:
+  // writing the old one would undo the browser's scroll anchoring instead.
+  if (rebuild && !morph && keptScrollTop) list.scrollTop = keptScrollTop;
   // The grid keeps its own signature, so it follows every poll whether or
   // not the list above was rebuilt.
   if (typeof renderSessionGrid === "function") renderSessionGrid();
@@ -4795,10 +4930,11 @@ function applyCflowBadges() {
       });
       li.appendChild(line);
     }
-    line.dataset.wf = `${r.scope || "default"}|${r.cwd}`;
+    // dataset writes are not covered by quietdom.js, so this one compares.
+    const wf = `${r.scope || "default"}|${r.cwd}`;
+    if (line.dataset.wf !== wf) line.dataset.wf = wf;
     const gated = sessCflowGated(r);
     line.className = `sess-cflow${gated ? " gated" : ""}`;
-    line.textContent = "";
     const [markCls, markGlyph] = wfMark(r.status, r);
     const mark = document.createElement("span");
     mark.className = markCls;
@@ -4817,6 +4953,14 @@ function applyCflowBadges() {
       ? stepLine + (r.gate || r.prompt || "") +
         (r.options ? ` — options: ${r.options.join(", ")}` : "")
       : (r.title || r.step_id || "");
+    // Redrawn only when it reads differently: every poll repaints every badge
+    // (claunch-v87).
+    const holder = document.createElement("span");
+    if (typeof holder.append === "function" && typeof line.innerHTML === "string") {
+      holder.append(mark, txt);
+      if (line.innerHTML === holder.innerHTML) continue;
+    }
+    line.textContent = "";
     line.append(mark, txt);
   }
 }
@@ -5325,12 +5469,21 @@ function paintTermTimer() {
   box.className = `term-btn timer-chip ${line.state}`;
   if (hold) box.classList.toggle("timer-paused", !hold.on);
   box.title = termTimerTitle(read.pick, line, hold);
-  box.textContent = "";
-  box.append(
-    el("span", "tt-glyph",
-       hold ? TERM_TIMER_HOLD_GLYPH[hold.on ? "on" : "off"] : line.glyph),
-    el("span", "tt-text", line.text)
-  );
+  // The two spans are kept and only their text moves: this repaints every
+  // second, and rebuilding them each time was two mutations a second for
+  // anything watching the page (claunch-v87).
+  const glyph = hold ? TERM_TIMER_HOLD_GLYPH[hold.on ? "on" : "off"] : line.glyph;
+  let glyphBox = box.querySelector ? box.querySelector(".tt-glyph") : null;
+  let textBox = box.querySelector ? box.querySelector(".tt-text") : null;
+  if (!glyphBox || !textBox || box.children.length !== 2) {
+    box.textContent = "";
+    glyphBox = el("span", "tt-glyph", glyph);
+    textBox = el("span", "tt-text", line.text);
+    box.append(glyphBox, textBox);
+  } else {
+    glyphBox.textContent = glyph;
+    textBox.textContent = line.text;
+  }
   box.disabled = termTimerBusy;
   // Wired once: textContent above wipes the children, not the box, so a
   // listener added per repaint would stack.
@@ -6302,6 +6455,11 @@ function applyRailBeads() {
       continue;
     }
     const fresh = railBeadsLine(li.dataset.name, lane);
+    // Kept when it was drawn from the same issues: this runs after every
+    // rebuild and beads poll, and a swap per row each time was a mutation
+    // per row per poll (claunch-v87). The issues themselves are compared,
+    // not the markup, because the hover card shows fields the pill does not.
+    if (line && line._railSig === fresh._railSig) continue;
     if (line) line.replaceWith(fresh);
     else {
       // under the cwd line, above the gauge and the seen line, so the row's
@@ -6325,6 +6483,7 @@ function railBeadsLine(name, lane) {
   const all = (lane.issues || []).map((i) => ({ i, created: false }))
     .concat((lane.created || []).map((i) => ({ i, created: true })));
   const shown = all.slice(0, RAIL_BEADS_MAX);
+  line._railSig = JSON.stringify([name, next || null, all]);
   for (const { i, created } of shown) {
     const pill = el("a", `rail-bead ${i.status || ""}${created ? " created" : ""}`, i.id || "?");
     pill.href = "#/beads/" + encodeURIComponent(i.id || "");
@@ -6689,7 +6848,12 @@ function refreshRailSeen(list) {
     const old = typeof li.querySelector === "function"
       ? li.querySelector(".rail-seen") : null;
     if (!s || !old || typeof old.replaceWith !== "function") continue;
-    old.replaceWith(railSeenLine(s));
+    // Swapped only when it reads differently: the ages move by the minute,
+    // and a swap on every tick was a mutation per row per poll (claunch-v87).
+    const fresh = railSeenLine(s);
+    if (typeof old.outerHTML !== "string" || old.outerHTML !== fresh.outerHTML) {
+      old.replaceWith(fresh);
+    }
     // The dot's grade is read off the same moving stamps (plus moved_rows),
     // so it is re-shaded on the same tick.
     // The status dot is the row's first child (see the li.append in
@@ -7307,7 +7471,11 @@ function decorateBriefingRow(li, s) {
       checks = el("div", "rail-status-checks");
       li.appendChild(checks);
     }
-    checks.innerHTML = "";
+    // Drawn aside and swapped in only when the chips read differently: this
+    // runs on every poll for every row (refreshRailSeen), and redrawing the
+    // same chips each time was a mutation per row per poll (claunch-v87).
+    const live = checks;
+    checks = el("div", "rail-status-checks");
     for (const check of reported) {
       const answer = statusCheckText(check);
       const age = check.reported_at ? seenAgo(check.reported_at) : null;
@@ -7318,6 +7486,15 @@ function decorateBriefingRow(li, s) {
         : String(check.question || "");
       chip.ariaLabel = `${statusCheckName(check)}: ${answer}`;
       checks.appendChild(chip);
+    }
+    if (typeof live.outerHTML === "string" && live.outerHTML === checks.outerHTML) {
+      checks = live;
+    } else if (typeof live.replaceWith === "function") {
+      live.replaceWith(checks);
+    } else {
+      live.innerHTML = "";
+      for (const chip of [...checks.children]) live.appendChild(chip);
+      checks = live;
     }
     let statusRefresh = li.querySelector(".sess-status-check-rowref");
     if (!statusRefresh) {
@@ -9671,6 +9848,35 @@ function newPromptPacks(f) {
    Fed by the session poll, so it is rebuilt only when the offered
    conversations actually differ (see resumeRendered) and the current choice
    is preserved by hand across that rebuild. */
+/* A select's options brought to `items` ([label, value] pairs) in place.
+   The session pickers' signatures carry each session's status, so they move
+   on most polls; emptying and refilling a few hundred options each time was
+   a mutation per option per poll (claunch-v87). An option whose value is
+   still offered keeps its node and only has its label rewritten; options
+   are added and dropped where the list grew or shrank. */
+function syncSelectOptions(select, items) {
+  if (typeof select.insertBefore !== "function" || !select.options) {
+    select.innerHTML = "";
+    for (const [label, value] of items) select.appendChild(new Option(label, value));
+    return;
+  }
+  const byValue = new Map();
+  for (const o of [...select.options]) if (!byValue.has(o.value)) byValue.set(o.value, o);
+  const wanted = items.map(([label, value]) => {
+    const o = byValue.get(value);
+    if (!o) return new Option(label, value);
+    byValue.delete(value);
+    if (o.text !== label) o.text = label;
+    return o;
+  });
+  for (const o of byValue.values()) o.remove();
+  let cursor = select.firstElementChild;
+  for (const o of wanted) {
+    if (o === cursor) { cursor = cursor.nextElementSibling; continue; }
+    select.insertBefore(o, cursor);
+  }
+}
+
 function refreshResumeChoices() {
   const select = document.querySelector("#new-session select[name=resume]");
   // Name and status ARE the option — its value and its label — so they are
@@ -9684,11 +9890,15 @@ function refreshResumeChoices() {
   resumeRendered = signature;
 
   const previous = select.value;
-  select.innerHTML = "";
-  select.appendChild(new Option("(new conversation)", ""));
-  select.appendChild(new Option("pick in claude's picker (--resume)", PICKER));
-  for (const [name, status] of offered) {
-    select.appendChild(new Option(`${name} — ${status}`, name));
+  const items = [
+    ["(new conversation)", ""],
+    ["pick in claude's picker (--resume)", PICKER],
+    ...offered.map(([name, status]) => [`${name} — ${status}`, name]),
+  ];
+  if (typeof syncSelectOptions === "function") syncSelectOptions(select, items);
+  else {
+    select.innerHTML = "";
+    for (const [label, value] of items) select.appendChild(new Option(label, value));
   }
   // A session that vanished (cleared, renamed) takes its option with it;
   // falling back to "(new conversation)" beats silently resuming a stranger.
@@ -10289,10 +10499,14 @@ function refreshParentChoices() {
   parentsRendered = signature;
 
   const previous = select.value;
-  select.innerHTML = "";
-  select.appendChild(new Option("(none — a session of its own)", ""));
-  for (const [name, status] of offered) {
-    select.appendChild(new Option(`${name} — ${status}`, name));
+  const items = [
+    ["(none — a session of its own)", ""],
+    ...offered.map(([name, status]) => [`${name} — ${status}`, name]),
+  ];
+  if (typeof syncSelectOptions === "function") syncSelectOptions(select, items);
+  else {
+    select.innerHTML = "";
+    for (const [label, value] of items) select.appendChild(new Option(label, value));
   }
   select.value = [...select.options].some((o) => o.value === previous)
     ? previous
@@ -26665,8 +26879,94 @@ function sessFlags(s) {
   return box;
 }
 
+/* A panel redrawn on a poll, brought onto the page section by section
+   (claunch-v87). `fresh` holds the new build, detached; each of its top-level
+   sections replaces the live one in the same place unless the two read the
+   same, in which case the live one stays and the page sees nothing.
+
+   A section can be filled after it is built (a fetch that writes into the
+   node it was handed). When the live copy was kept, that write would land in
+   the discarded fresh one, so each kept section's fresh twin is watched until
+   the next redraw and swapped in the moment it changes. */
+const panelTwins = new WeakMap();
+
+/* A section that keeps its live form across polls (a half-typed note, a
+   picked destination) hands that form to the new build by moving it, which
+   is itself a mutation and leaves the live section a hollow that never reads
+   the same as the new one. While renderSession builds off the page
+   (`panelStaging`), carried() hands the build a copy instead -- the stand-in
+   -- and the live form stays where it is. A section that is kept never
+   touches it; a section that is replaced gets its stand-ins swapped back for
+   the live forms first (restoreStandIns). */
+let panelStaging = false;
+function carried(node) {
+  if (!panelStaging || !node || !node.isConnected || typeof node.cloneNode !== "function") return node;
+  const stand = node.cloneNode(true);
+  stand._standFor = node;
+  return stand;
+}
+
+function restoreStandIns(root) {
+  if (!root || root.nodeType !== 1) return;
+  const stands = [root, ...root.querySelectorAll("*")].filter((n) => n._standFor);
+  for (const stand of stands) stand.replaceWith(stand._standFor);
+}
+//
+// `before` is what the page held before the build began: a section the
+// builder carries over itself (the send box keeps its node so a draft
+// survives) has already been moved into `fresh` by then, and is kept as is.
+// Sections are paired by what they read, not by position, so one section
+// appearing or going does not turn every section after it into a swap.
+function morphPanel(live, fresh, before) {
+  for (const w of panelTwins.get(live) || []) w.disconnect();
+  const watchers = [];
+  const wanted = [...fresh.childNodes];
+  const carried = new Set(before);
+  const pool = new Map();
+  for (const old of live.childNodes) {
+    const key = old.nodeType === 1 ? old.outerHTML : "#" + old.data;
+    if (!pool.has(key)) pool.set(key, []);
+    pool.get(key).push(old);
+  }
+  const kept = new Set();
+  const out = wanted.map((node) => {
+    if (carried.has(node)) { kept.add(node); return node; }
+    const key = node.nodeType === 1 ? node.outerHTML : "#" + node.data;
+    const old = (pool.get(key) || []).shift();
+    if (old) {
+      kept.add(old);
+      if (node.nodeType === 1 && typeof MutationObserver === "function") {
+        // Most fills write what the kept section already shows, so the twin
+        // is compared once it settles and swapped in only if it differs.
+        let pending = 0;
+        const w = new MutationObserver(() => {
+          clearTimeout(pending);
+          pending = setTimeout(() => {
+            if (old.parentNode !== live || old.outerHTML === node.outerHTML) return;
+            w.disconnect();
+            restoreStandIns(node);
+            live.replaceChild(node, old);
+          }, 50);
+        });
+        w.observe(node, { subtree: true, childList: true, attributes: true, characterData: true });
+        watchers.push({ disconnect() { clearTimeout(pending); w.disconnect(); } });
+      }
+      return old;
+    }
+    return node;
+  });
+  panelTwins.set(live, watchers);
+  for (const node of [...live.childNodes]) if (!kept.has(node)) live.removeChild(node);
+  for (const node of out) if (!kept.has(node)) restoreStandIns(node);
+  let cursor = live.firstChild;
+  for (const node of out) {
+    if (node === cursor) { cursor = cursor.nextSibling; continue; }
+    live.insertBefore(node, cursor);
+  }
+}
+
 function renderSession(data) {
-  const view = $("sess-view");
+  const page = $("sess-view");
   const s = data.session || {};
   // The 2s poll rebuilds this panel from scratch, and a rebuild detaches
   // whatever the user is typing in — which takes the caret with it. Keeping
@@ -26674,24 +26974,36 @@ function renderSession(data) {
   // not the focus, so while a field in here has it, the poll waits. Same rule
   // the mesh page keeps, and for the same reason: a message being written is
   // worth more than a two-second-fresher 'last output'.
-  if (formInUse(view)) return;
+  if (formInUse(page)) return;
   // And the same rule for a selection, which is the claim a reader who is
   // copying a line has on this panel. It needs saying separately because the
   // lines worth copying here are not fields and never take focus.
-  if (selectionInUse(view)) return;
+  if (selectionInUse(page)) return;
   // `#sess-view` is the scroll container, so emptying it collapses its
   // content to nothing and the browser clamps scrollTop to 0. Every poll
   // therefore threw the reader back to the top of the panel, which put
   // everything below the fold — the input journal among it — out of reach for
   // longer than five seconds at a time. Read before the wipe, written after
   // the rebuild.
-  const previousTop = view.scrollTop;
-  view.innerHTML = "";
+  const previousTop = page.scrollTop;
+  const before = page.childNodes ? [...page.childNodes] : [];
+  // Drawn off the page and morphed on (morphPanel), where the DOM can say
+  // what a section serializes to; the reduced harnesses' stub DOMs cannot,
+  // and keep the wipe-and-redraw this panel always had.
+  const morph = typeof morphPanel === "function" &&
+    typeof page.outerHTML === "string" && typeof page.insertBefore === "function";
+  const view = morph ? document.createElement("div") : page;
+  if (!morph) page.innerHTML = "";
+  panelStaging = morph;
   // Called at each of this function's three exits. Assigning past the new
   // content's height is clamped by the browser rather than refused, so a
   // panel that came back shorter lands at its own bottom instead of throwing;
   // a stub DOM with no scrollTop reads undefined and writes nothing.
-  const keepScroll = () => { if (previousTop) view.scrollTop = previousTop; };
+  const keepScroll = () => {
+    panelStaging = false;
+    if (morph) morphPanel(page, view, before);
+    if (previousTop && page.scrollTop !== previousTop) page.scrollTop = previousTop;
+  };
 
   view.appendChild(sessHead(s));
 
@@ -27010,7 +27322,7 @@ function sessMeshJoin(data) {
 
   const key = `${name}|${candidates.join(",")}`;
   if (sessJoinBox && sessJoinBox.dataset.slot === key) {
-    box.appendChild(sessJoinBox);   // appending moves the live node here
+    box.appendChild((typeof carried === "function" ? carried(sessJoinBox) : sessJoinBox));   // the live node, or its stand-in (carried)
     return box;
   }
   sessJoinBox = el("div", "sess-mesh-join-form");
@@ -27301,22 +27613,29 @@ function sessInputJournalFill(box, name, quiet) {
     .then(async (resp) => {
       const doc = await resp.json().catch(() => ({}));
       if (quiet && box.open) return;
-      box.innerHTML = "";
+      // Drawn aside and swapped in only when it reads differently: the
+      // poll refills a shut fold every five seconds, and redrawing the same
+      // lines each time was a mutation burst per poll (claunch-v87).
+      const out = el("div");
       // One row per submitted line with its current status. `entries` (the
       // raw event log) is the fallback for a daemon that predates `requests`.
       const rows = doc.requests || doc.entries || [];
       const queued = doc.queued || 0;
-      box.appendChild(el("summary", null,
+      out.appendChild(el("summary", null,
         `Session input journal (${rows.length})` +
         (queued ? ` · ${queued} queued` : "")));
       if (!resp.ok || !rows.length) {
-        box.appendChild(el("p", resp.ok ? "no submitted lines" :
+        out.appendChild(el("p", resp.ok ? "no submitted lines" :
           (doc.error || "journal unavailable"), "wf-note"));
-        return;
+      } else {
+        for (const entry of rows.slice().reverse()) {
+          out.appendChild(sessInputJournalRow(box, name, entry));
+        }
       }
-      for (const entry of rows.slice().reverse()) {
-        box.appendChild(sessInputJournalRow(box, name, entry));
-      }
+      if (typeof box.innerHTML === "string" && typeof out.innerHTML === "string" &&
+          box.innerHTML === out.innerHTML) return;
+      box.innerHTML = "";
+      for (const node of [...out.childNodes]) box.appendChild(node);
     }).catch(() => {});
 }
 
@@ -27374,7 +27693,7 @@ function sessInputJournal(name) {
     // fold is shut, so the poll keeps it current. An OPEN fold is left
     // exactly as it is — its lines are what the reader is looking at.
     if (!sessJournalBox.open) sessInputJournalFill(sessJournalBox, name, true);
-    return sessJournalBox;   // appending moves the live node back into place
+    return (typeof carried === "function" ? carried(sessJournalBox) : sessJournalBox);   // the live node, or its stand-in (carried)
   }
   const box = el("details", "sess-input-journal");
   box.dataset.session = name;
@@ -27430,7 +27749,7 @@ function sessReborrow(data) {
   const key = `${s.name}|${s.borrow || ""}|${s.null_token ? 1 : 0}|` +
     `${s.disable_artifact_tool ? 1 : 0}|${validationKey}`;
   if (sessReborrowBox && sessReborrowBox.dataset.slot === key) {
-    box.appendChild(sessReborrowBox);   // appending moves the live node here
+    box.appendChild((typeof carried === "function" ? carried(sessReborrowBox) : sessReborrowBox));   // the live node, or its stand-in (carried)
     return box;
   }
   const form = el("div", "sess-reborrow-form");
@@ -27641,7 +27960,7 @@ function sessNote(s) {
   const saved = String(s.note || "");
   const key = `${s.name}|${saved}`;
   if (sessNoteBox && sessNoteBox.dataset.slot === key) {
-    box.appendChild(sessNoteBox);   // appending moves the live node here
+    box.appendChild((typeof carried === "function" ? carried(sessNoteBox) : sessNoteBox));   // the live node, or its stand-in (carried)
     return box;
   }
   const form = el("div", "sess-note-form");
@@ -27751,7 +28070,7 @@ function sessPerms(data) {
   const flag = permissionArgs.join(" ");
   const key = `${s.name}|${skipping ? 1 : 0}`;
   if (sessPermsBox && sessPermsBox.dataset.slot === key) {
-    box.appendChild(sessPermsBox);   // appending moves the live node here
+    box.appendChild((typeof carried === "function" ? carried(sessPermsBox) : sessPermsBox));   // the live node, or its stand-in (carried)
     return box;
   }
   const form = el("div", "sess-perms-form");
@@ -27850,7 +28169,7 @@ function sessMigrate(data) {
   // itself changes the key, which is what re-aims the picker.
   const key = `${s.name}|${s.cwd}`;
   if (sessMigrateBox && sessMigrateBox.dataset.slot === key) {
-    box.appendChild(sessMigrateBox);   // appending moves the live node here
+    box.appendChild((typeof carried === "function" ? carried(sessMigrateBox) : sessMigrateBox));   // the live node, or its stand-in (carried)
     return box;
   }
   const form = el("div", "sess-migrate-form");
@@ -28126,7 +28445,7 @@ function sessSend(data) {
   // out of the key — someone else joining is no reason to lose your sentence.
   const key = `${s.name}|` + meshes.map((m) => `${m.mesh}>${m.handle}`).join(",");
   if (sessSendBox && sessSendBox.dataset.slot === key) {
-    box.appendChild(sessSendBox);   // appending moves the live node here
+    box.appendChild((typeof carried === "function" ? carried(sessSendBox) : sessSendBox));   // the live node, or its stand-in (carried)
     return box;
   }
   sessSendBox = el("div", "sess-send-form");
@@ -28416,7 +28735,7 @@ function sessWorkflow(data) {
   // context line out from under the user.
   const key = `${slot.scope}|${slot.cwd}`;
   if (sessStartBox && sessStartBox.dataset.slot === key) {
-    box.appendChild(sessStartBox);   // appending moves the live node here
+    box.appendChild((typeof carried === "function" ? carried(sessStartBox) : sessStartBox));   // the live node, or its stand-in (carried)
     return box;
   }
   sessStartBox = el("div", "wf-start");
@@ -30028,7 +30347,7 @@ function sessQuickJob(data) {
   // half-typed task, and the pickers were fetched for THIS session's cwd.
   const key = `${s.name}|${s.cwd}`;
   if (sessQuickJobBox && sessQuickJobBox.dataset.slot === key) {
-    box.appendChild(sessQuickJobBox);   // appending moves the live node here
+    box.appendChild((typeof carried === "function" ? carried(sessQuickJobBox) : sessQuickJobBox));   // the live node, or its stand-in (carried)
     return box;
   }
   const form = el("div", "sess-quickjob-form");
@@ -30250,7 +30569,7 @@ function sessChildren(data) {
 
   const key = s.name || sessName || "";
   if (sessKidsBox && sessKidsBox.dataset.slot === key) {
-    box.appendChild(sessKidsBox);   // appending moves the live node here
+    box.appendChild((typeof carried === "function" ? carried(sessKidsBox) : sessKidsBox));   // the live node, or its stand-in (carried)
     return box;
   }
   stopSessKids();
