@@ -521,6 +521,7 @@ CHECKS = [
 # tests/ rather than tests/web, and `sessiontabs_browser.cjs` and
 # `toolbar_browser.cjs` sat in tests/web unlisted (claunch-6jerx).
 BROWSER_CHECKS = [
+        "flows_browser.cjs",
         "diagramviewport_browser.cjs",
         "sessionform_browser.cjs",
         "scoregoal_browser.cjs",
