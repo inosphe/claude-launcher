@@ -1439,6 +1439,14 @@ async def h_window_acquire(request: web.Request) -> web.Response:
     """Ask for the window. ``wait`` seconds > 0 queues and long-polls."""
     body = await _json_body(request)
     cls = body.get("class") or body.get("cls") or ""
+
+    def gone() -> bool:
+        # aiohttp keeps running a handler whose client disconnected, so the
+        # wait asks the transport instead of expecting a cancellation
+        # (claunch-zawnr).
+        transport = request.transport
+        return transport is None or transport.is_closing()
+
     result = await request.app["window"].acquire(
         cls,
         session=body.get("session"),
@@ -1447,6 +1455,9 @@ async def h_window_acquire(request: web.Request) -> web.Response:
         wait=float(body.get("wait") or 0),
         workers=int(body.get("workers") or 0),
         force=bool(body.get("force")),
+        # A pid is only this machine's to check from a loopback caller.
+        bound=bool(body.get("bound")) and request.remote in ("127.0.0.1", "::1"),
+        gone=gone,
     )
     if result.get("error"):
         return json_response(result, status=400)
