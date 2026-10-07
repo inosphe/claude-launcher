@@ -70,6 +70,65 @@ def test_authenticated_history_delete_and_clear(home):
     asyncio.run(run())
 
 
+def test_windows_reads_are_one_at_a_time_across_apps(monkeypatch):
+    # Two apps in one process each sample on their own thread. OpenClipboard
+    # with no window belongs to the process, so a second open succeeds while
+    # the first still reads, and its close frees that data: 0xc0000374
+    # (claunch-lxwwf). A fake user32/kernel32 counts the readers inside.
+    pytest.importorskip("ctypes.wintypes")
+    import threading
+
+    state = {"inside": 0, "most": 0}
+    guard = threading.Lock()
+    text = "x".encode("utf-16-le") + b"\0\0"
+    buf = __import__("ctypes").create_string_buffer(text, len(text))
+
+    class Fn:
+        def __init__(self, call):
+            self.call = call
+            self.argtypes = self.restype = None
+
+        def __call__(self, *args):
+            return self.call(*args)
+
+    def open_clipboard(_hwnd):
+        with guard:
+            state["inside"] += 1
+            state["most"] = max(state["most"], state["inside"])
+        time.sleep(0.01)
+        return True
+
+    def close_clipboard():
+        with guard:
+            state["inside"] -= 1
+        return True
+
+    calls = {
+        "OpenClipboard": open_clipboard,
+        "CloseClipboard": close_clipboard,
+        "GetClipboardData": lambda _fmt: 1,
+        "GlobalSize": lambda _h: len(text),
+        "GlobalLock": lambda _h: __import__("ctypes").addressof(buf),
+        "GlobalUnlock": lambda _h: True,
+    }
+
+    class Dll:
+        def __init__(self, *_args, **_kw):
+            for name, call in calls.items():
+                setattr(self, name, Fn(call))
+
+    monkeypatch.setattr(clipboard.ctypes, "WinDLL", Dll, raising=False)
+    got = []
+    threads = [threading.Thread(target=lambda: got.append(clipboard._read_windows()))
+               for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert got == ["x"] * 8
+    assert state["most"] == 1
+
+
 @pytest.mark.skipif(sys.platform == "win32",
                     reason="Windows reads in-process, outside this guard (claunch-lxwwf)")
 def test_a_served_app_reads_no_clipboard_under_the_suite(home, monkeypatch):
