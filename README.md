@@ -2595,8 +2595,9 @@ Two settings sit under the matrix, stored in `~/.claunch.yaml` under
   not; the form shows them ticked and locked with a 🔒 <role> badge. A
   required pack needs no install: the workspace's copy is used when it has
   one (an edit there wins), and the copy claunch ships otherwise — the form
-  badges it "claunch", the opening block says "shipped with claunch",
-  and the create response lists it under `prompt_packs_shipped`. Only a
+  badges it "claunch", the opening block says "shipped with claunch" and
+  why it is there ("required by role <role>", else "ticked at session
+  creation"), and the create response lists it under `prompt_packs_shipped`. Only a
   mapped pack that exists in neither place refuses the create, with the role
   named. Roles are matched by canonical name on the joined mesh, so aliases and
   a role inferred from the handle count too. The default maps every packaged
@@ -2629,7 +2630,8 @@ restores a default).
 
 Each daemon instance can hold one prompt of its own that it puts into the
 opening of **every** session it starts, whatever the role or mesh, as the
-first prompt pack (id `daemon`, header `-- this daemon's own prompt`). It is
+first prompt pack (id `@daemon`, header `-- this daemon's own prompt`; no pack
+file can have that id, so a workspace's own `daemon.md` is a separate pack). It is
 daemon configuration, not source code and not a workspace file: it lives in
 the instance's state directory, `~/.claude-launcher/daemon/daemon-prompt.md`
 for the default daemon and `daemons/<name>/daemon-prompt.md` for `-L <name>`,

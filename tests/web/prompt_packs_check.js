@@ -304,7 +304,7 @@ check("with no mesh and nothing installed, any of claunch's packs can be ticked"
 });
 
 check("the daemon's prompt is the first chip, ticked, and can be unticked", () => {
-  env.offer = { ...OFFER, daemon_prompt: { id: "daemon", title: "Daemon prompt (default)" } };
+  env.offer = { ...OFFER, daemon_prompt: { id: "@daemon", title: "Daemon prompt (default)" } };
   env.render();
   const b = boxes();
   assert.deepEqual(b.map((x) => x.name), ["daemon_prompt", ...GENERAL]);
@@ -317,7 +317,7 @@ check("the daemon's prompt is the first chip, ticked, and can be unticked", () =
   assert.ok(summary().startsWith(
     "The opening will include: daemon prompt (this daemon's, every session)"));
   // It is not a pack id the form sends; its own switch carries the answer.
-  assert.ok(!before.includes("daemon"));
+  assert.ok(!before.includes("@daemon"));
   b[0].checked = false;
   b[0].handlers.change[0]();
   assert.equal(env.daemonWanted(), false);
@@ -332,7 +332,7 @@ check("the daemon's prompt is the first chip, ticked, and can be unticked", () =
   assert.equal(row.classList.hidden, true);
   // The daemon's prompt alone is enough to show the row.
   env.offer = { ...OFFER, packs: [], shipped: [], role_packs: {},
-    daemon_prompt: { id: "daemon", title: "Daemon prompt (default)" } };
+    daemon_prompt: { id: "@daemon", title: "Daemon prompt (default)" } };
   env.render();
   assert.equal(row.classList.hidden, false);
   assert.deepEqual(boxes().map((x) => x.name), ["daemon_prompt"]);
@@ -367,7 +367,7 @@ check("view shows a pack's text below the chips, and a second click closes it", 
 });
 
 check("the daemon's prompt previews from its own route; a failure is said", async () => {
-  env.offer = { ...OFFER, daemon_prompt: { id: "daemon", title: "Daemon prompt (default)" } };
+  env.offer = { ...OFFER, daemon_prompt: { id: "@daemon", title: "Daemon prompt (default)" } };
   env.render();
   answers["/api/daemon-prompt"] = [200, { instance: "default", text: "cite files\nbe brief\nok" }];
   chips()[0].children[1].handlers.click[0]();
@@ -382,6 +382,24 @@ check("the daemon's prompt previews from its own route; a failure is said", asyn
   await flush();
   assert.match(text(row), /nope/);
   chips()[1].children[1].handlers.click[0]();
+  env.offer = OFFER;
+});
+
+check("a workspace pack named daemon is its own chip beside the daemon's prompt", async () => {
+  env.offer = { ...OFFER, packs: [...OFFER.packs, { id: "daemon", title: "Our daemon notes" }],
+    daemon_prompt: { id: "@daemon", title: "Daemon prompt (default)" } };
+  env.render();
+  const names = boxes().map((x) => x.name);
+  assert.equal(names[0], "daemon_prompt");
+  assert.ok(names.includes("prompt_pack_daemon"));
+  // Previewing the daemon's prompt marks its chip only, not the pack's.
+  answers["/api/daemon-prompt"] = [200, { instance: "default", text: "cite files" }];
+  chips()[0].children[1].handlers.click[0]();
+  await flush();
+  const marked = chips().filter((c) => c.className.includes("previewing"));
+  assert.equal(marked.length, 1);
+  assert.equal(marked[0], chips()[0]);
+  chips()[0].children[1].handlers.click[0]();
   env.offer = OFFER;
 });
 

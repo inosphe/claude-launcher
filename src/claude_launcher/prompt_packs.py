@@ -291,17 +291,29 @@ def text_id(body: str) -> str:
     return digests.text_digest((body or "").strip())
 
 
-def opening_block(pack_id: str, body: str, source: str = WORKSPACE) -> str:
+def opening_block(
+    pack_id: str, body: str, source: str = WORKSPACE, *,
+    required_by=None, ticked: bool = False,
+) -> str:
     """One pack as it goes into an opening, with its id beside it.
 
     The id is what a session reminder and ``rebrief`` name later
     (:mod:`claude_launcher.daemon.rebrief`): an agent that finds it here,
     next to the text, still has the pack after a compaction. The header says
     where the text came from, because a package copy has no file in the
-    workspace to point at.
+    workspace to point at -- and, for that copy, why it is there: the roles
+    that require it (``required_by``), else that it was ticked at creation.
+    A record from before the reason was kept says neither.
     """
     if source == PACKAGE:
-        origin = "shipped with claunch, not installed in this workspace"
+        if required_by:
+            n = len(required_by)
+            why = f"required by role{'s' if n > 1 else ''} {', '.join(required_by)}, "
+        elif ticked:
+            why = "ticked at session creation, "
+        else:
+            why = ""
+        origin = f"shipped with claunch, {why}not installed in this workspace"
         where = f"file: (not installed in this workspace; claunch's {pack_id}.md)"
     elif source == DAEMON:
         origin = "this daemon's own prompt, given to every session it starts"
@@ -319,18 +331,31 @@ def opening_block(pack_id: str, body: str, source: str = WORKSPACE) -> str:
     )
 
 
-def records(packs: List[Pack]) -> List[Dict[str, str]]:
+def records(
+    packs: List[Pack], *,
+    required: Optional[Dict[str, List[str]]] = None, asked=(),
+) -> List[Dict[str, object]]:
     """What a session definition keeps of the packs it was given.
 
     ``source`` is written only for a package copy or the daemon's prompt, so
     the record of a workspace copy reads exactly as it did before the key
-    existed.
+    existed. A package copy also keeps why it went in -- ``required_by`` (the
+    roles, from :func:`required_for`) and ``ticked`` -- because it has no
+    workspace file to explain its presence and its opening header says which
+    (:func:`opening_block`).
     """
+    required = required or {}
+    asked = set(asked or ())
     out = []
     for p in packs:
-        rec = {"id": p.id, "text": p.body}
+        rec: Dict[str, object] = {"id": p.id, "text": p.body}
         if p.source in (PACKAGE, DAEMON):
             rec["source"] = p.source
+        if p.source == PACKAGE:
+            if required.get(p.id):
+                rec["required_by"] = list(required[p.id])
+            if p.id in asked:
+                rec["ticked"] = True
         out.append(rec)
     return out
 
@@ -338,7 +363,10 @@ def records(packs: List[Pack]) -> List[Dict[str, str]]:
 def opening(recorded) -> str:
     """The opening's pack section, from a definition's recorded packs."""
     return "\n\n".join(
-        opening_block(r["id"], r["text"], r.get("source") or WORKSPACE)
+        opening_block(
+            r["id"], r["text"], r.get("source") or WORKSPACE,
+            required_by=r.get("required_by"), ticked=bool(r.get("ticked")),
+        )
         for r in recorded or ()
     )
 
@@ -518,7 +546,7 @@ def choose(
             raise PackError(
                 f"{exc} (required by role {', '.join(required[pack_id])})"
             ) from None
-    return records(packs), required
+    return records(packs, required=required, asked=asked), required
 
 
 def preview(workspace: Optional[Path], pack_id: str) -> dict:
