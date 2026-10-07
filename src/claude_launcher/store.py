@@ -487,6 +487,17 @@ DAEMON_DEFAULTS = {
     # the source that survives, so a timeout is "try again", never "end it
     # anyway". 0 waits without limit.
     "handoff_deliver_timeout": 120.0,
+    # The deep_think MCP tool (daemon/deep_think.py): a session asks itself a
+    # question and a quick-fork of it answers asynchronously. deep_think_max
+    # caps how many such forks one session has running at once;
+    # deep_think_timeout is the default seconds a question may run before the
+    # asking session is asked to extend or cancel it (a call may name its
+    # own); deep_think_grace is how long each rung of that ladder waits for
+    # an answer before the next (ask the fork for what it has, then end it).
+    # Read LIVE.
+    "deep_think_max": 3,
+    "deep_think_timeout": 1800.0,
+    "deep_think_grace": 300.0,
     # Base URL of a prompter server (daemon/prompter.py) whose prompt
     # snippets the web UI lists beside the footer's prompt presets. None =
     # off. Read LIVE on every request, so the settings page's PUT applies

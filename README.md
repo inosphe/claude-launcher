@@ -2656,6 +2656,35 @@ keeps the copy alive and says so, because the wrap-up is the only thing of
 the copy that survives. Nothing reads the transcript; the agent writes the
 wrap-up, since it is the one that knows what since-the-marker meant.
 
+### deep_think — a session asks itself, a copy answers
+
+The MCP `deep_think` tool is the quick-fork pressed by the agent itself, for
+one question. `deep_think {question}` forks the asking session into
+`A-dt<n>` (the copy holds A's whole conversation, so the question may lean
+on it), puts the question on top as a *deep-think: QUESTION* block, and
+**returns at once**. The answer is not in the reply: the copy explores,
+reasons, and hands its answer in with the `handoff` tool — a merge — which
+types it into A as a *deep-think: ANSWER from A-dt<n>* block in a later turn,
+and ends the copy. What A saves is context: the exploration is spent in the
+copy's window, and only the answer comes back.
+
+- **Edits.** The copy stands in A's checkout and may edit; before and after
+  it writes, it says what with `deep_think {op: notify, text}`, typed into A
+  as a *NOTE* block.
+- **Message log.** Notes and the answer are also written into the log of
+  every mesh A belongs to (and this daemon owns), from `deep-think:A-dt<n>`,
+  addressed to nobody — the record of the room, not a second delivery.
+- **Record.** Question and answer are kept as a search record of the copy,
+  so `search` finds them after it is gone.
+- **Model and effort.** `model` / `effort` run the copy differently, under
+  the spawn policy like any child's.
+- **Limits.** At most `daemon.deep_think_max` (3) copies per session run at
+  once. Each has a deadline (`minutes`, default `daemon.deep_think_timeout`,
+  30 min). Past it A is asked to `extend` or `cancel`; if it does neither
+  within `daemon.deep_think_grace` (5 min) the copy is asked to hand in what
+  it has, and after one more grace it is ended and A is told no answer is
+  coming. `deep_think {op: status}` lists what is running.
+
 ### handoff — the same relay between any two sessions
 
 Take the fork away and what is left is a session handing its work to another

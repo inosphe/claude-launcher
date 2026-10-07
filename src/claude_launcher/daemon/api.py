@@ -486,6 +486,11 @@ def build_app(
     glossary_api.install(app)
     from . import spec_api
     spec_api.install(app)
+    # deep_think (daemon/deep_think.py): a session asks itself a question and
+    # a quick-fork of it answers. Needs app["handoff"] (set above): the answer
+    # is a merge, and the module hooks how that merge is written and kept.
+    from . import deep_think
+    deep_think.install(app)
     app.on_startup.append(_start_rag)
     app.on_shutdown.append(_stop_rag)
     # How late the loop runs its callbacks: the part of the page's round
@@ -8225,24 +8230,51 @@ async def h_session_quick_fork(request: web.Request) -> web.Response:
     block says so in as many words -- the only defence available against two
     claude sessions writing one checkout is that both of them know.
     """
+    try:
+        out = await stage_quick_fork(
+            request, request.match_info["name"], await _json_body(request)
+        )
+    except QuickForkError as exc:
+        return json_error(exc.status, str(exc))
+    return json_response(out, status=201)
+
+
+class QuickForkError(Exception):
+    """A quick-fork that cannot be made, with the HTTP status it answers."""
+
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+async def stage_quick_fork(
+    request: web.Request, parent: str, body: dict, *, tag: str = "qf",
+    spawn_extra: Optional[dict] = None, before_launch=None,
+) -> dict:
+    """The quick-fork itself, shared by the operator's press (above) and the
+    ``deep_think`` tool (daemon/deep_think.py), which forks the asking
+    session the same way and adds its own fields: ``tag`` names the copy
+    (``<parent>-<tag><n>``), ``spawn_extra`` rides the spawn body (``model``
+    and ``effort``, under the spawn policy like any child's), and
+    ``before_launch(session)`` writes onto the staged copy before it starts.
+    Raises :class:`QuickForkError` with the status the route answers.
+    """
     manager: SessionManager = request.app["manager"]
-    parent = request.match_info["name"]
-    body = await _json_body(request)
     try:
         origin = manager.get(parent)
     except ManagerError as exc:
-        return json_error(404, str(exc))
+        raise QuickForkError(404, str(exc)) from None
     if origin.exited:
-        return json_error(400, f"session {parent!r} has exited — an exited session cannot be quick-forked")
+        raise QuickForkError(400, f"session {parent!r} has exited — an exited session cannot be quick-forked")
     if not spawn_mod.can_fork(origin.sdef.to_dict()):
-        return json_error(
+        raise QuickForkError(
             400,
             f"session {parent!r} has no conversation to copy: quick-fork needs "
             "a claude session whose conversation is on disk (its first turn "
             "has landed)",
         )
     name = str(body.get("name") or "").strip() or handoff_mod.fork_name(
-        parent, {s.sdef.name for s in manager.list()}
+        parent, {s.sdef.name for s in manager.list()}, tag=tag,
     )
     marker = handoff_mod.new_marker()
     forked_at = handoff_mod._utcnow()
@@ -8280,21 +8312,25 @@ async def h_session_quick_fork(request: web.Request) -> web.Response:
         spawn_body["mesh"] = mesh
     if not inherit_workflow:
         spawn_body["workflow"] = workflow
+    for key, value in (spawn_extra or {}).items():
+        spawn_body.setdefault(key, value)
     warnings: list = []
     try:
         session = manager.stage_child(parent, spawn_body, warnings=warnings)
     except spawn_mod.SpawnDenied as exc:
-        return json_error(403, str(exc))
+        raise QuickForkError(403, str(exc)) from None
     except (HarnessError, ValueError, TypeError) as exc:
-        return json_error(400, f"bad quick-fork request: {exc}")
+        raise QuickForkError(400, f"bad quick-fork request: {exc}") from None
     except ManagerError as exc:
-        return json_error(409 if "already exists" in str(exc) else 400, str(exc))
+        raise QuickForkError(409 if "already exists" in str(exc) else 400, str(exc)) from None
+    if before_launch is not None:
+        before_launch(session)
     try:
         result = await _onboard_and_launch(request, session, spawn_body, parent=parent)
     except onboard.OnboardError as exc:
-        return json_error(400, str(exc))
+        raise QuickForkError(400, str(exc)) from None
     except (HarnessError, ValueError, TypeError) as exc:
-        return json_error(400, f"bad quick-fork request: {exc}")
+        raise QuickForkError(400, f"bad quick-fork request: {exc}") from None
     out = {
         "session": session.info(), "origin": parent, "marker": marker,
         "forked_at": forked_at, **result,
@@ -8316,7 +8352,7 @@ async def h_session_quick_fork(request: web.Request) -> web.Response:
     }
     if warnings:
         out["warnings"] = warnings
-    return json_response(out, status=201)
+    return out
 
 
 async def h_session_handoff(request: web.Request) -> web.Response:
