@@ -37,14 +37,28 @@ const worktrees = [
   { name: 'empty', state: 'unlinked' },
 ];
 const names = (filter, search) => Array.from(ctx.WorktreesPage.filterItems(worktrees, filter, search), w => w.name);
-assert.deepStrictEqual(names('archived'), ['mixed', 'archived']);
-assert.deepStrictEqual(names('killed'), ['killed']);
+assert.deepStrictEqual(names('archived'), ['archived']);
+assert.deepStrictEqual(names('killed'), ['killed', 'archived']);
 assert.deepStrictEqual(names('active'), ['mixed', 'killed', 'paused']);
 assert.deepStrictEqual(names('orphaned'), ['archived']);
 assert.deepStrictEqual(names('unlinked'), ['empty']);
 assert.deepStrictEqual(names('archived', ' OLD2 '), ['archived']);
-assert.deepStrictEqual(names('killed', 'old'), []);
+assert.deepStrictEqual(names('killed', 'old'), ['archived']);
 assert.strictEqual(names('all').length, 5);
+
+const combinations = [
+  { name: 'all-archived', sessions: [{ category: 'archived' }, { category: 'archived' }] },
+  { name: 'all-killed', sessions: [{ category: 'killed' }, { category: 'killed' }] },
+  { name: 'archived-killed', sessions: [{ category: 'archived' }, { category: 'killed' }] },
+  { name: 'killed-running', sessions: [{ category: 'killed' }, { category: 'running' }] },
+  { name: 'archived-paused', sessions: [{ category: 'archived' }, { category: 'paused' }] },
+  { name: 'unknown', sessions: [{ category: 'archived' }, {}] },
+  { name: 'empty-list', sessions: [] },
+];
+assert.deepStrictEqual(Array.from(ctx.WorktreesPage.filterItems(combinations, 'archived'), w => w.name),
+  ['all-archived']);
+assert.deepStrictEqual(Array.from(ctx.WorktreesPage.filterItems(combinations, 'killed'), w => w.name),
+  ['all-archived', 'all-killed', 'archived-killed']);
 
 // Exercise expansion, status rendering, refreshing and retry without HTML
 // interpretation of repository-controlled filenames.
