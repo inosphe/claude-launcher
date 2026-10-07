@@ -16,11 +16,28 @@ It is a default and nothing more — every creation path still takes an
 explicit ``cwd``/``workspace``, and a session in the project is free to sit
 anywhere.
 
+A project may also hold a *default mesh*: the mesh the create forms (the web
+UI's new-session form, the wizard) pick in their Mesh row when that project
+is chosen. Unlike the default workspace it has three states, because "nobody
+has decided" and "decided: no mesh" are different answers:
+
+- the key is absent: **unset** (:data:`UNSET`; the API leaves the field out,
+  so a browser reads ``undefined``). Every project written before the field
+  existed reads this way, and nothing on disk is migrated.
+- ``default_mesh: null``: set to *no* mesh (``None``; the API sends ``null``).
+- ``default_mesh: <name>``: a mesh name.
+
+Both "no mesh" states leave the Mesh row empty; the distinction is kept so a
+reader can tell a project nobody configured from one configured to stay out
+of meshes. The CLI and API creation paths do not join it on their own: a
+mesh join is asked for with ``--mesh``/``mesh`` as before.
+
 The registry lives in ``~/.claunch.yaml`` under ``projects``, name -> fields::
 
     projects:
       launcher:
         default_workspace: claude-launcher   # a workspace NAME, or absent
+        default_mesh: mesh-0826              # a mesh NAME, null, or absent
       hq:
         default_workspace: hq
 
@@ -37,7 +54,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 from . import store, workspaces
 
@@ -52,11 +69,39 @@ class ProjectError(Exception):
     """Raised for an unusable project name or a lookup that finds nothing."""
 
 
+class _Unset:
+    """The type of :data:`UNSET`: one instance, falsy, equal only to itself."""
+
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __bool__(self) -> bool:
+        return False
+
+    def __repr__(self) -> str:
+        return "UNSET"
+
+
+#: A project's ``default_mesh`` when the registry has no key for it, distinct
+#: from ``None`` (a project explicitly set to no default mesh).
+UNSET = _Unset()
+
+#: :func:`add`'s "leave the default mesh as it is"; never a value a project holds.
+_KEEP = object()
+
+
 @dataclass(frozen=True)
 class Project:
     name: str
     #: The workspace *name* new sessions start in by default, or ``None``.
     default_workspace: Optional[str] = None
+    #: The mesh *name* the create forms pick by default, ``None`` for "no
+    #: mesh", or :data:`UNSET` when the registry records neither.
+    default_mesh: Union[str, None, _Unset] = UNSET
 
     @property
     def is_default(self) -> bool:
@@ -75,13 +120,23 @@ class Project:
         ws = workspaces.get(self.default_workspace, doc)
         return ws.path if ws is not None else None
 
+    @property
+    def default_mesh_set(self) -> bool:
+        """Whether the registry records a default mesh (a name *or* ``None``)."""
+        return self.default_mesh is not UNSET
+
     def to_dict(self, doc: Optional[dict] = None) -> dict:
-        return {
+        out = {
             "name": self.name,
             "default_workspace": self.default_workspace,
             "default_cwd": self.default_cwd(doc),
             "is_default": self.is_default,
         }
+        # Unset is the key's absence, on the wire as in the file: a reader
+        # that has to tell it from ``null`` checks for the key.
+        if self.default_mesh_set:
+            out["default_mesh"] = self.default_mesh
+        return out
 
 
 def normalize(name) -> str:
@@ -121,9 +176,22 @@ def _section(doc: Optional[dict] = None) -> Dict[str, dict]:
     return out
 
 
+def _mesh_from_entry(entry: dict):
+    if "default_mesh" not in entry:
+        return UNSET
+    value = entry.get("default_mesh")
+    if value is None:
+        return None
+    # A blank string in a hand-edited file reads as the explicit "no mesh"
+    # it most plausibly means, rather than as a mesh named "".
+    return str(value).strip() or None
+
+
 def _from_entry(name: str, entry: dict) -> Project:
     ws = str(entry.get("default_workspace") or "").strip() or None
-    return Project(name=name, default_workspace=ws)
+    return Project(
+        name=name, default_workspace=ws, default_mesh=_mesh_from_entry(entry)
+    )
 
 
 def list_all(doc: Optional[dict] = None) -> List[Project]:
@@ -183,18 +251,52 @@ def _check_workspace(name: Optional[str]) -> Optional[str]:
     return ws
 
 
-def add(name: str, default_workspace: Optional[str] = None) -> Project:
-    """Create a project, or update the default workspace of one that exists.
+def check_mesh_name(name) -> str:
+    """A default mesh's name, checked for shape only.
+
+    Whether the mesh exists is the daemon's to answer (meshes live in its
+    state, not in this file), and the API checks it before writing. A mesh
+    removed later leaves the setting in place, like an unregistered default
+    workspace, and the forms find no such option to pick.
+    """
+    canon = str(name or "").strip()
+    # ``dev@pca`` is a mesh address (the mesh ``dev`` created on ``pca``).
+    base, at, machine = canon.partition("@")
+    if not _NAME_RE.match(base) or (at and not _NAME_RE.match(machine)):
+        raise ProjectError(
+            f"invalid mesh name {name!r}: use letters, digits, '.', '_' or '-' "
+            "(optionally '@<machine>')"
+        )
+    return canon
+
+
+def add(
+    name: str,
+    default_workspace: Optional[str] = None,
+    default_mesh=_KEEP,
+) -> Project:
+    """Create a project, or update the defaults of one that exists.
 
     Repeating the command is safe: an existing project with the same default
     is returned unchanged, and a different ``default_workspace`` replaces the
     setting rather than raising, because "make it so" is the only thing a
     person typing this twice can mean.
+
+    ``default_mesh`` takes a mesh name, ``None`` (explicitly no mesh) or
+    :data:`UNSET` (drop the key). Left out, the setting is not touched, so a
+    new project starts unset.
     """
     canon = check_name(name)
     ws = _check_workspace(default_workspace)
+    mesh = default_mesh
+    if mesh is not _KEEP and mesh is not None and mesh is not UNSET:
+        mesh = check_mesh_name(mesh)
     existing = get(canon)
-    if existing is not None and (default_workspace is None or existing.default_workspace == ws):
+    if (
+        existing is not None
+        and (default_workspace is None or existing.default_workspace == ws)
+        and (mesh is _KEEP or existing.default_mesh == mesh)
+    ):
         return existing
 
     def _mutate(doc: dict) -> None:
@@ -210,13 +312,20 @@ def add(name: str, default_workspace: Optional[str] = None) -> Project:
                 entry["default_workspace"] = ws
             else:
                 entry.pop("default_workspace", None)
+        if mesh is UNSET:
+            entry.pop("default_mesh", None)
+        elif mesh is not _KEEP:
+            entry["default_mesh"] = mesh
         block[canon] = entry
 
     store.update(_mutate)
+    if mesh is _KEEP:
+        mesh = existing.default_mesh if existing else UNSET
     return Project(
         name=canon,
         default_workspace=ws if default_workspace is not None
         else (existing.default_workspace if existing else None),
+        default_mesh=mesh,
     )
 
 
@@ -224,6 +333,13 @@ def set_default_workspace(name: str, workspace: Optional[str]) -> Project:
     """Set (or, with a blank value, clear) a project's default workspace."""
     project = require(name)
     return add(project.name, default_workspace=str(workspace or ""))
+
+
+def set_default_mesh(name: str, mesh) -> Project:
+    """Set a project's default mesh: a name, ``None`` for "no mesh", or
+    :data:`UNSET` to drop the setting back to never-configured."""
+    project = require(name)
+    return add(project.name, default_mesh=mesh)
 
 
 def remove(name: str) -> Project:

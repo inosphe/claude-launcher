@@ -2273,27 +2273,75 @@ async def h_project_add(request: web.Request) -> web.Response:
     """
     body = await _json_body(request)
     ws = body.get("default_workspace")
+    mesh_args, error = _project_mesh_arg(request, body)
+    if error:
+        return json_error(400, error)
     try:
         project = projects.add(
             str(body.get("name") or ""),
             default_workspace=None if ws is None else str(ws or ""),
+            **mesh_args,
         )
     except projects.ProjectError as exc:
         return json_error(400, str(exc))
     return json_response({"project": project.to_dict()}, status=201)
 
 
-async def h_project_update(request: web.Request) -> web.Response:
-    """Set (or clear, with null/"") a project's default workspace."""
-    body = await _json_body(request)
-    if "default_workspace" not in body:
-        return json_error(400, "'default_workspace' is required (null clears it)")
+def _project_mesh_arg(request: web.Request, body: dict) -> Tuple[dict, str]:
+    """The ``default_mesh`` keyword a project write passes on, or an error.
+
+    The body says it three ways, one per state the setting has
+    (:mod:`claude_launcher.projects`): ``"default_mesh": "<name>"`` sets it,
+    ``"default_mesh": null`` sets it to no mesh, and
+    ``"default_mesh_unset": true`` drops it back to never-configured. Absent
+    both keys, nothing is passed and the setting is left as it is. A name
+    must be a mesh this daemon can resolve, for the same reason a default
+    workspace must be registered.
+    """
+    unset = bool(body.get("default_mesh_unset"))
+    if unset and "default_mesh" in body:
+        return {}, "send either 'default_mesh' or 'default_mesh_unset', not both"
+    if unset:
+        return {"default_mesh": projects.UNSET}, ""
+    if "default_mesh" not in body:
+        return {}, ""
+    value = body.get("default_mesh")
+    if value is None or not str(value).strip():
+        return {"default_mesh": None}, ""
     try:
-        project = projects.set_default_workspace(
-            request.match_info["name"], str(body.get("default_workspace") or "")
-        )
+        name = projects.check_mesh_name(value)
+        _mesh_mgr(request).get(name)
     except projects.ProjectError as exc:
-        return json_error(404 if "no project named" in str(exc) else 400, str(exc))
+        return {}, str(exc)
+    except MeshError as exc:
+        return {}, str(exc)
+    return {"default_mesh": name}, ""
+
+
+async def h_project_update(request: web.Request) -> web.Response:
+    """Change a project's defaults: ``default_workspace`` (null/"" clears it)
+    and/or the default mesh (see :func:`_project_mesh_arg`)."""
+    body = await _json_body(request)
+    if not any(k in body for k in ("default_workspace", "default_mesh", "default_mesh_unset")):
+        return json_error(
+            400,
+            "send 'default_workspace' (null clears it), 'default_mesh' "
+            "(null = no mesh) or 'default_mesh_unset': true",
+        )
+    try:
+        project = projects.require(request.match_info["name"])
+    except projects.ProjectError as exc:
+        return json_error(404, str(exc))
+    mesh_args, error = _project_mesh_arg(request, body)
+    if error:
+        return json_error(400, error)
+    ws = None
+    if "default_workspace" in body:
+        ws = str(body.get("default_workspace") or "")
+    try:
+        project = projects.add(project.name, default_workspace=ws, **mesh_args)
+    except projects.ProjectError as exc:
+        return json_error(400, str(exc))
     return json_response({"project": project.to_dict()})
 
 
