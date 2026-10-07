@@ -818,6 +818,26 @@ A provider may declare `allowed_harnesses`. When present, selecting that
 provider is only valid for the listed harnesses; `set-provider` refuses an
 atomic config change that would make a profile's current harness illegal.
 
+A provider also supplies the **default harness** for profiles that select it
+without pinning one. When no profile in the inheritance chain sets `harness`
+(and no `PROFILE:HARNESS` selector is given), the effective provider's own
+`harness` is used; without it, an `allowed_harnesses` list that excludes
+`claude` names its first entry; otherwise the default stays `claude`. So a
+profile only needs `provider: codex` when the provider says so:
+
+```yaml
+providers:
+  codex:
+    harness: codex              # optional; the default for profiles on it
+    allowed_harnesses: [codex]  # alone, this would also default to codex
+profiles:
+  codex:
+    provider: codex             # no `harness: codex` needed
+```
+
+A profile's `harness` (own or inherited) still overrides the provider's
+default, and the result goes through the same `allowed_harnesses` check.
+
 `service` identifies the provider's account and authentication service; it is
 separate from `allowed_harnesses` and a profile's selected harness. `default`
 and `claude` use `anthropic`; providers without `service` retain the `custom`
