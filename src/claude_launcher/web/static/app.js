@@ -7975,16 +7975,58 @@ async function refreshCflow() {
   renderFlowsTabs();   // the Orphans label carries a count off this answer
   if (flowsSection === "definitions") return;
   if (flowsSection === "orphans") { renderFlowsOrphans(runs); return; }
+  renderCflowRuns(runs);
+}
+
+// Independent of the rail's filter. Reuse its session categories, including
+// the pause marker on exited sessions, rather than the workflow's status.
+function cflowSessionCategory(run, sessions) {
+  const session = (sessions || []).find((s) => s.name === run.scope);
+  if (session) return sessionCategory(session);
+  return (run.sessions || []).includes(run.scope) ? "running" : "unknown";
+}
+
+function filterCflowRuns(runs, sessions, filter, query) {
+  const needle = (query || "").trim().toLowerCase();
+  return (runs || []).filter((run) => {
+    const category = cflowSessionCategory(run, sessions);
+    const matches = filter === "all" || category === filter ||
+      (filter === "running-paused" && (category === "running" || category === "paused"));
+    return matches && (!needle || [run.workflow, run.scope, run.title, run.step_id, run.cwd]
+      .some((value) => String(value || "").toLowerCase().includes(needle)));
+  });
+}
+
+function renderCflowRuns(runs = cflowCache) {
+  const filter = $("flows-session-filter");
+  const search = $("flows-search");
+  if (filter && !filter.dataset.bound) {
+    filter.dataset.bound = "true";
+    filter.addEventListener("change", async () => {
+      // Archived records are fetched on demand by the shared session cache.
+      if (filter.value === "archived" || filter.value === "all") {
+        await refreshSessions({ state: "all" });
+      }
+      renderCflowRuns();
+    });
+    search.addEventListener("input", () => renderCflowRuns());
+  }
+  const visible = filterCflowRuns(runs, sessionsCache,
+    filter ? filter.value : "running-paused", search ? search.value : "");
+  const count = $("flows-result-count");
+  if (count) count.textContent = `${visible.length} of ${runs.length} runs`;
   const list = $("cflow-list");
   list.innerHTML = "";
-  if (runs.length === 0) {
+  if (visible.length === 0) {
     const li = document.createElement("li");
     li.className = "cflow-empty";
-    li.textContent = "no cflow runs — start one with /cflow in a session";
+    li.textContent = runs.length
+      ? "No runs match these filters. Change the session status or search text."
+      : "No workflow runs yet. Start one with /cflow in a session.";
     list.appendChild(li);
     return;
   }
-  for (const r of runs) list.appendChild(cflowCard(r));
+  for (const r of visible) list.appendChild(cflowCard(r));
 }
 
 /* One run, as a list card. Split out of the list's own loop because the
@@ -8000,7 +8042,10 @@ function cflowCard(r) {
   const mark = document.createElement("span");
   mark.className = markCls;
   mark.textContent = markGlyph;
-  const name = document.createElement("span");
+  const name = document.createElement("a");
+  name.className = "cflow-name";
+  name.href = "#/wf/" + encodeURIComponent(`${r.scope || "default"}|${r.cwd}`);
+  name.addEventListener("click", (e) => e.stopPropagation());
   // A run is keyed by (directory, session), so a team working one workflow
   // in one tree makes cards that differ ONLY by the session. That makes the
   // session part of the run's name here, not a decoration beside it — the
@@ -8010,7 +8055,7 @@ function cflowCard(r) {
     ? `${r.workflow || "(workflow)"} · ${r.scope}`
     : (r.workflow || "(workflow)");
   const st = document.createElement("span");
-  st.className = "meta";
+  st.className = `meta badge ${wfDotClass(r.status, r)}`;
   st.textContent =
     r.status === "waiting_approval" && r.reason === "loop_limit"
       ? "loop limit"
@@ -8064,8 +8109,9 @@ function cflowCard(r) {
   // exited session is still there to attach (it resumes).
   if (scoped) {
     const live = (r.sessions || []).includes(r.scope);
+    const category = cflowSessionCategory(r, sessionsCache);
     const sess = cflowLine(
-      `session: ${r.scope}${live ? "" : " (not running)"}`, "dim"
+      `session: ${r.scope} · ${category === "unknown" ? "no session record" : category}`, "dim"
     );
     sess.classList.add("linkish");
     sess.title = live
@@ -24281,6 +24327,23 @@ function renderWfInto(view, data, ui) {
   if (ui.fullLink) head.appendChild(wfFullLink(data));
   view.appendChild(head);
 
+  const overview = el("div", "wf-overview");
+  if (!ui.fullLink) {
+    const back = el("a", "wf-back", "← All runs");
+    back.href = "#/flows";
+    overview.appendChild(back);
+  }
+  if (run.step_id) {
+    const current = el("button", "wf-btn wf-current",
+      `Current step: ${run.title || run.step_id}`);
+    current.type = "button";
+    current.title = "Inspect the current step's instructions and reports";
+    current.addEventListener("click", () => ui.select(run.step_id));
+    overview.appendChild(current);
+  }
+  overview.appendChild(el("span", "wf-note", `${run.steps_completed ?? 0} steps completed`));
+  view.appendChild(overview);
+
   // The buttons at the panel's own top, not the screen's: the gate and the
   // presses that clear it hold still under the head while everything below
   // scrolls. The reminder form stays out of it (reminder: false) — it is a
@@ -24296,6 +24359,7 @@ function renderWfInto(view, data, ui) {
   // head and the buttons and give each column its own scroll; only a phone
   // falls back to one flow (see the 820px block).
   const side = el("div", "wf-side");
+  side.appendChild(el("h3", "wf-section-title", "Run details"));
   if (wf.description) side.appendChild(el("p", "wf-desc", wf.description));
 
   const meta = el("div", "wf-meta");
@@ -24356,6 +24420,8 @@ function renderWfInto(view, data, ui) {
   const cols = el("div", "wf-cols");
   const dia = el("div", "wf-diagram");
   dia.innerHTML = wfDiagramSvg(wf, run, sel);
+  const diagramTitle = el("h3", "wf-section-title", "Workflow steps");
+  dia.insertBefore(diagramTitle, dia.firstChild);
   const finished = run.status === "done" || run.status === "aborted";
   dia.querySelectorAll("g.wfd-node[data-step]").forEach((g) => {
     g.addEventListener("click", () => {

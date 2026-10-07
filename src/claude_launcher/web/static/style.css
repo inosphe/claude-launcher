@@ -1239,6 +1239,30 @@ option:disabled { color: #6b7280; }
 a.cflow-scope { text-decoration: none; }
 a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 .cflow-head .meta { margin-left: auto; color: #7d8590; font-size: 11px; }
+.flows-toolbar { display: flex; align-items: end; flex-wrap: wrap; gap: 12px 20px; margin: 18px 0 12px; }
+.flows-toolbar label { display: flex; flex-direction: column; gap: 6px; color: #b9c2cc; font-size: 12px; }
+.flows-search-label { flex: 1 1 240px; }
+.flows-toolbar input, .flows-toolbar select {
+  min-height: 38px; padding: 8px 10px; border: 1px solid #3c444d;
+  border-radius: 6px; background: #14161a; color: #e6edf3; font: inherit;
+}
+.flows-toolbar .wf-note { padding-bottom: 10px; }
+.flows-settings { margin-bottom: 18px; border: 1px solid #30363d; border-radius: 8px; padding: 10px 14px; }
+.flows-settings > summary { cursor: pointer; font-size: 13px; color: #c6cdd5; }
+.flows-settings > summary .wf-note { margin-left: 12px; font-size: 12px; }
+#cflow-list, #cflow-orphan-list { display: grid; gap: 12px; }
+#cflow-list > li, #cflow-orphan-list > li {
+  min-width: 0; padding: 16px 18px; border: 1px solid #30363d;
+  border-radius: 8px; background: #1b1e24;
+}
+.cflow-head { flex-wrap: wrap; row-gap: 6px; margin-bottom: 9px; }
+.cflow-name { color: #e6edf3; text-decoration: none; font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+.cflow-name:hover { color: #58a6ff; text-decoration: underline; }
+.cflow-head .badge { flex: none; max-width: 100%; overflow-wrap: anywhere; }
+#cflow-list .cflow-line, #cflow-orphan-list .cflow-line { line-height: 1.6; }
+.flows-toolbar :focus-visible, .cflow-name:focus-visible, .wf-current:focus-visible, .wf-back:focus-visible {
+  outline: 2px solid #58a6ff; outline-offset: 3px;
+}
 .cflow-line { font-size: 12px; color: #9da5b0; margin-top: 3px; }
 .cflow-line.report {
   color: #b9c2cc; border-left: 2px solid #30363d; padding-left: 7px;
@@ -3065,6 +3089,16 @@ a.beads-q-name:hover { color: #79c0ff; text-decoration: underline; }
 .mono { font-family: Cascadia Mono, Consolas, Menlo, monospace; font-size: 12px; }
 .wf-head { display: flex; align-items: center; gap: 12px; }
 .wf-head h2 { font-size: 20px; }
+.wf-head { flex-wrap: wrap; }
+.wf-head h2 { overflow-wrap: anywhere; min-width: 0; }
+.wf-overview { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin-top: 10px; flex: none; }
+.wf-back { color: #58a6ff; font-size: 12px; text-decoration: none; }
+.wf-back:hover { text-decoration: underline; }
+.wf-overview .wf-current { text-align: left; overflow-wrap: anywhere; background: #172947; color: #a5d6ff; margin: 0; }
+.wf-section-title { font-size: 13px; color: #c6cdd5; padding: 12px 0 9px; border-bottom: 1px solid #30363d; margin-bottom: 10px; }
+.wf-side > .wf-meta { padding: 10px 12px; background: #1b1e24; border-radius: 6px; overflow-wrap: anywhere; }
+.wf-side > .wf-context { padding: 12px; border-left: 3px solid #3c444d; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.wf-side > .wf-desc { line-height: 1.6; }
 /* The owning session, beside the workflow's name. Sized up from the list
    chip it shares a class with: in the head it is half the run's name, not
    a footnote — and it keeps the pill so it still reads as a link away. */

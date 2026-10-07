@@ -945,7 +945,7 @@
     </div>
 
     <div id="flows-view" class="hidden">
-      <div class="page-head"><h2>Workflows</h2></div>
+      <div class="page-head"><div><h2>Workflows</h2><p class="wf-note">Browse runs, inspect progress, and manage workflow definitions.</p></div></div>
       <!-- Two readings of the same poll, one section deep in the URL the way
            #/beads/<section> already is: Runs is every run on the machine,
            Orphans is the subset whose driving session has exited. The daemon
@@ -954,6 +954,25 @@
            and acts on it. Filled by renderFlowsTabs(). -->
       <div id="flows-tabs" class="seq-tabs flows-page-tabs"></div>
       <div id="flows-runs">
+        <div class="flows-toolbar">
+          <label>Session status
+            <select id="flows-session-filter">
+              <option value="running-paused">Running or paused</option>
+              <option value="running">Running</option>
+              <option value="paused">Paused</option>
+              <option value="killed">Killed</option>
+              <option value="archived">Archived</option>
+              <option value="unknown">No session record</option>
+              <option value="all">All statuses</option>
+            </select>
+          </label>
+          <label class="flows-search-label">Find a run
+            <input id="flows-search" type="search" placeholder="Workflow, session, step, or directory">
+          </label>
+          <span id="flows-result-count" class="wf-note" role="status"></span>
+        </div>
+        <details class="flows-settings">
+          <summary>Automation defaults <span class="wf-note">Reminders and stall pings</span></summary>
         <!-- The reminder clock's machine defaults. Rendered once (not by the
              list's rebuild) so a half-typed interval survives the poll; each
              run's own override lives on its run page. -->
@@ -963,6 +982,7 @@
              that stopped at a step no gate is holding. Rendered once, same
              reason. -->
         <div id="cflow-ping-defaults" class="cflow-defaults"></div>
+        </details>
         <ul id="cflow-list"></ul>
       </div>
       <div id="flows-orphans" class="hidden">
