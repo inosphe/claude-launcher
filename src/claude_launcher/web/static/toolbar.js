@@ -63,19 +63,17 @@
     else { populateMenu(); menu.showPopover(); positionMenu(); }
   });
   menu.addEventListener("toggle", () => more.setAttribute("aria-expanded", String(menu.matches(":popover-open"))));
-  function fit() {
-    frame = 0;
-    observer.disconnect();
-    header.classList.remove("term-compact");
-    header.querySelectorAll(".toolbar-overflow").forEach(el => el.classList.remove("toolbar-overflow"));
-    more.classList.add("hidden");
-    overflow = [];
+  // The label-plus-description each control's tooltip and aria-label carry.
+  // Written only where it moved: the session poll rewrites these controls
+  // every tick, and each write is a mutation a page-watching extension pays
+  // for (claunch-v87).
+  function describe() {
     const title = document.getElementById("term-title");
     if (title) title.title = title.textContent.trim();
     for (const [id, icon] of Object.entries(icons)) {
       const el = document.getElementById(id);
       if (!el) continue;
-      el.dataset.toolbarIcon = icon;
+      if (el.dataset.toolbarIcon !== icon) el.dataset.toolbarIcon = icon;
       const label = el.textContent.trim() || id.replace("term-", "");
       const previous = descriptions.get(el);
       const description = previous && el.title === previous.rendered ? previous.description : el.title;
@@ -84,6 +82,15 @@
       el.title = rendered;
       el.setAttribute("aria-label", rendered);
     }
+  }
+  function fit() {
+    frame = 0;
+    observer.disconnect();
+    header.classList.remove("term-compact");
+    header.querySelectorAll(".toolbar-overflow").forEach(el => el.classList.remove("toolbar-overflow"));
+    more.classList.add("hidden");
+    overflow = [];
+    describe();
     const items = [...header.children].flatMap(el => el.classList.contains("term-actions") ? [...el.children] : [el])
       .filter(el => el !== more && el.id !== "term-details" && getComputedStyle(el).display !== "none");
     const fits = () => {
@@ -109,11 +116,26 @@
       if (!overflow.length) menu.hidePopover();
       else if (!menu.contains(document.activeElement)) { populateMenu(); positionMenu(); }
     }
+    watch();
+  }
+  function watch() {
     observer.observe(header, { subtree: true, childList: true, characterData: true, attributes: true,
       attributeFilter: ["class", "title", "disabled", "aria-pressed"] });
   }
   function schedule() { if (!frame) frame = requestAnimationFrame(fit); }
-  const observer = new MutationObserver(schedule);
+  // A tooltip or a pressed state does not change what fits on the line, so
+  // those alone re-describe the controls without the measuring pass, which
+  // takes the compact and overflow classes off and puts them back.
+  const observer = new MutationObserver((records) => {
+    if (records.every(r => r.type === "attributes" && (r.attributeName === "title" || r.attributeName === "aria-pressed"))) {
+      if (frame) return;
+      observer.disconnect();
+      describe();
+      watch();
+      return;
+    }
+    schedule();
+  });
   new ResizeObserver(schedule).observe(header);
   document.fonts.ready.then(schedule);
   fit();
