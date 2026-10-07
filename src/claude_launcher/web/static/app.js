@@ -14277,6 +14277,28 @@ function openCli() {
   cliRefit(0);
 }
 
+/* Draw a terminal on a WebGL canvas instead of xterm's default DOM rows.
+   The DOM renderer rewrites a row's spans for every line of output, and each
+   rewrite is a mutation that every content script observing the page walks
+   the document for: a busy session's terminal kept a password manager's
+   MutationObserver scanning for 5.2 s of every 12 s, and typing waited
+   behind it (claunch-i9oms). On a canvas the output is no mutation at all.
+   Called after open(), which the addon needs. Where WebGL is missing or the
+   context is lost later (the browser caps live contexts per page), the addon
+   is disposed and xterm falls back to its DOM renderer by itself -- the
+   terminal keeps working, only at the old cost. */
+function attachGpuRenderer(t) {
+  if (typeof WebglAddon === "undefined" || !WebglAddon.WebglAddon) return null;
+  try {
+    const gl = new WebglAddon.WebglAddon();
+    gl.onContextLoss(() => { try { gl.dispose(); } catch {} });
+    t.loadAddon(gl);
+    return gl;
+  } catch {
+    return null;
+  }
+}
+
 function buildCliTerm() {
   cliTerm = new Terminal({
     fontFamily: "Cascadia Mono, Consolas, Menlo, monospace",
@@ -14291,6 +14313,7 @@ function buildCliTerm() {
   cliFit = new FitAddon.FitAddon();
   cliTerm.loadAddon(cliFit);
   cliTerm.open($("cli-term"));
+  attachGpuRenderer(cliTerm);
   cliTerm.onData((data) => {
     if (cliWs && cliWs.readyState === WebSocket.OPEN && cliStatus !== "exited") {
       // A binary frame, on purpose: the daemon reads TEXT frames as JSON
@@ -14547,6 +14570,7 @@ function freshAttach(name) {
   fitAddon = new FitAddon.FitAddon();
   term.loadAddon(fitAddon);
   term.open($("terminal"));
+  if (typeof attachGpuRenderer === "function") attachGpuRenderer(term);
   localFit();
 
   // Wired once, for the life of this terminal object: the link swaps sockets
