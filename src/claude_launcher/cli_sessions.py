@@ -2594,9 +2594,10 @@ def register(sub) -> None:
     )
     p_new.add_argument(
         "--prompt-pack", dest="prompt_packs", action="append", metavar="ID",
-        help="a prompt pack installed in the session's workspace to put into "
-        "its opening (repeatable; see Settings > Install). Packs the role or "
-        "a subrole requires are added without being named",
+        help="a prompt pack to put into its opening (repeatable): the "
+        "session's workspace's copy when installed (Settings > Install), "
+        "else claunch's own. Packs the role or a subrole requires are added "
+        "without being named",
     )
     p_new.add_argument(
         "--resume", nargs="?", const="", metavar="SESSION|UUID",
@@ -2727,9 +2728,10 @@ def register(sub) -> None:
     )
     p_spawn.add_argument(
         "--prompt-pack", dest="prompt_packs", action="append", metavar="ID",
-        help="a prompt pack installed in the session's workspace to put into "
-        "its opening (repeatable; see Settings > Install). Packs the role or "
-        "a subrole requires are added without being named",
+        help="a prompt pack to put into its opening (repeatable): the "
+        "session's workspace's copy when installed (Settings > Install), "
+        "else claunch's own. Packs the role or a subrole requires are added "
+        "without being named",
     )
     p_spawn.add_argument(
         "--connect", action="append", metavar="HANDLE",
