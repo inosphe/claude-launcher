@@ -513,11 +513,14 @@ def test_a_request_naming_a_free_issue_takes_it_instead_of_minting(repo):
         assert br.issues["claunch-9"]["assignee"] == "w1"
         assert len(br.issues) == 1  # nothing minted
 
-        # an explicit field wins too, and an unknown id is not adopted
-        made = await board.ensure_issue(
-            _Sess(_sdef("w2", repo)), body={"task": "go", "issue": "nope-1"}, parent=None
-        )
-        assert made is None
+        # an unknown id is not adopted -- and no longer passes as "no issue":
+        # the board was read and does not hold it (claunch-z7b0n, W1)
+        with pytest.raises(beads_mod.IssueNotOnBoard, match="'nope-1' is not on the board"):
+            await board.ensure_issue(
+                _Sess(_sdef("w2", repo)), body={"task": "go", "issue": "nope-1"},
+                parent=None,
+            )
+        assert len(br.issues) == 1  # nothing minted in its place
 
     asyncio.run(run())
 

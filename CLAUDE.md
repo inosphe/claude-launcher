@@ -48,6 +48,11 @@
   이미 그 세션 것이거나 붙잡던 세션이 종료됐으면 assignee로 지정(take), 살아 있는
   세션이 붙잡고 있으면 assignee를 손대지 않고 참가만 시킨다(join: JOINED 코멘트
   + 오프닝에 "너는 assignee가 아니다" + 공유 메시가 있으면 보유 세션에 fyi).
+  `issue` 필드(Board, `--issue`, spawn, 편입된 v2 입력)로 준 id가 보드에 없다고
+  확인되면(오타, 다른 보드의 id) 세션을 만들지 않고 400으로 거절한다
+  (`beads.IssueNotOnBoard`). task·context 산문에서 읽은 참조는 거절하지 않는다. 보드를 쓸 수 없으면(br 없음, 보드
+  없음, `beads_auto_issue` off) 거절하지 않고 이슈 없이 시작하며, 응답의
+  `beads`(`input_issue`, `settled: false`, `why`)와 오프닝 한 줄에 이유를 남긴다.
   무이슈 답은 둘로 갈린다 — 둘 다 아무것도 만들지 않지만 오프닝에 남기는 안내가
   다르다: `--no-issue`(웹 폼의 "No issue — wait for my instructions", 바디
   `beads: false` 또는 `"none"`)면 보드를 뒤지지 말라고 오프닝에 적고(NONE_WAIT),

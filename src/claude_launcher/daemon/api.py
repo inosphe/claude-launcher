@@ -6769,6 +6769,14 @@ async def _onboard_and_launch(
             raise onboard.OnboardError(str(exc)) from None
         if packs:
             session.sdef = replace(session.sdef, prompt_packs=tuple(packs))
+        # TEMPORARY (claunch-z7b0n): a v2 start input 'issue' is folded into
+        # the board answer, or refused when it contradicts it. Removed with
+        # the overwrite below once no v2 workflow declares that input.
+        if plan.workflow_version == 2 and plan.cflow_inputs:
+            try:
+                beads_mod.adopt_input_issue(body, plan.cflow_inputs)
+            except beads_mod.BoardRequestError as exc:
+                raise onboard.OnboardError(str(exc)) from None
     except Exception:
         manager.discard(name)
         raise
@@ -6779,9 +6787,22 @@ async def _onboard_and_launch(
     # workflows tell it to read (`claunch beads show <id> --json`). Never a
     # reason to refuse the session: a board that cannot be written is logged
     # and the session starts without one.
-    linked = await request.app["beads"].ensure_issue(
-        session, body=body, parent=parent, manager=manager
-    )
+    #
+    # The one exception (claunch-z7b0n, W1): a request that names an issue the
+    # board was read and does not hold is refused like any other bad request
+    # -- whichever field the id came in (the Board pick, --issue, spawn's
+    # issue, a v2 input folded in above). An `issue: <id>` read out of the
+    # task or context is not refused: prose like "Known issue: flaky tests"
+    # matches the same pattern (s88 P1). A board that cannot be read is
+    # still no reason to refuse; that is reported in `unsettled` below.
+    unsettled: dict = {}
+    try:
+        linked = await request.app["beads"].ensure_issue(
+            session, body=body, parent=parent, manager=manager, unsettled=unsettled
+        )
+    except beads_mod.IssueNotOnBoard as exc:
+        manager.discard(name)
+        raise onboard.OnboardError(str(exc)) from None
     report: dict = {}
     if linked:
         beads_mod.link_issue(session, linked["issue"])
@@ -6825,13 +6846,37 @@ async def _onboard_and_launch(
         # board -- and a session that never receives it does the opposite of
         # what was asked.
         none = beads_mod.none_mode(body)
-        if none and (plan.wanted or none == beads_mod.NONE_AUTO):
+        if unsettled:
+            # The request named an issue and the board could not be asked:
+            # the session starts without it, and both the caller and the
+            # session are told which id and why, so the next step is theirs.
+            report["beads"] = {"issue": None, "input_issue": unsettled["issue"],
+                               "settled": False, "why": unsettled["why"]}
+            plan = replace(
+                plan,
+                task=(plan.task + "\n\n" if plan.task else "")
+                + f"[board] Issue {unsettled['issue']} was named for this "
+                  f"session but is not linked: {unsettled['why']}. Link it "
+                  "once the board is reachable, or ask whoever started you.",
+            )
+        elif none and (plan.wanted or none == beads_mod.NONE_AUTO):
             report["beads"] = {"issue": None, "mode": none}
             plan = replace(
                 plan,
                 task=(plan.task + "\n\n" if plan.task else "")
                 + beads_mod.compose_none_note(none, session=name),
             )
+
+    # TEMPORARY (claunch-z7b0n), during the v1 -> v2 migration: the run's
+    # inputs.issue is the issue the board settled -- minted, taken or joined
+    # -- and empty when there is none. The input stays declared so the
+    # workflows keep their text, but the daemon's answer is the only one a
+    # run starts with. Remove this, and beads.adopt_input_issue, once no v2
+    # workflow declares an 'issue' input.
+    if (plan.workflow_version == 2 and plan.cflow_inputs is not None
+            and "issue" in plan.cflow_inputs):
+        plan = replace(plan, cflow_inputs={
+            **plan.cflow_inputs, "issue": linked["issue"] if linked else ""})
 
     opening = ""
     if plan.wanted:
