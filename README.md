@@ -3588,6 +3588,18 @@ injects) but is dismissed there, where its mail is counted.
 
 ## Web UI & HTTP API
 
+**Session line sync.** The **type for this session** line is local-only by
+default: what one browser types stays in that browser until Enter. The
+**Sync** button beside it switches the *session* to remote-sync, and every
+browser showing that session follows: the line becomes one text they all
+type into, each edit carried to the others over the terminal socket, and
+the daemon keeps it in memory until it restarts — close the window, come
+back, and the line is where it was left. What a browser had typed locally
+when sync came on stays beside the shared line read-only, to copy from, and
+returns to the field when sync is switched off. Concurrent edits are last
+writer wins; the clear after a send is conditional, so a line someone else
+started meanwhile is not wiped (`daemon/line_sync.py`).
+
 **User score goal** is optional in **New session** and **Spawn child**.
 It starts with independent reward and penalty counts at zero and carries the
 goal text at the head of the session's opening message. Later session reminders
@@ -3970,6 +3982,8 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | GET    | `/api/sessions/{name}/capture` | `?history=1&format=json&trim=0` |
 | GET    | `/api/sessions/{name}/wait`    | long-poll `?state=idle\|exited&timeout=&threshold=` |
 | POST   | `/api/sessions/{name}/resize`  | `{cols, rows}` |
+| GET    | `/api/sessions/{name}/line-sync` | the session line's sync state: `{mode: local\|remote, text, rev, at, client}` (memory only; gone on a daemon restart) |
+| POST   | `/api/sessions/{name}/line-sync` | `{mode}` switches the session (every viewer follows); `{text, if_text?, client}` replaces the shared text (409 while `local`; `if_text` makes it conditional). Each change goes to every attached viewer as a `line_sync` frame |
 | GET    | `/api/sessions/{name}/ws`      | terminal WebSocket (binary = PTY bytes, text = JSON control) |
 | GET    | `/api/profiles`                | base profile names, policy-filtered execution selectors, labelled default options, and diagnostic selector details (each profile's own row also carries `directory`, `permission_mode` when it runs Claude, and that profile's `harness_policy`) |
 | POST   | `/api/profiles/permission-mode` | declare claunch's default permission mode and converge: `{"mode": "auto"}` (any of `default`, `manual`, `acceptEdits`, `plan`, `auto`, `bypassPermissions`), or `{"mode": null}` to undeclare and fall back to the packaged default; `400` on an unknown mode, before anything is written |

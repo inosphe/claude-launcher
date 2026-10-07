@@ -518,6 +518,17 @@
         <p id="term-clipboard-status" role="status"></p>
         <div id="term-clipboard-items"></div>
       </section>
+      <!-- Session line sync (daemon/line_sync.py). The toggle switches the
+           SESSION, so every page on it follows: in remote-sync mode the field
+           below is the shared line, and what this page had typed locally is
+           kept beside it read-only, to copy from, until sync is switched off
+           and it comes back into the field. -->
+      <button id="term-sync-toggle" class="term-btn" type="button"
+              aria-pressed="false"
+              title="local-only: this line stays in this browser. Click to share it with every browser on this session">Sync off</button>
+      <textarea id="term-local-keep" class="hidden" rows="1" readonly
+                title="what this browser had typed before remote-sync was switched on — read-only; it comes back into the line when sync is switched off"
+                aria-label="this browser's local line, kept read-only while remote-sync is on"></textarea>
       <textarea id="term-input-field" rows="1"
              placeholder="type for this session — Enter to send, Ctrl+J for a newline"
              title="Enter sends · Ctrl+J inserts a newline · Alt+V or Ctrl+V hands the clipboard image to the session · 🖼 attaches image files"
