@@ -704,3 +704,17 @@ def test_wrapup_and_settle_wait_say_the_new_settlement():
     assert "두 자리가 같은 것을 읽어야 정산의" not in text
     assert "생성 이슈 정산 대기" not in text
     assert "일감 완료 대기" in text
+
+
+# -- claunch-60539: the round's issue is recorded in run data ----------------
+
+
+def test_the_resolved_issue_is_bound_to_data_claim():
+    """User decision 2026-10-07 (option A): what resolve-issue settles is the
+    run's record of the round's issue, beside the start input it began with."""
+    chart = _chart()
+    assert chart.data["claim"] == {"issue": None, "how": None}
+    bound = [n for n in chart.nodes.values() if getattr(n, "bind", None) == "claim"]
+    assert [n.label for n in bound] == ["resolve"]
+    # the record has the procedure's return shape
+    assert 'ok: {issue: "str?", how: str}' in V2.read_text(encoding="utf-8")
