@@ -3640,6 +3640,28 @@ its attention, progress and restart fields still count. HTTP:
 own calls live under `/api/operator/agent/{session}/…` and are refused to any
 session that is not its project's bound operator.
 
+**Chat** is where the *people* on a mesh's daemons talk to each other. The
+**Chat** tab next to Mesh (`#/chat`, `#/chat/<mesh>`) and the floating
+**Chat** button above the Operator's open one room per mesh this daemon owns
+or mirrors. A person is a browser: the page mints a random key into
+localStorage the first time it loads and keeps it with a display name the
+header lets you change (it applies to messages sent after the change), so a
+second browser on the same daemon — or a private window — is a second person.
+The key identifies; it does not authenticate. New messages raise the badge on
+the tab and on the button (unread counts are this browser's own; a room's
+history at first sight counts as read), a toast you can reply from without
+opening the room, a desktop notification while the tab is hidden, and a short
+tone — the last two can be switched off in the header. Chat never reaches an
+agent: the room is its own log, `chat.jsonl` in the mesh directory, beside the
+agents' `log.jsonl`. The mesh's authority numbers the room's messages; a post
+on a guest daemon is forwarded to it (`/peer/chat/send`) and refused with 503
+when it cannot be reached (nothing is queued), the authority pushes each new
+message to its peers (`/peer/chat/sync`), and a peer that missed a push pulls
+the tail when its page polls (`/peer/chat/pull`); peer calls carry the mesh's
+link tokens. Routes: `GET /api/chat/rooms`,
+`GET /api/chat/rooms/{mesh}/messages?after=N&limit=N`,
+`POST /api/chat/rooms/{mesh}/messages {key, name, body}`.
+
 The daemon doubles as a web server. `claunch web --open` prints/opens the UI:
 a session list (status badges, create/kill) plus a **live xterm.js terminal**
 attached over WebSocket — full input and output, multiple viewers allowed.
