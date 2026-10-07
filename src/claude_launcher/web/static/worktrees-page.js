@@ -93,7 +93,8 @@ globalThis.WorktreesPage = (() => {
     const q = search.trim().toLowerCase();
     return all.filter(w => (filter === "all" ||
       (["archived", "killed"].includes(filter)
-        ? (w.sessions || []).some(s => s.category === filter)
+        ? (w.sessions || []).length > 0 && w.sessions.every(s =>
+          s.category === "archived" || (filter === "killed" && s.category === "killed"))
         : w.state === filter)) &&
       (!q || [w.name, w.branch, w.path, ...(w.sessions || []).map(s => s.name)]
         .some(v => String(v || "").toLowerCase().includes(q))));
@@ -311,7 +312,9 @@ globalThis.WorktreesPage = (() => {
       const b = node("button", `wf-btn wt-filter-btn${stateFilter === value ? " on" : ""}`, label);
       b.type = "button";
       if (["archived", "killed"].includes(value)) {
-        b.title = `${value} 상태의 연결된 세션이 하나 이상인 워크트리`;
+        b.title = value === "archived"
+          ? "연결된 모든 세션이 archived인 워크트리"
+          : "연결된 모든 세션이 archived 또는 killed인 워크트리";
       }
       b.onclick = () => { stateFilter = value; render(); };
       bar.appendChild(b);
