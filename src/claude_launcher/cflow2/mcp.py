@@ -288,6 +288,27 @@ TOOLS = [
         },
     },
     {
+        "name": "flow_input",
+        "description": (
+            "Write one start input of this running run (data.inputs.<name>, read by "
+            "prompts as ${data.inputs.<name>}). Only an input whose declaration has "
+            "'set_by: [agent]' and that is still empty is written; a filled one is "
+            "refused with the value it holds (nothing overwrites, including a value "
+            "the daemon put in at start). The value is checked like a start input "
+            "(type, enum choices, input_constraints). Only the run's driver may "
+            "write. Returns the new flow_status payload."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "the input's name"},
+                "value": {"description": "the value (text, number or list, as declared)"},
+                "scope": _SCOPE, "cwd": _CWD, "side": _SIDE,
+            },
+            "required": ["name", "value"],
+        },
+    },
+    {
         "name": "flow_rule",
         "description": (
             "Read one of the run's rules: its text, and 'why' (the incident or "
@@ -344,7 +365,7 @@ def _route(cwd: str, scope: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
 def call_tool(name: str, args: dict) -> Dict[str, Any]:
     out = _call(name, args)
     if name in ("flow_start", "flow_status", "flow_report", "flow_select", "flow_fork",
-                "flow_approve", "flow_delegate", "flow_collection") and isinstance(out, dict) and "run" in out:
+                "flow_approve", "flow_delegate", "flow_collection", "flow_input") and isinstance(out, dict) and "run" in out:
         cwd = str(args.get("cwd") or "").strip() or os.getcwd()
         out = _route(cwd, _scope(args), out)
     return out
@@ -466,6 +487,10 @@ def _call(name: str, args: dict) -> Dict[str, Any]:
                                      principal=runtime.PR_DRIVER, session=session,
                                      key=args.get("key"), item=args.get("item"),
                                      fields=args.get("fields"))
+    if name == "flow_input":
+        cwd, scope = _where(args)
+        return runtime.set_input(str(args.get("name") or "").strip(), args.get("value"),
+                                 session=session, cwd=cwd, scope=scope)
     if name == "flow_rule":
         cwd, scope = _where(args)
         return runtime.rule(str(args.get("name") or ""), cwd=cwd, scope=scope)

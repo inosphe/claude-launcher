@@ -655,7 +655,8 @@ inputs:
 | `acceptance` | `[{text, probe?}]` | 행마다 문장과 probe 명령 |
 
 - 선언 키: `type`(기본 `string`), `label`, `help`, `required`(기본 false),
-  `default`, `choices`(`enum`만), `placeholder`. 이름은 식별자 규칙을 따른다.
+  `default`, `choices`(`enum`만), `placeholder`, `precheck`, `set_by`(아래
+  「시작 뒤에 채우는 입력」). 이름은 식별자 규칙을 따른다.
   모르는 type, type과 맞지 않는 `default`, `enum`이 아닌 입력의 `choices`는
   컴파일 오류다.
 - 값 검사(`inputs.normalize`): 폼·CLI에서 온 문자열을 type으로 바꾼다(`int`,
@@ -688,6 +689,48 @@ inputs:
   - MCP `spawn` 도구(`mesh_mcp.py`)의 `cflow_inputs`, CLI `claunch new-session`·
     `claunch spawn`의 `--input NAME=VALUE`(반복 가능, 같은 이름을 두 번 쓰면 목록)와
     `--inputs-file PATH.json`, `--wizard`는 선언된 입력을 한 줄씩 묻는다.
+
+#### 시작 뒤에 채우는 입력(set_by)
+
+시작 입력은 런이 만들어질 때 한 번 기록된다. 선언에 `set_by: [agent]`가 있는
+입력만 예외로, 런이 시작된 뒤에 그 런의 드라이버가 한 번 채울 수 있다
+(claunch-7d4nt). 시작 입력은 런을 시작한 요청의 값이므로, 이 쓰기는 시작 때
+비워 둔 값을 나중에 사용자나 부모가 정해 주었을 때를 위한 것이다.
+improv-worker-v2의 `inputs.issue`가 그 예다: 이슈를 비워 두고 시작한 런에 뒤늦게
+시작 이슈가 지정되면 에이전트가 그 id를 채운다. 런이 진행 중에 스스로 정한
+값(예: 회차가 확정한 이슈)은 시작 입력이 아니며, 워크플로가 `bind`로 다른
+`$data` 이름에 기록한다. 그 값을 `inputs`로 옮겨 적는 경로는 두지 않는다.
+
+```yaml
+inputs:
+  issue: {type: string, default: "", set_by: [agent]}
+```
+
+- `set_by`의 값은 `agent` 하나다. `set_by`가 없는 입력은 시작 뒤에 바꿀 수 없다.
+  `set_by`를 둘 수 있는 type은 `string`, `text`, `int`, `enum`, `list`다. `bool`은
+  빈 값이 없고(채우지 않은 값이 `false`다), `invariants`·`acceptance`는 시작할 때
+  규칙과 모니터로 접히므로 시작 뒤 쓰기가 그것을 다시 만들지 못한다. 그 밖의
+  type에 `set_by`를 쓰면 컴파일 오류다.
+- 쓰기 도구: MCP `flow_input`(`name`, `value`, `scope`/`cwd`/`side`는 다른 `flow_*`
+  도구와 같다)과 CLI `claunch cflow2 input <이름> <값> [--json-value] [-t 슬롯]`.
+  둘 다 엔진 함수 `runtime.set_input` 하나를 부른다. 호출자는 런의 드라이버여야
+  한다(`runtime.may_drive`, 다른 `flow_*` 도구와 같은 판정). 멈춘(halt) 런과 끝난
+  런은 거절한다.
+- 덮어쓰기 금지: 현재 값이 비어 있을 때(`null`, 빈 문자열, 빈 목록)만 쓴다. 값이
+  있으면 거절하고 오류에 현재 값을 싣는다. 시작할 때 데몬이 넣은 Board 이슈도
+  이 규칙으로 보호된다. `default`가 비어 있지 않은 입력은 시작 때 그 값을 가지므로
+  쓸 수 없다. 사람이 값을 덮어쓰는 경로는 없다.
+- 값 검사는 시작 입력과 같다(`inputs.settle`이 `inputs.normalize`와 같은 형식
+  변환과 `enum` 검사를 쓴다). 빈 값은 쓰지 않는다. 그 입력을 읽는
+  `input_constraints`는 새 값을 넣은 전체 입력으로 다시 평가해 어기면 거절한다.
+- 쓰는 자리는 `data.inputs.<선언된 이름>` 하나다. 도구는 그 밖의 `$data` 경로를
+  쓰지 않는다. 반대로 노드는 `data.inputs`를 쓰지 않는다: `bind: inputs`와 최상위
+  `data:`의 `inputs` 키는 컴파일 오류다.
+- 저널: `input_set {name, value, by, was}`(`by`는 쓴 세션, `was`는 이전 값).
+- 쓴 값은 `data.inputs.<이름>`에 들어간다. 그 뒤에 렌더링되는 프롬프트의
+  `${data.inputs.<이름>}`, `flow_status`·`claunch cflow2 status`·웹의 `inputs`가 새
+  값을 보인다. `chart.json` 스냅샷은 시작 때 값 그대로다. 다음 회차(2.1 recur)는
+  런 상태의 `data.inputs`를 이어받는다.
 
 #### 입력 사이의 제약(input_constraints)
 
@@ -1661,6 +1704,7 @@ v1 툴과 이름이 겹치지 않도록 `flow_` 접두어를 쓴다.
 | `flow_answer` | 다른 세션의 런이 라우팅한 ask에 응답자로서 답함(`ask_id`, `decision`, `reason`) |
 | `flow_asks` | 이 세션의 답을 기다리는 ask 목록 |
 | `flow_collection` | 컬렉션 조회와 연산(`action`: `list`, `push`, `set`, `remove`; `collection`, `key`, `item`, `fields`). 주체는 `driver`이고 `access`를 따른다(2.7) |
+| `flow_input` | 시작 뒤에 채우는 입력 쓰기(`name`, `value`). `set_by: [agent]`로 선언되고 비어 있는 입력만, 드라이버만(2.6) |
 
 런 중단(abort)은 MCP 툴이 없다. 사람이 `claunch cflow2 abort`로 한다.
 

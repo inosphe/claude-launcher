@@ -533,6 +533,26 @@ def _cmd_collection(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_input(args: argparse.Namespace) -> int:
+    """Write an empty start input of the run here (``flow_input``'s CLI
+    door): the run's driver only, under the same checks."""
+    from .cflow2 import runtime, store
+
+    session = os.environ.get(store.SESSION_ENV, "").strip()
+    runtime.authorize(cwd=os.getcwd(), scope=args.scope, session=session)
+    value: Any = args.value
+    if args.json_value:
+        try:
+            value = json.loads(args.value)
+        except ValueError as exc:
+            raise SystemExit(f"error: VALUE is not JSON: {exc}")
+    payload = runtime.set_input(args.name, value, session=session, cwd=os.getcwd(),
+                                scope=args.scope)
+    got = (payload.get("inputs") or {}).get(args.name)
+    print(f"input {args.name} = {json.dumps(got, ensure_ascii=False)}")
+    return 0
+
+
 #: ``pr-preflight`` exit codes: the facts a v2 worker's landing reads to
 #: choose its medium (docs/cflow-v2.md 4.6, claunch-yq80p.5).
 PR_READY = 0
@@ -722,6 +742,14 @@ def register(sub) -> None:
     r.add_argument("name")
     r.add_argument("key")
     r.set_defaults(func=_guarded(_cmd_collection))
+
+    q = scoped(csub.add_parser("input", help="write an empty start input of the run here "
+                               "(declared with set_by: [agent]; the run's driver only)"))
+    q.add_argument("name")
+    q.add_argument("value")
+    q.add_argument("--json-value", action="store_true",
+                   help="read VALUE as JSON (a list, a number) instead of text")
+    q.set_defaults(func=_guarded(_cmd_input))
 
     q = csub.add_parser("pr-preflight", help="can this directory land through a pull "
                         "request now (remote, host, gh, sign-in)? JSON; exit 0 ready, 1 not")

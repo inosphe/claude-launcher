@@ -134,6 +134,9 @@ inputs:
     help: 이 회차가 맡을 기존 이슈 id(선택). 오프닝 태스크의 issue:와 같은 뜻이다
     placeholder: claunch-xxxxx
     default: ""
+    # 런이 시작된 이슈. 비워 두고 시작한 뒤 사용자·부모가 지정하면 flow_input으로
+    # 한 번 채운다(docs 2.6). 회차가 확정한 이슈의 기록은 이 입력이 아니다.
+    set_by: [agent]
   scope:
     type: list
     label: 범위(경로·glob)
@@ -364,6 +367,13 @@ nodes:
         --external-ref <run id>` — 이 전이가 회차의 시작이고, id는 intake
         fyi에 함께 실린다. 전이하는 것은 주 이슈 하나다 — 큐의 나머지는
         아래 큐 항목이 다룬다.
+        시작 입력 issue(지금 값: 「${data.inputs.issue}」)는 이 런이 시작된
+        이슈다. 그 값이 비어 있고, 시작 뒤에 사용자나 부모(리더)가 이
+        런의 시작 이슈를 id로 지정했을 때에만 `flow_input`(name `issue`,
+        value 그 id)으로 채운다 — MCP를 쓸 수 없으면 `claunch cflow2 input
+        issue <id>`. 이 회차가 스스로 고르거나 만들거나 확정한 이슈는 시작
+        입력이 아니므로 이 도구로 적지 않는다(그 기록은 워크플로가 따로
+        남긴다). 값이 이미 있으면 쓰지 않는다(엔진도 거절한다).
         어느 경로에도 해당하지 않아 이슈가 서지 않았으면 여기서
         지어내지 않는다 — 그 사실과 사유만 보고에 적고, 판정과 처리는
         여기서 하지 않는다. 사유는 추측이 아니라
