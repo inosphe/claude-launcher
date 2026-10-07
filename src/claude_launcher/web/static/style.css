@@ -130,8 +130,26 @@ option:disabled { color: #6b7280; }
    follow from its column alone (session-grid.js span), so the same column
    sits at the same place in every row. */
 #session-grid {
+  position: relative;
   flex: 1; overflow-x: hidden; overflow-y: auto; padding: 4px 6px 8px; font-size: 12px;
 }
+/* The selected session's lineage (drawSessionGridLineage in app.js): an
+   arrow from the parent's cell and one to each child's, laid over the cells
+   and scrolling with them. Purple for the parent link, teal for the child
+   links -- neither is a state colour the cells already use (green, red and
+   amber are the checks and the gate). The cell at the far end of each arrow
+   takes the same colour as an inset ring, so it reads even where the arrows
+   cross other cells. */
+#session-grid .sg-lineage {
+  position: absolute; left: 0; top: 0; pointer-events: none; overflow: visible; z-index: 1;
+}
+#session-grid .sg-lineage-arrow { fill: none; stroke-width: 2; stroke-linecap: round; opacity: 0.9; }
+#session-grid .sg-lineage-arrow.parent { stroke: #bc8cff; }
+#session-grid .sg-lineage-arrow.child { stroke: #39c5cf; }
+#session-grid .sg-lineage-head.parent path, #session-grid .sg-lineage-tail.parent { fill: #bc8cff; }
+#session-grid .sg-lineage-head.child path, #session-grid .sg-lineage-tail.child { fill: #39c5cf; }
+#session-grid .sg-cell.lineage-parent { box-shadow: inset 0 0 0 1px #bc8cff; }
+#session-grid .sg-cell.lineage-child { box-shadow: inset 0 0 0 1px #39c5cf; }
 #session-grid .sg-per-line {
   display: flex; align-items: center; gap: 2px; margin: 0 0 4px; padding: 0; border: 0;
   color: #7d8590; font-size: 11px;

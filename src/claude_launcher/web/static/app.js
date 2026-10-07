@@ -2230,6 +2230,7 @@ function syncSessionView() {
     input.checked = input.value === sessionView;
   });
   if (grid) renderSessionGrid(true);
+  else drawSessionGridLineage();   // clears it: the list has no overlay
 }
 
 /* The sessions the grid draws: those the rail's state filter admits. A
@@ -2264,7 +2265,7 @@ function renderSessionGrid(force = false) {
                         searching ? sessionMatchesSearch(s) : true,
                         s.briefing?.one_line || null,
                         sessionGridChecks(s).map(statusCheckText),
-                        sessionGridGated(s.name)]),
+                        sessionGridGated(s.name), s.parent || null]),
   ]);
   if (!force && host._gridSignature === signature) return;
   host._gridSignature = signature;
@@ -2345,6 +2346,103 @@ function renderSessionGrid(force = false) {
       closeSessionGridTip();
     }
   }
+  drawSessionGridLineage();
+}
+
+/* The selected session's lineage over the grid: an arrow from its parent's
+   cell to its own and from its own to each child's, in the spawn direction,
+   the parent link purple and the child links teal, with the same colour as a
+   ring on the cells at the far ends. An SVG laid over the scrolled content,
+   so it scrolls with the cells; it takes no pointer events, so every press
+   still lands on the cell under it. Only cells actually drawn get an arrow:
+   a relative with no cell, or one in a folded stretch, has none. Redrawn
+   with the grid, on a click that selects a cell, and when the grid's box
+   changes size (the cells reflow). */
+const SESSION_GRID_LINEAGE_KINDS = ["parent", "child"];
+function drawSessionGridLineage(selected = currentName) {
+  const host = $("session-grid");
+  if (!host) return;
+  host.querySelector(".sg-lineage")?.remove();
+  host.querySelectorAll(".sg-cell.lineage-parent, .sg-cell.lineage-child")
+    .forEach((el) => el.classList.remove("lineage-parent", "lineage-child"));
+  if (!selected || sessionView !== "grid" || typeof SessionGridLineage !== "object") return;
+  const all = typeof railSessions === "function" ? railSessions() : sessionsCache;
+  const links = SessionGridLineage.links(selected, all);
+  if (!links.length) return;
+  const cellOf = (name) => host.querySelector(`.sg-cell[data-name="${CSS.escape(name)}"]`);
+  const self = cellOf(selected);
+  if (!self) return;
+  const origin = host.getBoundingClientRect();
+  const box = (el) => {
+    const r = el.getBoundingClientRect();
+    return { x: r.left - origin.left - host.clientLeft + host.scrollLeft,
+             y: r.top - origin.top - host.clientTop + host.scrollTop,
+             w: r.width, h: r.height };
+  };
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("class", "sg-lineage");
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("width", String(host.scrollWidth));
+  svg.setAttribute("height", String(host.scrollHeight));
+  const defs = document.createElementNS(NS, "defs");
+  for (const kind of SESSION_GRID_LINEAGE_KINDS) {
+    const marker = document.createElementNS(NS, "marker");
+    marker.setAttribute("id", `sg-lineage-head-${kind}`);
+    marker.setAttribute("class", `sg-lineage-head ${kind}`);
+    marker.setAttribute("viewBox", "0 0 10 10");
+    marker.setAttribute("refX", "9");
+    marker.setAttribute("refY", "5");
+    marker.setAttribute("markerWidth", "4");
+    marker.setAttribute("markerHeight", "4");
+    marker.setAttribute("orient", "auto");
+    const head = document.createElementNS(NS, "path");
+    head.setAttribute("d", "M0 0 L10 5 L0 10 z");
+    marker.append(head);
+    defs.append(marker);
+  }
+  svg.append(defs);
+  let drawn = 0;
+  for (const link of links) {
+    const other = cellOf(link.kind === "parent" ? link.from : link.to);
+    if (!other || other === self) continue;
+    const [a, b] = link.kind === "parent" ? [other, self] : [self, other];
+    const arrow = SessionGridLineage.arrow(box(a), box(b));
+    if (!arrow) continue;
+    const path = document.createElementNS(NS, "path");
+    path.setAttribute("class", `sg-lineage-arrow ${link.kind}`);
+    path.setAttribute("d", arrow.d);
+    path.setAttribute("marker-end", `url(#sg-lineage-head-${link.kind})`);
+    path.dataset.from = link.from;
+    path.dataset.to = link.to;
+    // A dot where the arrow leaves, so its tail reads as a start and not as
+    // a line that happens to stop.
+    const tail = document.createElementNS(NS, "circle");
+    tail.setAttribute("class", `sg-lineage-tail ${link.kind}`);
+    tail.setAttribute("cx", String(arrow.start.x));
+    tail.setAttribute("cy", String(arrow.start.y));
+    tail.setAttribute("r", "2.5");
+    svg.append(path, tail);
+    other.classList.add(`lineage-${link.kind}`);
+    drawn++;
+  }
+  if (drawn) host.append(svg);
+}
+if (typeof ResizeObserver === "function") {
+  // The cells share the rail's width, so a wider or narrower rail moves every
+  // cell, and the arrows with them.
+  let lineageWidth = null;
+  const watch = () => {
+    const host = $("session-grid");
+    if (!host) return;
+    new ResizeObserver(() => {
+      if (host.clientWidth === lineageWidth) return;
+      lineageWidth = host.clientWidth;
+      if (host.querySelector(".sg-lineage")) drawSessionGridLineage();
+    }).observe(host);
+  };
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", watch);
+  else watch();
 }
 
 /* The marker a folded stretch leaves: a wavy break across the full width
@@ -2663,6 +2761,7 @@ function sessionGridCell(layout, row, r, c, records, present, searching) {
       document.querySelectorAll("#session-grid .sg-cell.active")
         .forEach((el) => el.classList.remove("active"));
       cell.classList.add("active");
+      drawSessionGridLineage(name);
       location.hash = "#/s/" + encodeURIComponent(name);
     });
     cell.addEventListener("keydown", (ev) => {
