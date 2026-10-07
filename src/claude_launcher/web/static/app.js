@@ -9945,6 +9945,16 @@ function newSubroles(f) {
 let newPackOffer = null;       // /api/prompt-packs/offer's answer
 let newPackOfferFor = null;    // the directory it answers for
 let newPackTicks = new Map();  // pack id -> the operator's own tick
+// The daemon's own prompt (offer.daemon_prompt): one per daemon, so a tick
+// outlives a change of workspace. null = untouched = ticked.
+let newDaemonPromptTick = null;
+
+/* Whether the opening takes this daemon's prompt: only when it has one, and
+   then unless the operator unticked it. */
+function newDaemonPromptWanted() {
+  if (!(newPackOffer && newPackOffer.daemon_prompt)) return false;
+  return newDaemonPromptTick !== false;
+}
 
 async function refreshPromptPackOffer() {
   const cwd = newSessionCwd();
@@ -10027,7 +10037,8 @@ function renderPromptPackRow() {
   const shippedIds = new Set(fromPackage.map((p) => p.id));
   const missing = Object.keys(required).filter((id) => !have.has(id) && !shippedIds.has(id));
   const wsName = offer && offer.workspace ? offer.workspace.name : "this directory's workspace";
-  const empty = !packs.length && !fromPackage.length && !missing.length;
+  const own = offer && offer.daemon_prompt;
+  const empty = !own && !packs.length && !fromPackage.length && !missing.length;
   row.classList.toggle("hidden", empty);
   if (empty) return;
   row.appendChild(el("span", "new-check-label", "Prompt packs"));
@@ -10053,6 +10064,24 @@ function renderPromptPackRow() {
     if (why.length) label.appendChild(el("span", "wf-note", ` (${why.join(" · ")})`));
     list.appendChild(label);
   };
+  if (own) {
+    // First, as the daemon puts it first: the prompt this daemon gives every
+    // session it starts, whatever the role (Settings ▸ Daemon prompt).
+    const label = el("label", "check");
+    label.title = own.description || "";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.name = "daemon_prompt";
+    box.checked = newDaemonPromptWanted();
+    box.addEventListener("change", () => {
+      newDaemonPromptTick = box.checked;
+      renderPromptPackRow();
+    });
+    label.appendChild(box);
+    label.appendChild(el("span", null, own.title || "Daemon prompt"));
+    label.appendChild(el("span", "wf-note", " (this daemon's prompt, every session)"));
+    list.appendChild(label);
+  }
   for (const p of packs) addBox(p, required[p.id], false);
   for (const p of fromPackage) addBox(p, required[p.id], true);
   row.appendChild(list);
@@ -10066,6 +10095,7 @@ function renderPromptPackRow() {
     const why = required[id] ? `role ${required[id].join(", ")}` : "ticked";
     return `${id} (${why}${shippedIds.has(id) ? ", claunch's copy" : ""})`;
   });
+  if (newDaemonPromptWanted()) parts.unshift("daemon prompt (this daemon's, every session)");
   let summary = parts.length
     ? `The opening will include: ${parts.join(" · ")}.`
     : "The opening will include no prompt pack.";
@@ -11317,6 +11347,10 @@ $("new-session").addEventListener("submit", async (e) => {
   // Sent even when empty once an offer was read: an empty list is "none of
   // the defaults", and the daemon still adds what the roles require.
   if (newPackOffer) body.prompt_packs = newPromptPacks(f);
+  // Sent only to say no: the daemon gives its prompt unless told otherwise.
+  if (newPackOffer && newPackOffer.daemon_prompt && !newDaemonPromptWanted()) {
+    body.daemon_prompt = false;
+  }
   if (!parent && f.borrow.value) body.borrow = f.borrow.value;
   if (!parent && f.null_token.checked) body.null_token = true;
   // Onboarding: only sent when chosen. The daemon checks each before it
@@ -18332,6 +18366,7 @@ function openSettings(section) {
   if (wsSection === "install") {
     refreshInstallOverview();
     refreshPromptPacks();
+    refreshDaemonPrompt();
     return;
   }
   if (wsSection === "vscode") {
@@ -23106,6 +23141,101 @@ async function refreshPromptPacks() {
   if (wsOpen) renderWorkspaces();
 }
 
+/* The daemon prompt (Settings ▸ Install): one text THIS daemon gives every
+   session it starts, whatever the role, as the first prompt pack of the
+   opening. It lives in this daemon's own state directory, so another daemon
+   on the machine neither shows nor uses it. Agents can read and replace it
+   too (MCP tool daemon_prompt); every save keeps the text it replaced. */
+let daemonPromptDoc = null;
+let daemonPromptError = "";
+let daemonPromptBusy = false;
+let daemonPromptDraft = null;   // the textarea's text while it differs
+
+async function refreshDaemonPrompt() {
+  try {
+    const resp = await api("/api/daemon-prompt");
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    daemonPromptDoc = data;
+    daemonPromptError = "";
+  } catch (err) { daemonPromptError = String(err); }
+  if (wsOpen) renderWorkspaces();
+}
+
+async function saveDaemonPrompt(text) {
+  daemonPromptBusy = true;
+  if (wsOpen) renderWorkspaces();
+  try {
+    const resp = await api("/api/daemon-prompt", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, by: "web" }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    daemonPromptDoc = data;
+    daemonPromptDraft = null;
+    daemonPromptError = "";
+  } catch (err) {
+    daemonPromptError = String(err);
+  } finally {
+    daemonPromptBusy = false;
+    newPackOfferFor = null;   // the create form's offer carries it
+    if (wsOpen) renderWorkspaces();
+  }
+}
+
+function daemonPromptCard() {
+  const card = el("section", "ws-add daemon-prompt");
+  card.appendChild(el("h3", null, "Daemon prompt"));
+  card.appendChild(el("p", "wf-note",
+    "One prompt this daemon gives every session it starts, whatever the " +
+    "role: the create form shows it as the first prompt pack, ticked (it " +
+    "can be unticked per session). It is this daemon's configuration, kept " +
+    "in its own state directory; other daemons on this machine have their " +
+    "own. Empty means none. Agents can read and replace it with the MCP " +
+    "tool daemon_prompt; each save keeps the text it replaced. A change " +
+    "reaches sessions created after it."));
+  if (daemonPromptError) card.appendChild(el("p", "wf-error", daemonPromptError));
+  const doc = daemonPromptDoc;
+  if (!doc) {
+    card.appendChild(el("p", "wf-note", "Reading the daemon prompt…"));
+    return card;
+  }
+  const where = el("p", "wf-note");
+  where.appendChild(document.createTextNode(`Daemon ${doc.instance} · `));
+  where.appendChild(el("code", null, doc.path));
+  where.appendChild(document.createTextNode(doc.enabled
+    ? ` · ${doc.chars} characters${doc.updated_at ? ` · saved ${doc.updated_at}` : ""}`
+    : " · empty (off)"));
+  card.appendChild(where);
+  const area = document.createElement("textarea");
+  area.id = "daemon-prompt-text";
+  area.className = "daemon-prompt-text";
+  area.rows = 10;
+  area.spellcheck = false;
+  area.placeholder = "Rules every session this daemon starts should follow…";
+  area.value = daemonPromptDraft !== null ? daemonPromptDraft : (doc.text || "");
+  const actions = el("div", "install-actions");
+  const save = el("button", "wf-btn", daemonPromptBusy ? "Saving…" : "Save");
+  const discard = el("button", "wf-btn clear", "Discard changes");
+  const sync = () => {
+    const changed = daemonPromptDraft !== null && daemonPromptDraft !== (doc.text || "");
+    save.disabled = daemonPromptBusy || !changed;
+    discard.disabled = !changed;
+  };
+  // Typing is kept in the draft without a re-render, so the caret stays put.
+  area.addEventListener("input", () => { daemonPromptDraft = area.value; sync(); });
+  save.addEventListener("click", () => saveDaemonPrompt(area.value));
+  discard.addEventListener("click", () => { daemonPromptDraft = null; renderWorkspaces(); });
+  sync();
+  card.appendChild(area);
+  actions.appendChild(save);
+  actions.appendChild(discard);
+  card.appendChild(actions);
+  return card;
+}
+
 async function promptPackCall(method, path, payload, busy) {
   promptPacksBusy = busy;
   if (wsOpen) renderWorkspaces();
@@ -23361,6 +23491,7 @@ function renderWorkspaces() {
   // below: they are machine settings, this is the list of storage roots.
   if (wsSection === "install") {
     view.appendChild(installPanel());
+    view.appendChild(daemonPromptCard());
     view.appendChild(promptPacksCard());
     return;
   }

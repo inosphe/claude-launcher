@@ -403,6 +403,14 @@ TOOLS = [
                         "refuses the spawn"
                     ),
                 },
+                "no_daemon_prompt": {
+                    "type": "boolean",
+                    "description": (
+                        "leave this daemon's own prompt (see 'daemon_prompt') "
+                        "out of the child's opening. Without it every child "
+                        "gets that prompt, whatever its role"
+                    ),
+                },
                 "issue_text": {
                     "type": "string",
                     "description": (
@@ -529,6 +537,32 @@ TOOLS = [
             "child list, which keeps the exited."
         ),
         "inputSchema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "daemon_prompt",
+        "description": (
+            "This daemon's own prompt: one text the daemon instance you run "
+            "under gives EVERY session it starts, whatever the role, as the "
+            "first prompt pack of the opening (a session's creator can untick "
+            "it). It is daemon configuration, not source code: a file in this "
+            "daemon's state directory that no other daemon reads. 'get' (the "
+            "default) returns its path, text and size; 'set' with 'text' "
+            "replaces it -- an empty text turns it off. Every set keeps the "
+            "text it replaced beside the file and logs who wrote it, and it "
+            "reaches only sessions created after it, so change it for a rule "
+            "every future session should follow, not for this session's task"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "op": {"type": "string", "enum": ["get", "set"]},
+                "text": {
+                    "type": "string",
+                    "description": "the whole new prompt, for 'set'",
+                },
+            },
+            "required": [],
+        },
     },
     {
         "name": "rebrief",
@@ -944,6 +978,17 @@ def call_tool(name: str, args: dict) -> dict:
     # messaging tools share.
     if name == "children":
         return _client().get(f"/api/sessions/{_session()}/children")
+    if name == "daemon_prompt":
+        op = str(args.get("op") or "get").strip()
+        if op == "get":
+            return _client().get("/api/daemon-prompt")
+        if op != "set":
+            raise MeshMcpError("'op' is 'get' or 'set'")
+        if not isinstance(args.get("text"), str):
+            raise MeshMcpError("'set' needs 'text': the whole new prompt (empty turns it off)")
+        return _client().put(
+            "/api/daemon-prompt", {"text": args["text"], "by": _session()}
+        )
     if name == "rebrief":
         ident = str(args.get("id") or "").strip()
         path = f"/api/sessions/{_session()}/rebrief"
@@ -1160,6 +1205,7 @@ _SPAWN_KEYS = (
 _SPAWN_RENAMED = {
     "no_issue": ("beads", False),
     "no_issue_auto": ("beads", "none-auto"),
+    "no_daemon_prompt": ("daemon_prompt", False),
 }
 
 

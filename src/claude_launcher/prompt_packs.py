@@ -60,10 +60,12 @@ EDITED = "edited"
 LOCAL = "local"
 
 #: Where the text a session was given came from (:attr:`Pack.source`): the
-#: workspace's installed copy, or -- for a pack a role requires and the
-#: workspace has not installed -- the copy that ships with claunch.
+#: workspace's installed copy, the copy that ships with claunch (for a pack
+#: the workspace has not installed), or the daemon instance's own prompt
+#: (:mod:`claude_launcher.daemon.daemon_prompt`).
 WORKSPACE = "workspace"
 PACKAGE = "package"
+DAEMON = "daemon"
 
 #: A pack id is its file name without ``.md``: lower-case words and dashes,
 #: so it is safe in a path, a URL and a checkbox value alike.
@@ -85,7 +87,8 @@ class Pack:
     #: The header's ``default: true``: ticked on the create form unless
     #: Settings saved its own list (:func:`default_packs`).
     default: bool = False
-    #: :data:`WORKSPACE` or :data:`PACKAGE`; see :func:`pack_copy`.
+    #: :data:`WORKSPACE`, :data:`PACKAGE` (see :func:`pack_copy`) or
+    #: :data:`DAEMON`.
     source: str = WORKSPACE
 
     def to_dict(self) -> dict:
@@ -298,8 +301,11 @@ def opening_block(pack_id: str, body: str, source: str = WORKSPACE) -> str:
     workspace to point at.
     """
     if source == PACKAGE:
-        origin = "shipped with claunch, required by a role"
+        origin = "shipped with claunch, not installed in this workspace"
         where = f"file: (not installed in this workspace; claunch's {pack_id}.md)"
+    elif source == DAEMON:
+        origin = "this daemon's own prompt, given to every session it starts"
+        where = "file: the daemon prompt (MCP tool daemon_prompt shows and edits it)"
     else:
         origin = "installed in this workspace, chosen at session creation"
         where = f"file: {(INSTALL_DIR / (pack_id + '.md')).as_posix()}"
@@ -316,14 +322,15 @@ def opening_block(pack_id: str, body: str, source: str = WORKSPACE) -> str:
 def records(packs: List[Pack]) -> List[Dict[str, str]]:
     """What a session definition keeps of the packs it was given.
 
-    ``source`` is written only for a package copy, so the record of a
-    workspace copy reads exactly as it did before the key existed.
+    ``source`` is written only for a package copy or the daemon's prompt, so
+    the record of a workspace copy reads exactly as it did before the key
+    existed.
     """
     out = []
     for p in packs:
         rec = {"id": p.id, "text": p.body}
-        if p.source == PACKAGE:
-            rec["source"] = PACKAGE
+        if p.source in (PACKAGE, DAEMON):
+            rec["source"] = p.source
         out.append(rec)
     return out
 

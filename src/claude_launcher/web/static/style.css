@@ -4326,6 +4326,13 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .install-diff, .install-lines { max-height: 320px; overflow: auto; white-space: pre-wrap; font-size: 12px; }
 .install-effects li { margin: 2px 0; }
 .prompt-packs { margin-top: 18px; }
+.daemon-prompt { margin-top: 18px; }
+.daemon-prompt code { overflow-wrap: anywhere; }
+.daemon-prompt-text {
+  width: 100%; box-sizing: border-box; min-height: 160px; resize: vertical;
+  padding: 6px 8px; font-family: ui-monospace, monospace; font-size: 12px;
+  background: #14161a; color: #d8dbe0; border: 1px solid #30363d; border-radius: 4px;
+}
 .prompt-pack-table, .prompt-pack-roles { width: 100%; }
 .prompt-pack-table td { vertical-align: top; }
 .prompt-pack-table td .wf-note { overflow-wrap: anywhere; }

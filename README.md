@@ -2615,6 +2615,34 @@ HTTP: `GET /api/prompt-packs` (catalog, per-workspace status, both settings),
 `PUT /api/prompt-packs/role-packs` (`{role_packs?, default_packs?}`; `null`
 restores a default).
 
+### The daemon prompt (one text every session of this daemon gets)
+
+Each daemon instance can hold one prompt of its own that it puts into the
+opening of **every** session it starts, whatever the role or mesh, as the
+first prompt pack (id `daemon`, header `-- this daemon's own prompt`). It is
+daemon configuration, not source code and not a workspace file: it lives in
+the instance's state directory, `~/.claude-launcher/daemon/daemon-prompt.md`
+for the default daemon and `daemons/<name>/daemon-prompt.md` for `-L <name>`,
+so two daemons on one machine never read or show each other's. Empty (or no
+file) means the daemon has none.
+
+Edit it under **Settings ▸ Install ▸ Daemon prompt**. The create form shows it
+as the first box of the Prompt packs row, ticked; untick it to leave it out of
+one session (`daemon_prompt: false` in the body, `--no-daemon-prompt` on
+`claunch new-session`/`spawn`, `no_daemon_prompt` on the MCP `spawn` tool). A
+change reaches sessions created after it, not running ones.
+
+Agents see and change it through the session MCP tool `daemon_prompt`
+(`op: get`, or `op: set` with the whole new `text`; empty turns it off). Every
+save, from the web or an agent, keeps the text it replaced in
+`daemon-prompt.prev.md` and appends `{at, by, chars, previous_chars}` to
+`daemon-prompt.log.jsonl` beside it, so a bad edit can be traced and undone.
+The text is limited to 32,000 characters.
+
+HTTP: `GET /api/daemon-prompt` (instance, path, text, size), `PUT
+/api/daemon-prompt` (`{text, by?}`); `GET /api/prompt-packs/offer` carries it
+as `daemon_prompt`.
+
 ### Joining with a role, or opening another session's conversation
 
 Two creation-time choices sit beside each other in the form. A **role** is the

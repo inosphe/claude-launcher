@@ -66,6 +66,8 @@ const env = new Function(
   [`let newSubroleTicks = new Set();`,
    `let rolesDefault = "";`,
    `let newPackOffer = null, newPackOfferFor = null, newPackTicks = new Map();`,
+   `let newDaemonPromptTick = null;`,
+   slice("newDaemonPromptWanted"),
    slice("newSubrolesMeshless"), slice("newSubroles"), slice("newPrimaryRole"),
    slice("newRequiredPacks"), slice("newPackTicked"),
    slice("renderPromptPackRow"), slice("newPromptPacks"),
@@ -74,6 +76,8 @@ const env = new Function(
       set roleDefault(v) { rolesDefault = v; },
       ticks: () => newPackTicks, subTicks: () => newSubroleTicks,
       render: renderPromptPackRow, packs: newPromptPacks,
+      daemonWanted: newDaemonPromptWanted,
+      resetDaemonTick: () => { newDaemonPromptTick = null; },
       required: newRequiredPacks, primary: newPrimaryRole,
     };`].join("\n")
 )(
@@ -236,6 +240,41 @@ check("with no mesh and nothing installed, any of claunch's packs can be ticked"
   newTick("beads", false);
   form.role.value = "";
   form.mesh.value = "team";
+  env.offer = OFFER;
+});
+
+check("the daemon's prompt is the first box, ticked, and can be unticked", () => {
+  env.offer = { ...OFFER, daemon_prompt: { id: "daemon", title: "Daemon prompt (default)" } };
+  env.render();
+  const b = boxes();
+  assert.deepEqual(b.map((x) => x.name), ["daemon_prompt", ...ALL_BOXES]);
+  assert.equal(b[0].checked, true);
+  assert.equal(b[0].disabled, false);
+  assert.equal(env.daemonWanted(), true);
+  assert.match(text(row), /Daemon prompt \(default\) {2}\(this daemon's prompt, every session\)/);
+  const before = env.packs(form);
+  assert.ok(summary().startsWith(
+    "The opening will include: daemon prompt (this daemon's, every session)"));
+  // It is not a pack id the form sends; its own switch carries the answer.
+  assert.ok(!before.includes("daemon"));
+  b[0].checked = false;
+  b[0].handlers.change[0]();
+  assert.equal(env.daemonWanted(), false);
+  assert.equal(boxes()[0].checked, false);
+  assert.ok(!summary().includes("daemon prompt"));
+  assert.deepEqual(env.packs(form), before);
+  // A daemon with no prompt offers no box, and nothing is wanted.
+  env.offer = { ...OFFER, packs: [], shipped: [], daemon_prompt: null };
+  env.resetDaemonTick();
+  env.render();
+  assert.equal(env.daemonWanted(), false);
+  assert.equal(row.classList.hidden, true);
+  // The daemon's prompt alone is enough to show the row.
+  env.offer = { ...OFFER, packs: [], shipped: [], role_packs: {},
+    daemon_prompt: { id: "daemon", title: "Daemon prompt (default)" } };
+  env.render();
+  assert.equal(row.classList.hidden, false);
+  assert.deepEqual(boxes().map((x) => x.name), ["daemon_prompt"]);
   env.offer = OFFER;
 });
 
