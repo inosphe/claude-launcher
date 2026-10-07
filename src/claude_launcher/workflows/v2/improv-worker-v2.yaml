@@ -212,6 +212,12 @@ params:
 data:
   recheck: {next: next-round, mode: full}
   land_out: {}
+  # 주 이슈(claunch-60539): resolve-issue가 확정한 {issue, how}를 확정할 때마다
+  # 덮어쓴다. issue는 beads id이고, 이슈 없이 진행하면 null이다. 귀속을 다시
+  # 확정하지 않는 회차(stack-round 등)에서는 마지막 확정 값이 남는다.
+  # 시작 입력 inputs.issue는 런을 시작할 때 준 값(데몬이 주입한 Board 이슈)으로
+  # 남고, 회차가 실제로 귀속된 이슈는 이 값이 말한다.
+  claim: {issue: null, how: null}
   # 이 회차의 착지 매체(landing-medium이 회차 시작에, pr-publish가 PR을 연 뒤
   # 채운다). integration-request의 push trigger가 pr_url·pr_number를 착지
   # 큐 레코드에 싣는다(claunch-yq80p.5).
@@ -3419,6 +3425,7 @@ procedures:
               - intake-issue
               - id: resolve
                 call: resolve-issue
+                bind: claim
               - id: workspace
                 call: workspace
               - branch-setup
