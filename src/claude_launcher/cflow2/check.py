@@ -668,6 +668,23 @@ def _known_caps() -> Optional[Set[str]]:
     return set(table) if isinstance(table, dict) else None
 
 
+def _input_checks(chart: ir.Chart) -> List[Finding]:
+    """``set-by-default`` (claunch-7d4nt.1): an input declared ``set_by``
+    whose default is not empty holds that default from the start, and the
+    runtime writes an input only while it is empty (docs 2.6) -- so its
+    ``set_by`` can never take effect."""
+    from . import inputs as inputs_mod
+
+    out: List[Finding] = []
+    for name, decl in ((chart.meta or {}).get("inputs") or {}).items():
+        if decl.get("set_by") and not inputs_mod._is_empty(decl.get("default")):
+            out.append(Finding(WARNING, "set-by-default",
+                               f"input {name!r} declares set_by but has the default "
+                               f"{decl['default']!r}: it is never empty, so nothing can "
+                               f"write it after start -- drop the default or the set_by"))
+    return out
+
+
 def check(chart: ir.Chart) -> List[Finding]:
     out: List[Finding] = []
     nodes = list(chart.walk())
@@ -776,6 +793,8 @@ def check(chart: ir.Chart) -> List[Finding]:
         out.append(Finding(WARNING, "unbounded-visits",
                            "max_visits: 0 -- no node is held by the visit limit; every loop "
                            "still needs its own max"))
+
+    out.extend(_input_checks(chart))
 
     graph = _build(chart)
     if _path(chart, graph, {END}, set()) is None:
