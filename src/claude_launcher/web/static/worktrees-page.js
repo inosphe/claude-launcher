@@ -89,9 +89,12 @@ globalThis.WorktreesPage = (() => {
     return out;
   }
 
-  function visible(all) {
-    const q = query.trim().toLowerCase();
-    return all.filter(w => (stateFilter === "all" || w.state === stateFilter) &&
+  function filterItems(all, filter, search = "") {
+    const q = search.trim().toLowerCase();
+    return all.filter(w => (filter === "all" ||
+      (["archived", "killed"].includes(filter)
+        ? (w.sessions || []).some(s => s.category === filter)
+        : w.state === filter)) &&
       (!q || [w.name, w.branch, w.path, ...(w.sessions || []).map(s => s.name)]
         .some(v => String(v || "").toLowerCase().includes(q))));
   }
@@ -303,9 +306,13 @@ globalThis.WorktreesPage = (() => {
     filter.oninput = () => { query = filter.value; renderBody(); };
     bar.appendChild(filter);
     for (const [value, label] of [["all", "전체"], ["active", "세션 연결됨"],
+      ["archived", "세션 archived"], ["killed", "세션 killed"],
       ["orphaned", "orphaned"], ["unlinked", "세션 기록 없음"]]) {
       const b = node("button", `wf-btn wt-filter-btn${stateFilter === value ? " on" : ""}`, label);
       b.type = "button";
+      if (["archived", "killed"].includes(value)) {
+        b.title = `${value} 상태의 연결된 세션이 하나 이상인 워크트리`;
+      }
       b.onclick = () => { stateFilter = value; render(); };
       bar.appendChild(b);
     }
@@ -330,7 +337,7 @@ globalThis.WorktreesPage = (() => {
       body.appendChild(node("p", "wt-muted", loading ? "읽는 중…" : ""));
       return;
     }
-    const all = visible(items());
+    const all = filterItems(items(), stateFilter, query);
     if (!all.length) {
       body.appendChild(node("p", "wt-muted", "표시할 워크트리가 없다."));
       return;
@@ -370,5 +377,5 @@ globalThis.WorktreesPage = (() => {
 
   function stop() { sequence++; loading = false; }
 
-  return { open, stop, bucketOf, mergeLabel, changesPanel };
+  return { open, stop, bucketOf, mergeLabel, changesPanel, filterItems };
 })();
