@@ -55,10 +55,62 @@ receiving the recorded variables verbatim (``legacy_env``) until
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field, replace
+from functools import lru_cache
 from typing import Dict, Iterable, Optional, Tuple
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
+
+
+@dataclass(frozen=True)
+class OpenAIUrls:
+    """One endpoint expressed as an SDK base URL and a direct request URL."""
+
+    base_url: str
+    chat_completions_url: str
+
+
+@lru_cache(maxsize=128)
+def openai_urls(endpoint: str) -> OpenAIUrls:
+    """Interpret ``endpoints.openai`` identically for every consumer.
+
+    The value is the backend's API base, including any required version path.
+    A full Chat Completions URL is accepted for compatibility. Arbitrary bases
+    retain their path; only Fireworks' historical ``/inference`` base gains
+    ``/v1``. Queries and fragments are rejected because SDKs and the shim
+    append resource paths to the base string. Memoization bounds repeated
+    compatibility warnings during polls.
+    """
+    endpoint = endpoint.strip()
+    if not endpoint:
+        return OpenAIUrls("", "")
+    parts = urlsplit(endpoint)
+    if parts.query or parts.fragment:
+        raise SpecError(
+            "endpoints.openai must be an API base URL without query parameters "
+            "or a fragment"
+        )
+    path = parts.path.rstrip("/")
+    suffix = "/chat/completions"
+    if path.endswith(suffix):
+        path = path[:-len(suffix)]
+    if (
+        parts.scheme == "https"
+        and parts.netloc.lower() == "api.fireworks.ai"
+        and path == "/inference"
+    ):
+        path += "/v1"
+        # Never include the supplied URL: query parameters may hold secrets.
+        logging.getLogger(__name__).warning(
+            "Fireworks OpenAI endpoint /inference was normalized to /inference/v1; "
+            "set endpoints.openai to https://api.fireworks.ai/inference/v1"
+        )
+    return OpenAIUrls(
+        urlunsplit(parts._replace(path=path)),
+        urlunsplit(parts._replace(path=path + suffix)),
+    )
+
 
 #: Model roles, in the order harnesses that take a flat list receive them.
 #: ``xlarge`` is the tier above ``large`` (Claude's Fable slot over its Opus
@@ -104,6 +156,14 @@ PROFILE_SPEC_FIELDS: Tuple[str, ...] = (
     "reasoning_effort",
 )
 HARNESS_OPTIONS_FIELD = "harness_options"
+#: cflow v2 capability overrides (docs/cflow-v2.md 6.2). Accepted on a
+#: provider, a profile, and as a channel of every ``harness_options.<h>``
+#: block; the spec only checks their shape -- ``cflow2.caps`` resolves them
+#: and reports unknown ids. Not a :data:`SPEC_FIELDS` member: it describes
+#: what the harness+backend can do, not the backend itself.
+CAPABILITIES_FIELD = "capabilities"
+#: ``harness_options`` channels every harness accepts, whatever its translator.
+UNIVERSAL_HARNESS_OPTION_CHANNELS: Tuple[str, ...] = (CAPABILITIES_FIELD,)
 
 #: Claude Code's context-window decoration on a model id (``name[1m]``).
 MODEL_TAG_RE = re.compile(r"(\[[^\]]*\])\s*$")
@@ -182,6 +242,8 @@ class ProviderSpec:
     #: The recorded Claude-vocabulary ``env`` of a not-yet-migrated provider.
     #: When set, the Claude translator returns it verbatim.
     legacy_env: Optional[Dict[str, str]] = None
+    #: ``{capability id: true | false | {enabled, args}}`` (cflow v2).
+    capabilities: Dict[str, object] = field(default_factory=dict)
 
     # -- convenience -------------------------------------------------------
     def endpoint(self, protocol: str) -> Optional[str]:
@@ -280,6 +342,33 @@ def _str_map(value, what: str, allowed: Optional[Iterable[str]] = None) -> Dict[
     return out
 
 
+def parse_capabilities(value, what: str) -> Dict[str, object]:
+    """Shape-check a ``capabilities`` block: id -> bool or {enabled, args}."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise SpecError(f"{what} must be a mapping of capability id -> true/false")
+    out: Dict[str, object] = {}
+    for key, item in value.items():
+        name = str(key).strip()
+        if isinstance(item, bool):
+            out[name] = item
+            continue
+        if not isinstance(item, dict) or set(map(str, item)) - {"enabled", "args"}:
+            raise SpecError(
+                f"{what}.{name} must be true, false or a mapping of enabled/args"
+            )
+        if "enabled" in item and not isinstance(item["enabled"], bool):
+            raise SpecError(f"{what}.{name}.enabled must be true or false")
+        args = item.get("args")
+        if args is not None and not (
+            isinstance(args, list) and all(isinstance(a, (str, int, float)) for a in args)
+        ):
+            raise SpecError(f"{what}.{name}.args must be a list of strings")
+        out[name] = dict(item)
+    return out
+
+
 def parse_harness_options(value, what: str) -> Dict[str, Dict[str, object]]:
     """Validate a ``harness_options`` block; unknown channels are errors."""
     if value is None:
@@ -297,6 +386,9 @@ def parse_harness_options(value, what: str) -> Dict[str, Dict[str, object]]:
         cleaned: Dict[str, object] = {}
         for channel, item in block.items():
             cname = str(channel)
+            if cname == CAPABILITIES_FIELD:
+                cleaned[cname] = parse_capabilities(item, f"{what}.{name}.{cname}")
+                continue
             if channels is not None and cname not in channels:
                 raise SpecError(
                     f"{what}.{name}.{cname} is not accepted by the {name} "
@@ -365,6 +457,9 @@ def from_entry(entry: dict, what: str, *, profile: bool = False) -> ProviderSpec
         harness_options=parse_harness_options(
             entry.get(HARNESS_OPTIONS_FIELD), f"{what}.{HARNESS_OPTIONS_FIELD}"
         ),
+        capabilities=parse_capabilities(
+            entry.get(CAPABILITIES_FIELD), f"{what}.{CAPABILITIES_FIELD}"
+        ),
     )
     if (
         spec.context_window
@@ -411,6 +506,7 @@ def overlay(base: ProviderSpec, top: ProviderSpec) -> ProviderSpec:
         ),
         harness_options=options,
         legacy_env=top.legacy_env if top.legacy_env is not None else base.legacy_env,
+        capabilities={**base.capabilities, **top.capabilities},
     )
 
 

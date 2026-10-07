@@ -328,8 +328,8 @@ TOOLS = [
                         "further roles the child also answers for besides "
                         "'role' — a workflow's delegated decision, a "
                         "filter_roles check and the policy engine find it "
-                        "under any of them. Its stance is still the primary "
-                        "role's"
+                        "under any of them, and each subrole's stance is "
+                        "briefed after the primary's"
                     ),
                 },
                 "connect": {
@@ -351,12 +351,24 @@ TOOLS = [
                         "child_cflow), and on none when your workflow pairs "
                         "with nothing or you are driving no run. Name one to "
                         "override that pairing; '-' gives the child no run "
-                        "where the pair would have given it one"
+                        "where the pair would have given it one. A cflow v2 workflow "
+                        "is named the same way (or as v2:<name> when a v1 one "
+                        "shares the name, or a .cflow2/generated/*.yaml path)"
                     ),
                 },
                 "context": {
                     "type": "string",
                     "description": "context string for that workflow run",
+                },
+                "cflow_inputs": {
+                    "type": "object",
+                    "description": (
+                        "start inputs of a cflow v2 workflow that declares "
+                        "'inputs:' (name -> value; e.g. {\"goal\": \"...\", "
+                        "\"invariants\": [{\"text\": \"...\", \"probe\": \"cmd\"}]}). "
+                        "Read the declaration with 'claunch cflow2 show <name>'. "
+                        "A missing required input or an unknown name refuses the spawn"
+                    ),
                 },
                 "task": {
                     "type": "string",
@@ -485,6 +497,17 @@ TOOLS = [
                         "starts. If that rebase cannot be done cleanly the "
                         "spawn is refused and nothing is created, so the child "
                         "never wakes up in a conflicted checkout"
+                    ),
+                },
+                "branch_from": {
+                    "type": "string",
+                    "description": (
+                        "start a NEW 'worktree' at this branch, commit or "
+                        "other worktree's name (that worktree's checked-out "
+                        "branch, committed work only) instead of the trunk. "
+                        "Refused when the named worktree already exists and "
+                        "together with rebase_onto, which is the field that "
+                        "updates a REUSED one"
                     ),
                 },
             },
@@ -1051,8 +1074,9 @@ def _my_handle(members: list) -> str:
 _SPAWN_KEYS = (
     "name", "mesh", "handle", "role", "subroles", "connect", "workflow", "context",
     "task", "issue", "issue_text", "harness", "workspace", "worktree",
-    "rebase_onto", "profile", "borrow", "null_token", "cwd", "args", "env",
-    "fork", "tools", "project", "prompt_packs",
+    "rebase_onto", "branch_from", "profile", "borrow", "null_token", "cwd", "args", "env",
+    "fork", "tools", "project", "prompt_packs", "workflow_version", "workflow_params",
+    "cflow_inputs",
 )
 
 

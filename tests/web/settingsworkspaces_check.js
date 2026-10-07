@@ -114,6 +114,7 @@ const REFRESHERS = [
   "refreshPrompterSettings", "refreshStatusChecks", "refreshRagStatus",
   "refreshGhStatus", "refreshRelaySettings", "refreshBeadsBoards",
   "refreshProjects", "refreshProfileSettings", "refreshInstallOverview",
+  "refreshVscode",
 ];
 const octx = {
   wsSection: "", wsOpen: true,
@@ -128,7 +129,12 @@ vm.runInContext(slice("openSettings"), octx);
 
 called.length = 0;
 octx.openSettings("workspaces");
-assert.deepEqual([...called].sort(), ["refreshBeadsBoards", "refreshProjects"]);
+// ...and the VS Code state its rows' buttons are drawn from.
+assert.deepEqual([...called].sort(), ["refreshBeadsBoards", "refreshProjects", "refreshVscode"]);
+
+called.length = 0;
+octx.openSettings("vscode");
+assert.deepEqual(called, ["refreshVscode"], "the VS Code tab fetches its own state only");
 
 called.length = 0;
 octx.openSettings("");

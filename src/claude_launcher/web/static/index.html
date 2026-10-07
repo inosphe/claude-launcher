@@ -214,6 +214,8 @@
       <a href="#/stats" data-page="stats"><span>▤</span>Stats</a>
       <a href="#/beads" data-page="beads"><span>◈</span>Beads</a>
       <a href="#/worktrees" data-page="worktrees"><span>⑂</span>Worktrees</a>
+      <a href="#/glossary" data-page="glossary"><span>≡</span>Glossary</a>
+      <a href="#/spec" data-page="spec"><span>⊞</span>Spec</a>
       <a href="#/cli" data-page="cli"><span>&gt;_</span>CLI</a>
       <a href="#/settings" data-page="settings"><span>⚙</span>Settings</a>
     </nav>
@@ -712,9 +714,13 @@
           <div id="new-subroles-row" class="new-check-row hidden"></div>
           <div id="new-packs-row" class="new-check-row hidden"></div>
           <label>Workflow <select name="workflow"></select></label>
+          <p id="new-workflow-note" class="wf-note hidden">cflow v1 format is deprecated; v2 runs beside it (docs/cflow-v2.md). The run still starts and works as before.</p>
           <label id="new-context-row" class="hidden">
             Context <input name="context" placeholder="context for the run (optional)">
           </label>
+          <!-- a v2 workflow's typed start inputs (docs/cflow-v2.md 2.6);
+               drawn by syncCflowInputs from the picked entry's schema -->
+          <div id="new-inputs" class="cf2-inputs hidden"></div>
         </fieldset>
 
         <!-- HOW it runs, folded shut. Every row here has a default that is
@@ -800,6 +806,12 @@
             <span>new worktree</span></label>
           <label id="new-worktree-name-row">Name
             <input name="worktree_name" placeholder="(auto: session-time)"></label>
+          <!-- Where the NEW branch starts. A question of the new checkout
+               only: an existing one keeps the branch it has, and bringing
+               that one up to date is the Rebase onto row's question, which
+               shows under "existing worktree" and nowhere else. -->
+          <label id="new-worktree-from-row">Branch from
+            <select name="worktree_from"></select></label>
           <label class="check"><input type="radio" name="worktree_mode" value="existing">
             <span>existing worktree</span></label>
           <!-- The search box above the picker, in the same hidden row, for
@@ -820,7 +832,8 @@
           <!-- A div rather than a label: the trunk button is a control of its
                own, and a button inside a label forwards the click to the
                label's control as well, so pressing it would both fill the
-               branch and open the box under it. -->
+               branch and open the box under it. Shown for a REUSED checkout
+               only: a new one starts where Branch from says. -->
           <div id="new-worktree-rebase-row">
             <label>Rebase onto
               <input name="worktree_rebase" placeholder="branch (optional)"></label>
@@ -1124,6 +1137,10 @@
       </div>
       <div id="cli-term"></div>
     </div>
+    <div id="glossary-view" class="hidden"></div>
+    <!-- Work spec import: check, plan and run a spec (docs/work-spec.md);
+         drawn by spec-page.js. -->
+    <div id="spec-view" class="hidden"></div>
   </main>
 
   <!-- #sess-view is moved in here, to the right of #main, on a wide screen:
@@ -1149,6 +1166,8 @@
 <script src="static/diagram-viewport.js"></script>
 <script src="static/search-anything.js"></script>
 <script src="static/worktrees-page.js"></script>
+<script src="static/glossary-page.js"></script>
+<script src="static/spec-page.js"></script>
 <script src="static/operator.js"></script>
 <script src="static/session-tabs.js"></script>
 <script src="static/session-grid.js"></script>

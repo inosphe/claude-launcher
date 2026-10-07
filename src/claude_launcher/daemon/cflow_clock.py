@@ -58,7 +58,7 @@ import subprocess
 import tempfile
 import time
 from collections import deque
-from typing import Callable, Dict, List, Optional, Set, Tuple
+from typing import Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
 from .. import store
 from ..cflow import engine as cflow_engine, landing as cflow_landing, model as cflow_model, state as cflow_state
@@ -2148,6 +2148,12 @@ class TriggerClock:
         still alive -- the request stands either way.
         """
         pcwd, parent, why = await asyncio.to_thread(self.parent_run, scope)
+        # A parent whose landing queue is a v2 ``landing`` collection
+        # (docs/cflow-v2.md 10, 「v1 연결」): taken only when no v1 run of
+        # the parent holds one, so every v1-only case below reads as before.
+        bridged = await self._enqueue_landing_v2(cwd, scope)
+        if bridged is not None:
+            return bridged
         if pcwd is None:
             return False, why
         tip = await asyncio.to_thread(cflow_landing.head, cwd)
@@ -2187,6 +2193,48 @@ class TriggerClock:
             )
         )
 
+    async def _enqueue_landing_v2(self, cwd: str, scope: str) -> Optional[Tuple[bool, str]]:
+        """The landing request onto a v2 parent run's ``landing`` collection
+        (principal ``child``), or None when the parent has no such run.
+
+        A parent with a v1 ``landing_queue:`` run AND a v2 ``landing`` run is
+        ambiguous: skipped with a warning, nothing pushed (docs 10).
+        """
+        from . import cflow2_triggers as v2
+
+        parent = v2.parent_of(self.manager, scope)
+        if not parent:
+            return None
+        holders = await asyncio.to_thread(
+            lambda: v2.v2_holders(v2.LANDING, parent, v2.session_cwds(self.manager, parent))
+        )
+        holders = sorted(set(holders))
+        if not holders:
+            return None
+        if await asyncio.to_thread(v2.v1_landing_holders, parent):
+            msg = v2.both_warning(parent, v2.LANDING)
+            log.warning("cflow enqueue-landing from %s: %s", scope, msg)
+            return False, msg
+        if len(holders) > 1:
+            return False, (
+                f"parent {parent!r} has {len(holders)} v2 runs declaring 'landing'; "
+                "the target is ambiguous"
+            )
+        tip = await asyncio.to_thread(cflow_landing.head, cwd)
+        if not tip:
+            return False, f"no commit readable in {cwd}"
+        branch = await asyncio.to_thread(cflow_landing.branch, cwd)
+        issues = await asyncio.to_thread(cflow_landing.in_review_of, cwd, scope)
+        if issues is None:
+            return False, "the issue board could not be read"
+        if not issues:
+            return False, f"{scope} holds no issue in_review (no landing request on the board)"
+        items = [
+            {"issue": i, "branch": branch or "", "tip": tip, "requested_by": scope}
+            for i in issues
+        ]
+        return await asyncio.to_thread(v2.push_v2, holders[0], v2.LANDING, items, scope)
+
     async def _perform(self, cwd: str, scope: str, action: dict) -> Tuple[bool, str]:
         """Do one claimed action. Returns (performed, why/what)."""
         do = action.get("do")
@@ -2207,17 +2255,9 @@ class TriggerClock:
         return False, f"this daemon has no trigger action named {do!r}"
 
     async def _checks(self, cwd: str, scope: str, session) -> Tuple[bool, str]:
-        try:
-            checks = await asyncio.to_thread(
-                status_checks.session_entries, session.sdef.name, enabled_only=True
-            )
-        except status_checks.StatusCheckError as exc:
-            return False, f"status checks unreadable: {exc}"
-        if not checks:
-            return False, "no enabled status checks are configured"
-        if not await self._deliver(cwd, scope, status_checks.REFRESH_PROMPT):
-            return False, "the refresh request could not be queued for the session"
-        return True, f"asked for {len(checks)} status check(s)"
+        return await request_checks(
+            session, lambda block: self._deliver(cwd, scope, block)
+        )
 
     async def _deliver(self, cwd: str, scope: str, block: str) -> bool:
         """Queue text for the driving session, the way every clock here does.
@@ -2238,20 +2278,45 @@ class TriggerClock:
 
     @staticmethod
     async def _briefing(session) -> Tuple[bool, str]:
-        cfg = await asyncio.to_thread(briefing.llm_config)
-        if not briefing.llm_configured(cfg):
-            return False, "no llm endpoint is configured (the llm: block is empty)"
-        try:
-            payload = await briefing.compose(session, cfg, refresh=True)
-        except briefing.BriefingError as exc:
-            return False, f"briefing endpoint failed: {exc}"
-        except Exception as exc:  # the endpoint is the user's own choice
-            return False, f"briefing could not be composed: {exc}"
-        state = ((payload.get("briefing") or {}).get("state")
-                 if isinstance(payload.get("briefing"), dict) else None)
-        if state:
-            return True, f"briefing recomposed (state {state!r})"
-        return True, "briefing recomposed"
+        return await recompose_briefing(session)
+
+
+async def request_checks(
+    session, deliver: Callable[[str], Awaitable[bool]]
+) -> Tuple[bool, str]:
+    """The ``checks`` trigger: ask ``session`` to re-take its enabled status
+    checks, typed through ``deliver``. Shared by the v1 :class:`TriggerClock`
+    and the v2 clock (:mod:`.cflow2_triggers`)."""
+    try:
+        checks = await asyncio.to_thread(
+            status_checks.session_entries, session.sdef.name, enabled_only=True
+        )
+    except status_checks.StatusCheckError as exc:
+        return False, f"status checks unreadable: {exc}"
+    if not checks:
+        return False, "no enabled status checks are configured"
+    if not await deliver(status_checks.REFRESH_PROMPT):
+        return False, "the refresh request could not be queued for the session"
+    return True, f"asked for {len(checks)} status check(s)"
+
+
+async def recompose_briefing(session) -> Tuple[bool, str]:
+    """The ``briefing`` trigger: recompose ``session``'s LLM briefing. Shared
+    by the v1 :class:`TriggerClock` and the v2 clock."""
+    cfg = await asyncio.to_thread(briefing.llm_config)
+    if not briefing.llm_configured(cfg):
+        return False, "no llm endpoint is configured (the llm: block is empty)"
+    try:
+        payload = await briefing.compose(session, cfg, refresh=True)
+    except briefing.BriefingError as exc:
+        return False, f"briefing endpoint failed: {exc}"
+    except Exception as exc:  # the endpoint is the user's own choice
+        return False, f"briefing could not be composed: {exc}"
+    state = ((payload.get("briefing") or {}).get("state")
+             if isinstance(payload.get("briefing"), dict) else None)
+    if state:
+        return True, f"briefing recomposed (state {state!r})"
+    return True, "briefing recomposed"
 
 
 class RoundStartClock:

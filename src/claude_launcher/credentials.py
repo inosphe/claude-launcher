@@ -17,7 +17,7 @@ import json
 import os
 import stat
 import time
-from typing import Optional
+from typing import List, Optional
 
 from . import atomic
 from .profile import Profile
@@ -54,6 +54,23 @@ def _save_secret(path, value: str, what: str) -> None:
 def save_token(profile: Profile, token: str) -> None:
     """Persist a setup-token for ``profile`` with owner-only permissions."""
     _save_secret(_token_path(profile), token, "token")
+
+
+def clear_token(profile: Profile) -> List[str]:
+    """Delete the profile's stored token; return the filenames removed.
+
+    The legacy ``set-key`` file goes too: left behind, the next bootstrap's
+    :func:`migrate_legacy_api_key` would move it back into the token path and
+    the clear would not hold. A ``/login``-written ``.credentials.json`` is
+    Claude Code's own file and is not touched.
+    """
+    removed: List[str] = []
+    for name in (TOKEN_FILENAME, LEGACY_API_KEY_FILENAME):
+        path = profile.config_dir / name
+        if path.is_file():
+            path.unlink()
+            removed.append(name)
+    return removed
 
 
 def migrate_legacy_api_key(profile: Profile) -> bool:

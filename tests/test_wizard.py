@@ -112,6 +112,8 @@ class FakeSources(wizard.Sources):
             "repo": True, "branch": branch,
             "branches": [branch, "topic", "old-thing"],
             "worktrees": ["review"],
+            "root_branch": branch,
+            "worktree_branches": {"review": "topic"},
         }
 
 
@@ -2824,6 +2826,44 @@ def test_no_update_sends_no_base_at_all():
     assert args.worktree == "review"
     assert args.rebase_onto == ""
     assert "rebased" not in wiz.summary()
+
+
+def test_a_new_worktree_is_asked_where_it_starts_and_a_reused_one_is_not():
+    """Branch from and Update/Rebase onto are the two questions of the two
+    kinds of checkout, so a form never shows both."""
+    wiz = form()
+    assert wiz.field("branch_from").hidden
+    pick(wiz, "worktree", "new worktree")
+    assert not wiz.field("branch_from").hidden
+    assert wiz.field("update").hidden and wiz.field("rebase_onto").hidden
+    # HEAD (named), then the worktrees as the branch they have, then the
+    # branches no worktree stands on, spelled so they cannot be read as one
+    assert [(o.label, o.value) for o in wiz.field("branch_from").options] == [
+        ("(HEAD)", ""), ("review", "review"),
+        ("master", "refs/heads/master"), ("old-thing", "refs/heads/old-thing"),
+    ]
+    assert "on master" in wiz.field("branch_from").options[0].detail
+    assert "on topic" in wiz.field("branch_from").options[1].detail
+    pick(wiz, "worktree", "review")
+    assert wiz.field("branch_from").hidden
+    assert not wiz.field("update").hidden
+
+
+def test_branch_from_travels_only_with_a_new_worktree():
+    wiz = form()
+    pick(wiz, "worktree", "new worktree")
+    pick(wiz, "branch_from", "review")
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.worktree == "" and args.branch_from == "review"
+    assert args.rebase_onto == ""
+    assert "branched from review" in wiz.summary()
+    # switching to a reused checkout drops the answer rather than sending it
+    pick(wiz, "worktree", "review")
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.branch_from is None
+    assert "branched from" not in wiz.summary()
 
 
 def test_the_summary_names_the_branch_it_will_catch_up_with():

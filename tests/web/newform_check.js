@@ -145,7 +145,7 @@ check("the form's controls read in the new order", named(form.text), [
   // fold so it is not mistaken for an inherited spawn row. The narrowing box
   // sits between the mode's radio and the list it narrows, the way the
   // board's own box sits between its radio and its picker.
-  "worktree_mode", "worktree_mode", "worktree_name", "worktree_mode",
+  "worktree_mode", "worktree_mode", "worktree_name", "worktree_from", "worktree_mode",
   "worktree_filter", "worktree_existing", "worktree_session", "worktree_rebase",
   // what it is told first
   "task",

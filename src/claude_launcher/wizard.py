@@ -838,6 +838,13 @@ def worktree_fields(auto_detail: str, section: str = "") -> List[Field]:
             hint="also the branch name; an existing one is returned to, not rebuilt",
         ),
         ChoiceField(
+            key="branch_from", label="Branch from",
+            hint="where the NEW branch starts: another worktree (its branch, "
+                 "committed work only) or a branch; an existing checkout "
+                 "keeps its own branch and is offered Update instead",
+            options=[],
+        ),
+        ChoiceField(
             key="update", label="Update",
             hint="a checkout you come back to is as far behind as the day you "
                  "left it",
@@ -897,6 +904,26 @@ def sync_worktree(form: "Form", cwd: str, *, allowed: bool = True, note: str = "
         ) + [Option(b, b) for b in (info.get("branches") or []) if b != here]
         base.index = 0
 
+        # Where a NEW checkout starts. The default is the main checkout's
+        # HEAD (what the daemon cuts from when nothing is named), named here
+        # because it is not always the trunk. A branch row is spelled
+        # refs/heads/<name> so it is never read as a worktree of that name.
+        start = form.field("branch_from")
+        head = info.get("root_branch") or ""
+        on_wt = info.get("worktree_branches") or {}
+        start.options = [
+            Option("(HEAD)", "", f"the main checkout, on {head}" if head
+                   else "the main checkout's HEAD"),
+        ] + [
+            Option(n, n, f"worktree, on {on_wt[n]}" if on_wt.get(n) else "worktree")
+            for n in (info.get("worktrees") or [])
+        ] + [
+            Option(b, f"refs/heads/{b}", "branch")
+            for b in (info.get("branches") or [])
+            if b not in set(on_wt.values())
+        ]
+        start.index = 0
+
     # Re-read every pass, not only when the list is rebuilt: a child's
     # auto-name is made of answers given further down the form, and a picker
     # showing the name it *would* have had is worse than showing none.
@@ -906,6 +933,12 @@ def sync_worktree(form: "Form", cwd: str, *, allowed: bool = True, note: str = "
 
     reusing = isinstance(wt.value, str) and wt.value not in ("", NAME_IT)
     form.field("worktree_name").hidden = not wt.selectable or wt.value != NAME_IT
+    # One question per kind of checkout: a new one is asked where it starts,
+    # a reused one whether to catch up (Update / Rebase onto) -- never both,
+    # which the daemon refuses anyway (worktree._checkout).
+    form.field("branch_from").hidden = (
+        not wt.selectable or wt.value not in ("", NAME_IT)
+    )
     # Only a *reused* checkout can be behind: a new one is cut from the
     # repository as it stands, so there is nothing for it to catch up on.
     form.field("update").hidden = not wt.selectable or not reusing
@@ -935,6 +968,12 @@ def check_worktree(form: "Form") -> List[tuple]:
             "pick 'no' under Update",
         ))
     return out
+
+
+def branch_from_answer(form: "Form") -> str:
+    """Where a new checkout starts, or "" for the daemon's default."""
+    field = form.field("branch_from")
+    return "" if field.hidden or not field.selectable else str(field.value or "")
 
 
 def worktree_answer(form: "Form") -> tuple:
@@ -977,11 +1016,70 @@ def _workflow_entry(raw) -> dict:
             "default_role": str(raw.get("default_role") or "").strip().lower(),
             "priority": priority,
             "filter_roles": raw.get("filter_roles"),
+            # cflow v2 runs beside v1 (docs/cflow-v2.md): the daemon tells
+            # the two apart by `version` and marks v1 `deprecated`. An older
+            # daemon says neither, and its entries read as plain v1.
+            "version": 2 if raw.get("version") == 2 else 1,
+            "deprecated": bool(raw.get("deprecated")),
+            # a v2 workflow's typed start inputs (docs/cflow-v2.md 2.6)
+            "inputs": list(raw.get("inputs") or []) if raw.get("version") == 2 else [],
         }
     return {
         "name": str(raw or ""), "description": "", "default_role": "",
-        "priority": 0, "filter_roles": None,
+        "priority": 0, "filter_roles": None, "version": 1, "deprecated": False,
+        "inputs": [],
     }
+
+
+def ask_inputs(fields: List[dict], ask=input, say=print) -> dict:
+    """Prompt each declared start input of a v2 workflow on the terminal,
+    one line at a time (``fields`` = the list entry's ``inputs``). Kept
+    plain on purpose: the dashboard's form is the rich surface. A blank
+    answer leaves the input to its default; the daemon validates the result
+    (``cflow2/inputs.normalize``) and refuses the create naming the field.
+
+    ``text`` and ``list`` read lines until a blank one; ``invariants`` and
+    ``acceptance`` read a text and an optional probe per item until a blank
+    text."""
+    out: dict = {}
+    if not fields:
+        return out
+    say("This workflow takes start inputs (blank = default/none):")
+    for f in fields:
+        name, typ = f.get("name"), f.get("type")
+        label = f.get("label") or name
+        mark = " *" if f.get("required") else ""
+        if f.get("help"):
+            say(f"  {label}: {f['help']}")
+        if typ in ("text", "list"):
+            say(f"  {label}{mark} -- one line each, blank line to finish")
+            lines = []
+            while True:
+                line = ask("    > ")
+                if not line.strip():
+                    break
+                lines.append(line)
+            if lines:
+                out[name] = "\n".join(lines) if typ == "text" else lines
+        elif typ in ("invariants", "acceptance"):
+            say(f"  {label}{mark} -- a text, then its probe command (blank: none); "
+                f"blank text to finish")
+            items = []
+            while True:
+                text = ask("    text  > ")
+                if not text.strip():
+                    break
+                probe = ask("    probe > ").strip()
+                items.append({"text": text.strip(), "probe": probe or None})
+            if items:
+                out[name] = items
+        else:
+            hint = f" ({'/'.join(f.get('choices') or [])})" if typ == "enum" else \
+                (" (y/n)" if typ == "bool" else "")
+            value = ask(f"  {label}{mark}{hint}: ")
+            if value.strip():
+                out[name] = value.strip()
+    return out
 
 
 def _workflow_admits(entry: dict, role: str) -> bool:
@@ -1028,7 +1126,7 @@ def _workflow_rank(entry: dict, role: str) -> tuple:
     third, refused band here. The arrow keys walk the same ranking the
     auto-pick used."""
     band = 0 if role and entry["default_role"] == role else 1
-    return (band, -entry["priority"], entry["name"])
+    return (band, -entry["priority"], entry.get("version") == 2, entry["name"])
 
 
 #: How much of a workflow's ``description`` an option row carries, in display
@@ -1051,6 +1149,31 @@ def _one_line(text: str, cols: int = WORKFLOW_DESC_COLS) -> str:
     able to encode a nicer one.
     """
     return fit(" ".join(str(text or "").split()), cols)
+
+
+def workflow_tag(entry: dict) -> str:
+    """The version marker a Workflow row carries: " [v2]" on a cflow v2
+    workflow, " [v1, deprecated]" on a v1 one the daemon marked deprecated,
+    nothing for an entry that says neither (an older daemon). ASCII, like
+    the rest of this form's rows: the console may not encode more.
+    The dashboard's `cflowVersionTag` says the same."""
+    if entry.get("version") == 2:
+        return " [v2]"
+    if entry.get("deprecated"):
+        return " [v1, deprecated]"
+    return ""
+
+
+def workflow_value(entry: dict, entries: List[dict]) -> str:
+    """What picking ``entry`` sends as ``workflow``: its name, or
+    ``v2:<name>`` for a v2 workflow whose name a v1 one also declares --
+    the daemon keeps v1 on a bare shared name, and reads the prefix as
+    ``workflow_version: 2``."""
+    if entry.get("version") == 2 and any(
+        e["name"] == entry["name"] and e.get("version") != 2 for e in entries
+    ):
+        return "v2:" + entry["name"]
+    return entry["name"]
 
 
 def _workflow_options(entries: List[dict], role: str) -> List[Option]:
@@ -1080,7 +1203,7 @@ def _workflow_options(entries: List[dict], role: str) -> List[Option]:
         desc = _one_line(e.get("description") or "")
         if desc:
             line = f"{line} -- {desc}" if line else desc
-        out.append(Option(e["name"], e["name"], line))
+        out.append(Option(e["name"] + workflow_tag(e), workflow_value(e, entries), line))
     return out
 
 
@@ -1093,8 +1216,10 @@ def _workflow_default(entries: List[dict], role: str) -> str:
         e for e in entries
         if e["default_role"] == role and _workflow_admits(e, role)
     ]
-    best.sort(key=lambda e: (-e["priority"], e["name"]))
-    return best[0]["name"] if best else ""
+    # v1 before v2 at equal priority: while the two run side by side a v2
+    # workflow is offered, never volunteered over the v1 one it may replace.
+    best.sort(key=lambda e: (-e["priority"], e.get("version") == 2, e["name"]))
+    return workflow_value(best[0], entries) if best else ""
 
 
 def sync_workflows(
@@ -2465,6 +2590,7 @@ class Wizard(Form):
         args.cwd = self.value("cwd") or self.cwd
 
         args.worktree, args.rebase_onto = worktree_answer(self)
+        args.branch_from = branch_from_answer(self) or None
 
         args.role = self.value("role") or None
         resume = self.value("resume")
@@ -2548,6 +2674,8 @@ class Wizard(Form):
             parts.append("worktree " + (wt or "(auto)"))
             if base:
                 parts.append("rebased onto " + base)
+            if branch_from_answer(self):
+                parts.append("branched from " + branch_from_answer(self))
         for label, key in (("mesh", "mesh"), ("workflow", "workflow"),
                            ("role", "role")):
             if self.value(key):
@@ -3750,6 +3878,7 @@ class SpawnWizard(Form):
             else (choice or self.auto_worktree_name())
         )
         args.rebase_onto = base or None
+        args.branch_from = branch_from_answer(self) or None
         mesh = self.value("mesh") or ""
         args.mesh = mesh or None
         args.handle = (self.value("handle") or None) if mesh != self.NO_MESH else None
@@ -3802,6 +3931,8 @@ class SpawnWizard(Form):
             parts.append("worktree " + (choice or self.auto_worktree_name()))
             if base:
                 parts.append("rebased onto " + base)
+            if branch_from_answer(self):
+                parts.append("branched from " + branch_from_answer(self))
         mesh = self.value("mesh") or ""
         parts.append(
             "no mesh" if mesh == self.NO_MESH

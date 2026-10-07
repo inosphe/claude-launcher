@@ -331,8 +331,11 @@ def test_a_profile_with_no_rules_reports_both_halves_missing(home):
     # a second copy is a second thing to forget when a gate verb gains a shell.
     assert row["allow"]["expected"] == list(install.GATE_ALLOW_RULES)
     assert row["deny"]["expected"] == list(install.GATE_DENY_RULES)
-    # five gate verbs (approve, select, goto, abort, set) x two shells x two spellings
-    assert len(row["deny"]["expected"]) == 20
+    # fourteen gate verbs (cflow approve, select, goto, abort, set; cflow2
+    # approve, select, extend, resume, abort, recur, collection push|set|remove)
+    # x two shells x two spellings, plus the cflow2 glob spellings: (nine verbs
+    # + start --force) x two program names (claunch, claude_launcher) x two shells
+    assert len(row["deny"]["expected"]) == 56 + 40
     assert row["allow"]["value"] == []
     assert row["allow"]["missing"] == ["mcp__claunch"]
     assert row["deny"]["missing"] == list(install.GATE_DENY_RULES)
@@ -433,4 +436,148 @@ def test_two_profiles_are_told_apart(home):
     assert rows["guarded"]["converged"] is True
     assert rows["bare"]["converged"] is False
     assert rows["bare"]["allow"]["missing"] == ["mcp__claunch"]
-    assert len(rows["bare"]["deny"]["missing"]) == 20
+    assert len(rows["bare"]["deny"]["missing"]) == len(install.GATE_DENY_RULES)
+
+
+# --------------------------------------------------------------------------- #
+# reasoning_effort: the effort a launch of the profile applies
+# --------------------------------------------------------------------------- #
+def _efforts(body, profile_name):
+    """``{harness: reasoning_effort}`` for one profile's explicit rows."""
+    return {
+        row["harness"]: row["reasoning_effort"]
+        for row in body["profile_details"]
+        if row["profile"] == profile_name and row.get("explicit") is True
+    }
+
+
+def _default_row(body, profile_name):
+    return next(
+        row
+        for row in body["profile_details"]
+        if row["profile"] == profile_name and row.get("explicit") is False
+    )
+
+
+def _default_option(body, profile_name):
+    return next(
+        opt
+        for opt in body["profile_options"]
+        if opt["profile"] == profile_name and opt["default"] is True
+    )
+
+
+def test_a_profile_with_no_effort_reports_null_on_every_row(home):
+    """Nothing configured: the harness's own default decides, and null says so."""
+    profile.create("work")
+    body = listing()
+    assert _default_row(body, "work")["reasoning_effort"] is None
+    assert _default_option(body, "work")["reasoning_effort"] is None
+    assert set(_efforts(body, "work").values()) == {None}
+    assert all(
+        row["reasoning_effort_problem"] is None
+        for row in body["profile_details"]
+        if row["profile"] == "work"
+    )
+    assert all(
+        opt["reasoning_effort"] is None
+        for opt in body["profile_options"]
+        if opt["profile"] == "work"
+    )
+
+
+def test_a_profile_effort_is_reported_on_its_rows_and_options(home):
+    profile.create("work")
+    profile.create("plain")
+    store.set_profile_field("work", "reasoning_effort", "high")
+    body = listing()
+    assert _default_row(body, "work")["reasoning_effort"] == "high"
+    assert _default_option(body, "work")["reasoning_effort"] == "high"
+    efforts = _efforts(body, "work")
+    # Every harness whose translator carries the field applies it at launch.
+    assert efforts["claude"] == efforts["codex"] == efforts["pi"] == "high"
+    # The other profile is told apart: its value is its own, not the listing's.
+    assert _default_row(body, "plain")["reasoning_effort"] is None
+
+
+def test_a_harness_that_cannot_carry_the_effort_says_its_launch_is_refused(home):
+    """No translator for the field: the launch is refused, not run on a default.
+
+    ``runner.harness_translation`` raises for a profile that sets an effort on
+    such a harness, so the row keeps the configured value and names the
+    refusal -- a null here would read as "unset, the harness decides".
+    """
+    profile.create("work")
+    store.set_profile_field("work", "reasoning_effort", "high")
+    rows = {
+        row["harness"]: row
+        for row in listing()["profile_details"]
+        if row["profile"] == "work" and row.get("explicit") is True
+    }
+    for harness_name in ("agent", "devin", "kimi"):
+        assert rows[harness_name]["reasoning_effort"] == "high"
+        assert "reasoning_effort" in rows[harness_name]["reasoning_effort_problem"]
+    for harness_name in ("claude", "codex", "pi"):
+        assert rows[harness_name]["reasoning_effort_problem"] is None
+
+
+def test_a_harness_that_cannot_carry_the_effort_has_no_problem_when_unset(home):
+    profile.create("work")
+    rows = [
+        row
+        for row in listing()["profile_details"]
+        if row["profile"] == "work" and row["harness"] in ("agent", "devin", "kimi")
+    ]
+    assert rows
+    assert all(row["reasoning_effort_problem"] is None for row in rows)
+
+
+def test_a_claude_profile_env_effort_overrides_the_spec_field(home):
+    """Claude applies the profile's env after the provider translation."""
+    profile.create("work")
+    store.set_profile_field("work", "reasoning_effort", "low")
+    store.update(
+        lambda doc: doc["profiles"]["work"].setdefault("env", {}).update(
+            {"CLAUDE_CODE_EFFORT_LEVEL": "high"}
+        )
+    )
+    body = listing()
+    assert _default_row(body, "work")["reasoning_effort"] == "high"
+    # The env channel is Claude's own: another harness reads the spec field.
+    assert _efforts(body, "work")["codex"] == "low"
+
+
+def test_the_effort_resolves_template_then_provider_then_profile(home):
+    store.update(lambda doc: doc.update({"template": {"reasoning_effort": "low"}}))
+    store.update(
+        lambda doc: doc.setdefault("providers", {}).update(
+            {"ds": {"reasoning_effort": "medium"}}
+        )
+    )
+    profile.create("on-template")
+    profile.create("on-provider")
+    store.set_profile_field("on-provider", "provider", "ds")
+    profile.create("own")
+    store.set_profile_field("own", "provider", "ds")
+    store.set_profile_field("own", "reasoning_effort", "high")
+    body = listing()
+    assert _default_row(body, "on-template")["reasoning_effort"] == "low"
+    assert _default_row(body, "on-provider")["reasoning_effort"] == "medium"
+    assert _default_row(body, "own")["reasoning_effort"] == "high"
+
+
+def test_an_unreadable_provider_reports_null_and_why(home):
+    """A profile naming a provider that is not declared still lists."""
+    profile.create("work")
+    store.set_profile_field("work", "provider", "nowhere")
+    body = listing()
+    # The profile's own lineage error row (harness "?") reports the failure
+    # itself; every harness row says why its effort could not be read.
+    rows = [
+        r
+        for r in body["profile_details"]
+        if r["profile"] == "work" and r["harness"] != "?"
+    ]
+    assert rows
+    assert all(r.get("reasoning_effort") is None for r in rows)
+    assert all("nowhere" in r["reasoning_effort_problem"] for r in rows)

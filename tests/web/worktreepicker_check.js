@@ -84,6 +84,7 @@ function box(id) {
 }
 for (const id of ["new-worktree", "new-worktree-name-row",
                   "new-worktree-existing-row", "new-worktree-rebase-row",
+                  "new-worktree-from-row",
                   "new-worktree-session-row",
                   "worktree-hint", "worktree-rebase-trunk", "cwd-hint"]) {
   box_[id] = box(id);
@@ -101,6 +102,7 @@ const form = {
   worktree_existing: picker(),
   worktree_session: picker(),
   worktree_rebase: control(""),
+  worktree_from: picker(),
 };
 
 let sessions = [];
@@ -110,8 +112,10 @@ const asked = [];
    the sources apart: the picked one, the parent's, and the daemon's own. */
 const REPOS = {
   "F:/repo": { repo: true, root: "F:/repo", branch: "master",
-               branches: ["master", "feature"],
-               worktrees: ["w-alpha", "w-beta"] },
+               root_branch: "master",
+               branches: ["master", "feature", "loose"],
+               worktrees: ["w-alpha", "w-beta"],
+               worktree_branches: { "w-alpha": "w-alpha", "w-beta": "feature" } },
   "F:/other": { repo: true, root: "F:/other", branch: "main",
                 branches: ["main"], worktrees: ["o-one"] },
 };
@@ -137,6 +141,7 @@ new Function(
    slice("worktreePathKey"), slice("worktreeParentOffer"),
    slice("worktreeSessions"), slice("worktreeOfSession"),
    slice("renderWorktreeSessionOptions"), slice("pickWorktreeSession"),
+   slice("renderWorktreeFromOptions"), slice("worktreeFromBranch"),
    slice("syncNewWorktree"),
    // The pack offer rides the same directory edges; its own check is
    // prompt_packs_check.js.
@@ -514,6 +519,74 @@ async function main() {
   await ctx.refresh();
   check("a child sent elsewhere has no parent's checkout on offer",
         [head(), names()], ["", ["o-one"]]);
+
+  /* -- Branch from: a NEW checkout's start, never beside Rebase onto ----- */
+  form.parent.value = "";
+  ctx.policy("", null);
+  form.cwd.value = "F:/repo";
+  await ctx.refresh();
+  form.worktree_mode.value = "new";
+  ctx.sync();
+  const fromRows = () => form.worktree_from.options.map((o) => [o.label, o.value]);
+  check("a new worktree is asked where it starts, and not asked to rebase",
+        [box_["new-worktree-from-row"].classes.has("hidden"),
+         form.worktree_from.disabled,
+         box_["new-worktree-rebase-row"].classes.has("hidden"),
+         form.worktree_rebase.disabled], [false, false, true, true]);
+  check("Branch from offers HEAD, each worktree as its branch, then the " +
+        "branches no worktree stands on (spelled refs/heads/)",
+        fromRows(),
+        [["repository HEAD — master", ""],
+         ["worktree w-alpha on w-alpha — lead", "w-alpha"],
+         ["worktree w-beta on feature — s13", "w-beta"],
+         ["branch master", "refs/heads/master"],
+         ["branch loose", "refs/heads/loose"]]);
+  check("the hint says where the new branch starts",
+        box_["worktree-hint"].textContent,
+        "the new branch starts at master (committed work only)");
+  form.worktree_from.value = "w-beta";
+  ctx.sync();
+  check("...and follows the pick: a worktree starts on the branch it has",
+        box_["worktree-hint"].textContent,
+        "the new branch starts at feature (committed work only)");
+  ctx.render();
+  check("a re-render keeps a pick that is still offered",
+        form.worktree_from.value, "w-beta");
+  REPOS["F:/repo"].root_branch = "feature";
+  form.cwd.value = "F:/other";
+  await ctx.refresh();
+  form.cwd.value = "F:/repo";
+  await ctx.refresh();
+  form.worktree_mode.value = "new";
+  ctx.sync();
+  check("a main checkout off the trunk is said out loud for the default",
+        box_["worktree-hint"].textContent,
+        "the new branch starts at feature (committed work only) — " +
+        "the main checkout is not on master");
+  REPOS["F:/repo"].root_branch = "master";
+  form.worktree_mode.value = "existing";
+  form.worktree_existing.value = "w-beta";
+  ctx.sync();
+  check("an existing worktree is asked to rebase, and not where it starts",
+        [box_["new-worktree-from-row"].classes.has("hidden"),
+         form.worktree_from.disabled,
+         box_["new-worktree-rebase-row"].classes.has("hidden"),
+         form.worktree_rebase.disabled], [true, true, false, false]);
+  form.worktree_mode.value = "";
+  ctx.sync();
+  check("no worktree asks neither",
+        [box_["new-worktree-from-row"].classes.has("hidden"),
+         box_["new-worktree-rebase-row"].classes.has("hidden")], [true, true]);
+  // A child: the parent's own checkout leads, named as such.
+  form.parent.value = "lead";
+  ctx.policy("lead", { may_choose: ["worktree"] });
+  form.cwd.value = `${WT}/w-alpha`;       // where the parent stands
+  await ctx.refresh();
+  form.worktree_mode.value = "new";
+  ctx.sync();
+  check("a child's Branch from leads with the parent's checkout",
+        fromRows()[1],
+        ["worktree w-alpha on w-alpha — parent's checkout (lead)", "w-alpha"]);
 
   if (failures) process.exit(1);
   console.log("worktreepicker_check: ok");

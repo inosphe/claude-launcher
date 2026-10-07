@@ -34,10 +34,12 @@ from .. import (
     lineage,
     metering,
     profile as profile_mod,
+    provider_spec,
     providers,
     quickjob,
     reports as reports_mod,
     runner,
+    translators,
     usage,
 )
 from .. import install
@@ -54,6 +56,11 @@ from . import loop_lag as loop_lag_mod
 from . import notice as notice_mod
 from . import rag as rag_mod
 from . import worktree_inventory
+from . import vscode as vscode_mod
+from . import cflow2_approve, cflow2_web
+from ..cflow2 import expr as cflow2_expr, frontend as cflow2_frontend
+from ..cflow2 import ir as cflow2_ir, runtime as cflow2_runtime, store as cflow2_store
+from ..cflow2 import layers as cflow2_layers
 from . import (
     briefing, cflow_clock, clipty, ctxsize, loops, onboard, prompt_presets, prompter,
     rebrief, session_input, status_checks,
@@ -185,6 +192,14 @@ async def revalidate_middleware(request: web.Request, handler):
     return response
 
 
+#: A refused cflow v2 operation or an unreadable v2 definition/run: a 400
+#: with the message, like the v1 engine's errors.
+_CFLOW2_ERRORS = (
+    cflow2_runtime.FlowError, cflow2_store.StoreError, cflow2_frontend.FrontendError,
+    cflow2_ir.IRError, cflow2_expr.ExprError,
+)
+
+
 @web.middleware
 async def error_middleware(request: web.Request, handler):
     try:
@@ -226,7 +241,13 @@ async def error_middleware(request: web.Request, handler):
         StateError,
         MeshError,
         BeadsError,
+        cflow2_web.ChoiceError,
     ) as exc:
+        if isinstance(exc, cflow2_web.InputsInvalid):
+            # per-field errors for the start form (docs/cflow-v2.md 2.6)
+            return json_response({"error": str(exc), "errors": exc.errors}, status=400)
+        return json_error(400, str(exc))
+    except _CFLOW2_ERRORS as exc:
         return json_error(400, str(exc))
     except web.HTTPException:
         raise
@@ -262,7 +283,10 @@ def build_auth_middleware(token: str, cookie_sessions: set):
     @web.middleware
     async def auth_middleware(request: web.Request, handler):
         path = request.path
-        if not path.startswith("/api/") or path == "/api/health" or path == "/api/auth/session":
+        # /vscode/ is a proxy into code-server, which runs with no auth of its
+        # own (daemon/vscode.py): this gate is the only one in front of it.
+        gated = path.startswith("/api/") or path.startswith("/vscode/")
+        if not gated or path == "/api/health" or path == "/api/auth/session":
             return await handler(request)
         auth = request.headers.get("Authorization", "")
         if auth.startswith("Bearer ") and _token_eq(auth[7:], token):
@@ -288,6 +312,14 @@ def build_auth_middleware(token: str, cookie_sessions: set):
             )
         except Exception:  # noqa: BLE001 -- diagnosis must not fail a request
             log.debug("could not record a refusal", exc_info=True)
+        if path.startswith("/vscode/"):
+            # An editor tab is a page, not a fetch: say where to log in.
+            return web.Response(
+                status=401, content_type="text/html",
+                text="<!doctype html><meta charset=utf-8><title>VS Code</title>"
+                "<p style='font:15px system-ui;margin:2em'>Log in to the claunch "
+                "dashboard first, then open VS Code from it again.</p>",
+            )
         return json_error(401, "authentication required")
 
     return auth_middleware
@@ -338,6 +370,7 @@ def build_app(
     operator_bot.install(app, create=_create_session, gates=_operator_gates,
                          work=lambda sessions: _operator_work(app, sessions))
     clipboard.install(app)
+    vscode_mod.install(app)
     app["relay_state"] = relay_state if relay_state is not None else _relay_unconfigured
     app["token"] = token
     app["cookie_sessions"] = cookie_sessions
@@ -449,6 +482,10 @@ def build_app(
     briefing.persist_hooks.append(rag_service.on_sessions_changed)
     from . import search_anything
     search_anything.install(app)
+    from . import glossary_api
+    glossary_api.install(app)
+    from . import spec_api
+    spec_api.install(app)
     app.on_startup.append(_start_rag)
     app.on_shutdown.append(_stop_rag)
     # How late the loop runs its callbacks: the part of the page's round
@@ -587,6 +624,18 @@ def build_app(
     r.add_put("/api/quickjob", h_quickjob_set)
     r.add_post("/api/cflow/reminder", h_cflow_reminder_run_set)
     r.add_post("/api/cflow/reminder/skip", h_cflow_reminder_skip)
+    # cflow v2 (docs/cflow-v2.md section 9): its run page, the person's side
+    # of a run (a chooser: user choice, a loop at its max) and a read-only
+    # definition view. Same token as the v1 approve/select endpoints.
+    r.add_get("/api/cflow2/run", h_cflow2_run)
+    r.add_get("/api/cflow2/runs", h_cflow2_runs)
+    r.add_get("/api/cflow2/definition", h_cflow2_definition)
+    r.add_post("/api/cflow2/select", h_cflow2_select)
+    r.add_post("/api/cflow2/extend", h_cflow2_extend)
+    r.add_post("/api/cflow2/approve", h_cflow2_approve)
+    r.add_get("/api/cflow2/asks", h_cflow2_asks)
+    r.add_post("/api/cflow2/collection", h_cflow2_collection)
+    r.add_post("/api/cflow2/inputs/check", h_cflow2_inputs_check)
     r.add_get("/api/mesh", h_mesh_list)
     r.add_post("/api/mesh", h_mesh_create)
     r.add_delete("/api/mesh/outgoing/{rid}", h_mesh_outgoing_cancel)
@@ -1626,6 +1675,68 @@ async def h_restart_request_extend(request: web.Request) -> web.Response:
     return json_response({"ok": True, "extended": True, "request": record})
 
 
+class _EffortSource:
+    """What a profile's launches read their reasoning effort from.
+
+    Resolved once per profile and asked once per harness row. ``spec`` is the
+    profile's spec with the template under the provider and the profile chain
+    over it (:func:`providers.spec_for`, the launch's own resolution);
+    ``claude_env`` is the chain's Claude-vocabulary env, which the Claude
+    launch applies *after* the provider translation, so a
+    ``CLAUDE_CODE_EFFORT_LEVEL`` written there is the one Claude Code reads.
+    ``error`` is why either could not be read -- a launch of this profile
+    fails on the same error.
+    """
+
+    def __init__(self, profile_obj, doc: dict):
+        self.spec = None
+        self.claude_env: dict = {}
+        self.error: Optional[str] = None
+        try:
+            self.spec = providers.spec_for(profile_obj, doc=doc)
+            self.claude_env = runner._claude_profile_env(profile_obj)
+        except (
+            providers.ProviderError,
+            lineage.LineageError,
+            runner.RunnerError,
+        ) as exc:
+            self.spec = None
+            self.error = str(exc)
+
+    def row(self, harness_name: str) -> dict:
+        """``reasoning_effort`` and ``reasoning_effort_problem`` for one row.
+
+        ``reasoning_effort`` is the value a launch on ``harness_name`` applies,
+        None when nothing is configured (the harness's own default decides).
+        ``reasoning_effort_problem`` is None unless that launch is refused
+        over it: a harness with no translation for the field cannot launch a
+        profile that sets one (:func:`runner.harness_translation`), so its row
+        carries the configured value *and* says why it will not run, rather
+        than reading as "unset".
+        """
+        if self.spec is None:
+            return {"reasoning_effort": None, "reasoning_effort_problem": self.error}
+        if harness_name == harness_registry.CLAUDE_HARNESS:
+            var = provider_spec.CLAUDE_REASONING_EFFORT
+            env = translators.claude(self.spec).env
+            if var in self.claude_env:
+                env = self.claude_env
+            return {
+                "reasoning_effort": str(env.get(var) or "").strip() or None,
+                "reasoning_effort_problem": None,
+            }
+        value = self.spec.reasoning_effort or None
+        problem = None
+        if value and "reasoning_effort" in (
+            translators.for_harness(harness_name, self.spec).missing
+        ):
+            problem = (
+                f"harness {harness_name!r} cannot translate configured "
+                "provider field(s): reasoning_effort"
+            )
+        return {"reasoning_effort": value, "reasoning_effort_problem": problem}
+
+
 def _profile_default_tools(profile_obj, entry) -> Optional[list]:
     """The builtin tools a session of this profile+harness gets by default.
 
@@ -1830,6 +1941,12 @@ async def h_profiles(request: web.Request) -> web.Response:
             # A profile whose provider cannot be read is reported as such by
             # its own rows below; this map simply has nothing to say.
             model_ids = {}
+        # The reasoning effort a launch of this profile applies, resolved the
+        # way the launch resolves it. The session form shows it as the
+        # "profile default" effort: for a harness that declares no
+        # ``efforts`` this setting is the only source of the value, and the
+        # form cannot resolve the layers itself.
+        effort = _EffortSource(p, doc)
         try:
             name = lineage.effective_harness(p, doc)
             default_name = name
@@ -1846,6 +1963,7 @@ async def h_profiles(request: web.Request) -> web.Response:
                     "harness": name,
                     "default": True,
                     "harness_available": available.get(name, False),
+                    **effort.row(name),
                 }
             )
             items.append(
@@ -1861,6 +1979,7 @@ async def h_profiles(request: web.Request) -> web.Response:
                     "explicit": False,
                     "tools": _profile_default_tools(p, registry.get(name)),
                     "model_ids": model_ids.get(name, {}),
+                    **effort.row(name),
                     # Where the profile actually lives. The management page
                     # shows it because a profile IS a directory, and the one
                     # question that needs it ("which of these is the one I am
@@ -1936,6 +2055,7 @@ async def h_profiles(request: web.Request) -> web.Response:
                         "harness": harness_name,
                         "default": False,
                         "harness_available": available.get(harness_name, False),
+                        **effort.row(harness_name),
                     }
                 )
             items.append(
@@ -1951,6 +2071,7 @@ async def h_profiles(request: web.Request) -> web.Response:
                     "explicit": True,
                     "tools": _profile_default_tools(p, registry.get(harness_name)),
                     "model_ids": model_ids.get(harness_name, {}),
+                    **effort.row(harness_name),
                 }
             )
     return json_response(
@@ -3853,15 +3974,18 @@ async def h_cflow_run_detail(request: web.Request) -> web.Response:
     sessions = _scope_sessions(manager, cwd, scope)
     payload = cflow_engine.status(cwd, scope=scope)
     if payload.get("status") == "idle":
-        return json_response(
-            {
-                "cwd": cwd,
-                "scope": scope,
-                "status": "idle",
-                "sessions": sessions,
-                "pending_start": payload.get("pending_start"),
-            }
-        )
+        idle = {
+            "cwd": cwd,
+            "scope": scope,
+            "status": "idle",
+            "sessions": sessions,
+            "pending_start": payload.get("pending_start"),
+        }
+        # No v1 run, but a v2 one: said here so a view that asked the v1
+        # endpoint can turn to /api/cflow2/run instead of reading "idle".
+        if cflow2_web.has_run(cwd, scope):
+            idle["v2"] = True
+        return json_response(idle)
     workflow = _serialize_workflow(cflow_state.load_snapshot(cwd, scope))
     journal = cflow_state.read_journal(cwd, scope, run_id=payload.get("run"))
     try:
@@ -4080,6 +4204,9 @@ def _startable_workflows(cwd: str) -> list:
             )
         except WorkflowError as exc:
             entry["error"] = str(exc)
+        # v1 beside v2 (docs/cflow-v2.md section 10): the format is
+        # deprecated, the workflows keep running.
+        cflow2_web.v1_marks(entry)
         flows.append(entry)
     # Stamped again with the bases this composition turned out to read, so
     # the next call watches them too. A base found now that was not watched
@@ -4097,13 +4224,38 @@ async def h_cflow_workflows(request: web.Request) -> web.Response:
     # "(daemon cwd)" asks about the workflows it would really see.
     raw = request.query.get("cwd")
     cwd = cflow_state.resolve_cwd(raw)
-    return json_response({"workflows": _startable_workflows(cwd)})
+    return json_response({"workflows": await asyncio.to_thread(_startable_all, cwd)})
+
+
+def _startable_all(cwd: str) -> list:
+    """v1 and v2 workflows startable in ``cwd``, one list, told apart by
+    ``version`` (docs/cflow-v2.md section 9). v1 first, so a picker that
+    takes the first match by name keeps v1 on a name both formats declare --
+    the same rule the start path applies (:func:`cflow2_web.choose`)."""
+    flows = list(_startable_workflows(cwd))
+    try:
+        flows.extend(cflow2_web.startable(cwd))
+    except Exception as exc:  # noqa: BLE001 - a broken v2 layer must not hide v1
+        log.warning("could not list cflow v2 workflows in %s: %s", cwd, exc)
+    return flows
 
 
 async def h_cflow_definitions(request: web.Request) -> web.Response:
     """Source declarations for the editor, including shadowed layers."""
     cwd = cflow_state.resolve_cwd(request.query.get("cwd"))
-    return json_response({"definitions": cflow_editor.declarations(cwd), "cwd": cwd})
+    try:
+        # Compiles every v2 file (cached by layer stamp): off the event loop.
+        v2 = await asyncio.to_thread(cflow2_web.definitions, cwd)
+    except Exception as exc:  # noqa: BLE001 - a broken v2 layer must not hide v1
+        log.warning("could not list cflow v2 definitions in %s: %s", cwd, exc)
+        v2 = []
+    return json_response({
+        "definitions": cflow_editor.declarations(cwd), "cwd": cwd,
+        # Read-only in the editor (GET /api/cflow2/definition); the v1 rows
+        # above are the deprecated format, still editable.
+        "definitions_v2": v2,
+        "deprecated_note": cflow2_web.DEPRECATED_NOTE,
+    })
 
 
 async def h_cflow_definition(request: web.Request) -> web.Response:
@@ -4172,6 +4324,12 @@ async def h_cflow_request(request: web.Request) -> web.Response:
     if not workflow:
         return json_error(400, "'workflow' required in the JSON body")
     context = str(body.get("context") or "") or None
+    # cflow v2 has no start-request file for the agent to pick up, so a v2
+    # workflow asked for here is started directly and the session nudged --
+    # the same thing /api/cflow/start does for it.
+    v2 = await _cflow2_start(request, cwd, scope, body, context)
+    if v2 is not None:
+        return v2
     payload = cflow_engine.request_start(
         workflow, context=context, by="web", cwd=cwd, scope=scope
     )
@@ -4211,11 +4369,298 @@ async def h_cflow_start(request: web.Request) -> web.Response:
     if not workflow:
         return json_error(400, "'workflow' required in the JSON body")
     context = str(body.get("context") or "") or None
+    v2 = await _cflow2_start(request, cwd, scope, body, context)
+    if v2 is not None:
+        return v2
     payload = cflow_engine.start(workflow, context=context, cwd=cwd, scope=scope)
     payload["nudge_scheduled_sessions"] = _schedule_cflow_nudges(
         request.app, cwd, scope, cflow_engine.NUDGE_STARTED, force=True
     )
     return json_response(payload)
+
+
+#: Typed into the scope's session after the dashboard starts a v2 run there.
+NUDGE_CFLOW2_STARTED = (
+    "cflow2: a new v2 workflow run was started for this session - call the "
+    "flow_status tool and drive it with flow_report / flow_select"
+)
+NUDGE_CFLOW2_ANSWERED = (
+    "cflow2: the user answered your run's open question from the dashboard - "
+    "call the flow_status tool and continue"
+)
+
+
+def _scope_profile(manager: SessionManager, scope: str) -> Optional[str]:
+    try:
+        return manager.get(scope).sdef.profile or None
+    except Exception:  # noqa: BLE001 - a scope with no session: ambient caps
+        return None
+
+
+async def _cflow2_start(request: web.Request, cwd: str, scope: str, body: dict,
+                        context: Optional[str]) -> Optional[web.Response]:
+    """Start ``body['workflow']`` on the cflow2 runtime when it is a v2
+    request (:func:`cflow2_web.choose`); ``None`` leaves it to v1. Like the
+    v1 web start there is no force path: a live v2 run refuses it."""
+    chosen = cflow2_web.choose(
+        str(body.get("workflow") or ""), body.get("workflow_version"), cwd=cwd
+    )
+    if chosen is None:
+        return None
+    ref, chart = chosen
+    params = cflow2_web.params_for(chart, body.get("workflow_params"), context or "")
+    values = cflow2_web.check_inputs(chart, body.get("cflow_inputs"))  # InputsInvalid -> 400
+    profile = _scope_profile(request.app["manager"], scope)
+
+    def start() -> dict:
+        return cflow2_web.start_run(
+            chart, inputs=values, cwd=cwd, scope=scope, params=params,
+            caps=cflow2_runtime.resolve_caps(profile),
+        )
+
+    payload = await asyncio.to_thread(start)
+    payload["version"] = 2
+    payload["workflow_ref"] = ref
+    payload["nudge_scheduled_sessions"] = _schedule_cflow_nudges(
+        request.app, cwd, scope, NUDGE_CFLOW2_STARTED, force=True
+    )
+    return json_response(payload)
+
+
+# --------------------------------------------------------------------------- #
+# cflow v2: run page, the person's answers, definitions (docs/cflow-v2.md 9)
+# --------------------------------------------------------------------------- #
+def _cflow2_slot(request: web.Request) -> Tuple[str, str]:
+    raw = request.query.get("cwd")
+    if not raw:
+        raise web.HTTPBadRequest(
+            text=json.dumps({"error": "'cwd' query parameter required"}),
+            content_type="application/json",
+        )
+    scope = request.query.get("scope") or cflow2_store.DEFAULT_SCOPE
+    cflow2_store.normalize_scope(scope)  # StoreError -> 400
+    return cflow_state.resolve_cwd(raw), scope
+
+
+async def h_cflow2_run(request: web.Request) -> web.Response:
+    """A v2 run: ``run`` (runtime status), ``chart`` (the IR's display
+    fields; task prompts with ``prompts=1``), the journal tail (200), the
+    live instances, per-node visits and the delegation rows."""
+    cwd, scope = _cflow2_slot(request)
+    prompts = request.query.get("prompts") in ("1", "true", "yes")
+    data = await asyncio.to_thread(cflow2_web.run_detail, cwd, scope, prompts)
+    data["sessions"] = _scope_sessions(request.app["manager"], cwd, scope)
+    data["collections"] = (
+        await asyncio.to_thread(_cflow2_collections, cwd, scope) if data.get("run") else {}
+    )
+    data["trigger_events"] = [
+        e for e in data.get("journal") or [] if str(e.get("event") or "") in CFLOW2_TRIGGER_EVENTS
+    ][-CFLOW2_TRIGGER_TAIL:]
+    return json_response(data)
+
+
+#: Journal events the v2 run view lists under "Triggers" (docs 4.5).
+CFLOW2_TRIGGER_EVENTS = ("trigger_queued", "trigger_done", "trigger_skipped")
+CFLOW2_TRIGGER_TAIL = 50
+
+
+def _cflow2_collections(cwd: str, scope: str) -> dict:
+    """``runtime.collection_view`` for the run payload: ``{name: {kind,
+    items, ...}}``; ``{}`` when the run declares none or it cannot be read."""
+    view_fn = getattr(cflow2_runtime, "collection_view", None)
+    if view_fn is None:
+        return {}
+    try:
+        view = view_fn(cwd, scope)
+    except _CFLOW2_ERRORS:
+        return {}
+    except Exception:  # noqa: BLE001 - the run view must still render
+        log.exception("cflow2 collection view of %s/%s failed", cwd, scope)
+        return {}
+    if isinstance(view, dict) and isinstance(view.get("collections"), dict):
+        view = view["collections"]
+    if not isinstance(view, dict):
+        return {}
+    # The declared status values, for the person's "set status" control.
+    try:
+        specs = (cflow2_store.RunStore(cwd, scope).load_chart().meta or {}).get("collections") or {}
+    except Exception:  # noqa: BLE001 - the table renders without them
+        specs = {}
+    for name, entry in view.items():
+        status = (specs.get(name) or {}).get("status") if isinstance(specs, dict) else None
+        if isinstance(entry, dict) and isinstance(status, dict) and status.get("values"):
+            entry.setdefault("status_values", list(status["values"]))
+    return view
+
+
+async def h_cflow2_collection(request: web.Request) -> web.Response:
+    """A person's change to a v2 run's collection (principal ``person``,
+    docs 2.7): ``op`` ``set`` (``key``, ``fields``) or ``remove`` (``key``).
+    The collection's ``access`` decides. Body: cwd, scope, op, collection,
+    key, fields. Answers the run's collections after the change."""
+    resolved, err = await _cflow_action_cwd(request)
+    if err:
+        return err
+    cwd, scope, body = resolved
+    op = str(body.get("op") or "")
+    if op not in ("set", "remove"):
+        return json_error(400, "'op' must be 'set' or 'remove'")
+    name = str(body.get("collection") or "").strip()
+    key = body.get("key")
+    if not name or key in (None, ""):
+        return json_error(400, "'collection' and 'key' are required")
+    fields = body.get("fields")
+    if op == "set" and (not isinstance(fields, dict) or not fields):
+        return json_error(400, "'set' takes 'fields' (an object of field -> value)")
+    await asyncio.to_thread(
+        cflow2_runtime.collection_op, op, name, cwd=cwd, scope=scope,
+        principal="person", session=cflow2_runtime.CALLER_USER, key=key,
+        fields=fields if op == "set" else None,
+    )
+    collections = await asyncio.to_thread(_cflow2_collections, cwd, scope)
+    return json_response({"status": "ok", "op": op, "collection": name, "key": key,
+                          "collections": collections})
+
+
+async def h_cflow2_runs(request: web.Request) -> web.Response:
+    """Every v2 run in the directories live sessions stand in (plus an
+    explicit ``?cwd=``): one summary line each -- status and the labels of
+    the active tasks."""
+    manager: SessionManager = request.app["manager"]
+    cwds = []
+    if request.query.get("cwd"):
+        cwds.append(cflow_state.resolve_cwd(request.query["cwd"]))
+    for session in manager.list():
+        cwd = _session_cwd(session)
+        if cwd and cwd not in cwds:
+            cwds.append(cwd)
+    runs = await asyncio.to_thread(cflow2_web.list_runs, cwds)
+    return json_response({"runs": runs})
+
+
+async def h_cflow2_definition(request: web.Request) -> web.Response:
+    """One v2 definition, read-only: compiled tree, static check findings,
+    source text. ``?name=`` (and ``?cwd=`` for the project layer)."""
+    name = str(request.query.get("name") or "").strip()
+    if not name:
+        return json_error(400, "'name' query parameter required")
+    if not cflow2_layers.is_name(name):
+        # Name only (docs/cflow-v2.md 1): no path reads a file outside the layers.
+        return json_error(400, f"'name' must be a v2 definition name, not a path: {name!r}")
+    cwd = cflow_state.resolve_cwd(request.query.get("cwd"))
+    try:
+        data = await asyncio.to_thread(cflow2_web.definition_view, name, cwd)
+    except cflow2_web.ChoiceError as exc:
+        return json_error(404, str(exc))
+    return json_response(data)
+
+
+async def h_cflow2_inputs_check(request: web.Request) -> web.Response:
+    """Check start inputs without starting (the new-session form calls it as
+    the user edits): per-field errors, cross-input constraints included
+    (docs/cflow-v2.md 2.6). Body: workflow, workflow_version?, cwd?,
+    cflow_inputs. 200 ``{ok, values, errors}``; 404 when the workflow is not
+    a startable v2 definition."""
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 - malformed body
+        return json_error(400, "JSON body required")
+    if not isinstance(body, dict):
+        return json_error(400, "JSON body must be an object")
+    workflow = str(body.get("workflow") or "").strip()
+    if not workflow:
+        return json_error(400, "'workflow' required in the JSON body")
+    cwd = cflow_state.resolve_cwd(body.get("cwd"))
+
+    def run() -> Optional[dict]:
+        chosen = cflow2_web.choose(workflow, body.get("workflow_version"), cwd=cwd)
+        if chosen is None:
+            return None
+        return cflow2_web.inputs_check(chosen[1], body.get("cflow_inputs"))
+
+    try:
+        out = await asyncio.to_thread(run)
+    except cflow2_web.ChoiceError as exc:
+        return json_error(404, str(exc))
+    if out is None:
+        return json_error(404, f"{workflow!r} is not a v2 workflow")
+    return json_response(out)
+
+
+async def h_cflow2_select(request: web.Request) -> web.Response:
+    """Answer a v2 ``choose`` from the dashboard, as the user: a
+    ``chooser: user`` choice is accepted here and refused to the agent's
+    flow_select. Body: cwd, scope, option, node (instance or label; optional
+    when one choice is open), reason."""
+    resolved, err = await _cflow_action_cwd(request)
+    if err:
+        return err
+    cwd, scope, body = resolved
+    option = str(body.get("option") or "")
+    if not option:
+        return json_error(400, "'option' required in the JSON body")
+    node = str(body.get("node") or "") or None
+    reason = str(body.get("reason") or "") or None
+    payload = await asyncio.to_thread(
+        cflow2_runtime.select, node, option, reason,
+        caller=cflow2_runtime.CALLER_USER, cwd=cwd, scope=scope,
+    )
+    payload["nudge_scheduled_sessions"] = await _nudge_sessions(
+        request.app["manager"], cwd, scope, NUDGE_CFLOW2_ANSWERED
+    )
+    return json_response(payload)
+
+
+async def h_cflow2_extend(request: web.Request) -> web.Response:
+    """Answer a v2 ``loop_limit`` hold: allow ``by`` more iterations, or
+    ``stop`` the loop (it finishes ``fail``). With ``visits: true`` it
+    answers a ``visit_limit`` hold instead (``runtime.extend_visits``: ``by``
+    more visits of the node over the run, or ``stop``). Body: cwd, scope,
+    node (optional with one hold), by, stop, visits."""
+    resolved, err = await _cflow_action_cwd(request)
+    if err:
+        return err
+    cwd, scope, body = resolved
+    node = str(body.get("node") or "") or None
+    try:
+        by = int(body.get("by") or 1)
+    except (TypeError, ValueError):
+        return json_error(400, "'by' must be a whole number")
+    stop = bool(body.get("stop"))
+    # ``visits: true`` answers a ``visit_limit`` hold (the chart's
+    # max_visits) instead of a loop's ``loop_limit``.
+    extend = cflow2_runtime.extend_visits if body.get("visits") else cflow2_runtime.extend_loop
+    payload = await asyncio.to_thread(
+        extend, node, by, stop=stop, cwd=cwd, scope=scope,
+    )
+    payload["nudge_scheduled_sessions"] = await _nudge_sessions(
+        request.app["manager"], cwd, scope, NUDGE_CFLOW2_ANSWERED
+    )
+    return json_response(payload)
+
+
+async def h_cflow2_approve(request: web.Request) -> web.Response:
+    """Answer a v2 task's ``ask`` from the dashboard, as the user. Body:
+    cwd, scope, node (optional with one open ask), decision (``approve``,
+    ``decline`` or a decision ask's option name), reason. The handler takes
+    the run lock and calls back into this API to withdraw and nudge, so it
+    runs off the event loop."""
+    resolved, err = await _cflow_action_cwd(request)
+    if err:
+        return err
+    cwd, scope, body = resolved
+    payload = await asyncio.to_thread(cflow2_approve.approve, cwd, scope, body)
+    payload["nudge_scheduled_sessions"] = await _nudge_sessions(
+        request.app["manager"], cwd, scope, NUDGE_CFLOW2_ANSWERED
+    )
+    return json_response(payload)
+
+
+async def h_cflow2_asks(request: web.Request) -> web.Response:
+    """Open asks of one v2 run (``cflow2_approve.pending``)."""
+    cwd, scope = _cflow2_slot(request)
+    data = await asyncio.to_thread(cflow2_approve.pending, cwd, scope)
+    return json_response(data)
 
 
 async def h_cflow_skip(request: web.Request) -> web.Response:
@@ -6230,7 +6675,9 @@ async def _create_session(request: web.Request, body: dict) -> Tuple[int, dict]:
         try:
             base = cflow_state.resolve_cwd(body.get("cwd") or None)
             tree = worktree_mod.resolve(
-                base, str(choice), rebase_onto=str(body.pop("rebase_onto", "") or "")
+                base, str(choice),
+                rebase_onto=str(body.pop("rebase_onto", "") or ""),
+                branch_from=str(body.pop("branch_from", "") or ""),
             )
         except worktree_mod.WorktreeError as exc:
             return 400, {"error": str(exc)}
@@ -6264,6 +6711,8 @@ async def _create_session(request: web.Request, body: dict) -> Tuple[int, dict]:
     # specification in the daemon's restart record).
     definition.pop("issue_text", None)
     definition.pop("prompt_packs", None)
+    # v2 start inputs belong to the run (chart.json), not to the session.
+    definition.pop("cflow_inputs", None)
     try:
         sdef = SessionDef.from_dict(definition)
     except (KeyError, ValueError, TypeError) as exc:
@@ -6275,7 +6724,7 @@ async def _create_session(request: web.Request, body: dict) -> Tuple[int, dict]:
     try:
         result = await _onboard_and_launch(request, session, body)
     except onboard.OnboardError as exc:
-        return 400, {"error": str(exc)}
+        return 400, onboard.error_body(exc)
     return 201, {**session.info(), **result}
 
 
@@ -6384,6 +6833,7 @@ async def _onboard_and_launch(
             harness=session.sdef.harness,
             parent=parent or "",
             parent_cwd=manager.get(parent).sdef.cwd if parent else "",
+            profile=session.sdef.profile or "",
         )
         # Checked before anything is arranged, like the board answer above: a
         # pack, ticked or role-required, that exists neither where the session
@@ -6398,6 +6848,14 @@ async def _onboard_and_launch(
             raise onboard.OnboardError(str(exc)) from None
         if packs:
             session.sdef = replace(session.sdef, prompt_packs=tuple(packs))
+        # TEMPORARY (claunch-z7b0n): a v2 start input 'issue' is folded into
+        # the board answer, or refused when it contradicts it. Removed with
+        # the overwrite below once no v2 workflow declares that input.
+        if plan.workflow_version == 2 and plan.cflow_inputs:
+            try:
+                beads_mod.adopt_input_issue(body, plan.cflow_inputs)
+            except beads_mod.BoardRequestError as exc:
+                raise onboard.OnboardError(str(exc)) from None
     except Exception:
         manager.discard(name)
         raise
@@ -6408,9 +6866,22 @@ async def _onboard_and_launch(
     # workflows tell it to read (`claunch beads show <id> --json`). Never a
     # reason to refuse the session: a board that cannot be written is logged
     # and the session starts without one.
-    linked = await request.app["beads"].ensure_issue(
-        session, body=body, parent=parent, manager=manager
-    )
+    #
+    # The one exception (claunch-z7b0n, W1): a request that names an issue the
+    # board was read and does not hold is refused like any other bad request
+    # -- whichever field the id came in (the Board pick, --issue, spawn's
+    # issue, a v2 input folded in above). An `issue: <id>` read out of the
+    # task or context is not refused: prose like "Known issue: flaky tests"
+    # matches the same pattern (s88 P1). A board that cannot be read is
+    # still no reason to refuse; that is reported in `unsettled` below.
+    unsettled: dict = {}
+    try:
+        linked = await request.app["beads"].ensure_issue(
+            session, body=body, parent=parent, manager=manager, unsettled=unsettled
+        )
+    except beads_mod.IssueNotOnBoard as exc:
+        manager.discard(name)
+        raise onboard.OnboardError(str(exc)) from None
     report: dict = {}
     if linked:
         beads_mod.link_issue(session, linked["issue"])
@@ -6454,13 +6925,37 @@ async def _onboard_and_launch(
         # board -- and a session that never receives it does the opposite of
         # what was asked.
         none = beads_mod.none_mode(body)
-        if none and (plan.wanted or none == beads_mod.NONE_AUTO):
+        if unsettled:
+            # The request named an issue and the board could not be asked:
+            # the session starts without it, and both the caller and the
+            # session are told which id and why, so the next step is theirs.
+            report["beads"] = {"issue": None, "input_issue": unsettled["issue"],
+                               "settled": False, "why": unsettled["why"]}
+            plan = replace(
+                plan,
+                task=(plan.task + "\n\n" if plan.task else "")
+                + f"[board] Issue {unsettled['issue']} was named for this "
+                  f"session but is not linked: {unsettled['why']}. Link it "
+                  "once the board is reachable, or ask whoever started you.",
+            )
+        elif none and (plan.wanted or none == beads_mod.NONE_AUTO):
             report["beads"] = {"issue": None, "mode": none}
             plan = replace(
                 plan,
                 task=(plan.task + "\n\n" if plan.task else "")
                 + beads_mod.compose_none_note(none, session=name),
             )
+
+    # TEMPORARY (claunch-z7b0n), during the v1 -> v2 migration: the run's
+    # inputs.issue is the issue the board settled -- minted, taken or joined
+    # -- and empty when there is none. The input stays declared so the
+    # workflows keep their text, but the daemon's answer is the only one a
+    # run starts with. Remove this, and beads.adopt_input_issue, once no v2
+    # workflow declares an 'issue' input.
+    if (plan.workflow_version == 2 and plan.cflow_inputs is not None
+            and "issue" in plan.cflow_inputs):
+        plan = replace(plan, cflow_inputs={
+            **plan.cflow_inputs, "issue": linked["issue"] if linked else ""})
 
     opening = ""
     if plan.wanted:
@@ -6654,7 +7149,7 @@ async def h_session_spawn(request: web.Request) -> web.Response:
     try:
         result = await _onboard_and_launch(request, session, body, parent=parent)
     except onboard.OnboardError as exc:
-        return json_error(400, str(exc))
+        return json_response(onboard.error_body(exc), status=400)
     except (HarnessError, ValueError, TypeError) as exc:
         return json_error(400, f"bad spawn request: {exc}")
     body_out = {"session": session.info(), "parent": parent, **result}
@@ -7140,11 +7635,15 @@ async def h_session_meta(request: web.Request) -> web.Response:
             "workspace_subpath": within,
             "role": role,
             "cflow": None,
+            "cflow2": None,
             "workflows": [],
         }
         if cwd:
             out["cflow"] = _clip_journal(_cflow_entry(manager, cwd, info["name"]))
-            out["workflows"] = _startable_workflows(cwd)
+            out["workflows"] = _startable_all(cwd)
+            # The v2 run this session drives, if any: its own slot
+            # (.cflow2/runs/<name>/), read beside the v1 one.
+            out["cflow2"] = cflow2_web.run_summary(cwd, info["name"])
         return out
 
     body = await asyncio.to_thread(describe)
@@ -9790,9 +10289,20 @@ async def h_gh_status(request: web.Request) -> web.Response:
     ``gh auth status`` per host, and the latter talks to the host. Nothing
     here is cached -- the card has a Re-check button precisely so the user
     can install, log in, and see the answer change.
+
+    ``?cwd=`` narrows it to one directory -- what the new-session form asks
+    for an input declared ``precheck: gh`` (improv-worker-v2's force_pr)
+    before the user may turn it on.
     """
+    cwd = str(request.query.get("cwd") or "").strip()
+    if cwd:
+        path = cflow_state.resolve_cwd(cwd)
+        repos = [(Path(path).name or path, path)]
+    else:
+        repos = None
     return json_response(
-        await asyncio.to_thread(lambda: ghcli.status(ghcli.daemon_repositories()))
+        await asyncio.to_thread(
+            lambda: ghcli.status(repos if repos is not None else ghcli.daemon_repositories()))
     )
 
 

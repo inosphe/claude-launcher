@@ -1523,8 +1523,10 @@ function forgetDeadSessions() {
 
 /* The rail holds still while a pointer is down on it.
 
-   Every poll rebuilds the whole list from scratch (`list.innerHTML` below,
-   driven by a five-second dashboard poll). A press is not an instant, though:
+   A poll that changes the rail redraws it in place (refreshSessions): a row
+   whose record did not change keeps its node, but a row whose record did is
+   built again and its old node leaves the document. A press is not an
+   instant, though:
    pointerdown, then pointerup, and only then the click the handler is
    waiting for. A rebuild landing between the first two takes the node the
    press started on out of the document, and the browser is then left with no
@@ -1542,7 +1544,12 @@ function forgetDeadSessions() {
    The hold carries its own deadline instead of trusting a pointerup to
    arrive. One can be lost -- the pointer leaves the window, another element
    captures it, the tab is hidden mid-press -- and a rail frozen for the rest
-   of the session would be a far worse bug than the one this fixes. */
+   of the session would be a far worse bug than the one this fixes.
+
+   The in-place redraw (claunch-v87) narrowed the hold's reach to the rows
+   that changed under the press; it did not remove it. The row a press lands
+   on is often the one that is changing -- its session is the busy one the
+   reader came to act on -- so the hold stays. */
 const RAIL_HOLD_MS = 1200;
 let railHeldUntil = 0;
 let railRedrawPending = false;
@@ -3383,114 +3390,6 @@ function sessionGroupStickyLayout(headings, viewport = 0) {
   return { stacked: true, offsets };
 }
 
-/* The rail as a reconcile, not a teardown (claunch-v87).
-
-   refreshSessions still builds the whole rail, but into a detached list;
-   railMorph then walks it against the one on the page and keeps every node
-   whose build came out the same, so the page only sees the rows that
-   changed. Nothing about what a row shows is decided here: equality is the
-   row's own markup as built, read before the painters that run after a
-   rebuild (cflow badge, beads line, briefing card), and those painters run
-   over kept rows exactly as they run over new ones.
-
-   Two parts of a row move on their own clock and are left out of that
-   reading -- the status dot's grade and the seen line, both read off
-   activity stamps -- so a row that only aged is kept and has those two
-   brought up to date in place, the same as refreshRailSeen does between
-   rebuilds. A kept row keeps its listeners; they read the session by name
-   (or from sessionsCache at click time), and the name is part of the key. */
-function canMorphRail(list) {
-  return !!list && typeof document.createDocumentFragment === "function" &&
-    typeof list.insertBefore === "function" && typeof list.outerHTML === "string";
-}
-
-// "as of 3h08m ago" in the context tooltip, "5m ago" on the tps line: an age
-// moves every minute on every row, so it is read out of the comparison, and
-// railKeepRow carries the fresh wording over to a kept row.
-const RAIL_AGE = /\b\d+[smhd](?:\d+[smhd])* ago\b/g;
-
-function railRowSig(li, dot, seen) {
-  let html = li.outerHTML;
-  for (const part of [dot, seen]) {
-    if (part && typeof part.outerHTML === "string") html = html.replace(part.outerHTML, "");
-  }
-  return html.replace(RAIL_AGE, "· ago");
-}
-
-// The parts of a row whose wording carries an age (see RAIL_AGE): the row's
-// and the name's tooltip, and the tps line.
-function railKeepAges(old, fresh) {
-  if (old.title !== fresh.title) old.title = fresh.title;
-  const name = old.querySelector(".rail-name");
-  const freshName = fresh.querySelector(".rail-name");
-  if (name && freshName && name.title !== freshName.title) name.title = freshName.title;
-  const tps = old.querySelector(".rail-tps-line");
-  const freshTps = fresh.querySelector(".rail-tps-line");
-  if (tps && freshTps && tps.outerHTML !== freshTps.outerHTML) tps.replaceWith(freshTps);
-}
-
-function railNodeKey(node) {
-  if (!node || node.nodeType !== 1) return null;
-  if (node.dataset && node.dataset.name && node.classList.contains("sess-card")) {
-    return "s:" + node.dataset.name;
-  }
-  if (node.classList && node.classList.contains("session-group")) {
-    return `g:${node.dataset.group}\u0000${node.dataset.value}`;
-  }
-  return "h:" + (node._railSig || node.outerHTML);
-}
-
-/* A kept row takes the fresh reading of what it does not compare on. */
-function railKeepRow(old, fresh) {
-  const s = fresh._railSession;
-  if (!s) return;
-  old._railSession = s;
-  const seen = old.querySelector(".rail-seen");
-  const freshSeen = fresh.querySelector(".rail-seen");
-  if (seen && freshSeen && seen.outerHTML !== freshSeen.outerHTML) seen.replaceWith(freshSeen);
-  railKeepAges(old, fresh);
-  const dot = old.firstElementChild;
-  if (dot && dot.classList.contains("dot") && typeof applyDotGrade === "function") {
-    applyDotGrade(dot, s);
-  }
-  decorateBriefingRow(old, s);
-  decorateNoteRow(old, s);
-}
-
-function railMorph(oldParent, freshParent) {
-  const pool = new Map();
-  for (const node of [...oldParent.children]) {
-    const key = railNodeKey(node);
-    if (key && !pool.has(key)) pool.set(key, node);
-  }
-  const wanted = [];
-  for (const fresh of [...freshParent.children]) {
-    const key = railNodeKey(fresh);
-    const old = key && pool.get(key);
-    if (old && old._railSig !== undefined && old._railSig === fresh._railSig) {
-      pool.delete(key);
-      if (old._railBody && fresh._railBody) {
-        old._railCount.textContent = fresh._railCount.textContent;
-        railMorph(old._railBody, fresh._railBody);
-      } else {
-        railKeepRow(old, fresh);
-      }
-      wanted.push(old);
-    } else {
-      wanted.push(fresh);
-    }
-  }
-  // Drop what is gone first, so a row leaving the middle does not shift
-  // every row after it into a move of its own.
-  const keep = new Set(wanted);
-  for (const node of [...oldParent.children]) if (!keep.has(node)) node.remove();
-  let cursor = oldParent.firstElementChild;
-  for (const node of wanted) {
-    if (node === cursor) { cursor = cursor.nextElementSibling; continue; }
-    oldParent.insertBefore(node, cursor);
-  }
-}
-
 function syncSessionGroupStickyOffsets(list) {
   const headings = [...list.querySelectorAll(".session-group-heading")];
   const layout = sessionGroupStickyLayout(headings, list.clientHeight || 0);
@@ -4014,17 +3913,18 @@ async function refreshSessions(options) {
   // feeds the seen line's "now".
   // Pin controls reflect the same state as the main session tabs.
   const pins = typeof sessionPinnedNames === "function" ? sessionPinnedNames() : [];
+  const unstamped = (key, value) => (
+    key === "due_in" || key === "fired_ago" ||
+    key === "last_visited_at" || key === "last_input_at" ||
+    key === "last_activity_at" || key === "last_output_at" ||
+    key === "viewers" || key === "moved_rows" || key === "tool_calls"
+  ) ? undefined : value;
   const signature = JSON.stringify(
     // The project is outside the old tuple so the tuple keeps its shape;
     // a pick changes what the rail draws out of the same cache.
     [[briefingLLM, sessionsCache, groupOrder, meshCache, pins],
      typeof currentProject === "string" ? currentProject : "", shadowList],
-    (key, value) => (
-      key === "due_in" || key === "fired_ago" ||
-      key === "last_visited_at" || key === "last_input_at" ||
-      key === "last_activity_at" || key === "last_output_at" ||
-      key === "viewers" || key === "moved_rows" || key === "tool_calls"
-    ) ? undefined : value,
+    unstamped,
   );
   // See the hold above: a press in flight keeps the rows it started on, and
   // the redraw it postpones is owed back the moment the press ends.
@@ -4050,15 +3950,64 @@ async function refreshSessions(options) {
   // transcript pane and the beads canvas hold theirs.
   const keptScrollTop = rebuild && typeof list.scrollTop === "number"
     ? list.scrollTop : 0;
-  // A rebuild draws the rail off-page and then keeps every row, heading and
-  // card that came out the same (railMorph), so a poll that changed one
-  // session swaps one row. Tearing the whole list down instead cost a
-  // mutation record per node per poll; a page-watching extension rescanned
-  // the document for each batch, which was the input lag of claunch-v87.
-  // The reduced harnesses whose stub DOM cannot serialize keep the teardown.
-  const morph = rebuild && typeof canMorphRail === "function" && canMorphRail(list);
-  const root = morph ? document.createElement(list.tagName || "ul") : list;
-  if (rebuild && !morph) list.innerHTML = "";
+  // A redraw updates the rail in place (claunch-v87): a row whose own
+  // signature (rowSignature below) is unchanged keeps its node -- with its
+  // listeners, hover, focus and any text selection in it -- and a group keeps
+  // its container. Only rows that changed are built again, nodes are moved
+  // only where the order changed, and what the poll no longer draws is
+  // removed at the end. Tearing the whole list down every time a single
+  // session changed cost two hundred rows and their listeners per poll, and
+  // dropped every hover and selection on the rail. The reduced harnesses whose
+  // stub DOM cannot move a node (no insertBefore/removeChild) keep the
+  // teardown they were written against.
+  const inPlace = rebuild && typeof document.createDocumentFragment === "function"
+    && typeof list.insertBefore === "function"
+    && typeof list.removeChild === "function" && !!list.childNodes;
+  const keptRows = new Map();
+  const keptGroups = new Map();
+  if (inPlace) {
+    const harvest = (box) => {
+      for (const n of Array.from(box.childNodes)) {
+        if (n._railGroupKey) {
+          keptGroups.set(n._railGroupKey, n);
+          harvest(n._railGroupBody);
+        } else if (n._railRowSig && n.dataset && n.dataset.name) {
+          if (!keptRows.has(n.dataset.name)) keptRows.set(n.dataset.name, []);
+          keptRows.get(n.dataset.name).push(n);
+        }
+      }
+    };
+    harvest(list);
+  } else if (rebuild) {
+    list.innerHTML = "";
+  }
+  // Where the next node goes in each container this pass writes to. A node
+  // already at that position stays where it is.
+  const placed = new Map();
+  const place = (box, node) => {
+    if (!inPlace) {
+      box.appendChild(node);
+      return;
+    }
+    const at = placed.get(box) || 0;
+    const kids = box.childNodes;
+    if (kids[at] !== node) box.insertBefore(node, kids[at] || null);
+    placed.set(box, at + 1);
+  };
+  // Everything a row draws from, other than the stamps refreshRailSeen moves
+  // on in place. The same row is drawn twice under two mesh headings, so the
+  // heading it sits under is part of it.
+  const rowSignature = (s, depth, meshGroup) => JSON.stringify(
+    [s, depth, meshGroup || null, s.name === currentName, s.name === sessName,
+     pins.includes(s.name), briefingLLM, sessMeshes(s.name), handleTag(s.name),
+     railMeshTags(s.name, meshGroup || null), railMetaText(s)],
+    unstamped,
+  );
+  const takeKeptRow = (name, sig) => {
+    const kept = keptRows.get(name);
+    const at = kept ? kept.findIndex((li) => li._railRowSig === sig) : -1;
+    return at < 0 ? null : kept.splice(at, 1)[0];
+  };
   // Wrapped, not passed straight to filter: Array.filter calls its callback
   // with (element, index, array), and sessionMatchesFilter's second
   // parameter is the filter name, which defaults to the rail's current
@@ -4103,6 +4052,9 @@ async function refreshSessions(options) {
   // group containers while those reduced consumers retain their old shape.
   const nestedGroupContainers = typeof document.createDocumentFragment === "function";
   const groupBodies = [];
+  // The reuse key of each open heading, one per level: a group is the same
+  // group only under the same headings above it.
+  const groupKeys = [];
   // The count each open heading shows, one per level, kept alongside the
   // bodies so a row appended at any depth raises every heading above it.
   const groupCounts = [];
@@ -4131,10 +4083,29 @@ async function refreshSessions(options) {
           ? sessionWorkspaceLabel(row.value) : row.value;
         heading.textContent = `${row.group} · ${label}`;
         heading.title = `${row.group} group ${row.value}`;
-        root.appendChild(heading);
+        list.appendChild(heading);
         continue;
       }
-      const parent = groupBodies[row.level - 1] || root;
+      const parent = groupBodies[row.level - 1] || list;
+      const groupKey = `${row.level ? groupKeys[row.level - 1] : ""}/` +
+        `${row.level}:${row.group}=${row.value}`;
+      const keptGroup = inPlace ? keptGroups.get(groupKey) : null;
+      if (keptGroup) {
+        keptGroups.delete(groupKey);
+        const keptCount = keptGroup._railGroupCount;
+        keptCount._sessionCount = 0;
+        keptCount.textContent = "0";
+        keptGroup._railPaintFold(isSessionGroupCollapsed(row.group, row.value));
+        place(parent, keptGroup);
+        placed.set(keptGroup._railGroupBody, 0);
+        groupBodies.length = row.level;
+        groupBodies[row.level] = keptGroup._railGroupBody;
+        groupCounts.length = row.level;
+        groupCounts[row.level] = keptCount;
+        groupKeys.length = row.level;
+        groupKeys[row.level] = groupKey;
+        continue;
+      }
       const group = document.createElement("li");
       group.className = `session-group session-group-level-${row.level}`;
       group.dataset.group = row.group;
@@ -4229,18 +4200,18 @@ async function refreshSessions(options) {
         }
       });
       group.append(heading, body);
-      // The heading as drawn, count still at its "0": the count is the one
-      // part railMorph carries over to a kept heading instead of comparing.
-      if (morph) {
-        group._railSig = heading.outerHTML;
-        group._railBody = body;
-        group._railCount = count;
-      }
-      parent.appendChild(group);
+      group._railGroupKey = groupKey;
+      group._railGroupBody = body;
+      group._railGroupCount = count;
+      group._railPaintFold = paintFold;
+      place(parent, group);
+      if (inPlace) placed.set(body, 0);
       groupBodies.length = row.level;
       groupBodies[row.level] = body;
       groupCounts.length = row.level;
       groupCounts[row.level] = count;
+      groupKeys.length = row.level;
+      groupKeys[row.level] = groupKey;
       continue;
     }
     if (row.type === "shadow") {
@@ -4249,15 +4220,26 @@ async function refreshSessions(options) {
       // local row by name -- kill, pin, the keyboard card, the filters'
       // record lookup -- can be handed it.
       const parent = nestedGroupContainers
-        ? (groupBodies[groupBodies.length - 1] || root) : root;
-      const card = renderShadowCard(row.shadow, { depth: row.depth || 0 });
-      if (morph) card._railSig = card.outerHTML;
-      parent.appendChild(card);
+        ? (groupBodies[groupBodies.length - 1] || list) : list;
+      place(parent, renderShadowCard(row.shadow, { depth: row.depth || 0 }));
       countRow();
       continue;
     }
     const { session: s, depth } = row;
+    const rowSig = inPlace ? rowSignature(s, depth, row.meshGroup) : "";
+    const keptRow = inPlace ? takeKeptRow(s.name, rowSig) : null;
+    if (keptRow) {
+      // Both decorations read state beside the record (the note editor that
+      // is open, the briefing one-line), and both are idempotent.
+      decorateBriefingRow(keptRow, s);
+      decorateNoteRow(keptRow, s);
+      place(nestedGroupContainers
+        ? (groupBodies[groupBodies.length - 1] || list) : list, keptRow);
+      countRow();
+      continue;
+    }
     const li = document.createElement("li");
+    li._railRowSig = rowSig;
     li.dataset.name = s.name;
     // The row is a card the keyboard can hold. `sess-card` is what the focus
     // helpers match on -- the ⓘ and + buttons inside carry this same
@@ -4382,6 +4364,10 @@ async function refreshSessions(options) {
     // bar beside the short count, so twenty rows can be compared at a
     // glance. The line is a flex line-breaker like the cflow badge below
     // it, and nothing at all where a harness keeps no transcript.
+    // The titles as they stand before the context note: the note carries the
+    // reading's age, so refreshRailSeen writes it again onto these.
+    li._railTitleBase = li.title;
+    label._railTitleBase = label.title;
     ctxNoteOnRow(li, label, s);
     const railCtx = ctxRailLine(s);
     // And how fast its backend answered last time, for a session that goes
@@ -4518,23 +4504,24 @@ async function refreshSessions(options) {
       location.hash = "#/s/" + encodeURIComponent(s.name);
     });
     li.addEventListener("keydown", (ev) => railCardKey(ev, s.name));
-    // What the row was built from, read before the decorations below: a row
-    // already on the rail with the same reading is kept instead of this one
-    // (railMorph), and only the decorations are run again over it.
-    if (morph) {
-      li._railSig = railRowSig(li, dot, railSeen);
-      li._railSession = s;
-    }
     // The briefing's one-line and the collapsed ⟳, always on the row.
     decorateBriefingRow(li, s);
     // The reader's own note for this session, when there is one.
     decorateNoteRow(li, s);
     const parent = nestedGroupContainers
-      ? (groupBodies[groupBodies.length - 1] || root) : root;
-    parent.appendChild(li);
+      ? (groupBodies[groupBodies.length - 1] || list) : list;
+    place(parent, li);
     countRow();
   }
-  if (morph) railMorph(list, root);
+  // What this poll did not draw: every container keeps the nodes placed into
+  // it and loses the rest. A group the poll dropped goes with its parent's
+  // tail, and a row that moved under another heading has already left.
+  if (inPlace) {
+    if (!placed.has(list)) placed.set(list, 0);
+    for (const [box, used] of placed) {
+      while (box.childNodes.length > used) box.removeChild(box.childNodes[used]);
+    }
+  }
   if (rebuild && typeof syncShadowActive === "function") syncShadowActive();
   if (rebuild && nestedGroupContainers && typeof syncSessionGroupStickyOffsets === "function") {
     syncSessionGroupStickyOffsets(list);
@@ -4551,7 +4538,7 @@ async function refreshSessions(options) {
   // signature above for why the stamps are not a reason to rebuild). Not
   // while a press is in flight: swapping the node under the pointer is the
   // lost click the hold exists to prevent, and the redraw it owes covers it.
-  if (!rebuild && !railHeld() && typeof refreshRailSeen === "function") {
+  if ((!rebuild || inPlace) && !railHeld() && typeof refreshRailSeen === "function") {
     refreshRailSeen(list);
   }
   refreshResumeChoices();  // the spawn form offers these same conversations
@@ -4661,9 +4648,7 @@ async function refreshSessions(options) {
   // Assigning past the content's height is not an error -- the browser clamps
   // it -- so a poll that drops rows lands at the new bottom rather than
   // refusing to move, and a rail too short to scroll takes the 0 it had.
-  // A morphed rail was never emptied, so it has no position to put back:
-  // writing the old one would undo the browser's scroll anchoring instead.
-  if (rebuild && !morph && keptScrollTop) list.scrollTop = keptScrollTop;
+  if (rebuild && keptScrollTop) list.scrollTop = keptScrollTop;
   // The grid keeps its own signature, so it follows every poll whether or
   // not the list above was rebuilt.
   if (typeof renderSessionGrid === "function") renderSessionGrid();
@@ -6394,7 +6379,10 @@ function railCwdLine(s) {
    The pill is a label, not the record: hovering opens a small card with the
    issue's title, status, priority and the head of its description, and a
    click goes to the issue on the Beads page. Both read off the queues
-   payload, which carries the listing's rows in full -- no second fetch. */
+   payload, which carries the listing's rows in full -- no second fetch.
+   The card is an issue pill's ONLY hover affordance: a native `title` would
+   draw the browser's own tooltip a second late, on top of the card that is
+   already open (see claunch-1qa8e). */
 let railBeads = new Map();   // session name -> lane (issues, created, summary)
 let railBeadsAt = 0;         // when the queues were last asked for
 let railBeadsBusy = false;
@@ -6487,7 +6475,8 @@ function railBeadsLine(name, lane) {
   for (const { i, created } of shown) {
     const pill = el("a", `rail-bead ${i.status || ""}${created ? " created" : ""}`, i.id || "?");
     pill.href = "#/beads/" + encodeURIComponent(i.id || "");
-    pill.title = `${i.id} [${i.status || "?"}]${created ? " (created, unassigned to " + name + ")" : ""} ${i.title || ""}`.trim();
+    // No `title` here: the hover card already says the id, the status, the
+    // title and the facts, and a native tooltip would land on top of it.
     if (!created && i.id && i.id === next) pill.classList.add("next");
     pill.addEventListener("click", (e) => e.stopPropagation());   // the row attaches; the pill navigates
     pill.addEventListener("mouseenter", () => showBeadPop(pill, i, name));
@@ -6495,6 +6484,8 @@ function railBeadsLine(name, lane) {
     line.appendChild(pill);
   }
   if (all.length > shown.length) {
+    // This one keeps its `title`: it is a count, not an issue, so it opens no
+    // card and the native tooltip is the only way to see what it stands for.
     const more = el("span", "rail-bead rail-bead-more", `+${all.length - shown.length}`);
     more.title = all.slice(shown.length).map(({ i }) => `${i.id} [${i.status}]`).join("\n");
     line.appendChild(more);
@@ -6865,6 +6856,30 @@ function refreshRailSeen(list) {
     // that is just as time-based as the seen line above, so it needs the same
     // tick even though the report itself did not change.
     decorateBriefingRow(li, s);
+    // So do the tps line ("N ago", and its stale class past max_age_s) and the
+    // context reading's age in the gauge's and the row's tooltips. A row the
+    // in-place redraw keeps would otherwise show the ages it was built with
+    // for as long as its session's record stays the same (claunch-v87).
+    // Neither line carries a listener, so the swap loses nothing.
+    const tps = li.querySelector(".rail-tps-line");
+    if (tps && typeof tpsRailLine === "function") {
+      const fresh = tpsRailLine(s);
+      if (fresh) tps.replaceWith(fresh);
+      else tps.remove();
+    }
+    const ctx = li.querySelector(".rail-ctx-line");
+    if (ctx && typeof ctxRailLine === "function") {
+      const fresh = ctxRailLine(s);
+      if (fresh) ctx.replaceWith(fresh);
+      else ctx.remove();
+    }
+    const name = li.querySelector(".rail-name");
+    if (typeof li._railTitleBase === "string" && name &&
+        typeof name._railTitleBase === "string" && typeof ctxNoteOnRow === "function") {
+      li.title = li._railTitleBase;
+      name.title = name._railTitleBase;
+      ctxNoteOnRow(li, name, s);
+    }
   }
 }
 
@@ -8024,9 +8039,50 @@ function renderCflowRuns(runs = cflowCache) {
       ? "No runs match these filters. Change the session status or search text."
       : "No workflow runs yet. Start one with /cflow in a session.";
     list.appendChild(li);
-    return;
   }
   for (const r of visible) list.appendChild(cflowCard(r));
+  appendCflow2Cards(list);
+}
+
+/* The v2 runs (GET /api/cflow2/runs), under the v1 cards: one line each,
+   linking to the run page, which draws the v2 view for a v2-only slot. The
+   list is rebuilt on every poll, so a reply for a list that has since been
+   rebuilt is dropped. */
+let cflow2CardsToken = 0;
+async function appendCflow2Cards(list) {
+  const token = ++cflow2CardsToken;
+  let runs = [];
+  try {
+    const resp = await api("/api/cflow2/runs");
+    if (!resp.ok) return;
+    runs = (await resp.json()).runs || [];
+  } catch {
+    return;
+  }
+  if (token !== cflow2CardsToken || !runs.length) return;
+  for (const r of runs) list.appendChild(cflow2Card(r));
+}
+
+function cflow2Card(r) {
+  const li = document.createElement("li");
+  li.className = "cflow-card cf2-card";
+  const head = el("div", "cflow-head");
+  head.appendChild(el("span", "cf2-badge", "v2"));
+  head.appendChild(el("span", "cflow-name", r.workflow || "(workflow)"));
+  head.appendChild(el("span", "meta",
+    `${r.status}${r.reason ? ` (${r.reason})` : ""} · ${r.scope} · ${r.cwd}`));
+  li.appendChild(head);
+  if (r.error) li.appendChild(el("p", "wf-warning", r.error));
+  if ((r.current || []).length) {
+    li.appendChild(el("p", "wf-note", `at: ${r.current.join(", ")}`));
+  }
+  if (r.delegations) {
+    li.appendChild(el("p", "wf-note", `${r.delegations} open delegation(s)`));
+  }
+  li.addEventListener("click", () => {
+    location.hash = "#/wf/" + encodeURIComponent(`${r.scope}|${r.cwd}`);
+  });
+  return li;
 }
 
 /* One run, as a list card. Split out of the list's own loop because the
@@ -8300,7 +8356,18 @@ async function loadFlowDefinitions() {
       const option = document.createElement("option");
       option.value = JSON.stringify([row.name, row.layer, row.path]);
       option.textContent = `${row.name} · ${row.layer} · ${row.path.split(/[\\/]/).pop()}` +
-        (row.active ? " · active" : " · shadowed");
+        (row.active ? " · active" : " · shadowed") + " · v1 (deprecated)";
+      choice.appendChild(option);
+    }
+    // The v2 definitions, read-only here: the compiled tree and the static
+    // check's findings (GET /api/cflow2/definition). The 4th element of
+    // the value marks them.
+    for (const row of data.definitions_v2 || []) {
+      const option = document.createElement("option");
+      option.value = JSON.stringify([row.name, row.layer, row.path, 2]);
+      option.textContent = `${row.name} · ${row.layer} · v2` +
+        (row.kind === "procedure" ? " · procedure" : "") +
+        (row.error ? " · invalid" : "") + " · read-only";
       choice.appendChild(option);
     }
     flowDefinitionsFor = cwd;
@@ -8319,11 +8386,16 @@ async function loadFlowDefinition() {
   }
   const choice = $("flow-editor-choice").value;
   if (!choice) return;
-  const [name, layer, path] = JSON.parse(choice);
+  const [name, layer, path, version] = JSON.parse(choice);
   const cwd = $("flow-editor-cwd").value;
   flowDefinition = null;
   $("flow-editor-text").value = "";
   $("flow-editor-effective").textContent = "";
+  flowEditorReadOnly(version === 2);
+  if (version === 2) {
+    await loadFlowDefinitionV2(cwd, name);
+    return;
+  }
   flowEditorMessage("Loading source…");
   try {
     const query = new URLSearchParams({ cwd, name, layer, path });
@@ -8333,6 +8405,44 @@ async function loadFlowDefinition() {
     flowEditorDirty();
     flowEditorMessage("Source loaded. Validate before saving.");
     await checkFlowDefinition(false);
+  } catch (error) {
+    flowEditorMessage(error.message, true);
+  }
+}
+
+/* The editor's v2 mode: the source shown read-only, Validate and Save off. */
+function flowEditorReadOnly(on) {
+  $("flow-editor-text").readOnly = !!on;
+  $("flow-editor-validate").disabled = !!on;
+  $("flow-editor-save").disabled = !!on;
+}
+
+/* One v2 definition: its source, the compiled tree (in the "effective"
+   pane) and the static check's findings. */
+async function loadFlowDefinitionV2(cwd, name) {
+  flowEditorMessage("Loading v2 definition…");
+  try {
+    const query = new URLSearchParams({ cwd, name });
+    const doc = await flowEditorResponse(await api(`/api/cflow2/definition?${query}`));
+    $("flow-editor-text").value = doc.text || "";
+    $("flow-editor-source").textContent = doc.path || "";
+    flowEditorDirty();
+    if (doc.error) {
+      flowEditorMessage(`Does not compile: ${doc.error}`, true);
+      return;
+    }
+    $("flow-editor-effective").textContent = cflow2TreeRows(doc.chart, null)
+      .map((r) => "  ".repeat(r.depth) + (r.role ? `${r.role}: ` : "") + `${r.icon} ${r.text}`)
+      .join("\n");
+    const findings = doc.findings || [];
+    flowEditorMessage([
+      "cflow v2 definition (read-only here; edit the file, then 'claunch cflow2 validate').",
+      `${Object.keys((doc.chart || {}).nodes || {}).length} nodes · ${(doc.delegations || []).length} delegation points`,
+      ...((doc.chart || {}).warnings || []).map((w) => `Warning: ${w}`),
+      ...(findings.length
+        ? findings.map((f) => `${f.level}: ${f.code}${f.node ? ` [${f.node}]` : ""}: ${f.message}`)
+        : ["Checks: no findings"]),
+    ].join("\n"), findings.some((f) => f.level === "error"));
   } catch (error) {
     flowEditorMessage(error.message, true);
   }
@@ -8363,6 +8473,7 @@ async function checkFlowDefinition(save) {
     $("flow-editor-effective").textContent = validation.effective_yaml;
     flowEditorMessage([
       save ? "Saved." : "Valid workflow.",
+      `Deprecated format: ${CFLOW_V1_NOTE}`,
       `${validation.steps} steps · start: ${validation.start}`,
       ...validation.bases.map(base => `Inherited: ${base}`),
       ...validation.warnings.map(value => `Warning: ${value}`),
@@ -9316,6 +9427,7 @@ function renderWorktreeOptions() {
   const keep = shown.includes(kept) || (!!offer && kept === PARENT_WORKTREE);
   sel.value = keep ? kept : (offer ? PARENT_WORKTREE : "");
   renderWorktreeSessionOptions();
+  renderWorktreeFromOptions();
 }
 
 /* The Reuse picker's value for "the checkout the parent is in". Never a
@@ -9410,6 +9522,58 @@ function renderWorktreeSessionOptions() {
   sel.value = target && target === f.worktree_existing.value ? kept : "";
 }
 
+/* The "Branch from" picker: where a NEW checkout's branch starts. The first
+   row is the daemon's default (the main checkout's HEAD, named, because it is
+   not always the trunk); then the listed worktrees, each read as the branch
+   it has checked out (the parent's own first, for a child); then the
+   branches no listed worktree stands on. A branch row's value is spelled
+   `refs/heads/<name>` so it can never be read as a worktree of the same name
+   (worktree.start_point takes a worktree name first). */
+function renderWorktreeFromOptions() {
+  const f = $("new-session");
+  const sel = f && f.worktree_from;
+  if (!sel) return;
+  const git = newWorktreeGit || {};
+  const onWt = git.worktree_branches || {};
+  const owners = worktreeSessions();
+  const offer = worktreeParentOffer();
+  const kept = sel.value;
+  sel.innerHTML = "";
+  const head = git.root_branch || "";
+  sel.appendChild(new Option(
+    head ? `repository HEAD — ${head}` : "repository HEAD (detached)", ""));
+  const names = (git.worktrees || []).slice();
+  if (offer && offer.name && names.includes(offer.name)) {
+    names.splice(names.indexOf(offer.name), 1);
+    names.unshift(offer.name);
+  }
+  for (const name of names) {
+    const branch = onWt[name] ? ` on ${onWt[name]}` : " (detached)";
+    const who = offer && offer.name === name
+      ? ` — parent's checkout (${offer.parent})`
+      : ((owners[name] || []).length
+          ? ` — ${owners[name].map((s) => s.name).join(", ")}` : "");
+    sel.appendChild(new Option(`worktree ${name}${branch}${who}`, name));
+  }
+  const taken = new Set(Object.values(onWt).filter(Boolean));
+  for (const b of git.branches || []) {
+    if (taken.has(b)) continue;
+    sel.appendChild(new Option(`branch ${b}`, `refs/heads/${b}`));
+  }
+  sel.value = [...sel.options].some((o) => o.value === kept) ? kept : "";
+}
+
+/* The branch a new checkout will start on, for the hint: what the picked
+   Branch from row resolves to. */
+function worktreeFromBranch() {
+  const f = $("new-session");
+  const picked = f && f.worktree_from ? f.worktree_from.value : "";
+  const git = newWorktreeGit || {};
+  if (!picked) return git.root_branch || "";
+  if (picked.startsWith("refs/heads/")) return picked.slice("refs/heads/".length);
+  return (git.worktree_branches || {})[picked] || picked;
+}
+
 /* One pick on the From session row: put that session's checkout on the Reuse
    picker, dropping a narrowing that would hide it. */
 function pickWorktreeSession(session) {
@@ -9473,12 +9637,20 @@ function syncNewWorktree() {
   if (f.worktree_session) {
     f.worktree_session.disabled = !usable || mode !== "existing";
   }
-  f.worktree_rebase.disabled = !usable || mode === "" || inParent;
+  // One question per mode: a NEW checkout is asked where it starts (Branch
+  // from), an EXISTING one whether to catch up (Rebase onto). The daemon
+  // refuses the pair together (worktree._checkout), so the form never shows
+  // both.
+  if (f.worktree_from) f.worktree_from.disabled = !usable || mode !== "new";
+  f.worktree_rebase.disabled = !usable || mode !== "existing" || inParent;
   $("new-worktree-name-row").classList.toggle("hidden", mode !== "new");
+  const fromRow = $("new-worktree-from-row");
+  if (fromRow) fromRow.classList.toggle("hidden", mode !== "new");
   $("new-worktree-existing-row").classList.toggle("hidden", mode !== "existing");
   const sessionRow = $("new-worktree-session-row");
   if (sessionRow) sessionRow.classList.toggle("hidden", mode !== "existing");
-  $("new-worktree-rebase-row").classList.toggle("hidden", mode === "" || inParent);
+  $("new-worktree-rebase-row").classList.toggle(
+    "hidden", mode !== "existing" || inParent);
   // Which directory the list was read from, said out loud. The picker is the
   // daemon's answer about ONE directory and it is not always the one the row
   // above names — a policy report still in flight leaves the row on
@@ -9504,13 +9676,26 @@ function syncNewWorktree() {
       if (who.length) shared = ` — ${picked} is in use by ${who.join(", ")}`;
     }
   }
+  // A new checkout says where its branch starts: the default is the main
+  // checkout's HEAD, which is not always the trunk, and a branch cut from
+  // somebody's unlanded work carries that work with it.
+  let starts = "";
+  if (!locked && mode === "new" && f.worktree_from) {
+    const at = worktreeFromBranch();
+    const trunk = worktreeTrunkBranch();
+    starts = at
+      ? `the new branch starts at ${at} (committed work only)` +
+        (!f.worktree_from.value && trunk && at !== trunk
+          ? ` — the main checkout is not on ${trunk}` : "")
+      : "the new branch starts at the main checkout's detached HEAD";
+  }
   hint.textContent = locked
     ? (parent
         ? "worktree selection is locked by spawn.allow_worktree"
         : "the selected directory is not a git repository")
     : (mode === "existing" && newWorktreeFor
         ? `checkouts of ${cwdShort(newWorktreeFor)}${shared}`
-        : "");
+        : starts);
   hint.classList.toggle("info", !locked);
   hint.classList.toggle("hidden", !hint.textContent);
   syncWorktreeTrunkButton();
@@ -10983,6 +11168,49 @@ function setCreatePending(f, pending, parent) {
   status.classList.toggle("hidden", !pending);
 }
 
+/* What a create/spawn answer says failed beside the session it made.
+
+   The daemon reports each onboarding leg separately so a partial success
+   stays legible, and the CLI has printed the failing one since it grew them
+   ("mesh join failed: handle 's59' is already taken in mesh ..."). The
+   browser never looked: it checked the HTTP status, and a refused mesh join
+   is a 200 with the session in it. So a Create that asked for a mesh and got
+   none closed the box and opened a terminal showing no team and no reason —
+   which reads as the picker being broken rather than as the answer it is.
+
+   The session exists either way, so this blocks nothing: it is the sentence
+   the operator would otherwise have had to infer. Callers show each entry
+   sticky, because the page navigates to the new session on the next line and
+   a card that times out while the reader watches a terminal open is a card
+   nobody read. */
+function onboardFailureNotices(info) {
+  const out = [];
+  const mesh = (info || {}).mesh;
+  if (mesh && mesh.ok === false) {
+    const pending = mesh.pending || null;
+    // A remote join that pended is not a failure — the primary has not
+    // answered yet. Titled "failed", the card told the reader the opposite
+    // of what its own sub-line said (claunch-mv4nu). The title follows the
+    // same branch as the sub: an error is a failure, a pend is a wait.
+    const waiting = !mesh.error && !!pending;
+    out.push({
+      title: waiting ? "mesh join pending" : "mesh join failed",
+      sub: mesh.error
+        || (pending
+              ? `waiting for ${pending.primary || "the mesh owner"} to approve`
+              : "no reason given"),
+    });
+  }
+  const flow = (info || {}).workflow;
+  if (flow && flow.ok === false) {
+    out.push({
+      title: "workflow did not start",
+      sub: flow.error || "no reason given",
+    });
+  }
+  return out;
+}
+
 let createBusy = false;
 $("new-session").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -11061,6 +11289,8 @@ $("new-session").addEventListener("submit", async (e) => {
     // stages it (spawn.AUTO_WORKTREE). An empty string sent to a child is
     // refused outright — `validate_name` calls it an empty worktree name.
     body.worktree = typed || (parent ? true : "");
+    if (f.worktree_from && !f.worktree_from.disabled && f.worktree_from.value)
+      body.branch_from = f.worktree_from.value;
   }
   else if (worktreeMode === "existing") {
     const picked = f.worktree_existing.value;
@@ -11076,8 +11306,9 @@ $("new-session").addEventListener("submit", async (e) => {
     }
     if (picked !== PARENT_WORKTREE) body.worktree = picked;
   }
-  // A greyed rebase box is no answer (the parent's checkout greys it).
-  if (worktreeMode !== "" && !f.worktree_rebase.disabled &&
+  // A greyed rebase box is no answer (the parent's checkout greys it), and
+  // a new checkout is never sent one: where it starts is branch_from above.
+  if (worktreeMode === "existing" && !f.worktree_rebase.disabled &&
       f.worktree_rebase.value.trim())
     body.rebase_onto = f.worktree_rebase.value.trim();
   if (f.role.value) body.role = f.role.value;
@@ -11117,8 +11348,15 @@ $("new-session").addEventListener("submit", async (e) => {
     if (f.handle.value.trim()) body.handle = f.handle.value.trim();
   }
   if (f.workflow.value) {
-    body.workflow = f.workflow.value;
+    // A v2 pick says so (workflow_version: 2), so a name both formats
+    // declare starts the one that was picked; see cflowPickBody.
+    Object.assign(body, cflowPickBody(f.workflow.value, workflowsCache));
     if (f.context.value.trim()) body.context = f.context.value.trim();
+    const inputsBox = $("new-inputs");
+    if (inputsBox && !inputsBox.classList.contains("hidden")) {
+      cflowInputsErrors(inputsBox, {});
+      body.cflow_inputs = cflowInputsValues(inputsBox);
+    }
   } else if (parent && newSpawnReportFor === parent.name &&
              (newSpawnReport || {}).child_cflow) {
     // "" is not silence on a child: the daemon reads an absent workflow as
@@ -11171,6 +11409,8 @@ $("new-session").addEventListener("submit", async (e) => {
       const doc = await resp.json().catch(() => ({}));
       err.textContent = doc.error || `HTTP ${resp.status}`;
       err.classList.remove("hidden");
+      // per-field start input errors (docs/cflow-v2.md 2.6)
+      if (doc.errors && $("new-inputs")) cflowInputsErrors($("new-inputs"), doc.errors);
       return;
     }
     f.name.value = "";
@@ -11217,6 +11457,12 @@ $("new-session").addEventListener("submit", async (e) => {
     // The spawn endpoint wraps the child (it also reports the parent and what
     // the onboarding did); the create one answers with the session itself.
     const made = info.session || info;
+    // A leg that failed beside the session (a refused mesh join is the usual
+    // one) is said now, as a card: the box that would have shown it is closed
+    // on the next line and the page leaves for the new terminal.
+    for (const bad of onboardFailureNotices(info)) {
+      notify(bad.title, bad.sub, { kind: "warn", sticky: true });
+    }
     // The form is in the modal when it was opened as one, and the page it was
     // opened over is not where the operator is going: the new session is.
     createBusy = false;
@@ -12838,6 +13084,100 @@ async function copyToBrowserClipboard(text, host) {
     area.remove();
     before?.focus?.();
   }
+}
+
+/* OSC 52 (`ESC ] 52 ; <targets> ; <base64> BEL`): a program in the terminal
+   asking for text to go on the clipboard. Claude Code copies both ways — a
+   native write on the machine it runs on, and this sequence — and xterm.js
+   core implements neither half of OSC 52, so before this handler the sequence
+   was dropped. Reached from the daemon's own machine the native write hid
+   that; reached through the relay from another machine, nothing landed on
+   the clipboard of the computer the browser runs on.
+   Only writes are honoured. A `?` payload asks the terminal to read the
+   clipboard back into the PTY, and the page never hands its clipboard to
+   whatever runs in a session. An empty payload (clear) is ignored too.
+   The write is taken only within OSC52_INPUT_MS of a DOM event the person
+   made — a key, a press of mouse/pen/finger, a paste or a finished IME
+   composition — on this terminal, or, for the session terminal on screen,
+   in the session line below it (typing `/copy` there is a copy too). Not
+   onData: xterm writes there by itself (answers to device queries, focus
+   reports, mouse motion under ?1003), so a replayed or live query ahead of
+   the OSC 52 would open the gate with nobody at the keyboard. With DOM
+   events, catch-up bytes replayed on attach (the CLI tab's ring) and a
+   second viewer who is only watching or hovering copy nothing. Browsers
+   draw the same line for the execCommand fallback (it needs recent user
+   activation). */
+const OSC52_MAX_BASE64 = 1 << 20;   // ~768 KiB of text once decoded
+const OSC52_INPUT_MS = 10000;
+const OSC52_USER_EVENTS = ["keydown", "pointerdown", "paste", "compositionend"];
+
+/* When the session line last had a user event. One listener for the page —
+   the line outlives every session terminal built under it. */
+let osc52SessionLineAt = -Infinity;
+const osc52SessionLine = $("term-input");
+if (osc52SessionLine) {
+  for (const type of OSC52_USER_EVENTS) {
+    osc52SessionLine.addEventListener(type, () => { osc52SessionLineAt = Date.now(); }, true);
+  }
+}
+
+/* The text an OSC 52 payload carries, or null when it is not a write this
+   page performs: a query, a clear, oversized, or not base64/UTF-8. */
+function decodeOsc52(data) {
+  const sep = data.indexOf(";");
+  if (sep < 0) return null;
+  const payload = data.slice(sep + 1).replace(/\s+/g, "");
+  if (!payload || payload === "?" || payload.length > OSC52_MAX_BASE64) return null;
+  try {
+    const bin = atob(payload);
+    const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+/* Wire OSC 52 into one xterm instance, after open() (t.element exists then).
+   The user events on its element mark the moments of input, so the gate
+   travels with the terminal object (a parked terminal brought back keeps its
+   history; a rebuilt one starts with none). The session line counts only
+   for the session terminal on screen — `term` — so a parked session's copy
+   is not taken on the strength of typing meant for another one. */
+function installOsc52(t) {
+  let lastInput = -Infinity;
+  for (const type of OSC52_USER_EVENTS) {
+    t.element?.addEventListener(type, () => { lastInput = Date.now(); }, true);
+  }
+  t.parser.registerOscHandler(52, (data) => {
+    const since = t === term ? Math.max(lastInput, osc52SessionLineAt) : lastInput;
+    if (Date.now() - since > OSC52_INPUT_MS) return true;
+    const sep = data.indexOf(";");
+    if (sep >= 0 && data.slice(sep + 1).replace(/\s+/g, "").length > OSC52_MAX_BASE64) {
+      notify("Copy not taken", "The text is larger than this page copies from a terminal.", { key: "osc52" });
+      return true;
+    }
+    const text = decodeOsc52(data);
+    if (text === null) return true;
+    // The Clipboard menu lists the daemon's history, which reads the daemon
+    // machine's clipboard — not this browser's — so hand it the copy too
+    // (claunch-fqw4k). Also when the browser refuses it: the menu's Copy is
+    // then the way to reach it.
+    api("/api/clipboard", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    }).catch(() => {});
+    copyToBrowserClipboard(text, document.body).then((ok) => {
+      if (!ok) {
+        notify(
+          "Copy did not reach this computer's clipboard",
+          "The browser refused it — select the text and copy it by hand.",
+          { key: "osc52" },
+        );
+      }
+    });
+    return true;
+  });
 }
 
 async function deleteHostClipboard(id) {
@@ -14605,6 +14945,9 @@ function buildCliTerm() {
     // the ring the daemon keeps is only catch-up on attach — so this
     // terminal keeps xterm's own scrollback and the wheel browses it.
     scrollback: 5000,
+    // Option+drag selects on a Mac, as Shift+drag does elsewhere: see the
+    // session terminal's note on macOptionClickForcesSelection.
+    macOptionClickForcesSelection: true,
   });
   cliFit = new FitAddon.FitAddon();
   cliTerm.loadAddon(cliFit);
@@ -14617,6 +14960,7 @@ function buildCliTerm() {
       cliWs.send(new TextEncoder().encode(data));
     }
   });
+  if (typeof installOsc52 === "function") installOsc52(cliTerm);
   // A resize we applied from a server broadcast must not be echoed back, or
   // two viewers ping-pong forever (the session terminal's rule, verbatim).
   cliTerm.onResize(({ cols, rows }) => {
@@ -14862,6 +15206,13 @@ function freshAttach(name) {
     // for the main buffer: a plain shell, a build log, a session after its
     // TUI has exited.
     scrollback: 5000,
+    // A program with mouse tracking on (claude does) takes every drag as a
+    // mouse report, so the browser never gets to select. xterm lets a
+    // modifier force its own selection instead: Shift everywhere but a Mac,
+    // where it is Option — and only with this flag, which defaults to off
+    // (claunch-ekrwr). The selection is xterm's; copying it is left to the
+    // browser's context menu.
+    macOptionClickForcesSelection: true,
   });
   fitAddon = new FitAddon.FitAddon();
   term.loadAddon(fitAddon);
@@ -14872,6 +15223,9 @@ function freshAttach(name) {
   // Wired once, for the life of this terminal object: the link swaps sockets
   // underneath these, and a reconnect must not leave a second pair behind.
   term.onData(sendInput);
+  // Guarded like onTermKeyEvent below, for the harnesses that boot this
+  // function without the clipboard block.
+  if (typeof installOsc52 === "function") installOsc52(term);
   watchComposer(term);
   term.onResize(({ cols, rows }) => {
     // A resize we applied from a server broadcast must not be echoed back, or
@@ -15722,6 +16076,8 @@ function mobileTitle() {
     case "beads": return beadsSection === "reports" ? "reports"
       : beadsSection === "queues" ? "queues" : "beads";
     case "worktrees": return "worktrees";
+    case "glossary": return "용어집";
+    case "spec": return "work spec";
     case "mesh": return `mesh · ${meshName}`;
     case "flow": return `flows · ${flowMesh}`;
     // The session first, for the reason the head carries it (wfOwnerChip):
@@ -15876,6 +16232,8 @@ const VIEWS = {
   cli: "cli-view",
   beads: "beads-view",
   worktrees: "worktrees-view",
+  glossary: "glossary-view",
+  spec: "spec-view",
   wf: "wf-view",
   // The session's conversation — the fourth reading of it, beside the
   // terminal (what it is doing), the run page (where it has got to) and the
@@ -15969,6 +16327,19 @@ async function refreshWf() {
       return;
     }
   } catch {
+    return;
+  }
+  if (data.status === "idle" && data.v2) {
+    const cwd = wfCwd;
+    const v2 = await fetchCflow2Run(cwd, wfScope);
+    if (!v2 || wfCwd !== cwd) return;
+    $("wf-view").innerHTML = "";
+    if (v2.error) {
+      $("wf-view").appendChild(el("p", "wf-warning", v2.error));
+      return;
+    }
+    wfLastData = null;
+    renderCflow2Into($("wf-view"), v2, { after: () => refreshWf() });
     return;
   }
   wfLastData = data;
@@ -16093,6 +16464,19 @@ async function refreshSplit() {
     return;
   }
   if (splitFor !== want) return;   // repointed while the reply was in flight
+  // No v1 run, a v2 one: drawn by the v2 renderer (see renderCflow2Into).
+  if (data.status === "idle" && data.v2) {
+    const v2 = await fetchCflow2Run(splitCwd, splitScope);
+    if (!v2 || splitFor !== want) return;
+    if (v2.error) {
+      $("term-wf").innerHTML = "";
+      $("term-wf").appendChild(el("p", "wf-warning", v2.error));
+      return;
+    }
+    splitLastData = null;
+    renderCflow2Into($("term-wf"), v2, { after: () => refreshSplit() });
+    return;
+  }
   splitLastData = data;
   renderSplit(data);
 }
@@ -16461,6 +16845,8 @@ function parseHash(h) {
     : { page: "beads", id: parts[1] || "" };
   if (parts[0] === "reports") return { page: "beads", section: "reports" };
   if (parts[0] === "worktrees") return { page: "worktrees" };
+  if (parts[0] === "glossary") return { page: "glossary" };
+  if (parts[0] === "spec") return { page: "spec" };
   // #/settings is the machine's own settings; #/settings/profiles the profile
   // manager beside it. One shell, one section deep — the same spelling
   // #/beads/<section> already uses, so a section is linkable and the Back
@@ -16518,6 +16904,8 @@ function route() {
   if (r.page !== "stats") stopStatsPoll();
   if (r.page !== "beads") { stopBeadsPoll(); stopReportsPoll(); }
   if (r.page !== "worktrees") globalThis.WorktreesPage?.stop();
+  if (r.page !== "glossary") globalThis.GlossaryPage?.stop();
+  if (r.page !== "spec") globalThis.SpecPage?.stop();
   if (r.page !== "log") closeTranscript();
   // Guarded like syncRouteProject: reduced harnesses slice route() alone.
   if (r.page !== "shadow" && typeof closeShadow === "function") closeShadow();
@@ -16559,6 +16947,8 @@ function route() {
     case "settings": openSettings(r.section); break;
     case "beads": openBeads(r.id, r.section); break;
     case "worktrees": showView("worktrees"); globalThis.WorktreesPage.open(); break;
+    case "glossary": showView("glossary"); globalThis.GlossaryPage.open(); break;
+    case "spec": showView("spec"); globalThis.SpecPage.open(); break;
     default: openHome();
   }
   // The rail is the address's `?detail=`, and nothing else opens or closes
@@ -16690,12 +17080,302 @@ function syncOnboardPickers() {
   wf.innerHTML = "";
   wf.appendChild(new Option("(none)", ""));
   for (const o of options) {
-    wf.appendChild(new Option(o.detail ? `${o.name} — ${o.detail}` : o.name,
-                              o.name));
+    const label = o.name + (o.tag || "");
+    wf.appendChild(new Option(o.detail ? `${label} — ${o.detail}` : label,
+                              o.value || o.name));
   }
   wf.value = [...wf.options].some((o) => o.value === keptWf) ? keptWf : "";
   $("new-context-row").classList.toggle("hidden", !wf.value);
   renderSubroles();
+  // One line under the row when the pick is a v1 workflow: the format is
+  // deprecated, the run still works. Absent in harnesses without the node.
+  const v1Note = $("new-workflow-note");
+  if (v1Note) {
+    const picked = options.find((o) => (o.value || o.name) === wf.value);
+    v1Note.classList.toggle("hidden", !(picked && picked.deprecated));
+  }
+  // Guarded: harnesses that slice this function alone do not carry it.
+  if (typeof syncCflowInputs === "function") syncCflowInputs();
+}
+
+/* The start inputs of the picked v2 workflow (docs/cflow-v2.md 2.6): the
+   list entry carries the schema (`inputs`), and the box under the Workflow
+   row draws one field per input. Rebuilt -- so cleared -- whenever the pick
+   changes; kept while the same workflow stays picked. */
+let newInputsFor = null;
+function syncCflowInputs() {
+  const f = $("new-session");
+  const box = $("new-inputs");
+  if (!f || !box) return;
+  const entry = f.workflow.value ? cflowPickEntry(f.workflow.value, workflowsCache) : null;
+  const fields = (entry && Number(entry.version) === 2 && entry.inputs) || [];
+  const key = fields.length ? `${entry.name}|${JSON.stringify(fields)}` : "";
+  if (key === newInputsFor) return;
+  newInputsFor = key;
+  box.innerHTML = "";
+  box.classList.toggle("hidden", !fields.length);
+  if (fields.length) {
+    cflowInputsForm(box, fields, entry.input_constraints || []);
+    cflowInputsLive(box, f.workflow.value, newSessionCwd);
+    // TEMPORARY (claunch-z7b0n, v1 -> v2 migration): the daemon writes the
+    // issue the Board answer settles into the run's `issue` input. The field
+    // stays; it says so. Remove with api.py's overwrite once no v2 workflow
+    // declares an `issue` input.
+    const issueRow = box.querySelector('.cf2-input[data-input="issue"]');
+    if (issueRow) {
+      issueRow.appendChild(el("p", "wf-note cf2-input-board",
+        "Temporary: the run starts with the issue the Board answer settles " +
+        "here. With Board left on New, an id typed here is taken or joined " +
+        "instead of a new issue being written; with any other Board answer " +
+        "it has to agree, or the create is refused."));
+    }
+  }
+}
+
+/* Cross-input asserts and readiness checks while the user edits the start
+   inputs (docs/cflow-v2.md 2.6). The daemon answers both: POST
+   /api/cflow2/inputs/check runs the same normalize a start runs (so the
+   form and the start refuse the same values with the same message), and an
+   input declared `precheck: gh` asks GET /api/tools/gh?cwd= before its
+   checkbox may be turned on. The start still re-checks; this only says it
+   earlier. */
+let cflowInputsCheckSeq = 0;
+function cflowInputsLive(box, picked, cwdOf) {
+  let timer = null;
+  const run = async () => {
+    const seq = ++cflowInputsCheckSeq;
+    const body = Object.assign(cflowPickBody(picked, workflowsCache), {
+      cwd: cwdOf() || undefined, cflow_inputs: cflowInputsValues(box),
+    });
+    try {
+      const resp = await api("/api/cflow2/inputs/check", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const doc = await resp.json().catch(() => ({}));
+      if (seq !== cflowInputsCheckSeq || !resp.ok) return;
+      cflowInputsErrors(box, doc.errors || {});
+      const general = box.querySelector(".cf2-constraint-error");
+      if (general) {
+        const msg = (doc.errors || {})._constraints || "";
+        general.textContent = msg;
+        general.classList.toggle("hidden", !msg);
+      }
+    } catch (_) { /* the start re-checks; a missed live check costs nothing */ }
+  };
+  const schedule = () => { clearTimeout(timer); timer = setTimeout(run, 250); };
+  box.addEventListener("input", schedule);
+  box.addEventListener("change", schedule);
+  for (const row of box.querySelectorAll('.cf2-input[data-precheck="gh"]')) {
+    cflowGhPrecheck(row, cwdOf, schedule);
+  }
+}
+
+/* The gh readiness line under an input declared `precheck: gh`: installed,
+   signed in to the repository's host. Until it says ready a bool input
+   stays off and disabled, with the commands to run beside it. */
+async function cflowGhPrecheck(row, cwdOf, changed) {
+  let line = row.querySelector(".cf2-precheck");
+  if (!line) {
+    line = el("div", "cf2-precheck");
+    row.insertBefore(line, row.querySelector(".cf2-input-error"));
+  }
+  const control = row.querySelector(".cf2-input-value");
+  line.textContent = "gh: checking…";
+  line.className = "cf2-precheck";
+  let doc = null;
+  try {
+    const cwd = cwdOf() || "";
+    const resp = await api(`/api/tools/gh${cwd ? `?cwd=${encodeURIComponent(cwd)}` : ""}`);
+    doc = resp.ok ? await resp.json() : null;
+  } catch (_) { doc = null; }
+  line.innerHTML = "";
+  const v = cflowGhVerdict(doc);
+  line.classList.add(v.ok ? "ok" : "bad");
+  line.appendChild(el("span", "cf2-precheck-text", v.text));
+  for (const g of v.guide) {
+    const cmd = el("code", "cf2-precheck-run", g.run);
+    cmd.title = g.why || "";
+    line.appendChild(cmd);
+  }
+  const again = el("button", "wf-btn cf2-precheck-again", "Re-check");
+  again.type = "button";
+  again.addEventListener("click", () => cflowGhPrecheck(row, cwdOf, changed));
+  line.appendChild(again);
+  if (control && control.type === "checkbox") {
+    if (!v.ok && control.checked) { control.checked = false; changed(); }
+    control.disabled = !v.ok;
+    control.title = v.ok ? "" : v.text;
+  }
+}
+
+/* What GET /api/tools/gh says about one directory, for the form: ok when
+   gh is installed and signed in to every host the repository pushes to. An
+   unset claunch.pr.remote is not a blocker here (the worker lands through
+   origin by default); it is listed with the guide. */
+function cflowGhVerdict(doc) {
+  if (!doc) return { ok: false, text: "gh: the daemon did not answer", guide: [] };
+  const cli = doc.client || {};
+  const guide = (doc.guide || []).filter((g) => g && g.run);
+  if (!cli.installed) return { ok: false, text: "gh is not installed on the daemon's PATH", guide };
+  const hosts = doc.hosts || [];
+  if (!hosts.length) {
+    return { ok: false, text: `gh ${cli.version || ""}: this directory has no GitHub remote`, guide };
+  }
+  const bad = hosts.filter((h) => !h.authenticated);
+  if (bad.length) {
+    return { ok: false, guide,
+             text: `gh ${cli.version || ""}: not signed in to ${bad.map((h) => h.host).join(", ")}` };
+  }
+  const who = hosts.map((h) => `${h.host}${h.account ? ` as ${h.account}` : ""}`).join(", ");
+  return { ok: true, text: `gh ${cli.version || ""} ✓ signed in to ${who}`, guide: [] };
+}
+
+const CFLOW_INPUT_CHECK_TYPES = ["invariants", "acceptance"];
+
+/* One input's control. Lists and check lists are rows with add/remove;
+   every control carries data-input so the collector and the error marker
+   find it again. */
+function cflowInputControl(field) {
+  const t = field.type || "string";
+  const wrap = el("div", "cf2-input-control");
+  const text = (cls, value, ph) => {
+    const i = document.createElement("input");
+    i.type = "text";
+    i.className = cls;
+    i.value = value == null ? "" : String(value);
+    i.placeholder = ph || "";
+    return i;
+  };
+  if (t === "text") {
+    const ta = document.createElement("textarea");
+    ta.rows = 3;
+    ta.className = "cf2-input-value";
+    ta.placeholder = field.placeholder || "";
+    ta.value = field.default == null ? "" : String(field.default);
+    wrap.appendChild(ta);
+  } else if (t === "int") {
+    const i = document.createElement("input");
+    i.type = "number";
+    i.step = "1";
+    i.className = "cf2-input-value";
+    i.placeholder = field.placeholder || "";
+    if (field.default != null) i.value = String(field.default);
+    wrap.appendChild(i);
+  } else if (t === "bool") {
+    const i = document.createElement("input");
+    i.type = "checkbox";
+    i.className = "cf2-input-value";
+    i.checked = !!field.default;
+    wrap.appendChild(i);
+  } else if (t === "enum") {
+    const sel = document.createElement("select");
+    sel.className = "cf2-input-value";
+    if (!field.required || field.default == null) sel.appendChild(new Option("(none)", ""));
+    for (const c of field.choices || []) sel.appendChild(new Option(c, c));
+    sel.value = field.default == null ? "" : String(field.default);
+    wrap.appendChild(sel);
+  } else if (t === "list" || CFLOW_INPUT_CHECK_TYPES.includes(t)) {
+    const rows = el("div", "cf2-input-rows");
+    const check = CFLOW_INPUT_CHECK_TYPES.includes(t);
+    const addRow = (item) => {
+      const row = el("div", "cf2-input-row");
+      row.appendChild(text("cf2-input-text", check ? (item || {}).text : item,
+                           check ? "text" : (field.placeholder || "")));
+      if (check) {
+        row.appendChild(text("cf2-input-probe mono", (item || {}).probe,
+                             "probe command (optional; exit 0 = holds)"));
+      }
+      const rm = el("button", "wf-btn cf2-input-remove", "×");
+      rm.type = "button";
+      rm.title = "remove this row";
+      rm.addEventListener("click", () => row.remove());
+      row.appendChild(rm);
+      rows.appendChild(row);
+    };
+    for (const item of field.default || []) addRow(item);
+    if (!(field.default || []).length) addRow(null);
+    const add = el("button", "wf-btn cf2-input-add", "+ add");
+    add.type = "button";
+    add.addEventListener("click", () => addRow(null));
+    wrap.append(rows, add);
+  } else {
+    wrap.appendChild(text("cf2-input-value", field.default, field.placeholder));
+  }
+  return wrap;
+}
+
+function cflowInputsForm(box, fields, constraints) {
+  box.appendChild(el("p", "wf-note", "Start inputs of this workflow (* = required)"));
+  for (const field of fields) {
+    const row = el("div", "cf2-input");
+    row.dataset.input = field.name;
+    row.dataset.type = field.type || "string";
+    if (field.precheck) row.dataset.precheck = field.precheck;
+    const label = el("label", "cf2-input-label",
+                     (field.label || field.name) + (field.required ? " *" : ""));
+    row.appendChild(label);
+    row.appendChild(cflowInputControl(field));
+    if (field.help) row.appendChild(el("p", "wf-note cf2-input-help", field.help));
+    row.appendChild(el("p", "cf2-input-error hidden"));
+    box.appendChild(row);
+  }
+  if ((constraints || []).length) {
+    const list = el("div", "cf2-constraints");
+    list.appendChild(el("p", "wf-note", "Rules across these inputs:"));
+    for (const c of constraints) {
+      const item = el("p", "wf-note cf2-constraint", c.message || c.assert);
+      item.title = c.assert;
+      list.appendChild(item);
+    }
+    list.appendChild(el("p", "cf2-input-error cf2-constraint-error hidden"));
+    box.appendChild(list);
+  }
+}
+
+/* What the box holds, as the API's `cflow_inputs`: empty values are left
+   out (the daemon applies the default and says when a required one is
+   missing). */
+function cflowInputsValues(box) {
+  const out = {};
+  for (const row of box.querySelectorAll(".cf2-input")) {
+    const name = row.dataset.input, t = row.dataset.type;
+    if (t === "list" || CFLOW_INPUT_CHECK_TYPES.includes(t)) {
+      const items = [];
+      for (const r of row.querySelectorAll(".cf2-input-row")) {
+        const text = r.querySelector(".cf2-input-text").value.trim();
+        if (CFLOW_INPUT_CHECK_TYPES.includes(t)) {
+          const probe = (r.querySelector(".cf2-input-probe") || {}).value || "";
+          if (text || probe.trim()) items.push({ text, probe: probe.trim() || null });
+        } else if (text) items.push(text);
+      }
+      if (items.length) out[name] = items;
+      continue;
+    }
+    const c = row.querySelector(".cf2-input-value");
+    if (!c) continue;
+    if (t === "bool") out[name] = !!c.checked;
+    else if (t === "int") { if (c.value.trim() !== "") out[name] = Number(c.value); }
+    else if (c.value.trim() !== "") out[name] = c.value;
+  }
+  return out;
+}
+
+/* Mark the fields a 400's `errors` names; clears the rest. Returns whether
+   any field was marked (an error about something else is shown elsewhere). */
+function cflowInputsErrors(box, errors) {
+  let marked = false;
+  for (const row of box.querySelectorAll(".cf2-input")) {
+    const msg = (errors || {})[row.dataset.input];
+    const p = row.querySelector(".cf2-input-error");
+    row.classList.toggle("invalid", !!msg);
+    if (p) {
+      p.textContent = msg || "";
+      p.classList.toggle("hidden", !msg);
+    }
+    marked = marked || !!msg;
+  }
+  return marked;
 }
 
 /* Workflows are declared per directory, so the list follows the Directory
@@ -17064,6 +17744,10 @@ $("new-session").worktree_existing.addEventListener("change", () => {
   renderWorktreeSessionOptions();
   syncNewWorktree();
 });
+/* The Branch from picker only moves the hint (where the new branch starts).
+   Guarded like the filter box: an older markup without it must still boot. */
+const worktreeFrom = $("new-session").worktree_from;
+if (worktreeFrom) worktreeFrom.addEventListener("change", syncNewWorktree);
 const worktreeBySession = $("new-session").worktree_session;
 if (worktreeBySession) {
   worktreeBySession.addEventListener("change", () => {
@@ -17646,11 +18330,16 @@ function openSettings(section) {
     refreshPromptPacks();
     return;
   }
+  if (wsSection === "vscode") {
+    refreshVscode();
+    return;
+  }
   if (wsSection === "workspaces") {
     // The registry itself came with openWorkspaces above; these are the two
-    // cards keyed by it.
+    // cards keyed by it, and the VS Code buttons on its rows.
     refreshProjects().then(() => { if (wsOpen) renderWorkspaces(); });
     refreshBeadsBoards();
+    refreshVscode();
     return;
   }
   refreshHarnesses().then(() => { if (wsOpen) renderWorkspaces(); });
@@ -21849,6 +22538,7 @@ function settingsTabs() {
     ["workspaces", "Workspaces", "#/settings/workspaces"],
     ["profiles", "Profiles", "#/settings/profiles"],
     ["install", "Install", "#/settings/install"],
+    ["vscode", "VS Code", "#/settings/vscode"],
   ]) {
     const tab = el("a", "seq-tab" + (wsSection === section ? " on" : ""), label);
     tab.href = href;
@@ -22670,6 +23360,11 @@ function renderWorkspaces() {
     view.appendChild(promptPacksCard());
     return;
   }
+  if (wsSection === "vscode") {
+    view.appendChild(vscodePanel());
+    refocusSettingsField(focused);
+    return;
+  }
   if (wsSection === "profiles") {
     view.appendChild(profilesPanel());
     if (focused) {
@@ -22706,6 +23401,329 @@ function renderWorkspaces() {
   view.appendChild(relaySettingsCard());
 
   refocusSettingsField(focused);
+}
+
+/* ------------------------------------------------------------------ */
+/* VS Code (#/settings/vscode) — code-server per workspace / worktree  */
+/* ------------------------------------------------------------------ */
+/* The daemon runs one code-server per registered workspace root, per
+   worktree under it, and per session directory outside the registry
+   (daemon/vscode.py), behind its own auth at vscode/<key>/ — relative to
+   BASE, so the same link works through a relay's /t/<name>/. This tab is
+   the one place its settings, its install and its running servers are
+   read and changed; the Workspaces rows and the session panel only open. */
+let vscodeState = null;
+let vscodeError = "";
+let vscodeBusy = "";
+let vscodeDraft = null;     // settings form, while it differs from the saved
+let vscodeInstallPoll = null;
+
+async function refreshVscode() {
+  try {
+    const resp = await api("/api/vscode");
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    vscodeState = data;
+    vscodeError = "";
+  } catch (err) { vscodeError = String(err); }
+  if (wsOpen) renderWorkspaces();
+  return vscodeState;
+}
+
+function vscodeWaitInstall() {
+  return new Promise((resolve) => {
+    clearInterval(vscodeInstallPoll);
+    vscodeInstallPoll = setInterval(async () => {
+      const st = await refreshVscode();
+      const inst = (st && st.install) || {};
+      if (inst.installed || inst.state === "failed") {
+        clearInterval(vscodeInstallPoll);
+        vscodeInstallPoll = null;
+        resolve(inst);
+      }
+    }, 1000);
+  });
+}
+
+async function vscodeInstall() {
+  const ver = ((vscodeState || {}).install || {}).version || "";
+  if (!confirm(`Download and install code-server ${ver} (about 220 MB) on the daemon's machine?`)) {
+    return false;
+  }
+  const resp = await api("/api/vscode/install", { method: "POST" });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+  await refreshVscode();
+  const inst = await vscodeWaitInstall();
+  if (!inst.installed) throw new Error(inst.error || "install failed");
+  return true;
+}
+
+/* Open a server in a new tab. The tab is opened before the first await —
+   a popup blocker allows window.open only inside the click itself — and
+   shows a line while the server starts (a cold start takes a second or two,
+   an install minutes). */
+async function vscodeOpen(body) {
+  const tab = window.open("", "_blank");
+  const say = (text) => {
+    try { if (tab && !tab.closed) tab.document.body.textContent = text; } catch { /* navigated */ }
+  };
+  say("Starting VS Code…");
+  vscodeBusy = JSON.stringify(body);
+  if (wsOpen) renderWorkspaces();
+  try {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const resp = await api("/api/vscode/open", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (resp.status === 409 && data.needs_install && attempt === 0) {
+        if (!vscodeState) await refreshVscode();
+        say("Waiting for code-server to be installed…");
+        if (!(await vscodeInstall())) { if (tab) tab.close(); return; }
+        continue;
+      }
+      if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+      if (tab && !tab.closed) tab.location.href = url(data.path);
+      else window.open(url(data.path), "_blank");
+      vscodeError = "";
+      break;
+    }
+  } catch (err) {
+    vscodeError = String(err);
+    say(`Could not open VS Code: ${err}`);
+  } finally {
+    vscodeBusy = "";
+    refreshVscode();
+  }
+}
+
+async function vscodeStop(key) {
+  vscodeBusy = "stop:" + key;
+  if (wsOpen) renderWorkspaces();
+  try {
+    const resp = await api("/api/vscode/stop", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+  } catch (err) { vscodeError = String(err); }
+  vscodeBusy = "";
+  refreshVscode();
+}
+
+async function vscodeSaveSettings(changes) {
+  vscodeBusy = "settings";
+  if (wsOpen) renderWorkspaces();
+  try {
+    const resp = await api("/api/vscode/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(changes),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    vscodeDraft = null;
+    vscodeError = "";
+  } catch (err) { vscodeError = String(err); }
+  vscodeBusy = "";
+  refreshVscode();
+}
+
+/* The button every surface uses; disabled with the reason as its title when
+   the daemon cannot serve one (Windows, turned off). */
+function vscodeButton(label, body, extraClass = "") {
+  const btn = el("button", "wf-btn " + extraClass, label);
+  const st = vscodeState;
+  const why = !st ? "" : !st.supported ? st.reason
+    : !(st.settings || {}).enabled ? "VS Code servers are turned off (Settings → VS Code)" : "";
+  btn.disabled = Boolean(why) || vscodeBusy === JSON.stringify(body);
+  btn.title = why || "open in VS Code in a new tab (code-server, behind this dashboard's login)";
+  btn.addEventListener("click", () => vscodeOpen(body));
+  return btn;
+}
+
+function vscodePanel() {
+  const wrap = el("div", "vscode-panel");
+  const st = vscodeState;
+  wrap.appendChild(el(
+    "p", "wf-note",
+    "One code-server per registered workspace, per worktree under it, and per " +
+    "session directory outside the registry. Servers start when opened and stop " +
+    "after the idle timeout; they are served at vscode/<key>/ behind this " +
+    "dashboard's login, also through a relay."
+  ));
+  if (vscodeError) wrap.appendChild(el("p", "error", vscodeError));
+  if (!st) {
+    wrap.appendChild(el("p", "wf-note", "loading…"));
+    return wrap;
+  }
+  if (!st.supported) wrap.appendChild(el("p", "error", st.reason));
+
+  // install
+  const inst = st.install || {};
+  const ic = el("section", "prompt-preset-settings");
+  ic.appendChild(el("h3", null, "code-server"));
+  if (inst.state === "installing") {
+    const pct = inst.total ? Math.floor((inst.done / inst.total) * 100) : 0;
+    ic.appendChild(el("p", "wf-note",
+      `installing ${inst.version}: ${(inst.done / 1048576).toFixed(0)} / ` +
+      `${(inst.total / 1048576).toFixed(0)} MB (${pct}%)`));
+  } else if (inst.installed) {
+    ic.appendChild(el("p", "wf-note", `installed: ${inst.binary}`));
+  } else {
+    ic.appendChild(el("p", "wf-note",
+      `not installed. Opening any workspace offers to download code-server ${inst.version} ` +
+      "(about 220 MB, sha256-checked) into the daemon's home."));
+    if (inst.state === "failed") ic.appendChild(el("p", "error", `last install failed: ${inst.error}`));
+    const b = el("button", "wf-btn", "Install now");
+    b.disabled = !st.supported;
+    b.addEventListener("click", () => vscodeInstall().catch((err) => {
+      vscodeError = String(err); renderWorkspaces();
+    }));
+    ic.appendChild(b);
+  }
+  ic.appendChild(el("p", "wf-note mono", `data: ${st.root}`));
+  wrap.appendChild(ic);
+
+  // settings
+  const cur = st.settings || {};
+  const draft = vscodeDraft || { ...cur };
+  const sc = el("section", "prompt-preset-settings");
+  sc.appendChild(el("h3", null, "settings (vscode: in ~/.claunch.yaml)"));
+  const form = el("form", "vscode-settings");
+  const row = (labelText, input, note) => {
+    const r = el("label", "vscode-setting");
+    r.appendChild(el("span", "vscode-setting-name", labelText));
+    r.appendChild(input);
+    if (note) r.appendChild(el("span", "wf-note", note));
+    form.appendChild(r);
+  };
+  const check = (key) => {
+    const i = document.createElement("input");
+    i.type = "checkbox";
+    i.checked = Boolean(draft[key]);
+    i.addEventListener("change", () => {
+      vscodeDraft = { ...(vscodeDraft || draft), [key]: i.checked };
+      renderWorkspaces();
+    });
+    return i;
+  };
+  row("enabled", check("enabled"), "serve /vscode/ at all");
+  const idle = document.createElement("input");
+  idle.type = "number"; idle.min = "1"; idle.step = "1"; idle.id = "vscode-idle";
+  idle.value = String(Math.round((draft.idle_timeout || 1800) / 60));
+  idle.addEventListener("input", () => {
+    vscodeDraft = { ...(vscodeDraft || draft), idle_timeout: Number(idle.value) * 60 };
+  });
+  row("idle timeout (minutes)", idle, "stop a server after this long with no open connection");
+  row("port proxy", check("port_proxy"),
+    "code-server's /proxy/<port>/: exposes this machine's local ports through the dashboard " +
+    "and the relay. Applies to servers started after the change.");
+  const cmd = document.createElement("input");
+  cmd.type = "text"; cmd.id = "vscode-command"; cmd.placeholder = "(the installed code-server)";
+  cmd.value = draft.command || "";
+  cmd.addEventListener("input", () => { vscodeDraft = { ...(vscodeDraft || draft), command: cmd.value }; });
+  row("command", cmd, "a code-server executable to run instead of the installed one");
+  const save = el("button", "wf-btn approve", "Save");
+  save.type = "submit";
+  save.disabled = vscodeBusy === "settings";
+  form.appendChild(save);
+  form.addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    const d = vscodeDraft || draft;
+    vscodeSaveSettings({
+      enabled: Boolean(d.enabled),
+      port_proxy: Boolean(d.port_proxy),
+      idle_timeout: Number(d.idle_timeout),
+      command: (d.command || "").trim() || null,
+    });
+  });
+  sc.appendChild(form);
+  wrap.appendChild(sc);
+
+  // servers
+  const servers = st.servers || [];
+  const sv = el("section", "prompt-preset-settings");
+  sv.appendChild(el("h3", null, `servers (${servers.filter((s) => s.state === "running").length} running)`));
+  const refresh = el("button", "wf-btn clear", "Refresh");
+  refresh.addEventListener("click", () => refreshVscode());
+  sv.appendChild(refresh);
+  if (!servers.length) sv.appendChild(el("p", "wf-note", "none started since the daemon came up"));
+  for (const s of servers) {
+    const r = el("div", "ws-row vscode-server");
+    const text = el("div", "ws-text");
+    text.appendChild(el("span", "ws-name", s.key));
+    text.appendChild(el("span", "ws-path mono", s.folder));
+    const facts = [`pid ${s.pid || "-"}`, `${s.connections} connection(s)`,
+      `last active ${(s.last_active || "").replace("T", " ")}`];
+    if (s.port_proxy) facts.push("port proxy on");
+    text.appendChild(el("span", "wf-note", facts.join(" · ")));
+    if (s.error) text.appendChild(el("span", "error", s.error));
+    r.appendChild(text);
+    r.appendChild(el("span", "badge " + (s.state === "running" ? "idle" : "exited"), s.state));
+    const body = s.kind === "adhoc" ? null
+      : s.kind === "worktree" ? { workspace: s.workspace, worktree: s.worktree }
+      : { workspace: s.workspace };
+    if (body) r.appendChild(vscodeButton("Open", body));
+    if (s.state === "running") {
+      const stop = el("button", "wf-btn clear", "Stop");
+      stop.disabled = vscodeBusy === "stop:" + s.key;
+      stop.addEventListener("click", () => vscodeStop(s.key));
+      r.appendChild(stop);
+    }
+    sv.appendChild(r);
+  }
+  wrap.appendChild(sv);
+  return wrap;
+}
+
+/* The Workspaces row's share: the root's button, and a picker over the
+   worktrees under it (a workspace with twenty worktrees would otherwise be
+   twenty buttons). Nothing until /api/vscode has answered. */
+function wsVscodeControls(w) {
+  const box = el("span", "ws-vscode");
+  const st = vscodeState;
+  if (!st) return box;
+  box.appendChild(vscodeButton("VS Code", { workspace: w.name }));
+  const trees = (st.targets || []).filter((t) => t.kind === "worktree" && t.workspace === w.name);
+  if (trees.length) {
+    const pick = document.createElement("select");
+    pick.className = "ws-vscode-pick";
+    pick.appendChild(new Option(`worktree… (${trees.length})`, ""));
+    for (const t of trees) {
+      const running = t.server && t.server.state === "running" ? " ●" : "";
+      pick.appendChild(new Option(t.worktree + running, t.worktree));
+    }
+    pick.title = "open one of this workspace's worktrees in its own VS Code server";
+    pick.addEventListener("change", () => {
+      if (pick.value) vscodeOpen({ workspace: w.name, worktree: pick.value });
+      pick.value = "";
+    });
+    box.appendChild(pick);
+  }
+  return box;
+}
+
+/* The session panel's share: open the server for this session's directory
+   — its worktree's, its workspace's, or one of its own when the directory
+   is outside the registry. */
+function sessVscode(data) {
+  const s = data.session || {};
+  const box = el("div", "sess-vscode");
+  box.appendChild(el("h3", null, "VS Code"));
+  if (!vscodeState) { refreshVscode(); }
+  if (!s.cwd) {
+    box.appendChild(el("p", "wf-note", "this session has no directory"));
+    return box;
+  }
+  box.appendChild(el("p", "wf-note mono", s.cwd));
+  box.appendChild(vscodeButton("Open in VS Code", { session: s.name }));
+  return box;
 }
 
 /* The Workspaces section (#/settings/workspaces, and the older #/workspaces):
@@ -24215,6 +25233,8 @@ function wsRow(w) {
     ));
   }
 
+  if (w.exists) row.appendChild(wsVscodeControls(w));
+
   const rm = el("button", "wf-btn clear", "Unregister");
   rm.addEventListener("click", () => wsRemove(w, here));
   row.appendChild(rm);
@@ -25285,16 +26305,588 @@ async function cflowPost(path, body) {
    - "Start directly" writes the run here and nudges the terminal. For a slot
      with no live session (an agent that attaches later, a script), where
      there is nobody to ask. */
+/* ---- cflow v2 beside v1 (docs/cflow-v2.md sections 9-10) ----
+   /api/cflow/workflows lists both formats in one list, told apart by
+   `version`; v1 entries carry `deprecated`. The pickers mark both, and a v2
+   pick is sent with `workflow_version: 2`. Small and pure so the harnesses
+   can slice them. */
+const CFLOW_V1_NOTE =
+  "cflow v1 format is deprecated; v2 runs beside it (docs/cflow-v2.md). " +
+  "The run still starts and works as before.";
+
+/* The marker an option label ends with: " · v2", " · v1 (deprecated)", or
+   nothing for an entry that says neither (an older daemon). */
+function cflowVersionTag(w) {
+  if (!w || typeof w !== "object") return "";
+  if (Number(w.version) === 2) return " · v2";
+  if (w.deprecated) return " · v1 (deprecated)";
+  return "";
+}
+
+/* The option value for one entry: its name, or "v2:<name>" for a v2 entry
+   whose name a v1 entry also declares (the daemon keeps v1 on a bare shared
+   name). */
+function cflowPickValue(w, all) {
+  const name = String((w && w.name) || "");
+  if (Number(w && w.version) !== 2) return name;
+  const shared = (all || []).some((o) => o && o.name === name &&
+                                         Number(o.version) !== 2);
+  return shared ? `v2:${name}` : name;
+}
+
+/* What a picked value sends: {workflow} for v1, {workflow,
+   workflow_version: 2} for a v2 entry (prefixed or not). */
+function cflowPickBody(value, all) {
+  value = String(value || "");
+  if (value.startsWith("v2:")) {
+    return { workflow: value.slice(3), workflow_version: 2 };
+  }
+  const v1 = (all || []).some((o) => o && o.name === value && Number(o.version) !== 2);
+  const v2 = (all || []).some((o) => o && o.name === value && Number(o.version) === 2);
+  return v2 && !v1 ? { workflow: value, workflow_version: 2 } : { workflow: value };
+}
+
+/* The entry a picked value means. */
+function cflowPickEntry(value, all) {
+  const body = cflowPickBody(value, all);
+  const want2 = body.workflow_version === 2;
+  return (all || []).find((o) => o && o.name === body.workflow &&
+                                 (Number(o.version) === 2) === want2) || null;
+}
+
+const CFLOW2_ICONS = {
+  seq: "→", par: "∥", loop: "↻", try: "⚑", choose: "◇", task: "•",
+  wait: "⏳", group: "⧉", scope: "ƒ", cond: "?", timeout: "⏱", control: "↩",
+};
+
+/* One node's line in the tree, without the role prefix. */
+function cflow2NodeText(n) {
+  const t = n.type;
+  let text;
+  if (t === "task") text = n.title && n.title !== n.label
+    ? `${n.label || n.id} — ${n.title}` : (n.label || n.title || n.id);
+  else if (t === "loop") {
+    text = `${n.mode || "loop"} (max ${n.max ?? "?"})`;
+    if (n.guard) text += ` ${n.guard}`;
+    if (n.items) text += ` in ${n.items}${n.parallel ? " par" : ""}`;
+  } else if (t === "choose") text = `choose (${n.chooser || "agent"})`;
+  else if (t === "par") text = `par settle=${n.settle || "all"}`;
+  else if (t === "group") text = `group${n.name ? " " + n.name : ""} settle=${n.settle || "all"}`;
+  else if (t === "scope") text = `call ${n.proc || "?"}`;
+  else if (t === "wait") text = `wait ${n.describe || ""}`.trim();
+  else if (t === "timeout") text = `timeout ${n.seconds}s`;
+  else if (t === "control") text = `${n.op || "control"}${n.outcome ? " " + n.outcome : ""}`;
+  else text = t;
+  if (t !== "task" && n.label) text += ` [${n.label}]`;
+  if ((n.executor || []).length && !(n.executor.length === 1 && n.executor[0] === "inline")) {
+    text += ` ⇢ ${n.executor.join("/")}`;
+  }
+  return text;
+}
+
+/* The chart as indented rows, pre-order from the root: depth, the role the
+   node plays under its parent ("do", "option x", "catch fail"), whether a
+   live instance sits on it (and whether it waits on the outside), and its
+   visit count. Pure: the renderer below only draws these. */
+function cflow2TreeRows(chart, detail) {
+  const nodes = (chart && chart.nodes) || {};
+  const live = {}, waiting = {};
+  for (const i of (detail && detail.instances) || []) {
+    live[i.node] = (live[i.node] || 0) + 1;
+    if (i.await) waiting[i.node] = i.await;
+  }
+  const visits = (detail && detail.visits) || {};
+  const rows = [];
+  const seen = new Set();
+  const walk = (id, depth, role) => {
+    const n = nodes[id];
+    if (!n || seen.has(id)) return;
+    seen.add(id);
+    rows.push({
+      id, depth, role: role || "", type: n.type,
+      icon: CFLOW2_ICONS[n.type] || "·",
+      text: cflow2NodeText(n),
+      active: !!live[id], awaiting: waiting[id] || "",
+      visits: Number(visits[n.label || n.id] || 0),
+    });
+    const kids = n.children || [];
+    const roles = n.roles || [];
+    kids.forEach((c, i) => walk(c, depth + 1, roles[i] || ""));
+  };
+  if (chart && chart.root) walk(chart.root, 0, "");
+  return rows;
+}
+
+function cflow2TreeInto(box, chart, detail) {
+  const tree = el("div", "cf2-tree mono");
+  for (const r of cflow2TreeRows(chart, detail)) {
+    const row = el("div", "cf2-row" + (r.awaiting ? " awaiting" : r.active ? " active" : ""));
+    row.style.paddingLeft = `${r.depth * 14}px`;
+    row.dataset.node = r.id;
+    if (r.role) row.appendChild(el("span", "cf2-role", `${r.role}: `));
+    row.appendChild(el("span", "cf2-icon", r.icon + " "));
+    row.appendChild(el("span", "cf2-text", r.text));
+    if (r.visits > 1) row.appendChild(el("span", "cf2-visits", ` ×${r.visits}`));
+    if (r.awaiting) row.appendChild(el("span", "cf2-await", ` ← ${r.awaiting}`));
+    row.title = `${r.type} ${r.id}`;
+    tree.appendChild(row);
+  }
+  box.appendChild(tree);
+}
+
+/* The v2 run, wherever a run is drawn (run page, session fold). `ui.after`
+   re-fetches the host after an answer. */
+
+// docs/cflow-v2.md 2.10: a question from GET /api/cflow2/run asks[].question
+// (cflow2/question.to_json). text -> label + markdown, table -> one row per
+// option (the recommended row marked), choice -> the recommendation.
+function cf2QuestionView(q) {
+  const wrap = el("div", "cf2-question");
+  for (const sec of q.sections || []) {
+    if (sec.kind === "table") {
+      wrap.appendChild(el("h5", null, sec.label));
+      const t = el("table", "cf2-q-table");
+      const head = el("tr");
+      head.appendChild(el("th", null, "name"));
+      for (const c of sec.value.columns || []) head.appendChild(el("th", null, c.label));
+      t.appendChild(head);
+      for (const r of sec.value.rows || []) {
+        const tr = el("tr", r.recommended ? "recommended" : null);
+        tr.appendChild(el("td", null, r.recommended ? `${r.name} (권장)` : String(r.name)));
+        for (const c of sec.value.columns || []) {
+          const v = (r.cells || {})[c.field];
+          tr.appendChild(el("td", null, v == null ? "" : String(v)));
+        }
+        t.appendChild(tr);
+      }
+      wrap.appendChild(t);
+    } else if (sec.kind === "choice") {
+      const p = el("p", "cf2-q-rec");
+      p.appendChild(el("strong", null, `${sec.label}: ${sec.value == null ? "" : sec.value}`));
+      wrap.appendChild(p);
+    } else {
+      wrap.appendChild(el("h5", null, sec.label));
+      wrap.appendChild(mdInto(el("div", "md"), String(sec.value)));
+    }
+  }
+  return wrap;
+}
+
+function renderCflow2Into(box, data, ui) {
+  ui = ui || {};
+  box.innerHTML = "";
+  const run = data.run || {};
+  if (!data.run || data.status === "idle") {
+    box.appendChild(el("p", "wf-note", "this slot has no v2 run"));
+    return;
+  }
+  const head = el("div", "wf-meta");
+  head.appendChild(el("span", "cf2-badge", "v2"));
+  head.appendChild(el("span", null, run.workflow || (data.chart || {}).name || "(workflow)"));
+  head.appendChild(el("span", null, `${run.status || data.status}` +
+    (run.reason ? ` (${run.reason})` : "")));
+  head.appendChild(el("span", null, `run ${run.run || "?"}`));
+  if (run.started) head.appendChild(el("span", null,
+    `started ${String(run.started).replace("T", " ")}`));
+  box.appendChild(head);
+  if (run.outcome !== undefined && run.outcome !== null) {
+    box.appendChild(el("p", "wf-note", `outcome: ${run.outcome}`));
+  }
+  const runInputs = run.inputs || ((run.data || {}).inputs);
+  if (runInputs && typeof runInputs === "object" && Object.keys(runInputs).length) {
+    box.appendChild(cflow2InputsBlock(runInputs));
+  }
+  if (run.acceptance && run.acceptance.status) {
+    box.appendChild(el("p", "wf-note", `acceptance: ${run.acceptance.status}` +
+      ((run.acceptance.failed || []).length ? ` (failed: ${run.acceptance.failed.join(", ")})` : "")));
+  }
+
+  const post = async (path, body) => {
+    const doc = await cflowPost(path, { cwd: data.cwd, scope: data.scope, ...body });
+    if (doc && ui.after) ui.after();
+    return doc;
+  };
+
+  for (const c of run.choices || []) {
+    const card = el("div", "cf2-choice");
+    card.appendChild(el("h4", null,
+      `choice ${c.label || c.node} — ${c.chooser === "user" ? "yours to pick" : "the agent's"}`));
+    if (c.prompt) card.appendChild(mdInto(el("div", "md"), c.prompt));
+    const btns = el("div", "wf-actions");
+    for (const o of c.options || []) {
+      const b = el("button", "wf-btn option", o.name);
+      b.title = o.description || "";
+      b.addEventListener("click", async () => {
+        let reason = "";
+        if (c.require_reason) {
+          reason = prompt(`Reason for '${o.name}'`, "") || "";
+          if (!reason.trim()) return;
+        } else if (!confirm(`Pick '${o.name}' for ${c.label || c.node}?`)) return;
+        b.disabled = true;
+        await post("/api/cflow2/select", { node: c.instance, option: o.name, reason });
+      });
+      btns.appendChild(b);
+    }
+    card.appendChild(btns);
+    for (const u of c.unavailable || []) {
+      card.appendChild(el("p", "wf-note", `${u.name}: not available now (when ${u.when})`));
+    }
+    box.appendChild(card);
+  }
+
+  for (const a of run.asks || []) {
+    const card = el("div", "cf2-choice");
+    const q = a.question || null;
+    card.appendChild(el("h4", null,
+      `${q ? "question" : "approval"} ${a.label || a.node}${a.title ? " — " + a.title : ""}`));
+    if (q) {
+      // a brief ask (docs/cflow-v2.md 2.10): the sections come from the
+      // question type, in its order -- no per-type code here
+      if (a.intro) card.appendChild(mdInto(el("div", "md"), a.intro));
+      card.appendChild(cf2QuestionView(q));
+    } else if (a.prompt) card.appendChild(mdInto(el("div", "md"), a.prompt));
+    if ((a.asked || []).length) {
+      card.appendChild(el("p", "wf-note", `asked: ${a.asked.join(", ")}` +
+        (a.deadline ? ` (until ${String(a.deadline).replace("T", " ")})` : "")));
+    }
+    const btns = el("div", "wf-actions");
+    const answer = async (b, decision, label) => {
+      const need = !!a.require_reason;
+      const reason = prompt(`Reason for '${label}'${need ? " (required)" : " (optional)"}`, "");
+      if (reason === null || (need && !reason.trim())) return;
+      b.disabled = true;
+      await post("/api/cflow2/approve", { node: a.instance, decision, reason });
+    };
+    const opts = (a.options || []).length ? a.options
+      : [{ name: "approve", description: "enter the task" },
+         { name: "decline", description: "the task finishes declined" }];
+    for (const o of opts) {
+      if (q && o.name === "reframe") {
+        // reframe needs a reason: what the options miss
+        const b = el("button", "wf-btn cf2-reframe", "reframe");
+        b.title = o.description || "";
+        b.addEventListener("click", async () => {
+          const reason = prompt("What do the options miss? (required)", "");
+          if (reason === null || !reason.trim()) return;
+          b.disabled = true;
+          await post("/api/cflow2/approve", { node: a.instance, decision: "reframe", reason });
+        });
+        btns.appendChild(b);
+        continue;
+      }
+      const rec = q && q.recommended === o.name;
+      const b = el("button", "wf-btn " + (o.name === "decline" ? "" : "approve")
+        + (rec ? " recommended" : ""), rec ? `${o.name} (권장)` : o.name);
+      b.title = o.description || "";
+      b.addEventListener("click", () => answer(b, o.name, o.name));
+      btns.appendChild(b);
+    }
+    card.appendChild(btns);
+    box.appendChild(card);
+  }
+
+  for (const lim of run.loop_limits || []) {
+    const card = el("div", "cf2-choice");
+    card.appendChild(el("h4", null,
+      `loop ${lim.label || lim.node} reached its max (${lim.iterations}/${lim.max})`));
+    const btns = el("div", "wf-actions");
+    const more = el("button", "wf-btn approve", "Allow one more");
+    more.addEventListener("click", async () => {
+      more.disabled = true;
+      await post("/api/cflow2/extend", { node: lim.instance, by: 1 });
+    });
+    const stop = el("button", "wf-btn", "Stop the loop");
+    stop.title = "the loop finishes with outcome fail";
+    stop.addEventListener("click", async () => {
+      if (!confirm("Stop the loop? It finishes with outcome fail.")) return;
+      stop.disabled = true;
+      await post("/api/cflow2/extend", { node: lim.instance, stop: true });
+    });
+    btns.append(more, stop);
+    card.appendChild(btns);
+    box.appendChild(card);
+  }
+
+  for (const lim of run.visit_limits || []) {
+    // The chart's max_visits: one node entered that many times over the run.
+    const card = el("div", "cf2-choice");
+    card.appendChild(el("h4", null,
+      `node ${lim.label || lim.node} reached the run's visit limit (${lim.visits ?? "?"}/${lim.max ?? "?"})`));
+    const btns = el("div", "wf-actions");
+    const more = el("button", "wf-btn approve", "Allow one more visit");
+    more.addEventListener("click", async () => {
+      more.disabled = true;
+      await post("/api/cflow2/extend", { node: lim.instance, by: 1, visits: true });
+    });
+    const stop = el("button", "wf-btn", "Stop here");
+    stop.title = "the node finishes with outcome fail";
+    stop.addEventListener("click", async () => {
+      if (!confirm("Stop at the visit limit? The node finishes with outcome fail.")) return;
+      stop.disabled = true;
+      await post("/api/cflow2/extend", { node: lim.instance, stop: true, visits: true });
+    });
+    btns.append(more, stop);
+    card.appendChild(btns);
+    box.appendChild(card);
+  }
+
+  for (const t of run.tasks || []) {
+    box.appendChild(el("p", "wf-note",
+      `task ${t.label || t.node}: ${t.title || ""} — waiting for the agent's flow_report`));
+  }
+  for (const v of run.verifying || []) {
+    const cmd = v.verify && v.verify.run;
+    box.appendChild(el("p", "wf-note cf2-verifying",
+      `task ${v.label || v.node}: verifying` +
+      (cmd ? ` — ${Array.isArray(cmd) ? cmd.join(" ") : cmd}` : "") +
+      (v.started_at ? ` (since ${String(v.started_at).replace("T", " ")})` : "")));
+  }
+  const undecided = cflow2UndecidedCounts(data.journal || []);
+  for (const w of run.waits || []) {
+    const n = undecided[w.instance] || 0;
+    box.appendChild(el("p", "wf-note",
+      `${w.kind} ${w.node}${w.describe ? ": " + w.describe : ""}` +
+      (n ? ` — probe could not decide ${n}× in a row` : "")));
+  }
+  for (const e of cflow2Undecidable(data.journal || [])) {
+    box.appendChild(el("p", "wf-note cf2-undecidable",
+      `wait ${e.node} gave up: its probe could not decide (undecidable)`));
+  }
+
+  if (data.chart) {
+    box.appendChild(el("h4", null, "Chart"));
+    cflow2TreeInto(box, data.chart, data);
+  }
+
+  const dels = data.delegations || [];
+  if (dels.length) {
+    box.appendChild(el("h4", null, `Delegations (${dels.length})`));
+    for (const d of dels) {
+      const row = el("div", "cf2-deleg");
+      row.appendChild(el("span", "mono", d.id));
+      row.appendChild(el("span", null,
+        ` ${d.label || d.node} · ${d.executor || "?"}` +
+        (d.route && d.route !== d.executor ? ` (route ${d.route})` : "") +
+        ` · ${d.status}`));
+      if (d.receipt) row.appendChild(el("span", "mono cf2-receipt", ` receipt ${d.receipt}`));
+      box.appendChild(row);
+      for (const why of [...(d.degraded || []), ...(d.fallbacks || [])]) {
+        box.appendChild(el("p", "wf-note cf2-fallback", `fallback: ${why}`));
+      }
+    }
+  }
+
+  for (const [name, col] of Object.entries(data.collections || {})) {
+    box.appendChild(cflow2CollectionTable(name, col, post));
+  }
+  const trig = cflow2TriggerLines(data.trigger_events || []);
+  if (trig.length) {
+    box.appendChild(el("h4", null, `Triggers (${trig.length})`));
+    for (const t of trig) {
+      box.appendChild(el("p", "wf-note mono cf2-trigger " + t.cls, t.text));
+    }
+  }
+
+  const events = (data.journal || []).slice().reverse();
+  const journal = document.createElement("details");
+  journal.className = "wf-journal";
+  journal.appendChild(el("summary", null, `journal (${events.length} newest events)`));
+  for (const e of events) {
+    const rest = Object.keys(e).filter((k) => !["ts", "event"].includes(k))
+      .map((k) => `${k}=${typeof e[k] === "object" ? JSON.stringify(e[k]) : e[k]}`)
+      .join(" ");
+    journal.appendChild(el("div", "wf-journal-line mono",
+      `${String(e.ts || "").replace("T", " ")}  ${e.event || ""}  ${rest}`));
+  }
+  box.appendChild(journal);
+}
+
+/* One collection of a v2 run (docs/cflow-v2.md 2.7) as rows: key, status
+   and the other fields as `name=value`. A queue is keyed by its `key`
+   field, a log by its sequence number. A field whose value is an http(s)
+   URL leaves the text and becomes a link (docs 10a): `url`/`pr_url` next
+   to a `number`/`pr_number` reads "PR #N", any other is named by its field. */
+function cflow2CollectionRows(col) {
+  col = col || {};
+  const keyField = col.key || null;
+  const skip = new Set(["status", "seq", "at", "by"]);
+  if (keyField) skip.add(keyField);
+  const isUrl = (v) => typeof v === "string" && /^https?:\/\/\S+$/.test(v);
+  return (col.items || []).map((it) => {
+    it = it || {};
+    const key = keyField ? it[keyField] : (it.seq !== undefined ? `#${it.seq}` : "");
+    const shown = Object.keys(it).filter((k) => !skip.has(k) && it[k] !== null && it[k] !== "");
+    const fields = shown.filter((k) => !isUrl(it[k]))
+      .map((k) => `${k}=${typeof it[k] === "object" ? JSON.stringify(it[k]) : it[k]}`);
+    if (!keyField && it.by) fields.unshift(`by=${it.by}`);
+    const links = shown.filter((k) => isUrl(it[k])).map((k) => {
+      const num = k === "url" ? it.number : k === "pr_url" ? it.pr_number : undefined;
+      const pr = (k === "url" || k === "pr_url") && /\/pull\/\d+/.test(it[k]);
+      const n = num !== undefined && num !== null && num !== "" ? num
+        : pr ? it[k].match(/\/pull\/(\d+)/)[1] : null;
+      return { field: k, href: it[k], label: pr && n !== null ? `PR #${n}` : k };
+    });
+    return { key: key === undefined || key === null ? "" : String(key),
+             status: it.status === undefined || it.status === null ? "" : String(it.status),
+             fields: fields.join("  "), links };
+  });
+}
+
+/* The status values a person may pick for a queue record (the collection's
+   declared `status.values`), or none. */
+function cflow2StatusValues(col) {
+  const st = (col || {}).status;
+  if (Array.isArray(col && col.status_values)) return col.status_values;
+  if (st && Array.isArray(st.values)) return st.values;
+  return [];
+}
+
+/* The trigger journal lines (trigger_queued/done/skipped), oldest first.
+   A done/skipped event names only its trigger id; what and where come
+   from that id's trigger_queued event when it is in the list. */
+function cflow2TriggerLines(events) {
+  const queued = {};
+  for (const e of events || []) {
+    if (e && e.event === "trigger_queued" && e.trigger) queued[e.trigger] = e;
+  }
+  return (events || []).filter((e) => e && /^trigger_/.test(e.event || "")).map((e) => {
+    const id = e.trigger || e.id || "";
+    const q = queued[id] || {};
+    const what = e.do || q.do || (e.push ? "push" : "?");
+    const node = e.label || e.node || q.label || q.node;
+    const where = node ? ` ${node}` : "";
+    const whenAt = e.at || q.at;
+    const at = whenAt ? ` (${whenAt})` : "";
+    const kind = String(e.event).slice("trigger_".length);
+    const detail = e.detail || e.reason || "";
+    return {
+      cls: kind,
+      text: `${String(e.ts || "").replace("T", " ")}  ${kind}  ${what}${where}${at}` +
+        (id ? ` [${id}]` : "") + (detail ? ` — ${detail}` : ""),
+    };
+  });
+}
+
+/* A collection's table, with a person's set/remove on queue rows
+   (POST /api/cflow2/collection; the collection's access decides). */
+function cflow2CollectionTable(name, col, post) {
+  col = col || {};
+  const rows = cflow2CollectionRows(col);
+  const wrap = el("div", "cf2-collection");
+  wrap.appendChild(el("h4", null, `Collection ${name} (${col.kind || "?"}, ${rows.length})`));
+  if (!rows.length) {
+    wrap.appendChild(el("p", "wf-note", "empty"));
+    return wrap;
+  }
+  const queue = col.kind === "queue";
+  const values = queue ? cflow2StatusValues(col) : [];
+  const table = el("table", "cf2-col-table");
+  const head = el("tr");
+  for (const h of ["key", "status", "fields"].concat(queue ? [""] : [])) head.appendChild(el("th", null, h));
+  table.appendChild(head);
+  for (const r of rows) {
+    const tr = el("tr");
+    tr.appendChild(el("td", "mono", r.key));
+    tr.appendChild(el("td", "cf2-col-status " + r.status, r.status));
+    const ftd = el("td", "mono cf2-col-fields", r.fields);
+    for (const l of r.links || []) {
+      const a = el("a", "cf2-col-link", l.label);
+      a.href = l.href;
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      a.title = l.href;
+      ftd.appendChild(a);
+    }
+    tr.appendChild(ftd);
+    if (queue) {
+      const td = el("td", "cf2-col-actions");
+      if (values.length) {
+        const sel = el("select");
+        sel.appendChild(el("option", null, "set status…")).value = "";
+        for (const v of values) sel.appendChild(el("option", null, v)).value = v;
+        sel.addEventListener("change", async () => {
+          if (!sel.value) return;
+          sel.disabled = true;
+          await post("/api/cflow2/collection",
+            { op: "set", collection: name, key: r.key, fields: { status: sel.value } });
+          sel.disabled = false;
+        });
+        td.appendChild(sel);
+      }
+      const rm = el("button", "wf-btn", "remove");
+      rm.addEventListener("click", async () => {
+        if (!confirm(`Remove ${r.key} from ${name}?`)) return;
+        rm.disabled = true;
+        await post("/api/cflow2/collection", { op: "remove", collection: name, key: r.key });
+        rm.disabled = false;
+      });
+      td.appendChild(rm);
+      tr.appendChild(td);
+    }
+    table.appendChild(tr);
+  }
+  wrap.appendChild(table);
+  return wrap;
+}
+
+/* The run's start inputs (data.inputs), folded shut. */
+function cflow2InputsBlock(values) {
+  const box = document.createElement("details");
+  box.className = "cf2-run-inputs";
+  box.appendChild(el("summary", null, `inputs (${Object.keys(values).length})`));
+  for (const [k, v] of Object.entries(values)) {
+    const row = el("div", "cf2-run-input");
+    row.appendChild(el("span", "mono", `${k}: `));
+    let text;
+    if (Array.isArray(v)) {
+      text = v.map((x) => (x && typeof x === "object")
+        ? (x.text || "") + (x.probe ? `  [probe: ${x.probe}]` : "") : String(x)).join("\n");
+    } else text = v == null ? "" : String(v);
+    row.appendChild(el("span", "cf2-run-input-value", text));
+    box.appendChild(row);
+  }
+  return box;
+}
+
+/* Consecutive undecided probe results per live wait instance, from the
+   journal tail (probe_undecided events; any other result of the same
+   instance's probe resets the count). */
+function cflow2UndecidedCounts(journal) {
+  const out = {};
+  for (const e of journal || []) {
+    if (e.event === "probe_undecided" && e.instance) out[e.instance] = Number(e.count || 0);
+  }
+  return out;
+}
+
+/* Waits that finished `undecidable`, newest last. */
+function cflow2Undecidable(journal) {
+  return (journal || []).filter((e) => e.event === "left" && e.outcome === "undecidable");
+}
+
+async function fetchCflow2Run(cwd, scope) {
+  try {
+    const resp = await api(`/api/cflow2/run?cwd=${encodeURIComponent(cwd)}` +
+                           `&scope=${encodeURIComponent(scope)}`);
+    const doc = await resp.json().catch(() => ({}));
+    return resp.ok ? doc : { error: doc.error || `HTTP ${resp.status}` };
+  } catch {
+    return null;
+  }
+}
+
 /* One line per workflow in the picker. An option cannot wrap, and the native
    popup sizes itself to the widest option: a paragraph-length description
    drags the whole dropdown past the viewport edge, where the browser pins and
    clips it. So the list gets one clipped line per workflow; the full
    description renders under the select for whichever is picked. */
 function wfOptionLabel(w) {
-  if (!w.description) return w.name;
+  // Guarded: the harness that slices this function alone does not carry it.
+  const tag = typeof cflowVersionTag === "function" ? cflowVersionTag(w) : "";
+  if (!w.description) return w.name + tag;
   const d = w.description.replace(/\s+/g, " ").trim();
   const clipped = d.length > 48 ? d.slice(0, 48).trimEnd() + "…" : d;
-  return `${w.name} — ${clipped}`;
+  return `${w.name}${tag} — ${clipped}`;
 }
 
 async function buildStartPanel(box, { cwd, scope, sessions, stillHere, after }) {
@@ -25321,7 +26913,7 @@ async function buildStartPanel(box, { cwd, scope, sessions, stillHere, after }) 
   sel.className = "wf-start-select";
   for (const w of flows) {
     const opt = document.createElement("option");
-    opt.value = w.name;
+    opt.value = cflowPickValue(w, flows);
     opt.textContent = wfOptionLabel(w);
     opt.title = w.path;
     sel.appendChild(opt);
@@ -25332,10 +26924,12 @@ async function buildStartPanel(box, { cwd, scope, sessions, stillHere, after }) 
      The path goes under the select rather than into the option text — an
      option cannot wrap, and these are absolute paths. */
   const source = el("p", "wf-source mono");
+  const versionNote = el("p", "wf-note cf2-v1-note hidden", CFLOW_V1_NOTE);
   const showSource = () => {
-    const w = flows.find((f) => f.name === sel.value);
+    const w = cflowPickEntry(sel.value, flows);
     source.replaceChildren();
     desc.textContent = w && w.description ? w.description : "";
+    versionNote.classList.toggle("hidden", !(w && w.deprecated));
     if (!w) return;
     source.appendChild(el("span", "wf-source-path", w.path));
     if (w.shadowed && w.shadowed.length) {
@@ -25368,16 +26962,20 @@ async function buildStartPanel(box, { cwd, scope, sessions, stillHere, after }) 
     : "no live session in this slot to ask";
   ask.disabled = !live;
   ask.addEventListener("click", async () => {
-    const workflow = sel.value;
+    const pick = cflowPickBody(sel.value, flows);
+    const workflow = pick.workflow;
     if (!confirm(
       `Ask session '${sessions[0]}' to start '${workflow}'?\n\n` +
-      `The request is recorded and the session is nudged; its agent reads ` +
-      `the request and runs the start itself.`
+      (pick.workflow_version === 2
+        ? "This is a cflow v2 workflow, which has no start request: the run " +
+          "is started now and the session is nudged to pick it up."
+        : `The request is recorded and the session is nudged; its agent reads ` +
+          `the request and runs the start itself.`)
     )) return;
     ask.disabled = true;
     ask.textContent = "Requesting…";
     const doc = await cflowPost("/api/cflow/request", {
-      cwd, scope, workflow, context: ctx.value.trim(),
+      cwd, scope, ...pick, context: ctx.value.trim(),
     });
     const nudged = doc ? [
       ...(doc.nudged_sessions || []),
@@ -25406,7 +27004,8 @@ async function buildStartPanel(box, { cwd, scope, sessions, stillHere, after }) 
   direct.title =
     "write the run now, without waiting for the agent to start it";
   direct.addEventListener("click", async () => {
-    const workflow = sel.value;
+    const pick = cflowPickBody(sel.value, flows);
+    const workflow = pick.workflow;
     if (!confirm(
       `Start '${workflow}' directly?\n\n` +
       (live
@@ -25420,7 +27019,7 @@ async function buildStartPanel(box, { cwd, scope, sessions, stillHere, after }) 
     direct.disabled = true;
     direct.textContent = "Starting…";
     const doc = await cflowPost("/api/cflow/start", {
-      cwd, scope, workflow, context: ctx.value.trim(),
+      cwd, scope, ...pick, context: ctx.value.trim(),
     });
     const nudged = doc ? [
       ...(doc.nudged_sessions || []),
@@ -25449,6 +27048,7 @@ async function buildStartPanel(box, { cwd, scope, sessions, stillHere, after }) 
   row.append(sel, ctx, ask, direct);
   box.appendChild(row);
   box.appendChild(desc);
+  box.appendChild(versionNote);
   box.appendChild(source);
   box.appendChild(el(
     "p", "wf-note",
@@ -27410,6 +29010,8 @@ function renderSession(data) {
     // round reports because the three are one answer read from three places:
     // what it was asked to do, what it wrote up, what it committed.
     view.appendChild(sessCommits(data));
+    // And the editor for that directory, beside what was committed in it.
+    view.appendChild(sessVscode(data));
 
     // What this session is FOR, by role: a leader gets its dispatch and reaping
     // panels here, other roles whatever ROLE_PANELS declares for them. Between
@@ -28835,7 +30437,12 @@ function sessWorkflow(data) {
   // Only the branch below with a run in it hangs the fold; every other one
   // has to let go of it, or its poll outlives the run it was reading and
   // keeps asking about a slot that has nothing in it.
-  if (!flow || flow.status === "error" || !flow.status || flow.status === "idle") {
+  // A v2 run in an otherwise idle slot hangs the same fold (it draws the v2
+  // view), so it keeps it too.
+  const v2Live = !!(data.cflow2 && data.cflow2.status &&
+    !["idle", "error"].includes(data.cflow2.status));
+  if (!v2Live &&
+      (!flow || flow.status === "error" || !flow.status || flow.status === "idle")) {
     stopSessRun();
     sessRunFold = null;
   }
@@ -28887,6 +30494,14 @@ function sessWorkflow(data) {
     return box;
   }
 
+  const v2 = data.cflow2;
+  if (v2 && v2.status && v2.status !== "idle") {
+    box.appendChild(sessCflow2Line(v2));
+    if (v2.status === "error") return box;
+    if (pending) box.appendChild(pending);
+    box.appendChild(sessRunFoldFor(flow, true));
+    return box;
+  }
   box.appendChild(el("p", "wf-note", `no active cflow run in ${flow.cwd}`));
   if (pending) box.appendChild(pending);
   // Rebuilt only when the slot changes: the poll must not wipe a half-typed
@@ -28904,6 +30519,25 @@ function sessWorkflow(data) {
     after: () => { refreshSession(); refreshCflow(); },
   });
   return box;
+}
+
+/* The session panel's head line for a v2 run: name, a v2 badge, status and
+   the labels of the tasks it is on. */
+function sessCflow2Line(v2) {
+  const wrap = el("div", "sess-wf-v2");
+  if (v2.status === "error") {
+    wrap.appendChild(el("p", "wf-warning", v2.error || "cannot read this v2 run"));
+    return wrap;
+  }
+  const line = el("div", "sess-wf-run");
+  line.appendChild(el("span", "cf2-badge", "v2"));
+  line.appendChild(el("span", "sess-wf-name", v2.workflow || "(workflow)"));
+  line.appendChild(el("span", "meta", v2.status + (v2.reason ? ` (${v2.reason})` : "")));
+  wrap.appendChild(line);
+  if ((v2.current || []).length) {
+    wrap.appendChild(el("p", "wf-note", `at: ${v2.current.join(", ")}`));
+  }
+  return wrap;
 }
 
 /* ---- the run, opened where you already are ----
@@ -28974,6 +30608,17 @@ async function refreshSessRun() {
   // The panel repoints, and the fold is rebuilt with it: a reply that lands
   // after that belongs to a run this fold no longer shows.
   if (sessRunFold !== fold || !fold.open) return;
+  if (data.status === "idle" && data.v2) {
+    const v2 = await fetchCflow2Run(fold.dataset.cwd, fold.dataset.scope);
+    if (!v2 || sessRunFold !== fold || !fold.open) return;
+    if (v2.error) {
+      body.innerHTML = "";
+      body.appendChild(el("p", "wf-warning", v2.error));
+      return;
+    }
+    renderCflow2Into(body, v2, { after: refreshSessRun });
+    return;
+  }
   renderSessRun(body, data);
 }
 
@@ -29398,10 +31043,14 @@ function spawnWorkflowEntry(raw) {
       default_role: String(raw.default_role || "").trim().toLowerCase(),
       priority,
       filter_roles: raw.filter_roles || null,
+      // cflow v2 beside v1: an older daemon says neither, and reads as v1.
+      version: Number(raw.version) === 2 ? 2 : 1,
+      deprecated: !!raw.deprecated,
     };
   }
   return {
     name: String(raw || ""), default_role: "", priority: 0, filter_roles: null,
+    version: 1, deprecated: false,
   };
 }
 
@@ -29444,10 +31093,21 @@ function spawnRankWorkflows(raws, role) {
     const d = [];
     if (e.default_role) d.push(`default for ${e.default_role}`);
     if (e.priority) d.push(`priority ${e.priority}`);
-    return { name: e.name, detail: d.join(", ") };
+    // value: the name, or "v2:<name>" when a v1 workflow shares it (see
+    // cflowPickValue); tag: the version marker the label carries.
+    const shared = e.version === 2 && entries.some((o) => o.name === e.name && o.version !== 2);
+    return {
+      name: e.name, detail: d.join(", "),
+      value: shared ? `v2:${e.name}` : e.name,
+      version: e.version, deprecated: e.deprecated,
+      tag: e.version === 2 ? " · v2" : e.deprecated ? " · v1 (deprecated)" : "",
+    };
   });
-  const auto = entries.find((e) => band(e) === 0);
-  return { options, auto: auto ? auto.name : "" };
+  // v1 before v2 for the auto-pick: a v2 workflow volunteering for the same
+  // role is offered, never chosen over the v1 one while both run.
+  const auto = entries.find((e) => band(e) === 0 && e.version !== 2) ||
+    entries.find((e) => band(e) === 0);
+  return { options, auto: auto ? options[entries.indexOf(auto)].value : "" };
 }
 
 /* ---- rows built in JavaScript ----
@@ -29650,18 +31310,20 @@ function sessionFormConfig(mode) {
     "mesh", "handle", "role", "workflow", "context", "borrow", "null_token",
     "resume", "fork", "skip_permissions", "codex_yolo", "codex_sandbox", "args",
     "worktree_mode", "worktree_name", "worktree_existing", "worktree_session",
-    "worktree_rebase", "task", "score_goal", "beads", "issue_text", "issue_filter", "issue", "pi_tool_*",
+    "worktree_rebase", "worktree_from", "task", "score_goal", "beads", "issue_text", "issue_filter", "issue", "pi_tool_*",
     "subrole_*", "prompt_pack_*"];
   const modes = {
     new: { title: "New session", submit: "Create", sections, editable,
       payload: ["name", "profile", "project", "cwd", "args", "model", "effort", "tools", "worktree",
-        "rebase_onto", "role", "subroles", "borrow", "null_token", "mesh", "handle", "workflow",
+        "rebase_onto", "branch_from", "role", "subroles", "borrow", "null_token", "mesh", "handle", "workflow",
+        "workflow_version", "cflow_inputs",
         "context", "task", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
         "resume", "fork_session"] },
     spawn: { title: "Spawn child", submit: "Spawn child", sections,
       editable: [...editable, "parent", "fork_parent", "over_limit"],
       payload: ["name", "profile", "project", "workspace", "cwd", "args", "model", "effort", "tools", "worktree",
-        "rebase_onto", "role", "subroles", "borrow", "null_token", "mesh", "handle", "workflow",
+        "rebase_onto", "branch_from", "role", "subroles", "borrow", "null_token", "mesh", "handle", "workflow",
+        "workflow_version", "cflow_inputs",
         "context", "task", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
         "fork", "connect", "over_limit"] },
     fork: { title: "Quick fork", submit: "Fork", sections: ["new-quick-fork"],
@@ -30567,7 +32229,9 @@ function sessQuickJob(data) {
   let defaults = { ...QUICKJOB_FALLBACK };
   let canSave = false;
 
-  const fill = (sel, names, none, want) => {
+  // `labels` (optional) maps a value to the text shown for it -- the
+  // workflow row's version markers.
+  const fill = (sel, names, none, want, labels) => {
     sel.innerHTML = "";
     const empty = document.createElement("option");
     empty.value = "";
@@ -30576,7 +32240,7 @@ function sessQuickJob(data) {
     for (const n of names) {
       const opt = document.createElement("option");
       opt.value = n;
-      opt.textContent = n;
+      opt.textContent = (labels && labels[n]) || n;
       sel.appendChild(opt);
     }
     // The default may name a role/workflow this daemon does not know; offer
@@ -30618,13 +32282,16 @@ function sessQuickJob(data) {
       ((roles && roles.roles) || []).map((r) => r.name).filter(Boolean),
       "(no role)", defaults.role
     );
-    fill(
-      wfSel,
-      ((wfs && wfs.workflows) || [])
-        .map((w) => (typeof w === "string" ? w : w && !w.error && w.name))
-        .filter(Boolean),
-      "(no workflow)", defaults.workflow
-    );
+    const wfList = ((wfs && wfs.workflows) || [])
+      .filter((w) => typeof w === "string" || (w && !w.error && w.name));
+    const wfLabels = {};
+    const wfValues = wfList.map((w) => {
+      if (typeof w === "string") return w;
+      const value = cflowPickValue(w, wfList);
+      wfLabels[value] = w.name + cflowVersionTag(w);
+      return value;
+    });
+    fill(wfSel, wfValues, "(no workflow)", defaults.workflow, wfLabels);
     wtBox.checked = !!defaults.worktree;
     saveBtn.disabled = !canSave;
 

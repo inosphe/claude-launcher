@@ -9,3 +9,30 @@ compositionupdate schedules, so a typist fast enough to commit the next
 syllable before that timer runs loses the syllable in between. Korean commits
 a syllable every two or three keystrokes, so the loss is continuous rather
 than occasional. tests/web/composition_check.js pins it.
+
+Local patch (claunch-xa0j7) — re-apply on upgrade; tests/web/termselect_check.js
+fails until it is:
+  SelectionService.disable(){this.clearSelection(),this._enabled=!1}
+  -> disable(){this._enabled&&this.clearSelection(),this._enabled=!1}
+Every DECSET 9/1000/1002/1003 runs the activeProtocol setter, which fires
+onProtocolChange even when the protocol is unchanged, and the handler calls
+disable(). Claude Code re-sends its mouse modes while it redraws (58 times in
+one session's output), so a Shift/Option+drag selection -- the only selection
+possible while mouse tracking is on -- was cleared mid-drag. Disabling an
+already disabled service now keeps it; turning tracking on still clears an
+ordinary selection, as upstream does.
+
+Same issue, two more sites in Terminal.bindMouse() (claunch-xa0j7, review):
+  mousemove:e=>{e.buttons||i(e)}
+  -> mousemove:e=>{e.buttons||this._selectionService.hasSelection||i(e)}
+  ...areMouseEventsActive&&!this._selectionService.shouldForceSelection(e))return i(e)
+  -> ...shouldForceSelection(e)&&!(2===e.button&&this._selectionService.hasSelection))return i(e)
+Any mouse report is user input, and SelectionService clears its selection on
+user input. Under ?1003 (any-motion, which Claude Code turns on) the first
+buttonless move after a forced drag was a report, so the selection vanished
+before the pointer reached it; a right-click was a report too, so it was gone
+before the context menu could copy it. While there is a selection these two
+reports are not sent: hovering does not reach the program, and a right-click
+goes to the browser (on Firefox xterm's own mousedown listener puts the
+selection in the textarea for the menu's Copy). A left click or a wheel turn
+still reports and clears the selection.

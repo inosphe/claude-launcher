@@ -97,6 +97,10 @@ class Worktree:
     #: Only ever set for a *reused* checkout: a fresh one is cut from the
     #: base and has nothing to catch up on.
     rebased: str = ""
+    #: What a *new* checkout was asked to branch from (``branch_from``), as
+    #: the caller named it -- a branch, a commit, or another worktree. Only
+    #: ever set for a fresh checkout, so it and ``rebased`` never both hold.
+    branched_from: str = ""
 
 
 # --------------------------------------------------------------------------- #
@@ -539,6 +543,32 @@ def _existing_paths(root: Path) -> List[tuple]:
     return pairs
 
 
+def _existing_branches(root: Path) -> dict:
+    """``name -> branch`` of every launcher worktree of ``root`` ("" when
+    detached), read off the same porcelain listing as :func:`_existing_paths`
+    -- one git process however many checkouts there are."""
+    base = worktrees_dir(root)
+    done = _git(["worktree", "list", "--porcelain"], cwd=str(root))
+    if done.returncode != 0:
+        return {}
+    out: dict = {}
+    name = None
+    for line in (done.stdout or "").splitlines():
+        if line.startswith("worktree "):
+            path = os.path.abspath(line[len("worktree "):].strip())
+            try:
+                rel = os.path.relpath(path, str(base))
+            except ValueError:  # a different drive on Windows
+                rel = ".."
+            name = (None if rel.startswith("..") or rel == "."
+                    else rel.replace(os.sep, "/"))
+            if name is not None:
+                out[name] = ""
+        elif line.startswith("branch refs/heads/") and name is not None:
+            out[name] = line[len("branch refs/heads/"):].strip()
+    return out
+
+
 def info(cwd: str) -> dict:
     """Everything a worktree picker needs about ``cwd``, in one answer.
 
@@ -550,17 +580,25 @@ def info(cwd: str) -> dict:
     root = repo_root(cwd)
     if root is None:
         return {"repo": False, "root": "", "branch": "", "branches": [],
-                "worktrees": [], "paths": {}}
+                "worktrees": [], "paths": {}, "worktree_branches": {},
+                "root_branch": ""}
     pairs = _existing_paths(root)
     return {
         "repo": True,
         "root": str(root),
         "branch": current_branch(Path(cwd)),
+        # What the main checkout is on: where a new worktree starts when no
+        # branch_from is given (create() cuts from the root's HEAD), which is
+        # not always the trunk and not always ``branch`` above.
+        "root_branch": current_branch(root),
         "branches": branches(cwd),
         "worktrees": [name for name, _ in pairs],
         # name -> absolute path, so a picker can join a session's cwd to the
         # checkout it sits in ("reuse s123's worktree").
         "paths": dict(pairs),
+        # name -> the branch checked out there ("" when detached), so a
+        # "branch from" picker can say what a new checkout would start on.
+        "worktree_branches": _existing_branches(root),
     }
 
 
@@ -681,6 +719,7 @@ def resolve(
     *,
     resuming: bool = False,
     rebase_onto: str = "",
+    branch_from: str = "",
 ) -> Optional[Worktree]:
     """Turn a ``--worktree`` answer -- and maybe a question -- into a checkout.
 
@@ -696,6 +735,15 @@ def resolve(
     branch has nothing to replay, so no rebase runs and ``rebased`` stays
     empty. A rebase that cannot be done cleanly fails the launch, which is
     the same rule a worktree that cannot be made already follows.
+
+    ``branch_from`` is the one-meaning spelling of the second half: where a
+    *new* checkout starts -- a branch, a commit, or the name of another
+    worktree (which starts it on whatever that worktree has checked out; see
+    :func:`start_point`). It refuses a name that already exists, because an
+    existing checkout keeps the branch it has and would silently ignore the
+    answer, and it refuses ``rebase_onto`` beside it: one launch either
+    starts a new branch somewhere or brings a reused one up to date, and the
+    two fields are those two questions (see :func:`_checkout`).
 
     ``resuming`` says the launch opens an existing conversation
     (``--resume``, ``--continue``, ``--session-id``). Claude Code keeps
@@ -731,7 +779,7 @@ def resolve(
                 "none to resume. Name a worktree that already exists, or drop "
                 "the resume and start a conversation there"
             )
-        return _updated(create(root, name, start=rebase_onto), rebase_onto)
+        return _checkout(root, name, rebase_onto=rebase_onto, branch_from=branch_from)
     if resuming:
         # Nothing to ask: the answer that a resume implies is "here".
         return None
@@ -739,9 +787,82 @@ def resolve(
         return None
     chosen = _ask(root)
     return (
-        _updated(create(root, chosen, start=rebase_onto), rebase_onto)
+        _checkout(root, chosen, rebase_onto=rebase_onto, branch_from=branch_from)
         if chosen
         else None
+    )
+
+
+def start_point(root: Path, ref: str) -> str:
+    """What ``branch_from`` names, in the spelling ``git worktree add`` takes.
+
+    A launcher worktree's name is read as that checkout: its branch, or its
+    commit when it is on a detached HEAD. Anything else has to be a branch
+    or commit of this repository. A worktree wins over a branch of the same
+    name, because naming a checkout is what the picker offers -- and its
+    branch is normally that same name anyway (:func:`create`).
+
+    Only what is *committed* there is carried: uncommitted changes in the
+    other checkout stay where they are.
+    """
+    ref = (ref or "").strip()
+    try:
+        path = worktrees_dir(root) / validate_name(ref)
+    except WorktreeError:
+        path = None
+    if path is not None and path.exists() and _registered(root, path):
+        branch = current_branch(path)
+        if branch:
+            return branch
+        done = _git(["rev-parse", "HEAD"], cwd=str(path), timeout=_READ_TIMEOUT)
+        if done.returncode == 0 and (done.stdout or "").strip():
+            return (done.stdout or "").strip()
+    if _git(
+        ["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], cwd=str(root)
+    ).returncode != 0:
+        raise WorktreeError(
+            f"nothing named {ref!r} to branch from: it is no worktree, branch "
+            "or commit of this repository"
+        )
+    return ref
+
+
+def _checkout(
+    root: Path, name: str, *, rebase_onto: str = "", branch_from: str = ""
+) -> Worktree:
+    """Make or reuse the worktree ``name``, answering at most one of the two
+    branch questions.
+
+    | field         | new worktree                 | existing worktree        |
+    |---------------|------------------------------|--------------------------|
+    | ``branch_from`` | starts the branch there    | refused (it has a branch)|
+    | ``rebase_onto`` | starts the branch there (*) | rebased onto it         |
+
+    (*) kept for the callers that already spell a stacked child's start this
+    way (``spawn`` with ``rebase_onto: <parent>-stack``). Both fields at once
+    is refused rather than ranked: the pair asks two different things of one
+    checkout, and whichever was dropped would be dropped without a word.
+    """
+    if not branch_from:
+        return _updated(create(root, name, start=rebase_onto), rebase_onto)
+    if rebase_onto:
+        raise WorktreeError(
+            f"branch_from ({branch_from!r}) and rebase_onto ({rebase_onto!r}) "
+            "were both given: branch_from is where a NEW worktree starts, "
+            "rebase_onto brings an EXISTING one up to date -- send one"
+        )
+    name = validate_name(name)
+    if (worktrees_dir(root) / name).exists() or _branch_exists(root, name):
+        raise WorktreeError(
+            f"worktree or branch {name!r} already exists, so it cannot be "
+            f"branched from {branch_from!r}: an existing checkout keeps its "
+            "own branch. Pick a new name, or reuse it and use rebase_onto to "
+            "bring it up to date"
+        )
+    wt = create(root, name, start=start_point(root, branch_from))
+    return Worktree(
+        path=wt.path, name=wt.name, branch=wt.branch, created=wt.created,
+        branched_from=branch_from,
     )
 
 
@@ -757,6 +878,8 @@ def announce(wt: Optional[Worktree], stream=None) -> None:
     verb = "created" if wt.created else "reusing"
     if wt.rebased:
         verb = f"reusing (rebased onto {wt.rebased})"
+    if wt.branched_from:
+        verb = f"created (branched from {wt.branched_from})"
     print(
         f"{verb} worktree {wt.name!r} on branch {wt.branch!r}: {wt.path}",
         file=stream or sys.stderr,

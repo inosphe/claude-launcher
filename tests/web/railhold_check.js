@@ -1,8 +1,9 @@
 /* The rail holds still while a pointer is down on it — run against the real
    refreshSessions from app.js and a stub DOM.
 
-   The rail is rebuilt from scratch when session data changes
-   (`list.innerHTML = ""`), and a press is not an instant:
+   A row is rebuilt when its session's data changes (the whole rail, in the
+   reduced harness below that cannot move nodes), and a press is not an
+   instant:
    pointerdown, pointerup, and only then the click a handler is waiting for.
    A rebuild landing between the first two takes the node the press started
    on out of the document, and the browser has no common ancestor left to
@@ -53,21 +54,64 @@ if (!holdMs || !heldUntil || !pending) {
 }
 
 /* ---- stub DOM ---------------------------------------------------------- */
+/* Nodes move the way the browser moves them: appending or inserting a node
+   that already has a parent takes it out of that parent first. The in-place
+   redraw (the second half of this file) depends on exactly that. */
 function node(tag) {
   const n = {
     tag, kids: [], text: "", classes: new Set(), dataset: {}, style: {},
-    title: "", type: "",
-    appendChild(c) { n.kids.push(c); return c; },
+    title: "", type: "", parentNode: null,
+    get childNodes() { return n.kids; },
+    appendChild(c) { return n.insertBefore(c, null); },
+    insertBefore(c, ref) {
+      if (c.parentNode) c.parentNode.removeChild(c);
+      const at = ref ? n.kids.indexOf(ref) : -1;
+      if (at < 0) n.kids.push(c); else n.kids.splice(at, 0, c);
+      c.parentNode = n;
+      return c;
+    },
+    removeChild(c) {
+      const at = n.kids.indexOf(c);
+      if (at >= 0) n.kids.splice(at, 1);
+      c.parentNode = null;
+      return c;
+    },
+    remove() { if (n.parentNode) n.parentNode.removeChild(n); },
+    replaceWith(m) {
+      const p = n.parentNode;
+      if (!p) return;
+      p.insertBefore(m, n);
+      p.removeChild(n);
+    },
+    get firstElementChild() { return n.kids[0] || null; },
     append(...cs) { cs.forEach((c) => n.appendChild(c)); },
     addEventListener() {},
-    querySelector() { return null; },
-    querySelectorAll() { return []; },
+    /* Only the two shapes refreshRailSeen asks: ".class" for the first
+       descendant wearing it, "li[data-name]" for every row. */
+    querySelector(sel) {
+      const cls = sel.startsWith(".") ? sel.slice(1) : null;
+      for (const k of n.kids) {
+        if (cls && k.classes && k.classes.has(cls)) return k;
+        const deep = k.querySelector ? k.querySelector(sel) : null;
+        if (deep) return deep;
+      }
+      return null;
+    },
+    querySelectorAll(sel) {
+      if (sel !== "li[data-name]") return [];
+      const out = [];
+      for (const k of n.kids) {
+        if (k.dataset && k.dataset.name) out.push(k);
+        if (k.querySelectorAll) out.push(...k.querySelectorAll(sel));
+      }
+      return out;
+    },
     get textContent() { return n.text; },
     set textContent(v) { n.text = String(v); },
     get className() { return [...n.classes].join(" "); },
     set className(v) { n.classes = new Set(String(v).split(/\s+/).filter(Boolean)); },
     get innerHTML() { return ""; },
-    set innerHTML(v) { n.kids = []; },
+    set innerHTML(v) { n.kids.slice().forEach((c) => n.removeChild(c)); },
   };
   n.classList = {
     add: (...cs) => cs.forEach((c) => n.classes.add(c)),
@@ -77,6 +121,8 @@ function node(tag) {
   };
   return n;
 }
+/* The first harness is the reduced one: no createDocumentFragment, so
+   refreshSessions keeps its teardown and the hold is all that keeps a row. */
 const document = { createElement: node };
 function el(tag, cls, text) {
   const n = node(tag);
@@ -165,6 +211,77 @@ Object.assign(exports, {
   deadline: RAIL_HOLD_MS,
 });`)(ctx, document, el, api, list, setTimeout, [], true);
 
+/* The second harness is the shipped page's shape: a document that can make
+   fragments, so refreshSessions updates the rail in place. Ungrouped, so the
+   rows are the list's own children. */
+const placeList = node("ul");
+const placeCtx = {};
+let placeServed = { sessions: [], llm_configured: true };
+new Function(
+  "exports", "document", "el", "api", "list", "setTimeout", "meshCache", "sessionGroupByMesh",
+  stubs
+  + holdMs[0] + "\n" + heldUntil[0] + "\n" + pending[0] + "\n"
+  + slice("railHeld") + slice("holdRail") + slice("releaseRail")
+  + slice("byLineage") + slice("sessionMeshGroup") + slice("profileHarnessLabel")
+  + slice("railMetaText")
+  + slice("refreshSessions")
+  + `
+Object.assign(exports, { refresh: refreshSessions, hold: holdRail });`)(
+  placeCtx, { createElement: node, createDocumentFragment: () => node("#fragment") },
+  el, async () => ({ ok: true, json: async () => placeServed }), placeList,
+  setTimeout, [], false);
+
+/* The third is the same page grouped by mesh: group containers are kept
+   across a redraw too, and a row whose mesh changed moves under its new
+   heading. Later declarations replace the shared stubs' sessMeshes. */
+const groupList = node("ul");
+const groupCtx = {};
+let groupServed = { sessions: [], llm_configured: true };
+const meshOf = {};
+new Function(
+  "exports", "document", "el", "api", "list", "setTimeout", "meshCache", "sessionGroupByMesh",
+  "meshOf",
+  stubs + `
+function sessMeshes(name) { return meshOf[name] ? [{ mesh: meshOf[name], label: "worker" }] : []; }
+function isSessionGroupCollapsed() { return false; }
+function setSessionGroupCollapsed() {}
+`
+  + holdMs[0] + "\n" + heldUntil[0] + "\n" + pending[0] + "\n"
+  + slice("railHeld") + slice("holdRail") + slice("releaseRail")
+  + slice("byLineage") + slice("sessionMeshGroup") + slice("profileHarnessLabel")
+  + slice("railMetaText")
+  + slice("refreshSessions")
+  + `
+Object.assign(exports, { refresh: refreshSessions });`)(
+  groupCtx, { createElement: node, createDocumentFragment: () => node("#fragment") },
+  el, async () => ({ ok: true, json: async () => groupServed }), groupList,
+  /* meshOf is also the meshCache the page signature reads, as the mesh poll's
+     answer is on the real page: a membership change is a change to draw. */
+  setTimeout, meshOf, true, meshOf);
+
+/* The fourth is the in-place page with the real tps line and the real
+   refreshRailSeen: a row kept across polls must still show how old its tps
+   reading is (s88's T1 on claunch-v87). Date.now is the clock it reads. */
+const tpsList = node("ul");
+const tpsCtx = {};
+let tpsServed = { sessions: [], llm_configured: true };
+new Function(
+  "exports", "document", "el", "api", "list", "setTimeout", "meshCache", "sessionGroupByMesh",
+  stubs + "function railSeenLine(s) { return el('span', 'rail-seen'); }\n"
+  + holdMs[0] + "\n" + heldUntil[0] + "\n" + pending[0] + "\n"
+  + slice("railHeld") + slice("holdRail") + slice("releaseRail")
+  + slice("byLineage") + slice("sessionMeshGroup") + slice("profileHarnessLabel")
+  + slice("railMetaText") + slice("fmtAge")
+  + slice("tpsFmt") + slice("ttftFmt") + slice("tpsLatencyText") + slice("tpsAgeSecs")
+  + slice("tpsText") + slice("tpsTooltip") + slice("tpsStaleClass") + slice("tpsRailLine")
+  + slice("refreshRailSeen")
+  + slice("refreshSessions")
+  + `
+Object.assign(exports, { refresh: refreshSessions });`)(
+  tpsCtx, { createElement: node, createDocumentFragment: () => node("#fragment") },
+  el, async () => ({ ok: true, json: async () => tpsServed }), tpsList,
+  setTimeout, [], false);
+
 let failures = 0;
 function check(what, got, want) {
   const g = JSON.stringify(got), w = JSON.stringify(want);
@@ -249,6 +366,106 @@ const TWO = [
   check("...and the cache forgetDeadSessions judges by is untouched",
         ctx.cache().map((s) => s.name), cached);
   ok = true;
+
+  /* ---- no press: the rail updates in place (claunch-v87) -------------- */
+  const placeRows = () => placeList.kids.filter((li) => li.dataset.name);
+  const placeNames = () => placeRows().map((li) => li.dataset.name);
+  placeServed = { sessions: TWO, llm_configured: true };
+  await placeCtx.refresh({ state: "current" });
+  check("in place: a poll draws the rows", placeNames(), ["s1", "s2"]);
+  const kept0 = [...placeRows()];
+  placeServed = {
+    sessions: [...TWO, { name: "s3", status: "busy", harness: "claude", cwd: "" }],
+    llm_configured: true,
+  };
+  await placeCtx.refresh({ state: "current" });
+  check("in place: a session appearing adds its row", placeNames(), ["s1", "s2", "s3"]);
+  check("...and every other row stays the same object, with no press holding it",
+        placeRows().slice(0, 2).map((li, i) => li === kept0[i]), [true, true]);
+  const kept1 = [...placeRows()];
+  placeServed = {
+    sessions: [TWO[0], { ...TWO[1], status: "idle", exit_code: null },
+               { name: "s3", status: "busy", harness: "claude", cwd: "" }],
+    llm_configured: true,
+  };
+  await placeCtx.refresh({ state: "current" });
+  check("in place: a session that changed gets a fresh row",
+        placeRows()[1] === kept1[1], false);
+  check("...drawn from its new record",
+        placeRows()[1].kids.find((k) => k.classes.has("meta")).text, "claude");
+  check("...while the rows that did not change are kept",
+        [placeRows()[0] === kept1[0], placeRows()[2] === kept1[2]], [true, true]);
+  const kept2 = [...placeRows()];
+  placeServed = { sessions: [TWO[0], { name: "s3", status: "busy", harness: "claude", cwd: "" }],
+                  llm_configured: true };
+  await placeCtx.refresh({ state: "current" });
+  check("in place: a session that left loses its row", placeNames(), ["s1", "s3"]);
+  check("...and the rest are the same objects",
+        [placeRows()[0] === kept2[0], placeRows()[1] === kept2[2]], [true, true]);
+  check("...with nothing left behind in the list", placeList.kids.length, 2);
+  check("...and no node claiming a parent it is not in",
+        kept2[1].parentNode, null);
+
+  /* ---- grouped: containers are kept, a row moves between them --------- */
+  const groups = () => groupList.kids.filter((g) => g.dataset.group);
+  const bodyOf = (g) => g.kids.find((k) => k.classes.has("session-group-body"));
+  const countOf = (g) => g.kids[0].kids.find((k) => k.classes.has("session-group-count")).text;
+  const rowsIn = (g) => bodyOf(g).kids.map((li) => li.dataset.name);
+  Object.assign(meshOf, { s1: "a", s2: "a", s3: "b" });
+  groupServed = {
+    sessions: [...TWO, { name: "s3", status: "busy", harness: "claude", cwd: "" }],
+    llm_configured: true,
+  };
+  await groupCtx.refresh({ state: "current" });
+  check("grouped: two mesh groups", groups().map((g) => g.dataset.value), ["a", "b"]);
+  check("...holding their rows", groups().map(rowsIn), [["s1", "s2"], ["s3"]]);
+  const [ga, gb] = groups();
+  const s1row = bodyOf(ga).kids[0];
+  meshOf.s2 = "b";
+  await groupCtx.refresh({ state: "current" });
+  check("grouped: the group containers are the same objects",
+        [groups()[0] === ga, groups()[1] === gb], [true, true]);
+  check("...the row whose mesh changed sits under its new heading",
+        groups().map(rowsIn), [["s1"], ["s2", "s3"]]);
+  check("...each heading counts what it now holds",
+        groups().map(countOf), ["1", "2"]);
+  check("...and the untouched row is the same object", bodyOf(ga).kids[0] === s1row, true);
+  meshOf.s1 = "b";
+  await groupCtx.refresh({ state: "current" });
+  check("grouped: a group left empty is removed",
+        groups().map((g) => g.dataset.value), ["b"]);
+  check("...and its container is detached", ga.parentNode === null, true);
+
+  /* ---- a kept row's tps age moves on (claunch-v87, s88 T1) ------------ */
+  const realNow = Date.now;
+  const T = Date.parse("2026-10-07T00:00:00Z");
+  const tpsRec = { ts: new Date(T).toISOString(), tps: 42.5, max_age_s: 600 };
+  const tpsRow = () => tpsList.kids.find((li) => li.dataset.name === "s1");
+  const tpsLine = () => tpsRow().querySelector(".rail-tps-line");
+  try {
+    Date.now = () => T + 5000;
+    tpsServed = { sessions: [{ ...TWO[0], tps: tpsRec }, TWO[1]], llm_configured: true };
+    await tpsCtx.refresh({ state: "current" });
+    const kept = tpsRow();
+    check("tps: the first poll draws a fresh reading",
+          [tpsLine().className, tpsLine().querySelector(".rail-tps-age").text],
+          ["rail-tps-line", "5s ago"]);
+    Date.now = () => T + 15 * 60 * 1000;
+    tpsServed = { sessions: [{ ...TWO[0], tps: tpsRec },
+                             { ...TWO[1], status: "idle", exit_code: null }],
+                  llm_configured: true };
+    await tpsCtx.refresh({ state: "current" });
+    check("tps: another session's change keeps s1's row", tpsRow() === kept, true);
+    check("...and its tps line shows the reading's age now, stale past max_age_s",
+          [tpsLine().className, tpsLine().querySelector(".rail-tps-age").text],
+          ["rail-tps-line stale", "15m ago"]);
+    Date.now = () => T + 30 * 60 * 1000;
+    await tpsCtx.refresh({ state: "current" });
+    check("...and on a poll that changes nothing",
+          tpsLine().querySelector(".rail-tps-age").text, "30m ago");
+  } finally {
+    Date.now = realNow;
+  }
 
   process.exit(failures ? 1 : 0);
 })();

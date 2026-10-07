@@ -66,6 +66,8 @@ with the branch nowhere.
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -212,6 +214,44 @@ def _fetch_target(repo: Path, target: str) -> Tuple[Optional[str], str]:
     )
 
 
+#: The probe environment variable that carries ``data.landing`` (cflow v2
+#: probes get top-level data as ``CFLOW_DATA_<NAME>``, maps as JSON).
+LANDING_ENV = "CFLOW_DATA_LANDING"
+#: ``--landing`` given without a value: read :data:`LANDING_ENV`.
+LANDING_FROM_ENV = object()
+
+
+def _apply_landing(args: argparse.Namespace) -> Optional[str]:
+    """Turn ``--landing`` (the v2 run's ``data.landing`` as JSON) into the
+    question to ask. A PR landing is merged on the remote base -- the merge
+    commit is not here until fetched, and the local default question would
+    read "not yet" forever -- so it asks ``<remote>/<base>`` with a fetch.
+    Returns why it cannot tell, or None."""
+    text = args.landing
+    if text is LANDING_FROM_ENV:
+        text = os.environ.get(LANDING_ENV, "")
+    text = (text or "").strip()
+    if not text or text == "null":
+        return None
+    try:
+        rec = json.loads(text)
+    except ValueError as exc:
+        return f"--landing is not JSON: {exc}"
+    if rec is None:
+        return None
+    if not isinstance(rec, dict):
+        return f"--landing must be a JSON object, got {type(rec).__name__}"
+    if rec.get("medium") != "pr" or args.target:
+        return None
+    remote, base = rec.get("remote"), rec.get("base")
+    if not remote or not base:
+        return (f"the landing record says medium 'pr' but names no remote/base "
+                f"(remote={remote!r}, base={base!r})")
+    args.target = f"{remote}/{base}"
+    args.fetch = True
+    return None
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -243,7 +283,29 @@ def main(argv: Optional[List[str]] = None) -> int:
             "remote-tracking branch; anything else cannot tell."
         ),
     )
+    parser.add_argument(
+        "--landing",
+        nargs="?",
+        const=LANDING_FROM_ENV,
+        default=None,
+        help=(
+            "the run's landing record as JSON ({medium, remote, base, ...}). "
+            "Given with no value it is read from the environment variable "
+            f"{LANDING_ENV}, which a v2 wait probe carries -- improv-worker-v2 "
+            "passes it that way so no shell has to expand it (cmd.exe does "
+            "not read $VAR). medium 'pr' means "
+            "the leader merged the pull request on the remote base, so the "
+            "question becomes --target <remote>/<base> --fetch; any other "
+            "medium (or null) leaves the local question as it is. An explicit "
+            "--target wins over the record."
+        ),
+    )
     args = parser.parse_args(argv)
+    if args.landing is not None:
+        why = _apply_landing(args)
+        if why:
+            print(f"cannot tell: {why}", file=sys.stderr)
+            return CANNOT_TELL
     repo, how = _resolve_repo(args.repo)
 
     if args.fetch:

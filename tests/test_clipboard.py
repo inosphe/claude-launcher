@@ -70,6 +70,40 @@ def test_authenticated_history_delete_and_clear(home):
     asyncio.run(run())
 
 
+def test_a_browser_copy_joins_the_history_without_touching_the_host(home):
+    # The web terminal posts what an OSC 52 write put on the browser's
+    # clipboard (claunch-fqw4k): it lands first in the history the menu reads,
+    # and the host clipboard it never came from is not re-recorded over it.
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        app = build_app(mgr, "secret", started_at=time.monotonic())
+        history = app["clipboard"]
+        history.reader = lambda: "on the host"
+        async with TestClient(TestServer(app)) as client:
+            assert (await client.post("/api/clipboard", json={"text": "x"})).status == 401
+            headers = {"Authorization": "Bearer secret"}
+            await history.sample()
+            response = await client.post("/api/clipboard", json={"text": "한글 <copy>\nline two"},
+                                         headers=headers)
+            assert response.status == 200
+            assert response.headers["Cache-Control"] == "no-store"
+            assert (await response.json())["item"]["text"] == "한글 <copy>\nline two"
+            items = (await (await client.get("/api/clipboard", headers=headers)).json())["items"]
+            assert [item["text"] for item in items] == ["한글 <copy>\nline two", "on the host"]
+            # The same text again moves to the front instead of repeating.
+            await client.post("/api/clipboard", json={"text": "on the host"}, headers=headers)
+            items = (await (await client.get("/api/clipboard", headers=headers)).json())["items"]
+            assert [item["text"] for item in items] == ["on the host", "한글 <copy>\nline two"]
+            for body in ({"text": ""}, {"text": 3}, {}, ["text"]):
+                assert (await client.post("/api/clipboard", json=body, headers=headers)).status == 400
+            assert (await client.post("/api/clipboard", data="not json", headers=headers)).status == 400
+            too_long = {"text": "x" * (clipboard.MAX_TEXT + 1)}
+            assert (await client.post("/api/clipboard", json=too_long, headers=headers)).status == 413
+            assert len((await (await client.get("/api/clipboard", headers=headers)).json())["items"]) == 2
+        await mgr.shutdown_all()
+    asyncio.run(run())
+
+
 def test_windows_reads_are_one_at_a_time_across_apps(monkeypatch):
     # Two apps in one process each sample on their own thread. OpenClipboard
     # with no window belongs to the process, so a second open succeeds while

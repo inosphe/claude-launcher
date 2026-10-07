@@ -197,7 +197,10 @@ TOOLS = [
             "in the target branch. When a round ends, landed and rejected "
             "entries are dropped and the rest carried into the next round; "
             "the round-start block and the payload's 'landing_reset' say "
-            "what went where. Journalled as queue_*."
+            "what went where. Journalled as queue_*. When this session has "
+            "no v1 landing queue but its cflow v2 run declares a 'landing' "
+            "collection, the same calls list and move that collection's "
+            "records (same status values)."
         ),
         "inputSchema": {
             "type": "object",
@@ -640,10 +643,94 @@ def _request_child_goto(args: dict) -> dict:
     }
 
 
+#: The v2 collection the ``landing_queue`` tool stands for (docs/cflow-v2.md
+#: 10, 「v1 연결」).
+V2_LANDING = "landing"
+
+
+def _v2_landing(run: Optional[str]):
+    """``(cwd, scope)`` of this session's v2 run that declares the
+    ``landing`` collection -- only when no v1 run of this session holds a
+    ``landing_queue:`` and no v1 sub run is addressed. None otherwise."""
+    if run:
+        return None
+    session = _session()
+    if not session:
+        return None
+    try:
+        if engine.landing_queue_run() is not None:
+            return None
+    except Exception:  # no v1 run here at all
+        pass
+    from ..cflow2 import runtime as runtime2
+
+    try:
+        found = runtime2.holders(V2_LANDING, session, [state_mod.resolve_cwd(None)])
+    except Exception:
+        return None
+    found = sorted({(str(h[0]), str(h[1])) if not isinstance(h, dict)
+                    else (str(h.get("cwd")), str(h.get("scope"))) for h in found or []})
+    if len(found) > 1:
+        raise engine.CflowError(
+            f"{len(found)} v2 runs of this session declare the 'landing' collection "
+            f"({', '.join(s for _, s in found)}); use flow_collection on the one you mean"
+        )
+    return found[0] if found else None
+
+
+def _v2_items(view: dict, collection: str) -> list:
+    """The records of ``collection`` in a ``collection_view`` summary."""
+    cols = view.get("collections", view) if isinstance(view, dict) else {}
+    col = cols.get(collection) if isinstance(cols, dict) else None
+    if isinstance(col, dict):
+        return list(col.get("items") or [])
+    return list(col or [])
+
+
+def _landing_queue_v2(slot, args: dict) -> dict:
+    """The ``landing_queue`` tool on a v2 ``landing`` collection: list it,
+    or move one record's status as the run's driver (``set``; the
+    collection's ``access`` decides -- ``landed`` stays the daemon's)."""
+    from ..cflow2 import runtime as runtime2
+
+    cwd, scope = slot
+    issue = str(args.get("issue") or "").strip()
+    try:
+        if issue:
+            status = str(args.get("status") or "").strip()
+            if not status:
+                raise engine.CflowError("moving an entry takes 'status' as well as 'issue'")
+            fields = {"status": status}
+            note = str(args.get("note") or "").strip()
+            if note:
+                fields["note"] = note
+            runtime2.collection_op(
+                "set", V2_LANDING, cwd=cwd, scope=scope, principal="driver",
+                session=_session(), key=issue, fields=fields,
+            )
+        view = runtime2.collection_view(cwd, scope)
+    except (runtime2.FlowError, ValueError) as exc:
+        raise engine.CflowError(str(exc))
+    return {
+        "status": "landing_marked" if issue else "landing_queue",
+        **({"issue": issue} if issue else {}),
+        "version": 2,
+        "collection": V2_LANDING,
+        "cwd": cwd,
+        "scope": scope,
+        "landing_queue": _v2_items(view, V2_LANDING),
+        "note": (
+            "this session's landing queue is the v2 run's 'landing' collection; "
+            "'landed' is set by the daemon's watch when the tip is in the target"
+        ),
+    }
+
+
 def call_tool(name: str, args: dict) -> dict:
     global _seen_run
     run = _run_arg(name, args)
     _check_fence(name, run)
+    v2_landing = _v2_landing(run) if name == "landing_queue" else None
     if name == "start":
         inputs = args.get("inputs")
         if inputs is not None and not isinstance(inputs, dict):
@@ -668,6 +755,8 @@ def call_tool(name: str, args: dict) -> dict:
         )
     elif name == "status":
         payload = engine.status(run=run)
+    elif name == "landing_queue" and v2_landing is not None:
+        payload = _landing_queue_v2(v2_landing, args)
     elif name == "landing_queue":
         issue = str(args.get("issue") or "").strip()
         if issue:

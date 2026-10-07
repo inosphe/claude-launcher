@@ -1072,6 +1072,18 @@ def _cmd_stance(args: argparse.Namespace) -> int:
         return 0
     print()
     print((role.get("stance") or "(this role declares no stance)").rstrip())
+    # A subrole binds too: its stance follows, as the join briefing hands it
+    # (``MeshManager.subrole_stances`` — the same skips: no stance, a role the
+    # vocabulary dropped, a text already printed).
+    seen = {(role.get("stance") or "").strip()}
+    by_name = {r.get("name"): r for r in payload.get("roles", [])}
+    for sub in member.get("subroles") or []:
+        text = ((by_name.get(sub) or {}).get("stance") or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        print(f"\n# subrole {sub}\n")
+        print(text)
     _print_role_packs([member.get("role"), *(member.get("subroles") or [])])
     return 0
 
@@ -1738,7 +1750,7 @@ def register(sub) -> None:
 
     p = msub.add_parser(
         "stance",
-        help="print your role's stance on a mesh (re-read it after a "
+        help="print your role's stance, and your subroles', on a mesh (re-read it after a "
              "compaction or restart)",
     )
     p.add_argument("mesh")

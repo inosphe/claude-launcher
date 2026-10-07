@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from claude_launcher import test_window
+from claude_launcher import pytest_venv, test_window
 
 
 _test_window_grant = None
@@ -50,6 +50,11 @@ def pytest_sessionstart(session):
     if os.environ.get("PYTEST_XDIST_WORKER"):
         return
     _session_started = time.monotonic()
+    stranger = pytest_venv.foreign_interpreter(
+        session.config.rootpath, sys.prefix, sys.executable
+    )
+    if stranger:
+        print(stranger, file=sys.stderr)
     # Only the direct child of a grant owner reports into that grant; a
     # pytest started by a test inside this run must not overwrite it.
     reporter = os.environ.pop(test_window.WINDOW_REPORT_ENV, None) == "1"

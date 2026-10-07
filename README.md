@@ -125,7 +125,7 @@ claunch run work:claude                  # explicit Claude selector
 | `set-provider [p] <provider>` | Pin a provider globally or per profile (`--clear` to inherit). |
 | `providers`            | List API providers from the config file and the active one. |
 | `routing [set\|clear\|stop]` | Show or change [request-body routing](#pinning-the-upstream-provider-openrouter-routing) (e.g. pin OpenRouter to CoreWeave). |
-| `set-token <name> [t]` | Store the profile's one launcher token. The harness declaration chooses its destination env; OAuth harnesses ignore it. |
+| `set-token <name> [t]` | Store the profile's one launcher token. The harness declaration chooses its destination env; OAuth harnesses ignore it. `--clear` deletes it. |
 | `get-token <name>`     | Print the profile's OAuth token (resolves inheritance; `--own`). |
 | `list`                 | List profiles and each login's state (alias: `ls`). |
 | `path <name[:harness]>` | Print the profile root, or the explicit harness's namespaced home. |
@@ -550,7 +550,9 @@ no token of its own resolves to the nearest ancestor that has one, so
 `run`/`validate`/`usage` all work on children. (For a shared login, log the
 parent in with `setup-token` — those tokens are long-lived.) Cycles and missing
 parents are rejected. Use `claunch parent <name> <parent>` to re-parent an
-existing profile or `--clear` to detach it.
+existing profile or `--clear` to detach it. `claunch set-token <name> --clear` deletes a child's own
+stored token so it inherits the parent's again (a `/login`-written
+`.credentials.json` is left alone).
 
 **What inheritance covers.** `harness`, `env` and applicable auth are resolved live at
 launch, so changing them on a parent affects children immediately. **Skills and
@@ -620,6 +622,22 @@ A profile overlays `models`, `context_window`, `auto_compact_at`,
 the profile itself last); `api_key`, `endpoints` and
 `openai_reasoning_format` identify the backend and stay on the provider.
 
+`endpoints.openai` is the OpenAI-compatible API base URL, including any
+version path required by the backend (for Fireworks,
+`https://api.fireworks.ai/inference/v1`). Pi, profile-based briefings and
+Observer share this URL interpretation: Pi receives the base, and direct
+calls append `/chat/completions`. A full `/chat/completions` URL is also
+accepted and reduced to its base for Pi. Custom paths such as `/api/v2` are
+preserved. Query parameters and fragments in `endpoints.openai` are rejected
+by Pi, profile-based briefings and Observer before a request is sent; their
+clients append resource paths to the base URL. The historical Fireworks
+`https://api.fireworks.ai/inference`
+value is normalized to `/inference/v1` with a compatibility warning; other
+URLs receive no implicit version suffix. `endpoints.anthropic` keeps its
+own protocol's base URL convention.
+Existing Pi configurations that depended on automatic `/v1` insertion for
+other backends should declare that path explicitly in `endpoints.openai`.
+
 **What each harness receives** (`claunch providers` prints the description;
 `claunch run PROFILE:HARNESS` prints a `note:` for anything the harness
 cannot carry):
@@ -628,7 +646,7 @@ cannot carry):
 |---|---|---|---|
 | `api_key` | `ANTHROPIC_AUTH_TOKEN` (below the profile's `set-token`) | not translated yet | `ANTHROPIC_API_KEY` (below `set-token`) |
 | `endpoints.anthropic` | `ANTHROPIC_BASE_URL` | -- | -- |
-| `endpoints.openai` | -- | not translated yet | the registered provider's base URL (`/v1` appended) |
+| `endpoints.openai` | -- | not translated yet | the registered provider's API base URL (shared URL interpretation above) |
 | `models` | `default` -> `ANTHROPIC_MODEL` + `..._DEFAULT_SONNET_MODEL`, `small` -> `..._DEFAULT_HAIKU_MODEL`, `large` -> `..._DEFAULT_OPUS_MODEL`, `xlarge` -> `..._DEFAULT_FABLE_MODEL`, `subagent` -> `CLAUDE_CODE_SUBAGENT_MODEL` | the session's own `--model` | the registered model list, `default` launched |
 | `context_window` | appends `[1m]` to every model id when >= 1,000,000 | `-c model_context_window=N` | each registered model's `contextWindow` |
 | `auto_compact_at` | `CLAUDE_CODE_AUTO_COMPACT_WINDOW` | `-c model_auto_compact_token_limit=N` | `compaction.reserveTokens = context_window - auto_compact_at` in the profile's `pi/settings.json` |
@@ -820,7 +838,7 @@ header. A provider therefore needs no secret in the file:
 ```yaml
 providers:
   fireworks-glm5p2:
-    endpoints: {anthropic: "https://api.fireworks.ai/inference", openai: "https://api.fireworks.ai/inference"}
+    endpoints: {anthropic: "https://api.fireworks.ai/inference", openai: "https://api.fireworks.ai/inference/v1"}
     models: {default: "accounts/fireworks/models/glm-5p2"}
     # no api_key here — supplied by set-token per machine
 ```
@@ -983,8 +1001,8 @@ Metering is observability, so it fails soft: if the shim cannot start, the
 launch prints a one-line warning and uses the upstream URL directly (a
 `routing` spec keeps the hard failure described above).
 
-The `pi` harness goes through the same shim: its OpenAI base URL
-(`endpoints.openai` + `/v1`) is fronted the same way, the packaged extension
+The `pi` harness goes through the same shim: its resolved OpenAI base URL
+from `endpoints.openai` is fronted the same way, the packaged extension
 registers `X-Claunch-Session` as a provider header for daemon-managed
 sessions, and the shim records each `/v1/chat/completions` call. An OpenAI
 stream only carries token counts when the request asks for them, so behind
@@ -1615,6 +1633,16 @@ questions the flags can barely ask:
   launch**: the rebase is aborted, nothing is created, and the checkout stays
   exactly as you left it — an agent must never wake up mid-conflict in a mess
   it did not make. By flag: `--worktree=NAME --rebase-onto BRANCH`.
+  Picking a *new* one reveals **Branch from** instead — where the new branch
+  starts: the main checkout's HEAD (the default, named with the branch it is
+  on, which is not always the trunk), another worktree (its checked-out
+  branch; committed work only), or a branch. By flag:
+  `--worktree=NAME --branch-from REF`. The two rows answer the two kinds of
+  checkout and never appear together: `--branch-from` is refused for a
+  worktree or branch that already exists (it keeps its own branch) and
+  together with `--rebase-onto`. (`--rebase-onto` on a new worktree still
+  sets its start, as it always has, so older scripts keep working.) The web
+  form's Worktree row asks the same two questions the same way.
 - **Attach** — whether to take this terminal over the moment it starts
   (`Ctrl+]` detaches, and the session lives on either way).
 
@@ -1706,7 +1734,9 @@ since the daemon has no Herdr pane to name a checkout after. Reusing one
 offers the same **Update** rebase as `new-session`'s form, defaulting to the
 parent's own branch — and a rebase that cannot be done cleanly refuses the
 spawn with nothing created. By flag: `claunch spawn --worktree NAME
---rebase-onto BRANCH`.
+--rebase-onto BRANCH`. A new one offers **Branch from** — start the child's
+branch on another worktree or branch (`--branch-from REF`, `branch_from` on
+the agents' `spawn` tool).
 
 **Parent** is the field that has no equivalent in the other form, and it is
 why this one exists. `spawn` normally reads its parent from
@@ -1743,8 +1773,8 @@ and a form painted into its PTY would hang the session it was creating.
 
 | Command | Description |
 | ------- | ----------- |
-| `new-session` (`new`) | Spawn the harness owned by required `--profile P` in a managed PTY. `--wizard` uses one `Profile : Harness` picker and picks every other field (see [Building one from a form](#building-one-from-a-form---wizard)); by flag: (`-s NAME`, `--profile P`, `--model M`, `-c CWD`, `--cols/--rows`, `--env K=V`, `--restore/--no-restore`, `--role R` with `--mesh`, Claude-only `--resume [S]`/`--fork-session`, `--worktree[=NAME]`/`--no-worktree`, `--rebase-onto BRANCH`, `-a/--attach`; trailing args pass through). Also **what it is for**: `--mesh M --as HANDLE --connect H`, `--workflow W --context C`, `--task "..."`. `--harness` remains only as a deprecated, refused compatibility flag. **Yours, not an agent's**: refused from inside a managed session, which should use `spawn` (`--detached` overrides). |
-| `spawn`               | Create a **child** of a session by hand, exactly as its agent would — same endpoint, same policy. `--wizard` uses the inherited or allowed replacement `Profile : Harness`; by flag: (`--parent S`, `-s NAME`, `--profile P` when allowed, `--model M` when `spawn.allow_args` permits it, `--mesh M`, `--as HANDLE`, `--role R`, `--connect HANDLE`, `--workflow W`, `--task "..."`, `-w/--workspace NAME`, `--worktree NAME --rebase-onto BRANCH`). `--harness` is refused; changing an allowed profile is the only way to change the child harness. `--mesh` defaults to the parent's own. |
+| `new-session` (`new`) | Spawn the harness owned by required `--profile P` in a managed PTY. `--wizard` uses one `Profile : Harness` picker and picks every other field (see [Building one from a form](#building-one-from-a-form---wizard)); by flag: (`-s NAME`, `--profile P`, `--model M`, `-c CWD`, `--cols/--rows`, `--env K=V`, `--restore/--no-restore`, `--role R` with `--mesh`, Claude-only `--resume [S]`/`--fork-session`, `--worktree[=NAME]`/`--no-worktree`, `--rebase-onto BRANCH` (reused worktree), `--branch-from REF` (new worktree), `-a/--attach`; trailing args pass through). Also **what it is for**: `--mesh M --as HANDLE --connect H`, `--workflow W --context C`, `--task "..."`. `--harness` remains only as a deprecated, refused compatibility flag. **Yours, not an agent's**: refused from inside a managed session, which should use `spawn` (`--detached` overrides). |
+| `spawn`               | Create a **child** of a session by hand, exactly as its agent would — same endpoint, same policy. `--wizard` uses the inherited or allowed replacement `Profile : Harness`; by flag: (`--parent S`, `-s NAME`, `--profile P` when allowed, `--model M` when `spawn.allow_args` permits it, `--mesh M`, `--as HANDLE`, `--role R`, `--connect HANDLE`, `--workflow W`, `--task "..."`, `-w/--workspace NAME`, `--worktree NAME --rebase-onto BRANCH` or `--branch-from REF`). `--harness` is refused; changing an allowed profile is the only way to change the child harness. `--mesh` defaults to the parent's own. |
 | `sessions` (`lss`)    | List sessions: name, status (`starting/busy/idle/exited`), harness, profile, size, cwd. Children are indented under the session that spawned them. |
 | `attach [S]` (`a`, `attach-session`) | Mirror a session into this terminal, tmux-style; detach with `Ctrl+]` (session keeps running). Omit `S` when exactly one session is running. `-t S` also accepted. |
 | `respawn S [-a]`      | Relaunch an exited session under its own name — claude comes back with `--resume` of its pinned conversation, so quitting it by accident (double `Ctrl+C` while attached) is recoverable. `-a` attaches right away. Also a **resume** button in the [web UI](#web-ui--http-api). |
@@ -1766,6 +1796,7 @@ and a form painted into its PTY would hang the session it was creating.
 | `resize S COLS ROWS`  | Resize the session's terminal. |
 | `harnesses`           | List the declared harnesses (`claude`, `codex`, `pi`, `kimi`, `agent`, plus your own) and whether each is installed here. |
 | `workspace add\|ls\|rm` (`ws`) | Register / list / unregister the directories a session may be spawned in — the web UI's Directory picker is exactly this list, and (unless `spawn.allow_workspace` is off) where an agent may send a child (see [Workspaces](#workspaces-where-a-session-may-be-spawned)). `add` defaults to the current directory and refuses one that does not exist. |
+| `workspace code [WS] [--worktree NAME] [--session S] [--install] [--stop]` | Open a workspace, one of its worktrees, or a session's directory in VS Code in the browser (code-server run by the daemon) and print the URL; with no workspace, list the running servers (see [VS Code in the browser](#vs-code-in-the-browser-one-code-server-per-workspace-and-worktree)). |
 | `daemon start\|stop\|status\|restart` | Explicit daemon control (session commands auto-start it, tmux-style). |
 | `daemon token [--rotate]` | Print (or rotate) the API/web auth token. |
 | `daemon config [KEY [VALUE]]` | Show or set daemon settings (stored in `~/.claunch.yaml`). |
@@ -2307,6 +2338,58 @@ straight into it — register it like any other directory:
 
 ```bash
 claunch workspace add .claude/worktrees/review --name review
+```
+
+### VS Code in the browser (one code-server per workspace and worktree)
+
+The daemon can run [code-server](https://github.com/coder/code-server) next to
+the sessions and serve it at `/vscode/<key>/`, behind the dashboard's own login:
+
+| Target | Key | Opens |
+|---|---|---|
+| a registered workspace | `<workspace>` | its root |
+| a linked worktree under it | `<workspace>~<name>` | `<root>/.claude/worktrees/<name>` |
+| a session directory outside every workspace | `adhoc-<hash>` | that directory (only from the session's panel) |
+
+Each target is its own code-server process. It starts when first opened and
+stops after `vscode.idle_timeout` seconds without an open connection; the next
+open starts it again. Extensions and `User/settings.json`·`keybindings.json`
+are shared by every server; each server keeps its own state (open editors,
+unsaved-buffer backups) under `~/.claude-launcher/vscode/servers/`.
+
+- **Opening**: the VS Code button on each row of Settings → Workspaces (with a
+  picker for that workspace's worktrees), the VS Code block of a session's
+  panel, or `claunch workspace code <workspace> [--worktree NAME]`, which
+  prints the URL. With no workspace it lists the running servers.
+- **Installing**: code-server is not bundled. The first open asks, then the
+  daemon downloads the pinned release (about 220 MB), checks its published
+  sha256 and unpacks it under `~/.claude-launcher/vscode/code-server/`.
+  `claunch workspace code <ws> --install` does the same from a shell.
+- **Auth**: code-server runs with `--auth none` on a unix socket (mode 0600).
+  The only gate is the daemon's Bearer token or login cookie, which the
+  middleware applies to `/vscode/` exactly as to `/api/`. The proxy removes
+  `Authorization` and the `claunch_session`/`relay_session` cookies before a
+  request reaches code-server.
+- **Relay**: through a relay the same server is at
+  `/t/<name>/vscode/<key>/`; code-server builds its URLs relative to the page,
+  and WebSockets pass through.
+- **Same origin**: the editor runs on the dashboard's origin (a relay cannot
+  give it another). Scripts in it — extensions, webviews — can call the
+  daemon's API with the browser's login, which is the same reach a terminal
+  of the daemon already has.
+- **Port forwarding** (code-server's `/proxy/<port>/`) is off: servers start
+  with `--disable-proxy` and the proxy refuses those paths.
+- **Not on a Windows daemon** (code-server needs Linux, macOS or WSL).
+
+Settings → VS Code shows and edits the `vscode:` block, the install and the
+running servers (with Stop):
+
+```yaml
+vscode:
+  enabled: true        # serve /vscode/ at all
+  idle_timeout: 1800   # seconds without a connection before a server stops
+  port_proxy: false    # code-server's /proxy/<port>/; applies to servers started after
+  command: null        # a code-server to run instead of the installed one
 ```
 
 ### Each workspace's issue board

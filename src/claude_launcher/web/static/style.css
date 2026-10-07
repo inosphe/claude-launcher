@@ -1325,7 +1325,7 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   line-height: 1; font-style: normal;
 }
 
-#new-session { padding: 0; max-width: 520px; }
+#new-session { padding: 0; width: 100%; max-width: 1100px; }
 #new-session label { display: block; font-size: 12px; color: #9da5b0; margin-bottom: 6px; }
 /* WHERE it works — the first fence on the form, styled like the ones below
    it. The step badge and blurb reuse the spawn modal's own classes
@@ -1384,7 +1384,11 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 #new-worktree legend {
   padding: 0 6px; font-size: 11px; text-transform: uppercase; color: #7d8590;
 }
-#new-worktree-existing-row, #new-worktree-rebase-row { margin-left: 22px; }
+/* Each mode's rows sit under its radio: Name and Branch from under "new",
+   Reuse, From session and Rebase onto under "existing". */
+#new-worktree-name-row, #new-worktree-from-row,
+#new-worktree-existing-row, #new-worktree-session-row,
+#new-worktree-rebase-row { margin-left: 22px; }
 /* The rebase row carries a control of its own beside the branch box, so it
    is a flex line rather than a block: the label takes the room, the trunk
    button keeps its own width at the end. */
@@ -4638,9 +4642,7 @@ body.embed #main { width: 100%; }
 .sess-modal-tab[aria-selected="true"] {
   background: #172947; border-color: #58a6ff; color: #cfe2ff; cursor: default;
 }
-/* The page caps the form at a readable column; inside the box the box IS the
-   column, and a 520px form in a 700px dialog leaves a stripe of empty sheet
-   down one side. */
+/* In a dialog the session form fills the available body width. */
 #modal-overlay.spawn-open #new-session { max-width: none; }
 #new-session-actions { display: flex; align-items: center; gap: 8px; }
 #new-session .session-field-hidden { display: none; }
@@ -4664,6 +4666,12 @@ body.embed #main { width: 100%; }
   /* narrower and the 130px label column eats the control; shorter and the
      form is a slit. Both are floors the grip cannot cross. */
   min-width: 420px; min-height: 240px;
+}
+/* Session forms need room for option labels and help text. Keep the page and
+   dialog widths aligned, with viewport margins on small screens. */
+#modal-overlay.spawn-open .modal-box:has(#new-session) {
+  width: 1100px;
+  min-width: min(420px, calc(100vw - 32px));
 }
 /* The body takes the slack a taller box creates — without this it keeps its
    content height and the extra pixels open as dead space under the form. */
@@ -5357,6 +5365,31 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 
 /* ---- Worktrees page (worktrees-page.js) ---- */
 #worktrees-view { flex: 1; overflow-y: auto; padding: 18px 26px; min-height: 0; }
+#glossary-view { flex: 1; overflow-y: auto; padding: 18px 26px; min-height: 0; }
+#spec-view { flex: 1; overflow-y: auto; padding: 18px 26px; min-height: 0; }
+.spec-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 8px 0; }
+.spec-text { width: 100%; box-sizing: border-box; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+.spec-errors { color: #ff7b72; font-size: 13px; }
+.spec-summary { font-size: 13px; }
+.spec-table { border-collapse: collapse; font-size: 12px; width: 100%; }
+.spec-table th, .spec-table td { border: 1px solid #30363d; padding: 4px 6px; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+#spec-view .wf-btn:disabled { opacity: .5; cursor: default; }
+.glossary-controls { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+.glossary-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+.glossary-card { border: 1px solid var(--border); border-radius: 6px; padding: 12px; margin: 12px 0; overflow-wrap: anywhere; }
+.glossary-card h4 { margin: 0 0 8px; }
+.glossary-card code { display: block; margin: 8px 0; }
+.glossary-card button { margin-right: 6px; }
+.glossary-definition, .glossary-form pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.glossary-error { color: var(--red, #e57373); }
+.glossary-form { max-width: 850px; margin-top: 24px; }
+.glossary-form label { display: block; margin: 12px 0; }
+.glossary-form input, .glossary-form textarea { display: block; width: 100%; box-sizing: border-box; margin-top: 5px; }
+.glossary-form textarea { min-height: 80px; }
+@media (max-width: 820px) {
+  #glossary-view { padding: 14px 12px; }
+  .glossary-columns { grid-template-columns: 1fr; }
+}
 @media (max-width: 820px) { #worktrees-view { padding: 14px 12px; } }
 .wt-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 12px 0; }
 .wt-filter {
@@ -5513,3 +5546,86 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 }
 #shadow-input-field:focus { outline: none; border-color: #1f6feb; }
 #shadow-input-field:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* VS Code (#/settings/vscode, Workspaces rows, session panel) */
+.vscode-settings { display: flex; flex-direction: column; gap: 8px; }
+.vscode-setting { display: grid; grid-template-columns: 180px auto; gap: 4px 12px; align-items: center; }
+.vscode-setting .wf-note { grid-column: 2; }
+.vscode-setting-name { color: #c9d1d9; }
+.vscode-setting input[type="number"], .vscode-setting input[type="text"] { max-width: 360px; }
+.vscode-setting input[type="checkbox"] { justify-self: start; }
+.vscode-settings > .wf-btn { align-self: flex-start; }
+.vscode-panel > .wf-note { margin: 10px 0; }
+.ws-vscode { display: inline-flex; gap: 6px; align-items: center; flex: none; }
+.ws-vscode-pick { max-width: 220px; }
+.vscode-server .ws-text .error { display: block; }
+.sess-vscode { margin: 14px 0; }
+@media (max-width: 640px) {
+  .vscode-setting { grid-template-columns: 1fr; }
+  .vscode-setting .wf-note { grid-column: 1; }
+}
+/* cflow v2 beside v1 (docs/cflow-v2.md section 9): the version badge, the
+   chart tree of a v2 run, the user's open choices and the delegation rows. */
+.cf2-badge {
+  display: inline-block; padding: 0 5px; margin-right: 6px; border-radius: 3px;
+  font-size: 11px; font-weight: 600; color: #0d1117; background: #a5d6ff;
+}
+.cf2-tree { font-size: 12px; margin: 4px 0 8px; }
+.cf2-row { padding: 1px 0; color: #8b949e; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cf2-row.active { color: #c9d1d9; }
+.cf2-row.awaiting { color: #f0f6fc; background: rgba(56, 139, 253, 0.18); }
+.cf2-role { color: #6e7681; }
+.cf2-visits { color: #d29922; }
+.cf2-await { color: #58a6ff; }
+.cf2-choice { border: 1px solid #30363d; border-radius: 6px; padding: 6px 8px; margin: 6px 0; }
+.cf2-choice h4 { margin: 0 0 4px; }
+.cf2-question h5 { margin: 6px 0 2px; }
+.cf2-q-table { border-collapse: collapse; margin: 2px 0 6px; font-size: 12px; }
+.cf2-q-table th, .cf2-q-table td { border: 1px solid #30363d; padding: 2px 6px; text-align: left; vertical-align: top; white-space: pre-wrap; }
+.cf2-q-table tr.recommended td { background: rgba(46, 160, 67, 0.15); }
+.cf2-q-rec { margin: 4px 0; }
+.wf-btn.recommended { outline: 2px solid #2ea043; }
+.cf2-deleg { font-size: 12px; padding: 2px 0; }
+.cf2-receipt { color: #6e7681; }
+.cf2-fallback { margin: 0 0 2px 12px; font-size: 12px; }
+.cf2-v1-note { margin-top: 4px; }
+/* cflow v2 collections and trigger lines (run view) */
+.cf2-collection { margin: 6px 0; overflow-x: auto; }
+.cf2-col-table { border-collapse: collapse; font-size: 12px; width: 100%; }
+.cf2-col-table th, .cf2-col-table td { text-align: left; padding: 2px 6px; border-bottom: 1px solid #30363d; vertical-align: top; }
+.cf2-col-fields { overflow-wrap: anywhere; color: #8b949e; }
+.cf2-col-link { margin-left: 8px; color: #58a6ff; white-space: nowrap; }
+.cf2-col-link:hover { text-decoration: underline; }
+.cf2-col-status.landed { color: #3fb950; }
+.cf2-col-status.rejected { color: #f85149; }
+.cf2-col-status.merged { color: #a371f7; }
+.cf2-col-status.open { color: #3fb950; }
+.cf2-col-status.closed { color: #f85149; }
+.cf2-col-actions { white-space: nowrap; }
+.cf2-trigger { font-size: 12px; margin: 0; }
+.cf2-trigger.skipped { color: #d29922; }
+/* cflow v2 start inputs (new-session / spawn form) and the run's inputs */
+.cf2-inputs { border: 1px solid #30363d; border-radius: 6px; padding: 6px 8px; margin: 6px 0; }
+.cf2-input { margin: 6px 0; }
+.cf2-input-label { display: block; font-weight: 600; }
+.cf2-input-control textarea, .cf2-input-control input[type=text],
+.cf2-input-control input[type=number], .cf2-input-control select { width: 100%; box-sizing: border-box; }
+.cf2-input-row { display: flex; gap: 4px; margin: 2px 0; }
+.cf2-input-row input { flex: 1 1 0; min-width: 0; }
+.cf2-input-help { margin: 2px 0 0; }
+.cf2-input.invalid .cf2-input-control { outline: 1px solid #f85149; border-radius: 4px; }
+.cf2-input-error { color: #f85149; margin: 2px 0 0; }
+.cf2-run-inputs { margin: 6px 0; }
+.cf2-run-input-value { white-space: pre-wrap; }
+.cf2-undecidable { color: #d29922; }
+
+/* Start inputs: a readiness check beside an input (precheck: gh) and the
+   cross-input rules under the fields (docs/cflow-v2.md 2.6). */
+.cf2-precheck { display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  font-size: 12px; margin-top: 4px; color: #8b949e; }
+.cf2-precheck.ok .cf2-precheck-text { color: #3fb950; }
+.cf2-precheck.bad .cf2-precheck-text { color: #f85149; }
+.cf2-precheck-run { font-family: var(--mono, monospace); padding: 0 4px;
+  border: 1px solid var(--border, #ccc); border-radius: 3px; }
+.cf2-constraints { margin-top: 6px; }
+.cf2-constraint { margin: 2px 0; }
