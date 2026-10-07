@@ -110,6 +110,7 @@ const ctx = {};
 new Function(
   "exports", "document", "el",
   stubs
+  + "const hiddenSkippedPolls = new Map();\n" + slice("visiblePoll")
   + slice("selectionInUse") + slice("renderBeads") + slice("beadsPageTabs") + slice("beadsWorkspaceTabs")
   // The workspace row names each board and titles it with its database path
   // (claunch-4aesv); real helpers, so the row reads as the page draws it.

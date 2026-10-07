@@ -171,7 +171,8 @@ new Function(
   "exports", "$", "document", "MOBILE_MQ", "setInterval", "clearInterval",
   "el", "terminalOnScreen",
   stubs +
-  [slice("parseHash"), slice("hashQuery"), slice("hashDetail"),
+  ["const hiddenSkippedPolls = new Map();", slice("visiblePoll"),
+   slice("parseHash"), slice("hashQuery"), slice("hashDetail"),
    slice("hashWithDetail"), slice("syncDetailPanel"), slice("markDetailRow"),
    slice("dropDetail"), slice("openDetail"), slice("repointDetail"),
    slice("closeDetail"), slice("route"),

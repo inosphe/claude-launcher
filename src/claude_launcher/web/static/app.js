@@ -15050,6 +15050,47 @@ function fmtLogTime(iso) {
   return new Date(t).toLocaleTimeString();
 }
 
+/* A page's own poll, held while the tab is hidden. The dashboard tick
+   (pollTick) slows down behind another tab; a page poll -- a workflow, a session's
+   detail, the beads board, a transcript -- stops outright, because what it
+   redraws is a page nobody is reading, and each redraw is a DOM rebuild that
+   every content script observing the page then walks again (claunch-dumca:
+   a hidden dashboard tab spent 3.4 s of CPU in 12 s on it). A tick that
+   comes due while hidden is remembered rather than run, and runs once the
+   moment the tab is shown again -- but only if its timer is still the live
+   one (`alive`), so a page closed in the meantime is not redrawn. */
+const hiddenSkippedPolls = new Map();
+
+function visiblePoll(fn, alive) {
+  const tick = () => {
+    if (typeof document !== "undefined" && document.hidden === true) {
+      hiddenSkippedPolls.set(tick, alive);
+      return undefined;
+    }
+    hiddenSkippedPolls.delete(tick);
+    return fn();
+  };
+  return tick;
+}
+
+function runSkippedPolls() {
+  const due = [...hiddenSkippedPolls];
+  hiddenSkippedPolls.clear();
+  for (const [tick, alive] of due) {
+    if (alive && !alive()) continue;
+    try {
+      const out = tick();
+      if (out && typeof out.catch === "function") out.catch(() => {});
+    } catch {}
+  }
+}
+
+if (typeof document !== "undefined" && document.addEventListener) {
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden !== true) runSkippedPolls();
+  });
+}
+
 /* The follow-forward: while the pane is open and the reader is sitting at the
    bottom of it, new turns arrive under them the way the terminal's own output
    does. Scrolled up, nothing moves — a reader who went looking for something
@@ -15064,7 +15105,8 @@ let transcriptTimer = null;
 
 function startTranscriptPoll() {
   if (transcriptTimer) return;
-  transcriptTimer = setInterval(pollTranscript, TRANSCRIPT_POLL_MS);
+  transcriptTimer = setInterval(
+    visiblePoll(pollTranscript, () => transcriptTimer), TRANSCRIPT_POLL_MS);
 }
 
 function stopTranscriptPoll() {
@@ -15590,7 +15632,7 @@ async function openWorkflow(cwd, scope) {
   showView("wf");
   $("wf-view").innerHTML = "<p class='wf-note'>loading…</p>";
   await refreshWf();
-  wfPollTimer = setInterval(refreshWf, 5000);
+  wfPollTimer = setInterval(visiblePoll(refreshWf, () => wfPollTimer), 5000);
 }
 
 async function refreshWf() {
@@ -15670,7 +15712,7 @@ function openSplit(name) {
   splitFor = name;
   $("term-wf").innerHTML = "<p class='wf-note'>loading…</p>";
   refreshSplit();
-  splitPollTimer = setInterval(refreshSplit, 5000);
+  splitPollTimer = setInterval(visiblePoll(refreshSplit, () => splitPollTimer), 5000);
 }
 
 function closeSplit() {
@@ -17763,7 +17805,7 @@ function openBeads(id, section) {
     // The Queues tab reads its own endpoint; without this first read it sat
     // on "loading…" until the 15 s poll came round.
     if (beadsSection === "queues") refreshQueues();
-    if (!beadsTimer) beadsTimer = setInterval(refreshBeads, 15000);
+    if (!beadsTimer) beadsTimer = setInterval(visiblePoll(refreshBeads, () => beadsTimer), 15000);
   }
 }
 
@@ -20225,7 +20267,7 @@ function openWindowPage() {
   showView("window");
   renderWindow();
   refreshWindow();
-  if (!windowTimer) windowTimer = setInterval(refreshWindow, 5000);
+  if (!windowTimer) windowTimer = setInterval(visiblePoll(refreshWindow, () => windowTimer), 5000);
 }
 
 function stopWindowPoll() {
@@ -21237,7 +21279,9 @@ function openReports() {
   // 30 s, not the rail's 2. A report is written once per round — tens of
   // minutes apart at the very best — and each tick costs the daemon a
   // listdir per session plus a read per file to tell a page from a stub.
-  if (!reportsTimer) reportsTimer = setInterval(refreshReports, 30000);
+  if (!reportsTimer) {
+    reportsTimer = setInterval(visiblePoll(refreshReports, () => reportsTimer), 30000);
+  }
 }
 
 function stopReportsPoll() {
@@ -26179,7 +26223,7 @@ function repointDetail(name) {
   $("sess-view").innerHTML = "<p class='wf-note'>loading…</p>";
   markDetailRow();
   refreshSession();
-  sessPollTimer = setInterval(refreshSession, 5000);
+  sessPollTimer = setInterval(visiblePoll(refreshSession, () => sessPollTimer), 5000);
 }
 
 /* The same address without `?detail=`. On a phone that hands the page slot
@@ -28364,7 +28408,7 @@ function sessRunFoldFor(flow, unfold) {
     stopSessRun();
     if (!fold.open) return;
     refreshSessRun();
-    sessRunTimer = setInterval(refreshSessRun, 5000);
+    sessRunTimer = setInterval(visiblePoll(refreshSessRun, () => sessRunTimer), 5000);
   });
   sessRunFold = fold;
   // On creation only, so shutting it stays shut across the panel's rebuilds:
@@ -30167,7 +30211,7 @@ function sessChildren(data) {
   refreshSessKids();
   // Its own poll, slower than the panel's: statuses drift in seconds, but a
   // roster is glanced at, not watched.
-  sessKidsTimer = setInterval(refreshSessKids, 5000);
+  sessKidsTimer = setInterval(visiblePoll(refreshSessKids, () => sessKidsTimer), 5000);
   return box;
 }
 
