@@ -533,6 +533,7 @@ BROWSER_CHECKS = [
         "sessiongridlineage_browser.cjs",
         "railchildline_browser.cjs",
         "termfit_browser.cjs",
+        "quietpoll_browser.cjs",
 ]
 
 
