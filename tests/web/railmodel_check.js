@@ -111,6 +111,7 @@ function sessQueued() { return null; }
 function sessBackpressure() { return null; }
 function sessReborrow() { return el("div", "sess-reborrow"); }
 function sessPerms() { return el("div", "sess-perms"); }
+function sessCompact() { return el("div", "sess-compact"); }
 function sessMigrate() { return el("div", "sess-migrate"); }
 /* The note editor, fixed like the rest: this harness is about the model row,
    and the note's own behaviour is railnote_check's subject. */

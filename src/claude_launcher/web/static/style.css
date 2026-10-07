@@ -2465,6 +2465,17 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 .sess-perms .wf-btn + .wf-note, .sess-perms .wf-btn + .wf-warning {
   margin: 8px 0 0;
 }
+/* The auto-compact form: a switch and a threshold, one row each, above the
+   button that applies both with one restart. */
+.sess-compact-form label {
+  display: flex; align-items: center; gap: 6px; margin: 0 0 8px;
+  font-size: 12px; color: #9da5b0;
+}
+.sess-compact-form input[type="number"] {
+  width: 10em; padding: 3px 6px; background: #0d1117; color: #c9d1d9;
+  border: 1px solid #30363d; border-radius: 4px;
+}
+.sess-compact-form input[type="number"]:disabled { opacity: .5; }
 /* role-specific panels: the leader's dispatch form and its children roster.
    Same card as the panel's other boxes, same field skin as the send box. */
 .sess-quickjob select, .sess-quickjob input:not([type="checkbox"]),

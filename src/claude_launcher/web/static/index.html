@@ -778,6 +778,18 @@
                 <span><strong>Skip permissions</strong> — run without permission prompts</span>
               </label>
               <p id="new-claude-runtime-hint"></p>
+              <!-- Auto-compact: both answers travel in the session's env
+                   (DISABLE_AUTO_COMPACT, CLAUDE_CODE_AUTO_COMPACT_WINDOW),
+                   which claude reads at launch. An empty threshold keeps
+                   the profile's auto_compact_at. -->
+              <label class="check">
+                <input type="checkbox" name="auto_compact" checked>
+                <span><strong>Auto compact</strong> — compact the conversation when it reaches the threshold</span>
+              </label>
+              <label>Auto-compact at (tokens)
+                <input type="number" name="auto_compact_window" min="1" step="1000"
+                       inputmode="numeric" placeholder="profile default"></label>
+              <p id="new-claude-compact-hint" class="wf-note"></p>
             </fieldset>
             <fieldset id="new-codex-runtime" class="harness-runtime hidden">
               <legend>Codex runtime</legend>

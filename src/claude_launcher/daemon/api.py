@@ -42,6 +42,7 @@ from .. import (
     translators,
     usage,
 )
+from .. import auto_compact as auto_compact_mod
 from .. import install
 from .. import install_plan
 from .. import session_commits
@@ -801,6 +802,7 @@ def build_app(
     r.add_post(
         "/api/sessions/{name}/skip-permissions", h_session_skip_permissions
     )
+    r.add_post("/api/sessions/{name}/auto-compact", h_session_auto_compact)
     r.add_post("/api/sessions/{name}/keys", h_session_keys)
     r.add_post("/api/sessions/{name}/paste-image", h_session_paste_image)
     r.add_post("/api/sessions/{name}/deliver", h_session_deliver)
@@ -8557,6 +8559,28 @@ async def h_session_skip_permissions(request: web.Request) -> web.Response:
             400, "pass 'skip': true to stop asking, false to ask again"
         )
     session = await manager.skip_permissions(request.match_info["name"], skip)
+    return json_response(session.info())
+
+
+async def h_session_auto_compact(request: web.Request) -> web.Response:
+    """Restart a claude session with auto-compact on or off, and its
+    threshold pinned or returned to the profile's.
+
+    Body: ``{"enabled": true|false, "window": <tokens>|null}``. ``window``
+    omitted or null drops the session's own pin. The change is
+    :meth:`SessionManager.auto_compact` — an edit of the definition's env
+    and a relaunch, so the conversation, directory and auth are untouched.
+    Operator-only, like skip-permissions.
+    """
+    manager: SessionManager = request.app["manager"]
+    body = await _json_body(request)
+    try:
+        enabled, window = auto_compact_mod.parse(body)
+    except ValueError as exc:
+        return json_error(400, str(exc))
+    session = await manager.auto_compact(
+        request.match_info["name"], enabled, window
+    )
     return json_response(session.info())
 
 
