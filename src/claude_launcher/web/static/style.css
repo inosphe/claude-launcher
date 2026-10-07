@@ -1870,6 +1870,37 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   color: #c6cdd5; white-space: pre-wrap; overflow-wrap: anywhere;
   max-height: 9em; overflow-y: auto; font-size: 12px;
 }
+/* The cflow answer strip: the attached session's run is waiting on a person.
+   The gate amber of the rail line it repeats (`.wf-waiting`), one row high
+   at desktop width; on a narrow window the buttons wrap to a second row
+   and the question keeps a single clipped line (its full text is the
+   hover). `flex: none` so its height is taken from the terminal, which
+   renderTermCflow refits whenever the strip changes. */
+#term-cflow {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px;
+  flex: none; padding: 5px 14px; font-size: 12px;
+  background: #2a2108; border-bottom: 1px solid #6e5000; color: #e3b341;
+}
+#term-cflow.hidden { display: none; }
+#term-cflow .tcf-head {
+  display: flex; align-items: baseline; gap: 6px; flex: none;
+  color: inherit; text-decoration: none; font-weight: 600; white-space: nowrap;
+}
+#term-cflow .tcf-head:hover .tcf-what { text-decoration: underline; }
+#term-cflow .tcf-question {
+  flex: 1 1 12em; min-width: 0; color: #c9b27a;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#term-cflow .tcf-buttons { display: flex; flex-wrap: wrap; gap: 6px; flex: none; }
+#term-cflow .tcf-btn {
+  padding: 3px 10px; border-radius: 6px; font: inherit; font-size: 12px;
+  background: #21262d; border: 1px solid #6e5000; color: #e6edf3;
+  cursor: pointer; white-space: nowrap;
+}
+#term-cflow .tcf-btn:hover { background: #4d3800; }
+#term-cflow .tcf-btn.approve { background: #238636; border-color: #2ea043; }
+#term-cflow .tcf-btn.approve:hover { background: #2ea043; }
+#term-cflow .tcf-btn.proposed { border-color: #e3b341; font-weight: 600; }
 /* overflow hidden is the backstop for fitView (app.js): the grid is kept
    inside the box by shrinking glyphs, and whatever a mid-adjustment frame
    still hangs over the edge must clip, not become a scrollbar.

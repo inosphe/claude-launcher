@@ -7934,6 +7934,7 @@ async function refreshCflow() {
     applyRailQuiet();    // one of its two flags is read off this very cache
   }
   renderTermTimer();   // the attached session's own header chip
+  renderTermCflow();   // and the answer strip over its terminal
   if (repaintRail && currentPage === "home") renderHome();
   // Everything above is what feeds the rail and the header: badges on rows,
   // the attached session's countdown, the home card's count. What follows
@@ -12110,6 +12111,10 @@ function setStatusBadge(status) {
   // which session it is now about — a whole second of the last session's
   // clock would otherwise sit on this one's name.
   renderTermTimer();
+  // The answer strip speaks for the same session, for the same reason.
+  // Guarded like the other optional painters here: the header harnesses
+  // slice this function without it.
+  if (typeof renderTermCflow === "function") renderTermCflow();
   syncMobileBars();  // the mobile bars mirror this header
 }
 
@@ -13927,6 +13932,163 @@ async function refreshTermQueued() {
   if (name !== currentName || currentPage !== "terminal") return;
   renderTermQueued(q);
   renderHoldChip(q);
+}
+
+/* ---- cflow answer strip (#term-cflow) ----
+   The attached session's run is stopped on something only a person settles
+   (sessCflowGated: an approval, a user branch, a goto request, an ask that
+   reached nobody). The rail line says so in amber, but the press that
+   settles it lived on the run page, a navigation away from the terminal the
+   reader is watching. This strip puts the same presses on top of that
+   terminal: one line with the step, the question, and a button per answer.
+
+   Every press is the run page's own — the same endpoint, the same body, the
+   same confirm — so the two places cannot disagree about what a press does.
+
+   The strip shares a column with the terminal, so its appearing, going and
+   changing shape all change the grid the session draws into. It is rebuilt
+   and the terminal refitted only when what it would draw changes (`sig`);
+   the 2s poll that repaints the same gate must not, or the buttons would be
+   replaced under the pointer and the session resized for nothing. */
+function termCflowAnswers(r) {
+  const body = { cwd: r.cwd, scope: r.scope };
+  const pick = (o, ask) => ({
+    label: o.name || String(o),
+    title: o.description || "",
+    path: "/api/cflow/select",
+    body: { ...body, option: o.name || String(o) },
+    ask,
+  });
+  if (answerFellToUs(r)) {
+    const opts = answerBranchOptions(r);
+    if (opts !== null) {
+      return opts.map((o) => pick(o,
+        `Answer '${r.step_id}' with '${o.name || o}' yourself?\n\n` +
+        "It was put to nobody, so nothing else will."));
+    }
+    return [{
+      label: "Approve", cls: "approve", path: "/api/cflow/approve", body,
+      ask: `Answer '${r.step_id}' yourself?\n\nIt was put to nobody, so ` +
+        "nothing else will.",
+    }];
+  }
+  if (r.status === "waiting_approval") {
+    const isLoop = r.reason === "loop_limit";
+    return [{
+      label: isLoop ? "Extend loop limit"
+        : r.reason === "declined" ? "Override the refusal" : "Approve",
+      cls: "approve", path: "/api/cflow/approve", body,
+      ask: isLoop ? `Extend the loop limit at step '${r.step_id}'?`
+        : `Approve the gate at step '${r.step_id}'?`,
+    }];
+  }
+  if (r.status === "waiting_selection") {
+    const proposed = (r.proposal || {}).option;
+    return (r.options || []).map((o) => {
+      const a = pick(o, `Select '${o.name}'?`);
+      if (o.name === proposed) {
+        a.cls = "proposed";
+        a.title = `the agent proposes this${a.title ? " — " + a.title : ""}`;
+      }
+      return a;
+    });
+  }
+  if (r.status === "waiting_goto") {
+    const gr = r.goto_request || {};
+    return [
+      {
+        label: `Move to '${gr.step}'`, cls: "approve",
+        path: "/api/cflow/goto/resolve",
+        body: { ...body, decision: "approve" },
+        ask: `Move the run to '${gr.step}', as the agent asked?` +
+          (gr.step === "end" ? " (this finishes the run)" : ""),
+      },
+      {
+        label: "Refuse", title:
+          "the run stays where it is; the agent is told and continues",
+        path: "/api/cflow/goto/resolve",
+        body: { ...body, decision: "deny" },
+        reason: "Refuse the move? A reason is optional but is what the agent reads:",
+      },
+    ];
+  }
+  return [];
+}
+
+/* The one line of question the strip carries: what the run page puts in
+   its gate paragraph, flattened to a line (the full text is the hover). */
+function termCflowQuestion(r) {
+  let q;
+  if (r.status === "waiting_goto") {
+    const gr = r.goto_request || {};
+    q = `wants to move from '${gr.from || r.step_id}' to '${gr.step}'` +
+      (gr.reason ? ` — ${gr.reason}` : "");
+  } else if (r.status === "waiting_answer") {
+    q = (r.ask && r.ask.prompt) || r.prompt || "waiting for a decision";
+  } else if (r.status === "waiting_approval") {
+    q = r.reason === "declined" && r.declined
+      ? `${r.declined.by} declined: ${r.declined.reason || "no reason given"}`
+      : r.gate || "waiting for approval";
+  } else {
+    q = r.prompt || "decision point";
+  }
+  return String(q).replace(/\s+/g, " ").trim();
+}
+
+function renderTermCflow() {
+  const box = $("term-cflow");
+  if (!box) return;
+  const r = currentPage === "terminal" && currentName
+    ? sessCflowRun(currentName) : null;
+  const show = !!r && sessCflowGated(r);
+  const answers = show ? termCflowAnswers(r) : [];
+  const question = show ? termCflowQuestion(r) : "";
+  const sig = show
+    ? JSON.stringify([currentName, r.run, r.status, r.step_id, r.visit,
+      question, answers.map((a) => [a.label, a.cls, a.title])])
+    : "hidden";
+  // Never drawn yet reads as hidden: the page starts with the strip hidden,
+  // and a first paint with nothing to show has no shape to change.
+  if ((box.dataset.sig || "hidden") === sig) return;
+  box.dataset.sig = sig;
+  box.innerHTML = "";
+  if (!show) {
+    box.classList.add("hidden");
+    refitSoon(60);
+    return;
+  }
+  const head = el("a", "tcf-head");
+  head.href = "#/wf/" + encodeURIComponent(`${r.scope || "default"}|${r.cwd}`);
+  head.title = "open this run's page";
+  head.appendChild(el("span", "tcf-mark", "◆"));
+  head.appendChild(el("span", "tcf-what",
+    `${r.workflow || "cflow"} · ${sessCflowGateStep(r) || "?"} — ` +
+    sessCflowLabel(r)));
+  box.appendChild(head);
+  const qn = el("span", "tcf-question", question);
+  qn.title = question;
+  box.appendChild(qn);
+  const btns = el("span", "tcf-buttons");
+  for (const a of answers) {
+    const b = el("button", "tcf-btn" + (a.cls ? " " + a.cls : ""), a.label);
+    b.type = "button";
+    if (a.title) b.title = a.title;
+    b.addEventListener("click", () => {
+      let payload = a.body;
+      if (a.reason) {
+        const why = prompt(a.reason, "");
+        if (why === null) return; // cancelled the dialog, not the refusal
+        payload = { ...payload, reason: why };
+      } else if (a.ask && !confirm(a.ask)) {
+        return;
+      }
+      cflowAction(a.path, payload);
+    });
+    btns.appendChild(b);
+  }
+  box.appendChild(btns);
+  box.classList.remove("hidden");
+  refitSoon(60);
 }
 
 /* ---- delivery chip (#term-hold) ----
@@ -16128,6 +16290,8 @@ function showView(name) {
   // it anyway, but a page swap should not flash a stale backlog first).
   if (!showTerm) renderTermQueued(null);
   else refreshTermQueued();
+  // The cflow answer strip is drawn from the cache in hand: no request.
+  renderTermCflow();
   for (const [page, id] of Object.entries(VIEWS)) {
     $(id).classList.toggle("hidden", name !== page);
   }
