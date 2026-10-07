@@ -37422,6 +37422,123 @@ async function refreshGotoGate() {
 }
 
 /* ------------------------------------------------------------------ */
+/* the reposync gate: a session's push to a shared remote             */
+/* ------------------------------------------------------------------ */
+/* An agent session's `claunch reposync` (or repo_sync tool) that would push
+   to the shared remote files its plan with daemon/reposync_gate.py and waits
+   here (claunch-dh73y). The card prints the whole plan the approval is bound
+   to: repository, remote, the two tips and -- for a rebase -- how many landing
+   merges are recreated and which local branches stay on the old commits.
+   Unlike the goto gate, an unanswered card EXPIRES as a refusal: a push to a
+   shared remote cannot be taken back by the person who missed it. */
+const REPOSYNC_GATE_PREFIX = "reposync-gate-";
+const reposyncGateIgnored = new Set();
+
+async function refreshReposyncGate() {
+  const host = $("notices");
+  if (!host) return;
+  let body;
+  try {
+    body = await (await api("/api/reposync/requests")).json();
+  } catch {
+    return;
+  }
+  const pending = (body && body.requests ? body.requests : []).filter(
+    (r) => r.status === "pending"
+  );
+  const live = new Set(pending.map((r) => r.id));
+  for (const id of [...reposyncGateIgnored]) {
+    if (!live.has(id)) reposyncGateIgnored.delete(id);
+  }
+  const seen = new Set();
+  for (const rec of pending) {
+    const key = REPOSYNC_GATE_PREFIX + rec.id;
+    if (reposyncGateIgnored.has(rec.id)) continue;
+    seen.add(key);
+    const plan = rec.plan || {};
+    let card = notices.get(key);
+    if (!card || !card.node.isConnected) {
+      dismissNotice(key);
+      const node = el("div", "notice warn gate");
+      const title = el("div", "notice-title");
+      title.appendChild(el("span", null, "repository sync wants to push: "));
+      title.appendChild(el("span", null, plan.workspace || plan.repo || "?"));
+      const sub = el("div", "notice-sub");
+      if (rec.session) {
+        sub.appendChild(gateSessionLink(rec.session));
+        sub.appendChild(el("span", null, " asks: "));
+      }
+      sub.appendChild(el("span", null, plan.summary || plan.action || "?"));
+      const tips = el(
+        "div",
+        "notice-sub",
+        `${plan.branch || "?"} ${(plan.local || "").slice(0, 8)} → ` +
+          `${plan.remote || "?"}` +
+          (plan.remote_key ? ` (${plan.remote_key})` : "") +
+          (plan.upstream ? ` @ ${plan.upstream.slice(0, 8)}` : "")
+      );
+      const clock = el("div", "notice-sub gate-clock");
+      node.appendChild(title);
+      node.appendChild(sub);
+      node.appendChild(tips);
+      const stranded = plan.affected || [];
+      if (stranded.length) {
+        node.appendChild(el(
+          "div",
+          "notice-sub",
+          `left on the old commits (${stranded.length}): ` +
+            stranded.slice(0, 12).join(", ") +
+            (stranded.length > 12 ? ", …" : "")
+        ));
+      }
+      const actions = el("div", "gate-actions");
+      const approve = el("button", "wf-btn approve", "Approve");
+      const reject = el("button", "wf-btn clear", "Reject");
+      const ignore = el("button", "wf-btn", "Ignore");
+      approve.title = "the asking session pushes exactly this plan";
+      reject.title = "nothing is pushed; the asking session is told no";
+      ignore.title =
+        "close this card only — the request stays open and expires as a " +
+        "refusal at its deadline";
+      approve.addEventListener("click", async (ev) => {
+        ev.stopPropagation();
+        if (await gatePost(`/api/reposync/requests/${rec.id}/approve`, approve)) {
+          dismissNotice(key);
+        }
+      });
+      reject.addEventListener("click", async (ev) => {
+        ev.stopPropagation();
+        if (await gatePost(`/api/reposync/requests/${rec.id}/reject`, reject)) {
+          dismissNotice(key);
+        }
+      });
+      ignore.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        reposyncGateIgnored.add(rec.id);
+        dismissNotice(key);
+      });
+      actions.appendChild(approve);
+      actions.appendChild(reject);
+      actions.appendChild(ignore);
+      node.appendChild(clock);
+      node.appendChild(actions);
+      host.appendChild(node);
+      notices.set(key, { node, timer: null });
+      card = notices.get(key);
+    }
+    const clock = card.node.querySelector(".gate-clock");
+    if (clock) {
+      clock.textContent = `expires (as a refusal) in ${gateCountdown(rec.deadline)}`;
+    }
+  }
+  for (const key of [...notices.keys()]) {
+    if (key.startsWith(REPOSYNC_GATE_PREFIX) && !seen.has(key)) {
+      dismissNotice(key);
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* boot                                                               */
 /* ------------------------------------------------------------------ */
 /* The poll is installed here rather than at the end of boot(), and is never
@@ -38200,7 +38317,7 @@ async function pollOnce() {
   // is fed by the same heartbeat as the registry — and the goto gate beside
   // it: a leader files from its own terminal, the person answers here.
   const gateRefresh = refreshRestartGate();
-  refreshes.push(gateRefresh, refreshGotoGate());
+  refreshes.push(gateRefresh, refreshGotoGate(), refreshReposyncGate());
   await Promise.all(refreshes);
 }
 

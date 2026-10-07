@@ -531,6 +531,11 @@ DAEMON_DEFAULTS = {
     "cflow2_clock": True,
     "cflow2_headless_max": 3,
     "cflow2_poll": 10.0,
+    # claunch reposync (claunch-dh73y): "ask" -- a sync that pushes to the
+    # shared remote waits for a person (a y/N prompt at the user's own
+    # terminal, the web UI's approval card for an agent session); "auto" --
+    # it goes ahead. Read live by the CLI on every sync.
+    "reposync_push": "ask",
 }
 
 

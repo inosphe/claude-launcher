@@ -35,6 +35,7 @@ from . import (
     cli_transcript,
     cli_window,
     cli_project,
+    cli_reposync,
     cli_workspace,
     config,
     credentials,
@@ -1670,6 +1671,7 @@ def build_parser() -> argparse.ArgumentParser:
     cli_cflow2.register(sub)
     cli_sync.register(sub)
     cli_workspace.register(sub)
+    cli_reposync.register(sub)
     cli_project.register(sub)
     cli_beads.register(sub)
     cli_search.register(sub)
