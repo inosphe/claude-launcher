@@ -2542,6 +2542,9 @@ async def h_prompt_packs_offer(request: web.Request) -> web.Response:
     The packs installed in the workspace that owns ``cwd`` (none when no
     workspace does), which of them start ticked, and the role → pack mapping
     so the form can lock the ones a chosen role or subrole requires.
+    ``shipped`` is the package catalog: a required pack the workspace has not
+    installed goes in as the shipped copy (prompt_packs.required_pack), and
+    the form names it as such.
     """
     cwd = cflow_state.resolve_cwd(request.query.get("cwd") or None)
     owner = workspaces.owning(str(cwd))
@@ -2555,6 +2558,7 @@ async def h_prompt_packs_offer(request: web.Request) -> web.Response:
         "packs": packs,
         "default_packs": prompt_packs.default_packs(),
         "role_packs": prompt_packs.role_packs(),
+        "shipped": [p.to_dict() for p in prompt_packs.catalog()],
     })
 
 
@@ -3044,6 +3048,9 @@ async def h_roles(request: web.Request) -> web.Response:
     roleset = mesh_roles.resolve()
     return json_response(
         {
+            # What a blank role resolves to when nothing in the handle names
+            # one -- the create form needs it to say which role packs follow.
+            "default": roleset.default,
             "roles": [
                 {
                     "name": r.name,
@@ -6331,9 +6338,10 @@ async def _onboard_and_launch(
             parent_cwd=manager.get(parent).sdef.cwd if parent else "",
         )
         # Checked before anything is arranged, like the board answer above: a
-        # pack that is not installed where the session will run is a refused
-        # request, never a session that started without guidance it was
-        # promised -- whether the form ticked it or a role requires it.
+        # ticked pack that is not installed where the session will run is a
+        # refused request, never a session that started without guidance it
+        # was promised. A role-required one falls back to claunch's copy
+        # (prompt_packs.required_pack) and refuses only when it exists nowhere.
         try:
             packs, packs_required = _session_prompt_packs(
                 request, body, plan, name=name, cwd=cwd
@@ -6417,10 +6425,24 @@ async def _onboard_and_launch(
         # the packs are standing rules for the whole session, and the task is
         # what it acts on first.
         rules = prompt_packs.opening(session.sdef.prompt_packs)
-        opening = rules + ("\n\n" + opening if opening else "")
+        # A child's parent block still leads (onboard.arrange: the frame the
+        # rest is read in); the packs follow it. Every spawned member with a
+        # role now carries its role pack, so this is the common case.
+        head = onboard._parent_block(plan) if plan.parent and plan.wanted else ""
+        if head and opening.startswith(head):
+            rest = opening[len(head):].lstrip("\n")
+            opening = head + "\n\n" + rules + ("\n\n" + rest if rest else "")
+        else:
+            opening = rules + ("\n\n" + opening if opening else "")
         report["prompt_packs"] = [p["id"] for p in session.sdef.prompt_packs]
         if packs_required:
             report["prompt_packs_required"] = packs_required
+        shipped_copies = [
+            p["id"] for p in session.sdef.prompt_packs
+            if p.get("source") == prompt_packs.PACKAGE
+        ]
+        if shipped_copies:
+            report["prompt_packs_shipped"] = shipped_copies
     if selected:
         # The goal is the head of the opening itself — one block either way
         # it travels (argv or typed in), never a slash command.

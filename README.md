@@ -2389,6 +2389,7 @@ header (`title`, `description`, optionally `default: true`). Shipped today:
 | `common` | A workspace's common working rules (scratch files, daemon restarts, reporting). Ticked by default; meant to be edited after install. |
 | `beads` | Driving the board through `claunch beads`, issue writing rules, and picking work with `bv --robot-*` (never the bare TUI). Agent Mail is not covered. |
 | `unreal-operator` | Handing Unreal editor-only work (assets, Blueprint wiring, Project Settings, PIE checks) to a person as `--assignee operator` issues. |
+| `role-<name>` | One per packaged mesh role (`role-leader`, `role-worker`, `role-reviewer`, `role-pm`, `role-operator`, `role-specialist`, `role-analyst`, `role-free`): the role's working rules. The role's stance keeps one or two sentences; the rest is here. |
 
 A new pack is a new `.md` file in that directory; nothing else lists them.
 
@@ -2423,12 +2424,28 @@ Two settings sit under the matrix, stored in `~/.claunch.yaml` under
   `default: true` (`common`).
 - **Required by role** (`role_packs`): role → packs. A session whose primary
   role or one of whose subroles is listed gets those packs whether ticked or
-  not; the form shows them ticked and locked with "required by <role>", and a
-  create in a workspace that has not installed them is refused with the role
+  not; the form shows them ticked and locked with "required by <role>". A
+  required pack needs no install: the workspace's copy is used when it has
+  one (an edit there wins), and the copy claunch ships otherwise — the form
+  marks it "claunch's copy", the opening block says "shipped with claunch",
+  and the create response lists it under `prompt_packs_shipped`. Only a
+  mapped pack that exists in neither place refuses the create, with the role
   named. Roles are matched by canonical name on the joined mesh, so aliases and
-  a role inferred from the handle count too. The default maps the `unreal`
-  role (a domain subrole in the packaged role set, held beside a primary role:
+  a role inferred from the handle count too. The default maps every packaged
+  role to its `role-<name>` pack, and the `unreal` role (a domain subrole in
+  the packaged role set, held beside a primary role:
   `--role worker --subrole unreal`) to `unreal-operator`.
+
+The create and spawn forms end the Prompt packs row with one line naming
+every pack the opening will carry and why (ticked, or the role that requires
+it, and whether it is claunch's copy). When the Role row is blank it says
+which role the handle will resolve to, since that role decides the packs.
+
+The join briefing prints the role's short stance and a `role prompt packs:`
+line naming the packs its roles require. `claunch mesh stance <mesh>` prints
+the stance followed by the text of those packs (the copy installed in the
+current directory's workspace, or claunch's), which is how a member that
+joined by hand, without a create-time opening, reads them.
 
 HTTP: `GET /api/prompt-packs` (catalog, per-workspace status, both settings),
 `GET /api/prompt-packs/offer?cwd=` (what the form offers there),

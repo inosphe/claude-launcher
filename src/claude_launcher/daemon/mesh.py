@@ -42,7 +42,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Un
 
 import yaml
 
-from .. import atomic, digests, projects
+from .. import atomic, digests, projects, prompt_packs
 from . import loops, mesh_ops, mesh_policy, mesh_roles, paths, wire
 from .manager import AnySession, ManagerError, SessionManager
 from .session import STATUS_IDLE, session_category
@@ -3109,6 +3109,20 @@ class MeshManager:
             f"stance: run 'claunch mesh stance {mesh.name}' now — it prints "
             f"what a {member.role} is on this mesh, and it is binding\n"
         )
+        # The stance says what the role IS; how it works is in the packs its
+        # roles require (prompt_packs.role_packs). A session created with the
+        # role has them in its opening; one that joined by hand has only this
+        # line, and the stance command prints their text.
+        try:
+            packs = list(prompt_packs.required_for(member.roles))
+        except Exception:  # a broken config must not cost the briefing
+            packs = []
+        if packs:
+            pointer += (
+                f"role prompt packs: {', '.join(packs)} -- in your opening "
+                f"when this session was created with its role; 'claunch mesh "
+                f"stance {mesh.name}' prints them\n"
+            )
         if not inline or not self._is_local(mesh, member):
             # The caller has a harder budget than the join does and would
             # rather cut this than anything else it carries. Right ordering:
