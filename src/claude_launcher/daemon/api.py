@@ -518,6 +518,7 @@ def build_app(
     r.add_get("/api/workspaces", h_workspaces)
     r.add_get("/api/git", h_git)
     r.add_get("/api/worktrees", h_worktrees)
+    r.add_get("/api/worktrees/changes", h_worktree_changes)
     r.add_post("/api/worktrees/remove", h_worktrees_remove)
     r.add_post("/api/workspaces", h_workspace_add)
     r.add_delete("/api/workspaces/{name}", h_workspace_remove)
@@ -2366,6 +2367,28 @@ async def h_worktrees(request: web.Request) -> web.Response:
         lambda: worktree_inventory.inventory(_worktree_roots(sessions), sessions)
     )
     return json_response(answer)
+
+
+async def h_worktree_changes(request: web.Request) -> web.Response:
+    """Read changes only for a registered launcher checkout, on expansion."""
+    path = request.query.get("path", "")
+    if not path:
+        return json_response({"error": "path is required"}, status=400)
+    sessions = _worktree_sessions(request.app["manager"])
+
+    def read():
+        found = worktree_inventory.find(_worktree_roots(sessions), path)
+        if found is None:
+            return None
+        return worktree_inventory.changes(path)
+
+    try:
+        files = await asyncio.to_thread(read)
+    except worktree_mod.WorktreeError as exc:
+        return json_response({"error": str(exc)}, status=500)
+    if files is None:
+        return json_response({"error": "워크트리를 찾을 수 없습니다"}, status=404)
+    return json_response({"path": path, "files": files})
 
 
 async def h_worktrees_remove(request: web.Request) -> web.Response:

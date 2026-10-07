@@ -28,3 +28,50 @@ assert.strictEqual(mergeLabel({ trunk: 'master', is_trunk: true, merged: true })
 assert.strictEqual(mergeLabel({ trunk: '', merged: null })[0], 'unknown');
 assert.strictEqual(mergeLabel({ trunk: 'master', merged: null })[0], 'unknown');
 console.log('ok');
+
+// Exercise expansion, status rendering, refreshing and retry without HTML
+// interpretation of repository-controlled filenames.
+class Element {
+  constructor(tag) { this.tagName = tag; this.children = []; this.textContent = ''; }
+  appendChild(child) { this.children.push(child); return child; }
+  append(...children) { this.children.push(...children); }
+  replaceChildren(...children) { this.children = children; }
+}
+ctx.document.createElement = tag => new Element(tag);
+const textOf = el => el.textContent + el.children.map(textOf).join('');
+(async () => {
+  let calls = 0;
+  let reply = { files: [{ status: 'RM', original_path: 'old.txt', path: '<img>.txt' },
+    { status: '??', path: '한 글.txt' }] };
+  let ok = true;
+  ctx.api = async url => {
+    calls++;
+    assert.strictEqual(url, '/api/worktrees/changes?path=F%3A%2Fwork%20tree');
+    return { ok, json: async () => reply };
+  };
+  const panel = ctx.WorktreesPage.changesPanel({ path: 'F:/work tree' });
+  assert.strictEqual(calls, 0);
+  panel.open = true;
+  await panel.ontoggle();
+  assert.strictEqual(calls, 1);
+  assert(textOf(panel).includes('2개'));
+  assert(textOf(panel).includes('old.txt → <img>.txt'));
+  assert(textOf(panel).includes('한 글.txt'));
+  const list = panel.children[1].children[1];
+  assert.strictEqual(list.children[0].children[0].textContent, 'RM');
+  assert.strictEqual(list.children[0].children[1].children.length, 0);
+  await panel.ontoggle();
+  assert.strictEqual(calls, 1); // already loaded
+  reply = { files: [] };
+  await panel.children[2].onclick();
+  assert(textOf(panel).includes('커밋되지 않은 파일이 없습니다.'));
+  ok = false; reply = { error: 'git failed' };
+  await panel.children[2].onclick();
+  assert(textOf(panel).includes('조회 실패'));
+  assert(textOf(panel).includes('git failed'));
+  assert(!textOf(panel).includes('0개'));
+  ok = true; reply = { files: [] };
+  await panel.ontoggle();
+  assert(textOf(panel).includes('0개'));
+  console.log('changes panel ok');
+})().catch(error => { console.error(error); process.exitCode = 1; });
