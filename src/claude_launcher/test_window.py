@@ -181,6 +181,10 @@ def acquire(
             "pid": os.getpid(),
             "label": label,
             "wait": max(0.0, wait),
+            # This process holds the grant for its lifetime and releases it on
+            # exit; a grant left by a run that was killed is reaped by its pid
+            # (claunch-zawnr).
+            "bound": True,
         }
         if workers:
             body["workers"] = max(1, int(workers))

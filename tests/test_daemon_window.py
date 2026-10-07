@@ -956,3 +956,160 @@ def test_window_state_changes_do_not_emit_mesh_messages(home, tmp_path):
             await manager.shutdown_all()
 
     asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# claunch-zawnr: a grant held for a client that is no longer there
+# --------------------------------------------------------------------------- #
+def test_a_bound_grant_is_reaped_with_its_pid_under_a_live_session(tmp_path):
+    """A pytest run killed mid-run (shell timeout, daemon restart) left its
+    grant held under a session that lives on, and per-session limits then
+    blocked every later run of that session."""
+    async def run():
+        manager = _Manager()
+        manager.set("a", exited=False)
+        w = _make(tmp_path, manager=manager)
+        held = await w.acquire("targeted", session="a", pid=_dead_pid(), bound=True)
+        assert held["granted"]
+        nxt = await w.acquire("targeted", session="a", pid=os.getpid(), bound=True)
+        assert nxt["granted"], nxt
+        assert [h["grant_id"] for h in w.status()["holders"]] == [nxt["grant_id"]]
+        ends = [r["end"] for r in w.history()["entries"]]
+        assert "reaped" in ends
+
+    asyncio.run(run())
+
+
+def test_an_unbound_session_grant_outlives_its_requesting_pid(tmp_path):
+    """`claunch window acquire` exits at once and the session releases later:
+    its grant must not be reaped by that pid."""
+    async def run():
+        manager = _Manager()
+        manager.set("a", exited=False)
+        w = _make(tmp_path, manager=manager)
+        held = await w.acquire("targeted", session="a", pid=_dead_pid())
+        assert held["granted"]
+        nxt = await w.acquire("targeted", session="a", pid=os.getpid())
+        assert not nxt["granted"]
+        assert [h["grant_id"] for h in w.status()["holders"]] == [held["grant_id"]]
+
+    asyncio.run(run())
+
+
+def test_a_waiter_whose_client_left_leaves_the_queue(tmp_path, monkeypatch):
+    monkeypatch.setattr(window_mod, "GONE_POLL", 0.05)
+
+    async def run():
+        w = _make(tmp_path)
+        first = await w.acquire("sweep", session="a", pid=os.getpid())
+        left = {"gone": False}
+        waiter = asyncio.create_task(w.acquire(
+            "sweep", session="b", pid=os.getpid(), wait=30,
+            gone=lambda: left["gone"]))
+        await asyncio.sleep(0.1)
+        assert len(w.status()["queue"]) == 1
+        left["gone"] = True
+        assert await asyncio.wait_for(waiter, 2) == {
+            "granted": False, "disconnected": True}
+        assert w.status()["queue"] == []
+        # and the window, once released, goes to nobody
+        assert w.release(first["grant_id"])
+        assert w.status()["holders"] == []
+        assert [r["end"] for r in w.history()["entries"]].count("disconnected") == 1
+
+    asyncio.run(run())
+
+
+def test_a_grant_made_as_its_client_left_is_handed_back(tmp_path):
+    async def run():
+        w = _make(tmp_path)
+        first = await w.acquire("sweep", session="a", pid=os.getpid())
+        left = {"gone": False}
+        waiter = asyncio.create_task(w.acquire(
+            "sweep", session="b", pid=os.getpid(), wait=30,
+            gone=lambda: left["gone"]))
+        await asyncio.sleep(0.05)
+        left["gone"] = True
+        w.release(first["grant_id"])          # grants b in the same turn
+        assert (await waiter) == {"granted": False, "disconnected": True}
+        assert w.status()["holders"] == []
+
+    asyncio.run(run())
+
+
+def test_waiters_left_by_a_previous_daemon_are_dropped_and_holders_kept(tmp_path):
+    async def run():
+        w = _make(tmp_path)
+        held = await w.acquire("sweep", session="a", pid=os.getpid())
+        waiter = asyncio.create_task(
+            w.acquire("sweep", session="b", pid=os.getpid(), wait=30))
+        await asyncio.sleep(0.05)
+        assert len(w.status()["queue"]) == 1
+        w2 = _make(tmp_path)                  # the next daemon process
+        status = w2.status()
+        assert status["queue"] == []
+        assert [h["grant_id"] for h in status["holders"]] == [held["grant_id"]]
+        assert "disconnected" in [r["end"] for r in w2.history()["entries"]]
+        # releasing the holder grants nobody
+        assert w2.release(held["grant_id"]) and w2.status()["holders"] == []
+        waiter.cancel()
+
+    asyncio.run(run())
+
+
+def test_the_api_drops_a_long_poll_whose_client_hung_up(home, tmp_path, monkeypatch):
+    """End to end over a real socket, served the way the daemon serves
+    (``daemon/__main__``: ``web.AppRunner`` with aiohttp's default
+    ``handler_cancellation=False``). aiohttp's ``TestServer`` turns handler
+    cancellation ON, which is why the cancelled-long-poll path looked covered
+    while the daemon never took it: the queue entry stayed and was later
+    granted to nobody."""
+    from aiohttp import web
+
+    from claude_launcher.daemon.api import build_app
+    from claude_launcher.daemon.manager import SessionManager
+
+    monkeypatch.setattr(window_mod, "GONE_POLL", 0.05)
+
+    async def run():
+        manager = SessionManager(idle_threshold=0.5, scrollback=100, restore_default=False)
+        window = _make(tmp_path)
+        runner = web.AppRunner(build_app(
+            manager, "secret", started_at=time.monotonic(), window=window),
+            access_log=None)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0, shutdown_timeout=1.0)
+        await site.start()
+        host, port = site._server.sockets[0].getsockname()[:2]
+        try:
+            held = await window.acquire("sweep", session=None, pid=os.getpid())
+            body = json.dumps({"class": "sweep", "pid": os.getpid(), "wait": 60,
+                               "bound": True}).encode()
+            reader, writer = await asyncio.open_connection(host, port)
+            writer.write(
+                b"POST /api/window/acquire HTTP/1.1\r\nHost: x\r\n"
+                b"Authorization: Bearer secret\r\nContent-Type: application/json\r\n"
+                + f"Content-Length: {len(body)}\r\n\r\n".encode() + body)
+            await writer.drain()
+            for _ in range(50):
+                if window.status()["queue"]:
+                    break
+                await asyncio.sleep(0.02)
+            queued = window.status()["queue"][0]
+            writer.close()
+            for _ in range(100):
+                if not window.status()["queue"]:
+                    break
+                await asyncio.sleep(0.02)
+            assert window.status()["queue"] == []
+            window.release(held["grant_id"])
+            assert window.status()["holders"] == []
+            # a loopback test_window client's grant is bound to its pid
+            assert queued.get("bound") is True
+        finally:
+            await runner.cleanup()
+            await manager.shutdown_all()
+
+    # bounded: without the fix the handler outlives the client and the server
+    # close waits on it for the whole 60s long-poll
+    asyncio.run(asyncio.wait_for(run(), 15))

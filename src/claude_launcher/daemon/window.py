@@ -151,6 +151,13 @@ MAX_WAIT = 1800.0
 REMINDER_INTERVAL = 180.0
 REMINDER_POLL = 15.0
 
+#: How often a queued long-poll checks that its client is still connected
+#: (claunch-zawnr). aiohttp does not cancel a handler whose client went away,
+#: so without this a waiter killed mid-wait stayed queued, was granted later
+#: with nobody to receive the grant id, and as a session's one targeted grant
+#: blocked that session until someone released it by hand.
+GONE_POLL = 1.0
+
 _STATE_VERSION = 1
 
 #: How long the run history is kept. Stated to the user in the CLI help, the
@@ -306,6 +313,7 @@ class WindowManager:
         self._history_pruned_at = 0.0
         self._load()
         self._load_history()
+        self._drop_restored_queue()
 
     # ---- configuration --------------------------------------------------- #
 
@@ -377,6 +385,25 @@ class WindowManager:
             return
         self._holders = list(doc.get("holders") or [])
         self._queue = list(doc.get("queue") or [])
+
+    def _drop_restored_queue(self) -> None:
+        """Forget the waiters a previous daemon process left on disk.
+
+        A queued request is a long-poll on a connection, and no connection
+        outlives the process that accepted it: the client was answered with a
+        connection error and moved on (``test_window`` falls back to its file
+        locks). An entry restored here has nobody behind it, and granting it
+        later recorded a holder no one would release (claunch-zawnr).
+        Holders are kept -- a grant outlives its request by design.
+        """
+        if not self._queue:
+            return
+        for entry in self._queue:
+            self._record(entry, "disconnected")
+        log.info("window: dropped %d waiter(s) left by the previous daemon",
+                 len(self._queue))
+        self._queue = []
+        self._save()
 
     def _save(self) -> None:
         doc = {
@@ -563,7 +590,19 @@ class WindowManager:
 
     def _dead(self, entry: dict) -> bool:
         """A holder/waiter nobody is behind: dead session, or a sessionless
-        (manual) entry whose pid is gone."""
+        (manual) entry whose pid is gone.
+
+        A *bound* entry (``bound``: the requesting process holds the grant
+        for its own lifetime -- a pytest run through ``test_window``) is dead
+        when that pid is, whether or not its session lives on: a run killed
+        by a shell ``timeout`` or a daemon restart otherwise left its grant
+        held under a live session (claunch-zawnr). A grant taken with
+        ``claunch window acquire`` is not bound -- that process exits at once
+        and the session releases the grant later.
+        """
+        if entry.get("bound") and (entry.get("pid") or 0) > 0:
+            if not pid_alive(int(entry["pid"])):
+                return True
         session = entry.get("session")
         if session:
             return self._session_gone(session)
@@ -708,8 +747,16 @@ class WindowManager:
         wait: float = 0.0,
         workers: int = 0,
         force: bool = False,
+        bound: bool = False,
+        gone: Optional[Callable[[], bool]] = None,
     ) -> dict:
         """Grant the window, or queue for it up to ``wait`` seconds.
+
+        ``bound`` marks a grant held for the requesting pid's lifetime
+        (:meth:`_dead`). ``gone`` reports that the long-poll's client has
+        disconnected; a queued request whose client is gone leaves the queue,
+        and a grant made just as it left is released again, instead of being
+        held for nobody (claunch-zawnr).
 
         A ``wait`` of 0 asks without queueing and jumps nobody: with a
         non-empty queue the answer is ``granted: False`` even into a grantable
@@ -740,6 +787,8 @@ class WindowManager:
             "enqueued_at": _utcnow(),
             "priority": 0,
         }
+        if bound:
+            entry["bound"] = True
         if workers:
             entry["requested"] = max(1, int(workers))
         if force:
@@ -780,8 +829,24 @@ class WindowManager:
         # (another session's per-session limit); the queue decides, in order.
         self._process_queue()
         self._save()
+        deadline = time.monotonic() + min(wait, MAX_WAIT)
         try:
-            await asyncio.wait_for(event.wait(), timeout=min(wait, MAX_WAIT))
+            while not event.is_set():
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    raise asyncio.TimeoutError
+                try:
+                    await asyncio.wait_for(
+                        event.wait(),
+                        timeout=min(left, GONE_POLL) if gone else left,
+                    )
+                except asyncio.TimeoutError:
+                    if gone is not None and gone() and not event.is_set():
+                        if entry in self._queue:
+                            self._queue.remove(entry)
+                            self._record(entry, "disconnected")
+                            self._save()
+                        return {"granted": False, "disconnected": True}
         except asyncio.TimeoutError:
             if entry in self._queue:
                 self._queue.remove(entry)
@@ -805,6 +870,13 @@ class WindowManager:
         holder = next(
             (h for h in self._holders if h["grant_id"] == entry["grant_id"]), {}
         )
+        if gone is not None and gone() and holder:
+            # Granted while its client was leaving: nobody will read the id.
+            self._holders.remove(holder)
+            self._record(holder, "disconnected")
+            self._process_queue()
+            self._save()
+            return {"granted": False, "disconnected": True}
         result = {
             "granted": True,
             "grant_id": entry["grant_id"],
