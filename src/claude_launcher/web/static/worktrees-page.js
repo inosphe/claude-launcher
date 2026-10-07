@@ -191,6 +191,53 @@ globalThis.WorktreesPage = (() => {
     return a;
   }
 
+  function changesPanel(w) {
+    const panel = node("details", "wt-changes");
+    const summary = node("summary", null, "커밋되지 않은 파일");
+    const content = node("div", "wt-changes-content");
+    const refresh = node("button", "wf-btn", "새로 고침");
+    refresh.type = "button";
+    let pending = false, loaded = false;
+    async function read() {
+      if (pending) return;
+      pending = true; refresh.disabled = true;
+      content.replaceChildren(node("p", "wt-muted", "읽는 중…"));
+      try {
+        const response = await api(`/api/worktrees/changes?path=${encodeURIComponent(w.path)}`);
+        const body = await response.json();
+        if (!response.ok) throw Error(body.error || `HTTP ${response.status}`);
+        const files = body.files || [];
+        summary.textContent = `커밋되지 않은 파일 · ${files.length}개`;
+        content.replaceChildren();
+        if (!files.length) content.appendChild(node("p", "wt-muted", "커밋되지 않은 파일이 없습니다."));
+        else {
+          content.appendChild(node("p", "wt-muted",
+            "상태: 첫째 칸은 스테이징, 둘째 칸은 작업 폴더 · M 수정, A 추가, D 삭제, R 이름 변경, C 복사, U 충돌, ? 미추적"));
+          const list = node("ul", "wt-change-list");
+          for (const file of files) {
+            const row = node("li");
+            row.appendChild(node("code", "wt-change-status", file.status));
+            row.appendChild(node("span", "wt-change-path", file.original_path != null
+              ? `${file.original_path} → ${file.path}` : file.path));
+            list.appendChild(row);
+          }
+          content.appendChild(list);
+        }
+        loaded = true;
+      } catch (exc) {
+        loaded = false;
+        summary.textContent = "커밋되지 않은 파일 · 조회 실패";
+        content.replaceChildren(node("p", "wt-error", `읽기 실패: ${exc.message || exc}`));
+      } finally {
+        pending = false; refresh.disabled = false;
+      }
+    }
+    panel.ontoggle = () => { if (panel.open && !loaded) return read(); };
+    refresh.onclick = read;
+    panel.append(summary, content, refresh);
+    return panel;
+  }
+
   function card(w) {
     const box = node("div", `wt-card ${w.state}`);
     const top = node("div", "wt-card-top");
@@ -221,6 +268,7 @@ globalThis.WorktreesPage = (() => {
     if ((w.sessions || []).length) for (const s of w.sessions) sessions.appendChild(sessionRow(s));
     else sessions.appendChild(node("span", "wt-muted", "연결된 세션 없음"));
     box.appendChild(sessions);
+    box.appendChild(changesPanel(w));
     const actions = node("div", "wt-actions");
     const del = node("button", "wf-btn wt-danger",
       w.state === "active" ? "archive + 삭제" : "삭제");
@@ -322,5 +370,5 @@ globalThis.WorktreesPage = (() => {
 
   function stop() { sequence++; loading = false; }
 
-  return { open, stop, bucketOf, mergeLabel };
+  return { open, stop, bucketOf, mergeLabel, changesPanel };
 })();

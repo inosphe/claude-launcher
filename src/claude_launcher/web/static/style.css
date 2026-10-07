@@ -5351,6 +5351,12 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
   color: #c9d1d9; background: #161b22; border: 1px solid #30363d; border-radius: 4px; padding: 1px 6px; }
 .wt-session:hover { border-color: #58a6ff; }
 .wt-actions { display: flex; justify-content: flex-end; }
+.wt-changes { margin: 8px 0; font-size: 12px; }
+.wt-changes summary { cursor: pointer; }
+.wt-change-list { list-style: none; margin: 8px 0; padding: 0; max-height: 280px; overflow: auto; }
+.wt-change-list li { display: flex; gap: 10px; padding: 3px 0; }
+.wt-change-status { white-space: pre; flex: 0 0 2ch; }
+.wt-change-path { white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; }
 .wt-actions .wf-btn { margin-right: 0; padding: 4px 12px; }
 .wf-btn.wt-danger { background: #3a2422; color: #ffa198; }
 .wf-btn.wt-danger:hover:not(:disabled) { background: #5c2a28; }

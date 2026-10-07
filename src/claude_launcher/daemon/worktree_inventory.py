@@ -300,6 +300,29 @@ def find(roots: Iterable[str], path: str) -> Optional[Tuple[str, dict]]:
     return index(roots).get(_key(path))
 
 
+def changes(path: str) -> List[dict]:
+    """Uncommitted files, including individual untracked files, read on demand.
+
+    NUL delimiters preserve spaces, Unicode and newlines in paths. In v1 -z
+    rename/copy records the destination precedes the original path.
+    """
+    done = _git(["--no-optional-locks", "status", "--porcelain=v1", "-z",
+                 "--untracked-files=all", "--ignore-submodules=none"], cwd=path)
+    if done.returncode:
+        raise worktree_mod.WorktreeError((done.stderr or "git status failed").strip())
+    records = iter(done.stdout.split("\0"))
+    files = []
+    for record in records:
+        if not record:
+            continue
+        status = record[:2]
+        item = {"path": record[3:], "status": status}
+        if "R" in status or "C" in status:
+            item["original_path"] = next(records)
+        files.append(item)
+    return files
+
+
 def path_key(path: str) -> str:
     """The form two spellings of one path compare equal in."""
     return _key(path)
