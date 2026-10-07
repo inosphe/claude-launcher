@@ -27587,14 +27587,14 @@ function sessPerms(data) {
    the daemon stops the session, re-files its conversation under the target
    directory's slug, and relaunches it there — same name, same conversation,
    same mesh memberships. The picker offers the checkouts that make sense
-   from where the session stands: its repository's existing worktrees, or a
-   new one cut on the spot. Directories outside the repository stay a CLI
-   affair (`--to DIR`), the same way free-text paths are kept out of the
-   create form. */
+   from where the session stands: the repository's original checkout, its
+   existing worktrees, or a new one cut on the spot. Directories outside the
+   repository stay a CLI affair (`--to DIR`), the same way free-text paths
+   are kept out of the create form. */
 function sessMigrate(data) {
   const s = data.session || {};
   const box = el("div", "sess-migrate");
-  box.appendChild(el("h3", null, "Move to worktree"));
+  box.appendChild(el("h3", null, "Move to checkout"));
 
   // Rebuilt only when the session or its directory changes — the 2s poll
   // must not wipe a picked destination, and after a successful move the cwd
@@ -27638,6 +27638,7 @@ function sessMigrate(data) {
     status.className = cls || "wf-note";
     status.textContent = msg;
   };
+  let root = ""; // the repository's own checkout, once the daemon has said
 
   // The choices are the daemon's answer, not a guess: which worktrees
   // already stand beside this session's checkout, and whether there is a
@@ -27662,17 +27663,26 @@ function sessMigrate(data) {
       return;
     }
     dest.innerHTML = "";
-    for (const w of info.worktrees || []) {
+    root = info.root;
+    // The repository's own checkout first: a session in a worktree has no
+    // other way back to it from here. Whichever checkout the session already
+    // stands in is shown but cannot be picked — moving there is no move.
+    const here = worktreePathKey(s.cwd);
+    const paths = info.paths || {};
+    const offer = (value, label, path) => {
       const opt = document.createElement("option");
-      opt.value = `wt:${w}`;
-      opt.textContent = `worktree: ${w}`;
+      opt.value = value;
+      const current = worktreePathKey(path) === here;
+      opt.textContent = current ? `${label} (here)` : label;
+      opt.disabled = current;
       dest.appendChild(opt);
+    };
+    offer("root", `original: ${info.root}`, info.root);
+    for (const w of info.worktrees || []) {
+      offer(`wt:${w}`, `worktree: ${w}`, paths[w]);
     }
-    const fresh = document.createElement("option");
-    fresh.value = "new";
-    fresh.textContent = "new worktree…";
-    dest.appendChild(fresh);
-    if (!(info.worktrees || []).length) dest.value = "new";
+    offer("new", "new worktree…", "");
+    dest.value = [...dest.options].find((o) => !o.disabled).value;
     const sync = () =>
       nameIn.classList.toggle("hidden", dest.value !== "new");
     dest.addEventListener("change", sync);
@@ -27684,7 +27694,11 @@ function sessMigrate(data) {
   moveBtn.addEventListener("click", async () => {
     if (moveBtn.disabled) return;
     const name = s.name;
-    const wt = dest.value === "new" ? nameIn.value.trim() : dest.value.slice(3);
+    // The original checkout is a directory, not a launcher worktree, so it
+    // goes as 'cwd' — 'worktree' would cut a new one under .claude/worktrees.
+    const target = dest.value === "root"
+      ? { cwd: root }
+      : { worktree: dest.value === "new" ? nameIn.value.trim() : dest.value.slice(3) };
     moveBtn.disabled = true;
     say("migrating… (stopping it, moving its transcript, relaunching)");
     let doc = {};
@@ -27693,7 +27707,7 @@ function sessMigrate(data) {
       resp = await api(`/api/sessions/${encodeURIComponent(name)}/migrate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ worktree: wt, children: kidsBox.checked }),
+        body: JSON.stringify({ ...target, children: kidsBox.checked }),
       });
       doc = await resp.json().catch(() => ({}));
     } catch {
