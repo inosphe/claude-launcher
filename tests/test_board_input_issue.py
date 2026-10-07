@@ -69,49 +69,45 @@ def proj(home, tmp_path, monkeypatch):
     return d
 
 
-class FakeBoard:
-    """``ensure_issue`` with the decision shape of the real one: a named
-    issue (``body["issue"]``) is taken, a task with no name is minted, a
-    "no issue" answer is nothing. Records every body it was handed."""
+def _real_board(proj, *, board=True):
+    """The real Board on an in-memory ``br`` (test_beads_daemon.FakeBr), with
+    two issues on it. ``board=False`` is a directory with no board."""
+    from test_beads_daemon import FakeBr
 
-    def __init__(self):
-        self.bodies = []
-
-    async def ensure_issue(self, session, *, body, parent=None, manager=None):
-        self.bodies.append(dict(body))
-        if beads_mod.none_mode(body):
-            return None
-        named = str(body.get("issue") or "").strip()
-        if named:
-            return {"issue": named, "created": False, "mode": beads_mod.TAKE,
-                    "held_by": None, "why": "named"}
-        if str(body.get("task") or "").strip():
-            return {"issue": "claunch-minted", "created": True,
-                    "mode": beads_mod.MINTED, "held_by": None, "why": "task"}
-        return None
-
-    def __getattr__(self, name):  # anything else the app asks of the board
-        async def nothing(*a, **k):
-            return None
-        return nothing
+    br = FakeBr()
+    br.add(id="claunch-held", title="held")
+    br.add(id="claunch-typed", title="typed")
+    if board:
+        (proj / ".beads").mkdir(exist_ok=True)
+        (proj / ".beads" / "beads.db").write_bytes(b"")
+    return br, beads_mod.Board(br, root_for=lambda cwd: proj if board else None)
 
 
-def _create(proj, body):
+def _create(proj, body, *, board=True, spawn_from=None):
     from aiohttp.test_utils import TestClient, TestServer
 
     async def run():
         mgr = SessionManager(idle_threshold=0.5, scrollback=50, restore_default=True)
         app = api_mod.build_app(mgr, "sekrit", started_at=time.monotonic())
-        board = FakeBoard()
-        app["beads"] = board
+        br, real = _real_board(proj, board=board)
+        app["beads"] = real
         client = TestClient(TestServer(app))
         await client.start_server()
         try:
-            resp = await client.post("/api/sessions", headers=BEARER, json={
-                "name": "w1", "profile": "py", "cwd": str(proj), **body})
+            url, payload = "/api/sessions", {"name": "w1", "profile": "py",
+                                             "cwd": str(proj), **body}
+            if spawn_from:
+                resp = await client.post("/api/sessions", headers=BEARER, json={
+                    "name": spawn_from, "profile": "py", "cwd": str(proj),
+                    "beads": False})
+                assert resp.status == 201, await resp.json()
+                url = f"/api/sessions/{spawn_from}/children"
+                payload = {"name": "w1", **body}
+            resp = await client.post(url, headers=BEARER, json=payload)
             doc = await resp.json()
             names = [s.sdef.name for s in mgr.list()]
-            return resp.status, doc, board.bodies, names
+            creates = [c for c in br.calls if "create" in c]
+            return resp.status, doc, creates, names
         finally:
             await mgr.shutdown_all()
             await client.close()
@@ -124,83 +120,136 @@ def _run_inputs(proj):
     return (chart.get("data") or {}).get("inputs")
 
 
+V2 = {"workflow": "takes-issue", "workflow_version": 2}
+
+
 def test_a_minted_issue_is_the_runs_input(proj):          # (a) Board new
-    status, doc, bodies, _ = _create(proj, {
-        "task": "do it", "workflow": "takes-issue", "workflow_version": 2})
+    status, doc, creates, _ = _create(proj, {"task": "do it", **V2})
     assert status == 201, doc
     assert doc["workflow"]["ok"] is True, doc
-    assert _run_inputs(proj)["issue"] == "claunch-minted"
+    assert doc["beads"]["created"] is True and len(creates) == 1
+    assert _run_inputs(proj)["issue"] == doc["beads"]["issue"]
 
 
 def test_the_board_issue_overwrites_the_input(proj):      # (b) Board existing
-    status, doc, bodies, _ = _create(proj, {
-        "task": "do it", "issue": "claunch-held", "workflow": "takes-issue",
-        "workflow_version": 2})
+    status, doc, creates, _ = _create(proj, {"task": "do it", "issue": "claunch-held", **V2})
     assert status == 201, doc
+    assert creates == []
     assert _run_inputs(proj)["issue"] == "claunch-held"
 
 
 def test_an_input_with_no_board_answer_is_adopted_not_minted(proj):  # (c)
-    status, doc, bodies, _ = _create(proj, {
-        "task": "do it", "workflow": "takes-issue", "workflow_version": 2,
-        "cflow_inputs": {"issue": "claunch-typed"}})
+    status, doc, creates, _ = _create(proj, {
+        "task": "do it", **V2, "cflow_inputs": {"issue": "claunch-typed"}})
     assert status == 201, doc
-    assert bodies[0]["issue"] == "claunch-typed"   # the board saw it as named
-    assert doc["beads"]["mode"] == beads_mod.TAKE and doc["beads"]["created"] is False
+    assert creates == []                                  # nothing minted
+    assert doc["beads"]["issue"] == "claunch-typed"
+    assert doc["beads"]["mode"] == beads_mod.TAKE
     assert _run_inputs(proj)["issue"] == "claunch-typed"
 
 
 @pytest.mark.parametrize("board, match", [
-    ({"issue": "claunch-other"}, "adopts 'claunch-other'"),
+    ({"issue": "claunch-held"}, "adopts 'claunch-held'"),
     ({"beads": False}, "asks for none"),
     ({"beads": "none-auto"}, "asks for none"),
     ({"issue_text": "write a new one"}, "issue_text"),
-    ({"task": "do it\nissue: claunch-other"}, "names issue 'claunch-other'"),
+    ({"task": "do it\nissue: claunch-held"}, "names issue 'claunch-held'"),
 ])
 def test_an_input_that_contradicts_the_board_is_refused(proj, board, match):  # (d)
-    body = {"task": "do it", "workflow": "takes-issue", "workflow_version": 2,
-            "cflow_inputs": {"issue": "claunch-typed"}, **board}
-    status, doc, bodies, names = _create(proj, body)
+    body = {"task": "do it", **V2, "cflow_inputs": {"issue": "claunch-typed"}, **board}
+    status, doc, creates, names = _create(proj, body)
     assert status == 400, doc
     assert match in doc["error"]
-    assert bodies == [] and names == []   # refused before the board or a session
+    assert creates == [] and names == []   # refused before the board or a session
 
 
 def test_the_same_issue_twice_is_not_a_contradiction(proj):
     status, doc, _, _ = _create(proj, {
-        "task": "do it", "issue": "claunch-typed", "workflow": "takes-issue",
-        "workflow_version": 2, "cflow_inputs": {"issue": "claunch-typed"}})
+        "task": "do it", "issue": "claunch-typed", **V2,
+        "cflow_inputs": {"issue": "claunch-typed"}})
     assert status == 201, doc
     assert _run_inputs(proj)["issue"] == "claunch-typed"
 
 
 @pytest.mark.parametrize("none", [False, "none-auto"])
 def test_no_issue_leaves_the_input_empty(proj, none):     # (e)
-    status, doc, _, _ = _create(proj, {
-        "task": "do it", "beads": none, "workflow": "takes-issue",
-        "workflow_version": 2})
+    status, doc, _, _ = _create(proj, {"task": "do it", "beads": none, **V2})
     assert status == 201, doc
     assert _run_inputs(proj)["issue"] == ""
 
 
-def test_an_issue_that_could_not_be_settled_leaves_the_input_empty(proj):
-    # no task, no name: the board settles nothing, and the run must not keep
-    # a value the board did not stand behind
-    status, doc, _, _ = _create(proj, {"workflow": "takes-issue", "workflow_version": 2})
+def test_nothing_to_settle_leaves_the_input_empty(proj):
+    status, doc, _, _ = _create(proj, dict(V2))
     assert status == 201, doc
     assert _run_inputs(proj)["issue"] == ""
 
 
 def test_v1_no_workflow_and_no_issue_input_are_unchanged(proj):  # (f)
     for extra in ({"workflow": "old"}, {}):
-        status, doc, bodies, _ = _create(proj, {"task": "do it", **extra})
+        status, doc, creates, _ = _create(proj, {"task": "do it", **extra})
         assert status == 201, doc
-        assert "issue" not in bodies[0]
-    status, doc, bodies, _ = _create(proj, {
+        assert doc["beads"]["created"] is True and len(creates) == 1
+    status, doc, _, _ = _create(proj, {
         "task": "do it", "workflow": "no-issue-input", "workflow_version": 2})
     assert status == 201, doc
-    assert "issue" not in bodies[0]
     assert "issue" not in _run_inputs(proj)
+
+
+# --- W1: a named id the board does not hold is refused, by every path ------
+
+
+@pytest.mark.parametrize("body", [
+    pytest.param({"task": "do it", **V2, "cflow_inputs": {"issue": "claunch-typo"}},
+                 id="v2-input"),
+    pytest.param({"task": "do it", "issue": "claunch-typo"}, id="board-pick-or-cli"),
+    pytest.param({"task": "do it\nissue: claunch-typo"}, id="task-reference"),
+])
+def test_a_named_issue_not_on_the_board_is_refused(proj, body):
+    status, doc, creates, names = _create(proj, body)
+    assert status == 400, doc
+    assert "'claunch-typo' is not on the board at" in doc["error"]
+    assert str(proj) in doc["error"]
+    assert creates == [] and names == []
+
+
+def test_a_spawn_naming_an_issue_not_on_the_board_is_refused(proj):
+    # `claunch spawn --issue` and MCP spawn reach the daemon here
+    status, doc, creates, names = _create(
+        proj, {"task": "do it", "issue": "claunch-typo"}, spawn_from="lead")
+    assert status == 400, doc
+    assert "'claunch-typo' is not on the board" in doc["error"]
+    assert "w1" not in names and creates == []
+
+
+@pytest.mark.parametrize("how", ["no-board", "auto-off"])
+def test_a_board_that_cannot_be_asked_starts_the_session_and_says_so(
+        proj, how, monkeypatch):
+    from claude_launcher.daemon import harness as harness_mod
+
+    openings = {}
+    real = harness_mod.build_command
+
+    def spy(sdef, **kw):
+        openings[sdef.name] = kw.get("opening", "")
+        return real(sdef, **kw)
+
+    monkeypatch.setattr(harness_mod, "build_command", spy)
+    if how == "auto-off":
+        store.update(lambda doc: doc.setdefault("daemon", {}).update(
+            {"beads_auto_issue": False}))
+    status, doc, _, names = _create(
+        proj, {"task": "do it", **V2, "cflow_inputs": {"issue": "claunch-typed"}},
+        board=(how != "no-board"))
+    assert status == 201, doc
+    assert "w1" in names
+    beads = doc["beads"]
+    assert beads["issue"] is None and beads["settled"] is False
+    assert beads["input_issue"] == "claunch-typed"
+    assert ("no board" in beads["why"]) if how == "no-board" \
+        else ("beads_auto_issue is off" in beads["why"])
+    assert _run_inputs(proj)["issue"] == ""
+    assert "Issue claunch-typed was named for this session but is not linked" \
+        in openings["w1"]
 
 
 def test_adopt_input_issue_rules():

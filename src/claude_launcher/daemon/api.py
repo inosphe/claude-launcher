@@ -6787,9 +6787,20 @@ async def _onboard_and_launch(
     # workflows tell it to read (`claunch beads show <id> --json`). Never a
     # reason to refuse the session: a board that cannot be written is logged
     # and the session starts without one.
-    linked = await request.app["beads"].ensure_issue(
-        session, body=body, parent=parent, manager=manager
-    )
+    #
+    # The one exception (claunch-z7b0n, W1): a request that names an issue the
+    # board was read and does not hold is refused like any other bad request
+    # -- whichever way the id came (the Board pick, --issue, an `issue: <id>`
+    # in the task, a v2 input folded in above). A board that cannot be read is
+    # still no reason to refuse; that is reported in `unsettled` below.
+    unsettled: dict = {}
+    try:
+        linked = await request.app["beads"].ensure_issue(
+            session, body=body, parent=parent, manager=manager, unsettled=unsettled
+        )
+    except beads_mod.IssueNotOnBoard as exc:
+        manager.discard(name)
+        raise onboard.OnboardError(str(exc)) from None
     report: dict = {}
     if linked:
         beads_mod.link_issue(session, linked["issue"])
@@ -6833,7 +6844,20 @@ async def _onboard_and_launch(
         # board -- and a session that never receives it does the opposite of
         # what was asked.
         none = beads_mod.none_mode(body)
-        if none and (plan.wanted or none == beads_mod.NONE_AUTO):
+        if unsettled:
+            # The request named an issue and the board could not be asked:
+            # the session starts without it, and both the caller and the
+            # session are told which id and why, so the next step is theirs.
+            report["beads"] = {"issue": None, "input_issue": unsettled["issue"],
+                               "settled": False, "why": unsettled["why"]}
+            plan = replace(
+                plan,
+                task=(plan.task + "\n\n" if plan.task else "")
+                + f"[board] Issue {unsettled['issue']} was named for this "
+                  f"session but is not linked: {unsettled['why']}. Link it "
+                  "once the board is reachable, or ask whoever started you.",
+            )
+        elif none and (plan.wanted or none == beads_mod.NONE_AUTO):
             report["beads"] = {"issue": None, "mode": none}
             plan = replace(
                 plan,

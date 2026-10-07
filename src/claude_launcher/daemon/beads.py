@@ -789,6 +789,27 @@ class BoardRequestError(ValueError):
     """A creation request whose board answer contradicts itself."""
 
 
+class IssueNotOnBoard(BoardRequestError):
+    """A creation request named an issue the board says does not exist.
+
+    Raised by :meth:`Board.ensure_issue` only when the board was read and the
+    id is not on it -- a typo, or an issue of another board. A request that
+    names its issue and starts a session with none is the silent half of the
+    failure the rest of this module refuses (claunch-z7b0n, W1): the operator
+    sees a session start and never learns it is not on the issue they gave.
+    A board that cannot be read at all is not this error -- that session
+    still starts, with the reason reported beside it.
+    """
+
+    def __init__(self, issue: str, board: str):
+        self.issue = issue
+        self.board = board
+        super().__init__(
+            f"issue {issue!r} is not on the board at {board} — check the id, "
+            "or create the session in the directory whose board holds it"
+        )
+
+
 def check_request(body: dict) -> None:
     """Refuse a creation request that asks for two board answers at once.
 
@@ -2390,7 +2411,8 @@ class Board:
         return running
 
     async def ensure_issue(
-        self, session, *, body: dict, parent: Optional[str], manager=None
+        self, session, *, body: dict, parent: Optional[str], manager=None,
+        unsettled: Optional[dict] = None,
     ) -> Optional[dict]:
         """Give a new session its issue: adopt the one the request names, or
         mint one from its task. ``None`` when there is nothing to do -- no task
@@ -2414,14 +2436,19 @@ class Board:
         instruction writes both. With the box empty it falls back to the task,
         which is what every caller that predates the field still gets.
 
-        Never raises: a board that cannot be written must not cost a session
-        its launch. Returns ``{"issue": id, "created": bool, "mode": ...,
+        A board that cannot be read or written must not cost a session its
+        launch: that is ``None``, and when the request named an issue,
+        ``unsettled`` (if given) is filled with ``{"issue": id, "why": ...}``
+        so the caller can say so. The one refusal is a named issue the board
+        was read and does not hold: :class:`IssueNotOnBoard` (claunch-z7b0n,
+        W1 -- a typo must not start a session silently without its issue).
+        Returns ``{"issue": id, "created": bool, "mode": ...,
         "held_by": name|None, "from_issue_text": bool, "why": str}`` on
         success, where ``mode`` is one of :data:`MINTED`, :data:`TAKE`,
         :data:`JOIN` (``from_issue_text`` only on a mint).
         """
         cfg = store.daemon_config()
-        if not cfg.get("beads_auto_issue", True) or none_mode(body):
+        if none_mode(body):
             return None
         sdef = session.sdef
         task = str(body.get("task") or sdef.task or "")
@@ -2431,6 +2458,17 @@ class Board:
         refs = ([explicit] if explicit else []) + [
             r for r in issue_refs(task, context) if r != explicit
         ]
+
+        def not_settled(why: str) -> None:
+            # A named issue the board could not be asked about: the session
+            # still starts (a board that cannot be written is never a reason
+            # to refuse one), and the caller is told which id and why.
+            if refs and unsettled is not None:
+                unsettled.update({"issue": refs[0], "why": why})
+            return None
+
+        if not cfg.get("beads_auto_issue", True):
+            return not_settled("the daemon's beads_auto_issue is off")
         # Written text is a reason to mint on its own: "no task" no longer
         # means "nothing to write down" now that the two are separate boxes,
         # and a session created with only an issue text must still get its
@@ -2438,13 +2476,13 @@ class Board:
         if not refs and not task.strip() and not written:
             return None
         if not self.available():
-            return None
+            return not_settled("br is not available to the daemon")
         try:
             root = await self.root_for(sdef.cwd)
-        except Exception:
-            return None
+        except Exception as exc:  # noqa: BLE001 - reported, never raised
+            return not_settled(f"no board could be found for {sdef.cwd}: {exc}")
         if not self.has_board(root):
-            return None
+            return not_settled(f"there is no board at {root}")
         name = sdef.name
         try:
             if refs:
@@ -2453,7 +2491,7 @@ class Board:
                 current = next((r for r in rows if r.get("id") == iid), None)
                 if current is None:
                     log.info("session %r names issue %r that is not on the board", name, iid)
-                    return None
+                    raise IssueNotOnBoard(iid, str(root))
                 verdict = adoption(
                     current, session=name, running=self._running(manager)
                 )
@@ -2519,7 +2557,7 @@ class Board:
             }
         except cli_beads.BeadsError as exc:
             log.warning("beads: could not register an issue for %r: %s", name, exc)
-            return None
+            return not_settled(f"the board could not be read or written: {exc}")
 
     async def candidates(self, cwd: str, manager=None) -> dict:
         """The issues a creation form may offer for ``cwd``'s board.
