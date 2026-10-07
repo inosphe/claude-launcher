@@ -7983,7 +7983,7 @@ async function refreshCflow() {
 function cflowSessionCategory(run, sessions) {
   const session = (sessions || []).find((s) => s.name === run.scope);
   if (session) return sessionCategory(session);
-  return (run.sessions || []).includes(run.scope) ? "running" : "unknown";
+  return "unknown";
 }
 
 function filterCflowRuns(runs, sessions, filter, query) {
@@ -8004,7 +8004,7 @@ function renderCflowRuns(runs = cflowCache) {
     filter.dataset.bound = "true";
     filter.addEventListener("change", async () => {
       // Archived records are fetched on demand by the shared session cache.
-      if (filter.value === "archived" || filter.value === "all") {
+      if (["archived", "all", "unknown"].includes(filter.value)) {
         await refreshSessions({ state: "all" });
       }
       renderCflowRuns();
@@ -24338,7 +24338,13 @@ function renderWfInto(view, data, ui) {
       `Current step: ${run.title || run.step_id}`);
     current.type = "button";
     current.title = "Inspect the current step's instructions and reports";
-    current.addEventListener("click", () => ui.select(run.step_id));
+    current.addEventListener("click", () => {
+      ui.select(run.step_id);
+      // Diagram enhancement finishes after rendering and can change its height.
+      requestAnimationFrame(() => {
+        view.querySelector(".wf-reports")?.scrollIntoView({ block: "start" });
+      });
+    });
     overview.appendChild(current);
   }
   overview.appendChild(el("span", "wf-note", `${run.steps_completed ?? 0} steps completed`));

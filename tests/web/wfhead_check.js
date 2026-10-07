@@ -79,6 +79,7 @@ function el(tag, cls, text) {
    diagram, the reports, the buttons and the boxes below them. Stubbed to
    their shapes so the head is what is left to check. */
 const stubs = `
+const requestAnimationFrame = (fn) => fn();
 let wfSelectedStep = null, wfCwd = null, wfScope = "default";
 let meshName = "", flowMesh = "", transcriptName = "", traceSession = "";
 let sessName = "", currentName = "", currentPage = "home";

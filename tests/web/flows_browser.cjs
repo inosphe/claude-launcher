@@ -49,7 +49,8 @@ const server = http.createServer((req, res) => {
     await page.waitForFunction(() => document.getElementById('flows-result-count').textContent === '2 of 5 runs');
     assert.deepEqual(await names(), ['improv-worker · running', 'improv-worker · paused']);
     assert.equal(await page.locator('.flows-settings').evaluate(e => e.open), false);
-    for (const state of ['paused', 'killed', 'archived', 'running', 'unknown']) {
+    // Unknown first: archived records have not been fetched by the rail yet.
+    for (const state of ['unknown', 'paused', 'killed', 'archived', 'running']) {
       await page.selectOption('#flows-session-filter', state);
       const expected = state === 'unknown' ? 'improv-worker' : `improv-worker · ${state}`;
       await page.waitForFunction(expected => {
@@ -76,6 +77,10 @@ const server = http.createServer((req, res) => {
     await page.locator('#wf-view .wf-current').click();
     await page.locator('#wf-view .wf-instructions').waitFor();
     assert.match(await page.locator('#wf-view .wf-instructions').textContent(), /Inspect the current task/);
+    await page.waitForFunction(() => {
+      const box = document.querySelector('#wf-view .wf-instructions').getBoundingClientRect();
+      return box.top >= 0 && box.bottom <= innerHeight;
+    });
     assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'detail mobile overflow');
     if (process.env.CLAUNCH_SCRATCH) await page.screenshot({ path: path.join(process.env.CLAUNCH_SCRATCH, 'flows-detail-mobile.png'), fullPage: true });
     await page.setViewportSize({ width: 1440, height: 900 });
