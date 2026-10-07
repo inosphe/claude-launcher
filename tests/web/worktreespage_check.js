@@ -29,6 +29,23 @@ assert.strictEqual(mergeLabel({ trunk: '', merged: null })[0], 'unknown');
 assert.strictEqual(mergeLabel({ trunk: 'master', merged: null })[0], 'unknown');
 console.log('ok');
 
+const worktrees = [
+  { name: 'mixed', state: 'active', sessions: [{ name: 'old', category: 'archived' }, { name: 'live', category: 'running' }] },
+  { name: 'killed', state: 'active', sessions: [{ name: 'dead', category: 'killed' }] },
+  { name: 'archived', state: 'orphaned', sessions: [{ name: 'old2', category: 'archived' }] },
+  { name: 'paused', state: 'active', sessions: [{ name: 'paused', category: 'paused' }] },
+  { name: 'empty', state: 'unlinked' },
+];
+const names = (filter, search) => Array.from(ctx.WorktreesPage.filterItems(worktrees, filter, search), w => w.name);
+assert.deepStrictEqual(names('archived'), ['mixed', 'archived']);
+assert.deepStrictEqual(names('killed'), ['killed']);
+assert.deepStrictEqual(names('active'), ['mixed', 'killed', 'paused']);
+assert.deepStrictEqual(names('orphaned'), ['archived']);
+assert.deepStrictEqual(names('unlinked'), ['empty']);
+assert.deepStrictEqual(names('archived', ' OLD2 '), ['archived']);
+assert.deepStrictEqual(names('killed', 'old'), []);
+assert.strictEqual(names('all').length, 5);
+
 // Exercise expansion, status rendering, refreshing and retry without HTML
 // interpretation of repository-controlled filenames.
 class Element {
