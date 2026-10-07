@@ -137,6 +137,19 @@ check("...and the name, the reuse pick and the rebase base stay out of it",
         .match(/worktree\w*/g)) || [],
       ["worktree_mode"]);
 
+// The daemon's own prompt is unticked on the form's row and answered as
+// daemon_prompt: false; the modal must neither grey the box nor drop the key
+// from either payload, or an untick silently gives the child the prompt.
+{
+  const config = new Function(`${slice("sessionFormConfig")}; return sessionFormConfig;`)();
+  for (const mode of ["new", "spawn"]) {
+    check(`the ${mode} payload carries daemon_prompt`,
+          config(mode).payload.includes("daemon_prompt"), true);
+    check(`the ${mode} form leaves the daemon prompt box editable`,
+          config(mode).editable.includes("daemon_prompt"), true);
+  }
+}
+
 /* ---- the rows one launch spends ----------------------------------------
    The form is one long-lived node and everything on it stands until somebody
    changes it, which is right for the answers that describe a TEAM and wrong

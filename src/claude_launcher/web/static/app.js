@@ -31581,13 +31581,14 @@ function sessionFormConfig(mode) {
     "resume", "fork", "skip_permissions", "codex_yolo", "codex_sandbox", "args",
     "worktree_mode", "worktree_name", "worktree_existing", "worktree_session",
     "worktree_rebase", "worktree_from", "task", "score_goal", "beads", "issue_text", "issue_filter", "issue", "pi_tool_*",
-    "subrole_*", "prompt_pack_*"];
+    "subrole_*", "prompt_pack_*", "daemon_prompt"];
   const modes = {
     new: { title: "New session", submit: "Create", sections, editable,
       payload: ["name", "profile", "project", "cwd", "args", "model", "effort", "tools", "worktree",
         "rebase_onto", "branch_from", "role", "subroles", "borrow", "null_token", "mesh", "handle", "workflow",
         "workflow_version", "cflow_inputs",
         "context", "task", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
+        "daemon_prompt",
         "resume", "fork_session"] },
     spawn: { title: "Spawn child", submit: "Spawn child", sections,
       editable: [...editable, "parent", "fork_parent", "over_limit"],
@@ -31595,6 +31596,7 @@ function sessionFormConfig(mode) {
         "rebase_onto", "branch_from", "role", "subroles", "borrow", "null_token", "mesh", "handle", "workflow",
         "workflow_version", "cflow_inputs",
         "context", "task", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
+        "daemon_prompt",
         "fork", "connect", "over_limit"] },
     fork: { title: "Quick fork", submit: "Fork", sections: ["new-quick-fork"],
       editable: ["quick_fork_carry", "quick_fork_task"], payload: ["task", "mesh", "workflow"] },
