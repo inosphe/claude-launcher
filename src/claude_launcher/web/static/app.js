@@ -19233,6 +19233,7 @@ function openSettings(section) {
     refreshProjects().then(() => { if (wsOpen) renderWorkspaces(); });
     refreshBeadsBoards();
     refreshVscode();
+    refreshWsGitSummary();
     return;
   }
   refreshHarnesses().then(() => { if (wsOpen) renderWorkspaces(); });
@@ -24750,6 +24751,7 @@ function workspacesPanel(view) {
   }
   for (const w of workspacesCache) {
     list.appendChild(wsRow(w));
+    if (wsTreesOpen.has(w.name) && w.exists) list.appendChild(wsWorktreeList(w));
     if (wsSyncOpen.has(w.name)) list.appendChild(wsSyncPanel(w));
   }
   view.appendChild(list);
@@ -26216,6 +26218,92 @@ async function beadsBoardInit(b) {
   renderWorkspaces();
 }
 
+/* ------------------------------------------------------------------ */
+/* Workspaces · row badges (claunch-gax44)                             */
+/* ------------------------------------------------------------------ */
+/* Branch, ahead/behind its upstream and changed tracked files, read with
+   one local 'git status' per workspace (/api/reposync/workspaces/summary).
+   Nothing is fetched: ahead/behind is against the remote-tracking ref as
+   the last fetch left it, which the badge's tooltip says. Read when the
+   page opens and after a sync -- the 2s workspace poll does not run git. */
+//: workspace name -> {branch, detached, upstream, ahead, behind, changed} | {error}
+let wsGitSummary = {};
+
+async function refreshWsGitSummary() {
+  try {
+    const resp = await api("/api/reposync/workspaces/summary");
+    if (!resp.ok) return;   // an older daemon: the rows simply carry no badges
+    wsGitSummary = ((await resp.json()) || {}).workspaces || {};
+  } catch {
+    return;
+  }
+  if (wsOpen) renderWorkspaces();
+}
+
+function wsGitBadges(g) {
+  if (!g) return [];
+  if (g.error) {
+    const b = el("span", "badge exited", "not a git checkout");
+    b.title = g.error;
+    return [b];
+  }
+  const out = [];
+  const head = el("span", "badge idle ws-git-branch mono",
+    g.detached ? "detached HEAD" : (g.branch || "?"));
+  head.title = g.upstream ? `tracks ${g.upstream}` : "no upstream set";
+  out.push(head);
+  if (g.ahead || g.behind) {
+    const parts = [];
+    if (g.ahead) parts.push(`↑${g.ahead}`);
+    if (g.behind) parts.push(`↓${g.behind}`);
+    const ab = el("span", "badge ws-git-ab" + (g.behind ? " ws-git-behind" : ""), parts.join(" "));
+    ab.title = `${g.ahead} ahead, ${g.behind} behind ${g.upstream} ` +
+      "(as of the last fetch; Sync ▾ › Refresh fetches)";
+    out.push(ab);
+  }
+  if (g.changed) {
+    const dirty = el("span", "badge ws-git-dirty", `${g.changed} changed`);
+    dirty.title = "tracked files with uncommitted changes (untracked files are not counted)";
+    out.push(dirty);
+  }
+  return out;
+}
+
+/* The linked worktrees under one workspace (claunch-kjjta), read with the
+   row badges (wsGitSummary). Folded by default: a busy repository carries
+   dozens. Each line names the checkout, its branch, and the sessions whose
+   directory is that checkout, linked to their pages; the sessions come from
+   the session list the page already holds. */
+const wsTreesOpen = new Set();
+
+function wsPathKey(p) {
+  return String(p || "").replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+}
+
+function wsWorktreeList(w) {
+  const box = el("div", "ws-worktrees");
+  const trees = (wsGitSummary[w.name] || {}).worktrees || [];
+  for (const t of trees) {
+    const line = el("div", "ws-worktree");
+    const where = el("span", "mono ws-worktree-path", t.path);
+    where.title = t.head ? `HEAD ${t.head}` : "";
+    line.appendChild(where);
+    line.appendChild(el("span", "badge " + (t.detached ? "exited" : "idle"),
+      t.detached ? `detached ${String(t.head || "").slice(0, 8)}` : (t.branch || "?")));
+    if (t.prunable) line.appendChild(el("span", "badge exited", "directory gone"));
+    const key = wsPathKey(t.path);
+    const here = sessionsCache.filter((x) => wsPathKey(x.cwd) === key);
+    if (!here.length) line.appendChild(el("span", "wf-note", "no session"));
+    for (const x of here) {
+      const a = el("a", "ws-worktree-session", x.name);
+      a.href = `#/s/${encodeURIComponent(x.name)}`;
+      line.appendChild(a);
+    }
+    box.appendChild(line);
+  }
+  return box;
+}
+
 function wsRow(w) {
   const row = el("div", "ws-row");
   const text = el("div", "ws-text");
@@ -26232,6 +26320,19 @@ function wsRow(w) {
       "span", "badge idle",
       here.length === 1 ? "1 session" : `${here.length} sessions`
     ));
+  }
+  if (w.exists) for (const b of wsGitBadges(wsGitSummary[w.name])) row.appendChild(b);
+  const trees = w.exists ? ((wsGitSummary[w.name] || {}).worktrees || []) : [];
+  if (trees.length) {
+    const open = wsTreesOpen.has(w.name);
+    const tb = el("button", "wf-btn clear" + (open ? " on" : ""),
+      `${trees.length} worktree${trees.length === 1 ? "" : "s"} ${open ? "▴" : "▾"}`);
+    tb.title = "the linked git worktrees of this repository, and the sessions standing in them";
+    tb.addEventListener("click", () => {
+      if (wsTreesOpen.has(w.name)) wsTreesOpen.delete(w.name); else wsTreesOpen.add(w.name);
+      renderWorkspaces();
+    });
+    row.appendChild(tb);
   }
 
   if (w.exists) row.appendChild(wsVscodeControls(w));
@@ -26360,6 +26461,7 @@ async function wsSyncSend(name, kind, body) {
   } else {
     st.result = { kind, doc };
   }
+  if (st.result) refreshWsGitSummary();
   if (st.result && kind !== "push") await wsSyncRefresh(name, false);
   else if (wsOpen) renderWorkspaces();
 }
@@ -26416,7 +26518,65 @@ async function wsSyncBranch(name, kind) {
     return;
   }
   if (!st.pullMachine || !st.pullBranch) return;
-  await wsSyncSend(name, "pull", { machine: st.pullMachine, branch: st.pullBranch });
+  await wsSyncSend(name, "pull", wsSyncPullBody(st.doc, st.pullMachine, st.pullBranch));
+}
+
+/* A pull names the remote the panel planned on: a workspace with two
+   remotes otherwise refuses to guess which one carries the branch. */
+function wsSyncPullBody(doc, machine, branch) {
+  const body = { machine, branch };
+  const remote = doc && doc.plan && doc.plan.remote;
+  if (remote) body.remote = remote;
+  return body;
+}
+
+const WS_SHARED_STATE = {
+  new: "not here yet", same: "up to date", behind: "pull fast-forwards",
+  diverged: "local has other commits",
+};
+
+/* The branches other machines published on the planned remote as
+   <machine>/<branch> (claunch-tamel), each with a Pull that runs the
+   branch pull above -- fast-forward only, no approval card, since it moves
+   nothing but a local branch. Prefixes that are not a relay peer sharing
+   this address (a remote's own feature/x branches) are kept apart. */
+function wsSyncShared(name, doc, st) {
+  const box = el("div", "ws-sync-shared");
+  const rows = doc.shared || [];
+  const remote = doc.plan ? doc.plan.remote : "";
+  const peers = rows.filter((r) => r.peer);
+  const other = rows.filter((r) => !r.peer);
+  box.appendChild(el("h5", null,
+    `Published by other machines on ${remote} (${peers.length})` +
+    (doc.fetched ? "" : " · as last fetched")));
+  if (!peers.length) {
+    box.appendChild(el("p", "wf-note",
+      "No relay peer has published a work branch here. Refresh (fetch) reads the remote again."));
+  }
+  const line = (r) => {
+    const row = el("div", "ws-sync-shared-row");
+    row.appendChild(el("span", "mono", r.ref));
+    const sha = el("span", "mono wf-note", r.sha.slice(0, 8));
+    sha.title = [r.subject, r.date].filter(Boolean).join(" · ");
+    row.appendChild(sha);
+    row.appendChild(el("span", "badge " + (r.state === "behind" || r.state === "new" ? "busy" : "idle"),
+      WS_SHARED_STATE[r.state] || r.state));
+    const go = el("button", "wf-btn", st.busy === "pull" ? "Pulling…" : "Pull");
+    go.disabled = !!st.busy || r.state === "same" || r.state === "diverged";
+    if (r.state === "diverged") go.title = `local ${r.ref} has commits ${remote}/${r.ref} does not; a pull would refuse`;
+    go.addEventListener("click", () => wsSyncSend(name, "pull", wsSyncPullBody(doc, r.machine, r.branch)));
+    row.appendChild(go);
+    return row;
+  };
+  for (const r of peers) box.appendChild(line(r));
+  if (other.length) {
+    const more = el("details", "ws-sync-shared-other");
+    more.appendChild(el("summary", "wf-note",
+      `${other.length} other prefixed branch(es), not from a relay peer sharing this address`));
+    for (const r of other) more.appendChild(line(r));
+    box.appendChild(more);
+  }
+  return box;
 }
 
 function wsSyncPlanLine(plan) {
@@ -26429,29 +26589,67 @@ function wsSyncPlanLine(plan) {
   return line;
 }
 
+/* How a peer's master stands against ours, as the status measured it from
+   local git (claunch-gjjdp). "unknown" means the peer's tip is not in this
+   clone: it never reached the shared remote, or we have not fetched since. */
+function wsPeerDistanceText(d) {
+  if (!d) return "";
+  if (d.state === "same") return "same as ours";
+  if (d.state === "ahead") return `${d.theirs_only} ahead of ours`;
+  if (d.state === "behind") return `${d.ours_only} behind ours`;
+  if (d.state === "diverged") return `diverged: +${d.theirs_only} / −${d.ours_only}`;
+  return "not in this clone yet";
+}
+
+/* The peers holding the same repository, one table row per (machine,
+   workspace): its master tip, that tip against the remote and its own
+   unpushed count as it last fetched, and the tip against our master. A peer
+   that did not answer is a row of its own. Peers are read when the panel
+   opens and on Refresh, never on page load: one round trip per peer. */
 function wsSyncPeers(doc) {
   const box = el("div", "ws-sync-peers");
   const rows = doc.peers || [];
+  const unreadable = doc.unreadable || [];
   box.appendChild(el("h4", null, `Peers sharing this address (${rows.length})`));
-  if (!rows.length) {
+  if (!rows.length && !unreadable.length) {
     box.appendChild(el("p", "wf-note",
       "No relay peer reports a clone of this remote. Sync does not need one."));
   }
-  const upstream = doc.plan && doc.plan.upstream;
-  for (const r of rows) {
-    const line = el("div", "ws-sync-peer");
-    line.appendChild(el("span", "ws-name", r.machine));
-    line.appendChild(el("span", "mono", `${r.workspace || "?"} · ${r.peer_remote}`));
-    const master = (r.branches || {}).master || (r.branches || {}).main;
-    if (master && master.sha) {
-      const track = (master.tracking || []).find((t) => t.key === r.key) || {};
-      let note = `master ${master.sha.slice(0, 8)}`;
-      if (upstream && master.sha === upstream) note += " = remote";
-      if (track.ahead) note += ` · ${track.ahead} unpushed`;
-      if (track.behind) note += ` · ${track.behind} behind (as last fetched)`;
-      line.appendChild(el("span", "wf-note", note));
+  if (rows.length || unreadable.length) {
+    const table = el("table", "ws-sync-peers-table");
+    const head = el("tr");
+    for (const h of ["Machine", "Workspace", "Master tip", "Against ours"]) head.appendChild(el("th", null, h));
+    table.appendChild(head);
+    const upstream = doc.plan && doc.plan.upstream;
+    const branch = (doc.plan && doc.plan.branch) || "master";
+    for (const r of rows) {
+      const tr = el("tr", "ws-sync-peer");
+      tr.appendChild(el("td", "ws-name", r.machine));
+      tr.appendChild(el("td", "mono", `${r.workspace || "?"} · ${r.peer_remote}`));
+      const b = (r.branches || {})[branch];
+      const tip = b && typeof b === "object" ? b : (b ? { sha: b, tracking: [] } : null);
+      let note = "";
+      if (tip && tip.sha) {
+        const track = (tip.tracking || []).find((t) => t.key === r.key) || {};
+        note = `${branch} ${tip.sha.slice(0, 8)}`;
+        if (upstream && tip.sha === upstream) note += " = remote";
+        if (track.ahead) note += ` · ${track.ahead} unpushed`;
+        if (track.behind) note += ` · ${track.behind} behind (as last fetched)`;
+      }
+      tr.appendChild(el("td", "mono", note || "no " + branch));
+      const d = r.distance;
+      tr.appendChild(el("td", "ws-peer-distance" + (d ? ` ws-peer-${d.state}` : ""), wsPeerDistanceText(d)));
+      table.appendChild(tr);
     }
-    box.appendChild(line);
+    for (const m of unreadable) {
+      const tr = el("tr", "ws-sync-peer ws-sync-peer-unreadable");
+      tr.appendChild(el("td", "ws-name", m));
+      tr.appendChild(el("td", "wf-note", "unreadable"));
+      tr.appendChild(el("td", "wf-note", ""));
+      tr.appendChild(el("td", "wf-note", "did not answer"));
+      table.appendChild(tr);
+    }
+    box.appendChild(table);
   }
   for (const p of doc.problems || []) box.appendChild(el("p", "wf-note", p));
   return box;
@@ -26476,6 +26674,43 @@ function wsSyncResult(result) {
     box.appendChild(el("div", "mono", `pushed ${d.sha.slice(0, 8)} -> ${d.remote}/${d.ref}`));
   } else {
     box.appendChild(el("div", "mono", `${d.branch} = ${d.sha.slice(0, 8)} (from ${d.remote})`));
+  }
+  return box;
+}
+
+/* Local branches the remote's master does not hold yet (claunch-6p7ri),
+   newest commit first: how far each is ahead, when it last moved, and the
+   session that stamped its tip (the Claunch-Session trailer), linked to
+   that session's page. Read with the plan, so as of its fetch. */
+function wsSyncUnmerged(doc) {
+  const box = el("div", "ws-sync-section ws-sync-unmerged");
+  const rows = doc.unmerged || [];
+  const base = doc.plan ? `${doc.plan.remote}/${doc.plan.branch}` : "master";
+  box.appendChild(el("h4", null, `Waiting to land (${rows.length})`));
+  if (!rows.length) {
+    box.appendChild(el("p", "wf-note", `Every local branch is already on ${base}.`));
+    return box;
+  }
+  for (const r of rows) {
+    const line = el("div", "ws-sync-unmerged-row");
+    const name = el("span", "mono", r.branch);
+    name.title = r.subject || "";
+    line.appendChild(name);
+    if (r.ahead !== null && r.ahead !== undefined) {
+      const ahead = el("span", "badge busy", `+${r.ahead}`);
+      ahead.title = `${r.ahead} commit(s) not on ${base}`;
+      line.appendChild(ahead);
+    }
+    if (r.date) line.appendChild(el("span", "wf-note", r.date.slice(0, 16).replace("T", " ")));
+    if (r.session) {
+      const sess = el("a", "ws-sync-unmerged-session", r.session);
+      sess.href = `#/s/${encodeURIComponent(r.session)}`;
+      sess.title = "the session stamped on the tip commit (Claunch-Session)";
+      line.appendChild(sess);
+    } else {
+      line.appendChild(el("span", "wf-note", "unstamped"));
+    }
+    box.appendChild(line);
   }
   return box;
 }
@@ -26532,6 +26767,7 @@ function wsSyncPanel(w) {
     master.appendChild(el("p", "wf-note wf-warning", doc.plan_error || "no plan"));
   }
   panel.appendChild(master);
+  if (doc.plan) panel.appendChild(wsSyncUnmerged(doc));
 
   // work branches
   const work = el("div", "ws-sync-section");
@@ -26559,6 +26795,7 @@ function wsSyncPanel(w) {
   push.addEventListener("click", () => { st.pushBranch = pick.value; wsSyncBranch(w.name, "push"); });
   pushRow.appendChild(push);
   work.appendChild(pushRow);
+  if (doc.plan) work.appendChild(wsSyncShared(w.name, doc, st));
 
   const pullRow = el("div", "ws-sync-form");
   const machine = el("input");

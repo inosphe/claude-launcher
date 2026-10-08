@@ -12,7 +12,23 @@
    panel shows that it waits, reads the card until a person answers it, and
    sends the request again with the id only once the card is approved. A
    rejected or expired card ends with nothing sent. A fast-forward pushes
-   nothing, so it asks here instead and needs no card. */
+   nothing, so it asks here instead and needs no card.
+
+   And the shared branches (claunch-tamel): the branches other machines
+   published as <machine>/<branch> are listed with a Pull each, which sends
+   the branch pull with the planned remote and needs no card; one already
+   level or with local commits of its own offers nothing to press, and a
+   prefix that is not a relay peer is kept apart under a fold.
+
+   And the branches waiting to land (claunch-6p7ri): each local branch the
+   remote's master does not hold is a row with its ahead count, its time and
+   the session stamped on its tip, linked to that session's page; an
+   unstamped one says so, and an empty list says every branch is on the
+   remote's master.
+
+   And the peer table (claunch-gjjdp): one row per peer with its master tip
+   and how that tip stands against ours, worded per state; a peer that did
+   not answer is a row marked unreadable. */
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
@@ -81,6 +97,7 @@ const timers = [];
 let reply = null;
 let confirmAnswer = true;
 let gateRefreshed = 0;
+let badgesRefreshed = 0;   // the row badges re-read after a sync that ran (claunch-gax44)
 const ctx = {
   el, renderWorkspaces() {}, wsOpen: true,
   Option: function (text, value) { return { tag: "option", text, value, children: [] }; },
@@ -88,6 +105,7 @@ const ctx = {
   confirm: (msg) => { calls.push({ confirm: msg }); return confirmAnswer; },
   setTimeout: (fn) => { timers.push(fn); },
   refreshReposyncGate: () => { gateRefreshed++; },
+  refreshWsGitSummary: () => { badgesRefreshed++; },
   encodeURIComponent,
   JSON, Promise, String, Set, Map, Object,
   api: async (url, opts) => {
@@ -99,10 +117,11 @@ const ctx = {
 vm.createContext(ctx);
 vm.runInContext(
   [constant("wsSyncOpen"), constant("wsSyncState"), constant("WS_SYNC_LABEL"),
-   constant("WS_SYNC_PATH"), constant("WS_SYNC_POLL_MS"),
+   constant("WS_SYNC_PATH"), constant("WS_SYNC_POLL_MS"), constant("WS_SHARED_STATE"),
    ...["wsSyncSt", "wsSyncRefresh", "wsSyncSend", "wsSyncWait", "wsSyncRun",
        "wsSyncBranch", "wsSyncPlanLine", "wsSyncPeers", "wsSyncResult",
-       "wsSyncPanel"].map(slice),
+       "wsSyncPanel", "wsSyncPullBody", "wsSyncShared", "wsSyncUnmerged",
+       "wsPeerDistanceText"].map(slice),
    "globalThis.__st = wsSyncSt;"].join("\n"),
   ctx);
 
@@ -193,6 +212,7 @@ async function tick() {
   assert.ok(nodes.includes("restack s1-x: git rebase --onto d a s1-x"));
   assert.equal(calls[calls.length - 1].url, "/api/reposync/workspaces/proj/status?fetch=0",
                "the status is read again after a sync");
+  assert.equal(badgesRefreshed, 1, "the row badges are read again after a sync that ran");
 
   /* ---- rejected: nothing sent again, and the panel says so -------------- */
   st.doc.plan = PLAN;
@@ -217,6 +237,7 @@ async function tick() {
   assert.match(st.error, /moved since this plan was shown/);
   assert.equal(st.result, null);
   assert.equal(timers.length, 0);
+  assert.equal(badgesRefreshed, 1, "a refused sync moved nothing, so the badges stay");
 
   /* ---- branch push waits on its card too -------------------------------- */
   calls.length = 0;
@@ -245,7 +266,99 @@ async function tick() {
     ? { status: 200, body: { ok: true, remote: "origin", branch: "pc-b/s9-y", sha: "e".repeat(40) } }
     : { status: 200, body: DOC };
   await ctx.wsSyncBranch("proj", "pull");
-  assert.deepEqual(posts()[0].body, { machine: "pc-b", branch: "s9-y" });
+  assert.deepEqual(posts()[0].body, { machine: "pc-b", branch: "s9-y", remote: "origin" },
+                   "the pull names the remote the panel planned on");
+
+  /* ---- shared branches: listed with a Pull each ------------------------- */
+  const row = (ref, state, peer) => ({
+    machine: ref.split("/")[0], branch: ref.split("/").slice(1).join("/"), ref,
+    sha: "f".repeat(40), date: "2026-10-08T10:00:00+09:00", subject: "work",
+    peer, local: state === "new" ? null : "a".repeat(40), state });
+  st.doc = { ...DOC, plan: PLAN, shared: [
+    row("pc-b/s2-y", "new", true), row("pc-b/old", "behind", true),
+    row("pc-b/same", "same", true), row("pc-b/div", "diverged", true),
+    row("feature/z", "new", false)] };
+  st.busy = "";
+  nodes = walk(ctx.wsSyncPanel(W));
+  const shared = nodes.find((n) => n.cls === "ws-sync-shared");
+  assert.ok(shared, "the list sits in the panel");
+  assert.ok(walk(shared).some((n) => n.text === "Published by other machines on origin (4) · as last fetched"));
+  const rowOf = (ref) => walk(shared).find((n) => n.cls === "ws-sync-shared-row" && n.children[0].text === ref);
+  const pullOf = (ref) => rowOf(ref).children.find((n) => n.tag === "button");
+  assert.equal(pullOf("pc-b/s2-y").disabled, false);
+  assert.equal(pullOf("pc-b/old").disabled, false);
+  assert.equal(pullOf("pc-b/same").disabled, true, "level: nothing to pull");
+  assert.equal(pullOf("pc-b/div").disabled, true, "diverged: a pull would refuse");
+  assert.match(pullOf("pc-b/div").title, /would refuse/);
+  const fold = walk(shared).find((n) => n.cls === "ws-sync-shared-other");
+  assert.ok(fold && walk(fold).some((n) => n.children && n.children[0] && n.children[0].text === "feature/z"),
+            "a prefix that is not a relay peer is under the fold");
+  calls.length = 0;
+  const cardsBefore = gateRefreshed;
+  await pullOf("pc-b/old").handlers.click[0]();
+  assert.equal(posts().length, 1);
+  assert.equal(posts()[0].url, "/api/reposync/workspaces/proj/branch-pull");
+  assert.deepEqual(posts()[0].body, { machine: "pc-b", branch: "old", remote: "origin" });
+  assert.equal(gateRefreshed, cardsBefore, "a pull files no card");
+
+  /* ---- no peer has published: a note, no rows --------------------------- */
+  st.doc = { ...DOC, plan: PLAN, fetched: true, shared: [] };
+  nodes = walk(ctx.wsSyncPanel(W));
+  assert.ok(nodes.some((n) => n.text === "Published by other machines on origin (0)"));
+  assert.ok(!nodes.some((n) => n.cls === "ws-sync-shared-row"));
+
+  /* ---- branches waiting to land ----------------------------------------- */
+  st.doc = { ...DOC, plan: PLAN, unmerged: [
+    { branch: "s1-open", sha: "1".repeat(40), date: "2026-10-08T17:01:02+09:00",
+      subject: "open work", ahead: 3, session: "s43" },
+    { branch: "plain", sha: "2".repeat(40), date: "2026-10-07T09:00:00+09:00",
+      subject: "add plain.txt", ahead: 1, session: null }] };
+  nodes = walk(ctx.wsSyncPanel(W));
+  const land = nodes.find((n) => (n.cls || "").includes("ws-sync-unmerged"));
+  assert.ok(land, "the section sits in the panel");
+  const landTexts = walk(land).map((n) => n.text);
+  assert.ok(landTexts.includes("Waiting to land (2)"));
+  const landRows = walk(land).filter((n) => n.cls === "ws-sync-unmerged-row");
+  assert.equal(landRows.length, 2);
+  assert.deepEqual(landRows[0].children.map((n) => n.text),
+                   ["s1-open", "+3", "2026-10-08 17:01", "s43"]);
+  const link = landRows[0].children[3];
+  assert.equal(link.tag, "a");
+  assert.equal(link.href, "#/s/s43");
+  assert.match(landRows[0].children[1].title, /not on origin\/master/);
+  assert.equal(landRows[1].children[3].text, "unstamped");
+  st.doc = { ...DOC, plan: PLAN, unmerged: [] };
+  nodes = walk(ctx.wsSyncPanel(W)).map((n) => n.text);
+  assert.ok(nodes.includes("Waiting to land (0)"));
+  assert.ok(nodes.includes("Every local branch is already on origin/master."));
+
+  /* ---- the peer table ---------------------------------------------------- */
+  st.doc = JSON.parse(JSON.stringify(DOC));
+  st.doc.peers[0].distance = { state: "ahead", theirs_only: 2, ours_only: 0 };
+  st.doc.unreadable = ["pc-old"];
+  nodes = walk(ctx.wsSyncPanel(W));
+  const table = nodes.find((n) => n.cls === "ws-sync-peers-table");
+  assert.ok(table, "peers are a table");
+  assert.deepEqual(table.children[0].children.map((n) => n.text),
+                   ["Machine", "Workspace", "Master tip", "Against ours"]);
+  const peerRow = table.children[1];
+  assert.deepEqual(peerRow.children.map((n) => n.text),
+                   ["pc-b", "proj · up", "master bbbbbbbb = remote · 3 unpushed", "2 ahead of ours"]);
+  assert.match(peerRow.children[3].cls, /ws-peer-ahead/);
+  const dead = table.children[2];
+  assert.match(dead.cls, /ws-sync-peer-unreadable/);
+  assert.deepEqual([dead.children[0].text, dead.children[3].text], ["pc-old", "did not answer"]);
+  const words = (d) => ctx.wsPeerDistanceText(d);
+  assert.equal(words({ state: "same", theirs_only: 0, ours_only: 0 }), "same as ours");
+  assert.equal(words({ state: "behind", theirs_only: 0, ours_only: 4 }), "4 behind ours");
+  assert.equal(words({ state: "diverged", theirs_only: 1, ours_only: 2 }), "diverged: +1 / −2");
+  assert.equal(words({ state: "unknown" }), "not in this clone yet");
+  assert.equal(words(undefined), "");
+  // nothing answered and nobody failed: the note, no table
+  st.doc = { ...DOC, peers: [], unreadable: [], problems: [] };
+  nodes = walk(ctx.wsSyncPanel(W));
+  assert.ok(!nodes.some((n) => n.cls === "ws-sync-peers-table"));
+  assert.ok(nodes.some((n) => (n.text || "").startsWith("No relay peer reports a clone")));
 
   console.log("workspacesync_check ok");
 })().catch((err) => { console.error(err); process.exit(1); });

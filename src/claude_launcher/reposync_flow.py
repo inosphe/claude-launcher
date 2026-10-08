@@ -121,14 +121,221 @@ def local_branches(repo: str) -> List[str]:
     return [line for line in out.splitlines() if line]
 
 
+def linked_worktrees(path: str) -> List[dict]:
+    """The linked worktrees of the repository at ``path`` (claunch-kjjta),
+    from one ``git worktree list --porcelain``: each one's path, branch (or
+    ``detached``) and HEAD. The main checkout -- the workspace itself -- is
+    left out, and so is a bare entry; a worktree whose directory is gone is
+    kept with ``prunable`` so the row can say so. A workspace registered at
+    a linked worktree lists the others, not itself."""
+    out = reposync.git(path, "worktree", "list", "--porcelain", check=False)
+    rows: List[dict] = []
+    cur: Optional[dict] = None
+    for line in out.splitlines() + [""]:
+        if line.startswith("worktree "):
+            cur = {"path": os.path.normpath(line[len("worktree "):]), "branch": None,
+                   "detached": False, "head": None, "prunable": False, "bare": False}
+        elif cur is None:
+            continue
+        elif line.startswith("HEAD "):
+            cur["head"] = line[len("HEAD "):]
+        elif line.startswith("branch "):
+            ref = line[len("branch "):]
+            cur["branch"] = ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else ref
+        elif line == "detached":
+            cur["detached"] = True
+        elif line == "bare":
+            cur["bare"] = True
+        elif line.startswith("prunable"):
+            cur["prunable"] = True
+        elif not line:
+            rows.append(cur)
+            cur = None
+    # the first entry is always the main working tree; a workspace that is
+    # itself a linked worktree does not list itself either
+    try:
+        here = os.path.normcase(os.path.normpath(reposync.toplevel(path)))
+    except reposync.SyncError:
+        here = ""
+    return [{k: v for k, v in r.items() if k != "bare"} for r in rows[1:]
+            if not r["bare"] and os.path.normcase(r["path"]) != here]
+
+
+def git_summary(path: str) -> dict:
+    """What a workspace row shows without opening its Sync panel: the
+    checked-out branch, how far it is ahead of / behind its upstream, and how
+    many tracked files carry uncommitted changes (claunch-gax44).
+
+    One ``git status`` and nothing else -- no fetch, so ahead/behind is
+    against the remote-tracking ref as the last fetch left it, and untracked
+    files are not scanned (on a large checkout that scan is what takes the
+    seconds). A directory git cannot read answers ``{"error": ...}``.
+    ``worktrees`` lists its linked worktrees (:func:`linked_worktrees`), a
+    second git process."""
+    try:
+        out = reposync.git(path, "status", "--porcelain=v2", "--branch",
+                           "--untracked-files=no", check=True)
+    except reposync.SyncError as exc:
+        return {"error": str(exc)}
+    doc: dict = {"branch": None, "detached": False, "upstream": None,
+                 "ahead": None, "behind": None, "changed": 0}
+    for line in out.splitlines():
+        if line.startswith("# branch.head "):
+            head = line[len("# branch.head "):]
+            if head == "(detached)":
+                doc["detached"] = True
+            else:
+                doc["branch"] = head
+        elif line.startswith("# branch.upstream "):
+            doc["upstream"] = line[len("# branch.upstream "):]
+        elif line.startswith("# branch.ab "):
+            ahead, behind = line[len("# branch.ab "):].split()
+            doc["ahead"], doc["behind"] = int(ahead.lstrip("+")), int(behind.lstrip("-"))
+        elif line and not line.startswith("#"):
+            doc["changed"] += 1
+    doc["worktrees"] = linked_worktrees(path)
+    return doc
+
+
+#: How many shared branches the Sync panel lists, newest commit first.
+SHARED_LIMIT = 50
+
+
+def shared_branches(repo: str, remote: str, machine: Optional[str],
+                    peers: Iterable[str] = ()) -> List[dict]:
+    """The work branches other machines published on ``remote`` as
+    ``<machine>/<branch>`` (:func:`reposync.publish_branch`), read from the
+    remote-tracking refs as the last fetch left them (claunch-tamel).
+
+    This machine's own prefix is left out. Any other ``<prefix>/<rest>`` is
+    listed, and ``peer`` says whether the prefix is a relay peer that shares
+    this address -- a remote may carry ``feature/x`` branches nobody
+    published, and the panel keeps those apart. ``local`` is the local branch
+    a pull lands on (:func:`reposync.receive_branch` names it the same) and
+    ``state`` how it stands: ``new`` (none yet), ``same``, ``behind`` (a pull
+    fast-forwards it) or ``diverged`` (a pull refuses)."""
+    mine = reposync.machine_prefix(machine) if machine else None
+    known = set()
+    for m in peers:
+        try:
+            known.add(reposync.machine_prefix(m))
+        except reposync.SyncError:
+            continue
+    base = f"refs/remotes/{remote}/"
+    out = reposync.git(
+        repo, "for-each-ref", "--sort=-committerdate",
+        "--format=%(refname)%00%(objectname)%00%(committerdate:iso-strict)%00%(subject)",
+        base, check=False,
+    )
+    heads = {}
+    for line in reposync.git(repo, "for-each-ref", "--format=%(refname)%00%(objectname)",
+                             "refs/heads", check=False).splitlines():
+        ref, _, sha = line.partition("\0")
+        heads[ref[len("refs/heads/"):]] = sha
+    rows = []
+    for line in out.splitlines():
+        ref, sha, date, subject = (line.split("\0") + ["", "", ""])[:4]
+        name = ref[len(base):]
+        prefix, slash, branch = name.partition("/")
+        if not slash or not branch or name == "HEAD" or prefix == mine:
+            continue
+        local = heads.get(name)
+        if local is None:
+            state = "new"
+        elif local == sha:
+            state = "same"
+        elif reposync._ok(repo, "merge-base", "--is-ancestor", local, sha):
+            state = "behind"
+        else:
+            state = "diverged"
+        rows.append({
+            "machine": prefix, "branch": branch, "ref": name, "sha": sha,
+            "date": date, "subject": subject, "peer": prefix in known,
+            "local": local, "state": state,
+        })
+        if len(rows) >= SHARED_LIMIT:
+            break
+    return rows
+
+
+#: How many unlanded branches the Sync panel lists, newest commit first.
+UNMERGED_LIMIT = 50
+
+
+def unmerged_branches(repo: str, base: str, *, skip: Iterable[str] = ()) -> List[dict]:
+    """Local branches with commits ``base`` does not have yet -- the work
+    waiting to land (claunch-6p7ri). ``base`` is a commit, normally the
+    remote's master as the plan read it, so a branch counts as landed once
+    the shared master holds it, whatever the local master says.
+
+    Each row carries its tip's commit time and subject, how many commits it
+    has beyond ``base``, and ``session``: the ``Claunch-Session`` trailer of
+    its tip commit (the commit-stamp convention), ``None`` when unstamped.
+    ``skip`` names branches left out -- the planned branch itself."""
+    out = reposync.git(
+        repo, "for-each-ref", "--sort=-committerdate", f"--no-merged={base}",
+        "--format=%(refname:short)%00%(objectname)%00%(committerdate:iso-strict)%00"
+        "%(subject)%00%(trailers:key=Claunch-Session,valueonly,separator=%x2C)",
+        "refs/heads", check=False,
+    )
+    left = set(skip)
+    rows = []
+    for line in out.splitlines():
+        name, sha, date, subject, stamp = (line.split("\0") + [""] * 4)[:5]
+        if not name or name in left:
+            continue
+        ahead = reposync.git(repo, "rev-list", "--count", f"{base}..{sha}", check=False)
+        rows.append({
+            "branch": name, "sha": sha, "date": date, "subject": subject,
+            "ahead": int(ahead) if ahead.isdigit() else None,
+            "session": stamp.split(",")[0].strip() or None,
+        })
+        if len(rows) >= UNMERGED_LIMIT:
+            break
+    return rows
+
+
+def peer_distance(repo: str, ours: str, theirs: Optional[str]) -> dict:
+    """How a peer's master tip stands against ours (claunch-gjjdp), from
+    local git only: ``same``; ``ahead`` / ``behind`` (the peer has commits we
+    lack / we have commits the peer lacks); ``diverged``; ``unknown`` when
+    the peer's tip is not in this clone yet (it never reached the shared
+    remote, or we have not fetched since) or the peer reported none.
+    ``theirs_only`` / ``ours_only`` count the commits on each side."""
+    doc: dict = {"state": "unknown", "theirs_only": None, "ours_only": None}
+    if not theirs or not ours:
+        return doc
+    if theirs == ours:
+        return {"state": "same", "theirs_only": 0, "ours_only": 0}
+    if not reposync._ok(repo, "cat-file", "-e", f"{theirs}^{{commit}}"):
+        return doc
+    counts = reposync.git(repo, "rev-list", "--left-right", "--count",
+                          f"{theirs}...{ours}", check=False).split()
+    if len(counts) != 2 or not all(c.isdigit() for c in counts):
+        return doc
+    t, o = int(counts[0]), int(counts[1])
+    state = "diverged" if t and o else "ahead" if t else "behind"
+    return {"state": state, "theirs_only": t, "ours_only": o}
+
+
+def _peer_tip(row: dict, branch: str) -> Optional[str]:
+    got = (row.get("branches") or {}).get(branch)
+    if isinstance(got, dict):
+        return got.get("sha") or None
+    return got or None     # an older peer reported the bare sha
+
+
 def workspace_status(path: str, workspace: Optional[str], peers: Dict[str, List[dict]],
                      problems: List[str], *, do_fetch: bool, remote: Optional[str] = None,
-                     branch: Optional[str] = None) -> dict:
+                     branch: Optional[str] = None, machine: Optional[str] = None) -> dict:
     """One workspace as the web UI's Sync panel shows it: its remotes, the
     peers that share an address with it, and the plan a sync would carry out.
     ``peers`` is what the daemon could read off the relay; an unreadable peer
     is a line in ``problems``, never a reason not to plan -- the plan rests on
-    the shared remote alone."""
+    the shared remote alone. ``shared`` lists the branches other machines
+    published on the planned remote (:func:`shared_branches`); ``machine`` is
+    this one, whose own prefix it leaves out. ``unmerged`` lists the local
+    branches the remote's master does not hold yet (:func:`unmerged_branches`)."""
     try:
         repo = reposync.toplevel(path)
     except reposync.SyncError as exc:
@@ -148,6 +355,11 @@ def workspace_status(path: str, workspace: Optional[str], peers: Dict[str, List[
         return out
     key = reposync.url_key(reposync.remotes(repo).get(name, ""))
     out["plan"] = plan_card(p, workspace=workspace, key=key)
+    for row in rows:
+        row["distance"] = peer_distance(repo, p.local, _peer_tip(row, p.branch))
+    # after the plan: with do_fetch its fetch is what brought these refs in
+    out["shared"] = shared_branches(repo, name, machine, {r["machine"] for r in rows})
+    out["unmerged"] = unmerged_branches(repo, p.upstream or p.local, skip=[p.branch])
     return out
 
 

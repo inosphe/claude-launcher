@@ -2422,10 +2422,58 @@ plans against the shared remote. HTTP: `GET
 /api/reposync/workspaces/<name>/status[?fetch=0]`, `POST .../sync`
 (`{remote, branch, local, upstream[, request]}`), `POST .../branch-push`
 (`{branch, force_with_lease[, request]}`), `POST .../branch-pull`
-(`{machine, branch}`). A push without `request` answers 202 with the id of
+(`{machine, branch[, remote]}`). A push without `request` answers 202 with the id of
 the card it filed; the same body with that `request` runs once the card is
 approved (`GET /api/reposync/requests/<id>` says when), and answers 409 when
 the card was rejected or expired or the tips moved after the approval.
+
+Each row also carries badges read from local git without opening the panel:
+the checked-out branch (its tooltip names the upstream), `↑ahead ↓behind`
+against that upstream when either is non-zero, and `N changed` for tracked
+files with uncommitted changes (untracked files are not scanned). Nothing is
+fetched for them, so ahead/behind is as of the last fetch; the panel's
+Refresh fetches. They are read when the page opens and after a sync runs,
+not on the two-second workspace poll. HTTP: `GET
+/api/reposync/workspaces/summary` answers `{workspaces: {<name>: {branch,
+detached, upstream, ahead, behind, changed, worktrees} | {error}}}` for every
+registered workspace that is present.
+
+A row whose repository has linked worktrees also carries an `N worktrees`
+toggle (folded by default; a busy repository has dozens). Opened, each
+worktree is a line with its path, its branch or detached HEAD, a mark when
+its directory is gone, and the sessions whose directory it is, linked to
+their pages. The workspace itself is never in its own list, also when it is
+registered at a linked worktree. `worktrees` in the summary is
+`[{path, branch, detached, head, prunable}]`.
+
+Under **Work branches** the panel lists the branches other machines published
+on the planned remote as `<machine>/<branch>`, newest commit first, read from
+the remote-tracking refs (so as of the last fetch until Refresh fetches).
+Each row shows where the local branch of that name stands (not here yet, up
+to date, a pull fast-forwards it, or it has commits of its own and a pull
+would refuse) and has a **Pull** that runs the same branch pull with the
+planned remote. This machine's own prefix is left out, and a prefix that is
+not a relay peer sharing the address (a remote's own `feature/x` branches)
+is folded away separately. The status answer carries them as `shared:
+[{machine, branch, ref, sha, date, subject, peer, local, state}]`.
+
+The panel's **Waiting to land** section lists the local branches the
+remote's master does not hold yet (as the plan read it, so a branch counts
+as landed once the shared master has it, whatever the local master says),
+newest commit first: how many commits each has beyond that master, when it
+last moved, and the session stamped on its tip commit (the
+`Claunch-Session` trailer), linked to that session. The status answer
+carries them as `unmerged: [{branch, sha, date, subject, ahead, session}]`.
+
+The peers are a table, one row per peer clone of the same repository: its
+master tip (against the remote and with its unpushed count, as it last
+fetched) and how that tip stands against our master, measured from local
+git only: same, ahead or behind by N, diverged, or not in this clone yet
+(the peer's tip never reached the shared remote, or we have not fetched
+since). A peer that did not answer is a row marked unreadable. Peers are
+asked when the panel opens and on Refresh, one round trip each, never on
+page load. The status answer carries `distance: {state, theirs_only,
+ours_only}` on each peer row and the silent peers as `unreadable`.
 
 ### VS Code in the browser (one code-server per workspace and worktree)
 
