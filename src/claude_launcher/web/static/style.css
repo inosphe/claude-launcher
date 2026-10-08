@@ -2023,6 +2023,23 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 }
 #term-input-field:focus { outline: none; border-color: #1f6feb; }
 #term-input-field:disabled { opacity: 0.5; cursor: not-allowed; }
+/* Session line sync (daemon/line_sync.py). In remote-sync mode the field is
+   the line every browser on the session shares, and says so by its border;
+   this browser's own local line sits beside it read-only, to copy from. */
+#term-sync-toggle { flex: none; }
+#term-sync-toggle[aria-pressed="true"] {
+  color: #fff; background: #1f6feb; border-color: #1f6feb;
+}
+#term-input-field.line-shared { border-color: #8957e5; }
+#term-input-field.line-shared:focus { border-color: #a371f7; }
+#term-local-keep {
+  flex: 0 1 30%; min-width: 0; padding: 5px 10px; font-size: 13px;
+  line-height: 1.5; color: #9da7b3; background: #101215;
+  border: 1px dashed #30363d; border-radius: 5px; font-family: inherit;
+  resize: none; overflow-y: auto; max-height: 30vh; white-space: pre-wrap;
+  word-break: break-word;
+}
+#term-local-keep:focus { outline: none; border-color: #484f58; }
 #term-score-goal { display: flex; align-items: center; gap: 0.3rem; flex-wrap: wrap; flex-shrink: 0; }
 #term-score-goal.hidden { display: none; }
 #term-score-goal .term-score-label { font-size: 0.85rem; }

@@ -12670,6 +12670,7 @@ function handleFrame(msg) {
     renderSizeChip();
     setStatusBadge(msg.status);
     refreshTermInput();
+    if (currentName && typeof loadLineSync === "function") loadLineSync(currentName, true);
     flushInput(same);
     // Adopt the viewer's size once attached.
     refitSoon(50);
@@ -12748,6 +12749,8 @@ function handleFrame(msg) {
     }
   } else if (msg.type === "notice") {
     showTermNotice(msg);
+  } else if (msg.type === "line_sync") {
+    applyLineSync(msg);
   } else if (msg.type === "exit") {
     // Not a broken link: the program finished under this socket. The notice
     // belongs here rather than in endSession(), because this is the case
@@ -12832,7 +12835,8 @@ function termInputNote(note, message, warn = false) {
 }
 
 async function sendKeyLine(field, btn, note) {
-  const text = field.value.trim();
+  const raw = field.value;
+  const text = raw.trim();
   if (!text || !currentName) return false;
   note.classList.add("hidden");
   note.classList.remove("wf-warning");
@@ -12863,8 +12867,8 @@ async function sendKeyLine(field, btn, note) {
       // Nothing was typed: the session has ended, and the daemon holds the
       // line until it is resumed. Said on the spot, because the box empties
       // exactly as it does for a line that landed.
-      field.value = "";
-      autogrowTermInput(field);
+      if (typeof clearSentLine === "function") clearSentLine(field, raw);
+      else { field.value = ""; autogrowTermInput(field); }
       termInputNote(note,
         `queued (${doc.position || 1} waiting) — typed when this session ` +
         "is resumed; withdraw it from the session input journal");
@@ -12875,8 +12879,8 @@ async function sendKeyLine(field, btn, note) {
       return true;
     }
     if (resp.ok) {
-      field.value = "";
-      autogrowTermInput(field);
+      if (typeof clearSentLine === "function") clearSentLine(field, raw);
+      else { field.value = ""; autogrowTermInput(field); }
       if (doc.score_goal) {
         const session = sessionsCache.find((s) => s.name === currentName);
         if (session) {
@@ -13071,6 +13075,7 @@ function insertPromptPreset(text, fieldId = "term-input-field") {
   if (field.setSelectionRange) field.setSelectionRange(cursor, cursor);
   field.focus();
   if (typeof autogrowTermInput === "function") autogrowTermInput(field);
+  if (fieldId === "term-input-field" && typeof pushLineSync === "function") pushLineSync();
   return true;
 }
 
@@ -13485,6 +13490,201 @@ function insertTermInputText(field, text) {
   const caret = start + text.length;
   if (field.setSelectionRange) field.setSelectionRange(caret, caret);
   autogrowTermInput(field);
+  if (field.id === "term-input-field" && typeof pushLineSync === "function") pushLineSync();
+}
+
+/* ---- session line sync -------------------------------------------------
+   The line above is this browser's own by default ("local-only"): nothing
+   of it leaves the page until Enter. A session can be switched to
+   remote-sync instead (daemon/line_sync.py) -- a property of the SESSION,
+   so every page showing it follows the switch -- and then this field is the
+   one line every browser on the session shares: each edit goes out on the
+   terminal socket as a `line_sync` frame and comes back to every page,
+   and the daemon keeps the text in memory until it restarts, so a window
+   closed and opened again finds it where it was left.
+
+   What this page had typed locally when sync came on is not thrown away and
+   not shared: it moves to #term-local-keep, read-only, to copy from, and
+   comes back into the field when sync is switched off.
+
+   Ordering: frames arrive in the daemon's write order, so applying each in
+   turn leaves the field equal to the daemon's text. Two exceptions keep
+   typing smooth: the echo of an older write of this page's own (a later one
+   is still on its way, and applying the old one would take back the keys
+   typed since), and anything arriving while an IME is composing (setting
+   the value mid-syllable breaks the composition; the composed text is
+   pushed when it ends, and last writer wins). */
+const LINE_SYNC_CLIENT = "page-" + Date.now().toString(36) + "-" +
+  Math.random().toString(36).slice(2, 10);
+let lineSync = { session: null, mode: "local", rev: 0, lastPushed: null };
+let lineSyncComposing = false;
+
+function lineSyncShared() {
+  return !!currentName && lineSync.session === currentName &&
+    lineSync.mode === "remote";
+}
+
+/* A session was attached: its line starts local until the daemon says
+   otherwise, and nothing kept for the previous session carries over. */
+function resetLineSync(name) {
+  lineSync = { session: name || null, mode: "local", rev: 0, lastPushed: null };
+  lineSyncComposing = false;
+  const keep = $("term-local-keep");
+  if (keep) keep.value = "";
+  renderLineSync();
+  if (name) loadLineSync(name, true);
+}
+
+/* Read the state over HTTP: on attach (a parked terminal's socket is not
+   re-opened, so no frame says what changed while it was parked) and on
+   every socket `init` (a daemon restart forgets the state, and the socket
+   then says nothing about it). `force` takes the answer whatever its rev,
+   since a restarted daemon counts from zero again. */
+async function loadLineSync(name, force = false) {
+  try {
+    const resp = await api(`/api/sessions/${encodeURIComponent(name)}/line-sync`);
+    if (!resp.ok) return;
+    const doc = await resp.json();
+    if (name === currentName) applyLineSync(doc, force);
+  } catch { /* the socket's frames still carry it */ }
+}
+
+/* Set the field to `text`, keeping the caret where it was relative to the
+   text around it: past the common prefix it moves by the length change. */
+function setLineText(field, text) {
+  if (!field || field.value === text) return;
+  const old = field.value;
+  const focused = document.activeElement === field;
+  let caret = Number.isInteger(field.selectionStart) ? field.selectionStart : old.length;
+  let prefix = 0;
+  while (prefix < old.length && prefix < text.length && old[prefix] === text[prefix]) prefix++;
+  if (caret > prefix) caret = Math.max(prefix, caret + text.length - old.length);
+  field.value = text;
+  caret = Math.min(caret, text.length);
+  if (focused && field.setSelectionRange) field.setSelectionRange(caret, caret);
+  autogrowTermInput(field);
+}
+
+function applyLineSync(msg, force = false) {
+  if (!msg || !currentName) return;
+  if (lineSync.session !== currentName) {
+    lineSync = { session: currentName, mode: "local", rev: 0, lastPushed: null };
+  }
+  const rev = Number(msg.rev) || 0;
+  if (!force && rev < lineSync.rev) return; // an answer older than a frame already applied
+  const field = $("term-input-field");
+  const keep = $("term-local-keep");
+  const wasShared = lineSync.mode === "remote";
+  const nowShared = msg.mode === "remote";
+  const text = typeof msg.text === "string" ? msg.text : "";
+  lineSync.rev = rev;
+  lineSync.mode = nowShared ? "remote" : "local";
+  if (field) {
+    if (nowShared && !wasShared) {
+      if (keep) keep.value = field.value;
+      field.value = "";
+      setLineText(field, text);
+      lineSync.lastPushed = null;
+    } else if (!nowShared && wasShared) {
+      field.value = keep ? keep.value : "";
+      autogrowTermInput(field);
+      if (keep) keep.value = "";
+      lineSync.lastPushed = null;
+    } else if (nowShared) {
+      const ownStale = msg.client === LINE_SYNC_CLIENT &&
+        lineSync.lastPushed !== null && text !== lineSync.lastPushed;
+      if (!ownStale && !lineSyncComposing) setLineText(field, text);
+    }
+  }
+  renderLineSync();
+}
+
+function renderLineSync() {
+  const shared = lineSyncShared();
+  const btn = $("term-sync-toggle");
+  if (btn) {
+    btn.textContent = shared ? "Sync on" : "Sync off";
+    btn.setAttribute("aria-pressed", shared ? "true" : "false");
+    btn.disabled = !(currentName || lineSync.session);
+    btn.title = shared
+      ? "remote-sync: every browser on this session types into this one line, " +
+        "kept by the daemon until it restarts. Click to return everyone to local-only"
+      : "local-only: this line stays in this browser. Click to share it with " +
+        "every browser on this session";
+  }
+  const field = $("term-input-field");
+  if (field && field.classList) {
+    field.classList.toggle("line-shared", shared);
+    field.placeholder = shared
+      ? "shared with every browser on this session — Enter to send, Ctrl+J for a newline"
+      : "type for this session — Enter to send, Ctrl+J for a newline";
+  }
+  const keep = $("term-local-keep");
+  if (keep && keep.classList) {
+    keep.classList.toggle("hidden", !(shared && keep.value));
+    if (shared && keep.value) autogrowTermInput(keep);
+  }
+}
+
+/* Send the field's text (or `extra.text`) as the shared line. The terminal
+   socket when it is open -- one frame per edit, no request round trip --
+   and the HTTP door when it is not. */
+function pushLineSync(extra = {}) {
+  if (!lineSyncShared()) return;
+  const field = $("term-input-field");
+  if (!field) return;
+  const msg = { type: "line_sync", text: field.value, client: LINE_SYNC_CLIENT, ...extra };
+  lineSync.lastPushed = msg.text;
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(msg));
+    return;
+  }
+  const name = currentName;
+  const body = { text: msg.text, client: LINE_SYNC_CLIENT };
+  if (typeof msg.if_text === "string") body.if_text = msg.if_text;
+  api(`/api/sessions/${encodeURIComponent(name)}/line-sync`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }).then((resp) => resp.json()).then((doc) => {
+    if (name === currentName && doc && doc.type === "line_sync") applyLineSync(doc);
+  }).catch(() => { /* the next edit tries again */ });
+}
+
+/* The line was sent. A local line just empties. A shared one empties only
+   if it still holds what was sent -- another browser may have started the
+   next line while the send was in flight -- and the daemon applies the same
+   condition (`if_text`), so nobody's new line is wiped by an old send. */
+function clearSentLine(field, sent) {
+  if (field && field.id === "term-input-field" && lineSyncShared()) {
+    if (field.value === sent) field.value = "";
+    autogrowTermInput(field);
+    pushLineSync({ text: "", if_text: sent });
+    return;
+  }
+  field.value = "";
+  autogrowTermInput(field);
+}
+
+async function toggleLineSync() {
+  if (!currentName) return;
+  const name = currentName;
+  const mode = lineSyncShared() ? "local" : "remote";
+  try {
+    const resp = await api(`/api/sessions/${encodeURIComponent(name)}/line-sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode, client: LINE_SYNC_CLIENT }),
+    });
+    const doc = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      termInputNote($("term-input-note"), doc.error || "the sync mode was not changed", true);
+      return;
+    }
+    if (name === currentName) applyLineSync(doc);
+  } catch {
+    termInputNote($("term-input-note"), "the sync mode was not changed — the daemon is unreachable", true);
+  }
 }
 
 /* ---- images for the session: Alt+V, a pasted file, the file picker ----
@@ -13775,9 +13975,22 @@ if ($("term-input-field")) {
   // listener that only sees the event on its way back up.
   window.addEventListener("keydown", onWindowCtrlJ, true);
   $("term-input-field").addEventListener("paste", onTermInputPaste);
-  $("term-input-field").addEventListener("input", (ev) =>
-    autogrowTermInput(ev.currentTarget || ev.target));
+  $("term-input-field").addEventListener("input", (ev) => {
+    autogrowTermInput(ev.currentTarget || ev.target);
+    pushLineSync();
+  });
+  // An IME's syllable is held back from incoming shared edits while it is
+  // composed, and pushed whole when it commits (see "session line sync").
+  $("term-input-field").addEventListener("compositionstart", () => {
+    lineSyncComposing = true;
+  });
+  $("term-input-field").addEventListener("compositionend", () => {
+    lineSyncComposing = false;
+    pushLineSync();
+  });
 }
+if ($("term-sync-toggle"))
+  $("term-sync-toggle").addEventListener("click", toggleLineSync);
 // Capture phase: ahead of xterm's own paste listener on its textarea.
 if ($("terminal"))
   $("terminal").addEventListener("paste", onTerminalPaste, true);
@@ -15434,6 +15647,7 @@ function attach(name) {
     termInputField.value = "";
     if (typeof autogrowTermInput === "function") autogrowTermInput(termInputField);
   }
+  if (typeof resetLineSync === "function") resetLineSync(name);
   if (typeof refreshPromptPresets === "function") refreshPromptPresets();
   if (typeof refreshPrompterPrompts === "function") refreshPrompterPrompts();
   // The common hop: this session has been up before, so bring its parked
