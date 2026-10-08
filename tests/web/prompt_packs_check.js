@@ -232,9 +232,14 @@ check("the role locks its pack on and names itself", () => {
   assert.equal(beads.checked, true);
   assert.equal(beads.disabled, true);
   assert.ok(chips()[0].className.includes("locked"));
-  assert.match(text(row), /Beads board 🔒 leader installed/);
-  const lock = all(row, (n) => n.className === "pack-chip-badge lock")[0];
-  assert.equal(lock.title, "required by leader");
+  // The lock is an icon in the slot every chip has; the role is in its
+  // tooltip and, in full, in the summary (claunch-uvm3w).
+  assert.match(text(row), /🔒 Beads board installed/);
+  const slots = all(row, (n) => n.className === "pack-chip-lock");
+  assert.equal(slots.length, chips().length, "every chip has the slot");
+  assert.deepEqual(slots.map((n) => n.textContent), ["🔒", "", ""]);
+  assert.equal(slots[0].title, "required by leader");
+  assert.match(summary(), /beads \(role leader\)/);
   assert.deepEqual(env.packs(form), ["beads"]);
   form.role.value = "";
 });
@@ -247,7 +252,7 @@ check("a ticked subrole's uninstalled pack is shown as claunch's copy", () => {
   assert.deepEqual(b.map((x) => x.name), GENERAL);
   assert.equal(b[2].checked, true);
   assert.equal(b[2].disabled, true);
-  assert.match(text(row), /Unreal — operator 🔒 unreal claunch/);
+  assert.match(text(row), /🔒 Unreal — operator claunch/);
   assert.doesNotMatch(text(row), /refused/);
   assert.equal(summary(),
     "The opening will include: unreal-operator (role unreal, claunch's copy).");

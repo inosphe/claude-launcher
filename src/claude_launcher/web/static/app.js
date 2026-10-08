@@ -10049,8 +10049,11 @@ function renderPromptPackRow() {
   row.appendChild(el("span", "new-check-label", "Prompt packs"));
   const body = el("div", "pack-groups");
 
-  /* One chip: the box (the form's state), the title, why it is locked and
-     where its text comes from as badges, and a button that shows the text. */
+  /* One chip: the box (the form's state), the lock's slot, the title, where
+     its text comes from as a badge, and a button that shows the text. The
+     lock is an icon in a slot every chip has, so a role locking a chip does
+     not widen it; the roles that locked it are in its tooltip and, in full,
+     in the summary block below. */
   const chip = (p, opts) => {
     const wrap = el("span", "pack-chip" + (opts.checked ? " on" : "") +
       (opts.locked ? " locked" : "") +
@@ -10066,12 +10069,10 @@ function renderPromptPackRow() {
     box.disabled = !!opts.locked;
     box.addEventListener("change", () => opts.onChange(box.checked));
     label.appendChild(box);
+    const lock = el("span", "pack-chip-lock", opts.locked ? "🔒" : "");
+    if (opts.locked) lock.title = `required by ${opts.locked.join(", ")}`;
+    label.appendChild(lock);
     label.appendChild(el("span", "pack-chip-title", p.title || p.id));
-    if (opts.locked) {
-      const lock = el("span", "pack-chip-badge lock", `🔒 ${opts.locked.join(", ")}`);
-      lock.title = `required by ${opts.locked.join(", ")}`;
-      label.appendChild(lock);
-    }
     const src = el("span", `pack-chip-badge src-${opts.source}`, opts.sourceLabel);
     src.title = opts.sourceTitle;
     label.appendChild(src);
