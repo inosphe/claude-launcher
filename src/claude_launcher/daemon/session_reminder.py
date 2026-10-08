@@ -20,11 +20,14 @@ import asyncio
 import contextlib
 import logging
 import time
+from dataclasses import replace
 from typing import Dict, List, Optional, Tuple
 
-from .. import digests, store
-from ..cflow import engine as cflow_engine
-from . import cflow_clock, mesh_roles, rebrief, score_goal
+from pathlib import Path
+
+from .. import digests, prompt_packs, store, workspaces
+from ..cflow import engine as cflow_engine, state as cflow_state
+from . import cflow_clock, daemon_prompt, mesh_roles, rebrief, score_goal
 from .session import STATUS_BUSY
 
 log = logging.getLogger("claunch.daemon.session-reminder")
@@ -42,6 +45,157 @@ def role_reminder_policy(cfg: dict) -> Tuple[bool, float]:
     if interval > 0:
         interval = max(interval, cflow_engine.REMINDER_MIN_INTERVAL)
     return enabled and interval > 0, interval
+
+
+def pack_reminder_policy(cfg: dict) -> Tuple[bool, float]:
+    """Effective machine policy for the prompt pack source.
+
+    Its own switch and interval, on the same lower bound as the role source:
+    a session's packs are standing rules recorded at creation, independent of
+    whether it holds a role or drives a run.
+    """
+    enabled = bool(cfg.get("prompt_pack_reminder", True))
+    interval = float(cfg.get("prompt_pack_reminder_interval") or 0)
+    if interval > 0:
+        interval = max(interval, cflow_engine.REMINDER_MIN_INTERVAL)
+    return enabled and interval > 0, interval
+
+
+def pack_entries(sdef) -> List[dict]:
+    """The prompt packs one session holds, as the reminder names them.
+
+    Read from the definition's records, the same text ``rebrief`` serves
+    back, so an id named here is always one that tool can answer.
+    """
+    out: List[dict] = []
+    for rec in getattr(sdef, "prompt_packs", ()) or ():
+        text = (rec.get("text") or "").strip()
+        if not rec.get("id") or not text:
+            continue
+        out.append(
+            {
+                "id": str(rec["id"]),
+                "digest": prompt_packs.text_id(text),
+                "source": rec.get("source") or prompt_packs.WORKSPACE,
+                "required_by": list(rec.get("required_by") or ()),
+            }
+        )
+    return out
+
+
+def pack_key(entries: List[dict]) -> tuple:
+    """The pack source's position key: which packs, with which text.
+
+    The source is left out on purpose. A claunch copy that a workspace
+    installed unchanged is a new origin for the same text, and the agent
+    holds that text under the same id, so there is nothing to tell it.
+    """
+    return tuple((e["id"], e["digest"]) for e in entries)
+
+
+def _session_workspace(sdef) -> Optional[Path]:
+    """The registered workspace a session's directory belongs to, if any.
+
+    The same lookup creation uses to choose the packs (``api.
+    _session_prompt_packs``), so a recorded workspace copy is compared
+    against the file it was read from.
+    """
+    try:
+        owner = workspaces.owning(str(cflow_state.resolve_cwd(sdef.cwd or None)))
+    except Exception:  # noqa: BLE001 - an unresolvable cwd has no workspace
+        return None
+    return Path(owner.path) if owner is not None else None
+
+
+def _current_record(rec: dict, workspace: Optional[Path]) -> Optional[dict]:
+    """The record ``rec`` should be now, or None when its copy is gone."""
+    source = rec.get("source") or prompt_packs.WORKSPACE
+    if source == prompt_packs.DAEMON:
+        pack = daemon_prompt.pack()
+        if pack is None:
+            return None
+        return {**rec, "text": pack.body}
+    pack = prompt_packs.current_copy(workspace, rec)
+    if pack is None:
+        return None
+    if pack.source == prompt_packs.WORKSPACE:
+        # A workspace copy's record carries no origin keys
+        # (prompt_packs.records): its file explains why it is there.
+        return {"id": rec["id"], "text": pack.body}
+    return {**rec, "text": pack.body, "source": pack.source}
+
+
+def refresh_packs(session) -> Tuple[Optional[tuple], List[dict]]:
+    """Bring one session's recorded packs up to the copies they follow.
+
+    Returns ``(records, notices)``: the new records when anything moved
+    (``None`` otherwise), and one notice per pack whose text changed or whose
+    copy is gone. A change of origin with the same text updates the record
+    and says nothing (:func:`pack_key`). The caller stores the records; this
+    only reads files.
+    """
+    sdef = session.sdef
+    recorded = tuple(getattr(sdef, "prompt_packs", ()) or ())
+    if not recorded:
+        return None, []
+    workspace = _session_workspace(sdef)
+    out: List[dict] = []
+    notices: List[dict] = []
+    moved = False
+    for rec in recorded:
+        try:
+            now = _current_record(rec, workspace)
+        except Exception:  # noqa: BLE001 - an unreadable copy is not a removal
+            out.append(rec)
+            continue
+        old_id = prompt_packs.text_id(rec.get("text") or "")
+        if now is None:
+            moved = True
+            notices.append({"id": rec["id"], "change": "removed", "old": old_id})
+            continue
+        new_id = prompt_packs.text_id(now.get("text") or "")
+        if now != rec:
+            moved = True
+        if new_id != old_id:
+            notices.append(
+                {"id": rec["id"], "change": "changed", "old": old_id, "new": new_id}
+            )
+        out.append(now)
+    return (tuple(out) if moved else None), notices
+
+
+def pack_section(entries: List[dict], notices: List[dict]) -> List[str]:
+    """The Prompt packs section: ids only, never the text."""
+    lines: List[str] = []
+    for note in notices:
+        if note["change"] == "removed":
+            lines.append(
+                f"removed: prompt pack {note['id']} (text id {note['old']}) no "
+                "longer applies to this session -- its copy is gone. Stop "
+                "acting from it."
+            )
+        else:
+            lines.append(
+                f"changed: prompt pack {note['id']} was edited; its text id is "
+                f"now {note['new']} (was {note['old']}). The text you hold "
+                f"under {note['old']} is replaced: call the mesh 'rebrief' "
+                f"tool with id {note['new']} and act from what it returns."
+            )
+    for entry in entries:
+        why = ""
+        if entry.get("required_by"):
+            why = f", required by role {', '.join(entry['required_by'])}"
+        lines.append(
+            f"prompt pack {entry['id']}: text id {entry['digest']} "
+            f"({entry['source']}{why})"
+        )
+    if entries:
+        lines.append(
+            "recovery: find each id attached to its pack text in this "
+            "conversation. If it is absent, call the mesh 'rebrief' tool with "
+            "that id; this id line alone is not the pack."
+        )
+    return lines
 
 
 def role_entries(name: str, manager, mesh_mgr, *, session=None) -> List[dict]:
@@ -236,14 +390,18 @@ def situation_lines(name: str, manager, mesh_mgr, open_asks: int = 0) -> List[st
 
 
 def context_id_lines(name: str, manager, mesh_mgr) -> List[str]:
-    """IDs for stable non-role session text, currently the opening task."""
+    """IDs for stable session text no other section names: the opening task.
+
+    Stances are the Role section's, and prompt packs have their own source
+    and section (:func:`pack_section`).
+    """
     try:
         ids = [
             (ident, kind)
             for ident, kind in rebrief.given_ids(
                 name, manager=manager, mesh_mgr=mesh_mgr
             )
-            if not kind.startswith("stance (")
+            if not kind.startswith(("stance (", "prompt pack ("))
         ]
     except Exception:  # noqa: BLE001 - context decoration never sinks delivery
         ids = []
@@ -267,6 +425,7 @@ def reminder_block(
     context: Optional[List[str]] = None,
     cflow_guidance: bool = False,
     goal: str = "",
+    packs: Optional[List[str]] = None,
 ) -> str:
     """Render one session reminder with peer Role and Cflow sections."""
     sections: List[Tuple[str, List[str]]] = []
@@ -275,6 +434,9 @@ def reminder_block(
     role_lines = role_section(roles, cflow_guidance=cflow_guidance)
     if role_lines:
         sections.append(("Role", role_lines))
+    pack_lines = list(packs or [])
+    if pack_lines:
+        sections.append(("Prompt packs", pack_lines))
     cflow_lines = _cflow_section(cflow)
     if cflow_lines:
         sections.append(("Cflow", cflow_lines))
@@ -308,6 +470,7 @@ class SessionReminderService:
         # table directly.  The table still belongs to the cflow source.
         self._seen = self.cflow._seen
         self._roles: Dict[str, dict] = {}
+        self._packs: Dict[str, dict] = {}
         self._goals: Dict[str, dict] = {}
         self._task: Optional[asyncio.Task] = None
 
@@ -375,6 +538,11 @@ class SessionReminderService:
             role["at"] = stamp
             role["held_at"] = None
             sources.append("role")
+        packs = self._packs.get(name)
+        if packs is not None:
+            packs["at"] = stamp
+            packs["held_at"] = None
+            sources.append("prompt_packs")
         goal = self._goals.get(name)
         if goal is not None:
             goal.update(at=stamp, held_at=None)
@@ -432,6 +600,130 @@ class SessionReminderService:
 
     def _session_for(self, cwd: str, scope: str):
         return self.cflow._session_for(cwd, scope)
+
+    # Prompt pack source --------------------------------------------------
+    def _store_packs(self, session, records: tuple) -> None:
+        """Write a session's refreshed pack records and persist them."""
+        session.sdef = replace(session.sdef, prompt_packs=records)
+        persist = getattr(self.manager, "persist", None)
+        if callable(persist):
+            try:
+                persist()
+            except Exception:  # noqa: BLE001 - the next persist writes it
+                log.warning("prompt pack refresh: persist failed", exc_info=True)
+
+    def scan_packs(self, now: float, cfg: dict) -> List[Tuple[str, List[dict]]]:
+        """Refresh recorded packs, arm, and return the sessions due.
+
+        A changed or removed copy is applied to the session's record here,
+        whether or not the source is enabled: ``rebrief`` answers from that
+        record, and it must not go on serving a text the workspace replaced.
+        What the session is told about it waits as a notice on its timer
+        entry until a delivery lands.
+        """
+        enabled, interval = pack_reminder_policy(cfg)
+        try:
+            sessions = list(self.manager.list())
+        except Exception:  # noqa: BLE001
+            return []
+        due: List[Tuple[str, List[dict]]] = []
+        live = set()
+        for session in sessions:
+            if getattr(session, "exited", False):
+                continue
+            name = session.sdef.name
+            try:
+                records, notices = refresh_packs(session)
+            except Exception:  # noqa: BLE001 - one session's files, not all
+                log.warning("prompt pack refresh failed for %r", name, exc_info=True)
+                records, notices = None, []
+            if records is not None:
+                self._store_packs(session, records)
+            entries = pack_entries(session.sdef)
+            if not enabled:
+                continue
+            if not entries and not notices and name not in self._packs:
+                continue
+            live.add(name)
+            key = pack_key(entries)
+            entry = self._packs.get(name)
+            if entry is None:
+                entry = self._packs[name] = {
+                    "key": key,
+                    "at": now,
+                    "fired_at": None,
+                    "held_at": None,
+                    "activity": self._session_activity(session),
+                    # The opening carried these packs beside their ids.
+                    "settled": True,
+                    "moved_for": None,
+                    "notices": [],
+                }
+            if notices:
+                entry["notices"].extend(notices)
+            if entry["key"] != key or notices:
+                # Like a role change: current state the session has not
+                # received is due now, and earns no repeat rule.
+                entry.update(
+                    {"key": key, "at": now - interval, "held_at": None,
+                     "moved_for": None}
+                )
+            if not entries and not entry["notices"]:
+                # Every pack is gone and the session has been told.
+                del self._packs[name]
+                live.discard(name)
+                continue
+            due_now = now - entry["at"] >= interval
+            cflow_clock.settle_activity(session, entry, now, due=due_now)
+            cflow_clock.observe_movement(session, entry, now)
+            if due_now and not entry["notices"]:
+                # The same two no-progress rules as the role source.
+                if not cflow_clock.moved_enough(session, entry):
+                    continue
+                activity = self._session_activity(session)
+                fired_at = entry.get("fired_at")
+                unmoved = (
+                    fired_at is not None
+                    and activity is not None
+                    and activity == entry.get("activity")
+                )
+                if not unmoved:
+                    unmoved = cflow_clock.nothing_moved_since_settle(
+                        session, entry
+                    ) or cflow_clock.answered_only_the_reminder(
+                        session, now, fired_at
+                    )
+                if unmoved:
+                    entry["at"] = now
+                    entry["held_at"] = None
+                    continue
+            if due_now:
+                due.append((name, entries))
+        for name in list(self._packs):
+            if name not in live:
+                del self._packs[name]
+        return due
+
+    def _mark_packs(self, name: str, *, now: Optional[float] = None) -> None:
+        entry = self._packs.get(name)
+        if entry is None:
+            return
+        stamp = time.monotonic() if now is None else now
+        entry["at"] = stamp
+        entry["fired_at"] = stamp
+        entry["notices"] = []
+        try:
+            session = self.manager.get(name)
+        except Exception:  # noqa: BLE001 - the session may exit after send
+            session = None
+        if session is not None:
+            entry["activity"] = self._session_activity(session)
+        entry["settled"] = False
+        entry["moved_for"] = None
+        entry["held_at"] = None
+        if not entry["key"]:
+            # Nothing is left to remind of once the removal has been told.
+            del self._packs[name]
 
     # Role source ---------------------------------------------------------
     def scan_roles(self, now: float, cfg: dict) -> List[Tuple[str, List[dict]]]:
@@ -684,6 +976,11 @@ class SessionReminderService:
             if cfg is not None
             else {}
         )
+        packs_due = (
+            {name: entries for name, entries in self.scan_packs(now, cfg)}
+            if cfg is not None
+            else {}
+        )
         goals_due = self.scan_goals(now, cfg) if cfg is not None else set()
 
         reminders: Dict[str, tuple] = {}
@@ -693,7 +990,9 @@ class SessionReminderService:
             elif not self.session_paused(scope):
                 reminders[scope] = (cwd, block)
 
-        for name in sorted(set(reminders) | set(roles_due) | goals_due):
+        for name in sorted(
+            set(reminders) | set(roles_due) | set(packs_due) | goals_due
+        ):
             if self.session_paused(name):
                 continue
             cflow_item = reminders.get(name)
@@ -704,6 +1003,8 @@ class SessionReminderService:
                     cwd=cwd,
                     cflow_block=block,
                     role_due=name in roles_due,
+                    packs=packs_due.get(name),
+                    packs_due=name in packs_due,
                     now=now,
                 )
             else:
@@ -711,6 +1012,8 @@ class SessionReminderService:
                     name,
                     roles=roles_due.get(name),
                     role_due=name in roles_due,
+                    packs=packs_due.get(name),
+                    packs_due=name in packs_due,
                     now=now,
                 )
 
@@ -750,6 +1053,8 @@ class SessionReminderService:
         cflow_block: str = "",
         roles: Optional[List[dict]] = None,
         role_due: bool = False,
+        packs: Optional[List[dict]] = None,
+        packs_due: bool = False,
         now: Optional[float] = None,
     ) -> None:
         # One clock for the whole decision.  The scan that found this source
@@ -783,6 +1088,8 @@ class SessionReminderService:
                 cflow_entry["held_at"] = stamp
             if role_due and name in self._roles:
                 self._roles[name]["held_at"] = stamp
+            if packs_due and name in self._packs:
+                self._packs[name]["held_at"] = stamp
             if goal_entry is not None:
                 goal_entry["held_at"] = stamp
             log.debug("session reminder held for %r: session is not working", name)
@@ -807,6 +1114,17 @@ class SessionReminderService:
             role_entry["at"] = at
             role_entry["held_at"] = None
             resumed = True
+        pack_entry = self._packs.get(name) if packs_due else None
+        if (
+            pack_entry is not None
+            and pack_entry.get("held_at") is not None
+            and not pack_entry.get("notices")
+        ):
+            # A held change notice does not go stale when the session
+            # resumes: it is news, so it rides the next turn instead.
+            pack_entry["at"] = at
+            pack_entry["held_at"] = None
+            resumed = True
         if resumed:
             log.debug(
                 "session reminder re-armed for %r after idle session resumed", name
@@ -823,9 +1141,18 @@ class SessionReminderService:
             if (cflow_full or role_due)
             else []
         )
+        pack_lines = (
+            pack_section(
+                packs if packs is not None else pack_entries(session.sdef),
+                list((self._packs.get(name) or {}).get("notices") or ()),
+            )
+            if packs_due
+            else []
+        )
+
         def render():
             active = score_goal.active(session.sdef)
-            if not cflow_block and not role_due and not active:
+            if not cflow_block and not role_due and not pack_lines and not active:
                 return ""
             return reminder_block(
                 name,
@@ -835,6 +1162,7 @@ class SessionReminderService:
                 situation=situation,
                 context=context,
                 cflow_guidance=cflow_full,
+                packs=pack_lines,
             )
 
         # Score may change while delivery waits for the person's input draft.
@@ -860,11 +1188,14 @@ class SessionReminderService:
             self._mark_cflow(cwd, name, "reminder", now=at)
         if current_roles:
             self._mark_role(name, now=at)
+        if packs_due:
+            self._mark_packs(name, now=at)
         log.info(
-            "session reminder delivered to %r (role=%s, cflow=%s)",
+            "session reminder delivered to %r (role=%s, cflow=%s, packs=%s)",
             name,
             bool(current_roles),
             bool(cflow_block),
+            bool(packs_due),
         )
 
     def _mark_cflow(

@@ -622,3 +622,30 @@ def pack_copy(workspace: Optional[Path], pack_id: str) -> Pack:
         raise PackError(
             f"{pack_id} is neither {where} nor shipped with claunch"
         ) from None
+
+
+def current_copy(workspace: Optional[Path], record: dict) -> Optional[Pack]:
+    """The copy a session's recorded pack follows now, or None when gone.
+
+    Which files are watched depends on where the recorded text came from.
+    A workspace copy follows the workspace's file only: it never falls back
+    to claunch's copy, because the workspace chose to replace that text. A
+    claunch copy follows both, and a workspace copy that has appeared since
+    wins -- from then on the record is a workspace copy and follows only
+    that file. The daemon's own prompt is not a file here and is resolved
+    by the daemon (:mod:`claude_launcher.daemon.daemon_prompt`).
+    """
+    pack_id = str(record.get("id") or "")
+    source = record.get("source") or WORKSPACE
+    if source == DAEMON or not _ID.match(pack_id):
+        return None
+    if workspace is not None:
+        for pack in installed(workspace):
+            if pack.id == pack_id:
+                return pack
+    if source == WORKSPACE:
+        return None
+    try:
+        return replace(shipped(pack_id), source=PACKAGE)
+    except PackError:
+        return None
