@@ -29324,6 +29324,47 @@ document.addEventListener("keydown", (e) => {
   cf2PaneClose();
 });
 
+// Keep page and embedded-panel preferences separate. Changing layout moves
+// the existing columns so drafts, open reports and chart selection survive.
+const cf2Layouts = {};
+function cflow2LayoutControls(root, cols, main, chart, host) {
+  const key = "claunch.cflow2.layout." + host;
+  let mode = cf2Layouts[host];
+  if (!mode) {
+    try { mode = localStorage.getItem(key); } catch {}
+    mode = mode === "stacked" ? "stacked" : "columns";
+  }
+  const group = el("div", "cf2-layout");
+  group.setAttribute("role", "group");
+  group.setAttribute("aria-label", "Chart layout");
+  group.appendChild(el("span", "wf-note", "Layout"));
+  const buttons = [];
+  const apply = (value) => {
+    cf2Layouts[host] = value;
+    root.classList.toggle("cf2-stacked", value === "stacked");
+    if (value === "stacked") cols.append(chart, main);
+    else cols.append(main, chart);
+    for (const [button, option] of buttons) {
+      button.setAttribute("aria-pressed", String(value === option));
+    }
+  };
+  for (const [value, label] of [["columns", "2 columns"], ["stacked", "1 column"]]) {
+    const button = el("button", "wf-btn sm", label);
+    button.type = "button";
+    button.title = value === "stacked"
+      ? "Full-width chart above run details"
+      : "Run details and chart side by side when space allows";
+    button.addEventListener("click", () => {
+      apply(value);
+      try { localStorage.setItem(key, value); } catch {}
+    });
+    buttons.push([button, value]);
+    group.appendChild(button);
+  }
+  apply(mode);
+  return group;
+}
+
 function renderCflow2Into(box, data, ui) {
   ui = ui || {};
   // A hand is in a box on this view (a reason being typed, an outcome being
@@ -29449,6 +29490,7 @@ function renderCflow2Into(box, data, ui) {
   const main = el("div", "cf2-col-main");
   const side = el("div", "cf2-col-chart");
   cols.append(main, side);
+  if (data.chart) root.appendChild(cflow2LayoutControls(root, cols, main, side, host));
   root.appendChild(cols);
 
   // -- waiting on a person: choices, questions, limits ----------------------
