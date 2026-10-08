@@ -580,6 +580,7 @@ def build_app(
     r.add_get("/api/daemon-prompt", h_daemon_prompt_get)
     r.add_put("/api/daemon-prompt", h_daemon_prompt_put)
     r.add_post("/api/prompt-packs/install", h_prompt_packs_install)
+    r.add_post("/api/prompt-packs/install-all", h_prompt_packs_install_all)
     r.add_post("/api/prompt-packs/remove", h_prompt_packs_remove)
     r.add_put("/api/prompt-packs/role-packs", h_prompt_packs_role_packs)
     r.add_get("/api/briefing/llm", h_briefing_llm)
@@ -2847,6 +2848,17 @@ async def h_prompt_packs_install(request: web.Request) -> web.Response:
     except prompt_packs.PackError as exc:
         return json_error(400, str(exc))
     return json_response({"pack": pack_id, "was": before, **_prompt_packs_doc()})
+
+
+async def h_prompt_packs_install_all(request: web.Request) -> web.Response:
+    """Install all shipped packs in one registered workspace, keeping edits."""
+    body = await _json_body(request)
+    try:
+        root, _ = _pack_target(body)
+    except prompt_packs.PackError as exc:
+        return json_error(400, str(exc))
+    results = await asyncio.to_thread(prompt_packs.install_all, root)
+    return json_response({"batch": results, **await asyncio.to_thread(_prompt_packs_doc)})
 
 
 async def h_prompt_packs_remove(request: web.Request) -> web.Response:

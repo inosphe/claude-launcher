@@ -4567,6 +4567,54 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .prompt-pack-table td.prompt-pack-missing > div:first-child { color: #7d8590; }
 .prompt-pack-catalog li { margin: 2px 0; }
 .prompt-pack-add-role { margin: 6px 0; }
+/* Installation settings: readable controls and bounded overflow at every width. */
+.install-panel, .ws-add.prompt-packs, .ws-add.daemon-prompt {
+  max-width: 1160px; box-sizing: border-box; padding: 20px;
+  background: #171b22; border: 1px solid #303743; border-radius: 12px;
+}
+.install-panel h3, .ws-add.prompt-packs h3, .ws-add.daemon-prompt h3 {
+  margin: 0 0 8px; font-size: 16px; color: #e6edf3; text-transform: none;
+}
+.install-panel .wf-note, .prompt-packs .wf-note, .daemon-prompt .wf-note {
+  font-size: 12px; line-height: 1.6; overflow-wrap: anywhere;
+}
+.install-panel .wf-btn, .prompt-packs .wf-btn, .daemon-prompt .wf-btn {
+  font-size: 12px; line-height: 18px; padding: 5px 10px; white-space: nowrap;
+  flex-shrink: 0; margin: 0;
+}
+.install-table-scroll { max-width: 100%; overflow-x: auto; margin: 14px 0; }
+.install-table { font-size: 12px; }
+.install-table th, .prompt-pack-roles th { white-space: nowrap; }
+.install-table td:first-child { min-width: 160px; }
+.install-table .install-cmd { min-width: 220px; font-size: 11px; line-height: 1.6; }
+.install-table td.install-actions { white-space: nowrap; }
+.install-table .wf-btn + .wf-btn { margin-left: 6px; }
+.prompt-pack-guide { margin: 14px 0; font-size: 12px; color: #9da7b5; }
+.prompt-pack-guide summary { cursor: pointer; padding: 6px 0; }
+.prompt-pack-catalog { padding-left: 20px; line-height: 1.7; }
+.prompt-pack-workspace { margin-top: 16px; border: 1px solid #303743; border-radius: 8px; overflow: hidden; }
+.prompt-pack-workspace-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  flex-wrap: wrap; padding: 14px; background: #1e242e;
+}
+.prompt-pack-workspace-name { min-width: 0; flex: 1 1 180px; font-size: 14px; }
+.prompt-pack-workspace-name .wf-note { margin: 3px 0 0; }
+.prompt-pack-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr)); gap: 1px; background: #303743; }
+.prompt-pack-item { min-width: 0; padding: 14px; background: #171b22; }
+.prompt-pack-title { display: block; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.prompt-pack-status { font-size: 11px; line-height: 1.5; margin: 6px 0 10px; white-space: nowrap; color: #9da7b5; }
+.prompt-pack-current .prompt-pack-status { color: #7ee787; }
+.prompt-pack-stale .prompt-pack-status, .prompt-pack-edited .prompt-pack-status { color: #e3b341; }
+.prompt-packs div.install-actions, .daemon-prompt div.install-actions { display: flex; flex-wrap: wrap; gap: 6px; white-space: normal; }
+.prompt-pack-settings { border-top: 1px solid #303743; margin-top: 24px; padding-top: 8px; }
+.prompt-pack-settings h4 { font-size: 13px; margin: 16px 0 8px; }
+.prompt-pack-settings .check { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; font-size: 12px; }
+.prompt-pack-settings .new-check-list { display: flex; flex-wrap: wrap; gap: 8px 14px; }
+.prompt-pack-roles { font-size: 11px; }
+.prompt-pack-roles td { text-align: center; }
+.prompt-pack-roles td:first-child { text-align: left; white-space: nowrap; }
+.prompt-pack-bulk { border-color: #43875b; background: #234832; color: #b4f2c8; }
+.prompt-pack-bulk:disabled { opacity: .6; }
 /* The create form's Subroles and Prompt packs rows: a label, then boxes. */
 .new-check-row { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; margin: 4px 0; font-size: 12px; }
 .new-check-row .new-check-label { min-width: 90px; }

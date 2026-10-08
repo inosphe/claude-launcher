@@ -23862,12 +23862,10 @@ function installDetailCard(d) {
 
 function installPanel() {
   const panel = el("div", "install-panel");
+  panel.appendChild(el("h3", null, "Installation & updates"));
   panel.appendChild(el(
     "p", "wf-note",
-    "Every command that installs or refreshes claunch, one row each. The " +
-    "counts come from a dry run of the real install code: nothing is written " +
-    "until you press Run, which does from the daemon what the command line " +
-    "does from a shell. Sessions already running keep what they started with."
+    "Preview changes before installing. Counts show files to create, update or delete. Changes apply to new sessions."
   ));
   if (installError) panel.appendChild(el("p", "wf-error", installError));
   if (installDetail) panel.appendChild(installDetailCard(installDetail));
@@ -23912,7 +23910,9 @@ function installPanel() {
     tr.appendChild(act);
     table.appendChild(tr);
   }
-  panel.appendChild(table);
+  const scroll = el("div", "install-table-scroll");
+  scroll.appendChild(table);
+  panel.appendChild(scroll);
   const refresh = el("button", "wf-btn clear", "Re-check");
   refresh.addEventListener("click", () => refreshInstallOverview());
   panel.appendChild(refresh);
@@ -24047,7 +24047,8 @@ async function promptPackCall(method, path, payload, busy) {
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
     promptPacksDoc = data;
-    promptPacksError = "";
+    promptPacksError = (data.batch || []).filter((r) => r.error)
+      .map((r) => `${r.id}: ${r.error}`).join(" · ");
     return true;
   } catch (err) {
     promptPacksError = String(err);
@@ -24086,12 +24087,8 @@ function promptPacksCard() {
   const card = el("section", "ws-add prompt-packs");
   card.appendChild(el("h3", null, "Prompt packs"));
   card.appendChild(el("p", "wf-note",
-    "Guidance that ships with claunch as Markdown. Installing copies it into " +
-    "the workspace's .claunch/prompts/ (profiles are never a target). The " +
-    "create form then offers every pack installed in the session's " +
-    "workspace as a checkbox, and the ticked ones open the session. A copy " +
-    "edited in the workspace is kept on update unless you confirm; a .md " +
-    "file you add to that directory yourself is offered too."));
+    "Install guidance for each workspace, then choose packs when creating a session. " +
+    "Install all adds missing packs and updates older copies. Edited and local packs are kept."));
   if (promptPacksError) card.appendChild(el("p", "wf-error", promptPacksError));
   const doc = promptPacksDoc;
   if (!doc) {
@@ -24116,34 +24113,41 @@ function promptPacksCard() {
     li.appendChild(document.createTextNode(` (${p.id}) — ${p.description || ""}`));
     about.appendChild(li);
   }
-  card.appendChild(about);
+  const catalogDetails = el("details", "prompt-pack-guide");
+  catalogDetails.appendChild(el("summary", null, `Pack descriptions (${catalog.length})`));
+  catalogDetails.appendChild(about);
+  card.appendChild(catalogDetails);
 
   if (!(doc.workspaces || []).length) {
     card.appendChild(el("p", "wf-note",
       "No workspace is registered yet. Add one under Settings ▸ Workspaces first."));
   } else {
-    const table = el("table", "md-table prompt-pack-table");
-    const head = el("tr", null);
-    head.appendChild(el("th", null, "Workspace"));
-    for (const id of ids) head.appendChild(el("th", null, (titles[id] || {}).title || id));
-    table.appendChild(head);
     for (const ws of doc.workspaces) {
-      const tr = el("tr", null);
-      const name = el("td", null);
+      const workspace = el("section", "prompt-pack-workspace");
+      const header = el("div", "prompt-pack-workspace-head");
+      const name = el("div", "prompt-pack-workspace-name");
       name.appendChild(el("b", null, ws.name));
       name.appendChild(el("div", "wf-note", ws.path));
-      tr.appendChild(name);
+      header.appendChild(name);
       const rows = Object.fromEntries((ws.packs || []).map((r) => [r.id, r]));
+      const pending = shippedIds.filter((id) => !rows[id] || ["missing", "stale"].includes(rows[id].status)).length;
+      const bulk = el("button", "wf-btn prompt-pack-bulk", promptPacksBusy === `${ws.name}/*`
+        ? "Installing…" : pending ? `Install all (${pending})` : "Up to date");
+      bulk.disabled = !!promptPacksBusy || !pending;
+      bulk.addEventListener("click", () => promptPackCall("POST", "/api/prompt-packs/install-all",
+        { workspace: ws.name }, `${ws.name}/*`));
+      header.appendChild(bulk);
+      workspace.appendChild(header);
+      const grid = el("div", "prompt-pack-grid");
       for (const id of ids) {
         const row = rows[id] || { id, status: "missing", local: true };
-        const td = el("td", `prompt-pack-${row.status}`);
+        const td = el("div", `prompt-pack-item prompt-pack-${row.status}`);
         const busy = promptPacksBusy === `${ws.name}/${id}`;
         if (!rows[id] && localIds.includes(id)) {
-          td.appendChild(el("span", "wf-note", "—"));
-          tr.appendChild(td);
           continue;
         }
-        td.appendChild(el("div", null, busy ? "…" : (PROMPT_PACK_STATUS[row.status] || row.status)));
+        td.appendChild(el("b", "prompt-pack-title", (titles[id] || {}).title || id));
+        td.appendChild(el("div", "prompt-pack-status", busy ? "Working…" : (PROMPT_PACK_STATUS[row.status] || row.status)));
         const act = el("div", "install-actions");
         const add = (label, verb) => {
           const b = el("button", "wf-btn", label);
@@ -24156,11 +24160,11 @@ function promptPacksCard() {
         if (row.status === "edited") add("Overwrite", "install");
         if (row.status !== "missing") add("Remove", "remove");
         td.appendChild(act);
-        tr.appendChild(td);
+        grid.appendChild(td);
       }
-      table.appendChild(tr);
+      workspace.appendChild(grid);
+      card.appendChild(workspace);
     }
-    card.appendChild(table);
   }
   card.appendChild(promptPackSettings(doc, ids));
   return card;
@@ -24232,7 +24236,9 @@ function promptPackSettings(doc, ids) {
     tr.appendChild(td);
     table.appendChild(tr);
   }
-  box.appendChild(table);
+  const roleScroll = el("div", "install-table-scroll");
+  roleScroll.appendChild(table);
+  box.appendChild(roleScroll);
   const addRow = el("div", "prompt-pack-add-role");
   const pick = document.createElement("select");
   pick.id = "prompt-pack-role-pick";
@@ -24293,8 +24299,8 @@ function renderWorkspaces() {
   // below: they are machine settings, this is the list of storage roots.
   if (wsSection === "install") {
     view.appendChild(installPanel());
-    view.appendChild(daemonPromptCard());
     view.appendChild(promptPacksCard());
+    view.appendChild(daemonPromptCard());
     return;
   }
   if (wsSection === "vscode") {
