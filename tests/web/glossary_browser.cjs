@@ -28,7 +28,14 @@ const isAltV = () => false, isCtrlJ = () => false;
 ${fn('autogrowTermInput')}
 ${fn('termInputNote')}
 ${fn('sendKeyLine')}
+${fn('resetTermInputAttachment')}
 ${fn('refreshTermInput')}
+const keptTerms = new Map();
+const stopWfPoll = () => {}, stopMeshPoll = () => {}, dropKept = () => {};
+const suspendActive = () => {currentName=null;};
+const freshAttach = name => {currentName=name;};
+const restoreTerminal = entry => {currentName=entry.name;};
+${fn('attach')}
 ${fn('onTermInputKeydown')}
 $('term-input').onsubmit = ev => { ev.preventDefault(); sendKeyLine($('term-input-field'), $('term-input-send'), $('term-input-note')); };
 $('term-input-field').addEventListener('keydown', onTermInputKeydown);
@@ -66,7 +73,7 @@ const server = http.createServer((req,res) => {
       const req = route.request(), u = new URL(req.url()), body = req.postDataJSON();
       let data = {};
       if (u.pathname === '/api/workspaces') data = {workspaces:[{name:'claunch'},{name:'other'}]};
-      else if (u.pathname.endsWith('/keys')) {sent.push(body); if (body.keys?.[0] === 'newer send') await new Promise(resolve => {sendResolve=resolve;}); data={ok:true};}
+      else if (u.pathname.endsWith('/keys')) {sent.push(body); if (['newer send','same-state send'].includes(body.keys?.[0])) await new Promise(resolve => {sendResolve=resolve;}); data={ok:true};}
       else if (/\/sessions\/[^/]+\/glossary/.test(u.pathname)) {
         if (req.method() === 'GET') data = {terms:terms.slice(0,2),workspace:'claunch'};
         else {
@@ -142,14 +149,14 @@ const server = http.createServer((req,res) => {
     // A response for the previous session must not appear or replace the draft.
     await field.fill('stale 자세히');
     await page.waitForTimeout(250);
-    await page.evaluate(() => {currentName='s2';refreshTermInput();document.getElementById('term-input-field').value='new draft';});
+    await page.evaluate(() => {attach('s2');document.getElementById('term-input-field').value='new draft';});
     staleResolve(); await page.waitForTimeout(100);
     assert(await page.locator('.glossary-composer').evaluate(n => n.hidden));
     assert.equal(await field.inputValue(),'new draft');
     // Changing sessions during compose must not submit the old draft to either target.
     await field.fill('[[term:#research]] slow');
     await field.press('Enter'); await page.waitForTimeout(100);
-    await page.evaluate(() => {currentName='s3';refreshTermInput();const f=document.getElementById('term-input-field');f.value='third draft';f.disabled=false;document.getElementById('term-input-send').disabled=false;});
+    await page.evaluate(() => {attach('s3');const f=document.getElementById('term-input-field');f.value='third draft';f.disabled=false;document.getElementById('term-input-send').disabled=false;});
     composeResolve(); await page.waitForTimeout(100);
     assert.equal(sent.length,1); assert.equal(await field.inputValue(),'third draft');
     await field.fill('ordinary message'); await field.press('Enter');
@@ -161,12 +168,25 @@ const server = http.createServer((req,res) => {
     const before = sent.length;
     await field.fill('[[term:#research]] slow'); await field.press('Enter');
     await page.waitForTimeout(100);
-    await page.evaluate(() => {currentName='away';refreshTermInput();currentName='s3';refreshTermInput();});
+    await page.evaluate(() => {attach('away');keptTerms.set('s3',{name:'s3'});attach('s3');});
     await field.fill('newer send'); await field.press('Enter');
     await page.waitForTimeout(100);
     composeResolve(); await page.waitForTimeout(100);
     assert.equal(sent.length,before+1);
     assert(await field.isDisabled()); assert.equal(await field.inputValue(),'newer send');
+    sendResolve(); await page.waitForFunction(() => document.getElementById('term-input-field').value === '');
+    // Same-session WebSocket status refresh preserves pending compose and POST.
+    composeResolve = null;
+    await field.fill('[[term:#research]] slow'); await field.press('Enter');
+    await page.waitForTimeout(100);
+    await page.evaluate(() => refreshTermInput());
+    assert(await field.isDisabled());
+    composeResolve(); await page.waitForFunction(() => document.getElementById('term-input-field').value === '');
+    sendResolve = null;
+    await field.fill('same-state send'); await field.press('Enter');
+    await page.waitForTimeout(100);
+    await page.evaluate(() => refreshTermInput());
+    assert(await field.isDisabled()); assert.equal(await field.inputValue(),'same-state send');
     sendResolve(); await page.waitForFunction(() => document.getElementById('term-input-field').value === '');
     await page.setViewportSize({width:390,height:844});
     await field.fill('자세히'); await page.getByRole('button',{name:'자세히 · 의미 2개'}).click();

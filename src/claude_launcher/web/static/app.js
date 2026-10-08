@@ -12637,6 +12637,7 @@ async function sendKeyLine(field, btn, note) {
   if (!text || !target || field.disabled) return false;
   const epoch = (field.sendEpoch || 0) + 1;
   field.sendEpoch = epoch;
+  field.sendPending = epoch;
   const ownsInput = () => currentName === target && field.sendEpoch === epoch;
   const ownsDraft = () => ownsInput() && field.value === draftText;
   note.classList.add("hidden");
@@ -12710,6 +12711,7 @@ async function sendKeyLine(field, btn, note) {
     return false;
   } finally {
     if (ownsInput()) {
+      field.sendPending = null;
       field.disabled = wasField;
       btn.disabled = wasBtn;
       if (preparingGlossary) globalThis.GlossaryComposer?.refresh();
@@ -12823,15 +12825,24 @@ function scoreGoalSettingsCard() {
   return card;
 }
 
-function refreshTermInput() {
+function resetTermInputAttachment() {
   globalThis.GlossaryComposer?.reset();
+  const field = $("term-input-field"), btn = $("term-input-send");
+  if (!field || !btn) return;
+  field.sendEpoch = (field.sendEpoch || 0) + 1;
+  field.sendPending = null;
+  field.disabled = false;
+  btn.disabled = false;
+}
+
+function refreshTermInput() {
   if (typeof renderScoreGoal === "function") renderScoreGoal();
   const field = $("term-input-field");
   const note = $("term-input-note");
   const btn = $("term-input-send");
   if (!field || !btn) return;
-  // Invalidate pending sends even when navigation later returns to this name.
-  field.sendEpoch = (field.sendEpoch || 0) + 1;
+  // State frames do not change ownership or unlock an in-flight send.
+  if (field.sendPending != null && field.sendPending === field.sendEpoch) return;
   const queueNote = termInputQueueNote(sessionEnded);
   field.disabled = false;
   btn.disabled = false;
@@ -13822,6 +13833,7 @@ function closeLink() {
 }
 
 function detach() {
+  if (typeof resetTermInputAttachment === "function") resetTermInputAttachment();
   closeHostClipboard();
   // A full tear-down supersedes whatever parked copy of this session exists —
   // the stale child the respawn-follow path leaves behind is exactly that.
@@ -15401,6 +15413,7 @@ function freshAttach(name) {
    lands back on the same terminal instead of on an empty slot. A session we
    have parked comes back by swap; anything else is a fresh attach. */
 function attach(name) {
+  if (typeof resetTermInputAttachment === "function") resetTermInputAttachment();
   stopWfPoll();
   stopMeshPoll();
   // The send-keys input belongs to the session it is attached to: switching
