@@ -616,12 +616,21 @@ def _git(repo, *args):
                           capture_output=True, text=True, check=True).stdout.strip()
 
 
-def test_a_v1_childs_request_lands_in_a_v2_parent(tmp_path, monkeypatch):
-    lead, work = _dirs(tmp_path)
+def _v1_worker_at_request(tmp_path, monkeypatch, lead_same_repo=True):
+    """A v1 worker with one commit at its request step, and its parent's
+    checkout ``lead`` -- a worktree of the worker's repository, or with
+    ``lead_same_repo=False`` a repository of its own."""
+    work, lead = tmp_path / "work", tmp_path / "lead"
+    work.mkdir()
     _git(work, "init", "-q", "-b", "w1-feature")
     (work / "f.txt").write_text("x", encoding="utf-8")
     _git(work, "add", "f.txt")
     _git(work, "commit", "-q", "-m", "f")
+    if lead_same_repo:
+        _git(work, "worktree", "add", "-q", "-b", "lead-co", str(lead))
+    else:
+        lead.mkdir()
+        _git(lead, "init", "-q", "-b", "master")
     tip = _git(work, "rev-parse", "HEAD")
     wf = work / ".claunch" / "workflows"
     wf.mkdir(parents=True)
@@ -630,16 +639,47 @@ def test_a_v1_childs_request_lands_in_a_v2_parent(tmp_path, monkeypatch):
     engine.start("work", cwd=wcwd, scope="w1")
     engine.report("asked", cwd=wcwd, scope="w1")
     engine.next_step(cwd=wcwd, scope="w1")
-    _start(lead, LEAD, "lead")
     monkeypatch.setattr(landing, "in_review_of", lambda repo, session: ["c-9"])
+    return lead, work, tip
+
+
+def _v1_request(clock):
+    [(cwd, scope, action)] = [c for c in clock.scan() if c[2]["do"] == "enqueue-landing"]
+    return asyncio.run(clock._perform(cwd, scope, action))
+
+
+def test_a_v1_childs_request_lands_in_a_v2_parent(tmp_path, monkeypatch):
+    lead, work, tip = _v1_worker_at_request(tmp_path, monkeypatch)
+    _start(lead, LEAD, "lead")
     clock = cflow_clock.TriggerClock(Manager(Session("lead", lead),
                                              Session("w1", work, parent="lead")))
-    [(cwd, scope, action)] = [c for c in clock.scan() if c[2]["do"] == "enqueue-landing"]
-    ok, detail = asyncio.run(clock._perform(cwd, scope, action))
+    ok, detail = _v1_request(clock)
     assert ok, detail
     item = _items(lead, "lead")["c-9"]
     assert item["tip"] == tip and item["branch"] == "w1-feature"
     assert item["requested_by"] == "w1" and item["status"] == "requested"
+
+
+def test_a_v1_child_skips_a_v2_parent_run_in_another_repository(tmp_path, monkeypatch):
+    # A mesh spans projects: a queue in another repository would measure
+    # "landed" in a git that never saw this tip (the Router's rule).
+    lead, work, _ = _v1_worker_at_request(tmp_path, monkeypatch, lead_same_repo=False)
+    _start(lead, LEAD, "lead")
+    clock = cflow_clock.TriggerClock(Manager(Session("lead", lead),
+                                             Session("w1", work, parent="lead")))
+    ok, detail = _v1_request(clock)
+    assert not ok and "parent 'lead' has no run in this repository" in detail, detail
+    assert _items(lead, "lead") == {}
+
+
+def test_a_v1_child_skips_an_exited_v2_parent(tmp_path, monkeypatch):
+    lead, work, _ = _v1_worker_at_request(tmp_path, monkeypatch)
+    _start(lead, LEAD, "lead")
+    clock = cflow_clock.TriggerClock(Manager(Session("lead", lead, exited=True),
+                                             Session("w1", work, parent="lead")))
+    ok, detail = _v1_request(clock)
+    assert not ok and "parent 'lead' has exited" in detail, detail
+    assert _items(lead, "lead") == {}
 
 
 def test_a_v1_child_of_a_parent_holding_both_queues_files_on_the_v1_one(tmp_path, monkeypatch):
