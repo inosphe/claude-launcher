@@ -17,10 +17,13 @@ is a reason string.
   (:func:`measure_facts`), ``each``/``item`` evaluated with the v2 expression
   language over ``{facts, each}``, then the record goes to the one run of the
   parent session that holds the collection -- a v2 run
-  (:func:`..cflow2.runtime.holders`, pushed with principal ``child``) or, for
-  ``landing`` only, a v1 run declaring ``landing_queue:``
-  (:func:`..cflow.engine.enqueue_landing`). None, more than one, or one of
-  each is a skip.
+  (:func:`..cflow2.runtime.holders`, pushed with principal ``child``). None,
+  more than one, or one of each is a skip. A ``landing`` push is routed
+  instead by :mod:`.landing_route` (:func:`push_landing`): ``parent:`` walks
+  the direct ancestors, then the sibling mesh leader; ``leader:`` is the mesh
+  leader only; a v1 run declaring ``landing_queue:`` counts as a holder
+  (:func:`..cflow.engine.enqueue_landing`), and of several holders one is
+  picked (a main run first, then the first in order).
 
 The v1 side of the same bridge (a v1 worker whose parent holds a v2
 ``landing`` collection) reuses :func:`v2_holders` and :func:`push_v2` from
@@ -153,7 +156,7 @@ def v2_holders(name: str, parent: str, cwds: Sequence[str]) -> List[Tuple[str, s
 def v1_landing_holders(parent: str) -> List[Tuple[str, Optional[str]]]:
     """``(cwd, run)`` of each v1 run of ``parent`` that holds a
     ``landing_queue:`` (``run`` None for the main run). The way
-    :meth:`.cflow_clock.TriggerClock.merger_run` finds the parent's runs
+    :meth:`.cflow_clock.TriggerClock.v1_holders` finds the parent's runs
     (the v1 registry), over every directory it drives."""
     out: List[Tuple[str, Optional[str]]] = []
     try:
@@ -351,7 +354,8 @@ def push_v1(holder: Tuple[str, Optional[str]], parent: str,
 def push_to_parent(manager: Any, *, session: str, name: str,
                    items: Sequence[Dict[str, Any]], cwds: Sequence[str],
                    tid: Optional[str] = None) -> Result:
-    """Push into the one run of ``session``'s parent that holds ``name``."""
+    """Push into the one run of ``session``'s parent that holds ``name``.
+    A ``landing`` push does not come here (:func:`push_landing`)."""
     parent = parent_of(manager, session)
     if not parent:
         return False, f"{session or 'this run'} has no parent session"
@@ -372,7 +376,9 @@ def push_to_leader(manager: Any, *, session: str, name: str,
     """Push into the nearest ancestor of ``session`` (its parent first)
     whose *main* run holds ``name`` (docs 2.8 ``leader:``). A side run or a
     nested run of an ancestor does not count: an independent child of a
-    worker skips the worker's stack run and reaches the session above it."""
+    worker skips the worker's stack run and reaches the session above it.
+    A ``landing`` push does not come here: it goes to the mesh leader
+    (:func:`push_landing`)."""
     from ..cflow2 import store as cstore
 
     seen = {session}
@@ -413,6 +419,49 @@ def _push_one(owner: str, role: str, v2: List[Tuple[str, str]],
     return push_v1(v1[0], owner, items, session)
 
 
+def landing_holders(manager: Any, cwds: Sequence[str]) -> Callable[[str, str], List[Any]]:
+    """The ``holders`` a :class:`.landing_route.Router` reads for a v2 push:
+    each live v2 run of a session that declares ``landing`` and each v1 run
+    that declares ``landing_queue:``, in a checkout of the worker's
+    repository, ordered by directory then run."""
+    from ..cflow2 import store as cstore
+    from .landing_route import Holder
+
+    def holders(session: str, repo: Optional[str]) -> List[Holder]:
+        out: List[Holder] = []
+        for c, sc in sorted(set(v2_holders(LANDING, session,
+                                           list(cwds) + session_cwds(manager, session)))):
+            if repo is None or cflow_landing.common_dir(c) == repo:
+                out.append(Holder(c, sc, sc == cstore.main_scope(sc), "v2"))
+        for c, run in v1_landing_holders(session):
+            if repo is None or cflow_landing.common_dir(c) == repo:
+                out.append(Holder(c, run, run is None, "v1"))
+        return sorted(out, key=lambda h: (h.cwd, h.run or ""))
+    return holders
+
+
+def push_landing(manager: Any, mesh: Any, *, cwd: str, session: str, target: str,
+                 items: Sequence[Dict[str, Any]], cwds: Sequence[str],
+                 tid: Optional[str] = None) -> Result:
+    """A landing request (``parent:landing`` or ``leader:landing``) onto the
+    queue :class:`.landing_route.Router` names: for ``parent`` the nearest
+    direct ancestor that can merge, else the sibling mesh leader; for
+    ``leader`` the mesh leader only. The detail says who was passed over."""
+    from .landing_route import Router
+
+    router = Router(manager, mesh, landing_holders(manager, cwds))
+    found = router.independent(cwd, session) if target == "leader" else router.stacked(cwd, session)
+    if found.holder is None:
+        log.warning("cflow2 enqueue-landing from %s: no merge target: %s", session, found.why)
+        return False, found.why
+    h = found.holder
+    if h.version == "v2":
+        ok, detail = push_v2((h.cwd, str(h.run)), LANDING, items, session, tid=tid)
+    else:
+        ok, detail = push_v1((h.cwd, h.run), str(found.owner), items, session)
+    return ok, found.note() + detail
+
+
 # -- one trigger ----------------------------------------------------------------
 
 
@@ -428,7 +477,7 @@ def _driver(cwd: str, scope: str) -> str:
 async def perform(manager: Any, cwd: str, scope: str, trig: Dict[str, Any], *,
                   cwds: Sequence[str] = (),
                   facts_fn: Optional[Callable[[str, str], Dict[str, Any]]] = None,
-                  driver: Optional[str] = None) -> Result:
+                  driver: Optional[str] = None, mesh: Any = None) -> Result:
     """Perform one claimed trigger of the v2 run in (cwd, scope).
     ``(performed, detail)``; never raises for an ordinary failure."""
     from . import cflow_clock
@@ -456,7 +505,7 @@ async def perform(manager: Any, cwd: str, scope: str, trig: Dict[str, Any], *,
         push = ENQUEUE_LANDING_PUSH if do == DO_ENQUEUE_LANDING else (trig.get("push") or {})
         return await asyncio.to_thread(
             _push, manager, cwd, driver, push, do == DO_ENQUEUE_LANDING, list(cwds),
-            facts_fn or measure_facts, trigger_tid(cwd, scope, trig), trig.get("data"))
+            facts_fn or measure_facts, trigger_tid(cwd, scope, trig), trig.get("data"), mesh)
     return False, f"this daemon has no trigger action named {do!r}"
 
 
@@ -467,7 +516,8 @@ def trigger_tid(cwd: str, scope: str, trig: Dict[str, Any]) -> str:
 
 def _push(manager: Any, cwd: str, session: str, push: Dict[str, Any], landing: bool,
           cwds: List[str], facts_fn: Callable[[str, str], Dict[str, Any]],
-          tid: Optional[str] = None, data: Optional[Dict[str, Any]] = None) -> Result:
+          tid: Optional[str] = None, data: Optional[Dict[str, Any]] = None,
+          mesh: Any = None) -> Result:
     target, name = split_addr(push.get("to"))
     if target not in ("parent", "leader") or not name:
         return False, ("a trigger pushes to 'parent:<collection>' or 'leader:<collection>', "
@@ -485,6 +535,9 @@ def _push(manager: Any, cwd: str, session: str, push: Dict[str, Any], landing: b
         items = expand_push(push, facts, data)
     except PushError as exc:
         return False, str(exc)
+    if name == LANDING:
+        return push_landing(manager, mesh, cwd=cwd, session=session, target=target,
+                            items=items, cwds=cwds, tid=tid)
     to = push_to_leader if target == "leader" else push_to_parent
     return to(manager, session=session, name=name, items=items, cwds=cwds, tid=tid)
 

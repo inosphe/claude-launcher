@@ -237,7 +237,7 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
     cflow2_clock = None
     if cflow2_clock_mod.enabled():
         cflow2_clock = cflow2_clock_mod.Cflow2Clock(
-            manager, poll=cflow2_clock_mod.poll_from()
+            manager, poll=cflow2_clock_mod.poll_from(), mesh=mesh_manager
         )
         cflow2_clock.start()
         # A session's side runs end with it (docs/cflow-v2.md 2.9).
