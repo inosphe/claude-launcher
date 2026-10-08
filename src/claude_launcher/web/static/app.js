@@ -26248,6 +26248,8 @@ function wsWorktreeList(w) {
     line.appendChild(where);
     line.appendChild(el("span", "badge " + (t.detached ? "exited" : "idle"),
       t.detached ? `detached ${String(t.head || "").slice(0, 8)}` : (t.branch || "?")));
+    // listed when the workspace itself is a linked worktree (claunch-k9ddh)
+    if (t.main) line.appendChild(el("span", "badge idle", "main checkout"));
     if (t.prunable) line.appendChild(el("span", "badge exited", "directory gone"));
     const key = wsPathKey(t.path);
     const here = sessionsCache.filter((x) => wsPathKey(x.cwd) === key);
