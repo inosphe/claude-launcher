@@ -11225,14 +11225,14 @@ const OPENING_IMAGES_MAX = 10;   // opening_images.MAX_IMAGES in the daemon
 const openingImages = [];        // [{file, url}]
 
 /* Whether the form's harness takes images: its declaration names
-   `image_paste_keys`. Unknown (an older daemon, a detail not loaded yet)
+   a path transport or `image_paste_keys`. Unknown (an older daemon, a detail not loaded yet)
    counts as yes — the daemon then answers for itself. */
 function newFormTakesImages(f) {
   const harness = newProfileHarnessName(f) || "claude";
   const detail = (typeof harnessDetails === "object" && harnessDetails)
     ? harnessDetails[harness] : null;
   const ok = !detail || !Array.isArray(detail.image_paste_keys) ||
-    detail.image_paste_keys.length > 0;
+    detail.image_paste_transport === "path" || detail.image_paste_keys.length > 0;
   return { ok, harness };
 }
 
@@ -14605,8 +14605,8 @@ function onTerminalPaste(ev) {
   sendImageFiles(files, $("term-input-note"));
 }
 
-/* Whether the attached session's harness takes an image off the clipboard
-   (its declaration names `image_paste_keys`). Unknown counts as yes — the
+/* Whether the attached session's harness accepts a path or clipboard image
+   (its declaration names the transport or keys). Unknown counts as yes — the
    daemon then answers for itself, with a reason if it cannot. */
 function sessionTakesImages(name) {
   const rec = (sessionsCache || []).find((s) => s.name === name);
@@ -14614,7 +14614,7 @@ function sessionTakesImages(name) {
   const detail = (typeof harnessDetails === "object" && harnessDetails)
     ? harnessDetails[harness] : null;
   if (!detail || !Array.isArray(detail.image_paste_keys)) return true;
-  return detail.image_paste_keys.length > 0;
+  return detail.image_paste_transport === "path" || detail.image_paste_keys.length > 0;
 }
 
 /* xterm's key hook (attachCustomKeyEventHandler): false keeps the event from

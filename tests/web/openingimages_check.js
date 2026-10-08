@@ -41,7 +41,10 @@ const kindsBlock = (() => {
 {
   const takes = new Function("harnessDetails", "newProfileHarnessName",
     `${slice("newFormTakesImages")}; return newFormTakesImages;`);
-  const declared = { claude: { image_paste_keys: ["M-v"] }, pi: { image_paste_keys: [] } };
+  const declared = { claude: { image_paste_keys: ["M-v"] }, pi: { image_paste_keys: [] },
+    codex: { image_paste_keys: [], image_paste_transport: "path" } };
+  assert.deepStrictEqual(takes(declared, () => "codex")({}), { ok: true, harness: "codex" },
+    "Codex path transport offers opening images without a clipboard key");
   assert.deepStrictEqual(takes(declared, () => "claude")({}), { ok: true, harness: "claude" });
   assert.deepStrictEqual(takes(declared, () => "pi")({}), { ok: false, harness: "pi" },
     "a harness that declares no image key is not offered images");
