@@ -61,6 +61,7 @@ const ctx = {
   wsVscodeControls: () => el("span", "vscode"),
   wsSyncToggle: () => {},
   wsRemove: () => {},
+  wsRefreshAllBadge: () => null,
   sessionsCache: [
     { name: "s7", cwd: "C:\\r\\wt-feature\\" },
     { name: "s8", cwd: "c:/R/wt-feature" },
