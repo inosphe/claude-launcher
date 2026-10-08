@@ -116,6 +116,41 @@ def matches(repo: str, peers: Dict[str, List[dict]]) -> List[dict]:
     return rows
 
 
+def local_branches(repo: str) -> List[str]:
+    out = reposync.git(repo, "for-each-ref", "--format=%(refname:short)", "refs/heads", check=False)
+    return [line for line in out.splitlines() if line]
+
+
+def workspace_status(path: str, workspace: Optional[str], peers: Dict[str, List[dict]],
+                     problems: List[str], *, do_fetch: bool, remote: Optional[str] = None,
+                     branch: Optional[str] = None) -> dict:
+    """One workspace as the web UI's Sync panel shows it: its remotes, the
+    peers that share an address with it, and the plan a sync would carry out.
+    ``peers`` is what the daemon could read off the relay; an unreadable peer
+    is a line in ``problems``, never a reason not to plan -- the plan rests on
+    the shared remote alone."""
+    try:
+        repo = reposync.toplevel(path)
+    except reposync.SyncError as exc:
+        return {"workspace": workspace, "error": str(exc)}
+    rows = matches(repo, peers)
+    out = {
+        "workspace": workspace, "repo": repo,
+        "remotes": reposync.remote_keys(repo), "peers": rows,
+        "problems": list(problems), "branches": local_branches(repo),
+        "fetched": bool(do_fetch),
+    }
+    try:
+        name = reposync.choose_remote(repo, remote, [r["key"] for r in rows] if rows else None)
+        p = reposync.plan(repo, name, branch, do_fetch=do_fetch)
+    except reposync.SyncError as exc:
+        out["plan_error"] = str(exc)
+        return out
+    key = reposync.url_key(reposync.remotes(repo).get(name, ""))
+    out["plan"] = plan_card(p, workspace=workspace, key=key)
+    return out
+
+
 def discover(repo: str, c: Optional[daemon_client.DaemonClient],
              only: Iterable[str] = ()) -> Tuple[List[dict], List[str]]:
     """Matching rows across peers, plus one line per peer that could not be
