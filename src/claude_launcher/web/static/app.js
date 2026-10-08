@@ -4802,23 +4802,41 @@ function memberAutoBadge(m) {
    one of ours, and tagging our row with somebody else's room would be a
    lie the reader cannot check. */
 function sessMeshes(name) {
-  const out = [];
-  for (const m of meshCache || []) {
-    for (const mem of m.members || []) {
-      if (mem.local && mem.session === name) {
+  // Indexed once per mesh poll rather than walked per call: the rail asks
+  // this two or three times for every row it draws, and walking every
+  // member of every mesh each time was a visible slice of a 390-row redraw
+  // (claunch-otusq). The mesh poll replaces meshCache wholesale, so the
+  // arrays it holds -- itself and each room's member list, for a caller
+  // that rewrites one room in place -- say whether the index is current.
+  const from = meshCache || [];
+  const lists = from.map((m) => m.members);
+  const was = sessMeshes._lists;
+  if (sessMeshes._from !== from || !was || was.length !== lists.length
+      || lists.some((l, i) => l !== was[i])) {
+    const index = new Map();
+    for (const m of from) {
+      for (const mem of m.members || []) {
+        if (!mem.local) continue;
         // `label` is the roster's spelling of everything the member holds
         // (`leader+reviewer`); `role` stays the primary for callers that
         // key on one name.
         const held = Array.isArray(mem.roles) && mem.roles.length
           ? mem.roles : [mem.role || ""];
-        out.push({
+        if (!index.has(mem.session)) index.set(mem.session, []);
+        index.get(mem.session).push({
           mesh: m.name, handle: mem.handle, role: mem.role || "",
           roles: held.filter(Boolean), label: held.filter(Boolean).join("+"),
         });
       }
     }
+    for (const list of index.values()) list.sort((a, b) => a.mesh.localeCompare(b.mesh));
+    sessMeshes._from = from;
+    sessMeshes._lists = lists;
+    sessMeshes._index = index;
   }
-  return out.sort((a, b) => a.mesh.localeCompare(b.mesh));
+  // A copy of each entry, so a caller that edits what it was handed cannot
+  // change the next caller's answer.
+  return (sessMeshes._index.get(name) || []).map((m) => ({ ...m, roles: [...m.roles] }));
 }
 
 /* What the row actually draws: the first few rooms, then a count for the
