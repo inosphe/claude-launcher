@@ -6163,6 +6163,14 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
   .cf2-col-chart { order: 2; }
 }
 .cf2-col-main, .cf2-col-chart { min-width: 0; }
+.cf2-layout { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 12px; }
+.cf2-layout .wf-note { margin: 0 4px 0 0; }
+.cf2-layout [aria-pressed="true"] { background: #172947; color: #a5d6ff; outline: 1px solid #388bfd; }
+.cf2-stacked .cf2-cols { grid-template-columns: minmax(0, 1fr); }
+.cf2-stacked .cf2-col-chart { order: 0; }
+.cf2-stacked .cf2-chart { position: static; }
+.cf2-stacked .cf2-chart .cf2-tree { max-height: none; overflow: auto; }
+
 .cf2-section { margin-top: 14px; }
 .cf2-sec-title {
   display: flex; align-items: center; gap: 8px; margin: 0 0 8px; padding-bottom: 6px;
