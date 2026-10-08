@@ -2401,6 +2401,17 @@ it. Agents use the MCP tool `repo_sync` (`status` / `plan` / `sync` /
 `branch_push` / `branch_pull`); its push answers `waiting_approval` with a
 request id and is carried out by a second call once approved.
 
+`status` reports, beside the plan, the three things the Sync panel below
+shows: each peer's master tip against ours (`same`, `ahead`, `behind`,
+`diverged` with the commits on each side, or `unknown` when its tip is not in
+this clone), the branches other machines published on the planned remote as
+`<machine>/<branch>` with how the local branch of that name stands, and the
+local branches the remote's master does not hold yet, with the session that
+stamped each tip. In `--json` (and in the MCP answer) they are each peer's
+`distance`, `shared` and `unmerged`. The CLI fetches first unless
+`--no-fetch`; the MCP `status` does not fetch (its `plan` action does), so its
+answer is as of the last fetch.
+
 The same operations are on the web UI's **Workspaces** page (`#/workspaces`):
 each workspace row has a **Sync** button that opens a panel with its remotes,
 the relay peers whose clones share an address with it (their master tip
@@ -2442,9 +2453,23 @@ A row whose repository has linked worktrees also carries an `N worktrees`
 toggle (folded by default; a busy repository has dozens). Opened, each
 worktree is a line with its path, its branch or detached HEAD, a mark when
 its directory is gone, and the sessions whose directory it is, linked to
-their pages. The workspace itself is never in its own list, also when it is
-registered at a linked worktree. `worktrees` in the summary is
-`[{path, branch, detached, head, prunable}]`.
+their pages. The workspace itself is never in its own list. When it is
+registered at a linked worktree, the repository's main checkout is one of the
+others and is marked **main checkout**. `worktrees` in the summary is
+`[{path, branch, detached, head, prunable, main}]`.
+
+A present workspace's row has a **New session** button: it opens the same
+new-session form as the New session page, in its dialog, with that
+workspace already picked as the directory (the Beads detail's Start block
+seeds it the same way).
+
+**Refresh all (fetch)**, under the Registered heading, does what each Sync
+panel's Refresh does for every present workspace: fetch, then re-read the
+sync status. Each fetch talks to a remote, so two run at a time; every row
+shows where it is in the run (queued, fetching…, refreshed, or refresh
+failed with git's error as the tooltip), the bar counts the finished and the
+failed, and once all are through the row badges above are read again. A
+press while a run is going does nothing.
 
 Under **Work branches** the panel lists the branches other machines published
 on the planned remote as `<machine>/<branch>`, newest commit first, read from
@@ -2474,6 +2499,19 @@ since). A peer that did not answer is a row marked unreadable. Peers are
 asked when the panel opens and on Refresh, one round trip each, never on
 page load. The status answer carries `distance: {state, theirs_only,
 ours_only}` on each peer row and the silent peers as `unreadable`.
+
+The panel ends with the repository's **History**: what this machine synced,
+pushed and pulled in it, newest first (the last 30) -- when, from which tip
+to which, who ran it (a session, linked; the Sync panel; or a terminal) and
+how a push was let through (the approval card and who answered it, `auto`,
+or a person at their own terminal). The Sync panel, `claunch reposync` and
+the MCP tool `repo_sync` each append a line when an operation runs, failures
+included with git's refusal, to `reposync-history.jsonl` in the daemon
+directory; a refused or expired card ran nothing and is not there (the
+approval cards themselves are kept in memory only). Lines are matched per
+repository, so every worktree of one shows the same history. The status
+answer carries them as `history: [{at, kind, workspace, remote, branch, ref,
+action, before, after, pushed, by, approval, ok, error}]`.
 
 ### VS Code in the browser (one code-server per workspace and worktree)
 

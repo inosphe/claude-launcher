@@ -14,7 +14,7 @@ import argparse
 import json
 import os
 import sys
-from typing import Optional
+from typing import Optional, Tuple
 
 from . import reposync, reposync_flow as flow
 
@@ -36,22 +36,25 @@ def _err(msg: str) -> int:
 # --------------------------------------------------------------------------- #
 # approval
 # --------------------------------------------------------------------------- #
-def _approve(card: dict, *, yes: bool, c) -> Optional[dict]:
-    """None when the push may go ahead; otherwise the refusal as a dict.
+def _approve(card: dict, *, yes: bool, c) -> Tuple[Optional[dict], dict]:
+    """``(None, approval)`` when the push may go ahead -- ``approval`` says
+    how, for the history; otherwise ``(refusal, {})``.
 
     ``auto`` needs nobody. Under ``ask``, a person at their own terminal says
     y (or passed --yes); a managed session waits on the web UI's card, and
     its --yes is not an answer -- the asker cannot be the approver.
     """
     if flow.approval_mode() == flow.AUTO:
-        return None
+        return None, {"mode": flow.AUTO}
     if not os.environ.get("CLAUNCH_SESSION"):
         if yes:
-            return None
+            return None, {"mode": "terminal", "yes": True}
         if not sys.stdin.isatty():
-            return {"status": "needs_approval", "why": "not a terminal -- pass --yes"}
+            return {"status": "needs_approval", "why": "not a terminal -- pass --yes"}, {}
         answer = input(f"{card['summary']}\nproceed? [y/N] ").strip().lower()
-        return None if answer in ("y", "yes") else {"status": "declined"}
+        if answer in ("y", "yes"):
+            return None, {"mode": "terminal"}
+        return {"status": "declined"}, {}
     record = flow.file_request(c, card)
     print(
         f"waiting for approval in the web UI (request {record['id']}, "
@@ -60,8 +63,8 @@ def _approve(card: dict, *, yes: bool, c) -> Optional[dict]:
     )
     record = flow.wait_request(c, record["id"])
     if record.get("status") == "approved":
-        return None
-    return {"status": record.get("status"), "request": record["id"]}
+        return None, flow.card_approval(record)
+    return {"status": record.get("status"), "request": record["id"]}, {}
 
 
 # --------------------------------------------------------------------------- #
@@ -90,23 +93,49 @@ def _cmd_status(args: argparse.Namespace) -> int:
                     )
     for problem in problems:
         lines.append(f"  ({problem})")
-    plan_doc = None
-    if not args.no_fetch:
-        try:
-            remote = reposync.choose_remote(
-                repo, args.remote, [r["key"] for r in rows] if rows else None
-            )
-            p = reposync.plan(repo, remote, args.branch)
-            plan_doc = p.to_dict()
-            lines.append(
-                f"  here {p.branch} {p.local[:8]}: +{p.ahead} -{p.behind} vs "
-                f"{p.remote}/{p.branch} -> {p.action}"
-            )
-        except reposync.SyncError as exc:
-            lines.append(f"  (no plan: {exc})")
-    return _out(args, {"repo": repo, "workspace": workspace, "machine": me,
-                       "remotes": local, "peers": rows, "problems": problems,
-                       "plan": plan_doc}, lines)
+    doc = {"repo": repo, "workspace": workspace, "machine": me,
+           "remotes": local, "peers": rows, "problems": problems,
+           "plan": None, "fetched": not args.no_fetch}
+    try:
+        remote = reposync.choose_remote(
+            repo, args.remote, [r["key"] for r in rows] if rows else None
+        )
+        p = reposync.plan(repo, remote, args.branch, do_fetch=not args.no_fetch)
+    except reposync.SyncError as exc:
+        lines.append(f"  (no plan: {exc})")
+        return _out(args, doc, lines)
+    doc["plan"] = p.to_dict()
+    lines.append(
+        f"  here {p.branch} {p.local[:8]}: +{p.ahead} -{p.behind} vs "
+        f"{p.remote}/{p.branch} -> {p.action}"
+        + ("" if not args.no_fetch else "  (as of the last fetch)")
+    )
+    doc.update(flow.plan_facts(repo, p, rows, me))
+    lines += _fact_lines(doc, p)
+    return _out(args, doc, lines)
+
+
+def _fact_lines(doc: dict, p: reposync.Plan) -> list:
+    """The text form of :func:`reposync_flow.plan_facts` (claunch-1cvq4)."""
+    lines = []
+    for row in doc["peers"]:
+        d = row.get("distance") or {}
+        if d.get("state") in (None, "unknown"):
+            how = "unknown here (its tip is not in this clone)"
+        elif d["state"] == "same":
+            how = "same as ours"
+        else:
+            how = f"{d['state']} (+{d['theirs_only']} theirs, +{d['ours_only']} ours)"
+        lines.append(f"  peer {row['machine']} {p.branch}: {how}")
+    lines.append(f"  shared branches on {p.remote} ({len(doc['shared'])}):")
+    for r in doc["shared"]:
+        mark = "" if r["peer"] else "  (not a relay peer)"
+        lines.append(f"    {r['ref']:<32} {r['sha'][:8]} {r['state']:<8} {r['subject']}{mark}")
+    lines.append(f"  local branches {p.remote}/{p.branch} does not hold ({len(doc['unmerged'])}):")
+    for r in doc["unmerged"]:
+        who = f" [{r['session']}]" if r["session"] else ""
+        lines.append(f"    {r['branch']:<32} +{r['ahead']}{who} {r['subject']}")
+    return lines
 
 
 # --------------------------------------------------------------------------- #
@@ -131,12 +160,16 @@ def _cmd_master(args: argparse.Namespace) -> int:
         lines += [f"    {name}" for name in p.affected]
     if args.dry_run or p.action == reposync.UP_TO_DATE:
         return _out(args, {"plan": p.to_dict(), "dry_run": args.dry_run}, lines)
+    approval = {"mode": "none"}
     if p.pushes:
-        refusal = _approve(card, yes=args.yes, c=c)
+        refusal, approval = _approve(card, yes=args.yes, c=c)
         if refusal:
             print("\n".join(lines))
             return _err(f"not synced: {refusal}")
-    result = reposync.execute(p, scratch=flow.scratch())
+    entry = flow.history_entry(repo, kind="master", workspace=workspace, remote=remote,
+                               branch=p.branch, by=flow.actor(), approval=approval)
+    result = flow.recorded(entry, lambda: reposync.execute(p, scratch=flow.scratch()),
+                           flow.master_done(p))
     reposync.git(repo, "config", reposync.REMOTE_CONFIG, remote, check=False)
     board = []
     if result.rewritten:
@@ -170,18 +203,28 @@ def _cmd_branch_push(args: argparse.Namespace) -> int:
         "summary": f"push {args.branch} {sha[:8]} to {remote}/{target}"
                    + (" (force-with-lease)" if args.force_with_lease else ""),
     }
-    refusal = _approve(card, yes=args.yes, c=c)
+    refusal, approval = _approve(card, yes=args.yes, c=c)
     if refusal:
         return _err(f"not pushed: {refusal}")
-    reposync.publish_branch(repo, remote, args.branch, me, force_with_lease=args.force_with_lease)
+    entry = flow.history_entry(repo, kind="publish", workspace=workspace, remote=remote,
+                               branch=args.branch, by=flow.actor(), approval=approval,
+                               ref=target, force=bool(args.force_with_lease))
+    flow.recorded(entry, lambda: reposync.publish_branch(
+        repo, remote, args.branch, me, force_with_lease=args.force_with_lease),
+        lambda _ref: {"after": sha, "pushed": True})
     return _out(args, {"remote": remote, "ref": target, "sha": sha},
                 [f"pushed {args.branch} {sha[:8]} -> {remote}/{target}"])
 
 
 def _cmd_branch_pull(args: argparse.Namespace) -> int:
-    repo, _workspace = flow.resolve_repo(args.workspace)
+    repo, workspace = flow.resolve_repo(args.workspace)
     remote = reposync.choose_remote(repo, args.remote)
-    local, sha = reposync.receive_branch(repo, remote, args.machine, args.branch)
+    entry = flow.history_entry(repo, kind="pull", workspace=workspace, remote=remote,
+                               branch=args.branch, by=flow.actor(), approval={"mode": "none"},
+                               ref=reposync.shared_ref(args.machine, args.branch))
+    local, sha = flow.recorded(
+        entry, lambda: reposync.receive_branch(repo, remote, args.machine, args.branch),
+        lambda got: {"after": got[1], "pushed": False})
     return _out(args, {"remote": remote, "branch": local, "sha": sha},
                 [f"{local} = {sha[:8]} (from {remote})"])
 
@@ -214,10 +257,16 @@ def register(sub) -> None:
             q.add_argument("--peer", action="append", default=None, metavar="MACHINE",
                            help="consult only this relay peer (repeatable; default: all)")
 
-    st = rsub.add_parser("status", help="remotes here, peers sharing them, and what a sync would do")
+    st = rsub.add_parser(
+        "status",
+        help="remotes here, peers sharing them and how their master stands against "
+             "ours, what a sync would do, other machines' shared branches, and "
+             "local branches the remote master does not hold",
+    )
     common(st, peers=True)
     st.add_argument("--branch", default=None, help="branch to plan (default master, then main)")
-    st.add_argument("--no-fetch", action="store_true", help="do not fetch or plan")
+    st.add_argument("--no-fetch", action="store_true",
+                    help="do not fetch: plan against the remote-tracking refs as they are")
     st.set_defaults(func=_guard(_cmd_status))
 
     ms = rsub.add_parser(
