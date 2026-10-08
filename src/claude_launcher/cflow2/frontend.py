@@ -196,7 +196,7 @@ LIBRARY_KEYS = ("cflow", "name", "description", "kind", "include", "fragments", 
 TASK_KEYS = (
     "title", "prompt", "done_when", "verify", "ask", "executor", "needs",
     "returns", "effects", "paths", "budget", "rules", "strict_budget",
-    "do", "triggers", "restart",
+    "do", "triggers", "restart", "force_target",
 )
 #: ``$data.inputs`` is the run's start inputs (docs 2.6): written by the start
 #: request and, for an input declared ``set_by: [agent]``, once by the driver
@@ -204,7 +204,8 @@ TASK_KEYS = (
 #: this name is a compile error (claunch-7d4nt).
 DATA_INPUTS = "inputs"
 
-COMMON_KEYS = ("id", "executor", "needs", "budget", "bind", "on", "do", "triggers")
+COMMON_KEYS = ("id", "executor", "needs", "budget", "bind", "on", "do", "triggers",
+               "force_target")
 #: ``do:`` operations (docs/cflow-v2.md 2.7) and the moments they run at.
 DO_OPS = ("push", "set", "remove", "consume")
 MOMENT_ENTER = "enter"
@@ -316,6 +317,10 @@ class _Ctx:
     #: ``sides`` of included files -> (declaration, file, line); the
     #: including file's own declaration of a name replaces the included one
     included_sides: Dict[str, Tuple[Any, str, int]] = field(default_factory=dict)
+    #: task nodes marked ``force_target`` through their task definition: a
+    #: task is reused, so the mark applies where the position can be rebuilt
+    #: and is dropped (with a warning) where it cannot (docs 2.11)
+    task_marks: Set[str] = field(default_factory=set)
 
     def err(self, file: str, line: int, msg: str) -> FrontendError:
         return FrontendError(f"{file}:{line}: {msg}" if line else f"{file}: {msg}")
@@ -872,9 +877,47 @@ def _compile_task(ctx: _Ctx, sc: _Scope, name: str, parent: Optional[str], line:
             "strict_budget": strict,
         },
     )
+    if _force_target(ctx, tfile, raw, node, tline):
+        ctx.task_marks.add(nid)
     _effects_and_triggers(ctx, tfile, raw, node, tline)
     _add(ctx, node)
     return nid
+
+
+def _force_target(ctx: _Ctx, file: str, raw: Dict[str, Any], node: ir.Node, line: int) -> bool:
+    """``force_target: true`` (docs 2.11): a person may move the run here.
+    Whether the position can be rebuilt is ``ir.validate``'s (force_path);
+    a task definition's mark is first narrowed by :func:`_narrow_task_marks`."""
+    value = raw.get(ir.FORCE_TARGET)
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise ctx.err(file, _key_line(raw, ir.FORCE_TARGET, line),
+                      f"{ir.FORCE_TARGET} must be true or false")
+    if value:
+        node.props[ir.FORCE_TARGET] = True
+    return value
+
+
+def _narrow_task_marks(ctx: _Ctx, chart: ir.Chart) -> None:
+    """Drop a task definition's ``force_target`` from the uses a move cannot
+    rebuild (a catch, a par branch, a foreach body...), with a warning; the
+    uses it can rebuild keep it. A mark written on a combinator mapping names
+    one position and is refused here, where the error can name its line."""
+    for nid, node in sorted(chart.nodes.items()):
+        if not node.get(ir.FORCE_TARGET):
+            continue
+        _, problems = ir.force_path(chart, nid)
+        if not problems:
+            continue
+        if nid not in ctx.task_marks:
+            raise FrontendError(f"{node.src or ctx.file}: {ir.FORCE_TARGET} here cannot be a "
+                                f"forced move's target: " + "; ".join(problems))
+        if problems:
+            node.props.pop(ir.FORCE_TARGET, None)
+            chart.warnings.append(f"{node.src or ctx.file}: {ir.FORCE_TARGET} of task "
+                                  f"{node.label!r} does not apply at {nid}: "
+                                  + "; ".join(problems))
 
 
 VERIFY_KEYS = ("run", "command", "timeout")
@@ -1142,6 +1185,7 @@ def _compile_mapping(ctx: _Ctx, sc: _Scope, m: Dict[str, Any], parent: Optional[
 
     builder = _BUILDERS[head]
     builder(ctx, sc, node, m[head], m, hline)
+    _force_target(ctx, sc.file, m, node, line)
     _effects_and_triggers(ctx, sc.file, m, node, line)
 
     on = m.get("on")
@@ -2209,6 +2253,7 @@ def compile_text(text: str, *, source: str = "",
         source=str(source or ""),
         warnings=list(ctx.warnings),
     )
+    _narrow_task_marks(ctx, chart)
     try:
         ir.validate(chart)
     except ir.IRError as exc:  # a frontend bug, but say where

@@ -477,6 +477,8 @@ body:
 | `end` | 런 종료 |
 
 `goto`는 없다. 앞 단계로 되돌아가는 경로는 반복 조합자와 `continue`로 쓴다.
+사람이 런의 위치를 직접 바꾸는 경로는 2.11의 강제 이동 하나이고, 정의가
+`force_target: true`로 표시한 노드로만 갈 수 있다.
 
 #### wait
 
@@ -1490,6 +1492,99 @@ Finding이다.
 대상이 아니다. `improv-leader-v2`(claunch-yq80p.6)의 교대 종료 승인도 같은 방식으로
 바꿨다(`wind-down-decision`: `call: ask-user`, choices `[end-shift, keep]`).
 
+### 2.11 사람의 강제 조작: force_target, 강제 이동, 강제 결과 보고 (claunch-huwmp)
+
+v1의 run 페이지에는 그래프에서 스텝을 골라 그 스텝으로 런을 옮기는 Force 버튼이
+있었다(`cflow goto`). v1의 위치는 스텝 id 하나지만, v2의 위치는 살아 있는 인스턴스의
+트리다(예: `try(body) > loop(iter 1) > seq(idx 0) > scope > seq(idx 0) > cond(branch 1)
+> seq(idx 1) > task`). 그래서 v2는 임의의 노드로 이동하는 기능을 두지 않고, 다음
+두 조작을 사람에게 준다.
+
+1. **강제 결과 보고**: 활성 작업 하나를 사람이 선언된 결과로 끝낸다. 결과는 작업의
+   `returns`로 검사되고(`fail`은 항상 받는다), verify가 있으면 verify를 거치며,
+   드라이버의 보고와 같은 경로(`on`, `catch`, 상위 조합자)로 라우팅된다. 저널의
+   `reported`(와 `verify_started`)에 `by: user`가 남는다.
+2. **강제 이동**: 정의가 허용한 노드로 런을 옮긴다. 허용은 노드 옵션
+   `force_target: true`로 표시한다. 작업 정의(`nodes:`의 항목)와 조합자 매핑(`seq`,
+   `cond`, `loop` 등의 매핑) 모두에 쓸 수 있고, 값은 불리언이다. 작업 정의에 쓰면
+   그 작업을 쓰는 모든 자리가 표시된다.
+
+```yaml
+nodes:
+  intake: {title: 목표 수립, prompt: …, force_target: true}
+body:
+  seq:
+    - intake
+    - {id: review-loop, loop: {while: "true", max: 3, do: review}, force_target: true}
+```
+
+강제 이동이 다시 세울 수 있는 경로(`ir.force_path`, `ir.force_slot`):
+
+| 부모 조합자 | 자식의 자리 | 이동 시 부모의 상태 |
+|---|---|---|
+| `seq` | k번째 자식 | `idx = k`. `waterfall`이면 자식의 `prev`는 비어 있다 |
+| `cond` | i번째 가지 | `branch = i`. 가지의 조건식은 평가하지 않는다 |
+| `choose` | 옵션의 `then` | `option`이 그 옵션 이름이 된다. 조건식(`when`)은 평가하지 않는다 |
+| `loop`(while·until·retry) | `do` | 살아 있으면 현재 회차를 유지하고, 새로 세우면 1회차다. retry면 `attempt`가 회차 번호다 |
+| `try` | 본문 | `phase = body` |
+| `timeout` | `do` | `phase = body`. 살아 있으면 기존 기한을 유지하고, 새로 세우면 지금부터 `seconds`다 |
+| 프로시저 호출(`scope`) | 본문 | `params`를 호출 지점의 `with`로 다시 계산한다 |
+
+거절하는 자리: `par` 가지, `group`의 `do`·멤버(형제·멤버의 상태를 만들 수 없음),
+`foreach`의 본문(항목이 없음), `loop`의 `between`, `try`의 `catch`·`finally`,
+`timeout`의 `else`, `on` 핸들러(그 자리에 이른 결과가 없음), 위임 하위 트리
+(`executor`가 `inline`이 아닌 조상 아래, 하위 트리는 실행 주체가 통째로 실행함),
+루트.
+
+- 조합자 매핑에 쓴 표시는 자리 하나를 가리키므로, 그 자리가 위의 거절 대상이면
+  컴파일이 실패한다(`frontend._narrow_task_marks`).
+- 작업 정의에 쓴 표시는 그 작업을 쓰는 자리 중 다시 세울 수 있는 자리에만 남는다.
+  거절 대상인 자리(예: 같은 작업을 `catch`에서도 쓰는 경우)에서는 표시를 떼고 차트
+  경고(`warnings`)를 남긴다.
+- 런타임은 스냅숏을 읽을 때 `ir.validate`로 표시를 다시 검사한다.
+
+그래서 컴파일된 차트에 남은 표시는 언제나 이동할 수 있다.
+
+이동의 실행(`runtime.force_move`):
+
+- 루트에서 대상까지의 노드 사슬에서, 살아 있는 인스턴스가 있는 가장 깊은 노드를
+  기준점으로 삼는다. 기준점 아래의 모든 인스턴스를 취소한다(저널 `left`의
+  `why: forced`). 열린 작업, 위임(중첩 런 포함), ask(응답자에게 철회 통지),
+  보류(`loop_limit`, `visit_limit`)가 함께 정리된다.
+- 기준점부터 대상까지 사슬의 조합자를 위 표대로 자리에 앉히고, 그 사이의 노드는
+  새 인스턴스로 들어간다(방문 수 증가, `do`(enter)와 trigger(enter) 실행). 대상은
+  보통의 진입(`_enter`)으로 들어간다. 대상이 이미 살아 있으면 새로 들어간다.
+- 이동이 건너뛴 노드는 실행되지 않는다. 그 노드의 `bind`, `do`, trigger는 이전
+  진행이 남긴 값 그대로다. 앞으로 건너뛰면 대상의 프롬프트가 읽는 `$data.*`가 비어
+  있을 수 있다. 이 위험은 정의 작성자가 표시할 노드를 고를 때 판단한다.
+- 저널 이벤트 `forced`: `node`(대상), `label`, `by`(`user`), `reason`, `at`(기준점
+  노드), `left`(이동 직전에 기다리던 노드 목록).
+- halt 모니터에 걸린 런과 끝난 런은 거절한다(`_require_progress`).
+
+경로와 권한:
+
+| 조작 | CLI | 웹 API | MCP |
+|---|---|---|---|
+| 강제 이동 | `claunch cflow2 move <노드> [--reason R]` | `POST /api/cflow2/move {cwd, scope, node, reason}` | 없음 |
+| 강제 결과 보고 | `claunch cflow2 report <작업> <결과> [--value JSON] [--reason R]` | `POST /api/cflow2/report {cwd, scope, node, outcome, value, reason}` | 없음 |
+| 중단 | `claunch cflow2 abort --reason R` | `POST /api/cflow2/abort {cwd, scope, reason}` | 없음 |
+| 보관 | `claunch cflow2 archive` | `POST /api/cflow2/archive {cwd, scope}` | 없음 |
+| 재촉 | 없음 | `POST /api/cflow2/nudge {cwd, scope}` | 없음 |
+
+- CLI의 `move`·`report`는 런을 드라이브하는 세션의 셸에서 실행하면 거절한다
+  (`_refuse_own_session`, `select`·`approve`와 같다).
+- 웹 API는 다른 사람용 엔드포인트(`/api/cflow2/select`, `/api/cflow2/approve`)와 같이
+  데몬 토큰을 사람의 채널로 취급하고 호출자를 구분하지 않는다. 관리 세션은 그 토큰에
+  접근할 수 있으므로, 세션이 이 엔드포인트를 직접 호출해 자기 런을 옮기는 경로가
+  기술적으로 열려 있다. 이 경로는 에이전트에게 금지다. 같은 구조의 문제가
+  reposync 승인 카드에 있으며 사용자 결정을 기다린다(claunch-sne7a). 그 결정이
+  호출자 구분으로 나면 이 엔드포인트들에도 같이 적용한다.
+- 이동·결과 보고·중단 뒤에는 런의 세션에 안내 한 줄이 타이핑된다(api.py의
+  `NUDGE_CFLOW2_FORCED`, `NUDGE_CFLOW2_REPORTED`, `NUDGE_CFLOW2_ABORTED`). 재촉 버튼은
+  `NUDGE_CFLOW2_CONTINUE`를 보낸다.
+- 보관은 끝난 런만 받는다. 살아 있는 런은 먼저 중단한다. 보관 뒤 슬롯은 비고 run
+  페이지는 시작 화면을 그린다.
+
 ## 3. IR
 
 IR은 JSON으로 직렬화되는 statechart다. 버전은 `ir_version`(현재 1)으로 표시한다.
@@ -1709,7 +1804,8 @@ v1 툴과 이름이 겹치지 않도록 `flow_` 접두어를 쓴다.
 | `flow_collection` | 컬렉션 조회와 연산(`action`: `list`, `push`, `set`, `remove`; `collection`, `key`, `item`, `fields`). 주체는 `driver`이고 `access`를 따른다(2.7) |
 | `flow_input` | 시작 뒤에 채우는 입력 쓰기(`name`, `value`). `set_by: [agent]`로 선언되고 비어 있는 입력만, 드라이버만(2.6) |
 
-런 중단(abort)은 MCP 툴이 없다. 사람이 `claunch cflow2 abort`로 한다.
+런 중단(abort), 보관(archive), 강제 이동(move), 사람의 강제 결과 보고는 MCP 툴이
+없다. 사람이 CLI나 웹 UI로 한다(2.11).
 
 권한(`cflow2/mcp.py`, `runtime.may_drive`):
 
@@ -2079,8 +2175,9 @@ spec:
 
 ## 9. 화면과 CLI
 
-- CLI: `claunch cflow2 ls | show | validate | compile | caps | start | status | journal | abort`,
+- CLI: `claunch cflow2 ls | show | validate | compile | caps | start | status | journal | abort | archive`,
   사람의 경로 `select | extend | resume | approve [NODE] [--decline | --option O] [--reason R]`,
+  `move <노드> [--reason R]`, `report <작업> <결과> [--value JSON] [--reason R]`(2.11),
   `recur [--cancel] [--reason R]`(다음 회차 요청 확인·취소, 2.1 「recur」).
 - ask 응답 API: `POST /api/cflow2/approve`(본문 `{cwd, scope, node?, decision?, reason?}`,
   처리 함수 `daemon/cflow2_approve.approve`, 이벤트 루프 밖에서 호출).
@@ -2096,8 +2193,9 @@ spec:
     (컴파일 트리, 검사 결과, 시작 입력 선언, 읽기 전용. `name`은 정의 이름만 받고
     경로면 400), `POST /api/cflow2/select`(사용자 선택, `caller=user`),
     `POST /api/cflow2/extend`(`loop_limit` 응답, 본문에 `visits: true`면
-    `visit_limit` 응답). v2 런만 있는 슬롯에서 `GET /api/cflow/run`은 `v2: true`를
-    싣는다.
+    `visit_limit` 응답), `POST /api/cflow2/nudge | abort | archive | report | move`
+    (사람의 조작, 2.11). v2 런만 있는 슬롯에서 `GET /api/cflow/run`은 `v2: true`를
+    싣는다. 런 상세의 `chart.nodes[*].force_target`은 강제 이동 대상 표시다.
   - `GET /api/cflow/definitions`의 v2 목록은 레이어 디렉터리의 파일 목록·수정
     시각으로 만든 스탬프로 캐시하며, 이벤트 루프 밖 스레드에서 컴파일한다.
   - 요청이 v2를 명시하지 않았는데(`workflow_version` 없음, `v2:` 접두어 없음, 생성
@@ -2115,6 +2213,15 @@ spec:
   (`data.inputs`, 접힌 블록), 완료 기준 확인 상태, `verifying` 중인 작업과 그
   명령, `visit_limit` 대기(「Allow one more visit」/「Stop here」 버튼), probe가
   연속으로 판정하지 못한 횟수와 `undecidable`로 끝난 wait를 표시한다.
+- v2 run 페이지의 조작(v1 페이지의 대응 기능): 위쪽에 「← All runs」 링크, 소유
+  세션 칩, attach 링크(분할 창과 세션 접이식 영역에는 「Open the run page」 버튼),
+  그 아래 버튼 줄에 Nudge session·Abort run(살아 있는 런)과 Archive run(끝난 런).
+  세션 접이식 영역에는 Abort·Archive를 두지 않는다(v1과 같음). 활성 작업 줄마다
+  결과 선택 상자와 「Force outcome」 버튼이 있다. 트리의 행을 누르면 노드가 선택되고
+  (다시 누르면 해제), 노드 정보(id, 방문 수, 살아 있는 인스턴스)와 「Force run to
+  …」 버튼이 나온다. 버튼은 `force_target` 노드에서만 눌리고, 그 노드의 행에는 ⇥
+  표시가 붙는다. 선택 상태는 화면(page, split, fold)마다 따로 기억해 폴링 재그리기
+  뒤에도 유지한다.
 
 ## 10. v1 deprecation
 

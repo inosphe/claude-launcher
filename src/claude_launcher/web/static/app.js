@@ -17301,7 +17301,7 @@ async function refreshWf() {
       return;
     }
     wfLastData = null;
-    renderCflow2Into($("wf-view"), v2, { after: () => refreshWf() });
+    renderCflow2Into($("wf-view"), v2, { after: () => refreshWf(), host: "page" });
     return;
   }
   wfLastData = data;
@@ -17436,7 +17436,8 @@ async function refreshSplit() {
       return;
     }
     splitLastData = null;
-    renderCflow2Into($("term-wf"), v2, { after: () => refreshSplit() });
+    renderCflow2Into($("term-wf"), v2,
+                     { after: () => refreshSplit(), host: "split", fullLink: true });
     return;
   }
   splitLastData = data;
@@ -28102,6 +28103,7 @@ function cflow2TreeRows(chart, detail) {
       text: cflow2NodeText(n),
       active: !!live[id], awaiting: waiting[id] || "",
       visits: Number(visits[n.label || n.id] || 0),
+      force: !!n.force_target,
     });
     const kids = n.children || [];
     const roles = n.roles || [];
@@ -28111,21 +28113,104 @@ function cflow2TreeRows(chart, detail) {
   return rows;
 }
 
-function cflow2TreeInto(box, chart, detail) {
+function cflow2TreeInto(box, chart, detail, opts = {}) {
   const tree = el("div", "cf2-tree mono");
   for (const r of cflow2TreeRows(chart, detail)) {
-    const row = el("div", "cf2-row" + (r.awaiting ? " awaiting" : r.active ? " active" : ""));
+    const row = el("div", "cf2-row" + (r.awaiting ? " awaiting" : r.active ? " active" : "") +
+      (r.force ? " force" : "") + (opts.selected === r.id ? " selected" : ""));
     row.style.paddingLeft = `${r.depth * 14}px`;
     row.dataset.node = r.id;
+    if (opts.onSelect) {
+      row.classList.add("selectable");
+      row.addEventListener("click", () => opts.onSelect(r.id));
+    }
     if (r.role) row.appendChild(el("span", "cf2-role", `${r.role}: `));
     row.appendChild(el("span", "cf2-icon", r.icon + " "));
     row.appendChild(el("span", "cf2-text", r.text));
+    if (r.force) row.appendChild(el("span", "cf2-force", " \u21e5"));
     if (r.visits > 1) row.appendChild(el("span", "cf2-visits", ` ×${r.visits}`));
     if (r.awaiting) row.appendChild(el("span", "cf2-await", ` ← ${r.awaiting}`));
     row.title = `${r.type} ${r.id}`;
     tree.appendChild(row);
   }
   box.appendChild(tree);
+}
+
+/* The selected node of the v2 tree: what it is, whether a live instance
+   sits on it, and the forced move (docs 2.11) -- offered on a node the
+   definition marks force_target, explained on every other. */
+function cflow2NodePanel(data, n, live, post) {
+  const panel = el("div", "cf2-choice cf2-node");
+  panel.appendChild(el("h4", null, `${n.type} ${n.label || n.id}`));
+  if (n.title && n.title !== n.label) panel.appendChild(el("p", null, n.title));
+  const inst = (data.instances || []).filter((i) => i.node === n.id);
+  const visits = Number((data.visits || {})[n.label || n.id] || 0);
+  panel.appendChild(el("p", "wf-note mono",
+    `id ${n.id} \u00b7 visits ${visits} \u00b7 ` + (inst.length
+      ? "live: " + inst.map((i) => i.instance + (i.await ? ` (${i.await})` : "")).join(", ")
+      : "not live")));
+  const name = n.label || n.id;
+  const btn = el("button", "wf-btn force", `Force run to '${name}'`);
+  if (!live) {
+    btn.disabled = true;
+    btn.title = "the run is finished";
+  } else if (!n.force_target) {
+    btn.disabled = true;
+    btn.title = "this node is not marked 'force_target: true' in the workflow definition";
+  }
+  btn.addEventListener("click", async () => {
+    const reason = prompt(
+      `Move the run to '${name}'?\n\nEverything open on the way there is cancelled ` +
+      "(tasks, delegations, questions, holds); the combinators in between are entered " +
+      "again and the nodes skipped do not run. The session is nudged.\n\n" +
+      "Reason (journaled):", "");
+    if (reason === null) return;
+    btn.disabled = true;
+    await post("/api/cflow2/move", { node: n.id, reason });
+  });
+  panel.appendChild(btn);
+  if (live && !n.force_target) {
+    panel.appendChild(el("p", "wf-note",
+      "not a force target \u2014 add 'force_target: true' to this node in the definition " +
+      "to allow moving here"));
+  }
+  return panel;
+}
+
+/* A task's "Force outcome" control: pick an outcome, give its fields as JSON
+   when it requires any, and a reason; the engine checks it against the
+   task's returns and routes it like the agent's report. */
+function cflow2ForceReport(task, post) {
+  const wrap = el("span", "cf2-force-report");
+  const outcomes = cflow2ForceOutcomes(task);
+  const pick = document.createElement("select");
+  for (const o of outcomes) {
+    const opt = document.createElement("option");
+    opt.value = o.name;
+    opt.textContent = o.name;
+    pick.appendChild(opt);
+  }
+  const btn = el("button", "wf-btn force", "Force outcome");
+  btn.title = "end this task yourself with the chosen outcome (journaled by: user)";
+  btn.addEventListener("click", async () => {
+    const o = outcomes.find((x) => x.name === pick.value);
+    if (!o) return;
+    let value = null;
+    if (o.required.length) {
+      const tmpl = JSON.stringify(Object.fromEntries(o.required.map((f) => [f, ""])));
+      const raw = prompt(`Fields for '${o.name}' (JSON):`, tmpl);
+      if (raw === null) return;
+      try { value = JSON.parse(raw); } catch { alert("not valid JSON"); return; }
+    }
+    const reason = prompt(
+      `End task '${task.label || task.node}' with '${o.name}'?\n\nThe agent stops ` +
+      "working on it and is nudged.\n\nReason (journaled):", "");
+    if (reason === null) return;
+    btn.disabled = true;
+    await post("/api/cflow2/report", { node: task.instance, outcome: o.name, value, reason });
+  });
+  wrap.append(pick, btn);
+  return wrap;
 }
 
 /* The v2 run, wherever a run is drawn (run page, session fold). `ui.after`
@@ -28166,6 +28251,42 @@ function cf2QuestionView(q) {
   return wrap;
 }
 
+/* Which run-management presses a v2 run offers, the v1 bar's (wfActions)
+   counterparts: nudge and abort while it is live, archive once it is
+   finished. `ui.archive === false` (the session fold) leaves the two that end
+   or clear a run to the run page, as the v1 fold does. Pure, so the harness
+   can pin it. */
+function cflow2RunActions(data, ui) {
+  const run = (data && data.run) || {};
+  const status = run.status || (data && data.status) || "";
+  const live = status === "running" || status === "waiting_approval";
+  const out = [];
+  if (live) out.push("nudge");
+  if (ui && ui.archive === false) return out;
+  if (live) out.push("abort");
+  else if (status) out.push("archive");
+  return out;
+}
+
+/* The outcomes a person can force on an active task (docs 2.11): every one
+   its `returns` declares, then `fail`, which the engine always accepts. Each
+   carries the fields it requires (a type ending in "?" is optional), so the
+   page asks for a value only when one is needed. */
+function cflow2ForceOutcomes(task) {
+  const returns = (task && task.returns) || { ok: {} };
+  const out = Object.keys(returns).map((name) => ({
+    name,
+    required: Object.entries(returns[name] || {})
+      .filter(([, t]) => !String(t).endsWith("?")).map(([f]) => f),
+  }));
+  if (!returns.fail) out.push({ name: "fail", required: [] });
+  return out;
+}
+
+/* The v2 tree's selected node, one per home (the page, the split pane, the
+   session fold), so a click survives the poll's rebuild. */
+let cf2Selected = {};
+
 function renderCflow2Into(box, data, ui) {
   ui = ui || {};
   box.innerHTML = "";
@@ -28174,6 +28295,80 @@ function renderCflow2Into(box, data, ui) {
     box.appendChild(el("p", "wf-note", "this slot has no v2 run"));
     return;
   }
+  const host = ui.host || "page";
+  const post = async (path, body) => {
+    const doc = await cflowPost(path, { cwd: data.cwd, scope: data.scope, ...body });
+    if (doc && ui.after) ui.after();
+    return doc;
+  };
+  const live = run.status === "running" || run.status === "waiting_approval";
+  const sessions = data.sessions || [];
+
+  // The ways out of this view, as the v1 page has them: back to every run,
+  // the owning session, attach links, and (from a half) the page itself.
+  const nav = el("div", "wf-overview cf2-nav");
+  if (!ui.fullLink) {
+    const back = el("a", "wf-back", "\u2190 All runs");
+    back.href = "#/flows";
+    nav.appendChild(back);
+  }
+  const owner = wfOwnerChip(data);
+  if (owner) nav.appendChild(owner);
+  for (const s of sessions) {
+    if (s === data.scope) continue;  // the chip already is that link
+    const link = el("a", "wf-session", `attach: ${s}`);
+    link.href = "#/s/" + encodeURIComponent(s);
+    nav.appendChild(link);
+  }
+  if (ui.fullLink) nav.appendChild(wfFullLink(data));
+  box.appendChild(nav);
+
+  const bar = el("div", "wf-actions cf2-actions");
+  const scoped = data.scope && data.scope !== "default";
+  if (!sessions.length && live) {
+    bar.appendChild(el("p", scoped ? "wf-warning" : "wf-note", scoped
+      ? `session '${data.scope}' is not running \u2014 nothing is driving this run`
+      : "this run belongs to no managed session"));
+  }
+  for (const act of cflow2RunActions(data, ui)) {
+    if (act === "nudge") {
+      const b = el("button", "wf-btn nudge", "Nudge session");
+      b.disabled = !sessions.length;
+      b.title = sessions.length
+        ? `type a 'call flow_status and continue' line into session ${sessions.join(", ")}`
+        : "nothing to nudge: this run has no live session of its own";
+      b.addEventListener("click", async () => {
+        if (!confirm(`Nudge session '${sessions.join(", ")}'?\n\nIt is told to call ` +
+                     "flow_status and continue its v2 run.")) return;
+        b.disabled = true;
+        await post("/api/cflow2/nudge", {});
+      });
+      bar.appendChild(b);
+    } else if (act === "abort") {
+      const b = el("button", "wf-btn archive", "Abort run");
+      b.title = "end this run as aborted; its record stays here until you archive it";
+      b.addEventListener("click", async () => {
+        const reason = prompt("This run is still ACTIVE. Abort it? The agent driving it " +
+                              "loses the run.\n\nReason (journaled):", "");
+        if (reason === null) return;
+        b.disabled = true;
+        await post("/api/cflow2/abort", { reason });
+      });
+      bar.appendChild(b);
+    } else if (act === "archive") {
+      const b = el("button", "wf-btn archive", "Archive run");
+      b.title = "move this finished run into .cflow2/archive, freeing the slot for a new start";
+      b.addEventListener("click", async () => {
+        if (!confirm("Archive this finished run?\n\nIts state and journal move into " +
+                     ".cflow2/archive; a new workflow can then be started here.")) return;
+        b.disabled = true;
+        await post("/api/cflow2/archive", {});
+      });
+      bar.appendChild(b);
+    }
+  }
+  if (bar.childNodes.length) box.appendChild(bar);
+
   const head = el("div", "wf-meta");
   head.appendChild(el("span", "cf2-badge", "v2"));
   head.appendChild(el("span", null, run.workflow || (data.chart || {}).name || "(workflow)"));
@@ -28194,12 +28389,6 @@ function renderCflow2Into(box, data, ui) {
     box.appendChild(el("p", "wf-note", `acceptance: ${run.acceptance.status}` +
       ((run.acceptance.failed || []).length ? ` (failed: ${run.acceptance.failed.join(", ")})` : "")));
   }
-
-  const post = async (path, body) => {
-    const doc = await cflowPost(path, { cwd: data.cwd, scope: data.scope, ...body });
-    if (doc && ui.after) ui.after();
-    return doc;
-  };
 
   for (const c of run.choices || []) {
     const card = el("div", "cf2-choice");
@@ -28325,8 +28514,11 @@ function renderCflow2Into(box, data, ui) {
   }
 
   for (const t of run.tasks || []) {
-    box.appendChild(el("p", "wf-note",
-      `task ${t.label || t.node}: ${t.title || ""} — waiting for the agent's flow_report`));
+    const row = el("div", "cf2-task");
+    row.appendChild(el("span", "wf-note",
+      `task ${t.label || t.node}: ${t.title || ""} \u2014 waiting for the agent's flow_report`));
+    if (live) row.appendChild(cflow2ForceReport(t, post));
+    box.appendChild(row);
   }
   for (const v of run.verifying || []) {
     const cmd = v.verify && v.verify.run;
@@ -28349,7 +28541,23 @@ function renderCflow2Into(box, data, ui) {
 
   if (data.chart) {
     box.appendChild(el("h4", null, "Chart"));
-    cflow2TreeInto(box, data.chart, data);
+    const nodes = data.chart.nodes || {};
+    const marked = Object.values(nodes).filter((n) => n.force_target).length;
+    box.appendChild(el("p", "wf-note", marked
+      ? `click a node to inspect it; the ${marked} node(s) marked \u21e5 (force_target) ` +
+        "can be moved to"
+      : "click a node to inspect it; this definition marks no node force_target, " +
+        "so the run cannot be moved by hand"));
+    let sel = cf2Selected[host] || null;
+    if (sel && !nodes[sel]) sel = cf2Selected[host] = null;
+    cflow2TreeInto(box, data.chart, data, {
+      selected: sel,
+      onSelect: (id) => {
+        cf2Selected[host] = cf2Selected[host] === id ? null : id;  // again = clear
+        renderCflow2Into(box, data, ui);
+      },
+    });
+    if (sel) box.appendChild(cflow2NodePanel(data, nodes[sel], live, post));
   }
 
   const dels = data.delegations || [];
@@ -32468,7 +32676,8 @@ async function refreshSessRun() {
       body.appendChild(el("p", "wf-warning", v2.error));
       return;
     }
-    renderCflow2Into(body, v2, { after: refreshSessRun });
+    renderCflow2Into(body, v2,
+                     { after: refreshSessRun, host: "fold", fullLink: true, archive: false });
     return;
   }
   renderSessRun(body, data);

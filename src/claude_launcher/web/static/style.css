@@ -6001,6 +6001,14 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .cf2-role { color: #6e7681; }
 .cf2-visits { color: #d29922; }
 .cf2-await { color: #58a6ff; }
+.cf2-row.selectable { cursor: pointer; }
+.cf2-row.selectable:hover { background: rgba(110, 118, 129, 0.15); }
+.cf2-row.selected { outline: 1px solid #58a6ff; outline-offset: -1px; }
+.cf2-force { color: #d29922; }
+.cf2-nav { margin-bottom: 6px; }
+.cf2-actions { margin: 4px 0 8px; }
+.cf2-task { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 2px 0; }
+.cf2-force-report { display: inline-flex; gap: 4px; align-items: center; }
 .cf2-choice { border: 1px solid #30363d; border-radius: 6px; padding: 6px 8px; margin: 6px 0; }
 .cf2-choice h4 { margin: 0 0 4px; }
 .cf2-question h5 { margin: 6px 0 2px; }

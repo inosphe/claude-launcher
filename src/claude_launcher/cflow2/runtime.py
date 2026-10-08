@@ -561,6 +561,21 @@ def _splice_env(r: Run, parent: Optional[str], splice: Dict[str, Any],
 def _enter(r: Run, node_id: str, parent: Optional[str], role: str,
            env: Optional[Dict[str, Any]] = None) -> str:
     node = r.chart.node(node_id)
+    iid = _new_instance(r, node, parent, role, env)
+    key = node_key(node)
+    limit = _max_visits(r, key)
+    if limit is not None and r.state["visits"][key] > limit:
+        _visit_limit(r, iid, node)
+        return iid
+    _enter_body(r, iid, node)
+    return iid
+
+
+def _new_instance(r: Run, node: ir.Node, parent: Optional[str], role: str,
+                  env: Optional[Dict[str, Any]] = None) -> str:
+    """The instance record of an entered node, its visit counted and its
+    ``entered`` journaled -- everything of :func:`_enter` but the body."""
+    node_id = node.id
     iid = r.new_id(node_id)
     base = dict(r.inst[parent]["env"]) if parent and parent in r.inst else {}
     if (node.get("splice") or {}).get("call"):
@@ -578,11 +593,6 @@ def _enter(r: Run, node_id: str, parent: Optional[str], role: str,
     visits = r.state.setdefault("visits", {})
     visits[key] = int(visits.get(key) or 0) + 1
     r.emit("entered", node=node_id, instance=iid, type=node.type, label=node.label or None)
-    limit = _max_visits(r, key)
-    if limit is not None and visits[key] > limit:
-        _visit_limit(r, iid, node)
-        return iid
-    _enter_body(r, iid, node)
     return iid
 
 
@@ -2889,7 +2899,7 @@ def _verify_apply(r: Run, iid: str, command: Any, res: Dict[str, Any]) -> None:
     inst["frame"].pop("verify", None)
     inst["frame"].pop("last_verify", None)
     r.emit("reported", node=n.id, instance=iid, outcome=v["outcome"], value=v.get("value"),
-           text=v.get("text"))
+           text=v.get("text"), by=v.get("by"))
     _complete(r, iid, v["outcome"], v.get("value"))
 
 
@@ -2916,8 +2926,14 @@ def _task_for_report(r: Run, node: Optional[str]) -> str:
 def report(node: Optional[str], outcome: str = ir.OUTCOME_OK, value: Any = None,
            text: Optional[str] = None, *, cwd: Optional[str] = None,
            scope: Optional[str] = None, now: Optional[float] = None,
-           verify_runner: Optional[VerifyRunner] = None) -> Dict[str, Any]:
+           verify_runner: Optional[VerifyRunner] = None,
+           by: Optional[str] = None) -> Dict[str, Any]:
     """Report an active task's result and advance.
+
+    ``by`` names a reporter other than the driver -- ``user`` for a person
+    forcing the task's outcome from the dashboard or the CLI (docs 2.11). It
+    is journaled on ``reported`` (and ``verify_started``); the result is
+    checked, verified and routed exactly as the driver's would be.
 
     An ``ok`` report of a task with ``verify`` does not apply at once: the
     task goes to ``verifying`` (journal ``verify_started``) and the command
@@ -2944,15 +2960,16 @@ def report(node: Optional[str], outcome: str = ir.OUTCOME_OK, value: Any = None,
             r.inst[iid]["await"] = AW_VERIFY
             r.inst[iid]["frame"]["verify"] = {
                 "token": token, "started_at": r.now, "timeout": spec["timeout"],
-                "outcome": outcome, "value": value, "text": text,
+                "outcome": outcome, "value": value, "text": text, "by": by,
             }
-            r.emit("verify_started", node=n.id, instance=iid, timeout=spec["timeout"])
+            r.emit("verify_started", node=n.id, instance=iid, timeout=spec["timeout"], by=by)
             job.update(instance=iid, task=n.label or n.id, timeout=spec["timeout"])
             st = r.store
             r.after.append(lambda: _launch(_verify_task_job, str(st.cwd), st.scope, iid, token,
                                            verify_runner, now))
             return
-        r.emit("reported", node=n.id, instance=iid, outcome=outcome, value=value, text=text)
+        r.emit("reported", node=n.id, instance=iid, outcome=outcome, value=value, text=text,
+               by=by)
         _complete(r, iid, outcome, value)
     _mutate(cwd, scope, now, op)
     payload = status(cwd=cwd, scope=scope, now=now, tick=False)
@@ -3638,6 +3655,143 @@ def abort(reason: str, *, cwd: Optional[str] = None, scope: Optional[str] = None
     return status(cwd=cwd, scope=scope, now=now, tick=False)
 
 
+def archive(*, cwd: Optional[str] = None, scope: Optional[str] = None) -> Dict[str, Any]:
+    """Move a finished run out of its slot into the archive, leaving the slot
+    idle (a start would do the same first). A live run is refused: abort it
+    first, so ending a run and clearing its record stay two decisions."""
+    st = RunStore(cwd, scope)
+    with st.lock():
+        if not st.exists():
+            raise FlowError(f"no cflow2 run in {st.dir}")
+        state = st.load_state()
+        if state.get("status") not in FINISHED_STATUSES:
+            raise FlowError(f"run {state.get('run_id')} is {state.get('status')}; abort it "
+                            f"before archiving")
+        target = st.archive(state.get("run_id"))
+    return {"status": "idle", "archived": str(target), "run": state.get("run_id"),
+            "workflow": state.get("workflow")}
+
+
+# -- a person's forced move (docs 2.11) ------------------------------------------
+
+
+def _force_target_id(chart: ir.Chart, ref: str) -> str:
+    """The node a move names (id or label) among the ``force_target`` nodes."""
+    marked = [n for n in chart.nodes.values() if n.get(ir.FORCE_TARGET)]
+    hits = [n for n in marked if ref in (n.id, n.label)]
+    if len(hits) == 1:
+        return hits[0].id
+    if len(hits) > 1:
+        raise FlowError(f"{ref!r} names several force targets ({', '.join(n.id for n in hits)}); "
+                        f"give the node id")
+    known = ", ".join(n.label or n.id for n in marked) or "none -- the definition marks no node"
+    if any(ref in (n.id, n.label) for n in chart.nodes.values()):
+        raise FlowError(f"{ref!r} is not a force target (the definition's '{ir.FORCE_TARGET}: "
+                        f"true' nodes: {known})")
+    raise FlowError(f"no node {ref!r} (force targets: {known})")
+
+
+def _seat(r: Run, iid: str, node: ir.Node, slot: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Point instance ``iid`` at the child ``slot`` names, as if it had
+    reached that child on its own: the frame field that tracks the child, any
+    hold of its own released. Returns the environment the child is entered
+    with (what the combinator would have given it), or ``None``."""
+    inst = r.inst[iid]
+    frame = inst["frame"]
+    inst["await"] = None
+    r.state["approvals"] = [a for a in r.state.get("approvals") or []
+                            if a.get("instance") != iid]
+    frame.pop("on", None)
+    env: Optional[Dict[str, Any]] = None
+    t = node.type
+    if t == ir.T_SEQ:
+        frame["idx"] = slot["idx"]
+        if node.get("pass_prev"):
+            env = {"prev": None}
+    elif t == ir.T_COND:
+        frame["branch"] = slot["branch"]
+    elif t == ir.T_CHOOSE:
+        frame["option"] = slot["option"]
+    elif t == ir.T_LOOP:
+        if not frame.get("iter"):
+            frame.update({"iter": 1, "values": [], "extra": 0, "last": None})
+        frame["phase"] = "body"
+        frame.pop("resume_at", None)
+        if node.get("mode") == ir.LOOP_RETRY:
+            env = {"vars": {"attempt": frame["iter"]}, "prev": frame.get("last")}
+    elif t == ir.T_TRY:
+        frame["phase"] = "body"
+        for key in ("caught", "pending", "signal"):
+            frame.pop(key, None)
+    elif t == ir.T_TIMEOUT:
+        frame["phase"] = "body"
+        frame.setdefault("deadline", r.now + float(node.get("seconds") or 0))
+    return env
+
+
+def force_move(target: str, reason: Optional[str] = None, *, by: str = CALLER_USER,
+               cwd: Optional[str] = None, scope: Optional[str] = None,
+               now: Optional[float] = None) -> Dict[str, Any]:
+    """Move the run to ``target`` -- a node its definition marks
+    ``force_target: true`` -- as a person's override (docs 2.11).
+
+    The deepest live instance on the root-to-target chain stays; everything
+    below it is cancelled (open tasks, delegations, asks, holds), and the
+    chain is entered again from there down to the target, each combinator
+    seated on the child that leads on (a seq at that index, a cond on that
+    branch, a loop in its current iteration, a try in its body). The nodes in
+    between run their enter effects; nodes the move skips do not run at all,
+    so their ``bind``s and ``do``s are whatever an earlier pass left. A
+    target that is live already is entered afresh. ``ir.force_path`` decides
+    which chains can be rebuilt; the compiler refuses a mark on one that
+    cannot."""
+    moved: Dict[str, Any] = {}
+
+    def op(r: Run) -> None:
+        _require_progress(r)
+        tid = _force_target_id(r.chart, target)
+        path, problems = ir.force_path(r.chart, tid)
+        if problems:
+            raise FlowError(f"cannot move to {target!r}: " + "; ".join(problems))
+        roots = [iid for iid, rec in r.inst.items()
+                 if rec.get("parent") is None and rec.get("node") == path[0][0]]
+        if not roots:
+            raise FlowError(f"run {r.state.get('run_id')} has no live root instance to move")
+        cur, k = roots[0], 1
+        while True:
+            kids = [c for c in r.children_of(cur) if r.inst[c]["node"] == path[k][0]]
+            if not kids or k == len(path) - 1:
+                break
+            cur, k = kids[0], k + 1
+        left = sorted(rec["node"] for rec in r.inst.values() if rec.get("await"))
+        node = r.chart.node(tid)
+        r.emit("forced", node=tid, label=node.label or None, by=by, reason=reason or None,
+               at=r.inst[cur]["node"], left=left)
+        moved.update(node=tid, label=node.label or None, at=r.inst[cur]["node"], left=left)
+        _cancel_children(r, cur, "forced")
+        env = _seat(r, cur, r.node_of(cur), path[k][1] or {})
+        parent = cur
+        for j in range(k, len(path) - 1):
+            nid, slot = path[j]
+            mid = r.chart.node(nid)
+            iid = _new_instance(r, mid, parent, (slot or {}).get("role", ""), env)
+            err = _apply_effects(r, iid, mid, AT_ENTER)
+            if err:
+                _complete(r, iid, ir.OUTCOME_FAIL, {"reason": err})
+                return
+            _queue_triggers(r, iid, mid, AT_ENTER)
+            if mid.type == ir.T_SCOPE and not _scope_params(r, iid, mid):
+                return
+            env = _seat(r, iid, mid, path[j + 1][1] or {})
+            parent = iid
+        _enter(r, tid, parent, (path[-1][1] or {}).get("role", ""), env)
+
+    _mutate(cwd, scope, now, op)
+    payload = status(cwd=cwd, scope=scope, now=now, tick=False)
+    payload["forced"] = moved
+    return payload
+
+
 # -- time and probes ---------------------------------------------------------
 
 
@@ -4188,7 +4342,7 @@ def _apply_held(r: Run) -> None:
             inst["frame"].pop("verify", None)
             n = r.node_of(iid)
             r.emit("reported", node=n.id, instance=iid, outcome=v["outcome"],
-                   value=v.get("value"), text=v.get("text"))
+                   value=v.get("value"), text=v.get("text"), by=v.get("by"))
             _complete(r, iid, v["outcome"], v.get("value"))
     for rec in list((r.state.get("delegations") or {}).values()):
         held = rec.get("held")
