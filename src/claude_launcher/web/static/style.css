@@ -4449,6 +4449,12 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .ws-sync-form { display: flex; align-items: center; gap: 8px; margin: 6px 0; flex-wrap: wrap; }
 .ws-sync-form select, .ws-sync-form input:not([type="checkbox"]) { flex: 1 1 140px; min-width: 0; }
 .ws-sync-form .wf-btn { flex: none; }
+/* shared <machine>/<branch> list (claunch-tamel) */
+.ws-sync-shared { margin: 6px 0; }
+.ws-sync-shared h5 { margin: 4px 0; font-size: 12px; font-weight: 600; }
+.ws-sync-shared-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 2px 0; }
+.ws-sync-shared-row .mono:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.ws-sync-shared-other > summary { cursor: pointer; }
 .ws-sync-peers { border-top: 1px solid #22262d; padding-top: 8px; }
 .ws-sync-peer { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; padding: 3px 0; }
 .ws-sync-peer .ws-name { font-size: 13px; }

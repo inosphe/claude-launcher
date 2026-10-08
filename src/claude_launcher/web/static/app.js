@@ -26292,7 +26292,65 @@ async function wsSyncBranch(name, kind) {
     return;
   }
   if (!st.pullMachine || !st.pullBranch) return;
-  await wsSyncSend(name, "pull", { machine: st.pullMachine, branch: st.pullBranch });
+  await wsSyncSend(name, "pull", wsSyncPullBody(st.doc, st.pullMachine, st.pullBranch));
+}
+
+/* A pull names the remote the panel planned on: a workspace with two
+   remotes otherwise refuses to guess which one carries the branch. */
+function wsSyncPullBody(doc, machine, branch) {
+  const body = { machine, branch };
+  const remote = doc && doc.plan && doc.plan.remote;
+  if (remote) body.remote = remote;
+  return body;
+}
+
+const WS_SHARED_STATE = {
+  new: "not here yet", same: "up to date", behind: "pull fast-forwards",
+  diverged: "local has other commits",
+};
+
+/* The branches other machines published on the planned remote as
+   <machine>/<branch> (claunch-tamel), each with a Pull that runs the
+   branch pull above -- fast-forward only, no approval card, since it moves
+   nothing but a local branch. Prefixes that are not a relay peer sharing
+   this address (a remote's own feature/x branches) are kept apart. */
+function wsSyncShared(name, doc, st) {
+  const box = el("div", "ws-sync-shared");
+  const rows = doc.shared || [];
+  const remote = doc.plan ? doc.plan.remote : "";
+  const peers = rows.filter((r) => r.peer);
+  const other = rows.filter((r) => !r.peer);
+  box.appendChild(el("h5", null,
+    `Published by other machines on ${remote} (${peers.length})` +
+    (doc.fetched ? "" : " · as last fetched")));
+  if (!peers.length) {
+    box.appendChild(el("p", "wf-note",
+      "No relay peer has published a work branch here. Refresh (fetch) reads the remote again."));
+  }
+  const line = (r) => {
+    const row = el("div", "ws-sync-shared-row");
+    row.appendChild(el("span", "mono", r.ref));
+    const sha = el("span", "mono wf-note", r.sha.slice(0, 8));
+    sha.title = [r.subject, r.date].filter(Boolean).join(" · ");
+    row.appendChild(sha);
+    row.appendChild(el("span", "badge " + (r.state === "behind" || r.state === "new" ? "busy" : "idle"),
+      WS_SHARED_STATE[r.state] || r.state));
+    const go = el("button", "wf-btn", st.busy === "pull" ? "Pulling…" : "Pull");
+    go.disabled = !!st.busy || r.state === "same" || r.state === "diverged";
+    if (r.state === "diverged") go.title = `local ${r.ref} has commits ${remote}/${r.ref} does not; a pull would refuse`;
+    go.addEventListener("click", () => wsSyncSend(name, "pull", wsSyncPullBody(doc, r.machine, r.branch)));
+    row.appendChild(go);
+    return row;
+  };
+  for (const r of peers) box.appendChild(line(r));
+  if (other.length) {
+    const more = el("details", "ws-sync-shared-other");
+    more.appendChild(el("summary", "wf-note",
+      `${other.length} other prefixed branch(es), not from a relay peer sharing this address`));
+    for (const r of other) more.appendChild(line(r));
+    box.appendChild(more);
+  }
+  return box;
 }
 
 function wsSyncPlanLine(plan) {
@@ -26435,6 +26493,7 @@ function wsSyncPanel(w) {
   push.addEventListener("click", () => { st.pushBranch = pick.value; wsSyncBranch(w.name, "push"); });
   pushRow.appendChild(push);
   work.appendChild(pushRow);
+  if (doc.plan) work.appendChild(wsSyncShared(w.name, doc, st));
 
   const pullRow = el("div", "ws-sync-form");
   const machine = el("input");

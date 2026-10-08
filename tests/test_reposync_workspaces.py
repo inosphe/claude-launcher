@@ -428,3 +428,49 @@ def test_summary_needs_the_token(world):
         assert resp.status == 401
 
     _with_app(body)
+
+
+# --- Shared branches (claunch-tamel) --------------------------------------
+
+
+def test_status_lists_branches_other_machines_published(world):
+    a, b = world["a"], world["b"]
+    base = _git(a, "rev-parse", "HEAD")
+    _git(b, "switch", "-q", "-c", "s2-y")
+    theirs = _commit(b, "theirs.txt")
+    for ref in ("pc-b/s2-y", "pc-b/old", "pc-b/div", "Feature/z"):
+        _git(b, "push", "-q", "origin", f"{theirs}:refs/heads/{ref}")
+    _git(b, "push", "-q", "origin", f"{base}:refs/heads/pc-b/same")
+    _git(b, "push", "-q", "origin", f"{theirs}:refs/heads/pc-a/mine")   # this machine's own
+    _git(a, "branch", "pc-b/same", base)
+    _git(a, "branch", "pc-b/old", base)
+    _git(a, "switch", "-q", "-c", "pc-b/div")
+    _commit(a, "mine.txt")
+    _git(a, "switch", "-q", "master")
+    _git(a, "remote", "add", "gh", "https://git.example/Org/Proj.git")
+    peers = {"pc-b": [{"workspace": "proj", "remotes": [{"name": "up", "key": "git.example/org/proj"}]}]}
+
+    async def body(client):
+        resp = await client.get("/api/reposync/workspaces/proj/status?remote=origin", headers=AUTH)
+        assert resp.status == 200, await resp.text()
+        shared = {r["ref"]: r for r in (await resp.json())["shared"]}
+        assert set(shared) == {"pc-b/s2-y", "pc-b/old", "pc-b/div", "pc-b/same", "Feature/z"}
+        assert {k: r["state"] for k, r in shared.items()} == {
+            "pc-b/s2-y": "new", "pc-b/old": "behind", "pc-b/div": "diverged",
+            "pc-b/same": "same", "Feature/z": "new"}
+        row = shared["pc-b/s2-y"]
+        assert (row["machine"], row["branch"], row["sha"]) == ("pc-b", "s2-y", theirs)
+        assert row["subject"] == "add theirs.txt" and row["local"] is None
+        assert row["peer"] is True and shared["Feature/z"]["peer"] is False
+
+        # the row's Pull is the existing branch pull, fast-forward only
+        resp = await client.post("/api/reposync/workspaces/proj/branch-pull",
+                                 json={"machine": "pc-b", "branch": "old", "remote": "origin"},
+                                 headers=AUTH)
+        assert resp.status == 200, await resp.text()
+        resp = await client.get("/api/reposync/workspaces/proj/status?remote=origin&fetch=0",
+                                headers=AUTH)
+        shared = {r["ref"]: r for r in (await resp.json())["shared"]}
+        assert shared["pc-b/old"]["state"] == "same"
+
+    _with_app(body, peers=peers, me="pc-a")

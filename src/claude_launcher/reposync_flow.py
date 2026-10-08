@@ -154,14 +154,77 @@ def git_summary(path: str) -> dict:
     return doc
 
 
+#: How many shared branches the Sync panel lists, newest commit first.
+SHARED_LIMIT = 50
+
+
+def shared_branches(repo: str, remote: str, machine: Optional[str],
+                    peers: Iterable[str] = ()) -> List[dict]:
+    """The work branches other machines published on ``remote`` as
+    ``<machine>/<branch>`` (:func:`reposync.publish_branch`), read from the
+    remote-tracking refs as the last fetch left them (claunch-tamel).
+
+    This machine's own prefix is left out. Any other ``<prefix>/<rest>`` is
+    listed, and ``peer`` says whether the prefix is a relay peer that shares
+    this address -- a remote may carry ``feature/x`` branches nobody
+    published, and the panel keeps those apart. ``local`` is the local branch
+    a pull lands on (:func:`reposync.receive_branch` names it the same) and
+    ``state`` how it stands: ``new`` (none yet), ``same``, ``behind`` (a pull
+    fast-forwards it) or ``diverged`` (a pull refuses)."""
+    mine = reposync.machine_prefix(machine) if machine else None
+    known = set()
+    for m in peers:
+        try:
+            known.add(reposync.machine_prefix(m))
+        except reposync.SyncError:
+            continue
+    base = f"refs/remotes/{remote}/"
+    out = reposync.git(
+        repo, "for-each-ref", "--sort=-committerdate",
+        "--format=%(refname)%00%(objectname)%00%(committerdate:iso-strict)%00%(subject)",
+        base, check=False,
+    )
+    heads = {}
+    for line in reposync.git(repo, "for-each-ref", "--format=%(refname)%00%(objectname)",
+                             "refs/heads", check=False).splitlines():
+        ref, _, sha = line.partition("\0")
+        heads[ref[len("refs/heads/"):]] = sha
+    rows = []
+    for line in out.splitlines():
+        ref, sha, date, subject = (line.split("\0") + ["", "", ""])[:4]
+        name = ref[len(base):]
+        prefix, slash, branch = name.partition("/")
+        if not slash or not branch or name == "HEAD" or prefix == mine:
+            continue
+        local = heads.get(name)
+        if local is None:
+            state = "new"
+        elif local == sha:
+            state = "same"
+        elif reposync._ok(repo, "merge-base", "--is-ancestor", local, sha):
+            state = "behind"
+        else:
+            state = "diverged"
+        rows.append({
+            "machine": prefix, "branch": branch, "ref": name, "sha": sha,
+            "date": date, "subject": subject, "peer": prefix in known,
+            "local": local, "state": state,
+        })
+        if len(rows) >= SHARED_LIMIT:
+            break
+    return rows
+
+
 def workspace_status(path: str, workspace: Optional[str], peers: Dict[str, List[dict]],
                      problems: List[str], *, do_fetch: bool, remote: Optional[str] = None,
-                     branch: Optional[str] = None) -> dict:
+                     branch: Optional[str] = None, machine: Optional[str] = None) -> dict:
     """One workspace as the web UI's Sync panel shows it: its remotes, the
     peers that share an address with it, and the plan a sync would carry out.
     ``peers`` is what the daemon could read off the relay; an unreadable peer
     is a line in ``problems``, never a reason not to plan -- the plan rests on
-    the shared remote alone."""
+    the shared remote alone. ``shared`` lists the branches other machines
+    published on the planned remote (:func:`shared_branches`); ``machine`` is
+    this one, whose own prefix it leaves out."""
     try:
         repo = reposync.toplevel(path)
     except reposync.SyncError as exc:
@@ -181,6 +244,8 @@ def workspace_status(path: str, workspace: Optional[str], peers: Dict[str, List[
         return out
     key = reposync.url_key(reposync.remotes(repo).get(name, ""))
     out["plan"] = plan_card(p, workspace=workspace, key=key)
+    # after the plan: with do_fetch its fetch is what brought these refs in
+    out["shared"] = shared_branches(repo, name, machine, {r["machine"] for r in rows})
     return out
 
 

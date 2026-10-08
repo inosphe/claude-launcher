@@ -5885,7 +5885,7 @@ async def h_reposync_ws_status(request: web.Request) -> web.Response:
     doc = await asyncio.to_thread(
         reposync_flow.workspace_status, path, name, peers, problems,
         do_fetch=do_fetch, remote=request.query.get("remote") or None,
-        branch=request.query.get("branch") or None,
+        branch=request.query.get("branch") or None, machine=_machine_name(request),
     )
     doc["machine"] = _machine_name(request)
     return json_response(doc)
