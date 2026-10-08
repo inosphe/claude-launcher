@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import subprocess
 import time
+import sys
 from pathlib import Path
 
 import pytest
@@ -155,6 +156,215 @@ async def _status_plan(client):
     doc = await (await client.get("/api/reposync/workspaces/proj/status?peers=0",
                                   headers=AUTH)).json()
     return doc["plan"]
+
+
+def _agent_parent(client, world, monkeypatch):
+    """Real child staging/worktree creation, with only process onboarding replaced."""
+    from claude_launcher import lineage, profile, store
+    from claude_launcher.daemon import api
+    from claude_launcher.daemon.harness import SessionDef
+
+    store.update(lambda doc: doc.update({
+        "harnesses": {"sync-test": {"command": [sys.executable, "-c", "pass"]}},
+    }))
+    lineage.set_harness(profile.create("sync-test"), "sync-test")
+    manager = client.app["manager"]
+    parent = manager.stage(SessionDef(name="sync-parent", profile="sync-test", cwd=str(world["a"])))
+    assignments = []
+
+    async def onboard(request, child, body, *, parent):
+        assignments.append((child, body, parent))
+        return {"test_onboarding": True}
+
+    monkeypatch.setattr(api, "_onboard_and_launch", onboard)
+    return parent, assignments
+
+
+def test_sync_agent_a_stages_isolated_child_without_executing_or_pushing(world, monkeypatch):
+    from claude_launcher.daemon import api, reposync_agent
+
+    mine = _commit(world["a"], "mine.txt")
+    before = _git(world["remote"], "rev-parse", "master")
+    monkeypatch.setattr(api, "_ws_execute", lambda *_: pytest.fail("A must not execute sync"))
+
+    async def body(client):
+        parent, assignments = _agent_parent(client, world, monkeypatch)
+        plan = await _status_plan(client)
+        req = _shown(plan, agent_mode="agent", agent_parent=parent.sdef.name)
+        # Concurrent double-clicks must stage only one child.
+        responses = await asyncio.gather(*[
+            client.post("/api/reposync/workspaces/proj/sync", json=req, headers=AUTH)
+            for _ in range(2)
+        ])
+        assert [r.status for r in responses] == [202, 202]
+        docs = [await r.json() for r in responses]
+        assert docs[0]["agent"]["session"] == docs[1]["agent"]["session"]
+        assert len(assignments) == 1
+        child, assignment, spawned_parent = assignments[0]
+        assert spawned_parent == parent.sdef.name == child.sdef.parent
+        assert child.sdef.profile == parent.sdef.profile
+        assert Path(child.sdef.cwd) != world["a"]
+        assert _git(Path(child.sdef.cwd), "rev-parse", "HEAD") == mine
+        assert assignment["worktree"] is True
+        assert assignment["branch_from"] == mine and assignment["workflow"] == "-"
+        assert '"remote": "origin"' in child.sdef.task
+        assert "Delegation does not approve a push" in child.sdef.task
+        assert _git(world["remote"], "rev-parse", "master") == before
+        assert _git(world["a"], "rev-parse", "master") == mine
+        assert not (await (await client.get("/api/reposync/requests", headers=AUTH)).json())["requests"]
+        status = await (await client.get("/api/reposync/workspaces/proj/status?peers=0&fetch=0",
+                                        headers=AUTH)).json()
+        assert status["agent"]["session"] == child.sdef.name
+        assert parent.sdef.name in [p["name"] for p in status["agent_parents"]]
+        # The persisted task alone identifies ownership after a restore.
+        assert reposync_agent.active(client.app["manager"], str(world["a"])) is child
+        resp = await client.post("/api/reposync/workspaces/proj/sync", json=_shown(plan), headers=AUTH)
+        assert resp.status == 409 and "already assigned" in (await resp.json())["error"]
+        child.exited = True
+        assert reposync_agent.active(client.app["manager"], str(world["a"])) is None
+
+    _with_app(body)
+
+
+@pytest.mark.parametrize("mode", ["commands", "on_failure"])
+def test_sync_agent_b_real_conflict_only_delegates_when_enabled(world, monkeypatch, mode):
+    for repo, content in [(world["a"], "ours\n"), (world["b"], "theirs\n")]:
+        (repo / "base.txt").write_text(content)
+        _git(repo, "commit", "-qam", "edit base")
+    _git(world["b"], "push", "-q", "origin", "master")
+    before = _git(world["remote"], "rev-parse", "master")
+
+    async def body(client):
+        parent, assignments = _agent_parent(client, world, monkeypatch)
+        plan = await _status_plan(client)
+        req = _shown(plan, agent_mode=mode, agent_parent=parent.sdef.name)
+        resp = await client.post("/api/reposync/workspaces/proj/sync", json=req, headers=AUTH)
+        assert resp.status == 202 and not assignments
+        rid = (await resp.json())["request"]
+        await client.post(f"/api/reposync/requests/{rid}/approve", headers=AUTH)
+        resp = await client.post("/api/reposync/workspaces/proj/sync",
+                                 json={**req, "request": rid}, headers=AUTH)
+        doc = await resp.json()
+        assert resp.status == (202 if mode == "on_failure" else 409), doc
+        assert _git(world["a"], "rev-parse", "master") == plan["local"]
+        assert _git(world["remote"], "rev-parse", "master") == before
+        if mode == "on_failure":
+            assert len(assignments) == 1 and doc["status"] == "delegated"
+            assert "base.txt" in doc["operation_error"]
+            assert "base.txt" in assignments[0][0].sdef.task
+            assert "aborted" in assignments[0][0].sdef.task
+        else:
+            assert not assignments and "base.txt" in doc["error"]
+
+    _with_app(body)
+
+
+def test_sync_agent_b_success_rejection_and_stale_plan_do_not_spawn(world, monkeypatch):
+    mine = _commit(world["a"], "mine.txt")
+
+    async def body(client):
+        parent, assignments = _agent_parent(client, world, monkeypatch)
+        plan = await _status_plan(client)
+        req = _shown(plan, agent_mode="on_failure", agent_parent=parent.sdef.name)
+        # No fallback on a stale plan, for either agent mode.
+        for mode in ("agent", "on_failure"):
+            resp = await client.post("/api/reposync/workspaces/proj/sync",
+                                     json={**req, "local": "0" * 40, "agent_mode": mode}, headers=AUTH)
+            assert resp.status == 409 and (await resp.json())["stale"]
+        resp = await client.post("/api/reposync/workspaces/proj/sync", json=req, headers=AUTH)
+        rid = (await resp.json())["request"]
+        await client.post(f"/api/reposync/requests/{rid}/reject", headers=AUTH)
+        resp = await client.post("/api/reposync/workspaces/proj/sync",
+                                 json={**req, "request": rid}, headers=AUTH)
+        assert resp.status == 409 and not assignments
+        resp = await client.post("/api/reposync/workspaces/proj/sync", json=req, headers=AUTH)
+        rid = (await resp.json())["request"]
+        await client.post(f"/api/reposync/requests/{rid}/approve", headers=AUTH)
+        resp = await client.post("/api/reposync/workspaces/proj/sync",
+                                 json={**req, "request": rid}, headers=AUTH)
+        assert resp.status == 200 and (await resp.json())["pushed"]
+        assert not assignments and _git(world["remote"], "rev-parse", "master") == mine
+
+    _with_app(body)
+
+
+@pytest.mark.parametrize("mode", ["agent", "on_failure"])
+def test_sync_agent_publish_preserves_destination_and_failure(world, monkeypatch, mode):
+    from claude_launcher import reposync, reposync_flow
+
+    _git(world["a"], "branch", "work")
+    monkeypatch.setattr(reposync_flow, "approval_mode", lambda: reposync_flow.AUTO)
+
+    def fail(*args, **kwargs):
+        if mode == "agent":
+            pytest.fail("A must not attempt a push")
+        raise reposync.SyncError("push rejected: remote advanced")
+
+    monkeypatch.setattr(reposync, "publish_branch", fail)
+
+    async def body(client):
+        parent, assignments = _agent_parent(client, world, monkeypatch)
+        resp = await client.post("/api/reposync/workspaces/proj/branch-push", headers=AUTH, json={
+            "branch": "work", "remote": "origin", "agent_mode": mode, "agent_parent": parent.sdef.name,
+        })
+        doc = await resp.json()
+        assert resp.status == 202, doc
+        task = assignments[0][0].sdef.task
+        assert '"source": "work"' in task and '"branch": "pc-a/work"' in task
+        assert bool(doc["operation_error"]) == (mode == "on_failure")
+
+    _with_app(body)
+
+
+@pytest.mark.parametrize("failure", ["policy", "onboarding"])
+def test_sync_agent_spawn_denial_keeps_original_error(world, monkeypatch, failure):
+    from claude_launcher import reposync, reposync_flow, spawn
+    from claude_launcher.daemon import api
+
+    _commit(world["a"], "mine.txt")
+    monkeypatch.setattr(reposync_flow, "approval_mode", lambda: reposync_flow.AUTO)
+
+    def fail(*args):
+        raise reposync.SyncError("original push failure")
+
+    def denied(*args, **kwargs):
+        raise spawn.SpawnDenied("spawn disabled")
+
+    monkeypatch.setattr(api, "_ws_execute", fail)
+
+    async def body(client):
+        parent, assignments = _agent_parent(client, world, monkeypatch)
+        if failure == "policy":
+            monkeypatch.setattr(client.app["manager"], "stage_child", denied)
+        else:
+            async def no_launch(*args, **kwargs):
+                raise OSError("spawn disabled at launch")
+            monkeypatch.setattr(api, "_onboard_and_launch", no_launch)
+        plan = await _status_plan(client)
+        resp = await client.post("/api/reposync/workspaces/proj/sync", headers=AUTH,
+                                 json=_shown(plan, agent_mode="on_failure", agent_parent=parent.sdef.name))
+        doc = await resp.json()
+        assert resp.status == 409 and not assignments
+        assert doc["operation_error"] == "original push failure"
+        assert "spawn disabled" in doc["agent_error"]
+        assert "original push failure" in doc["error"]
+        assert [s.sdef.name for s in client.app["manager"].list()] == [parent.sdef.name]
+
+    _with_app(body)
+
+
+def test_sync_agent_invalid_options_do_not_execute(world, monkeypatch):
+    from claude_launcher.daemon import api
+
+    monkeypatch.setattr(api, "_ws_plan", lambda *_: pytest.fail("invalid options must not execute"))
+
+    async def body(client):
+        for options in ({"agent_mode": "invalid"}, {"agent_mode": "agent"},
+                        {"agent_mode": "on_failure", "agent_parent": "absent"}):
+            resp = await client.post("/api/reposync/workspaces/proj/sync", headers=AUTH, json=options)
+            assert resp.status == 400
+
+    _with_app(body)
 
 
 def test_a_push_without_an_approval_files_a_card_and_pushes_nothing(world):

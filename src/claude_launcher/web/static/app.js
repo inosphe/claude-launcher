@@ -26853,6 +26853,7 @@ function wsSyncSt(name) {
     wsSyncState.set(name, {
       loading: false, doc: null, error: "", busy: "", result: null, waiting: null,
       pushBranch: "", force: false, pullMachine: "", pullBranch: "",
+      agentMode: "commands", agentParent: "",
     });
   }
   return wsSyncState.get(name);
@@ -27005,6 +27006,7 @@ async function wsSyncSend(name, kind, body) {
       "Review the new plan below and press the button again.";
   } else if (!resp.ok) {
     st.error = doc.error || `HTTP ${resp.status}`;
+    if (doc.agent && st.doc) st.doc.agent = doc.agent;
   } else {
     st.result = { kind, doc };
   }
@@ -27045,23 +27047,28 @@ async function wsSyncWait(name) {
 async function wsSyncRun(name) {
   const st = wsSyncSt(name);
   const plan = st.doc && st.doc.plan;
-  if (!plan || plan.action === "up-to-date") return;
+  if (!plan || plan.action === "up-to-date" || wsSyncAgentBlocked(st)) return;
   // A fast-forward only moves the local branch and runs at once, so it asks
   // here; a push asks on the approval card instead.
-  if (plan.action === "ff" && !confirm(
+  if (st.agentMode !== "agent" && plan.action === "ff" && !confirm(
     `Fast-forward ${name}: ${plan.branch} ${plan.local.slice(0, 8)} → ` +
     `${plan.remote}/${plan.branch} ${plan.upstream.slice(0, 8)}?\n\n${plan.summary}`
   )) return;
   await wsSyncSend(name, "sync", {
     remote: plan.remote, branch: plan.branch, local: plan.local, upstream: plan.upstream,
+    ...wsSyncAgentBody(st),
   });
 }
 
 async function wsSyncBranch(name, kind) {
   const st = wsSyncSt(name);
   if (kind === "push") {
-    if (!st.pushBranch) return;
-    await wsSyncSend(name, "push", { branch: st.pushBranch, force_with_lease: !!st.force });
+    if (!st.pushBranch || wsSyncAgentBlocked(st)) return;
+    await wsSyncSend(name, "push", {
+      branch: st.pushBranch, force_with_lease: !!st.force,
+      remote: st.doc && st.doc.plan && st.doc.plan.remote,
+      ...wsSyncAgentBody(st),
+    });
     return;
   }
   if (!st.pullMachine || !st.pullBranch) return;
@@ -27203,8 +27210,17 @@ function wsSyncPeers(doc) {
 }
 
 function wsSyncResult(result) {
-  const box = el("div", "ws-sync-result");
   const d = result.doc;
+  const box = el("div", "ws-sync-result" + (d.status === "delegated" ? " ws-sync-delegated" : ""));
+  if (d.status === "delegated") {
+    const link = el("a", "ws-sync-agent-link", `Assigned to agent ${d.agent.session}`);
+    link.href = `#/s/${encodeURIComponent(d.agent.session)}`;
+    box.appendChild(link);
+    box.appendChild(el("div", "wf-note", "Synchronization is pending; follow the agent session for its result."));
+    if (d.operation_error) box.appendChild(el("div", "wf-note wf-warning", d.operation_error));
+    for (const warning of d.warnings || []) box.appendChild(el("div", "wf-note wf-warning", warning));
+    return box;
+  }
   if (result.kind === "sync") {
     box.appendChild(el("div", "mono",
       `done: ${d.plan.branch} = ${String(d.new || "").slice(0, 8)}` + (d.pushed ? " (pushed)" : "")));
@@ -27318,6 +27334,59 @@ function wsSyncHistory(doc) {
   return box;
 }
 
+function wsSyncAgentBody(st) {
+  return st.agentMode && st.agentMode !== "commands"
+    ? { agent_mode: st.agentMode, agent_parent: st.agentParent } : {};
+}
+
+function wsSyncAgentBlocked(st) {
+  if (st.doc && st.doc.agent) return true;
+  return st.agentMode && st.agentMode !== "commands" &&
+    !(st.doc && (st.doc.agent_parents || []).some((p) => p.name === st.agentParent));
+}
+
+function wsSyncAgentControls(st) {
+  const box = el("div", "ws-sync-agent");
+  box.appendChild(el("h4", null, "Sync / push execution"));
+  const form = el("div", "ws-sync-form");
+  const mode = el("select");
+  mode.setAttribute("aria-label", "Sync execution mode");
+  for (const [value, label] of [
+    ["commands", "Run commands"], ["agent", "A — Delegate to agent"],
+    ["on_failure", "B — Agent on failure"],
+  ]) mode.appendChild(new Option(label, value));
+  mode.value = st.agentMode || "commands";
+  mode.disabled = !!st.busy;
+  mode.addEventListener("change", () => { st.agentMode = mode.value; renderWorkspaces(); });
+  form.appendChild(mode);
+  if (st.agentMode !== "commands") {
+    const parent = el("select");
+    parent.setAttribute("aria-label", "Sync agent parent session");
+    parent.appendChild(new Option("Choose parent session", ""));
+    for (const p of (st.doc && st.doc.agent_parents) || []) {
+      parent.appendChild(new Option(`${p.name} (${p.profile})`, p.name));
+    }
+    if (!(st.doc && (st.doc.agent_parents || []).length)) {
+      box.appendChild(el("p", "wf-note", "Start a parent agent session to enable delegation."));
+    }
+    parent.value = st.agentParent;
+    parent.disabled = !!st.busy;
+    parent.addEventListener("change", () => { st.agentParent = parent.value; renderWorkspaces(); });
+    form.appendChild(parent);
+    box.appendChild(el("p", "wf-note", st.agentMode === "agent"
+      ? "Start a child agent in its own worktree to handle sync or push. It inherits the selected parent's settings."
+      : "Try the commands first. If execution fails, start a child agent to diagnose and resolve the failure."));
+    box.appendChild(el("p", "wf-note", "Push approval still applies to the agent's final changes."));
+  }
+  box.appendChild(form);
+  if (st.doc && st.doc.agent) {
+    const link = el("a", "ws-sync-agent-link", `Agent ${st.doc.agent.session} (${st.doc.agent.status}) — open session`);
+    link.href = `#/s/${encodeURIComponent(st.doc.agent.session)}`;
+    box.appendChild(link);
+  }
+  return box;
+}
+
 function wsSyncPanel(w) {
   const st = wsSyncSt(w.name);
   const panel = el("div", "ws-sync");
@@ -27346,6 +27415,7 @@ function wsSyncPanel(w) {
   }
 
   const remotes = Object.entries(doc.remotes || {});
+  panel.appendChild(wsSyncAgentControls(st));
   panel.appendChild(el("div", "wf-note",
     "Remotes: " + (remotes.length
       ? remotes.map(([key, name]) => `${name} (${key})`).join(", ")
@@ -27362,8 +27432,9 @@ function wsSyncPanel(w) {
         `left on the old commits: ${doc.plan.affected.join(", ")}`));
     }
     const go = el("button", "wf-btn",
-      st.busy === "sync" ? (st.waiting ? "Waiting for approval…" : "Syncing…") : (WS_SYNC_LABEL[doc.plan.action] || "Up to date"));
-    go.disabled = !!st.busy || st.loading || doc.plan.action === "up-to-date";
+      st.busy === "sync" ? (st.waiting ? "Waiting for approval…" : "Syncing…")
+        : st.agentMode === "agent" ? "Delegate sync" : (WS_SYNC_LABEL[doc.plan.action] || "Up to date"));
+    go.disabled = !!st.busy || st.loading || doc.plan.action === "up-to-date" || wsSyncAgentBlocked(st);
     go.addEventListener("click", () => wsSyncRun(w.name));
     master.appendChild(go);
   } else {
@@ -27393,8 +27464,9 @@ function wsSyncPanel(w) {
   force.appendChild(box);
   force.appendChild(document.createTextNode(" force-with-lease"));
   pushRow.appendChild(force);
-  const push = el("button", "wf-btn", st.busy === "push" ? (st.waiting ? "Waiting for approval…" : "Pushing…") : `Push as ${doc.machine}/…`);
-  push.disabled = !!st.busy || !(doc.branches || []).length;
+  const push = el("button", "wf-btn", st.busy === "push" ? (st.waiting ? "Waiting for approval…" : "Pushing…")
+    : st.agentMode === "agent" ? "Delegate push" : `Push as ${doc.machine}/…`);
+  push.disabled = !!st.busy || !(doc.branches || []).length || wsSyncAgentBlocked(st);
   push.addEventListener("click", () => { st.pushBranch = pick.value; wsSyncBranch(w.name, "push"); });
   pushRow.appendChild(push);
   work.appendChild(pushRow);

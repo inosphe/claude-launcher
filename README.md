@@ -2438,6 +2438,32 @@ the card it filed; the same body with that `request` runs once the card is
 approved (`GET /api/reposync/requests/<id>` says when), and answers 409 when
 the card was rejected or expired or the tips moved after the approval.
 
+**Sync / push execution** selects how the panel performs master sync and
+work-branch push:
+
+- **Run commands** keeps the existing behavior and is the default.
+- **A — Delegate to agent** starts a child session to perform the sync or push.
+- **B — Agent on failure** tries the commands first and starts a child only
+  after execution fails. Pending or refused approval and stale plans do not
+  trigger recovery.
+
+For A or B, choose a live **parent session**. The child inherits its settings,
+uses the normal spawn policy and board onboarding, and gets a new worktree
+based on the selected local commit. Its task includes the repository, remote,
+source and destination, recorded tips, and the original error for B. The panel
+links to the child and reports the synchronization as pending. While that
+session remains active, another sync or push from the panel is blocked;
+follow up in the existing session or end it before starting another assignment.
+Starting an agent grants no push approval: its final resolved tips use the
+existing approval flow. If the child cannot start, the panel shows both the
+original failure and the creation error.
+
+These modes are specific to the Workspaces panel (`agent_mode: commands |
+agent | on_failure`, with `agent_parent` for A/B, on the sync and branch-push
+requests). CLI behavior is unchanged. MCP `repo_sync` leaves diagnosis,
+conflict resolution, verification and final reporting with the calling agent;
+it does not spawn a recovery session.
+
 Each row also carries badges read from local git without opening the panel:
 the checked-out branch (its tooltip names the upstream), `↑ahead ↓behind`
 against that upstream when either is non-zero, and `N changed` for tracked
