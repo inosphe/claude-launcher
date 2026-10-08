@@ -12,8 +12,10 @@
      forgotten;
    - pressing the open tab scrolls the list to its top; pressing another
      opens it and redraws from the records in hand;
-   - a mesh's open tab carries the ⊕ that opens the create form with that
-     mesh picked, and no other tab does;
+   - under the strip, one header row for the open group alone (claunch-b7326):
+     its kind, its full name, its session count and, for a mesh, the ⊕ that
+     opens the create form with that mesh picked; no tab carries a ⊕;
+   - pressing the header row scrolls the list to its top;
    - the fold, its caret and the jump button are gone from the page. */
 const fs = require("fs");
 const path = require("path");
@@ -95,7 +97,10 @@ const bar = node("div");
 bar.classes.add("hidden");
 const list = node("ul");
 list.scrollTop = 0;
-const $ = (id) => (id === "session-group-tabs" ? bar : id === "session-list" ? list : null);
+const head = node("div");
+head.classes.add("hidden");
+const $ = (id) => (id === "session-group-tabs" ? bar : id === "session-group-header" ? head
+  : id === "session-list" ? list : null);
 
 function storage(seed) {
   const store = new Map(Object.entries(seed));
@@ -120,7 +125,8 @@ function load(seed) {
     "let sessionGroupTabScrollReset = false;\n" +
     [slice("sessionWorkspaceLabel"), slice("sessionGroupActiveTab"),
      slice("setSessionGroupTab"), slice("sessionGroupTabRows"),
-     slice("selectSessionGroupTab"), slice("renderSessionGroupTabs")].join("\n") + `
+     slice("scrollSessionListTop"), slice("selectSessionGroupTab"),
+     slice("renderSessionGroupTabs"), slice("renderSessionGroupHeader")].join("\n") + `
 Object.assign(exports, {
   order: () => sessionGroupOrder,
   tab: () => sessionGroupTab,
@@ -128,6 +134,7 @@ Object.assign(exports, {
   active: sessionGroupActiveTab,
   split: sessionGroupTabRows,
   render: renderSessionGroupTabs,
+  top: scrollSessionListTop,
 });`)(ctx, document, $, localStorage, "/t/local/",
       (opts) => ctx.redraws.push(opts), (hash) => ctx.went.push(hash));
   ctx.writes = localStorage.writes;
@@ -187,11 +194,21 @@ check("the open tab carries the active class alone",
 check("each tab counts its sessions, local and remote",
       tabs().map((t) => t.querySelector(".session-group-count").textContent),
       ["1", "2", "2"]);
-check("the ⊕ sits on the open mesh tab alone",
-      tabs().map((t) => t.querySelectorAll(".session-group-new").length), [0, 0, 1]);
+check("no tab carries a ⊕: the tabs are pickers alone",
+      tabs().map((t) => t.querySelectorAll(".session-group-new").length), [0, 0, 0]);
 check("the open tab is kept in view in a strip wider than the rail",
       tabs()[2].scrolled.length, 1);
-const add = tabs()[2].querySelector(".session-group-new");
+
+/* ---- the open group's header row ---- */
+check("one header row, for the open group, shown under the strip",
+      [head.classes.has("hidden"), head.dataset.group, head.dataset.value],
+      [false, "mesh", "m2"]);
+check("it says the group's kind, full name and session count",
+      [".session-group-kind", ".session-group-name", ".session-group-count"].map((sel) =>
+        head.querySelector(sel).textContent), ["mesh", "m2", "2 sessions"]);
+check("an open mesh's header carries the ⊕",
+      head.querySelectorAll(".session-group-new").length, 1);
+const add = head.querySelector(".session-group-new");
 let stopped = 0;
 add.handlers.click({ stopPropagation() { stopped++; } });
 check("the ⊕ opens the create form with that mesh picked, and nothing else",
@@ -219,17 +236,31 @@ check("Enter on a tab presses it", [ctx.tab().mesh, prevented], ["(no mesh)", 1]
 tabs()[0].handlers.keydown({ key: "x", preventDefault() { prevented++; } });
 check("other keys are left alone", prevented, 1);
 
+/* ---- the header row's press ---- */
+list.scrollTop = 300;
+const redrawsBefore = ctx.redraws.length;
+ctx.top();
+check("pressing the header row takes the list to its top, with no redraw",
+      [list.scrollTop, ctx.redraws.length - redrawsBefore], [0, 0]);
+
 /* ---- (no mesh) and workspace tabs ---- */
 ctx.render("mesh", split.tabs, "(no mesh)");
-check("(no mesh) is not a mesh to create in: its open tab has no ⊕",
-      bar.querySelectorAll(".session-group-new").length, 0);
+check("(no mesh) is not a mesh to create in: its header has no ⊕",
+      [head.querySelector(".session-group-name").textContent,
+       head.querySelector(".session-group-count").textContent,
+       head.querySelectorAll(".session-group-new").length], ["(no mesh)", "1 session", 0]);
 ctx.render("workspace", [{ value: "F:/a/b/repo", rows: [session("s1")] }], "F:/a/b/repo");
 check("a workspace tab is labelled by its last two path parts",
       [tabs()[0].querySelector(".session-group-name").textContent,
        tabs()[0].querySelectorAll(".session-group-new").length], ["…/b/repo", 0]);
+check("...and its header names the full path, with no ⊕",
+      [head.querySelector(".session-group-kind").textContent,
+       head.querySelector(".session-group-name").textContent,
+       head.querySelectorAll(".session-group-new").length], ["workspace", "F:/a/b/repo", 0]);
 ctx.render("", [], null);
-check("ungrouped, the strip is hidden and empty",
-      [bar.classes.has("hidden"), tabs().length], [true, 0]);
+check("ungrouped, the strip and the header are hidden and empty",
+      [bar.classes.has("hidden"), tabs().length, head.classes.has("hidden"), head.kids.length],
+      [true, 0, true, 0]);
 
 /* ---- the page ---- */
 check("the fold and the jump are gone from the rail",
@@ -239,6 +270,15 @@ check("the fold and the jump are gone from the rail",
 check("the tab strip sits between the filters and the list",
       html.indexOf('id="session-group-tabs"') > html.indexOf('id="session-filters"') &&
       html.indexOf('id="session-group-tabs"') < html.indexOf('id="session-list"'), true);
+check("the header row sits right under the tab strip, above the list",
+      html.indexOf('id="session-group-header"') > html.indexOf('id="session-group-tabs"') &&
+      html.indexOf('id="session-group-header"') < html.indexOf('id="session-list"'), true);
+check("the header row is wired to scroll the list to its top",
+      /\$\("session-group-header"\)\?\.addEventListener\("click", scrollSessionListTop\)/.test(src),
+      true);
+check("the header row is hidden with the strip in grid view",
+      /groupHeader\.classList\.toggle\("view-hidden", grid\)/.test(src) &&
+      /\.session-group-header\.view-hidden\s*\{\s*display: none/.test(css), true);
 check("the tabs have their own styling, open and matched",
       [/\.session-group-tab\.active\s*\{/.test(css),
        /\.session-group-tab\.search-match\s*\{/.test(css)], [true, true]);

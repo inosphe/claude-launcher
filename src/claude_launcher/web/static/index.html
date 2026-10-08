@@ -188,6 +188,12 @@
          back to its top. -->
     <div id="session-group-tabs" class="session-group-tabs hidden" role="tablist"
          aria-label="Session groups"></div>
+    <!-- The open tab's group, in one row: its full name, its session count
+         and, for a mesh, the ⊕ that creates a session in it
+         (renderSessionGroupHeader). Pressing the row also scrolls the list
+         back to its top. -->
+    <div id="session-group-header" class="session-group-header hidden" role="button"
+         tabindex="0" aria-label="Scroll the open group to its top"></div>
     <!-- Every session the rail can show: this daemon's rows (li[data-name],
          keyed by bare name, with their controls) and other daemons' members
          of the meshes held here (li.shadow-card, GET /api/shadows,
