@@ -166,7 +166,7 @@ async function main() {
   const prBtn = buttons(head).find((b) => b.text === "Open PR");
   check("the detail head has an Open PR button", !!prBtn);
   check("...between Spawn and Open terminal", buttons(head).map((b) => b.text).join(",")
-    === "Spawn,Open PR,Open terminal,×", buttons(head).map((b) => b.text));
+    === "Spawn,Spawn same setup,Open PR,Open terminal,×", buttons(head).map((b) => b.text));
   const exitedHead = ctx.sessHead({ name: "s1", status: "exited", cwd: "C:/repo" });
   const exitedPr = buttons(exitedHead).find((b) => b.text === "Open PR");
   check("an exited session still has a directory to push", exitedPr && !exitedPr.disabled);
