@@ -37,7 +37,7 @@ const rows = sessions.map((session) => {
 });
 const list = { querySelectorAll: (selector) => selector === "li[data-name]" ? rows : [] };
 const buttons = {};
-for (const filter of ["current", "running", "killed", "paused", "archived"]) {
+for (const filter of ["current", "running-paused", "running", "killed", "paused", "archived"]) {
   buttons[filter] = {
     textContent: "", children: [], attrs: {},
     append(...children) { this.children.push(...children); },
@@ -90,17 +90,17 @@ check("the four lifecycle categories are disjoint",
 check("current combines running, killed and paused",
       sessions.map((s) => ctx.matches(s, "current")), [true, true, true, false]);
 check("every count describes its exact partition", ctx.counts(sessions),
-      { current: 3, running: 1, killed: 1, paused: 1, archived: 1 });
+      { current: 3, "running-paused": 2, running: 1, killed: 1, paused: 1, archived: 1 });
 
 ctx.sync(sessions);
 check("the remembered killed filter is selected",
       Object.values(buttons).map((b) => b.attrs["aria-pressed"]),
-      ["false", "false", "true", "false", "false"]);
+      ["false", "false", "false", "true", "false", "false"]);
 check("killed shows only killed rows — a paused record is not one",
       rows.map((row) => row.classes.has("session-filtered")), [true, false, true, true]);
 check("counts are rendered beside every label",
       Object.values(buttons).map((b) => b.children[1].textContent),
-      ["3", "1", "1", "1", "1"]);
+      ["3", "2", "1", "1", "1", "1"]);
 
 check("legacy combined selection migrates", ctx.restore("running-paused"), ["running", "paused"]);
 check("legacy current migrates", ctx.restore("current"), ["running", "killed", "paused"]);
@@ -115,7 +115,7 @@ ctx.set("killed");
 ctx.set("paused");
 check("running and paused can both be pressed", sessions.map((s) => ctx.matches(s)), [true, false, true, false]);
 check("independent buttons reflect the combination", Object.values(buttons).map((b) => b.attrs["aria-pressed"]),
-      ["false", "true", "false", "true", "false"]);
+      ["false", "true", "true", "false", "true", "false"]);
 check("combination is remembered", writes.at(-1), ["claunch_session_filter:/t/local/", '["running","paused"]']);
 ctx.set("running");
 check("paused alone refreshes its partition", refreshes.at(-1), "paused");
@@ -130,14 +130,28 @@ check("empty selection is saved", writes.at(-1)[1], "[]");
 ctx.set("current");
 check("current restores the working fleet", rows.map((row) => row.classes.has("session-filtered")), [false, false, false, true]);
 check("current presses its three component buttons", Object.values(buttons).map((b) => b.attrs["aria-pressed"]),
-      ["true", "true", "true", "true", "false"]);
+      ["true", "false", "true", "true", "true", "false"]);
 ctx.set("current");
 check("current is an idempotent preset", ctx.current(), ["running", "killed", "paused"]);
 ctx.set("archived");
 check("adding archived releases current indicator", buttons.current.attrs["aria-pressed"], "false");
 ctx.set("current");
 check("current releases archived", buttons.archived.attrs["aria-pressed"], "false");
-check("obsolete combined button is removed", html.includes('id="session-filter-running-paused"'), false);
+ctx.set("running-paused");
+check("combined preset selects exactly running and paused", ctx.current(), ["running", "paused"]);
+check("combined preset count includes both categories", buttons["running-paused"].attrs["aria-label"], "Running || Paused (2)");
+check("combined preset has tooltip", buttons["running-paused"].attrs.title, "Running || Paused");
+ctx.set("running-paused");
+check("combined preset is idempotent", ctx.current(), ["running", "paused"]);
+ctx.set("killed");
+check("adding killed releases combined preset", buttons["running-paused"].attrs["aria-pressed"], "false");
+ctx.set("archived");
+ctx.set("running-paused");
+check("preset clears killed and archived", sessions.map((s) => ctx.matches(s)), [true, false, true, false]);
+check("preset stores only actual categories", writes.at(-1)[1], '["running","paused"]');
+check("combined preset is second in the page", [...html.matchAll(/id="session-filter-([^"]+)"/g)].map((m) => m[1]),
+      ["current", "running-paused", "running", "paused", "killed", "archived"]);
+ctx.set("current");
 check("buttons stay in a scrolling single row", /\.session-filter-buttons\s*\{[^}]*flex-wrap:\s*nowrap;[^}]*overflow-x:\s*auto/.test(css), true);
 
 const grouped = ctx.groupRows([
@@ -168,8 +182,8 @@ check("turning the grouping off leaves none",
         ["claunch_session_group:/t/local/", "false"],
       ]);
 
-check("the shipped page contains all five state controls",
-      ["current", "running", "killed", "paused", "archived"].every((name) =>
+check("the shipped page contains all six state controls",
+      ["current", "running-paused", "running", "killed", "paused", "archived"].every((name) =>
         html.includes(`id="session-filter-${name}"`)), true);
 check("every icon button has a tooltip and accessible name before polling",
       ["current", "running", "paused", "killed", "archived"].every((name) => {

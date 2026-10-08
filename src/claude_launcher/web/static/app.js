@@ -1712,7 +1712,7 @@ async function runSessionSearch(q) {
 const SESSION_FILTER_KEY = `claunch_session_filter:${BASE}`;
 const SESSION_GROUP_KEY = `claunch_session_group:${BASE}`;
 const SESSION_GROUP_ORDER_KEY = `claunch_session_group_order:${BASE}`;
-const SESSION_FILTERS = ["current", "running", "killed", "paused", "archived"];
+const SESSION_FILTERS = ["current", "running-paused", "running", "killed", "paused", "archived"];
 const SESSION_GROUPS = ["mesh", "workspace"];
 function restoreSessionFilter(saved) {
   const current = ["running", "killed", "paused"];
@@ -1721,7 +1721,7 @@ function restoreSessionFilter(saved) {
   if (SESSION_FILTERS.includes(saved)) return [saved];
   try {
     const states = JSON.parse(saved);
-    if (Array.isArray(states) && states.every((s) => SESSION_FILTERS.includes(s) && s !== "current")) {
+    if (Array.isArray(states) && states.every((s) => SESSION_FILTERS.includes(s) && s !== "current" && s !== "running-paused")) {
       return SESSION_FILTERS.filter((s) => states.includes(s));
     }
   } catch { /* Old or invalid browser storage falls back to Current. */ }
@@ -3514,10 +3514,11 @@ function sessionMatchesFilter(s, filter = sessionFilter) {
 }
 
 function sessionFilterCounts(sessions) {
-  const counts = { current: 0, running: 0, killed: 0, paused: 0, archived: 0 };
+  const counts = { current: 0, "running-paused": 0, running: 0, killed: 0, paused: 0, archived: 0 };
   for (const session of sessions || []) {
     const category = sessionCategory(session);
     counts[category]++;
+    if (category === "running" || category === "paused") counts["running-paused"]++;
     if (category !== "archived") counts.current++;
   }
   return counts;
@@ -3526,7 +3527,8 @@ function sessionFilterCounts(sessions) {
 function setSessionFilter(filter, remember = true) {
   if (!SESSION_FILTERS.includes(filter)) return;
   sessionFilter = filter === "current" ? ["running", "killed", "paused"]
-    : SESSION_FILTERS.filter((s) => s !== "current"
+    : filter === "running-paused" ? ["running", "paused"]
+    : SESSION_FILTERS.filter((s) => s !== "current" && s !== "running-paused"
       && (s === filter ? !sessionFilter.includes(s) : sessionFilter.includes(s)));
   if (remember) localStorage.setItem(SESSION_FILTER_KEY, JSON.stringify(sessionFilter));
   syncSessionFilters(typeof railSessions === "function" ? railSessions() : sessionsCache);
@@ -3567,6 +3569,7 @@ function syncSessionFilters(sessions) {
   }
   const counts = sessionFilterCounts(sessions);
   const labels = {
+    "running-paused": "Running || Paused",
     current: "Current", running: "Running", killed: "Killed", paused: "Paused",
     archived: "Archived",
   };
@@ -3587,6 +3590,8 @@ function syncSessionFilters(sessions) {
     );
     const pressed = filter === "current"
       ? sessionFilter.length === 3 && ["running", "killed", "paused"].every((s) => sessionFilter.includes(s))
+      : filter === "running-paused"
+        ? sessionFilter.length === 2 && ["running", "paused"].every((s) => sessionFilter.includes(s))
       : sessionFilter.includes(filter);
     button.setAttribute("aria-pressed", String(pressed));
   }
