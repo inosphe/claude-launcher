@@ -510,6 +510,12 @@ def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+#: The role that leads a mesh, and the subrole every leader holds with it
+#: (claunch-lhgfx): a leader is always one who may merge.
+LEADER_ROLE = "leader"
+LEADER_IMPLIES = "merger"
+
+
 def infer_role(handle: str) -> str:
     """The role a handle self-selects under the PACKAGED vocabulary.
 
@@ -4377,6 +4383,13 @@ class MeshManager:
         never repeated as a subrole, and an ``exclusive`` role is exclusive
         however it is held — a second live ``leader`` is refused whether it
         arrives as a primary or as a subrole.
+
+        A ``leader`` always holds ``merger`` (claunch-lhgfx) when the mesh's
+        vocabulary has it: it is added here, on every join and role change
+        that settles a leader, so it cannot be dropped while the member
+        leads. Records written before this stay as they are; the landing
+        route takes a leader as a merger regardless
+        (:mod:`.landing_route`).
         """
         out: List[str] = []
         for name in _read_subroles(list(subroles)):
@@ -4396,6 +4409,9 @@ class MeshManager:
                         f"be taken as a subrole either"
                     )
             out.append(canon)
+        if (primary == LEADER_ROLE and LEADER_IMPLIES not in out
+                and mesh.roleset.get(LEADER_IMPLIES) is not None):
+            out.append(LEADER_IMPLIES)
         return out
 
     def _new_member(

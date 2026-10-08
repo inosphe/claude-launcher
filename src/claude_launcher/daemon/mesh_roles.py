@@ -533,6 +533,16 @@ roles:
       You solely and serially own ONE resource and operate it for everyone
       else, working requests in order.
 
+  merger:
+    # A capability subrole, not a job: it is held beside a primary role to
+    # say the member may merge other members' branches, so a worker's
+    # landing request may be filed on a queue it drives
+    # (daemon/landing_route.py). A ``leader`` is always taken as holding it,
+    # and a member joining as leader is given it (mesh._resolve_subroles).
+    stance: |
+      You may merge other members' branches: landing requests can be filed
+      on your queue. Your primary role decides everything else.
+
   unreal:
     # A domain subrole, not a job: it is held beside a primary role (worker,
     # leader...) to say the member works in an Unreal project. What that

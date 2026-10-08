@@ -1013,8 +1013,9 @@ nodes:
   `landing`이면 이 항목 대신 아래 「착지 요청의 대상」을 따른다.
 - 착지 요청의 대상(`parent:landing`, `leader:landing`, `enqueue-landing`. claunch-6i0tp,
   claunch-9wwbb): 데몬의 `daemon/landing_route.py`가 v1과 함께 정한다.
-  - **병합 가능**: 세션이 살아 있고, 워커와 같은 저장소(`git --git-common-dir`가 같은
-    checkout)에서 착지 큐를 가진 런(v2 `landing` 컬렉션을 선언한 런 또는 v1
+  - **병합 가능**: 세션이 살아 있고, 워커가 속한 mesh에서 `merger` 역할(primary 또는
+    subrole. `leader`는 가진 것으로 본다, claunch-lhgfx)을 가지며, 워커와 같은
+    저장소(`git --git-common-dir`가 같은 checkout)에서 착지 큐를 가진 런(v2 `landing` 컬렉션을 선언한 런 또는 v1
     `landing_queue:`를 선언한 런)을 구동한다. 그런 런이 여럿이면 묻지 않고 하나를
     고른다: 메인 런이 먼저이고(순서와 무관), 그다음은 디렉터리·런 이름 순서에서 처음 것이다.
   - `parent:landing`(stacked): 부모부터 직계 조상을 위로 차례로 보고 병합 가능한 가장
