@@ -4719,6 +4719,7 @@ async function refreshSessions(options) {
   if (typeof renderTermTimer === "function") renderTermTimer();
   if (rebuild) {
     applyCflowBadges();
+    if (typeof applyCflow2Badges === "function") applyCflow2Badges();
     // Guarded like the other optional painters: the isolated rail harnesses
     // slice refreshSessions without the beads line.
     if (typeof applyRailBeads === "function") applyRailBeads();
@@ -5042,6 +5043,97 @@ function applyCflowBadges() {
     }
     line.textContent = "";
     line.append(mark, txt);
+  }
+}
+
+/* The session's cflow v2 run, one line under its rail row.
+
+   A path of its own, beside the v1 badge above rather than folded into it:
+   its own request (GET /api/cflow2/rail, one entry per live session, keyed
+   by the session -- the run in the session's directory under the session's
+   name), its own cache and its own line (.sess-cflow2). The v1 helpers
+   (sessCflowRun, sessCflowGated, sessCflowLabel) read v1 statuses and v1
+   payload fields; a v2 run has neither, so nothing here goes through them.
+   Only the mark's glyph table (WF_GLYPH) is shared, so one shape still means
+   one state on the whole rail. */
+let cflow2RailCache = {};
+let cflow2RailSig = null;
+
+async function refreshCflow2Rail() {
+  let data;
+  try {
+    const resp = await api("/api/cflow2/rail");
+    if (!resp.ok) return;
+    data = await resp.json();
+  } catch {
+    return;
+  }
+  const rows = (data && data.rows) || {};
+  const sig = JSON.stringify(rows);
+  if (sig === cflow2RailSig) return;
+  cflow2RailSig = sig;
+  cflow2RailCache = rows;
+  applyCflow2Badges();
+}
+
+/* Which WF_GLYPH shape a v2 run wears. `gated` comes from the server: a
+   hold only a person releases, or an open choice whose chooser is `user`. */
+function cflow2RailMarkState(r) {
+  if (r.gated) return "yours";
+  if (r.status === "done") return "done";
+  if (r.status === "failed" || r.status === "aborted" || r.status === "error")
+    return "error";
+  return "running";
+}
+
+function cflow2RailLabel(r) {
+  if (r.status === "error") return `error${r.error ? ": " + r.error : ""}`;
+  if (r.gated) return `⚑ ${(r.owed || []).join(" · ")}`;
+  if (r.status === "done" || r.status === "failed" || r.status === "aborted")
+    return r.status;
+  const where = (r.current || []).join(", ");
+  const round = r.round ? ` · round ${r.round}` : "";
+  return `${r.status || "running"}${round}${where ? " · " + where : ""}`;
+}
+
+function applyCflow2Badges() {
+  const list = $("session-list");
+  if (!list) return;
+  for (const li of list.querySelectorAll("li[data-name]")) {
+    const old = li.querySelector(".sess-cflow2");
+    const r = (cflow2RailCache || {})[li.dataset.name];
+    if (!r) { if (old) old.remove(); continue; }
+    const line = old || document.createElement("span");
+    if (!old) {
+      // Walks to the run page, which draws the v2 view for the slot; the
+      // key is read from the dataset each poll rewrites.
+      line.addEventListener("click", (e) => {
+        e.stopPropagation();
+        location.hash = "#/wf/" + encodeURIComponent(line.dataset.wf || "");
+      });
+      li.appendChild(line);
+    }
+    const wf = `${r.scope}|${r.cwd}`;
+    if (line.dataset.wf !== wf) line.dataset.wf = wf;
+    line.className = `sess-cflow2${r.gated ? " gated" : ""}`;
+    const state = cflow2RailMarkState(r);
+    const mark = document.createElement("span");
+    mark.className = `wf-mark wf-mark-${state}`;
+    mark.textContent = WF_GLYPH[state];
+    const tag = document.createElement("span");
+    tag.className = "sess-cflow2-tag";
+    tag.textContent = "v2";
+    const txt = document.createElement("span");
+    txt.className = "sess-cflow2-text";
+    txt.textContent = `${r.workflow || "cflow2"} · ${cflow2RailLabel(r)}`;
+    line.title = (r.gated ? r.owed : r.current || []).join("\n");
+    const holder = document.createElement("span");
+    if (typeof holder.append === "function" && typeof line.innerHTML === "string") {
+      holder.append(mark, tag, txt);
+      if (line.innerHTML === holder.innerHTML) continue;
+    }
+    line.textContent = "";
+    line.append(mark, tag, txt);
   }
 }
 
@@ -39533,6 +39625,7 @@ async function boot() {
     refreshSessions(),
     refreshMeshList(),
     refreshCflow(),
+    refreshCflow2Rail(),
   ]);
   // Last, and once. A #/s/<name> link attaches here — which is why a reload
   // puts you back in the session instead of at an empty slot — and it renders
@@ -40183,6 +40276,7 @@ async function pollOnce() {
     refreshSessions(),
     refreshMeshList(),
     refreshCflow(),
+    refreshCflow2Rail(),
     refreshTermQueued(),
   ];
   // Polled because the registry is edited from the CLI, in another window;
