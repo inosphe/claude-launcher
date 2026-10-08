@@ -87,7 +87,10 @@ V1_TO_V2 = {
 PROCEDURES = {"resolve-issue", "workspace", "item", "land", "settle",
               "worker-round", "queue-recheck", "confirm-landed", "found-issue"}
 
-DELEGATED = {"prior-context", "targeted-test", "merge-ready", "round-report"}
+# prior-context, targeted-test and merge-ready are the driver's (claunch-onbdf):
+# a read-only headless delegate has no shell or MCP on the claude harness.
+DELEGATED = {"round-report"}
+DRIVER_RUN = {"prior-context", "targeted-test", "merge-ready"}
 
 
 def _block(text: str) -> str:
@@ -775,12 +778,16 @@ def _prior_flow(tmp_path):
                                  resolve_include=layers.resolver(str(tmp_path)))
 
 
-SUBAGENT_CAPS = {"subagent.spawn": True, "mcp.claunch": True}
 INTAKE = {"goal": "g", "scope": "s", "branch_gist": "b", "evidence": "e"}
 
 
-@pytest.mark.parametrize("outcome", ["fail", "timeout"])
-def test_a_failed_prior_context_does_not_end_the_round(tmp_path, monkeypatch, outcome):
+def test_read_only_steps_that_need_a_shell_are_run_by_the_driver():
+    chart = _chart()
+    got = {n.label: n.executor for n in chart.nodes.values() if n.label in DRIVER_RUN}
+    assert got == {label: ["inline"] for label in DRIVER_RUN}
+
+
+def test_a_failed_prior_context_does_not_end_the_round(tmp_path, monkeypatch):
     """claunch-onbdf: 8 of 9 trial runs lost their round when the read-only
     search delegation failed (a readonly violation, a refused MCP call) and
     went to settle without work, review or landing. The search is not a gate
@@ -788,19 +795,17 @@ def test_a_failed_prior_context_does_not_end_the_round(tmp_path, monkeypatch, ou
     from claude_launcher.cflow2 import runtime
     monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
     kw = {"cwd": str(tmp_path), "scope": "m", "now": 1.0}
-    st = runtime.start(_prior_flow(tmp_path), caps=SUBAGENT_CAPS, **kw)
+    st = runtime.start(_prior_flow(tmp_path), caps={}, **kw)
     iid = next(t["instance"] for t in st["tasks"] if t["label"] == "intake")
-    runtime.report(iid, "ok", INTAKE, **kw)
-    (did,) = runtime.RunStore(str(tmp_path), "m").load_state()["delegations"]
-    runtime.delegate_fail(did, "read-only delegation changed the working tree",
-                          outcome=outcome, **kw)
-    st = runtime.status(**kw)
+    st = runtime.report(iid, "ok", INTAKE, **kw)
+    iid = next(t["instance"] for t in st["tasks"] if t["label"] == "prior-context")
+    st = runtime.report(iid, "fail", {"reason": "MCP search refused"}, **kw)
     task = next(t for t in st["tasks"] if t["label"] == "prior-context-fallback")
-    assert "read-only delegation changed the working tree" in task["prompt"]
-    found = {"query": "q", "summary": "위임 실패로 대체 검색: 없음", "related": [], "duplicate": None}
+    assert "MCP search refused" in task["prompt"]
+    found = {"query": "q", "summary": "검색 실패로 대체 검색: 없음", "related": [], "duplicate": None}
     st = runtime.report(task["instance"], "ok", found, **kw)
     assert [t["label"] for t in st["tasks"]] == ["intake-issue"]
-    assert "위임 실패로 대체 검색: 없음" in st["tasks"][0]["prompt"]
+    assert "검색 실패로 대체 검색: 없음" in st["tasks"][0]["prompt"]
     assert runtime.RunStore(str(tmp_path), "m").load_state()["data"]["prior"] == found
 
 
