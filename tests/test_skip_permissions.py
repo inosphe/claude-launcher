@@ -120,7 +120,7 @@ def test_codex_skip_permissions_toggles_declared_arg_group(home, tmp_path, monke
                               args=("--sandbox", "danger-full-access")))
         skipping = await mgr.skip_permissions("cx1", True)
         assert skipping.sdef.args == (
-            "--sandbox", "danger-full-access", "--approval-mode", "full-auto"
+            "--sandbox", "danger-full-access", "-a", "never"
         )
         asking = await mgr.skip_permissions("cx1", False)
         assert asking.sdef.args == ("--sandbox", "danger-full-access")

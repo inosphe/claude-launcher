@@ -432,6 +432,7 @@ CHECKS = [
         "railquiet_check.js",
         "spawnform_check.js",
         "autocompact_check.js",
+        "sandboxpanel_check.js",
         "worktreepicker_check.js",
         "newflow_check.js",
         "cflow2inputs_check.js",

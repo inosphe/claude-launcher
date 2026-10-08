@@ -529,7 +529,7 @@ async function main() {
   form.codex_sandbox.checked = true;
   check("changing the Codex sandbox preserves the two-axis YOLO choice",
         ctx.fields(form, {}).args,
-        ["--approval-mode", "full-auto", "--sandbox", "workspace-write"]);
+        ["-a", "never", "--sandbox", "workspace-write"]);
   form.codex_sandbox.checked = false;
   check("changing harness does not rewrite the membership stance",
         stances, 0);
