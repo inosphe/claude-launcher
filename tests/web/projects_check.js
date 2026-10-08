@@ -243,7 +243,9 @@ const code = [
   "let projectFollowPending = '';", slice("followSessionProject"),
   slice("sessionTabOtherProject"), slice("hashQuery"),
   slice("applyProjectDefaultMesh"),
-  slice("applyProjectDefaultCwd"), slice("renderProjectTabs"),
+  slice("applyProjectDefaultCwd"),
+  // The drag on the strip needs real pointer input: tabdragscroll_browser.cjs.
+  "function enableTabDragScroll() {}", slice("renderProjectTabs"),
   slice("projectSelectOptions"), slice("refreshProjects"),
   "return { setCurrentProject, applyProjectDefaultCwd, railSessions, " +
   "hashWithProject, syncRouteProject, followSessionProject, " +
