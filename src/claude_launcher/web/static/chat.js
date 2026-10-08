@@ -452,14 +452,24 @@ function openModal(mesh) {
   modalRoot.querySelector(".chat-composer textarea")?.focus();
 }
 
-/* The floating button: always there, stacked above the Operator's. */
+/* The floating button: Chat's segment of the dock the Operator's button sits
+   in (operator.js fabDock; made here too when this file runs alone). */
+function fabDock() {
+  let dock = document.getElementById("fab-dock");
+  if (!dock) {
+    dock = node("div", null, "fab-dock"); dock.id = "fab-dock";
+    dock.setAttribute("role", "group"); dock.setAttribute("aria-label", "빠른 열기");
+    document.body.append(dock);
+  }
+  return dock;
+}
 const fab = node("button", null, "chat-fab"); fab.type = "button";
 fab.title = "Chat 열기"; fab.setAttribute("aria-label", "Chat 열기");
 fab.append(node("span", "✉", "chat-fab-icon"), node("span", "Chat", "chat-fab-label"));
 const fabBadge = node("span", "", "chat-badge-count"); fabBadge.id = "chat-fab-badge"; fabBadge.hidden = true;
 fab.append(fabBadge);
 fab.onclick = () => modal.open ? modal.close() : openModal();
-document.body.append(fab);
+fabDock().append(fab);
 // app.js (api, BASE, the login) runs after this file. A timer is not enough
 // to wait for it — one can fire between two scripts while the next is still
 // being fetched — but DOMContentLoaded comes after every script has run.
