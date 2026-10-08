@@ -2668,11 +2668,11 @@ values are absolute paths.
 
 claunch ships agent guidance as Markdown files under
 `src/claude_launcher/prompt_packs/` — one file per pack, with a small YAML
-header (`title`, `description`, optionally `default: true`). Shipped today:
+header (`title`, `description`). Shipped today:
 
 | Pack | Content |
 |---|---|
-| `common` | A workspace's common working rules (scratch files, daemon restarts, reporting). Ticked by default; meant to be edited after install. |
+| `common` | A workspace's common working rules (scratch files, daemon restarts, reporting). Meant to be edited after install. |
 | `beads` | Driving the board through `claunch beads`, issue writing rules, and picking work with `bv --robot-*` (never the bare TUI). Agent Mail is not covered. |
 | `unreal-operator` | Handing Unreal editor-only work (assets, Blueprint wiring, Project Settings, PIE checks) to a person as `--assignee operator` issues. |
 | `role-<name>` | One per packaged mesh role (`role-leader`, `role-worker`, `role-reviewer`, `role-pm`, `role-operator`, `role-specialist`, `role-analyst`, `role-free`): the role's working rules. The role's stance keeps one or two sentences; the rest is here. |
@@ -2692,7 +2692,10 @@ The workflow has two steps:
 2. **Choose at session creation.** The create and spawn forms offer every pack
    as a chip you click on or off: the ones installed in the session's
    workspace first, then every pack claunch ships that the workspace has not
-   installed, badged "claunch" (an installed one is badged "installed").
+   installed, badged "claunch copy" (an installed one is badged
+   "workspace"; the badge's tooltip says which workspace, and for claunch's
+   copy that installing it in Settings ▸ Install makes it editable there).
+   A default pack carries a "default" mark.
    The chips sit in two groups, **General** and **Roles** (the `role-*`
    packs); a role pack that is neither ticked nor required is folded behind
    a "+N more" button. Every chip has a **view** button that shows the pack's
@@ -2712,19 +2715,19 @@ the workspace has not installed goes in as claunch's copy and the create
 response lists it under `prompt_packs_shipped`; one that exists in neither
 place refuses the create with a 400 and nothing is staged.
 
-Three settings sit under the matrix, stored in `~/.claunch.yaml` under
+Two settings sit under the matrix, stored in `~/.claunch.yaml` under
 `prompt_packs`:
 
-- **Ticked by default** (`default_packs`): packs the create form ticks before
-  anyone touches it, where the workspace installed them (claunch's copies
-  start unticked). Until saved, every pack whose header says
-  `default: true` (`common`).
-- **Ticked on every opening** (`always_packs`): packs New session and Spawn
-  child tick each time they open. Unlike the default list, an untick lasts
-  only for the opening it was made in, and a "Spawn same setup" seed that
-  left the pack out does not untick it; a pack the workspace has not
-  installed is ticked as claunch's copy. Use it for the shared working rules
-  (`common`) that every session should carry. Empty until saved.
+- **Default packs** (`default_packs`): packs New session and Spawn child
+  tick every time they open. Unticking one in the form leaves it out of that
+  one session only — the next opening ticks it again, and a "Spawn same
+  setup" seed that left it out does not untick it; take it off the list to
+  stop. Installed or not makes no difference: a session gets the workspace's
+  copy, or claunch's when the workspace has not installed it, and the form
+  says which. Until saved, `DEFAULT_PACKS` in `prompt_packs.py` (`asking-the-user`, `common`);
+  which packs are defaults is this setting's value, not something a pack's
+  header declares. Only the web form reads it: `--prompt-pack` on the CLI and
+  `prompt_packs` on MCP `spawn` take exactly the packs named.
 - **Required by role** (`role_packs`): role → packs. A session whose primary
   role or one of whose subroles is listed gets those packs whether ticked or
   not; the form shows them ticked and locked with a 🔒 <role> badge. A
@@ -2741,8 +2744,9 @@ Three settings sit under the matrix, stored in `~/.claunch.yaml` under
   `--role worker --subrole unreal`) to `unreal-operator`.
 
 The create and spawn forms end the Prompt packs row with one line naming
-every pack the opening will carry and why, one chip each (ticked, or the role that requires
-it, and whether it is claunch's copy). When the Role row is blank it says
+every pack the opening will carry and why, one chip each (default, ticked, or the role
+that requires it, and whose copy: the workspace's, or claunch's because it is not installed
+there). When the Role row is blank it says
 which role the handle will resolve to, since that role decides the packs.
 
 The join briefing prints the role's short stance and a `role prompt packs:`
@@ -2751,16 +2755,16 @@ the stance followed by the text of those packs (the copy installed in the
 current directory's workspace, or claunch's), which is how a member that
 joined by hand, without a create-time opening, reads them.
 
-HTTP: `GET /api/prompt-packs` (catalog, per-workspace status, the three settings),
+HTTP: `GET /api/prompt-packs` (catalog, per-workspace status, both settings and
+`shipped_default_packs`),
 `GET /api/prompt-packs/offer?cwd=` (what the form offers there),
 `GET /api/prompt-packs/text?id=&cwd=` (one pack's text as a session there
 would get it, with `source` — `workspace` or `package` — and for a workspace
 copy its `status`: `current`, `stale`, `edited` or `local`; 404 for an id
 that is neither installed nor shipped),
 `POST /api/prompt-packs/install|remove` (`{workspace, pack, force}`),
-`PUT /api/prompt-packs/role-packs` (`{role_packs?, default_packs?,
-always_packs?}`; `null` restores a default; a bad id in any of them saves
-none).
+`PUT /api/prompt-packs/role-packs` (`{role_packs?, default_packs?}`; `null`
+restores a default; a bad id in either saves neither).
 
 ### The daemon prompt (one text every session of this daemon gets)
 
