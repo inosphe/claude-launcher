@@ -319,6 +319,30 @@ def test_readonly_tools_route_clean_run_returns(tmp_path):
     assert f.run()["result"] == "returned"
 
 
+def _checkout_hint(status):
+    return [h for h in (status.get("next") or "").split("; ") if "THIS working tree" in h]
+
+
+def test_readonly_tools_route_tells_the_driver_to_leave_its_tree_alone(tmp_path):
+    # claunch-onbdf: the porcelain check cannot tell the driver's edits from
+    # the delegate's, and 6 of 9 trial runs lost their round to the driver's
+    # own edits; the driver is told while the delegation is out
+    repo = _git_repo(tmp_path / "repo")
+    f = Fake(tmp_path, [{"out": FENCED}], cwd=repo, caps=RESTRICT_CAPS, src=RO_SRC)
+    (hint,) = _checkout_hint(f.status())
+    assert f.did in hint and "read-only violation" in hint
+    assert f.run()["result"] == "returned"
+    assert _checkout_hint(f.status()) == []
+
+
+def test_a_throwaway_worktree_route_has_no_checkout_hint(tmp_path):
+    repo = _git_repo(tmp_path / "repo")
+    f = Fake(tmp_path, [{"out": FENCED}], cwd=repo, caps=TEXT_CAPS, src=RO_SRC,
+             scratch=str(tmp_path / "scratch"))
+    assert f.rec()["route"]["readonly"]["route"] == "throwaway-worktree"
+    assert _checkout_hint(f.status()) == []
+
+
 def test_readonly_throwaway_worktree_unavailable_reroutes(tmp_path):
     # not a git repository: no worktree, no sandbox, no restriction -> the
     # delegate must not run in the checkout at all
