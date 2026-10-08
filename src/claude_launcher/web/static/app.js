@@ -41700,8 +41700,8 @@ if (typeof location !== "undefined" && new URLSearchParams(location.search).has(
   document.body.classList.add("embed");
 }
 
-boot();
-
 // Mount once; session identity is read on every lookup and before transmission.
 globalThis.GlossaryComposer?.mount({field: $("term-input-field"),
   session: () => currentName, resize: autogrowTermInput});
+
+boot();
