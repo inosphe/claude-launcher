@@ -81,6 +81,7 @@ const timers = [];
 let reply = null;
 let confirmAnswer = true;
 let gateRefreshed = 0;
+let badgesRefreshed = 0;   // the row badges re-read after a sync that ran (claunch-gax44)
 const ctx = {
   el, renderWorkspaces() {}, wsOpen: true,
   Option: function (text, value) { return { tag: "option", text, value, children: [] }; },
@@ -88,6 +89,7 @@ const ctx = {
   confirm: (msg) => { calls.push({ confirm: msg }); return confirmAnswer; },
   setTimeout: (fn) => { timers.push(fn); },
   refreshReposyncGate: () => { gateRefreshed++; },
+  refreshWsGitSummary: () => { badgesRefreshed++; },
   encodeURIComponent,
   JSON, Promise, String, Set, Map, Object,
   api: async (url, opts) => {
@@ -193,6 +195,7 @@ async function tick() {
   assert.ok(nodes.includes("restack s1-x: git rebase --onto d a s1-x"));
   assert.equal(calls[calls.length - 1].url, "/api/reposync/workspaces/proj/status?fetch=0",
                "the status is read again after a sync");
+  assert.equal(badgesRefreshed, 1, "the row badges are read again after a sync that ran");
 
   /* ---- rejected: nothing sent again, and the panel says so -------------- */
   st.doc.plan = PLAN;
@@ -217,6 +220,7 @@ async function tick() {
   assert.match(st.error, /moved since this plan was shown/);
   assert.equal(st.result, null);
   assert.equal(timers.length, 0);
+  assert.equal(badgesRefreshed, 1, "a refused sync moved nothing, so the badges stay");
 
   /* ---- branch push waits on its card too -------------------------------- */
   calls.length = 0;

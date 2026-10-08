@@ -4431,6 +4431,12 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .ws-path { color: #7d8590; overflow-wrap: anywhere; }
 .ws-row .wf-btn { flex: none; }
 .ws-row .wf-btn.on { border-color: #58a6ff; }
+/* Workspaces · row badges (claunch-gax44): branch, ahead/behind, changed. */
+.ws-row .badge { flex: none; }
+.ws-git-branch { max-width: 16em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.badge.ws-git-ab { background: #1c2b44; color: #58a6ff; }
+.badge.ws-git-ab.ws-git-behind { background: #3a2a10; color: #d29922; }
+.badge.ws-git-dirty { background: #3a2a10; color: #d29922; }
 /* Workspaces · Sync: the reposync panel under a workspace's row. */
 .ws-sync { margin: 0 0 8px; padding: 10px 12px; background: #161a20;
   border: 1px solid #2a2e36; border-radius: 6px; display: flex; flex-direction: column; gap: 8px; }

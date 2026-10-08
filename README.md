@@ -2427,6 +2427,17 @@ the card it filed; the same body with that `request` runs once the card is
 approved (`GET /api/reposync/requests/<id>` says when), and answers 409 when
 the card was rejected or expired or the tips moved after the approval.
 
+Each row also carries badges read from local git without opening the panel:
+the checked-out branch (its tooltip names the upstream), `↑ahead ↓behind`
+against that upstream when either is non-zero, and `N changed` for tracked
+files with uncommitted changes (untracked files are not scanned). Nothing is
+fetched for them, so ahead/behind is as of the last fetch; the panel's
+Refresh fetches. They are read when the page opens and after a sync runs,
+not on the two-second workspace poll. HTTP: `GET
+/api/reposync/workspaces/summary` answers `{workspaces: {<name>: {branch,
+detached, upstream, ahead, behind, changed} | {error}}}` for every
+registered workspace that is present.
+
 ### VS Code in the browser (one code-server per workspace and worktree)
 
 The daemon can run [code-server](https://github.com/coder/code-server) next to

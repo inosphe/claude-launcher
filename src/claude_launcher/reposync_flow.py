@@ -121,6 +121,39 @@ def local_branches(repo: str) -> List[str]:
     return [line for line in out.splitlines() if line]
 
 
+def git_summary(path: str) -> dict:
+    """What a workspace row shows without opening its Sync panel: the
+    checked-out branch, how far it is ahead of / behind its upstream, and how
+    many tracked files carry uncommitted changes (claunch-gax44).
+
+    One ``git status`` and nothing else -- no fetch, so ahead/behind is
+    against the remote-tracking ref as the last fetch left it, and untracked
+    files are not scanned (on a large checkout that scan is what takes the
+    seconds). A directory git cannot read answers ``{"error": ...}``."""
+    try:
+        out = reposync.git(path, "status", "--porcelain=v2", "--branch",
+                           "--untracked-files=no", check=True)
+    except reposync.SyncError as exc:
+        return {"error": str(exc)}
+    doc: dict = {"branch": None, "detached": False, "upstream": None,
+                 "ahead": None, "behind": None, "changed": 0}
+    for line in out.splitlines():
+        if line.startswith("# branch.head "):
+            head = line[len("# branch.head "):]
+            if head == "(detached)":
+                doc["detached"] = True
+            else:
+                doc["branch"] = head
+        elif line.startswith("# branch.upstream "):
+            doc["upstream"] = line[len("# branch.upstream "):]
+        elif line.startswith("# branch.ab "):
+            ahead, behind = line[len("# branch.ab "):].split()
+            doc["ahead"], doc["behind"] = int(ahead.lstrip("+")), int(behind.lstrip("-"))
+        elif line and not line.startswith("#"):
+            doc["changed"] += 1
+    return doc
+
+
 def workspace_status(path: str, workspace: Optional[str], peers: Dict[str, List[dict]],
                      problems: List[str], *, do_fetch: bool, remote: Optional[str] = None,
                      branch: Optional[str] = None) -> dict:

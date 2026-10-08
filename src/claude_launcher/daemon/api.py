@@ -724,6 +724,7 @@ def build_app(
     # The Workspaces page's Sync panel (claunch-tqm2e). Its pushes wait
     # behind the gate above like a session's do: the button files the card,
     # a person approves it, the panel's next call runs it.
+    r.add_get("/api/reposync/workspaces/summary", h_reposync_ws_summary)
     r.add_get("/api/reposync/workspaces/{name}/status", h_reposync_ws_status)
     r.add_post("/api/reposync/workspaces/{name}/sync", h_reposync_ws_sync)
     r.add_post("/api/reposync/workspaces/{name}/branch-push", h_reposync_ws_branch_push)
@@ -5853,6 +5854,19 @@ def _machine_name(request: web.Request) -> str:
     """This machine as the shared remote's branch namespace knows it: the
     relay name when there is one, as the CLI uses (reposync_flow.relay_identity)."""
     return str((request.app["relay_state"]() or {}).get("name") or socket.gethostname())
+
+
+async def h_reposync_ws_summary(request: web.Request) -> web.Response:
+    """The Workspaces page's row badges: branch, ahead/behind and changed
+    files for every registered workspace that is there, read from local git
+    only (claunch-gax44). One ``git status`` per workspace, run side by side
+    off the loop; a workspace that is missing is left out, one git cannot
+    read carries ``error``."""
+    present = [w for w in workspaces.list_all() if w.exists()]
+    docs = await asyncio.gather(*(
+        asyncio.to_thread(reposync_flow.git_summary, w.path) for w in present
+    ))
+    return json_response({"workspaces": {w.name: d for w, d in zip(present, docs)}})
 
 
 async def h_reposync_ws_status(request: web.Request) -> web.Response:
