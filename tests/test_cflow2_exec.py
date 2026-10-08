@@ -4,6 +4,7 @@ process run with retry/timeout/readonly (docs/cflow-v2.md 6.4, 7)."""
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import textwrap
@@ -497,6 +498,21 @@ def test_process_alive_identifies_by_argv0():
         proc.wait(10)
     assert cflow2_exec.process_alive(proc.pid, sys.executable) is False
     assert cflow2_exec.process_alive(None) is False
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="names the image of a Windows process")
+def test_process_alive_on_windows_compares_the_image_without_its_extension():
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        stem = os.path.splitext(os.path.basename(sys.executable))[0]
+        assert cflow2_exec.process_alive(proc.pid, stem) is True  # "python" for python.exe
+        assert cflow2_exec.process_alive(proc.pid, stem.upper()) is True
+        # Another name may still be this process (a shim that hands over): never False
+        assert cflow2_exec.process_alive(proc.pid, "not-this") is None
+    finally:
+        cflow2_exec.kill_group(proc.pid)
+        proc.wait(10)
+    assert cflow2_exec.process_alive(proc.pid, "python") is False
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc")
