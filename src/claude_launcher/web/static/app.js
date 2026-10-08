@@ -16774,6 +16774,7 @@ function mobileTitle() {
     case "window": return "measurement window";
     case "stats": return "session statistics";
     case "settings": return "settings";
+    case "workspaces": return "workspaces";
     case "beads": return beadsSection === "reports" ? "reports"
       : beadsSection === "queues" ? "queues" : "beads";
     case "worktrees": return "worktrees";
@@ -16947,6 +16948,9 @@ const VIEWS = {
   mesh: "mesh-view",
   flow: "flow-view",
   settings: "ws-view",
+  // The workspace registry and its repository sync (claunch-tqm2e): drawn by
+  // the same renderWorkspaces as Settings, into a page of its own.
+  workspaces: "workspaces-view",
   // Another daemon's mesh member, looked at from here (#/r/<machine>/<name>).
   // A page of its own, never the terminal page: that one is the local
   // session's, keyed by bare name, with every control a local session has.
@@ -17561,7 +17565,11 @@ function parseHash(h) {
   // #/workspaces predates the section and is what every "manage" link beside
   // a Project or Directory field still says, so it opens the section those
   // links mean rather than the General one.
-  if (parts[0] === "workspaces") return { page: "settings", section: "workspaces" };
+  // The registry left Settings for a page of its own; #/settings/workspaces
+  // is every bookmark made while it was a tab, so it opens the page too.
+  if (parts[0] === "workspaces" || (parts[0] === "settings" && parts[1] === "workspaces")) {
+    return { page: "workspaces" };
+  }
   if (parts[0] === "settings") {
     return { page: "settings", section: parts[1] || "" };
   }
@@ -17656,6 +17664,7 @@ function route() {
     case "profile-usage": showView("profile-usage"); globalThis.ProfileUsagePage.open(); break;
     case "cli": openCli(); break;
     case "settings": openSettings(r.section); break;
+    case "workspaces": openSettings("workspaces"); break;
     case "beads": openBeads(r.id, r.section); break;
     case "worktrees": showView("worktrees"); globalThis.WorktreesPage.open(); break;
     case "glossary": showView("glossary"); globalThis.GlossaryPage.open(); break;
@@ -19022,7 +19031,7 @@ let wsSection = "";
 function openWorkspaces(section) {
   wsOpen = true;
   wsSection = section || "";
-  showView("settings");
+  showView(wsSection === "workspaces" ? "workspaces" : "settings");
   renderWorkspaces();
   refreshWorkspaces();  // don't make the user wait out the 2s poll
 }
@@ -23247,7 +23256,6 @@ function settingsTabs() {
   const tabs = el("div", "seq-tabs settings-tabs");
   for (const [section, label, href] of [
     ["", "General", "#/settings"],
-    ["workspaces", "Workspaces", "#/settings/workspaces"],
     ["profiles", "Profiles", "#/settings/profiles"],
     ["install", "Install", "#/settings/install"],
     ["vscode", "VS Code", "#/settings/vscode"],
@@ -24148,17 +24156,20 @@ function promptPackSettings(doc, ids) {
 }
 
 function renderWorkspaces() {
-  const view = $("ws-view");
+  // "workspaces" is its own page (#/workspaces) now, without the Settings
+  // tab strip; every other section is a tab of Settings.
+  const own = wsSection === "workspaces";
+  const view = $(own ? "workspaces-view" : "ws-view");
   const focused = document.activeElement && document.activeElement.id;
   view.innerHTML = "";
 
   const head = el("div", "wf-head");
-  head.appendChild(el("h2", null, "Settings"));
+  head.appendChild(el("h2", null, own ? "Workspaces" : "Settings"));
   const back = el("button", "wf-btn clear", "Back");
   back.addEventListener("click", () => { location.hash = "#"; });
   head.appendChild(back);
   view.appendChild(head);
-  view.appendChild(settingsTabs());
+  if (!own) view.appendChild(settingsTabs());
 
   // The profile manager is its own section and shares none of the cards
   // below: they are machine settings, this is the list of storage roots.
@@ -24534,11 +24545,12 @@ function sessVscode(data) {
   return box;
 }
 
-/* The Workspaces section (#/settings/workspaces, and the older #/workspaces):
-   the directory registry and the two things keyed by it — the projects that
-   group sessions, and each workspace's beads board. They sat among the
-   machine settings on General, where a card about where sessions run was
-   between the keyboard help and the model list. */
+/* The Workspaces page (#/workspaces; #/settings/workspaces from when it was a
+   Settings tab): the directory registry and the two things keyed by it — the
+   projects that group sessions, and each workspace's beads board — plus each
+   row's Sync panel. They once sat among the machine settings on General,
+   where a card about where sessions run was between the keyboard help and
+   the model list. */
 function workspacesPanel(view) {
   view.appendChild(el(
     "p", "wf-note",
@@ -24558,7 +24570,10 @@ function workspacesPanel(view) {
       "the daemon's own directory and an agent has nowhere to send a child."
     ));
   }
-  for (const w of workspacesCache) list.appendChild(wsRow(w));
+  for (const w of workspacesCache) {
+    list.appendChild(wsRow(w));
+    if (wsSyncOpen.has(w.name)) list.appendChild(wsSyncPanel(w));
+  }
   view.appendChild(list);
 
   view.appendChild(projectsCard());
@@ -26042,11 +26057,362 @@ function wsRow(w) {
   }
 
   if (w.exists) row.appendChild(wsVscodeControls(w));
+  if (w.exists) {
+    const open = wsSyncOpen.has(w.name);
+    const sync = el("button", "wf-btn" + (open ? " on" : ""), open ? "Sync ▴" : "Sync ▾");
+    sync.title = "sync this repository's master with the shared remote, " +
+      "and push or pull work branches (reposync)";
+    sync.addEventListener("click", () => wsSyncToggle(w));
+    row.appendChild(sync);
+  }
 
   const rm = el("button", "wf-btn clear", "Unregister");
   rm.addEventListener("click", () => wsRemove(w, here));
   row.appendChild(rm);
   return row;
+}
+
+/* ------------------------------------------------------------------ */
+/* Workspaces · Sync — reposync from the page (claunch-tqm2e)          */
+/* ------------------------------------------------------------------ */
+/* One panel per workspace, opened from its row. It reads
+   /api/reposync/workspaces/<name>/status: the remotes, the peers on the
+   relay whose clones share an address with this one, and the plan a sync of
+   master would carry out. Peers are advisory -- the plan stands on the shared
+   remote alone, so a peer that cannot be read is a note, not a stop.
+   The request carries the two tips the panel showed, and the daemon
+   refuses (409) and hands the fresh plan back when either moved in between.
+   A push is never approved by the panel's own button: it files the same
+   approval card a session's push does, and runs once a person approves it
+   there (wsSyncSend; s469's decline of the first version, claunch-tqm2e). */
+const wsSyncOpen = new Set();
+//: name -> {loading, doc, error, busy, result, pushBranch, force, pullMachine, pullBranch}
+const wsSyncState = new Map();
+
+function wsSyncSt(name) {
+  if (!wsSyncState.has(name)) {
+    wsSyncState.set(name, {
+      loading: false, doc: null, error: "", busy: "", result: null, waiting: null,
+      pushBranch: "", force: false, pullMachine: "", pullBranch: "",
+    });
+  }
+  return wsSyncState.get(name);
+}
+
+function wsSyncToggle(w) {
+  if (wsSyncOpen.has(w.name)) {
+    wsSyncOpen.delete(w.name);
+  } else {
+    wsSyncOpen.add(w.name);
+    const st = wsSyncSt(w.name);
+    if (!st.doc && !st.loading) wsSyncRefresh(w.name, false);
+  }
+  renderWorkspaces();
+}
+
+/* fetch=false plans against the remote-tracking refs as they are, which is
+   instant; Refresh fetches first, which is what Sync itself does. */
+async function wsSyncRefresh(name, fetchFirst) {
+  const st = wsSyncSt(name);
+  st.loading = true;
+  st.error = "";
+  renderWorkspaces();
+  try {
+    const q = fetchFirst ? "" : "?fetch=0";
+    const resp = await api(`/api/reposync/workspaces/${encodeURIComponent(name)}/status${q}`);
+    const doc = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(doc.error || `HTTP ${resp.status}`);
+    st.doc = doc;
+    if (!st.pushBranch || !(doc.branches || []).includes(st.pushBranch)) {
+      st.pushBranch = (doc.branches || []).find((b) => !/^(master|main)$/.test(b)) || "";
+    }
+  } catch (err) {
+    st.error = String(err.message || err);
+  }
+  st.loading = false;
+  if (wsOpen) renderWorkspaces();
+}
+
+const WS_SYNC_LABEL = { ff: "Fast-forward", push: "Push", rebase: "Rebase & push" };
+const WS_SYNC_PATH = { sync: "sync", push: "branch-push", pull: "branch-pull" };
+//: How often a panel waiting on an approval card re-reads it.
+const WS_SYNC_POLL_MS = 2500;
+
+/* One request of the panel. A push answers 202 with an approval request:
+   the card is on the gate (the notices strip), and the panel waits for a
+   person to answer it there, then sends the same body again with the
+   request id. The panel's own button never approves anything -- the daemon
+   runs a push only for an approved card whose tips still match. */
+async function wsSyncSend(name, kind, body) {
+  const st = wsSyncSt(name);
+  st.busy = kind;
+  st.error = "";
+  st.result = null;
+  renderWorkspaces();
+  let resp, doc;
+  try {
+    resp = await api(
+      `/api/reposync/workspaces/${encodeURIComponent(name)}/${WS_SYNC_PATH[kind]}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    doc = await resp.json().catch(() => ({}));
+  } catch (err) {
+    st.busy = "";
+    st.error = String(err.message || err);
+    if (wsOpen) renderWorkspaces();
+    return;
+  }
+  if (resp.status === 202 && doc.request) {
+    st.waiting = { kind, body, request: doc.request, deadline: doc.deadline || "" };
+    if (typeof refreshReposyncGate === "function") refreshReposyncGate();
+    setTimeout(() => wsSyncWait(name), WS_SYNC_POLL_MS);
+    if (wsOpen) renderWorkspaces();
+    return;
+  }
+  st.busy = "";
+  st.waiting = null;
+  if (resp.status === 409 && doc.stale) {
+    if (st.doc) st.doc.plan = doc.plan;
+    st.error = "The branch or the remote moved since this plan was shown. " +
+      "Review the new plan below and press the button again.";
+  } else if (!resp.ok) {
+    st.error = doc.error || `HTTP ${resp.status}`;
+  } else {
+    st.result = { kind, doc };
+  }
+  if (st.result && kind !== "push") await wsSyncRefresh(name, false);
+  else if (wsOpen) renderWorkspaces();
+}
+
+/* Read the waiting card until a person answers it. Approved: send the same
+   request again with its id (the daemon re-checks the tips). Rejected or
+   expired: nothing was pushed, and the panel says so. */
+async function wsSyncWait(name) {
+  const st = wsSyncSt(name);
+  const w = st.waiting;
+  if (!w) return;
+  let rec = null;
+  try {
+    const resp = await api(`/api/reposync/requests/${encodeURIComponent(w.request)}`);
+    if (resp.ok) rec = ((await resp.json()) || {}).request || null;
+  } catch {
+    rec = null;
+  }
+  if (st.waiting !== w) return;   // answered or abandoned meanwhile
+  if (!rec || rec.status === "pending") {
+    setTimeout(() => wsSyncWait(name), WS_SYNC_POLL_MS);
+    return;
+  }
+  st.waiting = null;
+  if (rec.status === "approved") {
+    await wsSyncSend(name, w.kind, { ...w.body, request: w.request });
+    return;
+  }
+  st.busy = "";
+  st.error = `The approval card was ${rec.status}; nothing was pushed.`;
+  if (wsOpen) renderWorkspaces();
+}
+
+async function wsSyncRun(name) {
+  const st = wsSyncSt(name);
+  const plan = st.doc && st.doc.plan;
+  if (!plan || plan.action === "up-to-date") return;
+  // A fast-forward only moves the local branch and runs at once, so it asks
+  // here; a push asks on the approval card instead.
+  if (plan.action === "ff" && !confirm(
+    `Fast-forward ${name}: ${plan.branch} ${plan.local.slice(0, 8)} → ` +
+    `${plan.remote}/${plan.branch} ${plan.upstream.slice(0, 8)}?\n\n${plan.summary}`
+  )) return;
+  await wsSyncSend(name, "sync", {
+    remote: plan.remote, branch: plan.branch, local: plan.local, upstream: plan.upstream,
+  });
+}
+
+async function wsSyncBranch(name, kind) {
+  const st = wsSyncSt(name);
+  if (kind === "push") {
+    if (!st.pushBranch) return;
+    await wsSyncSend(name, "push", { branch: st.pushBranch, force_with_lease: !!st.force });
+    return;
+  }
+  if (!st.pullMachine || !st.pullBranch) return;
+  await wsSyncSend(name, "pull", { machine: st.pullMachine, branch: st.pullBranch });
+}
+
+function wsSyncPlanLine(plan) {
+  const line = el("div", "ws-sync-plan");
+  line.appendChild(el("span", "mono",
+    `${plan.branch} ${plan.local.slice(0, 8)} · ${plan.remote}/${plan.branch} ` +
+    `${plan.upstream.slice(0, 8)} · +${plan.ahead} −${plan.behind}`));
+  line.appendChild(el("span", "badge " + (plan.action === "up-to-date" ? "idle" : "busy"),
+    plan.action));
+  return line;
+}
+
+function wsSyncPeers(doc) {
+  const box = el("div", "ws-sync-peers");
+  const rows = doc.peers || [];
+  box.appendChild(el("h4", null, `Peers sharing this address (${rows.length})`));
+  if (!rows.length) {
+    box.appendChild(el("p", "wf-note",
+      "No relay peer reports a clone of this remote. Sync does not need one."));
+  }
+  const upstream = doc.plan && doc.plan.upstream;
+  for (const r of rows) {
+    const line = el("div", "ws-sync-peer");
+    line.appendChild(el("span", "ws-name", r.machine));
+    line.appendChild(el("span", "mono", `${r.workspace || "?"} · ${r.peer_remote}`));
+    const master = (r.branches || {}).master || (r.branches || {}).main;
+    if (master && master.sha) {
+      const track = (master.tracking || []).find((t) => t.key === r.key) || {};
+      let note = `master ${master.sha.slice(0, 8)}`;
+      if (upstream && master.sha === upstream) note += " = remote";
+      if (track.ahead) note += ` · ${track.ahead} unpushed`;
+      if (track.behind) note += ` · ${track.behind} behind (as last fetched)`;
+      line.appendChild(el("span", "wf-note", note));
+    }
+    box.appendChild(line);
+  }
+  for (const p of doc.problems || []) box.appendChild(el("p", "wf-note", p));
+  return box;
+}
+
+function wsSyncResult(result) {
+  const box = el("div", "ws-sync-result");
+  const d = result.doc;
+  if (result.kind === "sync") {
+    box.appendChild(el("div", "mono",
+      `done: ${d.plan.branch} = ${String(d.new || "").slice(0, 8)}` + (d.pushed ? " (pushed)" : "")));
+    for (const r of d.restack || []) {
+      box.appendChild(el("div", "mono",
+        `restack ${r.branch}` + (r.worktree ? ` in ${r.worktree}` : "") + `: ${r.command}`));
+    }
+    for (const b of d.board || []) {
+      box.appendChild(el("div", "mono",
+        `board ${b.issue}: REBASED ${b.old.slice(0, 8)} -> ${b.new.slice(0, 8)}` +
+        (b.ok ? "" : " (comment failed)")));
+    }
+  } else if (result.kind === "push") {
+    box.appendChild(el("div", "mono", `pushed ${d.sha.slice(0, 8)} -> ${d.remote}/${d.ref}`));
+  } else {
+    box.appendChild(el("div", "mono", `${d.branch} = ${d.sha.slice(0, 8)} (from ${d.remote})`));
+  }
+  return box;
+}
+
+function wsSyncPanel(w) {
+  const st = wsSyncSt(w.name);
+  const panel = el("div", "ws-sync");
+  const doc = st.doc;
+
+  const head = el("div", "ws-sync-head");
+  head.appendChild(el("span", "wf-note",
+    st.loading ? "reading…" : doc ? `as ${doc.machine}` + (doc.fetched ? " · fetched" : " · not fetched") : ""));
+  const refresh = el("button", "wf-btn clear", "Refresh (fetch)");
+  refresh.disabled = st.loading || !!st.busy;
+  refresh.addEventListener("click", () => wsSyncRefresh(w.name, true));
+  head.appendChild(refresh);
+  panel.appendChild(head);
+
+  if (st.error) panel.appendChild(el("p", "wf-note wf-warning", st.error));
+  if (st.waiting) {
+    const until = st.waiting.deadline ? ` (expires ${st.waiting.deadline.slice(11, 16)} UTC)` : "";
+    panel.appendChild(el("p", "wf-note ws-sync-waiting",
+      `Waiting for approval: answer the "repository sync wants to push" card ` +
+      `at the top of the page${until}. Nothing is pushed until it is approved.`));
+  }
+  if (!doc) return panel;
+  if (doc.error) {
+    panel.appendChild(el("p", "wf-note wf-warning", doc.error));
+    return panel;
+  }
+
+  const remotes = Object.entries(doc.remotes || {});
+  panel.appendChild(el("div", "wf-note",
+    "Remotes: " + (remotes.length
+      ? remotes.map(([key, name]) => `${name} (${key})`).join(", ")
+      : "none with a network address")));
+
+  // master
+  const master = el("div", "ws-sync-section");
+  master.appendChild(el("h4", null, "Master"));
+  if (doc.plan) {
+    master.appendChild(wsSyncPlanLine(doc.plan));
+    master.appendChild(el("p", "wf-note", doc.plan.summary));
+    if ((doc.plan.affected || []).length) {
+      master.appendChild(el("p", "wf-note",
+        `left on the old commits: ${doc.plan.affected.join(", ")}`));
+    }
+    const go = el("button", "wf-btn",
+      st.busy === "sync" ? (st.waiting ? "Waiting for approval…" : "Syncing…") : (WS_SYNC_LABEL[doc.plan.action] || "Up to date"));
+    go.disabled = !!st.busy || st.loading || doc.plan.action === "up-to-date";
+    go.addEventListener("click", () => wsSyncRun(w.name));
+    master.appendChild(go);
+  } else {
+    master.appendChild(el("p", "wf-note wf-warning", doc.plan_error || "no plan"));
+  }
+  panel.appendChild(master);
+
+  // work branches
+  const work = el("div", "ws-sync-section");
+  work.appendChild(el("h4", null, "Work branches"));
+  const pushRow = el("div", "ws-sync-form");
+  const pick = el("select");
+  pick.id = `ws-sync-push-${w.name}`;
+  for (const b of doc.branches || []) {
+    const opt = new Option(b, b);
+    if (b === st.pushBranch) opt.selected = true;
+    pick.appendChild(opt);
+  }
+  pick.addEventListener("change", () => { st.pushBranch = pick.value; });
+  pushRow.appendChild(pick);
+  const force = el("label", "wf-note");
+  const box = el("input");
+  box.type = "checkbox";
+  box.checked = !!st.force;
+  box.addEventListener("change", () => { st.force = box.checked; });
+  force.appendChild(box);
+  force.appendChild(document.createTextNode(" force-with-lease"));
+  pushRow.appendChild(force);
+  const push = el("button", "wf-btn", st.busy === "push" ? (st.waiting ? "Waiting for approval…" : "Pushing…") : `Push as ${doc.machine}/…`);
+  push.disabled = !!st.busy || !(doc.branches || []).length;
+  push.addEventListener("click", () => { st.pushBranch = pick.value; wsSyncBranch(w.name, "push"); });
+  pushRow.appendChild(push);
+  work.appendChild(pushRow);
+
+  const pullRow = el("div", "ws-sync-form");
+  const machine = el("input");
+  machine.id = `ws-sync-machine-${w.name}`;
+  machine.placeholder = "machine";
+  machine.value = st.pullMachine;
+  machine.setAttribute("list", `ws-sync-machines-${w.name}`);
+  machine.addEventListener("input", () => { st.pullMachine = machine.value.trim(); });
+  const known = el("datalist");
+  known.id = `ws-sync-machines-${w.name}`;
+  for (const m of new Set((doc.peers || []).map((r) => r.machine))) known.appendChild(new Option(m, m));
+  pullRow.appendChild(machine);
+  pullRow.appendChild(known);
+  const branch = el("input");
+  branch.id = `ws-sync-branch-${w.name}`;
+  branch.placeholder = "branch";
+  branch.value = st.pullBranch;
+  branch.addEventListener("input", () => { st.pullBranch = branch.value.trim(); });
+  pullRow.appendChild(branch);
+  const pull = el("button", "wf-btn", st.busy === "pull" ? "Pulling…" : "Pull (fast-forward)");
+  pull.disabled = !!st.busy;
+  pull.addEventListener("click", () => wsSyncBranch(w.name, "pull"));
+  pullRow.appendChild(pull);
+  work.appendChild(pullRow);
+  work.appendChild(el("p", "wf-note",
+    "A work branch travels as <machine>/<branch> on the shared remote; " +
+    "pull fetches another machine's into the local branch of that name."));
+  panel.appendChild(work);
+
+  if (st.result) panel.appendChild(wsSyncResult(st.result));
+  panel.appendChild(wsSyncPeers(doc));
+  return panel;
 }
 
 async function wsAdd(rawPath, rawName) {

@@ -97,21 +97,22 @@ vm.runInContext(
   // --- the tab strip -----------------------------------------------------
   context.wsSection = "";
   let tabs = context.settingsTabs();
-  assert.equal(tabs.children.length, 5);
+  // Workspaces left the strip for a page of its own (#/workspaces).
+  assert.equal(tabs.children.length, 4);
   assert.deepEqual(tabs.children.map((t) => t.text),
-                   ["General", "Workspaces", "Profiles", "Install", "VS Code"]);
+                   ["General", "Profiles", "Install", "VS Code"]);
   assert.deepEqual(tabs.children.map((t) => t.href),
-                   ["#/settings", "#/settings/workspaces", "#/settings/profiles",
+                   ["#/settings", "#/settings/profiles",
                     "#/settings/install", "#/settings/vscode"]);
   // The section that is up is the one that is not a link away from itself.
   assert.equal(tabs.children[0].cls.includes("on"), true);
-  assert.equal(tabs.children[2].cls.includes("on"), false);
+  assert.equal(tabs.children[1].cls.includes("on"), false);
   context.wsSection = "profiles";
   tabs = context.settingsTabs();
-  assert.equal(tabs.children[2].cls.includes("on"), true);
-  context.wsSection = "workspaces";
+  assert.equal(tabs.children[1].cls.includes("on"), true);
+  context.wsSection = "vscode";
   tabs = context.settingsTabs();
-  assert.deepEqual(tabs.children.map((t) => t.cls.includes("on")), [false, true, false, false, false]);
+  assert.deepEqual(tabs.children.map((t) => t.cls.includes("on")), [false, false, false, true]);
 
   // --- the card, declared ------------------------------------------------
   response = { profiles: [], profile_details: details() };
