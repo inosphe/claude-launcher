@@ -554,6 +554,7 @@ BROWSER_CHECKS = [
         "quietpoll_browser.cjs",
         "chat_browser.cjs",
         "promptpacks_browser.cjs",
+        "installsettings_browser.cjs",
 ]
 
 
