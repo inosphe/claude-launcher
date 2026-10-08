@@ -558,6 +558,86 @@ def run_detail(cwd: str, scope: str, prompts: bool = False) -> dict:
     }
 
 
+#: What a node of each type does when the run enters it -- the run page's
+#: node pane says it next to the node's own fields (docs/cflow-v2.md 2.3).
+NODE_HOW = {
+    ir.T_TASK: "A unit of work. The driving agent reads the prompt, does it and reports "
+               "an outcome its 'returns' declares (flow_report); a non-ok outcome stops "
+               "the enclosing seq and goes to the nearest try/catch that names it. "
+               "'verify' runs on the engine when the agent reports; 'ask' routes a question "
+               "or approval to someone else before the task counts as done.",
+    ir.T_SEQ: "Runs its children one after another. A child's non-ok outcome ends the "
+              "sequence with that outcome.",
+    ir.T_COND: "Takes the first branch whose guard is true (else the 'else' branch). The "
+               "engine decides from run data; nobody is asked.",
+    ir.T_CHOOSE: "An open decision. The chooser (agent or user) picks one option; an "
+                 "option's guard decides whether it is offered now.",
+    ir.T_LOOP: "Repeats its body while the guard holds (or over a list), up to 'max'. "
+               "Reaching max asks a person to extend or stop the loop.",
+    ir.T_PAR: "Runs its branches at once; 'settle' says when the whole is done "
+              "(all, any, ...).",
+    ir.T_TIMEOUT: "Runs its body with a deadline; when it passes, the body is cancelled "
+                  "and the node ends 'timeout'.",
+    ir.T_TRY: "Runs its body; an outcome named under 'catch' runs that handler instead "
+              "of ending the run, 'finally' runs either way.",
+    ir.T_WAIT: "Waits on the outside: a probe command, checks or a pause. The daemon's "
+               "clock re-checks it and wakes the session when it passes.",
+    ir.T_GROUP: "A slot for members forked at run time (flow_fork); it ends when its "
+                "members settle.",
+    ir.T_CONTROL: "Ends the enclosing procedure, loop iteration or run with the given "
+                  "outcome (return / continue / break).",
+    ir.T_SCOPE: "Calls a procedure: its body runs here with the given params, and its "
+                "outcome is this node's.",
+}
+
+
+def _plain(value: Any) -> Any:
+    return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+
+
+def node_detail(cwd: str, scope: str, node_id: str) -> Optional[dict]:
+    """``GET /api/cflow2/node``: one node of a run's chart in full -- every
+    field the definition gave it (the task's prompt, done_when, returns,
+    rules, verify, ask; a choice's options and guards), what its type does,
+    its children with their roles, its live instances, visits, last result
+    and its journal lines in the tail. ``None`` when the run or node is not
+    there."""
+    st = store2.RunStore(cwd, scope)
+    if not st.exists():
+        return None
+    chart = st.load_chart()
+    node = chart.nodes.get(node_id)
+    if node is None:
+        return None
+    state = st.load_state()
+    key = node.label or node.id
+    fields = node.to_dict()
+    for k in ("id", "type", "parent", "children", "child", "branches"):
+        fields.pop(k, None)
+    if fields.get("rules"):
+        # a rule is named on the node and written once on the chart
+        fields["rules"] = [{"id": rid, "text": (chart.rules.get(rid) or {}).get("text")}
+                           for rid in fields["rules"]]
+    kids = []
+    for cid, role in _child_roles(chart, node):
+        c = chart.nodes.get(cid)
+        if c is not None:
+            kids.append({"id": cid, "role": role, "type": c.type,
+                         "label": c.label or "", "title": c.get("title") or ""})
+    inst = state.get("inst") or {}
+    return {
+        "node": node_view(node, True),
+        "how": NODE_HOW.get(node.type, ""),
+        "fields": _plain(fields),
+        "children": kids,
+        "instances": [{"instance": iid, "await": rec.get("await"), "frame": _plain(rec.get("frame"))}
+                      for iid, rec in sorted(inst.items()) if rec.get("node") == node.id],
+        "visits": int((state.get("visits") or {}).get(key) or 0),
+        "result": _plain((state.get("result") or {}).get(key)),
+        "journal": [e for e in st.journal(JOURNAL_TAIL) if e.get("node") == node.id],
+    }
+
+
 def run_summary(cwd: str, scope: str) -> Optional[dict]:
     """One line's worth of a v2 run in (cwd, scope), or ``None`` without one."""
     try:

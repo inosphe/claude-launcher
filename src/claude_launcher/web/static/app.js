@@ -17510,8 +17510,8 @@ async function refreshWf() {
     const cwd = wfCwd;
     const v2 = await fetchCflow2Run(cwd, wfScope);
     if (!v2 || wfCwd !== cwd) return;
-    $("wf-view").innerHTML = "";
     if (v2.error) {
+      $("wf-view").innerHTML = "";
       $("wf-view").appendChild(el("p", "wf-warning", v2.error));
       return;
     }
@@ -28434,10 +28434,35 @@ function cflow2NodeText(n) {
   return text;
 }
 
-/* The chart as indented rows, pre-order from the root: depth, the role the
-   node plays under its parent ("do", "option x", "catch fail"), whether a
-   live instance sits on it (and whether it waits on the outside), and its
-   visit count. Pure: the renderer below only draws these. */
+/* A node drawn in parts (cflow2TreeInto): `head` is what it is called or
+   does, `sub` the detail beside it, `executor` where it runs when that is
+   not inline. cflow2NodeText above is the same node as one line (tooltips). */
+function cflow2NodeBits(n) {
+  const t = n.type;
+  let head = n.label || "", sub = "";
+  if (t === "task") {
+    head = n.label || n.title || n.id;
+    sub = n.title && n.title !== head ? n.title : "";
+  } else if (t === "loop") {
+    sub = [`${n.mode || "loop"} ≤ ${n.max ?? "?"}`, n.guard || "",
+           n.items ? `in ${n.items}${n.parallel ? " (par)" : ""}` : ""].filter(Boolean).join(" · ");
+  } else if (t === "choose") sub = `by ${n.chooser || "agent"}`;
+  else if (t === "par") sub = `settle ${n.settle || "all"}`;
+  else if (t === "group") { head = head || n.name || ""; sub = `settle ${n.settle || "all"}`; }
+  else if (t === "scope") { head = n.proc || "?"; sub = n.label && n.label !== n.proc ? n.label : ""; }
+  else if (t === "wait") sub = n.describe || "";
+  else if (t === "timeout") sub = `${n.seconds}s`;
+  else if (t === "control") head = `${n.op || "control"}${n.outcome ? " " + n.outcome : ""}`;
+  const ex = n.executor || [];
+  return { head, sub,
+           executor: ex.length && !(ex.length === 1 && ex[0] === "inline") ? ex.join("/") : "" };
+}
+
+/* The chart as rows, pre-order from the root: depth, the parent and how many
+   children it has, the role the node plays under its parent ("do", "option
+   x", "catch fail"), whether a live instance sits on it (and whether it
+   waits on the outside), and its visit count. Pure: the renderer below only
+   draws these. */
 function cflow2TreeRows(chart, detail) {
   const nodes = (chart && chart.nodes) || {};
   const live = {}, waiting = {};
@@ -28448,104 +28473,134 @@ function cflow2TreeRows(chart, detail) {
   const visits = (detail && detail.visits) || {};
   const rows = [];
   const seen = new Set();
-  const walk = (id, depth, role) => {
+  const walk = (id, depth, role, parent) => {
     const n = nodes[id];
     if (!n || seen.has(id)) return;
     seen.add(id);
+    const bits = cflow2NodeBits(n);
+    const kids = (n.children || []).filter((c) => nodes[c] && c !== id);
     rows.push({
-      id, depth, role: role || "", type: n.type,
+      id, depth, role: role || "", type: n.type, parent: parent || null,
+      kids: kids.length,
       icon: CFLOW2_ICONS[n.type] || "·",
-      text: cflow2NodeText(n),
+      text: cflow2NodeText(n), head: bits.head, sub: bits.sub, executor: bits.executor,
       active: !!live[id], awaiting: waiting[id] || "",
       visits: Number(visits[n.label || n.id] || 0),
       force: !!n.force_target,
     });
-    const kids = n.children || [];
     const roles = n.roles || [];
-    kids.forEach((c, i) => walk(c, depth + 1, roles[i] || ""));
+    (n.children || []).forEach((c, i) => walk(c, depth + 1, roles[i] || "", id));
   };
-  if (chart && chart.root) walk(chart.root, 0, "");
+  if (chart && chart.root) walk(chart.root, 0, "", null);
   return rows;
 }
 
+/* Which rows of the tree are open: the root, every ancestor of a live
+   instance or of the selected node (so the run's position is always in
+   view), then the person's own toggles (`overrides`: id -> open). Pure. */
+function cflow2TreeOpen(rows, selected, overrides) {
+  const parent = {};
+  for (const r of rows) parent[r.id] = r.parent;
+  const open = new Set();
+  for (const r of rows) if (r.depth === 0) open.add(r.id);
+  const lift = (id) => { for (let p = parent[id]; p; p = parent[p]) open.add(p); };
+  for (const r of rows) if (r.active || r.awaiting) lift(r.id);
+  if (selected && selected in parent) lift(selected);
+  for (const [id, on] of Object.entries(overrides || {})) {
+    if (on) open.add(id); else open.delete(id);
+  }
+  return open;
+}
+
+const CFLOW2_TYPE_NAMES = { scope: "call", control: "", task: "" };
+
+/* `opts`: selected, onSelect(id), open (overrides), onToggle(id, open). */
 function cflow2TreeInto(box, chart, detail, opts = {}) {
-  const tree = el("div", "cf2-tree mono");
-  for (const r of cflow2TreeRows(chart, detail)) {
-    const row = el("div", "cf2-row" + (r.awaiting ? " awaiting" : r.active ? " active" : "") +
+  const rows = cflow2TreeRows(chart, detail);
+  const open = cflow2TreeOpen(rows, opts.selected, opts.open);
+  const tree = el("div", "cf2-tree");
+  const shown = {};
+  const liveParents = new Set(rows.filter((r) => r.active || r.awaiting).map((r) => r.parent));
+  for (const r of rows) {
+    const vis = !r.parent || (shown[r.parent] && open.has(r.parent));
+    shown[r.id] = vis;
+    if (!vis) continue;
+    const row = el("div", `cf2-row t-${r.type}` +
+      (r.awaiting ? " awaiting" : r.active ? " active" : "") +
       (r.force ? " force" : "") + (opts.selected === r.id ? " selected" : ""));
-    row.style.paddingLeft = `${r.depth * 14}px`;
     row.dataset.node = r.id;
+    row.title = `${r.text}\n${r.type} ${r.id}`;
+    const ind = el("span", "cf2-indent");
+    for (let i = 0; i < r.depth; i++) ind.appendChild(el("span", "cf2-guide"));
+    row.appendChild(ind);
+    const isOpen = open.has(r.id);
+    const tg = el("span", "cf2-toggle" + (r.kids ? "" : " leaf"), r.kids ? (isOpen ? "▾" : "▸") : "");
+    if (r.kids && opts.onToggle) {
+      tg.title = isOpen ? "collapse" : "expand";
+      tg.addEventListener("click", (e) => { e.stopPropagation(); opts.onToggle(r.id, !isOpen); });
+    }
+    row.appendChild(tg);
+    if (r.role) {
+      const role = el("span", "cf2-role", r.role.length > 42 ? r.role.slice(0, 40) + "…" : r.role);
+      role.title = r.role;
+      row.appendChild(role);
+    }
+    const name = CFLOW2_TYPE_NAMES[r.type] ?? r.type;
+    row.appendChild(el("span", `cf2-type t-${r.type}`, name ? `${r.icon} ${name}` : r.icon));
+    if (r.head) row.appendChild(el("span", "cf2-head", r.head));
+    if (r.sub) row.appendChild(el("span", "cf2-sub", r.sub));
+    if (r.executor) row.appendChild(el("span", "cf2-exec", `⇢ ${r.executor}`));
+    const tail = el("span", "cf2-tail");
+    if (r.kids && !isOpen) tail.appendChild(el("span", "cf2-more", `+${r.kids}`));
+    if (r.visits > 1) tail.appendChild(el("span", "cf2-visits", `×${r.visits}`));
+    if (r.force) {
+      const f = el("span", "cf2-force", "⇥");
+      f.title = "force_target: a person may move the run here";
+      tail.appendChild(f);
+    }
+    if (r.awaiting) tail.appendChild(el("span", "cf2-await", r.awaiting));
+    else if (r.active && !liveParents.has(r.id)) tail.appendChild(el("span", "cf2-live", "live"));
+    row.appendChild(tail);
     if (opts.onSelect) {
       row.classList.add("selectable");
       row.addEventListener("click", () => opts.onSelect(r.id));
     }
-    if (r.role) row.appendChild(el("span", "cf2-role", `${r.role}: `));
-    row.appendChild(el("span", "cf2-icon", r.icon + " "));
-    row.appendChild(el("span", "cf2-text", r.text));
-    if (r.force) row.appendChild(el("span", "cf2-force", " \u21e5"));
-    if (r.visits > 1) row.appendChild(el("span", "cf2-visits", ` ×${r.visits}`));
-    if (r.awaiting) row.appendChild(el("span", "cf2-await", ` ← ${r.awaiting}`));
-    row.title = `${r.type} ${r.id}`;
     tree.appendChild(row);
   }
   box.appendChild(tree);
 }
 
-/* The selected node of the v2 tree: what it is, whether a live instance
-   sits on it, and the forced move (docs 2.11) -- offered on a node the
-   definition marks force_target, explained on every other. */
-function cflow2NodePanel(data, n, live, post) {
-  const panel = el("div", "cf2-choice cf2-node");
-  panel.appendChild(el("h4", null, `${n.type} ${n.label || n.id}`));
-  if (n.title && n.title !== n.label) panel.appendChild(el("p", null, n.title));
-  const inst = (data.instances || []).filter((i) => i.node === n.id);
-  const visits = Number((data.visits || {})[n.label || n.id] || 0);
-  panel.appendChild(el("p", "wf-note mono",
-    `id ${n.id} \u00b7 visits ${visits} \u00b7 ` + (inst.length
-      ? "live: " + inst.map((i) => i.instance + (i.await ? ` (${i.await})` : "")).join(", ")
-      : "not live")));
-  const name = n.label || n.id;
-  const btn = el("button", "wf-btn force", `Force run to '${name}'`);
-  if (!live) {
-    btn.disabled = true;
-    btn.title = "the run is finished";
-  } else if (!n.force_target) {
-    btn.disabled = true;
-    btn.title = "this node is not marked 'force_target: true' in the workflow definition";
-  }
-  btn.addEventListener("click", async () => {
-    const reason = prompt(
-      `Move the run to '${name}'?\n\nEverything open on the way there is cancelled ` +
-      "(tasks, delegations, questions, holds); the combinators in between are entered " +
-      "again and the nodes skipped do not run. The session is nudged.\n\n" +
-      "Reason (journaled):", "");
-    if (reason === null) return;
-    btn.disabled = true;
-    await post("/api/cflow2/move", { node: n.id, reason });
-  });
-  panel.appendChild(btn);
-  if (live && !n.force_target) {
-    panel.appendChild(el("p", "wf-note",
-      "not a force target \u2014 add 'force_target: true' to this node in the definition " +
-      "to allow moving here"));
-  }
-  return panel;
+/* A reason box beside the presses that answer something. The reason is
+   always optional for a person (docs 2.11); what is typed survives the
+   poll's rebuild (cf2Drafts), and a focused box holds the rebuild off. */
+let cf2Drafts = {};
+function cf2ReasonInput(key, placeholder) {
+  const input = el("input", "cf2-reason");
+  input.type = "text";
+  input.placeholder = placeholder || "reason (optional)";
+  input.value = cf2Drafts[key] || "";
+  input.addEventListener("input", () => { cf2Drafts[key] = input.value; });
+  input.addEventListener("keydown", (e) => e.stopPropagation());
+  return input;
 }
 
 /* A task's "Force outcome" control: pick an outcome, give its fields as JSON
-   when it requires any, and a reason; the engine checks it against the
-   task's returns and routes it like the agent's report. */
-function cflow2ForceReport(task, post) {
-  const wrap = el("span", "cf2-force-report");
+   when it requires any, and an optional reason; the engine checks it
+   against the task's returns and routes it like the agent's report. */
+function cflow2ForceReport(task, post, host) {
+  const wrap = el("div", "cf2-press");
   const outcomes = cflow2ForceOutcomes(task);
   const pick = document.createElement("select");
+  pick.className = "cf2-select";
   for (const o of outcomes) {
     const opt = document.createElement("option");
     opt.value = o.name;
     opt.textContent = o.name;
     pick.appendChild(opt);
   }
-  const btn = el("button", "wf-btn force", "Force outcome");
+  const key = `${host}:report:${task.instance}`;
+  const reason = cf2ReasonInput(key);
+  const btn = el("button", "wf-btn sm force", "Force outcome");
   btn.title = "end this task yourself with the chosen outcome (journaled by: user)";
   btn.addEventListener("click", async () => {
     const o = outcomes.find((x) => x.name === pick.value);
@@ -28556,15 +28611,14 @@ function cflow2ForceReport(task, post) {
       const raw = prompt(`Fields for '${o.name}' (JSON):`, tmpl);
       if (raw === null) return;
       try { value = JSON.parse(raw); } catch { alert("not valid JSON"); return; }
-    }
-    const reason = prompt(
-      `End task '${task.label || task.node}' with '${o.name}'?\n\nThe agent stops ` +
-      "working on it and is nudged.\n\nReason (journaled):", "");
-    if (reason === null) return;
+    } else if (!confirm(`End task '${task.label || task.node}' with '${o.name}'?\n\n` +
+                        "The agent stops working on it and is nudged.")) return;
     btn.disabled = true;
-    await post("/api/cflow2/report", { node: task.instance, outcome: o.name, value, reason });
+    delete cf2Drafts[key];
+    await post("/api/cflow2/report",
+               { node: task.instance, outcome: o.name, value, reason: reason.value.trim() });
   });
-  wrap.append(pick, btn);
+  wrap.append(pick, reason, btn);
   return wrap;
 }
 
@@ -28573,34 +28627,71 @@ function cflow2ForceReport(task, post) {
 
 // docs/cflow-v2.md 2.10: a question from GET /api/cflow2/run asks[].question
 // (cflow2/question.to_json). text -> label + markdown, table -> one row per
-// option (the recommended row marked), choice -> the recommendation.
+// option, choice -> a label card. The recommendation is data, not text: the
+// card and the recommended row carry it as data-value / data-recommended,
+// and the 권장 chip is drawn from that.
 function cf2QuestionView(q) {
   const wrap = el("div", "cf2-question");
-  for (const sec of q.sections || []) {
+  const secs = q.sections || [];
+  for (let i = 0; i < secs.length; i++) {
+    const sec = secs[i];
     if (sec.kind === "table") {
-      wrap.appendChild(el("h5", null, sec.label));
-      const t = el("table", "cf2-q-table");
-      const head = el("tr");
-      head.appendChild(el("th", null, "name"));
-      for (const c of sec.value.columns || []) head.appendChild(el("th", null, c.label));
-      t.appendChild(head);
-      for (const r of sec.value.rows || []) {
-        const tr = el("tr", r.recommended ? "recommended" : null);
-        tr.appendChild(el("td", null, r.recommended ? `${r.name} (권장)` : String(r.name)));
-        for (const c of sec.value.columns || []) {
-          const v = (r.cells || {})[c.field];
-          tr.appendChild(el("td", null, v == null ? "" : String(v)));
+      // One card per option: the short columns (an enum such as
+      // reversibility) as tags beside the name, the prose ones as labelled
+      // blocks under it -- a five-column table of paragraphs reads as neither.
+      const sw = el("div", "cf2-sec");
+      sw.appendChild(el("h5", null, sec.label));
+      const cols = sec.value.columns || [];
+      const rowsV = sec.value.rows || [];
+      const cell = (r, c) => { const v = (r.cells || {})[c.field]; return v == null ? "" : String(v); };
+      const short = new Set(cols.filter((c) => rowsV.every((r) => cell(r, c).length <= 20 &&
+                                                          !cell(r, c).includes("\n"))).map((c) => c.field));
+      const list = el("div", "cf2-opts");
+      for (const r of rowsV) {
+        const card = el("div", "cf2-opt-card");
+        card.dataset.value = String(r.name);
+        if (r.recommended) card.dataset.recommended = "true";
+        const top = el("div", "cf2-opt-top");
+        top.appendChild(el("span", "cf2-opt" + (r.recommended ? " rec" : ""), String(r.name)));
+        if (card.dataset.recommended) top.appendChild(el("span", "cf2-rec-chip", "권장"));
+        for (const c of cols) {
+          if (!short.has(c.field) || !cell(r, c)) continue;
+          const tag = el("span", "cf2-tag");
+          tag.append(el("span", "cf2-fact-k", c.label), el("span", null, cell(r, c)));
+          top.appendChild(tag);
         }
-        t.appendChild(tr);
+        card.appendChild(top);
+        const dl = el("div", "cf2-opt-body");
+        for (const c of cols) {
+          if (short.has(c.field) || !cell(r, c)) continue;
+          dl.appendChild(el("span", "cf2-fact-k", c.label));
+          dl.appendChild(mdInto(el("div", "md"), cell(r, c)));
+        }
+        if (dl.childNodes.length) card.appendChild(dl);
+        list.appendChild(card);
       }
-      wrap.appendChild(t);
+      sw.appendChild(list);
+      wrap.appendChild(sw);
     } else if (sec.kind === "choice") {
-      const p = el("p", "cf2-q-rec");
-      p.appendChild(el("strong", null, `${sec.label}: ${sec.value == null ? "" : sec.value}`));
-      wrap.appendChild(p);
+      const card = el("div", "cf2-rec");
+      card.dataset.value = sec.value == null ? "" : String(sec.value);
+      const top = el("div", "cf2-rec-top");
+      top.appendChild(el("span", "cf2-rec-label", sec.label));
+      if (card.dataset.value) top.appendChild(el("span", "cf2-opt rec", card.dataset.value));
+      card.appendChild(top);
+      const next = secs[i + 1];
+      if (next && next.kind !== "table" && next.kind !== "choice") {
+        // the reason that follows the recommendation belongs on its card
+        card.appendChild(el("div", "cf2-rec-why", next.label));
+        card.appendChild(mdInto(el("div", "md"), String(next.value ?? "")));
+        i++;
+      }
+      wrap.appendChild(card);
     } else {
-      wrap.appendChild(el("h5", null, sec.label));
-      wrap.appendChild(mdInto(el("div", "md"), String(sec.value)));
+      const sw = el("div", "cf2-sec");
+      sw.appendChild(el("h5", null, sec.label));
+      sw.appendChild(mdInto(el("div", "md"), String(sec.value ?? "")));
+      wrap.appendChild(sw);
     }
   }
   return wrap;
@@ -28638,12 +28729,293 @@ function cflow2ForceOutcomes(task) {
   return out;
 }
 
-/* The v2 tree's selected node, one per home (the page, the split pane, the
-   session fold), so a click survives the poll's rebuild. */
+/* The agent's reports in the journal tail, newest first: which task, the
+   outcome, who reported (by: user for a forced one), when, and the prose
+   summary it gave (markdown). Pure. */
+function cflow2Reports(journal) {
+  return (journal || []).filter((e) => e && e.event === "reported").reverse().map((e) => ({
+    node: e.node || "", label: String(e.node || "").split("/").pop(),
+    outcome: e.outcome || "ok", by: e.by || "",
+    ts: String(e.ts || "").replace("T", " ").replace("+00:00", ""),
+    text: typeof e.text === "string" ? e.text : "", value: e.value,
+  }));
+}
+
+const CFLOW2_STATUS_CLS = {
+  running: "run", waiting_approval: "wait", done: "ok", failed: "bad", aborted: "bad",
+};
+
+/* The v2 tree's selected node and its open/closed toggles, one per home
+   (the page, the split pane, the session fold), so a click survives the
+   poll's rebuild. */
 let cf2Selected = {};
+let cf2Open = {};
+
+function cf2Section(title, count, cls) {
+  const sec = el("section", "cf2-section" + (cls ? " " + cls : ""));
+  const h = el("h3", "cf2-sec-title", title);
+  if (count !== undefined) h.appendChild(el("span", "cf2-count", String(count)));
+  sec.appendChild(h);
+  return sec;
+}
+
+function cf2Card(kind, title, sub) {
+  const card = el("div", "cf2-card");
+  const head = el("div", "cf2-card-head");
+  head.appendChild(el("span", "cf2-kind " + kind, kind));
+  head.appendChild(el("span", "cf2-card-title", title));
+  if (sub) head.appendChild(el("span", "cf2-sub", sub));
+  card.appendChild(head);
+  return card;
+}
+
+/* The node pane: a clicked chart node in full, on the right edge of the
+   view, closed with its x (or Esc). What the run page has for the node from
+   the chart is drawn at once; the rest -- the prompt, done_when, returns,
+   rules, an option's guard, the last result, the node's journal lines --
+   comes from GET /api/cflow2/node and is kept per home (cf2NodeDocs) so the
+   poll's rebuild does not blank it. */
+let cf2NodeDocs = {};
+
+async function fetchCflow2Node(cwd, scope, node) {
+  try {
+    const resp = await api(`/api/cflow2/node?cwd=${encodeURIComponent(cwd)}` +
+                           `&scope=${encodeURIComponent(scope)}&node=${encodeURIComponent(node)}`);
+    const doc = await resp.json().catch(() => ({}));
+    return resp.ok ? doc : { error: doc.error || `HTTP ${resp.status}` };
+  } catch {
+    return null;
+  }
+}
+
+/* The fields of a node the pane draws in their own blocks, in this order;
+   whatever else the definition gave it is listed after them as-is. */
+const CF2_PANE_BLOCKS = ["prompt", "done_when", "returns", "effects", "rules", "verify",
+                         "ask", "options", "guard", "items", "mode", "max", "settle",
+                         "seconds", "proc", "with", "params", "probe", "checks"];
+const CF2_PANE_SKIP = new Set(["src", "label", "title", "text_id", "effects_declared",
+                               "roles", "executor"]);
+
+function cf2PaneBlock(title, content) {
+  const b = el("div", "cf2-pane-block");
+  b.appendChild(el("h5", null, title));
+  if (content) b.appendChild(content);
+  return b;
+}
+
+function cf2PaneValue(v) {
+  if (v === null || v === undefined || v === "") return el("span", "wf-note", "—");
+  if (typeof v === "string") {
+    return v.length > 60 || v.includes("\n") ? mdInto(el("div", "md"), v) : el("span", "mono", v);
+  }
+  if (typeof v !== "object") return el("span", "mono", String(v));
+  return el("pre", "mono cf2-pre", JSON.stringify(v, null, 2));
+}
+
+function cf2NodePaneBody(body, data, n, doc, live, post, host, onSelect) {
+  const f = (doc && doc.fields) || {};
+  if (doc && doc.how) body.appendChild(cf2PaneBlock("What it does", el("p", "cf2-how", doc.how)));
+
+  // the person's move (docs 2.11), first: it is the one press here
+  const move = el("div", "cf2-pane-block");
+  move.appendChild(el("h5", null, "Move the run here"));
+  const name = n.label || n.id;
+  if (live && n.force_target) {
+    const key = `${host}:move:${n.id}`;
+    const reason = cf2ReasonInput(key);
+    const btn = el("button", "wf-btn sm force", `Force run to ‘${name}’`);
+    btn.addEventListener("click", async () => {
+      if (!confirm(`Move the run to '${name}'?\n\nEverything open on the way there is ` +
+                   "cancelled (tasks, delegations, questions, holds); the combinators in " +
+                   "between are entered again and the nodes skipped do not run. The " +
+                   "session is nudged.")) return;
+      btn.disabled = true;
+      delete cf2Drafts[key];
+      await post("/api/cflow2/move", { node: n.id, reason: reason.value.trim() });
+    });
+    const row = el("div", "cf2-press");
+    row.append(reason, btn);
+    move.appendChild(row);
+  } else {
+    move.appendChild(el("p", "wf-note", !live ? "the run is finished"
+      : "not a force target — add 'force_target: true' to this node in the definition " +
+        "to allow moving here"));
+  }
+  body.appendChild(move);
+
+  // where it stands now
+  const inst = (doc && doc.instances) || (data.instances || []).filter((i) => i.node === n.id);
+  const facts = el("div", "cf2-facts");
+  const fact = (k, v) => {
+    const s = el("span", "cf2-fact");
+    s.append(el("span", "cf2-fact-k", k), el("span", "mono", v));
+    facts.appendChild(s);
+  };
+  fact("id", n.id);
+  fact("visits", String(doc ? doc.visits : Number((data.visits || {})[n.label || n.id] || 0)));
+  fact("live", inst.length
+    ? inst.map((i) => i.instance + (i.await ? ` (${i.await})` : "")).join(", ") : "no");
+  if ((n.executor || []).length) fact("executor", n.executor.join(" / "));
+  if (f.bind) fact("bind", f.bind);
+  if (f.src) fact("defined at", f.src);
+  body.appendChild(cf2PaneBlock("State", facts));
+
+  if (!doc) {
+    body.appendChild(el("p", "wf-note", "loading the node’s definition…"));
+    return;
+  }
+  if (doc.error) {
+    body.appendChild(el("p", "wf-warning", doc.error));
+    return;
+  }
+
+  for (const k of CF2_PANE_BLOCKS) {
+    if (f[k] === undefined || f[k] === null || f[k] === "" ||
+        (Array.isArray(f[k]) && !f[k].length)) continue;
+    const v = f[k];
+    if (k === "prompt" || k === "done_when") {
+      body.appendChild(cf2PaneBlock(k === "prompt" ? "Prompt" : "Done when",
+                                    mdInto(el("div", "md cf2-pane-md"), String(v))));
+    } else if (k === "returns" && v && typeof v === "object") {
+      const t = el("table", "cf2-col-table");
+      for (const [outcome, fields] of Object.entries(v)) {
+        const tr = el("tr");
+        tr.appendChild(el("td", null)).appendChild(el("span", "cf2-opt", outcome));
+        const fl = Object.entries(fields || {}).map(([fk, ft]) => `${fk}: ${ft}`).join(", ");
+        tr.appendChild(el("td", "mono", fl || "—"));
+        t.appendChild(tr);
+      }
+      body.appendChild(cf2PaneBlock("Returns", t));
+    } else if (k === "effects" && Array.isArray(v)) {
+      const chips = el("div", "cf2-chips");
+      for (const e of v) chips.appendChild(el("span", "cf2-opt", String(e)));
+      body.appendChild(cf2PaneBlock("Effects", chips));
+    } else if (k === "rules" && Array.isArray(v)) {
+      const list = el("div", "cf2-rules");
+      for (const r of v) {
+        const d = document.createElement("details");
+        d.className = "cf2-rule";
+        d.appendChild(el("summary", "mono", (r && r.id) || "rule"));
+        d.appendChild(mdInto(el("div", "md"), String((r && r.text) || "")));
+        list.appendChild(d);
+      }
+      body.appendChild(cf2PaneBlock(`Rules (${v.length})`, list));
+    } else if (k === "options" && Array.isArray(v)) {
+      const t = el("table", "cf2-col-table");
+      for (const o of v) {
+        const tr = el("tr");
+        tr.appendChild(el("td", null)).appendChild(el("span", "cf2-opt", String(o.name)));
+        const td = el("td");
+        if (o.description) td.appendChild(mdInto(el("div", "md"), String(o.description)));
+        if (o.guard) td.appendChild(el("div", "mono cf2-sub", `when ${o.guard}`));
+        tr.appendChild(td);
+        t.appendChild(tr);
+      }
+      body.appendChild(cf2PaneBlock("Options", t));
+    } else {
+      body.appendChild(cf2PaneBlock(k, cf2PaneValue(v)));
+    }
+  }
+  const rest = Object.keys(f).filter((k) => !CF2_PANE_BLOCKS.includes(k) && !CF2_PANE_SKIP.has(k) &&
+                                            k !== "bind");
+  if (rest.length) {
+    const d = document.createElement("details");
+    d.className = "cf2-rule";
+    d.appendChild(el("summary", null, `Other fields (${rest.length})`));
+    const grid = el("div", "cf2-kv");
+    for (const k of rest) {
+      grid.appendChild(el("span", "cf2-fact-k", k));
+      grid.appendChild(cf2PaneValue(f[k]));
+    }
+    d.appendChild(grid);
+    body.appendChild(cf2PaneBlock("Definition", d));
+  }
+
+  if ((doc.children || []).length) {
+    const list = el("div", "cf2-kids");
+    for (const c of doc.children) {
+      const row = el("div", "cf2-kid");
+      if (c.role) row.appendChild(el("span", "cf2-role", c.role));
+      row.appendChild(el("span", `cf2-type t-${c.type}`, c.type));
+      row.appendChild(el("span", "cf2-head", c.label || c.id));
+      if (c.title) row.appendChild(el("span", "cf2-sub", c.title));
+      row.addEventListener("click", () => onSelect(c.id));
+      list.appendChild(row);
+    }
+    body.appendChild(cf2PaneBlock(`Children (${doc.children.length})`, list));
+  }
+
+  if (doc.result) {
+    const r = el("div");
+    r.appendChild(el("span", "cf2-outcome " + (doc.result.outcome === "ok" ? "ok" : "bad"),
+                     String(doc.result.outcome)));
+    if (doc.result.value !== null && doc.result.value !== undefined) r.appendChild(cf2PaneValue(doc.result.value));
+    body.appendChild(cf2PaneBlock("Last result", r));
+  }
+  if ((doc.journal || []).length) {
+    const grid = el("div", "cf2-jgrid mono cf2-jgrid-node");
+    for (const e of doc.journal.slice().reverse()) {
+      const rest = Object.keys(e).filter((k) => !["ts", "event", "node", "instance"].includes(k))
+        .map((k) => `${k}=${typeof e[k] === "object" ? JSON.stringify(e[k]) : e[k]}`).join(" ");
+      grid.appendChild(el("span", "cf2-when", String(e.ts || "").replace("T", " ").replace("+00:00", "")));
+      grid.appendChild(el("span", "cf2-ev " + (e.event || ""), e.event || ""));
+      const rs = el("span", "cf2-jrest", rest);
+      rs.title = rest;
+      grid.appendChild(rs);
+    }
+    body.appendChild(cf2PaneBlock(`Journal (${doc.journal.length})`, grid));
+  }
+}
+
+function cf2NodePane(data, n, live, post, host, onClose, onSelect) {
+  const pane = el("aside", "cf2-pane");
+  const head = el("div", "cf2-pane-head");
+  head.appendChild(el("span", `cf2-type t-${n.type}`, n.type));
+  const t = el("div", "cf2-pane-title");
+  t.appendChild(el("strong", null, n.label || n.id));
+  if (n.title && n.title !== n.label) t.appendChild(el("span", "cf2-sub", n.title));
+  head.appendChild(t);
+  const x = el("button", "cf2-close", "×");
+  x.title = "close (Esc)";
+  x.setAttribute("aria-label", "close");
+  x.addEventListener("click", onClose);
+  head.appendChild(x);
+  pane.appendChild(head);
+  const body = el("div", "cf2-pane-body");
+  pane.appendChild(body);
+  const cached = cf2NodeDocs[host];
+  const draw = (doc) => {
+    body.innerHTML = "";
+    cf2NodePaneBody(body, data, n, doc, live, post, host, onSelect);
+  };
+  draw(cached && cached.id === n.id ? cached.doc : null);
+  fetchCflow2Node(data.cwd, data.scope, n.id).then((doc) => {
+    if (!doc || cf2Selected[host] !== n.id) return;
+    cf2NodeDocs[host] = { id: n.id, doc };
+    const act = document.activeElement;
+    if (pane.isConnected && !(act && pane.contains(act) && act.matches("input, textarea, select"))) {
+      draw(doc);
+    }
+  });
+  return pane;
+}
+
+/* Esc closes the node pane of whichever v2 view drew one last. */
+let cf2PaneClose = null;
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape" || !cf2PaneClose) return;
+  const act = document.activeElement;
+  if (act && act.matches && act.matches("input, textarea, select") && !act.closest(".cf2-pane")) return;
+  cf2PaneClose();
+});
 
 function renderCflow2Into(box, data, ui) {
   ui = ui || {};
+  // A hand is in a box on this view (a reason being typed, an outcome being
+  // picked): leave it; the next poll redraws once focus moves on.
+  const act = document.activeElement;
+  if (act && act !== document.body && box.contains(act) &&
+      act.matches("input, textarea, select")) return;
   box.innerHTML = "";
   const run = data.run || {};
   if (!data.run || data.status === "idle") {
@@ -28656,14 +29028,18 @@ function renderCflow2Into(box, data, ui) {
     if (doc && ui.after) ui.after();
     return doc;
   };
-  const live = run.status === "running" || run.status === "waiting_approval";
+  const status = run.status || data.status || "";
+  const live = status === "running" || status === "waiting_approval";
   const sessions = data.sessions || [];
+  cf2PaneClose = null;
+  const root = el("div", "cf2 cf2-host-" + host);
+  box.appendChild(root);
 
-  // The ways out of this view, as the v1 page has them: back to every run,
-  // the owning session, attach links, and (from a half) the page itself.
-  const nav = el("div", "wf-overview cf2-nav");
+  // -- the head: ways out on the left, run presses on the right -------------
+  const top = el("div", "cf2-top");
+  const nav = el("div", "cf2-nav");
   if (!ui.fullLink) {
-    const back = el("a", "wf-back", "\u2190 All runs");
+    const back = el("a", "wf-back", "← All runs");
     back.href = "#/flows";
     nav.appendChild(back);
   }
@@ -28675,19 +29051,16 @@ function renderCflow2Into(box, data, ui) {
     link.href = "#/s/" + encodeURIComponent(s);
     nav.appendChild(link);
   }
-  if (ui.fullLink) nav.appendChild(wfFullLink(data));
-  box.appendChild(nav);
-
-  const bar = el("div", "wf-actions cf2-actions");
-  const scoped = data.scope && data.scope !== "default";
-  if (!sessions.length && live) {
-    bar.appendChild(el("p", scoped ? "wf-warning" : "wf-note", scoped
-      ? `session '${data.scope}' is not running \u2014 nothing is driving this run`
-      : "this run belongs to no managed session"));
+  top.appendChild(nav);
+  const bar = el("div", "cf2-bar");
+  if (ui.fullLink) {
+    const full = wfFullLink(data);
+    full.classList.add("sm");
+    bar.appendChild(full);
   }
   for (const act of cflow2RunActions(data, ui)) {
     if (act === "nudge") {
-      const b = el("button", "wf-btn nudge", "Nudge session");
+      const b = el("button", "wf-btn sm nudge", "Nudge");
       b.disabled = !sessions.length;
       b.title = sessions.length
         ? `type a 'call flow_status and continue' line into session ${sessions.join(", ")}`
@@ -28700,18 +29073,18 @@ function renderCflow2Into(box, data, ui) {
       });
       bar.appendChild(b);
     } else if (act === "abort") {
-      const b = el("button", "wf-btn archive", "Abort run");
+      const b = el("button", "wf-btn sm archive", "Abort");
       b.title = "end this run as aborted; its record stays here until you archive it";
       b.addEventListener("click", async () => {
         const reason = prompt("This run is still ACTIVE. Abort it? The agent driving it " +
-                              "loses the run.\n\nReason (journaled):", "");
+                              "loses the run.\n\nReason (optional, journaled):", "");
         if (reason === null) return;
         b.disabled = true;
         await post("/api/cflow2/abort", { reason });
       });
       bar.appendChild(b);
     } else if (act === "archive") {
-      const b = el("button", "wf-btn archive", "Archive run");
+      const b = el("button", "wf-btn sm archive", "Archive");
       b.title = "move this finished run into .cflow2/archive, freeing the slot for a new start";
       b.addEventListener("click", async () => {
         if (!confirm("Archive this finished run?\n\nIts state and journal move into " +
@@ -28722,240 +29095,318 @@ function renderCflow2Into(box, data, ui) {
       bar.appendChild(b);
     }
   }
-  if (bar.childNodes.length) box.appendChild(bar);
+  if (bar.childNodes.length) top.appendChild(bar);
+  root.appendChild(top);
 
-  const head = el("div", "wf-meta");
-  head.appendChild(el("span", "cf2-badge", "v2"));
-  head.appendChild(el("span", null, run.workflow || (data.chart || {}).name || "(workflow)"));
-  head.appendChild(el("span", null, `${run.status || data.status}` +
-    (run.reason ? ` (${run.reason})` : "")));
-  head.appendChild(el("span", null, `run ${run.run || "?"}`));
-  if (run.started) head.appendChild(el("span", null,
-    `started ${String(run.started).replace("T", " ")}`));
-  box.appendChild(head);
-  if (run.outcome !== undefined && run.outcome !== null) {
-    box.appendChild(el("p", "wf-note", `outcome: ${run.outcome}`));
+  const title = el("div", "cf2-title");
+  title.appendChild(el("span", "cf2-badge", "v2"));
+  title.appendChild(el("h2", null, run.workflow || (data.chart || {}).name || "(workflow)"));
+  title.appendChild(el("span", "cf2-status " + (CFLOW2_STATUS_CLS[status] || ""),
+                       status.replace("_", " ")));
+  root.appendChild(title);
+  const meta = el("div", "cf2-meta");
+  const metaItem = (k, v, cls) => {
+    const s = el("span", "cf2-fact");
+    s.append(el("span", "cf2-fact-k", k), el("span", cls || null, v));
+    meta.appendChild(s);
+  };
+  metaItem("run", run.run || "?", "mono");
+  if (run.started) metaItem("started", String(run.started).replace("T", " ").replace("+00:00", "Z"));
+  if (run.reason) metaItem("reason", run.reason);
+  if (run.outcome !== undefined && run.outcome !== null) metaItem("outcome", String(run.outcome));
+  if (run.acceptance && run.acceptance.status) {
+    metaItem("acceptance", run.acceptance.status +
+      ((run.acceptance.failed || []).length ? ` (failed: ${run.acceptance.failed.join(", ")})` : ""));
+  }
+  root.appendChild(meta);
+  const scoped = data.scope && data.scope !== "default";
+  if (!sessions.length && live) {
+    root.appendChild(el("p", scoped ? "wf-warning" : "wf-note", scoped
+      ? `session '${data.scope}' is not running — nothing is driving this run`
+      : "this run belongs to no managed session"));
   }
   const runInputs = run.inputs || ((run.data || {}).inputs);
   if (runInputs && typeof runInputs === "object" && Object.keys(runInputs).length) {
-    box.appendChild(cflow2InputsBlock(runInputs));
-  }
-  if (run.acceptance && run.acceptance.status) {
-    box.appendChild(el("p", "wf-note", `acceptance: ${run.acceptance.status}` +
-      ((run.acceptance.failed || []).length ? ` (failed: ${run.acceptance.failed.join(", ")})` : "")));
+    root.appendChild(cflow2InputsBlock(runInputs));
   }
 
+  const cols = el("div", "cf2-cols");
+  const main = el("div", "cf2-col-main");
+  const side = el("div", "cf2-col-chart");
+  cols.append(main, side);
+  root.appendChild(cols);
+
+  // -- waiting on a person: choices, questions, limits ----------------------
+  const yours = cf2Section("Waiting on you");
+  const answerRow = (key, presses) => {
+    const row = el("div", "cf2-press");
+    const reason = cf2ReasonInput(key);
+    row.appendChild(reason);
+    for (const p of presses) row.appendChild(p);
+    return { row, reason };
+  };
   for (const c of run.choices || []) {
-    const card = el("div", "cf2-choice");
-    card.appendChild(el("h4", null,
-      `choice ${c.label || c.node} — ${c.chooser === "user" ? "yours to pick" : "the agent's"}`));
-    if (c.prompt) card.appendChild(mdInto(el("div", "md"), c.prompt));
-    const btns = el("div", "wf-actions");
-    for (const o of c.options || []) {
-      const b = el("button", "wf-btn option", o.name);
+    const card = cf2Card("choice", c.label || c.node,
+      c.chooser === "user" ? "yours to pick" : "the agent's — you may pick for it");
+    if (c.prompt) card.appendChild(mdInto(el("div", "md cf2-body"), c.prompt));
+    const key = `${host}:choice:${c.instance}`;
+    const presses = (c.options || []).map((o) => {
+      const b = el("button", "wf-btn sm option", o.name);
+      b.dataset.value = o.name;
       b.title = o.description || "";
+      return b;
+    });
+    const { row, reason } = answerRow(key, presses);
+    for (const b of presses) {
       b.addEventListener("click", async () => {
-        let reason = "";
-        if (c.require_reason) {
-          reason = prompt(`Reason for '${o.name}'`, "") || "";
-          if (!reason.trim()) return;
-        } else if (!confirm(`Pick '${o.name}' for ${c.label || c.node}?`)) return;
+        if (!confirm(`Pick '${b.dataset.value}' for ${c.label || c.node}?`)) return;
         b.disabled = true;
-        await post("/api/cflow2/select", { node: c.instance, option: o.name, reason });
+        delete cf2Drafts[key];
+        await post("/api/cflow2/select",
+                   { node: c.instance, option: b.dataset.value, reason: reason.value.trim() });
       });
-      btns.appendChild(b);
     }
-    card.appendChild(btns);
+    card.appendChild(row);
     for (const u of c.unavailable || []) {
       card.appendChild(el("p", "wf-note", `${u.name}: not available now (when ${u.when})`));
     }
-    box.appendChild(card);
+    yours.appendChild(card);
   }
-
   for (const a of run.asks || []) {
-    const card = el("div", "cf2-choice");
     const q = a.question || null;
-    card.appendChild(el("h4", null,
-      `${q ? "question" : "approval"} ${a.label || a.node}${a.title ? " — " + a.title : ""}`));
+    const card = cf2Card(q ? "question" : "approval", a.label || a.node, a.title || "");
     if (q) {
       // a brief ask (docs/cflow-v2.md 2.10): the sections come from the
       // question type, in its order -- no per-type code here
-      if (a.intro) card.appendChild(mdInto(el("div", "md"), a.intro));
+      if (a.intro) card.appendChild(mdInto(el("div", "md cf2-body"), a.intro));
       card.appendChild(cf2QuestionView(q));
-    } else if (a.prompt) card.appendChild(mdInto(el("div", "md"), a.prompt));
+    } else if (a.prompt) card.appendChild(mdInto(el("div", "md cf2-body"), a.prompt));
     if ((a.asked || []).length) {
       card.appendChild(el("p", "wf-note", `asked: ${a.asked.join(", ")}` +
         (a.deadline ? ` (until ${String(a.deadline).replace("T", " ")})` : "")));
     }
-    const btns = el("div", "wf-actions");
-    const answer = async (b, decision, label) => {
-      const need = !!a.require_reason;
-      const reason = prompt(`Reason for '${label}'${need ? " (required)" : " (optional)"}`, "");
-      if (reason === null || (need && !reason.trim())) return;
-      b.disabled = true;
-      await post("/api/cflow2/approve", { node: a.instance, decision, reason });
-    };
     const opts = (a.options || []).length ? a.options
       : [{ name: "approve", description: "enter the task" },
          { name: "decline", description: "the task finishes declined" }];
-    for (const o of opts) {
-      if (q && o.name === "reframe") {
-        // reframe needs a reason: what the options miss
-        const b = el("button", "wf-btn cf2-reframe", "reframe");
-        b.title = o.description || "";
-        b.addEventListener("click", async () => {
-          const reason = prompt("What do the options miss? (required)", "");
-          if (reason === null || !reason.trim()) return;
-          b.disabled = true;
-          await post("/api/cflow2/approve", { node: a.instance, decision: "reframe", reason });
-        });
-        btns.appendChild(b);
-        continue;
+    const key = `${host}:ask:${a.instance}`;
+    const presses = opts.map((o) => {
+      const cls = o.name === "reframe" && q ? "cf2-reframe" : o.name === "decline" ? "" : "approve";
+      const b = el("button", "wf-btn sm " + cls);
+      b.dataset.value = o.name;
+      b.appendChild(el("span", null, o.name));
+      if (q && q.recommended === o.name) {
+        b.dataset.recommended = "true";
+        b.appendChild(el("span", "cf2-rec-chip", "권장"));
       }
-      const rec = q && q.recommended === o.name;
-      const b = el("button", "wf-btn " + (o.name === "decline" ? "" : "approve")
-        + (rec ? " recommended" : ""), rec ? `${o.name} (권장)` : o.name);
       b.title = o.description || "";
-      b.addEventListener("click", () => answer(b, o.name, o.name));
-      btns.appendChild(b);
+      return b;
+    });
+    const { row, reason } = answerRow(key, presses);
+    for (const b of presses) {
+      b.addEventListener("click", async () => {
+        if (!confirm(`Answer '${b.dataset.value}' to ${a.label || a.node}?`)) return;
+        b.disabled = true;
+        delete cf2Drafts[key];
+        await post("/api/cflow2/approve",
+                   { node: a.instance, decision: b.dataset.value, reason: reason.value.trim() });
+      });
     }
-    card.appendChild(btns);
-    box.appendChild(card);
+    card.appendChild(row);
+    yours.appendChild(card);
   }
-
-  for (const lim of run.loop_limits || []) {
-    const card = el("div", "cf2-choice");
-    card.appendChild(el("h4", null,
-      `loop ${lim.label || lim.node} reached its max (${lim.iterations}/${lim.max})`));
-    const btns = el("div", "wf-actions");
-    const more = el("button", "wf-btn approve", "Allow one more");
+  const limitCard = (lim, title, visitsKind) => {
+    const card = cf2Card("limit", lim.label || lim.node, title);
+    const more = el("button", "wf-btn sm approve", visitsKind ? "Allow one more visit" : "Allow one more");
     more.addEventListener("click", async () => {
       more.disabled = true;
-      await post("/api/cflow2/extend", { node: lim.instance, by: 1 });
+      await post("/api/cflow2/extend",
+                 { node: lim.instance, by: 1, ...(visitsKind ? { visits: true } : {}) });
     });
-    const stop = el("button", "wf-btn", "Stop the loop");
-    stop.title = "the loop finishes with outcome fail";
+    const stop = el("button", "wf-btn sm", visitsKind ? "Stop here" : "Stop the loop");
+    stop.title = "it finishes with outcome fail";
     stop.addEventListener("click", async () => {
-      if (!confirm("Stop the loop? It finishes with outcome fail.")) return;
+      if (!confirm("Stop here? It finishes with outcome fail.")) return;
       stop.disabled = true;
-      await post("/api/cflow2/extend", { node: lim.instance, stop: true });
+      await post("/api/cflow2/extend",
+                 { node: lim.instance, stop: true, ...(visitsKind ? { visits: true } : {}) });
     });
-    btns.append(more, stop);
-    card.appendChild(btns);
-    box.appendChild(card);
+    const row = el("div", "cf2-press");
+    row.append(more, stop);
+    card.appendChild(row);
+    yours.appendChild(card);
+  };
+  for (const lim of run.loop_limits || []) {
+    limitCard(lim, `loop reached its max (${lim.iterations}/${lim.max})`, false);
   }
-
   for (const lim of run.visit_limits || []) {
     // The chart's max_visits: one node entered that many times over the run.
-    const card = el("div", "cf2-choice");
-    card.appendChild(el("h4", null,
-      `node ${lim.label || lim.node} reached the run's visit limit (${lim.visits ?? "?"}/${lim.max ?? "?"})`));
-    const btns = el("div", "wf-actions");
-    const more = el("button", "wf-btn approve", "Allow one more visit");
-    more.addEventListener("click", async () => {
-      more.disabled = true;
-      await post("/api/cflow2/extend", { node: lim.instance, by: 1, visits: true });
-    });
-    const stop = el("button", "wf-btn", "Stop here");
-    stop.title = "the node finishes with outcome fail";
-    stop.addEventListener("click", async () => {
-      if (!confirm("Stop at the visit limit? The node finishes with outcome fail.")) return;
-      stop.disabled = true;
-      await post("/api/cflow2/extend", { node: lim.instance, stop: true, visits: true });
-    });
-    btns.append(more, stop);
-    card.appendChild(btns);
-    box.appendChild(card);
+    limitCard(lim, `reached the run's visit limit (${lim.visits ?? "?"}/${lim.max ?? "?"})`, true);
   }
+  if (yours.childNodes.length > 1) main.appendChild(yours);
 
+  // -- in progress: tasks, verifies, waits ---------------------------------
+  const prog = cf2Section("In progress");
   for (const t of run.tasks || []) {
-    const row = el("div", "cf2-task");
-    row.appendChild(el("span", "wf-note",
-      `task ${t.label || t.node}: ${t.title || ""} \u2014 waiting for the agent's flow_report`));
-    if (live) row.appendChild(cflow2ForceReport(t, post));
-    box.appendChild(row);
+    const card = cf2Card("task", t.label || t.node, t.title || "");
+    card.appendChild(el("p", "wf-note cf2-line", "waiting for the agent's flow_report"));
+    if (live) card.appendChild(cflow2ForceReport(t, post, host));
+    prog.appendChild(card);
   }
   for (const v of run.verifying || []) {
     const cmd = v.verify && v.verify.run;
-    box.appendChild(el("p", "wf-note cf2-verifying",
-      `task ${v.label || v.node}: verifying` +
-      (cmd ? ` — ${Array.isArray(cmd) ? cmd.join(" ") : cmd}` : "") +
-      (v.started_at ? ` (since ${String(v.started_at).replace("T", " ")})` : "")));
+    const card = cf2Card("verify", v.label || v.node,
+      v.started_at ? `since ${String(v.started_at).replace("T", " ")}` : "");
+    if (cmd) card.appendChild(el("div", "mono cf2-cmd", Array.isArray(cmd) ? cmd.join(" ") : cmd));
+    prog.appendChild(card);
   }
   const undecided = cflow2UndecidedCounts(data.journal || []);
   for (const w of run.waits || []) {
     const n = undecided[w.instance] || 0;
-    box.appendChild(el("p", "wf-note",
-      `${w.kind} ${w.node}${w.describe ? ": " + w.describe : ""}` +
-      (n ? ` — probe could not decide ${n}× in a row` : "")));
+    const card = cf2Card(w.kind || "wait", w.label || w.node, w.describe || "");
+    if (n) card.appendChild(el("p", "wf-warning cf2-line", `probe could not decide ${n}× in a row`));
+    prog.appendChild(card);
   }
   for (const e of cflow2Undecidable(data.journal || [])) {
-    box.appendChild(el("p", "wf-note cf2-undecidable",
+    prog.appendChild(el("p", "wf-note cf2-undecidable",
       `wait ${e.node} gave up: its probe could not decide (undecidable)`));
   }
+  if (prog.childNodes.length > 1) main.appendChild(prog);
 
-  if (data.chart) {
-    box.appendChild(el("h4", null, "Chart"));
-    const nodes = data.chart.nodes || {};
-    const marked = Object.values(nodes).filter((n) => n.force_target).length;
-    box.appendChild(el("p", "wf-note", marked
-      ? `click a node to inspect it; the ${marked} node(s) marked \u21e5 (force_target) ` +
-        "can be moved to"
-      : "click a node to inspect it; this definition marks no node force_target, " +
-        "so the run cannot be moved by hand"));
-    let sel = cf2Selected[host] || null;
-    if (sel && !nodes[sel]) sel = cf2Selected[host] = null;
-    cflow2TreeInto(box, data.chart, data, {
-      selected: sel,
-      onSelect: (id) => {
-        cf2Selected[host] = cf2Selected[host] === id ? null : id;  // again = clear
-        renderCflow2Into(box, data, ui);
-      },
+  // -- the agent's reports --------------------------------------------------
+  const reports = cflow2Reports(data.journal || []);
+  if (reports.length) {
+    const sec = cf2Section("Reports", reports.length);
+    reports.forEach((r, i) => {
+      const d = document.createElement("details");
+      d.className = "cf2-report";
+      if (i === 0) d.open = true;
+      const s = el("summary", "cf2-report-head");
+      s.appendChild(el("span", "cf2-head", r.label));
+      s.appendChild(el("span", "cf2-outcome " + (r.outcome === "ok" ? "ok" : "bad"), r.outcome));
+      if (r.by) s.appendChild(el("span", "cf2-by", `by ${r.by}`));
+      // folded, the first line of the report says what it is about
+      if (r.text) s.appendChild(el("span", "cf2-preview", mdPlain(r.text).slice(0, 160)));
+      s.appendChild(el("span", "cf2-when", r.ts));
+      d.appendChild(s);
+      if (r.text) d.appendChild(mdInto(el("div", "md cf2-body"), r.text));
+      if (r.value && typeof r.value === "object" && Object.keys(r.value).length) {
+        const v = document.createElement("details");
+        v.className = "cf2-value";
+        v.appendChild(el("summary", null, "value"));
+        v.appendChild(el("pre", "mono", JSON.stringify(r.value, null, 2)));
+        d.appendChild(v);
+      }
+      sec.appendChild(d);
     });
-    if (sel) box.appendChild(cflow2NodePanel(data, nodes[sel], live, post));
+    main.appendChild(sec);
   }
 
+  // -- the chart ------------------------------------------------------------
+  if (data.chart) {
+    const nodes = data.chart.nodes || {};
+    const sec = cf2Section("Chart", undefined, "cf2-chart");
+    const tools = el("div", "cf2-chart-tools");
+    const marked = Object.values(nodes).filter((n) => n.force_target).length;
+    tools.appendChild(el("span", "wf-note", marked
+      ? `${marked} node(s) marked ⇥ can be moved to — click one`
+      : "no node is marked force_target"));
+    const redraw = () => renderCflow2Into(box, data, ui);
+    const expand = el("button", "wf-btn sm clear", "Expand all");
+    expand.addEventListener("click", () => {
+      cf2Open[host] = Object.fromEntries(Object.keys(nodes).map((id) => [id, true]));
+      redraw();
+    });
+    const fold = el("button", "wf-btn sm clear", "Collapse");
+    fold.title = "back to the run's position only";
+    fold.addEventListener("click", () => { cf2Open[host] = {}; redraw(); });
+    tools.append(expand, fold);
+    sec.appendChild(tools);
+    let sel = cf2Selected[host] || null;
+    if (sel && !nodes[sel]) sel = cf2Selected[host] = null;
+    cflow2TreeInto(sec, data.chart, data, {
+      selected: sel,
+      open: cf2Open[host] || {},
+      onSelect: (id) => {
+        cf2Selected[host] = cf2Selected[host] === id ? null : id;  // again = clear
+        redraw();
+      },
+      onToggle: (id, on) => {
+        cf2Open[host] = { ...(cf2Open[host] || {}), [id]: on };
+        redraw();
+      },
+    });
+    side.appendChild(sec);
+    if (sel) {
+      const close = () => { cf2Selected[host] = null; redraw(); };
+      root.appendChild(cf2NodePane(data, nodes[sel], live, post, host, close, (id) => {
+        cf2Selected[host] = id;
+        redraw();
+      }));
+      cf2PaneClose = close;
+      root.classList.add("pane-open");
+    }
+  }
+
+  // -- the rest: delegations, collections, triggers, journal ---------------
   const dels = data.delegations || [];
   if (dels.length) {
-    box.appendChild(el("h4", null, `Delegations (${dels.length})`));
+    const sec = cf2Section("Delegations", dels.length);
+    const t = el("table", "cf2-col-table");
+    const head = el("tr");
+    for (const h of ["id", "node", "executor", "status", "receipt"]) head.appendChild(el("th", null, h));
+    t.appendChild(head);
     for (const d of dels) {
-      const row = el("div", "cf2-deleg");
-      row.appendChild(el("span", "mono", d.id));
-      row.appendChild(el("span", null,
-        ` ${d.label || d.node} · ${d.executor || "?"}` +
-        (d.route && d.route !== d.executor ? ` (route ${d.route})` : "") +
-        ` · ${d.status}`));
-      if (d.receipt) row.appendChild(el("span", "mono cf2-receipt", ` receipt ${d.receipt}`));
-      box.appendChild(row);
+      const tr = el("tr");
+      tr.appendChild(el("td", "mono", d.id));
+      tr.appendChild(el("td", null, d.label || d.node));
+      tr.appendChild(el("td", null, (d.executor || "?") +
+        (d.route && d.route !== d.executor ? ` (route ${d.route})` : "")));
+      tr.appendChild(el("td", "cf2-col-status " + (d.status || ""), d.status || ""));
+      const rc = el("td", "mono cf2-receipt",
+                    d.receipt ? String(d.receipt).split(/[\\/]/).pop() : "");
+      if (d.receipt) rc.title = d.receipt;
+      tr.appendChild(rc);
+      t.appendChild(tr);
       for (const why of [...(d.degraded || []), ...(d.fallbacks || [])]) {
-        box.appendChild(el("p", "wf-note cf2-fallback", `fallback: ${why}`));
+        const fr = el("tr");
+        const td = el("td", "wf-note cf2-fallback", `fallback: ${why}`);
+        td.colSpan = 5;
+        fr.appendChild(td);
+        t.appendChild(fr);
       }
     }
+    sec.appendChild(t);
+    main.appendChild(sec);
   }
 
   for (const [name, col] of Object.entries(data.collections || {})) {
-    box.appendChild(cflow2CollectionTable(name, col, post));
+    main.appendChild(cflow2CollectionTable(name, col, post));
   }
   const trig = cflow2TriggerLines(data.trigger_events || []);
   if (trig.length) {
-    box.appendChild(el("h4", null, `Triggers (${trig.length})`));
-    for (const t of trig) {
-      box.appendChild(el("p", "wf-note mono cf2-trigger " + t.cls, t.text));
-    }
+    const sec = cf2Section("Triggers", trig.length);
+    for (const t of trig) sec.appendChild(el("div", "mono cf2-trigger " + t.cls, t.text));
+    main.appendChild(sec);
   }
 
   const events = (data.journal || []).slice().reverse();
   const journal = document.createElement("details");
-  journal.className = "wf-journal";
-  journal.appendChild(el("summary", null, `journal (${events.length} newest events)`));
+  journal.className = "cf2-journal";
+  journal.appendChild(el("summary", null, `Journal · ${events.length} newest events`));
+  const grid = el("div", "cf2-jgrid mono");
   for (const e of events) {
-    const rest = Object.keys(e).filter((k) => !["ts", "event"].includes(k))
+    const rest = Object.keys(e).filter((k) => !["ts", "event", "node", "instance", "text"].includes(k))
       .map((k) => `${k}=${typeof e[k] === "object" ? JSON.stringify(e[k]) : e[k]}`)
       .join(" ");
-    journal.appendChild(el("div", "wf-journal-line mono",
-      `${String(e.ts || "").replace("T", " ")}  ${e.event || ""}  ${rest}`));
+    grid.appendChild(el("span", "cf2-when", String(e.ts || "").replace("T", " ").replace("+00:00", "")));
+    grid.appendChild(el("span", "cf2-ev " + (e.event || ""), e.event || ""));
+    grid.appendChild(el("span", "cf2-jnode", e.instance || e.node || ""));
+    const r = el("span", "cf2-jrest", rest);
+    r.title = rest;
+    grid.appendChild(r);
   }
-  box.appendChild(journal);
+  journal.appendChild(grid);
+  main.appendChild(journal);
 }
 
 /* One collection of a v2 run (docs/cflow-v2.md 2.7) as rows: key, status
@@ -29029,8 +29480,10 @@ function cflow2TriggerLines(events) {
 function cflow2CollectionTable(name, col, post) {
   col = col || {};
   const rows = cflow2CollectionRows(col);
-  const wrap = el("div", "cf2-collection");
-  wrap.appendChild(el("h4", null, `Collection ${name} (${col.kind || "?"}, ${rows.length})`));
+  const wrap = el("section", "cf2-section cf2-collection");
+  const h = el("h3", "cf2-sec-title", `Collection ${name}`);
+  h.appendChild(el("span", "cf2-count", `${col.kind || "?"} · ${rows.length}`));
+  wrap.appendChild(h);
   if (!rows.length) {
     wrap.appendChild(el("p", "wf-note", "empty"));
     return wrap;
@@ -29093,13 +29546,16 @@ function cflow2InputsBlock(values) {
   box.appendChild(el("summary", null, `inputs (${Object.keys(values).length})`));
   for (const [k, v] of Object.entries(values)) {
     const row = el("div", "cf2-run-input");
-    row.appendChild(el("span", "mono", `${k}: `));
+    row.appendChild(el("span", "mono cf2-fact-k", k));
     let text;
     if (Array.isArray(v)) {
       text = v.map((x) => (x && typeof x === "object")
         ? (x.text || "") + (x.probe ? `  [probe: ${x.probe}]` : "") : String(x)).join("\n");
     } else text = v == null ? "" : String(v);
-    row.appendChild(el("span", "cf2-run-input-value", text));
+    // long prose (a goal, an issue text) reads as markdown; a short value stays itself
+    row.appendChild(text.length > 80 || text.includes("\n")
+      ? mdInto(el("div", "md cf2-run-input-value"), text)
+      : el("span", "cf2-run-input-value" + (text ? "" : " empty"), text || "—"));
     box.appendChild(row);
   }
   return box;
