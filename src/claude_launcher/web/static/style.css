@@ -1389,11 +1389,12 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
    Auto placement follows DOM order, including keyboard navigation. */
 #new-session {
   display: grid; gap: 16px;
+  container: session-form / inline-size;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 390px), 1fr));
   align-items: start;
 }
 #new-session > * { grid-column: 1 / -1; min-width: 0; }
-#new-session > :is(#new-where, #new-identity, #new-runs-on, #new-onboard) {
+#new-session > :is(#new-where, #new-identity) {
   grid-column: auto; align-self: stretch;
 }
 #new-session > fieldset, #new-session > details {
@@ -1410,6 +1411,32 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 #new-session :is(#new-where, #new-runs-on, #new-onboard, #new-beads) > :is(p, div, legend),
 #new-session #new-onboard > label:has([name="workflow"], [name="context"]),
 #new-session #new-beads > label:not(.check) { grid-column: 1 / -1; }
+/* Keep the longer onboarding section on its own row. Field captions and
+   grouped choices share a left edge; help stays below the field it describes. */
+#new-session > fieldset { padding: 16px; }
+#new-session :is(#new-where, #new-runs-on, #new-onboard, #new-beads):not(.session-field-hidden) {
+  gap: 12px 16px;
+}
+#new-session :is(#new-where, #new-runs-on, #new-onboard, #new-beads) > label {
+  margin-bottom: 0;
+}
+#new-session .sess-spawn-group-blurb { margin: 0 0 4px; line-height: 1.5; }
+#new-session #new-onboard:not(.session-field-hidden) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+@container session-form (max-width: 520px) {
+  #new-session #new-onboard:not(.session-field-hidden) { grid-template-columns: minmax(0, 1fr); }
+}
+#new-session #new-onboard > label:has([name="role"]) { grid-column: 1 / -1; }
+#new-session #new-onboard > :is(.wf-note, #role-stance) {
+  margin: -4px 0 0; line-height: 1.5;
+}
+#new-session #new-onboard > .new-check-row { margin: 4px 0; }
+#new-session #new-subroles-row { display: grid; gap: 8px; }
+#new-subroles-row .new-check-list {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 120px), 1fr));
+  gap: 8px 16px;
+}
+#new-session #new-subroles-row label.check { margin: 0; align-items: center; min-height: 28px; }
+#new-session #new-subroles-row input { margin: 0; }
 #new-session-footer {
   position: sticky; bottom: 0; z-index: 1;
   padding: 12px 0 4px; background: #14161a;
@@ -1461,7 +1488,7 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
 }
 #new-session input, #new-session select {
-  width: 100%; margin-top: 2px; padding: 5px 8px; font-size: 13px;
+  width: 100%; margin-top: 6px; padding: 7px 10px; font-size: 13px;
   background: #14161a; color: #d8dbe0; border: 1px solid #30363d; border-radius: 4px;
 }
 /* A label whose caption carries a link to where that field's options come
@@ -4623,26 +4650,26 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 /* Prompt packs as chips (renderPromptPackRow): grouped, the box hidden
    inside the chip, which is lit when on; badges say why a chip is locked and
    where its text comes from; "view" opens the text below the chips.
-   A fixed layout: the row is a grid whose second column stacks the chips,
-   the opening summary and the preview one under another. Chips are as wide
+   The label, chips, opening summary and preview stack at the same left edge.
+   Chips are as wide
    as their whole text -- nothing is cut to an ellipsis (claunch-uvm3w) --
    and nothing a tick or a role changes alters a chip's width: the lit state
    is colour only, and the lock is an icon in a slot every chip has, so
    ticking one or a role locking one never re-wraps the chips around it
    (claunch-glntg). Which role locked it is said in the summary block. */
 #new-packs-row {
-  display: grid; grid-template-columns: 90px minmax(0, 1fr); column-gap: 8px; row-gap: 6px;
+  display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px;
   align-items: start;
 }
-#new-packs-row > :not(.new-check-label) { grid-column: 2; min-width: 0; }
-#new-packs-row > .new-check-label { grid-column: 1; grid-row: 1; padding-top: 3px; }
-.pack-groups { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-.pack-group { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 8px; align-items: start; }
-.pack-group-name { color: #7d8590; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; padding-top: 4px; }
+#new-packs-row > * { grid-column: 1; min-width: 0; }
+#new-packs-row > .new-check-label { color: #9da5b0; }
+.pack-groups { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.pack-group { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; align-items: start; }
+.pack-group-name { color: #7d8590; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
 .pack-chips.new-check-list { display: flex; flex-wrap: wrap; gap: 6px; }
 .pack-chip {
-  display: inline-flex; align-items: center; gap: 2px; padding: 1px 2px 1px 6px; max-width: 100%;
-  border: 1px solid #30363d; border-radius: 999px; background: #14161a; color: #9aa4b0;
+  display: inline-flex; align-items: center; gap: 2px; padding: 4px 4px 4px 6px; max-width: 100%;
+  border: 1px solid #30363d; border-radius: 4px; background: #14161a; color: #9aa4b0;
 }
 .pack-chip.on { border-color: #2f81f7; background: #10233d; color: #d8dbe0; }
 .pack-chip.locked { border-style: dashed; }
@@ -4686,9 +4713,6 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .pack-chip-mini { padding: 0 6px; border-radius: 999px; background: #21262d; white-space: nowrap; max-width: 100%; }
 .new-packs-summary-list .pack-chip-mini { white-space: normal; overflow-wrap: anywhere; }
 @media (max-width: 640px) {
-  #new-packs-row { grid-template-columns: minmax(0, 1fr); }
-  #new-packs-row > :not(.new-check-label), #new-packs-row > .new-check-label { grid-column: 1; grid-row: auto; }
-  .pack-group { grid-template-columns: minmax(0, 1fr); gap: 2px; }
   .pack-chip-mini { white-space: normal; }
 }
 .new-check-row .wf-error { flex-basis: 100%; margin: 2px 0; font-size: 12px; }
