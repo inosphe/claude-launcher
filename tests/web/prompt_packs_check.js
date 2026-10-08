@@ -215,7 +215,7 @@ check("ticking and unticking keeps the row's shape; the summary is its own block
   assert.deepEqual(before[0], ["new-check-label", "pack-groups", "new-packs-summary"]);
   newTick("beads", true);
   assert.deepEqual(shape(), before);
-  assert.match(summary(), /beads \(ticked, proj's copy\)/);
+  assert.match(summary(), /beads \(ticked\)/);
   newTick("beads", false);
   newTick("common", false);
   assert.deepEqual(shape(), before);
@@ -247,7 +247,7 @@ check("the role locks its pack on and names itself", () => {
   assert.equal(slots.length, chips().length, "every chip has the slot");
   assert.deepEqual(slots.map((n) => n.textContent), ["🔒", "", ""]);
   assert.equal(slots[0].title, "required by leader");
-  assert.match(summary(), /beads \(role leader, proj's copy\)/);
+  assert.match(summary(), /beads \(role leader\)/);
   assert.deepEqual(env.packs(form), ["beads"]);
   form.role.value = "";
 });
@@ -263,7 +263,7 @@ check("a ticked subrole's uninstalled pack is shown as claunch's copy", () => {
   assert.match(text(row), /🔒 Unreal — operator claunch copy/);
   assert.doesNotMatch(text(row), /refused/);
   assert.equal(summary(),
-    "The opening will include: unreal-operator (role unreal, claunch copy — not installed in proj).");
+    "The opening will include: unreal-operator (role unreal, claunch's copy).");
   // Not sent as a tick: the daemon adds required packs itself.
   assert.deepEqual(env.packs(form), []);
 });
@@ -272,10 +272,14 @@ check("the summary names every pack and why it is there, one chip each", () => {
   newTick("common", true);
   env.render();
   assert.equal(summary(),
-    "The opening will include: common (default, proj's copy) · " +
-    "unreal-operator (role unreal, claunch copy — not installed in proj).");
-  assert.deepEqual(all(row, (n) => n.className === "pack-chip-mini").map((n) => n.textContent),
-    ["common (default, proj's copy)", "unreal-operator (role unreal, claunch copy — not installed in proj)"]);
+    "The opening will include: common (default) · unreal-operator (role unreal, claunch's copy).");
+  const pills = all(row, (n) => n.className === "pack-chip-mini");
+  assert.deepEqual(pills.map((n) => n.textContent),
+    ["common (default)", "unreal-operator (role unreal, claunch's copy)"]);
+  // Where each copy comes from is the pill's tooltip, so the pill stays one
+  // line (claunch-5gbqg).
+  assert.deepEqual(pills.map((n) => n.title),
+    ["proj's copy, installed there", "claunch's copy: not installed in proj"]);
   newTick("common", false);
 });
 
@@ -286,7 +290,7 @@ check("a blank Role row is inferred from the handle, alias included", () => {
   assert.deepEqual(env.primary(form), { role: "worker", inferred: true });
   env.render();
   assert.equal(summary(),
-    "The opening will include: role-worker (role worker, claunch copy — not installed in proj)." +
+    "The opening will include: role-worker (role worker, claunch's copy)." +
     " Role worker is inferred from the handle (no Role picked).");
   // The required role pack is in play, so it is shown though folded.
   assert.deepEqual(groups()[1], ["Roles", ["prompt_pack_role-worker"]]);
@@ -344,14 +348,15 @@ check("with no mesh and nothing installed, any of claunch's packs can be ticked"
   assert.deepEqual(boxes().map((x) => x.checked), [false, true, false, false, false]);
   assert.deepEqual(env.packs(form), ["common"]);
   assert.equal(summary(),
-    "The opening will include: common (default, claunch copy — no workspace here).");
+    "The opening will include: common (default, claunch's copy).");
   newTick("role-worker", true);
   newTick("beads", true);
   assert.deepEqual(env.packs(form), ["beads", "common", "role-worker"]);
   assert.equal(summary(),
-    "The opening will include: beads (ticked, claunch copy — no workspace here) · " +
-    "common (default, claunch copy — no workspace here) · " +
-    "role-worker (ticked, claunch copy — no workspace here).");
+    "The opening will include: beads (ticked, claunch's copy) · " +
+    "common (default, claunch's copy) · role-worker (ticked, claunch's copy).");
+  assert.equal(all(row, (n) => n.className === "pack-chip-mini")[0].title,
+    "claunch's copy: no workspace here");
   newTick("role-worker", false);
   newTick("beads", false);
   env.closeRoles();
@@ -488,8 +493,8 @@ check("the default packs are ticked again each time the form opens", async () =>
   const ticked = () => boxes().filter((b) => b.checked).map((b) => b.value);
   assert.deepEqual(ticked(), ["common", "unreal-operator"]);
   assert.deepEqual(env.packs(form), ["common", "unreal-operator"]);
-  assert.match(summary(), /common \(default, proj's copy\)/);
-  assert.match(summary(), /unreal-operator \(default, claunch copy — not installed in proj\)/);
+  assert.match(summary(), /common \(default\)/);
+  assert.match(summary(), /unreal-operator \(default, claunch's copy\)/);
   // Within one opening the box is still the operator's to untick.
   newTick("common", false);
   env.render();
