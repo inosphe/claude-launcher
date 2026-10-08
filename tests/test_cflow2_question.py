@@ -124,7 +124,8 @@ def test_type_name_cannot_shadow_a_base_type():
 
 
 def test_duplicate_question_type_is_a_compile_error(tmp_path):
-    (tmp_path / "lib.yaml").write_text("cflow: 2\nname: lib\nkind: library\n" + QTYPE)
+    (tmp_path / "lib.yaml").write_text("cflow: 2\nname: lib\nkind: library\n" + QTYPE,
+                                         encoding="utf-8")
     with pytest.raises(frontend.FrontendError, match="already defined"):
         _compile("include: [lib]\n" + QTYPE + "nodes: {a: {prompt: a}}\nbody: a\n",
                  resolve=lambda n: tmp_path / f"{n}.yaml")
@@ -244,7 +245,7 @@ def test_brief_ask_outcomes_include_reframe():
 
 def test_library_compiles_but_cannot_be_started_or_called(tmp_path):
     lib = "cflow: 2\nname: lib\nkind: library\n" + QTYPE
-    (tmp_path / "lib.yaml").write_text(lib)
+    (tmp_path / "lib.yaml").write_text(lib, encoding="utf-8")
     chart = frontend.compile_text(lib)
     assert chart.kind == "library" and "pick" in chart.meta["question_types"]
     with pytest.raises(runtime.FlowError, match="only a workflow"):

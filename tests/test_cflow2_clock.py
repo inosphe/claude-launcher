@@ -234,7 +234,10 @@ def _fake_launch(tmp_path):
     d.mkdir(exist_ok=True)
     script = d / "h.py"
     script.write_text(FAKE)
-    return d, cflow2_exec.Launch(harness="claude", command=[sys.executable, str(script)],
+    # A venv's python.exe on Windows is a launcher whose child runs the script,
+    # so the pid the clock records would differ from the script's own getpid().
+    exe = getattr(sys, "_base_executable", sys.executable) if sys.platform == "win32" else sys.executable
+    return d, cflow2_exec.Launch(harness="claude", command=[exe, str(script)],
                                  env=dict(os.environ, FAKE_DIR=str(d)))
 
 
@@ -473,7 +476,10 @@ def _slow_launch(tmp_path):
     d.mkdir(exist_ok=True)
     script = d / "h.py"
     script.write_text(SLOW)
-    return d, cflow2_exec.Launch(harness="claude", command=[sys.executable, str(script)],
+    # A venv's python.exe on Windows is a launcher whose child runs the script,
+    # so the pid the clock records would differ from the script's own getpid().
+    exe = getattr(sys, "_base_executable", sys.executable) if sys.platform == "win32" else sys.executable
+    return d, cflow2_exec.Launch(harness="claude", command=[exe, str(script)],
                                  env=dict(os.environ, FAKE_DIR=str(d)))
 
 
@@ -813,13 +819,17 @@ def test_stuck_pass_lets_heartbeat_go_stale(tmp_path, monkeypatch):
 
 
 def test_run_probe_env_and_timeout_kills_group(tmp_path):
-    code, out = cflow2_clock.run_probe('printf %s "$CFLOW_IN_TARGET"', str(tmp_path),
+    win = sys.platform == "win32"  # cmd.exe: %VAR%, no printf, no sleep
+    # cmd.exe expands %VAR% before it parses `||`, so `set VAR` is the way to print the raw value
+    code, out = cflow2_clock.run_probe('set CFLOW_IN_TARGET' if win
+                                       else 'printf %s "$CFLOW_IN_TARGET"', str(tmp_path),
                                        env={"CFLOW_IN_TARGET": "x || true; false"})
-    assert code == 0 and out == "x || true; false"
+    assert code == 0 and out.strip().removeprefix("CFLOW_IN_TARGET=") == "x || true; false"
     code, _ = cflow2_clock.run_probe("exit 3", str(tmp_path))
     assert code == 3
     t0 = time.monotonic()
-    code, out = cflow2_clock.run_probe("sleep 30 & sleep 30", str(tmp_path), timeout=0.5)
+    code, out = cflow2_clock.run_probe("ping -n 30 127.0.0.1 >NUL" if win else "sleep 30 & sleep 30",
+                                       str(tmp_path), timeout=0.5)
     assert code == 124 and time.monotonic() - t0 < 10
 
 

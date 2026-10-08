@@ -212,6 +212,42 @@ def _proc_state(pid: int) -> str:
     return rest[0] if rest else ""
 
 
+def _win_image_name(pid: int) -> str:
+    """The executable path of a live Windows process, or "" when it cannot be
+    read (there is no ``/proc`` to name it from)."""
+    import ctypes
+
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    handle = kernel32.OpenProcess(0x1000, False, int(pid))  # QUERY_LIMITED_INFORMATION
+    if not handle:
+        return ""
+    try:
+        size = ctypes.c_ulong(32768)
+        buf = ctypes.create_unicode_buffer(size.value)
+        if not kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+            return ""
+        return buf.value
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def kill_tree(pid: int) -> None:
+    """End ``pid`` and its descendants. POSIX kills the process group the
+    daemon started; Windows has no group id, so ``taskkill /T`` walks the
+    tree (a venv ``python.exe`` is a launcher whose child does the work)."""
+    pid = int(pid)
+    if sys.platform != "win32":
+        with contextlib.suppress(OSError, ProcessLookupError):
+            os.killpg(pid, signal.SIGKILL)
+        return
+    try:  # pragma: no cover - windows
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], stdin=subprocess.DEVNULL,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        with contextlib.suppress(OSError, ProcessLookupError):
+            os.kill(pid, signal.SIGTERM)
+
+
 def process_alive(pid: Optional[int], argv0: Optional[str] = None) -> Optional[bool]:
     """Whether ``pid`` still runs the process a runner marker recorded:
     True/False, or None when it is alive but cannot be identified (another
@@ -231,6 +267,11 @@ def process_alive(pid: Optional[int], argv0: Optional[str] = None) -> Optional[b
         return False
     if not argv0:
         return None
+    if sys.platform == "win32":
+        image = _win_image_name(pid)
+        if not image:
+            return None
+        return os.path.basename(image).lower() == os.path.basename(str(argv0)).lower()
     deadline = time.monotonic() + CMDLINE_SETTLE
     while True:
         try:
@@ -251,14 +292,8 @@ def process_alive(pid: Optional[int], argv0: Optional[str] = None) -> Optional[b
 
 def kill_group(pid: int) -> None:
     """End a process group the daemon started (``start_new_session``: the
-    group id is the leader's pid)."""
-    try:
-        if sys.platform != "win32":
-            os.killpg(int(pid), signal.SIGKILL)
-        else:  # pragma: no cover - windows
-            os.kill(int(pid), signal.SIGTERM)
-    except (OSError, ProcessLookupError):
-        pass
+    group id is the leader's pid; on Windows the whole process tree)."""
+    kill_tree(pid)
 
 
 def run_process(argv: List[str], *, env: Dict[str, str], cwd: str, stdin: Optional[str],

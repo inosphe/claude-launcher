@@ -142,7 +142,6 @@ def run_probe(probe: Any, cwd: str, timeout: float = PROBE_TIMEOUT,
     (exit 124). Exit codes are returned as they are; what 0, 1 and others
     mean is the runtime's (doc 2.3, wait).
     """
-    import signal
     import subprocess
     import sys
 
@@ -162,11 +161,9 @@ def run_probe(probe: Any, cwd: str, timeout: float = PROBE_TIMEOUT,
     try:
         out, _ = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
+        cflow2_exec.kill_tree(proc.pid)
         with contextlib.suppress(OSError, ProcessLookupError):
-            if sys.platform != "win32":
-                os.killpg(proc.pid, signal.SIGKILL)
-            else:  # pragma: no cover - windows
-                proc.kill()
+            proc.kill()
         with contextlib.suppress(Exception):
             proc.communicate(timeout=5)
         return PROBE_TIMED_OUT, PROBE_TIMED_OUT_TEXT
