@@ -134,7 +134,7 @@ def pack(base: Optional[Path] = None) -> Optional[prompt_packs.Pack]:
     return prompt_packs.Pack(
         id=PACK_ID, title=title,
         description="This daemon's own prompt, given to every session unless unticked.",
-        body=body, raw=body, default=True, source=prompt_packs.DAEMON,
+        body=body, raw=body, source=prompt_packs.DAEMON,
     )
 
 

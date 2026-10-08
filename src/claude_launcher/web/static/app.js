@@ -10216,6 +10216,23 @@ let newPackPreview = null;     // {id, daemon, doc, error}: the text being shown
 // the form's directory has arrived: the arrival of another workspace's offer
 // starts the ticks over, which would wipe ticks written before it.
 let pendingSeedPacks = null;
+// Set when the form opens: the next offer to arrive forgets the operator's
+// unticks of the default packs (offer.default_packs).
+let newPackDefaultsPending = false;
+
+/* Settings' default packs: ticked on every opening of the form. */
+function newPackDefaults() {
+  return (newPackOffer && newPackOffer.default_packs) || [];
+}
+
+/* An opening of New session or Spawn child: the offer is read again (a list
+   just saved in Settings is the one that counts), and once it is here the
+   default packs start ticked whatever the last opening left. */
+function promptPackFormOpened() {
+  newPackDefaultsPending = true;
+  newPackOfferFor = null;
+  Promise.resolve(refreshPromptPackOffer()).catch(() => {});
+}
 
 /* Write a held seed's ticks, once the offer on hand is the one for the
    directory the form names: exactly the seeded packs on, every other offered
@@ -10224,7 +10241,8 @@ let pendingSeedPacks = null;
 function applyPendingPackSeed() {
   if (!pendingSeedPacks || !newPackOffer) return;
   if (newPackOfferFor !== newSessionCwd()) return;
-  const want = new Set(pendingSeedPacks);
+  // The default packs are on whatever the seed's session took.
+  const want = new Set([...pendingSeedPacks, ...newPackDefaults()]);
   pendingSeedPacks = null;
   const ids = [...(newPackOffer.packs || []), ...(newPackOffer.shipped || [])]
     .map((p) => p && p.id).filter(Boolean);
@@ -10260,6 +10278,10 @@ async function refreshPromptPackOffer() {
   // defaults again rather than carrying ids across.
   if (before !== after) { newPackTicks = new Map(); newPackRolesShown = new Set(); }
   newPackOffer = offer;
+  if (offer && newPackDefaultsPending) {
+    newPackDefaultsPending = false;
+    for (const id of newPackDefaults()) newPackTicks.delete(id);
+  }
   applyPendingPackSeed();
   renderPromptPackRow();
 }
@@ -10300,13 +10322,12 @@ function newRequiredPacks(f) {
   return out;
 }
 
-/* The operator's own tick, else the default -- which only ticks a pack the
-   workspace installed, so offering claunch's copies puts nothing new into a
-   session nobody touched the row for. */
+/* The operator's own tick in this opening, else whether Settings lists it
+   as a default pack. Installed or not makes no difference: one the workspace
+   has not installed goes in as claunch's copy, and the chip says so. */
 function newPackTicked(id) {
   if (newPackTicks.has(id)) return newPackTicks.get(id);
-  const installed = ((newPackOffer && newPackOffer.packs) || []).some((p) => p.id === id);
-  return installed && ((newPackOffer && newPackOffer.default_packs) || []).includes(id);
+  return newPackDefaults().includes(id);
 }
 
 function renderPromptPackRow() {
@@ -10356,6 +10377,11 @@ function renderPromptPackRow() {
     if (opts.locked) lock.title = `required by ${opts.locked.join(", ")}`;
     label.appendChild(lock);
     label.appendChild(el("span", "pack-chip-title", p.title || p.id));
+    if (opts.isDefault) {
+      const mark = el("span", "pack-chip-default", "default");
+      mark.title = "A default pack: ticked on every opening (Settings ▸ Install ▸ Default packs)";
+      label.appendChild(mark);
+    }
     const src = el("span", `pack-chip-badge src-${opts.source}`, opts.sourceLabel);
     src.title = opts.sourceTitle;
     label.appendChild(src);
@@ -10372,11 +10398,13 @@ function renderPromptPackRow() {
     return chip(p, {
       name: `prompt_pack_${p.id}`, value: p.id,
       checked: by ? true : newPackTicked(p.id), locked: by,
+      isDefault: newPackDefaults().includes(p.id),
       source: packaged ? "package" : "workspace",
-      sourceLabel: packaged ? "claunch" : "installed",
+      sourceLabel: packaged ? "claunch copy" : "workspace",
       sourceTitle: packaged
-        ? `claunch's copy, not installed in ${wsName}`
-        : `installed in ${wsName}`,
+        ? `claunch's copy: not installed in ${wsName}. Install it in ` +
+          "Settings ▸ Install to edit it for this workspace."
+        : `${wsName}'s copy, installed there`,
       onChange: (on) => { newPackTicks.set(p.id, on); renderPromptPackRow(); },
     });
   };
@@ -10439,8 +10467,12 @@ function renderPromptPackRow() {
     .filter((id, i, a) => a.indexOf(id) === i);
   const primary = newPrimaryRole(f);
   const parts = chosen.map((id) => {
-    const why = required[id] ? `role ${required[id].join(", ")}` : "ticked";
-    return `${id} (${why}${shippedIds.has(id) ? ", claunch's copy" : ""})`;
+    const why = required[id] ? `role ${required[id].join(", ")}`
+      : (newPackDefaults().includes(id) ? "default" : "ticked");
+    const copy = !shippedIds.has(id) ? `${wsName}'s copy`
+      : (offer && offer.workspace ? `claunch copy — not installed in ${wsName}`
+        : "claunch copy — no workspace here");
+    return `${id} (${why}, ${copy})`;
   });
   if (newDaemonPromptWanted()) parts.unshift("daemon prompt (this daemon's, every session)");
   const summary = el("div", "new-packs-summary");
@@ -18131,6 +18163,7 @@ async function openNewSession(mesh) {
   $("new-session")._sessionView = createSessionFormView("new", "page");
   refreshParentChoices();
   setSessionModalTab("new");
+  promptPackFormOpened();
   applySessionModalRecall($("new-session"));
   refreshScoreGoalDefault($("new-session"));
   pendingNewMesh = mesh || "";
@@ -24518,11 +24551,15 @@ function promptPackSettings(doc, ids) {
     if (!on && at >= 0) list.splice(at, 1);
   };
 
-  box.appendChild(el("h4", null, "Ticked by default"));
+  box.appendChild(el("h4", null, "Default packs"));
   box.appendChild(el("p", "wf-note",
-    "Packs the create form ticks before anyone touches it (when the " +
-    "workspace has them installed). \"common\" is the shipped default."));
+    "Packs New session and Spawn child tick every time they open. Unticking " +
+    "one in the form leaves it out of that one session only; take it off " +
+    "this list to stop ticking it. Each session gets its workspace's copy, " +
+    "or the copy claunch ships when the workspace has not installed it " +
+    `(the form says which). Restore defaults sets: ${(doc.shipped_default_packs || []).join(", ") || "none"}.`));
   const defaults = el("div", "new-check-list");
+  defaults.id = "prompt-pack-defaults";
   for (const id of ids) {
     const label = el("label", "check");
     label.appendChild(check(draft.default_packs.includes(id),
@@ -34686,6 +34723,7 @@ async function openSessionModal(opts = {}) {
   if (opts.mesh) pendingNewMesh = opts.mesh;
   refreshParentChoices();
   setSessionModalTab(tab);
+  promptPackFormOpened();
   if (opts.seed) applySessionModalSeed(f, opts.seed);
   else applySessionModalRecall(f);
   refreshScoreGoalDefault(f);

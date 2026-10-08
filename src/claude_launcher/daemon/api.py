@@ -2762,6 +2762,7 @@ def _prompt_packs_doc() -> dict:
         "role_packs": prompt_packs.role_packs(),
         "default_role_packs": prompt_packs.DEFAULT_ROLE_PACKS,
         "default_packs": prompt_packs.default_packs(),
+        "shipped_default_packs": prompt_packs.DEFAULT_PACKS,
         "roles": sorted(roleset.roles),
     }
 
@@ -2791,6 +2792,7 @@ async def h_prompt_packs_offer(request: web.Request) -> web.Response:
         "cwd": str(cwd),
         "workspace": owner.to_dict() if owner is not None else None,
         "packs": packs,
+        # Ticked on every opening of the form, installed or not.
         "default_packs": prompt_packs.default_packs(),
         "role_packs": prompt_packs.role_packs(),
         "shipped": [p.to_dict() for p in prompt_packs.catalog()],
@@ -2887,7 +2889,7 @@ async def h_prompt_packs_remove(request: web.Request) -> web.Response:
 
 
 async def h_prompt_packs_role_packs(request: web.Request) -> web.Response:
-    """Save the role → required packs mapping and/or the default-ticked list.
+    """Save the role → required packs mapping and/or the default packs.
 
     Each key is optional; ``null`` restores that setting's default.
     """

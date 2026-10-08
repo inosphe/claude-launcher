@@ -4744,6 +4744,8 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .pack-chip-badge.src-package { color: #d2a8ff; }
 .pack-chip-badge.src-workspace { color: #7ee787; }
 .pack-chip-badge.src-daemon { color: #e3b341; }
+/* A default pack (Settings ▸ Install ▸ Default packs): ticked on every opening. */
+.pack-chip-default { font-size: 10px; padding: 0 5px; border-radius: 999px; border: 1px solid #30363d; color: #9aa4b0; flex: none; white-space: nowrap; }
 /* #new-session: the form's own button rule (a green action button) is an
    id selector, so these need one too. */
 #new-session .pack-chip-view, #new-session .pack-chip-more, .pack-chip-view, .pack-chip-more {
