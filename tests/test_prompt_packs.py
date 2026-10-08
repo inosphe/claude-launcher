@@ -35,7 +35,7 @@ CHILD = (
 # --------------------------------------------------------------------------- #
 def test_the_catalog_ships_the_packs_and_common_is_the_default():
     ids = [p.id for p in prompt_packs.catalog()]
-    assert {"beads", "common", "unreal-operator"} <= set(ids)
+    assert {"beads", "child-agents", "common", "unreal-operator"} <= set(ids)
     # Every pack the default role mapping names ships, so a role's guidance
     # never depends on a workspace having installed it.
     for packs in prompt_packs.DEFAULT_ROLE_PACKS.values():
