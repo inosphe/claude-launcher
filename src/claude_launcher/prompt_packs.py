@@ -400,6 +400,7 @@ DEFAULT_ROLE_PACKS: Dict[str, List[str]] = {
     "analyst": ["role-analyst"],
     "free-role": ["role-free"],
     "leader": ["role-leader"],
+    "merger": ["role-merger"],
     "operator": ["role-operator"],
     "pm": ["role-pm"],
     "reviewer": ["role-reviewer"],

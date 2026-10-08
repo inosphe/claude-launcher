@@ -2675,7 +2675,7 @@ header (`title`, `description`). Shipped today:
 | `common` | A workspace's common working rules (scratch files, daemon restarts, reporting). Meant to be edited after install. |
 | `beads` | Driving the board through `claunch beads`, issue writing rules, and picking work with `bv --robot-*` (never the bare TUI). Agent Mail is not covered. |
 | `unreal-operator` | Handing Unreal editor-only work (assets, Blueprint wiring, Project Settings, PIE checks) to a person as `--assignee operator` issues. |
-| `role-<name>` | One per packaged mesh role (`role-leader`, `role-worker`, `role-reviewer`, `role-pm`, `role-operator`, `role-specialist`, `role-analyst`, `role-free`): the role's working rules. The role's stance keeps one or two sentences; the rest is here. |
+| `role-<name>` | One per packaged mesh role (`role-leader`, `role-worker`, `role-reviewer`, `role-pm`, `role-operator`, `role-specialist`, `role-analyst`, `role-free`, `role-merger`): the role's working rules. The role's stance keeps one or two sentences; the rest is here. |
 
 A new pack is a new `.md` file in that directory; nothing else lists them.
 
@@ -2742,6 +2742,13 @@ Two settings sit under the matrix, stored in `~/.claunch.yaml` under
   role to its `role-<name>` pack, and the `unreal` role (a domain subrole in
   the packaged role set, held beside a primary role:
   `--role worker --subrole unreal`) to `unreal-operator`.
+- The `merger` role is a capability subrole: a member holding it (in the
+  worker's mesh) may take other workers' landing requests on a landing queue
+  it drives (`daemon/landing_route.py`). A `leader` always counts as holding
+  it, and a member that joins as, spawns as, or is changed to `leader` is
+  given `merger` as a subrole that cannot be removed while it leads; the
+  create form shows it ticked and fixed, and the wizard summary prints
+  `leader (+merger)`.
 
 The create and spawn forms end the Prompt packs row with one line naming
 every pack the opening will carry and why, one chip each (default, ticked, or the role
