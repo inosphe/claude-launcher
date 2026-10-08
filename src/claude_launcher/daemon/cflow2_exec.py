@@ -271,7 +271,14 @@ def process_alive(pid: Optional[int], argv0: Optional[str] = None) -> Optional[b
         image = _win_image_name(pid)
         if not image:
             return None
-        return os.path.basename(image).lower() == os.path.basename(str(argv0)).lower()
+        # argv0 is the name the harness was started by ("claude", "python"), the
+        # image carries the extension ("claude.exe"): compare without it. A
+        # different image may still be the process (a .cmd or script shim
+        # that hands over to another program), so that is "cannot identify".
+        def stem(path: str) -> str:
+            return os.path.splitext(os.path.basename(path))[0].lower()
+
+        return True if stem(image) == stem(str(argv0)) else None
     deadline = time.monotonic() + CMDLINE_SETTLE
     while True:
         try:
