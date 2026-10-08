@@ -312,6 +312,66 @@ def _spy_openings():
     return seen, lambda: setattr(harness_mod, "build_command", real)
 
 
+def test_bulk_install_preserves_edits_updates_stale_and_reports_errors(tmp_path, monkeypatch):
+    ws = tmp_path / "proj"
+    ws.mkdir()
+    prompt_packs.install(ws, "common")
+    prompt_packs.install(ws, "beads")
+    directory = prompt_packs.install_dir(ws)
+    (directory / "common.md").write_text("my rules", encoding="utf-8")
+    (directory / "house.md").write_text("local rules", encoding="utf-8")
+    (directory / "beads.md").write_text("old rules", encoding="utf-8")
+    record = prompt_packs._record(ws)
+    record["beads"] = prompt_packs._sha("old rules")
+    prompt_packs._write_record(ws, record)
+    real_install = prompt_packs.install
+
+    def fail_one(root, pack_id, **kwargs):
+        if pack_id == "role-worker":
+            raise PermissionError("read only")
+        return real_install(root, pack_id, **kwargs)
+
+    monkeypatch.setattr(prompt_packs, "install", fail_one)
+    results = {r["id"]: r for r in prompt_packs.install_all(ws)}
+    assert results["common"] == {"id": "common", "was": "edited", "changed": False}
+    assert results["beads"]["was"] == "stale"
+    assert results["beads"]["changed"] is True
+    assert results["role-worker"]["error"] == "read only"
+    assert results["role-leader"]["changed"] is True
+    assert (directory / "common.md").read_text() == "my rules"
+    assert (directory / "house.md").read_text() == "local rules"
+    monkeypatch.setattr(prompt_packs, "install", real_install)
+    retry = prompt_packs.install_all(ws)
+    assert [r["id"] for r in retry if r["changed"]] == ["role-worker"]
+    assert not any(r["changed"] for r in prompt_packs.install_all(ws))
+
+
+def test_bulk_install_route_requires_registered_workspace(home, tmp_path):
+    ws = tmp_path / "proj"
+    ws.mkdir()
+    workspaces.add(str(ws), "proj")
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        client = await _serve(mgr, None)
+        try:
+            for body in ({}, {"workspace": "unknown"}):
+                response = await client.post("/api/prompt-packs/install-all", headers=BEARER, json=body)
+                assert response.status == 400
+            assert not prompt_packs.install_dir(ws).exists()
+            response = await client.post("/api/prompt-packs/install-all", headers=BEARER,
+                                         json={"workspace": "proj"})
+            assert response.status == 200
+            doc = await response.json()
+            assert len(doc["batch"]) == len(prompt_packs.catalog())
+            assert all(r["changed"] for r in doc["batch"])
+            assert all(r["status"] == "current" for r in doc["workspaces"][0]["packs"])
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_settings_routes_install_remove_and_save_the_mapping(home, tmp_path):
     ws = tmp_path / "proj"
     ws.mkdir()

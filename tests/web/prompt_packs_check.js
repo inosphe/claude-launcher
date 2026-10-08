@@ -515,13 +515,26 @@ const DOC = {
 check("buttons follow the status of each copy", () => {
   card.doc = DOC;
   const c = card.card();
-  const table = all(c, (n) => n.className === "md-table prompt-pack-table")[0];
-  const rows = table.children.slice(1);
-  const labels = (tr) => tr.children.slice(1).map((td) =>
+  const rows = all(c, (n) => n.className === "prompt-pack-grid");
+  const labels = (tr) => tr.children.map((td) =>
     all(td, (n) => n.tag === "button").map((b) => b.textContent).join("+"));
   // Columns: shipped beads, common, then the local pack "house".
   assert.deepEqual(labels(rows[0]), ["Install", "Overwrite+Remove", "Remove"]);
-  assert.deepEqual(labels(rows[1]), ["Update+Remove", "Remove", ""]);
+  assert.deepEqual(labels(rows[1]), ["Update+Remove", "Remove"]);
+});
+
+check("bulk installation targets one workspace and disables when nothing is pending", async () => {
+  card.doc = DOC;
+  const bulk = all(card.card(), (n) => n.className === "wf-btn prompt-pack-bulk");
+  assert.deepEqual(bulk.map((b) => b.textContent), ["Install all (1)", "Install all (1)"]);
+  await bulk[0].handlers.click[0]();
+  assert.deepEqual(calls.pop(), { url: "/api/prompt-packs/install-all", body: { workspace: "proj" } });
+  card.doc = { ...DOC, workspaces: [{ name: "done", packs: [
+    { id: "beads", status: "current" }, { id: "common", status: "edited" },
+  ] }] };
+  const done = all(card.card(), (n) => n.className === "wf-btn prompt-pack-bulk")[0];
+  assert.equal(done.disabled, true);
+  assert.equal(done.textContent, "Up to date");
 });
 
 check("force only after a confirm, and a declined confirm sends nothing", async () => {
