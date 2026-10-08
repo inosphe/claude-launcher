@@ -46,6 +46,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 from .. import harnesses as harness_registry
+from .. import auto_compact as auto_compact_mod
 from .. import lineage, providers
 from .. import profile as profile_mod
 from . import codex_sessions
@@ -90,6 +91,9 @@ _located: Dict[Tuple[str, str, str, str], Tuple[Optional[Path], float]] = {}
 #: tick on each row's context gauge — the point the conversation compacts at,
 #: which is what "how full" is actually measured against.
 COMPACT_WINDOW_ENV = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
+
+#: Claude's own switches for compaction (see :mod:`claude_launcher.auto_compact`).
+auto_compact_off = auto_compact_mod.auto_compact_off
 
 #: How long a resolved window is trusted before the profile chain and the
 #: provider registry are consulted again. Resolution reads the config store,
@@ -556,6 +560,11 @@ def compact_window_of(sdef) -> Optional[int]:
     base env was, and a wrong extra leg must not turn into a wrong number.
     """
     own = getattr(sdef, "env", None) or {}
+    if (getattr(sdef, "harness", None) == CLAUDE_HARNESS
+            and auto_compact_off(own)):
+        # Nothing compacts this session automatically, so there is no
+        # threshold to draw; the gauge falls back to the model's window.
+        return None
     if COMPACT_WINDOW_ENV in own:
         return _window_value(own[COMPACT_WINDOW_ENV])
     key = (str(getattr(sdef, "profile", "") or ""),

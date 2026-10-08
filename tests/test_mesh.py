@@ -2190,6 +2190,11 @@ def test_the_board_answer_reaches_the_api_in_its_own_spelling(monkeypatch):
     mesh_mcp._spawn({"task": "go", "no_issue": True, "no_issue_auto": True})
     assert sent["body"]["beads"] == "none-auto"
 
+    # an existing issue not named yet (claunch-5p2j4) is a third value of
+    # the same key, so it cannot ride beside a named issue either
+    mesh_mcp._spawn({"task": "go", "issue_pending": True})
+    assert sent["body"]["beads"] == "existing-pending" and "issue" not in sent["body"]
+
     # saying nothing must send nothing: the daemon reads that as "mint one"
     mesh_mcp._spawn({"task": "go"})
     assert "beads" not in sent["body"] and "issue" not in sent["body"]

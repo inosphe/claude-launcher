@@ -125,6 +125,7 @@ function sessQueued() { return null; }
 function sessBackpressure() { return null; }
 function sessReborrow() { return el("div", "sess-reborrow"); }
 function sessPerms() { return el("div", "sess-perms"); }
+function sessCompact() { return el("div", "sess-compact"); }
 function sessMigrate() { return el("div", "sess-migrate"); }
 function sessNote() { return el("div", "sess-note"); }
 function sessFlags() { return el("div", "sess-flags"); }

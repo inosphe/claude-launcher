@@ -76,6 +76,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from . import (
+    auto_compact as auto_compact_mod,
     harness_policy,
     harnesses,
     lineage,
@@ -512,6 +513,22 @@ def check(
                 child["borrow"] = None
             if not request.get("null_token"):
                 child["null_token"] = False
+
+    if request.get("auto_compact") is not None:
+        # Ungated on purpose, like null_token: when the child's conversation
+        # compacts grants it no credential, tool or argv of its own — it is
+        # two named keys of claude's env (see claude_launcher.auto_compact),
+        # applied over the env the child inherited. After the profile
+        # re-resolution above, because only a claude child reads them.
+        enabled, window = auto_compact_mod.parse(request["auto_compact"])
+        if child.get("harness") != harnesses.CLAUDE_HARNESS:
+            raise ValueError(
+                "auto_compact is claude's switch; this child runs "
+                f"{child.get('harness')!r}"
+            )
+        child["env"] = auto_compact_mod.with_auto_compact(
+            child["env"], enabled=enabled, window=window
+        )
 
     _file_under_project(policy, child, request, parent=parent, warnings=warnings)
 

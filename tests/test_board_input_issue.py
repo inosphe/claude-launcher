@@ -152,6 +152,7 @@ def test_an_input_with_no_board_answer_is_adopted_not_minted(proj):  # (c)
     ({"issue": "claunch-held"}, "adopts 'claunch-held'"),
     ({"beads": False}, "asks for none"),
     ({"beads": "none-auto"}, "asks for none"),
+    ({"beads": "existing-pending"}, "not picked yet"),
     ({"issue_text": "write a new one"}, "issue_text"),
     ({"task": "do it\nissue: claunch-held"}, "names issue 'claunch-held'"),
 ])
@@ -171,7 +172,7 @@ def test_the_same_issue_twice_is_not_a_contradiction(proj):
     assert _run_inputs(proj)["issue"] == "claunch-typed"
 
 
-@pytest.mark.parametrize("none", [False, "none-auto"])
+@pytest.mark.parametrize("none", [False, "none-auto", "existing-pending"])
 def test_no_issue_leaves_the_input_empty(proj, none):     # (e)
     status, doc, _, _ = _create(proj, {"task": "do it", "beads": none, **V2})
     assert status == 201, doc

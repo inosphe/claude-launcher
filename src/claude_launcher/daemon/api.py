@@ -43,6 +43,7 @@ from .. import (
     usage,
     profile_usage,
 )
+from .. import auto_compact as auto_compact_mod
 from .. import install
 from .. import install_plan
 from .. import session_commits
@@ -831,6 +832,7 @@ def build_app(
     r.add_post(
         "/api/sessions/{name}/skip-permissions", h_session_skip_permissions
     )
+    r.add_post("/api/sessions/{name}/auto-compact", h_session_auto_compact)
     r.add_post("/api/sessions/{name}/keys", h_session_keys)
     r.add_post("/api/sessions/{name}/paste-image", h_session_paste_image)
     r.add_post("/api/sessions/{name}/deliver", h_session_deliver)
@@ -1475,6 +1477,14 @@ async def h_window_acquire(request: web.Request) -> web.Response:
     """Ask for the window. ``wait`` seconds > 0 queues and long-polls."""
     body = await _json_body(request)
     cls = body.get("class") or body.get("cls") or ""
+
+    def gone() -> bool:
+        # aiohttp keeps running a handler whose client disconnected, so the
+        # wait asks the transport instead of expecting a cancellation
+        # (claunch-zawnr).
+        transport = request.transport
+        return transport is None or transport.is_closing()
+
     result = await request.app["window"].acquire(
         cls,
         session=body.get("session"),
@@ -1483,6 +1493,9 @@ async def h_window_acquire(request: web.Request) -> web.Response:
         wait=float(body.get("wait") or 0),
         workers=int(body.get("workers") or 0),
         force=bool(body.get("force")),
+        # A pid is only this machine's to check from a loopback caller.
+        bound=bool(body.get("bound")) and request.remote in ("127.0.0.1", "::1"),
+        gone=gone,
     )
     if result.get("error"):
         return json_response(result, status=400)
@@ -7082,7 +7095,8 @@ async def _onboard_and_launch(
         # is what it would do regardless. NONE_AUTO is always added, because
         # there the block IS the instruction -- go and take work off the
         # board -- and a session that never receives it does the opposite of
-        # what was asked.
+        # what was asked. ISSUE_PENDING likewise: it tells the session that an
+        # issue is coming and how to record it (claunch-5p2j4).
         none = beads_mod.none_mode(body)
         if unsettled:
             # The request named an issue and the board could not be asked:
@@ -7097,7 +7111,8 @@ async def _onboard_and_launch(
                   f"session but is not linked: {unsettled['why']}. Link it "
                   "once the board is reachable, or ask whoever started you.",
             )
-        elif none and (plan.wanted or none == beads_mod.NONE_AUTO):
+        elif none and (plan.wanted
+                       or none in (beads_mod.NONE_AUTO, beads_mod.ISSUE_PENDING)):
             report["beads"] = {"issue": None, "mode": none}
             plan = replace(
                 plan,
@@ -8782,6 +8797,28 @@ async def h_session_skip_permissions(request: web.Request) -> web.Response:
             400, "pass 'skip': true to stop asking, false to ask again"
         )
     session = await manager.skip_permissions(request.match_info["name"], skip)
+    return json_response(session.info())
+
+
+async def h_session_auto_compact(request: web.Request) -> web.Response:
+    """Restart a claude session with auto-compact on or off, and its
+    threshold pinned or returned to the profile's.
+
+    Body: ``{"enabled": true|false, "window": <tokens>|null}``. ``window``
+    omitted or null drops the session's own pin. The change is
+    :meth:`SessionManager.auto_compact` — an edit of the definition's env
+    and a relaunch, so the conversation, directory and auth are untouched.
+    Operator-only, like skip-permissions.
+    """
+    manager: SessionManager = request.app["manager"]
+    body = await _json_body(request)
+    try:
+        enabled, window = auto_compact_mod.parse(body)
+    except ValueError as exc:
+        return json_error(400, str(exc))
+    session = await manager.auto_compact(
+        request.match_info["name"], enabled, window
+    )
     return json_response(session.info())
 
 

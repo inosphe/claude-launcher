@@ -7927,6 +7927,7 @@ async function refreshCflow() {
     applyRailQuiet();    // one of its two flags is read off this very cache
   }
   renderTermTimer();   // the attached session's own header chip
+  renderTermCflow();   // and the answer strip over its terminal
   if (repaintRail && currentPage === "home") renderHome();
   // Everything above is what feeds the rail and the header: badges on rows,
   // the attached session's countdown, the home card's count. What follows
@@ -10477,6 +10478,100 @@ function renderNewClaudeRuntime(f, harnessName, capabilities, parent = null) {
       : "";
     hint.textContent = `permission skipping ${mode}${source}`;
   }
+  renderNewClaudeCompact(f, harnessName, parent);
+}
+
+/* Claude's auto-compact, as the two env keys claude reads at launch:
+   DISABLE_AUTO_COMPACT (the switch) and CLAUDE_CODE_AUTO_COMPACT_WINDOW (the
+   threshold). Both are the session's own env, the last layer of the spawn
+   env, so they override the profile's auto_compact_at. */
+const AUTO_COMPACT_OFF_ENV = "DISABLE_AUTO_COMPACT";
+const COMPACT_OFF_ENV = "DISABLE_COMPACT";
+const COMPACT_WINDOW_ENV = "CLAUDE_CODE_AUTO_COMPACT_WINDOW";
+
+/* Whether an env turns claude's automatic compaction off — the values claude
+   reads as a set boolean switch. */
+function envAutoCompactOff(env) {
+  return [AUTO_COMPACT_OFF_ENV, COMPACT_OFF_ENV].some((key) =>
+    ["1", "true", "yes", "on"].includes(
+      String((env || {})[key] || "").trim().toLowerCase()));
+}
+
+/* The session-pinned threshold of an env, or 0 when it pins none. */
+function envCompactWindow(env) {
+  const n = Number((env || {})[COMPACT_WINDOW_ENV]);
+  return Number.isInteger(n) && n > 0 ? n : 0;
+}
+
+/* The threshold typed into the form, or 0 for "the profile's". */
+function newCompactWindow(f) {
+  if (!f.auto_compact_window) return 0;
+  const n = Number(f.auto_compact_window.value);
+  return Number.isInteger(n) && n > 0 ? n : 0;
+}
+
+/* The env a standalone Create sends for the two rows: nothing while they
+   still say "on, profile's threshold", so the default session's definition
+   is unchanged by this panel. */
+function newClaudeCompactEnv(f) {
+  const env = {};
+  if (f.auto_compact && !f.auto_compact.checked) {
+    env[AUTO_COMPACT_OFF_ENV] = "1";
+    return env;   // a threshold nothing compacts at is not an answer
+  }
+  const window = newCompactWindow(f);
+  if (window) env[COMPACT_WINDOW_ENV] = String(window);
+  return env;
+}
+
+function renderNewClaudeCompact(f, harnessName, parent) {
+  if (!f.auto_compact || !f.auto_compact_window) return;
+  if (parent) {
+    // A child inherits its parent's env (spawn.py), so the rows start on
+    // that answer; spawnChildFields sends them only once they differ.
+    const key = `child:${parent.name}:${harnessName}`;
+    if (f._claudeCompactFor !== key) {
+      const env = harnessName === parent.harness ? (parent.env || {}) : {};
+      f.auto_compact.checked = !envAutoCompactOff(env);
+      const window = envCompactWindow(env);
+      f.auto_compact_window.value = window ? String(window) : "";
+      f._claudeCompactFor = key;
+      f._claudeCompactOriginal = {
+        enabled: f.auto_compact.checked, window,
+      };
+    }
+  } else if (f._claudeCompactFor) {
+    // Leaving the spawn mode puts the standalone defaults back rather than
+    // keeping the last parent's answer as this session's.
+    f.auto_compact.checked = true;
+    f.auto_compact_window.value = "";
+    f._claudeCompactFor = null;
+  }
+  f.auto_compact_window.disabled =
+    f.auto_compact.disabled || !f.auto_compact.checked;
+  const hint = $("new-claude-compact-hint");
+  if (!hint) return;
+  const window = newCompactWindow(f);
+  const text = !f.auto_compact.checked
+    ? `auto-compact disabled (${AUTO_COMPACT_OFF_ENV}=1) — /compact still works`
+    : window
+      ? `auto-compact at ${window} tokens (${COMPACT_WINDOW_ENV})`
+      : "auto-compact at the profile's auto_compact_at";
+  hint.textContent = text + (parent && !newClaudeCompactOverride(f)
+    ? ` · inherited from ${parent.name}` : "");
+}
+
+/* A child's auto-compact answer as the spawn's `auto_compact` field, or
+   undefined while the rows still say what the parent's env says — the same
+   rule as the model row: an untouched row inherits. */
+function newClaudeCompactOverride(f) {
+  const original = f._claudeCompactOriginal;
+  if (!original || !f.auto_compact || f.auto_compact.disabled) return undefined;
+  const enabled = !!f.auto_compact.checked;
+  const window = enabled ? newCompactWindow(f) : 0;
+  if (enabled === original.enabled &&
+      (!enabled || window === original.window)) return undefined;
+  return { enabled, window: window || null };
 }
 
 /* --fork-session is claude's own "use with --resume or --continue": with
@@ -10584,6 +10679,13 @@ function renderRuntimeSummary() {
   if (claudePanel && !claudePanel.classList.contains("hidden") &&
       speaks("skip_permissions") && f.skip_permissions.checked) {
     bits.push("Claude permissions skipped");
+  }
+  if (claudePanel && !claudePanel.classList.contains("hidden") &&
+      speaks("auto_compact")) {
+    if (!f.auto_compact.checked) bits.push("Claude auto-compact off");
+    else if (newCompactWindow(f)) {
+      bits.push(`auto-compact at ${newCompactWindow(f)}`);
+    }
   }
   const codexPanel = $("new-codex-runtime");
   if (codexPanel && !codexPanel.classList.contains("hidden") &&
@@ -10747,7 +10849,8 @@ $("new-session").addEventListener("input", (event) => {
    wrong, and lies to the person who set 'allow_profile: true'. */
 const SPAWN_INHERITS = ["profile", "harness", "model", "effort", "borrow", "null_token",
                         "project", "cwd",
-                        "args", "resume", "fork", "skip_permissions", "codex_yolo",
+                        "args", "resume", "fork", "skip_permissions",
+                        "auto_compact", "auto_compact_window", "codex_yolo",
                         "codex_sandbox"];
 
 /* Of those, the rows that no longer live in the fold. They are still
@@ -10802,6 +10905,11 @@ function spawnUnlocked(report) {
     // the policy-controlled escape hatch. Codex always emits an explicit
     // mode group and therefore has no empty-override ambiguity.
     skip_permissions: false,
+    // Ungated, like null_token: when a child's conversation compacts grants
+    // it nothing. The rows start on the parent's answer (its env is copied)
+    // and travel as `auto_compact` only once they differ from it.
+    auto_compact: true,
+    auto_compact_window: true,
     codex_yolo: may.includes("args"),
     codex_sandbox: may.includes("args"),
     // Not the policy's: a spawn has no --resume of its own, and the one
@@ -10979,7 +11087,8 @@ function syncSpawnMode() {
       return panel && !panel.classList.contains("hidden");
     };
     const runtimeVisible = (key) =>
-      key === "skip_permissions" ? panelVisible("new-claude-runtime") :
+      (key === "skip_permissions" || key === "auto_compact" ||
+       key === "auto_compact_window") ? panelVisible("new-claude-runtime") :
       (key === "codex_yolo" || key === "codex_sandbox")
         ? panelVisible("new-codex-runtime") : true;
     const shut = SPAWN_INHERITS.filter(
@@ -11192,6 +11301,14 @@ function spawnChildFields(f, body) {
   } else if (typed.length) {
     body.args = typed;
   }
+  // Read apart from claudeOpen: that one is keyed on the permission row,
+  // which a spawn keeps the parent's, while these rows are always the
+  // child's to answer.
+  if (harnessName === "claude" && claudePanel &&
+      !claudePanel.classList.contains("hidden")) {
+    const compact = newClaudeCompactOverride(f);
+    if (compact) body.auto_compact = compact;
+  }
   // The tool ticks travel only when they differ from what the child would
   // inherit anyway — the same rule as model above — and only from an OPEN
   // panel: a locked row's ticks are the parent's, not an answer.
@@ -11380,6 +11497,8 @@ $("new-session").addEventListener("submit", async (e) => {
       const permissionArgs = (capabilities.skip_permissions_args || []).map(String);
       body.args = withoutArgGroups(body.args, [permissionArgs]);
       if (f.skip_permissions.checked) body.args.push(...permissionArgs);
+      const compactEnv = newClaudeCompactEnv(f);
+      if (Object.keys(compactEnv).length) body.env = compactEnv;
     } else if (harnessName === "pi") {
       // Absent = the profile default, so the ticks travel only once they
       // differ from it — and `[]` (no builtin tools) travels as itself.
@@ -11496,11 +11615,17 @@ $("new-session").addEventListener("submit", async (e) => {
   // that has never heard of this field still wants. The two "no issue" rows
   // are one key with two values: `false` is the older spelling and keeps
   // meaning "no issue, and do not go looking", "none-auto" is the opposite
-  // instruction about the same empty board.
+  // instruction about the same empty board. "existing" with nothing picked
+  // is a third answer, "existing-pending": no issue is minted and the
+  // session waits to be told which issue it is (claunch-5p2j4) — sending
+  // nothing there read as "new" and minted one from the task.
   const beads = f.beads.value;
   if (beads === "none") body.beads = false;
   else if (beads === "none-auto") body.beads = "none-auto";
-  else if (beads === "existing" && f.issue.value) body.issue = f.issue.value;
+  else if (beads === "existing") {
+    if (f.issue.value) body.issue = f.issue.value;
+    else body.beads = "existing-pending";
+  }
   // Only under the answer it belongs to: the box keeps its text while the
   // radios are being tried out, and sending it alongside "existing" or
   // "none" is a contradiction the daemon refuses (beads.check_request).
@@ -12385,6 +12510,10 @@ function setStatusBadge(status) {
   // which session it is now about — a whole second of the last session's
   // clock would otherwise sit on this one's name.
   renderTermTimer();
+  // The answer strip speaks for the same session, for the same reason.
+  // Guarded like the other optional painters here: the header harnesses
+  // slice this function without it.
+  if (typeof renderTermCflow === "function") renderTermCflow();
   syncMobileBars();  // the mobile bars mirror this header
 }
 
@@ -14415,6 +14544,163 @@ async function refreshTermQueued() {
   if (name !== currentName || currentPage !== "terminal") return;
   renderTermQueued(q);
   renderHoldChip(q);
+}
+
+/* ---- cflow answer strip (#term-cflow) ----
+   The attached session's run is stopped on something only a person settles
+   (sessCflowGated: an approval, a user branch, a goto request, an ask that
+   reached nobody). The rail line says so in amber, but the press that
+   settles it lived on the run page, a navigation away from the terminal the
+   reader is watching. This strip puts the same presses on top of that
+   terminal: one line with the step, the question, and a button per answer.
+
+   Every press is the run page's own — the same endpoint, the same body, the
+   same confirm — so the two places cannot disagree about what a press does.
+
+   The strip shares a column with the terminal, so its appearing, going and
+   changing shape all change the grid the session draws into. It is rebuilt
+   and the terminal refitted only when what it would draw changes (`sig`);
+   the 2s poll that repaints the same gate must not, or the buttons would be
+   replaced under the pointer and the session resized for nothing. */
+function termCflowAnswers(r) {
+  const body = { cwd: r.cwd, scope: r.scope };
+  const pick = (o, ask) => ({
+    label: o.name || String(o),
+    title: o.description || "",
+    path: "/api/cflow/select",
+    body: { ...body, option: o.name || String(o) },
+    ask,
+  });
+  if (answerFellToUs(r)) {
+    const opts = answerBranchOptions(r);
+    if (opts !== null) {
+      return opts.map((o) => pick(o,
+        `Answer '${r.step_id}' with '${o.name || o}' yourself?\n\n` +
+        "It was put to nobody, so nothing else will."));
+    }
+    return [{
+      label: "Approve", cls: "approve", path: "/api/cflow/approve", body,
+      ask: `Answer '${r.step_id}' yourself?\n\nIt was put to nobody, so ` +
+        "nothing else will.",
+    }];
+  }
+  if (r.status === "waiting_approval") {
+    const isLoop = r.reason === "loop_limit";
+    return [{
+      label: isLoop ? "Extend loop limit"
+        : r.reason === "declined" ? "Override the refusal" : "Approve",
+      cls: "approve", path: "/api/cflow/approve", body,
+      ask: isLoop ? `Extend the loop limit at step '${r.step_id}'?`
+        : `Approve the gate at step '${r.step_id}'?`,
+    }];
+  }
+  if (r.status === "waiting_selection") {
+    const proposed = (r.proposal || {}).option;
+    return (r.options || []).map((o) => {
+      const a = pick(o, `Select '${o.name}'?`);
+      if (o.name === proposed) {
+        a.cls = "proposed";
+        a.title = `the agent proposes this${a.title ? " — " + a.title : ""}`;
+      }
+      return a;
+    });
+  }
+  if (r.status === "waiting_goto") {
+    const gr = r.goto_request || {};
+    return [
+      {
+        label: `Move to '${gr.step}'`, cls: "approve",
+        path: "/api/cflow/goto/resolve",
+        body: { ...body, decision: "approve" },
+        ask: `Move the run to '${gr.step}', as the agent asked?` +
+          (gr.step === "end" ? " (this finishes the run)" : ""),
+      },
+      {
+        label: "Refuse", title:
+          "the run stays where it is; the agent is told and continues",
+        path: "/api/cflow/goto/resolve",
+        body: { ...body, decision: "deny" },
+        reason: "Refuse the move? A reason is optional but is what the agent reads:",
+      },
+    ];
+  }
+  return [];
+}
+
+/* The one line of question the strip carries: what the run page puts in
+   its gate paragraph, flattened to a line (the full text is the hover). */
+function termCflowQuestion(r) {
+  let q;
+  if (r.status === "waiting_goto") {
+    const gr = r.goto_request || {};
+    q = `wants to move from '${gr.from || r.step_id}' to '${gr.step}'` +
+      (gr.reason ? ` — ${gr.reason}` : "");
+  } else if (r.status === "waiting_answer") {
+    q = (r.ask && r.ask.prompt) || r.prompt || "waiting for a decision";
+  } else if (r.status === "waiting_approval") {
+    q = r.reason === "declined" && r.declined
+      ? `${r.declined.by} declined: ${r.declined.reason || "no reason given"}`
+      : r.gate || "waiting for approval";
+  } else {
+    q = r.prompt || "decision point";
+  }
+  return String(q).replace(/\s+/g, " ").trim();
+}
+
+function renderTermCflow() {
+  const box = $("term-cflow");
+  if (!box) return;
+  const r = currentPage === "terminal" && currentName
+    ? sessCflowRun(currentName) : null;
+  const show = !!r && sessCflowGated(r);
+  const answers = show ? termCflowAnswers(r) : [];
+  const question = show ? termCflowQuestion(r) : "";
+  const sig = show
+    ? JSON.stringify([currentName, r.run, r.status, r.step_id, r.visit,
+      question, answers.map((a) => [a.label, a.cls, a.title])])
+    : "hidden";
+  // Never drawn yet reads as hidden: the page starts with the strip hidden,
+  // and a first paint with nothing to show has no shape to change.
+  if ((box.dataset.sig || "hidden") === sig) return;
+  box.dataset.sig = sig;
+  box.innerHTML = "";
+  if (!show) {
+    box.classList.add("hidden");
+    refitSoon(60);
+    return;
+  }
+  const head = el("a", "tcf-head");
+  head.href = "#/wf/" + encodeURIComponent(`${r.scope || "default"}|${r.cwd}`);
+  head.title = "open this run's page";
+  head.appendChild(el("span", "tcf-mark", "◆"));
+  head.appendChild(el("span", "tcf-what",
+    `${r.workflow || "cflow"} · ${sessCflowGateStep(r) || "?"} — ` +
+    sessCflowLabel(r)));
+  box.appendChild(head);
+  const qn = el("span", "tcf-question", question);
+  qn.title = question;
+  box.appendChild(qn);
+  const btns = el("span", "tcf-buttons");
+  for (const a of answers) {
+    const b = el("button", "tcf-btn" + (a.cls ? " " + a.cls : ""), a.label);
+    b.type = "button";
+    if (a.title) b.title = a.title;
+    b.addEventListener("click", () => {
+      let payload = a.body;
+      if (a.reason) {
+        const why = prompt(a.reason, "");
+        if (why === null) return; // cancelled the dialog, not the refusal
+        payload = { ...payload, reason: why };
+      } else if (a.ask && !confirm(a.ask)) {
+        return;
+      }
+      cflowAction(a.path, payload);
+    });
+    btns.appendChild(b);
+  }
+  box.appendChild(btns);
+  box.classList.remove("hidden");
+  refitSoon(60);
 }
 
 /* ---- delivery chip (#term-hold) ----
@@ -16611,6 +16897,8 @@ function showView(name) {
   // it anyway, but a page swap should not flash a stale backlog first).
   if (!showTerm) renderTermQueued(null);
   else refreshTermQueued();
+  // The cflow answer strip is drawn from the cache in hand: no request.
+  renderTermCflow();
   for (const [page, id] of Object.entries(VIEWS)) {
     $(id).classList.toggle("hidden", name !== page);
   }
@@ -28604,6 +28892,7 @@ let sessJoinBox = null;   // and the mesh-join row, which holds a typed handle
 let sessMigrateBox = null; // and the migrate picker — same reason again
 let sessReborrowBox = null; // and the borrow picker — same reason again
 let sessPermsBox = null;    // and the permissions toggle — same reason again
+let sessCompactBox = null;  // and the auto-compact form — it holds a typed threshold
 let sessNoteBox = null;     // and the note editor — it holds a half-typed note
 let sessRunFold = null;   // reused across polls too: it holds open/shut
 let sessRunTimer = null;  // the fold's own poll, alive only while it is open
@@ -28626,6 +28915,7 @@ function dropDetail() {
   sessMigrateBox = null;
   sessReborrowBox = null;
   sessPermsBox = null;
+  sessCompactBox = null;
   sessQuickJobBox = null;
   sessKidsBox = null;
   sessBeadsBox = null;
@@ -28663,6 +28953,7 @@ function repointDetail(name) {
   sessMigrateBox = null;
   sessReborrowBox = null;
   sessPermsBox = null;
+  sessCompactBox = null;
   sessQuickJobBox = null;
   sessKidsBox = null;
   sessBeadsBox = null;
@@ -29471,6 +29762,7 @@ function renderSession(data) {
   if (show("settings")) {
     view.appendChild(sessReborrow(data));
     view.appendChild(sessPerms(data));
+    view.appendChild(sessCompact(data));
     view.appendChild(sessMigrate(data));
   }
   keepScroll();
@@ -30343,6 +30635,140 @@ function sessPerms(data) {
     );
     // The restart relaunched a fresh PTY under the same name; a terminal
     // attached to the old one is watching a socket that just died.
+    if (currentName === name) {
+      detach();
+      await refreshSessions();
+      attach(name);
+    } else {
+      refreshSessions();
+    }
+  });
+
+  return box;
+}
+
+/* ---- restart this session with auto-compact switched or re-pinned ----
+   Claude reads both answers from its environment at launch, so changing
+   either is the same kind of restart as the permissions toggle above: the
+   daemon writes DISABLE_AUTO_COMPACT / CLAUDE_CODE_AUTO_COMPACT_WINDOW into
+   the definition's env and relaunches — same name, same conversation. An
+   empty threshold drops the session's pin and returns it to the profile's
+   auto_compact_at. Claude only: the switch is claude's. */
+function sessCompact(data) {
+  const s = data.session || {};
+  const box = el("div", "sess-perms sess-compact");
+  box.appendChild(el("h3", null, "Auto compact"));
+  if (s.harness !== "claude") {
+    sessCompactBox = null;
+    box.appendChild(el(
+      "p", "wf-note",
+      `auto-compact is claude's switch; this session runs ${s.harness || "?"}`
+    ));
+    return box;
+  }
+
+  const env = s.env || {};
+  const off = envAutoCompactOff(env);
+  const pinned = envCompactWindow(env);
+  // Rebuilt only when the session's answer changes — a threshold being typed
+  // must survive the 2s poll; a successful restart changes the key.
+  const key = `${s.name}|${off ? 1 : 0}|${pinned}`;
+  if (sessCompactBox && sessCompactBox.dataset.slot === key) {
+    box.appendChild(sessCompactBox);   // appending moves the live node here
+    return box;
+  }
+  const form = el("div", "sess-perms-form sess-compact-form");
+  form.dataset.slot = key;
+  sessCompactBox = form;
+  box.appendChild(form);
+
+  const c = s.context;
+  const effective = c && Number.isFinite(c.compact_window)
+    && c.compact_window > 0 ? c.compact_window : 0;
+  form.appendChild(el(
+    "p", "wf-note",
+    (off
+      ? `auto-compact is off (${AUTO_COMPACT_OFF_ENV}=1) — /compact still works`
+      : pinned
+        ? `compacts at ${pinned} tokens, pinned on this session ` +
+          `(${COMPACT_WINDOW_ENV})`
+        : "compacts at the profile's auto_compact_at" +
+          (effective ? ` (${effective} tokens)` : "")) +
+    ". Applying a change stops the session and relaunches it — " +
+    "same name, same conversation"
+  ));
+
+  const toggle = document.createElement("input");
+  toggle.type = "checkbox";
+  toggle.checked = !off;
+  const toggleLabel = el("label", "check");
+  toggleLabel.append(toggle, el("span", null, " compact automatically"));
+  const windowInput = document.createElement("input");
+  windowInput.type = "number";
+  windowInput.min = "1";
+  windowInput.step = "1000";
+  windowInput.inputMode = "numeric";
+  windowInput.placeholder = "profile default";
+  windowInput.value = pinned ? String(pinned) : "";
+  windowInput.title = "tokens; empty returns to the profile's auto_compact_at";
+  const windowLabel = el("label", null, "threshold (tokens) ");
+  windowLabel.appendChild(windowInput);
+  const btn = el("button", "wf-btn option", "Apply and restart");
+  const status = el("p", "wf-note hidden");
+  form.append(toggleLabel, windowLabel, btn, status);
+
+  const say = (msg, cls) => {
+    status.className = cls || "wf-note";
+    status.textContent = msg;
+  };
+  const sync = () => { windowInput.disabled = !toggle.checked; };
+  toggle.addEventListener("change", sync);
+  sync();
+
+  btn.addEventListener("click", async () => {
+    if (btn.disabled) return;
+    const name = s.name;
+    const enabled = toggle.checked;
+    const typed = windowInput.value.trim();
+    let window = null;
+    if (enabled && typed) {
+      window = Number(typed);
+      if (!Number.isInteger(window) || window <= 0) {
+        say("the threshold is a positive whole number of tokens", "wf-warning");
+        return;
+      }
+    }
+    btn.disabled = true;
+    say("restarting… (stopping it, relaunching with the new setting)");
+    let doc = {};
+    let resp;
+    try {
+      resp = await api(
+        `/api/sessions/${encodeURIComponent(name)}/auto-compact`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled, window }),
+        }
+      );
+      doc = await resp.json().catch(() => ({}));
+    } catch {
+      say("could not reach the daemon — nothing was changed", "wf-warning");
+      btn.disabled = false;
+      return;
+    }
+    btn.disabled = false;
+    if (!resp.ok) {
+      say(doc.error || `HTTP ${resp.status}`, "wf-warning");
+      return;
+    }
+    const now = doc.env || {};
+    say(envAutoCompactOff(now)
+      ? "restarted — auto-compact off"
+      : envCompactWindow(now)
+        ? `restarted — compacting at ${envCompactWindow(now)} tokens`
+        : "restarted — compacting at the profile's threshold");
+    // Same as the permissions toggle: the old PTY is gone.
     if (currentName === name) {
       detach();
       await refreshSessions();
@@ -31754,13 +32180,14 @@ function sessionFormConfig(mode) {
     "new-runtime", "new-worktree", "new-task", "new-beads"];
   const editable = ["project", "cwd", "name", "profile", "harness", "model", "effort",
     "mesh", "handle", "role", "workflow", "context", "borrow", "null_token",
-    "resume", "fork", "skip_permissions", "codex_yolo", "codex_sandbox", "args",
+    "resume", "fork", "skip_permissions", "auto_compact", "auto_compact_window",
+    "codex_yolo", "codex_sandbox", "args",
     "worktree_mode", "worktree_name", "worktree_existing", "worktree_session",
     "worktree_rebase", "worktree_from", "task", "score_goal", "beads", "issue_text", "issue_filter", "issue", "pi_tool_*",
     "subrole_*", "prompt_pack_*", "daemon_prompt"];
   const modes = {
     new: { title: "New session", submit: "Create", sections, editable,
-      payload: ["name", "profile", "project", "cwd", "args", "model", "effort", "tools", "worktree",
+      payload: ["name", "profile", "project", "cwd", "args", "env", "model", "effort", "tools", "worktree",
         "rebase_onto", "branch_from", "role", "subroles", "borrow", "null_token", "mesh", "handle", "workflow",
         "workflow_version", "cflow_inputs",
         "context", "task", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
@@ -31773,7 +32200,7 @@ function sessionFormConfig(mode) {
         "workflow_version", "cflow_inputs",
         "context", "task", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
         "daemon_prompt",
-        "fork", "connect", "over_limit"] },
+        "fork", "connect", "over_limit", "auto_compact"] },
     fork: { title: "Quick fork", submit: "Fork", sections: ["new-quick-fork"],
       editable: ["quick_fork_carry", "quick_fork_task"], payload: ["task", "mesh", "workflow"] },
   };

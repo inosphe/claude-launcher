@@ -75,6 +75,13 @@
   모두 오프닝 task에 `no issue:`로 시작하는 줄이 붙는다(`daemon/beads.compose_none_note`,
   `daemon/api.py`) — 그 줄이 없다는 것은 무이슈 지시였다는 뜻이 아니라 이슈가 서지
   못했다는 뜻이다.
+  기존 이슈를 고르는 답에서 이슈를 비워 두면(웹 폼·위저드의 Existing issue에
+  선택 없음, `--issue-pending`, spawn의 `issue_pending`, 바디 `beads:
+  "existing-pending"`) 세 번째 무생성 답이다(ISSUE_PENDING, claunch-5p2j4):
+  아무것도 만들거나 배정하지 않고 v2 런의 `inputs.issue`는 비워 두며, 오프닝에
+  `start issue pending:`으로 시작하는 줄을 붙인다 — 세션은 사용자나 부모가 id를
+  알려 줄 때까지 기다렸다가 `flow_input`으로 시작 입력을 채우고 그 이슈를 잡는다.
+  이 답은 `issue`·`issue_text`·태스크 안의 `issue: <id>`와 함께 오면 400이다.
   새로 만드는 쪽에서는 그 이슈의 본문을 오프닝 태스크와 따로 쓸 수 있다
   (`--issue-text`/바디 `issue_text`, 위저드의 Issue text 행, 웹 폼의 같은 이름
   textarea, MCP spawn의 `issue_text`) — 첫 줄이 제목, 전체가 목표가 되고 세션은

@@ -140,7 +140,7 @@ check("the form's controls read in the new order", named(form.text), [
   // default already answers, not a property of the task text, so it sits
   // here rather than beside the task box it used to be fenced with.
   "borrow", "null_token", "resume", "fork", "score_goal", "skip_permissions",
-  "codex_yolo", "codex_sandbox", "args",
+  "auto_compact", "auto_compact_window", "codex_yolo", "codex_sandbox", "args",
   // worktree selection is a create-only checkout choice, after the runtime
   // fold so it is not mistaken for an inherited spawn row. The narrowing box
   // sits between the mode's radio and the list it narrows, the way the
@@ -264,7 +264,12 @@ const claudeRuntime = block(
   '<fieldset id="new-claude-runtime"', "</fieldset>", fold.start
 );
 check("Claude keeps a separate runtime fieldset",
-      named(claudeRuntime.text), ["skip_permissions"]);
+      named(claudeRuntime.text),
+      ["skip_permissions", "auto_compact", "auto_compact_window"]);
+check("Claude starts compacting automatically, at the profile's threshold",
+      [/name="auto_compact" checked/.test(claudeRuntime.text),
+       /name="auto_compact_window"[^>]*value=/.test(claudeRuntime.text)],
+      [true, false]);
 check("Codex runtime controls have their own fieldset",
       named(codexRuntime.text), ["codex_yolo", "codex_sandbox"]);
 check("the two harness layouts share no controls",
@@ -363,6 +368,9 @@ check("standalone Codex Create serializes its specialised checkboxes",
 check("standalone Claude Create retains its own permission checkbox",
       /harnessName === "claude"/.test(submit) &&
         /f\.skip_permissions\.checked/.test(submit), true);
+check("standalone Claude Create sends its auto-compact answer as env",
+      /newClaudeCompactEnv\(f\)/.test(submit) && /body\.env = compactEnv/.test(submit),
+      true);
 /* An absent key is the profile default, so the ticks are read through the
    override helper — the one that answers undefined while they still say
    what the seeding said — and `[]` has to survive as itself. */
@@ -384,12 +392,18 @@ check("the create form provides an announced pending status",
    of both keys. A request that says nothing gets an issue minted from its
    task, which is what every client written before this row still sends — so
    the default answer must produce exactly that request. */
-check("only the three non-default answers put a board key on the request",
+check("only the non-default answers put a board key on the request",
       [/body\.beads = false/.test(submit),
        /body\.beads = "none-auto"/.test(submit),
        /body\.issue = f\.issue\.value/.test(submit),
        /body\.beads = true/.test(submit)],
       [true, true, true, false]);
+
+/* "existing" with nothing picked is its own answer (claunch-5p2j4): sending
+   no key there read as "new" and minted an issue from the task for work
+   that already had one. */
+check("an existing answer with no pick says so instead of sending nothing",
+      /else body\.beads = "existing-pending"/.test(submit), true);
 
 /* ...and the text rides only under "new". Sent beside "existing" or "none"
    it is a contradiction the daemon refuses outright (beads.check_request),

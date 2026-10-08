@@ -31,6 +31,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple, Union
 from .. import borrowing, harnesses as harness_registry, profile as profile_mod
 from .. import spawn as spawn_mod
 from .. import transcripts
+from .. import auto_compact as auto_compact_mod
 from . import codex_sessions, ctxsize, db, harness as harness_mod, pi_sessions
 from . import line_sync, paths, search_records, session_events, session_input
 from .harness import SessionDef
@@ -1934,6 +1935,45 @@ class SessionManager:
         else:
             args = (*old.args, *flags)
         return await self.redefine(name, args=args)
+
+    async def auto_compact(
+        self, name: str, enabled: bool, window: Optional[int]
+    ) -> Session:
+        """Restart a claude session with auto-compact switched and re-pinned.
+
+        Claude reads both answers from its environment at launch — the
+        on/off switch (``DISABLE_AUTO_COMPACT``) and the threshold
+        (``CLAUDE_CODE_AUTO_COMPACT_WINDOW``) — so changing either is an edit
+        of the definition's own env and a relaunch, like
+        :meth:`skip_permissions` is of its args. ``window=None`` drops the
+        session's pin and returns the threshold to the profile's
+        ``auto_compact_at``. The env is the spawn's last layer, so the answer
+        overrides the profile's and survives a daemon restart.
+
+        Refused while nothing has been stopped: another harness (the switch
+        is claude's), a window that is not a positive integer, and a no-op.
+        """
+        session = self.get(name)
+        old = session.sdef
+        if old.harness != harness_mod.CLAUDE_HARNESS:
+            raise ManagerError(
+                f"auto-compact is claude's switch; session {name!r} runs "
+                f"{old.harness!r}"
+            )
+        try:
+            enabled, window = auto_compact_mod.parse(
+                {"enabled": enabled, "window": window}
+            )
+        except ValueError as exc:
+            raise ManagerError(str(exc)) from exc
+        env = auto_compact_mod.with_auto_compact(
+            old.env, enabled=enabled, window=window
+        )
+        if env == dict(old.env):
+            raise ManagerError(
+                f"session {name!r} already runs with that auto-compact setting"
+            )
+        return await self.redefine(name, env=env)
 
     async def migrate(self, name: str, new_cwd: str) -> Tuple[Session, bool]:
         """Move a session to another directory: stop it, carry its claude

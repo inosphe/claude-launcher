@@ -329,6 +329,8 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
         body["beads"] = "none-auto"
     elif getattr(args, "no_issue", False):
         body["beads"] = False
+    elif getattr(args, "issue_pending", False):
+        body["beads"] = "existing-pending"
     if args.connect:
         body["connect"] = args.connect
     # `--resume` with no value is the picker, which argparse hands back as the
@@ -706,6 +708,8 @@ def _cmd_spawn(args: argparse.Namespace) -> int:
         payload["beads"] = "none-auto"
     elif getattr(args, "no_issue", False):
         payload["beads"] = False
+    elif getattr(args, "issue_pending", False):
+        payload["beads"] = "existing-pending"
     # Same shape, same reason as `beads` above: `over_limit: False` is the
     # answer --within-limit gives, and the comprehension keeps only truthy
     # values, so it has to be set after or "hold me to the cap" would read as
@@ -790,7 +794,26 @@ def _print_onboarding(result: dict) -> None:
             for peer, err in sorted((mesh.get("connect_errors") or {}).items()):
                 print(f"  could not connect to {peer}: {err}")
         else:
-            print(f"  mesh join failed: {mesh.get('error') or mesh.get('pending')}")
+            # A remote join that pended is a WAIT, not a failure: the primary
+            # has not answered yet. Collapsed into one line with `or`, this
+            # printed "mesh join failed: {'pending': True, ...}" -- the reader
+            # was told the join had failed, and handed a dict. The round-1
+            # incident (claunch-ryvvf) read exactly that for s59/s60, which
+            # were waiting on an answer, and the diagnosis took a round.
+            # The web card takes the same branch (claunch-mv4nu, d8408352);
+            # the two paths saying the same sentence is the point.
+            error = mesh.get("error")
+            pending = mesh.get("pending")
+            if error:
+                print(f"  mesh join failed: {error}")
+            elif pending:
+                who = pending.get("primary") if isinstance(pending, dict) else None
+                print(
+                    "  mesh join pending: waiting for "
+                    f"{who or 'the mesh owner'} to approve"
+                )
+            else:
+                print("  mesh join failed: no reason given")
     flow = result.get("workflow") or {}
     if flow:
         print(
@@ -2584,6 +2607,12 @@ NOISSUE_AUTO_HELP = (
     "of --no-issue, split out because one flag meant both and the session "
     "was left guessing which"
 )
+ISSUE_PENDING_HELP = (
+    "the session works an EXISTING board issue that is not picked yet: "
+    "nothing is minted or assigned, and the session is told to wait until "
+    "you or its parent name the issue, then record it (a v2 run's start "
+    "input 'issue', via flow_input) and take it"
+)
 ISSUETEXT_HELP = (
     "what the minted issue SAYS, written here instead of being read off "
     "--task. Its first line becomes the title and the whole of it the goal, "
@@ -2760,6 +2789,10 @@ def register(sub) -> None:
         "--no-issue-auto", action="store_true", dest="no_issue_auto",
         help=NOISSUE_AUTO_HELP,
     )
+    n_issue.add_argument(
+        "--issue-pending", action="store_true", dest="issue_pending",
+        help=ISSUE_PENDING_HELP,
+    )
     # In the same group as the other two: the text only has meaning under the
     # answer that mints, so "this text, and also that existing issue" and
     # "this text, and also no issue" are both contradictions and are refused
@@ -2873,6 +2906,10 @@ def register(sub) -> None:
     s_issue.add_argument(
         "--no-issue-auto", action="store_true", dest="no_issue_auto",
         help=NOISSUE_AUTO_HELP,
+    )
+    s_issue.add_argument(
+        "--issue-pending", action="store_true", dest="issue_pending",
+        help=ISSUE_PENDING_HELP,
     )
     s_issue.add_argument(
         "--issue-text", metavar="TEXT", dest="issue_text", help=ISSUETEXT_HELP,

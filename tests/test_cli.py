@@ -767,6 +767,7 @@ def test_the_two_no_issue_answers_travel_as_two_values_of_one_key(
     assert "beads" not in body("spawn")                 # did not say: mint one
     assert body("spawn", "--no-issue")["beads"] is False
     assert body("spawn", "--no-issue-auto")["beads"] == "none-auto"
+    assert body("spawn", "--issue-pending")["beads"] == "existing-pending"
 
     # the human's command builds its own body, so it is pinned separately --
     # the two have drifted before. It refuses to run from inside a managed
@@ -776,6 +777,7 @@ def test_the_two_no_issue_answers_travel_as_two_values_of_one_key(
     assert "beads" not in body(*new)
     assert body(*new, "--no-issue")["beads"] is False
     assert body(*new, "--no-issue-auto")["beads"] == "none-auto"
+    assert body(*new, "--issue-pending")["beads"] == "existing-pending"
 
 
 def test_the_child_cap_flags_are_three_valued(home):
