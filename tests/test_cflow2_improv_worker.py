@@ -249,9 +249,9 @@ USER_QUESTIONS = {
     "issue-decision": ["adopt", "create", "none"],
     "cut-unreachable-choice": ["confirmed", "held"],
     "landed-unclear-choice": ["confirmed", "held"],
-    "rework-decision": ["approve", "hold"],
+    "rework-decision": ["rework", "hold"],
     "settle-stall": ["proceed", "keep-waiting"],
-    "end-decision": ["approve", "hold"],
+    "end-decision": ["end", "hold"],
 }
 #: The two PR-medium questions go through the pr-or-local skeleton
 #: (claunch-yq80p.11): the label is the skeleton's call, the ask-user calls
@@ -822,3 +822,29 @@ def test_an_ok_prior_context_feeds_intake_issue(tmp_path, monkeypatch):
     assert [t["label"] for t in st["tasks"]] == ["intake-issue"]
     assert "선행 맥락 없음(쿼리: q)" in st["tasks"][0]["prompt"]
     assert "claunch-x" in st["tasks"][0]["prompt"]
+
+
+def test_the_end_question_can_be_posed(tmp_path, monkeypatch):
+    """claunch-gpccp: with choices {approve, hold} no brief passed -- the
+    question validator refuses an option named approve and the ask refuses
+    any other name -- so every finished v2 run failed at end-decision. With
+    end/hold the brief is accepted and the question reaches the person."""
+    from claude_launcher.cflow2 import runtime
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    decision = _find_id(doc["procedures"], "end-decision")
+    flow = {"cflow": 2, "name": "end-flow", "include": ["ask-common"],
+            "nodes": {"end-gate": {"prompt": "end"}, "end-hold": {"prompt": "hold"}},
+            "body": [decision]}
+    from claude_launcher.cflow2 import frontend
+    chart = frontend.compile_text(yaml.safe_dump(flow, allow_unicode=True, sort_keys=False),
+                                  resolve_include=layers.resolver(str(tmp_path)))
+    kw = {"cwd": str(tmp_path), "scope": "m", "now": 1.0}
+    st = runtime.start(chart, caps={}, **kw)
+    brief = dict(BRIEF, recommendation="end", options=[
+        dict(BRIEF["options"][0], name="end"), dict(BRIEF["options"][1], name="hold")])
+    iid = next(t["instance"] for t in st["tasks"] if t["label"] == "ask-frame")
+    st = runtime.report(iid, "ok", {"brief": brief}, **kw)
+    assert st["status"] == "waiting_approval" and [a["node"] for a in st["asks"]]
+    runtime.approve(None, decision="end", reason="done", **kw)
+    assert [t["label"] for t in runtime.status(**kw)["tasks"]] == ["end-gate"]
