@@ -6122,13 +6122,17 @@ async def h_reposync_ws_sync(request: web.Request) -> web.Response:
         if answer is not None:
             return answer
         approval = _ws_approval(request, str(body.get("request") or ""))
-    entry = reposync_flow.history_entry(
-        p.repo, kind="master", workspace=request.match_info["name"], remote=p.remote,
-        branch=p.branch, by="web", approval=approval)
+
+    def run() -> dict:
+        # history_entry runs git (repo_identity), so it stays off the event loop
+        entry = reposync_flow.history_entry(
+            p.repo, kind="master", workspace=request.match_info["name"], remote=p.remote,
+            branch=p.branch, by="web", approval=approval)
+        return reposync_flow.recorded(entry, lambda: _ws_execute(p, card),
+                                      reposync_flow.master_done(p))
+
     try:
-        return json_response(await asyncio.to_thread(
-            reposync_flow.recorded, entry, lambda: _ws_execute(p, card),
-            reposync_flow.master_done(p)))
+        return json_response(await asyncio.to_thread(run))
     except reposync.SyncError as exc:
         return json_error(409, str(exc))
 
@@ -6181,7 +6185,7 @@ async def h_reposync_ws_branch_push(request: web.Request) -> web.Response:
     if answer is not None:
         return answer
 
-    def run() -> dict:
+    def push() -> dict:
         # the sha the approval named is what goes out, never a later tip
         current = reposync.git(card["repo"], "rev-parse", "--verify", "-q",
                                f"refs/heads/{card['source']}", check=False)
@@ -6191,15 +6195,19 @@ async def h_reposync_ws_branch_push(request: web.Request) -> web.Response:
                                       force_with_lease=card["action"] == "publish-force")
         return {"ok": True, "remote": card["remote"], "ref": ref, "sha": card["local"]}
 
-    entry = reposync_flow.history_entry(
-        card["repo"], kind="publish", workspace=request.match_info["name"],
-        remote=card["remote"], branch=card["source"], by="web",
-        approval=_ws_approval(request, str(body.get("request") or "")),
-        ref=card["branch"], force=card["action"] == "publish-force")
+    approval = _ws_approval(request, str(body.get("request") or ""))
+
+    def run() -> dict:
+        # history_entry runs git (repo_identity), so it stays off the event loop
+        entry = reposync_flow.history_entry(
+            card["repo"], kind="publish", workspace=request.match_info["name"],
+            remote=card["remote"], branch=card["source"], by="web", approval=approval,
+            ref=card["branch"], force=card["action"] == "publish-force")
+        return reposync_flow.recorded(entry, push,
+                                      lambda out: {"after": out["sha"], "pushed": True})
+
     try:
-        return json_response(await asyncio.to_thread(
-            reposync_flow.recorded, entry, run,
-            lambda out: {"after": out["sha"], "pushed": True}))
+        return json_response(await asyncio.to_thread(run))
     except reposync.SyncError as exc:
         return json_error(409, str(exc))
 
