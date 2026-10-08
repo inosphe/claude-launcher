@@ -62,7 +62,7 @@ from typing import Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
 from .. import store
 from ..cflow import engine as cflow_engine, landing as cflow_landing, model as cflow_model, state as cflow_state
-from . import briefing, status_checks
+from . import briefing, landing_route, status_checks
 from .session import STATUS_BUSY, STATUS_IDLE
 
 log = logging.getLogger("claunch.daemon.cflow")
@@ -2120,149 +2120,27 @@ class TriggerClock:
                 moved.append((cwd, scope, list(result["landed"])))
         return moved
 
-    def _session(self, name: str):
-        try:
-            return self.manager.get(name)
-        except Exception:
-            return None
-
-    def _parent_of(self, name: str) -> Optional[str]:
-        session = self._session(name)
-        return getattr(getattr(session, "sdef", None), "parent", None) or None
-
-    def merger_run(self, name: str, repo: str) -> Tuple[Optional[str], str, bool]:
-        """(cwd, why, ambiguous): the one run ``name`` drives in a checkout of
-        ``repo`` that holds a landing queue, or why there is none.
-
-        Only a live session merges. Its run must be in the worker's own
-        repository -- a mesh spans projects, and a queue in another
-        repository measures "landed" in a git that never saw this tip. Two
-        such runs is ``ambiguous``: the session can merge, which run takes
-        the request is the unknown, and that is never guessed.
-        """
-        session = self._session(name)
-        if session is None:
-            return None, "is not a session of this daemon", False
-        if session.exited:
-            return None, "has exited", False
-        found: List[str] = []
+    def v1_holders(self, name: str, repo: Optional[str]) -> List[landing_route.Holder]:
+        """The v1 runs ``name`` drives in checkouts of ``repo`` that declare
+        ``landing_queue:`` -- one per directory, its main run asked first
+        (:func:`cflow.engine.landing_queue_run`), directories in order."""
+        out: List[landing_route.Holder] = []
         for c in sorted({c for c, s in cflow_state.known_runs() if s == name}):
-            if cflow_landing.common_dir(c) != repo:
+            if repo is not None and cflow_landing.common_dir(c) != repo:
                 continue
             try:
-                if cflow_engine.landing_queue_run(cwd=c, scope=name) is not None:
-                    found.append(c)
+                run = cflow_engine.landing_queue_run(cwd=c, scope=name)
             except Exception:
                 continue
-        if not found:
-            return None, "has no run in this repository that declares a landing_queue", False
-        if len(found) > 1:
-            return None, (
-                f"has {len(found)} runs in this repository that declare a "
-                "landing_queue; the target is ambiguous"
-            ), True
-        return found[0], "", False
+            if run is not None:
+                main = run == cflow_state.MAIN_RUN
+                out.append(landing_route.Holder(c, None if main else run, main))
+        return out
 
-    def landing_target(
-        self, cwd: str, scope: str
-    ) -> Tuple[Optional[str], Optional[str], str, List[str]]:
-        """(cwd, session, why, passed): whose landing queue this worker's
-        request goes on.
-
-        The parent first, then each direct ancestor above it: the nearest one
-        that can merge (:meth:`merger_run`). With none, the mesh leader
-        (:meth:`leader_run`) -- only ever a sibling or a direct ancestor,
-        never an uncle or a child. ``passed`` names each session passed over
-        and why, for the trigger's detail; ``why`` is set when there is no
-        target.
-        """
-        repo = cflow_landing.common_dir(cwd)
-        if repo is None:
-            return None, None, f"no git repository readable in {cwd}", []
-        passed: List[str] = []
-        chain: List[str] = []
-        name = self._parent_of(scope)
-        if not name:
-            passed.append("this session has no parent session")
-        while name and name != scope and name not in chain:
-            chain.append(name)
-            label = f"{'parent' if len(chain) == 1 else 'ancestor'} {name!r}"
-            tcwd, why, ambiguous = self.merger_run(name, repo)
-            if tcwd is not None:
-                return tcwd, name, "", passed
-            if ambiguous:
-                # This ancestor can merge; going past it would skip its stack.
-                return None, name, f"{label} {why}", passed
-            passed.append(f"{label} {why}")
-            name = self._parent_of(name)
-        lcwd, leader, lwhy = self.leader_run(scope, chain, repo)
-        if lcwd is not None:
-            return lcwd, leader, "", passed
-        return None, None, "; ".join(passed + [f"mesh leader fallback: {lwhy}"]), passed
-
-    def leader_run(
-        self, scope: str, chain: List[str], repo: str
-    ) -> Tuple[Optional[str], Optional[str], str]:
-        """(cwd, session, why) of the mesh leader run a worker's landing
-        request goes to when no direct ancestor can merge.
-
-        The leader is a ``leader``-role member of a mesh the worker is in,
-        and it is taken only as the worker's sibling (the same parent; two
-        sessions with no parent count as siblings) -- a leader that is a
-        direct ancestor was already asked in ``chain``. A leader that is
-        neither is refused: a landing request never goes to an uncle or a
-        child. Not exactly one leader that can merge is a skip, never a guess.
-        """
-        if self.mesh is None:
-            return None, None, "no mesh to look for a leader in"
-        try:
-            names = sorted({m["mesh"] for m in self.mesh.meshes_for_session(scope)})
-        except Exception:
-            return None, None, "the worker's mesh membership could not be read"
-        if not names:
-            return None, None, "this session is in no mesh"
-        leaders: Dict[str, tuple] = {}
-        for mname in names:
-            try:
-                mesh = self.mesh.get(mname)
-            except Exception:
-                continue
-            for _, m in sorted(mesh.members.items()):
-                if "leader" in m.roles and m.session != scope:
-                    leaders.setdefault(m.session, (mesh, m))
-        if not leaders:
-            return None, None, f"no leader in mesh {', '.join(repr(n) for n in names)}"
-        own_parent = self._parent_of(scope)
-        eligible: List[Tuple[str, str]] = []
-        refused: List[str] = []
-        for lead, (mesh, member) in sorted(leaders.items()):
-            if lead in chain:
-                refused.append(f"leader {lead!r} is a direct ancestor that cannot merge")
-                continue
-            if not self.mesh._is_local(mesh, member):
-                refused.append(f"leader {lead!r} is on another machine")
-                continue
-            if self._session(lead) is None:
-                refused.append(f"leader {lead!r} is not a session of this daemon")
-                continue
-            if self._parent_of(lead) != own_parent:
-                refused.append(
-                    f"leader {lead!r} is neither a sibling nor a direct ancestor of {scope!r}"
-                )
-                continue
-            tcwd, why, _ = self.merger_run(lead, repo)
-            if tcwd is None:
-                refused.append(f"leader {lead!r} {why}")
-                continue
-            eligible.append((tcwd, lead))
-        if len(eligible) == 1:
-            return eligible[0][0], eligible[0][1], ""
-        if len(eligible) > 1:
-            return None, None, (
-                f"several leaders can merge ({', '.join(l for _, l in eligible)}); "
-                "the target is ambiguous"
-            )
-        return None, None, "; ".join(refused)
+    def landing_target(self, cwd: str, scope: str) -> landing_route.Target:
+        """Whose landing queue this worker's request goes on
+        (:meth:`.landing_route.Router.stacked`). Blocking; call it in a thread."""
+        return landing_route.Router(self.manager, self.mesh, self.v1_holders).stacked(cwd, scope)
 
     async def _enqueue_landing(self, cwd: str, scope: str) -> Tuple[bool, str]:
         """This worker's landing request, onto the landing queue of the
@@ -2281,13 +2159,14 @@ class TriggerClock:
         bridged = await self._enqueue_landing_v2(cwd, scope)
         if bridged is not None:
             return bridged
-        pcwd, parent, why, passed = await asyncio.to_thread(self.landing_target, cwd, scope)
-        if pcwd is None:
-            log.warning("cflow enqueue-landing from %s: no merge target: %s", scope, why)
-            return False, why
+        target = await asyncio.to_thread(self.landing_target, cwd, scope)
+        if target.holder is None:
+            log.warning("cflow enqueue-landing from %s: no merge target: %s", scope, target.why)
+            return False, target.why
         # Who was passed over, so the journal says why the request is not on
         # the parent's queue.
-        via = f"{'; '.join(passed)}; fell back to {parent!r} at {pcwd}: " if passed else ""
+        via = target.note()
+        pcwd, parent = target.holder.cwd, target.owner
         tip = await asyncio.to_thread(cflow_landing.head, cwd)
         if not tip:
             return False, f"no commit readable in {cwd}"
@@ -2297,20 +2176,12 @@ class TriggerClock:
             return False, "the issue board could not be read"
         if not issues:
             return False, f"{scope} holds no issue in_review (no landing request on the board)"
-        # The parent's queue may live on one of its SUB runs (a stack that
-        # manages the children); the main run is asked first, and with no
-        # holder at all the main run answers "declares no landing_queue".
-        try:
-            holder = await asyncio.to_thread(
-                cflow_engine.landing_queue_run, cwd=pcwd, scope=parent
-            )
-        except Exception:
-            holder = None
+        # The queue may live on one of the target's SUB runs (a stack that
+        # manages the children); the holder names it.
         try:
             result = await asyncio.to_thread(
                 cflow_engine.enqueue_landing, issues, branch, tip,
-                by=scope, cwd=pcwd, scope=parent,
-                run=None if holder in (None, cflow_state.MAIN_RUN) else holder,
+                by=scope, cwd=pcwd, scope=parent, run=target.holder.run,
             )
         except cflow_engine.CflowError as exc:
             return False, f"{via}{parent!r}: {exc}"
@@ -2329,9 +2200,11 @@ class TriggerClock:
         """The landing request onto a v2 parent run's ``landing`` collection
         (principal ``child``), or None when the parent has no such run.
 
-        A parent with a v1 ``landing_queue:`` run AND a v2 ``landing`` run is
-        ambiguous: skipped with a warning, nothing pushed (docs 10).
+        A parent that also holds a v1 ``landing_queue:`` run leaves this to
+        the v1 path (None), and of several v2 runs a main run is taken first,
+        then the first in order (:func:`.landing_route.pick`, docs 10).
         """
+        from ..cflow2 import store as cstore
         from . import cflow2_triggers as v2
 
         parent = v2.parent_of(self.manager, scope)
@@ -2344,14 +2217,10 @@ class TriggerClock:
         if not holders:
             return None
         if await asyncio.to_thread(v2.v1_landing_holders, parent):
-            msg = v2.both_warning(parent, v2.LANDING)
-            log.warning("cflow enqueue-landing from %s: %s", scope, msg)
-            return False, msg
-        if len(holders) > 1:
-            return False, (
-                f"parent {parent!r} has {len(holders)} v2 runs declaring 'landing'; "
-                "the target is ambiguous"
-            )
+            return None
+        chosen = landing_route.pick([
+            landing_route.Holder(c, sc, sc == cstore.main_scope(sc), "v2") for c, sc in holders
+        ])
         tip = await asyncio.to_thread(cflow_landing.head, cwd)
         if not tip:
             return False, f"no commit readable in {cwd}"
@@ -2365,7 +2234,9 @@ class TriggerClock:
             {"issue": i, "branch": branch or "", "tip": tip, "requested_by": scope}
             for i in issues
         ]
-        return await asyncio.to_thread(v2.push_v2, holders[0], v2.LANDING, items, scope)
+        return await asyncio.to_thread(
+            v2.push_v2, (chosen.cwd, str(chosen.run)), v2.LANDING, items, scope
+        )
 
     async def _perform(self, cwd: str, scope: str, action: dict) -> Tuple[bool, str]:
         """Do one claimed action. Returns (performed, why/what)."""

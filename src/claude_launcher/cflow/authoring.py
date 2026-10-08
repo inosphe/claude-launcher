@@ -456,8 +456,9 @@ work:
   can, and with none to the session's mesh `leader`, but only a leader that
   is its sibling (the same parent; two sessions with no parent are
   siblings), never an uncle or a child. Every target must run in this
-  repository. With no target, or two, it is skipped, journalled with the
-  reason. Put it where the request has just been made, `at: leave` of the
+  repository; of several queue runs a main run is taken first, then the
+  first in order. With no target, or two leaders that could take it, it is
+  skipped, journalled with the reason. Put it where the request has just been made, `at: leave` of the
   step that makes it, so a waiting loop does not file it again.
 
 `at` is `enter` (the default — the run arrived here) or `leave` (the run
