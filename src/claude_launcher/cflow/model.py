@@ -302,8 +302,10 @@ web dashboard by hand:
   to the configured endpoint.
 * ``enqueue-landing`` — the daemon files the session's landing request (its
   ``in_review`` issues, branch and tip) on its parent's run, when that run's
-  workflow declares ``landing_queue:`` (:class:`LandingQueueSpec`). The one
-  action whose effect lands in another session's run.
+  workflow declares ``landing_queue:`` (:class:`LandingQueueSpec`); when the
+  parent cannot merge (none, exited, no run, no queue), on the nearest
+  direct ancestor's that can, else on its sibling mesh leader's.
+  The one action whose effect lands in another session's run.
 
 ``at`` takes ``enter`` (the run arrived at this step — the default) or
 ``leave`` (the run moved off it, whichever edge it took). It is spelled
@@ -606,7 +608,9 @@ class Restart:
 TRIGGER_CHECKS = "checks"
 TRIGGER_BRIEFING = "briefing"
 #: Put this session's landing request on its parent's landing queue (a
-#: parent whose workflow declares ``landing_queue:``). Fired by the worker's
+#: parent whose workflow declares ``landing_queue:``), or, when the parent
+#: cannot merge, on the nearest direct ancestor's that can, else on its
+#: sibling mesh leader's. Fired by the worker's
 #: step, written into the parent's run: the one trigger whose effect lands in
 #: a run other than the one that asked.
 TRIGGER_ENQUEUE_LANDING = "enqueue-landing"

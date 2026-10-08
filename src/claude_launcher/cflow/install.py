@@ -210,8 +210,9 @@ workflow to be started here), that is the answer; otherwise list candidates
    declared — what the daemon does here, not what you do. `{do: briefing}`
    costs you nothing: the daemon recomposes this session's dashboard
    briefing on its own and types nothing, and `{do: enqueue-landing}` files
-   your landing request on your parent's queue by itself -- nothing for you
-   to send. `{do: checks}` is the one that
+   your landing request on your parent's queue (when the parent cannot
+   merge: the nearest ancestor's that can, else your sibling mesh leader's)
+   by itself -- nothing for you to send. `{do: checks}` is the one that
    reaches you: at the moment it declares, the daemon types a
    `[claunch status-check refresh]` block into this terminal, and answering
    it — `status_checks`, then `report_status_checks` with every enabled id
