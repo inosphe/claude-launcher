@@ -6408,3 +6408,6 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .profile-usage-window { display: grid; grid-template-columns: minmax(120px, 1fr) auto; gap: 8px 16px; align-items: center; padding: 8px 0; }
 .profile-usage-window progress { grid-column: 1 / -1; width: 100%; height: 8px; }
 .profile-usage-window small { grid-column: 1 / -1; color: var(--muted, #888); }
+
+.ws-sync-remote-row { display: flex; flex-wrap: wrap; gap: 6px 16px; padding: 8px 0; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
+.ws-sync-remote-row > * { min-width: 0; }

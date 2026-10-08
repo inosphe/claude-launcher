@@ -348,6 +348,52 @@ def plan_facts(repo: str, p: reposync.Plan, rows: List[dict],
     }
 
 
+def remote_comparisons(repo: str, *, branch: Optional[str], do_fetch: bool,
+                       already_fetched: Optional[str] = None) -> List[dict]:
+    """Web-only comparison of every remote, including aliases and local URLs."""
+    rows = []
+    for remote in reposync.remotes(repo):
+        row = {"remote": remote, "branch": branch, "state": "unknown",
+               "ahead": None, "behind": None, "fetched": False}
+        rows.append(row)
+        if do_fetch:
+            try:
+                if remote != already_fetched:
+                    reposync.fetch(repo, remote)
+                row["fetched"] = True
+            except reposync.SyncError as exc:
+                row["error"] = str(exc)
+                # Retained tracking refs may be stale; never present as fresh.
+        try:
+            target = branch or reposync.default_branch(repo, remote)
+            row["branch"] = target
+            local = reposync.git(repo, "rev-parse", "--verify", "-q",
+                                 f"refs/heads/{target}", check=False)
+            upstream = reposync.git(repo, "rev-parse", "--verify", "-q",
+                                    f"refs/remotes/{remote}/{target}", check=False)
+            row.update(local=local, upstream=upstream)
+            if not local or not upstream:
+                row["state"] = "missing-local" if not local else "missing-tracking"
+                continue
+            counts = reposync._counts(repo, local, upstream)
+            if counts is None:
+                continue
+            ahead, behind = counts
+            row.update(ahead=ahead, behind=behind)
+            if not ahead and not behind:
+                row["state"] = "up-to-date"
+            elif not behind:
+                row["state"] = "ahead"
+            elif not ahead:
+                row["state"] = "behind"
+            else:
+                base = reposync.git(repo, "merge-base", local, upstream, check=False)
+                row["state"] = "diverged" if base else "unrelated"
+        except reposync.SyncError as exc:
+            row["error"] = str(exc)
+    return rows
+
+
 def workspace_status(path: str, workspace: Optional[str], peers: Dict[str, List[dict]],
                      problems: List[str], *, do_fetch: bool, remote: Optional[str] = None,
                      branch: Optional[str] = None, machine: Optional[str] = None) -> dict:
