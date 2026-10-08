@@ -730,7 +730,7 @@ def test_a_pending_start_issue_is_waited_for_then_recorded(tmp_path):
     import yaml
     from pathlib import Path
     root = Path(__file__).resolve().parents[1] / "src/claude_launcher/workflows"
-    v2 = yaml.safe_load((root / "v2/improv-worker-v2.yaml").read_text())
+    v2 = yaml.safe_load((root / "v2/improv-worker-v2.yaml").read_text(encoding="utf-8"))
     intake = v2["nodes"]["intake"]["prompt"]
     assert "start issue pending:" in intake
     assert "보드를 뒤지거나" in intake and "intake-issue가 한다" in intake
@@ -739,7 +739,7 @@ def test_a_pending_start_issue_is_waited_for_then_recorded(tmp_path):
     assert "start issue pending:" in v2["nodes"]["intake-issue"]["prompt"]
     check = v2["procedures"]["resolve-issue"]["body"]["choose"]["prompt"]
     assert "`start issue pending:` 줄은 무이슈 답이 아니다" in check
-    v1 = (root / "improv-worker.yaml").read_text()
+    v1 = (root / "improv-worker.yaml").read_text(encoding="utf-8")
     assert "start issue pending:" in v1
     assert "`start issue pending:` 줄은 무이슈 답이 아니다" in v1
     # v1 has no start input to write

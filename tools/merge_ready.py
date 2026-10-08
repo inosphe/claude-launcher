@@ -55,10 +55,19 @@ report. The worker leaves the preview merge behind as a ref:
 
     git worktree add --detach <tmp> <target>
     git -C <tmp> merge --no-ff <branch>
-    <run the targeted tests in <tmp>>
+    uv sync --extra test --directory <tmp>
+    uv run --directory <tmp> --no-sync python tools/changed_tests.py --repo <tmp> --base <target>
     git update-ref refs/claunch/preview/<branch> $(git -C <tmp> rev-parse HEAD)
 
-and this asks one question of it: are its two parents exactly this tip and the
+The two middle lines are the measurement, and both halves of the second one
+carry weight (``claunch-873ys``). Without ``--repo <tmp>``,
+``changed_tests.py`` asks the daemon where the session stands and measures
+*that* tree, so ``cd <tmp>`` followed by a bare run reuses or re-runs the
+session's own receipt and reads as a green re-measure of the preview. With
+``--repo`` but no ``uv sync``, ``<tmp>`` has no environment of its own and
+the gate refuses rather than run another checkout's pytest (``claunch-7sj``).
+
+Given that measurement, this asks one question of the ref it leaves behind: are its two parents exactly this tip and the
 target's tip? If they are, the numbers were taken on the pair being judged
 now. If the target moves again, the second parent stops matching and the
 verdict goes back to ``1`` by itself -- which is the property the whole design
@@ -971,7 +980,11 @@ def _recipe(branch: str, target: str, ref: str) -> str:
         "not move):\n"
         f"    git worktree add --detach <tmp> {target}\n"
         f"    git -C <tmp> merge --no-ff {branch}\n"
-        "    <run the targeted tests in <tmp>, report the numbers>\n"
+        "    uv sync --extra test --directory <tmp>\n"
+        "    uv run --directory <tmp> --no-sync python tools/changed_tests.py "
+        f"--repo <tmp> --base {target}\n"
+        "    (report the numbers; --repo <tmp> is what makes them the "
+        "preview's -- without it the session's own tree is measured)\n"
         f"    git update-ref {ref} $(git -C <tmp> rev-parse HEAD)\n"
         f"  or rebase: git rebase {target}"
     )

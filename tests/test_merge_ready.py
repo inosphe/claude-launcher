@@ -345,6 +345,44 @@ def test_a_clean_merge_still_demands_a_re_measurement(repo, capsys):
     assert "update-ref" in out
 
 
+def test_the_recipe_measures_the_preview_and_not_the_sessions_tree(repo, capsys):
+    """``claunch-873ys``: "run the targeted tests in <tmp>" was the whole step.
+
+    Followed literally -- ``cd <tmp>`` and a bare ``changed_tests.py`` -- that
+    measures the session's own checkout, because the gate asks the daemon
+    where the session stands unless ``--repo`` names a tree; and ``--repo
+    <tmp>`` alone is refused, because ``<tmp>`` has no environment. The hint
+    has to carry both, in the order they run, against the target it judged.
+    """
+    code, out = _verdict(
+        repo, capsys, "--branch", "clean-branch", "--target", "clean-target"
+    )
+    assert code == merge_ready.REMEASURE, out
+    lines = [line.strip() for line in out.splitlines()]
+    sync = "uv sync --extra test --directory <tmp>"
+    measure = (
+        "uv run --directory <tmp> --no-sync python tools/changed_tests.py "
+        "--repo <tmp> --base clean-target"
+    )
+    assert sync in lines, out
+    assert measure in lines, out
+    order = [
+        next(i for i, line in enumerate(lines) if key in line)
+        for key in ("merge --no-ff clean-branch", sync, measure, "git update-ref")
+    ]
+    assert order == sorted(order), out
+    assert "run the targeted tests in <tmp>" not in out
+
+
+def test_the_docstring_recipe_is_the_one_the_hint_prints():
+    """The module docstring is the recipe's second copy; it may not keep the
+    old one-liner once the hint stopped printing it."""
+    doc = merge_ready.__doc__
+    assert "uv sync --extra test --directory <tmp>" in doc
+    assert "tools/changed_tests.py --repo <tmp> --base <target>" in doc
+    assert "<run the targeted tests in <tmp>>" not in doc
+
+
 def test_the_two_failures_do_not_share_an_exit_code(repo, capsys):
     """``awaits.probe`` compares exit codes and ignores output by contract.
 
