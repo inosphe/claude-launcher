@@ -87,7 +87,7 @@ function box(id) {
   };
 }
 for (const id of ["parent-hint", "new-fork-row", "new-over-row", "new-over-text",
-                  "new-model-row",
+                  "new-model-row", "new-effort-row",
                   "new-claude-runtime", "new-claude-runtime-hint",
                   "new-claude-compact-hint",
                   "new-codex-runtime", "new-codex-runtime-hint",
@@ -117,7 +117,7 @@ const form = {
   parent: picker(), name: control(""),
   profile: picker([["work", "work"], ["home", "home"]]),
   harness: picker([["claude", "claude"]]),
-  model: picker(),
+  model: picker(), effort: picker(),
   borrow: picker([["(this profile's own token)", ""], ["work", "work"],
                   ["home", "home"]]),
   null_token: control(""),
@@ -163,7 +163,8 @@ const PROFILE_OPTIONS = [
 ];
 const HARNESS_DETAILS = {
   claude: { name: "claude", builtin: true,
-            models: ["haiku", "sonnet", "opus", "fable"] },
+            models: ["haiku", "sonnet", "opus", "fable"],
+            efforts: ["low", "medium", "high", "xhigh", "max"] },
   codex: { name: "codex", models: ["luna", "terra", "sol"] },
   pi: { name: "pi", tools: ["full_read"] },
 };
@@ -304,7 +305,8 @@ function reread(name) {
 }
 
 const SESSIONS = [
-  { name: "lead", status: "idle", harness: "claude", model: "opus", conversation_id: "c-1",
+  { name: "lead", status: "idle", harness: "claude", model: "opus", effort: "xhigh",
+    conversation_id: "c-1",
     cwd: "F:/repo" },
   { name: "quiet", status: "busy", harness: "claude" },      // nothing pinned
   { name: "pi", status: "idle", harness: "codex", conversation_id: "c-2" },
@@ -345,6 +347,17 @@ async function main() {
   ctx.sync();
   check("the model picker starts from the parent's saved selection",
         form.model.value, "opus");
+  /* Effort is offered for claude as it is for codex, and the row starts on
+     the parent's effort: the spawn body sends effort only when it differs
+     from the parent's, so a row reset to "(harness default)" would clear
+     the inherited effort of every child nobody touched. */
+  check("the effort row lists the harness's declared levels",
+        form.effort.options.map((o) => o.value),
+        ["", "low", "medium", "high", "xhigh", "max"]);
+  check("the effort row is shown for a harness that declares efforts",
+        box_["new-effort-row"].classes.has("hidden"), false);
+  check("the effort picker starts from the parent's effort",
+        form.effort.value, "xhigh");
   SESSIONS[0].model = "sonnet";
   ctx.setSessions(SESSIONS);
   ctx.refresh();
@@ -365,7 +378,7 @@ async function main() {
         [false, true]);
   check("...and says which rows an unlock would open",
         box_["parent-hint"].textContent.includes(
-          "profile, harness, model, borrow, null_token, cwd, args, skip_permissions " +
+          "profile, harness, model, effort, borrow, null_token, cwd, args, skip_permissions " +
           "stay its parent's"),
         true);
   check("the blank directory entry now means the parent's",
@@ -403,7 +416,7 @@ async function main() {
      the form used to get wrong: `allow_profile: true` in ~/.claunch.yaml, the
      CLI wizard offering the row, and the browser greying it anyway. */
   reports.lead = {
-    may_choose: ["args", "model", "borrow", "null_token", "profile", "worktree"],
+    may_choose: ["args", "model", "effort", "borrow", "null_token", "profile", "worktree"],
     spawnable_harnesses: [],
     workspaces: [{ name: "repo", path: "F:/repo", exists: true }],
     soft_blocked_by: [],
@@ -413,6 +426,18 @@ async function main() {
   check("what the policy opened is handed back, what it shuts stays grey",
         greyed(), [false, false, false, false, false, false, false, true, true,
                    true, false, false]);
+  /* Effort rides the args unlock on the daemon and is reported under its
+     own name. The row used to stay grey whatever the report said, so a
+     claude child could not be given an effort from this form at all. */
+  check("the effort the policy opened is handed back",
+        [form.effort.disabled, form.effort.value], [false, "xhigh"]);
+  form.effort.value = "low";
+  ctx.sync();
+  check("a picked effort survives the re-sync and travels as the child's own",
+        [form.effort.value, ctx.fields(form, {}).effort], ["low", "low"]);
+  form.effort.value = "xhigh";
+  check("the parent's effort left as it is is not sent",
+        ctx.fields(form, {}).effort, undefined);
   check("a child's workflows are re-read for where the child will stand",
         wfRefreshes > 0, true);
   /* The worktree picker is read from that same directory, so the report's

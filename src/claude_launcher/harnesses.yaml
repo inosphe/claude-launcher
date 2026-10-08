@@ -5,6 +5,11 @@ harnesses:
   claude:
     builtin: true
     models: [haiku, sonnet, opus, fable]
+    # `claude --effort <level>` (verified against `claude --help` on
+    # 2026-10-08: low, medium, high, xhigh, max). The flag wins over the
+    # profile's CLAUDE_CODE_EFFORT_LEVEL for that one session.
+    efforts: [low, medium, high, xhigh, max]
+    effort_args: [--effort, "{effort}"]
     # Launches pass the alias itself (--model=opus); this prefix is what
     # reads a reported id (claude-opus-5) back into that alias.
     model_id_prefix: claude
@@ -99,6 +104,10 @@ harnesses:
     input_readiness: bracketed-paste
     submit_strategy: screen
     paste_enter_delay: 0.2
+    # Codex reads an image off the clipboard on Ctrl+V (codex 0.160.1: "Paste
+    # an image with `Ctrl+V` to attach it to your next message."). tmux key
+    # names: C- is Ctrl.
+    image_paste_keys: [C-v]
     # cflow v2 capabilities (docs/cflow-v2.md 6.1/6.3). Verified against
     # `codex exec --help` on 2026-10-06: the `exec` subcommand runs one prompt
     # and exits, --output-schema <FILE> (a file path), --json (JSONL events),
