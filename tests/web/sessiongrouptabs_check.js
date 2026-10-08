@@ -123,6 +123,8 @@ function load(seed) {
     constLine("SESSION_GROUPS") + letBlock("sessionGroupOrder") + "\n" +
     constLine("SESSION_GROUP_TAB_KEY") + letBlock("sessionGroupTab") + "\n" +
     "let sessionGroupTabScrollReset = false;\n" +
+    // The drag on the strip needs real pointer input: tabdragscroll_browser.cjs.
+    "function enableTabDragScroll() {}\n" +
     [slice("sessionWorkspaceLabel"), slice("sessionGroupActiveTab"),
      slice("setSessionGroupTab"), slice("sessionGroupTabRows"),
      slice("scrollSessionListTop"), slice("selectSessionGroupTab"),

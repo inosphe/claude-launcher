@@ -174,6 +174,8 @@ function openDetail() {}
 function openSpawnModal() {}
 function railCardKey() {}
 function go() {}
+// The drag on the strip needs real pointer input: tabdragscroll_browser.cjs.
+function enableTabDragScroll() {}
 `;
 
 const names = [
