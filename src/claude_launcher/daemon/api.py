@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import secrets
+import socket
 import time
 from datetime import datetime, timezone
 from dataclasses import replace
@@ -46,7 +47,7 @@ from .. import install
 from .. import install_plan
 from .. import session_commits
 from .. import beads_db, beads_meta
-from .. import ghcli, prflow, projects, reposync, spawn as spawn_mod, store, workspaces
+from .. import ghcli, prflow, projects, reposync, reposync_flow, spawn as spawn_mod, store, workspaces
 from .. import plugins, prompt_packs, settings
 from .. import worktree as worktree_mod
 from . import beads as beads_mod, channel, clipboard, connections
@@ -718,6 +719,13 @@ def build_app(
     r.add_get("/api/reposync/requests/{rid}", h_reposync_request_get)
     r.add_post("/api/reposync/requests/{rid}/approve", h_reposync_request_approve)
     r.add_post("/api/reposync/requests/{rid}/reject", h_reposync_request_reject)
+    # The Workspaces page's Sync panel (claunch-tqm2e). The person pressing
+    # the button in the web UI is the approval; these never go through the
+    # gate above, which exists for sessions that cannot approve themselves.
+    r.add_get("/api/reposync/workspaces/{name}/status", h_reposync_ws_status)
+    r.add_post("/api/reposync/workspaces/{name}/sync", h_reposync_ws_sync)
+    r.add_post("/api/reposync/workspaces/{name}/branch-push", h_reposync_ws_branch_push)
+    r.add_post("/api/reposync/workspaces/{name}/branch-pull", h_reposync_ws_branch_pull)
     r.add_get("/api/relay/meshes", h_relay_meshes)
     # A relay daemon was renamed: rewrite every mesh reference to it here.
     r.add_post("/api/relay/peers/{machine}/rename", h_relay_peer_rename)
@@ -5789,6 +5797,164 @@ async def h_relay_peer_repos(request: web.Request) -> web.Response:
     except Exception as exc:  # noqa: BLE001 — PeerError, an old peer's 404
         return json_error(502, f"{machine}: {exc}")
     return json_response({"machine": machine, "repos": payload.get("repos", [])})
+
+
+#: How long one peer gets to answer /peer/repos before the Sync panel
+#: reports it unreadable and plans without it.
+PEER_REPOS_TIMEOUT = 15.0
+
+
+async def _peer_repos_all(request: web.Request) -> Tuple[Dict[str, list], List[str]]:
+    """Every relay peer's registered repositories, plus one line per peer
+    that could not be read. Peers are advisory: no relay, or a peer whose
+    daemon predates reposync, narrows what the panel shows and nothing else."""
+    mm = _mesh_mgr(request)
+    if mm.peer_lister is None or mm.peer_transport is None:
+        return {}, ["relay uplink is not running -- peers not consulted"]
+    try:
+        names = await mm.peer_lister()
+    except Exception as exc:  # noqa: BLE001 — PeerError
+        return {}, [f"cannot list relay peers ({exc})"]
+    me = (request.app["relay_state"]() or {}).get("name")
+    found: Dict[str, list] = {}
+    problems: List[str] = []
+
+    async def one(machine: str) -> None:
+        try:
+            payload = await asyncio.wait_for(
+                mm.peer_transport(machine, "/peer/repos", {}), PEER_REPOS_TIMEOUT
+            )
+        except Exception as exc:  # noqa: BLE001 — PeerError, timeout, an old peer's 404
+            problems.append(f"{machine}: cannot read its repositories ({exc or type(exc).__name__})")
+            return
+        found[machine] = list(payload.get("repos") or [])
+
+    await asyncio.gather(*(one(m) for m in sorted(names) if m != me))
+    return found, sorted(problems)
+
+
+def _ws_path(request: web.Request) -> Tuple[Optional[str], Optional[web.Response]]:
+    name = request.match_info["name"]
+    ws = workspaces.find(name)
+    if ws is None or ws.name != name:
+        return None, json_error(404, f"no workspace named {name!r}")
+    return ws.path, None
+
+
+def _machine_name(request: web.Request) -> str:
+    """This machine as the shared remote's branch namespace knows it: the
+    relay name when there is one, as the CLI uses (reposync_flow.relay_identity)."""
+    return str((request.app["relay_state"]() or {}).get("name") or socket.gethostname())
+
+
+async def h_reposync_ws_status(request: web.Request) -> web.Response:
+    """The Sync panel's view of one workspace: remotes, the peers sharing an
+    address with it, and the plan a sync of its default branch would carry
+    out (``?fetch=0`` plans against the remote-tracking refs as they are)."""
+    path, err = _ws_path(request)
+    if err is not None:
+        return err
+    name = request.match_info["name"]
+    do_fetch = request.query.get("fetch", "1") not in ("0", "false", "no")
+    if request.query.get("peers", "1") in ("0", "false", "no"):
+        peers, problems = {}, []
+    else:
+        peers, problems = await _peer_repos_all(request)
+    doc = await asyncio.to_thread(
+        reposync_flow.workspace_status, path, name, peers, problems,
+        do_fetch=do_fetch, remote=request.query.get("remote") or None,
+        branch=request.query.get("branch") or None,
+    )
+    doc["machine"] = _machine_name(request)
+    return json_response(doc)
+
+
+def _ws_sync(path: str, name: str, body: dict) -> Tuple[int, dict]:
+    repo = reposync.toplevel(path)
+    remote = str(body.get("remote") or "")
+    if not remote:
+        raise reposync.SyncError("no remote named -- read the status first")
+    p = reposync.plan(repo, remote, str(body.get("branch") or "") or None)
+    key = reposync.url_key(reposync.remotes(repo).get(remote, ""))
+    card = reposync_flow.plan_card(p, workspace=name, key=key)
+    # the person confirmed the plan they were shown; a branch or a remote
+    # that moved since is a plan nobody confirmed
+    if p.local != body.get("local") or p.upstream != body.get("upstream"):
+        return 409, {"error": "the branch or the remote moved since the plan was shown",
+                     "stale": True, "plan": card}
+    if p.action == reposync.UP_TO_DATE:
+        return 200, {"ok": True, "plan": card, "new": p.local, "pushed": False}
+    # the daemon has no session scratch of its own; its rebase worktrees live
+    # under the daemon directory, never in the workspace
+    result = reposync.execute(p, scratch=str(paths.daemon_dir() / "reposync-scratch"))
+    reposync.git(repo, "config", reposync.REMOTE_CONFIG, remote, check=False)
+    board = []
+    if result.rewritten:
+        board = reposync_flow.annotate_board(repo, result.rewritten, remote=remote, branch=p.branch)
+    return 200, {"ok": True, "plan": card, **result.to_dict(), "board": board}
+
+
+async def h_reposync_ws_sync(request: web.Request) -> web.Response:
+    """Carry out the plan the person confirmed in the Sync panel. The body
+    names the plan's two tips; if either moved, nothing runs (409) and the
+    fresh plan comes back to be confirmed again."""
+    path, err = _ws_path(request)
+    if err is not None:
+        return err
+    body = await _json_body(request)
+    try:
+        status, doc = await asyncio.to_thread(_ws_sync, path, request.match_info["name"], body)
+    except reposync.SyncError as exc:
+        return json_error(409, str(exc))
+    return json_response(doc, status=status)
+
+
+async def h_reposync_ws_branch_push(request: web.Request) -> web.Response:
+    """Publish a local work branch as ``<this machine>/<branch>``."""
+    path, err = _ws_path(request)
+    if err is not None:
+        return err
+    body = await _json_body(request)
+    branch = str(body.get("branch") or "")
+    if not branch:
+        return json_error(400, "branch is required")
+    machine = _machine_name(request)
+
+    def run() -> dict:
+        repo = reposync.toplevel(path)
+        remote = reposync.choose_remote(repo, str(body.get("remote") or "") or None)
+        ref = reposync.publish_branch(repo, remote, branch, machine,
+                                      force_with_lease=bool(body.get("force_with_lease")))
+        sha = reposync.git(repo, "rev-parse", f"refs/heads/{branch}")
+        return {"ok": True, "remote": remote, "ref": ref, "sha": sha}
+
+    try:
+        return json_response(await asyncio.to_thread(run))
+    except reposync.SyncError as exc:
+        return json_error(409, str(exc))
+
+
+async def h_reposync_ws_branch_pull(request: web.Request) -> web.Response:
+    """Fetch another machine's ``<machine>/<branch>`` into the local branch
+    of the same name, fast-forward only."""
+    path, err = _ws_path(request)
+    if err is not None:
+        return err
+    body = await _json_body(request)
+    machine, branch = str(body.get("machine") or ""), str(body.get("branch") or "")
+    if not machine or not branch:
+        return json_error(400, "machine and branch are required")
+
+    def run() -> dict:
+        repo = reposync.toplevel(path)
+        remote = reposync.choose_remote(repo, str(body.get("remote") or "") or None)
+        local, sha = reposync.receive_branch(repo, remote, machine, branch)
+        return {"ok": True, "remote": remote, "branch": local, "sha": sha}
+
+    try:
+        return json_response(await asyncio.to_thread(run))
+    except reposync.SyncError as exc:
+        return json_error(409, str(exc))
 
 
 async def h_reposync_request_submit(request: web.Request) -> web.Response:

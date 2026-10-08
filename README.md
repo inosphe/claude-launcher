@@ -2401,6 +2401,23 @@ it. Agents use the MCP tool `repo_sync` (`status` / `plan` / `sync` /
 `branch_push` / `branch_pull`); its push answers `waiting_approval` with a
 request id and is carried out by a second call once approved.
 
+The same operations are on the web UI's **Workspaces** page (`#/workspaces`):
+each workspace row has a **Sync** button that opens a panel with its remotes,
+the relay peers whose clones share an address with it (their master tip
+against the remote, and their unpushed count as they last fetched), and the
+master plan with one button for its action (Fast-forward / Push /
+Rebase & push). Pressing it is the person's approval, as the y/N is at a
+terminal, so it does not go through the approval card. The request carries
+the two tips the panel showed; if the local branch or the remote moved in
+between, nothing runs and the fresh plan is shown to be confirmed again. The
+panel also pushes a local work branch as `<this machine>/<branch>` and pulls
+another machine's (fast-forward only). Peers are advisory throughout: with no
+relay, or a peer whose daemon predates reposync, the panel says so and still
+plans against the shared remote. HTTP: `GET
+/api/reposync/workspaces/<name>/status[?fetch=0]`, `POST .../sync`
+(`{remote, branch, local, upstream}`), `POST .../branch-push`
+(`{branch, force_with_lease}`), `POST .../branch-pull` (`{machine, branch}`).
+
 ### VS Code in the browser (one code-server per workspace and worktree)
 
 The daemon can run [code-server](https://github.com/coder/code-server) next to
@@ -2418,7 +2435,7 @@ open starts it again. Extensions and `User/settings.json`·`keybindings.json`
 are shared by every server; each server keeps its own state (open editors,
 unsaved-buffer backups) under `~/.claude-launcher/vscode/servers/`.
 
-- **Opening**: the VS Code button on each row of Settings → Workspaces (with a
+- **Opening**: the VS Code button on each row of the Workspaces page (with a
   picker for that workspace's worktrees), the VS Code block of a session's
   panel, or `claunch workspace code <workspace> [--worktree NAME]`, which
   prints the URL. With no workspace it lists the running servers.
@@ -3840,7 +3857,8 @@ The create form's **Directory** is a picker over your
 [workspaces](#workspaces-where-a-session-may-be-spawned) — free-text paths are
 deliberately not accepted here, since a mistyped one is both easy and
 expensive. The **manage** link beside the field opens `#/workspaces`, the
-Settings page's **Workspaces** section, which edits that registry: register a directory (checked against the *daemon's*
+**Workspaces** page (its own entry in the rail; `#/settings/workspaces`, where
+it used to be a Settings tab, opens it too), which edits that registry: register a directory (checked against the *daemon's*
 filesystem before it is stored, so a bad path is refused with the reason
 instead of failing later at spawn), see which entries are missing right now
 and how many sessions are running in each, and unregister one — the directory
@@ -3848,10 +3866,12 @@ itself is never touched, and sessions already in it keep running. The list
 refreshes in place, so a `claunch workspace add` in a terminal shows up here
 too, and `(daemon cwd)` is always available in the picker.
 
+The Workspaces page also carries the two things keyed by the registry,
+projects and each workspace's beads board, and each row's **Sync** panel
+([repository sync](#syncing-a-repository-across-machines-claunch-reposync)).
+
 The Settings page has four sections. **General** is the machine's own
-settings. **Workspaces** (`#/settings/workspaces`; `#/workspaces` opens it
-too) is the registry described above, together with the two things keyed by
-it: projects and each workspace's beads board.
+settings.
 **Profiles** (`#/settings/profiles`) is the profile manager: one row per
 profile with its harness, provider, config directory and permission mode, and
 the control for that mode — which is the one profile setting every session

@@ -463,6 +463,7 @@ CHECKS = [
         "relaysettings_check.js",
         "profilesettings_check.js",
         "settingsworkspaces_check.js",
+        "workspacesync_check.js",
         "beadsboardsetup_check.js",
         "installsettings_check.js",
         "prompt_packs_check.js",
