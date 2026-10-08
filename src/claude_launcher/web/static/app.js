@@ -30595,7 +30595,24 @@ function sessHead(s) {
   const close = el("button", "sess-close", "×");
   close.title = "close details";
   close.addEventListener("click", closeDetail);
+  // "Spawn same setup": the spawn wizard under this session, filled with what
+  // it was itself created with (spawnSameSeed). Denied on the same state as
+  // the plain Spawn below, for the same reason.
+  const same = el("button", "wf-btn", "Spawn same setup");
+  same.title = s.status === "exited"
+    ? "an exited session cannot spawn children"
+    : "the spawn wizard with this session as the parent, filled with the "
+      + "role, mesh, workflow, task, worktree and prompt packs it was "
+      + "created with";
+  if (s.status === "exited") same.disabled = true;
+  same.addEventListener("click", () => openSpawnModal(s.name,
+    { seed: spawnSameSeed(s) }));
+  // Docked beside its own terminal the head drops the verbs reachable from
+  // elsewhere (the rail row's + is the plain Spawn; Open terminal would open
+  // what is open). "Spawn same setup" has no other way in, so it stays
+  // (claunch-b6ril).
   if (mine && terminalOnScreen() && !MOBILE_MQ.matches) {
+    head.appendChild(same);
     head.appendChild(close);
     return head;
   }
@@ -30612,17 +30629,7 @@ function sessHead(s) {
   head.appendChild(spawn);
 
   // The same wizard, filled with what this session was itself created with
-  // (spawnSameSeed): another one like it, one press away, under it. Denied
-  // on the same state as the plain Spawn, for the same reason.
-  const same = el("button", "wf-btn", "Spawn same setup");
-  same.title = s.status === "exited"
-    ? "an exited session cannot spawn children"
-    : "the spawn wizard with this session as the parent, filled with the "
-      + "role, mesh, workflow, task, worktree and prompt packs it was "
-      + "created with";
-  if (s.status === "exited") same.disabled = true;
-  same.addEventListener("click", () => openSpawnModal(s.name,
-    { seed: spawnSameSeed(s) }));
+  // (spawnSameSeed), built above because the docked arrangement keeps it.
   head.appendChild(same);
 
   // The PR wizard: push what this session's directory holds under a new

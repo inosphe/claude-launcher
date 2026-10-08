@@ -381,7 +381,10 @@ let h = headOf("coder3");
 check("docked beside its own terminal: the × stays",
       kidsOf(h, "sess-close").length === 1);
 check("...and no Open terminal that opens what is open",
-      kidsOf(h, "wf-btn").length === 0);
+      !kidsOf(h, "wf-btn").some((b) => b.text === "Open terminal"));
+check("...but Spawn same setup, which has no other way in, stays",
+      kidsOf(h, "wf-btn").map((b) => b.text).join(",") === "Spawn same setup",
+      kidsOf(h, "wf-btn").map((b) => b.text));
 check("...but still says which session", h.kids[0].text === "coder3");
 
 h = headOf("s7");

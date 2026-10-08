@@ -49,9 +49,13 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const head = slice("sessHead");
 check("the head builds a 'Spawn same setup' button",
       head.includes('el("button", "wf-btn", "Spawn same setup")'));
-check("...placed right after the plain Spawn",
-      head.indexOf('"Spawn same setup"') > head.indexOf("head.appendChild(spawn)")
-      && head.indexOf('"Spawn same setup"') < head.indexOf('"Open PR"'));
+const afterSpawn = head.indexOf("head.appendChild(same)", head.indexOf("head.appendChild(spawn)"));
+check("...appended right after the plain Spawn, before Open PR",
+      afterSpawn > 0 && afterSpawn < head.indexOf('"Open PR"'));
+const docked = head.slice(head.indexOf("if (mine && terminalOnScreen()"));
+check("...and kept when the panel is docked beside its own terminal (claunch-b6ril)",
+      /^if \(mine && terminalOnScreen\(\) && !MOBILE_MQ\.matches\) \{\s*head\.appendChild\(same\);/
+        .test(docked));
 check("...which opens the spawn wizard under this session with its own seed",
       /openSpawnModal\(s\.name,\s*\{ seed: spawnSameSeed\(s\) \}\)/.test(head));
 check("...and is greyed on an exited session",
