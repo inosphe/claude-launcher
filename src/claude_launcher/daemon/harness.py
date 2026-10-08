@@ -1050,6 +1050,10 @@ def build_command(
             entry = harness_registry.get(sdef.harness)
             model_id = entry.model_aliases.get(sdef.model, sdef.model)
             argv.append(f"--model={model_id}")
+        if sdef.effort:
+            entry = harness_registry.get(sdef.harness)
+            argv.extend(str(arg).replace("{effort}", sdef.effort)
+                        for arg in entry.effort_args)
         argv.extend(sdef.args)
         if opening and not restoring:
             # The positional prompt — claude's first turn; see _append_opening

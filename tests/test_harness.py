@@ -154,6 +154,30 @@ def test_selected_claude_model_is_an_argv_alias_and_profile_env_still_maps_it(
     assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "vendor/opus-v2"
 
 
+def test_selected_claude_effort_becomes_the_effort_flag_before_free_args(
+    home, tmp_path
+):
+    profile.create("work")
+    sdef = harness.normalize(
+        SessionDef(
+            name="x", profile="work", cwd=str(tmp_path),
+            model="opus", effort="xhigh", args=("--verbose",),
+        )
+    )
+
+    argv, _, _ = harness.build_command(sdef)
+    i = argv.index("--effort")
+    assert argv[i:i + 3] == ["--effort", "xhigh", "--verbose"]
+
+
+def test_claude_effort_outside_the_declared_levels_is_refused(home, tmp_path):
+    profile.create("work")
+    with pytest.raises(HarnessError, match="unknown effort 'turbo'.*xhigh, max"):
+        harness.normalize(
+            SessionDef(name="x", profile="work", cwd=str(tmp_path), effort="turbo")
+        )
+
+
 def test_declared_non_claude_model_is_inserted_before_free_args(home, tmp_path):
     _declare_harness("other", models=["luna", "terra", "sol"])
     _profile_for("work", "other")

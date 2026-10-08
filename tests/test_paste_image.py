@@ -543,3 +543,15 @@ def test_an_undelivered_paste_does_not_hold_the_clipboard(home, tmp_path,
             assert asyncio.get_running_loop().time() - started < 10.0
 
     _run(tmp_path, body, image_paste_keys=["M-v"])
+
+
+@pytest.mark.parametrize("name, keys", [("claude", ["M-v"]), ("codex", ["C-v"])])
+def test_the_packaged_harnesses_declare_the_key_they_read_an_image_with(
+    home, name, keys
+):
+    """Claude Code takes an image on Alt+V and Codex on Ctrl+V. Without the
+    declaration the route stores the image and answers 'no image paste key
+    declared' -- which is what a codex session got before this was set."""
+    from claude_launcher import harnesses as harness_registry
+
+    assert harness_registry.registry().get(name).image_paste_keys == keys
