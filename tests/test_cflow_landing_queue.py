@@ -408,7 +408,7 @@ def test_a_childs_trigger_files_its_request_on_the_parents_queue(proj, feature, 
     "parent, workflow, issues, why",
     [
         (None, "lead", ["x-1"], "no parent session"),
-        ("lead", "plain", ["x-1"], "declares no 'landing_queue'"),
+        ("lead", "plain", ["x-1"], "declares a landing_queue"),
         ("lead", "lead", [], "holds no issue in_review"),
         ("lead", "lead", None, "board could not be read"),
     ],
@@ -470,28 +470,49 @@ def _fallback_clock(wcwd, sessions, roles, parent=None):
     )
 
 
-@pytest.mark.parametrize("parent", [None, "gone", "plain"])
-def test_a_worker_without_a_usable_parent_queue_files_on_the_mesh_leader(
-    proj, feature, monkeypatch, parent
-):
+def _fallback_run(wcwd, sessions, roles, parent=None):
+    clock = _fallback_clock(wcwd, sessions, roles, parent=parent)
+    return asyncio.run(clock._perform(wcwd, "w1", {"do": "enqueue-landing"}))
+
+
+def test_a_root_worker_files_on_its_sibling_root_leader(proj, feature, monkeypatch):
+    # Two sessions with no parent count as siblings.
     lcwd = state_mod.resolve_cwd(str(proj))
     engine.start("lead", cwd=lcwd, scope="lead")
-    if parent == "plain":
-        # a parent that drives a run which declares no landing_queue
-        engine.start("plain", cwd=lcwd, scope="plain")
     wcwd = _worker_at_request(feature)
     monkeypatch.setattr(landing, "in_review_of", lambda repo, session: ["x-1"])
-    sessions = [_Session("lead", lcwd)]
-    if parent == "plain":
-        sessions.append(_Session("plain", lcwd))
-    clock = _fallback_clock(
-        wcwd, sessions, {"w1": ["worker"], "lead": ["leader"]}, parent=parent,
+    performed, detail = _fallback_run(
+        wcwd, [_Session("lead", lcwd)], {"w1": ["worker"], "lead": ["leader"]},
     )
-    performed, detail = asyncio.run(clock._perform(wcwd, "w1", {"do": "enqueue-landing"}))
     assert performed, detail
+    assert "no parent session" in detail and "fell back to 'lead'" in detail
     assert "lead's landing queue" in detail and "added x-1" in detail
     entry = _queue(engine.status(cwd=lcwd, scope="lead"))["x-1"]
     assert entry["tip"] == feature.tip and entry["requested_by"] == "w1"
+
+
+@pytest.mark.parametrize("mid", ["plain", "exited", "norun"])
+def test_a_parent_that_cannot_merge_hands_the_request_to_the_grandparent(
+    proj, feature, monkeypatch, mid
+):
+    lcwd = state_mod.resolve_cwd(str(proj))
+    engine.start("lead", cwd=lcwd, scope="lead")
+    if mid == "plain":
+        engine.start("plain", cwd=lcwd, scope="mid")   # a run with no landing_queue
+    if mid == "exited":
+        other = _other_checkout(proj)
+        engine.start("lead", cwd=other, scope="mid")   # a queue nobody drives
+    wcwd = _worker_at_request(feature)
+    monkeypatch.setattr(landing, "in_review_of", lambda repo, session: ["x-1"])
+    # The grandparent need not hold the leader role: it is a direct ancestor.
+    performed, detail = _fallback_run(
+        wcwd,
+        [_Session("lead", lcwd), _Session("mid", lcwd, parent="lead", exited=mid == "exited")],
+        {"w1": ["worker"], "lead": ["worker"], "mid": ["worker"]}, parent="mid",
+    )
+    assert performed, detail
+    assert "parent 'mid'" in detail and "fell back to 'lead'" in detail
+    assert "x-1" in _queue(engine.status(cwd=lcwd, scope="lead"))
 
 
 def test_the_parents_own_queue_wins_over_the_mesh_leader(proj, feature, monkeypatch):
@@ -501,13 +522,38 @@ def test_the_parents_own_queue_wins_over_the_mesh_leader(proj, feature, monkeypa
     engine.start("lead", cwd=mid, scope="mid")     # the parent holds a queue too
     wcwd = _worker_at_request(feature)
     monkeypatch.setattr(landing, "in_review_of", lambda repo, session: ["x-1"])
-    clock = _fallback_clock(
+    performed, detail = _fallback_run(
         wcwd, [_Session("lead", lcwd), _Session("mid", mid)],
         {"w1": ["worker"], "lead": ["leader"], "mid": ["worker"]}, parent="mid",
     )
-    performed, detail = asyncio.run(clock._perform(wcwd, "w1", {"do": "enqueue-landing"}))
     assert performed, detail
+    assert "fell back" not in detail
     assert "x-1" in _queue(engine.status(cwd=mid, scope="mid"))
+    assert _queue(engine.status(cwd=lcwd, scope="lead")) == {}
+
+
+@pytest.mark.parametrize(
+    "parent, lead_parent, sessions",
+    [
+        ("top", None, ["top"]),      # the leader is a sibling of the parent (an uncle)
+        (None, "w1", []),            # the leader is the worker's own child
+        ("gone", None, []),          # the parent is not a session; the leader is a root
+    ],
+)
+def test_a_leader_that_is_no_sibling_or_ancestor_is_refused(
+    proj, feature, monkeypatch, parent, lead_parent, sessions
+):
+    lcwd = state_mod.resolve_cwd(str(proj))
+    engine.start("lead", cwd=lcwd, scope="lead")
+    wcwd = _worker_at_request(feature)
+    monkeypatch.setattr(landing, "in_review_of", lambda repo, session: ["x-1"])
+    performed, detail = _fallback_run(
+        wcwd,
+        [_Session("lead", lcwd, parent=lead_parent)] + [_Session(s, lcwd) for s in sessions],
+        {"w1": ["worker"], "lead": ["leader"]}, parent=parent,
+    )
+    assert not performed
+    assert "neither a sibling nor a direct ancestor" in detail
     assert _queue(engine.status(cwd=lcwd, scope="lead")) == {}
 
 
@@ -518,10 +564,9 @@ def test_a_leader_with_two_queue_runs_in_this_repository_is_a_skip(proj, feature
     engine.start("lead", cwd=other, scope="lead")
     wcwd = _worker_at_request(feature)
     monkeypatch.setattr(landing, "in_review_of", lambda repo, session: ["x-1"])
-    clock = _fallback_clock(
+    performed, detail = _fallback_run(
         wcwd, [_Session("lead", lcwd)], {"w1": ["worker"], "lead": ["leader"]},
     )
-    performed, detail = asyncio.run(clock._perform(wcwd, "w1", {"do": "enqueue-landing"}))
     assert not performed
     assert "no parent session" in detail and "ambiguous" in detail
     assert _queue(engine.status(cwd=lcwd, scope="lead")) == {}
@@ -532,10 +577,9 @@ def test_a_leader_without_a_queue_run_is_a_skip(proj, feature, monkeypatch):
     lcwd = state_mod.resolve_cwd(str(proj))      # no run started here
     wcwd = _worker_at_request(feature)
     monkeypatch.setattr(landing, "in_review_of", lambda repo, session: ["x-1"])
-    clock = _fallback_clock(
+    performed, detail = _fallback_run(
         wcwd, [_Session("lead", lcwd)], {"w1": ["worker"], "lead": ["leader"]},
     )
-    performed, detail = asyncio.run(clock._perform(wcwd, "w1", {"do": "enqueue-landing"}))
     assert not performed
     assert "no parent session" in detail
     assert "declares a landing_queue" in detail
@@ -546,12 +590,11 @@ def test_a_mesh_without_a_leader_is_a_skip(proj, feature, monkeypatch):
     engine.start("lead", cwd=lcwd, scope="lead")
     wcwd = _worker_at_request(feature)
     monkeypatch.setattr(landing, "in_review_of", lambda repo, session: ["x-1"])
-    clock = _fallback_clock(
+    performed, detail = _fallback_run(
         wcwd, [_Session("lead", lcwd)], {"w1": ["worker"], "lead": ["reviewer"]},
     )
-    performed, detail = asyncio.run(clock._perform(wcwd, "w1", {"do": "enqueue-landing"}))
     assert not performed
-    assert "has no leader" in detail
+    assert "no leader in mesh" in detail
     assert _queue(engine.status(cwd=lcwd, scope="lead")) == {}
 
 
@@ -588,13 +631,12 @@ def test_a_parent_whose_run_is_ambiguous_is_not_bypassed(proj, feature, monkeypa
     engine.start("lead", cwd=other, scope="mid")
     wcwd = _worker_at_request(feature)
     monkeypatch.setattr(landing, "in_review_of", lambda repo, session: ["x-1"])
-    clock = _fallback_clock(
-        wcwd, [_Session("lead", lcwd), _Session("mid", lcwd)],
+    performed, detail = _fallback_run(
+        wcwd, [_Session("lead", lcwd), _Session("mid", lcwd, parent="lead")],
         {"w1": ["worker"], "lead": ["leader"], "mid": ["worker"]}, parent="mid",
     )
-    performed, detail = asyncio.run(clock._perform(wcwd, "w1", {"do": "enqueue-landing"}))
     assert not performed
-    assert "drives runs in 2 directories" in detail and "leader" not in detail
+    assert "parent 'mid' has 2 runs" in detail and "leader" not in detail
     assert _queue(engine.status(cwd=lcwd, scope="lead")) == {}
 
 
@@ -616,19 +658,30 @@ class _Meshes:
 
 def test_a_worker_in_several_meshes_is_told_the_candidate_leaders(proj, feature, monkeypatch):
     lcwd = state_mod.resolve_cwd(str(proj))
+    other = _other_checkout(proj)
     engine.start("lead", cwd=lcwd, scope="lead")
+    engine.start("lead", cwd=other, scope="lead-b")
     wcwd = _worker_at_request(feature)
     monkeypatch.setattr(landing, "in_review_of", lambda repo, session: ["x-1"])
+    meshes = _Meshes(_Mesh({"w1": ["worker"], "lead": ["leader"]}, name="m-a"),
+                     _Mesh({"w1": ["worker"], "lead-b": ["leader"]}, name="m-b"))
     clock = cflow_clock.TriggerClock(
-        _Manager([_Session("w1", wcwd), _Session("lead", lcwd)]),
-        _Meshes(_Mesh({"w1": ["worker"], "lead": ["leader"]}, name="m-a"),
-                _Mesh({"w1": ["worker"], "lead-b": ["leader"]}, name="m-b")),
+        _Manager([_Session("w1", wcwd), _Session("lead", lcwd), _Session("lead-b", other)]),
+        meshes,
     )
     performed, detail = asyncio.run(clock._perform(wcwd, "w1", {"do": "enqueue-landing"}))
     assert not performed
-    assert "several meshes" in detail
-    assert "m-a: lead" in detail and "m-b: lead-b" in detail
+    assert "several leaders can merge (lead, lead-b)" in detail
     assert _queue(engine.status(cwd=lcwd, scope="lead")) == {}
+    # One of the two not a sibling: the other is the only candidate.
+    clock = cflow_clock.TriggerClock(
+        _Manager([_Session("w1", wcwd), _Session("lead", lcwd),
+                  _Session("lead-b", other, parent="lead")]),
+        meshes,
+    )
+    performed, detail = asyncio.run(clock._perform(wcwd, "w1", {"do": "enqueue-landing"}))
+    assert performed, detail
+    assert "x-1" in _queue(engine.status(cwd=lcwd, scope="lead"))
 
 
 def test_the_clock_marks_landed_at_most_once_a_minute(proj, feature):

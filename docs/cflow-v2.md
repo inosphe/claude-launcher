@@ -2244,10 +2244,13 @@ spec:
 - v1 워커 → v2 부모: v1 `TriggerClock._enqueue_landing`은 부모 세션의 v1 런에서 큐를
   찾지 못하면 `runtime.holders("landing", parent)`로 v2 런을 찾아
   `runtime.collection_op("push", "landing", principal="child")`로 넣는다.
-- v1 워커의 부모가 병합을 수행할 수 없으면(부모 세션 없음, 부모가 구동하는 런 없음,
-  그 런에 착지 큐 없음) v1 `TriggerClock.leader_run`이 워커가 속한 mesh의 leader가
-  같은 저장소에서 구동하는 v1 큐 런 하나를 찾아 넣는다. 그런 런이 없거나 둘 이상이면,
-  또는 워커가 여러 mesh에 속하면 건너뛴다. v2 `push_to_leader`에는 이 폴백이 아직 없다.
+- v1 워커의 부모가 병합을 수행할 수 없으면(부모 세션 없음·종료, 부모가 구동하는 런
+  없음, 그 런에 착지 큐 없음) v1 `TriggerClock.landing_target`이 조부모부터 직계 조상을
+  차례로 보고 병합을 수행할 수 있는 가장 가까운 세션의 큐에 넣는다. 그런 조상이 없으면
+  `leader_run`이 워커의 형제(같은 부모. 둘 다 부모가 없으면 형제)인 mesh leader의 큐에
+  넣는다. 삼촌이나 자식 관계인 leader는 대상이 아니다. 모든 대상은 살아 있고, 같은
+  저장소에서 v1 큐 런을 하나만 구동해야 한다. 대상이 없거나 둘 이상이면 건너뛴다.
+  v2 `push_to_parent`/`push_to_leader`에는 이 폴백이 아직 없다.
 - MCP `landing_queue` 도구는 호출 세션의 v1 런에 `landing_queue`가 없고 v2 런이
   `landing` 컬렉션을 가지면 그 컬렉션을 보여 주고 바꾼다(`status` 값은 v1과 같다).
 - 한 세션에서 v1 `landing_queue`와 v2 `landing` 컬렉션을 동시에 가진 런이 있으면
