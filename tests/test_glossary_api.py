@@ -36,3 +36,34 @@ def test_http_crud_suggestions_search_resolution_and_errors(home, tmp_path):
             fuzzy = await client.get("/api/glossary?workspace=alpha&q=checkpiont")
             assert (await fuzzy.json())["terms"][0]["id"] == created["term"]["id"]
     asyncio.run(scenario())
+
+
+def test_composer_uses_target_session_workspace_and_returns_definition_snapshot(home, tmp_path):
+    from types import SimpleNamespace
+    from claude_launcher import glossary
+    alpha = tmp_path / "alpha"
+    beta = tmp_path / "beta"
+    alpha.mkdir(); beta.mkdir()
+    a = workspaces.add(str(alpha), "alpha")
+    b = workspaces.add(str(beta), "beta")
+    glossary.create(a, {"term": "자세히", "definition": "구체적인 설명"})
+    glossary.create(b, {"term": "자세히", "definition": "추가 탐색"})
+    sessions = {name: SimpleNamespace(sdef=SimpleNamespace(cwd=str(path)))
+                for name, path in [("s1", alpha), ("s2", beta), ("s3", tmp_path / "unregistered")]}
+    async def scenario():
+        app = web.Application()
+        app["manager"] = SimpleNamespace(get=lambda name: sessions[name])
+        glossary_api.install(app)
+        async with TestClient(TestServer(app)) as client:
+            for name, meaning in [("s1", "구체적인 설명"), ("s2", "추가 탐색")]:
+                response = await client.get(f"/api/sessions/{name}/glossary?q=자세히&workspace=beta")
+                data = await response.json()
+                assert data["terms"][0]["definition"] == meaning
+                response = await client.post(f"/api/sessions/{name}/glossary", json={
+                    "text": "[[term:자세히]] 해줘", "action": "compose", "workspace": "ignored"})
+                data = await response.json()
+                assert data["ready"] and meaning in data["delivery"]
+            assert (await client.post("/api/sessions/s1/glossary", json=[])).status == 400
+            assert (await client.post("/api/sessions/s1/glossary", json={"action": "oops"})).status == 400
+            assert (await client.get("/api/sessions/s3/glossary?q=자세히")).status == 404
+    asyncio.run(scenario())

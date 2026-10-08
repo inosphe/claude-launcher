@@ -12631,14 +12631,22 @@ function termInputNote(note, message, warn = false) {
 }
 
 async function sendKeyLine(field, btn, note) {
-  const text = field.value.trim();
-  if (!text || !currentName) return false;
+  let text = field.value.trim();
+  const target = currentName;
+  if (!text || !target || field.disabled) return false;
   note.classList.add("hidden");
   note.classList.remove("wf-warning");
   const wasField = field.disabled, wasBtn = btn.disabled;
   field.disabled = true;
   btn.disabled = true;
+  let preparingGlossary = false;
   try {
+    if (globalThis.GlossaryComposer) {
+      preparingGlossary = true;
+      text = await globalThis.GlossaryComposer.prepare(target, text);
+      preparingGlossary = false;
+    }
+    if (currentName !== target) return false;
     const inputId = `input-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     // This is an explicit operator action either way. The daemon uses the
     // short forced grace and submits an existing draft first, so a busy
@@ -12652,17 +12660,19 @@ async function sendKeyLine(field, btn, note) {
       ? { paste: text, enter: true, force: true, input_id: inputId, feedback }
       : { keys: [text, "Enter"], force: true, input_id: inputId, feedback };
     const resp = await api(
-      `/api/sessions/${encodeURIComponent(currentName)}/keys`,
+      `/api/sessions/${encodeURIComponent(target)}/keys`,
       { method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body) }
     );
     const doc = await resp.json().catch(() => ({}));
+    if (currentName !== target) return resp.ok;
     if (resp.ok && doc.queued) {
       // Nothing was typed: the session has ended, and the daemon holds the
       // line until it is resumed. Said on the spot, because the box empties
       // exactly as it does for a line that landed.
       field.value = "";
+      globalThis.GlossaryComposer?.reset();
       autogrowTermInput(field);
       termInputNote(note,
         `queued (${doc.position || 1} waiting) — typed when this session ` +
@@ -12675,6 +12685,7 @@ async function sendKeyLine(field, btn, note) {
     }
     if (resp.ok) {
       field.value = "";
+      globalThis.GlossaryComposer?.reset();
       autogrowTermInput(field);
       if (doc.score_goal) {
         const session = sessionsCache.find((s) => s.name === currentName);
@@ -12689,12 +12700,15 @@ async function sendKeyLine(field, btn, note) {
     }
     termInputNote(note, doc.error || "the session refused these keys", true);
     return false;
-  } catch {
-    termInputNote(note, "nothing was sent — the daemon is unreachable", true);
+  } catch (error) {
+    if (currentName === target) termInputNote(note, preparingGlossary ? error.message : "nothing was sent — the daemon is unreachable", true);
     return false;
   } finally {
-    field.disabled = wasField;
-    btn.disabled = wasBtn;
+    if (currentName === target) {
+      field.disabled = wasField;
+      btn.disabled = wasBtn;
+      if (preparingGlossary) globalThis.GlossaryComposer?.refresh();
+    }
   }
 }
 
@@ -12805,6 +12819,7 @@ function scoreGoalSettingsCard() {
 }
 
 function refreshTermInput() {
+  globalThis.GlossaryComposer?.reset();
   if (typeof renderScoreGoal === "function") renderScoreGoal();
   const field = $("term-input-field");
   const note = $("term-input-note");
@@ -38310,3 +38325,7 @@ if (typeof location !== "undefined" && new URLSearchParams(location.search).has(
 }
 
 boot();
+
+// Mount once; session identity is read on every lookup and before transmission.
+globalThis.GlossaryComposer?.mount({field: $("term-input-field"),
+  session: () => currentName, resize: autogrowTermInput});

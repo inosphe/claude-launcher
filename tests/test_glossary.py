@@ -149,3 +149,41 @@ def test_workspace_and_search_validation(ws):
         g.suggestions(ws, "invalid")
     with pytest.raises(g.GlossaryError):
         g.review(ws, "missing", "approve")
+
+
+def test_composer_detects_multiple_meanings_and_only_expands_explicit_choices(ws):
+    explain = g.create(ws, term("자세히 · 구체적 설명", aliases=["자세히"],
+        definition="일의 목적과 동기, 실행 방법을 구체적으로"))
+    research = g.create(ws, term("자세히 · 추가 탐색", aliases=["자세히"],
+        definition="현재 모르는 일에 대해 브라우저 검색을 포함해 추가 탐색"))
+    raw = "😀 자세히 설명하고 자세히 탐색해주세요"
+    found = g.analyze(ws, raw)
+    assert len(found["mentions"]) == 2
+    for mention in found["mentions"]:
+        assert raw[mention["start"]:mention["end"]] == "자세히"
+        assert {c["id"] for c in mention["candidates"]} == {explain["id"], research["id"]}
+    assert g.compose(ws, raw)["delivery"] == raw
+    assert not g.compose(ws, "[[term:자세히]] 설명해주세요")["ready"]
+    chosen = "😀 " + explain["reference"] + " 설명해주세요"
+    delivered = g.compose(ws, chosen)
+    assert delivered["ready"]
+    assert delivered["delivery"].startswith(chosen + "\n\n")
+    assert explain["definition"] in delivered["delivery"]
+    assert research["definition"] not in delivered["delivery"]
+    assert g.analyze(ws, chosen)["mentions"] == []
+    # Each send re-reads definitions, including deletion since a preview.
+    g.delete(ws, explain["id"])
+    assert not g.compose(ws, chosen)["ready"]
+
+
+def test_composer_literals_overlaps_and_incomplete_references(ws):
+    g.create(ws, term("RAG", aliases=[]))
+    g.create(ws, term("base model", aliases=[]))
+    g.create(ws, term("model", aliases=[]))
+    text = r"paragraph RAG base model \[[term:RAG]]"
+    assert [r["literal"] for r in g.analyze(ws, text)["mentions"]] == ["RAG", "base model"]
+    assert g.compose(ws, r"\[[term:RAG]]")["delivery"] == r"\[[term:RAG]]"
+    assert not g.compose(ws, "[[term:RAG")["ready"]
+    assert not g.compose(ws, "[[term:unknown]]")["ready"]
+    assert not g.compose(ws, "[[term:]")["ready"]
+    assert g.compose(ws, "ordinary text")["ready"]

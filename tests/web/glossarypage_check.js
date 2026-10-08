@@ -36,11 +36,13 @@ const field = name => all().find(n => n.name === name);
 async function settle() { for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve)); }
 (async () => {
   await ctx.GlossaryPage.open();
+  button('제안 검토').onclick();
   assert(all().some(n => n.tag === 'h4' && n.textContent === '<script>bad()</script>'));
   assert(!all().some(n => n.tag === 'script'));
   assert(calls.some(c => c.url.searchParams.get('workspace') === 'alpha'));
   button('수락').onclick(); await settle();
   assert(calls.some(c => c.method === 'POST' && c.body.decision === 'accept'));
+  button('등록된 용어').onclick();
   assert(button('편집') && button('삭제'));
   button('편집').onclick();
   field('definition').value = 'Edited meaning'; field('definition').oninput();
@@ -56,11 +58,12 @@ async function settle() { for (let i = 0; i < 8; i++) await new Promise(resolve 
   all().find(n => n.tag === 'form' && n.children.some(c => c.textContent === '저장')).onsubmit({preventDefault() {}});
   await settle();
   assert(calls.some(c => c.method === 'POST' && c.body.term === 'new term' && c.body.aliases.length === 2));
+  button('참조 확인').onclick();
   const ref = all().find(n => n.attributes['aria-label'] === '용어 참조 원문');
   ref.value = '[[term:#t1]]'; ref.oninput();
   all().find(n => n.tag === 'form' && n.children.some(c => c.textContent === '참조 확인')).onsubmit({preventDefault() {}});
   await settle();
-  assert(all().some(n => n.tag === 'pre' && n.textContent.includes('resolved')));
+  assert(all().some(n => n.textContent === '정의 확인됨'));
   const picker = all().find(n => n.attributes['aria-label'] === 'Workspace');
   picker.value = 'beta'; picker.onchange(); await settle();
   assert(calls.slice(-2).every(c => c.url.searchParams.get('workspace') === 'beta'));
