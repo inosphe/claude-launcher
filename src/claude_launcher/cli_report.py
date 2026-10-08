@@ -7,6 +7,11 @@ session has left, and ``check`` is the exit code a workflow's ``verify`` can
 gate on. See :mod:`claude_launcher.reports` for the naming and location rules
 and why they are what they are.
 
+``--name <purpose>`` turns any of them from the round report to an *artifact*:
+a page filed the same way for any purpose, at any point of a round. Without
+it, ``path``/``save`` mean the round report and ``check`` asks only about the
+round report, so an artifact filed mid-round cannot pass the wrapup gate.
+
 Every subcommand defaults ``--session`` to ``$CLAUNCH_SESSION``, so inside a
 claunch session none of them needs an argument.
 """
@@ -68,13 +73,15 @@ def _session(args: argparse.Namespace) -> str:
 
 
 def _cmd_path(args: argparse.Namespace) -> int:
-    path = reports.target(_session(args), args.issue, new=args.new)
+    path = reports.target(_session(args), args.issue, new=args.new, name=args.name)
     print(path)
     return 0
 
 
 def _cmd_save(args: argparse.Namespace) -> int:
-    dest = reports.save(_session(args), Path(args.file), args.issue, new=args.new)
+    dest = reports.save(
+        _session(args), Path(args.file), args.issue, new=args.new, name=args.name
+    )
     print(dest)
     return 0
 
@@ -82,10 +89,19 @@ def _cmd_save(args: argparse.Namespace) -> int:
 def _print_rows(rows: List[dict]) -> None:
     for row in rows:
         issue = row["issue"] or "-"
+        name = row.get("name") or "(round)"
         print(
-            f"{row['at']}  {row['session']:<10}  {issue:<16}  "
+            f"{row['at']}  {row['session']:<10}  {issue:<16}  {name:<16}  "
             f"{row['size']:>7}B  {row['path']}"
         )
+
+
+def _by_name(rows: List[dict], name: Optional[str]) -> List[dict]:
+    """Narrow rows to one artifact name; no name leaves every row."""
+    name = reports.check_name(name)
+    if not name:
+        return rows
+    return [r for r in rows if r.get("name") == name]
 
 
 def _cmd_ls(args: argparse.Namespace) -> int:
@@ -98,7 +114,7 @@ def _cmd_ls(args: argparse.Namespace) -> int:
     question it exists to answer.
     """
     if args.issue and not getattr(args, "session", None):
-        rows = reports.for_issue(args.issue)
+        rows = _by_name(reports.for_issue(args.issue), args.name)
         if args.json:
             print(json.dumps({"issue": args.issue, "reports": rows}, indent=2))
             return 0
@@ -109,7 +125,7 @@ def _cmd_ls(args: argparse.Namespace) -> int:
         return 0
 
     session = _session(args)
-    rows = reports.listing(session)
+    rows = _by_name(reports.listing(session), args.name)
     if args.issue:
         want = reports.issue_slug(args.issue)
         rows = [r for r in rows if reports.issue_slug(r["issue"]) == want]
@@ -133,9 +149,14 @@ def _cmd_check(args: argparse.Namespace) -> int:
     nothing else. Note what it does *not* claim — the check is per session,
     not per run. That is exact for improv-worker (one session, one round) and
     would need a run id in the filename to be exact for a workflow that loops.
+
+    Without ``--name`` only round reports count: an artifact filed earlier in
+    the round is a different page and says nothing about how the round ended.
     """
     session = _session(args)
+    name = reports.check_name(getattr(args, "name", None))
     rows = reports.listing(session)
+    rows = _by_name(rows, name) if name else reports.round_reports(rows)
     if args.issue:
         want = reports.issue_slug(args.issue)
         rows = [r for r in rows if reports.issue_slug(r["issue"]) == want]
@@ -145,10 +166,12 @@ def _cmd_check(args: argparse.Namespace) -> int:
         return 0
     where = reports.dir_for(session)
     for_issue = f" for issue {args.issue}" if args.issue else ""
+    what = f"artifact {name!r}" if name else "round report"
     print(
-        f"no round report{for_issue} for {session} in {where}\n"
+        f"no {what}{for_issue} for {session} in {where}\n"
         f"  write one: claunch report path"
         + (f" --issue {args.issue}" if args.issue else "")
+        + (f" --name {name}" if name else "")
         + " prints the file to create,\n"
         f"  or hand over a page written elsewhere: claunch report save <file.html>\n"
         f"  it must be real HTML and at least {reports.MIN_BYTES} bytes — an empty "
@@ -184,6 +207,9 @@ def check_main(argv: Optional[List[str]] = None) -> int:
         "--session", help="session name (default: $CLAUNCH_SESSION)"
     )
     parser.add_argument("--issue", help="require the report to be for this issue")
+    parser.add_argument(
+        "--name", help="check this artifact instead of the round report"
+    )
     args = parser.parse_args(argv)
     args.report_func = _cmd_check
     return _cmd(args)
@@ -200,12 +226,16 @@ def _cmd(args: argparse.Namespace) -> int:
 def register(sub) -> None:
     p = sub.add_parser(
         "report",
-        help="a session's round report (HTML), where the daemon indexes it",
+        help="a session's round report or artifact (HTML), where the daemon indexes it",
         description=(
             "One HTML page per round, written to "
             "<daemon dir>/reports/<session>/<UTC stamp>-<issue>.html and served "
             "by the daemon at /api/sessions/<session>/reports/<file>. Outside "
-            "every repository, so writing one never dirties a working tree."
+            "every repository, so writing one never dirties a working tree. "
+            "With --name, an artifact for any purpose is filed the same way as "
+            "<UTC stamp>-<issue>--<name>.html; with no issue (no board), the "
+            "issue half is 'no-issue' and the page is found through the session "
+            "and the Reports page."
         ),
     )
     rsub = p.add_subparsers(dest="report_command", required=True)
@@ -258,5 +288,13 @@ def register(sub) -> None:
     for parser in (p_path, p_save, p_ls, p_check):
         parser.add_argument(
             "--session", help="session name (default: $CLAUNCH_SESSION)"
+        )
+        parser.add_argument(
+            "--name",
+            help=(
+                "artifact purpose name (e.g. design-note): a page filed for any "
+                "purpose, kept apart from the round report. Omit for the round "
+                "report"
+            ),
         )
         parser.set_defaults(func=_cmd)
