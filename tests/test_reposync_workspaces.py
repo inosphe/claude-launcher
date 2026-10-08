@@ -191,6 +191,16 @@ def test_sync_agent_a_stages_isolated_child_without_executing_or_pushing(world, 
         parent, assignments = _agent_parent(client, world, monkeypatch)
         plan = await _status_plan(client)
         req = _shown(plan, agent_mode="agent", agent_parent=parent.sdef.name)
+        # Preview reads the shown refs without fetch, staging or execution.
+        from claude_launcher import reposync
+        with monkeypatch.context() as preview_patch:
+            preview_patch.setattr(reposync, "fetch", lambda *_: pytest.fail("preview must not fetch"))
+            resp = await client.post("/api/reposync/workspaces/proj/agent-preview",
+                                     json={**_shown(plan), "kind": "sync"}, headers=AUTH)
+            assert resp.status == 200
+            preview = await resp.json()
+        assert not assignments
+        assert "Whenever rebasing, use git rebase --rebase-merges" in preview["prompt"]
         # Concurrent double-clicks must stage only one child.
         responses = await asyncio.gather(*[
             client.post("/api/reposync/workspaces/proj/sync", json=req, headers=AUTH)
@@ -201,6 +211,8 @@ def test_sync_agent_a_stages_isolated_child_without_executing_or_pushing(world, 
         assert docs[0]["agent"]["session"] == docs[1]["agent"]["session"]
         assert len(assignments) == 1
         child, assignment, spawned_parent = assignments[0]
+        assert preview["prompt"] == assignment["task"] == child.sdef.task
+        assert docs[0]["agent"]["prompt"] == child.sdef.task
         assert spawned_parent == parent.sdef.name == child.sdef.parent
         assert child.sdef.profile == parent.sdef.profile
         assert Path(child.sdef.cwd) != world["a"]
@@ -215,6 +227,7 @@ def test_sync_agent_a_stages_isolated_child_without_executing_or_pushing(world, 
         status = await (await client.get("/api/reposync/workspaces/proj/status?peers=0&fetch=0",
                                         headers=AUTH)).json()
         assert status["agent"]["session"] == child.sdef.name
+        assert status["agent"]["prompt"] == child.sdef.task
         assert parent.sdef.name in [p["name"] for p in status["agent_parents"]]
         # The persisted task alone identifies ownership after a restore.
         assert reposync_agent.active(client.app["manager"], str(world["a"])) is child
@@ -253,6 +266,8 @@ def test_sync_agent_b_real_conflict_only_delegates_when_enabled(world, monkeypat
             assert "base.txt" in doc["operation_error"]
             assert "base.txt" in assignments[0][0].sdef.task
             assert "aborted" in assignments[0][0].sdef.task
+            assert doc["agent"]["prompt"] == assignments[0][0].sdef.task
+            assert "base.txt" in doc["agent"]["prompt"]
         else:
             assert not assignments and "base.txt" in doc["error"]
 
@@ -304,6 +319,11 @@ def test_sync_agent_publish_preserves_destination_and_failure(world, monkeypatch
 
     async def body(client):
         parent, assignments = _agent_parent(client, world, monkeypatch)
+        resp = await client.post("/api/reposync/workspaces/proj/agent-preview", headers=AUTH, json={
+            "kind": "push", "branch": "work", "remote": "origin",
+        })
+        assert resp.status == 200 and not assignments
+        preview = await resp.json()
         resp = await client.post("/api/reposync/workspaces/proj/branch-push", headers=AUTH, json={
             "branch": "work", "remote": "origin", "agent_mode": mode, "agent_parent": parent.sdef.name,
         })
@@ -312,6 +332,23 @@ def test_sync_agent_publish_preserves_destination_and_failure(world, monkeypatch
         task = assignments[0][0].sdef.task
         assert '"source": "work"' in task and '"branch": "pc-a/work"' in task
         assert bool(doc["operation_error"]) == (mode == "on_failure")
+        if mode == "agent":
+            assert task == preview["prompt"]
+
+    _with_app(body)
+
+
+def test_sync_agent_preview_refuses_stale_or_invalid_request(world):
+    async def body(client):
+        plan = await _status_plan(client)
+        resp = await client.post("/api/reposync/workspaces/proj/agent-preview", headers=AUTH,
+                                 json={**_shown(plan), "kind": "sync", "local": "0" * 40})
+        assert resp.status == 409 and (await resp.json())["stale"]
+        resp = await client.post("/api/reposync/workspaces/proj/agent-preview", headers=AUTH,
+                                 json={"kind": "unknown"})
+        assert resp.status == 400
+        resp = await client.post("/api/reposync/workspaces/proj/agent-preview", json={"kind": "sync"})
+        assert resp.status == 401
 
     _with_app(body)
 

@@ -18,14 +18,19 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
       behind: 1, affected: [], summary: 'Rebase and push' };
     const doc = { plan, repo: '/repo', machine: 'local', branches: ['master', 'work'],
       remotes: { origin: 'origin' }, peers: [], agent_parents: [{ name: 'parent', profile: 'coder' }] };
+    const previewText = body => `Assignment: ${body.kind} ${body.branch}\nUse git rebase --rebase-merges.\n${'long-path/'.repeat(70)}`;
     await page.route('http://sync.test/**', async route => {
       const url = new URL(route.request().url());
       if (url.pathname.startsWith('/api/')) {
+        if (url.pathname.endsWith('/agent-preview')) {
+          return route.fulfill({ json: { prompt: previewText(route.request().postDataJSON()), plan } });
+        }
         if (url.pathname.endsWith('/sync')) {
           const body = route.request().postDataJSON();
           posts.push(body);
           return route.fulfill({ status: 202, json: { status: 'delegated', plan,
-            agent: { session: 'sync-child', status: 'busy' },
+            agent: { session: 'sync-child', status: 'busy', prompt: 'Use git rebase --rebase-merges.\n' +
+              (body.agent_mode === 'on_failure' ? 'Failure: conflict in example.txt' : 'Sync the repository') },
             operation_error: body.agent_mode === 'on_failure' ? 'conflict: example.txt' : '' } });
         }
         return route.fulfill({ json: url.pathname.endsWith('/status') ? doc : {} });
@@ -49,6 +54,16 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
     await mode.selectOption('agent');
     assert.equal(await page.getByRole('button', { name: 'Delegate sync', exact: true }).isDisabled(), true);
     await page.getByLabel('Sync agent parent session').selectOption('parent');
+    await page.getByRole('button', { name: 'Preview push prompt' }).click();
+    await page.locator('.ws-sync-agent pre').waitFor();
+    assert.match(await page.locator('.ws-sync-agent pre').innerText(), /Assignment: push master/);
+    await page.locator('#ws-sync-push-example').selectOption('work');
+    assert.equal(await page.locator('.ws-sync-agent pre').count(), 0, 'branch change hides old preview');
+    await page.getByRole('button', { name: 'Preview push prompt' }).click();
+    await page.locator('.ws-sync-agent pre').waitFor();
+    assert.match(await page.locator('.ws-sync-agent pre').innerText(), /Assignment: push work/);
+    await page.getByRole('button', { name: 'Preview sync prompt' }).click();
+    await page.waitForFunction(() => document.querySelector('.ws-sync-agent pre')?.textContent.includes('Assignment: sync'));
     for (const width of [1440, 1024, 768, 390, 320]) {
       await page.setViewportSize({ width, height: 1100 });
       const layout = await page.locator('.ws-sync-agent').evaluate(node => {
@@ -72,6 +87,8 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
     assert.equal(posts[1].agent_mode, 'on_failure');
     assert.equal(posts[1].agent_parent, 'parent');
     assert.equal(await page.locator('.ws-sync-result').innerText().then(t => t.includes('done:')), false);
+    await page.locator('.ws-sync-result summary').click();
+    assert.match(await page.locator('.ws-sync-result pre').innerText(), /--rebase-merges[\s\S]*Failure: conflict in example.txt/);
     assert.deepEqual(errors, []);
     if (process.env.CLAUNCH_SCRATCH) {
       await page.setViewportSize({ width: 1440, height: 1100 });
