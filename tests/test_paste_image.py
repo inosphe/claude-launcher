@@ -23,6 +23,7 @@ import asyncio
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -46,6 +47,36 @@ CHILD = (
 PNG = bytes.fromhex("89504e470d0a1a0a") + b"a pretend png body"
 
 
+@pytest.mark.parametrize("ready,failed", [(True, False), (False, False), (True, True)])
+def test_codex_image_path_paste_avoids_busy_clipboard(home, tmp_path, monkeypatch,
+                                                    ready, failed):
+    from unittest.mock import AsyncMock
+
+    target = tmp_path / "image with 공백 #1.png"
+    target.write_bytes(PNG)
+    session = SimpleNamespace(
+        sdef=SessionDef(name="s1", harness="codex"),
+        screen=SimpleNamespace(bracketed_paste=ready),
+        paste=AsyncMock(side_effect=RuntimeError("PTY closed") if failed else None),
+        send_keys=AsyncMock(),
+    )
+    put = AsyncMock(side_effect=api_mod.clipboard.ClipboardError("clipboard held"))
+    monkeypatch.setattr(api_mod.clipboard, "put_image", put)
+    delivered, keys, reason = asyncio.run(
+        api_mod._deliver_pasted_image(session, target, "image/png")
+    )
+    assert delivered is (ready and not failed)
+    assert keys == []
+    put.assert_not_called()
+    session.send_keys.assert_not_called()
+    if ready:
+        session.paste.assert_awaited_once_with(target.resolve().as_uri(), enter=False)
+        assert reason == ("the image path did not reach the session: PTY closed" if failed else "")
+    else:
+        session.paste.assert_not_called()
+        assert "not ready" in reason
+
+
 @pytest.fixture(autouse=True)
 def _no_settle_carryover(monkeypatch):
     """Each test starts with the clipboard free: the settle window is module
@@ -54,18 +85,19 @@ def _no_settle_carryover(monkeypatch):
     monkeypatch.setattr(api_mod, "PASTE_SETTLE_SECONDS", 0.0)
 
 
-def _harness(image_paste_keys=None):
+def _harness(image_paste_keys=None, image_paste_transport="clipboard"):
     body = {"command": [sys.executable, "-u", "-c", CHILD]}
+    body["image_paste_transport"] = image_paste_transport
     if image_paste_keys is not None:
         body["image_paste_keys"] = list(image_paste_keys)
     store.update(lambda doc: doc.update({"harnesses": {"py": body}}))
 
 
-def _run(tmp_path, body, image_paste_keys=None):
+def _run(tmp_path, body, image_paste_keys=None, image_paste_transport="clipboard"):
     """Boot a daemon with one session and hand it to ``body(client)``."""
     from aiohttp.test_utils import TestClient, TestServer
 
-    _harness(image_paste_keys)
+    _harness(image_paste_keys, image_paste_transport)
 
     async def run():
         mgr = SessionManager(idle_threshold=0.5, scrollback=200,
@@ -82,6 +114,38 @@ def _run(tmp_path, body, image_paste_keys=None):
             await client.close()
 
     asyncio.run(run())
+
+
+def test_path_transport_upload_sends_one_paste_without_submitting(home, tmp_path,
+                                                               monkeypatch):
+    writes = []
+
+    async def capture_write(self, data, **kwargs):
+        writes.append(data)
+
+    async def fail_clipboard(*args, **kwargs):
+        raise AssertionError("path transport must not access the clipboard")
+
+    monkeypatch.setattr(session_mod.Session, "write_bytes", capture_write)
+    monkeypatch.setattr(api_mod.clipboard, "put_image", fail_clipboard)
+
+    async def body(client):
+        session = client.server.app["manager"].get("s1")
+        session.screen.bracketed_paste = True
+        for _ in range(2):
+            resp = await client.post("/api/sessions/s1/paste-image", data=PNG,
+                                     headers={**BEARER, "Content-Type": "image/png"})
+            assert resp.status == 200
+            doc = await resp.json()
+            assert doc["delivered"] is True
+            assert doc["keys"] == []
+            target = Path(doc["path"])
+            assert target.read_bytes() == PNG
+            assert writes[-1] == b"\x1b[200~" + target.as_uri().encode() + b"\x1b[201~"
+        assert len(writes) == 2  # No Enter, even for consecutive attachments.
+        assert writes[0] != writes[1]
+
+    _run(tmp_path, body, image_paste_transport="path")
 
 
 def test_a_pasted_png_is_stored_beside_the_session_and_its_path_answered(
@@ -545,13 +609,11 @@ def test_an_undelivered_paste_does_not_hold_the_clipboard(home, tmp_path,
     _run(tmp_path, body, image_paste_keys=["M-v"])
 
 
-@pytest.mark.parametrize("name, keys", [("claude", ["M-v"]), ("codex", ["C-v"])])
+@pytest.mark.parametrize("name, keys", [("claude", ["M-v"]), ("codex", [])])
 def test_the_packaged_harnesses_declare_the_key_they_read_an_image_with(
     home, name, keys
 ):
-    """Claude Code takes an image on Alt+V and Codex on Ctrl+V. Without the
-    declaration the route stores the image and answers 'no image paste key
-    declared' -- which is what a codex session got before this was set."""
+    """Claude Code uses Alt+V; Codex uses a pasted path without a key chord."""
     from claude_launcher import harnesses as harness_registry
 
     assert harness_registry.registry().get(name).image_paste_keys == keys

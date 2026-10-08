@@ -9369,12 +9369,11 @@ async def h_session_paste_image(request: web.Request) -> web.Response:
 
     The web session line cannot hand a harness an *attachment*: the program in
     the PTY reads bytes, and an image is not bytes it can read as a prompt.
-    What a harness does accept is an image off the clipboard, so this route
-    stores the file, puts it on the clipboard of the machine the daemon runs
-    on, and sends the keystroke that harness reads it with (see
-    :func:`_deliver_pasted_image`).
+    This route stores the file and uses the harness's declared image
+    transport: a path paste into its terminal, or the host clipboard and
+    an image paste keystroke (see :func:`_deliver_pasted_image`).
 
-    The path used to go into the composer instead. That only worked for a
+    The path used to go into the browser's text composer. That only worked for a
     browser on the daemon's own machine: a person connecting from another PC
     was handed a path to a file that does not exist on their side, and nothing
     in the round trip told them so.
@@ -9566,20 +9565,32 @@ _paste_settle = {"until": 0.0}
 
 
 async def _deliver_pasted_image(session, path, media_type: str):
-    """Put a stored image on this machine's clipboard and let the harness read it.
+    """Deliver a stored image using the harness's declared paste transport.
 
     Answers ``(delivered, keys, reason)``. A failure here is not an error
     response: the file is stored by the time this runs, so the useful answer
     is "stored, not delivered, because X" -- which the web session line shows
     where the person who pressed the key is looking.
 
-    Which keystroke a harness reads an image with is a property of the
+    The path transport sends a file URI in one bracketed paste, which a
+    supporting harness converts into an attachment without the clipboard.
+    For the clipboard transport, the image keystroke is a property of the
     harness, so it comes from its declaration (``image_paste_keys``) rather
     than from a name check here. An undeclared harness gets nothing sent: a
     chord that means "paste an image" to one program means something else to
     another, and guessing would type that something else into a session.
     """
     entry = harness_registry.registry().get(session.sdef.harness or "")
+    if entry and entry.image_paste_transport == "path":
+        # A paste event lets the harness recognize the whole filename, even
+        # with spaces. Never send Enter: attaching must preserve the draft.
+        if not session.screen.bracketed_paste:
+            return False, [], "the session is not ready for an image path paste"
+        try:
+            await session.paste(Path(path).resolve().as_uri(), enter=False)
+        except Exception as exc:
+            return False, [], f"the image path did not reach the session: {exc}"
+        return True, [], ""
     keys = list(entry.image_paste_keys) if entry else []
     if not keys:
         return False, [], (

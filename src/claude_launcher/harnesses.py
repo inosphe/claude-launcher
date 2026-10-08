@@ -250,6 +250,9 @@ class Harness:
     #: rather than receiving a chord that means something else to it. Empty
     #: for every harness whose behaviour here has not been established.
     image_paste_keys: List[str] = field(default_factory=list)
+    #: ``path`` pastes a stored image path as a terminal paste event. Only
+    #: declare it for harnesses that convert that event into an attachment.
+    image_paste_transport: str = "clipboard"
     #: cflow v2 capability defaults this harness's CLI provides
     #: (docs/cflow-v2.md 6.3): ``{id: {"enabled": bool, "args": [...]}}``
     #: (``args`` only when declared). Ids are not checked here; the cflow2
@@ -383,6 +386,7 @@ class Harness:
             "submit_strategy": self.submit_strategy,
             "paste_enter_delay": self.paste_enter_delay,
             "image_paste_keys": list(self.image_paste_keys),
+            "image_paste_transport": self.image_paste_transport,
             "capabilities": {
                 key: {
                     k: (list(v) if isinstance(v, list) else v)
@@ -594,6 +598,10 @@ def _parse_entry(name: str, body) -> Harness:
             str(body.get("submit_strategy") or "fixed").strip(),
             {"fixed", "screen"},
         ),
+        "image_paste_transport": (
+            str(body.get("image_paste_transport") or "clipboard").strip(),
+            {"clipboard", "path"},
+        ),
     }
     for field_name, (value, allowed) in strategies.items():
         if value not in allowed:
@@ -681,6 +689,7 @@ def _parse_entry(name: str, body) -> Harness:
         input_readiness=strategies["input_readiness"][0],
         submit_strategy=strategies["submit_strategy"][0],
         paste_enter_delay=paste_enter_delay,
+        image_paste_transport=strategies["image_paste_transport"][0],
         image_paste_keys=_as_list(
             body.get("image_paste_keys"),
             f"harness {name!r} image_paste_keys",
