@@ -94,9 +94,9 @@ option:disabled { color: #6b7280; }
   scrollbar-width: thin;
 }
 .session-filters button {
-  flex: 1 0 0; min-width: 48px; min-height: 32px;
-  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px;
-  white-space: nowrap; padding: 3px 2px; border: 1px solid #29313c; border-radius: 6px;
+  flex: 1 0 0; min-width: 36px; min-height: 26px;
+  display: flex; align-items: center; justify-content: center; gap: 5px;
+  white-space: nowrap; padding: 3px 2px; border: 1px solid #29313c; border-radius: 2px;
   background: #171c24; color: #8b949e; cursor: pointer;
   font-size: 10px; font-weight: 500; line-height: 1.2; text-align: center;
   transition: background-color 120ms, border-color 120ms, color 120ms;
@@ -107,6 +107,15 @@ option:disabled { color: #6b7280; }
 }
 .session-filters button:focus-visible { outline: 2px solid #79b8ff; outline-offset: -2px; }
 .session-filter-count { display: block; font-size: 9px; font-weight: 400; color: #8b949e; font-variant-numeric: tabular-nums; }
+.session-filter-icon {
+  flex: none; width: 12px; height: 12px; background: currentColor;
+  mask: var(--filter-icon) center / contain no-repeat;
+}
+.filter-icon-current { --filter-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 5h16M4 12h16M4 19h16M8 3v4M16 10v4M10 17v4'/%3E%3C/svg%3E"); }
+.filter-icon-running { --filter-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M7 3v18l14-9z'/%3E%3C/svg%3E"); }
+.filter-icon-paused { --filter-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M5 4h5v16H5zM14 4h5v16h-5z'/%3E%3C/svg%3E"); }
+.filter-icon-killed { --filter-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='4' y='4' width='16' height='16' rx='2'/%3E%3C/svg%3E"); }
+.filter-icon-archived { --filter-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linejoin='round'%3E%3Cpath d='M3 3h18v5H3zM5 8v13h14V8M9 12h6'/%3E%3C/svg%3E"); }
 .session-filters button[aria-pressed="true"] .session-filter-count { color: #a4bedc; }
 .session-group-toggle {
   grid-column: 1 / -1; display: flex; align-items: center; gap: 6px;
@@ -4798,7 +4807,7 @@ body.embed #main { width: 100%; }
   /* thumb-sized, like every other tap target on the rail */
   #refresh-all { font-size: 17px; padding: 6px 10px; }
   .session-filters { padding: 4px 7px; }
-  .session-filters button { min-height: 34px; }
+  .session-filters button { min-height: 28px; }
   /* The rail is the whole screen here, so the list takes what it needs and
      the nav sits at the thumb end rather than floating mid-screen. */
   #session-list { flex: 1 0 auto; max-height: none; overflow: visible; }
