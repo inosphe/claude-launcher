@@ -41,6 +41,7 @@ from .. import (
     runner,
     translators,
     usage,
+    profile_usage,
 )
 from .. import install
 from .. import install_plan
@@ -2276,16 +2277,19 @@ async def h_metering(request: web.Request) -> web.Response:
 async def h_usage(request: web.Request) -> web.Response:
     """Return subscription usage for a profile selector.
 
-    Usage providers perform network and subprocess I/O.  Run the existing CLI
-    implementation in a worker thread so one slow account endpoint cannot
-    block the daemon's event loop (or the session rail polling it).
+    Usage providers perform network and subprocess I/O. Run them in a worker
+    thread so one slow account endpoint cannot block the event loop. Dashboard
+    page-entry reads opt into the profile usage cooldown with ``refresh=auto``;
+    an unqualified or ``refresh=manual`` request fetches immediately.
     """
     selector = str(request.query.get("profile") or "").strip()
     if not selector:
         return json_error(400, "profile is required")
+    manual = request.query.get("refresh") != "auto"
     try:
-        selected = usage.resolve_target(profile_mod.require_selector(selector))
-        report = await asyncio.to_thread(usage.fetch, selected)
+        payload, cached, updated_at = await asyncio.to_thread(
+            profile_usage.fetch, selector, manual=manual
+        )
     except (
         profile_mod.ProfileError,
         usage.UsageError,
@@ -2293,21 +2297,11 @@ async def h_usage(request: web.Request) -> web.Response:
     ) as exc:
         return json_error(400, str(exc))
     return json_response(
-        {
-            "profile": selected.selector,
-            "source": report.source,
-            "windows": [
-                {
-                    "name": item.name,
-                    "utilization": item.utilization,
-                    "resets_at": item.resets_at,
-                    "used_dollars": item.used_dollars,
-                    "limit_dollars": item.limit_dollars,
-                    "status": item.status,
-                }
-                for item in report.windows
-            ],
-        }
+        payload,
+        headers={
+            "X-Usage-Cached": "true" if cached else "false",
+            "X-Usage-Updated-At": str(updated_at),
+        },
     )
 
 
