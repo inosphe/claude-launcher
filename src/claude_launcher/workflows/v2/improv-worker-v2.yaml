@@ -45,7 +45,8 @@ sides:
 # v1 improv-worker.yaml의 41 스텝이 각각 어느 v2 노드(작업 이름, 또는 조합자
 # id)에 실렸는가. tests/test_cflow2_improv_worker.py가 같은 표를 들고 v1
 # 스텝 전부가 있는지, 오른쪽 이름이 컴파일된 IR에 실제로 있는지 검사한다.
-#   intake                -> intake, prior-context(위임), intake-issue
+#   intake                -> intake, prior-context(실패하면
+#                            prior-context-fallback), intake-issue
 #   issue-check           -> issue-check            (choose, resolve-issue)
 #   issue-auto            -> issue-auto
 #   issue-search          -> issue-search
@@ -59,7 +60,7 @@ sides:
 #   work                  -> work                   (group found 안)
 #   test-decision         -> test-decision          (choose)
 #   test-skipped          -> test-skipped
-#   review                -> review, targeted-test(위임)
+#   review                -> review, targeted-test
 #   commit                -> commit
 #   queue-next            -> queue-next             (choose, worker-round)
 #   item-intake           -> item-intake
@@ -67,7 +68,7 @@ sides:
 #   stack-merge           -> cut-wait(wait), stack-merge
 #   landing               -> landing                (choose, when $params.allow)
 #   landing-review        -> landing-review, landing-review-leader (ask: 착지 요청을 받을 세션)
-#   rebase                -> merge-ready(위임), rebase   (loop align)
+#   rebase                -> merge-ready, rebase   (loop align)
 #   reviewer-ensure       -> reviewer-ensure
 #   peer-review           -> peer-review            (ask: 리뷰어)
 #   integration-request   -> integration-request
@@ -228,6 +229,9 @@ data:
             pr_url: null, pr_number: null}
   work_report: {}
   round: {}
+  # 이 회차의 선행 맥락 검색 결과(prior-context, 그것이 실패하면
+  # prior-context-fallback). intake-issue가 읽는다. 회차마다 덮어쓴다.
+  prior: {}
 
 rules:
   no-master-merge:
@@ -349,7 +353,30 @@ nodes:
     done_when: |
       선행 맥락 검색 결과(관련 이슈·세션과 관계, 또는 「선행 맥락 없음(쿼리: …)」)가
       보고에 있다.
-    executor: [headless, subagent, inline]
+    # 드라이버가 직접 한다(claunch-onbdf). 읽기 전용 headless 위임은 claude
+    # 하네스에서 쓰기 도구와 함께 Bash·MCP도 막혀(executors.READONLY_TOOLS)
+    # 이 단계가 쓰는 셸 명령·MCP search를 실행할 수 없다 — 시험 런에서 실패하거나
+    # 검색 없이 끝났다. 엔진의 읽기 전용 경로가 셸을 허용하게 되면 위임으로 되돌린다.
+    executor: [inline]
+    returns:
+      ok: {query: str, summary: str, related: list, duplicate: "str?"}
+    effects: [fs.read]
+
+  prior-context-fallback:
+    title: 선행 맥락 검색 (대체)
+    prompt: |
+      선행 맥락 검색(prior-context)이 ok 결과 없이 끝났다 — 결과를 쓸 수
+      없다. 실패 사유: ${result['prior-context'].value.reason}
+      이 검색은 회차를 막는 단계가 아니다(v1 intake와 같다). 직접 한 번 검색한다:
+      `claunch beads search "<목표의 핵심어>" --json`(필요하면 핵심 파일·기능
+      이름으로 한 번 더). 이번 회차의 목표: ${result.intake.value.goal}
+      같은 목표를 이미 다룬 이슈(중복), 이 목표가 기대는 선행 작업이 보이면 그
+      id와 관계 한 줄을 남긴다(중복이면 그 id를 duplicate에). 없으면 「선행
+      맥락 없음(쿼리: …)」을 남긴다. summary 첫머리에 「검색 실패로 대체 검색」을
+      적는다.
+    done_when: |
+      대체 검색 결과(관련 이슈와 관계, 또는 「선행 맥락 없음(쿼리: …)」)와 검색
+      실패 사실이 보고에 있다.
     returns:
       ok: {query: str, summary: str, related: list, duplicate: "str?"}
     effects: [fs.read]
@@ -357,8 +384,8 @@ nodes:
   intake-issue:
     title: 일감 등록·큐 확인
     prompt: |
-      선행 맥락 검색 결과: ${result['prior-context'].value.summary}
-      (중복 후보: ${result['prior-context'].value.duplicate})
+      선행 맥락 검색 결과: ${data.prior.summary}
+      (중복 후보: ${data.prior.duplicate})
       중복이면 새 이슈를 만들지 않고 그 이슈를 읽기 규칙대로 잡거나(take/join)
       사유와 함께 사용자·리더에게 올린다.
       - 이슈(beads): 생성 task/context에 `issue: <id>`가 있으면(리더가 배정했든
@@ -1369,7 +1396,11 @@ nodes:
       돌린 수치가 아니다 — 그것은 이 스텝의 것이 아니다). 수치에는 트리 해시와
       (트리, 환경)이 붙어 있고, 실행 영수증의 window 필드(class·source·
       wait_seconds·advisory_n)가 보고에 있다.
-    executor: [headless, subagent, inline]
+    # 드라이버가 직접 한다(claunch-onbdf). 읽기 전용 headless 위임은 claude
+    # 하네스에서 쓰기 도구와 함께 Bash·MCP도 막혀(executors.READONLY_TOOLS)
+    # 이 단계가 쓰는 셸 명령·MCP search를 실행할 수 없다 — 시험 런에서 실패하거나
+    # 검색 없이 끝났다. 엔진의 읽기 전용 경로가 셸을 허용하게 되면 위임으로 되돌린다.
+    executor: [inline]
     returns:
       ok:
         modules: list
@@ -1642,7 +1673,11 @@ nodes:
       문구면 code를 5로 반환한다. 게이트를 `|| true`로 통과시키지 않는다.
     done_when: |
       tools/merge_ready.py의 종료 코드와 출력 첫 줄, 쓴 대상 브랜치가 보고에 있다.
-    executor: [headless, subagent, inline]
+    # 드라이버가 직접 한다(claunch-onbdf). 읽기 전용 headless 위임은 claude
+    # 하네스에서 쓰기 도구와 함께 Bash·MCP도 막혀(executors.READONLY_TOOLS)
+    # 이 단계가 쓰는 셸 명령·MCP search를 실행할 수 없다 — 시험 런에서 실패하거나
+    # 검색 없이 끝났다. 엔진의 읽기 전용 경로가 셸을 허용하게 되면 위임으로 되돌린다.
+    executor: [inline]
     returns:
       ok: {code: int, verdict: str, target: str, output: str}
     effects: [fs.read]
@@ -3452,7 +3487,15 @@ procedures:
                       value: {release: true}
           - else:
               - intake
-              - prior-context
+              # 선행 맥락 검색은 회차를 막지 않는다(v1 intake와 같다). 검색이
+              # 실패로 끝나도(도구 거절 등 — claunch-onbdf. timeout은 이 노드를
+              # 다시 위임할 때를 위해 둔다) 대체 검색을 하고 회차는 intake-issue로
+              # 이어진다.
+              - id: prior-search
+                try: {seq: [prior-context], bind: prior}
+                catch:
+                  fail: {seq: [prior-context-fallback], bind: prior}
+                  timeout: {seq: [prior-context-fallback], bind: prior}
               - intake-issue
               - id: resolve
                 call: resolve-issue
