@@ -27407,6 +27407,31 @@ function wsSyncAgentControls(st, name) {
   return box;
 }
 
+function wsSyncRemoteComparisons(doc) {
+  const section = el("div", "ws-sync-section ws-sync-remotes");
+  section.appendChild(el("h4", null, "Remote comparisons"));
+  section.appendChild(el("p", "wf-note",
+    "Ahead / behind counts are relative to the local branch. Refresh (fetch) updates every remote."));
+  const labels = {
+    "up-to-date": "Up to date", ahead: "Ahead · remote can fast-forward",
+    behind: "Behind · local can fast-forward", diverged: "Diverged",
+    unrelated: "Unrelated histories", "missing-local": "Local branch missing",
+    "missing-tracking": "No remote-tracking branch", unknown: "Comparison unavailable",
+  };
+  for (const row of doc.remote_comparisons || []) {
+    const line = el("div", "ws-sync-remote-row");
+    line.appendChild(el("strong", null, `${row.remote}/${row.branch || "—"}`));
+    line.appendChild(el("span", null, labels[row.state] || labels.unknown));
+    line.appendChild(el("span", null,
+      `ahead ${row.ahead == null ? "—" : row.ahead} · behind ${row.behind == null ? "—" : row.behind}`));
+    line.appendChild(el("span", "wf-note", row.fetched ? "Fetched" : "Cached refs · freshness unverified"));
+    if (row.error) line.appendChild(el("span", "wf-note wf-warning", row.error));
+    section.appendChild(line);
+  }
+  if (!(doc.remote_comparisons || []).length) section.appendChild(el("p", "wf-note", "No remote comparisons available."));
+  return section;
+}
+
 function wsSyncPanel(w) {
   const st = wsSyncSt(w.name);
   const panel = el("div", "ws-sync");
@@ -27440,6 +27465,8 @@ function wsSyncPanel(w) {
     "Remotes: " + (remotes.length
       ? remotes.map(([key, name]) => `${name} (${key})`).join(", ")
       : "none with a network address")));
+
+  panel.appendChild(wsSyncRemoteComparisons(doc));
 
   // master
   const master = el("div", "ws-sync-section");

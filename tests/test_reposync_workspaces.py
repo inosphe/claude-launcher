@@ -1326,3 +1326,68 @@ def test_usage_failure_keeps_the_last_number(world, monkeypatch):
         assert (row["bytes"], row["at"]) == (rows[0]["bytes"], rows[0]["at"])
 
     _with_app(second)
+
+
+def test_remote_comparisons_all_names_and_states(world, monkeypatch):
+    from claude_launcher import reposync, reposync_flow
+    a, b = world["a"], world["b"]
+    base = _git(a, "rev-parse", "HEAD")
+    ours = _commit(a, "ours-remote.txt")
+    theirs = _commit(b, "theirs-remote.txt")
+    _git(b, "push", "-q", "origin", "master")
+    _git(a, "fetch", "origin")
+    # Aliases of the same URL and filesystem remotes must all remain visible.
+    for name in ("ahead", "equal", "behind", "missing", "unrelated"):
+        _git(a, "remote", "add", name, str(world["remote"]))
+    unrelated = _git(a, "commit-tree", f"{base}^{{tree}}", "-m", "unrelated root")
+    _git(a, "update-ref", "refs/remotes/unrelated/master", unrelated)
+    _git(a, "update-ref", "refs/remotes/ahead/master", base)
+    _git(a, "update-ref", "refs/remotes/equal/master", ours)
+    later = _commit(a, "later-remote.txt")
+    _git(a, "update-ref", "refs/remotes/behind/master", later)
+    _git(a, "reset", "--hard", ours)
+    monkeypatch.setattr(reposync, "fetch", lambda *_: pytest.fail("cached view must not fetch"))
+    rows = {r["remote"]: r for r in reposync_flow.remote_comparisons(str(a), branch="master", do_fetch=False)}
+    assert set(rows) == {"origin", "ahead", "equal", "behind", "missing", "unrelated"}
+    assert rows["origin"]["state"] == "diverged"
+    assert (rows["origin"]["ahead"], rows["origin"]["behind"]) == (1, 1)
+    assert rows["origin"]["upstream"] == theirs
+    assert rows["ahead"]["state"] == "ahead"
+    assert rows["equal"]["state"] == "up-to-date"
+    assert rows["behind"]["state"] == "behind"
+    assert rows["missing"]["state"] == "missing-tracking"
+    assert rows["unrelated"]["state"] == "unrelated"
+    assert rows["missing"]["ahead"] is None
+    absent = reposync_flow.remote_comparisons(str(a), branch="absent", do_fetch=False)
+    assert all(r["state"] == "missing-local" for r in absent)
+    assert all(not r["fetched"] for r in rows.values())
+
+
+def test_remote_comparisons_fetch_failure_and_api(world, monkeypatch):
+    from claude_launcher import reposync
+    a = world["a"]
+    _git(a, "remote", "add", "alias", str(world["remote"]))
+    _git(a, "remote", "add", "broken", str(world["remote"]))
+    original = reposync.fetch
+    fetched = []
+
+    def fetch(repo, remote):
+        fetched.append(remote)
+        if remote == "broken":
+            raise reposync.SyncError("fetch failed for broken")
+        original(repo, remote)
+
+    monkeypatch.setattr(reposync, "fetch", fetch)
+
+    async def body(client):
+        response = await client.get("/api/reposync/workspaces/proj/status?remote=origin&peers=0", headers=AUTH)
+        doc = await response.json()
+        rows = {r["remote"]: r for r in doc["remote_comparisons"]}
+        assert doc["plan"]["action"] == "up-to-date"
+        assert rows["origin"]["fetched"] and rows["alias"]["fetched"]
+        assert rows["alias"]["state"] == "up-to-date"
+        assert rows["broken"]["error"] == "fetch failed for broken"
+        assert not rows["broken"]["fetched"]
+        assert sorted(fetched) == ["alias", "broken", "origin"]
+
+    _with_app(body)

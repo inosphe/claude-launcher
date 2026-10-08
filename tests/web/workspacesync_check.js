@@ -121,7 +121,7 @@ vm.runInContext(
    constant("WS_HISTORY_KIND"),
    ...["wsSyncSt", "wsSyncRefresh", "wsSyncSend", "wsSyncWait", "wsSyncRun",
        "wsSyncBranch", "wsSyncPlanLine", "wsSyncPeers", "wsSyncResult",
-       "wsSyncPanel", "wsSyncPullBody", "wsSyncShared", "wsSyncUnmerged",
+       "wsSyncRemoteComparisons", "wsSyncPanel", "wsSyncPullBody", "wsSyncShared", "wsSyncUnmerged",
        "wsPeerDistanceText", "wsSyncHistory", "wsHistoryApproval"].map(slice),
    ...["wsSyncAgentBody", "wsSyncAgentBlocked", "wsSyncAgentControls", "wsSyncPromptText",
        "wsSyncPromptBody", "wsSyncPreviewPrompt"].map(slice),
@@ -477,5 +477,11 @@ async function tick() {
   assert.equal(st.agentPreview.error, "Refresh the changed plan");
   delegated.agent.prompt = prompt + "\nconflict: file.txt";
   assert.ok(walk(ctx.wsSyncResult({ doc: delegated })).some((n) => n.tag === "pre" && n.text === delegated.agent.prompt));
+  const remoteText = walk(ctx.wsSyncRemoteComparisons({remote_comparisons: [
+    {remote: "origin", branch: "master", state: "behind", ahead: 0, behind: 3, fetched: true},
+    {remote: "other", branch: "master", state: "diverged", ahead: 2, behind: 4, fetched: false, error: "fetch failed"},
+    {remote: "empty", branch: "master", state: "missing-tracking", ahead: null, behind: null, fetched: true},
+  ]})).map(n => n.text).join("\n");
+  for (const text of ["origin/master", "local can fast-forward", "ahead 0 · behind 3", "Diverged", "fetch failed", "freshness unverified", "No remote-tracking branch", "ahead — · behind —"]) assert.ok(remoteText.includes(text), text);
   console.log("workspacesync_check ok");
 })().catch((err) => { console.error(err); process.exit(1); });

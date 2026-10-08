@@ -17,6 +17,7 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
       local: 'a'.repeat(40), upstream: 'b'.repeat(40), action: 'rebase', ahead: 2,
       behind: 1, affected: [], summary: 'Rebase and push' };
     const doc = { plan, repo: '/repo', machine: 'local', branches: ['master', 'work'],
+      remote_comparisons: [{ remote: 'long-remote-name-'.repeat(12), branch: 'master', state: 'diverged', ahead: 2, behind: 1, fetched: false }],
       remotes: { origin: 'origin' }, peers: [], agent_parents: [{ name: 'parent', profile: 'coder' }] };
     const previewText = body => `Assignment: ${body.kind} ${body.branch}\nUse git rebase --rebase-merges.\n${'long-path/'.repeat(70)}`;
     await page.route('http://sync.test/**', async route => {
@@ -75,6 +76,8 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
           }) };
       });
       assert.deepEqual(layout, { overflow: false, outside: false }, `viewport ${width}`);
+      assert.equal(await page.locator('.ws-sync-remotes').evaluate(n => n.scrollWidth > n.clientWidth + 1), false, `remote rows viewport ${width}`);
+      assert.match(await page.locator('.ws-sync-remotes').innerText(), /Diverged[\s\S]*ahead 2 · behind 1/);
     }
     await page.getByRole('button', { name: 'Delegate sync', exact: true }).click();
     await page.getByRole('link', { name: 'Assigned to agent sync-child' }).waitFor();

@@ -6101,6 +6101,13 @@ async def h_reposync_ws_status(request: web.Request) -> web.Response:
         do_fetch=do_fetch, remote=request.query.get("remote") or None,
         branch=request.query.get("branch") or None, machine=_machine_name(request),
     )
+    if doc.get("repo"):
+        doc["remote_comparisons"] = await asyncio.to_thread(
+            reposync_flow.remote_comparisons, doc["repo"],
+            branch=request.query.get("branch") or (doc.get("plan") or {}).get("branch"),
+            do_fetch=do_fetch,
+            already_fetched=(doc.get("plan") or {}).get("remote") if do_fetch else None,
+        )
     doc["machine"] = _machine_name(request)
     # the peers table shows these as unreadable rows (claunch-gjjdp)
     doc["unreadable"] = unreadable

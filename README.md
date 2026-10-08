@@ -2438,6 +2438,16 @@ the card it filed; the same body with that `request` runs once the card is
 approved (`GET /api/reposync/requests/<id>` says when), and answers 409 when
 the card was rejected or expired or the tips moved after the approval.
 
+The Workspaces → Sync **Remote comparisons** section compares the local sync
+branch with the same branch on every configured remote, including aliases.
+Ahead and behind are local commit counts: ahead means the remote can
+fast-forward; behind means the local branch can fast-forward; both means
+histories diverged. Unrelated histories and missing tracking refs are shown
+separately. Opening the panel uses cached refs; **Refresh (fetch)** fetches
+each remote. A failed fetch retains an explicit error and marks its comparison
+as cached, while the other remotes remain visible. This analysis does not
+rebase, push, or change the selected sync remote.
+
 **Sync / push execution** selects how the panel performs master sync and
 work-branch push:
 
