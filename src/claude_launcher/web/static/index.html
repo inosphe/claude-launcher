@@ -114,14 +114,24 @@
          carry every project, so a pick redraws at once) and is what the
          create form files a new session under. Carried in the address as
          ?project=, so a reload keeps it. -->
-    <div id="project-row" class="project-row">
-      <label for="project-select">Project <a href="#/workspaces" title="manage projects">manage</a></label>
-      <select id="project-select" aria-label="Project"></select>
-    </div>
-    <!-- The rail's search: typing narrows by substring (name, task, issue,
-         branch, briefing); Enter asks the daemon to rank the fleet by
-         meaning, which needs the rag: block; Esc and the × button clear. -->
+    <div id="project-tabs" class="project-tabs" role="tablist" aria-label="Projects"></div>
+    <!-- The picked project's header and the rail's search share this line
+         (renderProjectTabs, syncSessionSearchOpen). The search is folded to
+         its icon until it is pressed; then the box opens over the header.
+         Typing narrows by substring (name, task, issue, branch, briefing);
+         Enter asks the daemon to rank the fleet by meaning, which needs the
+         rag: block; Esc and the × button clear, and Esc on an empty box
+         folds it again. -->
     <div id="session-search-row" class="session-search-row">
+      <div id="project-header" class="project-header">
+        <span class="project-header-name">All projects</span>
+        <span class="project-header-detail"></span>
+      </div>
+      <button id="session-search-toggle" class="session-search-toggle" type="button"
+              aria-label="Filter sessions" aria-controls="session-search" aria-expanded="false"
+              title="Filter sessions — Enter searches by meaning">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M7 12h10M10 18h4"/></svg>
+      </button>
       <!-- The box and its clear button share one grid cell: the × sits
            inside the input's right edge, so it takes no width from the box
            and leaves the Search-anything button where it was. It is hidden
@@ -141,6 +151,10 @@
               aria-label="Search anything (/)" title="Search anything (/)">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4.5 4.5"/></svg>
       </button>
+      <a id="project-manage" class="project-manage" href="#/workspaces"
+         aria-label="Manage projects" title="Manage projects">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9 7 7M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1"/></svg>
+      </a>
       <span id="session-search-note" class="session-search-note hidden"></span>
     </div>
     <!-- List or Grid: two views of the same sessions. The list orders them
