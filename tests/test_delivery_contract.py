@@ -46,6 +46,7 @@ RAW_WRITER_ALLOWLIST = {
     ("daemon/session.py", "_deliver"): "the sender implementation under its delivery lock",
     ("daemon/session.py", "paste"): "implements the paste + delayed-CR rule",
     ("daemon/session.py", "send_keys"): "implements the raw keystroke path",
+    ("daemon/session.py", "_confirm_submit"): "re-sends the submitting Enter of paste/send_keys while no turn has started",
     ("daemon/session.py", "submit_open_draft"): "the bare CR that submits a human's own unsent line, for an operator forcing past it",
     ("daemon/api.py", "h_session_keys"): "raw keyboard passthrough over HTTP",
     ("daemon/api.py", "_deliver_pasted_image"): "the image-paste chord a human pressed in the web session line — a keystroke the harness reads its own clipboard with, carrying no message text",
@@ -148,6 +149,7 @@ def _fake_session(*, bracketed: bool, ready: bool = True):
         _last_terminal_input = 0.0
         _draft_open = False
         paste = session_mod.Session.paste
+        _confirm_submit = session_mod.Session._confirm_submit
         deliver = session_mod.Session.deliver
         _deliver = session_mod.Session._deliver
         send_keys = session_mod.Session.send_keys
@@ -272,6 +274,124 @@ def test_codex_retries_submit_for_the_raw_session_input(home):
     asyncio.run(s.send_keys(["message", "Enter"]))
 
     assert writes == [b"message", b"\r", b"\r"]
+
+
+#: Codex window titles: a spinner frame while a turn runs, the bare name after.
+_CODEX_BUSY_TITLE = "\x1b]0;⠋ s\x07".encode()
+_CODEX_IDLE_TITLE = b"\x1b]0;s\x07"
+
+
+def _codex_with_turns(monkeypatch, *, turn_after_enters):
+    """A codex stand-in whose title starts animating once it has received
+    ``turn_after_enters`` Enters (None: never)."""
+    from claude_launcher.daemon.activity import Detector
+
+    monkeypatch.setattr(session_mod, "PASTE_ENTER_DELAY", 0.0)
+    monkeypatch.setattr(session_mod, "PASTE_RENDER_TIMEOUT", 0.0)
+    monkeypatch.setattr(session_mod, "SUBMIT_CONFIRM_TIMEOUT", 0.1)
+    s, writes = _fake_session(bracketed=True)
+    s.sdef = SessionDef(name="s", harness="codex")
+    s._activity = Detector("codex")
+    # A turn earlier in this process: the title signal is known to exist.
+    s._activity.feed(_CODEX_BUSY_TITLE)
+    s._activity.feed(_CODEX_IDLE_TITLE)
+
+    async def write_bytes(data: bytes) -> None:
+        writes.append(data)
+        enters = sum(1 for w in writes if w == b"\r")
+        if turn_after_enters is not None and enters == turn_after_enters:
+            s._activity.feed(_CODEX_BUSY_TITLE)
+
+    s.write_bytes = write_bytes
+    return s, writes
+
+
+def test_codex_resends_enter_until_a_turn_starts(home, monkeypatch):
+    """Both paced Enters became newlines: a third one submits the draft."""
+    s, writes = _codex_with_turns(monkeypatch, turn_after_enters=3)
+    assert asyncio.run(s.deliver("mesh: go")) is True
+    assert writes[1:] == [b"\r", b"\r", b"\r"]
+
+
+def test_codex_sends_no_extra_enter_once_a_turn_shows(home, monkeypatch):
+    s, writes = _codex_with_turns(monkeypatch, turn_after_enters=1)
+    assert asyncio.run(s.deliver("mesh: go")) is True
+    assert writes[1:] == [b"\r", b"\r"]
+
+
+def test_codex_extra_enters_are_bounded(home, monkeypatch):
+    monkeypatch.setattr(session_mod, "SUBMIT_RETRIES", 2)
+    s, writes = _codex_with_turns(monkeypatch, turn_after_enters=None)
+    assert asyncio.run(s.deliver("mesh: go")) is True
+    assert writes[1:] == [b"\r"] * 4
+
+
+def test_codex_no_retry_without_an_observed_turn_signal(home, monkeypatch):
+    """No title animation seen yet in this process: silence is no evidence."""
+    from claude_launcher.daemon.activity import Detector
+
+    s, writes = _codex_with_turns(monkeypatch, turn_after_enters=None)
+    s._activity = Detector("codex")
+    assert asyncio.run(s.deliver("mesh: go")) is True
+    assert writes[1:] == [b"\r", b"\r"]
+
+
+def test_codex_no_retry_after_a_person_types(home, monkeypatch):
+    """Another Enter would submit the line a person started meanwhile."""
+    s, writes = _codex_with_turns(monkeypatch, turn_after_enters=None)
+    original = s.write_bytes
+
+    async def write_bytes(data: bytes) -> None:
+        await original(data)
+        if sum(1 for w in writes if w == b"\r") == 2:
+            s._last_human_input = time.monotonic()
+
+    s.write_bytes = write_bytes
+    assert asyncio.run(s.deliver("mesh: go")) is True
+    assert writes[1:] == [b"\r", b"\r"]
+
+
+def test_codex_no_retry_when_a_person_types_during_the_pacing_sleep(
+    home, monkeypatch
+):
+    """The confirm window passed quietly, then a key arrived in the gap
+    before the resent Enter: that Enter would submit the person's line."""
+    monkeypatch.setattr(session_mod, "PASTE_ENTER_DELAY", 0.0)
+    s, writes = _codex_with_turns(monkeypatch, turn_after_enters=None)
+    real_sleep = asyncio.sleep
+    entry = session_mod.harness_registry.get("codex")
+    pacing = entry.paste_enter_delay
+
+    async def sleep(seconds):
+        if seconds == pacing and sum(1 for w in writes if w == b"\r") == 2:
+            s._last_human_input = time.monotonic()
+        await real_sleep(0)
+
+    monkeypatch.setattr(session_mod.asyncio, "sleep", sleep)
+    assert asyncio.run(s.deliver("mesh: go")) is True
+    assert writes[1:] == [b"\r", b"\r"]
+
+
+def test_codex_busy_before_delivery_sends_no_extra_enter(home, monkeypatch):
+    """A turn already running keeps animating the title after the Enter:
+    that counts as the turn signal, so nothing is resent."""
+    s, writes = _codex_with_turns(monkeypatch, turn_after_enters=None)
+    s._activity.feed(_CODEX_BUSY_TITLE)  # busy before the delivery starts
+    original = s.write_bytes
+
+    async def write_bytes(data: bytes) -> None:
+        await original(data)
+        s._activity.feed(_CODEX_BUSY_TITLE)  # the spinner keeps turning
+
+    s.write_bytes = write_bytes
+    assert asyncio.run(s.deliver("mesh: go")) is True
+    assert writes[1:] == [b"\r", b"\r"]
+
+
+def test_codex_send_keys_resends_enter_until_a_turn_starts(home, monkeypatch):
+    s, writes = _codex_with_turns(monkeypatch, turn_after_enters=3)
+    asyncio.run(s.send_keys(["message", "Enter"]))
+    assert writes == [b"message", b"\r", b"\r", b"\r"]
 
 
 def test_deliver_reports_failure_instead_of_raising(monkeypatch):

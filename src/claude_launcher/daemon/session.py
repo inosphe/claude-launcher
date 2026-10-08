@@ -70,6 +70,17 @@ PASTE_RENDER_TIMEOUT = float(
     os.environ.get("CLAUNCH_PASTE_RENDER_TIMEOUT") or 2.0
 )
 
+#: How long a ``submit_strategy: screen`` harness (Codex) has, after its
+#: submitting Enter, to show that a turn started before the Enter is sent
+#: again — see :meth:`Session._confirm_submit`. Codex animates its title
+#: within a fraction of a second of accepting a message.
+SUBMIT_CONFIRM_TIMEOUT = float(
+    os.environ.get("CLAUNCH_SUBMIT_CONFIRM_TIMEOUT") or 2.5
+)
+
+#: Extra Enters :meth:`Session._confirm_submit` may send when no turn shows.
+SUBMIT_RETRIES = int(os.environ.get("CLAUNCH_SUBMIT_RETRIES") or 2)
+
 #: How long a TUI has, from spawn, to become deliverable-to before
 #: :meth:`Session.deliver` stops waiting and writes anyway. Generous: it is
 #: paid at most once per session, and being late is free while being early
@@ -1594,6 +1605,7 @@ class Session:
                 else PASTE_ENTER_DELAY
             )
             await asyncio.sleep(delay)
+            since = time.monotonic()
             await self.write_bytes(submit)
             if entry is not None and entry.submit_strategy == "screen":
                 # Keep the web "type for this session" path and CLI
@@ -1602,6 +1614,7 @@ class Session:
                 # paced Enter to submit the resulting draft.
                 await asyncio.sleep(delay)
                 await self.write_bytes(submit)
+                await self._confirm_submit(since, delay)
             return data
         await self.write_bytes(data)
         return data
@@ -1664,6 +1677,7 @@ class Session:
                     break
                 await asyncio.sleep(0.05)
         await asyncio.sleep(delay)
+        since = time.monotonic()
         await self.write_bytes(b"\r")
         if strategy == "screen" and self.screen.bracketed_paste:
             # Codex can interpret the first Enter after a pasted delivery as
@@ -1672,8 +1686,62 @@ class Session:
             # the second reaches an empty composer.
             await asyncio.sleep(delay)
             await self.write_bytes(b"\r")
-            return data + b"\r\r"
+            extra = await self._confirm_submit(since, delay)
+            return data + b"\r\r" + b"\r" * extra
         return data + b"\r"
+
+    async def _confirm_submit(self, since: float, delay: float) -> int:
+        """Send Enter again until the harness shows a turn, for a
+        ``submit_strategy: screen`` harness; return how many were sent.
+
+        Two paced Enters are still not always enough for Codex: both can
+        land inside its paste-burst window and become newlines, and the
+        message then sits in the composer as a draft. A write succeeding
+        says nothing about that, so this waits for the positive signal — a
+        busy title frame after ``since`` (the first Enter) — and sends one
+        more Enter per :data:`SUBMIT_CONFIRM_TIMEOUT` without it, at most
+        :data:`SUBMIT_RETRIES` times. An Enter on an empty composer does
+        nothing in Codex, so a retry after a submit that was merely slow to
+        show costs nothing.
+
+        Skipped when the absence of the signal is not evidence: the
+        harness has shown no turn yet in this process (no title animation
+        to wait for), or a person typed into the session after ``since``
+        (another Enter could submit their half-written line).
+        """
+        activity = getattr(self, "_activity", None)
+        if activity is None or not activity.observes_turns:
+            return 0
+        def person_typed() -> bool:
+            return getattr(self, "_last_human_input", 0.0) > since
+
+        extra = 0
+        while True:
+            deadline = time.monotonic() + SUBMIT_CONFIRM_TIMEOUT
+            while time.monotonic() < deadline:
+                if self.exited or activity.busy_seen_since(since):
+                    return extra
+                if person_typed():
+                    return extra
+                await asyncio.sleep(0.05)
+            if extra >= SUBMIT_RETRIES:
+                log.warning(
+                    "session %s: no turn started after %d extra Enter(s); "
+                    "the message may still be in the composer",
+                    self.sdef.name, extra,
+                )
+                return extra
+            log.info(
+                "session %s: no turn started %.1fs after Enter; sending "
+                "Enter again", self.sdef.name, SUBMIT_CONFIRM_TIMEOUT,
+            )
+            await asyncio.sleep(delay)
+            # The pacing sleep is a window too: a key typed during it would
+            # otherwise be submitted by the Enter written next.
+            if self.exited or person_typed():
+                return extra
+            await self.write_bytes(b"\r")
+            extra += 1
 
     async def write_bytes(self, data: bytes, writer: object = None) -> None:
         """Write ``data`` into the PTY on behalf of ``writer``.
