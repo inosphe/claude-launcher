@@ -25,9 +25,11 @@ SANDBOX_ON_ARGS = ["--sandbox", "workspace-write"]
 SANDBOX_OFF_ARGS = ["--sandbox", "danger-full-access"]
 #: What ``skip_permissions_args`` used to declare. Codex 0.160 refuses it
 #: ("unexpected argument '--approval-mode'"), so a session that still
-#: carries it never starts; it is read as the skip group and removed
-#: whenever the switches are written again, which is how such a session is
-#: repaired.
+#: carries it never starts. It is removed whenever the switches are written
+#: again, which is how such a session is repaired — and only removed: the
+#: state is read without it, by the same rule the daemon builds the command
+#: by (``harness.build_command`` does not count it as a mode group), so the
+#: panel and the no-op check see the mode the session is launched with.
 LEGACY_SKIP_ARGS = ["--approval-mode", "full-auto"]
 
 
@@ -46,15 +48,16 @@ def _declared(capabilities: dict, key: str, fallback: List[str]) -> List[str]:
     return [str(value) for value in (capabilities.get(key) or fallback)]
 
 
-def mode_groups(capabilities: dict) -> List[List[str]]:
-    """The argv groups the two switches control, the legacy one included."""
+def mode_groups(capabilities: dict, *, legacy: bool = True) -> List[List[str]]:
+    """The argv groups the two switches control — with the legacy one for
+    removal, without it for reading the state."""
     groups: List[List[str]] = []
     for group in (
         _declared(capabilities, "mode_conflict_args", BYPASS_ARGS),
         _declared(capabilities, "skip_permissions_args", SKIP_ARGS),
         _declared(capabilities, "full_access_args", SANDBOX_OFF_ARGS),
         _declared(capabilities, "full_access_off_args", SANDBOX_ON_ARGS),
-        LEGACY_SKIP_ARGS,
+        *([LEGACY_SKIP_ARGS] if legacy else []),
     ):
         if group and group not in groups:
             groups.append(group)
@@ -87,15 +90,15 @@ def runtime_state(argv: Any, capabilities: dict) -> Tuple[bool, bool]:
     inherited checkboxes aligned with the command the parent actually runs.
     """
     own = [str(value) for value in (argv or []) if value != "--"]
-    managed = any(argv_has_group(own, group) for group in mode_groups(capabilities))
+    managed = any(argv_has_group(own, group)
+                  for group in mode_groups(capabilities, legacy=False))
     bypass = _declared(capabilities, "mode_conflict_args", BYPASS_ARGS)
     declared = capabilities.get("args") or bypass
     effective = own if managed else [*[str(value) for value in declared], *own]
     skip = _declared(capabilities, "skip_permissions_args", SKIP_ARGS)
     sandbox_on = _declared(capabilities, "full_access_off_args", SANDBOX_ON_ARGS)
     sandbox_off = _declared(capabilities, "full_access_args", SANDBOX_OFF_ARGS)
-    skipping = (argv_has_group(effective, skip)
-                or argv_has_group(effective, LEGACY_SKIP_ARGS))
+    skipping = argv_has_group(effective, skip)
     yolo = argv_has_group(effective, bypass) or skipping
     sandbox = argv_has_group(effective, sandbox_on) or (
         skipping and not argv_has_group(effective, sandbox_off)

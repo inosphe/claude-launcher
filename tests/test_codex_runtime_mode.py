@@ -7,8 +7,9 @@ pin:
 
 - the packaged skip group is argv codex 0.160 accepts (``-a never``; the
   old ``--approval-mode full-auto`` is refused there as an unexpected
-  argument), and a session still carrying the old group is read as skipping
-  and repaired by the next write;
+  argument), and a session still carrying the old group is read the way
+  the daemon launches it (the old group is no mode group there) and
+  repaired by the next write;
 - :func:`codex_mode.runtime_args` writes all four states from any starting
   argv, keeping the session's other args;
 - :meth:`SessionManager.runtime_mode` and its route restart the session
@@ -90,11 +91,36 @@ def test_each_state_is_written_and_read_back(home, yolo, sandbox, want):
 
 def test_a_session_carrying_the_refused_group_is_repaired(home):
     caps = _caps(home)
-    legacy = ["--approval-mode", "full-auto", *ON]
-    assert codex_mode.runtime_state(legacy, caps) == (True, True)
-    assert codex_mode.runtime_args(legacy, caps, yolo=True, sandbox=True) == [
+    # alone — the shape /skip-permissions appended to empty args: the
+    # command builder keeps the bypass default beside it, and so does the
+    # reading, which is what the panel and the no-op check go by (s129-rev)
+    alone = ["--approval-mode", "full-auto"]
+    assert codex_mode.runtime_state(alone, caps) == (True, False)
+    assert codex_mode.runtime_args(alone, caps, yolo=True, sandbox=True) == [
         "-a", "never", *ON
     ]
+    beside = ["--approval-mode", "full-auto", *ON]
+    assert codex_mode.runtime_state(beside, caps) == (False, True)
+    assert codex_mode.runtime_args(beside, caps, yolo=True, sandbox=True) == [
+        "-a", "never", *ON
+    ]
+
+
+def test_the_sandbox_button_repairs_a_session_carrying_the_refused_group(
+    home, tmp_path, monkeypatch
+):
+    _codex_profile()
+    monkeypatch.setattr(harness_mod, "build_command", _fake_build_command)
+
+    async def run():
+        mgr = _manager()
+        mgr.create(SessionDef(name="cx1", profile="cx", cwd=str(tmp_path),
+                              args=("--approval-mode", "full-auto")))
+        fixed = await mgr.runtime_mode("cx1", True, True)  # not a no-op
+        assert fixed.sdef.args == ("-a", "never", *ON)
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
 
 
 def test_only_a_harness_with_the_sandbox_pair_declares_the_switch(home):

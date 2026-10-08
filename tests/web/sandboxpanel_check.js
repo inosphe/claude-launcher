@@ -147,6 +147,16 @@ async function main() {
   check("a refusal is shown as the daemon worded it",
         text(box2).includes("already runs"), true);
 
+  /* ---- a session carrying the refused --approval-mode group ----
+     Read the way the daemon launches it: not a mode group, so the bypass
+     default stands beside it — the same answer as codex_mode.runtime_state,
+     and the Sandbox button offers a write the daemon does not refuse as a
+     no-op (s129-rev). */
+  const legacy = { session: { name: "cx2", harness: "codex",
+                              args: ["--approval-mode", "full-auto"] } };
+  check("the refused group alone reads as YOLO without the sandbox",
+        button(ctx.sandbox(legacy)).textContent, "Turn sandbox on");
+
   /* ---- a harness without the pair ---- */
   const claude = { session: { name: "cl1", harness: "claude", args: [] } };
   check("claude gets no Sandbox button",
