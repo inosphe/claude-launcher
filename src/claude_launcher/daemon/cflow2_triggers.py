@@ -153,7 +153,7 @@ def v2_holders(name: str, parent: str, cwds: Sequence[str]) -> List[Tuple[str, s
 def v1_landing_holders(parent: str) -> List[Tuple[str, Optional[str]]]:
     """``(cwd, run)`` of each v1 run of ``parent`` that holds a
     ``landing_queue:`` (``run`` None for the main run). The way
-    :meth:`.cflow_clock.TriggerClock.parent_run` finds the parent's runs
+    :meth:`.cflow_clock.TriggerClock.merger_run` finds the parent's runs
     (the v1 registry), over every directory it drives."""
     out: List[Tuple[str, Optional[str]]] = []
     try:

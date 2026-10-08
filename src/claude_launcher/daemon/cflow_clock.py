@@ -2120,143 +2120,174 @@ class TriggerClock:
                 moved.append((cwd, scope, list(result["landed"])))
         return moved
 
-    def parent_run(self, scope: str) -> Tuple[Optional[str], Optional[str], str]:
-        """(cwd, scope) of the run this session's parent drives, or why not.
-
-        The parent is the session that created this one; its run is found the
-        way a goto request finds a target's (one directory, or none -- two
-        would be a guess). The parent's name comes back even when its run is
-        not found, and the cwd is None then: a parent that drives no run
-        cannot merge, one whose run is ambiguous can -- the caller tells
-        them apart by the reason's owner.
-        """
+    def _session(self, name: str):
         try:
-            parent = self.manager.get(scope).sdef.parent
+            return self.manager.get(name)
         except Exception:
-            parent = None
-        if not parent:
-            return None, None, "this session has no parent session"
-        hits = sorted({c for c, s in cflow_state.known_runs() if s == parent})
-        if not hits:
-            return None, None, f"parent {parent!r} drives no run"
-        if len(hits) > 1:
-            return None, parent, f"parent {parent!r} drives runs in {len(hits)} directories"
-        return hits[0], parent, ""
+            return None
 
-    def leader_run(self, cwd: str, scope: str) -> Tuple[Optional[str], Optional[str], str]:
-        """(cwd, scope) of the mesh leader run a parentless worker's landing
-        request goes to instead, or why there is none.
+    def _parent_of(self, name: str) -> Optional[str]:
+        session = self._session(name)
+        return getattr(getattr(session, "sdef", None), "parent", None) or None
 
-        The leader is the ``leader``-role member of the worker's mesh; a mesh
-        has one, and only the worker's own mesh is looked in.
-        Its run must hold a ``landing_queue`` in a checkout of the worker's
-        own repository -- a mesh spans projects, and a leader's run in
-        another repository measures "landed" in a git that never saw this
-        tip. Not exactly one such run is a skip, never a guess.
+    def merger_run(self, name: str, repo: str) -> Tuple[Optional[str], str, bool]:
+        """(cwd, why, ambiguous): the one run ``name`` drives in a checkout of
+        ``repo`` that holds a landing queue, or why there is none.
+
+        Only a live session merges. Its run must be in the worker's own
+        repository -- a mesh spans projects, and a queue in another
+        repository measures "landed" in a git that never saw this tip. Two
+        such runs is ``ambiguous``: the session can merge, which run takes
+        the request is the unknown, and that is never guessed.
+        """
+        session = self._session(name)
+        if session is None:
+            return None, "is not a session of this daemon", False
+        if session.exited:
+            return None, "has exited", False
+        found: List[str] = []
+        for c in sorted({c for c, s in cflow_state.known_runs() if s == name}):
+            if cflow_landing.common_dir(c) != repo:
+                continue
+            try:
+                if cflow_engine.landing_queue_run(cwd=c, scope=name) is not None:
+                    found.append(c)
+            except Exception:
+                continue
+        if not found:
+            return None, "has no run in this repository that declares a landing_queue", False
+        if len(found) > 1:
+            return None, (
+                f"has {len(found)} runs in this repository that declare a "
+                "landing_queue; the target is ambiguous"
+            ), True
+        return found[0], "", False
+
+    def landing_target(
+        self, cwd: str, scope: str
+    ) -> Tuple[Optional[str], Optional[str], str, List[str]]:
+        """(cwd, session, why, passed): whose landing queue this worker's
+        request goes on.
+
+        The parent first, then each direct ancestor above it: the nearest one
+        that can merge (:meth:`merger_run`). With none, the mesh leader
+        (:meth:`leader_run`) -- only ever a sibling or a direct ancestor,
+        never an uncle or a child. ``passed`` names each session passed over
+        and why, for the trigger's detail; ``why`` is set when there is no
+        target.
+        """
+        repo = cflow_landing.common_dir(cwd)
+        if repo is None:
+            return None, None, f"no git repository readable in {cwd}", []
+        passed: List[str] = []
+        chain: List[str] = []
+        name = self._parent_of(scope)
+        if not name:
+            passed.append("this session has no parent session")
+        while name and name != scope and name not in chain:
+            chain.append(name)
+            label = f"{'parent' if len(chain) == 1 else 'ancestor'} {name!r}"
+            tcwd, why, ambiguous = self.merger_run(name, repo)
+            if tcwd is not None:
+                return tcwd, name, "", passed
+            if ambiguous:
+                # This ancestor can merge; going past it would skip its stack.
+                return None, name, f"{label} {why}", passed
+            passed.append(f"{label} {why}")
+            name = self._parent_of(name)
+        lcwd, leader, lwhy = self.leader_run(scope, chain, repo)
+        if lcwd is not None:
+            return lcwd, leader, "", passed
+        return None, None, "; ".join(passed + [f"mesh leader fallback: {lwhy}"]), passed
+
+    def leader_run(
+        self, scope: str, chain: List[str], repo: str
+    ) -> Tuple[Optional[str], Optional[str], str]:
+        """(cwd, session, why) of the mesh leader run a worker's landing
+        request goes to when no direct ancestor can merge.
+
+        The leader is a ``leader``-role member of a mesh the worker is in,
+        and it is taken only as the worker's sibling (the same parent; two
+        sessions with no parent count as siblings) -- a leader that is a
+        direct ancestor was already asked in ``chain``. A leader that is
+        neither is refused: a landing request never goes to an uncle or a
+        child. Not exactly one leader that can merge is a skip, never a guess.
         """
         if self.mesh is None:
             return None, None, "no mesh to look for a leader in"
         try:
-            memberships = self.mesh.meshes_for_session(scope)
+            names = sorted({m["mesh"] for m in self.mesh.meshes_for_session(scope)})
         except Exception:
             return None, None, "the worker's mesh membership could not be read"
-        names = sorted({m["mesh"] for m in memberships})
         if not names:
             return None, None, "this session is in no mesh"
-        if len(names) > 1:
-            # Which mesh's leader lands this is a choice for the worker or
-            # its user; the reason lists the candidates so it can be made.
-            listed = []
-            for name in names:
-                try:
-                    roster = self.mesh.get(name).members.values()
-                except Exception:
-                    roster = []
-                heads = sorted(m.session for m in roster if "leader" in m.roles)
-                listed.append(f"{name}: {', '.join(heads) or 'no leader'}")
-            return None, None, (
-                f"member of several meshes; candidate leaders -- {'; '.join(listed)}"
-            )
-        try:
-            mesh = self.mesh.get(names[0])
-        except Exception:
-            return None, None, f"mesh {names[0]!r} could not be read"
-        leaders = [
-            m for _, m in sorted(mesh.members.items())
-            if "leader" in m.roles and m.session != scope
-        ]
-        if not leaders:
-            return None, None, f"mesh {names[0]!r} has no leader"
-        if len(leaders) > 1:
-            # A mesh has one leader; a roster saying otherwise is not ours to
-            # pick from.
-            return None, None, (
-                f"mesh {names[0]!r} lists {len(leaders)} leaders "
-                f"({', '.join(m.session for m in leaders)})"
-            )
-        leader = leaders[0].session
-        if not self.mesh._is_local(mesh, leaders[0]):
-            return None, None, f"leader {leader!r} is on another machine"
-        repo = cflow_landing.common_dir(cwd)
-        if repo is None:
-            return None, None, f"no git repository readable in {cwd}"
-        found: List[str] = []
-        for lcwd in sorted({c for c, s in cflow_state.known_runs() if s == leader}):
-            if cflow_landing.common_dir(lcwd) != repo:
-                continue
+        leaders: Dict[str, tuple] = {}
+        for mname in names:
             try:
-                if cflow_engine.landing_queue_run(cwd=lcwd, scope=leader) is not None:
-                    found.append(lcwd)
+                mesh = self.mesh.get(mname)
             except Exception:
                 continue
-        if not found:
+            for _, m in sorted(mesh.members.items()):
+                if "leader" in m.roles and m.session != scope:
+                    leaders.setdefault(m.session, (mesh, m))
+        if not leaders:
+            return None, None, f"no leader in mesh {', '.join(repr(n) for n in names)}"
+        own_parent = self._parent_of(scope)
+        eligible: List[Tuple[str, str]] = []
+        refused: List[str] = []
+        for lead, (mesh, member) in sorted(leaders.items()):
+            if lead in chain:
+                refused.append(f"leader {lead!r} is a direct ancestor that cannot merge")
+                continue
+            if not self.mesh._is_local(mesh, member):
+                refused.append(f"leader {lead!r} is on another machine")
+                continue
+            if self._session(lead) is None:
+                refused.append(f"leader {lead!r} is not a session of this daemon")
+                continue
+            if self._parent_of(lead) != own_parent:
+                refused.append(
+                    f"leader {lead!r} is neither a sibling nor a direct ancestor of {scope!r}"
+                )
+                continue
+            tcwd, why, _ = self.merger_run(lead, repo)
+            if tcwd is None:
+                refused.append(f"leader {lead!r} {why}")
+                continue
+            eligible.append((tcwd, lead))
+        if len(eligible) == 1:
+            return eligible[0][0], eligible[0][1], ""
+        if len(eligible) > 1:
             return None, None, (
-                f"leader {leader!r} has no run in this repository that declares a landing_queue"
+                f"several leaders can merge ({', '.join(l for _, l in eligible)}); "
+                "the target is ambiguous"
             )
-        if len(found) > 1:
-            return None, None, (
-                f"leader {leader!r} has {len(found)} runs in this repository that declare "
-                "a landing_queue; the target is ambiguous"
-            )
-        return found[0], leader, ""
+        return None, None, "; ".join(refused)
 
     async def _enqueue_landing(self, cwd: str, scope: str) -> Tuple[bool, str]:
-        """This worker's landing request, onto its parent's landing queue.
-        When the parent cannot merge -- no parent session, no run it drives,
-        or a run with no landing queue -- onto the mesh leader's
-        (:meth:`leader_run`).
+        """This worker's landing request, onto the landing queue of the
+        nearest direct ancestor that can merge, else of its sibling mesh
+        leader (:meth:`landing_target`). With neither it is an error: the
+        reason is journalled and logged, and nothing is filed.
 
         Read, not reported: the tip and branch from the worker's own
         checkout (the frozen tip its request names), the issues from the
         board (what it moved to in_review). Runs whether or not the worker is
         still alive -- the request stands either way.
         """
-        pcwd, parent, why = await asyncio.to_thread(self.parent_run, scope)
         # A parent whose landing queue is a v2 ``landing`` collection
         # (docs/cflow-v2.md 10, 「v1 연결」): taken only when no v1 run of
         # the parent holds one, so every v1-only case below reads as before.
         bridged = await self._enqueue_landing_v2(cwd, scope)
         if bridged is not None:
             return bridged
-        if pcwd is None and parent is not None:
-            # The parent can merge; which of its runs takes the request is
-            # what is unknown, and the leader is not the answer to that.
+        pcwd, parent, why, passed = await asyncio.to_thread(self.landing_target, cwd, scope)
+        if pcwd is None:
+            log.warning("cflow enqueue-landing from %s: no merge target: %s", scope, why)
             return False, why
-        has_queue = False
-        if pcwd is not None:
-            try:
-                has_queue = await asyncio.to_thread(
-                    cflow_engine.landing_queue_run, cwd=pcwd, scope=parent
-                ) is not None
-            except Exception:
-                has_queue = True  # the enqueue below reports the real error
-        if not has_queue:
-            lcwd, leader, lwhy = await asyncio.to_thread(self.leader_run, cwd, scope)
-            if lcwd is None:
-                return False, (
-                    why or f"parent {parent!r}: declares no 'landing_queue'"
-                ) + f"; mesh leader fallback: {lwhy}"
-            pcwd, parent = lcwd, leader
+        # Who was passed over, so the journal says why the request is not on
+        # the parent's queue.
+        via = f"{'; '.join(passed)}; fell back to {parent!r} at {pcwd}: " if passed else ""
         tip = await asyncio.to_thread(cflow_landing.head, cwd)
         if not tip:
             return False, f"no commit readable in {cwd}"
@@ -2282,12 +2313,12 @@ class TriggerClock:
                 run=None if holder in (None, cflow_state.MAIN_RUN) else holder,
             )
         except cflow_engine.CflowError as exc:
-            return False, f"parent {parent!r}: {exc}"
+            return False, f"{via}{parent!r}: {exc}"
         added, renewed = result.get("added") or [], result.get("renewed") or []
         if not added and not renewed:
-            return True, f"already on {parent}'s landing queue at {tip[:8]}"
+            return True, f"{via}already on {parent}'s landing queue at {tip[:8]}"
         return True, (
-            f"on {parent}'s landing queue at {tip[:8]}: "
+            f"{via}on {parent}'s landing queue at {tip[:8]}: "
             + ", ".join(
                 [f"added {', '.join(added)}"] * bool(added)
                 + [f"renewed {', '.join(renewed)}"] * bool(renewed)
