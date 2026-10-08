@@ -122,6 +122,10 @@ AW_VERIFY = "verifying"
 #: Hold kinds (``state["approvals"]``). ``monitor_violation`` holds the whole
 #: run; the others hold one instance.
 HOLD_HALT = "monitor_violation"
+#: Read-only routes whose headless delegate runs in the run's own checkout,
+#: kept read-only by a porcelain check there (daemon/cflow2_exec.py; the
+#: others are ``READONLY_SANDBOXED``).
+READONLY_IN_CHECKOUT = ("tools-restrict",)
 HOLD_LOOP = "loop_limit"
 HOLD_VISIT = "visit_limit"
 #: An ``ok`` finish whose acceptance probes did not all pass.
@@ -4421,6 +4425,20 @@ def describe(r: Run) -> Dict[str, Any]:
            for d in dels):
         hints.append("headless/session delegations are run by the daemon and come back on "
                      "their own; call flow_status again later")
+    in_checkout = sorted(
+        did for did, rec in (s.get("delegations") or {}).items()
+        if rec.get("status") in ("queued", "running")
+        and rec.get("executor") == ir.EXEC_HEADLESS
+        and ((rec.get("route") or {}).get("readonly") or {}).get("route")
+        in READONLY_IN_CHECKOUT)
+    if in_checkout:
+        # The daemon compares `git status --porcelain` of this checkout before
+        # and after a read-only delegation that runs in it, and cannot tell
+        # the driver's edits from the delegate's (claunch-onbdf).
+        hints.append(f"read-only delegation(s) {', '.join(in_checkout)} run in THIS working "
+                     "tree: do not edit, create, delete or commit files here until they "
+                     "come back -- any change to `git status` meanwhile fails them as a "
+                     "read-only violation")
     if waits:
         hints.append("waits fire on their own; call flow_status again later")
     if limits:
