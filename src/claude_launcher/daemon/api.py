@@ -50,6 +50,7 @@ from .. import install_plan
 from .. import session_commits
 from .. import beads_db, beads_meta
 from .. import ghcli, prflow, projects, reposync, reposync_flow, spawn as spawn_mod, store, workspaces
+from .. import workspace_usage
 from .. import plugins, prompt_packs, settings
 from .. import worktree as worktree_mod
 from . import beads as beads_mod, channel, clipboard, connections
@@ -402,6 +403,8 @@ def build_app(
     #: The approval gate a session's repository sync waits behind; see
     #: reposync_gate. Unanswered expires as a refusal.
     app["reposync_gate"] = reposync_gate.ReposyncGate()
+    # workspace name -> the disk-usage measurement running for it (claunch-2oait)
+    app["ws_usage_tasks"] = {}
     app["goto_gate"] = goto_gate.GotoGate(
         app,
         manager=manager,
@@ -569,6 +572,8 @@ def build_app(
     r.add_patch("/api/projects/{name}", h_project_update)
     r.add_delete("/api/projects/{name}", h_project_remove)
     r.add_get("/api/workspaces", h_workspaces)
+    r.add_get("/api/workspaces/usage", h_workspace_usage)
+    r.add_post("/api/workspaces/{name}/usage", h_workspace_usage_measure)
     r.add_get("/api/git", h_git)
     r.add_get("/api/worktrees", h_worktrees)
     r.add_get("/api/worktrees/changes", h_worktree_changes)
@@ -6007,6 +6012,59 @@ def _machine_name(request: web.Request) -> str:
     return str((request.app["relay_state"]() or {}).get("name") or socket.gethostname())
 
 
+def _ws_usage_doc(app: web.Application) -> dict:
+    tasks = app["ws_usage_tasks"]
+    cached = workspace_usage.load()
+    out = {}
+    for w in workspaces.list_all():
+        row = dict(cached.get(w.name) or {})
+        if w.name in tasks:
+            row["running"] = True
+        if row:
+            out[w.name] = row
+    return {"workspaces": out}
+
+
+async def h_workspace_usage(request: web.Request) -> web.Response:
+    """The Workspaces page's size badges (claunch-2oait): each workspace's
+    last measurement with the time it was taken, and ``running`` while one
+    is being taken. Reads the cache only; nothing is walked here."""
+    return json_response(await asyncio.to_thread(_ws_usage_doc, request.app))
+
+
+async def h_workspace_usage_measure(request: web.Request) -> web.Response:
+    """Measure one workspace's repository and worktrees in the background
+    (workspace_usage.measure) and keep the answer. Answers at once (202);
+    a measurement already running for it is not started twice."""
+    path, err = _ws_path(request)
+    if err is not None:
+        return err
+    name = request.match_info["name"]
+    tasks = request.app["ws_usage_tasks"]
+    if name not in tasks:
+        tasks[name] = asyncio.ensure_future(_ws_usage_run(tasks, name, path))
+    return json_response({"name": name, "running": True}, status=202)
+
+
+async def _ws_usage_run(tasks: dict, name: str, path: str) -> None:
+    def now() -> str:
+        return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    try:
+        doc = await asyncio.to_thread(workspace_usage.measure, path)
+        await asyncio.to_thread(workspace_usage.save, name, {**doc, "at": now()})
+    except Exception as exc:  # the row says it failed; the last number stays
+        log.warning("disk usage of workspace %s failed: %s", name, exc)
+        prev = (await asyncio.to_thread(workspace_usage.load)).get(name) or {}
+        try:
+            await asyncio.to_thread(workspace_usage.save, name,
+                                    {**prev, "error": str(exc), "failed_at": now()})
+        except OSError:
+            pass
+    finally:
+        tasks.pop(name, None)
+
+
 async def h_reposync_ws_summary(request: web.Request) -> web.Response:
     """The Workspaces page's row badges: branch, ahead/behind and changed
     files for every registered workspace that is there, read from local git
@@ -6133,13 +6191,17 @@ async def h_reposync_ws_sync(request: web.Request) -> web.Response:
         if answer is not None:
             return answer
         approval = _ws_approval(request, str(body.get("request") or ""))
-    entry = reposync_flow.history_entry(
-        p.repo, kind="master", workspace=request.match_info["name"], remote=p.remote,
-        branch=p.branch, by="web", approval=approval)
+
+    def run() -> dict:
+        # history_entry runs git (repo_identity), so it stays off the event loop
+        entry = reposync_flow.history_entry(
+            p.repo, kind="master", workspace=request.match_info["name"], remote=p.remote,
+            branch=p.branch, by="web", approval=approval)
+        return reposync_flow.recorded(entry, lambda: _ws_execute(p, card),
+                                      reposync_flow.master_done(p))
+
     try:
-        return json_response(await asyncio.to_thread(
-            reposync_flow.recorded, entry, lambda: _ws_execute(p, card),
-            reposync_flow.master_done(p)))
+        return json_response(await asyncio.to_thread(run))
     except reposync.SyncError as exc:
         return json_error(409, str(exc))
 
@@ -6192,7 +6254,7 @@ async def h_reposync_ws_branch_push(request: web.Request) -> web.Response:
     if answer is not None:
         return answer
 
-    def run() -> dict:
+    def push() -> dict:
         # the sha the approval named is what goes out, never a later tip
         current = reposync.git(card["repo"], "rev-parse", "--verify", "-q",
                                f"refs/heads/{card['source']}", check=False)
@@ -6202,15 +6264,19 @@ async def h_reposync_ws_branch_push(request: web.Request) -> web.Response:
                                       force_with_lease=card["action"] == "publish-force")
         return {"ok": True, "remote": card["remote"], "ref": ref, "sha": card["local"]}
 
-    entry = reposync_flow.history_entry(
-        card["repo"], kind="publish", workspace=request.match_info["name"],
-        remote=card["remote"], branch=card["source"], by="web",
-        approval=_ws_approval(request, str(body.get("request") or "")),
-        ref=card["branch"], force=card["action"] == "publish-force")
+    approval = _ws_approval(request, str(body.get("request") or ""))
+
+    def run() -> dict:
+        # history_entry runs git (repo_identity), so it stays off the event loop
+        entry = reposync_flow.history_entry(
+            card["repo"], kind="publish", workspace=request.match_info["name"],
+            remote=card["remote"], branch=card["source"], by="web", approval=approval,
+            ref=card["branch"], force=card["action"] == "publish-force")
+        return reposync_flow.recorded(entry, push,
+                                      lambda out: {"after": out["sha"], "pushed": True})
+
     try:
-        return json_response(await asyncio.to_thread(
-            reposync_flow.recorded, entry, run,
-            lambda out: {"after": out["sha"], "pushed": True}))
+        return json_response(await asyncio.to_thread(run))
     except reposync.SyncError as exc:
         return json_error(409, str(exc))
 

@@ -2471,6 +2471,19 @@ failed with git's error as the tooltip), the bar counts the finished and the
 failed, and once all are through the row badges above are read again. A
 press while a run is going does nothing.
 
+A present workspace's row also shows its disk usage: the repository and all
+of its linked worktrees, as `3.2 GB · 5m ago`, with each checkout's size and
+when it was measured in the tooltip. Walking a large checkout takes seconds to
+tens of seconds on Windows, so nothing is measured until the button is
+pressed (**Measure size**, or the size itself to measure again); the daemon
+walks in the background (`POST /api/workspaces/<name>/usage`, one walk per
+workspace at a time) while the row says measuring…, and keeps the answer
+with its time in `workspace-usage.json` in the daemon directory, so it
+survives a restart (`GET /api/workspaces/usage` reads it). A worktree under
+another checkout's directory is counted once, on its own line; symlinks and
+junctions count as links and are not followed. A failed walk keeps the last
+size and says it failed.
+
 Under **Work branches** the panel lists the branches other machines published
 on the planned remote as `<machine>/<branch>`, newest commit first, read from
 the remote-tracking refs (so as of the last fetch until Refresh fetches).
@@ -2509,7 +2522,11 @@ the MCP tool `repo_sync` each append a line when an operation runs, failures
 included with git's refusal, to `reposync-history.jsonl` in the daemon
 directory; a refused or expired card ran nothing and is not there (the
 approval cards themselves are kept in memory only). Lines are matched per
-repository, so every worktree of one shows the same history. The status
+repository, so every worktree of one shows the same history. Writers take
+`reposync-history.jsonl.lock` around the append and the trim to the newest
+1000 lines, so a line another process adds while the file is trimmed is
+kept; a writer that waits 5s for the lock drops its line, and the operation
+itself is unaffected. The status
 answer carries them as `history: [{at, kind, workspace, remote, branch, ref,
 action, before, after, pushed, by, approval, ok, error}]`.
 

@@ -823,3 +823,259 @@ def test_history_is_shared_by_the_worktrees_and_trimmed(world, tmp_path, monkeyp
         reposync_flow.record_history({**entry, "ok": True, "n": n})
     rows = reposync_flow.read_history(str(a))
     assert [r.get("n") for r in rows] == [9, 8, 7]
+
+
+_HISTORY_WRITER = r"""
+import sys
+from claude_launcher import reposync_flow
+path, tag, count = sys.argv[1], sys.argv[2], int(sys.argv[3])
+reposync_flow.history_path = lambda: path
+# a one-byte bound trims on every write; KEEP holds every line both writers add
+reposync_flow.HISTORY_TRIM_BYTES = 1
+reposync_flow.HISTORY_KEEP = 100000
+for n in range(count):
+    reposync_flow.record_history({"kind": "pull", "repo_id": "r", "w": tag, "n": n})
+"""
+
+
+def test_history_keeps_every_line_two_processes_append_while_trimming(tmp_path):
+    """claunch-iaihd.1: the daemon, the CLI and the MCP tool are separate
+    processes on one history file, and a trim rewrites the file -- a line
+    another process appended between the trim's read and its write was lost.
+    Two processes that trim on every write must leave every line behind."""
+    import json
+    import sys
+
+    path = str(tmp_path / "reposync-history.jsonl")
+    count = 150
+    procs = [subprocess.Popen([sys.executable, "-c", _HISTORY_WRITER, path, tag, str(count)])
+             for tag in ("a", "b")]
+    for proc in procs:
+        assert proc.wait(timeout=120) == 0
+    with open(path, encoding="utf-8") as fh:
+        rows = [json.loads(line) for line in fh.read().splitlines()]
+    for tag in ("a", "b"):
+        assert [r["n"] for r in rows if r["w"] == tag] == list(range(count)), tag
+
+
+def test_history_gives_up_the_line_when_the_lock_is_held(tmp_path, monkeypatch):
+    """A writer that cannot get the lock loses its line; the operation the line
+    describes does not fail and does not hang."""
+    from claude_launcher import reposync_flow
+
+    path = str(tmp_path / "reposync-history.jsonl")
+    monkeypatch.setattr(reposync_flow, "history_path", lambda: path)
+    monkeypatch.setattr(reposync_flow, "HISTORY_LOCK_TIMEOUT", 0.1)
+    with reposync_flow._history_lock(path):
+        started = time.monotonic()
+        # another handle on the lock file: the same process still waits (Windows
+        # byte-range locks and flock are both per open file, not per process)
+        reposync_flow.record_history({"kind": "pull", "repo_id": "r"})
+        assert time.monotonic() - started < 5
+    assert not (tmp_path / "reposync-history.jsonl").exists()
+    reposync_flow.record_history({"kind": "pull", "repo_id": "r"})
+    assert (tmp_path / "reposync-history.jsonl").read_text(encoding="utf-8").count("\n") == 1
+
+
+def test_history_entry_is_built_off_the_event_loop(world, monkeypatch):
+    """claunch-iaihd.2: history_entry runs git (repo_identity); the Sync
+    panel's handlers build it inside the thread they hand to to_thread, so
+    no git call blocks the daemon's event loop."""
+    import threading
+
+    from claude_launcher import reposync_flow
+
+    a, b = world["a"], world["b"]
+    real = reposync_flow.history_entry
+    threads = []
+
+    def spy(*args, **kw):
+        threads.append(threading.get_ident())
+        return real(*args, **kw)
+
+    monkeypatch.setattr(reposync_flow, "history_entry", spy)
+    _git(b, "pull", "-q", "origin", "master")
+    _commit(b, "theirs.txt")
+    _git(b, "push", "-q", "origin", "master")
+    _git(a, "branch", "s1-work")
+    workspaces.add(str(b), "proj-b")
+    loop_threads = []
+
+    async def body(client):
+        loop_threads.append(threading.get_ident())
+        # a fast-forward: no card
+        plan = await _status_plan(client)
+        resp = await client.post("/api/reposync/workspaces/proj/sync", json=_shown(plan),
+                                 headers=AUTH)
+        assert resp.status == 200, await resp.text()
+        rid = (await (await client.post("/api/reposync/workspaces/proj/branch-push",
+                                        json={"branch": "s1-work"}, headers=AUTH)).json())["request"]
+        await client.post(f"/api/reposync/requests/{rid}/approve", headers=AUTH)
+        resp = await client.post("/api/reposync/workspaces/proj/branch-push",
+                                 json={"branch": "s1-work", "request": rid}, headers=AUTH)
+        assert resp.status == 200, await resp.text()
+        resp = await client.post("/api/reposync/workspaces/proj-b/branch-pull",
+                                 json={"machine": "pc-a", "branch": "s1-work"}, headers=AUTH)
+        assert resp.status == 200, await resp.text()
+        assert [r["kind"] for r in await _history(client)] == ["publish", "master"]
+
+    _with_app(body)
+    assert len(threads) == 3, threads
+    assert loop_threads[0] not in threads
+
+
+# --------------------------------------------------------------------------- #
+# disk usage (claunch-2oait)
+# --------------------------------------------------------------------------- #
+def _write(path: Path, size: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"x" * size)
+
+
+def test_usage_counts_each_checkout_once(world, tmp_path):
+    """The workspace and every linked worktree get a line; a worktree under
+    the workspace's directory is not counted in the workspace's line too, so
+    the lines add up to the total."""
+    import os
+
+    from claude_launcher import workspace_usage
+
+    a = world["a"]
+    inner = a / ".claude" / "worktrees" / "wt-in"
+    outer = tmp_path / "wt-out"
+    _git(a, "worktree", "add", "-q", "-b", "s1-in", str(inner))
+    _git(a, "worktree", "add", "-q", "-b", "s1-out", str(outer))
+    _write(inner / "big.bin", 100_000)
+    _write(outer / "mid.bin", 30_000)
+    _write(a / "small.bin", 5_000)
+
+    doc = workspace_usage.measure(str(a))
+    by = {os.path.normcase(p["path"]): p for p in doc["parts"]}
+    assert set(by) == {os.path.normcase(str(x)) for x in (a, inner, outer)}
+    assert by[os.path.normcase(str(a))]["workspace"] is True
+    assert by[os.path.normcase(str(inner))]["bytes"] >= 100_000
+    assert by[os.path.normcase(str(outer))]["bytes"] >= 30_000
+    # the inner worktree's 100 KB is not in the workspace's own line
+    assert 5_000 <= by[os.path.normcase(str(a))]["bytes"] < 100_000
+    assert doc["bytes"] == sum(p["bytes"] for p in doc["parts"])
+    assert doc["files"] == sum(p["files"] for p in doc["parts"])
+
+    # from the linked worktree, the main checkout is one of the lines, and
+    # the worktree is still counted once
+    doc2 = workspace_usage.measure(str(inner))
+    assert doc2["parts"][0]["path"] == str(inner) and doc2["parts"][0]["workspace"]
+    assert doc2["bytes"] == doc["bytes"]
+
+
+def test_usage_does_not_follow_links(tmp_path):
+    import os
+
+    from claude_launcher import workspace_usage
+
+    root = tmp_path / "r"
+    _write(root / "f.bin", 1_000)
+    far = tmp_path / "far"
+    _write(far / "huge.bin", 500_000)
+    made = []
+    try:
+        os.symlink(str(far), str(root / "link"), target_is_directory=True)
+        made.append("link")
+    except (OSError, NotImplementedError):
+        pass
+    if os.name == "nt":
+        # a junction needs no privilege, and is what Windows checkouts carry
+        done = subprocess.run(["cmd", "/c", "mklink", "/J", str(root / "junction"), str(far)],
+                              capture_output=True)
+        if done.returncode == 0:
+            made.append("junction")
+    if not made:
+        pytest.skip("this machine can create neither a directory symlink nor a junction")
+    size, files = workspace_usage.walk_size(str(root))
+    assert size < 500_000 and files == 1 + len(made)
+
+
+def _usage(client):
+    async def get():
+        return (await (await client.get("/api/workspaces/usage", headers=AUTH)).json())["workspaces"]
+    return get()
+
+
+async def _usage_settled(client, name="proj"):
+    for _ in range(200):
+        row = (await _usage(client)).get(name) or {}
+        if row and not row.get("running"):
+            return row
+        await asyncio.sleep(0.05)
+    raise AssertionError("the measurement did not finish")
+
+
+def test_usage_measures_in_the_background_and_keeps_the_answer(world, monkeypatch):
+    import threading
+
+    from claude_launcher import workspace_usage
+
+    real = workspace_usage.measure
+    gate = threading.Event()
+    runs = []
+
+    def slow(path):
+        runs.append(path)
+        gate.wait(10)
+        return real(path)
+
+    monkeypatch.setattr(workspace_usage, "measure", slow)
+
+    async def body(client):
+        assert await _usage(client) == {}
+        resp = await client.post("/api/workspaces/proj/usage", headers=AUTH)
+        assert resp.status == 202
+        assert (await _usage(client))["proj"] == {"running": True}
+        # a second press while it runs starts nothing
+        resp = await client.post("/api/workspaces/proj/usage", headers=AUTH)
+        assert resp.status == 202
+        gate.set()
+        row = await _usage_settled(client)
+        assert len(runs) == 1
+        assert row["bytes"] > 0 and row["files"] > 0 and row["at"]
+        assert row["parts"][0]["workspace"] is True
+        assert (await client.post("/api/workspaces/nope/usage", headers=AUTH)).status == 404
+
+    _with_app(body)
+
+    # the cache outlives the daemon: a new app reads the same answer
+    async def again(client):
+        row = (await _usage(client))["proj"]
+        assert row["bytes"] > 0 and "running" not in row
+
+    _with_app(again)
+
+
+def test_usage_failure_keeps_the_last_number(world, monkeypatch):
+    from claude_launcher import workspace_usage
+
+    async def first(client):
+        await client.post("/api/workspaces/proj/usage", headers=AUTH)
+        return await _usage_settled(client)
+
+    rows = []
+
+    async def run_first(client):
+        rows.append(await first(client))
+
+    _with_app(run_first)
+
+    def broken(path):
+        raise OSError("access denied")
+
+    monkeypatch.setattr(workspace_usage, "measure", broken)
+
+    async def second(client):
+        await client.post("/api/workspaces/proj/usage", headers=AUTH)
+        row = await _usage_settled(client)
+        while "error" not in row:
+            await asyncio.sleep(0.05)
+            row = (await _usage(client))["proj"]
+        assert row["error"] == "access denied" and row["failed_at"]
+        assert (row["bytes"], row["at"]) == (rows[0]["bytes"], rows[0]["at"])
+
+    _with_app(second)

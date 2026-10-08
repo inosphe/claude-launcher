@@ -18,15 +18,17 @@ Approval (decision Q5): ``daemon.reposync_push`` is ``ask`` by default.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import socket
 import subprocess
 import time
 from datetime import datetime, timezone
-from typing import Callable, Dict, Iterable, List, Optional, Tuple, TypeVar
+from pathlib import Path
+from typing import Callable, Dict, Iterable, Iterator, List, Optional, Tuple, TypeVar
 
-from . import daemon_client, reposync, store, workspaces
+from . import atomic, daemon_client, reposync, store, workspaces
 from .daemon.paths import daemon_dir, session_scratch_dir
 
 ASK = "ask"
@@ -585,6 +587,8 @@ HISTORY_FILE = "reposync-history.jsonl"
 #: lines the file keeps once it grows past :data:`HISTORY_TRIM_BYTES`
 HISTORY_KEEP = 1000
 HISTORY_TRIM_BYTES = 512 * 1024
+#: seconds a writer waits for another one's append+trim before giving up the line
+HISTORY_LOCK_TIMEOUT = 5.0
 #: entries a workspace's panel shows, newest first
 HISTORY_SHOWN = 30
 
@@ -616,6 +620,52 @@ def history_entry(repo: str, *, kind: str, workspace: Optional[str], remote: str
             "by": by, "approval": approval, **extra}
 
 
+@contextlib.contextmanager
+def _history_lock(path: str) -> Iterator[None]:
+    """Hold ``<history>.lock`` exclusively. The daemon, the CLI and the MCP
+    tool are separate processes writing one file, and a trim reads the whole
+    file and writes it back: without the lock, a line another process appends
+    between that read and that write is gone. Raises ``TimeoutError`` (an
+    ``OSError``) when the holder does not let go within
+    :data:`HISTORY_LOCK_TIMEOUT`."""
+    fd = os.open(path + ".lock", os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        try:
+            import msvcrt
+        except ImportError:
+            msvcrt = None  # type: ignore[assignment]
+        if msvcrt is not None:
+            def take() -> None:
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+
+            def drop() -> None:
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            def take() -> None:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+            def drop() -> None:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        deadline = time.monotonic() + HISTORY_LOCK_TIMEOUT
+        while True:
+            try:
+                take()
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"{path}.lock is held by another writer")
+                time.sleep(0.02)
+        try:
+            yield
+        finally:
+            drop()
+    finally:
+        os.close(fd)
+
+
 def record_history(entry: dict) -> None:
     """Append one line. A history that cannot be written is a lost record,
     never a reason the operation it describes fails."""
@@ -623,13 +673,16 @@ def record_history(entry: dict) -> None:
     path = history_path()
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
-        if os.path.getsize(path) > HISTORY_TRIM_BYTES:
-            with open(path, encoding="utf-8") as fh:
-                keep = fh.read().splitlines()[-HISTORY_KEEP:]
-            with open(path, "w", encoding="utf-8") as fh:
-                fh.write("\n".join(keep) + "\n")
+        with _history_lock(path):
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+            if os.path.getsize(path) > HISTORY_TRIM_BYTES:
+                with open(path, encoding="utf-8") as fh:
+                    keep = fh.read().splitlines()[-HISTORY_KEEP:]
+                # a reader (read_history) never sees a half-written file
+                with atomic.scratch(Path(path)) as tmp:
+                    tmp.write_text("\n".join(keep) + "\n", encoding="utf-8")
+                    atomic.replace(tmp, path)
     except OSError:
         pass
 
