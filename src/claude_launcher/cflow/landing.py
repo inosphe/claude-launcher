@@ -15,6 +15,7 @@ could not be asked has lost exactly the request it exists to keep.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -56,6 +57,16 @@ def branch(repo: str) -> Optional[str]:
     if proc is None or proc.returncode != 0:
         return None
     return proc.stdout.strip() or None
+
+
+def common_dir(repo: str) -> Optional[str]:
+    """The git directory every worktree of ``repo``'s repository shares, as
+    an absolute normalized path, or None. Two checkouts are the same
+    repository exactly when this is equal."""
+    proc = _git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    if proc is None or proc.returncode != 0 or not proc.stdout.strip():
+        return None
+    return os.path.normcase(os.path.normpath(proc.stdout.strip()))
 
 
 def landed(repo: str, tip: str, target: str) -> Optional[bool]:
