@@ -107,15 +107,19 @@ def _session_workspace(sdef) -> Optional[Path]:
     return Path(owner.path) if owner is not None else None
 
 
-def _current_record(rec: dict, workspace: Optional[Path]) -> Optional[dict]:
+def _current_record(
+    rec: dict, workspace: Optional[Path], memo: dict
+) -> Optional[dict]:
     """The record ``rec`` should be now, or None when its copy is gone."""
     source = rec.get("source") or prompt_packs.WORKSPACE
     if source == prompt_packs.DAEMON:
-        pack = daemon_prompt.pack()
+        if "daemon" not in memo:
+            memo["daemon"] = daemon_prompt.pack()
+        pack = memo["daemon"]
         if pack is None:
             return None
         return {**rec, "text": pack.body}
-    pack = prompt_packs.current_copy(workspace, rec)
+    pack = prompt_packs.current_copy(workspace, rec, memo=memo)
     if pack is None:
         return None
     if pack.source == prompt_packs.WORKSPACE:
@@ -125,26 +129,32 @@ def _current_record(rec: dict, workspace: Optional[Path]) -> Optional[dict]:
     return {**rec, "text": pack.body, "source": pack.source}
 
 
-def refresh_packs(session) -> Tuple[Optional[tuple], List[dict]]:
+def refresh_packs(
+    session, memo: Optional[dict] = None
+) -> Tuple[Optional[tuple], List[dict]]:
     """Bring one session's recorded packs up to the copies they follow.
 
     Returns ``(records, notices)``: the new records when anything moved
     (``None`` otherwise), and one notice per pack whose text changed or whose
     copy is gone. A change of origin with the same text updates the record
     and says nothing (:func:`pack_key`). The caller stores the records; this
-    only reads files.
+    only reads files, each one once per ``memo`` (one scan shares it).
     """
+    memo = {} if memo is None else memo
     sdef = session.sdef
     recorded = tuple(getattr(sdef, "prompt_packs", ()) or ())
     if not recorded:
         return None, []
-    workspace = _session_workspace(sdef)
+    owner_key = ("owner", sdef.cwd or "")
+    if owner_key not in memo:
+        memo[owner_key] = _session_workspace(sdef)
+    workspace = memo[owner_key]
     out: List[dict] = []
     notices: List[dict] = []
     moved = False
     for rec in recorded:
         try:
-            now = _current_record(rec, workspace)
+            now = _current_record(rec, workspace, memo)
         except Exception:  # noqa: BLE001 - an unreadable copy is not a removal
             out.append(rec)
             continue
@@ -628,12 +638,15 @@ class SessionReminderService:
             return []
         due: List[Tuple[str, List[dict]]] = []
         live = set()
+        # Sessions in one workspace share its directory and claunch's copies:
+        # read each once per scan, since this runs on every poll.
+        memo: dict = {}
         for session in sessions:
             if getattr(session, "exited", False):
                 continue
             name = session.sdef.name
             try:
-                records, notices = refresh_packs(session)
+                records, notices = refresh_packs(session, memo)
             except Exception:  # noqa: BLE001 - one session's files, not all
                 log.warning("prompt pack refresh failed for %r", name, exc_info=True)
                 records, notices = None, []

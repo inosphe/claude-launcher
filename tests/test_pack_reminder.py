@@ -343,3 +343,31 @@ def test_a_change_notice_waits_for_a_landed_delivery(env, monkeypatch):
     _tick(service, 1030.0)
     assert "changed: prompt pack house" in sess.delivered[0]
     assert service._packs["w1"]["notices"] == []
+
+
+def test_one_scan_reads_a_workspace_and_a_shipped_pack_once(env, monkeypatch):
+    """The scan runs on every poll for every session, so sessions that share
+    a workspace share its directory read, and claunch's copy is read once."""
+    ws_rec = _ws_record(env, "house", "house rules")
+    pkg_rec = _pkg_record(env, "role-worker", "be a producer")
+    sessions = {}
+    for name in ("w1", "w2", "w3"):
+        sdef = SessionDef(name=name, cwd=str(env["ws"]),
+                          prompt_packs=(ws_rec, pkg_rec))
+        sessions[name] = _Session(sdef)
+    service = session_reminder.SessionReminderService(_Manager(sessions))
+    calls = {"installed": 0, "shipped": 0}
+    real_installed, real_shipped = prompt_packs.installed, prompt_packs.shipped
+
+    def counting_installed(workspace):
+        calls["installed"] += 1
+        return real_installed(workspace)
+
+    def counting_shipped(pack_id):
+        calls["shipped"] += 1
+        return real_shipped(pack_id)
+
+    monkeypatch.setattr(prompt_packs, "installed", counting_installed)
+    monkeypatch.setattr(prompt_packs, "shipped", counting_shipped)
+    service.scan_packs(1000.0, CFG)
+    assert calls == {"installed": 1, "shipped": 1}

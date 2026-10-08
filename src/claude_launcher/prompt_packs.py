@@ -624,7 +624,9 @@ def pack_copy(workspace: Optional[Path], pack_id: str) -> Pack:
         ) from None
 
 
-def current_copy(workspace: Optional[Path], record: dict) -> Optional[Pack]:
+def current_copy(
+    workspace: Optional[Path], record: dict, *, memo: Optional[dict] = None,
+) -> Optional[Pack]:
     """The copy a session's recorded pack follows now, or None when gone.
 
     Which files are watched depends on where the recorded text came from.
@@ -634,18 +636,27 @@ def current_copy(workspace: Optional[Path], record: dict) -> Optional[Pack]:
     wins -- from then on the record is a workspace copy and follows only
     that file. The daemon's own prompt is not a file here and is resolved
     by the daemon (:mod:`claude_launcher.daemon.daemon_prompt`).
+
+    ``memo`` is a dict the caller keeps for one pass over many records, so
+    each workspace directory and each shipped pack is read once per pass.
     """
+    memo = {} if memo is None else memo
     pack_id = str(record.get("id") or "")
     source = record.get("source") or WORKSPACE
     if source == DAEMON or not _ID.match(pack_id):
         return None
     if workspace is not None:
-        for pack in installed(workspace):
-            if pack.id == pack_id:
-                return pack
+        key = ("workspace", str(workspace))
+        if key not in memo:
+            memo[key] = {p.id: p for p in installed(workspace)}
+        if pack_id in memo[key]:
+            return memo[key][pack_id]
     if source == WORKSPACE:
         return None
-    try:
-        return replace(shipped(pack_id), source=PACKAGE)
-    except PackError:
-        return None
+    key = ("package", pack_id)
+    if key not in memo:
+        try:
+            memo[key] = replace(shipped(pack_id), source=PACKAGE)
+        except PackError:
+            memo[key] = None
+    return memo[key]
