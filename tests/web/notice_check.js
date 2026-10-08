@@ -128,6 +128,7 @@ function build(opts) {
     // read has answered. Whether it does is controlsocket_check's subject;
     // here it only has to exist.
     "ensureControlSocket",
+    "refreshCflow2Rail",
     code +
     "\nreturn {notify, dismissNotice, noticeClock, setDaemonOnline, boot, pollOnce," +
     " get cards() { return [...notices.keys()]; }," +
@@ -148,6 +149,7 @@ function build(opts) {
     // and spawnform_check's to hold — here it only has to exist.
     () => {},
     () => {},   // refreshProjects
+    () => {},   // refreshCflow2Rail (the rail's v2 line; railcflow2_check)
   );
 
   return { api, nodes, daemon, clock, apiCalls, timers,

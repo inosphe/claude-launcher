@@ -527,7 +527,8 @@ option:disabled { color: #6b7280; }
    the name's line keeps the default `order: 0` and declares no
    `flex-basis: 100%`. Only the deliberate line-breakers below
    (.rail-cwd, .rail-ctx-line, .rail-usage-line, .rail-seen, .rail-quiet,
-   .rail-note, .rail-status-checks, .sess-cflow, .sess-brief) are full-width, and they
+   .rail-note, .rail-status-checks, .sess-cflow, .sess-cflow2, .sess-brief) are
+   full-width, and they
    carry an `order` above the ▸ toggle's so the toggle still lands at the end
    of the name line. A full-width child at order 0 would break the line
    before the toggle got there.
@@ -667,6 +668,22 @@ option:disabled { color: #6b7280; }
    plainly inert — the tooltip carries the how-to-enable */
 #session-list .sess-brief-toggle:disabled { color: #3d434d; cursor: default; }
 #session-list .sess-cflow { order: 3; }
+/* The session's cflow v2 run (applyCflow2Badges): its own line under the v1
+   one, same indent and the same amber when a person owes it something. The
+   "v2" tag tells the two lines apart when a session carries both. */
+#session-list .sess-cflow2 {
+  flex-basis: 100%; display: flex; align-items: center; gap: 6px;
+  min-width: 0; padding-left: 16px; font-size: 11px; color: #7d8590;
+  order: 3; cursor: pointer;
+}
+#session-list .sess-cflow2-tag {
+  flex: none; font-size: 9px; padding: 0 4px; border-radius: 6px;
+  border: 1px solid #30363d; color: #8b949e;
+}
+#session-list .sess-cflow2-text {
+  min-width: 0; white-space: normal; overflow-wrap: anywhere;
+}
+#session-list .sess-cflow2.gated { color: #d29922; font-weight: 600; }
 /* The "the daemon will not type here" line: delivery held, cflow reminder off.
    Its own full-width line rather than pills loose on the name row — see the
    invariant on .rail-head; anything at order 0 that does not shrink pushes
