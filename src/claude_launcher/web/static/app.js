@@ -9949,6 +9949,9 @@ let newPackTicks = new Map();  // pack id -> the operator's own tick
 // outlives a change of workspace. null = untouched = ticked.
 let newDaemonPromptTick = null;
 let newPackRolesOpen = false;  // the folded role packs are shown
+// Role packs shown while folded stay shown until the fold button is pressed
+// again: an untick does not pull its chip out from under the pointer.
+let newPackRolesShown = new Set();
 let newPackPreview = null;     // {id, daemon, doc, error}: the text being shown
 
 /* Whether the opening takes this daemon's prompt: only when it has one, and
@@ -9973,7 +9976,7 @@ async function refreshPromptPackOffer() {
   const after = offer && (offer.workspace || {}).path;
   // Another workspace's packs are another list: ticks start from its
   // defaults again rather than carrying ids across.
-  if (before !== after) newPackTicks = new Map();
+  if (before !== after) { newPackTicks = new Map(); newPackRolesShown = new Set(); }
   newPackOffer = offer;
   renderPromptPackRow();
 }
@@ -10122,29 +10125,32 @@ function renderPromptPackRow() {
   group("General", general, null);
 
   // Roles: the ones in play (required or ticked) are shown; the rest of the
-  // role packs fold behind one button so the row stays short.
+  // role packs fold behind one button so the row stays short. A chip once
+  // shown keeps its place until the button is pressed (newPackRolesShown),
+  // so ticking and unticking never moves the chips around it.
   const roles = every.filter(([p]) => isRole(p));
   const inPlay = ([p]) => !!required[p.id] || newPackTicked(p.id);
-  const shown = roles.filter((r) => newPackRolesOpen || inPlay(r));
-  const folded = roles.filter((r) => !inPlay(r)).length;
+  for (const r of roles) if (inPlay(r)) newPackRolesShown.add(r[0].id);
+  const shown = roles.filter((r) => newPackRolesOpen || newPackRolesShown.has(r[0].id));
+  const folded = roles.length - roles.filter((r) => newPackRolesShown.has(r[0].id)).length;
   let more = null;
   if (folded) {
     more = el("button", "pack-chip-more", newPackRolesOpen ? "fewer" : `+${folded} more`);
     more.type = "button";
     more.addEventListener("click", () => {
       newPackRolesOpen = !newPackRolesOpen;
+      newPackRolesShown = new Set();
       renderPromptPackRow();
     });
   }
   group("Roles", shown.map(([p, packaged]) => packChip(p, packaged)), more);
   row.appendChild(body);
 
-  if (newPackPreview) row.appendChild(packPreviewPanel(newPackPreview, wsName));
-
   // What the opening will actually carry, in the daemon's order (its own
   // prompt, ticked, then required), each with why it is there -- the chips
   // alone do not say which role a locked one came from when the Role row
-  // was left blank.
+  // was left blank. Its own block right under the chips, above the text
+  // preview, so opening a preview never moves it.
   const chosen = [...newPromptPacks(f), ...Object.keys(required).filter((id) => shippedIds.has(id))]
     .filter((id, i, a) => a.indexOf(id) === i);
   const primary = newPrimaryRole(f);
@@ -10153,22 +10159,19 @@ function renderPromptPackRow() {
     return `${id} (${why}${shippedIds.has(id) ? ", claunch's copy" : ""})`;
   });
   if (newDaemonPromptWanted()) parts.unshift("daemon prompt (this daemon's, every session)");
-  const summary = el("p", "wf-note new-packs-summary");
-  if (parts.length) {
-    summary.appendChild(document.createTextNode("The opening will include: "));
-    parts.forEach((part, i) => {
-      if (i) summary.appendChild(document.createTextNode(" · "));
-      summary.appendChild(el("span", "pack-chip-mini", part));
-    });
-    summary.appendChild(document.createTextNode("."));
-  } else {
-    summary.appendChild(document.createTextNode("The opening will include no prompt pack."));
-  }
+  const summary = el("div", "new-packs-summary");
+  summary.appendChild(el("div", "new-packs-summary-head",
+    parts.length ? "The opening will include" : "The opening will include no prompt pack"));
+  const list = el("div", "new-packs-summary-list");
+  for (const part of parts) list.appendChild(el("span", "pack-chip-mini", part));
+  summary.appendChild(list);
   if (primary.inferred && primary.role) {
-    summary.appendChild(document.createTextNode(
-      ` Role ${primary.role} is inferred from the handle (no Role picked).`));
+    summary.appendChild(el("div", "wf-note new-packs-summary-note",
+      `Role ${primary.role} is inferred from the handle (no Role picked).`));
   }
   row.appendChild(summary);
+
+  if (newPackPreview) row.appendChild(packPreviewPanel(newPackPreview, wsName));
   if (missing.length) {
     row.appendChild(el("p", "wf-error",
       missing.map((id) => `${id} is required by ${required[id].join(", ")}`).join("; ") +
