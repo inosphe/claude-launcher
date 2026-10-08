@@ -33,7 +33,19 @@ TOOLS = [
             "with a request id -- tell the user, end your turn, and call again with "
             "'request' once they approved. After a rebase the result lists branches "
             "left on old commits with the 'git rebase --onto' for each; it moves "
-            "none of them, and neither should you without their owner."
+            "none of them, and neither should you without their owner. "
+            "You, the calling agent, retain responsibility when a rebase or push "
+            "fails: inspect current refs and the error, reproduce and resolve "
+            "conflicts in an isolated worktree preserving merge history, run "
+            "relevant checks, and finish the synchronization within your authority. "
+            "A failed mechanical rebase is aborted and its temporary worktree is "
+            "removed; do not assume a rebase remains in progress. Preserve local "
+            "edits and other owners' branches. Replan when tips change and obtain "
+            "approval for the final resolved tips through the existing gate; do "
+            "not reuse stale approval or bypass it with a direct push. Verify "
+            "the final remote ref and report the real outcome, or a concrete "
+            "blocker requiring the user's decision. Do not stop at relaying a "
+            "command error. This tool does not spawn a recovery session for you."
         ),
         "inputSchema": {
             "type": "object",

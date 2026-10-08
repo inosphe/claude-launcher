@@ -123,6 +123,7 @@ vm.runInContext(
        "wsSyncBranch", "wsSyncPlanLine", "wsSyncPeers", "wsSyncResult",
        "wsSyncPanel", "wsSyncPullBody", "wsSyncShared", "wsSyncUnmerged",
        "wsPeerDistanceText", "wsSyncHistory", "wsHistoryApproval"].map(slice),
+   ...["wsSyncAgentBody", "wsSyncAgentBlocked", "wsSyncAgentControls"].map(slice),
    "globalThis.__st = wsSyncSt;"].join("\n"),
   ctx);
 
@@ -248,12 +249,12 @@ async function tick() {
     ? { status: 202, body: { status: "waiting_approval", request: "r3", deadline: "" } }
     : { status: 200, body: { request: { id: "r3", status: "approved" } } };
   await ctx.wsSyncBranch("proj", "push");
-  assert.deepEqual(posts()[0].body, { branch: "s1-x", force_with_lease: true });
+  assert.deepEqual(posts()[0].body, { branch: "s1-x", force_with_lease: true, remote: "origin" });
   reply = (url) => url.endsWith("/branch-push")
     ? { status: 200, body: { ok: true, remote: "origin", ref: "pc-a/s1-x", sha: "e".repeat(40) } }
     : { status: 200, body: { request: { id: "r3", status: "approved" } } };
   await tick();
-  assert.deepEqual(posts()[1].body, { branch: "s1-x", force_with_lease: true, request: "r3" });
+  assert.deepEqual(posts()[1].body, { branch: "s1-x", force_with_lease: true, remote: "origin", request: "r3" });
   assert.equal(st.result.kind, "push");
 
   /* ---- branch pull needs both fields, and no card ----------------------- */
@@ -397,6 +398,64 @@ async function tick() {
   assert.match(pull.children[1].cls, /exited/);
   assert.equal(ctx.wsHistoryApproval({ mode: "terminal", yes: true }),
                "approved at the terminal (--yes)");
+
+  /* A/B delegation preserves approval polling and never reports sync done. */
+  st.doc = { ...DOC, agent_parents: [{ name: "parent", profile: "coder" }] };
+  nodes = walk(ctx.wsSyncPanel(W));
+  const modePick = nodes.find((n) => (n.attrs || {})["aria-label"] === "Sync execution mode");
+  assert.equal(modePick.value, "commands", "delegation is opt-in");
+  modePick.value = "agent";
+  modePick.handlers.change[0]();
+  assert.equal(st.agentMode, "agent");
+  calls.length = 0;
+  await ctx.wsSyncRun("proj");
+  assert.equal(posts().length, 0, "must select a live parent before spawning");
+  nodes = walk(ctx.wsSyncPanel(W));
+  const parentPick = nodes.find((n) => (n.attrs || {})["aria-label"] === "Sync agent parent session");
+  parentPick.value = "parent";
+  parentPick.handlers.change[0]();
+  const delegated = { status: "delegated", agent: { session: "child", status: "busy" },
+    plan: PLAN, operation_error: "conflict: file.txt" };
+  reply = (url) => url.endsWith("/sync")
+    ? { status: 202, body: delegated } : { status: 200, body: st.doc };
+  await ctx.wsSyncRun("proj");
+  assert.equal(posts()[0].body.agent_mode, "agent");
+  assert.equal(posts()[0].body.agent_parent, "parent");
+  assert.equal(st.waiting, null, "202 delegated is not an approval wait");
+  let resultNodes = walk(ctx.wsSyncResult(st.result));
+  assert.equal(resultNodes.find((n) => n.tag === "a").href, "#/s/child");
+  assert.ok(resultNodes.some((n) => n.text === "conflict: file.txt"));
+  assert.ok(!resultNodes.some((n) => n.text.startsWith("done:")));
+
+  st.agentMode = "on_failure";
+  calls.length = 0;
+  reply = () => ({ status: 202, body: { request: "r-agent", status: "waiting_approval" } });
+  await ctx.wsSyncRun("proj");
+  assert.equal(st.waiting.body.agent_mode, "on_failure");
+  reply = (url) => url.endsWith("/r-agent")
+    ? { status: 200, body: { request: { status: "approved" } } }
+    : url.endsWith("/sync") ? { status: 202, body: delegated }
+      : { status: 200, body: st.doc };
+  await tick();
+  assert.equal(posts()[1].body.agent_mode, "on_failure");
+  assert.equal(posts()[1].body.agent_parent, "parent");
+  assert.equal(posts()[1].body.request, "r-agent");
+  assert.equal(st.result.doc.status, "delegated");
+
+  calls.length = 0;
+  reply = () => ({ status: 202, body: delegated });
+  await ctx.wsSyncBranch("proj", "push");
+  assert.equal(posts()[0].body.agent_mode, "on_failure");
+  st.doc.agent = delegated.agent;
+  nodes = walk(ctx.wsSyncPanel(W));
+  assert.ok(nodes.find((n) => n.text === "Rebase & push").disabled);
+  calls.length = 0;
+  await ctx.wsSyncRun("proj");
+  assert.equal(posts().length, 0, "active agent owns this sync");
+  delete st.doc.agent;
+  st.doc.agent_parents = [];
+  await ctx.wsSyncRun("proj");
+  assert.equal(posts().length, 0, "an exited parent is not a valid choice");
 
   console.log("workspacesync_check ok");
 })().catch((err) => { console.error(err); process.exit(1); });

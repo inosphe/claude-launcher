@@ -4587,6 +4587,8 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .ws-sync-waiting { color: #d29922; }
 .ws-sync-result { padding: 6px 8px; background: #1b2a1f; border-radius: 4px;
   overflow-wrap: anywhere; }
+.ws-sync-result.ws-sync-delegated { background: #1c2b44; }
+.ws-sync-agent-link { color: #58a6ff; overflow-wrap: anywhere; }
 
 /* ------------------------------------------------------------------ */
 /* Beads boards: which database each workspace's board reads            */

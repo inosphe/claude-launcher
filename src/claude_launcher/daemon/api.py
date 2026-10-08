@@ -87,6 +87,7 @@ from ..profile import ProfileError
 from . import goto_gate
 from . import mesh_roles
 from . import reposync_gate
+from . import reposync_agent
 from . import restart_gate
 from . import restart_notice
 from .harness import HarnessError, SessionDef
@@ -405,6 +406,7 @@ def build_app(
     app["reposync_gate"] = reposync_gate.ReposyncGate()
     # workspace name -> the disk-usage measurement running for it (claunch-2oait)
     app["ws_usage_tasks"] = {}
+    app["ws_sync_locks"] = {}
     app["goto_gate"] = goto_gate.GotoGate(
         app,
         manager=manager,
@@ -6101,6 +6103,13 @@ async def h_reposync_ws_status(request: web.Request) -> web.Response:
     doc["machine"] = _machine_name(request)
     # the peers table shows these as unreadable rows (claunch-gjjdp)
     doc["unreadable"] = unreadable
+    agent = reposync_agent.active(request.app["manager"], doc["repo"]) if doc.get("repo") else None
+    doc["agent"] = reposync_agent.summary(agent) if agent else None
+    doc["agent_parents"] = [
+        {"name": s.sdef.name, "profile": s.sdef.profile}
+        for s in request.app["manager"].list()
+        if not s.exited and s.sdef.harness != "shell"
+    ]
     return json_response(doc)
 
 
@@ -6168,7 +6177,74 @@ def _ws_execute(p: "reposync.Plan", card: dict) -> dict:
     return {"ok": True, "plan": card, **result.to_dict(), "board": board}
 
 
+async def _ws_sync_serialized(request: web.Request, handler) -> web.Response:
+    path, err = _ws_path(request)
+    if err is not None:
+        return err
+    key = os.path.normcase(os.path.realpath(path))
+    lock = request.app["ws_sync_locks"].setdefault(key, asyncio.Lock())
+    async with lock:
+        return await handler(request)
+
+
+def _ws_agent_options(request: web.Request, body: dict) -> str:
+    mode = body.get("agent_mode", "commands")
+    if mode not in ("commands", "agent", "on_failure"):
+        raise ValueError("agent_mode must be commands, agent or on_failure")
+    if mode != "commands":
+        parent = body.get("agent_parent")
+        if not isinstance(parent, str) or not parent:
+            raise ValueError("select a parent session for the sync agent")
+        session = request.app["manager"].get(parent)
+        if session.exited or session.sdef.harness == "shell":
+            raise ValueError("the sync agent needs a live agent parent session")
+    return mode
+
+
+def _ws_active_agent(request: web.Request, card: dict, mode: str):
+    agent = reposync_agent.active(request.app["manager"], card["repo"])
+    if not agent:
+        return None
+    doc = {"status": "delegated", "agent": reposync_agent.summary(agent), "plan": card}
+    if mode == "agent":
+        return json_response(doc, status=202)
+    return json_response({**doc, "error": "a sync agent is already assigned; open its session"},
+                         status=409)
+
+
+async def _ws_start_agent(request: web.Request, card: dict, body: dict, *, error: str = ""):
+    """Use normal spawn policy, board onboarding and launch; never approve a push."""
+    manager = request.app["manager"]
+    parent = body["agent_parent"]
+    assignment = {
+        "workspace": request.match_info["name"], "worktree": True,
+        "branch_from": card["local"], "workflow": "-", "role": "worker",
+        "task": reposync_agent.task(card, error=error),
+    }
+    warnings = []
+    child = None
+    try:
+        child = manager.stage_child(parent, assignment, warnings=warnings)
+        arranged = await _onboard_and_launch(request, child, assignment, parent=parent)
+    except (spawn_mod.SpawnDenied, ManagerError, HarnessError, worktree_mod.WorktreeError,
+            onboard.OnboardError, ValueError, TypeError, OSError) as exc:
+        if child is not None:
+            manager.discard(child.sdef.name)  # only drops an unstarted record
+        return json_response({
+            "error": (f"{error}\n" if error else "") + f"Could not start sync agent: {exc}",
+            "operation_error": error, "agent_error": str(exc),
+        }, status=409)
+    return json_response({
+        "status": "delegated", "agent": reposync_agent.summary(child), "plan": card,
+        "operation_error": error, "warnings": warnings, "onboarding": arranged,
+    }, status=202)
+
+
 async def h_reposync_ws_sync(request: web.Request) -> web.Response:
+    return await _ws_sync_serialized(request, _h_reposync_ws_sync)
+
+
+async def _h_reposync_ws_sync(request: web.Request) -> web.Response:
     """Carry out the plan the Sync panel showed. The body names the plan's
     two tips; if either moved, nothing runs (409) and the fresh plan comes
     back. A plan that pushes goes through the approval gate first
@@ -6179,14 +6255,23 @@ async def h_reposync_ws_sync(request: web.Request) -> web.Response:
         return err
     body = await _json_body(request)
     try:
+        mode = _ws_agent_options(request, body)
+    except (ValueError, ManagerError) as exc:
+        return json_error(400, str(exc))
+    try:
         p, card = await asyncio.to_thread(_ws_plan, path, request.match_info["name"], body)
     except reposync.SyncError as exc:
         return json_error(409, str(exc))
+    active = _ws_active_agent(request, card, mode)
+    if active is not None:
+        return active
     if p.local != body.get("local") or p.upstream != body.get("upstream"):
         return json_response({"error": "the branch or the remote moved since the plan was shown",
                               "stale": True, "plan": card}, status=409)
     if p.action == reposync.UP_TO_DATE:
         return json_response({"ok": True, "plan": card, "new": p.local, "pushed": False})
+    if mode == "agent":
+        return await _ws_start_agent(request, card, body)
     approval = {"mode": "none"}
     if p.pushes:
         answer = _ws_authorize(request, card, str(body.get("request") or ""))
@@ -6205,6 +6290,8 @@ async def h_reposync_ws_sync(request: web.Request) -> web.Response:
     try:
         return json_response(await asyncio.to_thread(run))
     except reposync.SyncError as exc:
+        if mode == "on_failure":
+            return await _ws_start_agent(request, card, body, error=str(exc))
         return json_error(409, str(exc))
 
 
@@ -6239,12 +6326,20 @@ def _ws_publish_card(path: str, name: str, body: dict, machine: str) -> dict:
 
 
 async def h_reposync_ws_branch_push(request: web.Request) -> web.Response:
+    return await _ws_sync_serialized(request, _h_reposync_ws_branch_push)
+
+
+async def _h_reposync_ws_branch_push(request: web.Request) -> web.Response:
     """Publish a local work branch as ``<this machine>/<branch>``, behind the
     approval gate like every push (:func:`_ws_authorize`)."""
     path, err = _ws_path(request)
     if err is not None:
         return err
     body = await _json_body(request)
+    try:
+        mode = _ws_agent_options(request, body)
+    except (ValueError, ManagerError) as exc:
+        return json_error(400, str(exc))
     if not str(body.get("branch") or ""):
         return json_error(400, "branch is required")
     machine = _machine_name(request)
@@ -6252,6 +6347,11 @@ async def h_reposync_ws_branch_push(request: web.Request) -> web.Response:
         card = await asyncio.to_thread(_ws_publish_card, path, request.match_info["name"], body, machine)
     except reposync.SyncError as exc:
         return json_error(409, str(exc))
+    active = _ws_active_agent(request, card, mode)
+    if active is not None:
+        return active
+    if mode == "agent":
+        return await _ws_start_agent(request, card, body)
     answer = _ws_authorize(request, card, str(body.get("request") or ""))
     if answer is not None:
         return answer
@@ -6280,6 +6380,8 @@ async def h_reposync_ws_branch_push(request: web.Request) -> web.Response:
     try:
         return json_response(await asyncio.to_thread(run))
     except reposync.SyncError as exc:
+        if mode == "on_failure":
+            return await _ws_start_agent(request, card, body, error=str(exc))
         return json_error(409, str(exc))
 
 
