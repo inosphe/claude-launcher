@@ -2451,6 +2451,14 @@ new-session form as the New session page, in its dialog, with that
 workspace already picked as the directory (the Beads detail's Start block
 seeds it the same way).
 
+**Refresh all (fetch)**, under the Registered heading, does what each Sync
+panel's Refresh does for every present workspace: fetch, then re-read the
+sync status. Each fetch talks to a remote, so two run at a time; every row
+shows where it is in the run (queued, fetching…, refreshed, or refresh
+failed with git's error as the tooltip), the bar counts the finished and the
+failed, and once all are through the row badges above are read again. A
+press while a run is going does nothing.
+
 Under **Work branches** the panel lists the branches other machines published
 on the planned remote as `<machine>/<branch>`, newest commit first, read from
 the remote-tracking refs (so as of the last fetch until Refresh fetches).

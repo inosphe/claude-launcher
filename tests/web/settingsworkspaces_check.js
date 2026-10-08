@@ -72,6 +72,7 @@ const ctx = {
   wsSyncPanel: (w) => el("div", "ws-sync", w.name),
   wsTreesOpen: new Set(),
   wsWorktreeList: (w) => el("div", "ws-worktrees", w.name),
+  wsRefreshAllBar: () => el("div", "ws-refresh-all", "bar"),
   installPanel: () => el("div", "card", "installPanel"),
   profilesPanel: () => el("div", "card", "profilesPanel"),
   globalThis: {},
@@ -120,14 +121,14 @@ assert.deepEqual(tabs.children.filter((t) => t.cls.includes("on")).map((t) => t.
 ctx.wsSyncOpen.add("b");
 drawn("workspaces");
 const rows = pageView.children.find((c) => c.cls === "ws-list").children.map((c) => `${c.cls}:${c.text}`);
-assert.deepEqual(rows, [":Registered (2)", "ws-row:a", "ws-row:b", "ws-sync:b"]);
+assert.deepEqual(rows, [":Registered (2)", "ws-refresh-all:bar", "ws-row:a", "ws-row:b", "ws-sync:b"]);
 // An open worktree list sits between its row and that row's Sync panel
 // (claunch-kjjta).
 ctx.wsTreesOpen.add("b");
 drawn("workspaces");
 assert.deepEqual(
   pageView.children.find((c) => c.cls === "ws-list").children.map((c) => `${c.cls}:${c.text}`),
-  [":Registered (2)", "ws-row:a", "ws-row:b", "ws-worktrees:b", "ws-sync:b"]);
+  [":Registered (2)", "ws-refresh-all:bar", "ws-row:a", "ws-row:b", "ws-worktrees:b", "ws-sync:b"]);
 ctx.wsTreesOpen.clear();
 ctx.wsSyncOpen.clear();
 

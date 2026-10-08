@@ -24699,6 +24699,7 @@ function workspacesPanel(view) {
 
   const list = el("div", "ws-list");
   list.appendChild(el("h3", null, `Registered (${workspacesCache.length})`));
+  if (workspacesCache.some((w) => w.exists)) list.appendChild(wsRefreshAllBar());
   if (!workspacesCache.length) {
     list.appendChild(el(
       "p", "wf-note",
@@ -26279,7 +26280,9 @@ function wsRow(w) {
     ));
   }
   if (w.exists) for (const b of wsGitBadges(wsGitSummary[w.name])) row.appendChild(b);
-  const trees = w.exists ? ((wsGitSummary[w.name] || {}).worktrees || []) : [];
+  const progress = wsRefreshAllBadge(w.name);
+  if (progress) row.appendChild(progress);
+  const trees =w.exists ? ((wsGitSummary[w.name] || {}).worktrees || []) : [];
   if (trees.length) {
     const open = wsTreesOpen.has(w.name);
     const tb = el("button", "wf-btn clear" + (open ? " on" : ""),
@@ -26378,6 +26381,73 @@ async function wsSyncRefresh(name, fetchFirst) {
   }
   st.loading = false;
   if (wsOpen) renderWorkspaces();
+}
+
+/* Refresh all (claunch-87eqx): every present workspace's Sync status, with
+   a fetch first, as its own Refresh button would -- WS_REFRESH_ALL_CAP at a
+   time, since each fetch talks to a remote and a dozen at once would queue
+   on the network and the daemon's git. Each row says where it is in the
+   run; once all are through, the row badges are read again, because a
+   fetch moves the ahead/behind they show. A second press while a run is
+   going does nothing. */
+const WS_REFRESH_ALL_CAP = 2;
+//: active while a run goes; state: name -> "queued" | "running" | "done" | "failed"
+const wsRefreshAll = { active: false, state: new Map() };
+const WS_REFRESH_ALL_BADGE = {
+  queued: ["badge idle", "queued"],
+  running: ["badge busy", "fetching…"],
+  done: ["badge idle", "refreshed"],
+  failed: ["badge exited", "refresh failed"],
+};
+
+async function wsRefreshAllRun() {
+  if (wsRefreshAll.active) return;
+  const names = workspacesCache.filter((w) => w.exists).map((w) => w.name);
+  if (!names.length) return;
+  wsRefreshAll.active = true;
+  wsRefreshAll.state = new Map(names.map((n) => [n, "queued"]));
+  renderWorkspaces();
+  const queue = names.slice();
+  const worker = async () => {
+    while (queue.length) {
+      const name = queue.shift();
+      wsRefreshAll.state.set(name, "running");
+      await wsSyncRefresh(name, true);   // never throws; a failure is st.error
+      wsRefreshAll.state.set(name, wsSyncSt(name).error ? "failed" : "done");
+    }
+  };
+  const lanes = Math.min(WS_REFRESH_ALL_CAP, names.length);
+  await Promise.all(Array.from({ length: lanes }, worker));
+  wsRefreshAll.active = false;
+  await refreshWsGitSummary();
+  if (wsOpen) renderWorkspaces();
+}
+
+function wsRefreshAllBadge(name) {
+  const at = wsRefreshAll.state.get(name);
+  if (!at) return null;
+  const [cls, label] = WS_REFRESH_ALL_BADGE[at];
+  const b = el("span", cls + " ws-refresh-progress", label);
+  if (at === "failed") b.title = wsSyncSt(name).error;
+  return b;
+}
+
+function wsRefreshAllBar() {
+  const bar = el("div", "ws-refresh-all");
+  const st = wsRefreshAll.state;
+  const btn = el("button", "wf-btn", wsRefreshAll.active ? "Refreshing…" : "Refresh all (fetch)");
+  btn.disabled = wsRefreshAll.active;
+  btn.title = "fetch and re-read the Sync status of every workspace, " +
+    `${WS_REFRESH_ALL_CAP} at a time`;
+  btn.addEventListener("click", () => wsRefreshAllRun());
+  bar.appendChild(btn);
+  if (st.size) {
+    const n = (s) => [...st.values()].filter((v) => v === s).length;
+    const parts = [`${n("done") + n("failed")}/${st.size} refreshed`];
+    if (n("failed")) parts.push(`${n("failed")} failed`);
+    bar.appendChild(el("span", "wf-note", parts.join(", ")));
+  }
+  return bar;
 }
 
 const WS_SYNC_LABEL = { ff: "Fast-forward", push: "Push", rebase: "Rebase & push" };
