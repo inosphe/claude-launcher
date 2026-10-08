@@ -18,6 +18,7 @@ const fs = require("node:fs");
 const http = require("node:http");
 const path = require("node:path");
 const { chromium } = require("playwright");
+const { safeListen } = require("./safe_listen.cjs");
 const root = path.join(__dirname, "../../src/claude_launcher/web/static");
 
 const messages = [{ seq: 1, id: "h1", at: "2026-10-07T10:00:00+00:00", key: "historyKey01", name: "old", machine: "", body: "history" }];
@@ -66,7 +67,7 @@ const server = http.createServer((req, res) => {
 });
 
 (async () => {
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  await safeListen(server);
   const base = `http://127.0.0.1:${server.address().port}/`;
   const browser = await chromium.launch({ headless: true });
   try {
