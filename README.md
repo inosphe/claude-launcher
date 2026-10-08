@@ -2712,13 +2712,19 @@ the workspace has not installed goes in as claunch's copy and the create
 response lists it under `prompt_packs_shipped`; one that exists in neither
 place refuses the create with a 400 and nothing is staged.
 
-Two settings sit under the matrix, stored in `~/.claunch.yaml` under
+Three settings sit under the matrix, stored in `~/.claunch.yaml` under
 `prompt_packs`:
 
 - **Ticked by default** (`default_packs`): packs the create form ticks before
   anyone touches it, where the workspace installed them (claunch's copies
   start unticked). Until saved, every pack whose header says
   `default: true` (`common`).
+- **Ticked on every opening** (`always_packs`): packs New session and Spawn
+  child tick each time they open. Unlike the default list, an untick lasts
+  only for the opening it was made in, and a "Spawn same setup" seed that
+  left the pack out does not untick it; a pack the workspace has not
+  installed is ticked as claunch's copy. Use it for the shared working rules
+  (`common`) that every session should carry. Empty until saved.
 - **Required by role** (`role_packs`): role → packs. A session whose primary
   role or one of whose subroles is listed gets those packs whether ticked or
   not; the form shows them ticked and locked with a 🔒 <role> badge. A
@@ -2745,15 +2751,16 @@ the stance followed by the text of those packs (the copy installed in the
 current directory's workspace, or claunch's), which is how a member that
 joined by hand, without a create-time opening, reads them.
 
-HTTP: `GET /api/prompt-packs` (catalog, per-workspace status, both settings),
+HTTP: `GET /api/prompt-packs` (catalog, per-workspace status, the three settings),
 `GET /api/prompt-packs/offer?cwd=` (what the form offers there),
 `GET /api/prompt-packs/text?id=&cwd=` (one pack's text as a session there
 would get it, with `source` — `workspace` or `package` — and for a workspace
 copy its `status`: `current`, `stale`, `edited` or `local`; 404 for an id
 that is neither installed nor shipped),
 `POST /api/prompt-packs/install|remove` (`{workspace, pack, force}`),
-`PUT /api/prompt-packs/role-packs` (`{role_packs?, default_packs?}`; `null`
-restores a default).
+`PUT /api/prompt-packs/role-packs` (`{role_packs?, default_packs?,
+always_packs?}`; `null` restores a default; a bad id in any of them saves
+none).
 
 ### The daemon prompt (one text every session of this daemon gets)
 
