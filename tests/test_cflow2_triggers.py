@@ -13,6 +13,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from claude_launcher.cflow import landing as cflow_landing
+
 from claude_launcher.cflow import engine, landing, mcp as v1_mcp, state as state_mod
 from claude_launcher.cflow2 import executors, frontend, runtime
 from claude_launcher.daemon import briefing, cflow2_clock, cflow2_triggers, cflow_clock, status_checks
@@ -346,11 +348,28 @@ body: req
     assert {i["branch"] for i in _items(lead, "lead").values()} == {"fixed"}
 
 
-def _push(mgr, work, facts=None, push=None):
+def _push(mgr, work, facts=None, push=None, mesh=None):
     trig = {"do": "push", "push": push or dict(cflow2_triggers.ENQUEUE_LANDING_PUSH)}
     return asyncio.run(cflow2_triggers.perform(
         mgr, str(work), "w1", trig, driver="w1", cwds=[],
-        facts_fn=lambda c, s: dict(facts or FACTS)))
+        facts_fn=lambda c, s: dict(facts or FACTS), mesh=mesh))
+
+
+class Mesh:
+    """The slice of MeshManager a landing request's leader step reads."""
+
+    def __init__(self, roles, name="m1"):
+        self.name = name
+        self.members = {h: SimpleNamespace(session=h, roles=r) for h, r in roles.items()}
+
+    def meshes_for_session(self, session):
+        return [{"mesh": self.name}] if session in self.members else []
+
+    def get(self, name):
+        return self
+
+    def is_local_member(self, mesh, member):
+        return True
 
 
 def test_fields_the_parent_does_not_declare_are_left_out(tmp_path):
@@ -378,10 +397,10 @@ def test_a_parent_without_the_collection_is_a_skip(tmp_path):
     lead, work = _dirs(tmp_path)
     _start(lead, "cflow: 2\nname: plain\nnodes:\n  a: {prompt: A}\nbody: a\n", "lead")
     ok, detail = _push(Manager(Session("lead", lead), Session("w1", work, parent="lead")), work)
-    assert not ok and "no live run that declares 'landing'" in detail
+    assert not ok and "parent 'lead' has no run in this repository that declares a landing queue" in detail
 
 
-def test_two_v2_holders_are_ambiguous(tmp_path):
+def test_two_v2_holders_take_the_first_in_order(tmp_path):
     lead, work = _dirs(tmp_path)
     other = tmp_path / "other"
     other.mkdir()
@@ -391,7 +410,10 @@ def test_two_v2_holders_are_ambiguous(tmp_path):
     ok, detail = asyncio.run(cflow2_triggers.perform(
         mgr, str(work), "w1", {"do": "enqueue-landing"}, driver="w1",
         cwds=[str(lead), str(other)], facts_fn=lambda c, s: dict(FACTS)))
-    assert not ok and "ambiguous" in detail
+    # Two main runs: no question is asked, the first in order takes it.
+    assert ok, detail
+    first, second = sorted([lead, other])
+    assert set(_items(first, "lead")) == {"c-1", "c-2"} and _items(second, "lead") == {}
 
 
 def test_an_empty_each_is_a_skip(tmp_path):
@@ -486,13 +508,17 @@ def test_a_partly_refused_v1_push_is_a_skip_that_counts(tmp_path, monkeypatch):
     assert "refused 1 of 2 record(s) (1 pushed and kept: c-1): c-2: tip not found" in detail
 
 
-def test_a_v1_and_a_v2_holder_together_are_skipped(tmp_path):
+def test_a_v1_and_a_v2_holder_together_take_the_first_in_order(tmp_path):
+    # Both main runs in one directory: the v1 main run (no run name) sorts
+    # first; nothing is asked.
     lead, work = _dirs(tmp_path)
-    _v1_lead(lead)
+    lcwd = _v1_lead(lead)
     _start(lead, LEAD, "lead")
     mgr = Manager(Session("lead", lead), Session("w1", work, parent="lead"))
     ok, detail = _push(mgr, work)
-    assert not ok and "v1 run" in detail and "v2 run" in detail
+    assert ok and "(v1)" in detail, detail
+    assert {e["issue"] for e in engine.status(cwd=lcwd, scope="lead")["landing_queue"]}         == {"c-1", "c-2"}
+    assert _items(lead, "lead") == {}
 
 
 # -- watch ---------------------------------------------------------------------------
@@ -616,17 +642,23 @@ def test_a_v1_childs_request_lands_in_a_v2_parent(tmp_path, monkeypatch):
     assert item["requested_by"] == "w1" and item["status"] == "requested"
 
 
-def test_a_v1_child_skips_a_parent_holding_both_queues(tmp_path, monkeypatch):
+def test_a_v1_child_of_a_parent_holding_both_queues_files_on_the_v1_one(tmp_path, monkeypatch):
+    # No question is asked (claunch-9wwbb): a v1 worker's request takes the
+    # parent's v1 queue run, and the v2 collection stays untouched.
     lead, work = _dirs(tmp_path)
-    _v1_lead(lead)
+    lcwd = _v1_lead(lead)
     _start(lead, LEAD, "lead")
     calls = []
-    monkeypatch.setattr(engine, "enqueue_landing", lambda *a, **kw: calls.append((a, kw)))
+    monkeypatch.setattr(engine, "enqueue_landing",
+                        lambda *a, **kw: calls.append((a, kw)) or {"added": list(a[0])})
+    monkeypatch.setattr(cflow_landing, "head", lambda cwd: "abc123")
+    monkeypatch.setattr(cflow_landing, "branch", lambda cwd: "w1-feature")
+    monkeypatch.setattr(cflow_landing, "in_review_of", lambda cwd, session: ["c-1"])
     clock = cflow_clock.TriggerClock(Manager(Session("lead", lead),
                                              Session("w1", work, parent="lead")))
     ok, detail = asyncio.run(clock._enqueue_landing(str(work), "w1"))
-    assert not ok and "v1 run" in detail and "v2 run" in detail, detail
-    assert calls == []
+    assert ok, detail
+    assert [(kw["cwd"], kw["scope"]) for _, kw in calls] == [(lcwd, "lead")]
     assert _items(lead, "lead") == {}
 
 
@@ -683,10 +715,13 @@ def _leader_tree(tmp_path):
     return lead, mid, work, mgr
 
 
+LEADER_MESH = {"lead": ["leader"], "m1": ["worker"], "w1": ["worker"]}
+
+
 def test_leader_push_skips_the_parents_side_run(tmp_path):
     lead, mid, work, mgr = _leader_tree(tmp_path)
     push = dict(cflow2_triggers.ENQUEUE_LANDING_PUSH, to="leader:landing")
-    ok, detail = _push(mgr, work, push=push)
+    ok, detail = _push(mgr, work, push=push, mesh=Mesh(LEADER_MESH))
     assert ok, detail
     assert set(_items(lead, "lead")) == {"c-1", "c-2"}
     assert _items(mid, "m1+stack") == {}
@@ -696,14 +731,63 @@ def test_leader_push_skips_the_parents_side_run(tmp_path):
     assert set(_items(mid, "m1+stack")) == {"c-1", "c-2"}
 
 
-def test_leader_push_with_no_holding_ancestor_is_a_skip(tmp_path):
+def test_leader_push_with_no_holding_leader_is_a_skip(tmp_path):
     lead, work = _dirs(tmp_path)
     mgr = Manager(Session("lead", lead), Session("w1", work, parent="lead"))
     push = dict(cflow2_triggers.ENQUEUE_LANDING_PUSH, to="leader:landing")
+    ok, detail = _push(mgr, work, push=push, mesh=Mesh({"lead": ["leader"], "w1": ["worker"]}))
+    assert not ok and "leader 'lead' has no run in this repository" in detail
     ok, detail = _push(mgr, work, push=push)
-    assert not ok and "no ancestor of 'w1' (lead)" in detail
-    ok, detail = _push(Manager(Session("w1", work)), work, push=push)
-    assert not ok and "has no parent session" in detail
+    assert not ok and "no mesh to look for a leader in" in detail
+
+
+def test_leader_push_goes_to_the_leader_only(tmp_path):
+    # An ancestor holding a main landing run that is not the leader is not
+    # the target of an independent request; the leader is.
+    lead, work = _dirs(tmp_path)
+    mid = tmp_path / "mid"
+    mid.mkdir()
+    _start(lead, LEAD, "lead")
+    _start(mid, LEAD, "m1")   # the parent's MAIN run holds landing too
+    mgr = Manager(Session("lead", lead), Session("m1", mid, parent="lead"),
+                  Session("w1", work, parent="m1"))
+    push = dict(cflow2_triggers.ENQUEUE_LANDING_PUSH, to="leader:landing")
+    ok, detail = _push(mgr, work, push=push, mesh=Mesh(LEADER_MESH))
+    assert ok, detail
+    assert set(_items(lead, "lead")) == {"c-1", "c-2"}
+    assert _items(mid, "m1") == {}
+
+
+def test_leader_push_refuses_an_uncle_leader(tmp_path):
+    lead, mid, work, _ = _leader_tree(tmp_path)
+    # lead and m1 are both roots, so lead is w1's uncle.
+    mgr = Manager(Session("lead", lead), Session("m1", mid), Session("w1", work, parent="m1"))
+    push = dict(cflow2_triggers.ENQUEUE_LANDING_PUSH, to="leader:landing")
+    ok, detail = _push(mgr, work, push=push, mesh=Mesh(LEADER_MESH))
+    assert not ok and "neither a sibling nor a direct ancestor" in detail
+    assert _items(lead, "lead") == {}
+
+
+def test_parent_push_climbs_to_the_grandparent_then_the_sibling_leader(tmp_path):
+    # stacked: a parent that cannot merge is passed over for the grandparent.
+    lead, work = _dirs(tmp_path)
+    mid = tmp_path / "mid"
+    mid.mkdir()
+    _start(lead, LEAD, "lead")
+    mgr = Manager(Session("lead", lead), Session("m1", mid, parent="lead", exited=True),
+                  Session("w1", work, parent="m1"))
+    ok, detail = _push(mgr, work)
+    assert ok and "parent 'm1' has exited" in detail and "fell back to 'lead'" in detail
+    assert set(_items(lead, "lead")) == {"c-1", "c-2"}
+    # ... and a root worker with no parent reaches its sibling root leader.
+    lead2, work2 = tmp_path / "lead2", tmp_path / "work2"
+    lead2.mkdir()
+    work2.mkdir()
+    _start(lead2, LEAD, "boss")
+    mgr = Manager(Session("boss", lead2), Session("w1", work2))
+    ok, detail = _push(mgr, work2, mesh=Mesh({"boss": ["leader"], "w1": ["worker"]}))
+    assert ok and "no parent session" in detail and "fell back to 'boss'" in detail
+    assert set(_items(lead2, "boss")) == {"c-1", "c-2"}
 
 
 def test_trigger_when_decides_whether_it_is_recorded(tmp_path):
