@@ -4589,6 +4589,11 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
   overflow-wrap: anywhere; }
 .ws-sync-result.ws-sync-delegated { background: #1c2b44; }
 .ws-sync-agent-link { color: #58a6ff; overflow-wrap: anywhere; }
+.ws-sync-prompt { margin-top: 8px; }
+.ws-sync-prompt summary { cursor: pointer; color: #58a6ff; }
+.ws-sync-prompt pre { white-space: pre-wrap; overflow-wrap: anywhere;
+  max-height: 360px; overflow-y: auto; padding: 10px; background: #101419;
+  color: #c9d1d9; font-size: 12px; user-select: text; }
 
 /* ------------------------------------------------------------------ */
 /* Beads boards: which database each workspace's board reads            */

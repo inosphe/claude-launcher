@@ -27176,6 +27176,7 @@ function wsSyncResult(result) {
     box.appendChild(el("div", "wf-note", "Synchronization is pending; follow the agent session for its result."));
     if (d.operation_error) box.appendChild(el("div", "wf-note wf-warning", d.operation_error));
     for (const warning of d.warnings || []) box.appendChild(el("div", "wf-note wf-warning", warning));
+    if (d.agent.prompt) box.appendChild(wsSyncPromptText("Sent agent prompt", d.agent.prompt));
     return box;
   }
   if (result.kind === "sync") {
@@ -27302,7 +27303,45 @@ function wsSyncAgentBlocked(st) {
     !(st.doc && (st.doc.agent_parents || []).some((p) => p.name === st.agentParent));
 }
 
-function wsSyncAgentControls(st) {
+function wsSyncPromptText(title, prompt) {
+  const detail = el("details", "ws-sync-prompt");
+  detail.appendChild(el("summary", null, title));
+  detail.appendChild(el("pre", null, prompt));
+  return detail;
+}
+
+function wsSyncPromptBody(st, kind) {
+  const doc = st.doc || {};
+  const plan = doc.plan;
+  if (kind === "sync") return plan ? {
+    kind, remote: plan.remote, branch: plan.branch, local: plan.local, upstream: plan.upstream,
+  } : null;
+  const branch = st.pushBranch || (doc.branches || [])[0];
+  return branch ? { kind, branch, remote: plan && plan.remote, force_with_lease: !!st.force } : null;
+}
+
+async function wsSyncPreviewPrompt(name, kind) {
+  const st = wsSyncSt(name);
+  const body = wsSyncPromptBody(st, kind);
+  if (!body) return;
+  const preview = { kind, key: JSON.stringify(body), loading: true, prompt: "", error: "" };
+  st.agentPreview = preview;
+  renderWorkspaces();
+  try {
+    const resp = await api(`/api/reposync/workspaces/${encodeURIComponent(name)}/agent-preview`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    const doc = await resp.json();
+    if (!resp.ok) throw new Error(doc.error || `HTTP ${resp.status}`);
+    preview.prompt = doc.prompt;
+  } catch (err) {
+    preview.error = String(err.message || err);
+  }
+  preview.loading = false;
+  if (st.agentPreview === preview && wsOpen) renderWorkspaces();
+}
+
+function wsSyncAgentControls(st, name) {
   const box = el("div", "ws-sync-agent");
   box.appendChild(el("h4", null, "Sync / push execution"));
   const form = el("div", "ws-sync-form");
@@ -27336,10 +27375,34 @@ function wsSyncAgentControls(st) {
     box.appendChild(el("p", "wf-note", "Push approval still applies to the agent's final changes."));
   }
   box.appendChild(form);
+  if (st.agentMode !== "commands") {
+    const previews = el("div", "ws-sync-form");
+    for (const kind of ["sync", "push"]) {
+      const button = el("button", "wf-btn clear", `Preview ${kind} prompt`);
+      button.disabled = !wsSyncPromptBody(st, kind) || !!st.busy;
+      button.addEventListener("click", () => wsSyncPreviewPrompt(name, kind));
+      previews.appendChild(button);
+    }
+    box.appendChild(previews);
+    box.appendChild(el("p", "wf-note", "The assignment uses git rebase --rebase-merges. Standard parent and mesh instructions are added at launch."));
+    if (st.agentMode === "on_failure") box.appendChild(el("p", "wf-note",
+      "B mode adds the actual failure details when the agent starts. The sent prompt remains available below."));
+    const preview = st.agentPreview;
+    if (preview && preview.key === JSON.stringify(wsSyncPromptBody(st, preview.kind))) {
+      if (preview.loading) box.appendChild(el("p", "wf-note", "Loading prompt…"));
+      else if (preview.error) box.appendChild(el("p", "wf-note wf-warning", preview.error));
+      else {
+        const detail = wsSyncPromptText(`Agent prompt preview (${preview.kind})`, preview.prompt);
+        detail.open = true;
+        box.appendChild(detail);
+      }
+    }
+  }
   if (st.doc && st.doc.agent) {
     const link = el("a", "ws-sync-agent-link", `Agent ${st.doc.agent.session} (${st.doc.agent.status}) — open session`);
     link.href = `#/s/${encodeURIComponent(st.doc.agent.session)}`;
     box.appendChild(link);
+    if (st.doc.agent.prompt) box.appendChild(wsSyncPromptText("Sent agent prompt", st.doc.agent.prompt));
   }
   return box;
 }
@@ -27372,7 +27435,7 @@ function wsSyncPanel(w) {
   }
 
   const remotes = Object.entries(doc.remotes || {});
-  panel.appendChild(wsSyncAgentControls(st));
+  panel.appendChild(wsSyncAgentControls(st, w.name));
   panel.appendChild(el("div", "wf-note",
     "Remotes: " + (remotes.length
       ? remotes.map(([key, name]) => `${name} (${key})`).join(", ")
@@ -27411,13 +27474,13 @@ function wsSyncPanel(w) {
     if (b === st.pushBranch) opt.selected = true;
     pick.appendChild(opt);
   }
-  pick.addEventListener("change", () => { st.pushBranch = pick.value; });
+  pick.addEventListener("change", () => { st.pushBranch = pick.value; renderWorkspaces(); });
   pushRow.appendChild(pick);
   const force = el("label", "wf-note");
   const box = el("input");
   box.type = "checkbox";
   box.checked = !!st.force;
-  box.addEventListener("change", () => { st.force = box.checked; });
+  box.addEventListener("change", () => { st.force = box.checked; renderWorkspaces(); });
   force.appendChild(box);
   force.appendChild(document.createTextNode(" force-with-lease"));
   pushRow.appendChild(force);

@@ -742,6 +742,7 @@ def build_app(
     # a person approves it, the panel's next call runs it.
     r.add_get("/api/reposync/workspaces/summary", h_reposync_ws_summary)
     r.add_get("/api/reposync/workspaces/{name}/status", h_reposync_ws_status)
+    r.add_post("/api/reposync/workspaces/{name}/agent-preview", h_reposync_ws_agent_preview)
     r.add_post("/api/reposync/workspaces/{name}/sync", h_reposync_ws_sync)
     r.add_post("/api/reposync/workspaces/{name}/branch-push", h_reposync_ws_branch_push)
     r.add_post("/api/reposync/workspaces/{name}/branch-pull", h_reposync_ws_branch_pull)
@@ -6156,12 +6157,12 @@ def _ws_authorize(request: web.Request, card: dict, rid: str) -> Optional[web.Re
     return None
 
 
-def _ws_plan(path: str, name: str, body: dict):
+def _ws_plan(path: str, name: str, body: dict, *, do_fetch: bool = True):
     repo = reposync.toplevel(path)
     remote = str(body.get("remote") or "")
     if not remote:
         raise reposync.SyncError("no remote named -- read the status first")
-    p = reposync.plan(repo, remote, str(body.get("branch") or "") or None)
+    p = reposync.plan(repo, remote, str(body.get("branch") or "") or None, do_fetch=do_fetch)
     key = reposync.url_key(reposync.remotes(repo).get(remote, ""))
     return p, reposync_flow.plan_card(p, workspace=name, key=key)
 
@@ -6175,6 +6176,28 @@ def _ws_execute(p: "reposync.Plan", card: dict) -> dict:
     if result.rewritten:
         board = reposync_flow.annotate_board(p.repo, result.rewritten, remote=p.remote, branch=p.branch)
     return {"ok": True, "plan": card, **result.to_dict(), "board": board}
+
+
+async def h_reposync_ws_agent_preview(request: web.Request) -> web.Response:
+    """Read-only assignment preview; use the same task builder as child spawn."""
+    path, err = _ws_path(request)
+    if err is not None:
+        return err
+    body = await _json_body(request)
+    name = request.match_info["name"]
+    try:
+        if body.get("kind") == "sync":
+            p, card = await asyncio.to_thread(_ws_plan, path, name, body, do_fetch=False)
+            if p.local != body.get("local") or p.upstream != body.get("upstream"):
+                return json_response({"error": "The plan changed; refresh Sync before previewing.",
+                                      "stale": True, "plan": card}, status=409)
+        elif body.get("kind") == "push":
+            card = await asyncio.to_thread(_ws_publish_card, path, name, body, _machine_name(request))
+        else:
+            return json_error(400, "kind must be sync or push")
+    except reposync.SyncError as exc:
+        return json_error(409, str(exc))
+    return json_response({"prompt": reposync_agent.task(card), "plan": card})
 
 
 async def _ws_sync_serialized(request: web.Request, handler) -> web.Response:
