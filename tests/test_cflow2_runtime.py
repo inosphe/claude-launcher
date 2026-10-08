@@ -182,6 +182,20 @@ def test_choose_guards_reason_and_chooser(tmp_path):
         d.select("wait")
     d.select("wait", reason="because")
     assert d.tasks() == ["b"]
+
+
+def test_a_person_may_pick_without_a_reason(tmp_path):
+    d = Drv(tmp_path, TASKS + """
+        body:
+          choose:
+            chooser: user
+            prompt: pick
+            require_reason: true
+            options:
+              wait: {then: b}
+    """)
+    d.select("wait", caller="user")
+    assert d.tasks() == ["b"]
     assert d.events("selected")[0]["option"] == "wait"
 
 
