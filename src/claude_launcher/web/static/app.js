@@ -1716,11 +1716,15 @@ const SESSION_FILTERS = ["current", "running-paused", "running", "killed", "paus
 const SESSION_GROUPS = ["mesh", "workspace"];
 let sessionFilter = localStorage.getItem(SESSION_FILTER_KEY) || "current";
 if (!SESSION_FILTERS.includes(sessionFilter)) sessionFilter = "current";
+/* At most one grouping at a time: the rail shows one group per tab, and a
+   tab strip has one axis. A browser that saved the former nested order
+   (`["workspace","mesh"]`) keeps its outer grouping. */
 let sessionGroupOrder = (() => {
   try {
-    const saved = JSON.parse(localStorage.getItem(SESSION_GROUP_ORDER_KEY) || "[]");
-    if (Array.isArray(saved)) return saved.filter((group, i) =>
-      SESSION_GROUPS.includes(group) && saved.indexOf(group) === i);
+    const raw = localStorage.getItem(SESSION_GROUP_ORDER_KEY);
+    const saved = raw === null ? null : JSON.parse(raw);
+    if (Array.isArray(saved)) return saved.filter((group) =>
+      SESSION_GROUPS.includes(group)).slice(0, 1);
   } catch {}
   // Preserve the pre-order setting for browsers that used the former mesh-only
   // checkbox.  The new setting takes over on the next group change.
@@ -1771,47 +1775,42 @@ function shadowGroupValue(group, row) {
   return group === "mesh" ? shadowMeshGroup(row) : `@${row.machine}`;
 }
 
-/* Which groups the reader has folded shut, remembered per browser.
+/* Which group's tab is open, per grouping, remembered per browser.
 
-   The rail is a poll: it rebuilds its rows whenever the fleet changes, which
-   on a busy machine is most ticks. A fold kept only on the DOM node would
-   therefore last until the next poll, so the state lives here and every
-   rebuild reads it back. Stored as the list of folded keys rather than the
-   open ones, so a mesh that appears later starts open -- a group nobody has
-   touched is not a group somebody shut. */
-const SESSION_GROUP_COLLAPSE_KEY = `claunch_session_group_collapsed:${BASE}`;
-let sessionGroupCollapsed = (() => {
+   The rail is a poll and rebuilds whenever the fleet changes, so the pick
+   lives here and every rebuild reads it back. A saved value that is not
+   among the groups right now (the mesh ended, the filter emptied it) is
+   kept rather than overwritten: the first tab stands in for it until that
+   group is back. */
+const SESSION_GROUP_TAB_KEY = `claunch_session_group_tab:${BASE}`;
+let sessionGroupTab = (() => {
   try {
-    const saved = JSON.parse(localStorage.getItem(SESSION_GROUP_COLLAPSE_KEY) || "[]");
-    if (Array.isArray(saved)) {
-      return new Set(saved.filter((key) => typeof key === "string"));
+    const saved = JSON.parse(localStorage.getItem(SESSION_GROUP_TAB_KEY) || "{}");
+    if (saved && typeof saved === "object" && !Array.isArray(saved)) {
+      const out = {};
+      for (const group of SESSION_GROUPS) {
+        if (typeof saved[group] === "string") out[group] = saved[group];
+      }
+      return out;
     }
   } catch {}
-  return new Set();
+  return {};
 })();
 
-/* The group's identity across rebuilds. Both halves are in it because the
-   two groupings are independent lanes: a workspace named after a mesh would
-   otherwise share its fold. */
-function sessionGroupKey(group, value) {
-  return JSON.stringify([group, value]);
+/* The tab that is open: the saved one when it is among `values`, else the
+   first. */
+function sessionGroupActiveTab(group, values) {
+  const saved = sessionGroupTab[group];
+  return values.includes(saved) ? saved : (values[0] ?? null);
 }
 
-function isSessionGroupCollapsed(group, value) {
-  return sessionGroupCollapsed.has(sessionGroupKey(group, value));
-}
-
-function setSessionGroupCollapsed(group, value, collapsed, remember = true) {
-  const key = sessionGroupKey(group, value);
-  if (collapsed) sessionGroupCollapsed.add(key);
-  else sessionGroupCollapsed.delete(key);
+function setSessionGroupTab(group, value, remember = true) {
+  sessionGroupTab[group] = value;
   if (remember) {
     try {
-      localStorage.setItem(SESSION_GROUP_COLLAPSE_KEY,
-                           JSON.stringify([...sessionGroupCollapsed]));
+      localStorage.setItem(SESSION_GROUP_TAB_KEY, JSON.stringify(sessionGroupTab));
     } catch {}
   }
-  return collapsed;
 }
 
 /* ---- rail pins --------------------------------------------------------
@@ -2229,10 +2228,12 @@ function syncSessionView() {
   const grid = sessionView === "grid";
   $("session-list")?.classList.toggle("hidden", grid);
   $("session-grid")?.classList.toggle("hidden", !grid);
-  // Mesh and workspace grouping reorder the list; the grid's rows are its
-  // grouping, so the two checkboxes would do nothing there.
+  // Mesh and workspace grouping split the list into tabs; the grid's rows
+  // are its grouping, so the mode and the tabs would do nothing there.
   document.querySelectorAll(".session-group-toggle").forEach((el) =>
     el.classList.toggle("hidden", grid));
+  const groupTabs = $("session-group-tabs");
+  if (groupTabs) groupTabs.classList.toggle("view-hidden", grid);
   document.querySelectorAll('input[name="session-view"]').forEach((input) => {
     input.checked = input.value === sessionView;
   });
@@ -3308,132 +3309,140 @@ function remoteRailRows(shadows) {
 }
 
 
-/* Sticky headings need the height of every outer heading as their offset.
-   The heading styles intentionally differ by level, so a fixed multiplier
-   would overlap when the type scale or padding changes. */
-function sessionGroupStickyTops(headings) {
-  const heights = [];
-  for (const heading of headings) {
-    const level = Number(heading.dataset.groupLevel || 0);
-    if (heights[level] !== undefined) continue;
-    const rect = typeof heading.getBoundingClientRect === "function"
-      ? heading.getBoundingClientRect() : null;
-    heights[level] = rect && rect.height || heading.offsetHeight || 0;
-  }
-  return headings.map((heading) => {
-    const level = Number(heading.dataset.groupLevel || 0);
-    let top = 0;
-    for (let outer = 0; outer < level; outer++) top += heights[outer] || 0;
-    return top;
-  });
-}
-
-/* The share of the rail the outermost headings may occupy before the stack
-   stops being worth it. Every outermost heading is pinned at one end or the
-   other at all times, so the stack costs its full height at every scroll
-   position -- a machine running fifteen meshes would otherwise hand most of
-   the rail to headings and leave a slot for two sessions. */
-const SESSION_GROUP_STACK_BUDGET = 0.6;
-
-/* Where each heading sits once the outermost groups stack instead of taking
-   turns.
-
-   `sessionGroupStickyTops` above answers the nested question: a heading is
-   held by its own group and released at that group's bottom, so only the
-   group the reader is inside is named. That loses the other groups the
-   moment they scroll out of range, which is the thing this layout fixes:
-   the outermost headings pile up at the top as they pass (`top`) and wait in
-   a pile at the bottom before they arrive (`bottom`), so every mesh is
-   named no matter where the list is scrolled.
-
-   Both ends are needed for that, and they are what makes the cost fixed --
-   hence the budget. Over it, the caller is handed the nested offsets and the
-   old behaviour, which is correct, just less informative. Headings below the
-   outermost level keep a top offset only: they belong to one group, and
-   parking them at the bottom of the rail would name a group the reader is
-   not in. */
-function sessionGroupStickyLayout(headings, viewport = 0) {
-  const levels = headings.map((h) => Number(h.dataset.groupLevel || 0));
-  const heights = headings.map((h) => {
-    const rect = typeof h.getBoundingClientRect === "function"
-      ? h.getBoundingClientRect() : null;
-    return (rect && rect.height) || h.offsetHeight || 0;
-  });
-  let total = 0;
-  for (let i = 0; i < headings.length; i++) if (!levels[i]) total += heights[i];
-  if (!(viewport > 0) || total > viewport * SESSION_GROUP_STACK_BUDGET) {
-    return {
-      stacked: false,
-      offsets: sessionGroupStickyTops(headings).map((top) => ({ top, bottom: null })),
-    };
-  }
-  const offsets = [];
-  // The top offset the next nested level starts at, per level. Truncated at
-  // every heading so a group that follows a deeper one does not inherit its
-  // chain.
-  const chain = [];
-  let above = 0;   // outermost headings already passed, in pixels
-  for (let i = 0; i < headings.length; i++) {
-    const level = levels[i];
-    if (!level) {
-      offsets.push({ top: above, bottom: total - above - heights[i] });
-      chain.length = 0;
-      chain[0] = above + heights[i];
-      above += heights[i];
-      continue;
+/* The grouped rail drawn as tabs: one tab per level-0 group of `rows`
+   (sessionGroupRows), and only the open tab's rows go on to the list -- its
+   heading dropped, since the tab already names it. Each tab carries the rows
+   it holds, so the count and the search mark need no second pass over the
+   fleet. `rows` without groups (ungrouped) come back as they are, with no
+   tabs. */
+function sessionGroupTabRows(rows, group) {
+  const tabs = [];
+  let tab = null;
+  const loose = [];
+  for (const row of rows) {
+    if (row.type === "group" && row.level === 0 && row.group === group) {
+      tab = { value: row.value, rows: [] };
+      tabs.push(tab);
+    } else if (tab) {
+      tab.rows.push(row);
+    } else {
+      loose.push(row);
     }
-    const top = chain[level - 1] || 0;
-    offsets.push({ top, bottom: null });
-    chain.length = level;
-    chain[level] = top + heights[i];
   }
-  return { stacked: true, offsets };
+  if (!tabs.length) return { tabs, active: null, rows };
+  const active = sessionGroupActiveTab(group, tabs.map((t) => t.value));
+  const open = tabs.find((t) => t.value === active);
+  return { tabs, active, rows: [...loose, ...(open ? open.rows : [])] };
 }
 
-function syncSessionGroupStickyOffsets(list) {
-  const headings = [...list.querySelectorAll(".session-group-heading")];
-  const layout = sessionGroupStickyLayout(headings, list.clientHeight || 0);
-  if (list.classList && typeof list.classList.toggle === "function") {
-    list.classList.toggle("session-group-stacked", layout.stacked);
+/* Set by a tab switch, read once by the rebuild it causes: another group's
+   rows start at the top, not at the scroll position the last group had. */
+let sessionGroupTabScrollReset = false;
+
+/* A tab press. On another tab, open it; on the open one, take the rail back
+   to its top -- the tab bar's scroll-to-top, as a phone app does it. */
+function selectSessionGroupTab(group, value) {
+  const list = $("session-list");
+  const bar = $("session-group-tabs");
+  if (bar && bar.dataset.active === value) {
+    if (list && typeof list.scrollTo === "function") {
+      list.scrollTo({ top: 0, behavior: "smooth" });
+    } else if (list) {
+      list.scrollTop = 0;
+    }
+    return;
   }
-  for (let i = 0; i < headings.length; i++) {
-    const { top, bottom } = layout.offsets[i];
-    headings[i].style.setProperty("--session-group-sticky-top", `${top}px`);
-    headings[i].style.setProperty("--session-group-sticky-bottom",
-                                  bottom === null ? "auto" : `${bottom}px`);
+  setSessionGroupTab(group, value);
+  sessionGroupTabScrollReset = true;
+  refreshSessions({ cached: true });
+}
+
+/* The tab strip above the list. Built on every rebuild of the rail (the
+   counts move with the fleet), hidden while the rail is ungrouped. A mesh's
+   open tab carries the ⊕ that opens the create form with that mesh picked. */
+function renderSessionGroupTabs(group, tabs, active) {
+  const bar = $("session-group-tabs");
+  if (!bar) return;
+  // The strip is rebuilt whole, so a tab that held the keyboard (a press by
+  // Enter, then the redraw it caused) hands it to its successor below.
+  const focused = typeof document.activeElement !== "undefined" && document.activeElement
+    && document.activeElement.parentNode === bar ? document.activeElement.dataset.value : null;
+  bar.classList.toggle("hidden", !group || !tabs.length);
+  bar.textContent = "";
+  bar.dataset.active = active ?? "";
+  if (!group) return;
+  let activeTab = null;
+  for (const tab of tabs) {
+    const el = document.createElement("div");
+    const open = tab.value === active;
+    el.className = "session-group-tab" + (open ? " active" : "");
+    el.setAttribute("role", "tab");
+    el.setAttribute("aria-selected", String(open));
+    el.tabIndex = 0;
+    el.dataset.group = group;
+    el.dataset.value = tab.value;
+    el._groupRows = tab.rows;
+    const name = document.createElement("span");
+    name.className = "session-group-name";
+    name.textContent = group === "workspace" ? sessionWorkspaceLabel(tab.value) : tab.value;
+    const count = document.createElement("span");
+    count.className = "session-group-count";
+    count.textContent = String(tab.rows.filter((r) =>
+      r.type === "session" || r.type === "shadow").length);
+    el.append(name, count);
+    el.title = open ? `${group} ${tab.value} — click to scroll to the top`
+      : `${group} ${tab.value}`;
+    if (open && group === "mesh" && tab.value !== "(no mesh)") {
+      const add = document.createElement("button");
+      add.className = "session-group-new";
+      add.type = "button";
+      add.textContent = "⊕";
+      add.title = `create a new session in mesh ${tab.value}` +
+                  " — the Create page with this mesh already picked";
+      add.addEventListener("click", (e) => {
+        e.stopPropagation();   // the tab itself scrolls; this does not
+        go(`#/new/${encodeURIComponent(tab.value)}`);
+      });
+      el.appendChild(add);
+    }
+    el.addEventListener("click", () => selectSessionGroupTab(group, tab.value));
+    el.addEventListener("keydown", (ev) => {
+      if (ev.key !== "Enter" && ev.key !== " ") return;
+      ev.preventDefault();
+      selectSessionGroupTab(group, tab.value);
+    });
+    bar.appendChild(el);
+    if (open) activeTab = el;
+    if (focused !== null && tab.value === focused && typeof el.focus === "function") el.focus();
+  }
+  // A strip wider than the rail scrolls sideways; the open tab is kept in it.
+  if (activeTab && typeof activeTab.scrollIntoView === "function") {
+    activeTab.scrollIntoView({ block: "nearest", inline: "nearest" });
   }
 }
 
-/* Where the rail has to be scrolled for a group's first session to sit
-   directly under that group's own heading.
-
-   `scrollIntoView` would put the row at the top of the rail, which is where
-   the pinned headings already are: the row would land underneath them and
-   the reader would see the stack rather than the session they asked for.
-   The headings above the target occupy exactly its own
-   `--session-group-sticky-top` pixels once it reaches the stack, so that
-   offset plus the heading's own height is the first free pixel below it. */
-function sessionGroupJumpOffset(list, heading, row) {
-  const listRect = list.getBoundingClientRect();
-  const rowRect = row.getBoundingClientRect();
-  const headRect = heading.getBoundingClientRect();
-  const raw = (heading.style && typeof heading.style.getPropertyValue === "function")
-    ? heading.style.getPropertyValue("--session-group-sticky-top") : "";
-  const stickyTop = parseFloat(raw) || 0;
-  return (rowRect.top || 0) - (listRect.top || 0) - stickyTop - (headRect.height || 0);
-}
-
+/* One grouping or none: picking one replaces the other. */
 function setSessionGroup(group, enabled, remember = true) {
   if (!SESSION_GROUPS.includes(group)) return;
-  sessionGroupOrder = sessionGroupOrder.filter((item) => item !== group);
-  if (enabled) sessionGroupOrder.push(group);
+  if (enabled) sessionGroupOrder = [group];
+  else sessionGroupOrder = sessionGroupOrder.filter((item) => item !== group);
   sessionGroupByMesh = sessionGroupOrder.includes("mesh");
   sessionGroupByWorkspace = sessionGroupOrder.includes("workspace");
   if (remember) {
     localStorage.setItem(SESSION_GROUP_ORDER_KEY, JSON.stringify(sessionGroupOrder));
     localStorage.setItem(SESSION_GROUP_KEY, String(sessionGroupByMesh));
   }
+  syncSessionGroupMode();
   refreshSessions();
+}
+
+/* The mode radios follow the setting, whoever changed it. */
+function syncSessionGroupMode() {
+  if (typeof document.querySelectorAll !== "function") return;
+  const mode = sessionGroupOrder[0] || "";
+  document.querySelectorAll('input[name="session-group-mode"]').forEach((input) => {
+    input.checked = input.value === mode;
+  });
 }
 
 function setSessionGroupByMesh(enabled, remember = true) {
@@ -3476,19 +3485,21 @@ function setSessionFilter(filter, remember = true) {
   refreshSessions({ state });
 }
 
-function syncSessionGroupSearch(list) {
+/* While the search box holds a query, a tab whose group has a match is
+   marked, so a match in a closed tab is still found. */
+function syncSessionGroupTabSearch() {
+  const bar = $("session-group-tabs");
+  if (!bar) return;
   const active = typeof sessionSearch !== "undefined" && !!String(sessionSearch.q || "").trim();
-  let changed = false;
-  for (const group of list.querySelectorAll(".session-group")) {
-    const match = active && !!group.querySelector(
-      "li[data-name]:not(.session-filtered), li.shadow-card:not(.session-filtered)");
-    const shut = !match && isSessionGroupCollapsed(group.dataset.group, group.dataset.value);
-    changed = changed || group.classList.contains("collapsed") !== shut;
-    group.classList.toggle("collapsed", shut);
-    group.querySelector(".session-group-caret").textContent = shut ? "▸" : "▾";
-    group.querySelector(".session-group-heading").setAttribute("aria-expanded", String(!shut));
+  for (const tab of bar.querySelectorAll(".session-group-tab")) {
+    const match = active && (tab._groupRows || []).some((row) =>
+      row.type === "session"
+        ? sessionMatchesFilter(row.session) && sessionMatchesSearch(row.session)
+        : row.type === "shadow"
+          ? shadowMatchesFilter(row.shadow) && shadowMatchesSearch(row.shadow)
+          : false);
+    tab.classList.toggle("search-match", match);
   }
-  if (changed) syncSessionGroupStickyOffsets(list);
 }
 
 function syncSessionFilters(sessions) {
@@ -3533,9 +3544,9 @@ function syncSessionFilters(sessions) {
         || (searching && !shadowMatchesSearch(row)));
     }
   }
-  // Search can change without rebuilding the rail. Open every ancestor of
-  // a visible match while preserving the reader's stored fold preferences.
-  if (typeof syncSessionGroupSearch === "function") syncSessionGroupSearch(list);
+  // Search can change without rebuilding the rail: mark the tabs that hold
+  // a match.
+  if (typeof syncSessionGroupTabSearch === "function") syncSessionGroupTabSearch();
   if (typeof syncSessionSearchNote === "function") syncSessionSearchNote();
   if (typeof renderSessionGrid === "function") renderSessionGrid();
   if (typeof syncBulkActions === "function") syncBulkActions(sessions || [], sessionFilter);
@@ -3923,7 +3934,9 @@ async function refreshSessions(options) {
     // The project is outside the old tuple so the tuple keeps its shape;
     // a pick changes what the rail draws out of the same cache.
     [[briefingLLM, sessionsCache, groupOrder, meshCache, pins],
-     typeof currentProject === "string" ? currentProject : "", shadowList],
+     typeof currentProject === "string" ? currentProject : "", shadowList,
+     // The open tab picks which rows are drawn.
+     typeof sessionGroupTab === "object" ? sessionGroupTab : null],
     unstamped,
   );
   // See the hold above: a press in flight keeps the rows it started on, and
@@ -3948,7 +3961,11 @@ async function refreshSessions(options) {
   // poll that changes any session's state -- which is most polls. The
   // position is held here and put back once the rows are in, the way the
   // transcript pane and the beads canvas hold theirs.
-  const keptScrollTop = rebuild && typeof list.scrollTop === "number"
+  // A tab switch is the one rebuild that starts at the top instead.
+  const tabSwitched = typeof sessionGroupTabScrollReset !== "undefined"
+    && sessionGroupTabScrollReset;
+  if (tabSwitched) sessionGroupTabScrollReset = false;
+  const keptScrollTop = rebuild && !tabSwitched && typeof list.scrollTop === "number"
     ? list.scrollTop : 0;
   // A redraw updates the rail in place (claunch-v87): a row whose own
   // signature (rowSignature below) is unchanged keeps its node -- with its
@@ -4018,7 +4035,7 @@ async function refreshSessions(options) {
   const entries = rebuild ? byLineage(railList, visibleSessions) : [];
   // Isolated web harnesses retain the old mesh-only variable. The fallback
   // keeps those consumers compatible while the page uses the ordered setting.
-  const rows = !rebuild ? [] : typeof sessionGroupRows !== "undefined"
+  const allRows = !rebuild ? [] : typeof sessionGroupRows !== "undefined"
     ? (groupOrder.length
       ? sessionGroupRows(entries, groupOrder, 0, null, shadowList)
       : [...sessionGroupRows(entries, groupOrder),
@@ -4047,6 +4064,15 @@ async function refreshSessions(options) {
              meshGroup: value === "(no mesh)" ? null : value })),
       ]);
     })() : entries.map(([session, depth]) => ({ type: "session", session, depth }));
+  // Grouped, the rail shows one group at a time: the tab strip names every
+  // group, and only the open tab's rows are drawn below it.
+  const tabbed = rebuild && groupOrder.length && typeof sessionGroupTabRows === "function"
+    ? sessionGroupTabRows(allRows, groupOrder[0]) : null;
+  const rows = tabbed ? tabbed.rows : allRows;
+  if (rebuild && typeof renderSessionGroupTabs === "function") {
+    renderSessionGroupTabs(groupOrder[0] || "", tabbed ? tabbed.tabs : [],
+                           tabbed ? tabbed.active : null);
+  }
   // The narrow embedded web harnesses model only a flat list.  Browsers
   // expose Document#createDocumentFragment, which lets the shipped rail use
   // group containers while those reduced consumers retain their old shape.
@@ -4095,7 +4121,6 @@ async function refreshSessions(options) {
         const keptCount = keptGroup._railGroupCount;
         keptCount._sessionCount = 0;
         keptCount.textContent = "0";
-        keptGroup._railPaintFold(isSessionGroupCollapsed(row.group, row.value));
         place(parent, keptGroup);
         placed.set(keptGroup._railGroupBody, 0);
         groupBodies.length = row.level;
@@ -4115,95 +4140,23 @@ async function refreshSessions(options) {
       heading.dataset.groupLevel = String(row.level);
       const label = row.group === "workspace"
         ? sessionWorkspaceLabel(row.value) : row.value;
-      // The fold marker, the name, then how many sessions are inside it. The
-      // count is what a shut group still has to say: a heading with nothing
-      // under it reads the same as one hiding thirty rows otherwise.
-      const caret = document.createElement("span");
-      caret.className = "session-group-caret";
+      // The name, then how many sessions are inside it. Only the ungrouped
+      // rail's per-daemon headings for other machines' sessions reach here
+      // (remoteRailRows); a grouped rail names its groups in the tab strip.
       const name = document.createElement("span");
       name.className = "session-group-name";
       name.textContent = `${row.group} · ${label}`;
       const count = document.createElement("span");
       count.className = "session-group-count";
       count.textContent = "0";
-      heading.append(caret, name, count);
-      heading.title = `${row.group} group ${row.value} — click to fold it shut`;
+      heading.append(name, count);
+      heading.title = `${row.group} group ${row.value}`;
       const body = document.createElement("ul");
       body.className = "session-group-body";
-      // Jump to the group's first session. Every grouping gets one: a
-      // heading pinned at the bottom of the stack names a group whose rows
-      // are an unknown distance further down, and this is how the reader
-      // gets to them without scrolling past the groups in between.
-      const jump = document.createElement("button");
-      jump.className = "session-group-jump";
-      jump.type = "button";
-      jump.textContent = "↓";
-      jump.title = `jump to the first session in ${row.group} ${row.value}`;
-      jump.addEventListener("click", (e) => {
-        e.stopPropagation();   // the heading itself folds; this does not
-        const first = body.querySelector("li[data-name], li.shadow-card");
-        if (!first) return;
-        // A shut group has nothing on screen to scroll to, so opening it is
-        // part of the jump rather than a second thing to ask of the reader.
-        if (group.classList.contains("collapsed")) {
-          setSessionGroupCollapsed(row.group, row.value, false);
-          paintFold(false);
-          syncSessionGroupStickyOffsets(list);
-        }
-        list.scrollTop += sessionGroupJumpOffset(list, heading, first);
-      });
-      heading.appendChild(jump);
-      if (row.group === "mesh") {
-        // Open the plain create form with this mesh already picked. It needs
-        // no leader and is refused only where there is no mesh to join.
-        const joinable = row.value && row.value !== "(no mesh)";
-        const add = document.createElement("button");
-        add.className = "session-group-new";
-        add.type = "button";
-        add.textContent = "⊕";
-        if (joinable) {
-          add.title = `create a new session in mesh ${row.value}` +
-                      " — the Create page with this mesh already picked";
-          add.addEventListener("click", (e) => {
-            e.stopPropagation();   // the heading itself folds; this does not
-            go(`#/new/${encodeURIComponent(row.value)}`);
-          });
-        } else {
-          // Refused the same way the + is: `aria-disabled` keeps the pointer
-          // events a `disabled` control drops, and the reason is the answer
-          // to "why is this one grey".
-          add.setAttribute("aria-disabled", "true");
-          add.classList.add("disabled");
-          add.title = "these sessions are in no mesh, so there is no room to create one in";
-          add.addEventListener("click", (e) => e.stopPropagation());
-        }
-        heading.appendChild(add);
-      }
-      const collapsed = isSessionGroupCollapsed(row.group, row.value);
-      const paintFold = (shut) => {
-        group.classList.toggle("collapsed", shut);
-        caret.textContent = shut ? "▸" : "▾";
-        if (typeof heading.setAttribute === "function") {
-          heading.setAttribute("aria-expanded", String(!shut));
-        }
-      };
-      paintFold(collapsed);
-      heading.addEventListener("click", () => {
-        const shut = !group.classList.contains("collapsed");
-        setSessionGroupCollapsed(row.group, row.value, shut);
-        paintFold(shut);
-        syncSessionGroupSearch(list);
-        // Folding changes how many headings are in the list's flow, so the
-        // stack that keeps them all named has to be measured again.
-        if (typeof syncSessionGroupStickyOffsets === "function") {
-          syncSessionGroupStickyOffsets(list);
-        }
-      });
       group.append(heading, body);
       group._railGroupKey = groupKey;
       group._railGroupBody = body;
       group._railGroupCount = count;
-      group._railPaintFold = paintFold;
       place(parent, group);
       if (inPlace) placed.set(body, 0);
       groupBodies.length = row.level;
@@ -4523,9 +4476,6 @@ async function refreshSessions(options) {
     }
   }
   if (rebuild && typeof syncShadowActive === "function") syncShadowActive();
-  if (rebuild && nestedGroupContainers && typeof syncSessionGroupStickyOffsets === "function") {
-    syncSessionGroupStickyOffsets(list);
-  }
   if (keyCardHeld && typeof restoreRailFocus === "function") {
     restoreRailFocus(keyCardHeld);
   }
@@ -4649,6 +4599,7 @@ async function refreshSessions(options) {
   // it -- so a poll that drops rows lands at the new bottom rather than
   // refusing to move, and a rail too short to scroll takes the 0 it had.
   if (rebuild && keptScrollTop) list.scrollTop = keptScrollTop;
+  else if (rebuild && tabSwitched) list.scrollTop = 0;
   // The grid keeps its own signature, so it follows every poll whether or
   // not the list above was rebuilt.
   if (typeof renderSessionGrid === "function") renderSessionGrid();
@@ -11996,23 +11947,19 @@ if (projectSelect) {
     formProject.addEventListener("change", () => applyProjectDefaultCwd(formProject));
   }
 }
-const meshGroupToggle = $("session-group-mesh");
-if (meshGroupToggle) {
-  meshGroupToggle.checked = sessionGroupByMesh;
-  meshGroupToggle.addEventListener("change", () =>
-    setSessionGroupByMesh(meshGroupToggle.checked));
-}
+// Off, Mesh or Workspace: the grouping whose groups become the tabs.
+document.querySelectorAll('input[name="session-group-mode"]').forEach((input) =>
+  input.addEventListener("change", () => {
+    if (!input.checked) return;
+    if (input.value) setSessionGroup(input.value, true);
+    else if (sessionGroupOrder.length) setSessionGroup(sessionGroupOrder[0], false);
+  }));
+syncSessionGroupMode();
 document.querySelectorAll('input[name="session-view"]').forEach((input) =>
   input.addEventListener("change", () => {
     if (input.checked) setSessionView(input.value);
   }));
 syncSessionView();
-const workspaceGroupToggle = $("session-group-workspace");
-if (workspaceGroupToggle) {
-  workspaceGroupToggle.checked = sessionGroupByWorkspace;
-  workspaceGroupToggle.addEventListener("change", () =>
-    setSessionGroup("workspace", workspaceGroupToggle.checked));
-}
 
 /* The rail polls, but a poll is a tick behind at best: a session spawned from
    somewhere else — another agent's `spawn`, a `claunch new` in a terminal, a
@@ -15708,13 +15655,6 @@ function refitSoon(delay = 150) {
 window.addEventListener("resize", () => {
   refitSoon();
   if (currentPage === "cli") cliRefit(150);
-  // The heading stack is budgeted against the rail's own height, so a window
-  // that got shorter can put the rail back on per-group headings, and a
-  // taller one can take the stack back.
-  const railList = $("session-list");
-  if (railList && typeof syncSessionGroupStickyOffsets === "function") {
-    syncSessionGroupStickyOffsets(railList);
-  }
 });
 
 /* Another viewer (e.g. `claunch attach`) may have resized the session while
@@ -16367,33 +16307,31 @@ function applyGotoFlash() {
   );
 }
 
-/* The list view's half of the press: `name`'s row, with every folded group
-   around it opened first. A row inside a shut group is display:none, and
-   scrollIntoView on it moves nothing -- the press would answer "found" with
-   nothing on screen. The fold is opened for good, as the group jump does:
-   the state lives in sessionGroupCollapsed, so the next rebuild keeps it. */
+/* The list view's half of the press: `name`'s row, with the tab that holds
+   it opened first. Grouped, the rail draws only the open tab's rows, so a
+   session filed under another group has no row to scroll to until its tab
+   is open. The tab stays open, as a press on it would leave it. */
 function revealSessionListRow(name) {
   const list = $("session-list");
   if (!list) return null;
-  let row = null;
-  list.querySelectorAll("li[data-name]").forEach((li) => {
-    if (li.dataset.name === name) row = li;
-  });
-  if (!row) return null;
-  let opened = false;
-  for (let el = row.parentElement; el && el !== list; el = el.parentElement) {
-    if (el.classList.contains("session-group") && el.classList.contains("collapsed")) {
-      setSessionGroupCollapsed(el.dataset.group, el.dataset.value, false);
-      opened = true;
-    }
-  }
-  if (opened) {
-    // Repaints every group from the fold state, and re-measures the sticky
-    // stack, whose height changed with the headings now back in the flow.
-    syncSessionGroupSearch(list);
-    syncSessionGroupStickyOffsets(list);
-  }
-  return row;
+  const find = () => {
+    let row = null;
+    list.querySelectorAll("li[data-name]").forEach((li) => {
+      if (li.dataset.name === name) row = li;
+    });
+    return row;
+  };
+  let row = find();
+  if (row) return row;
+  const bar = $("session-group-tabs");
+  const tab = bar && [...bar.querySelectorAll(".session-group-tab")].find((el) =>
+    (el._groupRows || []).some((r) => r.type === "session" && r.session.name === name));
+  if (!tab) return null;
+  setSessionGroupTab(tab.dataset.group, tab.dataset.value);
+  // From the records in hand: no request, so the rows are drawn before this
+  // returns.
+  refreshSessions({ cached: true });
+  return find();
 }
 
 /* The grid view's half: `name`'s cell. A cell inside a folded stretch is not

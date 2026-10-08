@@ -174,15 +174,20 @@
               aria-pressed="false">Paused<span class="session-filter-count">0</span></button>
       <button id="session-filter-archived" type="button" data-filter="archived"
               aria-pressed="false">Archived<span class="session-filter-count">0</span></button>
-      <label class="session-group-toggle">
-        <input id="session-group-mesh" type="checkbox">
-        <span>Group by mesh</span>
-      </label>
-      <label class="session-group-toggle">
-        <input id="session-group-workspace" type="checkbox">
-        <span>Group by workspace</span>
-      </label>
+      <!-- One grouping or none. A grouping turns its groups into the tab
+           strip below, and the list shows the open tab's sessions. -->
+      <fieldset id="session-group-mode" class="session-group-toggle session-group-mode">
+        <legend>Group by</legend>
+        <label><input type="radio" name="session-group-mode" value="" checked><span>Off</span></label>
+        <label><input id="session-group-mesh" type="radio" name="session-group-mode" value="mesh"><span>Mesh</span></label>
+        <label><input id="session-group-workspace" type="radio" name="session-group-mode" value="workspace"><span>Workspace</span></label>
+      </fieldset>
     </div>
+    <!-- One tab per group of the grouping picked above (refreshSessions,
+         renderSessionGroupTabs). Pressing the open tab scrolls the list
+         back to its top. -->
+    <div id="session-group-tabs" class="session-group-tabs hidden" role="tablist"
+         aria-label="Session groups"></div>
     <!-- Every session the rail can show: this daemon's rows (li[data-name],
          keyed by bare name, with their controls) and other daemons' members
          of the meshes held here (li.shadow-card, GET /api/shadows,
