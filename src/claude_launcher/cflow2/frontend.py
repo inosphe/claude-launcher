@@ -1547,6 +1547,12 @@ def _call_cases(ctx: _Ctx, sc: _Scope, node: ir.Node, pname: str, m: Dict[str, A
             raise ctx.err(sc.file, kline, f"cases: {key!r} is an outcome of {pname!r} "
                                           f"({', '.join(sorted(reserved))}), not a choice -- "
                                           f"handle it with on or catch")
+        if key.lower() in _question.RESERVED_NAMES:
+            # the keys become a question's option names, and no brief may
+            # name an option like this: the ask could never be posed
+            # (claunch-gpccp: end-decision's approve)
+            raise ctx.err(sc.file, kline, f"cases: {key!r} cannot be an option name "
+                                          f"(reserved: {', '.join(_question.RESERVED_NAMES)})")
         if any(key.lower() == n.lower() for n in names):
             raise ctx.err(sc.file, kline, f"cases: duplicate choice {key!r}")
         if tree is None:
