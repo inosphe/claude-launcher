@@ -559,3 +559,36 @@ def test_peer_distance_behind_and_diverged(world):
     assert reposync_flow.peer_distance(str(a), mine, side) == {
         "state": "diverged", "theirs_only": 1, "ours_only": 1}
     assert reposync_flow.peer_distance(str(a), mine, None)["state"] == "unknown"
+
+
+# --- Worktrees per workspace (claunch-kjjta) ------------------------------
+
+
+def test_summary_lists_the_linked_worktrees_but_not_the_workspace(world, tmp_path):
+    import os
+
+    a = world["a"]
+    on_branch = tmp_path / "wt-feature"
+    detached = tmp_path / "wt-detached"
+    _git(a, "worktree", "add", "-q", "-b", "s7-feature", str(on_branch))
+    _git(a, "worktree", "add", "-q", "--detach", str(detached), "HEAD")
+    workspaces.add(str(on_branch), "proj-wt")    # a workspace that is itself a worktree
+
+    def norm(p):
+        return os.path.normcase(os.path.normpath(str(p)))
+
+    async def body(client):
+        resp = await client.get("/api/reposync/workspaces/summary", headers=AUTH)
+        assert resp.status == 200
+        docs = (await resp.json())["workspaces"]
+        rows = {norm(r["path"]): r for r in docs["proj"]["worktrees"]}
+        assert set(rows) == {norm(on_branch), norm(detached)}
+        assert rows[norm(on_branch)]["branch"] == "s7-feature"
+        assert rows[norm(on_branch)]["detached"] is False
+        assert rows[norm(detached)]["detached"] is True and rows[norm(detached)]["branch"] is None
+        assert rows[norm(detached)]["head"] == _git(a, "rev-parse", "HEAD")
+        # registered at a linked worktree: the others, never itself
+        own = {norm(r["path"]) for r in docs["proj-wt"]["worktrees"]}
+        assert own == {norm(detached)}
+
+    _with_app(body)
