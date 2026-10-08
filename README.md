@@ -2446,6 +2446,11 @@ their pages. The workspace itself is never in its own list, also when it is
 registered at a linked worktree. `worktrees` in the summary is
 `[{path, branch, detached, head, prunable}]`.
 
+A present workspace's row has a **New session** button: it opens the same
+new-session form as the New session page, in its dialog, with that
+workspace already picked as the directory (the Beads detail's Start block
+seeds it the same way).
+
 Under **Work branches** the panel lists the branches other machines published
 on the planned remote as `<machine>/<branch>`, newest commit first, read from
 the remote-tracking refs (so as of the last fetch until Refresh fetches).

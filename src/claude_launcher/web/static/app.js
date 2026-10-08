@@ -26292,6 +26292,17 @@ function wsRow(w) {
     row.appendChild(tb);
   }
 
+  // Start a session here (claunch-dbik7): the one creation modal, with this
+  // workspace already picked as its directory -- the same seed the Beads
+  // detail's Start block hands it for an issue's recorded workspace.
+  if (w.exists && typeof openSessionModal === "function") {
+    const start = el("button", "wf-btn", "New session");
+    start.title = `open the new-session form with ${w.path} as its directory`;
+    start.addEventListener("click", () => {
+      openSessionModal({ tab: "new", seed: { workspace: w.name } });
+    });
+    row.appendChild(start);
+  }
   if (w.exists) row.appendChild(wsVscodeControls(w));
   if (w.exists) {
     const open = wsSyncOpen.has(w.name);

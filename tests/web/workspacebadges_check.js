@@ -13,7 +13,12 @@
    worktrees carries an "N worktrees" toggle; opened, each worktree is a
    line with its path, its branch (or detached HEAD) and the sessions whose
    directory it is -- matched whatever the slashes or the case -- linked to
-   their pages, and "no session" when nobody stands there. */
+   their pages, and "no session" when nobody stands there.
+
+   And the start button (claunch-dbik7): a present workspace's row has a
+   "New session" button that opens the one session modal on its "new" tab
+   seeded with that workspace's name; a missing workspace has none, and so
+   does a page with no modal to open. */
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
@@ -46,8 +51,10 @@ function el(tag, cls, text) {
 
 let renders = 0;
 let answer = null;
+const opened = [];
 const ctx = {
   el,
+  openSessionModal: (opts) => { opened.push(opts); },
   wsOpen: true,
   wsSyncOpen: new Set(),
   wsSessionsIn: () => [],
@@ -165,6 +172,24 @@ assert.equal(ctx.badges(undefined).length, 0);
   await ctx.refresh();
   r = ctx.row({ name: "proj", path: "/r", exists: true });
   assert.ok(!r.children.some((c) => c.tag === "button" && /worktree/.test(c.text)));
+
+  /* ---- start a session here ------------------------------------------- */
+  const startOf = (row) => row.children.find((c) => c.tag === "button" && c.text === "New session");
+  r = ctx.row({ name: "proj", path: "C:/r", exists: true });
+  const start = startOf(r);
+  assert.ok(start, "a present workspace's row carries the start button");
+  assert.match(start.title, /C:\/r/);
+  start.handlers.click[0]();
+  assert.equal(opened.length, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(opened[0])),
+                   { tab: "new", seed: { workspace: "proj" } });
+  // a missing workspace: nowhere to start one
+  assert.equal(startOf(ctx.row({ name: "proj", path: "C:/r", exists: false })), undefined);
+  // a page without the modal: no button that would do nothing
+  const keep = ctx.openSessionModal;
+  delete ctx.openSessionModal;
+  assert.equal(startOf(ctx.row({ name: "proj", path: "C:/r", exists: true })), undefined);
+  ctx.openSessionModal = keep;
 
   console.log("ok");
 })().catch((err) => { console.error(err); process.exit(1); });
