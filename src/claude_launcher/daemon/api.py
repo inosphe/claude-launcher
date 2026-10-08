@@ -647,6 +647,7 @@ def build_app(
     # definition view. Same token as the v1 approve/select endpoints.
     r.add_get("/api/cflow2/run", h_cflow2_run)
     r.add_get("/api/cflow2/runs", h_cflow2_runs)
+    r.add_get("/api/cflow2/rail", h_cflow2_rail)
     r.add_get("/api/cflow2/definition", h_cflow2_definition)
     r.add_post("/api/cflow2/select", h_cflow2_select)
     r.add_post("/api/cflow2/extend", h_cflow2_extend)
@@ -4633,6 +4634,22 @@ async def h_cflow2_runs(request: web.Request) -> web.Response:
             cwds.append(cwd)
     runs = await asyncio.to_thread(cflow2_web.list_runs, cwds)
     return json_response({"runs": runs})
+
+
+async def h_cflow2_rail(request: web.Request) -> web.Response:
+    """The session rail's v2 lines: ``{"rows": {session: entry}}`` for each
+    live session whose own directory holds a v2 run under the session's own
+    name (``cflow2_web.rail_entry``). Its own endpoint rather than a field of
+    ``/api/cflow`` or ``/api/cflow2/runs``: the rail asks one question per
+    session, keyed by the session, not by the run slots on disk."""
+    manager: SessionManager = request.app["manager"]
+    pairs = []
+    for session in manager.list():
+        cwd = _session_cwd(session)
+        if cwd:
+            pairs.append((session.sdef.name, cwd))
+    rows = await asyncio.to_thread(cflow2_web.rail_entries, pairs)
+    return json_response({"rows": rows})
 
 
 async def h_cflow2_definition(request: web.Request) -> web.Response:

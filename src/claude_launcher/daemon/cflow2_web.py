@@ -609,6 +609,116 @@ def list_runs(cwds: Sequence[str]) -> List[dict]:
     return out
 
 
+def rail_entry(cwd: str, scope: str) -> Optional[dict]:
+    """The session rail's line for the v2 run a session drives: the run in
+    the session's own directory under the session's own name, or ``None``.
+
+    Kept apart from :func:`run_summary` (the Flows list) and from the v1
+    badge: the rail asks a narrower question -- does this run want the
+    person reading the rail -- and answers it with ``gated`` and ``owed``.
+    ``owed`` names what only a person releases: the holds that put the run
+    in ``waiting_approval`` (a loop or visit limit, a halt, an ask that fell
+    to a human) and every open choice whose chooser is ``user``."""
+    from ..cflow2 import runtime
+
+    try:
+        st = store2.RunStore(cwd, scope)
+        if not st.exists():
+            return None
+        state = st.load_state()
+        chart = st.load_chart()
+    except Exception as exc:  # noqa: BLE001 - shown, not raised
+        return {"cwd": cwd, "scope": scope, "status": "error", "error": str(exc),
+                "workflow": None, "current": [], "owed": [], "gated": False}
+    inst = state.get("inst") or {}
+    current = []
+    owed = []
+    for iid in state.get("active") or []:
+        rec = inst.get(iid) or {}
+        try:
+            node = chart.node(rec.get("node"))
+        except Exception:  # noqa: BLE001
+            continue
+        current.append(node.get("title") or node.label or node.id)
+    for iid, rec in sorted(inst.items()):
+        if rec.get("await") != runtime.AW_CHOOSE:
+            continue
+        try:
+            node = chart.node(rec.get("node"))
+        except Exception:  # noqa: BLE001
+            continue
+        if (node.get("chooser") or ir.CHOOSER_AGENT) == ir.CHOOSER_USER:
+            owed.append(f"choose: {node.get('title') or node.label or node.id}")
+    status = state.get("status")
+    if status == runtime.ST_WAITING:
+        for a in state.get("approvals") or []:
+            kind = a.get("kind")
+            if kind == "ask" and a.get("resolution") != runtime.RES_HUMAN:
+                continue
+            if kind == runtime.HOLD_HALT:
+                owed.append(f"halted: {a.get('monitor')}")
+            else:
+                owed.append(f"{kind}: {a.get('label') or a.get('node') or a.get('instance')}")
+    return {
+        "cwd": str(st.cwd),
+        "scope": st.scope,
+        "run": state.get("run_id"),
+        "workflow": state.get("workflow"),
+        "status": status,
+        "reason": state.get("reason"),
+        "round": state.get("round"),
+        "current": current,
+        "owed": owed,
+        "gated": bool(owed),
+    }
+
+
+#: ``(cwd, scope) -> (stamp, entry)``. The rail polls every few seconds for
+#: every live session, and a run's chart snapshot runs to hundreds of KB, so
+#: an entry is recomputed only when its state or chart file changed.
+_RAIL: Dict[Tuple[str, str], Tuple[Any, Optional[dict]]] = {}
+
+
+def _rail_stamp(cwd: str, scope: str) -> Any:
+    st = store2.RunStore(cwd, scope)
+    out = []
+    for path in (st.state_path, st.chart_path):
+        try:
+            info = path.stat()
+        except OSError:
+            out.append(None)
+            continue
+        out.append((info.st_mtime_ns, info.st_size))
+    return tuple(out)
+
+
+def rail_entries(sessions: Sequence[Tuple[str, str]]) -> Dict[str, dict]:
+    """``GET /api/cflow2/rail``: ``{session: rail_entry}`` for each
+    ``(session, cwd)`` that drives a v2 run; sessions without one are left
+    out."""
+    out: Dict[str, dict] = {}
+    for name, cwd in sessions:
+        if not name or not cwd:
+            continue
+        key = (cwd, name)
+        try:
+            stamp = _rail_stamp(cwd, name)
+        except (OSError, ValueError):
+            continue
+        if stamp[0] is None:
+            _RAIL.pop(key, None)
+            continue
+        hit = _RAIL.get(key)
+        if hit is not None and hit[0] == stamp:
+            entry = hit[1]
+        else:
+            entry = rail_entry(cwd, name)
+            _RAIL[key] = (stamp, entry)
+        if entry is not None:
+            out[name] = dict(entry)
+    return out
+
+
 def definition_view(name: str, cwd: str) -> dict:
     """``GET /api/cflow2/definition``: the compiled tree, the static check's
     findings and the source text of one v2 definition (read-only)."""

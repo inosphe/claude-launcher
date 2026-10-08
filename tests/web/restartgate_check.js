@@ -174,6 +174,7 @@ function build(opts) {
     // other checks' subjects (notice_check lists the same), here they only
     // have to exist.
     "refreshNewWorktree", "refreshProjects", "ensureControlSocket",
+    "refreshCflow2Rail",
     code +
     "\nreturn {notify, dismissNotice, noticeClock, setDaemonOnline, " +
     "refreshRestartGate, pollOnce, boot," +
@@ -187,6 +188,7 @@ function build(opts) {
     () => {}, () => {}, () => {}, () => {}, () => {}, () => {}, () => {},
     () => {}, () => {}, () => {}, () => {},
     () => {}, () => {}, () => {},
+    () => {},   // refreshCflow2Rail (the rail's v2 line; railcflow2_check)
   );
 
   return { api, nodes, clock, gate, apiCalls, daemon,

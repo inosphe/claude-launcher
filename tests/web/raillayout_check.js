@@ -359,13 +359,13 @@ ctx.setMeshes([
     "#session-list .rail-status-checks", "#session-list .rail-tps-line",
     "#session-list .rail-usage-line",
     "#session-list .rail-note", "#session-list .rail-note-editor",
-    "#session-list .sess-cflow", "#session-list .sess-brief",
+    "#session-list .sess-cflow", "#session-list .sess-cflow2", "#session-list .sess-brief",
   ];
   const fullWidth = [...rules].filter(([sel, d]) =>
     sel.startsWith("#session-list") &&
     (d["flex-basis"] === "100%" || /(^|\s)100%$/.test(d.flex || ""))
   ).map(([sel]) => sel);
-  check("only the directory line, the beads line, the one-line, the context line, the throughput line, the usage line, the attention line, the quiet line, the note line (or its editor), the status-check line, the cflow line and the briefing card break the row",
+  check("only the directory line, the beads line, the one-line, the context line, the throughput line, the usage line, the attention line, the quiet line, the note line (or its editor), the status-check line, the cflow line, the cflow v2 line and the briefing card break the row",
         fullWidth.sort(), [...BREAKERS].sort());
 
   /* The one-line summary is the exception to this rail's ellipsis habit: it
