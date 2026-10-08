@@ -12,7 +12,13 @@
    panel shows that it waits, reads the card until a person answers it, and
    sends the request again with the id only once the card is approved. A
    rejected or expired card ends with nothing sent. A fast-forward pushes
-   nothing, so it asks here instead and needs no card. */
+   nothing, so it asks here instead and needs no card.
+
+   And the shared branches (claunch-tamel): the branches other machines
+   published as <machine>/<branch> are listed with a Pull each, which sends
+   the branch pull with the planned remote and needs no card; one already
+   level or with local commits of its own offers nothing to press, and a
+   prefix that is not a relay peer is kept apart under a fold. */
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
@@ -101,10 +107,10 @@ const ctx = {
 vm.createContext(ctx);
 vm.runInContext(
   [constant("wsSyncOpen"), constant("wsSyncState"), constant("WS_SYNC_LABEL"),
-   constant("WS_SYNC_PATH"), constant("WS_SYNC_POLL_MS"),
+   constant("WS_SYNC_PATH"), constant("WS_SYNC_POLL_MS"), constant("WS_SHARED_STATE"),
    ...["wsSyncSt", "wsSyncRefresh", "wsSyncSend", "wsSyncWait", "wsSyncRun",
        "wsSyncBranch", "wsSyncPlanLine", "wsSyncPeers", "wsSyncResult",
-       "wsSyncPanel"].map(slice),
+       "wsSyncPanel", "wsSyncPullBody", "wsSyncShared"].map(slice),
    "globalThis.__st = wsSyncSt;"].join("\n"),
   ctx);
 
@@ -249,7 +255,46 @@ async function tick() {
     ? { status: 200, body: { ok: true, remote: "origin", branch: "pc-b/s9-y", sha: "e".repeat(40) } }
     : { status: 200, body: DOC };
   await ctx.wsSyncBranch("proj", "pull");
-  assert.deepEqual(posts()[0].body, { machine: "pc-b", branch: "s9-y" });
+  assert.deepEqual(posts()[0].body, { machine: "pc-b", branch: "s9-y", remote: "origin" },
+                   "the pull names the remote the panel planned on");
+
+  /* ---- shared branches: listed with a Pull each ------------------------- */
+  const row = (ref, state, peer) => ({
+    machine: ref.split("/")[0], branch: ref.split("/").slice(1).join("/"), ref,
+    sha: "f".repeat(40), date: "2026-10-08T10:00:00+09:00", subject: "work",
+    peer, local: state === "new" ? null : "a".repeat(40), state });
+  st.doc = { ...DOC, plan: PLAN, shared: [
+    row("pc-b/s2-y", "new", true), row("pc-b/old", "behind", true),
+    row("pc-b/same", "same", true), row("pc-b/div", "diverged", true),
+    row("feature/z", "new", false)] };
+  st.busy = "";
+  nodes = walk(ctx.wsSyncPanel(W));
+  const shared = nodes.find((n) => n.cls === "ws-sync-shared");
+  assert.ok(shared, "the list sits in the panel");
+  assert.ok(walk(shared).some((n) => n.text === "Published by other machines on origin (4) · as last fetched"));
+  const rowOf = (ref) => walk(shared).find((n) => n.cls === "ws-sync-shared-row" && n.children[0].text === ref);
+  const pullOf = (ref) => rowOf(ref).children.find((n) => n.tag === "button");
+  assert.equal(pullOf("pc-b/s2-y").disabled, false);
+  assert.equal(pullOf("pc-b/old").disabled, false);
+  assert.equal(pullOf("pc-b/same").disabled, true, "level: nothing to pull");
+  assert.equal(pullOf("pc-b/div").disabled, true, "diverged: a pull would refuse");
+  assert.match(pullOf("pc-b/div").title, /would refuse/);
+  const fold = walk(shared).find((n) => n.cls === "ws-sync-shared-other");
+  assert.ok(fold && walk(fold).some((n) => n.children && n.children[0] && n.children[0].text === "feature/z"),
+            "a prefix that is not a relay peer is under the fold");
+  calls.length = 0;
+  const cardsBefore = gateRefreshed;
+  await pullOf("pc-b/old").handlers.click[0]();
+  assert.equal(posts().length, 1);
+  assert.equal(posts()[0].url, "/api/reposync/workspaces/proj/branch-pull");
+  assert.deepEqual(posts()[0].body, { machine: "pc-b", branch: "old", remote: "origin" });
+  assert.equal(gateRefreshed, cardsBefore, "a pull files no card");
+
+  /* ---- no peer has published: a note, no rows --------------------------- */
+  st.doc = { ...DOC, plan: PLAN, fetched: true, shared: [] };
+  nodes = walk(ctx.wsSyncPanel(W));
+  assert.ok(nodes.some((n) => n.text === "Published by other machines on origin (0)"));
+  assert.ok(!nodes.some((n) => n.cls === "ws-sync-shared-row"));
 
   console.log("workspacesync_check ok");
 })().catch((err) => { console.error(err); process.exit(1); });

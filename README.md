@@ -2422,7 +2422,7 @@ plans against the shared remote. HTTP: `GET
 /api/reposync/workspaces/<name>/status[?fetch=0]`, `POST .../sync`
 (`{remote, branch, local, upstream[, request]}`), `POST .../branch-push`
 (`{branch, force_with_lease[, request]}`), `POST .../branch-pull`
-(`{machine, branch}`). A push without `request` answers 202 with the id of
+(`{machine, branch[, remote]}`). A push without `request` answers 202 with the id of
 the card it filed; the same body with that `request` runs once the card is
 approved (`GET /api/reposync/requests/<id>` says when), and answers 409 when
 the card was rejected or expired or the tips moved after the approval.
@@ -2437,6 +2437,17 @@ not on the two-second workspace poll. HTTP: `GET
 /api/reposync/workspaces/summary` answers `{workspaces: {<name>: {branch,
 detached, upstream, ahead, behind, changed} | {error}}}` for every
 registered workspace that is present.
+
+Under **Work branches** the panel lists the branches other machines published
+on the planned remote as `<machine>/<branch>`, newest commit first, read from
+the remote-tracking refs (so as of the last fetch until Refresh fetches).
+Each row shows where the local branch of that name stands (not here yet, up
+to date, a pull fast-forwards it, or it has commits of its own and a pull
+would refuse) and has a **Pull** that runs the same branch pull with the
+planned remote. This machine's own prefix is left out, and a prefix that is
+not a relay peer sharing the address (a remote's own `feature/x` branches)
+is folded away separately. The status answer carries them as `shared:
+[{machine, branch, ref, sha, date, subject, peer, local, state}]`.
 
 ### VS Code in the browser (one code-server per workspace and worktree)
 
