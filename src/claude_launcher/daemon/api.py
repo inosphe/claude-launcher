@@ -8302,7 +8302,7 @@ async def h_session_reminder(request: web.Request) -> web.Response:
 
 
 async def h_session_reminder_set(request: web.Request) -> web.Response:
-    """Pause or resume repeating Role and Cflow reminders for one session."""
+    """Pause or resume every repeating session reminder source for one session."""
     session = _session(request)
     if session.exited:
         return json_error(409, f"session {session.sdef.name!r} has exited")

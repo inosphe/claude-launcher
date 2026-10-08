@@ -377,8 +377,8 @@
            the attached session's run or shows nothing at all. Rendered by
            renderTermTimer(); aged every second by paintTermTimer().
 
-           Also the switch that pauses this session's repeating Role and Cflow
-           reminders and lets them go again. Cflow-only sessions retain their
+           Also the switch that pauses this session's repeating reminders (Role,
+           Prompt pack, Cflow, Score goal) and lets them go again. Cflow-only sessions retain their
            run override; Role-bearing sessions use the shared Session reminder
            delivery gate. Stall ping and Cflow signals remain active. Its
            leading glyph is the control: ⏸ while reminders are on, ▶ once
@@ -390,7 +390,7 @@
            thing and want the next paste not to land in the middle of it —
            and a pause is a state they have to remember to undo, set at the
            moment they are least likely to. So this writes nothing: the
-           active Role and Cflow timers are re-armed where they stand, and the
+           active Role, Prompt pack, Cflow and Score goal timers are re-armed where they stand, and the
            countdown starts over at a full interval. Up only when there is a
            reminder coming to skip (counting, due, or held for a session);
            rendered by paintTermTimerSkip(). -->

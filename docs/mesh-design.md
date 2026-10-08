@@ -1301,17 +1301,18 @@ or an edge the old roles earned) is left as it is.
 live holder), `task_poll` wording, and `cflow_reminder`. The last field is a
 capped role-specific correction for a cflow position that stopped moving.
 
-The daemon's `SessionReminderService` maintains Role and Cflow as independent
-sources. A due message renders them as peer `## Role` and `## Cflow` sections
-inside one delivery. The Role section always names the current membership and
+The daemon's `SessionReminderService` maintains Score goal, Role, Prompt
+pack and Cflow as independent sources. A due message renders them as peer
+`## Score goal`, `## Role`, `## Prompt packs` and `## Cflow` sections inside
+one delivery. The Role section always names the current membership and
 stance id. The longer `cflow_reminder` correction appears with the Cflow
 source's first full fire at a position; repeats retain the short role identity
 and stance recovery instruction. Sessions with a role and no cflow run still
 receive the Role source on its own interval.
 
 The attached terminal header controls that shared delivery boundary. Its
-pause/resume state is stored with the session and suppresses repeating Role
-and Cflow reminders until resumed. Skip re-arms every active repeating source
+pause/resume state is stored with the session and suppresses every repeating
+source (Role, Prompt pack, Cflow, Score goal) until resumed. Skip re-arms every active repeating source
 for one interval. Cflow state-change signals and stall pings continue because
 they report external state changes rather than repeat session context.
 

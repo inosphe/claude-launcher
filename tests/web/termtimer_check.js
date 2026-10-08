@@ -550,8 +550,9 @@ check("the pause is visible immediately and removes the skip",
       [chip.kids.map((k) => k.text), ctx.skip(),
        skipBtn.classList.contains("hidden")],
       [["▶", "session reminders paused"], null, true]);
-check("the tooltip names the two repeating sources and retained signals",
-      [/Role and Cflow/.test(chip.title), /signals and stall pings/.test(chip.title)],
+check("the tooltip names every repeating source and the retained signals",
+      [/Role, Prompt pack, Cflow and Score goal/.test(chip.title),
+       /signals and stall pings/.test(chip.title)],
       [true, true]);
 
 posts.length = 0;
@@ -568,6 +569,9 @@ ctx.setWorld("role-only", [], {
           fired_ago: null, state: "counting" },
 });
 ctx.render();
+check("the Session skip names every source it re-arms",
+      /active Role, Prompt pack, Cflow and Score goal source timers/
+        .test(skipBtn.title), true);
 skipBtn.fire("click");
 check("skipping a Role session uses the Session reminder endpoint",
       posts, [{ path: "/api/sessions/role-only/reminder/skip", body: {} }]);
