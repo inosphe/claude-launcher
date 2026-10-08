@@ -12631,9 +12631,14 @@ function termInputNote(note, message, warn = false) {
 }
 
 async function sendKeyLine(field, btn, note) {
-  let text = field.value.trim();
+  const draftText = field.value;
+  let text = draftText.trim();
   const target = currentName;
   if (!text || !target || field.disabled) return false;
+  const epoch = (field.sendEpoch || 0) + 1;
+  field.sendEpoch = epoch;
+  const ownsInput = () => currentName === target && field.sendEpoch === epoch;
+  const ownsDraft = () => ownsInput() && field.value === draftText;
   note.classList.add("hidden");
   note.classList.remove("wf-warning");
   const wasField = field.disabled, wasBtn = btn.disabled;
@@ -12646,7 +12651,7 @@ async function sendKeyLine(field, btn, note) {
       text = await globalThis.GlossaryComposer.prepare(target, text);
       preparingGlossary = false;
     }
-    if (currentName !== target) return false;
+    if (!ownsDraft()) return false;
     const inputId = `input-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     // This is an explicit operator action either way. The daemon uses the
     // short forced grace and submits an existing draft first, so a busy
@@ -12666,7 +12671,7 @@ async function sendKeyLine(field, btn, note) {
         body: JSON.stringify(body) }
     );
     const doc = await resp.json().catch(() => ({}));
-    if (currentName !== target) return resp.ok;
+    if (!ownsDraft()) return resp.ok;
     if (resp.ok && doc.queued) {
       // Nothing was typed: the session has ended, and the daemon holds the
       // line until it is resumed. Said on the spot, because the box empties
@@ -12701,10 +12706,10 @@ async function sendKeyLine(field, btn, note) {
     termInputNote(note, doc.error || "the session refused these keys", true);
     return false;
   } catch (error) {
-    if (currentName === target) termInputNote(note, preparingGlossary ? error.message : "nothing was sent — the daemon is unreachable", true);
+    if (ownsDraft()) termInputNote(note, preparingGlossary ? error.message : "nothing was sent — the daemon is unreachable", true);
     return false;
   } finally {
-    if (currentName === target) {
+    if (ownsInput()) {
       field.disabled = wasField;
       btn.disabled = wasBtn;
       if (preparingGlossary) globalThis.GlossaryComposer?.refresh();
@@ -12825,6 +12830,8 @@ function refreshTermInput() {
   const note = $("term-input-note");
   const btn = $("term-input-send");
   if (!field || !btn) return;
+  // Invalidate pending sends even when navigation later returns to this name.
+  field.sendEpoch = (field.sendEpoch || 0) + 1;
   const queueNote = termInputQueueNote(sessionEnded);
   field.disabled = false;
   btn.disabled = false;

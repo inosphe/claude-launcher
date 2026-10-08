@@ -113,6 +113,9 @@ globalThis.GlossaryComposer = (() => {
     panel = node('section', null, 'glossary-composer'); panel.hidden = true;
     panel.setAttribute('aria-label', '입력 중인 메시지의 용어집');
     field.parentElement.append(panel);
+    panel.addEventListener('keydown', ev => {
+      if (ev.key === 'Escape') { ev.preventDefault(); reset(); field.focus(); }
+    });
     const trigger = document.getElementById('term-glossary-open');
     if (trigger) trigger.onclick = insertReference;
     field.addEventListener('input', schedule);

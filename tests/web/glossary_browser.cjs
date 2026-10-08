@@ -20,13 +20,15 @@ const fixture = `<!doctype html><meta charset="utf-8"><meta name="viewport" cont
 <script>globalThis.api = (url, opts) => fetch(url, opts);</script>
 <script src="/glossary-page.js"></script><script src="/glossary-composer.js"></script>
 <script>
-let currentName = 's1', sessJournalBox = null; const sessionsCache = [];
+let currentName = 's1', sessJournalBox = null, sessionEnded = false; const sessionsCache = [];
 const $ = id => document.getElementById(id);
 const currentScoreFeedback = () => 'none', setScoreFeedbackChoice = () => {}, renderScoreGoal = () => {};
+const termInputQueueNote = () => '';
 const isAltV = () => false, isCtrlJ = () => false;
 ${fn('autogrowTermInput')}
 ${fn('termInputNote')}
 ${fn('sendKeyLine')}
+${fn('refreshTermInput')}
 ${fn('onTermInputKeydown')}
 $('term-input').onsubmit = ev => { ev.preventDefault(); sendKeyLine($('term-input-field'), $('term-input-send'), $('term-input-note')); };
 $('term-input-field').addEventListener('keydown', onTermInputKeydown);
@@ -38,7 +40,7 @@ const entries = [
   {id:'research', term:'자세히 · 추가 탐색', definition:'현재 모르는 일에 대해 브라우저 검색을 포함해 추가 탐색합니다.', aliases:['자세히'], source:'근거가 부족하거나 추가 조사가 필요할 때', reference:'[[term:#research]]'},
   {id:'model', term:'기반 모델', definition:'추가 학습을 시작할 때 사용하는 모델입니다.', aliases:['base model', '기반모델'], source:'모델 비교 실험', reference:'[[term:#model]]'},
 ];
-let terms = structuredClone(entries), sent = [], staleResolve, composeResolve;
+let terms = structuredClone(entries), sent = [], staleResolve, composeResolve, sendResolve;
 function analyze(text) {
   const references = [...text.matchAll(/\[\[term:([^\]]+)\]\]/g)].map(m => {
     const row = terms.find(t => '#' + t.id === m[1]);
@@ -64,7 +66,7 @@ const server = http.createServer((req,res) => {
       const req = route.request(), u = new URL(req.url()), body = req.postDataJSON();
       let data = {};
       if (u.pathname === '/api/workspaces') data = {workspaces:[{name:'claunch'},{name:'other'}]};
-      else if (u.pathname.endsWith('/keys')) {sent.push(body); data={ok:true};}
+      else if (u.pathname.endsWith('/keys')) {sent.push(body); if (body.keys?.[0] === 'newer send') await new Promise(resolve => {sendResolve=resolve;}); data={ok:true};}
       else if (/\/sessions\/[^/]+\/glossary/.test(u.pathname)) {
         if (req.method() === 'GET') data = {terms:terms.slice(0,2),workspace:'claunch'};
         else {
@@ -140,19 +142,32 @@ const server = http.createServer((req,res) => {
     // A response for the previous session must not appear or replace the draft.
     await field.fill('stale 자세히');
     await page.waitForTimeout(250);
-    await page.evaluate(() => {currentName='s2';GlossaryComposer.reset();document.getElementById('term-input-field').value='new draft';});
+    await page.evaluate(() => {currentName='s2';refreshTermInput();document.getElementById('term-input-field').value='new draft';});
     staleResolve(); await page.waitForTimeout(100);
     assert(await page.locator('.glossary-composer').evaluate(n => n.hidden));
     assert.equal(await field.inputValue(),'new draft');
     // Changing sessions during compose must not submit the old draft to either target.
     await field.fill('[[term:#research]] slow');
     await field.press('Enter'); await page.waitForTimeout(100);
-    await page.evaluate(() => {currentName='s3';GlossaryComposer.reset();const f=document.getElementById('term-input-field');f.value='third draft';f.disabled=false;document.getElementById('term-input-send').disabled=false;});
+    await page.evaluate(() => {currentName='s3';refreshTermInput();const f=document.getElementById('term-input-field');f.value='third draft';f.disabled=false;document.getElementById('term-input-send').disabled=false;});
     composeResolve(); await page.waitForTimeout(100);
     assert.equal(sent.length,1); assert.equal(await field.inputValue(),'third draft');
     await field.fill('ordinary message'); await field.press('Enter');
     await page.waitForFunction(() => document.getElementById('term-input-field').value === '');
     assert.deepEqual(sent[1].keys,['ordinary message','Enter']);
+    // Away and back to the same name: an old prepare cannot send or unlock
+    // a newer send on the same textarea, nor clear its replacement draft.
+    composeResolve = null; sendResolve = null;
+    const before = sent.length;
+    await field.fill('[[term:#research]] slow'); await field.press('Enter');
+    await page.waitForTimeout(100);
+    await page.evaluate(() => {currentName='away';refreshTermInput();currentName='s3';refreshTermInput();});
+    await field.fill('newer send'); await field.press('Enter');
+    await page.waitForTimeout(100);
+    composeResolve(); await page.waitForTimeout(100);
+    assert.equal(sent.length,before+1);
+    assert(await field.isDisabled()); assert.equal(await field.inputValue(),'newer send');
+    sendResolve(); await page.waitForFunction(() => document.getElementById('term-input-field').value === '');
     await page.setViewportSize({width:390,height:844});
     await field.fill('자세히'); await page.getByRole('button',{name:'자세히 · 의미 2개'}).click();
     await screenshot('composer-mobile');
