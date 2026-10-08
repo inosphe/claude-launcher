@@ -100,8 +100,20 @@ const server = http.createServer(async (req,res) => {
     const page=await browser.newPage(); const errors=[];page.on('pageerror',error=>errors.push(error.message));
     await page.goto(`http://127.0.0.1:${server.address().port}/`);
     await page.clock.install({time: now});
-    const filterBox = await page.locator('#session-search').boundingBox(), buttonBox = await page.locator('#search-anything-open').boundingBox();
+    // The rail's search line starts folded (claunch-p6xb3): the box is not drawn
+    // and Search anything sits right of the filter icon, on the header's line.
+    // app.js is not loaded here, so nothing opens it until the class is set.
+    const row = page.locator('#session-search-row');
+    const toggleBox = await page.locator('#session-search-toggle').boundingBox();
+    let buttonBox = await page.locator('#search-anything-open').boundingBox();
+    assert.equal(await page.locator('#session-search').boundingBox(), null);
+    assert.equal(buttonBox.y + buttonBox.height / 2, toggleBox.y + toggleBox.height / 2); assert.ok(buttonBox.x >= toggleBox.x + toggleBox.width); assert.equal(buttonBox.width, 28);
+    // Opened (what syncSessionSearchOpen sets): the box takes the header's place
+    // and Search anything stays right of it on the same line.
+    await row.evaluate(n => n.classList.add('searching'));
+    const filterBox = await page.locator('#session-search').boundingBox(); buttonBox = await page.locator('#search-anything-open').boundingBox();
     assert.equal(buttonBox.y, filterBox.y); assert.ok(buttonBox.x >= filterBox.x + filterBox.width); assert.equal(buttonBox.width, 28);
+    await row.evaluate(n => n.classList.remove('searching'));
     await page.locator('#editor').focus();await page.keyboard.type('/');assert.equal(await page.locator('dialog').evaluate(n=>n.open),false);
     await page.locator('#terminal').focus();await page.keyboard.type('/');assert.equal(await page.locator('dialog').evaluate(n=>n.open),false);
     await page.locator('#search-anything-open').focus();await page.keyboard.press('/');assert.equal(await page.locator('dialog').evaluate(n=>n.open),true);
