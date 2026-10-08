@@ -1287,7 +1287,9 @@ ask:
   선택지 이름을 정한다.
 - `require_reason`(선택, 기본 false): 참이면 선택지 답에도 reason이 필요하다(없으면
   답을 거절한다). `choose`의 `require_reason`과 같은 역할이다. brief가 없는 ask에는
-  쓸 수 없다(컴파일 오류).
+  쓸 수 없다(컴파일 오류). 이 요구는 에이전트와 응답자(`flow_answer`)의 답에만
+  적용된다. 사람의 채널(`claunch cflow2 approve`·`select`, 웹 UI, `caller=user`)로 들어온
+  답은 reason을 생략할 수 있다. `choose`의 `require_reason`과 `reframe`도 같다.
 - `format`·`choices`·`require_reason`·`from`은 리터럴 대신 `${params.<p>}` 참조
   하나를 받을 수 있고, 런타임이 ask를 열 때 프로시저 params로 해석한다(아래
   `ask-user`).
@@ -2196,6 +2198,11 @@ spec:
     `visit_limit` 응답), `POST /api/cflow2/nudge | abort | archive | report | move`
     (사람의 조작, 2.11). v2 런만 있는 슬롯에서 `GET /api/cflow/run`은 `v2: true`를
     싣는다. 런 상세의 `chart.nodes[*].force_target`은 강제 이동 대상 표시다.
+  - `GET /api/cflow2/node?cwd&scope&node=<id>`(`daemon/cflow2_web.node_detail`): 런
+    차트의 노드 하나. 정의가 준 필드 전부(작업의 `prompt`, `done_when`, `returns`,
+    `rules`(본문 포함), `verify`, `ask`, 선택지의 `options`와 guard 등), 유형별 동작 설명
+    (`how`, `NODE_HOW`), 자식과 역할, 살아 있는 인스턴스, 방문 수, 마지막 결과, 저널
+    꼬리 중 그 노드의 줄. 런이나 노드가 없으면 404.
   - `GET /api/cflow/definitions`의 v2 목록은 레이어 디렉터리의 파일 목록·수정
     시각으로 만든 스탬프로 캐시하며, 이벤트 루프 밖 스레드에서 컴파일한다.
   - 요청이 v2를 명시하지 않았는데(`workflow_version` 없음, `v2:` 접두어 없음, 생성
@@ -2208,20 +2215,35 @@ spec:
   데몬이 v2 런으로 시작한다. 고른 v2 항목이 `inputs`를 선언하면 Workflow 행 아래에
   입력 칸을 그린다(2.6). 워크플로를 바꾸면 칸을 비우고 다시 그린다. 400 응답의
   `errors`는 해당 칸 아래에 표시한다.
-- 실행 패널: v2 런이면 IR 트리를 들여쓰기 목록으로 그리고, 활성 구성의 노드와
-  위임 실행 단위(실행 주체, 상태, 영수증)를 표시한다. 그 밖에 런의 시작 입력
+- 실행 패널: v2 런이면 머리(링크와 런 조작 버튼, 이름, 상태, 런 정보) 아래에 두
+  열을 둔다. 왼쪽은 사람의 응답을 기다리는 카드(선택, 질문, 반복 상한), 진행 중인
+  작업, 에이전트의 보고(저널의 `reported`, 최신 것이 펼쳐진 markdown), 위임 표,
+  컬렉션, 트리거, 저널이다. 오른쪽은 차트다. 너비가 980px보다 좁으면(분할 창, 세션
+  접이식 영역) 한 열이다. 차트는 안내선, 노드 유형 칩, 역할 태그(`do`, `option x`,
+  `catch fail`)를 가진 접는 트리이고, 루트와 살아 있는 노드·선택한 노드의 조상이
+  펼쳐진다. 「Expand all」과 「Collapse」로 전체를 펼치거나 처음 상태로 돌린다.
+  질문 카드의 선택지 표는 선택지마다 카드로 그린다(짧은 열은 태그, 긴 열은
+  markdown). 권장안은 텍스트가 아닌 data 값(`data-value`, `data-recommended`)으로
+  싣고, 그 값으로 권장 라벨 카드와 버튼의 「권장」 배지를 그린다. 위임 실행 단위는
+  실행 주체, 상태, 영수증을 표시한다. 그 밖에 런의 시작 입력
   (`data.inputs`, 접힌 블록), 완료 기준 확인 상태, `verifying` 중인 작업과 그
   명령, `visit_limit` 대기(「Allow one more visit」/「Stop here」 버튼), probe가
   연속으로 판정하지 못한 횟수와 `undecidable`로 끝난 wait를 표시한다.
-- v2 run 페이지의 조작(v1 페이지의 대응 기능): 위쪽에 「← All runs」 링크, 소유
-  세션 칩, attach 링크(분할 창과 세션 접이식 영역에는 「Open the run page」 버튼),
-  그 아래 버튼 줄에 Nudge session·Abort run(살아 있는 런)과 Archive run(끝난 런).
-  세션 접이식 영역에는 Abort·Archive를 두지 않는다(v1과 같음). 활성 작업 줄마다
-  결과 선택 상자와 「Force outcome」 버튼이 있다. 트리의 행을 누르면 노드가 선택되고
-  (다시 누르면 해제), 노드 정보(id, 방문 수, 살아 있는 인스턴스)와 「Force run to
-  …」 버튼이 나온다. 버튼은 `force_target` 노드에서만 눌리고, 그 노드의 행에는 ⇥
-  표시가 붙는다. 선택 상태는 화면(page, split, fold)마다 따로 기억해 폴링 재그리기
-  뒤에도 유지한다.
+- v2 run 페이지의 조작(v1 페이지의 대응 기능): 머리의 왼쪽에 「← All runs」 링크,
+  소유 세션 칩, attach 링크, 오른쪽에 Nudge·Abort(살아 있는 런)와 Archive(끝난 런)
+  버튼(분할 창과 세션 접이식 영역에는 「Open the run page」 버튼도). 세션 접이식
+  영역에는 Abort·Archive를 두지 않는다(v1과 같음). 활성 작업 카드마다 결과 선택
+  상자, reason 칸, 「Force outcome」 버튼이 한 줄에 있다. 선택·질문 카드의 답 버튼도
+  reason 칸과 한 줄이다. reason은 언제나 생략할 수 있다(ask의 `require_reason` 항목 참조).
+  입력 중인 칸이 있으면 폴링 재그리기를 건너뛰고, 입력한 값은 화면별로 기억한다.
+- 노드 패널: 트리의 행을 누르면 화면 오른쪽 가장자리에 패널이 열린다(× 버튼 또는
+  Esc로 닫고, 같은 행을 다시 누르면 닫힌다). 패널은 `GET /api/cflow2/node`를 읽어
+  유형의 동작 설명, 「Force run to …」(`force_target` 노드에서만), 상태(id, 방문 수,
+  살아 있는 인스턴스, 정의 위치), 프롬프트와 완료 기준(markdown), returns, effects,
+  규칙, 선택지와 guard, 그 밖의 정의 필드, 자식 목록(누르면 그 노드로 이동), 마지막
+  결과, 그 노드의 저널 줄을 보여 준다. `force_target` 노드의 행에는 ⇥ 표시가 붙는다.
+  선택·펼침 상태는 화면(page, split, fold)마다 따로 기억해 폴링 재그리기 뒤에도
+  유지한다.
 
 ## 10. v1 deprecation
 

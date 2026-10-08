@@ -319,12 +319,10 @@ def test_wind_down_asks_the_person_and_ends_the_loop(tmp_path):
     # keep: back to standby
     _wind_down(ld, "keep", "not yet")
     assert [c["label"] for c in ld.st["choices"]] == ["standby"]
-    # an answer needs a reason
+    # the person may answer without a reason (docs 2.11)
     ld.select("wind-down", "again")
     ld.report("ask-frame", value={"brief": WIND_DOWN})
-    with pytest.raises(runtime.FlowError):
-        runtime.approve(None, decision="end-shift", reason=None, **ld.kw())
-    runtime.approve(None, decision="end-shift", reason="queue empty", **ld.kw())
+    runtime.approve(None, decision="end-shift", reason=None, **ld.kw())
     ld.status()
     assert ld.tasks() == ["wrapup"]
     ld.report("wrapup")

@@ -648,6 +648,7 @@ def build_app(
     # of a run (a chooser: user choice, a loop at its max) and a read-only
     # definition view. Same token as the v1 approve/select endpoints.
     r.add_get("/api/cflow2/run", h_cflow2_run)
+    r.add_get("/api/cflow2/node", h_cflow2_node)
     r.add_get("/api/cflow2/runs", h_cflow2_runs)
     r.add_get("/api/cflow2/rail", h_cflow2_rail)
     r.add_get("/api/cflow2/definition", h_cflow2_definition)
@@ -4591,6 +4592,17 @@ async def h_cflow2_run(request: web.Request) -> web.Response:
     data["trigger_events"] = [
         e for e in data.get("journal") or [] if str(e.get("event") or "") in CFLOW2_TRIGGER_EVENTS
     ][-CFLOW2_TRIGGER_TAIL:]
+    return json_response(data)
+
+
+async def h_cflow2_node(request: web.Request) -> web.Response:
+    """One node of a v2 run in full, for the run page's node pane
+    (cflow2_web.node_detail): ``?cwd=&scope=&node=<id>``."""
+    cwd, scope = _cflow2_slot(request)
+    node = request.query.get("node") or ""
+    data = await asyncio.to_thread(cflow2_web.node_detail, cwd, scope, node)
+    if data is None:
+        return json_response({"error": f"no node {node!r} in this run"}, status=404)
     return json_response(data)
 
 

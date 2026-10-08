@@ -713,7 +713,7 @@ def register(sub) -> None:
     q.set_defaults(func=_guarded(_cmd_journal))
 
     q = scoped(csub.add_parser("abort", help="abort the v2 run here"))
-    q.add_argument("--reason", required=True)
+    q.add_argument("--reason", default="", help="optional; journaled")
     q.set_defaults(func=_guarded(_cmd_abort))
 
     q = scoped(csub.add_parser("archive", help="move the finished v2 run here into the "

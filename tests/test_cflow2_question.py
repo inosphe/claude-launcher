@@ -284,8 +284,10 @@ def test_reframe_needs_a_reason_and_finishes_reframe(tmp_path):
                        "body:\n  try: [frame, pose]\n  catch: {reframe: end}")
     d = Drv(tmp_path, _compile(src))
     d.report("frame", value={"brief": BRIEF})
+    # an agent's or a responder's reframe needs one; a person's never does
     with pytest.raises(runtime.FlowError, match="needs a reason"):
-        runtime.approve("pose", decision="reframe", **d.kw())
+        runtime._ask_need_reason({"brief": BRIEF}, "reframe", None)
+    runtime._ask_need_reason({"brief": BRIEF}, "reframe", None, by_user=True)
     runtime.approve("pose", decision="reframe", reason="옵션이 빠졌다", **d.kw())
     res = d.state()["result"]["pose"]
     assert res["outcome"] == "reframe" and res["value"]["reason"] == "옵션이 빠졌다"
@@ -395,16 +397,17 @@ def test_ask_user_rejects_choices_that_do_not_match(tmp_path):
     assert "exactly the fixed choices" in d.events("ask_brief_invalid")[0]["errors"][0]
 
 
-def test_require_reason_refuses_a_bare_answer(tmp_path):
+def test_require_reason_refuses_an_agents_bare_answer_but_not_a_persons(tmp_path):
     src = ASKB.replace("format: pick,", "format: pick, require_reason: true,")
     d = Drv(tmp_path, _compile(src))
     d.report("frame", value={"brief": BRIEF})
     (a,) = d.status()["asks"]
     assert a["require_reason"] is True and a["question"]["recommended"] == "narrow"
+    (rec,) = d.state()["asks"].values()
     with pytest.raises(runtime.FlowError, match="needs a reason"):
-        runtime.approve("pose", decision="narrow", **d.kw())
-    runtime.approve("pose", decision="narrow", reason="봤다", **d.kw())
-    assert d.state()["result"]["pose"]["value"]["reason"] == "봤다"
+        runtime._ask_need_reason(rec, "narrow", "")
+    runtime.approve("pose", decision="narrow", **d.kw())  # the person's channel
+    assert d.state()["result"]["pose"]["value"]["decision"] == "narrow"
 
 
 def test_require_reason_is_for_brief_asks_only():
@@ -417,5 +420,5 @@ def test_ask_user_passes_require_reason(tmp_path):
     src = CALLER.replace("choices: [narrow, full]}", "choices: [narrow, full], require_reason: true}")
     d = Drv(tmp_path, _compile(src, resolve=layers.resolver(str(tmp_path))))
     d.report("ask-frame", value={"brief": DECISION})
-    with pytest.raises(runtime.FlowError, match="needs a reason"):
-        runtime.approve(None, decision="full", **d.kw())
+    assert [x["require_reason"] for x in d.state()["asks"].values()] == [True]
+    runtime.approve(None, decision="full", **d.kw())  # a person may still omit it

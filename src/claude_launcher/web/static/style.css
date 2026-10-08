@@ -6026,49 +6026,297 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
   display: inline-block; padding: 0 5px; margin-right: 6px; border-radius: 3px;
   font-size: 11px; font-weight: 600; color: #0d1117; background: #a5d6ff;
 }
-.cf2-tree { font-size: 12px; margin: 4px 0 8px; }
-.cf2-row { padding: 1px 0; color: #8b949e; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.cf2-row.active { color: #c9d1d9; }
-.cf2-row.awaiting { color: #f0f6fc; background: rgba(56, 139, 253, 0.18); }
-.cf2-role { color: #6e7681; }
-.cf2-visits { color: #d29922; }
-.cf2-await { color: #58a6ff; }
+/* The v2 run view (renderCflow2Into): a head (ways out, run presses, name,
+   status, facts), then two columns when there is room -- what waits on a
+   person, what is in progress and the agent's reports on the left, the
+   chart on the right -- and one column in the split pane and the fold. The
+   type is a size down from the page's body: this is a dense panel, and the
+   agent's prose in it is read, not displayed. */
+.cf2 { container-type: inline-size; font-size: 13px; color: #c9d1d9; }
+.cf2 .md { font-size: 13px; line-height: 1.55; color: #c9d1d9; }
+.cf2 .md .md-p { margin-bottom: 6px; }
+.cf2 .md-h1, .cf2 .md-h2, .cf2 .md-h3 { font-size: 13px; }
+.cf2 .wf-note { font-size: 12px; }
+.cf2-top { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
+.cf2-nav { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; min-width: 0; }
+.cf2-nav .wf-session { font-size: 12px; }
+.cf2-bar { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
+.cf2-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
+.cf2-title h2 { margin: 0; font-size: 18px; font-weight: 600; color: #e6edf3; overflow-wrap: anywhere; }
+.cf2-title .cf2-badge { margin-right: 0; }
+.cf2-status {
+  padding: 1px 9px; border-radius: 10px; font-size: 11px; font-weight: 600;
+  background: #30363d; color: #c9d1d9; text-transform: uppercase; letter-spacing: .03em;
+}
+.cf2-status.run { background: #172947; color: #58a6ff; }
+.cf2-status.wait { background: #4d3800; color: #e3b341; }
+.cf2-status.ok { background: #1f4428; color: #3fb950; }
+.cf2-status.bad { background: #442022; color: #ff7b72; }
+.cf2-meta, .cf2-facts { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 6px; font-size: 12px; color: #9da5b0; }
+.cf2-fact { display: inline-flex; gap: 6px; align-items: baseline; min-width: 0; overflow-wrap: anywhere; }
+.cf2-fact-k { color: #6e7681; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+.cf2 > .wf-warning { margin: 8px 0 0; }
+
+.cf2-cols { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px 24px; margin-top: 8px; }
+@container (min-width: 980px) {
+  .cf2-cols { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .cf2-col-chart { order: 2; }
+}
+.cf2-col-main, .cf2-col-chart { min-width: 0; }
+.cf2-section { margin-top: 14px; }
+.cf2-sec-title {
+  display: flex; align-items: center; gap: 8px; margin: 0 0 8px; padding-bottom: 6px;
+  border-bottom: 1px solid #262b33; font-size: 12px; font-weight: 600; color: #9da5b0;
+  text-transform: uppercase; letter-spacing: .05em;
+}
+.cf2-count {
+  padding: 0 7px; border-radius: 9px; background: #262b33; color: #9da5b0;
+  font-size: 11px; font-weight: 500; text-transform: none; letter-spacing: 0;
+}
+
+/* a card: one thing that waits or runs */
+.cf2-card {
+  margin: 0 0 10px; padding: 10px 12px; background: #181b20;
+  border: 1px solid #262b33; border-radius: 8px;
+}
+.cf2-card-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 8px; }
+.cf2-card-title { font-weight: 600; color: #e6edf3; }
+.cf2-sub { color: #8b949e; font-size: 12px; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.cf2-kind {
+  padding: 0 6px; border-radius: 4px; font-size: 10px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .05em; background: #262b33; color: #9da5b0;
+}
+.cf2-kind.question, .cf2-kind.approval, .cf2-kind.choice { background: #2b2410; color: #e3b341; }
+.cf2-kind.task { background: #13233d; color: #79c0ff; }
+.cf2-kind.limit { background: #3a1d22; color: #ff7b72; }
+.cf2-body { margin-top: 8px; }
+.cf2-line { margin: 6px 0 0; }
+.cf2-cmd { margin-top: 6px; padding: 4px 8px; background: #0f1115; border-radius: 4px; overflow-wrap: anywhere; }
+
+/* the presses that answer a card, inline with their optional reason */
+.cf2-press { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 10px; }
+.cf2-reason, .cf2-select {
+  height: 28px; box-sizing: border-box; padding: 0 8px; font: inherit; font-size: 12px;
+  color: #c9d1d9; background: #0f1115; border: 1px solid #30363d; border-radius: 5px;
+}
+.cf2-reason { flex: 1 1 180px; min-width: 120px; max-width: 360px; }
+.cf2-reason:focus, .cf2-select:focus { outline: none; border-color: #388bfd; }
+.wf-btn.sm {
+  margin: 0; height: 28px; padding: 0 12px; font-size: 12px; font-weight: 500;
+  display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;
+}
+.cf2-bar .wf-btn.sm { height: 26px; padding: 0 10px; }
+.cf2 .wf-btn.force { margin-top: 0; }
+.wf-btn[data-recommended] { box-shadow: 0 0 0 1px #3fb950 inset, 0 0 0 2px rgba(63, 185, 80, .25); }
+
+/* a brief question: labelled sections, the options table, the
+   recommendation as a card (data-value), the 권장 chip from that value */
+.cf2-question { margin-top: 8px; display: flex; flex-direction: column; gap: 10px; }
+.cf2-sec h5, .cf2-rec-label, .cf2-rec-why {
+  margin: 0 0 4px; font-size: 11px; font-weight: 600; color: #8b949e;
+  text-transform: uppercase; letter-spacing: .05em;
+}
+.cf2-q-scroll { overflow-x: auto; border: 1px solid #262b33; border-radius: 6px; }
+.cf2-q-table { border-collapse: collapse; width: 100%; font-size: 12px; }
+.cf2-q-table th, .cf2-q-table td {
+  padding: 6px 8px; text-align: left; vertical-align: top; border-bottom: 1px solid #262b33;
+}
+.cf2-q-table th { background: #1d2127; color: #8b949e; font-weight: 600; font-size: 11px; white-space: nowrap; }
+.cf2-q-table tr:last-child td { border-bottom: none; }
+.cf2-q-table .md { font-size: 12px; line-height: 1.45; }
+.cf2-q-table tr[data-recommended] td { background: rgba(46, 160, 67, .07); }
+.cf2-q-name { white-space: nowrap; }
+.cf2-opt {
+  display: inline-block; padding: 1px 7px; border-radius: 4px; font-family: Cascadia Mono, Consolas, monospace;
+  font-size: 12px; background: #262b33; color: #e6edf3;
+}
+.cf2-opt.rec { background: #1f4428; color: #56d364; }
+.cf2-rec-chip {
+  display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 9px;
+  font-size: 10px; font-weight: 700; line-height: 16px; background: #238636; color: #fff;
+}
+.wf-btn .cf2-rec-chip { margin-left: 0; background: rgba(255, 255, 255, .22); }
+.cf2-rec {
+  padding: 8px 12px 10px; border: 1px solid #2c5a35; border-left: 3px solid #3fb950;
+  border-radius: 6px; background: rgba(46, 160, 67, .06);
+}
+.cf2-rec-top { display: flex; align-items: center; gap: 8px; }
+.cf2-rec-top .cf2-rec-label { margin: 0; color: #56d364; }
+.cf2-rec-why { margin-top: 8px; }
+
+.cf2-opts { display: flex; flex-direction: column; gap: 8px; }
+.cf2-opt-card { padding: 8px 10px; border: 1px solid #262b33; border-radius: 6px; background: #14171c; }
+.cf2-opt-card[data-recommended] { border-color: #2c5a35; background: rgba(46, 160, 67, .05); }
+.cf2-opt-top { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+.cf2-opt-top .cf2-rec-chip { margin-left: 0; }
+.cf2-tag { display: inline-flex; gap: 5px; align-items: baseline; padding: 0 7px; border-radius: 9px; background: #1d2127; font-size: 11.5px; color: #c9d1d9; }
+.cf2-opt-body { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 12px; margin-top: 8px; align-items: baseline; }
+.cf2-opt-body .md { font-size: 12.5px; }
+@media (min-width: 1500px) { .cf2-host-page.pane-open { margin-right: 520px; } }
+/* the agent's reports, newest open */
+.cf2-report { margin: 0 0 6px; border: 1px solid #262b33; border-radius: 6px; background: #16191e; }
+.cf2-report > summary {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px;
+  padding: 6px 10px; cursor: pointer; list-style: none;
+}
+.cf2-report > summary::-webkit-details-marker { display: none; }
+.cf2-report > summary::before { content: "\25b8"; color: #6e7681; font-size: 10px; }
+.cf2-report[open] > summary::before { content: "\25be"; }
+.cf2-report > .cf2-body { margin: 0; padding: 4px 12px 10px 26px; }
+.cf2-preview { flex: 1 1 0; min-width: 0; color: #6e7681; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cf2-report[open] .cf2-preview { display: none; }
+.cf2-outcome { padding: 0 6px; border-radius: 4px; font-size: 11px; background: #1f4428; color: #3fb950; }
+.cf2-outcome.bad { background: #442022; color: #ff7b72; }
+.cf2-by { color: #d29922; font-size: 11px; }
+.cf2-when { color: #6e7681; font-size: 11px; margin-left: auto; white-space: nowrap; }
+.cf2-value { margin: 0 12px 8px 26px; font-size: 12px; color: #8b949e; }
+.cf2-value > summary { cursor: pointer; }
+.cf2-value pre { margin: 4px 0 0; padding: 6px 8px; max-height: 240px; overflow: auto; background: #0f1115; border-radius: 4px; white-space: pre-wrap; }
+
+/* the chart: an outline with guide lines, a type chip per node, the role a
+   child plays as a tag, the run's position opened and marked */
+.cf2-chart-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 6px; }
+.cf2-chart-tools .wf-note { margin-right: auto; }
+.cf2-chart-tools .wf-btn.clear { height: 24px; }
+@container (min-width: 980px) {
+  .cf2-chart { position: sticky; top: 0; }
+  .cf2-chart .cf2-tree { max-height: calc(100vh - 140px); overflow: auto; }
+}
+.cf2-tree {
+  font-size: 12px; padding: 4px 0; background: #121418;
+  border: 1px solid #262b33; border-radius: 8px;
+}
+.cf2-row {
+  display: flex; align-items: center; gap: 6px; min-height: 24px; padding: 0 10px 0 6px;
+  color: #8b949e; white-space: nowrap; border-left: 2px solid transparent;
+}
+.cf2-indent { display: inline-flex; align-self: stretch; flex: none; }
+.cf2-guide { width: 16px; flex: none; border-left: 1px solid #262b33; margin-left: 7px; margin-right: -7px; }
+.cf2-toggle { width: 14px; flex: none; text-align: center; color: #6e7681; cursor: pointer; font-size: 10px; }
+.cf2-toggle.leaf { cursor: default; }
+.cf2-toggle:not(.leaf):hover { color: #e6edf3; }
+.cf2-role {
+  flex: none; padding: 0 5px; border-radius: 3px; font-size: 10.5px;
+  color: #a5a0ff; background: rgba(110, 100, 255, .12); max-width: 260px; overflow: hidden; text-overflow: ellipsis;
+}
+.cf2-type {
+  flex: none; padding: 0 5px; border-radius: 3px; font-size: 10.5px; line-height: 17px;
+  color: #8b949e; background: #1d2127; font-family: Cascadia Mono, Consolas, monospace;
+}
+.cf2-type.t-task { background: none; color: #58a6ff; padding: 0 2px; }
+.cf2-type.t-loop { color: #d2a8ff; }
+.cf2-type.t-try { color: #ffa198; }
+.cf2-type.t-choose, .cf2-type.t-cond { color: #e3b341; }
+.cf2-type.t-par, .cf2-type.t-group { color: #56d4dd; }
+.cf2-type.t-scope { color: #7ee787; }
+.cf2-type.t-wait, .cf2-type.t-timeout { color: #f0883e; }
+.cf2-head { color: #c9d1d9; flex: none; }
+.cf2-row.t-task .cf2-head { color: #e6edf3; font-weight: 600; }
+.cf2-row .cf2-sub { flex: 1 1 auto; font-size: 11.5px; color: #6e7681; }
+.cf2-exec { flex: none; font-size: 10.5px; color: #a371f7; }
+.cf2-tail { display: inline-flex; gap: 6px; align-items: center; margin-left: auto; padding-left: 8px; flex: none; }
+.cf2-more { color: #6e7681; font-size: 10.5px; }
+.cf2-visits { color: #d29922; font-size: 11px; }
+.cf2-force { color: #e3b341; font-weight: 700; }
+.cf2-live, .cf2-await {
+  padding: 0 6px; border-radius: 9px; font-size: 10px; font-weight: 700; line-height: 16px;
+  background: #1f6feb; color: #fff;
+}
+.cf2-live { background: #1f4428; color: #56d364; }
+.cf2-row.active { border-left-color: #2ea043; }
+.cf2-row.awaiting { border-left-color: #388bfd; background: rgba(56, 139, 253, .12); }
 .cf2-row.selectable { cursor: pointer; }
-.cf2-row.selectable:hover { background: rgba(110, 118, 129, 0.15); }
-.cf2-row.selected { outline: 1px solid #58a6ff; outline-offset: -1px; }
-.cf2-force { color: #d29922; }
-.cf2-nav { margin-bottom: 6px; }
-.cf2-actions { margin: 4px 0 8px; }
-.cf2-task { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 2px 0; }
-.cf2-force-report { display: inline-flex; gap: 4px; align-items: center; }
-.cf2-choice { border: 1px solid #30363d; border-radius: 6px; padding: 6px 8px; margin: 6px 0; }
-.cf2-choice h4 { margin: 0 0 4px; }
-.cf2-question h5 { margin: 6px 0 2px; }
-.cf2-q-table { border-collapse: collapse; margin: 2px 0 6px; font-size: 12px; }
-.cf2-q-table th, .cf2-q-table td { border: 1px solid #30363d; padding: 2px 6px; text-align: left; vertical-align: top; white-space: pre-wrap; }
-.cf2-q-table tr.recommended td { background: rgba(46, 160, 67, 0.15); }
-.cf2-q-rec { margin: 4px 0; }
-.wf-btn.recommended { outline: 2px solid #2ea043; }
-.cf2-deleg { font-size: 12px; padding: 2px 0; }
+.cf2-row.selectable:hover { background: rgba(110, 118, 129, .12); }
+.cf2-row.selected { background: rgba(56, 139, 253, .18); }
+.cf2-node {
+  margin: 4px 10px 8px; padding: 8px 10px; border: 1px solid #30363d; border-radius: 6px;
+  background: #181b20; white-space: normal;
+}
+.cf2-node-top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; color: #e6edf3; }
+.cf2-node .cf2-press { margin-top: 8px; }
+
+/* delegations, collections, triggers, the journal */
 .cf2-receipt { color: #6e7681; }
-.cf2-fallback { margin: 0 0 2px 12px; font-size: 12px; }
+.cf2-fallback { font-size: 12px; }
 .cf2-v1-note { margin-top: 4px; }
-/* cflow v2 collections and trigger lines (run view) */
-.cf2-collection { margin: 6px 0; overflow-x: auto; }
+.cf2-collection { overflow-x: auto; }
 .cf2-col-table { border-collapse: collapse; font-size: 12px; width: 100%; }
-.cf2-col-table th, .cf2-col-table td { text-align: left; padding: 2px 6px; border-bottom: 1px solid #30363d; vertical-align: top; }
+.cf2-col-table th, .cf2-col-table td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #262b33; vertical-align: top; }
+.cf2-col-table th { color: #8b949e; font-weight: 600; font-size: 11px; }
 .cf2-col-fields { overflow-wrap: anywhere; color: #8b949e; }
 .cf2-col-link { margin-left: 8px; color: #58a6ff; white-space: nowrap; }
 .cf2-col-link:hover { text-decoration: underline; }
-.cf2-col-status.landed { color: #3fb950; }
-.cf2-col-status.rejected { color: #f85149; }
+.cf2-col-status.landed, .cf2-col-status.returned { color: #3fb950; }
+.cf2-col-status.rejected, .cf2-col-status.cancelled { color: #f85149; }
 .cf2-col-status.merged { color: #a371f7; }
 .cf2-col-status.open { color: #3fb950; }
 .cf2-col-status.closed { color: #f85149; }
 .cf2-col-actions { white-space: nowrap; }
-.cf2-trigger { font-size: 12px; margin: 0; }
+.cf2-trigger { font-size: 11.5px; margin: 0; padding: 1px 0; color: #8b949e; overflow-wrap: anywhere; }
 .cf2-trigger.skipped { color: #d29922; }
-/* cflow v2 start inputs (new-session / spawn form) and the run's inputs */
+.cf2-journal { margin-top: 14px; }
+.cf2-journal > summary { cursor: pointer; color: #9da5b0; font-size: 12px; }
+.cf2-jgrid {
+  display: grid; grid-template-columns: auto auto minmax(0, 1fr) minmax(0, 2fr);
+  gap: 1px 12px; margin-top: 6px; font-size: 11.5px; max-height: 420px; overflow: auto;
+}
+.cf2-jgrid > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cf2-jgrid .cf2-when { margin: 0; }
+.cf2-ev { color: #79c0ff; }
+.cf2-ev.reported, .cf2-ev.selected, .cf2-ev.ask_answered { color: #56d364; }
+.cf2-ev.forced { color: #e3b341; }
+.cf2-jnode { color: #c9d1d9; }
+.cf2-jrest { color: #6e7681; }
+
+/* the node pane, on the view's right edge */
+.cf2-pane {
+  position: fixed; top: 0; right: 0; bottom: 0; z-index: 40;
+  width: min(520px, 94vw); display: flex; flex-direction: column;
+  background: #15181d; border-left: 1px solid #30363d;
+  box-shadow: -12px 0 32px rgba(0, 0, 0, .45);
+}
+.cf2-pane-head {
+  display: flex; align-items: flex-start; gap: 8px; padding: 12px 14px;
+  border-bottom: 1px solid #262b33; flex: none;
+}
+.cf2-pane-head .cf2-type { margin-top: 2px; }
+.cf2-pane-title { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.cf2-pane-title strong { color: #e6edf3; font-size: 14px; overflow-wrap: anywhere; }
+.cf2-pane-title .cf2-sub { white-space: normal; }
+.cf2-close {
+  flex: none; width: 28px; height: 28px; border: none; border-radius: 6px; cursor: pointer;
+  background: transparent; color: #8b949e; font-size: 20px; line-height: 1;
+}
+.cf2-close:hover { background: #262b33; color: #e6edf3; }
+.cf2-pane-body { flex: 1; overflow-y: auto; padding: 4px 14px 24px; }
+.cf2-pane-block { margin-top: 14px; }
+.cf2-pane-block > h5 {
+  margin: 0 0 6px; font-size: 11px; font-weight: 600; color: #8b949e;
+  text-transform: uppercase; letter-spacing: .05em;
+}
+.cf2-pane-block .cf2-press { margin-top: 0; }
+.cf2-how { margin: 0; color: #9da5b0; line-height: 1.55; }
+.cf2-pane-md { padding: 8px 10px; background: #101216; border: 1px solid #262b33; border-radius: 6px; max-height: 420px; overflow: auto; }
+.cf2-pre { margin: 0; padding: 6px 8px; background: #101216; border-radius: 4px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto; }
+.cf2-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.cf2-rules { display: flex; flex-direction: column; gap: 4px; }
+.cf2-rule > summary { cursor: pointer; color: #c9d1d9; font-size: 12px; }
+.cf2-rule > .md { margin: 4px 0 6px 14px; }
+.cf2-kv { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 12px; margin-top: 6px; align-items: baseline; }
+.cf2-kids { display: flex; flex-direction: column; border: 1px solid #262b33; border-radius: 6px; overflow: hidden; }
+.cf2-kid { display: flex; align-items: center; gap: 6px; padding: 4px 8px; cursor: pointer; white-space: nowrap; font-size: 12px; }
+.cf2-kid + .cf2-kid { border-top: 1px solid #1d2127; }
+.cf2-kid:hover { background: rgba(110, 118, 129, .12); }
+.cf2-jgrid-node { grid-template-columns: auto auto minmax(0, 1fr); max-height: 260px; }
+
+/* the run's inputs, folded */
+.cf2-run-inputs { margin-top: 8px; font-size: 12px; }
+.cf2-run-inputs > summary { cursor: pointer; color: #9da5b0; }
+.cf2-run-input { display: grid; grid-template-columns: 140px minmax(0, 1fr); gap: 10px; padding: 3px 0; align-items: baseline; }
+.cf2-run-input-value { white-space: pre-wrap; overflow-wrap: anywhere; }
+.cf2-run-input-value.empty { color: #484f58; }
+.cf2-undecidable { color: #d29922; }
+
 .cf2-inputs { border: 1px solid #30363d; border-radius: 6px; padding: 6px 8px; margin: 6px 0; }
 .cf2-input { margin: 6px 0; }
 .cf2-input-label { display: block; font-weight: 600; }
@@ -6079,9 +6327,6 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .cf2-input-help { margin: 2px 0 0; }
 .cf2-input.invalid .cf2-input-control { outline: 1px solid #f85149; border-radius: 4px; }
 .cf2-input-error { color: #f85149; margin: 2px 0 0; }
-.cf2-run-inputs { margin: 6px 0; }
-.cf2-run-input-value { white-space: pre-wrap; }
-.cf2-undecidable { color: #d29922; }
 
 /* Start inputs: a readiness check beside an input (precheck: gh) and the
    cross-input rules under the fields (docs/cflow-v2.md 2.6). */

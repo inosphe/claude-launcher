@@ -776,3 +776,39 @@ def test_the_person_moves_reports_aborts_and_archives_a_v2_run(proj):
               .read_text(encoding="utf-8").splitlines()]
     assert any('"forced"' in e and '"by": "user"' in e for e in events)
     assert any('"reported"' in e and '"by": "user"' in e for e in events)
+
+
+def test_the_node_pane_reads_one_node_in_full(proj):
+    """GET /api/cflow2/node: the run page's node pane (claunch-wm67r) -- the
+    definition's fields, what the type does, children with roles, the live
+    instance, the last result and the node's journal lines."""
+    cwd = str(proj)
+    (proj / ".claunch" / "workflows" / "v2" / "move.yaml").write_text(MOVE, encoding="utf-8")
+    runtime.start(layers.load("move", cwd), cwd=cwd, scope="s4", caps={})
+    chart = RunStore(cwd, "s4").load_chart()
+    ids = {n.label: n.id for n in chart.nodes.values() if n.label}
+    task = runtime.status(cwd=cwd, scope="s4")["tasks"][0]["instance"]
+    runtime.report(task, "ok", None, "a is done", cwd=cwd, scope="s4")  # a -> b
+
+    async def go(client, bearer):
+        q = f"cwd={cwd}&scope=s4"
+        return {
+            "unauth": (await client.get(f"/api/cflow2/node?{q}&node={ids['b']}")).status,
+            "a": await (await client.get(f"/api/cflow2/node?{q}&node={ids['a']}", headers=bearer)).json(),
+            "b": await (await client.get(f"/api/cflow2/node?{q}&node={ids['b']}", headers=bearer)).json(),
+            "root": await (await client.get(f"/api/cflow2/node?{q}&node={chart.root}",
+                                            headers=bearer)).json(),
+            "none": (await client.get(f"/api/cflow2/node?{q}&node=zzz", headers=bearer)).status,
+        }
+
+    out = _http(go)
+    assert out["unauth"] == 401 and out["none"] == 404
+    b = out["b"]
+    assert b["fields"]["prompt"] == "do b" and b["fields"]["returns"] == {"ok": {"n": "int"}, "blocked": {}}
+    assert "flow_report" in b["how"]
+    assert [i["await"] for i in b["instances"]] == ["task"]
+    a = out["a"]
+    assert a["node"]["force_target"] is True and a["visits"] == 1
+    assert a["result"]["outcome"] == "ok"
+    assert [e["event"] for e in a["journal"]][:1] == ["entered"]
+    assert [c["role"] for c in out["root"]["children"]][:2] == ["try", "catch blocked"]
