@@ -16317,8 +16317,9 @@ function syncSplitPane() {
    The header's `details` is the same switch and gets the same treatment —
    pressed only while the open panel is describing the terminal under it,
    which is exactly when pressing it again would close rather than repoint.
-   Both names null (no terminal, no panel) is not a match. In that state the
-   panel has handed this button its × (see sessHead), so it says so. */
+   Both names null (no terminal, no panel) is not a match. While it matches,
+   the panel's own × (see sessHead) and this button both close it, so it
+   says so. */
 function markDetailRow() {
   document.querySelectorAll("#session-list .sess-info").forEach((b) =>
     b.classList.toggle("on", b.dataset.name === sessName)
@@ -28766,17 +28767,18 @@ function metaRow(dl, label, value, title) {
   dl.appendChild(dd);
 }
 
-/* Who this panel is about, and the two ways out of it — both of which drop
-   away in the one arrangement where they are noise.
+/* Who this panel is about, and the ways out of it.
 
-   Docked beside the terminal it describes, the header's `details` chip is
-   anchored over this head's top-right corner and a second press of it closes
-   the panel. There is no sense in a × under a close button, nor in an "open
-   the terminal" that opens the terminal already on screen. Every other
-   arrangement keeps both and needs them: the panel aimed at another row's
-   session (that button travels), a page covering the terminal (it brings it
-   back), and the phone, where this panel IS the page and there is no header
-   anywhere on screen to close it from. */
+   The × is on every arrangement. Docked beside the terminal it describes, the
+   header's `details` chip also closes the panel on a second press, but that
+   chip sits in the terminal's header, outside the panel: a reader looking at
+   the panel looks for its close button in the panel's own corner (reported
+   from the live UI, claunch-tk08h). What does drop away there is the verbs —
+   "open the terminal" would open the terminal already on screen, and Spawn
+   and Open PR are for a session read from elsewhere. Every other arrangement
+   keeps them and needs them: the panel aimed at another row's session (that
+   button travels), a page covering the terminal (it brings it back), and the
+   phone, where this panel IS the page. */
 function sessHead(s) {
   const head = el("div", "wf-head sess-head");
   head.appendChild(el("h2", null, s.name || "session"));
@@ -28813,7 +28815,15 @@ function sessHead(s) {
   // of this head, not only the ones that keep the buttons; the stylesheet
   // orders it last so it is the head's own bottom line.
   head.appendChild(cwdLine(s, "sess-cwd"));
-  if (mine && terminalOnScreen() && !MOBILE_MQ.matches) return head;
+  // The × goes on last in every arrangement (margin-left: auto puts it in the
+  // corner), so it is built here and appended at each return.
+  const close = el("button", "sess-close", "×");
+  close.title = "close details";
+  close.addEventListener("click", closeDetail);
+  if (mine && terminalOnScreen() && !MOBILE_MQ.matches) {
+    head.appendChild(close);
+    return head;
+  }
 
   // The spawn wizard, aimed at this session: the panel's verb for growing a
   // fleet under whatever this session is. An exited session has nothing to
@@ -28842,9 +28852,6 @@ function sessHead(s) {
   const open = el("button", "wf-btn", "Open terminal");
   open.addEventListener("click", () => go("#/s/" + encodeURIComponent(s.name)));
   head.appendChild(open);
-  const close = el("button", "sess-close", "×");
-  close.title = "close details";
-  close.addEventListener("click", closeDetail);
   head.appendChild(close);
   return head;
 }

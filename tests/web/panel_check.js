@@ -370,15 +370,16 @@ check("...a close, once it is the panel's ×",
       $("term-details").title.includes("close"), $("term-details").title);
 ctx.closeDetail();
 
-/* ---- the panel head hands its × to that chip, but only there ---- */
-/* Docked beside its own terminal, the chip is pinned over this head's corner
-   and closes the panel: a × under a close button, and an "Open terminal" for
-   the terminal already on screen, are both noise. Nowhere else. */
+/* ---- the panel head keeps its × everywhere; only the verbs drop ---- */
+/* Docked beside its own terminal, the header chip also closes the panel, but
+   it sits outside the panel, so the panel keeps its own × (claunch-tk08h).
+   An "Open terminal" for the terminal already on screen is still noise. */
 const headOf = (name) => ctx.sessHead({ name, status: "idle" });
 narrow = false; termUp = true;
 ctx.setCur("coder3");
 let h = headOf("coder3");
-check("docked beside its own terminal: no ×", kidsOf(h, "sess-close").length === 0);
+check("docked beside its own terminal: the × stays",
+      kidsOf(h, "sess-close").length === 1);
 check("...and no Open terminal that opens what is open",
       kidsOf(h, "wf-btn").length === 0);
 check("...but still says which session", h.kids[0].text === "coder3");
