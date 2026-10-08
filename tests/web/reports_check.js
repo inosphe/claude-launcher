@@ -246,6 +246,9 @@ check("a round that named no issue says so rather than showing a blank",
       noIssue.find("reports-issue")[0].text, "no issue");
 check("and offers no board link, because there is no issue to open",
       noIssue.find("reports-board").length, 0);
+const artifact = ctx.row({...ROWS[3], name: "design-note"});
+check("an artifact row carries its purpose name beside the issue",
+      artifact.find("reports-issue")[0].text, "no issue · design-note");
 check("an ended session is marked ended, not gone",
       [noIssue.find("reports-sess")[0].classes.has("ended"),
        noIssue.find("reports-sess")[0].tag], [true, "a"]);

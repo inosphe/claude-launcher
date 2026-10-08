@@ -51,7 +51,9 @@ def test_a_filename_carries_the_time_and_the_issue_back(home):
     at = datetime(2026, 8, 26, 3, 12, 0, tzinfo=timezone.utc)
     name = reports.filename("claunch-j31", at)
     assert name == "20260826T031200Z-claunch-j31.html"
-    assert reports.parse(name) == {"at": "2026-08-26T03:12:00Z", "issue": "claunch-j31"}
+    assert reports.parse(name) == {
+        "at": "2026-08-26T03:12:00Z", "issue": "claunch-j31", "name": None,
+    }
 
 
 def test_a_round_with_no_issue_is_still_named_not_refused(home):
@@ -798,3 +800,119 @@ def test_the_gate_runs_the_checkout_rather_than_whatever_claunch_is_installed():
     assert verify.startswith("uv run --no-sync python")
     assert "tools/report_check.py" in verify
     assert " -m " not in verify
+
+
+# --------------------------------------------------------------------------- #
+# artifacts: a page for any purpose, filed beside the round report
+# --------------------------------------------------------------------------- #
+def test_an_artifact_name_rides_in_the_filename_and_comes_back(home):
+    at = datetime(2026, 10, 8, 9, 30, 0, tzinfo=timezone.utc)
+    name = reports.filename("claunch-yu1bs", at, "design-note")
+    assert name == "20261008T093000Z-claunch-yu1bs--design-note.html"
+    assert reports.parse(name) == {
+        "at": "2026-10-08T09:30:00Z", "issue": "claunch-yu1bs", "name": "design-note",
+    }
+
+
+def test_an_artifact_with_no_issue_is_filed_without_a_board(home):
+    # No board, or a page about no issue: the store does not need one.
+    path = write(reports.target("s1", None, name="perf-compare"))
+    assert path.name.endswith(f"-{reports.NO_ISSUE}--perf-compare.html")
+    [row] = reports.listing("s1")
+    assert row["issue"] is None and row["name"] == "perf-compare"
+    assert [r["file"] for r in reports.index()] == [path.name]
+
+
+@pytest.mark.parametrize("bad", ["Design", "a--b", "-a", "a_b", "a b", "x" * 49])
+def test_a_bad_artifact_name_is_refused_not_squeezed(home, bad):
+    with pytest.raises(reports.ReportError):
+        reports.target("s1", "i-1", name=bad)
+
+
+def test_an_issue_slug_never_carries_the_name_separator(home):
+    assert reports.issue_slug("odd--id") == "odd-id"
+    assert reports.issue_slug("a // b") == "a-b"
+
+
+def test_an_artifact_and_the_round_report_for_one_issue_are_two_pages(home):
+    report = write(reports.target("s1", "i-1"))
+    note = write(reports.target("s1", "i-1", name="design-note"))
+    assert report != note
+    # Each comes back to itself when asked again; neither overwrites the other.
+    assert reports.target("s1", "i-1") == report
+    assert reports.target("s1", "i-1", name="design-note") == note
+    assert reports.target("s1", "i-1", name="other") not in (report, note)
+
+
+def test_two_artifacts_with_no_issue_do_not_collide(home):
+    a = write(reports.target("s1", None, name="first"))
+    b = write(reports.target("s1", None, name="second"))
+    assert a != b
+    assert reports.target("s1", None) not in (a, b)
+
+
+def test_an_artifact_is_found_by_its_issue_beside_the_round_report(home):
+    write(reports.target("s1", "i-1"))
+    write(reports.target("s1", "i-1", name="design-note"))
+    names = sorted(r["name"] or "" for r in reports.for_issue("i-1"))
+    assert names == ["", "design-note"]
+
+
+def test_an_artifact_alone_does_not_pass_the_wrapup_gate(home, capsys):
+    write(reports.target("s1", "i-1", name="design-note"))
+    assert run_cli("report", "check", "--session", "s1") == 1
+    assert "no round report" in capsys.readouterr().err
+    assert run_cli("report", "check", "--session", "s1", "--name", "design-note") == 0
+
+
+def test_the_gate_entry_point_takes_the_name_too(home, capsys):
+    from claude_launcher import cli_report
+
+    write(reports.target("s1", None, name="api-shape"))
+    assert cli_report.check_main(["--session", "s1"]) == 1
+    assert cli_report.check_main(["--session", "s1", "--name", "api-shape"]) == 0
+    assert cli_report.check_main(["--session", "s1", "--name", "Bad"]) == 2
+
+
+def test_path_with_a_name_prints_the_artifact_file_and_is_stable(home, capsys):
+    argv = ("report", "path", "--session", "s1", "--name", "design-note")
+    assert run_cli(*argv) == 0
+    first = capsys.readouterr().out.strip()
+    assert first.endswith("--design-note.html")
+    write(Path(first))
+    assert run_cli(*argv) == 0
+    assert capsys.readouterr().out.strip() == first
+
+
+def test_save_with_a_name_files_the_page_as_an_artifact(home, tmp_path, capsys):
+    src = write(tmp_path / "page.html")
+    argv = ("report", "save", str(src), "--session", "s1", "--name", "table")
+    assert run_cli(*argv) == 0
+    dest = Path(capsys.readouterr().out.strip())
+    assert dest.name.endswith(f"-{reports.NO_ISSUE}--table.html")
+
+
+def test_ls_narrows_to_one_artifact_and_says_which_row_is_the_round(home, capsys):
+    write(reports.target("s1", "i-1"))
+    write(reports.target("s1", "i-1", name="design-note"))
+    assert run_cli("report", "ls", "--session", "s1") == 0
+    out = capsys.readouterr().out
+    assert "(round)" in out and "design-note" in out
+    assert run_cli("report", "ls", "--session", "s1", "--name", "design-note", "--json") == 0
+    rows = json.loads(capsys.readouterr().out)["reports"]
+    assert [r["name"] for r in rows] == ["design-note"]
+
+
+def test_the_shipped_skill_names_the_commands_it_teaches(home):
+    from claude_launcher import artifact_skill
+
+    text = artifact_skill.SKILL_MD
+    assert text.startswith("---\nname: claunch-artifact\n")
+    for cmd in (
+        "claunch report path --name",
+        "claunch report save",
+        "claunch report check --name",
+        "claunch report ls --name",
+        "claunch beads comments add",
+    ):
+        assert cmd in text, cmd
