@@ -3399,6 +3399,58 @@ function selectSessionGroupTab(group, value) {
   refreshSessions({ cached: true });
 }
 
+/* A tab strip wider than the rail scrolls sideways by its scrollbar, and also
+   by dragging the strip itself with the mouse (claunch-h3xa3). Installed once
+   per strip -- the strips are fixed elements whose tabs are rebuilt -- from
+   the renderers that fill them. A press that moves less than
+   TAB_DRAG_THRESHOLD pixels stays a click on its tab; one that moves further
+   scrolls the strip, and the click the browser sends on release is swallowed
+   so the drag does not also pick the tab it ended on. Touch and pen keep the
+   browser's own panning. */
+const TAB_DRAG_THRESHOLD = 5;
+function enableTabDragScroll(bar) {
+  if (!bar || bar.dataset.dragScroll) return;
+  bar.dataset.dragScroll = "1";
+  let swallowClick = false;
+  bar.addEventListener("click", (ev) => {
+    if (!swallowClick) return;
+    swallowClick = false;
+    ev.preventDefault();
+    ev.stopPropagation();
+  }, true);
+  bar.addEventListener("pointerdown", (ev) => {
+    if (ev.pointerType !== "mouse" || ev.button !== 0) return;
+    if (bar.scrollWidth <= bar.clientWidth) return;
+    const startX = ev.clientX;
+    const startLeft = bar.scrollLeft;
+    let dragging = false;
+    swallowClick = false;
+    const move = (e) => {
+      const dx = e.clientX - startX;
+      if (!dragging && Math.abs(dx) < TAB_DRAG_THRESHOLD) return;
+      dragging = true;
+      bar.classList.add("dragging");
+      bar.scrollLeft = startLeft - dx;
+      e.preventDefault();
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+      if (!dragging) return;
+      bar.classList.remove("dragging");
+      // The click follows pointerup in the same task when it comes at all
+      // (it does not when the release lands off the strip); a flag left up
+      // past that would eat the next real click.
+      swallowClick = true;
+      setTimeout(() => { swallowClick = false; }, 0);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+  });
+}
+
 /* The tab strip above the list. Built on every rebuild of the rail (the
    counts move with the fleet), hidden while the rail is ungrouped. A tab is
    only a picker: what the open group says and offers is on the header row
@@ -3406,6 +3458,7 @@ function selectSessionGroupTab(group, value) {
 function renderSessionGroupTabs(group, tabs, active) {
   const bar = $("session-group-tabs");
   if (!bar) return;
+  enableTabDragScroll(bar);
   // The strip is rebuilt whole, so a tab that held the keyboard (a press by
   // Enter, then the redraw it caused) hands it to its successor below.
   const focused = typeof document.activeElement !== "undefined" && document.activeElement
@@ -9309,6 +9362,7 @@ function applyProjectDefaultMesh(f, picked, previous) {
 function renderProjectTabs() {
   const bar = $("project-tabs");
   if (bar) {
+    enableTabDragScroll(bar);
     bar.textContent = "";
     const tabs = [{ name: "", label: "All projects", title: "every project's sessions" }]
       .concat(projectsCache.map((p) => ({
