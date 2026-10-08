@@ -4345,7 +4345,10 @@ daemon prompt follows the daemon prompt. An edited copy replaces the
 session's record and is due at once with a `changed:` line giving the new id
 (the old id then answers `stale_id`); a copy that is gone (no fallback to
 claunch's) releases the pack from the session with a `removed:` line. The
-record is kept in step even with the reminder switched off. On a role-bearing
+record is kept in step even with the reminder switched off; switching it off
+also leaves no reminder naming the pack ids, since the Context line no longer
+does. A workspace that cannot be confirmed (unregistered, or its lookup
+fails) releases nothing. On a role-bearing
 session, the terminal header's pause/resume control gates both repeating
 sources at their shared delivery boundary, and **⏭** re-arms both active
 source timers for one interval. Cflow signals and stall pings remain active.
