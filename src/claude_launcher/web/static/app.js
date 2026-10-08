@@ -24224,11 +24224,12 @@ function sessVscode(data) {
   return box;
 }
 
-/* The Workspaces section (#/settings/workspaces, and the older #/workspaces):
-   the directory registry and the two things keyed by it — the projects that
-   group sessions, and each workspace's beads board. They sat among the
-   machine settings on General, where a card about where sessions run was
-   between the keyboard help and the model list. */
+/* The Workspaces page (#/workspaces; #/settings/workspaces from when it was a
+   Settings tab): the directory registry and the two things keyed by it — the
+   projects that group sessions, and each workspace's beads board — plus each
+   row's Sync panel. They once sat among the machine settings on General,
+   where a card about where sessions run was between the keyboard help and
+   the model list. */
 function workspacesPanel(view) {
   view.appendChild(el(
     "p", "wf-note",
