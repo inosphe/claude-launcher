@@ -2267,6 +2267,8 @@ nodes:
   # ── 회차 마감 ────────────────────────────────────────────────────────
   wrapup:
     title: 회차 마감·정리
+    # 사람의 강제 이동 대상(docs 2.11): 착지가 끝났는데 런이 그 앞에 머물 때
+    force_target: true
     prompt: |
       이 스텝이 내는 것은 셋: **깨끗한 트리**, **회차 보고서 HTML 한 장**,
       **넘길 것마다 handoff 이슈**. 보고서는 「한 것과 나온 것」으로 시작하고
@@ -3524,8 +3526,10 @@ procedures:
                         while: "true"
                         max: 5
                         do:
+                          # 사람의 강제 이동 대상(docs 2.11): 지금 일감을 작업부터 다시 한다
                           - id: item
                             call: item
+                            force_target: true
                             with: {verify: "$params.verify"}
                           - id: queue-next
                             choose:
@@ -3556,9 +3560,11 @@ procedures:
                                   description: 큐가 비었거나 배치 상한·무관 일감으로 여기서 끊는다 — 배치 전체를 착지 절차로 넘긴다
                                   then: {break: items}
                   - else: []
+              # 사람의 강제 이동 대상(docs 2.11): 착지 절차를 처음부터 다시 한다
               - id: land
                 call: land
                 bind: land_out
+                force_target: true
                 with: {mode: "$params.mode", allow: "$params.allow"}
             catch:
               rework: {continue: batch}
@@ -3713,9 +3719,11 @@ body:
       while: "$data.recheck.next != 'done' and ($data.inputs.max_rounds == null or $visits.round == null or $visits.round < $data.inputs.max_rounds)"
       max: 10000
       do:
+        # 사람의 강제 이동 대상(docs 2.11): 이 회차를 목표 수립부터 다시 한다
         - id: round
           call: worker-round
           bind: round
+          force_target: true
           with: {mode: "$data.recheck.mode", verify: "$params.verify"}
         - cond:
             - if: "$data.round.release == true"

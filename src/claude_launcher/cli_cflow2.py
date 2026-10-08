@@ -387,6 +387,38 @@ def _cmd_abort(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_archive(args: argparse.Namespace) -> int:
+    from .cflow2 import runtime
+
+    out = runtime.archive(cwd=os.getcwd(), scope=args.scope)
+    print(f"archived {out['workflow']} [{out['run']}] -> {out['archived']}")
+    return 0
+
+
+def _cmd_move(args: argparse.Namespace) -> int:
+    from .cflow2 import runtime
+
+    _refuse_own_session(args.scope, "move")
+    payload = runtime.force_move(args.node, args.reason, cwd=os.getcwd(), scope=args.scope)
+    moved = payload.get("forced") or {}
+    print(f"moved to {moved.get('label') or moved.get('node')} (from {moved.get('at')}; "
+          f"cancelled: {', '.join(moved.get('left') or []) or 'nothing open'})")
+    _print_status(payload, False)
+    return 0
+
+
+def _cmd_report(args: argparse.Namespace) -> int:
+    from .cflow2 import runtime
+
+    _refuse_own_session(args.scope, "report")
+    value = json.loads(args.value) if args.value else None
+    text = "forced by a person" + (f": {args.reason}" if args.reason else "")
+    payload = runtime.report(args.node, args.outcome, value, text, cwd=os.getcwd(),
+                             scope=args.scope, by=runtime.CALLER_USER)
+    _print_status(payload, False)
+    return 0
+
+
 def _cmd_recur(args: argparse.Namespace) -> int:
     from .cflow2 import runtime
 
@@ -683,6 +715,24 @@ def register(sub) -> None:
     q = scoped(csub.add_parser("abort", help="abort the v2 run here"))
     q.add_argument("--reason", required=True)
     q.set_defaults(func=_guarded(_cmd_abort))
+
+    q = scoped(csub.add_parser("archive", help="move the finished v2 run here into the "
+                               "archive (the slot becomes idle)"))
+    q.set_defaults(func=_guarded(_cmd_archive))
+
+    q = scoped(csub.add_parser("move", help="a person's forced move to a node the "
+                               "definition marks force_target: true"))
+    q.add_argument("node", help="the target's node id or label")
+    q.add_argument("--reason")
+    q.set_defaults(func=_guarded(_cmd_move))
+
+    q = scoped(csub.add_parser("report", help="a person forces an active task's outcome "
+                               "(checked against its returns, journaled by: user)"))
+    q.add_argument("node", help="task instance id or label")
+    q.add_argument("outcome")
+    q.add_argument("--value", help="the outcome's fields as JSON")
+    q.add_argument("--reason")
+    q.set_defaults(func=_guarded(_cmd_report))
 
     q = scoped(csub.add_parser("recur", help="a recurring run's next-round request: show it, "
                                "or --cancel it (stops the loop after the finished round)"))

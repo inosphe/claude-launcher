@@ -480,6 +480,76 @@ def subtree_is_flat(chart: Chart, node_id: str) -> bool:
     return True
 
 
+#: The node key that opts a node in as the target of a person's forced move
+#: (docs/cflow-v2.md 2.11): ``force_target: true`` on a task or a combinator.
+FORCE_TARGET = "force_target"
+
+
+def force_slot(chart: Chart, parent_id: str, child_id: str) -> Tuple[Optional[Dict[str, Any]], str]:
+    """Where ``child_id`` sits under ``parent_id``, as a forced move would seat
+    it: ``(slot, "")`` with the role the child plays and the parent's frame
+    field that points at it, or ``(None, why)`` when a move cannot rebuild
+    that position (a par branch or group member has siblings whose state the
+    move cannot invent; a foreach body needs an item; a catch, finally,
+    between or ``on`` handler needs the outcome that led there)."""
+    parent = chart.node(parent_id)
+    t = parent.type
+    if child_id in (parent.on or {}).values():
+        return None, f"{child_id} is an 'on' handler of {parent_id}"
+    if t == T_SEQ:
+        return {"role": "seq", "idx": list(parent.get("children") or []).index(child_id)}, ""
+    if t == T_COND:
+        for i, br in enumerate(parent.get("branches") or []):
+            if br.get("child") == child_id:
+                return {"role": "branch", "branch": i}, ""
+    elif t == T_CHOOSE:
+        for opt in parent.get("options") or []:
+            if opt.get("child") == child_id:
+                return {"role": "option", "option": opt.get("name")}, ""
+    elif t == T_LOOP:
+        if parent.get("child") != child_id:
+            return None, f"{child_id} is the 'between' of loop {parent_id}"
+        if parent.get("mode") == LOOP_FOREACH:
+            return None, f"{child_id} is the body of foreach {parent_id}, which needs an item"
+        return {"role": "body"}, ""
+    elif t in (T_TRY, T_TIMEOUT):
+        if parent.get("child") == child_id:
+            return {"role": "body"}, ""
+        return None, f"{child_id} is a catch/finally/else of {t} {parent_id}"
+    elif t == T_SCOPE:
+        return {"role": "body"}, ""
+    elif t in (T_PAR, T_GROUP):
+        return None, f"{child_id} is under {t} {parent_id}, whose siblings a move cannot rebuild"
+    return None, f"{child_id} cannot be seated under {t} {parent_id}"
+
+
+def force_path(chart: Chart, node_id: str) -> Tuple[List[Tuple[str, Optional[Dict[str, Any]]]], List[str]]:
+    """The root-to-``node_id`` chain a forced move rebuilds: ``[(node id,
+    slot under its parent)]`` (the root's slot is ``None``), and the reasons
+    the chain cannot be rebuilt (empty: it can). A node inside a delegated
+    subtree is refused too -- that subtree runs elsewhere as a whole."""
+    chain: List[str] = []
+    cur: Optional[str] = node_id
+    while cur is not None:
+        chain.append(cur)
+        cur = chart.node(cur).parent
+    chain.reverse()
+    out: List[Tuple[str, Optional[Dict[str, Any]]]] = [(chain[0], None)]
+    problems: List[str] = []
+    if len(chain) == 1:
+        problems.append(f"{node_id} is the root; a move needs a node under it")
+    for parent_id, child_id in zip(chain, chain[1:]):
+        parent = chart.node(parent_id)
+        if parent.executor and parent.executor != [EXEC_INLINE]:
+            problems.append(f"{child_id} is inside {parent_id}, delegated to "
+                            f"{'/'.join(parent.executor)}")
+        slot, why = force_slot(chart, parent_id, child_id)
+        if why:
+            problems.append(why)
+        out.append((child_id, slot))
+    return out, problems
+
+
 def text_id(*parts: str) -> str:
     """Content-only id of a task's text: the template, never rendered values."""
     digest = hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()
@@ -527,6 +597,11 @@ def validate(chart: Chart) -> None:
                 raise IRError(f"{chart.name}: {node.type} {nid!r} has unknown settle {settle!r}")
         if node.type == T_CONTROL and node.get("op") not in CONTROL_OPS:
             raise IRError(f"{chart.name}: control {nid!r} has unknown op {node.get('op')!r}")
+        if node.get(FORCE_TARGET):
+            _, problems = force_path(chart, nid)
+            if problems:
+                raise IRError(f"{chart.name}: {FORCE_TARGET} {node.label or nid!r} cannot be "
+                              f"a forced move's target: " + "; ".join(problems))
     reached = {n.id for n in chart.walk()}
     stray = sorted(set(chart.nodes) - reached)
     if stray:
