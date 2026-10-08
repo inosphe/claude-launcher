@@ -241,8 +241,9 @@ def recall(name: str, digest: str, *, manager, mesh_mgr) -> dict:
         "note": (
             f"id {digest} does not name anything this session holds now. If "
             "it was a stance, the mesh has replaced its role vocabulary since "
-            "you were given it -- do not go on acting from what you remember "
-            "of it. Call 'rebrief' with no id for the current state."
+            "you were given it; if it was a prompt pack, the copy it follows "
+            "was edited or removed -- do not go on acting from what you "
+            "remember of it. Call 'rebrief' with no id for the current state."
         ),
     }
 
