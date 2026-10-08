@@ -1558,8 +1558,15 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   border: 1px solid #30363d; border-radius: 5px;
 }
 /* Keep the toggle inside the terminal header when the detail panel opens.
-   Header padding reserves its space in both full and compact layouts. */
-#term-details { position: absolute; top: 8px; right: 14px; z-index: 3; }
+   Header padding reserves its space in both full and compact layouts.
+   Centred on the header's height rather than pinned 8px from its top: the
+   flowing buttons are centred by the flex row (align-items: center), and the
+   row is taller than 8px + one button whenever any item in it is, so a fixed
+   offset left this one 3.8px above its neighbours at full width. */
+#term-details {
+  position: absolute; top: 50%; right: 14px; z-index: 3;
+  transform: translateY(-50%);
+}
 #term-details:hover { color: #c6cdd5; border-color: #3c444d; }
 #term-details[aria-pressed="true"] {
   background: #10203a; color: #58a6ff; border-color: #1f6feb;

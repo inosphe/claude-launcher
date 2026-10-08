@@ -48,6 +48,12 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
       for (const r of geometry.rects) assert(r.left >= 0 && r.right <= width, `${r.id} outside at ${width}`);
       const centers = geometry.rects.map(r => r.y);
       assert(Math.max(...centers) - Math.min(...centers) < 4, `wrapped at ${width}`);
+      // `details` floats outside the flex row (absolute), so the row's
+      // align-items does not centre it; it has to land on the same line by
+      // itself. Pinned 8px from the top it sat 3.8px above its neighbours.
+      const details = geometry.rects.find(r => r.id === "term-details");
+      for (const r of geometry.rects.filter(r => r.id && r.id !== "term-details" && /^term-(?!title)/.test(r.id)))
+        assert(Math.abs(r.y - details.y) <= 1, `details centred with ${r.id} at ${width}: ${details.y} vs ${r.y}`);
       const ordered = geometry.rects.filter(r => r.right > r.left).sort((a, b) => a.left - b.left);
       for (let i = 1; i < ordered.length; i++) assert(ordered[i].left >= ordered[i - 1].right - 1, `overlap at ${width}`);
     }
