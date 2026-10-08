@@ -4530,6 +4530,13 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .ws-row .wf-btn.on { border-color: #58a6ff; }
 /* Workspaces · row badges (claunch-gax44): branch, ahead/behind, changed. */
 .ws-row .badge { flex: none; }
+/* Registry rows can include git badges, worktrees and editor controls.
+   Keep the directory readable and let the controls use additional lines. */
+#workspaces-view .ws-row { flex-wrap: wrap; }
+#workspaces-view .ws-text { flex-basis: 100%; overflow-wrap: anywhere; }
+#workspaces-view .ws-row .wf-btn { white-space: nowrap; }
+#workspaces-view .ws-vscode { flex-wrap: wrap; max-width: 100%; }
+#workspaces-view .ws-vscode-pick { min-width: 0; max-width: 100%; }
 .ws-git-branch { max-width: 16em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .badge.ws-git-ab { background: #1c2b44; color: #58a6ff; }
 .badge.ws-git-ab.ws-git-behind { background: #3a2a10; color: #d29922; }
