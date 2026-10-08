@@ -256,3 +256,36 @@ def test_an_image_that_could_not_be_pasted_is_named_in_the_opening(
         assert "no clipboard tool" in pasted[0]
 
     _run(body, ["M-v"])
+
+
+def test_a_spawned_child_takes_opening_images_too(home, tmp_path, monkeypatch):
+    """The Spawn child mode of the same form posts to the children route,
+    which shares the onboarding half with create -- so the images are kept
+    with the child and a child of a harness without the key is refused."""
+
+    async def fake_put(path, media_type, **kw):
+        return None
+
+    async def fake_send(self, keys, **kw):
+        return b""
+
+    monkeypatch.setattr(api_mod.clipboard, "put_image", fake_put)
+    monkeypatch.setattr(session_mod.Session, "send_keys", fake_send)
+
+    async def body(client, mgr):
+        resp = await client.post("/api/sessions", headers=BEARER, json={
+            "name": "p1", "profile": "py", "cwd": str(tmp_path), "beads": False,
+        })
+        assert resp.status == 201, await resp.text()
+        image_id = (await (await _upload(client)).json())["id"]
+        resp = await client.post("/api/sessions/p1/children", headers=BEARER, json={
+            "name": "c1", "task": "look",
+            "beads": False, "opening_images": [image_id],
+        })
+        doc = await resp.json()
+        assert resp.status == 201, doc
+        kept = Path(doc["opening_images"][0])
+        assert kept.parent == opening_images.session_dir("c1")
+        assert kept.read_bytes() == PNG
+
+    _run(body, ["M-v"])
