@@ -8837,9 +8837,24 @@ function syncNewModelOptions(f, harnessName, capabilities, parent = null) {
   if (row) row.classList.toggle("hidden", !choices.length);
   if (f.effort) {
     const efforts = (capabilities.efforts || []).map(String);
-    f.effort.innerHTML = "";
-    f.effort.appendChild(new Option("(harness default)", ""));
-    for (const value of efforts) f.effort.appendChild(new Option(value, value));
+    // A child on its parent's harness starts on the parent's effort, so
+    // leaving the row alone inherits it (the body sends only a change).
+    const inheritedEffort = parent && harnessName === parent.harness
+      ? String(parent.effort || "") : "";
+    // Rebuilt only when what it offers moves, like the model row: the poll
+    // re-syncs this form every two seconds and must not undo a pick.
+    const effortKey = `${parent ? parent.name : "new"}:${inheritedEffort}:` +
+      `${harnessName}:` + efforts.join("\u0000");
+    if (f._effortFor !== effortKey) {
+      f.effort.innerHTML = "";
+      f.effort.appendChild(new Option("(harness default)", ""));
+      for (const value of efforts) f.effort.appendChild(new Option(value, value));
+      if (inheritedEffort && !efforts.includes(inheritedEffort)) {
+        f.effort.appendChild(new Option(inheritedEffort, inheritedEffort));
+      }
+      f.effort.value = inheritedEffort;
+      f._effortFor = effortKey;
+    }
     const effortRow = $("new-effort-row");
     if (effortRow) effortRow.classList.toggle("hidden", !efforts.length);
   }
@@ -11039,6 +11054,9 @@ function spawnUnlocked(report) {
     harness: may.includes("profile"),
     profile: may.includes("profile"),
     model: may.includes("model"),
+    // Gated with args on the daemon (spawn._GATED_FIELDS: allow_args), which
+    // reports it under its own name.
+    effort: may.includes("effort"),
     borrow: may.includes("borrow"),
     // Ungated by the policy — it takes a credential away rather than
     // granting one — but still claude-only machinery (see syncSpawnMode).
