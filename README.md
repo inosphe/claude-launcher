@@ -2457,6 +2457,16 @@ last moved, and the session stamped on its tip commit (the
 `Claunch-Session` trailer), linked to that session. The status answer
 carries them as `unmerged: [{branch, sha, date, subject, ahead, session}]`.
 
+The peers are a table, one row per peer clone of the same repository: its
+master tip (against the remote and with its unpushed count, as it last
+fetched) and how that tip stands against our master, measured from local
+git only: same, ahead or behind by N, diverged, or not in this clone yet
+(the peer's tip never reached the shared remote, or we have not fetched
+since). A peer that did not answer is a row marked unreadable. Peers are
+asked when the panel opens and on Refresh, one round trip each, never on
+page load. The status answer carries `distance: {state, theirs_only,
+ours_only}` on each peer row and the silent peers as `unreadable`.
+
 ### VS Code in the browser (one code-server per workspace and worktree)
 
 The daemon can run [code-server](https://github.com/coder/code-server) next to
