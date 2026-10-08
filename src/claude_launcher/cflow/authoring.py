@@ -450,8 +450,12 @@ work:
 - **`enqueue-landing`** — the daemon files this session's landing request on
   its PARENT's landing queue: the issues it holds `in_review` on the board,
   and the branch and tip its checkout has. It needs a parent whose workflow
-  declares `landing_queue:` (otherwise it is skipped, journalled with the
-  reason). Put it where the request has just been made, `at: leave` of the
+  declares `landing_queue:`. When the parent cannot merge -- no parent
+  session, no run it drives, or a run with no `landing_queue:` -- the request
+  goes to the run of the session's mesh `leader` that declares one in this
+  repository. With no such run or several, or a session in several meshes
+  (the reason then lists each mesh's leader), it is skipped, journalled with
+  the reason. Put it where the request has just been made, `at: leave` of the
   step that makes it, so a waiting loop does not file it again.
 
 `at` is `enter` (the default — the run arrived here) or `leave` (the run

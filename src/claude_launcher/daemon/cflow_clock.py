@@ -2028,8 +2028,9 @@ class TriggerClock:
     #: moves (the move to ``end`` measures it regardless).
     LANDING_REFRESH = 60.0
 
-    def __init__(self, manager, *, poll: float = 5.0) -> None:
+    def __init__(self, manager, mesh=None, *, poll: float = 5.0) -> None:
         self.manager = manager
+        self.mesh = mesh
         self.poll = poll
         self._task: Optional[asyncio.Task] = None
         self._landing_checked: Dict[Tuple[str, str, Optional[str]], float] = {}
@@ -2124,7 +2125,10 @@ class TriggerClock:
 
         The parent is the session that created this one; its run is found the
         way a goto request finds a target's (one directory, or none -- two
-        would be a guess).
+        would be a guess). The parent's name comes back even when its run is
+        not found, and the cwd is None then: a parent that drives no run
+        cannot merge, one whose run is ambiguous can -- the caller tells
+        them apart by the reason's owner.
         """
         try:
             parent = self.manager.get(scope).sdef.parent
@@ -2136,11 +2140,91 @@ class TriggerClock:
         if not hits:
             return None, None, f"parent {parent!r} drives no run"
         if len(hits) > 1:
-            return None, None, f"parent {parent!r} drives runs in {len(hits)} directories"
+            return None, parent, f"parent {parent!r} drives runs in {len(hits)} directories"
         return hits[0], parent, ""
+
+    def leader_run(self, cwd: str, scope: str) -> Tuple[Optional[str], Optional[str], str]:
+        """(cwd, scope) of the mesh leader run a parentless worker's landing
+        request goes to instead, or why there is none.
+
+        The leader is the ``leader``-role member of the worker's mesh; a mesh
+        has one, and only the worker's own mesh is looked in.
+        Its run must hold a ``landing_queue`` in a checkout of the worker's
+        own repository -- a mesh spans projects, and a leader's run in
+        another repository measures "landed" in a git that never saw this
+        tip. Not exactly one such run is a skip, never a guess.
+        """
+        if self.mesh is None:
+            return None, None, "no mesh to look for a leader in"
+        try:
+            memberships = self.mesh.meshes_for_session(scope)
+        except Exception:
+            return None, None, "the worker's mesh membership could not be read"
+        names = sorted({m["mesh"] for m in memberships})
+        if not names:
+            return None, None, "this session is in no mesh"
+        if len(names) > 1:
+            # Which mesh's leader lands this is a choice for the worker or
+            # its user; the reason lists the candidates so it can be made.
+            listed = []
+            for name in names:
+                try:
+                    roster = self.mesh.get(name).members.values()
+                except Exception:
+                    roster = []
+                heads = sorted(m.session for m in roster if "leader" in m.roles)
+                listed.append(f"{name}: {', '.join(heads) or 'no leader'}")
+            return None, None, (
+                f"member of several meshes; candidate leaders -- {'; '.join(listed)}"
+            )
+        try:
+            mesh = self.mesh.get(names[0])
+        except Exception:
+            return None, None, f"mesh {names[0]!r} could not be read"
+        leaders = [
+            m for _, m in sorted(mesh.members.items())
+            if "leader" in m.roles and m.session != scope
+        ]
+        if not leaders:
+            return None, None, f"mesh {names[0]!r} has no leader"
+        if len(leaders) > 1:
+            # A mesh has one leader; a roster saying otherwise is not ours to
+            # pick from.
+            return None, None, (
+                f"mesh {names[0]!r} lists {len(leaders)} leaders "
+                f"({', '.join(m.session for m in leaders)})"
+            )
+        leader = leaders[0].session
+        if not self.mesh._is_local(mesh, leaders[0]):
+            return None, None, f"leader {leader!r} is on another machine"
+        repo = cflow_landing.common_dir(cwd)
+        if repo is None:
+            return None, None, f"no git repository readable in {cwd}"
+        found: List[str] = []
+        for lcwd in sorted({c for c, s in cflow_state.known_runs() if s == leader}):
+            if cflow_landing.common_dir(lcwd) != repo:
+                continue
+            try:
+                if cflow_engine.landing_queue_run(cwd=lcwd, scope=leader) is not None:
+                    found.append(lcwd)
+            except Exception:
+                continue
+        if not found:
+            return None, None, (
+                f"leader {leader!r} has no run in this repository that declares a landing_queue"
+            )
+        if len(found) > 1:
+            return None, None, (
+                f"leader {leader!r} has {len(found)} runs in this repository that declare "
+                "a landing_queue; the target is ambiguous"
+            )
+        return found[0], leader, ""
 
     async def _enqueue_landing(self, cwd: str, scope: str) -> Tuple[bool, str]:
         """This worker's landing request, onto its parent's landing queue.
+        When the parent cannot merge -- no parent session, no run it drives,
+        or a run with no landing queue -- onto the mesh leader's
+        (:meth:`leader_run`).
 
         Read, not reported: the tip and branch from the worker's own
         checkout (the frozen tip its request names), the issues from the
@@ -2154,8 +2238,25 @@ class TriggerClock:
         bridged = await self._enqueue_landing_v2(cwd, scope)
         if bridged is not None:
             return bridged
-        if pcwd is None:
+        if pcwd is None and parent is not None:
+            # The parent can merge; which of its runs takes the request is
+            # what is unknown, and the leader is not the answer to that.
             return False, why
+        has_queue = False
+        if pcwd is not None:
+            try:
+                has_queue = await asyncio.to_thread(
+                    cflow_engine.landing_queue_run, cwd=pcwd, scope=parent
+                ) is not None
+            except Exception:
+                has_queue = True  # the enqueue below reports the real error
+        if not has_queue:
+            lcwd, leader, lwhy = await asyncio.to_thread(self.leader_run, cwd, scope)
+            if lcwd is None:
+                return False, (
+                    why or f"parent {parent!r}: declares no 'landing_queue'"
+                ) + f"; mesh leader fallback: {lwhy}"
+            pcwd, parent = lcwd, leader
         tip = await asyncio.to_thread(cflow_landing.head, cwd)
         if not tip:
             return False, f"no commit readable in {cwd}"
