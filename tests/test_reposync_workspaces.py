@@ -875,3 +875,50 @@ def test_history_gives_up_the_line_when_the_lock_is_held(tmp_path, monkeypatch):
     assert not (tmp_path / "reposync-history.jsonl").exists()
     reposync_flow.record_history({"kind": "pull", "repo_id": "r"})
     assert (tmp_path / "reposync-history.jsonl").read_text(encoding="utf-8").count("\n") == 1
+
+
+def test_history_entry_is_built_off_the_event_loop(world, monkeypatch):
+    """claunch-iaihd.2: history_entry runs git (repo_identity); the Sync
+    panel's handlers build it inside the thread they hand to to_thread, so
+    no git call blocks the daemon's event loop."""
+    import threading
+
+    from claude_launcher import reposync_flow
+
+    a, b = world["a"], world["b"]
+    real = reposync_flow.history_entry
+    threads = []
+
+    def spy(*args, **kw):
+        threads.append(threading.get_ident())
+        return real(*args, **kw)
+
+    monkeypatch.setattr(reposync_flow, "history_entry", spy)
+    _git(b, "pull", "-q", "origin", "master")
+    _commit(b, "theirs.txt")
+    _git(b, "push", "-q", "origin", "master")
+    _git(a, "branch", "s1-work")
+    workspaces.add(str(b), "proj-b")
+    loop_threads = []
+
+    async def body(client):
+        loop_threads.append(threading.get_ident())
+        # a fast-forward: no card
+        plan = await _status_plan(client)
+        resp = await client.post("/api/reposync/workspaces/proj/sync", json=_shown(plan),
+                                 headers=AUTH)
+        assert resp.status == 200, await resp.text()
+        rid = (await (await client.post("/api/reposync/workspaces/proj/branch-push",
+                                        json={"branch": "s1-work"}, headers=AUTH)).json())["request"]
+        await client.post(f"/api/reposync/requests/{rid}/approve", headers=AUTH)
+        resp = await client.post("/api/reposync/workspaces/proj/branch-push",
+                                 json={"branch": "s1-work", "request": rid}, headers=AUTH)
+        assert resp.status == 200, await resp.text()
+        resp = await client.post("/api/reposync/workspaces/proj-b/branch-pull",
+                                 json={"machine": "pc-a", "branch": "s1-work"}, headers=AUTH)
+        assert resp.status == 200, await resp.text()
+        assert [r["kind"] for r in await _history(client)] == ["publish", "master"]
+
+    _with_app(body)
+    assert len(threads) == 3, threads
+    assert loop_threads[0] not in threads
