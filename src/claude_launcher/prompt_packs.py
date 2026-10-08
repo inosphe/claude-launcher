@@ -229,6 +229,25 @@ def install(workspace: Path, pack_id: str, *, force: bool = False) -> str:
     return before
 
 
+def install_all(workspace: Path) -> List[dict]:
+    """Install missing/stale shipped packs, preserving edits and local files.
+
+    Each result records a failure independently so callers can show partial
+    success and retry without replacing a workspace's custom text.
+    """
+    results = []
+    for pack in catalog():
+        try:
+            before = status(workspace, pack)
+            if before in (MISSING, STALE):
+                install(workspace, pack.id)
+            results.append({"id": pack.id, "was": before,
+                            "changed": before in (MISSING, STALE)})
+        except (PackError, OSError) as exc:
+            results.append({"id": pack.id, "error": str(exc), "changed": False})
+    return results
+
+
 def remove(workspace: Path, pack_id: str, *, force: bool = False) -> str:
     """Delete ``workspace``'s copy of a pack; returns the status it had.
 
