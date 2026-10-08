@@ -2509,7 +2509,11 @@ the MCP tool `repo_sync` each append a line when an operation runs, failures
 included with git's refusal, to `reposync-history.jsonl` in the daemon
 directory; a refused or expired card ran nothing and is not there (the
 approval cards themselves are kept in memory only). Lines are matched per
-repository, so every worktree of one shows the same history. The status
+repository, so every worktree of one shows the same history. Writers take
+`reposync-history.jsonl.lock` around the append and the trim to the newest
+1000 lines, so a line another process adds while the file is trimmed is
+kept; a writer that waits 5s for the lock drops its line, and the operation
+itself is unaffected. The status
 answer carries them as `history: [{at, kind, workspace, remote, branch, ref,
 action, before, after, pushed, by, approval, ok, error}]`.
 

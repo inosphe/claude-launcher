@@ -823,3 +823,55 @@ def test_history_is_shared_by_the_worktrees_and_trimmed(world, tmp_path, monkeyp
         reposync_flow.record_history({**entry, "ok": True, "n": n})
     rows = reposync_flow.read_history(str(a))
     assert [r.get("n") for r in rows] == [9, 8, 7]
+
+
+_HISTORY_WRITER = r"""
+import sys
+from claude_launcher import reposync_flow
+path, tag, count = sys.argv[1], sys.argv[2], int(sys.argv[3])
+reposync_flow.history_path = lambda: path
+# a one-byte bound trims on every write; KEEP holds every line both writers add
+reposync_flow.HISTORY_TRIM_BYTES = 1
+reposync_flow.HISTORY_KEEP = 100000
+for n in range(count):
+    reposync_flow.record_history({"kind": "pull", "repo_id": "r", "w": tag, "n": n})
+"""
+
+
+def test_history_keeps_every_line_two_processes_append_while_trimming(tmp_path):
+    """claunch-iaihd.1: the daemon, the CLI and the MCP tool are separate
+    processes on one history file, and a trim rewrites the file -- a line
+    another process appended between the trim's read and its write was lost.
+    Two processes that trim on every write must leave every line behind."""
+    import json
+    import sys
+
+    path = str(tmp_path / "reposync-history.jsonl")
+    count = 150
+    procs = [subprocess.Popen([sys.executable, "-c", _HISTORY_WRITER, path, tag, str(count)])
+             for tag in ("a", "b")]
+    for proc in procs:
+        assert proc.wait(timeout=120) == 0
+    with open(path, encoding="utf-8") as fh:
+        rows = [json.loads(line) for line in fh.read().splitlines()]
+    for tag in ("a", "b"):
+        assert [r["n"] for r in rows if r["w"] == tag] == list(range(count)), tag
+
+
+def test_history_gives_up_the_line_when_the_lock_is_held(tmp_path, monkeypatch):
+    """A writer that cannot get the lock loses its line; the operation the line
+    describes does not fail and does not hang."""
+    from claude_launcher import reposync_flow
+
+    path = str(tmp_path / "reposync-history.jsonl")
+    monkeypatch.setattr(reposync_flow, "history_path", lambda: path)
+    monkeypatch.setattr(reposync_flow, "HISTORY_LOCK_TIMEOUT", 0.1)
+    with reposync_flow._history_lock(path):
+        started = time.monotonic()
+        # another handle on the lock file: the same process still waits (Windows
+        # byte-range locks and flock are both per open file, not per process)
+        reposync_flow.record_history({"kind": "pull", "repo_id": "r"})
+        assert time.monotonic() - started < 5
+    assert not (tmp_path / "reposync-history.jsonl").exists()
+    reposync_flow.record_history({"kind": "pull", "repo_id": "r"})
+    assert (tmp_path / "reposync-history.jsonl").read_text(encoding="utf-8").count("\n") == 1
