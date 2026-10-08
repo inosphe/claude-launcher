@@ -399,6 +399,11 @@ DAEMON_DEFAULTS = {
     # combined Session reminder.
     "role_reminder": True,
     "role_reminder_interval": 600.0,
+    # The prompt pack source: a session's packs named by text id only, and a
+    # notice when the copy a pack follows changes or disappears
+    # (session_reminder.scan_packs). The record refresh runs even when off.
+    "prompt_pack_reminder": True,
+    "prompt_pack_reminder_interval": 600.0,
     "score_goal_default": False,
     # The run event clock's machine switch: whether an overseer session (the
     # driver's spawn parent, else its mesh leader) is told when a run it

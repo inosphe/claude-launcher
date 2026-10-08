@@ -2790,7 +2790,8 @@ as the first chip of the Prompt packs row (badged "daemon", its **view** shows
 the text), ticked; untick it to leave it out of
 one session (`daemon_prompt: false` in the body, `--no-daemon-prompt` on
 `claunch new-session`/`spawn`, `no_daemon_prompt` on the MCP `spawn` tool). A
-change reaches sessions created after it, not running ones.
+change reaches new sessions in their opening and running ones that took it as
+a new text id in the session reminder (emptying it releases it from them).
 
 Agents see and change it through the session MCP tool `daemon_prompt`
 (`op: get`, or `op: set` with the whole new `text`; empty turns it off). Every
@@ -4336,7 +4337,25 @@ or suspended session is held until it is working again. Defaults:
 `claunch daemon config cflow_reminder true|false` /
 `cflow_reminder_interval 600` — these two keys are read live, no restart —
 with a per-run override on the run's web page (or the POST above). Role uses
-`role_reminder true|false` / `role_reminder_interval 600`. On a role-bearing
+`role_reminder true|false` / `role_reminder_interval 600`.
+
+A session given prompt packs has a third source with its own key and timer:
+`prompt_pack_reminder true|false` / `prompt_pack_reminder_interval 600`. Its
+`## Prompt packs` section names each pack by text id only (the text went into
+the opening beside that id; `rebrief` with the id serves it again), so it also
+reaches a session with no role and no run, and the `## Context` line names
+only the task. The daemon also keeps each running session's packs in step
+with the copy they follow: a workspace copy follows the workspace's
+`.claunch/prompts/<id>.md` only; claunch's copy follows claunch's file and the
+workspace, and once the workspace installs its own it follows that alone; the
+daemon prompt follows the daemon prompt. An edited copy replaces the
+session's record and is due at once with a `changed:` line giving the new id
+(the old id then answers `stale_id`); a copy that is gone (no fallback to
+claunch's) releases the pack from the session with a `removed:` line. The
+record is kept in step even with the reminder switched off; switching it off
+also leaves no reminder naming the pack ids, since the Context line no longer
+does. A workspace that cannot be confirmed (unregistered, or its lookup
+fails) releases nothing. On a role-bearing
 session, the terminal header's pause/resume control gates both repeating
 sources at their shared delivery boundary, and **⏭** re-arms both active
 source timers for one interval. Cflow signals and stall pings remain active.
@@ -4363,7 +4382,8 @@ true|false` (read at restore, so an edit applies to the next restart).
 Daemon settings live under `daemon:` in `~/.claunch.yaml`
 (`host`, `port`, `idle_threshold`, `scrollback_lines`, `restore`,
 `cflow_reminder`, `cflow_reminder_interval`, `role_reminder`,
-`role_reminder_interval`, `resume_nudge`); runtime
+`role_reminder_interval`, `prompt_pack_reminder`,
+`prompt_pack_reminder_interval`, `resume_nudge`); runtime
 state (pid/port file, auth token, session logs) stays machine-local under
 `~/.claude-launcher/daemon/`.
 
