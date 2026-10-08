@@ -3006,7 +3006,10 @@ def select(node: Optional[str], option: str, reason: Optional[str] = None, *,
             raise FlowError(f"option {option!r} guard could not be evaluated: {exc}")
         if not allowed:
             raise FlowError(f"option {option!r} is not available now (when: {opt.get('guard')})")
-        if n.get("require_reason") and not (reason or "").strip():
+        # a person may always answer without a reason (docs 2.11); the
+        # requirement is the agent's
+        if (n.get("require_reason") and caller != CALLER_USER
+                and not (reason or "").strip()):
             raise FlowError(f"choice {n.label or n.id} requires a reason")
         frame = r.inst[iid]["frame"]
         held = frame.get("held")
@@ -4984,8 +4987,12 @@ def _ask_decision(rec: Dict[str, Any], decision: Optional[str], *,
                     f"{', '.join(names)}{extra}")
 
 
-def _ask_need_reason(rec: Dict[str, Any], choice: str, reason: Optional[str]) -> None:
-    if rec.get("brief") is None or str(reason or "").strip() or choice == ASK_ABSTAIN:
+def _ask_need_reason(rec: Dict[str, Any], choice: str, reason: Optional[str], *,
+                     by_user: bool = False) -> None:
+    """An agent's or a responder's answer must carry the reason the ask asks
+    for; a person's never has to (docs 2.11)."""
+    if (by_user or rec.get("brief") is None or str(reason or "").strip()
+            or choice == ASK_ABSTAIN):
         return
     if choice == q_mod.REFRAME:
         raise FlowError(f"'{q_mod.REFRAME}' needs a reason: say what the options miss, so the "
@@ -5206,7 +5213,7 @@ def approve(node: Optional[str] = None, *, decision: Optional[str] = None,
             raise FlowError(f"{rec['id']} is a decision: name an option "
                             f"({', '.join(o['name'] for o in _ask_choices(rec))})")
         choice = _ask_decision(rec, choice)
-        _ask_need_reason(rec, choice, reason)
+        _ask_need_reason(rec, choice, reason, by_user=caller == CALLER_USER)
         answered.update({
             "ask": rec["id"], "instance": iid, "node": rec["node"], "label": rec.get("label"),
             "decision": choice, "workflow": r.state.get("workflow"),

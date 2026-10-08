@@ -35,12 +35,13 @@ function sliceConst(name) {
 const fns = new Function(
   [sliceConst("CFLOW2_ICONS"), slice("cflowVersionTag"), slice("cflowPickValue"),
    slice("cflowPickBody"), slice("cflowPickEntry"), slice("cflow2NodeText"),
-   slice("cflow2TreeRows"), slice("wfOptionLabel"), slice("spawnWorkflowEntry"),
+   slice("cflow2NodeBits"), slice("cflow2TreeRows"), slice("cflow2TreeOpen"),
+   slice("cflow2Reports"), slice("wfOptionLabel"), slice("spawnWorkflowEntry"),
    slice("spawnWorkflowAdmits"), slice("spawnRankWorkflows"),
    slice("cflow2RunActions"), slice("cflow2ForceOutcomes")].join("\n") +
   "\nreturn { cflowVersionTag, cflowPickValue, cflowPickBody, cflowPickEntry," +
   " cflow2TreeRows, wfOptionLabel, spawnRankWorkflows, cflow2RunActions," +
-  " cflow2ForceOutcomes };"
+  " cflow2ForceOutcomes, cflow2TreeOpen, cflow2NodeBits, cflow2Reports };"
 )();
 
 let failures = 0;
@@ -150,6 +151,39 @@ check("a force_target node is flagged on its row",
         t: { id: "t", type: "task", label: "t", force_target: true },
         u: { id: "u", type: "task", label: "u" } } }, null).map((r) => [r.id, r.force]),
       [["r", false], ["t", true], ["u", false]]);
+
+check("rows carry their parent and child count",
+      rows.map((r) => [r.id, r.parent, r.kids]),
+      [["n0", null, 2], ["n1", "n0", 2], ["n3", "n1", 0], ["n4", "n1", 0],
+       ["n2", "n0", 1], ["n5", "n2", 0]]);
+check("a node in parts: a task's label and title, a loop's mode and guard",
+      [fns.cflow2NodeBits(CHART.nodes.n3), fns.cflow2NodeBits(CHART.nodes.n2),
+       fns.cflow2NodeBits(CHART.nodes.n5).executor],
+      [{ head: "a", sub: "Step A", executor: "" },
+       { head: "", sub: "while ≤ 2 · true", executor: "" }, "subagent/inline"]);
+
+/* ---- which rows are open ---- */
+check("the root and the live path are open, the rest folded",
+      [...fns.cflow2TreeOpen(rows, null, {})].sort(), ["n0"]);
+const liveRows = fns.cflow2TreeRows(CHART, { instances: [{ instance: "x", node: "n5", await: "task" }] });
+check("a live node opens its ancestors",
+      [...fns.cflow2TreeOpen(liveRows, null, {})].sort(), ["n0", "n2"]);
+check("the selected node's ancestors open too",
+      [...fns.cflow2TreeOpen(rows, "n4", {})].sort(), ["n0", "n1"]);
+check("a person's toggles win both ways",
+      [...fns.cflow2TreeOpen(liveRows, null, { n2: false, n1: true })].sort(), ["n0", "n1"]);
+
+/* ---- the agent's reports ---- */
+check("reported events, newest first, with the task's own name",
+      fns.cflow2Reports([
+        { ts: "2026-10-08T10:00:00+00:00", event: "reported", node: "round/item/work",
+          outcome: "ok", text: "did it", value: { files: [] } },
+        { ts: "2026-10-08T10:01:00+00:00", event: "entered", node: "x" },
+        { ts: "2026-10-08T10:02:00+00:00", event: "reported", node: "commit", outcome: "fail",
+          by: "user" },
+      ]).map((r) => [r.label, r.outcome, r.by, r.ts, r.text]),
+      [["commit", "fail", "user", "2026-10-08 10:02:00", ""],
+       ["work", "ok", "", "2026-10-08 10:00:00", "did it"]]);
 
 /* ---- the run page's presses (the v1 bar's counterparts) ---- */
 check("a live run offers nudge and abort",
