@@ -127,6 +127,23 @@ const server = http.createServer((req, res) => {
     assert.equal(await b.textContent("#chat-fab-badge"), "1");
     assert.match(await b.textContent(".chat-toast"), /Alice[\s\S]*hello from A/);
     if (process.env.CHAT_SHOT_T) await b.screenshot({ path: process.env.CHAT_SHOT_T });
+    // The toasts stay clear of the dock wherever the dock stands: its own
+    // corner, and above a session page's input bar (#term-input shown), on a
+    // desktop and on a phone.
+    const toastClear = () => b.evaluate(() => {
+      const d = document.getElementById("fab-dock").getBoundingClientRect();
+      const t = document.querySelector(".chat-toasts").getBoundingClientRect();
+      return t.bottom <= d.top;
+    });
+    for (const size of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+      await b.setViewportSize(size);
+      for (const bar of [false, true]) {
+        await b.evaluate((bar) => document.getElementById("term-input").classList.toggle("hidden", !bar), bar);
+        assert.ok(await toastClear(), `toasts over the dock at ${size.width}px, input bar ${bar ? "shown" : "hidden"}`);
+      }
+    }
+    await b.evaluate(() => document.getElementById("term-input").classList.add("hidden"));
+    await b.setViewportSize({ width: 1440, height: 900 });
     await b.fill(".chat-toast-reply input", "hi Alice");
     await b.click(".chat-toast-reply button[type=submit]");
     await b.waitForSelector(".chat-toast", { state: "detached" });
