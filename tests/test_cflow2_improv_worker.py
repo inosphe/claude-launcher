@@ -41,7 +41,7 @@ ACCEPTED_WARNINGS = {("par-write-overlap", "round/item/work-group"),
 
 # Every v1 step id -> the v2 labels that carry it.
 V1_TO_V2 = {
-    "intake": ["intake", "prior-context", "intake-issue"],
+    "intake": ["intake", "prior-context", "prior-context-fallback", "intake-issue"],
     "issue-check": ["issue-check"],
     "issue-auto": ["issue-auto"],
     "issue-search": ["issue-search"],
@@ -744,3 +744,76 @@ def test_a_pending_start_issue_is_waited_for_then_recorded(tmp_path):
     assert "`start issue pending:` 줄은 무이슈 답이 아니다" in v1
     # v1 has no start input to write
     assert "flow_input" not in v1.split("start issue pending:")[1].split("다음을 정해")[0]
+
+
+def _find_id(tree, wanted):
+    if isinstance(tree, dict):
+        if tree.get("id") == wanted:
+            return tree
+        tree = list(tree.values())
+    if isinstance(tree, list):
+        for sub in tree:
+            got = _find_id(sub, wanted)
+            if got is not None:
+                return got
+    return None
+
+
+def _prior_flow(tmp_path):
+    """intake -> the prior-search block as it is in the definition ->
+    intake-issue, with the three nodes' prompts and returns (claunch-onbdf)."""
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    block = _find_id(doc["procedures"], "prior-search")
+    keep = ("title", "prompt", "returns", "executor", "effects")
+    nodes = {k: {kk: vv for kk, vv in doc["nodes"][k].items() if kk in keep}
+             for k in ("intake", "prior-context", "prior-context-fallback", "intake-issue")}
+    flow = {"cflow": 2, "name": "prior-flow", "include": doc["include"], "nodes": nodes,
+            "data": {"prior": doc["data"]["prior"]},
+            "body": ["intake", block, "intake-issue"]}
+    from claude_launcher.cflow2 import frontend
+    return frontend.compile_text(yaml.safe_dump(flow, allow_unicode=True, sort_keys=False),
+                                 resolve_include=layers.resolver(str(tmp_path)))
+
+
+SUBAGENT_CAPS = {"subagent.spawn": True, "mcp.claunch": True}
+INTAKE = {"goal": "g", "scope": "s", "branch_gist": "b", "evidence": "e"}
+
+
+@pytest.mark.parametrize("outcome", ["fail", "timeout"])
+def test_a_failed_prior_context_does_not_end_the_round(tmp_path, monkeypatch, outcome):
+    """claunch-onbdf: 8 of 9 trial runs lost their round when the read-only
+    search delegation failed (a readonly violation, a refused MCP call) and
+    went to settle without work, review or landing. The search is not a gate
+    (v1 does it inside intake): the driver searches itself and the round goes on."""
+    from claude_launcher.cflow2 import runtime
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    kw = {"cwd": str(tmp_path), "scope": "m", "now": 1.0}
+    st = runtime.start(_prior_flow(tmp_path), caps=SUBAGENT_CAPS, **kw)
+    iid = next(t["instance"] for t in st["tasks"] if t["label"] == "intake")
+    runtime.report(iid, "ok", INTAKE, **kw)
+    (did,) = runtime.RunStore(str(tmp_path), "m").load_state()["delegations"]
+    runtime.delegate_fail(did, "read-only delegation changed the working tree",
+                          outcome=outcome, **kw)
+    st = runtime.status(**kw)
+    task = next(t for t in st["tasks"] if t["label"] == "prior-context-fallback")
+    assert "read-only delegation changed the working tree" in task["prompt"]
+    found = {"query": "q", "summary": "위임 실패로 대체 검색: 없음", "related": [], "duplicate": None}
+    st = runtime.report(task["instance"], "ok", found, **kw)
+    assert [t["label"] for t in st["tasks"]] == ["intake-issue"]
+    assert "위임 실패로 대체 검색: 없음" in st["tasks"][0]["prompt"]
+    assert runtime.RunStore(str(tmp_path), "m").load_state()["data"]["prior"] == found
+
+
+def test_an_ok_prior_context_feeds_intake_issue(tmp_path, monkeypatch):
+    from claude_launcher.cflow2 import runtime
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    kw = {"cwd": str(tmp_path), "scope": "m", "now": 1.0}
+    st = runtime.start(_prior_flow(tmp_path), caps={}, **kw)
+    iid = next(t["instance"] for t in st["tasks"] if t["label"] == "intake")
+    st = runtime.report(iid, "ok", INTAKE, **kw)
+    iid = next(t["instance"] for t in st["tasks"] if t["label"] == "prior-context")
+    found = {"query": "q", "summary": "선행 맥락 없음(쿼리: q)", "related": [], "duplicate": "claunch-x"}
+    st = runtime.report(iid, "ok", found, **kw)
+    assert [t["label"] for t in st["tasks"]] == ["intake-issue"]
+    assert "선행 맥락 없음(쿼리: q)" in st["tasks"][0]["prompt"]
+    assert "claunch-x" in st["tasks"][0]["prompt"]
