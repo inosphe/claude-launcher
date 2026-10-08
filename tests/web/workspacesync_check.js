@@ -24,7 +24,11 @@
    remote's master does not hold is a row with its ahead count, its time and
    the session stamped on its tip, linked to that session's page; an
    unstamped one says so, and an empty list says every branch is on the
-   remote's master. */
+   remote's master.
+
+   And the peer table (claunch-gjjdp): one row per peer with its master tip
+   and how that tip stands against ours, worded per state; a peer that did
+   not answer is a row marked unreadable. */
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
@@ -116,7 +120,8 @@ vm.runInContext(
    constant("WS_SYNC_PATH"), constant("WS_SYNC_POLL_MS"), constant("WS_SHARED_STATE"),
    ...["wsSyncSt", "wsSyncRefresh", "wsSyncSend", "wsSyncWait", "wsSyncRun",
        "wsSyncBranch", "wsSyncPlanLine", "wsSyncPeers", "wsSyncResult",
-       "wsSyncPanel", "wsSyncPullBody", "wsSyncShared", "wsSyncUnmerged"].map(slice),
+       "wsSyncPanel", "wsSyncPullBody", "wsSyncShared", "wsSyncUnmerged",
+       "wsPeerDistanceText"].map(slice),
    "globalThis.__st = wsSyncSt;"].join("\n"),
   ctx);
 
@@ -326,6 +331,34 @@ async function tick() {
   nodes = walk(ctx.wsSyncPanel(W)).map((n) => n.text);
   assert.ok(nodes.includes("Waiting to land (0)"));
   assert.ok(nodes.includes("Every local branch is already on origin/master."));
+
+  /* ---- the peer table ---------------------------------------------------- */
+  st.doc = JSON.parse(JSON.stringify(DOC));
+  st.doc.peers[0].distance = { state: "ahead", theirs_only: 2, ours_only: 0 };
+  st.doc.unreadable = ["pc-old"];
+  nodes = walk(ctx.wsSyncPanel(W));
+  const table = nodes.find((n) => n.cls === "ws-sync-peers-table");
+  assert.ok(table, "peers are a table");
+  assert.deepEqual(table.children[0].children.map((n) => n.text),
+                   ["Machine", "Workspace", "Master tip", "Against ours"]);
+  const peerRow = table.children[1];
+  assert.deepEqual(peerRow.children.map((n) => n.text),
+                   ["pc-b", "proj · up", "master bbbbbbbb = remote · 3 unpushed", "2 ahead of ours"]);
+  assert.match(peerRow.children[3].cls, /ws-peer-ahead/);
+  const dead = table.children[2];
+  assert.match(dead.cls, /ws-sync-peer-unreadable/);
+  assert.deepEqual([dead.children[0].text, dead.children[3].text], ["pc-old", "did not answer"]);
+  const words = (d) => ctx.wsPeerDistanceText(d);
+  assert.equal(words({ state: "same", theirs_only: 0, ours_only: 0 }), "same as ours");
+  assert.equal(words({ state: "behind", theirs_only: 0, ours_only: 4 }), "4 behind ours");
+  assert.equal(words({ state: "diverged", theirs_only: 1, ours_only: 2 }), "diverged: +1 / −2");
+  assert.equal(words({ state: "unknown" }), "not in this clone yet");
+  assert.equal(words(undefined), "");
+  // nothing answered and nobody failed: the note, no table
+  st.doc = { ...DOC, peers: [], unreadable: [], problems: [] };
+  nodes = walk(ctx.wsSyncPanel(W));
+  assert.ok(!nodes.some((n) => n.cls === "ws-sync-peers-table"));
+  assert.ok(nodes.some((n) => (n.text || "").startsWith("No relay peer reports a clone")));
 
   console.log("workspacesync_check ok");
 })().catch((err) => { console.error(err); process.exit(1); });

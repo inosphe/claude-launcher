@@ -507,3 +507,55 @@ def test_status_lists_local_branches_the_remote_master_does_not_hold(world):
         assert rows["plain"]["date"]
 
     _with_app(body)
+
+
+# --- Peer comparison table (claunch-gjjdp) --------------------------------
+
+
+def test_status_measures_each_peer_master_against_ours(world):
+    a, b = world["a"], world["b"]
+    ours = _git(a, "rev-parse", "master")
+    theirs = _commit(b, "theirs.txt")
+    _git(b, "push", "-q", "origin", "master")      # reaches this clone with the status fetch
+    _git(a, "remote", "add", "gh", "https://git.example/Org/Proj.git")
+    shared = [{"name": "up", "key": "git.example/org/proj"}]
+
+    def peer(sha):
+        return [{"workspace": "proj", "remotes": shared,
+                 "branches": {"master": {"sha": sha, "tracking": []}}}]
+
+    peers = {
+        "pc-same": peer(ours),
+        "pc-ahead": peer(theirs),
+        "pc-far": peer("f" * 40),                  # never reached the shared remote
+        "pc-legacy": [{"workspace": "proj", "remotes": shared, "branches": {"master": ours}}],
+        "pc-old": RuntimeError("404"),
+    }
+
+    async def body(client):
+        resp = await client.get("/api/reposync/workspaces/proj/status?remote=origin", headers=AUTH)
+        assert resp.status == 200, await resp.text()
+        doc = await resp.json()
+        got = {r["machine"]: r["distance"] for r in doc["peers"]}
+        assert got["pc-same"] == {"state": "same", "theirs_only": 0, "ours_only": 0}
+        assert got["pc-ahead"] == {"state": "ahead", "theirs_only": 1, "ours_only": 0}
+        assert got["pc-far"]["state"] == "unknown"
+        assert got["pc-legacy"]["state"] == "same"
+        assert doc["unreadable"] == ["pc-old"]
+
+    _with_app(body, peers=peers)
+
+
+def test_peer_distance_behind_and_diverged(world):
+    from claude_launcher import reposync_flow
+
+    a = world["a"]
+    base = _git(a, "rev-parse", "HEAD")
+    mine = _commit(a, "mine.txt")
+    _git(a, "switch", "-q", "-c", "side", base)
+    side = _commit(a, "side.txt")
+    assert reposync_flow.peer_distance(str(a), mine, base) == {
+        "state": "behind", "theirs_only": 0, "ours_only": 1}
+    assert reposync_flow.peer_distance(str(a), mine, side) == {
+        "state": "diverged", "theirs_only": 1, "ours_only": 1}
+    assert reposync_flow.peer_distance(str(a), mine, None)["state"] == "unknown"

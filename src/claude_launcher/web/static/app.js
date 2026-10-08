@@ -26320,29 +26320,67 @@ function wsSyncPlanLine(plan) {
   return line;
 }
 
+/* How a peer's master stands against ours, as the status measured it from
+   local git (claunch-gjjdp). "unknown" means the peer's tip is not in this
+   clone: it never reached the shared remote, or we have not fetched since. */
+function wsPeerDistanceText(d) {
+  if (!d) return "";
+  if (d.state === "same") return "same as ours";
+  if (d.state === "ahead") return `${d.theirs_only} ahead of ours`;
+  if (d.state === "behind") return `${d.ours_only} behind ours`;
+  if (d.state === "diverged") return `diverged: +${d.theirs_only} / −${d.ours_only}`;
+  return "not in this clone yet";
+}
+
+/* The peers holding the same repository, one table row per (machine,
+   workspace): its master tip, that tip against the remote and its own
+   unpushed count as it last fetched, and the tip against our master. A peer
+   that did not answer is a row of its own. Peers are read when the panel
+   opens and on Refresh, never on page load: one round trip per peer. */
 function wsSyncPeers(doc) {
   const box = el("div", "ws-sync-peers");
   const rows = doc.peers || [];
+  const unreadable = doc.unreadable || [];
   box.appendChild(el("h4", null, `Peers sharing this address (${rows.length})`));
-  if (!rows.length) {
+  if (!rows.length && !unreadable.length) {
     box.appendChild(el("p", "wf-note",
       "No relay peer reports a clone of this remote. Sync does not need one."));
   }
-  const upstream = doc.plan && doc.plan.upstream;
-  for (const r of rows) {
-    const line = el("div", "ws-sync-peer");
-    line.appendChild(el("span", "ws-name", r.machine));
-    line.appendChild(el("span", "mono", `${r.workspace || "?"} · ${r.peer_remote}`));
-    const master = (r.branches || {}).master || (r.branches || {}).main;
-    if (master && master.sha) {
-      const track = (master.tracking || []).find((t) => t.key === r.key) || {};
-      let note = `master ${master.sha.slice(0, 8)}`;
-      if (upstream && master.sha === upstream) note += " = remote";
-      if (track.ahead) note += ` · ${track.ahead} unpushed`;
-      if (track.behind) note += ` · ${track.behind} behind (as last fetched)`;
-      line.appendChild(el("span", "wf-note", note));
+  if (rows.length || unreadable.length) {
+    const table = el("table", "ws-sync-peers-table");
+    const head = el("tr");
+    for (const h of ["Machine", "Workspace", "Master tip", "Against ours"]) head.appendChild(el("th", null, h));
+    table.appendChild(head);
+    const upstream = doc.plan && doc.plan.upstream;
+    const branch = (doc.plan && doc.plan.branch) || "master";
+    for (const r of rows) {
+      const tr = el("tr", "ws-sync-peer");
+      tr.appendChild(el("td", "ws-name", r.machine));
+      tr.appendChild(el("td", "mono", `${r.workspace || "?"} · ${r.peer_remote}`));
+      const b = (r.branches || {})[branch];
+      const tip = b && typeof b === "object" ? b : (b ? { sha: b, tracking: [] } : null);
+      let note = "";
+      if (tip && tip.sha) {
+        const track = (tip.tracking || []).find((t) => t.key === r.key) || {};
+        note = `${branch} ${tip.sha.slice(0, 8)}`;
+        if (upstream && tip.sha === upstream) note += " = remote";
+        if (track.ahead) note += ` · ${track.ahead} unpushed`;
+        if (track.behind) note += ` · ${track.behind} behind (as last fetched)`;
+      }
+      tr.appendChild(el("td", "mono", note || "no " + branch));
+      const d = r.distance;
+      tr.appendChild(el("td", "ws-peer-distance" + (d ? ` ws-peer-${d.state}` : ""), wsPeerDistanceText(d)));
+      table.appendChild(tr);
     }
-    box.appendChild(line);
+    for (const m of unreadable) {
+      const tr = el("tr", "ws-sync-peer ws-sync-peer-unreadable");
+      tr.appendChild(el("td", "ws-name", m));
+      tr.appendChild(el("td", "wf-note", "unreadable"));
+      tr.appendChild(el("td", "wf-note", ""));
+      tr.appendChild(el("td", "wf-note", "did not answer"));
+      table.appendChild(tr);
+    }
+    box.appendChild(table);
   }
   for (const p of doc.problems || []) box.appendChild(el("p", "wf-note", p));
   return box;

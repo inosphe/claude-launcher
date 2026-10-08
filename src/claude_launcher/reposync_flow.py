@@ -252,6 +252,36 @@ def unmerged_branches(repo: str, base: str, *, skip: Iterable[str] = ()) -> List
     return rows
 
 
+def peer_distance(repo: str, ours: str, theirs: Optional[str]) -> dict:
+    """How a peer's master tip stands against ours (claunch-gjjdp), from
+    local git only: ``same``; ``ahead`` / ``behind`` (the peer has commits we
+    lack / we have commits the peer lacks); ``diverged``; ``unknown`` when
+    the peer's tip is not in this clone yet (it never reached the shared
+    remote, or we have not fetched since) or the peer reported none.
+    ``theirs_only`` / ``ours_only`` count the commits on each side."""
+    doc: dict = {"state": "unknown", "theirs_only": None, "ours_only": None}
+    if not theirs or not ours:
+        return doc
+    if theirs == ours:
+        return {"state": "same", "theirs_only": 0, "ours_only": 0}
+    if not reposync._ok(repo, "cat-file", "-e", f"{theirs}^{{commit}}"):
+        return doc
+    counts = reposync.git(repo, "rev-list", "--left-right", "--count",
+                          f"{theirs}...{ours}", check=False).split()
+    if len(counts) != 2 or not all(c.isdigit() for c in counts):
+        return doc
+    t, o = int(counts[0]), int(counts[1])
+    state = "diverged" if t and o else "ahead" if t else "behind"
+    return {"state": state, "theirs_only": t, "ours_only": o}
+
+
+def _peer_tip(row: dict, branch: str) -> Optional[str]:
+    got = (row.get("branches") or {}).get(branch)
+    if isinstance(got, dict):
+        return got.get("sha") or None
+    return got or None     # an older peer reported the bare sha
+
+
 def workspace_status(path: str, workspace: Optional[str], peers: Dict[str, List[dict]],
                      problems: List[str], *, do_fetch: bool, remote: Optional[str] = None,
                      branch: Optional[str] = None, machine: Optional[str] = None) -> dict:
@@ -282,6 +312,8 @@ def workspace_status(path: str, workspace: Optional[str], peers: Dict[str, List[
         return out
     key = reposync.url_key(reposync.remotes(repo).get(name, ""))
     out["plan"] = plan_card(p, workspace=workspace, key=key)
+    for row in rows:
+        row["distance"] = peer_distance(repo, p.local, _peer_tip(row, p.branch))
     # after the plan: with do_fetch its fetch is what brought these refs in
     out["shared"] = shared_branches(repo, name, machine, {r["machine"] for r in rows})
     out["unmerged"] = unmerged_branches(repo, p.upstream or p.local, skip=[p.branch])
