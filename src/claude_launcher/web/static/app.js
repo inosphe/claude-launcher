@@ -10466,20 +10466,30 @@ function renderPromptPackRow() {
   const chosen = [...newPromptPacks(f), ...Object.keys(required).filter((id) => shippedIds.has(id))]
     .filter((id, i, a) => a.indexOf(id) === i);
   const primary = newPrimaryRole(f);
+  // A pill stays short -- a long one wraps the summary onto another line
+  // and moves what is under it (claunch-5gbqg): only claunch's copy is
+  // marked, and where the copy comes from is the pill's tooltip.
   const parts = chosen.map((id) => {
     const why = required[id] ? `role ${required[id].join(", ")}`
       : (newPackDefaults().includes(id) ? "default" : "ticked");
-    const copy = !shippedIds.has(id) ? `${wsName}'s copy`
-      : (offer && offer.workspace ? `claunch copy — not installed in ${wsName}`
-        : "claunch copy — no workspace here");
-    return `${id} (${why}, ${copy})`;
+    const packaged = shippedIds.has(id);
+    const title = !packaged ? `${wsName}'s copy, installed there`
+      : (offer && offer.workspace ? `claunch's copy: not installed in ${wsName}`
+        : "claunch's copy: no workspace here");
+    return { text: `${id} (${why}${packaged ? ", claunch's copy" : ""})`, title };
   });
-  if (newDaemonPromptWanted()) parts.unshift("daemon prompt (this daemon's, every session)");
+  if (newDaemonPromptWanted()) {
+    parts.unshift({ text: "daemon prompt (this daemon's, every session)", title: "" });
+  }
   const summary = el("div", "new-packs-summary");
   summary.appendChild(el("div", "new-packs-summary-head",
     parts.length ? "The opening will include" : "The opening will include no prompt pack"));
   const list = el("div", "new-packs-summary-list");
-  for (const part of parts) list.appendChild(el("span", "pack-chip-mini", part));
+  for (const part of parts) {
+    const pill = el("span", "pack-chip-mini", part.text);
+    if (part.title) pill.title = part.title;
+    list.appendChild(pill);
+  }
   summary.appendChild(list);
   if (primary.inferred && primary.role) {
     summary.appendChild(el("div", "wf-note new-packs-summary-note",
