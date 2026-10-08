@@ -93,23 +93,49 @@ def _cmd_status(args: argparse.Namespace) -> int:
                     )
     for problem in problems:
         lines.append(f"  ({problem})")
-    plan_doc = None
-    if not args.no_fetch:
-        try:
-            remote = reposync.choose_remote(
-                repo, args.remote, [r["key"] for r in rows] if rows else None
-            )
-            p = reposync.plan(repo, remote, args.branch)
-            plan_doc = p.to_dict()
-            lines.append(
-                f"  here {p.branch} {p.local[:8]}: +{p.ahead} -{p.behind} vs "
-                f"{p.remote}/{p.branch} -> {p.action}"
-            )
-        except reposync.SyncError as exc:
-            lines.append(f"  (no plan: {exc})")
-    return _out(args, {"repo": repo, "workspace": workspace, "machine": me,
-                       "remotes": local, "peers": rows, "problems": problems,
-                       "plan": plan_doc}, lines)
+    doc = {"repo": repo, "workspace": workspace, "machine": me,
+           "remotes": local, "peers": rows, "problems": problems,
+           "plan": None, "fetched": not args.no_fetch}
+    try:
+        remote = reposync.choose_remote(
+            repo, args.remote, [r["key"] for r in rows] if rows else None
+        )
+        p = reposync.plan(repo, remote, args.branch, do_fetch=not args.no_fetch)
+    except reposync.SyncError as exc:
+        lines.append(f"  (no plan: {exc})")
+        return _out(args, doc, lines)
+    doc["plan"] = p.to_dict()
+    lines.append(
+        f"  here {p.branch} {p.local[:8]}: +{p.ahead} -{p.behind} vs "
+        f"{p.remote}/{p.branch} -> {p.action}"
+        + ("" if not args.no_fetch else "  (as of the last fetch)")
+    )
+    doc.update(flow.plan_facts(repo, p, rows, me))
+    lines += _fact_lines(doc, p)
+    return _out(args, doc, lines)
+
+
+def _fact_lines(doc: dict, p: reposync.Plan) -> list:
+    """The text form of :func:`reposync_flow.plan_facts` (claunch-1cvq4)."""
+    lines = []
+    for row in doc["peers"]:
+        d = row.get("distance") or {}
+        if d.get("state") in (None, "unknown"):
+            how = "unknown here (its tip is not in this clone)"
+        elif d["state"] == "same":
+            how = "same as ours"
+        else:
+            how = f"{d['state']} (+{d['theirs_only']} theirs, +{d['ours_only']} ours)"
+        lines.append(f"  peer {row['machine']} {p.branch}: {how}")
+    lines.append(f"  shared branches on {p.remote} ({len(doc['shared'])}):")
+    for r in doc["shared"]:
+        mark = "" if r["peer"] else "  (not a relay peer)"
+        lines.append(f"    {r['ref']:<32} {r['sha'][:8]} {r['state']:<8} {r['subject']}{mark}")
+    lines.append(f"  local branches {p.remote}/{p.branch} does not hold ({len(doc['unmerged'])}):")
+    for r in doc["unmerged"]:
+        who = f" [{r['session']}]" if r["session"] else ""
+        lines.append(f"    {r['branch']:<32} +{r['ahead']}{who} {r['subject']}")
+    return lines
 
 
 # --------------------------------------------------------------------------- #
@@ -231,10 +257,16 @@ def register(sub) -> None:
             q.add_argument("--peer", action="append", default=None, metavar="MACHINE",
                            help="consult only this relay peer (repeatable; default: all)")
 
-    st = rsub.add_parser("status", help="remotes here, peers sharing them, and what a sync would do")
+    st = rsub.add_parser(
+        "status",
+        help="remotes here, peers sharing them and how their master stands against "
+             "ours, what a sync would do, other machines' shared branches, and "
+             "local branches the remote master does not hold",
+    )
     common(st, peers=True)
     st.add_argument("--branch", default=None, help="branch to plan (default master, then main)")
-    st.add_argument("--no-fetch", action="store_true", help="do not fetch or plan")
+    st.add_argument("--no-fetch", action="store_true",
+                    help="do not fetch: plan against the remote-tracking refs as they are")
     st.set_defaults(func=_guard(_cmd_status))
 
     ms = rsub.add_parser(

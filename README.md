@@ -2401,6 +2401,17 @@ it. Agents use the MCP tool `repo_sync` (`status` / `plan` / `sync` /
 `branch_push` / `branch_pull`); its push answers `waiting_approval` with a
 request id and is carried out by a second call once approved.
 
+`status` reports, beside the plan, the three things the Sync panel below
+shows: each peer's master tip against ours (`same`, `ahead`, `behind`,
+`diverged` with the commits on each side, or `unknown` when its tip is not in
+this clone), the branches other machines published on the planned remote as
+`<machine>/<branch>` with how the local branch of that name stands, and the
+local branches the remote's master does not hold yet, with the session that
+stamped each tip. In `--json` (and in the MCP answer) they are each peer's
+`distance`, `shared` and `unmerged`. The CLI fetches first unless
+`--no-fetch`; the MCP `status` does not fetch (its `plan` action does), so its
+answer is as of the last fetch.
+
 The same operations are on the web UI's **Workspaces** page (`#/workspaces`):
 each workspace row has a **Sync** button that opens a panel with its remotes,
 the relay peers whose clones share an address with it (their master tip

@@ -21,7 +21,9 @@ TOOLS = [
             "Keep a repository in step with its clones on other machines through "
             "the remote they share. Clones are matched by remote ADDRESS (host/"
             "owner/repo), never by remote or workspace name. Actions: 'status' "
-            "(remotes here, peers sharing them, what a sync would do), 'plan' "
+            "(remotes here, peers sharing them with each one's master against ours, "
+            "what a sync would do, other machines' shared branches, local branches "
+            "the remote master does not hold -- as of the last fetch), 'plan' "
             "(fetch and plan master, change nothing), 'sync' (master: fast-forward, "
             "or rebase --rebase-merges onto the remote when both sides moved, then "
             "push), 'branch_push' (push a work branch as <this machine>/<branch>), "
@@ -73,8 +75,22 @@ def _status(args: dict) -> dict:
     c = flow.client()
     me, _ = flow.relay_identity(c)
     rows, problems = flow.discover(repo, c, args.get("peer") or ())
-    return {"repo": repo, "workspace": workspace, "machine": me,
-            "remotes": reposync.remote_keys(repo), "peers": rows, "problems": problems}
+    doc = {"repo": repo, "workspace": workspace, "machine": me,
+           "remotes": reposync.remote_keys(repo), "peers": rows, "problems": problems}
+    # status does not fetch ('plan' does): the plan and the facts beside it
+    # stand on the remote-tracking refs as the last fetch left them
+    try:
+        remote = reposync.choose_remote(repo, args.get("remote"),
+                                        [r["key"] for r in rows] if rows else None)
+        p = reposync.plan(repo, remote, args.get("branch"), do_fetch=False)
+    except reposync.SyncError as exc:
+        doc["plan_error"] = str(exc)
+        return doc
+    key = reposync.url_key(reposync.remotes(repo).get(remote, ""))
+    doc["plan"] = flow.plan_card(p, workspace=workspace, key=key)
+    doc["fetched"] = False
+    doc.update(flow.plan_facts(repo, p, rows, me))
+    return doc
 
 
 def _plan(args: dict, c) -> tuple:
