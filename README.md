@@ -2769,7 +2769,7 @@ Two settings sit under the matrix, stored in `~/.claunch.yaml` under
   setup" seed that left it out does not untick it; take it off the list to
   stop. Installed or not makes no difference: a session gets the workspace's
   copy, or claunch's when the workspace has not installed it, and the form
-  says which. Until saved, `DEFAULT_PACKS` in `prompt_packs.py` (`common`);
+  says which. Until saved, `DEFAULT_PACKS` in `prompt_packs.py` (`asking-the-user`, `common`);
   which packs are defaults is this setting's value, not something a pack's
   header declares. Only the web form reads it: `--prompt-pack` on the CLI and
   `prompt_packs` on MCP `spawn` take exactly the packs named.

@@ -436,6 +436,7 @@ CHECKS = [
         "railquiet_check.js",
         "spawnform_check.js",
         "autocompact_check.js",
+        "sandboxpanel_check.js",
         "worktreepicker_check.js",
         "newflow_check.js",
         "cflow2inputs_check.js",
@@ -543,7 +544,8 @@ CHECKS = [
 # tests/ rather than tests/web, and `sessiontabs_browser.cjs` and
 # `toolbar_browser.cjs` sat in tests/web unlisted (claunch-6jerx).
 BROWSER_CHECKS = [
-        "flows_browser.cjs",
+    "glossary_browser.cjs",
+    "flows_browser.cjs",
         "diagramviewport_browser.cjs",
         "sessionform_browser.cjs",
         "scoregoal_browser.cjs",

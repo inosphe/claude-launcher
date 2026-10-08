@@ -9028,7 +9028,7 @@ function codexModeGroups(capabilities) {
   const groups = {
     bypass: declared("mode_conflict_args",
       ["--dangerously-bypass-approvals-and-sandbox"]),
-    skip: declared("skip_permissions_args", ["--approval-mode", "full-auto"]),
+    skip: declared("skip_permissions_args", ["-a", "never"]),
     sandboxOn: declared("full_access_off_args", ["--sandbox", "workspace-write"]),
     sandboxOff: declared("full_access_args", ["--sandbox", "danger-full-access"]),
   };
@@ -9079,6 +9079,15 @@ function codexRuntimeArgs(argv, capabilities, yolo, sandbox) {
   if (yolo) mode.push(...groups.skip);
   mode.push(...(sandbox ? groups.sandboxOn : groups.sandboxOff));
   return [...mode, ...out];
+}
+
+/* Whether a harness declares the sandbox pair the YOLO/Sandbox switches
+   write (Codex does). Declaration-driven like the groups above, so a
+   harness that one day declares the same pair gets the same panel. */
+function codexRuntimeDeclared(capabilities) {
+  capabilities = capabilities || {};
+  return !!((capabilities.full_access_args || []).length &&
+            (capabilities.full_access_off_args || []).length);
 }
 
 function codexRuntimeText(yolo, sandbox) {
@@ -13486,15 +13495,28 @@ function termInputNote(note, message, warn = false) {
 }
 
 async function sendKeyLine(field, btn, note) {
-  const raw = field.value;
-  const text = raw.trim();
-  if (!text || !currentName) return false;
+  const draftText = field.value;
+  let text = draftText.trim();
+  const target = currentName;
+  if (!text || !target || field.disabled) return false;
+  const epoch = (field.sendEpoch || 0) + 1;
+  field.sendEpoch = epoch;
+  field.sendPending = epoch;
+  const ownsInput = () => currentName === target && field.sendEpoch === epoch;
+  const ownsDraft = () => ownsInput() && field.value === draftText;
   note.classList.add("hidden");
   note.classList.remove("wf-warning");
   const wasField = field.disabled, wasBtn = btn.disabled;
   field.disabled = true;
   btn.disabled = true;
+  let preparingGlossary = false;
   try {
+    if (globalThis.GlossaryComposer) {
+      preparingGlossary = true;
+      text = await globalThis.GlossaryComposer.prepare(target, text);
+      preparingGlossary = false;
+    }
+    if (!ownsDraft()) return false;
     const inputId = `input-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     // This is an explicit operator action either way. The daemon uses the
     // short forced grace and submits an existing draft first, so a busy
@@ -13508,18 +13530,20 @@ async function sendKeyLine(field, btn, note) {
       ? { paste: text, enter: true, force: true, input_id: inputId, feedback }
       : { keys: [text, "Enter"], force: true, input_id: inputId, feedback };
     const resp = await api(
-      `/api/sessions/${encodeURIComponent(currentName)}/keys`,
+      `/api/sessions/${encodeURIComponent(target)}/keys`,
       { method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body) }
     );
     const doc = await resp.json().catch(() => ({}));
+    if (!ownsDraft()) return resp.ok;
     if (resp.ok && doc.queued) {
       // Nothing was typed: the session has ended, and the daemon holds the
       // line until it is resumed. Said on the spot, because the box empties
       // exactly as it does for a line that landed.
-      if (typeof clearSentLine === "function") clearSentLine(field, raw);
+      if (typeof clearSentLine === "function") clearSentLine(field, draftText);
       else { field.value = ""; autogrowTermInput(field); }
+      globalThis.GlossaryComposer?.reset();
       termInputNote(note,
         `queued (${doc.position || 1} waiting) — typed when this session ` +
         "is resumed; withdraw it from the session input journal");
@@ -13530,8 +13554,9 @@ async function sendKeyLine(field, btn, note) {
       return true;
     }
     if (resp.ok) {
-      if (typeof clearSentLine === "function") clearSentLine(field, raw);
+      if (typeof clearSentLine === "function") clearSentLine(field, draftText);
       else { field.value = ""; autogrowTermInput(field); }
+      globalThis.GlossaryComposer?.reset();
       if (doc.score_goal) {
         const session = sessionsCache.find((s) => s.name === currentName);
         if (session) {
@@ -13545,12 +13570,16 @@ async function sendKeyLine(field, btn, note) {
     }
     termInputNote(note, doc.error || "the session refused these keys", true);
     return false;
-  } catch {
-    termInputNote(note, "nothing was sent — the daemon is unreachable", true);
+  } catch (error) {
+    if (ownsDraft()) termInputNote(note, preparingGlossary ? error.message : "nothing was sent — the daemon is unreachable", true);
     return false;
   } finally {
-    field.disabled = wasField;
-    btn.disabled = wasBtn;
+    if (ownsInput()) {
+      field.sendPending = null;
+      field.disabled = wasField;
+      btn.disabled = wasBtn;
+      if (preparingGlossary) globalThis.GlossaryComposer?.refresh();
+    }
   }
 }
 
@@ -13660,12 +13689,24 @@ function scoreGoalSettingsCard() {
   return card;
 }
 
+function resetTermInputAttachment() {
+  globalThis.GlossaryComposer?.reset();
+  const field = $("term-input-field"), btn = $("term-input-send");
+  if (!field || !btn) return;
+  field.sendEpoch = (field.sendEpoch || 0) + 1;
+  field.sendPending = null;
+  field.disabled = false;
+  btn.disabled = false;
+}
+
 function refreshTermInput() {
   if (typeof renderScoreGoal === "function") renderScoreGoal();
   const field = $("term-input-field");
   const note = $("term-input-note");
   const btn = $("term-input-send");
   if (!field || !btn) return;
+  // State frames do not change ownership or unlock an in-flight send.
+  if (field.sendPending != null && field.sendPending === field.sendEpoch) return;
   const queueNote = termInputQueueNote(sessionEnded);
   field.disabled = false;
   btn.disabled = false;
@@ -14865,6 +14906,7 @@ function closeLink() {
 }
 
 function detach() {
+  if (typeof resetTermInputAttachment === "function") resetTermInputAttachment();
   closeHostClipboard();
   // A full tear-down supersedes whatever parked copy of this session exists —
   // the stale child the respawn-follow path leaves behind is exactly that.
@@ -16444,6 +16486,7 @@ function freshAttach(name) {
    lands back on the same terminal instead of on an empty slot. A session we
    have parked comes back by swap; anything else is a fresh attach. */
 function attach(name) {
+  if (typeof resetTermInputAttachment === "function") resetTermInputAttachment();
   stopWfPoll();
   stopMeshPoll();
   // The send-keys input belongs to the session it is attached to: switching
@@ -31148,6 +31191,7 @@ let sessJoinBox = null;   // and the mesh-join row, which holds a typed handle
 let sessMigrateBox = null; // and the migrate picker — same reason again
 let sessReborrowBox = null; // and the borrow picker — same reason again
 let sessPermsBox = null;    // and the permissions toggle — same reason again
+let sessSandboxBox = null;  // and the sandbox toggle — same reason again
 let sessCompactBox = null;  // and the auto-compact form — it holds a typed threshold
 let sessNoteBox = null;     // and the note editor — it holds a half-typed note
 let sessRunFold = null;   // reused across polls too: it holds open/shut
@@ -31171,6 +31215,7 @@ function dropDetail() {
   sessMigrateBox = null;
   sessReborrowBox = null;
   sessPermsBox = null;
+  sessSandboxBox = null;
   sessCompactBox = null;
   sessQuickJobBox = null;
   sessKidsBox = null;
@@ -31209,6 +31254,7 @@ function repointDetail(name) {
   sessMigrateBox = null;
   sessReborrowBox = null;
   sessPermsBox = null;
+  sessSandboxBox = null;
   sessCompactBox = null;
   sessQuickJobBox = null;
   sessKidsBox = null;
@@ -32039,6 +32085,7 @@ function renderSession(data) {
   if (show("settings")) {
     view.appendChild(sessReborrow(data));
     view.appendChild(sessPerms(data));
+    view.appendChild(sessSandbox(data));
     view.appendChild(sessCompact(data));
     view.appendChild(sessMigrate(data));
   }
@@ -32837,13 +32884,23 @@ function sessPerms(data) {
     return box;
   }
 
+  // A harness with a sandbox pair (Codex) runs YOLO and Sandbox as one mode:
+  // its packaged default already skips the asks, so the state is read with
+  // that default counted, and the toggle restarts through /runtime-mode with
+  // the sandbox sent as it reads now — the skip group appended on its own
+  // would drop the default and leave the sandbox to Codex's own choice.
+  const runtime = codexRuntimeDeclared(capabilities)
+    ? codexRuntimeState(s.args, capabilities) : null;
   // Rebuilt only when the toggle's state changes — same keep-the-node rule
-  // as the other restart pickers; a successful restart flips the key.
+  // as the other restart pickers; a successful restart flips the key. The
+  // sandbox is in it too: the click sends it, so a form kept across the
+  // Sandbox section's restart would send the old one.
   const currentArgs = s.args || [];
-  const skipping = currentArgs.some((_, i) =>
+  const skipping = runtime ? runtime.yolo : currentArgs.some((_, i) =>
     permissionArgs.every((arg, j) => currentArgs[i + j] === arg));
-  const flag = permissionArgs.join(" ");
-  const key = `${s.name}|${skipping ? 1 : 0}`;
+  const flag = runtime ? "YOLO" : permissionArgs.join(" ");
+  const key = `${s.name}|${skipping ? 1 : 0}` +
+    (runtime ? `|${runtime.sandbox ? 1 : 0}` : "");
   if (sessPermsBox && sessPermsBox.dataset.slot === key) {
     box.appendChild((typeof carried === "function" ? carried(sessPermsBox) : sessPermsBox));   // the live node, or its stand-in (carried)
     return box;
@@ -32886,11 +32943,15 @@ function sessPerms(data) {
     let resp;
     try {
       resp = await api(
-        `/api/sessions/${encodeURIComponent(name)}/skip-permissions`,
+        runtime
+          ? `/api/sessions/${encodeURIComponent(name)}/runtime-mode`
+          : `/api/sessions/${encodeURIComponent(name)}/skip-permissions`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ skip: !skipping }),
+          body: JSON.stringify(runtime
+            ? { yolo: !skipping, sandbox: runtime.sandbox }
+            : { skip: !skipping }),
         }
       );
       doc = await resp.json().catch(() => ({}));
@@ -32905,13 +32966,110 @@ function sessPerms(data) {
       return;
     }
     say(
-      (doc.args || []).some((_, i, args) =>
-        permissionArgs.every((arg, j) => args[i + j] === arg))
+      (runtime
+        ? codexRuntimeState(doc.args, capabilities).yolo
+        : (doc.args || []).some((_, i, args) =>
+          permissionArgs.every((arg, j) => args[i + j] === arg)))
         ? "restarted — now acting without asking"
         : "restarted — asking before it acts again"
     );
     // The restart relaunched a fresh PTY under the same name; a terminal
     // attached to the old one is watching a socket that just died.
+    if (currentName === name) {
+      detach();
+      await refreshSessions();
+      attach(name);
+    } else {
+      refreshSessions();
+    }
+  });
+
+  return box;
+}
+
+/* ---- restart this session with the sandbox on — or off ----
+   Codex's other switch: whether model-generated commands run in the
+   workspace-write sandbox. Same restart as the permissions toggle above,
+   through the same route: the daemon rewrites the session's args from the
+   pair {yolo, sandbox} by the rule the create form uses (codexRuntimeArgs),
+   with YOLO sent as it reads now, and relaunches — same name, same
+   conversation. Only for a harness that declares the sandbox pair. */
+function sessSandbox(data) {
+  const s = data.session || {};
+  const box = el("div", "sess-perms sess-sandbox");
+  box.appendChild(el("h3", null, "Sandbox"));
+  const capabilities = harnessDetails[s.harness] || {};
+  if (!codexRuntimeDeclared(capabilities)) {
+    sessSandboxBox = null;
+    box.appendChild(el(
+      "p", "wf-note",
+      `the ${s.harness || "?"} harness declares no sandbox switch`
+    ));
+    return box;
+  }
+  const state = codexRuntimeState(s.args, capabilities);
+  const key = `${s.name}|${state.yolo ? 1 : 0}|${state.sandbox ? 1 : 0}`;
+  if (sessSandboxBox && sessSandboxBox.dataset.slot === key) {
+    box.appendChild((typeof carried === "function" ? carried(sessSandboxBox) : sessSandboxBox));
+    return box;
+  }
+  const form = el("div", "sess-perms-form");
+  form.dataset.slot = key;
+  sessSandboxBox = form;
+  box.appendChild(form);
+
+  form.appendChild(el(
+    "p", "wf-note",
+    `${codexRuntimeText(state.yolo, state.sandbox)}. ` +
+      (state.sandbox ? "Turning the sandbox off" : "Turning the sandbox on") +
+      " stops the session and relaunches it — same name, same conversation"
+  ));
+  const btn = el(
+    "button", "wf-btn option",
+    state.sandbox ? "Turn sandbox off" : "Turn sandbox on"
+  );
+  btn.title = state.sandbox
+    ? "restart without the sandbox — commands run with full access"
+    : "restart in the workspace-write sandbox — writes stay in the workspace";
+  const status = el("p", "wf-note hidden");
+  form.append(btn, status);
+
+  const say = (msg, cls) => {
+    status.className = cls || "wf-note";
+    status.textContent = msg;
+  };
+
+  btn.addEventListener("click", async () => {
+    if (btn.disabled) return;
+    const name = s.name;
+    btn.disabled = true;
+    say("restarting… (stopping it, relaunching with the sandbox switched)");
+    let doc = {};
+    let resp;
+    try {
+      resp = await api(
+        `/api/sessions/${encodeURIComponent(name)}/runtime-mode`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ yolo: state.yolo, sandbox: !state.sandbox }),
+        }
+      );
+      doc = await resp.json().catch(() => ({}));
+    } catch {
+      say("could not reach the daemon — nothing was changed", "wf-warning");
+      btn.disabled = false;
+      return;
+    }
+    btn.disabled = false;
+    if (!resp.ok) {
+      say(doc.error || `HTTP ${resp.status}`, "wf-warning");
+      return;
+    }
+    say(codexRuntimeState(doc.args, capabilities).sandbox
+      ? "restarted — in the workspace-write sandbox"
+      : "restarted — without the sandbox");
+    // The relaunched PTY is a new socket under the same name.
     if (currentName === name) {
       detach();
       await refreshSessions();
@@ -41568,5 +41726,9 @@ termTimerTicker = setInterval(() => { paintTermTimer(); }, 1000);
 if (typeof location !== "undefined" && new URLSearchParams(location.search).has("embed")) {
   document.body.classList.add("embed");
 }
+
+// Mount once; session identity is read on every lookup and before transmission.
+globalThis.GlossaryComposer?.mount({field: $("term-input-field"),
+  session: () => currentName, resize: autogrowTermInput});
 
 boot();

@@ -5840,7 +5840,6 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 
 /* ---- Worktrees page (worktrees-page.js) ---- */
 #worktrees-view { flex: 1; overflow-y: auto; padding: 18px 26px; min-height: 0; }
-#glossary-view { flex: 1; overflow-y: auto; padding: 18px 26px; min-height: 0; }
 #spec-view { flex: 1; overflow-y: auto; padding: 18px 26px; min-height: 0; }
 .spec-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 8px 0; }
 .spec-text { width: 100%; box-sizing: border-box; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
@@ -5849,69 +5848,104 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 .spec-table { border-collapse: collapse; font-size: 12px; width: 100%; }
 .spec-table th, .spec-table td { border: 1px solid #30363d; padding: 4px 6px; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
 #spec-view .wf-btn:disabled { opacity: .5; cursor: default; }
-/* Glossary: reading-first layout, with review beside the accepted terms. */
-#glossary-view { container-type: inline-size; padding: 30px; }
-#glossary-view > * { max-width: 1240px; margin-left: auto; margin-right: auto; }
-.glossary-head { display: flex; justify-content: space-between; align-items: center; gap: 24px; margin-bottom: 28px; }
-.glossary-eyebrow { color: #79b8ff; font-size: 10px; letter-spacing: .14em; font-weight: 700; }
-.glossary-head h2 { margin: 6px 0; font-size: 28px; letter-spacing: -.04em; }
-.glossary-subtitle { color: #9da7b5; font-size: 13px; line-height: 1.7; }
-.glossary-controls { display: flex; gap: 8px; align-items: end; }
-.glossary-workspace { display: grid; gap: 6px; color: #9da7b5; font-size: 11px; }
-#glossary-view input, #glossary-view select, #glossary-view textarea {
-  background: #14181f; color: #e4e9f0; border: 1px solid #394352; border-radius: 8px;
-  padding: 10px 12px; font: inherit; font-size: 13px; min-width: 0; max-width: 100%;
+/* Glossary: scoped design tokens keep controls consistent with the dark shell. */
+#glossary-view {
+  --gl-border: #303843; --gl-muted: #a4afbd; --gl-panel: #1b2028;
+  flex: 1; overflow-y: auto; padding: 36px clamp(16px, 3vw, 48px); min-height: 0;
+  container-type: inline-size;
 }
-#glossary-view input::placeholder, #glossary-view textarea::placeholder { color: #8591a2; }
-#glossary-view :is(input, select, textarea, button, summary):focus-visible { outline: 2px solid #79b8ff; outline-offset: 3px; }
-#glossary-view .wf-btn { padding: 9px 14px; border-radius: 8px; font-size: 12px; min-height: 38px; white-space: nowrap; }
-#glossary-view button:disabled { opacity: .5; cursor: wait; }
-.glossary-columns { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(280px, 1fr); gap: 24px; align-items: start; }
-.glossary-columns section { min-width: 0; }
-.glossary-section-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 16px; }
-.glossary-section-head h3 { font-size: 16px; font-weight: 600; }
-#glossary-view .glossary-section-head button { background: #367dd6; border-color: #5395ea; color: #fff; }
-#glossary-view .glossary-section-head button:hover { background: #438ce5; }
-.glossary-accepted .glossary-controls input { flex: 1; width: 0; }
-.glossary-count { color: #95a1b2; font-size: 11px; margin: 12px 0 16px; }
-.glossary-card { background: #1b2028; border: 1px solid #303947; border-radius: 12px; padding: 20px; margin: 12px 0; overflow-wrap: anywhere; }
-.glossary-card h4 { color: #edf2f8; font-size: 17px; font-weight: 600; margin: 0 0 10px; }
-.glossary-definition { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.85; font-size: 14px; color: #c8d0dc; }
-.glossary-aliases { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 16px; }
-.glossary-meta-label { font-size: 11px; color: #95a1b2; margin-right: 4px; }
-.glossary-alias { background: #272f3b; color: #b9c9dd; border-radius: 5px; padding: 3px 8px; font-size: 11px; }
-.glossary-source { color: #9da7b5; font-size: 12px; white-space: pre-wrap; line-height: 1.7; margin-top: 12px; }
-.glossary-card-footer { display: flex; gap: 12px; align-items: center; justify-content: space-between; border-top: 1px solid #303947; margin-top: 18px; padding-top: 12px; flex-wrap: wrap; }
-.glossary-card code { font-size: 11px; color: #8fa9ca; overflow-wrap: anywhere; }
-.glossary-actions { display: flex; gap: 6px; }
-.glossary-review { background: #191d24; border: 1px solid #303947; border-radius: 14px; padding: 20px; }
-.glossary-review > select { margin: 16px 0 4px; width: 100%; }
-.glossary-review .glossary-card { padding: 16px; background: #202630; }
-.glossary-review .glossary-card > button { margin: 12px 6px 0 0; }
-.glossary-review .glossary-card > button:first-of-type { color: #9fe1bf; border-color: #406a56; }
-.glossary-review .wf-note { font-size: 11px; line-height: 1.7; margin-top: 12px; }
-.glossary-badge { background: #293b50; color: #a8d0ff; border-radius: 20px; padding: 4px 9px; font-size: 11px; }
-.glossary-empty { text-align: center; border: 1px dashed #394352; border-radius: 12px; padding: 32px 16px; color: #9da7b5; font-size: 13px; line-height: 1.8; margin-top: 16px; }
-.glossary-empty h4 { color: #d8e1ed; font-size: 15px; margin-bottom: 6px; }
-.glossary-error { color: #ffb4ab; background: #36242a; border: 1px solid #714049; padding: 12px 16px; border-radius: 8px; margin-bottom: 20px; }
-.glossary-form { border: 1px solid #43628a; background: #1b2430; border-radius: 12px; padding: 20px; margin: 16px 0; }
-.glossary-form h3 { font-size: 16px; }
-.glossary-form label { display: block; margin: 16px 0; color: #bdc9d9; font-size: 12px; }
-.glossary-form input, .glossary-form textarea { display: block; width: 100%; margin-top: 7px; }
-.glossary-form textarea { min-height: 90px; resize: vertical; line-height: 1.7; }
-.glossary-form > button { margin: 8px 6px 0 0; }
-.glossary-form pre { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 16px; font-size: 12px; }
-.glossary-reference { border-top: 1px solid #303947; margin-top: 28px; padding-top: 18px; }
-.glossary-reference summary { color: #a9bbd1; cursor: pointer; font-size: 13px; padding: 8px 0; }
-.glossary-reference .glossary-form { max-width: 760px; }
-.glossary-reference .wf-note { line-height: 1.8; margin: 12px 0; }
+.glossary-shell { max-width: 1240px; margin: 0 auto; font-size: 14px; line-height: 1.6; }
+.glossary-head { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-bottom: 30px; }
+.glossary-eyebrow { display: block; color: #92baff; font-size: 11px; font-weight: 650; letter-spacing: .09em; margin-bottom: 8px; }
+.glossary-head h2 { font-size: clamp(22px, 2.5vw, 30px); font-weight: 650; letter-spacing: -.04em; margin-bottom: 6px; }
+.glossary-muted { color: var(--gl-muted); font-size: 13px; }
+.glossary-scope { flex: 0 0 200px; font-size: 11px; color: var(--gl-muted); display: grid; gap: 6px; }
+#glossary-view input, #glossary-view textarea, #glossary-view select {
+  font: inherit; color: #e3e9f0; background: #12171e; border: 1px solid #3b4552;
+  border-radius: 8px; padding: 10px 12px; min-width: 0; max-width: 100%; color-scheme: dark;
+}
+#glossary-view :is(input, textarea, select, button):focus-visible { outline: 2px solid #79aeff; outline-offset: 3px; }
+#glossary-view textarea { resize: vertical; }
+#glossary-view .wf-btn { margin: 0; min-height: 38px; padding: 8px 14px; border: 1px solid var(--gl-border); background: #242d38; border-radius: 8px; font-weight: 550; white-space: nowrap; }
+#glossary-view .wf-btn:hover { background: #354153; }
+#glossary-view .glossary-primary { background: #427fdf; color: #fff; border-color: #6099ef; }
+#glossary-view .glossary-primary:hover { background: #5390ed; }
+#glossary-view .glossary-danger { background: transparent; color: #f0a4a0; border-color: transparent; }
+.glossary-tabs { display: flex; gap: 8px; border-bottom: 1px solid var(--gl-border); margin-bottom: 28px; padding-bottom: 12px; }
+#glossary-view .glossary-tabs .wf-btn { border-color: transparent; background: transparent; color: var(--gl-muted); }
+#glossary-view .glossary-tabs .is-active { background: #253753; color: #b6d4ff; border-color: #3b5377; }
+#glossary-view .glossary-tabs .glossary-refresh { margin-left: auto; }
+.glossary-layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 28px; align-items: start; }
+.glossary-layout.is-editing { grid-template-columns: minmax(0, 1fr) minmax(300px, .8fr); }
+.glossary-main, .glossary-aside { min-width: 0; }
+.glossary-aside { position: sticky; top: 0; }
+.glossary-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.glossary-toolbar h3, .glossary-help h3, .glossary-form h3 { font-size: 16px; font-weight: 600; }
+.glossary-search { display: flex; gap: 8px; flex: 1; min-width: 0; }
+.glossary-search input { width: 100%; }
+.glossary-list-meta { margin: 14px 0; color: var(--gl-muted); font-size: 12px; }
+.glossary-card { background: var(--gl-panel); border: 1px solid var(--gl-border); border-radius: 12px; padding: 20px; margin: 0 0 12px; overflow-wrap: anywhere; }
+.glossary-card h4 { font-size: 17px; font-weight: 600; color: #edf3fb; margin-bottom: 8px; }
+.glossary-definition { white-space: pre-wrap; line-height: 1.75; color: #ccd5df; }
+.glossary-aliases { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
+.glossary-aliases span, .glossary-badge { border-radius: 5px; background: #28313e; color: #b9c9dd; font-size: 12px; padding: 2px 8px; }
+.glossary-source { color: var(--gl-muted); font-size: 12px; margin-top: 12px; white-space: pre-wrap; border-left: 2px solid #465366; padding-left: 10px; }
+.glossary-match { font-size: 11px; color: #92baff; margin-top: 12px; }
+.glossary-card-footer { display: flex; justify-content: space-between; align-items: center; gap: 12px; border-top: 1px solid var(--gl-border); margin-top: 18px; padding-top: 12px; }
+.glossary-card-footer code { font-size: 11px; color: #8998ae; min-width: 0; overflow-wrap: anywhere; }
+.glossary-actions { display: flex; gap: 6px; flex: none; }
+#glossary-view .glossary-actions .wf-btn { font-size: 12px; min-height: 34px; padding: 6px 11px; }
+.glossary-help { background: #1d293b; border: 1px solid #354962; padding: 22px; border-radius: 12px; }
+.glossary-help p { color: #b3c2d7; font-size: 13px; margin-top: 12px; line-height: 1.8; }
+.glossary-help code { display: block; color: #c2daff; background: #141e2d; padding: 12px; border-radius: 6px; margin-top: 18px; }
+.glossary-help-secondary { background: transparent; border-color: var(--gl-border); margin-top: 16px; }
+.glossary-empty { min-height: 265px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 10px; border: 1px dashed #394352; border-radius: 12px; padding: 32px; }
+.glossary-empty-symbol { color: #96b6df; font: 24px Georgia, serif; background: #243144; border: 1px solid #3a4b63; padding: 6px 12px; border-radius: 10px; margin-bottom: 8px; }
+.glossary-empty h3 { font-size: 16px; }
+.glossary-empty p { color: var(--gl-muted); max-width: 340px; font-size: 13px; }
+.glossary-form { background: var(--gl-panel); border: 1px solid #45536a; border-radius: 12px; padding: 24px; }
+.glossary-form > p { margin: 8px 0 20px; }
+.glossary-form label { display: grid; gap: 7px; font-size: 12px; color: #c5cfdb; margin: 18px 0; }
+.glossary-form textarea { min-height: 88px; width: 100%; }
+.glossary-form textarea[name=definition] { min-height: 120px; }
+.glossary-editor > .glossary-primary { width: 100%; margin-top: 8px !important; }
+.glossary-reference { max-width: 850px; }
+.glossary-reference > textarea { display: block; min-height: 150px; margin: 22px 0 14px; }
+.glossary-reference-result { margin-top: 24px; }
+.glossary-reference-result > code { display: inline-block; margin-right: 12px; margin-bottom: 12px; }
+.glossary-error { color: #ffb4ad; padding: 14px; background: #38262a; border: 1px solid #69434a; border-radius: 8px; margin-bottom: 18px; }
 @container (max-width: 760px) {
-  .glossary-head { align-items: start; flex-direction: column; gap: 16px; }
-  .glossary-columns { grid-template-columns: 1fr; }
-  .glossary-head .glossary-controls { width: 100%; }
-  .glossary-workspace { flex: 1; min-width: 0; }
+  .glossary-layout, .glossary-layout.is-editing { grid-template-columns: 1fr; }
+  .glossary-aside { position: static; }
+  .glossary-layout.is-editing .glossary-aside { grid-row: 1; }
+  .glossary-head { align-items: flex-start; flex-direction: column; gap: 18px; }
+  .glossary-scope { flex-basis: auto; width: 100%; }
 }
-@media (max-width: 820px) { #glossary-view { padding: 20px 14px; } }
+@media (max-width: 600px) {
+  #glossary-view { padding: 24px 16px; }
+  .glossary-tabs { gap: 3px; flex-wrap: wrap; }
+  #glossary-view .glossary-tabs .wf-btn { padding: 8px 10px; }
+  .glossary-toolbar { flex-wrap: wrap; }
+  .glossary-search { flex-basis: 100%; }
+  .glossary-card, .glossary-form { padding: 16px; }
+  .glossary-card-footer { align-items: flex-start; flex-direction: column; }
+}
+/* Composer suggestions remain outside the textarea and preserve its caret. */
+.glossary-composer { position: absolute; bottom: calc(100% + 6px); left: 12px; right: 12px; z-index: 45; max-height: min(440px, 48vh); overflow: auto; padding: 16px; border: 1px solid #455771; border-radius: 12px; color: #dce5f2; background: #1b2330; box-shadow: 0 12px 32px #0006; font-size: 13px; }
+.glossary-composer[hidden] { display: none; }
+.gc-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.gc-hint { color: #afbed2; margin: 8px 0 12px; line-height: 1.6; }
+.gc-button { font: inherit; text-align: left; border: 1px solid #455771; background: #253750; color: #c8dfff; border-radius: 7px; padding: 8px 12px; cursor: pointer; }
+.gc-button:hover { background: #334e70; }
+.gc-button:focus-visible { outline: 2px solid #88b8ff; outline-offset: 2px; }
+.gc-close { padding: 4px 8px; background: transparent; }
+.gc-mentions { display: flex; flex-wrap: wrap; gap: 8px; }
+.gc-choices { display: grid; gap: 8px; }
+.gc-choice { display: grid; gap: 6px; width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; }
+.gc-choice span, .gc-resolved span { color: #b8c8db; line-height: 1.6; white-space: pre-wrap; }
+.gc-choice small { color: #97c0ff; }
+.gc-resolved { display: grid; gap: 5px; margin-top: 10px; border-left: 2px solid #73a0d9; padding-left: 12px; overflow-wrap: anywhere; }
+
 @media (max-width: 820px) { #worktrees-view { padding: 14px 12px; } }
 .wt-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 12px 0; }
 .wt-filter {

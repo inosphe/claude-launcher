@@ -116,13 +116,15 @@ def test_role_packs_default_save_and_clear(home):
 
 
 def test_default_packs_are_the_constant_until_saved(home):
-    assert prompt_packs.default_packs() == prompt_packs.DEFAULT_PACKS == ["common"]
+    assert prompt_packs.default_packs() == prompt_packs.DEFAULT_PACKS == [
+        "asking-the-user", "common",
+    ]
     assert prompt_packs.set_default_packs(["beads", "common", "beads"]) == ["beads", "common"]
     assert prompt_packs.set_default_packs([]) == []
     with pytest.raises(prompt_packs.PackError):
         prompt_packs.set_default_packs(["Bad Id"])
     assert prompt_packs.default_packs() == []
-    assert prompt_packs.set_default_packs(None) == ["common"]
+    assert prompt_packs.set_default_packs(None) == ["asking-the-user", "common"]
 
 
 def test_a_default_header_in_a_pack_file_means_nothing(home):
@@ -396,8 +398,8 @@ def test_settings_routes_install_remove_and_save_the_mapping(home, tmp_path):
         try:
             doc = await (await client.get("/api/prompt-packs", headers=BEARER)).json()
             assert doc["role_packs"] == prompt_packs.DEFAULT_ROLE_PACKS
-            assert doc["default_packs"] == ["common"]
-            assert doc["shipped_default_packs"] == ["common"]
+            assert doc["default_packs"] == ["asking-the-user", "common"]
+            assert doc["shipped_default_packs"] == ["asking-the-user", "common"]
             assert "unreal" in doc["roles"]
             row = next(w for w in doc["workspaces"] if w["name"] == "proj")
             assert {p["id"]: p["status"] for p in row["packs"]}["beads"] == "missing"
@@ -427,7 +429,7 @@ def test_settings_routes_install_remove_and_save_the_mapping(home, tmp_path):
                                           "default_packs": ["beads"]})
             assert resp.status == 400
             # The bad half refused the good half too.
-            assert prompt_packs.default_packs() == ["common"]
+            assert prompt_packs.default_packs() == ["asking-the-user", "common"]
             resp = await client.put("/api/prompt-packs/role-packs", headers=BEARER,
                                     json={"role_packs": {"worker": ["beads"]},
                                           "default_packs": ["beads"]})

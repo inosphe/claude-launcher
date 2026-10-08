@@ -859,6 +859,7 @@ def build_app(
         "/api/sessions/{name}/skip-permissions", h_session_skip_permissions
     )
     r.add_post("/api/sessions/{name}/auto-compact", h_session_auto_compact)
+    r.add_post("/api/sessions/{name}/runtime-mode", h_session_runtime_mode)
     r.add_post("/api/sessions/{name}/keys", h_session_keys)
     r.add_post("/api/sessions/{name}/paste-image", h_session_paste_image)
     r.add_post("/api/opening-images", h_opening_image_upload)
@@ -9454,6 +9455,29 @@ async def h_session_skip_permissions(request: web.Request) -> web.Response:
             400, "pass 'skip': true to stop asking, false to ask again"
         )
     session = await manager.skip_permissions(request.match_info["name"], skip)
+    return json_response(session.info())
+
+
+async def h_session_runtime_mode(request: web.Request) -> web.Response:
+    """Restart a session with its YOLO and Sandbox switches rewritten.
+
+    Body: ``{"yolo": true|false, "sandbox": true|false}`` — both, always: the
+    detail panel turns one and sends the other as it reads now, so a
+    request names the whole mode and never leans on what the daemon would
+    infer. The change is :meth:`SessionManager.runtime_mode`.
+
+    Operator-only, like skip-permissions.
+    """
+    manager: SessionManager = request.app["manager"]
+    body = await _json_body(request)
+    yolo, sandbox = body.get("yolo"), body.get("sandbox")
+    if not isinstance(yolo, bool) or not isinstance(sandbox, bool):
+        return json_error(
+            400, "pass both 'yolo' and 'sandbox' as true or false"
+        )
+    session = await manager.runtime_mode(
+        request.match_info["name"], yolo, sandbox
+    )
     return json_response(session.info())
 
 
