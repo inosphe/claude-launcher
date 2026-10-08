@@ -10060,6 +10060,25 @@ let newPackRolesOpen = false;  // the folded role packs are shown
 // again: an untick does not pull its chip out from under the pointer.
 let newPackRolesShown = new Set();
 let newPackPreview = null;     // {id, daemon, doc, error}: the text being shown
+// A seed's ticked pack ids (applySessionModalSeed), held until the offer for
+// the form's directory has arrived: the arrival of another workspace's offer
+// starts the ticks over, which would wipe ticks written before it.
+let pendingSeedPacks = null;
+
+/* Write a held seed's ticks, once the offer on hand is the one for the
+   directory the form names: exactly the seeded packs on, every other offered
+   pack off -- a pack a workspace ticks by default that the seed's session did
+   not take is not taken again. Required packs stay ticked by their roles. */
+function applyPendingPackSeed() {
+  if (!pendingSeedPacks || !newPackOffer) return;
+  if (newPackOfferFor !== newSessionCwd()) return;
+  const want = new Set(pendingSeedPacks);
+  pendingSeedPacks = null;
+  const ids = [...(newPackOffer.packs || []), ...(newPackOffer.shipped || [])]
+    .map((p) => p && p.id).filter(Boolean);
+  for (const id of new Set([...ids, ...want])) newPackTicks.set(id, want.has(id));
+  renderPromptPackRow();
+}
 
 /* Whether the opening takes this daemon's prompt: only when it has one, and
    then unless the operator unticked it. */
@@ -10070,7 +10089,11 @@ function newDaemonPromptWanted() {
 
 async function refreshPromptPackOffer() {
   const cwd = newSessionCwd();
-  if (cwd === newPackOfferFor && newPackOffer) { renderPromptPackRow(); return; }
+  if (cwd === newPackOfferFor && newPackOffer) {
+    applyPendingPackSeed();
+    renderPromptPackRow();
+    return;
+  }
   newPackOfferFor = cwd;
   let offer = null;
   try {
@@ -10085,6 +10108,7 @@ async function refreshPromptPackOffer() {
   // defaults again rather than carrying ids across.
   if (before !== after) { newPackTicks = new Map(); newPackRolesShown = new Set(); }
   newPackOffer = offer;
+  applyPendingPackSeed();
   renderPromptPackRow();
 }
 
@@ -29661,6 +29685,20 @@ function sessHead(s) {
   spawn.addEventListener("click", () => openSpawnModal(s.name));
   head.appendChild(spawn);
 
+  // The same wizard, filled with what this session was itself created with
+  // (spawnSameSeed): another one like it, one press away, under it. Denied
+  // on the same state as the plain Spawn, for the same reason.
+  const same = el("button", "wf-btn", "Spawn same setup");
+  same.title = s.status === "exited"
+    ? "an exited session cannot spawn children"
+    : "the spawn wizard with this session as the parent, filled with the "
+      + "role, mesh, workflow, task, worktree and prompt packs it was "
+      + "created with";
+  if (s.status === "exited") same.disabled = true;
+  same.addEventListener("click", () => openSpawnModal(s.name,
+    { seed: spawnSameSeed(s) }));
+  head.appendChild(same);
+
   // The PR wizard: push what this session's directory holds under a new
   // branch and open the pull request, without touching its checkout. An
   // exited session still has a directory, so the button stays live; a
@@ -32972,14 +33010,32 @@ function applySessionModalSeed(f, seed) {
   if (!seed) return;
   if (seed.name !== undefined) f.name.value = seed.name || "";
   if (seed.task !== undefined) f.task.value = seed.task || "";
+  // The mesh before the role: the role list is the mesh's. Held the way a
+  // #/new/<mesh> link is, for a picker the mesh poll has not filled yet
+  // (syncOnboardPickers spends it).
+  if (seed.mesh !== undefined && f.mesh) {
+    pendingNewMesh = seed.mesh || "";
+    if ([...(f.mesh.options || [])].some((o) => o.value === pendingNewMesh)) {
+      f.mesh.value = pendingNewMesh;
+    }
+  }
   if (seed.role !== undefined) {
     ensureOption(f.role, seed.role);
     f.role.value = seed.role || "";
     renderRoleStance();
   }
+  if (seed.subroles !== undefined) {
+    newSubroleTicks = new Set(seed.subroles || []);
+    renderSubroles();
+  }
   if (seed.workflow !== undefined) {
-    ensureOption(f.workflow, seed.workflow);
-    f.workflow.value = seed.workflow || "";
+    // A v2 run whose name a v1 workflow also declares is offered as
+    // "v2:<name>" (cflowPickValue); the bare name would start the v1 one.
+    const v2 = seed.workflow && seed.workflow_version === 2
+      && [...(f.workflow.options || [])].some((o) => o.value === `v2:${seed.workflow}`);
+    const value = v2 ? `v2:${seed.workflow}` : seed.workflow;
+    ensureOption(f.workflow, value);
+    f.workflow.value = value || "";
     // A seeded workflow is a pick, not a default: the role's own auto-pick
     // must not come back over it on the next sync (see syncOnboardPickers).
     newWfPicked = true;
@@ -33015,6 +33071,10 @@ function applySessionModalSeed(f, seed) {
   if (seed.args !== undefined) f.args.value = (seed.args || []).join(" ");
   if (seed.null_token !== undefined) f.null_token.checked = !!seed.null_token;
   if (seed.model !== undefined) f._modelPreset = seed.model;
+  if (seed.prompt_packs !== undefined) {
+    pendingSeedPacks = [...(seed.prompt_packs || [])];
+    applyPendingPackSeed();
+  }
 }
 
 /* What the modal remembers between openings, applied to the rows that are
@@ -33344,6 +33404,7 @@ function sessionModalClose(opts = {}) {
   // A remembered answer the row never became able to carry is dropped with
   // the box: the next opening asks the recall again.
   pendingWorktreeMode = "";
+  pendingSeedPacks = null;
   $("new-session-actions").removeChild(sessionModal.cancelBtn);
   sessionModal = null;
   const overlay = $("modal-overlay");
@@ -33386,6 +33447,41 @@ async function openSpawnModal(parentName, opts = {}) {
   if (!parentName) return;
   await openSessionModal({ tab: "spawn", parent: parentName,
                            seed: (opts || {}).seed || null });
+}
+
+/* The detail head's "Spawn same setup": what `s` was created with, as a seed
+   for a child of `s`. The rows a child inherits -- profile, harness, model,
+   effort, directory, args, borrow, null token -- are not in it: with `s` as
+   the parent they already come out as `s`'s own. What is in it is what a
+   spawn asks afresh: the mesh and roles `s` holds, the workflow its run
+   follows, the task it was opened with, whether it got a worktree of its
+   own, and the prompt packs it was given by tick (a role's required pack
+   comes back with the role). Left out on purpose: the name and handle, which
+   are one session's, and the issue, which is `s`'s record -- the child gets
+   its own unless the task names one. */
+function spawnSameSeed(s) {
+  const seed = { name: "" };
+  const member = (typeof sessMeshes === "function"
+    ? (sessMeshes(s.name) || []) : [])[0];
+  if (member) {
+    seed.mesh = member.mesh;
+    seed.role = member.role || "";
+    seed.subroles = (member.roles || []).filter((r) => r && r !== member.role);
+  }
+  const run = typeof sessCflowRun === "function" ? sessCflowRun(s.name) : null;
+  if (run && run.workflow) {
+    seed.workflow = run.workflow;
+    if (Number(run.version) === 2) seed.workflow_version = 2;
+  }
+  if (s.task) seed.task = s.task;
+  // A launcher worktree is a directory under <repo>/.claude/worktrees
+  // (worktree.WORKTREES_SUBDIR): `s` was given a fresh checkout, so the child
+  // is too, rather than being dropped into the one `s` is editing.
+  seed.worktree = /\/\.claude\/worktrees\/[^/]+$/.test(worktreePathKey(s.cwd));
+  seed.prompt_packs = (s.prompt_packs || [])
+    .filter((p) => p && p.id && !(p.required_by || []).length)
+    .map((p) => p.id);
+  return seed;
 }
 
 /* ---- the PR wizard: a branch and a pull request from a session's directory ----
