@@ -530,6 +530,7 @@ CHECKS = [
         "cflow2view_check.js",
         "cflow2collections_check.js",
         "cflow2question_check.js",
+        "safe_listen_check.js",
 ]
 
 
