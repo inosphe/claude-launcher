@@ -916,3 +916,21 @@ def test_the_shipped_skill_names_the_commands_it_teaches(home):
         "claunch beads comments add",
     ):
         assert cmd in text, cmd
+
+
+def test_a_page_filed_before_artifact_names_still_reads_as_a_round_report(home, capsys):
+    # Files written under the old two-part name, and the links already handed
+    # out for them, must keep working: listed, found by issue, served, and
+    # counted by the wrapup gate.
+    old = write(reports.dir_for("s1", create=True) / "20260826T031200Z-claunch-j31.html")
+    [row] = reports.listing("s1")
+    assert (row["file"], row["issue"], row["name"]) == (old.name, "claunch-j31", None)
+    assert [r["file"] for r in reports.for_issue("claunch-j31")] == [old.name]
+    assert reports.resolve("s1", old.name) == old
+    assert reports.target("s1", "claunch-j31") == old
+    assert run_cli("report", "check", "--session", "s1") == 0
+    assert run_cli("report", "check", "--session", "s1", "--issue", "claunch-j31") == 0
+    old_none = write(reports.dir_for("s2", create=True) / "20260826T031200Z-no-issue.html")
+    assert reports.listing("s2")[0]["issue"] is None
+    assert reports.target("s2", None) == old_none
+    assert run_cli("report", "check", "--session", "s2") == 0
