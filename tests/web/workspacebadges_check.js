@@ -64,6 +64,7 @@ const ctx = {
   wsSyncToggle: () => {},
   wsRemove: () => {},
   wsRefreshAllBadge: () => null,
+  wsUsageButton: () => el("button", "ws-usage", "size"),
   sessionsCache: [
     { name: "s7", cwd: "C:\\r\\wt-feature\\" },
     { name: "s8", cwd: "c:/R/wt-feature" },

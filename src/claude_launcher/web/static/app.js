@@ -19498,6 +19498,7 @@ function openSettings(section) {
     refreshBeadsBoards();
     refreshVscode();
     refreshWsGitSummary();
+    refreshWsUsage();
     return;
   }
   refreshHarnesses().then(() => { if (wsOpen) renderWorkspaces(); });
@@ -26539,6 +26540,94 @@ function wsGitBadges(g) {
   return out;
 }
 
+/* Disk usage per workspace (claunch-2oait): the repository and its linked
+   worktrees, walked by the daemon in the background because a large checkout
+   takes seconds to tens of seconds on Windows. The row shows the last answer
+   and how old it is (/api/workspaces/usage, a cache read); its button asks
+   for a new one (POST .../usage), and the page polls while one is running. */
+//: workspace name -> {bytes, files, parts, seconds, at, running, error, failed_at}
+let wsUsage = {};
+let wsUsageTimer = null;
+
+async function refreshWsUsage() {
+  try {
+    const resp = await api("/api/workspaces/usage");
+    if (!resp.ok) return;   // an older daemon: no size on the rows
+    wsUsage = ((await resp.json()) || {}).workspaces || {};
+  } catch {
+    return;
+  }
+  if (wsOpen) renderWorkspaces();
+  wsUsagePoll();
+}
+
+function wsUsagePoll() {
+  const running = Object.values(wsUsage).some((u) => u && u.running);
+  if (!running || wsUsageTimer || !wsOpen) return;
+  wsUsageTimer = setTimeout(() => {
+    wsUsageTimer = null;
+    refreshWsUsage();
+  }, 2000);
+}
+
+async function wsUsageMeasure(name) {
+  wsUsage[name] = { ...(wsUsage[name] || {}), running: true };
+  if (wsOpen) renderWorkspaces();
+  try {
+    const resp = await api(`/api/workspaces/${encodeURIComponent(name)}/usage`, { method: "POST" });
+    if (!resp.ok) {
+      wsUsage[name] = { ...(wsUsage[name] || {}), running: false, error: await resp.text() };
+      if (wsOpen) renderWorkspaces();
+      return;
+    }
+  } catch (e) {
+    wsUsage[name] = { ...(wsUsage[name] || {}), running: false, error: String(e) };
+    if (wsOpen) renderWorkspaces();
+    return;
+  }
+  wsUsagePoll();
+}
+
+function wsFmtBytes(n) {
+  let b = Number(n);
+  if (!Number.isFinite(b) || b < 0) return "?";
+  for (const unit of ["B", "KB", "MB", "GB"]) {
+    if (b < 1024 || unit === "GB") {
+      return unit === "B" ? `${Math.round(b)} B` : `${b < 10 ? b.toFixed(1) : Math.round(b)} ${unit}`;
+    }
+    b /= 1024;
+  }
+  return "?";
+}
+
+function wsUsageButton(w, now = Date.now()) {
+  const u = wsUsage[w.name] || {};
+  if (u.running) {
+    const b = el("button", "wf-btn clear ws-usage", "measuring…");
+    b.disabled = true;
+    b.title = "walking the repository and its worktrees";
+    return b;
+  }
+  const has = typeof u.bytes === "number";
+  const at = Date.parse(u.at || "");
+  const age = Number.isFinite(at) ? `${fmtAge(Math.max(0, (now - at) / 1000))} ago` : "";
+  const b = el("button", "wf-btn clear ws-usage" + (u.error ? " ws-usage-failed" : ""),
+    has ? `${wsFmtBytes(u.bytes)} · ${age}` : "Measure size");
+  const lines = [];
+  if (has) {
+    const trees = (u.parts || []).length;
+    lines.push(`${wsFmtBytes(u.bytes)} in ${u.files} files: the repository` +
+      (trees > 1 ? ` and ${trees - 1} worktree${trees === 2 ? "" : "s"}` : "") +
+      `, measured ${u.at} (took ${u.seconds}s)`);
+    for (const p of u.parts || []) lines.push(`  ${wsFmtBytes(p.bytes)}  ${p.path}`);
+  }
+  if (u.error) lines.push(`the last measurement failed: ${u.error}`);
+  lines.push(has ? "click to measure again" : "walk the repository and its worktrees (can take a while)");
+  b.title = lines.join("\n");
+  b.addEventListener("click", () => wsUsageMeasure(w.name));
+  return b;
+}
+
 /* The linked worktrees under one workspace (claunch-kjjta), read with the
    row badges (wsGitSummary). Folded by default: a busy repository carries
    dozens. Each line names the checkout, its branch, and the sessions whose
@@ -26596,6 +26685,7 @@ function wsRow(w) {
   if (w.exists) for (const b of wsGitBadges(wsGitSummary[w.name])) row.appendChild(b);
   const progress = wsRefreshAllBadge(w.name);
   if (progress) row.appendChild(progress);
+  if (w.exists) row.appendChild(wsUsageButton(w));
   const trees =w.exists ? ((wsGitSummary[w.name] || {}).worktrees || []) : [];
   if (trees.length) {
     const open = wsTreesOpen.has(w.name);
