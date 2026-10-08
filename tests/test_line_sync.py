@@ -282,3 +282,74 @@ def test_two_viewers_share_the_line_and_a_new_one_opens_on_it(home, tmp_path):
             await client.close()
 
     asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# the record's end
+# --------------------------------------------------------------------------- #
+class _Ended:
+    """An exited record, enough for ``remove``/``clear`` and ``persist``."""
+
+    exited = True
+    exit_code = 0
+    pid = None
+    created_at = 0.0
+    last_output_at = 0.0
+    last_visited_at = None
+    last_input_at = None
+    exited_at = None
+    archived_at = None
+
+    def __init__(self, name, parent=None):
+        from claude_launcher.daemon.harness import SessionDef
+
+        self.sdef = SessionDef(name=name, harness="py", parent=parent)
+
+    def status(self, threshold=None):
+        return "exited"
+
+    def delivery_held(self):
+        return False
+
+
+def _shared(name):
+    line_sync.set_mode(name, line_sync.REMOTE)
+    line_sync.set_text(name, f"draft of {name}")
+
+
+def _manager(*records):
+    from claude_launcher.daemon.manager import SessionManager
+
+    mgr = SessionManager(idle_threshold=1.0, scrollback=10, restore_default=False)
+    for name, parent in records:
+        mgr._sessions[name] = _Ended(name, parent)
+        _shared(name)
+    return mgr
+
+
+def _is_fresh(name):
+    state = line_sync.get(name)
+    return (state.mode, state.text, state.rev) == (line_sync.LOCAL, "", 0)
+
+
+def test_removing_a_record_drops_its_line_and_its_removed_childrens(home):
+    mgr = _manager(("lead", None), ("gone", "lead"), ("kid", "gone"), ("kept", None))
+    mgr.remove("gone", children="remove")
+    assert _is_fresh("gone")
+    assert _is_fresh("kid")
+    assert line_sync.get("kept").text == "draft of kept"
+
+
+def test_escalated_children_keep_their_line(home):
+    mgr = _manager(("lead", None), ("gone", "lead"), ("kid", "gone"))
+    mgr.remove("gone")
+    assert _is_fresh("gone")
+    assert line_sync.get("kid").mode == line_sync.REMOTE
+
+
+def test_clearing_records_drops_their_lines_and_spares_the_kept(home):
+    mgr = _manager(("a", None), ("b", None), ("kept", None))
+    mgr.clear(keep=["kept"])
+    assert _is_fresh("a")
+    assert _is_fresh("b")
+    assert line_sync.get("kept").text == "draft of kept"

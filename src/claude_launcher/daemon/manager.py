@@ -32,7 +32,7 @@ from .. import borrowing, harnesses as harness_registry, profile as profile_mod
 from .. import spawn as spawn_mod
 from .. import transcripts
 from . import codex_sessions, ctxsize, db, harness as harness_mod, pi_sessions
-from . import paths, search_records, session_events, session_input
+from . import line_sync, paths, search_records, session_events, session_input
 from .harness import SessionDef
 from .screen import BACKGROUND_RENDER_BUDGET, RenderBudget
 from .session import STATUS_BUSY, DeadSession, Session
@@ -868,6 +868,7 @@ class SessionManager:
         session = self._sessions.get(name)
         if session is not None and getattr(session, "pty", None) is None:
             self._sessions.pop(name, None)
+            line_sync.forget(name)
 
     def _check_name(self, name: str) -> None:
         if not _NAME_RE.match(name):
@@ -1460,10 +1461,14 @@ class SessionManager:
                 )
             for child in below:
                 del self._sessions[child]
+                line_sync.forget(child)
             touched = below
         else:
             touched = self.escalate_children(name)
         del self._sessions[name]
+        # The shared session line lives beside the record, not in it; a name
+        # created again later must not open on the deleted session's line.
+        line_sync.forget(name)
         # Removing the last record leaves the set empty on purpose, so let this
         # one persist prune the store to empty past the empty-snapshot guard.
         self._allow_empty_persist = True
@@ -1595,6 +1600,7 @@ class SessionManager:
             self.escalate_children(name)
         for name in names:
             del self._sessions[name]
+            line_sync.forget(name)
             if logs:
                 shutil.rmtree(paths.session_dir(name), ignore_errors=True)
         # A clear that drops every exited record legitimately empties the set;

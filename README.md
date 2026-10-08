@@ -3703,7 +3703,10 @@ default: what one browser types stays in that browser until Enter. The
 browser showing that session follows: the line becomes one text they all
 type into, each edit carried to the others over the terminal socket, and
 the daemon keeps it in memory until it restarts — close the window, come
-back, and the line is where it was left. What a browser had typed locally
+back, and the line is where it was left. Removing the session's record
+(`DELETE /api/sessions/{name}`, or the clear of ended sessions) drops the
+line with it, so a session later created under the same name opens local
+and empty. What a browser had typed locally
 when sync came on stays beside the shared line read-only, to copy from, and
 returns to the field when sync is switched off. Concurrent edits are last
 writer wins; the clear after a send is conditional, so a line someone else
