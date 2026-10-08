@@ -453,7 +453,8 @@ work:
   declares `landing_queue:`. When the parent cannot merge -- no parent
   session, one that exited, no run it drives, or a run with no
   `landing_queue:` -- the request goes to the nearest direct ancestor that
-  can, and with none to the session's mesh `leader`, but only a leader that
+  can (a session that can merge also holds the `merger` role in the worker's
+  mesh; a leader always counts), and with none to the session's mesh `leader`, but only a leader that
   is its sibling (the same parent; two sessions with no parent are
   siblings), never an uncle or a child. Every target must run in this
   repository; of several queue runs a main run is taken first, then the

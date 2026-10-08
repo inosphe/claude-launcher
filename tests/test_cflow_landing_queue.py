@@ -504,11 +504,13 @@ def test_a_parent_that_cannot_merge_hands_the_request_to_the_grandparent(
         engine.start("lead", cwd=other, scope="mid")   # a queue nobody drives
     wcwd = _worker_at_request(feature)
     monkeypatch.setattr(landing, "in_review_of", lambda repo, session: ["x-1"])
-    # The grandparent need not hold the leader role: it is a direct ancestor.
+    # The grandparent need not hold the leader role: it is a direct ancestor
+    # holding merger (claunch-lhgfx).
     performed, detail = _fallback_run(
         wcwd,
         [_Session("lead", lcwd), _Session("mid", lcwd, parent="lead", exited=mid == "exited")],
-        {"w1": ["worker"], "lead": ["worker"], "mid": ["worker"]}, parent="mid",
+        {"w1": ["worker"], "lead": ["worker", "merger"], "mid": ["worker", "merger"]},
+        parent="mid",
     )
     assert performed, detail
     assert "parent 'mid'" in detail and "fell back to 'lead'" in detail
@@ -524,7 +526,7 @@ def test_the_parents_own_queue_wins_over_the_mesh_leader(proj, feature, monkeypa
     monkeypatch.setattr(landing, "in_review_of", lambda repo, session: ["x-1"])
     performed, detail = _fallback_run(
         wcwd, [_Session("lead", lcwd), _Session("mid", mid)],
-        {"w1": ["worker"], "lead": ["leader"], "mid": ["worker"]}, parent="mid",
+        {"w1": ["worker"], "lead": ["leader"], "mid": ["worker", "merger"]}, parent="mid",
     )
     assert performed, detail
     assert "fell back" not in detail
@@ -635,7 +637,7 @@ def test_a_parent_with_two_queue_runs_is_not_bypassed(proj, feature, monkeypatch
     monkeypatch.setattr(landing, "in_review_of", lambda repo, session: ["x-1"])
     performed, detail = _fallback_run(
         wcwd, [_Session("lead", lcwd), _Session("mid", lcwd, parent="lead")],
-        {"w1": ["worker"], "lead": ["leader"], "mid": ["worker"]}, parent="mid",
+        {"w1": ["worker"], "lead": ["leader"], "mid": ["worker", "merger"]}, parent="mid",
     )
     assert performed, detail
     assert "fell back" not in detail
@@ -643,6 +645,26 @@ def test_a_parent_with_two_queue_runs_is_not_bypassed(proj, feature, monkeypatch
     assert "x-1" in _queue(engine.status(cwd=first, scope="mid"))
     assert _queue(engine.status(cwd=second, scope="mid")) == {}
     assert _queue(engine.status(cwd=lcwd, scope="lead")) == {}
+
+
+def test_a_parent_with_a_queue_but_no_merger_role_is_passed_over(proj, feature, monkeypatch):
+    # claunch-lhgfx: a queue alone does not make a merger; the parent is
+    # passed over for the leader, which holds merger by being leader.
+    lcwd = state_mod.resolve_cwd(str(proj))
+    mid = _other_checkout(proj)
+    engine.start("lead", cwd=lcwd, scope="lead")
+    engine.start("lead", cwd=mid, scope="mid")
+    wcwd = _worker_at_request(feature)
+    monkeypatch.setattr(landing, "in_review_of", lambda repo, session: ["x-1"])
+    performed, detail = _fallback_run(
+        wcwd, [_Session("lead", lcwd), _Session("mid", mid, parent="lead")],
+        {"w1": ["worker"], "lead": ["leader"], "mid": ["worker"]}, parent="mid",
+    )
+    assert performed, detail
+    assert "parent 'mid' holds no 'merger' role" in detail
+    assert "fell back to 'lead'" in detail
+    assert "x-1" in _queue(engine.status(cwd=lcwd, scope="lead"))
+    assert _queue(engine.status(cwd=mid, scope="mid")) == {}
 
 
 def test_a_main_run_is_picked_before_an_earlier_side_run():

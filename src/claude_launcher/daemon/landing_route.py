@@ -14,8 +14,12 @@ only when it is the worker's sibling (the same parent; two sessions with no
 parent count as siblings) or one of its direct ancestors -- never an uncle or
 a child. Not exactly one such leader that can merge is a skip.
 
-A session *can merge* when it is live and drives, in a checkout of the
-worker's own repository, a run that holds a landing queue. When it drives
+A session *can merge* when it is live, holds the ``merger`` role in a mesh
+the worker is in (a ``leader`` is taken as holding it; roles are mesh
+membership, so that is where they are read -- claunch-lhgfx), and drives, in a
+checkout of the worker's own repository, a run that holds a landing queue.
+With no mesh manager at all (a daemon or test without one) the role is not
+checked. When it drives
 several, one is picked without asking: a main run first, whatever its order,
 then the first in order (``holders`` hands them over sorted).
 
@@ -49,6 +53,11 @@ class Holder:
 #: worker's checkout has no readable git (its request then fails on the tip
 #: it cannot read, not here): no checkout is filtered out.
 HoldersFn = Callable[[str, Optional[str]], List[Holder]]
+
+#: The role a session must hold (in the worker's mesh) to take a landing
+#: request, and the role that always counts as holding it.
+MERGER = "merger"
+LEADER = "leader"
 
 #: How many ancestors a walk looks through (a cycle or a runaway chain ends).
 MAX_HOPS = 8
@@ -107,14 +116,38 @@ class Router:
             name = self.parent_of(name)
         return out
 
-    def merger(self, name: str, repo: Optional[str]) -> Tuple[Optional[Holder], str]:
+    def merger_role(self, scope: str, name: str) -> str:
+        """Why ``name`` holds no ``merger`` role where ``scope`` (the worker)
+        can see it, or empty when it does. A ``leader`` counts as one."""
+        if self.mesh is None:
+            return ""
+        try:
+            meshes = sorted({m["mesh"] for m in self.mesh.meshes_for_session(scope)})
+        except Exception:
+            return "holds a role that could not be read (the worker's mesh membership)"
+        for mname in meshes:
+            try:
+                members = self.mesh.get(mname).members.values()
+            except Exception:
+                continue
+            for m in members:
+                if m.session == name and (MERGER in m.roles or LEADER in m.roles):
+                    return ""
+        where = ", ".join(repr(n) for n in meshes) or "no mesh"
+        return f"holds no {MERGER!r} role in the worker's mesh ({where})"
+
+    def merger(self, name: str, repo: Optional[str], scope: str = "") -> Tuple[Optional[Holder], str]:
         """(holder, why): the run of ``name`` the request goes on, or why
-        ``name`` cannot merge."""
+        ``name`` cannot merge. ``scope`` is the worker whose meshes the
+        ``merger`` role is read in."""
         session = self._session(name)
         if session is None:
             return None, "is not a session of this daemon"
         if getattr(session, "exited", False):
             return None, "has exited"
+        why = self.merger_role(scope, name)
+        if why:
+            return None, why
         try:
             found = self.holders(name, repo)
         except Exception as exc:  # noqa: BLE001 - an unreadable slot is no holder
@@ -132,7 +165,7 @@ class Router:
         if not chain:
             passed.append("this session has no parent session")
         for depth, name in enumerate(chain):
-            holder, why = self.merger(name, repo)
+            holder, why = self.merger(name, repo, scope)
             if holder is not None:
                 return Target(name, holder, passed=tuple(passed))
             passed.append(f"{'parent' if depth == 0 else 'ancestor'} {name!r} {why}")
@@ -172,7 +205,7 @@ class Router:
             except Exception:
                 continue
             for _, m in sorted(mesh.members.items()):
-                if "leader" in m.roles and m.session != scope:
+                if LEADER in m.roles and m.session != scope:
                     leaders.setdefault(m.session, (mesh, m))
         if not leaders:
             return None, None, f"no leader in mesh {', '.join(repr(n) for n in names)}"
@@ -194,7 +227,7 @@ class Router:
                     f"leader {lead!r} is neither a sibling nor a direct ancestor of {scope!r}"
                 )
                 continue
-            holder, why = self.merger(lead, repo)
+            holder, why = self.merger(lead, repo, scope)
             if holder is None:
                 refused.append(f"leader {lead!r} {why}")
                 continue

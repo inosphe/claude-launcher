@@ -72,7 +72,7 @@ from ..cflow.model import WorkflowError
 from . import cflow2_web
 from . import harness as harness_mod, mesh_roles
 from .harness import CLAUDE_HARNESS
-from .mesh import MeshError
+from .mesh import LEADER_IMPLIES, LEADER_ROLE, MeshError
 
 log = logging.getLogger(__name__)
 
@@ -459,6 +459,16 @@ def preflight(
                         f"worker that integrates upward), or retire "
                         f"{holder.handle!r} first"
                     )
+            # A leader always holds merger (claunch-lhgfx). Added to the plan
+            # here, not only at the join, so the opening's role packs and
+            # what the request reports back already carry it.
+            try:
+                primary = local_mesh.roleset.resolve(wanted_handle, role) if wanted_handle else ""
+            except mesh_roles.RoleError:
+                primary = ""
+            if (primary == LEADER_ROLE and LEADER_IMPLIES not in subroles
+                    and local_mesh.roleset.get(LEADER_IMPLIES) is not None):
+                subroles = (*subroles, LEADER_IMPLIES)
     elif role or handle or connect or subroles:
         raise OnboardError(
             "'role', 'subroles', 'handle' and 'connect' only mean something "

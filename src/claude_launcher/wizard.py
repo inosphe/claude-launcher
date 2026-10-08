@@ -2588,12 +2588,22 @@ class Wizard(Form):
         for label, key in (("mesh", "mesh"), ("workflow", "workflow"),
                            ("role", "role")):
             if self.value(key):
-                parts.append(label + " " + str(self.value(key)))
+                parts.append(label + " " + _role_shown(key, self.value(key)))
         if self.value("resume") is not None:
             parts.append("resuming " + (self.value("resume") or "(picker)"))
         parts.append(_issue_summary(self))
         return "creating: " + ", ".join(parts)
 
+
+
+def _role_shown(key: str, value) -> str:
+    """A summary value, with the subrole a leader is always given beside it
+    (claunch-lhgfx): the daemon adds ``merger`` at the join, so the summary
+    says so before the session exists."""
+    text = str(value)
+    if key == "role" and text == "leader":
+        return text + " (+merger)"
+    return text
 
 
 def _issue_summary(form: "Form") -> str:
@@ -3838,7 +3848,7 @@ class SpawnWizard(Form):
             ("workflow", "workflow"),
         ):
             if self.value(key):
-                parts.append(label + " " + str(self.value(key)))
+                parts.append(label + " " + _role_shown(key, self.value(key)))
         choice, base = worktree_answer(self)
         if choice is not worktree.NEVER:
             parts.append("worktree " + (choice or self.auto_worktree_name()))

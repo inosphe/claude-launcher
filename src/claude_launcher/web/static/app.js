@@ -10162,11 +10162,19 @@ function newSubrolesMeshless(f) {
   return mesh === "-" || (!mesh && !spawnParent());
 }
 
+/* A leader always holds merger (claunch-lhgfx): the daemon adds it at the
+   join, so the form shows it ticked and fixed while the primary is leader. */
+function newImpliedSubrole(f) {
+  const implied = newPrimaryRole(f).role === "leader" ? "merger" : "";
+  return implied && rolesByName[implied] ? implied : "";
+}
+
 function renderSubroles() {
   const f = $("new-session");
   const row = $("new-subroles-row");
   if (!f || !row) return;
   const primary = f.role.value || "";
+  const implied = newImpliedSubrole(f);
   const names = Object.keys(rolesByName).filter((n) => n !== primary).sort();
   row.innerHTML = "";
   const hidden = newSubrolesMeshless(f) || !names.length;
@@ -10180,7 +10188,11 @@ function renderSubroles() {
       box.type = "checkbox";
       box.name = `subrole_${name}`;
       box.value = name;
-      box.checked = newSubroleTicks.has(name);
+      box.checked = newSubroleTicks.has(name) || name === implied;
+      if (name === implied) {
+        box.disabled = true;
+        label.title = `A ${newPrimaryRole(f).role} always holds ${name}`;
+      }
       box.addEventListener("change", () => {
         if (box.checked) newSubroleTicks.add(name);
         else newSubroleTicks.delete(name);
@@ -10199,7 +10211,10 @@ function renderSubroles() {
 function newSubroles(f) {
   if (newSubrolesMeshless(f)) return [];
   const primary = f.role.value || "";
-  return [...newSubroleTicks].filter((n) => n !== primary && rolesByName[n]).sort();
+  const implied = newImpliedSubrole(f);
+  const out = new Set([...newSubroleTicks].filter((n) => n !== primary && rolesByName[n]));
+  if (implied) out.add(implied);
+  return [...out].sort();
 }
 
 /* Prompt packs: one checkbox per pack, the workspace's installed ones first
