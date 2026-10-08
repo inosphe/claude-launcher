@@ -153,7 +153,7 @@ const REFRESHERS = [
   "refreshPrompterSettings", "refreshStatusChecks", "refreshRagStatus",
   "refreshGhStatus", "refreshRelaySettings", "refreshBeadsBoards",
   "refreshProjects", "refreshProfileSettings", "refreshInstallOverview",
-  "refreshVscode", "refreshWsGitSummary",
+  "refreshVscode", "refreshWsGitSummary", "refreshWsUsage",
 ];
 const octx = {
   wsSection: "", wsOpen: true,
@@ -169,9 +169,11 @@ vm.runInContext(slice("openSettings"), octx);
 called.length = 0;
 octx.openSettings("workspaces");
 // ...the VS Code state its rows' buttons are drawn from, and the git
-// summary its row badges are (claunch-gax44).
+// summary its row badges are (claunch-gax44), and the cached disk usage
+// (claunch-2oait).
 assert.deepEqual([...called].sort(),
-  ["refreshBeadsBoards", "refreshProjects", "refreshVscode", "refreshWsGitSummary"]);
+  ["refreshBeadsBoards", "refreshProjects", "refreshVscode", "refreshWsGitSummary",
+   "refreshWsUsage"]);
 
 called.length = 0;
 octx.openSettings("vscode");

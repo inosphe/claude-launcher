@@ -922,3 +922,160 @@ def test_history_entry_is_built_off_the_event_loop(world, monkeypatch):
     _with_app(body)
     assert len(threads) == 3, threads
     assert loop_threads[0] not in threads
+
+
+# --------------------------------------------------------------------------- #
+# disk usage (claunch-2oait)
+# --------------------------------------------------------------------------- #
+def _write(path: Path, size: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"x" * size)
+
+
+def test_usage_counts_each_checkout_once(world, tmp_path):
+    """The workspace and every linked worktree get a line; a worktree under
+    the workspace's directory is not counted in the workspace's line too, so
+    the lines add up to the total."""
+    import os
+
+    from claude_launcher import workspace_usage
+
+    a = world["a"]
+    inner = a / ".claude" / "worktrees" / "wt-in"
+    outer = tmp_path / "wt-out"
+    _git(a, "worktree", "add", "-q", "-b", "s1-in", str(inner))
+    _git(a, "worktree", "add", "-q", "-b", "s1-out", str(outer))
+    _write(inner / "big.bin", 100_000)
+    _write(outer / "mid.bin", 30_000)
+    _write(a / "small.bin", 5_000)
+
+    doc = workspace_usage.measure(str(a))
+    by = {os.path.normcase(p["path"]): p for p in doc["parts"]}
+    assert set(by) == {os.path.normcase(str(x)) for x in (a, inner, outer)}
+    assert by[os.path.normcase(str(a))]["workspace"] is True
+    assert by[os.path.normcase(str(inner))]["bytes"] >= 100_000
+    assert by[os.path.normcase(str(outer))]["bytes"] >= 30_000
+    # the inner worktree's 100 KB is not in the workspace's own line
+    assert 5_000 <= by[os.path.normcase(str(a))]["bytes"] < 100_000
+    assert doc["bytes"] == sum(p["bytes"] for p in doc["parts"])
+    assert doc["files"] == sum(p["files"] for p in doc["parts"])
+
+    # from the linked worktree, the main checkout is one of the lines, and
+    # the worktree is still counted once
+    doc2 = workspace_usage.measure(str(inner))
+    assert doc2["parts"][0]["path"] == str(inner) and doc2["parts"][0]["workspace"]
+    assert doc2["bytes"] == doc["bytes"]
+
+
+def test_usage_does_not_follow_links(tmp_path):
+    import os
+
+    from claude_launcher import workspace_usage
+
+    root = tmp_path / "r"
+    _write(root / "f.bin", 1_000)
+    far = tmp_path / "far"
+    _write(far / "huge.bin", 500_000)
+    made = []
+    try:
+        os.symlink(str(far), str(root / "link"), target_is_directory=True)
+        made.append("link")
+    except (OSError, NotImplementedError):
+        pass
+    if os.name == "nt":
+        # a junction needs no privilege, and is what Windows checkouts carry
+        done = subprocess.run(["cmd", "/c", "mklink", "/J", str(root / "junction"), str(far)],
+                              capture_output=True)
+        if done.returncode == 0:
+            made.append("junction")
+    if not made:
+        pytest.skip("this machine can create neither a directory symlink nor a junction")
+    size, files = workspace_usage.walk_size(str(root))
+    assert size < 500_000 and files == 1 + len(made)
+
+
+def _usage(client):
+    async def get():
+        return (await (await client.get("/api/workspaces/usage", headers=AUTH)).json())["workspaces"]
+    return get()
+
+
+async def _usage_settled(client, name="proj"):
+    for _ in range(200):
+        row = (await _usage(client)).get(name) or {}
+        if row and not row.get("running"):
+            return row
+        await asyncio.sleep(0.05)
+    raise AssertionError("the measurement did not finish")
+
+
+def test_usage_measures_in_the_background_and_keeps_the_answer(world, monkeypatch):
+    import threading
+
+    from claude_launcher import workspace_usage
+
+    real = workspace_usage.measure
+    gate = threading.Event()
+    runs = []
+
+    def slow(path):
+        runs.append(path)
+        gate.wait(10)
+        return real(path)
+
+    monkeypatch.setattr(workspace_usage, "measure", slow)
+
+    async def body(client):
+        assert await _usage(client) == {}
+        resp = await client.post("/api/workspaces/proj/usage", headers=AUTH)
+        assert resp.status == 202
+        assert (await _usage(client))["proj"] == {"running": True}
+        # a second press while it runs starts nothing
+        resp = await client.post("/api/workspaces/proj/usage", headers=AUTH)
+        assert resp.status == 202
+        gate.set()
+        row = await _usage_settled(client)
+        assert len(runs) == 1
+        assert row["bytes"] > 0 and row["files"] > 0 and row["at"]
+        assert row["parts"][0]["workspace"] is True
+        assert (await client.post("/api/workspaces/nope/usage", headers=AUTH)).status == 404
+
+    _with_app(body)
+
+    # the cache outlives the daemon: a new app reads the same answer
+    async def again(client):
+        row = (await _usage(client))["proj"]
+        assert row["bytes"] > 0 and "running" not in row
+
+    _with_app(again)
+
+
+def test_usage_failure_keeps_the_last_number(world, monkeypatch):
+    from claude_launcher import workspace_usage
+
+    async def first(client):
+        await client.post("/api/workspaces/proj/usage", headers=AUTH)
+        return await _usage_settled(client)
+
+    rows = []
+
+    async def run_first(client):
+        rows.append(await first(client))
+
+    _with_app(run_first)
+
+    def broken(path):
+        raise OSError("access denied")
+
+    monkeypatch.setattr(workspace_usage, "measure", broken)
+
+    async def second(client):
+        await client.post("/api/workspaces/proj/usage", headers=AUTH)
+        row = await _usage_settled(client)
+        while "error" not in row:
+            await asyncio.sleep(0.05)
+            row = (await _usage(client))["proj"]
+        assert row["error"] == "access denied" and row["failed_at"]
+        assert (row["bytes"], row["at"]) == (rows[0]["bytes"], rows[0]["at"])
+
+    _with_app(second)

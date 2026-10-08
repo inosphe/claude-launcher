@@ -50,6 +50,7 @@ from .. import install_plan
 from .. import session_commits
 from .. import beads_db, beads_meta
 from .. import ghcli, prflow, projects, reposync, reposync_flow, spawn as spawn_mod, store, workspaces
+from .. import workspace_usage
 from .. import plugins, prompt_packs, settings
 from .. import worktree as worktree_mod
 from . import beads as beads_mod, channel, clipboard, connections
@@ -402,6 +403,8 @@ def build_app(
     #: The approval gate a session's repository sync waits behind; see
     #: reposync_gate. Unanswered expires as a refusal.
     app["reposync_gate"] = reposync_gate.ReposyncGate()
+    # workspace name -> the disk-usage measurement running for it (claunch-2oait)
+    app["ws_usage_tasks"] = {}
     app["goto_gate"] = goto_gate.GotoGate(
         app,
         manager=manager,
@@ -569,6 +572,8 @@ def build_app(
     r.add_patch("/api/projects/{name}", h_project_update)
     r.add_delete("/api/projects/{name}", h_project_remove)
     r.add_get("/api/workspaces", h_workspaces)
+    r.add_get("/api/workspaces/usage", h_workspace_usage)
+    r.add_post("/api/workspaces/{name}/usage", h_workspace_usage_measure)
     r.add_get("/api/git", h_git)
     r.add_get("/api/worktrees", h_worktrees)
     r.add_get("/api/worktrees/changes", h_worktree_changes)
@@ -5994,6 +5999,59 @@ def _machine_name(request: web.Request) -> str:
     """This machine as the shared remote's branch namespace knows it: the
     relay name when there is one, as the CLI uses (reposync_flow.relay_identity)."""
     return str((request.app["relay_state"]() or {}).get("name") or socket.gethostname())
+
+
+def _ws_usage_doc(app: web.Application) -> dict:
+    tasks = app["ws_usage_tasks"]
+    cached = workspace_usage.load()
+    out = {}
+    for w in workspaces.list_all():
+        row = dict(cached.get(w.name) or {})
+        if w.name in tasks:
+            row["running"] = True
+        if row:
+            out[w.name] = row
+    return {"workspaces": out}
+
+
+async def h_workspace_usage(request: web.Request) -> web.Response:
+    """The Workspaces page's size badges (claunch-2oait): each workspace's
+    last measurement with the time it was taken, and ``running`` while one
+    is being taken. Reads the cache only; nothing is walked here."""
+    return json_response(await asyncio.to_thread(_ws_usage_doc, request.app))
+
+
+async def h_workspace_usage_measure(request: web.Request) -> web.Response:
+    """Measure one workspace's repository and worktrees in the background
+    (workspace_usage.measure) and keep the answer. Answers at once (202);
+    a measurement already running for it is not started twice."""
+    path, err = _ws_path(request)
+    if err is not None:
+        return err
+    name = request.match_info["name"]
+    tasks = request.app["ws_usage_tasks"]
+    if name not in tasks:
+        tasks[name] = asyncio.ensure_future(_ws_usage_run(tasks, name, path))
+    return json_response({"name": name, "running": True}, status=202)
+
+
+async def _ws_usage_run(tasks: dict, name: str, path: str) -> None:
+    def now() -> str:
+        return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    try:
+        doc = await asyncio.to_thread(workspace_usage.measure, path)
+        await asyncio.to_thread(workspace_usage.save, name, {**doc, "at": now()})
+    except Exception as exc:  # the row says it failed; the last number stays
+        log.warning("disk usage of workspace %s failed: %s", name, exc)
+        prev = (await asyncio.to_thread(workspace_usage.load)).get(name) or {}
+        try:
+            await asyncio.to_thread(workspace_usage.save, name,
+                                    {**prev, "error": str(exc), "failed_at": now()})
+        except OSError:
+            pass
+    finally:
+        tasks.pop(name, None)
 
 
 async def h_reposync_ws_summary(request: web.Request) -> web.Response:

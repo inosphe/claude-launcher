@@ -472,6 +472,7 @@ CHECKS = [
         "workspacesync_check.js",
         "workspacebadges_check.js",
         "wsrefreshall_check.js",
+        "wsusage_check.js",
         "beadsboardsetup_check.js",
         "installsettings_check.js",
         "prompt_packs_check.js",
