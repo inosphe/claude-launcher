@@ -33,14 +33,16 @@ CHILD = (
 # --------------------------------------------------------------------------- #
 # module
 # --------------------------------------------------------------------------- #
-def test_the_catalog_ships_the_packs_and_common_is_the_default():
+def test_the_catalog_ships_the_packs_and_the_defaults():
     ids = [p.id for p in prompt_packs.catalog()]
     assert {"beads", "common", "unreal-operator"} <= set(ids)
     # Every pack the default role mapping names ships, so a role's guidance
     # never depends on a workspace having installed it.
     for packs in prompt_packs.DEFAULT_ROLE_PACKS.values():
         assert set(packs) <= set(ids)
-    assert [p.id for p in prompt_packs.catalog() if p.default] == ["common"]
+    assert [p.id for p in prompt_packs.catalog() if p.default] == [
+        "asking-the-user", "common",
+    ]
     for pack in prompt_packs.catalog():
         assert pack.title and pack.body and not pack.body.startswith("---")
 
@@ -114,10 +116,10 @@ def test_role_packs_default_save_and_clear(home):
 
 
 def test_default_packs_follow_the_headers_until_saved(home):
-    assert prompt_packs.default_packs() == ["common"]
+    assert prompt_packs.default_packs() == ["asking-the-user", "common"]
     assert prompt_packs.set_default_packs(["beads", "common"]) == ["beads", "common"]
     assert prompt_packs.set_default_packs([]) == []
-    assert prompt_packs.set_default_packs(None) == ["common"]
+    assert prompt_packs.set_default_packs(None) == ["asking-the-user", "common"]
 
 
 def test_choose_adds_required_packs_and_names_the_role(tmp_path):
@@ -323,7 +325,7 @@ def test_settings_routes_install_remove_and_save_the_mapping(home, tmp_path):
         try:
             doc = await (await client.get("/api/prompt-packs", headers=BEARER)).json()
             assert doc["role_packs"] == prompt_packs.DEFAULT_ROLE_PACKS
-            assert doc["default_packs"] == ["common"]
+            assert doc["default_packs"] == ["asking-the-user", "common"]
             assert "unreal" in doc["roles"]
             row = next(w for w in doc["workspaces"] if w["name"] == "proj")
             assert {p["id"]: p["status"] for p in row["packs"]}["beads"] == "missing"
@@ -353,7 +355,7 @@ def test_settings_routes_install_remove_and_save_the_mapping(home, tmp_path):
                                           "default_packs": ["beads"]})
             assert resp.status == 400
             # The bad half refused the good half too.
-            assert prompt_packs.default_packs() == ["common"]
+            assert prompt_packs.default_packs() == ["asking-the-user", "common"]
             resp = await client.put("/api/prompt-packs/role-packs", headers=BEARER,
                                     json={"role_packs": {"worker": ["beads"]},
                                           "default_packs": ["beads"]})
