@@ -393,6 +393,9 @@ def node_view(node: ir.Node, prompts: bool = False) -> dict:
         out["title"] = node.get("title")
     if node.executor:
         out["executor"] = list(node.executor)
+    if node.get(ir.FORCE_TARGET):
+        # the run page offers "move here" on it (docs 2.11)
+        out["force_target"] = True
     t = node.type
     if t == ir.T_LOOP:
         for key in ("mode", "max", "guard", "items", "parallel"):

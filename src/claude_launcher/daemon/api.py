@@ -653,6 +653,11 @@ def build_app(
     r.add_post("/api/cflow2/select", h_cflow2_select)
     r.add_post("/api/cflow2/extend", h_cflow2_extend)
     r.add_post("/api/cflow2/approve", h_cflow2_approve)
+    r.add_post("/api/cflow2/nudge", h_cflow2_nudge)
+    r.add_post("/api/cflow2/abort", h_cflow2_abort)
+    r.add_post("/api/cflow2/archive", h_cflow2_archive)
+    r.add_post("/api/cflow2/report", h_cflow2_report)
+    r.add_post("/api/cflow2/move", h_cflow2_move)
     r.add_get("/api/cflow2/asks", h_cflow2_asks)
     r.add_post("/api/cflow2/collection", h_cflow2_collection)
     r.add_post("/api/cflow2/inputs/check", h_cflow2_inputs_check)
@@ -4499,6 +4504,23 @@ NUDGE_CFLOW2_ANSWERED = (
     "cflow2: the user answered your run's open question from the dashboard - "
     "call the flow_status tool and continue"
 )
+#: The run page's Nudge button on a v2 run (the v1 line names /cflow).
+NUDGE_CFLOW2_CONTINUE = (
+    "cflow2: continue your v2 workflow run - call the flow_status tool and drive "
+    "it with flow_report / flow_select"
+)
+NUDGE_CFLOW2_FORCED = (
+    "cflow2: the user moved your run from the dashboard - what you were doing "
+    "there is cancelled; call the flow_status tool and continue from its tasks"
+)
+NUDGE_CFLOW2_REPORTED = (
+    "cflow2: the user reported your run's task from the dashboard - stop working "
+    "on it; call the flow_status tool and continue"
+)
+NUDGE_CFLOW2_ABORTED = (
+    "cflow2: the user aborted your v2 workflow run from the dashboard - stop "
+    "working on it; flow_status shows it aborted"
+)
 
 
 def _scope_profile(manager: SessionManager, scope: str) -> Optional[str]:
@@ -4779,6 +4801,88 @@ async def h_cflow2_approve(request: web.Request) -> web.Response:
     payload = await asyncio.to_thread(cflow2_approve.approve, cwd, scope, body)
     payload["nudge_scheduled_sessions"] = await _nudge_sessions(
         request.app["manager"], cwd, scope, NUDGE_CFLOW2_ANSWERED
+    )
+    return json_response(payload)
+
+
+async def h_cflow2_nudge(request: web.Request) -> web.Response:
+    """Type the v2 continue line into the run's session (the run page's
+    Nudge). Body: cwd, scope."""
+    resolved, err = await _cflow_action_cwd(request)
+    if err:
+        return err
+    cwd, scope, _ = resolved
+    nudged = await _nudge_sessions(request.app["manager"], cwd, scope, NUDGE_CFLOW2_CONTINUE)
+    return json_response({"ok": True, "nudge_scheduled_sessions": nudged})
+
+
+async def h_cflow2_abort(request: web.Request) -> web.Response:
+    """Abort the live v2 run, as the user -- the dashboard half of
+    ``claunch cflow2 abort``. Body: cwd, scope, reason."""
+    resolved, err = await _cflow_action_cwd(request)
+    if err:
+        return err
+    cwd, scope, body = resolved
+    reason = str(body.get("reason") or "").strip() or "aborted from the dashboard"
+    payload = await asyncio.to_thread(cflow2_runtime.abort, reason, cwd=cwd, scope=scope)
+    payload["nudge_scheduled_sessions"] = await _nudge_sessions(
+        request.app["manager"], cwd, scope, NUDGE_CFLOW2_ABORTED
+    )
+    return json_response(payload)
+
+
+async def h_cflow2_archive(request: web.Request) -> web.Response:
+    """Move a finished v2 run into the archive, leaving the slot idle (the
+    run page then offers a start). A live run is refused. Body: cwd, scope."""
+    resolved, err = await _cflow_action_cwd(request)
+    if err:
+        return err
+    cwd, scope, _ = resolved
+    payload = await asyncio.to_thread(cflow2_runtime.archive, cwd=cwd, scope=scope)
+    return json_response(payload)
+
+
+async def h_cflow2_report(request: web.Request) -> web.Response:
+    """A person forces an active task's outcome (docs 2.11): the result is
+    checked against the task's ``returns`` and routed like the driver's
+    report, journaled ``by: user``. Body: cwd, scope, node, outcome, value,
+    reason."""
+    resolved, err = await _cflow_action_cwd(request)
+    if err:
+        return err
+    cwd, scope, body = resolved
+    outcome = str(body.get("outcome") or "")
+    if not outcome:
+        return json_error(400, "'outcome' required in the JSON body")
+    node = str(body.get("node") or "") or None
+    reason = str(body.get("reason") or "").strip()
+    text = "forced by a person from the dashboard" + (f": {reason}" if reason else "")
+    payload = await asyncio.to_thread(
+        cflow2_runtime.report, node, outcome, body.get("value"), text,
+        cwd=cwd, scope=scope, by=cflow2_runtime.CALLER_USER,
+    )
+    payload["nudge_scheduled_sessions"] = await _nudge_sessions(
+        request.app["manager"], cwd, scope, NUDGE_CFLOW2_REPORTED
+    )
+    return json_response(payload)
+
+
+async def h_cflow2_move(request: web.Request) -> web.Response:
+    """A person moves the run to a ``force_target`` node (docs 2.11). Body:
+    cwd, scope, node (the target's id or label), reason."""
+    resolved, err = await _cflow_action_cwd(request)
+    if err:
+        return err
+    cwd, scope, body = resolved
+    target = str(body.get("node") or "")
+    if not target:
+        return json_error(400, "'node' required in the JSON body")
+    reason = str(body.get("reason") or "").strip() or None
+    payload = await asyncio.to_thread(
+        cflow2_runtime.force_move, target, reason, cwd=cwd, scope=scope,
+    )
+    payload["nudge_scheduled_sessions"] = await _nudge_sessions(
+        request.app["manager"], cwd, scope, NUDGE_CFLOW2_FORCED
     )
     return json_response(payload)
 

@@ -36,9 +36,11 @@ const fns = new Function(
   [sliceConst("CFLOW2_ICONS"), slice("cflowVersionTag"), slice("cflowPickValue"),
    slice("cflowPickBody"), slice("cflowPickEntry"), slice("cflow2NodeText"),
    slice("cflow2TreeRows"), slice("wfOptionLabel"), slice("spawnWorkflowEntry"),
-   slice("spawnWorkflowAdmits"), slice("spawnRankWorkflows")].join("\n") +
+   slice("spawnWorkflowAdmits"), slice("spawnRankWorkflows"),
+   slice("cflow2RunActions"), slice("cflow2ForceOutcomes")].join("\n") +
   "\nreturn { cflowVersionTag, cflowPickValue, cflowPickBody, cflowPickEntry," +
-  " cflow2TreeRows, wfOptionLabel, spawnRankWorkflows };"
+  " cflow2TreeRows, wfOptionLabel, spawnRankWorkflows, cflow2RunActions," +
+  " cflow2ForceOutcomes };"
 )();
 
 let failures = 0;
@@ -141,6 +143,36 @@ check("visits are read by label, else id",
 check("a chart with a cycle through `on` is still walked once",
       fns.cflow2TreeRows({ root: "x", nodes: { x: { id: "x", type: "seq",
         children: ["x"], roles: [""] } } }, null).length, 1);
+
+check("a force_target node is flagged on its row",
+      fns.cflow2TreeRows({ root: "r", nodes: {
+        r: { id: "r", type: "seq", children: ["t", "u"], roles: ["", ""] },
+        t: { id: "t", type: "task", label: "t", force_target: true },
+        u: { id: "u", type: "task", label: "u" } } }, null).map((r) => [r.id, r.force]),
+      [["r", false], ["t", true], ["u", false]]);
+
+/* ---- the run page's presses (the v1 bar's counterparts) ---- */
+check("a live run offers nudge and abort",
+      fns.cflow2RunActions({ run: { status: "running" } }, {}), ["nudge", "abort"]);
+check("a run waiting on a person is still live",
+      fns.cflow2RunActions({ run: { status: "waiting_approval" } }, {}), ["nudge", "abort"]);
+check("a finished run offers archive only",
+      fns.cflow2RunActions({ run: { status: "failed" } }, {}), ["archive"]);
+check("the session fold keeps abort and archive to the run page",
+      fns.cflow2RunActions({ run: { status: "running" } }, { archive: false }), ["nudge"]);
+check("nothing for a finished run in the fold",
+      fns.cflow2RunActions({ run: { status: "done" } }, { archive: false }), []);
+
+/* ---- a person's forced outcome ---- */
+check("declared outcomes with their required fields, then fail",
+      fns.cflow2ForceOutcomes({ returns: { ok: { n: "int", note: "str?" }, blocked: {} } }),
+      [{ name: "ok", required: ["n"] }, { name: "blocked", required: [] },
+       { name: "fail", required: [] }]);
+check("a declared fail is not listed twice",
+      fns.cflow2ForceOutcomes({ returns: { ok: {}, fail: { why: "str" } } }).map((o) => o.name),
+      ["ok", "fail"]);
+check("no returns reads as a bare ok",
+      fns.cflow2ForceOutcomes({}).map((o) => o.name), ["ok", "fail"]);
 
 console.log(failures ? `\n${failures} failure(s)` : "cflow2view_check: all assertions passed");
 process.exit(failures ? 1 : 0);
