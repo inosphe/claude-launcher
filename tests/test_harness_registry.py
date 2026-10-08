@@ -159,9 +159,9 @@ def test_packaged_runtime_capabilities_are_harness_native(home):
     assert reg["claude"].skip_permissions_args == [
         "--dangerously-skip-permissions"
     ]
-    assert reg["codex"].skip_permissions_args == [
-        "--approval-mode", "full-auto"
-    ]
+    # codex 0.160 has no --approval-mode ("unexpected argument"); -a is
+    # --ask-for-approval (claunch-w186v)
+    assert reg["codex"].skip_permissions_args == ["-a", "never"]
     assert reg["codex"].full_access_args == [
         "--sandbox", "danger-full-access"
     ]

@@ -32,6 +32,7 @@ from .. import borrowing, harnesses as harness_registry, profile as profile_mod
 from .. import spawn as spawn_mod
 from .. import transcripts
 from .. import auto_compact as auto_compact_mod
+from .. import codex_mode
 from . import codex_sessions, ctxsize, db, harness as harness_mod, pi_sessions
 from . import line_sync, paths, search_records, session_events, session_input
 from .harness import SessionDef
@@ -1934,6 +1935,40 @@ class SessionManager:
             args = tuple(args_list)
         else:
             args = (*old.args, *flags)
+        return await self.redefine(name, args=args)
+
+    async def runtime_mode(self, name: str, yolo: bool, sandbox: bool) -> Session:
+        """Restart a session with its YOLO and Sandbox switches rewritten.
+
+        The detail panel's pair for a harness that declares a sandbox (Codex):
+        approvals and the sandbox are separate options there, and turning one
+        while keeping the other needs both written at once — the skip group
+        alone, appended by :meth:`skip_permissions`, would drop the packaged
+        bypass default and leave the sandbox to whatever Codex defaults to.
+        So the session's own args are rewritten by :func:`codex_mode.
+        runtime_args`, the rule the create forms and the wizard use, and the
+        session relaunches into its conversation like the other restarts.
+
+        Refused while nothing has been stopped: a harness that declares no
+        sandbox pair, and a no-op (the switches already read that way).
+        """
+        session = self.get(name)
+        old = session.sdef
+        entry = harness_mod.harness_registry.get(old.harness)
+        capabilities = entry.to_dict() if entry else {}
+        if not codex_mode.declares_runtime(capabilities):
+            raise ManagerError(
+                f"harness {old.harness!r} declares no sandbox switch"
+            )
+        if codex_mode.runtime_state(old.args, capabilities) == (yolo, sandbox):
+            raise ManagerError(
+                f"session {name!r} already runs with YOLO "
+                f"{'on' if yolo else 'off'} and the sandbox "
+                f"{'on' if sandbox else 'off'}"
+            )
+        args = tuple(codex_mode.runtime_args(
+            old.args, capabilities, yolo=yolo, sandbox=sandbox
+        ))
         return await self.redefine(name, args=args)
 
     async def auto_compact(

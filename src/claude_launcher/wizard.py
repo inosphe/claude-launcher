@@ -49,6 +49,10 @@ from dataclasses import dataclass, field as dataclass_field
 from typing import Any, Dict, List, Optional
 
 from . import worktree
+from .codex_mode import (
+    runtime_args as _codex_runtime_args,
+    runtime_state as _codex_runtime_state,
+)
 from .cflow.model import FILTER_TYPES, RoleFilter
 
 #: Value of the worktree picker's "name it myself" entry. Not a name anyone
@@ -1752,17 +1756,6 @@ def _model_options(choices: List[str], ids: dict) -> List["Option"]:
     ]
 
 
-def _argv_has_group(argv: List[str], group: Any) -> bool:
-    """Whether the contiguous argv ``group`` occurs in ``argv``."""
-    wanted = [str(value) for value in (group or [])]
-    if not wanted:
-        return False
-    return any(
-        argv[i:i + len(wanted)] == wanted
-        for i in range(len(argv) - len(wanted) + 1)
-    )
-
-
 #: The harness whose builtin tools the forms offer as switches. Named, like
 #: the Codex section: the rows are Pi's and carry Pi's label, so another
 #: harness that one day declares ``tools`` gets its own section rather than
@@ -1827,118 +1820,6 @@ def _profile_default_tools(detail: dict, fields: List[CheckboxField]) -> List[st
     if declared is None:
         return [_tool_name(f) for f in fields]
     return [str(name) for name in declared]
-
-
-def _codex_mode_groups(capabilities: dict) -> List[List[str]]:
-    """The argv groups controlled by the Codex runtime panel."""
-    groups = []
-    for key, fallback in (
-        ("mode_conflict_args", ["--dangerously-bypass-approvals-and-sandbox"]),
-        ("skip_permissions_args", ["--approval-mode", "full-auto"]),
-        ("full_access_args", ["--sandbox", "danger-full-access"]),
-        ("full_access_off_args", ["--sandbox", "workspace-write"]),
-    ):
-        group = [str(value) for value in (capabilities.get(key) or fallback)]
-        if group and group not in groups:
-            groups.append(group)
-    return groups
-
-
-def _without_argv_groups(argv: Any, groups: List[List[str]]) -> List[str]:
-    """Remove every complete managed group while preserving other argv."""
-    remaining = [str(value) for value in (argv or []) if value != "--"]
-    i = 0
-    while i < len(remaining):
-        found = next(
-            (
-                group for group in groups
-                if remaining[i:i + len(group)] == group
-            ),
-            None,
-        )
-        if found:
-            del remaining[i:i + len(found)]
-        else:
-            i += 1
-    return remaining
-
-
-def _codex_runtime_state(argv: Any, capabilities: dict) -> "tuple[bool, bool]":
-    """Return ``(yolo, sandbox)`` for one Codex session's own argv.
-
-    An empty session argv still runs with the harness declaration's default
-    YOLO argument.  Once any managed mode group is present, daemon command
-    construction removes that default and the session groups are the complete
-    answer.  Reading the state by the same boundary keeps a Spawn wizard's
-    inherited checkboxes aligned with the command the parent actually runs.
-    """
-    own = [str(value) for value in (argv or []) if value != "--"]
-    groups = _codex_mode_groups(capabilities)
-    managed = any(_argv_has_group(own, group) for group in groups)
-    bypass = capabilities.get("mode_conflict_args") or [
-        "--dangerously-bypass-approvals-and-sandbox"
-    ]
-    declared = capabilities.get("args") or bypass
-    effective = own if managed else [
-        *[str(value) for value in declared],
-        *own,
-    ]
-    skip = capabilities.get("skip_permissions_args") or [
-        "--approval-mode", "full-auto"
-    ]
-    sandbox_on = capabilities.get("full_access_off_args") or [
-        "--sandbox", "workspace-write"
-    ]
-    sandbox_off = capabilities.get("full_access_args") or [
-        "--sandbox", "danger-full-access"
-    ]
-    skipping = _argv_has_group(effective, skip)
-    yolo = _argv_has_group(effective, bypass) or skipping
-    sandbox = _argv_has_group(effective, sandbox_on) or (
-        skipping and not _argv_has_group(effective, sandbox_off)
-    )
-    return yolo, sandbox
-
-
-def _codex_runtime_args(
-    argv: Any,
-    capabilities: dict,
-    *,
-    yolo: bool,
-    sandbox: bool,
-) -> List[str]:
-    """Apply the Codex panel's two switches to arbitrary extra argv.
-
-    The four states are explicit and mutually consistent:
-
-    * YOLO on, sandbox off: bypass approvals and the sandbox;
-    * YOLO on, sandbox on: full-auto approvals with workspace-write;
-    * YOLO off, sandbox off: approval prompts with danger-full-access;
-    * YOLO off, sandbox on: approval prompts with workspace-write.
-
-    Existing managed groups are removed first, so a value typed into Args
-    cannot leave two contradictory Codex modes in the command.
-    """
-    clean = _without_argv_groups(argv, _codex_mode_groups(capabilities))
-    bypass = list(capabilities.get("mode_conflict_args") or [
-        "--dangerously-bypass-approvals-and-sandbox"
-    ])
-    skip = list(capabilities.get("skip_permissions_args") or [
-        "--approval-mode", "full-auto"
-    ])
-    sandbox_on = list(capabilities.get("full_access_off_args") or [
-        "--sandbox", "workspace-write"
-    ])
-    sandbox_off = list(capabilities.get("full_access_args") or [
-        "--sandbox", "danger-full-access"
-    ])
-    if yolo and not sandbox:
-        return [*bypass, *clean]
-    mode = []
-    if yolo:
-        mode.extend(skip)
-    mode.extend(sandbox_on if sandbox else sandbox_off)
-    return [*mode, *clean]
 
 
 class Wizard(Form):
