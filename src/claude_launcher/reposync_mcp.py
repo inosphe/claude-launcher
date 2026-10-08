@@ -88,11 +88,17 @@ def _plan(args: dict, c) -> tuple:
 def _sync(args: dict) -> dict:
     c = flow.client()
     p, card = _plan(args, c)
+    approval = {"mode": "none"}
     if p.pushes:
         gate = flow.authorize(c, card, args.get("request"))
         if not gate["go"]:
             return {**gate, "plan": card}
-    result = reposync.execute(p, scratch=flow.scratch())
+        approval = flow.gate_approval(gate)
+    entry = flow.history_entry(p.repo, kind="master", workspace=card.get("workspace"),
+                               remote=p.remote, branch=p.branch, by=flow.actor(),
+                               approval=approval)
+    result = flow.recorded(entry, lambda: reposync.execute(p, scratch=flow.scratch()),
+                           flow.master_done(p))
     reposync.git(p.repo, "config", reposync.REMOTE_CONFIG, p.remote, check=False)
     board = []
     if result.rewritten:
@@ -122,16 +128,27 @@ def _branch_push(args: dict) -> dict:
     gate = flow.authorize(c, card, args.get("request"))
     if not gate["go"]:
         return {**gate, "plan": card}
-    reposync.publish_branch(repo, remote, branch, me, force_with_lease=force)
+    entry = flow.history_entry(repo, kind="publish", workspace=workspace, remote=remote,
+                               branch=branch, by=flow.actor(), approval=flow.gate_approval(gate),
+                               ref=target, force=force)
+    flow.recorded(entry, lambda: reposync.publish_branch(repo, remote, branch, me,
+                                                         force_with_lease=force),
+                  lambda _ref: {"after": sha, "pushed": True})
     return {"status": "done", "remote": remote, "ref": target, "sha": sha}
 
 
 def _branch_pull(args: dict) -> dict:
     if not args.get("machine") or not args.get("branch"):
         raise ReposyncMcpError("branch_pull needs 'machine' and 'branch'")
-    repo, _ = flow.resolve_repo(args.get("workspace"))
+    repo, workspace = flow.resolve_repo(args.get("workspace"))
     remote = reposync.choose_remote(repo, args.get("remote"))
-    local, sha = reposync.receive_branch(repo, remote, args["machine"], args["branch"])
+    entry = flow.history_entry(repo, kind="pull", workspace=workspace, remote=remote,
+                               branch=args["branch"], by=flow.actor(),
+                               approval={"mode": "none"},
+                               ref=reposync.shared_ref(args["machine"], args["branch"]))
+    local, sha = flow.recorded(
+        entry, lambda: reposync.receive_branch(repo, remote, args["machine"], args["branch"]),
+        lambda got: {"after": got[1], "pushed": False})
     return {"status": "done", "remote": remote, "branch": local, "sha": sha}
 
 

@@ -4543,6 +4543,9 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 /* branches waiting to land (claunch-6p7ri) */
 .ws-sync-unmerged-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 2px 0; }
 .ws-sync-unmerged-row .mono { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* sync history (claunch-iaihd) */
+.ws-sync-history-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 2px 0; font-size: 12px; }
+.ws-sync-history-row .mono { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 /* shared <machine>/<branch> list (claunch-tamel) */
 .ws-sync-shared { margin: 6px 0; }
 .ws-sync-shared h5 { margin: 4px 0; font-size: 12px; font-weight: 600; }
