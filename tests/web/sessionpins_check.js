@@ -43,11 +43,11 @@ function pinsBlock() {
   if (a < 0 || b <= a) throw new Error("cannot locate the rail pins block");
   return src.slice(a, b);
 }
-/* The group helpers the rail needs to draw a section: key, fold state. */
+/* The group helpers the rail needs to draw a section: the open tab's state. */
 function groupBlock() {
-  const a = src.indexOf("const SESSION_GROUP_COLLAPSE_KEY");
+  const a = src.indexOf("const SESSION_GROUP_TAB_KEY");
   const b = src.indexOf("/* ---- rail pins", a);
-  if (a < 0 || b <= a) throw new Error("cannot locate the group fold block");
+  if (a < 0 || b <= a) throw new Error("cannot locate the group tab block");
   return src.slice(a, b);
 }
 /* The filter sync, which is what applies the state filter to the rows. */
@@ -190,7 +190,6 @@ function handleTag() { return null; }
 function railMeshTags() { return []; }
 function sessMeshes() { return []; }
 function sessionMeshGroup() { return "(no mesh)"; }
-function syncSessionGroupStickyOffsets() {}
 `;
 
 const ctx = {};

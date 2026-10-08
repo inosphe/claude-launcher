@@ -103,6 +103,55 @@ option:disabled { color: #6b7280; }
   padding: 4px 7px 2px; color: #8b949e; font-size: 11px; cursor: pointer;
 }
 .session-group-toggle input { margin: 0; accent-color: #58a6ff; }
+/* Group by: Off | Mesh | Workspace, a segmented radio row like List | Grid. */
+.session-group-mode { margin: 0; border: 0; cursor: default; }
+.session-group-mode legend { float: left; padding: 0 4px 0 0; color: #7d8590; }
+.session-group-mode label { position: relative; cursor: pointer; }
+.session-group-mode input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.session-group-mode span {
+  display: block; padding: 2px 8px; border-radius: 4px; color: #7d8590; font-weight: 600;
+}
+.session-group-mode label:hover span { color: #c9d1d9; background: #1d2128; }
+.session-group-mode input:checked + span {
+  color: #e6edf3; background: #243247; box-shadow: inset 0 0 0 1px #385273;
+}
+.session-group-mode input:focus-visible + span { outline: 2px solid #58a6ff; outline-offset: 1px; }
+
+/* One tab per group. A strip wider than the rail scrolls sideways rather
+   than wrapping onto lines the list would lose. */
+.session-group-tabs {
+  flex: none; display: flex; gap: 2px; padding: 4px 6px;
+  overflow-x: auto; overflow-y: hidden; scrollbar-width: thin;
+  background: #11151b; border-bottom: 1px solid #2a2e36;
+}
+.session-group-tabs.view-hidden { display: none; }
+.session-group-tab {
+  flex: none; display: flex; align-items: center; gap: 5px; max-width: 180px;
+  padding: 4px 8px; border-radius: 4px; cursor: pointer; white-space: nowrap;
+  color: #8b949e; font-size: 11px; font-weight: 600;
+}
+.session-group-tab:hover { color: #c9d1d9; background: #1d2128; }
+.session-group-tab.active {
+  color: #e6edf3; background: #243247; box-shadow: inset 0 0 0 1px #385273;
+}
+.session-group-tab:focus-visible { outline: 2px solid #58a6ff; outline-offset: 1px; }
+/* A tab whose group holds a match for the search box. */
+.session-group-tab.search-match { box-shadow: inset 0 -2px 0 #d29922; }
+.session-group-tab.active.search-match {
+  box-shadow: inset 0 0 0 1px #385273, inset 0 -2px 0 #d29922;
+}
+.session-group-tab .session-group-name {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis;
+}
+.session-group-tab .session-group-count {
+  flex: none; color: #7d8590; font-weight: 400; font-variant-numeric: tabular-nums;
+}
+/* The open mesh tab's create button. */
+.session-group-tab .session-group-new {
+  flex: none; background: none; border: none; color: #8b949e;
+  font-size: 13px; line-height: 1; padding: 0 1px; cursor: pointer;
+}
+.session-group-tab .session-group-new:hover { color: #58a6ff; }
 
 /* List | Grid: one segmented radio pair above the filters. */
 .session-view-tabs {
@@ -349,53 +398,22 @@ option:disabled { color: #6b7280; }
 }
 #session-list .session-group:hover { background: transparent; }
 #session-list .session-group-body { margin: 0; padding: 0; list-style: none; }
-/* The stacked lane. `display: contents` takes the group's own box out of
-   layout, which hands its heading the whole list as a containing block —
-   native sticky then holds it for the length of the rail instead of
-   releasing it at its own group's bottom, so every outermost heading is on
-   screen at every scroll position (piled at the top once passed, waiting at
-   the bottom before). The nested levels keep their boxes, and with them the
-   release that stops an inner heading from sitting under the next outer
-   group. Off the stacked class the rail is exactly as it was. */
-#session-list.session-group-stacked > li.session-group.session-group-level-0 {
-  display: contents;
-}
-#session-list .session-group.collapsed > .session-group-body { display: none; }
 #session-list .session-group-heading {
   padding: 6px 10px; color: #a5b4c3; background: #161b22;
   border-bottom: 1px solid #2a2e36; font-size: 11px; font-weight: 600;
-  letter-spacing: .02em; text-transform: none; cursor: pointer;
+  letter-spacing: .02em; text-transform: none;
   display: flex; align-items: center; gap: 5px;
-  position: sticky; top: var(--session-group-sticky-top, 0px);
-  bottom: var(--session-group-sticky-bottom, auto); z-index: 2;
+  position: sticky; top: 0; z-index: 2;
   white-space: nowrap; overflow: hidden;
 }
-#session-list .session-group-heading:hover { color: #e6edf3; background: #1b222c; }
 #session-list .session-group-name {
   flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
 }
-#session-list .session-group-caret {
-  flex: none; width: 9px; color: #6e7681; font-size: 9px; line-height: 1;
-}
-/* How many sessions the group holds — the one fact a shut group still owes
-   its reader. */
+/* How many sessions the group holds. */
 #session-list .session-group-count {
   flex: none; color: #7d8590; font-weight: 400;
   font-variant-numeric: tabular-nums;
 }
-#session-list .session-group-jump {
-  flex: none; background: none; border: none; color: #6e7681;
-  font-size: 11px; line-height: 1; padding: 0 3px; cursor: pointer;
-}
-#session-list .session-group-jump:hover { color: #e6edf3; }
-/* The mesh group create button. */
-#session-list .session-group-new {
-  flex: none; background: none; border: none; color: #6e7681;
-  font-size: 13px; line-height: 1; padding: 0 2px; cursor: pointer;
-}
-#session-list .session-group-new:hover { color: #58a6ff; }
-#session-list .session-group-new.disabled { color: #444c56; cursor: not-allowed; }
-#session-list .session-group-new.disabled:hover { color: #444c56; }
 #session-list .session-group-heading.session-group-level-1 {
   padding-left: 20px; color: #8b949e; background: #131820;
   font-size: 10px; z-index: 1;

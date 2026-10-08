@@ -39,8 +39,8 @@ const check = (name, cond, extra) => {
 
 /* ---- stub rail ----
    A row is what refreshSessions builds: an <li> carrying the session name in
-   its dataset, plus whatever classes the other painters put on it. It hangs
-   off the list directly, or off a group's body when grouping is on. */
+   its dataset, plus whatever classes the other painters put on it. Grouped,
+   only the open tab's rows are in the list. */
 function node(dataset, cls, parentElement) {
   const n = { dataset, classes: new Set(cls || []), scrolls: [], parentElement };
   n.classList = {
@@ -58,33 +58,29 @@ const list = { id: "session-list", parentElement: null,
                  return rail;
                } };
 const row = (name, cls, parent = list) => node({ name }, cls, parent);
-// A group as refreshSessions builds it: div.session-group > ul.session-group-body > li.
-function group(kind, value, collapsed, parent = list) {
-  const g = node({ group: kind, value }, ["session-group"].concat(collapsed ? ["collapsed"] : []), parent);
-  if (collapsed) folded.add(JSON.stringify([kind, value]));
-  g.body = node({}, ["session-group-body"], g);
-  groups.push(g);
-  return g;
-}
 let rail = [];
-let groups = [];
-let folded = new Set();
-let groupSyncs = 0;
-let stickySyncs = 0;
-// The fold state and its painter, as app.js has them: the set is the truth,
-// syncSessionGroupSearch paints every group from it.
-const setSessionGroupCollapsed = (kind, value, shut) => {
-  const key = JSON.stringify([kind, value]);
-  if (shut) folded.add(key); else folded.delete(key);
-  return shut;
+/* The tab strip as renderSessionGroupTabs builds it: one tab per group, each
+   carrying the rows its group holds. Opening a tab redraws the rail from the
+   records in hand (refreshSessions with `cached`), which puts that tab's
+   rows in the list. */
+let tabs = [];
+let opened = [];
+let redraws = [];
+const tab = (group, value, names) => ({
+  dataset: { group, value },
+  _groupRows: names.map((name) => ({ type: "session", session: { name } })),
+});
+const tabBar = { querySelectorAll: (sel) => {
+  if (sel !== ".session-group-tab") throw new Error("unexpected tab selector " + sel);
+  return tabs;
+} };
+const setSessionGroupTab = (group, value) => opened.push([group, value]);
+const refreshSessions = (opts) => {
+  redraws.push(opts);
+  const [group, value] = opened.at(-1);
+  const open = tabs.find((t) => t.dataset.group === group && t.dataset.value === value);
+  rail = open._groupRows.map((r) => row(r.session.name));
 };
-const syncSessionGroupSearch = () => {
-  groupSyncs++;
-  for (const g of groups) {
-    g.classList.toggle("collapsed", folded.has(JSON.stringify([g.dataset.group, g.dataset.value])));
-  }
-};
-const syncSessionGroupStickyOffsets = () => { stickySyncs++; };
 
 /* ---- stub grid ----
    The layout answers where a session sits; the drawn cells are what
@@ -119,7 +115,8 @@ const grid = {
     return cells.find((c) => c.dataset.name === m[1] && !hiddenInFold.has(m[1])) || null;
   },
 };
-const $ = (id) => (id === "session-list" ? list : id === "session-grid" ? grid : null);
+const $ = (id) => (id === "session-list" ? list : id === "session-grid" ? grid
+  : id === "session-group-tabs" ? tabBar : null);
 const CSS = { escape: (s) => s };
 const document = {
   querySelectorAll: (sel) => {
@@ -139,7 +136,7 @@ const only = () => [...timers.keys()][0];
 
 const ctx = {};
 const stubs = {
-  $, CSS, setSessionGroupCollapsed, syncSessionGroupSearch, syncSessionGroupStickyOffsets,
+  $, CSS, setSessionGroupTab, refreshSessions,
   sessionGridLayout, sessionGridPerLine, SESSION_GRID_FOLD_LINES, sessionGridVisible,
   sessionGridUnfolded, renderSessionGrid: (f) => renderSessionGrid(f),
 };
@@ -224,34 +221,35 @@ ctx.setCur("s193");
 check("a row that cannot scroll is still marked rather than throwing",
       ctx.gotoSessionCard() === true && flashed().length === 1, flashed());
 
-/* ---- list view: a row inside a folded group is opened, then scrolled ----
-   A shut group's row is display:none; scrolling it moves nothing. */
+/* ---- list view: a row in a closed tab is opened, then scrolled ----
+   Grouped, the list holds the open tab's rows alone; a session in another
+   group has no row to scroll to until its tab is open. */
 {
-  groups = []; folded = new Set(); groupSyncs = 0; stickySyncs = 0;
-  const outer = group("mesh", "mesh-1", true);
-  const inner = group("workspace", "ws-a", true, outer.body);
-  const other = group("mesh", "mesh-2", true);
-  rail = [row("s127", [], other.body), row("s193", [], inner.body)];
+  tabs = [tab("mesh", "mesh-1", ["s127"]), tab("mesh", "mesh-2", ["s050", "s193"])];
+  opened = [["mesh", "mesh-1"]];
+  redraws = [];
+  rail = [row("s127")];
   ctx.setCur("s193");
-  check("a row in a folded group is still found", ctx.gotoSessionCard() === true);
-  check("the group holding it is opened",
-        !inner.classes.has("collapsed") && !folded.has(JSON.stringify(["workspace", "ws-a"])));
-  check("and so is every folded group above it",
-        !outer.classes.has("collapsed") && !folded.has(JSON.stringify(["mesh", "mesh-1"])));
-  check("a folded group it is not in stays folded",
-        other.classes.has("collapsed") && folded.has(JSON.stringify(["mesh", "mesh-2"])));
-  check("groups are repainted and the sticky stack re-measured",
-        groupSyncs === 1 && stickySyncs === 1, [groupSyncs, stickySyncs]);
+  check("a row in a closed tab is still found", ctx.gotoSessionCard() === true);
+  check("the tab holding it is opened",
+        JSON.stringify(opened.at(-1)) === JSON.stringify(["mesh", "mesh-2"]), opened);
+  check("the rail is redrawn from the records in hand, with no request",
+        redraws.length === 1 && redraws[0] && redraws[0].cached === true, redraws);
   check("then the row is scrolled and marked",
         JSON.stringify(scrolledTo()) === JSON.stringify(["s193"])
         && JSON.stringify(flashed()) === JSON.stringify(["s193"]), [scrolledTo(), flashed()]);
   fire(only());
-  // A row already in view opens nothing and repaints nothing.
-  rail = [row("s193")];
-  groupSyncs = 0;
+  // A row already in the list opens nothing and redraws nothing.
+  redraws = [];
   ctx.gotoSessionCard();
-  check("an unfolded rail is not repainted", groupSyncs === 0, groupSyncs);
+  check("a row already drawn redraws nothing", redraws.length === 0, redraws);
   fire(only());
+  // A session in no tab at all (not in the poll yet) is a no-op.
+  ctx.setCur("s999");
+  check("a session no tab holds is not found", ctx.gotoSessionCard() === false);
+  check("and nothing was opened for it", redraws.length === 0, redraws);
+  tabs = [];
+  ctx.setCur("s193");
 }
 
 /* ---- grid view: the cell is scrolled to and marked, not the hidden list ---- */
