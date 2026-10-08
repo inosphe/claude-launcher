@@ -719,9 +719,9 @@ def build_app(
     r.add_get("/api/reposync/requests/{rid}", h_reposync_request_get)
     r.add_post("/api/reposync/requests/{rid}/approve", h_reposync_request_approve)
     r.add_post("/api/reposync/requests/{rid}/reject", h_reposync_request_reject)
-    # The Workspaces page's Sync panel (claunch-tqm2e). The person pressing
-    # the button in the web UI is the approval; these never go through the
-    # gate above, which exists for sessions that cannot approve themselves.
+    # The Workspaces page's Sync panel (claunch-tqm2e). Its pushes wait
+    # behind the gate above like a session's do: the button files the card,
+    # a person approves it, the panel's next call runs it.
     r.add_get("/api/reposync/workspaces/{name}/status", h_reposync_ws_status)
     r.add_post("/api/reposync/workspaces/{name}/sync", h_reposync_ws_sync)
     r.add_post("/api/reposync/workspaces/{name}/branch-push", h_reposync_ws_branch_push)
@@ -5869,64 +5869,148 @@ async def h_reposync_ws_status(request: web.Request) -> web.Response:
     return json_response(doc)
 
 
-def _ws_sync(path: str, name: str, body: dict) -> Tuple[int, dict]:
+def _ws_authorize(request: web.Request, card: dict, rid: str) -> Optional[web.Response]:
+    """Whether a push the Sync panel asked for may run now. ``None`` means
+    go; anything else is the answer to send instead.
+
+    The panel's button is NOT the approval (claunch-tqm2e, s469's decline of
+    d641c8fe): any holder of the daemon token -- a session included -- can
+    POST here, so a push waits behind the same gate a session's CLI push
+    does (:mod:`daemon.reposync_gate`, ``daemon.reposync_push``). The first
+    call files the card and answers 202 with the request id; a later call
+    naming that id runs only once a person approved it on the card AND the
+    plan still has the tips the card showed (:func:`reposync_flow.approval_matches`).
+    Rejected and expired requests refuse; nothing is pushed on any of them."""
+    if reposync_flow.approval_mode() == reposync_flow.AUTO:
+        return None
+    gate = request.app["reposync_gate"]
+    if not rid:
+        record = gate.submit(session="", plan=card)
+        return json_response({
+            "status": "waiting_approval", "request": record["id"],
+            "deadline": record["deadline"], "plan": card,
+        }, status=202)
+    record = gate.get(rid)
+    if record is None:
+        return json_error(404, f"no reposync request {rid!r}")
+    if record.get("status") == reposync_gate.PENDING:
+        return json_response({
+            "status": "waiting_approval", "request": rid,
+            "deadline": record.get("deadline"), "plan": card,
+        }, status=202)
+    if record.get("status") != reposync_gate.APPROVED:
+        return json_response({
+            "error": f"reposync request {rid} was {record.get('status')}; nothing was pushed",
+            "status": record.get("status"), "request": rid, "plan": card,
+        }, status=409)
+    if not reposync_flow.approval_matches(record, card):
+        return json_response({
+            "error": "the branch or the remote moved after the approval; "
+                     "nothing was pushed -- ask again",
+            "status": "stale_approval", "request": rid, "plan": card,
+        }, status=409)
+    return None
+
+
+def _ws_plan(path: str, name: str, body: dict):
     repo = reposync.toplevel(path)
     remote = str(body.get("remote") or "")
     if not remote:
         raise reposync.SyncError("no remote named -- read the status first")
     p = reposync.plan(repo, remote, str(body.get("branch") or "") or None)
     key = reposync.url_key(reposync.remotes(repo).get(remote, ""))
-    card = reposync_flow.plan_card(p, workspace=name, key=key)
-    # the person confirmed the plan they were shown; a branch or a remote
-    # that moved since is a plan nobody confirmed
-    if p.local != body.get("local") or p.upstream != body.get("upstream"):
-        return 409, {"error": "the branch or the remote moved since the plan was shown",
-                     "stale": True, "plan": card}
-    if p.action == reposync.UP_TO_DATE:
-        return 200, {"ok": True, "plan": card, "new": p.local, "pushed": False}
+    return p, reposync_flow.plan_card(p, workspace=name, key=key)
+
+
+def _ws_execute(p: "reposync.Plan", card: dict) -> dict:
     # the daemon has no session scratch of its own; its rebase worktrees live
     # under the daemon directory, never in the workspace
     result = reposync.execute(p, scratch=str(paths.daemon_dir() / "reposync-scratch"))
-    reposync.git(repo, "config", reposync.REMOTE_CONFIG, remote, check=False)
+    reposync.git(p.repo, "config", reposync.REMOTE_CONFIG, p.remote, check=False)
     board = []
     if result.rewritten:
-        board = reposync_flow.annotate_board(repo, result.rewritten, remote=remote, branch=p.branch)
-    return 200, {"ok": True, "plan": card, **result.to_dict(), "board": board}
+        board = reposync_flow.annotate_board(p.repo, result.rewritten, remote=p.remote, branch=p.branch)
+    return {"ok": True, "plan": card, **result.to_dict(), "board": board}
 
 
 async def h_reposync_ws_sync(request: web.Request) -> web.Response:
-    """Carry out the plan the person confirmed in the Sync panel. The body
-    names the plan's two tips; if either moved, nothing runs (409) and the
-    fresh plan comes back to be confirmed again."""
+    """Carry out the plan the Sync panel showed. The body names the plan's
+    two tips; if either moved, nothing runs (409) and the fresh plan comes
+    back. A plan that pushes goes through the approval gate first
+    (:func:`_ws_authorize`); a fast-forward only moves the local branch and
+    runs at once."""
     path, err = _ws_path(request)
     if err is not None:
         return err
     body = await _json_body(request)
     try:
-        status, doc = await asyncio.to_thread(_ws_sync, path, request.match_info["name"], body)
+        p, card = await asyncio.to_thread(_ws_plan, path, request.match_info["name"], body)
     except reposync.SyncError as exc:
         return json_error(409, str(exc))
-    return json_response(doc, status=status)
+    if p.local != body.get("local") or p.upstream != body.get("upstream"):
+        return json_response({"error": "the branch or the remote moved since the plan was shown",
+                              "stale": True, "plan": card}, status=409)
+    if p.action == reposync.UP_TO_DATE:
+        return json_response({"ok": True, "plan": card, "new": p.local, "pushed": False})
+    if p.pushes:
+        answer = _ws_authorize(request, card, str(body.get("request") or ""))
+        if answer is not None:
+            return answer
+    try:
+        return json_response(await asyncio.to_thread(_ws_execute, p, card))
+    except reposync.SyncError as exc:
+        return json_error(409, str(exc))
+
+
+def _ws_publish_card(path: str, name: str, body: dict, machine: str) -> dict:
+    """The approval card for publishing a work branch. A force-with-lease is
+    a different action than a plain push, so an approval of one does not
+    cover the other (the action is one of the fields an approval binds)."""
+    repo = reposync.toplevel(path)
+    branch = str(body.get("branch") or "")
+    remote = reposync.choose_remote(repo, str(body.get("remote") or "") or None)
+    sha = reposync.git(repo, "rev-parse", "--verify", "-q", f"refs/heads/{branch}", check=False)
+    if not sha:
+        raise reposync.SyncError(f"no local branch {branch!r}")
+    target = reposync.shared_ref(machine, branch)
+    force = bool(body.get("force_with_lease"))
+    return {
+        "repo": repo, "workspace": name, "remote": remote,
+        "remote_key": reposync.url_key(reposync.remotes(repo).get(remote, "")),
+        "branch": target, "action": "publish-force" if force else "publish",
+        "local": sha, "upstream": "", "source": branch,
+        "summary": f"push {branch} {sha[:8]} to {remote}/{target}"
+                   + (" (force-with-lease)" if force else ""),
+    }
 
 
 async def h_reposync_ws_branch_push(request: web.Request) -> web.Response:
-    """Publish a local work branch as ``<this machine>/<branch>``."""
+    """Publish a local work branch as ``<this machine>/<branch>``, behind the
+    approval gate like every push (:func:`_ws_authorize`)."""
     path, err = _ws_path(request)
     if err is not None:
         return err
     body = await _json_body(request)
-    branch = str(body.get("branch") or "")
-    if not branch:
+    if not str(body.get("branch") or ""):
         return json_error(400, "branch is required")
     machine = _machine_name(request)
+    try:
+        card = await asyncio.to_thread(_ws_publish_card, path, request.match_info["name"], body, machine)
+    except reposync.SyncError as exc:
+        return json_error(409, str(exc))
+    answer = _ws_authorize(request, card, str(body.get("request") or ""))
+    if answer is not None:
+        return answer
 
     def run() -> dict:
-        repo = reposync.toplevel(path)
-        remote = reposync.choose_remote(repo, str(body.get("remote") or "") or None)
-        ref = reposync.publish_branch(repo, remote, branch, machine,
-                                      force_with_lease=bool(body.get("force_with_lease")))
-        sha = reposync.git(repo, "rev-parse", f"refs/heads/{branch}")
-        return {"ok": True, "remote": remote, "ref": ref, "sha": sha}
+        # the sha the approval named is what goes out, never a later tip
+        current = reposync.git(card["repo"], "rev-parse", "--verify", "-q",
+                               f"refs/heads/{card['source']}", check=False)
+        if current != card["local"]:
+            raise reposync.SyncError(f"{card['source']} moved after the approval; nothing was pushed")
+        ref = reposync.publish_branch(card["repo"], card["remote"], card["source"], machine,
+                                      force_with_lease=card["action"] == "publish-force")
+        return {"ok": True, "remote": card["remote"], "ref": ref, "sha": card["local"]}
 
     try:
         return json_response(await asyncio.to_thread(run))

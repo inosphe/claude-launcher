@@ -25759,9 +25759,11 @@ function wsRow(w) {
    relay whose clones share an address with this one, and the plan a sync of
    master would carry out. Peers are advisory -- the plan stands on the shared
    remote alone, so a peer that cannot be read is a note, not a stop.
-   The button is the person's approval (the CLI's y/N): the request carries
-   the two tips the person was shown, and the daemon refuses (409) and hands
-   the fresh plan back when either moved in between. */
+   The request carries the two tips the panel showed, and the daemon
+   refuses (409) and hands the fresh plan back when either moved in between.
+   A push is never approved by the panel's own button: it files the same
+   approval card a session's push does, and runs once a person approves it
+   there (wsSyncSend; s469's decline of the first version, claunch-tqm2e). */
 const wsSyncOpen = new Set();
 //: name -> {loading, doc, error, busy, result, pushBranch, force, pullMachine, pullBranch}
 const wsSyncState = new Map();
@@ -25769,7 +25771,7 @@ const wsSyncState = new Map();
 function wsSyncSt(name) {
   if (!wsSyncState.has(name)) {
     wsSyncState.set(name, {
-      loading: false, doc: null, error: "", busy: "", result: null,
+      loading: false, doc: null, error: "", busy: "", result: null, waiting: null,
       pushBranch: "", force: false, pullMachine: "", pullBranch: "",
     });
   }
@@ -25811,85 +25813,111 @@ async function wsSyncRefresh(name, fetchFirst) {
 }
 
 const WS_SYNC_LABEL = { ff: "Fast-forward", push: "Push", rebase: "Rebase & push" };
+const WS_SYNC_PATH = { sync: "sync", push: "branch-push", pull: "branch-pull" };
+//: How often a panel waiting on an approval card re-reads it.
+const WS_SYNC_POLL_MS = 2500;
+
+/* One request of the panel. A push answers 202 with an approval request:
+   the card is on the gate (the notices strip), and the panel waits for a
+   person to answer it there, then sends the same body again with the
+   request id. The panel's own button never approves anything -- the daemon
+   runs a push only for an approved card whose tips still match. */
+async function wsSyncSend(name, kind, body) {
+  const st = wsSyncSt(name);
+  st.busy = kind;
+  st.error = "";
+  st.result = null;
+  renderWorkspaces();
+  let resp, doc;
+  try {
+    resp = await api(
+      `/api/reposync/workspaces/${encodeURIComponent(name)}/${WS_SYNC_PATH[kind]}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    doc = await resp.json().catch(() => ({}));
+  } catch (err) {
+    st.busy = "";
+    st.error = String(err.message || err);
+    if (wsOpen) renderWorkspaces();
+    return;
+  }
+  if (resp.status === 202 && doc.request) {
+    st.waiting = { kind, body, request: doc.request, deadline: doc.deadline || "" };
+    if (typeof refreshReposyncGate === "function") refreshReposyncGate();
+    setTimeout(() => wsSyncWait(name), WS_SYNC_POLL_MS);
+    if (wsOpen) renderWorkspaces();
+    return;
+  }
+  st.busy = "";
+  st.waiting = null;
+  if (resp.status === 409 && doc.stale) {
+    if (st.doc) st.doc.plan = doc.plan;
+    st.error = "The branch or the remote moved since this plan was shown. " +
+      "Review the new plan below and press the button again.";
+  } else if (!resp.ok) {
+    st.error = doc.error || `HTTP ${resp.status}`;
+  } else {
+    st.result = { kind, doc };
+  }
+  if (st.result && kind !== "push") await wsSyncRefresh(name, false);
+  else if (wsOpen) renderWorkspaces();
+}
+
+/* Read the waiting card until a person answers it. Approved: send the same
+   request again with its id (the daemon re-checks the tips). Rejected or
+   expired: nothing was pushed, and the panel says so. */
+async function wsSyncWait(name) {
+  const st = wsSyncSt(name);
+  const w = st.waiting;
+  if (!w) return;
+  let rec = null;
+  try {
+    const resp = await api(`/api/reposync/requests/${encodeURIComponent(w.request)}`);
+    if (resp.ok) rec = ((await resp.json()) || {}).request || null;
+  } catch {
+    rec = null;
+  }
+  if (st.waiting !== w) return;   // answered or abandoned meanwhile
+  if (!rec || rec.status === "pending") {
+    setTimeout(() => wsSyncWait(name), WS_SYNC_POLL_MS);
+    return;
+  }
+  st.waiting = null;
+  if (rec.status === "approved") {
+    await wsSyncSend(name, w.kind, { ...w.body, request: w.request });
+    return;
+  }
+  st.busy = "";
+  st.error = `The approval card was ${rec.status}; nothing was pushed.`;
+  if (wsOpen) renderWorkspaces();
+}
 
 async function wsSyncRun(name) {
   const st = wsSyncSt(name);
   const plan = st.doc && st.doc.plan;
   if (!plan || plan.action === "up-to-date") return;
-  const lines = [
-    `${name}: ${plan.branch} ${plan.local.slice(0, 8)} vs ` +
-      `${plan.remote}/${plan.branch} ${plan.upstream.slice(0, 8)}`,
-    plan.summary,
-  ];
-  if ((plan.affected || []).length) {
-    lines.push("", "Branches left on the old commits (restack them yourself):",
-               ...plan.affected.map((b) => `  ${b}`));
-  }
-  if (!confirm(`${WS_SYNC_LABEL[plan.action] || plan.action}?\n\n${lines.join("\n")}`)) return;
-  st.busy = "sync";
-  st.error = "";
-  st.result = null;
-  renderWorkspaces();
-  try {
-    const resp = await api(`/api/reposync/workspaces/${encodeURIComponent(name)}/sync`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        remote: plan.remote, branch: plan.branch, local: plan.local, upstream: plan.upstream,
-      }),
-    });
-    const doc = await resp.json().catch(() => ({}));
-    if (resp.status === 409 && doc.stale) {
-      st.doc.plan = doc.plan;
-      st.error = "The branch or the remote moved since this plan was shown. " +
-        "Review the new plan below and press the button again.";
-    } else if (!resp.ok) {
-      st.error = doc.error || `HTTP ${resp.status}`;
-    } else {
-      st.result = { kind: "sync", doc };
-    }
-  } catch (err) {
-    st.error = String(err.message || err);
-  }
-  st.busy = "";
-  if (st.result) await wsSyncRefresh(name, false);
-  else if (wsOpen) renderWorkspaces();
+  // A fast-forward only moves the local branch and runs at once, so it asks
+  // here; a push asks on the approval card instead.
+  if (plan.action === "ff" && !confirm(
+    `Fast-forward ${name}: ${plan.branch} ${plan.local.slice(0, 8)} → ` +
+    `${plan.remote}/${plan.branch} ${plan.upstream.slice(0, 8)}?\n\n${plan.summary}`
+  )) return;
+  await wsSyncSend(name, "sync", {
+    remote: plan.remote, branch: plan.branch, local: plan.local, upstream: plan.upstream,
+  });
 }
 
 async function wsSyncBranch(name, kind) {
   const st = wsSyncSt(name);
-  const machine = (st.doc && st.doc.machine) || "this machine";
-  let body;
   if (kind === "push") {
     if (!st.pushBranch) return;
-    body = { branch: st.pushBranch, force_with_lease: !!st.force };
-    if (!confirm(`Push ${st.pushBranch} to the shared remote as ` +
-                 `${machine}/${st.pushBranch}?` +
-                 (st.force ? "\n\nforce-with-lease: a rewrite of the published branch replaces it." : ""))) return;
-  } else {
-    if (!st.pullMachine || !st.pullBranch) return;
-    body = { machine: st.pullMachine, branch: st.pullBranch };
+    await wsSyncSend(name, "push", { branch: st.pushBranch, force_with_lease: !!st.force });
+    return;
   }
-  st.busy = kind;
-  st.error = "";
-  st.result = null;
-  renderWorkspaces();
-  try {
-    const resp = await api(
-      `/api/reposync/workspaces/${encodeURIComponent(name)}/branch-${kind}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-    const doc = await resp.json().catch(() => ({}));
-    if (!resp.ok) st.error = doc.error || `HTTP ${resp.status}`;
-    else st.result = { kind, doc };
-  } catch (err) {
-    st.error = String(err.message || err);
-  }
-  st.busy = "";
-  if (st.result && kind === "pull") await wsSyncRefresh(name, false);
-  else if (wsOpen) renderWorkspaces();
+  if (!st.pullMachine || !st.pullBranch) return;
+  await wsSyncSend(name, "pull", { machine: st.pullMachine, branch: st.pullBranch });
 }
 
 function wsSyncPlanLine(plan) {
@@ -25968,6 +25996,12 @@ function wsSyncPanel(w) {
   panel.appendChild(head);
 
   if (st.error) panel.appendChild(el("p", "wf-note wf-warning", st.error));
+  if (st.waiting) {
+    const until = st.waiting.deadline ? ` (expires ${st.waiting.deadline.slice(11, 16)} UTC)` : "";
+    panel.appendChild(el("p", "wf-note ws-sync-waiting",
+      `Waiting for approval: answer the "repository sync wants to push" card ` +
+      `at the top of the page${until}. Nothing is pushed until it is approved.`));
+  }
   if (!doc) return panel;
   if (doc.error) {
     panel.appendChild(el("p", "wf-note wf-warning", doc.error));
@@ -25991,7 +26025,7 @@ function wsSyncPanel(w) {
         `left on the old commits: ${doc.plan.affected.join(", ")}`));
     }
     const go = el("button", "wf-btn",
-      st.busy === "sync" ? "Syncing…" : (WS_SYNC_LABEL[doc.plan.action] || "Up to date"));
+      st.busy === "sync" ? (st.waiting ? "Waiting for approval…" : "Syncing…") : (WS_SYNC_LABEL[doc.plan.action] || "Up to date"));
     go.disabled = !!st.busy || st.loading || doc.plan.action === "up-to-date";
     go.addEventListener("click", () => wsSyncRun(w.name));
     master.appendChild(go);
@@ -26021,7 +26055,7 @@ function wsSyncPanel(w) {
   force.appendChild(box);
   force.appendChild(document.createTextNode(" force-with-lease"));
   pushRow.appendChild(force);
-  const push = el("button", "wf-btn", st.busy === "push" ? "Pushing…" : `Push as ${doc.machine}/…`);
+  const push = el("button", "wf-btn", st.busy === "push" ? (st.waiting ? "Waiting for approval…" : "Pushing…") : `Push as ${doc.machine}/…`);
   push.disabled = !!st.busy || !(doc.branches || []).length;
   push.addEventListener("click", () => { st.pushBranch = pick.value; wsSyncBranch(w.name, "push"); });
   pushRow.appendChild(push);

@@ -4305,6 +4305,7 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .ws-sync-peers { border-top: 1px solid #22262d; padding-top: 8px; }
 .ws-sync-peer { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; padding: 3px 0; }
 .ws-sync-peer .ws-name { font-size: 13px; }
+.ws-sync-waiting { color: #d29922; }
 .ws-sync-result { padding: 6px 8px; background: #1b2a1f; border-radius: 4px;
   overflow-wrap: anywhere; }
 

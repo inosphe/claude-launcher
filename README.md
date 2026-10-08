@@ -2406,17 +2406,26 @@ each workspace row has a **Sync** button that opens a panel with its remotes,
 the relay peers whose clones share an address with it (their master tip
 against the remote, and their unpushed count as they last fetched), and the
 master plan with one button for its action (Fast-forward / Push /
-Rebase & push). Pressing it is the person's approval, as the y/N is at a
-terminal, so it does not go through the approval card. The request carries
-the two tips the panel showed; if the local branch or the remote moved in
-between, nothing runs and the fresh plan is shown to be confirmed again. The
-panel also pushes a local work branch as `<this machine>/<branch>` and pulls
-another machine's (fast-forward only). Peers are advisory throughout: with no
+Rebase & push). The request carries the two tips the panel showed; if the
+local branch or the remote moved in between, nothing runs and the fresh plan
+is shown instead. A push from the panel goes through the same approval card
+a session's push does (`daemon.reposync_push`): the button files the card,
+the panel waits, and the push runs only after a person approves the card and
+only if the tips still match. The button itself approves nothing, since
+anything holding the daemon token can call these routes. A fast-forward
+pushes nothing and runs at once. The panel also pushes a local work branch
+as `<this machine>/<branch>` (behind the same card; a force-with-lease is
+approved separately from a plain push) and pulls another machine's
+(fast-forward only, no card). Peers are advisory throughout: with no
 relay, or a peer whose daemon predates reposync, the panel says so and still
 plans against the shared remote. HTTP: `GET
 /api/reposync/workspaces/<name>/status[?fetch=0]`, `POST .../sync`
-(`{remote, branch, local, upstream}`), `POST .../branch-push`
-(`{branch, force_with_lease}`), `POST .../branch-pull` (`{machine, branch}`).
+(`{remote, branch, local, upstream[, request]}`), `POST .../branch-push`
+(`{branch, force_with_lease[, request]}`), `POST .../branch-pull`
+(`{machine, branch}`). A push without `request` answers 202 with the id of
+the card it filed; the same body with that `request` runs once the card is
+approved (`GET /api/reposync/requests/<id>` says when), and answers 409 when
+the card was rejected or expired or the tips moved after the approval.
 
 ### VS Code in the browser (one code-server per workspace and worktree)
 
