@@ -326,6 +326,24 @@ def _peer_tip(row: dict, branch: str) -> Optional[str]:
     return got or None     # an older peer reported the bare sha
 
 
+def plan_facts(repo: str, p: reposync.Plan, rows: List[dict],
+               machine: Optional[str]) -> dict:
+    """What a status shows beside the plan ``p`` (claunch-1cvq4): each peer
+    row gains ``distance`` (its master tip against ours, :func:`peer_distance`),
+    and the answer carries ``shared`` (:func:`shared_branches` on the planned
+    remote, leaving out ``machine``'s own prefix) and ``unmerged``
+    (:func:`unmerged_branches` against the remote's master). The Sync panel,
+    ``claunch reposync status`` and the MCP tool's status all read it here.
+    Call it after the plan: when the plan fetched, that fetch is what brought
+    the refs these read."""
+    for row in rows:
+        row["distance"] = peer_distance(repo, p.local, _peer_tip(row, p.branch))
+    return {
+        "shared": shared_branches(repo, p.remote, machine, {r["machine"] for r in rows}),
+        "unmerged": unmerged_branches(repo, p.upstream or p.local, skip=[p.branch]),
+    }
+
+
 def workspace_status(path: str, workspace: Optional[str], peers: Dict[str, List[dict]],
                      problems: List[str], *, do_fetch: bool, remote: Optional[str] = None,
                      branch: Optional[str] = None, machine: Optional[str] = None) -> dict:
@@ -358,11 +376,7 @@ def workspace_status(path: str, workspace: Optional[str], peers: Dict[str, List[
         return out
     key = reposync.url_key(reposync.remotes(repo).get(name, ""))
     out["plan"] = plan_card(p, workspace=workspace, key=key)
-    for row in rows:
-        row["distance"] = peer_distance(repo, p.local, _peer_tip(row, p.branch))
-    # after the plan: with do_fetch its fetch is what brought these refs in
-    out["shared"] = shared_branches(repo, name, machine, {r["machine"] for r in rows})
-    out["unmerged"] = unmerged_branches(repo, p.upstream or p.local, skip=[p.branch])
+    out.update(plan_facts(repo, p, rows, machine))
     return out
 
 

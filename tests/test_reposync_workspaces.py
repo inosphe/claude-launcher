@@ -561,6 +561,93 @@ def test_peer_distance_behind_and_diverged(world):
     assert reposync_flow.peer_distance(str(a), mine, None)["state"] == "unknown"
 
 
+# --- The same facts from the CLI and the MCP status (claunch-1cvq4) -------
+
+
+def _status_world(world, monkeypatch):
+    """pc-b pushed a master commit and published pc-b/s2-y; this clone has an
+    unlanded, stamped branch. The relay is stood in for at the flow's seams."""
+    from claude_launcher import reposync_flow
+
+    a, b = world["a"], world["b"]
+    theirs = _commit(b, "theirs.txt")
+    _git(b, "push", "-q", "origin", "master")
+    _git(b, "switch", "-q", "-c", "s2-y")
+    pub = _commit(b, "pub.txt")
+    _git(b, "push", "-q", "origin", "s2-y:refs/heads/pc-b/s2-y")
+    _git(a, "switch", "-q", "-c", "s1-open")
+    _git(a, "commit", "-q", "--allow-empty", "-m", "open work\n\nClaunch-Session: s42")
+    _git(a, "switch", "-q", "master")
+    _git(a, "remote", "add", "gh", "https://git.example/Org/Proj.git")
+    shared = [{"name": "up", "key": "git.example/org/proj"}]
+    peers = {"pc-b": [{"workspace": "proj", "remotes": shared,
+                       "branches": {"master": {"sha": theirs, "tracking": []}}}]}
+    monkeypatch.setattr(reposync_flow, "client", lambda: object())
+    monkeypatch.setattr(reposync_flow, "relay_identity", lambda c: ("pc-a", ["pc-b"]))
+    monkeypatch.setattr(reposync_flow, "peer_repos", lambda c, machine: peers[machine])
+    return theirs, pub
+
+
+def _status_args(**kw):
+    import argparse
+    base = dict(workspace="proj", remote="origin", branch=None, peer=None,
+                no_fetch=False, json=False)
+    return argparse.Namespace(**{**base, **kw})
+
+
+def test_cli_status_reports_peer_distance_shared_and_unmerged(world, monkeypatch, capsys):
+    import json
+    from claude_launcher import cli_reposync
+
+    theirs, pub = _status_world(world, monkeypatch)
+    assert cli_reposync._cmd_status(_status_args(json=True)) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["fetched"] is True and doc["plan"]["action"] == "ff"
+    [peer] = doc["peers"]
+    assert peer["distance"] == {"state": "ahead", "theirs_only": 1, "ours_only": 0}
+    [row] = doc["shared"]
+    assert (row["ref"], row["sha"], row["state"], row["peer"]) == ("pc-b/s2-y", pub, "new", True)
+    [open_] = doc["unmerged"]
+    assert (open_["branch"], open_["ahead"], open_["session"]) == ("s1-open", 1, "s42")
+
+    assert cli_reposync._cmd_status(_status_args()) == 0
+    text = capsys.readouterr().out
+    assert "peer pc-b master: ahead (+1 theirs, +0 ours)" in text
+    assert "shared branches on origin (1):" in text
+    assert "pc-b/s2-y" in text and pub[:8] in text
+    assert "local branches origin/master does not hold (1):" in text
+    assert "s1-open" in text and "[s42]" in text
+
+
+def test_cli_status_without_fetch_plans_on_the_refs_as_they_are(world, monkeypatch, capsys):
+    import json
+    from claude_launcher import cli_reposync
+
+    _status_world(world, monkeypatch)
+    assert cli_reposync._cmd_status(_status_args(no_fetch=True, json=True)) == 0
+    doc = json.loads(capsys.readouterr().out)
+    # nothing fetched: the push and the published branch are not here yet
+    assert doc["fetched"] is False and doc["plan"]["action"] == "up-to-date"
+    assert doc["peers"][0]["distance"]["state"] == "unknown"
+    assert doc["shared"] == []
+    assert [r["branch"] for r in doc["unmerged"]] == ["s1-open"]
+    assert cli_reposync._cmd_status(_status_args(no_fetch=True)) == 0
+    assert "(as of the last fetch)" in capsys.readouterr().out
+
+
+def test_mcp_status_carries_the_same_facts_without_fetching(world, monkeypatch):
+    from claude_launcher import reposync_mcp
+
+    theirs, pub = _status_world(world, monkeypatch)
+    _git(world["a"], "fetch", "-q", "origin")        # status itself does not fetch
+    doc = reposync_mcp.call_tool("repo_sync", {"action": "status", "workspace": "proj",
+                                               "remote": "origin"})
+    assert doc["fetched"] is False and doc["plan"]["action"] == "ff"
+    assert doc["peers"][0]["distance"]["state"] == "ahead"
+    assert [r["ref"] for r in doc["shared"]] == ["pc-b/s2-y"]
+    assert [(r["branch"], r["session"]) for r in doc["unmerged"]] == [("s1-open", "s42")]
+
+
 # --- Worktrees per workspace (claunch-kjjta) ------------------------------
 
 
