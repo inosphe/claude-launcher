@@ -123,7 +123,8 @@ vm.runInContext(
        "wsSyncBranch", "wsSyncPlanLine", "wsSyncPeers", "wsSyncResult",
        "wsSyncPanel", "wsSyncPullBody", "wsSyncShared", "wsSyncUnmerged",
        "wsPeerDistanceText", "wsSyncHistory", "wsHistoryApproval"].map(slice),
-   ...["wsSyncAgentBody", "wsSyncAgentBlocked", "wsSyncAgentControls"].map(slice),
+   ...["wsSyncAgentBody", "wsSyncAgentBlocked", "wsSyncAgentControls", "wsSyncPromptText",
+       "wsSyncPromptBody", "wsSyncPreviewPrompt"].map(slice),
    "globalThis.__st = wsSyncSt;"].join("\n"),
   ctx);
 
@@ -457,5 +458,24 @@ async function tick() {
   await ctx.wsSyncRun("proj");
   assert.equal(posts().length, 0, "an exited parent is not a valid choice");
 
+  st.agentMode = "on_failure";
+  const prompt = "Use git rebase --rebase-merges\n<do not interpret this as HTML>";
+  reply = () => ({ status: 200, body: { prompt } });
+  calls.length = 0;
+  await ctx.wsSyncPreviewPrompt("proj", "sync");
+  assert.equal(posts()[0].url, "/api/reposync/workspaces/proj/agent-preview");
+  assert.equal(posts()[0].body.local, st.doc.plan.local);
+  nodes = walk(ctx.wsSyncPanel(W));
+  assert.ok(nodes.some((n) => n.tag === "pre" && n.text === prompt));
+  await ctx.wsSyncPreviewPrompt("proj", "push");
+  assert.equal(posts()[1].body.branch, st.pushBranch);
+  st.pushBranch = "changed-branch";
+  nodes = walk(ctx.wsSyncPanel(W));
+  assert.ok(!nodes.some((n) => n.tag === "pre" && n.text === prompt), "hide stale branch preview");
+  reply = () => ({ status: 409, body: { error: "Refresh the changed plan" } });
+  await ctx.wsSyncPreviewPrompt("proj", "sync");
+  assert.equal(st.agentPreview.error, "Refresh the changed plan");
+  delegated.agent.prompt = prompt + "\nconflict: file.txt";
+  assert.ok(walk(ctx.wsSyncResult({ doc: delegated })).some((n) => n.tag === "pre" && n.text === delegated.agent.prompt));
   console.log("workspacesync_check ok");
 })().catch((err) => { console.error(err); process.exit(1); });
