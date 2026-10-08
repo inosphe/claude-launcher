@@ -494,34 +494,65 @@ def default_packs(doc: Optional[dict] = None) -> List[str]:
     return [p.id for p in catalog() if p.default]
 
 
-def set_default_packs(ids) -> List[str]:
-    """Validate and save the default list; ``None`` restores the headers'."""
-    from . import store
+def _clean_ids(ids, what: str) -> List[str]:
+    if isinstance(ids, str):
+        ids = [part for part in ids.split(",") if part.strip()]
+    if not isinstance(ids, list):
+        raise PackError(f"{what} must be a list of pack ids")
+    return [check_id(i) for i in dict.fromkeys(str(i).strip() for i in ids)]
 
-    if ids is None:
-        clean = None
-    else:
-        if isinstance(ids, str):
-            ids = [part for part in ids.split(",") if part.strip()]
-        if not isinstance(ids, list):
-            raise PackError("default packs must be a list of pack ids")
-        clean = [check_id(i) for i in dict.fromkeys(str(i).strip() for i in ids)]
+
+def _save_list(key: str, clean: Optional[List[str]]) -> None:
+    """Write one list of the settings block; ``None`` drops the key."""
+    from . import store
 
     def _mutate(doc: dict) -> None:
         block = doc.get(CONFIG_KEY)
         if not isinstance(block, dict):
             block = {}
         if clean is None:
-            block.pop("default_packs", None)
+            block.pop(key, None)
         else:
-            block["default_packs"] = clean
+            block[key] = clean
         if block:
             doc[CONFIG_KEY] = block
         else:
             doc.pop(CONFIG_KEY, None)
 
     store.update(_mutate)
+
+
+def set_default_packs(ids) -> List[str]:
+    """Validate and save the default list; ``None`` restores the headers'."""
+    _save_list("default_packs",
+               None if ids is None else _clean_ids(ids, "default packs"))
     return default_packs()
+
+
+def always_packs(doc: Optional[dict] = None) -> List[str]:
+    """The pack ids the create form ticks on every opening.
+
+    Saved in Settings as ``prompt_packs.always_packs`` (empty until then).
+    Unlike :func:`default_packs`, an untick does not outlive the opening it
+    was made in: New session and Spawn child start with these ticked again,
+    whatever the last form or a "Spawn same setup" seed left. A pack the
+    workspace has not installed is ticked as claunch's copy.
+    """
+    from . import store
+
+    doc = store.load() if doc is None else doc
+    block = doc.get(CONFIG_KEY)
+    raw = block.get("always_packs") if isinstance(block, dict) else None
+    if not isinstance(raw, list):
+        return []
+    return [i for i in dict.fromkeys(str(x) for x in raw) if _ID.match(i)]
+
+
+def set_always_packs(ids) -> List[str]:
+    """Validate and save the every-opening list; ``None`` empties it."""
+    _save_list("always_packs",
+               None if ids is None else _clean_ids(ids, "always packs"))
+    return always_packs()
 
 
 def required_for(

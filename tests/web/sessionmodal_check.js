@@ -317,6 +317,7 @@ function refreshRoles(mesh) { state.calls.push("roles:" + mesh); }
 function refreshIssueChoices() { state.calls.push("issues"); }
 function beadsMode() { return "new"; }
 function refreshParentChoices() { state.calls.push("parents"); }
+function promptPackFormOpened() { state.calls.push("packs-opened"); }
 function syncOnboardPickers() { state.calls.push("pickers"); }
 function go(hash) { state.calls.push("go:" + hash); }
 function applySessionCwdChange() { state.calls.push("cwd-change"); }
@@ -397,7 +398,11 @@ async function main() {
   ctx.tab("spawn");
   check("Spawn restores its chosen parent", form.parent.value, "lead");
   check("sub-tabs preserve typed input", [form.task.value, form.name.value], ["read the board", "kid"]);
+  check("the page's New session counts as an opening of the packs",
+        calls.filter((c) => c === "packs-opened").length, 1);
   await ctx.spawn("lead");
+  check("...and so does the Spawn child box (Settings' every-opening packs)",
+        calls.filter((c) => c === "packs-opened").length, 2);
   check("rail Spawn borrows the same form", ids["modal-body"].kids.map(k => k.id), ["new-session"]);
   check("Spawn dialog has no New session tab",
         [ids["new-tabs"].classes.has("hidden"), ids["new-tab-new"].classes.has("hidden")], [true, true]);

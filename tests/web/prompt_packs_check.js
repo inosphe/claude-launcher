@@ -79,6 +79,9 @@ const env = new Function(
    `let newPackOffer = null, newPackOfferFor = null, newPackTicks = new Map();`,
    `let newDaemonPromptTick = null, newPackRolesOpen = false, newPackPreview = null;`,
    `let newPackRolesShown = new Set();`,
+   `let newPackAlwaysPending = false, pendingSeedPacks = null;`,
+   slice("newPackAlways"), slice("promptPackFormOpened"),
+   slice("refreshPromptPackOffer"), slice("applyPendingPackSeed"),
    slice("newDaemonPromptWanted"),
    slice("newSubrolesMeshless"), slice("newSubroles"), slice("newPrimaryRole"),
    slice("newRequiredPacks"), slice("newPackTicked"),
@@ -96,6 +99,8 @@ const env = new Function(
       preview: () => newPackPreview,
       origin: packPreviewOrigin,
       required: newRequiredPacks, primary: newPrimaryRole,
+      opened: promptPackFormOpened,
+      seed: (ids) => { pendingSeedPacks = ids; applyPendingPackSeed(); },
     };`].join("\n")
 )(
   (id) => (id === "new-session" ? form : id === "new-packs-row" ? row : null),
@@ -458,6 +463,53 @@ check("each origin is named the way the chips name it", () => {
   assert.equal(env.origin({ source: "daemon" }, "proj"), "this daemon's prompt, every session");
 });
 
+check("Settings' every-opening packs are ticked again each time the form opens", async () => {
+  const ALWAYS = { ...OFFER, always_packs: ["common", "unreal-operator"] };
+  answers["/api/prompt-packs/offer"] = [200, ALWAYS];
+  env.ticks().clear();
+  env.offer = OFFER;
+  env.render();
+  newTick("common", false);
+  assert.deepEqual(env.packs(form), []);
+  // An opening: the offer is read again, and the last opening's untick of an
+  // every-opening pack is forgotten. One not installed goes in as claunch's.
+  fetched.length = 0;
+  env.opened();
+  await flush();
+  assert.equal(fetched.filter((u) => u.startsWith("/api/prompt-packs/offer")).length, 1);
+  const ticked = () => boxes().filter((b) => b.checked).map((b) => b.value);
+  assert.deepEqual(ticked(), ["common", "unreal-operator"]);
+  assert.deepEqual(env.packs(form), ["common", "unreal-operator"]);
+  assert.match(summary(), /common \(ticked, every opening\)/);
+  assert.match(summary(), /unreal-operator \(ticked, every opening, claunch's copy\)/);
+  // Within one opening the box is still the operator's to untick.
+  newTick("common", false);
+  env.render();
+  assert.deepEqual(env.packs(form), ["unreal-operator"]);
+  // The next opening ticks it again; a pack outside the list keeps its tick.
+  newTick("beads", true);
+  env.opened();
+  await flush();
+  assert.deepEqual(env.packs(form), ["beads", "common", "unreal-operator"]);
+  // A "Spawn same setup" seed that left them out does not untick them.
+  env.seed(["beads"]);
+  assert.deepEqual(env.packs(form), ["beads", "common", "unreal-operator"]);
+  env.seed([]);
+  assert.deepEqual(env.packs(form), ["common", "unreal-operator"]);
+  // An empty list changes nothing: the untick of a default pack is kept.
+  answers["/api/prompt-packs/offer"] = [200, OFFER];
+  env.ticks().clear();
+  env.render();
+  newTick("common", false);
+  env.opened();
+  await flush();
+  assert.deepEqual(env.packs(form), []);
+  delete answers["/api/prompt-packs/offer"];
+  env.ticks().clear();
+  env.offer = OFFER;
+  env.render();
+});
+
 function newTick(id, on) {
   const box = boxes().find((b) => b.value === id);
   box.checked = on;
@@ -557,7 +609,36 @@ check("the settings draft starts from the saved mapping", () => {
   card.card();
   assert.deepEqual(card.draft(), {
     role_packs: { unreal: ["unreal-operator"] }, default_packs: ["common"],
+    always_packs: [],
   });
+});
+
+check("the every-opening list is its own checkboxes and is saved with the rest", async () => {
+  card.doc = { ...DOC, always_packs: ["beads"] };
+  // The previous check left a draft; discarding it reads the doc again.
+  const discard = (n) => n.tag === "button" && n.textContent === "Discard changes";
+  all(card.card(), discard)[0].handlers.click[0]();
+  const c = card.card();
+  const list = all(c, (n) => n.id === "prompt-pack-always")[0];
+  const items = list.children.map((l) => [l.children[1].textContent, l.children[0].checked]);
+  assert.deepEqual(items.slice(0, 2), [["beads", true], ["common", false]]);
+  // Ticking common here leaves the default-ticked list alone.
+  const common = list.children[1].children[0];
+  common.checked = true;
+  common.handlers.change[0]();
+  assert.deepEqual(card.draft().always_packs, ["beads", "common"]);
+  assert.deepEqual(card.draft().default_packs, ["common"]);
+  calls.length = 0;
+  const save = all(c, (n) => n.tag === "button" && n.textContent === "Save")[0];
+  await save.handlers.click[0]();
+  assert.deepEqual(calls.pop(), { url: "/api/prompt-packs/role-packs", body: {
+    role_packs: { unreal: ["unreal-operator"] }, default_packs: ["common"],
+    always_packs: ["beads", "common"],
+  } });
+  // Restore defaults clears it too.
+  const reset = all(card.card(), (n) => n.tag === "button" && n.textContent === "Restore defaults")[0];
+  await reset.handlers.click[0]();
+  assert.deepEqual(calls.pop().body, { role_packs: null, default_packs: null, always_packs: null });
 });
 
 queue.then(() => setTimeout(() => {
