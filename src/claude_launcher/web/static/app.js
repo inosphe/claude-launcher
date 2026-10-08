@@ -3573,9 +3573,14 @@ function syncSessionFilters(sessions) {
   for (const filter of SESSION_FILTERS) {
     const button = $(`session-filter-${filter}`);
     if (!button) continue;
+    button.setAttribute("title", filter === "current"
+      ? "Current — Running, Paused, Killed" : labels[filter]);
+    button.setAttribute("aria-label", `${labels[filter]} (${counts[filter]})`);
     button.textContent = "";
     button.append(
-      document.createTextNode(labels[filter]),
+      Object.assign(document.createElement("span"), {
+        className: `session-filter-icon filter-icon-${filter}`, ariaHidden: "true",
+      }),
       Object.assign(document.createElement("span"), {
         className: "session-filter-count", textContent: String(counts[filter]),
       })
