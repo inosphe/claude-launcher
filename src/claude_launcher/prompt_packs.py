@@ -84,9 +84,6 @@ class Pack:
     description: str
     body: str
     raw: str
-    #: The header's ``default: true``: ticked on the create form unless
-    #: Settings saved its own list (:func:`default_packs`).
-    default: bool = False
     #: :data:`WORKSPACE`, :data:`PACKAGE` (see :func:`pack_copy`) or
     #: :data:`DAEMON`.
     source: str = WORKSPACE
@@ -94,7 +91,7 @@ class Pack:
     def to_dict(self) -> dict:
         return {
             "id": self.id, "title": self.title,
-            "description": self.description, "default": self.default,
+            "description": self.description,
         }
 
 
@@ -129,7 +126,6 @@ def parse(pack_id: str, raw: str) -> Pack:
         description=str(meta.get("description") or "").strip(),
         body=body.strip(),
         raw=raw,
-        default=meta.get("default") is True,
     )
 
 
@@ -412,6 +408,11 @@ DEFAULT_ROLE_PACKS: Dict[str, List[str]] = {
     "worker": ["role-worker"],
 }
 
+#: The default packs of an untouched config (:func:`default_packs`). A
+#: setting's value like :data:`DEFAULT_ROLE_PACKS`, kept here rather than in
+#: the packs' headers: which packs a form ticks is not a property of a pack.
+DEFAULT_PACKS: List[str] = ["common"]
+
 _ROLE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 
@@ -475,12 +476,13 @@ def set_role_packs(mapping) -> Dict[str, List[str]]:
 
 
 def default_packs(doc: Optional[dict] = None) -> List[str]:
-    """The pack ids the create form ticks before anyone touches it.
+    """The pack ids New session and Spawn child tick on every opening.
 
-    Saved in Settings as ``prompt_packs.default_packs``; until then, every
-    shipped pack whose header says ``default: true`` (``common``). The form
-    ticks only the ones the workspace installed; claunch's copy of one it has
-    not installed is offered unticked.
+    Saved in Settings as ``prompt_packs.default_packs``; until then
+    :data:`DEFAULT_PACKS`. Installed or not makes no difference: a session
+    gets the workspace's copy when it has one and claunch's otherwise
+    (:func:`pack_copy`), and the form says which. An untick holds for the
+    one opening it was made in.
     """
     from . import store
 
@@ -491,7 +493,7 @@ def default_packs(doc: Optional[dict] = None) -> List[str]:
         if isinstance(raw, list):
             return [i for i in dict.fromkeys(str(x) for x in raw) if _ID.match(i)]
         return []
-    return [p.id for p in catalog() if p.default]
+    return list(DEFAULT_PACKS)
 
 
 def _clean_ids(ids, what: str) -> List[str]:
@@ -523,36 +525,10 @@ def _save_list(key: str, clean: Optional[List[str]]) -> None:
 
 
 def set_default_packs(ids) -> List[str]:
-    """Validate and save the default list; ``None`` restores the headers'."""
+    """Validate and save the default list; ``None`` restores :data:`DEFAULT_PACKS`."""
     _save_list("default_packs",
                None if ids is None else _clean_ids(ids, "default packs"))
     return default_packs()
-
-
-def always_packs(doc: Optional[dict] = None) -> List[str]:
-    """The pack ids the create form ticks on every opening.
-
-    Saved in Settings as ``prompt_packs.always_packs`` (empty until then).
-    Unlike :func:`default_packs`, an untick does not outlive the opening it
-    was made in: New session and Spawn child start with these ticked again,
-    whatever the last form or a "Spawn same setup" seed left. A pack the
-    workspace has not installed is ticked as claunch's copy.
-    """
-    from . import store
-
-    doc = store.load() if doc is None else doc
-    block = doc.get(CONFIG_KEY)
-    raw = block.get("always_packs") if isinstance(block, dict) else None
-    if not isinstance(raw, list):
-        return []
-    return [i for i in dict.fromkeys(str(x) for x in raw) if _ID.match(i)]
-
-
-def set_always_packs(ids) -> List[str]:
-    """Validate and save the every-opening list; ``None`` empties it."""
-    _save_list("always_packs",
-               None if ids is None else _clean_ids(ids, "always packs"))
-    return always_packs()
 
 
 def required_for(

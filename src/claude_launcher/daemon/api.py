@@ -2762,7 +2762,7 @@ def _prompt_packs_doc() -> dict:
         "role_packs": prompt_packs.role_packs(),
         "default_role_packs": prompt_packs.DEFAULT_ROLE_PACKS,
         "default_packs": prompt_packs.default_packs(),
-        "always_packs": prompt_packs.always_packs(),
+        "shipped_default_packs": prompt_packs.DEFAULT_PACKS,
         "roles": sorted(roleset.roles),
     }
 
@@ -2792,9 +2792,8 @@ async def h_prompt_packs_offer(request: web.Request) -> web.Response:
         "cwd": str(cwd),
         "workspace": owner.to_dict() if owner is not None else None,
         "packs": packs,
+        # Ticked on every opening of the form, installed or not.
         "default_packs": prompt_packs.default_packs(),
-        # Ticked again on every opening of the form, installed or not.
-        "always_packs": prompt_packs.always_packs(),
         "role_packs": prompt_packs.role_packs(),
         "shipped": [p.to_dict() for p in prompt_packs.catalog()],
         # This daemon's own prompt, null when it has none: the form draws it
@@ -2890,28 +2889,23 @@ async def h_prompt_packs_remove(request: web.Request) -> web.Response:
 
 
 async def h_prompt_packs_role_packs(request: web.Request) -> web.Response:
-    """Save the role → required packs mapping, the default-ticked list
-    and/or the every-opening list.
+    """Save the role → required packs mapping and/or the default packs.
 
     Each key is optional; ``null`` restores that setting's default.
     """
     body = await _json_body(request)
-    lists = ("default_packs", "always_packs")
-    if "role_packs" not in body and not any(k in body for k in lists):
-        return json_error(400, "send role_packs, default_packs and/or always_packs")
+    if "role_packs" not in body and "default_packs" not in body:
+        return json_error(400, "send role_packs and/or default_packs")
     try:
-        # All checked before any is written, so a bad part saves nothing.
+        # Both checked before either is written, so a bad half saves nothing.
         if body.get("role_packs") is not None:
             prompt_packs.clean_role_packs(body["role_packs"])
-        for key in lists:
-            if isinstance(body.get(key), list):
-                [prompt_packs.check_id(str(i)) for i in body[key]]
+        if isinstance(body.get("default_packs"), list):
+            [prompt_packs.check_id(str(i)) for i in body["default_packs"]]
         if "role_packs" in body:
             prompt_packs.set_role_packs(body["role_packs"])
         if "default_packs" in body:
             prompt_packs.set_default_packs(body["default_packs"])
-        if "always_packs" in body:
-            prompt_packs.set_always_packs(body["always_packs"])
     except prompt_packs.PackError as exc:
         return json_error(400, str(exc))
     return json_response(_prompt_packs_doc())

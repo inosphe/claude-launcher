@@ -33,14 +33,16 @@ CHILD = (
 # --------------------------------------------------------------------------- #
 # module
 # --------------------------------------------------------------------------- #
-def test_the_catalog_ships_the_packs_and_common_is_the_default():
+def test_the_catalog_ships_the_packs_and_the_default_packs():
     ids = [p.id for p in prompt_packs.catalog()]
     assert {"beads", "child-agents", "common", "unreal-operator"} <= set(ids)
     # Every pack the default role mapping names ships, so a role's guidance
     # never depends on a workspace having installed it.
     for packs in prompt_packs.DEFAULT_ROLE_PACKS.values():
         assert set(packs) <= set(ids)
-    assert [p.id for p in prompt_packs.catalog() if p.default] == ["common"]
+    assert set(prompt_packs.DEFAULT_PACKS) <= set(ids)
+    # Which packs are defaults is the setting's value, not a pack's header.
+    assert all("default" not in p.to_dict() for p in prompt_packs.catalog())
     for pack in prompt_packs.catalog():
         assert pack.title and pack.body and not pack.body.startswith("---")
 
@@ -113,25 +115,22 @@ def test_role_packs_default_save_and_clear(home):
         prompt_packs.set_role_packs({"unreal": ["Bad Id"]})
 
 
-def test_default_packs_follow_the_headers_until_saved(home):
-    assert prompt_packs.default_packs() == ["common"]
-    assert prompt_packs.set_default_packs(["beads", "common"]) == ["beads", "common"]
+def test_default_packs_are_the_constant_until_saved(home):
+    assert prompt_packs.default_packs() == prompt_packs.DEFAULT_PACKS == ["common"]
+    assert prompt_packs.set_default_packs(["beads", "common", "beads"]) == ["beads", "common"]
     assert prompt_packs.set_default_packs([]) == []
+    with pytest.raises(prompt_packs.PackError):
+        prompt_packs.set_default_packs(["Bad Id"])
+    assert prompt_packs.default_packs() == []
     assert prompt_packs.set_default_packs(None) == ["common"]
 
 
-def test_always_packs_are_empty_until_saved_and_kept_apart(home):
-    assert prompt_packs.always_packs() == []
-    assert prompt_packs.set_always_packs(["common", "common"]) == ["common"]
-    # A list of its own: saving it leaves the default-ticked list alone.
-    assert prompt_packs.default_packs() == ["common"]
-    assert prompt_packs.set_default_packs([]) == []
-    assert prompt_packs.always_packs() == ["common"]
-    with pytest.raises(prompt_packs.PackError):
-        prompt_packs.set_always_packs(["Bad Id"])
-    assert prompt_packs.always_packs() == ["common"]
-    assert prompt_packs.set_always_packs(None) == []
-    assert prompt_packs.default_packs() == []
+def test_a_default_header_in_a_pack_file_means_nothing(home):
+    # An installed copy written before the header was dropped still parses,
+    # and its old "default: true" ticks nothing.
+    pack = prompt_packs.parse("x", "---\ntitle: X\ndefault: true\n---\nbody")
+    assert pack.title == "X" and pack.body == "body"
+    assert pack.to_dict() == {"id": "x", "title": "X", "description": ""}
 
 
 def test_choose_adds_required_packs_and_names_the_role(tmp_path):
@@ -398,7 +397,7 @@ def test_settings_routes_install_remove_and_save_the_mapping(home, tmp_path):
             doc = await (await client.get("/api/prompt-packs", headers=BEARER)).json()
             assert doc["role_packs"] == prompt_packs.DEFAULT_ROLE_PACKS
             assert doc["default_packs"] == ["common"]
-            assert doc["always_packs"] == []
+            assert doc["shipped_default_packs"] == ["common"]
             assert "unreal" in doc["roles"]
             row = next(w for w in doc["workspaces"] if w["name"] == "proj")
             assert {p["id"]: p["status"] for p in row["packs"]}["beads"] == "missing"
@@ -436,27 +435,18 @@ def test_settings_routes_install_remove_and_save_the_mapping(home, tmp_path):
             assert doc["role_packs"] == {"worker": ["beads"]}
             assert doc["default_packs"] == ["beads"]
 
-            # The every-opening list: a bad id refuses the whole body, a good
-            # one is saved alone, read back by Settings and by the form's
-            # offer, and null empties it.
+            # The form's offer carries the saved list, installed or not:
+            # "common" is not installed in proj and is offered as a default.
             resp = await client.put("/api/prompt-packs/role-packs", headers=BEARER,
-                                    json={"default_packs": ["common"],
-                                          "always_packs": ["Bad Id"]})
-            assert resp.status == 400
-            assert prompt_packs.default_packs() == ["beads"]
-            resp = await client.put("/api/prompt-packs/role-packs", headers=BEARER,
-                                    json={"always_packs": ["common"]})
-            doc = await resp.json()
-            assert resp.status == 200 and doc["always_packs"] == ["common"]
-            assert doc["default_packs"] == ["beads"]
+                                    json={"default_packs": ["common"]})
+            assert (await resp.json())["default_packs"] == ["common"]
             offer = await (await client.get(
                 "/api/prompt-packs/offer", params={"cwd": str(ws)},
                 headers=BEARER,
             )).json()
-            assert offer["always_packs"] == ["common"]
-            resp = await client.put("/api/prompt-packs/role-packs", headers=BEARER,
-                                    json={"always_packs": None})
-            assert (await resp.json())["always_packs"] == []
+            assert offer["default_packs"] == ["common"]
+            assert "common" not in [p["id"] for p in offer["packs"]]
+            assert "always_packs" not in offer
             resp = await client.put("/api/prompt-packs/role-packs", headers=BEARER,
                                     json={})
             assert resp.status == 400

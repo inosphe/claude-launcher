@@ -164,7 +164,9 @@ def test_settings_routes_read_and_replace_it(home, tmp_path):
                 headers=BEARER,
             )).json()
             assert offer["daemon_prompt"]["id"] == daemon_prompt.PACK_ID
-            assert offer["daemon_prompt"]["default"] is True
+            # Ticked unless unticked is the form's rule (newDaemonPromptWanted),
+            # not a field of the offer.
+            assert "default" not in offer["daemon_prompt"]
         finally:
             await client.close()
 
