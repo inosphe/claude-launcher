@@ -78,6 +78,7 @@ const env = new Function(
    `let rolesDefault = "";`,
    `let newPackOffer = null, newPackOfferFor = null, newPackTicks = new Map();`,
    `let newDaemonPromptTick = null, newPackRolesOpen = false, newPackPreview = null;`,
+   `let newPackRolesShown = new Set();`,
    slice("newDaemonPromptWanted"),
    slice("newSubrolesMeshless"), slice("newSubroles"), slice("newPrimaryRole"),
    slice("newRequiredPacks"), slice("newPackTicked"),
@@ -91,7 +92,7 @@ const env = new Function(
       daemonWanted: newDaemonPromptWanted,
       resetDaemonTick: () => { newDaemonPromptTick = null; },
       rolesOpen: () => newPackRolesOpen,
-      closeRoles: () => { newPackRolesOpen = false; },
+      closeRoles: () => { newPackRolesOpen = false; newPackRolesShown = new Set(); },
       preview: () => newPackPreview,
       origin: packPreviewOrigin,
       required: newRequiredPacks, primary: newPrimaryRole,
@@ -106,11 +107,16 @@ const env = new Function(
   (n, t) => { n.appendChild(node("md", "", t)); return n; },
   () => "F:/proj/sub",
 );
-// The summary is text nodes and chips; read it the way a browser's
-// textContent would, every descendant in order.
-const deep = (n) => n.textContent + (n.children || []).map(deep).join("");
-const summary = () =>
-  all(row, (n) => n.className === "wf-note new-packs-summary").map(deep)[0] || "";
+// The summary is its own block: a head, one pill per pack, and a note when
+// the role came from the handle. Read back as one sentence.
+const summary = () => {
+  const s = all(row, (n) => n.className === "new-packs-summary")[0];
+  if (!s) return "";
+  const [head, list, note] = s.children;
+  const items = list.children.map((c) => c.textContent);
+  const tail = note ? ` ${note.textContent}` : "";
+  return (items.length ? `${head.textContent}: ${items.join(" · ")}.` : `${head.textContent}.`) + tail;
+};
 const chips = () => all(row, (n) => /(^| )pack-chip( |$)/.test(n.className));
 const groups = () => all(row, (n) => n.className === "pack-group")
   .map((g) => [g.children[0].textContent,
@@ -174,8 +180,40 @@ check("the folded role packs open and close, and a ticked one stays out", () => 
   assert.deepEqual(groups()[1], ["Roles", ["prompt_pack_role-worker"]]);
   assert.equal(button("+1 more").length, 1);
   assert.deepEqual(env.packs(form), ["common", "role-worker"]);
+  // Unticked, it keeps its place until the fold button is pressed: an untick
+  // does not pull the chip out from under the pointer (claunch-glntg).
   newTick("role-worker", false);
+  assert.deepEqual(groups()[1], ["Roles", ["prompt_pack_role-worker"]]);
+  assert.equal(boxes().find((b) => b.value === "role-worker").checked, false);
+  assert.equal(button("+1 more").length, 1);
+  assert.deepEqual(env.packs(form), ["common"]);
+  // The button refolds to what is in play.
+  button("+1 more")[0].handlers.click[0]();
+  button("fewer")[0].handlers.click[0]();
   assert.deepEqual(groups()[1], ["Roles", []]);
+  assert.equal(button("+2 more").length, 1);
+});
+
+check("ticking and unticking keeps the row's shape; the summary is its own block", () => {
+  // The row's shape: its children in order, each group's chip names, and the
+  // summary block's place. A tick changes what is lit and what the summary
+  // lists, never where anything is.
+  const shape = () => [
+    row.children.map((n) => n.className),
+    groups(),
+    all(row, (n) => n.className === "new-packs-summary").length,
+  ];
+  const before = shape();
+  assert.deepEqual(before[0], ["new-check-label", "pack-groups", "new-packs-summary"]);
+  newTick("beads", true);
+  assert.deepEqual(shape(), before);
+  assert.match(summary(), /beads \(ticked\)/);
+  newTick("beads", false);
+  newTick("common", false);
+  assert.deepEqual(shape(), before);
+  assert.equal(summary(), "The opening will include no prompt pack.");
+  newTick("common", true);
+  assert.deepEqual(shape(), before);
 });
 
 check("an operator's untick survives a redraw", () => {
@@ -278,6 +316,7 @@ check("with no mesh and nothing installed, any of claunch's packs can be ticked"
   // The user's case: no mesh, so no role and nothing required, and a
   // workspace that installed no pack. The row still offers every pack.
   env.offer = { ...OFFER, workspace: null, packs: [] };
+  env.closeRoles();   // a role chip an earlier check showed keeps its place
   form.mesh.value = "";
   form.role.value = "worker";
   env.render();
@@ -304,6 +343,7 @@ check("with no mesh and nothing installed, any of claunch's packs can be ticked"
 });
 
 check("the daemon's prompt is the first chip, ticked, and can be unticked", () => {
+  env.closeRoles();   // a role chip an earlier check showed keeps its place
   env.offer = { ...OFFER, daemon_prompt: { id: "@daemon", title: "Daemon prompt (default)" } };
   env.render();
   const b = boxes();
@@ -358,9 +398,10 @@ check("view shows a pack's text below the chips, and a second click closes it", 
   const panel = all(row, (n) => n.className === "pack-preview")[0];
   assert.match(text(panel), /Common edited in proj · 2 lines/);
   assert.equal(all(panel, (n) => n.tag === "md")[0].textContent, "# Rules\nbe kind");
-  // The panel sits between the chips and the summary.
+  // The panel goes under the summary block, so opening it moves neither the
+  // chips nor the summary.
   const order = row.children.map((n) => n.className);
-  assert.ok(order.indexOf("pack-preview") < order.indexOf("wf-note new-packs-summary"));
+  assert.deepEqual(order, ["new-check-label", "pack-groups", "new-packs-summary", "pack-preview"]);
   viewCommon().handlers.click[0]();
   assert.equal(env.preview(), null);
   assert.equal(all(row, (n) => n.className === "pack-preview").length, 0);

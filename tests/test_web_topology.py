@@ -548,6 +548,7 @@ BROWSER_CHECKS = [
         "termfit_browser.cjs",
         "quietpoll_browser.cjs",
         "chat_browser.cjs",
+        "promptpacks_browser.cjs",
 ]
 
 
