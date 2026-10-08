@@ -674,9 +674,13 @@ def test_summary_lists_the_linked_worktrees_but_not_the_workspace(world, tmp_pat
         assert rows[norm(on_branch)]["detached"] is False
         assert rows[norm(detached)]["detached"] is True and rows[norm(detached)]["branch"] is None
         assert rows[norm(detached)]["head"] == _git(a, "rev-parse", "HEAD")
-        # registered at a linked worktree: the others, never itself
-        own = {norm(r["path"]) for r in docs["proj-wt"]["worktrees"]}
-        assert own == {norm(detached)}
+        assert not any(r["main"] for r in rows.values())
+        # registered at a linked worktree: the others, never itself -- and the
+        # others include the main checkout, marked as such (claunch-k9ddh)
+        own = {norm(r["path"]): r for r in docs["proj-wt"]["worktrees"]}
+        assert set(own) == {norm(a), norm(detached)}
+        assert own[norm(a)]["main"] is True and own[norm(a)]["branch"] == "master"
+        assert own[norm(detached)]["main"] is False
 
     _with_app(body)
 

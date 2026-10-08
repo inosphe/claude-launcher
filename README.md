@@ -2453,9 +2453,10 @@ A row whose repository has linked worktrees also carries an `N worktrees`
 toggle (folded by default; a busy repository has dozens). Opened, each
 worktree is a line with its path, its branch or detached HEAD, a mark when
 its directory is gone, and the sessions whose directory it is, linked to
-their pages. The workspace itself is never in its own list, also when it is
-registered at a linked worktree. `worktrees` in the summary is
-`[{path, branch, detached, head, prunable}]`.
+their pages. The workspace itself is never in its own list. When it is
+registered at a linked worktree, the repository's main checkout is one of the
+others and is marked **main checkout**. `worktrees` in the summary is
+`[{path, branch, detached, head, prunable, main}]`.
 
 A present workspace's row has a **New session** button: it opens the same
 new-session form as the New session page, in its dialog, with that

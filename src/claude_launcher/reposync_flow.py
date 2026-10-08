@@ -125,10 +125,11 @@ def local_branches(repo: str) -> List[str]:
 def linked_worktrees(path: str) -> List[dict]:
     """The linked worktrees of the repository at ``path`` (claunch-kjjta),
     from one ``git worktree list --porcelain``: each one's path, branch (or
-    ``detached``) and HEAD. The main checkout -- the workspace itself -- is
-    left out, and so is a bare entry; a worktree whose directory is gone is
-    kept with ``prunable`` so the row can say so. A workspace registered at
-    a linked worktree lists the others, not itself."""
+    ``detached``) and HEAD. The workspace itself is left out, and so is a
+    bare entry; a worktree whose directory is gone is kept with ``prunable``
+    so the row can say so. ``main`` marks the repository's main checkout,
+    which is listed only when the workspace is registered at a linked
+    worktree -- then it is one of the others (claunch-k9ddh)."""
     out = reposync.git(path, "worktree", "list", "--porcelain", check=False)
     rows: List[dict] = []
     cur: Optional[dict] = None
@@ -152,13 +153,14 @@ def linked_worktrees(path: str) -> List[dict]:
         elif not line:
             rows.append(cur)
             cur = None
-    # the first entry is always the main working tree; a workspace that is
-    # itself a linked worktree does not list itself either
+    # git lists the main working tree first; whichever entry is the
+    # workspace's own checkout is the one left out
     try:
         here = os.path.normcase(os.path.normpath(reposync.toplevel(path)))
     except reposync.SyncError:
         here = ""
-    return [{k: v for k, v in r.items() if k != "bare"} for r in rows[1:]
+    return [{**{k: v for k, v in r.items() if k != "bare"}, "main": i == 0}
+            for i, r in enumerate(rows)
             if not r["bare"] and os.path.normcase(r["path"]) != here]
 
 

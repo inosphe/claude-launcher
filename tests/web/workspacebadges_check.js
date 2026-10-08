@@ -13,7 +13,9 @@
    worktrees carries an "N worktrees" toggle; opened, each worktree is a
    line with its path, its branch (or detached HEAD) and the sessions whose
    directory it is -- matched whatever the slashes or the case -- linked to
-   their pages, and "no session" when nobody stands there.
+   their pages, and "no session" when nobody stands there. A workspace
+   registered at a linked worktree lists the main checkout too, marked
+   "main checkout" (claunch-k9ddh).
 
    And the start button (claunch-dbik7): a present workspace's row has a
    "New session" button that opens the one session modal on its "new" tab
@@ -167,6 +169,18 @@ assert.equal(ctx.badges(undefined).length, 0);
   assert.deepEqual(links.map((a) => a.href), ["#/s/s7", "#/s/s8"]);
   assert.deepEqual(texts(old.children),
                    ["C:/r/wt-old", "detached bbbbbbbb", "directory gone", "no session"]);
+  // registered at a linked worktree, the main checkout is listed and says so
+  // (claunch-k9ddh)
+  answer = { ok: true, json: async () => ({ workspaces: {
+    proj: { branch: "s7-feature", ahead: 0, behind: 0, changed: 0, worktrees: [
+      { path: "C:/r", branch: "master", detached: false, head: "c".repeat(40),
+        prunable: false, main: true },
+    ] } } }) };
+  await ctx.refresh();
+  const [mainLine] = ctx.trees({ name: "proj" }).children;
+  assert.deepEqual(texts(mainLine.children), ["C:/r", "master", "main checkout", "no session"]);
+  assert.ok(!texts(feat.children).includes("main checkout"));
+
   // no worktrees: no toggle at all
   answer = { ok: true, json: async () => ({ workspaces: {
     proj: { branch: "master", ahead: 0, behind: 0, changed: 0, worktrees: [] } } }) };
