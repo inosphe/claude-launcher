@@ -77,16 +77,17 @@ def test_the_primary_moves_and_the_subroles_are_settled_around_it(home, tmp_path
         m = mm.set_member_roles("m", "worker1", role="reviewer")
         assert (m.role, m.subroles) == ("reviewer", [])
         # ...and kept when named, with an alias resolved like a join's.
+        # A leader is given `merger` (claunch-lhgfx).
         m = mm.set_member_roles("m", "worker1", role="mod", add=["reviewer"])
-        assert (m.role, m.subroles) == ("leader", ["reviewer"])
-        assert mesh.members["worker1"].roles == ["leader", "reviewer"]
+        assert (m.role, m.subroles) == ("leader", ["reviewer", "merger"])
+        assert mesh.members["worker1"].roles == ["leader", "reviewer", "merger"]
         # A3: set_subroles leaves the primary where it is.
         m = mm.set_subroles("m", "worker1", replace=["worker"])
-        assert (m.role, m.subroles) == ("leader", ["worker"])
+        assert (m.role, m.subroles) == ("leader", ["worker", "merger"])
         # Persisted with the roster: a fresh manager reads the same record.
         again = MeshManager(mgr, settle=0.05, root=tmp_path / "mesh")
         again.load_all()
-        assert again.get("m").members["worker1"].roles == ["leader", "worker"]
+        assert again.get("m").members["worker1"].roles == ["leader", "worker", "merger"]
 
         await mgr.shutdown_all()
 
@@ -110,11 +111,13 @@ def test_an_exclusive_primary_is_refused_while_somebody_else_holds_it(home, tmp_
         assert mesh.members["worker2"].roles == ["worker", "pm"]
         # The holder itself keeps it through an edit.
         m = mm.set_member_roles("m", "lead1", role="leader", add=["reviewer"])
-        assert m.roles == ["leader", "reviewer"]
-        # Once it lets go, the role is free to move.
-        mm.set_member_roles("m", "lead1", role="worker")
+        assert m.roles == ["leader", "merger", "reviewer"]
+        # Once it lets go, the role is free to move (merger is not exclusive
+        # and stays with whoever was given it).
+        m = mm.set_member_roles("m", "lead1", role="worker")
+        assert m.roles == ["worker", "merger", "reviewer"]
         m = mm.set_member_roles("m", "worker2", role="leader")
-        assert m.roles == ["leader", "pm"]
+        assert m.roles == ["leader", "pm", "merger"]
 
         await mgr.shutdown_all()
 
@@ -184,10 +187,10 @@ def test_the_role_reminder_follows_the_edit(home, tmp_path):
         # C1: a subrole-only edit is a new position too, and the section says it.
         mm.set_member_roles("m", "w1", add=["reviewer"])
         subbed = session_reminder.role_entries("s1", mgr, mm)
-        assert subbed[0]["subroles"] == ["reviewer"]
+        assert subbed[0]["subroles"] == ["merger", "reviewer"]
         assert session_reminder.role_key(subbed) != session_reminder.role_key(after)
         lines = session_reminder.role_section(subbed, cflow_guidance=False)
-        assert any(line.startswith("subroles: reviewer") for line in lines)
+        assert any(line.startswith("subroles: merger, reviewer") for line in lines)
 
         await mgr.shutdown_all()
 

@@ -99,11 +99,12 @@ def test_a_join_resolves_subroles_and_refuses_an_unknown_one(home, tmp_path):
         mesh = mm.get("m")
 
         # B1: the alias `qa` stores `reviewer`; `lead` (an alias of the
-        # primary) is dropped rather than stored twice.
+        # primary) is dropped rather than stored twice. A leader is given
+        # `merger` with it (claunch-lhgfx).
         member = await mm.join("m", "s1", handle="lead1", subroles=["qa", "lead"])
         assert member.role == "leader"
-        assert member.subroles == ["reviewer"]
-        assert mesh.members["lead1"].roles == ["leader", "reviewer"]
+        assert member.subroles == ["reviewer", "merger"]
+        assert mesh.members["lead1"].roles == ["leader", "reviewer", "merger"]
 
         # B2: an unknown subrole refuses the join, naming the vocabulary.
         with pytest.raises(MeshError, match="unknown subrole 'ghost'"):
@@ -213,19 +214,22 @@ def test_set_subroles_edits_a_live_member_and_leaves_the_primary_alone(
         await mm.join("m", "s1", handle="lead1")
         await mm.join("m", "s2", handle="worker2")
 
-        # C1: add, then remove, then replace — the primary never moves.
+        # C1: add, then remove, then replace — the primary never moves, and
+        # a leader keeps `merger` through every edit (claunch-lhgfx).
         m = mm.set_subroles("m", "lead1", add=["qa"])
-        assert (m.role, m.subroles) == ("leader", ["reviewer"])
+        assert (m.role, m.subroles) == ("leader", ["merger", "reviewer"])
         m = mm.set_subroles("m", "lead1", add=["worker", "reviewer"])
-        assert m.subroles == ["reviewer", "worker"]  # keeping one is not a second holder
+        assert m.subroles == ["merger", "reviewer", "worker"]  # keeping one is not a second holder
         m = mm.set_subroles("m", "lead1", remove=["qa"])
-        assert m.subroles == ["worker"]
+        assert m.subroles == ["merger", "worker"]
         m = mm.set_subroles("m", "lead1", replace=["pm"])
-        assert m.subroles == ["pm"]
+        assert m.subroles == ["pm", "merger"]
         m = mm.set_subroles("m", "lead1", replace=[])
-        assert m.subroles == []
+        assert m.subroles == ["merger"]
+        m = mm.set_subroles("m", "lead1", remove=["merger"])
+        assert m.subroles == ["merger"]
         # The edit is persisted with the roster.
-        assert mesh.members["lead1"].subroles == []
+        assert mesh.members["lead1"].subroles == ["merger"]
 
         # An exclusive role held live elsewhere is refused here too, and a
         # refused edit leaves the member as it was.
@@ -262,7 +266,7 @@ def test_the_http_surface_carries_subroles(home, tmp_path):
             )
             assert resp.status == 201
             body = await resp.json()
-            assert body["role"] == "leader" and body["subroles"] == ["reviewer"]
+            assert body["role"] == "leader" and body["subroles"] == ["reviewer", "merger"]
             # ...or one comma-separated string from a hand-typed call.
             resp = await client.post(
                 "/api/mesh/web/members",
@@ -274,8 +278,8 @@ def test_the_http_surface_carries_subroles(home, tmp_path):
             # The roster publishes both the primary and the whole set.
             info = await (await client.get("/api/mesh/web", headers=BEARER)).json()
             rows = {m["handle"]: m for m in info["members"]}
-            assert rows["lead1"]["roles"] == ["leader", "reviewer"]
-            assert rows["lead1"]["subroles"] == ["reviewer"]
+            assert rows["lead1"]["roles"] == ["leader", "reviewer", "merger"]
+            assert rows["lead1"]["subroles"] == ["reviewer", "merger"]
             assert rows["w1"]["role"] == "free-role"  # "w1" infers no role
 
             # PATCH edits; the primary is refused with a pointer to the fields.
@@ -495,6 +499,20 @@ def test_a_spawn_seats_the_child_with_its_subroles(home, tmp_path):
             assert mm.get("team").members["w1"].roles == ["worker", "reviewer"]
             # The spawn's `subroles` never enters the session definition.
             assert "subroles" not in body["session"]
+
+            # A child made leader of a mesh of its own is given merger
+            # (claunch-lhgfx), in what the request reports and on the roster.
+            mm.create("solo")
+            resp = await client.post(
+                "/api/sessions/lead/children",
+                json={"name": "kid2", "mesh": "solo", "handle": "boss",
+                      "role": "leader", "subroles": ["qa"]},
+                headers=BEARER,
+            )
+            assert resp.status == 201, await resp.text()
+            body = await resp.json()
+            assert body["mesh"]["subroles"] == ["reviewer", "merger"]
+            assert mm.get("solo").members["boss"].roles == ["leader", "reviewer", "merger"]
 
             await mgr.shutdown_all()
         finally:

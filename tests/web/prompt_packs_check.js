@@ -72,6 +72,7 @@ const fakeApi = async (url) => {
   const [status, body] = key ? answers[key] : [404, { error: "nope" }];
   return { ok: status < 400, status, json: async () => body };
 };
+const ROLES = { worker: { aliases: ["coder"] }, unreal: {}, leader: {}, "free-role": {} };
 const env = new Function(
   "$", "el", "document", "rolesByName", "spawnParent", "api", "mdInto", "newSessionCwd",
   [`let newSubroleTicks = new Set();`,
@@ -83,7 +84,8 @@ const env = new Function(
    slice("newPackDefaults"), slice("promptPackFormOpened"),
    slice("refreshPromptPackOffer"), slice("applyPendingPackSeed"),
    slice("newDaemonPromptWanted"),
-   slice("newSubrolesMeshless"), slice("newSubroles"), slice("newPrimaryRole"),
+   slice("newSubrolesMeshless"), slice("newImpliedSubrole"), slice("newSubroles"),
+   slice("newPrimaryRole"),
    slice("newRequiredPacks"), slice("newPackTicked"),
    slice("renderPromptPackRow"), slice("newPromptPacks"),
    slice("togglePackPreview"), slice("packPreviewOrigin"), slice("packPreviewPanel"),
@@ -106,7 +108,7 @@ const env = new Function(
   (id) => (id === "new-session" ? form : id === "new-packs-row" ? row : null),
   el,
   { createElement: (tag) => node(tag), createTextNode: (t) => node("#text", "", t) },
-  { worker: { aliases: ["coder"] }, unreal: {}, leader: {}, "free-role": {} },
+  ROLES,
   () => null,
   fakeApi,
   (n, t) => { n.appendChild(node("md", "", t)); return n; },
@@ -277,6 +279,20 @@ check("the summary names every pack and why it is there, one chip each", () => {
   assert.deepEqual(all(row, (n) => n.className === "pack-chip-mini").map((n) => n.textContent),
     ["common (default, proj's copy)", "unreal-operator (role unreal, claunch copy — not installed in proj)"]);
   newTick("common", false);
+});
+
+check("a leader holds merger, so merger's pack is required with it (claunch-lhgfx)", () => {
+  const kept = [...env.subTicks()];
+  env.subTicks().clear();
+  ROLES.merger = {};
+  env.offer = { ...OFFER, role_packs: { ...OFFER.role_packs, merger: ["role-merger"] } };
+  form.role.value = "leader";
+  assert.deepEqual(env.required(form), { beads: ["leader"], "role-merger": ["merger"] });
+  form.role.value = "worker";
+  assert.deepEqual(env.required(form), {});
+  form.role.value = "";
+  delete ROLES.merger;
+  for (const name of kept) env.subTicks().add(name);
 });
 
 check("a blank Role row is inferred from the handle, alias included", () => {

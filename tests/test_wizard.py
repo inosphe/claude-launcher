@@ -3276,3 +3276,12 @@ def test_a_spawn_asks_the_board_of_the_directory_the_child_lands_in():
     args = argparse.Namespace()
     wiz.apply(args)
     assert args.issue == "cl-2" and args.no_issue is False
+
+
+def test_the_summary_names_the_merger_a_leader_is_given():
+    # claunch-lhgfx: the daemon adds merger to every leader at the join.
+    from claude_launcher import wizard as wizard_mod
+
+    assert wizard_mod._role_shown("role", "leader") == "leader (+merger)"
+    assert wizard_mod._role_shown("role", "worker") == "worker"
+    assert wizard_mod._role_shown("mesh", "leader") == "leader"
