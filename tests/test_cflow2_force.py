@@ -282,3 +282,33 @@ def test_the_packaged_worker_moves_between_its_marked_nodes(tmp_path):
     st = runtime.force_move("round", **kw)
     assert [t["label"] for t in st["tasks"]] == ["intake"]
     assert len([e for e in runtime.journal(cwd=cwd, scope=scope) if e["event"] == "forced"]) == 4
+
+
+def test_a_forced_report_is_held_to_the_tasks_returns(tmp_path):
+    d = Drv(tmp_path, """
+        nodes:
+          t: {prompt: T, returns: {ok: {n: int}, blocked: {}}}
+        body: {seq: [t]}
+    """)
+    inst = d.st["tasks"][0]["instance"]
+    for outcome, value, why in [("nope", None, "unknown outcome"),
+                                ("ok", {"n": "not-int"}, "n"),
+                                ("ok", {}, "n")]:
+        with pytest.raises(runtime.FlowError, match=why):
+            runtime.report(inst, outcome, value, "forced", by="user", **d.kw())
+    assert not d.events("reported")
+    d.st = runtime.report(inst, "ok", {"n": 3}, "forced", by="user", **d.kw())
+    assert d.st["status"] == "done"
+
+
+def test_a_move_cancels_an_open_delegation(tmp_path):
+    cwd, scope = str(tmp_path), "t"
+    chart = compile_src(TASKS + "body: {seq: [{id: sub, seq: [b], executor: [subagent]}, a]}\n")
+    st = runtime.start(chart, cwd=cwd, scope=scope,
+                       caps={"subagent.spawn": True, "mcp.claunch": True}, now=T0)
+    assert [g["status"] for g in st["delegations"]] == ["pending"]
+    st = runtime.force_move("a", "skip the sub-agent", cwd=cwd, scope=scope, now=T0)
+    assert [t["label"] for t in st["tasks"]] == ["a"]
+    assert [g["status"] for g in st["delegations"]] == ["cancelled"]
+    forced = [e for e in runtime.journal(cwd=cwd, scope=scope) if e["event"] == "forced"]
+    assert forced and forced[0]["by"] == "user"
