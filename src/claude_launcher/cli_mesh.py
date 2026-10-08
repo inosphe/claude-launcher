@@ -889,6 +889,20 @@ def _cmd_subroles(args: argparse.Namespace) -> int:
         f"{member.get('handle')} in mesh {args.mesh!r}: role "
         f"{member.get('role')}, subroles: {', '.join(subs) or '-'}"
     )
+    # claunch-nie6o: a subrole the daemon granted on its own says so, with
+    # its reason and how to take it back; one a person removed says it is
+    # not granted again.
+    auto = member.get("auto_subroles") or {}
+    for role in subs:
+        if role in auto:
+            print(
+                f"  {role}: granted by the daemon — {auto[role]}. Take it "
+                f"back: claunch mesh subroles {args.mesh} "
+                f"{member.get('handle')} --remove {role}"
+            )
+    declined = member.get("declined") or []
+    if declined:
+        print(f"  removed by hand, not granted again: {', '.join(declined)}")
     return 0
 
 

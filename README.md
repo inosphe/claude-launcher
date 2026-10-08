@@ -2793,7 +2793,15 @@ Two settings sit under the matrix, stored in `~/.claunch.yaml` under
   it, and a member that joins as, spawns as, or is changed to `leader` is
   given `merger` as a subrole that cannot be removed while it leads; the
   create form shows it ticked and fixed, and the wizard summary prints
-  `leader (+merger)`.
+  `leader (+merger)` (when the mesh's vocabulary has `merger`). A session
+  that drives a run holding a landing queue (a v1 `landing_queue:` run, the
+  `stack` sub run, a v2 `landing` collection) is given `merger` by the daemon
+  within a minute (claunch-nie6o). That grant is shown: the session is typed a
+  role-change notice with the reason, `claunch mesh subroles <mesh> <handle>`
+  prints it, and the web roster and session panel mark it `auto: merger`. A
+  person takes it back with `claunch mesh subroles <mesh> <handle> --remove
+  merger` or by unticking it in the session's role editor; the daemon then
+  does not grant it again until a person adds it back.
 
 The create and spawn forms end the Prompt packs row with one line naming
 every pack the opening will carry and why, one chip each (default, ticked, or the role

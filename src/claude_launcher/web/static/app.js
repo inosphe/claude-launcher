@@ -4764,6 +4764,32 @@ function memberRoleLabel(m) {
   return memberRoles(m).join("+");
 }
 
+/* The subroles the daemon granted this member on its own (claunch-nie6o:
+   `merger`, to a session that drives a run holding a landing queue), each
+   with the reason it gave. Drawn wherever the roles are, so a role nobody
+   typed is never silent; empty for a member without one. */
+function memberAutoRoles(m) {
+  const auto = (m && m.auto_subroles) || {};
+  const held = new Set(memberRoles(m));
+  return Object.keys(auto).filter((r) => held.has(r))
+    .map((r) => ({ role: r, why: String(auto[r] || "") }));
+}
+
+/* `auto: merger` and its tooltip (the reason, and how a person takes it
+   back), or null when the daemon granted nothing. */
+function memberAutoBadge(m) {
+  const auto = memberAutoRoles(m);
+  if (!auto.length) return null;
+  const badge = el("span", "mesh-kin mesh-auto",
+    "auto: " + auto.map((a) => a.role).join(", "));
+  badge.title = auto.map((a) =>
+    `${a.role}: granted by the daemon — ${a.why}. Untick it in the session's ` +
+    "role editor (or run claunch mesh subroles <mesh> <handle> --remove " +
+    `${a.role}) to take it back; the daemon then does not grant it again.`
+  ).join("\n");
+  return badge;
+}
+
 /* The meshes a rail row speaks for — the rooms that session is in.
 
    Derived from the mesh poll rather than the session poll: /api/sessions
@@ -32071,9 +32097,12 @@ function renderSession(data) {
       meshBox.appendChild(el("p", "wf-note", "not a member of any mesh"));
     }
     for (const m of meshes) {
-      const chip = el("a", "sess-mesh", `${m.mesh} · ${m.handle} (${memberRoleLabel(m)})`);
+      const auto = memberAutoRoles(m);
+      const chip = el("a", "sess-mesh", `${m.mesh} · ${m.handle} (${memberRoleLabel(m)})` +
+        (auto.length ? ` · auto: ${auto.map((a) => a.role).join(", ")}` : ""));
       chip.href = "#/mesh/" + encodeURIComponent(m.mesh);
-      chip.title = `${m.members} member(s); joined ${(m.joined_at || "").replace("T", " ")}`;
+      chip.title = `${m.members} member(s); joined ${(m.joined_at || "").replace("T", " ")}` +
+        auto.map((a) => `\n${a.role}: granted by the daemon — ${a.why}`).join("");
       meshBox.appendChild(chip);
     }
     // One role editor per membership, under the chips that name them: the
@@ -32386,8 +32415,17 @@ function sessRoleEditor(data, m) {
       box.checked = held.has(r.name);
       box.addEventListener("change", touched);
       lab.title = (r.stance || "").slice(0, 300);
+      const why = ((m.auto_subroles || {})[r.name]) || "";
+      const tags = [r.exclusive ? "exclusive" : "", why ? "granted by the daemon" : ""]
+        .filter(Boolean);
+      if (why) {
+        lab.title = `granted by the daemon — ${why}. Untick and apply to take ` +
+          "it back; the daemon then does not grant it again.";
+      } else if ((m.declined || []).includes(r.name)) {
+        tags.push("removed by hand — not granted again");
+      }
       lab.append(box, document.createTextNode(
-        r.exclusive ? `${r.name} (exclusive)` : r.name
+        tags.length ? `${r.name} (${tags.join("; ")})` : r.name
       ));
       subs.appendChild(lab);
     }
@@ -37724,6 +37762,8 @@ function renderWiring(info) {
     row.appendChild(linkDot);
     row.appendChild(el("span", "mesh-handle", m.handle));
     row.appendChild(el("span", "mesh-role", memberRoleLabel(m)));
+    const autoOthers = memberAutoBadge(m);
+    if (autoOthers) row.appendChild(autoOthers);
     // Lineage, where there is any. Cutting the edge along a spawn is the one
     // disconnect with a second consequence: the briefing a child was given
     // tells it to report to its parent, and a report it cannot send is a run
@@ -38055,7 +38095,10 @@ function renderMesh(info, history, force, owed, historyPage) {
       (m.pending ? ` · ${m.pending} pending` : "") +
       (m.owed ? ` · ${m.owed} unanswered` : ""));
     if (m.owed) state.classList.add("mesh-owes");
-    row.append(dot, name, role, where, state);
+    row.append(dot, name, role);
+    const autoBadge = memberAutoBadge(m);
+    if (autoBadge) row.appendChild(autoBadge);
+    row.append(where, state);
     // A mirror may only remove its own members; the primary's roster is the
     // primary's to edit (and whole guest machines go via 'revoke' below).
     if (!isMirror || isLocalMember(m)) {

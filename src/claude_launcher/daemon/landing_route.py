@@ -127,11 +127,16 @@ class Router:
             return "holds a role that could not be read (the worker's mesh membership)"
         for mname in meshes:
             try:
-                members = self.mesh.get(mname).members.values()
+                mesh = self.mesh.get(mname)
             except Exception:
                 continue
-            for m in members:
-                if m.session == name and (MERGER in m.roles or LEADER in m.roles):
+            for m in mesh.members.values():
+                # A handle on a mirrored mesh can carry the same session name
+                # for a session on another machine; only this daemon's own
+                # member speaks for ``name``.
+                if m.session != name or not self.mesh.is_local_member(mesh, m):
+                    continue
+                if MERGER in m.roles or LEADER in m.roles:
                     return ""
         where = ", ".join(repr(n) for n in meshes) or "no mesh"
         return f"holds no {MERGER!r} role in the worker's mesh ({where})"

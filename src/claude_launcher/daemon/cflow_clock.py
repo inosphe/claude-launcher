@@ -2034,6 +2034,7 @@ class TriggerClock:
         self.poll = poll
         self._task: Optional[asyncio.Task] = None
         self._landing_checked: Dict[Tuple[str, str, Optional[str]], float] = {}
+        self._mergers_checked = float("-inf")
 
     def start(self) -> None:
         if self._task is None:
@@ -2056,6 +2057,7 @@ class TriggerClock:
                 # trade at this volume (a handful per round) and keeps one
                 # misconfigured endpoint from opening N concurrent calls.
                 await asyncio.to_thread(self.refresh_landing)
+                await asyncio.to_thread(self.grant_mergers)
                 for cwd, scope, action in await asyncio.to_thread(self.scan):
                     performed, detail = await self._perform(cwd, scope, action)
                     await asyncio.to_thread(
@@ -2119,6 +2121,66 @@ class TriggerClock:
             if result.get("landed"):
                 moved.append((cwd, scope, list(result["landed"])))
         return moved
+
+    def grant_mergers(self, now: Optional[float] = None) -> List[Tuple[str, str, str]]:
+        """Give the ``merger`` subrole to each live session that drives a run
+        holding a landing queue, at most once a minute (claunch-nie6o).
+
+        A worker's landing request goes only to a session holding ``merger``
+        (:meth:`.landing_route.Router.merger_role`); a session that took on a
+        landing queue (a v1 ``landing_queue:`` run, the ``stack`` sub run
+        opened when its first child appears, a v2 ``landing`` collection) is
+        given it here rather than waiting for a person. The grant goes
+        through :meth:`.mesh.MeshManager.grant_auto_subrole`: the member is
+        typed why and how to take it back, the roster marks it as the
+        daemon's, and a person's removal sticks. Blocking (every run's
+        state); call it in a thread. Returns ``(session, mesh, handle)`` per
+        grant. Public for the tests.
+        """
+        now = time.monotonic() if now is None else now
+        if self.mesh is None or now - self._mergers_checked < self.LANDING_REFRESH:
+            return []
+        self._mergers_checked = now
+        from . import cflow2_triggers as v2
+
+        try:
+            sessions = [s for s in self.manager.list() if not getattr(s, "exited", True)]
+        except Exception:
+            return []
+        holders = None
+        granted: List[Tuple[str, str, str]] = []
+        for session in sessions:
+            name = getattr(getattr(session, "sdef", None), "name", "") or ""
+            try:
+                wanting = [
+                    m for m in self.mesh.meshes_for_session(name)
+                    if landing_route.MERGER not in (m.get("roles") or [])
+                ]
+            except Exception:
+                continue
+            if not name or not wanting:
+                continue
+            if holders is None:
+                holders = v2.landing_holders(self.manager, v2.session_cwds(self.manager))
+            try:
+                holder = landing_route.pick(holders(name, None))
+            except Exception as exc:  # noqa: BLE001 - an unreadable slot is no holder
+                log.debug("merger grant skipped %s: %s", name, exc)
+                continue
+            if holder is None:
+                continue
+            run = holder.run or "main run"
+            reason = (
+                f"it drives a run that holds a landing queue ({holder.version} "
+                f"{run} at {holder.cwd}), so workers' landing requests can be "
+                "routed to it"
+            )
+            for mesh_name, handle in self.mesh.grant_auto_subrole(
+                name, landing_route.MERGER, reason
+            ):
+                log.info("mesh %r: gave %r (%s) merger: %s", mesh_name, handle, name, reason)
+                granted.append((name, mesh_name, handle))
+        return granted
 
     def v1_holders(self, name: str, repo: Optional[str]) -> List[landing_route.Holder]:
         """The v1 runs ``name`` drives in checkouts of ``repo`` that declare

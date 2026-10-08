@@ -587,6 +587,8 @@ class Member:
         subroles: Optional[Sequence[str]] = None,
         joined_at: str = "",
         wired: bool = False,
+        auto_subroles: Optional[Dict[str, str]] = None,
+        declined: Optional[Sequence[str]] = None,
     ) -> None:
         self.handle = handle
         self.session = session
@@ -614,6 +616,17 @@ class Member:
         #: arriving from an older daemon has no flag in its roster entry and
         #: reads as False here, which is the same answer.
         self.wired = bool(wired)
+        #: Subroles the daemon granted on its own, each with the reason it
+        #: gave (:meth:`MeshManager.grant_auto_subrole`) — what the roster
+        #: and the role editor show beside the name, so a role nobody typed
+        #: is never silent. Only names still in :attr:`subroles` are kept.
+        self.auto_subroles: Dict[str, str] = {
+            str(k): str(v) for k, v in (auto_subroles or {}).items()
+            if str(k) in self.subroles
+        }
+        #: Subroles a person removed and the daemon must not grant again on
+        #: its own. Adding the role back by hand clears it.
+        self.declined: List[str] = _dedupe_roles(declined or ())
 
     @property
     def local(self) -> bool:
@@ -649,6 +662,8 @@ class Member:
             "roles": self.roles,
             "joined_at": self.joined_at,
             "wired": self.wired,
+            "auto_subroles": dict(self.auto_subroles),
+            "declined": list(self.declined),
         }
 
     @classmethod
@@ -663,6 +678,11 @@ class Member:
             subroles=_read_subroles(doc.get("subroles")),
             joined_at=str(doc.get("joined_at") or ""),
             wired=bool(doc.get("wired")),
+            auto_subroles=(
+                doc.get("auto_subroles")
+                if isinstance(doc.get("auto_subroles"), dict) else None
+            ),
+            declined=_read_subroles(doc.get("declined")),
         )
 
 
@@ -1534,6 +1554,8 @@ class MeshManager:
                             "role": member.role,
                             "subroles": list(member.subroles),
                             "roles": member.roles,
+                            "auto_subroles": dict(member.auto_subroles),
+                            "declined": list(member.declined),
                             "joined_at": member.joined_at,
                             "members": len(mesh.members),
                         }
@@ -4481,6 +4503,7 @@ class MeshManager:
         role: Optional[str] = None,
         add: Sequence[str] = (), remove: Sequence[str] = (),
         replace: Optional[Sequence[str]] = None,
+        auto: str = "",
     ) -> Member:
         """Change a live member's roles: its primary and/or its subroles.
 
@@ -4500,6 +4523,12 @@ class MeshManager:
         mesh's ``auto_link`` rules grant the new roles are opened
         (:meth:`_rewire_roles`). Membership is the authority's, so on a
         mirror this is refused with the daemon to ask.
+
+        ``auto`` is the daemon's own reason when it, not a person, makes the
+        change (:meth:`grant_auto_subrole`): the subroles it adds are recorded
+        in :attr:`Member.auto_subroles` with that reason. A change without it
+        is a person's: a subrole it removes goes on :attr:`Member.declined`,
+        so the daemon does not grant it back, and one it adds leaves both.
         """
         mesh = self.get(name)
         self._require_authority(mesh, "membership")
@@ -4542,7 +4571,23 @@ class MeshManager:
             member.role, member.subroles = before_role, before_subs
             raise
         member.role, member.subroles = primary, resolved
-        if (primary, resolved) != (before_role, before_subs):
+        added = [r for r in resolved if r not in before_subs]
+        dropped = [r for r in before_subs if r not in resolved]
+        before_marks = (dict(member.auto_subroles), list(member.declined))
+        for r in dropped:
+            member.auto_subroles.pop(r, None)
+        if auto:
+            for r in added:
+                member.auto_subroles[r] = auto
+        else:
+            for r in added:
+                member.auto_subroles.pop(r, None)
+            member.declined = [r for r in member.declined if r not in added]
+            member.declined += [r for r in dropped if r not in member.declined]
+        if (primary, resolved) == (before_role, before_subs):
+            if (dict(member.auto_subroles), list(member.declined)) != before_marks:
+                self._roster_changed(mesh)
+        else:
             log.info(
                 "mesh %r: %r roles %s -> %s", mesh.name, handle,
                 "+".join([before_role, *before_subs]), member.role_label(),
@@ -4553,6 +4598,40 @@ class MeshManager:
                 mesh, member, before_role, before_subs, opened
             )
         return member
+
+    def grant_auto_subrole(
+        self, session: str, role: str, reason: str
+    ) -> List[Tuple[str, str]]:
+        """Give ``session`` the subrole ``role`` in every mesh it is in, on
+        the daemon's own account; ``[(mesh, handle), ...]`` it was given in.
+
+        Skipped, silently, where the member already holds the role, where a
+        person removed it before (:attr:`Member.declined`), where the mesh's
+        vocabulary has no such role, and on a mirror (membership is the
+        authority's). Each grant goes through :meth:`set_member_roles` with
+        ``auto=reason``, so the member is typed a notice that names the
+        reason and how a person takes the role back.
+        """
+        granted: List[Tuple[str, str]] = []
+        for mesh in self.list():
+            if mesh.primary or mesh.roleset.canonical(role) != role:
+                continue
+            for handle in sorted(mesh.members):
+                member = mesh.members[handle]
+                if member.session != session or not self._is_local(mesh, member):
+                    continue
+                if role in member.roles or role in member.declined:
+                    continue
+                try:
+                    self.set_member_roles(
+                        mesh.name, handle, add=[role], auto=reason
+                    )
+                except MeshError as exc:
+                    log.info("mesh %r: auto %s for %r refused: %s",
+                             mesh.name, role, handle, exc)
+                    continue
+                granted.append((mesh.name, handle))
+        return granted
 
     def _rewire_roles(self, mesh: Mesh, member: Member) -> List[str]:
         """Open the edges ``auto_link`` grants ``member`` under its new roles.
@@ -4617,6 +4696,15 @@ class MeshManager:
                 f"subroles added: {', '.join(added)} — you now also answer "
                 "for these when a workflow or a peer looks one up"
             )
+        for r in added:
+            reason = member.auto_subroles.get(r)
+            if reason:
+                lines.append(
+                    f"granted by the daemon: {r} — {reason}. A person can "
+                    f"take it back (claunch mesh subroles {mesh.name} "
+                    f"{member.handle} --remove {r}, or the web UI's role "
+                    "editor); the daemon then does not grant it again"
+                )
         if dropped:
             lines.append(
                 f"subroles removed: {', '.join(dropped)} — you are no longer "
