@@ -555,6 +555,7 @@ BROWSER_CHECKS = [
         "chat_browser.cjs",
         "promptpacks_browser.cjs",
         "installsettings_browser.cjs",
+        "tabdragscroll_browser.cjs",
 ]
 
 
