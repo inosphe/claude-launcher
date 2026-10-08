@@ -174,6 +174,12 @@ check(
   true
 );
 
+check("multi-selection shows only selected bulk partitions", bar([
+  { status: "busy" }, { status: "exited" }, { status: "exited", paused_at: "now" }
+], ["running", "paused"]), ["stop 1", "pause 1", "resume 1 paused"]);
+check("empty selection hides all bulk actions", bar(of("busy", "exited"), []), []);
+check("archive mixed with killed offers killed actions", bar(of("busy", "exited"), ["killed", "archived"]), ["resume 1", "archive 1 exited"]);
+
 if (failures) {
   console.error(`${failures} check(s) failed`);
   process.exit(1);

@@ -387,6 +387,15 @@ const tabShadows = () => tabs().flatMap((t) => t._groupRows)
   ctx.set("filter", "archived");
   ctx.filters();
   check("archived: a shadow is never an archived record", shown(), []);
+  ctx.set("filter", ["killed", "archived"]);
+  ctx.filters();
+  check("multi-select includes exited shadows with killed local records", shown().sort(), ["r3@m3", "s2"]);
+  ctx.set("filter", ["running", "paused"]);
+  ctx.filters();
+  check("multi-select includes running shadows", shown().sort(), ["r4@m3", "r5@m2", "r9@m2", "s1", "s1@m2", "s3"]);
+  ctx.set("filter", []);
+  ctx.filters();
+  check("empty selection hides local and remote rows", shown(), []);
   ctx.set("filter", "current");
   ctx.set("search", { q: "twin" });
   ctx.filters();

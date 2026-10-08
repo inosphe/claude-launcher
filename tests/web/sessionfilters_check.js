@@ -37,7 +37,7 @@ const rows = sessions.map((session) => {
 });
 const list = { querySelectorAll: (selector) => selector === "li[data-name]" ? rows : [] };
 const buttons = {};
-for (const filter of ["current", "running-paused", "running", "killed", "paused", "archived"]) {
+for (const filter of ["current", "running", "killed", "paused", "archived"]) {
   buttons[filter] = {
     textContent: "", children: [], attrs: {},
     append(...children) { this.children.push(...children); },
@@ -53,10 +53,12 @@ const document = {
   createTextNode: (text) => ({ textContent: text }),
   createElement: () => ({}),
 };
+const refreshes = [];
 const ctx = {};
 new Function("exports", "BASE", "localStorage", "sessionsCache", "$", "document",
   "sessMeshes", "refreshSessions",
   src.slice(a, b) +
+  "\nexports.restore = restoreSessionFilter;" +
   "\nexports.category = sessionCategory;" +
   "\nexports.matches = sessionMatchesFilter;" +
   "\nexports.counts = sessionFilterCounts;" +
@@ -71,7 +73,7 @@ new Function("exports", "BASE", "localStorage", "sessionsCache", "$", "document"
     document,
     (name) => name === "alpha" ? [{ mesh: "mesh-a" }] :
       name === "beta" ? [{ mesh: "mesh-b" }] : [],
-    () => {}
+    (options) => refreshes.push(options?.state)
   );
 
 let failures = 0;
@@ -88,43 +90,55 @@ check("the four lifecycle categories are disjoint",
 check("current combines running, killed and paused",
       sessions.map((s) => ctx.matches(s, "current")), [true, true, true, false]);
 check("every count describes its exact partition", ctx.counts(sessions),
-      { current: 3, "running-paused": 2, running: 1, killed: 1, paused: 1, archived: 1 });
+      { current: 3, running: 1, killed: 1, paused: 1, archived: 1 });
 
 ctx.sync(sessions);
 check("the remembered killed filter is selected",
       Object.values(buttons).map((b) => b.attrs["aria-pressed"]),
-      ["false", "false", "false", "true", "false", "false"]);
+      ["false", "false", "true", "false", "false"]);
 check("killed shows only killed rows — a paused record is not one",
       rows.map((row) => row.classes.has("session-filtered")), [true, false, true, true]);
 check("counts are rendered beside every label",
       Object.values(buttons).map((b) => b.children[1].textContent),
-      ["3", "2", "1", "1", "1", "1"]);
+      ["3", "1", "1", "1", "1"]);
 
-ctx.set("running-paused");
-check("combined mode shows running and paused rows",
-      rows.map((row) => row.classes.has("session-filtered")), [false, true, false, true]);
-check("combined mode is remembered", writes.at(-1),
-      ["claunch_session_filter:/t/local/", "running-paused"]);
-check("combined mode has its own selected control",
-      buttons["running-paused"].attrs["aria-pressed"], "true");
-check("combined mode has a label before polling",
-      html.includes('aria-pressed="false">Running || Paused<span'), true);
+check("legacy combined selection migrates", ctx.restore("running-paused"), ["running", "paused"]);
+check("legacy current migrates", ctx.restore("current"), ["running", "killed", "paused"]);
+check("invalid storage resets", ctx.restore('{bad'), ["running", "killed", "paused"]);
+check("invalid state resets", ctx.restore('["unknown"]'), ["running", "killed", "paused"]);
+check("empty selection survives reload", ctx.restore('[]'), []);
+check("saved combination survives reload", ctx.restore('["running","archived"]'), ["running", "archived"]);
 
+ctx.set("running");
+check("running adds to killed", sessions.map((s) => ctx.matches(s)), [true, true, false, false]);
+ctx.set("killed");
 ctx.set("paused");
-check("paused shows only paused rows",
-      rows.map((row) => row.classes.has("session-filtered")), [true, true, false, true]);
-check("the paused filter asks the daemon for the paused partition",
-      src.includes(': filter === "paused" ? "paused"'), true);
-
+check("running and paused can both be pressed", sessions.map((s) => ctx.matches(s)), [true, false, true, false]);
+check("independent buttons reflect the combination", Object.values(buttons).map((b) => b.attrs["aria-pressed"]),
+      ["false", "true", "false", "true", "false"]);
+check("combination is remembered", writes.at(-1), ["claunch_session_filter:/t/local/", '["running","paused"]']);
+ctx.set("running");
+check("paused alone refreshes its partition", refreshes.at(-1), "paused");
 ctx.set("archived");
-check("archived shows only archived rows",
-      rows.map((row) => row.classes.has("session-filtered")), [true, true, true, false]);
-check("a filter selection is remembered",
-      writes.at(-1), ["claunch_session_filter:/t/local/", "archived"]);
-
+check("archive adds to paused", sessions.map((s) => ctx.matches(s)), [false, false, true, true]);
+check("mixed archive refreshes all selected categories", refreshes.at(-1), "all");
+ctx.set("paused");
+check("archive alone refreshes archived", refreshes.at(-1), "archived");
+ctx.set("archived");
+check("all buttons can be released", sessions.map((s) => ctx.matches(s)), [false, false, false, false]);
+check("empty selection is saved", writes.at(-1)[1], "[]");
 ctx.set("current");
-check("current restores the working fleet",
-      rows.map((row) => row.classes.has("session-filtered")), [false, false, false, true]);
+check("current restores the working fleet", rows.map((row) => row.classes.has("session-filtered")), [false, false, false, true]);
+check("current presses its three component buttons", Object.values(buttons).map((b) => b.attrs["aria-pressed"]),
+      ["true", "true", "true", "true", "false"]);
+ctx.set("current");
+check("current is an idempotent preset", ctx.current(), ["running", "killed", "paused"]);
+ctx.set("archived");
+check("adding archived releases current indicator", buttons.current.attrs["aria-pressed"], "false");
+ctx.set("current");
+check("current releases archived", buttons.archived.attrs["aria-pressed"], "false");
+check("obsolete combined button is removed", html.includes('id="session-filter-running-paused"'), false);
+check("buttons stay in a scrolling single row", /\.session-filter-buttons\s*\{[^}]*flex-wrap:\s*nowrap;[^}]*overflow-x:\s*auto/.test(css), true);
 
 const grouped = ctx.groupRows([
   [{ name: "alpha", cwd: "F:/works/repo/.claude/worktrees/a" }, 0],
@@ -154,8 +168,8 @@ check("turning the grouping off leaves none",
         ["claunch_session_group:/t/local/", "false"],
       ]);
 
-check("the shipped page contains all six state controls",
-      ["current", "running-paused", "running", "killed", "paused", "archived"].every((name) =>
+check("the shipped page contains all five state controls",
+      ["current", "running", "killed", "paused", "archived"].every((name) =>
         html.includes(`id="session-filter-${name}"`)), true);
 // A poll that has not landed yet — first load, or the window a daemon reset
 // opens — must not leave this bar a blank strip. The labels are seeded in the
