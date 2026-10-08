@@ -54,6 +54,7 @@ from .. import plugins, prompt_packs, settings
 from .. import worktree as worktree_mod
 from . import beads as beads_mod, channel, clipboard, connections
 from . import p2p
+from . import opening_images
 from . import handoff as handoff_mod
 from . import loop_lag as loop_lag_mod
 from . import line_sync
@@ -852,6 +853,7 @@ def build_app(
     r.add_post("/api/sessions/{name}/runtime-mode", h_session_runtime_mode)
     r.add_post("/api/sessions/{name}/keys", h_session_keys)
     r.add_post("/api/sessions/{name}/paste-image", h_session_paste_image)
+    r.add_post("/api/opening-images", h_opening_image_upload)
     r.add_post("/api/sessions/{name}/deliver", h_session_deliver)
     # The PR wizard (prflow.py): what the session's directory would push,
     # and the push itself. GET is the preview the form opens on, POST does
@@ -7389,6 +7391,7 @@ async def _onboard_and_launch(
             beads_mod.check_request(body)
         except beads_mod.BoardRequestError as exc:
             raise onboard.OnboardError(str(exc)) from None
+        image_ids = _opening_image_ids(body, session.sdef.harness)
         if parent:
             await onboard.inherit_mesh(
                 body,
@@ -7571,13 +7574,23 @@ async def _onboard_and_launch(
         opening = score_goal.prompt(session.sdef) + (
             "\n\n" + opening if opening else ""
         )
+    images = opening_images.claim(image_ids, name)
     try:
-        await manager.launch_async(session, opening=opening)
+        # An opening with images is typed in, never put on the command line:
+        # the images go into the composer first and the text is submitted
+        # with them (_opening_image_step), and a command-line prompt would be
+        # submitted on its own before any image could join it.
+        await manager.launch_async(session, opening="" if images else opening)
     except Exception:
         manager.discard(name)
         await onboard.unwind(report, name=name, cwd=cwd, mesh_mgr=_mesh_mgr(request))
         raise
-    onboard.open_with(session, opening)
+    if images:
+        report["opening_images"] = [str(img.path) for img in images]
+        step, text = _opening_image_step(session, images, opening)
+        onboard.open_with(session, text, before=step)
+    else:
+        onboard.open_with(session, opening)
     if linked and linked.get("mode") == beads_mod.JOIN:
         # Last, because it names a session that now exists: the holder is told
         # only once there is something for it to settle with. After launch for
@@ -9338,6 +9351,111 @@ async def h_session_paste_image(request: web.Request) -> web.Response:
         "keys": keys,
         "reason": reason,
     })
+
+
+async def h_opening_image_upload(request: web.Request) -> web.Response:
+    """Stage one image for the opening of a session not created yet.
+
+    The create form's Opening task takes images (claunch-jmrmc). The create
+    request is JSON, so each image is uploaded here first, as its own raw
+    body with its media type in ``Content-Type`` -- the paste route's shape
+    and size ceiling -- and the create request names the returned ids in
+    ``opening_images``. Staging and claiming are
+    :mod:`claude_launcher.daemon.opening_images`.
+    """
+    kind = (request.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+    if kind not in opening_images.TYPES:
+        return json_error(
+            415,
+            f"{kind or 'no Content-Type'} is not an image this accepts "
+            f"({', '.join(sorted(opening_images.TYPES))})",
+        )
+    chunks: List[bytes] = []
+    total = 0
+    async for chunk in request.content.iter_chunked(64 * 1024):
+        total += len(chunk)
+        if total > PASTE_IMAGE_MAX_BYTES:
+            return json_error(
+                413,
+                f"the image is larger than "
+                f"{PASTE_IMAGE_MAX_BYTES // (1024 * 1024)} MiB",
+            )
+        chunks.append(chunk)
+    if not total:
+        return json_error(400, "the body carried no image bytes")
+    image_id = await asyncio.to_thread(opening_images.stage, chunks, kind)
+    return json_response({"id": image_id, "bytes": total, "type": kind}, status=201)
+
+
+def _opening_image_ids(body: dict, harness: str) -> List[str]:
+    """``body["opening_images"]`` checked, as staged ids.
+
+    Refused for a harness that declares no ``image_paste_keys``: the images
+    could be stored but never handed over, and a session told about a picture
+    it never received starts work on a wrong premise.
+    """
+    try:
+        ids = opening_images.check_ids(body.get("opening_images"))
+    except opening_images.OpeningImageError as exc:
+        raise onboard.OnboardError(str(exc)) from None
+    if ids:
+        entry = harness_registry.registry().get(harness or "")
+        if not (entry and entry.image_paste_keys):
+            raise onboard.OnboardError(
+                f"harness {harness or 'unknown'!r} declares no image paste key "
+                f"(image_paste_keys), so it cannot be handed opening images"
+            )
+    return ids
+
+
+def _opening_image_step(session, images, opening: str):
+    """The pre-paste step of an opening that carries images, and its text.
+
+    Each image goes into the composer the way the session line's paste does
+    (:func:`_deliver_pasted_image`), in order; then the step waits out the
+    settle window, so the harness has read the last image off the clipboard
+    before the text is pasted behind it and submitted. Runs once: a delivery
+    retried after the images went in does not paste them a second time.
+
+    The text is a factory :meth:`Session.deliver` calls after the step. It
+    names every image that could not be handed over, with the stored file's
+    path, so the agent knows a picture it was meant to see is missing and
+    where it is. An opening with no task text still says that images were
+    attached: an empty text would cancel the delivery.
+    """
+    done = {"ran": False}
+    failed: List[str] = []
+
+    async def step() -> None:
+        if done["ran"]:
+            return
+        done["ran"] = True
+        for img in images:
+            delivered, _keys, reason = await _deliver_pasted_image(
+                session, img.path, img.media_type
+            )
+            if not delivered:
+                log.warning(
+                    "opening image %s for %r not handed over: %s",
+                    img.path, session.sdef.name, reason,
+                )
+                failed.append(f"- {img.path} ({reason})")
+        wait = _paste_settle["until"] - asyncio.get_running_loop().time()
+        if wait > 0:
+            await asyncio.sleep(wait)
+
+    def text() -> str:
+        parts = [opening] if opening else [
+            f"{len(images)} image(s) attached to this opening message."
+        ]
+        if failed:
+            parts.append(
+                "These opening images could not be pasted here; the files "
+                "are on this machine:\n" + "\n".join(failed)
+            )
+        return "\n\n".join(parts)
+
+    return step, text
 
 
 #: Held across the clipboard write AND the keystroke that reads it back. The
