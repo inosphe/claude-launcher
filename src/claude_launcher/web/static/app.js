@@ -19018,6 +19018,7 @@ function openSettings(section) {
     refreshProjects().then(() => { if (wsOpen) renderWorkspaces(); });
     refreshBeadsBoards();
     refreshVscode();
+    refreshWsGitSummary();
     return;
   }
   refreshHarnesses().then(() => { if (wsOpen) renderWorkspaces(); });
@@ -25995,6 +25996,57 @@ async function beadsBoardInit(b) {
   renderWorkspaces();
 }
 
+/* ------------------------------------------------------------------ */
+/* Workspaces · row badges (claunch-gax44)                             */
+/* ------------------------------------------------------------------ */
+/* Branch, ahead/behind its upstream and changed tracked files, read with
+   one local 'git status' per workspace (/api/reposync/workspaces/summary).
+   Nothing is fetched: ahead/behind is against the remote-tracking ref as
+   the last fetch left it, which the badge's tooltip says. Read when the
+   page opens and after a sync -- the 2s workspace poll does not run git. */
+//: workspace name -> {branch, detached, upstream, ahead, behind, changed} | {error}
+let wsGitSummary = {};
+
+async function refreshWsGitSummary() {
+  try {
+    const resp = await api("/api/reposync/workspaces/summary");
+    if (!resp.ok) return;   // an older daemon: the rows simply carry no badges
+    wsGitSummary = ((await resp.json()) || {}).workspaces || {};
+  } catch {
+    return;
+  }
+  if (wsOpen) renderWorkspaces();
+}
+
+function wsGitBadges(g) {
+  if (!g) return [];
+  if (g.error) {
+    const b = el("span", "badge exited", "not a git checkout");
+    b.title = g.error;
+    return [b];
+  }
+  const out = [];
+  const head = el("span", "badge idle ws-git-branch mono",
+    g.detached ? "detached HEAD" : (g.branch || "?"));
+  head.title = g.upstream ? `tracks ${g.upstream}` : "no upstream set";
+  out.push(head);
+  if (g.ahead || g.behind) {
+    const parts = [];
+    if (g.ahead) parts.push(`↑${g.ahead}`);
+    if (g.behind) parts.push(`↓${g.behind}`);
+    const ab = el("span", "badge ws-git-ab" + (g.behind ? " ws-git-behind" : ""), parts.join(" "));
+    ab.title = `${g.ahead} ahead, ${g.behind} behind ${g.upstream} ` +
+      "(as of the last fetch; Sync ▾ › Refresh fetches)";
+    out.push(ab);
+  }
+  if (g.changed) {
+    const dirty = el("span", "badge ws-git-dirty", `${g.changed} changed`);
+    dirty.title = "tracked files with uncommitted changes (untracked files are not counted)";
+    out.push(dirty);
+  }
+  return out;
+}
+
 function wsRow(w) {
   const row = el("div", "ws-row");
   const text = el("div", "ws-text");
@@ -26012,6 +26064,7 @@ function wsRow(w) {
       here.length === 1 ? "1 session" : `${here.length} sessions`
     ));
   }
+  if (w.exists) for (const b of wsGitBadges(wsGitSummary[w.name])) row.appendChild(b);
 
   if (w.exists) row.appendChild(wsVscodeControls(w));
   if (w.exists) {
@@ -26139,6 +26192,7 @@ async function wsSyncSend(name, kind, body) {
   } else {
     st.result = { kind, doc };
   }
+  if (st.result) refreshWsGitSummary();
   if (st.result && kind !== "push") await wsSyncRefresh(name, false);
   else if (wsOpen) renderWorkspaces();
 }

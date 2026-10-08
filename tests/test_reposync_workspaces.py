@@ -371,3 +371,60 @@ def test_routes_need_the_token(world):
         assert resp.status == 401
 
     _with_app(body)
+
+
+# --- Row badges (claunch-gax44) -------------------------------------------
+
+
+def test_summary_reads_branch_ahead_behind_and_changed_files(world, tmp_path):
+    a, b = world["a"], world["b"]
+    _commit(b, "theirs.txt")
+    _git(b, "push", "-q", "origin", "master")
+    _git(a, "fetch", "-q", "origin")          # the summary itself never fetches
+    _commit(a, "mine1.txt")
+    _commit(a, "mine2.txt")
+    (a / "base.txt").write_text("edited", encoding="utf-8")
+    (a / "untracked.txt").write_text("new", encoding="utf-8")
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    workspaces.add(str(plain), "plain")
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    workspaces.add(str(gone), "gone")
+    gone.rmdir()                              # a removable drive that is unplugged
+
+    async def body(client):
+        resp = await client.get("/api/reposync/workspaces/summary", headers=AUTH)
+        assert resp.status == 200
+        docs = (await resp.json())["workspaces"]
+        proj = docs["proj"]
+        assert proj["branch"] == "master" and proj["detached"] is False
+        assert proj["upstream"] == "origin/master"
+        assert (proj["ahead"], proj["behind"]) == (2, 1)
+        assert proj["changed"] == 1               # untracked.txt is not counted
+        assert "not a git repository" in docs["plain"]["error"]
+        assert "gone" not in docs                 # a missing workspace is left out
+
+    _with_app(body)
+
+
+def test_summary_without_upstream_and_detached(world):
+    a = world["a"]
+    _git(a, "switch", "-q", "-c", "local-only")
+    from claude_launcher import reposync_flow
+
+    doc = reposync_flow.git_summary(str(a))
+    assert doc["branch"] == "local-only" and doc["upstream"] is None
+    assert doc["ahead"] is None and doc["behind"] is None and doc["changed"] == 0
+
+    _git(a, "switch", "-q", "--detach", "HEAD")
+    doc = reposync_flow.git_summary(str(a))
+    assert doc["detached"] is True and doc["branch"] is None
+
+
+def test_summary_needs_the_token(world):
+    async def body(client):
+        resp = await client.get("/api/reposync/workspaces/summary")
+        assert resp.status == 401
+
+    _with_app(body)
