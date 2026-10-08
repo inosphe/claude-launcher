@@ -1894,6 +1894,140 @@ def test_with_no_lookup_the_working_directory_is_still_the_answer(
 
 
 # --------------------------------------------------------------------------- #
+# a re-measure on a preview merge (claunch-873ys, claunch-preview-remeasure-
+# wrong-tree-lf5dn)
+#
+# The rebase step's re-measure builds `<tmp>` from the target, merges the
+# branch into it, and runs this gate there. With no `--repo` the lookup above
+# answers with the SESSION's tree, so the gate reuses or re-runs that tree and
+# exits 0 -- measured twice (s704 2026-09-22: 1351 vs 1363 passed; s875
+# 2026-10-08). The shape below is that one: two work trees with different
+# trees, the lookup answering one, the caller standing in the other.
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def preview(repo, tmp_path):
+    """A detached work tree of ``repo`` on master with the branch merged in,
+    built exactly as the recipe builds it, and holding a different tree."""
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "branch work")
+    where = tmp_path / "preview"
+    _git(repo, "worktree", "add", "-q", "--detach", str(where), "master")
+    _git(where, "merge", "-q", "--no-ff", "-m", "preview", "feature")
+    _write(repo, "tests/test_unrelated.py", "y = 1\n")  # the session's tree moves on
+    # Not removed afterwards: both trees live under tmp_path, and a test that
+    # chdir'd into this one is still standing there when this would run.
+    return where
+
+
+def _session_is(monkeypatch, repo: Path) -> None:
+    monkeypatch.setattr(
+        checkout, "own_checkout",
+        lambda explicit=None, **k: (
+            (str(Path(explicit).resolve()), checkout.NAMED)
+            if explicit is not None else (str(repo), checkout.SESSION)
+        ),
+    )
+
+
+FOREIGN = "WARNING: the working directory is in another work tree"
+
+
+def test_standing_in_a_preview_without_repo_says_which_tree_it_measured(
+    repo, preview, monkeypatch, capsys
+):
+    """The lf5dn criterion: run in the preview with no ``--repo``, the gate
+    may not hand back the session tree's numbers as the preview's unmarked.
+
+    It still measures the session's tree -- the verify path needs that answer
+    (see the next test) -- but it says so before any number, names the tree
+    the caller is standing in, and prints the form that measures it.
+    """
+    _session_is(monkeypatch, repo)
+    monkeypatch.chdir(preview)
+
+    assert changed_tests.main(["--base", "master", "--list"]) == 0
+    out = capsys.readouterr().out
+    assert "(session)" in out
+    assert FOREIGN in out
+    where = os.path.normcase(str(preview.resolve()))
+    assert f"--repo {where}" in out, "the warning has to name the preview"
+    assert f"uv sync --extra test --directory {where}" in out
+    assert out.index(FOREIGN) < out.index("tests/test_"), (
+        "the warning comes before the selection it qualifies"
+    )
+
+
+def test_the_same_shape_in_a_verify_keeps_its_exit_code(
+    repo, preview, monkeypatch, capsys
+):
+    """Why it is a warning and not a refusal: the engine runs a verify with
+    cwd = the run's directory, a different work tree from the session's
+    whenever the run was keyed elsewhere (claunch-7sj), and there the session
+    tree IS the answer. The exit code is the one the gate gives without the
+    mismatch."""
+    _session_is(monkeypatch, repo)
+    monkeypatch.chdir(repo)
+    expected = changed_tests.main(["--base", "master", "--list"])
+    assert FOREIGN not in capsys.readouterr().out
+
+    monkeypatch.chdir(preview)
+    assert changed_tests.main(["--base", "master", "--list"]) == expected
+
+
+def test_naming_the_preview_measures_it_and_is_silent(
+    repo, preview, monkeypatch, capsys
+):
+    """The recipe's form: ``--repo <tmp>`` measures the preview's own tree."""
+    _session_is(monkeypatch, repo)
+    monkeypatch.chdir(preview)
+
+    assert changed_tests.main(
+        ["--repo", str(preview), "--base", "master", "--list"]
+    ) == 0
+    out = capsys.readouterr().out
+    assert "(named)" in out
+    assert str(preview.resolve()) in out
+    assert FOREIGN not in out
+    assert "tests/test_mesh.py" in out
+
+
+def test_a_subdirectory_of_the_sessions_own_tree_is_not_another_tree(
+    repo, monkeypatch, capsys
+):
+    """``cd tests`` inside the session's checkout is the same work tree."""
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    _session_is(monkeypatch, repo)
+    monkeypatch.chdir(repo / "tests")
+    assert changed_tests.main(["--base", "master", "--list"]) == 0
+    assert FOREIGN not in capsys.readouterr().out
+
+
+def test_a_directory_outside_any_work_tree_is_not_a_competing_tree(
+    repo, tmp_path, monkeypatch, capsys
+):
+    """A scratch directory is not a tree somebody meant to measure; the
+    lookup's rescue (``test_the_run_directory_is_not_taken...``) stays quiet."""
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    _session_is(monkeypatch, repo)
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.chdir(scratch)
+    assert changed_tests.main(["--base", "master", "--list"]) == 0
+    assert FOREIGN not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("how", ["named", "run cwd"])
+def test_only_the_session_lookup_can_pick_a_tree_the_caller_is_not_in(
+    repo, preview, how
+):
+    """``named`` is what the caller asked for and ``run cwd`` is where it
+    stands; neither is a tree chosen behind the caller's back."""
+    assert changed_tests.foreign_cwd(repo, how, cwd=preview) is None
+    assert changed_tests.foreign_cwd(repo, "session", cwd=preview) is not None
+
+
+# --------------------------------------------------------------------------- #
 # which pytest would run (claunch-7sj, environment axis)
 #
 # `uv run --no-sync pytest` resolves a console script: the project

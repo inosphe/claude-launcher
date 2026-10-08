@@ -1876,8 +1876,16 @@ steps:
         브랜치 자체는 안 움직이므로 리뷰어가 승인한 tip이 그대로 착지한다:
           git worktree add --detach <tmp> <대상>
           git -C <tmp> merge --no-ff <브랜치>
-          <tmp에서 표적 테스트 실행 — 수치를 보고와 코멘트에>
+          uv sync --extra test --directory <tmp>
+          uv run --directory <tmp> --no-sync python tools/changed_tests.py --repo <tmp> --base <대상>
           git update-ref refs/claunch/preview/<브랜치> $(git -C <tmp> rev-parse HEAD)
+        가운데 두 줄이 측정이고, 수치는 보고와 코멘트에 옮긴다. `--repo <tmp>`를
+        빼면 changed_tests는 데몬에게 이 세션의 체크아웃을 물어 그 트리를
+        잰다 — `cd <tmp>` 뒤에 그냥 돌린 실행은 세션 트리의 영수증을 재사용하거나
+        세션 트리를 다시 돌리고, 둘 다 프리뷰를 녹색으로 다시 잰 것처럼 보인다
+        (claunch-873ys; 그 경우 changed_tests가 `WARNING: the working directory
+        is in another work tree`를 낸다). `uv sync`를 빼면 <tmp>에 환경이
+        없어 changed_tests가 거절한다(claunch-7sj).
         마지막 줄이 요점이다: 게이트는 그 ref의 두 부모가 정확히 내 tip과
         대상 tip인지만 본다. 대상이 또 움직이면 부모가 안 맞아 판정이 저절로
         re-measure로 돌아온다 — 아무도 안 보고 있을 때 기준선이 낡는 그
