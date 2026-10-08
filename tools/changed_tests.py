@@ -399,6 +399,51 @@ def _resolve_repo(explicit) -> tuple:
         return Path(explicit or ".").resolve(), "named" if explicit else "run cwd"
 
 
+def _toplevel(where: Path) -> Optional[str]:
+    """The work tree ``where`` sits in, normalised for comparison; None outside one."""
+    try:
+        top = _git(where, "rev-parse", "--show-toplevel")
+    except (LookupError, OSError):
+        return None
+    return os.path.normcase(str(Path(top).resolve())) if top else None
+
+
+def foreign_cwd(repo: Path, how: str, cwd: Optional[Path] = None) -> Optional[Path]:
+    """The work tree the caller stands in, when the session lookup chose another.
+
+    The shape this names is the re-measure on a preview merge
+    (``claunch-873ys``, earlier ``claunch-preview-remeasure-wrong-tree-lf5dn``):
+    the worker builds ``<tmp>`` from the target, merges its branch into it,
+    ``cd``s there and runs this gate with no ``--repo``. :func:`_resolve_repo`
+    then answers with the session's own checkout, so the gate either reuses
+    that tree's green receipt or re-runs that tree -- and both read as a
+    green re-measure of the preview. Exit 0, no warning, measured twice
+    (s704 2026-09-22, s875 2026-10-08).
+
+    Only a WARNING, never a refusal, because the same shape is also the one
+    the session lookup exists for: the engine runs a ``verify`` with ``cwd``
+    set to the run's directory, which is a different work tree from the
+    session's whenever the run was keyed somewhere the session does not stand
+    (``claunch-7sj``). There the session's tree is the right answer and a
+    non-zero exit would break the gate. A warning costs that path one
+    paragraph of output, read only when the verify fails.
+
+    Fires only for :data:`checkout.SESSION`: ``named`` is what the caller
+    asked for, and ``run cwd`` measured the working directory already. A
+    working directory outside any git work tree (a scratch directory) is not
+    a competing tree and stays silent.
+    """
+    if how != "session":
+        return None
+    here = Path(cwd) if cwd is not None else Path.cwd()
+    mine = _toplevel(here)
+    if mine is None:
+        return None
+    if mine == _toplevel(repo):
+        return None
+    return Path(mine)
+
+
 def resolve_base(repo: Path, base: str) -> tuple:
     """The ref to measure against, and how we came to think so.
 
@@ -1546,6 +1591,21 @@ def main(argv: Optional[list] = None) -> int:
     # about this directory and a reader who assumes it is the working
     # directory reads the whole report as being about a different tree.
     print(f"tree    : {repo}  ({how_repo})")
+    elsewhere = foreign_cwd(repo, how_repo)
+    if elsewhere is not None:
+        print(
+            f"WARNING: the working directory is in another work tree, "
+            f"{elsewhere}, and this measures the session's tree above, not "
+            f"that one.\n"
+            f"  Right for a step's verify (it runs in the run's directory). "
+            f"Wrong for a re-measure on a preview merge: there the numbers "
+            f"below, or a receipt reused for them, describe the session's "
+            f"tree (claunch-873ys). To measure the preview, give it its own "
+            f"environment and name it:\n"
+            f"    uv sync --extra test --directory {elsewhere}\n"
+            f"    uv run --directory {elsewhere} --no-sync python "
+            f"tools/changed_tests.py --repo {elsewhere} --base <target>"
+        )
     base, how = resolve_base(repo, args.base)
     if how == "self-tracking":
         print(
