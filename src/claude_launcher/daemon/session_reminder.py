@@ -451,7 +451,7 @@ def reminder_block(
     goal: str = "",
     packs: Optional[List[str]] = None,
 ) -> str:
-    """Render one session reminder with peer Role and Cflow sections."""
+    """Render one session reminder with its peer source sections."""
     sections: List[Tuple[str, List[str]]] = []
     if goal:
         sections.append(("Score goal", [goal]))

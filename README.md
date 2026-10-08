@@ -4360,8 +4360,8 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | POST   | `/api/cflow/reminder`          | `{cwd, scope, enabled?, interval?}` or `{cwd, scope, clear: true}` — one run's override, stored (and archived) with the run |
 | POST   | `/api/cflow/reminder/skip`     | `{cwd, scope}` — let ONE of that run's reminders go by: re-arms the clock's timer (and drops one held for a stopped session) without writing an override. Answers `{skipped}`; `false` = the clock was keeping no timer there |
 | GET    | `/api/sessions/{name}/reminder` | the session-level pause and Role-source timer shown in the attached terminal header |
-| POST   | `/api/sessions/{name}/reminder` | `{paused: bool}` — pause/resume this session's repeating Role and Cflow reminder deliveries; persisted with the session |
-| POST   | `/api/sessions/{name}/reminder/skip` | re-arm this session's active Role and Cflow reminder sources for one interval without changing their settings |
+| POST   | `/api/sessions/{name}/reminder` | `{paused: bool}` — pause/resume this session's repeating Role, Prompt pack, Cflow and Score goal reminder deliveries; persisted with the session |
+| POST   | `/api/sessions/{name}/reminder/skip` | re-arm this session's active Role, Prompt pack, Cflow and Score goal reminder sources for one interval without changing their settings |
 
 **Session reminders.** One service coordinates independent sources per
 session. The Role source is keyed by `(mesh, role, stance id)` and remains

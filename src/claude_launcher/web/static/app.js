@@ -5550,8 +5550,8 @@ const TERM_TIMER_HOLD_GLYPH = { on: "⏸", off: "▶" };
 function termTimerHold() {
   const read = termTimerRead;
   if (!read || !read.pick) return null;
-  // Role-bearing sessions use the service-level gate. Role and Cflow retain
-  // independent clocks; this switch is at their shared delivery boundary.
+  // Role-bearing sessions use the service-level gate. Its sources (Role,
+  // Prompt pack, Cflow, Score goal) retain independent clocks; this switch is at their shared delivery boundary.
   if (read.sessionReminder && read.sessionReminder.role) {
     return {
       on: !read.sessionReminder.paused,
@@ -5674,7 +5674,8 @@ function termTimerTitle(pick, line, hold) {
     if (hold.session) {
       lines.push(
         "Click to " + (hold.on ? "PAUSE" : "RESUME") +
-          " this session's repeating Role and Cflow reminders.",
+          " this session's repeating Role, Prompt pack, Cflow and Score goal "
+          + "reminders.",
         "Cflow signals and stall pings remain active. The pause is stored " +
           "with this session and survives daemon restart and respawn."
       );
@@ -5793,8 +5794,8 @@ function termTimerSkipTitle(skip) {
         + "poll, so it lands the moment this session is working again. "
         + "Press to let it go instead."
       : skip.session
-        ? "SKIP this Session reminder: active Role and Cflow source timers "
-          + "start a fresh interval now."
+        ? "SKIP this Session reminder: active Role, Prompt pack, Cflow and "
+          + "Score goal source timers start a fresh interval now."
         : "SKIP this one cflow reminder: the daemon does not re-type the step "
           + "into this session now.",
     "The clock stays on" + (skip.interval

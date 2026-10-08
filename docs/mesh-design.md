@@ -1310,8 +1310,8 @@ and stance recovery instruction. Sessions with a role and no cflow run still
 receive the Role source on its own interval.
 
 The attached terminal header controls that shared delivery boundary. Its
-pause/resume state is stored with the session and suppresses repeating Role
-and Cflow reminders until resumed. Skip re-arms every active repeating source
+pause/resume state is stored with the session and suppresses every repeating
+source (Role, Prompt pack, Cflow, Score goal) until resumed. Skip re-arms every active repeating source
 for one interval. Cflow state-change signals and stall pings continue because
 they report external state changes rather than repeat session context.
 

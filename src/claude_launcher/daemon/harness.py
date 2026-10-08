@@ -198,8 +198,8 @@ class SessionDef:
     #: set while the end-sequence waits still protects the session.
     keep_alive: bool = False
     #: A person's standing pause for the session-level reminder service.
-    #: Role and Cflow keep independent source clocks, but neither repeating
-    #: reminder is delivered into this session while this flag is set.
+    #: Each source (Role, Prompt pack, Cflow, Score goal) keeps its own
+    #: clock, but no repeating reminder is delivered into this session while this flag is set.
     #: Persisted with the definition so a daemon restart or respawn does not
     #: silently undo a pause made from the terminal header.
     reminder_paused: bool = False

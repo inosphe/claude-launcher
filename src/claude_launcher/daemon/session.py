@@ -1443,7 +1443,7 @@ class Session:
         return bool(self.sdef.reminder_paused)
 
     def set_reminder_pause(self, paused: bool) -> bool:
-        """Pause or resume repeating Role and Cflow reminders.
+        """Pause or resume every repeating session reminder source.
 
         The service owns source clocks and re-arms them when this changes.
         The session owns the durable choice because it must survive process
