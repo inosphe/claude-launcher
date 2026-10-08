@@ -551,6 +551,12 @@ def test_cases_errors():
     assert "duplicate choice" in err(_cases(base + """
           cases: {a: x, A: x}
     """))
+    # claunch-gpccp: no brief may name an option approve, so the ask that
+    # these keys become could never be posed
+    for word in ("approve", "Decline", "abstain"):
+        assert "cannot be an option name" in err(_cases(base + f"""
+          cases: {{{word}: x, b: x}}
+    """))
     assert "declares a 'choices' param" in err(textwrap.dedent("""
         nodes:
           x: {prompt: X}
