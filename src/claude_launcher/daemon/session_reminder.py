@@ -98,7 +98,9 @@ def _session_workspace(sdef) -> Optional[Path]:
 
     The same lookup creation uses to choose the packs (``api.
     _session_prompt_packs``), so a recorded workspace copy is compared
-    against the file it was read from.
+    against the file it was read from. ``None`` means the workspace could
+    not be confirmed -- an unregistered directory or a failed lookup alike
+    -- and :func:`refresh_packs` then removes nothing.
     """
     try:
         owner = workspaces.owning(str(cflow_state.resolve_cwd(sdef.cwd or None)))
@@ -153,12 +155,24 @@ def refresh_packs(
     notices: List[dict] = []
     moved = False
     for rec in recorded:
+        source = rec.get("source") or prompt_packs.WORKSPACE
+        if workspace is None and source == prompt_packs.WORKSPACE:
+            # Unconfirmed is not gone: a workspace that was unregistered or
+            # could not be read still has its file, and a removal is not
+            # undone by registering it again.
+            out.append(rec)
+            continue
         try:
             now = _current_record(rec, workspace, memo)
         except Exception:  # noqa: BLE001 - an unreadable copy is not a removal
             out.append(rec)
             continue
         old_id = prompt_packs.text_id(rec.get("text") or "")
+        if now is None and workspace is None and source == prompt_packs.PACKAGE:
+            # claunch's copy is gone but the workspace, which might hold
+            # this pack's replacement, cannot be looked at: keep it.
+            out.append(rec)
+            continue
         if now is None:
             moved = True
             notices.append({"id": rec["id"], "change": "removed", "old": old_id})

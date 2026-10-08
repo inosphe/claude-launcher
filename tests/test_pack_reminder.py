@@ -371,3 +371,45 @@ def test_one_scan_reads_a_workspace_and_a_shipped_pack_once(env, monkeypatch):
     monkeypatch.setattr(prompt_packs, "shipped", counting_shipped)
     service.scan_packs(1000.0, CFG)
     assert calls == {"installed": 1, "shipped": 1}
+
+
+@pytest.mark.parametrize("how", ["unregistered", "lookup fails"])
+def test_an_unconfirmed_workspace_releases_nothing(env, monkeypatch, how):
+    """Not finding the workspace is not finding the file gone (s764's
+    review of 54954748): the record stays, nothing is told, and rebrief
+    still serves the text -- and registering it again changes nothing."""
+    monkeypatch.setattr(session_reminder.SessionReminderService, "_config",
+                        staticmethod(lambda: dict(CFG)))
+    ws_rec = _ws_record(env, "house", "house rules")
+    pkg_rec = _pkg_record(env, "extra", "extra rules")
+    sess, mgr = _session(env, [ws_rec, pkg_rec])
+    service = session_reminder.SessionReminderService(mgr)
+    _tick(service, 1000.0)
+
+    (env["shipped"] / "extra.md").unlink()   # gone, but cannot be confirmed
+    if how == "unregistered":
+        workspaces.remove(str(env["ws"]))
+    else:
+        def broken(*_a, **_k):
+            raise OSError("workspace registry unreadable")
+        monkeypatch.setattr(workspaces, "owning", broken)
+    _tick(service, 1015.0)
+
+    assert sess.sdef.prompt_packs == (ws_rec, pkg_rec)
+    assert mgr.persisted == 0
+    assert sess.delivered == []
+    ident = prompt_packs.text_id("house rules")
+    assert rebrief.recall("w1", ident, manager=mgr, mesh_mgr=None)["text"] == "house rules"
+
+
+def test_an_unconfirmed_workspace_still_follows_claunchs_edits(env, monkeypatch):
+    monkeypatch.setattr(session_reminder.SessionReminderService, "_config",
+                        staticmethod(lambda: dict(CFG)))
+    sess, mgr = _session(env, [_pkg_record(env, "extra", "v1")])
+    service = session_reminder.SessionReminderService(mgr)
+    _tick(service, 1000.0)
+    workspaces.remove(str(env["ws"]))
+    _pack_file(env["shipped"], "extra", "v2")
+    _tick(service, 1015.0)
+    assert sess.sdef.prompt_packs[0]["text"] == "v2"
+    assert "changed: prompt pack extra" in sess.delivered[0]
