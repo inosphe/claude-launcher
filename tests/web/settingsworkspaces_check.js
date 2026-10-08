@@ -65,11 +65,13 @@ const ctx = {
   el,
   $: (id) => (id === "ws-view" ? settingsView : id === "workspaces-view" ? pageView : null),
   document: { activeElement: null },
-  workspacesCache: [{ name: "a" }, { name: "b" }],
+  workspacesCache: [{ name: "a", exists: true }, { name: "b", exists: true }],
   wsSection: "",
   wsRow: (w) => el("div", "ws-row", w.name),
   wsSyncOpen: new Set(),
   wsSyncPanel: (w) => el("div", "ws-sync", w.name),
+  wsTreesOpen: new Set(),
+  wsWorktreeList: (w) => el("div", "ws-worktrees", w.name),
   installPanel: () => el("div", "card", "installPanel"),
   profilesPanel: () => el("div", "card", "profilesPanel"),
   globalThis: {},
@@ -119,6 +121,14 @@ ctx.wsSyncOpen.add("b");
 drawn("workspaces");
 const rows = pageView.children.find((c) => c.cls === "ws-list").children.map((c) => `${c.cls}:${c.text}`);
 assert.deepEqual(rows, [":Registered (2)", "ws-row:a", "ws-row:b", "ws-sync:b"]);
+// An open worktree list sits between its row and that row's Sync panel
+// (claunch-kjjta).
+ctx.wsTreesOpen.add("b");
+drawn("workspaces");
+assert.deepEqual(
+  pageView.children.find((c) => c.cls === "ws-list").children.map((c) => `${c.cls}:${c.text}`),
+  [":Registered (2)", "ws-row:a", "ws-row:b", "ws-worktrees:b", "ws-sync:b"]);
+ctx.wsTreesOpen.clear();
 ctx.wsSyncOpen.clear();
 
 /* ---- which view each section shows ------------------------------------- */
@@ -142,7 +152,7 @@ const REFRESHERS = [
   "refreshPrompterSettings", "refreshStatusChecks", "refreshRagStatus",
   "refreshGhStatus", "refreshRelaySettings", "refreshBeadsBoards",
   "refreshProjects", "refreshProfileSettings", "refreshInstallOverview",
-  "refreshVscode",
+  "refreshVscode", "refreshWsGitSummary",
 ];
 const octx = {
   wsSection: "", wsOpen: true,
@@ -157,8 +167,10 @@ vm.runInContext(slice("openSettings"), octx);
 
 called.length = 0;
 octx.openSettings("workspaces");
-// ...and the VS Code state its rows' buttons are drawn from.
-assert.deepEqual([...called].sort(), ["refreshBeadsBoards", "refreshProjects", "refreshVscode"]);
+// ...the VS Code state its rows' buttons are drawn from, and the git
+// summary its row badges are (claunch-gax44).
+assert.deepEqual([...called].sort(),
+  ["refreshBeadsBoards", "refreshProjects", "refreshVscode", "refreshWsGitSummary"]);
 
 called.length = 0;
 octx.openSettings("vscode");

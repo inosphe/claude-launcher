@@ -371,3 +371,224 @@ def test_routes_need_the_token(world):
         assert resp.status == 401
 
     _with_app(body)
+
+
+# --- Row badges (claunch-gax44) -------------------------------------------
+
+
+def test_summary_reads_branch_ahead_behind_and_changed_files(world, tmp_path):
+    a, b = world["a"], world["b"]
+    _commit(b, "theirs.txt")
+    _git(b, "push", "-q", "origin", "master")
+    _git(a, "fetch", "-q", "origin")          # the summary itself never fetches
+    _commit(a, "mine1.txt")
+    _commit(a, "mine2.txt")
+    (a / "base.txt").write_text("edited", encoding="utf-8")
+    (a / "untracked.txt").write_text("new", encoding="utf-8")
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    workspaces.add(str(plain), "plain")
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    workspaces.add(str(gone), "gone")
+    gone.rmdir()                              # a removable drive that is unplugged
+
+    async def body(client):
+        resp = await client.get("/api/reposync/workspaces/summary", headers=AUTH)
+        assert resp.status == 200
+        docs = (await resp.json())["workspaces"]
+        proj = docs["proj"]
+        assert proj["branch"] == "master" and proj["detached"] is False
+        assert proj["upstream"] == "origin/master"
+        assert (proj["ahead"], proj["behind"]) == (2, 1)
+        assert proj["changed"] == 1               # untracked.txt is not counted
+        assert "not a git repository" in docs["plain"]["error"]
+        assert "gone" not in docs                 # a missing workspace is left out
+
+    _with_app(body)
+
+
+def test_summary_without_upstream_and_detached(world):
+    a = world["a"]
+    _git(a, "switch", "-q", "-c", "local-only")
+    from claude_launcher import reposync_flow
+
+    doc = reposync_flow.git_summary(str(a))
+    assert doc["branch"] == "local-only" and doc["upstream"] is None
+    assert doc["ahead"] is None and doc["behind"] is None and doc["changed"] == 0
+
+    _git(a, "switch", "-q", "--detach", "HEAD")
+    doc = reposync_flow.git_summary(str(a))
+    assert doc["detached"] is True and doc["branch"] is None
+
+
+def test_summary_needs_the_token(world):
+    async def body(client):
+        resp = await client.get("/api/reposync/workspaces/summary")
+        assert resp.status == 401
+
+    _with_app(body)
+
+
+# --- Shared branches (claunch-tamel) --------------------------------------
+
+
+def test_status_lists_branches_other_machines_published(world):
+    a, b = world["a"], world["b"]
+    base = _git(a, "rev-parse", "HEAD")
+    _git(b, "switch", "-q", "-c", "s2-y")
+    theirs = _commit(b, "theirs.txt")
+    for ref in ("pc-b/s2-y", "pc-b/old", "pc-b/div", "Feature/z"):
+        _git(b, "push", "-q", "origin", f"{theirs}:refs/heads/{ref}")
+    _git(b, "push", "-q", "origin", f"{base}:refs/heads/pc-b/same")
+    _git(b, "push", "-q", "origin", f"{theirs}:refs/heads/pc-a/mine")   # this machine's own
+    _git(a, "branch", "pc-b/same", base)
+    _git(a, "branch", "pc-b/old", base)
+    _git(a, "switch", "-q", "-c", "pc-b/div")
+    _commit(a, "mine.txt")
+    _git(a, "switch", "-q", "master")
+    _git(a, "remote", "add", "gh", "https://git.example/Org/Proj.git")
+    peers = {"pc-b": [{"workspace": "proj", "remotes": [{"name": "up", "key": "git.example/org/proj"}]}]}
+
+    async def body(client):
+        resp = await client.get("/api/reposync/workspaces/proj/status?remote=origin", headers=AUTH)
+        assert resp.status == 200, await resp.text()
+        shared = {r["ref"]: r for r in (await resp.json())["shared"]}
+        assert set(shared) == {"pc-b/s2-y", "pc-b/old", "pc-b/div", "pc-b/same", "Feature/z"}
+        assert {k: r["state"] for k, r in shared.items()} == {
+            "pc-b/s2-y": "new", "pc-b/old": "behind", "pc-b/div": "diverged",
+            "pc-b/same": "same", "Feature/z": "new"}
+        row = shared["pc-b/s2-y"]
+        assert (row["machine"], row["branch"], row["sha"]) == ("pc-b", "s2-y", theirs)
+        assert row["subject"] == "add theirs.txt" and row["local"] is None
+        assert row["peer"] is True and shared["Feature/z"]["peer"] is False
+
+        # the row's Pull is the existing branch pull, fast-forward only
+        resp = await client.post("/api/reposync/workspaces/proj/branch-pull",
+                                 json={"machine": "pc-b", "branch": "old", "remote": "origin"},
+                                 headers=AUTH)
+        assert resp.status == 200, await resp.text()
+        resp = await client.get("/api/reposync/workspaces/proj/status?remote=origin&fetch=0",
+                                headers=AUTH)
+        shared = {r["ref"]: r for r in (await resp.json())["shared"]}
+        assert shared["pc-b/old"]["state"] == "same"
+
+    _with_app(body, peers=peers, me="pc-a")
+
+
+# --- Branches waiting to land (claunch-6p7ri) -----------------------------
+
+
+def test_status_lists_local_branches_the_remote_master_does_not_hold(world):
+    a = world["a"]
+    _git(a, "switch", "-q", "-c", "s1-landed")
+    _commit(a, "landed.txt")
+    _git(a, "push", "-q", "origin", "s1-landed:master")       # landed on the shared master
+    _git(a, "switch", "-q", "-c", "s1-open", "master")
+    (a / "open.txt").write_text("open", encoding="utf-8")
+    _git(a, "add", "open.txt")
+    _git(a, "commit", "-q", "-m", "open work\n\nClaunch-Session: s42\nClaunch-Worktree: wt-x")
+    _commit(a, "open2.txt")
+    _git(a, "commit", "-q", "--allow-empty", "-m", "tip\n\nClaunch-Session: s43")
+    _git(a, "switch", "-q", "-c", "plain", "master")
+    plain = _commit(a, "plain.txt")
+    _git(a, "switch", "-q", "master")
+
+    async def body(client):
+        resp = await client.get("/api/reposync/workspaces/proj/status", headers=AUTH)
+        assert resp.status == 200, await resp.text()
+        doc = await resp.json()
+        rows = {r["branch"]: r for r in doc["unmerged"]}
+        # s1-landed is on the remote's master though the local master is behind
+        assert set(rows) == {"s1-open", "plain"}
+        assert (rows["s1-open"]["ahead"], rows["s1-open"]["session"]) == (3, "s43")
+        assert (rows["plain"]["ahead"], rows["plain"]["session"]) == (1, None)
+        assert rows["plain"]["sha"] == plain and rows["plain"]["subject"] == "add plain.txt"
+        assert rows["plain"]["date"]
+
+    _with_app(body)
+
+
+# --- Peer comparison table (claunch-gjjdp) --------------------------------
+
+
+def test_status_measures_each_peer_master_against_ours(world):
+    a, b = world["a"], world["b"]
+    ours = _git(a, "rev-parse", "master")
+    theirs = _commit(b, "theirs.txt")
+    _git(b, "push", "-q", "origin", "master")      # reaches this clone with the status fetch
+    _git(a, "remote", "add", "gh", "https://git.example/Org/Proj.git")
+    shared = [{"name": "up", "key": "git.example/org/proj"}]
+
+    def peer(sha):
+        return [{"workspace": "proj", "remotes": shared,
+                 "branches": {"master": {"sha": sha, "tracking": []}}}]
+
+    peers = {
+        "pc-same": peer(ours),
+        "pc-ahead": peer(theirs),
+        "pc-far": peer("f" * 40),                  # never reached the shared remote
+        "pc-legacy": [{"workspace": "proj", "remotes": shared, "branches": {"master": ours}}],
+        "pc-old": RuntimeError("404"),
+    }
+
+    async def body(client):
+        resp = await client.get("/api/reposync/workspaces/proj/status?remote=origin", headers=AUTH)
+        assert resp.status == 200, await resp.text()
+        doc = await resp.json()
+        got = {r["machine"]: r["distance"] for r in doc["peers"]}
+        assert got["pc-same"] == {"state": "same", "theirs_only": 0, "ours_only": 0}
+        assert got["pc-ahead"] == {"state": "ahead", "theirs_only": 1, "ours_only": 0}
+        assert got["pc-far"]["state"] == "unknown"
+        assert got["pc-legacy"]["state"] == "same"
+        assert doc["unreadable"] == ["pc-old"]
+
+    _with_app(body, peers=peers)
+
+
+def test_peer_distance_behind_and_diverged(world):
+    from claude_launcher import reposync_flow
+
+    a = world["a"]
+    base = _git(a, "rev-parse", "HEAD")
+    mine = _commit(a, "mine.txt")
+    _git(a, "switch", "-q", "-c", "side", base)
+    side = _commit(a, "side.txt")
+    assert reposync_flow.peer_distance(str(a), mine, base) == {
+        "state": "behind", "theirs_only": 0, "ours_only": 1}
+    assert reposync_flow.peer_distance(str(a), mine, side) == {
+        "state": "diverged", "theirs_only": 1, "ours_only": 1}
+    assert reposync_flow.peer_distance(str(a), mine, None)["state"] == "unknown"
+
+
+# --- Worktrees per workspace (claunch-kjjta) ------------------------------
+
+
+def test_summary_lists_the_linked_worktrees_but_not_the_workspace(world, tmp_path):
+    import os
+
+    a = world["a"]
+    on_branch = tmp_path / "wt-feature"
+    detached = tmp_path / "wt-detached"
+    _git(a, "worktree", "add", "-q", "-b", "s7-feature", str(on_branch))
+    _git(a, "worktree", "add", "-q", "--detach", str(detached), "HEAD")
+    workspaces.add(str(on_branch), "proj-wt")    # a workspace that is itself a worktree
+
+    def norm(p):
+        return os.path.normcase(os.path.normpath(str(p)))
+
+    async def body(client):
+        resp = await client.get("/api/reposync/workspaces/summary", headers=AUTH)
+        assert resp.status == 200
+        docs = (await resp.json())["workspaces"]
+        rows = {norm(r["path"]): r for r in docs["proj"]["worktrees"]}
+        assert set(rows) == {norm(on_branch), norm(detached)}
+        assert rows[norm(on_branch)]["branch"] == "s7-feature"
+        assert rows[norm(on_branch)]["detached"] is False
+        assert rows[norm(detached)]["detached"] is True and rows[norm(detached)]["branch"] is None
+        assert rows[norm(detached)]["head"] == _git(a, "rev-parse", "HEAD")
+        # registered at a linked worktree: the others, never itself
+        own = {norm(r["path"]) for r in docs["proj-wt"]["worktrees"]}
+        assert own == {norm(detached)}
+
+    _with_app(body)

@@ -725,6 +725,7 @@ def build_app(
     # The Workspaces page's Sync panel (claunch-tqm2e). Its pushes wait
     # behind the gate above like a session's do: the button files the card,
     # a person approves it, the panel's next call runs it.
+    r.add_get("/api/reposync/workspaces/summary", h_reposync_ws_summary)
     r.add_get("/api/reposync/workspaces/{name}/status", h_reposync_ws_status)
     r.add_post("/api/reposync/workspaces/{name}/sync", h_reposync_ws_sync)
     r.add_post("/api/reposync/workspaces/{name}/branch-push", h_reposync_ws_branch_push)
@@ -5823,20 +5824,24 @@ async def h_relay_peer_repos(request: web.Request) -> web.Response:
 PEER_REPOS_TIMEOUT = 15.0
 
 
-async def _peer_repos_all(request: web.Request) -> Tuple[Dict[str, list], List[str]]:
-    """Every relay peer's registered repositories, plus one line per peer
-    that could not be read. Peers are advisory: no relay, or a peer whose
-    daemon predates reposync, narrows what the panel shows and nothing else."""
+async def _peer_repos_all(
+    request: web.Request,
+) -> Tuple[Dict[str, list], List[str], List[str]]:
+    """Every relay peer's registered repositories, one line per peer that
+    could not be read, and the names of those peers. Peers are advisory: no
+    relay, or a peer whose daemon predates reposync, narrows what the panel
+    shows and nothing else."""
     mm = _mesh_mgr(request)
     if mm.peer_lister is None or mm.peer_transport is None:
-        return {}, ["relay uplink is not running -- peers not consulted"]
+        return {}, ["relay uplink is not running -- peers not consulted"], []
     try:
         names = await mm.peer_lister()
     except Exception as exc:  # noqa: BLE001 — PeerError
-        return {}, [f"cannot list relay peers ({exc})"]
+        return {}, [f"cannot list relay peers ({exc})"], []
     me = (request.app["relay_state"]() or {}).get("name")
     found: Dict[str, list] = {}
     problems: List[str] = []
+    unreadable: List[str] = []
 
     async def one(machine: str) -> None:
         try:
@@ -5845,11 +5850,12 @@ async def _peer_repos_all(request: web.Request) -> Tuple[Dict[str, list], List[s
             )
         except Exception as exc:  # noqa: BLE001 — PeerError, timeout, an old peer's 404
             problems.append(f"{machine}: cannot read its repositories ({exc or type(exc).__name__})")
+            unreadable.append(machine)
             return
         found[machine] = list(payload.get("repos") or [])
 
     await asyncio.gather(*(one(m) for m in sorted(names) if m != me))
-    return found, sorted(problems)
+    return found, sorted(problems), sorted(unreadable)
 
 
 def _ws_path(request: web.Request) -> Tuple[Optional[str], Optional[web.Response]]:
@@ -5866,6 +5872,19 @@ def _machine_name(request: web.Request) -> str:
     return str((request.app["relay_state"]() or {}).get("name") or socket.gethostname())
 
 
+async def h_reposync_ws_summary(request: web.Request) -> web.Response:
+    """The Workspaces page's row badges: branch, ahead/behind and changed
+    files for every registered workspace that is there, read from local git
+    only (claunch-gax44). One ``git status`` per workspace, run side by side
+    off the loop; a workspace that is missing is left out, one git cannot
+    read carries ``error``."""
+    present = [w for w in workspaces.list_all() if w.exists()]
+    docs = await asyncio.gather(*(
+        asyncio.to_thread(reposync_flow.git_summary, w.path) for w in present
+    ))
+    return json_response({"workspaces": {w.name: d for w, d in zip(present, docs)}})
+
+
 async def h_reposync_ws_status(request: web.Request) -> web.Response:
     """The Sync panel's view of one workspace: remotes, the peers sharing an
     address with it, and the plan a sync of its default branch would carry
@@ -5876,15 +5895,17 @@ async def h_reposync_ws_status(request: web.Request) -> web.Response:
     name = request.match_info["name"]
     do_fetch = request.query.get("fetch", "1") not in ("0", "false", "no")
     if request.query.get("peers", "1") in ("0", "false", "no"):
-        peers, problems = {}, []
+        peers, problems, unreadable = {}, [], []
     else:
-        peers, problems = await _peer_repos_all(request)
+        peers, problems, unreadable = await _peer_repos_all(request)
     doc = await asyncio.to_thread(
         reposync_flow.workspace_status, path, name, peers, problems,
         do_fetch=do_fetch, remote=request.query.get("remote") or None,
-        branch=request.query.get("branch") or None,
+        branch=request.query.get("branch") or None, machine=_machine_name(request),
     )
     doc["machine"] = _machine_name(request)
+    # the peers table shows these as unreadable rows (claunch-gjjdp)
+    doc["unreadable"] = unreadable
     return json_response(doc)
 
 
