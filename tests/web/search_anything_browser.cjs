@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const http = require('node:http');
 const {chromium} = require(process.env.CLAUNCH_PLAYWRIGHT || 'playwright');
+const {safeListen} = require('./safe_listen.cjs');
 const root = path.join(__dirname, '../../src/claude_launcher/web/static');
 /* The rail row's markup, taken whole. The row holds nested divs (the search box
    and its clear button), so slicing to the first `</div>` cut it short and the
@@ -94,7 +95,7 @@ const server = http.createServer(async (req,res) => {
   res.end(JSON.stringify({text:'원문 기록',session:'s1'}));
 });
 (async()=>{
-  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  await safeListen(server);
   const browser=await chromium.launch({headless:true,executablePath:process.env.CLAUNCH_CHROMIUM});
   try {
     const page=await browser.newPage(); const errors=[];page.on('pageerror',error=>errors.push(error.message));
