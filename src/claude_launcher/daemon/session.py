@@ -23,7 +23,7 @@ import os
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Callable, Dict, List, Optional, Set, Tuple, Union
+from typing import Awaitable, Callable, Dict, List, Optional, Set, Tuple, Union
 
 from .. import atomic
 from .. import harnesses as harness_registry
@@ -1073,6 +1073,7 @@ class Session:
 
     async def _deliver(
         self, text: Union[str, Callable[[], str]], *, force: bool = False, wait_for_draft: bool = False,
+        before: Optional[Callable[[], Awaitable[None]]] = None,
     ) -> Optional[bool]:
         """Put ``text`` in front of the agent running here, as a user message.
 
@@ -1126,6 +1127,11 @@ class Session:
         (after the readiness/keyboard holds, in the machine's local zone), so
         the receiving agent — and anyone reading its transcript — can tell
         *when* an automated delivery arrived, not just that it did.
+
+        ``before`` runs once the terminal is ready and the composer is clear,
+        ahead of the text factory and the paste. The opening of a session
+        created with images puts them in the composer there (claunch-jmrmc),
+        so the images and the text are submitted as one message.
         """
         try:
             await self._await_readable()
@@ -1168,6 +1174,8 @@ class Session:
                 await asyncio.sleep(FORCE_DRAFT_SETTLE)
             # State-dependent reminders resolve after readiness and draft
             # waits, so a newer user rating can replace or cancel them.
+            if before is not None:
+                await before()
             if callable(text):
                 text = text()
                 if not text:
@@ -1179,15 +1187,17 @@ class Session:
         return True
 
     async def deliver(
-        self, text: Union[str, Callable[[], str]], *, force: bool = False, wait_for_draft: bool = False
+        self, text: Union[str, Callable[[], str]], *, force: bool = False, wait_for_draft: bool = False,
+        before: Optional[Callable[[], Awaitable[None]]] = None,
     ) -> bool:
         """Deliver without interleaving input. A text factory can refresh state
         after the keyboard wait; returning an empty string cancels the send.
+        ``before`` is :meth:`_deliver`'s pre-paste step.
         """
         while True:
             async with self._delivery_lock:
                 result = await self._deliver(
-                    text, force=force, wait_for_draft=wait_for_draft
+                    text, force=force, wait_for_draft=wait_for_draft, before=before
                 )
             if result is not None:
                 return result
@@ -2235,7 +2245,8 @@ class DeadSession:
         raise self._gone()
 
     async def deliver(
-        self, text: str, *, force: bool = False, wait_for_draft: bool = False
+        self, text: str, *, force: bool = False, wait_for_draft: bool = False,
+        before=None,
     ) -> bool:
         return False  # nothing is running to read it, forced or not
 
