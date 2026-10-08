@@ -44,6 +44,15 @@ If your draft is a chain of `instructions` + `next` with no `verify`, no
 several tool calls. Put it in ONE step's instructions instead — it will be
 followed just as well and cost nothing to run.
 
+## Readable run details
+
+Write workflow `description`, step `instructions`, and `select.prompt` as
+Markdown: the dashboard renders these fields in Run details. Use headings,
+short paragraphs, lists, code spans for commands/paths, and fenced blocks
+for multi-line examples. Keep YAML multi-line text in literal (`|`) blocks
+so Markdown line breaks survive. Do not wrap the entire field in a code
+fence or use raw HTML. Keep titles and executable `verify` commands plain.
+
 ## The control points, weakest first
 
 Always take the weakest one that actually holds. Each row costs more than the

@@ -1881,6 +1881,12 @@ class Session:
         self._broadcast(("notice", notice))
         return len(self._subscribers)
 
+    def announce_line_sync(self, frame: dict) -> int:
+        """Send the shared session line's state (``daemon/line_sync.py``) to
+        every viewer. Returns how many were subscribed."""
+        self._broadcast(("line_sync", frame))
+        return len(self._subscribers)
+
     def set_viewer_focused(self, viewer: object, focused: bool) -> None:
         """Apply one viewer's focus state to rendering and child scheduling."""
         before = self.is_focused()
@@ -2231,6 +2237,9 @@ class DeadSession:
         return asyncio.Queue(maxsize=1)  # nothing will ever be published to it
 
     def notify(self, text: str, *, ttl=None, level: str = "info") -> int:
+        return 0  # no live viewers to show it to
+
+    def announce_line_sync(self, frame: dict) -> int:
         return 0  # no live viewers to show it to
 
     def unsubscribe(self, q: asyncio.Queue) -> None:

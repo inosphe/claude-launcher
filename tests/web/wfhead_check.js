@@ -41,6 +41,7 @@ function node(tag) {
     dataset: {}, disabled: false, href: "", title: "",
     setAttribute(k, v) { this.attrs[k] = String(v); },
     appendChild(c) { this.kids.push(c); return c; },
+    insertBefore(c, before) { const i = this.kids.indexOf(before); this.kids.splice(i < 0 ? 0 : i, 0, c); return c; },
     addEventListener(k, fn) { (this.handlers[k] ||= []).push(fn); },
     querySelector() { return null; },
     querySelectorAll() { return []; },
@@ -78,6 +79,7 @@ function el(tag, cls, text) {
    diagram, the reports, the buttons and the boxes below them. Stubbed to
    their shapes so the head is what is left to check. */
 const stubs = `
+const requestAnimationFrame = (fn) => fn();
 let wfSelectedStep = null, wfCwd = null, wfScope = "default";
 let meshName = "", flowMesh = "", transcriptName = "", traceSession = "";
 let sessName = "", currentName = "", currentPage = "home";
@@ -86,6 +88,7 @@ function wfPacedNote() { return null; }
 // The timing diagram under the graph (s157) — another of the pictures this
 // file is not testing, stubbed to the same shape as its neighbour above.
 function wfTimelinePanel() { return null; }
+function mdInto(host, text) { host.textContent = text; return host; }
 function wfReports() { return el("div", "wf-reports"); }
 function wfActions() { return el("div", "wf-actions"); }
 function reminderControl() { return el("div", "wf-reminder"); }
@@ -156,6 +159,14 @@ const data = (over) => ({
 {
   const view = node("div");
   ctx.renderWfInto(view, data(), UI);
+  const current = find(view, "wf-current")[0];
+  check("current step is available without finding its graph node", current && current.text === "Current step: work");
+  let selected = null;
+  const currentView = node("div");
+  ctx.renderWfInto(currentView, data(), { ...UI, select: (step) => { selected = step; } });
+  find(currentView, "wf-current")[0].handlers.click[0]();
+  check("current step opens its existing inspection view", selected === "work");
+  check("full page links back to runs", find(view, "wf-back")[0]?.href === "#/flows");
   const head = find(view, "wf-head")[0];
   check("the run page has a head", !!head);
   const kids = head ? head.kids : [];

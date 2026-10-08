@@ -395,13 +395,20 @@ TOOLS = [
                     "type": "array",
                     "items": {"type": "string"},
                     "description": (
-                        "prompt pack ids to put into the child's opening, "
-                        "read from the workspace it will run in (installed "
-                        "there in Settings > Install). Packs its role or "
-                        "subroles require are added whether listed or not "
-                        "(claunch's copy when the workspace has none); a "
-                        "listed pack that is not installed there refuses "
-                        "the spawn"
+                        "prompt pack ids to put into the child's opening: "
+                        "the copy installed in the workspace it will run in "
+                        "(Settings > Install), else claunch's own. Packs its "
+                        "role or subroles require are added whether listed "
+                        "or not; a listed pack that exists in neither place "
+                        "refuses the spawn"
+                    ),
+                },
+                "no_daemon_prompt": {
+                    "type": "boolean",
+                    "description": (
+                        "leave this daemon's own prompt (see 'daemon_prompt') "
+                        "out of the child's opening. Without it every child "
+                        "gets that prompt, whatever its role"
                     ),
                 },
                 "issue_text": {
@@ -543,6 +550,32 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
     {
+        "name": "daemon_prompt",
+        "description": (
+            "This daemon's own prompt: one text the daemon instance you run "
+            "under gives EVERY session it starts, whatever the role, as the "
+            "first prompt pack of the opening (a session's creator can untick "
+            "it). It is daemon configuration, not source code: a file in this "
+            "daemon's state directory that no other daemon reads. 'get' (the "
+            "default) returns its path, text and size; 'set' with 'text' "
+            "replaces it -- an empty text turns it off. Every set keeps the "
+            "text it replaced beside the file and logs who wrote it, and it "
+            "reaches only sessions created after it, so change it for a rule "
+            "every future session should follow, not for this session's task"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "op": {"type": "string", "enum": ["get", "set"]},
+                "text": {
+                    "type": "string",
+                    "description": "the whole new prompt, for 'set'",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "rebrief",
         "description": (
             "Re-read this session's own briefing, composed fresh from the "
@@ -647,6 +680,74 @@ TOOLS = [
                 },
             },
             "required": ["text"],
+        },
+    },
+    {
+        "name": "deep_think",
+        "description": (
+            "Ask YOURSELF a question and have a copy of you answer it, so the "
+            "exploration costs the copy's context instead of yours. 'ask' "
+            "quick-forks this session (the copy holds your whole conversation "
+            "up to now, so the question may lean on it), puts the question on "
+            "top, and RETURNS AT ONCE with an id: the answer is NOT in the "
+            "reply. It arrives LATER, typed into your terminal as a fenced "
+            "'claunch deep-think: ANSWER from <id>' block that starts a new "
+            "turn. So do not wait, sleep or poll for it, and do not redo the "
+            "same exploration meanwhile: carry on with other work, or end "
+            "your turn. Good for code exploration and deep reasoning whose "
+            "path you do not need to read, only its conclusion. The copy "
+            "stands in YOUR checkout and may edit; it tells you what it "
+            "changes with notes (op 'notify', typed into your terminal) "
+            "before the answer. Optional 'model'/'effort' run the copy "
+            "differently (the spawn policy decides whether you may). Past "
+            "its deadline you are asked to 'extend' or 'cancel'; say "
+            "neither and it is asked for what it has, then ended. 'status' "
+            "lists your running questions; 'cancel' ends one unanswered. "
+            "Inside a copy, 'notify' is how you tell the asker, and the "
+            "answer goes in with the 'handoff' tool, not here."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "op": {
+                    "type": "string",
+                    "enum": ["ask", "status", "cancel", "extend", "notify"],
+                    "description": "what to do; default 'ask'",
+                },
+                "question": {
+                    "type": "string",
+                    "description": (
+                        "ask: the question, stated so it can be answered "
+                        "without asking you back -- what you want to know, "
+                        "where to look, and what shape the answer should take"
+                    ),
+                },
+                "model": {
+                    "type": "string",
+                    "description": "ask: the model the copy runs on (default: yours)",
+                },
+                "effort": {
+                    "type": "string",
+                    "description": "ask: the reasoning effort the copy runs at (default: yours)",
+                },
+                "minutes": {
+                    "type": "number",
+                    "description": (
+                        "ask: how long before you are asked to extend or "
+                        "cancel (default daemon.deep_think_timeout, 30 min); "
+                        "extend: how much more time from now"
+                    ),
+                },
+                "id": {
+                    "type": "string",
+                    "description": "cancel/extend: the question's id, as 'ask' or 'status' gave it",
+                },
+                "text": {
+                    "type": "string",
+                    "description": "notify (inside a copy): the note for the asker -- which files and why",
+                },
+            },
+            "required": [],
         },
     },
     {
@@ -888,6 +989,17 @@ def call_tool(name: str, args: dict) -> dict:
     # messaging tools share.
     if name == "children":
         return _client().get(f"/api/sessions/{_session()}/children")
+    if name == "daemon_prompt":
+        op = str(args.get("op") or "get").strip()
+        if op == "get":
+            return _client().get("/api/daemon-prompt")
+        if op != "set":
+            raise MeshMcpError("'op' is 'get' or 'set'")
+        if not isinstance(args.get("text"), str):
+            raise MeshMcpError("'set' needs 'text': the whole new prompt (empty turns it off)")
+        return _client().put(
+            "/api/daemon-prompt", {"text": args["text"], "by": _session()}
+        )
     if name == "rebrief":
         ident = str(args.get("id") or "").strip()
         path = f"/api/sessions/{_session()}/rebrief"
@@ -930,6 +1042,8 @@ def call_tool(name: str, args: dict) -> dict:
         if args.get("to"):
             body["to"] = str(args["to"])
         return _client().post(f"/api/sessions/{_session()}/handoff", body)
+    if name == "deep_think":
+        return _deep_think(args)
     if name == "reparent":
         child = str(args.get("session") or "")
         parent = str(args.get("parent") or "")
@@ -1103,6 +1217,7 @@ _SPAWN_RENAMED = {
     "issue_pending": ("beads", "existing-pending"),
     "no_issue": ("beads", False),
     "no_issue_auto": ("beads", "none-auto"),
+    "no_daemon_prompt": ("daemon_prompt", False),
 }
 
 
@@ -1112,6 +1227,46 @@ def _spawn(args: dict) -> dict:
         if args.get(offered):
             payload[key] = value
     return _client().post(f"/api/sessions/{_session()}/children", payload)
+
+
+def _deep_think(args: dict) -> dict:
+    op = str(args.get("op") or "ask").strip()
+    me = quote(_session(), safe="")
+    base = f"/api/sessions/{me}/deep-think"
+    minutes = args.get("minutes")
+    seconds = None
+    if minutes not in (None, ""):
+        try:
+            seconds = float(minutes) * 60.0
+        except (TypeError, ValueError):
+            raise MeshMcpError(f"'minutes' must be a number, not {minutes!r}") from None
+    if op == "ask":
+        question = str(args.get("question") or "").strip()
+        if not question:
+            raise MeshMcpError("'question' is required for op 'ask'")
+        body = {"question": question}
+        for key in ("model", "effort"):
+            if args.get(key):
+                body[key] = str(args[key])
+        if seconds is not None:
+            body["timeout"] = seconds
+        return _client().post(base, body)
+    if op == "status":
+        return _client().get(base)
+    if op == "notify":
+        text = str(args.get("text") or "").strip()
+        if not text:
+            raise MeshMcpError("'text' is required for op 'notify'")
+        return _client().post(f"{base}/notify", {"text": text})
+    if op in ("cancel", "extend"):
+        ident = str(args.get("id") or "").strip()
+        if not ident:
+            raise MeshMcpError(f"'id' is required for op {op!r}")
+        body = {"timeout": seconds} if op == "extend" and seconds is not None else {}
+        return _client().post(f"{base}/{quote(ident, safe='')}/{op}", body)
+    raise MeshMcpError(
+        f"unknown op {op!r}: one of ask, status, cancel, extend, notify"
+    )
 
 
 def _relay_summary(relay) -> str:

@@ -19,11 +19,12 @@ Schema::
       <name>:
         service: <name>        # optional; authentication/usage service identity
         env: {KEY: VALUE, ...}
+        harness: <name>        # optional; default harness for profiles on it
         allowed_harnesses: [claude, ...]  # optional; missing = unrestricted
     profiles:
       <name>:
         parent: <other>         # optional
-        harness: <name>         # optional; inherited, default claude
+        harness: <name>         # optional; inherited, else the provider's, else claude
         provider: <name>        # optional; Claude Code only
         allowed_harnesses: [claude, pi]  # optional; inherited by intersection
         env: {KEY: VALUE, ...}
@@ -52,6 +53,7 @@ Schema::
     projects:                   # the tier above meshes/sessions; see :mod:`projects`
       <name>:
         default_workspace: <workspace name>   # optional
+        default_mesh: <mesh name> | null      # optional; absent = never set
 
 The on-disk file is first created from a bootstrap *template* (``template.yaml``,
 see :mod:`template`); after that this file is authoritative and is read live —
@@ -486,6 +488,17 @@ DAEMON_DEFAULTS = {
     # the source that survives, so a timeout is "try again", never "end it
     # anyway". 0 waits without limit.
     "handoff_deliver_timeout": 120.0,
+    # The deep_think MCP tool (daemon/deep_think.py): a session asks itself a
+    # question and a quick-fork of it answers asynchronously. deep_think_max
+    # caps how many such forks one session has running at once;
+    # deep_think_timeout is the default seconds a question may run before the
+    # asking session is asked to extend or cancel it (a call may name its
+    # own); deep_think_grace is how long each rung of that ladder waits for
+    # an answer before the next (ask the fork for what it has, then end it).
+    # Read LIVE.
+    "deep_think_max": 3,
+    "deep_think_timeout": 1800.0,
+    "deep_think_grace": 300.0,
     # Base URL of a prompter server (daemon/prompter.py) whose prompt
     # snippets the web UI lists beside the footer's prompt presets. None =
     # off. Read LIVE on every request, so the settings page's PUT applies
@@ -530,6 +543,11 @@ DAEMON_DEFAULTS = {
     "cflow2_clock": True,
     "cflow2_headless_max": 3,
     "cflow2_poll": 10.0,
+    # claunch reposync (claunch-dh73y): "ask" -- a sync that pushes to the
+    # shared remote waits for a person (a y/N prompt at the user's own
+    # terminal, the web UI's approval card for an agent session); "auto" --
+    # it goes ahead. Read live by the CLI on every sync.
+    "reposync_push": "ask",
 }
 
 

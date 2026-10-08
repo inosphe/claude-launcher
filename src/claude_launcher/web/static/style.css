@@ -103,6 +103,75 @@ option:disabled { color: #6b7280; }
   padding: 4px 7px 2px; color: #8b949e; font-size: 11px; cursor: pointer;
 }
 .session-group-toggle input { margin: 0; accent-color: #58a6ff; }
+/* Group by: Off | Mesh | Workspace, a segmented radio row like List | Grid. */
+.session-group-mode { margin: 0; border: 0; cursor: default; }
+.session-group-mode legend { float: left; padding: 0 4px 0 0; color: #7d8590; }
+.session-group-mode label { position: relative; cursor: pointer; }
+.session-group-mode input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.session-group-mode span {
+  display: block; padding: 2px 8px; border-radius: 4px; color: #7d8590; font-weight: 600;
+}
+.session-group-mode label:hover span { color: #c9d1d9; background: #1d2128; }
+.session-group-mode input:checked + span {
+  color: #e6edf3; background: #243247; box-shadow: inset 0 0 0 1px #385273;
+}
+.session-group-mode input:focus-visible + span { outline: 2px solid #58a6ff; outline-offset: 1px; }
+
+/* One tab per group. A strip wider than the rail scrolls sideways rather
+   than wrapping onto lines the list would lose. */
+.session-group-tabs {
+  flex: none; display: flex; gap: 2px; padding: 4px 6px;
+  overflow-x: auto; overflow-y: hidden; scrollbar-width: thin;
+  background: #11151b; border-bottom: 1px solid #2a2e36;
+}
+.session-group-tabs.view-hidden { display: none; }
+.session-group-tab {
+  flex: none; display: flex; align-items: center; gap: 5px; max-width: 180px;
+  padding: 4px 8px; border-radius: 4px; cursor: pointer; white-space: nowrap;
+  color: #8b949e; font-size: 11px; font-weight: 600;
+}
+.session-group-tab:hover { color: #c9d1d9; background: #1d2128; }
+.session-group-tab.active {
+  color: #e6edf3; background: #243247; box-shadow: inset 0 0 0 1px #385273;
+}
+.session-group-tab:focus-visible { outline: 2px solid #58a6ff; outline-offset: 1px; }
+/* A tab whose group holds a match for the search box. */
+.session-group-tab.search-match { box-shadow: inset 0 -2px 0 #d29922; }
+.session-group-tab.active.search-match {
+  box-shadow: inset 0 0 0 1px #385273, inset 0 -2px 0 #d29922;
+}
+.session-group-tab .session-group-name {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis;
+}
+.session-group-tab .session-group-count {
+  flex: none; color: #7d8590; font-weight: 400; font-variant-numeric: tabular-nums;
+}
+/* The open group's header row under the strip: kind, full name, count,
+   and the mesh's create button at the far end. */
+.session-group-header {
+  flex: none; display: flex; align-items: center; gap: 6px; min-width: 0;
+  padding: 4px 8px; cursor: pointer; white-space: nowrap;
+  background: #161b22; border-bottom: 1px solid #2a2e36;
+  color: #c9d1d9; font-size: 11px;
+}
+.session-group-header.view-hidden { display: none; }
+.session-group-header:hover { background: #1d2128; }
+.session-group-header:focus-visible { outline: 2px solid #58a6ff; outline-offset: -2px; }
+.session-group-header .session-group-kind {
+  flex: none; color: #7d8590; text-transform: uppercase; letter-spacing: 0.04em;
+  font-size: 10px;
+}
+.session-group-header .session-group-name {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; font-weight: 600;
+}
+.session-group-header .session-group-count {
+  flex: none; color: #7d8590; font-variant-numeric: tabular-nums;
+}
+.session-group-header .session-group-new {
+  flex: none; margin-left: auto; background: none; border: none; color: #8b949e;
+  font-size: 14px; line-height: 1; padding: 0 2px; cursor: pointer;
+}
+.session-group-header .session-group-new:hover { color: #58a6ff; }
 
 /* List | Grid: one segmented radio pair above the filters. */
 .session-view-tabs {
@@ -349,53 +418,22 @@ option:disabled { color: #6b7280; }
 }
 #session-list .session-group:hover { background: transparent; }
 #session-list .session-group-body { margin: 0; padding: 0; list-style: none; }
-/* The stacked lane. `display: contents` takes the group's own box out of
-   layout, which hands its heading the whole list as a containing block —
-   native sticky then holds it for the length of the rail instead of
-   releasing it at its own group's bottom, so every outermost heading is on
-   screen at every scroll position (piled at the top once passed, waiting at
-   the bottom before). The nested levels keep their boxes, and with them the
-   release that stops an inner heading from sitting under the next outer
-   group. Off the stacked class the rail is exactly as it was. */
-#session-list.session-group-stacked > li.session-group.session-group-level-0 {
-  display: contents;
-}
-#session-list .session-group.collapsed > .session-group-body { display: none; }
 #session-list .session-group-heading {
   padding: 6px 10px; color: #a5b4c3; background: #161b22;
   border-bottom: 1px solid #2a2e36; font-size: 11px; font-weight: 600;
-  letter-spacing: .02em; text-transform: none; cursor: pointer;
+  letter-spacing: .02em; text-transform: none;
   display: flex; align-items: center; gap: 5px;
-  position: sticky; top: var(--session-group-sticky-top, 0px);
-  bottom: var(--session-group-sticky-bottom, auto); z-index: 2;
+  position: sticky; top: 0; z-index: 2;
   white-space: nowrap; overflow: hidden;
 }
-#session-list .session-group-heading:hover { color: #e6edf3; background: #1b222c; }
 #session-list .session-group-name {
   flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
 }
-#session-list .session-group-caret {
-  flex: none; width: 9px; color: #6e7681; font-size: 9px; line-height: 1;
-}
-/* How many sessions the group holds — the one fact a shut group still owes
-   its reader. */
+/* How many sessions the group holds. */
 #session-list .session-group-count {
   flex: none; color: #7d8590; font-weight: 400;
   font-variant-numeric: tabular-nums;
 }
-#session-list .session-group-jump {
-  flex: none; background: none; border: none; color: #6e7681;
-  font-size: 11px; line-height: 1; padding: 0 3px; cursor: pointer;
-}
-#session-list .session-group-jump:hover { color: #e6edf3; }
-/* The mesh group create button. */
-#session-list .session-group-new {
-  flex: none; background: none; border: none; color: #6e7681;
-  font-size: 13px; line-height: 1; padding: 0 2px; cursor: pointer;
-}
-#session-list .session-group-new:hover { color: #58a6ff; }
-#session-list .session-group-new.disabled { color: #444c56; cursor: not-allowed; }
-#session-list .session-group-new.disabled:hover { color: #444c56; }
 #session-list .session-group-heading.session-group-level-1 {
   padding-left: 20px; color: #8b949e; background: #131820;
   font-size: 10px; z-index: 1;
@@ -1239,6 +1277,30 @@ option:disabled { color: #6b7280; }
 a.cflow-scope { text-decoration: none; }
 a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 .cflow-head .meta { margin-left: auto; color: #7d8590; font-size: 11px; }
+.flows-toolbar { display: flex; align-items: end; flex-wrap: wrap; gap: 12px 20px; margin: 18px 0 12px; }
+.flows-toolbar label { display: flex; flex-direction: column; gap: 6px; color: #b9c2cc; font-size: 12px; }
+.flows-search-label { flex: 1 1 240px; }
+.flows-toolbar input, .flows-toolbar select {
+  min-height: 38px; padding: 8px 10px; border: 1px solid #3c444d;
+  border-radius: 6px; background: #14161a; color: #e6edf3; font: inherit;
+}
+.flows-toolbar .wf-note { padding-bottom: 10px; }
+.flows-settings { margin-bottom: 18px; border: 1px solid #30363d; border-radius: 8px; padding: 10px 14px; }
+.flows-settings > summary { cursor: pointer; font-size: 13px; color: #c6cdd5; }
+.flows-settings > summary .wf-note { margin-left: 12px; font-size: 12px; }
+#cflow-list, #cflow-orphan-list { display: grid; gap: 12px; }
+#cflow-list > li, #cflow-orphan-list > li {
+  min-width: 0; padding: 16px 18px; border: 1px solid #30363d;
+  border-radius: 8px; background: #1b1e24;
+}
+.cflow-head { flex-wrap: wrap; row-gap: 6px; margin-bottom: 9px; }
+.cflow-name { color: #e6edf3; text-decoration: none; font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+.cflow-name:hover { color: #58a6ff; text-decoration: underline; }
+.cflow-head .badge { flex: none; max-width: 100%; overflow-wrap: anywhere; }
+#cflow-list .cflow-line, #cflow-orphan-list .cflow-line { line-height: 1.6; }
+.flows-toolbar :focus-visible, .cflow-name:focus-visible, .wf-current:focus-visible, .wf-back:focus-visible {
+  outline: 2px solid #58a6ff; outline-offset: 3px;
+}
 .cflow-line { font-size: 12px; color: #9da5b0; margin-top: 3px; }
 .cflow-line.report {
   color: #b9c2cc; border-left: 2px solid #30363d; padding-left: 7px;
@@ -1582,8 +1644,15 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   border: 1px solid #30363d; border-radius: 5px;
 }
 /* Keep the toggle inside the terminal header when the detail panel opens.
-   Header padding reserves its space in both full and compact layouts. */
-#term-details { position: absolute; top: 8px; right: 14px; z-index: 3; }
+   Header padding reserves its space in both full and compact layouts.
+   Centred on the header's height rather than pinned 8px from its top: the
+   flowing buttons are centred by the flex row (align-items: center), and the
+   row is taller than 8px + one button whenever any item in it is, so a fixed
+   offset left this one 3.8px above its neighbours at full width. */
+#term-details {
+  position: absolute; top: 50%; right: 14px; z-index: 3;
+  transform: translateY(-50%);
+}
 #term-details:hover { color: #c6cdd5; border-color: #3c444d; }
 #term-details[aria-pressed="true"] {
   background: #10203a; color: #58a6ff; border-color: #1f6feb;
@@ -2078,6 +2147,23 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 }
 #term-input-field:focus { outline: none; border-color: #1f6feb; }
 #term-input-field:disabled { opacity: 0.5; cursor: not-allowed; }
+/* Session line sync (daemon/line_sync.py). In remote-sync mode the field is
+   the line every browser on the session shares, and says so by its border;
+   this browser's own local line sits beside it read-only, to copy from. */
+#term-sync-toggle { flex: none; }
+#term-sync-toggle[aria-pressed="true"] {
+  color: #fff; background: #1f6feb; border-color: #1f6feb;
+}
+#term-input-field.line-shared { border-color: #8957e5; }
+#term-input-field.line-shared:focus { border-color: #a371f7; }
+#term-local-keep {
+  flex: 0 1 30%; min-width: 0; padding: 5px 10px; font-size: 13px;
+  line-height: 1.5; color: #9da7b3; background: #101215;
+  border: 1px dashed #30363d; border-radius: 5px; font-family: inherit;
+  resize: none; overflow-y: auto; max-height: 30vh; white-space: pre-wrap;
+  word-break: break-word;
+}
+#term-local-keep:focus { outline: none; border-color: #484f58; }
 #term-score-goal { display: flex; align-items: center; gap: 0.3rem; flex-wrap: wrap; flex-shrink: 0; }
 #term-score-goal.hidden { display: none; }
 #term-score-goal .term-score-label { font-size: 0.85rem; }
@@ -3159,6 +3245,16 @@ a.beads-q-name:hover { color: #79c0ff; text-decoration: underline; }
 .mono { font-family: Cascadia Mono, Consolas, Menlo, monospace; font-size: 12px; }
 .wf-head { display: flex; align-items: center; gap: 12px; }
 .wf-head h2 { font-size: 20px; }
+.wf-head { flex-wrap: wrap; }
+.wf-head h2 { overflow-wrap: anywhere; min-width: 0; }
+.wf-overview { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin-top: 10px; flex: none; }
+.wf-back { color: #58a6ff; font-size: 12px; text-decoration: none; }
+.wf-back:hover { text-decoration: underline; }
+.wf-overview .wf-current { text-align: left; overflow-wrap: anywhere; background: #172947; color: #a5d6ff; margin: 0; }
+.wf-section-title { font-size: 13px; color: #c6cdd5; padding: 12px 0 9px; border-bottom: 1px solid #30363d; margin-bottom: 10px; }
+.wf-side > .wf-meta { padding: 10px 12px; background: #1b1e24; border-radius: 6px; overflow-wrap: anywhere; }
+.wf-side > .wf-context { padding: 12px; border-left: 3px solid #3c444d; line-height: 1.6; overflow-wrap: anywhere; }
+.wf-side > .wf-desc { line-height: 1.6; }
 /* The owning session, beside the workflow's name. Sized up from the list
    chip it shares a class with: in the head it is half the run's name, not
    a footnote — and it keeps the pill so it still reads as a link away. */
@@ -3472,10 +3568,16 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .wf-instructions h4 {
   font-size: 11px; text-transform: uppercase; color: #58a6ff; margin-bottom: 6px;
 }
-.wf-instructions-text {
-  font-size: 12px; color: #c6cdd5; white-space: pre-wrap; overflow-x: auto;
-  font-family: Cascadia Mono, Consolas, Menlo, monospace;
+.wf-instructions-text { font-size: 13px; color: #c6cdd5; line-height: 1.65; }
+.wf-step-controls {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+  gap: 8px; padding: 10px 12px; margin-bottom: 12px;
+  border: 1px solid #59442b; border-radius: 6px; background: #241f19;
 }
+.wf-step-controls .wf-note { margin: 0; overflow-wrap: anywhere; min-width: 0; }
+.wf-step-controls .wf-btn { white-space: normal; overflow-wrap: anywhere; max-width: 100%; }
+.wf-context > h4 { margin: 0 0 8px; color: #c6cdd5; }
+.wf-instructions .md h4 { text-transform: none; font-size: 1em; }
 .wf-instructions-gate { font-size: 12px; color: #d29922; margin-bottom: 6px; }
 .wf-instructions-select { font-size: 12px; color: #c6cdd5; margin-top: 6px; }
 .wf-instructions-verify { font-size: 11px; color: #8b949e; margin-top: 6px; }
@@ -4382,6 +4484,13 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .install-diff, .install-lines { max-height: 320px; overflow: auto; white-space: pre-wrap; font-size: 12px; }
 .install-effects li { margin: 2px 0; }
 .prompt-packs { margin-top: 18px; }
+.daemon-prompt { margin-top: 18px; }
+.daemon-prompt code { overflow-wrap: anywhere; }
+.daemon-prompt-text {
+  width: 100%; box-sizing: border-box; min-height: 160px; resize: vertical;
+  padding: 6px 8px; font-family: ui-monospace, monospace; font-size: 12px;
+  background: #14161a; color: #d8dbe0; border: 1px solid #30363d; border-radius: 4px;
+}
 .prompt-pack-table, .prompt-pack-roles { width: 100%; }
 .prompt-pack-table td { vertical-align: top; }
 .prompt-pack-table td .wf-note { overflow-wrap: anywhere; }
@@ -4396,6 +4505,77 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .new-check-row .new-check-label { min-width: 90px; }
 .new-check-list { display: flex; flex-wrap: wrap; gap: 4px 14px; }
 .new-check-list label.check { display: inline-flex; gap: 4px; align-items: baseline; margin: 0; }
+/* Prompt packs as chips (renderPromptPackRow): grouped, the box hidden
+   inside the chip, which is lit when on; badges say why a chip is locked and
+   where its text comes from; "view" opens the text below the chips.
+   A fixed layout: the row is a grid whose second column stacks the chips,
+   the opening summary and the preview one under another. Chips are as wide
+   as their whole text -- nothing is cut to an ellipsis (claunch-uvm3w) --
+   and nothing a tick or a role changes alters a chip's width: the lit state
+   is colour only, and the lock is an icon in a slot every chip has, so
+   ticking one or a role locking one never re-wraps the chips around it
+   (claunch-glntg). Which role locked it is said in the summary block. */
+#new-packs-row {
+  display: grid; grid-template-columns: 90px minmax(0, 1fr); column-gap: 8px; row-gap: 6px;
+  align-items: start;
+}
+#new-packs-row > :not(.new-check-label) { grid-column: 2; min-width: 0; }
+#new-packs-row > .new-check-label { grid-column: 1; grid-row: 1; padding-top: 3px; }
+.pack-groups { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.pack-group { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 8px; align-items: start; }
+.pack-group-name { color: #7d8590; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; padding-top: 4px; }
+.pack-chips.new-check-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.pack-chip {
+  display: inline-flex; align-items: center; gap: 2px; padding: 1px 2px 1px 6px; max-width: 100%;
+  border: 1px solid #30363d; border-radius: 999px; background: #14161a; color: #9aa4b0;
+}
+.pack-chip.on { border-color: #2f81f7; background: #10233d; color: #d8dbe0; }
+.pack-chip.locked { border-style: dashed; }
+.pack-chip.previewing { box-shadow: 0 0 0 1px #d29922; }
+#new-session .pack-chip-label, .pack-chip-label { display: inline-flex; min-width: 0; align-items: center; gap: 5px; margin: 0; cursor: pointer; position: relative; color: inherit; font-size: 12px; }
+.pack-chip.locked .pack-chip-label { cursor: default; }
+.pack-chip-box { position: absolute; opacity: 0; width: 1px; height: 1px; margin: 0; }
+.pack-chip-label:focus-within { outline: 1px solid #2f81f7; outline-offset: 2px; border-radius: 4px; }
+/* The title wraps inside its chip only when one title is wider than the
+   whole row (a narrow window); it is never cut. */
+.pack-chip-title { font-size: 12px; min-width: 0; overflow-wrap: anywhere; }
+.pack-chip-badge { font-size: 10px; padding: 0 5px; border-radius: 999px; background: #21262d; color: #9aa4b0; flex: none; white-space: nowrap; }
+/* The lock's slot: the same width on every chip, the icon only when locked. */
+.pack-chip-lock { flex: none; width: 14px; text-align: center; font-size: 10px; line-height: 1; }
+.pack-chip-view { flex: none; }
+.pack-chip-badge.src-package { color: #d2a8ff; }
+.pack-chip-badge.src-workspace { color: #7ee787; }
+.pack-chip-badge.src-daemon { color: #e3b341; }
+/* #new-session: the form's own button rule (a green action button) is an
+   id selector, so these need one too. */
+#new-session .pack-chip-view, #new-session .pack-chip-more, .pack-chip-view, .pack-chip-more {
+  margin: 0; font-size: 11px; line-height: 18px; padding: 0 7px; border: 0; border-radius: 999px;
+  background: transparent; color: #7d8590; cursor: pointer;
+}
+#new-session .pack-chip-view:hover, #new-session .pack-chip-more:hover,
+.pack-chip-view:hover, .pack-chip-more:hover { color: #d8dbe0; background: #21262d; }
+#new-session .pack-chip-more, .pack-chip-more { border: 1px dashed #30363d; }
+.pack-preview { margin: 2px 0; border: 1px solid #30363d; border-radius: 6px; background: #0d1117; }
+.pack-preview-head { display: flex; gap: 8px; align-items: baseline; padding: 6px 10px; border-bottom: 1px solid #21262d; }
+.pack-preview-head .wf-note { flex: 1; overflow-wrap: anywhere; }
+.pack-preview-body { padding: 8px 12px; max-height: 320px; overflow: auto; font-size: 12px; }
+.pack-preview > .wf-note, .pack-preview > .wf-error { padding: 6px 10px; margin: 0; }
+/* What the opening will carry: its own bordered block, one pill per pack;
+   the list keeps a line's height when it is empty, so the block is as tall
+   with no pack as with one. */
+.new-packs-summary { border: 1px solid #30363d; border-radius: 6px; background: #0d1117; padding: 6px 10px; }
+.new-packs-summary-head { color: #7d8590; font-size: 11px; line-height: 16px; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 4px; }
+.new-packs-summary-list { display: flex; flex-wrap: wrap; gap: 4px 6px; min-height: 18px; }
+.new-packs-summary-list .pack-chip-mini { line-height: 18px; }
+.new-packs-summary-note { margin: 4px 0 0; }
+.pack-chip-mini { padding: 0 6px; border-radius: 999px; background: #21262d; white-space: nowrap; max-width: 100%; }
+.new-packs-summary-list .pack-chip-mini { white-space: normal; overflow-wrap: anywhere; }
+@media (max-width: 640px) {
+  #new-packs-row { grid-template-columns: minmax(0, 1fr); }
+  #new-packs-row > :not(.new-check-label), #new-packs-row > .new-check-label { grid-column: 1; grid-row: auto; }
+  .pack-group { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  .pack-chip-mini { white-space: normal; }
+}
 .new-check-row .wf-error { flex-basis: 100%; margin: 2px 0; font-size: 12px; }
 .profile-ok { color: #7ee787; }
 .profile-pending { color: #e3b341; }
@@ -5768,3 +5948,7 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
   border: 1px solid var(--border, #ccc); border-radius: 3px; }
 .cf2-constraints { margin-top: 6px; }
 .cf2-constraint { margin: 2px 0; }
+.profile-usage-card { margin: 12px 0; }
+.profile-usage-window { display: grid; grid-template-columns: minmax(120px, 1fr) auto; gap: 8px 16px; align-items: center; padding: 8px 0; }
+.profile-usage-window progress { grid-column: 1 / -1; width: 100%; height: 8px; }
+.profile-usage-window small { grid-column: 1 / -1; color: var(--muted, #888); }

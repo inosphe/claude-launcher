@@ -411,7 +411,11 @@ def test_renamed_daemon_migrates_its_peers_over_real_relay(home, tmp_path):
                         timeout=25.0)
             assert "pcb" not in mesh_a.links
             assert mesh_a.members["bob"].machine == "pcb2"
-            assert b.mesh.get("m@pca").rename_notice is None
+            # the owner moves the link while it handles /peer/mesh/renamed;
+            # the guest clears its notice only once that call's answer is
+            # back, so under load the two land a moment apart
+            await _wait(lambda: b.mesh.get("m@pca").rename_notice is None,
+                        "the guest to clear its rename notice")
             # and the link works under the new name: another session there
             # joins with no approval
             b.manager.create(SessionDef(name="sb2", harness="py", cwd=str(tmp_path)))

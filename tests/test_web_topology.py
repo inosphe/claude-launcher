@@ -367,8 +367,7 @@ CHECKS = [
         "lineage_check.js",
         "railgroupdepth_check.js",
         "sessionfilters_check.js",
-        "sessiongroupsticky_check.js",
-        "sessiongroupstack_check.js",
+        "sessiongrouptabs_check.js",
         "railbadge_check.js",
         "sessmesh_check.js",
         "sesshandle_check.js",
@@ -401,6 +400,7 @@ CHECKS = [
         "window_check.js",
         "stats_check.js",
         "sendinput_check.js",
+        "linesync_check.js",
         "clipboard_check.js",
         "osc52_check.js",
         "termselect_check.js",
@@ -513,6 +513,7 @@ CHECKS = [
         "beadsstill_check.js",
         "observerpin_check.js",
         "operator_check.js",
+        "chat_check.js",
         "worktreespage_check.js",
         "glossarypage_check.js",
         "specpage_check.js",
@@ -534,6 +535,7 @@ CHECKS = [
 # `toolbar_browser.cjs` sat in tests/web unlisted (claunch-6jerx).
 BROWSER_CHECKS = [
     "glossary_browser.cjs",
+    "flows_browser.cjs",
         "diagramviewport_browser.cjs",
         "sessionform_browser.cjs",
         "scoregoal_browser.cjs",
@@ -546,6 +548,9 @@ BROWSER_CHECKS = [
         "sessiongridlineage_browser.cjs",
         "railchildline_browser.cjs",
         "termfit_browser.cjs",
+        "quietpoll_browser.cjs",
+        "chat_browser.cjs",
+        "promptpacks_browser.cjs",
 ]
 
 

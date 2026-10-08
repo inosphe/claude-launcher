@@ -83,6 +83,69 @@ def test_projects_routes_add_update_list_and_remove(home, tmp_path):
     asyncio.run(run())
 
 
+def test_projects_routes_carry_the_three_default_mesh_states(home, tmp_path):
+    """Unset is the key's absence on the wire; null is "no mesh"; a name must
+    be a mesh this daemon resolves."""
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        mm.create("room")
+        client = await _serve(mgr, mm)
+        try:
+            resp = await client.post("/api/projects", headers=BEARER, json={"name": "p"})
+            assert resp.status == 201
+            assert "default_mesh" not in (await resp.json())["project"]
+
+            resp = await client.patch(
+                "/api/projects/p", headers=BEARER, json={"default_mesh": "room"})
+            assert resp.status == 200, await resp.text()
+            assert (await resp.json())["project"]["default_mesh"] == "room"
+
+            resp = await client.patch(
+                "/api/projects/p", headers=BEARER, json={"default_mesh": "ghost"})
+            assert resp.status == 400
+            assert "no mesh named 'ghost'" in (await resp.json())["error"]
+
+            resp = await client.patch(
+                "/api/projects/p", headers=BEARER, json={"default_mesh": None})
+            assert resp.status == 200
+            doc = (await resp.json())["project"]
+            assert "default_mesh" in doc and doc["default_mesh"] is None
+            assert store.load()["projects"]["p"] == {"default_mesh": None}
+
+            resp = await client.patch(
+                "/api/projects/p", headers=BEARER, json={"default_mesh_unset": True})
+            assert resp.status == 200
+            assert "default_mesh" not in (await resp.json())["project"]
+            assert store.load()["projects"]["p"] == {}
+
+            resp = await client.patch(
+                "/api/projects/p", headers=BEARER,
+                json={"default_mesh": "room", "default_mesh_unset": True})
+            assert resp.status == 400
+
+            resp = await client.patch("/api/projects/p", headers=BEARER, json={})
+            assert resp.status == 400
+
+            resp = await client.post(
+                "/api/projects", headers=BEARER,
+                json={"name": "q", "default_mesh": "room"})
+            assert resp.status == 201
+            assert (await resp.json())["project"]["default_mesh"] == "room"
+
+            resp = await client.get("/api/projects", headers=BEARER)
+            rows = {p["name"]: p for p in (await resp.json())["projects"]}
+            assert "default_mesh" not in rows["default"]
+            assert "default_mesh" not in rows["p"]
+            assert rows["q"]["default_mesh"] == "room"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 # --------------------------------------------------------------------------- #
 # sessions
 # --------------------------------------------------------------------------- #

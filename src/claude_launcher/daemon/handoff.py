@@ -78,12 +78,14 @@ def new_marker() -> str:
     return "qf-" + secrets.token_hex(4)
 
 
-def fork_name(origin: str, taken) -> str:
-    """``<origin>-qf<n>``: the first ``n`` no session already holds."""
+def fork_name(origin: str, taken, *, tag: str = "qf") -> str:
+    """``<origin>-<tag><n>``: the first ``n`` no session already holds. The
+    tag is ``qf`` for a person's press and ``dt`` for a ``deep_think``
+    question, so the rail tells the two apart by name."""
     n = 1
-    while f"{origin}-qf{n}" in taken:
+    while f"{origin}-{tag}{n}" in taken:
         n += 1
-    return f"{origin}-qf{n}"
+    return f"{origin}-{tag}{n}"
 
 
 # ---- the blocks --------------------------------------------------------- #
@@ -246,6 +248,16 @@ class Handoffs:
     def __init__(self) -> None:
         self.pending: Dict[str, dict] = {}
         self._tasks: set = set()
+        #: ``(manager, source, settled, text, marker) -> Optional[str]``: the
+        #: first one that answers a string writes the block the target gets,
+        #: in place of :func:`compose_report`. A deep-think fork's answer is
+        #: a merge whose header has to say which question it answers.
+        self.composers: list = []
+        #: ``(manager, source, settled, text) -> None``, called once the
+        #: report has been delivered and before the source is ended -- the
+        #: one moment the source's record and the delivered text are both in
+        #: hand. A hook that raises is logged and does not undo the delivery.
+        self.completed_hooks: list = []
 
     # ---- reading ---------------------------------------------------------- #
     def state(self, name: str) -> Optional[dict]:
@@ -369,10 +381,16 @@ class Handoffs:
             kind=kind or row.get("kind", ""),
         )
         marker = row.get("marker") or _marker_of(manager, source)
-        block = compose_report(
-            kind=settled["kind"], source=source, target=settled["target"],
-            text=body, marker=marker, forked_at=_forked_at_of(manager, source),
-        )
+        block = None
+        for compose in self.composers:
+            block = compose(manager, source, settled, body, marker)
+            if block:
+                break
+        if not block:
+            block = compose_report(
+                kind=settled["kind"], source=source, target=settled["target"],
+                text=body, marker=marker, forked_at=_forked_at_of(manager, source),
+            )
         target = manager.get(settled["target"])
         if timeout is None:
             cfg = store.daemon_config()
@@ -398,6 +416,11 @@ class Handoffs:
                 f"{source!r} is kept; try again"
             )
         self.pending.pop(source, None)
+        for hook in self.completed_hooks:
+            try:
+                hook(manager, source, settled, body)
+            except Exception:  # the report landed; a record that did not is logged
+                log.exception("handoff: completion hook failed for %r", source)
         ended = False
         try:
             manager.kill(source, force=False)

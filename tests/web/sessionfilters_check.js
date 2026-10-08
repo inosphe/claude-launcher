@@ -142,10 +142,16 @@ check("first selected group is the outer nesting level",
        "1:workspace:F:/works/repo", "0:mesh:mesh-b", "1:workspace:F:/works/repo"]);
 ctx.setGroup("workspace", true);
 ctx.setGroup("mesh", true);
-check("group priority follows checkbox activation order",
+check("one grouping at a time: picking mesh replaces workspace",
       writes.slice(-2), [
-        ["claunch_session_group_order:/t/local/", "[\"workspace\",\"mesh\"]"],
+        ["claunch_session_group_order:/t/local/", "[\"mesh\"]"],
         ["claunch_session_group:/t/local/", "true"],
+      ]);
+ctx.setGroup("mesh", false);
+check("turning the grouping off leaves none",
+      writes.slice(-2), [
+        ["claunch_session_group_order:/t/local/", "[]"],
+        ["claunch_session_group:/t/local/", "false"],
       ]);
 
 check("the shipped page contains all six state controls",
@@ -181,12 +187,12 @@ check("archived sessions have a dedicated one-shot refresh control",
       src.includes('refreshSessions({ state: "archived" })'), true);
 check("filtered rows leave the layout",
       /#session-list\s*>\s*li\.session-filtered\s*\{[^}]*display:\s*none/.test(css), true);
-check("the shipped page contains the mesh grouping checkbox",
-      html.includes('id="session-group-mesh"') &&
-      html.includes("Group by mesh"), true);
-check("the shipped page contains the workspace grouping checkbox",
-      html.includes('id="session-group-workspace"') &&
-      html.includes("Group by workspace"), true);
+check("the shipped page picks the grouping with one radio set: off, mesh, workspace",
+      ["", "mesh", "workspace"].every((value) =>
+        new RegExp(`type="radio" name="session-group-mode" value="${value}"`).test(html)) &&
+      !html.includes('type="checkbox">\n        <span>Group by'), true);
+check("the shipped page has the tab strip the groups are drawn into",
+      html.includes('id="session-group-tabs"') && html.includes('role="tablist"'), true);
 check("mesh grouping persists and rebuilds the rail",
       src.includes("const SESSION_GROUP_KEY") &&
       src.includes("const SESSION_GROUP_ORDER_KEY") &&

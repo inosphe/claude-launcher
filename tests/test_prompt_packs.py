@@ -70,7 +70,7 @@ def test_install_status_edit_and_remove(tmp_path):
         prompt_packs.install(ws, "beads")
     with pytest.raises(prompt_packs.PackError, match="needs force"):
         prompt_packs.remove(ws, "beads")
-    assert prompt_packs.resolve(ws, ["beads"])[0].body.endswith("local rule")
+    assert prompt_packs.pack_copy(ws, "beads").body.endswith("local rule")
     assert prompt_packs.remove(ws, "beads", force=True) == prompt_packs.EDITED
     assert not copy.exists()
     assert prompt_packs._record(ws) == {}
@@ -88,16 +88,6 @@ def test_a_local_pack_is_offered_and_needs_force_to_remove(tmp_path):
     with pytest.raises(prompt_packs.PackError, match="needs force"):
         prompt_packs.remove(ws, "house")
     assert prompt_packs.remove(ws, "house", force=True) == prompt_packs.LOCAL
-
-
-def test_resolve_refuses_what_is_not_installed(tmp_path):
-    with pytest.raises(prompt_packs.PackError, match="no registered workspace"):
-        prompt_packs.resolve(None, ["beads"])
-    with pytest.raises(prompt_packs.PackError, match="not installed"):
-        prompt_packs.resolve(tmp_path, ["beads"])
-    with pytest.raises(prompt_packs.PackError, match="bad prompt pack id"):
-        prompt_packs.resolve(tmp_path, ["../x"])
-    assert prompt_packs.resolve(None, []) == []
 
 
 def test_opening_block_names_the_id_rebrief_uses():
@@ -151,6 +141,7 @@ def test_choose_adds_required_packs_and_names_the_role(tmp_path):
     assert recs == [{
         "id": "unreal-operator", "source": prompt_packs.PACKAGE,
         "text": prompt_packs.shipped("unreal-operator").body,
+        "required_by": ["unreal"], "ticked": True,
     }]
 
     # An installed copy wins, edits included.
@@ -163,10 +154,18 @@ def test_choose_adds_required_packs_and_names_the_role(tmp_path):
     )
     assert recs[1]["text"].endswith("house rule") and "source" not in recs[1]
 
-    # A ticked pack still has to be installed; a required one that exists
-    # nowhere is refused with the role named.
-    with pytest.raises(prompt_packs.PackError, match="not installed"):
-        prompt_packs.choose(ws, ["beads"], ["unreal"], mapping=mapping)
+    # A ticked pack needs no install either, whatever the role: claunch's
+    # copy goes in. One that exists nowhere is refused, a required one with
+    # the role named.
+    recs, required = prompt_packs.choose(ws, ["beads"], [], mapping=mapping)
+    assert recs == [{
+        "id": "beads", "source": prompt_packs.PACKAGE,
+        "text": prompt_packs.shipped("beads").body, "ticked": True,
+    }] and required == {}
+    recs, _ = prompt_packs.choose(None, ["beads"], [])
+    assert recs[0]["source"] == prompt_packs.PACKAGE
+    with pytest.raises(prompt_packs.PackError, match="nor shipped with claunch"):
+        prompt_packs.choose(ws, ["ghost"], [], mapping=mapping)
     with pytest.raises(prompt_packs.PackError, match="required by role ghost"):
         prompt_packs.choose(ws, [], ["ghost"], mapping={"ghost": ["no-such-pack"]})
 
@@ -188,6 +187,44 @@ def test_a_package_copy_says_so_in_the_opening():
     assert sdef.prompt_packs == ({"id": "role-worker", "text": "t", "source": "package"},)
 
 
+def test_a_package_copy_says_why_it_went_in():
+    # The roles that require it, else that it was ticked; a record from before
+    # the reason was kept says neither.
+    recs = prompt_packs.records(
+        [prompt_packs.pack_copy(None, "role-worker"),
+         prompt_packs.pack_copy(None, "unreal-operator"),
+         prompt_packs.pack_copy(None, "beads")],
+        required={"role-worker": ["worker", "lead"], "unreal-operator": ["unreal"]},
+        asked=["unreal-operator", "beads"],
+    )
+    assert [(r.get("required_by"), r.get("ticked")) for r in recs] == [
+        (["worker", "lead"], None), (["unreal"], True), (None, True),
+    ]
+    heads = [line for line in prompt_packs.opening(recs).splitlines()
+             if line.startswith("# claunch prompt pack:")]
+    assert heads[0].endswith(
+        "role-worker -- shipped with claunch, required by roles worker, lead, "
+        "not installed in this workspace")
+    # Required wins over ticked: the role is why it cannot be unticked.
+    assert heads[1].endswith(
+        "unreal-operator -- shipped with claunch, required by role unreal, "
+        "not installed in this workspace")
+    assert heads[2].endswith(
+        "beads -- shipped with claunch, ticked at session creation, "
+        "not installed in this workspace")
+    legacy = prompt_packs.opening([{"id": "beads", "text": "t", "source": "package"}])
+    assert "beads -- shipped with claunch, not installed in this workspace" in legacy
+    # A workspace copy's record is unchanged: no reason keys.
+    ws_rec = prompt_packs.records(
+        [prompt_packs.Pack(id="common", title="c", description="", body="b", raw="b")],
+        required={"common": ["worker"]}, asked=["common"],
+    )
+    assert ws_rec == [{"id": "common", "text": "b"}]
+    # The session definition keeps the reason across a restart record.
+    sdef = SessionDef.from_dict({"name": "s", "prompt_packs": recs})
+    assert [dict(r) for r in sdef.prompt_packs] == recs
+
+
 def test_the_stance_command_prints_the_role_packs(home, tmp_path, monkeypatch, capsys):
     from claude_launcher import cli_mesh
 
@@ -195,7 +232,8 @@ def test_the_stance_command_prints_the_role_packs(home, tmp_path, monkeypatch, c
     monkeypatch.chdir(tmp_path)
     cli_mesh._print_role_packs(["worker", "unreal", ""])
     out = capsys.readouterr().out
-    assert "# claunch prompt pack: role-worker -- shipped with claunch" in out
+    assert ("# claunch prompt pack: role-worker -- shipped with claunch, "
+            "required by role worker") in out
     assert prompt_packs.shipped("role-worker").body in out
     assert "# claunch prompt pack: unreal-operator -- shipped with claunch" in out
 
@@ -361,14 +399,27 @@ def test_create_puts_ticked_packs_ahead_of_the_task(home, tmp_path):
             ids = rebrief.addressable("p1", manager=mgr, mesh_mgr=None)
             assert any(v["kind"] == "prompt pack (common)" for v in ids.values())
 
-            # A pack the workspace does not hold is refused, nothing staged.
+            # A pack the workspace does not hold, ticked with no mesh and no
+            # role, goes in as claunch's copy and is reported as such.
             resp = await client.post("/api/sessions", headers=BEARER, json={
                 "name": "p2", "profile": "py", "cwd": str(ws),
                 "task": "x", "beads": False, "prompt_packs": ["beads"],
             })
+            doc = await resp.json()
+            assert resp.status == 201, doc
+            assert doc["prompt_packs"] == ["beads"]
+            assert doc["prompt_packs_shipped"] == ["beads"]
+            assert ("# claunch prompt pack: beads -- shipped with claunch, "
+                    "ticked at session creation") in seen["p2"]
+
+            # One that exists nowhere is refused, nothing staged.
+            resp = await client.post("/api/sessions", headers=BEARER, json={
+                "name": "p3", "profile": "py", "cwd": str(ws),
+                "task": "x", "beads": False, "prompt_packs": ["ghost"],
+            })
             assert resp.status == 400
-            assert "not installed" in (await resp.json())["error"]
-            assert "p2" not in [s.sdef.name for s in mgr.list()]
+            assert "nor shipped with claunch" in (await resp.json())["error"]
+            assert "p3" not in [s.sdef.name for s in mgr.list()]
         finally:
             restore()
             await mgr.shutdown_all()
@@ -407,8 +458,8 @@ def test_the_unreal_subrole_forces_its_pack(home, tmp_path):
             }
             assert doc["prompt_packs_shipped"] == ["role-worker", "unreal-operator"]
             assert (
-                "# claunch prompt pack: unreal-operator -- shipped with claunch"
-                in seen["u1"]
+                "# claunch prompt pack: unreal-operator -- shipped with claunch, "
+                "required by role unreal" in seen["u1"]
             )
 
             prompt_packs.install(ws, "unreal-operator")
@@ -435,6 +486,65 @@ def test_the_unreal_subrole_forces_its_pack(home, tmp_path):
         finally:
             restore()
             await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_the_text_route_shows_what_the_opening_would_get(home, tmp_path):
+    ws = tmp_path / "proj"
+    ws.mkdir()
+    workspaces.add(str(ws), "proj")
+    prompt_packs.install(ws, "common")
+    prompt_packs.install(ws, "beads")
+    beads = ws / ".claunch" / "prompts" / "beads.md"
+    beads.write_text(beads.read_text(encoding="utf-8") + "\nOUR OWN RULE\n", encoding="utf-8")
+    (ws / ".claunch" / "prompts" / "house.md").write_text(
+        "---\ntitle: House\n---\nonly here\n", encoding="utf-8"
+    )
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        client = await _serve(mgr, None)
+
+        async def text(pack_id, cwd=ws / "sub"):
+            resp = await client.get("/api/prompt-packs/text", headers=BEARER,
+                                    params={"id": pack_id, "cwd": str(cwd)})
+            return resp.status, await resp.json()
+
+        try:
+            status, doc = await text("common")
+            assert status == 200, doc
+            assert (doc["source"], doc["status"]) == ("workspace", "current")
+            assert doc["body"] == prompt_packs.shipped("common").body
+            assert doc["lines"] == len(doc["body"].splitlines())
+            assert doc["workspace"]["name"] == "proj"
+            # The id the opening prints beside the same text.
+            assert doc["text_id"] == prompt_packs.text_id(doc["body"])
+
+            # An edit in the workspace is what the session would read.
+            status, doc = await text("beads")
+            assert (doc["source"], doc["status"]) == ("workspace", "edited")
+            assert "OUR OWN RULE" in doc["body"]
+
+            status, doc = await text("house")
+            assert (doc["source"], doc["status"]) == ("workspace", "local")
+
+            # Not installed here: claunch's copy, as pack_copy would give it.
+            status, doc = await text("role-worker")
+            assert status == 200 and doc["source"] == "package"
+            assert "status" not in doc
+            assert doc["body"] == prompt_packs.shipped("role-worker").body
+
+            # Outside any workspace, the shipped copy too.
+            status, doc = await text("beads", cwd=tmp_path / "elsewhere")
+            assert doc["source"] == "package" and "OUR OWN RULE" not in doc["body"]
+            assert doc["workspace"] is None
+
+            for bad in ("ghost", "Bad Id", ""):
+                status, doc = await text(bad)
+                assert status == 404, (bad, doc)
+        finally:
             await client.close()
 
     asyncio.run(run())

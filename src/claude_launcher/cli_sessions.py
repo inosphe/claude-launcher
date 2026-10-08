@@ -288,6 +288,8 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
         body["subroles"] = list(args.subroles)
     if getattr(args, "prompt_packs", None):
         body["prompt_packs"] = list(args.prompt_packs)
+    if getattr(args, "no_daemon_prompt", False):
+        body["daemon_prompt"] = False
     if args.borrow:
         body["borrow"] = args.borrow
     if args.null_token:
@@ -714,6 +716,10 @@ def _cmd_spawn(args: argparse.Namespace) -> int:
     # "you did not say" and cross it.
     if getattr(args, "over_limit", None) is False:
         payload["over_limit"] = False
+    # And again: the daemon prompt rides by default, so only the False that
+    # --no-daemon-prompt sets is ever sent.
+    if getattr(args, "no_daemon_prompt", False):
+        payload["daemon_prompt"] = False
     # The wizard uses an explicit empty model to remove the parent's pin and
     # return to the selected harness default.  Keep that distinct from an
     # omitted value, which inherits the parent.
@@ -2259,7 +2265,14 @@ _LIVE_KEYS = (
     "cflow_reminder", "cflow_reminder_interval",
     "cflow_ping", "cflow_ping_interval", "cflow_ping_message",
     "cflow_events", "prompter_url", "cflow2_headless_max",
+    # read by the reposync CLI itself on every sync, never by the daemon
+    "reposync_push",
 )
+
+
+#: Keys that set whether a person approves what an agent does. A managed
+#: session (CLAUNCH_SESSION set) may read them but not write them.
+_PERSON_ONLY_KEYS = ("reposync_push",)
 
 
 def _cmd_daemon_config(args: argparse.Namespace) -> int:
@@ -2278,6 +2291,14 @@ def _cmd_daemon_config(args: argparse.Namespace) -> int:
     if args.value is None:
         print(cfg[args.key])
         return 0
+    if args.key in _PERSON_ONLY_KEYS and os.environ.get("CLAUNCH_SESSION"):
+        print(
+            f"error: {args.key} decides whether a person approves what an agent "
+            "does, so an agent session cannot change it -- ask the user to set "
+            "it from their own shell",
+            file=sys.stderr,
+        )
+        return 1
     store.set_daemon_field(args.key, _parse_value(args.value))
     print(f"{args.key} = {args.value}")
     if daemon_client.connect() is not None:
@@ -2706,9 +2727,15 @@ def register(sub) -> None:
     )
     p_new.add_argument(
         "--prompt-pack", dest="prompt_packs", action="append", metavar="ID",
-        help="a prompt pack installed in the session's workspace to put into "
-        "its opening (repeatable; see Settings > Install). Packs the role or "
-        "a subrole requires are added without being named",
+        help="a prompt pack to put into its opening (repeatable): the "
+        "session's workspace's copy when installed (Settings > Install), "
+        "else claunch's own. Packs the role or a subrole requires are added "
+        "without being named",
+    )
+    p_new.add_argument(
+        "--no-daemon-prompt", dest="no_daemon_prompt", action="store_true",
+        help="leave this daemon's own prompt (Settings > Daemon prompt) out of "
+        "the opening; every session gets it otherwise",
     )
     p_new.add_argument(
         "--resume", nargs="?", const="", metavar="SESSION|UUID",
@@ -2845,9 +2872,15 @@ def register(sub) -> None:
     )
     p_spawn.add_argument(
         "--prompt-pack", dest="prompt_packs", action="append", metavar="ID",
-        help="a prompt pack installed in the session's workspace to put into "
-        "its opening (repeatable; see Settings > Install). Packs the role or "
-        "a subrole requires are added without being named",
+        help="a prompt pack to put into its opening (repeatable): the "
+        "session's workspace's copy when installed (Settings > Install), "
+        "else claunch's own. Packs the role or a subrole requires are added "
+        "without being named",
+    )
+    p_spawn.add_argument(
+        "--no-daemon-prompt", dest="no_daemon_prompt", action="store_true",
+        help="leave this daemon's own prompt (Settings > Daemon prompt) out of "
+        "the opening; every session gets it otherwise",
     )
     p_spawn.add_argument(
         "--connect", action="append", metavar="HANDLE",

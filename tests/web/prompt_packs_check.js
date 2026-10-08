@@ -1,9 +1,11 @@
 /* Prompt packs in the browser, run against the real functions from app.js.
 
-   Two places: the create form's Prompt packs row (installed packs as
-   checkboxes, the defaults ticked, a pack the role or a ticked subrole
-   requires locked on with the role named, and one that is required but not
-   installed said out loud), and the Settings ▸ Install card (one cell per
+   Two places: the create form's Prompt packs row (installed packs and then
+   claunch's own copies as chips in a General and a Roles group, the role
+   packs not in play folded, each with a view that shows its text, any of
+   them tickable with no role or mesh, the defaults ticked only where installed, a pack the role or a
+   ticked subrole requires locked on with the role named, and one that is
+   required but exists nowhere said out loud), and the Settings ▸ Install card (one cell per
    workspace × pack whose buttons follow the copy's status, force only after
    a confirm for an edited or local copy). */
 const fs = require("fs");
@@ -49,30 +51,50 @@ function all(n, pred, out = []) {
 const text = (n) => all(n, () => true).map((x) => x.textContent).join(" ");
 
 let failures = 0;
+// One check at a time, an async one finished before the next starts: the
+// checks share the form's state, and a preview still reading must not see
+// the next check's offer.
+let queue = Promise.resolve();
 function check(name, fn) {
-  const fail = (err) => { failures++; console.error(`FAIL ${name}`, err); };
-  try {
-    const out = fn();
-    if (out && out.then) out.catch(fail);
-  } catch (err) { fail(err); }
+  queue = queue.then(async () => {
+    try { await fn(); } catch (err) { failures++; console.error(`FAIL ${name}`, err); }
+  });
 }
 
 /* ---- the create form's row ---------------------------------------------- */
 const row = node("div", "new-check-row");
 const form = { role: { value: "" }, mesh: { value: "team" } };
+const fetched = [];
+const answers = {};   // url prefix -> [status, body]
+const fakeApi = async (url) => {
+  fetched.push(url);
+  const key = Object.keys(answers).find((k) => url.startsWith(k));
+  const [status, body] = key ? answers[key] : [404, { error: "nope" }];
+  return { ok: status < 400, status, json: async () => body };
+};
 const env = new Function(
-  "$", "el", "document", "rolesByName", "spawnParent",
+  "$", "el", "document", "rolesByName", "spawnParent", "api", "mdInto", "newSessionCwd",
   [`let newSubroleTicks = new Set();`,
    `let rolesDefault = "";`,
    `let newPackOffer = null, newPackOfferFor = null, newPackTicks = new Map();`,
+   `let newDaemonPromptTick = null, newPackRolesOpen = false, newPackPreview = null;`,
+   `let newPackRolesShown = new Set();`,
+   slice("newDaemonPromptWanted"),
    slice("newSubrolesMeshless"), slice("newSubroles"), slice("newPrimaryRole"),
    slice("newRequiredPacks"), slice("newPackTicked"),
    slice("renderPromptPackRow"), slice("newPromptPacks"),
+   slice("togglePackPreview"), slice("packPreviewOrigin"), slice("packPreviewPanel"),
    `return {
       set offer(v) { newPackOffer = v; },
       set roleDefault(v) { rolesDefault = v; },
       ticks: () => newPackTicks, subTicks: () => newSubroleTicks,
       render: renderPromptPackRow, packs: newPromptPacks,
+      daemonWanted: newDaemonPromptWanted,
+      resetDaemonTick: () => { newDaemonPromptTick = null; },
+      rolesOpen: () => newPackRolesOpen,
+      closeRoles: () => { newPackRolesOpen = false; newPackRolesShown = new Set(); },
+      preview: () => newPackPreview,
+      origin: packPreviewOrigin,
       required: newRequiredPacks, primary: newPrimaryRole,
     };`].join("\n")
 )(
@@ -81,9 +103,26 @@ const env = new Function(
   { createElement: (tag) => node(tag), createTextNode: (t) => node("#text", "", t) },
   { worker: { aliases: ["coder"] }, unreal: {}, leader: {}, "free-role": {} },
   () => null,
+  fakeApi,
+  (n, t) => { n.appendChild(node("md", "", t)); return n; },
+  () => "F:/proj/sub",
 );
-const summary = () =>
-  all(row, (n) => n.className === "wf-note new-packs-summary").map((n) => n.textContent)[0] || "";
+// The summary is its own block: a head, one pill per pack, and a note when
+// the role came from the handle. Read back as one sentence.
+const summary = () => {
+  const s = all(row, (n) => n.className === "new-packs-summary")[0];
+  if (!s) return "";
+  const [head, list, note] = s.children;
+  const items = list.children.map((c) => c.textContent);
+  const tail = note ? ` ${note.textContent}` : "";
+  return (items.length ? `${head.textContent}: ${items.join(" · ")}.` : `${head.textContent}.`) + tail;
+};
+const chips = () => all(row, (n) => /(^| )pack-chip( |$)/.test(n.className));
+const groups = () => all(row, (n) => n.className === "pack-group")
+  .map((g) => [g.children[0].textContent,
+    all(g, (n) => n.tag === "input").map((b) => b.name)]);
+const button = (label) => all(row, (n) => n.tag === "button" && n.textContent === label);
+const flush = () => new Promise((r) => setTimeout(r, 0));
 
 const OFFER = {
   workspace: { name: "proj", path: "F:/proj" },
@@ -98,6 +137,7 @@ const OFFER = {
     { id: "common", title: "Common" },
     { id: "unreal-operator", title: "Unreal — operator" },
     { id: "role-worker", title: "Role — worker" },
+    { id: "role-leader", title: "Role — leader" },
   ],
 };
 const boxes = () => all(row, (n) => n.tag === "input");
@@ -108,14 +148,72 @@ check("no offer, no row", () => {
   assert.deepEqual(env.packs(form), []);
 });
 
-check("installed packs are boxes, the default ticked", () => {
+const GENERAL = ["prompt_pack_beads", "prompt_pack_common", "prompt_pack_unreal-operator"];
+
+check("installed packs, then claunch's copies, are chips; the default ticked", () => {
   env.offer = OFFER;
   env.render();
   assert.equal(row.classList.hidden, false);
+  // Two groups; the role packs nobody asked for are folded behind a button.
+  assert.deepEqual(groups(), [["General", GENERAL], ["Roles", []]]);
+  assert.equal(button("+2 more").length, 1);
   const b = boxes();
-  assert.deepEqual(b.map((x) => x.name), ["prompt_pack_beads", "prompt_pack_common"]);
-  assert.deepEqual(b.map((x) => x.checked), [false, true]);
+  assert.deepEqual(b.map((x) => x.checked), [false, true, false]);
+  assert.deepEqual(b.map((x) => x.disabled), [false, false, false]);
+  // A lit chip for the ticked one, and each chip says where its text is from.
+  assert.deepEqual(chips().map((c) => c.className.includes(" on")), [false, true, false]);
+  assert.match(text(row), /Unreal — operator claunch view/);
+  const src = all(row, (n) => n.className === "pack-chip-badge src-package")[0];
+  assert.equal(src.title, "claunch's copy, not installed in proj");
+  assert.match(text(row), /Common installed view/);
   assert.deepEqual(env.packs(form), ["common"]);
+});
+
+check("the folded role packs open and close, and a ticked one stays out", () => {
+  button("+2 more")[0].handlers.click[0]();
+  assert.equal(env.rolesOpen(), true);
+  assert.deepEqual(groups()[1], ["Roles", ["prompt_pack_role-worker", "prompt_pack_role-leader"]]);
+  assert.equal(button("fewer").length, 1);
+  newTick("role-worker", true);
+  button("fewer")[0].handlers.click[0]();
+  // Folded again, but the ticked one is in play and stays shown.
+  assert.deepEqual(groups()[1], ["Roles", ["prompt_pack_role-worker"]]);
+  assert.equal(button("+1 more").length, 1);
+  assert.deepEqual(env.packs(form), ["common", "role-worker"]);
+  // Unticked, it keeps its place until the fold button is pressed: an untick
+  // does not pull the chip out from under the pointer (claunch-glntg).
+  newTick("role-worker", false);
+  assert.deepEqual(groups()[1], ["Roles", ["prompt_pack_role-worker"]]);
+  assert.equal(boxes().find((b) => b.value === "role-worker").checked, false);
+  assert.equal(button("+1 more").length, 1);
+  assert.deepEqual(env.packs(form), ["common"]);
+  // The button refolds to what is in play.
+  button("+1 more")[0].handlers.click[0]();
+  button("fewer")[0].handlers.click[0]();
+  assert.deepEqual(groups()[1], ["Roles", []]);
+  assert.equal(button("+2 more").length, 1);
+});
+
+check("ticking and unticking keeps the row's shape; the summary is its own block", () => {
+  // The row's shape: its children in order, each group's chip names, and the
+  // summary block's place. A tick changes what is lit and what the summary
+  // lists, never where anything is.
+  const shape = () => [
+    row.children.map((n) => n.className),
+    groups(),
+    all(row, (n) => n.className === "new-packs-summary").length,
+  ];
+  const before = shape();
+  assert.deepEqual(before[0], ["new-check-label", "pack-groups", "new-packs-summary"]);
+  newTick("beads", true);
+  assert.deepEqual(shape(), before);
+  assert.match(summary(), /beads \(ticked\)/);
+  newTick("beads", false);
+  newTick("common", false);
+  assert.deepEqual(shape(), before);
+  assert.equal(summary(), "The opening will include no prompt pack.");
+  newTick("common", true);
+  assert.deepEqual(shape(), before);
 });
 
 check("an operator's untick survives a redraw", () => {
@@ -133,7 +231,15 @@ check("the role locks its pack on and names itself", () => {
   const beads = boxes()[0];
   assert.equal(beads.checked, true);
   assert.equal(beads.disabled, true);
-  assert.match(text(row), /required by leader/);
+  assert.ok(chips()[0].className.includes("locked"));
+  // The lock is an icon in the slot every chip has; the role is in its
+  // tooltip and, in full, in the summary (claunch-uvm3w).
+  assert.match(text(row), /🔒 Beads board installed/);
+  const slots = all(row, (n) => n.className === "pack-chip-lock");
+  assert.equal(slots.length, chips().length, "every chip has the slot");
+  assert.deepEqual(slots.map((n) => n.textContent), ["🔒", "", ""]);
+  assert.equal(slots[0].title, "required by leader");
+  assert.match(summary(), /beads \(role leader\)/);
   assert.deepEqual(env.packs(form), ["beads"]);
   form.role.value = "";
 });
@@ -143,11 +249,10 @@ check("a ticked subrole's uninstalled pack is shown as claunch's copy", () => {
   env.render();
   assert.deepEqual(env.required(form), { "unreal-operator": ["unreal"] });
   const b = boxes();
-  assert.deepEqual(b.map((x) => x.name),
-    ["prompt_pack_beads", "prompt_pack_common", "prompt_pack_unreal-operator"]);
+  assert.deepEqual(b.map((x) => x.name), GENERAL);
   assert.equal(b[2].checked, true);
   assert.equal(b[2].disabled, true);
-  assert.match(text(row), /required by unreal · claunch's copy, not installed in proj/);
+  assert.match(text(row), /🔒 Unreal — operator claunch/);
   assert.doesNotMatch(text(row), /refused/);
   assert.equal(summary(),
     "The opening will include: unreal-operator (role unreal, claunch's copy).");
@@ -155,11 +260,13 @@ check("a ticked subrole's uninstalled pack is shown as claunch's copy", () => {
   assert.deepEqual(env.packs(form), []);
 });
 
-check("the summary names every pack and why it is there", () => {
+check("the summary names every pack and why it is there, one chip each", () => {
   newTick("common", true);
   env.render();
   assert.equal(summary(),
     "The opening will include: common (ticked) · unreal-operator (role unreal, claunch's copy).");
+  assert.deepEqual(all(row, (n) => n.className === "pack-chip-mini").map((n) => n.textContent),
+    ["common (ticked)", "unreal-operator (role unreal, claunch's copy)"]);
   newTick("common", false);
 });
 
@@ -172,6 +279,8 @@ check("a blank Role row is inferred from the handle, alias included", () => {
   assert.equal(summary(),
     "The opening will include: role-worker (role worker, claunch's copy)." +
     " Role worker is inferred from the handle (no Role picked).");
+  // The required role pack is in play, so it is shown though folded.
+  assert.deepEqual(groups()[1], ["Roles", ["prompt_pack_role-worker"]]);
   // A handle naming no role falls to the vocabulary's default.
   form.handle.value = "zed";
   env.roleDefault = "free-role";
@@ -202,9 +311,151 @@ check("subroles do not count without a mesh", () => {
   form.mesh.value = "";
   assert.deepEqual(env.required(form), {});
   env.render();
-  assert.doesNotMatch(text(row), /not installed/);
+  assert.doesNotMatch(text(row), /🔒/);
+  assert.equal(boxes().every((b) => !b.disabled), true);
   form.mesh.value = "team";
   env.subTicks().clear();
+});
+
+check("with no mesh and nothing installed, any of claunch's packs can be ticked", () => {
+  // The user's case: no mesh, so no role and nothing required, and a
+  // workspace that installed no pack. The row still offers every pack.
+  env.offer = { ...OFFER, workspace: null, packs: [] };
+  env.closeRoles();   // a role chip an earlier check showed keeps its place
+  form.mesh.value = "";
+  form.role.value = "worker";
+  env.render();
+  assert.equal(row.classList.hidden, false);
+  button("+2 more")[0].handlers.click[0]();
+  assert.deepEqual(boxes().map((x) => x.name),
+    [...GENERAL, "prompt_pack_role-worker", "prompt_pack_role-leader"]);
+  // Nobody touched the row: the default does not tick an uninstalled copy.
+  assert.deepEqual(boxes().map((x) => x.checked), [false, false, false, false, false]);
+  assert.deepEqual(env.packs(form), []);
+  assert.equal(summary(), "The opening will include no prompt pack.");
+  newTick("role-worker", true);
+  newTick("beads", true);
+  assert.deepEqual(env.packs(form), ["beads", "role-worker"]);
+  assert.equal(summary(),
+    "The opening will include: beads (ticked, claunch's copy) · " +
+    "role-worker (ticked, claunch's copy).");
+  newTick("role-worker", false);
+  newTick("beads", false);
+  env.closeRoles();
+  form.role.value = "";
+  form.mesh.value = "team";
+  env.offer = OFFER;
+});
+
+check("the daemon's prompt is the first chip, ticked, and can be unticked", () => {
+  env.closeRoles();   // a role chip an earlier check showed keeps its place
+  env.offer = { ...OFFER, daemon_prompt: { id: "@daemon", title: "Daemon prompt (default)" } };
+  env.render();
+  const b = boxes();
+  assert.deepEqual(b.map((x) => x.name), ["daemon_prompt", ...GENERAL]);
+  assert.equal(groups()[0][1][0], "daemon_prompt");
+  assert.equal(b[0].checked, true);
+  assert.equal(b[0].disabled, false);
+  assert.equal(env.daemonWanted(), true);
+  assert.match(text(row), /Daemon prompt \(default\) daemon view/);
+  const before = env.packs(form);
+  assert.ok(summary().startsWith(
+    "The opening will include: daemon prompt (this daemon's, every session)"));
+  // It is not a pack id the form sends; its own switch carries the answer.
+  assert.ok(!before.includes("@daemon"));
+  b[0].checked = false;
+  b[0].handlers.change[0]();
+  assert.equal(env.daemonWanted(), false);
+  assert.equal(boxes()[0].checked, false);
+  assert.ok(!summary().includes("daemon prompt"));
+  assert.deepEqual(env.packs(form), before);
+  // A daemon with no prompt offers no chip, and nothing is wanted.
+  env.offer = { ...OFFER, packs: [], shipped: [], daemon_prompt: null };
+  env.resetDaemonTick();
+  env.render();
+  assert.equal(env.daemonWanted(), false);
+  assert.equal(row.classList.hidden, true);
+  // The daemon's prompt alone is enough to show the row.
+  env.offer = { ...OFFER, packs: [], shipped: [], role_packs: {},
+    daemon_prompt: { id: "@daemon", title: "Daemon prompt (default)" } };
+  env.render();
+  assert.equal(row.classList.hidden, false);
+  assert.deepEqual(boxes().map((x) => x.name), ["daemon_prompt"]);
+  env.resetDaemonTick();
+  env.offer = OFFER;
+});
+
+check("view shows a pack's text below the chips, and a second click closes it", async () => {
+  env.offer = OFFER;
+  env.render();
+  answers["/api/prompt-packs/text"] = [200, {
+    id: "common", title: "Common", body: "# Rules\nbe kind", source: "workspace",
+    status: "edited", lines: 2,
+  }];
+  const viewCommon = () => chips()[1].children[1];
+  assert.equal(viewCommon().textContent, "view");
+  viewCommon().handlers.click[0]();
+  // Asked for this form's directory, and a placeholder while it reads.
+  assert.equal(fetched.at(-1), "/api/prompt-packs/text?id=common&cwd=F%3A%2Fproj%2Fsub");
+  assert.match(text(row), /Reading…/);
+  await flush();
+  assert.ok(chips()[1].className.includes("previewing"));
+  const panel = all(row, (n) => n.className === "pack-preview")[0];
+  assert.match(text(panel), /Common edited in proj · 2 lines/);
+  assert.equal(all(panel, (n) => n.tag === "md")[0].textContent, "# Rules\nbe kind");
+  // The panel goes under the summary block, so opening it moves neither the
+  // chips nor the summary.
+  const order = row.children.map((n) => n.className);
+  assert.deepEqual(order, ["new-check-label", "pack-groups", "new-packs-summary", "pack-preview"]);
+  viewCommon().handlers.click[0]();
+  assert.equal(env.preview(), null);
+  assert.equal(all(row, (n) => n.className === "pack-preview").length, 0);
+});
+
+check("the daemon's prompt previews from its own route; a failure is said", async () => {
+  env.offer = { ...OFFER, daemon_prompt: { id: "@daemon", title: "Daemon prompt (default)" } };
+  env.render();
+  answers["/api/daemon-prompt"] = [200, { instance: "default", text: "cite files\nbe brief\nok" }];
+  chips()[0].children[1].handlers.click[0]();
+  assert.equal(fetched.at(-1), "/api/daemon-prompt");
+  await flush();
+  assert.match(text(row), /Daemon prompt \(default\) this daemon's prompt, every session · 3 lines/);
+  all(row, (n) => n.tag === "button" && n.textContent === "close")[0].handlers.click[0]();
+  assert.equal(env.preview(), null);
+  // An id the daemon does not know: the panel says so instead of hanging.
+  delete answers["/api/prompt-packs/text"];
+  chips()[1].children[1].handlers.click[0]();
+  await flush();
+  assert.match(text(row), /nope/);
+  chips()[1].children[1].handlers.click[0]();
+  env.offer = OFFER;
+});
+
+check("a workspace pack named daemon is its own chip beside the daemon's prompt", async () => {
+  env.offer = { ...OFFER, packs: [...OFFER.packs, { id: "daemon", title: "Our daemon notes" }],
+    daemon_prompt: { id: "@daemon", title: "Daemon prompt (default)" } };
+  env.render();
+  const names = boxes().map((x) => x.name);
+  assert.equal(names[0], "daemon_prompt");
+  assert.ok(names.includes("prompt_pack_daemon"));
+  // Previewing the daemon's prompt marks its chip only, not the pack's.
+  answers["/api/daemon-prompt"] = [200, { instance: "default", text: "cite files" }];
+  chips()[0].children[1].handlers.click[0]();
+  await flush();
+  const marked = chips().filter((c) => c.className.includes("previewing"));
+  assert.equal(marked.length, 1);
+  assert.equal(marked[0], chips()[0]);
+  chips()[0].children[1].handlers.click[0]();
+  env.offer = OFFER;
+});
+
+check("each origin is named the way the chips name it", () => {
+  assert.equal(env.origin({ source: "package" }, "proj"), "claunch's copy, not installed in proj");
+  assert.equal(env.origin({ source: "workspace", status: "current" }, "proj"), "installed in proj");
+  assert.equal(env.origin({ source: "workspace", status: "stale" }, "proj"),
+    "installed in proj, older than claunch's");
+  assert.equal(env.origin({ source: "workspace", status: "local" }, "proj"), "proj's own pack");
+  assert.equal(env.origin({ source: "daemon" }, "proj"), "this daemon's prompt, every session");
 });
 
 function newTick(id, on) {
@@ -296,7 +547,7 @@ check("the settings draft starts from the saved mapping", () => {
   });
 });
 
-setTimeout(() => {
+queue.then(() => setTimeout(() => {
   if (failures) process.exit(1);
   console.log("prompt_packs_check: ok");
-}, 10);
+}, 10));

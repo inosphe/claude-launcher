@@ -2205,6 +2205,14 @@ class Wizard(Form):
             + [Option(m.get("name", ""), m.get("name", "")) for m in meshes],
         )
         mesh.select(get("mesh") or "")
+        # The project's default mesh fills the row the way its default
+        # workspace fills Directory: on the opening answer only when no
+        # --mesh was given, and afterwards through `_sync_project_mesh`.
+        if not get("mesh"):
+            target = self._project_default_mesh(project.value)
+            if target:
+                mesh.select(target)
+        self._project_mesh_for: str = str(project.value or "")
         handle = TextField(
             key="handle", label="Handle",
             placeholder="(the session name)",
@@ -2294,6 +2302,42 @@ class Wizard(Form):
             if row.get("name") == name:
                 return str(row.get("default_cwd") or "")
         return ""
+
+    def _project_default_mesh(self, name: Optional[str]) -> str:
+        """The default mesh of project ``name``, or "".
+
+        Both "no mesh" states read as "": a project whose row carries no
+        ``default_mesh`` key (never set) and one whose value is ``null``
+        (set to none) leave the Mesh row empty alike.
+        """
+        for row in self._project_rows:
+            if row.get("name") == name:
+                return str(row.get("default_mesh") or "")
+        return ""
+
+    def _sync_project_mesh(self) -> None:
+        """Move the Mesh row to the picked project's default mesh.
+
+        The rule of :meth:`_sync_project_cwd` (and of the web form's
+        ``applyProjectDefaultMesh``): the row moves while it is still empty or
+        still holds the previous project's default, never over a mesh the
+        operator picked, and a mesh this daemon does not list is not picked.
+        """
+        field = self.field("project")
+        if field.hidden:
+            return
+        picked = str(field.value or "")
+        if picked == self._project_mesh_for:
+            return
+        before = self._project_default_mesh(self._project_mesh_for)
+        self._project_mesh_for = picked
+        mesh = self.field("mesh")
+        current = str(mesh.value or "")
+        if current and current != before:
+            return
+        target = self._project_default_mesh(picked)
+        if not (target and mesh.select(target)):
+            mesh.select("")
 
     def _sync_project_cwd(self) -> None:
         """Move the Directory row to the picked project's default workspace.
@@ -2485,6 +2529,7 @@ class Wizard(Form):
             f.hidden = not pi_runtime
 
         self._sync_project_cwd()
+        self._sync_project_mesh()
         cwd = self.value("cwd") or self.cwd
         sync_worktree(self, cwd)
 

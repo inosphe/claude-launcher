@@ -220,6 +220,13 @@ workflow to be started here), that is the answer; otherwise list candidates
    against a list you have not read. A trigger never blocks `next`, so a
    request that has not arrived is not something to wait for.
 
+## Run details use Markdown
+
+Write the `start` tool's `context` as Markdown for the Run details panel.
+Use short paragraphs, headings for distinct topics, and lists for evidence.
+Put paths and commands in backticks and multi-line output in fenced blocks.
+Do not wrap the whole response in a code fence or emit raw HTML.
+
 ## Reports are markdown
 
 `summary` and `details` are rendered as markdown on the daemon web

@@ -355,6 +355,52 @@ def test_the_project_travels_in_the_answers():
     assert answers.cwd == "/srv/api"
 
 
+class MeshDefaultSources(FakeSources):
+    """Projects carrying the three default-mesh states: ``api`` names the
+    mesh, ``ops`` is set to none (null), ``default`` never set one (no key)."""
+
+    def projects(self):
+        return [
+            {"name": "default", "default_workspace": None,
+             "default_cwd": None, "is_default": True},
+            {"name": "api", "default_workspace": "api",
+             "default_cwd": "/srv/api", "is_default": False,
+             "default_mesh": "team"},
+            {"name": "ops", "default_workspace": "ops",
+             "default_cwd": "/srv/ops", "is_default": False,
+             "default_mesh": None},
+        ]
+
+
+def test_picking_a_project_fills_the_mesh_row_with_its_default_mesh():
+    wiz = form(sources=MeshDefaultSources())
+    assert wiz.value("mesh") == ""
+    pick(wiz, "project", "api")
+    assert wiz.value("mesh") == "team"
+    # null (set to none) lets the previous project's default go, as an
+    # unset project does.
+    pick(wiz, "project", "ops")
+    assert wiz.value("mesh") == ""
+
+
+def test_a_mesh_picked_by_hand_survives_a_project_change():
+    wiz = form(sources=MeshDefaultSources())
+    pick(wiz, "mesh", "team")
+    pick(wiz, "project", "ops")
+    assert wiz.value("mesh") == "team"
+
+
+def test_a_typed_project_opens_on_its_default_mesh_unless_unlisted():
+    defaults = argparse.Namespace(project="api")
+    wiz = wizard.Wizard(MeshDefaultSources(), cwd="/work/repo", defaults=defaults)
+    assert wiz.value("mesh") == "team"
+    wiz = wizard.Wizard(
+        MeshDefaultSources(meshes=False), cwd="/work/repo", defaults=defaults
+    )
+    # A default mesh this daemon does not list is not picked.
+    assert wiz.value("mesh") == ""
+
+
 def test_a_typed_project_starts_in_its_workspace_like_the_flag_does():
     """``--project api`` without ``-c`` starts there without the wizard
     (cli_sessions._cmd_new_session), so the form opens on the same answer."""
@@ -1675,7 +1721,7 @@ def test_an_untouched_project_row_travels_as_nothing():
     assert args.project is None
 
 
-def test_the_project_travels_in_the_answers():
+def test_the_spawn_project_travels_in_the_answers():
     wiz = spawn_form()
     pick(wiz, "project", "api")
     args = argparse.Namespace()
@@ -1738,7 +1784,7 @@ def test_a_typed_project_opens_the_workspace_row_on_its_own():
     assert wiz.value("workspace") == "api"
 
 
-def test_a_project_the_daemon_does_not_list_still_reaches_the_check():
+def test_a_spawn_project_the_daemon_does_not_list_still_reaches_the_check():
     """`projects.require` refuses an unknown name and says which ones exist.
     Dropping it here would file the child under its parent's project instead
     of refusing anything."""

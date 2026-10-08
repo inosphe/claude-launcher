@@ -28,9 +28,9 @@ pack too (``local``): it is offered at creation like the shipped ones.
 A mesh role may also *require* packs (:func:`role_packs`). The packaged
 roles keep a one- or two-sentence stance and put the rest of their guidance
 in a ``role-<name>`` pack, so a session created with a role gets that pack
-in its opening whether or not it was ticked. A required pack does not need
-installing: the workspace's copy is read when it has one, and the shipped
-copy otherwise (:func:`required_pack`).
+in its opening whether or not it was ticked. No pack needs installing to be
+given, ticked or required: the workspace's copy is read when it has one, and
+the shipped copy otherwise (:func:`pack_copy`).
 """
 
 from __future__ import annotations
@@ -60,10 +60,12 @@ EDITED = "edited"
 LOCAL = "local"
 
 #: Where the text a session was given came from (:attr:`Pack.source`): the
-#: workspace's installed copy, or -- for a pack a role requires and the
-#: workspace has not installed -- the copy that ships with claunch.
+#: workspace's installed copy, the copy that ships with claunch (for a pack
+#: the workspace has not installed), or the daemon instance's own prompt
+#: (:mod:`claude_launcher.daemon.daemon_prompt`).
 WORKSPACE = "workspace"
 PACKAGE = "package"
+DAEMON = "daemon"
 
 #: A pack id is its file name without ``.md``: lower-case words and dashes,
 #: so it is safe in a path, a URL and a checkbox value alike.
@@ -85,7 +87,8 @@ class Pack:
     #: The header's ``default: true``: ticked on the create form unless
     #: Settings saved its own list (:func:`default_packs`).
     default: bool = False
-    #: :data:`WORKSPACE` or :data:`PACKAGE`; see :func:`required_pack`.
+    #: :data:`WORKSPACE`, :data:`PACKAGE` (see :func:`pack_copy`) or
+    #: :data:`DAEMON`.
     source: str = WORKSPACE
 
     def to_dict(self) -> dict:
@@ -283,48 +286,38 @@ def workspace_rows(workspace: Path) -> List[dict]:
     return rows
 
 
-def resolve(workspace: Optional[Path], ids: List[str]) -> List[Pack]:
-    """The workspace's copies of ``ids``, in the order asked.
-
-    Raises for an id that is not installed there: a checkbox the form offered
-    names a file that exists, so a miss is a stale form or a typo, and a
-    session started without guidance it was promised is worse than a 400.
-    """
-    ids = [check_id(i) for i in dict.fromkeys(ids or [])]
-    if not ids:
-        return []
-    if workspace is None:
-        raise PackError(
-            "prompt packs are installed per workspace, and this directory is "
-            "in no registered workspace"
-        )
-    have = {p.id: p for p in installed(workspace)}
-    missing = [i for i in ids if i not in have]
-    if missing:
-        raise PackError(
-            f"not installed in {workspace}: {', '.join(missing)} — install "
-            "it in Settings ▸ Install first"
-        )
-    return [have[i] for i in ids]
-
-
 def text_id(body: str) -> str:
     """The content id a session is handed beside a pack's text."""
     return digests.text_digest((body or "").strip())
 
 
-def opening_block(pack_id: str, body: str, source: str = WORKSPACE) -> str:
+def opening_block(
+    pack_id: str, body: str, source: str = WORKSPACE, *,
+    required_by=None, ticked: bool = False,
+) -> str:
     """One pack as it goes into an opening, with its id beside it.
 
     The id is what a session reminder and ``rebrief`` name later
     (:mod:`claude_launcher.daemon.rebrief`): an agent that finds it here,
     next to the text, still has the pack after a compaction. The header says
     where the text came from, because a package copy has no file in the
-    workspace to point at.
+    workspace to point at -- and, for that copy, why it is there: the roles
+    that require it (``required_by``), else that it was ticked at creation.
+    A record from before the reason was kept says neither.
     """
     if source == PACKAGE:
-        origin = "shipped with claunch, required by a role"
+        if required_by:
+            n = len(required_by)
+            why = f"required by role{'s' if n > 1 else ''} {', '.join(required_by)}, "
+        elif ticked:
+            why = "ticked at session creation, "
+        else:
+            why = ""
+        origin = f"shipped with claunch, {why}not installed in this workspace"
         where = f"file: (not installed in this workspace; claunch's {pack_id}.md)"
+    elif source == DAEMON:
+        origin = "this daemon's own prompt, given to every session it starts"
+        where = "file: the daemon prompt (MCP tool daemon_prompt shows and edits it)"
     else:
         origin = "installed in this workspace, chosen at session creation"
         where = f"file: {(INSTALL_DIR / (pack_id + '.md')).as_posix()}"
@@ -338,17 +331,31 @@ def opening_block(pack_id: str, body: str, source: str = WORKSPACE) -> str:
     )
 
 
-def records(packs: List[Pack]) -> List[Dict[str, str]]:
+def records(
+    packs: List[Pack], *,
+    required: Optional[Dict[str, List[str]]] = None, asked=(),
+) -> List[Dict[str, object]]:
     """What a session definition keeps of the packs it was given.
 
-    ``source`` is written only for a package copy, so the record of a
-    workspace copy reads exactly as it did before the key existed.
+    ``source`` is written only for a package copy or the daemon's prompt, so
+    the record of a workspace copy reads exactly as it did before the key
+    existed. A package copy also keeps why it went in -- ``required_by`` (the
+    roles, from :func:`required_for`) and ``ticked`` -- because it has no
+    workspace file to explain its presence and its opening header says which
+    (:func:`opening_block`).
     """
+    required = required or {}
+    asked = set(asked or ())
     out = []
     for p in packs:
-        rec = {"id": p.id, "text": p.body}
+        rec: Dict[str, object] = {"id": p.id, "text": p.body}
+        if p.source in (PACKAGE, DAEMON):
+            rec["source"] = p.source
         if p.source == PACKAGE:
-            rec["source"] = PACKAGE
+            if required.get(p.id):
+                rec["required_by"] = list(required[p.id])
+            if p.id in asked:
+                rec["ticked"] = True
         out.append(rec)
     return out
 
@@ -356,7 +363,10 @@ def records(packs: List[Pack]) -> List[Dict[str, str]]:
 def opening(recorded) -> str:
     """The opening's pack section, from a definition's recorded packs."""
     return "\n\n".join(
-        opening_block(r["id"], r["text"], r.get("source") or WORKSPACE)
+        opening_block(
+            r["id"], r["text"], r.get("source") or WORKSPACE,
+            required_by=r.get("required_by"), ticked=bool(r.get("ticked")),
+        )
         for r in recorded or ()
     )
 
@@ -449,8 +459,9 @@ def default_packs(doc: Optional[dict] = None) -> List[str]:
     """The pack ids the create form ticks before anyone touches it.
 
     Saved in Settings as ``prompt_packs.default_packs``; until then, every
-    shipped pack whose header says ``default: true`` (``common``). A pack on
-    this list that a workspace has not installed is simply not offered there.
+    shipped pack whose header says ``default: true`` (``common``). The form
+    ticks only the ones the workspace installed; claunch's copy of one it has
+    not installed is offered unticked.
     """
     from . import store
 
@@ -517,40 +528,61 @@ def choose(
     """The packs a session gets: what was ticked, plus what its roles require.
 
     Returns ``(records, required)``, where ``required`` is
-    :func:`required_for`'s answer. A ticked pack must be installed in the
-    workspace (:func:`resolve`); a required one is read through
-    :func:`required_pack`, so it falls back to the shipped copy. The order is
-    the ticked ones first, then the required ones, each once.
+    :func:`required_for`'s answer. Every pack is read through
+    :func:`pack_copy`, so a ticked one needs no install either: the form
+    offers claunch's own packs beside the workspace's, picked freely whatever
+    the role. The order is the ticked ones first, then the required ones,
+    each once.
     """
     required = required_for(roles, mapping)
     asked = [check_id(i) for i in dict.fromkeys(chosen or [])]
-    plain = {
-        p.id: p
-        for p in resolve(workspace, [i for i in asked if i not in required])
-    }
     packs = []
     for pack_id in dict.fromkeys([*asked, *required]):
-        if pack_id in plain:
-            packs.append(plain[pack_id])
-            continue
         try:
-            packs.append(required_pack(workspace, pack_id))
+            packs.append(pack_copy(workspace, pack_id))
         except PackError as exc:
+            if pack_id not in required:
+                raise
             raise PackError(
                 f"{exc} (required by role {', '.join(required[pack_id])})"
             ) from None
-    return records(packs), required
+    return records(packs, required=required, asked=asked), required
 
 
-def required_pack(workspace: Optional[Path], pack_id: str) -> Pack:
-    """The text a role-required pack is given as.
+def preview(workspace: Optional[Path], pack_id: str) -> dict:
+    """What the create form shows when a pack's text is asked for.
+
+    The same copy :func:`pack_copy` would put into the opening, plus where it
+    came from: ``source`` (:data:`WORKSPACE` or :data:`PACKAGE`) and, for a
+    workspace copy, ``status`` -- :data:`CURRENT`, :data:`STALE` or
+    :data:`EDITED` against the shipped text, :data:`LOCAL` when claunch ships
+    no pack of that id. Raises :class:`PackError` as :func:`pack_copy` does.
+    """
+    pack = pack_copy(workspace, pack_id)
+    out = {
+        **pack.to_dict(),
+        "body": pack.body,
+        "source": pack.source,
+        "lines": len(pack.body.splitlines()),
+        "text_id": text_id(pack.body),
+    }
+    if pack.source == WORKSPACE and workspace is not None:
+        try:
+            out["status"] = status(workspace, shipped(pack.id))
+        except PackError:
+            out["status"] = LOCAL
+        out["path"] = str(install_dir(workspace) / f"{pack.id}.md")
+    return out
+
+
+def pack_copy(workspace: Optional[Path], pack_id: str) -> Pack:
+    """The text a session is given for ``pack_id``, ticked or role-required.
 
     The workspace's copy when it installed one (an edit there wins), else the
-    copy claunch ships, marked :data:`PACKAGE`. A role's guidance is part of
-    what the role is, so a workspace that never installed it still gets it
-    instead of a refused create; a ticked pack has no such fallback
-    (:func:`resolve`). Raises only for an id that is neither installed nor
-    shipped -- a mapping naming a pack that exists nowhere.
+    copy claunch ships, marked :data:`PACKAGE`. So a workspace that never
+    installed a pack still gets it instead of a refused create. Raises only
+    for an id that is neither installed nor shipped -- a stale form, a typo,
+    or a role mapping naming a pack that exists nowhere.
     """
     pack_id = check_id(pack_id)
     if workspace is not None:

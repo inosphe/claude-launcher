@@ -9292,6 +9292,47 @@ class MeshManager:
         except OSError as exc:
             log.warning("mesh %r: cannot persist outbox: %s", mesh.name, exc)
 
+    def record_only(
+        self, session: str, *, sender: str, body: str, ref: Optional[dict] = None
+    ) -> List[str]:
+        """Write one log-only entry about ``session`` into every mesh this
+        daemon owns that ``session`` belongs to, and deliver it to nobody.
+
+        For traffic that already reached its terminal by another path (a
+        ``deep_think`` fork's notes and answer are typed into the asking
+        session by daemon/deep_think.py) but belongs in the room's record.
+        Addressed to ``[]`` like the urgent-send audit: an entry naming the
+        session's handle in ``to`` would read as undelivered to ``pending``
+        and be typed in a second time on the next drain. Who it was for is
+        in ``body`` and ``ref``. Mirrored meshes are skipped -- their log is
+        the authority's to append to. Returns the mesh names written.
+        """
+        written: List[str] = []
+        for row in self.meshes_for_session(session):
+            mesh = self._meshes.get(row["mesh"])
+            if mesh is None or mesh.primary:
+                continue
+            msg = {
+                "id": "msg-" + uuid.uuid4().hex[:12],
+                "ts": utcnow(),
+                "from": sender,
+                "to": [],
+                "type": "fyi",
+                "epoch": mesh.authority_epoch,
+                "seq": mesh.next_seq,
+                "body": f"-> {row['handle']} ({session}): {str(body).strip()}",
+            }
+            if ref:
+                msg[REF_KEY] = {**ref, "for": row["handle"]}
+            mesh.next_seq += 1
+            mesh.messages.append(msg)
+            mesh.seen_ids.add(msg["id"])
+            mesh.last_append = time.monotonic()
+            self._append_log(mesh, msg)
+            self._flush_guests_soon(mesh)
+            written.append(mesh.name)
+        return written
+
     def _append_log(self, mesh: Mesh, msg: dict) -> None:
         d = self._mesh_dir(mesh.name)
         try:

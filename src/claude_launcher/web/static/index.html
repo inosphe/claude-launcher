@@ -8,6 +8,7 @@
 <link rel="stylesheet" href="static/style.css">
 <link rel="stylesheet" href="static/observer.css">
 <link rel="stylesheet" href="static/operator.css">
+<link rel="stylesheet" href="static/chat.css">
 </head>
 <body>
 <div id="auth-overlay" class="hidden">
@@ -173,15 +174,26 @@
               aria-pressed="false">Paused<span class="session-filter-count">0</span></button>
       <button id="session-filter-archived" type="button" data-filter="archived"
               aria-pressed="false">Archived<span class="session-filter-count">0</span></button>
-      <label class="session-group-toggle">
-        <input id="session-group-mesh" type="checkbox">
-        <span>Group by mesh</span>
-      </label>
-      <label class="session-group-toggle">
-        <input id="session-group-workspace" type="checkbox">
-        <span>Group by workspace</span>
-      </label>
+      <!-- One grouping or none. A grouping turns its groups into the tab
+           strip below, and the list shows the open tab's sessions. -->
+      <fieldset id="session-group-mode" class="session-group-toggle session-group-mode">
+        <legend>Group by</legend>
+        <label><input type="radio" name="session-group-mode" value="" checked><span>Off</span></label>
+        <label><input id="session-group-mesh" type="radio" name="session-group-mode" value="mesh"><span>Mesh</span></label>
+        <label><input id="session-group-workspace" type="radio" name="session-group-mode" value="workspace"><span>Workspace</span></label>
+      </fieldset>
     </div>
+    <!-- One tab per group of the grouping picked above (refreshSessions,
+         renderSessionGroupTabs). Pressing the open tab scrolls the list
+         back to its top. -->
+    <div id="session-group-tabs" class="session-group-tabs hidden" role="tablist"
+         aria-label="Session groups"></div>
+    <!-- The open tab's group, in one row: its full name, its session count
+         and, for a mesh, the ⊕ that creates a session in it
+         (renderSessionGroupHeader). Pressing the row also scrolls the list
+         back to its top. -->
+    <div id="session-group-header" class="session-group-header hidden" role="button"
+         tabindex="0" aria-label="Scroll the open group to its top"></div>
     <!-- Every session the rail can show: this daemon's rows (li[data-name],
          keyed by bare name, with their controls) and other daemons' members
          of the meshes held here (li.shadow-card, GET /api/shadows,
@@ -209,9 +221,11 @@
       <a href="#/" data-page="home"><span>⌂</span>Home</a>
       <a href="#/new" data-page="new"><span>+</span>New</a>
       <a href="#/mesh" data-page="meshes"><span>◉</span>Mesh</a>
+      <a href="#/chat" data-page="chat"><span>✉</span>Chat<span id="chat-nav-badge" class="chat-badge-count" hidden></span></a>
       <a href="#/flows" data-page="flows"><span>⇶</span>Flows</a>
       <a href="#/window" data-page="window"><span>▦</span>Window</a>
       <a href="#/stats" data-page="stats"><span>▤</span>Stats</a>
+      <a href="#/profile-usage" data-page="profile-usage"><span>◷</span>Usage</a>
       <a href="#/beads" data-page="beads"><span>◈</span>Beads</a>
       <a href="#/worktrees" data-page="worktrees"><span>⑂</span>Worktrees</a>
       <a href="#/glossary" data-page="glossary"><span>≡</span>Glossary</a>
@@ -231,6 +245,9 @@
     <!-- The project Operator bot's conversation (operator.js builds it; the
          same view also opens as a modal over any page). -->
     <section id="operator-view" class="hidden" aria-label="Operator"></section>
+    <!-- The people's room of each mesh (chat.js builds it; the same view
+         also opens as a modal over any page). -->
+    <section id="chat-view" class="hidden" aria-label="Chat"></section>
     <section id="observer-view" class="hidden">
       <header class="wf-head"><h1>관찰 대시보드</h1><label id="observer-scope-control" title="켜면 observe-pin 한 세션만 관찰합니다. 관찰 API 호출이 그 수에 비례해 줄어듭니다. 세션 레일의 체크박스와 카드의 「관찰 고정」이 같은 표시입니다."><input type="checkbox" id="observer-scope-pinned"> 고정만 관찰</label><button id="observer-monitor">관찰 시작</button></header>
       <section id="observer-token-summary" aria-label="관찰 API 토큰 사용량">
@@ -525,6 +542,17 @@
         <p id="term-clipboard-status" role="status"></p>
         <div id="term-clipboard-items"></div>
       </section>
+      <!-- Session line sync (daemon/line_sync.py). The toggle switches the
+           SESSION, so every page on it follows: in remote-sync mode the field
+           below is the shared line, and what this page had typed locally is
+           kept beside it read-only, to copy from, until sync is switched off
+           and it comes back into the field. -->
+      <button id="term-sync-toggle" class="term-btn" type="button"
+              aria-pressed="false"
+              title="local-only: this line stays in this browser. Click to share it with every browser on this session">Sync off</button>
+      <textarea id="term-local-keep" class="hidden" rows="1" readonly
+                title="what this browser had typed before remote-sync was switched on — read-only; it comes back into the line when sync is switched off"
+                aria-label="this browser's local line, kept read-only while remote-sync is on"></textarea>
       <textarea id="term-input-field" rows="1"
              placeholder="type for this session — Enter to send, Ctrl+J for a newline"
              title="Enter sends · Ctrl+J inserts a newline · Alt+V or Ctrl+V hands the clipboard image to the session · 🖼 attaches image files"
@@ -712,12 +740,16 @@
           <div id="new-connect-row" class="hidden"></div>
           <label>Role <select name="role"></select></label>
           <p id="role-stance" class="hidden"></p>
-          <!-- Roles held beside the primary one, and the prompt packs the
-               session's workspace has installed (Settings > Install). A pack
-               a chosen role or subrole requires is locked on (the mapping is
-               in Settings > Install too), and a summary line names every pack
-               the opening will carry and why. Both rows are drawn by
-               renderSubroles / renderPromptPackRow. -->
+          <!-- Roles held beside the primary one, and the prompt packs: the
+               ones the session's workspace has installed (Settings > Install),
+               then claunch's own copies of the rest, any of them tickable with
+               or without a role. A pack a chosen role or subrole requires is
+               locked on (the mapping is in Settings > Install too), and a
+               summary line names every pack the opening will carry and why.
+               The packs are chips in two groups (General, Roles -- the role
+               packs not in play folded), each with a "view" that shows its
+               text below them; this daemon's own prompt is the first chip.
+               Both rows are drawn by renderSubroles / renderPromptPackRow. -->
           <div id="new-subroles-row" class="new-check-row hidden"></div>
           <div id="new-packs-row" class="new-check-row hidden"></div>
           <label>Workflow <select name="workflow"></select></label>
@@ -979,7 +1011,7 @@
     </div>
 
     <div id="flows-view" class="hidden">
-      <div class="page-head"><h2>Workflows</h2></div>
+      <div class="page-head"><div><h2>Workflows</h2><p class="wf-note">Browse runs, inspect progress, and manage workflow definitions.</p></div></div>
       <!-- Two readings of the same poll, one section deep in the URL the way
            #/beads/<section> already is: Runs is every run on the machine,
            Orphans is the subset whose driving session has exited. The daemon
@@ -988,6 +1020,25 @@
            and acts on it. Filled by renderFlowsTabs(). -->
       <div id="flows-tabs" class="seq-tabs flows-page-tabs"></div>
       <div id="flows-runs">
+        <div class="flows-toolbar">
+          <label>Session status
+            <select id="flows-session-filter">
+              <option value="running-paused">Running or paused</option>
+              <option value="running">Running</option>
+              <option value="paused">Paused</option>
+              <option value="killed">Killed</option>
+              <option value="archived">Archived</option>
+              <option value="unknown">No session record</option>
+              <option value="all">All statuses</option>
+            </select>
+          </label>
+          <label class="flows-search-label">Find a run
+            <input id="flows-search" type="search" placeholder="Workflow, session, step, or directory">
+          </label>
+          <span id="flows-result-count" class="wf-note" role="status"></span>
+        </div>
+        <details class="flows-settings">
+          <summary>Automation defaults <span class="wf-note">Reminders and stall pings</span></summary>
         <!-- The reminder clock's machine defaults. Rendered once (not by the
              list's rebuild) so a half-typed interval survives the poll; each
              run's own override lives on its run page. -->
@@ -997,6 +1048,7 @@
              that stopped at a step no gate is holding. Rendered once, same
              reason. -->
         <div id="cflow-ping-defaults" class="cflow-defaults"></div>
+        </details>
         <ul id="cflow-list"></ul>
       </div>
       <div id="flows-orphans" class="hidden">
@@ -1116,6 +1168,7 @@
          acquire/release stay with the processes whose test runs own grants. -->
     <div id="window-view" class="hidden"></div>
     <div id="stats-view" class="hidden"></div>
+    <div id="profile-usage-view" class="hidden"></div>
     <!-- The board: every beads issue the fleet's repositories hold, each
          tagged with the sessions it belongs to. Data only — the writes stay
          with `claunch beads`, except the one the rail offers. -->
@@ -1159,6 +1212,7 @@
   </div>
 </div>
 
+<script src="static/quietdom.js"></script>
 <script src="static/vendor/xterm.js"></script>
 <script src="static/vendor/addon-fit.js"></script>
 <script src="static/vendor/addon-webgl.js"></script>
@@ -1170,8 +1224,10 @@
 <script src="static/spec-page.js"></script>
 <script src="static/glossary-composer.js"></script>
 <script src="static/operator.js"></script>
+<script src="static/chat.js"></script>
 <script src="static/session-tabs.js"></script>
 <script src="static/session-grid.js"></script>
+<script src="static/profile-usage.js"></script>
 <script src="static/p2p.js"></script>
 <script src="static/app.js"></script>
 <script src="static/toolbar.js"></script>

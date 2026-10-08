@@ -530,7 +530,9 @@ spin off variants. Children inherit the parent's `harness`, `env` (child keys
 win), API-key route and applicable login secret. Every `allowed_harnesses`
 constraint in the parent chain also applies; a child list intersects it and
 therefore cannot widen it. A local `set-harness` pin wins;
-`set-harness --clear` returns to the inherited/default (`claude`) choice.
+`set-harness --clear` returns to the inherited choice, else the provider's
+default harness, else `claude`. `set-harness PROFILE` with no name prints the
+effective harness and which of these it came from.
 
 ```bash
 claunch create company                       # base profile
@@ -817,6 +819,26 @@ precedence. A non-default provider selected for Pi therefore needs both
 A provider may declare `allowed_harnesses`. When present, selecting that
 provider is only valid for the listed harnesses; `set-provider` refuses an
 atomic config change that would make a profile's current harness illegal.
+
+A provider also supplies the **default harness** for profiles that select it
+without pinning one. When no profile in the inheritance chain sets `harness`
+(and no `PROFILE:HARNESS` selector is given), the effective provider's own
+`harness` is used; without it, an `allowed_harnesses` list that excludes
+`claude` names its first entry; otherwise the default stays `claude`. So a
+profile only needs `provider: codex` when the provider says so:
+
+```yaml
+providers:
+  codex:
+    harness: codex              # optional; the default for profiles on it
+    allowed_harnesses: [codex]  # alone, this would also default to codex
+profiles:
+  codex:
+    provider: codex             # no `harness: codex` needed
+```
+
+A profile's `harness` (own or inherited) still overrides the provider's
+default, and the result goes through the same `allowed_harnesses` check.
 
 `service` identifies the provider's account and authentication service; it is
 separate from `allowed_harnesses` and a profile's selected harness. `default`
@@ -2232,6 +2254,7 @@ sessions for *this* piece of work":
 claunch project add launcher --default-workspace claude-launcher
 claunch project ls
 claunch project set-workspace launcher hq   # '' clears the default
+claunch project set-mesh launcher room      # --none: no mesh; --unset: never set
 claunch project rm launcher                 # records keep the name; nothing is killed
 
 claunch new-session --profile nc --project launcher   # filed under it, started in its default workspace
@@ -2258,6 +2281,18 @@ claunch mesh ls --project launcher
   name. A session created in the project with no directory of its own starts
   there — a default only; `-c`, `--workspace`, `--worktree` and the form's
   Directory row still win, and a session in the project may sit anywhere.
+- A project's **default mesh** is the mesh the web UI's new-session form and
+  the `new-session` wizard pick in their Mesh row when that project is
+  chosen (by the Directory row's rule: never over a mesh picked by hand, and
+  not for a child, whose empty row means its parent's mesh). It has three
+  states: *unset* (no `default_mesh` key; every project made before the
+  setting existed reads this way, and the API leaves the field out), *none*
+  (`default_mesh: null`) and a mesh name. `claunch project set-mesh NAME
+  MESH | --none | --unset` writes them, as do `project add --default-mesh /
+  --no-default-mesh`, the Projects card and `PATCH /api/projects/NAME` with
+  `default_mesh` (a name or null) or `default_mesh_unset: true`. The CLI's
+  `new-session` and the create API do not join it on their own: `--mesh` is
+  still how a session is put in a mesh there.
 - Workspaces are not filed under projects: two projects may point at the
   same directory.
 - The web UI's rail has a **Project** selector that narrows the session
@@ -2326,6 +2361,45 @@ straight into it — register it like any other directory:
 ```bash
 claunch workspace add .claude/worktrees/review --name review
 ```
+
+### Syncing a repository across machines (`claunch reposync`)
+
+Two machines often hold clones of one repository under different workspace
+names and different remote names — this machine's `github.ncsoft.com` remote
+and another machine's `origin` can be the same URL. `reposync` ties them by the
+remote's *address* (`host/owner/repo`, no credentials), and each machine syncs
+its own half through that shared remote: fetch, bring the local branch onto
+it, push. Run it on A, then B, then A again and all three refs agree. Nothing
+writes to the other machine; a peer's clones are only *read*, over the relay
+(`/peer/repos`: workspace names, address keys, branch tips).
+
+```bash
+claunch reposync status [WORKSPACE]          # remotes here, peers sharing them, what a sync would do
+claunch reposync master [WORKSPACE] --dry-run
+claunch reposync master [WORKSPACE]          # ff, or rebase --rebase-merges when both moved; then push
+claunch reposync branch push s875-x          # -> <this machine>/s875-x on the shared remote
+claunch reposync branch pull shared-daemon-main s120-y   # ff only
+```
+
+How master is brought onto the remote: work-unit branches still land with
+`--no-ff`; master itself stays on one line — fast-forward when one side moved,
+`git rebase --rebase-merges` when both did (the landing merges are recreated,
+no sync merge commit is made). A rebase rewrites the unpushed commits, so the
+result lists every local branch still built on the old ones with the
+`git rebase --onto` that would move it (it moves none), and comments
+`REBASED <old> -> <new>` on board issues whose close reason cited a rewritten
+merge. A conflict aborts with nothing moved; when the only conflict is the
+board export `.beads/issues.jsonl`, untrack it (the repository's board lives
+in `.beads/beads.db`) or merge the boards with `claunch beads sync --merge`.
+
+A push waits for a person by default (`daemon.reposync_push: ask`): at your
+own terminal you answer y/N (or pass `--yes`); an agent session's push files
+its plan as an approval card in the web UI, bound to the plan's tips, and an
+unanswered card expires as a refusal. `claunch daemon config reposync_push
+auto` lifts the gate — from your own shell; an agent session cannot change
+it. Agents use the MCP tool `repo_sync` (`status` / `plan` / `sync` /
+`branch_push` / `branch_pull`); its push answers `waiting_approval` with a
+request id and is carried out by a second call once approved.
 
 ### VS Code in the browser (one code-server per workspace and worktree)
 
@@ -2487,31 +2561,43 @@ The workflow has two steps:
    untouched), *edited here* (Overwrite/Remove ask first), and *local pack*
    (a `.md` the workspace wrote itself, which is offered at creation too).
 2. **Choose at session creation.** The create and spawn forms offer every pack
-   installed in the session's workspace as a checkbox. The ticked packs go
-   into the opening, after the score goal and before the mesh/workflow
-   briefing, so the opening still ends with the task. The workspace's copy is
-   what is read, so a workspace that edited its copy gets its edit. The text
-   is recorded in the session definition, and each block carries a `text id`
+   as a chip you click on or off: the ones installed in the session's
+   workspace first, then every pack claunch ships that the workspace has not
+   installed, badged "claunch" (an installed one is badged "installed").
+   The chips sit in two groups, **General** and **Roles** (the `role-*`
+   packs); a role pack that is neither ticked nor required is folded behind
+   a "+N more" button. Every chip has a **view** button that shows the pack's
+   text under the chips, read the same way the opening would read it (the
+   workspace's copy with its edits, else claunch's) and saying which it is.
+   Any of them can be ticked, whatever the role and with no
+   mesh at all. The ticked packs go into the opening, after the score goal
+   and before the mesh/workflow briefing, so the opening still ends with the
+   task. The workspace's copy is read when it has one, so a workspace that
+   edited its copy gets its edit, and the shipped copy otherwise. The text is
+   recorded in the session definition, and each block carries a `text id`
    that `rebrief` answers after a compaction.
 
 From the CLI: `claunch new-session --prompt-pack beads --prompt-pack common`
 (also on `claunch spawn`), and `prompt_packs` on the MCP `spawn` tool. A pack
-that is not installed in the session's workspace refuses the create with a 400
-and nothing is staged.
+the workspace has not installed goes in as claunch's copy and the create
+response lists it under `prompt_packs_shipped`; one that exists in neither
+place refuses the create with a 400 and nothing is staged.
 
 Two settings sit under the matrix, stored in `~/.claunch.yaml` under
 `prompt_packs`:
 
 - **Ticked by default** (`default_packs`): packs the create form ticks before
-  anyone touches it. Until saved, every pack whose header says
+  anyone touches it, where the workspace installed them (claunch's copies
+  start unticked). Until saved, every pack whose header says
   `default: true` (`common`).
 - **Required by role** (`role_packs`): role → packs. A session whose primary
   role or one of whose subroles is listed gets those packs whether ticked or
-  not; the form shows them ticked and locked with "required by <role>". A
+  not; the form shows them ticked and locked with a 🔒 <role> badge. A
   required pack needs no install: the workspace's copy is used when it has
   one (an edit there wins), and the copy claunch ships otherwise — the form
-  marks it "claunch's copy", the opening block says "shipped with claunch",
-  and the create response lists it under `prompt_packs_shipped`. Only a
+  badges it "claunch", the opening block says "shipped with claunch" and
+  why it is there ("required by role <role>", else "ticked at session
+  creation"), and the create response lists it under `prompt_packs_shipped`. Only a
   mapped pack that exists in neither place refuses the create, with the role
   named. Roles are matched by canonical name on the joined mesh, so aliases and
   a role inferred from the handle count too. The default maps every packaged
@@ -2520,7 +2606,7 @@ Two settings sit under the matrix, stored in `~/.claunch.yaml` under
   `--role worker --subrole unreal`) to `unreal-operator`.
 
 The create and spawn forms end the Prompt packs row with one line naming
-every pack the opening will carry and why (ticked, or the role that requires
+every pack the opening will carry and why, one chip each (ticked, or the role that requires
 it, and whether it is claunch's copy). When the Role row is blank it says
 which role the handle will resolve to, since that role decides the packs.
 
@@ -2532,9 +2618,43 @@ joined by hand, without a create-time opening, reads them.
 
 HTTP: `GET /api/prompt-packs` (catalog, per-workspace status, both settings),
 `GET /api/prompt-packs/offer?cwd=` (what the form offers there),
+`GET /api/prompt-packs/text?id=&cwd=` (one pack's text as a session there
+would get it, with `source` — `workspace` or `package` — and for a workspace
+copy its `status`: `current`, `stale`, `edited` or `local`; 404 for an id
+that is neither installed nor shipped),
 `POST /api/prompt-packs/install|remove` (`{workspace, pack, force}`),
 `PUT /api/prompt-packs/role-packs` (`{role_packs?, default_packs?}`; `null`
 restores a default).
+
+### The daemon prompt (one text every session of this daemon gets)
+
+Each daemon instance can hold one prompt of its own that it puts into the
+opening of **every** session it starts, whatever the role or mesh, as the
+first prompt pack (id `@daemon`, header `-- this daemon's own prompt`; no pack
+file can have that id, so a workspace's own `daemon.md` is a separate pack). It is
+daemon configuration, not source code and not a workspace file: it lives in
+the instance's state directory, `~/.claude-launcher/daemon/daemon-prompt.md`
+for the default daemon and `daemons/<name>/daemon-prompt.md` for `-L <name>`,
+so two daemons on one machine never read or show each other's. Empty (or no
+file) means the daemon has none.
+
+Edit it under **Settings ▸ Install ▸ Daemon prompt**. The create form shows it
+as the first chip of the Prompt packs row (badged "daemon", its **view** shows
+the text), ticked; untick it to leave it out of
+one session (`daemon_prompt: false` in the body, `--no-daemon-prompt` on
+`claunch new-session`/`spawn`, `no_daemon_prompt` on the MCP `spawn` tool). A
+change reaches sessions created after it, not running ones.
+
+Agents see and change it through the session MCP tool `daemon_prompt`
+(`op: get`, or `op: set` with the whole new `text`; empty turns it off). Every
+save, from the web or an agent, keeps the text it replaced in
+`daemon-prompt.prev.md` and appends `{at, by, chars, previous_chars}` to
+`daemon-prompt.log.jsonl` beside it, so a bad edit can be traced and undone.
+The text is limited to 32,000 characters.
+
+HTTP: `GET /api/daemon-prompt` (instance, path, text, size), `PUT
+/api/daemon-prompt` (`{text, by?}`); `GET /api/prompt-packs/offer` carries it
+as `daemon_prompt`.
 
 ### Joining with a role, or opening another session's conversation
 
@@ -2637,6 +2757,35 @@ ends the copy. In that order, always: a delivery that fails or times out
 keeps the copy alive and says so, because the wrap-up is the only thing of
 the copy that survives. Nothing reads the transcript; the agent writes the
 wrap-up, since it is the one that knows what since-the-marker meant.
+
+### deep_think — a session asks itself, a copy answers
+
+The MCP `deep_think` tool is the quick-fork pressed by the agent itself, for
+one question. `deep_think {question}` forks the asking session into
+`A-dt<n>` (the copy holds A's whole conversation, so the question may lean
+on it), puts the question on top as a *deep-think: QUESTION* block, and
+**returns at once**. The answer is not in the reply: the copy explores,
+reasons, and hands its answer in with the `handoff` tool — a merge — which
+types it into A as a *deep-think: ANSWER from A-dt<n>* block in a later turn,
+and ends the copy. What A saves is context: the exploration is spent in the
+copy's window, and only the answer comes back.
+
+- **Edits.** The copy stands in A's checkout and may edit; before and after
+  it writes, it says what with `deep_think {op: notify, text}`, typed into A
+  as a *NOTE* block.
+- **Message log.** Notes and the answer are also written into the log of
+  every mesh A belongs to (and this daemon owns), from `deep-think:A-dt<n>`,
+  addressed to nobody — the record of the room, not a second delivery.
+- **Record.** Question and answer are kept as a search record of the copy,
+  so `search` finds them after it is gone.
+- **Model and effort.** `model` / `effort` run the copy differently, under
+  the spawn policy like any child's.
+- **Limits.** At most `daemon.deep_think_max` (3) copies per session run at
+  once. Each has a deadline (`minutes`, default `daemon.deep_think_timeout`,
+  30 min). Past it A is asked to `extend` or `cancel`; if it does neither
+  within `daemon.deep_think_grace` (5 min) the copy is asked to hand in what
+  it has, and after one more grace it is ended and A is told no answer is
+  coming. `deep_think {op: status}` lists what is running.
 
 ### handoff — the same relay between any two sessions
 
@@ -3548,6 +3697,21 @@ injects) but is dismissed there, where its mail is counted.
 
 ## Web UI & HTTP API
 
+**Session line sync.** The **type for this session** line is local-only by
+default: what one browser types stays in that browser until Enter. The
+**Sync** button beside it switches the *session* to remote-sync, and every
+browser showing that session follows: the line becomes one text they all
+type into, each edit carried to the others over the terminal socket, and
+the daemon keeps it in memory until it restarts — close the window, come
+back, and the line is where it was left. Removing the session's record
+(`DELETE /api/sessions/{name}`, or the clear of ended sessions) drops the
+line with it, so a session later created under the same name opens local
+and empty. What a browser had typed locally
+when sync came on stays beside the shared line read-only, to copy from, and
+returns to the field when sync is switched off. Concurrent edits are last
+writer wins; the clear after a send is conditional, so a line someone else
+started meanwhile is not wiped (`daemon/line_sync.py`).
+
 **User score goal** is optional in **New session** and **Spawn child**.
 It starts with independent reward and penalty counts at zero and carries the
 goal text at the head of the session's opening message. Later session reminders
@@ -3574,7 +3738,8 @@ press **Operator 시작**); the daemon creates one session with role
 `operator` on mesh `operator-<project>`, running the bundled `operator`
 workflow (declare it where the session works — `claunch cflow update`
 refreshes the global layer). The same conversation opens as a modal over any
-page from the floating **Operator** button or **Alt+O**. The bot is an
+page from the Operator button (◍) in the floating dock at the bottom right,
+or **Alt+O**. The bot is an
 ordinary claunch session: it is listed with the others, and its name in the
 Operator header links to its terminal (a link followed from the modal closes
 the modal). The bot polls with
@@ -3621,6 +3786,28 @@ its attention, progress and restart fields still count. HTTP:
 `POST /api/operator/asks/{id}/answer?project=P {decision?, text?}`; the bot's
 own calls live under `/api/operator/agent/{session}/…` and are refused to any
 session that is not its project's bound operator.
+
+**Chat** is where the *people* on a mesh's daemons talk to each other. The
+**Chat** tab next to Mesh (`#/chat`, `#/chat/<mesh>`) and the Chat button (✉)
+beside the Operator's in the same floating dock open one room per mesh this daemon owns
+or mirrors. A person is a browser: the page mints a random key into
+localStorage the first time it loads and keeps it with a display name the
+header lets you change (it applies to messages sent after the change), so a
+second browser on the same daemon — or a private window — is a second person.
+The key identifies; it does not authenticate. New messages raise the badge on
+the tab and on the button (unread counts are this browser's own; a room's
+history at first sight counts as read), a toast you can reply from without
+opening the room, a desktop notification while the tab is hidden, and a short
+tone — the last two can be switched off in the header. Chat never reaches an
+agent: the room is its own log, `chat.jsonl` in the mesh directory, beside the
+agents' `log.jsonl`. The mesh's authority numbers the room's messages; a post
+on a guest daemon is forwarded to it (`/peer/chat/send`) and refused with 503
+when it cannot be reached (nothing is queued), the authority pushes each new
+message to its peers (`/peer/chat/sync`), and a peer that missed a push pulls
+the tail when its page polls (`/peer/chat/pull`); peer calls carry the mesh's
+link tokens. Routes: `GET /api/chat/rooms`,
+`GET /api/chat/rooms/{mesh}/messages?after=N&limit=N`,
+`POST /api/chat/rooms/{mesh}/messages {key, name, body}`.
 
 The daemon doubles as a web server. `claunch web --open` prints/opens the UI:
 a session list (status badges, create/kill) plus a **live xterm.js terminal**
@@ -3930,6 +4117,8 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | GET    | `/api/sessions/{name}/capture` | `?history=1&format=json&trim=0` |
 | GET    | `/api/sessions/{name}/wait`    | long-poll `?state=idle\|exited&timeout=&threshold=` |
 | POST   | `/api/sessions/{name}/resize`  | `{cols, rows}` |
+| GET    | `/api/sessions/{name}/line-sync` | the session line's sync state: `{mode: local\|remote, text, rev, at, client}` (memory only; gone on a daemon restart) |
+| POST   | `/api/sessions/{name}/line-sync` | `{mode}` switches the session (every viewer follows); `{text, if_text?, client}` replaces the shared text (409 while `local`; `if_text` makes it conditional). Each change goes to every attached viewer as a `line_sync` frame |
 | GET    | `/api/sessions/{name}/ws`      | terminal WebSocket (binary = PTY bytes, text = JSON control) |
 | GET    | `/api/profiles`                | base profile names, policy-filtered execution selectors, labelled default options, and diagnostic selector details (each profile's own row also carries `directory`, `permission_mode` when it runs Claude, and that profile's `harness_policy`) |
 | POST   | `/api/profiles/permission-mode` | declare claunch's default permission mode and converge: `{"mode": "auto"}` (any of `default`, `manual`, `acceptEdits`, `plan`, `auto`, `bypassPermissions`), or `{"mode": null}` to undeclare and fall back to the packaged default; `400` on an unknown mode, before anything is written |

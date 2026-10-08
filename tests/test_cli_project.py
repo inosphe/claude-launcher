@@ -37,6 +37,39 @@ def test_project_add_ls_set_workspace_rm(home, tmp_path, capsys):
     assert projects.get("launcher") is None
 
 
+def test_project_default_mesh_from_the_cli(home, capsys):
+    assert run("project", "add", "p") == 0
+    capsys.readouterr()
+    assert store.load()["projects"]["p"] == {}
+    assert run("project", "ls") == 0
+    assert "default mesh: (unset)" in capsys.readouterr().out
+
+    assert run("project", "set-mesh", "p", "room") == 0
+    assert "mesh 'room'" in capsys.readouterr().out
+    assert store.load()["projects"]["p"] == {"default_mesh": "room"}
+
+    assert run("project", "set-mesh", "p", "--none") == 0
+    assert "set to none" in capsys.readouterr().out
+    assert store.load()["projects"]["p"] == {"default_mesh": None}
+    assert run("project", "ls") == 0
+    assert "default mesh: none" in capsys.readouterr().out
+
+    assert run("project", "set-mesh", "p", "--unset") == 0
+    assert "unset" in capsys.readouterr().out
+    assert store.load()["projects"]["p"] == {}
+
+    assert run("project", "add", "q", "--no-default-mesh") == 0
+    assert "default mesh: none" in capsys.readouterr().out
+    assert store.load()["projects"]["q"] == {"default_mesh": None}
+    assert run("project", "add", "r", "-m", "room") == 0
+    assert store.load()["projects"]["r"] == {"default_mesh": "room"}
+
+    assert run("project", "set-mesh", "p") == 1
+    assert "name a mesh" in capsys.readouterr().err
+    assert run("project", "set-mesh", "p", "room", "--none") == 1
+    assert "not both" in capsys.readouterr().err
+
+
 def test_project_errors_are_one_line_on_stderr(home, capsys):
     assert run("project", "add", "p", "--default-workspace", "nope") == 1
     assert "no workspace named 'nope'" in capsys.readouterr().err

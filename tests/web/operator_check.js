@@ -191,8 +191,8 @@ check("the nav entry sits next to Observer and carries the badge",
       /data-page="observer">[^\n]*\n\s*<a href="#\/operator" data-page="operator">[^\n]*id="operator-nav-badge"/.test(html), true);
 check("script and stylesheet are loaded",
       [html.includes('<script src="static/operator.js"></script>'), html.includes('href="static/operator.css"')], [true, true]);
-check("the modal opens from anywhere: floating button and Alt+O",
-      [src.includes('document.body.append(fab)'), /event\.altKey[^\n]*event\.key === "o"/.test(src)], [true, true]);
+check("the modal opens from anywhere: floating button (a segment of the shared dock) and Alt+O",
+      [src.includes('fabDock().append(fab)'), src.includes('dock.id = "fab-dock"'), /event\.altKey[^\n]*event\.key === "o"/.test(src)], [true, true, true]);
 check("user input goes to the daemon, not a terminal",
       [src.includes("api/operator/message"), /api\/sessions\/[^"`]*\/(deliver|keys)/.test(src)], [true, false]);
 

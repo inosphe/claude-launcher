@@ -30,7 +30,12 @@
      mistake the row exists to prevent.
    - A remembered project that no longer exists falls back to "all". A
      project removed from another window must not leave the rail narrowed to
-     a name nothing is filed under. */
+     a name nothing is filed under.
+   - A pick fills the Mesh row by the directory's rule, from the project's
+     default mesh. That setting has three states (projects.py): the field
+     absent (undefined: never set), null (set to no mesh) and a name. The
+     Projects card writes each one with its own body, and a project that
+     never had one is sent nothing at creation, so it stays absent. */
 const fs = require("fs");
 const path = require("path");
 const STATIC = path.join(__dirname, "..", "..", "src", "claude_launcher",
@@ -142,7 +147,10 @@ function select(id) {
   return s;
 }
 const form = select("form-project");
-form.form = { cwd: select("cwd") };
+let meshChanges = 0;
+const meshRow = select("mesh");
+meshRow.dispatchEvent = (ev) => { if (ev.type === "change") meshChanges++; };
+form.form = { cwd: select("cwd"), mesh: meshRow };
 form.closest = () => form.form;
 const rail = select("project-select");
 const byId = { "project-select": rail };
@@ -203,6 +211,7 @@ const code = [
   slice("setCurrentProject"), slice("syncRouteProject"),
   "let projectFollowPending = '';", slice("followSessionProject"),
   slice("sessionTabOtherProject"), slice("hashQuery"),
+  slice("applyProjectDefaultMesh"),
   slice("applyProjectDefaultCwd"), slice("projectSelectOptions"),
   slice("refreshProjects"),
   "return { setCurrentProject, applyProjectDefaultCwd, railSessions, " +
@@ -267,6 +276,64 @@ const fns = new Function(...Object.keys(ctx), code)(...Object.values(ctx));
   fns.applyProjectDefaultCwd(form);
   check("the previous default is released when the new project has none",
         form.form.cwd.value, "");
+
+  /* the Mesh row follows the project's default mesh, by the same rule */
+  served = { projects: [
+    { name: "default", default_workspace: null, default_cwd: null, is_default: true },
+    { name: "hq", default_workspace: "hq", default_cwd: "D:\\hq", is_default: false,
+      default_mesh: "room" },
+    { name: "solo", default_workspace: null, default_cwd: null, is_default: false,
+      default_mesh: null },
+  ] };
+  await fns.refreshProjects();
+  meshRow.appendChild(Option("(none)", ""));
+  meshRow.appendChild(Option("room", "room"));
+  meshRow.appendChild(Option("other", "other"));
+  meshRow.value = "";
+  form.form.cwd.value = "";
+  form._lastProject = "default";
+  form.value = "hq";
+  meshChanges = 0;
+  fns.applyProjectDefaultCwd(form);
+  check("a pick fills an empty Mesh row with the project's default mesh",
+        [meshRow.value, meshChanges], ["room", 1]);
+  form.value = "solo";
+  fns.applyProjectDefaultCwd(form);
+  check("...and a project set to none lets the previous default go",
+        [meshRow.value, meshChanges], ["", 2]);
+  form.value = "default";
+  fns.applyProjectDefaultCwd(form);
+  check("an unset project leaves an empty row alone", [meshRow.value, meshChanges], ["", 2]);
+  meshRow.value = "other";
+  form.value = "hq";
+  fns.applyProjectDefaultCwd(form);
+  check("a mesh picked by hand survives a project change", meshRow.value, "other");
+  form.value = "default";
+  fns.applyProjectDefaultCwd(form);
+
+  /* the three states on the Projects card */
+  const meshFns = new Function(
+    src.slice(src.indexOf("const PROJECT_MESH_UNSET = "),
+              src.indexOf("function projectMeshChoice(")) +
+    slice("projectMeshChoice") + slice("projectMeshValue") + slice("projectMeshBody") +
+    "return { projectMeshChoice, projectMeshValue, projectMeshBody, " +
+    "UNSET: PROJECT_MESH_UNSET, NONE: PROJECT_MESH_NONE };")();
+  check("a row with no default_mesh key reads as unset",
+        meshFns.projectMeshChoice({ name: "p" }), meshFns.UNSET);
+  check("...null as none, a name as itself",
+        [meshFns.projectMeshChoice({ default_mesh: null }),
+         meshFns.projectMeshChoice({ default_mesh: "room" })], [meshFns.NONE, "room"]);
+  check("the picker values map back to undefined / null / a name",
+        [meshFns.projectMeshValue(meshFns.UNSET) === undefined,
+         meshFns.projectMeshValue(meshFns.NONE), meshFns.projectMeshValue("room")],
+        [true, null, "room"]);
+  check("each state is written with its own body",
+        [meshFns.projectMeshBody(undefined), meshFns.projectMeshBody(null),
+         meshFns.projectMeshBody("room")],
+        [{ default_mesh_unset: true }, { default_mesh: null }, { default_mesh: "room" }]);
+  check("a new project left unset sends no default_mesh",
+        /if \(mesh !== undefined\) body\.default_mesh = mesh;/.test(slice("projectAdd")),
+        true);
 
   /* the rail narrows the cache it holds; "default" is the unnamed project */
   fns.setSessions([

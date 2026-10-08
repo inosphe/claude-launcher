@@ -1109,11 +1109,11 @@ def _print_role_packs(roles) -> None:
     for pack_id, by in required.items():
         print()
         try:
-            pack = prompt_packs.required_pack(root, pack_id)
+            pack = prompt_packs.pack_copy(root, pack_id)
         except prompt_packs.PackError as exc:
             print(f"# prompt pack {pack_id} (required by {', '.join(by)}): {exc}")
             continue
-        print(prompt_packs.opening_block(pack.id, pack.body, pack.source))
+        print(prompt_packs.opening_block(pack.id, pack.body, pack.source, required_by=by))
 
 
 def _cmd_mcp(_args: argparse.Namespace) -> int:

@@ -1716,11 +1716,15 @@ const SESSION_FILTERS = ["current", "running-paused", "running", "killed", "paus
 const SESSION_GROUPS = ["mesh", "workspace"];
 let sessionFilter = localStorage.getItem(SESSION_FILTER_KEY) || "current";
 if (!SESSION_FILTERS.includes(sessionFilter)) sessionFilter = "current";
+/* At most one grouping at a time: the rail shows one group per tab, and a
+   tab strip has one axis. A browser that saved the former nested order
+   (`["workspace","mesh"]`) keeps its outer grouping. */
 let sessionGroupOrder = (() => {
   try {
-    const saved = JSON.parse(localStorage.getItem(SESSION_GROUP_ORDER_KEY) || "[]");
-    if (Array.isArray(saved)) return saved.filter((group, i) =>
-      SESSION_GROUPS.includes(group) && saved.indexOf(group) === i);
+    const raw = localStorage.getItem(SESSION_GROUP_ORDER_KEY);
+    const saved = raw === null ? null : JSON.parse(raw);
+    if (Array.isArray(saved)) return saved.filter((group) =>
+      SESSION_GROUPS.includes(group)).slice(0, 1);
   } catch {}
   // Preserve the pre-order setting for browsers that used the former mesh-only
   // checkbox.  The new setting takes over on the next group change.
@@ -1771,47 +1775,42 @@ function shadowGroupValue(group, row) {
   return group === "mesh" ? shadowMeshGroup(row) : `@${row.machine}`;
 }
 
-/* Which groups the reader has folded shut, remembered per browser.
+/* Which group's tab is open, per grouping, remembered per browser.
 
-   The rail is a poll: it rebuilds its rows whenever the fleet changes, which
-   on a busy machine is most ticks. A fold kept only on the DOM node would
-   therefore last until the next poll, so the state lives here and every
-   rebuild reads it back. Stored as the list of folded keys rather than the
-   open ones, so a mesh that appears later starts open -- a group nobody has
-   touched is not a group somebody shut. */
-const SESSION_GROUP_COLLAPSE_KEY = `claunch_session_group_collapsed:${BASE}`;
-let sessionGroupCollapsed = (() => {
+   The rail is a poll and rebuilds whenever the fleet changes, so the pick
+   lives here and every rebuild reads it back. A saved value that is not
+   among the groups right now (the mesh ended, the filter emptied it) is
+   kept rather than overwritten: the first tab stands in for it until that
+   group is back. */
+const SESSION_GROUP_TAB_KEY = `claunch_session_group_tab:${BASE}`;
+let sessionGroupTab = (() => {
   try {
-    const saved = JSON.parse(localStorage.getItem(SESSION_GROUP_COLLAPSE_KEY) || "[]");
-    if (Array.isArray(saved)) {
-      return new Set(saved.filter((key) => typeof key === "string"));
+    const saved = JSON.parse(localStorage.getItem(SESSION_GROUP_TAB_KEY) || "{}");
+    if (saved && typeof saved === "object" && !Array.isArray(saved)) {
+      const out = {};
+      for (const group of SESSION_GROUPS) {
+        if (typeof saved[group] === "string") out[group] = saved[group];
+      }
+      return out;
     }
   } catch {}
-  return new Set();
+  return {};
 })();
 
-/* The group's identity across rebuilds. Both halves are in it because the
-   two groupings are independent lanes: a workspace named after a mesh would
-   otherwise share its fold. */
-function sessionGroupKey(group, value) {
-  return JSON.stringify([group, value]);
+/* The tab that is open: the saved one when it is among `values`, else the
+   first. */
+function sessionGroupActiveTab(group, values) {
+  const saved = sessionGroupTab[group];
+  return values.includes(saved) ? saved : (values[0] ?? null);
 }
 
-function isSessionGroupCollapsed(group, value) {
-  return sessionGroupCollapsed.has(sessionGroupKey(group, value));
-}
-
-function setSessionGroupCollapsed(group, value, collapsed, remember = true) {
-  const key = sessionGroupKey(group, value);
-  if (collapsed) sessionGroupCollapsed.add(key);
-  else sessionGroupCollapsed.delete(key);
+function setSessionGroupTab(group, value, remember = true) {
+  sessionGroupTab[group] = value;
   if (remember) {
     try {
-      localStorage.setItem(SESSION_GROUP_COLLAPSE_KEY,
-                           JSON.stringify([...sessionGroupCollapsed]));
+      localStorage.setItem(SESSION_GROUP_TAB_KEY, JSON.stringify(sessionGroupTab));
     } catch {}
   }
-  return collapsed;
 }
 
 /* ---- rail pins --------------------------------------------------------
@@ -2229,10 +2228,14 @@ function syncSessionView() {
   const grid = sessionView === "grid";
   $("session-list")?.classList.toggle("hidden", grid);
   $("session-grid")?.classList.toggle("hidden", !grid);
-  // Mesh and workspace grouping reorder the list; the grid's rows are its
-  // grouping, so the two checkboxes would do nothing there.
+  // Mesh and workspace grouping split the list into tabs; the grid's rows
+  // are its grouping, so the mode and the tabs would do nothing there.
   document.querySelectorAll(".session-group-toggle").forEach((el) =>
     el.classList.toggle("hidden", grid));
+  const groupTabs = $("session-group-tabs");
+  if (groupTabs) groupTabs.classList.toggle("view-hidden", grid);
+  const groupHeader = $("session-group-header");
+  if (groupHeader) groupHeader.classList.toggle("view-hidden", grid);
   document.querySelectorAll('input[name="session-view"]').forEach((input) => {
     input.checked = input.value === sessionView;
   });
@@ -3308,132 +3311,177 @@ function remoteRailRows(shadows) {
 }
 
 
-/* Sticky headings need the height of every outer heading as their offset.
-   The heading styles intentionally differ by level, so a fixed multiplier
-   would overlap when the type scale or padding changes. */
-function sessionGroupStickyTops(headings) {
-  const heights = [];
-  for (const heading of headings) {
-    const level = Number(heading.dataset.groupLevel || 0);
-    if (heights[level] !== undefined) continue;
-    const rect = typeof heading.getBoundingClientRect === "function"
-      ? heading.getBoundingClientRect() : null;
-    heights[level] = rect && rect.height || heading.offsetHeight || 0;
-  }
-  return headings.map((heading) => {
-    const level = Number(heading.dataset.groupLevel || 0);
-    let top = 0;
-    for (let outer = 0; outer < level; outer++) top += heights[outer] || 0;
-    return top;
-  });
-}
-
-/* The share of the rail the outermost headings may occupy before the stack
-   stops being worth it. Every outermost heading is pinned at one end or the
-   other at all times, so the stack costs its full height at every scroll
-   position -- a machine running fifteen meshes would otherwise hand most of
-   the rail to headings and leave a slot for two sessions. */
-const SESSION_GROUP_STACK_BUDGET = 0.6;
-
-/* Where each heading sits once the outermost groups stack instead of taking
-   turns.
-
-   `sessionGroupStickyTops` above answers the nested question: a heading is
-   held by its own group and released at that group's bottom, so only the
-   group the reader is inside is named. That loses the other groups the
-   moment they scroll out of range, which is the thing this layout fixes:
-   the outermost headings pile up at the top as they pass (`top`) and wait in
-   a pile at the bottom before they arrive (`bottom`), so every mesh is
-   named no matter where the list is scrolled.
-
-   Both ends are needed for that, and they are what makes the cost fixed --
-   hence the budget. Over it, the caller is handed the nested offsets and the
-   old behaviour, which is correct, just less informative. Headings below the
-   outermost level keep a top offset only: they belong to one group, and
-   parking them at the bottom of the rail would name a group the reader is
-   not in. */
-function sessionGroupStickyLayout(headings, viewport = 0) {
-  const levels = headings.map((h) => Number(h.dataset.groupLevel || 0));
-  const heights = headings.map((h) => {
-    const rect = typeof h.getBoundingClientRect === "function"
-      ? h.getBoundingClientRect() : null;
-    return (rect && rect.height) || h.offsetHeight || 0;
-  });
-  let total = 0;
-  for (let i = 0; i < headings.length; i++) if (!levels[i]) total += heights[i];
-  if (!(viewport > 0) || total > viewport * SESSION_GROUP_STACK_BUDGET) {
-    return {
-      stacked: false,
-      offsets: sessionGroupStickyTops(headings).map((top) => ({ top, bottom: null })),
-    };
-  }
-  const offsets = [];
-  // The top offset the next nested level starts at, per level. Truncated at
-  // every heading so a group that follows a deeper one does not inherit its
-  // chain.
-  const chain = [];
-  let above = 0;   // outermost headings already passed, in pixels
-  for (let i = 0; i < headings.length; i++) {
-    const level = levels[i];
-    if (!level) {
-      offsets.push({ top: above, bottom: total - above - heights[i] });
-      chain.length = 0;
-      chain[0] = above + heights[i];
-      above += heights[i];
-      continue;
+/* The grouped rail drawn as tabs: one tab per level-0 group of `rows`
+   (sessionGroupRows), and only the open tab's rows go on to the list -- its
+   heading dropped, since the tab already names it. Each tab carries the rows
+   it holds, so the count and the search mark need no second pass over the
+   fleet. `rows` without groups (ungrouped) come back as they are, with no
+   tabs. */
+function sessionGroupTabRows(rows, group) {
+  const tabs = [];
+  let tab = null;
+  const loose = [];
+  for (const row of rows) {
+    if (row.type === "group" && row.level === 0 && row.group === group) {
+      tab = { value: row.value, rows: [] };
+      tabs.push(tab);
+    } else if (tab) {
+      tab.rows.push(row);
+    } else {
+      loose.push(row);
     }
-    const top = chain[level - 1] || 0;
-    offsets.push({ top, bottom: null });
-    chain.length = level;
-    chain[level] = top + heights[i];
   }
-  return { stacked: true, offsets };
+  if (!tabs.length) return { tabs, active: null, rows };
+  const active = sessionGroupActiveTab(group, tabs.map((t) => t.value));
+  const open = tabs.find((t) => t.value === active);
+  return { tabs, active, rows: [...loose, ...(open ? open.rows : [])] };
 }
 
-function syncSessionGroupStickyOffsets(list) {
-  const headings = [...list.querySelectorAll(".session-group-heading")];
-  const layout = sessionGroupStickyLayout(headings, list.clientHeight || 0);
-  if (list.classList && typeof list.classList.toggle === "function") {
-    list.classList.toggle("session-group-stacked", layout.stacked);
-  }
-  for (let i = 0; i < headings.length; i++) {
-    const { top, bottom } = layout.offsets[i];
-    headings[i].style.setProperty("--session-group-sticky-top", `${top}px`);
-    headings[i].style.setProperty("--session-group-sticky-bottom",
-                                  bottom === null ? "auto" : `${bottom}px`);
+/* Set by a tab switch, read once by the rebuild it causes: another group's
+   rows start at the top, not at the scroll position the last group had. */
+let sessionGroupTabScrollReset = false;
+
+/* The rail back to its top: smoothly where the browser can. */
+function scrollSessionListTop() {
+  const list = $("session-list");
+  if (list && typeof list.scrollTo === "function") {
+    list.scrollTo({ top: 0, behavior: "smooth" });
+  } else if (list) {
+    list.scrollTop = 0;
   }
 }
 
-/* Where the rail has to be scrolled for a group's first session to sit
-   directly under that group's own heading.
-
-   `scrollIntoView` would put the row at the top of the rail, which is where
-   the pinned headings already are: the row would land underneath them and
-   the reader would see the stack rather than the session they asked for.
-   The headings above the target occupy exactly its own
-   `--session-group-sticky-top` pixels once it reaches the stack, so that
-   offset plus the heading's own height is the first free pixel below it. */
-function sessionGroupJumpOffset(list, heading, row) {
-  const listRect = list.getBoundingClientRect();
-  const rowRect = row.getBoundingClientRect();
-  const headRect = heading.getBoundingClientRect();
-  const raw = (heading.style && typeof heading.style.getPropertyValue === "function")
-    ? heading.style.getPropertyValue("--session-group-sticky-top") : "";
-  const stickyTop = parseFloat(raw) || 0;
-  return (rowRect.top || 0) - (listRect.top || 0) - stickyTop - (headRect.height || 0);
+/* A tab press. On another tab, open it; on the open one, take the rail back
+   to its top -- the tab bar's scroll-to-top, as a phone app does it. */
+function selectSessionGroupTab(group, value) {
+  const bar = $("session-group-tabs");
+  if (bar && bar.dataset.active === value) {
+    scrollSessionListTop();
+    return;
+  }
+  setSessionGroupTab(group, value);
+  sessionGroupTabScrollReset = true;
+  refreshSessions({ cached: true });
 }
 
+/* The tab strip above the list. Built on every rebuild of the rail (the
+   counts move with the fleet), hidden while the rail is ungrouped. A tab is
+   only a picker: what the open group says and offers is on the header row
+   below the strip (renderSessionGroupHeader). */
+function renderSessionGroupTabs(group, tabs, active) {
+  const bar = $("session-group-tabs");
+  if (!bar) return;
+  // The strip is rebuilt whole, so a tab that held the keyboard (a press by
+  // Enter, then the redraw it caused) hands it to its successor below.
+  const focused = typeof document.activeElement !== "undefined" && document.activeElement
+    && document.activeElement.parentNode === bar ? document.activeElement.dataset.value : null;
+  bar.classList.toggle("hidden", !group || !tabs.length);
+  bar.textContent = "";
+  bar.dataset.active = active ?? "";
+  if (!group) {
+    renderSessionGroupHeader("", null);
+    return;
+  }
+  let activeTab = null;
+  for (const tab of tabs) {
+    const el = document.createElement("div");
+    const open = tab.value === active;
+    el.className = "session-group-tab" + (open ? " active" : "");
+    el.setAttribute("role", "tab");
+    el.setAttribute("aria-selected", String(open));
+    el.tabIndex = 0;
+    el.dataset.group = group;
+    el.dataset.value = tab.value;
+    el._groupRows = tab.rows;
+    const name = document.createElement("span");
+    name.className = "session-group-name";
+    name.textContent = group === "workspace" ? sessionWorkspaceLabel(tab.value) : tab.value;
+    const count = document.createElement("span");
+    count.className = "session-group-count";
+    count.textContent = String(tab.rows.filter((r) =>
+      r.type === "session" || r.type === "shadow").length);
+    el.append(name, count);
+    el.title = open ? `${group} ${tab.value} — click to scroll to the top`
+      : `${group} ${tab.value}`;
+    el.addEventListener("click", () => selectSessionGroupTab(group, tab.value));
+    el.addEventListener("keydown", (ev) => {
+      if (ev.key !== "Enter" && ev.key !== " ") return;
+      ev.preventDefault();
+      selectSessionGroupTab(group, tab.value);
+    });
+    bar.appendChild(el);
+    if (open) activeTab = el;
+    if (focused !== null && tab.value === focused && typeof el.focus === "function") el.focus();
+  }
+  // A strip wider than the rail scrolls sideways; the open tab is kept in it.
+  if (activeTab && typeof activeTab.scrollIntoView === "function") {
+    activeTab.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }
+  renderSessionGroupHeader(group, tabs.find((tab) => tab.value === active) || null);
+}
+
+/* The open group's header: one row under the tab strip, for the open tab
+   alone. It names the group in full (a workspace tab shows only the last two
+   parts of its path), counts its sessions, and carries what the group
+   offers -- a mesh's ⊕, which opens the create form with that mesh picked.
+   Pressing the row takes the list to its top, as pressing the open tab does. */
+function renderSessionGroupHeader(group, tab) {
+  const head = $("session-group-header");
+  if (!head) return;
+  head.classList.toggle("hidden", !group || !tab);
+  head.textContent = "";
+  if (!group || !tab) return;
+  head.dataset.group = group;
+  head.dataset.value = tab.value;
+  const kind = document.createElement("span");
+  kind.className = "session-group-kind";
+  kind.textContent = group;
+  const name = document.createElement("span");
+  name.className = "session-group-name";
+  name.textContent = tab.value;
+  const sessions = tab.rows.filter((r) => r.type === "session" || r.type === "shadow").length;
+  const count = document.createElement("span");
+  count.className = "session-group-count";
+  count.textContent = `${sessions} session${sessions === 1 ? "" : "s"}`;
+  head.append(kind, name, count);
+  head.title = `${group} ${tab.value} — click to scroll to the top`;
+  if (group === "mesh" && tab.value !== "(no mesh)") {
+    const add = document.createElement("button");
+    add.className = "session-group-new";
+    add.type = "button";
+    add.textContent = "⊕";
+    add.title = `create a new session in mesh ${tab.value}` +
+                " — the Create page with this mesh already picked";
+    add.addEventListener("click", (e) => {
+      e.stopPropagation();   // the row itself scrolls; this does not
+      go(`#/new/${encodeURIComponent(tab.value)}`);
+    });
+    head.appendChild(add);
+  }
+}
+
+/* One grouping or none: picking one replaces the other. */
 function setSessionGroup(group, enabled, remember = true) {
   if (!SESSION_GROUPS.includes(group)) return;
-  sessionGroupOrder = sessionGroupOrder.filter((item) => item !== group);
-  if (enabled) sessionGroupOrder.push(group);
+  if (enabled) sessionGroupOrder = [group];
+  else sessionGroupOrder = sessionGroupOrder.filter((item) => item !== group);
   sessionGroupByMesh = sessionGroupOrder.includes("mesh");
   sessionGroupByWorkspace = sessionGroupOrder.includes("workspace");
   if (remember) {
     localStorage.setItem(SESSION_GROUP_ORDER_KEY, JSON.stringify(sessionGroupOrder));
     localStorage.setItem(SESSION_GROUP_KEY, String(sessionGroupByMesh));
   }
+  syncSessionGroupMode();
   refreshSessions();
+}
+
+/* The mode radios follow the setting, whoever changed it. */
+function syncSessionGroupMode() {
+  if (typeof document.querySelectorAll !== "function") return;
+  const mode = sessionGroupOrder[0] || "";
+  document.querySelectorAll('input[name="session-group-mode"]').forEach((input) => {
+    input.checked = input.value === mode;
+  });
 }
 
 function setSessionGroupByMesh(enabled, remember = true) {
@@ -3476,19 +3524,21 @@ function setSessionFilter(filter, remember = true) {
   refreshSessions({ state });
 }
 
-function syncSessionGroupSearch(list) {
+/* While the search box holds a query, a tab whose group has a match is
+   marked, so a match in a closed tab is still found. */
+function syncSessionGroupTabSearch() {
+  const bar = $("session-group-tabs");
+  if (!bar) return;
   const active = typeof sessionSearch !== "undefined" && !!String(sessionSearch.q || "").trim();
-  let changed = false;
-  for (const group of list.querySelectorAll(".session-group")) {
-    const match = active && !!group.querySelector(
-      "li[data-name]:not(.session-filtered), li.shadow-card:not(.session-filtered)");
-    const shut = !match && isSessionGroupCollapsed(group.dataset.group, group.dataset.value);
-    changed = changed || group.classList.contains("collapsed") !== shut;
-    group.classList.toggle("collapsed", shut);
-    group.querySelector(".session-group-caret").textContent = shut ? "▸" : "▾";
-    group.querySelector(".session-group-heading").setAttribute("aria-expanded", String(!shut));
+  for (const tab of bar.querySelectorAll(".session-group-tab")) {
+    const match = active && (tab._groupRows || []).some((row) =>
+      row.type === "session"
+        ? sessionMatchesFilter(row.session) && sessionMatchesSearch(row.session)
+        : row.type === "shadow"
+          ? shadowMatchesFilter(row.shadow) && shadowMatchesSearch(row.shadow)
+          : false);
+    tab.classList.toggle("search-match", match);
   }
-  if (changed) syncSessionGroupStickyOffsets(list);
 }
 
 function syncSessionFilters(sessions) {
@@ -3533,9 +3583,9 @@ function syncSessionFilters(sessions) {
         || (searching && !shadowMatchesSearch(row)));
     }
   }
-  // Search can change without rebuilding the rail. Open every ancestor of
-  // a visible match while preserving the reader's stored fold preferences.
-  if (typeof syncSessionGroupSearch === "function") syncSessionGroupSearch(list);
+  // Search can change without rebuilding the rail: mark the tabs that hold
+  // a match.
+  if (typeof syncSessionGroupTabSearch === "function") syncSessionGroupTabSearch();
   if (typeof syncSessionSearchNote === "function") syncSessionSearchNote();
   if (typeof renderSessionGrid === "function") renderSessionGrid();
   if (typeof syncBulkActions === "function") syncBulkActions(sessions || [], sessionFilter);
@@ -3923,7 +3973,9 @@ async function refreshSessions(options) {
     // The project is outside the old tuple so the tuple keeps its shape;
     // a pick changes what the rail draws out of the same cache.
     [[briefingLLM, sessionsCache, groupOrder, meshCache, pins],
-     typeof currentProject === "string" ? currentProject : "", shadowList],
+     typeof currentProject === "string" ? currentProject : "", shadowList,
+     // The open tab picks which rows are drawn.
+     typeof sessionGroupTab === "object" ? sessionGroupTab : null],
     unstamped,
   );
   // See the hold above: a press in flight keeps the rows it started on, and
@@ -3948,7 +4000,11 @@ async function refreshSessions(options) {
   // poll that changes any session's state -- which is most polls. The
   // position is held here and put back once the rows are in, the way the
   // transcript pane and the beads canvas hold theirs.
-  const keptScrollTop = rebuild && typeof list.scrollTop === "number"
+  // A tab switch is the one rebuild that starts at the top instead.
+  const tabSwitched = typeof sessionGroupTabScrollReset !== "undefined"
+    && sessionGroupTabScrollReset;
+  if (tabSwitched) sessionGroupTabScrollReset = false;
+  const keptScrollTop = rebuild && !tabSwitched && typeof list.scrollTop === "number"
     ? list.scrollTop : 0;
   // A redraw updates the rail in place (claunch-v87): a row whose own
   // signature (rowSignature below) is unchanged keeps its node -- with its
@@ -4018,7 +4074,7 @@ async function refreshSessions(options) {
   const entries = rebuild ? byLineage(railList, visibleSessions) : [];
   // Isolated web harnesses retain the old mesh-only variable. The fallback
   // keeps those consumers compatible while the page uses the ordered setting.
-  const rows = !rebuild ? [] : typeof sessionGroupRows !== "undefined"
+  const allRows = !rebuild ? [] : typeof sessionGroupRows !== "undefined"
     ? (groupOrder.length
       ? sessionGroupRows(entries, groupOrder, 0, null, shadowList)
       : [...sessionGroupRows(entries, groupOrder),
@@ -4047,6 +4103,15 @@ async function refreshSessions(options) {
              meshGroup: value === "(no mesh)" ? null : value })),
       ]);
     })() : entries.map(([session, depth]) => ({ type: "session", session, depth }));
+  // Grouped, the rail shows one group at a time: the tab strip names every
+  // group, and only the open tab's rows are drawn below it.
+  const tabbed = rebuild && groupOrder.length && typeof sessionGroupTabRows === "function"
+    ? sessionGroupTabRows(allRows, groupOrder[0]) : null;
+  const rows = tabbed ? tabbed.rows : allRows;
+  if (rebuild && typeof renderSessionGroupTabs === "function") {
+    renderSessionGroupTabs(groupOrder[0] || "", tabbed ? tabbed.tabs : [],
+                           tabbed ? tabbed.active : null);
+  }
   // The narrow embedded web harnesses model only a flat list.  Browsers
   // expose Document#createDocumentFragment, which lets the shipped rail use
   // group containers while those reduced consumers retain their old shape.
@@ -4095,7 +4160,6 @@ async function refreshSessions(options) {
         const keptCount = keptGroup._railGroupCount;
         keptCount._sessionCount = 0;
         keptCount.textContent = "0";
-        keptGroup._railPaintFold(isSessionGroupCollapsed(row.group, row.value));
         place(parent, keptGroup);
         placed.set(keptGroup._railGroupBody, 0);
         groupBodies.length = row.level;
@@ -4115,95 +4179,23 @@ async function refreshSessions(options) {
       heading.dataset.groupLevel = String(row.level);
       const label = row.group === "workspace"
         ? sessionWorkspaceLabel(row.value) : row.value;
-      // The fold marker, the name, then how many sessions are inside it. The
-      // count is what a shut group still has to say: a heading with nothing
-      // under it reads the same as one hiding thirty rows otherwise.
-      const caret = document.createElement("span");
-      caret.className = "session-group-caret";
+      // The name, then how many sessions are inside it. Only the ungrouped
+      // rail's per-daemon headings for other machines' sessions reach here
+      // (remoteRailRows); a grouped rail names its groups in the tab strip.
       const name = document.createElement("span");
       name.className = "session-group-name";
       name.textContent = `${row.group} · ${label}`;
       const count = document.createElement("span");
       count.className = "session-group-count";
       count.textContent = "0";
-      heading.append(caret, name, count);
-      heading.title = `${row.group} group ${row.value} — click to fold it shut`;
+      heading.append(name, count);
+      heading.title = `${row.group} group ${row.value}`;
       const body = document.createElement("ul");
       body.className = "session-group-body";
-      // Jump to the group's first session. Every grouping gets one: a
-      // heading pinned at the bottom of the stack names a group whose rows
-      // are an unknown distance further down, and this is how the reader
-      // gets to them without scrolling past the groups in between.
-      const jump = document.createElement("button");
-      jump.className = "session-group-jump";
-      jump.type = "button";
-      jump.textContent = "↓";
-      jump.title = `jump to the first session in ${row.group} ${row.value}`;
-      jump.addEventListener("click", (e) => {
-        e.stopPropagation();   // the heading itself folds; this does not
-        const first = body.querySelector("li[data-name], li.shadow-card");
-        if (!first) return;
-        // A shut group has nothing on screen to scroll to, so opening it is
-        // part of the jump rather than a second thing to ask of the reader.
-        if (group.classList.contains("collapsed")) {
-          setSessionGroupCollapsed(row.group, row.value, false);
-          paintFold(false);
-          syncSessionGroupStickyOffsets(list);
-        }
-        list.scrollTop += sessionGroupJumpOffset(list, heading, first);
-      });
-      heading.appendChild(jump);
-      if (row.group === "mesh") {
-        // Open the plain create form with this mesh already picked. It needs
-        // no leader and is refused only where there is no mesh to join.
-        const joinable = row.value && row.value !== "(no mesh)";
-        const add = document.createElement("button");
-        add.className = "session-group-new";
-        add.type = "button";
-        add.textContent = "⊕";
-        if (joinable) {
-          add.title = `create a new session in mesh ${row.value}` +
-                      " — the Create page with this mesh already picked";
-          add.addEventListener("click", (e) => {
-            e.stopPropagation();   // the heading itself folds; this does not
-            go(`#/new/${encodeURIComponent(row.value)}`);
-          });
-        } else {
-          // Refused the same way the + is: `aria-disabled` keeps the pointer
-          // events a `disabled` control drops, and the reason is the answer
-          // to "why is this one grey".
-          add.setAttribute("aria-disabled", "true");
-          add.classList.add("disabled");
-          add.title = "these sessions are in no mesh, so there is no room to create one in";
-          add.addEventListener("click", (e) => e.stopPropagation());
-        }
-        heading.appendChild(add);
-      }
-      const collapsed = isSessionGroupCollapsed(row.group, row.value);
-      const paintFold = (shut) => {
-        group.classList.toggle("collapsed", shut);
-        caret.textContent = shut ? "▸" : "▾";
-        if (typeof heading.setAttribute === "function") {
-          heading.setAttribute("aria-expanded", String(!shut));
-        }
-      };
-      paintFold(collapsed);
-      heading.addEventListener("click", () => {
-        const shut = !group.classList.contains("collapsed");
-        setSessionGroupCollapsed(row.group, row.value, shut);
-        paintFold(shut);
-        syncSessionGroupSearch(list);
-        // Folding changes how many headings are in the list's flow, so the
-        // stack that keeps them all named has to be measured again.
-        if (typeof syncSessionGroupStickyOffsets === "function") {
-          syncSessionGroupStickyOffsets(list);
-        }
-      });
       group.append(heading, body);
       group._railGroupKey = groupKey;
       group._railGroupBody = body;
       group._railGroupCount = count;
-      group._railPaintFold = paintFold;
       place(parent, group);
       if (inPlace) placed.set(body, 0);
       groupBodies.length = row.level;
@@ -4523,9 +4515,6 @@ async function refreshSessions(options) {
     }
   }
   if (rebuild && typeof syncShadowActive === "function") syncShadowActive();
-  if (rebuild && nestedGroupContainers && typeof syncSessionGroupStickyOffsets === "function") {
-    syncSessionGroupStickyOffsets(list);
-  }
   if (keyCardHeld && typeof restoreRailFocus === "function") {
     restoreRailFocus(keyCardHeld);
   }
@@ -4649,6 +4638,7 @@ async function refreshSessions(options) {
   // it -- so a poll that drops rows lands at the new bottom rather than
   // refusing to move, and a rail too short to scroll takes the 0 it had.
   if (rebuild && keptScrollTop) list.scrollTop = keptScrollTop;
+  else if (rebuild && tabSwitched) list.scrollTop = 0;
   // The grid keeps its own signature, so it follows every poll whether or
   // not the list above was rebuilt.
   if (typeof renderSessionGrid === "function") renderSessionGrid();
@@ -4915,10 +4905,11 @@ function applyCflowBadges() {
       });
       li.appendChild(line);
     }
-    line.dataset.wf = `${r.scope || "default"}|${r.cwd}`;
+    // dataset writes are not covered by quietdom.js, so this one compares.
+    const wf = `${r.scope || "default"}|${r.cwd}`;
+    if (line.dataset.wf !== wf) line.dataset.wf = wf;
     const gated = sessCflowGated(r);
     line.className = `sess-cflow${gated ? " gated" : ""}`;
-    line.textContent = "";
     const [markCls, markGlyph] = wfMark(r.status, r);
     const mark = document.createElement("span");
     mark.className = markCls;
@@ -4937,6 +4928,14 @@ function applyCflowBadges() {
       ? stepLine + (r.gate || r.prompt || "") +
         (r.options ? ` — options: ${r.options.join(", ")}` : "")
       : (r.title || r.step_id || "");
+    // Redrawn only when it reads differently: every poll repaints every badge
+    // (claunch-v87).
+    const holder = document.createElement("span");
+    if (typeof holder.append === "function" && typeof line.innerHTML === "string") {
+      holder.append(mark, txt);
+      if (line.innerHTML === holder.innerHTML) continue;
+    }
+    line.textContent = "";
     line.append(mark, txt);
   }
 }
@@ -5445,12 +5444,21 @@ function paintTermTimer() {
   box.className = `term-btn timer-chip ${line.state}`;
   if (hold) box.classList.toggle("timer-paused", !hold.on);
   box.title = termTimerTitle(read.pick, line, hold);
-  box.textContent = "";
-  box.append(
-    el("span", "tt-glyph",
-       hold ? TERM_TIMER_HOLD_GLYPH[hold.on ? "on" : "off"] : line.glyph),
-    el("span", "tt-text", line.text)
-  );
+  // The two spans are kept and only their text moves: this repaints every
+  // second, and rebuilding them each time was two mutations a second for
+  // anything watching the page (claunch-v87).
+  const glyph = hold ? TERM_TIMER_HOLD_GLYPH[hold.on ? "on" : "off"] : line.glyph;
+  let glyphBox = box.querySelector ? box.querySelector(".tt-glyph") : null;
+  let textBox = box.querySelector ? box.querySelector(".tt-text") : null;
+  if (!glyphBox || !textBox || box.children.length !== 2) {
+    box.textContent = "";
+    glyphBox = el("span", "tt-glyph", glyph);
+    textBox = el("span", "tt-text", line.text);
+    box.append(glyphBox, textBox);
+  } else {
+    glyphBox.textContent = glyph;
+    textBox.textContent = line.text;
+  }
   box.disabled = termTimerBusy;
   // Wired once: textContent above wipes the children, not the box, so a
   // listener added per repaint would stack.
@@ -6425,6 +6433,11 @@ function applyRailBeads() {
       continue;
     }
     const fresh = railBeadsLine(li.dataset.name, lane);
+    // Kept when it was drawn from the same issues: this runs after every
+    // rebuild and beads poll, and a swap per row each time was a mutation
+    // per row per poll (claunch-v87). The issues themselves are compared,
+    // not the markup, because the hover card shows fields the pill does not.
+    if (line && line._railSig === fresh._railSig) continue;
     if (line) line.replaceWith(fresh);
     else {
       // under the cwd line, above the gauge and the seen line, so the row's
@@ -6448,6 +6461,7 @@ function railBeadsLine(name, lane) {
   const all = (lane.issues || []).map((i) => ({ i, created: false }))
     .concat((lane.created || []).map((i) => ({ i, created: true })));
   const shown = all.slice(0, RAIL_BEADS_MAX);
+  line._railSig = JSON.stringify([name, next || null, all]);
   for (const { i, created } of shown) {
     const pill = el("a", `rail-bead ${i.status || ""}${created ? " created" : ""}`, i.id || "?");
     pill.href = "#/beads/" + encodeURIComponent(i.id || "");
@@ -6815,7 +6829,12 @@ function refreshRailSeen(list) {
     const old = typeof li.querySelector === "function"
       ? li.querySelector(".rail-seen") : null;
     if (!s || !old || typeof old.replaceWith !== "function") continue;
-    old.replaceWith(railSeenLine(s));
+    // Swapped only when it reads differently: the ages move by the minute,
+    // and a swap on every tick was a mutation per row per poll (claunch-v87).
+    const fresh = railSeenLine(s);
+    if (typeof old.outerHTML !== "string" || old.outerHTML !== fresh.outerHTML) {
+      old.replaceWith(fresh);
+    }
     // The dot's grade is read off the same moving stamps (plus moved_rows),
     // so it is re-shaded on the same tick.
     // The status dot is the row's first child (see the li.append in
@@ -7457,7 +7476,11 @@ function decorateBriefingRow(li, s) {
       checks = el("div", "rail-status-checks");
       li.appendChild(checks);
     }
-    checks.innerHTML = "";
+    // Drawn aside and swapped in only when the chips read differently: this
+    // runs on every poll for every row (refreshRailSeen), and redrawing the
+    // same chips each time was a mutation per row per poll (claunch-v87).
+    const live = checks;
+    checks = el("div", "rail-status-checks");
     for (const check of reported) {
       const answer = statusCheckText(check);
       const age = check.reported_at ? seenAgo(check.reported_at) : null;
@@ -7468,6 +7491,15 @@ function decorateBriefingRow(li, s) {
         : String(check.question || "");
       chip.ariaLabel = `${statusCheckName(check)}: ${answer}`;
       checks.appendChild(chip);
+    }
+    if (typeof live.outerHTML === "string" && live.outerHTML === checks.outerHTML) {
+      checks = live;
+    } else if (typeof live.replaceWith === "function") {
+      live.replaceWith(checks);
+    } else {
+      live.innerHTML = "";
+      for (const chip of [...checks.children]) live.appendChild(chip);
+      checks = live;
     }
     let statusRefresh = li.querySelector(".sess-status-check-rowref");
     if (!statusRefresh) {
@@ -7949,15 +7981,57 @@ async function refreshCflow() {
   renderFlowsTabs();   // the Orphans label carries a count off this answer
   if (flowsSection === "definitions") return;
   if (flowsSection === "orphans") { renderFlowsOrphans(runs); return; }
+  renderCflowRuns(runs);
+}
+
+// Independent of the rail's filter. Reuse its session categories, including
+// the pause marker on exited sessions, rather than the workflow's status.
+function cflowSessionCategory(run, sessions) {
+  const session = (sessions || []).find((s) => s.name === run.scope);
+  if (session) return sessionCategory(session);
+  return "unknown";
+}
+
+function filterCflowRuns(runs, sessions, filter, query) {
+  const needle = (query || "").trim().toLowerCase();
+  return (runs || []).filter((run) => {
+    const category = cflowSessionCategory(run, sessions);
+    const matches = filter === "all" || category === filter ||
+      (filter === "running-paused" && (category === "running" || category === "paused"));
+    return matches && (!needle || [run.workflow, run.scope, run.title, run.step_id, run.cwd]
+      .some((value) => String(value || "").toLowerCase().includes(needle)));
+  });
+}
+
+function renderCflowRuns(runs = cflowCache) {
+  const filter = $("flows-session-filter");
+  const search = $("flows-search");
+  if (filter && !filter.dataset.bound) {
+    filter.dataset.bound = "true";
+    filter.addEventListener("change", async () => {
+      // Archived records are fetched on demand by the shared session cache.
+      if (["archived", "all", "unknown"].includes(filter.value)) {
+        await refreshSessions({ state: "all" });
+      }
+      renderCflowRuns();
+    });
+    search.addEventListener("input", () => renderCflowRuns());
+  }
+  const visible = filterCflowRuns(runs, sessionsCache,
+    filter ? filter.value : "running-paused", search ? search.value : "");
+  const count = $("flows-result-count");
+  if (count) count.textContent = `${visible.length} of ${runs.length} runs`;
   const list = $("cflow-list");
   list.innerHTML = "";
-  if (runs.length === 0) {
+  if (visible.length === 0) {
     const li = document.createElement("li");
     li.className = "cflow-empty";
-    li.textContent = "no cflow runs — start one with /cflow in a session";
+    li.textContent = runs.length
+      ? "No runs match these filters. Change the session status or search text."
+      : "No workflow runs yet. Start one with /cflow in a session.";
     list.appendChild(li);
   }
-  for (const r of runs) list.appendChild(cflowCard(r));
+  for (const r of visible) list.appendChild(cflowCard(r));
   appendCflow2Cards(list);
 }
 
@@ -8015,7 +8089,10 @@ function cflowCard(r) {
   const mark = document.createElement("span");
   mark.className = markCls;
   mark.textContent = markGlyph;
-  const name = document.createElement("span");
+  const name = document.createElement("a");
+  name.className = "cflow-name";
+  name.href = "#/wf/" + encodeURIComponent(`${r.scope || "default"}|${r.cwd}`);
+  name.addEventListener("click", (e) => e.stopPropagation());
   // A run is keyed by (directory, session), so a team working one workflow
   // in one tree makes cards that differ ONLY by the session. That makes the
   // session part of the run's name here, not a decoration beside it — the
@@ -8025,7 +8102,7 @@ function cflowCard(r) {
     ? `${r.workflow || "(workflow)"} · ${r.scope}`
     : (r.workflow || "(workflow)");
   const st = document.createElement("span");
-  st.className = "meta";
+  st.className = `meta badge ${wfDotClass(r.status, r)}`;
   st.textContent =
     r.status === "waiting_approval" && r.reason === "loop_limit"
       ? "loop limit"
@@ -8079,8 +8156,9 @@ function cflowCard(r) {
   // exited session is still there to attach (it resumes).
   if (scoped) {
     const live = (r.sessions || []).includes(r.scope);
+    const category = cflowSessionCategory(r, sessionsCache);
     const sess = cflowLine(
-      `session: ${r.scope}${live ? "" : " (not running)"}`, "dim"
+      `session: ${r.scope} · ${category === "unknown" ? "no session record" : category}`, "dim"
     );
     sess.classList.add("linkish");
     sess.title = live
@@ -9130,11 +9208,12 @@ function followSessionProject(name) {
    directory the operator chose by hand. */
 function applyProjectDefaultCwd(form) {
   const f = form.form || form.closest && form.closest("form") || $("new-session");
-  const cwd = f && f.cwd;
-  if (!cwd) return;
   const picked = projectsCache.find((p) => p.name === form.value);
   const previous = projectsCache.find((p) => p.name === (form._lastProject || ""));
   form._lastProject = form.value;
+  applyProjectDefaultMesh(f, picked, previous);
+  const cwd = f && f.cwd;
+  if (!cwd) return;
   const untouched = !cwd.value || (previous && cwd.value === previous.default_cwd);
   if (!untouched) return;
   const target = picked && picked.default_cwd;
@@ -9145,6 +9224,28 @@ function applyProjectDefaultCwd(form) {
     // leaving the old project's directory in place would file the session
     // under one project and start it in another's checkout.
     if (previous && cwd.value === previous.default_cwd) cwd.value = "";
+  }
+}
+
+/* The Mesh row follows the picked project's default mesh by the directory's
+   rule: only over a row that is still empty or still holds the previous
+   project's default. A default of none (null) and no setting at all
+   (undefined) both leave an untouched row empty. A child spawn is left
+   alone: its empty answer means "inherit the parent's mesh". */
+function applyProjectDefaultMesh(f, picked, previous) {
+  const mesh = f && f.mesh;
+  if (!mesh) return;
+  if (typeof spawnParent === "function" && spawnParent()) return;
+  const before = (previous && previous.default_mesh) || "";
+  if (mesh.value && mesh.value !== before) return;
+  const target = (picked && picked.default_mesh) || "";
+  const next = target && [...mesh.options].some((o) => o.value === target)
+    ? target : "";
+  if (next === mesh.value) return;
+  mesh.value = next;
+  // The roles, handle and peer rows hang off the mesh's change handler.
+  if (typeof mesh.dispatchEvent === "function") {
+    mesh.dispatchEvent(new Event("change"));
   }
 }
 
@@ -9824,16 +9925,32 @@ function newSubroles(f) {
   return [...newSubroleTicks].filter((n) => n !== primary && rolesByName[n]).sort();
 }
 
-/* Prompt packs: the ones installed in the workspace the session will stand
-   in (Settings ▸ Install puts them there), one checkbox each. A pack the
-   chosen role or a ticked subrole requires is ticked and locked, with the
-   role named beside it; one that is required but not installed is shown the
-   same way and marked as claunch's copy, which is what the daemon puts in
-   (prompt_packs.required_pack). A summary line names every pack the opening
-   will carry and why, including a role inferred from the handle. */
+/* Prompt packs: one checkbox per pack, the workspace's installed ones first
+   (Settings ▸ Install puts them there), then every pack claunch ships that
+   the workspace has not installed, marked as claunch's copy -- which is what
+   the daemon puts in (prompt_packs.pack_copy). Any of them can be ticked,
+   whatever the role and with no mesh at all. A pack the chosen role or a
+   ticked subrole requires is ticked and locked, with the role named beside
+   it. A summary line names every pack the opening will carry and why,
+   including a role inferred from the handle. */
 let newPackOffer = null;       // /api/prompt-packs/offer's answer
 let newPackOfferFor = null;    // the directory it answers for
 let newPackTicks = new Map();  // pack id -> the operator's own tick
+// The daemon's own prompt (offer.daemon_prompt): one per daemon, so a tick
+// outlives a change of workspace. null = untouched = ticked.
+let newDaemonPromptTick = null;
+let newPackRolesOpen = false;  // the folded role packs are shown
+// Role packs shown while folded stay shown until the fold button is pressed
+// again: an untick does not pull its chip out from under the pointer.
+let newPackRolesShown = new Set();
+let newPackPreview = null;     // {id, daemon, doc, error}: the text being shown
+
+/* Whether the opening takes this daemon's prompt: only when it has one, and
+   then unless the operator unticked it. */
+function newDaemonPromptWanted() {
+  if (!(newPackOffer && newPackOffer.daemon_prompt)) return false;
+  return newDaemonPromptTick !== false;
+}
 
 async function refreshPromptPackOffer() {
   const cwd = newSessionCwd();
@@ -9850,7 +9967,7 @@ async function refreshPromptPackOffer() {
   const after = offer && (offer.workspace || {}).path;
   // Another workspace's packs are another list: ticks start from its
   // defaults again rather than carrying ids across.
-  if (before !== after) newPackTicks = new Map();
+  if (before !== after) { newPackTicks = new Map(); newPackRolesShown = new Set(); }
   newPackOffer = offer;
   renderPromptPackRow();
 }
@@ -9891,9 +10008,13 @@ function newRequiredPacks(f) {
   return out;
 }
 
+/* The operator's own tick, else the default -- which only ticks a pack the
+   workspace installed, so offering claunch's copies puts nothing new into a
+   session nobody touched the row for. */
 function newPackTicked(id) {
   if (newPackTicks.has(id)) return newPackTicks.get(id);
-  return ((newPackOffer && newPackOffer.default_packs) || []).includes(id);
+  const installed = ((newPackOffer && newPackOffer.packs) || []).some((p) => p.id === id);
+  return installed && ((newPackOffer && newPackOffer.default_packs) || []).includes(id);
 }
 
 function renderPromptPackRow() {
@@ -9905,58 +10026,144 @@ function renderPromptPackRow() {
   const required = newRequiredPacks(f);
   const packs = (offer && offer.packs) || [];
   const have = new Set(packs.map((p) => p.id));
-  // A required pack the workspace has not installed goes in as claunch's
-  // own copy (prompt_packs.required_pack); only one that is not shipped
+  // A pack the workspace has not installed goes in as claunch's own copy
+  // (prompt_packs.pack_copy); only a required one that is not shipped
   // either refuses the create.
-  const shipped = Object.fromEntries(((offer && offer.shipped) || []).map((p) => [p.id, p]));
-  const notHere = Object.keys(required).filter((id) => !have.has(id));
-  const fromPackage = notHere.filter((id) => shipped[id]);
-  const missing = notHere.filter((id) => !shipped[id]);
+  const fromPackage = ((offer && offer.shipped) || []).filter((p) => !have.has(p.id));
+  const shippedIds = new Set(fromPackage.map((p) => p.id));
+  const missing = Object.keys(required).filter((id) => !have.has(id) && !shippedIds.has(id));
   const wsName = offer && offer.workspace ? offer.workspace.name : "this directory's workspace";
-  row.classList.toggle("hidden", !packs.length && !notHere.length);
-  if (!packs.length && !notHere.length) return;
+  const own = offer && offer.daemon_prompt;
+  const empty = !own && !packs.length && !fromPackage.length && !missing.length;
+  row.classList.toggle("hidden", empty);
+  if (empty) return;
   row.appendChild(el("span", "new-check-label", "Prompt packs"));
-  const list = el("span", "new-check-list");
-  const addBox = (p, by, packaged) => {
-    const label = el("label", "check");
+  const body = el("div", "pack-groups");
+
+  /* One chip: the box (the form's state), the lock's slot, the title, where
+     its text comes from as a badge, and a button that shows the text. The
+     lock is an icon in a slot every chip has, so a role locking a chip does
+     not widen it; the roles that locked it are in its tooltip and, in full,
+     in the summary block below. */
+  const chip = (p, opts) => {
+    const wrap = el("span", "pack-chip" + (opts.checked ? " on" : "") +
+      (opts.locked ? " locked" : "") +
+      (newPackPreview && newPackPreview.id === p.id ? " previewing" : ""));
+    const label = el("label", "pack-chip-label");
     label.title = p.description || "";
     const box = document.createElement("input");
     box.type = "checkbox";
-    box.name = `prompt_pack_${p.id}`;
-    box.value = p.id;
-    box.checked = by ? true : newPackTicked(p.id);
-    box.disabled = !!by;
-    box.addEventListener("change", () => {
-      newPackTicks.set(p.id, box.checked);
+    box.className = "pack-chip-box";
+    box.name = opts.name;
+    if (opts.value) box.value = opts.value;
+    box.checked = !!opts.checked;
+    box.disabled = !!opts.locked;
+    box.addEventListener("change", () => opts.onChange(box.checked));
+    label.appendChild(box);
+    const lock = el("span", "pack-chip-lock", opts.locked ? "🔒" : "");
+    if (opts.locked) lock.title = `required by ${opts.locked.join(", ")}`;
+    label.appendChild(lock);
+    label.appendChild(el("span", "pack-chip-title", p.title || p.id));
+    const src = el("span", `pack-chip-badge src-${opts.source}`, opts.sourceLabel);
+    src.title = opts.sourceTitle;
+    label.appendChild(src);
+    wrap.appendChild(label);
+    const view = el("button", "pack-chip-view", "view");
+    view.type = "button";
+    view.title = `Show the text of ${p.title || p.id}`;
+    view.addEventListener("click", () => togglePackPreview(p.id, opts.daemon));
+    wrap.appendChild(view);
+    return wrap;
+  };
+  const packChip = (p, packaged) => {
+    const by = required[p.id];
+    return chip(p, {
+      name: `prompt_pack_${p.id}`, value: p.id,
+      checked: by ? true : newPackTicked(p.id), locked: by,
+      source: packaged ? "package" : "workspace",
+      sourceLabel: packaged ? "claunch" : "installed",
+      sourceTitle: packaged
+        ? `claunch's copy, not installed in ${wsName}`
+        : `installed in ${wsName}`,
+      onChange: (on) => { newPackTicks.set(p.id, on); renderPromptPackRow(); },
+    });
+  };
+  const group = (name, chips, more) => {
+    if (!chips.length && !more) return;
+    const g = el("div", "pack-group");
+    g.appendChild(el("span", "pack-group-name", name));
+    const list = el("span", "new-check-list pack-chips");
+    for (const c of chips) list.appendChild(c);
+    if (more) list.appendChild(more);
+    g.appendChild(list);
+    body.appendChild(g);
+  };
+
+  // General: this daemon's prompt first (the daemon puts it first), then
+  // every pack that is not a role's own.
+  const every = [...packs.map((p) => [p, false]), ...fromPackage.map((p) => [p, true])];
+  const isRole = (p) => p.id.startsWith("role-");
+  const general = [];
+  if (own) {
+    general.push(chip(own, {
+      name: "daemon_prompt", daemon: true,
+      checked: newDaemonPromptWanted(),
+      source: "daemon", sourceLabel: "daemon",
+      sourceTitle: "this daemon's own prompt, given to every session it starts",
+      onChange: (on) => { newDaemonPromptTick = on; renderPromptPackRow(); },
+    }));
+  }
+  for (const [p, packaged] of every) if (!isRole(p)) general.push(packChip(p, packaged));
+  group("General", general, null);
+
+  // Roles: the ones in play (required or ticked) are shown; the rest of the
+  // role packs fold behind one button so the row stays short. A chip once
+  // shown keeps its place until the button is pressed (newPackRolesShown),
+  // so ticking and unticking never moves the chips around it.
+  const roles = every.filter(([p]) => isRole(p));
+  const inPlay = ([p]) => !!required[p.id] || newPackTicked(p.id);
+  for (const r of roles) if (inPlay(r)) newPackRolesShown.add(r[0].id);
+  const shown = roles.filter((r) => newPackRolesOpen || newPackRolesShown.has(r[0].id));
+  const folded = roles.length - roles.filter((r) => newPackRolesShown.has(r[0].id)).length;
+  let more = null;
+  if (folded) {
+    more = el("button", "pack-chip-more", newPackRolesOpen ? "fewer" : `+${folded} more`);
+    more.type = "button";
+    more.addEventListener("click", () => {
+      newPackRolesOpen = !newPackRolesOpen;
+      newPackRolesShown = new Set();
       renderPromptPackRow();
     });
-    label.appendChild(box);
-    label.appendChild(el("span", null, p.title || p.id));
-    const why = [];
-    if (by) why.push(`required by ${by.join(", ")}`);
-    if (packaged) why.push(`claunch's copy, not installed in ${wsName}`);
-    if (why.length) label.appendChild(el("span", "wf-note", ` (${why.join(" · ")})`));
-    list.appendChild(label);
-  };
-  for (const p of packs) addBox(p, required[p.id], false);
-  for (const id of fromPackage) addBox(shipped[id], required[id], true);
-  row.appendChild(list);
-  // What the opening will actually carry, in the daemon's order (ticked,
-  // then required), each with why it is there -- the boxes alone do not say
-  // which role a locked one came from when the Role row was left blank.
-  const chosen = [...newPromptPacks(f), ...fromPackage].filter((id, i, a) => a.indexOf(id) === i);
+  }
+  group("Roles", shown.map(([p, packaged]) => packChip(p, packaged)), more);
+  row.appendChild(body);
+
+  // What the opening will actually carry, in the daemon's order (its own
+  // prompt, ticked, then required), each with why it is there -- the chips
+  // alone do not say which role a locked one came from when the Role row
+  // was left blank. Its own block right under the chips, above the text
+  // preview, so opening a preview never moves it.
+  const chosen = [...newPromptPacks(f), ...Object.keys(required).filter((id) => shippedIds.has(id))]
+    .filter((id, i, a) => a.indexOf(id) === i);
   const primary = newPrimaryRole(f);
   const parts = chosen.map((id) => {
     const why = required[id] ? `role ${required[id].join(", ")}` : "ticked";
-    return `${id} (${why}${fromPackage.includes(id) ? ", claunch's copy" : ""})`;
+    return `${id} (${why}${shippedIds.has(id) ? ", claunch's copy" : ""})`;
   });
-  let summary = parts.length
-    ? `The opening will include: ${parts.join(" · ")}.`
-    : "The opening will include no prompt pack.";
+  if (newDaemonPromptWanted()) parts.unshift("daemon prompt (this daemon's, every session)");
+  const summary = el("div", "new-packs-summary");
+  summary.appendChild(el("div", "new-packs-summary-head",
+    parts.length ? "The opening will include" : "The opening will include no prompt pack"));
+  const list = el("div", "new-packs-summary-list");
+  for (const part of parts) list.appendChild(el("span", "pack-chip-mini", part));
+  summary.appendChild(list);
   if (primary.inferred && primary.role) {
-    summary += ` Role ${primary.role} is inferred from the handle (no Role picked).`;
+    summary.appendChild(el("div", "wf-note new-packs-summary-note",
+      `Role ${primary.role} is inferred from the handle (no Role picked).`));
   }
-  row.appendChild(el("p", "wf-note new-packs-summary", summary));
+  row.appendChild(summary);
+
+  if (newPackPreview) row.appendChild(packPreviewPanel(newPackPreview, wsName));
   if (missing.length) {
     row.appendChild(el("p", "wf-error",
       missing.map((id) => `${id} is required by ${required[id].join(", ")}`).join("; ") +
@@ -9965,12 +10172,88 @@ function renderPromptPackRow() {
   }
 }
 
-/* The ids the form sends: ticked, installed. Required ones are added by the
-   daemon itself, so a locked box is sent too but needs no special case. */
+/* The text a chip's "view" shows, fetched the way the opening will get it:
+   the workspace's copy (edits and all) or claunch's, through
+   /api/prompt-packs/text for this form's directory; the daemon's own prompt
+   through /api/daemon-prompt. A second click on the same chip closes it. */
+async function togglePackPreview(id, daemon) {
+  if (newPackPreview && newPackPreview.id === id) {
+    newPackPreview = null;
+    renderPromptPackRow();
+    return;
+  }
+  const want = { id, daemon: !!daemon, doc: null, error: "" };
+  newPackPreview = want;
+  renderPromptPackRow();
+  try {
+    const url = daemon
+      ? "/api/daemon-prompt"
+      : `/api/prompt-packs/text?id=${encodeURIComponent(id)}` +
+        `&cwd=${encodeURIComponent(newSessionCwd())}`;
+    const resp = await api(url);
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    const text = daemon ? String(data.text || "") : "";
+    want.doc = daemon
+      ? { title: `Daemon prompt (${data.instance})`, body: text, source: "daemon",
+          lines: text ? text.split("\n").length : 0 }
+      : data;
+  } catch (err) {
+    want.error = String((err && err.message) || err);
+  }
+  if (newPackPreview === want) renderPromptPackRow();
+}
+
+/* Where a previewed text comes from, in the words the chips' badges use. */
+function packPreviewOrigin(doc, wsName) {
+  if (doc.source === "daemon") return "this daemon's prompt, every session";
+  if (doc.source === "package") return `claunch's copy, not installed in ${wsName}`;
+  return {
+    current: `installed in ${wsName}`,
+    stale: `installed in ${wsName}, older than claunch's`,
+    edited: `edited in ${wsName}`,
+    local: `${wsName}'s own pack`,
+  }[doc.status] || `installed in ${wsName}`;
+}
+
+/* The panel under the chips: title, origin, length, then the text itself. */
+function packPreviewPanel(view, wsName) {
+  const panel = el("div", "pack-preview");
+  const head = el("div", "pack-preview-head");
+  const doc = view.doc;
+  head.appendChild(el("b", null, doc ? (doc.title || view.id) : view.id));
+  if (doc) {
+    head.appendChild(el("span", "wf-note",
+      `${packPreviewOrigin(doc, wsName)} · ${doc.lines} line${doc.lines === 1 ? "" : "s"}`));
+  }
+  const close = el("button", "pack-chip-view", "close");
+  close.type = "button";
+  close.addEventListener("click", () => { newPackPreview = null; renderPromptPackRow(); });
+  head.appendChild(close);
+  panel.appendChild(head);
+  if (view.error) {
+    panel.appendChild(el("p", "wf-error", view.error));
+  } else if (!doc) {
+    panel.appendChild(el("p", "wf-note", "Reading…"));
+  } else {
+    mdInto(panel.appendChild(el("div", "pack-preview-body md")), doc.body || "");
+  }
+  return panel;
+}
+
+/* The ids the form sends: the ticked ones, installed or claunch's copy.
+   Required ones are added by the daemon itself: an installed locked box is
+   sent too and needs no special case, an uninstalled one is left to it. */
 function newPromptPacks(f) {
-  const packs = (newPackOffer && newPackOffer.packs) || [];
+  const installed = ((newPackOffer && newPackOffer.packs) || []).map((p) => p.id);
+  const have = new Set(installed);
+  const others = ((newPackOffer && newPackOffer.shipped) || [])
+    .map((p) => p.id).filter((id) => !have.has(id));
   const required = newRequiredPacks(f);
-  return packs.map((p) => p.id).filter((id) => required[id] || newPackTicked(id));
+  return [
+    ...installed.filter((id) => required[id] || newPackTicked(id)),
+    ...others.filter((id) => !required[id] && newPackTicked(id)),
+  ];
 }
 
 /* The resume picker: claude's own interactive picker, or the conversation of
@@ -9979,6 +10262,35 @@ function newPromptPacks(f) {
    Fed by the session poll, so it is rebuilt only when the offered
    conversations actually differ (see resumeRendered) and the current choice
    is preserved by hand across that rebuild. */
+/* A select's options brought to `items` ([label, value] pairs) in place.
+   The session pickers' signatures carry each session's status, so they move
+   on most polls; emptying and refilling a few hundred options each time was
+   a mutation per option per poll (claunch-v87). An option whose value is
+   still offered keeps its node and only has its label rewritten; options
+   are added and dropped where the list grew or shrank. */
+function syncSelectOptions(select, items) {
+  if (typeof select.insertBefore !== "function" || !select.options) {
+    select.innerHTML = "";
+    for (const [label, value] of items) select.appendChild(new Option(label, value));
+    return;
+  }
+  const byValue = new Map();
+  for (const o of [...select.options]) if (!byValue.has(o.value)) byValue.set(o.value, o);
+  const wanted = items.map(([label, value]) => {
+    const o = byValue.get(value);
+    if (!o) return new Option(label, value);
+    byValue.delete(value);
+    if (o.text !== label) o.text = label;
+    return o;
+  });
+  for (const o of byValue.values()) o.remove();
+  let cursor = select.firstElementChild;
+  for (const o of wanted) {
+    if (o === cursor) { cursor = cursor.nextElementSibling; continue; }
+    select.insertBefore(o, cursor);
+  }
+}
+
 function refreshResumeChoices() {
   const select = document.querySelector("#new-session select[name=resume]");
   // Name and status ARE the option — its value and its label — so they are
@@ -9992,11 +10304,15 @@ function refreshResumeChoices() {
   resumeRendered = signature;
 
   const previous = select.value;
-  select.innerHTML = "";
-  select.appendChild(new Option("(new conversation)", ""));
-  select.appendChild(new Option("pick in claude's picker (--resume)", PICKER));
-  for (const [name, status] of offered) {
-    select.appendChild(new Option(`${name} — ${status}`, name));
+  const items = [
+    ["(new conversation)", ""],
+    ["pick in claude's picker (--resume)", PICKER],
+    ...offered.map(([name, status]) => [`${name} — ${status}`, name]),
+  ];
+  if (typeof syncSelectOptions === "function") syncSelectOptions(select, items);
+  else {
+    select.innerHTML = "";
+    for (const [label, value] of items) select.appendChild(new Option(label, value));
   }
   // A session that vanished (cleared, renamed) takes its option with it;
   // falling back to "(new conversation)" beats silently resuming a stranger.
@@ -10704,10 +11020,14 @@ function refreshParentChoices() {
   parentsRendered = signature;
 
   const previous = select.value;
-  select.innerHTML = "";
-  select.appendChild(new Option("(none — a session of its own)", ""));
-  for (const [name, status] of offered) {
-    select.appendChild(new Option(`${name} — ${status}`, name));
+  const items = [
+    ["(none — a session of its own)", ""],
+    ...offered.map(([name, status]) => [`${name} — ${status}`, name]),
+  ];
+  if (typeof syncSelectOptions === "function") syncSelectOptions(select, items);
+  else {
+    select.innerHTML = "";
+    for (const [label, value] of items) select.appendChild(new Option(label, value));
   }
   select.value = [...select.options].some((o) => o.value === previous)
     ? previous
@@ -11275,6 +11595,10 @@ $("new-session").addEventListener("submit", async (e) => {
   // Sent even when empty once an offer was read: an empty list is "none of
   // the defaults", and the daemon still adds what the roles require.
   if (newPackOffer) body.prompt_packs = newPromptPacks(f);
+  // Sent only to say no: the daemon gives its prompt unless told otherwise.
+  if (newPackOffer && newPackOffer.daemon_prompt && !newDaemonPromptWanted()) {
+    body.daemon_prompt = false;
+  }
   if (!parent && f.borrow.value) body.borrow = f.borrow.value;
   if (!parent && f.null_token.checked) body.null_token = true;
   // Onboarding: only sent when chosen. The daemon checks each before it
@@ -11787,23 +12111,26 @@ if (projectSelect) {
     formProject.addEventListener("change", () => applyProjectDefaultCwd(formProject));
   }
 }
-const meshGroupToggle = $("session-group-mesh");
-if (meshGroupToggle) {
-  meshGroupToggle.checked = sessionGroupByMesh;
-  meshGroupToggle.addEventListener("change", () =>
-    setSessionGroupByMesh(meshGroupToggle.checked));
-}
+// Off, Mesh or Workspace: the grouping whose groups become the tabs.
+document.querySelectorAll('input[name="session-group-mode"]').forEach((input) =>
+  input.addEventListener("change", () => {
+    if (!input.checked) return;
+    if (input.value) setSessionGroup(input.value, true);
+    else if (sessionGroupOrder.length) setSessionGroup(sessionGroupOrder[0], false);
+  }));
+syncSessionGroupMode();
+// The open group's header row: pressing it takes the list to its top.
+$("session-group-header")?.addEventListener("click", scrollSessionListTop);
+$("session-group-header")?.addEventListener("keydown", (ev) => {
+  if (ev.target !== ev.currentTarget || (ev.key !== "Enter" && ev.key !== " ")) return;
+  ev.preventDefault();
+  scrollSessionListTop();
+});
 document.querySelectorAll('input[name="session-view"]').forEach((input) =>
   input.addEventListener("change", () => {
     if (input.checked) setSessionView(input.value);
   }));
 syncSessionView();
-const workspaceGroupToggle = $("session-group-workspace");
-if (workspaceGroupToggle) {
-  workspaceGroupToggle.checked = sessionGroupByWorkspace;
-  workspaceGroupToggle.addEventListener("change", () =>
-    setSessionGroup("workspace", workspaceGroupToggle.checked));
-}
 
 /* The rail polls, but a poll is a tick behind at best: a session spawned from
    somewhere else — another agent's `spawn`, a `claunch new` in a terminal, a
@@ -12469,6 +12796,7 @@ function handleFrame(msg) {
     renderSizeChip();
     setStatusBadge(msg.status);
     refreshTermInput();
+    if (currentName && typeof loadLineSync === "function") loadLineSync(currentName, true);
     flushInput(same);
     // Adopt the viewer's size once attached.
     refitSoon(50);
@@ -12547,6 +12875,8 @@ function handleFrame(msg) {
     }
   } else if (msg.type === "notice") {
     showTermNotice(msg);
+  } else if (msg.type === "line_sync") {
+    applyLineSync(msg);
   } else if (msg.type === "exit") {
     // Not a broken link: the program finished under this socket. The notice
     // belongs here rather than in endSession(), because this is the case
@@ -12677,9 +13007,9 @@ async function sendKeyLine(field, btn, note) {
       // Nothing was typed: the session has ended, and the daemon holds the
       // line until it is resumed. Said on the spot, because the box empties
       // exactly as it does for a line that landed.
-      field.value = "";
+      if (typeof clearSentLine === "function") clearSentLine(field, draftText);
+      else { field.value = ""; autogrowTermInput(field); }
       globalThis.GlossaryComposer?.reset();
-      autogrowTermInput(field);
       termInputNote(note,
         `queued (${doc.position || 1} waiting) — typed when this session ` +
         "is resumed; withdraw it from the session input journal");
@@ -12690,9 +13020,9 @@ async function sendKeyLine(field, btn, note) {
       return true;
     }
     if (resp.ok) {
-      field.value = "";
+      if (typeof clearSentLine === "function") clearSentLine(field, draftText);
+      else { field.value = ""; autogrowTermInput(field); }
       globalThis.GlossaryComposer?.reset();
-      autogrowTermInput(field);
       if (doc.score_goal) {
         const session = sessionsCache.find((s) => s.name === currentName);
         if (session) {
@@ -12903,6 +13233,7 @@ function insertPromptPreset(text, fieldId = "term-input-field") {
   if (field.setSelectionRange) field.setSelectionRange(cursor, cursor);
   field.focus();
   if (typeof autogrowTermInput === "function") autogrowTermInput(field);
+  if (fieldId === "term-input-field" && typeof pushLineSync === "function") pushLineSync();
   return true;
 }
 
@@ -13317,6 +13648,201 @@ function insertTermInputText(field, text) {
   const caret = start + text.length;
   if (field.setSelectionRange) field.setSelectionRange(caret, caret);
   autogrowTermInput(field);
+  if (field.id === "term-input-field" && typeof pushLineSync === "function") pushLineSync();
+}
+
+/* ---- session line sync -------------------------------------------------
+   The line above is this browser's own by default ("local-only"): nothing
+   of it leaves the page until Enter. A session can be switched to
+   remote-sync instead (daemon/line_sync.py) -- a property of the SESSION,
+   so every page showing it follows the switch -- and then this field is the
+   one line every browser on the session shares: each edit goes out on the
+   terminal socket as a `line_sync` frame and comes back to every page,
+   and the daemon keeps the text in memory until it restarts, so a window
+   closed and opened again finds it where it was left.
+
+   What this page had typed locally when sync came on is not thrown away and
+   not shared: it moves to #term-local-keep, read-only, to copy from, and
+   comes back into the field when sync is switched off.
+
+   Ordering: frames arrive in the daemon's write order, so applying each in
+   turn leaves the field equal to the daemon's text. Two exceptions keep
+   typing smooth: the echo of an older write of this page's own (a later one
+   is still on its way, and applying the old one would take back the keys
+   typed since), and anything arriving while an IME is composing (setting
+   the value mid-syllable breaks the composition; the composed text is
+   pushed when it ends, and last writer wins). */
+const LINE_SYNC_CLIENT = "page-" + Date.now().toString(36) + "-" +
+  Math.random().toString(36).slice(2, 10);
+let lineSync = { session: null, mode: "local", rev: 0, lastPushed: null };
+let lineSyncComposing = false;
+
+function lineSyncShared() {
+  return !!currentName && lineSync.session === currentName &&
+    lineSync.mode === "remote";
+}
+
+/* A session was attached: its line starts local until the daemon says
+   otherwise, and nothing kept for the previous session carries over. */
+function resetLineSync(name) {
+  lineSync = { session: name || null, mode: "local", rev: 0, lastPushed: null };
+  lineSyncComposing = false;
+  const keep = $("term-local-keep");
+  if (keep) keep.value = "";
+  renderLineSync();
+  if (name) loadLineSync(name, true);
+}
+
+/* Read the state over HTTP: on attach (a parked terminal's socket is not
+   re-opened, so no frame says what changed while it was parked) and on
+   every socket `init` (a daemon restart forgets the state, and the socket
+   then says nothing about it). `force` takes the answer whatever its rev,
+   since a restarted daemon counts from zero again. */
+async function loadLineSync(name, force = false) {
+  try {
+    const resp = await api(`/api/sessions/${encodeURIComponent(name)}/line-sync`);
+    if (!resp.ok) return;
+    const doc = await resp.json();
+    if (name === currentName) applyLineSync(doc, force);
+  } catch { /* the socket's frames still carry it */ }
+}
+
+/* Set the field to `text`, keeping the caret where it was relative to the
+   text around it: past the common prefix it moves by the length change. */
+function setLineText(field, text) {
+  if (!field || field.value === text) return;
+  const old = field.value;
+  const focused = document.activeElement === field;
+  let caret = Number.isInteger(field.selectionStart) ? field.selectionStart : old.length;
+  let prefix = 0;
+  while (prefix < old.length && prefix < text.length && old[prefix] === text[prefix]) prefix++;
+  if (caret > prefix) caret = Math.max(prefix, caret + text.length - old.length);
+  field.value = text;
+  caret = Math.min(caret, text.length);
+  if (focused && field.setSelectionRange) field.setSelectionRange(caret, caret);
+  autogrowTermInput(field);
+}
+
+function applyLineSync(msg, force = false) {
+  if (!msg || !currentName) return;
+  if (lineSync.session !== currentName) {
+    lineSync = { session: currentName, mode: "local", rev: 0, lastPushed: null };
+  }
+  const rev = Number(msg.rev) || 0;
+  if (!force && rev < lineSync.rev) return; // an answer older than a frame already applied
+  const field = $("term-input-field");
+  const keep = $("term-local-keep");
+  const wasShared = lineSync.mode === "remote";
+  const nowShared = msg.mode === "remote";
+  const text = typeof msg.text === "string" ? msg.text : "";
+  lineSync.rev = rev;
+  lineSync.mode = nowShared ? "remote" : "local";
+  if (field) {
+    if (nowShared && !wasShared) {
+      if (keep) keep.value = field.value;
+      field.value = "";
+      setLineText(field, text);
+      lineSync.lastPushed = null;
+    } else if (!nowShared && wasShared) {
+      field.value = keep ? keep.value : "";
+      autogrowTermInput(field);
+      if (keep) keep.value = "";
+      lineSync.lastPushed = null;
+    } else if (nowShared) {
+      const ownStale = msg.client === LINE_SYNC_CLIENT &&
+        lineSync.lastPushed !== null && text !== lineSync.lastPushed;
+      if (!ownStale && !lineSyncComposing) setLineText(field, text);
+    }
+  }
+  renderLineSync();
+}
+
+function renderLineSync() {
+  const shared = lineSyncShared();
+  const btn = $("term-sync-toggle");
+  if (btn) {
+    btn.textContent = shared ? "Sync on" : "Sync off";
+    btn.setAttribute("aria-pressed", shared ? "true" : "false");
+    btn.disabled = !(currentName || lineSync.session);
+    btn.title = shared
+      ? "remote-sync: every browser on this session types into this one line, " +
+        "kept by the daemon until it restarts. Click to return everyone to local-only"
+      : "local-only: this line stays in this browser. Click to share it with " +
+        "every browser on this session";
+  }
+  const field = $("term-input-field");
+  if (field && field.classList) {
+    field.classList.toggle("line-shared", shared);
+    field.placeholder = shared
+      ? "shared with every browser on this session — Enter to send, Ctrl+J for a newline"
+      : "type for this session — Enter to send, Ctrl+J for a newline";
+  }
+  const keep = $("term-local-keep");
+  if (keep && keep.classList) {
+    keep.classList.toggle("hidden", !(shared && keep.value));
+    if (shared && keep.value) autogrowTermInput(keep);
+  }
+}
+
+/* Send the field's text (or `extra.text`) as the shared line. The terminal
+   socket when it is open -- one frame per edit, no request round trip --
+   and the HTTP door when it is not. */
+function pushLineSync(extra = {}) {
+  if (!lineSyncShared()) return;
+  const field = $("term-input-field");
+  if (!field) return;
+  const msg = { type: "line_sync", text: field.value, client: LINE_SYNC_CLIENT, ...extra };
+  lineSync.lastPushed = msg.text;
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(msg));
+    return;
+  }
+  const name = currentName;
+  const body = { text: msg.text, client: LINE_SYNC_CLIENT };
+  if (typeof msg.if_text === "string") body.if_text = msg.if_text;
+  api(`/api/sessions/${encodeURIComponent(name)}/line-sync`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }).then((resp) => resp.json()).then((doc) => {
+    if (name === currentName && doc && doc.type === "line_sync") applyLineSync(doc);
+  }).catch(() => { /* the next edit tries again */ });
+}
+
+/* The line was sent. A local line just empties. A shared one empties only
+   if it still holds what was sent -- another browser may have started the
+   next line while the send was in flight -- and the daemon applies the same
+   condition (`if_text`), so nobody's new line is wiped by an old send. */
+function clearSentLine(field, sent) {
+  if (field && field.id === "term-input-field" && lineSyncShared()) {
+    if (field.value === sent) field.value = "";
+    autogrowTermInput(field);
+    pushLineSync({ text: "", if_text: sent });
+    return;
+  }
+  field.value = "";
+  autogrowTermInput(field);
+}
+
+async function toggleLineSync() {
+  if (!currentName) return;
+  const name = currentName;
+  const mode = lineSyncShared() ? "local" : "remote";
+  try {
+    const resp = await api(`/api/sessions/${encodeURIComponent(name)}/line-sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode, client: LINE_SYNC_CLIENT }),
+    });
+    const doc = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      termInputNote($("term-input-note"), doc.error || "the sync mode was not changed", true);
+      return;
+    }
+    if (name === currentName) applyLineSync(doc);
+  } catch {
+    termInputNote($("term-input-note"), "the sync mode was not changed — the daemon is unreachable", true);
+  }
 }
 
 /* ---- images for the session: Alt+V, a pasted file, the file picker ----
@@ -13607,9 +14133,22 @@ if ($("term-input-field")) {
   // listener that only sees the event on its way back up.
   window.addEventListener("keydown", onWindowCtrlJ, true);
   $("term-input-field").addEventListener("paste", onTermInputPaste);
-  $("term-input-field").addEventListener("input", (ev) =>
-    autogrowTermInput(ev.currentTarget || ev.target));
+  $("term-input-field").addEventListener("input", (ev) => {
+    autogrowTermInput(ev.currentTarget || ev.target);
+    pushLineSync();
+  });
+  // An IME's syllable is held back from incoming shared edits while it is
+  // composed, and pushed whole when it commits (see "session line sync").
+  $("term-input-field").addEventListener("compositionstart", () => {
+    lineSyncComposing = true;
+  });
+  $("term-input-field").addEventListener("compositionend", () => {
+    lineSyncComposing = false;
+    pushLineSync();
+  });
 }
+if ($("term-sync-toggle"))
+  $("term-sync-toggle").addEventListener("click", toggleLineSync);
 // Capture phase: ahead of xterm's own paste listener on its textarea.
 if ($("terminal"))
   $("terminal").addEventListener("paste", onTerminalPaste, true);
@@ -15425,6 +15964,7 @@ function attach(name) {
     termInputField.value = "";
     if (typeof autogrowTermInput === "function") autogrowTermInput(termInputField);
   }
+  if (typeof resetLineSync === "function") resetLineSync(name);
   if (typeof refreshPromptPresets === "function") refreshPromptPresets();
   if (typeof refreshPrompterPrompts === "function") refreshPrompterPrompts();
   // The common hop: this session has been up before, so bring its parked
@@ -15481,13 +16021,6 @@ function refitSoon(delay = 150) {
 window.addEventListener("resize", () => {
   refitSoon();
   if (currentPage === "cli") cliRefit(150);
-  // The heading stack is budgeted against the rail's own height, so a window
-  // that got shorter can put the rail back on per-group headings, and a
-  // taller one can take the stack back.
-  const railList = $("session-list");
-  if (railList && typeof syncSessionGroupStickyOffsets === "function") {
-    syncSessionGroupStickyOffsets(railList);
-  }
 });
 
 /* Another viewer (e.g. `claunch attach`) may have resized the session while
@@ -16091,8 +16624,9 @@ function syncSplitPane() {
    The header's `details` is the same switch and gets the same treatment —
    pressed only while the open panel is describing the terminal under it,
    which is exactly when pressing it again would close rather than repoint.
-   Both names null (no terminal, no panel) is not a match. In that state the
-   panel has handed this button its × (see sessHead), so it says so. */
+   Both names null (no terminal, no panel) is not a match. While it matches,
+   the panel's own × (see sessHead) and this button both close it, so it
+   says so. */
 function markDetailRow() {
   document.querySelectorAll("#session-list .sess-info").forEach((b) =>
     b.classList.toggle("on", b.dataset.name === sessName)
@@ -16139,33 +16673,31 @@ function applyGotoFlash() {
   );
 }
 
-/* The list view's half of the press: `name`'s row, with every folded group
-   around it opened first. A row inside a shut group is display:none, and
-   scrollIntoView on it moves nothing -- the press would answer "found" with
-   nothing on screen. The fold is opened for good, as the group jump does:
-   the state lives in sessionGroupCollapsed, so the next rebuild keeps it. */
+/* The list view's half of the press: `name`'s row, with the tab that holds
+   it opened first. Grouped, the rail draws only the open tab's rows, so a
+   session filed under another group has no row to scroll to until its tab
+   is open. The tab stays open, as a press on it would leave it. */
 function revealSessionListRow(name) {
   const list = $("session-list");
   if (!list) return null;
-  let row = null;
-  list.querySelectorAll("li[data-name]").forEach((li) => {
-    if (li.dataset.name === name) row = li;
-  });
-  if (!row) return null;
-  let opened = false;
-  for (let el = row.parentElement; el && el !== list; el = el.parentElement) {
-    if (el.classList.contains("session-group") && el.classList.contains("collapsed")) {
-      setSessionGroupCollapsed(el.dataset.group, el.dataset.value, false);
-      opened = true;
-    }
-  }
-  if (opened) {
-    // Repaints every group from the fold state, and re-measures the sticky
-    // stack, whose height changed with the headings now back in the flow.
-    syncSessionGroupSearch(list);
-    syncSessionGroupStickyOffsets(list);
-  }
-  return row;
+  const find = () => {
+    let row = null;
+    list.querySelectorAll("li[data-name]").forEach((li) => {
+      if (li.dataset.name === name) row = li;
+    });
+    return row;
+  };
+  let row = find();
+  if (row) return row;
+  const bar = $("session-group-tabs");
+  const tab = bar && [...bar.querySelectorAll(".session-group-tab")].find((el) =>
+    (el._groupRows || []).some((r) => r.type === "session" && r.session.name === name));
+  if (!tab) return null;
+  setSessionGroupTab(tab.dataset.group, tab.dataset.value);
+  // From the records in hand: no request, so the rows are drawn before this
+  // returns.
+  refreshSessions({ cached: true });
+  return find();
 }
 
 /* The grid view's half: `name`'s cell. A cell inside a folded stretch is not
@@ -16384,11 +16916,13 @@ const VIEWS = {
   home: "home-view",
   observer: "observer-view",
   operator: "operator-view",
+  chat: "chat-view",
   new: "new-view",
   meshes: "meshes-view",
   flows: "flows-view",
   window: "window-view",
   stats: "stats-view",
+  "profile-usage": "profile-usage-view",
   cli: "cli-view",
   beads: "beads-view",
   worktrees: "worktrees-view",
@@ -16978,6 +17512,7 @@ function parseHash(h) {
     return { page: "new", mesh: parts[1] ? decodeURIComponent(parts[1]) : "" };
   }
   if (parts[0] === "operator") return { page: "operator" };
+  if (parts[0] === "chat") return { page: "chat", name: parts[1] || "" };
   if (parts[0] === "observer") return {
     page: "observer",
     scope: ["session", "mesh"].includes(parts[1]) ? parts[1] : "global",
@@ -16989,6 +17524,7 @@ function parseHash(h) {
       ? parts[1] : "" };
   }
   if (parts[0] === "window") return { page: "window" };
+  if (parts[0] === "profile-usage") return { page: "profile-usage" };
   // #/stats opens on a default session; #/stats/<name> names one.
   if (parts[0] === "stats") return { page: "stats", name: parts[1] || "" };
   // #/compare/<a,b,c>: the same page comparing sessions (names hold no comma).
@@ -17057,6 +17593,7 @@ function route() {
   // open function never has to know which other pages exist.
   if (r.page !== "observer") globalThis.ObserverPage?.stop();
   if (r.page !== "operator") globalThis.OperatorPanel?.stop();
+  if (r.page !== "chat") globalThis.ChatPanel?.stop();
   if (r.page !== "wf") stopWfPoll();
   if (r.page !== "msg") stopMsgPoll();
   if (r.page !== "mesh") stopMeshPoll();
@@ -17064,6 +17601,7 @@ function route() {
   if (r.page !== "settings") closeWorkspaces();
   if (r.page !== "window") stopWindowPoll();
   if (r.page !== "stats") stopStatsPoll();
+  if (r.page !== "profile-usage") globalThis.ProfileUsagePage?.stop();
   if (r.page !== "beads") { stopBeadsPoll(); stopReportsPoll(); }
   if (r.page !== "worktrees") globalThis.WorktreesPage?.stop();
   if (r.page !== "glossary") globalThis.GlossaryPage?.stop();
@@ -17094,6 +17632,7 @@ function route() {
     case "shadow": openShadow(r.machine, r.name); break;
     case "observer": showView("observer"); globalThis.ObserverPage.open(r.scope, r.name); break;
     case "operator": showView("operator"); globalThis.OperatorPanel.open(); break;
+    case "chat": showView("chat"); globalThis.ChatPanel.open(r.name); break;
     case "wf": openWorkflow(r.cwd, r.scope); break;
     case "log": openTranscript(r.name, r.machine); break;
     case "msg": openTrace(r.name, r.mesh); break;
@@ -17105,6 +17644,7 @@ function route() {
     case "flows": openFlows(r.section); break;
     case "window": openWindowPage(); break;
     case "stats": openStatsPage(r.name, r.compare); break;
+    case "profile-usage": showView("profile-usage"); globalThis.ProfileUsagePage.open(); break;
     case "cli": openCli(); break;
     case "settings": openSettings(r.section); break;
     case "beads": openBeads(r.id, r.section); break;
@@ -18490,6 +19030,7 @@ function openSettings(section) {
   if (wsSection === "install") {
     refreshInstallOverview();
     refreshPromptPacks();
+    refreshDaemonPrompt();
     return;
   }
   if (wsSection === "vscode") {
@@ -23264,6 +23805,101 @@ async function refreshPromptPacks() {
   if (wsOpen) renderWorkspaces();
 }
 
+/* The daemon prompt (Settings ▸ Install): one text THIS daemon gives every
+   session it starts, whatever the role, as the first prompt pack of the
+   opening. It lives in this daemon's own state directory, so another daemon
+   on the machine neither shows nor uses it. Agents can read and replace it
+   too (MCP tool daemon_prompt); every save keeps the text it replaced. */
+let daemonPromptDoc = null;
+let daemonPromptError = "";
+let daemonPromptBusy = false;
+let daemonPromptDraft = null;   // the textarea's text while it differs
+
+async function refreshDaemonPrompt() {
+  try {
+    const resp = await api("/api/daemon-prompt");
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    daemonPromptDoc = data;
+    daemonPromptError = "";
+  } catch (err) { daemonPromptError = String(err); }
+  if (wsOpen) renderWorkspaces();
+}
+
+async function saveDaemonPrompt(text) {
+  daemonPromptBusy = true;
+  if (wsOpen) renderWorkspaces();
+  try {
+    const resp = await api("/api/daemon-prompt", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, by: "web" }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    daemonPromptDoc = data;
+    daemonPromptDraft = null;
+    daemonPromptError = "";
+  } catch (err) {
+    daemonPromptError = String(err);
+  } finally {
+    daemonPromptBusy = false;
+    newPackOfferFor = null;   // the create form's offer carries it
+    if (wsOpen) renderWorkspaces();
+  }
+}
+
+function daemonPromptCard() {
+  const card = el("section", "ws-add daemon-prompt");
+  card.appendChild(el("h3", null, "Daemon prompt"));
+  card.appendChild(el("p", "wf-note",
+    "One prompt this daemon gives every session it starts, whatever the " +
+    "role: the create form shows it as the first prompt pack, ticked (it " +
+    "can be unticked per session). It is this daemon's configuration, kept " +
+    "in its own state directory; other daemons on this machine have their " +
+    "own. Empty means none. Agents can read and replace it with the MCP " +
+    "tool daemon_prompt; each save keeps the text it replaced. A change " +
+    "reaches sessions created after it."));
+  if (daemonPromptError) card.appendChild(el("p", "wf-error", daemonPromptError));
+  const doc = daemonPromptDoc;
+  if (!doc) {
+    card.appendChild(el("p", "wf-note", "Reading the daemon prompt…"));
+    return card;
+  }
+  const where = el("p", "wf-note");
+  where.appendChild(document.createTextNode(`Daemon ${doc.instance} · `));
+  where.appendChild(el("code", null, doc.path));
+  where.appendChild(document.createTextNode(doc.enabled
+    ? ` · ${doc.chars} characters${doc.updated_at ? ` · saved ${doc.updated_at}` : ""}`
+    : " · empty (off)"));
+  card.appendChild(where);
+  const area = document.createElement("textarea");
+  area.id = "daemon-prompt-text";
+  area.className = "daemon-prompt-text";
+  area.rows = 10;
+  area.spellcheck = false;
+  area.placeholder = "Rules every session this daemon starts should follow…";
+  area.value = daemonPromptDraft !== null ? daemonPromptDraft : (doc.text || "");
+  const actions = el("div", "install-actions");
+  const save = el("button", "wf-btn", daemonPromptBusy ? "Saving…" : "Save");
+  const discard = el("button", "wf-btn clear", "Discard changes");
+  const sync = () => {
+    const changed = daemonPromptDraft !== null && daemonPromptDraft !== (doc.text || "");
+    save.disabled = daemonPromptBusy || !changed;
+    discard.disabled = !changed;
+  };
+  // Typing is kept in the draft without a re-render, so the caret stays put.
+  area.addEventListener("input", () => { daemonPromptDraft = area.value; sync(); });
+  save.addEventListener("click", () => saveDaemonPrompt(area.value));
+  discard.addEventListener("click", () => { daemonPromptDraft = null; renderWorkspaces(); });
+  sync();
+  card.appendChild(area);
+  actions.appendChild(save);
+  actions.appendChild(discard);
+  card.appendChild(actions);
+  return card;
+}
+
 async function promptPackCall(method, path, payload, busy) {
   promptPacksBusy = busy;
   if (wsOpen) renderWorkspaces();
@@ -23519,6 +24155,7 @@ function renderWorkspaces() {
   // below: they are machine settings, this is the list of storage roots.
   if (wsSection === "install") {
     view.appendChild(installPanel());
+    view.appendChild(daemonPromptCard());
     view.appendChild(promptPacksCard());
     return;
   }
@@ -24876,7 +25513,32 @@ function wsAddCard() {
    or drop one. The default project is listed but has no remove button —
    it is where every unfiled session and mesh lives. */
 let projectError = "";
-let projectDraft = { name: "", workspace: "" };
+let projectDraft = { name: "", workspace: "", mesh: undefined };
+
+/* A project's default mesh has three states (projects.py): the field
+   absent from the record (undefined: nobody set it), null (set to no mesh)
+   and a mesh name. The pickers carry the first two as values no mesh name
+   can take (':' is outside the name alphabet). */
+const PROJECT_MESH_UNSET = ":unset";
+const PROJECT_MESH_NONE = ":none";
+
+function projectMeshChoice(p) {
+  if (!p || !("default_mesh" in p) || p.default_mesh === undefined) {
+    return PROJECT_MESH_UNSET;
+  }
+  return p.default_mesh === null ? PROJECT_MESH_NONE : p.default_mesh;
+}
+
+function projectMeshValue(choice) {
+  if (choice === PROJECT_MESH_UNSET) return undefined;
+  if (choice === PROJECT_MESH_NONE) return null;
+  return choice;
+}
+
+/* The request body that writes one default-mesh state. */
+function projectMeshBody(mesh) {
+  return mesh === undefined ? { default_mesh_unset: true } : { default_mesh: mesh };
+}
 
 function projectsCard() {
   const card = el("div", "ws-add");
@@ -24884,8 +25546,11 @@ function projectsCard() {
   card.appendChild(el(
     "p", "wf-note",
     "The tier above meshes and sessions. Each project keeps its own session " +
-    "and mesh lists (the rail's Project selector), and a default workspace: " +
-    "the directory a session created in it starts in when no other is chosen."
+    "and mesh lists (the rail's Project selector), a default workspace " +
+    "(the directory a session created in it starts in when no other is " +
+    "chosen) and a default mesh (the Mesh row the new-session form picks " +
+    "for it). A default mesh is unset until someone sets it, which is " +
+    "kept apart from setting it to none."
   ));
 
   const workspaceOptions = (select, chosen) => {
@@ -24893,6 +25558,19 @@ function projectsCard() {
     select.appendChild(new Option("(no default workspace)", ""));
     for (const w of workspacesCache) select.appendChild(new Option(w.name, w.name));
     select.value = [...select.options].some((o) => o.value === chosen) ? chosen : "";
+  };
+
+  const meshOptions = (select, p) => {
+    select.innerHTML = "";
+    select.appendChild(new Option("(default mesh unset)", PROJECT_MESH_UNSET));
+    select.appendChild(new Option("(no default mesh)", PROJECT_MESH_NONE));
+    for (const m of meshCache) select.appendChild(new Option(m.name, m.name));
+    const chosen = projectMeshChoice(p);
+    // A mesh deleted since it was chosen stays visible as what is stored.
+    if (![...select.options].some((o) => o.value === chosen)) {
+      select.appendChild(new Option(`${chosen} (no such mesh)`, chosen));
+    }
+    select.value = chosen;
   };
 
   const form = el("form", "project-add-row");
@@ -24906,14 +25584,22 @@ function projectsCard() {
   ws.id = "project-workspace";
   workspaceOptions(ws, projectDraft.workspace);
   ws.addEventListener("change", () => { projectDraft.workspace = ws.value; });
+  const addMesh = el("select");
+  addMesh.id = "project-mesh";
+  meshOptions(addMesh, projectDraft.mesh === undefined ? {}
+    : { default_mesh: projectDraft.mesh });
+  addMesh.addEventListener("change", () => {
+    projectDraft.mesh = projectMeshValue(addMesh.value);
+  });
   const submit = el("button", "wf-btn approve", "Add project");
   submit.type = "submit";
   form.appendChild(name);
   form.appendChild(ws);
+  form.appendChild(addMesh);
   form.appendChild(submit);
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
-    await projectAdd(name.value, ws.value);
+    await projectAdd(name.value, ws.value, projectMeshValue(addMesh.value));
   });
   card.appendChild(form);
   if (projectError) card.appendChild(el("p", "error", projectError));
@@ -24929,6 +25615,12 @@ function projectsCard() {
     if (p.default_workspace && !p.default_cwd) {
       row.appendChild(el("span", "badge exited", "workspace not registered"));
     }
+    const meshPick = el("select");
+    meshPick.id = `project-mesh-${p.name}`;
+    meshOptions(meshPick, p);
+    meshPick.addEventListener("change", () =>
+      projectSetMesh(p.name, projectMeshValue(meshPick.value)));
+    row.appendChild(meshPick);
     const here = sessionsCache.filter(
       (s) => (s.project || "default") === p.name).length;
     if (here) row.appendChild(el("span", "badge idle", plural(here, "session")));
@@ -24966,7 +25658,7 @@ async function projectRequest(method, url, body) {
   return true;
 }
 
-async function projectAdd(rawName, workspace) {
+async function projectAdd(rawName, workspace, mesh) {
   const name = (rawName || "").trim();
   if (!name) {
     projectError = "a project needs a name";
@@ -24975,8 +25667,10 @@ async function projectAdd(rawName, workspace) {
   }
   const body = { name };
   if (workspace) body.default_workspace = workspace;
+  // A new project left at "unset" sends nothing: the field stays absent.
+  if (mesh !== undefined) body.default_mesh = mesh;
   if (await projectRequest("POST", "/api/projects", body)) {
-    projectDraft = { name: "", workspace: "" };
+    projectDraft = { name: "", workspace: "", mesh: undefined };
     renderWorkspaces();
   }
 }
@@ -24985,6 +25679,12 @@ async function projectSetWorkspace(name, workspace) {
   await projectRequest(
     "PATCH", `/api/projects/${encodeURIComponent(name)}`,
     { default_workspace: workspace || null }
+  );
+}
+
+async function projectSetMesh(name, mesh) {
+  await projectRequest(
+    "PATCH", `/api/projects/${encodeURIComponent(name)}`, projectMeshBody(mesh)
   );
 }
 
@@ -25532,6 +26232,29 @@ function renderWfInto(view, data, ui) {
   if (ui.fullLink) head.appendChild(wfFullLink(data));
   view.appendChild(head);
 
+  const overview = el("div", "wf-overview");
+  if (!ui.fullLink) {
+    const back = el("a", "wf-back", "← All runs");
+    back.href = "#/flows";
+    overview.appendChild(back);
+  }
+  if (run.step_id) {
+    const current = el("button", "wf-btn wf-current",
+      `Current step: ${run.title || run.step_id}`);
+    current.type = "button";
+    current.title = "Inspect the current step's instructions and reports";
+    current.addEventListener("click", () => {
+      ui.select(run.step_id);
+      // Diagram enhancement finishes after rendering and can change its height.
+      requestAnimationFrame(() => {
+        view.querySelector(".wf-reports")?.scrollIntoView({ block: "start" });
+      });
+    });
+    overview.appendChild(current);
+  }
+  overview.appendChild(el("span", "wf-note", `${run.steps_completed ?? 0} steps completed`));
+  view.appendChild(overview);
+
   // The buttons at the panel's own top, not the screen's: the gate and the
   // presses that clear it hold still under the head while everything below
   // scrolls. The reminder form stays out of it (reminder: false) — it is a
@@ -25547,7 +26270,8 @@ function renderWfInto(view, data, ui) {
   // head and the buttons and give each column its own scroll; only a phone
   // falls back to one flow (see the 820px block).
   const side = el("div", "wf-side");
-  if (wf.description) side.appendChild(el("p", "wf-desc", wf.description));
+  side.appendChild(el("h3", "wf-section-title", "Run details"));
+  if (wf.description) side.appendChild(mdInto(el("div", "wf-desc md"), wf.description));
 
   const meta = el("div", "wf-meta");
   // The owning session is not in this line any more: it moved up to the head
@@ -25573,7 +26297,12 @@ function renderWfInto(view, data, ui) {
     }
     side.appendChild(src);
   }
-  if (run.context) side.appendChild(el("p", "wf-context", `context: ${run.context}`));
+  if (run.context) {
+    const context = el("section", "wf-context");
+    context.appendChild(el("h4", null, "Context"));
+    context.appendChild(mdInto(el("div", "md"), run.context));
+    side.appendChild(context);
+  }
   for (const w of wf.warnings || []) {
     side.appendChild(el("p", "wf-warning", `⚠ ${w}`));
   }
@@ -25607,6 +26336,8 @@ function renderWfInto(view, data, ui) {
   const cols = el("div", "wf-cols");
   const dia = el("div", "wf-diagram");
   dia.innerHTML = wfDiagramSvg(wf, run, sel);
+  const diagramTitle = el("h3", "wf-section-title", "Workflow steps");
+  dia.insertBefore(diagramTitle, dia.firstChild);
   const finished = run.status === "done" || run.status === "aborted";
   dia.querySelectorAll("g.wfd-node[data-step]").forEach((g) => {
     g.addEventListener("click", () => {
@@ -25649,9 +26380,13 @@ function renderWfInto(view, data, ui) {
       }
     });
   }
-  dia.appendChild(forceBtn);
-
-  side.appendChild(wfReports(data, ui));
+  const reports = wfReports(data, ui);
+  const controls = el("div", "wf-step-controls");
+  controls.appendChild(el("span", "wf-note", sel
+    ? `Selected step: ${sel}` : "Select a workflow step to change the run position."));
+  controls.appendChild(forceBtn);
+  reports.insertBefore(controls, reports.firstChild);
+  side.appendChild(reports);
   // No split bar on a phone: .wf-cols there is one column per row (see the
   // 820px breakpoint), and a column has nothing to drag against.
   if (!MOBILE_MQ.matches) {
@@ -27176,13 +27911,13 @@ function wfReports(data, ui) {
       inst.appendChild(el("h4", null, "Instructions"));
       if (step.gate) inst.appendChild(el("p", "wf-instructions-gate", `gate: ${step.gate}`));
       if (step.instructions) {
-        inst.appendChild(el("pre", "wf-instructions-text", step.instructions.trimEnd()));
+        inst.appendChild(mdInto(el("div", "wf-instructions-text md"), step.instructions.trimEnd()));
       }
       if (step.select) {
-        inst.appendChild(el(
-          "p", "wf-instructions-select",
-          `select (${step.select.chooser}): ${step.select.prompt.trim()}`
-        ));
+        const selection = el("div", "wf-instructions-select");
+        selection.appendChild(el("h4", null, `Selection (${step.select.chooser})`));
+        selection.appendChild(mdInto(el("div", "md"), step.select.prompt.trim()));
+        inst.appendChild(selection);
       }
       if (step.verify) {
         inst.appendChild(el("p", "wf-instructions-verify mono", `verify: ${step.verify}`));
@@ -28355,17 +29090,18 @@ function metaRow(dl, label, value, title) {
   dl.appendChild(dd);
 }
 
-/* Who this panel is about, and the two ways out of it — both of which drop
-   away in the one arrangement where they are noise.
+/* Who this panel is about, and the ways out of it.
 
-   Docked beside the terminal it describes, the header's `details` chip is
-   anchored over this head's top-right corner and a second press of it closes
-   the panel. There is no sense in a × under a close button, nor in an "open
-   the terminal" that opens the terminal already on screen. Every other
-   arrangement keeps both and needs them: the panel aimed at another row's
-   session (that button travels), a page covering the terminal (it brings it
-   back), and the phone, where this panel IS the page and there is no header
-   anywhere on screen to close it from. */
+   The × is on every arrangement. Docked beside the terminal it describes, the
+   header's `details` chip also closes the panel on a second press, but that
+   chip sits in the terminal's header, outside the panel: a reader looking at
+   the panel looks for its close button in the panel's own corner (reported
+   from the live UI, claunch-tk08h). What does drop away there is the verbs —
+   "open the terminal" would open the terminal already on screen, and Spawn
+   and Open PR are for a session read from elsewhere. Every other arrangement
+   keeps them and needs them: the panel aimed at another row's session (that
+   button travels), a page covering the terminal (it brings it back), and the
+   phone, where this panel IS the page. */
 function sessHead(s) {
   const head = el("div", "wf-head sess-head");
   head.appendChild(el("h2", null, s.name || "session"));
@@ -28402,7 +29138,15 @@ function sessHead(s) {
   // of this head, not only the ones that keep the buttons; the stylesheet
   // orders it last so it is the head's own bottom line.
   head.appendChild(cwdLine(s, "sess-cwd"));
-  if (mine && terminalOnScreen() && !MOBILE_MQ.matches) return head;
+  // The × goes on last in every arrangement (margin-left: auto puts it in the
+  // corner), so it is built here and appended at each return.
+  const close = el("button", "sess-close", "×");
+  close.title = "close details";
+  close.addEventListener("click", closeDetail);
+  if (mine && terminalOnScreen() && !MOBILE_MQ.matches) {
+    head.appendChild(close);
+    return head;
+  }
 
   // The spawn wizard, aimed at this session: the panel's verb for growing a
   // fleet under whatever this session is. An exited session has nothing to
@@ -28431,9 +29175,6 @@ function sessHead(s) {
   const open = el("button", "wf-btn", "Open terminal");
   open.addEventListener("click", () => go("#/s/" + encodeURIComponent(s.name)));
   head.appendChild(open);
-  const close = el("button", "sess-close", "×");
-  close.title = "close details";
-  close.addEventListener("click", closeDetail);
   head.appendChild(close);
   return head;
 }
@@ -28713,8 +29454,94 @@ function sessFlags(s) {
   return box;
 }
 
+/* A panel redrawn on a poll, brought onto the page section by section
+   (claunch-v87). `fresh` holds the new build, detached; each of its top-level
+   sections replaces the live one in the same place unless the two read the
+   same, in which case the live one stays and the page sees nothing.
+
+   A section can be filled after it is built (a fetch that writes into the
+   node it was handed). When the live copy was kept, that write would land in
+   the discarded fresh one, so each kept section's fresh twin is watched until
+   the next redraw and swapped in the moment it changes. */
+const panelTwins = new WeakMap();
+
+/* A section that keeps its live form across polls (a half-typed note, a
+   picked destination) hands that form to the new build by moving it, which
+   is itself a mutation and leaves the live section a hollow that never reads
+   the same as the new one. While renderSession builds off the page
+   (`panelStaging`), carried() hands the build a copy instead -- the stand-in
+   -- and the live form stays where it is. A section that is kept never
+   touches it; a section that is replaced gets its stand-ins swapped back for
+   the live forms first (restoreStandIns). */
+let panelStaging = false;
+function carried(node) {
+  if (!panelStaging || !node || !node.isConnected || typeof node.cloneNode !== "function") return node;
+  const stand = node.cloneNode(true);
+  stand._standFor = node;
+  return stand;
+}
+
+function restoreStandIns(root) {
+  if (!root || root.nodeType !== 1) return;
+  const stands = [root, ...root.querySelectorAll("*")].filter((n) => n._standFor);
+  for (const stand of stands) stand.replaceWith(stand._standFor);
+}
+//
+// `before` is what the page held before the build began: a section the
+// builder carries over itself (the send box keeps its node so a draft
+// survives) has already been moved into `fresh` by then, and is kept as is.
+// Sections are paired by what they read, not by position, so one section
+// appearing or going does not turn every section after it into a swap.
+function morphPanel(live, fresh, before) {
+  for (const w of panelTwins.get(live) || []) w.disconnect();
+  const watchers = [];
+  const wanted = [...fresh.childNodes];
+  const carried = new Set(before);
+  const pool = new Map();
+  for (const old of live.childNodes) {
+    const key = old.nodeType === 1 ? old.outerHTML : "#" + old.data;
+    if (!pool.has(key)) pool.set(key, []);
+    pool.get(key).push(old);
+  }
+  const kept = new Set();
+  const out = wanted.map((node) => {
+    if (carried.has(node)) { kept.add(node); return node; }
+    const key = node.nodeType === 1 ? node.outerHTML : "#" + node.data;
+    const old = (pool.get(key) || []).shift();
+    if (old) {
+      kept.add(old);
+      if (node.nodeType === 1 && typeof MutationObserver === "function") {
+        // Most fills write what the kept section already shows, so the twin
+        // is compared once it settles and swapped in only if it differs.
+        let pending = 0;
+        const w = new MutationObserver(() => {
+          clearTimeout(pending);
+          pending = setTimeout(() => {
+            if (old.parentNode !== live || old.outerHTML === node.outerHTML) return;
+            w.disconnect();
+            restoreStandIns(node);
+            live.replaceChild(node, old);
+          }, 50);
+        });
+        w.observe(node, { subtree: true, childList: true, attributes: true, characterData: true });
+        watchers.push({ disconnect() { clearTimeout(pending); w.disconnect(); } });
+      }
+      return old;
+    }
+    return node;
+  });
+  panelTwins.set(live, watchers);
+  for (const node of [...live.childNodes]) if (!kept.has(node)) live.removeChild(node);
+  for (const node of out) if (!kept.has(node)) restoreStandIns(node);
+  let cursor = live.firstChild;
+  for (const node of out) {
+    if (node === cursor) { cursor = cursor.nextSibling; continue; }
+    live.insertBefore(node, cursor);
+  }
+}
+
 function renderSession(data) {
-  const view = $("sess-view");
+  const page = $("sess-view");
   const s = data.session || {};
   // The 2s poll rebuilds this panel from scratch, and a rebuild detaches
   // whatever the user is typing in — which takes the caret with it. Keeping
@@ -28722,24 +29549,36 @@ function renderSession(data) {
   // not the focus, so while a field in here has it, the poll waits. Same rule
   // the mesh page keeps, and for the same reason: a message being written is
   // worth more than a two-second-fresher 'last output'.
-  if (formInUse(view)) return;
+  if (formInUse(page)) return;
   // And the same rule for a selection, which is the claim a reader who is
   // copying a line has on this panel. It needs saying separately because the
   // lines worth copying here are not fields and never take focus.
-  if (selectionInUse(view)) return;
+  if (selectionInUse(page)) return;
   // `#sess-view` is the scroll container, so emptying it collapses its
   // content to nothing and the browser clamps scrollTop to 0. Every poll
   // therefore threw the reader back to the top of the panel, which put
   // everything below the fold — the input journal among it — out of reach for
   // longer than five seconds at a time. Read before the wipe, written after
   // the rebuild.
-  const previousTop = view.scrollTop;
-  view.innerHTML = "";
+  const previousTop = page.scrollTop;
+  const before = page.childNodes ? [...page.childNodes] : [];
+  // Drawn off the page and morphed on (morphPanel), where the DOM can say
+  // what a section serializes to; the reduced harnesses' stub DOMs cannot,
+  // and keep the wipe-and-redraw this panel always had.
+  const morph = typeof morphPanel === "function" &&
+    typeof page.outerHTML === "string" && typeof page.insertBefore === "function";
+  const view = morph ? document.createElement("div") : page;
+  if (!morph) page.innerHTML = "";
+  panelStaging = morph;
   // Called at each of this function's three exits. Assigning past the new
   // content's height is clamped by the browser rather than refused, so a
   // panel that came back shorter lands at its own bottom instead of throwing;
   // a stub DOM with no scrollTop reads undefined and writes nothing.
-  const keepScroll = () => { if (previousTop) view.scrollTop = previousTop; };
+  const keepScroll = () => {
+    panelStaging = false;
+    if (morph) morphPanel(page, view, before);
+    if (previousTop && page.scrollTop !== previousTop) page.scrollTop = previousTop;
+  };
 
   view.appendChild(sessHead(s));
 
@@ -29061,7 +29900,7 @@ function sessMeshJoin(data) {
 
   const key = `${name}|${candidates.join(",")}`;
   if (sessJoinBox && sessJoinBox.dataset.slot === key) {
-    box.appendChild(sessJoinBox);   // appending moves the live node here
+    box.appendChild((typeof carried === "function" ? carried(sessJoinBox) : sessJoinBox));   // the live node, or its stand-in (carried)
     return box;
   }
   sessJoinBox = el("div", "sess-mesh-join-form");
@@ -29352,22 +30191,29 @@ function sessInputJournalFill(box, name, quiet) {
     .then(async (resp) => {
       const doc = await resp.json().catch(() => ({}));
       if (quiet && box.open) return;
-      box.innerHTML = "";
+      // Drawn aside and swapped in only when it reads differently: the
+      // poll refills a shut fold every five seconds, and redrawing the same
+      // lines each time was a mutation burst per poll (claunch-v87).
+      const out = el("div");
       // One row per submitted line with its current status. `entries` (the
       // raw event log) is the fallback for a daemon that predates `requests`.
       const rows = doc.requests || doc.entries || [];
       const queued = doc.queued || 0;
-      box.appendChild(el("summary", null,
+      out.appendChild(el("summary", null,
         `Session input journal (${rows.length})` +
         (queued ? ` · ${queued} queued` : "")));
       if (!resp.ok || !rows.length) {
-        box.appendChild(el("p", resp.ok ? "no submitted lines" :
+        out.appendChild(el("p", resp.ok ? "no submitted lines" :
           (doc.error || "journal unavailable"), "wf-note"));
-        return;
+      } else {
+        for (const entry of rows.slice().reverse()) {
+          out.appendChild(sessInputJournalRow(box, name, entry));
+        }
       }
-      for (const entry of rows.slice().reverse()) {
-        box.appendChild(sessInputJournalRow(box, name, entry));
-      }
+      if (typeof box.innerHTML === "string" && typeof out.innerHTML === "string" &&
+          box.innerHTML === out.innerHTML) return;
+      box.innerHTML = "";
+      for (const node of [...out.childNodes]) box.appendChild(node);
     }).catch(() => {});
 }
 
@@ -29425,7 +30271,7 @@ function sessInputJournal(name) {
     // fold is shut, so the poll keeps it current. An OPEN fold is left
     // exactly as it is — its lines are what the reader is looking at.
     if (!sessJournalBox.open) sessInputJournalFill(sessJournalBox, name, true);
-    return sessJournalBox;   // appending moves the live node back into place
+    return (typeof carried === "function" ? carried(sessJournalBox) : sessJournalBox);   // the live node, or its stand-in (carried)
   }
   const box = el("details", "sess-input-journal");
   box.dataset.session = name;
@@ -29481,7 +30327,7 @@ function sessReborrow(data) {
   const key = `${s.name}|${s.borrow || ""}|${s.null_token ? 1 : 0}|` +
     `${s.disable_artifact_tool ? 1 : 0}|${validationKey}`;
   if (sessReborrowBox && sessReborrowBox.dataset.slot === key) {
-    box.appendChild(sessReborrowBox);   // appending moves the live node here
+    box.appendChild((typeof carried === "function" ? carried(sessReborrowBox) : sessReborrowBox));   // the live node, or its stand-in (carried)
     return box;
   }
   const form = el("div", "sess-reborrow-form");
@@ -29692,7 +30538,7 @@ function sessNote(s) {
   const saved = String(s.note || "");
   const key = `${s.name}|${saved}`;
   if (sessNoteBox && sessNoteBox.dataset.slot === key) {
-    box.appendChild(sessNoteBox);   // appending moves the live node here
+    box.appendChild((typeof carried === "function" ? carried(sessNoteBox) : sessNoteBox));   // the live node, or its stand-in (carried)
     return box;
   }
   const form = el("div", "sess-note-form");
@@ -29802,7 +30648,7 @@ function sessPerms(data) {
   const flag = permissionArgs.join(" ");
   const key = `${s.name}|${skipping ? 1 : 0}`;
   if (sessPermsBox && sessPermsBox.dataset.slot === key) {
-    box.appendChild(sessPermsBox);   // appending moves the live node here
+    box.appendChild((typeof carried === "function" ? carried(sessPermsBox) : sessPermsBox));   // the live node, or its stand-in (carried)
     return box;
   }
   const form = el("div", "sess-perms-form");
@@ -30035,7 +30881,7 @@ function sessMigrate(data) {
   // itself changes the key, which is what re-aims the picker.
   const key = `${s.name}|${s.cwd}`;
   if (sessMigrateBox && sessMigrateBox.dataset.slot === key) {
-    box.appendChild(sessMigrateBox);   // appending moves the live node here
+    box.appendChild((typeof carried === "function" ? carried(sessMigrateBox) : sessMigrateBox));   // the live node, or its stand-in (carried)
     return box;
   }
   const form = el("div", "sess-migrate-form");
@@ -30311,7 +31157,7 @@ function sessSend(data) {
   // out of the key — someone else joining is no reason to lose your sentence.
   const key = `${s.name}|` + meshes.map((m) => `${m.mesh}>${m.handle}`).join(",");
   if (sessSendBox && sessSendBox.dataset.slot === key) {
-    box.appendChild(sessSendBox);   // appending moves the live node here
+    box.appendChild((typeof carried === "function" ? carried(sessSendBox) : sessSendBox));   // the live node, or its stand-in (carried)
     return box;
   }
   sessSendBox = el("div", "sess-send-form");
@@ -30614,7 +31460,7 @@ function sessWorkflow(data) {
   // context line out from under the user.
   const key = `${slot.scope}|${slot.cwd}`;
   if (sessStartBox && sessStartBox.dataset.slot === key) {
-    box.appendChild(sessStartBox);   // appending moves the live node here
+    box.appendChild((typeof carried === "function" ? carried(sessStartBox) : sessStartBox));   // the live node, or its stand-in (carried)
     return box;
   }
   sessStartBox = el("div", "wf-start");
@@ -31418,13 +32264,14 @@ function sessionFormConfig(mode) {
     "codex_yolo", "codex_sandbox", "args",
     "worktree_mode", "worktree_name", "worktree_existing", "worktree_session",
     "worktree_rebase", "worktree_from", "task", "score_goal", "beads", "issue_text", "issue_filter", "issue", "pi_tool_*",
-    "subrole_*", "prompt_pack_*"];
+    "subrole_*", "prompt_pack_*", "daemon_prompt"];
   const modes = {
     new: { title: "New session", submit: "Create", sections, editable,
       payload: ["name", "profile", "project", "cwd", "args", "env", "model", "effort", "tools", "worktree",
         "rebase_onto", "branch_from", "role", "subroles", "borrow", "null_token", "mesh", "handle", "workflow",
         "workflow_version", "cflow_inputs",
         "context", "task", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
+        "daemon_prompt",
         "resume", "fork_session"] },
     spawn: { title: "Spawn child", submit: "Spawn child", sections,
       editable: [...editable, "parent", "fork_parent", "over_limit"],
@@ -31432,6 +32279,7 @@ function sessionFormConfig(mode) {
         "rebase_onto", "branch_from", "role", "subroles", "borrow", "null_token", "mesh", "handle", "workflow",
         "workflow_version", "cflow_inputs",
         "context", "task", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
+        "daemon_prompt",
         "fork", "connect", "over_limit", "auto_compact"] },
     fork: { title: "Quick fork", submit: "Fork", sections: ["new-quick-fork"],
       editable: ["quick_fork_carry", "quick_fork_task"], payload: ["task", "mesh", "workflow"] },
@@ -32274,7 +33122,7 @@ function sessQuickJob(data) {
   // half-typed task, and the pickers were fetched for THIS session's cwd.
   const key = `${s.name}|${s.cwd}`;
   if (sessQuickJobBox && sessQuickJobBox.dataset.slot === key) {
-    box.appendChild(sessQuickJobBox);   // appending moves the live node here
+    box.appendChild((typeof carried === "function" ? carried(sessQuickJobBox) : sessQuickJobBox));   // the live node, or its stand-in (carried)
     return box;
   }
   const form = el("div", "sess-quickjob-form");
@@ -32501,7 +33349,7 @@ function sessChildren(data) {
 
   const key = s.name || sessName || "";
   if (sessKidsBox && sessKidsBox.dataset.slot === key) {
-    box.appendChild(sessKidsBox);   // appending moves the live node here
+    box.appendChild((typeof carried === "function" ? carried(sessKidsBox) : sessKidsBox));   // the live node, or its stand-in (carried)
     return box;
   }
   stopSessKids();
@@ -37529,6 +38377,123 @@ async function refreshGotoGate() {
 }
 
 /* ------------------------------------------------------------------ */
+/* the reposync gate: a session's push to a shared remote             */
+/* ------------------------------------------------------------------ */
+/* An agent session's `claunch reposync` (or repo_sync tool) that would push
+   to the shared remote files its plan with daemon/reposync_gate.py and waits
+   here (claunch-dh73y). The card prints the whole plan the approval is bound
+   to: repository, remote, the two tips and -- for a rebase -- how many landing
+   merges are recreated and which local branches stay on the old commits.
+   Unlike the goto gate, an unanswered card EXPIRES as a refusal: a push to a
+   shared remote cannot be taken back by the person who missed it. */
+const REPOSYNC_GATE_PREFIX = "reposync-gate-";
+const reposyncGateIgnored = new Set();
+
+async function refreshReposyncGate() {
+  const host = $("notices");
+  if (!host) return;
+  let body;
+  try {
+    body = await (await api("/api/reposync/requests")).json();
+  } catch {
+    return;
+  }
+  const pending = (body && body.requests ? body.requests : []).filter(
+    (r) => r.status === "pending"
+  );
+  const live = new Set(pending.map((r) => r.id));
+  for (const id of [...reposyncGateIgnored]) {
+    if (!live.has(id)) reposyncGateIgnored.delete(id);
+  }
+  const seen = new Set();
+  for (const rec of pending) {
+    const key = REPOSYNC_GATE_PREFIX + rec.id;
+    if (reposyncGateIgnored.has(rec.id)) continue;
+    seen.add(key);
+    const plan = rec.plan || {};
+    let card = notices.get(key);
+    if (!card || !card.node.isConnected) {
+      dismissNotice(key);
+      const node = el("div", "notice warn gate");
+      const title = el("div", "notice-title");
+      title.appendChild(el("span", null, "repository sync wants to push: "));
+      title.appendChild(el("span", null, plan.workspace || plan.repo || "?"));
+      const sub = el("div", "notice-sub");
+      if (rec.session) {
+        sub.appendChild(gateSessionLink(rec.session));
+        sub.appendChild(el("span", null, " asks: "));
+      }
+      sub.appendChild(el("span", null, plan.summary || plan.action || "?"));
+      const tips = el(
+        "div",
+        "notice-sub",
+        `${plan.branch || "?"} ${(plan.local || "").slice(0, 8)} → ` +
+          `${plan.remote || "?"}` +
+          (plan.remote_key ? ` (${plan.remote_key})` : "") +
+          (plan.upstream ? ` @ ${plan.upstream.slice(0, 8)}` : "")
+      );
+      const clock = el("div", "notice-sub gate-clock");
+      node.appendChild(title);
+      node.appendChild(sub);
+      node.appendChild(tips);
+      const stranded = plan.affected || [];
+      if (stranded.length) {
+        node.appendChild(el(
+          "div",
+          "notice-sub",
+          `left on the old commits (${stranded.length}): ` +
+            stranded.slice(0, 12).join(", ") +
+            (stranded.length > 12 ? ", …" : "")
+        ));
+      }
+      const actions = el("div", "gate-actions");
+      const approve = el("button", "wf-btn approve", "Approve");
+      const reject = el("button", "wf-btn clear", "Reject");
+      const ignore = el("button", "wf-btn", "Ignore");
+      approve.title = "the asking session pushes exactly this plan";
+      reject.title = "nothing is pushed; the asking session is told no";
+      ignore.title =
+        "close this card only — the request stays open and expires as a " +
+        "refusal at its deadline";
+      approve.addEventListener("click", async (ev) => {
+        ev.stopPropagation();
+        if (await gatePost(`/api/reposync/requests/${rec.id}/approve`, approve)) {
+          dismissNotice(key);
+        }
+      });
+      reject.addEventListener("click", async (ev) => {
+        ev.stopPropagation();
+        if (await gatePost(`/api/reposync/requests/${rec.id}/reject`, reject)) {
+          dismissNotice(key);
+        }
+      });
+      ignore.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        reposyncGateIgnored.add(rec.id);
+        dismissNotice(key);
+      });
+      actions.appendChild(approve);
+      actions.appendChild(reject);
+      actions.appendChild(ignore);
+      node.appendChild(clock);
+      node.appendChild(actions);
+      host.appendChild(node);
+      notices.set(key, { node, timer: null });
+      card = notices.get(key);
+    }
+    const clock = card.node.querySelector(".gate-clock");
+    if (clock) {
+      clock.textContent = `expires (as a refusal) in ${gateCountdown(rec.deadline)}`;
+    }
+  }
+  for (const key of [...notices.keys()]) {
+    if (key.startsWith(REPOSYNC_GATE_PREFIX) && !seen.has(key)) {
+      dismissNotice(key);
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* boot                                                               */
 /* ------------------------------------------------------------------ */
 /* The poll is installed here rather than at the end of boot(), and is never
@@ -38307,7 +39272,7 @@ async function pollOnce() {
   // is fed by the same heartbeat as the registry — and the goto gate beside
   // it: a leader files from its own terminal, the person answers here.
   const gateRefresh = refreshRestartGate();
-  refreshes.push(gateRefresh, refreshGotoGate());
+  refreshes.push(gateRefresh, refreshGotoGate(), refreshReposyncGate());
   await Promise.all(refreshes);
 }
 

@@ -1721,7 +1721,7 @@ def test_install_supersedes_the_split_servers(tmp_path, home):
 def test_merged_server_offers_both_toolsets():
     from claude_launcher import (
         mcp_server, mesh_mcp, status_checks_mcp, wait_mcp, window_mcp, observer_mcp,
-        operator_mcp, search_mcp, glossary_mcp,
+        operator_mcp, search_mcp, glossary_mcp, reposync_mcp,
     )
     from claude_launcher.cflow import mcp as cflow_mcp
     from claude_launcher.cflow2 import mcp as cflow2_mcp
@@ -1734,7 +1734,7 @@ def test_merged_server_offers_both_toolsets():
     ] + [t["name"] for t in wait_mcp.TOOLS] + [t["name"] for t in observer_mcp.TOOLS] + [
         t["name"] for t in operator_mcp.TOOLS
     ] + [t["name"] for t in search_mcp.TOOLS] + [t["name"] for t in glossary_mcp.TOOLS] \
-        + [t["name"] for t in cflow2_mcp.TOOLS]
+        + [t["name"] for t in cflow2_mcp.TOOLS] + [t["name"] for t in reposync_mcp.TOOLS]
     assert len(set(names)) == len(names)  # merge() guards this too
     listed = mcp_server.SERVER.handle(
         {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
@@ -1842,7 +1842,11 @@ def test_mesh_mcp_tools(home, monkeypatch):
         "peer_file", "peer_git", "lease",
         # ... building the team that does it: made, counted, re-oriented,
         # ended, re-drawn, wired
-        "spawn", "children", "rebrief", "kill", "handoff", "reparent", "connect",
+        "spawn", "children",
+        # (what every session this daemon starts is told: daemon_prompt)
+        "daemon_prompt",
+        "rebrief", "kill", "handoff", "deep_think",
+        "reparent", "connect",
         "disconnect",
         # ... and answering the members who asked to be wired themselves
         "wire_requests",

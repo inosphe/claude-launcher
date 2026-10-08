@@ -8,9 +8,9 @@
    shadow card (li.shadow-card, keyed by machine and name, with none).
 
    What has to hold:
-   - under a mesh heading, every member the rail can show sits together, and
-     the heading counts them all; a mesh only remote members are in still
-     gets its heading;
+   - under a mesh tab, every member the rail can show sits together, and
+     the tab counts them all; a mesh only remote members are in still gets
+     its tab;
    - a shadow card carries no data-name and no control, so nothing that acts
      on a local row by name (kill, pin, the keyboard card, the filters'
      record lookup) can be handed one -- and a remote `s1` stays apart from
@@ -21,7 +21,7 @@
    - ungrouped, the shadows trail the local rows under `remote · <machine>`;
      grouped by workspace, they file under `@<machine>`;
    - the status filter and the search apply to them, a search by meaning
-     never matches one, and a group jump can land on one;
+     never matches one, and a tab holding a matching one is marked;
    - a shadow whose card names a parent (the spawning session, on its own
      daemon) sits right under that parent's card, indented with the └ tick,
      when the parent is a shadow of the same machine in the same bucket; a
@@ -89,7 +89,8 @@ function node(tag) {
     querySelectorAll(sel) { return walk(n).filter((k) => matches(k, sel)); },
     getBoundingClientRect() { return { top: 0, height: 20 }; },
     get textContent() { return n.text; },
-    set textContent(v) { n.text = String(v); },
+    // Writing text replaces the children, as the DOM does.
+    set textContent(v) { n.text = String(v); n.kids = []; },
     get className() { return [...n.classes].join(" "); },
     set className(v) { n.classes = new Set(String(v).split(/\s+/).filter(Boolean)); },
     get innerHTML() { return ""; },
@@ -124,7 +125,13 @@ function el(tag, cls, text) {
 }
 
 const list = node("ul");
-const $ = (id) => (id === "session-list" ? list : null);
+const tabBar = node("div");
+tabBar.classes.add("hidden");
+const groupHeader = node("div");
+groupHeader.classes.add("hidden");
+const $ = (id) => (id === "session-list" ? list
+  : id === "session-group-tabs" ? tabBar
+  : id === "session-group-header" ? groupHeader : null);
 let served = { sessions: [] };
 const api = async () => ({ ok: true, json: async () => served });
 const location = { hash: "" };
@@ -141,13 +148,7 @@ let attachedPid = null, linkState = "down", sessName = null, snapshotName = null
 let railRedrawPending = false, briefingLLM = true, ragConfigured = false;
 let currentProject = "";
 let shadowRows = [], shadowOpen = null;
-const folded = new Set();
-function isSessionGroupCollapsed(group, value) { return folded.has(group + "/" + value); }
-function setSessionGroupCollapsed(group, value, shut) {
-  if (shut) folded.add(group + "/" + value); else folded.delete(group + "/" + value);
-}
-function syncSessionGroupStickyOffsets() {}
-function sessionGroupJumpOffset(l, heading, row) { exports.jumped = row; return 0; }
+let sessionGroupTab = {}, sessionGroupTabScrollReset = false;
 function railHeld() { return false; }
 function forgetDeadSessions() {}
 function refreshResumeChoices() {}
@@ -177,7 +178,10 @@ function go() {}
 
 const names = [
   "byLineage", "sessionCategory", "sessionMatchesFilter", "sessionFilterCounts",
-  "syncSessionGroupSearch", "syncSessionFilters",
+  "sessionGroupActiveTab", "setSessionGroupTab", "sessionGroupTabRows",
+  "scrollSessionListTop", "selectSessionGroupTab", "renderSessionGroupTabs",
+  "renderSessionGroupHeader", "syncSessionGroupTabSearch",
+  "syncSessionFilters",
   "sessionSearchText", "sessionMatchesSearch",
   "recordProject", "sessionInCurrentProject", "railSessions",
   "sessMeshes", "sessionMeshGroup", "sessionWorkspaceGroup", "sessionWorkspaceLabel",
@@ -211,7 +215,6 @@ Object.assign(exports, {
                                        index: null, ...value }; break;
       case "page": currentPage = value; break;
       case "open": shadowOpen = value; break;
-      case "fold": folded.add(value); break;
     }
   },
 });`)(ctx, document, el, api, $, location, [], ["mesh"]);
@@ -277,24 +280,42 @@ const who = (n) => (n.dataset.name ? n.dataset.name
 const shadowCard = (key) => walk(list).find((n) => n.classes.has("shadow-card")
   && `${n.dataset.session}@${n.dataset.machine}` === key);
 const shown = () => items(list).filter((n) => !n.classes.has("session-filtered")).map(who);
+/* The tab strip: one tab per group, the open one's rows in the list. */
+const tabs = () => tabBar.kids.filter((n) => n.classes.has("session-group-tab"));
+const tabValues = () => tabs().map((t) => t.dataset.value);
+const tabOf = (value) => tabs().find((t) => t.dataset.value === value);
+const tabCount = (value) => tabOf(value).querySelector(".session-group-count").text;
+const openTab = () => tabs().filter((t) => t.classes.has("active")).map((t) => t.dataset.value);
+async function open(value) {
+  tabOf(value).handlers.click();
+  await new Promise((r) => setTimeout(r, 0));
+}
+/* Every shadow the tabs hold, open or not. */
+const tabShadows = () => tabs().flatMap((t) => t._groupRows)
+  .filter((r) => r.type === "shadow").map((r) => `${r.shadow.session}@${r.shadow.machine}`);
 
 (async () => {
   pick("");
   ctx.set("shadows", SHADOWS);
   await ctx.refresh();
 
-  /* ---- one list, mesh groups hold both kinds ------------------------- */
-  check("every mesh with a member on the rail gets a heading, remote-only ones too",
-        groups().map((g) => g.dataset.value),
-        ["(no mesh)", "alpha", "bravo", "gamma", "zeta"]);
-  check("a mesh group holds its local rows, then its remote cards",
-        items(bodyOf(groupOf("alpha"))).map(who), ["s1", "s1@m2", "r3@m3", "r5@m2"]);
-  check("and its heading counts all of them", countOf(groupOf("alpha")), "4");
+  /* ---- one list, mesh tabs hold both kinds --------------------------- */
+  check("every mesh with a member on the rail gets a tab, remote-only ones too",
+        tabValues(), ["(no mesh)", "alpha", "bravo", "gamma", "zeta"]);
+  check("the first tab is open, and only its rows are drawn",
+        [openTab(), items(list).map(who)], [["(no mesh)"], ["s3"]]);
+  await open("alpha");
+  check("a mesh tab holds its local rows, then its remote cards",
+        items(list).map(who), ["s1", "s1@m2", "r3@m3", "r5@m2"]);
+  check("and the tab counts all of them", tabCount("alpha"), "4");
+  check("no heading is drawn in the list: the tab names the group",
+        list.querySelectorAll(".session-group-heading").length, 0);
   check("a mesh only remote sessions are in",
-        [items(bodyOf(groupOf("gamma"))).map(who), countOf(groupOf("gamma"))],
-        [["r4@m3"], "1"]);
+        [tabOf("gamma")._groupRows.map((r) => r.shadow
+          ? `${r.shadow.session}@${r.shadow.machine}` : r.session.name),
+         tabCount("gamma")], [["r4@m3"], "1"]);
   check("a shadow in two meshes is drawn once, under the first",
-        items(list).filter((n) => who(n) === "r3@m3").length, 1);
+        tabShadows().filter((k) => k === "r3@m3").length, 1);
   check("there is no second rail", walk(list).some((n) => n.classes.has("shadow-group")), false);
 
   /* ---- the kinds stay apart ------------------------------------------ */
@@ -304,36 +325,37 @@ const shown = () => items(list).filter((n) => !n.classes.has("session-filtered")
         walk(s1Remote).filter((n) => ["button", "input", "textarea", "select", "a"]
           .includes(n.tag)).length, 0);
   check("the name-keyed rows are this daemon's alone",
-        list.querySelectorAll("li[data-name]").map((n) => n.dataset.name).sort(),
-        ["s1", "s2", "s3"]);
+        list.querySelectorAll("li[data-name]").map((n) => n.dataset.name), ["s1"]);
   check("the local s1 and the remote s1 are two items",
         [list.querySelectorAll("li[data-name]").filter((n) => n.dataset.name === "s1").length,
          !!s1Remote], [1, true]);
   check("sessionsCache never takes a shadow", ctx.cache(), ["s1", "s2", "s3"]);
-  check("the ⊕ on a mesh heading stays one per heading",
-        groupOf("alpha").querySelectorAll(".session-group-new").length, 1);
+  check("the ⊕ sits on the open mesh's header row, on no tab",
+        [tabs().map((t) => t.querySelectorAll(".session-group-new").length),
+         groupHeader.dataset.value, groupHeader.querySelectorAll(".session-group-new").length],
+        [[0, 0, 0, 0, 0], "alpha", 1]);
 
   /* ---- ownership -------------------------------------------------------- */
   pick("default");
   await ctx.refresh({ cached: true });
   check("a project shows only the shadows it owns through a mesh",
-        items(list).filter((n) => !n.dataset.name).map(who).sort(),
-        ["r3@m3", "r4@m3", "r5@m2", "s1@m2"]);
-  check("and no heading for another project's mesh",
-        groups().map((g) => g.dataset.value), ["(no mesh)", "alpha", "bravo", "gamma"]);
+        tabShadows().sort(), ["r3@m3", "r4@m3", "r5@m2", "s1@m2"]);
+  check("and no tab for another project's mesh",
+        tabValues(), ["(no mesh)", "alpha", "bravo", "gamma"]);
   pick("other");
   await ctx.refresh({ cached: true });
-  check("the other project owns the rest",
-        items(list).filter((n) => !n.dataset.name).map(who).sort(), ["r5@m2", "r9@m2"]);
+  check("the other project owns the rest", tabShadows().sort(), ["r5@m2", "r9@m2"]);
+  await open("zeta");
   check("a shadow in both projects files under the picked project's mesh",
-        items(bodyOf(groupOf("zeta"))).map(who), ["r5@m2", "r9@m2"]);
-  check("with no heading for a mesh the project does not own",
-        groupOf("alpha"), undefined);
+        items(list).map(who), ["r5@m2", "r9@m2"]);
+  check("with no tab for a mesh the project does not own", tabOf("alpha"), undefined);
   pick("");
 
   /* ---- ungrouped, and by workspace ------------------------------------ */
   ctx.set("groups", []);
   await ctx.refresh({ cached: true });
+  check("ungrouped, there is no tab strip",
+        [tabBar.classes.has("hidden"), tabs().length], [true, 0]);
   check("ungrouped, local rows stay loose at the top",
         list.kids.filter((n) => n.dataset.name).map((n) => n.dataset.name),
         ["s1", "s2", "s3"]);
@@ -349,16 +371,11 @@ const shown = () => items(list).filter((n) => !n.classes.has("session-filtered")
   ctx.set("groups", ["workspace"]);
   await ctx.refresh({ cached: true });
   check("by workspace, a shadow files under its machine",
-        groups().map((g) => g.dataset.value), ["@m2", "@m3", "C:/w"]);
-
-  ctx.set("groups", ["mesh", "workspace"]);
-  await ctx.refresh({ cached: true });
-  const alphaInner = bodyOf(groupOf("alpha")).kids.map((g) => g.dataset.value);
-  check("nested under a mesh, the machine is the shadow's workspace",
-        alphaInner, ["@m2", "@m3", "C:/w"]);
+        tabValues(), ["@m2", "@m3", "C:/w"]);
 
   /* ---- filters and search --------------------------------------------- */
-  ctx.set("groups", ["mesh"]);
+  // Ungrouped, so every item is in the list at once.
+  ctx.set("groups", []);
   await ctx.refresh({ cached: true });
   ctx.set("filter", "running");
   ctx.filters();
@@ -380,22 +397,28 @@ const shown = () => items(list).filter((n) => !n.classes.has("session-filtered")
   ctx.set("search", { q: "anything", hits: new Map([["s1", 0.9]]) });
   ctx.filters();
   check("a hit by meaning is the local s1's, never the remote one's", shown(), ["s1"]);
-  ctx.set("fold", "mesh/gamma");
+  ctx.set("groups", ["mesh"]);
+  await ctx.refresh({ cached: true });
   ctx.set("search", { q: "r4" });
   ctx.filters();
-  check("a folded group opens for a shadow that matches",
-        groupOf("gamma").classes.has("collapsed"), false);
+  check("a tab whose group holds a matching shadow is marked",
+        tabs().filter((t) => t.classes.has("search-match")).map((t) => t.dataset.value),
+        ["gamma"]);
   ctx.set("search", { q: "" });
   ctx.filters();
-  check("and shuts again when the search clears",
-        groupOf("gamma").classes.has("collapsed"), true);
+  check("and unmarked when the search clears",
+        tabs().filter((t) => t.classes.has("search-match")).length, 0);
 
-  /* ---- the jump and the open card ------------------------------------- */
-  const jump = groupOf("gamma").querySelector(".session-group-jump");
-  jump.handlers.click({ stopPropagation() {} });
-  check("the jump of a remote-only group lands on its first card",
-        ctx.jumped && who(ctx.jumped), "r4@m3");
-  check("and unfolds it on the way", groupOf("gamma").classes.has("collapsed"), false);
+  /* ---- the tab press and the open card -------------------------------- */
+  await open("alpha");
+  list.scrollTop = 120;
+  await open("alpha");
+  check("pressing the open tab takes the list back to its top", list.scrollTop, 0);
+  list.scrollTop = 120;
+  await open("gamma");
+  check("pressing another tab opens it, from the top",
+        [openTab(), items(list).map(who), list.scrollTop], [["gamma"], ["r4@m3"], 0]);
+  await open("alpha");
 
   ctx.set("page", "shadow");
   ctx.set("open", { machine: "m2", name: "s1" });
@@ -440,7 +463,8 @@ const shown = () => items(list).filter((n) => !n.classes.has("session-filtered")
   ctx.set("groups", ["mesh"]);
   ctx.set("shadows", LINEAGE);
   await ctx.refresh({ cached: true });
-  const alphaCards = () => items(bodyOf(groupOf("alpha"))).filter((n) => !n.dataset.name);
+  await open("alpha");
+  const alphaCards = () => items(list).filter((n) => !n.dataset.name);
   const depthOf = (n) => (n.classes.has("shadow-child")
     ? walk(n).filter((k) => k.classes.has("shadow-tick")).length && n.style.paddingLeft
     : 0);
@@ -452,11 +476,12 @@ const shown = () => items(list).filter((n) => !n.classes.has("session-filtered")
         shadowCard("k2@m4").title.endsWith(" · spawned by k1"), true);
   check("a root card's title names no parent",
         shadowCard("k0@m4").title.includes("spawned by"), false);
-  check("a parent under another heading leaves the child a root there",
-        items(bodyOf(groupOf("gamma"))).map((n) => [who(n), depthOf(n)]),
-        [["k4@m4", 0]]);
   check("the local rows keep their place ahead of the shadows",
-        items(bodyOf(groupOf("alpha"))).filter((n) => n.dataset.name).map(who), ["s1"]);
+        items(list).filter((n) => n.dataset.name).map(who), ["s1"]);
+  await open("gamma");
+  check("a parent under another heading leaves the child a root there",
+        items(list).map((n) => [who(n), depthOf(n)]), [["k4@m4", 0]]);
+  await open("alpha");
 
   ctx.set("groups", []);
   await ctx.refresh({ cached: true });

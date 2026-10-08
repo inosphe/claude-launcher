@@ -41,19 +41,21 @@ from .. import (
     runner,
     translators,
     usage,
+    profile_usage,
 )
 from .. import auto_compact as auto_compact_mod
 from .. import install
 from .. import install_plan
 from .. import session_commits
 from .. import beads_db, beads_meta
-from .. import ghcli, prflow, projects, spawn as spawn_mod, store, workspaces
+from .. import ghcli, prflow, projects, reposync, spawn as spawn_mod, store, workspaces
 from .. import plugins, prompt_packs, settings
 from .. import worktree as worktree_mod
 from . import beads as beads_mod, channel, clipboard, connections
 from . import p2p
 from . import handoff as handoff_mod
 from . import loop_lag as loop_lag_mod
+from . import line_sync
 from . import notice as notice_mod
 from . import rag as rag_mod
 from . import worktree_inventory
@@ -67,6 +69,7 @@ from . import (
     rebrief, session_input, status_checks,
 )
 from . import paths
+from . import daemon_prompt
 from . import sessionstats, statscompare, statsworker
 from . import tokenusage
 from . import transcript_view
@@ -80,6 +83,7 @@ from ..cflow.state import LockBusy, StateError
 from ..profile import ProfileError
 from . import goto_gate
 from . import mesh_roles
+from . import reposync_gate
 from . import restart_gate
 from . import restart_notice
 from .harness import HarnessError, SessionDef
@@ -366,8 +370,9 @@ def build_app(
     )
     app["manager"] = manager
     app["mesh"] = mesh if mesh is not None else MeshManager(manager)
-    from . import observer, operator_bot
+    from . import mesh_chat, observer, operator_bot
     observer.install(app)
+    mesh_chat.install(app)
     operator_bot.install(app, create=_create_session, gates=_operator_gates,
                          work=lambda sessions: _operator_work(app, sessions))
     clipboard.install(app)
@@ -392,6 +397,9 @@ def build_app(
     #: The approval gate a leader's child-run goto waits behind; see
     #: goto_gate. Its nudge is the cflow action handlers' own helper, so the
     #: settled move reaches the child driver the same way a human's goto does.
+    #: The approval gate a session's repository sync waits behind; see
+    #: reposync_gate. Unanswered expires as a refusal.
+    app["reposync_gate"] = reposync_gate.ReposyncGate()
     app["goto_gate"] = goto_gate.GotoGate(
         app,
         manager=manager,
@@ -487,6 +495,11 @@ def build_app(
     glossary_api.install(app)
     from . import spec_api
     spec_api.install(app)
+    # deep_think (daemon/deep_think.py): a session asks itself a question and
+    # a quick-fork of it answers. Needs app["handoff"] (set above): the answer
+    # is a merge, and the module hooks how that merge is written and kept.
+    from . import deep_think
+    deep_think.install(app)
     app.on_startup.append(_start_rag)
     app.on_shutdown.append(_stop_rag)
     # How late the loop runs its callbacks: the part of the page's round
@@ -562,6 +575,9 @@ def build_app(
     r.add_delete("/api/workspaces/{name}", h_workspace_remove)
     r.add_get("/api/prompt-packs", h_prompt_packs)
     r.add_get("/api/prompt-packs/offer", h_prompt_packs_offer)
+    r.add_get("/api/prompt-packs/text", h_prompt_packs_text)
+    r.add_get("/api/daemon-prompt", h_daemon_prompt_get)
+    r.add_put("/api/daemon-prompt", h_daemon_prompt_put)
     r.add_post("/api/prompt-packs/install", h_prompt_packs_install)
     r.add_post("/api/prompt-packs/remove", h_prompt_packs_remove)
     r.add_put("/api/prompt-packs/role-packs", h_prompt_packs_role_packs)
@@ -694,6 +710,16 @@ def build_app(
     r.add_post("/api/relays", h_relay_save)
     r.add_get("/api/relay/peers", h_relay_peers)
     r.add_get("/api/relay/peers/{machine}/sessions", h_relay_peer_sessions)
+    # Repository sync across machines (reposync, claunch-dh73y): what a peer's
+    # registered workspaces look like (remote address keys and branch tips,
+    # read-only) and the approval gate a sync that pushes waits behind.
+    r.add_get("/api/relay/peers/{machine}/repos", h_relay_peer_repos)
+    r.add_get("/api/reposync/repos", h_reposync_repos)
+    r.add_get("/api/reposync/requests", h_reposync_requests_list)
+    r.add_post("/api/reposync/requests", h_reposync_request_submit)
+    r.add_get("/api/reposync/requests/{rid}", h_reposync_request_get)
+    r.add_post("/api/reposync/requests/{rid}/approve", h_reposync_request_approve)
+    r.add_post("/api/reposync/requests/{rid}/reject", h_reposync_request_reject)
     r.add_get("/api/relay/meshes", h_relay_meshes)
     # A relay daemon was renamed: rewrite every mesh reference to it here.
     r.add_post("/api/relay/peers/{machine}/rename", h_relay_peer_rename)
@@ -731,6 +757,10 @@ def build_app(
     r.add_post("/peer/ops/file", h_peer_ops_file)
     r.add_post("/peer/ops/git", h_peer_ops_git)
     r.add_post("/peer/ops/lease", h_peer_ops_lease)
+    # Same trust as /peer/sessions (any backend on a relay this daemon is
+    # registered with): workspace names, remote address KEYS (never URLs, so
+    # no credentials) and branch tips. Read-only; nothing is fetched.
+    r.add_post("/peer/repos", h_peer_repos)
     # Remote-shadow sessions (daemon/shadow.py): a linked peer's operator
     # LOOKS at this daemon's members of the mesh that link belongs to -- a
     # card, an output-only terminal, the session line, the transcript.
@@ -812,6 +842,12 @@ def build_app(
     r.add_get("/api/sessions/{name}/pr/preview", h_session_pr_preview)
     r.add_post("/api/sessions/{name}/pr", h_session_pr)
     r.add_post("/api/sessions/{name}/notice", h_session_notice)
+    # The session line's sync mode and its shared text (daemon/line_sync.py).
+    # Keystrokes ride the terminal socket; this is the door for the mode
+    # switch, for a page reading the state as it attaches, and for a writer
+    # with no socket open.
+    r.add_get("/api/sessions/{name}/line-sync", h_session_line_sync)
+    r.add_post("/api/sessions/{name}/line-sync", h_session_line_sync)
     # One composition, two verbs: GET hands the text to whoever will read it
     # into context (the SessionStart hook, the MCP tool, the CLI); POST types
     # it into the terminal — the operator's push for a session that does not
@@ -2254,16 +2290,19 @@ async def h_metering(request: web.Request) -> web.Response:
 async def h_usage(request: web.Request) -> web.Response:
     """Return subscription usage for a profile selector.
 
-    Usage providers perform network and subprocess I/O.  Run the existing CLI
-    implementation in a worker thread so one slow account endpoint cannot
-    block the daemon's event loop (or the session rail polling it).
+    Usage providers perform network and subprocess I/O. Run them in a worker
+    thread so one slow account endpoint cannot block the event loop. Dashboard
+    page-entry reads opt into the profile usage cooldown with ``refresh=auto``;
+    an unqualified or ``refresh=manual`` request fetches immediately.
     """
     selector = str(request.query.get("profile") or "").strip()
     if not selector:
         return json_error(400, "profile is required")
+    manual = request.query.get("refresh") != "auto"
     try:
-        selected = usage.resolve_target(profile_mod.require_selector(selector))
-        report = await asyncio.to_thread(usage.fetch, selected)
+        payload, cached, updated_at = await asyncio.to_thread(
+            profile_usage.fetch, selector, manual=manual
+        )
     except (
         profile_mod.ProfileError,
         usage.UsageError,
@@ -2271,21 +2310,11 @@ async def h_usage(request: web.Request) -> web.Response:
     ) as exc:
         return json_error(400, str(exc))
     return json_response(
-        {
-            "profile": selected.selector,
-            "source": report.source,
-            "windows": [
-                {
-                    "name": item.name,
-                    "utilization": item.utilization,
-                    "resets_at": item.resets_at,
-                    "used_dollars": item.used_dollars,
-                    "limit_dollars": item.limit_dollars,
-                    "status": item.status,
-                }
-                for item in report.windows
-            ],
-        }
+        payload,
+        headers={
+            "X-Usage-Cached": "true" if cached else "false",
+            "X-Usage-Updated-At": str(updated_at),
+        },
     )
 
 
@@ -2407,27 +2436,75 @@ async def h_project_add(request: web.Request) -> web.Response:
     """
     body = await _json_body(request)
     ws = body.get("default_workspace")
+    mesh_args, error = _project_mesh_arg(request, body)
+    if error:
+        return json_error(400, error)
     try:
         project = projects.add(
             str(body.get("name") or ""),
             default_workspace=None if ws is None else str(ws or ""),
+            **mesh_args,
         )
     except projects.ProjectError as exc:
         return json_error(400, str(exc))
     return json_response({"project": project.to_dict()}, status=201)
 
 
-async def h_project_update(request: web.Request) -> web.Response:
-    """Set (or clear, with null/"") a project's default workspace."""
-    body = await _json_body(request)
-    if "default_workspace" not in body:
-        return json_error(400, "'default_workspace' is required (null clears it)")
+def _project_mesh_arg(request: web.Request, body: dict) -> Tuple[dict, str]:
+    """The ``default_mesh`` keyword a project write passes on, or an error.
+
+    The body says it three ways, one per state the setting has
+    (:mod:`claude_launcher.projects`): ``"default_mesh": "<name>"`` sets it,
+    ``"default_mesh": null`` sets it to no mesh, and
+    ``"default_mesh_unset": true`` drops it back to never-configured. Absent
+    both keys, nothing is passed and the setting is left as it is. A name
+    must be a mesh this daemon can resolve, for the same reason a default
+    workspace must be registered.
+    """
+    unset = bool(body.get("default_mesh_unset"))
+    if unset and "default_mesh" in body:
+        return {}, "send either 'default_mesh' or 'default_mesh_unset', not both"
+    if unset:
+        return {"default_mesh": projects.UNSET}, ""
+    if "default_mesh" not in body:
+        return {}, ""
+    value = body.get("default_mesh")
+    if value is None or not str(value).strip():
+        return {"default_mesh": None}, ""
     try:
-        project = projects.set_default_workspace(
-            request.match_info["name"], str(body.get("default_workspace") or "")
-        )
+        name = projects.check_mesh_name(value)
+        _mesh_mgr(request).get(name)
     except projects.ProjectError as exc:
-        return json_error(404 if "no project named" in str(exc) else 400, str(exc))
+        return {}, str(exc)
+    except MeshError as exc:
+        return {}, str(exc)
+    return {"default_mesh": name}, ""
+
+
+async def h_project_update(request: web.Request) -> web.Response:
+    """Change a project's defaults: ``default_workspace`` (null/"" clears it)
+    and/or the default mesh (see :func:`_project_mesh_arg`)."""
+    body = await _json_body(request)
+    if not any(k in body for k in ("default_workspace", "default_mesh", "default_mesh_unset")):
+        return json_error(
+            400,
+            "send 'default_workspace' (null clears it), 'default_mesh' "
+            "(null = no mesh) or 'default_mesh_unset': true",
+        )
+    try:
+        project = projects.require(request.match_info["name"])
+    except projects.ProjectError as exc:
+        return json_error(404, str(exc))
+    mesh_args, error = _project_mesh_arg(request, body)
+    if error:
+        return json_error(400, error)
+    ws = None
+    if "default_workspace" in body:
+        ws = str(body.get("default_workspace") or "")
+    try:
+        project = projects.add(project.name, default_workspace=ws, **mesh_args)
+    except projects.ProjectError as exc:
+        return json_error(400, str(exc))
     return json_response({"project": project.to_dict()})
 
 
@@ -2676,9 +2753,9 @@ async def h_prompt_packs_offer(request: web.Request) -> web.Response:
     The packs installed in the workspace that owns ``cwd`` (none when no
     workspace does), which of them start ticked, and the role → pack mapping
     so the form can lock the ones a chosen role or subrole requires.
-    ``shipped`` is the package catalog: a required pack the workspace has not
-    installed goes in as the shipped copy (prompt_packs.required_pack), and
-    the form names it as such.
+    ``shipped`` is the package catalog: the form offers those the workspace
+    has not installed as boxes too, and one that is ticked or required goes in
+    as the shipped copy (prompt_packs.pack_copy), named as such.
     """
     cwd = cflow_state.resolve_cwd(request.query.get("cwd") or None)
     owner = workspaces.owning(str(cwd))
@@ -2693,7 +2770,54 @@ async def h_prompt_packs_offer(request: web.Request) -> web.Response:
         "default_packs": prompt_packs.default_packs(),
         "role_packs": prompt_packs.role_packs(),
         "shipped": [p.to_dict() for p in prompt_packs.catalog()],
+        # This daemon's own prompt, null when it has none: the form draws it
+        # first and ticked, and sends daemon_prompt: false when unticked.
+        "daemon_prompt": daemon_prompt.offer(),
     })
+
+
+async def h_prompt_packs_text(request: web.Request) -> web.Response:
+    """One pack's text as a session created in ``cwd`` would be given it.
+
+    The create form's preview: the workspace's copy when installed (edits
+    included), else claunch's, with where it came from
+    (prompt_packs.preview). 404 for an id that is neither.
+    """
+    pack_id = request.query.get("id") or ""
+    cwd = cflow_state.resolve_cwd(request.query.get("cwd") or None)
+    owner = workspaces.owning(str(cwd))
+    try:
+        doc = await asyncio.to_thread(
+            prompt_packs.preview,
+            Path(owner.path) if owner is not None else None,
+            pack_id,
+        )
+    except prompt_packs.PackError as exc:
+        return json_error(404, str(exc))
+    doc["workspace"] = owner.to_dict() if owner is not None else None
+    return json_response(doc)
+
+
+async def h_daemon_prompt_get(request: web.Request) -> web.Response:
+    """This daemon's own prompt: where it lives, what it says."""
+    return json_response(await asyncio.to_thread(daemon_prompt.read))
+
+
+async def h_daemon_prompt_put(request: web.Request) -> web.Response:
+    """Replace this daemon's prompt (``text``; empty turns it off).
+
+    ``by`` names the writer for the log beside the file -- the MCP tool sends
+    the calling session, Settings sends nothing and is logged as the web UI.
+    """
+    body = await _json_body(request)
+    by = str(body.get("by") or "web")
+    try:
+        doc = await asyncio.to_thread(
+            daemon_prompt.write, body.get("text", ""), by=by
+        )
+    except daemon_prompt.DaemonPromptError as exc:
+        return json_error(400, str(exc))
+    return json_response(doc)
 
 
 def _pack_target(body: dict):
@@ -5635,6 +5759,84 @@ async def h_relay_peer_sessions(request: web.Request) -> web.Response:
     )
 
 
+def _describe_workspaces() -> list:
+    """Every registered workspace as :func:`reposync.describe` sees it. A
+    workspace that is not a readable git repository is listed with its error,
+    so the asker can tell "not here" from "here but broken"."""
+    rows = []
+    for ws in workspaces.list_all():
+        try:
+            doc = reposync.describe(reposync.toplevel(ws.path))
+        except reposync.SyncError as exc:
+            rows.append({"workspace": ws.name, "error": str(exc)})
+            continue
+        rows.append({"workspace": ws.name, **doc})
+    return rows
+
+
+async def h_peer_repos(request: web.Request) -> web.Response:
+    return json_response({"repos": await asyncio.to_thread(_describe_workspaces)})
+
+
+async def h_reposync_repos(request: web.Request) -> web.Response:
+    """This daemon's own answer to /peer/repos, for the CLI and the web UI."""
+    return json_response({
+        "repos": await asyncio.to_thread(_describe_workspaces),
+        "relay": request.app["relay_state"](),
+    })
+
+
+async def h_relay_peer_repos(request: web.Request) -> web.Response:
+    mm = _mesh_mgr(request)
+    if mm.peer_transport is None:
+        return json_error(400, "relay uplink is not running")
+    machine = request.match_info["machine"]
+    try:
+        payload = await mm.peer_transport(machine, "/peer/repos", {})
+    except Exception as exc:  # noqa: BLE001 — PeerError, an old peer's 404
+        return json_error(502, f"{machine}: {exc}")
+    return json_response({"machine": machine, "repos": payload.get("repos", [])})
+
+
+async def h_reposync_request_submit(request: web.Request) -> web.Response:
+    """A session's sync plan, waiting for a person. The CLI decided that the
+    caller is a managed session and that the setting asks for approval; the
+    daemon only holds the question."""
+    body = await _json_body(request)
+    try:
+        record = request.app["reposync_gate"].submit(
+            session=str(body.get("session") or ""), plan=body.get("plan") or {},
+        )
+    except ValueError as exc:
+        return json_error(400, str(exc))
+    return json_response({"ok": True, "request": record})
+
+
+async def h_reposync_requests_list(request: web.Request) -> web.Response:
+    return json_response({"requests": request.app["reposync_gate"].list()})
+
+
+async def h_reposync_request_get(request: web.Request) -> web.Response:
+    record = request.app["reposync_gate"].get(request.match_info["rid"])
+    if record is None:
+        return json_error(404, "no reposync request with that id")
+    return json_response({"request": record})
+
+
+async def h_reposync_request_approve(request: web.Request) -> web.Response:
+    record = request.app["reposync_gate"].approve(request.match_info["rid"], decided_by="web")
+    if record is None:
+        return json_error(409, "no pending reposync request with that id")
+    return json_response({"ok": True, "request": record})
+
+
+async def h_reposync_request_reject(request: web.Request) -> web.Response:
+    record = request.app["reposync_gate"].reject(request.match_info["rid"], decided_by="web")
+    if record is None:
+        return json_error(409, "no pending reposync request with that id")
+    return json_response({"ok": True, "request": record})
+
+
 async def h_relay_meshes(request: web.Request) -> web.Response:
     """Meshes this daemon could attach: public ones owned by any daemon on
     any connected relay, plus offers pushed here (one hop, deduplicated)."""
@@ -6732,12 +6934,17 @@ def _session_prompt_packs(
             roles = [primary, *(roleset.canonical(r) or r for r in plan.subroles)]
     asked = _asked_prompt_packs(body)
     required = prompt_packs.required_for(roles)
+    # The daemon's own prompt comes first, for every role, unless the
+    # request turned it off (daemon_prompt.wanted).
+    own = daemon_prompt.pack() if daemon_prompt.wanted(body) else None
+    head = prompt_packs.records([own]) if own is not None else []
     if not asked and not required:
-        return [], {}
+        return head, {}
     owner = workspaces.owning(str(cflow_state.resolve_cwd(cwd or None)))
-    return prompt_packs.choose(
+    recs, required = prompt_packs.choose(
         Path(owner.path) if owner is not None else None, asked, roles
     )
+    return head + recs, required
 
 
 async def _onboard_and_launch(
@@ -6801,10 +7008,10 @@ async def _onboard_and_launch(
             profile=session.sdef.profile or "",
         )
         # Checked before anything is arranged, like the board answer above: a
-        # ticked pack that is not installed where the session will run is a
-        # refused request, never a session that started without guidance it
-        # was promised. A role-required one falls back to claunch's copy
-        # (prompt_packs.required_pack) and refuses only when it exists nowhere.
+        # pack, ticked or role-required, that exists neither where the session
+        # will run nor in claunch is a refused request, never a session that
+        # started without guidance it was promised. One the workspace has not
+        # installed goes in as claunch's copy (prompt_packs.pack_copy).
         try:
             packs, packs_required = _session_prompt_packs(
                 request, body, plan, name=name, cwd=cwd
@@ -8192,24 +8399,51 @@ async def h_session_quick_fork(request: web.Request) -> web.Response:
     block says so in as many words -- the only defence available against two
     claude sessions writing one checkout is that both of them know.
     """
+    try:
+        out = await stage_quick_fork(
+            request, request.match_info["name"], await _json_body(request)
+        )
+    except QuickForkError as exc:
+        return json_error(exc.status, str(exc))
+    return json_response(out, status=201)
+
+
+class QuickForkError(Exception):
+    """A quick-fork that cannot be made, with the HTTP status it answers."""
+
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+async def stage_quick_fork(
+    request: web.Request, parent: str, body: dict, *, tag: str = "qf",
+    spawn_extra: Optional[dict] = None, before_launch=None,
+) -> dict:
+    """The quick-fork itself, shared by the operator's press (above) and the
+    ``deep_think`` tool (daemon/deep_think.py), which forks the asking
+    session the same way and adds its own fields: ``tag`` names the copy
+    (``<parent>-<tag><n>``), ``spawn_extra`` rides the spawn body (``model``
+    and ``effort``, under the spawn policy like any child's), and
+    ``before_launch(session)`` writes onto the staged copy before it starts.
+    Raises :class:`QuickForkError` with the status the route answers.
+    """
     manager: SessionManager = request.app["manager"]
-    parent = request.match_info["name"]
-    body = await _json_body(request)
     try:
         origin = manager.get(parent)
     except ManagerError as exc:
-        return json_error(404, str(exc))
+        raise QuickForkError(404, str(exc)) from None
     if origin.exited:
-        return json_error(400, f"session {parent!r} has exited — an exited session cannot be quick-forked")
+        raise QuickForkError(400, f"session {parent!r} has exited — an exited session cannot be quick-forked")
     if not spawn_mod.can_fork(origin.sdef.to_dict()):
-        return json_error(
+        raise QuickForkError(
             400,
             f"session {parent!r} has no conversation to copy: quick-fork needs "
             "a claude session whose conversation is on disk (its first turn "
             "has landed)",
         )
     name = str(body.get("name") or "").strip() or handoff_mod.fork_name(
-        parent, {s.sdef.name for s in manager.list()}
+        parent, {s.sdef.name for s in manager.list()}, tag=tag,
     )
     marker = handoff_mod.new_marker()
     forked_at = handoff_mod._utcnow()
@@ -8247,21 +8481,25 @@ async def h_session_quick_fork(request: web.Request) -> web.Response:
         spawn_body["mesh"] = mesh
     if not inherit_workflow:
         spawn_body["workflow"] = workflow
+    for key, value in (spawn_extra or {}).items():
+        spawn_body.setdefault(key, value)
     warnings: list = []
     try:
         session = manager.stage_child(parent, spawn_body, warnings=warnings)
     except spawn_mod.SpawnDenied as exc:
-        return json_error(403, str(exc))
+        raise QuickForkError(403, str(exc)) from None
     except (HarnessError, ValueError, TypeError) as exc:
-        return json_error(400, f"bad quick-fork request: {exc}")
+        raise QuickForkError(400, f"bad quick-fork request: {exc}") from None
     except ManagerError as exc:
-        return json_error(409 if "already exists" in str(exc) else 400, str(exc))
+        raise QuickForkError(409 if "already exists" in str(exc) else 400, str(exc)) from None
+    if before_launch is not None:
+        before_launch(session)
     try:
         result = await _onboard_and_launch(request, session, spawn_body, parent=parent)
     except onboard.OnboardError as exc:
-        return json_error(400, str(exc))
+        raise QuickForkError(400, str(exc)) from None
     except (HarnessError, ValueError, TypeError) as exc:
-        return json_error(400, f"bad quick-fork request: {exc}")
+        raise QuickForkError(400, f"bad quick-fork request: {exc}") from None
     out = {
         "session": session.info(), "origin": parent, "marker": marker,
         "forked_at": forked_at, **result,
@@ -8283,7 +8521,7 @@ async def h_session_quick_fork(request: web.Request) -> web.Response:
     }
     if warnings:
         out["warnings"] = warnings
-    return json_response(out, status=201)
+    return out
 
 
 async def h_session_handoff(request: web.Request) -> web.Response:
@@ -9151,6 +9389,47 @@ async def h_session_notice(request: web.Request) -> web.Response:
         return json_error(400, "'level' must be one of " + ", ".join(notice_mod.LEVELS))
     viewers = session.notify(text, ttl=ttl, level=level)
     return json_response({"ok": True, "viewers": viewers})
+
+
+async def h_session_line_sync(request: web.Request) -> web.Response:
+    """The session line's shared state (:mod:`line_sync`).
+
+    GET answers the state. POST changes it: ``mode`` (``local`` /
+    ``remote``) switches the session -- every viewer is moved with it -- and
+    ``text`` (with ``if_text`` for a conditional write) replaces the shared
+    text, which is refused with 409 while the session is ``local``. ``client``
+    is the writing page's own id, echoed back so it can tell its write from
+    somebody else's. Either change goes out to every attached viewer as a
+    ``line_sync`` frame; ``viewers`` says how many."""
+    session = _session(request)
+    name = session.sdef.name
+    if request.method == "GET":
+        return json_response(line_sync.get(name).frame())
+    body = await _json_body(request)
+    client = str(body.get("client") or "")[:64]
+    mode = body.get("mode")
+    has_text = "text" in body
+    if mode is None and not has_text:
+        return json_error(400, "give 'mode' or 'text'")
+    changed = False
+    try:
+        if mode is not None:
+            _, moved = line_sync.set_mode(name, mode, client=client)
+            changed = changed or moved
+        if has_text:
+            if_text = body.get("if_text")
+            if if_text is not None and not isinstance(if_text, str):
+                return json_error(400, "'if_text' must be a string")
+            _, wrote = line_sync.set_text(
+                name, body.get("text"), client=client, if_text=if_text
+            )
+            changed = changed or wrote
+    except line_sync.LineSyncError as exc:
+        status = 409 if isinstance(exc, line_sync.NotRemote) else 400
+        return json_error(status, str(exc))
+    state = line_sync.get(name)
+    viewers = line_sync.publish(session, state) if changed else 0
+    return json_response({**state.frame(), "changed": changed, "viewers": viewers})
 
 
 async def h_session_rebrief(request: web.Request) -> web.Response:
