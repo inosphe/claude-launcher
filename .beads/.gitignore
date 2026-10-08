@@ -69,3 +69,7 @@ redirect
 .write-waiters.lock/
 # WAL indexes br quarantined
 .br-wal-index-*/
+
+# Board export: not tracked in git (user decision, claunch-xt0wn).
+# The board lives in beads.db; issues.jsonl stays a local export.
+issues.jsonl
