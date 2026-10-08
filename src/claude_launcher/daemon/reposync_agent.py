@@ -24,7 +24,7 @@ def active(manager, repo: str):
 
 def summary(session) -> dict:
     return {"session": session.sdef.name, "parent": session.sdef.parent,
-            "status": session.status()}
+            "status": session.status(), "prompt": session.sdef.task or ""}
 
 
 def task(card: dict, *, error: str = "") -> str:
@@ -40,6 +40,7 @@ def task(card: dict, *, error: str = "") -> str:
         + json.dumps(facts, ensure_ascii=False, indent=2) + "\n\n"
         "You own diagnosis, conflict resolution, verification and the final report. "
         "Work in your new isolated worktree, initially based on the shown local commit. "
+        "Whenever rebasing, use git rebase --rebase-merges to preserve merge history. "
         "Fetch and inspect current source and destination refs before proceeding: "
         "the recorded tips and failure are a snapshot, not proof of current state. "
         "If a mechanical rebase failed, it was aborted and its temporary worktree removed; "
