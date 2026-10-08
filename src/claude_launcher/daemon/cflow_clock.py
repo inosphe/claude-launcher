@@ -2200,18 +2200,25 @@ class TriggerClock:
         """The landing request onto a v2 parent run's ``landing`` collection
         (principal ``child``), or None when the parent has no such run.
 
-        A parent that also holds a v1 ``landing_queue:`` run leaves this to
-        the v1 path (None), and of several v2 runs a main run is taken first,
-        then the first in order (:func:`.landing_route.pick`, docs 10).
+        Only a live parent's runs in a checkout of the worker's repository
+        count, as in :class:`.landing_route.Router`; with none (or a parent
+        that exited) this returns None and the v1 route decides. A parent that
+        also holds a v1 ``landing_queue:`` run leaves this to the v1 path
+        (None), and of several v2 runs a main run is taken first, then the
+        first in order (:func:`.landing_route.pick`, docs 10).
         """
         from ..cflow2 import store as cstore
         from . import cflow2_triggers as v2
 
         parent = v2.parent_of(self.manager, scope)
-        if not parent:
+        if not parent or v2.live_session(self.manager, parent) is None:
             return None
+        repo = await asyncio.to_thread(cflow_landing.common_dir, cwd)
         holders = await asyncio.to_thread(
-            lambda: v2.v2_holders(v2.LANDING, parent, v2.session_cwds(self.manager, parent))
+            lambda: [
+                h for h in v2.v2_holders(v2.LANDING, parent, v2.session_cwds(self.manager, parent))
+                if repo is None or cflow_landing.common_dir(h[0]) == repo
+            ]
         )
         holders = sorted(set(holders))
         if not holders:
