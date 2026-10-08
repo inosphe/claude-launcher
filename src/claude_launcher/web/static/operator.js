@@ -753,14 +753,25 @@ function openModal() {
   modalRoot.querySelector(".operator-composer textarea")?.focus();
 }
 
-/* The floating button: always there, whatever page is on screen. */
+/* The floating button: always there, whatever page is on screen. It is one
+   segment of the shared dock (#fab-dock) that Chat (chat.js) joins too, so
+   the two sit in one control instead of two stacked buttons. */
+function fabDock() {
+  let dock = document.getElementById("fab-dock");
+  if (!dock) {
+    dock = node("div", null, "fab-dock"); dock.id = "fab-dock";
+    dock.setAttribute("role", "group"); dock.setAttribute("aria-label", "빠른 열기");
+    document.body.append(dock);
+  }
+  return dock;
+}
 const fab = node("button", null, "operator-fab"); fab.type = "button";
 fab.title = "Operator 열기 (Alt+O)"; fab.setAttribute("aria-label", "Operator 열기 (Alt+O)");
 fab.append(node("span", "◍", "operator-fab-icon"), node("span", "Operator", "operator-fab-label"));
 const fabBadge = node("span", "", "operator-badge-count"); fabBadge.id = "operator-fab-badge"; fabBadge.hidden = true;
 fab.append(fabBadge);
 fab.onclick = () => modal.open ? modal.close() : openModal();
-document.body.append(fab);
+fabDock().append(fab);
 document.addEventListener("keydown", event => {
   if (event.altKey && !event.ctrlKey && !event.metaKey && (event.key === "o" || event.key === "O")) {
     event.preventDefault();

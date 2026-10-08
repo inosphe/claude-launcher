@@ -94,6 +94,22 @@ const server = http.createServer((req, res) => {
     assert.equal(nav[nav.indexOf("meshes") + 1], "chat");
     assert.equal(await a.isVisible(".chat-fab"), false, "no button over the Chat page");
     assert.equal(await b.isVisible(".chat-fab"), true);
+    // ...and it is one control with the Operator's: both buttons are segments
+    // of the single #fab-dock, and only one dock exists.
+    const dockOf = (p) => p.evaluate(() => ({
+      docks: document.querySelectorAll(".fab-dock").length,
+      parts: [...document.querySelectorAll("#fab-dock > button")].map((e) => e.className.split(" ")[0]),
+      visible: [...document.querySelectorAll("#fab-dock > button")].filter((e) => e.offsetParent).map((e) => e.className.split(" ")[0]),
+    }));
+    assert.deepEqual(await dockOf(b), { docks: 1, parts: ["operator-fab", "chat-fab"], visible: ["operator-fab", "chat-fab"] });
+    assert.deepEqual((await dockOf(a)).visible, ["operator-fab"], "on the Chat page the dock keeps only the Operator's segment");
+    // The dock's remaining segment does not cover the composer's send button.
+    const clear = (p, sel) => p.evaluate((sel) => {
+      const r1 = document.getElementById("fab-dock").getBoundingClientRect();
+      const r2 = document.querySelector(sel).getBoundingClientRect();
+      return r1.right <= r2.left || r2.right <= r1.left || r1.bottom <= r2.top || r2.bottom <= r1.top;
+    }, sel);
+    assert.ok(await clear(a, "#chat-view .chat-composer button[type=submit]"), "the dock covers the send button");
 
     // 3. A renames itself and posts
     await a.waitForSelector("#chat-view .chat-feed .chat-msg");

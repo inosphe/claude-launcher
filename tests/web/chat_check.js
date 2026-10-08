@@ -94,8 +94,8 @@ check("the nav entry sits right after Mesh and carries the badge",
       /data-page="meshes">[^\n]*\n\s*<a href="#\/chat" data-page="chat">[^\n]*id="chat-nav-badge"/.test(html), true);
 check("script and stylesheet are loaded",
       [html.includes('<script src="static/chat.js"></script>'), html.includes('href="static/chat.css"')], [true, true]);
-check("the modal opens from anywhere through the floating button",
-      [src.includes("document.body.append(fab)"), src.includes("fab.onclick = () => modal.open ? modal.close() : openModal();")], [true, true]);
+check("the modal opens from anywhere through the floating button, a segment of the shared dock",
+      [src.includes("fabDock().append(fab)"), src.includes('dock.id = "fab-dock"'), src.includes("fab.onclick = () => modal.open ? modal.close() : openModal();")], [true, true, true]);
 check("a post carries this browser's key and name to the chat API",
       [src.includes("api/chat/rooms/${encodeURIComponent(mesh)}/messages"), src.includes("{key: me.key, name: me.name, body: text}")],
       [true, true]);

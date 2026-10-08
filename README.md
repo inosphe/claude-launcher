@@ -3738,7 +3738,8 @@ press **Operator 시작**); the daemon creates one session with role
 `operator` on mesh `operator-<project>`, running the bundled `operator`
 workflow (declare it where the session works — `claunch cflow update`
 refreshes the global layer). The same conversation opens as a modal over any
-page from the floating **Operator** button or **Alt+O**. The bot is an
+page from the Operator button (◍) in the floating dock at the bottom right,
+or **Alt+O**. The bot is an
 ordinary claunch session: it is listed with the others, and its name in the
 Operator header links to its terminal (a link followed from the modal closes
 the modal). The bot polls with
@@ -3787,8 +3788,8 @@ own calls live under `/api/operator/agent/{session}/…` and are refused to any
 session that is not its project's bound operator.
 
 **Chat** is where the *people* on a mesh's daemons talk to each other. The
-**Chat** tab next to Mesh (`#/chat`, `#/chat/<mesh>`) and the floating
-**Chat** button above the Operator's open one room per mesh this daemon owns
+**Chat** tab next to Mesh (`#/chat`, `#/chat/<mesh>`) and the Chat button (✉)
+beside the Operator's in the same floating dock open one room per mesh this daemon owns
 or mirrors. A person is a browser: the page mints a random key into
 localStorage the first time it loads and keeps it with a display name the
 header lets you change (it applies to messages sent after the change), so a
