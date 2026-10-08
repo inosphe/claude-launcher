@@ -89,18 +89,25 @@ option:disabled { color: #6b7280; }
   position: relative; z-index: 4;
 }
 .session-filter-buttons {
-  display: flex; flex-wrap: nowrap; gap: 1px; overflow-x: auto;
+  display: flex; flex-wrap: nowrap; gap: 4px; overflow-x: auto;
+  padding: 2px 0 9px; margin-bottom: 6px; border-bottom: 1px solid #29313c;
+  scrollbar-width: thin;
 }
 .session-filters button {
-  flex: 0 0 auto; white-space: nowrap; padding: 6px 7px; border: 0; border-radius: 4px;
-  background: transparent; color: #7d8590; cursor: pointer;
-  font-size: 11px; line-height: 1.2; text-align: left;
+  flex: 1 0 0; min-width: 48px; min-height: 42px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+  white-space: nowrap; padding: 5px 2px; border: 1px solid #29313c; border-radius: 6px;
+  background: #171c24; color: #8b949e; cursor: pointer;
+  font-size: 10px; font-weight: 500; line-height: 1.2; text-align: center;
+  transition: background-color 120ms, border-color 120ms, color 120ms;
 }
-.session-filters button:hover { color: #c9d1d9; background: #1d2128; }
+.session-filters button:hover { color: #e6edf3; background: #202936; border-color: #43536a; }
 .session-filters button[aria-pressed="true"] {
-  color: #e6edf3; background: #243247; box-shadow: inset 0 0 0 1px #385273;
+  color: #d6e9ff; background: #20324a; border-color: #42648d;
 }
-.session-filter-count { margin-left: 4px; color: #8b949e; font-variant-numeric: tabular-nums; }
+.session-filters button:focus-visible { outline: 2px solid #79b8ff; outline-offset: -2px; }
+.session-filter-count { display: block; font-size: 9px; font-weight: 400; color: #8b949e; font-variant-numeric: tabular-nums; }
+.session-filters button[aria-pressed="true"] .session-filter-count { color: #a4bedc; }
 .session-group-toggle {
   grid-column: 1 / -1; display: flex; align-items: center; gap: 6px;
   padding: 4px 7px 2px; color: #8b949e; font-size: 11px; cursor: pointer;
@@ -4791,8 +4798,7 @@ body.embed #main { width: 100%; }
   /* thumb-sized, like every other tap target on the rail */
   #refresh-all { font-size: 17px; padding: 6px 10px; }
   .session-filters { padding: 7px; }
-  .session-filters button { padding: 9px 7px; font-size: 12px; text-align: center; }
-  .session-filter-count { float: none; margin-left: 3px; }
+  .session-filters button { min-height: 44px; }
   /* The rail is the whole screen here, so the list takes what it needs and
      the nav sits at the thumb end rather than floating mid-screen. */
   #session-list { flex: 1 0 auto; max-height: none; overflow: visible; }
