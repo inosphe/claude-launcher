@@ -1676,6 +1676,29 @@ function clearSessionSearch() {
   box.focus();
 }
 
+/* The search shares one line with the project header: folded to its icon
+   while it is empty and not being typed in, and opened over the header --
+   the header hidden, the box taking its width -- when the icon is pressed
+   or the box takes the focus. A box with a query in it stays open, so the
+   narrowing on the list is never hidden behind an icon. */
+function syncSessionSearchOpen(open) {
+  const row = $("session-search-row");
+  const box = $("session-search");
+  if (!row || !box) return;
+  const want = open === undefined
+    ? !!box.value || (typeof document !== "undefined" && document.activeElement === box)
+    : !!open || !!box.value;
+  row.classList.toggle("searching", want);
+  const toggle = $("session-search-toggle");
+  if (toggle) toggle.setAttribute("aria-expanded", String(want));
+}
+
+function openSessionSearch() {
+  syncSessionSearchOpen(true);
+  const box = $("session-search");
+  if (box) box.focus();
+}
+
 async function runSessionSearch(q) {
   q = String(q || "").trim();
   if (!q) { setSessionSearch(""); return; }
@@ -9187,8 +9210,7 @@ function setCurrentProject(name) {
   currentProject = next;
   try { localStorage.setItem(PROJECT_KEY, next); } catch {}
   syncProjectHash();
-  const rail = $("project-select");
-  if (rail && rail.value !== next) rail.value = next;
+  renderProjectTabs();
   // The form files a new session where the rail is looking, unless the
   // rail says "all" — then the form keeps whatever the operator picked.
   const form = document.querySelector("#new-session select[name=project]");
@@ -9277,6 +9299,67 @@ function applyProjectDefaultMesh(f, picked, previous) {
   }
 }
 
+/* The rail's project picker: one tab per project behind "All projects",
+   and under it the picked project's header -- its name and default
+   workspace, on the line the search box shares (index.html
+   #session-search-row). Rebuilt from projectsCache and currentProject on
+   every pick and every change to the registry. Pressing the open tab takes
+   the list to its top, as the group tabs do. */
+function renderProjectTabs() {
+  const bar = $("project-tabs");
+  if (bar) {
+    bar.textContent = "";
+    const tabs = [{ name: "", label: "All projects", title: "every project's sessions" }]
+      .concat(projectsCache.map((p) => ({
+        name: p.name, label: p.name,
+        title: p.default_workspace ? `${p.name} — ${p.default_workspace}` : p.name,
+      })));
+    let open = null;
+    for (const tab of tabs) {
+      const el = document.createElement("div");
+      const active = tab.name === currentProject;
+      el.className = "project-tab" + (active ? " active" : "");
+      el.setAttribute("role", "tab");
+      el.setAttribute("aria-selected", String(active));
+      el.tabIndex = 0;
+      el.dataset.project = tab.name;
+      el.textContent = tab.label;
+      el.title = active ? `${tab.title} — click to scroll to the top` : tab.title;
+      const press = () => {
+        if (tab.name === currentProject) scrollSessionListTop();
+        else setCurrentProject(tab.name);
+      };
+      el.addEventListener("click", press);
+      el.addEventListener("keydown", (ev) => {
+        if (ev.key !== "Enter" && ev.key !== " ") return;
+        ev.preventDefault();
+        press();
+      });
+      bar.appendChild(el);
+      if (active) open = el;
+    }
+    // A strip wider than the rail scrolls sideways; the open tab is kept in it.
+    if (open && typeof open.scrollIntoView === "function") {
+      open.scrollIntoView({ block: "nearest", inline: "nearest" });
+    }
+  }
+  const head = $("project-header");
+  if (!head) return;
+  const picked = projectsCache.find((p) => p.name === currentProject) || null;
+  const name = head.querySelector(".project-header-name");
+  const detail = head.querySelector(".project-header-detail");
+  if (name) name.textContent = picked ? picked.name : "All projects";
+  if (detail) {
+    detail.textContent = picked
+      ? (picked.default_workspace || picked.default_cwd || "no default workspace")
+      : `${projectsCache.length} project${projectsCache.length === 1 ? "" : "s"}`;
+  }
+  head.title = picked
+    ? `project ${picked.name}` + (picked.default_cwd ? ` — ${picked.default_cwd}` : "")
+      + " — click to scroll to the top"
+    : "every project — click to scroll to the top";
+}
+
 function projectSelectOptions(select, withAll) {
   const kept = select.value;
   select.innerHTML = "";
@@ -9305,18 +9388,13 @@ async function refreshProjects() {
   if (signature === projectsRendered) return;
   projectsRendered = signature;
   projectsCache = list;
-  const rail = $("project-select");
-  if (rail) {
-    projectSelectOptions(rail, true);
-    // A remembered project that was removed since falls back to "all",
-    // and the memory is corrected so the next load does not ask for it.
-    // Asked of the options, not of the select's value: on the first build
-    // the select had no value to keep, so it reads "" whatever the page
-    // remembered, and comparing that dropped every reload's pick.
-    if (currentProject && ![...rail.options].some((o) => o.value === currentProject)) {
-      setCurrentProject("");
-    } else rail.value = currentProject;
-  }
+  // A remembered project that was removed since falls back to "all", and
+  // the memory is corrected so the next load does not ask for it. Asked of
+  // the registry, not of a picker's value: on the first build a picker has
+  // no value to keep, and comparing that dropped every reload's pick.
+  if (currentProject && !projectsCache.some((p) => p.name === currentProject)) {
+    setCurrentProject("");
+  } else renderProjectTabs();
   const form = document.querySelector("#new-session select[name=project]");
   if (form) {
     projectSelectOptions(form, false);
@@ -12129,9 +12207,12 @@ for (const filter of SESSION_FILTERS) {
   const button = $(`session-filter-${filter}`);
   if (button) button.addEventListener("click", () => setSessionFilter(filter));
 }
-const projectSelect = $("project-select");
-if (projectSelect) {
-  projectSelect.addEventListener("change", () => setCurrentProject(projectSelect.value));
+// The project header shares its line with the search box: pressing the
+// header (its name, not the controls beside it) takes the list to its top.
+const projectHeader = $("project-header");
+if (projectHeader) {
+  projectHeader.addEventListener("click", scrollSessionListTop);
+  renderProjectTabs();
 }
 {
   const formProject = document.querySelector("#new-session select[name=project]");
@@ -18411,14 +18492,24 @@ if (sessionSearchBox) {
   sessionSearchBox.addEventListener("keydown", (e) => {
     if (e.key === "Enter") { e.preventDefault(); runSessionSearch(sessionSearchBox.value); }
     if (e.key === "Escape") clearSessionSearch();
+    // Esc on a box already empty folds the search back to its icon.
+    if (e.key === "Escape" && !sessionSearchBox.value) {
+      sessionSearchBox.blur();
+      syncSessionSearchOpen(false);
+    }
   });
+  sessionSearchBox.addEventListener("focus", () => syncSessionSearchOpen(true));
+  sessionSearchBox.addEventListener("blur", () => syncSessionSearchOpen(false));
+  $("session-search-toggle")?.addEventListener("click", openSessionSearch);
   const sessionSearchClearButton = $("session-search-clear");
   if (sessionSearchClearButton) {
     sessionSearchClearButton.addEventListener("click", clearSessionSearch);
   }
   // A reload can hand the box back with text in it, so the button's first
-  // state is read from the box rather than assumed to be empty.
+  // state is read from the box rather than assumed to be empty -- and so
+  // is whether the search starts open.
   syncSessionSearchClear();
+  syncSessionSearchOpen();
 }
 
 $("new-session").mesh.addEventListener("change", async () => {
