@@ -2480,6 +2480,19 @@ asked when the panel opens and on Refresh, one round trip each, never on
 page load. The status answer carries `distance: {state, theirs_only,
 ours_only}` on each peer row and the silent peers as `unreadable`.
 
+The panel ends with the repository's **History**: what this machine synced,
+pushed and pulled in it, newest first (the last 30) -- when, from which tip
+to which, who ran it (a session, linked; the Sync panel; or a terminal) and
+how a push was let through (the approval card and who answered it, `auto`,
+or a person at their own terminal). The Sync panel, `claunch reposync` and
+the MCP tool `repo_sync` each append a line when an operation runs, failures
+included with git's refusal, to `reposync-history.jsonl` in the daemon
+directory; a refused or expired card ran nothing and is not there (the
+approval cards themselves are kept in memory only). Lines are matched per
+repository, so every worktree of one shows the same history. The status
+answer carries them as `history: [{at, kind, workspace, remote, branch, ref,
+action, before, after, pushed, by, approval, ok, error}]`.
+
 ### VS Code in the browser (one code-server per workspace and worktree)
 
 The daemon can run [code-server](https://github.com/coder/code-server) next to

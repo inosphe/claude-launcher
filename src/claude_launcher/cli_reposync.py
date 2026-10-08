@@ -14,7 +14,7 @@ import argparse
 import json
 import os
 import sys
-from typing import Optional
+from typing import Optional, Tuple
 
 from . import reposync, reposync_flow as flow
 
@@ -36,22 +36,25 @@ def _err(msg: str) -> int:
 # --------------------------------------------------------------------------- #
 # approval
 # --------------------------------------------------------------------------- #
-def _approve(card: dict, *, yes: bool, c) -> Optional[dict]:
-    """None when the push may go ahead; otherwise the refusal as a dict.
+def _approve(card: dict, *, yes: bool, c) -> Tuple[Optional[dict], dict]:
+    """``(None, approval)`` when the push may go ahead -- ``approval`` says
+    how, for the history; otherwise ``(refusal, {})``.
 
     ``auto`` needs nobody. Under ``ask``, a person at their own terminal says
     y (or passed --yes); a managed session waits on the web UI's card, and
     its --yes is not an answer -- the asker cannot be the approver.
     """
     if flow.approval_mode() == flow.AUTO:
-        return None
+        return None, {"mode": flow.AUTO}
     if not os.environ.get("CLAUNCH_SESSION"):
         if yes:
-            return None
+            return None, {"mode": "terminal", "yes": True}
         if not sys.stdin.isatty():
-            return {"status": "needs_approval", "why": "not a terminal -- pass --yes"}
+            return {"status": "needs_approval", "why": "not a terminal -- pass --yes"}, {}
         answer = input(f"{card['summary']}\nproceed? [y/N] ").strip().lower()
-        return None if answer in ("y", "yes") else {"status": "declined"}
+        if answer in ("y", "yes"):
+            return None, {"mode": "terminal"}
+        return {"status": "declined"}, {}
     record = flow.file_request(c, card)
     print(
         f"waiting for approval in the web UI (request {record['id']}, "
@@ -60,8 +63,8 @@ def _approve(card: dict, *, yes: bool, c) -> Optional[dict]:
     )
     record = flow.wait_request(c, record["id"])
     if record.get("status") == "approved":
-        return None
-    return {"status": record.get("status"), "request": record["id"]}
+        return None, flow.card_approval(record)
+    return {"status": record.get("status"), "request": record["id"]}, {}
 
 
 # --------------------------------------------------------------------------- #
@@ -131,12 +134,16 @@ def _cmd_master(args: argparse.Namespace) -> int:
         lines += [f"    {name}" for name in p.affected]
     if args.dry_run or p.action == reposync.UP_TO_DATE:
         return _out(args, {"plan": p.to_dict(), "dry_run": args.dry_run}, lines)
+    approval = {"mode": "none"}
     if p.pushes:
-        refusal = _approve(card, yes=args.yes, c=c)
+        refusal, approval = _approve(card, yes=args.yes, c=c)
         if refusal:
             print("\n".join(lines))
             return _err(f"not synced: {refusal}")
-    result = reposync.execute(p, scratch=flow.scratch())
+    entry = flow.history_entry(repo, kind="master", workspace=workspace, remote=remote,
+                               branch=p.branch, by=flow.actor(), approval=approval)
+    result = flow.recorded(entry, lambda: reposync.execute(p, scratch=flow.scratch()),
+                           flow.master_done(p))
     reposync.git(repo, "config", reposync.REMOTE_CONFIG, remote, check=False)
     board = []
     if result.rewritten:
@@ -170,18 +177,28 @@ def _cmd_branch_push(args: argparse.Namespace) -> int:
         "summary": f"push {args.branch} {sha[:8]} to {remote}/{target}"
                    + (" (force-with-lease)" if args.force_with_lease else ""),
     }
-    refusal = _approve(card, yes=args.yes, c=c)
+    refusal, approval = _approve(card, yes=args.yes, c=c)
     if refusal:
         return _err(f"not pushed: {refusal}")
-    reposync.publish_branch(repo, remote, args.branch, me, force_with_lease=args.force_with_lease)
+    entry = flow.history_entry(repo, kind="publish", workspace=workspace, remote=remote,
+                               branch=args.branch, by=flow.actor(), approval=approval,
+                               ref=target, force=bool(args.force_with_lease))
+    flow.recorded(entry, lambda: reposync.publish_branch(
+        repo, remote, args.branch, me, force_with_lease=args.force_with_lease),
+        lambda _ref: {"after": sha, "pushed": True})
     return _out(args, {"remote": remote, "ref": target, "sha": sha},
                 [f"pushed {args.branch} {sha[:8]} -> {remote}/{target}"])
 
 
 def _cmd_branch_pull(args: argparse.Namespace) -> int:
-    repo, _workspace = flow.resolve_repo(args.workspace)
+    repo, workspace = flow.resolve_repo(args.workspace)
     remote = reposync.choose_remote(repo, args.remote)
-    local, sha = reposync.receive_branch(repo, remote, args.machine, args.branch)
+    entry = flow.history_entry(repo, kind="pull", workspace=workspace, remote=remote,
+                               branch=args.branch, by=flow.actor(), approval={"mode": "none"},
+                               ref=reposync.shared_ref(args.machine, args.branch))
+    local, sha = flow.recorded(
+        entry, lambda: reposync.receive_branch(repo, remote, args.machine, args.branch),
+        lambda got: {"after": got[1], "pushed": False})
     return _out(args, {"remote": remote, "branch": local, "sha": sha},
                 [f"{local} = {sha[:8]} (from {remote})"])
 

@@ -118,10 +118,11 @@ vm.createContext(ctx);
 vm.runInContext(
   [constant("wsSyncOpen"), constant("wsSyncState"), constant("WS_SYNC_LABEL"),
    constant("WS_SYNC_PATH"), constant("WS_SYNC_POLL_MS"), constant("WS_SHARED_STATE"),
+   constant("WS_HISTORY_KIND"),
    ...["wsSyncSt", "wsSyncRefresh", "wsSyncSend", "wsSyncWait", "wsSyncRun",
        "wsSyncBranch", "wsSyncPlanLine", "wsSyncPeers", "wsSyncResult",
        "wsSyncPanel", "wsSyncPullBody", "wsSyncShared", "wsSyncUnmerged",
-       "wsPeerDistanceText"].map(slice),
+       "wsPeerDistanceText", "wsSyncHistory", "wsHistoryApproval"].map(slice),
    "globalThis.__st = wsSyncSt;"].join("\n"),
   ctx);
 
@@ -359,6 +360,43 @@ async function tick() {
   nodes = walk(ctx.wsSyncPanel(W));
   assert.ok(!nodes.some((n) => n.cls === "ws-sync-peers-table"));
   assert.ok(nodes.some((n) => (n.text || "").startsWith("No relay peer reports a clone")));
+
+  /* ---- history (claunch-iaihd) ------------------------------------------ */
+  // none yet: the heading and one note
+  st.doc = { ...DOC, history: [] };
+  nodes = walk(ctx.wsSyncPanel(W));
+  assert.ok(nodes.some((n) => n.text === "History (0)"));
+  assert.ok(nodes.some((n) => (n.text || "").startsWith("Nothing synced, pushed or pulled")));
+  st.doc = { ...DOC, history: [
+    { at: "2026-10-08T10:05:00+00:00", kind: "master", remote: "origin", branch: "master",
+      action: "rebase", before: "a".repeat(40), after: "b".repeat(40), pushed: true, ok: true,
+      by: "s9", approval: { mode: "card", request: "r1", decided_by: "web",
+                            decided_at: "2026-10-08T10:04:00+00:00" } },
+    { at: "2026-10-08T09:00:00+00:00", kind: "publish", remote: "origin", branch: "s1-work",
+      ref: "pc-a/s1-work", after: "c".repeat(40), pushed: true, ok: true, by: "web",
+      approval: { mode: "auto" } },
+    { at: "2026-10-08T08:00:00+00:00", kind: "pull", remote: "origin", branch: "nope",
+      ref: "pc-b/nope", ok: false, error: "no such branch", by: "terminal",
+      approval: { mode: "none" } },
+  ] };
+  nodes = walk(ctx.wsSyncPanel(W));
+  const hist = nodes.find((n) => n.cls === "ws-sync-section ws-sync-history");
+  assert.ok(hist, "the panel carries the history section");
+  const [h, sync, push, pull] = hist.children;
+  assert.equal(h.text, "History (3)");
+  assert.deepEqual(sync.children.map((n) => n.text), [
+    "2026-10-08 10:05", "sync · pushed", "origin/master", "aaaaaaaa → bbbbbbbb", "s9",
+    "approved on card r1 (web 10:04 UTC)"]);
+  assert.equal(sync.children[4].href, "#/s/s9");
+  assert.deepEqual(push.children.map((n) => n.text), [
+    "2026-10-08 09:00", "push · pushed", "s1-work → origin/pc-a/s1-work", "cccccccc",
+    "Sync panel", "no card (reposync_push: auto)"]);
+  assert.deepEqual(pull.children.map((n) => n.text), [
+    "2026-10-08 08:00", "pull failed", "nope ← origin/pc-b/nope", "terminal",
+    "nothing pushed, no approval needed", "no such branch"]);
+  assert.match(pull.children[1].cls, /exited/);
+  assert.equal(ctx.wsHistoryApproval({ mode: "terminal", yes: true }),
+               "approved at the terminal (--yes)");
 
   console.log("workspacesync_check ok");
 })().catch((err) => { console.error(err); process.exit(1); });

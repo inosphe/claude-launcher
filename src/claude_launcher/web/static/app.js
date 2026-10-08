@@ -26683,6 +26683,62 @@ function wsSyncUnmerged(doc) {
   return box;
 }
 
+/* What this machine synced, pushed and pulled in the repository, newest
+   first (claunch-iaihd): the status doc's `history`, written by the panel,
+   the CLI and the MCP tool alike when an operation runs. A refused or
+   expired approval card ran nothing and is not here. */
+const WS_HISTORY_KIND = { master: "sync", publish: "push", pull: "pull" };
+
+function wsHistoryApproval(a) {
+  const mode = (a || {}).mode;
+  if (mode === "card") {
+    const when = a.decided_at ? ` ${a.decided_at.slice(11, 16)} UTC` : "";
+    return `approved on card ${a.request || "?"} (${a.decided_by || "?"}${when})`;
+  }
+  if (mode === "auto") return "no card (reposync_push: auto)";
+  if (mode === "terminal") return a.yes ? "approved at the terminal (--yes)" : "approved at the terminal";
+  return "nothing pushed, no approval needed";
+}
+
+function wsSyncHistory(doc) {
+  const box = el("div", "ws-sync-section ws-sync-history");
+  const rows = doc.history || [];
+  box.appendChild(el("h4", null, `History (${rows.length})`));
+  if (!rows.length) {
+    box.appendChild(el("p", "wf-note", "Nothing synced, pushed or pulled from this machine yet."));
+    return box;
+  }
+  for (const r of rows) {
+    const line = el("div", "ws-sync-history-row");
+    line.appendChild(el("span", "wf-note mono", String(r.at || "").slice(0, 16).replace("T", " ")));
+    line.appendChild(el("span", "badge " + (r.ok === false ? "exited" : r.pushed ? "busy" : "idle"),
+      r.ok === false ? `${WS_HISTORY_KIND[r.kind] || r.kind} failed`
+        : (WS_HISTORY_KIND[r.kind] || r.kind) + (r.pushed ? " · pushed" : "")));
+    // a pull comes from the remote into the local branch; a push goes out
+    const what = r.ref && r.ref !== r.branch
+      ? `${r.branch} ${r.kind === "pull" ? "←" : "→"} ${r.remote}/${r.ref}`
+      : `${r.remote}/${r.branch}`;
+    line.appendChild(el("span", "mono", what));
+    if (r.after) {
+      const tips = el("span", "mono wf-note",
+        (r.before && r.before !== r.after ? `${r.before.slice(0, 8)} → ` : "") + r.after.slice(0, 8));
+      tips.title = r.action ? `action: ${r.action}` : "";
+      line.appendChild(tips);
+    }
+    if (r.by && r.by !== "web" && r.by !== "terminal") {
+      const who = el("a", "ws-sync-history-session", r.by);
+      who.href = `#/s/${encodeURIComponent(r.by)}`;
+      line.appendChild(who);
+    } else {
+      line.appendChild(el("span", "wf-note", r.by === "web" ? "Sync panel" : "terminal"));
+    }
+    line.appendChild(el("span", "wf-note", wsHistoryApproval(r.approval)));
+    if (r.error) line.appendChild(el("span", "wf-note wf-warning", r.error));
+    box.appendChild(line);
+  }
+  return box;
+}
+
 function wsSyncPanel(w) {
   const st = wsSyncSt(w.name);
   const panel = el("div", "ws-sync");
@@ -26795,6 +26851,7 @@ function wsSyncPanel(w) {
 
   if (st.result) panel.appendChild(wsSyncResult(st.result));
   panel.appendChild(wsSyncPeers(doc));
+  panel.appendChild(wsSyncHistory(doc));
   return panel;
 }
 
