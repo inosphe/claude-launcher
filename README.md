@@ -2435,8 +2435,16 @@ fetched for them, so ahead/behind is as of the last fetch; the panel's
 Refresh fetches. They are read when the page opens and after a sync runs,
 not on the two-second workspace poll. HTTP: `GET
 /api/reposync/workspaces/summary` answers `{workspaces: {<name>: {branch,
-detached, upstream, ahead, behind, changed} | {error}}}` for every
+detached, upstream, ahead, behind, changed, worktrees} | {error}}}` for every
 registered workspace that is present.
+
+A row whose repository has linked worktrees also carries an `N worktrees`
+toggle (folded by default; a busy repository has dozens). Opened, each
+worktree is a line with its path, its branch or detached HEAD, a mark when
+its directory is gone, and the sessions whose directory it is, linked to
+their pages. The workspace itself is never in its own list, also when it is
+registered at a linked worktree. `worktrees` in the summary is
+`[{path, branch, detached, head, prunable}]`.
 
 Under **Work branches** the panel lists the branches other machines published
 on the planned remote as `<machine>/<branch>`, newest commit first, read from

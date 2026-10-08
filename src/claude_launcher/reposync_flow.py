@@ -121,6 +121,46 @@ def local_branches(repo: str) -> List[str]:
     return [line for line in out.splitlines() if line]
 
 
+def linked_worktrees(path: str) -> List[dict]:
+    """The linked worktrees of the repository at ``path`` (claunch-kjjta),
+    from one ``git worktree list --porcelain``: each one's path, branch (or
+    ``detached``) and HEAD. The main checkout -- the workspace itself -- is
+    left out, and so is a bare entry; a worktree whose directory is gone is
+    kept with ``prunable`` so the row can say so. A workspace registered at
+    a linked worktree lists the others, not itself."""
+    out = reposync.git(path, "worktree", "list", "--porcelain", check=False)
+    rows: List[dict] = []
+    cur: Optional[dict] = None
+    for line in out.splitlines() + [""]:
+        if line.startswith("worktree "):
+            cur = {"path": os.path.normpath(line[len("worktree "):]), "branch": None,
+                   "detached": False, "head": None, "prunable": False, "bare": False}
+        elif cur is None:
+            continue
+        elif line.startswith("HEAD "):
+            cur["head"] = line[len("HEAD "):]
+        elif line.startswith("branch "):
+            ref = line[len("branch "):]
+            cur["branch"] = ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else ref
+        elif line == "detached":
+            cur["detached"] = True
+        elif line == "bare":
+            cur["bare"] = True
+        elif line.startswith("prunable"):
+            cur["prunable"] = True
+        elif not line:
+            rows.append(cur)
+            cur = None
+    # the first entry is always the main working tree; a workspace that is
+    # itself a linked worktree does not list itself either
+    try:
+        here = os.path.normcase(os.path.normpath(reposync.toplevel(path)))
+    except reposync.SyncError:
+        here = ""
+    return [{k: v for k, v in r.items() if k != "bare"} for r in rows[1:]
+            if not r["bare"] and os.path.normcase(r["path"]) != here]
+
+
 def git_summary(path: str) -> dict:
     """What a workspace row shows without opening its Sync panel: the
     checked-out branch, how far it is ahead of / behind its upstream, and how
@@ -129,7 +169,9 @@ def git_summary(path: str) -> dict:
     One ``git status`` and nothing else -- no fetch, so ahead/behind is
     against the remote-tracking ref as the last fetch left it, and untracked
     files are not scanned (on a large checkout that scan is what takes the
-    seconds). A directory git cannot read answers ``{"error": ...}``."""
+    seconds). A directory git cannot read answers ``{"error": ...}``.
+    ``worktrees`` lists its linked worktrees (:func:`linked_worktrees`), a
+    second git process."""
     try:
         out = reposync.git(path, "status", "--porcelain=v2", "--branch",
                            "--untracked-files=no", check=True)
@@ -151,6 +193,7 @@ def git_summary(path: str) -> dict:
             doc["ahead"], doc["behind"] = int(ahead.lstrip("+")), int(behind.lstrip("-"))
         elif line and not line.startswith("#"):
             doc["changed"] += 1
+    doc["worktrees"] = linked_worktrees(path)
     return doc
 
 

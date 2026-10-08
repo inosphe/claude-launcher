@@ -4449,6 +4449,11 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .ws-sync-form { display: flex; align-items: center; gap: 8px; margin: 6px 0; flex-wrap: wrap; }
 .ws-sync-form select, .ws-sync-form input:not([type="checkbox"]) { flex: 1 1 140px; min-width: 0; }
 .ws-sync-form .wf-btn { flex: none; }
+/* linked worktrees under a workspace row (claunch-kjjta) */
+.ws-worktrees { padding: 4px 0 8px 16px; border-left: 2px solid #22262d; margin: 0 0 6px 8px; }
+.ws-worktree { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 2px 0; font-size: 12px; }
+.ws-worktree-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; flex: 1 1 200px; }
+.ws-worktree .badge { flex: none; }
 /* peer comparison table (claunch-gjjdp) */
 .ws-sync-peers-table { border-collapse: collapse; width: 100%; font-size: 12px; }
 .ws-sync-peers-table th { text-align: left; font-weight: 600; padding: 2px 8px 2px 0; }

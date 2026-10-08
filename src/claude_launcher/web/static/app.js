@@ -24573,6 +24573,7 @@ function workspacesPanel(view) {
   }
   for (const w of workspacesCache) {
     list.appendChild(wsRow(w));
+    if (wsTreesOpen.has(w.name) && w.exists) list.appendChild(wsWorktreeList(w));
     if (wsSyncOpen.has(w.name)) list.appendChild(wsSyncPanel(w));
   }
   view.appendChild(list);
@@ -26090,6 +26091,41 @@ function wsGitBadges(g) {
   return out;
 }
 
+/* The linked worktrees under one workspace (claunch-kjjta), read with the
+   row badges (wsGitSummary). Folded by default: a busy repository carries
+   dozens. Each line names the checkout, its branch, and the sessions whose
+   directory is that checkout, linked to their pages; the sessions come from
+   the session list the page already holds. */
+const wsTreesOpen = new Set();
+
+function wsPathKey(p) {
+  return String(p || "").replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+}
+
+function wsWorktreeList(w) {
+  const box = el("div", "ws-worktrees");
+  const trees = (wsGitSummary[w.name] || {}).worktrees || [];
+  for (const t of trees) {
+    const line = el("div", "ws-worktree");
+    const where = el("span", "mono ws-worktree-path", t.path);
+    where.title = t.head ? `HEAD ${t.head}` : "";
+    line.appendChild(where);
+    line.appendChild(el("span", "badge " + (t.detached ? "exited" : "idle"),
+      t.detached ? `detached ${String(t.head || "").slice(0, 8)}` : (t.branch || "?")));
+    if (t.prunable) line.appendChild(el("span", "badge exited", "directory gone"));
+    const key = wsPathKey(t.path);
+    const here = sessionsCache.filter((x) => wsPathKey(x.cwd) === key);
+    if (!here.length) line.appendChild(el("span", "wf-note", "no session"));
+    for (const x of here) {
+      const a = el("a", "ws-worktree-session", x.name);
+      a.href = `#/s/${encodeURIComponent(x.name)}`;
+      line.appendChild(a);
+    }
+    box.appendChild(line);
+  }
+  return box;
+}
+
 function wsRow(w) {
   const row = el("div", "ws-row");
   const text = el("div", "ws-text");
@@ -26108,6 +26144,18 @@ function wsRow(w) {
     ));
   }
   if (w.exists) for (const b of wsGitBadges(wsGitSummary[w.name])) row.appendChild(b);
+  const trees = w.exists ? ((wsGitSummary[w.name] || {}).worktrees || []) : [];
+  if (trees.length) {
+    const open = wsTreesOpen.has(w.name);
+    const tb = el("button", "wf-btn clear" + (open ? " on" : ""),
+      `${trees.length} worktree${trees.length === 1 ? "" : "s"} ${open ? "▴" : "▾"}`);
+    tb.title = "the linked git worktrees of this repository, and the sessions standing in them";
+    tb.addEventListener("click", () => {
+      if (wsTreesOpen.has(w.name)) wsTreesOpen.delete(w.name); else wsTreesOpen.add(w.name);
+      renderWorkspaces();
+    });
+    row.appendChild(tb);
+  }
 
   if (w.exists) row.appendChild(wsVscodeControls(w));
   if (w.exists) {

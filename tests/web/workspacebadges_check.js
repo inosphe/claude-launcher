@@ -7,7 +7,13 @@
    a detached HEAD says so; a directory git cannot read says it is not a git
    checkout; a missing workspace and one the summary has not answered for
    yet get no git badge at all; and an older daemon that 404s the summary
-   route leaves the rows as they were. */
+   route leaves the rows as they were.
+
+   And the worktrees (claunch-kjjta): a row whose summary lists linked
+   worktrees carries an "N worktrees" toggle; opened, each worktree is a
+   line with its path, its branch (or detached HEAD) and the sessions whose
+   directory it is -- matched whatever the slashes or the case -- linked to
+   their pages, and "no session" when nobody stands there. */
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
@@ -48,6 +54,11 @@ const ctx = {
   wsVscodeControls: () => el("span", "vscode"),
   wsSyncToggle: () => {},
   wsRemove: () => {},
+  sessionsCache: [
+    { name: "s7", cwd: "C:\\r\\wt-feature\\" },
+    { name: "s8", cwd: "c:/R/wt-feature" },
+    { name: "s9", cwd: "C:/elsewhere" },
+  ],
   renderWorkspaces: () => { renders++; },
   api: async (url) => {
     assert.equal(url, "/api/reposync/workspaces/summary");
@@ -56,9 +67,11 @@ const ctx = {
 };
 vm.createContext(ctx);
 vm.runInContext(
-  "let wsGitSummary = {};\n" +
-  [slice("refreshWsGitSummary"), slice("wsGitBadges"), slice("wsRow")].join("\n") +
+  "let wsGitSummary = {};\nconst wsTreesOpen = new Set();\n" +
+  [slice("refreshWsGitSummary"), slice("wsGitBadges"), slice("wsRow"),
+   slice("wsPathKey"), slice("wsWorktreeList")].join("\n") +
   "\nthis.refresh = refreshWsGitSummary; this.badges = wsGitBadges; this.row = wsRow;" +
+  "\nthis.trees = wsWorktreeList; this.treesOpen = wsTreesOpen;" +
   "\nthis.summary = () => wsGitSummary;",
   ctx
 );
@@ -115,6 +128,43 @@ assert.equal(ctx.badges(undefined).length, 0);
   await ctx.refresh();
   assert.equal(renders, 1);
   assert.equal(ctx.summary().proj.behind, 2);
+
+  /* ---- worktrees ------------------------------------------------------- */
+  answer = { ok: true, json: async () => ({ workspaces: {
+    proj: { branch: "master", upstream: "origin/master", ahead: 0, behind: 0, changed: 0,
+            worktrees: [
+              { path: "C:/r/wt-feature", branch: "s7-feature", detached: false,
+                head: "a".repeat(40), prunable: false },
+              { path: "C:/r/wt-old", branch: null, detached: true,
+                head: "b".repeat(40), prunable: true },
+            ] },
+  } }) };
+  await ctx.refresh();
+  let r = ctx.row({ name: "proj", path: "/r", exists: true });
+  const toggle = r.children.find((c) => c.tag === "button" && /worktree/.test(c.text));
+  assert.ok(toggle, "a row with worktrees carries the toggle");
+  assert.equal(toggle.text, "2 worktrees ▾");
+  const before = renders;
+  toggle.handlers.click[0]();
+  assert.ok(ctx.treesOpen.has("proj"));
+  assert.equal(renders, before + 1);
+  r = ctx.row({ name: "proj", path: "/r", exists: true });
+  assert.equal(r.children.find((c) => c.tag === "button" && /worktree/.test(c.text)).text,
+               "2 worktrees ▴");
+  const list = ctx.trees({ name: "proj" });
+  assert.equal(list.children.length, 2);
+  const [feat, old] = list.children;
+  assert.deepEqual(texts(feat.children), ["C:/r/wt-feature", "s7-feature", "s7", "s8"]);
+  const links = feat.children.filter((c) => c.tag === "a");
+  assert.deepEqual(links.map((a) => a.href), ["#/s/s7", "#/s/s8"]);
+  assert.deepEqual(texts(old.children),
+                   ["C:/r/wt-old", "detached bbbbbbbb", "directory gone", "no session"]);
+  // no worktrees: no toggle at all
+  answer = { ok: true, json: async () => ({ workspaces: {
+    proj: { branch: "master", ahead: 0, behind: 0, changed: 0, worktrees: [] } } }) };
+  await ctx.refresh();
+  r = ctx.row({ name: "proj", path: "/r", exists: true });
+  assert.ok(!r.children.some((c) => c.tag === "button" && /worktree/.test(c.text)));
 
   console.log("ok");
 })().catch((err) => { console.error(err); process.exit(1); });
