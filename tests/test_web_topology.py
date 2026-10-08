@@ -396,6 +396,7 @@ CHECKS = [
         "sesslayout_check.js",
         "rolepanel_check.js",
         "sessionmodal_check.js",
+        "spawnsame_check.js",
         "queued_check.js",
         "termcflow_check.js",
         "window_check.js",
