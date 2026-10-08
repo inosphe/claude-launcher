@@ -561,6 +561,93 @@ def test_peer_distance_behind_and_diverged(world):
     assert reposync_flow.peer_distance(str(a), mine, None)["state"] == "unknown"
 
 
+# --- The same facts from the CLI and the MCP status (claunch-1cvq4) -------
+
+
+def _status_world(world, monkeypatch):
+    """pc-b pushed a master commit and published pc-b/s2-y; this clone has an
+    unlanded, stamped branch. The relay is stood in for at the flow's seams."""
+    from claude_launcher import reposync_flow
+
+    a, b = world["a"], world["b"]
+    theirs = _commit(b, "theirs.txt")
+    _git(b, "push", "-q", "origin", "master")
+    _git(b, "switch", "-q", "-c", "s2-y")
+    pub = _commit(b, "pub.txt")
+    _git(b, "push", "-q", "origin", "s2-y:refs/heads/pc-b/s2-y")
+    _git(a, "switch", "-q", "-c", "s1-open")
+    _git(a, "commit", "-q", "--allow-empty", "-m", "open work\n\nClaunch-Session: s42")
+    _git(a, "switch", "-q", "master")
+    _git(a, "remote", "add", "gh", "https://git.example/Org/Proj.git")
+    shared = [{"name": "up", "key": "git.example/org/proj"}]
+    peers = {"pc-b": [{"workspace": "proj", "remotes": shared,
+                       "branches": {"master": {"sha": theirs, "tracking": []}}}]}
+    monkeypatch.setattr(reposync_flow, "client", lambda: object())
+    monkeypatch.setattr(reposync_flow, "relay_identity", lambda c: ("pc-a", ["pc-b"]))
+    monkeypatch.setattr(reposync_flow, "peer_repos", lambda c, machine: peers[machine])
+    return theirs, pub
+
+
+def _status_args(**kw):
+    import argparse
+    base = dict(workspace="proj", remote="origin", branch=None, peer=None,
+                no_fetch=False, json=False)
+    return argparse.Namespace(**{**base, **kw})
+
+
+def test_cli_status_reports_peer_distance_shared_and_unmerged(world, monkeypatch, capsys):
+    import json
+    from claude_launcher import cli_reposync
+
+    theirs, pub = _status_world(world, monkeypatch)
+    assert cli_reposync._cmd_status(_status_args(json=True)) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["fetched"] is True and doc["plan"]["action"] == "ff"
+    [peer] = doc["peers"]
+    assert peer["distance"] == {"state": "ahead", "theirs_only": 1, "ours_only": 0}
+    [row] = doc["shared"]
+    assert (row["ref"], row["sha"], row["state"], row["peer"]) == ("pc-b/s2-y", pub, "new", True)
+    [open_] = doc["unmerged"]
+    assert (open_["branch"], open_["ahead"], open_["session"]) == ("s1-open", 1, "s42")
+
+    assert cli_reposync._cmd_status(_status_args()) == 0
+    text = capsys.readouterr().out
+    assert "peer pc-b master: ahead (+1 theirs, +0 ours)" in text
+    assert "shared branches on origin (1):" in text
+    assert "pc-b/s2-y" in text and pub[:8] in text
+    assert "local branches origin/master does not hold (1):" in text
+    assert "s1-open" in text and "[s42]" in text
+
+
+def test_cli_status_without_fetch_plans_on_the_refs_as_they_are(world, monkeypatch, capsys):
+    import json
+    from claude_launcher import cli_reposync
+
+    _status_world(world, monkeypatch)
+    assert cli_reposync._cmd_status(_status_args(no_fetch=True, json=True)) == 0
+    doc = json.loads(capsys.readouterr().out)
+    # nothing fetched: the push and the published branch are not here yet
+    assert doc["fetched"] is False and doc["plan"]["action"] == "up-to-date"
+    assert doc["peers"][0]["distance"]["state"] == "unknown"
+    assert doc["shared"] == []
+    assert [r["branch"] for r in doc["unmerged"]] == ["s1-open"]
+    assert cli_reposync._cmd_status(_status_args(no_fetch=True)) == 0
+    assert "(as of the last fetch)" in capsys.readouterr().out
+
+
+def test_mcp_status_carries_the_same_facts_without_fetching(world, monkeypatch):
+    from claude_launcher import reposync_mcp
+
+    theirs, pub = _status_world(world, monkeypatch)
+    _git(world["a"], "fetch", "-q", "origin")        # status itself does not fetch
+    doc = reposync_mcp.call_tool("repo_sync", {"action": "status", "workspace": "proj",
+                                               "remote": "origin"})
+    assert doc["fetched"] is False and doc["plan"]["action"] == "ff"
+    assert doc["peers"][0]["distance"]["state"] == "ahead"
+    assert [r["ref"] for r in doc["shared"]] == ["pc-b/s2-y"]
+    assert [(r["branch"], r["session"]) for r in doc["unmerged"]] == [("s1-open", "s42")]
+
+
 # --- Worktrees per workspace (claunch-kjjta) ------------------------------
 
 
@@ -587,8 +674,152 @@ def test_summary_lists_the_linked_worktrees_but_not_the_workspace(world, tmp_pat
         assert rows[norm(on_branch)]["detached"] is False
         assert rows[norm(detached)]["detached"] is True and rows[norm(detached)]["branch"] is None
         assert rows[norm(detached)]["head"] == _git(a, "rev-parse", "HEAD")
-        # registered at a linked worktree: the others, never itself
-        own = {norm(r["path"]) for r in docs["proj-wt"]["worktrees"]}
-        assert own == {norm(detached)}
+        assert not any(r["main"] for r in rows.values())
+        # registered at a linked worktree: the others, never itself -- and the
+        # others include the main checkout, marked as such (claunch-k9ddh)
+        own = {norm(r["path"]): r for r in docs["proj-wt"]["worktrees"]}
+        assert set(own) == {norm(a), norm(detached)}
+        assert own[norm(a)]["main"] is True and own[norm(a)]["branch"] == "master"
+        assert own[norm(detached)]["main"] is False
 
     _with_app(body)
+
+
+# --------------------------------------------------------------------------- #
+# history (claunch-iaihd)
+# --------------------------------------------------------------------------- #
+async def _history(client, name="proj"):
+    doc = await (await client.get(f"/api/reposync/workspaces/{name}/status?peers=0",
+                                  headers=AUTH)).json()
+    return doc["history"]
+
+
+def test_history_records_what_ran_and_under_whose_approval(world):
+    """The approval card is in memory and says nothing about whether the
+    push ran; the history keeps one line per operation that did, with the
+    card a person answered. A refused card ran nothing and adds nothing."""
+    a, b = world["a"], world["b"]
+    mine = _commit(a, "mine.txt")
+
+    async def body(client):
+        assert await _history(client) == []
+        plan = await _status_plan(client)
+        rid = (await (await client.post("/api/reposync/workspaces/proj/sync",
+                                        json=_shown(plan), headers=AUTH)).json())["request"]
+        await client.post(f"/api/reposync/requests/{rid}/reject", headers=AUTH)
+        await client.post("/api/reposync/workspaces/proj/sync",
+                          json=_shown(plan, request=rid), headers=AUTH)
+        assert await _history(client) == [], "a refused card ran nothing"
+
+        rid = (await (await client.post("/api/reposync/workspaces/proj/sync",
+                                        json=_shown(plan), headers=AUTH)).json())["request"]
+        await client.post(f"/api/reposync/requests/{rid}/approve", headers=AUTH)
+        resp = await client.post("/api/reposync/workspaces/proj/sync",
+                                 json=_shown(plan, request=rid), headers=AUTH)
+        assert resp.status == 200, await resp.text()
+        [row] = await _history(client)
+        assert row["kind"] == "master" and row["workspace"] == "proj" and row["ok"] is True
+        assert (row["action"], row["pushed"], row["before"], row["after"]) == (
+            "push", True, mine, mine)
+        assert row["by"] == "web" and row["remote"] == "origin" and row["branch"] == "master"
+        assert row["approval"]["mode"] == "card" and row["approval"]["request"] == rid
+        assert row["approval"]["decided_by"] == "web" and row["approval"]["decided_at"]
+        assert row["at"]
+
+        # a fast-forward needs no card and says so
+        _git(b, "pull", "-q", "origin", "master")
+        tip = _commit(b, "theirs.txt")
+        _git(b, "push", "-q", "origin", "master")
+        plan = await _status_plan(client)
+        await client.post("/api/reposync/workspaces/proj/sync", json=_shown(plan), headers=AUTH)
+        newest, older = await _history(client)
+        assert (newest["action"], newest["pushed"], newest["after"]) == ("ff", False, tip)
+        assert newest["approval"] == {"mode": "none"}
+        assert older["approval"]["request"] == rid
+
+    _with_app(body)
+
+
+def test_history_records_a_branch_push_and_the_pull_on_the_other_side(world):
+    a, b = world["a"], world["b"]
+    _git(a, "switch", "-q", "-c", "s1-work")
+    tip = _commit(a, "work.txt")
+    workspaces.add(str(b), "proj-b")
+
+    async def push(client):
+        rid = (await (await client.post("/api/reposync/workspaces/proj/branch-push",
+                                        json={"branch": "s1-work"}, headers=AUTH)).json())["request"]
+        await client.post(f"/api/reposync/requests/{rid}/approve", headers=AUTH)
+        resp = await client.post("/api/reposync/workspaces/proj/branch-push",
+                                 json={"branch": "s1-work", "request": rid}, headers=AUTH)
+        assert resp.status == 200, await resp.text()
+        [row] = await _history(client)
+        assert (row["kind"], row["branch"], row["ref"], row["after"]) == (
+            "publish", "s1-work", "pc-a/s1-work", tip)
+        assert row["pushed"] is True and row["force"] is False
+        assert row["approval"]["request"] == rid
+
+    async def pull(client):
+        resp = await client.post("/api/reposync/workspaces/proj-b/branch-pull",
+                                 json={"machine": "pc-a", "branch": "s1-work"}, headers=AUTH)
+        assert resp.status == 200, await resp.text()
+        [row] = await _history(client, "proj-b")
+        assert (row["kind"], row["ref"], row["after"], row["pushed"]) == (
+            "pull", "pc-a/s1-work", tip, False)
+        assert row["approval"] == {"mode": "none"}
+        # a failed pull is a line too, with git's refusal
+        resp = await client.post("/api/reposync/workspaces/proj-b/branch-pull",
+                                 json={"machine": "pc-a", "branch": "nope"}, headers=AUTH)
+        assert resp.status == 409
+        failed, _ = await _history(client, "proj-b")
+        assert failed["ok"] is False and failed["error"]
+        # each repository has its own history: proj-b's lines are not proj's
+        assert all(r["workspace"] == "proj" for r in await _history(client, "proj"))
+
+    _with_app(push, me="pc-a")
+    _with_app(pull, me="pc-b")
+
+
+def test_history_from_the_cli_names_the_session_and_its_card(world, monkeypatch):
+    """The CLI and the MCP tool run on this machine and write the same file;
+    a session's push carries the card it waited on."""
+    from claude_launcher import cli_reposync, reposync_flow
+
+    a = world["a"]
+    mine = _commit(a, "mine.txt")
+    monkeypatch.setenv("CLAUNCH_SESSION", "s9")
+    monkeypatch.setattr(reposync_flow, "client", lambda: None)
+    monkeypatch.setattr(reposync_flow, "file_request",
+                        lambda c, card: {"id": "r1", "deadline": "later"})
+    monkeypatch.setattr(reposync_flow, "wait_request", lambda c, rid: {
+        "id": rid, "status": "approved", "decided_by": "web",
+        "decided_at": "2026-10-08T10:00:00+00:00"})
+    import argparse
+    args = argparse.Namespace(workspace="proj", remote="origin", branch=None, peer=None,
+                              dry_run=False, yes=False, json=True)
+    assert cli_reposync._cmd_master(args) == 0
+    [row] = reposync_flow.read_history(str(a))
+    assert (row["by"], row["pushed"], row["after"]) == ("s9", True, mine)
+    assert row["approval"] == {"mode": "card", "request": "r1", "decided_by": "web",
+                               "decided_at": "2026-10-08T10:00:00+00:00"}
+
+
+def test_history_is_shared_by_the_worktrees_and_trimmed(world, tmp_path, monkeypatch):
+    from claude_launcher import reposync_flow
+
+    a = world["a"]
+    wt = tmp_path / "wt-x"
+    _git(a, "worktree", "add", "-q", "-b", "s2-x", str(wt))
+    entry = reposync_flow.history_entry(str(a), kind="pull", workspace="proj", remote="origin",
+                                        branch="x", by="terminal", approval={"mode": "none"})
+    reposync_flow.record_history({**entry, "ok": True})
+    assert len(reposync_flow.read_history(str(wt))) == 1, "one repository, any of its worktrees"
+    assert reposync_flow.read_history(str(world["b"])) == []
+    # past the size bound the file keeps its newest lines
+    # (a one-byte bound trims on every write, whatever the line length)
+    monkeypatch.setattr(reposync_flow, "HISTORY_TRIM_BYTES", 1)
+    monkeypatch.setattr(reposync_flow, "HISTORY_KEEP", 3)
+    for n in range(10):
+        reposync_flow.record_history({**entry, "ok": True, "n": n})
+    rows = reposync_flow.read_history(str(a))
+    assert [r.get("n") for r in rows] == [9, 8, 7]

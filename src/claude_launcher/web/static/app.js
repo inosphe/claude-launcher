@@ -25054,6 +25054,7 @@ function workspacesPanel(view) {
 
   const list = el("div", "ws-list");
   list.appendChild(el("h3", null, `Registered (${workspacesCache.length})`));
+  if (workspacesCache.some((w) => w.exists)) list.appendChild(wsRefreshAllBar());
   if (!workspacesCache.length) {
     list.appendChild(el(
       "p", "wf-note",
@@ -26602,6 +26603,8 @@ function wsWorktreeList(w) {
     line.appendChild(where);
     line.appendChild(el("span", "badge " + (t.detached ? "exited" : "idle"),
       t.detached ? `detached ${String(t.head || "").slice(0, 8)}` : (t.branch || "?")));
+    // listed when the workspace itself is a linked worktree (claunch-k9ddh)
+    if (t.main) line.appendChild(el("span", "badge idle", "main checkout"));
     if (t.prunable) line.appendChild(el("span", "badge exited", "directory gone"));
     const key = wsPathKey(t.path);
     const here = sessionsCache.filter((x) => wsPathKey(x.cwd) === key);
@@ -26634,7 +26637,9 @@ function wsRow(w) {
     ));
   }
   if (w.exists) for (const b of wsGitBadges(wsGitSummary[w.name])) row.appendChild(b);
-  const trees = w.exists ? ((wsGitSummary[w.name] || {}).worktrees || []) : [];
+  const progress = wsRefreshAllBadge(w.name);
+  if (progress) row.appendChild(progress);
+  const trees =w.exists ? ((wsGitSummary[w.name] || {}).worktrees || []) : [];
   if (trees.length) {
     const open = wsTreesOpen.has(w.name);
     const tb = el("button", "wf-btn clear" + (open ? " on" : ""),
@@ -26647,6 +26652,17 @@ function wsRow(w) {
     row.appendChild(tb);
   }
 
+  // Start a session here (claunch-dbik7): the one creation modal, with this
+  // workspace already picked as its directory -- the same seed the Beads
+  // detail's Start block hands it for an issue's recorded workspace.
+  if (w.exists && typeof openSessionModal === "function") {
+    const start = el("button", "wf-btn", "New session");
+    start.title = `open the new-session form with ${w.path} as its directory`;
+    start.addEventListener("click", () => {
+      openSessionModal({ tab: "new", seed: { workspace: w.name } });
+    });
+    row.appendChild(start);
+  }
   if (w.exists) row.appendChild(wsVscodeControls(w));
   if (w.exists) {
     const open = wsSyncOpen.has(w.name);
@@ -26722,6 +26738,73 @@ async function wsSyncRefresh(name, fetchFirst) {
   }
   st.loading = false;
   if (wsOpen) renderWorkspaces();
+}
+
+/* Refresh all (claunch-87eqx): every present workspace's Sync status, with
+   a fetch first, as its own Refresh button would -- WS_REFRESH_ALL_CAP at a
+   time, since each fetch talks to a remote and a dozen at once would queue
+   on the network and the daemon's git. Each row says where it is in the
+   run; once all are through, the row badges are read again, because a
+   fetch moves the ahead/behind they show. A second press while a run is
+   going does nothing. */
+const WS_REFRESH_ALL_CAP = 2;
+//: active while a run goes; state: name -> "queued" | "running" | "done" | "failed"
+const wsRefreshAll = { active: false, state: new Map() };
+const WS_REFRESH_ALL_BADGE = {
+  queued: ["badge idle", "queued"],
+  running: ["badge busy", "fetching…"],
+  done: ["badge idle", "refreshed"],
+  failed: ["badge exited", "refresh failed"],
+};
+
+async function wsRefreshAllRun() {
+  if (wsRefreshAll.active) return;
+  const names = workspacesCache.filter((w) => w.exists).map((w) => w.name);
+  if (!names.length) return;
+  wsRefreshAll.active = true;
+  wsRefreshAll.state = new Map(names.map((n) => [n, "queued"]));
+  renderWorkspaces();
+  const queue = names.slice();
+  const worker = async () => {
+    while (queue.length) {
+      const name = queue.shift();
+      wsRefreshAll.state.set(name, "running");
+      await wsSyncRefresh(name, true);   // never throws; a failure is st.error
+      wsRefreshAll.state.set(name, wsSyncSt(name).error ? "failed" : "done");
+    }
+  };
+  const lanes = Math.min(WS_REFRESH_ALL_CAP, names.length);
+  await Promise.all(Array.from({ length: lanes }, worker));
+  wsRefreshAll.active = false;
+  await refreshWsGitSummary();
+  if (wsOpen) renderWorkspaces();
+}
+
+function wsRefreshAllBadge(name) {
+  const at = wsRefreshAll.state.get(name);
+  if (!at) return null;
+  const [cls, label] = WS_REFRESH_ALL_BADGE[at];
+  const b = el("span", cls + " ws-refresh-progress", label);
+  if (at === "failed") b.title = wsSyncSt(name).error;
+  return b;
+}
+
+function wsRefreshAllBar() {
+  const bar = el("div", "ws-refresh-all");
+  const st = wsRefreshAll.state;
+  const btn = el("button", "wf-btn", wsRefreshAll.active ? "Refreshing…" : "Refresh all (fetch)");
+  btn.disabled = wsRefreshAll.active;
+  btn.title = "fetch and re-read the Sync status of every workspace, " +
+    `${WS_REFRESH_ALL_CAP} at a time`;
+  btn.addEventListener("click", () => wsRefreshAllRun());
+  bar.appendChild(btn);
+  if (st.size) {
+    const n = (s) => [...st.values()].filter((v) => v === s).length;
+    const parts = [`${n("done") + n("failed")}/${st.size} refreshed`];
+    if (n("failed")) parts.push(`${n("failed")} failed`);
+    bar.appendChild(el("span", "wf-note", parts.join(", ")));
+  }
+  return bar;
 }
 
 const WS_SYNC_LABEL = { ff: "Fast-forward", push: "Push", rebase: "Rebase & push" };
@@ -27027,6 +27110,62 @@ function wsSyncUnmerged(doc) {
   return box;
 }
 
+/* What this machine synced, pushed and pulled in the repository, newest
+   first (claunch-iaihd): the status doc's `history`, written by the panel,
+   the CLI and the MCP tool alike when an operation runs. A refused or
+   expired approval card ran nothing and is not here. */
+const WS_HISTORY_KIND = { master: "sync", publish: "push", pull: "pull" };
+
+function wsHistoryApproval(a) {
+  const mode = (a || {}).mode;
+  if (mode === "card") {
+    const when = a.decided_at ? ` ${a.decided_at.slice(11, 16)} UTC` : "";
+    return `approved on card ${a.request || "?"} (${a.decided_by || "?"}${when})`;
+  }
+  if (mode === "auto") return "no card (reposync_push: auto)";
+  if (mode === "terminal") return a.yes ? "approved at the terminal (--yes)" : "approved at the terminal";
+  return "nothing pushed, no approval needed";
+}
+
+function wsSyncHistory(doc) {
+  const box = el("div", "ws-sync-section ws-sync-history");
+  const rows = doc.history || [];
+  box.appendChild(el("h4", null, `History (${rows.length})`));
+  if (!rows.length) {
+    box.appendChild(el("p", "wf-note", "Nothing synced, pushed or pulled from this machine yet."));
+    return box;
+  }
+  for (const r of rows) {
+    const line = el("div", "ws-sync-history-row");
+    line.appendChild(el("span", "wf-note mono", String(r.at || "").slice(0, 16).replace("T", " ")));
+    line.appendChild(el("span", "badge " + (r.ok === false ? "exited" : r.pushed ? "busy" : "idle"),
+      r.ok === false ? `${WS_HISTORY_KIND[r.kind] || r.kind} failed`
+        : (WS_HISTORY_KIND[r.kind] || r.kind) + (r.pushed ? " · pushed" : "")));
+    // a pull comes from the remote into the local branch; a push goes out
+    const what = r.ref && r.ref !== r.branch
+      ? `${r.branch} ${r.kind === "pull" ? "←" : "→"} ${r.remote}/${r.ref}`
+      : `${r.remote}/${r.branch}`;
+    line.appendChild(el("span", "mono", what));
+    if (r.after) {
+      const tips = el("span", "mono wf-note",
+        (r.before && r.before !== r.after ? `${r.before.slice(0, 8)} → ` : "") + r.after.slice(0, 8));
+      tips.title = r.action ? `action: ${r.action}` : "";
+      line.appendChild(tips);
+    }
+    if (r.by && r.by !== "web" && r.by !== "terminal") {
+      const who = el("a", "ws-sync-history-session", r.by);
+      who.href = `#/s/${encodeURIComponent(r.by)}`;
+      line.appendChild(who);
+    } else {
+      line.appendChild(el("span", "wf-note", r.by === "web" ? "Sync panel" : "terminal"));
+    }
+    line.appendChild(el("span", "wf-note", wsHistoryApproval(r.approval)));
+    if (r.error) line.appendChild(el("span", "wf-note wf-warning", r.error));
+    box.appendChild(line);
+  }
+  return box;
+}
+
 function wsSyncPanel(w) {
   const st = wsSyncSt(w.name);
   const panel = el("div", "ws-sync");
@@ -27139,6 +27278,7 @@ function wsSyncPanel(w) {
 
   if (st.result) panel.appendChild(wsSyncResult(st.result));
   panel.appendChild(wsSyncPeers(doc));
+  panel.appendChild(wsSyncHistory(doc));
   return panel;
 }
 

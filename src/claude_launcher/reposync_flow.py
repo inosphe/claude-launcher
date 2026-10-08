@@ -23,10 +23,11 @@ import os
 import socket
 import subprocess
 import time
-from typing import Dict, Iterable, List, Optional, Tuple
+from datetime import datetime, timezone
+from typing import Callable, Dict, Iterable, List, Optional, Tuple, TypeVar
 
 from . import daemon_client, reposync, store, workspaces
-from .daemon.paths import session_scratch_dir
+from .daemon.paths import daemon_dir, session_scratch_dir
 
 ASK = "ask"
 AUTO = "auto"
@@ -124,10 +125,11 @@ def local_branches(repo: str) -> List[str]:
 def linked_worktrees(path: str) -> List[dict]:
     """The linked worktrees of the repository at ``path`` (claunch-kjjta),
     from one ``git worktree list --porcelain``: each one's path, branch (or
-    ``detached``) and HEAD. The main checkout -- the workspace itself -- is
-    left out, and so is a bare entry; a worktree whose directory is gone is
-    kept with ``prunable`` so the row can say so. A workspace registered at
-    a linked worktree lists the others, not itself."""
+    ``detached``) and HEAD. The workspace itself is left out, and so is a
+    bare entry; a worktree whose directory is gone is kept with ``prunable``
+    so the row can say so. ``main`` marks the repository's main checkout,
+    which is listed only when the workspace is registered at a linked
+    worktree -- then it is one of the others (claunch-k9ddh)."""
     out = reposync.git(path, "worktree", "list", "--porcelain", check=False)
     rows: List[dict] = []
     cur: Optional[dict] = None
@@ -151,13 +153,14 @@ def linked_worktrees(path: str) -> List[dict]:
         elif not line:
             rows.append(cur)
             cur = None
-    # the first entry is always the main working tree; a workspace that is
-    # itself a linked worktree does not list itself either
+    # git lists the main working tree first; whichever entry is the
+    # workspace's own checkout is the one left out
     try:
         here = os.path.normcase(os.path.normpath(reposync.toplevel(path)))
     except reposync.SyncError:
         here = ""
-    return [{k: v for k, v in r.items() if k != "bare"} for r in rows[1:]
+    return [{**{k: v for k, v in r.items() if k != "bare"}, "main": i == 0}
+            for i, r in enumerate(rows)
             if not r["bare"] and os.path.normcase(r["path"]) != here]
 
 
@@ -325,6 +328,24 @@ def _peer_tip(row: dict, branch: str) -> Optional[str]:
     return got or None     # an older peer reported the bare sha
 
 
+def plan_facts(repo: str, p: reposync.Plan, rows: List[dict],
+               machine: Optional[str]) -> dict:
+    """What a status shows beside the plan ``p`` (claunch-1cvq4): each peer
+    row gains ``distance`` (its master tip against ours, :func:`peer_distance`),
+    and the answer carries ``shared`` (:func:`shared_branches` on the planned
+    remote, leaving out ``machine``'s own prefix) and ``unmerged``
+    (:func:`unmerged_branches` against the remote's master). The Sync panel,
+    ``claunch reposync status`` and the MCP tool's status all read it here.
+    Call it after the plan: when the plan fetched, that fetch is what brought
+    the refs these read."""
+    for row in rows:
+        row["distance"] = peer_distance(repo, p.local, _peer_tip(row, p.branch))
+    return {
+        "shared": shared_branches(repo, p.remote, machine, {r["machine"] for r in rows}),
+        "unmerged": unmerged_branches(repo, p.upstream or p.local, skip=[p.branch]),
+    }
+
+
 def workspace_status(path: str, workspace: Optional[str], peers: Dict[str, List[dict]],
                      problems: List[str], *, do_fetch: bool, remote: Optional[str] = None,
                      branch: Optional[str] = None, machine: Optional[str] = None) -> dict:
@@ -335,7 +356,9 @@ def workspace_status(path: str, workspace: Optional[str], peers: Dict[str, List[
     the shared remote alone. ``shared`` lists the branches other machines
     published on the planned remote (:func:`shared_branches`); ``machine`` is
     this one, whose own prefix it leaves out. ``unmerged`` lists the local
-    branches the remote's master does not hold yet (:func:`unmerged_branches`)."""
+    branches the remote's master does not hold yet (:func:`unmerged_branches`).
+    ``history`` is what this machine synced, pushed and pulled in the
+    repository, newest first (:func:`read_history`)."""
     try:
         repo = reposync.toplevel(path)
     except reposync.SyncError as exc:
@@ -345,7 +368,7 @@ def workspace_status(path: str, workspace: Optional[str], peers: Dict[str, List[
         "workspace": workspace, "repo": repo,
         "remotes": reposync.remote_keys(repo), "peers": rows,
         "problems": list(problems), "branches": local_branches(repo),
-        "fetched": bool(do_fetch),
+        "fetched": bool(do_fetch), "history": read_history(repo),
     }
     try:
         name = reposync.choose_remote(repo, remote, [r["key"] for r in rows] if rows else None)
@@ -355,11 +378,7 @@ def workspace_status(path: str, workspace: Optional[str], peers: Dict[str, List[
         return out
     key = reposync.url_key(reposync.remotes(repo).get(name, ""))
     out["plan"] = plan_card(p, workspace=workspace, key=key)
-    for row in rows:
-        row["distance"] = peer_distance(repo, p.local, _peer_tip(row, p.branch))
-    # after the plan: with do_fetch its fetch is what brought these refs in
-    out["shared"] = shared_branches(repo, name, machine, {r["machine"] for r in rows})
-    out["unmerged"] = unmerged_branches(repo, p.upstream or p.local, skip=[p.branch])
+    out.update(plan_facts(repo, p, rows, machine))
     return out
 
 
@@ -442,7 +461,23 @@ def authorize(c, card: dict, request: Optional[str]) -> dict:
         return {"go": False, "status": "stale_approval", "request": request,
                 "why": "the branch or the remote moved after the approval; "
                        "call without 'request' to ask again"}
-    return {"go": True, "approval": request}
+    return {"go": True, "approval": request, "decided_by": record.get("decided_by"),
+            "decided_at": record.get("decided_at")}
+
+
+def card_approval(record: dict) -> dict:
+    """How a push was let through, for the history: the approval card a
+    person answered (:mod:`daemon.reposync_gate`)."""
+    return {"mode": "card", "request": record.get("id"),
+            "decided_by": record.get("decided_by"), "decided_at": record.get("decided_at")}
+
+
+def gate_approval(gate: dict) -> dict:
+    """:func:`authorize`'s go answer, as a history approval."""
+    if gate.get("approval") == "auto":
+        return {"mode": AUTO}
+    return {"mode": "card", "request": gate.get("approval"),
+            "decided_by": gate.get("decided_by"), "decided_at": gate.get("decided_at")}
 
 
 def file_request(c: Optional[daemon_client.DaemonClient], card: dict) -> dict:
@@ -532,4 +567,111 @@ def annotate_board(repo: str, rewritten: Dict[str, str], *, remote: str, branch:
             args += ["--actor", actor]
         code, _ = _beads(repo, *args)
         done.append({"issue": issue, "old": old, "new": new, "ok": code == 0})
+    return done
+
+
+# --------------------------------------------------------------------------- #
+# history (claunch-iaihd)
+# --------------------------------------------------------------------------- #
+# What was synced, pushed or pulled, when, by whom and under whose approval.
+# The approval gate cannot answer that: it lives in memory, keeps the last
+# twenty settled cards, records the decision but not whether the push ran,
+# and never sees a push under ``auto`` or one a person ran at their own
+# terminal. So every operation that ran appends one line here, from the
+# daemon (the Sync panel) and from the CLI and the MCP tool alike -- they
+# all run on this machine and share this daemon directory.
+
+HISTORY_FILE = "reposync-history.jsonl"
+#: lines the file keeps once it grows past :data:`HISTORY_TRIM_BYTES`
+HISTORY_KEEP = 1000
+HISTORY_TRIM_BYTES = 512 * 1024
+#: entries a workspace's panel shows, newest first
+HISTORY_SHOWN = 30
+
+T = TypeVar("T")
+
+
+def history_path() -> str:
+    return str(daemon_dir() / HISTORY_FILE)
+
+
+def repo_identity(repo: str) -> str:
+    """The repository a history line belongs to: its shared git directory,
+    so a sync run from any worktree of a repository shows under every
+    workspace registered at one of them."""
+    common = reposync.git(repo, "rev-parse", "--path-format=absolute",
+                          "--git-common-dir", check=False)
+    return os.path.normcase(os.path.normpath(common or repo))
+
+
+def actor() -> str:
+    """Who ran it: the managed session, or a person at their own shell."""
+    return os.environ.get("CLAUNCH_SESSION") or "terminal"
+
+
+def history_entry(repo: str, *, kind: str, workspace: Optional[str], remote: str,
+                  branch: str, by: str, approval: dict, **extra) -> dict:
+    return {"kind": kind, "repo": repo, "repo_id": repo_identity(repo),
+            "workspace": workspace, "remote": remote, "branch": branch,
+            "by": by, "approval": approval, **extra}
+
+
+def record_history(entry: dict) -> None:
+    """Append one line. A history that cannot be written is a lost record,
+    never a reason the operation it describes fails."""
+    row = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), **entry}
+    path = history_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        if os.path.getsize(path) > HISTORY_TRIM_BYTES:
+            with open(path, encoding="utf-8") as fh:
+                keep = fh.read().splitlines()[-HISTORY_KEEP:]
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(keep) + "\n")
+    except OSError:
+        pass
+
+
+def read_history(repo: str, limit: int = HISTORY_SHOWN) -> List[dict]:
+    """The lines for ``repo``'s repository, newest first."""
+    ident = repo_identity(repo)
+    try:
+        with open(history_path(), encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return []
+    rows: List[dict] = []
+    for line in reversed(lines):
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict) and row.get("repo_id") == ident:
+            rows.append(row)
+            if len(rows) >= limit:
+                break
+    return rows
+
+
+def recorded(entry: dict, run: Callable[[], T], done: Callable[[T], dict]) -> T:
+    """Run one operation and append what it did -- ``done(result)`` on
+    success, the error when git refused. The error is raised on."""
+    try:
+        out = run()
+    except reposync.SyncError as exc:
+        record_history({**entry, "ok": False, "error": str(exc)})
+        raise
+    record_history({**entry, "ok": True, **done(out)})
+    return out
+
+
+def master_done(p: reposync.Plan) -> Callable[[object], dict]:
+    """The history fields of a master sync, from its :class:`reposync.Result`
+    or that result's ``to_dict()`` form (what the daemon's handler holds)."""
+    def done(result) -> dict:
+        doc = result if isinstance(result, dict) else result.to_dict()
+        return {"action": p.action, "before": p.local, "after": doc.get("new"),
+                "pushed": bool(doc.get("pushed")), "rewritten": len(doc.get("rewritten") or {})}
     return done
