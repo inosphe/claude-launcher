@@ -32789,7 +32789,7 @@ function sessCompact(data) {
   // must survive the 2s poll; a successful restart changes the key.
   const key = `${s.name}|${off ? 1 : 0}|${pinned}`;
   if (sessCompactBox && sessCompactBox.dataset.slot === key) {
-    box.appendChild(sessCompactBox);   // appending moves the live node here
+    box.appendChild((typeof carried === "function" ? carried(sessCompactBox) : sessCompactBox));   // the live node, or its stand-in (carried)
     return box;
   }
   const form = el("div", "sess-perms-form sess-compact-form");
