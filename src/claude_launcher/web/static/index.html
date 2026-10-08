@@ -917,6 +917,21 @@
           <p class="sess-spawn-group-blurb">what it is told once it boots</p>
           <textarea name="task" rows="3"
             placeholder="typed in once it has booted — what it is for"></textarea>
+          <!-- Images that go out with the opening (claunch-jmrmc): pasted into
+               the task box, dropped on this area, or picked. Uploaded when the
+               form is submitted; the daemon keeps them with the session and
+               pastes them in ahead of the task text. Offered only for a
+               harness that declares an image paste key. -->
+          <div id="new-task-images" class="new-task-images">
+            <div class="new-task-images-drop" id="new-task-images-drop">
+              <span class="new-task-images-hint">Images: paste into the task, drop here, or</span>
+              <button type="button" class="wf-btn" id="new-task-images-pick">Choose files</button>
+              <input type="file" id="new-task-images-file" hidden multiple
+                accept="image/png,image/jpeg,image/gif,image/webp">
+            </div>
+            <ul class="new-task-images-list" id="new-task-images-list"></ul>
+            <p class="new-task-images-note hidden" id="new-task-images-note"></p>
+          </div>
         </fieldset>
 
         <!-- The board answer, after the task because it is still the fallback

@@ -10925,6 +10925,7 @@ function syncForkAvailability() {
   renderNewClaudeRuntime(f, harnessName, capabilities, parent);
   renderNewCodexRuntime(f, harnessName, capabilities, parent);
   renderNewPiRuntime(f, harnessName, capabilities, parent);
+  syncOpeningImages();
   // Claude and declared API-key harnesses consume the shared profile token.
   // OAuth harnesses keep auth in their own profile home. --null remains a
   // Claude-only answer and cannot coexist with a borrow.
@@ -11146,6 +11147,161 @@ function syncRuntimeFold(f, parent) {
   runtimeFoldOpenedFor = stamp;
 }
 
+/* ---- opening images (claunch-jmrmc) ---------------------------------------
+   Images that go out with the opening task. They are held here as files until
+   the form is submitted, then uploaded one by one to /api/opening-images and
+   named by id in the create request (`opening_images`); the daemon keeps them
+   with the session and pastes them in ahead of the task text. Not a form
+   field: the rows SESSION_FORM_SPENT and the modal restore walk are named
+   controls, and a list of files is not one. Cleared when a launch goes
+   through, kept when the box is cancelled — like a half-written task. */
+const OPENING_IMAGES_MAX = 10;   // opening_images.MAX_IMAGES in the daemon
+const openingImages = [];        // [{file, url}]
+
+/* Whether the form's harness takes images: its declaration names
+   `image_paste_keys`. Unknown (an older daemon, a detail not loaded yet)
+   counts as yes — the daemon then answers for itself. */
+function newFormTakesImages(f) {
+  const harness = newProfileHarnessName(f) || "claude";
+  const detail = (typeof harnessDetails === "object" && harnessDetails)
+    ? harnessDetails[harness] : null;
+  const ok = !detail || !Array.isArray(detail.image_paste_keys) ||
+    detail.image_paste_keys.length > 0;
+  return { ok, harness };
+}
+
+function openingImagesNote(text) {
+  const note = $("new-task-images-note");
+  if (!note) return;
+  note.textContent = text || "";
+  note.classList.toggle("hidden", !text);
+}
+
+function renderOpeningImages() {
+  const list = $("new-task-images-list");
+  if (!list) return;
+  list.innerHTML = "";
+  openingImages.forEach((img, i) => {
+    const li = document.createElement("li");
+    li.title = img.file.name || `image ${i + 1}`;
+    const pic = document.createElement("img");
+    pic.src = img.url;
+    pic.alt = li.title;
+    li.appendChild(pic);
+    const drop = document.createElement("button");
+    drop.type = "button";
+    drop.textContent = "×";
+    drop.title = "Remove this image";
+    drop.addEventListener("click", () => {
+      const [gone] = openingImages.splice(i, 1);
+      if (gone) URL.revokeObjectURL(gone.url);
+      openingImagesNote("");
+      renderOpeningImages();
+    });
+    li.appendChild(drop);
+    list.appendChild(li);
+  });
+}
+
+/* The harness row can change under attached images (another profile, another
+   parent). They are kept, the area is disabled, and the note says why — the
+   submit then leaves them out rather than having the daemon refuse. */
+function syncOpeningImages() {
+  const f = $("new-session");
+  const box = $("new-task-images");
+  if (!f || !box) return;
+  const { ok, harness } = newFormTakesImages(f);
+  box.classList.toggle("disabled", !ok);
+  const pick = $("new-task-images-pick");
+  if (pick) pick.disabled = !ok;
+  if (!ok) {
+    openingImagesNote(`${harness} has no image paste key, so it cannot take images` +
+      (openingImages.length ? " — the attached ones will not be sent" : ""));
+  } else if ((($("new-task-images-note") || {}).textContent || "").includes("image paste key")) {
+    openingImagesNote("");
+  }
+}
+
+function addOpeningImages(files) {
+  const f = $("new-session");
+  if (!newFormTakesImages(f).ok) { syncOpeningImages(); return; }
+  const list = Array.from(files || []);
+  const images = list.filter((file) => Object.values(PASTE_IMAGE_KINDS).includes(imageKindOf(file)));
+  const notes = [];
+  if (images.length < list.length) notes.push(`${list.length - images.length} file(s) not a PNG, JPEG, GIF or WebP image, left out`);
+  for (const file of images) {
+    if (openingImages.length >= OPENING_IMAGES_MAX) {
+      notes.push(`an opening takes at most ${OPENING_IMAGES_MAX} images`);
+      break;
+    }
+    openingImages.push({ file, url: URL.createObjectURL(file) });
+  }
+  openingImagesNote(notes.join("; "));
+  renderOpeningImages();
+}
+
+function clearOpeningImages() {
+  for (const img of openingImages.splice(0)) URL.revokeObjectURL(img.url);
+  openingImagesNote("");
+  renderOpeningImages();
+}
+
+/* Upload every attached image, in order; answers the ids. A failed upload
+   throws with the daemon's reason, so the launch stops before a session is
+   created without the pictures it was meant to get. */
+async function uploadOpeningImages() {
+  const ids = [];
+  for (let i = 0; i < openingImages.length; i++) {
+    const file = openingImages[i].file;
+    const resp = await api("/api/opening-images", {
+      method: "POST", headers: { "Content-Type": imageKindOf(file) }, body: file,
+    });
+    const doc = await resp.json().catch(() => ({}));
+    if (!resp.ok || !doc.id) {
+      throw new Error(`image ${i + 1} (${file.name || "pasted"}): ${doc.error || `HTTP ${resp.status}`}`);
+    }
+    ids.push(doc.id);
+  }
+  return ids;
+}
+
+(() => {
+  const f = $("new-session");
+  const area = $("new-task-images-drop");
+  const picker = $("new-task-images-file");
+  const pick = $("new-task-images-pick");
+  if (!f || !area || !picker || !pick) return;
+  pick.addEventListener("click", () => picker.click());
+  picker.addEventListener("change", () => {
+    addOpeningImages(picker.files);
+    picker.value = "";
+  });
+  // A paste into the task box that carries images: the images are taken, the
+  // text of a mixed paste is left to the browser.
+  f.task.addEventListener("paste", (ev) => {
+    const files = pastedImageFiles(ev.clipboardData);
+    if (!files.length) return;
+    ev.preventDefault();
+    addOpeningImages(files);
+  });
+  // Dropped on the task box or the area under it.
+  for (const target of [area, f.task]) {
+    target.addEventListener("dragover", (ev) => {
+      if (!Array.from((ev.dataTransfer || {}).types || []).includes("Files")) return;
+      ev.preventDefault();
+      area.classList.add("dragover");
+    });
+    target.addEventListener("dragleave", () => area.classList.remove("dragover"));
+    target.addEventListener("drop", (ev) => {
+      area.classList.remove("dragover");
+      const files = Array.from((ev.dataTransfer || {}).files || []);
+      if (!files.length) return;
+      ev.preventDefault();
+      addOpeningImages(files);
+    });
+  }
+})();
+
 /* One listener for the whole form rather than one per folded row: `input`
    bubbles from every control in it, and both lines are cheap to rebuild. */
 $("new-session").addEventListener("input", (event) => {
@@ -11163,6 +11319,7 @@ $("new-session").addEventListener("input", (event) => {
   renderNewPiRuntime(f, harnessName, capabilities, spawnParent());
   renderRuntimeSummary();
   renderProfileHint();
+  syncOpeningImages();
 });
 
 /* ------------------------------------------------------------------ */
@@ -11978,6 +12135,19 @@ $("new-session").addEventListener("submit", async (e) => {
   setCreatePending(f, true, parent);
   err.classList.add("hidden");
   try {
+    // Uploaded only now, and only when the harness takes them: the ids are
+    // claimed by this one request (opening_images in the daemon).
+    if (openingImages.length && newFormTakesImages(f).ok) {
+      try {
+        body.opening_images = await uploadOpeningImages();
+      } catch (upload) {
+        err.textContent = `Opening images were not uploaded: ${upload.message || upload}`;
+        err.classList.remove("hidden");
+        return;
+      }
+      Object.assign(payload, sessionFormPayload(sessionFormView().mode,
+        { opening_images: body.opening_images }));
+    }
     const resp = await api(
       parent
         ? `/api/sessions/${encodeURIComponent(parent.name)}/children`
@@ -12012,6 +12182,8 @@ $("new-session").addEventListener("submit", async (e) => {
     // issue body, which is the one row of the board record nobody re-reads
     // before pressing Create (claunch-ke7ke).
     f.issue_text.value = "";
+    // The opening's images went out with this launch, like its task.
+    clearOpeningImages();
     // Say which rows the launch just spent, so the restore in
     // sessionModalClose steps over them. Without this the five clears above
     // are undone four lines later — the modal puts back whatever the form
@@ -33379,7 +33551,7 @@ function sessionFormConfig(mode) {
       payload: ["name", "profile", "project", "cwd", "args", "env", "model", "effort", "tools", "worktree",
         "rebase_onto", "branch_from", "role", "subroles", "borrow", "null_token", "mesh", "handle", "workflow",
         "workflow_version", "cflow_inputs",
-        "context", "task", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
+        "context", "task", "opening_images", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
         "daemon_prompt",
         "resume", "fork_session"] },
     spawn: { title: "Spawn child", submit: "Spawn child", sections,
@@ -33387,7 +33559,7 @@ function sessionFormConfig(mode) {
       payload: ["name", "profile", "project", "workspace", "cwd", "args", "model", "effort", "tools", "worktree",
         "rebase_onto", "branch_from", "role", "subroles", "borrow", "null_token", "mesh", "handle", "workflow",
         "workflow_version", "cflow_inputs",
-        "context", "task", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
+        "context", "task", "opening_images", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
         "daemon_prompt",
         "fork", "connect", "over_limit", "auto_compact"] },
     fork: { title: "Quick fork", submit: "Fork", sections: ["new-quick-fork"],

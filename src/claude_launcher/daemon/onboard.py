@@ -865,7 +865,7 @@ def _start_v2(plan: Plan, *, name: str, cwd: str) -> dict:
     }
 
 
-def open_with(session, block: str) -> None:
+def open_with(session, block: str, *, before=None) -> None:
     """Get ``block`` in front of the agent, whichever way this harness allows.
 
     A no-op when the harness already took the block on its command line — the
@@ -878,10 +878,17 @@ def open_with(session, block: str) -> None:
     Read off the argv the session actually started with, not off the harness's
     declared transport: a block too long for the command line is left off it
     (:func:`harness.carries_opening`), and a declaration alone would drop it.
+
+    ``before`` is the pre-paste step :meth:`Session.deliver` runs once the
+    terminal is ready. An opening with images passes one that puts the images
+    in the composer (claunch-jmrmc); such an opening is always typed in -- the
+    caller kept it off the command line -- and goes out even with no text.
     """
-    if not block or harness_mod.carries_opening(session.argv, block):
+    if before is None and (
+        not block or harness_mod.carries_opening(session.argv, block)
+    ):
         return
-    asyncio.ensure_future(_deliver_until_it_lands(session, block))
+    asyncio.ensure_future(_deliver_until_it_lands(session, block, before=before))
 
 
 #: How long :func:`open_with` keeps trying to hand over the opening block.
@@ -891,7 +898,7 @@ def open_with(session, block: str) -> None:
 OPENING_RETRY_WINDOW = 300.0
 
 
-async def _deliver_until_it_lands(session, block: str) -> None:
+async def _deliver_until_it_lands(session, block, *, before=None) -> None:
     """Type the opening block in, retrying while the terminal is not free.
 
     ``deliver`` declines rather than typing over a human composing at that
@@ -904,7 +911,7 @@ async def _deliver_until_it_lands(session, block: str) -> None:
     while time.monotonic() < deadline:
         if session.exited:
             return
-        if await session.deliver(block):
+        if await session.deliver(block, before=before):
             return
         await asyncio.sleep(1.0)
     log.warning(
