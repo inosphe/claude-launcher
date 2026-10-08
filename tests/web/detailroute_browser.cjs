@@ -16,6 +16,7 @@ const fs = require("node:fs");
 const http = require("node:http");
 const path = require("node:path");
 const { chromium } = require("playwright");
+const { safeListen } = require("./safe_listen.cjs");
 const root = path.join(__dirname, "../../src/claude_launcher/web/static");
 const sessions = ["s1", "s2", "s3"].map((name) => ({
   name, status: "exited", paused_at: "2026-09-18T00:00:00Z", cwd: "/repo", harness: "codex",
@@ -46,7 +47,7 @@ const server = http.createServer((req, res) => {
 });
 
 (async () => {
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  await safeListen(server);
   const browser = await chromium.launch({ headless: true });
   let checks = 0;
   try {
