@@ -3318,7 +3318,7 @@ procedures:
                                 정산했다(이슈는 in_progress로 돌아갔고 브랜치 동결은 풀렸다).
                                 이 브랜치 위에서 재작업을 재개할지 정한다.
 
-                                approve: 런이 작업 단계로 되감기고, 같은 브랜치 위에서 작업·
+                                rework: 런이 작업 단계로 되감기고, 같은 브랜치 위에서 작업·
                                 테스트·커밋·착지 요청을 한 바퀴 더 돈다. 세션 슬롯과 상위의 심사
                                 턴이 한 번 더 든다.
                                 hold: 착지 없이 이 회차를 마감한다(재작업이 이 세션의 일이
@@ -3329,8 +3329,9 @@ procedures:
                                 판단 근거: 거절 사유와 재작업 범위 요지가 앞 스텝의 보고에 있다
                                 (`claunch cflow2 journal`), 거절 마커는
                                 `claunch beads comments <이슈 id>`에 있다.
+                            # 선택지 이름은 질문 예약어(approve 등)를 피한다(claunch-gpccp).
                             cases:
-                              approve:
+                              rework:
                               - rework-gate
                               - return: rework
                                 value: {reason: "$result['landing-declined'].value.reason", rework: true}
@@ -3693,7 +3694,7 @@ procedures:
             이 런이 done이 되면 데몬이 종결 기록을 쓴 뒤 이 세션을 종료한다.
             세션 종료를 승인할지 정한다.
 
-            approve: pane이 닫히고 슬롯이 반환된다. 브랜치와 beads 이슈는
+            end: pane이 닫히고 슬롯이 반환된다. 브랜치와 beads 이슈는
             세션과 무관하게 남아 상위 세션이 그대로 통합할 수 있고, 다시 사람
             손이 필요하면 `claunch respawn <세션>`이 있다.
             hold: 종료를 보류한다 — 세션을 의도적으로 살려 둘 사유가 있을 때
@@ -3701,7 +3702,9 @@ procedures:
             답하지 않는 동안 이 질문은 열린 상태로 유지되고 세션은 살아 있다.
 
             판단 근거: `claunch cflow2 journal -t <세션>`, `claunch beads show <이슈> --json`.
-        cases: {approve: end-gate, hold: end-hold}
+        # 선택지 이름은 질문 예약어(approve 등)를 피한다(claunch-gpccp): approve로
+        # 두면 어떤 질문 brief도 검증을 통과하지 못해 런이 이 질문을 올리지 못한다.
+        cases: {end: end-gate, hold: end-hold}
 
 body:
   try:
