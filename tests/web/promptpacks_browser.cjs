@@ -1,8 +1,10 @@
 /* The create form's Prompt packs row in a real browser: its layout is fixed
-   (claunch-glntg). Ticking a chip, a role locking one (a wider badge) and a
-   longer summary must not move any chip, and the "The opening will include"
-   block keeps its own place under the chips -- opening a pack's text below
-   it moves neither. Positions are measured, not inferred from the DOM. */
+   (claunch-glntg). Ticking a chip, a role locking one and a longer summary
+   must not move any chip, and the "The opening will include" block keeps its
+   own place under the chips -- opening a pack's text below it moves neither.
+   And no text is cut: every title, badge and summary pill shows whole, so
+   nobody has to hover for a tooltip (claunch-uvm3w). Positions and widths
+   are measured, not inferred from the DOM. */
 const { chromium } = require('playwright');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -12,9 +14,9 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
 const ROLES = ['analyst', 'free', 'leader', 'operator', 'pm', 'reviewer', 'specialist', 'worker'];
 const OFFER = {
   workspace: { name: 'repo', path: 'F:/repo' },
-  packs: [{ id: 'beads', title: 'Beads board' }, { id: 'common', title: 'Common' }],
+  packs: [{ id: 'beads', title: 'Beads board (br · bv)' }, { id: 'common', title: '공통 지침' }],
   default_packs: ['common'],
-  role_packs: { leader: ['beads', 'role-leader'], worker: ['role-worker'] },
+  role_packs: { leader: ['beads', 'role-leader', 'role-specialist'], worker: ['role-worker'] },
   shipped: [
     { id: 'beads', title: 'Beads board' }, { id: 'common', title: 'Common' },
     { id: 'unreal-operator', title: 'Unreal — operator' },
@@ -73,6 +75,22 @@ const OFFER = {
       const groups = document.querySelector('#new-packs-row .pack-groups');
       return { chips, summary: r(summary), groups: r(groups) };
     });
+    // Every piece of chip and summary text, and whether it shows whole.
+    const clipped = () => page.evaluate(() => {
+      const out = [];
+      const sel = '#new-packs-row .pack-chip-title, #new-packs-row .pack-chip-badge, ' +
+        '#new-packs-row .pack-chip-lock, #new-packs-row .pack-chip-mini, #new-packs-row .pack-chip';
+      for (const n of document.querySelectorAll(sel)) {
+        if (n.scrollWidth > n.clientWidth + 1 || getComputedStyle(n).textOverflow === 'ellipsis') {
+          out.push(`${n.className}: ${n.textContent.trim()} (${n.scrollWidth} > ${n.clientWidth})`);
+        }
+      }
+      const row = document.querySelector('#new-packs-row').getBoundingClientRect();
+      for (const c of document.querySelectorAll('#new-packs-row .pack-chip')) {
+        if (c.getBoundingClientRect().right > row.right + 1) out.push(`outside the row: ${c.textContent.trim()}`);
+      }
+      return out;
+    });
     const tick = (name) => page.evaluate((n) => {
       document.querySelector(`#new-packs-row input[name="${n}"]`).click();
     }, name);
@@ -82,10 +100,8 @@ const OFFER = {
     assert.ok(base.summary[1] >= base.groups[1] + base.groups[3], 'summary under the chips');
     assert.equal(base.summary[0], base.groups[0]);
     assert.equal(base.summary[2], base.groups[2]);
-    // Chips sit in equal cells.
     const general = ['daemon_prompt', 'prompt_pack_beads', 'prompt_pack_common', 'prompt_pack_unreal-operator'];
-    const widths = new Set(general.map((n) => base.chips[n][2]));
-    assert.equal(widths.size, 1, `equal cells: ${[...widths]}`);
+    assert.deepEqual(await clipped(), []);
 
     // Ticking and unticking: nothing moves, the summary keeps its box.
     await tick('prompt_pack_beads');
@@ -114,6 +130,16 @@ const OFFER = {
     now = await measure();
     for (const n of general) assert.deepEqual(now.chips[n], base.chips[n], n);
     assert.ok(now.chips['prompt_pack_role-leader'], 'the role chip is shown');
+    assert.ok(now.chips['prompt_pack_role-specialist'], 'the role chip is shown');
+    // Locked chips show whole too; the role is named in the summary.
+    assert.deepEqual(await clipped(), []);
+    assert.equal(await page.locator('#new-packs-row .pack-chip.locked .pack-chip-lock').first().innerText(), '🔒');
+    assert.match(await page.locator('#new-packs-row .new-packs-summary').innerText(),
+      /role-specialist \(role leader, claunch's copy\)/);
+    // Every role pack unfolded: still nothing cut.
+    await page.locator('#new-packs-row .pack-chip-more').click();
+    assert.deepEqual(await clipped(), []);
+    await page.locator('#new-packs-row .pack-chip-more').click();
 
     // Opening a pack's text: the chips and the summary stay put, the panel
     // goes under the summary.
@@ -126,7 +152,11 @@ const OFFER = {
     const panel = await page.locator('#new-packs-row .pack-preview').boundingBox();
     assert.ok(panel.y >= now.summary[1] + now.summary[3], 'preview under the summary');
 
+    // A narrow window: chips wrap to more lines, still nothing is cut.
+    await page.setViewportSize({ width: 700, height: 900 });
+    assert.deepEqual(await clipped(), []);
+
     assert.deepEqual(errors, []);
-    console.log('promptpacks browser: chips keep their cells through ticks and role locks; the opening block stays put');
+    console.log('promptpacks browser: chips stay put through ticks and role locks, no text is cut; the opening block stays put');
   } finally { await browser.close(); }
 })().catch((e) => { console.error(e); process.exitCode = 1; });
