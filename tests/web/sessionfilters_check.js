@@ -171,14 +171,17 @@ check("turning the grouping off leaves none",
 check("the shipped page contains all five state controls",
       ["current", "running", "killed", "paused", "archived"].every((name) =>
         html.includes(`id="session-filter-${name}"`)), true);
-// A poll that has not landed yet — first load, or the window a daemon reset
-// opens — must not leave this bar a blank strip. The labels are seeded in the
-// HTML, so they read even before syncSessionFilters has run once.
-check("every state control carries its label before any poll",
-      [["current", "Current"], ["running", "Running"], ["killed", "Killed"],
-       ["paused", "Paused"], ["archived", "Archived"]].every(([name, label]) =>
-        new RegExp(`id="session-filter-${name}"[^>]*>${label}` +
-                   `<span class="session-filter-count">`).test(html)), true);
+check("every icon button has a tooltip and accessible name before polling",
+      ["current", "running", "paused", "killed", "archived"].every((name) => {
+        const tag = html.match(new RegExp(`id="session-filter-${name}"[^>]*>`))?.[0] || "";
+        return tag.includes(`title="${name[0].toUpperCase() + name.slice(1)}`)
+          && tag.includes('aria-label="')
+          && html.includes(`class="session-filter-icon filter-icon-${name}" aria-hidden="true"`);
+      }), true);
+check("poll preserves icon labels and tooltips", buttons.running.attrs["title"], "Running");
+check("poll gives accessible name and count", buttons.running.attrs["aria-label"], "Running (1)");
+check("poll renders an icon instead of visible label", buttons.running.children[0].className,
+      "session-filter-icon filter-icon-running");
 // And the poll refreshes the counts whenever the fleet changed, not only when
 // the rail's rows are rebuilt: a daemon reset relaunches the same records, so
 // the row signature can be unchanged while the counts must still be redrawn,
