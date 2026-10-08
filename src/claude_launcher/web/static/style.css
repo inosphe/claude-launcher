@@ -2769,21 +2769,49 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 .sess-beads-create-note { flex: 1 1 100%; }
 .beads-filters { align-items: center; margin-bottom: 12px; }
 /* ---- semantic search --------------------------------------------------- */
-/* The project selector sits above the search: one row, label then picker. */
-.project-row { padding: 6px 8px 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px; align-items: center; }
-.project-row label { font-size: 11px; color: #7d8590; white-space: nowrap; }
-.project-row label a { color: #58a6ff; text-decoration: none; margin-left: 4px; }
-.project-row label a:hover { text-decoration: underline; }
-#project-select {
-  width: 100%; box-sizing: border-box; padding: 4px 6px; font-size: 12px;
-  background: #0d1117; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px;
+/* The project picker: one tab per project, a strip that scrolls sideways
+   rather than wrapping when it is wider than the rail. */
+.project-tabs {
+  flex: none; display: flex; gap: 2px; padding: 4px 6px;
+  overflow-x: auto; overflow-y: hidden; scrollbar-width: thin;
+  background: #11151b; border-bottom: 1px solid #2a2e36;
 }
+.project-tab {
+  flex: none; max-width: 160px; overflow: hidden; text-overflow: ellipsis;
+  padding: 4px 8px; border-radius: 4px; cursor: pointer; white-space: nowrap;
+  color: #8b949e; font-size: 11px; font-weight: 600;
+}
+.project-tab:hover { color: #c9d1d9; background: #1d2128; }
+.project-tab.active { color: #e6edf3; background: #243247; box-shadow: inset 0 0 0 1px #385273; }
+.project-tab:focus-visible { outline: 2px solid #58a6ff; outline-offset: 1px; }
 .project-add-row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .project-add-row input, .project-add-row select { flex: 1 1 160px; min-width: 120px; }
 .project-row-item { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 6px 0; border-top: 1px solid #21262d; }
 .project-row-item .project-name { font-weight: 600; min-width: 100px; }
 .project-row-item select { flex: 1 1 180px; min-width: 140px; }
-.session-search-row { padding: 6px 8px 0; display: grid; grid-template-columns: minmax(0, 1fr) 28px; gap: 3px 4px; align-items: stretch; }
+/* The picked project's header and the search on one line. Folded, the line
+   is the header then three icons (filter, search anything, manage); opened
+   (.searching), the box takes the header's place and the filter icon goes. */
+.session-search-row {
+  padding: 6px 8px 0; display: flex; flex-wrap: wrap; gap: 3px 4px; align-items: stretch;
+}
+.project-header {
+  flex: 1 1 0; min-width: 0; display: flex; align-items: baseline; gap: 6px;
+  padding: 4px 2px; cursor: pointer; white-space: nowrap; overflow: hidden;
+}
+.project-header-name { flex: none; max-width: 60%; overflow: hidden; text-overflow: ellipsis; font-size: 12px; font-weight: 600; color: #e6edf3; }
+.project-header-detail { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 11px; color: #7d8590; }
+.session-search-row .session-search-box { display: none; flex: 1 1 0; }
+.session-search-row.searching .session-search-box { display: flex; }
+.session-search-row.searching .project-header,
+.session-search-row.searching .session-search-toggle { display: none; }
+.session-search-toggle, .project-manage {
+  flex: none; display: flex; align-items: center; justify-content: center;
+  width: 28px; min-height: 26px; padding: 0; box-sizing: border-box;
+  background: #252b35; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; cursor: pointer;
+}
+.session-search-toggle:hover, .project-manage:hover { background: #303844; border-color: #596475; color: #e6edf3; }
+.project-manage { width: 24px; color: #8b949e; background: none; border-color: transparent; }
 /* The box and its clear button hold the first column together, which is why
    the button can be placed against the input's own right edge. */
 .session-search-box { position: relative; display: flex; min-width: 0; }
@@ -2801,7 +2829,7 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
   background: transparent; color: #7d8590; cursor: pointer;
 }
 .session-search-clear:hover { color: #e6edf3; background: #30363d; }
-.session-search-note { grid-column: 1 / -1; font-size: 11px; color: #7d8590; }
+.session-search-note { flex: 1 0 100%; font-size: 11px; color: #7d8590; }
 .beads-search {
   flex: 1 1 220px; min-width: 160px; padding: 4px 8px; font-size: 12px;
   background: #0d1117; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px;

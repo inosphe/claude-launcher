@@ -15,11 +15,14 @@
      its tab shows the session's state and a chip naming its project instead
      of the "unknown" dot a filtered poll left it with.
    - The pick is in the address (`?project=`), so a reload keeps it. The
-     first build of the rail's <select> has no value to keep, and comparing
+     first build of the rail's picker has no value to keep, and comparing
      that "" against the remembered pick used to drop it on every reload.
+   - The rail's picker is a strip of tabs (claunch-p6xb3): "All projects"
+     and one per project, the open one marked; under it the picked
+     project's header shares its line with the search.
    - Opening a session while the rail is narrowed to another project moves
      the rail to the session's project; "All projects" is left alone.
-   - The rail's selector stands above the search, and the create form's
+   - The rail's tabs stand above the search, and the create form's
      Project row stands above the Directory row it answers — in the markup,
      where a reorder done by moving HTML would drop it.
    - A pick fills the directory, and only a directory nobody chose. The
@@ -66,18 +69,19 @@ function slice(name) {
 }
 
 /* ---- the markup --------------------------------------------------------- */
-const railPick = html.indexOf('id="project-select"');
+const railPick = html.indexOf('id="project-tabs"');
 const railSearch = html.indexOf('id="session-search"');
-check("the rail's project selector exists", railPick >= 0, true);
-check("...and stands above the search it narrows",
+check("the rail's project tabs exist", railPick >= 0, true);
+check("...and stand above the search they narrow",
       railPick >= 0 && railSearch >= 0 && railPick < railSearch, true);
+check("the select they replaced is gone", html.includes('id="project-select"'), false);
 const formStart = html.indexOf('<form id="new-session"');
 const formProject = html.indexOf('<select name="project">', formStart);
 const formCwd = html.indexOf('<select name="cwd">', formStart);
 check("the create form asks the project", formProject >= 0, true);
 check("...before the directory it answers", formProject < formCwd, true);
-check("the rail selector has its own rule", /#project-select \{/.test(css), true);
-check("...and the row it sits in", /\.project-row \{/.test(css), true);
+check("the tabs have their own rule, open and not",
+      [/\.project-tabs \{/.test(css), /\.project-tab\.active \{/.test(css)], [true, true]);
 check("a tab of another project has its own look",
       [/\.session-tab\.other-project \{/.test(css), /\.session-tab-project \{/.test(css)],
       [true, true]);
@@ -152,12 +156,38 @@ const meshRow = select("mesh");
 meshRow.dispatchEvent = (ev) => { if (ev.type === "change") meshChanges++; };
 form.form = { cwd: select("cwd"), mesh: meshRow };
 form.closest = () => form.form;
-const rail = select("project-select");
-const byId = { "project-select": rail };
+/* The tab strip and the header renderProjectTabs fills. */
+function node(tag) {
+  const n = {
+    tag, kids: [], text: "", classes: new Set(), dataset: {}, attrs: {}, handlers: {},
+    title: "", tabIndex: undefined, scrolled: 0,
+    appendChild(c) { n.kids.push(c); return c; },
+    setAttribute(k, v) { n.attrs[k] = v; },
+    addEventListener(ev, fn) { n.handlers[ev] = fn; },
+    scrollIntoView() { n.scrolled++; },
+    querySelector(sel) { return n.parts[sel] || null; },
+    parts: {},
+    get textContent() { return n.text; },
+    set textContent(v) { n.text = String(v); n.kids = []; },
+    get className() { return [...n.classes].join(" "); },
+    set className(v) { n.classes = new Set(String(v).split(/\s+/).filter(Boolean)); },
+  };
+  return n;
+}
+const tabBar = node("div");
+const header = node("div");
+header.parts[".project-header-name"] = node("span");
+header.parts[".project-header-detail"] = node("span");
+const tabs = () => tabBar.kids;
+const openTab = () => tabs().filter((t) => t.classes.has("active")).map((t) => t.dataset.project);
+const byId = { "project-tabs": tabBar, "project-header": header };
 const $ = (id) => byId[id] || null;
 const document = {
   querySelector: (q) => (q === "#new-session select[name=project]" ? form : null),
+  createElement: node,
 };
+let scrolledTop = 0;
+const scrollSessionListTop = () => { scrolledTop++; };
 let served = { projects: [] };
 let apiCalls = [];
 const api = async (url) => {
@@ -195,6 +225,7 @@ const syncSpawnMode = () => { spawnResyncs++; };
 
 const ctx = {
   Option, document, $, api, localStorage, refreshSessions, refreshMeshList,
+  scrollSessionListTop,
   renderHome, renderWorkspaces, wsOpen, currentPage, BASE,
   spawnParent, syncSpawnMode, location, history,
 };
@@ -212,8 +243,8 @@ const code = [
   "let projectFollowPending = '';", slice("followSessionProject"),
   slice("sessionTabOtherProject"), slice("hashQuery"),
   slice("applyProjectDefaultMesh"),
-  slice("applyProjectDefaultCwd"), slice("projectSelectOptions"),
-  slice("refreshProjects"),
+  slice("applyProjectDefaultCwd"), slice("renderProjectTabs"),
+  slice("projectSelectOptions"), slice("refreshProjects"),
   "return { setCurrentProject, applyProjectDefaultCwd, railSessions, " +
   "hashWithProject, syncRouteProject, followSessionProject, " +
   "sessionTabOtherProject, setSessions: (l) => { sessionsCache = l; }, " +
@@ -239,13 +270,39 @@ const fns = new Function(...Object.keys(ctx), code)(...Object.values(ctx));
   form.form.cwd.appendChild(Option("other", "E:\\other"));
   form.form.cwd.value = "";
   await fns.refreshProjects();
-  check("a reload keeps the picked project on the freshly built selector",
-        [fns.current(), rail.value, hash], ["hq", "hq", "#/s/x?project=hq"]);
-  check("the rail offers every project behind 'all'",
-        rail.options.map((o) => o.value), ["", "default", "hq", "solo"]);
-  check("...with the default workspace on the label",
-        rail.options.map((o) => o.text),
-        ["All projects", "default", "hq — hq", "solo"]);
+  check("a reload keeps the picked project on the freshly built tabs",
+        [fns.current(), openTab(), hash], ["hq", ["hq"], "#/s/x?project=hq"]);
+  check("the rail offers every project behind 'all', a tab each",
+        tabs().map((t) => t.dataset.project), ["", "default", "hq", "solo"]);
+  check("...labelled by name, the default workspace in the tooltip",
+        [tabs().map((t) => t.text), tabs()[2].title],
+        [["All projects", "default", "hq", "solo"], "hq — hq — click to scroll to the top"]);
+  check("...every one a tab to a reader, and saying which is open",
+        tabs().map((t) => [t.attrs.role, t.attrs["aria-selected"], t.tabIndex]),
+        [["tab", "false", 0], ["tab", "false", 0], ["tab", "true", 0], ["tab", "false", 0]]);
+  check("the open tab is kept in view in a strip wider than the rail", tabs()[2].scrolled, 1);
+  check("the header names the picked project and its default workspace",
+        [header.parts[".project-header-name"].text, header.parts[".project-header-detail"].text],
+        ["hq", "hq"]);
+
+  /* the tabs pick */
+  cachedRedraws = 0;
+  tabs()[3].handlers.click();
+  check("pressing another tab picks its project and redraws from the cache",
+        [fns.current(), openTab(), hash, cachedRedraws], ["solo", ["solo"], "#/s/x?project=solo", 2]);
+  check("...and the header follows, saying a project with no default so",
+        [header.parts[".project-header-name"].text, header.parts[".project-header-detail"].text],
+        ["solo", "no default workspace"]);
+  cachedRedraws = 0;
+  tabs()[3].handlers.click();
+  check("pressing the open tab takes the list to its top and picks nothing",
+        [scrolledTop, cachedRedraws, fns.current()], [1, 0, "solo"]);
+  let prevented = 0;
+  tabs()[0].handlers.keydown({ key: "Enter", preventDefault() { prevented++; } });
+  check("Enter on a tab presses it", [fns.current(), prevented], ["", 1]);
+  check("'All projects' heads the line with the count of projects",
+        [header.parts[".project-header-name"].text, header.parts[".project-header-detail"].text],
+        ["All projects", "3 projects"]);
   check("the form offers every project and no 'all'",
         form.options.map((o) => o.value), ["default", "hq", "solo"]);
 
@@ -384,7 +441,7 @@ const fns = new Function(...Object.keys(ctx), code)(...Object.values(ctx));
   /* opening a session of another project moves the rail there */
   fns.followSessionProject("d");
   check("opening a session moves the rail to its project",
-        [fns.current(), rail.value, hash], ["solo", "solo", "#/s/x?project=solo"]);
+        [fns.current(), openTab(), hash], ["solo", ["solo"], "#/s/x?project=solo"]);
   fns.followSessionProject("a");
   check("...every time the project differs", fns.current(), "hq");
   fns.setCurrentProject("");
@@ -412,7 +469,8 @@ const fns = new Function(...Object.keys(ctx), code)(...Object.values(ctx));
   /* a remembered project that vanished falls back to all */
   served = { projects: served.projects.filter((p) => p.name !== "solo") };
   await fns.refreshProjects();
-  check("a removed project is forgotten", [fns.current(), rail.value], ["", ""]);
+  check("a removed project is forgotten", [fns.current(), openTab()], ["", [""]]);
+  check("...and its tab is gone", tabs().map((t) => t.dataset.project), ["", "default", "hq"]);
   check("...in memory too", memory["claunch_project:/t"], "");
   check("...and in the address", hash, "#/mesh/m1");
 
