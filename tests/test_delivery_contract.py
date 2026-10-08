@@ -351,6 +351,43 @@ def test_codex_no_retry_after_a_person_types(home, monkeypatch):
     assert writes[1:] == [b"\r", b"\r"]
 
 
+def test_codex_no_retry_when_a_person_types_during_the_pacing_sleep(
+    home, monkeypatch
+):
+    """The confirm window passed quietly, then a key arrived in the gap
+    before the resent Enter: that Enter would submit the person's line."""
+    monkeypatch.setattr(session_mod, "PASTE_ENTER_DELAY", 0.0)
+    s, writes = _codex_with_turns(monkeypatch, turn_after_enters=None)
+    real_sleep = asyncio.sleep
+    entry = session_mod.harness_registry.get("codex")
+    pacing = entry.paste_enter_delay
+
+    async def sleep(seconds):
+        if seconds == pacing and sum(1 for w in writes if w == b"\r") == 2:
+            s._last_human_input = time.monotonic()
+        await real_sleep(0)
+
+    monkeypatch.setattr(session_mod.asyncio, "sleep", sleep)
+    assert asyncio.run(s.deliver("mesh: go")) is True
+    assert writes[1:] == [b"\r", b"\r"]
+
+
+def test_codex_busy_before_delivery_sends_no_extra_enter(home, monkeypatch):
+    """A turn already running keeps animating the title after the Enter:
+    that counts as the turn signal, so nothing is resent."""
+    s, writes = _codex_with_turns(monkeypatch, turn_after_enters=None)
+    s._activity.feed(_CODEX_BUSY_TITLE)  # busy before the delivery starts
+    original = s.write_bytes
+
+    async def write_bytes(data: bytes) -> None:
+        await original(data)
+        s._activity.feed(_CODEX_BUSY_TITLE)  # the spinner keeps turning
+
+    s.write_bytes = write_bytes
+    assert asyncio.run(s.deliver("mesh: go")) is True
+    assert writes[1:] == [b"\r", b"\r"]
+
+
 def test_codex_send_keys_resends_enter_until_a_turn_starts(home, monkeypatch):
     s, writes = _codex_with_turns(monkeypatch, turn_after_enters=3)
     asyncio.run(s.send_keys(["message", "Enter"]))

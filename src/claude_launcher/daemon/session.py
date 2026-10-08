@@ -1712,15 +1712,18 @@ class Session:
         activity = getattr(self, "_activity", None)
         if activity is None or not activity.observes_turns:
             return 0
+        def person_typed() -> bool:
+            return getattr(self, "_last_human_input", 0.0) > since
+
         extra = 0
         while True:
             deadline = time.monotonic() + SUBMIT_CONFIRM_TIMEOUT
             while time.monotonic() < deadline:
                 if self.exited or activity.busy_seen_since(since):
                     return extra
+                if person_typed():
+                    return extra
                 await asyncio.sleep(0.05)
-            if getattr(self, "_last_human_input", 0.0) > since:
-                return extra
             if extra >= SUBMIT_RETRIES:
                 log.warning(
                     "session %s: no turn started after %d extra Enter(s); "
@@ -1733,6 +1736,10 @@ class Session:
                 "Enter again", self.sdef.name, SUBMIT_CONFIRM_TIMEOUT,
             )
             await asyncio.sleep(delay)
+            # The pacing sleep is a window too: a key typed during it would
+            # otherwise be submitted by the Enter written next.
+            if self.exited or person_typed():
+                return extra
             await self.write_bytes(b"\r")
             extra += 1
 
