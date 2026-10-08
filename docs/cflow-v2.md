@@ -967,7 +967,7 @@ nodes:
 |---|---|---|
 | `briefing` | 드라이버 세션의 LLM 브리핑을 다시 구성 | llm 설정 없음, 엔드포인트 실패, 드라이버 세션 없음 |
 | `checks` | 드라이버 세션에 상태 점검 재보고 요청을 전달 | 켜진 상태 점검 없음, 전달 실패, 드라이버 세션 없음 |
-| `push` | 다른 세션 런의 컬렉션에 레코드 추가(주체 `child`). 대상은 `parent:<이름>` 또는 `leader:<이름>` | 부모 세션 없음, 그 컬렉션을 가진 부모 런(`leader:`면 조상의 메인 런)이 없음 또는 둘 이상, 접근 거절, `each`가 빈 목록, 형식 오류 |
+| `push` | 다른 세션 런의 컬렉션에 레코드 추가(주체 `child`). 대상은 `parent:<이름>` 또는 `leader:<이름>` | 부모 세션 없음, 그 컬렉션을 가진 부모 런(`leader:`면 조상의 메인 런)이 없음 또는 둘 이상(`landing`은 아래 「착지 요청의 대상」), 접근 거절, `each`가 빈 목록, 형식 오류 |
 | `enqueue-landing` | 아래 `push`의 축약형: `to: parent:landing`, `each: $facts.in_review`, `item: {issue: $each, tip: $facts.head, branch: $facts.branch, requested_by: $facts.session}` | `push`와 같음. in_review 이슈 없음 |
 
 - 실행 시점: 엔진은 노드 인스턴스에 들어가거나 떠나는 변경 안에서 요청을
@@ -1002,13 +1002,32 @@ nodes:
   그 이름의 컬렉션을 선언한 런, 그리고 이름이 `landing`이면 부모 세션의 v1 런(메인과
   하위 런) 중 `landing_queue:`를 선언한 런. 정확히 하나여야 한다. v1 런이면 v1 엔진의
   `enqueue_landing(issues, branch, tip, by=…)`로 넣는다(10절 「v1 연결」).
+  이름이 `landing`이면 이 항목 대신 아래 「착지 요청의 대상」을 따른다.
 - `leader:<이름>`의 대상 찾기(claunch-yq80p.9): 부모 세션부터 위로 조상을 차례로
   보며, 그 세션의 **메인 slot** v2 런(side 런과 중첩 런은 세지 않는다)이 그 이름의
   컬렉션을 선언했거나 이름이 `landing`이고 그 세션의 v1 메인 런이 `landing_queue:`를
   선언했으면 그 세션이 대상이다. 그 세션 안에서 정확히 하나여야 한다. 8단계 안에서 찾지
   못하면 `trigger_skipped`(지나간 조상 목록)다. 워커의 independent 자식이 부모 워커의
   stack 런을 건너뛰고 리더의 `landing`에 착지를 요청하는 경로다. `parent:`와 같이
-  trigger에서만 쓴다(다른 자리는 검사 오류 `parent-outside-trigger`).
+  trigger에서만 쓴다(다른 자리는 검사 오류 `parent-outside-trigger`). 이름이
+  `landing`이면 이 항목 대신 아래 「착지 요청의 대상」을 따른다.
+- 착지 요청의 대상(`parent:landing`, `leader:landing`, `enqueue-landing`. claunch-6i0tp,
+  claunch-9wwbb): 데몬의 `daemon/landing_route.py`가 v1과 함께 정한다.
+  - **병합 가능**: 세션이 살아 있고, 워커와 같은 저장소(`git --git-common-dir`가 같은
+    checkout)에서 착지 큐를 가진 런(v2 `landing` 컬렉션을 선언한 런 또는 v1
+    `landing_queue:`를 선언한 런)을 구동한다. 그런 런이 여럿이면 묻지 않고 하나를
+    고른다: 메인 런이 먼저이고(순서와 무관), 그다음은 디렉터리·런 이름 순서에서 처음 것이다.
+  - `parent:landing`(stacked): 부모부터 직계 조상을 위로 차례로 보고 병합 가능한 가장
+    가까운 세션의 런에 넣는다. leader 역할은 따지지 않는다. 그런 조상이 없으면 mesh
+    leader(아래)에 넣는다.
+  - `leader:landing`(independent): mesh leader에만 넣는다. 조상의 메인 런이라도 leader가
+    아니면 대상이 아니다.
+  - mesh leader: 워커가 속한 mesh의 `leader` 역할 멤버 중 워커의 형제(같은 부모. 둘 다
+    부모가 없으면 형제로 본다)이거나 직계 조상인 세션만 대상이다. 삼촌이나 자식 관계인
+    leader는 대상이 아니다. 병합 가능한 leader가 정확히 하나가 아니면 `trigger_skipped`다.
+  - 대상이 없으면 `trigger_skipped`(지나간 세션과 사유)를 남기고 데몬 로그에 경고를
+    쓴다. 대체 대상으로 넣었으면 `trigger_done`의 사유가 지나간 세션과 대상
+    (`fell back to '<세션>' at <cwd>`)을 적는다.
 - `when`(push trigger, claunch-yq80p.9): 엔진이 trigger를 기록하는 순간 런의 환경으로
   평가하는 식이다(at leave면 `$outcome`도 읽는다. `$facts`·`$each`는 없다). 거짓이면
   기록하지 않고 `trigger_not_queued`(사유 `when (…) is false`)를 저널에 남긴다. 평가가
@@ -2263,20 +2282,18 @@ spec:
 - v2 워커 → v1 부모: `enqueue-landing`이나 `push: {to: parent:landing}`의 대상이
   v1 런(`landing_queue:` 선언)이면 데몬이 v1 `engine.enqueue_landing`을 부른다. 레코드
   필드 `issue`, `branch`, `tip`, `requested_by`가 v1 항목의 같은 이름 필드가 된다.
-- v1 워커 → v2 부모: v1 `TriggerClock._enqueue_landing`은 부모 세션의 v1 런에서 큐를
-  찾지 못하면 `runtime.holders("landing", parent)`로 v2 런을 찾아
-  `runtime.collection_op("push", "landing", principal="child")`로 넣는다.
-- v1 워커의 부모가 병합을 수행할 수 없으면(부모 세션 없음·종료, 부모가 구동하는 런
-  없음, 그 런에 착지 큐 없음) v1 `TriggerClock.landing_target`이 조부모부터 직계 조상을
-  차례로 보고 병합을 수행할 수 있는 가장 가까운 세션의 큐에 넣는다. 그런 조상이 없으면
-  `leader_run`이 워커의 형제(같은 부모. 둘 다 부모가 없으면 형제)인 mesh leader의 큐에
-  넣는다. 삼촌이나 자식 관계인 leader는 대상이 아니다. 모든 대상은 살아 있고, 같은
-  저장소에서 v1 큐 런을 하나만 구동해야 한다. 대상이 없거나 둘 이상이면 건너뛴다.
-  v2 `push_to_parent`/`push_to_leader`에는 이 폴백이 아직 없다.
+- v1 워커 → v2 부모: v1 `TriggerClock._enqueue_landing`은 부모 세션에 v1 큐 런이 없고
+  v2 `landing` 런이 있으면 `runtime.collection_op("push", "landing", principal="child")`로
+  넣는다. v2 런이 여럿이면 메인 런이 먼저이고, 그다음은 순서에서 처음 것이다.
+- v1 워커의 부모가 병합을 수행할 수 없으면 v1 `TriggerClock.landing_target`이 2.8의
+  「착지 요청의 대상」과 같은 규칙(`landing_route.Router.stacked`)으로 직계 조상, 그다음
+  형제이거나 직계 조상인 mesh leader의 v1 큐 런을 찾는다. 이 경로는 조부모 이상의
+  v2 `landing` 런은 보지 않는다.
 - MCP `landing_queue` 도구는 호출 세션의 v1 런에 `landing_queue`가 없고 v2 런이
   `landing` 컬렉션을 가지면 그 컬렉션을 보여 주고 바꾼다(`status` 값은 v1과 같다).
 - 한 세션에서 v1 `landing_queue`와 v2 `landing` 컬렉션을 동시에 가진 런이 있으면
-  대상이 둘이므로 push는 건너뛰고(`trigger_skipped`) 경고를 남긴다.
+  v2 착지 요청은 같은 선택 규칙(메인 런 먼저, 그다음 순서에서 처음 것)으로 하나를
+  고르고, v1 워커의 요청은 v1 큐 런으로 간다.
 
 ## 10a. PR 착지 (improv-worker-v2, claunch-yq80p.5)
 
@@ -2345,7 +2362,7 @@ v2 워커의 착지 요청은 기본으로 pull request를 거친다. 로컬 착
 | 항목 | stacked (기본) | independent |
 |---|---|---|
 | 기준 브랜치 | 부모의 스택 브랜치(`<부모>-stack`, 부모가 리더면 master) | 대상 브랜치(master) |
-| 착지 요청 | `parent:landing` — 부모 워커의 stack 런(부모가 리더면 리더 런) | `leader:landing` — 부모를 건너뛴 가장 가까운 조상의 메인 런(2.8) |
+| 착지 요청 | `parent:landing` — 부모 워커의 stack 런(부모가 리더면 리더 런). 부모가 병합할 수 없으면 직계 조상, 그다음 mesh leader(2.8) | `leader:landing` — mesh leader(형제 또는 직계 조상)의 착지 큐(2.8) |
 | PR base | 부모의 원격 스택 브랜치(아래 「stacked PR」) | master |
 | 부모의 역할 | 리뷰, 기준 이동 통지, 컷 | 상태 관제(정지·실패·완료 확인) |
 | 부모 기준이 바뀔 때 | stack 런이 새 tip과 `rebase --onto` 명령을 통지(아래) | 영향 없음 |

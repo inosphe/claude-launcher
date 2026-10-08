@@ -28,7 +28,7 @@ import pytest
 from claude_launcher import cli_cflow
 from claude_launcher.cflow import engine, landing, mcp, model, state as state_mod
 from claude_launcher.cflow.model import WorkflowError
-from claude_launcher.daemon import cflow_clock
+from claude_launcher.daemon import cflow_clock, landing_route
 from claude_launcher.daemon.harness import SessionDef
 
 LEADER = """
@@ -408,7 +408,7 @@ def test_a_childs_trigger_files_its_request_on_the_parents_queue(proj, feature, 
     "parent, workflow, issues, why",
     [
         (None, "lead", ["x-1"], "no parent session"),
-        ("lead", "plain", ["x-1"], "declares a landing_queue"),
+        ("lead", "plain", ["x-1"], "declares a landing queue"),
         ("lead", "lead", [], "holds no issue in_review"),
         ("lead", "lead", None, "board could not be read"),
     ],
@@ -443,7 +443,7 @@ class _Mesh:
     def get(self, name):
         return self
 
-    def _is_local(self, mesh, member):
+    def is_local_member(self, mesh, member):
         return True
 
 
@@ -557,7 +557,8 @@ def test_a_leader_that_is_no_sibling_or_ancestor_is_refused(
     assert _queue(engine.status(cwd=lcwd, scope="lead")) == {}
 
 
-def test_a_leader_with_two_queue_runs_in_this_repository_is_a_skip(proj, feature, monkeypatch):
+def test_a_leader_with_two_queue_runs_in_this_repository_takes_the_first(proj, feature, monkeypatch):
+    # Two main runs: no question is asked, the first in order takes it.
     lcwd = state_mod.resolve_cwd(str(proj))
     other = _other_checkout(proj)
     engine.start("lead", cwd=lcwd, scope="lead")
@@ -567,10 +568,11 @@ def test_a_leader_with_two_queue_runs_in_this_repository_is_a_skip(proj, feature
     performed, detail = _fallback_run(
         wcwd, [_Session("lead", lcwd)], {"w1": ["worker"], "lead": ["leader"]},
     )
-    assert not performed
-    assert "no parent session" in detail and "ambiguous" in detail
-    assert _queue(engine.status(cwd=lcwd, scope="lead")) == {}
-    assert _queue(engine.status(cwd=other, scope="lead")) == {}
+    assert performed, detail
+    first, second = sorted([lcwd, other])
+    assert f"fell back to 'lead' at {first}" in detail
+    assert "x-1" in _queue(engine.status(cwd=first, scope="lead"))
+    assert _queue(engine.status(cwd=second, scope="lead")) == {}
 
 
 def test_a_leader_without_a_queue_run_is_a_skip(proj, feature, monkeypatch):
@@ -582,7 +584,7 @@ def test_a_leader_without_a_queue_run_is_a_skip(proj, feature, monkeypatch):
     )
     assert not performed
     assert "no parent session" in detail
-    assert "declares a landing_queue" in detail
+    assert "declares a landing queue" in detail
 
 
 def test_a_mesh_without_a_leader_is_a_skip(proj, feature, monkeypatch):
@@ -621,9 +623,9 @@ def test_the_leaders_run_in_another_repository_is_not_taken(proj, feature, monke
     assert _queue(engine.status(cwd=other, scope="lead")) == {}
 
 
-def test_a_parent_whose_run_is_ambiguous_is_not_bypassed(proj, feature, monkeypatch):
-    # The parent can merge; which of its two runs takes the request is the
-    # unknown, and handing it to the leader would skip the parent's stack.
+def test_a_parent_with_two_queue_runs_is_not_bypassed(proj, feature, monkeypatch):
+    # The parent can merge: one of its runs takes the request (the first in
+    # order), and the leader above it is not asked.
     lcwd = state_mod.resolve_cwd(str(proj))
     other = _other_checkout(proj)
     engine.start("lead", cwd=lcwd, scope="lead")
@@ -635,9 +637,20 @@ def test_a_parent_whose_run_is_ambiguous_is_not_bypassed(proj, feature, monkeypa
         wcwd, [_Session("lead", lcwd), _Session("mid", lcwd, parent="lead")],
         {"w1": ["worker"], "lead": ["leader"], "mid": ["worker"]}, parent="mid",
     )
-    assert not performed
-    assert "parent 'mid' has 2 runs" in detail and "leader" not in detail
+    assert performed, detail
+    assert "fell back" not in detail
+    first, second = sorted([lcwd, other])
+    assert "x-1" in _queue(engine.status(cwd=first, scope="mid"))
+    assert _queue(engine.status(cwd=second, scope="mid")) == {}
     assert _queue(engine.status(cwd=lcwd, scope="lead")) == {}
+
+
+def test_a_main_run_is_picked_before_an_earlier_side_run():
+    side = landing_route.Holder("a", "stack", False)
+    main = landing_route.Holder("b", None, True)
+    assert landing_route.pick([side, main]) is main
+    assert landing_route.pick([side, landing_route.Holder("c", "x", False)]) is side
+    assert landing_route.pick([]) is None
 
 
 class _Meshes:
@@ -652,7 +665,7 @@ class _Meshes:
     def get(self, name):
         return self._by_name[name]
 
-    def _is_local(self, mesh, member):
+    def is_local_member(self, mesh, member):
         return True
 
 

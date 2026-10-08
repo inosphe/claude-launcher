@@ -193,8 +193,12 @@ class Cflow2Clock:
         facts_fn: Optional[Callable[[str, str], Dict[str, Any]]] = None,
         restart_runner: Optional[Callable[[str, Dict[str, Any], str], Dict[str, Any]]] = None,
         platform: Optional[str] = None,
+        mesh: Any = None,
     ) -> None:
         self.manager = manager
+        #: The mesh manager a landing request's leader fallback reads
+        #: (:mod:`.landing_route`); None leaves a request with no leader step.
+        self.mesh = mesh
         self.poll = float(poll if poll is not None else DEFAULT_POLL)
         self.spawn = spawn or cflow2_exec.default_spawn
         self.launch_for = launch_for or self._launch_for
@@ -695,7 +699,7 @@ class Cflow2Clock:
             self._mark()
             performed, detail = await cflow2_triggers.perform_bounded(
                 self.manager, cwd, scope, trig, cwds=cwds, driver=driver,
-                facts_fn=self.facts_fn)
+                facts_fn=self.facts_fn, mesh=self.mesh)
             try:
                 await asyncio.to_thread(runtime.complete_trigger, cwd, scope, tid,
                                         performed, detail)
