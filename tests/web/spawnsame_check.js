@@ -126,7 +126,8 @@ const actx = {
 };
 vm.createContext(actx);
 vm.runInContext(
-  [slice("ensureOption"), slice("applySessionModalSeed"), slice("applyPendingPackSeed")]
+  [slice("ensureOption"), slice("applySessionModalSeed"), slice("applyPendingPackSeed"),
+   slice("newPackAlways")]
     .join("\n")
   + "\nthis.apply = applySessionModalSeed; this.applyPacks = applyPendingPackSeed;"
   + "\nthis.state = () => ({ pendingNewMesh, newWfPicked, newSubroleTicks,"

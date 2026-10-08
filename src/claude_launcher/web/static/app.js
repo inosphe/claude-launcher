@@ -10225,6 +10225,23 @@ let newPackPreview = null;     // {id, daemon, doc, error}: the text being shown
 // the form's directory has arrived: the arrival of another workspace's offer
 // starts the ticks over, which would wipe ticks written before it.
 let pendingSeedPacks = null;
+// Set when the form opens: the next offer to arrive forgets the operator's
+// unticks of the packs Settings ticks on every opening (offer.always_packs).
+let newPackAlwaysPending = false;
+
+/* The packs Settings ticks on every opening of the form. */
+function newPackAlways() {
+  return (newPackOffer && newPackOffer.always_packs) || [];
+}
+
+/* An opening of New session or Spawn child: the offer is read again (a list
+   just saved in Settings is the one that counts), and once it is here the
+   every-opening packs start ticked whatever the last opening left. */
+function promptPackFormOpened() {
+  newPackAlwaysPending = true;
+  newPackOfferFor = null;
+  Promise.resolve(refreshPromptPackOffer()).catch(() => {});
+}
 
 /* Write a held seed's ticks, once the offer on hand is the one for the
    directory the form names: exactly the seeded packs on, every other offered
@@ -10233,7 +10250,8 @@ let pendingSeedPacks = null;
 function applyPendingPackSeed() {
   if (!pendingSeedPacks || !newPackOffer) return;
   if (newPackOfferFor !== newSessionCwd()) return;
-  const want = new Set(pendingSeedPacks);
+  // The every-opening packs are on whatever the seed's session took.
+  const want = new Set([...pendingSeedPacks, ...newPackAlways()]);
   pendingSeedPacks = null;
   const ids = [...(newPackOffer.packs || []), ...(newPackOffer.shipped || [])]
     .map((p) => p && p.id).filter(Boolean);
@@ -10269,6 +10287,10 @@ async function refreshPromptPackOffer() {
   // defaults again rather than carrying ids across.
   if (before !== after) { newPackTicks = new Map(); newPackRolesShown = new Set(); }
   newPackOffer = offer;
+  if (offer && newPackAlwaysPending) {
+    newPackAlwaysPending = false;
+    for (const id of newPackAlways()) newPackTicks.delete(id);
+  }
   applyPendingPackSeed();
   renderPromptPackRow();
 }
@@ -10311,9 +10333,11 @@ function newRequiredPacks(f) {
 
 /* The operator's own tick, else the default -- which only ticks a pack the
    workspace installed, so offering claunch's copies puts nothing new into a
-   session nobody touched the row for. */
+   session nobody touched the row for. A pack Settings ticks on every opening
+   is the exception: it is ticked, as claunch's copy when not installed. */
 function newPackTicked(id) {
   if (newPackTicks.has(id)) return newPackTicks.get(id);
+  if (newPackAlways().includes(id)) return true;
   const installed = ((newPackOffer && newPackOffer.packs) || []).some((p) => p.id === id);
   return installed && ((newPackOffer && newPackOffer.default_packs) || []).includes(id);
 }
@@ -10448,7 +10472,8 @@ function renderPromptPackRow() {
     .filter((id, i, a) => a.indexOf(id) === i);
   const primary = newPrimaryRole(f);
   const parts = chosen.map((id) => {
-    const why = required[id] ? `role ${required[id].join(", ")}` : "ticked";
+    const why = required[id] ? `role ${required[id].join(", ")}`
+      : (newPackAlways().includes(id) ? "ticked, every opening" : "ticked");
     return `${id} (${why}${shippedIds.has(id) ? ", claunch's copy" : ""})`;
   });
   if (newDaemonPromptWanted()) parts.unshift("daemon prompt (this daemon's, every session)");
@@ -18174,6 +18199,7 @@ async function openNewSession(mesh) {
   $("new-session")._sessionView = createSessionFormView("new", "page");
   refreshParentChoices();
   setSessionModalTab("new");
+  promptPackFormOpened();
   applySessionModalRecall($("new-session"));
   refreshScoreGoalDefault($("new-session"));
   pendingNewMesh = mesh || "";
@@ -24295,7 +24321,7 @@ function installPanel() {
 let promptPacksDoc = null;
 let promptPacksError = "";
 let promptPacksBusy = "";
-let promptPacksDraft = null;   // {role_packs, default_packs} being edited
+let promptPacksDraft = null;   // {role_packs, default_packs, always_packs} being edited
 
 async function refreshPromptPacks() {
   try {
@@ -24538,13 +24564,14 @@ function promptPacksCard() {
   return card;
 }
 
-/* The two settings, edited as one draft and saved together. */
+/* The three settings, edited as one draft and saved together. */
 function promptPackSettings(doc, ids) {
   const box = el("div", "prompt-pack-settings");
   if (!promptPacksDraft) {
     promptPacksDraft = {
       role_packs: JSON.parse(JSON.stringify(doc.role_packs || {})),
       default_packs: [...(doc.default_packs || [])],
+      always_packs: [...(doc.always_packs || [])],
     };
   }
   const draft = promptPacksDraft;
@@ -24574,6 +24601,24 @@ function promptPackSettings(doc, ids) {
     defaults.appendChild(label);
   }
   box.appendChild(defaults);
+
+  box.appendChild(el("h4", null, "Ticked on every opening"));
+  box.appendChild(el("p", "wf-note",
+    "Packs New session and Spawn child tick each time they open, even when " +
+    "the last form unticked them or a \"Spawn same setup\" seed left them " +
+    "out (e.g. \"common\", the shared working rules). The box can still be " +
+    "unticked for one session. A workspace that has not installed one gets " +
+    "the copy claunch ships."));
+  const always = el("div", "new-check-list");
+  always.id = "prompt-pack-always";
+  for (const id of ids) {
+    const label = el("label", "check");
+    label.appendChild(check(draft.always_packs.includes(id),
+      (on) => toggle(draft.always_packs, id, on)));
+    label.appendChild(el("span", null, id));
+    always.appendChild(label);
+  }
+  box.appendChild(always);
 
   box.appendChild(el("h4", null, "Required by role"));
   box.appendChild(el("p", "wf-note",
@@ -24634,9 +24679,9 @@ function promptPackSettings(doc, ids) {
   const reset = el("button", "wf-btn clear", "Restore defaults");
   reset.disabled = !!promptPacksBusy;
   reset.addEventListener("click", async () => {
-    if (!confirm("Restore the shipped defaults for both settings?")) return;
+    if (!confirm("Restore the shipped defaults for all three settings?")) return;
     const ok = await promptPackCall("PUT", "/api/prompt-packs/role-packs",
-      { role_packs: null, default_packs: null }, "settings");
+      { role_packs: null, default_packs: null, always_packs: null }, "settings");
     if (ok) { promptPacksDraft = null; renderWorkspaces(); }
   });
   actions.appendChild(reset);
@@ -34844,6 +34889,7 @@ async function openSessionModal(opts = {}) {
   if (opts.mesh) pendingNewMesh = opts.mesh;
   refreshParentChoices();
   setSessionModalTab(tab);
+  promptPackFormOpened();
   if (opts.seed) applySessionModalSeed(f, opts.seed);
   else applySessionModalRecall(f);
   refreshScoreGoalDefault(f);

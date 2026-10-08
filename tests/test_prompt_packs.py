@@ -122,6 +122,20 @@ def test_default_packs_follow_the_headers_until_saved(home):
     assert prompt_packs.set_default_packs(None) == ["asking-the-user", "common"]
 
 
+def test_always_packs_are_empty_until_saved_and_kept_apart(home):
+    assert prompt_packs.always_packs() == []
+    assert prompt_packs.set_always_packs(["common", "common"]) == ["common"]
+    # A list of its own: saving it leaves the default-ticked list alone.
+    assert prompt_packs.default_packs() == ["asking-the-user", "common"]
+    assert prompt_packs.set_default_packs([]) == []
+    assert prompt_packs.always_packs() == ["common"]
+    with pytest.raises(prompt_packs.PackError):
+        prompt_packs.set_always_packs(["Bad Id"])
+    assert prompt_packs.always_packs() == ["common"]
+    assert prompt_packs.set_always_packs(None) == []
+    assert prompt_packs.default_packs() == []
+
+
 def test_choose_adds_required_packs_and_names_the_role(tmp_path):
     ws = tmp_path / "ws"
     ws.mkdir()
@@ -386,6 +400,7 @@ def test_settings_routes_install_remove_and_save_the_mapping(home, tmp_path):
             doc = await (await client.get("/api/prompt-packs", headers=BEARER)).json()
             assert doc["role_packs"] == prompt_packs.DEFAULT_ROLE_PACKS
             assert doc["default_packs"] == ["asking-the-user", "common"]
+            assert doc["always_packs"] == []
             assert "unreal" in doc["roles"]
             row = next(w for w in doc["workspaces"] if w["name"] == "proj")
             assert {p["id"]: p["status"] for p in row["packs"]}["beads"] == "missing"
@@ -422,6 +437,31 @@ def test_settings_routes_install_remove_and_save_the_mapping(home, tmp_path):
             doc = await resp.json()
             assert doc["role_packs"] == {"worker": ["beads"]}
             assert doc["default_packs"] == ["beads"]
+
+            # The every-opening list: a bad id refuses the whole body, a good
+            # one is saved alone, read back by Settings and by the form's
+            # offer, and null empties it.
+            resp = await client.put("/api/prompt-packs/role-packs", headers=BEARER,
+                                    json={"default_packs": ["common"],
+                                          "always_packs": ["Bad Id"]})
+            assert resp.status == 400
+            assert prompt_packs.default_packs() == ["beads"]
+            resp = await client.put("/api/prompt-packs/role-packs", headers=BEARER,
+                                    json={"always_packs": ["common"]})
+            doc = await resp.json()
+            assert resp.status == 200 and doc["always_packs"] == ["common"]
+            assert doc["default_packs"] == ["beads"]
+            offer = await (await client.get(
+                "/api/prompt-packs/offer", params={"cwd": str(ws)},
+                headers=BEARER,
+            )).json()
+            assert offer["always_packs"] == ["common"]
+            resp = await client.put("/api/prompt-packs/role-packs", headers=BEARER,
+                                    json={"always_packs": None})
+            assert (await resp.json())["always_packs"] == []
+            resp = await client.put("/api/prompt-packs/role-packs", headers=BEARER,
+                                    json={})
+            assert resp.status == 400
 
             resp = await client.post("/api/prompt-packs/remove", headers=BEARER,
                                      json={"workspace": "proj", "pack": "beads"})
