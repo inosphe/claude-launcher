@@ -84,12 +84,15 @@ option:disabled { color: #6b7280; }
 
 /* Keep the filter panel and session list visually continuous. */
 .session-filters {
-  flex: none; display: grid; grid-template-columns: 1fr 1fr; gap: 1px;
+  flex: none;
   padding: 6px 6px 7px; margin-bottom: -1px; background: #11151b;
   position: relative; z-index: 4;
 }
+.session-filter-buttons {
+  display: flex; flex-wrap: nowrap; gap: 1px; overflow-x: auto;
+}
 .session-filters button {
-  min-width: 0; padding: 6px 7px; border: 0; border-radius: 4px;
+  flex: 0 0 auto; white-space: nowrap; padding: 6px 7px; border: 0; border-radius: 4px;
   background: transparent; color: #7d8590; cursor: pointer;
   font-size: 11px; line-height: 1.2; text-align: left;
 }
@@ -97,7 +100,7 @@ option:disabled { color: #6b7280; }
 .session-filters button[aria-pressed="true"] {
   color: #e6edf3; background: #243247; box-shadow: inset 0 0 0 1px #385273;
 }
-.session-filter-count { float: right; color: #8b949e; font-variant-numeric: tabular-nums; }
+.session-filter-count { margin-left: 4px; color: #8b949e; font-variant-numeric: tabular-nums; }
 .session-group-toggle {
   grid-column: 1 / -1; display: flex; align-items: center; gap: 6px;
   padding: 4px 7px 2px; color: #8b949e; font-size: 11px; cursor: pointer;
@@ -4787,7 +4790,7 @@ body.embed #main { width: 100%; }
   #sidebar header { padding: 10px 14px; }
   /* thumb-sized, like every other tap target on the rail */
   #refresh-all { font-size: 17px; padding: 6px 10px; }
-  .session-filters { grid-template-columns: repeat(5, minmax(0, 1fr)); padding: 7px; }
+  .session-filters { padding: 7px; }
   .session-filters button { padding: 9px 7px; font-size: 12px; text-align: center; }
   .session-filter-count { float: none; margin-left: 3px; }
   /* The rail is the whole screen here, so the list takes what it needs and
