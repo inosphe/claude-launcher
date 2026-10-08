@@ -474,3 +474,36 @@ def test_status_lists_branches_other_machines_published(world):
         assert shared["pc-b/old"]["state"] == "same"
 
     _with_app(body, peers=peers, me="pc-a")
+
+
+# --- Branches waiting to land (claunch-6p7ri) -----------------------------
+
+
+def test_status_lists_local_branches_the_remote_master_does_not_hold(world):
+    a = world["a"]
+    _git(a, "switch", "-q", "-c", "s1-landed")
+    _commit(a, "landed.txt")
+    _git(a, "push", "-q", "origin", "s1-landed:master")       # landed on the shared master
+    _git(a, "switch", "-q", "-c", "s1-open", "master")
+    (a / "open.txt").write_text("open", encoding="utf-8")
+    _git(a, "add", "open.txt")
+    _git(a, "commit", "-q", "-m", "open work\n\nClaunch-Session: s42\nClaunch-Worktree: wt-x")
+    _commit(a, "open2.txt")
+    _git(a, "commit", "-q", "--allow-empty", "-m", "tip\n\nClaunch-Session: s43")
+    _git(a, "switch", "-q", "-c", "plain", "master")
+    plain = _commit(a, "plain.txt")
+    _git(a, "switch", "-q", "master")
+
+    async def body(client):
+        resp = await client.get("/api/reposync/workspaces/proj/status", headers=AUTH)
+        assert resp.status == 200, await resp.text()
+        doc = await resp.json()
+        rows = {r["branch"]: r for r in doc["unmerged"]}
+        # s1-landed is on the remote's master though the local master is behind
+        assert set(rows) == {"s1-open", "plain"}
+        assert (rows["s1-open"]["ahead"], rows["s1-open"]["session"]) == (3, "s43")
+        assert (rows["plain"]["ahead"], rows["plain"]["session"]) == (1, None)
+        assert rows["plain"]["sha"] == plain and rows["plain"]["subject"] == "add plain.txt"
+        assert rows["plain"]["date"]
+
+    _with_app(body)

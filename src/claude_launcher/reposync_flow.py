@@ -215,6 +215,43 @@ def shared_branches(repo: str, remote: str, machine: Optional[str],
     return rows
 
 
+#: How many unlanded branches the Sync panel lists, newest commit first.
+UNMERGED_LIMIT = 50
+
+
+def unmerged_branches(repo: str, base: str, *, skip: Iterable[str] = ()) -> List[dict]:
+    """Local branches with commits ``base`` does not have yet -- the work
+    waiting to land (claunch-6p7ri). ``base`` is a commit, normally the
+    remote's master as the plan read it, so a branch counts as landed once
+    the shared master holds it, whatever the local master says.
+
+    Each row carries its tip's commit time and subject, how many commits it
+    has beyond ``base``, and ``session``: the ``Claunch-Session`` trailer of
+    its tip commit (the commit-stamp convention), ``None`` when unstamped.
+    ``skip`` names branches left out -- the planned branch itself."""
+    out = reposync.git(
+        repo, "for-each-ref", "--sort=-committerdate", f"--no-merged={base}",
+        "--format=%(refname:short)%00%(objectname)%00%(committerdate:iso-strict)%00"
+        "%(subject)%00%(trailers:key=Claunch-Session,valueonly,separator=%x2C)",
+        "refs/heads", check=False,
+    )
+    left = set(skip)
+    rows = []
+    for line in out.splitlines():
+        name, sha, date, subject, stamp = (line.split("\0") + [""] * 4)[:5]
+        if not name or name in left:
+            continue
+        ahead = reposync.git(repo, "rev-list", "--count", f"{base}..{sha}", check=False)
+        rows.append({
+            "branch": name, "sha": sha, "date": date, "subject": subject,
+            "ahead": int(ahead) if ahead.isdigit() else None,
+            "session": stamp.split(",")[0].strip() or None,
+        })
+        if len(rows) >= UNMERGED_LIMIT:
+            break
+    return rows
+
+
 def workspace_status(path: str, workspace: Optional[str], peers: Dict[str, List[dict]],
                      problems: List[str], *, do_fetch: bool, remote: Optional[str] = None,
                      branch: Optional[str] = None, machine: Optional[str] = None) -> dict:
@@ -224,7 +261,8 @@ def workspace_status(path: str, workspace: Optional[str], peers: Dict[str, List[
     is a line in ``problems``, never a reason not to plan -- the plan rests on
     the shared remote alone. ``shared`` lists the branches other machines
     published on the planned remote (:func:`shared_branches`); ``machine`` is
-    this one, whose own prefix it leaves out."""
+    this one, whose own prefix it leaves out. ``unmerged`` lists the local
+    branches the remote's master does not hold yet (:func:`unmerged_branches`)."""
     try:
         repo = reposync.toplevel(path)
     except reposync.SyncError as exc:
@@ -246,6 +284,7 @@ def workspace_status(path: str, workspace: Optional[str], peers: Dict[str, List[
     out["plan"] = plan_card(p, workspace=workspace, key=key)
     # after the plan: with do_fetch its fetch is what brought these refs in
     out["shared"] = shared_branches(repo, name, machine, {r["machine"] for r in rows})
+    out["unmerged"] = unmerged_branches(repo, p.upstream or p.local, skip=[p.branch])
     return out
 
 
