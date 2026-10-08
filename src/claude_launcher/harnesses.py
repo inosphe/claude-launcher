@@ -260,6 +260,11 @@ class Harness:
     capabilities: Dict[str, dict] = field(default_factory=dict)
 
     @property
+    def takes_images(self) -> bool:
+        """Whether a declared transport can deliver an image attachment."""
+        return self.image_paste_transport == "path" or bool(self.image_paste_keys)
+
+    @property
     def borrow_mode(self) -> str:
         """How this harness can consume another base profile's credential."""
         if self.builtin and self.auth == "claude":

@@ -16,6 +16,9 @@ def test_image_paste_transport_is_declared_and_validated(home):
     assert reg["codex"].image_paste_transport == "path"
     assert reg["codex"].to_dict()["image_paste_transport"] == "path"
     assert reg["claude"].image_paste_transport == "clipboard"
+    assert reg["codex"].takes_images is True
+    assert reg["claude"].takes_images is True
+    assert reg["pi"].takes_images is False
     with pytest.raises(HarnessConfigError, match="image_paste_transport"):
         harnesses.parse({"harnesses": {"x": {
             "command": "x", "image_paste_transport": "invalid",

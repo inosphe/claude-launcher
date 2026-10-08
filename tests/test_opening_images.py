@@ -101,6 +101,13 @@ def test_an_upload_is_staged_under_the_daemon_and_answered_with_an_id(home, tmp_
     _run(body, ["M-v"])
 
 
+@pytest.mark.parametrize("harness", ["codex", "claude"])
+def test_packaged_image_transports_accept_staged_opening_images(home, harness):
+    image_id = opening_images.stage([PNG], "image/png")
+    assert api_mod._opening_image_ids({"opening_images": [image_id]}, harness) == [image_id]
+    assert (opening_images.stage_dir() / image_id).read_bytes() == PNG
+
+
 def test_an_upload_over_the_ceiling_is_refused(home, monkeypatch):
     monkeypatch.setattr(api_mod, "PASTE_IMAGE_MAX_BYTES", 1024)
 

@@ -9473,7 +9473,7 @@ async def h_opening_image_upload(request: web.Request) -> web.Response:
 def _opening_image_ids(body: dict, harness: str) -> List[str]:
     """``body["opening_images"]`` checked, as staged ids.
 
-    Refused for a harness that declares no ``image_paste_keys``: the images
+    Refused for a harness that declares no image transport: the images
     could be stored but never handed over, and a session told about a picture
     it never received starts work on a wrong premise.
     """
@@ -9483,10 +9483,10 @@ def _opening_image_ids(body: dict, harness: str) -> List[str]:
         raise onboard.OnboardError(str(exc)) from None
     if ids:
         entry = harness_registry.registry().get(harness or "")
-        if not (entry and entry.image_paste_keys):
+        if not (entry and entry.takes_images):
             raise onboard.OnboardError(
                 f"harness {harness or 'unknown'!r} declares no image paste key "
-                f"(image_paste_keys), so it cannot be handed opening images"
+                f"(image_paste_keys) or path transport, so it cannot be handed opening images"
             )
     return ids
 
@@ -9581,6 +9581,11 @@ async def _deliver_pasted_image(session, path, media_type: str):
     another, and guessing would type that something else into a session.
     """
     entry = harness_registry.registry().get(session.sdef.harness or "")
+    if not (entry and entry.takes_images):
+        return False, [], (
+            f"harness {session.sdef.harness or 'unknown'!r} has no image paste "
+            f"key or path transport declared, so the image was stored but not handed over"
+        )
     if entry and entry.image_paste_transport == "path":
         # A paste event lets the harness recognize the whole filename, even
         # with spaces. Never send Enter: attaching must preserve the draft.
@@ -9591,12 +9596,7 @@ async def _deliver_pasted_image(session, path, media_type: str):
         except Exception as exc:
             return False, [], f"the image path did not reach the session: {exc}"
         return True, [], ""
-    keys = list(entry.image_paste_keys) if entry else []
-    if not keys:
-        return False, [], (
-            f"harness {session.sdef.harness or 'unknown'!r} has no image paste "
-            f"key declared, so the image was stored but not handed over"
-        )
+    keys = list(entry.image_paste_keys)
     loop = asyncio.get_running_loop()
     async with _paste_image_lock:
         wait = _paste_settle["until"] - loop.time()
