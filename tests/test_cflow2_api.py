@@ -704,3 +704,75 @@ def test_the_run_page_carries_collections_and_trigger_lines(proj):
     assert out["set"][1]["collections"]["landing"]["items"][0]["status"] == "landed"
     assert out["remove"] == 400   # remove is the driver's (access), not the person's
     assert out["push"] == 400
+
+
+MOVE = """\
+cflow: 2
+name: move
+nodes:
+  a: {title: A, prompt: do a, force_target: true}
+  b: {title: B, prompt: do b, returns: {ok: {n: int}, blocked: {}}}
+  c: {title: C, prompt: do c, force_target: true}
+body:
+  try: {seq: [a, b, c]}
+  catch: {blocked: a}
+"""
+
+
+def test_the_person_moves_reports_aborts_and_archives_a_v2_run(proj):
+    """The run page's presses on a v2 run (docs 2.11): nudge, a forced move to
+    a force_target node, a forced task outcome, abort, archive."""
+    cwd = str(proj)
+    (proj / ".claunch" / "workflows" / "v2" / "move.yaml").write_text(MOVE, encoding="utf-8")
+    runtime.start(layers.load("move", cwd), cwd=cwd, scope="s3", caps={})
+
+    async def go(client, bearer):
+        out = {}
+        slot = {"cwd": cwd, "scope": "s3"}
+
+        async def post(path, **body):
+            resp = await client.post(path, headers=bearer, json={**slot, **body})
+            return resp.status, await resp.json()
+
+        out["unauth"] = (await client.post("/api/cflow2/move", json={**slot, "node": "c"})).status
+        out["detail"] = await (await client.get(
+            f"/api/cflow2/run?cwd={cwd}&scope=s3", headers=bearer)).json()
+        out["nudge"] = await post("/api/cflow2/nudge")
+        out["unmarked"] = await post("/api/cflow2/move", node="b")
+        out["move"] = await post("/api/cflow2/move", node="c", reason="a and b are done")
+        out["back"] = await post("/api/cflow2/move", node="a")
+        task = runtime.status(cwd=cwd, scope="s3")["tasks"][0]["instance"]
+        runtime.report(task, cwd=cwd, scope="s3")  # a -> b
+        task = runtime.status(cwd=cwd, scope="s3")["tasks"][0]["instance"]
+        out["bad_value"] = await post("/api/cflow2/report", node=task, outcome="ok", value={})
+        out["report"] = await post("/api/cflow2/report", node=task, outcome="blocked",
+                                   reason="waiting on a review")
+        out["early_archive"] = await post("/api/cflow2/archive")
+        out["abort"] = await post("/api/cflow2/abort", reason="enough")
+        out["archive"] = await post("/api/cflow2/archive")
+        return out
+
+    out = _http(go)
+    assert out["unauth"] == 401
+    marked = sorted(n.get("label") for n in out["detail"]["chart"]["nodes"].values()
+                    if n.get("force_target"))
+    assert marked == ["a", "c"]
+    assert out["nudge"] == (200, {"ok": True, "nudge_scheduled_sessions": []})
+    status, payload = out["unmarked"]
+    assert status == 400 and "not a force target" in payload["error"]
+    status, payload = out["move"]
+    assert status == 200 and [t["label"] for t in payload["tasks"]] == ["c"]
+    assert payload["forced"]["left"] and payload["nudge_scheduled_sessions"] == []
+    assert [t["label"] for t in out["back"][1]["tasks"]] == ["a"]
+    status, payload = out["bad_value"]
+    assert status == 400 and "n" in payload["error"]
+    status, payload = out["report"]
+    assert status == 200 and [t["label"] for t in payload["tasks"]] == ["a"]  # the catch
+    assert out["early_archive"][0] == 400
+    assert out["abort"][0] == 200 and out["abort"][1]["status"] == "aborted"
+    assert out["archive"] == (200, {**out["archive"][1], "status": "idle"})
+    assert not RunStore(cwd, "s3").exists()
+    events = [e for e in RunStore(cwd, "s3").archived()[0].joinpath("journal.jsonl")
+              .read_text(encoding="utf-8").splitlines()]
+    assert any('"forced"' in e and '"by": "user"' in e for e in events)
+    assert any('"reported"' in e and '"by": "user"' in e for e in events)
