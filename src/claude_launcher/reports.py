@@ -11,12 +11,27 @@ Three rules make that indexing possible without any registry to keep in sync:
 * **One place.** ``<daemon dir>/reports/<session>/`` (:func:`dir_for`). It is
   outside every repository, so writing one never dirties a working tree, and
   outside ``sessions/<name>/``, so ``clear-sessions --logs`` does not take it.
-* **One name.** ``<UTC stamp>-<issue>.html`` (:func:`filename`), which is the
-  whole record: :func:`parse` reads the time and the issue back off the name,
-  so a directory listing *is* the index. Nothing else has to be written down.
+* **One name.** ``<UTC stamp>-<issue>[--<name>].html`` (:func:`filename`),
+  which is the whole record: :func:`parse` reads the time, the issue and the
+  artifact name back off the name, so a directory listing *is* the index.
+  Nothing else has to be written down.
 * **One check.** :func:`is_report` decides whether a file counts, and it is
   deliberately not "the path exists" — an empty file at the right path would
   satisfy a workflow's verify while telling a reader nothing.
+
+A round's write-up is one kind of page. The other kind is an *artifact*: any
+page a session is asked to leave for a person (a design note, a comparison, a
+measurement) at any point of a round, not only at its end. It goes through the
+same three rules and carries a short purpose name in the filename
+(``--<name>``). That name is what keeps the two kinds apart: a page *without*
+one is the round report, which the wrapup gate (:func:`round_reports`) asks
+for, and an artifact can neither satisfy that gate nor be overwritten by the
+round report for the same issue.
+
+Where a page is filed does not depend on the board. The issue in the name is a
+label for the board's lookup (:func:`for_issue`); a session with no board, or
+a page about no issue, is filed under :data:`NO_ISSUE` and found through the
+session (:func:`listing`) and the machine-wide index (:func:`index`).
 
 The module is deliberately free of daemon imports beyond :mod:`paths`, because
 both sides use it: ``claunch report`` writes through it and the daemon reads
@@ -38,7 +53,15 @@ STAMP_FORMAT = "%Y%m%dT%H%M%SZ"
 
 #: The name a report file must have to be indexed. Anything else in the
 #: directory is ignored rather than guessed at.
-FILENAME_RE = re.compile(r"^(\d{8}T\d{6}Z)-([A-Za-z0-9._-]+)\.html$")
+FILENAME_RE = re.compile(
+    r"^(\d{8}T\d{6}Z)-([A-Za-z0-9._-]+?)(?:--([a-z0-9]+(?:-[a-z0-9]+)*))?\.html$"
+)
+
+#: An artifact's purpose name: lower-case words joined by single hyphens. The
+#: double hyphen is the separator from the issue half, so a name cannot hold
+#: one and :func:`issue_slug` never leaves one behind.
+NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+NAME_MAX = 48
 
 #: Session names key the directory, so they must not be able to leave it.
 SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
@@ -76,17 +99,44 @@ def issue_slug(issue: Optional[str]) -> str:
     the same alphabet rather than rejected, so a report is never lost to a
     naming argument; an empty result becomes :data:`NO_ISSUE`.
     """
-    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", (issue or "").strip()).strip("-._")
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", (issue or "").strip())
+    # ``--`` separates the artifact name, so the issue half never carries one.
+    slug = re.sub(r"-{2,}", "-", slug).strip("-._")
     return slug or NO_ISSUE
 
 
-def filename(issue: Optional[str] = None, at: Optional[datetime] = None) -> str:
-    """``<UTC stamp>-<issue>.html``."""
-    return f"{stamp(at)}-{issue_slug(issue)}.html"
+def check_name(name: Optional[str]) -> Optional[str]:
+    """Return an artifact name as it is filed, or ``None`` for a round report.
+
+    Unlike the issue, a bad name is refused rather than squeezed: the writer
+    chooses it on the spot, so it is a typo to fix now, and a silently
+    rewritten name would file the page under something nobody asked for.
+    """
+    if name is None or not name.strip():
+        return None
+    name = name.strip()
+    if len(name) > NAME_MAX or not NAME_RE.match(name):
+        raise ReportError(
+            f"bad artifact name {name!r} (lower-case letters and digits in "
+            f"words joined by single '-', max {NAME_MAX} chars, e.g. "
+            "'design-note')"
+        )
+    return name
+
+
+def filename(
+    issue: Optional[str] = None,
+    at: Optional[datetime] = None,
+    name: Optional[str] = None,
+) -> str:
+    """``<UTC stamp>-<issue>.html``, or ``<UTC stamp>-<issue>--<name>.html``."""
+    name = check_name(name)
+    tail = f"--{name}" if name else ""
+    return f"{stamp(at)}-{issue_slug(issue)}{tail}.html"
 
 
 def parse(name: str) -> Optional[dict]:
-    """Read a report filename back: ``{"at", "issue"}``, or ``None``.
+    """Read a report filename back: ``{"at", "issue", "name"}``, or ``None``.
 
     ``None`` is "this file is not a report", which is how a stray note or a
     browser's ``.html`` save sitting in the directory stays out of the index.
@@ -102,6 +152,7 @@ def parse(name: str) -> Optional[dict]:
     return {
         "at": at.isoformat().replace("+00:00", "Z"),
         "issue": None if issue == NO_ISSUE else issue,
+        "name": m.group(3),
     }
 
 
@@ -166,7 +217,7 @@ def entry(session: str, path: Path) -> dict:
     session and knows it already: :func:`for_issue` returns rows from several
     at once, and a row that cannot say who wrote it is not usable there.
     """
-    meta = parse(path.name) or {"at": None, "issue": None}
+    meta = parse(path.name) or {"at": None, "issue": None, "name": None}
     try:
         size = path.stat().st_size
     except OSError:
@@ -176,6 +227,7 @@ def entry(session: str, path: Path) -> dict:
         "session": session,
         "at": meta["at"],
         "issue": meta["issue"],
+        "name": meta["name"],
         "size": size,
         "path": str(path),
         "url": f"/api/sessions/{session}/reports/{path.name}",
@@ -198,6 +250,15 @@ def listing(session: str) -> List[dict]:
     files = [p for p in base.iterdir() if is_report(p)]
     files.sort(key=lambda p: p.name, reverse=True)
     return [entry(session, p) for p in files]
+
+
+def round_reports(rows: List[dict]) -> List[dict]:
+    """The rows that are round write-ups: the ones carrying no artifact name.
+
+    The wrapup gate asks this question, and an artifact must not answer it: a
+    design note filed mid-round says nothing about how the round ended.
+    """
+    return [r for r in rows if not r.get("name")]
 
 
 def latest(session: str) -> Optional[dict]:
@@ -256,7 +317,7 @@ def for_issue(issue: str) -> List[dict]:
             continue
         for path in names:
             m = FILENAME_RE.match(path.name)
-            if not m or m.group(2) != slug:
+            if not m or issue_slug(m.group(2)) != slug:
                 continue
             if not is_report(path):
                 continue
@@ -317,6 +378,7 @@ def target(
     issue: Optional[str] = None,
     new: bool = False,
     at: Optional[datetime] = None,
+    name: Optional[str] = None,
 ) -> Path:
     """The path this round's report should be written to.
 
@@ -324,8 +386,10 @@ def target(
     once to write the page and once after revising it — must get the same file
     both times, or a round ends up with two half-reports and a reader has to
     guess which is current. "The same" means same session and same issue; a
-    round with a different issue is a different report. ``new`` forces a fresh
-    stamp for the case where keeping the earlier one is deliberate.
+    round with a different issue is a different report, and a page with a
+    different artifact ``name`` (or none: the round report) is a different
+    page. ``new`` forces a fresh stamp for the case where keeping the earlier
+    one is deliberate.
 
     The match is on the *name*, not on :func:`listing`, and the difference is
     the common case rather than a corner: the first draft an agent writes may
@@ -333,14 +397,15 @@ def target(
     and if asking again then minted a second name, revising a draft would
     quietly leave the stub behind for a reader to find.
     """
+    name = check_name(name)
     base = dir_for(session, create=True)
     if not new:
         slug = issue_slug(issue)
-        for name in names_in(session):
-            meta = parse(name)
-            if meta and issue_slug(meta["issue"]) == slug:
-                return base / name
-    return base / filename(issue, at)
+        for existing in names_in(session):
+            meta = parse(existing)
+            if meta and issue_slug(meta["issue"]) == slug and meta["name"] == name:
+                return base / existing
+    return base / filename(issue, at, name)
 
 
 def save(
@@ -348,12 +413,13 @@ def save(
     source: Path,
     issue: Optional[str] = None,
     new: bool = False,
+    name: Optional[str] = None,
 ) -> Path:
     """Copy an HTML file written elsewhere into the indexed location."""
     source = Path(source)
     if not source.is_file():
         raise ReportError(f"no such file: {source}")
-    dest = target(session, issue, new=new)
+    dest = target(session, issue, new=new, name=name)
     if source.resolve() == dest.resolve():
         return dest
     shutil.copyfile(source, dest)

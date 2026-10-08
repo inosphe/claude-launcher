@@ -21990,8 +21990,10 @@ function sessReportRow(r, bySession) {
   row.title = bySession
     ? `the round ${r.session || "a session"} wrote up for this issue`
     : `this session's write-up of the round it spent on ${r.issue || "no issue"}`;
-  row.appendChild(el("span", "sess-report-name",
-    (bySession ? r.session : r.issue) || "round report"));
+  // An artifact (a page filed with `claunch report path --name`) carries its
+  // purpose name; without it the row would read as a second round report.
+  const label = (bySession ? r.session : r.issue) || (r.name ? "no issue" : "round report");
+  row.appendChild(el("span", "sess-report-name", r.name ? `${label} · ${r.name}` : label));
   // Never the raw byte count: 19591 is what the filesystem knows, and 19 KB
   // is what tells a reader whether this is a write-up or a stub.
   row.appendChild(el("span", "sess-report-bits",
@@ -23326,10 +23328,13 @@ function reportsRow(r) {
   open.href = url(r.url);
   open.target = "_blank";
   open.rel = "noopener";
-  open.title = `open the round ${r.session} wrote up` +
+  open.title = (r.name
+    ? `open the ${r.name} page ${r.session} filed`
+    : `open the round ${r.session} wrote up`) +
     (r.issue ? ` for ${r.issue}` : ", which named no issue");
   open.appendChild(el("span", "reports-mark", "▤"));
-  open.appendChild(el("span", "reports-issue", r.issue || "no issue"));
+  open.appendChild(el("span", "reports-issue",
+    (r.issue || "no issue") + (r.name ? ` · ${r.name}` : "")));
   row.appendChild(open);
 
   const state = reportSessionState(r);

@@ -1598,9 +1598,9 @@ def test_mesh_install_project(tmp_path, home):
     from claude_launcher import install
 
     done = install.install_into_project(tmp_path)
-    # one server, seven skills — and nothing outside the project: workflow
+    # one server, eight skills — and nothing outside the project: workflow
     # seeding is the global/profile installs' business
-    assert len([line for line in done if line.startswith("skill ->")]) == 7
+    assert len([line for line in done if line.startswith("skill ->")]) == 8
     # the topology skills (wire peers, delegate a domain, re-draw the tree)
     # land beside mesh
     for name in ("mesh-wire", "mesh-delegate", "mesh-retopology"):
@@ -1658,6 +1658,13 @@ def test_mesh_install_project(tmp_path, home):
     assert "Claunch-Worktree" in stamp         # the worktree trailer
     assert "CLAUNCH_SESSION" in stamp          # where the session name comes from
     assert "--git-common-dir" in stamp         # how a linked worktree is detected
+    # ...and claunch-artifact, saying where a page for a person is filed
+    art = (tmp_path / ".claude" / "skills" / "claunch-artifact" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    assert art.startswith("---\nname: claunch-artifact\n")
+    assert "claunch report path --name" in art  # the one place to write
+    assert "no beads board" in art             # the board-less answer
     # installing again is idempotent and keeps other servers
     doc["mcpServers"]["other"] = {"command": "x"}
     (tmp_path / ".mcp.json").write_text(json.dumps(doc), encoding="utf-8")
@@ -1678,7 +1685,7 @@ def test_global_install_targets_the_user_scope(tmp_path, home, monkeypatch):
 
     cfg = Path(os.environ["CLAUDE_CONFIG_DIR"])
     done = install.install_into_user()
-    assert len([line for line in done if line.startswith("skill ->")]) == 7
+    assert len([line for line in done if line.startswith("skill ->")]) == 8
     assert [line for line in done if line.startswith("workflow ->")]
     assert (cfg / "skills" / "mesh" / "SKILL.md").is_file()
     doc = json.loads((cfg / ".claude.json").read_text(encoding="utf-8"))
