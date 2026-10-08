@@ -3282,6 +3282,16 @@ def test_the_summary_names_the_merger_a_leader_is_given():
     # claunch-lhgfx: the daemon adds merger to every leader at the join.
     from claude_launcher import wizard as wizard_mod
 
-    assert wizard_mod._role_shown("role", "leader") == "leader (+merger)"
-    assert wizard_mod._role_shown("role", "worker") == "worker"
-    assert wizard_mod._role_shown("mesh", "leader") == "leader"
+    class _Form:
+        def __init__(self, names):
+            self.options = [wizard_mod.Option(n, n) for n in ["", *names]]
+
+        def field(self, key):
+            return self
+
+    with_merger = _Form(["leader", "worker", "merger"])
+    assert wizard_mod._role_shown(with_merger, "role", "leader") == "leader (+merger)"
+    assert wizard_mod._role_shown(with_merger, "role", "worker") == "worker"
+    assert wizard_mod._role_shown(with_merger, "mesh", "leader") == "leader"
+    # claunch-nie6o: a mesh whose vocabulary has no merger gives none.
+    assert wizard_mod._role_shown(_Form(["leader", "worker"]), "role", "leader") == "leader"
