@@ -18,7 +18,13 @@
    published as <machine>/<branch> are listed with a Pull each, which sends
    the branch pull with the planned remote and needs no card; one already
    level or with local commits of its own offers nothing to press, and a
-   prefix that is not a relay peer is kept apart under a fold. */
+   prefix that is not a relay peer is kept apart under a fold.
+
+   And the branches waiting to land (claunch-6p7ri): each local branch the
+   remote's master does not hold is a row with its ahead count, its time and
+   the session stamped on its tip, linked to that session's page; an
+   unstamped one says so, and an empty list says every branch is on the
+   remote's master. */
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
@@ -110,7 +116,7 @@ vm.runInContext(
    constant("WS_SYNC_PATH"), constant("WS_SYNC_POLL_MS"), constant("WS_SHARED_STATE"),
    ...["wsSyncSt", "wsSyncRefresh", "wsSyncSend", "wsSyncWait", "wsSyncRun",
        "wsSyncBranch", "wsSyncPlanLine", "wsSyncPeers", "wsSyncResult",
-       "wsSyncPanel", "wsSyncPullBody", "wsSyncShared"].map(slice),
+       "wsSyncPanel", "wsSyncPullBody", "wsSyncShared", "wsSyncUnmerged"].map(slice),
    "globalThis.__st = wsSyncSt;"].join("\n"),
   ctx);
 
@@ -295,6 +301,31 @@ async function tick() {
   nodes = walk(ctx.wsSyncPanel(W));
   assert.ok(nodes.some((n) => n.text === "Published by other machines on origin (0)"));
   assert.ok(!nodes.some((n) => n.cls === "ws-sync-shared-row"));
+
+  /* ---- branches waiting to land ----------------------------------------- */
+  st.doc = { ...DOC, plan: PLAN, unmerged: [
+    { branch: "s1-open", sha: "1".repeat(40), date: "2026-10-08T17:01:02+09:00",
+      subject: "open work", ahead: 3, session: "s43" },
+    { branch: "plain", sha: "2".repeat(40), date: "2026-10-07T09:00:00+09:00",
+      subject: "add plain.txt", ahead: 1, session: null }] };
+  nodes = walk(ctx.wsSyncPanel(W));
+  const land = nodes.find((n) => (n.cls || "").includes("ws-sync-unmerged"));
+  assert.ok(land, "the section sits in the panel");
+  const landTexts = walk(land).map((n) => n.text);
+  assert.ok(landTexts.includes("Waiting to land (2)"));
+  const landRows = walk(land).filter((n) => n.cls === "ws-sync-unmerged-row");
+  assert.equal(landRows.length, 2);
+  assert.deepEqual(landRows[0].children.map((n) => n.text),
+                   ["s1-open", "+3", "2026-10-08 17:01", "s43"]);
+  const link = landRows[0].children[3];
+  assert.equal(link.tag, "a");
+  assert.equal(link.href, "#/s/s43");
+  assert.match(landRows[0].children[1].title, /not on origin\/master/);
+  assert.equal(landRows[1].children[3].text, "unstamped");
+  st.doc = { ...DOC, plan: PLAN, unmerged: [] };
+  nodes = walk(ctx.wsSyncPanel(W)).map((n) => n.text);
+  assert.ok(nodes.includes("Waiting to land (0)"));
+  assert.ok(nodes.includes("Every local branch is already on origin/master."));
 
   console.log("workspacesync_check ok");
 })().catch((err) => { console.error(err); process.exit(1); });

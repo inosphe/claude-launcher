@@ -2449,6 +2449,14 @@ not a relay peer sharing the address (a remote's own `feature/x` branches)
 is folded away separately. The status answer carries them as `shared:
 [{machine, branch, ref, sha, date, subject, peer, local, state}]`.
 
+The panel's **Waiting to land** section lists the local branches the
+remote's master does not hold yet (as the plan read it, so a branch counts
+as landed once the shared master has it, whatever the local master says),
+newest commit first: how many commits each has beyond that master, when it
+last moved, and the session stamped on its tip commit (the
+`Claunch-Session` trailer), linked to that session. The status answer
+carries them as `unmerged: [{branch, sha, date, subject, ahead, session}]`.
+
 ### VS Code in the browser (one code-server per workspace and worktree)
 
 The daemon can run [code-server](https://github.com/coder/code-server) next to

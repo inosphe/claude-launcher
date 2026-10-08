@@ -26371,6 +26371,43 @@ function wsSyncResult(result) {
   return box;
 }
 
+/* Local branches the remote's master does not hold yet (claunch-6p7ri),
+   newest commit first: how far each is ahead, when it last moved, and the
+   session that stamped its tip (the Claunch-Session trailer), linked to
+   that session's page. Read with the plan, so as of its fetch. */
+function wsSyncUnmerged(doc) {
+  const box = el("div", "ws-sync-section ws-sync-unmerged");
+  const rows = doc.unmerged || [];
+  const base = doc.plan ? `${doc.plan.remote}/${doc.plan.branch}` : "master";
+  box.appendChild(el("h4", null, `Waiting to land (${rows.length})`));
+  if (!rows.length) {
+    box.appendChild(el("p", "wf-note", `Every local branch is already on ${base}.`));
+    return box;
+  }
+  for (const r of rows) {
+    const line = el("div", "ws-sync-unmerged-row");
+    const name = el("span", "mono", r.branch);
+    name.title = r.subject || "";
+    line.appendChild(name);
+    if (r.ahead !== null && r.ahead !== undefined) {
+      const ahead = el("span", "badge busy", `+${r.ahead}`);
+      ahead.title = `${r.ahead} commit(s) not on ${base}`;
+      line.appendChild(ahead);
+    }
+    if (r.date) line.appendChild(el("span", "wf-note", r.date.slice(0, 16).replace("T", " ")));
+    if (r.session) {
+      const sess = el("a", "ws-sync-unmerged-session", r.session);
+      sess.href = `#/s/${encodeURIComponent(r.session)}`;
+      sess.title = "the session stamped on the tip commit (Claunch-Session)";
+      line.appendChild(sess);
+    } else {
+      line.appendChild(el("span", "wf-note", "unstamped"));
+    }
+    box.appendChild(line);
+  }
+  return box;
+}
+
 function wsSyncPanel(w) {
   const st = wsSyncSt(w.name);
   const panel = el("div", "ws-sync");
@@ -26423,6 +26460,7 @@ function wsSyncPanel(w) {
     master.appendChild(el("p", "wf-note wf-warning", doc.plan_error || "no plan"));
   }
   panel.appendChild(master);
+  if (doc.plan) panel.appendChild(wsSyncUnmerged(doc));
 
   // work branches
   const work = el("div", "ws-sync-section");
