@@ -11,17 +11,24 @@ const sessions = [
   { name: 'killed', status: 'exited' },
   { name: 'archived', status: 'exited', archived_at: '2026-10-07' },
 ].map(s => ({ cwd: '/repo', harness: 'codex', ...s }));
-const workflow = { name: 'improv-worker', start: 'work', steps: [{ id: 'work', title: 'Implement changes', instructions: 'Inspect the current task.', next: 'end' }] };
+const workflow = { description: '## Workflow purpose\n\n- **Readable** instructions', name: 'improv-worker', start: 'work', steps: [{ id: 'work', title: 'Implement changes', instructions: '## Task\n\nInspect the current task.\n\n- Check **evidence** and `paths`.\n\n```sh\ngit status\n```\n\n<script>window.injected = true</script>', next: 'end' }] };
 const runs = [...sessions.map(s => s.name), 'default'].map(scope => ({
-  scope, cwd: '/repo', workflow: workflow.name, status: 'step', step_id: 'work',
+  scope, cwd: '/repo', context: '## Goal\n\n- Keep **Markdown** readable.', workflow: workflow.name, status: 'step', step_id: 'work',
   title: 'Implement changes', steps_completed: 2, sessions: scope === 'running' ? ['running'] : [],
   reports: [{ step: 'intake', summary: 'Scope confirmed' }],
 }));
+const forced = [];
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://fixture');
   if (url.pathname.startsWith('/api/')) {
     res.setHeader('Content-Type', 'application/json');
     if (url.pathname === '/api/batch') { res.statusCode = 404; return res.end('{}'); }
+    if (url.pathname === '/api/cflow/goto') {
+      let body = '';
+      req.on('data', chunk => body += chunk);
+      req.on('end', () => { forced.push(JSON.parse(body)); res.end('{}'); });
+      return;
+    }
     let data = {};
     if (url.pathname === '/api/daemon') data = { version: 'fixture', boot_id: 'test' };
     if (url.pathname === '/api/sessions') data = { sessions: sessions.filter(s => url.searchParams.get('state') === 'all' || !s.archived_at) };
@@ -41,6 +48,7 @@ const server = http.createServer((req, res) => {
   const browser = await chromium.launch({ headless: true });
   try {
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    page.setDefaultTimeout(15000);
     const errors = [];
     page.on('pageerror', e => errors.push(String(e)));
     await page.addInitScript(() => localStorage.setItem('claunch_token:/', 'fixture-token'));
@@ -79,8 +87,23 @@ const server = http.createServer((req, res) => {
     assert.match(await page.locator('#wf-view .wf-instructions').textContent(), /Inspect the current task/);
     await page.waitForFunction(() => {
       const box = document.querySelector('#wf-view .wf-instructions').getBoundingClientRect();
-      return box.top >= 0 && box.bottom <= innerHeight;
+      return box.top >= 0 && box.top < innerHeight;
     });
+    assert.equal(await page.locator('#wf-view .wf-desc .md-h2').textContent(), 'Workflow purpose');
+    assert.equal(await page.locator('#wf-view .wf-context li strong').textContent(), 'Markdown');
+    assert.equal(await page.locator('#wf-view .wf-instructions-text .md-h2').textContent(), 'Task');
+    assert.equal(await page.locator('#wf-view .wf-instructions-text pre code').textContent(), 'git status');
+    assert.equal(await page.locator('#wf-view .wf-instructions-text script').count(), 0);
+    assert.equal(await page.evaluate(() => window.injected), undefined);
+    const force = page.locator('#wf-view .wf-step-controls .force');
+    assert.equal(await force.textContent(), "Force run to 'work'");
+    assert.equal(await page.locator('#wf-view .wf-diagram .force').count(), 0);
+    page.once('dialog', dialog => dialog.dismiss());
+    await force.click();
+    assert.equal(forced.length, 0, 'cancel leaves run unchanged');
+    page.once('dialog', dialog => dialog.accept());
+    await Promise.all([page.waitForResponse(r => r.url().endsWith('/api/cflow/goto')), force.click()]);
+    assert.deepEqual(forced, [{ cwd: '/repo', scope: 'running', step: 'work' }]);
     assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'detail mobile overflow');
     if (process.env.CLAUNCH_SCRATCH) await page.screenshot({ path: path.join(process.env.CLAUNCH_SCRATCH, 'flows-detail-mobile.png'), fullPage: true });
     await page.setViewportSize({ width: 1440, height: 900 });

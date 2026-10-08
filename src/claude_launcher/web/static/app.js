@@ -25959,7 +25959,7 @@ function renderWfInto(view, data, ui) {
   // falls back to one flow (see the 820px block).
   const side = el("div", "wf-side");
   side.appendChild(el("h3", "wf-section-title", "Run details"));
-  if (wf.description) side.appendChild(el("p", "wf-desc", wf.description));
+  if (wf.description) side.appendChild(mdInto(el("div", "wf-desc md"), wf.description));
 
   const meta = el("div", "wf-meta");
   // The owning session is not in this line any more: it moved up to the head
@@ -25985,7 +25985,12 @@ function renderWfInto(view, data, ui) {
     }
     side.appendChild(src);
   }
-  if (run.context) side.appendChild(el("p", "wf-context", `context: ${run.context}`));
+  if (run.context) {
+    const context = el("section", "wf-context");
+    context.appendChild(el("h4", null, "Context"));
+    context.appendChild(mdInto(el("div", "md"), run.context));
+    side.appendChild(context);
+  }
   for (const w of wf.warnings || []) {
     side.appendChild(el("p", "wf-warning", `⚠ ${w}`));
   }
@@ -26063,9 +26068,13 @@ function renderWfInto(view, data, ui) {
       }
     });
   }
-  dia.appendChild(forceBtn);
-
-  side.appendChild(wfReports(data, ui));
+  const reports = wfReports(data, ui);
+  const controls = el("div", "wf-step-controls");
+  controls.appendChild(el("span", "wf-note", sel
+    ? `Selected step: ${sel}` : "Select a workflow step to change the run position."));
+  controls.appendChild(forceBtn);
+  reports.insertBefore(controls, reports.firstChild);
+  side.appendChild(reports);
   // No split bar on a phone: .wf-cols there is one column per row (see the
   // 820px breakpoint), and a column has nothing to drag against.
   if (!MOBILE_MQ.matches) {
@@ -27590,13 +27599,13 @@ function wfReports(data, ui) {
       inst.appendChild(el("h4", null, "Instructions"));
       if (step.gate) inst.appendChild(el("p", "wf-instructions-gate", `gate: ${step.gate}`));
       if (step.instructions) {
-        inst.appendChild(el("pre", "wf-instructions-text", step.instructions.trimEnd()));
+        inst.appendChild(mdInto(el("div", "wf-instructions-text md"), step.instructions.trimEnd()));
       }
       if (step.select) {
-        inst.appendChild(el(
-          "p", "wf-instructions-select",
-          `select (${step.select.chooser}): ${step.select.prompt.trim()}`
-        ));
+        const selection = el("div", "wf-instructions-select");
+        selection.appendChild(el("h4", null, `Selection (${step.select.chooser})`));
+        selection.appendChild(mdInto(el("div", "md"), step.select.prompt.trim()));
+        inst.appendChild(selection);
       }
       if (step.verify) {
         inst.appendChild(el("p", "wf-instructions-verify mono", `verify: ${step.verify}`));

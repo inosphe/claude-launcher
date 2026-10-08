@@ -3273,6 +3273,19 @@ def test_the_authoring_skill_tells_the_author_to_write_a_description():
     assert "offered as a bare name" in text
 
 
+def test_run_details_producers_request_markdown():
+    """Both runtime context and authored instructions advertise the UI format."""
+    from claude_launcher.cflow import authoring, install, mcp
+
+    start = next(tool for tool in mcp.TOOLS if tool["name"] == "start")
+    context = start["inputSchema"]["properties"]["context"]["description"]
+    assert "Markdown" in context and "Run details" in context
+    assert "`start` tool's `context` as Markdown" in install.SKILL_MD
+    text = " ".join(authoring.SKILL_MD.split())
+    assert "`description`, step `instructions`, and `select.prompt` as Markdown" in text
+    assert "literal (`|`) blocks" in text
+
+
 def test_the_authoring_skill_states_the_rule_it_exists_for():
     """The incentive rule is the one line here that prevents an incident."""
     from claude_launcher.cflow import authoring

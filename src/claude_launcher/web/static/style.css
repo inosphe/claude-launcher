@@ -3118,7 +3118,7 @@ a.beads-q-name:hover { color: #79c0ff; text-decoration: underline; }
 .wf-overview .wf-current { text-align: left; overflow-wrap: anywhere; background: #172947; color: #a5d6ff; margin: 0; }
 .wf-section-title { font-size: 13px; color: #c6cdd5; padding: 12px 0 9px; border-bottom: 1px solid #30363d; margin-bottom: 10px; }
 .wf-side > .wf-meta { padding: 10px 12px; background: #1b1e24; border-radius: 6px; overflow-wrap: anywhere; }
-.wf-side > .wf-context { padding: 12px; border-left: 3px solid #3c444d; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.wf-side > .wf-context { padding: 12px; border-left: 3px solid #3c444d; line-height: 1.6; overflow-wrap: anywhere; }
 .wf-side > .wf-desc { line-height: 1.6; }
 /* The owning session, beside the workflow's name. Sized up from the list
    chip it shares a class with: in the head it is half the run's name, not
@@ -3433,10 +3433,16 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .wf-instructions h4 {
   font-size: 11px; text-transform: uppercase; color: #58a6ff; margin-bottom: 6px;
 }
-.wf-instructions-text {
-  font-size: 12px; color: #c6cdd5; white-space: pre-wrap; overflow-x: auto;
-  font-family: Cascadia Mono, Consolas, Menlo, monospace;
+.wf-instructions-text { font-size: 13px; color: #c6cdd5; line-height: 1.65; }
+.wf-step-controls {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+  gap: 8px; padding: 10px 12px; margin-bottom: 12px;
+  border: 1px solid #59442b; border-radius: 6px; background: #241f19;
 }
+.wf-step-controls .wf-note { margin: 0; overflow-wrap: anywhere; min-width: 0; }
+.wf-step-controls .wf-btn { white-space: normal; overflow-wrap: anywhere; max-width: 100%; }
+.wf-context > h4 { margin: 0 0 8px; color: #c6cdd5; }
+.wf-instructions .md h4 { text-transform: none; font-size: 1em; }
 .wf-instructions-gate { font-size: 12px; color: #d29922; margin-bottom: 6px; }
 .wf-instructions-select { font-size: 12px; color: #c6cdd5; margin-top: 6px; }
 .wf-instructions-verify { font-size: 11px; color: #8b949e; margin-top: 6px; }

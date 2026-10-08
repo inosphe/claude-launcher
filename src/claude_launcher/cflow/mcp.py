@@ -84,7 +84,11 @@ TOOLS = [
                 },
                 "context": {
                     "type": "string",
-                    "description": "task context carried into the run and its journal",
+                    "description": (
+                        "task context as Markdown, displayed in Run details: "
+                        "use short paragraphs, headings and lists; "
+                        "code spans for paths/commands"
+                    ),
                 },
                 "force": {
                     "type": "boolean",
