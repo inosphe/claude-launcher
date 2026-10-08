@@ -127,8 +127,11 @@ function el(tag, cls, text) {
 const list = node("ul");
 const tabBar = node("div");
 tabBar.classes.add("hidden");
+const groupHeader = node("div");
+groupHeader.classes.add("hidden");
 const $ = (id) => (id === "session-list" ? list
-  : id === "session-group-tabs" ? tabBar : null);
+  : id === "session-group-tabs" ? tabBar
+  : id === "session-group-header" ? groupHeader : null);
 let served = { sessions: [] };
 const api = async () => ({ ok: true, json: async () => served });
 const location = { hash: "" };
@@ -176,7 +179,8 @@ function go() {}
 const names = [
   "byLineage", "sessionCategory", "sessionMatchesFilter", "sessionFilterCounts",
   "sessionGroupActiveTab", "setSessionGroupTab", "sessionGroupTabRows",
-  "selectSessionGroupTab", "renderSessionGroupTabs", "syncSessionGroupTabSearch",
+  "scrollSessionListTop", "selectSessionGroupTab", "renderSessionGroupTabs",
+  "renderSessionGroupHeader", "syncSessionGroupTabSearch",
   "syncSessionFilters",
   "sessionSearchText", "sessionMatchesSearch",
   "recordProject", "sessionInCurrentProject", "railSessions",
@@ -326,9 +330,10 @@ const tabShadows = () => tabs().flatMap((t) => t._groupRows)
         [list.querySelectorAll("li[data-name]").filter((n) => n.dataset.name === "s1").length,
          !!s1Remote], [1, true]);
   check("sessionsCache never takes a shadow", ctx.cache(), ["s1", "s2", "s3"]);
-  check("the ⊕ sits on the open mesh tab alone",
-        tabs().map((t) => t.querySelectorAll(".session-group-new").length),
-        [0, 1, 0, 0, 0]);
+  check("the ⊕ sits on the open mesh's header row, on no tab",
+        [tabs().map((t) => t.querySelectorAll(".session-group-new").length),
+         groupHeader.dataset.value, groupHeader.querySelectorAll(".session-group-new").length],
+        [[0, 0, 0, 0, 0], "alpha", 1]);
 
   /* ---- ownership -------------------------------------------------------- */
   pick("default");

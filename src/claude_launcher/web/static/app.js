@@ -2234,6 +2234,8 @@ function syncSessionView() {
     el.classList.toggle("hidden", grid));
   const groupTabs = $("session-group-tabs");
   if (groupTabs) groupTabs.classList.toggle("view-hidden", grid);
+  const groupHeader = $("session-group-header");
+  if (groupHeader) groupHeader.classList.toggle("view-hidden", grid);
   document.querySelectorAll('input[name="session-view"]').forEach((input) => {
     input.checked = input.value === sessionView;
   });
@@ -3339,17 +3341,22 @@ function sessionGroupTabRows(rows, group) {
    rows start at the top, not at the scroll position the last group had. */
 let sessionGroupTabScrollReset = false;
 
+/* The rail back to its top: smoothly where the browser can. */
+function scrollSessionListTop() {
+  const list = $("session-list");
+  if (list && typeof list.scrollTo === "function") {
+    list.scrollTo({ top: 0, behavior: "smooth" });
+  } else if (list) {
+    list.scrollTop = 0;
+  }
+}
+
 /* A tab press. On another tab, open it; on the open one, take the rail back
    to its top -- the tab bar's scroll-to-top, as a phone app does it. */
 function selectSessionGroupTab(group, value) {
-  const list = $("session-list");
   const bar = $("session-group-tabs");
   if (bar && bar.dataset.active === value) {
-    if (list && typeof list.scrollTo === "function") {
-      list.scrollTo({ top: 0, behavior: "smooth" });
-    } else if (list) {
-      list.scrollTop = 0;
-    }
+    scrollSessionListTop();
     return;
   }
   setSessionGroupTab(group, value);
@@ -3358,8 +3365,9 @@ function selectSessionGroupTab(group, value) {
 }
 
 /* The tab strip above the list. Built on every rebuild of the rail (the
-   counts move with the fleet), hidden while the rail is ungrouped. A mesh's
-   open tab carries the ⊕ that opens the create form with that mesh picked. */
+   counts move with the fleet), hidden while the rail is ungrouped. A tab is
+   only a picker: what the open group says and offers is on the header row
+   below the strip (renderSessionGroupHeader). */
 function renderSessionGroupTabs(group, tabs, active) {
   const bar = $("session-group-tabs");
   if (!bar) return;
@@ -3370,7 +3378,10 @@ function renderSessionGroupTabs(group, tabs, active) {
   bar.classList.toggle("hidden", !group || !tabs.length);
   bar.textContent = "";
   bar.dataset.active = active ?? "";
-  if (!group) return;
+  if (!group) {
+    renderSessionGroupHeader("", null);
+    return;
+  }
   let activeTab = null;
   for (const tab of tabs) {
     const el = document.createElement("div");
@@ -3392,19 +3403,6 @@ function renderSessionGroupTabs(group, tabs, active) {
     el.append(name, count);
     el.title = open ? `${group} ${tab.value} — click to scroll to the top`
       : `${group} ${tab.value}`;
-    if (open && group === "mesh" && tab.value !== "(no mesh)") {
-      const add = document.createElement("button");
-      add.className = "session-group-new";
-      add.type = "button";
-      add.textContent = "⊕";
-      add.title = `create a new session in mesh ${tab.value}` +
-                  " — the Create page with this mesh already picked";
-      add.addEventListener("click", (e) => {
-        e.stopPropagation();   // the tab itself scrolls; this does not
-        go(`#/new/${encodeURIComponent(tab.value)}`);
-      });
-      el.appendChild(add);
-    }
     el.addEventListener("click", () => selectSessionGroupTab(group, tab.value));
     el.addEventListener("keydown", (ev) => {
       if (ev.key !== "Enter" && ev.key !== " ") return;
@@ -3418,6 +3416,47 @@ function renderSessionGroupTabs(group, tabs, active) {
   // A strip wider than the rail scrolls sideways; the open tab is kept in it.
   if (activeTab && typeof activeTab.scrollIntoView === "function") {
     activeTab.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }
+  renderSessionGroupHeader(group, tabs.find((tab) => tab.value === active) || null);
+}
+
+/* The open group's header: one row under the tab strip, for the open tab
+   alone. It names the group in full (a workspace tab shows only the last two
+   parts of its path), counts its sessions, and carries what the group
+   offers -- a mesh's ⊕, which opens the create form with that mesh picked.
+   Pressing the row takes the list to its top, as pressing the open tab does. */
+function renderSessionGroupHeader(group, tab) {
+  const head = $("session-group-header");
+  if (!head) return;
+  head.classList.toggle("hidden", !group || !tab);
+  head.textContent = "";
+  if (!group || !tab) return;
+  head.dataset.group = group;
+  head.dataset.value = tab.value;
+  const kind = document.createElement("span");
+  kind.className = "session-group-kind";
+  kind.textContent = group;
+  const name = document.createElement("span");
+  name.className = "session-group-name";
+  name.textContent = tab.value;
+  const sessions = tab.rows.filter((r) => r.type === "session" || r.type === "shadow").length;
+  const count = document.createElement("span");
+  count.className = "session-group-count";
+  count.textContent = `${sessions} session${sessions === 1 ? "" : "s"}`;
+  head.append(kind, name, count);
+  head.title = `${group} ${tab.value} — click to scroll to the top`;
+  if (group === "mesh" && tab.value !== "(no mesh)") {
+    const add = document.createElement("button");
+    add.className = "session-group-new";
+    add.type = "button";
+    add.textContent = "⊕";
+    add.title = `create a new session in mesh ${tab.value}` +
+                " — the Create page with this mesh already picked";
+    add.addEventListener("click", (e) => {
+      e.stopPropagation();   // the row itself scrolls; this does not
+      go(`#/new/${encodeURIComponent(tab.value)}`);
+    });
+    head.appendChild(add);
   }
 }
 
@@ -12080,6 +12119,13 @@ document.querySelectorAll('input[name="session-group-mode"]').forEach((input) =>
     else if (sessionGroupOrder.length) setSessionGroup(sessionGroupOrder[0], false);
   }));
 syncSessionGroupMode();
+// The open group's header row: pressing it takes the list to its top.
+$("session-group-header")?.addEventListener("click", scrollSessionListTop);
+$("session-group-header")?.addEventListener("keydown", (ev) => {
+  if (ev.target !== ev.currentTarget || (ev.key !== "Enter" && ev.key !== " ")) return;
+  ev.preventDefault();
+  scrollSessionListTop();
+});
 document.querySelectorAll('input[name="session-view"]').forEach((input) =>
   input.addEventListener("change", () => {
     if (input.checked) setSessionView(input.value);

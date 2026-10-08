@@ -146,12 +146,32 @@ option:disabled { color: #6b7280; }
 .session-group-tab .session-group-count {
   flex: none; color: #7d8590; font-weight: 400; font-variant-numeric: tabular-nums;
 }
-/* The open mesh tab's create button. */
-.session-group-tab .session-group-new {
-  flex: none; background: none; border: none; color: #8b949e;
-  font-size: 13px; line-height: 1; padding: 0 1px; cursor: pointer;
+/* The open group's header row under the strip: kind, full name, count,
+   and the mesh's create button at the far end. */
+.session-group-header {
+  flex: none; display: flex; align-items: center; gap: 6px; min-width: 0;
+  padding: 4px 8px; cursor: pointer; white-space: nowrap;
+  background: #161b22; border-bottom: 1px solid #2a2e36;
+  color: #c9d1d9; font-size: 11px;
 }
-.session-group-tab .session-group-new:hover { color: #58a6ff; }
+.session-group-header.view-hidden { display: none; }
+.session-group-header:hover { background: #1d2128; }
+.session-group-header:focus-visible { outline: 2px solid #58a6ff; outline-offset: -2px; }
+.session-group-header .session-group-kind {
+  flex: none; color: #7d8590; text-transform: uppercase; letter-spacing: 0.04em;
+  font-size: 10px;
+}
+.session-group-header .session-group-name {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; font-weight: 600;
+}
+.session-group-header .session-group-count {
+  flex: none; color: #7d8590; font-variant-numeric: tabular-nums;
+}
+.session-group-header .session-group-new {
+  flex: none; margin-left: auto; background: none; border: none; color: #8b949e;
+  font-size: 14px; line-height: 1; padding: 0 2px; cursor: pointer;
+}
+.session-group-header .session-group-new:hover { color: #58a6ff; }
 
 /* List | Grid: one segmented radio pair above the filters. */
 .session-view-tabs {
