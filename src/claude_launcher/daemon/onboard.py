@@ -888,7 +888,10 @@ def open_with(session, block: str, *, before=None) -> None:
         not block or harness_mod.carries_opening(session.argv, block)
     ):
         return
-    asyncio.ensure_future(_deliver_until_it_lands(session, block, before=before))
+    # ``before`` is passed only when there is one, so an opening without
+    # images makes exactly the calls it made before the step existed.
+    kw = {"before": before} if before is not None else {}
+    asyncio.ensure_future(_deliver_until_it_lands(session, block, **kw))
 
 
 #: How long :func:`open_with` keeps trying to hand over the opening block.
@@ -911,7 +914,8 @@ async def _deliver_until_it_lands(session, block, *, before=None) -> None:
     while time.monotonic() < deadline:
         if session.exited:
             return
-        if await session.deliver(block, before=before):
+        kw = {"before": before} if before is not None else {}
+        if await session.deliver(block, **kw):
             return
         await asyncio.sleep(1.0)
     log.warning(

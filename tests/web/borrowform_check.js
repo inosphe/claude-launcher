@@ -46,6 +46,7 @@ function syncSpawnMode() {}
 function renderNewClaudeRuntime() {}
 function renderNewCodexRuntime() {}
 function renderNewPiRuntime() {}
+function syncOpeningImages() {}
 function renderRuntimeSummary() {}
 function renderProfileHint() {}
 function syncNewModelOptions() {}
