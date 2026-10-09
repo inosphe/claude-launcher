@@ -298,10 +298,11 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
         # Announce before anything is torn down: attached CLIs must learn this
         # is a daemon stop/restart (reattach later) before shutdown_all makes
         # their sessions look like programs that exited on their own.
-        await notify_shutdown(app)
-        await relay_settings.close()
+        teardown = _Teardown()
+        await teardown.step("notify_shutdown", notify_shutdown(app))
+        await teardown.step("relay_settings", relay_settings.close())
         if p2p_hub is not None:
-            await p2p_hub.stop()
+            await teardown.step("p2p", p2p_hub.stop())
         listener_task.cancel()
         try:
             await listener_task
@@ -312,28 +313,66 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
             await model_clock_task
         except (asyncio.CancelledError, Exception):
             pass
-        await hold_clock.stop()
-        await resume_nudge.shutdown()
+        await teardown.step("hold_clock", hold_clock.stop())
+        await teardown.step("resume_nudge", resume_nudge.shutdown())
         # Undelivered debts stay on disk; shutdown only stops offering them.
-        await restart_notice_task.shutdown()
+        await teardown.step("restart_notice", restart_notice_task.shutdown())
         # Pending wind-downs are dropped, not finished: shutdown_all below
         # ends every session the daemon's way, and they come back on restart.
-        await app["beads"].cancel_all()
-        await checklist_clock.shutdown()
-        await restart_clock.shutdown()
-        await trigger_clock.shutdown()
-        await event_clock.shutdown()
+        await teardown.step("beads", app["beads"].cancel_all())
+        await teardown.step("checklist_clock", checklist_clock.shutdown())
+        await teardown.step("restart_clock", restart_clock.shutdown())
+        await teardown.step("trigger_clock", trigger_clock.shutdown())
+        await teardown.step("event_clock", event_clock.shutdown())
         if cflow2_clock is not None:
-            await cflow2_clock.shutdown()
-        await ping_clock.shutdown()
-        await window_reminder_clock.shutdown()
-        await reminder_clock.shutdown()
-        await ask_clock.shutdown()
-        await mesh_manager.shutdown()
+            await teardown.step("cflow2_clock", cflow2_clock.shutdown())
+        await teardown.step("ping_clock", ping_clock.shutdown())
+        await teardown.step("window_reminder_clock", window_reminder_clock.shutdown())
+        await teardown.step("reminder_clock", reminder_clock.shutdown())
+        await teardown.step("ask_clock", ask_clock.shutdown())
+        await teardown.step("mesh", mesh_manager.shutdown())
         runtime_state.remove_daemon_json()
-        await manager.shutdown_all()
-        await runner.cleanup()
+        await teardown.step("sessions", manager.shutdown_all())
+        # The app's own on_shutdown/on_cleanup hooks run in here.
+        await teardown.step("http runner", runner.cleanup())
+        teardown.report()
     return RESTART_CODE if app["restart_requested"] else 0
+
+
+class _Teardown:
+    """Times the steps of a shutdown and names the slow ones in the log.
+
+    The stretch between "shut down N live session(s)" and "spawning successor
+    daemon" took anywhere from 3 s to 52 s across restarts with nothing in
+    the log to say which step held it (claunch-t8bgj). Each step that runs
+    past :data:`SLOW_TEARDOWN_STEP` is named with its time, and the total is
+    said once at the end, so the next slow restart answers that from the log.
+    """
+
+    def __init__(self) -> None:
+        self._started = time.perf_counter()
+        self._slow: list = []
+
+    async def step(self, name: str, awaitable) -> None:
+        began = time.perf_counter()
+        try:
+            await awaitable
+        finally:
+            took = time.perf_counter() - began
+            if took >= SLOW_TEARDOWN_STEP:
+                self._slow.append((name, took))
+                log.info("shutdown step %r took %.1fs", name, took)
+
+    def report(self) -> None:
+        log.info(
+            "shutdown teardown took %.1fs%s",
+            time.perf_counter() - self._started,
+            "".join(f"; {n} {t:.1f}s" for n, t in self._slow),
+        )
+
+
+#: A shutdown step at least this long (seconds) is named in the log.
+SLOW_TEARDOWN_STEP = 1.0
 
 
 #: How often the watchdog looks at the listening socket.

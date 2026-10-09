@@ -151,10 +151,12 @@ class SessionManager:
                 "migrated %d session record(s) from sessions.json into "
                 "sessions.db", imported,
             )
-        #: True only while :meth:`restore_all` is still filling the set. The
-        #: per-session persists it triggers must upsert without pruning, or the
-        #: first one would delete every record not loaded yet.
+        #: True only while :meth:`restore_all` is still filling the set. Any
+        #: persist made meanwhile must upsert without pruning, or it would
+        #: delete every record not loaded yet; relaunches skip theirs.
         self._loading = False
+        #: Seconds the current :meth:`restore_all` spent per launch step.
+        self._restore_clock = {"prepare": 0.0, "spawn": 0.0}
         #: Set by :meth:`clear` and :meth:`remove` for the one persist that
         #: follows, so a *deliberate* empty write is allowed to prune the store
         #: to empty — the one case the empty-snapshot guard must let through.
@@ -578,8 +580,14 @@ class SessionManager:
         """Start a staged session. ``opening`` is a first user message for the
         harnesses that take one on their command line (see
         :func:`harness.takes_opening_argv`)."""
+        clock = self._restore_clock if restoring and self._loading else None
+        t0 = time.perf_counter()
         prepared = self._prepare_launch(session, restoring=restoring, opening=opening)
+        t1 = time.perf_counter()
         session.start(*prepared[:3])
+        if clock is not None:
+            clock["prepare"] += t1 - t0
+            clock["spawn"] += time.perf_counter() - t1
         return self._launched(session, restoring, *prepared[2:])
 
     async def launch_async(
@@ -701,7 +709,14 @@ class SessionManager:
                     functools.partial(self._codex_launch_finished, session.sdef.name)
                 )
         self.flush_queued_input(session)
-        self.persist()
+        if not (restoring and self._loading):
+            # A restore persists once, after the last relaunch (restore_all).
+            # Persisting here as well rewrote the whole registry -- every
+            # record, exited ones included -- and re-read every live session's
+            # transcript for the model once per relaunched session: work that
+            # grew with the square of the fleet, on the path that runs before
+            # the port is bound (claunch-t8bgj).
+            self.persist()
         return session
 
     def flush_queued_input(self, session: Session) -> bool:
@@ -2433,11 +2448,14 @@ class SessionManager:
             log.exception("failed to read the session registry")
             return []
         failed: List[str] = []
-        # While the set is being filled, each create/retire below persists a
-        # partial fleet; pruning on those writes would delete the records not
-        # loaded yet. Hold the flag for the whole loop, drop it before the one
-        # steady-state persist that reconciles at the end.
+        # While the set is being filled, a persist would write a partial
+        # fleet; pruning on it would delete the records not loaded yet. The
+        # relaunches below skip theirs (see _launched), and the flag still
+        # guards anything else that persists meanwhile. Hold it for the whole
+        # loop, drop it before the one steady-state persist at the end.
         self._loading = True
+        self._restore_clock = {"prepare": 0.0, "spawn": 0.0}
+        started = time.perf_counter()
         try:
             # Said up front: the relaunches below run before the port is bound,
             # so this line is what the log shows for the seconds a CLI spends
@@ -2506,7 +2524,25 @@ class SessionManager:
                 self._retire(sdef, entry)
         finally:
             self._loading = False
+        persist_started = time.perf_counter()
         self.persist()
+        if relaunching:
+            # The boot's longest stretch, broken into its parts, so a slow
+            # restart is read off the log instead of re-measured by hand:
+            # "prepare" is building the command and replaying the previous
+            # run's scrollback, "spawn" is the process and pseudo console.
+            clock = self._restore_clock
+            now = time.perf_counter()
+            log.info(
+                "restore took %.1fs for %d session(s): prepare/replay %.1fs, "
+                "spawn %.1fs, persist %.1fs, other %.1fs",
+                now - started,
+                relaunching,
+                clock["prepare"],
+                clock["spawn"],
+                now - persist_started,
+                (persist_started - started) - clock["prepare"] - clock["spawn"],
+            )
         return failed
 
     def _retire(self, sdef: SessionDef, entry: dict) -> DeadSession:
