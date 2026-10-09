@@ -35242,6 +35242,157 @@ function saveSpawnRecall(picks) {
   try { localStorage.setItem(SPAWN_RECALL_KEY, JSON.stringify(keep)); } catch {}
 }
 
+/* The New tab's standing answers, kept as the operator gives them rather
+   than at Create (claunch-9em4k). The record above is written only by a
+   launch that went through and holds six rows, and its restore steps over a
+   row that already holds something — which the Profile row always does once
+   refreshProfiles has picked the first profile — so a reload (ctrl+shift+R)
+   put every other row back on its default. This one is written on every
+   change the operator makes on the New tab and read back once per page load,
+   after the option lists it names are filled. The rows a single launch
+   consumes (SESSION_FORM_SPENT, the handle, the issue pick, the worktree's
+   name and base) are not in it, for the reason the record above leaves them
+   out; the Project row is the rail's (PROJECT_KEY). Listed in the order the
+   restore applies them: each row's options follow the ones before it. */
+const NEW_FORM_DRAFT_FIELDS = [
+  "cwd", "profile", "harness", "borrow", "null_token", "model", "effort",
+  "skip_permissions", "codex_yolo", "codex_sandbox", "auto_compact",
+  "over_limit", "score_goal", "args", "mesh", "role", "workflow",
+  "worktree_mode", "beads",
+];
+const NEW_FORM_DRAFT_CHECKS = [
+  "skip_permissions", "codex_yolo", "codex_sandbox", "auto_compact",
+  "over_limit", "score_goal",
+];
+const NEW_FORM_DRAFT_KEY = `claunch_new_form:${BASE}`;
+let newFormDraftRestoring = false;
+let newFormDraftRestored = false;
+
+function readNewFormDraft() {
+  try {
+    const doc = JSON.parse(localStorage.getItem(NEW_FORM_DRAFT_KEY) || "null");
+    return doc && typeof doc === "object" && !Array.isArray(doc) ? doc : null;
+  } catch { return null; }
+}
+
+/* A row's answer as the draft keeps it, or undefined for a row that is not
+   the operator's right now (greyed, or a radio group with nothing usable
+   picked) — the draft then keeps what it last held for that row. */
+function newFormDraftAnswer(control) {
+  if (!control) return undefined;
+  if (!control.tagName) { // a radio group
+    const on = [...control].find((r) => r.checked);
+    return on && !on.disabled ? String(on.value) : undefined;
+  }
+  if (control.disabled) return undefined;
+  return control.type === "checkbox" ? !!control.checked : String(control.value ?? "");
+}
+
+function saveNewFormDraft() {
+  if (newFormDraftRestoring) return;
+  const f = $("new-session");
+  if (!f || sessionFormView().mode !== "new") return;
+  const draft = readNewFormDraft() || {};
+  for (const name of NEW_FORM_DRAFT_FIELDS) {
+    const answer = newFormDraftAnswer(f.elements[name]);
+    if (answer !== undefined) draft[name] = answer;
+  }
+  try { localStorage.setItem(NEW_FORM_DRAFT_KEY, JSON.stringify(draft)); } catch {}
+}
+
+/* Put one remembered answer on a select, only when the row can take it and
+   offers it. True when the row moved. */
+function setNewFormDraftSelect(select, want) {
+  if (!select || select.disabled || typeof want !== "string") return false;
+  if (select.value === want) return false;
+  if (![...(select.options || [])].some((o) => o.value === want && !o.disabled)) {
+    return false;
+  }
+  select.value = want;
+  return true;
+}
+
+function setNewFormDraftCheck(box, want) {
+  if (!box || box.disabled || typeof want !== "boolean") return false;
+  if (box.checked === want) return false;
+  box.checked = want;
+  return true;
+}
+
+/* Once per page load, before the first route: the form is still the page's
+   own, so whichever way it is opened next starts from these answers. Each
+   row is set the way the operator would set it, with the work its own
+   listener does, so the rows that follow it are rebuilt for it first. */
+async function restoreNewFormDraft() {
+  if (newFormDraftRestored) return;
+  newFormDraftRestored = true;
+  const f = $("new-session");
+  const d = readNewFormDraft();
+  if (!f || !d || sessionFormView().mode !== "new") return;
+  const fire = (target, type = "change") =>
+    target.dispatchEvent(new Event(type, { bubbles: true }));
+  const quiet = (p) => Promise.resolve(p).catch(() => {});
+  newFormDraftRestoring = true;
+  try {
+    if (setNewFormDraftSelect(f.cwd, d.cwd)) {
+      applySessionCwdChange();
+    }
+    if (setNewFormDraftSelect(f.profile, d.profile)) fire(f.profile);
+    if (setNewFormDraftSelect(f.harness, d.harness)) fire(f.harness);
+    // The lender list is fetched per profile; the pick waits for it.
+    await quiet(syncNewBorrowOptions(true));
+    if (setNewFormDraftSelect(f.borrow, d.borrow)) f.borrow._borrowTouched = true;
+    if (setNewFormDraftCheck(f.null_token, d.null_token)) fire(f.null_token);
+    // The Model, Effort and runtime rows are rebuilt for the harness by the
+    // form's input listener; the answers go on after that rebuild.
+    fire(f, "input");
+    setNewFormDraftSelect(f.model, d.model);
+    setNewFormDraftSelect(f.effort, d.effort);
+    for (const name of NEW_FORM_DRAFT_CHECKS) {
+      setNewFormDraftCheck(f.elements[name], d[name]);
+    }
+    if (typeof d.args === "string" && f.args && !f.args.disabled) f.args.value = d.args;
+    fire(f, "input");
+    // The mesh picker is filled from the mesh poll, and the role list is
+    // the mesh's; the workflow list is the directory's.
+    syncOnboardPickers();
+    if (setNewFormDraftSelect(f.mesh, d.mesh)) {
+      await quiet(refreshRoles(f.mesh.value));
+      refreshSessionConnect();
+    }
+    await quiet(refreshWorkflowChoices());
+    syncOnboardPickers();
+    if (setNewFormDraftSelect(f.role, d.role)) {
+      renderRoleStance();
+      syncOnboardPickers();
+    }
+    if (setNewFormDraftSelect(f.workflow, d.workflow)) {
+      newWfPicked = true;
+      syncOnboardPickers();
+    }
+    // Parked, the way the launch record's mode is: the worktree list
+    // arrives after the directory does.
+    if (typeof d.worktree_mode === "string" && f.worktree_mode &&
+        f.worktree_mode.value !== d.worktree_mode) {
+      pendingWorktreeMode = d.worktree_mode;
+      syncNewWorktree();
+    }
+    if (typeof d.beads === "string" && f.beads && f.beads.value !== d.beads) {
+      const radio = [...f.beads].find((r) => r.value === d.beads && !r.disabled);
+      if (radio) {
+        radio.checked = true;
+        fire(radio);
+      }
+    }
+  } finally {
+    newFormDraftRestoring = false;
+  }
+}
+
+for (const type of ["change", "input"]) {
+  $("new-session").addEventListener(type, saveNewFormDraft);
+}
+
 /* The spawn tab's Model row, remembered per PARENT PROFILE. The row starts
    on the parent's own model (syncNewModelOptions), so without this every
    child of a parent launched on `sonnet` opened on `sonnet` again however
@@ -35747,7 +35898,11 @@ function applySessionModalSeed(f, seed) {
    a greyed row or over one that already holds something: the policy shut
    the first, and the second is an answer somebody gave. */
 function applySessionModalRecall(f) {
-  const re = spawnRecall();
+  // On the New tab a kept draft is the newer answer for these rows (it
+  // records an empty Role or "no worktree" as well), so the launch record
+  // only speaks for a browser that has none.
+  const re = sessionFormView().mode === "new" && readNewFormDraft()
+    ? {} : spawnRecall();
   if (re.role && !f.role.disabled && !f.role.value) {
     ensureOption(f.role, re.role);
     f.role.value = re.role;
@@ -36104,6 +36259,9 @@ function sessionModalClose(opts = {}) {
   renderSessionForm();
   applySessionParentChange();
   renderSessionForm();
+  // The restore above is programmatic and fires no change, so the draft
+  // still holds what was typed inside a box that was cancelled.
+  saveNewFormDraft();
 }
 
 /* The older entry point, kept under the name everything already presses:
@@ -42469,7 +42627,13 @@ async function boot() {
   // puts you back in the session instead of at an empty slot — and it renders
   // against caches the refreshes above have already filled. Re-running it on
   // every recovery would re-enter whatever page the user has since walked to.
-  if (!booted) { booted = true; route(); }
+  if (!booted) {
+    booted = true;
+    // Before the route, so a #/new reload opens on the answers the operator
+    // last gave rather than on the defaults (claunch-9em4k).
+    await Promise.resolve(restoreNewFormDraft()).catch(() => {});
+    route();
+  }
 }
 
 const DASHBOARD_POLL_MS = 5000;
