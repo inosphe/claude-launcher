@@ -15401,6 +15401,187 @@ async function refreshTermQueued() {
   renderHoldChip(q);
 }
 
+/* ---- measurement window strip (#term-window) ----
+   The machine's test window (daemon/window.py) as it concerns the attached
+   session (claunch-bwzkt): the grant it holds — class, width, how long it
+   has held, and how long a run like it usually holds — or the place it
+   waits in the queue, how long it has waited and the rule keeping it out.
+   Until this strip the answer lived on the Window page, a navigation away
+   from the terminal whose pytest is the thing being waited on.
+
+   The remaining time is the kept history's median for the same class and
+   label (or the class, when the label has fewer than three runs), so it is
+   an estimate and says so: "~" in front, its basis and sample count in the
+   tooltip, and "over" instead of a negative count once the run outlives
+   it. Without three past runs there is no estimate and none is shown.
+
+   Up only while the session holds or waits: an empty strip would take a
+   row from the terminal for nothing. Like the queued banner it shares the
+   terminal's column, so it refits only when its shape changes (`sig`), and
+   the 1s tick that ages the clocks repaints text, never the shape. */
+let termWindowView = null;   // the last GET /api/sessions/<name>/window
+let termWindowTick = null;   // the 1s repaint while the strip is up
+
+function fmtSpan(secs) {
+  if (secs === null || secs === undefined || !Number.isFinite(Number(secs))) return "?";
+  secs = Math.max(0, Math.floor(Number(secs)));
+  if (secs < 60) return `${secs}s`;
+  if (secs < 3600) {
+    return `${Math.floor(secs / 60)}m${String(secs % 60).padStart(2, "0")}s`;
+  }
+  return fmtAge(secs);
+}
+
+/* Seconds since an ISO stamp by this browser's clock, or the daemon's own
+   figure when the stamp does not parse: the daemon measured at poll time,
+   the browser keeps counting between polls. */
+function termWindowSince(iso, fallback, now) {
+  const t = Date.parse(iso || "");
+  if (Number.isFinite(t)) return Math.max(0, ((now || Date.now()) - t) / 1000);
+  return fallback === undefined ? null : fallback;
+}
+
+function termWindowEstimateText(est) {
+  if (!est || est.p50 === null || est.p50 === undefined) return "";
+  return `p50 ${fmtSpan(est.p50)}` +
+    (est.p90 !== null && est.p90 !== undefined ? `, p90 ${fmtSpan(est.p90)}` : "") +
+    ` over ${est.samples} ` +
+    (est.basis === "label" ? "runs of this command" : "runs of this class");
+}
+
+/* What the strip says, as data: one row per grant held or request queued.
+   Kept apart from the DOM so the check can read the words without a page. */
+function termWindowRows(v, now) {
+  if (!v) return [];
+  const rows = [];
+  for (const h of v.holding || []) {
+    const elapsed = termWindowSince(h.acquired_at, h.elapsed_seconds, now);
+    const parts = [`${h.cls}${h.workers ? ` ×${h.workers}` : ""}`];
+    if (h.forced) parts.push("forced");
+    parts.push(`running ${fmtSpan(elapsed)}`);
+    const est = h.estimate;
+    let over = false;
+    if (est && est.p50 !== null && est.p50 !== undefined && elapsed !== null) {
+      const left = est.p50 - elapsed;
+      over = left < 0;
+      parts.push(over
+        ? `${fmtSpan(-left)} over the usual ${fmtSpan(est.p50)}`
+        : `~${fmtSpan(left)} left`);
+    } else {
+      parts.push("no estimate yet");
+    }
+    if (h.result) parts.push(`result: ${windowResultText(h.result)}`);
+    rows.push({
+      kind: "held",
+      over,
+      head: "▦ window held",
+      parts,
+      reason: "",
+      label: h.label || "",
+      title: termWindowEstimateText(est) ||
+        "fewer than three finished runs like this one in the last 7 days — no estimate",
+    });
+  }
+  for (const q of v.waiting || []) {
+    const waited = termWindowSince(q.enqueued_at, q.waited_seconds, now);
+    const parts = [
+      q.cls,
+      `#${q.position} in queue` + (q.ahead ? ` (${q.ahead} ahead)` : ""),
+      `waiting ${fmtSpan(waited)}`,
+    ];
+    if (q.priority) parts.push(`priority ${q.priority}`);
+    // When the run it waits on should end: the soonest holder's estimate.
+    // Only a hint — a sweep needs every holder gone, a targeted one only a
+    // slot — so it is worded as the first one to finish, not as the grant.
+    const lefts = ((v.window && v.window.holders) || [])
+      .filter((h) => h.estimate && h.estimate.p50 !== null && h.estimate.p50 !== undefined)
+      .map((h) => h.estimate.p50 - termWindowSince(h.acquired_at, h.elapsed_seconds, now));
+    if (lefts.length) {
+      const soonest = Math.min(...lefts);
+      parts.push(soonest >= 0
+        ? `first holder done in ~${fmtSpan(soonest)}`
+        : "holders past their usual time");
+    }
+    rows.push({
+      kind: "waiting",
+      over: false,
+      head: "⧗ window queue",
+      parts,
+      reason: q.reason || "",
+      label: q.label || "",
+      title: q.estimate ? `a run like this holds ${termWindowEstimateText(q.estimate)}` : "",
+    });
+  }
+  return rows;
+}
+
+/* The whole machine in one line: whom the session shares the window with. */
+function termWindowLoad(v) {
+  const w = (v && v.window) || {};
+  const held = w.holders || [];
+  const caps = w.caps || {};
+  const count = (cls) => held.filter((h) => h.cls === cls).length;
+  const out = [
+    `targeted ${count("targeted")}/${caps.targeted ?? "?"}`,
+    `sweep ${count("sweep")}/${caps.sweep ?? "?"}`,
+  ];
+  if (w.worker_budget) out.push(`workers ${w.workers_in_use ?? "?"}/${w.worker_budget}`);
+  out.push(`queue ${w.queued ?? 0}` + (w.sweep_queued ? " (sweep waiting)" : ""));
+  return out.join(" · ");
+}
+
+function renderTermWindow(v) {
+  const box = $("term-window");
+  if (v && v.session !== currentName) v = null;   // a previous session's read
+  termWindowView = v;
+  const rows = termWindowRows(v);
+  const show = rows.length > 0 && currentPage === "terminal" && !!currentName;
+  const sig = show ? rows.map((r) => r.kind).join(",") : "hidden";
+  const changed = box.dataset.sig !== sig;
+  box.dataset.sig = sig;
+  if (!show) {
+    box.classList.add("hidden");
+    box.innerHTML = "";
+    if (termWindowTick) { clearInterval(termWindowTick); termWindowTick = null; }
+    if (changed) refitSoon(60);
+    return;
+  }
+  box.innerHTML = "";
+  for (const r of rows) {
+    const row = el("button", `tw-row tw-${r.kind}${r.over ? " tw-over" : ""}`);
+    row.type = "button";
+    row.title = (r.title ? r.title + "\n" : "") +
+      "open the Window page: every holder, the queue and 7 days of runs";
+    row.appendChild(el("span", "tw-head", r.head));
+    row.appendChild(el("span", "tw-facts", r.parts.join(" · ")));
+    if (r.reason) row.appendChild(el("span", "tw-reason", r.reason));
+    if (r.label) row.appendChild(el("span", "tw-label", r.label));
+    row.addEventListener("click", () => { location.hash = "#/window"; });
+    box.appendChild(row);
+  }
+  box.appendChild(el("div", "tw-load", termWindowLoad(v)));
+  box.classList.remove("hidden");
+  if (!termWindowTick) {
+    termWindowTick = setInterval(() => renderTermWindow(termWindowView), 1000);
+  }
+  if (changed) refitSoon(60);
+}
+
+async function refreshTermWindow() {
+  const name = currentName;
+  if (!name || currentPage !== "terminal") { renderTermWindow(null); return; }
+  let v = null;
+  try {
+    const resp = await api(`/api/sessions/${encodeURIComponent(name)}/window`);
+    if (!resp.ok) { renderTermWindow(null); return; } // older daemon: no route
+    v = await resp.json();
+  } catch {
+    return; // offline — the health poll owns saying so; keep the last truth
+  }
+  if (name !== currentName || currentPage !== "terminal") return;
+  renderTermWindow(v);
+}
+
 /* ---- cflow answer strip (#term-cflow) ----
    The attached session's run is stopped on something only a person settles
    (sessCflowGated: an approval, a user branch, a goto request, an ask that
@@ -18034,6 +18215,10 @@ function showView(name) {
   else refreshTermQueued();
   // The cflow answer strip is drawn from the cache in hand: no request.
   renderTermCflow();
+  // The window strip, like the queued banner: the session's grant or its
+  // place in the queue, re-asked-for on the way back in.
+  if (!showTerm) renderTermWindow(null);
+  else refreshTermWindow();
   for (const [page, id] of Object.entries(VIEWS)) {
     $(id).classList.toggle("hidden", name !== page);
   }
@@ -42342,6 +42527,7 @@ async function pollOnce() {
     refreshCflow(),
     refreshCflow2Rail(),
     refreshTermQueued(),
+    refreshTermWindow(),
   ];
   // Polled because the registry is edited from the CLI, in another window;
   // it redraws only when the list really changed (see refreshWorkspaces).
