@@ -6229,6 +6229,9 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 
 /* the presses that answer a card, inline with their optional reason */
 .cf2-press { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 10px; }
+.cf2-legend { margin: 6px 0 0; padding-left: 18px; font-size: 12px; color: #7d8590; }
+.cf2-legend li { margin: 2px 0; }
+.cf2-legend b { color: #c6cdd5; font-weight: 600; }
 .cf2-reason, .cf2-select {
   height: 28px; box-sizing: border-box; padding: 0 8px; font: inherit; font-size: 12px;
   color: #c9d1d9; background: #0f1115; border: 1px solid #30363d; border-radius: 5px;
