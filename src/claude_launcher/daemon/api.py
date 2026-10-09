@@ -847,7 +847,7 @@ def build_app(
     r.add_post("/api/sessions/{name}/handoff", h_session_handoff)
     r.add_delete("/api/sessions/{name}/handoff", h_session_handoff_cancel)
     r.add_post("/api/sessions/{name}/pause", h_session_pause)
-    r.add_post("/api/sessions/{name}/hold", h_session_hold)
+    r.add_post("/api/sessions/{name}/hold", h_session_idle_hold)
     r.add_post("/api/sessions/{name}/wake", h_session_wake)
     r.add_post("/api/sessions/{name}/archive", h_session_archive)
     r.add_delete("/api/sessions/{name}", h_session_delete)
@@ -8834,7 +8834,7 @@ async def h_session_pause(request: web.Request) -> web.Response:
     return json_response(session.info())
 
 
-async def h_session_hold(request: web.Request) -> web.Response:
+async def h_session_idle_hold(request: web.Request) -> web.Response:
     """Hold a running session now (claunch-5l35i): end its program, keep the
     session. What the idle clock (``daemon/hold.py``) does on its own after
     ``hold_idle_minutes``, asked for by hand. No wind-down: nothing is ending

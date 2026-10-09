@@ -1738,7 +1738,9 @@ const SESSION_GROUP_ORDER_KEY = `claunch_session_group_order:${BASE}`;
 const SESSION_FILTERS = ["current", "running-paused", "running", "hold", "killed", "paused", "archived"];
 /* The two presets. Hold (claunch-5l35i) is a running session whose program
    the daemon freed while nobody used it; it wakes on attach, so both presets
-   that show the running ones show it too. */
+   that show the running ones show it too. The functions further down spell
+   the same lists out, because the page checks slice them out of this file
+   one function at a time. */
 const SESSION_FILTER_CURRENT = ["running", "hold", "killed", "paused"];
 const SESSION_FILTER_RUNNING_PAUSED = ["running", "hold", "paused"];
 const SESSION_GROUPS = ["mesh", "workspace"];
@@ -3601,7 +3603,7 @@ function sessionCategory(s) {
 function sessionMatchesFilter(s, filter = sessionFilter) {
   const category = sessionCategory(s);
   if (Array.isArray(filter)) return filter.includes(category);
-  if (filter === "running-paused") return SESSION_FILTER_RUNNING_PAUSED.includes(category);
+  if (filter === "running-paused") return ["running", "hold", "paused"].includes(category);
   return filter === "current" ? category !== "archived" : category === filter;
 }
 
@@ -3610,7 +3612,7 @@ function sessionFilterCounts(sessions) {
   for (const session of sessions || []) {
     const category = sessionCategory(session);
     counts[category]++;
-    if (SESSION_FILTER_RUNNING_PAUSED.includes(category)) counts["running-paused"]++;
+    if (["running", "hold", "paused"].includes(category)) counts["running-paused"]++;
     if (category !== "archived") counts.current++;
   }
   return counts;
@@ -3618,8 +3620,8 @@ function sessionFilterCounts(sessions) {
 
 function setSessionFilter(filter, remember = true) {
   if (!SESSION_FILTERS.includes(filter)) return;
-  sessionFilter = filter === "current" ? SESSION_FILTER_CURRENT.slice()
-    : filter === "running-paused" ? SESSION_FILTER_RUNNING_PAUSED.slice()
+  sessionFilter = filter === "current" ? ["running", "hold", "killed", "paused"].slice()
+    : filter === "running-paused" ? ["running", "hold", "paused"].slice()
     : SESSION_FILTERS.filter((s) => s !== "current" && s !== "running-paused"
       && (s === filter ? !sessionFilter.includes(s) : sessionFilter.includes(s)));
   if (remember) localStorage.setItem(SESSION_FILTER_KEY, JSON.stringify(sessionFilter));
@@ -3681,11 +3683,11 @@ function syncSessionFilters(sessions) {
       })
     );
     const pressed = filter === "current"
-      ? sessionFilter.length === SESSION_FILTER_CURRENT.length
-        && SESSION_FILTER_CURRENT.every((s) => sessionFilter.includes(s))
+      ? sessionFilter.length === ["running", "hold", "killed", "paused"].length
+        && ["running", "hold", "killed", "paused"].every((s) => sessionFilter.includes(s))
       : filter === "running-paused"
-        ? sessionFilter.length === SESSION_FILTER_RUNNING_PAUSED.length
-          && SESSION_FILTER_RUNNING_PAUSED.every((s) => sessionFilter.includes(s))
+        ? sessionFilter.length === ["running", "hold", "paused"].length
+          && ["running", "hold", "paused"].every((s) => sessionFilter.includes(s))
       : sessionFilter.includes(filter);
     button.setAttribute("aria-pressed", String(pressed));
   }
@@ -8244,7 +8246,7 @@ function filterCflowRuns(runs, sessions, filter, query) {
   return (runs || []).filter((run) => {
     const category = cflowSessionCategory(run, sessions);
     const matches = filter === "all" || category === filter ||
-      (filter === "running-paused" && SESSION_FILTER_RUNNING_PAUSED.includes(category));
+      (filter === "running-paused" && ["running", "hold", "paused"].includes(category));
     return matches && (!needle || [run.workflow, run.scope, run.title, run.step_id, run.cwd]
       .some((value) => String(value || "").toLowerCase().includes(needle)));
   });
@@ -17550,7 +17552,7 @@ function syncMobileBars() {
   $("m-zoom").classList.toggle("hidden", !has);
   // A paused record keeps kill: it files the pause as killed (see
   // setStatusBadge).
-  $("m-kill").classList.toggle("hidden", !has || (status === "exited" && !paused));
+  $("m-kill").classList.toggle("hidden", !has || (status === "exited" && !marker));
   if ($("m-pause")) {
     $("m-pause").classList.toggle("hidden", !has || status === "exited");
   }
@@ -22077,7 +22079,7 @@ function beadsLaneCount(lane) {
 function beadsLaneSpent(lane) {
   if (lane.pool) return false;
   if (!lane.known) return true;
-  if (lane.category) return !SESSION_FILTER_RUNNING_PAUSED.includes(lane.category);
+  if (lane.category) return !["running", "hold", "paused"].includes(lane.category);
   return lane.status === "exited";
 }
 
