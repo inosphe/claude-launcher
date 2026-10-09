@@ -71,9 +71,10 @@ const server = http.createServer((req, res) => {
     for (const name of ["s1", "s2", "s3", "s4", "s5"]) await visit(name);
     await tab("s1").locator("a").click();
     await page.waitForFunction(() => location.hash === "#/s/s1" && document.querySelector('.session-tab[data-name="s1"]').classList.contains("active"));
-    assert.deepEqual(await names(), ["s9", "s1", "s2", "s3", "s4", "s5"]);
+    assert.deepEqual(await names(), ["s9", "s2", "s3", "s4", "s5", "s1"],
+                     "the last activated tab moves to the right end");
     await visit("s6");
-    assert.deepEqual(await names(), ["s9", "s1", "s3", "s4", "s5", "s6"]);
+    assert.deepEqual(await names(), ["s9", "s3", "s4", "s5", "s1", "s6"]);
     await tab("s1").locator(".session-tab-pin").click();
     await visit("s7");
     assert.deepEqual(await names(), ["s9", "s1", "s3", "s4", "s5", "s6", "s7"]);
