@@ -1,4 +1,5 @@
-/* A poll that changes nothing changes nothing on the page (claunch-v87).
+/* A poll that changes nothing changes nothing on the page (claunch-v87,
+   claunch-0stm2).
 
    The dashboard repainted by assignment and by teardown: every tick wrote
    each rail row's title, aria-pressed and text again, and most ticks tore the
@@ -8,13 +9,21 @@
    which was the input lag. Measured on the live dashboard (389 rail rows, 30 s
    window): 34,519 records before, about 1,200 after.
 
+   The in-place rail (rowSignature, kept rows) still wrote on every poll: the
+   seen/tps/context lines were replaced whatever they showed, and a row's
+   tooltip went back to its base text before the context note was added again
+   -- two writes with a different value in between, which no same-value guard
+   can drop. Those lines are now rebuilt only when what they show moves.
+
    This drives the shipped page against a fixture daemon and counts the
    records a MutationObserver sees:
      1. quietdom.js: a same-value write (title, class, classList, text, aria,
         disabled, setAttribute) is no record; a changed value still is;
      2. an idle poll leaves the rail without a single record;
-     3. one session changing state replaces that row only -- every other row
-        is the same node, and the row that held the keyboard still holds it;
+     3. one session changing state rebuilds that row only, swapped into its
+        own slot -- every other row is the same node and does not move, the
+        row that held the keyboard still holds it, and the next poll is
+        idle again;
      4. a session leaving the middle of the rail removes that row only;
      5. the session pickers keep their option nodes when a status moves;
      6. the details panel redrawn from the same answer adds no record. */
@@ -29,7 +38,11 @@ let sessions = [
   { name: "p0", status: "idle", cwd: "/repo", harness: "claude", model: "opus", conversation_id: "a" },
   { name: "c1", status: "busy", cwd: "/repo", harness: "claude", model: "opus", parent: "p0", conversation_id: "b" },
   { name: "c2", status: "idle", cwd: "/repo", harness: "claude", model: "opus", parent: "p0" },
-  { name: "q3", status: "idle", cwd: "/other", harness: "claude", model: "opus" },
+  // A tps reading, as the daemon answers it: `age_s` grows by the poll
+  // interval on every answer even when nothing was metered.
+  { name: "q3", status: "idle", cwd: "/other", harness: "claude", model: "opus",
+    tps: { ts: new Date(Date.now() - 7200e3).toISOString(), status: 200, counted: true,
+           idle: true, age_s: 7200, max_age_s: 600, window: 0 } },
   { name: "q4", status: "idle", cwd: "/other", harness: "claude", model: "opus" },
 ];
 const server = http.createServer((req, res) => {
@@ -127,12 +140,78 @@ const server = http.createServer((req, res) => {
     assert.deepEqual([quiet.title, quiet.text, quiet.on], ["u", "other", false],
       "the writes that change something still land");
 
-    /* ---- 2-4. the rail ------------------------------------------------
-       Not checked here. The rail redraws in place through the tree that
-       github.ncsoft.com/master brought (its own claunch-v87), and its rows are
-       covered by railhold_check.js and the other rail harnesses. An idle poll
-       still makes about 25 records on the rail there; the follow-up issue
-       claunch-0stm2 tracks removing them, and this scenario returns with it. */
+    /* ---- 2. an idle poll leaves the rail alone ------------------------- */
+    await page.evaluate(() => refreshSessions());
+    const idle = await recordsDuring("#session-list", () => refreshSessions());
+    assert.deepEqual(idle, [], "an idle poll makes no record on the rail");
+    // The tps reading's raw age moving on is still an idle poll: it rebuilt
+    // every row that had a reading (claunch-0stm2).
+    sessions = sessions.map((s) => s.tps ? { ...s, tps: { ...s.tps, age_s: s.tps.age_s + 5 } } : s);
+    const aged = await recordsDuring("#session-list", () => refreshSessions());
+    assert.deepEqual(aged, [], "a tps reading that only aged makes no record on the rail");
+
+    /* ---- 3. a changed session touches its own row only ---------------- */
+    const snapshot = () => page.evaluate(() => {
+      window.__rows = new Map([...document.querySelectorAll("#session-list li.sess-card")]
+        .map((li) => [li.dataset.name, li]));
+    });
+    const compare = () => page.evaluate(() => {
+      const now = [...document.querySelectorAll("#session-list li.sess-card")];
+      return {
+        order: now.map((li) => li.dataset.name),
+        same: now.filter((li) => __rows.get(li.dataset.name) === li).map((li) => li.dataset.name),
+        focused: document.activeElement && document.activeElement.dataset
+          ? document.activeElement.dataset.name : null,
+        dots: Object.fromEntries(now.map((li) => [li.dataset.name, li.querySelector(".dot").className])),
+        plus: Object.fromEntries(now.map((li) => [li.dataset.name, !!li.querySelector(".sess-plus")])),
+      };
+    });
+    await snapshot();
+    await page.evaluate(() => document.querySelector('#session-list li.sess-card[data-name="q3"]').focus());
+    // busy -> idle: the in-place redraw keys a row on its whole record
+    // (rowSignature), so the changed row is built again -- and only that
+    // one; every other row is the node it was.
+    sessions = sessions.map((s) => s.name === "c1" ? { ...s, status: "idle" } : s);
+    const dotOnly = await recordsDuring("#session-list", () => refreshSessions());
+    let after = await compare();
+    assert.deepEqual(after.order, ["p0", "c1", "c2", "q3", "q4"], "the rail keeps its order");
+    assert.deepEqual(after.same, ["p0", "c2", "q3", "q4"], "a status change rebuilds that row only");
+    assert.ok(after.dots.c1.split(" ").includes("idle"), "the changed row shows its new state");
+    assert.equal(after.focused, "q3", "the row holding the keyboard keeps it");
+    // The new row takes the old one's slot in one record (not an insert
+    // ahead of it that moves every row below), plus what its own late
+    // decorations add.
+    assert.ok(dotOnly.length > 0 && dotOnly.length <= 6,
+      `one rebuilt row is a handful of records, not the rail (${dotOnly.length}: ${dotOnly.join(", ")})`);
+    await snapshot();
+    // Exiting changes what the row draws (no + to spawn from), so that row,
+    // and only that row, is rebuilt.
+    sessions = sessions.map((s) => s.name === "q4" ? { ...s, status: "exited", exit_code: 0 } : s);
+    const swap = await recordsDuring("#session-list", () => refreshSessions());
+    after = await compare();
+    assert.deepEqual(after.same, ["p0", "c1", "c2", "q3"], "only the exited row is a new node");
+    // And the poll after a change is idle again: nothing left over to settle.
+    const settled = await recordsDuring("#session-list", () => refreshSessions());
+    assert.deepEqual(settled, [], "the poll after a change makes no record on the rail");
+    assert.equal(after.plus.q4, false, "the rebuilt row draws its new state");
+    assert.equal(after.focused, "q3", "the row holding the keyboard keeps it");
+    assert.ok(swap.length > 0 && swap.length <= 6,
+      `one rebuilt row is a handful of records, not the rail (${swap.length}: ${swap.join(", ")})`);
+
+    /* ---- 4. a row leaving the middle removes that row only ------------ */
+    await page.evaluate(() => {
+      window.__rows = new Map([...document.querySelectorAll("#session-list li.sess-card")]
+        .map((li) => [li.dataset.name, li]));
+    });
+    sessions = sessions.filter((s) => s.name !== "c2");
+    await page.evaluate(() => refreshSessions());
+    const gone = await page.evaluate(() => {
+      const now = [...document.querySelectorAll("#session-list li.sess-card")];
+      return { order: now.map((li) => li.dataset.name),
+               same: now.every((li) => __rows.get(li.dataset.name) === li) };
+    });
+    assert.deepEqual(gone.order, ["p0", "c1", "q3", "q4"]);
+    assert.equal(gone.same, true, "the rows that stayed are the same nodes");
 
     /* ---- 5. the session pickers keep their options --------------------- */
     const picker = await page.evaluate(() => {
@@ -154,10 +233,7 @@ const server = http.createServer((req, res) => {
     await page.locator("#sess-view .sess-head").waitFor();
     await page.evaluate(() => refreshSession());
     const panel = await recordsDuring("#sess-view", () => refreshSession());
-    // After merging github.ncsoft.com/master the panel still records four writes
-    // (a placeholder, the beads block, the docked notes) on a same-answer redraw.
-    // The bound keeps that number from growing until the follow-up removes it.
-    assert.ok(panel.length <= 4, `a redraw from the same answer makes at most the four known panel records (${panel.length}: ${panel.join(", ")})`);
+    assert.deepEqual(panel, [], "a redraw from the same answer makes no record in the panel");
 
     assert.deepEqual(errors, []);
     console.log("quietpoll_browser: ok");

@@ -4068,14 +4068,18 @@ async function refreshSessions(options) {
   // their listeners and their gauges -- to redraw one seen line. Those lines
   // are refreshed in place instead (refreshRailSeen, below the row loop).
   // `last_output_at` is a detail-panel fact no row draws, and `viewers` only
-  // feeds the seen line's "now".
+  // feeds the seen line's "now". The tps reading's `age_s` grows by the poll
+  // interval on every answer; the tps line shows it as an age and is moved
+  // on in place like the seen line, so it is no reason to rebuild a row
+  // (claunch-0stm2: it alone rebuilt every row with a tps reading).
   // Pin controls reflect the same state as the main session tabs.
   const pins = typeof sessionPinnedNames === "function" ? sessionPinnedNames() : [];
   const unstamped = (key, value) => (
     key === "due_in" || key === "fired_ago" ||
     key === "last_visited_at" || key === "last_input_at" ||
     key === "last_activity_at" || key === "last_output_at" ||
-    key === "viewers" || key === "moved_rows" || key === "tool_calls"
+    key === "viewers" || key === "moved_rows" || key === "tool_calls" ||
+    key === "age_s"
   ) ? undefined : value;
   const signature = JSON.stringify(
     // The project is outside the old tuple so the tuple keeps its shape;
@@ -4129,12 +4133,16 @@ async function refreshSessions(options) {
     && typeof list.removeChild === "function" && !!list.childNodes;
   const keptRows = new Map();
   const keptGroups = new Map();
+  const keptShadows = new Map();
   if (inPlace) {
     const harvest = (box) => {
       for (const n of Array.from(box.childNodes)) {
         if (n._railGroupKey) {
           keptGroups.set(n._railGroupKey, n);
           harvest(n._railGroupBody);
+        } else if (n._railShadowSig) {
+          if (!keptShadows.has(n._railShadowSig)) keptShadows.set(n._railShadowSig, []);
+          keptShadows.get(n._railShadowSig).push(n);
         } else if (n._railRowSig && n.dataset && n.dataset.name) {
           if (!keptRows.has(n.dataset.name)) keptRows.set(n.dataset.name, []);
           keptRows.get(n.dataset.name).push(n);
@@ -4155,7 +4163,22 @@ async function refreshSessions(options) {
     }
     const at = placed.get(box) || 0;
     const kids = box.childNodes;
-    if (kids[at] !== node) box.insertBefore(node, kids[at] || null);
+    const cur = kids[at];
+    if (cur !== node) {
+      // A rebuilt row lands where the row it replaces stands: swapping it
+      // there is one record, where inserting ahead of it would push every
+      // row below one slot down -- a move, and a record, each.
+      const name = cur && !node.parentNode && cur.dataset && node.dataset
+        ? cur.dataset.name : null;
+      const stale = name && name === node.dataset.name ? keptRows.get(name) : null;
+      const i = stale ? stale.indexOf(cur) : -1;
+      if (i >= 0 && typeof box.replaceChild === "function") {
+        stale.splice(i, 1);
+        box.replaceChild(node, cur);
+      } else {
+        box.insertBefore(node, cur || null);
+      }
+    }
     placed.set(box, at + 1);
   };
   // Everything a row draws from, other than the stamps refreshRailSeen moves
@@ -4321,7 +4344,16 @@ async function refreshSessions(options) {
       // record lookup -- can be handed it.
       const parent = nestedGroupContainers
         ? (groupBodies[groupBodies.length - 1] || list) : list;
-      place(parent, renderShadowCard(row.shadow, { depth: row.depth || 0 }));
+      // Kept like a local row: a card drawn from the same record at the
+      // same depth is the node already there, not a new one every poll.
+      const sig = inPlace ? JSON.stringify([row.shadow, row.depth || 0], unstamped) : "";
+      const kept = inPlace && keptShadows.has(sig) ? keptShadows.get(sig).shift() : null;
+      let card = kept;
+      if (!card) {
+        card = renderShadowCard(row.shadow, { depth: row.depth || 0 });
+        if (inPlace) card._railShadowSig = sig;
+      }
+      place(parent, card);
       countRow();
       continue;
     }
@@ -4802,23 +4834,41 @@ function memberAutoBadge(m) {
    one of ours, and tagging our row with somebody else's room would be a
    lie the reader cannot check. */
 function sessMeshes(name) {
-  const out = [];
-  for (const m of meshCache || []) {
-    for (const mem of m.members || []) {
-      if (mem.local && mem.session === name) {
+  // Indexed once per mesh poll rather than walked per call: the rail asks
+  // this two or three times for every row it draws, and walking every
+  // member of every mesh each time was a visible slice of a 390-row redraw
+  // (claunch-otusq). The mesh poll replaces meshCache wholesale, so the
+  // arrays it holds -- itself and each room's member list, for a caller
+  // that rewrites one room in place -- say whether the index is current.
+  const from = meshCache || [];
+  const lists = from.map((m) => m.members);
+  const was = sessMeshes._lists;
+  if (sessMeshes._from !== from || !was || was.length !== lists.length
+      || lists.some((l, i) => l !== was[i])) {
+    const index = new Map();
+    for (const m of from) {
+      for (const mem of m.members || []) {
+        if (!mem.local) continue;
         // `label` is the roster's spelling of everything the member holds
         // (`leader+reviewer`); `role` stays the primary for callers that
         // key on one name.
         const held = Array.isArray(mem.roles) && mem.roles.length
           ? mem.roles : [mem.role || ""];
-        out.push({
+        if (!index.has(mem.session)) index.set(mem.session, []);
+        index.get(mem.session).push({
           mesh: m.name, handle: mem.handle, role: mem.role || "",
           roles: held.filter(Boolean), label: held.filter(Boolean).join("+"),
         });
       }
     }
+    for (const list of index.values()) list.sort((a, b) => a.mesh.localeCompare(b.mesh));
+    sessMeshes._from = from;
+    sessMeshes._lists = lists;
+    sessMeshes._index = index;
   }
-  return out.sort((a, b) => a.mesh.localeCompare(b.mesh));
+  // A copy of each entry, so a caller that edits what it was handed cannot
+  // change the next caller's answer.
+  return (sessMeshes._index.get(name) || []).map((m) => ({ ...m, roles: [...m.roles] }));
 }
 
 /* What the row actually draws: the first few rooms, then a count for the
@@ -7053,6 +7103,30 @@ function railSeenLine(s) {
 function refreshRailSeen(list) {
   if (!list || typeof list.querySelectorAll !== "function") return;
   const byName = new Map((sessionsCache || []).map((s) => [s.name, s]));
+  // Each line below is redrawn only when what it reads as moved: the key is
+  // what the builder would print (the ages as the reader sees them, the
+  // stale marks, the record behind them), worked out without building a
+  // node. Building every line of every row on every poll and comparing the
+  // result left hundreds of detached spans per tick for the cycle collector,
+  // about two seconds in ten of the main thread on a 390-row rail
+  // (claunch-otusq).
+  const stale = typeof railStale === "object" && railStale ? railStale : {};
+  const seenKey = (s) => JSON.stringify([
+    Number(s.viewers) > 0, stale.seen, stale.typed, stale.moved,
+    ...[s.last_visited_at, s.last_input_at, s.last_activity_at].map((iso) => {
+      const ago = typeof seenAgo === "function" ? seenAgo(iso) : null;
+      return ago ? [iso, ago.text, ago.secs >= (stale.seen || 0),
+                    ago.secs >= (stale.typed || 0), ago.secs >= (stale.moved || 0)] : null;
+    }),
+  ]);
+  // A freshly built line goes in only where it reads differently.
+  const swap = (old, fresh) => {
+    if (typeof old.outerHTML !== "string" || old.outerHTML !== fresh.outerHTML) {
+      old.replaceWith(fresh);
+      return fresh;
+    }
+    return old;
+  };
   for (const li of list.querySelectorAll("li[data-name]")) {
     const s = byName.get(li.dataset.name);
     const old = typeof li.querySelector === "function"
@@ -7060,10 +7134,8 @@ function refreshRailSeen(list) {
     if (!s || !old || typeof old.replaceWith !== "function") continue;
     // Swapped only when it reads differently: the ages move by the minute,
     // and a swap on every tick was a mutation per row per poll (claunch-v87).
-    const fresh = railSeenLine(s);
-    if (typeof old.outerHTML !== "string" || old.outerHTML !== fresh.outerHTML) {
-      old.replaceWith(fresh);
-    }
+    const sk = seenKey(s);
+    if (old._railKey !== sk) swap(old, railSeenLine(s))._railKey = sk;
     // The dot's grade is read off the same moving stamps (plus moved_rows),
     // so it is re-shaded on the same tick.
     // The status dot is the row's first child (see the li.append in
@@ -7082,22 +7154,43 @@ function refreshRailSeen(list) {
     // Neither line carries a listener, so the swap loses nothing.
     const tps = li.querySelector(".rail-tps-line");
     if (tps && typeof tpsRailLine === "function") {
-      const fresh = tpsRailLine(s);
-      if (fresh) tps.replaceWith(fresh);
-      else tps.remove();
+      const t = s.tps;
+      const age = t && typeof tpsAgeSecs === "function" ? tpsAgeSecs(t) : null;
+      // The reading less its raw age, which moves every poll: what the line
+      // shows of it is the formatted age and the stale class beside it.
+      const tk = JSON.stringify([t || null, age === null ? null : fmtAge(age),
+        t && typeof tpsStaleClass === "function" ? tpsStaleClass(t) : ""],
+        (key, value) => key === "age_s" ? undefined : value);
+      if (tps._railKey !== tk) {
+        const fresh = tpsRailLine(s);
+        if (fresh) swap(tps, fresh)._railKey = tk;
+        else tps.remove();
+      }
     }
+    // The gauge reads the reading, the harness that sets its tick, and the
+    // tooltip that carries the reading's age.
+    const note = typeof ctxTooltip === "function" ? ctxTooltip(s) : "";
     const ctx = li.querySelector(".rail-ctx-line");
     if (ctx && typeof ctxRailLine === "function") {
-      const fresh = ctxRailLine(s);
-      if (fresh) ctx.replaceWith(fresh);
-      else ctx.remove();
+      const ck = JSON.stringify([s.context || null, s.harness || null, note]);
+      if (ctx._railKey !== ck) {
+        const fresh = ctxRailLine(s);
+        if (fresh) swap(ctx, fresh)._railKey = ck;
+        else ctx.remove();
+      }
     }
+    // The titles are written once, at what they end up reading (the same
+    // join ctxNoteOnRow makes): putting the base back first and adding the
+    // note after was two writes per row per poll, and the first never
+    // matched what was there (claunch-0stm2).
     const name = li.querySelector(".rail-name");
     if (typeof li._railTitleBase === "string" && name &&
         typeof name._railTitleBase === "string" && typeof ctxNoteOnRow === "function") {
-      li.title = li._railTitleBase;
-      name.title = name._railTitleBase;
-      ctxNoteOnRow(li, name, s);
+      const join = (had) => (note ? [had, note].filter(Boolean).join("\n") : had);
+      const rowTitle = join(li._railTitleBase);
+      const nameTitle = join(name._railTitleBase);
+      if (li.title !== rowTitle) li.title = rowTitle;
+      if (name.title !== nameTitle) name.title = nameTitle;
     }
   }
 }
@@ -7708,27 +7801,34 @@ function decorateBriefingRow(li, s) {
     // Drawn aside and swapped in only when the chips read differently: this
     // runs on every poll for every row (refreshRailSeen), and redrawing the
     // same chips each time was a mutation per row per poll (claunch-v87).
+    // Not drawn at all while what they would print is what they printed last
+    // time: the aside copy was garbage on every poll too (claunch-otusq).
+    const key = JSON.stringify(reported.map((check) => [
+      check, check.reported_at ? (seenAgo(check.reported_at) || {}).text : null]));
     const live = checks;
-    checks = el("div", "rail-status-checks");
-    for (const check of reported) {
-      const answer = statusCheckText(check);
-      const age = check.reported_at ? seenAgo(check.reported_at) : null;
-      const chip = el("span", `rail-status-check check-${answer}`,
-        `${statusCheckIcon(check)} ${statusCheckName(check)}` + (age ? ` · ${age.text}` : ""));
-      chip.title = age
-        ? `${String(check.question || "")}\nreported ${new Date(Date.parse(check.reported_at)).toLocaleString()}`
-        : String(check.question || "");
-      chip.ariaLabel = `${statusCheckName(check)}: ${answer}`;
-      checks.appendChild(chip);
-    }
-    if (typeof live.outerHTML === "string" && live.outerHTML === checks.outerHTML) {
-      checks = live;
-    } else if (typeof live.replaceWith === "function") {
-      live.replaceWith(checks);
-    } else {
-      live.innerHTML = "";
-      for (const chip of [...checks.children]) live.appendChild(chip);
-      checks = live;
+    if (live._railKey !== key) {
+      checks = el("div", "rail-status-checks");
+      for (const check of reported) {
+        const answer = statusCheckText(check);
+        const age = check.reported_at ? seenAgo(check.reported_at) : null;
+        const chip = el("span", `rail-status-check check-${answer}`,
+          `${statusCheckIcon(check)} ${statusCheckName(check)}` + (age ? ` · ${age.text}` : ""));
+        chip.title = age
+          ? `${String(check.question || "")}\nreported ${new Date(Date.parse(check.reported_at)).toLocaleString()}`
+          : String(check.question || "");
+        chip.ariaLabel = `${statusCheckName(check)}: ${answer}`;
+        checks.appendChild(chip);
+      }
+      if (typeof live.outerHTML === "string" && live.outerHTML === checks.outerHTML) {
+        checks = live;
+      } else if (typeof live.replaceWith === "function") {
+        live.replaceWith(checks);
+      } else {
+        live.innerHTML = "";
+        for (const chip of [...checks.children]) live.appendChild(chip);
+        checks = live;
+      }
+      checks._railKey = key;
     }
     let statusRefresh = li.querySelector(".sess-status-check-rowref");
     if (!statusRefresh) {
