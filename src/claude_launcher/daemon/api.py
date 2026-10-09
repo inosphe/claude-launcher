@@ -847,6 +847,8 @@ def build_app(
     r.add_post("/api/sessions/{name}/handoff", h_session_handoff)
     r.add_delete("/api/sessions/{name}/handoff", h_session_handoff_cancel)
     r.add_post("/api/sessions/{name}/pause", h_session_pause)
+    r.add_post("/api/sessions/{name}/hold", h_session_hold)
+    r.add_post("/api/sessions/{name}/wake", h_session_wake)
     r.add_post("/api/sessions/{name}/archive", h_session_archive)
     r.add_delete("/api/sessions/{name}", h_session_delete)
     r.add_post("/api/sessions/{name}/keep-alive", h_session_keep_alive)
@@ -7238,7 +7240,7 @@ async def h_sessions_list(request: web.Request) -> web.Response:
     rail_view = request.query.get("view") == "rail"
     list_state = request.query.get("state") or "all"
     if list_state not in {
-        "all", "active", "current", "killed", "paused", "archived",
+        "all", "active", "current", "killed", "paused", "hold", "archived",
     }:
         return json_error(400, f"invalid session list state: {list_state!r}")
     # ``?project=`` narrows the list to one project's sessions; absent means
@@ -7279,6 +7281,8 @@ async def h_sessions_list(request: web.Request) -> web.Response:
         if list_state == "killed" and category != session_mod.CATEGORY_KILLED:
             continue
         if list_state == "paused" and not paused:
+            continue
+        if list_state == "hold" and category != session_mod.CATEGORY_HOLD:
             continue
         if list_state == "archived" and not archived:
             continue
@@ -8221,6 +8225,11 @@ async def h_sessions_respawn_all(request: web.Request) -> web.Response:
             continue
         if getattr(session, "paused_at", None) and not include_paused:
             continue
+        # A held record is a running session asleep (claunch-5l35i): not
+        # done, so not archived in bulk; and it wakes on use, so a bulk
+        # relaunch would only undo the hold.
+        if getattr(session, "held_at", None):
+            continue
         name = session.sdef.name
         try:
             await manager.respawn_async(name)
@@ -8245,6 +8254,11 @@ async def h_sessions_archive_all(request: web.Request) -> web.Response:
         if not session.exited or session.archived_at:
             continue
         if getattr(session, "paused_at", None) and not include_paused:
+            continue
+        # A held record is a running session asleep (claunch-5l35i): not
+        # done, so not archived in bulk; and it wakes on use, so a bulk
+        # relaunch would only undo the hold.
+        if getattr(session, "held_at", None):
             continue
         name = session.sdef.name
         try:
@@ -8777,9 +8791,14 @@ async def h_session_kill(request: web.Request) -> web.Response:
     session = manager.get(name)  # ManagerError -> 400, as it always did
     if session.exited:
         unpaused = manager.unpause(name)
+        # A held record is filed as killed the same way, and the exit hooks
+        # the hold put off run now (SessionManager.unhold).
+        unheld = manager.unhold(name)
         body = {**session.info(), "already_exited": True}
         if unpaused:
             body["unpaused"] = True
+        if unheld:
+            body["unheld"] = True
         return json_response(body)
     if await _winding_down(request, session, force=force):
         return json_response({**session.info(), "winding_down": True})
@@ -8813,6 +8832,37 @@ async def h_session_pause(request: web.Request) -> web.Response:
     request.app["beads"].winddowns.pop(name, None)
     session = manager.pause(name, force=force)
     return json_response(session.info())
+
+
+async def h_session_hold(request: web.Request) -> web.Response:
+    """Hold a running session now (claunch-5l35i): end its program, keep the
+    session. What the idle clock (``daemon/hold.py``) does on its own after
+    ``hold_idle_minutes``, asked for by hand. No wind-down: nothing is ending
+    for the board. 400 for a session a respawn would bring back blank.
+
+    On an exited session the reply says ``already_exited``, as pause does.
+    """
+    manager: SessionManager = request.app["manager"]
+    name = request.match_info["name"]
+    force = request.query.get("force") in ("1", "true")
+    session = manager.get(name)
+    if session.exited:
+        return json_response({**session.info(), "already_exited": True})
+    session = manager.hold(name, force=force, reason="manual")
+    return json_response(session.info())
+
+
+async def h_session_wake(request: web.Request) -> web.Response:
+    """Bring a held session back now. The manual twin of the wake an attach,
+    a mesh message or a cflow notice does; anything not held is returned as
+    it is (``woken: false``). A killed or paused record is the respawn
+    route's, not this one's."""
+    manager: SessionManager = request.app["manager"]
+    name = request.match_info["name"]
+    before = manager.get(name)
+    held = bool(before.exited and getattr(before, "held_at", None))
+    session = await manager.wake_async(name, by="api")
+    return json_response({**session.info(), "woken": held})
 
 
 async def h_session_delete(request: web.Request) -> web.Response:
@@ -10580,6 +10630,7 @@ async def h_transcripts_list(request: web.Request) -> web.Response:
         "active": session_mod.CATEGORY_RUNNING,
         "killed": session_mod.CATEGORY_KILLED,
         "paused": session_mod.CATEGORY_PAUSED,
+        "hold": session_mod.CATEGORY_HOLD,
         "archived": session_mod.CATEGORY_ARCHIVED,
     }
     if state not in states:

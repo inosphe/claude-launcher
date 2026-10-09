@@ -358,6 +358,10 @@ class Cflow2Clock:
         except Exception:
             return
         if getattr(session, "exited", True):
+            # A held driver wakes for its notice (claunch-5l35i).
+            if getattr(session, "held_at", None):
+                self.manager.wake_soon(session.sdef.name, by="cflow2",
+                                       deliver=text)
             return
         try:
             session.queue_delivery(text)

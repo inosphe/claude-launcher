@@ -294,23 +294,26 @@ STATUS_IDLE = "idle"
 STATUS_EXITED = "exited"
 
 #: The lifecycle partition every reader filters a record by. An exited record
-#: is ``killed`` unless it carries the pause marker, and an archived one is
-#: neither however it exited — so a record lands in exactly one of the four
-#: and the counts of the filters built on this add up. Defined once, here:
-#: the session rail (``daemon/api.py``) and the mesh roster
-#: (``daemon/mesh.py``) both ask this question, and two copies of the answer
-#: would let the same record be filed two ways on one page.
+#: is ``killed`` unless it carries the hold or the pause marker, and an
+#: archived one is none of those however it exited — so a record lands in
+#: exactly one of the five and the counts of the filters built on this add
+#: up. Defined once, here: the session rail (``daemon/api.py``) and the mesh
+#: roster (``daemon/mesh.py``) both ask this question, and two copies of the
+#: answer would let the same record be filed two ways on one page.
 CATEGORY_RUNNING = "running"
+CATEGORY_HOLD = "hold"
 CATEGORY_KILLED = "killed"
 CATEGORY_PAUSED = "paused"
 CATEGORY_ARCHIVED = "archived"
 
 
 def session_category(session) -> str:
-    """Which of the four partitions ``session`` belongs to."""
+    """Which of the five partitions ``session`` belongs to."""
     if getattr(session, "archived_at", None):
         return CATEGORY_ARCHIVED
     if session.exited:
+        if getattr(session, "held_at", None):
+            return CATEGORY_HOLD
         return (
             CATEGORY_PAUSED
             if getattr(session, "paused_at", None)
@@ -492,6 +495,17 @@ class Session:
         #: back exactly the ones that were paused. Cleared the same way
         #: ``archived_at`` is: respawn constructs a fresh Session.
         self.paused_at: Optional[str] = None
+        #: The hold marker (claunch-5l35i): set by :meth:`hold` just before
+        #: the child is terminated. Unlike a pause, a hold is not an ending
+        #: of the session, only of its program: the daemon freed the process
+        #: of a session nobody was using, and brings it back (respawn with
+        #: the pinned conversation) the moment somebody does — a viewer
+        #: attaches, a mesh message or a cflow notice arrives. So the exit it
+        #: leaves skips the exit hooks (no board sweep, no side-run abort, no
+        #: orphan report; :meth:`SessionManager._session_exited`). Cleared by
+        #: a respawn (fresh Session), or by a kill of the held record, which
+        #: is when those hooks finally run (:meth:`SessionManager.unhold`).
+        self.held_at: Optional[str] = None
         #: When the board sweep this incarnation's ending owed was made
         #: (:meth:`beads.Board.sweep_many`). Persisted with the record, so a
         #: restart that retires it does not sweep the same ending again
@@ -1848,6 +1862,17 @@ class Session:
         self.paused_at = _utcnow()
         self.kill(force=force)
 
+    def hold(self, *, force: bool = False) -> None:
+        """Kill, and mark the record as held (see :attr:`held_at`).
+
+        Marker before signal, for the reason :meth:`pause` gives: the exit
+        funnel reads it to decide that nothing has ended.
+        """
+        if self.exited or self.pty is None:
+            return
+        self.held_at = _utcnow()
+        self.kill(force=force)
+
     async def shutdown(self, grace: float = 5.0) -> None:
         """Terminate the child and wait briefly; force-kill stragglers."""
         pending = tuple(self._deferred_deliveries)
@@ -2017,6 +2042,23 @@ class Session:
         complete without the daemon having to tick anything.
         """
         self.last_visited_at = _utcnow()
+        self._last_visit_mono = time.monotonic()
+
+    def quiet_for(self, now: Optional[float] = None) -> float:
+        """Seconds nothing has happened here: no meaningful screen change, no
+        human keystroke, no viewer coming or going, counted from this
+        incarnation's start. What the idle hold (daemon/hold.py) measures
+        against its threshold; monotonic throughout, so a sleeping laptop or
+        a clock change cannot make a session look older than it is.
+        """
+        now = time.monotonic() if now is None else now
+        marks = [self._started_mono, self._last_human_input,
+                 getattr(self, "_last_visit_mono", 0.0)]
+        idle = self.tracker.idle_for(now)
+        quiet = now - max(marks)
+        if idle is not None:
+            quiet = min(quiet, idle)
+        return max(0.0, quiet)
 
     def viewers(self) -> int:
         """How many viewer sockets are attached to this session right now.
@@ -2116,6 +2158,7 @@ class Session:
             "exited_at": self.exited_at,
             "archived_at": self.archived_at,
             "paused_at": self.paused_at,
+            "held_at": self.held_at,
             # A person's standing "type nothing in here" (:meth:`delivery_held`).
             # On the list poll rather than only on the per-session queued
             # endpoint, because the rail draws one row per session and the
@@ -2178,6 +2221,7 @@ class DeadSession:
         exited_at: Optional[str] = None,
         archived_at: Optional[str] = None,
         paused_at: Optional[str] = None,
+        held_at: Optional[str] = None,
         swept_at: Optional[str] = None,
         scrollback: int = 5000,
         idle_threshold: float = 2.0,
@@ -2195,6 +2239,7 @@ class DeadSession:
         self.exited_at = exited_at
         self.archived_at = archived_at
         self.paused_at = paused_at
+        self.held_at = held_at
         self.swept_at = swept_at
         #: A retired record was not ended by the OS in this daemon's lifetime,
         #: whatever its exit code says; see Session.ended_by_os.
@@ -2366,6 +2411,7 @@ class DeadSession:
             "exited_at": self.exited_at,
             "archived_at": self.archived_at,
             "paused_at": self.paused_at,
+            "held_at": self.held_at,
             "delivery_hold": self.delivery_held(),  # always False; see above
             "pending_deliveries": [],   # nothing is queued for a session that ended
         }

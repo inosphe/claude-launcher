@@ -194,6 +194,14 @@ class SessionManager:
         #: does not even exist yet. The board sweep their ending calls for is
         #: owed at boot, and :meth:`take_retired_for_sweep` is who collects it.
         self._retired_for_sweep: List[DeadSession] = []
+        #: One lock per name for :meth:`wake_async`, and the tasks
+        #: :meth:`wake_soon` scheduled (kept so they are not collected).
+        self._wake_locks: Dict[str, asyncio.Lock] = {}
+        self._wake_tasks: Set[asyncio.Task] = set()
+        #: Names mid-wake. The respawn takes the record out of the registry
+        #: while the new child spawns, and a reader in that gap must not
+        #: take the session for removed (:meth:`is_waking`).
+        self._waking: Set[str] = set()
         # A harness can write the file that names its conversation well after
         # the moment claunch would like to know it: codex writes its rollout
         # after the launch wait expires, pi writes the file ``/new`` creates
@@ -543,9 +551,21 @@ class SessionManager:
                                exit_code=session.exit_code)
             self.persist()
             return
+        if getattr(session, "held_at", None):
+            # A hold ends the program, not the session (Session.held_at): the
+            # board keeps its in_progress issue, side runs keep running, and
+            # nobody is told the session is gone. The hooks run if and when
+            # the hold is turned into a real ending (unhold).
+            self.events.record(session, "hold", "유휴 세션 hold: 프로세스 종료",
+                               exit_code=session.exit_code)
+            self.persist()
+            return
         self.events.record(session, "exit", "세션 프로세스 종료",
                            exit_code=session.exit_code)
         self.persist()
+        self._run_exit_hooks(session)
+
+    def _run_exit_hooks(self, session: AnySession) -> None:
         for hook in list(self.exit_hooks):
             try:
                 hook(session)
@@ -1382,6 +1402,114 @@ class SessionManager:
         self.persist()
         return True
 
+    # ---- hold (claunch-5l35i) ------------------------------------------------ #
+
+    @staticmethod
+    def resumable(session: AnySession) -> bool:
+        """Whether a respawn brings this session back *with its conversation*.
+
+        The precondition of a hold: freeing the process is only harmless when
+        the wake reopens the same conversation. Claude with a pinned id and a
+        transcript behind it, codex with a resolved rollout; anything else (a
+        shell, pi, a claude that has not written its first line yet) would
+        come back blank, so it is never held.
+        """
+        sdef = session.sdef
+        if not sdef.conversation_id:
+            return False
+        if sdef.harness == harness_mod.CLAUDE_HARNESS:
+            return not harness_mod.restores_blank(sdef)
+        return sdef.harness == "codex"
+
+    def hold(self, name: str, *, force: bool = False, reason: str = "") -> AnySession:
+        """Free a running session's program and file the record as held.
+
+        The session stays what it was everywhere else — its issue, its mesh
+        row, its runs — and comes back through :meth:`wake_async`. Refuses a
+        session :meth:`resumable` says would come back blank.
+        """
+        session = self.get(name)
+        if session.exited:
+            return session
+        if not self.resumable(session):
+            raise ManagerError(
+                f"session {name!r} cannot be held: a respawn would not reopen "
+                "its conversation"
+            )
+        session.hold(force=force)
+        self.events.record(session, "hold", "세션 hold 요청", force=force,
+                           reason=reason)
+        self.persist()
+        return session
+
+    def unhold(self, name: str) -> bool:
+        """Turn a hold into a real ending: the operator killed (or archived)
+        a held record. The exit hooks the hold skipped run now — the board
+        sweep returns its issue, side runs end — and the record reads killed.
+        Returns whether the marker was cleared."""
+        session = self.get(name)
+        if not session.exited or not getattr(session, "held_at", None):
+            return False
+        session.held_at = None
+        self.events.record(session, "kill", "hold된 세션을 종료로 전환")
+        self.persist()
+        self._run_exit_hooks(session)
+        return True
+
+    async def wake_async(self, name: str, *, by: str = "") -> AnySession:
+        """Bring a held session back (respawn with its conversation).
+
+        Anything else is returned as it is: a live session is already awake,
+        and a killed or paused record is not this verb's to revive. Concurrent
+        wakes of one name (a viewer and a mesh delivery at once) share one
+        respawn.
+        """
+        lock = self._wake_locks.setdefault(name, asyncio.Lock())
+        async with lock:
+            session = self.get(name)
+            if not session.exited or not getattr(session, "held_at", None):
+                return session
+            self._waking.add(name)
+            try:
+                relaunched = await self.respawn_async(name)
+            finally:
+                self._waking.discard(name)
+            log.info("held session %r woken (%s)", name, by or "respawn")
+            return relaunched
+
+    def is_waking(self, name: str) -> bool:
+        """Whether :meth:`wake_async` is relaunching ``name`` right now."""
+        return name in self._waking
+
+    def wake_soon(self, name: str, *, by: str = "", deliver: str = "") -> bool:
+        """Schedule :meth:`wake_async` from synchronous code on the loop, and
+        queue ``deliver`` into the woken session. Returns whether a wake was
+        scheduled (False when the record is not held or no loop is running)."""
+        try:
+            session = self.get(name)
+        except ManagerError:
+            return False
+        if not session.exited or not getattr(session, "held_at", None):
+            return False
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return False
+
+        async def run() -> None:
+            try:
+                woken = await self.wake_async(name, by=by)
+            except Exception:  # noqa: BLE001 -- a failed wake leaves it held
+                log.exception("wake of held session %r failed", name)
+                return
+            if deliver and not woken.exited:
+                woken.queue_delivery(deliver)
+
+        task = loop.create_task(run())
+        self._wake_tasks.add(task)
+        task.add_done_callback(self._wake_tasks.discard)
+        return True
+
     def escalate_children(self, name: str) -> List[str]:
         """Move ``name``'s direct children up to ``name``'s own parent.
 
@@ -1452,6 +1580,8 @@ class SessionManager:
             raise ManagerError(
                 f"session {name!r} is still running — kill it first"
             )
+        # Forgetting a held record is its real ending: settle what it owed.
+        self.unhold(name)
         if children == "remove":
             below = self.descendants(name)
             running = [n for n in below if not self._sessions[n].exited]
@@ -1665,6 +1795,9 @@ class SessionManager:
         # Session.resumed_by_human for what this buys the session.
         relaunched.resumed_by_human = True
         action = "resume" if session.paused_at else "respawn"
+        if getattr(session, "held_at", None):
+            self.events.record(relaunched, "wake", "hold된 세션 복귀")
+            return relaunched
         self.events.record(relaunched, action,
                            "일시 중지된 세션 재개" if action == "resume" else "세션 재실행")
         return relaunched
@@ -1689,6 +1822,8 @@ class SessionManager:
                 f"session {name!r} is still running — "
                 "archive it with stop_and_archive, which ends it first"
             )
+        # Filing a held record away is its real ending: settle what it owed.
+        self.unhold(name)
         if not session.archived_at:
             session.archived_at = datetime.now(timezone.utc).isoformat(
                 timespec="seconds"
@@ -2230,6 +2365,10 @@ class SessionManager:
                     # record that came back from a restart as a plain kill
                     # would drop out of the bulk resume it was paused for.
                     "paused_at": getattr(session, "paused_at", None),
+                    # The hold marker (claunch-5l35i): a held record that came
+                    # back from a restart as a plain kill would lose its wake
+                    # and owe a board sweep it must not make.
+                    "held_at": getattr(session, "held_at", None),
                     # Whether this ending's board sweep was made. Without it
                     # every boot swept every exited record again, and the one
                     # write a sweep makes that does not change state -- the
@@ -2383,6 +2522,7 @@ class SessionManager:
             exited_at=entry.get("exited_at"),
             archived_at=entry.get("archived_at"),
             paused_at=entry.get("paused_at"),
+            held_at=entry.get("held_at"),
             swept_at=entry.get("swept_at"),
             scrollback=self.scrollback,
             idle_threshold=self.idle_threshold,
@@ -2403,7 +2543,8 @@ class SessionManager:
         # So is one whose sweep was already made (``swept_at``): the sweep is
         # owed once per ending, and the only records still owing it are the
         # ones that ended across the restart or whose sweep never finished.
-        if not dead.archived_at and not dead.swept_at:
+        # And so is a held one: a hold is not an ending (Session.held_at).
+        if not dead.archived_at and not dead.swept_at and not dead.held_at:
             self._retired_for_sweep.append(dead)
         return dead
 
