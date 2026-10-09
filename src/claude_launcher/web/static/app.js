@@ -35901,8 +35901,8 @@ function applySessionModalRecall(f) {
   // On the New tab a kept draft is the newer answer for these rows (it
   // records an empty Role or "no worktree" as well), so the launch record
   // only speaks for a browser that has none.
-  const re = sessionFormView().mode === "new" && readNewFormDraft()
-    ? {} : spawnRecall();
+  const draft = sessionFormView().mode === "new" ? readNewFormDraft() : null;
+  const re = draft ? {} : spawnRecall();
   if (re.role && !f.role.disabled && !f.role.value) {
     ensureOption(f.role, re.role);
     f.role.value = re.role;
@@ -35917,9 +35917,20 @@ function applySessionModalRecall(f) {
   // already off "no worktree" is an answer somebody gave on this page, the
   // same reason the two rows above are left alone once filled. Parked, not
   // written — syncNewWorktree is what knows whether the row can take it.
-  pendingWorktreeMode =
-    (re.worktree_mode && f.worktree_mode && !f.worktree_mode.value)
-      ? re.worktree_mode : "";
+  if (draft) {
+    // The draft's mode is parked the same way, and a mode the reload's
+    // restore already parked is kept: on a #/new reload the worktree list
+    // has not arrived yet, so the restore could only park it, and clearing
+    // it here left the row on "no worktree" (claunch-9em4k review).
+    if (!pendingWorktreeMode && typeof draft.worktree_mode === "string" &&
+        f.worktree_mode && f.worktree_mode.value !== draft.worktree_mode) {
+      pendingWorktreeMode = draft.worktree_mode;
+    }
+  } else {
+    pendingWorktreeMode =
+      (re.worktree_mode && f.worktree_mode && !f.worktree_mode.value)
+        ? re.worktree_mode : "";
+  }
   if (pendingWorktreeMode) syncNewWorktree();
   // The Model row's own recall, keyed by the parent's profile rather than
   // held in the record above. A fresh opening asks it again even when the
