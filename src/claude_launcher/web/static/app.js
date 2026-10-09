@@ -12643,7 +12643,7 @@ if ($("term-pause")) $("term-pause").addEventListener("click", pauseCurrentSessi
    does the same on its own after `hold_idle_minutes` of quiet. */
 async function holdSession(name) {
   if (!name) return;
-  const btn = name === currentName ? $("term-hold") : null;
+  const btn = name === currentName ? $("term-idle-hold") : null;
   if (btn) btn.disabled = true;
   try {
     const resp = await api(
@@ -12666,7 +12666,7 @@ async function holdSession(name) {
   }
 }
 
-if ($("term-hold")) $("term-hold").addEventListener("click", () => holdSession(currentName));
+if ($("term-idle-hold")) $("term-idle-hold").addEventListener("click", () => holdSession(currentName));
 
 /* Archive is available on any record, and on a live one it is also the
    ending: the route terminates the program and writes the archive time in
@@ -13268,7 +13268,7 @@ function setStatusBadge(status) {
   // left for it to change.
   $("term-kill").classList.toggle("hidden", exited && !paused && !held);
   if ($("term-pause")) $("term-pause").classList.toggle("hidden", exited);
-  if ($("term-hold")) $("term-hold").classList.toggle("hidden", exited);
+  if ($("term-idle-hold")) $("term-idle-hold").classList.toggle("hidden", exited);
   $("term-archive").classList.toggle("hidden", archived);
   if (typeof syncSessionPinUi === "function") syncSessionPinUi();
   syncSessionKillControls();
