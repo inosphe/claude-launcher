@@ -421,6 +421,7 @@ CHECKS = [
         "snapshot_check.js",
         "notice_check.js",
         "restartgate_check.js",
+        "noticehistory_check.js",
         "termcache_check.js",
         "gpurender_check.js",
         "theme_check.js",

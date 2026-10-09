@@ -302,18 +302,20 @@ function pending(rec) {
   })();
 }
 
-/* --- Ignore closes the card and answers nothing -------------------------- */
+/* --- Hide closes the card and answers nothing ---------------------------- */
+/* (Named Ignore until the notification history, claunch-l978l: the card is
+   put away into the bell's panel, not ignored.) */
 {
   const w = build();
   w.gate.recs = [pending(), pending({ id: "g2", target_session: "w2" })];
   (async () => {
     await w.api.refreshGotoGate();
-    const ignore = w.buttons().find((b) => b.textContent === "Ignore");
+    const ignore = w.buttons().find((b) => b.textContent === "Hide");
     check("the card offers a third press that answers nothing",
           ignore !== undefined, w.buttons().map((b) => b.textContent));
 
     ignore.click();
-    check("Ignore takes its own card down", w.strip().length === 1, w.said());
+    check("Hide takes its own card down", w.strip().length === 1, w.said());
     check("and leaves the other request's card alone", /w2/.test(w.said()),
           w.said());
     check("nothing was posted for it",
