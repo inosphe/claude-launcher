@@ -1877,13 +1877,28 @@ let sessionOriginFilter = (() => {
 })();
 
 /* The rows (sessionGroupRows) without the side the filter leaves out.
-   Headings stay, so every mesh keeps its tab while its count drops to the
-   rows still shown, and the reader can switch to a tab that holds none of
-   them and back. */
+   Top-level headings stay, so every mesh keeps its tab while its count
+   drops to the rows still shown, and the reader can switch to a tab that
+   holds none of them and back. A nested heading the filter emptied goes
+   with its rows: under a nested grouping a remote row is filed under its
+   own `@<machine>` heading (shadowGroupValue), which `local` would leave
+   standing with nothing under it -- and `remote` every local one. */
 function filterSessionOrigin(rows, origin) {
-  if (origin === "local") return rows.filter((r) => r.type !== "shadow");
-  if (origin === "remote") return rows.filter((r) => r.type !== "session");
-  return rows;
+  if (origin !== "local" && origin !== "remote") return rows;
+  const drop = origin === "local" ? "shadow" : "session";
+  const kept = rows.filter((r) => r.type !== drop);
+  return kept.filter((row, i) => {
+    if (row.type !== "group" || !row.level) return true;
+    for (let j = i + 1; j < kept.length; j++) {
+      const next = kept[j];
+      if (next.type === "group") {
+        if (next.level <= row.level) return false;
+      } else {
+        return true;
+      }
+    }
+    return false;
+  });
 }
 
 function setSessionOriginFilter(origin, remember = true) {

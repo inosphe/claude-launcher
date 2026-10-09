@@ -18,7 +18,8 @@
    - pressing the header row scrolls the list to its top;
    - a mesh header carries a both | local | remote pick (claunch-no9dy):
      local drops the remote-shadow rows, remote drops this daemon's rows,
-     headings stay so every tab survives; the pick is remembered per
+     tab headings stay so every tab survives and a nested heading the pick
+     emptied goes; the pick is remembered per
      browser, redraws from the records in hand and is in the signature;
      a workspace header has no such pick;
    - the fold, its caret and the jump button are gone from the page. */
@@ -294,6 +295,25 @@ check("...so every mesh keeps its tab, counted by what is shown",
       [remoteSplit.tabs.map((t) => t.value),
        remoteSplit.tabs.map((t) => t.rows.length)],
       [["(no mesh)", "m1", "m2"], [0, 0, 1]]);
+const NESTED = [
+  { type: "group", group: "mesh", value: "m1", level: 0 },
+  { type: "group", group: "workspace", value: "F:/a", level: 1 },
+  session("s1"),
+  { type: "group", group: "workspace", value: "F:/b", level: 1 },
+  session("s2"),
+  { type: "group", group: "workspace", value: "@x", level: 1 },
+  shadow("r1"),
+  { type: "group", group: "mesh", value: "m2", level: 0 },
+  { type: "group", group: "workspace", value: "@x", level: 1 },
+  shadow("r2"),
+];
+check("nested, local drops the emptied @machine heading and keeps every tab",
+      ctx.byOrigin(NESTED, "local").map(rowName),
+      ["m1", "F:/a", "s1", "F:/b", "s2", "m2"]);
+check("nested, remote drops the emptied local workspace headings",
+      ctx.byOrigin(NESTED, "remote").map(rowName),
+      ["m1", "@x", "r1", "m2", "@x", "r2"]);
+check("nested, both keeps every row", ctx.byOrigin(NESTED, "both"), NESTED);
 const octx = load({});
 octx.render("mesh", split.tabs, "m2");
 const opts = () => head.querySelectorAll(".session-origin-option");
