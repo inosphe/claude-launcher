@@ -374,6 +374,42 @@ def node_key(node: ir.Node) -> str:
     return node.label or node.id
 
 
+def shown_label(chart: ir.Chart, node: ir.Node) -> Optional[str]:
+    """The label a reader is shown for ``node`` (status, briefs, asks).
+
+    A node inlined from a ``call`` keeps its own name as its label -- the
+    procedure reads its results under it (:func:`node_key`) -- so a chart
+    that calls one procedure from several sites has several nodes under one
+    label, and every one of them read the same: improv-worker-v2's four
+    ask-user sites all showed ``ask-pose`` (claunch-tm5ki). Such a label is
+    shown with the call site's own shown label in front
+    (``end-decision/ask-pose``). When every site on the path has an id that
+    is also the node's id, so it resolves to that node and no other
+    (:meth:`ir.Chart.by_label` matches ids). A label no other node shares is
+    shown as it is, and so is one whose site has no id -- a generated path
+    (``body.0``) tells a reader nothing.
+    """
+    if not node.label:
+        return None
+    if sum(1 for n in chart.nodes.values() if n.label == node.label) < 2:
+        return node.label
+    site_id, sep, _ = node.id.rpartition("/")
+    site = chart.nodes.get(site_id) if sep else None
+    head = _site_label(chart, site) if site is not None else None
+    return f"{head}/{node.label}" if head else node.label
+
+
+def _site_label(chart: ir.Chart, site: ir.Node) -> Optional[str]:
+    """A call site's part of a shown label: its own id path, outer sites
+    first, skipping the sites that have no author id."""
+    if not site.label:
+        return None
+    outer_id, sep, _ = site.id.rpartition("/")
+    outer = chart.nodes.get(outer_id) if sep else None
+    head = _site_label(chart, outer) if outer is not None else None
+    return f"{head}/{site.label}" if head else site.label
+
+
 # ---------------------------------------------------------------------------
 # expressions, values, rendering
 
@@ -636,7 +672,7 @@ def _visit_limit(r: Run, iid: str, node: ir.Node) -> None:
     inst["frame"]["visit_limit"] = True
     visits = int(r.state["visits"].get(key) or 0)
     approval = {"kind": HOLD_VISIT, "instance": iid, "node": node.id,
-                "label": node.label or None, "visits": visits, "max": _max_visits(r, key)}
+                "label": shown_label(r.chart, node), "visits": visits, "max": _max_visits(r, key)}
     r.state.setdefault("approvals", []).append(approval)
     r.emit("waiting", node=node.id, instance=iid, kind=HOLD_VISIT, visits=visits,
            max=approval["max"])
@@ -866,7 +902,7 @@ def _loop_limit(r: Run, iid: str) -> None:
     r.inst[iid]["await"] = AW_LIMIT
     approval = {
         "kind": "loop_limit", "instance": iid, "node": node.id,
-        "label": node.label or None, "iterations": frame.get("iter"),
+        "label": shown_label(r.chart, node), "iterations": frame.get("iter"),
         "max": _loop_max(r, iid), "mode": node.get("mode"),
     }
     r.state.setdefault("approvals", []).append(approval)
@@ -1657,7 +1693,7 @@ def _delegate(r: Run, iid: str) -> bool:
     dels = r.state.setdefault("delegations", {})
     did = f"d{len(dels) + 1}"
     rec: Dict[str, Any] = {
-        "id": did, "instance": iid, "node": node.id, "label": node.label or None,
+        "id": did, "instance": iid, "node": node.id, "label": shown_label(r.chart, node),
         "executor": executor, "status": "pending" if executor == ir.EXEC_SUBAGENT else "queued",
         "route": plan.to_dict(), "receipt": None, "started": store_mod.utcnow(),
         "started_at": r.now, "finished": None, "attempts": 0, "errors": [],
@@ -1910,7 +1946,7 @@ def brief(r: Run, did: str) -> Dict[str, Any]:
     rules = [{"id": rid, "text": (r.chart.rules.get(rid) or {}).get("text")} for rid in rule_ids]
     receipt = str(r.store.receipt_path(did))
     out = {
-        "delegation": did, "node": node.id, "label": node.label or None,
+        "delegation": did, "node": node.id, "label": shown_label(r.chart, node),
         "type": node.type, "executor": rec["executor"], "status": rec["status"],
         "with": env.get("params") if node.type == ir.T_SCOPE else None,
         "tasks": tasks, "returns": rec.get("returns") or returns_of(node),
@@ -2726,7 +2762,7 @@ def claim_restarts(*, platform: str, boot: str, cwd: Optional[str] = None,
                 continue
             frame = inst["frame"]
             rec = frame.get("restart")
-            item = {**base, "instance": iid, "node": node.id, "label": node.label or node.id}
+            item = {**base, "instance": iid, "node": node.id, "label": shown_label(r.chart, node)}
             if rec:
                 if rec.get("status") == RESTART_RUNNING and rec.get("boot") != boot:
                     rec.update(status=RESTART_INTERRUPTED, completed_at=store_mod.utcnow())
@@ -2785,7 +2821,7 @@ def complete_restart(instance: str, token: str, exit_code: Optional[int], output
         r.emit("restart_completed", node=node.id, instance=instance, exit_code=exit_code,
                output=tail)
         return {"run": r.state.get("run_id"), "workflow": r.state.get("workflow"),
-                "instance": instance, "node": node.id, "label": node.label or node.id,
+                "instance": instance, "node": node.id, "label": shown_label(r.chart, node),
                 "exit_code": exit_code, "status": rec["status"],
                 "driver": driver_of(r.state) or None}
     return _mutate(cwd, scope, now, op)
@@ -4455,7 +4491,7 @@ def describe(r: Run) -> Dict[str, Any]:
         env = r.env(iid)
         if aw == AW_TASK:
             tasks.append({
-                "instance": iid, "node": node.id, "label": node.label or None,
+                "instance": iid, "node": node.id, "label": shown_label(r.chart, node),
                 "title": node.get("title"), "prompt": render(node.get("prompt"), env),
                 "done_when": node.get("done_when"), "verify": node.get("verify"),
                 "returns": returns_of(node), "effects": node.get("effects") or [],
@@ -4470,7 +4506,7 @@ def describe(r: Run) -> Dict[str, Any]:
                 tasks[-1]["restart"] = _restart_view(inst["frame"].get("restart"))
         elif aw == AW_VERIFY:
             v = inst["frame"].get("verify") or {}
-            verifying.append({"instance": iid, "node": node.id, "label": node.label or None,
+            verifying.append({"instance": iid, "node": node.id, "label": shown_label(r.chart, node),
                               "verify": node.get("verify"), "started_at": v.get("started_at"),
                               "timeout": v.get("timeout"), "passed": bool(v.get("passed"))})
         elif aw == AW_CHOOSE:
@@ -4488,7 +4524,7 @@ def describe(r: Run) -> Dict[str, Any]:
                         entry["window_opens_at"] = _iso(opens)
                 (avail if ok else unavail).append(entry if ok else {**entry, "when": opt.get("guard")})
             choices.append({
-                "instance": iid, "node": node.id, "label": node.label or None,
+                "instance": iid, "node": node.id, "label": shown_label(r.chart, node),
                 "prompt": render(node.get("prompt"), env),
                 "chooser": node.get("chooser") or ir.CHOOSER_AGENT,
                 "require_reason": bool(node.get("require_reason")),
@@ -4497,7 +4533,7 @@ def describe(r: Run) -> Dict[str, Any]:
             held = inst["frame"].get("held")
             if held:
                 choices[-1]["held"] = {**held, "opens_at": _iso(held.get("opens_at"))}
-                windows.append({"instance": iid, "node": node.id, "label": node.label or None,
+                windows.append({"instance": iid, "node": node.id, "label": shown_label(r.chart, node),
                                 "option": held.get("option"),
                                 "opens_at": _iso(held.get("opens_at"))})
         elif aw == AW_WAIT:
@@ -4523,11 +4559,11 @@ def describe(r: Run) -> Dict[str, Any]:
                 asks.append(_describe_ask(r, iid, node, rec, env))
         elif aw == AW_LIMIT and inst["frame"].get("visit_limit"):
             key = node_key(node)
-            visit_limits.append({"instance": iid, "node": node.id, "label": node.label or None,
+            visit_limits.append({"instance": iid, "node": node.id, "label": shown_label(r.chart, node),
                                  "visits": (s.get("visits") or {}).get(key),
                                  "max": _max_visits(r, key)})
         elif aw == AW_LIMIT:
-            limits.append({"instance": iid, "node": node.id, "label": node.label or None,
+            limits.append({"instance": iid, "node": node.id, "label": shown_label(r.chart, node),
                            "iterations": inst["frame"].get("iter"), "max": _loop_max(r, iid)})
         if node.type == ir.T_GROUP:
             frame = inst["frame"]
@@ -4854,7 +4890,7 @@ def _open_ask(r: Run, iid: str, node: ir.Node) -> None:
         spec["options"], spec["from"] = brief["options"], brief["from"]
     aid = f"ask2-{secrets.token_hex(4)}"
     rec: Dict[str, Any] = {
-        "id": aid, "instance": iid, "node": node.id, "label": node.label or None,
+        "id": aid, "instance": iid, "node": node.id, "label": shown_label(r.chart, node),
         "kind": "decision" if spec["options"] else "approval",
         "prompt": render(spec["prompt"], r.env(iid)),
         "from": spec["from"], "otherwise": spec["otherwise"],
@@ -4878,7 +4914,7 @@ def _open_ask(r: Run, iid: str, node: ir.Node) -> None:
     r.inst[iid]["await"] = AW_APPROVAL
     r.inst[iid]["frame"]["ask"] = aid
     r.state.setdefault("approvals", []).append({
-        "kind": "ask", "instance": iid, "node": node.id, "label": node.label or None,
+        "kind": "ask", "instance": iid, "node": node.id, "label": shown_label(r.chart, node),
         "ask": aid, "resolution": rec["resolution"],
     })
     r.emit("waiting", node=node.id, instance=iid, kind="ask", ask=aid, ask_kind=rec["kind"],
@@ -5141,7 +5177,7 @@ def _ask_how(iid: str, rec: Dict[str, Any]) -> str:
 def _describe_ask(r: Run, iid: str, node: ir.Node, rec: Dict[str, Any],
                   env: Dict[str, Any]) -> Dict[str, Any]:
     return {
-        "instance": iid, "node": node.id, "label": node.label or None,
+        "instance": iid, "node": node.id, "label": shown_label(r.chart, node),
         "title": node.get("title"), "ask": rec["id"], "kind": rec.get("kind"),
         "prompt": rec.get("prompt"), "task_prompt": render(node.get("prompt"), env),
         "options": [{"name": o["name"], "description": o.get("description") or ""}
