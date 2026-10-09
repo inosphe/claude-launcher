@@ -471,6 +471,7 @@ CHECKS = [
         "relaysettings_check.js",
         "profilesettings_check.js",
         "settingsworkspaces_check.js",
+        "rolewf_settings_check.js",
         "workspacesync_check.js",
         "workspacebadges_check.js",
         "wsrefreshall_check.js",
