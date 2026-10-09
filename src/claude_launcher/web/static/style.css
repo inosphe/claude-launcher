@@ -5495,6 +5495,7 @@ body.embed #main { width: 100%; }
    dismiss: the notice's default pointer/cursor belongs to toasts that can
    just be swatted away, and a stray click on a decision is a restart. */
 .notice.gate { cursor: default; }
+.gate-reason { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 4px; }
 .gate-actions { display: flex; gap: 8px; margin-top: 8px; }
 .gate-actions .wf-btn { margin: 0; padding: 3px 10px; font-size: 11px; }
 /* A session named on a gate card opens that session. Marked as a press the

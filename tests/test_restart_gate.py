@@ -534,8 +534,6 @@ def test_extend_adds_to_the_deadline_not_to_now(home):
     ``now + EXTENSION`` would do, and it is why the arithmetic is written
     against the deadline rather than against the moment of the press.
 
-    Opened well inside ``TOTAL_BUDGET``: the clamp is a different rule, and
-    ``test_extend_stops_at_the_budget`` is where it belongs.
     """
     from datetime import datetime
 
@@ -566,21 +564,20 @@ def test_extend_adds_to_the_deadline_not_to_now(home):
     asyncio.run(run())
 
 
-def test_extend_stops_at_the_budget(home):
-    """Two presses and no more, and the refusal says so.
+def test_extend_has_no_limit(home):
+    """Every press is honoured, however many came before (claunch-mm8zv).
 
-    The ceiling is not politeness: the shell running ``claunch daemon
-    restart`` on the workflow's behalf is killed at the step's
-    ``restart.timeout``, and a gate held past that restarts a daemon whose
-    run has already journaled a timeout. A press that changes nothing must
-    come back as a refusal rather than as a press that worked.
-
-    Opened at the stock 300s, where both limits are reachable: the second
-    press is the one TOTAL_BUDGET clamps, the third is the one MAX_EXTENSIONS
-    refuses. A wider gate spends the same budget in fewer presses, which is
-    the point of measuring it from the filing.
+    The gate used to refuse the third press (two presses, 870 seconds in all)
+    so that it ended inside cflow's ``restart.timeout`` ceiling. The
+    RestartClock now keeps the waiting shell alive while the gate holds its
+    request (``test_cflow_restart``), so the person at the page decides how
+    long the restart waits.
     """
+    from datetime import datetime
+
     from claude_launcher.daemon import restart_gate
+
+    presses = 10
 
     async def run():
         mgr = _manager()
@@ -590,20 +587,21 @@ def test_extend_stops_at_the_budget(home):
         client = TestClient(TestServer(app))
         await client.start_server()
         try:
-            await client.post(
+            resp = await client.post(
                 "/api/daemon/restart-request", json={"session": "s1"}, headers=AUTH
             )
-            for press in range(restart_gate.MAX_EXTENSIONS):
+            filed = datetime.fromisoformat((await resp.json())["request"]["deadline"])
+            for press in range(presses):
                 resp = await client.post(
                     "/api/daemon/restart-request/extend", headers=AUTH
                 )
                 assert resp.status == 200, f"press {press + 1} was refused"
-            resp = await client.post("/api/daemon/restart-request/extend", headers=AUTH)
-            assert resp.status == 409
-            assert "extended" in (await resp.json())["error"].lower()
-            assert app["restart_gate"].get()["status"] == "pending", (
-                "a refused extension must not settle the request"
-            )
+            held = app["restart_gate"].get()
+            assert held["status"] == "pending"
+            assert held["extensions"] == presses
+            assert "max_extensions" not in held
+            grew = (datetime.fromisoformat(held["deadline"]) - filed).total_seconds()
+            assert grew == presses * restart_gate.EXTENSION
         finally:
             await mgr.shutdown_all()
             await client.close()
@@ -611,23 +609,17 @@ def test_extend_stops_at_the_budget(home):
     asyncio.run(run())
 
 
-def test_extend_never_moves_a_deadline_backwards(home):
-    """A gate configured wider than the budget has nothing left to add.
+def test_a_gate_opened_wide_still_extends(home):
+    """A ``restart_approval_timeout`` past the old 870-second ceiling used to
+    open a gate that could not be extended at all; now it extends like any
+    other."""
+    from datetime import datetime
 
-    ``restart_approval_timeout`` is a machine setting and may be raised past
-    ``TOTAL_BUDGET``; the request then opens already beyond the ceiling, and
-    clamping to it would hand back an earlier deadline than the one on the
-    record. A press for more time must never take time away -- it is refused
-    instead, and the deadline stands.
-    """
     from claude_launcher.daemon import restart_gate
 
     async def run():
         mgr = _manager()
-        app = build_app(
-            mgr, "sekrit", started_at=time.monotonic(),
-            gate_timeout=restart_gate.TOTAL_BUDGET + 600,
-        )
+        app = build_app(mgr, "sekrit", started_at=time.monotonic(), gate_timeout=1500)
         from aiohttp.test_utils import TestClient, TestServer
 
         client = TestClient(TestServer(app))
@@ -638,11 +630,10 @@ def test_extend_never_moves_a_deadline_backwards(home):
             )
             filed = (await resp.json())["request"]["deadline"]
             resp = await client.post("/api/daemon/restart-request/extend", headers=AUTH)
-            assert resp.status == 409
-            held = app["restart_gate"].get()
-            assert held["deadline"] == filed, "the refused press moved the deadline"
-            assert held["extensions"] == 0
-            assert held["status"] == "pending"
+            assert resp.status == 200
+            moved = (await resp.json())["request"]["deadline"]
+            grew = (datetime.fromisoformat(moved) - datetime.fromisoformat(filed)).total_seconds()
+            assert grew == restart_gate.EXTENSION
         finally:
             await mgr.shutdown_all()
             await client.close()
@@ -668,48 +659,139 @@ def test_extend_with_nothing_pending_is_a_conflict(home):
     asyncio.run(run())
 
 
-def test_the_budget_stays_inside_what_a_workflow_step_may_wait(home):
-    """The gate's three constants are one decision, shared with cflow.
-
-    ``GATE_TIMEOUT + EXTENSION * MAX_EXTENSIONS`` is what a gate would hold a
-    restart for if ``TOTAL_BUDGET`` did not clamp it, and 900 is the largest
-    ``restart.timeout`` a workflow step may declare. The budget has to sit
-    below that ceiling: past it the waiting shell dies before the gate it is
-    waiting on, and the run journals a timeout for a restart that then
-    happens anyway. Raising any one of these alone must make this red.
-    """
-    from claude_launcher.cflow import model
+def test_holding_names_the_session_whose_request_is_pending(home):
+    """``holding`` is what the RestartClock asks before it kills a restart
+    shell at the step's timeout: True only while THIS daemon's gate holds a
+    pending request from that session."""
     from claude_launcher.daemon import restart_gate
 
-    unclamped = (
-        restart_gate.GATE_TIMEOUT
-        + restart_gate.EXTENSION * restart_gate.MAX_EXTENSIONS
-    )
-    assert restart_gate.TOTAL_BUDGET <= unclamped
-    assert restart_gate.TOTAL_BUDGET < 900, (
-        "the budget must leave room inside cflow's restart.timeout ceiling"
-    )
-    flow = model.parse(
-        """
-name: f
-steps:
-  s:
-    instructions: x
-    checklist:
-      prompt: p
-      then: end
-      items:
-        - id: i
-          describe: d
-          check: 'true'
-    restart:
-      linux: 'true'
-      timeout: 900
-"""
-    )
-    assert flow.steps["s"].restart.timeout == 900, (
-        "900 must remain a legal restart.timeout, or the budget has no room"
-    )
+    async def run():
+        mgr = _manager()
+        app = build_app(mgr, "sekrit", started_at=time.monotonic(), gate_timeout=600)
+        gate = app["restart_gate"]
+        try:
+            assert not restart_gate.holding("s1"), "nothing filed yet"
+            gate.submit(session="s1")
+            assert restart_gate.holding("s1")
+            assert not restart_gate.holding("s2"), "another session's request"
+            assert not restart_gate.holding(""), "a nameless run holds nothing"
+            gate.extend()
+            assert restart_gate.holding("s1"), "an extension keeps it held"
+            gate.reject()
+            assert not restart_gate.holding("s1"), "a settled request holds nothing"
+        finally:
+            await gate.cancel()
+            await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# the reason: why the asker wants the restart, shown on the card
+# --------------------------------------------------------------------------- #
+def test_the_reason_travels_with_the_request(home):
+    async def run():
+        mgr = _manager()
+        app = build_app(mgr, "sekrit", started_at=time.monotonic(), gate_timeout=600)
+        from aiohttp.test_utils import TestClient, TestServer
+
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            reason = "restarting: older code\ncommits the live daemon does not serve yet (1):"
+            resp = await client.post(
+                "/api/daemon/restart-request",
+                json={"session": "s1", "reason": f"  {reason}  "},
+                headers=AUTH,
+            )
+            assert resp.status == 200
+            assert (await resp.json())["request"]["reason"] == reason
+            resp = await client.get("/api/daemon/restart-request", headers=AUTH)
+            assert (await resp.json())["request"]["reason"] == reason
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_a_request_without_a_reason_is_still_filed(home):
+    """An older CLI does not send the field; its request must not fail."""
+    async def run():
+        mgr = _manager()
+        app = build_app(mgr, "sekrit", started_at=time.monotonic(), gate_timeout=600)
+        from aiohttp.test_utils import TestClient, TestServer
+
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            resp = await client.post(
+                "/api/daemon/restart-request", json={"session": "s1"}, headers=AUTH
+            )
+            assert resp.status == 200
+            assert (await resp.json())["request"]["reason"] == ""
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_a_reason_that_is_not_text_is_refused(home):
+    async def run():
+        mgr = _manager()
+        app = build_app(mgr, "sekrit", started_at=time.monotonic(), gate_timeout=600)
+        from aiohttp.test_utils import TestClient, TestServer
+
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            resp = await client.post(
+                "/api/daemon/restart-request",
+                json={"session": "s1", "reason": ["x"]},
+                headers=AUTH,
+            )
+            assert resp.status == 400
+            assert app["restart_gate"].get() is None, "a refused ask opens nothing"
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_a_long_reason_is_cut_not_refused():
+    from claude_launcher.daemon import restart_gate
+
+    kept = restart_gate.clean_reason("x" * (restart_gate.REASON_MAX + 50))
+    assert kept.startswith("x" * restart_gate.REASON_MAX)
+    assert kept.endswith("(truncated)")
+    assert len(kept) < restart_gate.REASON_MAX + 30
+
+
+def test_the_cli_sends_the_reason_and_prints_it(home, monkeypatch, capsys):
+    from claude_launcher import cli_sessions
+
+    fake = _FakeDaemon(record={"id": "g1", "session": "s9", "deadline": _future()})
+    fake.client.record["status"] = "approved"
+    monkeypatch.setattr(cli_sessions, "daemon_client", fake)
+    monkeypatch.setattr(cli_sessions.time, "sleep", lambda s: None)
+    monkeypatch.setenv("CLAUNCH_SESSION", "s9")
+
+    args = _daemon_args(reason="  3 merges are not served  ")
+    assert cli_sessions._cmd_daemon(args) == 0
+    assert fake.client.posted == [(
+        "/api/daemon/restart-request",
+        {"session": "s9", "reason": "3 merges are not served"},
+    )]
+    assert "reason: 3 merges are not served" in capsys.readouterr().err
+
+
+def test_the_reason_flag_parses():
+    from claude_launcher import cli
+
+    args = cli.build_parser().parse_args(["daemon", "restart", "--reason", "why"])
+    assert args.reason == "why"
 
 
 def test_the_cli_waits_out_a_deadline_the_operator_extended(home, monkeypatch, capsys):
@@ -727,7 +809,7 @@ def test_the_cli_waits_out_a_deadline_the_operator_extended(home, monkeypatch, c
     from claude_launcher import cli_sessions
 
     now = datetime.now(timezone.utc)
-    base = {"id": "g9", "session": "s9", "max_extensions": 2}
+    base = {"id": "g9", "session": "s9"}
     fake = _FakeDaemon(record={
         **base,
         "deadline": (now + timedelta(seconds=0.3)).isoformat(),

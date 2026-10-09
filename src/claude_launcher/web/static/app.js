@@ -41495,7 +41495,9 @@ function gateSessionLink(name) {
    the card drawn with a live countdown, a settled or gone request takes
    it down. Approving is the daemon's own restart door, so the existing
    restarting announcement (the daemon card's NOTICE_LINK) labels the
-   outage that follows; rejecting just closes the card. */
+   outage that follows; rejecting just closes the card. The asker's reason
+   (`claunch daemon restart --reason`) is printed in full under the title:
+   it is the whole basis for the click. */
 const NOTICE_GATE = "restart-gate";
 
 function gateCountdown(deadlineIso) {
@@ -41538,6 +41540,7 @@ async function refreshRestartGate() {
     const node = el("div", "notice warn gate");
     const title = el("div", "notice-title", "daemon restart requested");
     const sub = el("div", "notice-sub");
+    const reasonLine = el("div", "notice-sub gate-reason");
     const actions = el("div", "gate-actions");
     const approve = el("button", "wf-btn approve", "Approve");
     const reject = el("button", "wf-btn clear", "Reject");
@@ -41549,8 +41552,8 @@ async function refreshRestartGate() {
     const extend = el("button", "wf-btn gate-extend", "+5 min");
     extend.title =
       "not a decision: the deadline moves out and the request stays open, " +
-      "so the countdown stops answering for you while you read. Twice at " +
-      "most — the waiting session's own shell cannot be held longer than that";
+      "so the countdown stops answering for you while you read. It can be " +
+      "pressed as many times as you need";
     approve.addEventListener("click", async (ev) => {
       ev.stopPropagation();
       if (await gatePost("/api/daemon/restart-request/approve", approve)) {
@@ -41581,6 +41584,7 @@ async function refreshRestartGate() {
     actions.appendChild(reject);
     node.appendChild(title);
     node.appendChild(sub);
+    node.appendChild(reasonLine);
     node.appendChild(actions);
     host.appendChild(node);
     const entry = { node, timer: null };
@@ -41588,7 +41592,6 @@ async function refreshRestartGate() {
     card = entry;   // the freshly built card carries this poll's countdown too
   }
   const used = rec.extensions || 0;
-  const max = rec.max_extensions || 0;
   const sub = card.node.querySelector(".notice-sub");
   if (sub) {
     sub.textContent =
@@ -41597,15 +41600,21 @@ async function refreshRestartGate() {
         ? ` asked at ${new Date(rec.requested_at).toLocaleTimeString()}`
         : "") +
       ` — auto-approves in ${gateCountdown(rec.deadline)}` +
-      (used ? ` (extended ${used}/${max})` : "");
+      (used ? ` (extended ${used}×)` : "");
   }
-  // Repainted every poll, not only on the click: the budget is the gate's
-  // and another page may have spent it.
+  const reasonLine = card.node.querySelector(".gate-reason");
+  if (reasonLine) {
+    const reason = (rec.reason || "").trim();
+    reasonLine.textContent = reason
+      ? `reason: ${reason}`
+      : "reason: (the request gave none)";
+  }
+  // Extend has no limit (claunch-mm8zv); a click in flight disables it until
+  // the post returns, and the repaint here re-enables it.
   const extendBtn = card.node.querySelector(".gate-extend");
   if (extendBtn) {
-    const spent = max > 0 && used >= max;
-    extendBtn.disabled = spent;
-    extendBtn.textContent = spent ? "extended" : "+5 min";
+    extendBtn.disabled = false;
+    extendBtn.textContent = "+5 min";
   }
 }
 
