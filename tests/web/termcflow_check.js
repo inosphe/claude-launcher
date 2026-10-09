@@ -323,6 +323,38 @@ const RUN = {
           "after"]]), ctx.actions());
   ctx.reset();
 
+  /* a brief ask's reframe always asks for the reason (claunch-omph3): the
+     engine takes a person's answer without one, and reframe re-asks from it.
+     The other options still need none when require_reason is off. */
+  ctx.setRail({ s16: { ...ROW, status: "waiting_approval", gated: true,
+    owed: ["ask: scope"], answers: [
+    { kind: "ask", instance: "scope@4", label: "scope", prompt: "which scope?",
+      require_reason: false,
+      options: [{ name: "narrow" }, { name: "reframe" }] }] } });
+  ctx.renderTermCflow();
+  bs = buttons(strip);
+  check("v2: a brief ask offers reframe", bs.map((b) => b.text).join() === "narrow,reframe",
+        bs.map((b) => b.text));
+  ctx.setPrompt("");
+  await bs[1].fire("click");
+  check("v2: reframe with an empty reason sends nothing", ctx.actions().length === 0,
+        ctx.actions());
+  check("v2: ...and the prompt says what the reason is for",
+        ctx.asked().some((q) => q.includes("reframe: none of the options fits")), ctx.asked());
+  ctx.setPrompt("both miss the migration");
+  await bs[1].fire("click");
+  check("v2: reframe sends its reason with the approve",
+        JSON.stringify(ctx.actions()) === JSON.stringify([["/api/cflow2/approve",
+          { cwd: "/repo", scope: "s16", node: "scope@4", decision: "reframe",
+            reason: "both miss the migration" }, "after"]]), ctx.actions());
+  ctx.reset();
+  ctx.setPrompt("");
+  await bs[0].fire("click");
+  check("v2: another option of the same ask still needs no reason",
+        ctx.actions().length === 1 && ctx.actions()[0][1].decision === "narrow"
+          && !ctx.asked().some((q) => q.includes("required")), [ctx.actions(), ctx.asked()]);
+  ctx.reset();
+
   /* a loop limit: allow one more / stop */
   ctx.setRail({ s16: { ...ROW, status: "waiting_approval", gated: true,
     owed: ["loop_limit: round"], answers: [

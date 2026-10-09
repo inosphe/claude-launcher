@@ -4748,8 +4748,9 @@ def _ask_choices(rec: Dict[str, Any]) -> List[Dict[str, Any]]:
     if rec.get("brief") is not None:
         return list(rec.get("options") or []) + [{
             "name": q_mod.REFRAME, "outcome": q_mod.REFRAME,
-            "description": "the options do not fit the problem -- say why in the reason; "
-                           "the question is framed again"}]
+            "description": "none of the options fits the problem -- say what they miss in "
+                           "the reason; the asker frames the question again from it and "
+                           "asks anew"}]
     if rec.get("options"):
         return list(rec["options"])
     return [{"name": ASK_APPROVE, "outcome": None, "description": "enter the task"},
