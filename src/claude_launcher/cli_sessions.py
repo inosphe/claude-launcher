@@ -2792,7 +2792,8 @@ def register(sub) -> None:
         help="a prompt pack to put into its opening (repeatable): the "
         "session's workspace's copy when installed (Settings > Install), "
         "else claunch's own. Packs the role or a subrole requires are added "
-        "without being named",
+        "without being named. An on-demand pack (retrospective) is refused: "
+        "it is sent later with 'claunch retro'",
     )
     p_new.add_argument(
         "--no-daemon-prompt", dest="no_daemon_prompt", action="store_true",
@@ -2937,7 +2938,8 @@ def register(sub) -> None:
         help="a prompt pack to put into its opening (repeatable): the "
         "session's workspace's copy when installed (Settings > Install), "
         "else claunch's own. Packs the role or a subrole requires are added "
-        "without being named",
+        "without being named. An on-demand pack (retrospective) is refused: "
+        "it is sent later with 'claunch retro'",
     )
     p_spawn.add_argument(
         "--no-daemon-prompt", dest="no_daemon_prompt", action="store_true",

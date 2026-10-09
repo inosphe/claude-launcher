@@ -400,7 +400,9 @@ TOOLS = [
                         "(Settings > Install), else claunch's own. Packs its "
                         "role or subroles require are added whether listed "
                         "or not; a listed pack that exists in neither place "
-                        "refuses the spawn"
+                        "refuses the spawn, and so does an on-demand pack "
+                        "(retrospective), which is sent later with "
+                        "'claunch retro', never in an opening"
                     ),
                 },
                 "no_daemon_prompt": {
