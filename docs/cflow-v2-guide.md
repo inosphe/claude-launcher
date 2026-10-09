@@ -478,7 +478,7 @@ profile)을 보여 준다.
 |---|---|
 | `select` 옵션 하나가 앞 스텝으로 되돌아감 | `loop` 또는 `retry` + `{continue: …}` |
 | `timer` 스텝으로 대기 후 다른 스텝으로 | `timeout: {do, seconds, else}` |
-| 재촉 스텝과 대기 스텝이 서로를 가리킴 | `retry: {do: await, between: nudge, every: 600, max: 25}` |
+| 재촉 스텝과 대기 스텝이 서로를 가리킴 | `loop: {while: "true", max: 25, do: {choose: {options: {nudge: {interval: 600, then: [재촉 작업]}, …}}}}` — 간격은 재촉 옵션에 건다. 루프의 `every`는 간격 동안 선택 전체를 닫아, 그사이 온 답(착지 등)을 고를 수 없다(claunch-jbk5w) |
 | 여러 스텝에서 `work`로 가는 간선 | `try: … catch: {rework: …}` |
 | `skip: true` + `editable` + 에이전트의 `set_state` | `cond: [{if: "$data.stack_open", then: …}]` |
 | 공통 블록 복사 | `fragments` + `${frag:이름}` |
