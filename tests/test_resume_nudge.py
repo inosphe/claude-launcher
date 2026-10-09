@@ -262,6 +262,41 @@ def test_a_fresh_manager_owes_nobody_a_nudge(home):
     assert mgr.resumed_busy == []
 
 
+def test_restore_keeps_the_idle_ones_with_their_last_output(home, tmp_path):
+    """claunch-ccoof: an idle session is carried forward with the stamp that
+    tells a finished agent from one waiting on a background command."""
+    cwd = str(tmp_path)
+    resting = _entry("resting", cwd=cwd)
+    resting["last_output_at"] = "2026-10-09T06:57:00+00:00"
+    _write_sessions_json([
+        _entry("worker", cwd=cwd, busy=True),
+        resting,
+        _entry("gone", cwd=cwd, running=False),
+    ])
+    mgr = _NoSpawnManager(idle_threshold=0.5, scrollback=100, restore_default=True)
+    mgr.restore_all()
+    assert mgr.resumed_busy == ["worker"]
+    assert mgr.resumed_idle == {"resting": "2026-10-09T06:57:00+00:00"}
+
+
+def test_recent_idle_keeps_only_what_wrote_shortly_before():
+    now = 1_000_000.0
+    from datetime import datetime, timezone
+
+    def ago(sec):
+        return datetime.fromtimestamp(now - sec, timezone.utc).isoformat()
+
+    idle = {
+        "cut-off": ago(600),
+        "edge": ago(resume.RECENT_OUTPUT),
+        "finished": ago(resume.RECENT_OUTPUT + 60),
+        "never": None,
+        "garbled": "yesterday",
+        "future": ago(-60),
+    }
+    assert sorted(resume.recent_idle(idle, now=now)) == ["cut-off", "edge"]
+
+
 # --------------------------------------------------------------------------- #
 # the guardrail: which cflow positions allow a nudge
 # --------------------------------------------------------------------------- #
@@ -304,6 +339,63 @@ def test_an_unreadable_run_is_not_an_answer(proj, monkeypatch):
     assert resume.gate(str(proj), "w1") is None
 
 
+def test_an_idle_session_needs_a_run_to_be_nudged(proj):
+    """For a recently-active idle session, "no run" is a stand-down: its
+    agent may simply have finished."""
+    assert resume.gate(str(proj), "w1", require_run=True) is False
+    cflow_engine.start("linear", cwd=str(proj), scope="w1")
+    assert resume.gate(str(proj), "w1", require_run=True) is True
+
+
+V2_TASK = """cflow: 2
+name: v2task
+nodes:
+  a: {title: Step A, prompt: do a}
+body: a
+"""
+
+V2_USER_CHOICE = """cflow: 2
+name: v2pick
+nodes:
+  a: {title: Step A, prompt: do a}
+  b: {title: Step B, prompt: do b}
+body:
+  choose:
+    prompt: which way?
+    chooser: user
+    options:
+      left: {then: a}
+      right: {then: b}
+"""
+
+
+def _start_v2(cwd, src, scope="w1"):
+    from claude_launcher.cflow2 import frontend, runtime
+    return runtime.start(frontend.compile_text(src), cwd=cwd, scope=scope, caps={})
+
+
+@pytest.mark.parametrize("require_run", [False, True])
+def test_a_v2_task_is_the_agents_to_move(proj, require_run):
+    _start_v2(str(proj), V2_TASK)
+    assert resume.gate(str(proj), "w1", require_run=require_run) is True
+
+
+@pytest.mark.parametrize("require_run", [False, True])
+def test_a_v2_users_choice_holds_the_nudge(proj, require_run):
+    """v1's status cannot see a v2 run; read alone it says "no run here"
+    and the parked session would be typed into."""
+    _start_v2(str(proj), V2_USER_CHOICE)
+    assert resume.gate(str(proj), "w1", require_run=require_run) is False
+
+
+def test_an_unreadable_v2_run_is_not_an_answer(proj, monkeypatch):
+    def _boom(*a, **kw):
+        raise RuntimeError("run store locked")
+
+    monkeypatch.setattr(resume.cflow2_runtime, "status", _boom)
+    assert resume.gate(str(proj), "w1") is None
+
+
 # --------------------------------------------------------------------------- #
 # the nudge itself
 # --------------------------------------------------------------------------- #
@@ -334,6 +426,48 @@ def test_a_parked_run_hears_nothing(home, tmp_path, monkeypatch, instant):
     assert session.delivered == []
     assert nudge.delivered == []
     assert nudge.pending == []  # settled, not left spinning
+
+
+def _recorded_gate(answer):
+    calls = []
+
+    def gate(cwd, scope, require_run=False):
+        calls.append((scope, require_run))
+        return answer
+    return gate, calls
+
+
+def test_a_recently_active_idle_session_hears_what_was_lost(
+        home, tmp_path, monkeypatch, instant):
+    gate, calls = _recorded_gate(True)
+    monkeypatch.setattr(resume, "gate", gate)
+    worker, waiter = _Session("w1", str(tmp_path)), _Session("w2", str(tmp_path))
+    nudge = resume.ResumeNudge(
+        _Manager({"w1": worker, "w2": waiter}), ["w1"], recent=["w2", "w1"],
+        poll=0.01, window=5.0,
+    )
+    asyncio.run(_drain(nudge))
+
+    assert sorted(nudge.delivered) == ["w1", "w2"]
+    assert sorted(calls) == [("w1", False), ("w2", True)]
+    assert "was idle" not in worker.delivered[0]   # busy wins over recent
+    assert len(waiter.delivered) == 1
+    assert "while this session was idle" in waiter.delivered[0]
+    assert "background" in waiter.delivered[0]
+
+
+def test_a_recently_active_idle_session_without_a_run_hears_nothing(
+        home, tmp_path, monkeypatch, instant):
+    gate, calls = _recorded_gate(False)
+    monkeypatch.setattr(resume, "gate", gate)
+    session = _Session("w2", str(tmp_path))
+    nudge = resume.ResumeNudge(
+        _Manager({"w2": session}), [], recent=["w2"], poll=0.01, window=5.0
+    )
+    asyncio.run(_drain(nudge))
+
+    assert calls == [("w2", True)]
+    assert session.delivered == [] and nudge.pending == []
 
 
 def test_an_unreadable_run_is_retried_not_dropped(home, tmp_path, monkeypatch, instant):

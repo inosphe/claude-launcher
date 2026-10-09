@@ -267,6 +267,45 @@ def test_queued_headless_is_dispatched_and_returns(tmp_path):
     assert clock.results[0]["result"] == "returned"
 
 
+def test_a_returned_headless_wakes_the_driver_once(tmp_path, monkeypatch):
+    """claunch-feve0: s931's round-report came back from a headless process
+    and the run opened an agent's choice that nobody told it about."""
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    d, launch = _fake_launch(tmp_path)
+    sess = FakeSession("own", str(tmp_path))
+    clock = _clock(FakeManager(sess), launch_for=lambda scope: launch)
+    clock.scan()
+    _start(tmp_path, HEADLESS, caps=JSON_CAPS)
+    # this pass dispatches and (not threaded) runs it to the end; the record
+    # was open when the pass read it, so the next pass sees it closed
+    assert clock.scan() == []
+    notices = clock.scan()
+    assert len(notices) == 1
+    cwd, name, text = notices[0]
+    assert name == "own" and "waiting on you: after" in text
+    assert cflow2_clock.WHY_DELEGATION in text
+    assert clock.scan() == []  # once per closing, not every pass
+
+
+def test_a_closed_subagent_delegation_is_not_announced(tmp_path, monkeypatch):
+    """The driver submits a subagent's result itself, so it is awake."""
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    _start(tmp_path, """
+        nodes:
+          t: {prompt: T, returns: {ok: {}}, executor: [subagent]}
+          after: {prompt: after}
+        body: [t, after]
+    """, caps={"subagent.spawn": True, "mcp.claunch": True})
+    clock = _clock(FakeManager(FakeSession("own", str(tmp_path))))
+    assert clock.scan(now=T0 + 1) == []
+    st = runtime.status(cwd=str(tmp_path), scope="own", tick=False)
+    did = st["delegations"][0]["id"]
+    runtime.delegate_submit(did, "ok", {}, cwd=str(tmp_path), scope="own", now=T0 + 2)
+    assert [t["label"] for t in runtime.status(cwd=str(tmp_path), scope="own",
+                                               tick=False)["tasks"]] == ["after"]
+    assert clock.scan(now=T0 + 3) == []
+
+
 def test_headless_threaded_respects_max(tmp_path):
     d, launch = _fake_launch(tmp_path)
     mgr = FakeManager(FakeSession("own", str(tmp_path)))
