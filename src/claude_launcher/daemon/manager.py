@@ -23,6 +23,9 @@ import re
 import shutil
 import sqlite3
 import time
+# Bound apart from the module: tests stand a stub in for `time` (monotonic
+# only), and the restore timings must not depend on what that stub carries.
+from time import perf_counter as _perf_counter
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -581,13 +584,13 @@ class SessionManager:
         harnesses that take one on their command line (see
         :func:`harness.takes_opening_argv`)."""
         clock = self._restore_clock if restoring and self._loading else None
-        t0 = time.perf_counter()
+        t0 = _perf_counter()
         prepared = self._prepare_launch(session, restoring=restoring, opening=opening)
-        t1 = time.perf_counter()
+        t1 = _perf_counter()
         session.start(*prepared[:3])
         if clock is not None:
             clock["prepare"] += t1 - t0
-            clock["spawn"] += time.perf_counter() - t1
+            clock["spawn"] += _perf_counter() - t1
         return self._launched(session, restoring, *prepared[2:])
 
     async def launch_async(
@@ -2455,7 +2458,7 @@ class SessionManager:
         # loop, drop it before the one steady-state persist at the end.
         self._loading = True
         self._restore_clock = {"prepare": 0.0, "spawn": 0.0}
-        started = time.perf_counter()
+        started = _perf_counter()
         try:
             # Said up front: the relaunches below run before the port is bound,
             # so this line is what the log shows for the seconds a CLI spends
@@ -2524,7 +2527,7 @@ class SessionManager:
                 self._retire(sdef, entry)
         finally:
             self._loading = False
-        persist_started = time.perf_counter()
+        persist_started = _perf_counter()
         self.persist()
         if relaunching:
             # The boot's longest stretch, broken into its parts, so a slow
@@ -2532,7 +2535,7 @@ class SessionManager:
             # "prepare" is building the command and replaying the previous
             # run's scrollback, "spawn" is the process and pseudo console.
             clock = self._restore_clock
-            now = time.perf_counter()
+            now = _perf_counter()
             log.info(
                 "restore took %.1fs for %d session(s): prepare/replay %.1fs, "
                 "spawn %.1fs, persist %.1fs, other %.1fs",
