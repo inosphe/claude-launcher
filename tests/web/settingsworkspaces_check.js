@@ -52,7 +52,7 @@ assert.deepEqual(parseHash("#/workspaces"), { page: "workspaces" });
 
 /* ---- which cards each section draws ------------------------------------ */
 const CARDS = [
-  "keyHelpCard", "scoreGoalSettingsCard", "railStaleCard", "modelChoicesCard",
+  "keyHelpCard", "scoreGoalSettingsCard", "roleWorkflowsCard", "railStaleCard", "modelChoicesCard",
   "llmSettingsCard", "faqCard", "promptPresetCard", "prompterSettingsCard",
   "statusCheckCard", "ragCard", "ghCard", "relaySettingsCard",
   "wsAddCard", "projectsCard", "beadsBoardsCard",
@@ -154,6 +154,7 @@ const REFRESHERS = [
   "refreshGhStatus", "refreshRelaySettings", "refreshBeadsBoards",
   "refreshProjects", "refreshProfileSettings", "refreshInstallOverview",
   "refreshVscode", "refreshWsGitSummary", "refreshWsUsage",
+  "refreshRoleWorkflowSettings",
 ];
 const octx = {
   wsSection: "", wsOpen: true,
@@ -184,5 +185,7 @@ octx.openSettings("");
 assert.equal(called.includes("refreshBeadsBoards"), false,
              "General no longer fetches the board listing it does not draw");
 assert.equal(called.includes("refreshLlmSettings"), true);
+assert.equal(called.includes("refreshRoleWorkflowSettings"), true,
+             "General fetches the Role workflows card's data");
 
 console.log("settingsworkspaces_check ok");

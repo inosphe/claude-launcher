@@ -833,6 +833,8 @@ def build_app(
     r.add_get("/api/sessions/{name}/reminder", h_session_reminder)
     r.add_get("/api/score-goal/defaults", h_score_goal_defaults)
     r.add_put("/api/score-goal/defaults", h_score_goal_defaults_set)
+    r.add_get("/api/role-workflows", h_role_workflows)
+    r.add_put("/api/role-workflows", h_role_workflows_set)
     r.add_get("/api/sessions/{name}/score-goal", h_session_score_goal)
     r.add_post("/api/sessions/{name}/reminder", h_session_reminder_set)
     r.add_post("/api/sessions/{name}/reminder/skip", h_session_reminder_skip)
@@ -4369,7 +4371,22 @@ async def h_cflow_workflows(request: web.Request) -> web.Response:
     # "(daemon cwd)" asks about the workflows it would really see.
     raw = request.query.get("cwd")
     cwd = cflow_state.resolve_cwd(raw)
-    return json_response({"workflows": await asyncio.to_thread(_startable_all, cwd)})
+    return json_response({
+        "workflows": await asyncio.to_thread(_startable_all, cwd),
+        # Settings' per-role auto-pick overrides, served with the list they
+        # pick from so the form and the CLI wizard apply them in one read.
+        "role_workflows": _role_workflows_or_none(),
+    })
+
+
+def _role_workflows_or_none() -> dict:
+    """The overrides, or none when the config file cannot be read: the list
+    is what the picker needs, and an unreadable file must not take it away."""
+    try:
+        return store.role_workflows()
+    except store.StoreError as exc:
+        log.warning("could not read daemon.role_workflows: %s", exc)
+        return {}
 
 
 def _startable_all(cwd: str) -> list:
@@ -8304,6 +8321,43 @@ async def h_score_goal_defaults_set(request: web.Request) -> web.Response:
         return json_error(400, str(exc))
     store.set_daemon_field("score_goal_default", value)
     return json_response({"enabled": value})
+
+
+async def h_role_workflows(request: web.Request) -> web.Response:
+    """Per-role overrides of the workflow the session pickers auto-select
+    (``daemon.role_workflows``), read live from the config file."""
+    try:
+        return json_response({"role_workflows": store.role_workflows()})
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+
+
+async def h_role_workflows_set(request: web.Request) -> web.Response:
+    """Set one role's auto-selected workflow, from the Settings page.
+
+    Body ``{"role": <role>, "workflow": <value>}``: a workflow name,
+    ``v2:<name>``, ``-`` for no auto-pick, or ``""``/null to drop the
+    override and let the workflows' own ``default_role`` decide again. The
+    workflow is not checked against a directory's list: which workflows
+    exist depends on where a session stands, so a picker applies an
+    override only where it is declared and falls back elsewhere.
+    """
+    body = await _json_body(request)
+    try:
+        role = mesh_roles._check_name(body.get("role"), "role")
+    except mesh_roles.RoleError as exc:
+        return json_error(400, str(exc))
+    workflow = body.get("workflow")
+    if workflow is not None and not isinstance(workflow, str):
+        return json_error(400, "'workflow' must be a string or null")
+    workflow = (workflow or "").strip()
+    if workflow and (any(c.isspace() for c in workflow) or len(workflow) > 200):
+        return json_error(400, f"invalid workflow value {workflow!r}")
+    try:
+        store.set_role_workflow(role, workflow or None)
+        return json_response({"role_workflows": store.role_workflows()})
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
 
 
 async def h_session_score_goal(request: web.Request) -> web.Response:

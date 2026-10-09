@@ -13903,6 +13903,89 @@ function scoreGoalSettingsCard() {
   return card;
 }
 
+/* Settings ▸ Role workflows: which workflow the new-session form and the
+   CLI wizard auto-select when a role is picked (daemon.role_workflows).
+   Kept in module state and filled by refreshRoleWorkflowSettings, because
+   the Settings page re-renders on every poll and the workflow listing is
+   too costly to fetch per render. The list is the daemon directory's; a
+   directory that does not declare the chosen workflow falls back to the
+   workflows' own default_role, which the first option names. */
+const roleWfSettings = { roles: null, workflows: [], overrides: {}, error: "", note: "" };
+
+async function refreshRoleWorkflowSettings() {
+  try {
+    const [roles, flows, rw] = await Promise.all([
+      api("/api/roles"), api("/api/cflow/workflows"), api("/api/role-workflows"),
+    ]);
+    if (!roles.ok || !flows.ok || !rw.ok) throw new Error("Could not load role workflows.");
+    roleWfSettings.roles = (await roles.json()).roles || [];
+    roleWfSettings.workflows = (await flows.json()).workflows || [];
+    roleWfSettings.overrides = (await rw.json()).role_workflows || {};
+    roleWfSettings.error = "";
+  } catch (err) { roleWfSettings.error = err.message || String(err); }
+  if (wsOpen) renderWorkspaces();
+}
+
+function roleWorkflowsCard() {
+  const card = el("section", "ws-add role-workflows-settings");
+  card.appendChild(el("h3", null, "Role workflows"));
+  card.appendChild(el("p", "wf-note",
+    "The workflow a new session's Workflow row picks on its own when a role " +
+    "is chosen (web form and CLI wizard). A workflow the session's directory " +
+    "does not declare falls back to the default. A child spawned by a parent " +
+    "running a workflow still takes that workflow's pair."));
+  const st = roleWfSettings;
+  if (st.error) card.appendChild(el("p", "wf-note", st.error));
+  if (!st.roles) {
+    if (!st.error) card.appendChild(el("p", "wf-note", "Loading…"));
+    return card;
+  }
+  for (const role of st.roles) {
+    const name = role.name;
+    const row = el("div", "sess-spawn-row");
+    const id = `role-wf-${name}`;
+    const lab = el("label", "sess-spawn-label", name);
+    lab.htmlFor = id;
+    const sel = document.createElement("select");
+    sel.id = id;
+    const { options, auto: fallback } = spawnRankWorkflows(st.workflows, name);
+    sel.appendChild(new Option(
+      `(default${fallback ? `: ${fallback}` : ": none"})`, ""));
+    sel.appendChild(new Option("(none — no workflow)", "-"));
+    for (const o of options) sel.appendChild(new Option(o.name + (o.tag || ""), o.value));
+    const cur = String(st.overrides[name] || "");
+    if (cur && ![...sel.options].some((o) => o.value === cur)) {
+      // Saved for a workflow this directory does not list: keep showing it.
+      sel.appendChild(new Option(`${cur} (not declared here)`, cur));
+    }
+    sel.value = cur;
+    sel.addEventListener("change", async () => {
+      const value = sel.value;
+      sel.disabled = true;
+      try {
+        const resp = await api("/api/role-workflows", {
+          method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ role: name, workflow: value }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+        st.overrides = data.role_workflows || {};
+        st.note = `Saved for ${name}. Applies to the next session form opened.`;
+        st.error = "";
+        // The open new-session form re-reads the overrides with its list.
+        workflowsFor = null;
+      } catch (err) {
+        st.error = err.message || String(err);
+      } finally { sel.disabled = false; }
+      if (wsOpen) renderWorkspaces();
+    });
+    row.append(lab, sel);
+    card.appendChild(row);
+  }
+  if (st.note) card.appendChild(el("p", "wf-note", st.note));
+  return card;
+}
+
 function resetTermInputAttachment() {
   globalThis.GlossaryComposer?.reset();
   const field = $("term-input-field"), btn = $("term-input-send");
@@ -19019,7 +19102,8 @@ function syncOnboardPickers() {
   // Workflow row and the spawn modal do: only workflows the role's
   // filter_roles admits, the role's own defaults first, then the rest.
   const wf = form.workflow;
-  const { options, auto } = spawnRankWorkflows(workflowsCache, form.role.value);
+  const { options, auto } = spawnRankWorkflows(
+    workflowsCache, form.role.value, roleWorkflowsCache);
   // Choosing a role chooses its workflow — but only over a row nobody has
   // touched. A workflow the operator picked survives every later role change,
   // and so does "(none)": an auto-pick that came back after somebody chose to
@@ -19332,6 +19416,8 @@ function cflowInputsErrors(box, errors) {
    name, default_role, priority, filter_roles — because the picker ranks them
    by the chosen role, and a list of bare names cannot be ranked at all. */
 let workflowsCache = [];
+/* Settings' per-role auto-pick overrides, served with the list. */
+let roleWorkflowsCache = {};
 let workflowsFor = null;
 /* Whether the Workflow row has been touched by hand. Until it has, the
    picked role decides it (see syncOnboardPickers). */
@@ -19363,10 +19449,13 @@ async function refreshWorkflowChoices() {
   let answered = false;
   try {
     const resp = await api(`/api/cflow/workflows?cwd=${encodeURIComponent(cwd)}`);
-    workflowsCache = resp.ok ? ((await resp.json()).workflows || []) : [];
+    const doc = resp.ok ? await resp.json() : {};
+    workflowsCache = doc.workflows || [];
+    roleWorkflowsCache = doc.role_workflows || {};
     answered = resp.ok;
   } catch {
     workflowsCache = [];
+    roleWorkflowsCache = {};
   }
   // Only this call's own claim is released: a later cwd change that already
   // re-claimed it owns the memo now, and its fetch is the one that answers.
@@ -20305,6 +20394,7 @@ function openSettings(section) {
     return;
   }
   refreshHarnesses().then(() => { if (wsOpen) renderWorkspaces(); });
+  refreshRoleWorkflowSettings();
   refreshLlmSettings();
   refreshFaq();
   refreshPromptPresets();
@@ -25475,6 +25565,7 @@ function renderWorkspaces() {
 
   view.appendChild(keyHelpCard());
   view.appendChild(scoreGoalSettingsCard());
+  view.appendChild(roleWorkflowsCard());
 
   view.appendChild(railStaleCard());
 
@@ -35232,8 +35323,11 @@ function spawnWorkflowAdmits(entry, role) {
    a workflow with no filter stays listed regardless of role, matching
    spawnWorkflowAdmits. Returns the ordered options and the auto-pick (the
    role's highest-priority default), for the caller to apply over a value
-   only the auto-pick itself set last time. */
-function spawnRankWorkflows(raws, role) {
+   only the auto-pick itself set last time. `overrides` is Settings'
+   daemon.role_workflows (role -> workflow name, "v2:<name>", or "-" for no
+   pick): an override naming an option here wins over default_role, one
+   naming nothing here falls back to it -- wizard._workflow_default's rule. */
+function spawnRankWorkflows(raws, role, overrides) {
   role = String(role || "").trim().toLowerCase();
   const entries = (raws || []).map(spawnWorkflowEntry).filter((e) => e.name)
     .filter((e) => spawnWorkflowAdmits(e, role));
@@ -35259,6 +35353,16 @@ function spawnRankWorkflows(raws, role) {
   // role is offered, never chosen over the v1 one while both run.
   const auto = entries.find((e) => band(e) === 0 && e.version !== 2) ||
     entries.find((e) => band(e) === 0);
+  const own = role && overrides && typeof overrides === "object"
+    ? String(overrides[role] || "").trim() : "";
+  if (own === "-") return { options, auto: "" };
+  if (own) {
+    const v2 = own.startsWith("v2:");
+    const name = v2 ? own.slice(3) : own;
+    const hit = options.find((o) => o.name === name &&
+      (v2 ? o.version === 2 : o.value === name));
+    if (hit) return { options, auto: hit.value };
+  }
   return { options, auto: auto ? options[entries.indexOf(auto)].value : "" };
 }
 
