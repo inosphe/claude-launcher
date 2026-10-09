@@ -399,7 +399,28 @@ def _cmd_move(args: argparse.Namespace) -> int:
     from .cflow2 import runtime
 
     _refuse_own_session(args.scope, "move")
-    payload = runtime.force_move(args.node, args.reason, cwd=os.getcwd(), scope=args.scope)
+    if args.approve or args.deny:
+        # The answer to the driver's move request (flow_request_move).
+        if args.approve and args.deny:
+            raise runtime.FlowError("give --approve or --deny, not both")
+        if args.node:
+            raise runtime.FlowError("--approve/--deny answer the pending request; it names "
+                                    "its node already (give a node without them to move "
+                                    "somewhere else, which supersedes the request)")
+        payload = runtime.resolve_move("approve" if args.approve else "deny",
+                                       reason=args.reason, cwd=os.getcwd(), scope=args.scope)
+        req = payload.get("move_request") or {}
+        if req.get("decision") == "denied":
+            print(f"refused the move to {req.get('label') or req.get('node')} "
+                  f"({req.get('id')}); the driver reads the refusal on its next flow_status")
+            _print_status(payload, False)
+            return 0
+    elif not args.node:
+        raise runtime.FlowError("name the node to move to, or answer the driver's request "
+                                "with --approve / --deny")
+    else:
+        payload = runtime.force_move(args.node, args.reason, cwd=os.getcwd(),
+                                     scope=args.scope)
     moved = payload.get("forced") or {}
     print(f"moved to {moved.get('label') or moved.get('node')} (from {moved.get('at')}; "
           f"cancelled: {', '.join(moved.get('left') or []) or 'nothing open'})")
@@ -753,8 +774,14 @@ def register(sub) -> None:
     q.set_defaults(func=_guarded(_cmd_archive))
 
     q = scoped(csub.add_parser("move", help="a person's forced move to a node the "
-                               "definition marks force_target: true"))
-    q.add_argument("node", help="the target's node id or label")
+                               "definition marks force_target: true, or the answer to "
+                               "the driver's move request (--approve/--deny)"))
+    q.add_argument("node", nargs="?", help="the target's node id or label (omit with "
+                   "--approve/--deny)")
+    q.add_argument("--approve", action="store_true",
+                   help="grant the driver's pending move request (flow_request_move)")
+    q.add_argument("--deny", action="store_true",
+                   help="refuse the driver's pending move request; --reason is what it reads")
     q.add_argument("--reason")
     q.set_defaults(func=_guarded(_cmd_move))
 

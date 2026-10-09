@@ -832,3 +832,45 @@ def test_the_node_pane_reads_one_node_in_full(proj):
     assert a["result"]["outcome"] == "ok"
     assert [e["event"] for e in a["journal"]][:1] == ["entered"]
     assert [c["role"] for c in out["root"]["children"]][:2] == ["try", "catch blocked"]
+
+
+def test_the_person_answers_the_drivers_move_request(proj):
+    """The run page's Move / Refuse on a v2 driver's move request
+    (flow_request_move, claunch-kgfr5): the rail owes it, approve moves the
+    run, deny hands the refusal back, and nothing pending is a 400."""
+    cwd = str(proj)
+    (proj / ".claunch" / "workflows" / "v2" / "move.yaml").write_text(MOVE, encoding="utf-8")
+    runtime.start(layers.load("move", cwd), cwd=cwd, scope="s4", caps={})
+    task = runtime.status(cwd=cwd, scope="s4")["tasks"][0]["instance"]
+    runtime.report(task, cwd=cwd, scope="s4")  # a -> b
+    runtime.request_move("c", "b is moot now", by="s4", cwd=cwd, scope="s4")
+    rail = cflow2_web.rail_entry(cwd, "s4")
+
+    async def go(client, bearer):
+        out = {}
+        slot = {"cwd": cwd, "scope": "s4"}
+
+        async def post(path, **body):
+            resp = await client.post(path, headers=bearer, json={**slot, **body})
+            return resp.status, await resp.json()
+
+        out["bad"] = await post("/api/cflow2/move/resolve", decision="maybe")
+        out["deny"] = await post("/api/cflow2/move/resolve", decision="deny",
+                                 reason="finish b")
+        out["none"] = await post("/api/cflow2/move/resolve", decision="approve")
+        runtime.request_move("c", "b is moot, really", by="s4", cwd=cwd, scope="s4")
+        out["approve"] = await post("/api/cflow2/move/resolve", decision="approve")
+        return out
+
+    out = _http(go)
+    assert rail["gated"] and any(o.startswith("move:") for o in rail["owed"])
+    move = [a for a in rail["answers"] if a["kind"] == "move"][0]
+    assert move["node"] == "c" and move["reason"] == "b is moot now"
+    assert out["bad"][0] == 400
+    status, payload = out["deny"]
+    assert status == 200 and payload["move_request"]["decision"] == "denied"
+    assert [t["label"] for t in payload["tasks"]] == ["b"]
+    assert out["none"][0] == 400 and "no pending move request" in out["none"][1]["error"]
+    status, payload = out["approve"]
+    assert status == 200 and [t["label"] for t in payload["tasks"]] == ["c"]
+    assert payload["move_request"]["decision"] == "approved"

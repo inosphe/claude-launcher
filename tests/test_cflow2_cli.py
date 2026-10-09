@@ -225,3 +225,39 @@ def test_pr_preflight_base_must_be_on_the_remote(tmp_path, capsys, monkeypatch):
     assert run("pr-preflight", "--cwd", wd) == cli_cflow2.PR_READY
     doc = json.loads(capsys.readouterr().out)
     assert doc["base"] == "master" and doc["base_sha"] is None
+
+
+MOVE_DEF = textwrap.dedent("""
+    cflow: 2
+    name: mv-cli
+    nodes:
+      intake: {prompt: I, force_target: true}
+      work: {prompt: W}
+    body: [intake, work]
+""")
+
+
+def test_move_answers_the_drivers_request(project, capsys):
+    """claunch-kgfr5: 'move --approve|--deny' answers flow_request_move;
+    a bare 'move' without a node or a decision says what it needs."""
+    from claude_launcher.cflow2 import runtime
+
+    (project / ".claunch" / "workflows" / "v2" / "mv-cli.yaml").write_text(
+        MOVE_DEF, encoding="utf-8")
+    assert run("start", "mv-cli") == 0
+    st = runtime.status(cwd=str(project))
+    runtime.report(st["tasks"][0]["instance"], cwd=str(project))  # intake -> work
+    capsys.readouterr()
+    assert run("move", "--approve") == 1
+    assert "no pending move request" in capsys.readouterr().err
+    assert run("move") == 1
+    assert "--approve / --deny" in capsys.readouterr().err
+    runtime.request_move("intake", "redo", by="s1", cwd=str(project))
+    assert run("move", "intake", "--deny") == 1
+    assert "names its node already" in capsys.readouterr().err
+    assert run("move", "--deny", "--reason", "not now") == 0
+    assert "refused the move to intake" in capsys.readouterr().out
+    runtime.request_move("intake", "redo, really", by="s1", cwd=str(project))
+    assert run("move", "--approve") == 0
+    assert "moved to intake" in capsys.readouterr().out
+    assert [t["label"] for t in runtime.status(cwd=str(project))["tasks"]] == ["intake"]

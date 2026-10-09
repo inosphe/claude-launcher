@@ -159,6 +159,11 @@ MAX_ROSTER_DEFERRALS = 4
 CALLER_AGENT = "agent"
 CALLER_USER = "user"
 
+#: State key of the driver's move request (:func:`request_move`): one per run,
+#: pending until a person answers; a refusal stays until the driver files
+#: another request or the run moves.
+MOVE_REQUEST = "move_request"
+
 #: Probe poll interval when a wait declares none.
 DEFAULT_POLL = 60.0
 
@@ -2992,6 +2997,8 @@ def report(node: Optional[str], outcome: str = ir.OUTCOME_OK, value: Any = None,
 
     def op(r: Run) -> None:
         _require_progress(r)
+        if by is None:
+            _require_no_move_request(r)
         iid = _task_for_report(r, node)
         n = r.node_of(iid)
         _require_restart_done(r, iid, n)
@@ -3034,6 +3041,8 @@ def select(node: Optional[str], option: str, reason: Optional[str] = None, *,
     """Pick an option of an active ``choose``."""
     def op(r: Run) -> None:
         _require_progress(r)
+        if caller != CALLER_USER:
+            _require_no_move_request(r)
         iid = _find(r, node, (AW_CHOOSE,), "choice")
         n = r.node_of(iid)
         chooser = n.get("chooser") or ir.CHOOSER_AGENT
@@ -3171,6 +3180,7 @@ def fork(group: Optional[str], with_: Optional[Dict[str, Any]] = None, *,
 
     def op(r: Run) -> None:
         _require_progress(r)
+        _require_no_move_request(r)
         groups = [iid for iid, inst in r.inst.items()
                   if r.chart.node(inst["node"]).type == ir.T_GROUP]
         if group and group in groups:
@@ -3817,48 +3827,203 @@ def force_move(target: str, reason: Optional[str] = None, *, by: str = CALLER_US
 
     def op(r: Run) -> None:
         _require_progress(r)
-        tid = _force_target_id(r.chart, target)
-        path, problems = ir.force_path(r.chart, tid)
-        if problems:
-            raise FlowError(f"cannot move to {target!r}: " + "; ".join(problems))
-        roots = [iid for iid, rec in r.inst.items()
-                 if rec.get("parent") is None and rec.get("node") == path[0][0]]
-        if not roots:
-            raise FlowError(f"run {r.state.get('run_id')} has no live root instance to move")
-        cur, k = roots[0], 1
-        while True:
-            kids = [c for c in r.children_of(cur) if r.inst[c]["node"] == path[k][0]]
-            if not kids or k == len(path) - 1:
-                break
-            cur, k = kids[0], k + 1
-        left = sorted(rec["node"] for rec in r.inst.values() if rec.get("await"))
-        node = r.chart.node(tid)
-        r.emit("forced", node=tid, label=node.label or None, by=by, reason=reason or None,
-               at=r.inst[cur]["node"], left=left)
-        moved.update(node=tid, label=node.label or None, at=r.inst[cur]["node"], left=left)
-        _cancel_children(r, cur, "forced")
-        env = _seat(r, cur, r.node_of(cur), path[k][1] or {})
-        parent = cur
-        for j in range(k, len(path) - 1):
-            nid, slot = path[j]
-            mid = r.chart.node(nid)
-            iid = _new_instance(r, mid, parent, (slot or {}).get("role", ""), env)
-            err = _apply_effects(r, iid, mid, AT_ENTER)
-            if err:
-                _complete(r, iid, ir.OUTCOME_FAIL, {"reason": err})
-                return
-            _queue_triggers(r, iid, mid, AT_ENTER)
-            if mid.type == ir.T_SCOPE and not _scope_params(r, iid, mid):
-                return
-            env = _seat(r, iid, mid, path[j + 1][1] or {})
-            parent = iid
-        _enter(r, tid, parent, (path[-1][1] or {}).get("role", ""), env)
+        _move_run(r, target, reason, by, moved)
 
     _mutate(cwd, scope, now, op)
     payload = status(cwd=cwd, scope=scope, now=now, tick=False)
     payload["forced"] = moved
     return payload
 
+
+def _move_run(r: Run, target: str, reason: Optional[str], by: str, moved: Dict[str, Any],
+              granted: Optional[Dict[str, Any]] = None) -> None:
+    """The move itself, shared by a person's :func:`force_move` and by the
+    approval of the driver's :func:`request_move`. ``granted`` is the request
+    this move answers, when it answers one: it rides on the ``forced`` event,
+    so the journal says the position was asked for and by whom.
+
+    A pending request that this move does not answer is superseded: the
+    person moved the run while the question was open, which answers it."""
+    tid = _force_target_id(r.chart, target)
+    path, problems = ir.force_path(r.chart, tid)
+    if problems:
+        raise FlowError(f"cannot move to {target!r}: " + "; ".join(problems))
+    roots = [iid for iid, rec in r.inst.items()
+             if rec.get("parent") is None and rec.get("node") == path[0][0]]
+    if not roots:
+        raise FlowError(f"run {r.state.get('run_id')} has no live root instance to move")
+    cur, k = roots[0], 1
+    while True:
+        kids = [c for c in r.children_of(cur) if r.inst[c]["node"] == path[k][0]]
+        if not kids or k == len(path) - 1:
+            break
+        cur, k = kids[0], k + 1
+    left = sorted(rec["node"] for rec in r.inst.values() if rec.get("await"))
+    node = r.chart.node(tid)
+    pending = pending_move(r.state)
+    if granted is None and pending is not None:
+        r.emit("move_superseded", request=pending.get("id"), node=pending.get("node"),
+               forced_to=tid, by=by)
+    r.state.pop(MOVE_REQUEST, None)
+    r.emit("forced", node=tid, label=node.label or None, by=by, reason=reason or None,
+           at=r.inst[cur]["node"], left=left,
+           **({"granted": granted.get("id"), "asked_by": granted.get("by")}
+              if granted else {}))
+    moved.update(node=tid, label=node.label or None, at=r.inst[cur]["node"], left=left)
+    _cancel_children(r, cur, "forced")
+    env = _seat(r, cur, r.node_of(cur), path[k][1] or {})
+    parent = cur
+    for j in range(k, len(path) - 1):
+        nid, slot = path[j]
+        mid = r.chart.node(nid)
+        iid = _new_instance(r, mid, parent, (slot or {}).get("role", ""), env)
+        err = _apply_effects(r, iid, mid, AT_ENTER)
+        if err:
+            _complete(r, iid, ir.OUTCOME_FAIL, {"reason": err})
+            return
+        _queue_triggers(r, iid, mid, AT_ENTER)
+        if mid.type == ir.T_SCOPE and not _scope_params(r, iid, mid):
+            return
+        env = _seat(r, iid, mid, path[j + 1][1] or {})
+        parent = iid
+    _enter(r, tid, parent, (path[-1][1] or {}).get("role", ""), env)
+
+
+
+def pending_move(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The driver's unanswered move request on this run, if any."""
+    req = state.get(MOVE_REQUEST)
+    if isinstance(req, dict) and not req.get("decision"):
+        return req
+    return None
+
+
+def _require_no_move_request(r: Run) -> None:
+    """A pending move request holds the driver: the run does not advance by
+    the driver's hand until a person answers it (v1's ``waiting_goto``)."""
+    pending = pending_move(r.state)
+    if pending is not None:
+        raise FlowError(
+            f"you asked for this run to be moved to {pending.get('node')!r} "
+            f"({pending.get('id')}) and nobody has answered yet; the run does not advance "
+            f"by your hand until a person does. Stop your turn. If the reason stopped being "
+            f"true, withdraw it with flow_request_move(cancel=true)")
+
+
+def request_move(target: str, reason: str, *, by: str, cwd: Optional[str] = None,
+                 scope: Optional[str] = None, now: Optional[float] = None) -> Dict[str, Any]:
+    """The driver's side of an off-route move: ask a person to move the run
+    to ``target`` -- a node the definition marks ``force_target`` -- and hold
+    until they answer (docs 2.11). Moves nothing.
+
+    Why a request and not a move: the definition is the run's account of
+    what may happen, and a driver that could re-position its own run could
+    walk out of any ask or choice put in front of it. But the work does
+    out-run the definition -- a new instruction arrives while the run waits
+    for its end decision -- and without this door the driver's only way
+    forward was to do the work outside the run (claunch-kgfr5). A person
+    answers with :func:`resolve_move` (the run page, ``claunch cflow2 move
+    --approve|--deny``), or moves the run elsewhere with :func:`force_move`,
+    which supersedes the request."""
+    note = (reason or "").strip()
+    if not note:
+        raise FlowError("'reason' is required: the person answering has not watched you "
+                        "work, and a node name on its own is not something anyone can "
+                        "approve or refuse")
+    filed: Dict[str, Any] = {}
+
+    def op(r: Run) -> None:
+        _require_progress(r)
+        tid = _force_target_id(r.chart, target)
+        _path, problems = ir.force_path(r.chart, tid)
+        if problems:
+            raise FlowError(f"cannot move to {target!r}: " + "; ".join(problems))
+        node = r.chart.node(tid)
+        previous = pending_move(r.state)
+        request = {
+            "id": f"mr-{secrets.token_hex(3)}", "node": tid, "label": node.label or None,
+            "title": node.get("title") or None, "reason": note, "by": by,
+            "from": sorted(rec["node"] for rec in r.inst.values() if rec.get("await")),
+            "at": _iso(r.now),
+        }
+        r.state[MOVE_REQUEST] = request
+        r.emit("move_requested", request=request["id"], node=tid, label=node.label or None,
+               by=by, reason=note, left=request["from"],
+               **({"replaces": previous.get("id")} if previous else {}))
+        filed.update(request)
+
+    _mutate(cwd, scope, now, op)
+    payload = status(cwd=cwd, scope=scope, now=now, tick=False)
+    payload["move_request"] = filed
+    payload["note"] = (
+        "recorded; the run does not advance by your hand until a person answers. Stop "
+        "your turn and write them the decision brief -- where the run has to go, what "
+        "you found that the definition declares no route for, what redoing from there "
+        "costs, and what staying costs. They answer from the run page (Move / Refuse) or "
+        "with 'claunch cflow2 move --approve' / '--deny'; they may also move the run "
+        "somewhere else with 'claunch cflow2 move <node>'")
+    return payload
+
+
+def cancel_move_request(*, by: str, cwd: Optional[str] = None, scope: Optional[str] = None,
+                        now: Optional[float] = None) -> Dict[str, Any]:
+    """Withdraw the driver's pending move request (the reason stopped being
+    true), so nobody is left holding a question no answer helps."""
+    def op(r: Run) -> None:
+        pending = pending_move(r.state)
+        if pending is None:
+            raise FlowError("no pending move request on this run")
+        r.state.pop(MOVE_REQUEST, None)
+        r.emit("move_withdrawn", request=pending.get("id"), node=pending.get("node"), by=by)
+
+    _mutate(cwd, scope, now, op)
+    payload = status(cwd=cwd, scope=scope, now=now, tick=False)
+    payload["note"] = "request withdrawn; the run continues from where it stands"
+    return payload
+
+
+def resolve_move(decision: str, *, by: str = CALLER_USER, reason: Optional[str] = None,
+                 cwd: Optional[str] = None, scope: Optional[str] = None,
+                 now: Optional[float] = None) -> Dict[str, Any]:
+    """A person answers the driver's pending move request. CLI / dashboard
+    only -- not exposed over MCP, for the reason ``approve`` is not: a grant
+    the asker can give itself is not a grant.
+
+    ``approve`` performs the move asked for (:func:`_move_run`, journaled
+    ``move_approved`` then ``forced`` with ``granted``); ``deny`` leaves the
+    run where it is and keeps the refusal on the run for its driver to read
+    on its next ``flow_status``, until it files another request or the run
+    moves."""
+    verdict = (decision or "").strip().lower()
+    if verdict not in ("approve", "deny"):
+        raise FlowError(f"decision must be 'approve' or 'deny', not {decision!r}")
+    note = (reason or "").strip()
+    out: Dict[str, Any] = {}
+
+    def op(r: Run) -> None:
+        pending = pending_move(r.state)
+        if pending is None:
+            raise FlowError("no pending move request on this run")
+        if verdict == "approve":
+            _require_progress(r)
+            r.emit("move_approved", request=pending.get("id"), node=pending.get("node"),
+                   by=by, reason=note or None)
+            moved: Dict[str, Any] = {}
+            _move_run(r, pending["node"], note or pending.get("reason"), by, moved,
+                      granted=pending)
+            out.update(forced=moved, move_request={**pending, "decision": "approved"})
+            return
+        decided = {**pending, "decision": "denied", "decided_by": by,
+                   "decided_reason": note, "decided_at": _iso(r.now)}
+        r.state[MOVE_REQUEST] = decided
+        r.emit("move_denied", request=pending.get("id"), node=pending.get("node"), by=by,
+               reason=note or None)
+        out.update(move_request=decided)
+
+    _mutate(cwd, scope, now, op)
+    payload = status(cwd=cwd, scope=scope, now=now, tick=False)
+    payload.update(out)
+    return payload
 
 # -- time and probes ---------------------------------------------------------
 
@@ -4636,6 +4801,9 @@ def describe(r: Run) -> Dict[str, Any]:
     if asks:
         out["asks"] = asks
     out["data"] = s.get("data")
+    move_req = s.get(MOVE_REQUEST)
+    if isinstance(move_req, dict):
+        out["move_request"] = move_req
     hints = []
     if tasks:
         hints.append("do each task, then flow_report(node=<instance>, outcome, value)")
@@ -4676,6 +4844,17 @@ def describe(r: Run) -> Dict[str, Any]:
                         f"resumes the run ('claunch cflow2 resume'); tell the user")
     for a in asks:
         hints.append(f"{a['instance']}: {a['how']}")
+    if isinstance(move_req, dict) and not move_req.get("decision"):
+        hints.insert(0, f"MOVE REQUESTED to {move_req.get('node')!r} ({move_req.get('id')}): "
+                        f"nothing advances by your hand until a person answers (run page "
+                        f"Move/Refuse, 'claunch cflow2 move --approve|--deny'); stop your turn, "
+                        f"or withdraw it with flow_request_move(cancel=true)")
+    elif isinstance(move_req, dict) and move_req.get("decision") == "denied":
+        hints.insert(0, f"your move request to {move_req.get('node')!r} was REFUSED by "
+                        f"{move_req.get('decided_by')}"
+                        + (f" ({move_req.get('decided_reason')})"
+                           if move_req.get("decided_reason") else "")
+                        + "; continue on the declared route and say so in your next report")
     out["next"] = "; ".join(hints) or None
     return out
 
@@ -5250,6 +5429,8 @@ def approve(node: Optional[str] = None, *, decision: Optional[str] = None,
 
     def op(r: Run) -> None:
         _require_progress(r)
+        if caller != CALLER_USER:
+            _require_no_move_request(r)
         iid = _find(r, node, (AW_APPROVAL,), "ask")
         rec = r.state["asks"][r.inst[iid]["frame"]["ask"]]
         if caller != CALLER_USER and rec.get("resolution") != RES_SELF:

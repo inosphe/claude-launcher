@@ -29,8 +29,10 @@ SKILL_MD = """\
 name: cflow
 description: >-
   Run a declared claunch workflow (cflow) step by step via the cflow MCP
-  tools. Use when the user types /cflow <workflow> or asks to run/resume a
-  cflow workflow in this project.
+  tools, v1 (status/next/report) or v2 (flow_* tools). Use when the user
+  types /cflow <workflow> or asks to run/resume a cflow workflow in this
+  project, and whenever a user message arrives while a cflow run is waiting
+  on something else.
 ---
 
 # cflow — run a declared workflow step by step
@@ -440,6 +442,60 @@ is the doorbell; `asks` is where the question actually lives.
 
 You cannot answer a request that was not put to you, nor one from your own
 run. Both are refused; neither is a thing to work around.
+
+## cflow v2 runs (flow_* tools)
+
+A v2 run (its opening says `cflow v2`, or `flow_status` answers with a
+`workflow` while `status` is idle) is driven with the `flow_*` tools, not
+`status`/`next`/`report`. Everything above about honest reports, asking a
+person well, and never granting yourself what a person grants holds for it
+unchanged; these are the parts that differ.
+
+1. **Every user message: `flow_status` first.** It is the current truth.
+   Read what the run is waiting on — `tasks` (yours to do), `choices`
+   (yours, or the user's when `chooser: user`), `asks` (a question put to a
+   person or a responder), `waits` (the daemon's clock), `move_request`
+   (your own pending request) — before acting on the message.
+2. **A new task is a new run here too.** The run is one task. When a user
+   message is a genuinely NEW requirement and the run is not on a step that
+   covers it — most often because it is waiting on a person (an end
+   decision, a `chooser: user` choice, an ask) — do NOT do the work outside
+   the run: no edits, no commits, no board issue moved to in_progress for
+   it. A run left waiting while the session works elsewhere is the failure
+   this rule exists for (claunch-kgfr5). Instead, in this order:
+   - If the open question itself offers a way to take the work (an end
+     decision with a `new-task` option), tell the user that the answer to
+     that question is how the work gets in, and stop. You cannot answer a
+     user's question for them.
+   - Otherwise, if the definition marks a node `force_target` that starts
+     the work over (a worker's `round` — a new round from intake), file
+     `flow_request_move {node, reason}` naming the new task in `reason`,
+     then stop your turn and write the person a brief: where the run must
+     go, what it cancels, and what staying costs. They answer from the run
+     page (Move / Refuse), the terminal strip, or
+     `claunch cflow2 move --approve|--deny`.
+   - Otherwise the run must be retired first: the user aborts it
+     (`claunch cflow2 abort`) and you `flow_start` fresh with the new task,
+     or the user gives the explicit go-ahead for `flow_start` with
+     `force: true`. Never force on your own initiative.
+   Clarifications and corrections to the current task are not new tasks;
+   they stay in the run.
+3. **A pending move request holds you.** Until a person answers it,
+   `flow_report`, `flow_select`, `flow_fork` and `flow_approve` are refused.
+   Do not work around it; withdraw it (`flow_request_move {cancel: true}`)
+   if its reason stopped being true. A refusal stays on `move_request` with
+   `decision: denied` and the person's reason: continue on the declared
+   route and say in your next report that the move was refused and by whom.
+4. **Waiting on a person means stopping.** A `chooser: user` choice, an ask
+   that reached a human, a loop or visit limit, a halt — all are answered
+   outside your tools (`claunch cflow2 select|approve|extend|resume`, or
+   the web dashboard). Present the question and your recommendation, then
+   end your turn; you are nudged when it is answered. Waits fire on the
+   daemon's clock; do not poll them.
+5. **A person may move the run while you are stopped** (`claunch cflow2
+   move <node>`, which also supersedes a pending request of yours). After
+   any nudge, `flow_status` is the current truth, even if it puts you back
+   on a task you already finished.
 
 ## Rules
 

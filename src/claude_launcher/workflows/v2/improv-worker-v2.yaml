@@ -89,6 +89,7 @@ sides:
 #                            (v1의 게이트는 end-decision이 맡는다. 그 뒤 노드는
 #                            피어에게 종료를 예고하므로 end-notice다 -- claunch-aobd0)
 #   end-hold              -> end-hold
+#   (v2 전용)              -> end-new-task            (end-decision의 new-task, claunch-kgfr5)
 #
 # ── v1에서 무엇이 문법으로 옮겨 갔는가 ───────────────────────────────────
 # - 스텝 사이의 next/select 간선 61개 -> 조합자 트리. 산문에서 「다음 단계로
@@ -2812,6 +2813,40 @@ nodes:
       보고에 있다.
     effects: [board.write, mesh.send]
 
+  end-new-task:
+    title: 새 작업으로 다음 런 시작 (사용자 지시)
+    prompt: |
+      사용자가 종료 대신 새 작업을 골랐다(end-decision의 new-task). 이 런은
+      여기서 done으로 마감되고, 새 작업은 같은 세션의 **새 런**이 목표 수립부터
+      맡는다. 이 런의 회차(브랜치·보고서·이슈)는 그대로 이 런의 기록으로 남는다.
+
+      1. 세션이 종료되지 않게 먼저 `claunch keep-alive $CLAUNCH_SESSION`을
+         실행한다 — 이 런이 done이 되는 순간 데몬이 세션을 끝낼 수 있다.
+      2. 새 작업의 이슈를 정한다. 선택의 reason과 사용자의 말(`claunch cflow2
+         journal`, 터미널 지시)에서 작업을 읽는다. 기존 이슈 id를 받았으면 그
+         id다. 아니면 중복을 확인한 뒤(`claunch beads search "<핵심어>" --json`)
+         만든다: `claunch beads create "<제목>" --type task --priority 2
+         --labels user-direct --assignee $CLAUNCH_SESSION --description
+         "<## 목표 / ## 범위 / ## 완료 증거 기준 / ## 출처>"`. 이 회차 이슈의
+         후속(같은 기능에 대한 추가 요청)이면 `--parent <이 회차 이슈 id>`를
+         붙인다. 상태는 open으로 둔다 — in_progress 전이는 새 런의 intake가
+         한다. 작업 내용을 읽을 수 없으면 지어내지 않고 사용자에게 묻는다.
+      3. 이 작업을 보고한다(value에 issue). 런이 done이 된 뒤 **같은 턴에서**
+         `flow_start`로 새 런을 시작한다: `workflow`는 이 런과 같은 정의,
+         `inputs: {issue: <그 id>}`. 끝난 런은 시작이 보관한다.
+      4. 새 런이 선 것을 확인한 뒤 `claunch keep-alive $CLAUNCH_SESSION off`로
+         플래그를 내린다 — 남겨 두면 새 런의 end-notice가 세션을 끝내지 못한다.
+      상위에게는 fyi 한 줄로 이 세션이 새 이슈로 다음 런을 시작한다는 사실과
+      그 id를 알린다.
+    done_when: |
+      keep-alive 플래그가 섰고(명령 출력을 보고에 붙인다), 새 작업의 이슈 id가
+      정해졌으며(기존 id 또는 새로 만든 id), 상위 fyi의 메시지 id가 보고에
+      있다(상위가 없으면 그 사실). 새 런 시작과 플래그 해제는 이 보고 뒤
+      같은 턴에서 한다.
+    returns:
+      ok: {issue: str}
+    effects: [board.write, mesh.send]
+
 procedures:
   pr-or-local:
     description: >-
@@ -3909,12 +3944,16 @@ procedures:
             손이 필요하면 `claunch respawn <세션>`이 있다.
             hold: 종료를 보류한다 — 세션을 의도적으로 살려 둘 사유가 있을 때
             keep-alive로 세션을 살려 둔다.
+            new-task: 이 세션에 새 작업을 맡긴다 — 이 런을 마감하고 같은 세션에서
+            그 작업의 이슈로 새 런(목표 수립부터)을 시작한다. 사용자가 이 질문에
+            답하지 않고 터미널에 새 작업을 주었다면 그 작업은 이 선택지로 들어온다
+            (claunch-kgfr5): 런 밖에서 작업하지 않는다.
             답하지 않는 동안 이 질문은 열린 상태로 유지되고 세션은 살아 있다.
 
             판단 근거: `claunch cflow2 journal -t <세션>`, `claunch beads show <이슈> --json`.
         # 선택지 이름은 질문 예약어(approve 등)를 피한다(claunch-gpccp): approve로
         # 두면 어떤 질문 brief도 검증을 통과하지 못해 런이 이 질문을 올리지 못한다.
-        cases: {end: end-notice, hold: end-hold}
+        cases: {end: end-notice, hold: end-hold, new-task: end-new-task}
 
 body:
   try:

@@ -744,6 +744,11 @@ def rail_entry(cwd: str, scope: str) -> Optional[dict]:
                 owed.append(f"halted: {a.get('monitor')}")
             else:
                 owed.append(f"{kind}: {a.get('label') or a.get('node') or a.get('instance')}")
+    move = runtime.pending_move(state)
+    if move is not None:
+        # The driver asked a person to move the run (flow_request_move): the
+        # driver is held until somebody answers, whatever the status says.
+        owed.append(f"move: {move.get('title') or move.get('label') or move.get('node')}")
     answers = _rail_answers(str(st.cwd), st.scope, state) if owed else []
     return {
         "cwd": str(st.cwd),
@@ -776,7 +781,7 @@ def _rail_answers(cwd: str, scope: str, state: dict) -> List[dict]:
     the question and the presses. Read from the same ``runtime.status``
     payload the run page draws, filtered to what only a person releases (a
     ``user`` choice, an ask that fell to a human, a loop or visit limit, a
-    halt). A halt and an acceptance hold carry no press -- the dashboard has
+    halt, the driver's move request). A halt and an acceptance hold carry no press -- the dashboard has
     no endpoint for them -- only the text."""
     from ..cflow2 import runtime
 
@@ -786,6 +791,18 @@ def _rail_answers(cwd: str, scope: str, state: dict) -> List[dict]:
         log.exception("cflow2 rail answers of %s/%s failed", cwd, scope)
         return []
     out: List[dict] = []
+    move = runtime.pending_move(state)
+    if move is not None:
+        # First: while it is pending nothing else moves by the driver's hand.
+        out.append({
+            "kind": "move", "request": move.get("id"), "node": move.get("node"),
+            "label": move.get("title") or move.get("label") or move.get("node"),
+            "by": move.get("by"), "reason": _rail_prompt(move.get("reason")),
+            "from": move.get("from") or [],
+            "prompt": _rail_prompt(f"{move.get('by') or 'the driver'} asks to move the run "
+                                   f"to {move.get('label') or move.get('node')}: "
+                                   f"{move.get('reason') or ''}"),
+        })
     for c in payload.get("choices") or []:
         if c.get("chooser") != ir.CHOOSER_USER:
             continue

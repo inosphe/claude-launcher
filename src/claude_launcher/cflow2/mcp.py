@@ -309,6 +309,34 @@ TOOLS = [
         },
     },
     {
+        "name": "flow_request_move",
+        "description": (
+            "Ask a person to move this run to a node the definition marks force_target "
+            "(e.g. a worker's 'round', which starts a new round from intake). Use it when "
+            "the run has to go somewhere its route does not lead -- typically a NEW task "
+            "arriving while the run waits on something else (an end decision, a user "
+            "choice). It files a REQUEST and moves nothing: until a person answers, "
+            "flow_report/flow_select/flow_fork/flow_approve are refused. Then stop your "
+            "turn and write the person a decision brief. They answer from the run page "
+            "(Move / Refuse) or 'claunch cflow2 move --approve|--deny'. 'cancel: true' "
+            "withdraws your pending request. Doing the new work outside the run instead "
+            "is what this tool exists to replace."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "node": {"type": "string",
+                         "description": "the force_target node's id or label"},
+                "reason": {"type": "string",
+                           "description": "why the run must go there (required): the "
+                                          "person answering did not watch you work"},
+                "cancel": {"type": "boolean",
+                           "description": "withdraw your pending request instead"},
+                "scope": _SCOPE, "cwd": _CWD, "side": _SIDE,
+            },
+        },
+    },
+    {
         "name": "flow_rule",
         "description": (
             "Read one of the run's rules: its text, and 'why' (the incident or "
@@ -491,6 +519,16 @@ def _call(name: str, args: dict) -> Dict[str, Any]:
         cwd, scope = _where(args)
         return runtime.set_input(str(args.get("name") or "").strip(), args.get("value"),
                                  session=session, cwd=cwd, scope=scope)
+    if name == "flow_request_move":
+        cwd, scope = _where(args)
+        by = session or runtime.CALLER_AGENT
+        if args.get("cancel"):
+            return runtime.cancel_move_request(by=by, cwd=cwd, scope=scope)
+        node = str(args.get("node") or "").strip()
+        if not node:
+            raise runtime.FlowError("'node' is required (a force_target node's id or label)")
+        return runtime.request_move(node, str(args.get("reason") or ""), by=by,
+                                    cwd=cwd, scope=scope)
     if name == "flow_rule":
         cwd, scope = _where(args)
         return runtime.rule(str(args.get("name") or ""), cwd=cwd, scope=scope)

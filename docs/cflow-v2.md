@@ -1608,6 +1608,7 @@ body:
 | 조작 | CLI | 웹 API | MCP |
 |---|---|---|---|
 | 강제 이동 | `claunch cflow2 move <노드> [--reason R]` | `POST /api/cflow2/move {cwd, scope, node, reason}` | 없음 |
+| 이동 요청에 답함 | `claunch cflow2 move --approve\|--deny [--reason R]` | `POST /api/cflow2/move/resolve {cwd, scope, decision, reason}` | 없음(요청은 `flow_request_move`) |
 | 강제 결과 보고 | `claunch cflow2 report <작업> <결과> [--value JSON] [--reason R]` | `POST /api/cflow2/report {cwd, scope, node, outcome, value, reason}` | 없음 |
 | 중단 | `claunch cflow2 abort --reason R` | `POST /api/cflow2/abort {cwd, scope, reason}` | 없음 |
 | 보관 | `claunch cflow2 archive` | `POST /api/cflow2/archive {cwd, scope}` | 없음 |
@@ -1626,6 +1627,39 @@ body:
   `NUDGE_CFLOW2_CONTINUE`를 보낸다.
 - 보관은 끝난 런만 받는다. 살아 있는 런은 먼저 중단한다. 보관 뒤 슬롯은 비고 run
   페이지는 시작 화면을 그린다.
+
+#### 드라이버의 이동 요청 (claunch-kgfr5)
+
+v1의 `request_goto`에 해당한다. 드라이버는 런을 직접 옮길 수 없고, 사람에게
+`force_target` 노드로의 이동을 요청할 수 있다. 예: 워커 런이 종료 결정(ask)을
+기다리는 동안 사용자가 새 작업을 주면, 드라이버는 런 밖에서 그 작업을 하지 않고
+`round`(목표 수립부터 새 회차)로의 이동을 요청한다.
+
+- 요청: MCP `flow_request_move {node, reason}`(`runtime.request_move`). 아무것도
+  옮기지 않는다. `reason`은 필수이고 대상은 강제 이동과 같은 규칙으로 검사한다
+  (`force_target` 표시, `ir.force_path`). 런 상태 `move_request`에 한 건이 실리고
+  (`id`, `node`, `label`, `title`, `reason`, `by`, `from`(그 순간 기다리던 노드),
+  `at`), 저널에 `move_requested`가 남는다. 다시 요청하면 앞 요청을 바꾼다
+  (`replaces`).
+- 대기: 요청이 열려 있는 동안 드라이버의 `flow_report`·`flow_select`·`flow_fork`·
+  `flow_approve`는 거절된다(`_require_no_move_request`). 사람의 조작(강제 결과 보고,
+  선택, ask 답)은 막지 않는다. `flow_status`는 `move_request`와 `next`의 첫 안내로
+  이 사실을 알린다.
+- 철회: `flow_request_move {cancel: true}` → 저널 `move_withdrawn`.
+- 승인: run 페이지의 Move 버튼, 터미널 띠(strip)의 Move 버튼, 또는
+  `claunch cflow2 move --approve`(`runtime.resolve_move`). 저널에 `move_approved`가
+  남고, 강제 이동과 같은 경로(`_move_run`)로 옮긴다. 그 `forced` 이벤트에
+  `granted`(요청 id)와 `asked_by`가 붙는다.
+- 거절: Refuse 버튼 또는 `--deny`. 런은 그대로이고 `move_request`에
+  `decision: denied`, `decided_by`, `decided_reason`이 남아 드라이버가
+  `flow_status`로 읽는다. 다음 요청이나 이동이 이 기록을 지운다. 저널
+  `move_denied`.
+- 대체: 요청이 열린 동안 사람이 `move <노드>`로 런을 옮기면 요청은 답을 받은
+  것으로 보고 지운다(저널 `move_superseded`).
+- 승인·거절 뒤에는 런의 세션에 안내 한 줄이 타이핑된다(api.py의
+  `NUDGE_CFLOW2_MOVE_APPROVED`, `NUDGE_CFLOW2_MOVE_DENIED`).
+- 세션 레일은 열린 요청을 사람이 처리할 항목(`owed`의 `move: <노드>`)으로 세고,
+  `answers`의 `kind: move` 행이 Move·Refuse 버튼을 싣는다.
 
 ## 3. IR
 
@@ -1851,9 +1885,11 @@ v1 툴과 이름이 겹치지 않도록 `flow_` 접두어를 쓴다.
 | `flow_asks` | 이 세션의 답을 기다리는 ask 목록 |
 | `flow_collection` | 컬렉션 조회와 연산(`action`: `list`, `push`, `set`, `remove`; `collection`, `key`, `item`, `fields`). 주체는 `driver`이고 `access`를 따른다(2.7) |
 | `flow_input` | 시작 뒤에 채우는 입력 쓰기(`name`, `value`). `set_by: [agent]`로 선언되고 비어 있는 입력만, 드라이버만(2.6) |
+| `flow_request_move` | `force_target` 노드로의 이동을 사람에게 요청(`node`, `reason`) 또는 철회(`cancel`). 아무것도 옮기지 않고, 답이 올 때까지 드라이버의 진행을 막는다(2.11) |
 
-런 중단(abort), 보관(archive), 강제 이동(move), 사람의 강제 결과 보고는 MCP 툴이
-없다. 사람이 CLI나 웹 UI로 한다(2.11).
+런 중단(abort), 보관(archive), 강제 이동(move), 이동 요청에 대한 답, 사람의 강제 결과
+보고는 MCP 툴이 없다. 사람이 CLI나 웹 UI로 한다(2.11). 드라이버는 이동을 요청만 할 수
+있다(`flow_request_move`).
 
 권한(`cflow2/mcp.py`, `runtime.may_drive`):
 
@@ -2166,7 +2202,8 @@ spec:
 
 - CLI: `claunch cflow2 ls | show | validate | compile | caps | start | status | journal | abort | archive`,
   사람의 경로 `select | extend | resume | approve [NODE] [--decline | --option O] [--reason R]`,
-  `move <노드> [--reason R]`, `report <작업> <결과> [--value JSON] [--reason R]`(2.11),
+  `move <노드> [--reason R]`, `move --approve | --deny [--reason R]`(드라이버의 이동 요청에
+  답함), `report <작업> <결과> [--value JSON] [--reason R]`(2.11),
   `recur [--cancel] [--reason R]`(다음 회차 요청 확인·취소, 2.1 「recur」).
 - ask 응답 API: `POST /api/cflow2/approve`(본문 `{cwd, scope, node?, decision?, reason?}`,
   처리 함수 `daemon/cflow2_approve.approve`, 이벤트 루프 밖에서 호출).

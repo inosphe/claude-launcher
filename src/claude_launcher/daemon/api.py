@@ -671,6 +671,7 @@ def build_app(
     r.add_post("/api/cflow2/archive", h_cflow2_archive)
     r.add_post("/api/cflow2/report", h_cflow2_report)
     r.add_post("/api/cflow2/move", h_cflow2_move)
+    r.add_post("/api/cflow2/move/resolve", h_cflow2_move_resolve)
     r.add_get("/api/cflow2/asks", h_cflow2_asks)
     r.add_post("/api/cflow2/collection", h_cflow2_collection)
     r.add_post("/api/cflow2/inputs/check", h_cflow2_inputs_check)
@@ -4576,6 +4577,15 @@ NUDGE_CFLOW2_FORCED = (
     "cflow2: the user moved your run from the dashboard - what you were doing "
     "there is cancelled; call the flow_status tool and continue from its tasks"
 )
+NUDGE_CFLOW2_MOVE_APPROVED = (
+    "cflow2: the user approved your move request from the dashboard - the run "
+    "moved where you asked; call the flow_status tool and continue from its tasks"
+)
+NUDGE_CFLOW2_MOVE_DENIED = (
+    "cflow2: the user refused your move request from the dashboard - the run "
+    "stays where it was; call the flow_status tool, read the refusal "
+    "(move_request) and continue on the declared route"
+)
 NUDGE_CFLOW2_REPORTED = (
     "cflow2: the user reported your run's task from the dashboard - stop working "
     "on it; call the flow_status tool and continue"
@@ -4963,6 +4973,30 @@ async def h_cflow2_move(request: web.Request) -> web.Response:
     )
     payload["nudge_scheduled_sessions"] = await _nudge_sessions(
         request.app["manager"], cwd, scope, NUDGE_CFLOW2_FORCED
+    )
+    return json_response(payload)
+
+
+async def h_cflow2_move_resolve(request: web.Request) -> web.Response:
+    """A person answers the driver's move request (``flow_request_move``) --
+    the dashboard half of ``claunch cflow2 move --approve|--deny``. Body:
+    cwd, scope, decision (approve | deny), reason. The driver is nudged
+    either way: an approval moved its run, a refusal released it."""
+    resolved, err = await _cflow_action_cwd(request)
+    if err:
+        return err
+    cwd, scope, body = resolved
+    decision = str(body.get("decision") or "").strip().lower()
+    if decision not in ("approve", "deny"):
+        return json_error(400, "'decision' must be 'approve' or 'deny'")
+    reason = str(body.get("reason") or "").strip() or None
+    payload = await asyncio.to_thread(
+        cflow2_runtime.resolve_move, decision, reason=reason, cwd=cwd,
+        scope=scope,
+    )
+    payload["nudge_scheduled_sessions"] = await _nudge_sessions(
+        request.app["manager"], cwd, scope,
+        NUDGE_CFLOW2_MOVE_APPROVED if decision == "approve" else NUDGE_CFLOW2_MOVE_DENIED,
     )
     return json_response(payload)
 
