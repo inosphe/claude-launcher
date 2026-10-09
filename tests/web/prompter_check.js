@@ -73,6 +73,7 @@ const harness = new Function(
    let prompterState = { connected: false, prompts: [] };
    let prompterExpanded = false;
    ${slice("renderTermPrompterRow")}
+   ${slice("sessionLineOnPage")}
    ${slice("syncPrompterToggle")}
    exports.render = renderTermPrompterRow;
    exports.set = (k, v) => { eval(k + " = v"); };

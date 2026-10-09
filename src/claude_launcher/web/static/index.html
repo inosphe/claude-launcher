@@ -1161,8 +1161,31 @@
         <legend class="sr-only">Transcript format</legend>
         <label><input type="radio" name="log-format" value="raw" checked><span>Raw text</span></label>
         <label><input type="radio" name="log-format" value="markdown"><span>Markdown</span></label>
+        <!-- What the minimap's colours stand for, in the same colours. -->
+        <span id="log-legend" aria-hidden="true">
+          <span class="log-key" data-kind="user">user</span>
+          <span class="log-key" data-kind="assistant">assistant</span>
+          <span class="log-key" data-kind="thinking">thinking</span>
+          <span class="log-key" data-kind="tool">tool call</span>
+          <span class="log-key" data-kind="result">result</span>
+          <span class="log-key" data-kind="error">error</span>
+        </span>
       </fieldset>
-      <div id="term-log-pane" role="tabpanel" aria-labelledby="log-transcript-tab"></div>
+      <!-- The conversation and its timeline. The minimap is a strip beside the
+           scroller with one coloured mark per block of what is loaded (user
+           input, assistant reply, thinking, tool call, tool result, error) at
+           the height that block sits at in the pane, and a box for the part
+           on screen; pressing or dragging on it scrolls the pane there
+           (renderTranscriptMinimap). #log-new is up only while turns have
+           arrived below a reader who scrolled up; pressing it goes to them. -->
+      <div id="log-body">
+        <div id="term-log-pane" role="tabpanel" aria-labelledby="log-transcript-tab"></div>
+        <div id="log-minimap" role="scrollbar" aria-controls="term-log-pane"
+             aria-orientation="vertical" aria-label="conversation timeline"
+             title="timeline of the loaded conversation — press or drag to jump"></div>
+        <button id="log-new" class="term-btn hidden" type="button"
+                title="new turns arrived below — go to the newest"></button>
+      </div>
       <div id="log-info-pane" role="tabpanel" aria-labelledby="log-info-tab" hidden></div>
     </div>
     <div id="msg-view" class="hidden"></div>
