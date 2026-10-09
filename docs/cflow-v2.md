@@ -294,6 +294,15 @@ ask:
   시도하며 최대 4회까지 미룬다(`ask_deferred`). 질문은 v1과 같은 경로
   (`POST /api/mesh/<mesh>/messages`, type `decide`)로 전달되고, ask id → 런 위치
   색인이 `<런처 홈>/cflow2/asks/`에 기록된다. 응답자는 id만으로 답한다.
+- 미리 보기(`claunch cflow2 responders <작업> [--role R] [--json]`, claunch-3va8h):
+  질문을 열기 전에 그 작업의 `from` 그룹이 지금 누구에게 닿는지 그룹마다 한 줄로
+  보여 준다(`asks.who_answers`). 명단을 읽기만 하고 연결은 만들지 않는다.
+  `connect: true` 그룹은 질문이 열릴 때 연결될 응답 가능 멤버를 싣는다. `--role`은
+  그 역할을 지명한 그룹만 남긴다. 종료 코드는 0(어느 그룹이 응답 가능한 멤버에
+  닿음), 1(아무 그룹도 닿지 않음), 2(판정 불가: 이 디렉터리에 v2 런이 없음, 그런
+  노드가 없음, 노드에 `from`이 있는 `ask`가 없음, 명단 무응답)다. v1의 `claunch
+  cflow responders`와 같은 판정이며, improv-worker-v2의 reviewer-ensure가 이 명령을
+  부른다.
 - 런의 신원: 런은 시작 시점에 드라이버 세션을 `state.json`의 `driver`로 기록한다
   (시작한 셸의 `CLAUNCH_SESSION`, 없으면 scope가 가리키는 세션). 명단 조회의 기준
   세션, 자기 응답 거절, 질문 발신자, 통지 대상은 모두 이 값을 쓴다. scope는 신원으로

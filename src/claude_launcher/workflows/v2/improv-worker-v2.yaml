@@ -113,8 +113,9 @@ sides:
 # - 저장소 특화 verify(workspace_check, changed_tests, report_check 등)는 v1과
 #   같이 정본에 박지 않는다. v2 프로젝트 레이어(.claunch/workflows/v2/)가 아직
 #   없으므로 workspace-ok의 재측정은 산문과 반환값(mismatch)이 진다.
-# - `claunch cflow responders peer-review`는 v1 런의 chooser를 읽는다. v2의
-#   ask(from) 응답자 해석은 런타임 단계의 일이다.
+# - reviewer-ensure가 부르는 응답자 판정은 `claunch cflow2 responders`다 — v1의
+#   `claunch cflow responders`는 v1 런만 찾으므로 v2 런에서는 판정을 내지
+#   못한다(claunch-3va8h).
 
 # ── 시작 입력(docs/cflow-v2.md 2.6) ─────────────────────────────────────
 # 새 세션·자식 spawn 폼이 이 선언으로 입력 칸을 그린다. 값은 런 데이터
@@ -1817,11 +1818,12 @@ nodes:
     prompt: |
       다음 스텝(peer-review)의 질문이 리뷰어에게 갈 수 있는지 먼저 잰다:
 
-          claunch cflow responders peer-review --role reviewer
+          claunch cflow2 responders peer-review --role reviewer
 
       종료 코드가 판정이다 — 0이면 reviewer 그룹 중 하나가 답할 세션에
       닿는다(자식 리뷰어, 형제 리뷰어, 조상 리뷰어 순서), 1이면 아무
-      그룹도 닿지 않는다, 2이면 재지 못했다(roster 무응답 등).
+      그룹도 닿지 않는다, 2이면 재지 못했다(이 디렉터리에 v2 런이 없음,
+      roster 무응답 등).
 
       · 0 — 할 일이 없다. 출력(어느 그룹이 누구에게 닿는지와 그 관계)을
         보고에 옮기고 넘어간다. 이 런이 앞 회차에 세운 자식 리뷰어가
@@ -1862,7 +1864,7 @@ nodes:
       세션이면 1이 나오고, 스폰이 너와 자식 둘만의 메시를 연다 — 그
       리뷰어에게도 질문은 그대로 닿는다.
     done_when: |
-      `claunch cflow responders peer-review --role reviewer`의 출력과 종료
+      `claunch cflow2 responders peer-review --role reviewer`의 출력과 종료
       코드가 보고에 있다. 1이었으면 스폰한 자식 리뷰어의 세션·핸들과
       스폰 뒤 다시 잰 출력(0)이, 또는 스폰 거절 문구가 함께 있다.
     returns:

@@ -481,6 +481,96 @@ def test_unreadable_roster_defers_instead_of_spending_groups(tmp_path):
     assert d.status(T0 + 31)["asks"][0]["asked"] == ["rev"]
 
 
+# -- responders preview (claunch-3va8h) -----------------------------------------
+
+
+REVIEW = """
+    nodes:
+      w: {prompt: w}
+      review:
+        prompt: r
+        ask:
+          prompt: "pass?"
+          from:
+            - {role: reviewer, scope: descendant}
+            - {role: reviewer, scope: sibling, connect: true}
+            - {role: leader, scope: ancestor}
+          otherwise: "self:pass"
+          options: {pass: {outcome: ok}, changes: {outcome: changes}}
+    body: [w, review]
+"""
+
+
+class _NoWire(responders.Pool):
+    def _wire_to(self, matched):  # pragma: no cover - failing is the assertion
+        raise AssertionError("a preview must not wire")
+
+
+def _preview_pool(**kw):
+    members = {"lead": _member("lead", "leader"), "rev": _member("rev", "reviewer")}
+    base = dict(mesh="m", me="w1", members=members, reachable={"lead"},
+                ancestors=["lead"], siblings={"rev"})
+    base.update(kw)
+    return lambda **_: _NoWire(**base)
+
+
+def test_responders_lists_every_group_and_wires_nothing(tmp_path):
+    d = Drv(tmp_path, REVIEW)  # the ask is not open yet: w is the active task
+    out = asks.who_answers("review", cwd=d.cwd, scope=d.scope, pool_fn=_preview_pool())
+    assert out["node"] == "review" and out["me"] == "w1" and out["mesh"] == "m"
+    desc, sib, lead = out["groups"]
+    assert desc["asks"] == [] and "reason" in desc
+    # connect: true lists the unwired reviewer it would wire when the ask opens
+    assert sib["asks"] == ["rev"] and sib["relations"] == {"rev": "sibling"}
+    assert lead["asks"] == ["lead"] and lead["relations"] == {"lead": "ancestor"}
+    assert out["resolves"] is True and out["unreadable"] is False
+    assert not d.state().get("asks")  # read-only: no ask was opened
+
+
+def test_responders_role_filter_keeps_the_leader_from_answering(tmp_path):
+    d = Drv(tmp_path, REVIEW)
+    nobody = _preview_pool(members={"lead": _member("lead", "leader")}, siblings=set())
+    out = asks.who_answers("review", role="Reviewer", cwd=d.cwd, scope=d.scope,
+                           pool_fn=nobody)
+    assert [g["candidate"] for g in out["groups"]] == [
+        "reviewer (descendant)", "reviewer (sibling, connect)"]
+    assert out["resolves"] is False
+    full = asks.who_answers("review", cwd=d.cwd, scope=d.scope, pool_fn=nobody)
+    assert full["resolves"] is True  # only through the leader group
+
+
+def test_responders_cannot_tell_without_a_run_a_node_or_an_ask(tmp_path):
+    with pytest.raises(runtime.FlowError, match="no cflow2 run"):
+        asks.who_answers("review", cwd=str(tmp_path), scope=SCOPE, pool_fn=_preview_pool())
+    d = Drv(tmp_path, REVIEW)
+    with pytest.raises(runtime.FlowError, match="no node 'nope'"):
+        asks.who_answers("nope", cwd=d.cwd, scope=d.scope, pool_fn=_preview_pool())
+    with pytest.raises(runtime.FlowError, match="asks nobody"):
+        asks.who_answers("w", cwd=d.cwd, scope=d.scope, pool_fn=_preview_pool())
+
+
+def test_responders_cli_exit_codes(tmp_path, monkeypatch, capsys):
+    from claude_launcher import cli_cflow2
+
+    d = Drv(tmp_path, REVIEW)
+    monkeypatch.chdir(tmp_path)
+
+    def run(node, role="", pool=None):
+        monkeypatch.setattr(asks, "default_pool", pool or _preview_pool())
+        args = SimpleNamespace(node=node, role=role, scope=d.scope, json=False)
+        return cli_cflow2._cmd_responders(args)
+
+    assert run("review", "reviewer") == 0
+    assert "reviewer (sibling, connect): rev (sibling)" in capsys.readouterr().out
+    lonely = _preview_pool(members={"lead": _member("lead", "leader")}, siblings=set())
+    assert run("review", "reviewer", lonely) == 1
+    assert run("review", "", _preview_pool(problem="no reply", unreadable=True)) == 2
+    assert run("nope") == 2
+    assert "no node 'nope'" in capsys.readouterr().err
+    monkeypatch.chdir(tmp_path / "..")
+    assert run("review") == 2  # no v2 run in this directory
+
+
 def test_abstain_moves_to_the_next_group(tmp_path):
     d = Drv(tmp_path, DELEGATED)
     out = Outbox()
