@@ -13923,9 +13923,36 @@ function renderTermPresetButtons() {
     .filter((row) => row.enabled !== false);
   const page = typeof currentPage === "undefined" ? "terminal" : currentPage;
   fillPresetStrip($("term-preset-buttons"), rows,
-    page === "terminal" && !!currentName && !sessionEnded, sendPromptPreset);
+    sessionLineOnPage(page) && !!currentName && !sessionEnded, sendPromptPreset);
   fillPresetStrip($("shadow-preset-buttons"), rows,
     page === "shadow", sendShadowPreset);
+}
+
+/* Which pages carry the attached session's footer (the session line, its
+   preset strip and prompter row). The terminal page, and the transcript page
+   while it reads that same local session: a reader going back through the
+   conversation can answer it from there. A transcript of another session, or
+   of a remote shadow, would send to a session that is not the one on screen,
+   so the footer stays down. The transcript's state is declared further down
+   the file; before that line has run the answer is simply "no". */
+function sessionLineOnPage(page) {
+  if (page === "terminal") return true;
+  if (page !== "log") return false;
+  try {
+    return !!currentName && transcriptName === currentName && !transcriptMachine;
+  } catch {
+    return false;
+  }
+}
+
+/* Show or hide the footer for the page on screen. Guarded like the terminal
+   itself is not — the element always exists in the shipped page, but a
+   harness that boots this against a partial DOM has no reason to know it. */
+function syncSessionLine() {
+  const page = typeof currentPage === "undefined" ? "terminal" : currentPage;
+  if ($("term-input"))
+    $("term-input").classList.toggle("hidden", !(currentName && sessionLineOnPage(page)));
+  renderTermPresetButtons();
 }
 
 function fillPresetStrip(box, rows, onPage, send) {
@@ -13998,9 +14025,10 @@ function renderTermPrompterRow() {
   if (!box) return;
   box.innerHTML = "";
   const rows = (prompterState && prompterState.connected && prompterState.prompts) || [];
-  // The terminal page's row only, like its preset strip: its chips insert
-  // into that page's footer field.
-  const onTerminal = typeof currentPage === "undefined" || currentPage === "terminal";
+  // The terminal page's row (and the attached session's transcript page,
+  // which keeps the same footer), like its preset strip: its chips insert
+  // into that footer field.
+  const onTerminal = typeof currentPage === "undefined" || sessionLineOnPage(currentPage);
   const visible = onTerminal && !!currentName && !sessionEnded && rows.length > 0;
   box.classList.toggle("hidden", !visible);
   if (!visible) return;
@@ -16949,6 +16977,8 @@ let transcriptSeen = -1;           // newest seq loaded, for the follow-forward
 let transcriptMore = false;        // is there anything above what is loaded
 let transcriptBusy = false;        // one fetch at a time, or a flick sends ten
 let transcriptGeneration = 0;
+let transcriptUnread = 0;          // turns appended below a reader who scrolled up
+let transcriptMinimapFrame = 0;    // a pending minimap redraw (one per frame)
 
 /* How prose (text and thinking blocks) is drawn: "raw" as typed, or
    "markdown" through mdInto. Tool traffic stays preformatted in both, since
@@ -16988,6 +17018,7 @@ function setTranscriptFormat(format, remember = true) {
   }
   if (atEnd) pane.scrollTop = pane.scrollHeight;
   else if (landed) pane.scrollTop = landed.offsetTop - anchorGap;
+  scheduleTranscriptMinimap();
 }
 document.querySelectorAll('input[name="log-format"]').forEach((input) =>
   input.addEventListener("change", () => {
@@ -17016,15 +17047,22 @@ function openTranscript(name, machine = null) {
   if (back) back.href = machine ? shadowHash(machine, name) : `#/s/${encodeURIComponent(name)}`;
   const info = $("log-info-tab");
   if (info) info.hidden = !!machine;
-  if (transcriptName === name && transcriptMachine === machine) return;
+  if (transcriptName === name && transcriptMachine === machine) {
+    if (typeof syncSessionLine === "function") syncSessionLine();
+    return;
+  }
   transcriptGeneration += 1;
   transcriptBusy = false;
   transcriptName = name;
   transcriptMachine = machine;
+  // showView ran before the name was set; the footer follows the session
+  // this page now reads.
+  if (typeof syncSessionLine === "function") syncSessionLine();
   globalThis.TranscriptTabs?.select("transcript");
   transcriptCursor = null;
   transcriptSeen = -1;
   transcriptMore = false;
+  setTranscriptUnread(0);
   const pane = $("term-log-pane");
   if (pane) {
     pane.innerHTML = "";
@@ -17032,8 +17070,13 @@ function openTranscript(name, machine = null) {
     if (!pane.dataset.wired) {
       pane.dataset.wired = "1";
       pane.addEventListener("scroll", onTranscriptScroll);
+      // A narrower pane re-wraps every block, which moves every mark.
+      if (typeof ResizeObserver === "function") {
+        new ResizeObserver(() => scheduleTranscriptMinimap()).observe(pane);
+      }
     }
   }
+  renderTranscriptMinimap();
   loadTranscriptPage({ older: false });
   startTranscriptPoll();
 }
@@ -17049,8 +17092,10 @@ function closeTranscript() {
   transcriptName = null;
   transcriptMachine = null;
   transcriptBusy = false;
+  setTranscriptUnread(0);
   const pane = $("term-log-pane");
   if (pane) pane.innerHTML = "";
+  renderTranscriptMinimap();
 }
 
 function transcriptIsOpen() {
@@ -17065,6 +17110,8 @@ function onTranscriptScroll() {
   if (pane.scrollTop < TRANSCRIPT_NEAR_TOP && transcriptMore && !transcriptBusy) {
     loadTranscriptPage({ older: true });
   }
+  if (transcriptUnread && transcriptAtEnd(pane)) setTranscriptUnread(0);
+  syncTranscriptMinimapView();
 }
 
 function transcriptAtEnd(pane) {
@@ -17166,7 +17213,9 @@ function renderTranscriptPage(data, older) {
     pane.appendChild(frag);
     // Only if they were already at the bottom. A reader who has scrolled up
     // to read something is not asking to be dragged back down every time the
-    // session says another word.
+    // session says another word: the turns are appended under them, where
+    // they stay put, and #log-new counts them.
+    if (!follow) setTranscriptUnread(transcriptUnread + records.length);
     if (follow) {
       const retained = Array.from(pane.children).filter((node) =>
         node.classList.contains("log-rec"));
@@ -17179,7 +17228,145 @@ function renderTranscriptPage(data, older) {
       pane.scrollTop = pane.scrollHeight;
     }
   }
+  scheduleTranscriptMinimap();
 }
+
+/* The count of turns that arrived below a reader who is not at the bottom,
+   on the button that takes them there. Zero hides it. */
+function setTranscriptUnread(n) {
+  transcriptUnread = Math.max(0, n | 0);
+  const chip = $("log-new");
+  if (!chip) return;
+  chip.textContent = transcriptUnread
+    ? `↓ ${transcriptUnread} new ${transcriptUnread === 1 ? "turn" : "turns"}` : "";
+  chip.classList.toggle("hidden", !transcriptUnread);
+}
+
+function onTranscriptNewClick() {
+  const pane = $("term-log-pane");
+  if (pane) pane.scrollTop = pane.scrollHeight;
+  setTranscriptUnread(0);
+  syncTranscriptMinimapView();
+}
+
+/* What a block is, for the timeline: who spoke, or which half of a tool
+   exchange it is. A text block takes its record's side — the same rule that
+   files a tool-result-only user record under the assistant. */
+function transcriptBlockKind(b, asst) {
+  if (b.type === "text") return asst ? "assistant" : "user";
+  if (b.type === "thinking") return "thinking";
+  if (b.type === "tool_use") return "tool";
+  if (b.type === "tool_result") return b.error ? "error" : "result";
+  return "";
+}
+
+/* The marks of the timeline, from the blocks on the page: each block's top
+   and height as fractions of the pane's whole scroll height. Neighbouring
+   blocks of one kind with (almost) no gap between them become one mark, so a
+   run of tool calls is one band rather than a hundred hairlines. Every block
+   sits inside a positioned record, so its offsetTop counts from the record
+   and the record's from the pane. */
+function transcriptMinimapSegments(pane) {
+  const total = pane ? pane.scrollHeight : 0;
+  if (!total) return [];
+  const out = [];
+  for (const rec of pane.children) {
+    if (!rec.classList.contains("log-rec")) continue;
+    for (const node of rec.children) {
+      const kind = node.dataset && node.dataset.kind;
+      if (!kind) continue;
+      const top = rec.offsetTop + node.offsetTop;
+      const height = node.offsetHeight || 0;
+      const prev = out[out.length - 1];
+      if (prev && prev.kind === kind && top - (prev.top + prev.height) <= 24) {
+        prev.height = top + height - prev.top;
+        prev.count += 1;
+        continue;
+      }
+      out.push({ kind, top, height, count: 1, seq: rec.dataset.seq });
+    }
+  }
+  return out.map((seg) => ({
+    kind: seg.kind, seq: seg.seq, count: seg.count,
+    top: seg.top / total, height: seg.height / total,
+  }));
+}
+
+/* Redraws batch to one per frame: a page of forty records and a format
+   switch each ask, and the layout is only worth reading once. */
+function scheduleTranscriptMinimap() {
+  if (transcriptMinimapFrame) return;
+  if (typeof requestAnimationFrame !== "function") { renderTranscriptMinimap(); return; }
+  transcriptMinimapFrame = requestAnimationFrame(renderTranscriptMinimap);
+}
+
+function renderTranscriptMinimap() {
+  transcriptMinimapFrame = 0;
+  const map = $("log-minimap");
+  const pane = $("term-log-pane");
+  if (!map) return;
+  map.innerHTML = "";
+  map.classList.toggle("has-more", !!transcriptMore);
+  map.title = transcriptMore
+    ? "timeline of the loaded conversation (older turns load as you scroll up) — press or drag to jump"
+    : "timeline of the conversation — press or drag to jump";
+  for (const seg of transcriptMinimapSegments(pane)) {
+    const mark = el("div", "log-mm-seg");
+    mark.dataset.kind = seg.kind;
+    mark.style.top = `${(seg.top * 100).toFixed(3)}%`;
+    mark.style.height = `${(seg.height * 100).toFixed(3)}%`;
+    map.appendChild(mark);
+  }
+  map.appendChild(el("div", "log-mm-view"));
+  syncTranscriptMinimapView();
+}
+
+/* The box over the part of the conversation that is on screen. */
+function syncTranscriptMinimapView() {
+  const map = $("log-minimap");
+  const pane = $("term-log-pane");
+  const view = map && map.querySelector(".log-mm-view");
+  if (!view || !pane) return;
+  const total = pane.scrollHeight || 1;
+  const top = Math.max(0, Math.min(1, pane.scrollTop / total));
+  const height = Math.max(0, Math.min(1 - top, pane.clientHeight / total));
+  view.style.top = `${(top * 100).toFixed(3)}%`;
+  view.style.height = `${(height * 100).toFixed(3)}%`;
+  map.setAttribute("aria-valuenow", String(Math.round(top * 100)));
+}
+
+/* Press or drag on the timeline: the point under the pointer becomes the
+   middle of the pane. Reaching near the top fetches the page above, as a
+   wheel would (the pane's own scroll handler). */
+function seekTranscriptMinimap(clientY) {
+  const map = $("log-minimap");
+  const pane = $("term-log-pane");
+  if (!map || !pane) return;
+  const rect = map.getBoundingClientRect();
+  const frac = Math.max(0, Math.min(1, (clientY - rect.top) / (rect.height || 1)));
+  pane.scrollTop = Math.max(0, frac * pane.scrollHeight - pane.clientHeight / 2);
+}
+
+function wireTranscriptMinimap() {
+  const map = $("log-minimap");
+  if (!map || map.dataset.wired) return;
+  map.dataset.wired = "1";
+  let dragging = false;
+  map.addEventListener("pointerdown", (ev) => {
+    dragging = true;
+    try { map.setPointerCapture(ev.pointerId); } catch {}
+    seekTranscriptMinimap(ev.clientY);
+    ev.preventDefault();
+  });
+  map.addEventListener("pointermove", (ev) => {
+    if (dragging) seekTranscriptMinimap(ev.clientY);
+  });
+  const stop = () => { dragging = false; };
+  map.addEventListener("pointerup", stop);
+  map.addEventListener("pointercancel", stop);
+  $("log-new")?.addEventListener("click", onTranscriptNewClick);
+}
+wireTranscriptMinimap();
 
 function renderTranscriptRecord(r) {
   // The role comes off the jsonl, and claude writes every tool_result as a
@@ -17201,7 +17388,12 @@ function renderTranscriptRecord(r) {
     head.appendChild(when);
   }
   box.appendChild(head);
-  for (const b of r.blocks || []) box.appendChild(renderTranscriptBlock(b));
+  for (const b of r.blocks || []) {
+    const node = renderTranscriptBlock(b);
+    const kind = transcriptBlockKind(b, asst);
+    if (kind) node.dataset.kind = kind;
+    box.appendChild(node);
+  }
   return box;
 }
 
@@ -17292,16 +17484,19 @@ if (typeof document !== "undefined" && document.addEventListener) {
   });
 }
 
-/* The follow-forward: while the pane is open and the reader is sitting at the
-   bottom of it, new turns arrive under them the way the terminal's own output
-   does. Scrolled up, nothing moves — a reader who went looking for something
-   is not asking to be dragged back to the present every few seconds.
+/* The follow-forward: while the pane is open, new turns arrive at its end
+   as they are written. A reader sitting at the bottom is carried along, the
+   way the terminal's own output does. Scrolled up, the turns are still
+   appended — the timeline and the #log-new count say so — but nothing moves:
+   a reader who went looking for something is not asking to be dragged back
+   to the present every few seconds.
 
    Its own timer rather than a ride on the session poll: the pane is open for
-   one session at a time and closed most of the time, and a conversation turn
-   is a slower thing than a rail row. Started when it opens, stopped when it
-   closes, so a closed pane costs nothing. */
-const TRANSCRIPT_POLL_MS = 4000;
+   one session at a time and closed most of the time. Started when it opens,
+   stopped when it closes, so a closed pane costs nothing; a tail read is an
+   indexed seek of one page (transcript_view.page), so a short period is
+   cheap. */
+const TRANSCRIPT_POLL_MS = 1500;
 let transcriptTimer = null;
 
 function startTranscriptPoll() {
@@ -17319,10 +17514,10 @@ function stopTranscriptPoll() {
 function pollTranscript() {
   // `transcriptIsOpen` is the whole guard now: route() clears the name (and
   // stops this timer) the moment the reader leaves the page, so a live name
-  // means the page is the one on screen.
+  // means the page is the one on screen. Polled wherever the reader is
+  // scrolled: renderTranscriptPage decides whether they are carried along.
   if (!transcriptIsOpen() || transcriptBusy || $("term-log-pane")?.hidden) return;
-  const pane = $("term-log-pane");
-  if (!pane || !transcriptAtEnd(pane)) return;
+  if (!$("term-log-pane")) return;
   loadTranscriptPage({ older: false });
 }
 
@@ -17799,14 +17994,10 @@ function showView(name) {
   // detach() own that object's life.
   $("term-header").classList.toggle("hidden", !(showTerm && currentName));
   $("terminal").classList.toggle("hidden", !showTerm);
-  // The send-keys input belongs to an attached session: hidden with the
-  // terminal, and only up when one is attached. Guarded like the terminal
-  // itself is not — the element always exists in the shipped page, but a
-  // harness that boots this function against a partial DOM has no reason to
-  // know about it.
-  if ($("term-input"))
-    $("term-input").classList.toggle("hidden", !(showTerm && currentName));
-  renderTermPresetButtons();
+  // The send-keys input belongs to an attached session: up on the terminal,
+  // and on that session's transcript page (sessionLineOnPage), only while one
+  // is attached.
+  syncSessionLine();
   // The transcript is its own page now (VIEWS below hides and shows it like
   // any other), so nothing here has to reach for it. The terminal button that
   // walks to it lives in the header, which the line above already handles.
