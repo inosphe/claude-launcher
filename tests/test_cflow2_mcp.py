@@ -97,3 +97,37 @@ def test_start_refused_while_live_and_abort(project):
 def test_unknown_definition_is_a_tool_error(project):
     _, err = _call("flow_start", {"workflow": "nope"})
     assert err and "no v2 definition" in err
+
+
+
+def _start_why(project):
+    """demo2 with require_reason on its choose, started through the tool."""
+    src = DEF.replace("name: demo2", "name: why2").replace(
+        "- choose:", "- choose:\n        require_reason: true")
+    (project / ".claunch" / "workflows" / "v2" / "why2.yaml").write_text(src, encoding="utf-8")
+    _, err = _call("flow_start", {"workflow": "why2"})
+    assert err is None, err
+    st, err = _call("flow_report", {"node": "first", "value": {"n": 1}})
+    assert err is None and st["choices"][0]["require_reason"] is True
+
+
+def test_flow_select_holds_the_agent_to_require_reason(project):
+    """The MCP tool passes the agent's caller through: a choose with
+    require_reason refuses its bare pick end to end (claunch-0obx8)."""
+    _start_why(project)
+    for bare in ({}, {"reason": ""}, {"reason": "   "}):
+        _, err = _call("flow_select", {"option": "go", **bare})
+        assert err and "requires a reason" in err
+    st, _ = _call("flow_status", {})
+    assert st["choices"] and not st["tasks"]  # nothing moved
+    st, err = _call("flow_select", {"option": "go", "reason": "first is done"})
+    assert err is None and st["tasks"][0]["label"] == "second"
+
+
+def test_a_person_picks_the_same_choose_without_a_reason(project):
+    # the person's channel may leave the reason out (claunch-wm67r)
+    from claude_launcher.cflow2 import runtime
+
+    _start_why(project)
+    st = runtime.select(None, "go", None, caller=runtime.CALLER_USER, cwd=str(project))
+    assert st["tasks"][0]["label"] == "second"

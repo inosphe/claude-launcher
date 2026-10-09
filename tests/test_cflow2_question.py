@@ -411,6 +411,31 @@ def test_require_reason_refuses_an_agents_bare_answer_but_not_a_persons(tmp_path
     assert d.state()["result"]["pose"]["value"]["decision"] == "narrow"
 
 
+def test_flow_approve_holds_the_agent_to_require_reason(tmp_path, monkeypatch):
+    """End to end through the MCP tool (claunch-0obx8): flow_approve passes
+    the agent's caller, so a bare answer -- and a bare reframe -- to a
+    require_reason ask that fell through to the driver is refused."""
+    from claude_launcher.cflow2 import mcp as cflow2_mcp
+
+    src = ASKB.replace("format: pick, otherwise: human",
+                       "format: pick, require_reason: true, otherwise: self")
+    d = Drv(tmp_path, _compile(src))
+    d.report("frame", value={"brief": BRIEF})
+    (a,) = d.status()["asks"]
+    assert a["resolution"] == "self" and a["require_reason"] is True
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CLAUNCH_SESSION", SCOPE)  # the driver's own MCP server
+    for option, bare in (("narrow", None), ("narrow", "  "), ("reframe", "")):
+        with pytest.raises(runtime.FlowError, match="needs a reason"):
+            cflow2_mcp.call_tool("flow_approve", {"node": "pose", "option": option,
+                                                  "reason": bare})
+    assert not d.events("ask_answered")
+    cflow2_mcp.call_tool("flow_approve", {"node": "pose", "option": "narrow",
+                                          "reason": "reversible, and enough for now"})
+    assert d.state()["result"]["pose"]["value"]["decision"] == "narrow"
+    assert d.events("ask_answered")[0]["channel"] == "self"
+
+
 def test_require_reason_is_for_brief_asks_only():
     with pytest.raises(frontend.FrontendError, match="require_reason applies"):
         _compile(QTYPE + "nodes:\n  a: {prompt: a, ask: {prompt: p, require_reason: true}}\n"
