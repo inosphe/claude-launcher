@@ -46,6 +46,17 @@
      purpose: that prompt is the restart's most confusing symptom, so the
      sentence explaining it has to be readable over the top of it. -->
 <div id="notices" aria-live="polite" aria-atomic="false"></div>
+<!-- The notification history behind the bell: the approval requests still
+     waiting (hidden cards included, with their buttons) and every notice this
+     browser has shown. Kept in localStorage; the waiting list is re-read from
+     the daemon on every poll (app.js, noticePanelPaint). -->
+<aside id="notice-panel" class="hidden" aria-label="notification history">
+  <div id="notice-panel-head">
+    <h2>Notifications</h2>
+    <button id="notice-panel-close" type="button" title="close (Esc)">×</button>
+  </div>
+  <div id="notice-panel-body"></div>
+</aside>
 
 <div id="layout">
   <!-- Mobile only: the status line that stands in for the rail while a page
@@ -54,6 +65,8 @@
     <button id="m-menu" type="button" aria-label="open menu">☰</button>
     <span id="m-dot" class="dot"></span>
     <span id="m-title">no session</span>
+    <button id="m-notice-bell" class="m-act notice-bell" type="button"
+            title="notification history">🔔<span class="notice-bell-count"></span></button>
     <!-- The observer header goes down on a phone, and the scope switch goes
          with it — but the rail's own observe-pin box stays reachable, so a
          phone that can pin sessions must also be able to choose the mode
@@ -99,6 +112,10 @@
                 title="reload the session list now">⟳</button>
         <button id="theme-toggle" type="button" data-theme-toggle
                 title="switch to the light theme">☀</button>
+        <!-- The notification history (claunch-l978l): the number is the
+             approval requests waiting on a person, hidden cards included. -->
+        <button id="notice-bell" class="notice-bell" type="button"
+                title="notification history">🔔<span class="notice-bell-count"></span></button>
         <button id="refresh-archived" class="hidden" type="button"
                 title="reload archived sessions">Archived ⟳</button>
         <span id="daemon-info"></span>

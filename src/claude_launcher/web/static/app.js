@@ -12855,6 +12855,19 @@ syncSessionView();
    somewhere else — another agent's `spawn`, a `claunch new` in a terminal, a
    relay that dropped a beat — shows up only when the timer next comes round.
    This is that timer, on demand, for the whole rail at once. */
+/* The notification history's bell (rail and phone bar) and its panel; what
+   they show is the notices section's (noticePanelPaint). */
+for (const id of ["notice-bell", "m-notice-bell"]) {
+  const bell = $(id);
+  if (bell) bell.addEventListener("click", () => noticePanelToggle());
+}
+if ($("notice-panel-close")) {
+  $("notice-panel-close").addEventListener("click", () => noticePanelToggle(false));
+}
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape" && noticePanelOpen()) noticePanelToggle(false);
+});
+
 $("refresh-all").addEventListener("click", async () => {
   const btn = $("refresh-all");
   if (btn.disabled) return;
@@ -41446,6 +41459,7 @@ function notify(title, sub, opts) {
   if (!host) return null;
   const key = o.key || `n${(noticeSeq += 1)}`;
   dismissNotice(key);            // one card per key, always the newest
+  noticeRecord({ title, sub: sub || "", kind: o.kind || "" });
   const node = el("div", "notice" + (o.kind ? ` ${o.kind}` : ""));
   node.appendChild(el("div", "notice-title", title));
   if (sub) node.appendChild(el("div", "notice-sub", sub));
@@ -41486,6 +41500,457 @@ function gateSessionLink(name) {
 }
 
 /* ------------------------------------------------------------------ */
+/* notice history — what the corner said, kept for later               */
+/* ------------------------------------------------------------------ */
+/* A card in the corner is gone once it is clicked or times out, and a gate
+   card could not be put away at all without answering it. The history keeps
+   every notice and every gate request this page saw, and the panel behind the
+   rail's bell shows them again: the requests still waiting (with their
+   buttons and countdowns) on top, everything else below with how it ended.
+
+   Hiding a gate card only puts the card away. The request stays open on the
+   daemon and its deadline keeps running — the restart gate still approves
+   itself at its timeout — which is why the bell keeps counting it.
+
+   Kept in this browser's localStorage (claunch-l978l): the history, the
+   hidden request ids and when the panel was last opened. A browser without
+   storage still works; it only forgets on reload. Pending requests are never
+   taken from storage — every poll reads them from the daemon. */
+const NOTICE_HISTORY_KEY = "claunch.noticeHistory";
+const NOTICE_HIDDEN_KEY = "claunch.noticeHidden";
+const NOTICE_SEEN_KEY = "claunch.noticeSeen";
+const NOTICE_HISTORY_MAX = 100;
+
+function noticeStore() {
+  try {
+    return typeof localStorage === "undefined" ? null : localStorage;
+  } catch {
+    return null;
+  }
+}
+
+function noticeLoad(key, fallback) {
+  const store = noticeStore();
+  if (!store) return fallback;
+  try {
+    const raw = store.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function noticeSave(key, value) {
+  const store = noticeStore();
+  if (!store) return;
+  try {
+    store.setItem(key, JSON.stringify(value));
+  } catch {
+    /* full or blocked: the page keeps working from memory */
+  }
+}
+
+const noticeHistory = (() => {
+  const saved = noticeLoad(NOTICE_HISTORY_KEY, []);
+  return Array.isArray(saved)
+    ? saved.filter((e) => e && typeof e === "object").slice(0, NOTICE_HISTORY_MAX)
+    : [];
+})();
+/* "<type>:<request id>" of gate cards put away by hand. */
+const gateHiddenIds = new Set(
+  (() => {
+    const saved = noticeLoad(NOTICE_HIDDEN_KEY, []);
+    return Array.isArray(saved) ? saved.filter((k) => typeof k === "string") : [];
+  })()
+);
+let noticeSeenAt = Number(noticeLoad(NOTICE_SEEN_KEY, 0)) || 0;
+/* The pending requests of each gate as its last poll answered them. */
+const gatePending = { restart: [], goto: [], reposync: [] };
+
+function noticeHistorySave() {
+  noticeSave(NOTICE_HISTORY_KEY, noticeHistory);
+}
+
+function noticeRecord(entry) {
+  const rec = Object.assign(
+    { id: `h${Date.now()}-${(noticeSeq += 1)}`, at: Date.now() },
+    entry
+  );
+  noticeHistory.unshift(rec);
+  if (noticeHistory.length > NOTICE_HISTORY_MAX) {
+    noticeHistory.length = NOTICE_HISTORY_MAX;
+  }
+  noticeHistorySave();
+  noticeBellPaint();
+  noticePanelPaint();
+  return rec;
+}
+
+function gateHistoryEntry(type, rid) {
+  return noticeHistory.find(
+    (e) => e.gate && e.gate.type === type && e.gate.rid === rid
+  ) || null;
+}
+
+/* One history row per request, written the first time a poll sees it. */
+function gateHistoryOpen(type, rid, title, sub) {
+  if (gateHistoryEntry(type, rid)) return;
+  noticeRecord({ title, sub, kind: "warn", gate: { type, rid }, status: "pending" });
+}
+
+/* A request that left the pending set. `status` is the daemon's word for it
+   when the poll still carries the record, otherwise it is only known gone. */
+function gateHistorySettle(type, rid, status) {
+  const entry = gateHistoryEntry(type, rid);
+  if (!entry || entry.status !== "pending") return;
+  entry.status = status || "no longer pending";
+  entry.settledAt = Date.now();
+  noticeHistorySave();
+}
+
+/* Reconciles one gate's poll: settles the rows whose request is no longer
+   pending, and forgets hidden ids that can no longer come back. `all` is
+   every record the poll returned, settled ones included. */
+function gateHistorySync(type, pending, all) {
+  gatePending[type] = pending;
+  const live = new Set(pending.map((r) => String(r.id)));
+  const byId = new Map((all || []).map((r) => [String(r.id), r]));
+  for (const entry of noticeHistory) {
+    if (!entry.gate || entry.gate.type !== type || entry.status !== "pending") continue;
+    if (live.has(entry.gate.rid)) continue;
+    const rec = byId.get(entry.gate.rid);
+    gateHistorySettle(type, entry.gate.rid, rec && rec.status !== "pending" ? rec.status : null);
+  }
+  let pruned = false;
+  for (const key of [...gateHiddenIds]) {
+    const [kind, ...rest] = key.split(":");
+    if (kind === type && !live.has(rest.join(":"))) {
+      gateHiddenIds.delete(key);
+      pruned = true;
+    }
+  }
+  if (pruned) noticeSave(NOTICE_HIDDEN_KEY, [...gateHiddenIds]);
+  noticeBellPaint();
+  noticePanelPaint();
+}
+
+function gateIsHidden(type, rid) {
+  return gateHiddenIds.has(`${type}:${rid}`);
+}
+
+function gateHide(type, rid) {
+  gateHiddenIds.add(`${type}:${rid}`);
+  noticeSave(NOTICE_HIDDEN_KEY, [...gateHiddenIds]);
+  const entry = gateHistoryEntry(type, String(rid));
+  if (entry) {
+    entry.hidden = true;
+    noticeHistorySave();
+  }
+  noticeBellPaint();
+  noticePanelPaint();
+}
+
+function gateUnhide(type, rid) {
+  gateHiddenIds.delete(`${type}:${rid}`);
+  noticeSave(NOTICE_HIDDEN_KEY, [...gateHiddenIds]);
+  const entry = gateHistoryEntry(type, String(rid));
+  if (entry) {
+    entry.hidden = false;
+    noticeHistorySave();
+  }
+  noticeGateRefresh(type);
+}
+
+/* The press on a gate card that answers nothing: the card goes, the request
+   stays open with its deadline, and the panel keeps it. `rid` may be a
+   function when the card outlives one request (the restart gate keeps a
+   single card key). */
+function gateHideButton(type, rid, key, title) {
+  const btn = el("button", "wf-btn gate-hide", "Hide");
+  btn.title = title;
+  btn.addEventListener("click", (ev) => {
+    if (ev && ev.stopPropagation) ev.stopPropagation();
+    gateHide(type, String(typeof rid === "function" ? rid() : rid));
+    dismissNotice(key);
+  });
+  return btn;
+}
+
+function noticeGateRefresh(type) {
+  if (type === "restart") return refreshRestartGate();
+  if (type === "goto") return refreshGotoGate();
+  if (type === "reposync") return refreshReposyncGate();
+  return null;
+}
+
+function gatePendingCount() {
+  return gatePending.restart.length + gatePending.goto.length +
+    gatePending.reposync.length;
+}
+
+/* The rail's bell (and its phone twin): the number is the requests waiting
+   on a person, hidden or not; with none waiting, a dot says the history has
+   something newer than the last time the panel was opened. */
+function noticeBellPaint() {
+  const waiting = gatePendingCount();
+  const unread = noticeHistory.some((e) => (e.at || 0) > noticeSeenAt);
+  const hidden = [...gateHiddenIds].length > 0;
+  for (const id of ["notice-bell", "m-notice-bell"]) {
+    const bell = $(id);
+    if (!bell) continue;
+    const badge = bell.querySelector(".notice-bell-count");
+    if (badge) badge.textContent = waiting ? String(waiting) : "";
+    bell.classList.toggle("waiting", waiting > 0);
+    bell.classList.toggle("unread", !waiting && unread);
+    bell.classList.toggle("has-hidden", hidden);
+    bell.title = waiting
+      ? `${waiting} request(s) waiting on you` +
+        (hidden ? " — some cards are hidden, their deadlines still run" : "") +
+        " · notification history"
+      : "notification history";
+  }
+}
+
+function noticePanelOpen() {
+  const panel = $("notice-panel");
+  return !!panel && !panel.classList.contains("hidden");
+}
+
+function noticePanelToggle(force) {
+  const panel = $("notice-panel");
+  if (!panel) return;
+  const open = force === undefined ? !noticePanelOpen() : !!force;
+  panel.classList.toggle("hidden", !open);
+  if (open) {
+    noticeSeenAt = Date.now();
+    noticeSave(NOTICE_SEEN_KEY, noticeSeenAt);
+    noticePanelPaint();
+  }
+  noticeBellPaint();
+}
+
+function noticeStamp(ms) {
+  const d = new Date(ms);
+  if (isNaN(d.getTime())) return "";
+  const today = new Date().toDateString() === d.toDateString();
+  return today ? d.toLocaleTimeString() : d.toLocaleString();
+}
+
+function noticePanelButton(label, cls, title, onClick) {
+  const btn = el("button", "wf-btn" + (cls ? ` ${cls}` : ""), label);
+  btn.type = "button";
+  if (title) btn.title = title;
+  btn.addEventListener("click", (ev) => {
+    if (ev && ev.stopPropagation) ev.stopPropagation();
+    onClick(btn);
+  });
+  return btn;
+}
+
+/* One waiting request in the panel: what the card says, with its buttons.
+   The decisions post to the same endpoints the card does; a hidden card gets
+   a Show card press that puts it back in the corner. */
+function noticePanelGateRow(type, rec) {
+  const row = el("div", "notice-row pending");
+  const rid = String(rec.id);
+  const hidden = gateIsHidden(type, rid);
+  const head = el("div", "notice-row-head");
+  const actions = el("div", "gate-actions");
+  if (type === "restart") {
+    head.appendChild(el("span", "notice-title", "daemon restart requested"));
+    row.appendChild(head);
+    row.appendChild(el(
+      "div", "notice-sub",
+      `session ${rec.session || "?"}` +
+        (rec.requested_at
+          ? ` asked at ${noticeStamp(new Date(rec.requested_at).getTime())}`
+          : "") +
+        ((rec.extensions || 0) ? ` (extended ${rec.extensions}×)` : "")
+    ));
+    if ((rec.reason || "").trim()) {
+      row.appendChild(el("div", "notice-sub gate-reason", `reason: ${rec.reason.trim()}`));
+    }
+    row.appendChild(el(
+      "div", "notice-sub gate-clock",
+      `auto-approves in ${gateCountdown(rec.deadline)}`
+    ));
+    actions.appendChild(noticePanelButton(
+      "Approve", "approve",
+      "the daemon restarts now — every attached terminal goes down with it",
+      async (btn) => {
+        if (await gatePost("/api/daemon/restart-request/approve", btn)) {
+          announceRestartAsked(
+            `approved at ${noticeClock()} — the page reconnects on its own ` +
+              "once the successor is up"
+          );
+          refreshRestartGate();
+        }
+      }
+    ));
+    actions.appendChild(noticePanelButton(
+      "+5 min", "gate-extend",
+      "not a decision: the deadline moves out and the request stays open",
+      async (btn) => {
+        if (await gatePost("/api/daemon/restart-request/extend", btn)) {
+          refreshRestartGate();
+        }
+      }
+    ));
+    actions.appendChild(noticePanelButton(
+      "Reject", "clear", "nothing restarts; the asking session keeps working",
+      async (btn) => {
+        if (await gatePost("/api/daemon/restart-request/reject", btn)) {
+          refreshRestartGate();
+        }
+      }
+    ));
+  } else if (type === "goto") {
+    head.appendChild(el("span", "notice-title", "run move requested: "));
+    head.appendChild(gateSessionLink(rec.target_session));
+    row.appendChild(head);
+    const sub = el("div", "notice-sub");
+    sub.appendChild(gateSessionLink(rec.session));
+    sub.appendChild(el("span", null, " asks to move "));
+    sub.appendChild(gateSessionLink(rec.target_session));
+    sub.appendChild(el("span", null, ` — ${rec.from || "?"} → ${rec.step || "?"}`));
+    row.appendChild(sub);
+    row.appendChild(el(
+      "div", "notice-sub",
+      `${rec.session || "?"}: ${rec.reason || "(no reason given)"}`
+    ));
+    row.appendChild(el(
+      "div", "notice-sub gate-clock",
+      `auto-approves in ${gateCountdown(rec.deadline)}`
+    ));
+    actions.appendChild(noticePanelButton(
+      "Approve", "approve", `move this run to '${rec.step}' now`,
+      async (btn) => {
+        if (await gatePost(`/api/cflow/goto-requests/${rec.id}/approve`, btn)) {
+          refreshGotoGate();
+        }
+      }
+    ));
+    actions.appendChild(noticePanelButton(
+      "Deny", "clear", "nothing moves; the refusal is handed to the run's driver",
+      async (btn) => {
+        if (await gatePost(`/api/cflow/goto-requests/${rec.id}/deny`, btn)) {
+          refreshGotoGate();
+        }
+      }
+    ));
+  } else {
+    const plan = rec.plan || {};
+    head.appendChild(el(
+      "span", "notice-title",
+      `repository sync wants to push: ${plan.workspace || plan.repo || "?"}`
+    ));
+    row.appendChild(head);
+    row.appendChild(el(
+      "div", "notice-sub",
+      (rec.session ? `${rec.session} asks: ` : "") +
+        (plan.summary || plan.action || "?")
+    ));
+    row.appendChild(el(
+      "div", "notice-sub gate-clock",
+      `expires (as a refusal) in ${gateCountdown(rec.deadline)}`
+    ));
+    actions.appendChild(noticePanelButton(
+      "Approve", "approve", "the asking session pushes exactly this plan",
+      async (btn) => {
+        if (await gatePost(`/api/reposync/requests/${rec.id}/approve`, btn)) {
+          refreshReposyncGate();
+        }
+      }
+    ));
+    actions.appendChild(noticePanelButton(
+      "Reject", "clear", "nothing is pushed; the asking session is told no",
+      async (btn) => {
+        if (await gatePost(`/api/reposync/requests/${rec.id}/reject`, btn)) {
+          refreshReposyncGate();
+        }
+      }
+    ));
+  }
+  if (hidden) {
+    head.appendChild(el("span", "notice-chip", "hidden"));
+    actions.appendChild(noticePanelButton(
+      "Show card", "", "put this card back in the corner",
+      () => gateUnhide(type, rid)
+    ));
+  }
+  row.appendChild(actions);
+  return row;
+}
+
+function noticePanelHistoryRow(entry) {
+  const row = el("div", "notice-row" + (entry.kind ? ` ${entry.kind}` : ""));
+  const head = el("div", "notice-row-head");
+  head.appendChild(el("span", "notice-title", entry.title || ""));
+  if (entry.gate) {
+    head.appendChild(el(
+      "span", "notice-chip" + (entry.status === "pending" ? " live" : ""),
+      entry.status || "pending"
+    ));
+  }
+  if (entry.hidden && entry.status === "pending") {
+    head.appendChild(el("span", "notice-chip", "hidden"));
+  }
+  row.appendChild(head);
+  if (entry.sub) row.appendChild(el("div", "notice-sub", entry.sub));
+  row.appendChild(el(
+    "div", "notice-sub notice-when",
+    noticeStamp(entry.at) +
+      (entry.settledAt ? ` · ended ${noticeStamp(entry.settledAt)}` : "")
+  ));
+  return row;
+}
+
+/* Rebuilt from the state above on every gate poll while the panel is open,
+   so the countdowns move and a request settled elsewhere drops out of the
+   waiting list on its own. */
+function noticePanelPaint() {
+  if (!noticePanelOpen()) return;
+  const body = $("notice-panel-body");
+  if (!body) return;
+  body.innerHTML = "";
+  const waiting = [];
+  for (const type of ["restart", "goto", "reposync"]) {
+    for (const rec of gatePending[type]) waiting.push([type, rec]);
+  }
+  body.appendChild(el("h3", "notice-panel-section", `Waiting on you (${waiting.length})`));
+  if (!waiting.length) {
+    body.appendChild(el("p", "wf-note", "no request is waiting on a person"));
+  }
+  for (const [type, rec] of waiting) body.appendChild(noticePanelGateRow(type, rec));
+
+  const past = noticeHistory.filter((e) => !(e.gate && e.status === "pending"));
+  const sectionHead = el("div", "notice-panel-section-row");
+  sectionHead.appendChild(el("h3", "notice-panel-section", `History (${past.length})`));
+  if (past.length) {
+    sectionHead.appendChild(noticePanelButton(
+      "Clear", "clear", "forget the history in this browser (waiting requests stay)",
+      () => {
+        for (let i = noticeHistory.length - 1; i >= 0; i -= 1) {
+          const e = noticeHistory[i];
+          if (!(e.gate && e.status === "pending")) noticeHistory.splice(i, 1);
+        }
+        noticeHistorySave();
+        noticePanelPaint();
+        noticeBellPaint();
+      }
+    ));
+  }
+  body.appendChild(sectionHead);
+  if (!past.length) {
+    body.appendChild(el("p", "wf-note", "nothing has been shown in this browser yet"));
+  }
+  for (const entry of past) body.appendChild(noticePanelHistoryRow(entry));
+}
+
+// The bell's dot for what an earlier visit left unread, before any poll.
+noticeBellPaint();
+
+/* ------------------------------------------------------------------ */
 /* the restart gate: an agent session's restart, waiting on a person   */
 /* ------------------------------------------------------------------ */
 /* A managed session's `claunch daemon restart` opens this gate instead
@@ -41499,6 +41964,7 @@ function gateSessionLink(name) {
    (`claunch daemon restart --reason`) is printed in full under the title:
    it is the whole basis for the click. */
 const NOTICE_GATE = "restart-gate";
+let restartGateRid = null;   // the request the card is about, as of the last poll
 
 function gateCountdown(deadlineIso) {
   const dead = new Date(deadlineIso).getTime();
@@ -41530,7 +41996,23 @@ async function refreshRestartGate() {
     return; // daemon down or auth up — pollOnce's own channels own both
   }
   const rec = body && body.request ? body.request : null;
-  if (!rec || rec.status !== "pending") {
+  const pending = rec && rec.status === "pending";
+  // The record has no id on an older daemon; its filing time stands in.
+  const rid = rec ? String(rec.id || rec.requested_at || "restart") : null;
+  if (pending) {
+    gateHistoryOpen(
+      "restart", rid, "daemon restart requested",
+      `session ${rec.session || "?"}` +
+        ((rec.reason || "").trim() ? ` — reason: ${rec.reason.trim()}` : "")
+    );
+  }
+  gateHistorySync(
+    "restart",
+    pending ? [Object.assign({}, rec, { id: rid })] : [],
+    rec ? [Object.assign({}, rec, { id: rid })] : []
+  );
+  restartGateRid = rid;
+  if (!pending || gateIsHidden("restart", rid)) {
     dismissNotice(NOTICE_GATE);
     return;
   }
@@ -41582,6 +42064,10 @@ async function refreshRestartGate() {
     actions.appendChild(approve);
     actions.appendChild(extend);
     actions.appendChild(reject);
+    actions.appendChild(gateHideButton("restart", () => restartGateRid, NOTICE_GATE,
+      "close this card only — nothing is answered, the request stays open " +
+        "and still auto-approves at its deadline. The bell beside the rail's " +
+        "title keeps it, with its buttons, in the notification history"));
     node.appendChild(title);
     node.appendChild(sub);
     node.appendChild(reasonLine);
@@ -41631,13 +42117,13 @@ async function refreshRestartGate() {
    keyed by request id and each poll reconciles the set. */
 const GOTO_GATE_PREFIX = "goto-gate-";
 
-/* Cards the reader closed by hand. Ignoring answers nothing — the request
-   stays open and still auto-approves at its deadline — so the id has to be
-   remembered somewhere the redraw reads: the poll rebuilds any card it
-   cannot find, and without this the next tick would put the closed card
-   straight back. An id is forgotten again as soon as its request leaves the
-   pending set, so it can never silence a later card. */
-const gotoGateIgnored = new Set();
+/* Cards the reader closed by hand are remembered in gateHiddenIds (the
+   notice history above). Hiding answers nothing — the request stays open and
+   still auto-approves at its deadline — so the id has to be remembered
+   somewhere the redraw reads: the poll rebuilds any card it cannot find, and
+   without this the next tick would put the closed card straight back. An id
+   is forgotten again as soon as its request leaves the pending set, so it can
+   never silence a later card. */
 
 async function refreshGotoGate() {
   const host = $("notices");
@@ -41651,14 +42137,17 @@ async function refreshGotoGate() {
   const pending = (body && body.requests ? body.requests : []).filter(
     (r) => r.status === "pending"
   );
-  const live = new Set(pending.map((r) => r.id));
-  for (const id of [...gotoGateIgnored]) {
-    if (!live.has(id)) gotoGateIgnored.delete(id);
-  }
+  gateHistorySync("goto", pending, body && body.requests);
   const seen = new Set();
   for (const rec of pending) {
     const key = GOTO_GATE_PREFIX + rec.id;
-    if (gotoGateIgnored.has(rec.id)) continue;   // closed by hand, still open
+    gateHistoryOpen(
+      "goto", String(rec.id),
+      `run move requested: ${rec.target_session || "?"}`,
+      `${rec.session || "?"} asks to move ${rec.target_session || "?"} — ` +
+        `${rec.from || "?"} → ${rec.step || "?"}: ${rec.reason || "(no reason given)"}`
+    );
+    if (gateIsHidden("goto", rec.id)) continue;   // closed by hand, still open
     seen.add(key);
     let card = notices.get(key);
     if (!card || !card.node.isConnected) {
@@ -41686,19 +42175,11 @@ async function refreshGotoGate() {
       const actions = el("div", "gate-actions");
       const approve = el("button", "wf-btn approve", "Approve");
       const deny = el("button", "wf-btn clear", "Deny");
-      const ignore = el("button", "wf-btn", "Ignore");
       approve.title =
         `move this run to '${rec.step}' now — or the timeout counts the ` +
         "request as approved on its own";
       deny.title =
         "nothing moves; the refusal is handed to the run's driver";
-      /* The third press answers nothing, and says so: a reader who has seen
-         the card and does not want to decide from here had only Approve,
-         Deny or a card that stays. Closing it leaves the request exactly as
-         it was — including its deadline. */
-      ignore.title =
-        "close this card only — nothing is answered, the request stays open " +
-        "and still auto-approves at its deadline";
       approve.addEventListener("click", async (ev) => {
         ev.stopPropagation();
         if (
@@ -41718,14 +42199,13 @@ async function refreshGotoGate() {
           dismissNotice(key);
         }
       });
-      ignore.addEventListener("click", (ev) => {
-        ev.stopPropagation();
-        gotoGateIgnored.add(rec.id);
-        dismissNotice(key);
-      });
       actions.appendChild(approve);
       actions.appendChild(deny);
-      actions.appendChild(ignore);
+      /* The third press answers nothing, and says so (gateHideButton). */
+      actions.appendChild(gateHideButton("goto", rec.id, key,
+        "close this card only — nothing is answered, the request stays open " +
+        "and still auto-approves at its deadline; the bell keeps it in the " +
+        "notification history"));
       node.appendChild(title);
       node.appendChild(sub);
       node.appendChild(clock);
@@ -41764,7 +42244,6 @@ async function refreshGotoGate() {
    Unlike the goto gate, an unanswered card EXPIRES as a refusal: a push to a
    shared remote cannot be taken back by the person who missed it. */
 const REPOSYNC_GATE_PREFIX = "reposync-gate-";
-const reposyncGateIgnored = new Set();
 
 async function refreshReposyncGate() {
   const host = $("notices");
@@ -41778,14 +42257,17 @@ async function refreshReposyncGate() {
   const pending = (body && body.requests ? body.requests : []).filter(
     (r) => r.status === "pending"
   );
-  const live = new Set(pending.map((r) => r.id));
-  for (const id of [...reposyncGateIgnored]) {
-    if (!live.has(id)) reposyncGateIgnored.delete(id);
-  }
+  gateHistorySync("reposync", pending, body && body.requests);
   const seen = new Set();
   for (const rec of pending) {
     const key = REPOSYNC_GATE_PREFIX + rec.id;
-    if (reposyncGateIgnored.has(rec.id)) continue;
+    gateHistoryOpen(
+      "reposync", String(rec.id),
+      `repository sync wants to push: ${(rec.plan || {}).workspace || (rec.plan || {}).repo || "?"}`,
+      (rec.session ? `${rec.session} asks: ` : "") +
+        ((rec.plan || {}).summary || (rec.plan || {}).action || "?")
+    );
+    if (gateIsHidden("reposync", rec.id)) continue;
     seen.add(key);
     const plan = rec.plan || {};
     let card = notices.get(key);
@@ -41826,12 +42308,8 @@ async function refreshReposyncGate() {
       const actions = el("div", "gate-actions");
       const approve = el("button", "wf-btn approve", "Approve");
       const reject = el("button", "wf-btn clear", "Reject");
-      const ignore = el("button", "wf-btn", "Ignore");
       approve.title = "the asking session pushes exactly this plan";
       reject.title = "nothing is pushed; the asking session is told no";
-      ignore.title =
-        "close this card only — the request stays open and expires as a " +
-        "refusal at its deadline";
       approve.addEventListener("click", async (ev) => {
         ev.stopPropagation();
         if (await gatePost(`/api/reposync/requests/${rec.id}/approve`, approve)) {
@@ -41844,14 +42322,12 @@ async function refreshReposyncGate() {
           dismissNotice(key);
         }
       });
-      ignore.addEventListener("click", (ev) => {
-        ev.stopPropagation();
-        reposyncGateIgnored.add(rec.id);
-        dismissNotice(key);
-      });
       actions.appendChild(approve);
       actions.appendChild(reject);
-      actions.appendChild(ignore);
+      actions.appendChild(gateHideButton("reposync", rec.id, key,
+        "close this card only — the request stays open and expires as a " +
+        "refusal at its deadline; the bell keeps it in the notification " +
+        "history"));
       node.appendChild(clock);
       node.appendChild(actions);
       host.appendChild(node);
