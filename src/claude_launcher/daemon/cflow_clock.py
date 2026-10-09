@@ -2155,6 +2155,8 @@ class TriggerClock:
                 wanting = [
                     m for m in self.mesh.meshes_for_session(name)
                     if landing_route.MERGER not in (m.get("roles") or [])
+                    # A leader counts as a merger already (claunch-lc2n3).
+                    and m.get("role") != landing_route.LEADER
                 ]
             except Exception:
                 continue

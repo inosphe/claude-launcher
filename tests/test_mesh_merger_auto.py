@@ -158,3 +158,39 @@ def test_merger_role_reads_only_this_daemons_member_of_a_session_name():
     assert "holds no 'merger' role" in router.merger_role("w1", "p1")
     local.roles = ["worker", "merger"]
     assert router.merger_role("w1", "p1") == ""
+
+
+def test_a_leader_is_never_given_merger_as_a_grant_it_cannot_give_back(home, tmp_path):
+    # claunch-lc2n3: a leader's merger is the leader rule's; the daemon's
+    # grant (with its "take it back" line) is not for it.
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, settle=0.05, root=tmp_path / "mesh")
+        mgr.create(SessionDef(name="s1", harness="py", cwd=str(tmp_path)))
+        mm.create("m")
+        await mm.join("m", "s1", handle="lead1")
+        lead = mm.get("m").members["lead1"]
+        # A record from before the leader rule: a leader with no merger.
+        lead.subroles = []
+        assert mm.grant_auto_subrole("s1", "merger", REASON) == []
+        assert lead.auto_subroles == {}
+
+        # A worker given merger by the daemon, then made the leader: the
+        # merger is the leader rule's from then on, with no "take it back".
+        mgr.create(SessionDef(name="s2", harness="py", cwd=str(tmp_path)))
+        mm.create("n")
+        await mm.join("n", "s2", handle="worker2")
+        w = mm.get("n").members["worker2"]
+        assert mm.grant_auto_subrole("s2", "merger", REASON) == [("n", "worker2")]
+        mm.set_member_roles("n", "worker2", role="leader")
+        assert "merger" in w.subroles and w.auto_subroles == {}
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+    # A record written with the mark before this fix reads without it.
+    old = Member("lead1", "s1", role="leader", subroles=["merger", "qa"],
+                 auto_subroles={"merger": REASON, "qa": "x"})
+    assert old.auto_subroles == {"qa": "x"}
