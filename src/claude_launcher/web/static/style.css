@@ -82,6 +82,29 @@ option:disabled { color: #6b7280; }
 #refresh-all.spinning, #refresh-archived.spinning { color: #58a6ff; animation: spin 0.7s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* The theme switch (theme.js). It sits beside ⟳ and looks like it; its
+   glyph names the theme a press goes to. */
+#theme-toggle {
+  flex: none; align-self: center; cursor: pointer;
+  background: none; border: none; color: #7d8590;
+  font-size: 14px; line-height: 1; padding: 2px 5px;
+}
+#theme-toggle:hover { color: #58a6ff; }
+
+/* The light theme's terminals: the picture is inverted rather than the
+   palette re-chosen, because a session's program draws in 24-bit colour the
+   xterm palette never sees (theme.js says why). hue-rotate turns the hues
+   back, so red stays red and only lightness flips. Inverting alone leaves
+   coloured text pale -- the dark palette's red is dark, so its inverse is a
+   light pink (255,140,140) on a near-white page -- so a linear stretch
+   follows (brightness 0.8, contrast 1.8: v' = 1.44 v - 0.4), which keeps the
+   background where the inversion put it (231 stays 231, the same as the
+   page around it) and pulls mid tones down: that red becomes (255,100,100),
+   grey text becomes black. */
+html[data-theme="light"] .xterm {
+  filter: invert(1) hue-rotate(180deg) brightness(0.8) contrast(1.8);
+}
+
 /* Keep the filter panel and session list visually continuous. */
 .session-filters {
   flex: none;
@@ -4981,7 +5004,7 @@ body.embed #main { width: 100%; }
   }
   #sidebar header { padding: 10px 14px; }
   /* thumb-sized, like every other tap target on the rail */
-  #refresh-all { font-size: 17px; padding: 6px 10px; }
+  #refresh-all, #theme-toggle { font-size: 17px; padding: 6px 10px; }
   .session-filters { padding: 4px 7px; }
   .session-filters button { min-height: 28px; }
   /* The rail is the whole screen here, so the list takes what it needs and

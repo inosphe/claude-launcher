@@ -2978,6 +2978,9 @@ function sessionGridTipStyles() {
   }
   const style = document.createElement("style");
   style.id = "sg-tip-style";
+  // A copy of themed rules: theme.js leaves it alone and drops it on a
+  // switch, so the next card copies the rules again in the new theme.
+  style.dataset.themeCopy = "";
   style.textContent = out.join("\n");
   document.head.append(style);
 }
@@ -23021,6 +23024,11 @@ function openStatsPage(name, compare) {
   refreshStats();
 }
 
+/* The compared sessions' colours are picked at render time (statsColor), so a
+   theme switch with the page open repaints it rather than waiting for the
+   next poll to. */
+window.addEventListener("claunch-theme", () => { if (statsPageOpen) renderStats(); });
+
 function stopStatsPoll() {
   if (statsTimer) { clearTimeout(statsTimer); statsTimer = null; }
   statsPageOpen = false;
@@ -23361,12 +23369,19 @@ function statsCompareChoices() {
   return names;
 }
 
+/* A colour a script sets on an element itself, for the theme in force
+   (theme.js); the dark value as written where theme.js is not loaded. */
+function themeColor(hex, prop) {
+  const theme = globalThis.claunchTheme;
+  return theme ? theme.color(hex, prop) : hex;
+}
+
 /* A compared session's colour, by its place in the asked-for set, so the
    picker, the table and the lines agree even when one of them could not be
    read. */
 function statsColor(name) {
   const i = Math.max(0, (statsCompare || []).indexOf(name));
-  return STATS_PALETTE[i % STATS_PALETTE.length];
+  return themeColor(STATS_PALETTE[i % STATS_PALETTE.length]);
 }
 
 function statsComparePicker() {
@@ -36195,9 +36210,9 @@ async function refreshMeshList(options) {
       ? m.requests.length : Number(m.requests || 0);
     if (inbound) {
       const req = el("span", "mesh-tag", `${inbound} join req`);
-      req.style.background = "#0d2818";
-      req.style.color = "#3fb950";
-      req.style.borderColor = "#1b4522";
+      req.style.background = themeColor("#0d2818", "background-color");
+      req.style.color = themeColor("#3fb950");
+      req.style.borderColor = themeColor("#1b4522", "border-color");
       li.appendChild(req);
     }
     li.appendChild(el(

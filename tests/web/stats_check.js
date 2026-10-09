@@ -129,7 +129,7 @@ new Function(
      "statsBucketTable", "statsFigures", "statsSourceTable", "statsSenderTable",
      "statsScroll", "statsSection", "statsControls", "renderStats", "parseHash",
      "refreshStatsCompare", "statsUnitTabs", "statsCompareHash", "statsValue",
-     "statsZ", "statsColor", "statsCompareChoices", "statsComparePicker", "statsCompareTable",
+     "statsZ", "themeColor", "statsColor", "statsCompareChoices", "statsComparePicker", "statsCompareTable",
      "statsShareBars", "statsTimelineChart", "renderStatsCompare"]
     .map(slice).join("\n")
   + `

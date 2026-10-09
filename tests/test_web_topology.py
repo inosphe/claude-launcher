@@ -422,6 +422,7 @@ CHECKS = [
         "restartgate_check.js",
         "termcache_check.js",
         "gpurender_check.js",
+        "theme_check.js",
         "hiddenpoll_check.js",
         "briefcard_check.js",
         "briefingtop_check.js",
@@ -565,6 +566,7 @@ BROWSER_CHECKS = [
         "installsettings_browser.cjs",
         "reposyncagent_browser.cjs",
         "tabdragscroll_browser.cjs",
+        "theme_browser.cjs",
 ]
 
 
