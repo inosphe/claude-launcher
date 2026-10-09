@@ -167,6 +167,10 @@ HISTORY_RETENTION = HISTORY_RETENTION_DAYS * 86400.0
 #: How often an append also rewrites the file without its expired lines.
 HISTORY_PRUNE_EVERY = 3600.0
 
+#: Finished runs needed before :meth:`WindowManager.estimate` offers a
+#: median for a grant's length (claunch-bwzkt).
+ESTIMATE_MIN_SAMPLES = 3
+
 #: The result fields a reporter may attach to a grant, and their types.
 RESULT_FIELDS = {
     "outcome": str,
@@ -990,6 +994,129 @@ class WindowManager:
             "limits": dict(self._limits()),
             "workers_in_use": self.workers_in_use(),
             "history_retention_days": HISTORY_RETENTION_DAYS,
+        }
+
+    # ---- one session's view (the terminal header's strip) ------------------ #
+
+    def estimate(self, cls: str, label: str = "") -> Optional[dict]:
+        """How long a grant like this one usually holds, from the kept log.
+
+        Same class and label first -- a label names the command, and one
+        module's run says nothing about the full suite's -- then the class.
+        ``ESTIMATE_MIN_SAMPLES`` runs are needed before a median is offered:
+        one past run is an anecdote, and a countdown built on it is a guess
+        dressed as a measurement. Runs that ended with their client gone are
+        left out; their hold is not the run's length.
+        """
+        runs = [
+            r
+            for r in self._history
+            if r.get("cls") == cls
+            and r.get("held_seconds") is not None
+            and r.get("end") != "disconnected"
+        ]
+        candidates = []
+        if label:
+            candidates.append(("label", [r for r in runs if (r.get("label") or "") == label]))
+        candidates.append(("class", runs))
+        for basis, rows in candidates:
+            if len(rows) < ESTIMATE_MIN_SAMPLES:
+                continue
+            held = [float(r["held_seconds"]) for r in rows]
+            return {
+                "basis": basis,
+                "samples": len(held),
+                "p50": _quantile(held, 0.5),
+                "p90": _quantile(held, 0.9),
+            }
+        return None
+
+    def _brief_holder(self, holder: dict, now: float) -> dict:
+        acquired = _parse_ts(holder.get("acquired_at"))
+        elapsed = round(max(0.0, now - acquired), 1) if acquired is not None else None
+        estimate = self.estimate(holder.get("cls", TARGETED), holder.get("label") or "")
+        remaining = None
+        if estimate and estimate.get("p50") is not None and elapsed is not None:
+            remaining = round(estimate["p50"] - elapsed, 1)
+        return {
+            "grant_id": holder.get("grant_id"),
+            "cls": holder.get("cls"),
+            "session": holder.get("session"),
+            "label": holder.get("label") or "",
+            "workers": holder.get("workers"),
+            "forced": bool(holder.get("forced")),
+            "acquired_at": holder.get("acquired_at"),
+            "elapsed_seconds": elapsed,
+            "estimate": estimate,
+            # Negative once the run has outlived its median: the strip says
+            # "over", it does not count below zero.
+            "remaining_seconds": remaining,
+            "result": holder.get("result"),
+        }
+
+    def session_view(self, session: str, now: Optional[float] = None) -> dict:
+        """The window as it concerns ONE session: what it holds, where it waits.
+
+        A read, like :meth:`status` -- it reaps nothing. ``holding`` carries
+        the elapsed time and the history's median for a grant like it;
+        ``waiting`` carries the queue position, how many are ahead, how long
+        it has waited and the rule that keeps it out (the same words
+        :meth:`acquire` gives the requester). ``window`` is the whole
+        machine in a few numbers, with every holder's elapsed/remaining, so
+        a waiter can see whom it waits on. ``last`` is the session's most
+        recent finished run in the kept log.
+        """
+        now = time.time() if now is None else now
+        holders = [self._brief_holder(h, now) for h in self._holders]
+        holding = [h for h in holders if h["session"] == session]
+        waiting = []
+        for index, entry in enumerate(self._queue):
+            if entry.get("session") != session:
+                continue
+            ahead = self._queue[:index]
+            enqueued = _parse_ts(entry.get("enqueued_at"))
+            reason = self._blocker(entry["cls"], session, ahead)
+            if reason is None:
+                reason = (
+                    f"{len(ahead)} request(s) are queued ahead"
+                    if ahead
+                    else "about to be granted"
+                )
+            waiting.append(
+                {
+                    "grant_id": entry.get("grant_id"),
+                    "cls": entry.get("cls"),
+                    "label": entry.get("label") or "",
+                    "priority": self._priority(entry),
+                    "position": index + 1,
+                    "ahead": len(ahead),
+                    "enqueued_at": entry.get("enqueued_at"),
+                    "waited_seconds": (
+                        round(max(0.0, now - enqueued), 1) if enqueued is not None else None
+                    ),
+                    "reason": reason,
+                    "estimate": self.estimate(entry["cls"], entry.get("label") or ""),
+                }
+            )
+        last = next(
+            (r for r in reversed(self._history) if r.get("session") == session),
+            None,
+        )
+        sweep_cap, targeted_cap = self._caps()
+        budget = self._budget()
+        return {
+            "session": session,
+            "holding": holding,
+            "waiting": waiting,
+            "last": last,
+            "window": {
+                "holders": holders,
+                "queued": len(self._queue),
+                "sweep_queued": any(q["cls"] == SWEEP for q in self._queue),
+                "caps": {"sweep": sweep_cap, "targeted": targeted_cap},
+                "workers_in_use": self.workers_in_use(),
+                "worker_budget": budget if budget > 0 else None,
+            },
         }
 
     # ---- the exit hook -------------------------------------------------------- #
