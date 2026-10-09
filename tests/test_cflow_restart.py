@@ -176,3 +176,68 @@ def test_restart_clock_returns_when_the_shell_exits_not_its_descendants(proj):
             os.kill(grandchild, signal.SIGTERM)
         except OSError:
             pass
+
+
+def _sleep_command(seconds: float) -> str:
+    return f'"{sys.executable}" -c "import time; time.sleep({seconds}); print(\'slept\')"'
+
+
+def test_a_restart_held_by_the_approval_gate_outlives_its_timeout(proj):
+    """The person at the web UI may extend the gate any number of times
+    (claunch-mm8zv). While the gate holds the run's request, the step's
+    timeout must not kill the shell waiting on it -- or the journal says
+    "timed out" while the gate restarts the daemon later anyway."""
+    asked = []
+
+    def holding(session):
+        asked.append(session)
+        return True
+
+    action = {"command": _sleep_command(1.5), "timeout": 0.3}
+    result = cflow_clock.RestartClock._execute(
+        str(proj), action, "s469", holding=holding, hold_poll=0.2
+    )
+    assert result["exit_code"] == 0
+    assert "slept" in result["output"]
+    assert "timed out" not in result["output"]
+    assert "approval gate held the request" in result["output"]
+    assert asked and set(asked) == {"s469"}
+
+
+def test_a_restart_not_held_by_the_gate_times_out_as_before(proj):
+    action = {"command": _sleep_command(30), "timeout": 0.5}
+    result = cflow_clock.RestartClock._execute(
+        str(proj), action, "s469", holding=lambda session: False, hold_poll=0.2
+    )
+    assert result["exit_code"] is None
+    assert "restart command timed out" in result["output"]
+
+
+def test_the_timeout_applies_again_once_the_gate_lets_go(proj):
+    """Held for two looks, then settled (rejected, say) while the shell is
+    still running: the next look kills it at once."""
+    looks = []
+
+    def holding(session):
+        looks.append(session)
+        return len(looks) <= 2
+
+    action = {"command": _sleep_command(30), "timeout": 0.3}
+    result = cflow_clock.RestartClock._execute(
+        str(proj), action, "s469", holding=holding, hold_poll=0.2
+    )
+    assert result["exit_code"] is None
+    assert "restart command timed out" in result["output"]
+    assert len(looks) == 3
+
+
+def test_a_nameless_run_is_never_held(proj):
+    """A run outside a managed session filed no gate request (its restart is
+    immediate), so the gate is not asked about it."""
+    asked = []
+    action = {"command": _sleep_command(30), "timeout": 0.3}
+    result = cflow_clock.RestartClock._execute(
+        str(proj), action, "", holding=lambda s: asked.append(s) or True, hold_poll=0.2
+    )
+    assert result["exit_code"] is None
+    assert asked == []

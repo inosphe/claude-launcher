@@ -1844,6 +1844,23 @@ def checklist_block(result: dict) -> str:
     return "\n".join(lines)
 
 
+#: How often a restart command past its ``restart.timeout`` is looked at
+#: again while the approval gate still holds its session's request.
+RESTART_HOLD_POLL = 15.0
+
+
+def _gate_holding(session: str) -> bool:
+    """Whether the daemon's restart gate holds ``session``'s request. Any
+    failure to tell reads as False: the step's timeout then applies as it
+    always did."""
+    try:
+        from . import restart_gate
+
+        return restart_gate.holding(session)
+    except Exception:  # noqa: BLE001 - a guess must not hold a shell forever
+        return False
+
+
 class RestartClock:
     """Run a checklist step's project-local restart command once per visit.
 
@@ -1908,7 +1925,8 @@ class RestartClock:
         return actions
 
     @staticmethod
-    def _execute(cwd: str, action: dict, scope: str = "") -> dict:
+    def _execute(cwd: str, action: dict, scope: str = "", *,
+                 holding=_gate_holding, hold_poll: float = RESTART_HOLD_POLL) -> dict:
         # Output goes to a file, not a pipe. The restart command is a shell
         # whose descendants (this repository's tools/restart_live.ps1 runs
         # `claunch daemon restart`) inherit stdout; with a pipe, the reader
@@ -1931,23 +1949,47 @@ class RestartClock:
         # precondition `claunch-028r` wrote down as C-3 and the implementation
         # did not meet. Scopes that are not a managed session (`default`)
         # answer to no name, so the variable is removed rather than set to one.
+        #
+        # The step's timeout does not cut short a shell that is waiting on the
+        # approval gate (claunch-mm8zv). The person at the web UI may extend
+        # the gate's deadline any number of times; killing the shell at the
+        # timeout would journal "timed out" while the gate, still pending,
+        # restarts the daemon later -- the journal and the machine disagreeing.
+        # So when the timeout comes, the clock asks the gate whether it still
+        # holds this session's request, and keeps waiting while it does.
         env = dict(os.environ)
+        session = ""
         if scope and scope != cflow_state.DEFAULT_SCOPE:
             env[cflow_state.SESSION_ENV] = scope
+            session = scope
         else:
             env.pop(cflow_state.SESSION_ENV, None)
         try:
             with tempfile.TemporaryFile(mode="w+b") as out:
-                try:
-                    done = subprocess.run(
-                        action["command"], cwd=cwd, shell=True, env=env,
-                        stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                        timeout=float(action["timeout"]), check=False,
-                    )
-                except subprocess.TimeoutExpired:
-                    output = _read_back(out) + "\nrestart command timed out"
-                    return {"exit_code": None, "output": output}
-                return {"exit_code": done.returncode, "output": _read_back(out)}
+                proc = subprocess.Popen(
+                    action["command"], cwd=cwd, shell=True, env=env,
+                    stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                )
+                wait = float(action["timeout"])
+                held = False
+                while True:
+                    try:
+                        code = proc.wait(timeout=wait)
+                        break
+                    except subprocess.TimeoutExpired:
+                        if session and holding(session):
+                            held = True
+                            wait = hold_poll
+                            continue
+                        proc.kill()
+                        proc.wait()
+                        output = _read_back(out) + "\nrestart command timed out"
+                        return {"exit_code": None, "output": output}
+                output = _read_back(out)
+                if held:
+                    output += ("\nrestart command outlived its timeout while the "
+                               "approval gate held the request")
+                return {"exit_code": code, "output": output}
         except OSError as exc:
             return {"exit_code": None, "output": f"could not run restart command: {exc}"}
 

@@ -232,7 +232,7 @@ async def error_middleware(request: web.Request, handler):
             resp.headers["Retry-After"] = str(int(exc.retry_after))
         return resp
     except (SessionGone, MeshConflict, LockBusy, KeyboardHeld, restart_gate.GateBusy,
-            restart_gate.GateExhausted, goto_gate.GateBusy) as exc:
+            goto_gate.GateBusy) as exc:
         # LockBusy is transient by construction (the other writer is mid-
         # transition), so it gets a retryable status, not a flat 400.
         # KeyboardHeld is transient in the same way, and for the most human
@@ -1712,14 +1712,18 @@ async def h_restart_request_submit(request: web.Request) -> web.Response:
     Called by the CLI when it has recognized its shell as a managed session
     (``CLAUNCH_SESSION``) — the daemon cannot see the caller's environment,
     so the session travels in the body and the CLI is the one that decided it
-    was an agent asking. ``GateBusy`` (a request already pending) escapes to
-    the middleware and comes back as 409.
+    was an agent asking. ``reason`` (optional) is why the restart is needed,
+    shown in full on the web UI's card. ``GateBusy`` (a request already
+    pending) escapes to the middleware and comes back as 409.
     """
     body = await _json_body(request)
     session = str(body.get("session") or "").strip()
     if not session:
         return json_error(400, "session is required")
-    record = request.app["restart_gate"].submit(session=session)
+    reason = body.get("reason")
+    if reason is not None and not isinstance(reason, str):
+        return json_error(400, "reason must be a string")
+    record = request.app["restart_gate"].submit(session=session, reason=reason or "")
     return json_response({"ok": True, "request": record})
 
 
@@ -1750,9 +1754,8 @@ async def h_restart_request_extend(request: web.Request) -> web.Response:
     The gate's default answer belongs to the clock, and this is how somebody
     who is at the page takes it back without having decided: the request
     stays pending, the asking session stays where it was, and both sides read
-    the new deadline off the same record. ``GateExhausted`` (the budget is
-    spent) escapes to the middleware and comes back as 409, because a press
-    that changed nothing must not answer like one that did."""
+    the new deadline off the same record. It may be pressed any number of
+    times (claunch-mm8zv)."""
     record = request.app["restart_gate"].extend(decided_by="web")
     if record is None:
         return json_error(409, "no pending restart request")

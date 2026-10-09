@@ -27,15 +27,25 @@ The settlement is three-way, and the third answer is not a choice:
   until the next submit, so the asker's CLI poll can report the outcome; the
   asking turn is alive (nothing has died) and carries on.
 * **Extended** — not a settlement: the deadline moves out by
-  :data:`EXTENSION` and the request stays pending, at most
-  :data:`MAX_EXTENSIONS` times. It is for the person who is here and is not
-  ready, whom the deadline would otherwise answer for.
+  :data:`EXTENSION` and the request stays pending, as many times as the
+  person presses it. It is for the person who is here and is not ready,
+  whom the deadline would otherwise answer for. There is no ceiling: a cflow
+  step's ``restart.timeout`` does not cut a held gate short, because the
+  RestartClock asks :func:`holding` before it kills the waiting shell
+  (``cflow_clock.RestartClock._execute``).
 * **Unanswered** — after :data:`GATE_TIMEOUT` (plus whatever was added) the
   request *counts as approved* and the restart goes out. A timeout is not a no-op: the agent's
   stop may be load-bearing (a config change, a new build), and holding it
   forever means the turn waits on a person who may be away all afternoon. The
   deadlock breaker is the revert of the default: approval does nothing that
   cannot be undone by the living sessions.
+
+A request carries the asker's **reason**: why the restart is needed (the
+merges the live daemon does not serve yet, a config change, a new build).
+The card prints it in full, because the person deciding is being asked to
+cut off every attached turn and the reason is the whole basis for the click
+(the goto gate does the same, ``goto_gate``). A request without one is still
+filed: an older CLI does not send the field.
 
 State is in memory on purpose. A gate that had to survive the daemon's death
 would be a gate nobody could read — the web page that decides is the page the
@@ -64,32 +74,55 @@ from . import restart_notice
 GATE_TIMEOUT = 300.0
 
 
-#: How much one Extend adds to a pending request's deadline, and how many
-#: times it may be pressed. The two multiply into the whole budget a gate can
-#: ever hold a restart for: 300 + 2*300 = 900 seconds, which is the ceiling
-#: cflow puts on a step's ``restart.timeout`` (``cflow.model``). Past that the
-#: shell running ``claunch daemon restart`` is killed by the RestartClock and
-#: the run journals a timeout, while the gate lives on and restarts later --
-#: the journal and the machine saying different things, which is the failure
-#: this budget exists to stay inside.
+#: How much one Extend adds to a pending request's deadline. It may be
+#: pressed any number of times (claunch-mm8zv). It used to stop at two
+#: presses (870 seconds in all) so the gate would end inside cflow's
+#: ``restart.timeout`` ceiling of 900 -- past that the RestartClock killed
+#: the waiting shell and the run journaled a timeout for a restart that then
+#: happened anyway. The clock now keeps waiting while :func:`holding` says
+#: this gate still holds that session's request, so the ceiling no longer
+#: bounds how long a person may take.
 EXTENSION = 300.0
-MAX_EXTENSIONS = 2
 
-#: The whole span one request may hold a restart for, measured from when it
-#: was filed. ``GATE_TIMEOUT + EXTENSION * MAX_EXTENSIONS`` is 900 exactly,
-#: which is cflow's own ceiling -- leaving nothing for the seconds the CLI
-#: spends diagnosing the daemon before it files anything. The last extension
-#: is clamped to this rather than overshooting it, so a gate held for as long
-#: as it can be held still ends inside the shell that is waiting on it.
-TOTAL_BUDGET = 870.0
+#: The longest reason a request keeps. A reason is read by a person on a
+#: notification card; past this it is a log, and the rest is cut with a
+#: marker rather than refused -- a restart must not fail over its prose.
+REASON_MAX = 4000
+
+#: The gate this daemon process serves, for readers that are not handed the
+#: app (the RestartClock runs in a worker thread). Set by the constructor;
+#: one daemon builds one gate.
+_LIVE: Optional["RestartGate"] = None
+
+
+def holding(session: str) -> bool:
+    """Whether this process's gate holds a pending request from ``session``.
+
+    Read from the RestartClock's thread while the restart shell it ran is
+    waiting on the gate: a True keeps the clock from killing that shell at
+    the step's ``restart.timeout``. A plain read of one dict; the event loop
+    is the only writer, and a stale answer costs one poll interval.
+    """
+    gate = _LIVE
+    record = gate.record if gate is not None else None
+    return bool(
+        record is not None
+        and record.get("status") == "pending"
+        and session
+        and record.get("session") == session
+    )
+
+
+def clean_reason(text) -> str:
+    """A submitted reason as the record keeps it: stripped, capped."""
+    reason = str(text or "").strip()
+    if len(reason) > REASON_MAX:
+        reason = reason[:REASON_MAX].rstrip() + " ...(truncated)"
+    return reason
 
 
 class GateBusy(Exception):
     """A restart request is already pending; the gate takes one at a time."""
-
-
-class GateExhausted(Exception):
-    """The pending request has been extended as often as it may be."""
 
 
 def _utcnow() -> str:
@@ -123,11 +156,13 @@ class RestartGate:
         self.record: Optional[dict] = None
         self._timer = None
         app.on_shutdown.append(self.cancel)
+        global _LIVE
+        _LIVE = self
 
     # ------------------------------------------------------------------ #
     # the ask
     # ------------------------------------------------------------------ #
-    def submit(self, *, session: str, via: str = "cli") -> dict:
+    def submit(self, *, session: str, via: str = "cli", reason: str = "") -> dict:
         """Open a gate for one session's restart request.
 
         Refuses only while one is *pending*: a settled request (rejected — or
@@ -144,13 +179,13 @@ class RestartGate:
             "id": secrets.token_hex(6),
             "session": session,
             "via": via,
+            "reason": clean_reason(reason),
             "requested_at": now.isoformat(timespec="seconds"),
             "deadline": (now + timedelta(seconds=self.timeout)).isoformat(
                 timespec="seconds"
             ),
             "status": "pending",
             "extensions": 0,
-            "max_extensions": MAX_EXTENSIONS,
         }
         self._timer = asyncio.get_running_loop().call_later(
             self.timeout, self._on_timeout, self.record["id"]
@@ -174,39 +209,18 @@ class RestartGate:
         session stays exactly where it was -- it is still waiting, just for
         longer, and its CLI poll reads the new deadline off the same record.
 
-        Returns None when nothing is pending; raises :class:`GateExhausted`
-        when the budget is spent, because a press that does nothing must not
-        read as a press that worked.
+        Returns None when nothing is pending. There is no limit on how many
+        times it may be pressed (claunch-mm8zv).
         """
         record = self.record
         if record is None or record["status"] != "pending":
             return None
         used = int(record.get("extensions") or 0)
-        if used >= MAX_EXTENSIONS:
-            raise GateExhausted(
-                f"this request has already been extended {used} times; "
-                f"approve or reject it"
-            )
         # Added to the deadline, not to now: pressing early must not shorten
-        # the wait it was meant to lengthen. The ceiling is measured from the
-        # filing, so two presses buy the same total whenever they land.
+        # the wait it was meant to lengthen.
         now = datetime.now(timezone.utc)
         current = _parse(record.get("deadline")) or now
-        filed = _parse(record.get("requested_at")) or now
-        deadline = min(
-            current + timedelta(seconds=EXTENSION),
-            filed + timedelta(seconds=TOTAL_BUDGET),
-        )
-        if deadline <= current:
-            # The clamp bit, and it bit backwards. A configured
-            # ``restart_approval_timeout`` above TOTAL_BUDGET opens a gate
-            # that is already past the ceiling, and min() would then hand
-            # back an EARLIER deadline -- a press for more time taking some
-            # away. There is nothing left to add here, so say so.
-            raise GateExhausted(
-                "this request is already open for as long as one may be; "
-                "approve or reject it"
-            )
+        deadline = current + timedelta(seconds=EXTENSION)
         self._clear_timer()
         record["extensions"] = used + 1
         record["deadline"] = deadline.isoformat(timespec="seconds")
