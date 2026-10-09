@@ -475,6 +475,36 @@ def _cmd_approve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_responders(args: argparse.Namespace) -> int:
+    """Who a task's ask would go to right now, group by group (read-only).
+
+    Exit 0 when some group reaches an answerable member, 1 when none does, 2
+    when it cannot be told (no v2 run here, no such node, a node that asks
+    nobody, a roster that did not answer) -- so a step can tell "nobody" from
+    "could not look" (claunch-3va8h).
+    """
+    from .cflow2 import asks
+
+    try:
+        payload = asks.who_answers(args.node, role=args.role or "", cwd=os.getcwd(),
+                                   scope=args.scope)
+    except _errors() as exc:
+        print(f"responders: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        label = f"node {payload['node']!r}" + (
+            f", role {payload['role']!r}" if payload["role"] else "")
+        print(f"{label} as {payload['me'] or '?'} in mesh {payload['mesh'] or '?'}:")
+        for group in payload["groups"]:
+            who = ", ".join(f"{h} ({group['relations'].get(h, '?')})" for h in group["asks"])
+            print(f"  {group['candidate']}: " + (who or f"nobody -- {group.get('reason')}"))
+    if payload["unreadable"]:
+        return 2
+    return 0 if payload["resolves"] else 1
+
+
 def _cmd_resume(args: argparse.Namespace) -> int:
     from .cflow2 import runtime
 
@@ -768,6 +798,16 @@ def register(sub) -> None:
     g.add_argument("--option", help="the answer of an ask that declares options")
     q.add_argument("--reason")
     q.set_defaults(func=_guarded(_cmd_approve))
+
+    q = scoped(csub.add_parser("responders", help="who a task's ask would go to right now, "
+                               "one line per 'from' group (read-only, wires nothing): exit 0 "
+                               "when some group reaches an answerable member, 1 when none "
+                               "does, 2 when it cannot be told"))
+    q.add_argument("node", help="the task whose ask to resolve (name or node id)")
+    q.add_argument("--role", help="only the groups naming this role -- e.g. 'reviewer', so a "
+                   "leader group does not answer 'is there a reviewer'")
+    q.add_argument("--json", action="store_true", help="print raw JSON")
+    q.set_defaults(func=_cmd_responders)
 
     q = csub.add_parser("collection", help="the run's collections: list them, or change "
                         "one as a person (push, set, remove)")

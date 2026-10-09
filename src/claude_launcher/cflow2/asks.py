@@ -15,7 +15,9 @@ module does what needs the daemon, always outside the run lock:
   timeouts (applied by the runtime's time tick) and routing;
 - :func:`answer_by_id` is ``flow_answer``: find the run an ask id belongs to
   through the index, answer it, wake the asking session;
-- :func:`pending_for` lists the open asks addressed to a session.
+- :func:`pending_for` lists the open asks addressed to a session;
+- :func:`who_answers` previews, without wiring anything, which ``from``
+  groups of a task's ask would reach someone (``claunch cflow2 responders``).
 
 ``pool_fn`` / ``deliver_fn`` / ``nudge_fn`` / ``withdraw_fn`` are injectable so
 tests (and a caller that must not call its own daemon synchronously) can
@@ -232,6 +234,61 @@ def plan_route(rec: Dict[str, Any], pool: Any) -> Dict[str, Any]:
     if getattr(pool, "wired", None):
         plan["wired"] = list(pool.wired)
     return plan
+
+
+def who_answers(node_ref: str, *, role: str = "", cwd: Optional[str] = None,
+                scope: Optional[str] = None,
+                pool_fn: Optional[PoolFn] = None) -> Dict[str, Any]:
+    """Who task ``node_ref``'s ``ask`` would go to right now, one entry per
+    ``from`` group (read-only) -- v1's :func:`..cflow.engine.who_answers` for
+    a v2 run (claunch-3va8h).
+
+    A step reads it *before* the question is opened: a worker that finds no
+    reviewer spawns its own before ``peer-review`` routes. So every group is
+    reported, not only the first that answers, and ``role`` keeps only the
+    groups naming that role ("is there a *reviewer*" must not be answered yes
+    by the leader group below it). Nothing is wired: a ``connect: true`` group
+    lists the answerable members it would wire when the question opens.
+    """
+    from ..cflow import model as v1
+
+    st = RunStore(cwd, scope)
+    if not st.exists():
+        raise runtime.FlowError(f"no cflow2 run here for scope {st.scope!r}")
+    snap = runtime.Run.load(st)
+    node = snap.chart.by_label(node_ref)
+    if node is None:
+        raise runtime.FlowError(f"workflow {snap.chart.name!r} has no node {node_ref!r}")
+    spec = runtime._ask_spec(node) if node.get("ask") else {"from": []}
+    if not spec["from"]:
+        raise runtime.FlowError(
+            f"node {node_ref!r} asks nobody -- it declares no 'ask' with 'from' groups")
+    pool = (pool_fn or default_pool)(session=_driver(st, snap.state), mesh="",
+                                     cwd=str(st.cwd))
+    wanted = role.strip().lower()
+    groups = []
+    for c in spec["from"]:
+        if wanted and c["role"] != wanted:
+            continue
+        cand = v1.Candidate(role=c["role"], scope=c["scope"] or v1.SCOPE_ANY,
+                            connect=c["connect"])
+        _, reason = pool.match(cand)
+        named = pool.eligible(cand)
+        entry = {
+            "candidate": cand.describe(),
+            "asks": [m.handle for m in named
+                     if m.answerable and (m.handle in pool.reachable or cand.connect)],
+            "relations": {m.handle: pool.relation(m.handle) for m in named if m.answerable},
+        }
+        if reason and not entry["asks"]:
+            entry["reason"] = reason
+        groups.append(entry)
+    return {
+        "node": node.label or node.id, "role": wanted, "me": pool.me, "mesh": pool.mesh,
+        "groups": groups, "resolves": any(g["asks"] for g in groups),
+        "unreadable": bool(getattr(pool, "unreadable", False)),
+        "problem": getattr(pool, "problem", ""),
+    }
 
 
 def route(*, cwd: Optional[str] = None, scope: Optional[str] = None,
