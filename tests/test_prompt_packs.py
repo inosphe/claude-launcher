@@ -609,7 +609,11 @@ def test_prompter_selection_reaches_create_and_spawn_and_survives_restore(home, 
                        "prompt_packs": ["common"],
                        "prompter_prompts": {"url": "https://p.example", "ids": [7]}}
             for name, endpoint in [("p1", "/api/sessions"), ("p2", "/api/sessions/p1/children")]:
-                resp = await client.post(endpoint, headers=BEARER, json={**payload, "name": name})
+                requested = {**payload, "name": name}
+                if name == "p2":
+                    for inherited in ("profile", "cwd"):
+                        requested.pop(inherited)
+                resp = await client.post(endpoint, headers=BEARER, json=requested)
                 assert resp.status == 201, await resp.json()
                 opening = seen[name]
                 assert opening.index("prompt pack: common") < opening.index("SERVER RULE") < opening.index("TASK")
