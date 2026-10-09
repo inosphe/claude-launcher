@@ -23024,6 +23024,11 @@ function openStatsPage(name, compare) {
   refreshStats();
 }
 
+/* The compared sessions' colours are picked at render time (statsColor), so a
+   theme switch with the page open repaints it rather than waiting for the
+   next poll to. */
+window.addEventListener("claunch-theme", () => { if (statsPageOpen) renderStats(); });
+
 function stopStatsPoll() {
   if (statsTimer) { clearTimeout(statsTimer); statsTimer = null; }
   statsPageOpen = false;
