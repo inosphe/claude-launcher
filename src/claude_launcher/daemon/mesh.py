@@ -624,6 +624,11 @@ class Member:
             str(k): str(v) for k, v in (auto_subroles or {}).items()
             if str(k) in self.subroles
         }
+        # A leader's merger is the leader rule's (claunch-lhgfx), held for as
+        # long as it leads and not a person's to take back; a daemon grant
+        # recorded before that was known (claunch-lc2n3) is not shown as one.
+        if self.role == LEADER_ROLE:
+            self.auto_subroles.pop(LEADER_IMPLIES, None)
         #: Subroles a person removed and the daemon must not grant again on
         #: its own. Adding the role back by hand clears it.
         self.declined: List[str] = _dedupe_roles(declined or ())
@@ -4584,6 +4589,10 @@ class MeshManager:
                 member.auto_subroles.pop(r, None)
             member.declined = [r for r in member.declined if r not in added]
             member.declined += [r for r in dropped if r not in member.declined]
+        if primary == LEADER_ROLE:
+            # A leader's merger comes from the leader rule, never as a grant
+            # a person could take back (claunch-lc2n3).
+            member.auto_subroles.pop(LEADER_IMPLIES, None)
         if (primary, resolved) == (before_role, before_subs):
             if (dict(member.auto_subroles), list(member.declined)) != before_marks:
                 self._roster_changed(mesh)
@@ -4621,6 +4630,10 @@ class MeshManager:
                 if member.session != session or not self._is_local(mesh, member):
                     continue
                 if role in member.roles or role in member.declined:
+                    continue
+                # A leader already counts as a merger, and the leader rule,
+                # not this grant, gives it the subrole (claunch-lc2n3).
+                if role == LEADER_IMPLIES and member.role == LEADER_ROLE:
                     continue
                 try:
                     self.set_member_roles(
