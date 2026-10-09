@@ -53,6 +53,49 @@ body:
 """
 
 
+#: A brief ask (format ``pick``) whose options, recommendation and
+#: require_reason come from the question the previous task wrote, not from
+#: the rail's defaults; ``otherwise: human`` lets it fall to a person.
+ASKBRIEF = """cflow: 2
+name: askbrief
+description: a brief ask with declared options that falls to a person
+question_types:
+  pick:
+    description: pick one
+    options: options
+    recommendation: rec
+    fields:
+      problem: {type: text, required: true, label: problem}
+      options:
+        type: list
+        required: true
+        min: 2
+        label: options
+        item:
+          name: {type: name, required: true, label: name}
+          summary: {type: str, required: true, label: summary}
+      rec: {type: ref, of: options, required: true, label: recommendation}
+nodes:
+  frame:
+    title: Frame
+    prompt: frame
+    returns: {ok: {brief: "question:pick"}}
+  pose:
+    title: Pose
+    prompt: pose
+    ask: {brief: "${result['frame'].value.brief}", format: pick, require_reason: true,
+          otherwise: human}
+body: [frame, pose]
+"""
+
+BRIEF = {
+    "problem": "how wide?",
+    "options": [{"name": "narrow", "summary": "keep it small"},
+                {"name": "full", "summary": "cover everything"}],
+    "rec": "NARROW",
+}
+
+
 @pytest.fixture
 def proj(home, tmp_path, monkeypatch):
     d = tmp_path / "proj"
@@ -60,6 +103,7 @@ def proj(home, tmp_path, monkeypatch):
     v2.mkdir(parents=True)
     (v2 / "pick.yaml").write_text(PICK, encoding="utf-8")
     (v2 / "askme.yaml").write_text(ASKME, encoding="utf-8")
+    (v2 / "askbrief.yaml").write_text(ASKBRIEF, encoding="utf-8")
     monkeypatch.setattr(layers, "package_dir", lambda: tmp_path / "no-package-v2")
     monkeypatch.setattr(cflow2_web, "_RAIL", {})
     monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
@@ -151,6 +195,38 @@ def test_rail_ask_answer_names_the_instance_the_approve_handler_takes(
     finally:
         executors.register(None)
 
+
+
+def test_rail_ask_answer_carries_the_briefs_options_recommendation_and_reason(proj):
+    """The ask answer maps what the question declares (claunch-uebgg review):
+    the brief's option names, its recommendation (read from the nested
+    ``question``) and ``require_reason`` -- and the strip's body with a
+    reason moves the run on the picked option."""
+    executors.register(None)
+    cwd = str(proj)
+    try:
+        runtime.start(layers.load("askbrief", cwd), cwd=cwd, scope="s1", caps={})
+        task = runtime.status(cwd=cwd, scope="s1")["tasks"][0]["instance"]
+        runtime.report(task, value={"brief": BRIEF}, cwd=cwd, scope="s1")
+        r = _rail(cwd, "s1")["s1"]
+        assert r["gated"] is True
+        (a,) = r["answers"]
+        assert a["kind"] == "ask" and a["label"] == "pose"
+        names = [o["name"] for o in a["options"]]
+        assert names[:2] == ["narrow", "full"]
+        assert runtime.ASK_APPROVE not in names
+        assert a["require_reason"] is True
+        assert a["recommended"] == "narrow"
+
+        cflow2_approve.approve(r["cwd"], r["scope"],
+                               {"node": a["instance"], "decision": "full",
+                                "reason": "the whole surface"},
+                               nudge_fn=lambda *x: None)
+        st = runtime.RunStore(cwd, "s1").load_state()
+        assert st["result"]["pose"]["value"]["decision"] == "full"
+        assert _rail(cwd, "s1")["s1"]["answers"] == []
+    finally:
+        executors.register(None)
 
 def test_rail_prompt_is_one_bounded_line():
     flat = cflow2_web._rail_prompt("a\n  b\tc")
