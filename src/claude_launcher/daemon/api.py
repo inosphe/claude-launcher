@@ -7701,6 +7701,7 @@ async def _onboard_and_launch(
             packs, packs_required = _session_prompt_packs(
                 request, body, plan, name=name, cwd=cwd
             )
+            packs += await prompter.selected_records(body.get("prompter_prompts"))
         except prompt_packs.PackError as exc:
             raise onboard.OnboardError(str(exc)) from None
         if packs:

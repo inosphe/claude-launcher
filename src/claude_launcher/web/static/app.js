@@ -10380,6 +10380,9 @@ function newSubroles(f) {
 let newPackOffer = null;       // /api/prompt-packs/offer's answer
 let newPackOfferFor = null;    // the directory it answers for
 let newPackTicks = new Map();  // pack id -> the operator's own tick
+let newPrompterOffer = null;
+let newPrompterTicks = new Set();
+let newPrompterRequest = 0;
 // The daemon's own prompt (offer.daemon_prompt): one per daemon, so a tick
 // outlives a change of workspace. null = untouched = ticked.
 let newDaemonPromptTick = null;
@@ -10408,6 +10411,30 @@ function promptPackFormOpened() {
   newPackDefaultsPending = true;
   newPackOfferFor = null;
   Promise.resolve(refreshPromptPackOffer()).catch(() => {});
+  newPrompterTicks = new Set();
+  newPrompterOffer = null;
+  if (newPackPreview && newPackPreview.prompter) newPackPreview = null;
+  Promise.resolve(refreshNewPrompterOffer()).catch(() => {});
+}
+
+async function refreshNewPrompterOffer() {
+  const request = ++newPrompterRequest;
+  let offer;
+  try {
+    const resp = await api("/api/prompter/prompts");
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    offer = await resp.json();
+  } catch (err) {
+    offer = { enabled: true, connected: false, prompts: [], error: String(err) };
+  }
+  if (request !== newPrompterRequest) return;
+  newPrompterOffer = offer;
+  renderPromptPackRow();
+}
+
+function newPrompterSelection() {
+  if (!newPrompterOffer || !newPrompterOffer.connected || !newPrompterTicks.size) return null;
+  return { url: newPrompterOffer.url, ids: [...newPrompterTicks] };
 }
 
 /* Write a held seed's ticks, once the offer on hand is the one for the
@@ -10523,7 +10550,8 @@ function renderPromptPackRow() {
   const missing = Object.keys(required).filter((id) => !have.has(id) && !shippedIds.has(id));
   const wsName = offer && offer.workspace ? offer.workspace.name : "this directory's workspace";
   const own = offer && offer.daemon_prompt;
-  const empty = !own && !packs.length && !fromPackage.length && !missing.length;
+  const remote = newPrompterOffer;
+  const empty = !own && !packs.length && !fromPackage.length && !missing.length && !(remote && remote.enabled);
   row.classList.toggle("hidden", empty);
   if (empty) return;
   row.appendChild(el("span", "new-check-label", "Prompt packs"));
@@ -10565,7 +10593,7 @@ function renderPromptPackRow() {
     const view = el("button", "pack-chip-view", "view");
     view.type = "button";
     view.title = `Show the text of ${p.title || p.id}`;
-    view.addEventListener("click", () => togglePackPreview(p.id, opts.daemon));
+    view.addEventListener("click", () => opts.onView ? opts.onView() : togglePackPreview(p.id, opts.daemon));
     wrap.appendChild(view);
     return wrap;
   };
@@ -10632,6 +10660,32 @@ function renderPromptPackRow() {
     });
   }
   group("Roles", shown.map(([p, packaged]) => packChip(p, packaged)), more);
+  const snippets = remote && remote.connected ? remote.prompts || [] : [];
+  group("Prompter", snippets.map((p) => chip({
+    id: `prompter:${p.id}`, title: p.title || p.name, description: p.body,
+  }, {
+    name: `prompter_prompt_${p.id}`, value: String(p.id),
+    checked: newPrompterTicks.has(p.id),
+    source: "prompter", sourceLabel: "prompter", sourceTitle: remote.url,
+    onChange: (on) => {
+      if (on) newPrompterTicks.add(p.id); else newPrompterTicks.delete(p.id);
+      renderPromptPackRow();
+    },
+    onView: () => {
+      const id = `prompter:${p.id}`;
+      newPackPreview = newPackPreview && newPackPreview.id === id ? null : {
+        id, prompter: true, error: "", doc: {
+          title: p.title || p.name, body: p.body, source: "prompter", url: remote.url,
+          lines: p.body.split("\n").length,
+        },
+      };
+      renderPromptPackRow();
+    },
+  })), null);
+  if (remote && remote.enabled && !snippets.length) {
+    body.appendChild(el("p", "wf-note", remote.connected
+      ? "Prompter has no prompts." : `Prompter unavailable: ${remote.error || "connection failed"}`));
+  }
   row.appendChild(body);
 
   // What the opening will actually carry, in the daemon's order (its own
@@ -10656,6 +10710,9 @@ function renderPromptPackRow() {
   });
   if (newDaemonPromptWanted()) {
     parts.unshift({ text: "daemon prompt (this daemon's, every session)", title: "" });
+  }
+  for (const p of snippets) if (newPrompterTicks.has(p.id)) {
+    parts.push({ text: `${p.title || p.name} (prompter)`, title: remote.url });
   }
   const summary = el("div", "new-packs-summary");
   summary.appendChild(el("div", "new-packs-summary-head",
@@ -10716,6 +10773,7 @@ async function togglePackPreview(id, daemon) {
 
 /* Where a previewed text comes from, in the words the chips' badges use. */
 function packPreviewOrigin(doc, wsName) {
+  if (doc.source === "prompter") return `prompter · ${doc.url}`;
   if (doc.source === "daemon") return "this daemon's prompt, every session";
   if (doc.source === "package") return `claunch's copy, not installed in ${wsName}`;
   return {
@@ -12265,6 +12323,8 @@ $("new-session").addEventListener("submit", async (e) => {
   // Sent even when empty once an offer was read: an empty list is "none of
   // the defaults", and the daemon still adds what the roles require.
   if (newPackOffer) body.prompt_packs = newPromptPacks(f);
+  const prompterSelection = newPrompterSelection();
+  if (prompterSelection) body.prompter_prompts = prompterSelection;
   // Sent only to say no: the daemon gives its prompt unless told otherwise.
   if (newPackOffer && newPackOffer.daemon_prompt && !newDaemonPromptWanted()) {
     body.daemon_prompt = false;
@@ -35581,14 +35641,14 @@ function sessionFormConfig(mode) {
     "codex_yolo", "codex_sandbox", "args",
     "worktree_mode", "worktree_name", "worktree_existing", "worktree_session",
     "worktree_rebase", "worktree_from", "task", "score_goal", "beads", "issue_text", "issue_filter", "issue", "pi_tool_*",
-    "subrole_*", "prompt_pack_*", "daemon_prompt"];
+    "subrole_*", "prompt_pack_*", "prompter_prompt_*", "daemon_prompt"];
   const modes = {
     new: { title: "New session", submit: "Create", sections, editable,
       payload: ["name", "profile", "project", "cwd", "args", "env", "model", "effort", "tools", "worktree",
         "rebase_onto", "branch_from", "role", "subroles", "borrow", "null_token", "mesh", "handle", "workflow",
         "workflow_version", "cflow_inputs",
         "context", "task", "opening_images", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
-        "daemon_prompt",
+        "daemon_prompt", "prompter_prompts",
         "resume", "fork_session"] },
     spawn: { title: "Spawn child", submit: "Spawn child", sections,
       editable: [...editable, "parent", "fork_parent", "over_limit"],
@@ -35596,7 +35656,7 @@ function sessionFormConfig(mode) {
         "rebase_onto", "branch_from", "role", "subroles", "borrow", "null_token", "mesh", "handle", "workflow",
         "workflow_version", "cflow_inputs",
         "context", "task", "opening_images", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
-        "daemon_prompt",
+        "daemon_prompt", "prompter_prompts",
         "fork", "connect", "over_limit", "auto_compact"] },
     fork: { title: "Quick fork", submit: "Fork", sections: ["new-quick-fork"],
       editable: ["quick_fork_carry", "quick_fork_task"], payload: ["task", "mesh", "workflow"] },
@@ -36145,7 +36205,7 @@ function spawnSameSeed(s) {
   // is too, rather than being dropped into the one `s` is editing.
   seed.worktree = /\/\.claude\/worktrees\/[^/]+$/.test(worktreePathKey(s.cwd));
   seed.prompt_packs = (s.prompt_packs || [])
-    .filter((p) => p && p.id && !(p.required_by || []).length)
+    .filter((p) => p && p.id && p.source !== "prompter" && !(p.required_by || []).length)
     .map((p) => p.id);
   return seed;
 }

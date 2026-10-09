@@ -114,6 +114,8 @@ def _current_record(
 ) -> Optional[dict]:
     """The record ``rec`` should be now, or None when its copy is gone."""
     source = rec.get("source") or prompt_packs.WORKSPACE
+    if source == "prompter":
+        return rec  # Server snippets are the snapshot selected at creation.
     if source == prompt_packs.DAEMON:
         if "daemon" not in memo:
             memo["daemon"] = daemon_prompt.pack()
