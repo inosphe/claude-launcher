@@ -978,3 +978,47 @@ def test_unsettled_reaches_the_stall_after_the_same_hour(tmp_path, monkeypatch):
         st = runtime.wait_tick(t0 + k * 600, **kw)
         assert st["ticked"] == 1
     assert [t["label"] for t in st["tasks"]] == ["stub-stall"]
+
+
+# -- claunch-ygbsd: the session retrospective before the end decision ---------
+
+
+def test_the_retrospective_reads_the_pack_and_runs_inline():
+    chart = _chart()
+    node = next(n for n in chart.nodes.values() if n.label == "retrospective")
+    words = _words(node.props["prompt"])
+    # The instructions live in the on-demand pack, the same text a person
+    # sends with `claunch retro <session>`; the node only has it read.
+    assert "`claunch retro --print`" in words
+    assert "RETRO @ <런 id>" in words
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    assert doc["nodes"]["retrospective"]["executor"] == ["inline"]
+    # Placed after the settlement and before the end decision.
+    body = doc["procedures"]["settle"]["body"]
+    ids = [b.get("id") if isinstance(b, dict) else b for b in body]
+    retro = next(i for i, b in enumerate(body)
+                 if isinstance(b, dict) and b.get("try") == {"seq": ["retrospective"]})
+    assert ids.index("settle-watch") < retro < ids.index("end-decision")
+
+
+@pytest.mark.parametrize("outcome", ["ok", "fail"])
+def test_a_failed_retrospective_still_reaches_the_end_decision(tmp_path, monkeypatch, outcome):
+    from claude_launcher.cflow2 import frontend, runtime
+
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    body = doc["procedures"]["settle"]["body"]
+    retro = next(b for b in body
+                 if isinstance(b, dict) and b.get("try") == {"seq": ["retrospective"]})
+    flow = {"cflow": 2, "name": "retro-flow",
+            "nodes": {"retrospective": doc["nodes"]["retrospective"],
+                      "end-stub": {"prompt": "end"}},
+            "body": [retro, "end-stub"]}
+    chart = frontend.compile_text(yaml.safe_dump(flow, allow_unicode=True, sort_keys=False),
+                                  resolve_include=layers.resolver(str(tmp_path)))
+    kw = {"cwd": str(tmp_path), "scope": "m", "now": 1.0}
+    st = runtime.start(chart, caps={}, **kw)
+    task = next(t for t in st["tasks"] if t["label"] == "retrospective")
+    value = {"where": "claunch-x", "proposals": 2, "problems": 1} if outcome == "ok" else {}
+    st = runtime.report(task["instance"], outcome, value, **kw)
+    assert [t["label"] for t in st["tasks"]] == ["end-stub"]
