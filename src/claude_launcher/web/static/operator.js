@@ -46,6 +46,9 @@ function sessionBadge(row) {
   // A paused session is stopped on purpose: nothing in it waits on the user
   // until it is resumed, so it outranks every "needs you" reading.
   if (row.category === "paused") return {label: "일시정지", kind: "paused"};
+  // A held session (claunch-5l35i) is idle with its program freed; it wakes
+  // when it is opened or messaged, so it reads as waiting, not as ended.
+  if (row.category === "hold") return {label: "hold", kind: "idle"};
   if (row.category === "killed" || row.category === "archived") return {label: "종료", kind: "idle"};
   if (row.questions) return {label: `질문 ${row.questions}`, kind: "waiting"};
   if (row.state === "blocked") return {label: "차단", kind: "blocked"};
@@ -93,6 +96,8 @@ function modeSelect(current, onpick) {
 function dotClass(record) {
   if (!record) return "dot exited";
   const status = record.status || "exited";
+  const held = record.category === "hold" || (status === "exited" && record.held_at);
+  if (held) return "dot exited hold";
   const paused = record.category === "paused" || (status === "exited" && record.paused_at);
   return `dot ${paused ? "exited paused" : status}`;
 }
