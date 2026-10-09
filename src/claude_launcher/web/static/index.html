@@ -180,11 +180,16 @@
            syncSessionFilters ran. The count span carries a 0 placeholder and
            is rewritten from the live cache on the first successful poll. -->
       <button id="session-filter-current" type="button" data-filter="current"
-              title="Current — Running, Paused, Killed" aria-label="Current (0)" aria-pressed="true"><span class="session-filter-icon filter-icon-current" aria-hidden="true"></span><span class="session-filter-count">0</span></button>
+              title="Current — Running, Hold, Paused, Killed" aria-label="Current (0)" aria-pressed="true"><span class="session-filter-icon filter-icon-current" aria-hidden="true"></span><span class="session-filter-count">0</span></button>
       <button id="session-filter-running-paused" type="button" data-filter="running-paused"
               title="Running || Paused" aria-label="Running || Paused (0)" aria-pressed="false"><span class="session-filter-icon filter-icon-running-paused" aria-hidden="true"></span><span class="session-filter-count">0</span></button>
       <button id="session-filter-running" type="button" data-filter="running"
               title="Running" aria-label="Running (0)" aria-pressed="true"><span class="session-filter-icon filter-icon-running" aria-hidden="true"></span><span class="session-filter-count">0</span></button>
+      <!-- Hold: running sessions whose program the daemon freed while nobody
+           used them (claunch-5l35i). Opening one wakes it; both presets above
+           include it. -->
+      <button id="session-filter-hold" type="button" data-filter="hold"
+              title="Hold" aria-label="Hold (0)" aria-pressed="true"><span class="session-filter-icon filter-icon-hold" aria-hidden="true"></span><span class="session-filter-count">0</span></button>
       <!-- Paused: exited records carrying the pause marker — the operator's
            temporary stop, filed apart from the killed so the two never share
            a count and the bulk resume below reaches exactly this set. -->
@@ -464,6 +469,10 @@
              for a session that is looping or racing another. No wind-down. -->
         <button id="term-pause" class="term-btn"
                 title="pause this session: the program is terminated as kill does, and the record is filed as paused so it can be resumed on its own or with every other paused one">pause</button>
+        <!-- Hold: end the program but keep the session; it wakes with its
+             conversation when opened again or messaged (claunch-5l35i). -->
+        <button id="term-hold" class="term-btn"
+                title="hold this session: the program is ended to free memory, and the session wakes with its conversation when you open it again or a message arrives">hold</button>
         <button id="term-kill" class="term-btn"
                 title="terminate the program running in this session">kill</button>
         <!-- Archive is available whatever the session is doing. On a live
