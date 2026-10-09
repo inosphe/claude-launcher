@@ -1193,13 +1193,16 @@ option:disabled { color: #6b7280; }
    list above is the only thing that stays, because it moves on its own and
    is meant to be watched while you work in the terminal beside it. */
 #rail-nav {
-  flex: none; display: grid; grid-template-columns: repeat(auto-fit, minmax(50px, 1fr));
+  /* Reserve room for full labels such as Workspaces, including padding.
+     Scale the cells with the label font on desktop and mobile alike. */
+  flex: none; display: grid; grid-template-columns: repeat(auto-fit, minmax(8em, 1fr));
+  font-size: 10px;
   background: #1b1e24;
   border-top: 1px solid #2a2e36;
 }
 #rail-nav a {
   min-width: 0; padding: 6px 2px; text-align: center;
-  font-size: 10px; color: #7d8590; text-decoration: none;
+  font-size: inherit; overflow-wrap: anywhere; color: #7d8590; text-decoration: none;
   border-top: 2px solid transparent;
 }
 #rail-nav a span { display: block; font-size: 15px; line-height: 1.3; }
@@ -4984,8 +4987,8 @@ body.embed #main { width: 100%; }
   /* The rail is the whole screen here, so the list takes what it needs and
      the nav sits at the thumb end rather than floating mid-screen. */
   #session-list { flex: 1 0 auto; max-height: none; overflow: visible; }
-  #rail-nav { position: sticky; bottom: 0; grid-template-columns: repeat(auto-fit, minmax(64px, 1fr)); }
-  #rail-nav a { padding: 12px 4px; font-size: 12px; }
+  #rail-nav { position: sticky; bottom: 0; font-size: 12px; }
+  #rail-nav a { padding: 12px 4px; }
 
   /* thumb-sized rows */
   #session-list li, #mesh-list li, #cflow-list li { padding: 13px 16px; font-size: 15px; }
