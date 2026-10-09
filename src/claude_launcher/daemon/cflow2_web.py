@@ -712,7 +712,8 @@ def rail_entry(cwd: str, scope: str) -> Optional[dict]:
         chart = st.load_chart()
     except Exception as exc:  # noqa: BLE001 - shown, not raised
         return {"cwd": cwd, "scope": scope, "status": "error", "error": str(exc),
-                "workflow": None, "current": [], "owed": [], "gated": False}
+                "workflow": None, "current": [], "owed": [], "gated": False,
+                "answers": []}
     inst = state.get("inst") or {}
     current = []
     owed = []
@@ -742,6 +743,7 @@ def rail_entry(cwd: str, scope: str) -> Optional[dict]:
                 owed.append(f"halted: {a.get('monitor')}")
             else:
                 owed.append(f"{kind}: {a.get('label') or a.get('node') or a.get('instance')}")
+    answers = _rail_answers(str(st.cwd), st.scope, state) if owed else []
     return {
         "cwd": str(st.cwd),
         "scope": st.scope,
@@ -753,7 +755,81 @@ def rail_entry(cwd: str, scope: str) -> Optional[dict]:
         "current": current,
         "owed": owed,
         "gated": bool(owed),
+        "answers": answers,
     }
+
+
+#: The longest question text a rail answer carries: the terminal strip shows
+#: one line of it, and the rail payload is polled for every live session.
+RAIL_PROMPT_MAX = 400
+
+
+def _rail_prompt(text: Any) -> str:
+    flat = " ".join(str(text or "").split())
+    return flat if len(flat) <= RAIL_PROMPT_MAX else flat[:RAIL_PROMPT_MAX - 1] + "…"
+
+
+def _rail_answers(cwd: str, scope: str, state: dict) -> List[dict]:
+    """What the terminal strip (#term-cflow) needs to answer each thing
+    ``owed`` names, in the shape the run page posts: the instance to name,
+    the question and the presses. Read from the same ``runtime.status``
+    payload the run page draws, filtered to what only a person releases (a
+    ``user`` choice, an ask that fell to a human, a loop or visit limit, a
+    halt). A halt and an acceptance hold carry no press -- the dashboard has
+    no endpoint for them -- only the text."""
+    from ..cflow2 import runtime
+
+    try:
+        payload = runtime.status(cwd=cwd, scope=scope, tick=False)
+    except Exception:  # noqa: BLE001 - the rail line still shows ``owed``
+        log.exception("cflow2 rail answers of %s/%s failed", cwd, scope)
+        return []
+    out: List[dict] = []
+    for c in payload.get("choices") or []:
+        if c.get("chooser") != ir.CHOOSER_USER:
+            continue
+        out.append({
+            "kind": "choose", "instance": c.get("instance"),
+            "label": c.get("label") or c.get("node"),
+            "prompt": _rail_prompt(c.get("prompt")),
+            "require_reason": bool(c.get("require_reason")),
+            "options": [{"name": o.get("name"), "description": o.get("description") or ""}
+                        for o in c.get("options") or []],
+        })
+    for a in payload.get("asks") or []:
+        if a.get("resolution") != runtime.RES_HUMAN:
+            continue
+        q = a.get("question") or {}
+        out.append({
+            "kind": "ask", "instance": a.get("instance"),
+            "label": a.get("label") or a.get("node"),
+            "prompt": _rail_prompt(a.get("question_text") or a.get("prompt")
+                                   or a.get("title")),
+            "require_reason": bool(a.get("require_reason")),
+            "options": [{"name": o.get("name"), "description": o.get("description") or ""}
+                        for o in a.get("options") or []]
+            or [{"name": runtime.ASK_APPROVE, "description": "enter the task"},
+                {"name": runtime.ASK_DECLINE, "description": "the task finishes declined"}],
+            "recommended": q.get("recommended") if isinstance(q, dict) else None,
+        })
+    for lim in payload.get("loop_limits") or []:
+        out.append({"kind": runtime.HOLD_LOOP, "instance": lim.get("instance"),
+                    "label": lim.get("label") or lim.get("node"),
+                    "count": lim.get("iterations"), "max": lim.get("max")})
+    for lim in payload.get("visit_limits") or []:
+        out.append({"kind": runtime.HOLD_VISIT, "instance": lim.get("instance"),
+                    "label": lim.get("label") or lim.get("node"),
+                    "count": lim.get("visits"), "max": lim.get("max")})
+    if state.get("status") == runtime.ST_WAITING:
+        for a in state.get("approvals") or []:
+            if a.get("kind") == runtime.HOLD_HALT:
+                out.append({"kind": "halt", "label": a.get("monitor"),
+                            "prompt": f"halted by monitor {a.get('monitor')} "
+                                      "(claunch cflow2 resume)"})
+            elif a.get("kind") == runtime.HOLD_ACCEPTANCE:
+                out.append({"kind": runtime.HOLD_ACCEPTANCE, "label": "acceptance",
+                            "prompt": "the run's acceptance criteria wait on a person"})
+    return out
 
 
 #: ``(cwd, scope) -> (stamp, entry)``. The rail polls every few seconds for

@@ -5100,6 +5100,8 @@ async function refreshCflow2Rail() {
   cflow2RailSig = sig;
   cflow2RailCache = rows;
   applyCflow2Badges();
+  // the answer strip over the attached terminal reads the same rows
+  if (typeof renderTermCflow === "function") renderTermCflow();
 }
 
 /* Which WF_GLYPH shape a v2 run wears. `gated` comes from the server: a
@@ -15287,16 +15289,124 @@ function termCflowQuestion(r) {
   return String(q).replace(/\s+/g, " ").trim();
 }
 
+/* The same strip for a cflow v2 run (claunch-bpziz). A v2 run has none of
+   the v1 fields the helpers above read, so it comes from its own source: the
+   session's /api/cflow2/rail row, whose `answers` (cflow2_web._rail_answers)
+   lists each thing a person owes the run with what the run page posts for
+   it -- the instance, the question, the options. The strip answers the first
+   of them and says how many more wait; the run page has them all.
+
+   Every press is the v2 run page's own: /api/cflow2/select for a `user`
+   choice, /api/cflow2/approve for an ask, /api/cflow2/extend for a loop or
+   visit limit, with the same body and the same confirm. A choice or ask
+   with require_reason asks for the reason first (the engine refuses one
+   without). A halt or an acceptance hold has no dashboard press; the strip
+   says so and links to the run page. */
+function termCflow2Answers(r, a) {
+  const body = { cwd: r.cwd, scope: r.scope, node: a.instance };
+  const what = a.label || a.instance || "?";
+  if (a.kind === "choose" || a.kind === "ask") {
+    const isAsk = a.kind === "ask";
+    return (a.options || []).map((o) => {
+      const name = o.name || String(o);
+      const out = {
+        label: name,
+        title: o.description || "",
+        path: isAsk ? "/api/cflow2/approve" : "/api/cflow2/select",
+        body: isAsk ? { ...body, decision: name, reason: "" }
+          : { ...body, option: name, reason: "" },
+        ask: isAsk ? `Answer '${name}' to ${what}?` : `Pick '${name}' for ${what}?`,
+      };
+      if (isAsk && name !== "decline" && name !== "reframe") out.cls = "approve";
+      if (isAsk && a.recommended === name) {
+        out.cls = "proposed";
+        out.title = `recommended${out.title ? " — " + out.title : ""}`;
+      }
+      if (a.require_reason) {
+        out.reason = `${out.ask}\n\nA reason is required (journaled):`;
+        out.reasonRequired = true;
+      }
+      return out;
+    });
+  }
+  if (a.kind === "loop_limit" || a.kind === "visit_limit") {
+    const visits = a.kind === "visit_limit" ? { visits: true } : {};
+    return [
+      {
+        label: visits.visits ? "Allow one more visit" : "Allow one more",
+        cls: "approve", path: "/api/cflow2/extend",
+        body: { ...body, by: 1, ...visits },
+        ask: `Allow one more at ${what}?`,
+      },
+      {
+        label: visits.visits ? "Stop here" : "Stop the loop",
+        title: "it finishes with outcome fail",
+        path: "/api/cflow2/extend",
+        body: { ...body, stop: true, ...visits },
+        ask: "Stop here? It finishes with outcome fail.",
+      },
+    ];
+  }
+  return [];
+}
+
+function termCflow2Question(a) {
+  let q;
+  if (a.kind === "loop_limit") {
+    q = `loop reached its max (${a.count ?? "?"}/${a.max ?? "?"})`;
+  } else if (a.kind === "visit_limit") {
+    q = `reached the run's visit limit (${a.count ?? "?"}/${a.max ?? "?"})`;
+  } else {
+    q = a.prompt || "waiting for a decision";
+  }
+  return String(q).replace(/\s+/g, " ").trim();
+}
+
+/* What the strip draws for the attached session, from whichever run waits
+   on the reader: the v1 run first (its strip predates this one and its
+   gate stops the session outright), else the v2 run's first owed answer.
+   `null` when neither does. */
+function termCflowView() {
+  if (currentPage !== "terminal" || !currentName) return null;
+  const r = sessCflowRun(currentName);
+  if (r && sessCflowGated(r)) {
+    return {
+      key: [r.run, r.status, r.step_id, r.visit],
+      href: "#/wf/" + encodeURIComponent(`${r.scope || "default"}|${r.cwd}`),
+      what: `${r.workflow || "cflow"} · ${sessCflowGateStep(r) || "?"} — ` +
+        sessCflowLabel(r),
+      question: termCflowQuestion(r),
+      answers: termCflowAnswers(r),
+      after: null,
+    };
+  }
+  const r2 = (typeof cflow2RailCache === "object" && cflow2RailCache || {})[currentName];
+  if (!r2 || !r2.gated) return null;
+  const owed = r2.answers || [];
+  const a = owed[0] || { kind: "", prompt: (r2.owed || []).join(" · ") };
+  const more = owed.length > 1 ? ` (+${owed.length - 1} more)` : "";
+  const question = termCflow2Question(a);
+  return {
+    key: [r2.run, r2.status, a.kind, a.instance || "", owed.length],
+    href: "#/wf/" + encodeURIComponent(`${r2.scope}|${r2.cwd}`),
+    what: `${r2.workflow || "cflow2"} · v2 · ${a.label || a.kind || "?"} — ` +
+      `${a.kind || "waiting"}${more}`,
+    question: termCflow2Answers(r2, a).length ? question
+      : `${question} — answer it on the run page`,
+    answers: termCflow2Answers(r2, a),
+    after: typeof refreshCflow2Rail === "function" ? refreshCflow2Rail : null,
+  };
+}
+
 function renderTermCflow() {
   const box = $("term-cflow");
   if (!box) return;
-  const r = currentPage === "terminal" && currentName
-    ? sessCflowRun(currentName) : null;
-  const show = !!r && sessCflowGated(r);
-  const answers = show ? termCflowAnswers(r) : [];
-  const question = show ? termCflowQuestion(r) : "";
+  const view = termCflowView();
+  const show = !!view;
+  const answers = show ? view.answers : [];
+  const question = show ? view.question : "";
   const sig = show
-    ? JSON.stringify([currentName, r.run, r.status, r.step_id, r.visit,
+    ? JSON.stringify([currentName, view.key, view.what,
       question, answers.map((a) => [a.label, a.cls, a.title])])
     : "hidden";
   // Never drawn yet reads as hidden: the page starts with the strip hidden,
@@ -15310,12 +15420,10 @@ function renderTermCflow() {
     return;
   }
   const head = el("a", "tcf-head");
-  head.href = "#/wf/" + encodeURIComponent(`${r.scope || "default"}|${r.cwd}`);
+  head.href = view.href;
   head.title = "open this run's page";
   head.appendChild(el("span", "tcf-mark", "◆"));
-  head.appendChild(el("span", "tcf-what",
-    `${r.workflow || "cflow"} · ${sessCflowGateStep(r) || "?"} — ` +
-    sessCflowLabel(r)));
+  head.appendChild(el("span", "tcf-what", view.what));
   box.appendChild(head);
   const qn = el("span", "tcf-question", question);
   qn.title = question;
@@ -15330,11 +15438,13 @@ function renderTermCflow() {
       if (a.reason) {
         const why = prompt(a.reason, "");
         if (why === null) return; // cancelled the dialog, not the refusal
-        payload = { ...payload, reason: why };
+        if (a.reasonRequired && !why.trim()) return; // the engine would refuse it
+        payload = { ...payload, reason: a.reasonRequired ? why.trim() : why };
       } else if (a.ask && !confirm(a.ask)) {
         return;
       }
-      cflowAction(a.path, payload);
+      if (view.after) cflowAction(a.path, payload, view.after);
+      else cflowAction(a.path, payload);
     });
     btns.appendChild(b);
   }

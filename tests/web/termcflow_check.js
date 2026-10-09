@@ -70,10 +70,14 @@ const stubs = `
 let currentPage = "terminal";
 let currentName = "s16";
 let cflowCache = [];
+let cflow2RailCache = {};
+function refreshCflow2Rail() {}
 let refits = 0;
 function refitSoon() { refits++; }
 let actions = [];
-function cflowAction(p, body) { actions.push([p, body]); }
+function cflowAction(p, body, after) {
+  actions.push(after ? [p, body, "after"] : [p, body]);
+}
 let confirmAnswer = true;
 let asked = [];
 function confirm(q) { asked.push(q); return confirmAnswer; }
@@ -87,7 +91,8 @@ new Function(
   stubs
   + ["askWho", "answerFellToUs", "answerBranchOptions", "sessCflowRun",
      "sessCflowGated", "sessCflowLabel", "sessCflowGateStep", "fmtOpensAt",
-     "termCflowAnswers", "termCflowQuestion", "renderTermCflow"]
+     "termCflowAnswers", "termCflowQuestion", "termCflow2Answers",
+     "termCflow2Question", "termCflowView", "renderTermCflow"]
     .map(slice).join("\n") + `
 Object.assign(exports, {
   renderTermCflow,
@@ -95,6 +100,7 @@ Object.assign(exports, {
   actions: () => actions,
   asked: () => asked,
   setRuns: (r) => { cflowCache = r; },
+  setRail: (r) => { cflow2RailCache = r; },
   setPage: (p) => { currentPage = p; },
   setName: (n) => { currentName = n; },
   setConfirm: (v) => { confirmAnswer = v; },
@@ -239,6 +245,143 @@ const RUN = {
   ctx.setName("s99");
   ctx.renderTermCflow();
   check("switching to a session with no run hides it", strip.classes.has("hidden"));
+
+  /* ---- a cflow v2 run (claunch-bpziz): the rail row's answers ---- */
+  ctx.setName("s16");
+  ctx.setRuns([]);
+  ctx.reset();
+  const ROW = { cwd: "/repo", scope: "s16", run: "r2", workflow: "improv-worker-v2",
+                status: "running" };
+  ctx.setRail({ s16: { ...ROW, gated: false, owed: [], answers: [] } });
+  ctx.renderTermCflow();
+  check("v2: an ungated run leaves it hidden", strip.classes.has("hidden"));
+
+  ctx.setRail({ s16: { ...ROW, gated: true, owed: ["choose: end-decision"], answers: [
+    { kind: "choose", instance: "round/end@40", label: "end-decision",
+      prompt: "end\nthe session?", require_reason: false,
+      options: [{ name: "end", description: "finish" }, { name: "hold" }] },
+    { kind: "loop_limit", instance: "round@3", label: "round", count: 5, max: 5 }] } });
+  let rf = ctx.refits();
+  ctx.renderTermCflow();
+  check("v2: a user choice shows the strip", !strip.classes.has("hidden"));
+  check("v2: appearing refits", ctx.refits() === rf + 1);
+  check("v2: names workflow, step and the count of the rest",
+        texts(strip).includes("improv-worker-v2 · v2 · end-decision — choose (+1 more)"),
+        texts(strip));
+  check("v2: the question is one line", texts(strip).includes("end the session?"), texts(strip));
+  check("v2: the head links to the v2 run page",
+        byClass(strip, "tcf-head").href === "#/wf/" + encodeURIComponent("s16|/repo"));
+  bs = buttons(strip);
+  check("v2: a button per option", bs.map((b) => b.text).join() === "end,hold",
+        bs.map((b) => b.text));
+  ctx.renderTermCflow();
+  check("v2: a same-shape repaint keeps the button node", buttons(strip)[0] === bs[0]);
+  ctx.setConfirm(false);
+  await bs[1].fire("click");
+  check("v2: a declined confirm sends nothing", ctx.actions().length === 0);
+  ctx.setConfirm(true);
+  await bs[1].fire("click");
+  check("v2: an option posts the run page's select",
+        JSON.stringify(ctx.actions()) === JSON.stringify([["/api/cflow2/select",
+          { cwd: "/repo", scope: "s16", node: "round/end@40", option: "hold", reason: "" },
+          "after"]]), ctx.actions());
+  check("v2: ...after the run page's confirm",
+        ctx.asked().includes("Pick 'hold' for end-decision?"), ctx.asked());
+  ctx.reset();
+
+  /* a choice with require_reason asks for it and refuses an empty one */
+  ctx.setRail({ s16: { ...ROW, gated: true, owed: ["choose: x"], answers: [
+    { kind: "choose", instance: "x@2", label: "x", prompt: "?", require_reason: true,
+      options: [{ name: "go" }] }] } });
+  ctx.renderTermCflow();
+  bs = buttons(strip);
+  ctx.setPrompt("  ");
+  await bs[0].fire("click");
+  check("v2: an empty required reason sends nothing", ctx.actions().length === 0);
+  ctx.setPrompt(" because ");
+  await bs[0].fire("click");
+  check("v2: the reason rides the select",
+        ctx.actions().length === 1 && ctx.actions()[0][1].reason === "because",
+        ctx.actions());
+  ctx.reset();
+
+  /* an ask that fell to a person: its options, the recommendation marked */
+  ctx.setRail({ s16: { ...ROW, status: "waiting_approval", gated: true,
+    owed: ["ask: land"], answers: [
+    { kind: "ask", instance: "land@9", label: "land", prompt: "land it?",
+      require_reason: false, recommended: "approve",
+      options: [{ name: "approve" }, { name: "decline" }] }] } });
+  ctx.renderTermCflow();
+  bs = buttons(strip);
+  check("v2: an ask offers its options", bs.map((b) => b.text).join() === "approve,decline");
+  check("v2: the recommended option is marked",
+        bs[0].classes.has("proposed") && !bs[1].classes.has("proposed"));
+  await bs[1].fire("click");
+  check("v2: an ask posts the run page's approve",
+        JSON.stringify(ctx.actions()) === JSON.stringify([["/api/cflow2/approve",
+          { cwd: "/repo", scope: "s16", node: "land@9", decision: "decline", reason: "" },
+          "after"]]), ctx.actions());
+  ctx.reset();
+
+  /* a loop limit: allow one more / stop */
+  ctx.setRail({ s16: { ...ROW, status: "waiting_approval", gated: true,
+    owed: ["loop_limit: round"], answers: [
+    { kind: "loop_limit", instance: "round@3", label: "round", count: 5, max: 5 }] } });
+  ctx.renderTermCflow();
+  bs = buttons(strip);
+  check("v2: loop limit presses",
+        bs.map((b) => b.text).join() === "Allow one more,Stop the loop", bs.map((b) => b.text));
+  check("v2: loop limit question", texts(strip).includes("loop reached its max (5/5)"));
+  await bs[0].fire("click");
+  await bs[1].fire("click");
+  check("v2: limit presses post extend",
+        JSON.stringify(ctx.actions()) === JSON.stringify([
+          ["/api/cflow2/extend", { cwd: "/repo", scope: "s16", node: "round@3", by: 1 }, "after"],
+          ["/api/cflow2/extend", { cwd: "/repo", scope: "s16", node: "round@3", stop: true },
+           "after"]]), ctx.actions());
+  ctx.reset();
+
+  /* a visit limit carries visits: true */
+  ctx.setRail({ s16: { ...ROW, status: "waiting_approval", gated: true,
+    owed: ["visit_limit: work"], answers: [
+    { kind: "visit_limit", instance: "work@7", label: "work", count: 9, max: 9 }] } });
+  ctx.renderTermCflow();
+  await buttons(strip)[0].fire("click");
+  check("v2: a visit limit posts visits: true",
+        ctx.actions()[0][1].visits === true && ctx.actions()[0][1].by === 1, ctx.actions());
+  ctx.reset();
+
+  /* a halt has no dashboard press: the text and the run page link only */
+  ctx.setRail({ s16: { ...ROW, status: "waiting_approval", gated: true,
+    owed: ["halted: m1"], answers: [
+    { kind: "halt", label: "m1", prompt: "halted by monitor m1 (claunch cflow2 resume)" }] } });
+  ctx.renderTermCflow();
+  check("v2: a halt shows the strip without presses",
+        !strip.classes.has("hidden") && buttons(strip).length === 0);
+  check("v2: ...and points at the run page", texts(strip).includes("answer it on the run page"),
+        texts(strip));
+
+  /* an older daemon's row without answers still shows what is owed */
+  ctx.setRail({ s16: { ...ROW, gated: true, owed: ["choose: pick"] } });
+  ctx.renderTermCflow();
+  check("v2: a row without answers shows owed", texts(strip).includes("choose: pick"),
+        texts(strip));
+
+  /* a v1 gate on the same session takes the strip first */
+  ctx.setRuns([{ ...RUN, status: "waiting_approval", step_id: "landing-gate", gate: "g" }]);
+  ctx.renderTermCflow();
+  check("v2: a v1 gate takes the strip first",
+        buttons(strip).map((b) => b.text).join() === "Approve");
+  ctx.setRuns([]);
+
+  /* another session's v2 row is not drawn here */
+  ctx.setRail({ other: { ...ROW, scope: "other", gated: true, owed: ["choose: x"],
+                         answers: [] } });
+  ctx.renderTermCflow();
+  check("v2: another session's row is not drawn", strip.classes.has("hidden"));
+
+  check("the v2 rail poll repaints it",
+        /applyCflow2Badges\(\);\s*(\/\/[^\n]*\n\s*)*if \(typeof renderTermCflow === "function"\) renderTermCflow\(\);/.test(src));
 
   /* ---- the markup, the stylesheet, the call sites ---- */
   const at = (id) => html.indexOf(`id="${id}"`);

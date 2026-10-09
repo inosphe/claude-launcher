@@ -84,6 +84,37 @@ def test_rail_entry_follows_the_run_and_flags_what_a_person_owes(proj):
     assert any(o.startswith("loop_limit: ") for o in r["owed"])
 
 
+def test_rail_answers_carry_what_the_terminal_strip_posts(proj):
+    """``answers`` (claunch-bpziz): each owed item with the instance and
+    options the run page posts, so the terminal strip's press -- the same
+    body -- moves the run."""
+    cwd = str(proj)
+    runtime.start(layers.load("pick", cwd), cwd=cwd, scope="s1", caps={})
+
+    (a,) = _rail(cwd, "s1")["s1"]["answers"]
+    assert a["kind"] == "choose" and a["prompt"] == "which way?"
+    assert [o["name"] for o in a["options"]] == ["left", "right"]
+    assert a["require_reason"] is False
+    runtime.select(a["instance"], "left", cwd=cwd, scope="s1", caller=runtime.CALLER_USER)
+    assert _rail(cwd, "s1")["s1"]["answers"] == []
+
+    for _ in range(2):
+        task = runtime.status(cwd=cwd, scope="s1")["tasks"][0]["instance"]
+        runtime.report(task, cwd=cwd, scope="s1")
+    (lim,) = _rail(cwd, "s1")["s1"]["answers"]
+    assert lim["kind"] == "loop_limit" and lim["max"] == 1
+    runtime.extend_loop(lim["instance"], 0, stop=True, cwd=cwd, scope="s1")
+    r = _rail(cwd, "s1")["s1"]
+    assert r["gated"] is False and r["answers"] == []
+
+
+def test_rail_prompt_is_one_bounded_line():
+    flat = cflow2_web._rail_prompt("a\n  b\tc")
+    assert flat == "a b c"
+    long = cflow2_web._rail_prompt("x" * 1000)
+    assert len(long) == cflow2_web.RAIL_PROMPT_MAX and long.endswith("…")
+
+
 def test_rail_entry_is_recomputed_only_when_the_run_files_change(proj, monkeypatch):
     cwd = str(proj)
     runtime.start(layers.load("pick", cwd), cwd=cwd, scope="s1", caps={})
