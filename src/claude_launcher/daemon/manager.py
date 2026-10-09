@@ -1026,8 +1026,18 @@ class SessionManager:
         identity: str = "",
         warnings: Optional[List[str]] = None,
         exempt_depth: bool = False,
+        place_under: Optional[str] = None,
     ) -> Session:
         """Register a child of ``parent`` under the spawn policy, unstarted.
+
+        ``place_under`` separates the session the child is BUILT from (always
+        ``parent``: its definition, directory and -- for ``fork`` -- its
+        conversation) from the one it is RECORDED under. ``None`` keeps them
+        the same; a session name hangs the child there instead, and ``""``
+        makes it a root. The quick-fork's sibling placement is the one user:
+        a copy of ``parent``'s conversation that answers to ``parent``'s own
+        parent. The spawn counts (depth, children) are read where the child
+        lands, because that is the subtree it grows.
 
         ``exempt_depth`` is handed to :func:`claude_launcher.spawn.check` as
         the keyword of the same name -- the daemon's own say-so that this one
@@ -1063,13 +1073,20 @@ class SessionManager:
                 f"session {parent!r} has exited — an exited session cannot "
                 "spawn children"
             )
+        placed = parent if place_under is None else place_under
+        if placed and placed != parent and self.get(placed).exited:
+            raise ManagerError(
+                f"session {placed!r} has exited — an exited session cannot "
+                "take children"
+            )
         policy = spawn_mod.SpawnPolicy.load()
         child = spawn_mod.check(
             policy,
             request,
             parent=session.sdef.to_dict(),
-            depth=self.depth(parent),
-            children=len(self.live_children(parent)),
+            # A root has no parent whose depth or brood it adds to.
+            depth=self.depth(placed) if placed else 0,
+            children=len(self.live_children(placed)) if placed else 0,
             warnings=warnings,
             exempt_depth=exempt_depth,
         )
@@ -1094,7 +1111,7 @@ class SessionManager:
                     # original request. The session definition keeps no second
                     # copy whose vocabulary or delivery differs by harness.
                     "role": None,
-                    "parent": parent,
+                    "parent": placed or None,
                     # Set explicitly: spawn.check() hands back the inherited
                     # subset and ``restore`` is not in it, so leaving it out
                     # would take from_dict's default and ignore a parent

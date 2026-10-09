@@ -24,14 +24,20 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
     'refreshSpawnPolicy','refreshSessionConnect','syncSpawnMode','syncOnboardPickers','refreshIssueChoices',
     'syncForkAvailability','refreshSessKids']) window[name]=()=>{};
    refreshSessions=async()=>{};
-   sessMeshes=()=>[{mesh:'team'}]; sessCflowRun=()=>({workflow:'worker'});
+   sessMeshes=()=>[{mesh:'team',role:'leader'}]; sessCflowRun=()=>({workflow:'leader-flow'});
+   meshCache=[{name:'team',members:[{handle:'lead',session:'lead',role:'leader',roles:['leader'],local:true}]},
+     {name:'other',members:[]}];
    spawnRecall=()=>({});
    const f=document.getElementById('new-session');
    f.profile.add(new Option('work','work')); f.harness.add(new Option('claude','claude'));
    f.mesh.add(new Option('none','')); f.role.add(new Option('none',''));
    f.workflow.add(new Option('none','')); f.cwd.add(new Option('repo','F:/repo'));
    window.posts=[];
-   api=async(url,opts)=>{ if(opts?.method==='POST') {posts.push({url,body:JSON.parse(opts.body)});return {ok:false,status:400,json:async()=>({error:'test refusal'})};}return {ok:true,json:async()=>({})}; };
+   api=async(url,opts)=>{ if(opts?.method==='POST') {posts.push({url,body:JSON.parse(opts.body)});return {ok:false,status:400,json:async()=>({error:'test refusal'})};}
+     if(url.includes('/children')) return {ok:true,json:async()=>({child_cflow:'worker-flow'})};
+     if(url.includes('/roles')) return {ok:true,json:async()=>({default:'free-role',roles:[{name:'leader',exclusive:true},{name:'worker'},{name:'free-role'}]})};
+     if(url.includes('/cflow/workflows')) return {ok:true,json:async()=>({workflows:[{name:'leader-flow'},{name:'worker-flow'},{name:'side',kind:'subflow'}]})};
+     return {ok:true,json:async()=>({})}; };
    showView('new');
    return openNewSession();
   });
@@ -125,10 +131,39 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
   }
   assert.equal(await page.locator('[name=task]').isEnabled(),false);
   await page.locator('[name=quick_fork_task]').fill('fork task');
-  await page.locator('[name=quick_fork_carry]').selectOption('inherit');
+  // claunch-9vpeq: four separate rows, each preselecting the inherited
+  // answer as recommended. The workflow inherited is the PAIR the origin's
+  // run declares (worker-flow), not the origin's own (leader-flow).
+  await page.waitForFunction(()=>document.querySelector('[name=quick_fork_workflow]').value==='.');
+  await page.waitForFunction(()=>document.querySelector('[name=quick_fork_role]').options.length===3);
+  const forkRows=await page.evaluate(()=>Object.fromEntries(['place','mesh','role','workflow'].map(k=>{
+    const s=document.querySelector(`[name=quick_fork_${k}]`);
+    return [k,{value:s.value,options:[...s.options].map(o=>o.textContent+(o.disabled?' [disabled]':''))}];
+  })));
+  assert.deepEqual(forkRows.place.options,['As child of lead (recommended)','As sibling — a root session, like lead']);
+  assert.deepEqual(forkRows.mesh,{value:'.',options:['Inherit — team (recommended)','No mesh — a scratch copy','other']});
+  assert.deepEqual(forkRows.workflow,{value:'.',options:[
+    "Inherit — worker-flow (recommended, the pair lead's run declares)",'No workflow','leader-flow']});
+  // The origin is the mesh's live leader, so the copy cannot be one.
+  assert.deepEqual(forkRows.role,{value:'worker',options:['leader — held by lead [disabled]','worker','free-role']});
+  assert.match(await page.locator('#new-quick-fork-role-note').textContent(),/Role change: the conversation was held as leader/);
+  // Validation: a held exclusive role is refused before any post.
+  const before=await page.evaluate(()=>posts.length);
+  await page.evaluate(()=>{document.querySelector('[name=quick_fork_role]').value='leader';});
+  await page.getByRole('button',{name:'Fork',exact:true}).click();
+  await page.getByText(/leader is already held by lead in team/).waitFor();
+  assert.equal(await page.evaluate(()=>posts.length),before);
+  await page.locator('[name=quick_fork_role]').selectOption('worker');
+  await page.locator('[name=quick_fork_place]').selectOption('sibling');
+  // No mesh hides the Role row and sends neither mesh nor role.
+  await page.locator('[name=quick_fork_mesh]').selectOption('-');
+  assert.equal(await page.locator('#new-quick-fork-role-row').isVisible(),false);
+  await page.locator('[name=quick_fork_mesh]').selectOption('.');
+  await page.waitForFunction(()=>document.querySelector('[name=quick_fork_role]').value==='worker');
   await page.getByRole('button',{name:'Fork',exact:true}).click();
   await page.getByText('test refusal',{exact:true}).waitFor();
-  assert.deepEqual(await page.evaluate(()=>posts.at(-1)),{url:'/api/sessions/lead/quick-fork',body:{task:'fork task',mesh:'.',workflow:'.'}});
+  assert.deepEqual(await page.evaluate(()=>posts.at(-1)),{url:'/api/sessions/lead/quick-fork',
+    body:{task:'fork task',mesh:'.',workflow:'.',role:'worker',sibling:true}});
   assert.equal(await page.locator('[name=quick_fork_task]').inputValue(),'fork task');
   await page.getByRole('button',{name:'Cancel',exact:true}).click();
   assert.equal(await page.locator('[name=task]').inputValue(),'page draft');

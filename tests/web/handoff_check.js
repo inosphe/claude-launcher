@@ -57,11 +57,12 @@ const showModal = async (spec) => { modals.push(spec); return modalAnswer; };
 // mesh and cflow polls, so the check supplies the same two readers.
 let meshOf = {};
 let runOf = {};
+let roleOf = {};
 
 const ctx = {};
 new Function(
   "exports", "$", "api", "modalInfo", "refreshSessions", "killSession", "location",
-  "showModal", "meshOf", "runOf",
+  "showModal", "meshOf", "runOf", "roleOf",
   `let currentName = "a";
    let sessionsCache = [
      {name: "a", status: "busy", harness: "claude", conversation_id: "u1"},
@@ -69,7 +70,7 @@ new Function(
      {name: "py", status: "busy", harness: "py"},
    ];
    function railCardRecord(name) { return sessionsCache.find((s) => s.name === name) || null; }
-   function sessMeshes(name) { return meshOf[name] ? [{mesh: meshOf[name]}] : []; }
+   function sessMeshes(name) { return meshOf[name] ? [{mesh: meshOf[name], role: roleOf[name] || ""}] : []; }
    function sessCflowRun(name) { return runOf[name] ? {workflow: runOf[name]} : null; }
    function openSessionModal(opts) { return showModal(opts); }
    ${src.slice(src.indexOf("function sessionFormConfig("), src.indexOf("function createSessionFormView("))}
@@ -78,11 +79,12 @@ new Function(
      forkControlState, handoffControlState, quickForkSession, requestHandoff,
      cancelHandoff, syncSessionHandoffControls, railCardQuickFork,
      quickForkInheritance, openQuickForkModal,
+     quickForkExclusiveHolders, quickForkRoleState,
      sessions: () => sessionsCache,
      setCurrent: (name) => { currentName = name; },
    });`
 )(ctx, $, api, modalInfo, refreshSessions, killSession, location,
-  showModal, meshOf, runOf);
+  showModal, meshOf, runOf, roleOf);
 
 let failures = 0;
 function check(name, actual, expected) {
@@ -203,19 +205,49 @@ const response = (body, ok = true, status = 200) => ({
   check("q opens the reusable Fork view without posting",
         [viaKey, modals.at(-1).tab, modals.at(-1).source.name, calls.length],
         [true, "fork", "a", postsBefore]);
-  check("no mesh/run exposes no inheritance", ctx.quickForkInheritance({name:"a"}),
-        {mesh:"", workflow:""});
-  meshOf.a = "mesh-1"; runOf.a = "improv-worker";
-  check("inheritance reads the same cached mesh/run as the rail",
-        ctx.quickForkInheritance({name:"a"}), {mesh:"mesh-1", workflow:"improv-worker"});
+  check("no mesh exposes no inheritance", ctx.quickForkInheritance({name:"a"}),
+        {mesh:"", role:"", parent:""});
+  meshOf.a = "mesh-1"; runOf.a = "improv-leader"; roleOf.a = "leader";
+  // The origin's own run is NOT what the copy inherits (that is the pair
+  // the run declares, read from /children), so it is not carried here.
+  check("inheritance reads the same cached mesh and role as the rail, and the parent",
+        ctx.quickForkInheritance({name:"a", parent:"g"}), {mesh:"mesh-1", role:"leader", parent:"g"});
+
+  // claunch-9vpeq: the Role row and the leader rule it enforces.
+  const roles = [{name:"leader", exclusive:true}, {name:"worker"}, {name:"free-role"}];
+  const meshes = [{name:"mesh-1", members:[
+    {handle:"a", session:"a", role:"leader", roles:["leader","merger"], local:true},
+    {handle:"w", session:"w", role:"worker", local:true}]}];
+  const live = [{name:"a", status:"busy"}, {name:"w", status:"idle"}];
+  check("a live leader blocks leader in that mesh",
+        ctx.quickForkExclusiveHolders("mesh-1", roles, meshes, live), {leader:"a"});
+  check("an exited holder does not",
+        ctx.quickForkExclusiveHolders("mesh-1", roles, meshes, [{name:"a", status:"exited"}]), {});
+  check("a remote holder counts as live",
+        ctx.quickForkExclusiveHolders("m2", roles,
+          [{name:"m2", members:[{handle:"r", session:"r", role:"leader", local:false}]}], []),
+        {leader:"r"});
+  check("another mesh is not this one", ctx.quickForkExclusiveHolders("mesh-2", roles, meshes, live), {});
+  let st = ctx.quickForkRoleState({roles, holders:{leader:"a"}, originRole:"leader", picked:"", fallback:"free-role"});
+  check("a leader's copy starts as worker, leader disabled and named with its holder",
+        [st.value, st.error, st.moved, st.options.find((o) => o.value === "leader")],
+        ["worker", "", true, {value:"leader", label:"leader — held by a", disabled:true}]);
+  st = ctx.quickForkRoleState({roles, holders:{}, originRole:"worker", picked:"", fallback:"free-role"});
+  check("a free origin role is the default", [st.value, st.moved], ["worker", false]);
+  st = ctx.quickForkRoleState({roles, holders:{}, originRole:"", picked:"free-role", fallback:"free-role"});
+  check("a picked role survives", st.value, "free-role");
+  st = ctx.quickForkRoleState({roles, holders:{leader:"a"}, originRole:"", picked:"leader", fallback:""});
+  check("a held role picked anyway is an error the submit refuses",
+        [st.value, /already held by a/.test(st.error)], ["leader", true]);
   await buttons["term-fork"].handlers.click();
   check("header Fork opens the same component", modals.at(-1).tab, "fork");
 
   // ...and the press sends what was picked.
-  const carried = ctx.quickForkSession("a", "", { mesh: "mesh-1", workflow: "improv-worker" });
+  const carried = ctx.quickForkSession("a", "",
+    { mesh: "mesh-1", workflow: "improv-worker", role: "worker", sibling: true });
   check("a fork that was told to carry them says so in the body",
         JSON.parse(calls[calls.length - 1].options.body),
-        { mesh: "mesh-1", workflow: "improv-worker" });
+        { mesh: "mesh-1", workflow: "improv-worker", role: "worker", sibling: true });
   replies.shift().resolve(response({ session: { name: "a-qf4" } }));
   await carried;
 

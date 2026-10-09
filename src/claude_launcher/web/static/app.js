@@ -13050,14 +13050,83 @@ function handoffControlState(session) {
   };
 }
 
-/* Fork has its own fields and endpoint, within the same form host. */
+/* Fork has its own fields and endpoint, within the same form host.
+
+   Placement, mesh, role and workflow are four separate rows. Each preselects
+   what the copy would inherit, labelled "(recommended)", and each can be set
+   to anything else. What "inherit" means is the daemon's reading, shown
+   rather than re-derived: the origin's mesh when it is in exactly one, and
+   for the workflow the pair the origin's run declares (default_child_cflow,
+   the `child_cflow` of /api/sessions/<origin>/children) -- which is NOT the
+   origin's own workflow. A leader's copy inherits improv-worker, not
+   improv-leader. */
 function quickForkInheritance(session) {
-  const name = (session || {}).name;
-  const mesh = typeof sessMeshes === "function"
-    ? ((sessMeshes(name) || [])[0] || {}).mesh || "" : "";
-  const workflow = typeof sessCflowRun === "function"
-    ? ((sessCflowRun(name) || {}).workflow || "") : "";
-  return { mesh, workflow };
+  const s = session || {};
+  const meshes = typeof sessMeshes === "function" ? (sessMeshes(s.name) || []) : [];
+  const one = meshes.length === 1 ? meshes[0] : null;
+  return {
+    mesh: one ? one.mesh : "",
+    role: one ? (one.role || "") : "",
+    parent: s.parent || "",
+  };
+}
+
+/* {role: handle} for every exclusive role (a leader) a live member of the
+   mesh holds. A remote member counts as live, as it does at the daemon's
+   own check (MeshManager._live_holder): only its daemon can see it die. */
+function quickForkExclusiveHolders(meshName, roles, meshes, sessions) {
+  const exclusive = new Set((roles || []).filter((r) => r && r.exclusive).map((r) => r.name));
+  const out = {};
+  const mesh = (meshes || []).find((m) => m.name === meshName);
+  for (const mem of (mesh && mesh.members) || []) {
+    const held = Array.isArray(mem.roles) && mem.roles.length ? mem.roles : [mem.role || ""];
+    const rec = (sessions || []).find((s) => s.name === mem.session);
+    if (mem.local !== false && !(rec && rec.status !== "exited")) continue;
+    for (const r of held) if (exclusive.has(r) && !out[r]) out[r] = mem.handle || mem.session;
+  }
+  return out;
+}
+
+/* The Role row: every role of the mesh's vocabulary, an exclusive one some
+   live member holds disabled and named with its holder. The preselection is
+   the origin's role, unless that is taken (the origin's own leadership, most
+   often) -- then worker, then the vocabulary's default, then any free role.
+   `error` is the validation the submit enforces; `moved` says the default
+   had to leave the origin's role, so the row can say why. */
+function quickForkRoleState({ roles, holders, originRole, picked, fallback }) {
+  const names = (roles || []).map((r) => r.name);
+  const held = holders || {};
+  const free = (n) => !!n && names.includes(n) && !held[n];
+  const options = names.map((n) => ({
+    value: n,
+    label: held[n] ? `${n} — held by ${held[n]}` : (n === originRole ? `${n} (origin's role)` : n),
+    disabled: !!held[n],
+  }));
+  let value = picked && names.includes(picked) ? picked : "";
+  if (!value) {
+    value = [originRole, "worker", fallback].find(free) || names.find(free) || "";
+  }
+  const error = value && held[value]
+    ? `${value} is already held by ${held[value]} in this mesh, and a mesh has only one ${value} — pick another role`
+    : "";
+  return { options, value, error, moved: !!originRole && value !== originRole && !picked };
+}
+
+function quickForkFill(select, items, value) {
+  select.innerHTML = "";
+  for (const it of items) {
+    const o = new Option(it.label, it.value);
+    if (it.disabled) o.disabled = true;
+    select.appendChild(o);
+  }
+  select.value = items.some((it) => it.value === value && !it.disabled) ? value
+    : (items.find((it) => !it.disabled) || {}).value || "";
+}
+
+/* The mesh the copy would join, by name: "." is the inherited one. */
+function quickForkMeshName(f, inherited) {
+  const v = f.quick_fork_mesh.value;
+  return v === "." ? inherited.mesh : (v === "-" ? "" : v);
 }
 
 function openQuickForkModal(name) {
@@ -13069,27 +13138,155 @@ function openQuickForkModal(name) {
 function configureSessionFork(source) {
   const f = $("new-session");
   const inherited = quickForkInheritance(source);
-  sessionFormView().inheritance = inherited;
+  const view = sessionFormView();
+  view.inheritance = inherited;
+  view.forkRoles = { mesh: null, roles: [], fallback: "" };
+  view.forkRolePicked = "";
+  view.forkWfPicked = false;
+  const load = view.forkLoad = (view.forkLoad || 0) + 1;
   $("new-quick-fork-source").textContent = `Copy the conversation from '${source.name}'. `
     + "The copy shares the original checkout and reports back with Merge. "
     + "Avoid editing the same files in both sessions.";
   f.quick_fork_task.value = "";
-  f.quick_fork_carry.innerHTML = "";
-  f.quick_fork_carry.appendChild(new Option("Scratch copy — no mesh or workflow", ""));
-  const labels = [inherited.mesh && `mesh ${inherited.mesh}`,
-    inherited.workflow && `workflow ${inherited.workflow}`].filter(Boolean);
-  if (labels.length) f.quick_fork_carry.appendChild(
-    new Option(`Inherit ${labels.join(" and ")}`, "inherit"));
-  f.quick_fork_carry.value = "";
-  $("new-quick-fork-carry-row").classList.toggle("hidden", !labels.length);
+  quickForkFill(f.quick_fork_place, [
+    { value: "child", label: `As child of ${source.name} (recommended)` },
+    { value: "sibling", label: inherited.parent
+      ? `As sibling — under ${inherited.parent}, beside ${source.name}`
+      : `As sibling — a root session, like ${source.name}` },
+  ], "child");
+  const others = (typeof meshCache !== "undefined" ? meshCache : [])
+    .map((m) => m.name).filter((n) => n && n !== inherited.mesh);
+  quickForkFill(f.quick_fork_mesh, [
+    ...(inherited.mesh ? [{ value: ".", label: `Inherit — ${inherited.mesh} (recommended)` }] : []),
+    { value: "-", label: "No mesh — a scratch copy" },
+    ...others.map((n) => ({ value: n, label: n })),
+  ], inherited.mesh ? "." : "-");
+  quickForkFill(f.quick_fork_workflow, [{ value: "-", label: "No workflow" }], "-");
+  f.quick_fork_mesh.onchange = () => { syncQuickForkRole(); };
+  f.quick_fork_role.onchange = () => {
+    view.forkRolePicked = f.quick_fork_role.value;
+    syncQuickForkRole();
+  };
+  f.quick_fork_workflow.onchange = () => { view.forkWfPicked = true; };
+  syncQuickForkRole();
+  Promise.resolve(loadQuickForkWorkflows(source, load)).catch(() => {});
+}
+
+/* The Workflow row's choices: the pair the origin hands a child, then every
+   workflow declared where the copy stands (the origin's directory). */
+async function loadQuickForkWorkflows(source, load) {
+  const f = $("new-session");
+  const view = sessionFormView();
+  const get = (url) => api(url).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+  const [kids, wfs] = await Promise.all([
+    get(`/api/sessions/${encodeURIComponent(source.name)}/children`),
+    get(`/api/cflow/workflows?cwd=${encodeURIComponent(source.cwd || "")}`),
+  ]);
+  if (view.forkLoad !== load) return;
+  const pair = (kids && kids.child_cflow) || "";
+  const names = [...new Set(((wfs && wfs.workflows) || [])
+    .filter((w) => w && w.kind !== "subflow")
+    .map((w) => w.value || w.name).filter((n) => n && n !== pair))];
+  const keep = view.forkWfPicked ? f.quick_fork_workflow.value : (pair ? "." : "-");
+  quickForkFill(f.quick_fork_workflow, [
+    ...(pair ? [{ value: ".", label: `Inherit — ${pair} (recommended, the pair ${source.name}'s run declares)` }] : []),
+    { value: "-", label: "No workflow" },
+    ...names.map((n) => ({ value: n, label: n })),
+  ], keep);
+  view.inheritance.workflow = pair;
+}
+
+/* Rebuild the Role row for the mesh now picked: the vocabulary is the mesh's
+   own (fetched once per mesh), and the live holders are read off the mesh
+   poll the rail already keeps. */
+async function syncQuickForkRole() {
+  const f = $("new-session");
+  const view = sessionFormView();
+  const inherited = view.inheritance || {};
+  const meshName = quickForkMeshName(f, inherited);
+  const row = $("new-quick-fork-role-row");
+  const note = $("new-quick-fork-role-note");
+  row.classList.toggle("hidden", !meshName);
+  if (!meshName) {
+    f.quick_fork_role.innerHTML = "";
+    const was = inherited.role;
+    note.textContent = was
+      ? `The copy joins no mesh and holds no role; its opening says the ${was} role in the conversation stays with the origin.`
+      : "";
+    note.classList.toggle("hidden", !was);
+    note.classList.remove("wf-warning");
+    return;
+  }
+  if (view.forkRoles.mesh !== meshName) {
+    const load = view.forkLoad;
+    let data = null;
+    try {
+      const resp = await api(meshName.includes("@") ? "/api/roles"
+        : `/api/mesh/${encodeURIComponent(meshName)}/roles`);
+      data = resp.ok ? await resp.json() : null;
+    } catch { data = null; }
+    if (view.forkLoad !== load || quickForkMeshName(f, inherited) !== meshName) return;
+    view.forkRoles = { mesh: meshName, roles: (data && data.roles) || [], fallback: (data && data.default) || "" };
+  }
+  const originRole = meshName === inherited.mesh ? inherited.role : "";
+  const holders = quickForkExclusiveHolders(meshName, view.forkRoles.roles,
+    typeof meshCache !== "undefined" ? meshCache : [], sessionsCache);
+  const state = quickForkRoleState({
+    roles: view.forkRoles.roles, holders, originRole,
+    picked: view.forkRolePicked, fallback: view.forkRoles.fallback,
+  });
+  quickForkFill(f.quick_fork_role, state.options, state.value);
+  const lines = [];
+  if (state.moved && holders[originRole]) {
+    lines.push(`${quickForkSourceName(view)} is ${originRole} in ${meshName}, and ${originRole} is held by `
+      + `${holders[originRole]} there — the copy starts as ${state.value}.`);
+  }
+  const was = inherited.role;
+  if (was && f.quick_fork_role.value && f.quick_fork_role.value !== originRole) {
+    lines.push(`Role change: the conversation was held as ${was}; the copy's opening tells it that it is `
+      + `${f.quick_fork_role.value} now and the ${was} role stays with the origin.`);
+  }
+  if (state.error) lines.push(state.error);
+  note.textContent = lines.join(" ");
+  note.classList.toggle("hidden", !lines.length);
+  note.classList.toggle("wf-warning", !!state.error);
+}
+
+function quickForkSourceName(view) {
+  return ((view && view.source) || {}).name || "the origin";
+}
+
+/* What the press sends, and the one refusal the form makes itself: an
+   exclusive role (leader) a live member already holds. The daemon refuses
+   the same request (onboard.preflight); this says so before the press. */
+function quickForkRequestOptions(f, view) {
+  const inherited = view.inheritance || {};
+  const meshName = quickForkMeshName(f, inherited);
+  const options = {};
+  if (f.quick_fork_place.value === "sibling") options.sibling = true;
+  const mesh = f.quick_fork_mesh.value;
+  if (mesh && mesh !== "-") options.mesh = mesh;
+  const wf = f.quick_fork_workflow.value;
+  if (wf && wf !== "-") options.workflow = wf;
+  if (meshName && f.quick_fork_role.value) {
+    options.role = f.quick_fork_role.value;
+    const holders = quickForkExclusiveHolders(meshName, (view.forkRoles || {}).roles,
+      typeof meshCache !== "undefined" ? meshCache : [], sessionsCache);
+    if (holders[options.role]) {
+      return { error: `${options.role} is already held by ${holders[options.role]} in ${meshName}, `
+        + `and a mesh has only one ${options.role} — pick another role` };
+    }
+  }
+  return { options };
 }
 
 async function submitSessionFork(f) {
   const view = sessionFormView();
-  const options = {};
-  if (f.quick_fork_carry.value === "inherit") {
-    if (view.inheritance.mesh) options.mesh = ".";
-    if (view.inheritance.workflow) options.workflow = ".";
+  const { options, error } = quickForkRequestOptions(f, view);
+  if (error) {
+    $("create-error").textContent = error;
+    $("create-error").classList.remove("hidden");
+    return;
   }
   createBusy = true;
   setActionPending(f.querySelector("button[type=submit]"), true, "Forking…");
@@ -13119,6 +13316,8 @@ async function quickForkSession(name, task, options, view = {}) {
   if (task) body.task = task;
   if (options && options.mesh) body.mesh = options.mesh;
   if (options && options.workflow) body.workflow = options.workflow;
+  if (options && options.role) body.role = options.role;
+  if (options && options.sibling) body.sibling = true;
   const payload = sessionFormPayload("fork", body);
   let resp;
   try {
@@ -35586,7 +35785,9 @@ function sessionFormConfig(mode) {
         "daemon_prompt",
         "fork", "connect", "over_limit", "auto_compact"] },
     fork: { title: "Quick fork", submit: "Fork", sections: ["new-quick-fork"],
-      editable: ["quick_fork_carry", "quick_fork_task"], payload: ["task", "mesh", "workflow"] },
+      editable: ["quick_fork_place", "quick_fork_mesh", "quick_fork_role",
+        "quick_fork_workflow", "quick_fork_task"],
+      payload: ["task", "mesh", "workflow", "role", "sibling"] },
   };
   return modes[mode] || modes.new;
 }
