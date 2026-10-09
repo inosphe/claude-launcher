@@ -16,8 +16,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from claude_launcher.cflow2 import layers, runtime
-from claude_launcher.daemon import api as api_mod, cflow2_web
+from claude_launcher.cflow2 import executors, layers, runtime
+from claude_launcher.daemon import api as api_mod, cflow2_approve, cflow2_web
 from claude_launcher.daemon.manager import SessionManager
 
 PICK = """\
@@ -39,6 +39,19 @@ body:
     - loop: {while: "true", max: 1, do: c}
 """
 
+ASKME = """\
+cflow: 2
+name: askme
+description: an ask nobody is routed to, so it falls to a person
+nodes:
+  a: {title: Step A, prompt: do a, ask: {prompt: "may I a?"}}
+  b: {title: Step B, prompt: do b}
+body:
+  try: [a, b]
+  catch:
+    declined: b
+"""
+
 
 @pytest.fixture
 def proj(home, tmp_path, monkeypatch):
@@ -46,6 +59,7 @@ def proj(home, tmp_path, monkeypatch):
     v2 = d / ".claunch" / "workflows" / "v2"
     v2.mkdir(parents=True)
     (v2 / "pick.yaml").write_text(PICK, encoding="utf-8")
+    (v2 / "askme.yaml").write_text(ASKME, encoding="utf-8")
     monkeypatch.setattr(layers, "package_dir", lambda: tmp_path / "no-package-v2")
     monkeypatch.setattr(cflow2_web, "_RAIL", {})
     monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
@@ -106,6 +120,36 @@ def test_rail_answers_carry_what_the_terminal_strip_posts(proj):
     runtime.extend_loop(lim["instance"], 0, stop=True, cwd=cwd, scope="s1")
     r = _rail(cwd, "s1")["s1"]
     assert r["gated"] is False and r["answers"] == []
+
+
+@pytest.mark.parametrize("decision, then", [("approve", "Step A"), ("decline", "Step B")])
+def test_rail_ask_answer_names_the_instance_the_approve_handler_takes(
+        proj, decision, then):
+    """The ``ask`` answer (claunch-uebgg): an ask that fell to a person
+    rides the rail with its instance, question and the default
+    approve/decline presses, and the strip's body -- ``node`` = that
+    instance, ``decision`` = the pressed option -- moves the run through the
+    same handler as ``/api/cflow2/approve``."""
+    executors.register(None)
+    cwd = str(proj)
+    try:
+        runtime.start(layers.load("askme", cwd), cwd=cwd, scope="s1", caps={})
+        r = _rail(cwd, "s1")["s1"]
+        assert r["status"] == "waiting_approval" and r["gated"] is True
+        (a,) = r["answers"]
+        assert a["kind"] == "ask" and a["prompt"] == "may I a?"
+        assert a["instance"] and a["label"] == "a"
+        assert [o["name"] for o in a["options"]] == [runtime.ASK_APPROVE, runtime.ASK_DECLINE]
+        assert a["require_reason"] is False and a["recommended"] is None
+
+        cflow2_approve.approve(r["cwd"], r["scope"],
+                               {"node": a["instance"], "decision": decision, "reason": ""},
+                               nudge_fn=lambda *x: None)
+        r = _rail(cwd, "s1")["s1"]
+        assert r["gated"] is False and r["answers"] == []
+        assert r["status"] == "running" and r["current"] == [then]
+    finally:
+        executors.register(None)
 
 
 def test_rail_prompt_is_one_bounded_line():
