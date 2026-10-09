@@ -1295,6 +1295,29 @@ def _cmd_respawn(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_hold(args: argparse.Namespace) -> int:
+    """End a running session's program now and file it as held
+    (claunch-5l35i); attaching to it, a mesh message or a cflow notice wakes
+    it, and ``claunch respawn`` is the manual way back."""
+    client = daemon_client.ensure_running()
+    path = f"/api/sessions/{args.session}/hold"
+    info = client.post(path + ("?force=1" if args.force else ""))
+    if info.get("already_exited"):
+        print(f"session {info['name']!r} has already exited — nothing to hold")
+        return 0
+    print(
+        f"session {info['name']!r} is on hold — it wakes on attach or a "
+        f"message; 'claunch respawn {info['name']}' brings it back by hand"
+    )
+    return 0
+
+
+def _cmd_hold_dispatch(args: argparse.Namespace) -> int:
+    if not _resolve_target(args):
+        return 1
+    return _cmd_hold(args)
+
+
 def _cmd_migrate_session(args: argparse.Namespace) -> int:
     """Move a session (kill, carry its conversation, relaunch) elsewhere."""
     body: dict = {"children": bool(args.children)}
@@ -1526,6 +1549,12 @@ def _cmd_kill_session(args: argparse.Namespace) -> int:
             f"session {args.session!r} was paused — it is now filed as "
             "killed, so resuming the paused sessions no longer brings it "
             f"back. It is still respawnable ('claunch respawn {args.session}')."
+        )
+    elif info.get("unheld"):
+        print(
+            f"session {args.session!r} was on hold — it is now filed as "
+            "killed and no longer wakes on attach or a message. It is still "
+            f"respawnable ('claunch respawn {args.session}')."
         )
     elif info.get("already_exited"):
         code = info.get("exit_code")
@@ -3036,6 +3065,18 @@ def register(sub) -> None:
         "-a", "--attach", action="store_true", help="attach once respawned"
     )
     p_respawn.set_defaults(func=_cmd_respawn_dispatch)
+
+    p_hold = sub.add_parser(
+        "hold",
+        help="end a running session's program but keep the session; it wakes "
+        "with its conversation on attach or a message",
+    )
+    p_hold.add_argument("-t", dest="session_t", help=argparse.SUPPRESS)
+    p_hold.add_argument("session", nargs="?")
+    p_hold.add_argument(
+        "-f", "--force", action="store_true", help="SIGKILL instead of SIGTERM"
+    )
+    p_hold.set_defaults(func=_cmd_hold_dispatch)
 
     p_send = sub.add_parser(
         "send-keys",

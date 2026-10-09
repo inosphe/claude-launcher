@@ -406,6 +406,10 @@ class Carrier:
         except Exception as exc:  # noqa: BLE001 -- the client named it, so tell it
             await self._fail(ch, str(exc))
             return
+        from . import ws as ws_mod  # local: ws.py knows nothing of this file
+
+        # A held session wakes when somebody comes to look (claunch-5l35i).
+        session = await ws_mod.wake_for_viewer(self._app["manager"], session)
         chan = ChannelSocket(self, ch)
         self._channels[ch] = chan
         await self.send_soon(

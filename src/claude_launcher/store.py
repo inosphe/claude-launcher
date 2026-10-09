@@ -487,6 +487,15 @@ DAEMON_DEFAULTS = {
     "beads_auto_issue": True,
     "beads_winddown": True,
     "beads_winddown_grace": 120.0,
+    # Idle hold (daemon/hold.py, claunch-5l35i): a running session that has
+    # been quiet this many minutes -- no screen change, no keystroke, no
+    # viewer, nothing queued for it -- has its program ended and its record
+    # filed as "hold"; attaching to it (the web terminal or `claunch
+    # attach`), a mesh message or a cflow notice brings it back with its
+    # conversation. 0 turns the automatic hold off (the manual one stays).
+    # keep_alive sessions and those that would come back blank are never
+    # held.
+    "hold_idle_minutes": 60.0,
     # A merge/handoff completion (daemon/handoff.py) waits this long for the
     # target to take the report before it gives up and KEEPS the source —
     # the target's keyboard may be busy, and the report is the only thing of

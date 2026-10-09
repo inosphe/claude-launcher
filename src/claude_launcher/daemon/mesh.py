@@ -181,7 +181,7 @@ def recipient_body(msg: dict, handle: str) -> str:
 #: filter the page applies and a filter the daemon applies must agree about
 #: what "current" means.
 MEMBER_STATES = (
-    "all", "current", "running", "remote",
+    "all", "current", "running", "remote", "hold",
     "killed", "paused", "archived", "missing",
 )
 
@@ -196,7 +196,8 @@ def member_in_state(category: str, state: str) -> bool:
     if state == "all":
         return True
     if state == "current":
-        return category in ("running", "remote")
+        # A held member is asleep, not gone (claunch-5l35i): a message wakes it.
+        return category in ("running", "remote", "hold")
     return category == state
 
 
@@ -8213,7 +8214,7 @@ class MeshManager:
         now = datetime.now(timezone.utc)
         rows = []
         counts = {
-            "all": 0, "current": 0, "running": 0, "remote": 0,
+            "all": 0, "current": 0, "running": 0, "remote": 0, "hold": 0,
             "killed": 0, "paused": 0, "archived": 0, "missing": 0,
         }
         for h in sorted(mesh.members):
@@ -8222,7 +8223,7 @@ class MeshManager:
             counts["all"] += 1
             if category in counts:
                 counts[category] += 1
-            if category in ("running", "remote"):
+            if category in ("running", "remote", "hold"):
                 counts["current"] += 1
             if handle is not None:
                 if h != handle:
@@ -8576,7 +8577,7 @@ class MeshManager:
         members = []
         lineage = self._local_lineage(mesh)
         counts = {
-            "all": 0, "current": 0, "running": 0, "remote": 0,
+            "all": 0, "current": 0, "running": 0, "remote": 0, "hold": 0,
             "killed": 0, "paused": 0, "archived": 0, "missing": 0,
         }
         for handle in sorted(mesh.members):
@@ -8585,7 +8586,7 @@ class MeshManager:
             counts["all"] += 1
             if category in counts:
                 counts[category] += 1
-            if category in ("running", "remote"):
+            if category in ("running", "remote", "hold"):
                 counts["current"] += 1
             if not member_in_state(category, state):
                 continue
@@ -8973,6 +8974,15 @@ class MeshManager:
             # persisted here: it is an optimisation, and a daemon that reads
             # the older number back simply re-walks once.
             mesh.cursors[member.handle] = len(mesh.messages)
+        if gone and pending and (
+            getattr(session, "held_at", None)
+            or getattr(self.manager, "is_waking", lambda _n: False)(member.session)
+        ):
+            # A held recipient is not gone, only asleep (claunch-5l35i): wake
+            # it, and the pass after the respawn delivers as usual. No
+            # stranded report -- nobody is waiting on a closed terminal.
+            self.manager.wake_soon(member.session, by="mesh")
+            return
         if gone:
             if pending:
                 # Hold until respawn (same name, same cursor) — and tell

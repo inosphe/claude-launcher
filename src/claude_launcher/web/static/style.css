@@ -138,6 +138,7 @@ html[data-theme="light"] .xterm {
 .filter-icon-running-paused { --filter-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M2 4v16l10-8zM14 4h3v16h-3zM20 4h3v16h-3z'/%3E%3C/svg%3E"); }
 .filter-icon-running { --filter-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M7 3v18l14-9z'/%3E%3C/svg%3E"); }
 .filter-icon-paused { --filter-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M5 4h5v16H5zM14 4h5v16h-5z'/%3E%3C/svg%3E"); }
+.filter-icon-hold { --filter-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M20 14.5A8.5 8.5 0 0 1 9.5 4 8.5 8.5 0 1 0 20 14.5z'/%3E%3C/svg%3E"); }
 .filter-icon-killed { --filter-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='4' y='4' width='16' height='16' rx='2'/%3E%3C/svg%3E"); }
 .filter-icon-archived { --filter-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linejoin='round'%3E%3Cpath d='M3 3h18v5H3zM5 8v13h14V8M9 12h6'/%3E%3C/svg%3E"); }
 .session-filters button[aria-pressed="true"] .session-filter-count { color: #a4bedc; }
@@ -520,6 +521,8 @@ html[data-theme="light"] .xterm {
    drawn in the reminder-pause blue rather than the grey of a kill, so the
    rail tells the two apart at the dot. */
 .dot.exited.paused { background: #58a6ff; }
+/* A held record (claunch-5l35i): asleep, wakes when opened. */
+.dot.exited.hold { background: #8b7fd6; }
 /* The dot's grade (dotGrade in app.js). Busy steps up from a dim amber — a
    turn parked on a tool call — to a bright orange with a halo for a screen
    moving hundreds of rows a minute. Idle fades as the quiet ages: full
@@ -1933,6 +1936,7 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 }
 .badge.tps.stale { background: #1c1f24; color: #7d8590; }
 .badge.exited.paused { background: #172947; color: #58a6ff; }
+.badge.exited.hold { background: #231f3d; color: #a99cf0; }
 /* The link chip: what this browser's socket is doing, as against the badge
    before it, which is what the session is doing. Filled rather than outlined
    like its neighbours because it is only ever up when something is wrong —

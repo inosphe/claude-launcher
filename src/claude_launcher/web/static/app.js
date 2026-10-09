@@ -1300,10 +1300,10 @@ function syncBulkActions(sessions, filter = "current") {
     ? sessions.filter((s) => s.status !== "exited").length : 0;
   const dead = (Array.isArray(filter) ? filter.includes("killed") : filter === "current" || filter === "killed")
     ? sessions.filter((s) => s.status === "exited" && !s.archived_at
-                      && !s.paused_at).length : 0;
+                      && !s.paused_at && !s.held_at).length : 0;
   const paused = (Array.isArray(filter) ? filter.includes("paused") : filter === "current" || filter === "paused" || filter === "running-paused")
     ? sessions.filter((s) => s.status === "exited" && !s.archived_at
-                      && !!s.paused_at).length : 0;
+                      && !!s.paused_at && !s.held_at).length : 0;
   const set = (id, n, label, title) => {
     const btn = $(id);
     if (!btn) return;  // an older index.html served by a newer daemon
@@ -1593,7 +1593,7 @@ function railMetaText(s) {
   // the pause is the operator's. A marker on a still-running row is a pause
   // whose signal has not landed yet — the same window a kill has.
   const state = s.archived_at ? "archived" : s.status === "exited"
-    ? (s.paused_at ? "paused" : `exit ${s.exit_code ?? "?"}`)
+    ? (s.held_at ? "hold" : s.paused_at ? "paused" : `exit ${s.exit_code ?? "?"}`)
     : s.paused_at ? "pausing" : s.winddown ? "winding down" : "";
   return [identity, state].filter(Boolean).join(" · ");
 }
@@ -1735,16 +1735,28 @@ async function runSessionSearch(q) {
 const SESSION_FILTER_KEY = `claunch_session_filter:${BASE}`;
 const SESSION_GROUP_KEY = `claunch_session_group:${BASE}`;
 const SESSION_GROUP_ORDER_KEY = `claunch_session_group_order:${BASE}`;
-const SESSION_FILTERS = ["current", "running-paused", "running", "killed", "paused", "archived"];
+const SESSION_FILTERS = ["current", "running-paused", "running", "hold", "killed", "paused", "archived"];
+/* The two presets. Hold (claunch-5l35i) is a running session whose program
+   the daemon freed while nobody used it; it wakes on attach, so both presets
+   that show the running ones show it too. The functions further down spell
+   the same lists out, because the page checks slice them out of this file
+   one function at a time. */
+const SESSION_FILTER_CURRENT = ["running", "hold", "killed", "paused"];
+const SESSION_FILTER_RUNNING_PAUSED = ["running", "hold", "paused"];
 const SESSION_GROUPS = ["mesh", "workspace"];
 function restoreSessionFilter(saved) {
-  const current = ["running", "killed", "paused"];
+  const current = SESSION_FILTER_CURRENT.slice();
   if (!saved || saved === "current") return current;
-  if (saved === "running-paused") return ["running", "paused"];
+  if (saved === "running-paused") return SESSION_FILTER_RUNNING_PAUSED.slice();
   if (SESSION_FILTERS.includes(saved)) return [saved];
   try {
     const states = JSON.parse(saved);
     if (Array.isArray(states) && states.every((s) => SESSION_FILTERS.includes(s) && s !== "current" && s !== "running-paused")) {
+      // A preset saved before the hold filter existed is the same preset
+      // now: both of them held running and paused, and both now hold hold.
+      if (!states.includes("hold") && states.includes("running") && states.includes("paused")) {
+        states.push("hold");
+      }
       return SESSION_FILTERS.filter((s) => states.includes(s));
     }
   } catch { /* Old or invalid browser storage falls back to Current. */ }
@@ -1984,7 +1996,7 @@ function renderSessionTabs() {
     // summary composed (or refreshed) while the bar is on screen has to
     // repaint the title, and the bar is otherwise only rebuilt when the
     // fields above move.
-    return [name, isSessionPinned(name), name === active, rec?.status, rec?.paused_at,
+    return [name, isSessionPinned(name), name === active, rec?.status, rec?.paused_at, rec?.held_at,
             typeof dotGrade === "function" ? dotGrade(rec) : "",
             rec?.observe_pin, rec?.briefing, sessionTabOtherProject(rec)];
   }));
@@ -2304,7 +2316,7 @@ function renderSessionGrid(force = false) {
     layout.rows, currentName, sessionGridPerLine,
     // The dot's grade rides here, not the readings under it: those move on
     // most polls, the grade only when a bound is crossed.
-    visible.map((s) => [s.name, s.status, s.paused_at,
+    visible.map((s) => [s.name, s.status, s.paused_at, s.held_at,
                         typeof dotGrade === "function" ? dotGrade(s) : "", s.role,
                         handleTag(s.name)?.handle || null,
                         searching ? sessionMatchesSearch(s) : true,
@@ -3581,23 +3593,26 @@ function setSessionGroupByMesh(enabled, remember = true) {
 
 function sessionCategory(s) {
   if (s && s.archived_at) return "archived";
-  if (s && s.status === "exited") return s.paused_at ? "paused" : "killed";
+  if (s && s.status === "exited") {
+    if (s.held_at) return "hold";
+    return s.paused_at ? "paused" : "killed";
+  }
   return "running";
 }
 
 function sessionMatchesFilter(s, filter = sessionFilter) {
   const category = sessionCategory(s);
   if (Array.isArray(filter)) return filter.includes(category);
-  if (filter === "running-paused") return category === "running" || category === "paused";
+  if (filter === "running-paused") return ["running", "hold", "paused"].includes(category);
   return filter === "current" ? category !== "archived" : category === filter;
 }
 
 function sessionFilterCounts(sessions) {
-  const counts = { current: 0, "running-paused": 0, running: 0, killed: 0, paused: 0, archived: 0 };
+  const counts = { current: 0, "running-paused": 0, running: 0, hold: 0, killed: 0, paused: 0, archived: 0 };
   for (const session of sessions || []) {
     const category = sessionCategory(session);
     counts[category]++;
-    if (category === "running" || category === "paused") counts["running-paused"]++;
+    if (["running", "hold", "paused"].includes(category)) counts["running-paused"]++;
     if (category !== "archived") counts.current++;
   }
   return counts;
@@ -3605,8 +3620,8 @@ function sessionFilterCounts(sessions) {
 
 function setSessionFilter(filter, remember = true) {
   if (!SESSION_FILTERS.includes(filter)) return;
-  sessionFilter = filter === "current" ? ["running", "killed", "paused"]
-    : filter === "running-paused" ? ["running", "paused"]
+  sessionFilter = filter === "current" ? ["running", "hold", "killed", "paused"].slice()
+    : filter === "running-paused" ? ["running", "hold", "paused"].slice()
     : SESSION_FILTERS.filter((s) => s !== "current" && s !== "running-paused"
       && (s === filter ? !sessionFilter.includes(s) : sessionFilter.includes(s)));
   if (remember) localStorage.setItem(SESSION_FILTER_KEY, JSON.stringify(sessionFilter));
@@ -3649,14 +3664,14 @@ function syncSessionFilters(sessions) {
   const counts = sessionFilterCounts(sessions);
   const labels = {
     "running-paused": "Running || Paused",
-    current: "Current", running: "Running", killed: "Killed", paused: "Paused",
-    archived: "Archived",
+    current: "Current", running: "Running", hold: "Hold", killed: "Killed",
+    paused: "Paused", archived: "Archived",
   };
   for (const filter of SESSION_FILTERS) {
     const button = $(`session-filter-${filter}`);
     if (!button) continue;
     button.setAttribute("title", filter === "current"
-      ? "Current — Running, Paused, Killed" : labels[filter]);
+      ? "Current — Running, Hold, Paused, Killed" : labels[filter]);
     button.setAttribute("aria-label", `${labels[filter]} (${counts[filter]})`);
     button.textContent = "";
     button.append(
@@ -3668,9 +3683,11 @@ function syncSessionFilters(sessions) {
       })
     );
     const pressed = filter === "current"
-      ? sessionFilter.length === 3 && ["running", "killed", "paused"].every((s) => sessionFilter.includes(s))
+      ? sessionFilter.length === ["running", "hold", "killed", "paused"].length
+        && ["running", "hold", "killed", "paused"].every((s) => sessionFilter.includes(s))
       : filter === "running-paused"
-        ? sessionFilter.length === 2 && ["running", "paused"].every((s) => sessionFilter.includes(s))
+        ? sessionFilter.length === ["running", "hold", "paused"].length
+          && ["running", "hold", "paused"].every((s) => sessionFilter.includes(s))
       : sessionFilter.includes(filter);
     button.setAttribute("aria-pressed", String(pressed));
   }
@@ -3818,7 +3835,7 @@ function restoreRailFocus(name) {
    would answer with `already_exited`. */
 function railCardKill(name) {
   const rec = railCardRecord(name);
-  if (!rec || (rec.status === "exited" && !rec.paused_at)) return false;
+  if (!rec || (rec.status === "exited" && !rec.paused_at && !rec.held_at)) return false;
   killSession(name);
   return true;
 }
@@ -4485,6 +4502,8 @@ async function refreshSessions(options) {
     if (s.status === "exited") {
       li.title = [li.title, s.archived_at
         ? "archived — open it to inspect or resume"
+        : s.held_at
+        ? "hold — idle, its program was freed; open it to wake it with its conversation"
         : s.paused_at
         ? "paused — open it to resume; the bulk resume brings every paused one back"
         : "exited — open it to resume or archive"].filter(Boolean).join(" · ");
@@ -6975,7 +6994,8 @@ function dotGrade(s) {
    for a caller that holds a fresher one (the mobile bar). */
 function dotClassOf(s, status) {
   const st = status || (s && s.status) || "unknown";
-  const paused = st === "exited" && s && s.paused_at ? " paused" : "";
+  const paused = st === "exited" && s && s.held_at ? " hold"
+    : st === "exited" && s && s.paused_at ? " paused" : "";
   return `dot ${st}${paused}${dotGrade(s && { ...s, status: st })}`;
 }
 
@@ -8326,7 +8346,7 @@ function filterCflowRuns(runs, sessions, filter, query) {
   return (runs || []).filter((run) => {
     const category = cflowSessionCategory(run, sessions);
     const matches = filter === "all" || category === filter ||
-      (filter === "running-paused" && (category === "running" || category === "paused"));
+      (filter === "running-paused" && ["running", "hold", "paused"].includes(category));
     return matches && (!needle || [run.workflow, run.scope, run.title, run.step_id, run.cwd]
       .some((value) => String(value || "").toLowerCase().includes(needle)));
   });
@@ -12472,7 +12492,7 @@ function killControlState(session, localState = null) {
       title: "wind-down in progress; stop this session now",
     };
   }
-  if (session && session.status === "exited" && session.paused_at) {
+  if (session && session.status === "exited" && (session.paused_at || session.held_at)) {
     return {
       label: "kill", disabled: false, phase: "ready",
       title: "file this paused session as killed: it leaves the Paused "
@@ -12617,6 +12637,37 @@ async function pauseCurrentSession() { await pauseSession(currentName); }
 
 if ($("term-pause")) $("term-pause").addEventListener("click", pauseCurrentSession);
 
+/* Hold (claunch-5l35i): free the program of a session you are done with for
+   now, keeping everything else. Opening it again wakes it with its
+   conversation; a mesh message or a cflow notice wakes it too. The daemon
+   does the same on its own after `hold_idle_minutes` of quiet. */
+async function holdSession(name) {
+  if (!name) return;
+  const btn = name === currentName ? $("term-hold") : null;
+  if (btn) btn.disabled = true;
+  try {
+    const resp = await api(
+      `/api/sessions/${encodeURIComponent(name)}/hold`, { method: "POST" }
+    );
+    const info = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      await modalInfo(`Could not hold '${name}'`,
+                      info.error || `HTTP ${resp.status}`);
+      return;
+    }
+    const at = sessionsCache.findIndex((s) => s.name === name);
+    if (at >= 0) sessionsCache[at] = { ...sessionsCache[at], ...info };
+  } catch (err) {
+    await modalInfo(`Could not hold '${name}'`,
+                    err && err.message ? err.message : "request failed");
+  } finally {
+    if (btn) btn.disabled = false;
+    await refreshSessions({ state: "current" });
+  }
+}
+
+if ($("term-hold")) $("term-hold").addEventListener("click", () => holdSession(currentName));
+
 /* Archive is available on any record, and on a live one it is also the
    ending: the route terminates the program and writes the archive time in
    one call, with no wind-down in between (see h_session_archive). That makes
@@ -12682,7 +12733,7 @@ $("stop-all").addEventListener("click", async () => {
    the child it was bound to. */
 $("resume-all").addEventListener("click", async () => {
   const dead = sessionsCache
-    .filter((s) => s.status === "exited" && !s.archived_at && !s.paused_at)
+    .filter((s) => s.status === "exited" && !s.archived_at && !s.paused_at && !s.held_at)
     .map((s) => s.name);
   if (!dead.length) return;
   if (!(await modalConfirm(
@@ -12752,7 +12803,7 @@ if ($("resume-paused")) $("resume-paused").addEventListener("click", async () =>
 
 $("archive-exited").addEventListener("click", async () => {
   const dead = sessionsCache
-    .filter((s) => s.status === "exited" && !s.archived_at && !s.paused_at)
+    .filter((s) => s.status === "exited" && !s.archived_at && !s.paused_at && !s.held_at)
     .map((s) => s.name);
   if (!dead.length) return;
   await bulkAction(
@@ -13196,8 +13247,12 @@ function setStatusBadge(status) {
   // `exited` (and every control below reads that), but the header is where
   // a person looks to see what became of the session, and "paused" is it.
   const paused = exited && !!record.paused_at;
-  badge.textContent = paused ? "paused" : status;
-  badge.className = `badge ${status}${paused ? " paused" : ""}`;
+  // Same for a held record (claunch-5l35i): opening it wakes it, so the
+  // badge reads `hold` only for the moment the wake takes, or when it failed
+  // and resume is the way back.
+  const held = exited && !!record.held_at;
+  badge.textContent = held ? "hold" : paused ? "paused" : status;
+  badge.className = `badge ${status}${held ? " hold" : paused ? " paused" : ""}`;
   // The rail dot's grade in words (dotTitle): how many rows a busy session
   // moved in the last minute, how long an idle one has sat. Only when the
   // poll's record agrees with the socket's word, or the two would contradict.
@@ -13211,8 +13266,9 @@ function setStatusBadge(status) {
   // press files the pause as killed, so the bulk resume of the paused no
   // longer brings it back (h_session_kill). A killed record has nothing
   // left for it to change.
-  $("term-kill").classList.toggle("hidden", exited && !paused);
+  $("term-kill").classList.toggle("hidden", exited && !paused && !held);
   if ($("term-pause")) $("term-pause").classList.toggle("hidden", exited);
+  if ($("term-hold")) $("term-hold").classList.toggle("hidden", exited);
   $("term-archive").classList.toggle("hidden", archived);
   if (typeof syncSessionPinUi === "function") syncSessionPinUi();
   syncSessionKillControls();
@@ -16629,6 +16685,7 @@ function snapshotFallbackText(name, reached) {
       "busy or briefly unreachable, and it does not retry on its own here." +
       how;
   }
+  if (rec.held_at) return `Session ${name} is on hold — opening it wakes it; if it stays down, resume brings it back.` + how;
   if (rec.paused_at) return `Session ${name} is paused — its terminal is not live.` + how;
   if (rec.archived_at) return `Session ${name} is archived — its terminal is not live.` + how;
   return "This session left no screen behind." + how;
@@ -17582,15 +17639,15 @@ function syncMobileBars() {
   // The header badge reads `paused` for a paused record while the status
   // underneath is `exited`; the mobile bar mirrors the word and keeps the
   // status for its controls.
-  const paused = status === "paused";
-  if (paused) status = "exited";
+  const marker = status === "paused" || status === "hold" ? status : "";
+  if (marker) status = "exited";
   dot.className = sess && typeof dotClassOf === "function"
     ? dotClassOf(sess, status) : `dot ${status}`;
-  if (paused) dot.classList.add("paused");
+  if (marker) dot.classList.add(marker);
   dot.classList.toggle("hidden", !has);
   const badge = $("m-status");
-  badge.textContent = paused ? "paused" : status;
-  badge.className = `badge ${status}${paused ? " paused" : ""}`;
+  badge.textContent = marker || status;
+  badge.className = `badge ${status}${marker ? " " + marker : ""}`;
   badge.classList.toggle("hidden", !has);
   // Mirrors of the hidden header's buttons — see the click handlers below.
   $("m-resume").classList.toggle("hidden", status !== "exited");
@@ -17598,7 +17655,7 @@ function syncMobileBars() {
   $("m-zoom").classList.toggle("hidden", !has);
   // A paused record keeps kill: it files the pause as killed (see
   // setStatusBadge).
-  $("m-kill").classList.toggle("hidden", !has || (status === "exited" && !paused));
+  $("m-kill").classList.toggle("hidden", !has || (status === "exited" && !marker));
   if ($("m-pause")) {
     $("m-pause").classList.toggle("hidden", !has || status === "exited");
   }
@@ -22125,7 +22182,7 @@ function beadsLaneCount(lane) {
 function beadsLaneSpent(lane) {
   if (lane.pool) return false;
   if (!lane.known) return true;
-  if (lane.category) return lane.category !== "running" && lane.category !== "paused";
+  if (lane.category) return !["running", "hold", "paused"].includes(lane.category);
   return lane.status === "exited";
 }
 
@@ -22191,7 +22248,8 @@ function beadsQueueLane(grid, lane, root, statuses, opts = {}) {
     const state = el("div", "beads-q-state");
     if (lane.known) {
       // A paused session's status is "exited"; the badge says which exit.
-      const shown = lane.category === "paused" ? "paused" : lane.status;
+      const shown = lane.category === "paused" || lane.category === "hold"
+        ? lane.category : lane.status;
       state.appendChild(el("span", `beads-sess ${shown || ""}`, shown || "?"));
     } else {
       state.appendChild(el("span", "beads-sess", "not a session here"));
@@ -32336,6 +32394,9 @@ function renderSession(data) {
     }
     if (s.paused_at) {
       metaRow(dl, "paused", (s.paused_at || "").replace("T", " "));
+    }
+    if (s.held_at) {
+      metaRow(dl, "hold", (s.held_at || "").replace("T", " "));
     }
     view.appendChild(dl);
 

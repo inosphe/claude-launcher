@@ -85,7 +85,7 @@ from .. import (
     beads_db, beads_meta, cli_beads, reports as reports_mod, store, workspaces,
 )
 from .session import (
-    CATEGORY_PAUSED, CATEGORY_RUNNING, STATUS_BUSY, STATUS_IDLE, Session,
+    CATEGORY_HOLD, CATEGORY_PAUSED, CATEGORY_RUNNING, STATUS_BUSY, STATUS_IDLE, Session,
     session_category,
 )
 
@@ -2303,7 +2303,7 @@ class Board:
                 created = created_of(active, name)
                 category = session_category(s) if s is not None else None
                 if (s is not None and s.status() == "exited"
-                        and category != CATEGORY_PAUSED
+                        and category not in (CATEGORY_PAUSED, CATEGORY_HOLD)
                         and not queue and not created):
                     continue
                 lane: dict = {
@@ -2327,7 +2327,8 @@ class Board:
                         log.debug("beads: no cflow summary for %r: %s", name, exc)
                 # The page's own fold rule (app.js beadsLaneSpent).
                 if (fold and "spent" not in opened
-                        and category not in (CATEGORY_RUNNING, CATEGORY_PAUSED)):
+                        and category not in (CATEGORY_RUNNING, CATEGORY_PAUSED,
+                                             CATEGORY_HOLD)):
                     lane.update(folded=True, count=len(queue), issues=[], created=[])
                 elif s is not None and activity_for is not None:
                     # Only for a head that is drawn: a folded lane has none.

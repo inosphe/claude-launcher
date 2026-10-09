@@ -20,7 +20,7 @@ from aiohttp import web
 from .. import daemon_client, providers, store
 from . import cflow2_clock as cflow2_clock_mod
 from . import cflow_clock, paths, restart_notice, resume, runtime_state, window as window_mod
-from . import instance_manifest, session_reminder
+from . import hold as hold_mod, instance_manifest, session_reminder
 from .api import build_app, notify_shutdown
 from .manager import SessionManager
 from .mesh import MeshError, MeshManager
@@ -282,6 +282,9 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
     # The saved model of a session drifts from the one it answers on the
     # moment somebody uses the harness's own model switch; this closes that.
     model_clock_task = asyncio.ensure_future(_model_reconcile_clock(manager))
+    # Idle sessions give their program back and wake on use (claunch-5l35i).
+    hold_clock = hold_mod.HoldClock(manager)
+    hold_clock.start()
 
     try:
         await app["shutdown_event"].wait()
@@ -309,6 +312,7 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
             await model_clock_task
         except (asyncio.CancelledError, Exception):
             pass
+        await hold_clock.stop()
         await resume_nudge.shutdown()
         # Undelivered debts stay on disk; shutdown only stops offering them.
         await restart_notice_task.shutdown()

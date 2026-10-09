@@ -36,7 +36,7 @@ from aiohttp import web
 
 from .. import atomic, projects
 from . import operator_transcript, paths, session_events
-from .session import CATEGORY_PAUSED, CATEGORY_RUNNING, session_category
+from .session import CATEGORY_HOLD, CATEGORY_PAUSED, CATEGORY_RUNNING, session_category
 
 log = logging.getLogger(__name__)
 
@@ -286,7 +286,7 @@ class Operators:
         paused ones. A killed or archived session is gone; reading its
         history on every poll only buries what is live under what is not."""
         return [s for s in self.members(project)
-                if session_category(s) in (CATEGORY_RUNNING, CATEGORY_PAUSED)]
+                if session_category(s) in (CATEGORY_RUNNING, CATEGORY_PAUSED, CATEGORY_HOLD)]
 
     def snapshot_of(self, sessions):
         """The Observer rows of ``sessions`` only."""
@@ -890,7 +890,7 @@ def install(app, *, create=None, gates=None, work=None):
 
     async def view(request):
         project = projects.normalize(request.query.get("project") or projects.DEFAULT)
-        shown = [s for s in ops.members(project) if session_category(s) in (CATEGORY_RUNNING, CATEGORY_PAUSED)]
+        shown = [s for s in ops.members(project) if session_category(s) in (CATEGORY_RUNNING, CATEGORY_PAUSED, CATEGORY_HOLD)]
         await ops.track(project)
         gates, _ = await ops.gates_read([s for s in shown if session_category(s) == CATEGORY_RUNNING])
         return web.json_response({**ops.view(project, await ops.work_of(shown), gates),

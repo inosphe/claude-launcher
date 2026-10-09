@@ -1794,6 +1794,8 @@ def _session_state(session) -> dict:
     return {
         "status": _status_of(session),
         "paused": bool(getattr(session, "paused_at", None)),
+        # A held session (claunch-5l35i) is asleep, not ended: it wakes on use.
+        "hold": bool(getattr(session, "held_at", None)),
         "archived": bool(getattr(session, "archived_at", None)),
     }
 

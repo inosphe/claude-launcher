@@ -121,6 +121,7 @@ globalThis.SearchAnything = (() => {
   // so `exited` would be true and would not be what a reader is looking at.
   function sessionState(session) {
     if (session.archived) return "archived";
+    if (session.hold) return "hold";
     if (session.paused) return "paused";
     return session.status || "";
   }
