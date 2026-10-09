@@ -848,3 +848,59 @@ def test_the_end_question_can_be_posed(tmp_path, monkeypatch):
     assert st["status"] == "waiting_approval" and [a["node"] for a in st["asks"]]
     runtime.approve(None, decision="end", reason="done", **kw)
     assert [t["label"] for t in runtime.status(**kw)["tasks"]] == ["end-gate"]
+
+
+# -- claunch-jbk5w: the landing wait paces the nudge, not the whole choice ----
+
+
+def _await_flow():
+    """The ``await`` loop as it is in the definition, with landing-nudge and
+    every other option's branch stubbed by one task named after it."""
+    import json
+
+    from claude_launcher.cflow2 import frontend
+
+    doc = yaml.load(V2.read_text(encoding="utf-8"), Loader=frontend._Loader)
+    loop = _find_id(doc["procedures"], "await")
+    opts = loop["loop"]["do"]["choose"]["options"]
+    nodes = {"landing-nudge": {k: v for k, v in doc["nodes"]["landing-nudge"].items()
+                               if k in ("title", "prompt", "done_when", "effects")}}
+    for name, opt in opts.items():
+        if name != "nudge":
+            nodes[f"stub-{name}"] = {"prompt": name}
+            opt["then"] = [f"stub-{name}", {"return": "ok"}]
+    flow = {"cflow": 2, "name": "await-flow",
+            "inputs": {"relation": doc["inputs"]["relation"]},
+            "returns": {"ok": {}}, "nodes": nodes, "body": [loop]}
+    return loop, frontend.compile_text(json.dumps(flow, ensure_ascii=False))
+
+
+def test_the_landing_wait_paces_only_the_nudge():
+    loop, _chart_ = _await_flow()
+    assert "every" not in loop["loop"] and "between" not in loop["loop"]
+    nudge = loop["loop"]["do"]["choose"]["options"]["nudge"]
+    assert nudge["interval"] == 600 and nudge["then"] == ["landing-nudge"]
+
+
+def test_landed_can_be_chosen_while_a_nudge_is_held(tmp_path, monkeypatch):
+    from claude_launcher.cflow2 import runtime
+
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    t0 = 1_000_000.0
+    kw = {"cwd": str(tmp_path), "scope": "m"}
+    _loop, chart = _await_flow()
+    runtime.start(chart, caps={}, now=t0, **kw)
+    # right after the request: the first nudge has no window record yet
+    st = runtime.select(None, "nudge", "no answer yet", now=t0, **kw)
+    assert [t["label"] for t in st["tasks"]] == ["landing-nudge"]
+    runtime.report(st["tasks"][0]["instance"], now=t0 + 5, **kw)
+    # the next nudge is held for the rest of the 10 minutes ...
+    st = runtime.select(None, "nudge", "still nothing", now=t0 + 10, **kw)
+    assert st["held"]["option"] == "nudge" and st["held"]["opens_at"] == t0 + 600
+    # ... and the choice stays open: the parent merged at +26s (s910)
+    st = runtime.status(now=t0 + 40, tick=False, **kw)
+    assert st["choices"], "the wait closed the choice while the nudge was held"
+    st = runtime.select(None, "landed", "merged e3fa3155", now=t0 + 40, **kw)
+    assert [t["label"] for t in st["tasks"]] == ["stub-landed"]
+    events = [e["event"] for e in runtime.journal(**kw)]
+    assert "hold_cancelled" in events
