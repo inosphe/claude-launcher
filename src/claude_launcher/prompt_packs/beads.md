@@ -51,7 +51,8 @@ description: 이 워크스페이스의 beads 보드를 claunch beads로 읽고 �
 - 부모-자식은 소속을 나타낸다. 순서는 별도로 `claunch beads dep add <뒤> <앞>`으로 적는다.
 - 자식 목록 조회: `claunch beads dep list <부모 id> --direction up --json`,
   부모 아래 전체 구조: `claunch beads dep tree <부모 id> --direction up`.
-- 부모 이슈는 자식이 모두 닫히거나 다른 부모로 옮겨진 뒤에 닫는다.
+- 부모 이슈를 닫아도 열린 자식은 그대로 둔다. 자식은 위의 `dep list`로 다시 찾을 수
+  있다. 부모를 닫는 시점은 워크플로가 정한다.
 
 ### 맡고, 진행하고, 닫을 때
 
