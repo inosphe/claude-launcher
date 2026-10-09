@@ -31,6 +31,16 @@ in a ``role-<name>`` pack, so a session created with a role gets that pack
 in its opening whether or not it was ticked. No pack needs installing to be
 given, ticked or required: the workspace's copy is read when it has one, and
 the shipped copy otherwise (:func:`pack_copy`).
+
+A pack whose header says ``delivery: on-demand`` (:data:`ON_DEMAND`) is the
+other kind: text given to a session that is already running, at the moment
+it is asked for -- the retrospective a run's last node or a person sends
+(``claunch retro``, :func:`on_demand_block`). It is never part of an opening,
+so it is excluded from everything that builds one, by the same rule in every
+place: the create form does not offer it, it cannot be ticked, saved as a
+default pack, or required by a role, and a saved setting that names one is
+read without it (:func:`offerable`). It still installs into a workspace like
+any pack, so a workspace can edit its text.
 """
 
 from __future__ import annotations
@@ -67,6 +77,11 @@ WORKSPACE = "workspace"
 PACKAGE = "package"
 DAEMON = "daemon"
 
+#: ``delivery`` header values. :data:`OPENING` (the default) is a pack an
+#: opening may carry; :data:`ON_DEMAND` is one only ever sent later.
+OPENING = "opening"
+ON_DEMAND = "on-demand"
+
 #: A pack id is its file name without ``.md``: lower-case words and dashes,
 #: so it is safe in a path, a URL and a checkbox value alike.
 _ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
@@ -87,12 +102,23 @@ class Pack:
     #: :data:`WORKSPACE`, :data:`PACKAGE` (see :func:`pack_copy`) or
     #: :data:`DAEMON`.
     source: str = WORKSPACE
+    #: :data:`OPENING` or :data:`ON_DEMAND`, from the header.
+    delivery: str = OPENING
+
+    @property
+    def on_demand(self) -> bool:
+        return self.delivery == ON_DEMAND
 
     def to_dict(self) -> dict:
-        return {
+        out = {
             "id": self.id, "title": self.title,
             "description": self.description,
         }
+        # Only the exception is spelled out, so an opening pack's row reads
+        # as it did before the header existed.
+        if self.on_demand:
+            out["delivery"] = ON_DEMAND
+        return out
 
 
 def _write_text(path: Path, text: str) -> None:
@@ -120,12 +146,14 @@ def parse(pack_id: str, raw: str) -> Pack:
         if isinstance(loaded, dict):
             meta = loaded
         body = raw[m.end():]
+    delivery = str(meta.get("delivery") or "").strip().lower()
     return Pack(
         id=pack_id,
         title=str(meta.get("title") or pack_id).strip(),
         description=str(meta.get("description") or "").strip(),
         body=body.strip(),
         raw=raw,
+        delivery=ON_DEMAND if delivery == ON_DEMAND else OPENING,
     )
 
 
@@ -160,6 +188,50 @@ def shipped(pack_id: str) -> Pack:
     if not path.is_file():
         raise PackError(f"no prompt pack named {pack_id!r} ships with claunch")
     return parse(pack_id, _read(path))
+
+
+def on_demand_ids() -> List[str]:
+    """The shipped packs that are only ever sent later, never in an opening."""
+    return [p.id for p in catalog() if p.on_demand]
+
+
+def is_on_demand(pack_id: str, workspace: Optional[Path] = None) -> bool:
+    """Whether ``pack_id`` is an on-demand pack (:data:`ON_DEMAND`).
+
+    claunch's own header decides for a pack it ships, whatever a workspace
+    copy says: which kind a pack is decides which settings may name it, and
+    those settings are not per workspace. A pack only a workspace has is
+    decided by that copy's header.
+    """
+    try:
+        return shipped(pack_id).on_demand
+    except PackError:
+        pass
+    if workspace is not None:
+        for pack in installed(workspace):
+            if pack.id == pack_id:
+                return pack.on_demand
+    return False
+
+
+def offerable(ids, workspace: Optional[Path] = None) -> List[str]:
+    """``ids`` without the on-demand packs: what an opening may carry."""
+    return [i for i in ids if not is_on_demand(i, workspace)]
+
+
+def check_offerable(ids, what: str) -> List[str]:
+    """Refuse an on-demand pack where a setting or a tick names one."""
+    bad = [i for i in ids if is_on_demand(i)]
+    if bad:
+        raise PackError(_on_demand_refusal(bad, what))
+    return list(ids)
+
+
+def _on_demand_refusal(ids, what: str) -> str:
+    return (
+        f"{', '.join(ids)}: delivered on demand to a running session "
+        f"(claunch retro), never in an opening; it cannot be {what}"
+    )
 
 
 def install_dir(workspace: Path) -> Path:
@@ -346,6 +418,41 @@ def opening_block(
     )
 
 
+#: The on-demand pack ``claunch retro`` sends (:func:`on_demand_block`).
+RETROSPECTIVE = "retrospective"
+
+
+def on_demand_block(workspace: Optional[Path], pack_id: str = RETROSPECTIVE) -> str:
+    """An on-demand pack as it is sent to a running session.
+
+    The workspace's copy when installed, else claunch's (:func:`pack_copy`),
+    under a header that says it came after the opening and from where. Not
+    recorded on the session definition: a reminder restating it every turn
+    would re-ask for work that was asked for once. Raises :class:`PackError`
+    for a pack that is not on-demand -- an opening pack sent this way would
+    be guidance the session's definition does not know it was given.
+    """
+    pack = pack_copy(workspace, pack_id)
+    if not is_on_demand(pack.id, workspace):
+        raise PackError(
+            f"{pack.id} is an opening pack; only an on-demand pack is sent to "
+            "a running session"
+        )
+    if pack.source == PACKAGE:
+        where = f"file: (not installed in this workspace; claunch's {pack.id}.md)"
+    else:
+        where = f"file: {(INSTALL_DIR / (pack.id + '.md')).as_posix()}"
+    return (
+        "---\n"
+        f"# claunch prompt pack: {pack.id} -- sent on demand to this running "
+        "session, not part of its opening\n"
+        f"text id: {text_id(pack.body)}\n"
+        f"{where}\n"
+        "---\n"
+        f"{pack.body.strip()}"
+    )
+
+
 def records(
     packs: List[Pack], *,
     required: Optional[Dict[str, List[str]]] = None, asked=(),
@@ -417,7 +524,13 @@ DEFAULT_PACKS: List[str] = ["asking-the-user", "common"]
 _ROLE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 
-def clean_role_packs(raw) -> Dict[str, List[str]]:
+def clean_role_packs(raw, *, strict: bool = True) -> Dict[str, List[str]]:
+    """Validate a role → packs mapping.
+
+    An on-demand pack is refused (``strict``), or dropped when reading back a
+    mapping saved before the pack was one -- one stale entry must not cost
+    every role its packs.
+    """
     if not isinstance(raw, dict):
         raise PackError("role packs must be a mapping of role -> [pack ids]")
     out: Dict[str, List[str]] = {}
@@ -430,6 +543,8 @@ def clean_role_packs(raw) -> Dict[str, List[str]]:
         if not isinstance(ids, list):
             raise PackError(f"{role}: packs must be a list of pack ids")
         clean = [check_id(i) for i in dict.fromkeys(str(i).strip() for i in ids)]
+        clean = (check_offerable(clean, f"required by role {role}")
+                 if strict else offerable(clean))
         if clean:
             out[role] = clean
     return dict(sorted(out.items()))
@@ -448,7 +563,7 @@ def role_packs(doc: Optional[dict] = None) -> Dict[str, List[str]]:
     if not isinstance(block, dict) or "role_packs" not in block:
         return {k: list(v) for k, v in DEFAULT_ROLE_PACKS.items()}
     try:
-        return clean_role_packs(block.get("role_packs") or {})
+        return clean_role_packs(block.get("role_packs") or {}, strict=False)
     except PackError:
         return {}
 
@@ -492,7 +607,9 @@ def default_packs(doc: Optional[dict] = None) -> List[str]:
     if isinstance(block, dict) and "default_packs" in block:
         raw = block.get("default_packs") or []
         if isinstance(raw, list):
-            return [i for i in dict.fromkeys(str(x) for x in raw) if _ID.match(i)]
+            return offerable(
+                [i for i in dict.fromkeys(str(x) for x in raw) if _ID.match(i)]
+            )
         return []
     return list(DEFAULT_PACKS)
 
@@ -527,8 +644,8 @@ def _save_list(key: str, clean: Optional[List[str]]) -> None:
 
 def set_default_packs(ids) -> List[str]:
     """Validate and save the default list; ``None`` restores :data:`DEFAULT_PACKS`."""
-    _save_list("default_packs",
-               None if ids is None else _clean_ids(ids, "default packs"))
+    _save_list("default_packs", None if ids is None else check_offerable(
+        _clean_ids(ids, "default packs"), "a default pack"))
     return default_packs()
 
 
@@ -559,10 +676,16 @@ def choose(
     :func:`pack_copy`, so a ticked one needs no install either: the form
     offers claunch's own packs beside the workspace's, picked freely whatever
     the role. The order is the ticked ones first, then the required ones,
-    each once.
+    each once. An on-demand pack is refused when ticked and skipped when a
+    role names it (:func:`offerable`): it is never part of an opening.
     """
     required = required_for(roles, mapping)
+    required = {k: v for k, v in required.items()
+                if not is_on_demand(k, workspace)}
     asked = [check_id(i) for i in dict.fromkeys(chosen or [])]
+    bad = [i for i in asked if is_on_demand(i, workspace)]
+    if bad:
+        raise PackError(_on_demand_refusal(bad, "ticked at session creation"))
     packs = []
     for pack_id in dict.fromkeys([*asked, *required]):
         try:

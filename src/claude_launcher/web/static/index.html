@@ -456,6 +456,11 @@
                 title="this session's conversation — scrollable, the whole of it">transcript</button>
         <button id="term-rebrief" class="term-btn"
                 title="re-type this session's briefing (mesh, run, parent, task) into its terminal — for an agent whose context was cleared or compacted">rebrief</button>
+        <!-- retro: the retrospective prompt pack, an on-demand pack typed into
+             the running session (claunch retro) — for a session whose cflow
+             run did not end normally, so its last node never asked for it. -->
+        <button id="term-retro" class="term-btn" type="button"
+                title="send the retrospective prompt pack: the agent reviews its own session and the cflow definition it followed, and proposes changes (claunch retro)">retro</button>
         <!-- quick-fork: a copy of this session's conversation, as a child,
              marked "forked from here"; merge is the copy's way back (the
              wrap-up typed into the origin, then the copy ends). Only one of

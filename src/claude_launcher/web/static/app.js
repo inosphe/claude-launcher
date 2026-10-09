@@ -12975,6 +12975,31 @@ $("term-rebrief").addEventListener("click", async () => {
   finally { btn.disabled = false; }
 });
 
+/* Send the retrospective prompt pack (an on-demand pack, never part of an
+   opening) into the terminal: the agent reviews its own session and the cflow
+   definition it followed. improv-worker-v2 asks for it in its last node; this
+   is the operator's door for a run that never got there. */
+$("term-retro").addEventListener("click", async () => {
+  if (!currentName) return;
+  if (!confirm(`Send the retrospective prompt to ${currentName}? ` +
+               "It is typed into the terminal as a new instruction.")) return;
+  const btn = $("term-retro");
+  btn.disabled = true;
+  try {
+    const resp = await api(
+      `/api/sessions/${encodeURIComponent(currentName)}/retrospective`,
+      { method: "POST" }
+    );
+    const info = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      alert(info.error || `HTTP ${resp.status}`);
+    } else if (!info.delivered) {
+      alert("the session did not take it: it is not running or not reading input");
+    }
+  } catch { /* auth overlay is up */ }
+  finally { btn.disabled = false; }
+});
+
 /* ------------------------------------------------------------------ */
 /* terminal attachment                                                */
 /* ------------------------------------------------------------------ */
@@ -13262,6 +13287,7 @@ function setStatusBadge(status) {
   // Rebrief types into a live terminal; on an exited one there is nobody to
   // read it, so the button yields its spot to resume.
   $("term-rebrief").classList.toggle("hidden", exited);
+  $("term-retro").classList.toggle("hidden", exited);
   // Kill stays on a paused record: the process is already gone, and the
   // press files the pause as killed, so the bulk resume of the paused no
   // longer brings it back (h_session_kill). A killed record has nothing
@@ -24909,8 +24935,13 @@ function promptPacksCard() {
   return card;
 }
 
-/* The two settings, edited as one draft and saved together. */
-function promptPackSettings(doc, ids) {
+/* The two settings, edited as one draft and saved together. An on-demand
+   pack (sent later to a running session, e.g. by `claunch retro`) is never
+   part of an opening, so neither setting may name it: the daemon refuses
+   it, and it is not drawn here as a box to tick. */
+function promptPackSettings(doc, allIds) {
+  const onDemand = doc.on_demand_packs || [];
+  const ids = allIds.filter((id) => !onDemand.includes(id));
   const box = el("div", "prompt-pack-settings");
   if (!promptPacksDraft) {
     promptPacksDraft = {
@@ -24938,7 +24969,8 @@ function promptPackSettings(doc, ids) {
     "one in the form leaves it out of that one session only; take it off " +
     "this list to stop ticking it. Each session gets its workspace's copy, " +
     "or the copy claunch ships when the workspace has not installed it " +
-    `(the form says which). Restore defaults sets: ${(doc.shipped_default_packs || []).join(", ") || "none"}.`));
+    `(the form says which). Restore defaults sets: ${(doc.shipped_default_packs || []).join(", ") || "none"}.` +
+    (onDemand.length ? ` Not listed here or below: ${onDemand.join(", ")} — sent on demand to a running session, never in an opening.` : "")));
   const defaults = el("div", "new-check-list");
   defaults.id = "prompt-pack-defaults";
   for (const id of ids) {

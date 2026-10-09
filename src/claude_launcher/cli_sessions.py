@@ -28,7 +28,7 @@ import time
 import webbrowser
 from datetime import datetime, timezone
 from typing import List, Optional, Tuple
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 from . import (
     cli_mesh,
@@ -1072,6 +1072,39 @@ def _resolve_session(args: argparse.Namespace) -> Optional[str]:
             file=sys.stderr,
         )
     return name
+
+
+def _cmd_retro(args: argparse.Namespace) -> int:
+    """Send a session the retrospective prompt pack, or print it.
+
+    The retrospective is an on-demand pack (prompt_packs.ON_DEMAND): never in
+    an opening, sent to a session that is already running. Bare, this types
+    it into the session's terminal -- the person's door for a session whose
+    run did not end normally, so it was never asked by the run's last node.
+    ``--print`` writes the same text to stdout instead and touches nothing:
+    that is how a run's node has the agent read it in its own turn.
+    """
+    name = _resolve_session(args)
+    if not name:
+        return 2
+    path = f"/api/sessions/{quote(name, safe='')}/retrospective"
+    if args.pack:
+        path += "?" + urlencode({"pack": args.pack})
+    try:
+        client = daemon_client.ensure_running()
+        if args.print:
+            print(client.get(path).get("block") or "")
+            return 0
+        doc = client.post(path)
+    except daemon_client.DaemonClientError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if doc.get("delivered"):
+        print(f"sent the {doc.get('pack')} pack to {name!r}")
+        return 0
+    print(f"{name!r} did not take the {doc.get('pack')} pack (session not "
+          "running or not reading input)", file=sys.stderr)
+    return 1
 
 
 def _cmd_deliver_now(args: argparse.Namespace) -> int:
@@ -3157,6 +3190,27 @@ def register(sub) -> None:
              "the text when it was given), instead of the whole briefing",
     )
     p_rebrief.set_defaults(func=_cmd_rebrief)
+
+    p_retro = sub.add_parser(
+        "retro",
+        help="send a running session the retrospective prompt pack (review "
+             "its own work and the cflow definition it followed) -- for a "
+             "session whose run did not end normally; --print writes the "
+             "text to stdout instead",
+    )
+    p_retro.add_argument(
+        "session", nargs="?",
+        help="session to send it to (default: $CLAUNCH_SESSION)",
+    )
+    p_retro.add_argument(
+        "--print", action="store_true",
+        help="print the text instead of typing it into the session",
+    )
+    p_retro.add_argument(
+        "--pack", default="",
+        help="another on-demand pack id (default: retrospective)",
+    )
+    p_retro.set_defaults(func=_cmd_retro)
 
     p_flush = sub.add_parser(
         "deliver-now",
