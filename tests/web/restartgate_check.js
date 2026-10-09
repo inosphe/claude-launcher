@@ -175,6 +175,8 @@ function build(opts) {
     // have to exist.
     "refreshNewWorktree", "refreshProjects", "ensureControlSocket",
     "refreshCflow2Rail",
+    // The poll's batch also reads the window strip (termwindow_check).
+    "refreshTermWindow",
     code +
     "\nreturn {notify, dismissNotice, noticeClock, setDaemonOnline, " +
     "refreshRestartGate, pollOnce, boot," +
@@ -189,6 +191,8 @@ function build(opts) {
     () => {}, () => {}, () => {}, () => {},
     () => {}, () => {}, () => {},
     () => {},   // refreshCflow2Rail (the rail's v2 line; railcflow2_check)
+
+    () => {},   // refreshTermWindow (the header's window strip; termwindow_check)
   );
 
   return { api, nodes, clock, gate, apiCalls, daemon,

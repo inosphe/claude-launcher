@@ -827,6 +827,7 @@ def build_app(
     r.add_post("/api/sessions/{name}/status-checks/refresh", h_session_status_checks_refresh)
     r.add_get("/api/sessions/{name}/briefing", h_session_briefing)
     r.add_get("/api/sessions/{name}/queued", h_session_queued)
+    r.add_get("/api/sessions/{name}/window", h_session_window)
     r.add_post("/api/sessions/{name}/queued/flush", h_session_queued_flush)
     r.add_post("/api/sessions/{name}/queued/hold", h_session_hold)
     r.add_get("/api/sessions/{name}/reminder", h_session_reminder)
@@ -8647,6 +8648,16 @@ async def h_session_queued(request: web.Request) -> web.Response:
     went — most often: it is held because their own focus keeps the keyboard
     busy. The same payload rides inside ``/meta`` for the detail panel."""
     return json_response(_session_queued(request, _session(request)))
+
+
+async def h_session_window(request: web.Request) -> web.Response:
+    """The measurement window as it concerns this session (claunch-bwzkt):
+    the grant it holds (elapsed, and the remaining time the kept history
+    suggests), the place it waits in the queue and the rule that keeps it
+    there, and the machine's load in a few numbers. Polled by the terminal
+    header's window strip; a read, like ``GET /api/window``."""
+    session = _session(request)
+    return json_response(request.app["window"].session_view(session.sdef.name))
 
 
 async def h_session_queued_flush(request: web.Request) -> web.Response:

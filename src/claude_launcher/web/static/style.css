@@ -2081,6 +2081,29 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   color: #c6cdd5; white-space: pre-wrap; overflow-wrap: anywhere;
   max-height: 9em; overflow-y: auto; font-size: 12px;
 }
+/* The measurement window strip (claunch-bwzkt): this session's test grant
+   or its place in the queue. Blue, the info colour of the Window page —
+   holding the window is ordinary work, not a warning. A run past its usual
+   time turns the row amber: the one case the reader should look at. */
+#term-window {
+  background: #0c1a2b; border-bottom: 1px solid #1f3a5c;
+  color: #79c0ff; font-size: 12px; flex: none;
+}
+#term-window .tw-row {
+  display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px;
+  width: 100%; background: none; border: none; color: inherit; font: inherit;
+  padding: 5px 14px 2px; cursor: pointer; text-align: left;
+}
+#term-window .tw-row:hover { background: #10243b; }
+#term-window .tw-head { font-weight: 600; white-space: nowrap; }
+#term-window .tw-facts { white-space: nowrap; }
+#term-window .tw-reason { color: #a5d6ff; min-width: 0; }
+#term-window .tw-label {
+  color: #7d8590; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; flex: 1;
+}
+#term-window .tw-over { color: #d29922; }
+#term-window .tw-load { color: #7d8590; padding: 0 14px 5px; font-size: 11px; }
 /* The cflow answer strip: the attached session's run is waiting on a person.
    The gate amber of the rail line it repeats (`.wf-waiting`), one row high
    at desktop width; on a narrow window the buttons wrap to a second row
