@@ -62,6 +62,47 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
       assert(await page.locator("#term-title").evaluate(el => el.clientWidth >= el.scrollWidth),
         `session name stays fully visible at ${width}`);
     }
+    // The reminder controls share one frame (claunch-0jjv3): at full width
+    // the chip and the skip sit inside it, and when the row is tight they
+    // leave for the overflow menu together.
+    await check(1920);
+    const group = await page.evaluate(() => {
+      const g = document.getElementById("term-reminder").getBoundingClientRect();
+      const inside = id => {
+        const r = document.getElementById(id).getBoundingClientRect();
+        return r.left >= g.left && r.right <= g.right && r.top >= g.top && r.bottom <= g.bottom;
+      };
+      return { shown: g.width > 0, timer: inside("term-timer"), skip: inside("term-timer-skip") };
+    });
+    assert.deepEqual(group, { shown: true, timer: true, skip: true }, "reminder group frames both controls");
+    await check(240);
+    assert.equal(await page.locator("#term-reminder").evaluate(el => el.classList.contains("toolbar-overflow")), true,
+      "the reminder group overflows as one item");
+    await page.locator("#term-more").click();
+    const menuText = await page.locator("#term-overflow-menu button").allTextContents();
+    const at = menuText.findIndex(t => t.includes("role reminder"));
+    assert(at >= 0 && menuText[at + 1] === "⏭", `menu keeps the reminder pair together: ${JSON.stringify(menuText)}`);
+    await page.keyboard.press("Escape");
+    // A hidden member of the group (nothing to skip) is not offered there.
+    await page.evaluate(() => document.getElementById("term-timer-skip").classList.add("hidden"));
+    await check(240);
+    await page.locator("#term-more").click();
+    const lone = await page.locator("#term-overflow-menu button").allTextContents();
+    assert(lone.some(t => t.includes("role reminder")) && !lone.includes("⏭"),
+      `a hidden skip stays out of the menu: ${JSON.stringify(lone)}`);
+    await page.keyboard.press("Escape");
+    await page.evaluate(() => {
+      for (const id of ["term-timer", "term-timer-skip"]) document.getElementById(id).classList.add("hidden");
+    });
+    await check(1920);
+    assert.equal(await page.locator("#term-reminder").evaluate(el => getComputedStyle(el).display), "none",
+      "an empty reminder group leaves the row");
+    await page.evaluate(() => {
+      for (const id of ["term-timer", "term-timer-skip"]) document.getElementById(id).classList.remove("hidden");
+    });
+    await check(1920);
+    await page.locator("#layout").evaluate(el => { el.style.width = "180px"; });
+    await page.waitForTimeout(80);
     await page.locator("#term-more").click();
     await page.locator("#term-overflow-menu button").filter({ hasText: "⬒ run" }).click();
     assert.equal(await page.evaluate(() => window.clicks), 1, "overflow forwards original action");
