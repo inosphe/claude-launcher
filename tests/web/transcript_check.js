@@ -790,6 +790,11 @@ const texts = (pane) => pane.children
         ["user", "assistant", "thinking", "tool", "result", "error"].every(
           (k) => html.includes(`class="log-key" data-kind="${k}"`)
                  && css.includes(`[data-kind="${k}"] { --log-kind-color`)));
+  check("the info tab hides the pane's whole row, minimap included, and [hidden] wins",
+        /getElementById\("log-body"\);if\(body\)body\.hidden=showInfo/.test(
+          fs.readFileSync(path.join(__dirname, "..", "..", "src", "claude_launcher", "web",
+                                    "static", "observer.js"), "utf8"))
+        && /#log-body\[hidden\]\s*\{\s*display:\s*none/.test(css));
   check("the new-turns button starts hidden", /id="log-new"[^>]*class="[^"]*hidden/.test(html));
   check("on the transcript page the footer is ordered under the conversation",
         /body\[data-page="log"\] #term-input\s*\{\s*order:\s*1/.test(css));

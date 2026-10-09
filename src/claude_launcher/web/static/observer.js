@@ -776,6 +776,8 @@ globalThis.TranscriptTabs = (() => {
     const showInfo=value==="info"&&!tabs[1].hidden;
     transcript.hidden=showInfo;info.hidden=!showInfo;
     const format=document.getElementById("log-format");if(format)format.hidden=showInfo;
+    // The pane's row (its minimap and new-turns button) goes with it, or it keeps the free height the info pane needs.
+    const body=document.getElementById("log-body");if(body)body.hidden=showInfo;
     tabs.forEach((tab,index)=>{const active=(index===1)===showInfo;tab.setAttribute("aria-selected",String(active));tab.tabIndex=active?0:-1;});
     if(showInfo)ObserverPage.openSession(transcriptName,info);
     else ObserverPage.closeSession();

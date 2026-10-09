@@ -2310,6 +2310,9 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 #log-body {
   flex: 1; min-height: 0; display: flex; position: relative;
 }
+/* The info tab hides the row (observer.js); [hidden] is restated because
+   the display:flex above outranks it. */
+#log-body[hidden] { display: none; }
 #term-log-pane {
   position: relative; min-width: 0;
   flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
