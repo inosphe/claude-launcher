@@ -108,6 +108,7 @@ new Function(
   "Object.defineProperty(exports, 'page', { set(v) { currentPage = v; } });" +
   "let currentPage = page.current;" +
   `${slice("renderTermPresetButtons")}; ${slice("fillPresetStrip")}; ` +
+  `${slice("sessionLineOnPage")}; ` +
   `${slice("insertPromptPreset")}; ${slice("sendPromptPreset")}; ${slice("sendShadowPreset")}; ` +
   "exports.render = renderTermPresetButtons;"
 )(
