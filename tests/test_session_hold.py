@@ -306,3 +306,137 @@ def test_shipped_page_ids_are_unique():
     ids = collections.Counter(re.findall(r'\bid="([^"]+)"', page.read_text(encoding="utf-8")))
     assert [i for i, n in ids.items() if n > 1] == []
     assert ids["term-hold"] == 1 and ids["term-idle-hold"] == 1
+
+
+class _TTY:
+    def isatty(self):
+        return True
+
+
+class _AttachClient:
+    """What :func:`attach.attach` asks the daemon, answered from a script."""
+
+    base_url = "http://daemon"
+    token = "t"
+
+    def __init__(self, info, wake):
+        self.info = info
+        self.wake = wake
+        self.posts = []
+
+    def get(self, path):
+        return dict(self.info)
+
+    def post(self, path):
+        self.posts.append(path)
+        if isinstance(self.wake, Exception):
+            raise self.wake
+        return dict(self.wake)
+
+
+def _attach_terminal(monkeypatch):
+    """Stand in for the terminal and the websocket so attach runs headless."""
+    from claude_launcher import attach as attach_mod
+
+    monkeypatch.setattr(attach_mod.sys, "stdin", _TTY())
+    # stdout is still written to (the detach line); only claim it is a tty.
+    monkeypatch.setattr(attach_mod.sys.stdout, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr(attach_mod.herdr, "rename_pane", lambda label: False)
+    monkeypatch.setattr(attach_mod, "_write_text", lambda text: None)
+
+    class _Raw:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(attach_mod, "_RawTerminal", _Raw)
+    attached = []
+
+    async def fake_attach(base_url, token, name, notice=None):
+        attached.append(name)
+        return {"reason": "detach"}
+
+    monkeypatch.setattr(attach_mod, "_attach_async", fake_attach)
+    return attach_mod, attached
+
+
+def test_cli_attach_wakes_a_held_session_first(monkeypatch, capsys):
+    attach_mod, attached = _attach_terminal(monkeypatch)
+    client = _AttachClient(
+        {"status": "exited", "held_at": HELD_AT, "cwd": "C:/work"},
+        {"status": "starting", "held_at": None, "woken": True, "cwd": "C:/work"},
+    )
+    assert attach_mod.attach(client, "asleep") == 0
+    assert client.posts == ["/api/sessions/asleep/wake"]
+    assert attached == ["asleep"]
+    assert "on hold" in capsys.readouterr().err
+
+
+def test_cli_attach_points_at_respawn_when_the_wake_fails(monkeypatch, capsys):
+    attach_mod, attached = _attach_terminal(monkeypatch)
+    client = _AttachClient(
+        {"status": "exited", "held_at": HELD_AT},
+        RuntimeError("HTTP 400: cannot respawn"),
+    )
+    assert attach_mod.attach(client, "asleep") == 1
+    err = capsys.readouterr().err
+    assert "could not wake 'asleep'" in err and "claunch respawn asleep" in err
+    assert attached == []
+
+    # The route answered but the session is still down: the same manual path.
+    client = _AttachClient(
+        {"status": "exited", "held_at": HELD_AT},
+        {"status": "exited", "held_at": HELD_AT, "exit_code": 1},
+    )
+    assert attach_mod.attach(client, "asleep") == 1
+    assert "claunch respawn asleep" in capsys.readouterr().err
+    assert attached == []
+
+    # A killed (not held) session is never woken by attaching.
+    client = _AttachClient({"status": "exited", "exit_code": 0}, {})
+    assert attach_mod.attach(client, "dead") == 1
+    assert client.posts == []
+
+
+def test_a_mesh_message_wakes_a_held_recipient_and_lands_after_the_respawn(
+    home, tmp_path
+):
+    """End to end on the py harness: no stub between the mesh pass, the wake
+    and the respawned program reading the message."""
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mgr.resumable = lambda s: True
+        mm = MeshManager(mgr, root=tmp_path / "meshes")
+        mesh = mm.create("sleepy")
+        try:
+            bob = mgr.create(SessionDef(name="bob", harness="py", cwd=str(tmp_path)))
+            await _wait_screen(bob, "READY")
+            for handle in ("carol", "bob"):
+                mesh.members[handle] = mesh_mod.Member(handle, handle)
+            mgr.hold("bob", reason="idle")
+            await mgr.get("bob").wait_for("exited", timeout=10.0, threshold=0.5)
+            assert mgr.get("bob").held_at
+
+            mm._send_core(mesh, "carol", "bob", "wakeup-ping", type="ask")
+            await mm._deliver_to(mesh, mesh.members["bob"])
+            assert [m for m in mesh.messages if m["from"] == "policy"] == []
+
+            for _ in range(150):
+                if not mesh.pending("bob"):
+                    break
+                await mm._deliver_to(mesh, mesh.members["bob"], force=True)
+                await asyncio.sleep(0.1)
+            assert mesh.pending("bob") == []
+            awake = mgr.get("bob")
+            assert not awake.exited and awake.held_at is None
+            await _wait_screen(awake, "wakeup-ping")
+            assert [e["kind"] for e in mgr.events.rows(awake)][-1] == "wake"
+        finally:
+            for s in list(mgr.list()):
+                await s.shutdown()
+
+    asyncio.run(run())
