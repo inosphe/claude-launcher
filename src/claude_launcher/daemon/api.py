@@ -883,6 +883,8 @@ def build_app(
     # it into the terminal — the operator's push for a session that does not
     # know it needs one.
     r.add_get("/api/sessions/{name}/rebrief", h_session_rebrief)
+    r.add_get("/api/sessions/{name}/retrospective", h_session_retrospective)
+    r.add_post("/api/sessions/{name}/retrospective", h_session_retrospective)
     r.add_post("/api/sessions/{name}/rebrief", h_session_rebrief)
     # The harness telling the daemon which conversation the session is on
     # now — claude's SessionStart hook after /clear mints a new session id
@@ -2769,6 +2771,8 @@ def _prompt_packs_doc() -> dict:
         "default_role_packs": prompt_packs.DEFAULT_ROLE_PACKS,
         "default_packs": prompt_packs.default_packs(),
         "shipped_default_packs": prompt_packs.DEFAULT_PACKS,
+        # Shown for install like any pack, kept out of the two settings.
+        "on_demand_packs": prompt_packs.on_demand_ids(),
         "roles": sorted(roleset.roles),
     }
 
@@ -2787,12 +2791,16 @@ async def h_prompt_packs_offer(request: web.Request) -> web.Response:
     ``shipped`` is the package catalog: the form offers those the workspace
     has not installed as boxes too, and one that is ticked or required goes in
     as the shipped copy (prompt_packs.pack_copy), named as such.
+    An on-demand pack (prompt_packs.ON_DEMAND) is in neither list: it is
+    never part of an opening, so the form has nothing to offer for it.
     """
     cwd = cflow_state.resolve_cwd(request.query.get("cwd") or None)
     owner = workspaces.owning(str(cwd))
+    root = Path(owner.path) if owner is not None else None
     packs = (
-        [p.to_dict() for p in prompt_packs.installed(Path(owner.path))]
-        if owner is not None else []
+        [p.to_dict() for p in prompt_packs.installed(root)
+         if not prompt_packs.is_on_demand(p.id, root)]
+        if root is not None else []
     )
     return json_response({
         "cwd": str(cwd),
@@ -2801,7 +2809,8 @@ async def h_prompt_packs_offer(request: web.Request) -> web.Response:
         # Ticked on every opening of the form, installed or not.
         "default_packs": prompt_packs.default_packs(),
         "role_packs": prompt_packs.role_packs(),
-        "shipped": [p.to_dict() for p in prompt_packs.catalog()],
+        "shipped": [p.to_dict() for p in prompt_packs.catalog()
+                    if not p.on_demand],
         # This daemon's own prompt, null when it has none: the form draws it
         # first and ticked, and sends daemon_prompt: false when unticked.
         "daemon_prompt": daemon_prompt.offer(),
@@ -2907,7 +2916,10 @@ async def h_prompt_packs_role_packs(request: web.Request) -> web.Response:
         if body.get("role_packs") is not None:
             prompt_packs.clean_role_packs(body["role_packs"])
         if isinstance(body.get("default_packs"), list):
-            [prompt_packs.check_id(str(i)) for i in body["default_packs"]]
+            prompt_packs.check_offerable(
+                [prompt_packs.check_id(str(i)) for i in body["default_packs"]],
+                "a default pack",
+            )
         if "role_packs" in body:
             prompt_packs.set_role_packs(body["role_packs"])
         if "default_packs" in body:
@@ -10315,6 +10327,37 @@ async def h_session_rebrief(request: web.Request) -> web.Response:
         return json_response({"ok": True, "delivered": False, "empty": True})
     delivered = await manager.get(name).deliver(block)
     return json_response({"ok": True, "delivered": delivered, "empty": False})
+
+
+async def h_session_retrospective(request: web.Request) -> web.Response:
+    """The retrospective pack, for a session that is already running.
+
+    An on-demand prompt pack (prompt_packs.on_demand_block): the copy the
+    session's workspace installed, else claunch's. GET returns the text and
+    touches nothing -- a run's last node has the agent pull it with
+    ``claunch retro --print``. POST types it into the session's terminal, the
+    person's door for a session whose run did not end normally. ``?pack=``
+    names another on-demand pack; an opening pack is refused (400).
+    """
+    manager: SessionManager = request.app["manager"]
+    name = request.match_info["name"]
+    session = manager.get(name)
+    pack_id = (request.query.get("pack") or prompt_packs.RETROSPECTIVE).strip()
+    owner = workspaces.owning(str(session.sdef.cwd))
+    try:
+        block = await asyncio.to_thread(
+            prompt_packs.on_demand_block,
+            Path(owner.path) if owner is not None else None,
+            pack_id,
+        )
+    except prompt_packs.PackError as exc:
+        return json_error(400, str(exc))
+    if request.method == "GET":
+        return json_response({"session": name, "pack": pack_id, "block": block})
+    delivered = await session.deliver(block)
+    return json_response(
+        {"ok": True, "session": name, "pack": pack_id, "delivered": delivered}
+    )
 
 
 async def h_session_conversation(request: web.Request) -> web.Response:

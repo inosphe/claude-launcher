@@ -2721,6 +2721,7 @@ header (`title`, `description`). Shipped today:
 | `beads` | Driving the board through `claunch beads`, issue writing rules, and picking work with `bv --robot-*` (never the bare TUI). Agent Mail is not covered. |
 | `unreal-operator` | Handing Unreal editor-only work (assets, Blueprint wiring, Project Settings, PIE checks) to a person as `--assignee operator` issues. |
 | `role-<name>` | One per packaged mesh role (`role-leader`, `role-worker`, `role-reviewer`, `role-pm`, `role-operator`, `role-specialist`, `role-analyst`, `role-free`, `role-merger`): the role's working rules. The role's stance keeps one or two sentences; the rest is here. |
+| `retrospective` | **On-demand** (see below): the session reviews its own work from the records (transcript, run journal, board, commits, mesh) and then the cflow definition it followed, ending in change proposals posted as a `RETRO @ <run>` comment on its issue. |
 
 A new pack is a new `.md` file in that directory; nothing else lists them.
 
@@ -2825,6 +2826,35 @@ that is neither installed nor shipped),
 `POST /api/prompt-packs/install|remove` (`{workspace, pack, force}`),
 `PUT /api/prompt-packs/role-packs` (`{role_packs?, default_packs?}`; `null`
 restores a default; a bad id in either saves neither).
+
+#### On-demand packs (sent to a running session, never in an opening)
+
+A pack whose header says `delivery: on-demand` is not chosen at creation: it
+is typed into a session that is already running, when it is asked for. The
+shipped one is `retrospective`. It is kept out of everything that builds an
+opening, by one rule (`prompt_packs.offerable`) applied in every place: the
+create form does not offer it, ticking it (`--prompt-pack`, `prompt_packs`)
+refuses the create with a 400, and neither setting may name it — saving it as
+a default pack or a role's requirement is a 400, and a saved setting that
+already names one is read without it. It still installs like any pack, so a
+workspace can edit its text; which kind a shipped pack is follows claunch's
+header, whatever the workspace copy says.
+
+- `claunch retro [SESSION]` (default `$CLAUNCH_SESSION`) types the
+  retrospective into the session — the person's door for a session whose
+  cflow run did not end normally. The terminal header's **retro** button does
+  the same. `--print` writes the text to stdout instead and touches nothing;
+  `--pack <id>` names another on-demand pack.
+- improv-worker-v2 asks for it itself: its `settle` procedure runs the
+  `retrospective` node after the settlement and before the end decision, and
+  that node has the agent run `claunch retro --print`. A failed retrospective
+  does not hold up the end decision.
+- The text is sent, not recorded on the session definition, so session
+  reminders do not restate it.
+- HTTP: `GET /api/sessions/{name}/retrospective` (`{block}`),
+  `POST` the same path (types it, `{delivered}`), `?pack=` for another
+  on-demand pack (an opening pack is a 400). `GET /api/prompt-packs` lists the
+  on-demand ids under `on_demand_packs`.
 
 ### The daemon prompt (one text every session of this daemon gets)
 

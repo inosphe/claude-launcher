@@ -665,6 +665,33 @@ check("the default packs are one list of checkboxes, saved with the role mapping
   assert.deepEqual(calls.pop().body, { role_packs: null, default_packs: null });
 });
 
+check("an on-demand pack installs like any pack but is in neither setting", () => {
+  // claunch-ygbsd: the retrospective is sent later (claunch retro), never in
+  // an opening, so it is no default and no role's requirement.
+  card.doc = {
+    ...DOC,
+    catalog: [...DOC.catalog,
+      { id: "retrospective", title: "Retro", description: "later", delivery: "on-demand" }],
+    workspaces: [{ name: "proj", path: "F:/proj", packs: [
+      { id: "beads", status: "missing" }, { id: "common", status: "edited" },
+      { id: "retrospective", status: "missing" },
+    ] }],
+    on_demand_packs: ["retrospective"],
+  };
+  const discard = (n) => n.tag === "button" && n.textContent === "Discard changes";
+  const stale = all(card.card(), discard)[0];
+  if (stale) stale.handlers.click[0]();
+  const c = card.card();
+  const titles = all(c, (n) => n.className === "prompt-pack-title").map((n) => n.textContent);
+  assert.ok(titles.includes("Retro"), titles);
+  const list = all(c, (n) => n.id === "prompt-pack-defaults")[0];
+  const defaults = list.children.map((l) => l.children[1].textContent);
+  assert.ok(!defaults.includes("retrospective"), defaults);
+  const heads = all(c, (n) => n.tag === "th").map((n) => n.textContent);
+  assert.ok(!heads.includes("retrospective"), heads);
+  assert.match(text(c), /Not listed here or below: retrospective/);
+});
+
 queue.then(() => setTimeout(() => {
   if (failures) process.exit(1);
   console.log("prompt_packs_check: ok");

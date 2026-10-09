@@ -640,3 +640,166 @@ def test_the_text_route_shows_what_the_opening_would_get(home, tmp_path):
             await client.close()
 
     asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# on-demand packs: the retrospective (claunch-ygbsd)
+# --------------------------------------------------------------------------- #
+def test_the_retrospective_ships_as_an_on_demand_pack():
+    pack = prompt_packs.shipped(prompt_packs.RETROSPECTIVE)
+    assert pack.on_demand and pack.delivery == prompt_packs.ON_DEMAND
+    assert pack.to_dict()["delivery"] == "on-demand"
+    # Both halves the task asks for are in the text it sends.
+    assert "세션 회고" in pack.body and "cflow 정의 리뷰" in pack.body
+    assert "claunch retro" in pack.body
+    assert prompt_packs.on_demand_ids() == [prompt_packs.RETROSPECTIVE]
+    # Every other shipped pack is an opening pack and reads as before.
+    assert all(not p.on_demand and "delivery" not in p.to_dict()
+               for p in prompt_packs.catalog() if p.id != "retrospective")
+    assert "retrospective" not in prompt_packs.DEFAULT_PACKS
+    assert not any("retrospective" in v
+                   for v in prompt_packs.DEFAULT_ROLE_PACKS.values())
+
+
+def test_no_setting_may_name_an_on_demand_pack(home):
+    with pytest.raises(prompt_packs.PackError, match="on demand"):
+        prompt_packs.set_default_packs(["common", "retrospective"])
+    assert prompt_packs.default_packs() == prompt_packs.DEFAULT_PACKS
+    with pytest.raises(prompt_packs.PackError, match="on demand"):
+        prompt_packs.set_role_packs({"worker": ["role-worker", "retrospective"]})
+    assert prompt_packs.role_packs() == prompt_packs.DEFAULT_ROLE_PACKS
+
+    # A config written by hand (or before the pack was on-demand) is read
+    # without it, and the rest of the setting survives.
+    store.update(lambda doc: doc.update({"prompt_packs": {
+        "default_packs": ["common", "retrospective"],
+        "role_packs": {"worker": ["role-worker", "retrospective"],
+                       "leader": ["retrospective"]},
+    }}))
+    assert prompt_packs.default_packs() == ["common"]
+    assert prompt_packs.role_packs() == {"worker": ["role-worker"]}
+    assert prompt_packs.required_for(["worker"]) == {"role-worker": ["worker"]}
+
+
+def test_choose_refuses_a_ticked_on_demand_pack(tmp_path):
+    ws = tmp_path / "ws"
+    (ws / ".claunch" / "prompts").mkdir(parents=True)
+    with pytest.raises(prompt_packs.PackError, match="ticked at session creation"):
+        prompt_packs.choose(ws, ["retrospective"], [])
+    # Installed, and even edited to drop the header, it is still claunch's
+    # on-demand pack: which kind a shipped pack is does not move per workspace.
+    prompt_packs.install(ws, "retrospective")
+    (ws / ".claunch" / "prompts" / "retrospective.md").write_text(
+        "---\ntitle: R\n---\nour retro\n", encoding="utf-8")
+    with pytest.raises(prompt_packs.PackError, match="on demand"):
+        prompt_packs.choose(ws, ["common", "retrospective"], [])
+    # A workspace's own pack decides by its own header.
+    (ws / ".claunch" / "prompts" / "house-retro.md").write_text(
+        "---\ntitle: H\ndelivery: on-demand\n---\nlater\n", encoding="utf-8")
+    assert prompt_packs.is_on_demand("house-retro", ws)
+    with pytest.raises(prompt_packs.PackError, match="on demand"):
+        prompt_packs.choose(ws, ["house-retro"], [])
+    # A role mapping that names one is skipped, never a refused create.
+    recs, required = prompt_packs.choose(
+        ws, ["common"], ["worker"], mapping={"worker": ["retrospective", "beads"]})
+    assert [r["id"] for r in recs] == ["common", "beads"]
+    assert required == {"beads": ["worker"]}
+
+
+def test_on_demand_block_sends_the_workspace_copy_and_refuses_opening_packs(tmp_path):
+    block = prompt_packs.on_demand_block(None)
+    assert block.startswith(
+        "---\n# claunch prompt pack: retrospective -- sent on demand to this "
+        "running session, not part of its opening\n")
+    body = prompt_packs.shipped("retrospective").body
+    assert f"text id: {prompt_packs.text_id(body)}" in block
+    assert "claunch's retrospective.md" in block and block.endswith(body)
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    prompt_packs.install(ws, "retrospective")
+    path = ws / ".claunch" / "prompts" / "retrospective.md"
+    path.write_text(path.read_text(encoding="utf-8") + "\nHOUSE STEP\n",
+                    encoding="utf-8")
+    block = prompt_packs.on_demand_block(ws)
+    assert "file: .claunch/prompts/retrospective.md" in block
+    assert block.endswith("HOUSE STEP")
+
+    with pytest.raises(prompt_packs.PackError, match="opening pack"):
+        prompt_packs.on_demand_block(ws, "common")
+
+
+def test_routes_keep_on_demand_packs_out_of_openings_and_send_them_later(home, tmp_path):
+    _register_py_harness()
+    ws = tmp_path / "proj"
+    ws.mkdir()
+    workspaces.add(str(ws), "proj")
+    prompt_packs.install(ws, "retrospective")
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        client = await _serve(mgr, MeshManager(mgr, root=tmp_path / "mesh"))
+        try:
+            doc = await (await client.get("/api/prompt-packs", headers=BEARER)).json()
+            assert doc["on_demand_packs"] == ["retrospective"]
+            # Still installable: it is in the catalog the install grid draws.
+            assert "retrospective" in [p["id"] for p in doc["catalog"]]
+
+            offer = await (await client.get(
+                "/api/prompt-packs/offer", params={"cwd": str(ws)}, headers=BEARER,
+            )).json()
+            assert "retrospective" not in [p["id"] for p in offer["packs"]]
+            assert "retrospective" not in [p["id"] for p in offer["shipped"]]
+            assert "retrospective" not in offer["default_packs"]
+
+            resp = await client.put("/api/prompt-packs/role-packs", headers=BEARER,
+                                    json={"default_packs": ["retrospective"]})
+            assert resp.status == 400
+            resp = await client.put("/api/prompt-packs/role-packs", headers=BEARER,
+                                    json={"role_packs": {"worker": ["retrospective"]}})
+            assert resp.status == 400
+            assert prompt_packs.role_packs() == prompt_packs.DEFAULT_ROLE_PACKS
+
+            resp = await client.post("/api/sessions", headers=BEARER, json={
+                "name": "r0", "profile": "py", "cwd": str(ws), "task": "x",
+                "beads": False, "prompt_packs": ["retrospective"],
+            })
+            assert resp.status == 400
+            assert "on demand" in (await resp.json())["error"]
+            assert "r0" not in [s.sdef.name for s in mgr.list()]
+
+            resp = await client.post("/api/sessions", headers=BEARER, json={
+                "name": "r1", "profile": "py", "cwd": str(ws), "task": "x",
+                "beads": False,
+            })
+            assert resp.status == 201, await resp.json()
+
+            doc = await (await client.get(
+                "/api/sessions/r1/retrospective", headers=BEARER)).json()
+            assert doc["pack"] == "retrospective"
+            assert "file: .claunch/prompts/retrospective.md" in doc["block"]
+
+            typed = []
+
+            async def deliver(text, *a, **kw):
+                typed.append(text)
+                return True
+
+            mgr.get("r1").deliver = deliver
+            resp = await client.post("/api/sessions/r1/retrospective", headers=BEARER)
+            assert (await resp.json())["delivered"] is True
+            assert typed == [doc["block"]]
+            # Sent, not recorded: the session's reminders do not restate it.
+            assert all(r["id"] != "retrospective"
+                       for r in mgr.get("r1").sdef.prompt_packs or ())
+
+            resp = await client.get("/api/sessions/r1/retrospective",
+                                    params={"pack": "common"}, headers=BEARER)
+            assert resp.status == 400
+            resp = await client.get("/api/sessions/ghost/retrospective", headers=BEARER)
+            assert resp.status >= 400
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
