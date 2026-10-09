@@ -216,6 +216,24 @@ html[data-theme="light"] .xterm {
   font-size: 14px; line-height: 1; padding: 0 2px; cursor: pointer;
 }
 .session-group-header .session-group-new:hover { color: #58a6ff; }
+/* A mesh header's both | local | remote pick (claunch-no9dy), at the far
+   end before the ⊕. */
+.session-group-header .session-origin-filter {
+  flex: none; margin-left: auto; display: inline-flex;
+  border: 1px solid #30363d; border-radius: 4px; overflow: hidden;
+}
+.session-group-header .session-origin-filter ~ .session-group-new { margin-left: 2px; }
+.session-group-header .session-origin-option {
+  background: none; border: none; color: #8b949e; cursor: pointer;
+  font-size: 10px; line-height: 1; padding: 2px 6px;
+}
+.session-group-header .session-origin-option + .session-origin-option {
+  border-left: 1px solid #30363d;
+}
+.session-group-header .session-origin-option:hover { color: #c9d1d9; }
+.session-group-header .session-origin-option.active {
+  background: #1f6feb33; color: #58a6ff;
+}
 
 /* List | Grid: one segmented radio pair above the filters. */
 .session-view-tabs {

@@ -1860,6 +1860,57 @@ function setSessionGroupTab(group, value, remember = true) {
   }
 }
 
+/* Which side of a mesh the rail shows, chosen on the mesh header
+   (claunch-no9dy): `local` keeps this daemon's rows, `remote` keeps other
+   daemons' members (the remote-shadow rows), `both` keeps every row. One
+   choice for every mesh tab, remembered per browser. It narrows the mesh
+   grouping alone: a workspace tab already files remote rows under their
+   own `@<machine>` heading, and an ungrouped rail trails them under one. */
+const SESSION_ORIGIN_FILTERS = ["both", "local", "remote"];
+const SESSION_ORIGIN_KEY = `claunch_session_origin:${BASE}`;
+let sessionOriginFilter = (() => {
+  try {
+    const saved = localStorage.getItem(SESSION_ORIGIN_KEY);
+    if (SESSION_ORIGIN_FILTERS.includes(saved)) return saved;
+  } catch {}
+  return "both";
+})();
+
+/* The rows (sessionGroupRows) without the side the filter leaves out.
+   Top-level headings stay, so every mesh keeps its tab while its count
+   drops to the rows still shown, and the reader can switch to a tab that
+   holds none of them and back. A nested heading the filter emptied goes
+   with its rows: under a nested grouping a remote row is filed under its
+   own `@<machine>` heading (shadowGroupValue), which `local` would leave
+   standing with nothing under it -- and `remote` every local one. */
+function filterSessionOrigin(rows, origin) {
+  if (origin !== "local" && origin !== "remote") return rows;
+  const drop = origin === "local" ? "shadow" : "session";
+  const kept = rows.filter((r) => r.type !== drop);
+  return kept.filter((row, i) => {
+    if (row.type !== "group" || !row.level) return true;
+    for (let j = i + 1; j < kept.length; j++) {
+      const next = kept[j];
+      if (next.type === "group") {
+        if (next.level <= row.level) return false;
+      } else {
+        return true;
+      }
+    }
+    return false;
+  });
+}
+
+function setSessionOriginFilter(origin, remember = true) {
+  if (!SESSION_ORIGIN_FILTERS.includes(origin)) return;
+  sessionOriginFilter = origin;
+  if (remember) {
+    try { localStorage.setItem(SESSION_ORIGIN_KEY, origin); } catch {}
+  }
+  sessionGroupTabScrollReset = true;
+  refreshSessions({ cached: true });
+}
+
 /* ---- rail pins --------------------------------------------------------
    Pins are browser-local shortcuts displayed in the main session tabs.
    Keep the existing BASE-scoped key so previously pinned sessions migrate
@@ -3548,6 +3599,34 @@ function renderSessionGroupHeader(group, tab) {
   count.textContent = `${sessions} session${sessions === 1 ? "" : "s"}`;
   head.append(kind, name, count);
   head.title = `${group} ${tab.value} — click to scroll to the top`;
+  if (group === "mesh" && typeof sessionOriginFilter === "string") {
+    const origins = document.createElement("span");
+    origins.className = "session-origin-filter";
+    origins.setAttribute("role", "radiogroup");
+    origins.setAttribute("aria-label", "Show local, remote or both");
+    const tips = {
+      both: "show this daemon's sessions and other daemons' members",
+      local: "show only this daemon's sessions",
+      remote: "show only other daemons' members (remote-shadow rows)",
+    };
+    for (const origin of SESSION_ORIGIN_FILTERS) {
+      const btn = document.createElement("button");
+      const on = origin === sessionOriginFilter;
+      btn.className = "session-origin-option" + (on ? " active" : "");
+      btn.type = "button";
+      btn.textContent = origin;
+      btn.dataset.origin = origin;
+      btn.setAttribute("role", "radio");
+      btn.setAttribute("aria-checked", String(on));
+      btn.title = tips[origin];
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();   // the row itself scrolls; this does not
+        if (origin !== sessionOriginFilter) setSessionOriginFilter(origin);
+      });
+      origins.appendChild(btn);
+    }
+    head.appendChild(origins);
+  }
   if (group === "mesh" && tab.value !== "(no mesh)") {
     const add = document.createElement("button");
     add.className = "session-group-new";
@@ -4104,7 +4183,9 @@ async function refreshSessions(options) {
     [[briefingLLM, sessionsCache, groupOrder, meshCache, pins],
      typeof currentProject === "string" ? currentProject : "", shadowList,
      // The open tab picks which rows are drawn.
-     typeof sessionGroupTab === "object" ? sessionGroupTab : null],
+     typeof sessionGroupTab === "object" ? sessionGroupTab : null,
+     // The mesh header's local/remote pick drops rows from the same cache.
+     typeof sessionOriginFilter === "string" ? sessionOriginFilter : "both"],
     unstamped,
   );
   // See the hold above: a press in flight keeps the rows it started on, and
@@ -4253,8 +4334,10 @@ async function refreshSessions(options) {
     })() : entries.map(([session, depth]) => ({ type: "session", session, depth }));
   // Grouped, the rail shows one group at a time: the tab strip names every
   // group, and only the open tab's rows are drawn below it.
+  const originRows = groupOrder[0] === "mesh" && typeof filterSessionOrigin === "function"
+    ? filterSessionOrigin(allRows, sessionOriginFilter) : allRows;
   const tabbed = rebuild && groupOrder.length && typeof sessionGroupTabRows === "function"
-    ? sessionGroupTabRows(allRows, groupOrder[0]) : null;
+    ? sessionGroupTabRows(originRows, groupOrder[0]) : null;
   const rows = tabbed ? tabbed.rows : allRows;
   if (rebuild && typeof renderSessionGroupTabs === "function") {
     renderSessionGroupTabs(groupOrder[0] || "", tabbed ? tabbed.tabs : [],
