@@ -1022,3 +1022,54 @@ def test_a_failed_retrospective_still_reaches_the_end_decision(tmp_path, monkeyp
     value = {"where": "claunch-x", "proposals": 2, "problems": 1} if outcome == "ok" else {}
     st = runtime.report(task["instance"], outcome, value, **kw)
     assert [t["label"] for t in st["tasks"]] == ["end-stub"]
+
+
+# -- the round record (claunch-qs4l9) ----------------------------------------
+
+#: The nodes where a round's exploration happens; each reports its tries and
+#: gets the rule that says to leave them on the issue as they happen.
+TRIES = ("work", "review", "targeted-test", "rebase")
+
+
+def test_the_tries_rule_reaches_the_exploring_nodes_and_their_returns_require_it():
+    from claude_launcher.cflow2 import runtime
+    chart = _chart()
+    assert "record-tries" in chart.rules
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    assert doc["rules"]["record-tries"]["deliver"] == list(TRIES)
+    by_label = {n.label: n for n in chart.nodes.values() if n.type == "task"}
+    for label in TRIES:
+        authored, _, rules = by_label[label].props["prompt"].partition("── 규칙 ──")
+        # delivered by the compiler, not typed into each prompt
+        assert "TRIED:" in rules, label
+        assert "TRIED:" not in authored, label
+        ok = doc["nodes"][label]["returns"]["ok"]
+        assert ok["tried"] == "list", label
+        # required (an empty list is the answer for a round that went straight)
+        without = {k: None for k in ok if k != "tried"}
+        assert any("tried" in p for p in runtime.validate_result({"ok": ok}, "ok", without)), label
+    work_ok = doc["nodes"]["work"]["returns"]["ok"]
+    assert runtime.validate_result({"ok": work_ok}, "ok",
+                                   {"files": [], "summary": "s", "tried": []}) == []
+
+
+def test_wrapup_leaves_the_html_report_to_round_report():
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    words = _words(doc["nodes"]["wrapup"]["prompt"])
+    # s906/s910/s934/s935: the driver wrote the page in wrapup and the
+    # round-report delegation wrote it again
+    assert "이 스텝이 내는 것은 둘: **깨끗한 트리**, **넘길 것마다 handoff 이슈**." in words
+    assert "**회차 보고서 HTML은 이 스텝에서 쓰지 않는다.**" in words
+    assert "claunch report path" not in words
+    assert doc["nodes"]["wrapup"]["returns"]["ok"]["gaps"] == "list?"
+
+
+def test_round_report_reads_the_round_records_before_writing():
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    node = doc["nodes"]["round-report"]
+    words = _words(node["prompt"])
+    assert "${result.wrapup.value.gaps}" in words
+    for source in ("`claunch cflow2 journal`", "`TRIED:`", "`claunch commits`"):
+        assert source in words, source
+    # still the first choice; the records are what lets it run without the chat
+    assert node["executor"][0] == "headless"
