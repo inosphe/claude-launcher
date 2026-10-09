@@ -290,3 +290,19 @@ def test_hold_of_a_missing_session_raises(home):
         pass
     else:
         raise AssertionError("hold of a missing session did not raise")
+
+
+def test_shipped_page_ids_are_unique():
+    """The idle-hold button once reused the delivery chip's id (#term-hold):
+    $("term-hold") found the chip, so the hold click and the exited toggle
+    landed on the chip and the button was never wired."""
+    import collections
+    import re
+    from pathlib import Path
+
+    import claude_launcher
+
+    page = Path(claude_launcher.__file__).parent / "web" / "static" / "index.html"
+    ids = collections.Counter(re.findall(r'\bid="([^"]+)"', page.read_text(encoding="utf-8")))
+    assert [i for i, n in ids.items() if n > 1] == []
+    assert ids["term-hold"] == 1 and ids["term-idle-hold"] == 1
