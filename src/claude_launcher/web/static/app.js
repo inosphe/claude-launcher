@@ -29178,6 +29178,34 @@ function cf2AnswerLegend(items) {
   return list;
 }
 
+/* The legend rows for an ask card: every option of a plain ask (approve,
+   decline or its own), but for a brief ask only the built-in answers -- its
+   own options are laid out in the question view above. */
+function cf2AskLegendItems(opts, isBrief) {
+  return opts
+    .filter((o) => !isBrief || CF2_ANSWER_MEANINGS[o.name])
+    .map((o) => [o.name, CF2_ANSWER_MEANINGS[o.name] || o.description]);
+}
+
+/* The two presses of a loop or visit limit card, with what each does. */
+function cf2LimitPresses(visitsKind) {
+  return visitsKind
+    ? [["Allow one more visit", "raise the limit by one: the node may be entered once more"],
+       ["Stop here", "end it here: it finishes with outcome fail and the run follows that"]]
+    : [["Allow one more", "raise the loop's max by one: it runs one more iteration"],
+       ["Stop the loop", "end it here: it finishes with outcome fail and the run follows that"]];
+}
+
+/* Why an ask answer may not be sent yet, or "" when it may. reframe sends
+   the agent back to re-ask from the reason, and the engine takes a person's
+   answer without one, so the page asks for it before posting. */
+function cf2AnswerHeld(name, isBrief, reason) {
+  if (name === "reframe" && isBrief && !String(reason || "").trim()) {
+    return "reframe needs a reason: write what the options miss in the reason box.";
+  }
+  return "";
+}
+
 /* A task's "Force outcome" control: pick an outcome, give its fields as JSON
    when it requires any, and an optional reason; the engine checks it
    against the task's returns and routes it like the agent's report. */
@@ -29843,10 +29871,9 @@ function renderCflow2Into(box, data, ui) {
     if (q) reason.placeholder = "reason (optional; required for reframe)";
     for (const b of presses) {
       b.addEventListener("click", async () => {
-        // reframe sends the agent back to re-ask from the reason; the engine
-        // takes a person's answer without one, so the page asks for it here
-        if (b.dataset.value === "reframe" && q && !reason.value.trim()) {
-          alert("reframe needs a reason: write what the options miss in the reason box.");
+        const held = cf2AnswerHeld(b.dataset.value, !!q, reason.value);
+        if (held) {
+          alert(held);
           reason.focus();
           return;
         }
@@ -29858,23 +29885,20 @@ function renderCflow2Into(box, data, ui) {
       });
     }
     card.appendChild(row);
-    // a brief ask's own options are laid out in the question view above;
-    // the legend only spells out the built-in answers
-    const legend = cf2AnswerLegend(opts
-      .filter((o) => !q || CF2_ANSWER_MEANINGS[o.name])
-      .map((o) => [o.name, CF2_ANSWER_MEANINGS[o.name] || o.description]));
+    const legend = cf2AnswerLegend(cf2AskLegendItems(opts, !!q));
     if (legend) card.appendChild(legend);
     yours.appendChild(card);
   }
   const limitCard = (lim, title, visitsKind) => {
     const card = cf2Card("limit", lim.label || lim.node, title);
-    const more = el("button", "wf-btn sm approve", visitsKind ? "Allow one more visit" : "Allow one more");
+    const presses = cf2LimitPresses(visitsKind);
+    const more = el("button", "wf-btn sm approve", presses[0][0]);
     more.addEventListener("click", async () => {
       more.disabled = true;
       await post("/api/cflow2/extend",
                  { node: lim.instance, by: 1, ...(visitsKind ? { visits: true } : {}) });
     });
-    const stop = el("button", "wf-btn sm", visitsKind ? "Stop here" : "Stop the loop");
+    const stop = el("button", "wf-btn sm", presses[1][0]);
     stop.title = "it finishes with outcome fail";
     stop.addEventListener("click", async () => {
       if (!confirm("Stop here? It finishes with outcome fail.")) return;
@@ -29885,11 +29909,7 @@ function renderCflow2Into(box, data, ui) {
     const row = el("div", "cf2-press");
     row.append(more, stop);
     card.appendChild(row);
-    card.appendChild(cf2AnswerLegend([
-      [more.textContent, visitsKind ? "raise the limit by one: the node may be entered once more"
-        : "raise the loop's max by one: it runs one more iteration"],
-      [stop.textContent, "end it here: it finishes with outcome fail and the run follows that"],
-    ]));
+    card.appendChild(cf2AnswerLegend(presses));
     yours.appendChild(card);
   };
   for (const lim of run.loop_limits || []) {
