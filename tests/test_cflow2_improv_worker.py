@@ -904,3 +904,77 @@ def test_landed_can_be_chosen_while_a_nudge_is_held(tmp_path, monkeypatch):
     assert [t["label"] for t in st["tasks"]] == ["stub-landed"]
     events = [e["event"] for e in runtime.journal(**kw)]
     assert "hold_cancelled" in events
+
+
+def _settle_flow():
+    """settle-poll and its catch as they are in the definition; settled and
+    the stall question are stubbed."""
+    import json
+
+    from claude_launcher.cflow2 import frontend
+
+    doc = yaml.load(V2.read_text(encoding="utf-8"), Loader=frontend._Loader)
+    watch = _find_id(doc["procedures"], "settle-watch")["loop"]["do"]
+    poll = watch["try"]
+    opts = poll["retry"]["do"]["choose"]["options"]
+    opts["settled"]["then"] = ["stub-settled", {"return": "ok"}]
+    keep = ("title", "prompt", "done_when", "effects")
+    nodes = {"settle-wait": {k: v for k, v in doc["nodes"]["settle-wait"].items() if k in keep},
+             "stub-settled": {"prompt": "settled"}, "stub-stall": {"prompt": "stall"}}
+    body = {"try": poll, "catch": {"unsettled": ["stub-stall", {"return": "ok"}]}}
+    flow = {"cflow": 2, "name": "settle-flow", "returns": {"ok": {}},
+            "nodes": nodes, "body": [body]}
+    return poll, frontend.compile_text(json.dumps(flow, ensure_ascii=False))
+
+
+def test_the_settle_wait_paces_only_unsettled():
+    poll, _chart_ = _settle_flow()
+    assert "every" not in poll["retry"] and poll["retry"]["max"] == 7
+    assert poll["retry"]["do"]["choose"]["options"]["unsettled"]["interval"] == 600
+
+
+def _settle_step(st, kw, now):
+    from claude_launcher.cflow2 import runtime
+
+    for t in st["tasks"]:
+        assert t["label"] == "settle-wait", t["label"]
+        st = runtime.report(t["instance"], now=now, **kw)
+    return runtime.status(now=now, tick=False, **kw)
+
+
+def test_settled_can_be_chosen_while_unsettled_is_held(tmp_path, monkeypatch):
+    from claude_launcher.cflow2 import runtime
+
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    t0 = 1_000_000.0
+    kw = {"cwd": str(tmp_path), "scope": "m"}
+    _poll, chart = _settle_flow()
+    runtime.start(chart, caps={}, now=t0, **kw)
+    st = runtime.select(None, "unsettled", "s1 open", now=t0, **kw)
+    st = _settle_step(st, kw, t0 + 1)
+    st = runtime.select(None, "unsettled", "s1 open", now=t0 + 2, **kw)
+    assert st["held"]["option"] == "unsettled" and st["held"]["opens_at"] == t0 + 600
+    # the last issue closes inside the window: settled is still selectable
+    st = runtime.select(None, "settled", "all closed", now=t0 + 60, **kw)
+    assert [t["label"] for t in st["tasks"]] == ["stub-settled"]
+    assert "hold_cancelled" in [e["event"] for e in runtime.journal(**kw)]
+
+
+def test_unsettled_reaches_the_stall_after_the_same_hour(tmp_path, monkeypatch):
+    """Seven checks, ten minutes apart, as with the former ``every: 600``."""
+    from claude_launcher.cflow2 import runtime
+
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    t0 = 1_000_000.0
+    kw = {"cwd": str(tmp_path), "scope": "m"}
+    _poll, chart = _settle_flow()
+    runtime.start(chart, caps={}, now=t0, **kw)
+    st = runtime.select(None, "unsettled", "open", now=t0, **kw)
+    for k in range(1, 7):
+        st = _settle_step(st, kw, t0 + (k - 1) * 600 + 1)
+        runtime.select(None, "unsettled", "open", now=t0 + (k - 1) * 600 + 2, **kw)
+        st = runtime.wait_tick(t0 + k * 600 - 1, **kw)
+        assert st["ticked"] == 0
+        st = runtime.wait_tick(t0 + k * 600, **kw)
+        assert st["ticked"] == 1
+    assert [t["label"] for t in st["tasks"]] == ["stub-stall"]

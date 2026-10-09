@@ -83,7 +83,7 @@ sides:
 #   queue-recheck         -> queue-recheck          (choose, 프로시저)
 #   stack-round           -> stack-round            (choose)
 #   settle-check          -> settle-check           (choose, retry settle-poll)
-#   settle-wait           -> settle-wait            (retry의 between, every 600)
+#   settle-wait           -> settle-wait            (retry의 between, unsettled interval 600)
 #   settle-stall          -> settle-stall           (ask-user)
 #   end-gate              -> end-decision(ask-user), end-gate
 #   end-hold              -> end-hold
@@ -105,7 +105,9 @@ sides:
 # - rework 간선(peer-review changes, landing-withdraw, rework-gate -> work) ->
 #   land가 rework로 끝나고 worker-round의 try/catch가 배치 루프를 다시 돈다.
 # - settle-wait의 timer(every 600, max 6, after settle-stall) -> retry
-#   settle-poll(max 7 = 첫 확인 + 여섯 번 깨움)과 catch unsettled.
+#   settle-poll(max 7 = 첫 확인 + 여섯 번 깨움)과 catch unsettled. 10분 간격은
+#   retry의 every가 아니라 settle-check의 unsettled 옵션 interval이 진다 --
+#   간격 동안에도 settled를 고를 수 있어야 한다(claunch-jbk5w, await와 같은 이유).
 # - wrapup 뒤 queue-recheck -> intake 루프 -> 본문 loop rounds. 세션 정산
 #   (settle-check ... end-gate)은 그 루프의 finally다 — 모든 경로가 지난다
 #   (spec.paths.settle-before-end).
@@ -2602,11 +2604,12 @@ nodes:
         닫기이거나 리더·운영자의 쓰기(HOLD, 재배정)다.
       · 브랜치·워크트리를 건드리지 않는다.
 
-      이 스텝은 settle-poll 재시도 사이의 대기다. 대기 한 줄을 보고하고 턴을
-      끝내면, 데몬의 시계가 `every`초 뒤에 settle-check를 다시 열어 이 세션을
-      깨운다 — 깨어나서 할 일은 보드를 다시 읽고 정산 여부를 판정하는 것
-      하나뿐이다. 손으로 폴링하지 않는다. 재시도가 다 차도 조건이 안 서면
-      settle-stall에서 사람이 판단한다.
+      이 스텝은 settle-poll 재시도 사이의 대기다. 대기 한 줄을 보고하면
+      settle-check가 바로 다시 열린다. 간격은 settle-check의 unsettled 옵션
+      (`interval: 600`)이 지킨다: 10분 안에 unsettled를 고르면 보류되고, 창이
+      열릴 때 데몬이 이 세션을 깨운다 — 깨어나서 할 일은 보드를 다시 읽고
+      정산 여부를 판정하는 것 하나뿐이다. 손으로 폴링하지 않는다. 재시도가
+      다 차도 조건이 안 서면 settle-stall에서 사람이 판단한다.
     done_when: |
       대기 사실 한 줄이 보고에 있고, 상위에 재촉을 보내지 않았으며 보드에 쓰지
       않았다.
@@ -3613,7 +3616,11 @@ procedures:
               id: settle-poll
               retry:
                 max: 7
-                every: 600
+                # 간격은 unsettled 옵션의 interval이 진다(claunch-jbk5w): retry에
+                # every를 걸면 정지하는 10분 동안 settle-check가 닫혀, 그사이 마지막
+                # 일감이 닫혀도 settled를 고를 수 없다. interval이면 unsettled만
+                # 보류되고 settled를 고르면 보류가 취소된다. 횟수(첫 확인 + 여섯
+                # 번)와 총 대기(약 60분)는 every 600일 때와 같다.
                 between: settle-wait
                 do:
                   id: settle-check
@@ -3674,12 +3681,23 @@ procedures:
                       reason에 적는다.
                       모호하면 unsettled다 — 리더에게 한 번 더 묻는 쪽이, 유실된 채
                       세션이 사라지는 쪽보다 싸다.
+
+                      unsettled 옵션에는 10분 간격이 걸려 있다(`interval: 600`). 직전
+                      unsettled 뒤 10분이 안 됐으면 그 선택은 보류되고, 창이 열릴 때
+                      데몬이 확정해 다음 재확인으로 넘기며 이 세션을 깨운다. 그러니
+                      unsettled를 고른 뒤에는 턴을 끝낸다. 보류 중에도 이 선택은
+                      열려 있다: 그사이 일감이 닫혔다는 신호(자식의 종료 통지, 상위의
+                      HOLD 등)로 깨어났으면 보드를 다시 읽고, 정산이 서면 settled를
+                      고른다 — unsettled 보류는 취소된다. 직전 확인이 몇 초 전이고
+                      그 뒤 깨운 신호가 없으면(settle-wait 바로 뒤에 열린 경우) 보드를
+                      다시 읽지 않고 같은 판정으로 unsettled를 고른다.
                     options:
                       settled:
                         description: 만든·배정된 일감이 전부 closed(또는 리더 HOLD)이고 stack은 봉인됐으며 살아 있는 자식도 없다(또는 adopt 완료) — 세션 종료 승인으로
                         then: {break: settle-watch}
                       unsettled:
-                        description: 미정산 항목이 있다 — 상위(리더)의 정산을 기다린다
+                        description: 미정산 항목이 있다 — 상위(리더)의 정산을 기다린다(10분에 한 번)
+                        interval: 600
                         then: {raise: unsettled}
             catch:
               unsettled:
