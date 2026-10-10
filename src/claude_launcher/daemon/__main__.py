@@ -263,6 +263,9 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
         # different message and the re-briefing, which is why the mesh manager
         # comes along — it is half of what a re-briefing is made of.
         blank=manager.resumed_blank,
+        # Idle at the shutdown but writing shortly before it: a restart may
+        # have killed the background command its agent was waiting on.
+        recent=resume.recent_idle(manager.resumed_idle),
         mesh_mgr=mesh_manager,
     )
     resume_nudge.start()

@@ -267,6 +267,81 @@ def test_session_executor_spawns_child_and_child_submits(tmp_path, monkeypatch):
     assert [t["label"] for t in st["tasks"]] == ["after"]
 
 
+def _kid_submits(tmp_path, monkeypatch, run_dir, did):
+    kid_dir = tmp_path / "kid"
+    kid_dir.mkdir(exist_ok=True)
+    monkeypatch.chdir(kid_dir)
+    monkeypatch.setenv("CLAUNCH_SESSION", "kid")
+    mcp.call_tool("flow_delegate", {"delegation": did, "scope": "own",
+                                    "cwd": str(run_dir), "outcome": "ok",
+                                    "value": {"verdict": "fine"}})
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+
+
+def _session_run(tmp_path, monkeypatch):
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    mgr = FakeManager(FakeSession("own", str(run_dir)))
+
+    def spawn(parent_name, body):
+        mgr.sessions["kid"] = FakeSession("kid", str(tmp_path / "kid"))
+        return "kid"
+
+    clock = _clock(mgr, spawn=spawn)
+    clock.scan()
+    st = _start(run_dir, SESSION, caps=SESSION_CAPS)
+    assert clock.scan() == []  # spawns the child
+    return clock, run_dir, st["delegations"][0]["id"]
+
+
+def test_a_child_session_result_wakes_the_driver_once(tmp_path, monkeypatch):
+    """claunch-feve0: a delegation that another process closes (a child
+    session's flow_delegate) opens the driver's next task while the driver
+    may be idle; the clock tells it once."""
+    clock, run_dir, did = _session_run(tmp_path, monkeypatch)
+    _kid_submits(tmp_path, monkeypatch, run_dir, did)
+    notices = clock.scan()
+    assert len(notices) == 1
+    cwd, name, text = notices[0]
+    assert name == "own" and "waiting on you: after" in text
+    assert cflow2_clock.WHY_DELEGATION in text
+    assert clock.scan() == []  # once per closing, not every pass
+
+
+def test_a_pass_that_fails_later_does_not_repeat_the_notice(tmp_path, monkeypatch):
+    """A step after the notice raising (caught per slot by scan) must not
+    leave the old open set behind, or every pass announces it again."""
+    clock, run_dir, did = _session_run(tmp_path, monkeypatch)
+    _kid_submits(tmp_path, monkeypatch, run_dir, did)
+
+    def boom(*a, **kw):
+        raise runtime.FlowError("restart record unreadable")
+
+    monkeypatch.setattr(clock, "_claim_restarts", boom)
+    assert len(clock.scan()) == 1
+    assert clock.scan() == []
+
+
+def test_a_closed_subagent_delegation_is_not_announced(tmp_path, monkeypatch):
+    """The driver submits a subagent's result itself, so it is awake."""
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    _start(tmp_path, """
+        nodes:
+          t: {prompt: T, returns: {ok: {}}, executor: [subagent]}
+          after: {prompt: after}
+        body: [t, after]
+    """, caps={"subagent.spawn": True, "mcp.claunch": True})
+    clock = _clock(FakeManager(FakeSession("own", str(tmp_path))))
+    assert clock.scan(now=T0 + 1) == []
+    st = runtime.status(cwd=str(tmp_path), scope="own", tick=False)
+    did = st["delegations"][0]["id"]
+    runtime.delegate_submit(did, "ok", {}, cwd=str(tmp_path), scope="own", now=T0 + 2)
+    assert [t["label"] for t in runtime.status(cwd=str(tmp_path), scope="own",
+                                               tick=False)["tasks"]] == ["after"]
+    assert clock.scan(now=T0 + 3) == []
+
+
 def test_session_spawn_refused_falls_back_to_next_executor(tmp_path):
     def spawn(parent_name, body):
         raise cflow2_exec.SpawnRefused("spawn policy: max_children reached")

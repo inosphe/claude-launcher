@@ -169,6 +169,14 @@ class SessionManager:
         #: (:mod:`claude_launcher.daemon.resume`). Written once per process,
         #: at restore; empty on a daemon that restored nothing.
         self.resumed_busy: List[str] = []
+        #: Names :meth:`restore_all` relaunched that were *idle* at the
+        #: shutdown, with the PTY stamp (``last_output_at``) the previous
+        #: daemon recorded for them. An idle agent may have ended its turn
+        #: to wait for a background command, which the restart killed, so
+        #: nothing will start its next turn either; the resume nudge reads
+        #: the stamp to tell such a session from one that finished long ago
+        #: (claunch-ccoof).
+        self.resumed_idle: Dict[str, Optional[str]] = {}
         #: Names :meth:`restore_all` relaunched whose conversation was *not*
         #: on disk yet, so the restore opened an empty one
         #: (:func:`harness.restores_blank`). Kept apart from
@@ -2517,6 +2525,8 @@ class SessionManager:
                         self.events.record(restored, "resume", "데몬 재시작 후 세션 복원")
                         if entry.get("was_busy"):
                             self.resumed_busy.append(sdef.name)
+                        else:
+                            self.resumed_idle[sdef.name] = entry.get("last_output_at")
                         if not blank:
                             # Codex's blank restore is decided by the launch
                             # that just ran, not by the transcript the previous

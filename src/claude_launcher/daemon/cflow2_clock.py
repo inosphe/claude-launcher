@@ -45,8 +45,10 @@ session name, as for v1 -- that does what no agent call does:
   :meth:`.cflow_clock.RestartClock._execute`), its result recorded with
   :func:`..cflow2.runtime.complete_restart`;
 * **wake-up**: a pass that moved a run on its own (a wait passed or timed
-  out, a held choice's window opened) tells the driver when the run now
-  waits on it (a task, or an agent's choice);
+  out, a held choice's window opened), or that finds a delegation closed
+  since the last pass by somebody other than the driver (a child
+  session, a receipt -- claunch-feve0), tells the driver
+  when the run now waits on it (a task, or an agent's choice);
 * **watch**: collection ``watch:`` probes that are due
   (:func:`..cflow2.runtime.watch_due`) run like a wait probe, with
   :data:`WATCH_TIMEOUT`; the exit code is applied by
@@ -244,6 +246,14 @@ class Cflow2Clock:
         #: runs are aborted by :meth:`end_sides` (filled on the loop by
         #: :meth:`session_exited`, drained in the scan thread).
         self._exits: "collections.deque[Tuple[str, str]]" = collections.deque()
+        #: ``(cwd, scope) -> {delegation id}`` open at the end of the last pass,
+        #: excluding subagent delegations (their driver submits them itself,
+        #: so it is awake). A delegation that was open and is now closed was
+        #: finished by somebody else -- a child session, a receipt this
+        #: clock submitted -- and nothing else tells the
+        #: driver its run moved (claunch-feve0). In memory only: a restart
+        #: forgets it, and the resume nudge covers what moved while down.
+        self._open_delegations: Dict[Tuple[str, str], Set[str]] = {}
 
     # -- lifecycle -------------------------------------------------------
     def start(self) -> None:
@@ -476,6 +486,7 @@ class Cflow2Clock:
             # finished (a leave of the last node) is still performed.
             self._claim(cwd, scope, first)
         if first.get("status") not in runtime.LIVE_STATUSES:
+            self._open_delegations.pop((cwd, scope), None)
             if (first.get("next_round") or {}).get("auto") and not self.stop.is_set():
                 started = runtime.start_next_round(cwd, scope, now)
                 if started:
@@ -485,6 +496,13 @@ class Cflow2Clock:
         payload = runtime.wait_tick(now, probe, cwd=cwd, scope=scope)
         if payload.get("ticked") and _waits_on_driver(payload):
             notices.append((cwd, payload.get("driver") or scope, moved_block(scope, payload)))
+        elif self._delegation_closed(cwd, scope, first) and _waits_on_driver(payload):
+            notices.append((cwd, payload.get("driver") or scope,
+                            moved_block(scope, payload, why=WHY_DELEGATION)))
+        # Taken now, not only at the end of the pass: a step below that raises
+        # would leave the old set, and every later pass would announce the
+        # same closed delegation again.
+        self._open_delegations[(cwd, scope)] = _open_delegations(first)
         self._claim_restarts(cwd, scope, now, notices)
         for text in asks.tick(cwd=cwd, scope=scope, now=now, pool_fn=self.ask_pool,
                               deliver_fn=self.ask_deliver):
@@ -496,7 +514,9 @@ class Cflow2Clock:
         self._watch_lost(cwd, scope)
         state = st.load_state()
         if state.get("status") not in runtime.LIVE_STATUSES:
+            self._open_delegations.pop((cwd, scope), None)
             return
+        self._open_delegations[(cwd, scope)] = _open_delegations(state)
         halted = _halted(state)
         clock_now = time.time() if now is None else float(now)
         for did, rec in (state.get("delegations") or {}).items():
@@ -511,6 +531,17 @@ class Cflow2Clock:
                 self._session(cwd, scope, did, rec, clock_now, notices, halted)
             elif ex == ir.EXEC_SUBAGENT:
                 self._budget(cwd, scope, did, rec, clock_now, notices)
+
+    def _delegation_closed(self, cwd: str, scope: str, state: Dict[str, Any]) -> bool:
+        """Whether a delegation open at the end of the last pass is closed now.
+
+        ``state`` is read before this pass moves anything, so a delegation
+        this pass closes (a child receipt submitted below) is seen by the next
+        one. The first pass over a slot has nothing to compare and says no."""
+        before = self._open_delegations.get((cwd, scope))
+        if not before:
+            return False
+        return bool(before - _open_delegations(state))
 
     # -- restarts (docs 2.2, restart) ----------------------------------------
     def _claim_restarts(self, cwd: str, scope: str, now: Optional[float],
@@ -898,6 +929,18 @@ def default_kill_child(parent: str, child: str) -> Any:
     return client.post(f"/api/sessions/{parent}/children/{child}/kill", {}, timeout=60.0)
 
 
+def _open_delegations(state: Dict[str, Any]) -> Set[str]:
+    """The run's open delegations that somebody other than its driver closes."""
+    return {did for did, rec in (state.get("delegations") or {}).items()
+            if rec.get("status") in runtime.OPEN_DELEGATION
+            and rec.get("executor") != ir.EXEC_SUBAGENT}
+
+
+#: Why the clock says a run moved (the protocol line of :func:`moved_block`).
+WHY_CLOCK = "a wait passed or timed out, or a held choice's window opened"
+WHY_DELEGATION = "a delegated node returned -- a child session or a receipt finished it"
+
+
 def _waits_on_driver(payload: Dict[str, Any]) -> bool:
     """The run now needs its driver: an active task or an agent's choice."""
     if payload.get("tasks"):
@@ -906,8 +949,9 @@ def _waits_on_driver(payload: Dict[str, Any]) -> bool:
                for c in payload.get("choices") or [])
 
 
-def moved_block(scope: str, payload: Dict[str, Any]) -> str:
-    """The wake-up after the clock moved a run (a wait, a window)."""
+def moved_block(scope: str, payload: Dict[str, Any], why: str = WHY_CLOCK) -> str:
+    """The wake-up after the run moved without its driver (a wait, a window,
+    a delegation somebody else finished)."""
     at = [t.get("label") or t.get("instance") for t in payload.get("tasks") or []]
     at += [c.get("label") or c.get("instance") for c in payload.get("choices") or []
            if c.get("chooser") == ir.CHOOSER_AGENT and not c.get("held")]
@@ -916,8 +960,7 @@ def moved_block(scope: str, payload: Dict[str, Any]) -> str:
         "# claunch cflow2: the run moved -- machine-generated, not typed by the user",
         f"run: {scope} ({payload.get('workflow')}, {payload.get('run')})",
         f"waiting on you: {', '.join(str(a) for a in at)}",
-        "protocol: the daemon's clock moved the run on its own (a wait passed or timed out, "
-        "or a held choice's window opened). Call flow_status and continue.",
+        f"protocol: the run moved on its own ({why}). Call flow_status and continue.",
         "---"])
 
 

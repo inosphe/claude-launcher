@@ -62,6 +62,7 @@ from typing import Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
 from .. import store
 from ..cflow import engine as cflow_engine, landing as cflow_landing, model as cflow_model, state as cflow_state
+from ..cflow2 import ir as cflow2_ir, runtime as cflow2_runtime, store as cflow2_store
 from . import briefing, landing_route, status_checks
 from .session import STATUS_BUSY, STATUS_IDLE
 
@@ -521,19 +522,13 @@ class CflowReminderSource:
             return []
         due: List[Tuple[str, str, str, str]] = []
         live = set()
-        for cwd, scope in cflow_state.known_runs():
+        for cwd, scope, payload, v2 in self._runs(live):
             key = (cwd, scope)
-            live.add(key)
-            try:
-                payload = cflow_engine.status(cwd, scope=scope)
-            except Exception as exc:
-                log.debug("cflow reminder skipped %s/%s: %s", cwd, scope, exc)
-                continue
-            if not _actionable(payload):
+            if not (_waits_on_driver(payload) if v2 else _actionable(payload)):
                 self._seen.pop(key, None)
                 continue
             enabled, interval = reminder_policy(payload, cfg)
-            awaits = payload.get("awaits") or {}
+            awaits = {} if v2 else payload.get("awaits") or {}
             if not enabled or (interval <= 0 and not awaits.get("probe")):
                 # `enabled` is this clock's master switch: off, it says
                 # neither of the two things it can say. An interval of zero
@@ -543,7 +538,7 @@ class CflowReminderSource:
                 # that changes.
                 self._seen.pop(key, None)
                 continue
-            pos = (
+            pos = v2_position(payload) if v2 else (
                 payload.get("run"), payload.get("status"),
                 payload.get("step_id"), payload.get("visit"),
             )
@@ -672,12 +667,16 @@ class CflowReminderSource:
                 # has it. That is not something the agent already has, so it
                 # is not something a pointer can replace — and at ~480
                 # characters it is already the short form.
-                short = entry.get("restated") and not _ask_reached_nobody(payload)
+                short = entry.get("restated") and (v2 or not _ask_reached_nobody(payload))
                 # ``or entry["at"]`` rather than a bare lookup: the arming is
                 # not the only writer of this table any more, and a staleness
                 # figure that falls back to the arming is off by at most one
                 # interval, where a KeyError here would silence the clock.
                 since = now - (entry.get("arrived_at") or entry["at"])
+                if v2:
+                    due.append((cwd, scope, v2_reminder_block(
+                        payload, interval, since if short else None), "reminder"))
+                    continue
                 block = reminder_block(payload, interval)
                 if short:
                     pointer = repeat_block(payload, interval, since)
@@ -699,6 +698,59 @@ class CflowReminderSource:
             if key not in live:
                 del self._seen[key]
         return due
+
+    def _runs(self, live: set):
+        """Every run this clock reminds about, as ``(cwd, scope, payload, v2)``.
+
+        v1 runs come from their registry. A v2 run has none, so each live
+        session's own slot (scope = the session's name) is read for one --
+        before claunch-ccoof this clock read only v1 and no v2 driver was
+        ever reminded. Like every reminder this one is typed only into a
+        busy session (session_reminder holds it otherwise): it re-aims an
+        agent mid-turn, and an idle driver is woken by the cflow2 clock's
+        moved_block or the resume nudge instead. A run whose recorded driver
+        is another session is left out -- the reminder goes to the slot's
+        own session, which is not the one to move it. A slot holding both is
+        v1's while v1 has the agent's position, and v2's otherwise: yielding
+        both would arm and drop the same timer on every pass.
+        """
+        v2_runs: Dict[Tuple[str, str], dict] = {}
+        try:
+            sessions = list(self.manager.list())
+        except Exception:  # noqa: BLE001 -- a manager without a listing
+            sessions = []
+        for session in sessions:
+            if getattr(session, "exited", False) or not session.sdef.cwd:
+                continue
+            scope = session.sdef.name
+            cwd = session.sdef.cwd
+            try:
+                cwd = cflow_state.resolve_cwd(session.sdef.cwd)
+                if not cflow2_store.RunStore(cwd, scope).exists():
+                    continue
+                payload = cflow2_runtime.status(cwd=cwd, scope=scope, tick=False)
+            except Exception as exc:  # noqa: BLE001 -- FlowError, StoreError, OSError
+                log.debug("cflow reminder skipped v2 %s/%s: %s", cwd, scope, exc)
+                continue
+            if (payload.get("status") in cflow2_runtime.LIVE_STATUSES
+                    and (payload.get("driver") or scope) == scope):
+                v2_runs[(cwd, scope)] = payload
+        for cwd, scope in cflow_state.known_runs():
+            key = (cwd, scope)
+            live.add(key)
+            try:
+                payload = cflow_engine.status(cwd, scope=scope)
+            except Exception as exc:
+                log.debug("cflow reminder skipped %s/%s: %s", cwd, scope, exc)
+                continue
+            if key in v2_runs:
+                if not _actionable(payload):
+                    continue
+                del v2_runs[key]
+            yield cwd, scope, payload, False
+        for (cwd, scope), payload in v2_runs.items():
+            live.add((cwd, scope))
+            yield cwd, scope, payload, True
 
     def _scan_sub(
         self, cwd: str, scope: str, run: str, key: tuple, now: float, due: list
@@ -1000,6 +1052,65 @@ def reminder_block(payload: dict, interval: float) -> str:
             "'report' and advance with 'next'; if you have lost the thread, "
             "call 'status' first -- it is the current truth."
         )
+    lines.append("---")
+    return "\n".join(lines)
+
+
+def _waits_on_driver(payload: dict) -> bool:
+    """A v2 run's "the agent is the one who can move it": the cflow2
+    clock's own rule, so the two clocks cannot disagree about it."""
+    from . import cflow2_clock
+
+    return cflow2_clock._waits_on_driver(payload)
+
+
+def v2_position(payload: dict) -> tuple:
+    """A v2 run's position key: what it waits on the driver for. Instance
+    ids carry their visit (``a@3``), so a loop's next lap is a new position."""
+    tasks = sorted(str(t.get("instance")) for t in payload.get("tasks") or [])
+    choices = sorted(str(c.get("instance")) for c in payload.get("choices") or []
+                     if c.get("chooser") == cflow2_ir.CHOOSER_AGENT and not c.get("held"))
+    return ("v2", payload.get("run"), payload.get("status"), tuple(tasks), tuple(choices))
+
+
+def v2_reminder_block(payload: dict, interval: float,
+                      stalled_for: Optional[float] = None) -> str:
+    """What a stalled v2 run's driver hears (claunch-ccoof).
+
+    The first one at a position names each task with its prompt, cut at
+    :data:`_INSTRUCTIONS_LIMIT` like :func:`reminder_block`; a repeat
+    (``stalled_for`` given) names the position and how long it has not
+    moved, and points at ``flow_status`` for the rest.
+    """
+    tasks = payload.get("tasks") or []
+    choices = [c for c in payload.get("choices") or []
+               if c.get("chooser") == cflow2_ir.CHOOSER_AGENT and not c.get("held")]
+    at = [str(t.get("label") or t.get("instance")) for t in tasks]
+    at += [str(c.get("label") or c.get("instance")) for c in choices]
+    head = ("# claunch cflow2: reminder -- machine-generated, not typed by the user "
+            f"(every {interval:.0f}s while the run does not move)")
+    lines = ["---", head,
+             f"run: {payload.get('scope')} ({payload.get('workflow')}, {payload.get('run')})",
+             f"waiting on you: {', '.join(at)}"]
+    if stalled_for is not None:
+        lines.append(f"unmoved for ~{max(1, int(stalled_for // 60))} min; this is "
+                     "the short form, the position was restated here once")
+    else:
+        for t in tasks:
+            prompt = str(t.get("prompt") or "").strip()
+            if len(prompt) > _INSTRUCTIONS_LIMIT:
+                prompt = prompt[:_INSTRUCTIONS_LIMIT] + " ... (cut; flow_status has it in full)"
+            lines.append(f"task {t.get('label') or t.get('instance')}: {prompt}")
+            if t.get("done_when"):
+                lines.append(f"  done when: {t.get('done_when')}")
+        for c in choices:
+            lines.append(f"choice {c.get('label') or c.get('instance')}: "
+                         f"{str(c.get('prompt') or '').strip()}")
+    lines.append(
+        "protocol: the run is waiting on you and has not moved. If this is the "
+        "work you are on, keep going. If you have lost the thread, call "
+        "flow_status, then finish the task with flow_report, or the choice "
+        "with flow_select.")
     lines.append("---")
     return "\n".join(lines)
 

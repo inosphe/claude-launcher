@@ -18,8 +18,20 @@ hears it, and both are narrowing:
   was idle before the restart is idle for a reason — its agent had finished —
   and telling it to "continue" would invent work nobody asked for.
 
+  With one exception (claunch-ccoof): an agent that ended its turn to wait
+  for a background command (a test run, a long build) reads ``idle`` too,
+  and the restart killed that command, so the notice that would have started
+  its next turn never comes. Measured on 2026-10-09: s934 and s933 sat 77 and
+  43 minutes on a cflow task after the 15:57 and 16:22 restarts. Such a
+  session is told apart by two facts together: its PTY wrote something
+  within :data:`RECENT_OUTPUT` of the restore (an agent that finished hours
+  ago did not), and its run is waiting on it — a run is required here, unlike
+  for a busy session, so an idle session with no run or a parked one is never
+  typed into. It hears :func:`idle_block`, which says what was lost.
+
 * **Its cflow run is not parked.** The same rule the reminder clock uses
-  (:func:`cflow_clock._actionable`): a run that is on a step, on an agent's
+  (:func:`cflow_clock._actionable`; for a v2 run, the cflow2 clock's
+  :func:`cflow2_clock._waits_on_driver`): a run that is on a step, on an agent's
   branch choice, or on a delegated ask that reached nobody is the agent's to
   move, and it is the one to nudge. A run waiting on a human gate, on a
   user's selection or on another session's answer is *not* — it is parked
@@ -73,12 +85,14 @@ import asyncio
 import contextlib
 import logging
 import time
+from datetime import datetime
 from typing import Dict, Iterable, List, Optional
 
 from .. import store
 from ..cflow import engine as cflow_engine, state as cflow_state
+from ..cflow2 import runtime as cflow2_runtime
 from ..harnesses import CLAUDE_HARNESS
-from . import cflow_clock, rebrief
+from . import cflow2_clock, cflow_clock, rebrief
 from .session import INPUT_SETTLE, STATUS_BUSY, STATUS_IDLE, STATUS_STARTING
 
 log = logging.getLogger("claunch.daemon.resume")
@@ -94,6 +108,12 @@ POLL = 1.0
 #: became ready inside this heard nothing, which is the safe direction — a
 #: paste into a TUI that is still starting is typed and never sent.
 WINDOW = 600.0
+
+#: How recently (seconds before the restore) an idle session's PTY must have
+#: written for the restart to count as having cut it off. Covers a restart's
+#: own downtime (a few minutes) plus a test run the agent was waiting on; a
+#: session that finished its work is quiet for much longer than this.
+RECENT_OUTPUT = 1800.0
 
 #: Why a session is still on the pending list. Reported when the window
 #: closes, because these are not one event and they do not call for one
@@ -127,25 +147,54 @@ _WAIT_REASONS = {
 }
 
 
-def gate(cwd: str, scope: str) -> Optional[bool]:
+def gate(cwd: str, scope: str, *, require_run: bool = False) -> Optional[bool]:
     """Whether this session's cflow position allows a resume nudge.
 
-    ``True`` to nudge (the run is the agent's to move, or there is no run),
-    ``False`` to stand down for good (parked on a gate, a user's selection,
-    somebody else's answer, or finished), ``None`` when the run could not be
-    read — the caller retries, because an unreadable state is a transient
-    (mid-write, locked) far more often than it is an answer.
+    ``True`` to nudge (the run is the agent's to move, or there is no run and
+    ``require_run`` is off), ``False`` to stand down for good (parked on a
+    gate, a user's selection, somebody else's answer, or finished), ``None``
+    when the run could not be read — the caller retries, because an
+    unreadable state is a transient (mid-write, locked) far more often than
+    it is an answer.
+
+    A v2 run in the slot is read first: v1's status cannot see it, and a v2
+    run parked on a person's question used to read as "no run here".
 
     Blocking (reads run state off disk); call it in a thread.
     """
+    try:
+        payload2 = cflow2_runtime.status(cwd=cwd, scope=scope, tick=False)
+    except Exception as exc:  # noqa: BLE001 — FlowError, StoreError, OSError
+        log.debug("resume nudge: v2 run state for %r unreadable: %s", scope, exc)
+        return None
+    if payload2.get("status") in cflow2_runtime.LIVE_STATUSES:
+        return cflow2_clock._waits_on_driver(payload2)
     try:
         payload = cflow_engine.status(cflow_state.resolve_cwd(cwd), scope=scope)
     except Exception as exc:  # noqa: BLE001 — CflowError, StateError, OSError
         log.debug("resume nudge: run state for %r unreadable: %s", scope, exc)
         return None
     if payload.get("status") == "idle" and not payload.get("step_id"):
-        return True  # no run here; nothing to be parked on
+        return not require_run  # no run here; nothing to be parked on
     return bool(cflow_clock._actionable(payload))
+
+
+def recent_idle(idle: Dict[str, Optional[str]], now: Optional[float] = None,
+                within: float = RECENT_OUTPUT) -> List[str]:
+    """The idle restored sessions whose PTY wrote within ``within`` seconds
+    of ``now`` (wall clock) -- the ones a restart may have cut off."""
+    at = time.time() if now is None else now
+    out = []
+    for name, stamp in idle.items():
+        if not stamp:
+            continue
+        try:
+            written = datetime.fromisoformat(str(stamp).replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            continue
+        if 0 <= at - written <= within:
+            out.append(name)
+    return out
 
 
 class ResumeNudge:
@@ -157,6 +206,7 @@ class ResumeNudge:
         names: Iterable[str],
         *,
         blank: Iterable[str] = (),
+        recent: Iterable[str] = (),
         mesh_mgr=None,
         poll: float = POLL,
         window: float = WINDOW,
@@ -184,6 +234,12 @@ class ResumeNudge:
         for name in self._blank:
             if name not in self.pending:
                 self.pending.append(name)
+        #: Idle at the shutdown but writing shortly before it (see
+        #: :func:`recent_idle`): nudged only when a run waits on them, and
+        #: with :func:`idle_block`. A blank restore is not one of these -- it
+        #: hears the blank block whatever it was doing.
+        self._recent = {n for n in recent if n not in self.pending}
+        self.pending.extend(sorted(self._recent))
         #: name -> monotonic time the session first read "ready". A session
         #: seen ready and then working again is being driven by somebody, and
         #: is dropped rather than nudged.
@@ -216,7 +272,8 @@ class ResumeNudge:
 
     async def _run(self) -> None:
         log.info(
-            "resume nudge: %d restored session(s) were working: %s",
+            "resume nudge: %d restored session(s) were working or recently "
+            "active: %s",
             len(self.pending),
             ", ".join(self.pending),
         )
@@ -277,16 +334,22 @@ class ResumeNudge:
                 harness=session.sdef.harness,
             )
         else:
-            verdict = await asyncio.to_thread(gate, session.sdef.cwd or "", name)
+            recent = name in self._recent
+            if recent:
+                verdict = await asyncio.to_thread(
+                    gate, session.sdef.cwd or "", name, require_run=True)
+            else:
+                verdict = await asyncio.to_thread(gate, session.sdef.cwd or "", name)
             if verdict is None:
                 self._waiting[name] = WAIT_RUN
                 return False  # unreadable run state: look again next poll
             if not verdict:
                 log.info(
-                    "resume nudge for %r held: its cflow run is parked", name
+                    "resume nudge for %r held: %s", name,
+                    "no run waits on it" if recent else "its cflow run is parked",
                 )
                 return True
-            block = nudge_block(name)
+            block = idle_block(name) if recent else nudge_block(name)
 
         if not await session.deliver(block):
             # readiness/keyboard holds refused it; try again. Worth its own
@@ -423,6 +486,34 @@ def nudge_block(name: str) -> str:
             "cflow run, call its 'status' tool first -- it is the current "
             "truth, and it may have moved while you were down. This is not a "
             "new task and nobody typed it.",
+            "---",
+        ]
+    )
+
+
+def idle_block(name: str) -> str:
+    """What a restored session that was idle -- but recently active, with a
+    run waiting on it -- hears (claunch-ccoof).
+
+    Its turn did not die; what it may have been waiting on did. Claude Code
+    wakes an agent when a background command it started finishes, and a
+    restart kills that command with the old daemon, so the wake never comes.
+    """
+    return "\n".join(
+        [
+            "---",
+            "# claunch: session resume -- machine-generated, not typed by the user",
+            f"session: {name}",
+            "what happened: the daemon restarted while this session was idle. "
+            "The conversation above is intact, and your cflow run is waiting "
+            "on you. Anything you left running in the background (a test run, "
+            "a build, a long shell command) was stopped with the old daemon "
+            "and will not report back.",
+            "protocol: if you ended your last turn waiting for such a command, "
+            "check what it left (its output file, a receipt) and run it again "
+            "if it did not finish. Then call your run's 'status' tool and "
+            "continue from where it stands. This is not a new task and nobody "
+            "typed it.",
             "---",
         ]
     )

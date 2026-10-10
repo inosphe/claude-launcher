@@ -1809,3 +1809,117 @@ def test_a_stance_change_reaches_a_session_that_never_moved(proj):
     mesh_mgr._role = "reviewer"
     due = service.scan_roles(2901.0, cfg)
     assert [e["name"] for _name, entries in due for e in entries] == ["reviewer"]
+
+
+# --------------------------------------------------------------------------- #
+# v2 runs (claunch-ccoof): read from each live session's own slot
+# --------------------------------------------------------------------------- #
+V2_TWO = """cflow: 2
+name: v2two
+nodes:
+  a: {title: Step A, prompt: write the parser}
+  b: {title: Step B, prompt: write the docs}
+body:
+  seq: [a, b]
+"""
+
+V2_USER_PICK = """cflow: 2
+name: v2pick
+nodes:
+  a: {title: Step A, prompt: do a}
+body:
+  choose:
+    prompt: which way?
+    chooser: user
+    options:
+      go: {then: a}
+"""
+
+
+def _start_v2(cwd, src, scope="w1"):
+    from claude_launcher.cflow2 import frontend, runtime
+    return runtime.start(frontend.compile_text(src), cwd=cwd, scope=scope, caps={})
+
+
+def test_a_v2_run_waiting_on_its_driver_is_reminded(proj):
+    from claude_launcher.cflow2 import runtime
+
+    cwd = str(proj)
+    _start_v2(cwd, V2_TWO)
+    sess = _ActivitySession("w1", cwd)
+    clock = cflow_clock.ReminderClock(_FakeManager({"w1": sess}))
+    t = time.monotonic()
+    assert clock.scan(t) == []                       # armed, not fired
+    due = clock.scan(t + 601)
+    assert [(c, s, k) for c, s, _, k in due] == [(cwd, "w1", "reminder")]
+    first = due[0][2]
+    assert "cflow2" in first and "write the parser" in first
+    assert "flow_status" in first
+    asyncio.run(clock._deliver(*due[0]))
+    assert len(sess.delivered) == 1
+
+    # the same position on a still screen stays quiet; a moved one hears
+    # the short form, without the task text
+    assert clock.scan(t + 1202) == []
+    sess.activity = "second"
+    second = clock.scan(t + 1803)[0][2]
+    assert "short form" in second and "write the parser" not in second
+
+    # the run moving re-arms on the next task, in full
+    runtime.report("a", cwd=cwd, scope="w1")
+    assert clock.scan(t + 1900) == []
+    assert "write the docs" in clock.scan(t + 1900 + 601)[0][2]
+
+
+def test_a_v2_run_parked_on_a_users_choice_is_not_reminded(proj):
+    cwd = str(proj)
+    _start_v2(cwd, V2_USER_PICK)
+    clock = cflow_clock.ReminderClock(
+        _FakeManager({"w1": _FakeSession("w1", cwd)}))
+    clock.scan(1000.0)
+    assert clock.scan(99999.0) == []
+
+
+def test_a_v2_run_without_its_session_is_not_reminded(proj):
+    """The slot is found through a live session; an orphaned run's driver
+    has nobody to hear it."""
+    cwd = str(proj)
+    _start_v2(cwd, V2_TWO)
+    clock = cflow_clock.ReminderClock(
+        _FakeManager({"w2": _FakeSession("w2", cwd)}))
+    clock.scan(1000.0)
+    assert clock.scan(99999.0) == []
+
+
+def test_a_slot_with_a_parked_v1_run_reminds_its_live_v2_run(proj):
+    """Both clocks' runs in one slot: v1 keeps it while it has the agent's
+    position; otherwise the v2 run's timer is not dropped on every pass."""
+    cwd = str(proj)
+    (proj / ".claunch" / "workflows" / "gated.yaml").write_text(
+        "name: gated\nsteps:\n  ship:\n    gate: human review\n"
+        "    instructions: ship it\n", encoding="utf-8")
+    cflow_engine.start("gated", cwd=cwd, scope="w1")
+    _start_v2(cwd, V2_TWO)
+    clock = cflow_clock.ReminderClock(
+        _FakeManager({"w1": _FakeSession("w1", cwd)}))
+    clock.scan(1000.0)
+    due = clock.scan(1000.0 + 601)
+    assert len(due) == 1 and "write the parser" in due[0][2]
+
+
+def test_a_v2_run_driven_from_another_session_is_left_out(proj):
+    """The reminder goes to the slot's own session; a run whose recorded
+    driver is somebody else is not that session's to move."""
+    from claude_launcher.cflow2 import store as cstore
+
+    cwd = str(proj)
+    _start_v2(cwd, V2_TWO)
+    st = cstore.RunStore(cwd, "w1")
+    with st.lock():
+        state = st.load_state()
+        state["driver"] = "w9"
+        st.save_state(state)
+    clock = cflow_clock.ReminderClock(
+        _FakeManager({"w1": _FakeSession("w1", cwd)}))
+    clock.scan(1000.0)
+    assert clock.scan(99999.0) == []
