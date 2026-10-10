@@ -179,3 +179,24 @@ def test_a_decision_must_be_approve_or_deny(tmp_path):
     runtime.request_move("intake", "x", by="s1", **d.kw())
     with pytest.raises(runtime.FlowError, match="approve' or 'deny"):
         runtime.resolve_move("maybe", **d.kw())
+
+
+def test_a_v1_tool_points_a_v2_session_at_flow_request_move(tmp_path, monkeypatch):
+    """s991 (2026-10-11) reached for the v1 ``request_goto`` from a v2 run, got
+    "no active cflow run" and told the person to type ``claunch cflow2 move``,
+    which its own shell refuses. The v1 tool now names the v2 one."""
+    from claude_launcher.cflow import engine, mcp
+    from claude_launcher.cflow import state as state_mod
+
+    Drv(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CLAUNCH_SESSION", "t")
+    with pytest.raises(engine.CflowError) as err:
+        mcp.call_tool("request_goto", {"step": "intake", "reason": "a new task"})
+    assert "cflow v2 run" in str(err.value) and "flow_request_move" in str(err.value)
+    with pytest.raises(engine.CflowError, match="flow_select"):
+        mcp.call_tool("select", {"option": "x"})
+    # no v2 run of this session here: the v1 answer stays as it was
+    monkeypatch.setenv("CLAUNCH_SESSION", "u")
+    with pytest.raises(state_mod.StateError, match="no active cflow run"):
+        mcp.call_tool("request_goto", {"step": "intake", "reason": "a new task"})

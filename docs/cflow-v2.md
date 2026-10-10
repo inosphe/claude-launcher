@@ -1646,6 +1646,12 @@ v1의 `request_goto`에 해당한다. 드라이버는 런을 직접 옮길 수 �
   선택, ask 답)은 막지 않는다. `flow_status`는 `move_request`와 `next`의 첫 안내로
   이 사실을 알린다.
 - 철회: `flow_request_move {cancel: true}` → 저널 `move_withdrawn`.
+- v1 도구의 안내: v2 런만 드라이브하는 세션이 v1 MCP 도구(`request_goto`, `select`,
+  `report`, `next`, `status` 등)를 호출하면, v1 런이 없다는 오류 대신 대응하는 v2
+  도구를 알리는 오류를 받는다(`cflow/mcp.py`의 `call_tool`). `request_goto`의 대응은
+  `flow_request_move`다. 이 안내가 없을 때 v2 세션은 "no active cflow run"을 받고
+  사용자에게 `claunch cflow2 move`를 입력하라고 안내했으며, 그 명령은 세션 셸에서
+  거절되었다(2026-10-11, s991).
 - 승인: run 페이지의 Move 버튼, 터미널 띠(strip)의 Move 버튼, 또는
   `claunch cflow2 move --approve`(`runtime.resolve_move`). 저널에 `move_approved`가
   남고, 강제 이동과 같은 경로(`_move_run`)로 옮긴다. 그 `forced` 이벤트에

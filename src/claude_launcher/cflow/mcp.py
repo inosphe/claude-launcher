@@ -354,7 +354,9 @@ TOOLS = [
             "entirely. You cannot approve it and must not simulate approval. "
             "Not for a route the workflow DOES declare — use 'next'/'select' "
             "there; not for a step you are already on. Pass cancel:true to "
-            "withdraw a request whose reason stopped being true."
+            "withdraw a request whose reason stopped being true. cflow v1 "
+            "only: a cflow v2 run (the flow_* tools) asks with "
+            "flow_request_move."
         ),
         "inputSchema": {
             "type": "object",
@@ -730,7 +732,45 @@ def _landing_queue_v2(slot, args: dict) -> dict:
     }
 
 
+#: The v2 tool to name when a v1 tool finds no v1 run but the session drives
+#: a v2 run here. ``request_goto`` is the one that mattered: a v2 session that
+#: reached for it got "no active cflow run" and fell back to asking the person
+#: to type ``claunch cflow2 move`` -- which its own shell refuses (claunch-kgfr5).
+_V2_COUNTERPART = {
+    "request_goto": "flow_request_move (node: a force_target node, reason)",
+    "select": "flow_select", "report": "flow_report", "next": "flow_status",
+    "status": "flow_status",
+}
+
+
+def _v2_run_here(run: Optional[str]) -> bool:
+    """This session drives a cflow v2 run in this directory (and the call
+    names no v1 sub run)."""
+    session = _session()
+    if run or not session:
+        return False
+    try:
+        from ..cflow2 import store as store2
+
+        return store2.RunStore(None, session).exists()
+    except Exception:  # noqa: BLE001 - only a hint hangs on this
+        return False
+
+
 def call_tool(name: str, args: dict) -> dict:
+    try:
+        return _call_tool(name, args)
+    except state_mod.StateError as exc:
+        if "no active cflow run" not in str(exc) or not _v2_run_here(_run_arg(name, args)):
+            raise
+        raise engine.CflowError(
+            f"no cflow v1 run here: this session drives a cflow v2 run, and v1 tools "
+            f"('{name}') do not reach it. Use the flow_* tools -- "
+            f"{_V2_COUNTERPART.get(name, 'flow_status')}"
+        ) from exc
+
+
+def _call_tool(name: str, args: dict) -> dict:
     global _seen_run
     run = _run_arg(name, args)
     _check_fence(name, run)
