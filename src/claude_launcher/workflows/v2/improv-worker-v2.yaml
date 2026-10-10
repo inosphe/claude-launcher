@@ -290,8 +290,8 @@ rules:
     text: |
       ── 시도 기록: 대화가 압축되기 전에 남긴다 ──
       이 회차의 탐색과 시행착오는 대화 안에만 있으면 compact에서 사라지고,
-      회차 보고서를 쓰는 round-report에도 닿지 않는다(그 노드는 headless로
-      돌면 이 대화를 전혀 보지 못한다). 기록이 남는 자리는 둘이다:
+      회차 보고서를 쓰는 round-report에도 닿지 않는다(그 노드는 자식 세션이나
+      서브에이전트로 돌면 이 대화를 전혀 보지 못한다). 기록이 남는 자리는 둘이다:
       · 그 자리에서 — 방향을 바꿨거나, 막혔거나, 세운 가설이 틀린 것으로
         드러났으면 그 순간 이 회차 이슈에 한 줄을 남긴다:
         `claunch beads comments add <이슈 id> "TRIED: <무엇을 했나> -> <무엇이
@@ -383,10 +383,10 @@ nodes:
     done_when: |
       선행 맥락 검색 결과(관련 이슈·세션과 관계, 또는 「선행 맥락 없음(쿼리: …)」)가
       보고에 있다.
-    # 드라이버가 직접 한다(claunch-onbdf). 읽기 전용 headless 위임은 claude
-    # 하네스에서 쓰기 도구와 함께 Bash·MCP도 막혀(executors.READONLY_TOOLS)
-    # 이 단계가 쓰는 셸 명령·MCP search를 실행할 수 없다 — 시험 런에서 실패하거나
-    # 검색 없이 끝났다. 엔진의 읽기 전용 경로가 셸을 허용하게 되면 위임으로 되돌린다.
+    # 드라이버가 직접 한다(claunch-onbdf). 읽기 전용 headless 위임에서는 쓰기
+    # 도구와 함께 Bash·MCP도 막혀 이 단계의 셸 명령·MCP search가 돌지 않았다
+    # (시험 런에서 실패하거나 검색 없이 끝났다). 그 실행기는 claunch-xjbrh에서
+    # 제거됐다.
     executor: [inline]
     returns:
       ok: {query: str, summary: str, related: list, duplicate: "str?"}
@@ -1429,10 +1429,10 @@ nodes:
       돌린 수치가 아니다 — 그것은 이 스텝의 것이 아니다). 수치에는 트리 해시와
       (트리, 환경)이 붙어 있고, 실행 영수증의 window 필드(class·source·
       wait_seconds·advisory_n)가 보고에 있다.
-    # 드라이버가 직접 한다(claunch-onbdf). 읽기 전용 headless 위임은 claude
-    # 하네스에서 쓰기 도구와 함께 Bash·MCP도 막혀(executors.READONLY_TOOLS)
-    # 이 단계가 쓰는 셸 명령·MCP search를 실행할 수 없다 — 시험 런에서 실패하거나
-    # 검색 없이 끝났다. 엔진의 읽기 전용 경로가 셸을 허용하게 되면 위임으로 되돌린다.
+    # 드라이버가 직접 한다(claunch-onbdf). 읽기 전용 headless 위임에서는 쓰기
+    # 도구와 함께 Bash·MCP도 막혀 이 단계의 셸 명령·MCP search가 돌지 않았다
+    # (시험 런에서 실패하거나 검색 없이 끝났다). 그 실행기는 claunch-xjbrh에서
+    # 제거됐다.
     executor: [inline]
     returns:
       ok:
@@ -1707,10 +1707,10 @@ nodes:
       문구면 code를 5로 반환한다. 게이트를 `|| true`로 통과시키지 않는다.
     done_when: |
       tools/merge_ready.py의 종료 코드와 출력 첫 줄, 쓴 대상 브랜치가 보고에 있다.
-    # 드라이버가 직접 한다(claunch-onbdf). 읽기 전용 headless 위임은 claude
-    # 하네스에서 쓰기 도구와 함께 Bash·MCP도 막혀(executors.READONLY_TOOLS)
-    # 이 단계가 쓰는 셸 명령·MCP search를 실행할 수 없다 — 시험 런에서 실패하거나
-    # 검색 없이 끝났다. 엔진의 읽기 전용 경로가 셸을 허용하게 되면 위임으로 되돌린다.
+    # 드라이버가 직접 한다(claunch-onbdf). 읽기 전용 headless 위임에서는 쓰기
+    # 도구와 함께 Bash·MCP도 막혀 이 단계의 셸 명령·MCP search가 돌지 않았다
+    # (시험 런에서 실패하거나 검색 없이 끝났다). 그 실행기는 claunch-xjbrh에서
+    # 제거됐다.
     executor: [inline]
     returns:
       ok: {code: int, verdict: str, target: str, output: str}
@@ -2591,8 +2591,8 @@ nodes:
 
       ── 재료: 쓰기 전에 이 회차의 기록을 읽는다 (claunch-qs4l9) ──
       위 다섯 줄은 요약이다. 이 노드는 드라이버의 대화 없이 돌 수 있고
-      (headless), 대화가 있어도 compact를 지난 뒤라 앞부분이 남아 있지
-      않다. 아래 「무엇을 왜 그렇게 했는가」「빨갛다가 고친 것」「못 한
+      (자식 세션·서브에이전트), 대화가 있어도 compact를 지난 뒤라 앞부분이
+      남아 있지 않다. 아래 「무엇을 왜 그렇게 했는가」「빨갛다가 고친 것」「못 한
       것」의 재료는 대화가 아니라 기록에 있다. 쓰기 전에 셋을 읽는다:
       · 런 저널 — `claunch cflow2 journal`에서 `reported` 줄이 노드마다 낸
         보고(value·text)다. work·review·targeted-test·rebase의 `tried`가
@@ -2605,6 +2605,17 @@ nodes:
       기록에 없는 것을 기억이나 추측으로 채우지 않는다. 기록끼리 어긋나면
       (저널의 수치와 코멘트의 수치가 다르다 등) 고르지 말고 그 사실을
       보고서에 적는다.
+
+      ── 자식 세션에서 돌 때: 런의 주인을 명시한다 (claunch-xjbrh) ──
+      이 노드의 첫 실행기는 session이다 — 데몬이 자식 세션을 띄워 이 브리프를
+      맡긴다. 그 자식의 `$CLAUNCH_SESSION`은 자기 이름이지만 이 회차의
+      런·커밋·보고서는 부모(런의 드라이버)의 것이다. 그래서 위아래 명령에
+      브리프가 알려 주는 런의 scope(부모 세션 이름)와 cwd(런 디렉터리)를
+      명시한다: 저널은 그 cwd에서 `claunch cflow2 journal -t <scope>`, 커밋은
+      `claunch commits --session <scope> --repo <cwd>`, 보고서 경로는
+      `claunch report path --session <scope> --issue <이슈 id>`. 드라이버가
+      직접 쓰는 경우(subagent·inline)에는 scope가 자기 이름이라 기본값과
+      같다. 보고서를 자식 이름으로 쓰면 부모 세션의 Reports 블록에 뜨지 않는다.
 
       쓸 자리를 네가 정하지 않는다 — `claunch report path --issue <이슈 id>`가
       찍어 주는 경로 그대로 쓴다(배치 회차면 주 이슈 id 하나로 한 장 — 실린
@@ -2691,7 +2702,7 @@ nodes:
       회차는 그 절이 비어도 된다. 또한 페이지가 **결과물을 축으로 서술되어
       있다** — 커밋 하나나 이슈 하나가 절 하나가 되는 구성은 이 조항을
       만족하지 않는다. 해시와 이슈 id는 증거 절에 모인다.
-    executor: [headless, subagent, inline]
+    executor: [session, subagent, inline]
     returns:
       ok: {path: str, bytes: int}
     effects: ["fs.write:reports"]

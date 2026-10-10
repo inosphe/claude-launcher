@@ -245,9 +245,9 @@ body:
 
 
 def test_unknown_capability():
-    good = C("nodes:\n  a: {prompt: a, needs: [headless.run]}\nbody: a\n")
+    good = C("nodes:\n  a: {prompt: a, needs: [session.spawn]}\nbody: a\n")
     assert "unknown-capability" not in codes(good)
-    bad = C("nodes:\n  a: {prompt: a, needs: [headless.teleport]}\nbody: a\n")
+    bad = C("nodes:\n  a: {prompt: a, needs: [session.teleport]}\nbody: a\n")
     assert "unknown-capability" in codes(bad, "error")
 
 
@@ -262,7 +262,7 @@ def test_delegated_ask():
     task = "nodes:\n  a: {prompt: a, ask: {prompt: ok}%s}\n"
     assert "delegated-ask" not in codes(C(task % "" + "body: a\n"))
     assert "delegated-ask" not in codes(C(task % ", executor: inline" + "body: a\n"))
-    assert "delegated-ask" in codes(C(task % ", executor: [headless, inline]" + "body: a\n"))
+    assert "delegated-ask" in codes(C(task % ", executor: [session, inline]" + "body: a\n"))
     under = C(task % "" + "body:\n  seq: [a]\n  executor: subagent\n")
     assert "delegated-ask" in codes(under, "error")
 
@@ -438,7 +438,7 @@ body:
   executor: %s
 """
     assert "delegated-user-gate" in codes(C(tree % ("user", "subagent")), "error")
-    assert "delegated-user-gate" in codes(C(tree % ("user", "[headless, inline]")), "error")
+    assert "delegated-user-gate" in codes(C(tree % ("user", "[session, inline]")), "error")
     assert "delegated-user-gate" not in codes(C(tree % ("user", "inline")))
     assert "delegated-user-gate" not in codes(C(tree % ("agent", "subagent")))
 

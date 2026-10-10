@@ -505,24 +505,16 @@ def test_delegation_results_by_executor_and_receipt_paths(tmp_path, monkeypatch)
     assert d.st["status"] == "done"
 
 
-def test_headless_and_session_results_have_their_own_doors(tmp_path, monkeypatch):
+def test_session_results_have_their_own_doors(tmp_path, monkeypatch):
     monkeypatch.setattr(executors, "available", lambda cwd: True)
     monkeypatch.setattr(executors, "dispatch", lambda rec, run: None)
     d = Drv(tmp_path, """
         nodes:
-          t: {prompt: T, executor: [headless]}
           u: {prompt: U, executor: [session]}
-        body: [t, u]
-    """, caps={"headless.run": True, "session.spawn": True, "mcp.claunch": True},
-        driver="drv")
-    (dl,) = d.st["delegations"]
-    assert dl["executor"] == "headless"
-    with pytest.raises(runtime.FlowError, match="headless"):
-        runtime.delegate_submit(dl["id"], "ok", {}, via=runtime.VIA_MCP, session="drv",
-                                **d.kw())
-    runtime.executor_submit(dl["id"], "ok", {}, cwd=d.cwd, scope=d.scope, now=T0)
-    st = d.status()
-    (sd,) = [x for x in st["delegations"] if x["executor"] == "session"]
+        body: [u]
+    """, caps={"session.spawn": True, "mcp.claunch": True}, driver="drv")
+    (sd,) = d.st["delegations"]
+    assert sd["executor"] == "session"
     runtime.delegate_update(sd["id"], cwd=d.cwd, scope=d.scope, now=T0, child="kid",
                             assignee="kid")
     with pytest.raises(runtime.FlowError, match="carried out by session kid"):

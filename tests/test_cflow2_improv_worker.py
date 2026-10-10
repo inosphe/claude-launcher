@@ -88,7 +88,7 @@ PROCEDURES = {"resolve-issue", "workspace", "item", "land", "settle",
               "worker-round", "queue-recheck", "confirm-landed", "found-issue"}
 
 # prior-context, targeted-test and merge-ready are the driver's (claunch-onbdf):
-# a read-only headless delegate has no shell or MCP on the claude harness.
+# a read-only delegate has no shell on the claude harness.
 DELEGATED = {"round-report"}
 DRIVER_RUN = {"prior-context", "targeted-test", "merge-ready"}
 
@@ -226,7 +226,7 @@ def test_land_returns_landed_held_rework():
 def test_delegation_points():
     chart = _chart()
     delegated = {n.label for n in chart.nodes.values()
-                 if n.type == "task" and n.executor == ["headless", "subagent", "inline"]}
+                 if n.type == "task" and n.executor == ["session", "subagent", "inline"]}
     assert delegated == DELEGATED
     for n in chart.nodes.values():
         if n.label in DELEGATED:
@@ -1136,5 +1136,8 @@ def test_round_report_reads_the_round_records_before_writing():
     assert "${result.wrapup.value.gaps}" in words
     for source in ("`claunch cflow2 journal`", "`TRIED:`", "`claunch commits`"):
         assert source in words, source
-    # still the first choice; the records are what lets it run without the chat
-    assert node["executor"][0] == "headless"
+    # a spawned child first (claunch-xjbrh); the records are what lets it run
+    # without the chat, and it names the run's session since its own differs
+    assert node["executor"][0] == "session"
+    for flag in ("-t <scope>", "--session <scope>", "report path --session <scope>"):
+        assert flag in words, flag

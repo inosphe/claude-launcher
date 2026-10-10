@@ -13,7 +13,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from claude_launcher.cflow2 import caps as caps_mod
 from claude_launcher.cflow2 import executors, frontend, mcp, runtime
 from claude_launcher.cflow2.store import RunStore, StoreError
 from claude_launcher.daemon import cflow2_clock, cflow2_exec
@@ -109,9 +108,9 @@ def test_heartbeat_names_scanned_dirs_and_makes_dispatch_available(tmp_path):
     # a run started from "another process" now queues instead of falling back
     st = _start(tmp_path, """
         nodes:
-          t: {prompt: T, executor: [headless, inline]}
+          t: {prompt: T, executor: [session, inline]}
         body: t
-    """, caps={"headless.run": True})
+    """, caps={"session.spawn": True})
     assert st["delegations"][0]["status"] == "queued"
     assert not [e for e in _events(tmp_path, "fallback") if "dispatcher" in e["cause"]]
 
@@ -216,102 +215,6 @@ def test_subagent_budget_timeout_notifies_driver(tmp_path):
     st = runtime.status(cwd=str(tmp_path), scope="own", tick=False)
     assert st["delegations"][0]["status"] == "timeout"
     assert [t["label"] for t in st["tasks"]] == ["after"]
-
-
-# -- headless dispatch ----------------------------------------------------------------
-
-FAKE = r'''
-import json, os, sys
-d = os.environ["FAKE_DIR"]
-open(os.path.join(d, "ran"), "a").write("x")
-sys.stdout.write(json.dumps({"type": "result",
-    "result": "ok\n```json\n{\"outcome\": \"ok\", \"value\": {\"n\": 1}}\n```"}))
-'''
-
-
-def _fake_launch(tmp_path):
-    d = tmp_path / "fake"
-    d.mkdir(exist_ok=True)
-    script = d / "h.py"
-    script.write_text(FAKE)
-    # A venv's python.exe on Windows is a launcher whose child runs the script,
-    # so the pid the clock records would differ from the script's own getpid().
-    exe = getattr(sys, "_base_executable", sys.executable) if sys.platform == "win32" else sys.executable
-    return d, cflow2_exec.Launch(harness="claude", command=[exe, str(script)],
-                                 env=dict(os.environ, FAKE_DIR=str(d)))
-
-
-HEADLESS = """
-    nodes:
-      t: {prompt: T, returns: {ok: {n: int}}, executor: [headless]}
-      after: {prompt: after}
-    body: [t, after]
-"""
-JSON_CAPS = {"headless.run": caps_mod.Capability(True, ["-p"]),
-             "headless.output.json": caps_mod.Capability(True, ["--output-format", "json"])}
-
-
-def test_queued_headless_is_dispatched_and_returns(tmp_path):
-    d, launch = _fake_launch(tmp_path)
-    mgr = FakeManager(FakeSession("own", str(tmp_path)))
-    clock = _clock(mgr, launch_for=lambda scope: launch, heartbeat=True)
-    clock.scan()  # heartbeat: this directory is served
-    st = _start(tmp_path, HEADLESS, caps=JSON_CAPS)
-    assert st["delegations"][0]["status"] == "queued"
-    clock.scan()
-    assert (d / "ran").read_text() == "x"
-    st = runtime.status(cwd=str(tmp_path), scope="own", tick=False)
-    assert [t["label"] for t in st["tasks"]] == ["after"]
-    phases = [e.get("phase") for e in _events(tmp_path, "delegate_started")]
-    assert "dispatched" in phases
-    assert clock.results[0]["result"] == "returned"
-
-
-def test_headless_threaded_respects_max(tmp_path):
-    d, launch = _fake_launch(tmp_path)
-    mgr = FakeManager(FakeSession("own", str(tmp_path)))
-    clock = _clock(mgr, launch_for=lambda scope: launch, threaded=True, max_headless=1)
-    clock.scan()
-    _start(tmp_path, HEADLESS, caps=JSON_CAPS)
-    clock.scan()
-    clock.wait_jobs(30)
-    assert clock.results and clock.results[0]["result"] == "returned"
-
-
-def test_in_process_dispatcher_leaves_it_queued(tmp_path):
-    clock = _clock(FakeManager())
-    executors.register(clock._dispatch_hook)
-    st = _start(tmp_path, HEADLESS, caps=JSON_CAPS)
-    assert st["delegations"][0]["status"] == "queued"
-    assert str(tmp_path.resolve()) in clock.cwds()
-
-
-def test_orphaned_running_headless_is_requeued(tmp_path):
-    clock = _clock(FakeManager(FakeSession("own", str(tmp_path))), launch_for=lambda s: None)
-    clock.scan()
-    st = _start(tmp_path, HEADLESS, caps=JSON_CAPS)
-    did = st["delegations"][0]["id"]
-    runtime.delegate_update(did, cwd=str(tmp_path), scope="own", status="running",
-                            runner={"boot": "old-daemon"})
-    clock.max_headless = 0  # do not start it again in this test
-    clock.scan()
-    rec = RunStore(str(tmp_path), "own").load_state()["delegations"][did]
-    assert rec["status"] == "queued"
-    assert any(e.get("route") == "requeue" for e in _events(tmp_path, "fallback"))
-
-
-def test_headless_without_owning_session_reroutes(tmp_path):
-    clock = _clock(FakeManager(FakeSession("other", str(tmp_path))), launch_for=lambda s: None)
-    clock.scan()
-    _start(tmp_path, """
-        nodes:
-          t: {prompt: T, executor: [headless, inline]}
-        body: t
-    """, caps={"headless.run": True})
-    clock.scan()
-    st = runtime.status(cwd=str(tmp_path), scope="own", tick=False)
-    assert [t["label"] for t in st["tasks"]] == ["t"]
-    assert any(e["route"] == "headless -> inline" for e in _events(tmp_path, "fallback"))
 
 
 # -- session executor ------------------------------------------------------------------
@@ -459,28 +362,27 @@ def test_session_budget_timeout_tells_child(tmp_path):
     assert {n[1] for n in notices} == {"own", "kid"}
 
 
-# -- A5 / B5: shutdown, reaping, halts, orphans --------------------------------------
-
-SLOW = r'''
-import os, sys, time
-d = os.environ["FAKE_DIR"]
-open(os.path.join(d, "pid"), "w").write(str(os.getpid()))
-n = os.path.join(d, "n")
-open(n, "a").write("x")
-time.sleep(30)
-'''
+def test_in_process_dispatcher_leaves_it_queued(tmp_path):
+    clock = _clock(FakeManager())
+    executors.register(clock._dispatch_hook)
+    st = _start(tmp_path, SESSION, caps=SESSION_CAPS)
+    assert st["delegations"][0]["status"] == "queued"
+    assert str(tmp_path.resolve()) in clock.cwds()
 
 
-def _slow_launch(tmp_path):
-    d = tmp_path / "slow"
-    d.mkdir(exist_ok=True)
-    script = d / "h.py"
-    script.write_text(SLOW)
-    # A venv's python.exe on Windows is a launcher whose child runs the script,
-    # so the pid the clock records would differ from the script's own getpid().
-    exe = getattr(sys, "_base_executable", sys.executable) if sys.platform == "win32" else sys.executable
-    return d, cflow2_exec.Launch(harness="claude", command=[exe, str(script)],
-                                 env=dict(os.environ, FAKE_DIR=str(d)))
+def test_a_delegation_left_on_the_removed_headless_executor_is_rerouted(tmp_path):
+    """An old run's record still says ``headless`` (claunch-xjbrh): nothing
+    runs it any more, so the clock moves it to the node's next executor."""
+    clock = _clock(FakeManager(FakeSession("own", str(tmp_path))),
+                   spawn=lambda parent, body: pytest.fail("spawned in the rerouting pass"))
+    clock.scan()
+    st = _start(tmp_path, SESSION, caps=SESSION_CAPS)
+    did = st["delegations"][0]["id"]
+    runtime.delegate_update(did, cwd=str(tmp_path), scope="own", executor="headless")
+    clock.scan()
+    rec = RunStore(str(tmp_path), "own").load_state()["delegations"][did]
+    assert rec["executor"] == "session" and rec["status"] == "queued"
+    assert any(e["route"] == "headless -> session" for e in _events(tmp_path, "fallback"))
 
 
 def _wait_for(pred, timeout=10.0):
@@ -496,93 +398,11 @@ def _rec(cwd, did, scope="own"):
     return RunStore(str(cwd), scope).load_state()["delegations"][did]
 
 
-def _started_slow(tmp_path):
-    d, launch = _slow_launch(tmp_path)
-    clock = _clock(FakeManager(FakeSession("own", str(tmp_path))),
-                   launch_for=lambda s: launch, threaded=True)
-    clock.scan()
-    st = _start(tmp_path, HEADLESS, caps=JSON_CAPS)
-    did = st["delegations"][0]["id"]
-    clock.scan()
-    assert _wait_for(lambda: clock.procs.keys() and (d / "pid").exists())
-    return d, clock, did
-
-
-def test_shutdown_requeues_with_attempt_unchanged_and_starts_nothing(tmp_path):
-    import asyncio
-
-    d, clock, did = _started_slow(tmp_path)
-    assert _wait_for(lambda: (_rec(tmp_path, did).get("runner") or {}).get("pid"))
-    runner = _rec(tmp_path, did)["runner"]
-    assert runner["pid"] == int((d / "pid").read_text()) and runner["attempt"] == 1
-    asyncio.run(clock.shutdown())
-    clock.wait_jobs(15)
-    rec = _rec(tmp_path, did)
-    assert rec["status"] == "queued" and rec["attempts"] == 0
-    assert (d / "n").read_text() == "x"  # no second attempt
-    assert clock.results[0]["result"] == "interrupted"
-    assert clock.scan() == [] and _rec(tmp_path, did)["status"] == "queued"
-    assert not cflow2_exec.process_alive(runner["pid"], runner["argv0"])
-
-
-def test_aborted_run_kills_headless_process_group(tmp_path):
-    d, clock, did = _started_slow(tmp_path)
-    pid = int((d / "pid").read_text())
-    runtime.abort("stop", cwd=str(tmp_path), scope="own")
-    clock.scan()
-    clock.wait_jobs(15)
-    assert not cflow2_exec.process_alive(pid, sys.executable)
-    assert _rec(tmp_path, did)["status"] == "cancelled"
-    assert clock.results[0]["result"] == "cancelled"
-    assert _events(tmp_path, "delegate_killed")[0]["why"] == "cancelled"
-
-
-def test_halt_kills_and_requeues_and_holds_dispatch(tmp_path):
-    d, clock, did = _started_slow(tmp_path)
-    pid = int((d / "pid").read_text())
-
-    def halt(r):
-        r.state["status"] = runtime.ST_WAITING
-        r.state["reason"] = "monitor_violation"
-        r.state["approvals"] = [{"kind": "monitor_violation", "monitor": "m", "instance": None}]
-    runtime._mutate(str(tmp_path), "own", None, halt)
-    clock.scan()
-    clock.wait_jobs(15)
-    assert not cflow2_exec.process_alive(pid, sys.executable)
-    rec = _rec(tmp_path, did)
-    assert rec["status"] == "queued" and rec["attempts"] == 0
-    clock.scan()  # still halted: not dispatched again
-    assert _rec(tmp_path, did)["status"] == "queued" and not clock.procs.keys()
-
-
-def test_boot_kills_surviving_process_then_requeues(tmp_path):
-    import subprocess
-
-    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
-                            start_new_session=True)
-    try:
-        clock = _clock(FakeManager(FakeSession("own", str(tmp_path))), launch_for=lambda s: None)
-        clock.scan()
-        st = _start(tmp_path, HEADLESS, caps=JSON_CAPS)
-        did = st["delegations"][0]["id"]
-        runtime.delegate_update(did, cwd=str(tmp_path), scope="own", status="running",
-                                runner={"boot": "old", "pid": proc.pid,
-                                        "argv0": sys.executable, "attempt": 1})
-        clock.max_headless = 0
-        clock.scan()
-        assert proc.wait(10) is not None
-        assert _rec(tmp_path, did)["status"] == "queued"
-        clock.scan()  # requeued once: nothing more happens
-        assert len([e for e in _events(tmp_path, "fallback") if e.get("route") == "requeue"]) == 1
-    finally:
-        cflow2_exec.kill_group(proc.pid)
-
-
 def test_stopped_clock_claims_nothing(tmp_path):
-    d, launch = _fake_launch(tmp_path)
-    clock = _clock(FakeManager(FakeSession("own", str(tmp_path))), launch_for=lambda s: launch)
+    clock = _clock(FakeManager(FakeSession("own", str(tmp_path))),
+                   spawn=lambda parent, body: pytest.fail("spawned after stop"))
     clock.scan()
-    st = _start(tmp_path, HEADLESS, caps=JSON_CAPS)
+    st = _start(tmp_path, SESSION, caps=SESSION_CAPS)
     clock.stop.set()
     assert clock.scan() == []
     assert _rec(tmp_path, st["delegations"][0]["id"])["status"] == "queued"

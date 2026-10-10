@@ -97,7 +97,7 @@ MARKED = "{id: m, seq: [plain], force_target: true}"
     ("{try: b, catch: {fail: %s}}" % MARKED, "catch"),
     ("{seq: [b], on: {fail: %s}}" % MARKED, "'on' handler"),
     (MARKED, "root"),
-    ("{seq: [plain, {seq: [b, %s], executor: headless}]}" % MARKED, "delegated"),
+    ("{seq: [plain, {seq: [b, %s], executor: session}]}" % MARKED, "delegated"),
 ])
 def test_a_mapping_mark_a_move_cannot_rebuild_is_a_compile_error(body, why):
     with pytest.raises(frontend.FrontendError, match=why):

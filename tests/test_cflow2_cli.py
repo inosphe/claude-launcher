@@ -16,7 +16,7 @@ DEF = textwrap.dedent("""
     description: cli demo
     nodes:
       scan: {prompt: scan, returns: {ok: {hits: int}}, effects: [fs.read],
-             executor: [headless, subagent, inline]}
+             executor: [session, subagent, inline]}
       work: {prompt: "work ${params.area}"}
     params:
       area: {default: src}
@@ -63,7 +63,7 @@ def test_validate_prints_plans(project, capsys):
     rc = run("validate", "demo-cli", "--harness", "codex")
     out = capsys.readouterr().out
     assert "compiled" in out and "delegation points" in out
-    assert "scan: executor" in out and "dispatcher headless -> " in out
+    assert "scan: executor" in out and "dispatcher session -> " in out
     assert rc in (0, 1)
 
 
@@ -75,7 +75,8 @@ def test_validate_reports_compile_error(project, capsys):
 def test_caps(project, capsys):
     assert run("caps", "--harness", "claude") == 0
     out = capsys.readouterr().out
-    assert "subagent.spawn" in out and "headless.run" in out
+    assert "subagent.spawn" in out and "session.spawn" in out
+    assert "headless" not in out
 
 
 def test_start_status_journal_abort(project, capsys):

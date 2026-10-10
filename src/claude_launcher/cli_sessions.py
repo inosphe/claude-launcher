@@ -2350,7 +2350,7 @@ _CONFIG_KEYS = tuple(store.DAEMON_DEFAULTS)
 _LIVE_KEYS = (
     "cflow_reminder", "cflow_reminder_interval",
     "cflow_ping", "cflow_ping_interval", "cflow_ping_message",
-    "cflow_events", "prompter_url", "cflow2_headless_max",
+    "cflow_events", "prompter_url",
     # read by the reposync CLI itself on every sync, never by the daemon
     "reposync_push",
 )

@@ -548,14 +548,11 @@ DAEMON_DEFAULTS = {
     # and tool results the screen cut short. Read LIVE on every request.
     "shadow_transcript": True,
     # The cflow v2 clock (daemon/cflow2_clock.py): wait probes, delegation
-    # budgets, spec.monitors, and serving headless/session delegations. Off
-    # = v2 delegations fall back to the next executor (no heartbeat is
-    # written) and waits/monitors move only when the agent calls
-    # flow_status. Read at daemon start. cflow2_headless_max caps the
-    # headless harness processes it runs at once (read LIVE per tick);
-    # cflow2_poll is its tick in seconds (read at start).
+    # budgets, spec.monitors, and serving session delegations. Off = v2
+    # delegations fall back to the next executor (no heartbeat is written)
+    # and waits/monitors move only when the agent calls flow_status. Read at
+    # daemon start. cflow2_poll is its tick in seconds (read at start).
     "cflow2_clock": True,
-    "cflow2_headless_max": 3,
     "cflow2_poll": 10.0,
     # claunch reposync (claunch-dh73y): "ask" -- a sync that pushes to the
     # shared remote waits for a person (a y/N prompt at the user's own

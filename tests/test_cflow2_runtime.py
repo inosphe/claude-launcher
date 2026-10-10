@@ -743,38 +743,38 @@ def test_subagent_receipt_path_submit(tmp_path, monkeypatch):
     assert d.st["status"] == "done"
 
 
-def test_headless_without_dispatcher_falls_back_and_journals(tmp_path):
+def test_session_without_dispatcher_falls_back_and_journals(tmp_path):
     executors.register(None)
     d = Drv(tmp_path, """
         nodes:
-          t: {prompt: T, executor: [headless, subagent, inline]}
+          t: {prompt: T, executor: [session, subagent, inline]}
         body: t
-    """, caps={"headless.run": True, "subagent.spawn": True})
+    """, caps={"session.spawn": True, "subagent.spawn": True})
     fb = d.events("fallback")
-    assert any(e["route"] == "headless -> subagent" for e in fb)
+    assert any(e["route"] == "session -> subagent" for e in fb)
     assert d.st["delegations"][0]["executor"] == "subagent"
 
 
 def test_missing_caps_fall_back_to_inline(tmp_path):
     d = Drv(tmp_path, """
         nodes:
-          t: {prompt: T, executor: [headless, subagent]}
+          t: {prompt: T, executor: [session, subagent]}
         body: t
     """, caps={})
     assert d.tasks() == ["t"]
     causes = {e["cause"] for e in d.events("fallback")}
-    assert {"headless.run", "subagent.spawn"} <= causes
+    assert {"session.spawn", "subagent.spawn"} <= causes
 
 
-def test_headless_with_dispatcher_is_queued(tmp_path):
+def test_session_with_dispatcher_is_queued(tmp_path):
     seen = []
     executors.register(lambda rec, run: seen.append(rec["id"]) or "running")
     try:
         d = Drv(tmp_path, """
             nodes:
-              t: {prompt: T, executor: [headless]}
+              t: {prompt: T, executor: [session]}
             body: t
-        """, caps={"headless.run": True})
+        """, caps={"session.spawn": True})
     finally:
         executors.register(None)
     assert seen == ["d1"] and d.st["delegations"][0]["status"] == "running"

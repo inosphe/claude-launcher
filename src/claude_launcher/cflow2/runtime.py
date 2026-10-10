@@ -123,10 +123,6 @@ AW_VERIFY = "verifying"
 #: Hold kinds (``state["approvals"]``). ``monitor_violation`` holds the whole
 #: run; the others hold one instance.
 HOLD_HALT = "monitor_violation"
-#: Read-only routes whose headless delegate runs in the run's own checkout,
-#: kept read-only by a porcelain check there (daemon/cflow2_exec.py; the
-#: others are ``READONLY_SANDBOXED``).
-READONLY_IN_CHECKOUT = ("tools-restrict",)
 HOLD_LOOP = "loop_limit"
 HOLD_VISIT = "visit_limit"
 #: An ``ok`` finish whose acceptance probes did not all pass.
@@ -1668,7 +1664,7 @@ def _delegate(r: Run, iid: str) -> bool:
     error). A flat subtree (task/seq only) goes out as one brief and comes
     back as one result. Any other subtree, for a ``subagent`` or ``session``
     executor, becomes a nested delegation run the delegate drives with the
-    flow_* tools (doc 7); ``headless`` takes flat subtrees only."""
+    flow_* tools (doc 7)."""
     node = r.node_of(iid)
     if caps_mod is None:
         r.emit("fallback", node=node.id, cause="caps module unavailable", route="inline")
@@ -1701,11 +1697,6 @@ def _delegate(r: Run, iid: str) -> bool:
         executor = nxt
         if executor != plan.route:
             plan = _plan(_with_executor(node, executor), caps, flat)
-    if not flat and executor == ir.EXEC_HEADLESS:
-        r.emit("fallback", node=node.id, instance=iid, decision="executor",
-               cause="headless runs only a flat subtree (task/seq)",
-               route="headless -> inline")
-        executor = ir.EXEC_INLINE
     if executor == ir.EXEC_INLINE:
         return False
 
@@ -2538,13 +2529,7 @@ def _check_delegation_authority(r: Run, rec: Dict[str, Any], session: str,
             f"delegation {rec['id']} runs as the nested run {rec['nested']['scope']!r}: "
             f"drive it with the flow_* tools under that scope; its result comes back on its "
             f"own")
-    if ex == ir.EXEC_HEADLESS:
-        if what == "submit":
-            raise FlowError(f"delegation {rec['id']} is headless: only the daemon's executor "
-                            f"brings its result back")
-        if may_drive(r.state, session):
-            return
-    elif ex == ir.EXEC_SUBAGENT:
+    if ex == ir.EXEC_SUBAGENT:
         if may_drive(r.state, session):
             return
     elif ex == ir.EXEC_SESSION:
@@ -3246,9 +3231,8 @@ def delegate_submit(delegation: str, outcome: Optional[str] = None, value: Any =
     ``via`` is who calls: ``internal`` (the daemon's executors) or ``mcp``
     (an agent; ``session`` is its identity). An agent may submit a
     ``subagent`` delegation only as the run's driver and a ``session``
-    delegation only as its assigned child session; a ``headless`` result
-    comes only from the daemon, a nested run's result only from the nested
-    run. A receipt is read only from the run's receipts directory or
+    delegation only as its assigned child session; a nested run's result
+    only from the nested run. A receipt is read only from the run's receipts directory or
     ``$CLAUNCH_SCRATCH``.
 
     An invalid result is refused once with the problems listed (the delegate
@@ -3343,8 +3327,8 @@ def executor_submit(delegation: str, outcome: Optional[str] = None, value: Any =
                     receipt_path: Optional[str] = None, cwd: Optional[str] = None,
                     scope: Optional[str] = None, now: Optional[float] = None,
                     verify_runner: Optional[VerifyRunner] = None) -> Dict[str, Any]:
-    """The daemon's door for a delegation result (a headless executor, a
-    session child's receipt picked up by the clock). Never offered through
+    """The daemon's door for a delegation result (a session child's receipt
+    picked up by the clock). Never offered through
     MCP: an agent's submission goes through :func:`delegate_submit` with
     ``via='mcp'`` and its authority checks. A result that arrives while a
     monitor halts the run is kept and applied on resume."""
@@ -3517,7 +3501,12 @@ def delegate_reroute(delegation: str, cause: str, *, cwd: Optional[str] = None,
         flat = bool(rec.get("flat", True))
         prefs = list(node.executor or [])
         old = rec["executor"]
-        rest = prefs[prefs.index(old) + 1:] if old in prefs else []
+        if old in prefs:
+            rest = prefs[prefs.index(old) + 1:]
+        else:
+            # A removed executor (an old run's record) is no longer in the
+            # node's list: every executor the node still names comes next.
+            rest = prefs if old in ir.REMOVED_EXECUTORS else []
         nxt = ir.EXEC_INLINE
         if caps_mod is not None:
             try:
@@ -3527,8 +3516,6 @@ def delegate_reroute(delegation: str, cause: str, *, cwd: Optional[str] = None,
                 nxt = caps_mod.choose_executor(rest, r.caps, needs=node.needs or []).executor
         if nxt in executors.DISPATCHED and not executors.available(str(r.store.cwd)):
             nxt = _next_undispatched(node, nxt, r.caps, flat)
-        if not flat and nxt == ir.EXEC_HEADLESS:
-            nxt = ir.EXEC_INLINE
         out["executor"] = nxt
         iid = rec["instance"]
         r.emit("fallback", node=node.id, instance=iid, delegation=delegation, cause=cause,
@@ -4659,22 +4646,8 @@ def describe(r: Run) -> Dict[str, Any]:
                      "flow_delegate(delegation, outcome, value)")
     if any(d.get("status") in ("queued", "running") and d.get("executor") in executors.DISPATCHED
            for d in dels):
-        hints.append("headless/session delegations are run by the daemon and come back on "
-                     "their own; call flow_status again later")
-    in_checkout = sorted(
-        did for did, rec in (s.get("delegations") or {}).items()
-        if rec.get("status") in ("queued", "running")
-        and rec.get("executor") == ir.EXEC_HEADLESS
-        and ((rec.get("route") or {}).get("readonly") or {}).get("route")
-        in READONLY_IN_CHECKOUT)
-    if in_checkout:
-        # The daemon compares `git status --porcelain` of this checkout before
-        # and after a read-only delegation that runs in it, and cannot tell
-        # the driver's edits from the delegate's (claunch-onbdf).
-        hints.append(f"read-only delegation(s) {', '.join(in_checkout)} run in THIS working "
-                     "tree: do not edit, create, delete or commit files here until they "
-                     "come back -- any change to `git status` meanwhile fails them as a "
-                     "read-only violation")
+        hints.append("session delegations are run by a child session the daemon spawns "
+                     "and come back on their own; call flow_status again later")
     if waits:
         hints.append("waits fire on their own; call flow_status again later")
     if limits:
