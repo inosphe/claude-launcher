@@ -153,7 +153,7 @@ function build(opts) {
     "refreshWorkspaces", "refreshSessions", "refreshMeshList", "refreshCflow",
     "refreshTermQueued", "reconnectNow", "route", "refreshNewWorktree",
     "refreshProjects", "ensureControlSocket", "refreshCflow2Rail",
-    "refreshTermWindow",
+    "refreshTermWindow", "refreshTermTimers",
     code +
     "\nreturn {notify, refreshRestartGate, refreshGotoGate, refreshReposyncGate," +
     " noticePanelToggle, noticeHistory," +
@@ -164,7 +164,7 @@ function build(opts) {
     setTimeoutStub, clearTimeoutStub, FakeDate, apiStub, { hash: "" },
     storage, async () => null,
     noop, noop, noop, noop, noop, noop, noop, noop, noop, noop, noop, noop,
-    noop, noop, noop, noop,
+    noop, noop, noop, noop, noop,
   );
 
   const all = (n, out) => { out.push(n); n.children.forEach((c) => all(c, out)); return out; };

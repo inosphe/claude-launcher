@@ -131,6 +131,8 @@ function build(opts) {
     "refreshCflow2Rail",
     // The poll's batch also reads the window strip (termwindow_check).
     "refreshTermWindow",
+    // and the timer line (termtimers_check).
+    "refreshTermTimers",
     // The first boot restores the New tab's draft before it routes
     // (newformdraft_check).
     "restoreNewFormDraft",
@@ -157,6 +159,7 @@ function build(opts) {
     () => {},   // refreshCflow2Rail (the rail's v2 line; railcflow2_check)
 
     () => {},   // refreshTermWindow (the header's window strip; termwindow_check)
+    () => {},   // refreshTermTimers (the timer line; termtimers_check)
     async () => {},   // restoreNewFormDraft (newformdraft_check)
   );
 

@@ -547,6 +547,14 @@
          holds nor waits. Each row opens the Window page. -->
     <div id="term-window" class="hidden" role="status"
          aria-label="measurement window"></div>
+    <!-- The session's timer line (claunch-7dzae): every countdown the
+         session waits on (a cflow v2 choice held until its interval window
+         opens, as await-landing's nudge; a wait; a loop pause; an ask
+         deadline), one chip each, soonest first, from the providers behind
+         GET /api/sessions/<name>/timers. Rendered by renderTermTimers();
+         hidden while there is no timer. A chip opens the run it belongs to. -->
+    <div id="term-timers" class="hidden" role="status"
+         aria-label="session timers"></div>
     <!-- The attached session's cflow run is stopped on a person: one line
          with the step, the question and a button per answer, the same
          presses the run page makes. Rendered by renderTermCflow(); hidden
