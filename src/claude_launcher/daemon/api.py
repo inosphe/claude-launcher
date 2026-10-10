@@ -604,6 +604,7 @@ def build_app(
     r.add_get("/api/prompter", h_prompter_get)
     r.add_put("/api/prompter", h_prompter_set)
     r.add_get("/api/prompter/prompts", h_prompter_prompts)
+    r.add_get("/api/prompter/contexts", h_prompter_contexts)
     r.add_get("/api/status-checks", h_status_checks)
     r.add_post("/api/status-checks", h_status_checks_add)
     r.add_put("/api/status-checks/{check_id}", h_status_checks_update)
@@ -3271,6 +3272,15 @@ async def h_prompter_prompts(request: web.Request) -> web.Response:
     refresh = request.query.get("refresh") in ("1", "true", "yes")
     try:
         return json_response(await prompter.prompts(refresh=refresh))
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+
+
+async def h_prompter_contexts(request: web.Request) -> web.Response:
+    """Context snippets for the New/Spawn prompt-pack selection."""
+    refresh = request.query.get("refresh") in ("1", "true", "yes")
+    try:
+        return json_response(await prompter.contexts(refresh=refresh))
     except store.StoreError as exc:
         return json_error(500, str(exc))
 
@@ -7701,7 +7711,9 @@ async def _onboard_and_launch(
             packs, packs_required = _session_prompt_packs(
                 request, body, plan, name=name, cwd=cwd
             )
-            packs += await prompter.selected_records(body.get("prompter_prompts"))
+            if body.get("prompter_prompts") is not None:
+                raise prompt_packs.PackError("Prompter prompts belong in Opening task; reopen the form")
+            packs += await prompter.selected_records(body.get("prompter_contexts"))
         except prompt_packs.PackError as exc:
             raise onboard.OnboardError(str(exc)) from None
         if packs:

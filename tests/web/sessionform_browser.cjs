@@ -155,6 +155,59 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
   await page.waitForFunction(()=>location.hash==='#/s/copy');
   assert.equal(await page.locator('#modal-overlay').isVisible(),false);
   assert.equal(await page.locator('[name=task]').inputValue(),'page draft');
+  // Prompter contexts are packs; prompt buttons append real editable task text.
+  await page.evaluate(() => {
+    api = async (url, opts) => {
+      if (opts?.method === 'POST') {
+        posts.push({url, body: JSON.parse(opts.body)});
+        return {ok:false, status:400, json:async()=>({error:'test refusal'})};
+      }
+      const kind = url === '/api/prompter/contexts' ? 'context' : 'prompt';
+      return {ok:true, json:async()=> url.startsWith('/api/prompter/') ? {
+        enabled:true, connected:true, url:'https://p.example',
+        [kind+'s']:[{id:1, name:kind, title:kind, body:kind+' BODY'}],
+      } : {}};
+    };
+    window.taskInputs = [];
+    document.getElementById('new-session').addEventListener('input', e => {
+      if (e.target.name === 'task') taskInputs.push(e.target.value);
+    });
+  });
+  for (const mode of ['new', 'spawn']) {
+    await page.evaluate(async mode => {
+      showView('new');
+      if (mode === 'new') await openNewSession(); else await openSpawnModal('lead');
+      const f = document.getElementById('new-session');
+      f.elements.namedItem('task').value = 'existing';
+      f.elements.namedItem('name').value = 'prompter-'+mode;
+      f.elements.namedItem('beads').value = 'none';
+      f.mesh.value = ''; f.workflow.value = '';
+      f.worktree_mode.value = '';
+      await Promise.all([refreshNewPrompterOffer(), refreshNewTaskPrompter()]);
+    }, mode);
+    await page.locator('#new-task-prompter button').click();
+    assert.equal(await page.locator('#new-task textarea').inputValue(), 'existing\n\nprompt BODY');
+    assert.equal(await page.evaluate(()=>taskInputs.at(-1)), 'existing\n\nprompt BODY');
+    assert.equal(await page.evaluate(()=>document.activeElement.name), 'task');
+    assert.equal(await page.evaluate(()=>readNewFormDraft()?.task), undefined,
+      'per-launch task stays out of the persistent settings draft');
+    await page.locator('#new-task textarea').fill('edited prompt BODY');
+    await page.locator('[name=prompter_context_1]').check();
+    const before = await page.evaluate(()=>posts.length);
+    await page.evaluate(()=>document.getElementById('new-session').dispatchEvent(
+      new Event('submit', {bubbles:true,cancelable:true})));
+    await page.waitForFunction(n=>posts.length>n, before);
+    const post = await page.evaluate(()=>posts.at(-1));
+    assert.equal(post.url, mode === 'new' ? '/api/sessions' : '/api/sessions/lead/children');
+    assert.equal(post.body.task, 'edited prompt BODY');
+    assert.deepEqual(post.body.prompter_contexts, {url:'https://p.example',ids:[1]});
+    assert.ok(!('prompter_prompts' in post.body));
+    if (mode === 'spawn') {
+      await page.evaluate(()=>sessionModalClose());
+      assert.equal(await page.locator('#new-task textarea').inputValue(), 'edited prompt BODY',
+        'the New form task draft returns after closing Spawn');
+    }
+  }
   assert.deepEqual(errors,[]);
   console.log('sessionform browser: page tabs, Spawn-only dialog, Fork fields/payload/error and draft restoration passed');
  } finally {await browser.close();}

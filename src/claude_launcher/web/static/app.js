@@ -10466,6 +10466,8 @@ let newPackTicks = new Map();  // pack id -> the operator's own tick
 let newPrompterOffer = null;
 let newPrompterTicks = new Set();
 let newPrompterRequest = 0;
+let newTaskPrompterOffer = null;
+let newTaskPrompterRequest = 0;
 // The daemon's own prompt (offer.daemon_prompt): one per daemon, so a tick
 // outlives a change of workspace. null = untouched = ticked.
 let newDaemonPromptTick = null;
@@ -10498,10 +10500,28 @@ function promptPackFormOpened() {
   newPrompterOffer = null;
   if (newPackPreview && newPackPreview.prompter) newPackPreview = null;
   Promise.resolve(refreshNewPrompterOffer()).catch(() => {});
+  newTaskPrompterOffer = null;
+  renderNewTaskPrompter();
+  Promise.resolve(refreshNewTaskPrompter()).catch(() => {});
 }
 
 async function refreshNewPrompterOffer() {
   const request = ++newPrompterRequest;
+  let offer;
+  try {
+    const resp = await api("/api/prompter/contexts");
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    offer = await resp.json();
+  } catch (err) {
+    offer = { enabled: true, connected: false, contexts: [], error: String(err) };
+  }
+  if (request !== newPrompterRequest) return;
+  newPrompterOffer = offer;
+  renderPromptPackRow();
+}
+
+async function refreshNewTaskPrompter() {
+  const request = ++newTaskPrompterRequest;
   let offer;
   try {
     const resp = await api("/api/prompter/prompts");
@@ -10510,9 +10530,37 @@ async function refreshNewPrompterOffer() {
   } catch (err) {
     offer = { enabled: true, connected: false, prompts: [], error: String(err) };
   }
-  if (request !== newPrompterRequest) return;
-  newPrompterOffer = offer;
-  renderPromptPackRow();
+  if (request !== newTaskPrompterRequest) return;
+  newTaskPrompterOffer = offer;
+  renderNewTaskPrompter();
+}
+
+function renderNewTaskPrompter() {
+  const row = $("new-task-prompter");
+  const form = $("new-session");
+  if (!row || !form) return;
+  row.innerHTML = "";
+  const offer = newTaskPrompterOffer;
+  row.classList.toggle("hidden", !(offer && offer.enabled));
+  if (!offer || !offer.enabled) return;
+  row.appendChild(el("p", "wf-note", "Prompter prompts — click to append to Opening task, then edit as needed."));
+  const prompts = offer.connected ? offer.prompts || [] : [];
+  if (!prompts.length) {
+    row.appendChild(el("p", "wf-note", offer.connected
+      ? "Prompter has no prompts." : `Prompter unavailable: ${offer.error || "connection failed"}`));
+  }
+  for (const prompt of prompts) {
+    const button = el("button", "wf-btn", `Append ${prompt.title || prompt.name}`);
+    button.type = "button";
+    button.title = prompt.body;
+    button.addEventListener("click", () => {
+      const task = form.elements.namedItem("task");
+      task.value += (task.value ? "\n\n" : "") + prompt.body;
+      task.dispatchEvent(new Event("input", { bubbles: true }));
+      task.focus();
+    });
+    row.appendChild(button);
+  }
 }
 
 function newPrompterSelection() {
@@ -10743,11 +10791,11 @@ function renderPromptPackRow() {
     });
   }
   group("Roles", shown.map(([p, packaged]) => packChip(p, packaged)), more);
-  const snippets = remote && remote.connected ? remote.prompts || [] : [];
-  group("Prompter", snippets.map((p) => chip({
-    id: `prompter:${p.id}`, title: p.title || p.name, description: p.body,
+  const snippets = remote && remote.connected ? remote.contexts || [] : [];
+  group("Prompter contexts", snippets.map((p) => chip({
+    id: `prompter:context:${p.id}`, title: p.title || p.name, description: p.body,
   }, {
-    name: `prompter_prompt_${p.id}`, value: String(p.id),
+    name: `prompter_context_${p.id}`, value: String(p.id),
     checked: newPrompterTicks.has(p.id),
     source: "prompter", sourceLabel: "prompter", sourceTitle: remote.url,
     onChange: (on) => {
@@ -10755,7 +10803,7 @@ function renderPromptPackRow() {
       renderPromptPackRow();
     },
     onView: () => {
-      const id = `prompter:${p.id}`;
+      const id = `prompter:context:${p.id}`;
       newPackPreview = newPackPreview && newPackPreview.id === id ? null : {
         id, prompter: true, error: "", doc: {
           title: p.title || p.name, body: p.body, source: "prompter", url: remote.url,
@@ -10767,7 +10815,7 @@ function renderPromptPackRow() {
   })), null);
   if (remote && remote.enabled && !snippets.length) {
     body.appendChild(el("p", "wf-note", remote.connected
-      ? "Prompter has no prompts." : `Prompter unavailable: ${remote.error || "connection failed"}`));
+      ? "Prompter has no contexts." : `Prompter unavailable: ${remote.error || "connection failed"}`));
   }
   row.appendChild(body);
 
@@ -12407,7 +12455,7 @@ $("new-session").addEventListener("submit", async (e) => {
   // the defaults", and the daemon still adds what the roles require.
   if (newPackOffer) body.prompt_packs = newPromptPacks(f);
   const prompterSelection = newPrompterSelection();
-  if (prompterSelection) body.prompter_prompts = prompterSelection;
+  if (prompterSelection) body.prompter_contexts = prompterSelection;
   // Sent only to say no: the daemon gives its prompt unless told otherwise.
   if (newPackOffer && newPackOffer.daemon_prompt && !newDaemonPromptWanted()) {
     body.daemon_prompt = false;
@@ -35875,14 +35923,14 @@ function sessionFormConfig(mode) {
     "codex_yolo", "codex_sandbox", "args",
     "worktree_mode", "worktree_name", "worktree_existing", "worktree_session",
     "worktree_rebase", "worktree_from", "task", "score_goal", "beads", "issue_text", "issue_filter", "issue", "pi_tool_*",
-    "subrole_*", "prompt_pack_*", "prompter_prompt_*", "daemon_prompt"];
+    "subrole_*", "prompt_pack_*", "prompter_context_*", "daemon_prompt"];
   const modes = {
     new: { title: "New session", submit: "Create", sections, editable,
       payload: ["name", "profile", "project", "cwd", "args", "env", "model", "effort", "tools", "worktree",
         "rebase_onto", "branch_from", "role", "subroles", "borrow", "null_token", "mesh", "handle", "workflow",
         "workflow_version", "cflow_inputs",
         "context", "task", "opening_images", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
-        "daemon_prompt", "prompter_prompts",
+        "daemon_prompt", "prompter_contexts",
         "resume", "fork_session"] },
     spawn: { title: "Spawn child", submit: "Spawn child", sections,
       editable: [...editable, "parent", "fork_parent", "over_limit"],
@@ -35890,7 +35938,7 @@ function sessionFormConfig(mode) {
         "rebase_onto", "branch_from", "role", "subroles", "borrow", "null_token", "mesh", "handle", "workflow",
         "workflow_version", "cflow_inputs",
         "context", "task", "opening_images", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
-        "daemon_prompt", "prompter_prompts",
+        "daemon_prompt", "prompter_contexts",
         "fork", "connect", "over_limit", "auto_compact"] },
     fork: { title: "Quick fork", submit: "Fork", sections: ["new-quick-fork"],
       editable: ["quick_fork_carry", "quick_fork_task"], payload: ["task", "mesh", "workflow"] },

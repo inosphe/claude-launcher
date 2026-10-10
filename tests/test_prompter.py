@@ -48,7 +48,11 @@ async def _serve(app):
 async def _fake_prompter(hits):
     async def snippets(request):
         hits.append(dict(request.query))
-        return aioweb.json_response(SNIPPETS)
+        kind = request.query["kind"]
+        return aioweb.json_response({**SNIPPETS, "kind": kind, "snippets": [
+            {**row, "kind": kind, "body": ("context " + row["body"] if kind == "context" and row["body"].strip() else row["body"])}
+            for row in SNIPPETS["snippets"]
+        ]})
 
     app = aioweb.Application()
     app.router.add_get("/api/snippets", snippets)
@@ -73,10 +77,10 @@ def test_selected_prompts_use_configured_server_and_deduplicate(home):
             url = str(server.make_url("")).rstrip("/")
             prompter.set_url(url)
             recs = await prompter.selected_records({"url": url, "ids": [2, 1, 2]})
-            assert [r["id"] for r in recs] == ["prompter:2", "prompter:1"]
-            assert [r["text"] for r in recs] == ["commit body", "align body"]
+            assert [r["id"] for r in recs] == ["prompter:context:2", "prompter:context:1"]
+            assert [r["text"] for r in recs] == ["context commit body", "context align body"]
             assert all(r["url"] == url and r["source"] == "prompter" for r in recs)
-            assert hits == [{"kind": "prompt"}]
+            assert hits == [{"kind": "context"}]
             with pytest.raises(PackError, match="unavailable"):
                 await prompter.selected_records({"url": url, "ids": [3, 99]})
             with pytest.raises(PackError, match="server changed"):
@@ -97,7 +101,7 @@ def test_selected_prompts_fail_closed_only_when_selected(home, monkeypatch):
     prompter.set_url("https://p.example")
     calls = []
 
-    async def fail(url):
+    async def fail(url, kind):
         calls.append(url)
         raise RuntimeError("offline")
 
@@ -221,4 +225,33 @@ def test_invalid_url_is_refused_and_not_stored(home):
             await mgr.shutdown_all()
             await client.close()
 
+    asyncio.run(run())
+
+
+def test_context_and_prompt_endpoints_have_separate_caches(home):
+    async def run():
+        hits = []
+        fake = await _fake_prompter(hits)
+        mgr, app = _daemon_app()
+        client = await _serve(app)
+        try:
+            prompter.set_url(str(fake.make_url("")).rstrip("/"))
+            for _ in range(2):
+                for kind in ("prompt", "context"):
+                    resp = await client.get(f"/api/prompter/{kind}s", headers=BEARER)
+                    answer = await resp.json()
+                    assert resp.status == 200 and answer["connected"]
+                    assert answer[kind + "s"][0]["body"] == ("context " if kind == "context" else "") + "align body"
+                    assert ("contexts" if kind == "prompt" else "prompts") not in answer
+            assert hits == [{"kind": "prompt"}, {"kind": "context"}]
+            await client.get("/api/prompter/contexts?refresh=1", headers=BEARER)
+            await client.get("/api/prompter/prompts", headers=BEARER)
+            assert hits == [{"kind": "prompt"}, {"kind": "context"}, {"kind": "context"}]
+            prompter.set_url(None)
+            answer = await (await client.get("/api/prompter/contexts", headers=BEARER)).json()
+            assert answer["enabled"] is False and answer["contexts"] == []
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+            await fake.close()
     asyncio.run(run())
