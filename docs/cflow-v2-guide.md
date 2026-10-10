@@ -18,7 +18,7 @@
 | 표면 문법 컴파일러, 정적 검사, 정의 탐색 | 구현 중(단계 1) |
 | 식 해석기, capability 합성과 fallback 계획 | 구현 중(단계 1) |
 | 런타임, `flow_*` MCP 툴, `claunch cflow2` CLI | 단계 2 |
-| 실행 주체(subagent, headless, session) | 단계 3 |
+| 실행 주체(session, subagent) | 단계 3 |
 | 데몬 연동, 웹 화면, spawn에서 v2 절차 파일 받기 | 단계 4 |
 | `improv-worker-v2` 정의 | 단계 5 |
 
@@ -232,7 +232,7 @@ probe·`verify`에는 `${...}`를 쓸 수 없다(컴파일 오류). 런의 값�
 
 ```yaml
 - id: verify-change
-  executor: [headless, subagent, inline]   # 앞에서부터 가능한 것을 씀
+  executor: [session, subagent, inline]   # 앞에서부터 가능한 것을 씀
   par:
     branches:
       tests:   targeted-test
@@ -454,18 +454,19 @@ nodes:
 claunch cflow2 caps --profile <프로필>       (단계 2)
 ```
 
-이 명령은 13개 capability의 값과 각 값이 정해진 층(하네스 기본값, provider,
+이 명령은 6개 capability의 값과 각 값이 정해진 층(하네스 기본값, provider,
 profile)을 보여 준다.
 
 자주 보게 될 fallback:
 
 | 상황 | 일어나는 일 |
 |---|---|
-| 하네스에 비대화형 실행이 없음 | `headless`를 건너뛰고 목록의 다음 실행 주체 |
-| 구조화 출력 플래그가 없음 | 출력의 마지막 ```json 블록을 추출해 스키마 검증. 실패하면 1회 재실행 후 `fail` |
-| 읽기 전용 위임인데 샌드박스·도구 제한이 없음 | 일회용 worktree에서 실행하고 변경을 버림 |
+| 데몬 정책이 자식 세션 생성을 막음 | `session`을 건너뛰고 목록의 다음 실행 주체 |
+| 하네스에 하위 에이전트가 없음 | `subagent`를 건너뛰고 목록의 다음 실행 주체 |
+| 읽기 전용 subagent 위임인데 도구 제한·worktree가 없음 | 브리프에 읽기 전용 규칙을 적고, 끝난 뒤 `git status --porcelain`을 위임 전과 비교 |
 | 병렬 하위 에이전트가 없음 | 직렬 실행. `race`는 선언 순서대로 시도 |
-| 비용 상한 플래그가 없음 | 상한을 강제하지 않고 기록만 남김. `strict_budget: true`면 그 실행 주체를 건너뜀 |
+| `budget.usd`를 지정함 | 비용 상한을 강제하는 실행 주체가 없어 기록만 남김. `strict_budget: true`면 위임 실행 주체를 모두 건너뛰고 `inline` |
+| `executor`에 `headless`가 있음 | 제거된 실행 주체라 컴파일 경고와 함께 목록에서 빠짐(claunch-xjbrh) |
 
 모든 fallback은 런 저널에 `fallback` 이벤트(원인 capability와 선택된 경로)로
 남는다.
@@ -517,11 +518,11 @@ spawn 전에 확인한다.
 |---|---|---|
 | prompt에 「끝나면 X 단계로 간다」를 적음 | 문법의 흐름과 산문이 어긋남 | 흐름은 조합자로만 쓴다 |
 | `returns` 없이 위임 | 메인이 결과 내용을 받지 못함 | 필요한 필드를 스키마에 넣는다 |
-| `executor: headless` 하나만 지정 | 비대화형 실행이 없는 하네스에서 바로 `inline`으로 내려감 | 선호 순서 목록으로 쓴다 |
+| `executor: session` 하나만 지정 | 데몬 정책이 자식 세션을 막는 환경에서 바로 `inline`으로 내려감 | 선호 순서 목록으로 쓴다 |
 | `effects`를 비워 둠 | 실행기는 쓰기 가능으로 보고(읽기 전용 경로를 쓰지 않음), 정적 검사는 효과 없음으로 봄(`never-effect`가 놓침, `effects-undeclared` 경고) | 모든 작업에 적는다. 효과가 없으면 `effects: []` |
 | `verify`에 `${params.x}`를 씀 | 컴파일 오류(값이 셸 명령이 되어 verify를 우회할 수 있음) | `"$CFLOW_IN_X"`처럼 환경 변수로 읽는다 |
 | probe가 있는 `wait`에 상한이 없음 | 조건을 판정할 수 없는 상태에서 무기한 대기 | `seconds`를 주고 `undecidable`·`timeout`을 `on`으로 받는다 |
-| 위임 노드 안에 `choose`의 `chooser: user` | 비대화형 프로세스 안에서 사용자 선택을 받을 수 없음 | 사용자 선택은 위임 노드 밖에 둔다 |
+| 위임 노드 안에 `choose`의 `chooser: user` | 위임 실행 주체 안에서는 사용자 선택을 받을 수 없음 | 사용자 선택은 위임 노드 밖에 둔다 |
 | `do:`의 문자열 상수를 따옴표 없이 씀(`status: waiting`) | 식에서 `waiting`은 알 수 없는 이름이라 컴파일 오류 | `"'waiting'"`처럼 식 안에서 따옴표로 감싼다 |
 | `log`에 `set`·`remove`, `queue`에 `consume` | 검사 오류 `collection-op-kind` | `log`는 추가만 한다. 처리 위치는 `consume`으로 옮긴다 |
 | 프로시저가 자기 자신을 호출 | 컴파일 오류(같은 런 안의 재귀는 금지) | 재귀가 필요하면 자식 세션 spawn으로 |

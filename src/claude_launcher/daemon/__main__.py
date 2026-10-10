@@ -231,7 +231,7 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
     # -- never re-read off state, which re-sent every dead run at each boot.
     manager.exit_hooks.append(event_clock.session_exited)
     event_clock.start()
-    # cflow v2: waits, monitors, delegation budgets and the headless/session
+    # cflow v2: waits, monitors, delegation budgets and the session
     # executors (daemon/cflow2_clock.py). Off by config -> v2 delegations
     # fall back to the next executor and nothing types into a v2 driver.
     cflow2_clock = None

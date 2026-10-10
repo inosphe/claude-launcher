@@ -113,9 +113,14 @@ RETURN_RUN = "$run"
 
 EXEC_INLINE = "inline"
 EXEC_SUBAGENT = "subagent"
-EXEC_HEADLESS = "headless"
 EXEC_SESSION = "session"
-EXECUTORS = (EXEC_INLINE, EXEC_SUBAGENT, EXEC_HEADLESS, EXEC_SESSION)
+EXECUTORS = (EXEC_INLINE, EXEC_SUBAGENT, EXEC_SESSION)
+#: Executors a definition or a snapshotted run may still name but the engine
+#: no longer has (claunch-xjbrh removed ``headless``): the frontend drops
+#: them with a warning and a loaded IR drops them silently, so a stale copy
+#: (a global-layer workflow, an old run) falls through to its next executor
+#: instead of failing to compile.
+REMOVED_EXECUTORS = ("headless",)
 
 CHOOSER_AGENT = "agent"
 CHOOSER_USER = "user"
@@ -259,7 +264,8 @@ class Node:
             parent=raw.get("parent"),
             src=str(raw.get("src") or ""),
             label=str(raw.get("label") or ""),
-            executor=list(raw.get("executor") or []),
+            executor=[ex for ex in (raw.get("executor") or [])
+                      if ex not in REMOVED_EXECUTORS],
             needs=list(raw.get("needs") or []),
             budget=dict(raw["budget"]) if raw.get("budget") else None,
             bind=raw.get("bind"),
