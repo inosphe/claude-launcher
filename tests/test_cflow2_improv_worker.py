@@ -80,7 +80,7 @@ V1_TO_V2 = {
     "settle-check": ["settle-check", "settle-poll"],
     "settle-wait": ["settle-wait"],
     "settle-stall": ["settle-stall"],
-    "end-gate": ["end-decision", "end-gate"],
+    "end-gate": ["end-decision", "end-notice"],
     "end-hold": ["end-hold"],
 }
 
@@ -834,7 +834,7 @@ def test_the_end_question_can_be_posed(tmp_path, monkeypatch):
     doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
     decision = _find_id(doc["procedures"], "end-decision")
     flow = {"cflow": 2, "name": "end-flow", "include": ["ask-common"],
-            "nodes": {"end-gate": {"prompt": "end"}, "end-hold": {"prompt": "hold"}},
+            "nodes": {"end-notice": {"prompt": "end"}, "end-hold": {"prompt": "hold"}},
             "body": [decision]}
     from claude_launcher.cflow2 import frontend
     chart = frontend.compile_text(yaml.safe_dump(flow, allow_unicode=True, sort_keys=False),
@@ -847,7 +847,7 @@ def test_the_end_question_can_be_posed(tmp_path, monkeypatch):
     st = runtime.report(iid, "ok", {"brief": brief}, **kw)
     assert st["status"] == "waiting_approval" and [a["node"] for a in st["asks"]]
     runtime.approve(None, decision="end", reason="done", **kw)
-    assert [t["label"] for t in runtime.status(**kw)["tasks"]] == ["end-gate"]
+    assert [t["label"] for t in runtime.status(**kw)["tasks"]] == ["end-notice"]
 
 
 # -- claunch-jbk5w: the landing wait paces the nudge, not the whole choice ----

@@ -85,7 +85,9 @@ sides:
 #   settle-check          -> settle-check           (choose, retry settle-poll)
 #   settle-wait           -> settle-wait            (retry의 between, unsettled interval 600)
 #   settle-stall          -> settle-stall           (ask-user)
-#   end-gate              -> end-decision(ask-user), end-gate
+#   end-gate              -> end-decision(ask-user), end-notice
+#                            (v1의 게이트는 end-decision이 맡는다. 그 뒤 노드는
+#                            피어에게 종료를 예고하므로 end-notice다 -- claunch-aobd0)
 #   end-hold              -> end-hold
 #
 # ── v1에서 무엇이 문법으로 옮겨 갔는가 ───────────────────────────────────
@@ -109,7 +111,7 @@ sides:
 #   retry의 every가 아니라 settle-check의 unsettled 옵션 interval이 진다 --
 #   간격 동안에도 settled를 고를 수 있어야 한다(claunch-jbk5w, await와 같은 이유).
 # - wrapup 뒤 queue-recheck -> intake 루프 -> 본문 loop rounds. 세션 정산
-#   (settle-check ... end-gate)은 그 루프의 finally다 — 모든 경로가 지난다
+#   (settle-check ... end-notice)은 그 루프의 finally다 — 모든 경로가 지난다
 #   (spec.paths.settle-before-end).
 # - master 머지 금지 산문 7곳 -> rules.no-master-merge(+ spec.invariants).
 #
@@ -2405,7 +2407,7 @@ nodes:
           영역(같은 파일·모듈·UI 면)이며, 그 자식의 런이 아직 큐를 다시
           읽는 자리 앞에 있으면 — `claunch cflow2 status -t <자식> --json`의
           현재 노드가 queue-recheck·settle-check·settle-wait·settle-stall·
-          end-gate·end-hold가 아니고 status가 done이 아니다 — 그 자식에게:
+          end-decision·end-notice·end-hold가 아니고 status가 done이 아니다 — 그 자식에게:
           `claunch beads update <id> --assignee <자식> --add-label delegated`
           + `claunch beads comments add <id> "DELEGATED: from <원회차 id> to
           <자식>"` + 자식에게 mesh 한 줄(이슈 id, 기준 브랜치). 자식의
@@ -2498,7 +2500,7 @@ nodes:
       ── 세션 종료 (회차의 일부다 — 선택이 아니다) ──
       이 워크플로우는 recur하지 않는다 — 다음 회차가 있다면 그것은 같은
       런 안의 루프(queue-recheck → intake)이지 새 런이 아니다. 배정 큐가
-      남았으면 다음 회차가 돌고, 없으면 settle과 end-gate를 지나 런이
+      남았으면 다음 회차가 돌고, 없으면 settle(정산, 종료 결정, 종료 예고)을 지나 런이
       done이 된다. **세션을 죽이라는 명령은 실행하지
       않는다** — 데몬이 done 전이를 보는 즉시, 이 회차의 종결 기록을
       이 세션의 transcript에 내구 기록(append+flush — WAL)한 뒤 세션을
@@ -2508,8 +2510,9 @@ nodes:
       구조적으로 사라졌다: 데몬은 done을 기다리고, done은 보고를 쓴
       같은 턴에서만 온다.
 
-      단, 이 스텝 다음이 바로 end가 아니다 — `queue-recheck`와 `end-gate`가
-      서 있고, end-gate에서 상위 세션이 종료를 허가한다. 그 게이트가 생긴
+      단, 이 스텝 다음이 바로 end가 아니다 — `queue-recheck`와 settle이
+      서 있고, settle의 `end-decision`에서 사용자가 종료를 허가한 뒤
+      `end-notice`가 피어에게 종료를 예고한다. 그 예고가 생긴
       이유는 하나다: 피어는 이 세션이 종료된 것을 모르고 계속 메시지를
       보낸다(데몬은 그 메시지를
       전달하지 못하고 송신자에게 실패를 되돌려준다).
@@ -2752,8 +2755,8 @@ nodes:
       않았다.
     effects: [fs.read]
 
-  end-gate:
-    title: 세션 종료 (사용자 승인 뒤)
+  end-notice:
+    title: 세션 종료 예고 (사용자 승인 뒤)
     prompt: |
       사용자가 종료를 승인했다. 남은 것은 하나다 — 이 세션과 대화하던 피어에게 종료를
       미리 알린다. 메시에서 너와 연결된 멤버 중 이번 회차에 서로 메시지를
@@ -3895,7 +3898,7 @@ procedures:
             판단 근거: `claunch cflow2 journal -t <세션>`, `claunch beads show <이슈> --json`.
         # 선택지 이름은 질문 예약어(approve 등)를 피한다(claunch-gpccp): approve로
         # 두면 어떤 질문 brief도 검증을 통과하지 못해 런이 이 질문을 올리지 못한다.
-        cases: {end: end-gate, hold: end-hold}
+        cases: {end: end-notice, hold: end-hold}
 
 body:
   try:
