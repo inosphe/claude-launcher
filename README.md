@@ -1809,7 +1809,7 @@ and a form painted into its PTY would hang the session it was creating.
 | `transcript ls\|path\|show\|search` | Read the conversation a session's harness keeps on disk — the record `capture-pane` cannot reach, because a claude session repaints its screen instead of scrolling it and nothing older than the last frame is in any scrollback. `ls` lists the sessions that have a transcript (path, size, mtime), `path S` prints one file's path, `show S` reads a page of it (`--limit`, `--before SEQ` walks backwards, `--prose` drops tool traffic), and `search PATTERN` says where something was said — across the recently written transcripts in the fleet, or in one with `--session S`. Each match carries the record's `seq`, which `show --before` reads in context. The same files and the same byte-offset index behind the web UI's transcript page. |
 | `wait-for S`          | Block until `--idle` (default) or `--exited`; `--timeout SECS`, `--idle-threshold SECS`. Exits 1 on timeout. |
 | `rebrief [--session S]` | Print the session's briefing re-derived from current daemon state: mesh memberships and roster, replies it owes, the cflow run it drives, parent/children, and its recorded opening `--task`. Managed claude sessions run it **automatically** — a `SessionStart` hook injected at spawn fires it after `/compact` and `/clear`, and claude reads the output back into context — so an agent's lost context is restored without the agent having to remember to ask. The same hook also posts the payload's `session_id` back to the daemon: `/clear` mints a new conversation id, and reporting it keeps the pinned conversation (what a daemon restart resumes, and what the transcript page reads) pointing at the conversation the session is actually in. Defaults to `$CLAUNCH_SESSION`; also a **rebrief** button in the web UI, which types the same block into the session's terminal. |
-| `quick-fork [S] [--as NAME] [--task T] [--mesh M] [--workflow W] [-a]` | Start a **copy** of `S`'s conversation as a child of it, marked `--- forked from here ---` (see [quick-fork and merge](#quick-fork-and-merge--a-scratch-copy-that-reports-back)). `S` defaults to `$CLAUNCH_SESSION`. The copy joins no mesh and drives no run unless `--mesh`/`--workflow` say otherwise; `.` means the origin's. It always shares the origin's checkout. |
+| `quick-fork [S] [--as NAME] [--task T] [--mesh M] [--workflow W] [--role R] [--sibling] [-a]` | Start a **copy** of `S`'s conversation as a child of it (`--sibling`: beside it, under `S`'s parent), marked `--- forked from here ---` (see [quick-fork and merge](#quick-fork-and-merge--a-scratch-copy-that-reports-back)). `S` defaults to `$CLAUNCH_SESSION`. The copy joins no mesh and drives no run unless `--mesh`/`--workflow` say otherwise; `.` means the origin's mesh and, for the workflow, the pair the origin's run declares (`default_child_cflow`). `--role` sets the copy's role in that mesh; a second leader is refused. It always shares the origin's checkout. |
 | `quick-fork merge [TEXT] [-f FILE] [-t COPY]` | The way back from a copy: with text (or `-f`), from inside the copy, the wrap-up is typed into the origin and the copy ends; without text (`-t COPY` from outside) the copy is asked to write one. |
 | `handoff --to C [TEXT] [-f FILE] [-t D]` | Hand `D`'s work to `C` and end `D` — with text it happens now, without it `D` is asked to write one; `--cancel` withdraws a pending request. Detail-panel-only in the web UI, because it needs the target picked. |
 | `kill-session S`      | Terminate a running session (`--force` skips graceful terminate). Idempotent: an already-exited session is left alone — dropping a record is a different verb, below. |
@@ -2943,7 +2943,8 @@ is the one-press version, and it comes with its way back:
 ```bash
 claunch quick-fork A                    # start A-qf1: a copy of A's conversation
 claunch quick-fork A --task "try the other approach" -a
-claunch quick-fork A --mesh . --workflow .   # ...and give it A's mesh and run
+claunch quick-fork A --mesh . --workflow .   # ...and give it A's mesh and A's child run
+claunch quick-fork A --mesh . --role worker --sibling   # beside A, as a worker
 claunch quick-fork merge -f wrap.md     # from inside the copy: hand the wrap-up in
 ```
 
@@ -2954,15 +2955,29 @@ and a marker id. Everything above the marker is `A`'s; everything below is
 the copy's. By default it joins no mesh, drives no run and mints no board
 issue: it is a branch of one session's conversation, and the work it does is
 the origin's. The web UI has it as the terminal header's **⑂ fork** button
-(and `q` on a rail card), which asks which of the two you want and then opens
-the copy.
+(and `q` on a rail card), which opens a form with four rows and then the
+copy: **Placement** (as a child of `A`, or as a sibling under `A`'s parent —
+a root when `A` is one), **Mesh**, **Role** and **Workflow**. Each row
+preselects what the copy would inherit, marked *(recommended)*, and each can
+be set to anything else.
 
 That default is a judgement and not a limit. A copy given a job of its own
 has to be able to report it, so `--mesh` and `--workflow` (body fields
 `mesh` and `workflow`) take it the other way, and **`.`** means *the
-origin's* — resolved by the daemon, so you never type a name. One corner is
-worth knowing: `--mesh .` on an origin that is in **no** mesh follows spawn's
-usual rule and **opens** one between the two.
+origin's* — resolved by the daemon, so you never type a name. For the
+workflow, *the origin's* is the run its own run hands a child
+(`default_child_cflow`): a copy of an `improv-leader` session inherits
+`improv-worker`. One corner is worth knowing: `--mesh .` on an origin that is
+in **no** mesh follows spawn's usual rule and **opens** one between the two.
+
+**Role.** `--role` (body `role`) is the copy's role in its mesh. A mesh has
+one live holder of an exclusive role, so a copy of a leader cannot be a
+leader there: the form disables the row's `leader` entry with its holder
+named and preselects the origin's role, or `worker` when that is taken; the
+daemon refuses the same request with a 400. Because the conversation above
+the marker was held under the origin's role, the marker block carries a
+`role:` line — and when the two differ it says `role: CHANGED`, that the
+origin's role and its duties stay with the origin, and which stance to read.
 
 **The copy shares the origin's checkout, and cannot be given one of its
 own.** Claude keeps transcripts per working directory, so a copy started
@@ -4339,7 +4354,7 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | GET    | `/api/sessions/{name}/stats`   | the Stats page (`#/stats/<name>`): the current conversation's token usage in `?unit=hour\|day\|week` buckets (local time), and every input it received sorted by origin (typed by a person, claunch notice by header, mesh message by sender, opening task, harness) with estimated tokens, the requests each input triggered and the text it carried as context; `partial` while the transcript is still being read; read in the stats worker process, off the daemon's event loop (`reader`: `worker`, or `thread` when the worker cannot answer) |
 | GET    | `/api/stats/compare`           | the Stats page's compare mode (`#/compare/<a,b,c>`): `?sessions=a,b,c&unit=…` (at most 12) — per figure (requests, tokens, tokens per request, cache read share, active buckets, input and triggered shares by origin, ...) every session's value, the mean, median, sample standard deviation, min and max across the set, and each session's z-score and rank; the origin shares; and the sessions' tokens on one bucket timeline. Descriptive statistics only |
 | POST   | `/api/sessions/{name}/respawn` | relaunch an exited session (claude resumes its conversation) |
-| POST   | `/api/sessions/{name}/quick-fork` | copy this session's conversation into a child marked `--- forked from here ---` (`{name?, task?, mesh?, workflow?}`; joins no mesh and drives no run unless named, and `"."` means this session's own). 201 with the child, `origin`, `marker`, `forked_at`, and `quick_fork` — `{mesh, workflow, cwd, shared_checkout}`, what the copy actually ended up in. A fork always stands in the origin's checkout; it cannot be given a worktree |
+| POST   | `/api/sessions/{name}/quick-fork` | copy this session's conversation into a child marked `--- forked from here ---` (`{name?, task?, mesh?, workflow?, role?, sibling?}`; joins no mesh and drives no run unless named, and `"."` means this session's mesh, or the workflow its run pairs a child with; `role` is refused for an exclusive role a live member holds; `sibling: true` records the copy under this session's parent, or as a root). 201 with the child, `origin`, `marker`, `forked_at`, and `quick_fork` — `{mesh, workflow, role, sibling, parent, cwd, shared_checkout}`, what the copy actually ended up in. A fork always stands in the origin's checkout; it cannot be given a worktree |
 | POST/DELETE | `/api/sessions/{name}/handoff` | POST without `text`: ask this session for its wrap-up (`kind: merge`, quick-forks only, back to the origin) or handoff (`to`), recorded as pending on its row; POST with `text`: the completion — delivered to the target as a fenced block, then this session ends, in that order. DELETE withdraws a pending request |
 | POST   | `/api/sessions/{name}/migrate` | move to another checkout: exactly one of `{worktree: NAME-or-""}` / `{cwd: DIR}`; `{children: true}` moves the descendants standing in the same directory. The claude transcript is carried to the new directory's slug |
 | POST   | `/api/sessions/{name}/reborrow` | restart on another answer to "whose token": `{borrow: NAME-or-null, null_token?}` — picking one clears the others; the session is relaunched with the definition's auth swapped, the directory untouched |

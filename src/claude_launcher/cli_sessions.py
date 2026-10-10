@@ -1674,12 +1674,20 @@ def _cmd_quick_fork(args: argparse.Namespace) -> int:
         body["mesh"] = str(args.mesh).strip()
     if getattr(args, "workflow", None):
         body["workflow"] = str(args.workflow).strip()
+    if getattr(args, "role", None):
+        # The daemon refuses an exclusive role (leader) a live member holds,
+        # and a role with no mesh to hold it in.
+        body["role"] = str(args.role).strip()
+    if getattr(args, "sibling", False):
+        body["sibling"] = True
     info = client.post(f"/api/sessions/{origin}/quick-fork", body)
     child = info["session"]
     got = info.get("quick_fork") or {}
     joined = []
     if got.get("mesh"):
         joined.append(f"mesh {got['mesh']}")
+    if got.get("role"):
+        joined.append(f"role {got['role']}")
     if got.get("workflow"):
         joined.append(f"workflow {got['workflow']}")
     where = got.get("cwd") or "the origin's directory"
@@ -1687,6 +1695,11 @@ def _cmd_quick_fork(args: argparse.Namespace) -> int:
         f"quick-fork {child['name']!r} of {origin!r} started (pid {child.get('pid')}, "
         f"marker {info.get('marker')}) — a copy of its conversation from here"
         + (", in " + " and ".join(joined) if joined else "")
+        + (
+            (f", as a sibling under {got['parent']!r}" if got.get("parent")
+             else ", as a sibling root session")
+            if got.get("sibling") else ""
+        )
         + "."
     )
     # Said every time, not only when it bites: the copy stands in the
@@ -3359,8 +3372,20 @@ def register(sub) -> None:
     )
     p_qf.add_argument(
         "--workflow",
-        help="start the copy on this cflow workflow ('.' = the same one as "
-             "the origin). Default: none",
+        help="start the copy on this cflow workflow ('.' = the pair the "
+             "origin's run declares for a child, default_child_cflow -- not "
+             "the origin's own workflow). Default: none",
+    )
+    p_qf.add_argument(
+        "--role",
+        help="the copy's role in its mesh (requires --mesh). An exclusive "
+             "role (leader) a live member holds is refused. The copy's "
+             "opening says when it differs from the origin's",
+    )
+    p_qf.add_argument(
+        "--sibling", action="store_true",
+        help="place the copy beside the origin, under the origin's parent "
+             "(a root when the origin has none), instead of as its child",
     )
     p_qf.add_argument("-a", "--attach", action="store_true", help="attach to the copy once started")
     p_qf.set_defaults(func=_cmd_quick_fork)
