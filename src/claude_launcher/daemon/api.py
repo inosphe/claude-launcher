@@ -63,6 +63,7 @@ from . import line_sync
 from . import notice as notice_mod
 from . import rag as rag_mod
 from . import worktree_inventory
+from . import work_checkout
 from . import vscode as vscode_mod
 from . import cflow2_approve, cflow2_web
 from . import session_timers
@@ -7400,6 +7401,12 @@ async def h_sessions_list(request: web.Request) -> web.Response:
                 # read incrementally off the same transcript; absent where the
                 # harness has no reader.
                 tokenusage.attach(info, s.sdef, usage_budget)
+                # Where the session works when that is not where it was
+                # started (``work_cwd``): read off the same transcript, so
+                # gates asking "where does this session stand" measure the
+                # worktree it moved into rather than the main checkout
+                # (claunch-4zc51.1.2).
+                work_checkout.attach(info, s.sdef)
             # The cached briefing's one-liner, when it exists — rides the list
             # the UI already polls so a row can show it without an open card or
             # an LLM call, and so a browser refresh repaints it from the
@@ -7431,7 +7438,7 @@ async def h_sessions_list(request: web.Request) -> web.Response:
         # two sessions in the same worktree apart without opening either. On
         # the loop, because a miss schedules its git read on the loop (see
         # _read_branch_later); the hit itself is one stat and a dict lookup.
-        info["branch"] = _branch_of(_session_cwd(s))
+        info["branch"] = _branch_of(info.get(work_checkout.FIELD) or _session_cwd(s))
         # The rail's observe-pin box and the observer card's read the same
         # definition field. Answering it here rather than in the observer's
         # snapshot is what lets the rail draw it off the poll it already

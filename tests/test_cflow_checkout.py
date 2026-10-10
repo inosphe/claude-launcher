@@ -486,3 +486,36 @@ def test_a_name_standing_in_another_repository_is_answered_with_that_repository(
     assert (where, how) == (state_mod.resolve_cwd(str(elsewhere)), checkout.SESSION)
     # Not merely a different directory: outside the run's tree entirely.
     assert not where.startswith(state_mod.resolve_cwd(str(flow_dir)))
+
+
+# --------------------------------------------------------------------------- #
+# work_cwd: a session that moved into a worktree after it was started
+# (claunch-4zc51.1.2)
+# --------------------------------------------------------------------------- #
+def test_inspect_reads_the_checkout_a_session_moved_into(flow_dir, monkeypatch):
+    """The daemon's record still names the main checkout; ``work_cwd`` names
+    the worktree the transcript says the session works in now."""
+    tree = flow_dir / "wt"
+    tree.mkdir()
+    _sessions(monkeypatch, _row("s1", flow_dir, work_cwd=str(tree)))
+    occ = checkout.inspect(session="s1", cwd=str(flow_dir))
+    assert occ.session_cwd == state_mod.resolve_cwd(str(tree))
+    assert occ.mismatch
+
+
+def test_own_checkout_answers_the_worktree_not_the_main_checkout(flow_dir, monkeypatch):
+    tree = flow_dir / "wt"
+    tree.mkdir()
+    _sessions(monkeypatch, _row("s1", flow_dir, work_cwd=str(tree)))
+    where, how = checkout.own_checkout(session="s1", cwd=str(flow_dir))
+    assert (where, how) == (state_mod.resolve_cwd(str(tree)), checkout.SESSION)
+
+
+def test_a_session_that_moved_away_is_no_longer_a_neighbour(flow_dir, monkeypatch):
+    tree = flow_dir / "wt"
+    tree.mkdir()
+    _sessions(monkeypatch, _row("me", flow_dir),
+              _row("gone", flow_dir, work_cwd=str(tree)))
+    occ = checkout.inspect(session="me", cwd=str(flow_dir))
+    assert not occ.shared
+    assert checkout.occupant(str(tree)) == "gone"

@@ -221,6 +221,23 @@ def test_another_live_session_in_the_same_linked_worktree_is_a_mismatch(gate, re
     assert "s2" in out
 
 
+def test_a_session_that_moved_into_the_worktree_occupies_it(gate, repos, capsys):
+    """Its record still names the main checkout; ``work_cwd`` says where it
+    works now (claunch-4zc51.1.2), and that is where it is a second writer."""
+    gate({
+        "/api/sessions/s1": _session(repos["mine"]),
+        "/api/beads/claunch-aaaaa": _issue(repos["mine"]),
+        "/api/sessions": _sessions(
+            {"name": "s1", "cwd": str(repos["worktree"]), "status": "busy"},
+            {"name": "s2", "cwd": str(repos["mine"]), "status": "idle",
+             "work_cwd": str(repos["worktree"])},
+        ),
+    })
+    assert _run(workspace_check, cwd=repos["worktree"]) == 1
+    out = capsys.readouterr().out
+    assert "occupancy" in out and "s2" in out
+
+
 def test_an_exited_session_does_not_occupy_a_worktree(gate, repos, capsys):
     """A session that has ended is not standing anywhere.
 

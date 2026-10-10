@@ -311,7 +311,10 @@ def occupancy_axis(client, session: str, here: str):
         if isinstance(r, dict)
         and r.get("name") != session
         and r.get("status") != "exited"
-        and _norm(str(r.get("cwd") or "")) == mine
+        # ``work_cwd`` first: a session started at the main checkout that moved
+        # into this worktree stands here, though its record says otherwise
+        # (claunch-4zc51.1.2).
+        and _norm(str(r.get("work_cwd") or r.get("cwd") or "")) == mine
     ]
     children = {str(r.get("name")) for r in live if session and r.get("parent") == session}
     reviewers, unread = set(), ""
