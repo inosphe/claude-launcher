@@ -1058,10 +1058,56 @@ def test_wrapup_leaves_the_html_report_to_round_report():
     words = _words(doc["nodes"]["wrapup"]["prompt"])
     # s906/s910/s934/s935: the driver wrote the page in wrapup and the
     # round-report delegation wrote it again
-    assert "이 스텝이 내는 것은 둘: **깨끗한 트리**, **넘길 것마다 handoff 이슈**." in words
+    assert ("이 스텝이 내는 것은 셋: **깨끗한 트리**, **이 세션이 만든 테스트 "
+            "부산물의 정리**, **넘길 것마다 handoff 이슈**.") in words
     assert "**회차 보고서 HTML은 이 스텝에서 쓰지 않는다.**" in words
     assert "claunch report path" not in words
     assert doc["nodes"]["wrapup"]["returns"]["ok"]["gaps"] == "list?"
+
+
+# claunch-4zc51.1: the wrapup used to keep basetemps "as forensic records" and
+# nothing removed them afterwards -- C:/t reached 28.06 GB of exited sessions'
+# trees and C: fell to 264 MB free. Both canonicals now have the session that
+# made them remove them, after moving the four values into the report.
+_OWN_ARTIFACT_LINES = (
+    "**이 세션이 직접 만든 테스트 부산물은 이 세션이 전부 지운다**",
+    "── 테스트 부산물 정리 (이 세션이 만든 것만, 전부) ──",
+    "`ls -d C:/t/${CLAUNCH_SESSION}c[0-9]* C:/t/${CLAUNCH_SESSION}-* 2>/dev/null`",
+    "접두사만으로 고르지 않는다: `C:/t/s98*`은 s987의 것까지 잡는다.",
+    "`git worktree remove --force <경로>`",
+    "다른 세션의 항목은 그 세션이 이미 종료됐어도 여기서 지우지 않는다",
+)
+
+
+@pytest.mark.parametrize("which", ["v1", "v2"])
+def test_wrapup_removes_the_test_artifacts_its_own_session_made(which):
+    if which == "v1":
+        step = yaml.safe_load(V1.read_text(encoding="utf-8"))["steps"]["wrapup"]
+        words, done = _words(step["instructions"]), _words(step["done_when"])
+    else:
+        node = yaml.safe_load(V2.read_text(encoding="utf-8"))["nodes"]["wrapup"]
+        words, done = _words(node["prompt"]), _words(node["done_when"])
+    assert "basetemp는 지우지 않는다" not in words
+    for line in _OWN_ARTIFACT_LINES:
+        assert _words(line) in words, line
+    assert "(시작 · 소요 · 워커 수 · 실행량)" in done
+    assert "`C:/t/<세션>c<10자리>`·`C:/t/<세션>-*`" in done
+
+
+def test_v1_wrapup_cleanup_stays_inside_the_reminder_window():
+    # the reminder re-fire carries only the first _INSTRUCTIONS_LIMIT chars
+    from claude_launcher.daemon.cflow_clock import _INSTRUCTIONS_LIMIT
+    step = yaml.safe_load(V1.read_text(encoding="utf-8"))["steps"]["wrapup"]
+    window = step["instructions"][:_INSTRUCTIONS_LIMIT]
+    assert "부산물의 정리**" in _words(window)
+    assert "이 세션이 직접 만든 테스트 부산물은 이 세션이 전부 지운다" in window
+
+
+def test_v2_wrapup_artifacts_reach_the_round_report():
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    assert doc["nodes"]["wrapup"]["returns"]["ok"]["artifacts"] == "list?"
+    words = _words(doc["nodes"]["round-report"]["prompt"])
+    assert "정리한 테스트 부산물: ${result.wrapup.value.artifacts}" in words
 
 
 def test_round_report_reads_the_round_records_before_writing():
