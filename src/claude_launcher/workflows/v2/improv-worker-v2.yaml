@@ -86,8 +86,8 @@ sides:
 #   settle-wait           -> settle-wait            (retry의 between, unsettled interval 600)
 #   settle-stall          -> settle-stall           (ask-user)
 #   end-gate              -> end-decision(ask-user), end-notice
-#                            (v1의 게이트는 end-decision이다. 그 뒤 노드는 게이트가
-#                            아니라 종료 예고라서 end-notice다 -- claunch-aobd0)
+#                            (v1의 게이트는 end-decision이 맡는다. 그 뒤 노드는
+#                            피어에게 종료를 예고하므로 end-notice다 -- claunch-aobd0)
 #   end-hold              -> end-hold
 #
 # ── v1에서 무엇이 문법으로 옮겨 갔는가 ───────────────────────────────────
