@@ -188,3 +188,35 @@ def test_a_nested_site_shows_only_the_ids_on_its_path(tmp_path):
     assert st["tasks"][0]["node"] != "start-decision/pose"
     st = runtime.report("start-decision/pose", cwd=str(tmp_path), scope="t", now=T0)
     assert _labels(st) == ["end-decision/pose"]
+
+
+def test_a_node_id_reference_wins_over_a_shown_label(tmp_path):
+    """Both active: one node's id and another node's shown label read the
+    same; the id still names its node."""
+    chart = frontend.compile_text("cflow: 2\nname: t\n" + textwrap.dedent("""
+        nodes:
+          after: {prompt: after}
+        procedures:
+          confirm:
+            nodes:
+              pose: {prompt: "confirm"}
+            body: pose
+          both:
+            body:
+              - id: start-decision
+                call: confirm
+        body:
+          seq:
+            - par:
+                branches:
+                  own: {id: start-decision, call: confirm}
+                  nested: {call: both}
+            - after
+    """), source="flow.yaml")
+    st = runtime.start(chart, cwd=str(tmp_path), scope="t", caps={}, now=T0)
+    nodes = sorted(t["node"] for t in st["tasks"])
+    assert "start-decision/pose" in nodes and len(nodes) == 2
+    other = next(n for n in nodes if n != "start-decision/pose")
+    assert runtime.shown_label(chart, chart.nodes[other]) == "start-decision/pose"
+    st = runtime.report("start-decision/pose", cwd=str(tmp_path), scope="t", now=T0)
+    assert [t["node"] for t in st["tasks"]] == [other]

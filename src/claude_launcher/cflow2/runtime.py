@@ -2419,8 +2419,12 @@ def _find(r: Run, ref: Optional[str], kinds: Tuple[str, ...], what: str,
         if ref in cands:
             return ref
         hits = [iid for iid in cands
-                if r.inst[iid]["node"] == ref or r.node_of(iid).label == ref
-                or shown_label(r.chart, r.node_of(iid)) == ref]
+                if r.inst[iid]["node"] == ref or r.node_of(iid).label == ref]
+        if not hits:
+            # a label as status shows it (claunch-tm5ki); tried only after the
+            # node id and the own label, so a reference that named one node
+            # before still does
+            hits = [iid for iid in cands if shown_label(r.chart, r.node_of(iid)) == ref]
         if len(hits) == 1:
             return hits[0]
         if len(hits) > 1:
