@@ -63,6 +63,11 @@ RUN_SUMMARY = "claunch-run.json"
 _STAMP = re.compile(r"c\d{10}")
 
 
+def default_root() -> Path:
+    """The directory reaped when none is given: the gate tools' root."""
+    return pytest_basetemp.root()
+
+
 def matches(name: str, session: str) -> bool:
     """Whether directory ``name`` has one of ``session``'s basetemp shapes."""
     if not session or not name.startswith(session):
@@ -145,7 +150,7 @@ class BasetempReaper:
 
     @property
     def root(self) -> Path:
-        return self._root if self._root is not None else pytest_basetemp.root()
+        return self._root if self._root is not None else default_root()
 
     @property
     def history_path(self) -> Path:

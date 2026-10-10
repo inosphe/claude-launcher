@@ -200,3 +200,11 @@ def test_history_drops_rows_past_retention(tmp_path):
     _reaper(tmp_path, [("s1", True)]).reap_ended()
 
     assert [r["session"] for r in _rows(tmp_path)] == ["s1"]
+
+
+def test_the_suite_never_reaps_the_real_root(tmp_path):
+    # conftest points the default root into tmp_path: tests that boot the
+    # real daemon (test_restart_gate, test_daemon_restart, ...) reach
+    # reap_ended() over registries of made-up names.
+    assert br.default_root() == tmp_path / ".basetemp-root"
+    assert br.BasetempReaper(lambda: []).root == tmp_path / ".basetemp-root"

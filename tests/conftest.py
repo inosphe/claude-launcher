@@ -160,6 +160,14 @@ def home(tmp_path, monkeypatch):
     # env-assembly tests would each start one against a made-up upstream.
     # Off by default here — the tests of the feature set it back to "1".
     monkeypatch.setenv("CLAUNCH_METERING", "0")
+    # The basetemp root is C:/t on Windows whatever the launcher home is, and
+    # the daemon's reaper deletes ended sessions' trees under it. A test that
+    # boots the real daemon over a registry of made-up names would otherwise
+    # delete real sessions' directories of the same names (claunch-4zc51.2).
+    monkeypatch.setattr(
+        "claude_launcher.daemon.basetemp_reaper.default_root",
+        lambda: tmp_path / ".basetemp-root",
+    )
     return h
 
 
