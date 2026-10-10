@@ -1094,6 +1094,25 @@ def test_wrapup_removes_the_test_artifacts_its_own_session_made(which):
     assert "`C:/t/<세션>c<10자리>`·`C:/t/<세션>-*`" in done
 
 
+@pytest.mark.parametrize("which", ["v1", "v2"])
+def test_wrapup_keeps_a_held_rounds_preview_ref(which):
+    # tools/merge_ready.py reads refs/claunch/preview/<branch> as the landing
+    # evidence of a frozen round; deleting it in a hold wrapup sends the
+    # leader's integrate back to re-measure (rc=1)
+    if which == "v1":
+        step = yaml.safe_load(V1.read_text(encoding="utf-8"))["steps"]["wrapup"]
+        words, done = _words(step["instructions"]), _words(step["done_when"])
+    else:
+        node = yaml.safe_load(V2.read_text(encoding="utf-8"))["nodes"]["wrapup"]
+        words, done = _words(node["prompt"]), _words(node["done_when"])
+    assert "`refs/claunch/preview/<세션>-*`" not in words
+    assert ("`refs/claunch/preview/<브랜치>`는 회차가 착지했을 때만 지운다. "
+            "hold로 동결한 회차는 그 ref를 남긴다") in words
+    assert "「착지 근거라 남김」" in words
+    assert ("hold 회차의 `refs/claunch/preview/<브랜치>`는 착지 근거라 "
+            "남기고") in done
+
+
 def test_v1_wrapup_cleanup_stays_inside_the_reminder_window():
     # the reminder re-fire carries only the first _INSTRUCTIONS_LIMIT chars
     from claude_launcher.daemon.cflow_clock import _INSTRUCTIONS_LIMIT
