@@ -208,3 +208,76 @@ def test_a_note_is_in_the_search_corpus(tmp_path):
 
     session_docs = [d for d in docs if d.meta["kind"] == "session"]
     assert any("waiting on the vendor reply" in d.chunks[0] for d in session_docs)
+
+
+# ------------------------------------------------- written at creation time
+
+_CHILD = (
+    "import sys\n"
+    "print('READY')\n"
+    "for line in sys.stdin:\n"
+    "    print('echo:' + line.strip())\n"
+)
+
+
+def _launching(scenario):
+    """A daemon whose ``py`` profile launches a real (echo) process, so the
+    create and spawn routes run to the end (claunch-zy9yk)."""
+    import sys
+
+    from claude_launcher import lineage, profile, store
+
+    store.update(lambda doc: doc.update(
+        {"harnesses": {"py": {"command": [sys.executable, "-u", "-c", _CHILD]}}}))
+    if not profile.resolve("py").exists():
+        lineage.set_harness(profile.create("py"), "py")
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        app = build_app(mgr, "sekrit", started_at=time.monotonic())
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            await scenario(client, mgr)
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_the_create_and_spawn_forms_write_the_note_with_the_launch(home, tmp_path):
+    """The new-session form (and its spawn-child mode) sends ``note`` beside
+    the task, and the session is on the rail with it from its first poll."""
+
+    async def scenario(client, mgr):
+        resp = await client.post("/api/sessions", headers=BEARER, json={
+            "name": "n1", "profile": "py", "cwd": str(tmp_path),
+            "beads": False, "note": "  for the release branch  ",
+        })
+        assert resp.status == 201, await resp.text()
+        assert (await resp.json())["note"] == "for the release branch"
+        assert mgr.get("n1").sdef.note == "for the release branch"
+
+        resp = await client.post("/api/sessions/n1/children", headers=BEARER, json={
+            "name": "n2", "beads": False, "note": "child note",
+        })
+        assert resp.status == 201, await resp.text()
+        assert (await resp.json())["session"]["note"] == "child note"
+        assert mgr.get("n2").sdef.note == "child note"
+
+    _launching(scenario)
+
+
+def test_a_launch_with_a_bad_note_is_refused_before_anything_starts(home, tmp_path):
+    async def scenario(client, mgr):
+        for note in ("x" * (manager_mod.MAX_NOTE + 1), 42):
+            resp = await client.post("/api/sessions", headers=BEARER, json={
+                "name": "n3", "profile": "py", "cwd": str(tmp_path),
+                "beads": False, "note": note,
+            })
+            assert resp.status == 400, await resp.text()
+            assert "note" in (await resp.json())["error"]
+            assert "n3" not in mgr._sessions
+
+    _launching(scenario)

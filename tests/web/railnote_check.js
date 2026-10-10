@@ -415,10 +415,13 @@ const tick = () => new Promise((r) => setTimeout(r, 0));
   check("...and writes nothing", calls.length, before);
   check("...and the rail is no longer held", ctx.focused(), false);
 
-  /* One click on the note line itself is the other door. */
+  /* The note line is read-only: a click on it is the row's own click, and
+     only the ✎ opens the box. */
   const lineClick = fire(noteIn(r1)[0], "click");
-  check("a click on the note line opens the box too", editorIn(r1).length, 1);
-  check("...and does not attach the session", lineClick.stopped, true);
+  check("a click on the note line does not open the box", editorIn(r1).length, 0);
+  check("...and is left to the row (attach)", lineClick.stopped, false);
+  fire(btnIn(r1, "sess-note-edit"), "click");
+  check("the ✎ opens it again", editorIn(r1).length, 1);
 
   /* Keys that are not a save. */
   before = calls.length;

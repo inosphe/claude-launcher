@@ -161,7 +161,11 @@ check("...and the name, the reuse pick and the rebase base stay out of it",
 const SPENT = JSON.parse(
   (src.match(/const SESSION_FORM_SPENT = (\[[\s\S]*?\]);/) || [, "[]"])[1]);
 check("the issue body is spent by its launch, beside the task it belongs to",
-      SPENT, ["name", "resume", "task", "context", "issue_text"]);
+      SPENT, ["name", "note", "resume", "task", "context", "issue_text"]);
+check("a created session clears its note on the form too (claunch-zy9yk)",
+      /if \(f\.note\) f\.note\.value = "";/.test(submit), true);
+check("...and sends a written note with the launch",
+      /body\.note = f\.note\.value\.trim\(\);/.test(src), true);
 check("a created session clears it on the form",
       /f\.issue_text\.value = "";/.test(submit), true);
 check("...and says so, since the modal's restore would otherwise put it back",

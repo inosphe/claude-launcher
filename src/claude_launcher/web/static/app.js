@@ -7764,15 +7764,8 @@ function decorateNoteRow(li, s) {
   }
   const fresh = el("div", "rail-note", text);
   fresh.title = text;  // the column clips it; hover still gives the whole note
-  // One click on the note is the way into editing it, so a click here is not
-  // the row's "attach" -- the ✎ beside the ⓘ is the same door for a row that
-  // has no note line to click.
-  if (typeof fresh.addEventListener === "function") {
-    fresh.addEventListener("click", (e) => {
-      e.stopPropagation();
-      openRailNoteEditor(li, s.name);
-    });
-  }
+  // The line is read-only: a click on it is the row's own click (attach).
+  // The ✎ beside the ⓘ is the only way into editing the note.
   railNotePlace(li, fresh);
 }
 
@@ -7817,7 +7810,7 @@ function railNoteButton(li, s, text) {
 
 /* ---- the note, edited on its rail row --------------------------------
    The detail panel's note box (sessNote) is the full editor; this is the
-   quick one: a click on the row's ✎ or on the note line opens a box in the
+   quick one: a click on the row's ✎ opens a box in the
    note's place, Enter saves, Shift+Enter is a newline, Esc puts the note
    back as it was. It writes through the same endpoint the panel does, so
    the two cannot disagree about what a note is.
@@ -12587,6 +12580,9 @@ $("new-session").addEventListener("submit", async (e) => {
     body.workflow = "-";
   }
   if (f.task.value.trim()) body.task = f.task.value.trim();
+  // The operator's note goes on the session record with the launch
+  // (claunch-zy9yk); empty is left off, which is "no note".
+  if (f.note && f.note.value.trim()) body.note = f.note.value.trim();
   if (f.score_goal && f.score_goal._scoreLoaded !== false) body.score_goal = !!f.score_goal.checked;
   // The board answer. "new" is the absence of both keys — a request that says
   // nothing gets an issue minted from the task, which is what every client
@@ -12662,6 +12658,8 @@ $("new-session").addEventListener("submit", async (e) => {
     // mesh and workflow pickers are not, since a second worker on the same
     // team is the normal next thing to want.
     f.task.value = "";
+    // The note was about this session; the next one gets its own.
+    if (f.note) f.note.value = "";
     f.context.value = "";
     // The issue body is the task's twin and is spent with it: it described
     // THIS launch's job, and the next session started from the same box has a
@@ -36187,7 +36185,7 @@ let sessionModal = null;
    (claunch-ke7ke). sessionModalClose steps over these when it puts the form
    back, which is what makes the clearing survive a launch made from the modal
    rather than from the #/new page. */
-const SESSION_FORM_SPENT = ["name", "resume", "task", "context", "issue_text"];
+const SESSION_FORM_SPENT = ["name", "note", "resume", "task", "context", "issue_text"];
 
 function sessionFormConfig(mode) {
   const sections = ["new-where", "new-identity", "new-runs-on", "new-onboard",
@@ -36197,14 +36195,14 @@ function sessionFormConfig(mode) {
     "resume", "fork", "skip_permissions", "auto_compact", "auto_compact_window",
     "codex_yolo", "codex_sandbox", "args",
     "worktree_mode", "worktree_name", "worktree_existing", "worktree_session",
-    "worktree_rebase", "worktree_from", "task", "score_goal", "beads", "issue_text", "issue_filter", "issue", "pi_tool_*",
+    "worktree_rebase", "worktree_from", "task", "note", "score_goal", "beads", "issue_text", "issue_filter", "issue", "pi_tool_*",
     "subrole_*", "prompt_pack_*", "prompter_context_*", "daemon_prompt"];
   const modes = {
     new: { title: "New session", submit: "Create", sections, editable,
       payload: ["name", "profile", "project", "cwd", "args", "env", "model", "effort", "tools", "worktree",
         "rebase_onto", "branch_from", "role", "subroles", "borrow", "null_token", "mesh", "handle", "workflow",
         "workflow_version", "cflow_inputs",
-        "context", "task", "opening_images", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
+        "context", "task", "note", "opening_images", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
         "daemon_prompt", "prompter_contexts",
         "resume", "fork_session"] },
     spawn: { title: "Spawn child", submit: "Spawn child", sections,
@@ -36212,7 +36210,7 @@ function sessionFormConfig(mode) {
       payload: ["name", "profile", "project", "workspace", "cwd", "args", "model", "effort", "tools", "worktree",
         "rebase_onto", "branch_from", "role", "subroles", "borrow", "null_token", "mesh", "handle", "workflow",
         "workflow_version", "cflow_inputs",
-        "context", "task", "opening_images", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
+        "context", "task", "note", "opening_images", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
         "daemon_prompt", "prompter_contexts",
         "fork", "connect", "over_limit", "auto_compact"] },
     fork: { title: "Quick fork", submit: "Fork", sections: ["new-quick-fork"],
