@@ -508,6 +508,19 @@ def attach(client, name: str) -> int:
         )
         return 1
     info = client.get(f"/api/sessions/{name}")
+    if info.get("status") == "exited" and info.get("held_at"):
+        # Held for idleness (claunch-5l35i): attaching is using it, so it
+        # comes back with its conversation first.
+        print(f"[claunch] session {name!r} is on hold — waking it", file=sys.stderr)
+        try:
+            info = client.post(f"/api/sessions/{name}/wake")
+        except Exception as exc:  # noqa: BLE001 -- say what to do instead
+            print(
+                f"error: could not wake {name!r}: {exc} — "
+                f"revive it by hand with: claunch respawn {name}",
+                file=sys.stderr,
+            )
+            return 1
     if info.get("status") == "exited":
         code = info.get("exit_code")
         print(

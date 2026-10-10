@@ -58,7 +58,7 @@ const ROW_H = 100;
 
 function mkel(tag) {
   const node = {
-    tag, className: "", title: "", dataset: {}, children: [],
+    tag, className: "", title: "", dataset: {}, children: [], style: {},
     listeners: {}, parent: null, disabled: false,
     scrollTop: 0, clientHeight: 500,
     get scrollHeight() { return this.children.length * ROW_H; },
@@ -91,6 +91,7 @@ function mkel(tag) {
       return old;
     },
     get offsetTop() { return this.parent ? this.parent.children.indexOf(this) * ROW_H : 0; },
+    get offsetHeight() { return ROW_H; },
     remove() {
       if (this.parent) this.parent.children.splice(this.parent.children.indexOf(this), 1);
     },
@@ -129,6 +130,8 @@ function build() {
     "log-title": mkel("span"),
     "log-back": mkel("a"),
     "log-info-tab": mkel("button"),
+    "log-minimap": mkel("div"),
+    "log-new": mkel("button"),
   };
   const radios = ["raw", "markdown"].map((value) => ({ value, checked: false }));
   const store = {};
@@ -162,6 +165,10 @@ function build() {
     slice("renderTranscriptProse"), slice("setTranscriptFormat"),
     "const hiddenSkippedPolls = new Map();", slice("visiblePoll"),
     slice("startTranscriptPoll"), slice("stopTranscriptPoll"), slice("pollTranscript"),
+    slice("setTranscriptUnread"), slice("onTranscriptNewClick"),
+    slice("transcriptBlockKind"), slice("transcriptMinimapSegments"),
+    slice("scheduleTranscriptMinimap"), slice("renderTranscriptMinimap"),
+    slice("syncTranscriptMinimapView"),
   ].join("\n");
   new Function(
     "exports", "$", "document", "api", "setInterval", "clearInterval",
@@ -179,7 +186,8 @@ const TRANSCRIPT_PAGE = 40;
 ${src.match(/const TRANSCRIPT_FOLLOW_MAX = \d+;/)[0]}
 const TRANSCRIPT_NEAR_TOP = 400;
 const TRANSCRIPT_NEAR_END = 40;
-const TRANSCRIPT_POLL_MS = 4000;
+${src.match(/const TRANSCRIPT_POLL_MS = \d+;/)[0]}
+let transcriptUnread = 0, transcriptMinimapFrame = 0;
 let transcriptName = null, transcriptMachine = null, transcriptCursor = null, transcriptSeen = -1;
 let transcriptMore = false, transcriptBusy = false, transcriptTimer = null;
 let transcriptGeneration = 0;
@@ -190,6 +198,9 @@ exports.scroll = onTranscriptScroll;
 exports.poll = pollTranscript;
 exports.shown = () => shown;
 exports.setFormat = setTranscriptFormat;
+exports.newClick = onTranscriptNewClick;
+exports.segments = () => transcriptMinimapSegments($("term-log-pane"));
+Object.defineProperty(exports, "unread", { get: () => transcriptUnread });
 Object.defineProperty(exports, "format", { get: () => transcriptFormat });
 Object.defineProperty(exports, "isOpen", { get: () => transcriptIsOpen() });
 Object.defineProperty(exports, "name", { get: () => transcriptName });
@@ -319,14 +330,121 @@ const texts = (pane) => pane.children
         w.api.cursor === 60, w.api.cursor);
   check("and they were carried to the newest", w.pane.scrollTop === w.pane.scrollHeight);
 
-  // Scrolled up to read something: nothing may drag them back.
+  // Scrolled up to read something: the new turns still arrive (the page is
+  // live), but nothing may drag the reader back.
   w.pane.scrollTop = 500;
   w.script([{ status: 200, body: { records: recs(60, 104), has_more: true, cursor: 60, total: 104 } }]);
   w.api.poll();
   await flush(); await flush();
-  check("a reader who scrolled up is not asked for", w.calls.length === 2, w.calls.length);
-  check("and is left exactly where they were", w.pane.scrollTop === 500, w.pane.scrollTop);
+  check("a reader who scrolled up is still polled — the page is live",
+        w.calls.length === 3, w.calls.length);
+  check("the new turns are appended below them",
+        texts(w.pane).length === 44 && texts(w.pane)[43] === "103", texts(w.pane).slice(-2));
+  check("and they are left exactly where they were", w.pane.scrollTop === 500, w.pane.scrollTop);
+  const chip = w.nodes["log-new"];
+  check("the arrivals are counted on the jump button",
+        w.api.unread === 2 && !chip.classList.contains("hidden")
+        && chip.textContent === "↓ 2 new turns", [w.api.unread, chip.className, chip.textContent]);
+
+  w.script([{ status: 200, body: { records: recs(60, 105), has_more: true, cursor: 60, total: 105 } }]);
+  w.api.poll();
+  await flush(); await flush();
+  check("the count adds up across polls", w.api.unread === 3, w.api.unread);
+
+  w.api.newClick();
+  check("pressing it goes to the newest and clears the count",
+        w.pane.scrollTop === w.pane.scrollHeight && w.api.unread === 0
+        && chip.classList.contains("hidden"), [w.pane.scrollTop, w.api.unread, chip.className]);
+
+  w.pane.scrollTop = 500;
+  w.script([{ status: 200, body: { records: recs(60, 106), has_more: true, cursor: 60, total: 106 } }]);
+  w.api.poll();
+  await flush(); await flush();
+  check("a later arrival raises it again", w.api.unread === 1, w.api.unread);
+  w.pane.scrollTop = w.pane.scrollHeight;
+  w.api.scroll();
+  check("scrolling down to the end by hand clears it too", w.api.unread === 0, w.api.unread);
 })();
+
+/* --- the timeline: one mark per run of a kind, coloured by who spoke ----- */
+(async () => {
+  const w = build();
+  w.script([{ status: 200, body: { total: 3, has_more: true, cursor: 7, records: [
+    { seq: 7, role: "user", ts: "", blocks: [{ type: "text", text: "do it" }] },
+    { seq: 8, role: "assistant", ts: "", blocks: [
+      { type: "thinking", text: "hm" },
+      { type: "text", text: "ok" },
+      { type: "tool_use", name: "Bash", text: "ls" },
+      { type: "tool_use", name: "Bash", text: "pwd" },
+    ] },
+    { seq: 9, role: "user", ts: "", blocks: [
+      { type: "tool_result", text: "a" },
+      { type: "tool_result", text: "b", error: true },
+    ] },
+  ] } }]);
+  w.api.open("mm");
+  await flush(); await flush();
+
+  const kinds = (seq) => {
+    const rec = w.pane.children.find((c) => c.dataset.seq === seq);
+    return rec.children.map((c) => c.dataset.kind || "-").join(",");
+  };
+  check("a user turn's text is marked as the user's", kinds("7") === "-,user", kinds("7"));
+  check("each assistant block is marked with what it is",
+        kinds("8") === "-,thinking,assistant,tool,tool", kinds("8"));
+  check("tool output is a result, and a failed one an error, under the assistant",
+        kinds("9") === "-,result,error", kinds("9"));
+
+  const segs = w.api.segments();
+  check("adjacent blocks of one kind make one mark",
+        segs.map((s) => s.kind).join(",") === "user,thinking,assistant,tool,result,error"
+        && segs.find((s) => s.kind === "tool").count === 2,
+        segs.map((s) => `${s.kind}x${s.count}`));
+  // The stub's rows are a fixed height whatever they hold, so only the
+  // arithmetic is checkable here, not a real layout: the first mark starts at
+  // its record's offset plus its own, over the pane's whole scroll height.
+  check("marks are measured against the pane's scroll height",
+        segs[0].top === (0 + 100) / w.pane.scrollHeight
+        && segs.every((s) => s.height === 100 * (s.kind === "tool" ? 2 : 1) / w.pane.scrollHeight),
+        segs);
+
+  const map = w.nodes["log-minimap"];
+  const marks = map.children.filter((c) => c.className === "log-mm-seg");
+  check("the minimap draws one node per mark, with its kind",
+        marks.length === segs.length && marks[0].dataset.kind === "user", marks.length);
+  check("placed by percentage", /%$/.test(marks[0].style.top) && /%$/.test(marks[0].style.height),
+        marks[0].style);
+  check("with a box for the part on screen", !!map.querySelector(".log-mm-view"));
+  check("and a mark that older turns exist above what is loaded",
+        map.classList.contains("has-more"));
+
+  w.api.close();
+  check("closing the page empties the timeline",
+        map.children.filter((c) => c.className === "log-mm-seg").length === 0);
+})();
+
+/* --- the session line stays on the transcript of the attached session ---- */
+{
+  const decide = (current, name, machine) => new Function(
+    "currentName", "transcriptName", "transcriptMachine",
+    `${slice("sessionLineOnPage")}; return sessionLineOnPage;`)(current, name, machine);
+  check("the terminal page always carries it", decide("s1", null, null)("terminal") === true);
+  check("the transcript of the attached session carries it",
+        decide("s1", "s1", null)("log") === true);
+  check("another session's transcript does not — it would send to s1",
+        decide("s1", "s2", null)("log") === false);
+  check("nor a remote shadow's of the same name",
+        decide("s1", "s1", "pcA")("log") === false);
+  check("nor with nothing attached", decide(null, "s1", null)("log") === false);
+  check("other pages never", decide("s1", "s1", null)("beads") === false);
+  check("showView hands the footer to syncSessionLine",
+        /function showView[\s\S]{0,2000}syncSessionLine\(\)/.test(src));
+  check("openTranscript re-syncs it once the page knows its session",
+        /transcriptMachine = machine;[\s\S]{0,200}syncSessionLine\(\)/.test(src));
+  check("the preset strip and prompter row follow the same rule",
+        /sessionLineOnPage\(page\) && !!currentName && !sessionEnded, sendPromptPreset/.test(src)
+        && /const onTerminal = typeof currentPage === "undefined" \|\| sessionLineOnPage\(currentPage\)/.test(src));
+}
 
 /* --- leaving the page stops it, and coming back starts clean ------------- */
 (async () => {
@@ -657,6 +775,31 @@ const texts = (pane) => pane.children
         && /\.log-format-tabs\[hidden\]\s*\{\s*display:\s*none/.test(css));
   check("prose wraps rather than growing a sideways scrollbar",
         /\.log-text\s*\{[^}]*white-space:\s*pre-wrap/.test(css));
+  const pre = (css.match(/\n\.log-pre\s*\{[^}]*\}/) || [""])[0];
+  check("tool traffic is shown whole: wrapped, with no height cap or scroller of its own",
+        /white-space:\s*pre-wrap/.test(pre) && !/max-height/.test(pre) && !/overflow:\s*auto/.test(pre),
+        pre);
+  check("markdown code and tables wrap inside the transcript too",
+        /#term-log-pane \.md-pre\s*\{[^}]*white-space:\s*pre-wrap[^}]*overflow:\s*visible/.test(css)
+        && /#term-log-pane \.md-table\s*\{[^}]*overflow:\s*visible/.test(css));
+  check("the minimap sits beside the pane, in one row",
+        html.indexOf('id="log-body"') < html.indexOf('id="term-log-pane"')
+        && html.indexOf('id="term-log-pane"') < html.indexOf('id="log-minimap"')
+        && /#log-body\s*\{[^}]*display:\s*flex/.test(css));
+  check("the legend names every kind the minimap draws, in the same colour",
+        ["user", "assistant", "thinking", "tool", "result", "error"].every(
+          (k) => html.includes(`class="log-key" data-kind="${k}"`)
+                 && css.includes(`[data-kind="${k}"] { --log-kind-color`)));
+  check("the info tab hides the pane's whole row, minimap included, and [hidden] wins",
+        /getElementById\("log-body"\);if\(body\)body\.hidden=showInfo/.test(
+          fs.readFileSync(path.join(__dirname, "..", "..", "src", "claude_launcher", "web",
+                                    "static", "observer.js"), "utf8"))
+        && /#log-body\[hidden\]\s*\{\s*display:\s*none/.test(css));
+  check("the new-turns button starts hidden", /id="log-new"[^>]*class="[^"]*hidden/.test(html));
+  check("on the transcript page the footer is ordered under the conversation",
+        /body\[data-page="log"\] #term-input\s*\{\s*order:\s*1/.test(css));
+  check("the minimap's press and drag are wired",
+        /map\.addEventListener\("pointerdown"[\s\S]{0,200}seekTranscriptMinimap/.test(src));
 }
 
 (async () => {

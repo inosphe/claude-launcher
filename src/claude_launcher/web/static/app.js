@@ -1300,10 +1300,10 @@ function syncBulkActions(sessions, filter = "current") {
     ? sessions.filter((s) => s.status !== "exited").length : 0;
   const dead = (Array.isArray(filter) ? filter.includes("killed") : filter === "current" || filter === "killed")
     ? sessions.filter((s) => s.status === "exited" && !s.archived_at
-                      && !s.paused_at).length : 0;
+                      && !s.paused_at && !s.held_at).length : 0;
   const paused = (Array.isArray(filter) ? filter.includes("paused") : filter === "current" || filter === "paused" || filter === "running-paused")
     ? sessions.filter((s) => s.status === "exited" && !s.archived_at
-                      && !!s.paused_at).length : 0;
+                      && !!s.paused_at && !s.held_at).length : 0;
   const set = (id, n, label, title) => {
     const btn = $(id);
     if (!btn) return;  // an older index.html served by a newer daemon
@@ -1593,7 +1593,7 @@ function railMetaText(s) {
   // the pause is the operator's. A marker on a still-running row is a pause
   // whose signal has not landed yet — the same window a kill has.
   const state = s.archived_at ? "archived" : s.status === "exited"
-    ? (s.paused_at ? "paused" : `exit ${s.exit_code ?? "?"}`)
+    ? (s.held_at ? "hold" : s.paused_at ? "paused" : `exit ${s.exit_code ?? "?"}`)
     : s.paused_at ? "pausing" : s.winddown ? "winding down" : "";
   return [identity, state].filter(Boolean).join(" · ");
 }
@@ -1735,16 +1735,28 @@ async function runSessionSearch(q) {
 const SESSION_FILTER_KEY = `claunch_session_filter:${BASE}`;
 const SESSION_GROUP_KEY = `claunch_session_group:${BASE}`;
 const SESSION_GROUP_ORDER_KEY = `claunch_session_group_order:${BASE}`;
-const SESSION_FILTERS = ["current", "running-paused", "running", "killed", "paused", "archived"];
+const SESSION_FILTERS = ["current", "running-paused", "running", "hold", "killed", "paused", "archived"];
+/* The two presets. Hold (claunch-5l35i) is a running session whose program
+   the daemon freed while nobody used it; it wakes on attach, so both presets
+   that show the running ones show it too. The functions further down spell
+   the same lists out, because the page checks slice them out of this file
+   one function at a time. */
+const SESSION_FILTER_CURRENT = ["running", "hold", "killed", "paused"];
+const SESSION_FILTER_RUNNING_PAUSED = ["running", "hold", "paused"];
 const SESSION_GROUPS = ["mesh", "workspace"];
 function restoreSessionFilter(saved) {
-  const current = ["running", "killed", "paused"];
+  const current = SESSION_FILTER_CURRENT.slice();
   if (!saved || saved === "current") return current;
-  if (saved === "running-paused") return ["running", "paused"];
+  if (saved === "running-paused") return SESSION_FILTER_RUNNING_PAUSED.slice();
   if (SESSION_FILTERS.includes(saved)) return [saved];
   try {
     const states = JSON.parse(saved);
     if (Array.isArray(states) && states.every((s) => SESSION_FILTERS.includes(s) && s !== "current" && s !== "running-paused")) {
+      // A preset saved before the hold filter existed is the same preset
+      // now: both of them held running and paused, and both now hold hold.
+      if (!states.includes("hold") && states.includes("running") && states.includes("paused")) {
+        states.push("hold");
+      }
       return SESSION_FILTERS.filter((s) => states.includes(s));
     }
   } catch { /* Old or invalid browser storage falls back to Current. */ }
@@ -1846,6 +1858,57 @@ function setSessionGroupTab(group, value, remember = true) {
       localStorage.setItem(SESSION_GROUP_TAB_KEY, JSON.stringify(sessionGroupTab));
     } catch {}
   }
+}
+
+/* Which side of a mesh the rail shows, chosen on the mesh header
+   (claunch-no9dy): `local` keeps this daemon's rows, `remote` keeps other
+   daemons' members (the remote-shadow rows), `both` keeps every row. One
+   choice for every mesh tab, remembered per browser. It narrows the mesh
+   grouping alone: a workspace tab already files remote rows under their
+   own `@<machine>` heading, and an ungrouped rail trails them under one. */
+const SESSION_ORIGIN_FILTERS = ["both", "local", "remote"];
+const SESSION_ORIGIN_KEY = `claunch_session_origin:${BASE}`;
+let sessionOriginFilter = (() => {
+  try {
+    const saved = localStorage.getItem(SESSION_ORIGIN_KEY);
+    if (SESSION_ORIGIN_FILTERS.includes(saved)) return saved;
+  } catch {}
+  return "both";
+})();
+
+/* The rows (sessionGroupRows) without the side the filter leaves out.
+   Top-level headings stay, so every mesh keeps its tab while its count
+   drops to the rows still shown, and the reader can switch to a tab that
+   holds none of them and back. A nested heading the filter emptied goes
+   with its rows: under a nested grouping a remote row is filed under its
+   own `@<machine>` heading (shadowGroupValue), which `local` would leave
+   standing with nothing under it -- and `remote` every local one. */
+function filterSessionOrigin(rows, origin) {
+  if (origin !== "local" && origin !== "remote") return rows;
+  const drop = origin === "local" ? "shadow" : "session";
+  const kept = rows.filter((r) => r.type !== drop);
+  return kept.filter((row, i) => {
+    if (row.type !== "group" || !row.level) return true;
+    for (let j = i + 1; j < kept.length; j++) {
+      const next = kept[j];
+      if (next.type === "group") {
+        if (next.level <= row.level) return false;
+      } else {
+        return true;
+      }
+    }
+    return false;
+  });
+}
+
+function setSessionOriginFilter(origin, remember = true) {
+  if (!SESSION_ORIGIN_FILTERS.includes(origin)) return;
+  sessionOriginFilter = origin;
+  if (remember) {
+    try { localStorage.setItem(SESSION_ORIGIN_KEY, origin); } catch {}
+  }
+  sessionGroupTabScrollReset = true;
+  refreshSessions({ cached: true });
 }
 
 /* ---- rail pins --------------------------------------------------------
@@ -1972,6 +2035,81 @@ function sessionTabOtherProject(rec) {
   return recordProject(rec);
 }
 
+/* Motion for the tab bar. The bar is rebuilt from scratch on every change, so
+   a reorder (the tab activated last moves to the right end), a pin toggle
+   (the tab changes group) or a tab arriving or leaving would otherwise jump
+   in a single frame and be easy to miss. Each tab's box is read before the
+   rebuild and the new tab is animated from the old box to its own (FLIP);
+   a tab that is new fades in, and one that is gone is left in place as an
+   inert copy that fades out. A pin toggle also flashes the tab's outline in
+   the colour of the group it joined. Off under prefers-reduced-motion, and
+   wherever the DOM lacks the calls (the reduced harnesses' stub DOM). */
+const SESSION_TAB_MOTION_MS = 220;
+
+function sessionTabMotionOff() {
+  return typeof matchMedia !== "function"
+    || matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+function snapshotSessionTabs(bar) {
+  const shots = new Map();
+  if (sessionTabMotionOff()) return shots;
+  for (const tab of bar.children || []) {
+    const name = tab.dataset && tab.dataset.name;
+    if (!name || typeof tab.getBoundingClientRect !== "function") continue;
+    shots.set(name, { el: tab, rect: tab.getBoundingClientRect(),
+                      pinned: tab.classList.contains("pinned") });
+  }
+  return shots;
+}
+
+function animateSessionTabs(bar, shots) {
+  if (!shots.size || sessionTabMotionOff()) return;
+  const timing = { duration: SESSION_TAB_MOTION_MS, easing: "cubic-bezier(.2, .7, .2, 1)" };
+  const present = new Set();
+  for (const tab of bar.querySelectorAll(".session-tab")) {
+    const name = tab.dataset.name;
+    present.add(name);
+    if (typeof tab.animate !== "function") continue;
+    const old = shots.get(name);
+    if (!old) {
+      tab.animate([{ opacity: 0, transform: "scale(.85)" }, { opacity: 1, transform: "none" }], timing);
+      continue;
+    }
+    const now = tab.getBoundingClientRect();
+    const dx = old.rect.left - now.left, dy = old.rect.top - now.top;
+    if (dx || dy) {
+      tab.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: "none" }], timing);
+    }
+    const pinned = tab.classList.contains("pinned");
+    if (old.pinned !== pinned) {
+      tab.animate([{ boxShadow: `0 0 0 2px ${pinned ? "#d29922" : "#8b949e"}` },
+                   { boxShadow: "0 0 0 0 transparent" }],
+                  { duration: SESSION_TAB_MOTION_MS * 3, easing: "ease-out" });
+    }
+  }
+  if (bar.classList.contains("hidden") || typeof bar.getBoundingClientRect !== "function") return;
+  const box = bar.getBoundingClientRect();
+  for (const [name, old] of shots) {
+    if (present.has(name) || typeof old.el.animate !== "function") continue;
+    // The detached tab itself, renamed out of `.session-tab` and stripped of
+    // its names so no selector, focus restore or snapshot counts it as a tab.
+    const ghost = old.el;
+    ghost.classList.replace("session-tab", "session-tab-leaving");
+    for (const el of [ghost, ...ghost.querySelectorAll("[data-name]")]) delete el.dataset.name;
+    ghost.setAttribute("aria-hidden", "true");
+    ghost.inert = true;
+    Object.assign(ghost.style, {
+      left: `${old.rect.left - box.left - bar.clientLeft}px`,
+      top: `${old.rect.top - box.top - bar.clientTop}px`,
+      width: `${old.rect.width}px`, height: `${old.rect.height}px`,
+    });
+    bar.append(ghost);
+    ghost.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: "scale(.85)" }],
+                  timing).onfinish = () => ghost.remove();
+  }
+}
+
 function renderSessionTabs() {
   const bar = $("session-tabs");
   if (!bar || !sessionTabHistory) return;
@@ -1984,7 +2122,7 @@ function renderSessionTabs() {
     // summary composed (or refreshed) while the bar is on screen has to
     // repaint the title, and the bar is otherwise only rebuilt when the
     // fields above move.
-    return [name, isSessionPinned(name), name === active, rec?.status, rec?.paused_at,
+    return [name, isSessionPinned(name), name === active, rec?.status, rec?.paused_at, rec?.held_at,
             typeof dotGrade === "function" ? dotGrade(rec) : "",
             rec?.observe_pin, rec?.briefing, sessionTabOtherProject(rec)];
   }));
@@ -1994,6 +2132,7 @@ function renderSessionTabs() {
   const focused = bar.contains(document.activeElement) ? document.activeElement : null;
   const focusName = focused?.dataset.name;
   const focusAction = focused?.dataset.action;
+  const shots = snapshotSessionTabs(bar);
   bar.replaceChildren();
   bar.classList.toggle("hidden", !names.length);
   for (const name of names) {
@@ -2091,6 +2230,8 @@ function renderSessionTabs() {
       || controls.find(el => el.dataset.action === "open");
     target?.focus({ preventScroll: true });
   }
+  // After the focus restore, so a leaving copy is never a focus target.
+  animateSessionTabs(bar, shots);
 }
 
 // Refit the terminal when tab wrapping or mobile rail visibility changes.
@@ -2304,7 +2445,7 @@ function renderSessionGrid(force = false) {
     layout.rows, currentName, sessionGridPerLine,
     // The dot's grade rides here, not the readings under it: those move on
     // most polls, the grade only when a bound is crossed.
-    visible.map((s) => [s.name, s.status, s.paused_at,
+    visible.map((s) => [s.name, s.status, s.paused_at, s.held_at,
                         typeof dotGrade === "function" ? dotGrade(s) : "", s.role,
                         handleTag(s.name)?.handle || null,
                         searching ? sessionMatchesSearch(s) : true,
@@ -3536,6 +3677,34 @@ function renderSessionGroupHeader(group, tab) {
   count.textContent = `${sessions} session${sessions === 1 ? "" : "s"}`;
   head.append(kind, name, count);
   head.title = `${group} ${tab.value} — click to scroll to the top`;
+  if (group === "mesh" && typeof sessionOriginFilter === "string") {
+    const origins = document.createElement("span");
+    origins.className = "session-origin-filter";
+    origins.setAttribute("role", "radiogroup");
+    origins.setAttribute("aria-label", "Show local, remote or both");
+    const tips = {
+      both: "show this daemon's sessions and other daemons' members",
+      local: "show only this daemon's sessions",
+      remote: "show only other daemons' members (remote-shadow rows)",
+    };
+    for (const origin of SESSION_ORIGIN_FILTERS) {
+      const btn = document.createElement("button");
+      const on = origin === sessionOriginFilter;
+      btn.className = "session-origin-option" + (on ? " active" : "");
+      btn.type = "button";
+      btn.textContent = origin;
+      btn.dataset.origin = origin;
+      btn.setAttribute("role", "radio");
+      btn.setAttribute("aria-checked", String(on));
+      btn.title = tips[origin];
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();   // the row itself scrolls; this does not
+        if (origin !== sessionOriginFilter) setSessionOriginFilter(origin);
+      });
+      origins.appendChild(btn);
+    }
+    head.appendChild(origins);
+  }
   if (group === "mesh" && tab.value !== "(no mesh)") {
     const add = document.createElement("button");
     add.className = "session-group-new";
@@ -3581,23 +3750,26 @@ function setSessionGroupByMesh(enabled, remember = true) {
 
 function sessionCategory(s) {
   if (s && s.archived_at) return "archived";
-  if (s && s.status === "exited") return s.paused_at ? "paused" : "killed";
+  if (s && s.status === "exited") {
+    if (s.held_at) return "hold";
+    return s.paused_at ? "paused" : "killed";
+  }
   return "running";
 }
 
 function sessionMatchesFilter(s, filter = sessionFilter) {
   const category = sessionCategory(s);
   if (Array.isArray(filter)) return filter.includes(category);
-  if (filter === "running-paused") return category === "running" || category === "paused";
+  if (filter === "running-paused") return ["running", "hold", "paused"].includes(category);
   return filter === "current" ? category !== "archived" : category === filter;
 }
 
 function sessionFilterCounts(sessions) {
-  const counts = { current: 0, "running-paused": 0, running: 0, killed: 0, paused: 0, archived: 0 };
+  const counts = { current: 0, "running-paused": 0, running: 0, hold: 0, killed: 0, paused: 0, archived: 0 };
   for (const session of sessions || []) {
     const category = sessionCategory(session);
     counts[category]++;
-    if (category === "running" || category === "paused") counts["running-paused"]++;
+    if (["running", "hold", "paused"].includes(category)) counts["running-paused"]++;
     if (category !== "archived") counts.current++;
   }
   return counts;
@@ -3605,8 +3777,8 @@ function sessionFilterCounts(sessions) {
 
 function setSessionFilter(filter, remember = true) {
   if (!SESSION_FILTERS.includes(filter)) return;
-  sessionFilter = filter === "current" ? ["running", "killed", "paused"]
-    : filter === "running-paused" ? ["running", "paused"]
+  sessionFilter = filter === "current" ? ["running", "hold", "killed", "paused"].slice()
+    : filter === "running-paused" ? ["running", "hold", "paused"].slice()
     : SESSION_FILTERS.filter((s) => s !== "current" && s !== "running-paused"
       && (s === filter ? !sessionFilter.includes(s) : sessionFilter.includes(s)));
   if (remember) localStorage.setItem(SESSION_FILTER_KEY, JSON.stringify(sessionFilter));
@@ -3649,14 +3821,14 @@ function syncSessionFilters(sessions) {
   const counts = sessionFilterCounts(sessions);
   const labels = {
     "running-paused": "Running || Paused",
-    current: "Current", running: "Running", killed: "Killed", paused: "Paused",
-    archived: "Archived",
+    current: "Current", running: "Running", hold: "Hold", killed: "Killed",
+    paused: "Paused", archived: "Archived",
   };
   for (const filter of SESSION_FILTERS) {
     const button = $(`session-filter-${filter}`);
     if (!button) continue;
     button.setAttribute("title", filter === "current"
-      ? "Current — Running, Paused, Killed" : labels[filter]);
+      ? "Current — Running, Hold, Paused, Killed" : labels[filter]);
     button.setAttribute("aria-label", `${labels[filter]} (${counts[filter]})`);
     button.textContent = "";
     button.append(
@@ -3668,9 +3840,11 @@ function syncSessionFilters(sessions) {
       })
     );
     const pressed = filter === "current"
-      ? sessionFilter.length === 3 && ["running", "killed", "paused"].every((s) => sessionFilter.includes(s))
+      ? sessionFilter.length === ["running", "hold", "killed", "paused"].length
+        && ["running", "hold", "killed", "paused"].every((s) => sessionFilter.includes(s))
       : filter === "running-paused"
-        ? sessionFilter.length === 2 && ["running", "paused"].every((s) => sessionFilter.includes(s))
+        ? sessionFilter.length === ["running", "hold", "paused"].length
+          && ["running", "hold", "paused"].every((s) => sessionFilter.includes(s))
       : sessionFilter.includes(filter);
     button.setAttribute("aria-pressed", String(pressed));
   }
@@ -3818,7 +3992,7 @@ function restoreRailFocus(name) {
    would answer with `already_exited`. */
 function railCardKill(name) {
   const rec = railCardRecord(name);
-  if (!rec || (rec.status === "exited" && !rec.paused_at)) return false;
+  if (!rec || (rec.status === "exited" && !rec.paused_at && !rec.held_at)) return false;
   killSession(name);
   return true;
 }
@@ -4068,14 +4242,18 @@ async function refreshSessions(options) {
   // their listeners and their gauges -- to redraw one seen line. Those lines
   // are refreshed in place instead (refreshRailSeen, below the row loop).
   // `last_output_at` is a detail-panel fact no row draws, and `viewers` only
-  // feeds the seen line's "now".
+  // feeds the seen line's "now". The tps reading's `age_s` grows by the poll
+  // interval on every answer; the tps line shows it as an age and is moved
+  // on in place like the seen line, so it is no reason to rebuild a row
+  // (claunch-0stm2: it alone rebuilt every row with a tps reading).
   // Pin controls reflect the same state as the main session tabs.
   const pins = typeof sessionPinnedNames === "function" ? sessionPinnedNames() : [];
   const unstamped = (key, value) => (
     key === "due_in" || key === "fired_ago" ||
     key === "last_visited_at" || key === "last_input_at" ||
     key === "last_activity_at" || key === "last_output_at" ||
-    key === "viewers" || key === "moved_rows" || key === "tool_calls"
+    key === "viewers" || key === "moved_rows" || key === "tool_calls" ||
+    key === "age_s"
   ) ? undefined : value;
   const signature = JSON.stringify(
     // The project is outside the old tuple so the tuple keeps its shape;
@@ -4083,7 +4261,9 @@ async function refreshSessions(options) {
     [[briefingLLM, sessionsCache, groupOrder, meshCache, pins],
      typeof currentProject === "string" ? currentProject : "", shadowList,
      // The open tab picks which rows are drawn.
-     typeof sessionGroupTab === "object" ? sessionGroupTab : null],
+     typeof sessionGroupTab === "object" ? sessionGroupTab : null,
+     // The mesh header's local/remote pick drops rows from the same cache.
+     typeof sessionOriginFilter === "string" ? sessionOriginFilter : "both"],
     unstamped,
   );
   // See the hold above: a press in flight keeps the rows it started on, and
@@ -4129,12 +4309,16 @@ async function refreshSessions(options) {
     && typeof list.removeChild === "function" && !!list.childNodes;
   const keptRows = new Map();
   const keptGroups = new Map();
+  const keptShadows = new Map();
   if (inPlace) {
     const harvest = (box) => {
       for (const n of Array.from(box.childNodes)) {
         if (n._railGroupKey) {
           keptGroups.set(n._railGroupKey, n);
           harvest(n._railGroupBody);
+        } else if (n._railShadowSig) {
+          if (!keptShadows.has(n._railShadowSig)) keptShadows.set(n._railShadowSig, []);
+          keptShadows.get(n._railShadowSig).push(n);
         } else if (n._railRowSig && n.dataset && n.dataset.name) {
           if (!keptRows.has(n.dataset.name)) keptRows.set(n.dataset.name, []);
           keptRows.get(n.dataset.name).push(n);
@@ -4155,7 +4339,22 @@ async function refreshSessions(options) {
     }
     const at = placed.get(box) || 0;
     const kids = box.childNodes;
-    if (kids[at] !== node) box.insertBefore(node, kids[at] || null);
+    const cur = kids[at];
+    if (cur !== node) {
+      // A rebuilt row lands where the row it replaces stands: swapping it
+      // there is one record, where inserting ahead of it would push every
+      // row below one slot down -- a move, and a record, each.
+      const name = cur && !node.parentNode && cur.dataset && node.dataset
+        ? cur.dataset.name : null;
+      const stale = name && name === node.dataset.name ? keptRows.get(name) : null;
+      const i = stale ? stale.indexOf(cur) : -1;
+      if (i >= 0 && typeof box.replaceChild === "function") {
+        stale.splice(i, 1);
+        box.replaceChild(node, cur);
+      } else {
+        box.insertBefore(node, cur || null);
+      }
+    }
     placed.set(box, at + 1);
   };
   // Everything a row draws from, other than the stamps refreshRailSeen moves
@@ -4213,8 +4412,10 @@ async function refreshSessions(options) {
     })() : entries.map(([session, depth]) => ({ type: "session", session, depth }));
   // Grouped, the rail shows one group at a time: the tab strip names every
   // group, and only the open tab's rows are drawn below it.
+  const originRows = groupOrder[0] === "mesh" && typeof filterSessionOrigin === "function"
+    ? filterSessionOrigin(allRows, sessionOriginFilter) : allRows;
   const tabbed = rebuild && groupOrder.length && typeof sessionGroupTabRows === "function"
-    ? sessionGroupTabRows(allRows, groupOrder[0]) : null;
+    ? sessionGroupTabRows(originRows, groupOrder[0]) : null;
   const rows = tabbed ? tabbed.rows : allRows;
   if (rebuild && typeof renderSessionGroupTabs === "function") {
     renderSessionGroupTabs(groupOrder[0] || "", tabbed ? tabbed.tabs : [],
@@ -4321,7 +4522,16 @@ async function refreshSessions(options) {
       // record lookup -- can be handed it.
       const parent = nestedGroupContainers
         ? (groupBodies[groupBodies.length - 1] || list) : list;
-      place(parent, renderShadowCard(row.shadow, { depth: row.depth || 0 }));
+      // Kept like a local row: a card drawn from the same record at the
+      // same depth is the node already there, not a new one every poll.
+      const sig = inPlace ? JSON.stringify([row.shadow, row.depth || 0], unstamped) : "";
+      const kept = inPlace && keptShadows.has(sig) ? keptShadows.get(sig).shift() : null;
+      let card = kept;
+      if (!card) {
+        card = renderShadowCard(row.shadow, { depth: row.depth || 0 });
+        if (inPlace) card._railShadowSig = sig;
+      }
+      place(parent, card);
       countRow();
       continue;
     }
@@ -4453,6 +4663,8 @@ async function refreshSessions(options) {
     if (s.status === "exited") {
       li.title = [li.title, s.archived_at
         ? "archived — open it to inspect or resume"
+        : s.held_at
+        ? "hold — idle, its program was freed; open it to wake it with its conversation"
         : s.paused_at
         ? "paused — open it to resume; the bulk resume brings every paused one back"
         : "exited — open it to resume or archive"].filter(Boolean).join(" · ");
@@ -4802,23 +5014,41 @@ function memberAutoBadge(m) {
    one of ours, and tagging our row with somebody else's room would be a
    lie the reader cannot check. */
 function sessMeshes(name) {
-  const out = [];
-  for (const m of meshCache || []) {
-    for (const mem of m.members || []) {
-      if (mem.local && mem.session === name) {
+  // Indexed once per mesh poll rather than walked per call: the rail asks
+  // this two or three times for every row it draws, and walking every
+  // member of every mesh each time was a visible slice of a 390-row redraw
+  // (claunch-otusq). The mesh poll replaces meshCache wholesale, so the
+  // arrays it holds -- itself and each room's member list, for a caller
+  // that rewrites one room in place -- say whether the index is current.
+  const from = meshCache || [];
+  const lists = from.map((m) => m.members);
+  const was = sessMeshes._lists;
+  if (sessMeshes._from !== from || !was || was.length !== lists.length
+      || lists.some((l, i) => l !== was[i])) {
+    const index = new Map();
+    for (const m of from) {
+      for (const mem of m.members || []) {
+        if (!mem.local) continue;
         // `label` is the roster's spelling of everything the member holds
         // (`leader+reviewer`); `role` stays the primary for callers that
         // key on one name.
         const held = Array.isArray(mem.roles) && mem.roles.length
           ? mem.roles : [mem.role || ""];
-        out.push({
+        if (!index.has(mem.session)) index.set(mem.session, []);
+        index.get(mem.session).push({
           mesh: m.name, handle: mem.handle, role: mem.role || "",
           roles: held.filter(Boolean), label: held.filter(Boolean).join("+"),
         });
       }
     }
+    for (const list of index.values()) list.sort((a, b) => a.mesh.localeCompare(b.mesh));
+    sessMeshes._from = from;
+    sessMeshes._lists = lists;
+    sessMeshes._index = index;
   }
-  return out.sort((a, b) => a.mesh.localeCompare(b.mesh));
+  // A copy of each entry, so a caller that edits what it was handed cannot
+  // change the next caller's answer.
+  return (sessMeshes._index.get(name) || []).map((m) => ({ ...m, roles: [...m.roles] }));
 }
 
 /* What the row actually draws: the first few rooms, then a count for the
@@ -6925,7 +7155,8 @@ function dotGrade(s) {
    for a caller that holds a fresher one (the mobile bar). */
 function dotClassOf(s, status) {
   const st = status || (s && s.status) || "unknown";
-  const paused = st === "exited" && s && s.paused_at ? " paused" : "";
+  const paused = st === "exited" && s && s.held_at ? " hold"
+    : st === "exited" && s && s.paused_at ? " paused" : "";
   return `dot ${st}${paused}${dotGrade(s && { ...s, status: st })}`;
 }
 
@@ -7053,6 +7284,30 @@ function railSeenLine(s) {
 function refreshRailSeen(list) {
   if (!list || typeof list.querySelectorAll !== "function") return;
   const byName = new Map((sessionsCache || []).map((s) => [s.name, s]));
+  // Each line below is redrawn only when what it reads as moved: the key is
+  // what the builder would print (the ages as the reader sees them, the
+  // stale marks, the record behind them), worked out without building a
+  // node. Building every line of every row on every poll and comparing the
+  // result left hundreds of detached spans per tick for the cycle collector,
+  // about two seconds in ten of the main thread on a 390-row rail
+  // (claunch-otusq).
+  const stale = typeof railStale === "object" && railStale ? railStale : {};
+  const seenKey = (s) => JSON.stringify([
+    Number(s.viewers) > 0, stale.seen, stale.typed, stale.moved,
+    ...[s.last_visited_at, s.last_input_at, s.last_activity_at].map((iso) => {
+      const ago = typeof seenAgo === "function" ? seenAgo(iso) : null;
+      return ago ? [iso, ago.text, ago.secs >= (stale.seen || 0),
+                    ago.secs >= (stale.typed || 0), ago.secs >= (stale.moved || 0)] : null;
+    }),
+  ]);
+  // A freshly built line goes in only where it reads differently.
+  const swap = (old, fresh) => {
+    if (typeof old.outerHTML !== "string" || old.outerHTML !== fresh.outerHTML) {
+      old.replaceWith(fresh);
+      return fresh;
+    }
+    return old;
+  };
   for (const li of list.querySelectorAll("li[data-name]")) {
     const s = byName.get(li.dataset.name);
     const old = typeof li.querySelector === "function"
@@ -7060,10 +7315,8 @@ function refreshRailSeen(list) {
     if (!s || !old || typeof old.replaceWith !== "function") continue;
     // Swapped only when it reads differently: the ages move by the minute,
     // and a swap on every tick was a mutation per row per poll (claunch-v87).
-    const fresh = railSeenLine(s);
-    if (typeof old.outerHTML !== "string" || old.outerHTML !== fresh.outerHTML) {
-      old.replaceWith(fresh);
-    }
+    const sk = seenKey(s);
+    if (old._railKey !== sk) swap(old, railSeenLine(s))._railKey = sk;
     // The dot's grade is read off the same moving stamps (plus moved_rows),
     // so it is re-shaded on the same tick.
     // The status dot is the row's first child (see the li.append in
@@ -7082,22 +7335,43 @@ function refreshRailSeen(list) {
     // Neither line carries a listener, so the swap loses nothing.
     const tps = li.querySelector(".rail-tps-line");
     if (tps && typeof tpsRailLine === "function") {
-      const fresh = tpsRailLine(s);
-      if (fresh) tps.replaceWith(fresh);
-      else tps.remove();
+      const t = s.tps;
+      const age = t && typeof tpsAgeSecs === "function" ? tpsAgeSecs(t) : null;
+      // The reading less its raw age, which moves every poll: what the line
+      // shows of it is the formatted age and the stale class beside it.
+      const tk = JSON.stringify([t || null, age === null ? null : fmtAge(age),
+        t && typeof tpsStaleClass === "function" ? tpsStaleClass(t) : ""],
+        (key, value) => key === "age_s" ? undefined : value);
+      if (tps._railKey !== tk) {
+        const fresh = tpsRailLine(s);
+        if (fresh) swap(tps, fresh)._railKey = tk;
+        else tps.remove();
+      }
     }
+    // The gauge reads the reading, the harness that sets its tick, and the
+    // tooltip that carries the reading's age.
+    const note = typeof ctxTooltip === "function" ? ctxTooltip(s) : "";
     const ctx = li.querySelector(".rail-ctx-line");
     if (ctx && typeof ctxRailLine === "function") {
-      const fresh = ctxRailLine(s);
-      if (fresh) ctx.replaceWith(fresh);
-      else ctx.remove();
+      const ck = JSON.stringify([s.context || null, s.harness || null, note]);
+      if (ctx._railKey !== ck) {
+        const fresh = ctxRailLine(s);
+        if (fresh) swap(ctx, fresh)._railKey = ck;
+        else ctx.remove();
+      }
     }
+    // The titles are written once, at what they end up reading (the same
+    // join ctxNoteOnRow makes): putting the base back first and adding the
+    // note after was two writes per row per poll, and the first never
+    // matched what was there (claunch-0stm2).
     const name = li.querySelector(".rail-name");
     if (typeof li._railTitleBase === "string" && name &&
         typeof name._railTitleBase === "string" && typeof ctxNoteOnRow === "function") {
-      li.title = li._railTitleBase;
-      name.title = name._railTitleBase;
-      ctxNoteOnRow(li, name, s);
+      const join = (had) => (note ? [had, note].filter(Boolean).join("\n") : had);
+      const rowTitle = join(li._railTitleBase);
+      const nameTitle = join(name._railTitleBase);
+      if (li.title !== rowTitle) li.title = rowTitle;
+      if (name.title !== nameTitle) name.title = nameTitle;
     }
   }
 }
@@ -7490,15 +7764,8 @@ function decorateNoteRow(li, s) {
   }
   const fresh = el("div", "rail-note", text);
   fresh.title = text;  // the column clips it; hover still gives the whole note
-  // One click on the note is the way into editing it, so a click here is not
-  // the row's "attach" -- the ✎ beside the ⓘ is the same door for a row that
-  // has no note line to click.
-  if (typeof fresh.addEventListener === "function") {
-    fresh.addEventListener("click", (e) => {
-      e.stopPropagation();
-      openRailNoteEditor(li, s.name);
-    });
-  }
+  // The line is read-only: a click on it is the row's own click (attach).
+  // The ✎ beside the ⓘ is the only way into editing the note.
   railNotePlace(li, fresh);
 }
 
@@ -7543,7 +7810,7 @@ function railNoteButton(li, s, text) {
 
 /* ---- the note, edited on its rail row --------------------------------
    The detail panel's note box (sessNote) is the full editor; this is the
-   quick one: a click on the row's ✎ or on the note line opens a box in the
+   quick one: a click on the row's ✎ opens a box in the
    note's place, Enter saves, Shift+Enter is a newline, Esc puts the note
    back as it was. It writes through the same endpoint the panel does, so
    the two cannot disagree about what a note is.
@@ -7708,27 +7975,34 @@ function decorateBriefingRow(li, s) {
     // Drawn aside and swapped in only when the chips read differently: this
     // runs on every poll for every row (refreshRailSeen), and redrawing the
     // same chips each time was a mutation per row per poll (claunch-v87).
+    // Not drawn at all while what they would print is what they printed last
+    // time: the aside copy was garbage on every poll too (claunch-otusq).
+    const key = JSON.stringify(reported.map((check) => [
+      check, check.reported_at ? (seenAgo(check.reported_at) || {}).text : null]));
     const live = checks;
-    checks = el("div", "rail-status-checks");
-    for (const check of reported) {
-      const answer = statusCheckText(check);
-      const age = check.reported_at ? seenAgo(check.reported_at) : null;
-      const chip = el("span", `rail-status-check check-${answer}`,
-        `${statusCheckIcon(check)} ${statusCheckName(check)}` + (age ? ` · ${age.text}` : ""));
-      chip.title = age
-        ? `${String(check.question || "")}\nreported ${new Date(Date.parse(check.reported_at)).toLocaleString()}`
-        : String(check.question || "");
-      chip.ariaLabel = `${statusCheckName(check)}: ${answer}`;
-      checks.appendChild(chip);
-    }
-    if (typeof live.outerHTML === "string" && live.outerHTML === checks.outerHTML) {
-      checks = live;
-    } else if (typeof live.replaceWith === "function") {
-      live.replaceWith(checks);
-    } else {
-      live.innerHTML = "";
-      for (const chip of [...checks.children]) live.appendChild(chip);
-      checks = live;
+    if (live._railKey !== key) {
+      checks = el("div", "rail-status-checks");
+      for (const check of reported) {
+        const answer = statusCheckText(check);
+        const age = check.reported_at ? seenAgo(check.reported_at) : null;
+        const chip = el("span", `rail-status-check check-${answer}`,
+          `${statusCheckIcon(check)} ${statusCheckName(check)}` + (age ? ` · ${age.text}` : ""));
+        chip.title = age
+          ? `${String(check.question || "")}\nreported ${new Date(Date.parse(check.reported_at)).toLocaleString()}`
+          : String(check.question || "");
+        chip.ariaLabel = `${statusCheckName(check)}: ${answer}`;
+        checks.appendChild(chip);
+      }
+      if (typeof live.outerHTML === "string" && live.outerHTML === checks.outerHTML) {
+        checks = live;
+      } else if (typeof live.replaceWith === "function") {
+        live.replaceWith(checks);
+      } else {
+        live.innerHTML = "";
+        for (const chip of [...checks.children]) live.appendChild(chip);
+        checks = live;
+      }
+      checks._railKey = key;
     }
     let statusRefresh = li.querySelector(".sess-status-check-rowref");
     if (!statusRefresh) {
@@ -8226,7 +8500,7 @@ function filterCflowRuns(runs, sessions, filter, query) {
   return (runs || []).filter((run) => {
     const category = cflowSessionCategory(run, sessions);
     const matches = filter === "all" || category === filter ||
-      (filter === "running-paused" && (category === "running" || category === "paused"));
+      (filter === "running-paused" && ["running", "hold", "paused"].includes(category));
     return matches && (!needle || [run.workflow, run.scope, run.title, run.step_id, run.cwd]
       .some((value) => String(value || "").toLowerCase().includes(needle)));
   });
@@ -10260,6 +10534,11 @@ function newSubroles(f) {
 let newPackOffer = null;       // /api/prompt-packs/offer's answer
 let newPackOfferFor = null;    // the directory it answers for
 let newPackTicks = new Map();  // pack id -> the operator's own tick
+let newPrompterOffer = null;
+let newPrompterTicks = new Set();
+let newPrompterRequest = 0;
+let newTaskPrompterOffer = null;
+let newTaskPrompterRequest = 0;
 // The daemon's own prompt (offer.daemon_prompt): one per daemon, so a tick
 // outlives a change of workspace. null = untouched = ticked.
 let newDaemonPromptTick = null;
@@ -10288,6 +10567,76 @@ function promptPackFormOpened() {
   newPackDefaultsPending = true;
   newPackOfferFor = null;
   Promise.resolve(refreshPromptPackOffer()).catch(() => {});
+  newPrompterTicks = new Set();
+  newPrompterOffer = null;
+  if (newPackPreview && newPackPreview.prompter) newPackPreview = null;
+  Promise.resolve(refreshNewPrompterOffer()).catch(() => {});
+  newTaskPrompterOffer = null;
+  renderNewTaskPrompter();
+  Promise.resolve(refreshNewTaskPrompter()).catch(() => {});
+}
+
+async function refreshNewPrompterOffer() {
+  const request = ++newPrompterRequest;
+  let offer;
+  try {
+    const resp = await api("/api/prompter/contexts");
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    offer = await resp.json();
+  } catch (err) {
+    offer = { enabled: true, connected: false, contexts: [], error: String(err) };
+  }
+  if (request !== newPrompterRequest) return;
+  newPrompterOffer = offer;
+  renderPromptPackRow();
+}
+
+async function refreshNewTaskPrompter() {
+  const request = ++newTaskPrompterRequest;
+  let offer;
+  try {
+    const resp = await api("/api/prompter/prompts");
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    offer = await resp.json();
+  } catch (err) {
+    offer = { enabled: true, connected: false, prompts: [], error: String(err) };
+  }
+  if (request !== newTaskPrompterRequest) return;
+  newTaskPrompterOffer = offer;
+  renderNewTaskPrompter();
+}
+
+function renderNewTaskPrompter() {
+  const row = $("new-task-prompter");
+  const form = $("new-session");
+  if (!row || !form) return;
+  row.innerHTML = "";
+  const offer = newTaskPrompterOffer;
+  row.classList.toggle("hidden", !(offer && offer.enabled));
+  if (!offer || !offer.enabled) return;
+  row.appendChild(el("p", "wf-note", "Prompter prompts — click to append to Opening task, then edit as needed."));
+  const prompts = offer.connected ? offer.prompts || [] : [];
+  if (!prompts.length) {
+    row.appendChild(el("p", "wf-note", offer.connected
+      ? "Prompter has no prompts." : `Prompter unavailable: ${offer.error || "connection failed"}`));
+  }
+  for (const prompt of prompts) {
+    const button = el("button", "wf-btn", `Append ${prompt.title || prompt.name}`);
+    button.type = "button";
+    button.title = prompt.body;
+    button.addEventListener("click", () => {
+      const task = form.elements.namedItem("task");
+      task.value += (task.value ? "\n\n" : "") + prompt.body;
+      task.dispatchEvent(new Event("input", { bubbles: true }));
+      task.focus();
+    });
+    row.appendChild(button);
+  }
+}
+
+function newPrompterSelection() {
+  if (!newPrompterOffer || !newPrompterOffer.connected || !newPrompterTicks.size) return null;
+  return { url: newPrompterOffer.url, ids: [...newPrompterTicks] };
 }
 
 /* Write a held seed's ticks, once the offer on hand is the one for the
@@ -10403,7 +10752,8 @@ function renderPromptPackRow() {
   const missing = Object.keys(required).filter((id) => !have.has(id) && !shippedIds.has(id));
   const wsName = offer && offer.workspace ? offer.workspace.name : "this directory's workspace";
   const own = offer && offer.daemon_prompt;
-  const empty = !own && !packs.length && !fromPackage.length && !missing.length;
+  const remote = newPrompterOffer;
+  const empty = !own && !packs.length && !fromPackage.length && !missing.length && !(remote && remote.enabled);
   row.classList.toggle("hidden", empty);
   if (empty) return;
   row.appendChild(el("span", "new-check-label", "Prompt packs"));
@@ -10445,7 +10795,7 @@ function renderPromptPackRow() {
     const view = el("button", "pack-chip-view", "view");
     view.type = "button";
     view.title = `Show the text of ${p.title || p.id}`;
-    view.addEventListener("click", () => togglePackPreview(p.id, opts.daemon));
+    view.addEventListener("click", () => opts.onView ? opts.onView() : togglePackPreview(p.id, opts.daemon));
     wrap.appendChild(view);
     return wrap;
   };
@@ -10512,6 +10862,32 @@ function renderPromptPackRow() {
     });
   }
   group("Roles", shown.map(([p, packaged]) => packChip(p, packaged)), more);
+  const snippets = remote && remote.connected ? remote.contexts || [] : [];
+  group("Prompter contexts", snippets.map((p) => chip({
+    id: `prompter:context:${p.id}`, title: p.title || p.name, description: p.body,
+  }, {
+    name: `prompter_context_${p.id}`, value: String(p.id),
+    checked: newPrompterTicks.has(p.id),
+    source: "prompter", sourceLabel: "prompter", sourceTitle: remote.url,
+    onChange: (on) => {
+      if (on) newPrompterTicks.add(p.id); else newPrompterTicks.delete(p.id);
+      renderPromptPackRow();
+    },
+    onView: () => {
+      const id = `prompter:context:${p.id}`;
+      newPackPreview = newPackPreview && newPackPreview.id === id ? null : {
+        id, prompter: true, error: "", doc: {
+          title: p.title || p.name, body: p.body, source: "prompter", url: remote.url,
+          lines: p.body.split("\n").length,
+        },
+      };
+      renderPromptPackRow();
+    },
+  })), null);
+  if (remote && remote.enabled && !snippets.length) {
+    body.appendChild(el("p", "wf-note", remote.connected
+      ? "Prompter has no contexts." : `Prompter unavailable: ${remote.error || "connection failed"}`));
+  }
   row.appendChild(body);
 
   // What the opening will actually carry, in the daemon's order (its own
@@ -10536,6 +10912,9 @@ function renderPromptPackRow() {
   });
   if (newDaemonPromptWanted()) {
     parts.unshift({ text: "daemon prompt (this daemon's, every session)", title: "" });
+  }
+  for (const p of snippets) if (newPrompterTicks.has(p.id)) {
+    parts.push({ text: `${p.title || p.name} (prompter)`, title: remote.url });
   }
   const summary = el("div", "new-packs-summary");
   summary.appendChild(el("div", "new-packs-summary-head",
@@ -10596,6 +10975,7 @@ async function togglePackPreview(id, daemon) {
 
 /* Where a previewed text comes from, in the words the chips' badges use. */
 function packPreviewOrigin(doc, wsName) {
+  if (doc.source === "prompter") return `prompter · ${doc.url}`;
   if (doc.source === "daemon") return "this daemon's prompt, every session";
   if (doc.source === "package") return `claunch's copy, not installed in ${wsName}`;
   return {
@@ -12145,6 +12525,8 @@ $("new-session").addEventListener("submit", async (e) => {
   // Sent even when empty once an offer was read: an empty list is "none of
   // the defaults", and the daemon still adds what the roles require.
   if (newPackOffer) body.prompt_packs = newPromptPacks(f);
+  const prompterSelection = newPrompterSelection();
+  if (prompterSelection) body.prompter_contexts = prompterSelection;
   // Sent only to say no: the daemon gives its prompt unless told otherwise.
   if (newPackOffer && newPackOffer.daemon_prompt && !newDaemonPromptWanted()) {
     body.daemon_prompt = false;
@@ -12198,6 +12580,9 @@ $("new-session").addEventListener("submit", async (e) => {
     body.workflow = "-";
   }
   if (f.task.value.trim()) body.task = f.task.value.trim();
+  // The operator's note goes on the session record with the launch
+  // (claunch-zy9yk); empty is left off, which is "no note".
+  if (f.note && f.note.value.trim()) body.note = f.note.value.trim();
   if (f.score_goal && f.score_goal._scoreLoaded !== false) body.score_goal = !!f.score_goal.checked;
   // The board answer. "new" is the absence of both keys — a request that says
   // nothing gets an issue minted from the task, which is what every client
@@ -12273,6 +12658,8 @@ $("new-session").addEventListener("submit", async (e) => {
     // mesh and workflow pickers are not, since a second worker on the same
     // team is the normal next thing to want.
     f.task.value = "";
+    // The note was about this session; the next one gets its own.
+    if (f.note) f.note.value = "";
     f.context.value = "";
     // The issue body is the task's twin and is spent with it: it described
     // THIS launch's job, and the next session started from the same box has a
@@ -12372,7 +12759,7 @@ function killControlState(session, localState = null) {
       title: "wind-down in progress; stop this session now",
     };
   }
-  if (session && session.status === "exited" && session.paused_at) {
+  if (session && session.status === "exited" && (session.paused_at || session.held_at)) {
     return {
       label: "kill", disabled: false, phase: "ready",
       title: "file this paused session as killed: it leaves the Paused "
@@ -12517,6 +12904,37 @@ async function pauseCurrentSession() { await pauseSession(currentName); }
 
 if ($("term-pause")) $("term-pause").addEventListener("click", pauseCurrentSession);
 
+/* Hold (claunch-5l35i): free the program of a session you are done with for
+   now, keeping everything else. Opening it again wakes it with its
+   conversation; a mesh message or a cflow notice wakes it too. The daemon
+   does the same on its own after `hold_idle_minutes` of quiet. */
+async function holdSession(name) {
+  if (!name) return;
+  const btn = name === currentName ? $("term-idle-hold") : null;
+  if (btn) btn.disabled = true;
+  try {
+    const resp = await api(
+      `/api/sessions/${encodeURIComponent(name)}/hold`, { method: "POST" }
+    );
+    const info = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      await modalInfo(`Could not hold '${name}'`,
+                      info.error || `HTTP ${resp.status}`);
+      return;
+    }
+    const at = sessionsCache.findIndex((s) => s.name === name);
+    if (at >= 0) sessionsCache[at] = { ...sessionsCache[at], ...info };
+  } catch (err) {
+    await modalInfo(`Could not hold '${name}'`,
+                    err && err.message ? err.message : "request failed");
+  } finally {
+    if (btn) btn.disabled = false;
+    await refreshSessions({ state: "current" });
+  }
+}
+
+if ($("term-idle-hold")) $("term-idle-hold").addEventListener("click", () => holdSession(currentName));
+
 /* Archive is available on any record, and on a live one it is also the
    ending: the route terminates the program and writes the archive time in
    one call, with no wind-down in between (see h_session_archive). That makes
@@ -12582,7 +13000,7 @@ $("stop-all").addEventListener("click", async () => {
    the child it was bound to. */
 $("resume-all").addEventListener("click", async () => {
   const dead = sessionsCache
-    .filter((s) => s.status === "exited" && !s.archived_at && !s.paused_at)
+    .filter((s) => s.status === "exited" && !s.archived_at && !s.paused_at && !s.held_at)
     .map((s) => s.name);
   if (!dead.length) return;
   if (!(await modalConfirm(
@@ -12652,7 +13070,7 @@ if ($("resume-paused")) $("resume-paused").addEventListener("click", async () =>
 
 $("archive-exited").addEventListener("click", async () => {
   const dead = sessionsCache
-    .filter((s) => s.status === "exited" && !s.archived_at && !s.paused_at)
+    .filter((s) => s.status === "exited" && !s.archived_at && !s.paused_at && !s.held_at)
     .map((s) => s.name);
   if (!dead.length) return;
   await bulkAction(
@@ -12704,6 +13122,19 @@ syncSessionView();
    somewhere else — another agent's `spawn`, a `claunch new` in a terminal, a
    relay that dropped a beat — shows up only when the timer next comes round.
    This is that timer, on demand, for the whole rail at once. */
+/* The notification history's bell (rail and phone bar) and its panel; what
+   they show is the notices section's (noticePanelPaint). */
+for (const id of ["notice-bell", "m-notice-bell"]) {
+  const bell = $(id);
+  if (bell) bell.addEventListener("click", () => noticePanelToggle());
+}
+if ($("notice-panel-close")) {
+  $("notice-panel-close").addEventListener("click", () => noticePanelToggle(false));
+}
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape" && noticePanelOpen()) noticePanelToggle(false);
+});
+
 $("refresh-all").addEventListener("click", async () => {
   const btn = $("refresh-all");
   if (btn.disabled) return;
@@ -12824,6 +13255,31 @@ $("term-rebrief").addEventListener("click", async () => {
   finally { btn.disabled = false; }
 });
 
+/* Send the retrospective prompt pack (an on-demand pack, never part of an
+   opening) into the terminal: the agent reviews its own session and the cflow
+   definition it followed. improv-worker-v2 asks for it in its last node; this
+   is the operator's door for a run that never got there. */
+$("term-retro").addEventListener("click", async () => {
+  if (!currentName) return;
+  if (!confirm(`Send the retrospective prompt to ${currentName}? ` +
+               "It is typed into the terminal as a new instruction.")) return;
+  const btn = $("term-retro");
+  btn.disabled = true;
+  try {
+    const resp = await api(
+      `/api/sessions/${encodeURIComponent(currentName)}/retrospective`,
+      { method: "POST" }
+    );
+    const info = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      alert(info.error || `HTTP ${resp.status}`);
+    } else if (!info.delivered) {
+      alert("the session did not take it: it is not running or not reading input");
+    }
+  } catch { /* auth overlay is up */ }
+  finally { btn.disabled = false; }
+});
+
 /* ------------------------------------------------------------------ */
 /* terminal attachment                                                */
 /* ------------------------------------------------------------------ */
@@ -12874,14 +13330,83 @@ function handoffControlState(session) {
   };
 }
 
-/* Fork has its own fields and endpoint, within the same form host. */
+/* Fork has its own fields and endpoint, within the same form host.
+
+   Placement, mesh, role and workflow are four separate rows. Each preselects
+   what the copy would inherit, labelled "(recommended)", and each can be set
+   to anything else. What "inherit" means is the daemon's reading, shown
+   rather than re-derived: the origin's mesh when it is in exactly one, and
+   for the workflow the pair the origin's run declares (default_child_cflow,
+   the `child_cflow` of /api/sessions/<origin>/children) -- which is NOT the
+   origin's own workflow. A leader's copy inherits improv-worker, not
+   improv-leader. */
 function quickForkInheritance(session) {
-  const name = (session || {}).name;
-  const mesh = typeof sessMeshes === "function"
-    ? ((sessMeshes(name) || [])[0] || {}).mesh || "" : "";
-  const workflow = typeof sessCflowRun === "function"
-    ? ((sessCflowRun(name) || {}).workflow || "") : "";
-  return { mesh, workflow };
+  const s = session || {};
+  const meshes = typeof sessMeshes === "function" ? (sessMeshes(s.name) || []) : [];
+  const one = meshes.length === 1 ? meshes[0] : null;
+  return {
+    mesh: one ? one.mesh : "",
+    role: one ? (one.role || "") : "",
+    parent: s.parent || "",
+  };
+}
+
+/* {role: handle} for every exclusive role (a leader) a live member of the
+   mesh holds. A remote member counts as live, as it does at the daemon's
+   own check (MeshManager._live_holder): only its daemon can see it die. */
+function quickForkExclusiveHolders(meshName, roles, meshes, sessions) {
+  const exclusive = new Set((roles || []).filter((r) => r && r.exclusive).map((r) => r.name));
+  const out = {};
+  const mesh = (meshes || []).find((m) => m.name === meshName);
+  for (const mem of (mesh && mesh.members) || []) {
+    const held = Array.isArray(mem.roles) && mem.roles.length ? mem.roles : [mem.role || ""];
+    const rec = (sessions || []).find((s) => s.name === mem.session);
+    if (mem.local !== false && !(rec && rec.status !== "exited")) continue;
+    for (const r of held) if (exclusive.has(r) && !out[r]) out[r] = mem.handle || mem.session;
+  }
+  return out;
+}
+
+/* The Role row: every role of the mesh's vocabulary, an exclusive one some
+   live member holds disabled and named with its holder. The preselection is
+   the origin's role, unless that is taken (the origin's own leadership, most
+   often) -- then worker, then the vocabulary's default, then any free role.
+   `error` is the validation the submit enforces; `moved` says the default
+   had to leave the origin's role, so the row can say why. */
+function quickForkRoleState({ roles, holders, originRole, picked, fallback }) {
+  const names = (roles || []).map((r) => r.name);
+  const held = holders || {};
+  const free = (n) => !!n && names.includes(n) && !held[n];
+  const options = names.map((n) => ({
+    value: n,
+    label: held[n] ? `${n} — held by ${held[n]}` : (n === originRole ? `${n} (origin's role)` : n),
+    disabled: !!held[n],
+  }));
+  let value = picked && names.includes(picked) ? picked : "";
+  if (!value) {
+    value = [originRole, "worker", fallback].find(free) || names.find(free) || "";
+  }
+  const error = value && held[value]
+    ? `${value} is already held by ${held[value]} in this mesh, and a mesh has only one ${value} — pick another role`
+    : "";
+  return { options, value, error, moved: !!originRole && value !== originRole && !picked };
+}
+
+function quickForkFill(select, items, value) {
+  select.innerHTML = "";
+  for (const it of items) {
+    const o = new Option(it.label, it.value);
+    if (it.disabled) o.disabled = true;
+    select.appendChild(o);
+  }
+  select.value = items.some((it) => it.value === value && !it.disabled) ? value
+    : (items.find((it) => !it.disabled) || {}).value || "";
+}
+
+/* The mesh the copy would join, by name: "." is the inherited one. */
+function quickForkMeshName(f, inherited) {
+  const v = f.quick_fork_mesh.value;
+  return v === "." ? inherited.mesh : (v === "-" ? "" : v);
 }
 
 function openQuickForkModal(name) {
@@ -12893,27 +13418,155 @@ function openQuickForkModal(name) {
 function configureSessionFork(source) {
   const f = $("new-session");
   const inherited = quickForkInheritance(source);
-  sessionFormView().inheritance = inherited;
+  const view = sessionFormView();
+  view.inheritance = inherited;
+  view.forkRoles = { mesh: null, roles: [], fallback: "" };
+  view.forkRolePicked = "";
+  view.forkWfPicked = false;
+  const load = view.forkLoad = (view.forkLoad || 0) + 1;
   $("new-quick-fork-source").textContent = `Copy the conversation from '${source.name}'. `
     + "The copy shares the original checkout and reports back with Merge. "
     + "Avoid editing the same files in both sessions.";
   f.quick_fork_task.value = "";
-  f.quick_fork_carry.innerHTML = "";
-  f.quick_fork_carry.appendChild(new Option("Scratch copy — no mesh or workflow", ""));
-  const labels = [inherited.mesh && `mesh ${inherited.mesh}`,
-    inherited.workflow && `workflow ${inherited.workflow}`].filter(Boolean);
-  if (labels.length) f.quick_fork_carry.appendChild(
-    new Option(`Inherit ${labels.join(" and ")}`, "inherit"));
-  f.quick_fork_carry.value = "";
-  $("new-quick-fork-carry-row").classList.toggle("hidden", !labels.length);
+  quickForkFill(f.quick_fork_place, [
+    { value: "child", label: `As child of ${source.name} (recommended)` },
+    { value: "sibling", label: inherited.parent
+      ? `As sibling — under ${inherited.parent}, beside ${source.name}`
+      : `As sibling — a root session, like ${source.name}` },
+  ], "child");
+  const others = (typeof meshCache !== "undefined" ? meshCache : [])
+    .map((m) => m.name).filter((n) => n && n !== inherited.mesh);
+  quickForkFill(f.quick_fork_mesh, [
+    ...(inherited.mesh ? [{ value: ".", label: `Inherit — ${inherited.mesh} (recommended)` }] : []),
+    { value: "-", label: "No mesh — a scratch copy" },
+    ...others.map((n) => ({ value: n, label: n })),
+  ], inherited.mesh ? "." : "-");
+  quickForkFill(f.quick_fork_workflow, [{ value: "-", label: "No workflow" }], "-");
+  f.quick_fork_mesh.onchange = () => { syncQuickForkRole(); };
+  f.quick_fork_role.onchange = () => {
+    view.forkRolePicked = f.quick_fork_role.value;
+    syncQuickForkRole();
+  };
+  f.quick_fork_workflow.onchange = () => { view.forkWfPicked = true; };
+  syncQuickForkRole();
+  Promise.resolve(loadQuickForkWorkflows(source, load)).catch(() => {});
+}
+
+/* The Workflow row's choices: the pair the origin hands a child, then every
+   workflow declared where the copy stands (the origin's directory). */
+async function loadQuickForkWorkflows(source, load) {
+  const f = $("new-session");
+  const view = sessionFormView();
+  const get = (url) => api(url).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+  const [kids, wfs] = await Promise.all([
+    get(`/api/sessions/${encodeURIComponent(source.name)}/children`),
+    get(`/api/cflow/workflows?cwd=${encodeURIComponent(source.cwd || "")}`),
+  ]);
+  if (view.forkLoad !== load) return;
+  const pair = (kids && kids.child_cflow) || "";
+  const names = [...new Set(((wfs && wfs.workflows) || [])
+    .filter((w) => w && w.kind !== "subflow")
+    .map((w) => w.value || w.name).filter((n) => n && n !== pair))];
+  const keep = view.forkWfPicked ? f.quick_fork_workflow.value : (pair ? "." : "-");
+  quickForkFill(f.quick_fork_workflow, [
+    ...(pair ? [{ value: ".", label: `Inherit — ${pair} (recommended, the pair ${source.name}'s run declares)` }] : []),
+    { value: "-", label: "No workflow" },
+    ...names.map((n) => ({ value: n, label: n })),
+  ], keep);
+  view.inheritance.workflow = pair;
+}
+
+/* Rebuild the Role row for the mesh now picked: the vocabulary is the mesh's
+   own (fetched once per mesh), and the live holders are read off the mesh
+   poll the rail already keeps. */
+async function syncQuickForkRole() {
+  const f = $("new-session");
+  const view = sessionFormView();
+  const inherited = view.inheritance || {};
+  const meshName = quickForkMeshName(f, inherited);
+  const row = $("new-quick-fork-role-row");
+  const note = $("new-quick-fork-role-note");
+  row.classList.toggle("hidden", !meshName);
+  if (!meshName) {
+    f.quick_fork_role.innerHTML = "";
+    const was = inherited.role;
+    note.textContent = was
+      ? `The copy joins no mesh and holds no role; its opening says the ${was} role in the conversation stays with the origin.`
+      : "";
+    note.classList.toggle("hidden", !was);
+    note.classList.remove("wf-warning");
+    return;
+  }
+  if (view.forkRoles.mesh !== meshName) {
+    const load = view.forkLoad;
+    let data = null;
+    try {
+      const resp = await api(meshName.includes("@") ? "/api/roles"
+        : `/api/mesh/${encodeURIComponent(meshName)}/roles`);
+      data = resp.ok ? await resp.json() : null;
+    } catch { data = null; }
+    if (view.forkLoad !== load || quickForkMeshName(f, inherited) !== meshName) return;
+    view.forkRoles = { mesh: meshName, roles: (data && data.roles) || [], fallback: (data && data.default) || "" };
+  }
+  const originRole = meshName === inherited.mesh ? inherited.role : "";
+  const holders = quickForkExclusiveHolders(meshName, view.forkRoles.roles,
+    typeof meshCache !== "undefined" ? meshCache : [], sessionsCache);
+  const state = quickForkRoleState({
+    roles: view.forkRoles.roles, holders, originRole,
+    picked: view.forkRolePicked, fallback: view.forkRoles.fallback,
+  });
+  quickForkFill(f.quick_fork_role, state.options, state.value);
+  const lines = [];
+  if (state.moved && holders[originRole]) {
+    lines.push(`${quickForkSourceName(view)} is ${originRole} in ${meshName}, and ${originRole} is held by `
+      + `${holders[originRole]} there — the copy starts as ${state.value}.`);
+  }
+  const was = inherited.role;
+  if (was && f.quick_fork_role.value && f.quick_fork_role.value !== originRole) {
+    lines.push(`Role change: the conversation was held as ${was}; the copy's opening tells it that it is `
+      + `${f.quick_fork_role.value} now and the ${was} role stays with the origin.`);
+  }
+  if (state.error) lines.push(state.error);
+  note.textContent = lines.join(" ");
+  note.classList.toggle("hidden", !lines.length);
+  note.classList.toggle("wf-warning", !!state.error);
+}
+
+function quickForkSourceName(view) {
+  return ((view && view.source) || {}).name || "the origin";
+}
+
+/* What the press sends, and the one refusal the form makes itself: an
+   exclusive role (leader) a live member already holds. The daemon refuses
+   the same request (onboard.preflight); this says so before the press. */
+function quickForkRequestOptions(f, view) {
+  const inherited = view.inheritance || {};
+  const meshName = quickForkMeshName(f, inherited);
+  const options = {};
+  if (f.quick_fork_place.value === "sibling") options.sibling = true;
+  const mesh = f.quick_fork_mesh.value;
+  if (mesh && mesh !== "-") options.mesh = mesh;
+  const wf = f.quick_fork_workflow.value;
+  if (wf && wf !== "-") options.workflow = wf;
+  if (meshName && f.quick_fork_role.value) {
+    options.role = f.quick_fork_role.value;
+    const holders = quickForkExclusiveHolders(meshName, (view.forkRoles || {}).roles,
+      typeof meshCache !== "undefined" ? meshCache : [], sessionsCache);
+    if (holders[options.role]) {
+      return { error: `${options.role} is already held by ${holders[options.role]} in ${meshName}, `
+        + `and a mesh has only one ${options.role} — pick another role` };
+    }
+  }
+  return { options };
 }
 
 async function submitSessionFork(f) {
   const view = sessionFormView();
-  const options = {};
-  if (f.quick_fork_carry.value === "inherit") {
-    if (view.inheritance.mesh) options.mesh = ".";
-    if (view.inheritance.workflow) options.workflow = ".";
+  const { options, error } = quickForkRequestOptions(f, view);
+  if (error) {
+    $("create-error").textContent = error;
+    $("create-error").classList.remove("hidden");
+    return;
   }
   createBusy = true;
   setActionPending(f.querySelector("button[type=submit]"), true, "Forking…");
@@ -12943,6 +13596,8 @@ async function quickForkSession(name, task, options, view = {}) {
   if (task) body.task = task;
   if (options && options.mesh) body.mesh = options.mesh;
   if (options && options.workflow) body.workflow = options.workflow;
+  if (options && options.role) body.role = options.role;
+  if (options && options.sibling) body.sibling = true;
   const payload = sessionFormPayload("fork", body);
   let resp;
   try {
@@ -13096,8 +13751,12 @@ function setStatusBadge(status) {
   // `exited` (and every control below reads that), but the header is where
   // a person looks to see what became of the session, and "paused" is it.
   const paused = exited && !!record.paused_at;
-  badge.textContent = paused ? "paused" : status;
-  badge.className = `badge ${status}${paused ? " paused" : ""}`;
+  // Same for a held record (claunch-5l35i): opening it wakes it, so the
+  // badge reads `hold` only for the moment the wake takes, or when it failed
+  // and resume is the way back.
+  const held = exited && !!record.held_at;
+  badge.textContent = held ? "hold" : paused ? "paused" : status;
+  badge.className = `badge ${status}${held ? " hold" : paused ? " paused" : ""}`;
   // The rail dot's grade in words (dotTitle): how many rows a busy session
   // moved in the last minute, how long an idle one has sat. Only when the
   // poll's record agrees with the socket's word, or the two would contradict.
@@ -13107,12 +13766,14 @@ function setStatusBadge(status) {
   // Rebrief types into a live terminal; on an exited one there is nobody to
   // read it, so the button yields its spot to resume.
   $("term-rebrief").classList.toggle("hidden", exited);
+  $("term-retro").classList.toggle("hidden", exited);
   // Kill stays on a paused record: the process is already gone, and the
   // press files the pause as killed, so the bulk resume of the paused no
   // longer brings it back (h_session_kill). A killed record has nothing
   // left for it to change.
-  $("term-kill").classList.toggle("hidden", exited && !paused);
+  $("term-kill").classList.toggle("hidden", exited && !paused && !held);
   if ($("term-pause")) $("term-pause").classList.toggle("hidden", exited);
+  if ($("term-idle-hold")) $("term-idle-hold").classList.toggle("hidden", exited);
   $("term-archive").classList.toggle("hidden", archived);
   if (typeof syncSessionPinUi === "function") syncSessionPinUi();
   syncSessionKillControls();
@@ -13721,6 +14382,89 @@ function scoreGoalSettingsCard() {
   return card;
 }
 
+/* Settings ▸ Role workflows: which workflow the new-session form and the
+   CLI wizard auto-select when a role is picked (daemon.role_workflows).
+   Kept in module state and filled by refreshRoleWorkflowSettings, because
+   the Settings page re-renders on every poll and the workflow listing is
+   too costly to fetch per render. The list is the daemon directory's; a
+   directory that does not declare the chosen workflow falls back to the
+   workflows' own default_role, which the first option names. */
+const roleWfSettings = { roles: null, workflows: [], overrides: {}, error: "", note: "" };
+
+async function refreshRoleWorkflowSettings() {
+  try {
+    const [roles, flows, rw] = await Promise.all([
+      api("/api/roles"), api("/api/cflow/workflows"), api("/api/role-workflows"),
+    ]);
+    if (!roles.ok || !flows.ok || !rw.ok) throw new Error("Could not load role workflows.");
+    roleWfSettings.roles = (await roles.json()).roles || [];
+    roleWfSettings.workflows = (await flows.json()).workflows || [];
+    roleWfSettings.overrides = (await rw.json()).role_workflows || {};
+    roleWfSettings.error = "";
+  } catch (err) { roleWfSettings.error = err.message || String(err); }
+  if (wsOpen) renderWorkspaces();
+}
+
+function roleWorkflowsCard() {
+  const card = el("section", "ws-add role-workflows-settings");
+  card.appendChild(el("h3", null, "Role workflows"));
+  card.appendChild(el("p", "wf-note",
+    "The workflow a new session's Workflow row picks on its own when a role " +
+    "is chosen (web form and CLI wizard). A workflow the session's directory " +
+    "does not declare falls back to the default. A child spawned by a parent " +
+    "running a workflow still takes that workflow's pair."));
+  const st = roleWfSettings;
+  if (st.error) card.appendChild(el("p", "wf-note", st.error));
+  if (!st.roles) {
+    if (!st.error) card.appendChild(el("p", "wf-note", "Loading…"));
+    return card;
+  }
+  for (const role of st.roles) {
+    const name = role.name;
+    const row = el("div", "sess-spawn-row");
+    const id = `role-wf-${name}`;
+    const lab = el("label", "sess-spawn-label", name);
+    lab.htmlFor = id;
+    const sel = document.createElement("select");
+    sel.id = id;
+    const { options, auto: fallback } = spawnRankWorkflows(st.workflows, name);
+    sel.appendChild(new Option(
+      `(default${fallback ? `: ${fallback}` : ": none"})`, ""));
+    sel.appendChild(new Option("(none — no workflow)", "-"));
+    for (const o of options) sel.appendChild(new Option(o.name + (o.tag || ""), o.value));
+    const cur = String(st.overrides[name] || "");
+    if (cur && ![...sel.options].some((o) => o.value === cur)) {
+      // Saved for a workflow this directory does not list: keep showing it.
+      sel.appendChild(new Option(`${cur} (not declared here)`, cur));
+    }
+    sel.value = cur;
+    sel.addEventListener("change", async () => {
+      const value = sel.value;
+      sel.disabled = true;
+      try {
+        const resp = await api("/api/role-workflows", {
+          method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ role: name, workflow: value }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+        st.overrides = data.role_workflows || {};
+        st.note = `Saved for ${name}. Applies to the next session form opened.`;
+        st.error = "";
+        // The open new-session form re-reads the overrides with its list.
+        workflowsFor = null;
+      } catch (err) {
+        st.error = err.message || String(err);
+      } finally { sel.disabled = false; }
+      if (wsOpen) renderWorkspaces();
+    });
+    row.append(lab, sel);
+    card.appendChild(row);
+  }
+  if (st.note) card.appendChild(el("p", "wf-note", st.note));
+  return card;
+}
+
 function resetTermInputAttachment() {
   globalThis.GlossaryComposer?.reset();
   const field = $("term-input-field"), btn = $("term-input-send");
@@ -13767,9 +14511,36 @@ function renderTermPresetButtons() {
     .filter((row) => row.enabled !== false);
   const page = typeof currentPage === "undefined" ? "terminal" : currentPage;
   fillPresetStrip($("term-preset-buttons"), rows,
-    page === "terminal" && !!currentName && !sessionEnded, sendPromptPreset);
+    sessionLineOnPage(page) && !!currentName && !sessionEnded, sendPromptPreset);
   fillPresetStrip($("shadow-preset-buttons"), rows,
     page === "shadow", sendShadowPreset);
+}
+
+/* Which pages carry the attached session's footer (the session line, its
+   preset strip and prompter row). The terminal page, and the transcript page
+   while it reads that same local session: a reader going back through the
+   conversation can answer it from there. A transcript of another session, or
+   of a remote shadow, would send to a session that is not the one on screen,
+   so the footer stays down. The transcript's state is declared further down
+   the file; before that line has run the answer is simply "no". */
+function sessionLineOnPage(page) {
+  if (page === "terminal") return true;
+  if (page !== "log") return false;
+  try {
+    return !!currentName && transcriptName === currentName && !transcriptMachine;
+  } catch {
+    return false;
+  }
+}
+
+/* Show or hide the footer for the page on screen. Guarded like the terminal
+   itself is not — the element always exists in the shipped page, but a
+   harness that boots this against a partial DOM has no reason to know it. */
+function syncSessionLine() {
+  const page = typeof currentPage === "undefined" ? "terminal" : currentPage;
+  if ($("term-input"))
+    $("term-input").classList.toggle("hidden", !(currentName && sessionLineOnPage(page)));
+  renderTermPresetButtons();
 }
 
 function fillPresetStrip(box, rows, onPage, send) {
@@ -13842,9 +14613,10 @@ function renderTermPrompterRow() {
   if (!box) return;
   box.innerHTML = "";
   const rows = (prompterState && prompterState.connected && prompterState.prompts) || [];
-  // The terminal page's row only, like its preset strip: its chips insert
-  // into that page's footer field.
-  const onTerminal = typeof currentPage === "undefined" || currentPage === "terminal";
+  // The terminal page's row (and the attached session's transcript page,
+  // which keeps the same footer), like its preset strip: its chips insert
+  // into that footer field.
+  const onTerminal = typeof currentPage === "undefined" || sessionLineOnPage(currentPage);
   const visible = onTerminal && !!currentName && !sessionEnded && rows.length > 0;
   box.classList.toggle("hidden", !visible);
   if (!visible) return;
@@ -14413,10 +15185,10 @@ async function toggleLineSync() {
 
 /* ---- images for the session: Alt+V, a pasted file, the file picker ----
    The program in the PTY reads bytes, so there is no way to hand it an
-   attachment from here. What it does accept is an image off the clipboard —
-   so the image is uploaded, the daemon stores it, puts it on the clipboard
-   of the machine it runs on, and sends the keystroke that harness reads an
-   image with. Nothing is typed into the composer.
+   attachment from here. The image is uploaded and stored by the daemon,
+   then delivered using the harness declaration: a pasted file path for
+   Claude/Codex, or a clipboard write and keystroke for clipboard transports.
+   Nothing is typed into the web composer.
 
    The image always travels from THIS browser, as bytes in an upload. That is
    what makes the result the same wherever the browser is: on the daemon's
@@ -15191,6 +15963,314 @@ async function refreshTermQueued() {
   renderHoldChip(q);
 }
 
+/* ---- measurement window strip (#term-window) ----
+   The machine's test window (daemon/window.py) as it concerns the attached
+   session (claunch-bwzkt): the grant it holds — class, width, how long it
+   has held, and how long a run like it usually holds — or the place it
+   waits in the queue, how long it has waited and the rule keeping it out.
+   Until this strip the answer lived on the Window page, a navigation away
+   from the terminal whose pytest is the thing being waited on.
+
+   The remaining time is the kept history's median for the same class and
+   label (or the class, when the label has fewer than three runs), so it is
+   an estimate and says so: "~" in front, its basis and sample count in the
+   tooltip, and "over" instead of a negative count once the run outlives
+   it. Without three past runs there is no estimate and none is shown.
+
+   Up only while the session holds or waits: an empty strip would take a
+   row from the terminal for nothing. Like the queued banner it shares the
+   terminal's column, so it refits only when its shape changes (`sig`), and
+   the 1s tick that ages the clocks repaints text, never the shape. */
+let termWindowView = null;   // the last GET /api/sessions/<name>/window
+let termWindowTick = null;   // the 1s repaint while the strip is up
+
+function fmtSpan(secs) {
+  if (secs === null || secs === undefined || !Number.isFinite(Number(secs))) return "?";
+  secs = Math.max(0, Math.floor(Number(secs)));
+  if (secs < 60) return `${secs}s`;
+  if (secs < 3600) {
+    return `${Math.floor(secs / 60)}m${String(secs % 60).padStart(2, "0")}s`;
+  }
+  return fmtAge(secs);
+}
+
+/* Seconds since an ISO stamp by this browser's clock, or the daemon's own
+   figure when the stamp does not parse: the daemon measured at poll time,
+   the browser keeps counting between polls. */
+function termWindowSince(iso, fallback, now) {
+  const t = Date.parse(iso || "");
+  if (Number.isFinite(t)) return Math.max(0, ((now || Date.now()) - t) / 1000);
+  return fallback === undefined ? null : fallback;
+}
+
+function termWindowEstimateText(est) {
+  if (!est || est.p50 === null || est.p50 === undefined) return "";
+  return `p50 ${fmtSpan(est.p50)}` +
+    (est.p90 !== null && est.p90 !== undefined ? `, p90 ${fmtSpan(est.p90)}` : "") +
+    ` over ${est.samples} ` +
+    (est.basis === "label" ? "runs of this command" : "runs of this class");
+}
+
+/* What the strip says, as data: one row per grant held or request queued.
+   Kept apart from the DOM so the check can read the words without a page. */
+function termWindowRows(v, now) {
+  if (!v) return [];
+  const rows = [];
+  for (const h of v.holding || []) {
+    const elapsed = termWindowSince(h.acquired_at, h.elapsed_seconds, now);
+    const parts = [`${h.cls}${h.workers ? ` ×${h.workers}` : ""}`];
+    if (h.forced) parts.push("forced");
+    parts.push(`running ${fmtSpan(elapsed)}`);
+    const est = h.estimate;
+    let over = false;
+    if (est && est.p50 !== null && est.p50 !== undefined && elapsed !== null) {
+      const left = est.p50 - elapsed;
+      over = left < 0;
+      parts.push(over
+        ? `${fmtSpan(-left)} over the usual ${fmtSpan(est.p50)}`
+        : `~${fmtSpan(left)} left`);
+    } else {
+      parts.push("no estimate yet");
+    }
+    if (h.result) parts.push(`result: ${windowResultText(h.result)}`);
+    rows.push({
+      kind: "held",
+      over,
+      head: "▦ window held",
+      parts,
+      reason: "",
+      label: h.label || "",
+      title: termWindowEstimateText(est) ||
+        "fewer than three finished runs like this one in the last 7 days — no estimate",
+    });
+  }
+  for (const q of v.waiting || []) {
+    const waited = termWindowSince(q.enqueued_at, q.waited_seconds, now);
+    const parts = [
+      q.cls,
+      `#${q.position} in queue` + (q.ahead ? ` (${q.ahead} ahead)` : ""),
+      `waiting ${fmtSpan(waited)}`,
+    ];
+    if (q.priority) parts.push(`priority ${q.priority}`);
+    // When the run it waits on should end: the soonest holder's estimate.
+    // Only a hint — a sweep needs every holder gone, a targeted one only a
+    // slot — so it is worded as the first one to finish, not as the grant.
+    const lefts = ((v.window && v.window.holders) || [])
+      .filter((h) => h.estimate && h.estimate.p50 !== null && h.estimate.p50 !== undefined)
+      .map((h) => h.estimate.p50 - termWindowSince(h.acquired_at, h.elapsed_seconds, now));
+    if (lefts.length) {
+      const soonest = Math.min(...lefts);
+      parts.push(soonest >= 0
+        ? `first holder done in ~${fmtSpan(soonest)}`
+        : "holders past their usual time");
+    }
+    rows.push({
+      kind: "waiting",
+      over: false,
+      head: "⧗ window queue",
+      parts,
+      reason: q.reason || "",
+      label: q.label || "",
+      title: q.estimate ? `a run like this holds ${termWindowEstimateText(q.estimate)}` : "",
+    });
+  }
+  return rows;
+}
+
+/* The whole machine in one line: whom the session shares the window with. */
+function termWindowLoad(v) {
+  const w = (v && v.window) || {};
+  const held = w.holders || [];
+  const caps = w.caps || {};
+  const count = (cls) => held.filter((h) => h.cls === cls).length;
+  const out = [
+    `targeted ${count("targeted")}/${caps.targeted ?? "?"}`,
+    `sweep ${count("sweep")}/${caps.sweep ?? "?"}`,
+  ];
+  if (w.worker_budget) out.push(`workers ${w.workers_in_use ?? "?"}/${w.worker_budget}`);
+  out.push(`queue ${w.queued ?? 0}` + (w.sweep_queued ? " (sweep waiting)" : ""));
+  return out.join(" · ");
+}
+
+function renderTermWindow(v) {
+  const box = $("term-window");
+  if (v && v.session !== currentName) v = null;   // a previous session's read
+  termWindowView = v;
+  const rows = termWindowRows(v);
+  const show = rows.length > 0 && currentPage === "terminal" && !!currentName;
+  const sig = show ? rows.map((r) => r.kind).join(",") : "hidden";
+  const changed = box.dataset.sig !== sig;
+  box.dataset.sig = sig;
+  if (!show) {
+    box.classList.add("hidden");
+    box.innerHTML = "";
+    if (termWindowTick) { clearInterval(termWindowTick); termWindowTick = null; }
+    if (changed) refitSoon(60);
+    return;
+  }
+  box.innerHTML = "";
+  for (const r of rows) {
+    const row = el("button", `tw-row tw-${r.kind}${r.over ? " tw-over" : ""}`);
+    row.type = "button";
+    row.title = (r.title ? r.title + "\n" : "") +
+      "open the Window page: every holder, the queue and 7 days of runs";
+    row.appendChild(el("span", "tw-head", r.head));
+    row.appendChild(el("span", "tw-facts", r.parts.join(" · ")));
+    if (r.reason) row.appendChild(el("span", "tw-reason", r.reason));
+    if (r.label) row.appendChild(el("span", "tw-label", r.label));
+    row.addEventListener("click", () => { location.hash = "#/window"; });
+    box.appendChild(row);
+  }
+  box.appendChild(el("div", "tw-load", termWindowLoad(v)));
+  box.classList.remove("hidden");
+  if (!termWindowTick) {
+    termWindowTick = setInterval(() => renderTermWindow(termWindowView), 1000);
+  }
+  if (changed) refitSoon(60);
+}
+
+async function refreshTermWindow() {
+  const name = currentName;
+  if (!name || currentPage !== "terminal") { renderTermWindow(null); return; }
+  let v = null;
+  try {
+    const resp = await api(`/api/sessions/${encodeURIComponent(name)}/window`);
+    if (!resp.ok) { renderTermWindow(null); return; } // older daemon: no route
+    v = await resp.json();
+  } catch {
+    return; // offline — the health poll owns saying so; keep the last truth
+  }
+  if (name !== currentName || currentPage !== "terminal") return;
+  renderTermWindow(v);
+}
+
+/* ---- session timer line (#term-timers, claunch-7dzae) ----
+   Every countdown the attached session waits on, one chip each, soonest
+   first: a cflow v2 choice held until its option's interval window opens
+   (improv-worker-v2's await-landing `nudge`), an option whose window is still
+   closed, a v2 wait, a loop's `every` pause, an ask's deadline. The daemon
+   gathers them from registered providers (daemon/session_timers.py,
+   GET /api/sessions/<name>/timers); this strip draws whatever comes back and
+   knows a kind only for its glyph, so a new provider shows up here without a
+   change to this code.
+
+   Up only while there is a timer to show. It shares the terminal's column
+   like the window strip, so it refits only when the set of chips changes
+   (`sig`); the 1s tick repaints the clocks. */
+let termTimersView = null;   // the last GET /api/sessions/<name>/timers
+let termTimersTick = null;   // the 1s repaint while the strip is up
+
+const TERM_TIMER_GLYPH = {
+  hold: "⏸",     // a pick queued behind a closed window
+  window: "◔",   // an option that opens again at `due`
+  wait: "⧗",
+  pause: "↻",
+  ask: "?",
+};
+const TERM_TIMER_GLYPH_DEFAULT = "⏱";
+
+function termTimerClock(ts) {
+  const d = new Date(ts * 1000);
+  return Number.isFinite(d.getTime())
+    ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+    : "?";
+}
+
+/* What the strip says, as data: one row per timer. Kept apart from the DOM
+   so the check can read the words without a page. A closed window past its
+   time is dropped (nothing waits behind it: the option is open now); a held
+   pick or a wait past its time stays, marked due, until the daemon fires it
+   and the next poll no longer carries it. */
+function termTimerRows(v, now) {
+  if (!v || !Array.isArray(v.timers)) return [];
+  const t0 = (now || Date.now()) / 1000;
+  const rows = [];
+  for (const t of v.timers) {
+    const due = Number(t.due);
+    if (t.due === null || t.due === undefined || !Number.isFinite(due)) continue;
+    const left = due - t0;
+    if (t.state === "closed" && left <= 0) continue;
+    const since = Number(t.since);
+    const span = t.since !== null && t.since !== undefined && Number.isFinite(since) &&
+      due > since ? due - since : null;
+    const pct = span ? Math.min(1, Math.max(0, (t0 - since) / span)) : null;
+    const overdue = left <= 0;
+    const lines = [];
+    if (t.detail) lines.push(t.detail);
+    lines.push(`${overdue ? "was due" : "due"} at ${termTimerClock(due)}` +
+      (t.state === "held" ? " — the held pick is applied then" : ""));
+    if (t.scope) lines.push(`run: ${t.scope}`);
+    lines.push(`source: ${t.source}${t.kind ? ` · ${t.kind}` : ""}`);
+    rows.push({
+      key: `${t.source}:${t.id}`,
+      kind: t.kind || "",
+      state: t.state || "waiting",
+      glyph: TERM_TIMER_GLYPH[t.kind] || TERM_TIMER_GLYPH_DEFAULT,
+      label: t.label || t.kind || "timer",
+      clock: overdue ? "due" : fmtSpan(left),
+      overdue,
+      pct,
+      link: t.link || "",
+      title: lines.join("\n"),
+    });
+  }
+  return rows;
+}
+
+function renderTermTimers(v) {
+  const box = $("term-timers");
+  if (!box) return;
+  if (v && v.session !== currentName) v = null;   // a previous session's read
+  termTimersView = v;
+  const rows = termTimerRows(v);
+  const show = rows.length > 0 && currentPage === "terminal" && !!currentName;
+  const sig = show ? rows.map((r) => r.key).join(",") : "hidden";
+  const changed = box.dataset.sig !== sig;
+  box.dataset.sig = sig;
+  if (!show) {
+    box.classList.add("hidden");
+    box.innerHTML = "";
+    if (termTimersTick) { clearInterval(termTimersTick); termTimersTick = null; }
+    if (changed) refitSoon(60);
+    return;
+  }
+  box.innerHTML = "";
+  box.appendChild(el("span", "tt-head", "timers"));
+  for (const r of rows) {
+    const chip = el("button",
+      `tt-chip tt-${r.kind || "other"} tt-state-${r.state}${r.overdue ? " tt-due" : ""}`);
+    chip.type = "button";
+    chip.title = r.title + (r.link ? "\nclick: open the run page" : "");
+    if (r.pct !== null) chip.style.setProperty("--tt-pct", `${Math.round(r.pct * 100)}%`);
+    chip.appendChild(el("span", "tt-glyph", r.glyph));
+    chip.appendChild(el("span", "tt-label", r.label));
+    chip.appendChild(el("span", "tt-clock", r.clock));
+    if (r.link) chip.addEventListener("click", () => { location.hash = r.link; });
+    else chip.disabled = true;
+    box.appendChild(chip);
+  }
+  box.classList.remove("hidden");
+  if (!termTimersTick) {
+    termTimersTick = setInterval(() => renderTermTimers(termTimersView), 1000);
+  }
+  if (changed) refitSoon(60);
+}
+
+async function refreshTermTimers() {
+  const name = currentName;
+  if (!name || currentPage !== "terminal") { renderTermTimers(null); return; }
+  let v = null;
+  try {
+    const resp = await api(`/api/sessions/${encodeURIComponent(name)}/timers`);
+    if (!resp.ok) { renderTermTimers(null); return; } // older daemon: no route
+    v = await resp.json();
+  } catch {
+    return; // offline — the health poll owns saying so; keep the last truth
+  }
+  if (name !== currentName || currentPage !== "terminal") return;
+  renderTermTimers(v);
+}
+
 /* ---- cflow answer strip (#term-cflow) ----
    The attached session's run is stopped on something only a person settles
    (sessCflowGated: an approval, a user branch, a goto request, an ask that
@@ -15301,10 +16381,10 @@ function termCflowQuestion(r) {
 
    Every press is the v2 run page's own: /api/cflow2/select for a `user`
    choice, /api/cflow2/approve for an ask, /api/cflow2/extend for a loop or
-   visit limit, with the same body and the same confirm. A choice or ask
-   with require_reason asks for the reason first (the engine refuses one
-   without). A halt or an acceptance hold has no dashboard press; the strip
-   says so and links to the run page. */
+   visit limit, with the same body and the same confirm. require_reason is
+   an agent constraint; a person may answer without it (docs 2.11). Like the
+   run page, reframe asks what the options miss. A halt or an acceptance
+   hold has no dashboard press; the strip links to the run page. */
 function termCflow2Answers(r, a) {
   const body = { cwd: r.cwd, scope: r.scope, node: a.instance };
   const what = a.label || a.instance || "?";
@@ -15322,33 +16402,28 @@ function termCflow2Answers(r, a) {
       };
       if (isAsk && name !== "decline" && name !== "reframe") out.cls = "approve";
       if (isAsk && a.recommended === name) {
-        out.cls = "proposed";
+        out.cls = out.cls ? `${out.cls} proposed` : "proposed";
         out.title = `recommended${out.title ? " — " + out.title : ""}`;
       }
-      if (a.require_reason) {
-        out.reason = `${out.ask}\n\nA reason is required (journaled):`;
+      if (isAsk && name === "reframe") {
+        out.reason = `${out.ask}\n\nreframe: none of the options fits. Say what they miss; ` +
+          "the agent frames the question again from it (required, journaled):";
         out.reasonRequired = true;
       }
       return out;
     });
   }
   if (a.kind === "loop_limit" || a.kind === "visit_limit") {
-    const visits = a.kind === "visit_limit" ? { visits: true } : {};
-    return [
-      {
-        label: visits.visits ? "Allow one more visit" : "Allow one more",
-        cls: "approve", path: "/api/cflow2/extend",
-        body: { ...body, by: 1, ...visits },
-        ask: `Allow one more at ${what}?`,
-      },
-      {
-        label: visits.visits ? "Stop here" : "Stop the loop",
-        title: "it finishes with outcome fail",
-        path: "/api/cflow2/extend",
-        body: { ...body, stop: true, ...visits },
-        ask: "Stop here? It finishes with outcome fail.",
-      },
-    ];
+    return cf2LimitPresses(a.kind === "visit_limit", a.count).map(([label, , extra]) => ({
+      label,
+      ...(extra.by ? { cls: "approve" } : {}),
+      ...(extra.stop ? { title: "it finishes with outcome fail" } : {}),
+      path: "/api/cflow2/extend",
+      body: { ...body, ...extra },
+      ask: extra.by ? `Allow one more at ${what}?`
+        : extra.reset ? `Reset the loop's count at ${what} to 0? It gets its full max again.`
+        : "Stop here? It finishes with outcome fail.",
+    }));
   }
   return [];
 }
@@ -16526,6 +17601,7 @@ function snapshotFallbackText(name, reached) {
       "busy or briefly unreachable, and it does not retry on its own here." +
       how;
   }
+  if (rec.held_at) return `Session ${name} is on hold — opening it wakes it; if it stays down, resume brings it back.` + how;
   if (rec.paused_at) return `Session ${name} is paused — its terminal is not live.` + how;
   if (rec.archived_at) return `Session ${name} is archived — its terminal is not live.` + how;
   return "This session left no screen behind." + how;
@@ -16789,6 +17865,8 @@ let transcriptSeen = -1;           // newest seq loaded, for the follow-forward
 let transcriptMore = false;        // is there anything above what is loaded
 let transcriptBusy = false;        // one fetch at a time, or a flick sends ten
 let transcriptGeneration = 0;
+let transcriptUnread = 0;          // turns appended below a reader who scrolled up
+let transcriptMinimapFrame = 0;    // a pending minimap redraw (one per frame)
 
 /* How prose (text and thinking blocks) is drawn: "raw" as typed, or
    "markdown" through mdInto. Tool traffic stays preformatted in both, since
@@ -16828,6 +17906,7 @@ function setTranscriptFormat(format, remember = true) {
   }
   if (atEnd) pane.scrollTop = pane.scrollHeight;
   else if (landed) pane.scrollTop = landed.offsetTop - anchorGap;
+  scheduleTranscriptMinimap();
 }
 document.querySelectorAll('input[name="log-format"]').forEach((input) =>
   input.addEventListener("change", () => {
@@ -16856,15 +17935,22 @@ function openTranscript(name, machine = null) {
   if (back) back.href = machine ? shadowHash(machine, name) : `#/s/${encodeURIComponent(name)}`;
   const info = $("log-info-tab");
   if (info) info.hidden = !!machine;
-  if (transcriptName === name && transcriptMachine === machine) return;
+  if (transcriptName === name && transcriptMachine === machine) {
+    if (typeof syncSessionLine === "function") syncSessionLine();
+    return;
+  }
   transcriptGeneration += 1;
   transcriptBusy = false;
   transcriptName = name;
   transcriptMachine = machine;
+  // showView ran before the name was set; the footer follows the session
+  // this page now reads.
+  if (typeof syncSessionLine === "function") syncSessionLine();
   globalThis.TranscriptTabs?.select("transcript");
   transcriptCursor = null;
   transcriptSeen = -1;
   transcriptMore = false;
+  setTranscriptUnread(0);
   const pane = $("term-log-pane");
   if (pane) {
     pane.innerHTML = "";
@@ -16872,8 +17958,13 @@ function openTranscript(name, machine = null) {
     if (!pane.dataset.wired) {
       pane.dataset.wired = "1";
       pane.addEventListener("scroll", onTranscriptScroll);
+      // A narrower pane re-wraps every block, which moves every mark.
+      if (typeof ResizeObserver === "function") {
+        new ResizeObserver(() => scheduleTranscriptMinimap()).observe(pane);
+      }
     }
   }
+  renderTranscriptMinimap();
   loadTranscriptPage({ older: false });
   startTranscriptPoll();
 }
@@ -16889,8 +17980,10 @@ function closeTranscript() {
   transcriptName = null;
   transcriptMachine = null;
   transcriptBusy = false;
+  setTranscriptUnread(0);
   const pane = $("term-log-pane");
   if (pane) pane.innerHTML = "";
+  renderTranscriptMinimap();
 }
 
 function transcriptIsOpen() {
@@ -16905,6 +17998,8 @@ function onTranscriptScroll() {
   if (pane.scrollTop < TRANSCRIPT_NEAR_TOP && transcriptMore && !transcriptBusy) {
     loadTranscriptPage({ older: true });
   }
+  if (transcriptUnread && transcriptAtEnd(pane)) setTranscriptUnread(0);
+  syncTranscriptMinimapView();
 }
 
 function transcriptAtEnd(pane) {
@@ -17006,7 +18101,9 @@ function renderTranscriptPage(data, older) {
     pane.appendChild(frag);
     // Only if they were already at the bottom. A reader who has scrolled up
     // to read something is not asking to be dragged back down every time the
-    // session says another word.
+    // session says another word: the turns are appended under them, where
+    // they stay put, and #log-new counts them.
+    if (!follow) setTranscriptUnread(transcriptUnread + records.length);
     if (follow) {
       const retained = Array.from(pane.children).filter((node) =>
         node.classList.contains("log-rec"));
@@ -17019,7 +18116,145 @@ function renderTranscriptPage(data, older) {
       pane.scrollTop = pane.scrollHeight;
     }
   }
+  scheduleTranscriptMinimap();
 }
+
+/* The count of turns that arrived below a reader who is not at the bottom,
+   on the button that takes them there. Zero hides it. */
+function setTranscriptUnread(n) {
+  transcriptUnread = Math.max(0, n | 0);
+  const chip = $("log-new");
+  if (!chip) return;
+  chip.textContent = transcriptUnread
+    ? `↓ ${transcriptUnread} new ${transcriptUnread === 1 ? "turn" : "turns"}` : "";
+  chip.classList.toggle("hidden", !transcriptUnread);
+}
+
+function onTranscriptNewClick() {
+  const pane = $("term-log-pane");
+  if (pane) pane.scrollTop = pane.scrollHeight;
+  setTranscriptUnread(0);
+  syncTranscriptMinimapView();
+}
+
+/* What a block is, for the timeline: who spoke, or which half of a tool
+   exchange it is. A text block takes its record's side — the same rule that
+   files a tool-result-only user record under the assistant. */
+function transcriptBlockKind(b, asst) {
+  if (b.type === "text") return asst ? "assistant" : "user";
+  if (b.type === "thinking") return "thinking";
+  if (b.type === "tool_use") return "tool";
+  if (b.type === "tool_result") return b.error ? "error" : "result";
+  return "";
+}
+
+/* The marks of the timeline, from the blocks on the page: each block's top
+   and height as fractions of the pane's whole scroll height. Neighbouring
+   blocks of one kind with (almost) no gap between them become one mark, so a
+   run of tool calls is one band rather than a hundred hairlines. Every block
+   sits inside a positioned record, so its offsetTop counts from the record
+   and the record's from the pane. */
+function transcriptMinimapSegments(pane) {
+  const total = pane ? pane.scrollHeight : 0;
+  if (!total) return [];
+  const out = [];
+  for (const rec of pane.children) {
+    if (!rec.classList.contains("log-rec")) continue;
+    for (const node of rec.children) {
+      const kind = node.dataset && node.dataset.kind;
+      if (!kind) continue;
+      const top = rec.offsetTop + node.offsetTop;
+      const height = node.offsetHeight || 0;
+      const prev = out[out.length - 1];
+      if (prev && prev.kind === kind && top - (prev.top + prev.height) <= 24) {
+        prev.height = top + height - prev.top;
+        prev.count += 1;
+        continue;
+      }
+      out.push({ kind, top, height, count: 1, seq: rec.dataset.seq });
+    }
+  }
+  return out.map((seg) => ({
+    kind: seg.kind, seq: seg.seq, count: seg.count,
+    top: seg.top / total, height: seg.height / total,
+  }));
+}
+
+/* Redraws batch to one per frame: a page of forty records and a format
+   switch each ask, and the layout is only worth reading once. */
+function scheduleTranscriptMinimap() {
+  if (transcriptMinimapFrame) return;
+  if (typeof requestAnimationFrame !== "function") { renderTranscriptMinimap(); return; }
+  transcriptMinimapFrame = requestAnimationFrame(renderTranscriptMinimap);
+}
+
+function renderTranscriptMinimap() {
+  transcriptMinimapFrame = 0;
+  const map = $("log-minimap");
+  const pane = $("term-log-pane");
+  if (!map) return;
+  map.innerHTML = "";
+  map.classList.toggle("has-more", !!transcriptMore);
+  map.title = transcriptMore
+    ? "timeline of the loaded conversation (older turns load as you scroll up) — press or drag to jump"
+    : "timeline of the conversation — press or drag to jump";
+  for (const seg of transcriptMinimapSegments(pane)) {
+    const mark = el("div", "log-mm-seg");
+    mark.dataset.kind = seg.kind;
+    mark.style.top = `${(seg.top * 100).toFixed(3)}%`;
+    mark.style.height = `${(seg.height * 100).toFixed(3)}%`;
+    map.appendChild(mark);
+  }
+  map.appendChild(el("div", "log-mm-view"));
+  syncTranscriptMinimapView();
+}
+
+/* The box over the part of the conversation that is on screen. */
+function syncTranscriptMinimapView() {
+  const map = $("log-minimap");
+  const pane = $("term-log-pane");
+  const view = map && map.querySelector(".log-mm-view");
+  if (!view || !pane) return;
+  const total = pane.scrollHeight || 1;
+  const top = Math.max(0, Math.min(1, pane.scrollTop / total));
+  const height = Math.max(0, Math.min(1 - top, pane.clientHeight / total));
+  view.style.top = `${(top * 100).toFixed(3)}%`;
+  view.style.height = `${(height * 100).toFixed(3)}%`;
+  map.setAttribute("aria-valuenow", String(Math.round(top * 100)));
+}
+
+/* Press or drag on the timeline: the point under the pointer becomes the
+   middle of the pane. Reaching near the top fetches the page above, as a
+   wheel would (the pane's own scroll handler). */
+function seekTranscriptMinimap(clientY) {
+  const map = $("log-minimap");
+  const pane = $("term-log-pane");
+  if (!map || !pane) return;
+  const rect = map.getBoundingClientRect();
+  const frac = Math.max(0, Math.min(1, (clientY - rect.top) / (rect.height || 1)));
+  pane.scrollTop = Math.max(0, frac * pane.scrollHeight - pane.clientHeight / 2);
+}
+
+function wireTranscriptMinimap() {
+  const map = $("log-minimap");
+  if (!map || map.dataset.wired) return;
+  map.dataset.wired = "1";
+  let dragging = false;
+  map.addEventListener("pointerdown", (ev) => {
+    dragging = true;
+    try { map.setPointerCapture(ev.pointerId); } catch {}
+    seekTranscriptMinimap(ev.clientY);
+    ev.preventDefault();
+  });
+  map.addEventListener("pointermove", (ev) => {
+    if (dragging) seekTranscriptMinimap(ev.clientY);
+  });
+  const stop = () => { dragging = false; };
+  map.addEventListener("pointerup", stop);
+  map.addEventListener("pointercancel", stop);
+  $("log-new")?.addEventListener("click", onTranscriptNewClick);
+}
+wireTranscriptMinimap();
 
 function renderTranscriptRecord(r) {
   // The role comes off the jsonl, and claude writes every tool_result as a
@@ -17041,7 +18276,12 @@ function renderTranscriptRecord(r) {
     head.appendChild(when);
   }
   box.appendChild(head);
-  for (const b of r.blocks || []) box.appendChild(renderTranscriptBlock(b));
+  for (const b of r.blocks || []) {
+    const node = renderTranscriptBlock(b);
+    const kind = transcriptBlockKind(b, asst);
+    if (kind) node.dataset.kind = kind;
+    box.appendChild(node);
+  }
   return box;
 }
 
@@ -17132,16 +18372,19 @@ if (typeof document !== "undefined" && document.addEventListener) {
   });
 }
 
-/* The follow-forward: while the pane is open and the reader is sitting at the
-   bottom of it, new turns arrive under them the way the terminal's own output
-   does. Scrolled up, nothing moves — a reader who went looking for something
-   is not asking to be dragged back to the present every few seconds.
+/* The follow-forward: while the pane is open, new turns arrive at its end
+   as they are written. A reader sitting at the bottom is carried along, the
+   way the terminal's own output does. Scrolled up, the turns are still
+   appended — the timeline and the #log-new count say so — but nothing moves:
+   a reader who went looking for something is not asking to be dragged back
+   to the present every few seconds.
 
    Its own timer rather than a ride on the session poll: the pane is open for
-   one session at a time and closed most of the time, and a conversation turn
-   is a slower thing than a rail row. Started when it opens, stopped when it
-   closes, so a closed pane costs nothing. */
-const TRANSCRIPT_POLL_MS = 4000;
+   one session at a time and closed most of the time. Started when it opens,
+   stopped when it closes, so a closed pane costs nothing; a tail read is an
+   indexed seek of one page (transcript_view.page), so a short period is
+   cheap. */
+const TRANSCRIPT_POLL_MS = 1500;
 let transcriptTimer = null;
 
 function startTranscriptPoll() {
@@ -17159,10 +18402,10 @@ function stopTranscriptPoll() {
 function pollTranscript() {
   // `transcriptIsOpen` is the whole guard now: route() clears the name (and
   // stops this timer) the moment the reader leaves the page, so a live name
-  // means the page is the one on screen.
+  // means the page is the one on screen. Polled wherever the reader is
+  // scrolled: renderTranscriptPage decides whether they are carried along.
   if (!transcriptIsOpen() || transcriptBusy || $("term-log-pane")?.hidden) return;
-  const pane = $("term-log-pane");
-  if (!pane || !transcriptAtEnd(pane)) return;
+  if (!$("term-log-pane")) return;
   loadTranscriptPage({ older: false });
 }
 
@@ -17209,6 +18452,31 @@ function syncLayout() {
   // whatever it was before the viewport last changed. Re-fit it.
   if (wasOpen && !railOpen) refitSoon(60);
 }
+
+/* The rail nav's pin (claunch-cka36). On a desktop the nav shows one row
+   and opens on hover; pinned, it shows every row in the rail's flow
+   (style.css, #rail-nav-dock.pinned). Remembered per browser. */
+const RAIL_NAV_PIN_KEY = `claunch_rail_nav_pinned:${BASE}`;
+function setRailNavPinned(pinned) {
+  const dock = $("rail-nav-dock");
+  const pin = $("rail-nav-pin");
+  if (!dock || !pin) return;
+  dock.classList.toggle("pinned", pinned);
+  pin.setAttribute("aria-pressed", String(pinned));
+  pin.title = pinned ? "Unpin the page nav (fold it to one row)" : "Pin the page nav (show every row)";
+}
+(() => {
+  let pinned = false;
+  try { pinned = localStorage.getItem(RAIL_NAV_PIN_KEY) === "1"; } catch { /* storage off */ }
+  setRailNavPinned(pinned);
+  const pin = $("rail-nav-pin");
+  if (!pin) return;
+  pin.addEventListener("click", () => {
+    const next = !$("rail-nav-dock").classList.contains("pinned");
+    setRailNavPinned(next);
+    try { localStorage.setItem(RAIL_NAV_PIN_KEY, next ? "1" : "0"); } catch { /* storage off */ }
+  });
+})();
 
 /* Where the session detail lives, and whether it is up.
 
@@ -17479,15 +18747,15 @@ function syncMobileBars() {
   // The header badge reads `paused` for a paused record while the status
   // underneath is `exited`; the mobile bar mirrors the word and keeps the
   // status for its controls.
-  const paused = status === "paused";
-  if (paused) status = "exited";
+  const marker = status === "paused" || status === "hold" ? status : "";
+  if (marker) status = "exited";
   dot.className = sess && typeof dotClassOf === "function"
     ? dotClassOf(sess, status) : `dot ${status}`;
-  if (paused) dot.classList.add("paused");
+  if (marker) dot.classList.add(marker);
   dot.classList.toggle("hidden", !has);
   const badge = $("m-status");
-  badge.textContent = paused ? "paused" : status;
-  badge.className = `badge ${status}${paused ? " paused" : ""}`;
+  badge.textContent = marker || status;
+  badge.className = `badge ${status}${marker ? " " + marker : ""}`;
   badge.classList.toggle("hidden", !has);
   // Mirrors of the hidden header's buttons — see the click handlers below.
   $("m-resume").classList.toggle("hidden", status !== "exited");
@@ -17495,7 +18763,7 @@ function syncMobileBars() {
   $("m-zoom").classList.toggle("hidden", !has);
   // A paused record keeps kill: it files the pause as killed (see
   // setStatusBadge).
-  $("m-kill").classList.toggle("hidden", !has || (status === "exited" && !paused));
+  $("m-kill").classList.toggle("hidden", !has || (status === "exited" && !marker));
   if ($("m-pause")) {
     $("m-pause").classList.toggle("hidden", !has || status === "exited");
   }
@@ -17639,14 +18907,10 @@ function showView(name) {
   // detach() own that object's life.
   $("term-header").classList.toggle("hidden", !(showTerm && currentName));
   $("terminal").classList.toggle("hidden", !showTerm);
-  // The send-keys input belongs to an attached session: hidden with the
-  // terminal, and only up when one is attached. Guarded like the terminal
-  // itself is not — the element always exists in the shipped page, but a
-  // harness that boots this function against a partial DOM has no reason to
-  // know about it.
-  if ($("term-input"))
-    $("term-input").classList.toggle("hidden", !(showTerm && currentName));
-  renderTermPresetButtons();
+  // The send-keys input belongs to an attached session: up on the terminal,
+  // and on that session's transcript page (sessionLineOnPage), only while one
+  // is attached.
+  syncSessionLine();
   // The transcript is its own page now (VIEWS below hides and shows it like
   // any other), so nothing here has to reach for it. The terminal button that
   // walks to it lives in the header, which the line above already handles.
@@ -17657,6 +18921,13 @@ function showView(name) {
   else refreshTermQueued();
   // The cflow answer strip is drawn from the cache in hand: no request.
   renderTermCflow();
+  // The window strip, like the queued banner: the session's grant or its
+  // place in the queue, re-asked-for on the way back in.
+  if (!showTerm) renderTermWindow(null);
+  else refreshTermWindow();
+  // The timer line, the same way: re-asked-for on the way back in.
+  if (!showTerm) renderTermTimers(null);
+  else refreshTermTimers();
   for (const [page, id] of Object.entries(VIEWS)) {
     $(id).classList.toggle("hidden", name !== page);
   }
@@ -18457,7 +19728,8 @@ function syncOnboardPickers() {
   // Workflow row and the spawn modal do: only workflows the role's
   // filter_roles admits, the role's own defaults first, then the rest.
   const wf = form.workflow;
-  const { options, auto } = spawnRankWorkflows(workflowsCache, form.role.value);
+  const { options, auto } = spawnRankWorkflows(
+    workflowsCache, form.role.value, roleWorkflowsCache);
   // Choosing a role chooses its workflow — but only over a row nobody has
   // touched. A workflow the operator picked survives every later role change,
   // and so does "(none)": an auto-pick that came back after somebody chose to
@@ -18770,6 +20042,8 @@ function cflowInputsErrors(box, errors) {
    name, default_role, priority, filter_roles — because the picker ranks them
    by the chosen role, and a list of bare names cannot be ranked at all. */
 let workflowsCache = [];
+/* Settings' per-role auto-pick overrides, served with the list. */
+let roleWorkflowsCache = {};
 let workflowsFor = null;
 /* Whether the Workflow row has been touched by hand. Until it has, the
    picked role decides it (see syncOnboardPickers). */
@@ -18801,10 +20075,13 @@ async function refreshWorkflowChoices() {
   let answered = false;
   try {
     const resp = await api(`/api/cflow/workflows?cwd=${encodeURIComponent(cwd)}`);
-    workflowsCache = resp.ok ? ((await resp.json()).workflows || []) : [];
+    const doc = resp.ok ? await resp.json() : {};
+    workflowsCache = doc.workflows || [];
+    roleWorkflowsCache = doc.role_workflows || {};
     answered = resp.ok;
   } catch {
     workflowsCache = [];
+    roleWorkflowsCache = {};
   }
   // Only this call's own claim is released: a later cwd change that already
   // re-claimed it owns the memo now, and its fetch is the one that answers.
@@ -19743,6 +21020,7 @@ function openSettings(section) {
     return;
   }
   refreshHarnesses().then(() => { if (wsOpen) renderWorkspaces(); });
+  refreshRoleWorkflowSettings();
   refreshLlmSettings();
   refreshFaq();
   refreshPromptPresets();
@@ -22022,7 +23300,7 @@ function beadsLaneCount(lane) {
 function beadsLaneSpent(lane) {
   if (lane.pool) return false;
   if (!lane.known) return true;
-  if (lane.category) return lane.category !== "running" && lane.category !== "paused";
+  if (lane.category) return !["running", "hold", "paused"].includes(lane.category);
   return lane.status === "exited";
 }
 
@@ -22088,7 +23366,8 @@ function beadsQueueLane(grid, lane, root, statuses, opts = {}) {
     const state = el("div", "beads-q-state");
     if (lane.known) {
       // A paused session's status is "exited"; the badge says which exit.
-      const shown = lane.category === "paused" ? "paused" : lane.status;
+      const shown = lane.category === "paused" || lane.category === "hold"
+        ? lane.category : lane.status;
       state.appendChild(el("span", `beads-sess ${shown || ""}`, shown || "?"));
     } else {
       state.appendChild(el("span", "beads-sess", "not a session here"));
@@ -24748,8 +26027,13 @@ function promptPacksCard() {
   return card;
 }
 
-/* The two settings, edited as one draft and saved together. */
-function promptPackSettings(doc, ids) {
+/* The two settings, edited as one draft and saved together. An on-demand
+   pack (sent later to a running session, e.g. by `claunch retro`) is never
+   part of an opening, so neither setting may name it: the daemon refuses
+   it, and it is not drawn here as a box to tick. */
+function promptPackSettings(doc, allIds) {
+  const onDemand = doc.on_demand_packs || [];
+  const ids = allIds.filter((id) => !onDemand.includes(id));
   const box = el("div", "prompt-pack-settings");
   if (!promptPacksDraft) {
     promptPacksDraft = {
@@ -24777,7 +26061,8 @@ function promptPackSettings(doc, ids) {
     "one in the form leaves it out of that one session only; take it off " +
     "this list to stop ticking it. Each session gets its workspace's copy, " +
     "or the copy claunch ships when the workspace has not installed it " +
-    `(the form says which). Restore defaults sets: ${(doc.shipped_default_packs || []).join(", ") || "none"}.`));
+    `(the form says which). Restore defaults sets: ${(doc.shipped_default_packs || []).join(", ") || "none"}.` +
+    (onDemand.length ? ` Not listed here or below: ${onDemand.join(", ")} — sent on demand to a running session, never in an opening.` : "")));
   const defaults = el("div", "new-check-list");
   defaults.id = "prompt-pack-defaults";
   for (const id of ids) {
@@ -24906,6 +26191,7 @@ function renderWorkspaces() {
 
   view.appendChild(keyHelpCard());
   view.appendChild(scoreGoalSettingsCard());
+  view.appendChild(roleWorkflowsCard());
 
   view.appendChild(railStaleCard());
 
@@ -29050,6 +30336,74 @@ function cf2ReasonInput(key, placeholder) {
   return input;
 }
 
+/* What each answer button under a card does, spelled out below the row
+   (claunch-omph3): a button's title only shows on hover, and the built-in
+   answers (approve, decline, reframe) mean the same thing on every run, so a
+   person should not have to guess them. `items` are [name, meaning] pairs;
+   pairs without a meaning are left out. */
+const CF2_ANSWER_MEANINGS = {
+  approve: "enter the task: the agent starts it now",
+  decline: "do not enter the task: it finishes declined and the run follows that outcome",
+  reframe: "none of these options fits the problem. Say what they miss in the reason; " +
+           "the agent frames the question again from it and asks anew " +
+           "(ask-user does this at most 3 times, then gives up on the question)",
+};
+
+function cf2AnswerLegend(items) {
+  const rows = items.filter(([, m]) => m);
+  if (!rows.length) return null;
+  const list = el("ul", "cf2-legend");
+  for (const [name, meaning] of rows) {
+    const li = el("li");
+    li.append(el("b", null, name), document.createTextNode(` — ${meaning}`));
+    list.appendChild(li);
+  }
+  return list;
+}
+
+/* The legend rows for an ask card: every option of a plain ask (approve,
+   decline or its own), but for a brief ask only the built-in answers -- its
+   own options are laid out in the question view above. */
+function cf2AskLegendItems(opts, isBrief) {
+  return opts
+    .filter((o) => !isBrief || CF2_ANSWER_MEANINGS[o.name])
+    .map((o) => [o.name, CF2_ANSWER_MEANINGS[o.name] || o.description]);
+}
+
+/* The two presses of a loop or visit limit card, with what each does. */
+/* A limit card's presses as [label, meaning, body]: the body is what the
+   press adds to /api/cflow2/extend. A loop limit also offers a reset of its
+   count when it has run an iteration (a parallel foreach stops before any,
+   because it has more items than max, and a reset there would stop again). */
+function cf2LimitPresses(visitsKind, iterations) {
+  const stop = ["end it here: it finishes with outcome fail and the run follows that",
+                { stop: true }];
+  if (visitsKind) {
+    return [["Allow one more visit", "raise the limit by one: the node may be entered once more",
+             { by: 1, visits: true }],
+            ["Stop here", stop[0], { ...stop[1], visits: true }]];
+  }
+  const presses = [["Allow one more", "raise the loop's max by one: it runs one more iteration",
+                    { by: 1 }]];
+  if (Number(iterations) > 0) {
+    presses.push(["Reset the count",
+                  "count from 0 again: the loop gets its full max, earlier raises are dropped",
+                  { reset: true }]);
+  }
+  presses.push(["Stop the loop", ...stop]);
+  return presses;
+}
+
+/* Why an ask answer may not be sent yet, or "" when it may. reframe sends
+   the agent back to re-ask from the reason, and the engine takes a person's
+   answer without one, so the page asks for it before posting. */
+function cf2AnswerHeld(name, isBrief, reason) {
+  if (name === "reframe" && isBrief && !String(reason || "").trim()) {
+    return "reframe needs a reason: write what the options miss in the reason box.";
+  }
+  return "";
+}
+
 /* A task's "Force outcome" control: pick an outcome, give its fields as JSON
    when it requires any, and an optional reason; the engine checks it
    against the task's returns and routes it like the agent's report. */
@@ -29675,6 +31029,8 @@ function renderCflow2Into(box, data, ui) {
       });
     }
     card.appendChild(row);
+    const legend = cf2AnswerLegend((c.options || []).map((o) => [o.name, o.description]));
+    if (legend) card.appendChild(legend);
     for (const u of c.unavailable || []) {
       card.appendChild(el("p", "wf-note", `${u.name}: not available now (when ${u.when})`));
     }
@@ -29710,8 +31066,15 @@ function renderCflow2Into(box, data, ui) {
       return b;
     });
     const { row, reason } = answerRow(key, presses);
+    if (q) reason.placeholder = "reason (optional; required for reframe)";
     for (const b of presses) {
       b.addEventListener("click", async () => {
+        const held = cf2AnswerHeld(b.dataset.value, !!q, reason.value);
+        if (held) {
+          alert(held);
+          reason.focus();
+          return;
+        }
         if (!confirm(`Answer '${b.dataset.value}' to ${a.label || a.node}?`)) return;
         b.disabled = true;
         delete cf2Drafts[key];
@@ -29720,27 +31083,29 @@ function renderCflow2Into(box, data, ui) {
       });
     }
     card.appendChild(row);
+    const legend = cf2AnswerLegend(cf2AskLegendItems(opts, !!q));
+    if (legend) card.appendChild(legend);
     yours.appendChild(card);
   }
   const limitCard = (lim, title, visitsKind) => {
     const card = cf2Card("limit", lim.label || lim.node, title);
-    const more = el("button", "wf-btn sm approve", visitsKind ? "Allow one more visit" : "Allow one more");
-    more.addEventListener("click", async () => {
-      more.disabled = true;
-      await post("/api/cflow2/extend",
-                 { node: lim.instance, by: 1, ...(visitsKind ? { visits: true } : {}) });
-    });
-    const stop = el("button", "wf-btn sm", visitsKind ? "Stop here" : "Stop the loop");
-    stop.title = "it finishes with outcome fail";
-    stop.addEventListener("click", async () => {
-      if (!confirm("Stop here? It finishes with outcome fail.")) return;
-      stop.disabled = true;
-      await post("/api/cflow2/extend",
-                 { node: lim.instance, stop: true, ...(visitsKind ? { visits: true } : {}) });
-    });
+    const presses = cf2LimitPresses(visitsKind, lim.iterations);
     const row = el("div", "cf2-press");
-    row.append(more, stop);
+    for (const [label, , extra] of presses) {
+      const b = el("button", extra.by ? "wf-btn sm approve" : "wf-btn sm", label);
+      if (extra.stop) b.title = "it finishes with outcome fail";
+      b.addEventListener("click", async () => {
+        if (extra.stop && !confirm("Stop here? It finishes with outcome fail.")) return;
+        if (extra.reset && !confirm("Reset the loop's count to 0? It gets its full max again.")) {
+          return;
+        }
+        b.disabled = true;
+        await post("/api/cflow2/extend", { node: lim.instance, ...extra });
+      });
+      row.appendChild(b);
+    }
     card.appendChild(row);
+    card.appendChild(cf2AnswerLegend(presses));
     yours.appendChild(card);
   };
   for (const lim of run.loop_limits || []) {
@@ -32168,6 +33533,9 @@ function renderSession(data) {
     if (s.paused_at) {
       metaRow(dl, "paused", (s.paused_at || "").replace("T", " "));
     }
+    if (s.held_at) {
+      metaRow(dl, "hold", (s.held_at || "").replace("T", " "));
+    }
     view.appendChild(dl);
 
     // The levers on the facts above, directly under them: the marks a reader
@@ -34500,6 +35868,157 @@ function saveSpawnRecall(picks) {
   try { localStorage.setItem(SPAWN_RECALL_KEY, JSON.stringify(keep)); } catch {}
 }
 
+/* The New tab's standing answers, kept as the operator gives them rather
+   than at Create (claunch-9em4k). The record above is written only by a
+   launch that went through and holds six rows, and its restore steps over a
+   row that already holds something — which the Profile row always does once
+   refreshProfiles has picked the first profile — so a reload (ctrl+shift+R)
+   put every other row back on its default. This one is written on every
+   change the operator makes on the New tab and read back once per page load,
+   after the option lists it names are filled. The rows a single launch
+   consumes (SESSION_FORM_SPENT, the handle, the issue pick, the worktree's
+   name and base) are not in it, for the reason the record above leaves them
+   out; the Project row is the rail's (PROJECT_KEY). Listed in the order the
+   restore applies them: each row's options follow the ones before it. */
+const NEW_FORM_DRAFT_FIELDS = [
+  "cwd", "profile", "harness", "borrow", "null_token", "model", "effort",
+  "skip_permissions", "codex_yolo", "codex_sandbox", "auto_compact",
+  "over_limit", "score_goal", "args", "mesh", "role", "workflow",
+  "worktree_mode", "beads",
+];
+const NEW_FORM_DRAFT_CHECKS = [
+  "skip_permissions", "codex_yolo", "codex_sandbox", "auto_compact",
+  "over_limit", "score_goal",
+];
+const NEW_FORM_DRAFT_KEY = `claunch_new_form:${BASE}`;
+let newFormDraftRestoring = false;
+let newFormDraftRestored = false;
+
+function readNewFormDraft() {
+  try {
+    const doc = JSON.parse(localStorage.getItem(NEW_FORM_DRAFT_KEY) || "null");
+    return doc && typeof doc === "object" && !Array.isArray(doc) ? doc : null;
+  } catch { return null; }
+}
+
+/* A row's answer as the draft keeps it, or undefined for a row that is not
+   the operator's right now (greyed, or a radio group with nothing usable
+   picked) — the draft then keeps what it last held for that row. */
+function newFormDraftAnswer(control) {
+  if (!control) return undefined;
+  if (!control.tagName) { // a radio group
+    const on = [...control].find((r) => r.checked);
+    return on && !on.disabled ? String(on.value) : undefined;
+  }
+  if (control.disabled) return undefined;
+  return control.type === "checkbox" ? !!control.checked : String(control.value ?? "");
+}
+
+function saveNewFormDraft() {
+  if (newFormDraftRestoring) return;
+  const f = $("new-session");
+  if (!f || sessionFormView().mode !== "new") return;
+  const draft = readNewFormDraft() || {};
+  for (const name of NEW_FORM_DRAFT_FIELDS) {
+    const answer = newFormDraftAnswer(f.elements[name]);
+    if (answer !== undefined) draft[name] = answer;
+  }
+  try { localStorage.setItem(NEW_FORM_DRAFT_KEY, JSON.stringify(draft)); } catch {}
+}
+
+/* Put one remembered answer on a select, only when the row can take it and
+   offers it. True when the row moved. */
+function setNewFormDraftSelect(select, want) {
+  if (!select || select.disabled || typeof want !== "string") return false;
+  if (select.value === want) return false;
+  if (![...(select.options || [])].some((o) => o.value === want && !o.disabled)) {
+    return false;
+  }
+  select.value = want;
+  return true;
+}
+
+function setNewFormDraftCheck(box, want) {
+  if (!box || box.disabled || typeof want !== "boolean") return false;
+  if (box.checked === want) return false;
+  box.checked = want;
+  return true;
+}
+
+/* Once per page load, before the first route: the form is still the page's
+   own, so whichever way it is opened next starts from these answers. Each
+   row is set the way the operator would set it, with the work its own
+   listener does, so the rows that follow it are rebuilt for it first. */
+async function restoreNewFormDraft() {
+  if (newFormDraftRestored) return;
+  newFormDraftRestored = true;
+  const f = $("new-session");
+  const d = readNewFormDraft();
+  if (!f || !d || sessionFormView().mode !== "new") return;
+  const fire = (target, type = "change") =>
+    target.dispatchEvent(new Event(type, { bubbles: true }));
+  const quiet = (p) => Promise.resolve(p).catch(() => {});
+  newFormDraftRestoring = true;
+  try {
+    if (setNewFormDraftSelect(f.cwd, d.cwd)) {
+      applySessionCwdChange();
+    }
+    if (setNewFormDraftSelect(f.profile, d.profile)) fire(f.profile);
+    if (setNewFormDraftSelect(f.harness, d.harness)) fire(f.harness);
+    // The lender list is fetched per profile; the pick waits for it.
+    await quiet(syncNewBorrowOptions(true));
+    if (setNewFormDraftSelect(f.borrow, d.borrow)) f.borrow._borrowTouched = true;
+    if (setNewFormDraftCheck(f.null_token, d.null_token)) fire(f.null_token);
+    // The Model, Effort and runtime rows are rebuilt for the harness by the
+    // form's input listener; the answers go on after that rebuild.
+    fire(f, "input");
+    setNewFormDraftSelect(f.model, d.model);
+    setNewFormDraftSelect(f.effort, d.effort);
+    for (const name of NEW_FORM_DRAFT_CHECKS) {
+      setNewFormDraftCheck(f.elements[name], d[name]);
+    }
+    if (typeof d.args === "string" && f.args && !f.args.disabled) f.args.value = d.args;
+    fire(f, "input");
+    // The mesh picker is filled from the mesh poll, and the role list is
+    // the mesh's; the workflow list is the directory's.
+    syncOnboardPickers();
+    if (setNewFormDraftSelect(f.mesh, d.mesh)) {
+      await quiet(refreshRoles(f.mesh.value));
+      refreshSessionConnect();
+    }
+    await quiet(refreshWorkflowChoices());
+    syncOnboardPickers();
+    if (setNewFormDraftSelect(f.role, d.role)) {
+      renderRoleStance();
+      syncOnboardPickers();
+    }
+    if (setNewFormDraftSelect(f.workflow, d.workflow)) {
+      newWfPicked = true;
+      syncOnboardPickers();
+    }
+    // Parked, the way the launch record's mode is: the worktree list
+    // arrives after the directory does.
+    if (typeof d.worktree_mode === "string" && f.worktree_mode &&
+        f.worktree_mode.value !== d.worktree_mode) {
+      pendingWorktreeMode = d.worktree_mode;
+      syncNewWorktree();
+    }
+    if (typeof d.beads === "string" && f.beads && f.beads.value !== d.beads) {
+      const radio = [...f.beads].find((r) => r.value === d.beads && !r.disabled);
+      if (radio) {
+        radio.checked = true;
+        fire(radio);
+      }
+    }
+  } finally {
+    newFormDraftRestoring = false;
+  }
+}
+
+for (const type of ["change", "input"]) {
+  $("new-session").addEventListener(type, saveNewFormDraft);
+}
+
 /* The spawn tab's Model row, remembered per PARENT PROFILE. The row starts
    on the parent's own model (syncNewModelOptions), so without this every
    child of a parent launched on `sonnet` opened on `sonnet` again however
@@ -34594,8 +36113,11 @@ function spawnWorkflowAdmits(entry, role) {
    a workflow with no filter stays listed regardless of role, matching
    spawnWorkflowAdmits. Returns the ordered options and the auto-pick (the
    role's highest-priority default), for the caller to apply over a value
-   only the auto-pick itself set last time. */
-function spawnRankWorkflows(raws, role) {
+   only the auto-pick itself set last time. `overrides` is Settings'
+   daemon.role_workflows (role -> workflow name, "v2:<name>", or "-" for no
+   pick): an override naming an option here wins over default_role, one
+   naming nothing here falls back to it -- wizard._workflow_default's rule. */
+function spawnRankWorkflows(raws, role, overrides) {
   role = String(role || "").trim().toLowerCase();
   const entries = (raws || []).map(spawnWorkflowEntry).filter((e) => e.name)
     .filter((e) => spawnWorkflowAdmits(e, role));
@@ -34621,6 +36143,16 @@ function spawnRankWorkflows(raws, role) {
   // role is offered, never chosen over the v1 one while both run.
   const auto = entries.find((e) => band(e) === 0 && e.version !== 2) ||
     entries.find((e) => band(e) === 0);
+  const own = role && overrides && typeof overrides === "object"
+    ? String(overrides[role] || "").trim() : "";
+  if (own === "-") return { options, auto: "" };
+  if (own) {
+    const v2 = own.startsWith("v2:");
+    const name = v2 ? own.slice(3) : own;
+    const hit = options.find((o) => o.name === name &&
+      (v2 ? o.version === 2 : o.value === name));
+    if (hit) return { options, auto: hit.value };
+  }
   return { options, auto: auto ? options[entries.indexOf(auto)].value : "" };
 }
 
@@ -34815,7 +36347,7 @@ let sessionModal = null;
    (claunch-ke7ke). sessionModalClose steps over these when it puts the form
    back, which is what makes the clearing survive a launch made from the modal
    rather than from the #/new page. */
-const SESSION_FORM_SPENT = ["name", "resume", "task", "context", "issue_text"];
+const SESSION_FORM_SPENT = ["name", "note", "resume", "task", "context", "issue_text"];
 
 function sessionFormConfig(mode) {
   const sections = ["new-where", "new-identity", "new-runs-on", "new-onboard",
@@ -34825,26 +36357,28 @@ function sessionFormConfig(mode) {
     "resume", "fork", "skip_permissions", "auto_compact", "auto_compact_window",
     "codex_yolo", "codex_sandbox", "args",
     "worktree_mode", "worktree_name", "worktree_existing", "worktree_session",
-    "worktree_rebase", "worktree_from", "task", "score_goal", "beads", "issue_text", "issue_filter", "issue", "pi_tool_*",
-    "subrole_*", "prompt_pack_*", "daemon_prompt"];
+    "worktree_rebase", "worktree_from", "task", "note", "score_goal", "beads", "issue_text", "issue_filter", "issue", "pi_tool_*",
+    "subrole_*", "prompt_pack_*", "prompter_context_*", "daemon_prompt"];
   const modes = {
     new: { title: "New session", submit: "Create", sections, editable,
       payload: ["name", "profile", "project", "cwd", "args", "env", "model", "effort", "tools", "worktree",
         "rebase_onto", "branch_from", "role", "subroles", "borrow", "null_token", "mesh", "handle", "workflow",
         "workflow_version", "cflow_inputs",
-        "context", "task", "opening_images", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
-        "daemon_prompt",
+        "context", "task", "note", "opening_images", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
+        "daemon_prompt", "prompter_contexts",
         "resume", "fork_session"] },
     spawn: { title: "Spawn child", submit: "Spawn child", sections,
       editable: [...editable, "parent", "fork_parent", "over_limit"],
       payload: ["name", "profile", "project", "workspace", "cwd", "args", "model", "effort", "tools", "worktree",
         "rebase_onto", "branch_from", "role", "subroles", "borrow", "null_token", "mesh", "handle", "workflow",
         "workflow_version", "cflow_inputs",
-        "context", "task", "opening_images", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
-        "daemon_prompt",
+        "context", "task", "note", "opening_images", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
+        "daemon_prompt", "prompter_contexts",
         "fork", "connect", "over_limit", "auto_compact"] },
     fork: { title: "Quick fork", submit: "Fork", sections: ["new-quick-fork"],
-      editable: ["quick_fork_carry", "quick_fork_task"], payload: ["task", "mesh", "workflow"] },
+      editable: ["quick_fork_place", "quick_fork_mesh", "quick_fork_role",
+        "quick_fork_workflow", "quick_fork_task"],
+      payload: ["task", "mesh", "workflow", "role", "sibling"] },
   };
   return modes[mode] || modes.new;
 }
@@ -34992,7 +36526,11 @@ function applySessionModalSeed(f, seed) {
    a greyed row or over one that already holds something: the policy shut
    the first, and the second is an answer somebody gave. */
 function applySessionModalRecall(f) {
-  const re = spawnRecall();
+  // On the New tab a kept draft is the newer answer for these rows (it
+  // records an empty Role or "no worktree" as well), so the launch record
+  // only speaks for a browser that has none.
+  const draft = sessionFormView().mode === "new" ? readNewFormDraft() : null;
+  const re = draft ? {} : spawnRecall();
   if (re.role && !f.role.disabled && !f.role.value) {
     ensureOption(f.role, re.role);
     f.role.value = re.role;
@@ -35007,9 +36545,20 @@ function applySessionModalRecall(f) {
   // already off "no worktree" is an answer somebody gave on this page, the
   // same reason the two rows above are left alone once filled. Parked, not
   // written — syncNewWorktree is what knows whether the row can take it.
-  pendingWorktreeMode =
-    (re.worktree_mode && f.worktree_mode && !f.worktree_mode.value)
-      ? re.worktree_mode : "";
+  if (draft) {
+    // The draft's mode is parked the same way, and a mode the reload's
+    // restore already parked is kept: on a #/new reload the worktree list
+    // has not arrived yet, so the restore could only park it, and clearing
+    // it here left the row on "no worktree" (claunch-9em4k review).
+    if (!pendingWorktreeMode && typeof draft.worktree_mode === "string" &&
+        f.worktree_mode && f.worktree_mode.value !== draft.worktree_mode) {
+      pendingWorktreeMode = draft.worktree_mode;
+    }
+  } else {
+    pendingWorktreeMode =
+      (re.worktree_mode && f.worktree_mode && !f.worktree_mode.value)
+        ? re.worktree_mode : "";
+  }
   if (pendingWorktreeMode) syncNewWorktree();
   // The Model row's own recall, keyed by the parent's profile rather than
   // held in the record above. A fresh opening asks it again even when the
@@ -35265,7 +36814,13 @@ async function openSessionModal(opts = {}) {
   document.addEventListener("keydown", sessionModalKey);
   overlay.classList.remove("hidden");
   overlay.classList.add("spawn-open");
-  spawnSizeApply(overlay.querySelector(".modal-box"));
+  // The quick fork is six rows, not the session form's twenty: it opens at
+  // the height its rows take (fork-open in the sheet) instead of at the size
+  // the operator last dragged the New/Spawn box to, which on a box shrunk
+  // for that form left the fork scrolling inside a slit.
+  overlay.classList.toggle("fork-open", tab === "fork");
+  st.fork = tab === "fork";
+  if (!st.fork) spawnSizeApply(overlay.querySelector(".modal-box"));
   if (tab === "fork") {
     configureSessionFork(opts.source);
     renderSessionForm();
@@ -35323,7 +36878,12 @@ function sessionModalClose(opts = {}) {
   // rules still apply to it, and the inline pair is stripped so the next
   // confirm dialog opens at the sheet's 460px rather than at this form's
   // drag.
-  spawnSizeRemember(overlay.querySelector(".modal-box"));
+  // A fork box is sized by its rows, so its size is not the one the next
+  // New/Spawn box should open at; only the inline pair is stripped.
+  const box = overlay.querySelector(".modal-box");
+  if (st.fork) { box.style.width = ""; box.style.height = ""; }
+  else spawnSizeRemember(box);
+  overlay.classList.remove("fork-open");
   const f = $("new-session");
   f._sessionView = st.previousView;
   // A launch that went through clears the rows it consumed (SESSION_FORM_SPENT)
@@ -35349,6 +36909,9 @@ function sessionModalClose(opts = {}) {
   renderSessionForm();
   applySessionParentChange();
   renderSessionForm();
+  // The restore above is programmatic and fires no change, so the draft
+  // still holds what was typed inside a box that was cancelled.
+  saveNewFormDraft();
 }
 
 /* The older entry point, kept under the name everything already presses:
@@ -35390,7 +36953,7 @@ function spawnSameSeed(s) {
   // is too, rather than being dropped into the one `s` is editing.
   seed.worktree = /\/\.claude\/worktrees\/[^/]+$/.test(worktreePathKey(s.cwd));
   seed.prompt_packs = (s.prompt_packs || [])
-    .filter((p) => p && p.id && !(p.required_by || []).length)
+    .filter((p) => p && p.id && p.source !== "prompter" && !(p.required_by || []).length)
     .map((p) => p.id);
   return seed;
 }
@@ -40704,6 +42267,7 @@ function notify(title, sub, opts) {
   if (!host) return null;
   const key = o.key || `n${(noticeSeq += 1)}`;
   dismissNotice(key);            // one card per key, always the newest
+  noticeRecord({ title, sub: sub || "", kind: o.kind || "" });
   const node = el("div", "notice" + (o.kind ? ` ${o.kind}` : ""));
   node.appendChild(el("div", "notice-title", title));
   if (sub) node.appendChild(el("div", "notice-sub", sub));
@@ -40744,6 +42308,457 @@ function gateSessionLink(name) {
 }
 
 /* ------------------------------------------------------------------ */
+/* notice history — what the corner said, kept for later               */
+/* ------------------------------------------------------------------ */
+/* A card in the corner is gone once it is clicked or times out, and a gate
+   card could not be put away at all without answering it. The history keeps
+   every notice and every gate request this page saw, and the panel behind the
+   rail's bell shows them again: the requests still waiting (with their
+   buttons and countdowns) on top, everything else below with how it ended.
+
+   Hiding a gate card only puts the card away. The request stays open on the
+   daemon and its deadline keeps running — the restart gate still approves
+   itself at its timeout — which is why the bell keeps counting it.
+
+   Kept in this browser's localStorage (claunch-l978l): the history, the
+   hidden request ids and when the panel was last opened. A browser without
+   storage still works; it only forgets on reload. Pending requests are never
+   taken from storage — every poll reads them from the daemon. */
+const NOTICE_HISTORY_KEY = "claunch.noticeHistory";
+const NOTICE_HIDDEN_KEY = "claunch.noticeHidden";
+const NOTICE_SEEN_KEY = "claunch.noticeSeen";
+const NOTICE_HISTORY_MAX = 100;
+
+function noticeStore() {
+  try {
+    return typeof localStorage === "undefined" ? null : localStorage;
+  } catch {
+    return null;
+  }
+}
+
+function noticeLoad(key, fallback) {
+  const store = noticeStore();
+  if (!store) return fallback;
+  try {
+    const raw = store.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function noticeSave(key, value) {
+  const store = noticeStore();
+  if (!store) return;
+  try {
+    store.setItem(key, JSON.stringify(value));
+  } catch {
+    /* full or blocked: the page keeps working from memory */
+  }
+}
+
+const noticeHistory = (() => {
+  const saved = noticeLoad(NOTICE_HISTORY_KEY, []);
+  return Array.isArray(saved)
+    ? saved.filter((e) => e && typeof e === "object").slice(0, NOTICE_HISTORY_MAX)
+    : [];
+})();
+/* "<type>:<request id>" of gate cards put away by hand. */
+const gateHiddenIds = new Set(
+  (() => {
+    const saved = noticeLoad(NOTICE_HIDDEN_KEY, []);
+    return Array.isArray(saved) ? saved.filter((k) => typeof k === "string") : [];
+  })()
+);
+let noticeSeenAt = Number(noticeLoad(NOTICE_SEEN_KEY, 0)) || 0;
+/* The pending requests of each gate as its last poll answered them. */
+const gatePending = { restart: [], goto: [], reposync: [] };
+
+function noticeHistorySave() {
+  noticeSave(NOTICE_HISTORY_KEY, noticeHistory);
+}
+
+function noticeRecord(entry) {
+  const rec = Object.assign(
+    { id: `h${Date.now()}-${(noticeSeq += 1)}`, at: Date.now() },
+    entry
+  );
+  noticeHistory.unshift(rec);
+  if (noticeHistory.length > NOTICE_HISTORY_MAX) {
+    noticeHistory.length = NOTICE_HISTORY_MAX;
+  }
+  noticeHistorySave();
+  noticeBellPaint();
+  noticePanelPaint();
+  return rec;
+}
+
+function gateHistoryEntry(type, rid) {
+  return noticeHistory.find(
+    (e) => e.gate && e.gate.type === type && e.gate.rid === rid
+  ) || null;
+}
+
+/* One history row per request, written the first time a poll sees it. */
+function gateHistoryOpen(type, rid, title, sub) {
+  if (gateHistoryEntry(type, rid)) return;
+  noticeRecord({ title, sub, kind: "warn", gate: { type, rid }, status: "pending" });
+}
+
+/* A request that left the pending set. `status` is the daemon's word for it
+   when the poll still carries the record, otherwise it is only known gone. */
+function gateHistorySettle(type, rid, status) {
+  const entry = gateHistoryEntry(type, rid);
+  if (!entry || entry.status !== "pending") return;
+  entry.status = status || "no longer pending";
+  entry.settledAt = Date.now();
+  noticeHistorySave();
+}
+
+/* Reconciles one gate's poll: settles the rows whose request is no longer
+   pending, and forgets hidden ids that can no longer come back. `all` is
+   every record the poll returned, settled ones included. */
+function gateHistorySync(type, pending, all) {
+  gatePending[type] = pending;
+  const live = new Set(pending.map((r) => String(r.id)));
+  const byId = new Map((all || []).map((r) => [String(r.id), r]));
+  for (const entry of noticeHistory) {
+    if (!entry.gate || entry.gate.type !== type || entry.status !== "pending") continue;
+    if (live.has(entry.gate.rid)) continue;
+    const rec = byId.get(entry.gate.rid);
+    gateHistorySettle(type, entry.gate.rid, rec && rec.status !== "pending" ? rec.status : null);
+  }
+  let pruned = false;
+  for (const key of [...gateHiddenIds]) {
+    const [kind, ...rest] = key.split(":");
+    if (kind === type && !live.has(rest.join(":"))) {
+      gateHiddenIds.delete(key);
+      pruned = true;
+    }
+  }
+  if (pruned) noticeSave(NOTICE_HIDDEN_KEY, [...gateHiddenIds]);
+  noticeBellPaint();
+  noticePanelPaint();
+}
+
+function gateIsHidden(type, rid) {
+  return gateHiddenIds.has(`${type}:${rid}`);
+}
+
+function gateHide(type, rid) {
+  gateHiddenIds.add(`${type}:${rid}`);
+  noticeSave(NOTICE_HIDDEN_KEY, [...gateHiddenIds]);
+  const entry = gateHistoryEntry(type, String(rid));
+  if (entry) {
+    entry.hidden = true;
+    noticeHistorySave();
+  }
+  noticeBellPaint();
+  noticePanelPaint();
+}
+
+function gateUnhide(type, rid) {
+  gateHiddenIds.delete(`${type}:${rid}`);
+  noticeSave(NOTICE_HIDDEN_KEY, [...gateHiddenIds]);
+  const entry = gateHistoryEntry(type, String(rid));
+  if (entry) {
+    entry.hidden = false;
+    noticeHistorySave();
+  }
+  noticeGateRefresh(type);
+}
+
+/* The press on a gate card that answers nothing: the card goes, the request
+   stays open with its deadline, and the panel keeps it. `rid` may be a
+   function when the card outlives one request (the restart gate keeps a
+   single card key). */
+function gateHideButton(type, rid, key, title) {
+  const btn = el("button", "wf-btn gate-hide", "Hide");
+  btn.title = title;
+  btn.addEventListener("click", (ev) => {
+    if (ev && ev.stopPropagation) ev.stopPropagation();
+    gateHide(type, String(typeof rid === "function" ? rid() : rid));
+    dismissNotice(key);
+  });
+  return btn;
+}
+
+function noticeGateRefresh(type) {
+  if (type === "restart") return refreshRestartGate();
+  if (type === "goto") return refreshGotoGate();
+  if (type === "reposync") return refreshReposyncGate();
+  return null;
+}
+
+function gatePendingCount() {
+  return gatePending.restart.length + gatePending.goto.length +
+    gatePending.reposync.length;
+}
+
+/* The rail's bell (and its phone twin): the number is the requests waiting
+   on a person, hidden or not; with none waiting, a dot says the history has
+   something newer than the last time the panel was opened. */
+function noticeBellPaint() {
+  const waiting = gatePendingCount();
+  const unread = noticeHistory.some((e) => (e.at || 0) > noticeSeenAt);
+  const hidden = [...gateHiddenIds].length > 0;
+  for (const id of ["notice-bell", "m-notice-bell"]) {
+    const bell = $(id);
+    if (!bell) continue;
+    const badge = bell.querySelector(".notice-bell-count");
+    if (badge) badge.textContent = waiting ? String(waiting) : "";
+    bell.classList.toggle("waiting", waiting > 0);
+    bell.classList.toggle("unread", !waiting && unread);
+    bell.classList.toggle("has-hidden", hidden);
+    bell.title = waiting
+      ? `${waiting} request(s) waiting on you` +
+        (hidden ? " — some cards are hidden, their deadlines still run" : "") +
+        " · notification history"
+      : "notification history";
+  }
+}
+
+function noticePanelOpen() {
+  const panel = $("notice-panel");
+  return !!panel && !panel.classList.contains("hidden");
+}
+
+function noticePanelToggle(force) {
+  const panel = $("notice-panel");
+  if (!panel) return;
+  const open = force === undefined ? !noticePanelOpen() : !!force;
+  panel.classList.toggle("hidden", !open);
+  if (open) {
+    noticeSeenAt = Date.now();
+    noticeSave(NOTICE_SEEN_KEY, noticeSeenAt);
+    noticePanelPaint();
+  }
+  noticeBellPaint();
+}
+
+function noticeStamp(ms) {
+  const d = new Date(ms);
+  if (isNaN(d.getTime())) return "";
+  const today = new Date().toDateString() === d.toDateString();
+  return today ? d.toLocaleTimeString() : d.toLocaleString();
+}
+
+function noticePanelButton(label, cls, title, onClick) {
+  const btn = el("button", "wf-btn" + (cls ? ` ${cls}` : ""), label);
+  btn.type = "button";
+  if (title) btn.title = title;
+  btn.addEventListener("click", (ev) => {
+    if (ev && ev.stopPropagation) ev.stopPropagation();
+    onClick(btn);
+  });
+  return btn;
+}
+
+/* One waiting request in the panel: what the card says, with its buttons.
+   The decisions post to the same endpoints the card does; a hidden card gets
+   a Show card press that puts it back in the corner. */
+function noticePanelGateRow(type, rec) {
+  const row = el("div", "notice-row pending");
+  const rid = String(rec.id);
+  const hidden = gateIsHidden(type, rid);
+  const head = el("div", "notice-row-head");
+  const actions = el("div", "gate-actions");
+  if (type === "restart") {
+    head.appendChild(el("span", "notice-title", "daemon restart requested"));
+    row.appendChild(head);
+    row.appendChild(el(
+      "div", "notice-sub",
+      `session ${rec.session || "?"}` +
+        (rec.requested_at
+          ? ` asked at ${noticeStamp(new Date(rec.requested_at).getTime())}`
+          : "") +
+        ((rec.extensions || 0) ? ` (extended ${rec.extensions}×)` : "")
+    ));
+    if ((rec.reason || "").trim()) {
+      row.appendChild(el("div", "notice-sub gate-reason", `reason: ${rec.reason.trim()}`));
+    }
+    row.appendChild(el(
+      "div", "notice-sub gate-clock",
+      `auto-approves in ${gateCountdown(rec.deadline)}`
+    ));
+    actions.appendChild(noticePanelButton(
+      "Approve", "approve",
+      "the daemon restarts now — every attached terminal goes down with it",
+      async (btn) => {
+        if (await gatePost("/api/daemon/restart-request/approve", btn)) {
+          announceRestartAsked(
+            `approved at ${noticeClock()} — the page reconnects on its own ` +
+              "once the successor is up"
+          );
+          refreshRestartGate();
+        }
+      }
+    ));
+    actions.appendChild(noticePanelButton(
+      "+5 min", "gate-extend",
+      "not a decision: the deadline moves out and the request stays open",
+      async (btn) => {
+        if (await gatePost("/api/daemon/restart-request/extend", btn)) {
+          refreshRestartGate();
+        }
+      }
+    ));
+    actions.appendChild(noticePanelButton(
+      "Reject", "clear", "nothing restarts; the asking session keeps working",
+      async (btn) => {
+        if (await gatePost("/api/daemon/restart-request/reject", btn)) {
+          refreshRestartGate();
+        }
+      }
+    ));
+  } else if (type === "goto") {
+    head.appendChild(el("span", "notice-title", "run move requested: "));
+    head.appendChild(gateSessionLink(rec.target_session));
+    row.appendChild(head);
+    const sub = el("div", "notice-sub");
+    sub.appendChild(gateSessionLink(rec.session));
+    sub.appendChild(el("span", null, " asks to move "));
+    sub.appendChild(gateSessionLink(rec.target_session));
+    sub.appendChild(el("span", null, ` — ${rec.from || "?"} → ${rec.step || "?"}`));
+    row.appendChild(sub);
+    row.appendChild(el(
+      "div", "notice-sub",
+      `${rec.session || "?"}: ${rec.reason || "(no reason given)"}`
+    ));
+    row.appendChild(el(
+      "div", "notice-sub gate-clock",
+      `auto-approves in ${gateCountdown(rec.deadline)}`
+    ));
+    actions.appendChild(noticePanelButton(
+      "Approve", "approve", `move this run to '${rec.step}' now`,
+      async (btn) => {
+        if (await gatePost(`/api/cflow/goto-requests/${rec.id}/approve`, btn)) {
+          refreshGotoGate();
+        }
+      }
+    ));
+    actions.appendChild(noticePanelButton(
+      "Deny", "clear", "nothing moves; the refusal is handed to the run's driver",
+      async (btn) => {
+        if (await gatePost(`/api/cflow/goto-requests/${rec.id}/deny`, btn)) {
+          refreshGotoGate();
+        }
+      }
+    ));
+  } else {
+    const plan = rec.plan || {};
+    head.appendChild(el(
+      "span", "notice-title",
+      `repository sync wants to push: ${plan.workspace || plan.repo || "?"}`
+    ));
+    row.appendChild(head);
+    row.appendChild(el(
+      "div", "notice-sub",
+      (rec.session ? `${rec.session} asks: ` : "") +
+        (plan.summary || plan.action || "?")
+    ));
+    row.appendChild(el(
+      "div", "notice-sub gate-clock",
+      `expires (as a refusal) in ${gateCountdown(rec.deadline)}`
+    ));
+    actions.appendChild(noticePanelButton(
+      "Approve", "approve", "the asking session pushes exactly this plan",
+      async (btn) => {
+        if (await gatePost(`/api/reposync/requests/${rec.id}/approve`, btn)) {
+          refreshReposyncGate();
+        }
+      }
+    ));
+    actions.appendChild(noticePanelButton(
+      "Reject", "clear", "nothing is pushed; the asking session is told no",
+      async (btn) => {
+        if (await gatePost(`/api/reposync/requests/${rec.id}/reject`, btn)) {
+          refreshReposyncGate();
+        }
+      }
+    ));
+  }
+  if (hidden) {
+    head.appendChild(el("span", "notice-chip", "hidden"));
+    actions.appendChild(noticePanelButton(
+      "Show card", "", "put this card back in the corner",
+      () => gateUnhide(type, rid)
+    ));
+  }
+  row.appendChild(actions);
+  return row;
+}
+
+function noticePanelHistoryRow(entry) {
+  const row = el("div", "notice-row" + (entry.kind ? ` ${entry.kind}` : ""));
+  const head = el("div", "notice-row-head");
+  head.appendChild(el("span", "notice-title", entry.title || ""));
+  if (entry.gate) {
+    head.appendChild(el(
+      "span", "notice-chip" + (entry.status === "pending" ? " live" : ""),
+      entry.status || "pending"
+    ));
+  }
+  if (entry.hidden && entry.status === "pending") {
+    head.appendChild(el("span", "notice-chip", "hidden"));
+  }
+  row.appendChild(head);
+  if (entry.sub) row.appendChild(el("div", "notice-sub", entry.sub));
+  row.appendChild(el(
+    "div", "notice-sub notice-when",
+    noticeStamp(entry.at) +
+      (entry.settledAt ? ` · ended ${noticeStamp(entry.settledAt)}` : "")
+  ));
+  return row;
+}
+
+/* Rebuilt from the state above on every gate poll while the panel is open,
+   so the countdowns move and a request settled elsewhere drops out of the
+   waiting list on its own. */
+function noticePanelPaint() {
+  if (!noticePanelOpen()) return;
+  const body = $("notice-panel-body");
+  if (!body) return;
+  body.innerHTML = "";
+  const waiting = [];
+  for (const type of ["restart", "goto", "reposync"]) {
+    for (const rec of gatePending[type]) waiting.push([type, rec]);
+  }
+  body.appendChild(el("h3", "notice-panel-section", `Waiting on you (${waiting.length})`));
+  if (!waiting.length) {
+    body.appendChild(el("p", "wf-note", "no request is waiting on a person"));
+  }
+  for (const [type, rec] of waiting) body.appendChild(noticePanelGateRow(type, rec));
+
+  const past = noticeHistory.filter((e) => !(e.gate && e.status === "pending"));
+  const sectionHead = el("div", "notice-panel-section-row");
+  sectionHead.appendChild(el("h3", "notice-panel-section", `History (${past.length})`));
+  if (past.length) {
+    sectionHead.appendChild(noticePanelButton(
+      "Clear", "clear", "forget the history in this browser (waiting requests stay)",
+      () => {
+        for (let i = noticeHistory.length - 1; i >= 0; i -= 1) {
+          const e = noticeHistory[i];
+          if (!(e.gate && e.status === "pending")) noticeHistory.splice(i, 1);
+        }
+        noticeHistorySave();
+        noticePanelPaint();
+        noticeBellPaint();
+      }
+    ));
+  }
+  body.appendChild(sectionHead);
+  if (!past.length) {
+    body.appendChild(el("p", "wf-note", "nothing has been shown in this browser yet"));
+  }
+  for (const entry of past) body.appendChild(noticePanelHistoryRow(entry));
+}
+
+// The bell's dot for what an earlier visit left unread, before any poll.
+noticeBellPaint();
+
+/* ------------------------------------------------------------------ */
 /* the restart gate: an agent session's restart, waiting on a person   */
 /* ------------------------------------------------------------------ */
 /* A managed session's `claunch daemon restart` opens this gate instead
@@ -40753,8 +42768,11 @@ function gateSessionLink(name) {
    the card drawn with a live countdown, a settled or gone request takes
    it down. Approving is the daemon's own restart door, so the existing
    restarting announcement (the daemon card's NOTICE_LINK) labels the
-   outage that follows; rejecting just closes the card. */
+   outage that follows; rejecting just closes the card. The asker's reason
+   (`claunch daemon restart --reason`) is printed in full under the title:
+   it is the whole basis for the click. */
 const NOTICE_GATE = "restart-gate";
+let restartGateRid = null;   // the request the card is about, as of the last poll
 
 function gateCountdown(deadlineIso) {
   const dead = new Date(deadlineIso).getTime();
@@ -40786,7 +42804,23 @@ async function refreshRestartGate() {
     return; // daemon down or auth up — pollOnce's own channels own both
   }
   const rec = body && body.request ? body.request : null;
-  if (!rec || rec.status !== "pending") {
+  const pending = rec && rec.status === "pending";
+  // The record has no id on an older daemon; its filing time stands in.
+  const rid = rec ? String(rec.id || rec.requested_at || "restart") : null;
+  if (pending) {
+    gateHistoryOpen(
+      "restart", rid, "daemon restart requested",
+      `session ${rec.session || "?"}` +
+        ((rec.reason || "").trim() ? ` — reason: ${rec.reason.trim()}` : "")
+    );
+  }
+  gateHistorySync(
+    "restart",
+    pending ? [Object.assign({}, rec, { id: rid })] : [],
+    rec ? [Object.assign({}, rec, { id: rid })] : []
+  );
+  restartGateRid = rid;
+  if (!pending || gateIsHidden("restart", rid)) {
     dismissNotice(NOTICE_GATE);
     return;
   }
@@ -40796,6 +42830,7 @@ async function refreshRestartGate() {
     const node = el("div", "notice warn gate");
     const title = el("div", "notice-title", "daemon restart requested");
     const sub = el("div", "notice-sub");
+    const reasonLine = el("div", "notice-sub gate-reason");
     const actions = el("div", "gate-actions");
     const approve = el("button", "wf-btn approve", "Approve");
     const reject = el("button", "wf-btn clear", "Reject");
@@ -40807,8 +42842,8 @@ async function refreshRestartGate() {
     const extend = el("button", "wf-btn gate-extend", "+5 min");
     extend.title =
       "not a decision: the deadline moves out and the request stays open, " +
-      "so the countdown stops answering for you while you read. Twice at " +
-      "most — the waiting session's own shell cannot be held longer than that";
+      "so the countdown stops answering for you while you read. It can be " +
+      "pressed as many times as you need";
     approve.addEventListener("click", async (ev) => {
       ev.stopPropagation();
       if (await gatePost("/api/daemon/restart-request/approve", approve)) {
@@ -40837,8 +42872,13 @@ async function refreshRestartGate() {
     actions.appendChild(approve);
     actions.appendChild(extend);
     actions.appendChild(reject);
+    actions.appendChild(gateHideButton("restart", () => restartGateRid, NOTICE_GATE,
+      "close this card only — nothing is answered, the request stays open " +
+        "and still auto-approves at its deadline. The bell beside the rail's " +
+        "title keeps it, with its buttons, in the notification history"));
     node.appendChild(title);
     node.appendChild(sub);
+    node.appendChild(reasonLine);
     node.appendChild(actions);
     host.appendChild(node);
     const entry = { node, timer: null };
@@ -40846,7 +42886,6 @@ async function refreshRestartGate() {
     card = entry;   // the freshly built card carries this poll's countdown too
   }
   const used = rec.extensions || 0;
-  const max = rec.max_extensions || 0;
   const sub = card.node.querySelector(".notice-sub");
   if (sub) {
     sub.textContent =
@@ -40855,15 +42894,21 @@ async function refreshRestartGate() {
         ? ` asked at ${new Date(rec.requested_at).toLocaleTimeString()}`
         : "") +
       ` — auto-approves in ${gateCountdown(rec.deadline)}` +
-      (used ? ` (extended ${used}/${max})` : "");
+      (used ? ` (extended ${used}×)` : "");
   }
-  // Repainted every poll, not only on the click: the budget is the gate's
-  // and another page may have spent it.
+  const reasonLine = card.node.querySelector(".gate-reason");
+  if (reasonLine) {
+    const reason = (rec.reason || "").trim();
+    reasonLine.textContent = reason
+      ? `reason: ${reason}`
+      : "reason: (the request gave none)";
+  }
+  // Extend has no limit (claunch-mm8zv); a click in flight disables it until
+  // the post returns, and the repaint here re-enables it.
   const extendBtn = card.node.querySelector(".gate-extend");
   if (extendBtn) {
-    const spent = max > 0 && used >= max;
-    extendBtn.disabled = spent;
-    extendBtn.textContent = spent ? "extended" : "+5 min";
+    extendBtn.disabled = false;
+    extendBtn.textContent = "+5 min";
   }
 }
 
@@ -40880,13 +42925,13 @@ async function refreshRestartGate() {
    keyed by request id and each poll reconciles the set. */
 const GOTO_GATE_PREFIX = "goto-gate-";
 
-/* Cards the reader closed by hand. Ignoring answers nothing — the request
-   stays open and still auto-approves at its deadline — so the id has to be
-   remembered somewhere the redraw reads: the poll rebuilds any card it
-   cannot find, and without this the next tick would put the closed card
-   straight back. An id is forgotten again as soon as its request leaves the
-   pending set, so it can never silence a later card. */
-const gotoGateIgnored = new Set();
+/* Cards the reader closed by hand are remembered in gateHiddenIds (the
+   notice history above). Hiding answers nothing — the request stays open and
+   still auto-approves at its deadline — so the id has to be remembered
+   somewhere the redraw reads: the poll rebuilds any card it cannot find, and
+   without this the next tick would put the closed card straight back. An id
+   is forgotten again as soon as its request leaves the pending set, so it can
+   never silence a later card. */
 
 async function refreshGotoGate() {
   const host = $("notices");
@@ -40900,14 +42945,17 @@ async function refreshGotoGate() {
   const pending = (body && body.requests ? body.requests : []).filter(
     (r) => r.status === "pending"
   );
-  const live = new Set(pending.map((r) => r.id));
-  for (const id of [...gotoGateIgnored]) {
-    if (!live.has(id)) gotoGateIgnored.delete(id);
-  }
+  gateHistorySync("goto", pending, body && body.requests);
   const seen = new Set();
   for (const rec of pending) {
     const key = GOTO_GATE_PREFIX + rec.id;
-    if (gotoGateIgnored.has(rec.id)) continue;   // closed by hand, still open
+    gateHistoryOpen(
+      "goto", String(rec.id),
+      `run move requested: ${rec.target_session || "?"}`,
+      `${rec.session || "?"} asks to move ${rec.target_session || "?"} — ` +
+        `${rec.from || "?"} → ${rec.step || "?"}: ${rec.reason || "(no reason given)"}`
+    );
+    if (gateIsHidden("goto", rec.id)) continue;   // closed by hand, still open
     seen.add(key);
     let card = notices.get(key);
     if (!card || !card.node.isConnected) {
@@ -40935,19 +42983,11 @@ async function refreshGotoGate() {
       const actions = el("div", "gate-actions");
       const approve = el("button", "wf-btn approve", "Approve");
       const deny = el("button", "wf-btn clear", "Deny");
-      const ignore = el("button", "wf-btn", "Ignore");
       approve.title =
         `move this run to '${rec.step}' now — or the timeout counts the ` +
         "request as approved on its own";
       deny.title =
         "nothing moves; the refusal is handed to the run's driver";
-      /* The third press answers nothing, and says so: a reader who has seen
-         the card and does not want to decide from here had only Approve,
-         Deny or a card that stays. Closing it leaves the request exactly as
-         it was — including its deadline. */
-      ignore.title =
-        "close this card only — nothing is answered, the request stays open " +
-        "and still auto-approves at its deadline";
       approve.addEventListener("click", async (ev) => {
         ev.stopPropagation();
         if (
@@ -40967,14 +43007,13 @@ async function refreshGotoGate() {
           dismissNotice(key);
         }
       });
-      ignore.addEventListener("click", (ev) => {
-        ev.stopPropagation();
-        gotoGateIgnored.add(rec.id);
-        dismissNotice(key);
-      });
       actions.appendChild(approve);
       actions.appendChild(deny);
-      actions.appendChild(ignore);
+      /* The third press answers nothing, and says so (gateHideButton). */
+      actions.appendChild(gateHideButton("goto", rec.id, key,
+        "close this card only — nothing is answered, the request stays open " +
+        "and still auto-approves at its deadline; the bell keeps it in the " +
+        "notification history"));
       node.appendChild(title);
       node.appendChild(sub);
       node.appendChild(clock);
@@ -41013,7 +43052,6 @@ async function refreshGotoGate() {
    Unlike the goto gate, an unanswered card EXPIRES as a refusal: a push to a
    shared remote cannot be taken back by the person who missed it. */
 const REPOSYNC_GATE_PREFIX = "reposync-gate-";
-const reposyncGateIgnored = new Set();
 
 async function refreshReposyncGate() {
   const host = $("notices");
@@ -41027,14 +43065,17 @@ async function refreshReposyncGate() {
   const pending = (body && body.requests ? body.requests : []).filter(
     (r) => r.status === "pending"
   );
-  const live = new Set(pending.map((r) => r.id));
-  for (const id of [...reposyncGateIgnored]) {
-    if (!live.has(id)) reposyncGateIgnored.delete(id);
-  }
+  gateHistorySync("reposync", pending, body && body.requests);
   const seen = new Set();
   for (const rec of pending) {
     const key = REPOSYNC_GATE_PREFIX + rec.id;
-    if (reposyncGateIgnored.has(rec.id)) continue;
+    gateHistoryOpen(
+      "reposync", String(rec.id),
+      `repository sync wants to push: ${(rec.plan || {}).workspace || (rec.plan || {}).repo || "?"}`,
+      (rec.session ? `${rec.session} asks: ` : "") +
+        ((rec.plan || {}).summary || (rec.plan || {}).action || "?")
+    );
+    if (gateIsHidden("reposync", rec.id)) continue;
     seen.add(key);
     const plan = rec.plan || {};
     let card = notices.get(key);
@@ -41075,12 +43116,8 @@ async function refreshReposyncGate() {
       const actions = el("div", "gate-actions");
       const approve = el("button", "wf-btn approve", "Approve");
       const reject = el("button", "wf-btn clear", "Reject");
-      const ignore = el("button", "wf-btn", "Ignore");
       approve.title = "the asking session pushes exactly this plan";
       reject.title = "nothing is pushed; the asking session is told no";
-      ignore.title =
-        "close this card only — the request stays open and expires as a " +
-        "refusal at its deadline";
       approve.addEventListener("click", async (ev) => {
         ev.stopPropagation();
         if (await gatePost(`/api/reposync/requests/${rec.id}/approve`, approve)) {
@@ -41093,14 +43130,12 @@ async function refreshReposyncGate() {
           dismissNotice(key);
         }
       });
-      ignore.addEventListener("click", (ev) => {
-        ev.stopPropagation();
-        reposyncGateIgnored.add(rec.id);
-        dismissNotice(key);
-      });
       actions.appendChild(approve);
       actions.appendChild(reject);
-      actions.appendChild(ignore);
+      actions.appendChild(gateHideButton("reposync", rec.id, key,
+        "close this card only — the request stays open and expires as a " +
+        "refusal at its deadline; the bell keeps it in the notification " +
+        "history"));
       node.appendChild(clock);
       node.appendChild(actions);
       host.appendChild(node);
@@ -41242,7 +43277,13 @@ async function boot() {
   // puts you back in the session instead of at an empty slot — and it renders
   // against caches the refreshes above have already filled. Re-running it on
   // every recovery would re-enter whatever page the user has since walked to.
-  if (!booted) { booted = true; route(); }
+  if (!booted) {
+    booted = true;
+    // Before the route, so a #/new reload opens on the answers the operator
+    // last gave rather than on the defaults (claunch-9em4k).
+    await Promise.resolve(restoreNewFormDraft()).catch(() => {});
+    route();
+  }
 }
 
 const DASHBOARD_POLL_MS = 5000;
@@ -41889,6 +43930,8 @@ async function pollOnce() {
     refreshCflow(),
     refreshCflow2Rail(),
     refreshTermQueued(),
+    refreshTermWindow(),
+    refreshTermTimers(),
   ];
   // Polled because the registry is edited from the CLI, in another window;
   // it redraws only when the list really changed (see refreshWorkspaces).

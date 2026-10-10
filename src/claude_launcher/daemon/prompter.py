@@ -1,10 +1,10 @@
-"""Prompt snippets pulled from a prompter server (the ``prompter`` project).
+"""Prompt and context snippets pulled from a prompter server (the ``prompter`` project).
 
 prompter is a FastAPI snippet manager. Its JSON API answers
-``GET /api/snippets?kind=prompt`` with ``{"kind", "count", "snippets": [...]}``
+``GET /api/snippets?kind=prompt|context`` with ``{"kind", "count", "snippets": [...]}``
 and each snippet carries ``id``, ``name``, ``title`` and ``body``. It sends no
 CORS headers, so the dashboard cannot ask it directly: the daemon fetches the
-list and the web UI reads it from ``GET /api/prompter/prompts``.
+list and the web UI reads ``/api/prompter/prompts`` or ``/api/prompter/contexts``.
 
 The server is optional. ``daemon.prompter_url`` unset (the default) means the
 feature is off, and an unreachable server answers ``connected: false`` with no
@@ -37,13 +37,13 @@ _OS_TRUST_CONTEXT = _truststore.SSLContext(_ssl.PROTOCOL_TLS_CLIENT) if _trustst
 #: slow or dead server must not hold the answer for long.
 TIMEOUT = 5.0
 
-#: Seconds a fetched answer (success or failure) is reused for the same URL.
+#: Seconds a fetched answer (success or failure) is reused for the same URL and kind.
 CACHE_TTL = 60.0
 
 #: Longest URL the settings endpoint accepts.
 MAX_URL = 2048
 
-_cache: Dict[str, tuple] = {}
+_cache: Dict[tuple, tuple] = {}
 
 
 class PrompterURLError(ValueError):
@@ -104,35 +104,82 @@ def _clean(snippets) -> list:
     return rows
 
 
-async def _fetch(url: str) -> dict:
+async def _fetch(url: str, kind: str = "prompt") -> dict:
     connector = aiohttp.TCPConnector(ssl=_OS_TRUST_CONTEXT) if _OS_TRUST_CONTEXT else None
     async with aiohttp.ClientSession(
         connector=connector,
         timeout=aiohttp.ClientTimeout(total=TIMEOUT),
         headers={"Accept": "application/json"},
     ) as http:
-        async with http.get(f"{url}/api/snippets", params={"kind": "prompt"}) as resp:
+        async with http.get(f"{url}/api/snippets", params={"kind": kind}) as resp:
             if resp.status != 200:
                 raise RuntimeError(f"HTTP {resp.status}")
             data = await resp.json(content_type=None)
     if not isinstance(data, dict):
         raise RuntimeError("unexpected response shape")
-    return {"connected": True, "prompts": _clean(data.get("snippets")), "error": ""}
+    return {"connected": True, kind + "s": _clean(data.get("snippets")), "error": ""}
 
 
-async def prompts(*, refresh: bool = False) -> dict:
-    """What the footer shows: ``{enabled, connected, url, prompts, error}``."""
+async def _snippets(kind: str, *, refresh: bool = False) -> dict:
+    """Fetch one kind, isolating its cached successes and failures."""
     url = configured_url()
     if not url:
-        return {"enabled": False, "connected": False, "url": None, "prompts": [], "error": ""}
+        return {"enabled": False, "connected": False, "url": None, kind + "s": [], "error": ""}
     now = time.monotonic()
-    hit = _cache.get(url)
+    hit = _cache.get((url, kind))
     if hit and not refresh and now - hit[0] < CACHE_TTL:
         answer = hit[1]
     else:
         try:
-            answer = await _fetch(url)
+            answer = await _fetch(url, kind)
         except Exception as exc:  # network, TLS, JSON: all mean "not connected"
-            answer = {"connected": False, "prompts": [], "error": str(exc) or type(exc).__name__}
-        _cache[url] = (now, answer)
+            answer = {"connected": False, kind + "s": [], "error": str(exc) or type(exc).__name__}
+        _cache[(url, kind)] = (now, answer)
     return {"enabled": True, "url": url, **answer}
+
+
+async def prompts(*, refresh: bool = False) -> dict:
+    """Prompt bodies for the footer and editable opening task."""
+    return await _snippets("prompt", refresh=refresh)
+
+
+async def contexts(*, refresh: bool = False) -> dict:
+    """Context snippets offered as opening packs."""
+    return await _snippets("context", refresh=refresh)
+
+
+async def selected_records(selection) -> list:
+    """Resolve explicitly selected snippets into the opening's saved packs.
+
+    For context packs the browser sends identities, never snippet text. Binding them to the
+    offered server prevents a settings change from selecting unrelated IDs.
+    No selection means no network request, including when the server is down.
+    """
+    from ..prompt_packs import PackError
+
+    if selection is None:
+        return []
+    if not isinstance(selection, dict) or not isinstance(selection.get("ids"), list):
+        raise PackError("prompter_contexts must contain a server url and an ids list")
+    ids = selection["ids"]
+    if any(type(i) is not int or i < 1 for i in ids):
+        raise PackError("prompter context IDs must be positive integers")
+    if not ids:
+        return []
+    url = configured_url()
+    if not url or selection.get("url") != url:
+        raise PackError("Prompter server changed; reopen the form and select contexts again")
+    answer = await contexts(refresh=True)
+    if answer["url"] != url or configured_url() != url:
+        raise PackError("Prompter server changed; reopen the form and select contexts again")
+    if not answer["connected"]:
+        raise PackError("Cannot load selected prompter contexts: " + answer["error"])
+    available = {p["id"]: p for p in answer["contexts"]}
+    missing = [i for i in ids if i not in available]
+    if missing:
+        raise PackError("Selected prompter contexts are unavailable: " + ", ".join(map(str, missing)))
+    return [
+        {"id": f"prompter:context:{i}", "text": available[i]["body"], "source": "prompter",
+         "prompter_id": i, "url": url, "title": available[i]["title"] or available[i]["name"]}
+        for i in dict.fromkeys(ids)
+    ]

@@ -12,28 +12,20 @@ from claude_launcher.cflow2.caps import Capability
 def test_capability_ids_match_doc_table():
     assert set(caps.CAPABILITIES) == {
         "subagent.spawn", "subagent.parallel", "subagent.tools.restrict",
-        "subagent.worktree", "headless.run", "headless.output.schema",
-        "headless.output.json", "headless.tools.restrict",
-        "headless.sandbox.readonly", "headless.budget.usd", "headless.resume",
-        "mcp.claunch", "session.spawn",
+        "subagent.worktree", "mcp.claunch", "session.spawn",
     }
 
 
 def test_registry_exposes_package_capabilities():
     reg = harnesses.registry({})
     claude = reg["claude"].capabilities
-    assert claude["headless.run"] == {"enabled": True, "args": ["-p"]}
-    assert claude["headless.output.schema"]["args"] == ["--json-schema", "{schema}"]
     assert claude["subagent.spawn"] == {"enabled": True}
-    codex = reg["codex"].capabilities
-    assert codex["headless.run"]["args"] == ["exec"]
-    assert codex["headless.output.schema"]["args"] == ["--output-schema", "{schema_file}"]
-    assert codex["headless.sandbox.readonly"]["args"] == ["-s", "read-only"]
-    assert "subagent.spawn" not in codex
-    assert reg["pi"].capabilities["headless.output.json"]["args"] == ["--mode", "json"]
-    assert reg["devin"].capabilities == {"headless.run": {"enabled": True, "args": ["-p"]}}
+    assert claude["mcp.claunch"] == {"enabled": True}
+    assert reg["codex"].capabilities == {"mcp.claunch": {"enabled": True}}
+    assert reg["pi"].capabilities == {}
+    assert reg["devin"].capabilities == {}
     assert reg["kimi"].capabilities == {}
-    assert reg["claude"].to_dict()["capabilities"]["headless.run"]["args"] == ["-p"]
+    assert not any(k.startswith("headless.") for h in reg.values() for k in h.capabilities)
 
 
 def test_bad_harness_capabilities_block_drops_that_entry_only():
@@ -46,8 +38,7 @@ def test_bad_harness_capabilities_block_drops_that_entry_only():
 def test_resolve_with_no_config():
     got = caps.resolve("claude", doc={})
     assert list(got) == list(caps.CAPABILITIES)
-    assert got["headless.run"] == Capability(True, ["-p"], "harness:claude")
-    assert got["headless.sandbox.readonly"] == Capability(False, [], "default")
+    assert got["subagent.spawn"] == Capability(True, [], "harness:claude")
     assert got["session.spawn"] == Capability(True, [], "daemon-policy")
     assert got.warnings == []
     off = caps.resolve("claude", doc={}, session_spawn=False)
@@ -55,7 +46,17 @@ def test_resolve_with_no_config():
     assert off["session.spawn"].source == "daemon-policy"
     codex = caps.resolve("codex", doc={})
     assert codex["subagent.spawn"].enabled is False
-    assert codex["headless.sandbox.readonly"].enabled is True
+    assert codex["mcp.claunch"].enabled is True
+
+
+def test_a_stale_headless_capability_in_config_is_skipped_silently():
+    """claunch-xjbrh removed the headless executor; a config still naming
+    its capabilities is stale, not wrong, and resolves without a warning."""
+    doc = {"profiles": {"p": {"capabilities": {"headless.run": {"enabled": True,
+                                                                "args": ["-p"]},
+                                               "headless.resume": False}}}}
+    got = caps.resolve("claude", profile="p", doc=doc)
+    assert "headless.run" not in got and got.warnings == []
 
 
 DOC = {
@@ -63,14 +64,14 @@ DOC = {
     "providers": {
         "ds4": {
             "capabilities": {
-                "headless.output.schema": False,
-                "headless.resume": False,
+                "subagent.tools.restrict": False,
+                "mcp.claunch": False,
                 "subagent.parallel": False,
                 "bogus.cap": True,
             },
             "harness_options": {
                 "claude": {"capabilities": {
-                    "headless.resume": True,
+                    "mcp.claunch": True,
                     "subagent.worktree": False,
                 }},
             },
@@ -79,11 +80,11 @@ DOC = {
     },
     "profiles": {
         "base": {"capabilities": {"subagent.worktree": True,
-                                  "headless.budget.usd": {"enabled": True, "args": ["--cap", "{usd}"]}}},
+                                  "subagent.spawn": {"enabled": False, "args": ["kept"]}}},
         "nc": {
             "parent": "base",
-            "capabilities": {"subagent.parallel": True, "headless.tools.restrict": False},
-            "harness_options": {"claude": {"capabilities": {"headless.tools.restrict": True}}},
+            "capabilities": {"subagent.parallel": True, "session.spawn": False},
+            "harness_options": {"claude": {"capabilities": {"subagent.spawn": True}}},
         },
     },
 }
@@ -92,34 +93,28 @@ DOC = {
 def test_layering_precedence():
     got = caps.resolve("claude", profile="nc", doc=DOC)
     # provider level overrides the harness default
-    assert got["headless.output.schema"] == Capability(
-        False, ["--json-schema", "{schema}"], "provider:ds4")
+    assert got["subagent.tools.restrict"] == Capability(False, [], "provider:ds4")
     # provider/harness overrides provider
-    assert got["headless.resume"].enabled is True
-    assert got["headless.resume"].source == "provider:ds4/harness:claude"
-    assert got["headless.resume"].args == ["--resume", "{session_id}"]
+    assert got["mcp.claunch"] == Capability(True, [], "provider:ds4/harness:claude")
     # ancestor profile overrides provider/harness, child overrides ancestor
     assert got["subagent.worktree"] == Capability(True, [], "profile:base")
     assert got["subagent.parallel"] == Capability(True, [], "profile:nc")
-    # args replaced by a mapping value
-    assert got["headless.budget.usd"].args == ["--cap", "{usd}"]
-    # profile/harness overrides profile
-    assert got["headless.tools.restrict"].enabled is True
-    assert got["headless.tools.restrict"].source == "profile:nc/harness:claude"
+    # a bool keeps the args a lower layer gave
+    assert got["subagent.spawn"] == Capability(True, ["kept"], "profile:nc/harness:claude")
     assert any("bogus.cap" in w for w in got.warnings)
 
 
 def test_harness_block_only_for_that_harness():
     got = caps.resolve("codex", profile="nc", doc=DOC)
-    assert got["headless.resume"].enabled is False
-    assert got["headless.resume"].source == "provider:ds4"
-    assert got["headless.tools.restrict"].source == "profile:nc"
+    assert got["mcp.claunch"].enabled is False
+    assert got["mcp.claunch"].source == "provider:ds4"
+    assert got["subagent.spawn"].source == "profile:base"
 
 
 def test_explicit_provider_and_unknowns():
     got = caps.resolve("claude", provider="other", doc=DOC)
     assert got["mcp.claunch"] == Capability(False, [], "provider:other")
-    assert got["headless.output.schema"].enabled is True
+    assert got["subagent.tools.restrict"].enabled is True
     unknown = caps.resolve("nope", provider="missing", doc={})
     assert any("nope" in w for w in unknown.warnings)
     assert any("missing" in w for w in unknown.warnings)
@@ -129,15 +124,14 @@ def test_explicit_provider_and_unknowns():
 def test_provider_spec_accepts_capabilities():
     entry = DOC["providers"]["ds4"]
     spec = provider_spec.from_entry(entry, "providers.ds4")
-    assert spec.capabilities["headless.output.schema"] is False
-    assert spec.options("claude")["capabilities"]["headless.resume"] is True
+    assert spec.capabilities["subagent.tools.restrict"] is False
+    assert spec.options("claude")["capabilities"]["mcp.claunch"] is True
     prof = provider_spec.from_entry(DOC["profiles"]["nc"], "profiles.nc", profile=True)
     merged = provider_spec.overlay(spec, prof)
     assert merged.capabilities["subagent.parallel"] is True
-    assert merged.capabilities["headless.resume"] is False
+    assert merged.capabilities["mcp.claunch"] is False
     assert merged.options("claude")["capabilities"] == {
-        "headless.resume": True, "subagent.worktree": False,
-        "headless.tools.restrict": True}
+        "mcp.claunch": True, "subagent.worktree": False, "subagent.spawn": True}
     with pytest.raises(provider_spec.SpecError):
         provider_spec.from_entry({"capabilities": ["x"]}, "providers.bad")
     with pytest.raises(provider_spec.SpecError):
@@ -152,29 +146,22 @@ NONE = {k: False for k in caps.CAPABILITIES}
 
 
 def test_choose_executor_chain():
-    got = caps.choose_executor(["headless", "subagent", "inline"], {**NONE, "subagent.spawn": True})
+    got = caps.choose_executor(["session", "subagent", "inline"], {**NONE, "subagent.spawn": True})
     assert got.executor == "subagent"
-    assert got.skipped == [("headless", "headless.run")]
+    assert got.skipped == [("session", "session.spawn")]
     assert got.degraded and got.route == "subagent"
-    got = caps.choose_executor(["headless", "subagent", "session"], {**NONE, "session.spawn": False})
+    got = caps.choose_executor(["subagent", "session"], {**NONE, "session.spawn": False})
     assert got.executor == "inline"
-    assert [s[0] for s in got.skipped] == ["headless", "subagent", "session"]
+    assert [s[0] for s in got.skipped] == ["subagent", "session"]
     assert caps.choose_executor([], NONE).executor == "inline"
-    got = caps.choose_executor(["headless", "subagent"], {**ALL, "headless.output.schema": False},
-                               needs=["headless.output.schema"])
-    assert got.executor == "subagent"
-    assert got.skipped == [("headless", "headless.output.schema")]
+    got = caps.choose_executor(["subagent", "session"], {**ALL, "subagent.worktree": False},
+                               needs=["subagent.worktree"])
+    assert got.executor == "session"
+    assert got.skipped == [("subagent", "subagent.worktree")]
 
 
 def test_plan_return_routes():
     r = caps.plan_return
-    assert r("headless", ALL, True).route == "schema-flag"
-    assert r("headless", ALL, True).capability == "headless.output.schema"
-    p = r("headless", {**ALL, "headless.output.schema": False}, True)
-    assert p.route == "json-output+fenced-block" and p.degraded
-    p = r("headless", NONE, True)
-    assert p.route == "text+fenced-block" and len(p.degraded) == 2
-    assert r("headless", ALL, False).route == "json-output+fenced-block"
     assert r("subagent", ALL, True).route == "mcp-submit"
     p = r("subagent", NONE, True)
     assert p.route == "receipt-file" and p.degraded
@@ -185,10 +172,6 @@ def test_plan_return_routes():
 
 def test_plan_readonly_routes():
     ro = caps.plan_readonly
-    assert ro("headless", ALL).route == "sandbox-readonly"
-    assert ro("headless", {**ALL, "headless.sandbox.readonly": False}).route == "tools-restrict"
-    p = ro("headless", NONE)
-    assert p.route == "throwaway-worktree" and p.degraded
     assert ro("subagent", ALL).route == "tools-restrict"
     assert ro("subagent", {**NONE, "subagent.worktree": True}).route == "worktree"
     assert ro("subagent", NONE).route == "brief+porcelain-check"
@@ -198,10 +181,9 @@ def test_plan_readonly_routes():
 
 def test_plan_parallel_routes():
     pp = caps.plan_parallel
-    assert pp("headless", NONE, 3, False).route == "parallel"
-    p = pp("headless", NONE, 3, True)
+    assert pp("session", NONE, 3, False).route == "parallel"
+    p = pp("session", NONE, 2, True)
     assert p.route == "parallel-isolated-worktrees" and p.isolate
-    assert pp("session", NONE, 2, True).route == "parallel-isolated-worktrees"
     assert pp("subagent", ALL, 2, False).route == "parallel"
     assert pp("subagent", ALL, 2, True).route == "parallel-isolated-worktrees"
     p = pp("subagent", {**ALL, "subagent.worktree": False}, 2, True)
@@ -217,12 +199,10 @@ def test_plan_parallel_routes():
 
 def test_plan_budget_routes():
     pb = caps.plan_budget
-    assert pb("headless", ALL, None, False).route == "none"
+    assert pb("session", ALL, None, False).route == "none"
     p = pb("subagent", NONE, {"seconds": 60}, True)
     assert p.route == "seconds-only" and p.seconds == 60 and not p.blocked
-    p = pb("headless", ALL, {"usd": 2, "seconds": 10}, True)
-    assert p.route == "usd-flag" and p.usd_enforced and not p.blocked
-    p = pb("headless", NONE, {"usd": 2}, False)
+    p = pb("session", ALL, {"usd": 2}, False)
     assert p.route == "unenforced" and p.degraded and not p.blocked
     p = pb("subagent", ALL, {"usd": 2}, True)
     assert p.route == "unenforced" and p.blocked
@@ -232,11 +212,10 @@ def test_plan_budget_routes():
 
 def test_plan_retry_carry_routes():
     rc = caps.plan_retry_carry
-    assert rc("headless", ALL, "resume").route == "resume"
-    p = rc("headless", NONE, "resume")
+    p = rc("session", ALL, "resume")
     assert p.route == "summary" and p.degraded
     assert rc("subagent", ALL, "resume").route == "summary"
-    p = rc("headless", ALL, "summary")
+    p = rc("session", ALL, "summary")
     assert p.route == "summary" and not p.degraded
 
 
@@ -246,23 +225,23 @@ def _node(**kw):
 
 
 def test_plan_node_combines():
-    node = _node(executor=["headless", "subagent"], needs=[],
+    node = _node(executor=["session", "subagent"], needs=[],
                  props={"effects": ["fs.read"], "returns": {"ok": {"x": "str"}}})
     plan = caps.plan_node(node, caps.resolve("codex", doc={}))
-    assert plan.route == "headless"
-    assert plan.returns.route == "schema-flag"
-    assert plan.readonly.route == "sandbox-readonly"
+    assert plan.route == "session"
+    assert plan.returns.route == "mcp-submit"
+    assert plan.readonly.route == "child-worktree"
     assert plan.parallel is None and plan.budget is None
-    assert plan.to_dict()["route"] == "headless"
+    assert plan.to_dict()["route"] == "session"
 
 
 def test_plan_node_strict_budget_skips_executor():
-    node = _node(executor=["headless", "subagent"], budget={"usd": 1},
+    node = _node(executor=["session", "subagent"], budget={"usd": 1},
                  props={"strict_budget": True, "effects": ["fs.write"]})
     plan = caps.plan_node(node, caps.resolve("codex", doc={}))
-    # codex has no headless.budget.usd; subagent.spawn is off for codex
+    # no executor enforces dollars; subagent.spawn is off for codex
     assert plan.route == "inline"
-    assert plan.executor.skipped == [("headless", "headless.budget.usd"),
+    assert plan.executor.skipped == [("session", "budget.usd enforcement"),
                                      ("subagent", "subagent.spawn")]
     assert plan.readonly is None
     assert plan.budget.route == "unenforced" and not plan.budget.blocked
@@ -276,111 +255,28 @@ def test_plan_node_needs_and_parallel_and_retry():
     plan = caps.plan_node(node, claude)
     assert plan.route == "subagent"
     assert plan.parallel.route == "parallel-isolated-worktrees"
-    loop = _node(type=ir.T_LOOP, executor=["headless"],
+    loop = _node(type=ir.T_LOOP, executor=["session"],
                  props={"mode": "retry", "max": 2, "carry": "resume"})
-    assert caps.plan_node(loop, claude).carry.route == "resume"
+    assert caps.plan_node(loop, claude).carry.route == "summary"
     no_need = _node(executor=["subagent"], needs=["subagent.worktree"])
     assert caps.plan_node(no_need, {**ALL, "subagent.worktree": False}).route == "inline"
 
 
-def test_render_args():
-    claude = caps.resolve("claude", doc={})
-    assert caps.render_args(claude["headless.output.schema"], schema='{"type":"object"}') == [
-        "--json-schema", '{"type":"object"}']
-    assert caps.render_args(claude["headless.tools.restrict"], tools=["Read", "Grep"],
-                            deny=["Edit", "Bash"]) == [
-        "--tools", "Read,Grep", "--disallowedTools", "Edit,Bash",
-        "--permission-mode", "dontAsk", "--strict-mcp-config"]
-    assert caps.render_args(claude["headless.budget.usd"], usd=1.5) == ["--max-budget-usd", "1.5"]
-    assert caps.render_args(claude["headless.resume"], session_id="abc") == ["--resume", "abc"]
-    codex = caps.resolve("codex", doc={})
-    assert caps.render_args(codex["headless.output.schema"], schema_file="/s.json") == [
-        "--output-schema", "/s.json"]
-    assert caps.render_args(codex["headless.run"]) == ["exec"]
-    assert caps.render_args(Capability(False, ["-x"], "default")) == []
-    with pytest.raises(ValueError):
-        caps.render_args(claude["headless.resume"])
-
-
-# -- A3: a flag route without flags is never selected ---------------------------
-
-
-def _doc_profile(block):
-    return {"profiles": {"p": {"capabilities": block}}}
-
-
-def test_needs_args_ids():
-    assert caps.NEEDS_ARGS == {
-        "headless.run", "headless.output.schema", "headless.output.json",
-        "headless.tools.restrict", "headless.sandbox.readonly", "headless.budget.usd",
-        "headless.resume"}
-    assert not caps.NEEDS_ARGS & {"subagent.spawn", "subagent.parallel", "mcp.claunch",
-                                  "session.spawn", "subagent.tools.restrict",
-                                  "subagent.worktree"}
-
-
-def test_true_on_higher_layer_inherits_args_of_the_same_harness():
-    got = caps.resolve("claude", profile="p", doc=_doc_profile({"headless.output.schema": True}))
-    assert got["headless.output.schema"] == Capability(
-        True, ["--json-schema", "{schema}"], "profile:p")
-    assert got.warnings == []
-
-
-def test_sandbox_readonly_true_without_args_is_disabled_with_warning():
-    # reviewer repro: claude declares no sandbox flag; a profile says true
-    got = caps.resolve("claude", profile="p",
-                       doc=_doc_profile({"headless.sandbox.readonly": True}))
-    assert got["headless.sandbox.readonly"].enabled is False
-    assert any("headless.sandbox.readonly" in w and "enabled without args" in w
-               for w in got.warnings)
-    node = _node(executor=["headless"], props={"effects": ["fs.read"]})
-    plan = caps.plan_node(node, got)
-    assert plan.readonly.route == "tools-restrict"  # claude's real restriction
-
-
-def test_schema_true_without_args_falls_to_fenced_block():
-    got = caps.resolve("devin", profile="p", doc=_doc_profile({"headless.output.schema": True}))
-    assert got["headless.output.schema"].enabled is False
-    assert any("enabled without args" in w for w in got.warnings)
-    node = _node(executor=["headless"], props={"returns": {"ok": {"x": "str"}}})
-    assert caps.plan_node(node, got).returns.route == "text+fenced-block"
-
-
-def test_budget_usd_true_without_args_strict_budget_blocks():
-    got = caps.resolve("codex", profile="p", doc=_doc_profile({"headless.budget.usd": True}))
-    assert got["headless.budget.usd"].enabled is False
-    node = _node(executor=["headless", "inline"], budget={"usd": 1},
-                 props={"strict_budget": True})
-    plan = caps.plan_node(node, got)
-    assert plan.route == "inline"
-    assert plan.executor.skipped == [("headless", "headless.budget.usd")]
-    # an unresolved map carrying an argless Capability is treated the same
-    raw = {"headless.run": Capability(True, ["exec"]), "headless.budget.usd": Capability(True, [])}
-    assert not caps.enabled(raw, "headless.budget.usd")
-    assert caps.plan_budget("headless", raw, {"usd": 1}, True).blocked
-    assert not caps.enabled({"headless.budget.usd": {"enabled": True, "args": []}},
-                            "headless.budget.usd")
-
-
-def test_argless_features_stay_enabled():
-    got = caps.resolve("codex", profile="p",
-                       doc=_doc_profile({"subagent.spawn": True, "mcp.claunch": True}))
-    assert got["subagent.spawn"].enabled and got["mcp.claunch"].enabled
-    assert got.warnings == []
+def test_enabled_reads_capabilities_dicts_and_bools():
+    assert caps.enabled({"x": Capability(True)}, "x")
+    assert not caps.enabled({"x": {"enabled": False, "args": ["a"]}}, "x")
+    assert caps.enabled({"x": True}, "x") and not caps.enabled({}, "x")
 
 
 # -- A2: non-flat subtrees ------------------------------------------------------------
 
 
-def test_plan_node_not_flat_skips_headless_and_mcp_less_delegates():
-    node = _node(type=ir.T_SEQ, executor=["headless", "subagent", "session"])
-    plan = caps.plan_node(node, ALL, flat=False)
-    assert plan.route == "subagent"
-    assert plan.executor.skipped == [("headless", caps.NOT_FLAT)]
-    assert "executor headless skipped: subtree not flat" in plan.degraded
+def test_plan_node_not_flat_skips_mcp_less_delegates():
+    node = _node(type=ir.T_SEQ, executor=["subagent", "session"])
+    assert caps.plan_node(node, ALL, flat=False).route == "subagent"
     no_mcp = {**ALL, "mcp.claunch": False}
     plan = caps.plan_node(node, no_mcp, flat=False)
     assert plan.route == "inline"
-    assert [s[1] for s in plan.executor.skipped] == [caps.NOT_FLAT] * 3
-    assert caps.plan_node(node, no_mcp).route == "headless"  # flat (default)
-    assert caps.choose_executor(["headless"], ALL, flat=False).executor == "inline"
+    assert [s[1] for s in plan.executor.skipped] == [caps.NOT_FLAT] * 2
+    assert "executor subagent skipped: subtree not flat" in plan.degraded
+    assert caps.plan_node(node, no_mcp).route == "subagent"  # flat (default)

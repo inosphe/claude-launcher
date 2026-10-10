@@ -135,6 +135,9 @@ class _FakeManager:
     def persist(self) -> None:
         pass
 
+    def list(self):
+        return list(self._sessions.values())
+
 
 class _FakeMesh:
     """Just enough of MeshManager for the leader fallback."""
@@ -787,3 +790,210 @@ def test_a_failed_kill_announces_nothing(proj):
     asyncio.run(clock._finish_end(cwd, "w1", _run_id(cwd), "linear"))
     assert worker.exited is False
     assert clock._debt == []
+
+
+# --------------------------------------------------------------------------- #
+# kill-on-end for cflow v2 runs (claunch-du6mx): same contract, v2 slots
+# --------------------------------------------------------------------------- #
+V2_ONE = """\
+cflow: 2
+name: v2one
+nodes:
+  a: {prompt: A}
+body: a
+"""
+
+V2_RECUR = """\
+cflow: 2
+name: v2rounds
+recur: true
+nodes:
+  a: {prompt: A}
+body: a
+"""
+
+
+def _v2_finish(cwd: str, scope: str, src: str = V2_ONE, driver: str = None) -> str:
+    """Start a one-node v2 run in (cwd, scope), report its task, return its id."""
+    from claude_launcher.cflow2 import frontend, runtime as v2
+
+    st = v2.start(frontend.compile_text(src), cwd=cwd, scope=scope, caps={},
+                  driver=driver or scope)
+    st = v2.report(st["tasks"][0]["instance"], cwd=cwd, scope=scope)
+    assert st["status"] == "done"
+    return st["run"]
+
+
+def test_v2_kill_on_end_records_then_ends(proj):
+    cwd = str(proj)
+    run_id = _v2_finish(cwd, "w1")
+    worker = _FakeSession("w1", cwd)
+    clock = cflow_clock.RunEventClock(_FakeManager({"w1": worker}))
+    assert clock.scan() == []                   # first sight at done mops up
+    assert len(worker.recorded) == 1
+    assert "session ended" in worker.recorded[0]
+    assert run_id in worker.recorded[0]
+    assert "v2one" in worker.recorded[0]
+    [(q_cwd, q_scope, q_run, q_wf, q_reap)] = clock._end_pending
+    assert (q_scope, q_run, q_wf, q_reap) == ("w1", run_id, "v2one", True)
+    asyncio.run(clock._finish_end(q_cwd, q_scope, q_run, q_wf))
+    assert worker.killed is True
+    clock._end_pending.clear()
+    worker.exited = False                       # even if it were back...
+    clock.scan()
+    assert len(worker.recorded) == 1            # ...the run is never replayed
+    assert clock._end_pending == []
+
+
+def test_v2_kill_on_end_skips_a_live_run(proj):
+    from claude_launcher.cflow2 import frontend, runtime as v2
+
+    cwd = str(proj)
+    v2.start(frontend.compile_text(V2_ONE), cwd=cwd, scope="w1", caps={}, driver="w1")
+    worker = _FakeSession("w1", cwd)
+    clock = cflow_clock.RunEventClock(_FakeManager({"w1": worker}))
+    clock.scan()
+    assert worker.recorded == [] and clock._end_pending == []
+
+
+def test_v2_kill_on_end_skips_a_recurring_run(proj):
+    cwd = str(proj)
+    _v2_finish(cwd, "w1", V2_RECUR)
+    worker = _FakeSession("w1", cwd)
+    clock = cflow_clock.RunEventClock(_FakeManager({"w1": worker}))
+    clock.scan()
+    assert worker.recorded == [] and clock._end_pending == []
+
+
+def test_v2_kill_on_end_ignores_another_drivers_run(proj):
+    cwd = str(proj)
+    _v2_finish(cwd, "other", driver="other")    # same directory, not w1's run
+    worker = _FakeSession("w1", cwd)
+    clock = cflow_clock.RunEventClock(_FakeManager({"w1": worker}))
+    clock.scan()
+    assert worker.recorded == [] and clock._end_pending == []
+
+
+def test_v2_kill_on_end_keep_alive_records_but_ends_nothing(proj):
+    cwd = str(proj)
+    _v2_finish(cwd, "w1")
+    worker = _FakeSession("w1", cwd, keep_alive=True)
+    clock = cflow_clock.RunEventClock(_FakeManager({"w1": worker}))
+    clock.scan()
+    assert len(worker.recorded) == 1 and "keep-alive" in worker.recorded[0]
+    [queued] = clock._end_pending
+    asyncio.run(clock._finish_end(*queued[:4]))
+    assert worker.killed is False
+
+
+def test_v2_kill_on_end_record_failure_leaves_session_alive(proj):
+    cwd = str(proj)
+    _v2_finish(cwd, "w1")
+    worker = _FakeSession("w1", cwd)
+    worker.wal_ok = False
+    clock = cflow_clock.RunEventClock(_FakeManager({"w1": worker}))
+    clock.scan()
+    assert clock._end_pending == [] and worker.killed is False
+
+
+def test_v2_kill_on_end_disabled_tracks_silently(proj):
+    cwd = str(proj)
+    _v2_finish(cwd, "w1")
+    worker = _FakeSession("w1", cwd)
+    clock = cflow_clock.RunEventClock(_FakeManager({"w1": worker}))
+    store.set_daemon_field("cflow_kill_on_end", False)
+    try:
+        clock.scan()
+    finally:
+        store.set_daemon_field("cflow_kill_on_end", True)
+    assert worker.recorded == []
+    clock.scan()                                # toggled back on: no replay
+    assert worker.recorded == [] and clock._end_pending == []
+
+
+# --------------------------------------------------------------------------- #
+# claunch-du6mx.1: the v2 end-sequence ends the driver's own reviewers first
+# --------------------------------------------------------------------------- #
+class _TreeManager(_FakeManager):
+    def children(self, name: str):
+        return [n for n, s in self._sessions.items() if s.sdef.parent == name]
+
+
+def _reviewer_tree(cwd: str, *, keep_alive: bool = False):
+    order: list = []
+    sessions = {
+        "w1": _FakeSession("w1", cwd, keep_alive=keep_alive),
+        "w1-rev": _FakeSession("w1-rev", cwd, parent="w1"),
+        "w1-kid": _FakeSession("w1-kid", cwd, parent="w1"),
+        "w1-kid-rev": _FakeSession("w1-kid-rev", cwd, parent="w1-kid"),
+    }
+    for name, s in sessions.items():
+        def kill(*, force=False, s=s, name=name):
+            order.append(name)
+            s.killed = s.exited = True
+        s.kill = kill
+    mesh = _FakeMesh(
+        {
+            "w1": [{"mesh": "m", "role": "worker"}],
+            "w1-rev": [{"mesh": "m", "role": "reviewer"}],
+            "w1-kid": [{"mesh": "m", "role": "worker"}],
+            "w1-kid-rev": [{"mesh": "m", "role": "reviewer"}],
+        },
+        {},
+    )
+    clock = cflow_clock.RunEventClock(_TreeManager(sessions), mesh)
+    return clock, sessions, order
+
+
+def test_v2_end_ends_the_drivers_own_reviewer_first(proj):
+    cwd = str(proj)
+    _v2_finish(cwd, "w1")
+    clock, sessions, order = _reviewer_tree(cwd)
+    clock.scan()
+    [queued] = clock._end_pending
+    asyncio.run(clock._finish_end(*queued[:4], reap_reviewers=queued[4]))
+    assert order == ["w1-rev", "w1"]            # reviewer before its driver
+    assert sessions["w1-kid"].exited is False   # a worker child is not ours
+    assert sessions["w1-kid-rev"].exited is False  # nor a grandchild reviewer
+
+
+def test_v2_end_keep_alive_keeps_the_reviewer_too(proj):
+    cwd = str(proj)
+    _v2_finish(cwd, "w1")
+    clock, sessions, order = _reviewer_tree(cwd, keep_alive=True)
+    clock.scan()
+    [queued] = clock._end_pending
+    asyncio.run(clock._finish_end(*queued[:4], reap_reviewers=queued[4]))
+    assert order == []
+
+
+def test_drain_ends_passes_the_reviewer_flag(proj):
+    cwd = str(proj)
+    _v2_finish(cwd, "w1")
+    clock, sessions, order = _reviewer_tree(cwd)
+    clock.scan()
+
+    async def drain():
+        clock._drain_ends()
+        await asyncio.gather(*clock._end_tasks)
+
+    asyncio.run(drain())
+    assert order == ["w1-rev", "w1"]
+
+
+def test_v1_end_leaves_reviewers_alone(proj):
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    clock, sessions, order = _reviewer_tree(cwd)
+    clock.scan()
+    _finish_linear(cwd)
+    clock.scan()
+    [queued] = clock._end_pending
+    assert len(queued) == 4                     # the v1 queue entry has no flag
+
+    async def drain():
+        clock._drain_ends()
+        await asyncio.gather(*clock._end_tasks)
+
+    asyncio.run(drain())
+    assert order == ["w1"]

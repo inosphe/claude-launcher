@@ -289,7 +289,7 @@ def register(sub) -> None:
     p_ls = tsub.add_parser(
         "ls", help="sessions that have a transcript, newest written first")
     p_ls.add_argument("--state", default="all",
-                      choices=("all", "active", "killed", "paused", "archived"),
+                      choices=("all", "active", "killed", "paused", "hold", "archived"),
                       help="which sessions to list (default all)")
     p_ls.add_argument("--all", action="store_true",
                       help="keep the sessions with no transcript on disk")
@@ -343,7 +343,7 @@ def register(sub) -> None:
     p_find.add_argument("--session", action="append",
                         help="search this session only (repeatable)")
     p_find.add_argument("--state", default="all",
-                        choices=("all", "active", "killed", "paused", "archived"),
+                        choices=("all", "active", "killed", "paused", "hold", "archived"),
                         help="which sessions the fleet search covers (default all)")
     p_find.add_argument("--regex", action="store_true",
                         help="read the pattern as a Python regular expression")

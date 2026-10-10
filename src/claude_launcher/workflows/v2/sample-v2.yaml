@@ -69,7 +69,7 @@ nodes:
     title: 테스트 실행
     prompt: 변경된 범위의 테스트를 돌린다.
     effects: [test.run]
-    executor: [headless, inline]
+    executor: [session, inline]
   fix-tests:
     title: 테스트 수정
     prompt: 실패한 테스트를 고친다.

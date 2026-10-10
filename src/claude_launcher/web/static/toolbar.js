@@ -36,7 +36,9 @@
   function populateMenu() {
     menu.replaceChildren();
     for (const item of overflow) {
-      const sources = item.matches("button") ? [item] : item.querySelectorAll("button");
+      // A group (the reminder frame) goes into the menu as its visible
+      // buttons, together; a hidden one has nothing to offer there.
+      const sources = item.matches("button") ? [item] : item.querySelectorAll("button:not(.hidden)");
       for (const source of sources.length ? sources : [item]) {
         const proxy = document.createElement(source.matches("button") ? "button" : "span");
         proxy.className = "term-btn";

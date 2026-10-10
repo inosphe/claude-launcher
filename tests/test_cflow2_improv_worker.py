@@ -80,7 +80,7 @@ V1_TO_V2 = {
     "settle-check": ["settle-check", "settle-poll"],
     "settle-wait": ["settle-wait"],
     "settle-stall": ["settle-stall"],
-    "end-gate": ["end-decision", "end-gate"],
+    "end-gate": ["end-decision", "end-notice"],
     "end-hold": ["end-hold"],
 }
 
@@ -88,7 +88,7 @@ PROCEDURES = {"resolve-issue", "workspace", "item", "land", "settle",
               "worker-round", "queue-recheck", "confirm-landed", "found-issue"}
 
 # prior-context, targeted-test and merge-ready are the driver's (claunch-onbdf):
-# a read-only headless delegate has no shell or MCP on the claude harness.
+# a read-only delegate has no shell on the claude harness.
 DELEGATED = {"round-report"}
 DRIVER_RUN = {"prior-context", "targeted-test", "merge-ready"}
 
@@ -226,7 +226,7 @@ def test_land_returns_landed_held_rework():
 def test_delegation_points():
     chart = _chart()
     delegated = {n.label for n in chart.nodes.values()
-                 if n.type == "task" and n.executor == ["headless", "subagent", "inline"]}
+                 if n.type == "task" and n.executor == ["session", "subagent", "inline"]}
     assert delegated == DELEGATED
     for n in chart.nodes.values():
         if n.label in DELEGATED:
@@ -479,7 +479,7 @@ def test_pr_or_local_retries_then_falls_back_locally(tmp_path, monkeypatch):
     st = runtime.start(_medium_flow(tmp_path), caps={}, **kw)
 
     def report(label, outcome="ok", value=None):
-        iid = next(t["instance"] for t in st["tasks"] if t["label"] == label)
+        iid = next(t["instance"] for t in st["tasks"] if t["label"].rsplit("/", 1)[-1] == label)
         return runtime.report(iid, outcome, value, **kw)
 
     st = report("remote-setup", "blocked", {"reason": "gh not logged in"})
@@ -507,9 +507,9 @@ def test_pr_or_local_user_local_answer(tmp_path, monkeypatch):
     monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
     kw = {"cwd": str(tmp_path), "scope": "m", "now": 1.0}
     st = runtime.start(_medium_flow(tmp_path), caps={}, **kw)
-    iid = next(t["instance"] for t in st["tasks"] if t["label"] == "remote-setup")
+    iid = next(t["instance"] for t in st["tasks"] if t["label"].rsplit("/", 1)[-1] == "remote-setup")
     st = runtime.report(iid, "blocked", {"reason": "no remote"}, **kw)
-    iid = next(t["instance"] for t in st["tasks"] if t["label"] == "ask-frame")
+    iid = next(t["instance"] for t in st["tasks"] if t["label"].rsplit("/", 1)[-1] == "ask-frame")
     assert "no remote" in st["tasks"][0]["prompt"]
     runtime.report(iid, "ok", {"brief": BRIEF}, **kw)
     runtime.approve(None, decision="local", reason="this round only", **kw)
@@ -580,16 +580,16 @@ def test_pr_or_local_scenarios(scen, tmp_path, monkeypatch):
     st = runtime.start(chart, caps={}, params={"force_pr": force}, **kw)
     seen = []
     for label, outcome, value in steps:
-        seen.append(st["tasks"][0]["label"])
+        seen.append(st["tasks"][0]["label"].rsplit("/", 1)[-1])
         if label == "answer":
-            frame = next(t for t in st["tasks"] if t["label"] == "ask-frame")
+            frame = next(t for t in st["tasks"] if t["label"].rsplit("/", 1)[-1] == "ask-frame")
             runtime.report(frame["instance"], "ok", {"brief": _brief2(*(value or ()))}, **kw)
             runtime.approve(None, decision=outcome, reason="why", **kw)
             st = runtime.status(**kw)
         else:
-            iid = next(t["instance"] for t in st["tasks"] if t["label"] == label)
+            iid = next(t["instance"] for t in st["tasks"] if t["label"].rsplit("/", 1)[-1] == label)
             st = runtime.report(iid, outcome, value, **kw)
-    seen.extend(t["label"] for t in st.get("tasks") or [])
+    seen.extend(t["label"].rsplit("/", 1)[-1] for t in st.get("tasks") or [])
     assert seen == order
     state = runtime.RunStore(str(tmp_path), "m").load_state()
     assert {k: v for k, v in state["data"].items() if k in ("landing", "published")} == data
@@ -796,11 +796,11 @@ def test_a_failed_prior_context_does_not_end_the_round(tmp_path, monkeypatch):
     monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
     kw = {"cwd": str(tmp_path), "scope": "m", "now": 1.0}
     st = runtime.start(_prior_flow(tmp_path), caps={}, **kw)
-    iid = next(t["instance"] for t in st["tasks"] if t["label"] == "intake")
+    iid = next(t["instance"] for t in st["tasks"] if t["label"].rsplit("/", 1)[-1] == "intake")
     st = runtime.report(iid, "ok", INTAKE, **kw)
-    iid = next(t["instance"] for t in st["tasks"] if t["label"] == "prior-context")
+    iid = next(t["instance"] for t in st["tasks"] if t["label"].rsplit("/", 1)[-1] == "prior-context")
     st = runtime.report(iid, "fail", {"reason": "MCP search refused"}, **kw)
-    task = next(t for t in st["tasks"] if t["label"] == "prior-context-fallback")
+    task = next(t for t in st["tasks"] if t["label"].rsplit("/", 1)[-1] == "prior-context-fallback")
     assert "MCP search refused" in task["prompt"]
     found = {"query": "q", "summary": "검색 실패로 대체 검색: 없음", "related": [], "duplicate": None}
     st = runtime.report(task["instance"], "ok", found, **kw)
@@ -814,9 +814,9 @@ def test_an_ok_prior_context_feeds_intake_issue(tmp_path, monkeypatch):
     monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
     kw = {"cwd": str(tmp_path), "scope": "m", "now": 1.0}
     st = runtime.start(_prior_flow(tmp_path), caps={}, **kw)
-    iid = next(t["instance"] for t in st["tasks"] if t["label"] == "intake")
+    iid = next(t["instance"] for t in st["tasks"] if t["label"].rsplit("/", 1)[-1] == "intake")
     st = runtime.report(iid, "ok", INTAKE, **kw)
-    iid = next(t["instance"] for t in st["tasks"] if t["label"] == "prior-context")
+    iid = next(t["instance"] for t in st["tasks"] if t["label"].rsplit("/", 1)[-1] == "prior-context")
     found = {"query": "q", "summary": "선행 맥락 없음(쿼리: q)", "related": [], "duplicate": "claunch-x"}
     st = runtime.report(iid, "ok", found, **kw)
     assert [t["label"] for t in st["tasks"]] == ["intake-issue"]
@@ -834,7 +834,7 @@ def test_the_end_question_can_be_posed(tmp_path, monkeypatch):
     doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
     decision = _find_id(doc["procedures"], "end-decision")
     flow = {"cflow": 2, "name": "end-flow", "include": ["ask-common"],
-            "nodes": {"end-gate": {"prompt": "end"}, "end-hold": {"prompt": "hold"}},
+            "nodes": {"end-notice": {"prompt": "end"}, "end-hold": {"prompt": "hold"}},
             "body": [decision]}
     from claude_launcher.cflow2 import frontend
     chart = frontend.compile_text(yaml.safe_dump(flow, allow_unicode=True, sort_keys=False),
@@ -843,11 +843,11 @@ def test_the_end_question_can_be_posed(tmp_path, monkeypatch):
     st = runtime.start(chart, caps={}, **kw)
     brief = dict(BRIEF, recommendation="end", options=[
         dict(BRIEF["options"][0], name="end"), dict(BRIEF["options"][1], name="hold")])
-    iid = next(t["instance"] for t in st["tasks"] if t["label"] == "ask-frame")
+    iid = next(t["instance"] for t in st["tasks"] if t["label"].rsplit("/", 1)[-1] == "ask-frame")
     st = runtime.report(iid, "ok", {"brief": brief}, **kw)
     assert st["status"] == "waiting_approval" and [a["node"] for a in st["asks"]]
     runtime.approve(None, decision="end", reason="done", **kw)
-    assert [t["label"] for t in runtime.status(**kw)["tasks"]] == ["end-gate"]
+    assert [t["label"] for t in runtime.status(**kw)["tasks"]] == ["end-notice"]
 
 
 # -- claunch-jbk5w: the landing wait paces the nudge, not the whole choice ----
@@ -978,3 +978,166 @@ def test_unsettled_reaches_the_stall_after_the_same_hour(tmp_path, monkeypatch):
         st = runtime.wait_tick(t0 + k * 600, **kw)
         assert st["ticked"] == 1
     assert [t["label"] for t in st["tasks"]] == ["stub-stall"]
+
+
+# -- claunch-ygbsd: the session retrospective before the end decision ---------
+
+
+def test_the_retrospective_reads_the_pack_and_runs_inline():
+    chart = _chart()
+    node = next(n for n in chart.nodes.values() if n.label == "retrospective")
+    words = _words(node.props["prompt"])
+    # The instructions live in the on-demand pack, the same text a person
+    # sends with `claunch retro <session>`; the node only has it read.
+    assert "`claunch retro --print`" in words
+    assert "RETRO @ <런 id>" in words
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    assert doc["nodes"]["retrospective"]["executor"] == ["inline"]
+    # Placed after the settlement and before the end decision.
+    body = doc["procedures"]["settle"]["body"]
+    ids = [b.get("id") if isinstance(b, dict) else b for b in body]
+    retro = next(i for i, b in enumerate(body)
+                 if isinstance(b, dict) and b.get("try") == {"seq": ["retrospective"]})
+    assert ids.index("settle-watch") < retro < ids.index("end-decision")
+
+
+@pytest.mark.parametrize("outcome", ["ok", "fail"])
+def test_a_failed_retrospective_still_reaches_the_end_decision(tmp_path, monkeypatch, outcome):
+    from claude_launcher.cflow2 import frontend, runtime
+
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    body = doc["procedures"]["settle"]["body"]
+    retro = next(b for b in body
+                 if isinstance(b, dict) and b.get("try") == {"seq": ["retrospective"]})
+    flow = {"cflow": 2, "name": "retro-flow",
+            "nodes": {"retrospective": doc["nodes"]["retrospective"],
+                      "end-stub": {"prompt": "end"}},
+            "body": [retro, "end-stub"]}
+    chart = frontend.compile_text(yaml.safe_dump(flow, allow_unicode=True, sort_keys=False),
+                                  resolve_include=layers.resolver(str(tmp_path)))
+    kw = {"cwd": str(tmp_path), "scope": "m", "now": 1.0}
+    st = runtime.start(chart, caps={}, **kw)
+    task = next(t for t in st["tasks"] if t["label"].rsplit("/", 1)[-1] == "retrospective")
+    value = {"where": "claunch-x", "proposals": 2, "problems": 1} if outcome == "ok" else {}
+    st = runtime.report(task["instance"], outcome, value, **kw)
+    assert [t["label"] for t in st["tasks"]] == ["end-stub"]
+
+
+# -- the round record (claunch-qs4l9) ----------------------------------------
+
+#: The nodes where a round's exploration happens; each reports its tries and
+#: gets the rule that says to leave them on the issue as they happen.
+TRIES = ("work", "review", "targeted-test", "rebase")
+
+
+def test_the_tries_rule_reaches_the_exploring_nodes_and_their_returns_require_it():
+    from claude_launcher.cflow2 import runtime
+    chart = _chart()
+    assert "record-tries" in chart.rules
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    assert doc["rules"]["record-tries"]["deliver"] == list(TRIES)
+    by_label = {n.label: n for n in chart.nodes.values() if n.type == "task"}
+    for label in TRIES:
+        authored, _, rules = by_label[label].props["prompt"].partition("── 규칙 ──")
+        # delivered by the compiler, not typed into each prompt
+        assert "TRIED:" in rules, label
+        assert "TRIED:" not in authored, label
+        ok = doc["nodes"][label]["returns"]["ok"]
+        assert ok["tried"] == "list", label
+        # required (an empty list is the answer for a round that went straight)
+        without = {k: None for k in ok if k != "tried"}
+        assert any("tried" in p for p in runtime.validate_result({"ok": ok}, "ok", without)), label
+    work_ok = doc["nodes"]["work"]["returns"]["ok"]
+    assert runtime.validate_result({"ok": work_ok}, "ok",
+                                   {"files": [], "summary": "s", "tried": []}) == []
+
+
+def test_wrapup_leaves_the_html_report_to_round_report():
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    words = _words(doc["nodes"]["wrapup"]["prompt"])
+    # s906/s910/s934/s935: the driver wrote the page in wrapup and the
+    # round-report delegation wrote it again
+    assert ("이 스텝이 내는 것은 셋: **깨끗한 트리**, **이 세션이 만든 테스트 "
+            "부산물의 정리**, **넘길 것마다 handoff 이슈**.") in words
+    assert "**회차 보고서 HTML은 이 스텝에서 쓰지 않는다.**" in words
+    assert "claunch report path" not in words
+    assert doc["nodes"]["wrapup"]["returns"]["ok"]["gaps"] == "list?"
+
+
+# claunch-4zc51.1: the wrapup used to keep basetemps "as forensic records" and
+# nothing removed them afterwards -- C:/t reached 28.06 GB of exited sessions'
+# trees and C: fell to 264 MB free. Both canonicals now have the session that
+# made them remove them, after moving the four values into the report.
+_OWN_ARTIFACT_LINES = (
+    "**이 세션이 직접 만든 테스트 부산물은 이 세션이 전부 지운다**",
+    "── 테스트 부산물 정리 (이 세션이 만든 것만, 전부) ──",
+    "`ls -d C:/t/${CLAUNCH_SESSION}c[0-9]* C:/t/${CLAUNCH_SESSION}-* 2>/dev/null`",
+    "접두사만으로 고르지 않는다: `C:/t/s98*`은 s987의 것까지 잡는다.",
+    "`git worktree remove --force <경로>`",
+    "다른 세션의 항목은 그 세션이 이미 종료됐어도 여기서 지우지 않는다",
+)
+
+
+@pytest.mark.parametrize("which", ["v1", "v2"])
+def test_wrapup_removes_the_test_artifacts_its_own_session_made(which):
+    if which == "v1":
+        step = yaml.safe_load(V1.read_text(encoding="utf-8"))["steps"]["wrapup"]
+        words, done = _words(step["instructions"]), _words(step["done_when"])
+    else:
+        node = yaml.safe_load(V2.read_text(encoding="utf-8"))["nodes"]["wrapup"]
+        words, done = _words(node["prompt"]), _words(node["done_when"])
+    assert "basetemp는 지우지 않는다" not in words
+    for line in _OWN_ARTIFACT_LINES:
+        assert _words(line) in words, line
+    assert "(시작 · 소요 · 워커 수 · 실행량)" in done
+    assert "`C:/t/<세션>c<10자리>`·`C:/t/<세션>-*`" in done
+
+
+@pytest.mark.parametrize("which", ["v1", "v2"])
+def test_wrapup_keeps_a_held_rounds_preview_ref(which):
+    # tools/merge_ready.py reads refs/claunch/preview/<branch> as the landing
+    # evidence of a frozen round; deleting it in a hold wrapup sends the
+    # leader's integrate back to re-measure (rc=1)
+    if which == "v1":
+        step = yaml.safe_load(V1.read_text(encoding="utf-8"))["steps"]["wrapup"]
+        words, done = _words(step["instructions"]), _words(step["done_when"])
+    else:
+        node = yaml.safe_load(V2.read_text(encoding="utf-8"))["nodes"]["wrapup"]
+        words, done = _words(node["prompt"]), _words(node["done_when"])
+    assert "`refs/claunch/preview/<세션>-*`" not in words
+    assert ("`refs/claunch/preview/<브랜치>`는 회차가 착지했을 때만 지운다. "
+            "hold로 동결한 회차는 그 ref를 남긴다") in words
+    assert "「착지 근거라 남김」" in words
+    assert ("hold 회차의 `refs/claunch/preview/<브랜치>`는 착지 근거라 "
+            "남기고") in done
+
+
+def test_v1_wrapup_cleanup_stays_inside_the_reminder_window():
+    # the reminder re-fire carries only the first _INSTRUCTIONS_LIMIT chars
+    from claude_launcher.daemon.cflow_clock import _INSTRUCTIONS_LIMIT
+    step = yaml.safe_load(V1.read_text(encoding="utf-8"))["steps"]["wrapup"]
+    window = step["instructions"][:_INSTRUCTIONS_LIMIT]
+    assert "부산물의 정리**" in _words(window)
+    assert "이 세션이 직접 만든 테스트 부산물은 이 세션이 전부 지운다" in window
+
+
+def test_v2_wrapup_artifacts_reach_the_round_report():
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    assert doc["nodes"]["wrapup"]["returns"]["ok"]["artifacts"] == "list?"
+    words = _words(doc["nodes"]["round-report"]["prompt"])
+    assert "정리한 테스트 부산물: ${result.wrapup.value.artifacts}" in words
+
+
+def test_round_report_reads_the_round_records_before_writing():
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    node = doc["nodes"]["round-report"]
+    words = _words(node["prompt"])
+    assert "${result.wrapup.value.gaps}" in words
+    for source in ("`claunch cflow2 journal`", "`TRIED:`", "`claunch commits`"):
+        assert source in words, source
+    # a spawned child first (claunch-xjbrh); the records are what lets it run
+    # without the chat, and it names the run's session since its own differs
+    assert node["executor"][0] == "session"
+    for flag in ("-t <scope>", "--session <scope>", "report path --session <scope>"):
+        assert flag in words, flag

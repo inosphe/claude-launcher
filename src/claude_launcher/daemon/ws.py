@@ -387,6 +387,20 @@ class _SyncLane:
             self._task = None
 
 
+async def wake_for_viewer(manager, session):
+    """The session a viewer should attach to: ``session`` itself, or -- when
+    it is held -- the incarnation :meth:`SessionManager.wake_async` brings
+    back. A wake that fails leaves the held record to attach to: its final
+    screen is shown, and the respawn button is the way back from there."""
+    if not (getattr(session, "exited", False) and getattr(session, "held_at", None)):
+        return session
+    try:
+        return await manager.wake_async(session.sdef.name, by="attach")
+    except Exception:  # noqa: BLE001 -- show what there is, say why in the log
+        log.exception("wake of held session %r on attach failed", session.sdef.name)
+        return session
+
+
 async def terminal_ws(request: web.Request) -> web.WebSocketResponse:
     """The terminal on a socket of its own: one upgrade, one session.
 
@@ -400,6 +414,8 @@ async def terminal_ws(request: web.Request) -> web.WebSocketResponse:
     # calls /api/auth/session before opening any terminal socket).
     manager = request.app["manager"]
     session: Session = manager.get(request.match_info["name"])
+    # A held session wakes when somebody comes to look (claunch-5l35i).
+    session = await wake_for_viewer(manager, session)
 
     ws = web.WebSocketResponse(heartbeat=HEARTBEAT)
     await ws.prepare(request)

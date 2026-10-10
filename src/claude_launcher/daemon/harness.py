@@ -380,6 +380,10 @@ def _prompt_packs_field(raw) -> Tuple[dict, ...]:
             # Only a package copy carries it (prompt_packs.records).
             if item.get("source"):
                 rec["source"] = str(item["source"])
+            if item.get("source") == "prompter":
+                for key in ("url", "title", "prompter_id"):
+                    if key in item:
+                        rec[key] = item[key]
             # Why a package copy went in, for its opening header.
             if isinstance(item.get("required_by"), list):
                 rec["required_by"] = [str(r) for r in item["required_by"]]

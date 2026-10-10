@@ -13,14 +13,12 @@ session name, as for v1 -- that does what no agent call does:
   run (``waiting_approval``/``monitor_violation``), ``notify`` and ``halt``
   are typed into the owning session the way the v1 timer clock delivers its
   notices (``session.queue_delivery``), ``record`` is the journal entry;
-* **dispatch**: queued ``headless`` delegations run as harness processes
-  (:func:`.cflow2_exec.run_headless`, worker threads, at most
-  ``daemon.cflow2_headless_max`` at once) and queued ``session`` delegations
-  become child sessions (:func:`.cflow2_exec.spawn_session`); a headless
-  delegation left ``running`` by an earlier daemon is requeued;
-* **budgets**: ``budget.seconds`` of ``subagent``/``session`` delegations
-  (headless enforces its own by killing the process): the delegation ends
-  ``timeout`` and the driver (and a child session) is told to stop;
+* **dispatch**: queued ``session`` delegations become child sessions
+  (:func:`.cflow2_exec.spawn_session`); a delegation an old run left on the
+  removed ``headless`` executor is rerouted to its next executor;
+* **budgets**: ``budget.seconds`` of ``subagent``/``session`` delegations:
+  the delegation ends ``timeout`` and the driver (and a child session) is
+  told to stop;
 * **asks**: :func:`..cflow2.asks.tick` -- a task's ``ask`` whose group
   timed out moves to the next ``from`` group, and every ask waiting for a
   group is routed (roster read, question delivered as a mesh ``decide``
@@ -48,8 +46,8 @@ session name, as for v1 -- that does what no agent call does:
   :func:`..cflow2.runtime.complete_restart`;
 * **wake-up**: a pass that moved a run on its own (a wait passed or timed
   out, a held choice's window opened), or that finds a delegation closed
-  since the last pass by somebody other than the driver (a headless
-  process, a child session, a receipt -- claunch-feve0), tells the driver
+  since the last pass by somebody other than the driver (a child
+  session, a receipt -- claunch-feve0), tells the driver
   when the run now waits on it (a task, or an agent's choice);
 * **watch**: collection ``watch:`` probes that are due
   (:func:`..cflow2.runtime.watch_due`) run like a wait probe, with
@@ -96,7 +94,6 @@ from . import cflow2_exec, cflow2_triggers
 log = logging.getLogger("claunch.daemon.cflow2")
 
 DEFAULT_POLL = 10.0
-DEFAULT_HEADLESS_MAX = 3
 
 Notice = Tuple[str, str, str]  # (cwd, session name, text)
 
@@ -179,12 +176,9 @@ class Cflow2Clock:
         *,
         poll: Optional[float] = None,
         spawn: Optional[Callable[[str, Dict[str, Any]], str]] = None,
-        launch_for: Optional[Callable[[str], Optional[cflow2_exec.Launch]]] = None,
         probe_runner: Optional[Callable[..., Any]] = run_probe,
-        max_headless: Optional[int] = None,
         heartbeat: bool = True,
         threaded: bool = True,
-        default_seconds: float = cflow2_exec.DEFAULT_SECONDS,
         ask_pool: Optional[Callable[..., Any]] = None,
         ask_deliver: Optional[Callable[..., Any]] = None,
         find_child: Optional[cflow2_exec.FindChild] = None,
@@ -200,12 +194,9 @@ class Cflow2Clock:
         self.mesh = mesh
         self.poll = float(poll if poll is not None else DEFAULT_POLL)
         self.spawn = spawn or cflow2_exec.default_spawn
-        self.launch_for = launch_for or self._launch_for
         self.probe_runner = probe_runner
-        self.max_headless = max_headless
         self.heartbeat = heartbeat
         self.threaded = threaded
-        self.default_seconds = default_seconds
         #: Roster reader and question delivery for asks (tests stub them;
         #: ``None`` is the mesh through this daemon's API -- :meth:`scan`
         #: runs in a worker thread, so the HTTP call does not block the loop).
@@ -226,13 +217,11 @@ class Cflow2Clock:
         self.platform = platform
         #: Restarts claimed during a pass, run after it: ``(cwd, scope, action)``.
         self.restarts: List[Tuple[str, str, Dict[str, Any]]] = []
-        #: Identifies this daemon process on a claimed delegation; a running
-        #: headless record carrying another boot was orphaned by a restart.
+        #: Identifies this daemon process on a claimed delegation; a session
+        #: spawn record carrying another boot was interrupted by a restart.
         self.boot = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
-        self.procs = cflow2_exec.Procs()
-        #: Set by :meth:`shutdown`: no new claim, spawn or attempt starts.
+        #: Set by :meth:`shutdown`: no new claim or spawn starts.
         self.stop = threading.Event()
-        self.jobs: Dict[Tuple[str, str, str, str], threading.Thread] = {}
         self.results: List[Dict[str, Any]] = []
         #: Directories a run was started in through this process's runtime
         #: (the in-process dispatcher saw it) without a session standing there.
@@ -260,8 +249,8 @@ class Cflow2Clock:
         #: ``(cwd, scope) -> {delegation id}`` open at the end of the last pass,
         #: excluding subagent delegations (their driver submits them itself,
         #: so it is awake). A delegation that was open and is now closed was
-        #: finished by somebody else -- a headless process, a child session,
-        #: a receipt this clock submitted -- and nothing else tells the
+        #: finished by somebody else -- a child session, a receipt this
+        #: clock submitted -- and nothing else tells the
         #: driver its run moved (claunch-feve0). In memory only: a restart
         #: forgets it, and the resume nudge covers what moved while down.
         self._open_delegations: Dict[Tuple[str, str], Set[str]] = {}
@@ -278,11 +267,8 @@ class Cflow2Clock:
             self._beat_task = self._loop.create_task(self._beat_loop())
 
     async def shutdown(self) -> None:
-        # Stop first: a worker whose process is killed below must requeue
-        # its delegation, not start the second attempt (A5).
         self.stop.set()
         executors.register(None)
-        self.procs.kill_all()
         for attr in ("_task", "_beat_task"):
             task = getattr(self, attr)
             setattr(self, attr, None)
@@ -292,17 +278,6 @@ class Cflow2Clock:
                     await task
         if self.heartbeat:
             executors.clear_heartbeat()
-        # Let the killed workers write their requeue; whatever does not land
-        # is requeued by the next boot (the record's pid is gone).
-        with contextlib.suppress(Exception):
-            await asyncio.to_thread(self.wait_jobs, 5.0)
-
-    def _wake_soon(self) -> None:
-        """Start the next pass now (from any thread)."""
-        loop, wake = self._loop, self._wake
-        if loop is not None and wake is not None:
-            with contextlib.suppress(RuntimeError):
-                loop.call_soon_threadsafe(wake.set)
 
     def _dispatch_hook(self, rec: dict, run: Any) -> str:
         """The in-process dispatcher: the runtime ran inside the daemon (an API
@@ -375,6 +350,10 @@ class Cflow2Clock:
         except Exception:
             return
         if getattr(session, "exited", True):
+            # A held driver wakes for its notice (claunch-5l35i).
+            if getattr(session, "held_at", None):
+                self.manager.wake_soon(session.sdef.name, by="cflow2",
+                                       deliver=text)
             return
         try:
             session.queue_delivery(text)
@@ -467,38 +446,6 @@ class Cflow2Clock:
                     self.extra_cwds.discard(cwd)
         return sorted(out)
 
-    def _launch_for(self, scope: str) -> Optional[cflow2_exec.Launch]:
-        session = self._live(scope)
-        if session is None:
-            return None
-        return cflow2_exec.launch_for_session(session)
-
-    def _headless_max(self) -> int:
-        if self.max_headless is not None:
-            return int(self.max_headless)
-        try:
-            return max(1, int(store.daemon_config().get("cflow2_headless_max")
-                              or DEFAULT_HEADLESS_MAX))
-        except (TypeError, ValueError):
-            return DEFAULT_HEADLESS_MAX
-
-    def running_jobs(self) -> int:
-        with self._lock:
-            for key in [k for k, t in self.jobs.items() if not t.is_alive()]:
-                del self.jobs[key]
-            return len(self.jobs)
-
-    def wait_jobs(self, timeout: float = 30.0) -> None:
-        """Join the headless workers (tests, shutdown)."""
-        deadline = time.monotonic() + timeout
-        while self.running_jobs():
-            with self._lock:
-                threads = list(self.jobs.values())
-            for t in threads:
-                t.join(max(0.0, deadline - time.monotonic()))
-            if time.monotonic() >= deadline:
-                break
-
     # -- the tick ----------------------------------------------------------
     def scan(self, now: Optional[float] = None) -> List[Notice]:
         """One pass over every run. Blocking (probes, file writes, a spawn
@@ -526,42 +473,9 @@ class Cflow2Clock:
                         log.debug("cflow2 clock skipped %s/%s: %s", cwd, scope, exc)
                     except Exception:
                         log.exception("cflow2 clock failed on %s/%s", cwd, scope)
-            self.reap()
         finally:
             self._scanning = False
         return notices
-
-    def reap(self) -> List[Tuple[str, str, str, str]]:
-        """End the headless processes whose work is gone (B5): the run is no
-        longer live or is another run now, the delegation is no longer open
-        (cancelled by a par settle, a timeout, an abort), or a halt monitor
-        stopped the run. Returns the job keys killed."""
-        killed = []
-        for key in self.procs.keys():
-            if not (isinstance(key, tuple) and len(key) == 4):
-                continue
-            cwd, scope, run_id, did = key
-            try:
-                state = cstore.RunStore(cwd, scope).load_state()
-            except Exception:  # noqa: BLE001 - the slot is gone
-                state = {}
-            rec = (state.get("delegations") or {}).get(did) or {}
-            why = None
-            if state.get("run_id") != run_id or state.get("status") not in runtime.LIVE_STATUSES:
-                why = cflow2_exec.KILL_CANCELLED
-            elif rec.get("status") not in runtime.OPEN_DELEGATION:
-                why = cflow2_exec.KILL_CANCELLED
-            elif _halted(state):
-                why = cflow2_exec.KILL_HALT
-            if why and self.procs.kill(key, why):
-                killed.append(key)
-                with contextlib.suppress(Exception):
-                    runtime.note("delegate_killed", cwd=cwd, scope=scope, delegation=did,
-                                 node=rec.get("node"), why=why,
-                                 detail="the run finished, was aborted or halted, or the "
-                                        "delegation was cancelled: its headless process "
-                                        "group was killed")
-        return killed
 
     def tick_slot(self, cwd: str, scope: str, now: Optional[float],
                   notices: List[Notice]) -> None:
@@ -605,15 +519,14 @@ class Cflow2Clock:
         self._open_delegations[(cwd, scope)] = _open_delegations(state)
         halted = _halted(state)
         clock_now = time.time() if now is None else float(now)
-        run_id = str(state.get("run_id") or "")
         for did, rec in (state.get("delegations") or {}).items():
             if self.stop.is_set():
                 return
             if rec.get("status") not in runtime.OPEN_DELEGATION:
                 continue
             ex = rec.get("executor")
-            if ex == ir.EXEC_HEADLESS:
-                self._headless(cwd, scope, run_id, did, rec, clock_now, halted)
+            if ex in ir.REMOVED_EXECUTORS:
+                self._removed(cwd, scope, did, rec)
             elif ex == ir.EXEC_SESSION:
                 self._session(cwd, scope, did, rec, clock_now, notices, halted)
             elif ex == ir.EXEC_SUBAGENT:
@@ -768,97 +681,14 @@ class Cflow2Clock:
                 log.debug("cflow2 watch apply %s/%s %s[%s]: %s", cwd, scope, name, key, exc)
 
     # -- executors ---------------------------------------------------------
-    def _requeue_orphan(self, cwd: str, scope: str, did: str, cause: str) -> bool:
-        return runtime.delegate_update(
-            did, expect=("running",), cwd=cwd, scope=scope, status="queued",
-            runner=None, child=None, attempt_running=None,
-            event={"event": "fallback", "cause": cause, "route": "requeue",
-                   "decision": "executor"},
-        )
-
-    def _headless(self, cwd: str, scope: str, run_id: str, did: str, rec: dict,
-                  now: float, halted: bool = False) -> None:
-        key = (cwd, scope, run_id, did)
-        status = rec.get("status")
-        if status == "running":
-            runner = rec.get("runner") or {}
-            with self._lock:
-                mine = key in self.jobs
-            if mine:
-                return
-            if runner.get("boot") != self.boot:
-                # Claimed by a daemon that is gone (A5). Its process may
-                # have outlived it: end it first, never run the work twice.
-                alive = cflow2_exec.process_alive(runner.get("pid"), runner.get("argv0"))
-                if alive is None:
-                    # A live pid we cannot identify: wait for it to go, or
-                    # for the budget to run out, before running it again.
-                    started = float(runner.get("started_at") or rec.get("dispatched_at") or now)
-                    seconds = float(((rec.get("route") or {}).get("budget") or {}).get("seconds")
-                                    or self.default_seconds)
-                    if now - started <= seconds:
-                        return
-                elif alive:
-                    cflow2_exec.kill_group(int(runner["pid"]))
-                self._requeue_orphan(
-                    cwd, scope, did,
-                    "the daemon that ran this headless delegation is gone"
-                    + (" (its process was killed)" if alive else ""))
-                return
-            # Our own worker finished without closing the record.
-            with contextlib.suppress(runtime.FlowError):
-                runtime.delegate_fail(did, "the headless executor ended without a result",
-                                      cwd=cwd, scope=scope)
-            return
-        if status != "queued" or halted or self.stop.is_set():
-            return
-        if self.running_jobs() >= self._headless_max():
-            return
-        launch = self.launch_for(scope)
-        if launch is None:
+    def _removed(self, cwd: str, scope: str, did: str, rec: dict) -> None:
+        """A delegation an old run gave an executor the engine no longer has
+        (``headless``, claunch-xjbrh): nothing here runs it, so it moves to
+        the node's next executor (``inline`` when none is left)."""
+        with contextlib.suppress(runtime.FlowError):
             runtime.delegate_reroute(
-                did, f"no live session {scope!r} to take the profile environment from",
+                did, f"executor {rec.get('executor')!r} was removed from the engine",
                 cwd=cwd, scope=scope)
-            return
-        runner = {"boot": self.boot, "harness": launch.harness}
-        claimed = runtime.delegate_update(
-            did, expect=("queued",), cwd=cwd, scope=scope, status="running",
-            runner=runner, dispatched_at=now,
-            event={"event": "delegate_started", "phase": "dispatched",
-                   "executor": ir.EXEC_HEADLESS, "harness": launch.harness},
-        )
-        if not claimed:
-            return
-
-        def job() -> None:
-            try:
-                result = cflow2_exec.run_headless(
-                    cwd, scope, did, launch, default_seconds=self.default_seconds,
-                    procs=self.procs, key=key, runner=runner)
-            except Exception as exc:  # noqa: BLE001 - must not leave it running forever
-                log.exception("headless delegation %s/%s/%s crashed", cwd, scope, did)
-                if self.stop.is_set():
-                    result = {"delegation": did, "result": "interrupted", "error": str(exc)}
-                else:
-                    with contextlib.suppress(Exception):
-                        runtime.delegate_fail(did, f"headless executor error: {exc}",
-                                              cwd=cwd, scope=scope)
-                    result = {"delegation": did, "result": "error", "error": str(exc)}
-            log.info("cflow2 headless %s/%s %s: %s", scope, did, cwd, result.get("result"))
-            with self._lock:
-                self.results.append(result)
-            # The run moved off the delegation: scan now rather than at the
-            # next poll, so the driver hears it while the result is fresh.
-            self._wake_soon()
-
-        if not self.threaded:
-            job()
-            return
-        thread = threading.Thread(target=job, name=f"cflow2-headless-{scope}-{did}",
-                                  daemon=True)
-        with self._lock:
-            self.jobs[key] = thread
-        thread.start()
 
     def _session(self, cwd: str, scope: str, did: str, rec: dict, now: float,
                  notices: List[Notice], halted: bool = False) -> None:
@@ -1108,8 +938,7 @@ def _open_delegations(state: Dict[str, Any]) -> Set[str]:
 
 #: Why the clock says a run moved (the protocol line of :func:`moved_block`).
 WHY_CLOCK = "a wait passed or timed out, or a held choice's window opened"
-WHY_DELEGATION = ("a delegated node returned -- a headless process, a child session or "
-                  "a receipt finished it")
+WHY_DELEGATION = "a delegated node returned -- a child session or a receipt finished it"
 
 
 def _waits_on_driver(payload: Dict[str, Any]) -> bool:

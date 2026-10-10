@@ -487,6 +487,15 @@ DAEMON_DEFAULTS = {
     "beads_auto_issue": True,
     "beads_winddown": True,
     "beads_winddown_grace": 120.0,
+    # Idle hold (daemon/hold.py, claunch-5l35i): a running session that has
+    # been quiet this many minutes -- no screen change, no keystroke, no
+    # viewer, nothing queued for it -- has its program ended and its record
+    # filed as "hold"; attaching to it (the web terminal or `claunch
+    # attach`), a mesh message or a cflow notice brings it back with its
+    # conversation. 0 turns the automatic hold off (the manual one stays).
+    # keep_alive sessions and those that would come back blank are never
+    # held.
+    "hold_idle_minutes": 60.0,
     # A merge/handoff completion (daemon/handoff.py) waits this long for the
     # target to take the report before it gives up and KEEPS the source —
     # the target's keyboard may be busy, and the report is the only thing of
@@ -539,21 +548,74 @@ DAEMON_DEFAULTS = {
     # and tool results the screen cut short. Read LIVE on every request.
     "shadow_transcript": True,
     # The cflow v2 clock (daemon/cflow2_clock.py): wait probes, delegation
-    # budgets, spec.monitors, and serving headless/session delegations. Off
-    # = v2 delegations fall back to the next executor (no heartbeat is
-    # written) and waits/monitors move only when the agent calls
-    # flow_status. Read at daemon start. cflow2_headless_max caps the
-    # headless harness processes it runs at once (read LIVE per tick);
-    # cflow2_poll is its tick in seconds (read at start).
+    # budgets, spec.monitors, and serving session delegations. Off = v2
+    # delegations fall back to the next executor (no heartbeat is written)
+    # and waits/monitors move only when the agent calls flow_status. Read at
+    # daemon start. cflow2_poll is its tick in seconds (read at start).
     "cflow2_clock": True,
-    "cflow2_headless_max": 3,
     "cflow2_poll": 10.0,
     # claunch reposync (claunch-dh73y): "ask" -- a sync that pushes to the
     # shared remote waits for a person (a y/N prompt at the user's own
     # terminal, the web UI's approval card for an agent session); "auto" --
     # it goes ahead. Read live by the CLI on every sync.
     "reposync_push": "ask",
+    # Which workflow the session pickers (the dashboard's new-session form,
+    # the CLI wizard) auto-select when a role is picked, per role: a
+    # workflow name, "v2:<name>" for the v2 one of a name both formats
+    # declare, or "-" to auto-select nothing. A role absent here falls back
+    # to the workflows' own ``default_role`` (worker -> improv-worker). An
+    # override the picked directory does not declare, or the role's filter
+    # refuses, also falls back. Only the auto-pick: a parent's pair
+    # (default_child_cflow) still decides a child's run. Read LIVE on every
+    # workflow listing; the Settings page writes it (PUT /api/role-workflows).
+    "role_workflows": {},
 }
+
+#: The ``role_workflows`` value that auto-selects no workflow for a role.
+ROLE_WORKFLOW_NONE = "-"
+
+
+def role_workflows(doc: Optional[dict] = None) -> Dict[str, str]:
+    """``daemon.role_workflows`` cleaned: lower-cased role -> non-empty
+    workflow value. A malformed block reads as empty rather than raising --
+    it only steers a picker's default, and a picker that broke over it
+    would cost more than the default it was meant to change."""
+    block = daemon_config(doc).get("role_workflows")
+    if not isinstance(block, dict):
+        return {}
+    out: Dict[str, str] = {}
+    for role, value in block.items():
+        role = str(role or "").strip().lower()
+        value = str(value or "").strip() if isinstance(value, str) else ""
+        if role and value:
+            out[role] = value
+    return out
+
+
+def set_role_workflow(role: str, workflow: Optional[str]) -> None:
+    """Set (or clear, when ``workflow`` is empty/None) one role's override."""
+    role = str(role or "").strip().lower()
+    workflow = str(workflow or "").strip()
+
+    def _mutate(doc: dict) -> None:
+        block = doc.get("daemon")
+        if not isinstance(block, dict):
+            block = {}
+            doc["daemon"] = block
+        rows = block.get("role_workflows")
+        rows = dict(rows) if isinstance(rows, dict) else {}
+        if workflow:
+            rows[role] = workflow
+        else:
+            rows.pop(role, None)
+        if rows:
+            block["role_workflows"] = rows
+        else:
+            block.pop("role_workflows", None)
+            if not block:
+                doc.pop("daemon", None)
+
+    update(_mutate)
 
 
 def daemon_config(doc: Optional[dict] = None) -> dict:

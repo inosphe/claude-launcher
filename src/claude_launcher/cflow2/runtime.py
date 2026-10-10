@@ -18,7 +18,8 @@ await          completed by
 ``delegation`` :func:`delegate_submit` (or a dispatcher, later)
 ``pause``      :func:`wait_tick` (a loop's ``every`` between iterations)
 ``limit``      :func:`extend_loop` (a loop at its ``max``; the run is
-               ``waiting_approval`` with reason ``loop_limit``) or
+               ``waiting_approval`` with reason ``loop_limit``; extend it
+               or reset its count) or
                :func:`extend_visits` (a node entered more than the chart's
                ``max_visits`` times; reason ``visit_limit``)
 ``approval``   an ask's answer (:func:`approve`, :func:`answer`)
@@ -122,10 +123,6 @@ AW_VERIFY = "verifying"
 #: Hold kinds (``state["approvals"]``). ``monitor_violation`` holds the whole
 #: run; the others hold one instance.
 HOLD_HALT = "monitor_violation"
-#: Read-only routes whose headless delegate runs in the run's own checkout,
-#: kept read-only by a porcelain check there (daemon/cflow2_exec.py; the
-#: others are ``READONLY_SANDBOXED``).
-READONLY_IN_CHECKOUT = ("tools-restrict",)
 HOLD_LOOP = "loop_limit"
 HOLD_VISIT = "visit_limit"
 #: An ``ok`` finish whose acceptance probes did not all pass.
@@ -372,6 +369,45 @@ def _caps_from_json(raw: Any) -> Dict[str, Any]:
 def node_key(node: ir.Node) -> str:
     """The name a node's result and visits are kept under."""
     return node.label or node.id
+
+
+def shown_label(chart: ir.Chart, node: ir.Node) -> Optional[str]:
+    """The label a reader is shown for ``node`` (status, briefs, asks).
+
+    A node inlined from a ``call`` keeps its own name as its label -- the
+    procedure reads its results under it (:func:`node_key`) -- so a chart
+    that calls one procedure from several sites has several nodes under one
+    label, and every one of them read the same: improv-worker-v2's ask-user
+    sites all showed ``ask-pose`` (claunch-tm5ki). Such a label is shown
+    with the author ids on its path in front
+    (``round/resolve/issue-decision/ask-pose``): each segment of the node's
+    id stands for the authored node it was generated under
+    (``issue-decision.call`` for ``issue-decision``), and a segment with no
+    authored node (``body.0``) adds nothing. A label no other node shares is
+    shown as it is. :func:`_find` accepts a shown label as a reference.
+    """
+    if not node.label:
+        return None
+    if sum(1 for n in chart.nodes.values() if n.label == node.label) < 2:
+        return node.label
+    segs = node.id.split("/")[:-1]
+    names = [_authored(chart, "/".join(segs[:i]), seg) for i, seg in enumerate(segs)]
+    return "/".join([n for n in names if n] + [node.label])
+
+
+def _authored(chart: ir.Chart, prefix: str, seg: str) -> Optional[str]:
+    """The author id an id segment stands for: the segment's own node when
+    it has one, else the node its generated suffixes were added to
+    (``issue-decision.call`` -> ``issue-decision``); None for a path with no
+    authored node (``body.0``)."""
+    head = seg
+    while True:
+        cand = chart.nodes.get(f"{prefix}/{head}" if prefix else head)
+        if cand is not None and cand.label:
+            return cand.label
+        if "." not in head:
+            return None
+        head = head.rsplit(".", 1)[0]
 
 
 # ---------------------------------------------------------------------------
@@ -636,7 +672,7 @@ def _visit_limit(r: Run, iid: str, node: ir.Node) -> None:
     inst["frame"]["visit_limit"] = True
     visits = int(r.state["visits"].get(key) or 0)
     approval = {"kind": HOLD_VISIT, "instance": iid, "node": node.id,
-                "label": node.label or None, "visits": visits, "max": _max_visits(r, key)}
+                "label": shown_label(r.chart, node), "visits": visits, "max": _max_visits(r, key)}
     r.state.setdefault("approvals", []).append(approval)
     r.emit("waiting", node=node.id, instance=iid, kind=HOLD_VISIT, visits=visits,
            max=approval["max"])
@@ -772,14 +808,29 @@ def _en_control(r: Run, iid: str, node: ir.Node) -> None:
 # -- loops -----------------------------------------------------------------
 
 
-def _loop_max(r: Run, iid: str) -> int:
+def _loop_cap(r: Run, iid: str) -> int:
+    """The limit a person sees: the loop's ``max`` plus what was extended
+    since the count was last reset."""
     node = r.node_of(iid)
     return int(node.get("max") or 1) + int(r.inst[iid]["frame"].get("extra") or 0)
 
 
+def _loop_count(frame: Dict[str, Any]) -> int:
+    """Iterations run since the count was last reset (``extend_loop(reset=True)``).
+    ``iter`` itself keeps counting: it indexes a foreach's items and is a
+    retry's ``attempt``."""
+    return int(frame.get("iter") or 0) - int(frame.get("base") or 0)
+
+
+def _loop_max(r: Run, iid: str) -> int:
+    """The bound ``iter`` is compared against."""
+    return _loop_cap(r, iid) + int(r.inst[iid]["frame"].get("base") or 0)
+
+
 def _en_loop(r: Run, iid: str, node: ir.Node) -> None:
     frame = r.inst[iid]["frame"]
-    frame.update({"iter": 0, "values": [], "extra": 0, "phase": "body", "last": None})
+    frame.update({"iter": 0, "base": 0, "values": [], "extra": 0, "phase": "body",
+                  "last": None})
     mode = node.get("mode")
     if mode == ir.LOOP_FOREACH:
         try:
@@ -866,8 +917,8 @@ def _loop_limit(r: Run, iid: str) -> None:
     r.inst[iid]["await"] = AW_LIMIT
     approval = {
         "kind": "loop_limit", "instance": iid, "node": node.id,
-        "label": node.label or None, "iterations": frame.get("iter"),
-        "max": _loop_max(r, iid), "mode": node.get("mode"),
+        "label": shown_label(r.chart, node), "iterations": _loop_count(frame),
+        "max": _loop_cap(r, iid), "mode": node.get("mode"),
     }
     r.state.setdefault("approvals", []).append(approval)
     r.state["status"] = ST_WAITING
@@ -1613,7 +1664,7 @@ def _delegate(r: Run, iid: str) -> bool:
     error). A flat subtree (task/seq only) goes out as one brief and comes
     back as one result. Any other subtree, for a ``subagent`` or ``session``
     executor, becomes a nested delegation run the delegate drives with the
-    flow_* tools (doc 7); ``headless`` takes flat subtrees only."""
+    flow_* tools (doc 7)."""
     node = r.node_of(iid)
     if caps_mod is None:
         r.emit("fallback", node=node.id, cause="caps module unavailable", route="inline")
@@ -1646,18 +1697,13 @@ def _delegate(r: Run, iid: str) -> bool:
         executor = nxt
         if executor != plan.route:
             plan = _plan(_with_executor(node, executor), caps, flat)
-    if not flat and executor == ir.EXEC_HEADLESS:
-        r.emit("fallback", node=node.id, instance=iid, decision="executor",
-               cause="headless runs only a flat subtree (task/seq)",
-               route="headless -> inline")
-        executor = ir.EXEC_INLINE
     if executor == ir.EXEC_INLINE:
         return False
 
     dels = r.state.setdefault("delegations", {})
     did = f"d{len(dels) + 1}"
     rec: Dict[str, Any] = {
-        "id": did, "instance": iid, "node": node.id, "label": node.label or None,
+        "id": did, "instance": iid, "node": node.id, "label": shown_label(r.chart, node),
         "executor": executor, "status": "pending" if executor == ir.EXEC_SUBAGENT else "queued",
         "route": plan.to_dict(), "receipt": None, "started": store_mod.utcnow(),
         "started_at": r.now, "finished": None, "attempts": 0, "errors": [],
@@ -1910,7 +1956,7 @@ def brief(r: Run, did: str) -> Dict[str, Any]:
     rules = [{"id": rid, "text": (r.chart.rules.get(rid) or {}).get("text")} for rid in rule_ids]
     receipt = str(r.store.receipt_path(did))
     out = {
-        "delegation": did, "node": node.id, "label": node.label or None,
+        "delegation": did, "node": node.id, "label": shown_label(r.chart, node),
         "type": node.type, "executor": rec["executor"], "status": rec["status"],
         "with": env.get("params") if node.type == ir.T_SCOPE else None,
         "tasks": tasks, "returns": rec.get("returns") or returns_of(node),
@@ -2381,6 +2427,11 @@ def _find(r: Run, ref: Optional[str], kinds: Tuple[str, ...], what: str,
             return ref
         hits = [iid for iid in cands
                 if r.inst[iid]["node"] == ref or r.node_of(iid).label == ref]
+        if not hits:
+            # a label as status shows it (claunch-tm5ki); tried only after the
+            # node id and the own label, so a reference that named one node
+            # before still does
+            hits = [iid for iid in cands if shown_label(r.chart, r.node_of(iid)) == ref]
         if len(hits) == 1:
             return hits[0]
         if len(hits) > 1:
@@ -2478,13 +2529,7 @@ def _check_delegation_authority(r: Run, rec: Dict[str, Any], session: str,
             f"delegation {rec['id']} runs as the nested run {rec['nested']['scope']!r}: "
             f"drive it with the flow_* tools under that scope; its result comes back on its "
             f"own")
-    if ex == ir.EXEC_HEADLESS:
-        if what == "submit":
-            raise FlowError(f"delegation {rec['id']} is headless: only the daemon's executor "
-                            f"brings its result back")
-        if may_drive(r.state, session):
-            return
-    elif ex == ir.EXEC_SUBAGENT:
+    if ex == ir.EXEC_SUBAGENT:
         if may_drive(r.state, session):
             return
     elif ex == ir.EXEC_SESSION:
@@ -2726,7 +2771,8 @@ def claim_restarts(*, platform: str, boot: str, cwd: Optional[str] = None,
                 continue
             frame = inst["frame"]
             rec = frame.get("restart")
-            item = {**base, "instance": iid, "node": node.id, "label": node.label or node.id}
+            item = {**base, "instance": iid, "node": node.id,
+                    "label": shown_label(r.chart, node) or node.id}
             if rec:
                 if rec.get("status") == RESTART_RUNNING and rec.get("boot") != boot:
                     rec.update(status=RESTART_INTERRUPTED, completed_at=store_mod.utcnow())
@@ -2785,7 +2831,8 @@ def complete_restart(instance: str, token: str, exit_code: Optional[int], output
         r.emit("restart_completed", node=node.id, instance=instance, exit_code=exit_code,
                output=tail)
         return {"run": r.state.get("run_id"), "workflow": r.state.get("workflow"),
-                "instance": instance, "node": node.id, "label": node.label or node.id,
+                "instance": instance, "node": node.id,
+                "label": shown_label(r.chart, node) or node.id,
                 "exit_code": exit_code, "status": rec["status"],
                 "driver": driver_of(r.state) or None}
     return _mutate(cwd, scope, now, op)
@@ -3184,9 +3231,8 @@ def delegate_submit(delegation: str, outcome: Optional[str] = None, value: Any =
     ``via`` is who calls: ``internal`` (the daemon's executors) or ``mcp``
     (an agent; ``session`` is its identity). An agent may submit a
     ``subagent`` delegation only as the run's driver and a ``session``
-    delegation only as its assigned child session; a ``headless`` result
-    comes only from the daemon, a nested run's result only from the nested
-    run. A receipt is read only from the run's receipts directory or
+    delegation only as its assigned child session; a nested run's result
+    only from the nested run. A receipt is read only from the run's receipts directory or
     ``$CLAUNCH_SCRATCH``.
 
     An invalid result is refused once with the problems listed (the delegate
@@ -3281,8 +3327,8 @@ def executor_submit(delegation: str, outcome: Optional[str] = None, value: Any =
                     receipt_path: Optional[str] = None, cwd: Optional[str] = None,
                     scope: Optional[str] = None, now: Optional[float] = None,
                     verify_runner: Optional[VerifyRunner] = None) -> Dict[str, Any]:
-    """The daemon's door for a delegation result (a headless executor, a
-    session child's receipt picked up by the clock). Never offered through
+    """The daemon's door for a delegation result (a session child's receipt
+    picked up by the clock). Never offered through
     MCP: an agent's submission goes through :func:`delegate_submit` with
     ``via='mcp'`` and its authority checks. A result that arrives while a
     monitor halts the run is kept and applied on resume."""
@@ -3455,7 +3501,12 @@ def delegate_reroute(delegation: str, cause: str, *, cwd: Optional[str] = None,
         flat = bool(rec.get("flat", True))
         prefs = list(node.executor or [])
         old = rec["executor"]
-        rest = prefs[prefs.index(old) + 1:] if old in prefs else []
+        if old in prefs:
+            rest = prefs[prefs.index(old) + 1:]
+        else:
+            # A removed executor (an old run's record) is no longer in the
+            # node's list: every executor the node still names comes next.
+            rest = prefs if old in ir.REMOVED_EXECUTORS else []
         nxt = ir.EXEC_INLINE
         if caps_mod is not None:
             try:
@@ -3465,8 +3516,6 @@ def delegate_reroute(delegation: str, cause: str, *, cwd: Optional[str] = None,
                 nxt = caps_mod.choose_executor(rest, r.caps, needs=node.needs or []).executor
         if nxt in executors.DISPATCHED and not executors.available(str(r.store.cwd)):
             nxt = _next_undispatched(node, nxt, r.caps, flat)
-        if not flat and nxt == ir.EXEC_HEADLESS:
-            nxt = ir.EXEC_INLINE
         out["executor"] = nxt
         iid = rec["instance"]
         r.emit("fallback", node=node.id, instance=iid, delegation=delegation, cause=cause,
@@ -3568,17 +3617,26 @@ def delegate_brief(delegation: Optional[str] = None, *, cwd: Optional[str] = Non
 
 
 def extend_loop(node: Optional[str] = None, by: int = 1, *, stop: bool = False,
-                cwd: Optional[str] = None, scope: Optional[str] = None,
-                now: Optional[float] = None) -> Dict[str, Any]:
-    """Answer a ``loop_limit``: allow ``by`` more iterations, or ``stop`` the
-    loop (it finishes ``fail``)."""
+                reset: bool = False, cwd: Optional[str] = None,
+                scope: Optional[str] = None, now: Optional[float] = None) -> Dict[str, Any]:
+    """Answer a ``loop_limit``: allow ``by`` more iterations, ``reset`` the
+    count (the loop gets its full ``max`` again and earlier extensions are
+    dropped; ``by`` is ignored), or ``stop`` the loop (it finishes ``fail``).
+    Reset keeps the loop's place: a foreach goes on with its next item, a
+    retry's ``attempt`` keeps counting, collected values stay."""
     def op(r: Run) -> None:
         _require_progress(r)
+        if stop and reset:
+            raise FlowError("reset or stop, not both")
         iid = _find(r, node, (AW_LIMIT,), "loop limit",
                     pred=lambda i: not r.inst[i]["frame"].get("visit_limit"))
         n = r.node_of(iid)
         frame = r.inst[iid]["frame"]
-        if not stop and by < 1:
+        if reset and _loop_count(frame) < 1:
+            # A parallel foreach stops before any iteration because it has
+            # more items than max; a reset there would stop again at once.
+            raise FlowError("no iterations to reset: extend the loop (or stop it)")
+        if not stop and not reset and by < 1:
             raise FlowError("extend by at least 1 (or stop the loop)")
         r.inst[iid]["await"] = None
         r.state["approvals"] = [a for a in r.state.get("approvals", [])
@@ -3587,8 +3645,15 @@ def extend_loop(node: Optional[str] = None, by: int = 1, *, stop: bool = False,
             r.emit("selected", node=n.id, instance=iid, option="stop", kind=HOLD_LOOP)
             _complete(r, iid, ir.OUTCOME_FAIL, {"reason": "loop_limit", "iterations": frame["iter"]})
             return
-        frame["extra"] = int(frame.get("extra") or 0) + int(by)
-        r.emit("selected", node=n.id, instance=iid, option="extend", by=by, kind=HOLD_LOOP)
+        if reset:
+            reset_from = _loop_count(frame)
+            frame["base"] = int(frame.get("iter") or 0)
+            frame["extra"] = 0
+            r.emit("selected", node=n.id, instance=iid, option="reset", count=reset_from,
+                   kind=HOLD_LOOP)
+        else:
+            frame["extra"] = int(frame.get("extra") or 0) + int(by)
+            r.emit("selected", node=n.id, instance=iid, option="extend", by=by, kind=HOLD_LOOP)
         if frame.get("phase") == "limit_par":
             if len(frame["items"]) > _loop_max(r, iid):
                 _loop_limit(r, iid)
@@ -3717,7 +3782,7 @@ def _seat(r: Run, iid: str, node: ir.Node, slot: Dict[str, Any]) -> Optional[Dic
         frame["option"] = slot["option"]
     elif t == ir.T_LOOP:
         if not frame.get("iter"):
-            frame.update({"iter": 1, "values": [], "extra": 0, "last": None})
+            frame.update({"iter": 1, "base": 0, "values": [], "extra": 0, "last": None})
         frame["phase"] = "body"
         frame.pop("resume_at", None)
         if node.get("mode") == ir.LOOP_RETRY:
@@ -4455,7 +4520,7 @@ def describe(r: Run) -> Dict[str, Any]:
         env = r.env(iid)
         if aw == AW_TASK:
             tasks.append({
-                "instance": iid, "node": node.id, "label": node.label or None,
+                "instance": iid, "node": node.id, "label": shown_label(r.chart, node),
                 "title": node.get("title"), "prompt": render(node.get("prompt"), env),
                 "done_when": node.get("done_when"), "verify": node.get("verify"),
                 "returns": returns_of(node), "effects": node.get("effects") or [],
@@ -4470,7 +4535,7 @@ def describe(r: Run) -> Dict[str, Any]:
                 tasks[-1]["restart"] = _restart_view(inst["frame"].get("restart"))
         elif aw == AW_VERIFY:
             v = inst["frame"].get("verify") or {}
-            verifying.append({"instance": iid, "node": node.id, "label": node.label or None,
+            verifying.append({"instance": iid, "node": node.id, "label": shown_label(r.chart, node),
                               "verify": node.get("verify"), "started_at": v.get("started_at"),
                               "timeout": v.get("timeout"), "passed": bool(v.get("passed"))})
         elif aw == AW_CHOOSE:
@@ -4488,7 +4553,7 @@ def describe(r: Run) -> Dict[str, Any]:
                         entry["window_opens_at"] = _iso(opens)
                 (avail if ok else unavail).append(entry if ok else {**entry, "when": opt.get("guard")})
             choices.append({
-                "instance": iid, "node": node.id, "label": node.label or None,
+                "instance": iid, "node": node.id, "label": shown_label(r.chart, node),
                 "prompt": render(node.get("prompt"), env),
                 "chooser": node.get("chooser") or ir.CHOOSER_AGENT,
                 "require_reason": bool(node.get("require_reason")),
@@ -4497,7 +4562,7 @@ def describe(r: Run) -> Dict[str, Any]:
             held = inst["frame"].get("held")
             if held:
                 choices[-1]["held"] = {**held, "opens_at": _iso(held.get("opens_at"))}
-                windows.append({"instance": iid, "node": node.id, "label": node.label or None,
+                windows.append({"instance": iid, "node": node.id, "label": shown_label(r.chart, node),
                                 "option": held.get("option"),
                                 "opens_at": _iso(held.get("opens_at"))})
         elif aw == AW_WAIT:
@@ -4523,12 +4588,13 @@ def describe(r: Run) -> Dict[str, Any]:
                 asks.append(_describe_ask(r, iid, node, rec, env))
         elif aw == AW_LIMIT and inst["frame"].get("visit_limit"):
             key = node_key(node)
-            visit_limits.append({"instance": iid, "node": node.id, "label": node.label or None,
+            visit_limits.append({"instance": iid, "node": node.id, "label": shown_label(r.chart, node),
                                  "visits": (s.get("visits") or {}).get(key),
                                  "max": _max_visits(r, key)})
         elif aw == AW_LIMIT:
-            limits.append({"instance": iid, "node": node.id, "label": node.label or None,
-                           "iterations": inst["frame"].get("iter"), "max": _loop_max(r, iid)})
+            limits.append({"instance": iid, "node": node.id, "label": shown_label(r.chart, node),
+                           "iterations": _loop_count(inst["frame"]),
+                           "max": _loop_cap(r, iid)})
         if node.type == ir.T_GROUP:
             frame = inst["frame"]
             groups.append({
@@ -4580,22 +4646,8 @@ def describe(r: Run) -> Dict[str, Any]:
                      "flow_delegate(delegation, outcome, value)")
     if any(d.get("status") in ("queued", "running") and d.get("executor") in executors.DISPATCHED
            for d in dels):
-        hints.append("headless/session delegations are run by the daemon and come back on "
-                     "their own; call flow_status again later")
-    in_checkout = sorted(
-        did for did, rec in (s.get("delegations") or {}).items()
-        if rec.get("status") in ("queued", "running")
-        and rec.get("executor") == ir.EXEC_HEADLESS
-        and ((rec.get("route") or {}).get("readonly") or {}).get("route")
-        in READONLY_IN_CHECKOUT)
-    if in_checkout:
-        # The daemon compares `git status --porcelain` of this checkout before
-        # and after a read-only delegation that runs in it, and cannot tell
-        # the driver's edits from the delegate's (claunch-onbdf).
-        hints.append(f"read-only delegation(s) {', '.join(in_checkout)} run in THIS working "
-                     "tree: do not edit, create, delete or commit files here until they "
-                     "come back -- any change to `git status` meanwhile fails them as a "
-                     "read-only violation")
+        hints.append("session delegations are run by a child session the daemon spawns "
+                     "and come back on their own; call flow_status again later")
     if waits:
         hints.append("waits fire on their own; call flow_status again later")
     if limits:
@@ -4748,8 +4800,9 @@ def _ask_choices(rec: Dict[str, Any]) -> List[Dict[str, Any]]:
     if rec.get("brief") is not None:
         return list(rec.get("options") or []) + [{
             "name": q_mod.REFRAME, "outcome": q_mod.REFRAME,
-            "description": "the options do not fit the problem -- say why in the reason; "
-                           "the question is framed again"}]
+            "description": "none of the options fits the problem -- say what they miss in "
+                           "the reason; the asker frames the question again from it and "
+                           "asks anew"}]
     if rec.get("options"):
         return list(rec["options"])
     return [{"name": ASK_APPROVE, "outcome": None, "description": "enter the task"},
@@ -4853,7 +4906,7 @@ def _open_ask(r: Run, iid: str, node: ir.Node) -> None:
         spec["options"], spec["from"] = brief["options"], brief["from"]
     aid = f"ask2-{secrets.token_hex(4)}"
     rec: Dict[str, Any] = {
-        "id": aid, "instance": iid, "node": node.id, "label": node.label or None,
+        "id": aid, "instance": iid, "node": node.id, "label": shown_label(r.chart, node),
         "kind": "decision" if spec["options"] else "approval",
         "prompt": render(spec["prompt"], r.env(iid)),
         "from": spec["from"], "otherwise": spec["otherwise"],
@@ -4877,7 +4930,7 @@ def _open_ask(r: Run, iid: str, node: ir.Node) -> None:
     r.inst[iid]["await"] = AW_APPROVAL
     r.inst[iid]["frame"]["ask"] = aid
     r.state.setdefault("approvals", []).append({
-        "kind": "ask", "instance": iid, "node": node.id, "label": node.label or None,
+        "kind": "ask", "instance": iid, "node": node.id, "label": shown_label(r.chart, node),
         "ask": aid, "resolution": rec["resolution"],
     })
     r.emit("waiting", node=node.id, instance=iid, kind="ask", ask=aid, ask_kind=rec["kind"],
@@ -5140,7 +5193,7 @@ def _ask_how(iid: str, rec: Dict[str, Any]) -> str:
 def _describe_ask(r: Run, iid: str, node: ir.Node, rec: Dict[str, Any],
                   env: Dict[str, Any]) -> Dict[str, Any]:
     return {
-        "instance": iid, "node": node.id, "label": node.label or None,
+        "instance": iid, "node": node.id, "label": shown_label(r.chart, node),
         "title": node.get("title"), "ask": rec["id"], "kind": rec.get("kind"),
         "prompt": rec.get("prompt"), "task_prompt": render(node.get("prompt"), env),
         "options": [{"name": o["name"], "description": o.get("description") or ""}

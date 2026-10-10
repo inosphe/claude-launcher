@@ -161,7 +161,11 @@ check("...and the name, the reuse pick and the rebase base stay out of it",
 const SPENT = JSON.parse(
   (src.match(/const SESSION_FORM_SPENT = (\[[\s\S]*?\]);/) || [, "[]"])[1]);
 check("the issue body is spent by its launch, beside the task it belongs to",
-      SPENT, ["name", "resume", "task", "context", "issue_text"]);
+      SPENT, ["name", "note", "resume", "task", "context", "issue_text"]);
+check("a created session clears its note on the form too (claunch-zy9yk)",
+      /if \(f\.note\) f\.note\.value = "";/.test(submit), true);
+check("...and sends a written note with the launch",
+      /body\.note = f\.note\.value\.trim\(\);/.test(src), true);
 check("a created session clears it on the form",
       /f\.issue_text\.value = "";/.test(submit), true);
 check("...and says so, since the modal's restore would otherwise put it back",
@@ -304,6 +308,8 @@ function el(tag, cls, text) {
 }
 function spawnParent() { return state.parent(); }
 function spawnRecall() { return state.recall; }
+function readNewFormDraft() { return state.draft || null; }
+function saveNewFormDraft() { state.draftSaves = (state.draftSaves || 0) + 1; }
 function connectCandidate(m) { return state.candidate(m); }
 function renderRoleStance() {}
 function applySpawnModelRecall() { state.calls.push("model-recall"); }
@@ -357,6 +363,7 @@ Object.assign(exports, {
   modal: () => sessionModal, picked: (v) => { sessionConnectPicked = v; },
   handles: () => sessionConnectHandles, wfPicked: () => newWfPicked,
   pending: () => pendingNewMesh, parked: () => pendingWorktreeMode,
+  park: (v) => { pendingWorktreeMode = v; },
 });`
 )(
   ctx, $, { createElement: node, addEventListener() {}, removeEventListener() {} },
@@ -546,6 +553,48 @@ async function main() {
   check("a row already off its default keeps the answer it holds",
         [form.worktree_mode.value, ctx.parked(),
          calls.includes("worktree-sync")], ["existing", "", false]);
+  // The New tab's draft (claunch-9em4k) is the newer answer: it records an
+  // empty Role and "no worktree" too, so the launch record must not fill
+  // those rows over it. The spawn tab keeps answering from the record.
+  const viewBefore = form._sessionView;
+  form._sessionView = { mode: "new", modes: ["new", "spawn"], parent: "", source: null };
+  form.role = picker([["(no role)", ""], ["worker", "worker"]]);
+  form.worktree_mode = { value: "" };
+  state.recall = { role: "worker", worktree_mode: "new" };
+  state.draft = { role: "", worktree_mode: "" };
+  ctx.recall(form);
+  check("a kept New-tab draft outranks the launch record",
+        [form.role.value, ctx.parked()], ["", ""]);
+  // A #/new reload: the restore parks the draft's mode before the worktree
+  // list exists, then openNewSession runs this recall. The parked answer
+  // must survive it, and the draft's own mode is parked when nothing is.
+  form.worktree_mode = { value: "" };
+  state.draft = { worktree_mode: "new" };
+  ctx.park("new");
+  calls.length = 0;
+  ctx.recall(form);
+  check("a mode the reload's restore parked survives the opening's recall",
+        [ctx.parked(), calls.includes("worktree-sync")], ["new", true]);
+  ctx.park("");
+  ctx.recall(form);
+  check("...and the draft's mode is parked when nothing was",
+        ctx.parked(), "new");
+  form.worktree_mode = { value: "new" };
+  ctx.park("");
+  ctx.recall(form);
+  check("...but not when the row already holds it", ctx.parked(), "");
+  ctx.park("");
+  form.worktree_mode = { value: "" };
+  state.draft = { role: "", worktree_mode: "" };
+  form._sessionView = { mode: "spawn", modes: ["spawn"], parent: "lead", source: null };
+  ctx.recall(form);
+  check("...and the spawn tab still answers from the launch record",
+        form.role.value, "worker");
+  state.draft = null;
+  form._sessionView = viewBefore;
+  form.worktree_mode = { value: "" };
+  check("a closed box writes the draft again from what it put back",
+        /saveNewFormDraft\(\);\s*\}$/.test(slice("sessionModalClose")), true);
 
   /* ---- the rows only a child has: mesh, connect, the run refusal -------- */
   form.mesh.value = "";

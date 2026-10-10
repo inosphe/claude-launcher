@@ -14,7 +14,8 @@
    successful POST settles the card (a refused one re-enables the button);
    approving hands the gap to the same "restarting the daemon" notice the
    web button shows; Extend moves the deadline without settling anything and
-   retires itself once the budget is spent; a settled or gone request retires
+   stays available however often it was pressed (claunch-mm8zv); the asker's
+   reason is printed on the card; a settled or gone request retires
    the card; and a stray click anywhere on the card decides nothing. Time and the network
    belong to the harness, so none of it is waited for. */
 const fs = require("fs");
@@ -175,6 +176,13 @@ function build(opts) {
     // have to exist.
     "refreshNewWorktree", "refreshProjects", "ensureControlSocket",
     "refreshCflow2Rail",
+    // The poll's batch also reads the window strip (termwindow_check).
+    "refreshTermWindow",
+    // and the timer line (termtimers_check).
+    "refreshTermTimers",
+    // The first boot restores the New tab's draft before it routes
+    // (newformdraft_check).
+    "restoreNewFormDraft",
     code +
     "\nreturn {notify, dismissNotice, noticeClock, setDaemonOnline, " +
     "refreshRestartGate, pollOnce, boot," +
@@ -189,6 +197,10 @@ function build(opts) {
     () => {}, () => {}, () => {}, () => {},
     () => {}, () => {}, () => {},
     () => {},   // refreshCflow2Rail (the rail's v2 line; railcflow2_check)
+
+    () => {},   // refreshTermWindow (the header's window strip; termwindow_check)
+    () => {},   // refreshTermTimers (the timer line; termtimers_check)
+    async () => {},   // restoreNewFormDraft (newformdraft_check)
   );
 
   return { api, nodes, clock, gate, apiCalls, daemon,
@@ -200,7 +212,7 @@ function pending(rec) {
   return { id: "g1", session: "s9",
            requested_at: new Date(clockBase()).toISOString(),
            deadline: new Date(clockBase() + 300000).toISOString(),
-           status: "pending", extensions: 0, max_extensions: 2,
+           status: "pending", extensions: 0,
            ...(rec || {}) };
 }
 const clockBase = () => 1700000000000;
@@ -402,27 +414,57 @@ const clockBase = () => 1700000000000;
     await w.api.refreshRestartGate();
     check("the countdown repaints from the moved deadline",
           /auto-approves in 10:00/.test(w.said()), w.said());
-    check("and the card says how much of the budget is spent",
-          /extended 1\/2/.test(w.said()), w.said());
+    check("and the card says how often it was extended",
+          /extended 1×/.test(w.said()), w.said());
     check("the button comes back for the second press",
           extend.disabled === false, extend.disabled);
   })();
 }
 
-/* --- extend: the last press retires the button -------------------------- */
+/* --- extend: no press is the last one ----------------------------------- */
 {
   const w = build();
-  w.gate.rec = pending({ extensions: 2 });
+  // An old daemon still sends max_extensions; the card must not read it.
+  w.gate.rec = pending({ extensions: 9, max_extensions: 2 });
   (async () => {
     await w.api.refreshRestartGate();
     const actions = w.strip()[0].children.find((c) => c.className.includes("gate-actions"));
     const extend = actions.children.find((b) => b.className.includes("gate-extend"));
-    check("a spent budget disables the button", extend.disabled === true, extend.disabled);
-    check("and says so rather than offering more time",
-          extend.textContent === "extended", extend.textContent);
-    check("while Approve and Reject stay live",
-          actions.children.filter((b) => b.disabled).length === 1,
+    check("the tenth press is still offered", extend.disabled === false, extend.disabled);
+    check("under its ordinary label", extend.textContent === "+5 min", extend.textContent);
+    check("and the count is shown without a ceiling",
+          /extended 9×/.test(w.said()) && !/9\/2/.test(w.said()), w.said());
+    check("no button is disabled",
+          actions.children.filter((b) => b.disabled).length === 0,
           actions.children.map((b) => [b.textContent, b.disabled]));
+  })();
+}
+
+/* --- the asker's reason is printed in full ------------------------------ */
+{
+  const w = build();
+  const reason = "the daemon serves older code than master: 3 merges are not served\n" +
+                 "78d0b42 merge: s933-daemon-restart-slow";
+  w.gate.rec = pending({ reason });
+  (async () => {
+    await w.api.refreshRestartGate();
+    check("the card prints the reason", w.said().includes(`reason: ${reason}`), w.said());
+    check("on its own line, not folded into the countdown",
+          w.strip()[0].children.some((c) => c.className.includes("gate-reason")
+                                         && c.textContent === `reason: ${reason}`),
+          w.said());
+    w.gate.rec = pending({ reason: "a newer reason" });
+    await w.api.refreshRestartGate();
+    check("and repaints it from the record", /reason: a newer reason/.test(w.said()), w.said());
+  })();
+}
+{
+  const w = build();
+  w.gate.rec = pending();
+  (async () => {
+    await w.api.refreshRestartGate();
+    check("a request without a reason says it gave none",
+          /reason: \(the request gave none\)/.test(w.said()), w.said());
   })();
 }
 

@@ -162,7 +162,7 @@ const response = (body, ok = true, status = 200) => ({
 
   /* The header's visibility, which is what the reader sees first. */
   const hdr = {};
-  for (const id of ["term-status", "term-resume", "term-rebrief", "term-kill",
+  for (const id of ["term-status", "term-resume", "term-rebrief", "term-retro", "term-kill",
                     "term-pause", "term-archive"]) {
     const classes = new Set();
     hdr[id] = { textContent: "", className: "", classes,
@@ -196,6 +196,16 @@ const response = (body, ok = true, status = 200) => ({
   badge.setStatusBadge("exited");
   check("an archived paused record keeps kill and resume",
         shown(), ["term-kill", "term-resume"]);
+  // rebrief and retro type into a live terminal: on an exited one there is
+  // nobody to read them (claunch-ygbsd).
+  check("an exited header hides rebrief and retro",
+        ["term-rebrief", "term-retro"].map((id) => hdr[id].classes.has("hidden")),
+        [true, true]);
+  badge.setSessions([{ name: "s1", status: "idle" }]);
+  badge.setStatusBadge("idle");
+  check("a live header shows rebrief and retro",
+        ["term-rebrief", "term-retro"].map((id) => hdr[id].classes.has("hidden")),
+        [false, false]);
 
   console.log(failures ? `\n${failures} failure(s)` : "all kill state checks passed");
   process.exit(failures ? 1 : 0);

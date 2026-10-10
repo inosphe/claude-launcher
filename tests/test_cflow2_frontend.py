@@ -101,8 +101,8 @@ def test_task_fields_and_defaults():
             prompt: hello ${data.x}
             done_when: done
             verify: "pytest -q"
-            executor: [headless, inline]
-            needs: [headless.run]
+            executor: [headless, session, inline]
+            needs: [session.spawn]
             returns: {ok: {files: list, note: "str?"}, fail: {reason: str}}
             effects: [fs.write]
             paths: ["src/**"]
@@ -114,7 +114,9 @@ def test_task_fields_and_defaults():
     """), source="t.yaml", resolve_include=lambda n: None)
     w = chart.node("work")
     assert w.type == ir.T_TASK and w.label == "work" and w.parent == "body"
-    assert w.executor == ["headless", "inline"] and w.needs == ["headless.run"]
+    # headless was removed from the engine (claunch-xjbrh): skipped with a warning
+    assert w.executor == ["session", "inline"] and w.needs == ["session.spawn"]
+    assert any("headless" in x and "removed" in x for x in chart.warnings)
     assert w.budget == {"seconds": 60, "usd": 1.5}
     assert w.get("prompt") == "hello ${data.x}"  # value refs untouched
     assert w.get("returns") == {"ok": {"files": "list", "note": "str?"}, "fail": {"reason": "str"}}

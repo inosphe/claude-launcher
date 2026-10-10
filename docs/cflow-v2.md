@@ -11,7 +11,7 @@ v1(`src/claude_launcher/cflow/`)과 병행한다.
 | 런타임 | v1과 별도 런타임. v1 엔진·상태 디렉터리를 공유하지 않는다 | 사용자 선택 |
 | IR | 표면 문법과 실행 사이에 IR을 둔다. IR은 계층적 statechart(SCXML 계열)다 | ANALYSIS-6 |
 | 재귀 | 같은 런 안의 재귀 호출은 금지한다. `call`은 컴파일 시점에 펼친다 | 사용자 결정 |
-| 실행 주체 | `inline`, `subagent`, `headless`, `session` 네 가지. 첫 단계에서 넷 다 지원한다 | 사용자 결정 |
+| 실행 주체 | `inline`, `subagent`, `session` 세 가지. 첫 단계에서 지원하던 `headless`는 claunch-xjbrh에서 제거했다(6.4) | 사용자 결정 |
 | capability | 실행 주체가 기대는 하네스·provider 기능을 원자 단위로 정의하고 `~/.claunch.yaml`의 provider에서 기술한다. 기능에 따라 갈라지는 모든 경로에 fallback을 정의한다 | 사용자 결정, 6절 |
 | 정의 | 첫 v2 정의는 `improv-worker-v2`. v1 정의는 deprecated 표시 후 유지한다 | 사용자 선택 |
 
@@ -124,7 +124,7 @@ nodes:
       ${frag:no-premature-rebase}
     done_when: 범위의 구현이 커밋으로 존재한다
     verify: "uv run --no-sync pytest -q tests/test_x.py"
-    executor: inline                  # 또는 선호 순서 목록 [headless, subagent, inline]
+    executor: inline                  # 또는 선호 순서 목록 [session, subagent, inline]
     needs: [tools.restrict]           # 실행 주체에 추가로 요구하는 capability
     returns:
       ok:   {files: list, summary: str}
@@ -431,6 +431,15 @@ body:
   골격 프로시저(시도 → 실패 처리)가 이것으로 만들어진다.
 - 노드 id는 호출의 접두(`<호출 id>/`)를 갖는다. 같은 작업이 여러 호출에 쓰여도 id가
   겹치지 않는다(결과는 라벨로 모인다).
+- 표시 라벨: 상태(`flow_status`의 `tasks`·`choices`·`asks` 등), 위임 brief,
+  질문 기록이 싣는 `label`은 노드의 라벨이 차트에서 하나뿐이면 그대로이고, 둘 이상의
+  노드가 같은 라벨을 가지면(같은 프로시저를 여러 곳에서 호출) 노드 id의 경로 구간마다
+  그 구간이 가리키는 작성자 id를 앞에 붙인다(`settle/end-decision/ask-pose`).
+  생성된 접미사(`issue-decision.call`)는 그것이 붙은 작성자 id(`issue-decision`)로
+  읽고, 작성자 노드가 없는 생성 경로(`body.0`)는 붙지 않는다. 노드를 참조로 받는
+  호출(`flow_report`·`flow_select`·질문 승인)은 노드 id와 라벨로 찾지 못한 참조를 표시
+  라벨로 한 번 더 찾는다. 결과와 방문 수는 여전히 노드 자신의
+  라벨 아래에 모인다(claunch-tm5ki).
 - `default`: 블록 param의 기본 트리는 프로시저 자신의 텍스트이므로 splice 위치에서
   프로시저의 범위로 컴파일하고 실행한다 — 프로시저의 작업, 그 자리를 감싸는
   프로시저의 반복, 프로시저의 `$params`. splice 노드는 호출 기록(`call`)을 갖지 않는다.
@@ -1157,7 +1166,7 @@ status, run, workflow, declared, how?}}`가 실린다(아직 없으면 `how`가 
 이름이 다시 쓰이면 `side(NAME).live`가 참으로 읽힌다.
 
 **데몬 통지.** side slot(`<세션>+<이름>`)과 그 아래 중첩 런의 통지(ask, monitor)와
-세션 조회(headless의 실행 환경, session 위임의 부모)는 slot의 세션 이름(`+`·`~` 앞)으로
+세션 조회(session 위임의 부모)는 slot의 세션 이름(`+`·`~` 앞)으로
 간다 — 그 세션이 side 런의 드라이버다.
 
 **검사.**
@@ -1699,7 +1708,13 @@ wait 노드에는 `undecided_max`가 붙는다.
 - 반복 상한: `loop.max`(`retry`·`foreach`의 `max` 포함)는 반복에 한 번 들어갈
   때마다의 회차 상한이다. 반복을 다시 들어가면 다시 0부터 센다. 상한에 닿았는데
   조건이 계속을 요구하면 그 반복 인스턴스가 `waiting_approval`(reason `loop_limit`)로
-  멈춘다(`claunch cflow2 extend`).
+  멈춘다(`claunch cflow2 extend`). 사람의 답은 세 가지다. `--by N`(웹 「Allow one
+  more」는 1)은 상한을 N만큼 올린다. `--reset`(웹 「Reset the count」, 본문
+  `reset: true`)은 회차 수를 0으로 되돌려 반복이 선언된 `max`만큼 다시 돌게 하고,
+  그때까지 올린 상한은 버린다. 반복의 위치는 유지된다: `foreach`는 다음 항목부터
+  이어 가고, `retry`의 `attempt`와 모은 값은 그대로다. 한 회차도 돌지 않은 상한
+  (항목 수가 `max`보다 많은 병렬 `foreach`)에는 `--reset`을 거절한다. `--stop`은
+  그 반복을 `fail`로 끝낸다.
 - 방문 상한: 방문 수는 노드별로 런 전체에서 센다. 차트 최상위 `max_visits`(기본
   200)를 넘는 진입은 그 노드의 본문이 시작되기 전에 멈추고, 런은
   `waiting_approval`(reason `visit_limit`)가 된다. 사람이
@@ -1857,8 +1872,8 @@ v1 툴과 이름이 겹치지 않도록 `flow_` 접두어를 쓴다.
   새 입력 앞에 합쳐 유지한다. 에이전트는 자기 run에 검사를 더할 수 있고, 사람이 준
   검사를 뺄 수는 없다. 사람의 CLI `start --force`는 주어진 입력만 쓴다.
 - `flow_delegate` 제출: `subagent` 위임은 런의 드라이버만, `session` 위임은 배정된
-  자식 세션(`assignee`, 없으면 `child`)만 제출한다. `headless` 결과와 데몬이 가져온
-  영수증은 데몬 내부 함수(`runtime.executor_submit`)로만 들어온다. 중첩 위임 런으로
+  자식 세션(`assignee`, 없으면 `child`)만 제출한다. 데몬이 가져온 자식의 영수증
+  파일은 데몬 내부 경로로만 들어온다. 중첩 위임 런으로
   실행되는 위임은 어느 경로로도 제출을 받지 않는다(데몬 내부 함수 포함). 결과는
   중첩 런이 끝날 때만 돌아온다. 브리프 조회는 드라이버와 담당 세션이 할 수
   있다.
@@ -1877,15 +1892,11 @@ v1 툴과 이름이 겹치지 않도록 `flow_` 접두어를 쓴다.
 | `subagent.parallel` | 하위 에이전트 여럿을 동시에 띄울 수 있다 | `par`·`group` + `subagent` |
 | `subagent.tools.restrict` | 하위 에이전트의 도구를 제한할 수 있다 | 읽기 전용 위임 |
 | `subagent.worktree` | 하위 에이전트를 별도 git worktree에서 실행할 수 있다 | 쓰기 효과가 있는 병렬 위임 |
-| `headless.run` | 비대화형으로 프롬프트 하나를 실행하고 끝나는 프로세스를 띄울 수 있다 | `headless` 실행 주체 |
-| `headless.output.schema` | 비대화형 실행의 최종 출력을 JSON 스키마로 강제할 수 있다 | 구조화 반환 |
-| `headless.output.json` | 비대화형 실행의 출력을 기계가 읽는 JSON으로 받을 수 있다 | 반환 추출 |
-| `headless.tools.restrict` | 비대화형 실행의 도구를 허용·금지 목록으로 제한할 수 있다 | 읽기 전용 위임 |
-| `headless.sandbox.readonly` | 비대화형 실행을 파일시스템 읽기 전용 샌드박스로 띄울 수 있다 | 읽기 전용 위임 |
-| `headless.budget.usd` | 비대화형 실행에 비용 상한을 줄 수 있다 | `budget.usd` |
-| `headless.resume` | 끝난 비대화형 실행을 이어서 재개할 수 있다 | `retry`의 이어하기 |
 | `mcp.claunch` | 실행 주체 안에서 claunch MCP 툴을 부를 수 있다 | `flow_delegate`로 결과 제출 |
 | `session.spawn` | claunch spawn으로 자식 세션을 만들 수 있다(데몬·정책 기능) | `session` 실행 주체 |
+
+`headless.*` 일곱 개는 `headless` 실행 주체와 함께 제거했다(claunch-xjbrh). 설정에
+남아 있는 `headless.*` 키는 경고 없이 무시한다(`caps.REMOVED_FAMILIES`).
 
 ### 6.2 기술 위치와 합성
 
@@ -1904,27 +1915,17 @@ capability는 세 층에서 기술하고 아래 순서로 합성한다. 뒤의 �
 providers:
   ds4-provider-official:
     capabilities:
-      headless.output.schema: false     # 이 백엔드는 구조화 출력을 지원하지 않음
+      mcp.claunch: false                # 이 백엔드에서는 claunch MCP를 쓰지 않음
     harness_options:
       claude:
         capabilities:
           subagent.parallel: false
 ```
 
-값은 `true`, `false`, 또는 매핑 `{enabled: bool, args: [...]}`이다. `args`는
-그 기능을 켤 때 하네스 명령에 붙일 인자 템플릿이다(`{schema}`, `{schema_file}`,
-`{tools}`, `{deny}`, `{usd}`, `{session_id}` 치환). `{tools}`·`{deny}`에 목록을 주면
-쉼표로 잇는다. `true`만 적은 층은 같은 하네스의 아래 층 `args`를 그대로 쓴다.
-
-인자가 있어야 동작하는 capability가 있다: `headless.run`, `headless.output.schema`,
-`headless.output.json`, `headless.tools.restrict`, `headless.sandbox.readonly`,
-`headless.budget.usd`, `headless.resume` (`caps.NEEDS_ARGS`). 합성 결과가 켜져
-있는데 `args`가 비어 있으면(예: 하네스가 선언하지 않은 `headless.sandbox.readonly`를
-프로필에서 `true`로만 켬) 그 capability는 꺼진 것으로 바뀌고 합성 경고
-「enabled without args」가 남는다. 플래그 없는 경로가 선택되어 읽기 전용·스키마·
-비용 상한이 실제로는 걸리지 않는 일을 막기 위해서다. 그래서 `strict_budget`은
-이 경우 그 실행 주체를 건너뛴다. `subagent.*`, `mcp.claunch`, `session.spawn`은
-하네스·데몬의 기능이라 인자가 없어도 된다.
+값은 `true`, `false`, 또는 매핑 `{enabled: bool, args: [...]}`이다. 남은
+capability는 모두 하네스·데몬의 기능이라 `args`를 읽지 않는다(하네스 명령에 인자를
+붙이던 것은 제거된 `headless.*`뿐이었다). `true`만 적은 층은 아래 층의 `args`를
+그대로 보존한다.
 
 기술되지 않은 capability는 `false`로 본다.
 
@@ -1938,34 +1939,9 @@ providers:
 | `subagent.parallel` | true | false | false | false | false |
 | `subagent.tools.restrict` | true | false | false | false | false |
 | `subagent.worktree` | true (`isolation: worktree`) | false | false | false | false |
-| `headless.run` | true (`-p`) | true (`exec`) | true (`-p`) | true (`-p`) | false |
-| `headless.output.schema` | true (`--json-schema`) | true (`--output-schema`) | false | false | false |
-| `headless.output.json` | true (`--output-format json`) | true (`--json`) | true (`--mode json`) | false | false |
-| `headless.tools.restrict` | true (`--tools` + `--disallowedTools` + `--permission-mode dontAsk` + `--strict-mcp-config`) | false | true (`--tools`) | false | false |
-| `headless.sandbox.readonly` | false | true (`-s read-only`) | false | false | false |
-| `headless.budget.usd` | true (`--max-budget-usd`) | false | false | false | false |
-| `headless.resume` | true (`--resume`) | false | false | false | false |
 | `mcp.claunch` | true | true | false | false | false |
 | `session.spawn` | 데몬 정책(`spawn.*`)으로 결정 | 같음 | 같음 | 같음 | 같음 |
 
-- `headless.output.schema`의 인자 형식은 하네스마다 다르다. claude의
-  `--json-schema`는 스키마 JSON 문자열을 직접 받고(`{schema}`), codex의
-  `--output-schema`는 파일 경로를 받는다(`{schema_file}`).
-- `headless.run` 인자: claude `-p`, codex는 하위 명령 `exec`, pi `-p`, devin `-p`.
-- `headless.tools.restrict`는 도구를 **제거**하는 플래그만 쓴다(claude 2.1.291,
-  pi `--help`로 확인). claude: `--tools <목록>`이 쓸 수 있는 내장 도구 집합을 정하고
-  (나머지는 없음), `--disallowedTools <목록>`이 이름으로 금지한다(`{deny}`:
-  Edit, Write, MultiEdit, NotebookEdit, Bash). `--allowedTools`는 나열한 도구를
-  자동 승인할 뿐 다른 도구를 없애지 않으므로 쓰지 않는다. `--permission-mode dontAsk`는
-  미리 승인되지 않은 도구 호출을 묻지 않고 거부한다(`--print`에서는 아무도 답하지
-  않는다). `--strict-mcp-config`를 `--mcp-config` 없이 주면 MCP 서버가 하나도 뜨지
-  않는다(MCP 도구는 `--tools` 대상이 아니다). pi: `--tools <목록>`은 내장·확장·사용자
-  도구 전체에 대한 허용 목록이고 pi에는 권한 확인 단계가 없다. 읽기 전용 허용
-  목록(`{tools}`)은 claude `Read, Grep, Glob, WebFetch, WebSearch`, pi
-  `read, grep, find, ls`이다(`executors.READONLY_TOOLS`).
-- `headless.resume`: codex(`codex exec resume <id>`, `exec`를 대체하는 하위 명령),
-  pi(`--session <id>`), devin(`-r <id>`)에도 재개 수단이 있으나 연결하지 않았으므로
-  기본값은 `false`다.
 - 값과 인자는 `src/claude_launcher/harnesses.yaml`의 `capabilities:` 블록이 정본이다.
 
 `claunch cflow2 caps [--profile P]`가 합성 결과와 각 값의 출처 층을 보여 준다.
@@ -1980,25 +1956,24 @@ providers:
 capability에도 기대지 않으므로 마지막 경로는 항상 존재한다.
 
 위임 서브트리가 평탄하지 않으면(task·seq 이외의 제어 구조를 포함) 플래너
-(`caps.plan_node(node, caps, flat=False)`)가 `headless`를 항상 건너뛰고,
-`mcp.claunch`가 꺼져 있으면 `subagent`·`session`도 건너뛴다. 건너뛴 사유는
+(`caps.plan_node(node, caps, flat=False)`)는 `mcp.claunch`가 꺼져 있으면
+`subagent`·`session`을 건너뛴다. 건너뛴 사유는
 `subtree not flat`으로 `fallback` 이벤트에 남는다.
+
+`executor` 목록에 `headless`가 있으면 컴파일러가 경고를 남기고 그 항목을 뺀다.
+제거 전에 시작된 런의 위임 기록이 `headless`로 남아 있으면 clock이 노드의 다음
+실행 주체로 넘기고 `fallback`(`headless -> <다음>`)을 남긴다.
 
 | 실행 주체 | 필요 조건 | 조건이 깨졌을 때 |
 |---|---|---|
-| `headless` | `headless.run` | 목록의 다음 항목 |
-| `subagent` | `subagent.spawn` | 목록의 다음 항목 |
 | `session` | `session.spawn` (데몬이 정책으로 판정) | 목록의 다음 항목 |
+| `subagent` | `subagent.spawn` | 목록의 다음 항목 |
 | `inline` | 없음 | — |
 
 **반환값 수집.**
 
 | 조건 | 경로 |
 |---|---|
-| headless + `headless.output.schema` | 스키마를 하네스에 넘긴다(codex는 파일 경로, claude는 JSON 문자열). 출력 JSON을 그대로 반환값으로 쓴다 |
-| headless, schema 없음, `headless.output.json` | 프롬프트에 반환 형식을 적고, JSON 출력의 최종 텍스트에서 마지막 ```json 블록을 추출해 스키마로 검증한다 |
-| headless, 둘 다 없음 | 텍스트 출력에서 마지막 ```json 블록을 추출해 검증한다 |
-| 추출·검증 실패 | 오류를 실어 같은 실행 주체로 1회 재실행. 다시 실패하면 `delegate_failed`, 노드 결과는 `fail` |
 | subagent + `mcp.claunch` | 하위 에이전트가 `flow_delegate`로 직접 제출. 엔진이 스키마 검증 |
 | subagent, `mcp.claunch` 없음 | 하위 에이전트가 영수증 파일(`receipts/<id>.json`)을 쓰고, 드라이버가 `flow_delegate`로 그 경로를 제출. 엔진이 파일을 읽어 검증 |
 | session | 자식 세션이 `flow_delegate`로 제출(자식이 claunch 세션이므로 MCP가 있다). 없으면 영수증 파일 |
@@ -2007,30 +1982,22 @@ capability에도 기대지 않으므로 마지막 경로는 항상 존재한다.
 
 | 실행 주체 | 1순위 | 2순위 | 3순위 |
 |---|---|---|---|
-| headless | `headless.sandbox.readonly` | `headless.tools.restrict`로 쓰기 도구 제거 | 위임 시점 tip에 detach한 일회용 worktree에서 실행하고, 끝난 뒤 미커밋 변경을 버린다(쓰기는 일어나도 반영되지 않음) |
 | subagent | `subagent.tools.restrict` | `subagent.worktree` | 브리프에 읽기 전용 규칙을 적고, 끝난 뒤 `git status --porcelain`이 위임 전과 같은지 검사. 다르면 `monitor_violation` |
 | session | 자식 세션의 worktree | — | — |
-
-headless 2순위(샌드박스·worktree 없이 실행 디렉터리에서 실행)는 시도마다 프로세스가
-끝난 직후 `git status --porcelain`을 위임 전과 비교한다. 다르면 `monitor_violation`
-(kind `readonly`)을 남기고 위임을 `fail`로 끝낸다(사유에 바뀐 줄). 결과 값은 쓰지
-않는다. 이 비교는 gitignore 대상 파일과 저장소 밖 쓰기를 보지 못한다. 3순위에서
-일회용 worktree를 만들 수 없으면(git 저장소가 아님 등) 실행 디렉터리에서 실행하지
-않고 노드의 다음 실행 주체로 넘긴다.
 
 **쓰기 효과가 있는 병렬 위임.**
 
 | 조건 | 경로 |
 |---|---|
 | 분기들의 `paths`가 서로 겹치지 않음(정적 검사) | 그대로 병렬 |
-| 겹치거나 `paths` 미선언, 실행 주체가 worktree 격리 가능(headless: 일회용 worktree, subagent: `subagent.worktree`, session: 항상) | 분기마다 worktree에서 실행하고 결과 브랜치를 순서대로 머지 |
+| 겹치거나 `paths` 미선언, 실행 주체가 worktree 격리 가능(subagent: `subagent.worktree`, session: 항상) | 분기마다 worktree에서 실행하고 결과 브랜치를 순서대로 머지 |
 | 격리 불가 | 직렬 실행(`settle` 의미는 유지) |
 
 **병렬 실행 수.**
 
 | 조건 | 경로 |
 |---|---|
-| headless | 데몬이 프로세스를 동시에 띄운다. 상한은 `daemon.cflow2_headless_max`(기본 3) |
+| session | 데몬이 분기마다 자식 세션을 띄운다 |
 | subagent + `subagent.parallel` | 드라이버에게 한 번에 여러 개를 띄우라고 지시 |
 | subagent, 병렬 없음 | 직렬. `race`는 선언 순서대로 실행해 첫 성공에서 멈춘다 |
 
@@ -2038,31 +2005,19 @@ headless 2순위(샌드박스·worktree 없이 실행 디렉터리에서 실행)
 
 | 조건 | 경로 |
 |---|---|
-| `budget.seconds` | 모든 실행 주체에서 데몬이 벽시계 시간으로 강제한다(headless는 프로세스 종료, subagent·session은 드라이버에게 중단 통지 후 `timeout` 결과) |
-| `budget.usd` + `headless.budget.usd` | 하네스 인자로 전달 |
-| `budget.usd`, 기능 없음 | 강제하지 않고 `fallback` 이벤트에 「비용 상한 미강제」를 남긴다. 노드에 `strict_budget: true`가 있으면 그 실행 주체를 건너뛴다 |
+| `budget.seconds` | 모든 실행 주체에서 데몬이 벽시계 시간으로 강제한다(드라이버에게 중단 통지 후 `timeout` 결과) |
+| `budget.usd` | 비용 상한을 강제하는 실행 주체가 없다. 강제하지 않고 `fallback` 이벤트에 「비용 상한 미강제」를 남긴다. 노드에 `strict_budget: true`가 있으면 그 실행 주체를 건너뛴다 |
 
 **재시도 이어하기.**
 
 | 조건 | 경로 |
 |---|---|
-| `retry.carry: resume` + `headless.resume` | 이전 실행을 `--resume`으로 이어서 실패 사유를 전달 |
-| 그 밖 | 새 실행에 이전 결과의 요약(`carry`)만 실어 보낸다 |
+| 모든 경우 | 새 실행에 이전 결과의 요약(`carry`)만 실어 보낸다. `carry: resume`은 끝난 실행을 재개할 수단이 없어 요약으로 내려가고 `fallback`을 남긴다 |
 
 ### 6.5 데몬 실행기의 수명
 
 데몬의 cflow2 clock(`daemon/cflow2_clock.py`)과 실행기(`daemon/cflow2_exec.py`)가
 지키는 규칙이다.
-
-**headless 프로세스.**
-
-| 상황 | 처리 |
-|---|---|
-| 시도 시작 | 프로세스가 뜬 직후 위임 기록의 `runner`에 `pid`, `argv0`, `attempt`를 저장한다 |
-| 데몬 종료(shutdown) | 정지 이벤트를 먼저 세운다. 실행 중 프로세스 그룹을 죽이고, 그 시도는 실패로 세지 않고 위임을 `queued`로 되돌린다(`attempts` 그대로, `delegate_interrupted` 이벤트). 2차 시도는 시작하지 않는다 |
-| 다음 부팅 | 다른 boot가 잡은 `running` 기록: 기록된 pid가 없으면 `queued`로 한 번 되돌린다. pid가 살아 있고 `/proc/<pid>/cmdline`으로 같은 프로그램임이 확인되면 그 그룹을 죽인 뒤 되돌린다. 살아 있으나 확인할 수 없으면 예산 시간이 지날 때까지 기다린다. 다시 실행하는 시도 번호는 저장된 `attempts` 다음부터다 |
-| 런 종료·중단, 위임 취소(par 정리, timeout) | 매 tick 끝에 해당 프로세스 그룹을 죽이고 `delegate_killed`를 남긴다. 위임은 런타임이 이미 `cancelled`로 바꿔 둔 상태이며 실행기는 더 쓰지 않는다 |
-| halt 모니터 | 프로세스 그룹을 죽이고 위임을 `queued`로 되돌린다(`attempts` 그대로). halt가 풀릴 때까지 새로 띄우지 않는다 |
 
 **session 자식.**
 
@@ -2122,8 +2077,8 @@ fallback하게 한다.
 
   | 하위 트리 | 실행 방식 | 실행 주체 |
   |---|---|---|
-  | 평탄함(task·seq만, 루트 아래에 `on`·`bind`·`ensures` 없음) | 브리프 하나, 결과 제출 하나. `ok` 결과는 하위 작업의 verify가 통과해야 받아들인다(2.2) | `headless`, `subagent`, `session` |
-  | 그 밖(loop, cond, choose(agent), par, try, on, ensures 등) | 중첩 위임 런 | `subagent`, `session`. `headless`는 건너뛰고 다음 선호로 간다(`fallback`) |
+  | 평탄함(task·seq만, 루트 아래에 `on`·`bind`·`ensures` 없음) | 브리프 하나, 결과 제출 하나. `ok` 결과는 하위 작업의 verify가 통과해야 받아들인다(2.2) | `session`, `subagent` |
+  | 그 밖(loop, cond, choose(agent), par, try, on, ensures 등) | 중첩 위임 런 | `session`, `subagent`(`mcp.claunch`가 있을 때) |
   | `chooser: user` 선택이나 `ask`가 있음 | 위임하지 않음. 그 자리에서 실행하고 `fallback`을 남긴다(정적 검사 오류이기도 하다) | `inline` |
 
 - 중첩 위임 런: 엔진이 같은 디렉터리에 scope `<scope>~<위임 id>`로 새 런을 시작한다.
@@ -2137,15 +2092,16 @@ fallback하게 한다.
   `fail`로 끝난다. 상위 런에서 위임이 취소되면(취소 경로 4.2) 중첩 런도 abort된다.
   결과 전달은 중첩 런을 끝낸 호출이 잠금을 놓은 뒤 하고, 놓친 경우 상위 런의
   `flow_status`가 다시 전달한다.
-- `headless`: 데몬이 하네스의 비대화형 명령을 프로필 환경으로 실행한다. 표준
-  출력은 `receipts/<id>.out`에 저장된다. 결과는 `runtime.executor_submit`으로 들어온다.
 - `subagent`: 드라이버가 `flow_status`에서 브리프를 받아 하네스의 하위 에이전트
   기능으로 실행하고 결과를 `flow_delegate`로 제출한다(중첩 런이면 하위 에이전트가
   그 런을 진행한다).
 - `session`: 데몬이 자식 세션을 spawn하고 브리프를 오프닝 태스크로 준다. 자식
   세션은 상위 런의 `scope`·`cwd`를 지정해 `flow_delegate`로 제출하거나(평탄),
   중첩 런을 진행한다. 다른 실행 주체로 재배정되면 `assignee`가 지워져 이전 자식의
-  제출은 거절된다.
+  제출은 거절된다. 자식의 `$CLAUNCH_SESSION`은 상위 런의 scope와 다르므로, 런의
+  기록(저널, 커밋, 회차 보고서)을 읽거나 쓰는 명령은 그 scope를 명시해야 한다
+  (`-t`/`--session <scope>`). 오프닝 태스크(`executors.session_task`)가 이것을
+  안내한다.
 
 ## 8. 명세(spec)
 
@@ -2225,8 +2181,8 @@ spec:
   - 그 밖의 API: `GET /api/cflow2/runs`(v2 런 목록), `GET /api/cflow2/definition?name`
     (컴파일 트리, 검사 결과, 시작 입력 선언, 읽기 전용. `name`은 정의 이름만 받고
     경로면 400), `POST /api/cflow2/select`(사용자 선택, `caller=user`),
-    `POST /api/cflow2/extend`(`loop_limit` 응답, 본문에 `visits: true`면
-    `visit_limit` 응답), `POST /api/cflow2/nudge | abort | archive | report | move`
+    `POST /api/cflow2/extend`(`loop_limit` 응답: `by`·`reset`·`stop`, 본문에
+    `visits: true`면 `visit_limit` 응답이며 `reset`은 400), `POST /api/cflow2/nudge | abort | archive | report | move`
     (사람의 조작, 2.11). v2 런만 있는 슬롯에서 `GET /api/cflow/run`은 `v2: true`를
     싣는다. 런 상세의 `chart.nodes[*].force_target`은 강제 이동 대상 표시다.
   - `GET /api/cflow2/node?cwd&scope&node=<id>`(`daemon/cflow2_web.node_detail`): 런
@@ -2482,6 +2438,6 @@ PR은 닫고 브랜치는 지웠다.
 |---|---|
 | 1 | IR, 표면 문법 컴파일러, 식 해석기, 정적 명세 검사, capability 합성과 fallback 계획 |
 | 2 | 런타임(상태, advance, 저널), MCP 툴, CLI |
-| 3 | 실행 주체: inline, subagent, headless, session |
-| 4 | 데몬 연동(대기 probe, timer, 실행 시간 모니터, headless 프로세스), API, 웹 화면 |
+| 3 | 실행 주체: inline, subagent, session (headless는 claunch-xjbrh에서 제거) |
+| 4 | 데몬 연동(대기 probe, timer, 실행 시간 모니터, session 자식), API, 웹 화면 |
 | 5 | `improv-worker-v2` 정의, v1 deprecated 표시 |

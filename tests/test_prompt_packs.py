@@ -35,7 +35,7 @@ CHILD = (
 # --------------------------------------------------------------------------- #
 def test_the_catalog_ships_the_packs_and_the_default_packs():
     ids = [p.id for p in prompt_packs.catalog()]
-    assert {"beads", "child-agents", "common", "unreal-operator"} <= set(ids)
+    assert {"beads", "child-agents", "common", "korean-replies", "unreal-operator"} <= set(ids)
     # Every pack the default role mapping names ships, so a role's guidance
     # never depends on a workspace having installed it.
     for packs in prompt_packs.DEFAULT_ROLE_PACKS.values():
@@ -117,14 +117,14 @@ def test_role_packs_default_save_and_clear(home):
 
 def test_default_packs_are_the_constant_until_saved(home):
     assert prompt_packs.default_packs() == prompt_packs.DEFAULT_PACKS == [
-        "asking-the-user", "common",
+        "asking-the-user", "common", "korean-replies",
     ]
     assert prompt_packs.set_default_packs(["beads", "common", "beads"]) == ["beads", "common"]
     assert prompt_packs.set_default_packs([]) == []
     with pytest.raises(prompt_packs.PackError):
         prompt_packs.set_default_packs(["Bad Id"])
     assert prompt_packs.default_packs() == []
-    assert prompt_packs.set_default_packs(None) == ["asking-the-user", "common"]
+    assert prompt_packs.set_default_packs(None) == ["asking-the-user", "common", "korean-replies"]
 
 
 def test_a_default_header_in_a_pack_file_means_nothing(home):
@@ -398,8 +398,8 @@ def test_settings_routes_install_remove_and_save_the_mapping(home, tmp_path):
         try:
             doc = await (await client.get("/api/prompt-packs", headers=BEARER)).json()
             assert doc["role_packs"] == prompt_packs.DEFAULT_ROLE_PACKS
-            assert doc["default_packs"] == ["asking-the-user", "common"]
-            assert doc["shipped_default_packs"] == ["asking-the-user", "common"]
+            assert doc["default_packs"] == ["asking-the-user", "common", "korean-replies"]
+            assert doc["shipped_default_packs"] == ["asking-the-user", "common", "korean-replies"]
             assert "unreal" in doc["roles"]
             row = next(w for w in doc["workspaces"] if w["name"] == "proj")
             assert {p["id"]: p["status"] for p in row["packs"]}["beads"] == "missing"
@@ -429,7 +429,7 @@ def test_settings_routes_install_remove_and_save_the_mapping(home, tmp_path):
                                           "default_packs": ["beads"]})
             assert resp.status == 400
             # The bad half refused the good half too.
-            assert prompt_packs.default_packs() == ["asking-the-user", "common"]
+            assert prompt_packs.default_packs() == ["asking-the-user", "common", "korean-replies"]
             resp = await client.put("/api/prompt-packs/role-packs", headers=BEARER,
                                     json={"role_packs": {"worker": ["beads"]},
                                           "default_packs": ["beads"]})
@@ -583,6 +583,75 @@ def test_the_unreal_subrole_forces_its_pack(home, tmp_path):
     asyncio.run(run())
 
 
+def test_prompter_selection_reaches_create_and_spawn_and_survives_restore(home, tmp_path, monkeypatch):
+    from claude_launcher.daemon import prompter, session_reminder
+
+    _register_py_harness()
+    ws = tmp_path / "proj"
+    ws.mkdir()
+    workspaces.add(str(ws), "proj")
+    prompter.set_url("https://p.example")
+
+    async def fetch(url, kind):
+        assert kind == "context"
+        return {"connected": True, "error": "", "contexts": [
+            {"id": 7, "name": "guidance", "title": "Guidance", "body": "SERVER RULE"},
+            {"id": 8, "name": "excluded", "title": "", "body": "UNSELECTED RULE"},
+        ]}
+
+    monkeypatch.setattr(prompter, "_fetch", fetch)
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        client = await _serve(mgr, MeshManager(mgr, root=tmp_path / "mesh"))
+        seen, restore = _spy_openings()
+        try:
+            payload = {"profile": "py", "cwd": str(ws), "task": "TASK", "beads": False,
+                       "prompt_packs": ["common"],
+                       "prompter_contexts": {"url": "https://p.example", "ids": [7]}}
+            for name, endpoint in [("p1", "/api/sessions"), ("p2", "/api/sessions/p1/children")]:
+                requested = {**payload, "name": name}
+                if name == "p2":
+                    for inherited in ("profile", "cwd"):
+                        requested.pop(inherited)
+                resp = await client.post(endpoint, headers=BEARER, json=requested)
+                assert resp.status == 201, await resp.json()
+                opening = seen[name]
+                assert opening.index("prompt pack: common") < opening.index("SERVER RULE") < opening.index("TASK")
+                assert "UNSELECTED RULE" not in opening
+                assert "from the configured prompter server" in opening
+                sdef = mgr.get(name).sdef
+                assert SessionDef.from_dict(sdef.to_dict()).prompt_packs == sdef.prompt_packs
+                assert session_reminder.refresh_packs(mgr.get(name)) == (None, [])
+                texts = rebrief.addressable(name, manager=mgr, mesh_mgr=None)
+                assert any(v["kind"] == "prompt pack (prompter:context:7)" for v in texts.values())
+            bad = {**payload, "name": "bad", "prompter_contexts": {"url": "https://p.example", "ids": [99]}}
+            resp = await client.post("/api/sessions", headers=BEARER, json=bad)
+            assert resp.status == 400
+            assert "unavailable" in (await resp.json())["error"]
+            assert "bad" not in [s.sdef.name for s in mgr.list()]
+            for name, endpoint in [("stale", "/api/sessions"), ("stale-child", "/api/sessions/p1/children")]:
+                stale = {**payload, "name": name,
+                         "prompter_prompts": {"url": "https://p.example", "ids": [7]}}
+                if name == "stale-child":
+                    for inherited in ("profile", "cwd"):
+                        stale.pop(inherited)
+                resp = await client.post(endpoint, headers=BEARER, json=stale)
+                assert resp.status == 400
+                assert "Opening task" in (await resp.json())["error"]
+                assert name not in [s.sdef.name for s in mgr.list()]
+            payload.pop("prompter_contexts")
+            resp = await client.post("/api/sessions", headers=BEARER, json={**payload, "name": "plain"})
+            assert resp.status == 201, await resp.json()
+            assert "SERVER RULE" not in seen["plain"]
+        finally:
+            restore()
+            await mgr.shutdown_all()
+            await client.close()
+            prompter._cache.clear()
+    asyncio.run(run())
+
+
 def test_the_text_route_shows_what_the_opening_would_get(home, tmp_path):
     ws = tmp_path / "proj"
     ws.mkdir()
@@ -637,6 +706,169 @@ def test_the_text_route_shows_what_the_opening_would_get(home, tmp_path):
                 status, doc = await text(bad)
                 assert status == 404, (bad, doc)
         finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# on-demand packs: the retrospective (claunch-ygbsd)
+# --------------------------------------------------------------------------- #
+def test_the_retrospective_ships_as_an_on_demand_pack():
+    pack = prompt_packs.shipped(prompt_packs.RETROSPECTIVE)
+    assert pack.on_demand and pack.delivery == prompt_packs.ON_DEMAND
+    assert pack.to_dict()["delivery"] == "on-demand"
+    # Both halves the task asks for are in the text it sends.
+    assert "세션 회고" in pack.body and "cflow 정의 리뷰" in pack.body
+    assert "claunch retro" in pack.body
+    assert prompt_packs.on_demand_ids() == [prompt_packs.RETROSPECTIVE]
+    # Every other shipped pack is an opening pack and reads as before.
+    assert all(not p.on_demand and "delivery" not in p.to_dict()
+               for p in prompt_packs.catalog() if p.id != "retrospective")
+    assert "retrospective" not in prompt_packs.DEFAULT_PACKS
+    assert not any("retrospective" in v
+                   for v in prompt_packs.DEFAULT_ROLE_PACKS.values())
+
+
+def test_no_setting_may_name_an_on_demand_pack(home):
+    with pytest.raises(prompt_packs.PackError, match="on demand"):
+        prompt_packs.set_default_packs(["common", "retrospective"])
+    assert prompt_packs.default_packs() == prompt_packs.DEFAULT_PACKS
+    with pytest.raises(prompt_packs.PackError, match="on demand"):
+        prompt_packs.set_role_packs({"worker": ["role-worker", "retrospective"]})
+    assert prompt_packs.role_packs() == prompt_packs.DEFAULT_ROLE_PACKS
+
+    # A config written by hand (or before the pack was on-demand) is read
+    # without it, and the rest of the setting survives.
+    store.update(lambda doc: doc.update({"prompt_packs": {
+        "default_packs": ["common", "retrospective"],
+        "role_packs": {"worker": ["role-worker", "retrospective"],
+                       "leader": ["retrospective"]},
+    }}))
+    assert prompt_packs.default_packs() == ["common"]
+    assert prompt_packs.role_packs() == {"worker": ["role-worker"]}
+    assert prompt_packs.required_for(["worker"]) == {"role-worker": ["worker"]}
+
+
+def test_choose_refuses_a_ticked_on_demand_pack(tmp_path):
+    ws = tmp_path / "ws"
+    (ws / ".claunch" / "prompts").mkdir(parents=True)
+    with pytest.raises(prompt_packs.PackError, match="ticked at session creation"):
+        prompt_packs.choose(ws, ["retrospective"], [])
+    # Installed, and even edited to drop the header, it is still claunch's
+    # on-demand pack: which kind a shipped pack is does not move per workspace.
+    prompt_packs.install(ws, "retrospective")
+    (ws / ".claunch" / "prompts" / "retrospective.md").write_text(
+        "---\ntitle: R\n---\nour retro\n", encoding="utf-8")
+    with pytest.raises(prompt_packs.PackError, match="on demand"):
+        prompt_packs.choose(ws, ["common", "retrospective"], [])
+    # A workspace's own pack decides by its own header.
+    (ws / ".claunch" / "prompts" / "house-retro.md").write_text(
+        "---\ntitle: H\ndelivery: on-demand\n---\nlater\n", encoding="utf-8")
+    assert prompt_packs.is_on_demand("house-retro", ws)
+    with pytest.raises(prompt_packs.PackError, match="on demand"):
+        prompt_packs.choose(ws, ["house-retro"], [])
+    # A role mapping that names one is skipped, never a refused create.
+    recs, required = prompt_packs.choose(
+        ws, ["common"], ["worker"], mapping={"worker": ["retrospective", "beads"]})
+    assert [r["id"] for r in recs] == ["common", "beads"]
+    assert required == {"beads": ["worker"]}
+
+
+def test_on_demand_block_sends_the_workspace_copy_and_refuses_opening_packs(tmp_path):
+    block = prompt_packs.on_demand_block(None)
+    assert block.startswith(
+        "---\n# claunch prompt pack: retrospective -- sent on demand to this "
+        "running session, not part of its opening\n")
+    body = prompt_packs.shipped("retrospective").body
+    assert f"text id: {prompt_packs.text_id(body)}" in block
+    assert "claunch's retrospective.md" in block and block.endswith(body)
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    prompt_packs.install(ws, "retrospective")
+    path = ws / ".claunch" / "prompts" / "retrospective.md"
+    path.write_text(path.read_text(encoding="utf-8") + "\nHOUSE STEP\n",
+                    encoding="utf-8")
+    block = prompt_packs.on_demand_block(ws)
+    assert "file: .claunch/prompts/retrospective.md" in block
+    assert block.endswith("HOUSE STEP")
+
+    with pytest.raises(prompt_packs.PackError, match="opening pack"):
+        prompt_packs.on_demand_block(ws, "common")
+
+
+def test_routes_keep_on_demand_packs_out_of_openings_and_send_them_later(home, tmp_path):
+    _register_py_harness()
+    ws = tmp_path / "proj"
+    ws.mkdir()
+    workspaces.add(str(ws), "proj")
+    prompt_packs.install(ws, "retrospective")
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        client = await _serve(mgr, MeshManager(mgr, root=tmp_path / "mesh"))
+        try:
+            doc = await (await client.get("/api/prompt-packs", headers=BEARER)).json()
+            assert doc["on_demand_packs"] == ["retrospective"]
+            # Still installable: it is in the catalog the install grid draws.
+            assert "retrospective" in [p["id"] for p in doc["catalog"]]
+
+            offer = await (await client.get(
+                "/api/prompt-packs/offer", params={"cwd": str(ws)}, headers=BEARER,
+            )).json()
+            assert "retrospective" not in [p["id"] for p in offer["packs"]]
+            assert "retrospective" not in [p["id"] for p in offer["shipped"]]
+            assert "retrospective" not in offer["default_packs"]
+
+            resp = await client.put("/api/prompt-packs/role-packs", headers=BEARER,
+                                    json={"default_packs": ["retrospective"]})
+            assert resp.status == 400
+            resp = await client.put("/api/prompt-packs/role-packs", headers=BEARER,
+                                    json={"role_packs": {"worker": ["retrospective"]}})
+            assert resp.status == 400
+            assert prompt_packs.role_packs() == prompt_packs.DEFAULT_ROLE_PACKS
+
+            resp = await client.post("/api/sessions", headers=BEARER, json={
+                "name": "r0", "profile": "py", "cwd": str(ws), "task": "x",
+                "beads": False, "prompt_packs": ["retrospective"],
+            })
+            assert resp.status == 400
+            assert "on demand" in (await resp.json())["error"]
+            assert "r0" not in [s.sdef.name for s in mgr.list()]
+
+            resp = await client.post("/api/sessions", headers=BEARER, json={
+                "name": "r1", "profile": "py", "cwd": str(ws), "task": "x",
+                "beads": False,
+            })
+            assert resp.status == 201, await resp.json()
+
+            doc = await (await client.get(
+                "/api/sessions/r1/retrospective", headers=BEARER)).json()
+            assert doc["pack"] == "retrospective"
+            assert "file: .claunch/prompts/retrospective.md" in doc["block"]
+
+            typed = []
+
+            async def deliver(text, *a, **kw):
+                typed.append(text)
+                return True
+
+            mgr.get("r1").deliver = deliver
+            resp = await client.post("/api/sessions/r1/retrospective", headers=BEARER)
+            assert (await resp.json())["delivered"] is True
+            assert typed == [doc["block"]]
+            # Sent, not recorded: the session's reminders do not restate it.
+            assert all(r["id"] != "retrospective"
+                       for r in mgr.get("r1").sdef.prompt_packs or ())
+
+            resp = await client.get("/api/sessions/r1/retrospective",
+                                    params={"pack": "common"}, headers=BEARER)
+            assert resp.status == 400
+            resp = await client.get("/api/sessions/ghost/retrospective", headers=BEARER)
+            assert resp.status >= 400
+        finally:
+            await mgr.shutdown_all()
             await client.close()
 
     asyncio.run(run())

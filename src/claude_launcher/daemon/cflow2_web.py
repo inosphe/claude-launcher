@@ -23,6 +23,7 @@ import os
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+from urllib.parse import quote
 
 from ..cflow import state as cflow_state
 from ..cflow2 import ir, layers
@@ -876,6 +877,142 @@ def rail_entries(sessions: Sequence[Tuple[str, str]]) -> Dict[str, dict]:
         if entry is not None:
             out[name] = dict(entry)
     return out
+
+
+def _epoch(value: Any) -> Optional[float]:
+    """Epoch seconds from what ``runtime.status`` carries: a number, or the
+    ``%Y-%m-%dT%H:%M:%SZ`` stamp its ``_iso`` writes for windows."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    import calendar
+    import time as _time
+
+    try:
+        return float(calendar.timegm(_time.strptime(str(value), "%Y-%m-%dT%H:%M:%SZ")))
+    except ValueError:
+        return None
+
+
+def run_timers(payload: dict, scope: str) -> List[dict]:
+    """The countdowns in one ``runtime.status`` payload, as
+    ``session_timers.timer`` dicts (claunch-7dzae):
+
+    - ``hold`` -- a choice picked while its option's ``interval`` window was
+      closed; the daemon applies the pick when ``opens_at`` passes
+      (await-landing's ``nudge``).
+    - ``window`` -- an option whose window is still closed with no pick
+      queued behind it.
+    - ``wait`` -- a ``wait`` node with ``seconds``.
+    - ``pause`` -- a loop's ``every`` pause until ``resume_at``.
+    - ``ask`` -- an ask whose responders have until ``deadline``.
+    """
+    from . import session_timers as st
+
+    out: List[Optional[dict]] = []
+    for c in payload.get("choices") or []:
+        label = c.get("label") or c.get("node") or "choice"
+        held = c.get("held") or {}
+        for o in c.get("options") or []:
+            if not o.get("window_opens_at") or o.get("name") == held.get("option"):
+                continue
+            opens = _epoch(o["window_opens_at"])
+            interval = _num_or_none(o.get("interval"))
+            out.append(st.timer(
+                "cflow2", "window", f"{scope}:{c.get('instance')}:{o.get('name')}",
+                f"{label} · {o.get('name')}", opens,
+                since=(opens - interval) if opens is not None and interval else None,
+                state=st.STATE_CLOSED, scope=scope,
+                detail=f"option {o.get('name')!r} of {label} opens again "
+                       f"(interval {o.get('interval')}s)"))
+        if held:
+            opt = held.get("option")
+            interval = next((o.get("interval") for o in c.get("options") or []
+                             if o.get("name") == opt), None)
+            reason = " ".join(str(held.get("reason") or "").split())
+            opens = _epoch(held.get("opens_at"))
+            span = _num_or_none(interval)
+            # The fill runs over the whole window, as for a closed one; the
+            # pick's own time is only the fallback without an interval.
+            out.append(st.timer(
+                "cflow2", "hold", f"{scope}:{c.get('instance')}:{opt}",
+                f"{label} → {opt}", opens,
+                since=(opens - span) if opens is not None and span else held.get("since"),
+                state=st.STATE_HELD, scope=scope,
+                detail=f"{opt!r} is held until its window opens"
+                       + (f" (interval {interval}s)" if interval else "")
+                       + "; the daemon applies it then"
+                       + (f" -- {reason}" if reason else "")))
+    for w in payload.get("waits") or []:
+        node = w.get("node") or "wait"
+        if w.get("kind") == "pause":
+            out.append(st.timer("cflow2", "pause", f"{scope}:{w.get('instance')}",
+                                f"{node} · every", w.get("resume_at"), state=st.STATE_WAITING,
+                                scope=scope, detail=f"loop {node} resumes"))
+            continue
+        due = w.get("due")
+        seconds = _num_or_none(w.get("seconds"))
+        out.append(st.timer(
+            "cflow2", "wait", f"{scope}:{w.get('instance')}", node, due,
+            since=(due - seconds) if isinstance(due, (int, float)) and seconds else None,
+            state=st.STATE_WAITING, scope=scope,
+            detail=" ".join(str(w.get("describe") or f"wait {node}").split())))
+    for a in payload.get("asks") or []:
+        label = a.get("label") or a.get("node") or "ask"
+        asked = ", ".join(h for h in a.get("asked") or [] if h)
+        out.append(st.timer(
+            "cflow2", "ask", f"{scope}:{a.get('instance')}", f"{label} · ask", a.get("deadline"),
+            state=st.STATE_WAITING, scope=scope,
+            detail=f"ask of {label} moves on past its deadline"
+                   + (f" (asked: {asked})" if asked else "")))
+    return [t for t in out if t]
+
+
+def _num_or_none(value: Any) -> Optional[float]:
+    try:
+        return float(value) if value is not None and not isinstance(value, bool) else None
+    except (TypeError, ValueError):
+        return None
+
+
+#: ``(cwd, scope) -> (stamp, timers)``: every due time is absolute, so a
+#: run's timers change only when its state or chart file does.
+_TIMERS: Dict[Tuple[str, str], Tuple[Any, List[dict]]] = {}
+
+
+def session_timers(cwd: str, session: str) -> List[dict]:
+    """The timers of the v2 runs ``session`` drives in ``cwd``: the main run
+    (scope = the session's name) and its side runs (``<session>+<side>``)."""
+    from ..cflow2 import runtime
+
+    try:
+        scopes = store2.list_scopes(cwd)
+    except OSError:
+        return []
+    out: List[dict] = []
+    for scope in scopes:
+        if scope != session and not scope.startswith(session + "+"):
+            continue
+        key = (cwd, scope)
+        try:
+            stamp = _rail_stamp(cwd, scope)
+        except (OSError, ValueError):
+            continue
+        hit = _TIMERS.get(key)
+        if hit is not None and hit[0] == stamp:
+            out.extend(hit[1])
+            continue
+        try:
+            payload = runtime.status(cwd=cwd, scope=scope, tick=False)
+        except Exception:  # noqa: BLE001 - one unreadable run hides only itself
+            log.exception("cflow2 timers of %s/%s failed", cwd, scope)
+            continue
+        link = "#/wf/" + quote(f"{scope}|{cwd}", safe="")
+        timers = [{**t, "link": link} for t in run_timers(payload, scope)]
+        _TIMERS[key] = (stamp, timers)
+        out.extend(timers)
+    return [dict(t) for t in out]
 
 
 def definition_view(name: str, cwd: str) -> dict:

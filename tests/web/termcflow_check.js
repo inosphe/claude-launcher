@@ -91,7 +91,7 @@ new Function(
   stubs
   + ["askWho", "answerFellToUs", "answerBranchOptions", "sessCflowRun",
      "sessCflowGated", "sessCflowLabel", "sessCflowGateStep", "fmtOpensAt",
-     "termCflowAnswers", "termCflowQuestion", "termCflow2Answers",
+     "termCflowAnswers", "termCflowQuestion", "cf2LimitPresses", "termCflow2Answers",
      "termCflow2Question", "termCflowView", "renderTermCflow"]
     .map(slice).join("\n") + `
 Object.assign(exports, {
@@ -289,7 +289,8 @@ const RUN = {
         ctx.asked().includes("Pick 'hold' for end-decision?"), ctx.asked());
   ctx.reset();
 
-  /* a choice with require_reason asks for it and refuses an empty one */
+  /* require_reason constrains agents; a person may select without a reason,
+     just as on the run page (docs 2.11). */
   ctx.setRail({ s16: { ...ROW, gated: true, owed: ["choose: x"], answers: [
     { kind: "choose", instance: "x@2", label: "x", prompt: "?", require_reason: true,
       options: [{ name: "go" }] }] } });
@@ -297,25 +298,27 @@ const RUN = {
   bs = buttons(strip);
   ctx.setPrompt("  ");
   await bs[0].fire("click");
-  check("v2: an empty required reason sends nothing", ctx.actions().length === 0);
-  ctx.setPrompt(" because ");
-  await bs[0].fire("click");
-  check("v2: the reason rides the select",
-        ctx.actions().length === 1 && ctx.actions()[0][1].reason === "because",
+  check("v2: a person can select without the agent's required reason",
+        ctx.actions().length === 1 && ctx.actions()[0][1].reason === "",
         ctx.actions());
+  check("v2: a choice asks for confirmation, not a required reason",
+        JSON.stringify(ctx.asked()) === JSON.stringify(["Pick 'go' for x?"]), ctx.asked());
   ctx.reset();
 
   /* an ask that fell to a person: its options, the recommendation marked */
   ctx.setRail({ s16: { ...ROW, status: "waiting_approval", gated: true,
     owed: ["ask: land"], answers: [
     { kind: "ask", instance: "land@9", label: "land", prompt: "land it?",
-      require_reason: false, recommended: "approve",
+      require_reason: true, recommended: "approve",
       options: [{ name: "approve" }, { name: "decline" }] }] } });
   ctx.renderTermCflow();
   bs = buttons(strip);
   check("v2: an ask offers its options", bs.map((b) => b.text).join() === "approve,decline");
   check("v2: the recommended option is marked",
         bs[0].classes.has("proposed") && !bs[1].classes.has("proposed"));
+  check("v2: recommendation preserves the run page's green approval style",
+        bs[0].classes.has("approve") && !bs[1].classes.has("approve"));
+  ctx.setPrompt("");
   await bs[1].fire("click");
   check("v2: an ask posts the run page's approve",
         JSON.stringify(ctx.actions()) === JSON.stringify([["/api/cflow2/approve",
@@ -323,22 +326,69 @@ const RUN = {
           "after"]]), ctx.actions());
   ctx.reset();
 
-  /* a loop limit: allow one more / stop */
+  /* a brief ask's reframe always asks for the reason (claunch-omph3): the
+     engine takes a person's answer without one, and reframe re-asks from it.
+     The other options still need none when require_reason is off. */
+  ctx.setRail({ s16: { ...ROW, status: "waiting_approval", gated: true,
+    owed: ["ask: scope"], answers: [
+    { kind: "ask", instance: "scope@4", label: "scope", prompt: "which scope?",
+      require_reason: true,
+      options: [{ name: "narrow" }, { name: "reframe" }] }] } });
+  ctx.renderTermCflow();
+  bs = buttons(strip);
+  check("v2: a brief ask offers reframe", bs.map((b) => b.text).join() === "narrow,reframe",
+        bs.map((b) => b.text));
+  ctx.setPrompt("");
+  await bs[1].fire("click");
+  check("v2: reframe with an empty reason sends nothing", ctx.actions().length === 0,
+        ctx.actions());
+  check("v2: ...and the prompt says what the reason is for",
+        ctx.asked().some((q) => q.includes("reframe: none of the options fits")), ctx.asked());
+  ctx.setPrompt("both miss the migration");
+  await bs[1].fire("click");
+  check("v2: reframe sends its reason with the approve",
+        JSON.stringify(ctx.actions()) === JSON.stringify([["/api/cflow2/approve",
+          { cwd: "/repo", scope: "s16", node: "scope@4", decision: "reframe",
+            reason: "both miss the migration" }, "after"]]), ctx.actions());
+  ctx.reset();
+  ctx.setPrompt("");
+  await bs[0].fire("click");
+  check("v2: require_reason does not block a person's other brief answers",
+        ctx.actions().length === 1 && ctx.actions()[0][1].decision === "narrow"
+          && !ctx.asked().some((q) => q.includes("required")), [ctx.actions(), ctx.asked()]);
+  ctx.reset();
+
+  /* a loop limit: allow one more / reset the count / stop */
   ctx.setRail({ s16: { ...ROW, status: "waiting_approval", gated: true,
     owed: ["loop_limit: round"], answers: [
     { kind: "loop_limit", instance: "round@3", label: "round", count: 5, max: 5 }] } });
   ctx.renderTermCflow();
   bs = buttons(strip);
   check("v2: loop limit presses",
-        bs.map((b) => b.text).join() === "Allow one more,Stop the loop", bs.map((b) => b.text));
+        bs.map((b) => b.text).join() === "Allow one more,Reset the count,Stop the loop",
+        bs.map((b) => b.text));
   check("v2: loop limit question", texts(strip).includes("loop reached its max (5/5)"));
   await bs[0].fire("click");
   await bs[1].fire("click");
+  await bs[2].fire("click");
   check("v2: limit presses post extend",
         JSON.stringify(ctx.actions()) === JSON.stringify([
           ["/api/cflow2/extend", { cwd: "/repo", scope: "s16", node: "round@3", by: 1 }, "after"],
+          ["/api/cflow2/extend", { cwd: "/repo", scope: "s16", node: "round@3", reset: true },
+           "after"],
           ["/api/cflow2/extend", { cwd: "/repo", scope: "s16", node: "round@3", stop: true },
            "after"]]), ctx.actions());
+  ctx.reset();
+
+  /* a loop limit that ran no iteration (a parallel foreach over more items
+     than max) offers no reset: it would stop again at once */
+  ctx.setRail({ s16: { ...ROW, status: "waiting_approval", gated: true,
+    owed: ["loop_limit: fan"], answers: [
+    { kind: "loop_limit", instance: "fan@2", label: "fan", count: 0, max: 3 }] } });
+  ctx.renderTermCflow();
+  check("v2: no reset at count 0",
+        buttons(strip).map((b) => b.text).join() === "Allow one more,Stop the loop",
+        buttons(strip).map((b) => b.text));
   ctx.reset();
 
   /* a visit limit carries visits: true */

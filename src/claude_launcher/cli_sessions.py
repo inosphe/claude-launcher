@@ -28,7 +28,7 @@ import time
 import webbrowser
 from datetime import datetime, timezone
 from typing import List, Optional, Tuple
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 from . import (
     cli_mesh,
@@ -1074,6 +1074,39 @@ def _resolve_session(args: argparse.Namespace) -> Optional[str]:
     return name
 
 
+def _cmd_retro(args: argparse.Namespace) -> int:
+    """Send a session the retrospective prompt pack, or print it.
+
+    The retrospective is an on-demand pack (prompt_packs.ON_DEMAND): never in
+    an opening, sent to a session that is already running. Bare, this types
+    it into the session's terminal -- the person's door for a session whose
+    run did not end normally, so it was never asked by the run's last node.
+    ``--print`` writes the same text to stdout instead and touches nothing:
+    that is how a run's node has the agent read it in its own turn.
+    """
+    name = _resolve_session(args)
+    if not name:
+        return 2
+    path = f"/api/sessions/{quote(name, safe='')}/retrospective"
+    if args.pack:
+        path += "?" + urlencode({"pack": args.pack})
+    try:
+        client = daemon_client.ensure_running()
+        if args.print:
+            print(client.get(path).get("block") or "")
+            return 0
+        doc = client.post(path)
+    except daemon_client.DaemonClientError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if doc.get("delivered"):
+        print(f"sent the {doc.get('pack')} pack to {name!r}")
+        return 0
+    print(f"{name!r} did not take the {doc.get('pack')} pack (session not "
+          "running or not reading input)", file=sys.stderr)
+    return 1
+
+
 def _cmd_deliver_now(args: argparse.Namespace) -> int:
     """Type a session's held backlog into it now, because a person said so.
 
@@ -1293,6 +1326,29 @@ def _cmd_respawn(args: argparse.Namespace) -> int:
 
         return attach_mod.attach(client, info["name"])
     return 0
+
+
+def _cmd_hold(args: argparse.Namespace) -> int:
+    """End a running session's program now and file it as held
+    (claunch-5l35i); attaching to it, a mesh message or a cflow notice wakes
+    it, and ``claunch respawn`` is the manual way back."""
+    client = daemon_client.ensure_running()
+    path = f"/api/sessions/{args.session}/hold"
+    info = client.post(path + ("?force=1" if args.force else ""))
+    if info.get("already_exited"):
+        print(f"session {info['name']!r} has already exited — nothing to hold")
+        return 0
+    print(
+        f"session {info['name']!r} is on hold — it wakes on attach or a "
+        f"message; 'claunch respawn {info['name']}' brings it back by hand"
+    )
+    return 0
+
+
+def _cmd_hold_dispatch(args: argparse.Namespace) -> int:
+    if not _resolve_target(args):
+        return 1
+    return _cmd_hold(args)
 
 
 def _cmd_migrate_session(args: argparse.Namespace) -> int:
@@ -1527,6 +1583,12 @@ def _cmd_kill_session(args: argparse.Namespace) -> int:
             "killed, so resuming the paused sessions no longer brings it "
             f"back. It is still respawnable ('claunch respawn {args.session}')."
         )
+    elif info.get("unheld"):
+        print(
+            f"session {args.session!r} was on hold — it is now filed as "
+            "killed and no longer wakes on attach or a message. It is still "
+            f"respawnable ('claunch respawn {args.session}')."
+        )
     elif info.get("already_exited"):
         code = info.get("exit_code")
         print(
@@ -1612,12 +1674,20 @@ def _cmd_quick_fork(args: argparse.Namespace) -> int:
         body["mesh"] = str(args.mesh).strip()
     if getattr(args, "workflow", None):
         body["workflow"] = str(args.workflow).strip()
+    if getattr(args, "role", None):
+        # The daemon refuses an exclusive role (leader) a live member holds,
+        # and a role with no mesh to hold it in.
+        body["role"] = str(args.role).strip()
+    if getattr(args, "sibling", False):
+        body["sibling"] = True
     info = client.post(f"/api/sessions/{origin}/quick-fork", body)
     child = info["session"]
     got = info.get("quick_fork") or {}
     joined = []
     if got.get("mesh"):
         joined.append(f"mesh {got['mesh']}")
+    if got.get("role"):
+        joined.append(f"role {got['role']}")
     if got.get("workflow"):
         joined.append(f"workflow {got['workflow']}")
     where = got.get("cwd") or "the origin's directory"
@@ -1625,6 +1695,11 @@ def _cmd_quick_fork(args: argparse.Namespace) -> int:
         f"quick-fork {child['name']!r} of {origin!r} started (pid {child.get('pid')}, "
         f"marker {info.get('marker')}) — a copy of its conversation from here"
         + (", in " + " and ".join(joined) if joined else "")
+        + (
+            (f", as a sibling under {got['parent']!r}" if got.get("parent")
+             else ", as a sibling root session")
+            if got.get("sibling") else ""
+        )
         + "."
     )
     # Said every time, not only when it bites: the copy stands in the
@@ -1814,7 +1889,7 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
         if getattr(args, "all", False):
             return _restart_all_instances()
         if getattr(args, "force", False):
-            return _force_replace()
+            return _force_replace(getattr(args, "reason", None) or "")
         # The ordinary path talks to the daemon, so it only works while the
         # daemon is listening. A wedged one cannot be asked anything -- say so
         # here rather than leaving the operator with "did not come up in 15s",
@@ -1842,7 +1917,7 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
         # to below — and the daemon cannot see it, so only the CLI can draw
         # it (see restart_gate's module docstring).
         if os.environ.get("CLAUNCH_SESSION"):
-            return _gated_restart()
+            return _gated_restart(getattr(args, "reason", None) or "")
         # Written first, and this order is the whole fix. Everything below
         # this line runs in a turn that is about to die: the daemon takes
         # every terminal attached to it down, so the print at the end reaches
@@ -1892,7 +1967,7 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
     raise AssertionError(f"unknown daemon action {action!r}")
 
 
-def _gated_restart() -> int:
+def _gated_restart(reason: str = "") -> int:
     """A managed session's restart request, waited out to its outcome.
 
     The ordinary path above stops the daemon on the spot — and with it the
@@ -1918,6 +1993,11 @@ def _gated_restart() -> int:
     answering falls through to this same gate, because then there is
     nothing to force: a session's restart waits here whatever spelling
     asked for it.
+
+    ``reason`` (``--reason``) travels with the request and is printed in
+    full on the web UI's card, so the person deciding can see why the
+    restart is wanted. It is sent only when given: a daemon older than the
+    field ignores it and the request is still filed.
     """
     report = daemon_client.diagnose()
     state = report["state"]
@@ -1939,8 +2019,12 @@ def _gated_restart() -> int:
         # back; the caller re-runs the command.
         print("daemon went away before the request could be filed", file=sys.stderr)
         return 1
+    body = {"session": session}
+    reason = (reason or "").strip()
+    if reason:
+        body["reason"] = reason
     try:
-        resp = client.post("/api/daemon/restart-request", {"session": session})
+        resp = client.post("/api/daemon/restart-request", body)
     except DaemonClientError as exc:
         print(f"could not request the restart: {exc}", file=sys.stderr)
         return 1
@@ -1973,6 +2057,8 @@ def _gated_restart() -> int:
             "(this command waits for the outcome)",
             file=sys.stderr,
         )
+    if reason:
+        print(f"  reason: {reason}", file=sys.stderr)
     poll_secs = 2.0
     try:
         while True:
@@ -2122,7 +2208,7 @@ def _print_wedged(report: dict, confirm: dict) -> None:
     )
 
 
-def _force_replace() -> int:
+def _force_replace(reason: str = "") -> int:
     """Replace a daemon that cannot be asked to leave.
 
     Reserved for the wedged case and never automatic: ending the process
@@ -2154,7 +2240,7 @@ def _force_replace() -> int:
         # can. The wedged branch below has no daemon to host a gate and stays
         # immediate.
         if os.environ.get("CLAUNCH_SESSION"):
-            return _gated_restart()
+            return _gated_restart(reason)
         restart_notice.record_request_from_env(via="cli-force")
         client = daemon_client.restart()
         print(f"daemon restarted at {client.base_url}")
@@ -2264,7 +2350,7 @@ _CONFIG_KEYS = tuple(store.DAEMON_DEFAULTS)
 _LIVE_KEYS = (
     "cflow_reminder", "cflow_reminder_interval",
     "cflow_ping", "cflow_ping_interval", "cflow_ping_message",
-    "cflow_events", "prompter_url", "cflow2_headless_max",
+    "cflow_events", "prompter_url",
     # read by the reposync CLI itself on every sync, never by the daemon
     "reposync_push",
 )
@@ -2730,7 +2816,8 @@ def register(sub) -> None:
         help="a prompt pack to put into its opening (repeatable): the "
         "session's workspace's copy when installed (Settings > Install), "
         "else claunch's own. Packs the role or a subrole requires are added "
-        "without being named",
+        "without being named. An on-demand pack (retrospective) is refused: "
+        "it is sent later with 'claunch retro'",
     )
     p_new.add_argument(
         "--no-daemon-prompt", dest="no_daemon_prompt", action="store_true",
@@ -2875,7 +2962,8 @@ def register(sub) -> None:
         help="a prompt pack to put into its opening (repeatable): the "
         "session's workspace's copy when installed (Settings > Install), "
         "else claunch's own. Packs the role or a subrole requires are added "
-        "without being named",
+        "without being named. An on-demand pack (retrospective) is refused: "
+        "it is sent later with 'claunch retro'",
     )
     p_spawn.add_argument(
         "--no-daemon-prompt", dest="no_daemon_prompt", action="store_true",
@@ -3037,6 +3125,18 @@ def register(sub) -> None:
     )
     p_respawn.set_defaults(func=_cmd_respawn_dispatch)
 
+    p_hold = sub.add_parser(
+        "hold",
+        help="end a running session's program but keep the session; it wakes "
+        "with its conversation on attach or a message",
+    )
+    p_hold.add_argument("-t", dest="session_t", help=argparse.SUPPRESS)
+    p_hold.add_argument("session", nargs="?")
+    p_hold.add_argument(
+        "-f", "--force", action="store_true", help="SIGKILL instead of SIGTERM"
+    )
+    p_hold.set_defaults(func=_cmd_hold_dispatch)
+
     p_send = sub.add_parser(
         "send-keys",
         help="send keys to a session (tmux semantics: Enter, Escape, C-c, ... or literal text)",
@@ -3116,6 +3216,27 @@ def register(sub) -> None:
              "the text when it was given), instead of the whole briefing",
     )
     p_rebrief.set_defaults(func=_cmd_rebrief)
+
+    p_retro = sub.add_parser(
+        "retro",
+        help="send a running session the retrospective prompt pack (review "
+             "its own work and the cflow definition it followed) -- for a "
+             "session whose run did not end normally; --print writes the "
+             "text to stdout instead",
+    )
+    p_retro.add_argument(
+        "session", nargs="?",
+        help="session to send it to (default: $CLAUNCH_SESSION)",
+    )
+    p_retro.add_argument(
+        "--print", action="store_true",
+        help="print the text instead of typing it into the session",
+    )
+    p_retro.add_argument(
+        "--pack", default="",
+        help="another on-demand pack id (default: retrospective)",
+    )
+    p_retro.set_defaults(func=_cmd_retro)
 
     p_flush = sub.add_parser(
         "deliver-now",
@@ -3251,8 +3372,20 @@ def register(sub) -> None:
     )
     p_qf.add_argument(
         "--workflow",
-        help="start the copy on this cflow workflow ('.' = the same one as "
-             "the origin). Default: none",
+        help="start the copy on this cflow workflow ('.' = the pair the "
+             "origin's run declares for a child, default_child_cflow -- not "
+             "the origin's own workflow). Default: none",
+    )
+    p_qf.add_argument(
+        "--role",
+        help="the copy's role in its mesh (requires --mesh). An exclusive "
+             "role (leader) a live member holds is refused. The copy's "
+             "opening says when it differs from the origin's",
+    )
+    p_qf.add_argument(
+        "--sibling", action="store_true",
+        help="place the copy beside the origin, under the origin's parent "
+             "(a root when the origin has none), instead of as its child",
     )
     p_qf.add_argument("-a", "--attach", action="store_true", help="attach to the copy once started")
     p_qf.set_defaults(func=_cmd_quick_fork)
@@ -3361,6 +3494,14 @@ def register(sub) -> None:
                 help="for a daemon that has stopped answering: end its "
                      "process (and its sessions) and start a fresh one -- "
                      "the only way past a lock a wedged daemon still holds",
+            )
+            p.add_argument(
+                "--reason", metavar="TEXT", default=None,
+                help="why the restart is needed. From inside a managed "
+                     "session it travels with the approval request and is "
+                     "shown in full on the web UI's card, so the operator "
+                     "can judge it (e.g. the merges the live daemon does "
+                     "not serve yet). Ignored on the immediate path",
             )
         p.set_defaults(func=_cmd_daemon, action=action)
     p_token = dsub.add_parser("token", help="print the API/web login token")

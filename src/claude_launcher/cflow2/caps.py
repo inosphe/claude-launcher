@@ -1,8 +1,8 @@
 """Atomic capabilities, their layering, and fallback planning (doc 6).
 
 A *capability* is one thing a delegation relies on that a harness, a backend
-or the daemon may or may not provide (``headless.output.schema``,
-``subagent.parallel`` ...). :data:`CAPABILITIES` is the closed list.
+or the daemon may or may not provide (``subagent.parallel``,
+``mcp.claunch`` ...). :data:`CAPABILITIES` is the closed list.
 
 :func:`resolve` composes the value of each for one harness under one
 provider/profile (doc 6.2), lowest layer first::
@@ -22,7 +22,6 @@ route. The runtime journals them as ``fallback`` events and
 
 from __future__ import annotations
 
-import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple, Union
 
@@ -34,36 +33,18 @@ CAPABILITIES: Dict[str, str] = {
     "subagent.parallel": "several sub-agents can run at once",
     "subagent.tools.restrict": "a sub-agent's tools can be restricted",
     "subagent.worktree": "a sub-agent can run in its own git worktree",
-    "headless.run": "a non-interactive process can run one prompt and exit",
-    "headless.output.schema": "a headless run's final output can be forced to a JSON schema",
-    "headless.output.json": "a headless run's output can be machine-readable JSON",
-    "headless.tools.restrict": "a headless run's tools can be allow/deny listed",
-    "headless.sandbox.readonly": "a headless run can be sandboxed read-only on the filesystem",
-    "headless.budget.usd": "a headless run can be given a cost ceiling",
-    "headless.resume": "a finished headless run can be resumed",
     "mcp.claunch": "the executor can call claunch MCP tools",
     "session.spawn": "claunch spawn can create a child session (daemon policy)",
 }
 
-#: Capabilities whose route works only through harness flags: enabled with
-#: an empty ``args`` they would be *selected* and add nothing to the argv
-#: (a read-only route without a sandbox flag, a dollar ceiling nobody
-#: enforces). :func:`resolve` turns such a value off with a warning and
-#: :func:`enabled` treats it as off. The others are features of the harness
-#: itself (the Agent tool, MCP) or of the daemon and take no arguments.
-NEEDS_ARGS = frozenset({
-    "headless.run",
-    "headless.output.schema",
-    "headless.output.json",
-    "headless.tools.restrict",
-    "headless.sandbox.readonly",
-    "headless.budget.usd",
-    "headless.resume",
-})
+#: Capability families of executors the engine no longer has (claunch-xjbrh
+#: removed ``headless``). A config or harness entry still naming one is
+#: skipped without a warning: it is stale, not wrong.
+REMOVED_FAMILIES = ("headless",)
 
 #: The planner's reason for passing over an executor that cannot run a
-#: subtree with control structure (doc 6.4, A2): headless always, and
-#: subagent/session without ``mcp.claunch`` (they cannot drive a nested run).
+#: subtree with control structure (doc 6.4, A2): subagent/session without
+#: ``mcp.claunch`` (they cannot drive a nested run).
 NOT_FLAT = "subtree not flat"
 
 SOURCE_DEFAULT = "default"
@@ -72,7 +53,6 @@ SESSION_SPAWN = "session.spawn"
 
 #: The capability an executor cannot run without (doc 6.4, executor choice).
 EXECUTOR_REQUIRES: Dict[str, Optional[str]] = {
-    ir.EXEC_HEADLESS: "headless.run",
     ir.EXEC_SUBAGENT: "subagent.spawn",
     ir.EXEC_SESSION: SESSION_SPAWN,
     ir.EXEC_INLINE: None,
@@ -111,30 +91,14 @@ CapsLike = Mapping[str, Union[Capability, bool]]
 SOURCE_GIVEN = "given"
 
 
-def usable(capability: Capability, cap_id: str) -> bool:
-    """On, and for a :data:`NEEDS_ARGS` capability, with arguments to add
-    (unless it is a bare bool the caller gave, :data:`SOURCE_GIVEN`)."""
-    if not capability.enabled:
-        return False
-    if cap_id not in NEEDS_ARGS or capability.source == SOURCE_GIVEN:
-        return True
-    return bool(capability.args)
-
-
 def enabled(caps: CapsLike, cap_id: str) -> bool:
-    """Whether ``cap_id`` is on in ``caps`` (Capability values or plain bools).
-
-    A :class:`Capability` that needs arguments (:data:`NEEDS_ARGS`) and has
-    none is off: its route would add nothing to the harness command. Plain
-    bools (tests, hand-written maps) are taken as they are.
-    """
+    """Whether ``cap_id`` is on in ``caps`` (Capability values, their
+    ``to_dict`` form, or plain bools from tests and hand-written maps)."""
     value = caps.get(cap_id) if caps else None
     if isinstance(value, Capability):
-        return usable(value, cap_id)
+        return value.enabled
     if isinstance(value, dict):
-        return usable(Capability(enabled=bool(value.get("enabled")),
-                                 args=list(value.get("args") or []),
-                                 source=str(value.get("source") or SOURCE_DEFAULT)), cap_id)
+        return bool(value.get("enabled"))
     return bool(value)
 
 
@@ -150,6 +114,8 @@ def _apply(out: CapSet, block: Any, source: str) -> None:
         return
     for raw_key, value in block.items():
         key = str(raw_key).strip()
+        if key.split(".", 1)[0] in REMOVED_FAMILIES:
+            continue
         if key not in CAPABILITIES:
             out.warnings.append(f"{source}: unknown capability {key!r} ignored")
             continue
@@ -274,41 +240,9 @@ def resolve(
     for cap_id in CAPABILITIES:
         if cap_id not in out:
             out[cap_id] = Capability(enabled=False, source=SOURCE_DEFAULT)
-        elif not usable(out[cap_id], cap_id) and out[cap_id].enabled:
-            # ``true`` with no args anywhere below it: the route would be
-            # chosen and the harness given no flag (A3). Off, and said so.
-            out.warnings.append(
-                f"{out[cap_id].source}: capability {cap_id!r} enabled without args "
-                f"(no lower layer of harness {harness!r} gives them): treated as disabled")
-            out[cap_id] = Capability(enabled=False, args=[], source=out[cap_id].source)
     ordered = CapSet((k, out[k]) for k in CAPABILITIES)
     ordered.warnings = out.warnings
     return ordered
-
-
-_PLACEHOLDER = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
-
-
-def render_args(capability: Capability, **values: Any) -> List[str]:
-    """The capability's ``args`` with ``{schema}``, ``{schema_file}``,
-    ``{tools}``, ``{deny}``, ``{usd}``, ``{session_id}`` filled in.
-
-    A list value (``tools``, ``deny``) is joined with commas. A disabled
-    capability (or one that needs args and has none) renders no arguments. A placeholder without a value raises ``ValueError``.
-    """
-    if not capability.enabled:
-        return []
-
-    def sub(match: "re.Match[str]") -> str:
-        key = match.group(1)
-        if key not in values or values[key] is None:
-            raise ValueError(f"capability argument needs a value for {{{key}}}")
-        value = values[key]
-        if isinstance(value, (list, tuple)):
-            return ",".join(str(v) for v in value)
-        return str(value)
-
-    return [_PLACEHOLDER.sub(sub, str(arg)) for arg in capability.args]
 
 
 # --- plans -------------------------------------------------------------------
@@ -417,25 +351,23 @@ class NodePlan:
 def need_applies(cap_id: str, executor: str) -> bool:
     """Whether a node's ``needs`` entry constrains ``executor``.
 
-    ``headless.*``/``subagent.*``/``session.*`` constrain only that executor;
+    ``subagent.*``/``session.*`` constrain only that executor;
     any other capability (``mcp.claunch``) constrains every delegating
     executor. ``inline`` is the guaranteed last route and is never skipped.
     """
     if executor == ir.EXEC_INLINE:
         return False
     family = cap_id.split(".", 1)[0]
-    if family in (ir.EXEC_HEADLESS, ir.EXEC_SUBAGENT, ir.EXEC_SESSION):
+    if family in (ir.EXEC_SUBAGENT, ir.EXEC_SESSION):
         return family == executor
     return True
 
 
 def flat_blocks(executor: str, caps: CapsLike) -> bool:
     """Whether ``executor`` cannot run a subtree that is not flat (has
-    control structure beyond task/seq): headless always (one prompt, no
-    engine underneath), subagent/session when ``mcp.claunch`` is off (the
-    delegate cannot drive the nested run through the flow tools)."""
-    if executor == ir.EXEC_HEADLESS:
-        return True
+    control structure beyond task/seq): subagent/session when
+    ``mcp.claunch`` is off (the delegate cannot drive the nested run through
+    the flow tools)."""
     if executor in (ir.EXEC_SUBAGENT, ir.EXEC_SESSION):
         return not enabled(caps, "mcp.claunch")
     return False
@@ -476,19 +408,6 @@ def choose_executor(
 
 def plan_return(executor: str, caps: CapsLike, has_schema: bool) -> ReturnPlan:
     """How the delegate's result comes back (doc 6.4, return values)."""
-    if executor == ir.EXEC_HEADLESS:
-        if has_schema and enabled(caps, "headless.output.schema"):
-            return ReturnPlan("schema-flag", capability="headless.output.schema")
-        degraded = []
-        if has_schema:
-            degraded.append("headless.output.schema unavailable: the result is "
-                            "extracted from the last ```json block and validated")
-        if enabled(caps, "headless.output.json"):
-            return ReturnPlan("json-output+fenced-block", degraded,
-                              capability="headless.output.json")
-        if has_schema:
-            degraded.append("headless.output.json unavailable: extracting from plain text output")
-        return ReturnPlan("text+fenced-block", degraded)
     if executor in (ir.EXEC_SUBAGENT, ir.EXEC_SESSION):
         if enabled(caps, "mcp.claunch"):
             return ReturnPlan("mcp-submit", capability="mcp.claunch")
@@ -501,16 +420,6 @@ def plan_return(executor: str, caps: CapsLike, has_schema: bool) -> ReturnPlan:
 
 def plan_readonly(executor: str, caps: CapsLike) -> ReadonlyPlan:
     """How a read-only delegation is kept read-only (doc 6.4, effects)."""
-    if executor == ir.EXEC_HEADLESS:
-        if enabled(caps, "headless.sandbox.readonly"):
-            return ReadonlyPlan("sandbox-readonly", capability="headless.sandbox.readonly")
-        note = "headless.sandbox.readonly unavailable"
-        if enabled(caps, "headless.tools.restrict"):
-            return ReadonlyPlan("tools-restrict", [f"{note}: write tools denied instead"],
-                                capability="headless.tools.restrict")
-        return ReadonlyPlan("throwaway-worktree", [
-            f"{note} and headless.tools.restrict unavailable: runs in a detached "
-            "throwaway worktree whose changes are discarded"])
     if executor == ir.EXEC_SUBAGENT:
         if enabled(caps, "subagent.tools.restrict"):
             return ReadonlyPlan("tools-restrict", capability="subagent.tools.restrict")
@@ -537,7 +446,7 @@ def plan_parallel(
     """
     if n <= 1:
         return ParallelPlan("parallel")
-    if executor in (ir.EXEC_HEADLESS, ir.EXEC_SESSION):
+    if executor == ir.EXEC_SESSION:
         concurrent, why = True, ""
     elif executor == ir.EXEC_SUBAGENT:
         concurrent = enabled(caps, "subagent.parallel")
@@ -549,7 +458,7 @@ def plan_parallel(
             isolatable = enabled(caps, "subagent.worktree")
             if not isolatable:
                 why = "overlapping writes and subagent.worktree unavailable"
-        else:  # headless: throwaway worktree; session: always its own
+        else:  # session: always its own worktree
             isolatable = True
         if isolatable:
             return ParallelPlan("parallel-isolated-worktrees", concurrent=True, isolate=True,
@@ -577,9 +486,9 @@ def _number(value: Any) -> Optional[float]:
 def plan_budget(executor: str, caps: CapsLike, budget: Optional[dict], strict: bool) -> BudgetPlan:
     """How a node's ``budget`` is enforced (doc 6.4, budget).
 
-    Seconds are always enforced by the daemon's wall clock. Dollars go to
-    the harness flag when the headless executor has ``headless.budget.usd``;
-    otherwise they are unenforced, and ``strict`` blocks the executor.
+    Seconds are always enforced by the daemon's wall clock. No executor
+    enforces dollars: they are unenforced, and ``strict`` blocks the
+    executor.
     """
     budget = budget or {}
     seconds = _number(budget.get("seconds"))
@@ -587,12 +496,7 @@ def plan_budget(executor: str, caps: CapsLike, budget: Optional[dict], strict: b
     if usd is None:
         return BudgetPlan("seconds-only" if seconds is not None else "none",
                           seconds=seconds)
-    if executor == ir.EXEC_HEADLESS and enabled(caps, "headless.budget.usd"):
-        return BudgetPlan("usd-flag", capability="headless.budget.usd",
-                          seconds=seconds, usd=usd, usd_enforced=True)
-    reason = ("headless.budget.usd unavailable" if executor == ir.EXEC_HEADLESS
-              else f"{executor} has no cost ceiling")
-    degraded = [f"{reason}: budget.usd {usd:g} is not enforced"]
+    degraded = [f"{executor} has no cost ceiling: budget.usd {usd:g} is not enforced"]
     # inline is the last route and cannot be skipped, so it is never blocked.
     blocked = bool(strict) and executor != ir.EXEC_INLINE
     if blocked:
@@ -606,11 +510,8 @@ def plan_budget(executor: str, caps: CapsLike, budget: Optional[dict], strict: b
 def plan_retry_carry(executor: str, caps: CapsLike, carry: Optional[str]) -> CarryPlan:
     """How a retry carries the failed attempt (doc 6.4, retry carry)."""
     if carry == "resume":
-        if executor == ir.EXEC_HEADLESS and enabled(caps, "headless.resume"):
-            return CarryPlan("resume", capability="headless.resume")
-        reason = ("headless.resume unavailable" if executor == ir.EXEC_HEADLESS
-                  else f"{executor} cannot resume a finished run")
-        return CarryPlan("summary", [f"{reason}: the retry gets a summary of the last attempt"])
+        return CarryPlan("summary", [f"{executor} cannot resume a finished run: "
+                                     "the retry gets a summary of the last attempt"])
     return CarryPlan("summary")
 
 
@@ -657,7 +558,7 @@ def plan_node(node: ir.Node, caps: CapsLike, flat: bool = True) -> NodePlan:
         missing = _missing_for(executor, caps, needs, flat)
         if missing is None and strict and executor != ir.EXEC_INLINE:
             if plan_budget(executor, caps, budget, True).blocked:
-                missing = "headless.budget.usd"
+                missing = "budget.usd enforcement"
         if missing is None:
             chosen = executor
             break

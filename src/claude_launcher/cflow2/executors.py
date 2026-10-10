@@ -2,13 +2,13 @@
 
 The runtime decides *which* executor a delegation point gets (``caps.plan_node``)
 and owns the delegation record; this module is the hook through which a
-``headless`` or ``session`` delegation is actually started.
+``session`` delegation is actually started.
 
 - ``inline``   -- no dispatch: the driver runs the subtree itself.
 - ``subagent`` -- no dispatch: the driver reads the brief from ``flow_status``
   / ``flow_delegate``, runs it with its harness's sub-agent feature and
   submits the result with ``flow_delegate``.
-- ``headless`` / ``session`` -- need a process the daemon starts. The daemon
+- ``session`` -- needs a child session the daemon starts. The daemon
   registers a dispatcher with :func:`register`; until one is registered
   (stage 3/4 of the plan, or a run driven without a daemon) :class:`InlineFallback`
   turns the delegation into the next executor the node's preference list
@@ -21,7 +21,7 @@ asynchronously and returns the delegation's new status (``queued`` or
 
 **Dispatch availability across processes.** The runtime usually runs in the
 agent's MCP server or the CLI, not in the daemon, so an in-process
-:func:`register` is not what decides whether a ``headless``/``session``
+:func:`register` is not what decides whether a ``session``
 delegation can be served. The daemon's cflow2 clock
 (``daemon/cflow2_clock.py``) writes a heartbeat file every tick
 (:func:`heartbeat_path`: ``<daemon dir>/cflow2_clock.json``) listing the run
@@ -32,28 +32,25 @@ it up on its next tick. A stale or missing heartbeat (no daemon, the clock
 switched off, or a directory no live session stands in) keeps the old
 behaviour: the runtime falls back at once and journals why.
 
-The second half of this module is the harness-independent part of the
-headless executor: the JSON schema handed to a schema flag, the prompt, the
-argv built from capability ``args`` (:func:`build_argv`), and result
-extraction from each return route (:func:`extract_result`). The process
-itself is the daemon's (``daemon/cflow2_exec.py``).
+The second half of this module is the prompt a ``session`` delegate's child
+gets (:func:`build_prompt`, :func:`session_task`). The ``headless`` executor
+(a one-shot harness process) was removed (claunch-xjbrh).
 """
 
 from __future__ import annotations
 
 import json
 import os
-import re
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from . import ir
 
 Dispatcher = Callable[[dict, Any], Optional[str]]
 
 #: Executors that need a dispatcher (a process someone else starts).
-DISPATCHED = (ir.EXEC_HEADLESS, ir.EXEC_SESSION)
+DISPATCHED = (ir.EXEC_SESSION,)
 
 _dispatcher: Optional[Dispatcher] = None
 
@@ -108,7 +105,7 @@ def read_heartbeat(path: Optional[Path] = None) -> Optional[Dict[str, Any]]:
 
 
 def available(cwd: Optional[str] = None, now: Optional[float] = None) -> bool:
-    """Whether a queued ``headless``/``session`` delegation in ``cwd`` will
+    """Whether a queued ``session`` delegation in ``cwd`` will
     be served (see the module docstring)."""
     if _dispatcher is not None:
         return True
@@ -135,7 +132,7 @@ def available(cwd: Optional[str] = None, now: Optional[float] = None) -> bool:
 
 
 def dispatch(delegation: dict, run: Any) -> bool:
-    """Hand a ``headless``/``session`` delegation to the registered dispatcher.
+    """Hand a ``session`` delegation to the registered dispatcher.
 
     Returns ``False`` when nothing is registered in this process (the
     delegation stays ``queued`` for the daemon's clock, which the caller
@@ -169,67 +166,7 @@ class InlineFallback:
 
 
 # ---------------------------------------------------------------------------
-# headless: schema, prompt, argv, result extraction
-
-#: Tools a read-only headless run may use, per harness, for the
-#: ``headless.tools.restrict`` route (``{tools}``: an allow-list without any
-#: write or command tool; the harness args must make it the *available* set,
-#: claude ``--tools``, pi ``--tools``).
-READONLY_TOOLS: Dict[str, List[str]] = {
-    "claude": ["Read", "Grep", "Glob", "WebFetch", "WebSearch"],
-    "pi": ["read", "grep", "find", "ls"],
-}
-
-#: Tools denied by name on the same route (``{deny}``), for a harness whose
-#: args also take a deny list (claude ``--disallowedTools``): a second wall
-#: in case the allow-list flag ever stops removing a tool.
-READONLY_DENY: Dict[str, List[str]] = {
-    "claude": ["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash"],
-    "pi": ["edit", "write", "bash"],
-}
-
-#: Above this many characters the prompt goes to stdin instead of argv.
-ARGV_PROMPT_MAX = 24000
-
-_JSON_TYPES = {"str": "string", "int": "integer", "float": "number", "bool": "boolean",
-               "list": "array", "dict": "object"}
-
-
-def json_schema(returns: Mapping[str, Any]) -> Dict[str, Any]:
-    """A JSON schema for ``{"outcome": ..., "value": {...}}`` from a
-    ``returns`` map (``{outcome: {field: type}}``).
-
-    Written for the strictest consumer (OpenAI structured outputs, which
-    codex's ``--output-schema`` uses): every property is listed in
-    ``required`` and ``additionalProperties`` is false, so a field one
-    outcome does not have, or that is optional, is nullable instead.
-    """
-    outcomes = list(returns or {ir.OUTCOME_OK: {}})
-    if ir.OUTCOME_FAIL not in outcomes:
-        outcomes.append(ir.OUTCOME_FAIL)
-    fields: Dict[str, str] = {}
-    for spec in (returns or {}).values():
-        for name, ftype in (spec or {}).items():
-            fields.setdefault(str(name), str(ftype))
-    props: Dict[str, Any] = {}
-    for name, ftype in fields.items():
-        base = ftype.rstrip("?")
-        jt = _JSON_TYPES.get(base)
-        if jt is None:
-            props[name] = {}
-            continue
-        prop: Dict[str, Any] = {"type": [jt, "null"]}
-        if jt == "array":
-            prop["items"] = {}
-        props[name] = prop
-    value = {"type": "object", "properties": props, "required": list(props),
-             "additionalProperties": False}
-    return {
-        "type": "object",
-        "properties": {"outcome": {"type": "string", "enum": outcomes}, "value": value},
-        "required": ["outcome", "value"],
-        "additionalProperties": False,
-    }
+# the delegate's prompt
 
 
 def return_instruction(returns: Mapping[str, Any]) -> str:
@@ -279,171 +216,6 @@ def build_prompt(brief: Mapping[str, Any], *, errors: Optional[List[str]] = None
     return "\n".join(lines)
 
 
-def _cap(caps: Mapping[str, Any], cap_id: str) -> Any:
-    from . import caps as caps_mod
-
-    value = caps.get(cap_id) if caps else None
-    if isinstance(value, caps_mod.Capability):
-        return value
-    if isinstance(value, dict):
-        return caps_mod.Capability(enabled=bool(value.get("enabled")),
-                                   args=list(value.get("args") or []))
-    return caps_mod.Capability(enabled=bool(value), args=[])
-
-
-def _route(plan: Mapping[str, Any], part: str) -> Optional[str]:
-    sub = plan.get(part) if plan else None
-    return sub.get("route") if isinstance(sub, dict) else None
-
-
-def build_argv(command: List[str], caps: Mapping[str, Any], plan: Mapping[str, Any],
-               prompt: str, *, harness: str = "claude",
-               schema: Optional[Mapping[str, Any]] = None,
-               schema_file: Optional[str] = None,
-               extra_args: Optional[List[str]] = None) -> Tuple[List[str], Optional[str]]:
-    """``(argv, stdin text or None)`` for one headless attempt.
-
-    ``command`` is the harness executable (``[claude]``, ``[codex]`` ...);
-    ``plan`` is the delegation's ``route`` (``caps.NodePlan.to_dict()``).
-    The prompt is the positional argument right after ``headless.run``'s
-    args (so a variadic flag like claude's ``--tools`` cannot swallow
-    it), or stdin when it is too long for a command line.
-    """
-    from . import caps as caps_mod
-
-    argv = list(command) + caps_mod.render_args(_cap(caps, "headless.run"))
-    stdin: Optional[str] = None
-    if len(prompt) > ARGV_PROMPT_MAX:
-        stdin = prompt
-        if harness == "codex":
-            argv.append("-")
-    else:
-        argv.append(prompt)
-    returns = _route(plan, "returns")
-    schema_text = json.dumps(schema) if schema is not None else None
-    if returns == "schema-flag":
-        argv += caps_mod.render_args(_cap(caps, "headless.output.schema"),
-                                     schema=schema_text, schema_file=schema_file)
-    if caps_mod.enabled(caps, "headless.output.json"):
-        argv += caps_mod.render_args(_cap(caps, "headless.output.json"))
-    readonly = _route(plan, "readonly")
-    if readonly == "sandbox-readonly":
-        argv += caps_mod.render_args(_cap(caps, "headless.sandbox.readonly"))
-    elif readonly == "tools-restrict":
-        argv += caps_mod.render_args(_cap(caps, "headless.tools.restrict"),
-                                     tools=READONLY_TOOLS.get(harness, READONLY_TOOLS["claude"]),
-                                     deny=READONLY_DENY.get(harness, READONLY_DENY["claude"]))
-    budget = plan.get("budget") if plan else None
-    if isinstance(budget, dict) and budget.get("usd_enforced") and budget.get("usd") is not None:
-        argv += caps_mod.render_args(_cap(caps, "headless.budget.usd"), usd=f"{float(budget['usd']):g}")
-    argv += list(extra_args or [])
-    return argv, stdin
-
-
-_FENCE = re.compile(r"```json[ \t]*\r?\n(.*?)```", re.S | re.I)
-
-
-def _assistant_text(obj: Any) -> Optional[str]:
-    """The agent text in one JSON event of a JSONL stream, if it is one."""
-    if not isinstance(obj, dict):
-        return None
-    item = obj.get("item")
-    if isinstance(item, dict) and item.get("type") in ("agent_message", "assistant_message"):
-        text = item.get("text")
-        return text if isinstance(text, str) else None
-    msg = obj.get("msg")
-    if isinstance(msg, dict) and msg.get("type") == "agent_message":
-        text = msg.get("message")
-        return text if isinstance(text, str) else None
-    if obj.get("type") == "result" and isinstance(obj.get("result"), str):
-        return obj["result"]
-    message = obj.get("message") if isinstance(obj.get("message"), dict) else obj
-    if message.get("role") == "assistant":
-        content = message.get("content")
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            parts = [c.get("text") for c in content
-                     if isinstance(c, dict) and c.get("type") == "text"
-                     and isinstance(c.get("text"), str)]
-            return "".join(parts) if parts else None
-    return None
-
-
-def final_text(stdout: str, *, json_output: bool) -> Tuple[str, Any]:
-    """``(final text, structured value or None)`` of a headless run's stdout.
-
-    With JSON output: claude ``--output-format json`` is one object whose
-    ``result`` is the final text (and ``structured_output`` the schema-forced
-    value); a JSONL stream (codex ``--json``, pi ``--mode json``) gives the
-    last agent message. Anything unparsable is taken as plain text.
-    """
-    text = stdout or ""
-    if not json_output:
-        return text, None
-    stripped = text.strip()
-    try:
-        doc = json.loads(stripped)
-    except ValueError:
-        doc = None
-    if isinstance(doc, list):
-        results = [d for d in doc if isinstance(d, dict) and d.get("type") == "result"]
-        doc = results[-1] if results else None
-    if isinstance(doc, dict):
-        structured = doc.get("structured_output")
-        if isinstance(doc.get("result"), str):
-            return doc["result"], structured
-        if structured is not None:
-            return "", structured
-        got = _assistant_text(doc)  # a one-event JSONL stream
-        return (got if got is not None else stripped), None
-    last: Optional[str] = None
-    for line in stripped.splitlines():
-        line = line.strip()
-        if not line.startswith("{"):
-            continue
-        try:
-            obj = json.loads(line)
-        except ValueError:
-            continue
-        got = _assistant_text(obj)
-        if got:
-            last = got
-    return (last if last is not None else text), None
-
-
-def _split(doc: Any) -> Tuple[str, Any]:
-    if isinstance(doc, dict) and isinstance(doc.get("outcome"), str):
-        return doc["outcome"], doc.get("value")
-    return ir.OUTCOME_OK, doc
-
-
-def extract_result(stdout: str, *, json_output: bool) -> Tuple[Optional[Tuple[str, Any]], str]:
-    """``((outcome, value) or None, how)`` from a headless run's stdout.
-
-    Tried in order: a structured value from JSON output, the final text as
-    a whole JSON document (what a schema flag yields), the last ```json
-    block of the final text. ``how`` names the step that worked, or why
-    none did.
-    """
-    text, structured = final_text(stdout, json_output=json_output)
-    if structured is not None:
-        return _split(structured), "structured_output"
-    body = (text or "").strip()
-    if body.startswith("{"):
-        try:
-            return _split(json.loads(body)), "json-document"
-        except ValueError:
-            pass
-    blocks = _FENCE.findall(text or "")
-    if blocks:
-        try:
-            return _split(json.loads(blocks[-1])), "fenced-block"
-        except ValueError as exc:
-            return None, f"the last ```json block is not valid JSON: {exc}"
-    return None, "no JSON result found (no JSON document and no ```json block)"
-
-
 def session_task(brief: Mapping[str, Any], *, cwd: str, scope: str, receipt_path: str,
                  mcp: bool = True, receipt_token: Optional[str] = None) -> str:
     """The opening task of a child session running a ``session`` delegation."""
@@ -471,6 +243,10 @@ def session_task(brief: Mapping[str, Any], *, cwd: str, scope: str, receipt_path
             + (" The \"key\" field is required; a receipt without it is refused. Do not "
                "show the key to anyone." if receipt_token else "")
         )
-    shape = (f"The result is {{\"outcome\": ..., \"value\": {{...}}}} matching the declared "
+    shape = (f"This delegation belongs to the run of session {scope!r} in {cwd}: a command "
+             f"that reads that run's records (its journal, commits or round report) names "
+             f"that session explicitly (e.g. -t/--session {scope}), since your own "
+             f"$CLAUNCH_SESSION is not it. "
+             f"The result is {{\"outcome\": ..., \"value\": {{...}}}} matching the declared "
              f"returns: {json.dumps(dict(brief.get('returns') or {}))}. ")
     return build_prompt(brief, result=shape + submit)

@@ -16,6 +16,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 import socket
 import time
@@ -64,6 +65,7 @@ from . import rag as rag_mod
 from . import worktree_inventory
 from . import vscode as vscode_mod
 from . import cflow2_approve, cflow2_web
+from . import session_timers
 from ..cflow2 import expr as cflow2_expr, frontend as cflow2_frontend
 from ..cflow2 import ir as cflow2_ir, runtime as cflow2_runtime, store as cflow2_store
 from ..cflow2 import layers as cflow2_layers
@@ -92,7 +94,7 @@ from . import restart_gate
 from . import restart_notice
 from .harness import HarnessError, SessionDef
 from . import score_goal
-from .manager import ManagerError, SessionManager
+from .manager import MAX_NOTE, ManagerError, SessionManager
 from . import mesh as mesh_mod
 from .mesh import MeshBusy, MeshConflict, MeshError, MeshManager
 from .session import STATUS_IDLE, KeyboardHeld, SessionGone
@@ -232,7 +234,7 @@ async def error_middleware(request: web.Request, handler):
             resp.headers["Retry-After"] = str(int(exc.retry_after))
         return resp
     except (SessionGone, MeshConflict, LockBusy, KeyboardHeld, restart_gate.GateBusy,
-            restart_gate.GateExhausted, goto_gate.GateBusy) as exc:
+            goto_gate.GateBusy) as exc:
         # LockBusy is transient by construction (the other writer is mid-
         # transition), so it gets a retryable status, not a flat 400.
         # KeyboardHeld is transient in the same way, and for the most human
@@ -604,6 +606,7 @@ def build_app(
     r.add_get("/api/prompter", h_prompter_get)
     r.add_put("/api/prompter", h_prompter_set)
     r.add_get("/api/prompter/prompts", h_prompter_prompts)
+    r.add_get("/api/prompter/contexts", h_prompter_contexts)
     r.add_get("/api/status-checks", h_status_checks)
     r.add_post("/api/status-checks", h_status_checks_add)
     r.add_put("/api/status-checks/{check_id}", h_status_checks_update)
@@ -827,11 +830,15 @@ def build_app(
     r.add_post("/api/sessions/{name}/status-checks/refresh", h_session_status_checks_refresh)
     r.add_get("/api/sessions/{name}/briefing", h_session_briefing)
     r.add_get("/api/sessions/{name}/queued", h_session_queued)
+    r.add_get("/api/sessions/{name}/window", h_session_window)
+    r.add_get("/api/sessions/{name}/timers", h_session_timers)
     r.add_post("/api/sessions/{name}/queued/flush", h_session_queued_flush)
     r.add_post("/api/sessions/{name}/queued/hold", h_session_hold)
     r.add_get("/api/sessions/{name}/reminder", h_session_reminder)
     r.add_get("/api/score-goal/defaults", h_score_goal_defaults)
     r.add_put("/api/score-goal/defaults", h_score_goal_defaults_set)
+    r.add_get("/api/role-workflows", h_role_workflows)
+    r.add_put("/api/role-workflows", h_role_workflows_set)
     r.add_get("/api/sessions/{name}/score-goal", h_session_score_goal)
     r.add_post("/api/sessions/{name}/reminder", h_session_reminder_set)
     r.add_post("/api/sessions/{name}/reminder/skip", h_session_reminder_skip)
@@ -847,6 +854,8 @@ def build_app(
     r.add_post("/api/sessions/{name}/handoff", h_session_handoff)
     r.add_delete("/api/sessions/{name}/handoff", h_session_handoff_cancel)
     r.add_post("/api/sessions/{name}/pause", h_session_pause)
+    r.add_post("/api/sessions/{name}/hold", h_session_idle_hold)
+    r.add_post("/api/sessions/{name}/wake", h_session_wake)
     r.add_post("/api/sessions/{name}/archive", h_session_archive)
     r.add_delete("/api/sessions/{name}", h_session_delete)
     r.add_post("/api/sessions/{name}/keep-alive", h_session_keep_alive)
@@ -881,6 +890,8 @@ def build_app(
     # it into the terminal — the operator's push for a session that does not
     # know it needs one.
     r.add_get("/api/sessions/{name}/rebrief", h_session_rebrief)
+    r.add_get("/api/sessions/{name}/retrospective", h_session_retrospective)
+    r.add_post("/api/sessions/{name}/retrospective", h_session_retrospective)
     r.add_post("/api/sessions/{name}/rebrief", h_session_rebrief)
     # The harness telling the daemon which conversation the session is on
     # now — claude's SessionStart hook after /clear mints a new session id
@@ -1705,14 +1716,18 @@ async def h_restart_request_submit(request: web.Request) -> web.Response:
     Called by the CLI when it has recognized its shell as a managed session
     (``CLAUNCH_SESSION``) — the daemon cannot see the caller's environment,
     so the session travels in the body and the CLI is the one that decided it
-    was an agent asking. ``GateBusy`` (a request already pending) escapes to
-    the middleware and comes back as 409.
+    was an agent asking. ``reason`` (optional) is why the restart is needed,
+    shown in full on the web UI's card. ``GateBusy`` (a request already
+    pending) escapes to the middleware and comes back as 409.
     """
     body = await _json_body(request)
     session = str(body.get("session") or "").strip()
     if not session:
         return json_error(400, "session is required")
-    record = request.app["restart_gate"].submit(session=session)
+    reason = body.get("reason")
+    if reason is not None and not isinstance(reason, str):
+        return json_error(400, "reason must be a string")
+    record = request.app["restart_gate"].submit(session=session, reason=reason or "")
     return json_response({"ok": True, "request": record})
 
 
@@ -1743,9 +1758,8 @@ async def h_restart_request_extend(request: web.Request) -> web.Response:
     The gate's default answer belongs to the clock, and this is how somebody
     who is at the page takes it back without having decided: the request
     stays pending, the asking session stays where it was, and both sides read
-    the new deadline off the same record. ``GateExhausted`` (the budget is
-    spent) escapes to the middleware and comes back as 409, because a press
-    that changed nothing must not answer like one that did."""
+    the new deadline off the same record. It may be pressed any number of
+    times (claunch-mm8zv)."""
     record = request.app["restart_gate"].extend(decided_by="web")
     if record is None:
         return json_error(409, "no pending restart request")
@@ -2767,6 +2781,8 @@ def _prompt_packs_doc() -> dict:
         "default_role_packs": prompt_packs.DEFAULT_ROLE_PACKS,
         "default_packs": prompt_packs.default_packs(),
         "shipped_default_packs": prompt_packs.DEFAULT_PACKS,
+        # Shown for install like any pack, kept out of the two settings.
+        "on_demand_packs": prompt_packs.on_demand_ids(),
         "roles": sorted(roleset.roles),
     }
 
@@ -2785,12 +2801,16 @@ async def h_prompt_packs_offer(request: web.Request) -> web.Response:
     ``shipped`` is the package catalog: the form offers those the workspace
     has not installed as boxes too, and one that is ticked or required goes in
     as the shipped copy (prompt_packs.pack_copy), named as such.
+    An on-demand pack (prompt_packs.ON_DEMAND) is in neither list: it is
+    never part of an opening, so the form has nothing to offer for it.
     """
     cwd = cflow_state.resolve_cwd(request.query.get("cwd") or None)
     owner = workspaces.owning(str(cwd))
+    root = Path(owner.path) if owner is not None else None
     packs = (
-        [p.to_dict() for p in prompt_packs.installed(Path(owner.path))]
-        if owner is not None else []
+        [p.to_dict() for p in prompt_packs.installed(root)
+         if not prompt_packs.is_on_demand(p.id, root)]
+        if root is not None else []
     )
     return json_response({
         "cwd": str(cwd),
@@ -2799,7 +2819,8 @@ async def h_prompt_packs_offer(request: web.Request) -> web.Response:
         # Ticked on every opening of the form, installed or not.
         "default_packs": prompt_packs.default_packs(),
         "role_packs": prompt_packs.role_packs(),
-        "shipped": [p.to_dict() for p in prompt_packs.catalog()],
+        "shipped": [p.to_dict() for p in prompt_packs.catalog()
+                    if not p.on_demand],
         # This daemon's own prompt, null when it has none: the form draws it
         # first and ticked, and sends daemon_prompt: false when unticked.
         "daemon_prompt": daemon_prompt.offer(),
@@ -2905,7 +2926,10 @@ async def h_prompt_packs_role_packs(request: web.Request) -> web.Response:
         if body.get("role_packs") is not None:
             prompt_packs.clean_role_packs(body["role_packs"])
         if isinstance(body.get("default_packs"), list):
-            [prompt_packs.check_id(str(i)) for i in body["default_packs"]]
+            prompt_packs.check_offerable(
+                [prompt_packs.check_id(str(i)) for i in body["default_packs"]],
+                "a default pack",
+            )
         if "role_packs" in body:
             prompt_packs.set_role_packs(body["role_packs"])
         if "default_packs" in body:
@@ -3251,6 +3275,15 @@ async def h_prompter_prompts(request: web.Request) -> web.Response:
     refresh = request.query.get("refresh") in ("1", "true", "yes")
     try:
         return json_response(await prompter.prompts(refresh=refresh))
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+
+
+async def h_prompter_contexts(request: web.Request) -> web.Response:
+    """Context snippets for the New/Spawn prompt-pack selection."""
+    refresh = request.query.get("refresh") in ("1", "true", "yes")
+    try:
+        return json_response(await prompter.contexts(refresh=refresh))
     except store.StoreError as exc:
         return json_error(500, str(exc))
 
@@ -4354,7 +4387,22 @@ async def h_cflow_workflows(request: web.Request) -> web.Response:
     # "(daemon cwd)" asks about the workflows it would really see.
     raw = request.query.get("cwd")
     cwd = cflow_state.resolve_cwd(raw)
-    return json_response({"workflows": await asyncio.to_thread(_startable_all, cwd)})
+    return json_response({
+        "workflows": await asyncio.to_thread(_startable_all, cwd),
+        # Settings' per-role auto-pick overrides, served with the list they
+        # pick from so the form and the CLI wizard apply them in one read.
+        "role_workflows": _role_workflows_or_none(),
+    })
+
+
+def _role_workflows_or_none() -> dict:
+    """The overrides, or none when the config file cannot be read: the list
+    is what the picker needs, and an unreadable file must not take it away."""
+    try:
+        return store.role_workflows()
+    except store.StoreError as exc:
+        log.warning("could not read daemon.role_workflows: %s", exc)
+        return {}
 
 
 def _startable_all(cwd: str) -> list:
@@ -4786,11 +4834,12 @@ async def h_cflow2_select(request: web.Request) -> web.Response:
 
 
 async def h_cflow2_extend(request: web.Request) -> web.Response:
-    """Answer a v2 ``loop_limit`` hold: allow ``by`` more iterations, or
-    ``stop`` the loop (it finishes ``fail``). With ``visits: true`` it
-    answers a ``visit_limit`` hold instead (``runtime.extend_visits``: ``by``
-    more visits of the node over the run, or ``stop``). Body: cwd, scope,
-    node (optional with one hold), by, stop, visits."""
+    """Answer a v2 ``loop_limit`` hold: allow ``by`` more iterations,
+    ``reset`` the loop's count (it gets its full ``max`` again), or ``stop``
+    the loop (it finishes ``fail``). With ``visits: true`` it answers a
+    ``visit_limit`` hold instead (``runtime.extend_visits``: ``by`` more
+    visits of the node over the run, or ``stop``; no reset). Body: cwd,
+    scope, node (optional with one hold), by, stop, reset, visits."""
     resolved, err = await _cflow_action_cwd(request)
     if err:
         return err
@@ -4801,12 +4850,17 @@ async def h_cflow2_extend(request: web.Request) -> web.Response:
     except (TypeError, ValueError):
         return json_error(400, "'by' must be a whole number")
     stop = bool(body.get("stop"))
+    reset = bool(body.get("reset"))
+    if reset and body.get("visits"):
+        return json_error(400, "'reset' answers a loop limit, not a visit limit")
     # ``visits: true`` answers a ``visit_limit`` hold (the chart's
     # max_visits) instead of a loop's ``loop_limit``.
-    extend = cflow2_runtime.extend_visits if body.get("visits") else cflow2_runtime.extend_loop
-    payload = await asyncio.to_thread(
-        extend, node, by, stop=stop, cwd=cwd, scope=scope,
-    )
+    if body.get("visits"):
+        extend = functools.partial(cflow2_runtime.extend_visits, node, by, stop=stop)
+    else:
+        extend = functools.partial(cflow2_runtime.extend_loop, node, by, stop=stop,
+                                   reset=reset)
+    payload = await asyncio.to_thread(extend, cwd=cwd, scope=scope)
     payload["nudge_scheduled_sessions"] = await _nudge_sessions(
         request.app["manager"], cwd, scope, NUDGE_CFLOW2_ANSWERED
     )
@@ -7238,7 +7292,7 @@ async def h_sessions_list(request: web.Request) -> web.Response:
     rail_view = request.query.get("view") == "rail"
     list_state = request.query.get("state") or "all"
     if list_state not in {
-        "all", "active", "current", "killed", "paused", "archived",
+        "all", "active", "current", "killed", "paused", "hold", "archived",
     }:
         return json_error(400, f"invalid session list state: {list_state!r}")
     # ``?project=`` narrows the list to one project's sessions; absent means
@@ -7279,6 +7333,8 @@ async def h_sessions_list(request: web.Request) -> web.Response:
         if list_state == "killed" and category != session_mod.CATEGORY_KILLED:
             continue
         if list_state == "paused" and not paused:
+            continue
+        if list_state == "hold" and category != session_mod.CATEGORY_HOLD:
             continue
         if list_state == "archived" and not archived:
             continue
@@ -7624,6 +7680,17 @@ async def _onboard_and_launch(
         except ValueError as exc:
             raise onboard.OnboardError(str(exc)) from None
         session.sdef = replace(session.sdef, score_goal=selected)
+        # The operator's note, written in the form that starts the session
+        # (claunch-zy9yk): the same field and limit as the note endpoint
+        # (manager.set_note), set here so create and spawn both carry it.
+        if "note" in body:
+            raw_note = body.get("note")
+            if raw_note is not None and not isinstance(raw_note, str):
+                raise onboard.OnboardError("'note' must be text")
+            note_text = str(raw_note or "").strip()
+            if len(note_text) > MAX_NOTE:
+                raise onboard.OnboardError(f"a note is at most {MAX_NOTE} characters")
+            session.sdef = replace(session.sdef, note=note_text or None)
         # Inside the discarding try, and before anything is arranged: a board
         # answer that contradicts itself is checkable without a session, and
         # the alternative is a request that half-happens.
@@ -7664,6 +7731,9 @@ async def _onboard_and_launch(
             packs, packs_required = _session_prompt_packs(
                 request, body, plan, name=name, cwd=cwd
             )
+            if body.get("prompter_prompts") is not None:
+                raise prompt_packs.PackError("Prompter prompts belong in Opening task; reopen the form")
+            packs += await prompter.selected_records(body.get("prompter_contexts"))
         except prompt_packs.PackError as exc:
             raise onboard.OnboardError(str(exc)) from None
         if packs:
@@ -8221,6 +8291,11 @@ async def h_sessions_respawn_all(request: web.Request) -> web.Response:
             continue
         if getattr(session, "paused_at", None) and not include_paused:
             continue
+        # A held record is a running session asleep (claunch-5l35i): not
+        # done, so not archived in bulk; and it wakes on use, so a bulk
+        # relaunch would only undo the hold.
+        if getattr(session, "held_at", None):
+            continue
         name = session.sdef.name
         try:
             await manager.respawn_async(name)
@@ -8245,6 +8320,11 @@ async def h_sessions_archive_all(request: web.Request) -> web.Response:
         if not session.exited or session.archived_at:
             continue
         if getattr(session, "paused_at", None) and not include_paused:
+            continue
+        # A held record is a running session asleep (claunch-5l35i): not
+        # done, so not archived in bulk; and it wakes on use, so a bulk
+        # relaunch would only undo the hold.
+        if getattr(session, "held_at", None):
             continue
         name = session.sdef.name
         try:
@@ -8277,6 +8357,43 @@ async def h_score_goal_defaults_set(request: web.Request) -> web.Response:
         return json_error(400, str(exc))
     store.set_daemon_field("score_goal_default", value)
     return json_response({"enabled": value})
+
+
+async def h_role_workflows(request: web.Request) -> web.Response:
+    """Per-role overrides of the workflow the session pickers auto-select
+    (``daemon.role_workflows``), read live from the config file."""
+    try:
+        return json_response({"role_workflows": store.role_workflows()})
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+
+
+async def h_role_workflows_set(request: web.Request) -> web.Response:
+    """Set one role's auto-selected workflow, from the Settings page.
+
+    Body ``{"role": <role>, "workflow": <value>}``: a workflow name,
+    ``v2:<name>``, ``-`` for no auto-pick, or ``""``/null to drop the
+    override and let the workflows' own ``default_role`` decide again. The
+    workflow is not checked against a directory's list: which workflows
+    exist depends on where a session stands, so a picker applies an
+    override only where it is declared and falls back elsewhere.
+    """
+    body = await _json_body(request)
+    try:
+        role = mesh_roles._check_name(body.get("role"), "role")
+    except mesh_roles.RoleError as exc:
+        return json_error(400, str(exc))
+    workflow = body.get("workflow")
+    if workflow is not None and not isinstance(workflow, str):
+        return json_error(400, "'workflow' must be a string or null")
+    workflow = (workflow or "").strip()
+    if workflow and (any(c.isspace() for c in workflow) or len(workflow) > 200):
+        return json_error(400, f"invalid workflow value {workflow!r}")
+    try:
+        store.set_role_workflow(role, workflow or None)
+        return json_response({"role_workflows": store.role_workflows()})
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
 
 
 async def h_session_score_goal(request: web.Request) -> web.Response:
@@ -8623,6 +8740,28 @@ async def h_session_queued(request: web.Request) -> web.Response:
     return json_response(_session_queued(request, _session(request)))
 
 
+async def h_session_window(request: web.Request) -> web.Response:
+    """The measurement window as it concerns this session (claunch-bwzkt):
+    the grant it holds (elapsed, and the remaining time the kept history
+    suggests), the place it waits in the queue and the rule that keeps it
+    there, and the machine's load in a few numbers. Polled by the terminal
+    header's window strip; a read, like ``GET /api/window``."""
+    session = _session(request)
+    return json_response(request.app["window"].session_view(session.sdef.name))
+
+
+async def h_session_timers(request: web.Request) -> web.Response:
+    """Every countdown this session waits on, soonest first (claunch-7dzae):
+    a cflow v2 choice held until its interval window opens, a v2 wait, a
+    loop pause, an ask deadline -- whatever the providers registered in
+    ``session_timers`` report. Polled by the terminal's timer line
+    (#term-timers); a read."""
+    session = _session(request)
+    data = await asyncio.to_thread(
+        session_timers.collect, session.sdef.name, _session_cwd(session), app=request.app)
+    return json_response(data)
+
+
 async def h_session_queued_flush(request: web.Request) -> web.Response:
     """Deliver this session's held backlog now, because a human said so.
 
@@ -8777,9 +8916,14 @@ async def h_session_kill(request: web.Request) -> web.Response:
     session = manager.get(name)  # ManagerError -> 400, as it always did
     if session.exited:
         unpaused = manager.unpause(name)
+        # A held record is filed as killed the same way, and the exit hooks
+        # the hold put off run now (SessionManager.unhold).
+        unheld = manager.unhold(name)
         body = {**session.info(), "already_exited": True}
         if unpaused:
             body["unpaused"] = True
+        if unheld:
+            body["unheld"] = True
         return json_response(body)
     if await _winding_down(request, session, force=force):
         return json_response({**session.info(), "winding_down": True})
@@ -8813,6 +8957,37 @@ async def h_session_pause(request: web.Request) -> web.Response:
     request.app["beads"].winddowns.pop(name, None)
     session = manager.pause(name, force=force)
     return json_response(session.info())
+
+
+async def h_session_idle_hold(request: web.Request) -> web.Response:
+    """Hold a running session now (claunch-5l35i): end its program, keep the
+    session. What the idle clock (``daemon/hold.py``) does on its own after
+    ``hold_idle_minutes``, asked for by hand. No wind-down: nothing is ending
+    for the board. 400 for a session a respawn would bring back blank.
+
+    On an exited session the reply says ``already_exited``, as pause does.
+    """
+    manager: SessionManager = request.app["manager"]
+    name = request.match_info["name"]
+    force = request.query.get("force") in ("1", "true")
+    session = manager.get(name)
+    if session.exited:
+        return json_response({**session.info(), "already_exited": True})
+    session = manager.hold(name, force=force, reason="manual")
+    return json_response(session.info())
+
+
+async def h_session_wake(request: web.Request) -> web.Response:
+    """Bring a held session back now. The manual twin of the wake an attach,
+    a mesh message or a cflow notice does; anything not held is returned as
+    it is (``woken: false``). A killed or paused record is the respawn
+    route's, not this one's."""
+    manager: SessionManager = request.app["manager"]
+    name = request.match_info["name"]
+    before = manager.get(name)
+    held = bool(before.exited and getattr(before, "held_at", None))
+    session = await manager.wake_async(name, by="api")
+    return json_response({**session.info(), "woken": held})
 
 
 async def h_session_delete(request: web.Request) -> web.Response:
@@ -9113,17 +9288,69 @@ async def stage_quick_fork(
     # name, and the inheritance that already exists does the work.
     mesh = str(body.get("mesh") or onboard.NO_MESH)
     workflow = str(body.get("workflow") or onboard.NO_WORKFLOW)
+    role = str(body.get("role") or "").strip()
+    # Sibling: the copy answers to the origin's parent (a root when the origin
+    # is one) instead of the origin. It is still BUILT from the origin -- its
+    # conversation, its directory -- which is what stage_child's place_under
+    # keeps apart.
+    sibling = body.get("sibling") in (True, "true", "1", 1)
+    placed = (origin.sdef.parent or "") if sibling else parent
+    mesh_mgr = _mesh_mgr(request)
+    origin_meshes = mesh_mgr.meshes_for_session(parent)
+    if mesh == ".":
+        # The origin's mesh, read here rather than by inherit_mesh downstream
+        # when it can be named outright: inherit_mesh reads the PARENT's, and
+        # a sibling's parent is not the origin. With none or several the child
+        # keeps the downstream reading (it opens one, or refuses naming them);
+        # a sibling has no such parent to fall back on.
+        if len(origin_meshes) == 1:
+            mesh = origin_meshes[0]["mesh"]
+        elif sibling:
+            if origin_meshes:
+                raise QuickForkError(400, (
+                    f"session {parent!r} is in {len(origin_meshes)} meshes "
+                    f"({', '.join(sorted(m['mesh'] for m in origin_meshes))}) "
+                    "— name the one the copy joins"
+                ))
+            mesh = onboard.NO_MESH
+    if workflow == "." and sibling:
+        # The same pair a child would get (inherit_workflow), read from the
+        # origin's run, because the sibling's parent is not the origin.
+        paired, version = onboard._paired(
+            parent=parent, parent_cwd=origin.sdef.cwd or "",
+            cwd=origin.sdef.cwd or "",
+        )
+        workflow = paired or onboard.NO_WORKFLOW
+        workflow_version = version if paired else 0
+    else:
+        workflow_version = 0
     inherit_mesh = mesh == "."
     inherit_workflow = workflow == "."
+    named_mesh = "" if mesh in (onboard.NO_MESH, ".") else mesh
+    # The origin's role where the copy lands (or, with no mesh, its only one),
+    # and the copy's own: asked for, or what the join will resolve its name to.
+    origin_role = next(
+        (m["role"] for m in origin_meshes if m["mesh"] == named_mesh), ""
+    ) if named_mesh else (
+        origin_meshes[0]["role"] if len(origin_meshes) == 1 and mesh == onboard.NO_MESH else ""
+    )
+    fork_role = role
+    if named_mesh and not fork_role:
+        try:
+            fork_role = mesh_mgr.get(named_mesh).roleset.resolve(name, "")
+        except Exception:
+            fork_role = ""
     opening = handoff_mod.compose_marker(
         origin=parent, fork=name, marker=marker, forked_at=forked_at,
         # The origin's own directory, because a fork cannot be moved out of
         # it. Named in the block so the copy can see what it shares.
         cwd=str(origin.sdef.cwd or ""),
-        # An inherited one is not named here: it is settled downstream, and
-        # the block would be guessing. The join itself tells the copy.
-        mesh="" if mesh in (onboard.NO_MESH, ".") else mesh,
+        # An inherited one the origin's roster could not name is not named
+        # here: it is settled downstream, and the block would be guessing.
+        mesh=named_mesh,
         workflow="" if workflow in (onboard.NO_WORKFLOW, ".") else workflow,
+        role=fork_role, origin_role=origin_role,
+        sibling=sibling, placed_under=placed,
     )
     task = str(body.get("task") or "").strip()
     if task:
@@ -9135,15 +9362,27 @@ async def stage_quick_fork(
         "task": opening,
         "beads": False,
     }
-    if not inherit_mesh:
+    # The "none" spellings are read by the inheritance step, which only runs
+    # for a session with a parent; a root says none by leaving the field out.
+    if not inherit_mesh and (placed or mesh != onboard.NO_MESH):
         spawn_body["mesh"] = mesh
-    if not inherit_workflow:
+    if not inherit_workflow and (placed or workflow != onboard.NO_WORKFLOW):
         spawn_body["workflow"] = workflow
+    if workflow_version == 2:
+        spawn_body["workflow_version"] = 2
+    if role:
+        # Without a mesh preflight refuses it ("only mean something with a
+        # mesh"); with one, it refuses an exclusive role (leader) a live
+        # member already holds -- the authority behind the form's check.
+        spawn_body["role"] = role
     for key, value in (spawn_extra or {}).items():
         spawn_body.setdefault(key, value)
     warnings: list = []
     try:
-        session = manager.stage_child(parent, spawn_body, warnings=warnings)
+        session = manager.stage_child(
+            parent, spawn_body, warnings=warnings,
+            place_under=None if not sibling else placed,
+        )
     except spawn_mod.SpawnDenied as exc:
         raise QuickForkError(403, str(exc)) from None
     except (HarnessError, ValueError, TypeError) as exc:
@@ -9153,7 +9392,9 @@ async def stage_quick_fork(
     if before_launch is not None:
         before_launch(session)
     try:
-        result = await _onboard_and_launch(request, session, spawn_body, parent=parent)
+        result = await _onboard_and_launch(
+            request, session, spawn_body, parent=(placed or None),
+        )
     except onboard.OnboardError as exc:
         raise QuickForkError(400, str(exc)) from None
     except (HarnessError, ValueError, TypeError) as exc:
@@ -9176,6 +9417,10 @@ async def stage_quick_fork(
         # it. A caller that prints one line about this fork should print this.
         "cwd": str(origin.sdef.cwd or ""),
         "shared_checkout": True,
+        # Where the copy hangs: under the origin, or beside it ("" = a root).
+        "sibling": sibling,
+        "parent": placed,
+        "role": fork_role if named_mesh else "",
     }
     if warnings:
         out["warnings"] = warnings
@@ -9664,12 +9909,18 @@ def _opening_image_step(session, images, opening: str):
     """
     done = {"ran": False}
     failed: List[str] = []
+    entry = harness_registry.registry().get(session.sdef.harness or "")
+    marker = (
+        re.compile(entry.image_paste_marker)
+        if entry and entry.image_paste_marker else None
+    )
 
     async def step() -> None:
         if done["ran"]:
             return
         done["ran"] = True
         for img in images:
+            seen = _marker_count(session, marker) if marker else 0
             delivered, _keys, reason = await _deliver_pasted_image(
                 session, img.path, img.media_type
             )
@@ -9679,6 +9930,12 @@ def _opening_image_step(session, images, opening: str):
                     img.path, session.sdef.name, reason,
                 )
                 failed.append(f"- {img.path} ({reason})")
+            elif marker and not await _await_marker(session, marker, seen):
+                log.warning(
+                    "opening image %s for %r: no attachment placeholder "
+                    "within %.0fs; pasting the text anyway",
+                    img.path, session.sdef.name, IMAGE_ATTACH_TIMEOUT,
+                )
         wait = _paste_settle["until"] - asyncio.get_running_loop().time()
         if wait > 0:
             await asyncio.sleep(wait)
@@ -9695,6 +9952,34 @@ def _opening_image_step(session, images, opening: str):
         return "\n\n".join(parts)
 
     return step, text
+
+
+#: How long an opening waits for the harness to show that it took one image
+#: (``image_paste_marker``) before it goes on without that evidence.
+IMAGE_ATTACH_TIMEOUT = 10.0
+
+
+def _marker_count(session, marker) -> int:
+    return sum(len(marker.findall(line)) for line in session.capture())
+
+
+async def _await_marker(session, marker, seen: int) -> bool:
+    """Wait until the screen shows more ``marker`` matches than ``seen``.
+
+    A pasted image is taken after the paste event: Claude Code reads the
+    pasted path and only then draws ``[Image #N]``. Text pasted and submitted
+    before that goes out as a message of its own, and the image is left in an
+    empty composer (claunch-1lfrh). Counting, rather than looking for any
+    match, keeps the second of two images from being satisfied by the first.
+    """
+    deadline = time.monotonic() + IMAGE_ATTACH_TIMEOUT
+    while not session.exited:
+        if _marker_count(session, marker) > seen:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(0.1)
+    return False
 
 
 #: Held across the clipboard write AND the keystroke that reads it back. The
@@ -9728,7 +10013,7 @@ async def _deliver_pasted_image(session, path, media_type: str):
     is "stored, not delivered, because X" -- which the web session line shows
     where the person who pressed the key is looking.
 
-    The path transport sends a file URI in one bracketed paste, which a
+    The path transport sends a path in one bracketed paste, which a
     supporting harness converts into an attachment without the clipboard.
     For the clipboard transport, the image keystroke is a property of the
     harness, so it comes from its declaration (``image_paste_keys``) rather
@@ -9747,8 +10032,11 @@ async def _deliver_pasted_image(session, path, media_type: str):
         # with spaces. Never send Enter: attaching must preserve the draft.
         if not session.screen.bracketed_paste:
             return False, [], "the session is not ready for an image path paste"
+        target = Path(path).resolve()
+        pasted_path = (str(target) if entry.image_paste_path_format == "native"
+                       else target.as_uri())
         try:
-            await session.paste(Path(path).resolve().as_uri(), enter=False)
+            await session.paste(pasted_path, enter=False)
         except Exception as exc:
             return False, [], f"the image path did not reach the session: {exc}"
         return True, [], ""
@@ -10267,6 +10555,37 @@ async def h_session_rebrief(request: web.Request) -> web.Response:
     return json_response({"ok": True, "delivered": delivered, "empty": False})
 
 
+async def h_session_retrospective(request: web.Request) -> web.Response:
+    """The retrospective pack, for a session that is already running.
+
+    An on-demand prompt pack (prompt_packs.on_demand_block): the copy the
+    session's workspace installed, else claunch's. GET returns the text and
+    touches nothing -- a run's last node has the agent pull it with
+    ``claunch retro --print``. POST types it into the session's terminal, the
+    person's door for a session whose run did not end normally. ``?pack=``
+    names another on-demand pack; an opening pack is refused (400).
+    """
+    manager: SessionManager = request.app["manager"]
+    name = request.match_info["name"]
+    session = manager.get(name)
+    pack_id = (request.query.get("pack") or prompt_packs.RETROSPECTIVE).strip()
+    owner = workspaces.owning(str(session.sdef.cwd))
+    try:
+        block = await asyncio.to_thread(
+            prompt_packs.on_demand_block,
+            Path(owner.path) if owner is not None else None,
+            pack_id,
+        )
+    except prompt_packs.PackError as exc:
+        return json_error(400, str(exc))
+    if request.method == "GET":
+        return json_response({"session": name, "pack": pack_id, "block": block})
+    delivered = await session.deliver(block)
+    return json_response(
+        {"ok": True, "session": name, "pack": pack_id, "delivered": delivered}
+    )
+
+
 async def h_session_conversation(request: web.Request) -> web.Response:
     """Record the conversation id the harness says this session is on.
 
@@ -10580,6 +10899,7 @@ async def h_transcripts_list(request: web.Request) -> web.Response:
         "active": session_mod.CATEGORY_RUNNING,
         "killed": session_mod.CATEGORY_KILLED,
         "paused": session_mod.CATEGORY_PAUSED,
+        "hold": session_mod.CATEGORY_HOLD,
         "archived": session_mod.CATEGORY_ARCHIVED,
     }
     if state not in states:

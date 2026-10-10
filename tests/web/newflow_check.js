@@ -90,6 +90,8 @@ const asked = [];
    there, "status" one that is there and busy. Both are the same thing to this
    form — no answer — and neither is a fact about the directory. */
 let failNext = "";
+/* Settings' daemon.role_workflows, served with every list. */
+let overrides = {};
 const api = async (p) => {
   const cwd = decodeURIComponent((p.split("cwd=")[1] || ""));
   asked.push(cwd);
@@ -97,14 +99,15 @@ const api = async (p) => {
   failNext = "";
   if (how === "throw") throw new Error("daemon unreachable");
   if (how === "status") return { ok: false, status: 503, json: async () => ({}) };
-  return { ok: true, json: async () => ({ workflows: FLOWS[cwd] || [] }) };
+  return { ok: true, json: async () => ({ workflows: FLOWS[cwd] || [],
+                                          role_workflows: overrides }) };
 };
 
 let sessions = [];
 const ctx = {};
 new Function(
   "exports", "$", "Option", "api", "meshCache", "sessionsCache",
-  [sliceLet("workflowsCache"), sliceLet("workflowsFor"), sliceLet("newWfPicked"),
+  [sliceLet("workflowsCache"), sliceLet("roleWorkflowsCache"), sliceLet("workflowsFor"), sliceLet("newWfPicked"),
    // the mesh a "#/new/<mesh>" link asks for; syncOnboardPickers reads it
    sliceLet("pendingNewMesh"),
    slice("spawnWorkflowEntry"), slice("spawnWorkflowAdmits"),
@@ -116,6 +119,7 @@ new Function(
 exports.refresh = refreshWorkflowChoices;
 exports.sync = syncOnboardPickers;
 exports.pickedByHand = () => { newWfPicked = true; };
+exports.unpick = () => { newWfPicked = false; };
 exports.cwdOf = newSessionCwd;
 `)(ctx,
    (id) => (id === "new-session" ? form : box_[id] || null),
@@ -195,6 +199,39 @@ async function main() {
   check("...and so does choosing no workflow at all",
         [form.workflow.value,
          box_["new-context-row"].classList.contains("hidden")], ["", true]);
+
+  /* Settings' per-role override (daemon.role_workflows) beats default_role,
+     on a form nobody has touched. */
+  ctx.unpick();
+  overrides = { worker: "chores" };
+  form.cwd.value = "F:/other";
+  await ctx.refresh();
+  form.cwd.value = "F:/repo";
+  form.role.value = "worker";
+  await ctx.refresh();
+  check("a Settings override replaces the role's default_role pick",
+        form.workflow.value, "chores");
+  overrides = { worker: "-" };
+  form.cwd.value = "F:/other";
+  await ctx.refresh();
+  form.cwd.value = "F:/repo";
+  await ctx.refresh();
+  check("the '-' override auto-picks no workflow", form.workflow.value, "");
+  overrides = { worker: "not-here" };
+  form.cwd.value = "F:/other";
+  await ctx.refresh();
+  form.cwd.value = "F:/repo";
+  await ctx.refresh();
+  check("an override this directory does not declare falls back to default_role",
+        form.workflow.value, "hotfix");
+  overrides = { worker: "improv-leader" };
+  form.cwd.value = "F:/other";
+  await ctx.refresh();
+  form.cwd.value = "F:/repo";
+  await ctx.refresh();
+  check("an override the role's filter refuses falls back too",
+        form.workflow.value, "hotfix");
+  overrides = {};
 
   /* A child's workflows are the ones declared where the CHILD will stand.
      The Directory row is greyed for a child whose policy keeps it shut, and

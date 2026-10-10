@@ -46,7 +46,7 @@ EXCERPT_CHARS = 360
 READ_CHARS = 40000
 
 _SESSION_FIELDS = (
-    "name", "status", "paused", "archived", "cwd", "role", "parent", "issue",
+    "name", "status", "paused", "hold", "archived", "cwd", "role", "parent", "issue",
     "note", "task", "created_at", "exited_at", "last_activity_at",
 )
 
@@ -163,6 +163,8 @@ def _session_label(entry: dict) -> str:
     state = entry.get("status") or "?"
     if entry.get("archived"):
         state += ", archived"
+    elif entry.get("hold"):
+        state += ", hold"
     elif entry.get("paused"):
         state += ", paused"
     via = entry.get("via")

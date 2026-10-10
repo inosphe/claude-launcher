@@ -122,7 +122,7 @@ def _status(tmp_path, scope):
 
 
 def _task(st, label):
-    return next(t["instance"] for t in st["tasks"] if t["label"] == label)
+    return next(t["instance"] for t in st["tasks"] if t["label"].rsplit("/", 1)[-1] == label)
 
 
 def _report(tmp_path, scope, label, value=None):

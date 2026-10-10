@@ -46,6 +46,17 @@
      purpose: that prompt is the restart's most confusing symptom, so the
      sentence explaining it has to be readable over the top of it. -->
 <div id="notices" aria-live="polite" aria-atomic="false"></div>
+<!-- The notification history behind the bell: the approval requests still
+     waiting (hidden cards included, with their buttons) and every notice this
+     browser has shown. Kept in localStorage; the waiting list is re-read from
+     the daemon on every poll (app.js, noticePanelPaint). -->
+<aside id="notice-panel" class="hidden" aria-label="notification history">
+  <div id="notice-panel-head">
+    <h2>Notifications</h2>
+    <button id="notice-panel-close" type="button" title="close (Esc)">×</button>
+  </div>
+  <div id="notice-panel-body"></div>
+</aside>
 
 <div id="layout">
   <!-- Mobile only: the status line that stands in for the rail while a page
@@ -54,6 +65,8 @@
     <button id="m-menu" type="button" aria-label="open menu">☰</button>
     <span id="m-dot" class="dot"></span>
     <span id="m-title">no session</span>
+    <button id="m-notice-bell" class="m-act notice-bell" type="button"
+            title="notification history">🔔<span class="notice-bell-count"></span></button>
     <!-- The observer header goes down on a phone, and the scope switch goes
          with it — but the rail's own observe-pin box stays reachable, so a
          phone that can pin sessions must also be able to choose the mode
@@ -99,6 +112,10 @@
                 title="reload the session list now">⟳</button>
         <button id="theme-toggle" type="button" data-theme-toggle
                 title="switch to the light theme">☀</button>
+        <!-- The notification history (claunch-l978l): the number is the
+             approval requests waiting on a person, hidden cards included. -->
+        <button id="notice-bell" class="notice-bell" type="button"
+                title="notification history">🔔<span class="notice-bell-count"></span></button>
         <button id="refresh-archived" class="hidden" type="button"
                 title="reload archived sessions">Archived ⟳</button>
         <span id="daemon-info"></span>
@@ -180,11 +197,16 @@
            syncSessionFilters ran. The count span carries a 0 placeholder and
            is rewritten from the live cache on the first successful poll. -->
       <button id="session-filter-current" type="button" data-filter="current"
-              title="Current — Running, Paused, Killed" aria-label="Current (0)" aria-pressed="true"><span class="session-filter-icon filter-icon-current" aria-hidden="true"></span><span class="session-filter-count">0</span></button>
+              title="Current — Running, Hold, Paused, Killed" aria-label="Current (0)" aria-pressed="true"><span class="session-filter-icon filter-icon-current" aria-hidden="true"></span><span class="session-filter-count">0</span></button>
       <button id="session-filter-running-paused" type="button" data-filter="running-paused"
               title="Running || Paused" aria-label="Running || Paused (0)" aria-pressed="false"><span class="session-filter-icon filter-icon-running-paused" aria-hidden="true"></span><span class="session-filter-count">0</span></button>
       <button id="session-filter-running" type="button" data-filter="running"
               title="Running" aria-label="Running (0)" aria-pressed="true"><span class="session-filter-icon filter-icon-running" aria-hidden="true"></span><span class="session-filter-count">0</span></button>
+      <!-- Hold: running sessions whose program the daemon freed while nobody
+           used them (claunch-5l35i). Opening one wakes it; both presets above
+           include it. -->
+      <button id="session-filter-hold" type="button" data-filter="hold"
+              title="Hold" aria-label="Hold (0)" aria-pressed="true"><span class="session-filter-icon filter-icon-hold" aria-hidden="true"></span><span class="session-filter-count">0</span></button>
       <!-- Paused: exited records carrying the pause marker — the operator's
            temporary stop, filed apart from the killed so the two never share
            a count and the bulk resume below reaches exactly this set. -->
@@ -236,6 +258,11 @@
       <button id="resume-all" class="bulk hidden" type="button"></button>
       <button id="archive-exited" class="bulk hidden" type="button"></button>
     </div>
+    <!-- The dock holds the nav's place in the rail. On a desktop with a
+         pointer it is one row tall: the nav inside shows its first row and
+         lays the rest over the session list while hovered or focused
+         (claunch-cka36). The pin keeps every row shown instead. -->
+    <div id="rail-nav-dock">
     <nav id="rail-nav">
       <a href="#/observer" data-page="observer"><span>◎</span>Observer</a>
       <a href="#/operator" data-page="operator"><span>◍</span>Operator<span id="operator-nav-badge" class="operator-badge-count" hidden></span></a>
@@ -255,6 +282,8 @@
       <a href="#/cli" data-page="cli"><span>&gt;_</span>CLI</a>
       <a href="#/settings" data-page="settings"><span>⚙</span>Settings</a>
     </nav>
+    <button id="rail-nav-pin" type="button" aria-pressed="false">📌</button>
+    </div>
   </aside>
 
   <!-- Desktop only: the bar between the rail and #main. Dragging it resizes
@@ -376,6 +405,15 @@
            and the card show. Hidden for a session that has none (the OAuth
            routes never go through the shim). -->
       <span id="term-tps" class="badge tps hidden"></span>
+      <!-- The reminder controls, framed as one group: the countdown/switch
+           and the skip beside it act on the same clock, and loose in a row
+           of a dozen chips they read as two unrelated widgets. The frame
+           carries a small "reminder" label so the group names itself; it
+           hides when neither control is up (CSS :has), and the toolbar
+           fitter moves it into the overflow menu as one item, both buttons
+           together (claunch-0jjv3). -->
+      <span id="term-reminder" class="term-reminder" role="group" aria-label="reminder">
+      <span class="term-reminder-label" aria-hidden="true">reminder</span>
       <!-- When the daemon will next type into THIS session by itself, and how
            long is left of it. On a session's own header a countdown belonging
            to some other session is a confident lie, so this chip speaks for
@@ -401,6 +439,7 @@
            rendered by paintTermTimerSkip(). -->
       <button id="term-timer-skip" class="term-btn timer-skip hidden"
               type="button"></button>
+      </span>
       <!-- What would happen to a message arriving RIGHT NOW: typed straight
            in, queued — and by what — or REFUSED outright, once this
            session's backlog has hit the mesh's cap and the daemon has
@@ -451,6 +490,11 @@
                 title="this session's conversation — scrollable, the whole of it">transcript</button>
         <button id="term-rebrief" class="term-btn"
                 title="re-type this session's briefing (mesh, run, parent, task) into its terminal — for an agent whose context was cleared or compacted">rebrief</button>
+        <!-- retro: the retrospective prompt pack, an on-demand pack typed into
+             the running session (claunch retro) — for a session whose cflow
+             run did not end normally, so its last node never asked for it. -->
+        <button id="term-retro" class="term-btn" type="button"
+                title="send the retrospective prompt pack: the agent reviews its own session and the cflow definition it followed, and proposes changes (claunch retro)">retro</button>
         <!-- quick-fork: a copy of this session's conversation, as a child,
              marked "forked from here"; merge is the copy's way back (the
              wrap-up typed into the origin, then the copy ends). Only one of
@@ -464,6 +508,10 @@
              for a session that is looping or racing another. No wind-down. -->
         <button id="term-pause" class="term-btn"
                 title="pause this session: the program is terminated as kill does, and the record is filed as paused so it can be resumed on its own or with every other paused one">pause</button>
+        <!-- Hold: end the program but keep the session; it wakes with its
+             conversation when opened again or messaged (claunch-5l35i). -->
+        <button id="term-idle-hold" class="term-btn"
+                title="hold this session: the program is ended to free memory, and the session wakes with its conversation when you open it again or a message arrives">hold</button>
         <button id="term-kill" class="term-btn"
                 title="terminate the program running in this session">kill</button>
         <!-- Archive is available whatever the session is doing. On a live
@@ -498,6 +546,22 @@
          keystrokes keep the keyboard busy). Rendered by renderTermQueued();
          hidden whenever the backlog is empty. -->
     <div id="term-queued" class="hidden"></div>
+    <!-- The machine's test window as it concerns this session
+         (claunch-bwzkt): the grant it holds — running for how long, and how
+         long a run like it usually holds — or its place in the queue and the
+         rule that keeps it there, with the machine's load on a second line.
+         Rendered by renderTermWindow(); hidden while the session neither
+         holds nor waits. Each row opens the Window page. -->
+    <div id="term-window" class="hidden" role="status"
+         aria-label="measurement window"></div>
+    <!-- The session's timer line (claunch-7dzae): every countdown the
+         session waits on (a cflow v2 choice held until its interval window
+         opens, as await-landing's nudge; a wait; a loop pause; an ask
+         deadline), one chip each, soonest first, from the providers behind
+         GET /api/sessions/<name>/timers. Rendered by renderTermTimers();
+         hidden while there is no timer. A chip opens the run it belongs to. -->
+    <div id="term-timers" class="hidden" role="status"
+         aria-label="session timers"></div>
     <!-- The attached session's cflow run is stopped on a person: one line
          with the step, the question and a button per answer, the same
          presses the run page makes. Rendered by renderTermCflow(); hidden
@@ -544,11 +608,9 @@
          (POST .../keys with `paste`), which is what keeps the block from
          being submitted a line at a time under any harness.
          Alt+V is the third key it answers: the clipboard's image is uploaded
-         (POST .../paste-image), the daemon stores it, puts it on the
-         clipboard of the machine it runs on, and sends the keystroke that
-         harness reads an image with. Nothing is typed into the line — the
-         program in the PTY reads bytes, and the clipboard is the door it
-         already has for an image.
+         (POST .../paste-image), then the daemon stores it and delivers a
+         file path or clipboard keystroke according to the harness's
+         declared transport. Nothing is typed into the web input line.
          Hidden with the terminal; only live while one is attached. -->
     <form id="term-input" class="hidden" autocomplete="off">
       <button id="term-clipboard-toggle" class="term-btn" type="button"
@@ -627,9 +689,23 @@
         <fieldset id="new-quick-fork" class="session-field-hidden" disabled>
           <legend>Quick fork</legend>
           <p id="new-quick-fork-source"></p>
-          <label id="new-quick-fork-carry-row">Inheritance
-            <select name="quick_fork_carry"></select>
+          <!-- Each of these is its own choice: inherit is the preselected,
+               recommended answer in every row, never the only one. The four
+               pickers sit two by two and the role note under both rows, so
+               the box holds the whole fork without scrolling. -->
+          <label>Placement
+            <select name="quick_fork_place"></select>
           </label>
+          <label>Mesh
+            <select name="quick_fork_mesh"></select>
+          </label>
+          <label id="new-quick-fork-role-row">Role
+            <select name="quick_fork_role"></select>
+          </label>
+          <label>Workflow
+            <select name="quick_fork_workflow"></select>
+          </label>
+          <p id="new-quick-fork-role-note" class="wf-note hidden"></p>
           <label>Opening task
             <textarea name="quick_fork_task" rows="3" placeholder="Optional task for the copy"></textarea>
           </label>
@@ -708,6 +784,13 @@
             <span id="new-over-text"></span>
           </label>
           <label>Name <input name="name" placeholder="(auto)"></label>
+          <!-- The operator's own note on the session (claunch-zy9yk), the
+               same one the rail's ✎ edits later: written here so it is on
+               the row from the first poll. Never sent into the session. -->
+          <label>Note
+            <textarea name="note" rows="2" maxlength="2000"
+              placeholder="(optional) your own note on this session — not sent to it"></textarea>
+          </label>
         </fieldset>
 
         <!-- WHO it runs as, on the face of the form rather than in the fold
@@ -921,8 +1004,9 @@
         <fieldset id="new-task">
           <legend><span class="sess-spawn-step">7</span> Opening task</legend>
           <p class="sess-spawn-group-blurb">what it is told once it boots</p>
-          <textarea name="task" rows="3"
+          <textarea name="task" rows="8"
             placeholder="typed in once it has booted — what it is for"></textarea>
+          <div id="new-task-prompter" class="hidden"></div>
           <!-- Images that go out with the opening (claunch-jmrmc): pasted into
                the task box, dropped on this area, or picked. Uploaded when the
                form is submitted; the daemon keeps them with the session and
@@ -1152,8 +1236,31 @@
         <legend class="sr-only">Transcript format</legend>
         <label><input type="radio" name="log-format" value="raw" checked><span>Raw text</span></label>
         <label><input type="radio" name="log-format" value="markdown"><span>Markdown</span></label>
+        <!-- What the minimap's colours stand for, in the same colours. -->
+        <span id="log-legend" aria-hidden="true">
+          <span class="log-key" data-kind="user">user</span>
+          <span class="log-key" data-kind="assistant">assistant</span>
+          <span class="log-key" data-kind="thinking">thinking</span>
+          <span class="log-key" data-kind="tool">tool call</span>
+          <span class="log-key" data-kind="result">result</span>
+          <span class="log-key" data-kind="error">error</span>
+        </span>
       </fieldset>
-      <div id="term-log-pane" role="tabpanel" aria-labelledby="log-transcript-tab"></div>
+      <!-- The conversation and its timeline. The minimap is a strip beside the
+           scroller with one coloured mark per block of what is loaded (user
+           input, assistant reply, thinking, tool call, tool result, error) at
+           the height that block sits at in the pane, and a box for the part
+           on screen; pressing or dragging on it scrolls the pane there
+           (renderTranscriptMinimap). #log-new is up only while turns have
+           arrived below a reader who scrolled up; pressing it goes to them. -->
+      <div id="log-body">
+        <div id="term-log-pane" role="tabpanel" aria-labelledby="log-transcript-tab"></div>
+        <div id="log-minimap" role="scrollbar" aria-controls="term-log-pane"
+             aria-orientation="vertical" aria-label="conversation timeline"
+             title="timeline of the loaded conversation — press or drag to jump"></div>
+        <button id="log-new" class="term-btn hidden" type="button"
+                title="new turns arrived below — go to the newest"></button>
+      </div>
       <div id="log-info-pane" role="tabpanel" aria-labelledby="log-info-tab" hidden></div>
     </div>
     <div id="msg-view" class="hidden"></div>

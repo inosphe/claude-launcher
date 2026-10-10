@@ -724,3 +724,151 @@ def test_a_fork_cannot_be_given_a_checkout_of_its_own():
             {"harness": "claude"}, parent, {"worktree": "mine"},
         )
     assert "transcripts per working directory" in str(got.value)
+
+
+# ---- placement and role (claunch-9vpeq) ---------------------------------- #
+
+def test_the_marker_tells_the_copy_when_its_role_is_not_the_origins():
+    """The conversation above the block was held under the origin's role, and
+    the copy reads all of it as its own unless the block says otherwise."""
+    changed = handoff_mod.compose_marker(
+        origin="a", fork="a-qf1", marker="qf-1", forked_at="T",
+        mesh="mesh-9", role="worker", origin_role="leader",
+    )
+    line = [ln for ln in changed.split("\n") if ln.startswith("role: ")]
+    assert len(line) == 1, changed
+    assert line[0].startswith("role: CHANGED")
+    assert "held as leader" in line[0] and "NOT yours" in line[0]
+    assert "You are worker in mesh mesh-9" in line[0]
+    assert "claunch mesh stance mesh-9" in line[0]
+
+    same = handoff_mod.compose_marker(
+        origin="a", fork="a-qf1", marker="qf-1", forked_at="T",
+        mesh="mesh-9", role="worker", origin_role="worker",
+    )
+    line = [ln for ln in same.split("\n") if ln.startswith("role: ")][0]
+    assert "CHANGED" not in line and "the same role a holds" in line
+
+    meshless = handoff_mod.compose_marker(
+        origin="a", fork="a-qf1", marker="qf-1", forked_at="T",
+        origin_role="leader",
+    )
+    line = [ln for ln in meshless.split("\n") if ln.startswith("role: ")][0]
+    assert line.startswith("role: NONE") and "leader" in line
+
+    # nothing known about roles: no line at all
+    plain = handoff_mod.compose_marker(origin="a", fork="a-qf1", marker="qf-1", forked_at="T")
+    assert "\nrole: " not in plain and "\nplacement: " not in plain
+
+
+def test_the_marker_says_where_a_sibling_hangs():
+    under = handoff_mod.compose_marker(
+        origin="a", fork="a-qf1", marker="qf-1", forked_at="T",
+        sibling=True, placed_under="g",
+    )
+    line = [ln for ln in under.split("\n") if ln.startswith("placement: ")][0]
+    assert "SIBLING of a" in line and "answers to g" in line
+    assert "merge still goes back to a" in line
+    root = handoff_mod.compose_marker(
+        origin="a", fork="a-qf1", marker="qf-1", forked_at="T", sibling=True,
+    )
+    line = [ln for ln in root.split("\n") if ln.startswith("placement: ")][0]
+    assert "a root session with no parent" in line
+
+
+def test_quick_fork_takes_a_role_refuses_a_second_leader_and_places_a_sibling(
+    home, tmp_path, forkable, typed
+):
+    _register_py_harness()
+
+    async def run():
+        mgr = _mgr()
+        meshes = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, meshes)
+        try:
+            mgr.create(SessionDef(name="g", harness="py", cwd=str(tmp_path)))
+            mgr.create(SessionDef(name="a", harness="py", cwd=str(tmp_path), parent="g"))
+            meshes.create("mesh-9")
+            await meshes.join("mesh-9", "a", handle="a", role="leader")
+
+            # The origin holds leader live, so a copy asking for it is refused
+            # by the daemon, whatever the form did or did not check.
+            resp = await client.post(
+                "/api/sessions/a/quick-fork",
+                json={"mesh": ".", "role": "leader"}, headers=BEARER,
+            )
+            doc = await resp.json()
+            assert resp.status == 400, doc
+            assert "exclusive" in doc["error"] and "leader" in doc["error"]
+            assert not any(s.sdef.name.startswith("a-qf") for s in mgr.list())
+
+            # Another role is taken, and the copy is told the role changed.
+            resp = await client.post(
+                "/api/sessions/a/quick-fork",
+                json={"mesh": ".", "role": "worker"}, headers=BEARER,
+            )
+            doc = await resp.json()
+            assert resp.status == 201, doc
+            got = doc["quick_fork"]
+            assert (got["mesh"], got["role"], got["sibling"], got["parent"]) == (
+                "mesh-9", "worker", False, "a")
+            assert doc["session"]["parent"] == "a"
+            task = doc["session"]["task"]
+            assert "mesh: you were put in mesh mesh-9" in task
+            assert "role: CHANGED" in task and "held as leader in mesh mesh-9" in task
+            member = [m for m in meshes.meshes_for_session(doc["session"]["name"])][0]
+            assert member["role"] == "worker"
+
+            # Sibling: built from a (its conversation, its marker, merge back
+            # to a), recorded under a's parent.
+            resp = await client.post(
+                "/api/sessions/a/quick-fork",
+                json={"mesh": ".", "role": "worker", "sibling": True}, headers=BEARER,
+            )
+            doc = await resp.json()
+            assert resp.status == 201, doc
+            assert doc["session"]["parent"] == "g"
+            assert doc["session"]["quick_fork_of"] == "a"
+            assert doc["quick_fork"]["sibling"] is True and doc["quick_fork"]["parent"] == "g"
+            assert doc["quick_fork"]["mesh"] == "mesh-9"
+            assert "placement: this copy is a SIBLING of a" in doc["session"]["task"]
+            assert doc["session"]["name"] not in mgr.children("a")
+            assert doc["session"]["name"] in mgr.children("g")
+
+            # A root's sibling is a root.
+            resp = await client.post(
+                "/api/sessions/g/quick-fork", json={"sibling": True}, headers=BEARER,
+            )
+            doc = await resp.json()
+            assert resp.status == 201, doc
+            assert doc["session"]["parent"] is None
+            assert doc["quick_fork"]["parent"] == ""
+            assert "a root session with no parent" in doc["session"]["task"]
+
+            # A role with no mesh to hold it in is refused, not dropped.
+            resp = await client.post(
+                "/api/sessions/a/quick-fork", json={"role": "worker"}, headers=BEARER,
+            )
+            assert resp.status == 400, await resp.json()
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_cli_quick_fork_passes_role_and_sibling(fake_daemon, capsys, monkeypatch):
+    from claude_launcher import cli
+
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    client = fake_daemon({
+        "/api/sessions/a/quick-fork": {
+            "session": {"name": "a-qf1", "pid": 42}, "marker": "qf-1", "origin": "a",
+            "quick_fork": {"mesh": "mesh-9", "role": "worker", "sibling": True, "parent": "g"},
+        },
+    })
+    assert cli.main(["quick-fork", "a", "--mesh", ".", "--role", "worker", "--sibling"]) == 0
+    assert client.calls == [("post", "/api/sessions/a/quick-fork",
+                             {"mesh": ".", "role": "worker", "sibling": True})]
+    out = capsys.readouterr().out
+    assert "in mesh mesh-9 and role worker, as a sibling under 'g'" in out

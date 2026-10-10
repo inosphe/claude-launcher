@@ -23,7 +23,7 @@ from . import daemon_client, projects, stdio
 #: every ``claunch mesh`` invocation. ``test_mesh_cli_owed`` pins the two
 #: lists equal, so a partition added there and not here is a test failure.
 MEMBER_STATES = (
-    "all", "current", "running", "remote",
+    "all", "current", "running", "remote", "hold",
     "killed", "paused", "archived", "missing",
 )
 

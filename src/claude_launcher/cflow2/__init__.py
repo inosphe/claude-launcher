@@ -12,6 +12,6 @@ Modules:
 - ``caps``      -- atomic capabilities, their layering, and fallback planning
 - ``layers``    -- discovery of v2 definitions (``workflows/v2/``)
 - ``runtime``   -- the interpreter: state, advance, journal
-- ``executors`` -- inline / subagent / headless / session delegation
+- ``executors`` -- inline / subagent / session delegation
 - ``mcp``       -- the ``flow_*`` agent tools
 """

@@ -419,6 +419,11 @@ def _values(ctx: _Ctx, file: str, value: Any, what: str, line: int) -> Dict[str,
 
 def _executor(ctx: _Ctx, file: str, value: Any, line: int) -> List[str]:
     items = _str_list(ctx, file, value, "executor", line)
+    removed = [item for item in items if item in ir.REMOVED_EXECUTORS]
+    if removed:
+        ctx.warnings.append(f"{file}:{line}: executor {', '.join(removed)} was removed "
+                            f"from the engine and is skipped")
+        items = [item for item in items if item not in ir.REMOVED_EXECUTORS]
     for item in items:
         if item not in ir.EXECUTORS:
             raise ctx.err(file, line, f"unknown executor {item!r} (allowed: {', '.join(ir.EXECUTORS)})")

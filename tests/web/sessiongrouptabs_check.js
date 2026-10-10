@@ -16,6 +16,12 @@
      its kind, its full name, its session count and, for a mesh, the ⊕ that
      opens the create form with that mesh picked; no tab carries a ⊕;
    - pressing the header row scrolls the list to its top;
+   - a mesh header carries a both | local | remote pick (claunch-no9dy):
+     local drops the remote-shadow rows, remote drops this daemon's rows,
+     tab headings stay so every tab survives and a nested heading the pick
+     emptied goes; the pick is remembered per
+     browser, redraws from the records in hand and is in the signature;
+     a workspace header has no such pick;
    - the fold, its caret and the jump button are gone from the page. */
 const fs = require("fs");
 const path = require("path");
@@ -122,13 +128,16 @@ function load(seed) {
     constLine("SESSION_GROUP_KEY") + constLine("SESSION_GROUP_ORDER_KEY") +
     constLine("SESSION_GROUPS") + letBlock("sessionGroupOrder") + "\n" +
     constLine("SESSION_GROUP_TAB_KEY") + letBlock("sessionGroupTab") + "\n" +
+    constLine("SESSION_ORIGIN_FILTERS") + constLine("SESSION_ORIGIN_KEY") +
+    letBlock("sessionOriginFilter") + "\n" +
     "let sessionGroupTabScrollReset = false;\n" +
     // The drag on the strip needs real pointer input: tabdragscroll_browser.cjs.
     "function enableTabDragScroll() {}\n" +
     [slice("sessionWorkspaceLabel"), slice("sessionGroupActiveTab"),
      slice("setSessionGroupTab"), slice("sessionGroupTabRows"),
      slice("scrollSessionListTop"), slice("selectSessionGroupTab"),
-     slice("renderSessionGroupTabs"), slice("renderSessionGroupHeader")].join("\n") + `
+     slice("renderSessionGroupTabs"), slice("renderSessionGroupHeader"),
+     slice("filterSessionOrigin"), slice("setSessionOriginFilter")].join("\n") + `
 Object.assign(exports, {
   order: () => sessionGroupOrder,
   tab: () => sessionGroupTab,
@@ -137,6 +146,8 @@ Object.assign(exports, {
   split: sessionGroupTabRows,
   render: renderSessionGroupTabs,
   top: scrollSessionListTop,
+  origin: () => sessionOriginFilter,
+  byOrigin: filterSessionOrigin,
 });`)(ctx, document, $, localStorage, "/t/local/",
       (opts) => ctx.redraws.push(opts), (hash) => ctx.went.push(hash));
   ctx.writes = localStorage.writes;
@@ -264,6 +275,79 @@ check("ungrouped, the strip and the header are hidden and empty",
       [bar.classes.has("hidden"), tabs().length, head.classes.has("hidden"), head.kids.length],
       [true, 0, true, 0]);
 
+/* ---- the mesh header's local/remote pick ---- */
+check("nothing saved shows both sides", load({}).origin(), "both");
+check("a saved pick is read back",
+      load({ "claunch_session_origin:/t/local/": "remote" }).origin(), "remote");
+check("an unknown saved pick falls back to both",
+      load({ "claunch_session_origin:/t/local/": "far" }).origin(), "both");
+check("both keeps every row", ctx.byOrigin(ROWS, "both"), ROWS);
+const rowName = (r) => r.type === "group" ? r.value
+  : r.type === "session" ? r.session.name : r.shadow.session;
+check("local drops the remote-shadow rows and keeps every heading",
+      ctx.byOrigin(ROWS, "local").map(rowName),
+      ["(no mesh)", "s0", "m1", "s1", "s2", "m2", "s3"]);
+check("remote drops this daemon's rows and keeps every heading",
+      ctx.byOrigin(ROWS, "remote").map(rowName),
+      ["(no mesh)", "m1", "m2", "r1"]);
+const remoteSplit = ctx.split(ctx.byOrigin(ROWS, "remote"), "mesh");
+check("...so every mesh keeps its tab, counted by what is shown",
+      [remoteSplit.tabs.map((t) => t.value),
+       remoteSplit.tabs.map((t) => t.rows.length)],
+      [["(no mesh)", "m1", "m2"], [0, 0, 1]]);
+const NESTED = [
+  { type: "group", group: "mesh", value: "m1", level: 0 },
+  { type: "group", group: "workspace", value: "F:/a", level: 1 },
+  session("s1"),
+  { type: "group", group: "workspace", value: "F:/b", level: 1 },
+  session("s2"),
+  { type: "group", group: "workspace", value: "@x", level: 1 },
+  shadow("r1"),
+  { type: "group", group: "mesh", value: "m2", level: 0 },
+  { type: "group", group: "workspace", value: "@x", level: 1 },
+  shadow("r2"),
+];
+check("nested, local drops the emptied @machine heading and keeps every tab",
+      ctx.byOrigin(NESTED, "local").map(rowName),
+      ["m1", "F:/a", "s1", "F:/b", "s2", "m2"]);
+check("nested, remote drops the emptied local workspace headings",
+      ctx.byOrigin(NESTED, "remote").map(rowName),
+      ["m1", "@x", "r1", "m2", "@x", "r2"]);
+check("nested, both keeps every row", ctx.byOrigin(NESTED, "both"), NESTED);
+const octx = load({});
+octx.render("mesh", split.tabs, "m2");
+const opts = () => head.querySelectorAll(".session-origin-option");
+check("a mesh header carries the three picks, both on",
+      [opts().map((o) => o.dataset.origin), opts().map((o) => o.attrs["aria-checked"]),
+       opts().filter((o) => o.classes.has("active")).map((o) => o.dataset.origin)],
+      [["both", "local", "remote"], ["true", "false", "false"], ["both"]]);
+check("...before the ⊕",
+      head.kids.findIndex((k) => k.classes.has("session-origin-filter")) <
+      head.kids.findIndex((k) => k.classes.has("session-group-new")), true);
+let ostopped = 0;
+opts()[1].handlers.click({ stopPropagation() { ostopped++; } });
+check("picking local narrows the rail and redraws from the records in hand",
+      [octx.origin(), octx.redraws, ostopped, octx.scrollReset()],
+      ["local", [{ cached: true }], 1, true]);
+check("the pick is remembered in this browser",
+      octx.writes.at(-1), ["claunch_session_origin:/t/local/", "local"]);
+octx.render("mesh", split.tabs, "m2");
+opts()[1].handlers.click({ stopPropagation() {} });
+check("picking the one already on does not redraw", octx.redraws.length, 1);
+octx.render("mesh", split.tabs, "(no mesh)");
+check("(no mesh) carries the pick too", opts().length, 3);
+octx.render("workspace", [{ value: "F:/a/b/repo", rows: [session("s1")] }], "F:/a/b/repo");
+check("a workspace header has no local/remote pick", opts().length, 0);
+check("the pick is applied to the mesh grouping before the tabs split",
+      /groupOrder\[0\] === "mesh" && typeof filterSessionOrigin === "function"\s*\? filterSessionOrigin\(allRows, sessionOriginFilter\)/.test(src) &&
+      /sessionGroupTabRows\(originRows, groupOrder\[0\]\)/.test(src), true);
+check("the pick is part of the rail's rebuild signature",
+      /typeof sessionOriginFilter === "string" \? sessionOriginFilter : "both"\]/.test(src), true);
+check("the pick has its own styling, on and off",
+      [/\.session-origin-option\.active\s*\{/.test(css),
+       /\.session-origin-filter\s*\{/.test(css)], [true, true]);
+octx.render("", [], null);
+
 /* ---- the page ---- */
 check("the fold and the jump are gone from the rail",
       ["sessionGroupCollapsed", "session-group-caret", "session-group-jump",
@@ -285,7 +369,7 @@ check("the tabs have their own styling, open and matched",
       [/\.session-group-tab\.active\s*\{/.test(css),
        /\.session-group-tab\.search-match\s*\{/.test(css)], [true, true]);
 check("the open tab is part of the rail's rebuild signature",
-      /typeof sessionGroupTab === "object" \? sessionGroupTab : null\]/.test(src), true);
+      /typeof sessionGroupTab === "object" \? sessionGroupTab : null,/.test(src), true);
 
 if (failures) {
   console.error(`${failures} check(s) failed`);

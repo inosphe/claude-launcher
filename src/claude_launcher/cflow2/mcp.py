@@ -182,8 +182,8 @@ TOOLS = [
             "parent's run. A delegation whose brief names a 'nested' run is not "
             "submitted here: drive that run with the flow_* tools under its scope. "
             "Only the run's driver submits a subagent delegation and only the "
-            "assigned child session a session delegation; headless results come "
-            "from the daemon. 'receipt_path' must be in the run's receipts directory "
+            "assigned child session a session delegation. "
+            "'receipt_path' must be in the run's receipts directory "
             "or this session's $CLAUNCH_SCRATCH."
         ),
         "inputSchema": {

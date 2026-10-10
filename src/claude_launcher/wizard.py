@@ -54,6 +54,7 @@ from .codex_mode import (
     runtime_state as _codex_runtime_state,
 )
 from .cflow.model import FILTER_TYPES, RoleFilter
+from .store import ROLE_WORKFLOW_NONE
 
 #: Value of the worktree picker's "name it myself" entry. Not a name anyone
 #: could type (``validate_name`` rejects the space), so it cannot collide with
@@ -647,10 +648,19 @@ class DaemonSources(Sources):
                 for w in (doc.get("workflows") or [])
                 if not (isinstance(w, dict) and w.get("error"))
             ]
+            overrides = doc.get("role_workflows")
         except Exception:
-            entries = []
+            entries, overrides = [], None
         self._cache[key] = [e for e in entries if e["name"]]
+        self._cache["rw:" + cwd] = _role_overrides(overrides)
         return self._cache[key]
+
+    def role_workflows(self, cwd: str) -> Dict[str, str]:
+        """Settings' per-role auto-pick overrides, served with ``cwd``'s
+        workflow list (an older daemon serves none)."""
+        if "rw:" + cwd not in self._cache:
+            self.workflows(cwd)
+        return self._cache.get("rw:" + cwd) or {}
 
     def git(self, cwd: str) -> dict:
         key = "git:" + cwd
@@ -1237,11 +1247,56 @@ def _workflow_options(entries: List[dict], role: str) -> List[Option]:
     return out
 
 
-def _workflow_default(entries: List[dict], role: str) -> str:
-    """The workflow a picked role selects on its own: the highest-priority
-    one declaring ``default_role: <role>`` that its own filter admits."""
+def _role_overrides(raw) -> Dict[str, str]:
+    """``role_workflows`` as the daemon serves it, cleaned: lower-cased
+    role -> non-empty value. Anything else reads as no overrides."""
+    if not isinstance(raw, dict):
+        return {}
+    out = {}
+    for role, value in raw.items():
+        role = str(role or "").strip().lower()
+        value = value.strip() if isinstance(value, str) else ""
+        if role and value:
+            out[role] = value
+    return out
+
+
+def _override_value(entries: List[dict], role: str, value: str) -> Optional[str]:
+    """What a Settings override auto-selects among ``entries``: the option
+    value it names, "" for the no-pick value, or ``None`` when it names
+    nothing here that ``role`` may drive (then ``default_role`` decides).
+    A bare name takes the entry the picker sends that name for (v1 on a
+    name both formats declare); ``v2:<name>`` the v2 one."""
+    if value == ROLE_WORKFLOW_NONE:
+        return ""
+    want_v2 = value.startswith("v2:")
+    name = value[3:] if want_v2 else value
+    admitted = [e for e in entries if _workflow_admits(e, role)]
+    for e in admitted:
+        if e["name"] != name:
+            continue
+        if want_v2 and e.get("version") != 2:
+            continue
+        picked = workflow_value(e, entries)
+        if not want_v2 and picked != name:
+            continue
+        return picked
+    return None
+
+
+def _workflow_default(
+    entries: List[dict], role: str, overrides: Optional[Dict[str, str]] = None
+) -> str:
+    """The workflow a picked role selects on its own: Settings' override for
+    that role when it names a workflow declared here that the role may
+    drive, else the highest-priority one declaring ``default_role: <role>``
+    that its own filter admits."""
     if not role:
         return ""
+    if overrides and role in overrides:
+        picked = _override_value(entries, role, overrides[role])
+        if picked is not None:
+            return picked
     best = [
         e for e in entries
         if e["default_role"] == role and _workflow_admits(e, role)
@@ -1290,7 +1345,12 @@ def sync_workflows(
     wf.index = 0
     if keep and keep != form._workflow_auto and wf.select(keep):
         return
-    auto = str(paired or "") if paired is not None else _workflow_default(entries, role)
+    if paired is not None:
+        auto = str(paired or "")
+    else:
+        rw = getattr(form.sources, "role_workflows", None)
+        overrides = rw(cwd) if (rw and cwd) else {}
+        auto = _workflow_default(entries, role, overrides)
     form._workflow_auto = auto if auto and wf.select(auto) else ""
 
 
