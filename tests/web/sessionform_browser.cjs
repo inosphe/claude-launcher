@@ -79,6 +79,9 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
   await page.setViewportSize({width:1440,height:900});
   await page.locator('#new-session [name=name]').focus();
   await page.keyboard.press('Tab');
+  // The operator's note sits under the name (claunch-zy9yk), ahead of Runs as.
+  assert.equal(await page.evaluate(()=>document.activeElement.name),'note');
+  await page.keyboard.press('Tab');
   assert.equal(await page.evaluate(()=>document.activeElement.name),'profile');
   await page.keyboard.press('Tab');
   assert.equal(await page.evaluate(()=>document.activeElement.name),'harness');
