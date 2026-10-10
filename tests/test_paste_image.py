@@ -48,14 +48,15 @@ PNG = bytes.fromhex("89504e470d0a1a0a") + b"a pretend png body"
 
 
 @pytest.mark.parametrize("ready,failed", [(True, False), (False, False), (True, True)])
-def test_codex_image_path_paste_avoids_busy_clipboard(home, tmp_path, monkeypatch,
-                                                    ready, failed):
+@pytest.mark.parametrize("harness", ["claude", "codex"])
+def test_image_path_paste_avoids_busy_clipboard(home, tmp_path, monkeypatch,
+                                               ready, failed, harness):
     from unittest.mock import AsyncMock
 
     target = tmp_path / "image with 공백 #1.png"
     target.write_bytes(PNG)
     session = SimpleNamespace(
-        sdef=SessionDef(name="s1", harness="codex"),
+        sdef=SessionDef(name="s1", harness=harness),
         screen=SimpleNamespace(bracketed_paste=ready),
         paste=AsyncMock(side_effect=RuntimeError("PTY closed") if failed else None),
         send_keys=AsyncMock(),
@@ -70,7 +71,8 @@ def test_codex_image_path_paste_avoids_busy_clipboard(home, tmp_path, monkeypatc
     put.assert_not_called()
     session.send_keys.assert_not_called()
     if ready:
-        session.paste.assert_awaited_once_with(target.resolve().as_uri(), enter=False)
+        expected = str(target.resolve()) if harness == "claude" else target.resolve().as_uri()
+        session.paste.assert_awaited_once_with(expected, enter=False)
         assert reason == ("the image path did not reach the session: PTY closed" if failed else "")
     else:
         session.paste.assert_not_called()
@@ -116,8 +118,11 @@ def _run(tmp_path, body, image_paste_keys=None, image_paste_transport="clipboard
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("harness", ["claude", "codex"])
 def test_path_transport_upload_sends_one_paste_without_submitting(home, tmp_path,
-                                                               monkeypatch):
+                                                               monkeypatch, harness):
+    from dataclasses import replace
+
     writes = []
 
     async def capture_write(self, data, **kwargs):
@@ -131,6 +136,7 @@ def test_path_transport_upload_sends_one_paste_without_submitting(home, tmp_path
 
     async def body(client):
         session = client.server.app["manager"].get("s1")
+        session.sdef = replace(session.sdef, harness=harness)
         session.screen.bracketed_paste = True
         for _ in range(2):
             resp = await client.post("/api/sessions/s1/paste-image", data=PNG,
@@ -141,7 +147,8 @@ def test_path_transport_upload_sends_one_paste_without_submitting(home, tmp_path
             assert doc["keys"] == []
             target = Path(doc["path"])
             assert target.read_bytes() == PNG
-            assert writes[-1] == b"\x1b[200~" + target.as_uri().encode() + b"\x1b[201~"
+            expected = str(target) if harness == "claude" else target.as_uri()
+            assert writes[-1] == b"\x1b[200~" + expected.encode() + b"\x1b[201~"
         assert len(writes) == 2  # No Enter, even for consecutive attachments.
         assert writes[0] != writes[1]
 
@@ -609,11 +616,11 @@ def test_an_undelivered_paste_does_not_hold_the_clipboard(home, tmp_path,
     _run(tmp_path, body, image_paste_keys=["M-v"])
 
 
-@pytest.mark.parametrize("name, keys", [("claude", ["M-v"]), ("codex", [])])
+@pytest.mark.parametrize("name, keys", [("claude", []), ("codex", [])])
 def test_the_packaged_harnesses_declare_the_key_they_read_an_image_with(
     home, name, keys
 ):
-    """Claude Code uses Alt+V; Codex uses a pasted path without a key chord."""
+    """Both packaged image-capable harnesses use a path without a key chord."""
     from claude_launcher import harnesses as harness_registry
 
     assert harness_registry.registry().get(name).image_paste_keys == keys

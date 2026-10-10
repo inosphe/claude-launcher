@@ -643,7 +643,7 @@ async function main() {
 
   /* ---- xterm's key hook: Alt+V never reaches the PTY as ESC v ---- */
   ctx.setSessions([{ name: "coder4", harness: "claude" }]);
-  ctx.setHarnesses({ claude: { name: "claude", image_paste_keys: ["M-v"] },
+  ctx.setHarnesses({ claude: { name: "claude", image_paste_keys: [], image_paste_transport: "path" },
                      codex: { name: "codex", image_paste_keys: [], image_paste_transport: "path" },
                      sh: { name: "sh", image_paste_keys: [] } });
   sent = [];

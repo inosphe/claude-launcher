@@ -593,11 +593,9 @@
          (POST .../keys with `paste`), which is what keeps the block from
          being submitted a line at a time under any harness.
          Alt+V is the third key it answers: the clipboard's image is uploaded
-         (POST .../paste-image), the daemon stores it, puts it on the
-         clipboard of the machine it runs on, and sends the keystroke that
-         harness reads an image with. Nothing is typed into the line — the
-         program in the PTY reads bytes, and the clipboard is the door it
-         already has for an image.
+         (POST .../paste-image), then the daemon stores it and delivers a
+         file path or clipboard keystroke according to the harness's
+         declared transport. Nothing is typed into the web input line.
          Hidden with the terminal; only live while one is attached. -->
     <form id="term-input" class="hidden" autocomplete="off">
       <button id="term-clipboard-toggle" class="term-btn" type="button"

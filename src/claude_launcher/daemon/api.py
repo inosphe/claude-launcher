@@ -9941,7 +9941,7 @@ async def _deliver_pasted_image(session, path, media_type: str):
     is "stored, not delivered, because X" -- which the web session line shows
     where the person who pressed the key is looking.
 
-    The path transport sends a file URI in one bracketed paste, which a
+    The path transport sends a path in one bracketed paste, which a
     supporting harness converts into an attachment without the clipboard.
     For the clipboard transport, the image keystroke is a property of the
     harness, so it comes from its declaration (``image_paste_keys``) rather
@@ -9960,8 +9960,11 @@ async def _deliver_pasted_image(session, path, media_type: str):
         # with spaces. Never send Enter: attaching must preserve the draft.
         if not session.screen.bracketed_paste:
             return False, [], "the session is not ready for an image path paste"
+        target = Path(path).resolve()
+        pasted_path = (str(target) if entry.image_paste_path_format == "native"
+                       else target.as_uri())
         try:
-            await session.paste(Path(path).resolve().as_uri(), enter=False)
+            await session.paste(pasted_path, enter=False)
         except Exception as exc:
             return False, [], f"the image path did not reach the session: {exc}"
         return True, [], ""
