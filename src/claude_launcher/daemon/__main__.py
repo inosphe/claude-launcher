@@ -18,6 +18,7 @@ from typing import Optional
 from aiohttp import web
 
 from .. import daemon_client, providers, store
+from . import basetemp_reaper
 from . import cflow2_clock as cflow2_clock_mod
 from . import cflow_clock, paths, restart_notice, resume, runtime_state, window as window_mod
 from . import hold as hold_mod, instance_manifest, session_reminder
@@ -243,6 +244,13 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
         # A session's side runs end with it (docs/cflow-v2.md 2.9).
         manager.exit_hooks.append(cflow2_clock.session_exited)
     app["cflow2_clock"] = cflow2_clock
+    # An ended session's pytest basetemps go with it (claunch-4zc51.2), and
+    # the ones whose session ended while no daemon was up go now. Wired here
+    # and not in create_app: tests build apps over registries of made-up
+    # names, and this deletes real directories under C:/t.
+    reaper = basetemp_reaper.BasetempReaper(basetemp_reaper.registry_view(manager))
+    manager.exit_hooks.append(reaper.session_exited)
+    reaper.reap_ended()
     # Published so the dashboard can report what these two are holding. Only
     # the two that type into a driving session on a timer: those are the ones
     # a person watching a terminal has no way to see coming, and the ones

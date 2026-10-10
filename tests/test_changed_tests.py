@@ -696,6 +696,27 @@ def test_a_pinned_basetemp_reaches_the_command():
     assert "--basetemp=C:/t/pinned" in cmd
 
 
+def test_the_command_says_where_and_how_wide_a_run_is():
+    """The receipt and the run summary read both off the command line, so
+    the reaper's row and the receipt agree on what ran (claunch-4zc51.2)."""
+    wide = changed_tests.build_command(["a.py", "b.py"], basetemp="C:/t/x", workers=2)
+    assert changed_tests.command_basetemp(wide) == "C:/t/x"
+    assert changed_tests.command_workers(wide) == 2
+    serial = changed_tests.build_command(["a.py"], basetemp="C:/t/y")
+    assert changed_tests.command_workers(serial) == 1
+    assert changed_tests.command_basetemp(["pytest"]) is None
+
+
+def test_a_run_leaves_its_summary_in_its_basetemp(tmp_path):
+    """What the daemon's reaper copies into its row before deleting the tree."""
+    changed_tests.write_run_summary(str(tmp_path), {"tree": "t1", "exit_code": 0})
+    summary = json.loads((tmp_path / changed_tests.RUN_SUMMARY).read_text(encoding="utf-8"))
+    assert summary == {"tree": "t1", "exit_code": 0}
+    # A basetemp pytest never made (a run that died first) is not an error.
+    changed_tests.write_run_summary(str(tmp_path / "missing"), {"tree": "t1"})
+    changed_tests.write_run_summary(None, {"tree": "t1"})
+
+
 def test_pruning_keeps_the_newest_and_leaves_other_sessions_alone(
     tmp_path, monkeypatch
 ):
