@@ -136,3 +136,40 @@ async def prompts(*, refresh: bool = False) -> dict:
             answer = {"connected": False, "prompts": [], "error": str(exc) or type(exc).__name__}
         _cache[url] = (now, answer)
     return {"enabled": True, "url": url, **answer}
+
+
+async def selected_records(selection) -> list:
+    """Resolve explicitly selected snippets into the opening's saved packs.
+
+    The browser sends identities, never prompt text. Binding them to the
+    offered server prevents a settings change from selecting unrelated IDs.
+    No selection means no network request, including when the server is down.
+    """
+    from ..prompt_packs import PackError
+
+    if selection is None:
+        return []
+    if not isinstance(selection, dict) or not isinstance(selection.get("ids"), list):
+        raise PackError("prompter_prompts must contain a server url and an ids list")
+    ids = selection["ids"]
+    if any(type(i) is not int or i < 1 for i in ids):
+        raise PackError("prompter prompt IDs must be positive integers")
+    if not ids:
+        return []
+    url = configured_url()
+    if not url or selection.get("url") != url:
+        raise PackError("Prompter server changed; reopen the form and select prompts again")
+    answer = await prompts(refresh=True)
+    if answer["url"] != url or configured_url() != url:
+        raise PackError("Prompter server changed; reopen the form and select prompts again")
+    if not answer["connected"]:
+        raise PackError("Cannot load selected prompter prompts: " + answer["error"])
+    available = {p["id"]: p for p in answer["prompts"]}
+    missing = [i for i in ids if i not in available]
+    if missing:
+        raise PackError("Selected prompter prompts are unavailable: " + ", ".join(map(str, missing)))
+    return [
+        {"id": f"prompter:{i}", "text": available[i]["body"], "source": "prompter",
+         "prompter_id": i, "url": url, "title": available[i]["title"] or available[i]["name"]}
+        for i in dict.fromkeys(ids)
+    ]

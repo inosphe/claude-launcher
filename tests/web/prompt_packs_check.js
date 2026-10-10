@@ -81,6 +81,8 @@ const env = new Function(
    `let newDaemonPromptTick = null, newPackRolesOpen = false, newPackPreview = null;`,
    `let newPackRolesShown = new Set();`,
    `let newPackDefaultsPending = false, pendingSeedPacks = null;`,
+   `let newPrompterOffer = null, newPrompterTicks = new Set(), newPrompterRequest = 0;`,
+   slice("refreshNewPrompterOffer"), slice("newPrompterSelection"),
    slice("newPackDefaults"), slice("promptPackFormOpened"),
    slice("refreshPromptPackOffer"), slice("applyPendingPackSeed"),
    slice("newDaemonPromptWanted"),
@@ -91,6 +93,9 @@ const env = new Function(
    slice("togglePackPreview"), slice("packPreviewOrigin"), slice("packPreviewPanel"),
    `return {
       set offer(v) { newPackOffer = v; },
+      set prompter(v) { newPrompterOffer = v; },
+      prompterSelection: newPrompterSelection,
+      refreshPrompter: refreshNewPrompterOffer,
       set roleDefault(v) { rolesDefault = v; },
       ticks: () => newPackTicks, subTicks: () => newSubroleTicks,
       render: renderPromptPackRow, packs: newPromptPacks,
@@ -690,6 +695,44 @@ check("an on-demand pack installs like any pack but is in neither setting", () =
   const heads = all(c, (n) => n.tag === "th").map((n) => n.textContent);
   assert.ok(!heads.includes("retrospective"), heads);
   assert.match(text(c), /Not listed here or below: retrospective/);
+});
+
+check("server prompts can be previewed, selected, and deselected beside packs", async () => {
+  answers["/api/prompter/prompts"] = [200, {
+    enabled: true, connected: true, url: "https://p.example", prompts: [
+      { id: 1, name: "server-rule", title: "Server rule", body: "SERVER BODY\nsecond line" },
+    ],
+  }];
+  await env.refreshPrompter();
+  const remoteBox = () => all(row, (n) => n.name === "prompter_prompt_1")[0];
+  assert.equal(remoteBox().checked, false);
+  assert.equal(env.prompterSelection(), null);
+  const chip = all(row, (n) => n.className.startsWith("pack-chip") &&
+    n.children.some((c) => c.children && c.children.includes(remoteBox())))[0];
+  const view = all(chip, (n) => n.tag === "button" && n.textContent === "view")[0];
+  view.handlers.click[0]();
+  assert.equal(env.preview().doc.body, "SERVER BODY\nsecond line");
+  assert.match(text(row), /prompter · https:\/\/p.example/);
+  let box = remoteBox(); box.checked = true; box.handlers.change[0]();
+  assert.deepEqual(env.prompterSelection(), { url: "https://p.example", ids: [1] });
+  assert.match(summary(), /Server rule \(prompter\)/);
+  assert.ok(!env.packs(form).includes("prompter:1"));
+  box = remoteBox(); box.checked = false; box.handlers.change[0]();
+  assert.equal(env.prompterSelection(), null);
+  env.prompter = { enabled: true, connected: false, error: "offline", prompts: [] };
+  env.render();
+  assert.match(text(row), /Prompter unavailable: offline/);
+  env.prompter = { enabled: false, connected: false, prompts: [] };
+  env.render();
+  assert.doesNotMatch(text(row), /Prompter unavailable/);
+});
+
+check("new and spawn payload allow the selected server identities", () => {
+  const config = new Function(slice("sessionFormConfig") + "; return sessionFormConfig;")();
+  for (const mode of ["new", "spawn"]) {
+    assert.ok(config(mode).payload.includes("prompter_prompts"));
+    assert.ok(config(mode).editable.includes("prompter_prompt_*"));
+  }
 });
 
 queue.then(() => setTimeout(() => {

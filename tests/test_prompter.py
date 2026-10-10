@@ -11,10 +11,13 @@ from __future__ import annotations
 import asyncio
 import time
 
+import pytest
+
 from aiohttp import web as aioweb
 from aiohttp.test_utils import TestClient, TestServer
 
 from claude_launcher import store
+from claude_launcher.prompt_packs import PackError
 from claude_launcher.daemon import prompter
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.manager import SessionManager
@@ -60,6 +63,54 @@ def _daemon_app():
 
 def setup_function():
     prompter._cache.clear()
+
+
+def test_selected_prompts_use_configured_server_and_deduplicate(home):
+    async def run():
+        hits = []
+        server = await _fake_prompter(hits)
+        try:
+            url = str(server.make_url("")).rstrip("/")
+            prompter.set_url(url)
+            recs = await prompter.selected_records({"url": url, "ids": [2, 1, 2]})
+            assert [r["id"] for r in recs] == ["prompter:2", "prompter:1"]
+            assert [r["text"] for r in recs] == ["commit body", "align body"]
+            assert all(r["url"] == url and r["source"] == "prompter" for r in recs)
+            assert hits == [{"kind": "prompt"}]
+            with pytest.raises(PackError, match="unavailable"):
+                await prompter.selected_records({"url": url, "ids": [3, 99]})
+            with pytest.raises(PackError, match="server changed"):
+                await prompter.selected_records({"url": "https://old.example", "ids": [1]})
+        finally:
+            await server.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("selection", [[], "1", {}, {"ids": "1"}, {"ids": [True]},
+                                       {"ids": [-1]}, {"ids": ["1"]}])
+def test_selected_prompts_reject_malformed_selection(selection):
+    with pytest.raises(PackError):
+        asyncio.run(prompter.selected_records(selection))
+
+
+def test_selected_prompts_fail_closed_only_when_selected(home, monkeypatch):
+    prompter.set_url("https://p.example")
+    calls = []
+
+    async def fail(url):
+        calls.append(url)
+        raise RuntimeError("offline")
+
+    monkeypatch.setattr(prompter, "_fetch", fail)
+
+    async def run():
+        assert await prompter.selected_records(None) == []
+        assert await prompter.selected_records({"ids": []}) == []
+        assert calls == []
+        with pytest.raises(PackError, match="offline"):
+            await prompter.selected_records({"url": "https://p.example", "ids": [1]})
+        assert calls == ["https://p.example"]
+    asyncio.run(run())
 
 
 def test_normalize_url_accepts_http_and_blank():
