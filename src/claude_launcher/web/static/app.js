@@ -15061,10 +15061,10 @@ async function toggleLineSync() {
 
 /* ---- images for the session: Alt+V, a pasted file, the file picker ----
    The program in the PTY reads bytes, so there is no way to hand it an
-   attachment from here. What it does accept is an image off the clipboard —
-   so the image is uploaded, the daemon stores it, puts it on the clipboard
-   of the machine it runs on, and sends the keystroke that harness reads an
-   image with. Nothing is typed into the composer.
+   attachment from here. The image is uploaded and stored by the daemon,
+   then delivered using the harness declaration: a pasted file path for
+   Claude/Codex, or a clipboard write and keystroke for clipboard transports.
+   Nothing is typed into the web composer.
 
    The image always travels from THIS browser, as bytes in an upload. That is
    what makes the result the same wherever the browser is: on the daemon's
