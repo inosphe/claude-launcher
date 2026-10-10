@@ -479,7 +479,7 @@ def test_pr_or_local_retries_then_falls_back_locally(tmp_path, monkeypatch):
     st = runtime.start(_medium_flow(tmp_path), caps={}, **kw)
 
     def report(label, outcome="ok", value=None):
-        iid = next(t["instance"] for t in st["tasks"] if t["label"] == label)
+        iid = next(t["instance"] for t in st["tasks"] if t["label"].rsplit("/", 1)[-1] == label)
         return runtime.report(iid, outcome, value, **kw)
 
     st = report("remote-setup", "blocked", {"reason": "gh not logged in"})
@@ -507,9 +507,9 @@ def test_pr_or_local_user_local_answer(tmp_path, monkeypatch):
     monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
     kw = {"cwd": str(tmp_path), "scope": "m", "now": 1.0}
     st = runtime.start(_medium_flow(tmp_path), caps={}, **kw)
-    iid = next(t["instance"] for t in st["tasks"] if t["label"] == "remote-setup")
+    iid = next(t["instance"] for t in st["tasks"] if t["label"].rsplit("/", 1)[-1] == "remote-setup")
     st = runtime.report(iid, "blocked", {"reason": "no remote"}, **kw)
-    iid = next(t["instance"] for t in st["tasks"] if t["label"] == "ask-frame")
+    iid = next(t["instance"] for t in st["tasks"] if t["label"].rsplit("/", 1)[-1] == "ask-frame")
     assert "no remote" in st["tasks"][0]["prompt"]
     runtime.report(iid, "ok", {"brief": BRIEF}, **kw)
     runtime.approve(None, decision="local", reason="this round only", **kw)
@@ -580,16 +580,16 @@ def test_pr_or_local_scenarios(scen, tmp_path, monkeypatch):
     st = runtime.start(chart, caps={}, params={"force_pr": force}, **kw)
     seen = []
     for label, outcome, value in steps:
-        seen.append(st["tasks"][0]["label"])
+        seen.append(st["tasks"][0]["label"].rsplit("/", 1)[-1])
         if label == "answer":
-            frame = next(t for t in st["tasks"] if t["label"] == "ask-frame")
+            frame = next(t for t in st["tasks"] if t["label"].rsplit("/", 1)[-1] == "ask-frame")
             runtime.report(frame["instance"], "ok", {"brief": _brief2(*(value or ()))}, **kw)
             runtime.approve(None, decision=outcome, reason="why", **kw)
             st = runtime.status(**kw)
         else:
-            iid = next(t["instance"] for t in st["tasks"] if t["label"] == label)
+            iid = next(t["instance"] for t in st["tasks"] if t["label"].rsplit("/", 1)[-1] == label)
             st = runtime.report(iid, outcome, value, **kw)
-    seen.extend(t["label"] for t in st.get("tasks") or [])
+    seen.extend(t["label"].rsplit("/", 1)[-1] for t in st.get("tasks") or [])
     assert seen == order
     state = runtime.RunStore(str(tmp_path), "m").load_state()
     assert {k: v for k, v in state["data"].items() if k in ("landing", "published")} == data
@@ -796,11 +796,11 @@ def test_a_failed_prior_context_does_not_end_the_round(tmp_path, monkeypatch):
     monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
     kw = {"cwd": str(tmp_path), "scope": "m", "now": 1.0}
     st = runtime.start(_prior_flow(tmp_path), caps={}, **kw)
-    iid = next(t["instance"] for t in st["tasks"] if t["label"] == "intake")
+    iid = next(t["instance"] for t in st["tasks"] if t["label"].rsplit("/", 1)[-1] == "intake")
     st = runtime.report(iid, "ok", INTAKE, **kw)
-    iid = next(t["instance"] for t in st["tasks"] if t["label"] == "prior-context")
+    iid = next(t["instance"] for t in st["tasks"] if t["label"].rsplit("/", 1)[-1] == "prior-context")
     st = runtime.report(iid, "fail", {"reason": "MCP search refused"}, **kw)
-    task = next(t for t in st["tasks"] if t["label"] == "prior-context-fallback")
+    task = next(t for t in st["tasks"] if t["label"].rsplit("/", 1)[-1] == "prior-context-fallback")
     assert "MCP search refused" in task["prompt"]
     found = {"query": "q", "summary": "검색 실패로 대체 검색: 없음", "related": [], "duplicate": None}
     st = runtime.report(task["instance"], "ok", found, **kw)
@@ -814,9 +814,9 @@ def test_an_ok_prior_context_feeds_intake_issue(tmp_path, monkeypatch):
     monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
     kw = {"cwd": str(tmp_path), "scope": "m", "now": 1.0}
     st = runtime.start(_prior_flow(tmp_path), caps={}, **kw)
-    iid = next(t["instance"] for t in st["tasks"] if t["label"] == "intake")
+    iid = next(t["instance"] for t in st["tasks"] if t["label"].rsplit("/", 1)[-1] == "intake")
     st = runtime.report(iid, "ok", INTAKE, **kw)
-    iid = next(t["instance"] for t in st["tasks"] if t["label"] == "prior-context")
+    iid = next(t["instance"] for t in st["tasks"] if t["label"].rsplit("/", 1)[-1] == "prior-context")
     found = {"query": "q", "summary": "선행 맥락 없음(쿼리: q)", "related": [], "duplicate": "claunch-x"}
     st = runtime.report(iid, "ok", found, **kw)
     assert [t["label"] for t in st["tasks"]] == ["intake-issue"]
@@ -843,7 +843,7 @@ def test_the_end_question_can_be_posed(tmp_path, monkeypatch):
     st = runtime.start(chart, caps={}, **kw)
     brief = dict(BRIEF, recommendation="end", options=[
         dict(BRIEF["options"][0], name="end"), dict(BRIEF["options"][1], name="hold")])
-    iid = next(t["instance"] for t in st["tasks"] if t["label"] == "ask-frame")
+    iid = next(t["instance"] for t in st["tasks"] if t["label"].rsplit("/", 1)[-1] == "ask-frame")
     st = runtime.report(iid, "ok", {"brief": brief}, **kw)
     assert st["status"] == "waiting_approval" and [a["node"] for a in st["asks"]]
     runtime.approve(None, decision="end", reason="done", **kw)
@@ -1018,7 +1018,7 @@ def test_a_failed_retrospective_still_reaches_the_end_decision(tmp_path, monkeyp
                                   resolve_include=layers.resolver(str(tmp_path)))
     kw = {"cwd": str(tmp_path), "scope": "m", "now": 1.0}
     st = runtime.start(chart, caps={}, **kw)
-    task = next(t for t in st["tasks"] if t["label"] == "retrospective")
+    task = next(t for t in st["tasks"] if t["label"].rsplit("/", 1)[-1] == "retrospective")
     value = {"where": "claunch-x", "proposals": 2, "problems": 1} if outcome == "ok" else {}
     st = runtime.report(task["instance"], outcome, value, **kw)
     assert [t["label"] for t in st["tasks"]] == ["end-stub"]
