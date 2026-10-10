@@ -16144,6 +16144,133 @@ async function refreshTermWindow() {
   renderTermWindow(v);
 }
 
+/* ---- session timer line (#term-timers, claunch-7dzae) ----
+   Every countdown the attached session waits on, one chip each, soonest
+   first: a cflow v2 choice held until its option's interval window opens
+   (improv-worker-v2's await-landing `nudge`), an option whose window is still
+   closed, a v2 wait, a loop's `every` pause, an ask's deadline. The daemon
+   gathers them from registered providers (daemon/session_timers.py,
+   GET /api/sessions/<name>/timers); this strip draws whatever comes back and
+   knows a kind only for its glyph, so a new provider shows up here without a
+   change to this code.
+
+   Up only while there is a timer to show. It shares the terminal's column
+   like the window strip, so it refits only when the set of chips changes
+   (`sig`); the 1s tick repaints the clocks. */
+let termTimersView = null;   // the last GET /api/sessions/<name>/timers
+let termTimersTick = null;   // the 1s repaint while the strip is up
+
+const TERM_TIMER_GLYPH = {
+  hold: "⏸",     // a pick queued behind a closed window
+  window: "◔",   // an option that opens again at `due`
+  wait: "⧗",
+  pause: "↻",
+  ask: "?",
+};
+const TERM_TIMER_GLYPH_DEFAULT = "⏱";
+
+function termTimerClock(ts) {
+  const d = new Date(ts * 1000);
+  return Number.isFinite(d.getTime())
+    ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+    : "?";
+}
+
+/* What the strip says, as data: one row per timer. Kept apart from the DOM
+   so the check can read the words without a page. A closed window past its
+   time is dropped (nothing waits behind it: the option is open now); a held
+   pick or a wait past its time stays, marked due, until the daemon fires it
+   and the next poll no longer carries it. */
+function termTimerRows(v, now) {
+  if (!v || !Array.isArray(v.timers)) return [];
+  const t0 = (now || Date.now()) / 1000;
+  const rows = [];
+  for (const t of v.timers) {
+    const due = Number(t.due);
+    if (t.due === null || t.due === undefined || !Number.isFinite(due)) continue;
+    const left = due - t0;
+    if (t.state === "closed" && left <= 0) continue;
+    const since = Number(t.since);
+    const span = t.since !== null && t.since !== undefined && Number.isFinite(since) &&
+      due > since ? due - since : null;
+    const pct = span ? Math.min(1, Math.max(0, (t0 - since) / span)) : null;
+    const overdue = left <= 0;
+    const lines = [];
+    if (t.detail) lines.push(t.detail);
+    lines.push(`${overdue ? "was due" : "due"} at ${termTimerClock(due)}` +
+      (t.state === "held" ? " — the held pick is applied then" : ""));
+    if (t.scope) lines.push(`run: ${t.scope}`);
+    lines.push(`source: ${t.source}${t.kind ? ` · ${t.kind}` : ""}`);
+    rows.push({
+      key: `${t.source}:${t.id}`,
+      kind: t.kind || "",
+      state: t.state || "waiting",
+      glyph: TERM_TIMER_GLYPH[t.kind] || TERM_TIMER_GLYPH_DEFAULT,
+      label: t.label || t.kind || "timer",
+      clock: overdue ? "due" : fmtSpan(left),
+      overdue,
+      pct,
+      link: t.link || "",
+      title: lines.join("\n"),
+    });
+  }
+  return rows;
+}
+
+function renderTermTimers(v) {
+  const box = $("term-timers");
+  if (!box) return;
+  if (v && v.session !== currentName) v = null;   // a previous session's read
+  termTimersView = v;
+  const rows = termTimerRows(v);
+  const show = rows.length > 0 && currentPage === "terminal" && !!currentName;
+  const sig = show ? rows.map((r) => r.key).join(",") : "hidden";
+  const changed = box.dataset.sig !== sig;
+  box.dataset.sig = sig;
+  if (!show) {
+    box.classList.add("hidden");
+    box.innerHTML = "";
+    if (termTimersTick) { clearInterval(termTimersTick); termTimersTick = null; }
+    if (changed) refitSoon(60);
+    return;
+  }
+  box.innerHTML = "";
+  box.appendChild(el("span", "tt-head", "timers"));
+  for (const r of rows) {
+    const chip = el("button",
+      `tt-chip tt-${r.kind || "other"} tt-state-${r.state}${r.overdue ? " tt-due" : ""}`);
+    chip.type = "button";
+    chip.title = r.title + (r.link ? "\nclick: open the run page" : "");
+    if (r.pct !== null) chip.style.setProperty("--tt-pct", `${Math.round(r.pct * 100)}%`);
+    chip.appendChild(el("span", "tt-glyph", r.glyph));
+    chip.appendChild(el("span", "tt-label", r.label));
+    chip.appendChild(el("span", "tt-clock", r.clock));
+    if (r.link) chip.addEventListener("click", () => { location.hash = r.link; });
+    else chip.disabled = true;
+    box.appendChild(chip);
+  }
+  box.classList.remove("hidden");
+  if (!termTimersTick) {
+    termTimersTick = setInterval(() => renderTermTimers(termTimersView), 1000);
+  }
+  if (changed) refitSoon(60);
+}
+
+async function refreshTermTimers() {
+  const name = currentName;
+  if (!name || currentPage !== "terminal") { renderTermTimers(null); return; }
+  let v = null;
+  try {
+    const resp = await api(`/api/sessions/${encodeURIComponent(name)}/timers`);
+    if (!resp.ok) { renderTermTimers(null); return; } // older daemon: no route
+    v = await resp.json();
+  } catch {
+    return; // offline — the health poll owns saying so; keep the last truth
+  }
+  if (name !== currentName || currentPage !== "terminal") return;
+  renderTermTimers(v);
+}
+
 /* ---- cflow answer strip (#term-cflow) ----
    The attached session's run is stopped on something only a person settles
    (sessCflowGated: an approval, a user branch, a goto request, an ask that
@@ -18779,6 +18906,9 @@ function showView(name) {
   // place in the queue, re-asked-for on the way back in.
   if (!showTerm) renderTermWindow(null);
   else refreshTermWindow();
+  // The timer line, the same way: re-asked-for on the way back in.
+  if (!showTerm) renderTermTimers(null);
+  else refreshTermTimers();
   for (const [page, id] of Object.entries(VIEWS)) {
     $(id).classList.toggle("hidden", name !== page);
   }
@@ -43769,6 +43899,7 @@ async function pollOnce() {
     refreshCflow2Rail(),
     refreshTermQueued(),
     refreshTermWindow(),
+    refreshTermTimers(),
   ];
   // Polled because the registry is edited from the CLI, in another window;
   // it redraws only when the list really changed (see refreshWorkspaces).

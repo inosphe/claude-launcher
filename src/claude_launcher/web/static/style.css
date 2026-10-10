@@ -2154,6 +2154,33 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 }
 #term-window .tw-over { color: #d29922; }
 #term-window .tw-load { color: #7d8590; padding: 0 14px 5px; font-size: 11px; }
+/* The session's timer line (claunch-7dzae): one chip per countdown, the
+   part already elapsed drawn as a fill behind the text (--tt-pct). Neutral
+   grey: a timer is ordinary waiting. A held pick is blue (something is
+   queued behind it); a chip past its time is amber (the daemon owes it). */
+#term-timers {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px;
+  background: #11151b; border-bottom: 1px solid #2a2e36;
+  color: #c6cdd5; font-size: 12px; flex: none; padding: 4px 14px;
+}
+#term-timers .tt-head { color: #7d8590; font-size: 11px; text-transform: uppercase; }
+#term-timers .tt-chip {
+  --tt-fill: #1f2630;
+  display: inline-flex; align-items: baseline; gap: 6px; max-width: 100%;
+  padding: 2px 8px; border: 1px solid #2a2e36; border-radius: 10px;
+  color: inherit; font: inherit; cursor: pointer;
+  background: linear-gradient(90deg, var(--tt-fill) var(--tt-pct, 0%),
+                              transparent var(--tt-pct, 0%));
+}
+#term-timers .tt-chip:disabled { cursor: default; }
+#term-timers .tt-chip:not(:disabled):hover { border-color: #3d444d; }
+#term-timers .tt-label {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#term-timers .tt-clock { font-variant-numeric: tabular-nums; font-weight: 600; }
+#term-timers .tt-state-held { color: #79c0ff; border-color: #1f3a5c; --tt-fill: #10243b; }
+#term-timers .tt-state-closed { color: #9da7b3; }
+#term-timers .tt-due { color: #d29922; border-color: #5a4312; }
 /* The cflow answer strip: the attached session's run is waiting on a person.
    The gate amber of the rail line it repeats (`.wf-waiting`), one row high
    at desktop width; on a narrow window the buttons wrap to a second row

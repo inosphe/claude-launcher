@@ -64,6 +64,7 @@ from . import rag as rag_mod
 from . import worktree_inventory
 from . import vscode as vscode_mod
 from . import cflow2_approve, cflow2_web
+from . import session_timers
 from ..cflow2 import expr as cflow2_expr, frontend as cflow2_frontend
 from ..cflow2 import ir as cflow2_ir, runtime as cflow2_runtime, store as cflow2_store
 from ..cflow2 import layers as cflow2_layers
@@ -829,6 +830,7 @@ def build_app(
     r.add_get("/api/sessions/{name}/briefing", h_session_briefing)
     r.add_get("/api/sessions/{name}/queued", h_session_queued)
     r.add_get("/api/sessions/{name}/window", h_session_window)
+    r.add_get("/api/sessions/{name}/timers", h_session_timers)
     r.add_post("/api/sessions/{name}/queued/flush", h_session_queued_flush)
     r.add_post("/api/sessions/{name}/queued/hold", h_session_hold)
     r.add_get("/api/sessions/{name}/reminder", h_session_reminder)
@@ -8739,6 +8741,18 @@ async def h_session_window(request: web.Request) -> web.Response:
     header's window strip; a read, like ``GET /api/window``."""
     session = _session(request)
     return json_response(request.app["window"].session_view(session.sdef.name))
+
+
+async def h_session_timers(request: web.Request) -> web.Response:
+    """Every countdown this session waits on, soonest first (claunch-7dzae):
+    a cflow v2 choice held until its interval window opens, a v2 wait, a
+    loop pause, an ask deadline -- whatever the providers registered in
+    ``session_timers`` report. Polled by the terminal's timer line
+    (#term-timers); a read."""
+    session = _session(request)
+    data = await asyncio.to_thread(
+        session_timers.collect, session.sdef.name, _session_cwd(session), app=request.app)
+    return json_response(data)
 
 
 async def h_session_queued_flush(request: web.Request) -> web.Response:
