@@ -1905,3 +1905,21 @@ def test_a_slot_with_a_parked_v1_run_reminds_its_live_v2_run(proj):
     clock.scan(1000.0)
     due = clock.scan(1000.0 + 601)
     assert len(due) == 1 and "write the parser" in due[0][2]
+
+
+def test_a_v2_run_driven_from_another_session_is_left_out(proj):
+    """The reminder goes to the slot's own session; a run whose recorded
+    driver is somebody else is not that session's to move."""
+    from claude_launcher.cflow2 import store as cstore
+
+    cwd = str(proj)
+    _start_v2(cwd, V2_TWO)
+    st = cstore.RunStore(cwd, "w1")
+    with st.lock():
+        state = st.load_state()
+        state["driver"] = "w9"
+        st.save_state(state)
+    clock = cflow_clock.ReminderClock(
+        _FakeManager({"w1": _FakeSession("w1", cwd)}))
+    clock.scan(1000.0)
+    assert clock.scan(99999.0) == []

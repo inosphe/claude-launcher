@@ -704,11 +704,15 @@ class CflowReminderSource:
 
         v1 runs come from their registry. A v2 run has none, so each live
         session's own slot (scope = the session's name) is read for one --
-        before claunch-ccoof this clock read only v1 and no v2 run was ever
-        reminded, which left a v2 driver that ended its turn with nothing to
-        start the next one. A slot holding both is v1's while v1 has the
-        agent's position, and v2's otherwise: yielding both would arm and
-        drop the same timer on every pass.
+        before claunch-ccoof this clock read only v1 and no v2 driver was
+        ever reminded. Like every reminder this one is typed only into a
+        busy session (session_reminder holds it otherwise): it re-aims an
+        agent mid-turn, and an idle driver is woken by the cflow2 clock's
+        moved_block or the resume nudge instead. A run whose recorded driver
+        is another session is left out -- the reminder goes to the slot's
+        own session, which is not the one to move it. A slot holding both is
+        v1's while v1 has the agent's position, and v2's otherwise: yielding
+        both would arm and drop the same timer on every pass.
         """
         v2_runs: Dict[Tuple[str, str], dict] = {}
         try:
@@ -728,7 +732,8 @@ class CflowReminderSource:
             except Exception as exc:  # noqa: BLE001 -- FlowError, StoreError, OSError
                 log.debug("cflow reminder skipped v2 %s/%s: %s", cwd, scope, exc)
                 continue
-            if payload.get("status") in cflow2_runtime.LIVE_STATUSES:
+            if (payload.get("status") in cflow2_runtime.LIVE_STATUSES
+                    and (payload.get("driver") or scope) == scope):
                 v2_runs[(cwd, scope)] = payload
         for cwd, scope in cflow_state.known_runs():
             key = (cwd, scope)
@@ -1102,11 +1107,10 @@ def v2_reminder_block(payload: dict, interval: float,
             lines.append(f"choice {c.get('label') or c.get('instance')}: "
                          f"{str(c.get('prompt') or '').strip()}")
     lines.append(
-        "protocol: the run is waiting on you and has not moved. If you are "
-        "mid-work, keep going. If you ended your turn waiting for something "
-        "(a background command, a reply), check whether it is still coming. "
-        "Otherwise call flow_status and finish the task with flow_report, or "
-        "the choice with flow_select.")
+        "protocol: the run is waiting on you and has not moved. If this is the "
+        "work you are on, keep going. If you have lost the thread, call "
+        "flow_status, then finish the task with flow_report, or the choice "
+        "with flow_select.")
     lines.append("---")
     return "\n".join(lines)
 

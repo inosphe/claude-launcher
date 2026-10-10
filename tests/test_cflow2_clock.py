@@ -287,6 +287,24 @@ def test_a_returned_headless_wakes_the_driver_once(tmp_path, monkeypatch):
     assert clock.scan() == []  # once per closing, not every pass
 
 
+def test_a_pass_that_fails_later_does_not_repeat_the_notice(tmp_path, monkeypatch):
+    """A step after the notice raising (caught per slot by scan) must not
+    leave the old open set behind, or every pass announces it again."""
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    d, launch = _fake_launch(tmp_path)
+    clock = _clock(FakeManager(FakeSession("own", str(tmp_path))), launch_for=lambda scope: launch)
+    clock.scan()
+    _start(tmp_path, HEADLESS, caps=JSON_CAPS)
+    assert clock.scan() == []
+
+    def boom(*a, **kw):
+        raise runtime.FlowError("restart record unreadable")
+
+    monkeypatch.setattr(clock, "_claim_restarts", boom)
+    assert len(clock.scan()) == 1
+    assert clock.scan() == []
+
+
 def test_a_closed_subagent_delegation_is_not_announced(tmp_path, monkeypatch):
     """The driver submits a subagent's result itself, so it is awake."""
     monkeypatch.delenv("CLAUNCH_SESSION", raising=False)

@@ -585,6 +585,10 @@ class Cflow2Clock:
         elif self._delegation_closed(cwd, scope, first) and _waits_on_driver(payload):
             notices.append((cwd, payload.get("driver") or scope,
                             moved_block(scope, payload, why=WHY_DELEGATION)))
+        # Taken now, not only at the end of the pass: a step below that raises
+        # would leave the old set, and every later pass would announce the
+        # same closed delegation again.
+        self._open_delegations[(cwd, scope)] = _open_delegations(first)
         self._claim_restarts(cwd, scope, now, notices)
         for text in asks.tick(cwd=cwd, scope=scope, now=now, pool_fn=self.ask_pool,
                               deliver_fn=self.ask_deliver):
