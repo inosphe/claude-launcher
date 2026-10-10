@@ -574,6 +574,7 @@ BROWSER_CHECKS = [
         "tabdragscroll_browser.cjs",
         "theme_browser.cjs",
         "railnav_browser.cjs",
+        "terminputlayout_browser.cjs",
 ]
 
 

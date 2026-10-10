@@ -14902,12 +14902,16 @@ function onTermInputSubmit(ev) {
    its own, so the height is cleared before it is read: scrollHeight of a
    collapsed box is the height the text actually needs. The CSS ceiling
    (max-height) turns the rest into a scroll rather than letting the composer
-   push the terminal off the screen. */
+   push the terminal off the screen. The page sizes every box border-box
+   (style.css), and scrollHeight stops inside the border, so the border is
+   added back: without it the box came out 2px short of its own content and
+   showed a scrollbar on a single line. */
 function autogrowTermInput(field) {
   if (!field || !field.style) return;
   field.style.height = "auto";
   const needed = field.scrollHeight;
-  if (needed) field.style.height = `${needed}px`;
+  const border = (field.offsetHeight || 0) - (field.clientHeight || 0);
+  if (needed) field.style.height = `${needed + Math.max(0, border)}px`;
 }
 
 /* Ctrl+J breaks the line at the caret, Enter sends — the split Claude Code

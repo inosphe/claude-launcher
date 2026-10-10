@@ -2337,6 +2337,15 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   flex: none; display: flex; align-items: flex-end; gap: 8px; min-width: 0;
   padding: 8px 12px; background: #1b1e24; border-top: 1px solid #2a2e36;
 }
+/* One row height for everything on the bar: the buttons, the one-row field
+   and the note share it, so they line up while the field holds one line, and
+   stay together along the bottom (align-items: flex-end) as it grows. Without
+   it the buttons were 25px against the field's 32px, the emoji button taller
+   than its text neighbours, and the note's text sat below their middles. */
+#term-input { --term-row: 32px; }
+#term-input > .term-btn {
+  flex: none; height: var(--term-row); padding-top: 0; padding-bottom: 0;
+}
 #term-clipboard-menu {
   position: absolute; bottom: 100%; left: 8px; z-index: 50;
   width: min(520px, calc(100% - 16px)); max-height: 60vh; overflow: auto;
@@ -2387,10 +2396,17 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
    eating the terminal above it. The manual resize grip is off: the height
    is the content's, and a dragged box would fight the script for it. */
 #term-input-field {
-  flex: 1; min-width: 0; padding: 5px 10px; font-size: 13px; line-height: 1.5;
+  flex: 1; min-width: min(16rem, 40%); padding: 5px 10px; font-size: 13px; line-height: 1.5;
   color: #d8dbe0; background: #14161a; border: 1px solid #30363d;
   border-radius: 5px; font-family: inherit; resize: none; overflow-y: auto;
   max-height: 30vh; white-space: pre-wrap; word-break: break-word;
+  min-height: var(--term-row);
+}
+/* An empty field keeps its placeholder on one line, cut with an ellipsis
+   where the bar is narrow. Wrapped, the placeholder counted in scrollHeight
+   and opened the empty field two rows tall. */
+#term-input-field:placeholder-shown {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 #term-input-field:focus { outline: none; border-color: #1f6feb; }
 #term-input-field:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -2404,7 +2420,8 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 #term-input-field.line-shared { border-color: #8957e5; }
 #term-input-field.line-shared:focus { border-color: #a371f7; }
 #term-local-keep {
-  flex: 0 1 30%; min-width: 0; padding: 5px 10px; font-size: 13px;
+  flex: 0 1 30%; min-width: 0; min-height: var(--term-row);
+  padding: 5px 10px; font-size: 13px;
   line-height: 1.5; color: #9da7b3; background: #101215;
   border: 1px dashed #30363d; border-radius: 5px; font-family: inherit;
   resize: none; overflow-y: auto; max-height: 30vh; white-space: pre-wrap;
@@ -2426,9 +2443,10 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 /* The send outcome, between the field and the button: a refusal or a dead
    daemon in the warning's amber, an informational reason in the note's grey.
    One line, truncated, so a long hold message can never shove the column
-   open. */
+   open, and the first thing on the bar to give up width: the field keeps
+   its minimum and the note's ellipsis takes the cut. */
 #term-input-note {
-  flex: none; max-width: 40%; margin: 0; line-height: 1.4;
+  flex: 0 1 auto; min-width: 0; max-width: 40%; margin: 0; line-height: var(--term-row);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   font-size: 12px;
 }
@@ -5250,6 +5268,8 @@ body.embed #main { width: 100%; }
   #new-mesh input, #new-mesh select, .auth-box input,
   #session-search, .beads-search,
   #term-input-field { font-size: 16px; }
+  /* the 16px field's one row is 36px; the bar's row height follows it */
+  #term-input { --term-row: 36px; }
   /* A thumb reaches a 22px target; the box gives it the room to sit in. */
   #session-search { padding-right: 28px; }
   .session-search-clear { width: 22px; height: 22px; right: 5px; }
