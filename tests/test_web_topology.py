@@ -572,6 +572,7 @@ BROWSER_CHECKS = [
         "reposyncagent_browser.cjs",
         "tabdragscroll_browser.cjs",
         "theme_browser.cjs",
+        "railnav_browser.cjs",
 ]
 
 
