@@ -37,7 +37,10 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
         field: { h: box(field).height, w: box(field).width, bottom: box(field).bottom,
                  overflow: field.scrollHeight > field.clientHeight },
         buttons: buttons.map(el => ({ id: el.id, h: box(el).height, bottom: box(el).bottom })),
-        note: { h: box(note).height, bottom: box(note).bottom },
+        note: { h: box(note).height, w: box(note).width, bottom: box(note).bottom },
+        bar: { scroll: form.scrollWidth, client: form.clientWidth },
+        sendRight: box(document.getElementById('term-input-send')).right,
+        viewport: window.innerWidth,
       };
     });
 
@@ -54,7 +57,7 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
       autogrowTermInput(document.getElementById('term-input-field'));
     });
 
-    for (const width of [1280, 760]) {
+    for (const width of [1280, 760, 520, 380]) {
       await page.setViewportSize({ width, height: 600 });
       await page.evaluate(() => autogrowTermInput(document.getElementById('term-input-field')));
       // TERMINPUT_SHOT=<dir> keeps a picture of the bar at each width
@@ -65,14 +68,24 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
       const row = m.buttons[0].h;
       assert.ok(Math.abs(m.field.h - row) < 1, `${width}px: empty field ${m.field.h}px against button ${row}px`);
       assert.equal(m.field.overflow, false, `${width}px: the empty field overflows`);
+      // nothing on the bar runs past its edge: the send button stays on screen
+      assert.ok(m.bar.scroll <= m.bar.client, `${width}px: bar overflows ${m.bar.scroll} > ${m.bar.client}`);
+      assert.ok(m.sendRight <= m.viewport, `${width}px: send button right ${m.sendRight} > ${m.viewport}`);
       // the note gives up width before the field drops under its minimum
-      assert.ok(m.field.w >= 250, `${width}px: field squeezed to ${m.field.w}px`);
+      if (width >= 760) assert.ok(m.field.w >= 250, `${width}px: field squeezed to ${m.field.w}px`);
       for (const b of m.buttons) {
         assert.ok(Math.abs(b.h - row) < 1, `${width}px: ${b.id} is ${b.h}px, not ${row}px`);
         assert.ok(Math.abs(b.bottom - m.field.bottom) < 1, `${width}px: ${b.id} bottom ${b.bottom} vs field ${m.field.bottom}`);
       }
-      assert.ok(Math.abs(m.note.h - row) < 1 && Math.abs(m.note.bottom - m.field.bottom) < 1,
-        `${width}px: note ${JSON.stringify(m.note)} off the row`);
+      if (width > 700) {
+        assert.ok(Math.abs(m.note.h - row) < 1 && Math.abs(m.note.bottom - m.field.bottom) < 1,
+          `${width}px: note ${JSON.stringify(m.note)} off the row`);
+      } else {
+        // a phone puts the note on its own row under the bar's controls
+        assert.ok(m.note.bottom - m.note.h >= m.field.bottom - 1, `${width}px: note not under the field`);
+        assert.ok(m.note.w >= m.bar.client - 30, `${width}px: note row only ${m.note.w}px wide`);
+        assert.ok(m.field.w >= 40, `${width}px: field squeezed to ${m.field.w}px`);
+      }
     }
 
     // Typed text: one line stays one row without a scrollbar; three lines grow

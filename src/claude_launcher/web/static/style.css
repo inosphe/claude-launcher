@@ -2396,7 +2396,7 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
    eating the terminal above it. The manual resize grip is off: the height
    is the content's, and a dragged box would fight the script for it. */
 #term-input-field {
-  flex: 1; min-width: min(16rem, 40%); padding: 5px 10px; font-size: 13px; line-height: 1.5;
+  flex: 1; min-width: max(0px, min(16rem, 100% - 24rem)); padding: 5px 10px; font-size: 13px; line-height: 1.5;
   color: #d8dbe0; background: #14161a; border: 1px solid #30363d;
   border-radius: 5px; font-family: inherit; resize: none; overflow-y: auto;
   max-height: 30vh; white-space: pre-wrap; word-break: break-word;
@@ -2444,11 +2444,20 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
    daemon in the warning's amber, an informational reason in the note's grey.
    One line, truncated, so a long hold message can never shove the column
    open, and the first thing on the bar to give up width: the field keeps
-   its minimum and the note's ellipsis takes the cut. */
+   its minimum and the note's ellipsis takes the cut. The field's minimum is
+   what is left once 24rem is set aside for the buttons, so on a phone it
+   falls to 0 and the send button stays on the bar. */
 #term-input-note {
   flex: 0 1 auto; min-width: 0; max-width: 40%; margin: 0; line-height: var(--term-row);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   font-size: 12px;
+}
+/* On a phone the note takes its own row under the bar, so it does not take
+   the little width the field has left beside the buttons. After the rule
+   above, which it overrides. */
+@media (max-width: 700px) {
+  #term-input:has(#term-input-note:not(.hidden)) { flex-wrap: wrap; }
+  #term-input-note { order: 3; flex-basis: 100%; max-width: none; }
 }
 /* xterm's viewport is the session's scrollback. Keep a flick that runs off
    its end there rather than chaining out to the document. */
