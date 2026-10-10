@@ -36654,7 +36654,13 @@ async function openSessionModal(opts = {}) {
   document.addEventListener("keydown", sessionModalKey);
   overlay.classList.remove("hidden");
   overlay.classList.add("spawn-open");
-  spawnSizeApply(overlay.querySelector(".modal-box"));
+  // The quick fork is six rows, not the session form's twenty: it opens at
+  // the height its rows take (fork-open in the sheet) instead of at the size
+  // the operator last dragged the New/Spawn box to, which on a box shrunk
+  // for that form left the fork scrolling inside a slit.
+  overlay.classList.toggle("fork-open", tab === "fork");
+  st.fork = tab === "fork";
+  if (!st.fork) spawnSizeApply(overlay.querySelector(".modal-box"));
   if (tab === "fork") {
     configureSessionFork(opts.source);
     renderSessionForm();
@@ -36712,7 +36718,12 @@ function sessionModalClose(opts = {}) {
   // rules still apply to it, and the inline pair is stripped so the next
   // confirm dialog opens at the sheet's 460px rather than at this form's
   // drag.
-  spawnSizeRemember(overlay.querySelector(".modal-box"));
+  // A fork box is sized by its rows, so its size is not the one the next
+  // New/Spawn box should open at; only the inline pair is stripped.
+  const box = overlay.querySelector(".modal-box");
+  if (st.fork) { box.style.width = ""; box.style.height = ""; }
+  else spawnSizeRemember(box);
+  overlay.classList.remove("fork-open");
   const f = $("new-session");
   f._sessionView = st.previousView;
   // A launch that went through clears the rows it consumed (SESSION_FORM_SPENT)
