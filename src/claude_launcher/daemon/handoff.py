@@ -93,10 +93,22 @@ def fork_name(origin: str, taken, *, tag: str = "qf") -> str:
 def compose_marker(
     *, origin: str, fork: str, marker: str, forked_at: str, cwd: str = "",
     mesh: str = "", workflow: str = "",
+    role: str = "", origin_role: str = "",
+    sibling: bool = False, placed_under: str = "",
 ) -> str:
     """The block at the top of the copy: where the fork begins, and how it
     ends. Fenced like every other machine-generated block a session gets, so
     the agent reads it as the daemon's and not as the user's.
+
+    ``role`` is the copy's role in ``mesh``, ``origin_role`` the origin's
+    there. The conversation above was held under the origin's role, and the
+    copy reads every word of it -- the stance, the duties, "I am the
+    leader" -- as its own unless told otherwise. So the role line is written
+    whenever a role is known, and when the two differ it says, in as many
+    words, that the role above is not this session's.
+
+    ``sibling`` places the copy beside the origin rather than under it:
+    ``placed_under`` names the parent it shares with the origin, "" a root.
 
     The ``checkout`` line is not decoration. A fork cannot be given a worktree
     of its own -- claude keeps transcripts per working directory, so a copy
@@ -139,12 +151,46 @@ def compose_marker(
         "only thing of this session that survives, so do not merge before "
         "the work is done, and do not end this session any other way.",
     ]
+    if sibling:
+        lines.append(
+            "placement: this copy is a SIBLING of "
+            f"{origin}, not its child -- "
+            + (f"it answers to {placed_under}, {origin}'s own parent"
+               if placed_under else
+               "a root session with no parent, as the origin is")
+            + ". The merge still goes back to "
+            f"{origin}."
+        )
     if mesh:
         lines.append(
             f"mesh: you were put in mesh {mesh} as {fork} -- the mesh the fork "
             "was asked to join. Its members are live sessions doing real work "
             "and what you send is typed into their terminals, so read the "
             "roster before you send: claunch mesh members " + mesh
+        )
+    if mesh and role:
+        if origin_role and origin_role != role:
+            lines.append(
+                f"role: CHANGED -- the conversation above was {origin}'s, held "
+                f"as {origin_role} in mesh {mesh}. That role, its stance and "
+                f"its duties stay with {origin} and are NOT yours. You are "
+                f"{role} in mesh {mesh} from this block on: where anything "
+                f"above speaks as {origin_role} (instructions, stance, "
+                "workflow steps, promises made to members), it does not bind "
+                f"you. Read your own stance first: claunch mesh stance {mesh}"
+            )
+        else:
+            lines.append(
+                f"role: you are {role} in mesh {mesh}"
+                + (f", the same role {origin} holds there" if origin_role else "")
+                + f". Read your stance: claunch mesh stance {mesh}"
+            )
+    elif not mesh and origin_role:
+        lines.append(
+            f"role: NONE -- the conversation above was {origin}'s, held as "
+            f"{origin_role} in its mesh. This copy joined no mesh and holds no "
+            f"role: the {origin_role} stance and duties above stay with "
+            f"{origin}, and there is no roster here to send to."
         )
     if workflow:
         lines.append(

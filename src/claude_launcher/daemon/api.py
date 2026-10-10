@@ -9244,17 +9244,69 @@ async def stage_quick_fork(
     # name, and the inheritance that already exists does the work.
     mesh = str(body.get("mesh") or onboard.NO_MESH)
     workflow = str(body.get("workflow") or onboard.NO_WORKFLOW)
+    role = str(body.get("role") or "").strip()
+    # Sibling: the copy answers to the origin's parent (a root when the origin
+    # is one) instead of the origin. It is still BUILT from the origin -- its
+    # conversation, its directory -- which is what stage_child's place_under
+    # keeps apart.
+    sibling = body.get("sibling") in (True, "true", "1", 1)
+    placed = (origin.sdef.parent or "") if sibling else parent
+    mesh_mgr = _mesh_mgr(request)
+    origin_meshes = mesh_mgr.meshes_for_session(parent)
+    if mesh == ".":
+        # The origin's mesh, read here rather than by inherit_mesh downstream
+        # when it can be named outright: inherit_mesh reads the PARENT's, and
+        # a sibling's parent is not the origin. With none or several the child
+        # keeps the downstream reading (it opens one, or refuses naming them);
+        # a sibling has no such parent to fall back on.
+        if len(origin_meshes) == 1:
+            mesh = origin_meshes[0]["mesh"]
+        elif sibling:
+            if origin_meshes:
+                raise QuickForkError(400, (
+                    f"session {parent!r} is in {len(origin_meshes)} meshes "
+                    f"({', '.join(sorted(m['mesh'] for m in origin_meshes))}) "
+                    "— name the one the copy joins"
+                ))
+            mesh = onboard.NO_MESH
+    if workflow == "." and sibling:
+        # The same pair a child would get (inherit_workflow), read from the
+        # origin's run, because the sibling's parent is not the origin.
+        paired, version = onboard._paired(
+            parent=parent, parent_cwd=origin.sdef.cwd or "",
+            cwd=origin.sdef.cwd or "",
+        )
+        workflow = paired or onboard.NO_WORKFLOW
+        workflow_version = version if paired else 0
+    else:
+        workflow_version = 0
     inherit_mesh = mesh == "."
     inherit_workflow = workflow == "."
+    named_mesh = "" if mesh in (onboard.NO_MESH, ".") else mesh
+    # The origin's role where the copy lands (or, with no mesh, its only one),
+    # and the copy's own: asked for, or what the join will resolve its name to.
+    origin_role = next(
+        (m["role"] for m in origin_meshes if m["mesh"] == named_mesh), ""
+    ) if named_mesh else (
+        origin_meshes[0]["role"] if len(origin_meshes) == 1 and mesh == onboard.NO_MESH else ""
+    )
+    fork_role = role
+    if named_mesh and not fork_role:
+        try:
+            fork_role = mesh_mgr.get(named_mesh).roleset.resolve(name, "")
+        except Exception:
+            fork_role = ""
     opening = handoff_mod.compose_marker(
         origin=parent, fork=name, marker=marker, forked_at=forked_at,
         # The origin's own directory, because a fork cannot be moved out of
         # it. Named in the block so the copy can see what it shares.
         cwd=str(origin.sdef.cwd or ""),
-        # An inherited one is not named here: it is settled downstream, and
-        # the block would be guessing. The join itself tells the copy.
-        mesh="" if mesh in (onboard.NO_MESH, ".") else mesh,
+        # An inherited one the origin's roster could not name is not named
+        # here: it is settled downstream, and the block would be guessing.
+        mesh=named_mesh,
         workflow="" if workflow in (onboard.NO_WORKFLOW, ".") else workflow,
+        role=fork_role, origin_role=origin_role,
+        sibling=sibling, placed_under=placed,
     )
     task = str(body.get("task") or "").strip()
     if task:
@@ -9266,15 +9318,27 @@ async def stage_quick_fork(
         "task": opening,
         "beads": False,
     }
-    if not inherit_mesh:
+    # The "none" spellings are read by the inheritance step, which only runs
+    # for a session with a parent; a root says none by leaving the field out.
+    if not inherit_mesh and (placed or mesh != onboard.NO_MESH):
         spawn_body["mesh"] = mesh
-    if not inherit_workflow:
+    if not inherit_workflow and (placed or workflow != onboard.NO_WORKFLOW):
         spawn_body["workflow"] = workflow
+    if workflow_version == 2:
+        spawn_body["workflow_version"] = 2
+    if role:
+        # Without a mesh preflight refuses it ("only mean something with a
+        # mesh"); with one, it refuses an exclusive role (leader) a live
+        # member already holds -- the authority behind the form's check.
+        spawn_body["role"] = role
     for key, value in (spawn_extra or {}).items():
         spawn_body.setdefault(key, value)
     warnings: list = []
     try:
-        session = manager.stage_child(parent, spawn_body, warnings=warnings)
+        session = manager.stage_child(
+            parent, spawn_body, warnings=warnings,
+            place_under=None if not sibling else placed,
+        )
     except spawn_mod.SpawnDenied as exc:
         raise QuickForkError(403, str(exc)) from None
     except (HarnessError, ValueError, TypeError) as exc:
@@ -9284,7 +9348,9 @@ async def stage_quick_fork(
     if before_launch is not None:
         before_launch(session)
     try:
-        result = await _onboard_and_launch(request, session, spawn_body, parent=parent)
+        result = await _onboard_and_launch(
+            request, session, spawn_body, parent=(placed or None),
+        )
     except onboard.OnboardError as exc:
         raise QuickForkError(400, str(exc)) from None
     except (HarnessError, ValueError, TypeError) as exc:
@@ -9307,6 +9373,10 @@ async def stage_quick_fork(
         # it. A caller that prints one line about this fork should print this.
         "cwd": str(origin.sdef.cwd or ""),
         "shared_checkout": True,
+        # Where the copy hangs: under the origin, or beside it ("" = a root).
+        "sibling": sibling,
+        "parent": placed,
+        "role": fork_role if named_mesh else "",
     }
     if warnings:
         out["warnings"] = warnings
