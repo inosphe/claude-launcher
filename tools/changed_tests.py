@@ -1113,6 +1113,40 @@ def prune_basetemps(session: str, *, keep: int = KEEP_BASETEMPS) -> List[Path]:
     return dropped
 
 
+#: What a run leaves in its own basetemp for the daemon's reaper to read
+#: before it deletes the tree (``daemon/basetemp_reaper.py``).
+RUN_SUMMARY = "claunch-run.json"
+
+
+def command_basetemp(cmd: List[str]) -> Optional[str]:
+    """The ``--basetemp=`` a pytest command line names, if any."""
+    for arg in cmd:
+        if arg.startswith("--basetemp="):
+            return arg.split("=", 1)[1].strip('"')
+    return None
+
+
+def command_workers(cmd: List[str]) -> int:
+    """The xdist width a pytest command line asks for; 1 when serial."""
+    for i, arg in enumerate(cmd[:-1]):
+        if arg == "-n":
+            try:
+                return int(cmd[i + 1])
+            except ValueError:
+                return 1
+    return 1
+
+
+def write_run_summary(basetemp: Optional[str], summary: dict) -> None:
+    """Leave ``summary`` in the run's basetemp; bookkeeping, so never fatal."""
+    if not basetemp:
+        return
+    try:
+        Path(basetemp, RUN_SUMMARY).write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
 # --------------------------------------------------------------------------- #
 # receipts: so the same tree is not judged twice
 # --------------------------------------------------------------------------- #
@@ -1453,11 +1487,21 @@ def run_and_record(
         lines.append(line)
     code = proc.wait()
     finished = datetime.now(timezone.utc)
+    output = "".join(lines)
+    basetemp, workers = command_basetemp(cmd), command_workers(cmd)
+    write_run_summary(basetemp, {
+        "tree": tree,
+        "exit_code": code,
+        "counts": sweep.parse_counts(output),
+        "workers": workers,
+        "window": (window or {}).get("class"),
+        "started_at": started.isoformat(),
+        "finished_at": finished.isoformat(),
+    })
 
     if tree is None:
         return 0 if code == 0 else 1      # no key, so nothing to file it under
 
-    output = "".join(lines)
     receipt = {
         "kind": "changed_tests",
         "tree": tree,
@@ -1469,6 +1513,8 @@ def run_and_record(
         "counts": sweep.parse_counts(output),
         "failures": sweep._failure_lines(output),
         "session": os.environ.get("CLAUNCH_SESSION", "worker"),
+        "basetemp": basetemp,
+        "workers": workers,
         "window": window,
         "started_at": started.isoformat(),
         "finished_at": finished.isoformat(),
