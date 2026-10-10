@@ -18332,6 +18332,31 @@ function syncLayout() {
   if (wasOpen && !railOpen) refitSoon(60);
 }
 
+/* The rail nav's pin (claunch-cka36). On a desktop the nav shows one row
+   and opens on hover; pinned, it shows every row in the rail's flow
+   (style.css, #rail-nav-dock.pinned). Remembered per browser. */
+const RAIL_NAV_PIN_KEY = `claunch_rail_nav_pinned:${BASE}`;
+function setRailNavPinned(pinned) {
+  const dock = $("rail-nav-dock");
+  const pin = $("rail-nav-pin");
+  if (!dock || !pin) return;
+  dock.classList.toggle("pinned", pinned);
+  pin.setAttribute("aria-pressed", String(pinned));
+  pin.title = pinned ? "Unpin the page nav (fold it to one row)" : "Pin the page nav (show every row)";
+}
+(() => {
+  let pinned = false;
+  try { pinned = localStorage.getItem(RAIL_NAV_PIN_KEY) === "1"; } catch { /* storage off */ }
+  setRailNavPinned(pinned);
+  const pin = $("rail-nav-pin");
+  if (!pin) return;
+  pin.addEventListener("click", () => {
+    const next = !$("rail-nav-dock").classList.contains("pinned");
+    setRailNavPinned(next);
+    try { localStorage.setItem(RAIL_NAV_PIN_KEY, next ? "1" : "0"); } catch { /* storage off */ }
+  });
+})();
+
 /* Where the session detail lives, and whether it is up.
 
    Wide: a rail of its own down the right-hand side, opposite the one that

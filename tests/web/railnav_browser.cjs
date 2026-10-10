@@ -10,7 +10,10 @@
      3. moving the pointer away folds it again;
      4. keyboard focus on a link opens it too, and the focus a click leaves
         on a link does not (3 runs right after a click);
-     5. on a phone width the whole nav shows, as before. */
+     5. the pin keeps every row shown with the pointer away, the dock grows
+        to hold them (the list gives up its room), the choice survives a
+        reload through localStorage, and unpinning folds it again;
+     6. on a phone width the whole nav shows, as before, without the pin. */
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const http = require("node:http");
@@ -107,16 +110,48 @@ async function settle(page) {
     assert.equal((await page.evaluate(measure)).visible.length, folded.total, "focus opens it");
     await page.evaluate(() => document.activeElement.blur());
 
-    // 5. phone: the whole nav
+    // 5. the pin
+    const pinKey = await page.evaluate(() =>
+      Object.keys(localStorage).find((k) => k.startsWith("claunch_rail_nav_pinned:")) || null);
+    assert.equal(pinKey, null, "nothing is stored before the pin is used");
+    assert.equal(await page.getAttribute("#rail-nav-pin", "aria-pressed"), "false");
+    await page.click("#rail-nav-pin");
+    await page.mouse.move(1100, 400);
+    await settle(page);
+    const pinned = await page.evaluate(measure);
+    assert.equal(pinned.visible.length, pinned.total, `pinned shows every link: ${pinned.visible}`);
+    assert.ok(pinned.dockHeight > folded.dockHeight * 2, `the dock holds every row: ${pinned.dockHeight}`);
+    assert.ok(Math.abs(pinned.dockHeight - pinned.navHeight) < 2,
+      `the nav stands in the dock, not over the list: ${pinned.dockHeight} / ${pinned.navHeight}`);
+    assert.equal(await page.getAttribute("#rail-nav-pin", "aria-pressed"), "true");
+    const stored = () => page.evaluate(() => {
+      const k = Object.keys(localStorage).find((k) => k.startsWith("claunch_rail_nav_pinned:"));
+      return k ? localStorage.getItem(k) : null;
+    });
+    assert.equal(await stored(), "1", "the pin is stored");
+    await page.reload();
+    await page.mouse.move(1100, 400);
+    await settle(page);
+    assert.equal((await page.evaluate(measure)).visible.length, folded.total, "pinned after a reload");
+    await page.click("#rail-nav-pin");
+    await page.mouse.move(1100, 400);
+    await settle(page);
+    const unpinned = await page.evaluate(measure);
+    assert.equal(unpinned.visible.length, folded.columns, "unpinning folds it to one row");
+    assert.ok(Math.abs(unpinned.dockHeight - folded.dockHeight) < 1, "and the dock is one row again");
+    assert.equal(await stored(), "0", "the unpin is stored");
+
+    // 6. phone: the whole nav, no pin
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto(base);
     await settle(page);
     const phone = await page.evaluate(() => {
       const nav = document.getElementById("rail-nav");
       return { transform: getComputedStyle(nav).transform, overflow: getComputedStyle(nav).overflow,
-               position: getComputedStyle(nav).position };
+               position: getComputedStyle(nav).position,
+               pin: getComputedStyle(document.getElementById("rail-nav-pin")).display };
     });
-    assert.deepEqual(phone, { transform: "none", overflow: "visible", position: "static" },
+    assert.deepEqual(phone, { transform: "none", overflow: "visible", position: "static", pin: "none" },
       "a phone keeps the plain nav");
 
     assert.deepEqual(errors, []);

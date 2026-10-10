@@ -261,7 +261,7 @@
     <!-- The dock holds the nav's place in the rail. On a desktop with a
          pointer it is one row tall: the nav inside shows its first row and
          lays the rest over the session list while hovered or focused
-         (claunch-cka36). -->
+         (claunch-cka36). The pin keeps every row shown instead. -->
     <div id="rail-nav-dock">
     <nav id="rail-nav">
       <a href="#/observer" data-page="observer"><span>◎</span>Observer</a>
@@ -282,6 +282,7 @@
       <a href="#/cli" data-page="cli"><span>&gt;_</span>CLI</a>
       <a href="#/settings" data-page="settings"><span>⚙</span>Settings</a>
     </nav>
+    <button id="rail-nav-pin" type="button" aria-pressed="false">📌</button>
     </div>
   </aside>
 

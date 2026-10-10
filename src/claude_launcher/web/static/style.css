@@ -1249,6 +1249,7 @@ html[data-theme="light"] .xterm {
 #rail-nav a:hover { color: #c6cdd5; background: #22262d; }
 #rail-nav a.active { color: #d8dbe0; border-top-color: #58a6ff; }
 #rail-nav-dock { flex: none; }
+#rail-nav-pin { display: none; }
 
 /* Desktop with a pointer: the nav is one row tall, and the rows past the
    first open over the session list while the pointer or the focus is in it
@@ -1259,14 +1260,19 @@ html[data-theme="light"] .xterm {
    was when the rest opens above it. Every cell is one fixed row tall --
    the row height is what the collapsed nav is clipped to. A phone shows
    the whole nav (the rail is the menu there), and so does a screen with
-   no hover, which would have no way to open it. */
+   no hover, which would have no way to open it.
+   The pin at the dock's right end keeps every row shown: pinned, the nav
+   stands in the rail's flow (still flipped, so the rows keep the order the
+   hover shows) and the session list gives up its room. The choice is
+   remembered per browser (app.js, RAIL_NAV_PIN_KEY). */
 @media (min-width: 821px) and (hover: hover) {
   #rail-nav-dock {
-    --rail-nav-row: 46px;
+    --rail-nav-row: 46px; --rail-nav-pin: 22px;
     position: relative; height: calc(var(--rail-nav-row) + 1px);
+    padding-right: var(--rail-nav-pin); background: #1b1e24;
   }
   #rail-nav {
-    position: absolute; left: 0; right: 0; bottom: 0; z-index: 30;
+    position: absolute; left: 0; right: var(--rail-nav-pin); bottom: 0; z-index: 30;
     grid-auto-rows: var(--rail-nav-row);
     max-height: var(--rail-nav-row); overflow: hidden;
     transform: scaleY(-1);
@@ -1281,6 +1287,16 @@ html[data-theme="light"] .xterm {
     max-height: calc(var(--rail-nav-row) * 17);
     box-shadow: 0 0 12px rgba(0, 0, 0, 0.45);
   }
+  #rail-nav-pin {
+    display: block; position: absolute; right: 0; bottom: 0; z-index: 31;
+    width: var(--rail-nav-pin); height: calc(var(--rail-nav-row) + 1px); padding: 0;
+    border: none; border-top: 1px solid #2a2e36; background: #1b1e24;
+    font-size: 11px; cursor: pointer; opacity: 0.45; filter: grayscale(1);
+  }
+  #rail-nav-pin:hover { opacity: 0.9; background: #22262d; }
+  #rail-nav-pin[aria-pressed="true"] { opacity: 1; filter: none; }
+  #rail-nav-dock.pinned { height: auto; }
+  #rail-nav-dock.pinned #rail-nav { position: static; max-height: none; box-shadow: none; }
 }
 @media (min-width: 821px) and (hover: hover) and (prefers-reduced-motion: reduce) {
   #rail-nav { transition: none; }
