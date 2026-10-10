@@ -85,7 +85,7 @@ class Leader:
         return [t["label"] for t in self.st.get("tasks") or []]
 
     def report(self, label, outcome="ok", value=None, verify=None):
-        iid = next(t["instance"] for t in self.st["tasks"] if t["label"] == label)
+        iid = next(t["instance"] for t in self.st["tasks"] if t["label"].rsplit("/", 1)[-1] == label)
         self.st = runtime.report(iid, outcome, value, verify_runner=verify, **self.kw())
         if verify is not None:
             runtime.verify_join(10)
