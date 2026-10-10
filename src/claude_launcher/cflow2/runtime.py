@@ -380,34 +380,37 @@ def shown_label(chart: ir.Chart, node: ir.Node) -> Optional[str]:
     A node inlined from a ``call`` keeps its own name as its label -- the
     procedure reads its results under it (:func:`node_key`) -- so a chart
     that calls one procedure from several sites has several nodes under one
-    label, and every one of them read the same: improv-worker-v2's four
-    ask-user sites all showed ``ask-pose`` (claunch-tm5ki). Such a label is
-    shown with the call site's own shown label in front
-    (``end-decision/ask-pose``). When every site on the path has an id that
-    is also the node's id, so it resolves to that node and no other
-    (:meth:`ir.Chart.by_label` matches ids). A label no other node shares is
-    shown as it is, and so is one whose site has no id -- a generated path
-    (``body.0``) tells a reader nothing.
+    label, and every one of them read the same: improv-worker-v2's ask-user
+    sites all showed ``ask-pose`` (claunch-tm5ki). Such a label is shown
+    with the author ids on its path in front
+    (``round/resolve/issue-decision/ask-pose``): each segment of the node's
+    id stands for the authored node it was generated under
+    (``issue-decision.call`` for ``issue-decision``), and a segment with no
+    authored node (``body.0``) adds nothing. A label no other node shares is
+    shown as it is. :func:`_find` accepts a shown label as a reference.
     """
     if not node.label:
         return None
     if sum(1 for n in chart.nodes.values() if n.label == node.label) < 2:
         return node.label
-    site_id, sep, _ = node.id.rpartition("/")
-    site = chart.nodes.get(site_id) if sep else None
-    head = _site_label(chart, site) if site is not None else None
-    return f"{head}/{node.label}" if head else node.label
+    segs = node.id.split("/")[:-1]
+    names = [_authored(chart, "/".join(segs[:i]), seg) for i, seg in enumerate(segs)]
+    return "/".join([n for n in names if n] + [node.label])
 
 
-def _site_label(chart: ir.Chart, site: ir.Node) -> Optional[str]:
-    """A call site's part of a shown label: its own id path, outer sites
-    first, skipping the sites that have no author id."""
-    if not site.label:
-        return None
-    outer_id, sep, _ = site.id.rpartition("/")
-    outer = chart.nodes.get(outer_id) if sep else None
-    head = _site_label(chart, outer) if outer is not None else None
-    return f"{head}/{site.label}" if head else site.label
+def _authored(chart: ir.Chart, prefix: str, seg: str) -> Optional[str]:
+    """The author id an id segment stands for: the segment's own node when
+    it has one, else the node its generated suffixes were added to
+    (``issue-decision.call`` -> ``issue-decision``); None for a path with no
+    authored node (``body.0``)."""
+    head = seg
+    while True:
+        cand = chart.nodes.get(f"{prefix}/{head}" if prefix else head)
+        if cand is not None and cand.label:
+            return cand.label
+        if "." not in head:
+            return None
+        head = head.rsplit(".", 1)[0]
 
 
 # ---------------------------------------------------------------------------
@@ -2416,7 +2419,8 @@ def _find(r: Run, ref: Optional[str], kinds: Tuple[str, ...], what: str,
         if ref in cands:
             return ref
         hits = [iid for iid in cands
-                if r.inst[iid]["node"] == ref or r.node_of(iid).label == ref]
+                if r.inst[iid]["node"] == ref or r.node_of(iid).label == ref
+                or shown_label(r.chart, r.node_of(iid)) == ref]
         if len(hits) == 1:
             return hits[0]
         if len(hits) > 1:
@@ -2762,7 +2766,8 @@ def claim_restarts(*, platform: str, boot: str, cwd: Optional[str] = None,
                 continue
             frame = inst["frame"]
             rec = frame.get("restart")
-            item = {**base, "instance": iid, "node": node.id, "label": shown_label(r.chart, node)}
+            item = {**base, "instance": iid, "node": node.id,
+                    "label": shown_label(r.chart, node) or node.id}
             if rec:
                 if rec.get("status") == RESTART_RUNNING and rec.get("boot") != boot:
                     rec.update(status=RESTART_INTERRUPTED, completed_at=store_mod.utcnow())
@@ -2821,7 +2826,8 @@ def complete_restart(instance: str, token: str, exit_code: Optional[int], output
         r.emit("restart_completed", node=node.id, instance=instance, exit_code=exit_code,
                output=tail)
         return {"run": r.state.get("run_id"), "workflow": r.state.get("workflow"),
-                "instance": instance, "node": node.id, "label": shown_label(r.chart, node),
+                "instance": instance, "node": node.id,
+                "label": shown_label(r.chart, node) or node.id,
                 "exit_code": exit_code, "status": rec["status"],
                 "driver": driver_of(r.state) or None}
     return _mutate(cwd, scope, now, op)

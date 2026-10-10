@@ -70,13 +70,47 @@ def test_a_shared_label_is_shown_with_its_call_site(tmp_path):
     assert st["tasks"][0]["prompt"] == "confirm end"
 
 
-def test_the_shown_label_reports_the_node_it_names(tmp_path):
-    """Reported by the bare label, the first site's node is the one found
-    (by_label returns the first match); the shown label names the other."""
-    chart = _chart(TWO_SITES)
-    node = chart.by_label("end-decision/pose")
-    assert node is not None and node.id == "end-decision/pose"
-    assert runtime.shown_label(chart, node) == "end-decision/pose"
+def test_a_shown_label_is_accepted_as_a_reference(tmp_path):
+    """What status shows is what an agent copies into flow_report."""
+    st = _start(tmp_path, BOUND_SITES)
+    assert _labels(st) == ["start-decision/pose"]
+    st = runtime.report("start-decision/pose", cwd=str(tmp_path), scope="t", now=T0)
+    assert _labels(st) == ["end-decision/pose"]
+
+
+#: Two bound calls of one procedure.
+BOUND_SITES = """
+nodes:
+  after: {prompt: after}
+body:
+  seq:
+    - id: start-decision
+      call: confirm
+      bind: started
+      with: {topic: start}
+    - id: end-decision
+      call: confirm
+      bind: ended
+      with: {topic: end}
+    - after
+"""
+
+
+def test_the_packaged_worker_tells_its_end_question_apart():
+    """The chart the issue was raised on. Its ask-user calls carry ``cases``,
+    which wraps each in a generated scope (``settle/end-decision.call/...``),
+    so the call site is named through that scope's segment."""
+    from claude_launcher.cflow2 import layers
+
+    chart = layers.load("improv-worker-v2")
+    end = [n for n in chart.nodes.values()
+           if n.label == "ask-pose" and "end-decision" in n.id]
+    assert end
+    shown = {runtime.shown_label(chart, n) for n in end}
+    assert shown == {"settle/end-decision/ask-pose"}
+    others = {runtime.shown_label(chart, n) for n in chart.nodes.values()
+              if n.label == "ask-pose" and "end-decision" not in n.id}
+    assert others and not shown & others
 
 
 def test_a_label_nobody_shares_is_shown_as_it_is(tmp_path):
@@ -149,3 +183,8 @@ def test_a_nested_site_shows_only_the_ids_on_its_path(tmp_path):
     """), source="flow.yaml")
     st = runtime.start(chart, cwd=str(tmp_path), scope="t", caps={}, now=T0)
     assert _labels(st) == ["start-decision/pose"]
+    # the node's id carries the generated outer path; the shown label is
+    # still a reference flow_report accepts
+    assert st["tasks"][0]["node"] != "start-decision/pose"
+    st = runtime.report("start-decision/pose", cwd=str(tmp_path), scope="t", now=T0)
+    assert _labels(st) == ["end-decision/pose"]

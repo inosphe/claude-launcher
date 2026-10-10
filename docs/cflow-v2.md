@@ -433,10 +433,12 @@ body:
   겹치지 않는다(결과는 라벨로 모인다).
 - 표시 라벨: 상태(`flow_status`의 `tasks`·`choices`·`asks` 등), 위임 brief,
   질문 기록이 싣는 `label`은 노드의 라벨이 차트에서 하나뿐이면 그대로이고, 둘 이상의
-  노드가 같은 라벨을 가지면(같은 프로시저를 여러 곳에서 호출) 그 앞에 경로상 호출
-  지점들의 id를 붙인다(`end-decision/ask-pose`). id가 없는 호출 지점(생성된
-  경로 `body.0`)은 붙지 않는다. 결과와 방문 수는 여전히 노드 자신의 라벨 아래에
-  모인다(claunch-tm5ki).
+  노드가 같은 라벨을 가지면(같은 프로시저를 여러 곳에서 호출) 노드 id의 경로 구간마다
+  그 구간이 가리키는 작성자 id를 앞에 붙인다(`settle/end-decision/ask-pose`).
+  생성된 접미사(`issue-decision.call`)는 그것이 붙은 작성자 id(`issue-decision`)로
+  읽고, 작성자 노드가 없는 생성 경로(`body.0`)는 붙지 않는다. `flow_report`·
+  `flow_select`는 표시 라벨도 참조로 받는다. 결과와 방문 수는 여전히 노드 자신의
+  라벨 아래에 모인다(claunch-tm5ki).
 - `default`: 블록 param의 기본 트리는 프로시저 자신의 텍스트이므로 splice 위치에서
   프로시저의 범위로 컴파일하고 실행한다 — 프로시저의 작업, 그 자리를 감싸는
   프로시저의 반복, 프로시저의 `$params`. splice 노드는 호출 기록(`call`)을 갖지 않는다.
