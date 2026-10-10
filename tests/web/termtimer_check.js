@@ -732,6 +732,13 @@ check("...and leaves the row when neither control is up",
       /\.term-reminder:not\(:has\(> \.term-btn:not\(\.hidden\)\)\) \{\s*display:\s*none/.test(rules), true);
 check("...and drops its label when the header turns compact",
       /#term-header\.term-compact \.term-reminder-label \{\s*display:\s*none/.test(rules), true);
+// One border around the pair (claunch-0jjv3.2): the controls inside lose
+// their own outlines, and the due/held/stopped dress moves to the frame.
+check("...and the controls inside it draw no border of their own",
+      /#term-reminder > \.term-btn \{\s*border-color:\s*transparent/.test(rules), true);
+for (const [state, colour] of [["due", "#4d3800"], ["held", "#3c2e5c"], ["stopped", "#8b2e2e"]])
+  check(`...and the frame wears the ${state} border instead`,
+        new RegExp(`\\.term-reminder:has\\(> [^)]*\\.${state}:not\\(\\.hidden\\)\\) \\{\\s*border-color:\\s*${colour}`).test(rules), true);
 
 if (failures) {
   console.error(`${failures} check(s) failed`);

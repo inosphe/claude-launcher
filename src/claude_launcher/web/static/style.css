@@ -2057,6 +2057,21 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   font-size: 10px; line-height: 1; letter-spacing: .02em;
   color: #6e7681; text-transform: uppercase; white-space: nowrap;
 }
+/* One border, the frame's: the controls inside drop their own outlines (kept
+   1px wide but transparent, so nothing shifts) and show hover as a fill. A
+   single rule between the countdown and the skip keeps them two targets. The
+   loud states the controls used to draw on their own borders move to the
+   frame, and their text colours stay where they were. The id outranks every
+   .timer-chip/.timer-skip state rule above, so no state can bring a border
+   back inside the frame. */
+#term-reminder > .term-btn { border-color: transparent; }
+#term-reminder > .term-btn:hover:not(:disabled) { background: #20252c; }
+#term-reminder > .timer-chip:not(.hidden) + .timer-skip {
+  border-left-color: #2a2e36; border-radius: 0 5px 5px 0;
+}
+.term-reminder:has(> .due:not(.hidden)) { border-color: #4d3800; }
+.term-reminder:has(> .held:not(.hidden)) { border-color: #3c2e5c; }
+.term-reminder:has(> .timer-chip.stopped:not(.hidden)) { border-color: #8b2e2e; }
 #term-header.term-compact .term-reminder { padding-left: 2px; gap: 2px; }
 #term-header.term-compact .term-reminder-label { display: none; }
 /* The briefing card's strip, between the header and the terminal: padding
