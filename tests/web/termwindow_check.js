@@ -105,7 +105,15 @@ const check = (name, cond, extra) => {
   console.log(`FAIL ${name}${extra === undefined ? "" : " — " + JSON.stringify(extra)}`);
 };
 
-const ago = (secs) => new Date(Date.now() - secs * 1000).toISOString();
+// One clock for the whole check (claunch-0jjv3.1): the stamps below and the
+// strip's own reading of "now" must agree to the millisecond. With a live
+// clock, whether a millisecond passed between ago() and the render decided
+// the floor (600 - 60.001 is 8m59s, 600 - 60 is 9m00s), so the soonest-holder
+// check failed about one run in five and the remainder check only passed
+// because time usually moved. Frozen, both read their exact values.
+const NOW = Date.now();
+Date.now = () => NOW;
+const ago = (secs) => new Date(NOW - secs * 1000).toISOString();
 const EST = { basis: "label", samples: 5, p50: 300, p90: 420 };
 const HOLD = (over) => ({
   grant_id: "g1", cls: "targeted", session: "s16", label: "pytest tests/test_a.py",
@@ -139,7 +147,7 @@ check("appearing refits the terminal", ctx.refits() === before + 1);
 let t = texts(strip);
 check("names the class and width", t.includes("targeted ×4"), t);
 check("counts the run's time", /running 1m4\ds/.test(t), t);
-check("turns the median into a remainder", /~3m1\ds left/.test(t), t);
+check("turns the median into a remainder", t.includes("~3m20s left"), t);
 check("shows the command it runs", t.includes("pytest tests/test_a.py"), t);
 check("states the machine's load",
       t.includes("targeted 1/3") && t.includes("workers 4/12") && t.includes("queue 0"), t);
@@ -190,7 +198,7 @@ check("held→waiting changes shape and refits", ctx.refits() === refitsBefore +
 check("names the queue place", t.includes("#2 in queue (1 ahead)"), t);
 check("counts the wait", /waiting 4\ds/.test(t), t);
 check("names the blocking rule", t.includes("a sweep holds the window"), t);
-check("estimates the soonest holder", /first holder done in ~9m0\ds/.test(t), t);
+check("estimates the soonest holder", t.includes("first holder done in ~9m00s"), t);
 check("says a sweep is waiting", t.includes("queue 2 (sweep waiting)"), t);
 
 /* ---- a read for the previous session is not this session's ---- */
