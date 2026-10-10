@@ -2035,6 +2035,81 @@ function sessionTabOtherProject(rec) {
   return recordProject(rec);
 }
 
+/* Motion for the tab bar. The bar is rebuilt from scratch on every change, so
+   a reorder (the tab activated last moves to the right end), a pin toggle
+   (the tab changes group) or a tab arriving or leaving would otherwise jump
+   in a single frame and be easy to miss. Each tab's box is read before the
+   rebuild and the new tab is animated from the old box to its own (FLIP);
+   a tab that is new fades in, and one that is gone is left in place as an
+   inert copy that fades out. A pin toggle also flashes the tab's outline in
+   the colour of the group it joined. Off under prefers-reduced-motion, and
+   wherever the DOM lacks the calls (the reduced harnesses' stub DOM). */
+const SESSION_TAB_MOTION_MS = 220;
+
+function sessionTabMotionOff() {
+  return typeof matchMedia !== "function"
+    || matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+function snapshotSessionTabs(bar) {
+  const shots = new Map();
+  if (sessionTabMotionOff()) return shots;
+  for (const tab of bar.children || []) {
+    const name = tab.dataset && tab.dataset.name;
+    if (!name || typeof tab.getBoundingClientRect !== "function") continue;
+    shots.set(name, { el: tab, rect: tab.getBoundingClientRect(),
+                      pinned: tab.classList.contains("pinned") });
+  }
+  return shots;
+}
+
+function animateSessionTabs(bar, shots) {
+  if (!shots.size || sessionTabMotionOff()) return;
+  const timing = { duration: SESSION_TAB_MOTION_MS, easing: "cubic-bezier(.2, .7, .2, 1)" };
+  const present = new Set();
+  for (const tab of bar.querySelectorAll(".session-tab")) {
+    const name = tab.dataset.name;
+    present.add(name);
+    if (typeof tab.animate !== "function") continue;
+    const old = shots.get(name);
+    if (!old) {
+      tab.animate([{ opacity: 0, transform: "scale(.85)" }, { opacity: 1, transform: "none" }], timing);
+      continue;
+    }
+    const now = tab.getBoundingClientRect();
+    const dx = old.rect.left - now.left, dy = old.rect.top - now.top;
+    if (dx || dy) {
+      tab.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: "none" }], timing);
+    }
+    const pinned = tab.classList.contains("pinned");
+    if (old.pinned !== pinned) {
+      tab.animate([{ boxShadow: `0 0 0 2px ${pinned ? "#d29922" : "#8b949e"}` },
+                   { boxShadow: "0 0 0 0 transparent" }],
+                  { duration: SESSION_TAB_MOTION_MS * 3, easing: "ease-out" });
+    }
+  }
+  if (bar.classList.contains("hidden") || typeof bar.getBoundingClientRect !== "function") return;
+  const box = bar.getBoundingClientRect();
+  for (const [name, old] of shots) {
+    if (present.has(name) || typeof old.el.animate !== "function") continue;
+    // The detached tab itself, renamed out of `.session-tab` and stripped of
+    // its names so no selector, focus restore or snapshot counts it as a tab.
+    const ghost = old.el;
+    ghost.classList.replace("session-tab", "session-tab-leaving");
+    for (const el of [ghost, ...ghost.querySelectorAll("[data-name]")]) delete el.dataset.name;
+    ghost.setAttribute("aria-hidden", "true");
+    ghost.inert = true;
+    Object.assign(ghost.style, {
+      left: `${old.rect.left - box.left - bar.clientLeft}px`,
+      top: `${old.rect.top - box.top - bar.clientTop}px`,
+      width: `${old.rect.width}px`, height: `${old.rect.height}px`,
+    });
+    bar.append(ghost);
+    ghost.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: "scale(.85)" }],
+                  timing).onfinish = () => ghost.remove();
+  }
+}
+
 function renderSessionTabs() {
   const bar = $("session-tabs");
   if (!bar || !sessionTabHistory) return;
@@ -2057,6 +2132,7 @@ function renderSessionTabs() {
   const focused = bar.contains(document.activeElement) ? document.activeElement : null;
   const focusName = focused?.dataset.name;
   const focusAction = focused?.dataset.action;
+  const shots = snapshotSessionTabs(bar);
   bar.replaceChildren();
   bar.classList.toggle("hidden", !names.length);
   for (const name of names) {
@@ -2154,6 +2230,8 @@ function renderSessionTabs() {
       || controls.find(el => el.dataset.action === "open");
     target?.focus({ preventScroll: true });
   }
+  // After the focus restore, so a leaving copy is never a focus target.
+  animateSessionTabs(bar, shots);
 }
 
 // Refit the terminal when tab wrapping or mobile rail visibility changes.
