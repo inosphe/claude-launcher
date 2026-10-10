@@ -26,7 +26,8 @@ body)``.
     body: {"cwd": str, "scope": str, "node": str?,
            "kind": "loop" | "visits",   # default loop
            "by": int?,                  # default 1
-           "stop": bool?}
+           "stop": bool?,
+           "reset": bool?}              # loop only: count back to 0
     200: the run's status payload; 400: {"error": ...}
 
 ``resume`` releases a halting monitor (``claunch cflow2 resume``)::
@@ -85,8 +86,12 @@ def extend(cwd: str, scope: Optional[str], args: Dict[str, Any]) -> Dict[str, An
     kind = str(args.get("kind") or "loop").strip()
     if kind not in ("loop", "visits"):
         raise runtime.FlowError("'kind' is loop or visits")
-    fn = runtime.extend_visits if kind == "visits" else runtime.extend_loop
-    return fn(node, by, stop=stop, cwd=cwd, scope=scope or None)
+    reset = bool(args.get("reset"))
+    if kind == "visits":
+        if reset:
+            raise runtime.FlowError("'reset' answers a loop limit, not a visit limit")
+        return runtime.extend_visits(node, by, stop=stop, cwd=cwd, scope=scope or None)
+    return runtime.extend_loop(node, by, stop=stop, reset=reset, cwd=cwd, scope=scope or None)
 
 
 def resume(cwd: str, scope: Optional[str], args: Dict[str, Any]) -> Dict[str, Any]:

@@ -648,6 +648,26 @@ def test_extend_with_visits_answers_a_visit_limit(proj, monkeypatch):
     assert seen == {"node": "x@3", "by": 2, "stop": False, "scope": "v1s"}
 
 
+def test_extend_reset_answers_a_loop_limit(proj, monkeypatch):
+    seen = {}
+
+    def fake(node, by, *, stop=False, reset=False, cwd=None, scope=None):
+        seen.update(node=node, stop=stop, reset=reset)
+        return {"status": "running"}
+
+    monkeypatch.setattr(runtime, "extend_loop", fake)
+
+    async def go(client, bearer):
+        ok = await client.post("/api/cflow2/extend", headers=bearer, json={
+            "cwd": str(proj), "scope": "v1s", "node": "x@3", "reset": True})
+        bad = await client.post("/api/cflow2/extend", headers=bearer, json={
+            "cwd": str(proj), "scope": "v1s", "node": "x@3", "reset": True, "visits": True})
+        return ok.status, bad.status
+
+    assert _http(go) == (200, 400)
+    assert seen == {"node": "x@3", "stop": False, "reset": True}
+
+
 # --------------------------------------------------------------------------- #
 # collections and trigger lines on the run page (docs/cflow-v2.md 2.7, 2.8)
 # --------------------------------------------------------------------------- #

@@ -4834,11 +4834,12 @@ async def h_cflow2_select(request: web.Request) -> web.Response:
 
 
 async def h_cflow2_extend(request: web.Request) -> web.Response:
-    """Answer a v2 ``loop_limit`` hold: allow ``by`` more iterations, or
-    ``stop`` the loop (it finishes ``fail``). With ``visits: true`` it
-    answers a ``visit_limit`` hold instead (``runtime.extend_visits``: ``by``
-    more visits of the node over the run, or ``stop``). Body: cwd, scope,
-    node (optional with one hold), by, stop, visits."""
+    """Answer a v2 ``loop_limit`` hold: allow ``by`` more iterations,
+    ``reset`` the loop's count (it gets its full ``max`` again), or ``stop``
+    the loop (it finishes ``fail``). With ``visits: true`` it answers a
+    ``visit_limit`` hold instead (``runtime.extend_visits``: ``by`` more
+    visits of the node over the run, or ``stop``; no reset). Body: cwd,
+    scope, node (optional with one hold), by, stop, reset, visits."""
     resolved, err = await _cflow_action_cwd(request)
     if err:
         return err
@@ -4849,12 +4850,17 @@ async def h_cflow2_extend(request: web.Request) -> web.Response:
     except (TypeError, ValueError):
         return json_error(400, "'by' must be a whole number")
     stop = bool(body.get("stop"))
+    reset = bool(body.get("reset"))
+    if reset and body.get("visits"):
+        return json_error(400, "'reset' answers a loop limit, not a visit limit")
     # ``visits: true`` answers a ``visit_limit`` hold (the chart's
     # max_visits) instead of a loop's ``loop_limit``.
-    extend = cflow2_runtime.extend_visits if body.get("visits") else cflow2_runtime.extend_loop
-    payload = await asyncio.to_thread(
-        extend, node, by, stop=stop, cwd=cwd, scope=scope,
-    )
+    if body.get("visits"):
+        extend = functools.partial(cflow2_runtime.extend_visits, node, by, stop=stop)
+    else:
+        extend = functools.partial(cflow2_runtime.extend_loop, node, by, stop=stop,
+                                   reset=reset)
+    payload = await asyncio.to_thread(extend, cwd=cwd, scope=scope)
     payload["nudge_scheduled_sessions"] = await _nudge_sessions(
         request.app["manager"], cwd, scope, NUDGE_CFLOW2_ANSWERED
     )

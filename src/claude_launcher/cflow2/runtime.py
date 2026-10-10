@@ -18,7 +18,8 @@ await          completed by
 ``delegation`` :func:`delegate_submit` (or a dispatcher, later)
 ``pause``      :func:`wait_tick` (a loop's ``every`` between iterations)
 ``limit``      :func:`extend_loop` (a loop at its ``max``; the run is
-               ``waiting_approval`` with reason ``loop_limit``) or
+               ``waiting_approval`` with reason ``loop_limit``; extend it
+               or reset its count) or
                :func:`extend_visits` (a node entered more than the chart's
                ``max_visits`` times; reason ``visit_limit``)
 ``approval``   an ask's answer (:func:`approve`, :func:`answer`)
@@ -811,14 +812,29 @@ def _en_control(r: Run, iid: str, node: ir.Node) -> None:
 # -- loops -----------------------------------------------------------------
 
 
-def _loop_max(r: Run, iid: str) -> int:
+def _loop_cap(r: Run, iid: str) -> int:
+    """The limit a person sees: the loop's ``max`` plus what was extended
+    since the count was last reset."""
     node = r.node_of(iid)
     return int(node.get("max") or 1) + int(r.inst[iid]["frame"].get("extra") or 0)
 
 
+def _loop_count(frame: Dict[str, Any]) -> int:
+    """Iterations run since the count was last reset (``extend_loop(reset=True)``).
+    ``iter`` itself keeps counting: it indexes a foreach's items and is a
+    retry's ``attempt``."""
+    return int(frame.get("iter") or 0) - int(frame.get("base") or 0)
+
+
+def _loop_max(r: Run, iid: str) -> int:
+    """The bound ``iter`` is compared against."""
+    return _loop_cap(r, iid) + int(r.inst[iid]["frame"].get("base") or 0)
+
+
 def _en_loop(r: Run, iid: str, node: ir.Node) -> None:
     frame = r.inst[iid]["frame"]
-    frame.update({"iter": 0, "values": [], "extra": 0, "phase": "body", "last": None})
+    frame.update({"iter": 0, "base": 0, "values": [], "extra": 0, "phase": "body",
+                  "last": None})
     mode = node.get("mode")
     if mode == ir.LOOP_FOREACH:
         try:
@@ -905,8 +921,8 @@ def _loop_limit(r: Run, iid: str) -> None:
     r.inst[iid]["await"] = AW_LIMIT
     approval = {
         "kind": "loop_limit", "instance": iid, "node": node.id,
-        "label": shown_label(r.chart, node), "iterations": frame.get("iter"),
-        "max": _loop_max(r, iid), "mode": node.get("mode"),
+        "label": shown_label(r.chart, node), "iterations": _loop_count(frame),
+        "max": _loop_cap(r, iid), "mode": node.get("mode"),
     }
     r.state.setdefault("approvals", []).append(approval)
     r.state["status"] = ST_WAITING
@@ -3614,17 +3630,26 @@ def delegate_brief(delegation: Optional[str] = None, *, cwd: Optional[str] = Non
 
 
 def extend_loop(node: Optional[str] = None, by: int = 1, *, stop: bool = False,
-                cwd: Optional[str] = None, scope: Optional[str] = None,
-                now: Optional[float] = None) -> Dict[str, Any]:
-    """Answer a ``loop_limit``: allow ``by`` more iterations, or ``stop`` the
-    loop (it finishes ``fail``)."""
+                reset: bool = False, cwd: Optional[str] = None,
+                scope: Optional[str] = None, now: Optional[float] = None) -> Dict[str, Any]:
+    """Answer a ``loop_limit``: allow ``by`` more iterations, ``reset`` the
+    count (the loop gets its full ``max`` again and earlier extensions are
+    dropped; ``by`` is ignored), or ``stop`` the loop (it finishes ``fail``).
+    Reset keeps the loop's place: a foreach goes on with its next item, a
+    retry's ``attempt`` keeps counting, collected values stay."""
     def op(r: Run) -> None:
         _require_progress(r)
+        if stop and reset:
+            raise FlowError("reset or stop, not both")
         iid = _find(r, node, (AW_LIMIT,), "loop limit",
                     pred=lambda i: not r.inst[i]["frame"].get("visit_limit"))
         n = r.node_of(iid)
         frame = r.inst[iid]["frame"]
-        if not stop and by < 1:
+        if reset and _loop_count(frame) < 1:
+            # A parallel foreach stops before any iteration because it has
+            # more items than max; a reset there would stop again at once.
+            raise FlowError("no iterations to reset: extend the loop (or stop it)")
+        if not stop and not reset and by < 1:
             raise FlowError("extend by at least 1 (or stop the loop)")
         r.inst[iid]["await"] = None
         r.state["approvals"] = [a for a in r.state.get("approvals", [])
@@ -3633,8 +3658,15 @@ def extend_loop(node: Optional[str] = None, by: int = 1, *, stop: bool = False,
             r.emit("selected", node=n.id, instance=iid, option="stop", kind=HOLD_LOOP)
             _complete(r, iid, ir.OUTCOME_FAIL, {"reason": "loop_limit", "iterations": frame["iter"]})
             return
-        frame["extra"] = int(frame.get("extra") or 0) + int(by)
-        r.emit("selected", node=n.id, instance=iid, option="extend", by=by, kind=HOLD_LOOP)
+        if reset:
+            reset_from = _loop_count(frame)
+            frame["base"] = int(frame.get("iter") or 0)
+            frame["extra"] = 0
+            r.emit("selected", node=n.id, instance=iid, option="reset", count=reset_from,
+                   kind=HOLD_LOOP)
+        else:
+            frame["extra"] = int(frame.get("extra") or 0) + int(by)
+            r.emit("selected", node=n.id, instance=iid, option="extend", by=by, kind=HOLD_LOOP)
         if frame.get("phase") == "limit_par":
             if len(frame["items"]) > _loop_max(r, iid):
                 _loop_limit(r, iid)
@@ -3763,7 +3795,7 @@ def _seat(r: Run, iid: str, node: ir.Node, slot: Dict[str, Any]) -> Optional[Dic
         frame["option"] = slot["option"]
     elif t == ir.T_LOOP:
         if not frame.get("iter"):
-            frame.update({"iter": 1, "values": [], "extra": 0, "last": None})
+            frame.update({"iter": 1, "base": 0, "values": [], "extra": 0, "last": None})
         frame["phase"] = "body"
         frame.pop("resume_at", None)
         if node.get("mode") == ir.LOOP_RETRY:
@@ -4574,7 +4606,8 @@ def describe(r: Run) -> Dict[str, Any]:
                                  "max": _max_visits(r, key)})
         elif aw == AW_LIMIT:
             limits.append({"instance": iid, "node": node.id, "label": shown_label(r.chart, node),
-                           "iterations": inst["frame"].get("iter"), "max": _loop_max(r, iid)})
+                           "iterations": _loop_count(inst["frame"]),
+                           "max": _loop_cap(r, iid)})
         if node.type == ir.T_GROUP:
             frame = inst["frame"]
             groups.append({
