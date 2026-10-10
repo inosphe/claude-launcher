@@ -75,6 +75,26 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
       return { shown: g.width > 0, timer: inside("term-timer"), skip: inside("term-timer-skip") };
     });
     assert.deepEqual(group, { shown: true, timer: true, skip: true }, "reminder group frames both controls");
+    // Only the frame draws a border (claunch-0jjv3.2): the chip has none on
+    // any side, the skip keeps just the divider on its left, and a due
+    // state colours the frame rather than the controls.
+    const borders = await page.evaluate(() => {
+      const visible = s => s.borderStyle !== "none" && parseFloat(s.borderWidth) > 0 && s.borderColor !== "rgba(0, 0, 0, 0)";
+      const sides = id => {
+        const s = getComputedStyle(document.getElementById(id));
+        return ["Top", "Right", "Bottom", "Left"].filter(side => visible({
+          borderStyle: s[`border${side}Style`], borderWidth: s[`border${side}Width`], borderColor: s[`border${side}Color`],
+        }));
+      };
+      const frame = () => getComputedStyle(document.getElementById("term-reminder")).borderTopColor;
+      const rest = frame();
+      for (const id of ["term-timer", "term-timer-skip"]) document.getElementById(id).classList.add("due");
+      const out = { timer: sides("term-timer"), skip: sides("term-timer-skip"), changed: frame() !== rest, due: frame() };
+      for (const id of ["term-timer", "term-timer-skip"]) document.getElementById(id).classList.remove("due");
+      return out;
+    });
+    assert.deepEqual(borders, { timer: [], skip: ["Left"], changed: true, due: "rgb(77, 56, 0)" },
+      `one border around the reminder controls: ${JSON.stringify(borders)}`);
     await check(240);
     assert.equal(await page.locator("#term-reminder").evaluate(el => el.classList.contains("toolbar-overflow")), true,
       "the reminder group overflows as one item");
