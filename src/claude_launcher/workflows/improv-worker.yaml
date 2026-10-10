@@ -137,7 +137,9 @@ steps:
         내용이다.
         터미널 사용자의 직접 지시면 지금 만든다: `claunch beads create "<제목>"
         --type task --priority 2 --labels user-direct --assignee
-        $CLAUNCH_SESSION --description "<규격>"`. 리더가 배정한 이슈가 따로
+        $CLAUNCH_SESSION --description "<규격>"`. 그 지시가 이 세션이 잡고
+        있는 이슈의 후속(같은 기능에 대한 추가 요청)이면 `--parent <그 이슈
+        id>`를 붙이고, 관계없는 새 일이면 붙이지 않는다. 리더가 배정한 이슈가 따로
         있는데 사용자 지시가 다르면 사용자 쪽을 잡고, 리더 배정 이슈는
         `claunch beads update <그 id> --status open`으로 되돌린 뒤 `claunch
         beads comments add <그 id> "DECLINED: user-direct <새 id> took
@@ -2713,7 +2715,8 @@ steps:
         다음 사람에게 넘길 것(범위 밖으로 미룬 일, 알아낸 결함, 후속)은
         항목마다 `claunch beads create "<제목>" --priority 3 --labels handoff
         --description "<규격>"`(assignee 없음) — 마감 fyi에 그 id들을 적는다.
-        협소하게 해석한다: 이 회차의 범위에서 직접 미룬 일과 작업 중
+        이 회차 이슈에서 나온 일이면 `--parent <이 회차 이슈 id>`를 붙이고,
+        관계없는 일이면 붙이지 않는다. 협소하게 해석한다: 이 회차의 범위에서 직접 미룬 일과 작업 중
         알아낸 결함만 만든다. 떠오른 개선 아이디어(P4)는 만들지 않고
         보고서의 「아는 구멍」에 한 줄로 남긴다. 만들 때는 assignee 없이
         만들고, 배정은 아래 「생성 이슈 정산」 절에서 항목마다 한 번에
@@ -3298,6 +3301,8 @@ steps:
       사유가 추가 작업이면 그것은 이 회차의
       범위 밖이다: 이슈로 남기고(`claunch beads create "<제목>" --priority 3
       --labels handoff --description "<규격>"`) 그 id를 보고에 적는다.
+      이 회차 이슈에서 나온 일이면 `--parent <이 회차 이슈 id>`를 붙이고,
+      관계없는 일이면 붙이지 않는다.
       상위에게는 fyi 한 줄로 이 세션이 keep-alive로 살아 있다는 사실과 그
       이슈 id를 알린다 — 데몬은 살아남은 세션에 대해서는 아무 통지도 보내지
       않는다(종료 통지는 실제로 종료된 세션에만 붙는다).

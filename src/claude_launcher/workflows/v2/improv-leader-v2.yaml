@@ -249,7 +249,9 @@ nodes:
       (tools/restart_live.*)을 실행한다. 리더는 그 명령도 `claunch daemon
       restart`도 직접 실행하지 않는다(AGENTS.md). 명령은 이 런의 드라이버 세션
       이름을 달고 나가므로 웹 UI 승인 게이트로 올라가고, 무응답이면 300초 뒤
-      승인으로 나간다(daemon/restart_gate.py).
+      승인으로 나간다(daemon/restart_gate.py). 사용자는 연장을 횟수 제한 없이
+      고를 수 있고, 카드에는 restart_live가 만든 재기동 이유(deploy_check
+      판정과 아직 서빙되지 않은 master 커밋 목록)가 표시된다.
       restart 결과 블록이 오기 전에는 보고가 거절된다. 결과가 오면 새 데몬이
       섰는지 재기동 통지 블록이나 재기동 전후 pid로 판정하고(응답이 있다는
       사실은 판정이 아니다), 새 머지 커밋의 기능이 실제로 서빙되는지 하나
@@ -257,7 +259,9 @@ nodes:
     restart:
       windows: 'powershell -NoProfile -ExecutionPolicy Bypass -File tools/restart_live.ps1'
       linux: 'bash tools/restart_live.sh'
-      # 승인 게이트가 요청을 붙들 수 있는 최대치(870초)를 감싼다(v1과 같음).
+      # 게이트 밖에서 멈춘 스크립트를 끊는 상한이다. 게이트가 이 세션의
+      # 요청을 붙들고 있는 동안에는 clock이 이 시한으로 셸을 죽이지 않는다
+      # (restart_gate.holding, claunch-mm8zv; v1과 같음).
       timeout: 900
     done_when: |
       새 데몬을 무엇으로 판정했는지(통지 블록 또는 pid)와, 새 머지 커밋의

@@ -216,6 +216,24 @@ html[data-theme="light"] .xterm {
   font-size: 14px; line-height: 1; padding: 0 2px; cursor: pointer;
 }
 .session-group-header .session-group-new:hover { color: #58a6ff; }
+/* A mesh header's both | local | remote pick (claunch-no9dy), at the far
+   end before the ⊕. */
+.session-group-header .session-origin-filter {
+  flex: none; margin-left: auto; display: inline-flex;
+  border: 1px solid #30363d; border-radius: 4px; overflow: hidden;
+}
+.session-group-header .session-origin-filter ~ .session-group-new { margin-left: 2px; }
+.session-group-header .session-origin-option {
+  background: none; border: none; color: #8b949e; cursor: pointer;
+  font-size: 10px; line-height: 1; padding: 2px 6px;
+}
+.session-group-header .session-origin-option + .session-origin-option {
+  border-left: 1px solid #30363d;
+}
+.session-group-header .session-origin-option:hover { color: #c9d1d9; }
+.session-group-header .session-origin-option.active {
+  background: #1f6feb33; color: #58a6ff;
+}
 
 /* List | Grid: one segmented radio pair above the filters. */
 .session-view-tabs {
@@ -797,10 +815,6 @@ html[data-theme="light"] .xterm {
   font-size: 11px; color: #9fb4cb; line-height: 1.45; font-style: italic;
   white-space: pre-wrap; overflow-wrap: anywhere;
 }
-/* The note line is also the way into editing it (openRailNoteEditor), so it
-   answers the pointer as a text field would. */
-#session-list .rail-note { cursor: text; }
-#session-list .rail-note:hover { color: #c3d4e6; border-left-color: #3b6ea5; }
 /* The box that replaces the note line while it is being edited: the same
    place and the same indent, so opening it does not move the row's other
    lines, and the same border colour the panel's note box takes on focus. */
@@ -1825,13 +1839,17 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   display: flex; flex: none; flex-wrap: wrap; align-items: center; gap: 4px;
   padding: 5px 8px; min-width: 0; background: #11151b;
   border-bottom: 1px solid #30363d;
+  position: relative; /* containing block for a leaving tab's fading copy */
 }
-.session-tab {
+/* .session-tab-leaving is the fading copy of a tab that just left the bar
+   (animateSessionTabs): drawn like a tab, out of the flow, never a target. */
+.session-tab, .session-tab-leaving {
   display: inline-flex; align-items: center; min-width: 0; max-width: 100%;
   border: 1px solid #30363d; border-radius: 5px; background: #161b22;
 }
-.session-tab.pinned { border-color: #66501e; }
-.session-tab.active { background: #10203a; border-color: #58a6ff; }
+.session-tab.pinned, .session-tab-leaving.pinned { border-color: #66501e; }
+.session-tab-leaving { position: absolute; margin: 0; pointer-events: none; }
+.session-tab.active, .session-tab-leaving.active { background: #10203a; border-color: #58a6ff; }
 /* A tab whose session belongs to another project than the rail shows. The
    dot keeps the session's real state; the dashed outline and the chip say
    where it is filed. */
@@ -1847,7 +1865,7 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 }
 .session-tab-open .dot { flex: none; width: 7px; height: 7px; border-radius: 50%; }
 .session-tab-name { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.session-tab button {
+.session-tab button, .session-tab-leaving button {
   flex: none; background: none; border: 0; color: #8b949e; cursor: pointer;
   padding: 4px; min-width: 24px; min-height: 28px;
 }
@@ -2024,6 +2042,38 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 .timer-skip.due { color: #d29922; border-color: #4d3800; }
 .timer-skip.held { color: #a371f7; border-color: #3c2e5c; }
 .timer-skip:disabled { opacity: 0.6; cursor: wait; }
+/* The frame around the reminder controls (#term-reminder): the countdown and
+   its skip as one group with a small label, so the row shows one reminder
+   item rather than two loose chips. Gone while neither control is up — an
+   empty frame must not sit in the row any more than an empty chip may. The
+   label is the first thing to go when the header turns compact. */
+.term-reminder {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 1px 2px 1px 7px;
+  background: #161a20; border: 1px solid #2a2e36; border-radius: 7px;
+}
+.term-reminder:not(:has(> .term-btn:not(.hidden))) { display: none; }
+.term-reminder-label {
+  font-size: 10px; line-height: 1; letter-spacing: .02em;
+  color: #6e7681; text-transform: uppercase; white-space: nowrap;
+}
+/* One border, the frame's: the controls inside drop their own outlines (kept
+   1px wide but transparent, so nothing shifts) and show hover as a fill. A
+   single rule between the countdown and the skip keeps them two targets. The
+   loud states the controls used to draw on their own borders move to the
+   frame, and their text colours stay where they were. The id outranks every
+   .timer-chip/.timer-skip state rule above, so no state can bring a border
+   back inside the frame. */
+#term-reminder > .term-btn { border-color: transparent; }
+#term-reminder > .term-btn:hover:not(:disabled) { background: #20252c; }
+#term-reminder > .timer-chip:not(.hidden) + .timer-skip {
+  border-left-color: #2a2e36; border-radius: 0 5px 5px 0;
+}
+.term-reminder:has(> .due:not(.hidden)) { border-color: #4d3800; }
+.term-reminder:has(> .held:not(.hidden)) { border-color: #3c2e5c; }
+.term-reminder:has(> .timer-chip.stopped:not(.hidden)) { border-color: #8b2e2e; }
+#term-header.term-compact .term-reminder { padding-left: 2px; gap: 2px; }
+#term-header.term-compact .term-reminder-label { display: none; }
 /* The briefing card's strip, between the header and the terminal: padding
    and a rule like the queued strip's, in the panel's own grey so a summary
    reads as something to read, not as a wait the reader caused. The card
@@ -2104,6 +2154,33 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 }
 #term-window .tw-over { color: #d29922; }
 #term-window .tw-load { color: #7d8590; padding: 0 14px 5px; font-size: 11px; }
+/* The session's timer line (claunch-7dzae): one chip per countdown, the
+   part already elapsed drawn as a fill behind the text (--tt-pct). Neutral
+   grey: a timer is ordinary waiting. A held pick is blue (something is
+   queued behind it); a chip past its time is amber (the daemon owes it). */
+#term-timers {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px;
+  background: #11151b; border-bottom: 1px solid #2a2e36;
+  color: #c6cdd5; font-size: 12px; flex: none; padding: 4px 14px;
+}
+#term-timers .tt-head { color: #7d8590; font-size: 11px; text-transform: uppercase; }
+#term-timers .tt-chip {
+  --tt-fill: #1f2630;
+  display: inline-flex; align-items: baseline; gap: 6px; max-width: 100%;
+  padding: 2px 8px; border: 1px solid #2a2e36; border-radius: 10px;
+  color: inherit; font: inherit; cursor: pointer;
+  background: linear-gradient(90deg, var(--tt-fill) var(--tt-pct, 0%),
+                              transparent var(--tt-pct, 0%));
+}
+#term-timers .tt-chip:disabled { cursor: default; }
+#term-timers .tt-chip:not(:disabled):hover { border-color: #3d444d; }
+#term-timers .tt-label {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#term-timers .tt-clock { font-variant-numeric: tabular-nums; font-weight: 600; }
+#term-timers .tt-state-held { color: #79c0ff; border-color: #1f3a5c; --tt-fill: #10243b; }
+#term-timers .tt-state-closed { color: #9da7b3; }
+#term-timers .tt-due { color: #d29922; border-color: #5a4312; }
 /* The cflow answer strip: the attached session's run is waiting on a person.
    The gate amber of the rail line it repeats (`.wf-waiting`), one row high
    at desktop width; on a narrow window the buttons wrap to a second row
@@ -5237,6 +5314,26 @@ body.embed #main { width: 100%; }
   width: 1100px;
   min-width: min(420px, calc(100vw - 32px));
 }
+/* The quick fork: six rows in a box sized by them. Wide enough that the
+   longest Inherit label sits on one line in a half-width column, and as tall
+   as the rows are, up to nearly the whole viewport, so it does not scroll
+   unless the window is too short for it. */
+#modal-overlay.spawn-open.fork-open .modal-box:has(#new-session) {
+  width: 1040px; height: auto; max-height: 94vh; min-height: 0;
+}
+#new-session #new-quick-fork:not(.session-field-hidden) {
+  display: grid; gap: 14px 18px; margin: 0; padding: 0; border: 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+#new-session #new-quick-fork > legend { display: none; }
+#new-session #new-quick-fork > :is(p, label:has(textarea)) { grid-column: 1 / -1; }
+#new-session #new-quick-fork > label { margin-bottom: 0; }
+#new-session #new-quick-fork > label > select { margin-top: 6px; }
+#new-session #new-quick-fork > p { margin: 0; line-height: 1.5; }
+#new-session #new-quick-fork > .wf-note { margin-top: -6px; }
+@container session-form (max-width: 560px) {
+  #new-session #new-quick-fork:not(.session-field-hidden) { grid-template-columns: minmax(0, 1fr); }
+}
 /* The body takes the slack a taller box creates — without this it keeps its
    content height and the extra pixels open as dead space under the form. */
 #modal-overlay.spawn-open #modal-body {
@@ -5495,6 +5592,7 @@ body.embed #main { width: 100%; }
    dismiss: the notice's default pointer/cursor belongs to toasts that can
    just be swatted away, and a stray click on a decision is a restart. */
 .notice.gate { cursor: default; }
+.gate-reason { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 4px; }
 .gate-actions { display: flex; gap: 8px; margin-top: 8px; }
 .gate-actions .wf-btn { margin: 0; padding: 3px 10px; font-size: 11px; }
 /* A session named on a gate card opens that session. Marked as a press the
@@ -5510,6 +5608,74 @@ body.embed #main { width: 100%; }
 /* The countdown is its own line so the poll can rewrite it without touching
    the links beside it. */
 .notice .gate-clock { color: #8b949e; }
+
+/* The notification history (claunch-l978l): a bell beside ⟳ and ☀ that
+   counts the requests waiting on a person, and a panel from the right edge
+   that lists them with their buttons above everything the corner has said.
+   Below the corner strip (30) so a fresh card still reads over it, above the
+   modal (20) because it is opened over whatever page is up. */
+.notice-bell {
+  flex: none; align-self: center; cursor: pointer; position: relative;
+  background: none; border: none; color: #7d8590;
+  font-size: 13px; line-height: 1; padding: 2px 5px;
+  filter: grayscale(1); opacity: 0.75;
+}
+.notice-bell:hover { opacity: 1; }
+.notice-bell.waiting, .notice-bell.unread { filter: none; opacity: 1; }
+.notice-bell-count:empty { display: none; }
+.notice-bell-count {
+  display: inline-block; margin-left: 2px; padding: 0 5px;
+  border-radius: 8px; background: #d29922; color: #0d1117;
+  font-size: 10px; font-weight: 600; line-height: 14px; vertical-align: 1px;
+}
+.notice-bell.unread::after {
+  content: ""; position: absolute; top: 1px; right: 2px;
+  width: 6px; height: 6px; border-radius: 50%; background: #58a6ff;
+}
+#notice-panel {
+  position: fixed; top: 0; right: 0; bottom: 0; z-index: 25;
+  width: min(380px, 100vw);
+  display: flex; flex-direction: column;
+  background: #161b22; border-left: 1px solid #2a2e36;
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.45);
+}
+#notice-panel-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 14px; border-bottom: 1px solid #2a2e36;
+}
+#notice-panel-head h2 { margin: 0; font-size: 14px; color: #e6edf3; flex: 1; }
+#notice-panel-close {
+  cursor: pointer; background: none; border: none; color: #7d8590;
+  font-size: 18px; line-height: 1; padding: 2px 6px;
+}
+#notice-panel-close:hover { color: #58a6ff; }
+#notice-panel-body { flex: 1; overflow-y: auto; padding: 4px 14px 16px; }
+.notice-panel-section {
+  margin: 14px 0 6px; font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.04em; color: #8b949e;
+}
+.notice-panel-section-row { display: flex; align-items: baseline; gap: 8px; }
+.notice-panel-section-row .notice-panel-section { flex: 1; }
+.notice-panel-section-row .wf-btn { margin: 0; padding: 2px 8px; font-size: 11px; }
+.notice-row {
+  background: #1b1e24; border: 1px solid #2a2e36; border-left: 3px solid #58a6ff;
+  border-radius: 6px; padding: 7px 10px; margin-bottom: 6px;
+}
+.notice-row.warn, .notice-row.pending { border-left-color: #d29922; }
+.notice-row.bad { border-left-color: #ff7b72; }
+.notice-row-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; }
+.notice-row .notice-title { font-size: 12.5px; color: #e6edf3; }
+.notice-row .gate-clock, .notice-row .notice-when { color: #8b949e; }
+.notice-row .gate-reason { white-space: pre-wrap; overflow-wrap: anywhere; }
+.notice-row .gate-session {
+  cursor: pointer; color: #c9d1d9; border-bottom: 1px dotted #6e7681;
+}
+.notice-row .gate-session:hover { color: #58a6ff; border-bottom-color: #58a6ff; }
+.notice-chip {
+  font-size: 10px; padding: 0 6px; border-radius: 8px; line-height: 15px;
+  border: 1px solid #3c444d; color: #9da5b0;
+}
+.notice-chip.live { border-color: #d29922; color: #d29922; }
 /* A phone has no corner to spare: the strip spans the width under the
    mobile bar instead of floating over the session it is reporting on. */
 @media (max-width: 700px) {

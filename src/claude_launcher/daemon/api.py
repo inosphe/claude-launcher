@@ -64,6 +64,7 @@ from . import rag as rag_mod
 from . import worktree_inventory
 from . import vscode as vscode_mod
 from . import cflow2_approve, cflow2_web
+from . import session_timers
 from ..cflow2 import expr as cflow2_expr, frontend as cflow2_frontend
 from ..cflow2 import ir as cflow2_ir, runtime as cflow2_runtime, store as cflow2_store
 from ..cflow2 import layers as cflow2_layers
@@ -92,7 +93,7 @@ from . import restart_gate
 from . import restart_notice
 from .harness import HarnessError, SessionDef
 from . import score_goal
-from .manager import ManagerError, SessionManager
+from .manager import MAX_NOTE, ManagerError, SessionManager
 from . import mesh as mesh_mod
 from .mesh import MeshBusy, MeshConflict, MeshError, MeshManager
 from .session import STATUS_IDLE, KeyboardHeld, SessionGone
@@ -232,7 +233,7 @@ async def error_middleware(request: web.Request, handler):
             resp.headers["Retry-After"] = str(int(exc.retry_after))
         return resp
     except (SessionGone, MeshConflict, LockBusy, KeyboardHeld, restart_gate.GateBusy,
-            restart_gate.GateExhausted, goto_gate.GateBusy) as exc:
+            goto_gate.GateBusy) as exc:
         # LockBusy is transient by construction (the other writer is mid-
         # transition), so it gets a retryable status, not a flat 400.
         # KeyboardHeld is transient in the same way, and for the most human
@@ -604,6 +605,7 @@ def build_app(
     r.add_get("/api/prompter", h_prompter_get)
     r.add_put("/api/prompter", h_prompter_set)
     r.add_get("/api/prompter/prompts", h_prompter_prompts)
+    r.add_get("/api/prompter/contexts", h_prompter_contexts)
     r.add_get("/api/status-checks", h_status_checks)
     r.add_post("/api/status-checks", h_status_checks_add)
     r.add_put("/api/status-checks/{check_id}", h_status_checks_update)
@@ -828,11 +830,14 @@ def build_app(
     r.add_get("/api/sessions/{name}/briefing", h_session_briefing)
     r.add_get("/api/sessions/{name}/queued", h_session_queued)
     r.add_get("/api/sessions/{name}/window", h_session_window)
+    r.add_get("/api/sessions/{name}/timers", h_session_timers)
     r.add_post("/api/sessions/{name}/queued/flush", h_session_queued_flush)
     r.add_post("/api/sessions/{name}/queued/hold", h_session_hold)
     r.add_get("/api/sessions/{name}/reminder", h_session_reminder)
     r.add_get("/api/score-goal/defaults", h_score_goal_defaults)
     r.add_put("/api/score-goal/defaults", h_score_goal_defaults_set)
+    r.add_get("/api/role-workflows", h_role_workflows)
+    r.add_put("/api/role-workflows", h_role_workflows_set)
     r.add_get("/api/sessions/{name}/score-goal", h_session_score_goal)
     r.add_post("/api/sessions/{name}/reminder", h_session_reminder_set)
     r.add_post("/api/sessions/{name}/reminder/skip", h_session_reminder_skip)
@@ -1710,14 +1715,18 @@ async def h_restart_request_submit(request: web.Request) -> web.Response:
     Called by the CLI when it has recognized its shell as a managed session
     (``CLAUNCH_SESSION``) — the daemon cannot see the caller's environment,
     so the session travels in the body and the CLI is the one that decided it
-    was an agent asking. ``GateBusy`` (a request already pending) escapes to
-    the middleware and comes back as 409.
+    was an agent asking. ``reason`` (optional) is why the restart is needed,
+    shown in full on the web UI's card. ``GateBusy`` (a request already
+    pending) escapes to the middleware and comes back as 409.
     """
     body = await _json_body(request)
     session = str(body.get("session") or "").strip()
     if not session:
         return json_error(400, "session is required")
-    record = request.app["restart_gate"].submit(session=session)
+    reason = body.get("reason")
+    if reason is not None and not isinstance(reason, str):
+        return json_error(400, "reason must be a string")
+    record = request.app["restart_gate"].submit(session=session, reason=reason or "")
     return json_response({"ok": True, "request": record})
 
 
@@ -1748,9 +1757,8 @@ async def h_restart_request_extend(request: web.Request) -> web.Response:
     The gate's default answer belongs to the clock, and this is how somebody
     who is at the page takes it back without having decided: the request
     stays pending, the asking session stays where it was, and both sides read
-    the new deadline off the same record. ``GateExhausted`` (the budget is
-    spent) escapes to the middleware and comes back as 409, because a press
-    that changed nothing must not answer like one that did."""
+    the new deadline off the same record. It may be pressed any number of
+    times (claunch-mm8zv)."""
     record = request.app["restart_gate"].extend(decided_by="web")
     if record is None:
         return json_error(409, "no pending restart request")
@@ -3270,6 +3278,15 @@ async def h_prompter_prompts(request: web.Request) -> web.Response:
         return json_error(500, str(exc))
 
 
+async def h_prompter_contexts(request: web.Request) -> web.Response:
+    """Context snippets for the New/Spawn prompt-pack selection."""
+    refresh = request.query.get("refresh") in ("1", "true", "yes")
+    try:
+        return json_response(await prompter.contexts(refresh=refresh))
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+
+
 async def h_prompt_presets_remove(request: web.Request) -> web.Response:
     preset_id = request.match_info["preset_id"]
     try:
@@ -4369,7 +4386,22 @@ async def h_cflow_workflows(request: web.Request) -> web.Response:
     # "(daemon cwd)" asks about the workflows it would really see.
     raw = request.query.get("cwd")
     cwd = cflow_state.resolve_cwd(raw)
-    return json_response({"workflows": await asyncio.to_thread(_startable_all, cwd)})
+    return json_response({
+        "workflows": await asyncio.to_thread(_startable_all, cwd),
+        # Settings' per-role auto-pick overrides, served with the list they
+        # pick from so the form and the CLI wizard apply them in one read.
+        "role_workflows": _role_workflows_or_none(),
+    })
+
+
+def _role_workflows_or_none() -> dict:
+    """The overrides, or none when the config file cannot be read: the list
+    is what the picker needs, and an unreadable file must not take it away."""
+    try:
+        return store.role_workflows()
+    except store.StoreError as exc:
+        log.warning("could not read daemon.role_workflows: %s", exc)
+        return {}
 
 
 def _startable_all(cwd: str) -> list:
@@ -7641,6 +7673,17 @@ async def _onboard_and_launch(
         except ValueError as exc:
             raise onboard.OnboardError(str(exc)) from None
         session.sdef = replace(session.sdef, score_goal=selected)
+        # The operator's note, written in the form that starts the session
+        # (claunch-zy9yk): the same field and limit as the note endpoint
+        # (manager.set_note), set here so create and spawn both carry it.
+        if "note" in body:
+            raw_note = body.get("note")
+            if raw_note is not None and not isinstance(raw_note, str):
+                raise onboard.OnboardError("'note' must be text")
+            note_text = str(raw_note or "").strip()
+            if len(note_text) > MAX_NOTE:
+                raise onboard.OnboardError(f"a note is at most {MAX_NOTE} characters")
+            session.sdef = replace(session.sdef, note=note_text or None)
         # Inside the discarding try, and before anything is arranged: a board
         # answer that contradicts itself is checkable without a session, and
         # the alternative is a request that half-happens.
@@ -7681,6 +7724,9 @@ async def _onboard_and_launch(
             packs, packs_required = _session_prompt_packs(
                 request, body, plan, name=name, cwd=cwd
             )
+            if body.get("prompter_prompts") is not None:
+                raise prompt_packs.PackError("Prompter prompts belong in Opening task; reopen the form")
+            packs += await prompter.selected_records(body.get("prompter_contexts"))
         except prompt_packs.PackError as exc:
             raise onboard.OnboardError(str(exc)) from None
         if packs:
@@ -8306,6 +8352,43 @@ async def h_score_goal_defaults_set(request: web.Request) -> web.Response:
     return json_response({"enabled": value})
 
 
+async def h_role_workflows(request: web.Request) -> web.Response:
+    """Per-role overrides of the workflow the session pickers auto-select
+    (``daemon.role_workflows``), read live from the config file."""
+    try:
+        return json_response({"role_workflows": store.role_workflows()})
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+
+
+async def h_role_workflows_set(request: web.Request) -> web.Response:
+    """Set one role's auto-selected workflow, from the Settings page.
+
+    Body ``{"role": <role>, "workflow": <value>}``: a workflow name,
+    ``v2:<name>``, ``-`` for no auto-pick, or ``""``/null to drop the
+    override and let the workflows' own ``default_role`` decide again. The
+    workflow is not checked against a directory's list: which workflows
+    exist depends on where a session stands, so a picker applies an
+    override only where it is declared and falls back elsewhere.
+    """
+    body = await _json_body(request)
+    try:
+        role = mesh_roles._check_name(body.get("role"), "role")
+    except mesh_roles.RoleError as exc:
+        return json_error(400, str(exc))
+    workflow = body.get("workflow")
+    if workflow is not None and not isinstance(workflow, str):
+        return json_error(400, "'workflow' must be a string or null")
+    workflow = (workflow or "").strip()
+    if workflow and (any(c.isspace() for c in workflow) or len(workflow) > 200):
+        return json_error(400, f"invalid workflow value {workflow!r}")
+    try:
+        store.set_role_workflow(role, workflow or None)
+        return json_response({"role_workflows": store.role_workflows()})
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+
+
 async def h_session_score_goal(request: web.Request) -> web.Response:
     return json_response(score_goal.view(_session(request).sdef))
 
@@ -8658,6 +8741,18 @@ async def h_session_window(request: web.Request) -> web.Response:
     header's window strip; a read, like ``GET /api/window``."""
     session = _session(request)
     return json_response(request.app["window"].session_view(session.sdef.name))
+
+
+async def h_session_timers(request: web.Request) -> web.Response:
+    """Every countdown this session waits on, soonest first (claunch-7dzae):
+    a cflow v2 choice held until its interval window opens, a v2 wait, a
+    loop pause, an ask deadline -- whatever the providers registered in
+    ``session_timers`` report. Polled by the terminal's timer line
+    (#term-timers); a read."""
+    session = _session(request)
+    data = await asyncio.to_thread(
+        session_timers.collect, session.sdef.name, _session_cwd(session), app=request.app)
+    return json_response(data)
 
 
 async def h_session_queued_flush(request: web.Request) -> web.Response:
@@ -9186,17 +9281,69 @@ async def stage_quick_fork(
     # name, and the inheritance that already exists does the work.
     mesh = str(body.get("mesh") or onboard.NO_MESH)
     workflow = str(body.get("workflow") or onboard.NO_WORKFLOW)
+    role = str(body.get("role") or "").strip()
+    # Sibling: the copy answers to the origin's parent (a root when the origin
+    # is one) instead of the origin. It is still BUILT from the origin -- its
+    # conversation, its directory -- which is what stage_child's place_under
+    # keeps apart.
+    sibling = body.get("sibling") in (True, "true", "1", 1)
+    placed = (origin.sdef.parent or "") if sibling else parent
+    mesh_mgr = _mesh_mgr(request)
+    origin_meshes = mesh_mgr.meshes_for_session(parent)
+    if mesh == ".":
+        # The origin's mesh, read here rather than by inherit_mesh downstream
+        # when it can be named outright: inherit_mesh reads the PARENT's, and
+        # a sibling's parent is not the origin. With none or several the child
+        # keeps the downstream reading (it opens one, or refuses naming them);
+        # a sibling has no such parent to fall back on.
+        if len(origin_meshes) == 1:
+            mesh = origin_meshes[0]["mesh"]
+        elif sibling:
+            if origin_meshes:
+                raise QuickForkError(400, (
+                    f"session {parent!r} is in {len(origin_meshes)} meshes "
+                    f"({', '.join(sorted(m['mesh'] for m in origin_meshes))}) "
+                    "— name the one the copy joins"
+                ))
+            mesh = onboard.NO_MESH
+    if workflow == "." and sibling:
+        # The same pair a child would get (inherit_workflow), read from the
+        # origin's run, because the sibling's parent is not the origin.
+        paired, version = onboard._paired(
+            parent=parent, parent_cwd=origin.sdef.cwd or "",
+            cwd=origin.sdef.cwd or "",
+        )
+        workflow = paired or onboard.NO_WORKFLOW
+        workflow_version = version if paired else 0
+    else:
+        workflow_version = 0
     inherit_mesh = mesh == "."
     inherit_workflow = workflow == "."
+    named_mesh = "" if mesh in (onboard.NO_MESH, ".") else mesh
+    # The origin's role where the copy lands (or, with no mesh, its only one),
+    # and the copy's own: asked for, or what the join will resolve its name to.
+    origin_role = next(
+        (m["role"] for m in origin_meshes if m["mesh"] == named_mesh), ""
+    ) if named_mesh else (
+        origin_meshes[0]["role"] if len(origin_meshes) == 1 and mesh == onboard.NO_MESH else ""
+    )
+    fork_role = role
+    if named_mesh and not fork_role:
+        try:
+            fork_role = mesh_mgr.get(named_mesh).roleset.resolve(name, "")
+        except Exception:
+            fork_role = ""
     opening = handoff_mod.compose_marker(
         origin=parent, fork=name, marker=marker, forked_at=forked_at,
         # The origin's own directory, because a fork cannot be moved out of
         # it. Named in the block so the copy can see what it shares.
         cwd=str(origin.sdef.cwd or ""),
-        # An inherited one is not named here: it is settled downstream, and
-        # the block would be guessing. The join itself tells the copy.
-        mesh="" if mesh in (onboard.NO_MESH, ".") else mesh,
+        # An inherited one the origin's roster could not name is not named
+        # here: it is settled downstream, and the block would be guessing.
+        mesh=named_mesh,
         workflow="" if workflow in (onboard.NO_WORKFLOW, ".") else workflow,
+        role=fork_role, origin_role=origin_role,
+        sibling=sibling, placed_under=placed,
     )
     task = str(body.get("task") or "").strip()
     if task:
@@ -9208,15 +9355,27 @@ async def stage_quick_fork(
         "task": opening,
         "beads": False,
     }
-    if not inherit_mesh:
+    # The "none" spellings are read by the inheritance step, which only runs
+    # for a session with a parent; a root says none by leaving the field out.
+    if not inherit_mesh and (placed or mesh != onboard.NO_MESH):
         spawn_body["mesh"] = mesh
-    if not inherit_workflow:
+    if not inherit_workflow and (placed or workflow != onboard.NO_WORKFLOW):
         spawn_body["workflow"] = workflow
+    if workflow_version == 2:
+        spawn_body["workflow_version"] = 2
+    if role:
+        # Without a mesh preflight refuses it ("only mean something with a
+        # mesh"); with one, it refuses an exclusive role (leader) a live
+        # member already holds -- the authority behind the form's check.
+        spawn_body["role"] = role
     for key, value in (spawn_extra or {}).items():
         spawn_body.setdefault(key, value)
     warnings: list = []
     try:
-        session = manager.stage_child(parent, spawn_body, warnings=warnings)
+        session = manager.stage_child(
+            parent, spawn_body, warnings=warnings,
+            place_under=None if not sibling else placed,
+        )
     except spawn_mod.SpawnDenied as exc:
         raise QuickForkError(403, str(exc)) from None
     except (HarnessError, ValueError, TypeError) as exc:
@@ -9226,7 +9385,9 @@ async def stage_quick_fork(
     if before_launch is not None:
         before_launch(session)
     try:
-        result = await _onboard_and_launch(request, session, spawn_body, parent=parent)
+        result = await _onboard_and_launch(
+            request, session, spawn_body, parent=(placed or None),
+        )
     except onboard.OnboardError as exc:
         raise QuickForkError(400, str(exc)) from None
     except (HarnessError, ValueError, TypeError) as exc:
@@ -9249,6 +9410,10 @@ async def stage_quick_fork(
         # it. A caller that prints one line about this fork should print this.
         "cwd": str(origin.sdef.cwd or ""),
         "shared_checkout": True,
+        # Where the copy hangs: under the origin, or beside it ("" = a root).
+        "sibling": sibling,
+        "parent": placed,
+        "role": fork_role if named_mesh else "",
     }
     if warnings:
         out["warnings"] = warnings
@@ -9801,7 +9966,7 @@ async def _deliver_pasted_image(session, path, media_type: str):
     is "stored, not delivered, because X" -- which the web session line shows
     where the person who pressed the key is looking.
 
-    The path transport sends a file URI in one bracketed paste, which a
+    The path transport sends a path in one bracketed paste, which a
     supporting harness converts into an attachment without the clipboard.
     For the clipboard transport, the image keystroke is a property of the
     harness, so it comes from its declaration (``image_paste_keys``) rather
@@ -9820,8 +9985,11 @@ async def _deliver_pasted_image(session, path, media_type: str):
         # with spaces. Never send Enter: attaching must preserve the draft.
         if not session.screen.bracketed_paste:
             return False, [], "the session is not ready for an image path paste"
+        target = Path(path).resolve()
+        pasted_path = (str(target) if entry.image_paste_path_format == "native"
+                       else target.as_uri())
         try:
-            await session.paste(Path(path).resolve().as_uri(), enter=False)
+            await session.paste(pasted_path, enter=False)
         except Exception as exc:
             return False, [], f"the image path did not reach the session: {exc}"
         return True, [], ""

@@ -1,4 +1,7 @@
-/* Browser-local session history. Display order and LRU order are independent. */
+/* Browser-local session history. Tabs are drawn oldest-activated first, so the
+   most recently activated tab sits at the right end. Pinned tabs form their
+   own group on the left, ordered the same way among themselves; a pin never
+   activated keeps the order it was pinned in. */
 globalThis.SessionTabHistory = class SessionTabHistory {
   constructor(storage, key, pins = []) {
     this.storage = storage;
@@ -45,7 +48,12 @@ globalThis.SessionTabHistory = class SessionTabHistory {
     this.save();
   }
   names() {
-    return [...this.pins, ...this.entries.filter(e => !this.pins.includes(e.name)).map(e => e.name)];
+    const used = name => this.entries.find(e => e.name === name)?.used || 0;
+    // Array.prototype.sort is stable, so equal stamps keep pin/insert order.
+    const pins = this.pins.slice().sort((a, b) => used(a) - used(b));
+    const recent = this.entries.filter(e => !this.pins.includes(e.name))
+      .sort((a, b) => a.used - b.used).map(e => e.name);
+    return [...pins, ...recent];
   }
   latest() {
     return this.entries.slice().sort((a, b) => b.used - a.used)[0]?.name || null;

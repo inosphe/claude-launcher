@@ -1674,12 +1674,20 @@ def _cmd_quick_fork(args: argparse.Namespace) -> int:
         body["mesh"] = str(args.mesh).strip()
     if getattr(args, "workflow", None):
         body["workflow"] = str(args.workflow).strip()
+    if getattr(args, "role", None):
+        # The daemon refuses an exclusive role (leader) a live member holds,
+        # and a role with no mesh to hold it in.
+        body["role"] = str(args.role).strip()
+    if getattr(args, "sibling", False):
+        body["sibling"] = True
     info = client.post(f"/api/sessions/{origin}/quick-fork", body)
     child = info["session"]
     got = info.get("quick_fork") or {}
     joined = []
     if got.get("mesh"):
         joined.append(f"mesh {got['mesh']}")
+    if got.get("role"):
+        joined.append(f"role {got['role']}")
     if got.get("workflow"):
         joined.append(f"workflow {got['workflow']}")
     where = got.get("cwd") or "the origin's directory"
@@ -1687,6 +1695,11 @@ def _cmd_quick_fork(args: argparse.Namespace) -> int:
         f"quick-fork {child['name']!r} of {origin!r} started (pid {child.get('pid')}, "
         f"marker {info.get('marker')}) — a copy of its conversation from here"
         + (", in " + " and ".join(joined) if joined else "")
+        + (
+            (f", as a sibling under {got['parent']!r}" if got.get("parent")
+             else ", as a sibling root session")
+            if got.get("sibling") else ""
+        )
         + "."
     )
     # Said every time, not only when it bites: the copy stands in the
@@ -1876,7 +1889,7 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
         if getattr(args, "all", False):
             return _restart_all_instances()
         if getattr(args, "force", False):
-            return _force_replace()
+            return _force_replace(getattr(args, "reason", None) or "")
         # The ordinary path talks to the daemon, so it only works while the
         # daemon is listening. A wedged one cannot be asked anything -- say so
         # here rather than leaving the operator with "did not come up in 15s",
@@ -1904,7 +1917,7 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
         # to below — and the daemon cannot see it, so only the CLI can draw
         # it (see restart_gate's module docstring).
         if os.environ.get("CLAUNCH_SESSION"):
-            return _gated_restart()
+            return _gated_restart(getattr(args, "reason", None) or "")
         # Written first, and this order is the whole fix. Everything below
         # this line runs in a turn that is about to die: the daemon takes
         # every terminal attached to it down, so the print at the end reaches
@@ -1954,7 +1967,7 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
     raise AssertionError(f"unknown daemon action {action!r}")
 
 
-def _gated_restart() -> int:
+def _gated_restart(reason: str = "") -> int:
     """A managed session's restart request, waited out to its outcome.
 
     The ordinary path above stops the daemon on the spot — and with it the
@@ -1980,6 +1993,11 @@ def _gated_restart() -> int:
     answering falls through to this same gate, because then there is
     nothing to force: a session's restart waits here whatever spelling
     asked for it.
+
+    ``reason`` (``--reason``) travels with the request and is printed in
+    full on the web UI's card, so the person deciding can see why the
+    restart is wanted. It is sent only when given: a daemon older than the
+    field ignores it and the request is still filed.
     """
     report = daemon_client.diagnose()
     state = report["state"]
@@ -2001,8 +2019,12 @@ def _gated_restart() -> int:
         # back; the caller re-runs the command.
         print("daemon went away before the request could be filed", file=sys.stderr)
         return 1
+    body = {"session": session}
+    reason = (reason or "").strip()
+    if reason:
+        body["reason"] = reason
     try:
-        resp = client.post("/api/daemon/restart-request", {"session": session})
+        resp = client.post("/api/daemon/restart-request", body)
     except DaemonClientError as exc:
         print(f"could not request the restart: {exc}", file=sys.stderr)
         return 1
@@ -2035,6 +2057,8 @@ def _gated_restart() -> int:
             "(this command waits for the outcome)",
             file=sys.stderr,
         )
+    if reason:
+        print(f"  reason: {reason}", file=sys.stderr)
     poll_secs = 2.0
     try:
         while True:
@@ -2184,7 +2208,7 @@ def _print_wedged(report: dict, confirm: dict) -> None:
     )
 
 
-def _force_replace() -> int:
+def _force_replace(reason: str = "") -> int:
     """Replace a daemon that cannot be asked to leave.
 
     Reserved for the wedged case and never automatic: ending the process
@@ -2216,7 +2240,7 @@ def _force_replace() -> int:
         # can. The wedged branch below has no daemon to host a gate and stays
         # immediate.
         if os.environ.get("CLAUNCH_SESSION"):
-            return _gated_restart()
+            return _gated_restart(reason)
         restart_notice.record_request_from_env(via="cli-force")
         client = daemon_client.restart()
         print(f"daemon restarted at {client.base_url}")
@@ -3348,8 +3372,20 @@ def register(sub) -> None:
     )
     p_qf.add_argument(
         "--workflow",
-        help="start the copy on this cflow workflow ('.' = the same one as "
-             "the origin). Default: none",
+        help="start the copy on this cflow workflow ('.' = the pair the "
+             "origin's run declares for a child, default_child_cflow -- not "
+             "the origin's own workflow). Default: none",
+    )
+    p_qf.add_argument(
+        "--role",
+        help="the copy's role in its mesh (requires --mesh). An exclusive "
+             "role (leader) a live member holds is refused. The copy's "
+             "opening says when it differs from the origin's",
+    )
+    p_qf.add_argument(
+        "--sibling", action="store_true",
+        help="place the copy beside the origin, under the origin's parent "
+             "(a root when the origin has none), instead of as its child",
     )
     p_qf.add_argument("-a", "--attach", action="store_true", help="attach to the copy once started")
     p_qf.set_defaults(func=_cmd_quick_fork)
@@ -3458,6 +3494,14 @@ def register(sub) -> None:
                 help="for a daemon that has stopped answering: end its "
                      "process (and its sessions) and start a fresh one -- "
                      "the only way past a lock a wedged daemon still holds",
+            )
+            p.add_argument(
+                "--reason", metavar="TEXT", default=None,
+                help="why the restart is needed. From inside a managed "
+                     "session it travels with the approval request and is "
+                     "shown in full on the web UI's card, so the operator "
+                     "can judge it (e.g. the merges the live daemon does "
+                     "not serve yet). Ignored on the immediate path",
             )
         p.set_defaults(func=_cmd_daemon, action=action)
     p_token = dsub.add_parser("token", help="print the API/web login token")

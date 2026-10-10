@@ -562,7 +562,63 @@ DAEMON_DEFAULTS = {
     # terminal, the web UI's approval card for an agent session); "auto" --
     # it goes ahead. Read live by the CLI on every sync.
     "reposync_push": "ask",
+    # Which workflow the session pickers (the dashboard's new-session form,
+    # the CLI wizard) auto-select when a role is picked, per role: a
+    # workflow name, "v2:<name>" for the v2 one of a name both formats
+    # declare, or "-" to auto-select nothing. A role absent here falls back
+    # to the workflows' own ``default_role`` (worker -> improv-worker). An
+    # override the picked directory does not declare, or the role's filter
+    # refuses, also falls back. Only the auto-pick: a parent's pair
+    # (default_child_cflow) still decides a child's run. Read LIVE on every
+    # workflow listing; the Settings page writes it (PUT /api/role-workflows).
+    "role_workflows": {},
 }
+
+#: The ``role_workflows`` value that auto-selects no workflow for a role.
+ROLE_WORKFLOW_NONE = "-"
+
+
+def role_workflows(doc: Optional[dict] = None) -> Dict[str, str]:
+    """``daemon.role_workflows`` cleaned: lower-cased role -> non-empty
+    workflow value. A malformed block reads as empty rather than raising --
+    it only steers a picker's default, and a picker that broke over it
+    would cost more than the default it was meant to change."""
+    block = daemon_config(doc).get("role_workflows")
+    if not isinstance(block, dict):
+        return {}
+    out: Dict[str, str] = {}
+    for role, value in block.items():
+        role = str(role or "").strip().lower()
+        value = str(value or "").strip() if isinstance(value, str) else ""
+        if role and value:
+            out[role] = value
+    return out
+
+
+def set_role_workflow(role: str, workflow: Optional[str]) -> None:
+    """Set (or clear, when ``workflow`` is empty/None) one role's override."""
+    role = str(role or "").strip().lower()
+    workflow = str(workflow or "").strip()
+
+    def _mutate(doc: dict) -> None:
+        block = doc.get("daemon")
+        if not isinstance(block, dict):
+            block = {}
+            doc["daemon"] = block
+        rows = block.get("role_workflows")
+        rows = dict(rows) if isinstance(rows, dict) else {}
+        if workflow:
+            rows[role] = workflow
+        else:
+            rows.pop(role, None)
+        if rows:
+            block["role_workflows"] = rows
+        else:
+            block.pop("role_workflows", None)
+            if not block:
+                doc.pop("daemon", None)
+
+    update(_mutate)
 
 
 def daemon_config(doc: Optional[dict] = None) -> dict:

@@ -1052,6 +1052,74 @@ def test_rival_defaults_settle_by_priority_and_sort_the_picker():
     ]
 
 
+class _OverrideSources(FakeSources):
+    """FakeSources plus Settings' daemon.role_workflows, as the daemon serves
+    it beside each workflow list."""
+
+    def __init__(self, overrides, **kw):
+        super().__init__(**kw)
+        self.overrides = overrides
+
+    def role_workflows(self, cwd):
+        return dict(self.overrides)
+
+
+_RIVALS = [
+    {"name": "improv-worker", "default_role": "worker", "priority": 0,
+     "filter_roles": {"type": "whitelist", "roles": ["worker"]}},
+    {"name": "improv-worker-v2", "priority": 0, "version": 2,
+     "filter_roles": {"type": "whitelist", "roles": ["worker"]}},
+    {"name": "improv-leader", "default_role": "leader", "priority": 0,
+     "filter_roles": {"type": "whitelist", "roles": ["leader"]}},
+    {"name": "plain"},
+]
+
+
+@pytest.mark.parametrize("override, picked", [
+    ("improv-worker-v2", "improv-worker-v2"),   # Settings' choice wins
+    ("-", ""),                                  # explicit "no workflow"
+    ("not-declared", "improv-worker"),          # absent here: default_role
+    ("improv-leader", "improv-worker"),         # filter refuses: default_role
+])
+def test_a_settings_override_decides_the_role_auto_pick(override, picked):
+    sources = _OverrideSources({"worker": override},
+                               workflows={"/srv/api": _RIVALS})
+    wiz = wizard.Wizard(sources, cwd="/work/repo")
+    pick(wiz, "cwd", "api")
+    pick(wiz, "role", "worker")
+    assert wiz.value("workflow") == picked
+
+
+def test_an_override_for_another_role_leaves_this_one_alone():
+    sources = _OverrideSources({"leader": "plain"},
+                               workflows={"/srv/api": _RIVALS})
+    wiz = wizard.Wizard(sources, cwd="/work/repo")
+    pick(wiz, "cwd", "api")
+    pick(wiz, "role", "worker")
+    assert wiz.value("workflow") == "improv-worker"
+
+
+def test_a_v2_prefixed_override_takes_the_v2_one_of_a_shared_name():
+    entries = [wizard._workflow_entry(e) for e in [
+        {"name": "flow", "default_role": "worker"},
+        {"name": "flow", "version": 2},
+    ]]
+    assert wizard._workflow_default(entries, "worker", {"worker": "v2:flow"}) == "v2:flow"
+    # the bare name is the v1 one, the value the picker sends for it
+    assert wizard._workflow_default(entries, "worker", {"worker": "flow"}) == "flow"
+
+
+def test_the_daemon_listing_carries_the_overrides_to_the_wizard():
+    class Client:
+        def get(self, path):
+            return {"workflows": [{"name": "w"}],
+                    "role_workflows": {"Worker": "w", "leader": "", "x": 3}}
+
+    src = wizard.DaemonSources(Client())
+    assert src.role_workflows("/srv") == {"worker": "w"}
+    assert [e["name"] for e in src.workflows("/srv")] == ["w"]
+
+
 def test_a_workflow_a_person_picked_survives_a_role_change():
     sources = FakeSources(workflows={"/srv/api": [
         {"name": "improv", "default_role": "worker", "priority": 1},

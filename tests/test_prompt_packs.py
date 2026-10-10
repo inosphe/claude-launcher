@@ -583,6 +583,75 @@ def test_the_unreal_subrole_forces_its_pack(home, tmp_path):
     asyncio.run(run())
 
 
+def test_prompter_selection_reaches_create_and_spawn_and_survives_restore(home, tmp_path, monkeypatch):
+    from claude_launcher.daemon import prompter, session_reminder
+
+    _register_py_harness()
+    ws = tmp_path / "proj"
+    ws.mkdir()
+    workspaces.add(str(ws), "proj")
+    prompter.set_url("https://p.example")
+
+    async def fetch(url, kind):
+        assert kind == "context"
+        return {"connected": True, "error": "", "contexts": [
+            {"id": 7, "name": "guidance", "title": "Guidance", "body": "SERVER RULE"},
+            {"id": 8, "name": "excluded", "title": "", "body": "UNSELECTED RULE"},
+        ]}
+
+    monkeypatch.setattr(prompter, "_fetch", fetch)
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        client = await _serve(mgr, MeshManager(mgr, root=tmp_path / "mesh"))
+        seen, restore = _spy_openings()
+        try:
+            payload = {"profile": "py", "cwd": str(ws), "task": "TASK", "beads": False,
+                       "prompt_packs": ["common"],
+                       "prompter_contexts": {"url": "https://p.example", "ids": [7]}}
+            for name, endpoint in [("p1", "/api/sessions"), ("p2", "/api/sessions/p1/children")]:
+                requested = {**payload, "name": name}
+                if name == "p2":
+                    for inherited in ("profile", "cwd"):
+                        requested.pop(inherited)
+                resp = await client.post(endpoint, headers=BEARER, json=requested)
+                assert resp.status == 201, await resp.json()
+                opening = seen[name]
+                assert opening.index("prompt pack: common") < opening.index("SERVER RULE") < opening.index("TASK")
+                assert "UNSELECTED RULE" not in opening
+                assert "from the configured prompter server" in opening
+                sdef = mgr.get(name).sdef
+                assert SessionDef.from_dict(sdef.to_dict()).prompt_packs == sdef.prompt_packs
+                assert session_reminder.refresh_packs(mgr.get(name)) == (None, [])
+                texts = rebrief.addressable(name, manager=mgr, mesh_mgr=None)
+                assert any(v["kind"] == "prompt pack (prompter:context:7)" for v in texts.values())
+            bad = {**payload, "name": "bad", "prompter_contexts": {"url": "https://p.example", "ids": [99]}}
+            resp = await client.post("/api/sessions", headers=BEARER, json=bad)
+            assert resp.status == 400
+            assert "unavailable" in (await resp.json())["error"]
+            assert "bad" not in [s.sdef.name for s in mgr.list()]
+            for name, endpoint in [("stale", "/api/sessions"), ("stale-child", "/api/sessions/p1/children")]:
+                stale = {**payload, "name": name,
+                         "prompter_prompts": {"url": "https://p.example", "ids": [7]}}
+                if name == "stale-child":
+                    for inherited in ("profile", "cwd"):
+                        stale.pop(inherited)
+                resp = await client.post(endpoint, headers=BEARER, json=stale)
+                assert resp.status == 400
+                assert "Opening task" in (await resp.json())["error"]
+                assert name not in [s.sdef.name for s in mgr.list()]
+            payload.pop("prompter_contexts")
+            resp = await client.post("/api/sessions", headers=BEARER, json={**payload, "name": "plain"})
+            assert resp.status == 201, await resp.json()
+            assert "SERVER RULE" not in seen["plain"]
+        finally:
+            restore()
+            await mgr.shutdown_all()
+            await client.close()
+            prompter._cache.clear()
+    asyncio.run(run())
+
+
 def test_the_text_route_shows_what_the_opening_would_get(home, tmp_path):
     ws = tmp_path / "proj"
     ws.mkdir()

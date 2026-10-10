@@ -52,6 +52,9 @@ def restarts(monkeypatch):
     """A ``claunch`` on PATH and a recorder for the command that runs."""
     calls = []
     monkeypatch.setattr(restart_live.shutil, "which", lambda name: f"/fake/{name}")
+    # The reason's commit list reads the real daemon.json and git; pinned
+    # here so these tests see only the decision. Tested on its own below.
+    monkeypatch.setattr(restart_live, "_unserved", lambda repo, branch, dj: [])
 
     def run(command):
         calls.append(list(command))
@@ -64,7 +67,10 @@ def test_older_code_is_restarted(verdict, restarts, capsys):
     verdict(deploy_check.NOT_RESTARTED)
     calls, run = restarts
     assert restart_live.main(["--branch", "master"], run=run) == 0
-    assert calls == [["/fake/claunch", "daemon", "restart"]]
+    assert calls == [[
+        "/fake/claunch", "daemon", "restart",
+        "--reason", restart_live._RESTARTING_BECAUSE[deploy_check.NOT_RESTARTED],
+    ]]
     got = capsys.readouterr()
     assert "restarting" in got.err and "running:" in got.out
 
@@ -97,7 +103,8 @@ def test_unsure_and_dirty_answers_still_restart(verdict, restarts, capsys, code)
     verdict(code)
     calls, run = restarts
     assert restart_live.main([], run=run) == 0
-    assert calls == [["/fake/claunch", "daemon", "restart"]]
+    assert [c[:4] for c in calls] == [["/fake/claunch", "daemon", "restart", "--reason"]]
+    assert calls[0][4] == restart_live._RESTARTING_BECAUSE[code]
     assert "restarting" in capsys.readouterr().err
 
 
@@ -150,3 +157,54 @@ def test_the_platform_wrappers_defer_to_the_python_decision(wrapper):
     ]
     assert any("tools/restart_live.py" in line for line in code_lines), wrapper
     assert not any(re.search(r"claunch\s+daemon\s+restart", line) for line in code_lines), wrapper
+
+
+def test_the_reason_lists_the_commits_the_daemon_does_not_serve(verdict, restarts, monkeypatch):
+    """The approval card shows this reason (claunch-mm8zv): the person asked
+    to cut every attached turn sees which merges are not live yet."""
+    verdict(deploy_check.NOT_RESTARTED)
+    calls, run = restarts
+    unserved = [f"{i:07x} merge: change {i}" for i in range(12)]
+    monkeypatch.setattr(restart_live, "_unserved", lambda repo, branch, dj: unserved)
+    assert restart_live.main([], run=run) == 0
+    reason = calls[0][calls[0].index("--reason") + 1]
+    assert reason.startswith(restart_live._RESTARTING_BECAUSE[deploy_check.NOT_RESTARTED])
+    assert "does not serve yet (12)" in reason
+    assert "0000000 merge: change 0" in reason
+    assert f"{restart_live.UNSERVED_SHOWN - 1:07x} merge" in reason
+    assert f"{restart_live.UNSERVED_SHOWN:07x} merge" not in reason
+    assert "... and 2 more" in reason
+
+
+def test_unserved_reads_the_range_from_the_daemons_head(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(
+        deploy_check, "_daemon_doc",
+        lambda dj: (Path("d.json"), {"started_at": "x", "code": {"head": "abc123"}}),
+    )
+
+    def fake_git(repo, *args):
+        seen["args"] = args
+        return "1111111 merge: one\n2222222 merge: two\n"
+
+    monkeypatch.setattr(deploy_check, "_git", fake_git)
+    assert restart_live._unserved(Path("."), "master", None) == [
+        "1111111 merge: one", "2222222 merge: two",
+    ]
+    assert seen["args"][-1] == "abc123..master"
+    assert "--first-parent" in seen["args"]
+
+
+def test_unserved_is_empty_when_it_cannot_tell(monkeypatch):
+    """The reason is for a person; failing to build it must not stop the
+    restart."""
+    def no_doc(dj):
+        raise LookupError("no daemon.json")
+
+    monkeypatch.setattr(deploy_check, "_daemon_doc", no_doc)
+    assert restart_live._unserved(Path("."), "master", None) == []
+    monkeypatch.setattr(
+        deploy_check, "_daemon_doc",
+        lambda dj: (Path("d.json"), {"started_at": "x", "code": {}}),
+    )
+    assert restart_live._unserved(Path("."), "master", None) == []

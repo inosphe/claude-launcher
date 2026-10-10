@@ -66,6 +66,25 @@ def test_incomplete_osc_is_bounded_and_recovers():
 
 
 @pytest.mark.parametrize("harness,busy,idle", SIGNALS)
+def test_turn_start_excludes_continuing_activity_and_survives_idle(
+    monkeypatch, harness, busy, idle
+):
+    now = [100.0]
+    monkeypatch.setattr(activity.time, "monotonic", lambda: now[0])
+    detector = activity.Detector(harness)
+    assert not detector.turn_started_since(100.0)
+    detector.feed(busy.encode())
+    assert detector.turn_started_since(100.0)
+    now[0] = 102.0
+    detector.feed(busy.encode())
+    assert detector.busy_seen_since(101.0)
+    assert not detector.turn_started_since(101.0)
+    detector.feed(idle.encode() + busy.encode() + idle.encode())
+    assert detector.turn_started_since(101.0)
+    assert not detector.busy(15)
+
+
+@pytest.mark.parametrize("harness,busy,idle", SIGNALS)
 @pytest.mark.parametrize("focused", [False, True])
 def test_live_output_overrides_quiet_screen_and_agrees_with_idle_since(
     home, tmp_path, monkeypatch, harness, busy, idle, focused

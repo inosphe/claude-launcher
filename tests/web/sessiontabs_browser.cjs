@@ -71,15 +71,25 @@ const server = http.createServer((req, res) => {
     for (const name of ["s1", "s2", "s3", "s4", "s5"]) await visit(name);
     await tab("s1").locator("a").click();
     await page.waitForFunction(() => location.hash === "#/s/s1" && document.querySelector('.session-tab[data-name="s1"]').classList.contains("active"));
-    assert.deepEqual(await names(), ["s9", "s1", "s2", "s3", "s4", "s5"]);
+    assert.deepEqual(await names(), ["s9", "s2", "s3", "s4", "s5", "s1"],
+                     "the last activated tab moves to the right end");
+    // The move is animated (animateSessionTabs): the tab that changed place
+    // carries a running transform animation right after the rebuild.
+    assert(await tab("s1").evaluate(el => el.getAnimations().length > 0),
+           "a reordered tab is animated to its new place");
     await visit("s6");
-    assert.deepEqual(await names(), ["s9", "s1", "s3", "s4", "s5", "s6"]);
+    assert.deepEqual(await names(), ["s9", "s3", "s4", "s5", "s1", "s6"]);
     await tab("s1").locator(".session-tab-pin").click();
+    assert(await tab("s1").evaluate(el => el.getAnimations().length > 0),
+           "a pin toggle animates the tab into the pin group");
     await visit("s7");
     assert.deepEqual(await names(), ["s9", "s1", "s3", "s4", "s5", "s6", "s7"]);
     // Closing a pinned tab must not temporarily unpin it into the full LRU
     // set and evict an unrelated recent tab.
     await tab("s1").locator(".session-tab-close").click();
+    // A closed tab leaves an inert fading copy that is not a tab and then goes.
+    assert.equal(await page.locator(".session-tab-leaving").count(), 1, "a closed tab fades out");
+    await page.waitForFunction(() => !document.querySelector(".session-tab-leaving"));
     assert.deepEqual(await names(), ["s9", "s3", "s4", "s5", "s6", "s7"]);
     await tab("s7").locator(".session-tab-close").click();
     await page.waitForFunction(() => location.hash === "#/s/s6");
@@ -97,6 +107,12 @@ const server = http.createServer((req, res) => {
     await visit("s8"); // parked live terminal restore also updates the active tab
     assert.equal(await tab("s8").locator("a").getAttribute("aria-current"), "page");
     assert((await tab("s8").locator(".dot").boundingBox()).width > 0, "session status dot is visible");
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await visit("s6");
+    assert.equal(await page.evaluate(() => document.getAnimations().filter(a =>
+      a.effect?.target?.closest?.("#session-tabs")).length), 0, "reduced motion turns the tab motion off");
+    await page.emulateMedia({ reducedMotion: "no-preference" });
+    await visit("s8");
     if (process.env.CLAUNCH_TAB_SCREENSHOT) await page.screenshot({ path: process.env.CLAUNCH_TAB_SCREENSHOT });
     for (const width of [1440, 1000, 390]) {
       await page.setViewportSize({ width, height: 900 });

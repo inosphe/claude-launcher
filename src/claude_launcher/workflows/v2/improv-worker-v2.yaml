@@ -284,6 +284,29 @@ rules:
       교대에 상위의 restack 요구를 거절한 워커가 옳았다
       (claunch-no-premature-rebase-lhcz).
     deliver: [work, rework-gate]
+  record-tries:
+    text: |
+      ── 시도 기록: 대화가 압축되기 전에 남긴다 ──
+      이 회차의 탐색과 시행착오는 대화 안에만 있으면 compact에서 사라지고,
+      회차 보고서를 쓰는 round-report에도 닿지 않는다(그 노드는 headless로
+      돌면 이 대화를 전혀 보지 못한다). 기록이 남는 자리는 둘이다:
+      · 그 자리에서 — 방향을 바꿨거나, 막혔거나, 세운 가설이 틀린 것으로
+        드러났으면 그 순간 이 회차 이슈에 한 줄을 남긴다:
+        `claunch beads comments add <이슈 id> "TRIED: <무엇을 했나> -> <무엇이
+        나왔나> (<그래서 어떻게 했나>)"`. 노드가 끝날 때까지 미루지 않는다 —
+        긴 노드 안에서는 compact가 보고보다 먼저 온다.
+      · 노드가 끝날 때 — 보고의 `tried`에 이 노드에서 시도한 것을 항목당 한
+        줄로 싣는다(위 코멘트와 같은 줄이어도 된다). 곧장 됐으면 빈 목록이다.
+        없는 시행착오를 지어내지 않는다.
+      남길 것: 버린 접근과 버린 이유, 빨갛다가 고친 것(무엇이 왜 빨갰나),
+      예상과 다르게 나온 측정, 사용자·상위의 결정으로 방향이 바뀐 지점.
+      남기지 않을 것: 성공한 명령의 나열, 커밋 메시지나 보고의 다른 필드에
+      이미 있는 값.
+    why: >-
+      claunch-qs4l9: s933 런 저널에서 탐색이 가장 많은 work 노드의 text가 0자·45자였고,
+      round-report는 wrapup 반환값만 받아 대화에만 있던 판단과 실패 경위를 보고서에
+      실을 수 없었다.
+    deliver: [work, review, targeted-test, rebase]
 
 nodes:
   # ── 회차 시작 ────────────────────────────────────────────────────────
@@ -405,7 +428,9 @@ nodes:
         내용이다.
         터미널 사용자의 직접 지시면 지금 만든다: `claunch beads create "<제목>"
         --type task --priority 2 --labels user-direct --assignee
-        $CLAUNCH_SESSION --description "<규격>"`. 리더가 배정한 이슈가 따로
+        $CLAUNCH_SESSION --description "<규격>"`. 그 지시가 이 세션이 잡고
+        있는 이슈의 후속(같은 기능에 대한 추가 요청)이면 `--parent <그 이슈
+        id>`를 붙이고, 관계없는 새 일이면 붙이지 않는다. 리더가 배정한 이슈가 따로
         있는데 사용자 지시가 다르면 사용자 쪽을 잡고, 리더 배정 이슈는
         `claunch beads update <그 id> --status open`으로 되돌린 뒤 `claunch
         beads comments add <그 id> "DECLINED: user-direct <새 id> took
@@ -938,7 +963,8 @@ nodes:
     # 세션의 LLM 브리핑을 다시 구성한다(docs/cflow-v2.md 2.8).
     triggers: [briefing]
     returns:
-      ok: {files: list, summary: str, found: "list?", delegated: "list?", stack_open: "bool?"}
+      ok: {files: list, summary: str, tried: list, found: "list?", delegated: "list?",
+           stack_open: "bool?"}
     effects: [fs.write, git.commit, board.write, session.spawn, mesh.send]
 
   test-skipped:
@@ -1066,7 +1092,7 @@ nodes:
       없으면 「관련 표면 없음」). 전체 스위트를 요청할 사유가 있으면
       `SWEEP REQUESTED:` 코멘트가 남았다.
     returns:
-      ok: {modules: list, surfaces: str, sweep_requested: "str?"}
+      ok: {modules: list, surfaces: str, tried: list, sweep_requested: "str?"}
     effects: [fs.write, board.write]
 
   targeted-test:
@@ -1415,6 +1441,7 @@ nodes:
         tree: str
         env: str
         receipt: str
+        tried: list
         window: "dict?"
         started_at: "str?"
         seconds: "float?"
@@ -1806,7 +1833,7 @@ nodes:
       그 수치, 그리고 프리뷰라면 남긴 ref와 그 머지 커밋 해시.
       master는 건드리지 않았다.
     returns:
-      ok: {tip: str, action: str, old_tip: "str?"}
+      ok: {tip: str, action: str, tried: list, old_tip: "str?"}
     effects: [git.rebase, git.commit, fs.write, test.run, board.write]
     # 회차 브랜치가 다시 쓰였으면 stack 런에 알린다(claunch-yq80p.9): 스택
     # 브랜치가 옛 tip 위에 서 있으므로 옮기고 stacked 자식에게 통지한다.
@@ -2290,10 +2317,15 @@ nodes:
     # 사람의 강제 이동 대상(docs 2.11): 착지가 끝났는데 런이 그 앞에 머물 때
     force_target: true
     prompt: |
-      이 스텝이 내는 것은 셋: **깨끗한 트리**, **회차 보고서 HTML 한 장**,
-      **넘길 것마다 handoff 이슈**. 보고서는 「한 것과 나온 것」으로 시작하고
-      이 회차가 만든 산출물 자체를 담는다(규격은 아래 「담을 것」).
+      이 스텝이 내는 것은 둘: **깨끗한 트리**, **넘길 것마다 handoff 이슈**.
       인수인계는 이슈로만 남는다 — 메시에만 적은 것은 다음 회차에 없다.
+      **회차 보고서 HTML은 이 스텝에서 쓰지 않는다.** 다음 노드 round-report가
+      이 스텝의 보고와 런 저널·이슈 코멘트를 읽고 쓴다(claunch-qs4l9). 여기서
+      미리 쓰면 round-report가 같은 경로를 다시 쓴다 — 실측: s906·s910·s934·
+      s935의 보고서 경로가 round-report 위임보다 먼저 만들어졌다. 보고서에
+      들어가야 하는데 기록에 아직 없는 것(대화에만 있던 판단, 실패 경위)은
+      지금 이슈 코멘트(`TRIED:`)나 아래 보고의 summary·gaps로 옮긴다 — 그
+      둘이 round-report가 받는 재료다.
 
       회차 잔류물을 정리하고 증거를 보고에 남긴다:
       - 잔류 테스트 서버·headless 브라우저 프로세스 종료 — 부모만 죽고
@@ -2330,9 +2362,11 @@ nodes:
         다음 사람에게 넘길 것(범위 밖으로 미룬 일, 알아낸 결함, 후속)은
         항목마다 `claunch beads create "<제목>" --priority 3 --labels handoff
         --description "<규격>"`(assignee 없음) — 마감 fyi에 그 id들을 적는다.
-        협소하게 해석한다: 이 회차의 범위에서 직접 미룬 일과 작업 중
+        이 회차 이슈에서 나온 일이면 `--parent <이 회차 이슈 id>`를 붙이고,
+        관계없는 일이면 붙이지 않는다. 협소하게 해석한다: 이 회차의 범위에서 직접 미룬 일과 작업 중
         알아낸 결함만 만든다. 떠오른 개선 아이디어(P4)는 만들지 않고
-        보고서의 「아는 구멍」에 한 줄로 남긴다. 만들 때는 assignee 없이
+        보고의 gaps에 한 줄로 남긴다(round-report가 보고서의 「아는 구멍」에
+        싣는다). 만들 때는 assignee 없이
         만들고, 배정은 아래 「생성 이슈 정산」 절에서 항목마다 한 번에
         친다 — 만든 이슈를 backlog로 두고 끝내지 않는다(claunch-034c4).
         메시 메시지에만 남긴 인수인계는 다음 회차에 없다.
@@ -2400,7 +2434,8 @@ nodes:
         `update <id> --assignee ""` + `UNQUEUED by leader: <이유>`를
         가진다). pool 항목이 하나라도 있으면 ask로 보내 그 처분을 묻는다:
         상위가 `HOLD: <이유>` 코멘트를 남기거나 다른 세션에 배정한다.
-        이 알림은 HTML 회차 보고서를 쓰기 전에 보낸다(상위가 거부하거나
+        이 알림은 round-report가 HTML 회차 보고서를 쓰기 전, 이 스텝에서
+        보낸다(상위가 거부하거나
         답할 시간이 그 사이에 생긴다). 답은 이슈의 코멘트로 남고, 이
         회차의 진행을 막지 않는다 — queue-recheck는 답을 기다리지 않고
         보드를 읽는다(next-round의 self 판정은 `--assignee`가 실제로 이
@@ -2414,7 +2449,8 @@ nodes:
         브랜치끼리 그 파일로 충돌하지 않는다.
       최종 보고: 이 회차의 목표·이슈 id(배치면 전부)·커밋·테스트 수치·
       착지 상태(상위 세션에 통합 요청됨 / 동결 — 브랜치 이름)·풀에
-      되돌린 일감 id를 요약한다. master는 이 런이
+      되돌린 일감 id를 요약한다. 못 한 것·아는 구멍·떠오른 개선은 gaps에
+      항목당 한 줄로 싣는다(없으면 빈 목록). master는 이 런이
       건드리지 않았어야 정상이다. 동결 브랜치가 남았으면 상위 세션에
       fyi로 알려 통합 대기 목록에 오르게 한다.
 
@@ -2482,7 +2518,8 @@ nodes:
     # 요약을 다시 쓴다.
     triggers: [briefing]
     returns:
-      ok: {summary: str, issues: list, landing: str, handoff: "list?", pool: "list?"}
+      ok: {summary: str, issues: list, landing: str, handoff: "list?", pool: "list?",
+           gaps: "list?"}
     effects: [fs.write, board.write, mesh.send, session.spawn]
 
   round-report:
@@ -2491,12 +2528,30 @@ nodes:
       이 회차의 최종 보고: ${result.wrapup.value.summary}
       이슈: ${result.wrapup.value.issues} / 착지 상태: ${result.wrapup.value.landing}
       인수인계 이슈: ${result.wrapup.value.handoff}
+      못 한 것·아는 구멍: ${result.wrapup.value.gaps}
 
       ── 회차 보고서 (HTML 한 장 — 이 회차의 마지막 산출물이다) ──
-      바로 위의 최종 보고는 이 대화에만 남는다. 저널은 스텝별 기록이고,
-      메시 fyi는 한 사람에게 한 번 간다. 세션이 닫히면 그 셋이 전부 사람
-      손에서 사라진다 — 그래서 회차마다 **읽을 수 있는 HTML 한 장**을
-      남긴다. 세션이 죽은 뒤에도 남는 유일한 산출물이다.
+      저널은 스텝별 기록이고, 이슈 코멘트는 보드에 흩어져 있으며, 메시
+      fyi는 한 사람에게 한 번 간다. 사람이 그 셋을 모아 읽지는 않는다 —
+      그래서 회차마다 **읽을 수 있는 HTML 한 장**을 남긴다. 세션이 죽은
+      뒤에도 남는 유일한 산출물이다.
+
+      ── 재료: 쓰기 전에 이 회차의 기록을 읽는다 (claunch-qs4l9) ──
+      위 네 줄은 요약이다. 이 노드는 드라이버의 대화 없이 돌 수 있고
+      (headless), 대화가 있어도 compact를 지난 뒤라 앞부분이 남아 있지
+      않다. 아래 「무엇을 왜 그렇게 했는가」「빨갛다가 고친 것」「못 한
+      것」의 재료는 대화가 아니라 기록에 있다. 쓰기 전에 셋을 읽는다:
+      · 런 저널 — `claunch cflow2 journal`에서 `reported` 줄이 노드마다 낸
+        보고(value·text)다. work·review·targeted-test·rebase의 `tried`가
+        이 회차의 시도와 버린 접근이다. 출력이 길면 `reported`로 거른다.
+      · 이슈 코멘트 — `claunch beads show <이슈 id> --json`의 comments.
+        `TRIED:` 줄(시도가 일어난 그 자리의 기록)과 판정 마커
+        (`LANDING REQUEST`, `REVIEWED`, `SWEEP REQUESTED`, `merged` 등).
+        배치 회차면 실린 이슈마다 읽는다.
+      · 커밋 — `claunch commits`(아래 「증거」 절).
+      기록에 없는 것을 기억이나 추측으로 채우지 않는다. 기록끼리 어긋나면
+      (저널의 수치와 코멘트의 수치가 다르다 등) 고르지 말고 그 사실을
+      보고서에 적는다.
 
       쓸 자리를 네가 정하지 않는다 — `claunch report path --issue <이슈 id>`가
       찍어 주는 경로 그대로 쓴다(배치 회차면 주 이슈 id 하나로 한 장 — 실린
@@ -2677,6 +2732,8 @@ nodes:
       사유가 추가 작업이면 그것은 이 회차의
       범위 밖이다: 이슈로 남기고(`claunch beads create "<제목>" --priority 3
       --labels handoff --description "<규격>"`) 그 id를 보고에 적는다.
+      이 회차 이슈에서 나온 일이면 `--parent <이 회차 이슈 id>`를 붙이고,
+      관계없는 일이면 붙이지 않는다.
       상위에게는 fyi 한 줄로 이 세션이 keep-alive로 살아 있다는 사실과 그
       이슈 id를 알린다 — 데몬은 살아남은 세션에 대해서는 아무 통지도 보내지
       않는다(종료 통지는 실제로 종료된 세션에만 붙는다).

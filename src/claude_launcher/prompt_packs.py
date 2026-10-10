@@ -405,6 +405,9 @@ def opening_block(
     elif source == DAEMON:
         origin = "this daemon's own prompt, given to every session it starts"
         where = "file: the daemon prompt (MCP tool daemon_prompt shows and edits it)"
+    elif source == "prompter":
+        origin = "from the configured prompter server, selected at session creation"
+        where = "file: (server prompt; snapshot saved with this session)"
     else:
         origin = "installed in this workspace, chosen at session creation"
         where = f"file: {(INSTALL_DIR / (pack_id + '.md')).as_posix()}"

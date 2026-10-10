@@ -289,7 +289,8 @@ const RUN = {
         ctx.asked().includes("Pick 'hold' for end-decision?"), ctx.asked());
   ctx.reset();
 
-  /* a choice with require_reason asks for it and refuses an empty one */
+  /* require_reason constrains agents; a person may select without a reason,
+     just as on the run page (docs 2.11). */
   ctx.setRail({ s16: { ...ROW, gated: true, owed: ["choose: x"], answers: [
     { kind: "choose", instance: "x@2", label: "x", prompt: "?", require_reason: true,
       options: [{ name: "go" }] }] } });
@@ -297,25 +298,27 @@ const RUN = {
   bs = buttons(strip);
   ctx.setPrompt("  ");
   await bs[0].fire("click");
-  check("v2: an empty required reason sends nothing", ctx.actions().length === 0);
-  ctx.setPrompt(" because ");
-  await bs[0].fire("click");
-  check("v2: the reason rides the select",
-        ctx.actions().length === 1 && ctx.actions()[0][1].reason === "because",
+  check("v2: a person can select without the agent's required reason",
+        ctx.actions().length === 1 && ctx.actions()[0][1].reason === "",
         ctx.actions());
+  check("v2: a choice asks for confirmation, not a required reason",
+        JSON.stringify(ctx.asked()) === JSON.stringify(["Pick 'go' for x?"]), ctx.asked());
   ctx.reset();
 
   /* an ask that fell to a person: its options, the recommendation marked */
   ctx.setRail({ s16: { ...ROW, status: "waiting_approval", gated: true,
     owed: ["ask: land"], answers: [
     { kind: "ask", instance: "land@9", label: "land", prompt: "land it?",
-      require_reason: false, recommended: "approve",
+      require_reason: true, recommended: "approve",
       options: [{ name: "approve" }, { name: "decline" }] }] } });
   ctx.renderTermCflow();
   bs = buttons(strip);
   check("v2: an ask offers its options", bs.map((b) => b.text).join() === "approve,decline");
   check("v2: the recommended option is marked",
         bs[0].classes.has("proposed") && !bs[1].classes.has("proposed"));
+  check("v2: recommendation preserves the run page's green approval style",
+        bs[0].classes.has("approve") && !bs[1].classes.has("approve"));
+  ctx.setPrompt("");
   await bs[1].fire("click");
   check("v2: an ask posts the run page's approve",
         JSON.stringify(ctx.actions()) === JSON.stringify([["/api/cflow2/approve",
@@ -329,7 +332,7 @@ const RUN = {
   ctx.setRail({ s16: { ...ROW, status: "waiting_approval", gated: true,
     owed: ["ask: scope"], answers: [
     { kind: "ask", instance: "scope@4", label: "scope", prompt: "which scope?",
-      require_reason: false,
+      require_reason: true,
       options: [{ name: "narrow" }, { name: "reframe" }] }] } });
   ctx.renderTermCflow();
   bs = buttons(strip);
@@ -350,7 +353,7 @@ const RUN = {
   ctx.reset();
   ctx.setPrompt("");
   await bs[0].fire("click");
-  check("v2: another option of the same ask still needs no reason",
+  check("v2: require_reason does not block a person's other brief answers",
         ctx.actions().length === 1 && ctx.actions()[0][1].decision === "narrow"
           && !ctx.asked().some((q) => q.includes("required")), [ctx.actions(), ctx.asked()]);
   ctx.reset();

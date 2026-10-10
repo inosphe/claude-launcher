@@ -37,6 +37,12 @@ carries the verdict to the run's driver. Exit 0 both when the daemon was
 restarted and when it did not need to be: either way the step's checklist
 (``deploy_check`` again, polled by the daemon) is what settles ``deployed``.
 
+The restart goes out with ``--reason``: the verdict above and the commits of
+``<branch>`` the live daemon does not serve yet (claunch-mm8zv). Run as the
+driving session, the restart waits on the web UI's approval gate, and the
+person deciding reads that reason on the card -- "these merges are not
+live" is what makes approving it an informed click.
+
 This file is the one place in the repository that runs ``claunch daemon
 restart`` on a workflow's behalf. It runs as the daemon's child, in the
 operator's environment (no ``CLAUNCH_SESSION``), which is what makes the
@@ -75,11 +81,49 @@ _RESTARTING_BECAUSE = {
 }
 
 
-def _restart_command() -> list:
+#: How many unserved commits the reason lists by name before it counts the rest.
+UNSERVED_SHOWN = 10
+
+
+def _unserved(repo: Path, branch: str, daemon_json: Optional[Path]) -> list:
+    """``<branch>``'s first-parent commits the live daemon does not serve yet,
+    one ``<short sha> <subject>`` line each, newest first. Best effort: any
+    failure to tell (no daemon.json, no recorded HEAD, git refusing) is an
+    empty list, because the reason is for a person and must not stop the
+    restart."""
+    try:
+        _path, doc = deploy_check._daemon_doc(daemon_json)
+        code = doc.get("code")
+        head = code.get("head") if isinstance(code, dict) else None
+        if not head:
+            return []
+        out = deploy_check._git(
+            repo, "log", "--first-parent", "--format=%h %s", f"{head}..{branch}"
+        )
+    except Exception:  # noqa: BLE001 - see the docstring
+        return []
+    return [line for line in out.splitlines() if line.strip()]
+
+
+def restart_reason(verdict: int, unserved: list) -> str:
+    """What the approval card shows: why this restart is needed."""
+    lines = [_RESTARTING_BECAUSE[verdict]]
+    if unserved:
+        lines.append(f"commits the live daemon does not serve yet ({len(unserved)}):")
+        lines += [f"  {line}" for line in unserved[:UNSERVED_SHOWN]]
+        if len(unserved) > UNSERVED_SHOWN:
+            lines.append(f"  ... and {len(unserved) - UNSERVED_SHOWN} more")
+    return "\n".join(lines)
+
+
+def _restart_command(reason: str = "") -> list:
     exe = shutil.which("claunch")
     if exe is None:
         raise LookupError("claunch is not on PATH; nothing can restart the daemon")
-    return [exe, "daemon", "restart"]
+    command = [exe, "daemon", "restart"]
+    if reason:
+        command += ["--reason", reason]
+    return command
 
 
 def main(argv: Optional[list] = None, *, run=subprocess.call) -> int:
@@ -107,17 +151,18 @@ def main(argv: Optional[list] = None, *, run=subprocess.call) -> int:
     if verdict == deploy_check.SERVING:
         print("no restart needed: the daemon already serves this code")
         return 0
-    print(_RESTARTING_BECAUSE[verdict], file=sys.stderr)
+    reason = restart_reason(verdict, _unserved(args.repo, args.branch, args.daemon_json))
+    print(reason, file=sys.stderr)
     if args.dry_run:
         print("dry run: would run 'claunch daemon restart' now; not doing it")
         return 0
 
     try:
-        command = _restart_command()
+        command = _restart_command(reason)
     except LookupError as exc:
         print(f"cannot restart: {exc}", file=sys.stderr)
         return 1
-    print(f"running: {' '.join(command)}", flush=True)
+    print(f"running: {' '.join(command[:3])} (reason above)", flush=True)
     return int(run(command))
 
 

@@ -240,6 +240,41 @@ def unreachable_reason(report: dict) -> str:
     )
 
 
+def _open_log_for_child() -> int:
+    """Open ``daemon.log`` as a descriptor the daemon's stdout/stderr append to.
+
+    ``open(..., "ab")`` is not enough on Windows: the C runtime emulates
+    append by seeking to the end before each of *this* process's writes, and
+    a child inheriting the handle writes at the handle's own position instead
+    -- the end of the file as it was at spawn. The daemon's logging handler
+    appends through a handle of its own, so the first thing the child printed
+    to stderr (a DeprecationWarning, a traceback) landed on top of the log
+    lines written since and erased their start (claunch-t8bgj.1). A handle
+    opened with only ``FILE_APPEND_DATA`` makes the OS place every write at
+    the current end, whoever writes it. POSIX ``O_APPEND`` already does that.
+    """
+    log = paths.log_file()
+    if sys.platform != "win32":
+        return os.open(log, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    import _winapi
+    import msvcrt
+
+    FILE_APPEND_DATA = 0x0004
+    SYNCHRONIZE = 0x00100000
+    FILE_SHARE_ALL = 0x1 | 0x2 | 0x4  # read | write | delete
+    OPEN_ALWAYS = 4
+    FILE_ATTRIBUTE_NORMAL = 0x80
+    handle = _winapi.CreateFile(
+        str(log), FILE_APPEND_DATA | SYNCHRONIZE, FILE_SHARE_ALL,
+        0, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0,
+    )
+    try:
+        return msvcrt.open_osfhandle(handle, os.O_WRONLY | os.O_APPEND)
+    except OSError:
+        _winapi.CloseHandle(handle)
+        raise
+
+
 def spawn_daemon(env: Optional[dict] = None) -> Optional[subprocess.Popen]:
     """Start the daemon as a fully detached background process.
 
@@ -254,7 +289,7 @@ def spawn_daemon(env: Optional[dict] = None) -> Optional[subprocess.Popen]:
     outlives every CLI that starts it.
     """
     paths.daemon_dir().mkdir(parents=True, exist_ok=True)
-    log = open(paths.log_file(), "ab")
+    log = _open_log_for_child()
     kwargs = {}
     if sys.platform == "win32":
         CREATE_NO_WINDOW = 0x08000000
@@ -273,7 +308,7 @@ def spawn_daemon(env: Optional[dict] = None) -> Optional[subprocess.Popen]:
             **kwargs,
         )
     finally:
-        log.close()
+        os.close(log)
 
 
 def ensure_running(*, auto_start: bool = True) -> DaemonClient:

@@ -398,10 +398,12 @@ CHECKS = [
         "sesslayout_check.js",
         "rolepanel_check.js",
         "sessionmodal_check.js",
+        "newformdraft_check.js",
         "spawnsame_check.js",
         "queued_check.js",
         "termcflow_check.js",
         "termwindow_check.js",
+        "termtimers_check.js",
         "window_check.js",
         "stats_check.js",
         "sendinput_check.js",
@@ -421,6 +423,7 @@ CHECKS = [
         "snapshot_check.js",
         "notice_check.js",
         "restartgate_check.js",
+        "noticehistory_check.js",
         "termcache_check.js",
         "gpurender_check.js",
         "theme_check.js",
@@ -471,6 +474,7 @@ CHECKS = [
         "relaysettings_check.js",
         "profilesettings_check.js",
         "settingsworkspaces_check.js",
+        "rolewf_settings_check.js",
         "workspacesync_check.js",
         "workspacebadges_check.js",
         "wsrefreshall_check.js",
@@ -546,6 +550,7 @@ CHECKS = [
 # tests/ rather than tests/web, and `sessiontabs_browser.cjs` and
 # `toolbar_browser.cjs` sat in tests/web unlisted (claunch-6jerx).
 BROWSER_CHECKS = [
+    "termcflow_browser.cjs",
     "cflow2layout_browser.cjs",
     "glossary_browser.cjs",
     "flows_browser.cjs",
