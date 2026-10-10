@@ -2902,6 +2902,7 @@ class RunEventClock:
                 and prev[1] in _RUNNING
             ):
                 events.append(self._event(cwd, scope, "round-done", payload))
+        self._scan_v2_ends(kill_on_end)
         events.extend(self._exit_events(enabled))
         for key in list(self._seen):
             if key not in live:
@@ -2967,6 +2968,93 @@ class RunEventClock:
             "block": event_block(scope, kind, payload),
         }
 
+    def _scan_v2_ends(self, kill_on_end: bool) -> None:
+        """Kill-on-end for cflow v2 runs (claunch-du6mx).
+
+        The v1 pass above reads the v1 registry only, so a v2 one-shot run
+        that reached ``done`` left its driver alive -- while its wrap-up prose
+        (improv-worker-v2's end-gate) tells the agent the daemon ends the
+        session. Same contract as the v1 pass: on sight, once per run, record
+        first, then queue the same :meth:`_finish_end` (idle wait, keep-alive
+        and resumed-by-human re-read beside the kill, session-ended notice).
+
+        v2 runs live under their driver's directory (``.cflow2/runs/<scope>``),
+        so the live sessions' directories are walked, as the v2 landing
+        holders are. Only a main run counts: a side run (``<session>+<side>``)
+        and a nested delegation run (``parent`` set) end with their main run's
+        session, never on their own. A run whose chart declares ``recur`` or
+        that filed a next round keeps its driver. The queued ``(cwd, scope)``
+        is the driver's own: ``session_for``'s canonical cwd and name, so
+        every later lookup in the end-sequence finds the same session.
+        """
+        from ..cflow2 import runtime as v2_runtime, store as v2_store
+
+        try:
+            sessions = [s for s in self.manager.list() if not getattr(s, "exited", True)]
+        except Exception:
+            return
+        for session in sessions:
+            sdef = getattr(session, "sdef", None)
+            name = str(getattr(sdef, "name", "") or "")
+            cwd = str(getattr(sdef, "cwd", "") or "")
+            if not name or not cwd:
+                continue
+            try:
+                scopes = v2_store.list_scopes(cwd)
+            except Exception:
+                continue
+            for scope in scopes:
+                if v2_store.side_of(scope):
+                    continue
+                st = v2_runtime.RunStore(cwd, scope)
+                try:
+                    state = st.load_state()
+                except Exception:
+                    continue
+                run_id = str(state.get("run_id") or "")
+                if (
+                    not run_id
+                    or state.get("status") != v2_runtime.ST_DONE
+                    or state.get("parent")
+                    or state.get("next_round")
+                    or v2_runtime.driver_of(state) != name
+                ):
+                    continue
+                key = (str(st.cwd), scope, "cflow2:" + run_id)
+                if key in self._end_done:
+                    continue
+                self._end_done.add(key)
+                try:
+                    if (st.load_chart().meta or {}).get("recur"):
+                        continue
+                except Exception:
+                    continue
+                if not kill_on_end:
+                    continue
+                try:
+                    v1_cwd = cflow_state.resolve_cwd(cwd)
+                except Exception:
+                    continue
+                if session_for(self.manager, v1_cwd, name) is not session:
+                    continue
+                workflow = str(state.get("workflow") or "?")
+                block = end_block(
+                    name, run_id, workflow,
+                    keep_alive=bool(session.sdef.keep_alive),
+                )
+                if not session.append_wal(block):
+                    log.error(
+                        "cflow kill-on-end: could not durably record "
+                        "the ending of %r (v2 run %s); leaving the "
+                        "session alive", name, run_id,
+                    )
+                    continue
+                log.info(
+                    "cflow kill-on-end: recorded the ending of %r (v2 run %s)",
+                    name, run_id,
+                )
+                self._end_pending.append((v1_cwd, name, run_id, workflow, True))
+
     def _drain_ends(self) -> None:
         """Hand the queued end-sequences to the loop as tasks.
 
@@ -2975,15 +3063,19 @@ class RunEventClock:
         are caught inside :meth:`_finish_end`.
         """
         while self._end_pending:
-            cwd, scope, run_id, workflow = self._end_pending.pop(0)
+            cwd, scope, run_id, workflow, *rest = self._end_pending.pop(0)
             task = asyncio.get_running_loop().create_task(
-                self._finish_end(cwd, scope, run_id, workflow)
+                self._finish_end(
+                    cwd, scope, run_id, workflow,
+                    reap_reviewers=bool(rest and rest[0]),
+                )
             )
             self._end_tasks.add(task)
             task.add_done_callback(self._end_tasks.discard)
 
     async def _finish_end(
-        self, cwd: str, scope: str, run_id: str, workflow: str = "?"
+        self, cwd: str, scope: str, run_id: str, workflow: str = "?",
+        *, reap_reviewers: bool = False,
     ) -> None:
         """End a finished one-shot run's session: wait out its current turn
         (bounded), then kill unless it was kept alive or a person respawned
@@ -3041,6 +3133,8 @@ class RunEventClock:
             )
             session.append_wal(resumed_block(scope, run_id))
             return
+        if reap_reviewers:
+            self._end_reviewers(scope, run_id)
         try:
             session.kill(force=False)
             self.manager.persist()
@@ -3072,6 +3166,60 @@ class RunEventClock:
                 {"run": run_id, "workflow": workflow},
             ),
         })
+
+    def _end_reviewers(self, driver: str, run_id: str) -> List[str]:
+        """End the live reviewers ``driver`` spawned itself, before it goes
+        (claunch-du6mx.1). Returns the names ended.
+
+        A reviewer child exists to answer its parent's peer-review asks
+        (improv-worker-v2's reviewer-ensure spawns one and keeps it for the
+        run); once that run is done it has nothing left to review. The
+        workflow's settle-check asks the agent to end it, but that is prose —
+        and a driver killed first leaves the reviewer alive, moved one level
+        up under the grandparent. So the end-sequence ends it right before the
+        driver. Only direct children (``sdef.parent``) holding the ``reviewer``
+        role on some mesh: a worker child is the settle/adopt rules' to
+        dispose of, and a grandchild belongs to its own parent.
+        """
+        if self.mesh is None:
+            return []
+        try:
+            children = list(self.manager.children(driver))
+        except Exception:
+            return []
+        ended: List[str] = []
+        for name in children:
+            child = self._live(name)
+            if child is None or child.sdef.parent != driver:
+                continue
+            try:
+                roles = {
+                    str(r)
+                    for m in self.mesh.meshes_for_session(name)
+                    for r in ([m.get("role")] + list(m.get("roles") or []))
+                    if r
+                }
+            except Exception:
+                continue
+            if "reviewer" not in roles:
+                continue
+            try:
+                child.kill(force=False)
+            except Exception as exc:
+                log.warning(
+                    "cflow kill-on-end: ending reviewer %r of %r failed: %s",
+                    name, driver, exc,
+                )
+                continue
+            ended.append(name)
+            log.info(
+                "cflow kill-on-end: ended reviewer %r of %r (run %s)",
+                name, driver, run_id,
+            )
+        if ended:
+            with contextlib.suppress(Exception):
+                self.manager.persist()
+        return ended
 
     async def _deliver(self, event: dict) -> bool:
         """Type the event into its overseer. True = settled (delivered, or
