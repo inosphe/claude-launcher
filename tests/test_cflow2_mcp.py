@@ -11,7 +11,8 @@ from claude_launcher import mcp_server
 from claude_launcher.cflow2 import mcp as cflow2_mcp
 
 FLOW_TOOLS = {"flow_start", "flow_status", "flow_report", "flow_select", "flow_fork",
-              "flow_delegate", "flow_rule", "flow_collection", "flow_input"}
+              "flow_delegate", "flow_rule", "flow_collection", "flow_input",
+              "flow_request_move"}
 
 DEF = textwrap.dedent("""
     cflow: 2
@@ -131,3 +132,34 @@ def test_a_person_picks_the_same_choose_without_a_reason(project):
     _start_why(project)
     st = runtime.select(None, "go", None, caller=runtime.CALLER_USER, cwd=str(project))
     assert st["tasks"][0]["label"] == "second"
+
+
+MOVE_DEF = textwrap.dedent("""
+    cflow: 2
+    name: mv2
+    nodes:
+      intake: {prompt: I, force_target: true}
+      work: {prompt: W}
+    body:
+      seq: [intake, work]
+""")
+
+
+def test_flow_request_move_files_holds_and_withdraws(project):
+    (project / ".claunch" / "workflows" / "v2" / "mv2.yaml").write_text(MOVE_DEF,
+                                                                        encoding="utf-8")
+    assert "flow_request_move" in {t["name"] for t in mcp_server.TOOLS}
+    st, err = _call("flow_start", {"workflow": "mv2"})
+    assert err is None, err
+    st, err = _call("flow_report", {"node": "intake"})
+    assert err is None and st["tasks"][0]["label"] == "work"
+    _, err = _call("flow_request_move", {"node": "intake"})
+    assert err and "'reason' is required" in err
+    st, err = _call("flow_request_move", {"node": "intake", "reason": "a new task came in"})
+    assert err is None and st["move_request"]["node"] == "intake"
+    _, err = _call("flow_report", {"node": "work"})
+    assert err and "nobody has answered" in err
+    st, err = _call("flow_request_move", {"cancel": True})
+    assert err is None and "move_request" not in st
+    st, err = _call("flow_report", {"node": "work"})
+    assert err is None and st["status"] == "done"

@@ -6563,6 +6563,7 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .cf2-kind.question, .cf2-kind.approval, .cf2-kind.choice { background: #2b2410; color: #e3b341; }
 .cf2-kind.task { background: #13233d; color: #79c0ff; }
 .cf2-kind.limit { background: #3a1d22; color: #ff7b72; }
+.cf2-kind.move { background: #2b2410; color: #e3b341; }
 .cf2-body { margin-top: 8px; }
 .cf2-line { margin: 6px 0 0; }
 .cf2-cmd { margin-top: 6px; padding: 4px 8px; background: #0f1115; border-radius: 4px; overflow-wrap: anywhere; }

@@ -251,7 +251,7 @@ USER_QUESTIONS = {
     "landed-unclear-choice": ["confirmed", "held"],
     "rework-decision": ["rework", "hold"],
     "settle-stall": ["proceed", "keep-waiting"],
-    "end-decision": ["end", "hold"],
+    "end-decision": ["end", "hold", "new-task"],
 }
 #: The two PR-medium questions go through the pr-or-local skeleton
 #: (claunch-yq80p.11): the label is the skeleton's call, the ask-user calls
@@ -828,26 +828,45 @@ def test_the_end_question_can_be_posed(tmp_path, monkeypatch):
     """claunch-gpccp: with choices {approve, hold} no brief passed -- the
     question validator refuses an option named approve and the ask refuses
     any other name -- so every finished v2 run failed at end-decision. With
-    end/hold the brief is accepted and the question reaches the person."""
+    end/hold the brief is accepted and the question reaches the person.
+    claunch-kgfr5 adds new-task: a person's answer that hands the session a
+    new task leads to end-new-task, not to work done outside the run."""
     from claude_launcher.cflow2 import runtime
     monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
     doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
     decision = _find_id(doc["procedures"], "end-decision")
     flow = {"cflow": 2, "name": "end-flow", "include": ["ask-common"],
-            "nodes": {"end-notice": {"prompt": "end"}, "end-hold": {"prompt": "hold"}},
+            "nodes": {"end-notice": {"prompt": "end"}, "end-hold": {"prompt": "hold"},
+                      "end-new-task": {"prompt": "new"}},
             "body": [decision]}
     from claude_launcher.cflow2 import frontend
     chart = frontend.compile_text(yaml.safe_dump(flow, allow_unicode=True, sort_keys=False),
                                   resolve_include=layers.resolver(str(tmp_path)))
-    kw = {"cwd": str(tmp_path), "scope": "m", "now": 1.0}
-    st = runtime.start(chart, caps={}, **kw)
     brief = dict(BRIEF, recommendation="end", options=[
-        dict(BRIEF["options"][0], name="end"), dict(BRIEF["options"][1], name="hold")])
-    iid = next(t["instance"] for t in st["tasks"] if t["label"].rsplit("/", 1)[-1] == "ask-frame")
-    st = runtime.report(iid, "ok", {"brief": brief}, **kw)
-    assert st["status"] == "waiting_approval" and [a["node"] for a in st["asks"]]
-    runtime.approve(None, decision="end", reason="done", **kw)
-    assert [t["label"] for t in runtime.status(**kw)["tasks"]] == ["end-notice"]
+        dict(BRIEF["options"][0], name="end"), dict(BRIEF["options"][1], name="hold"),
+        dict(BRIEF["options"][1], name="new-task")])
+    for scope, answer, then in (("m", "end", "end-notice"), ("n", "new-task", "end-new-task")):
+        kw = {"cwd": str(tmp_path), "scope": scope, "now": 1.0}
+        st = runtime.start(chart, caps={}, **kw)
+        iid = next(t["instance"] for t in st["tasks"] if t["label"].rsplit("/", 1)[-1] == "ask-frame")
+        st = runtime.report(iid, "ok", {"brief": brief}, **kw)
+        assert st["status"] == "waiting_approval" and [a["node"] for a in st["asks"]]
+        runtime.approve(None, decision=answer, reason="done", **kw)
+        assert [t["label"] for t in runtime.status(**kw)["tasks"]] == [then]
+
+
+def test_end_new_task_starts_the_next_run_and_keeps_the_session():
+    """claunch-kgfr5: the new-task branch keeps the session alive across the
+    run's end, records the task as an issue the next run's intake takes, and
+    starts that run in the same turn -- then lowers the flag again."""
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    node = doc["nodes"]["end-new-task"]
+    text = node["prompt"]
+    assert "claunch keep-alive $CLAUNCH_SESSION" in text
+    assert "keep-alive $CLAUNCH_SESSION off" in text
+    assert "flow_start" in text and "inputs: {issue: <그 id>}" in text
+    assert "--labels user-direct" in text and "--parent" in text
+    assert node["returns"] == {"ok": {"issue": "str"}}
 
 
 # -- claunch-jbk5w: the landing wait paces the nudge, not the whole choice ----

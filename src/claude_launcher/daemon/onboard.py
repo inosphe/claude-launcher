@@ -673,10 +673,17 @@ async def arrange(plan: Plan, *, name: str, cwd: str, mesh_mgr) -> Tuple[dict, s
                 f"workflow: {plan.workflow} (cflow v2)\n"
                 f"scope: {started.get('scope')}\n"
                 + (f"context: {plan.context}\n" if plan.context else "")
-                + "protocol: this run is yours to drive. Call the flow_status "
-                "tool to see the active tasks and choices, do each task, and "
-                "report it with flow_report (flow_select for a choice, "
-                "flow_delegate for a delegated node).\n"
+                + "protocol: this run is yours to drive. Follow /cflow (its "
+                "'cflow v2 runs' section) — call the flow_status tool to see "
+                "the active tasks and choices, do each task, and report it "
+                "with flow_report (flow_select for a choice, flow_delegate for "
+                "a delegated node).\n"
+                "new task: a user message that brings a new task while this "
+                "run waits on something else is not work to do outside the "
+                "run. Call flow_status first; then take it in through the "
+                "run (an open question's new-task option, or "
+                "flow_request_move to a force_target node) and stop until a "
+                "person answers.\n"
                 "---"
             )
         elif started.get("ok"):

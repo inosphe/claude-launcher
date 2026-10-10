@@ -289,6 +289,30 @@ const RUN = {
         ctx.asked().includes("Pick 'hold' for end-decision?"), ctx.asked());
   ctx.reset();
 
+  /* the driver's move request (flow_request_move, claunch-kgfr5): Move or
+     Refuse, the run page's /api/cflow2/move/resolve */
+  ctx.setRail({ s16: { ...ROW, gated: true, owed: ["move: round"], answers: [
+    { kind: "move", request: "mr-1", node: "round", label: "round", by: "s16",
+      reason: "a new task came in", prompt: "s16 asks to move the run to round: a new task" }] } });
+  ctx.renderTermCflow();
+  bs = buttons(strip);
+  check("v2 move: Move and Refuse", bs.map((b) => b.text).join() === "Move to 'round',Refuse",
+        bs.map((b) => b.text));
+  check("v2 move: the question names the asker",
+        texts(strip).includes("s16 asks to move the run to round"), texts(strip));
+  await bs[0].fire("click");
+  check("v2 move: Move posts approve",
+        JSON.stringify(ctx.actions()) === JSON.stringify([["/api/cflow2/move/resolve",
+          { cwd: "/repo", scope: "s16", decision: "approve", reason: "" }, "after"]]),
+        ctx.actions());
+  ctx.reset();
+  ctx.setPrompt("finish this first");
+  await bs[1].fire("click");
+  check("v2 move: Refuse carries the reason",
+        ctx.actions().length === 1 && ctx.actions()[0][1].decision === "deny"
+        && ctx.actions()[0][1].reason === "finish this first", ctx.actions());
+  ctx.reset();
+
   /* require_reason constrains agents; a person may select without a reason,
      just as on the run page (docs 2.11). */
   ctx.setRail({ s16: { ...ROW, gated: true, owed: ["choose: x"], answers: [
