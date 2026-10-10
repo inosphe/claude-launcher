@@ -182,16 +182,56 @@ def both_warning(parent: str, name: str, role: str = "parent") -> str:
 # -- facts and expressions -----------------------------------------------------
 
 
-def measure_facts(cwd: str, session: str) -> Dict[str, Any]:
-    """``$facts`` (docs 2.8), measured now in the run's checkout. Blocking
-    (git, the issue board). ``in_review`` is None when the board could not
-    be read."""
+def measure_facts(cwd: str, session: str, work: Optional[str] = None) -> Dict[str, Any]:
+    """``$facts`` (docs 2.8), measured now. Blocking (git, the issue board).
+    ``in_review`` is None when the board could not be read.
+
+    ``head`` and ``branch`` come from ``work`` -- the checkout the session
+    actually works in -- when it is given, else from the run's checkout.
+    The two differ for a session whose run was started at the main checkout
+    and which then moved into a worktree: measuring the run's checkout there
+    recorded the integration branch and its tip as the landing request
+    (claunch-4zc51.1.2). ``checkout`` says which directory was measured."""
+    where = work or cwd
     return {
-        "head": cflow_landing.head(cwd),
-        "branch": cflow_landing.branch(cwd),
+        "head": cflow_landing.head(where),
+        "branch": cflow_landing.branch(where),
         "in_review": cflow_landing.in_review_of(cwd, session),
         "session": session,
+        "checkout": where,
     }
+
+
+def session_facts(manager: Any) -> Callable[[str, str], Dict[str, Any]]:
+    """The default ``facts_fn``: :func:`measure_facts` in the checkout the
+    session works in (:func:`.work_checkout.of_session`), which falls back
+    to the run's checkout when nothing better is known."""
+    from . import work_checkout
+
+    def facts(cwd: str, session: str) -> Dict[str, Any]:
+        return measure_facts(cwd, session, work_checkout.of_session(manager, session))
+
+    return facts
+
+
+#: Branches a landing request is never for: the integration branch itself.
+#: A request measured on one of these was measured in the wrong checkout,
+#: and its tip is already in the target -- the queue would mark it landed at
+#: once (claunch-4zc51.1.2). Refused rather than pushed.
+TRUNKS = ("master", "main")
+
+
+def landing_refusal(facts: Dict[str, Any]) -> Optional[str]:
+    """Why a measured landing request must not be pushed, or None."""
+    where = facts.get("checkout") or "the run's checkout"
+    branch = facts.get("branch")
+    if not branch:
+        return (f"HEAD is detached in {where}: a landing request names a branch, "
+                "nothing was pushed")
+    if branch in TRUNKS:
+        return (f"{where} is on {branch}, the integration branch itself: this is "
+                "not the session's feature checkout, nothing was pushed")
+    return None
 
 
 def _value(spec: Any, env: Dict[str, Any]) -> Any:
@@ -505,7 +545,8 @@ async def perform(manager: Any, cwd: str, scope: str, trig: Dict[str, Any], *,
         push = ENQUEUE_LANDING_PUSH if do == DO_ENQUEUE_LANDING else (trig.get("push") or {})
         return await asyncio.to_thread(
             _push, manager, cwd, driver, push, do == DO_ENQUEUE_LANDING, list(cwds),
-            facts_fn or measure_facts, trigger_tid(cwd, scope, trig), trig.get("data"), mesh)
+            facts_fn or session_facts(manager), trigger_tid(cwd, scope, trig),
+            trig.get("data"), mesh)
     return False, f"this daemon has no trigger action named {do!r}"
 
 
@@ -531,6 +572,10 @@ def _push(manager: Any, cwd: str, session: str, push: Dict[str, Any], landing: b
             return False, "the issue board could not be read"
         if not facts.get("in_review"):
             return False, f"{session} holds no issue in_review (no landing request on the board)"
+        refused = landing_refusal(facts)
+        if refused:
+            log.warning("cflow2 enqueue-landing from %s refused: %s", session, refused)
+            return False, refused
     try:
         items = expand_push(push, facts, data)
     except PushError as exc:

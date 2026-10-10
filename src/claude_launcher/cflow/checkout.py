@@ -96,7 +96,7 @@ def inspect(*, session: str, cwd: Optional[str] = None) -> Occupancy:
         if not isinstance(row, dict):
             continue
         name = str(row.get("name") or "")
-        raw = row.get("cwd")
+        raw = _stands_in(row)
         if not name or not raw:
             continue
         try:
@@ -162,7 +162,7 @@ def occupant(cwd: Optional[str] = None) -> str:
     for row in rows:
         if not isinstance(row, dict) or _exited(row):
             continue
-        name, raw = str(row.get("name") or ""), row.get("cwd")
+        name, raw = str(row.get("name") or ""), _stands_in(row)
         if not name or not raw:
             continue
         try:
@@ -172,6 +172,13 @@ def occupant(cwd: Optional[str] = None) -> str:
         if where == here:
             found.append(name)
     return found[0] if len(found) == 1 else ""
+
+
+def _stands_in(row: dict):
+    """Where a session-list row says the session stands: the checkout it
+    works in (``work_cwd``, read off its transcript by the daemon) when it
+    moved away from where it was started, else its recorded ``cwd``."""
+    return row.get("work_cwd") or row.get("cwd")
 
 
 def _exited(row: dict) -> bool:
@@ -280,14 +287,19 @@ def own_checkout(
     What it does NOT answer, and the distinction is the whole limit of this
     fix: *which branch this run is about*. It answers where the session
     stands, and the two agree only when the session stands in the tree it
-    edits. A session started at the repository root that works in a worktree
-    it made by hand is invisible here -- the daemon records ``cwd`` at
-    creation and only an operator ``migrate`` (stop, relaunch) changes it, so
-    the session cannot correct the record itself. Measured on a live mesh:
-    17 of 23 live sessions stood in a worktree, and the 6 that did not
-    included the one whose round this defect blocked. For those, no machine
-    fact links the run to its branch, and the gates say "cannot tell" rather
-    than guess.
+    edits. The daemon records ``cwd`` at creation and only an operator
+    ``migrate`` (stop, relaunch) changes it, so a session started at the
+    repository root that moves into a worktree used to be invisible here
+    (measured on a live mesh: 17 of 23 live sessions stood in a worktree,
+    and the 6 that did not included the one whose round this defect
+    blocked). The session list now carries ``work_cwd`` for such a session
+    -- the newest directory its Claude transcript records, accepted only
+    when it is a checkout of the same repository
+    (:mod:`claude_launcher.daemon.work_checkout`, claunch-4zc51.1.2) -- and
+    :func:`inspect` reads that first. What remains invisible is a session
+    whose harness writes no such record (codex, pi) or that has not written
+    a turn since it moved; for those the gates still say "cannot tell"
+    rather than guess.
     """
     if explicit is not None:
         return str(Path(explicit).resolve()), NAMED
