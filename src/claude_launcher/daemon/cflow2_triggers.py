@@ -202,14 +202,29 @@ def measure_facts(cwd: str, session: str, work: Optional[str] = None) -> Dict[st
     }
 
 
+def _on_feature_branch(where: str) -> bool:
+    branch = cflow_landing.branch(where)
+    return bool(branch) and branch not in TRUNKS
+
+
 def session_facts(manager: Any) -> Callable[[str, str], Dict[str, Any]]:
     """The default ``facts_fn``: :func:`measure_facts` in the checkout the
     session works in (:func:`.work_checkout.of_session`), which falls back
-    to the run's checkout when nothing better is known."""
+    to the run's checkout when nothing better is known.
+
+    The work checkout is the transcript's newest ``cwd``, which is wherever
+    the session last ``cd``-ed. A session that works in a worktree and ends
+    a turn at the main checkout (on the trunk) or in a detached scratch
+    worktree would then be measured there and refused. When the measured
+    checkout is not on a feature branch and the run's checkout is, the run's
+    checkout is the better answer and is measured instead."""
     from . import work_checkout
 
     def facts(cwd: str, session: str) -> Dict[str, Any]:
-        return measure_facts(cwd, session, work_checkout.of_session(manager, session))
+        work = work_checkout.of_session(manager, session)
+        if work and not _on_feature_branch(work) and _on_feature_branch(cwd):
+            work = None
+        return measure_facts(cwd, session, work)
 
     return facts
 
@@ -221,16 +236,37 @@ def session_facts(manager: Any) -> Callable[[str, str], Dict[str, Any]]:
 TRUNKS = ("master", "main")
 
 
+#: What a refusal measured in the wrong checkout tells the session to do.
+RETRY_HINT = "cd into the feature checkout and request the landing again"
+
+
 def landing_refusal(facts: Dict[str, Any]) -> Optional[str]:
-    """Why a measured landing request must not be pushed, or None."""
+    """Why a measured landing request must not be pushed, or None.
+
+    Besides the branch name, the tip itself: a tip that is already an
+    ancestor of a trunk has nothing left to merge, and the queue would mark
+    the request landed at once -- the claunch-4zc51.1.2 outcome reached
+    through a branch whose name is not a trunk (a branch with no commit of
+    its own, a request raised before anything was committed). The trunks are
+    the target that can be read from the worker's checkout alone; the
+    holder's checkout is not read, because its HEAD moves while it merges
+    and a stacked request's target (the parent's stack branch) is not what
+    that checkout has checked out. A trunk git cannot answer for (no such
+    branch here) is skipped."""
     where = facts.get("checkout") or "the run's checkout"
     branch = facts.get("branch")
     if not branch:
         return (f"HEAD is detached in {where}: a landing request names a branch, "
-                "nothing was pushed")
+                f"nothing was pushed ({RETRY_HINT})")
     if branch in TRUNKS:
         return (f"{where} is on {branch}, the integration branch itself: this is "
-                "not the session's feature checkout, nothing was pushed")
+                f"not the session's feature checkout, nothing was pushed ({RETRY_HINT})")
+    head = facts.get("head")
+    if head and facts.get("checkout"):
+        for trunk in TRUNKS:
+            if cflow_landing.landed(str(facts["checkout"]), str(head), trunk):
+                return (f"{branch} @ {str(head)[:12]} is already contained in {trunk}: "
+                        "there is nothing to land, nothing was pushed")
     return None
 
 

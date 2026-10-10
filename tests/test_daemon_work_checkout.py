@@ -184,6 +184,47 @@ def test_a_request_measured_on_the_trunk_or_detached_is_refused(branch, word):
     assert word in cflow2_triggers.landing_refusal(facts)
 
 
+def test_a_tip_already_in_the_trunk_is_refused_on_a_feature_branch(repo):
+    """The name is not a trunk, but the tip is master's: nothing to land, and
+    the queue would mark it landed at once."""
+    root, tree = repo
+    facts = {"head": _git(root, "rev-parse", "HEAD"), "branch": "w1-feature",
+             "in_review": ["c-1"], "session": "w1", "checkout": str(tree)}
+    assert "already contained in master" in cflow2_triggers.landing_refusal(facts)
+    facts["head"] = _git(tree, "rev-parse", "HEAD")
+    assert cflow2_triggers.landing_refusal(facts) is None
+
+
+def test_a_session_that_cd_ed_to_the_trunk_is_measured_in_its_run_checkout(
+        repo, tmp_path, monkeypatch):
+    """Started in the worktree, last cd-ed to the main checkout: the trunk
+    reading is not taken over the feature branch the run stands on."""
+    root, tree = repo
+    path = _transcript(tmp_path / "t.jsonl", {"cwd": str(tree)}, {"cwd": str(root)})
+    monkeypatch.setattr(ctxsize, "transcript_of", lambda sdef: path)
+    monkeypatch.setattr(cflow_landing, "in_review_of", lambda cwd, s: ["c-1"])
+    facts = cflow2_triggers.session_facts(_Manager(_Session("w1", tree)))(str(tree), "w1")
+    assert (facts["branch"], facts["checkout"]) == ("w1-feature", str(tree))
+    assert cflow2_triggers.landing_refusal(facts) is None
+
+
+def test_a_detached_scratch_worktree_does_not_displace_the_run_checkout(
+        repo, tmp_path, monkeypatch):
+    root, tree = repo
+    scratch = tmp_path / "scratch"
+    _git(root, "worktree", "add", "-q", "--detach", str(scratch))
+    path = _transcript(tmp_path / "t.jsonl", {"cwd": str(tree)}, {"cwd": str(scratch)})
+    monkeypatch.setattr(ctxsize, "transcript_of", lambda sdef: path)
+    monkeypatch.setattr(cflow_landing, "in_review_of", lambda cwd, s: ["c-1"])
+    facts = cflow2_triggers.session_facts(_Manager(_Session("w1", tree)))(str(tree), "w1")
+    assert (facts["branch"], facts["checkout"]) == ("w1-feature", str(tree))
+
+
+def test_a_trunk_refusal_says_how_to_retry():
+    facts = {"head": "abc", "branch": "master", "checkout": "C:/repo"}
+    assert cflow2_triggers.RETRY_HINT in cflow2_triggers.landing_refusal(facts)
+
+
 def test_the_enqueue_landing_trigger_pushes_nothing_from_master(tmp_path):
     """Refused before any parent is looked up: the manager here knows no
     parent at all, so a push attempt would fail with a different reason."""
