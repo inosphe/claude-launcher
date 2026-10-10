@@ -15931,10 +15931,10 @@ function termCflowQuestion(r) {
 
    Every press is the v2 run page's own: /api/cflow2/select for a `user`
    choice, /api/cflow2/approve for an ask, /api/cflow2/extend for a loop or
-   visit limit, with the same body and the same confirm. A choice or ask
-   with require_reason asks for the reason first (the engine refuses one
-   without). A halt or an acceptance hold has no dashboard press; the strip
-   says so and links to the run page. */
+   visit limit, with the same body and the same confirm. require_reason is
+   an agent constraint; a person may answer without it (docs 2.11). Like the
+   run page, reframe asks what the options miss. A halt or an acceptance
+   hold has no dashboard press; the strip links to the run page. */
 function termCflow2Answers(r, a) {
   const body = { cwd: r.cwd, scope: r.scope, node: a.instance };
   const what = a.label || a.instance || "?";
@@ -15952,14 +15952,12 @@ function termCflow2Answers(r, a) {
       };
       if (isAsk && name !== "decline" && name !== "reframe") out.cls = "approve";
       if (isAsk && a.recommended === name) {
-        out.cls = "proposed";
+        out.cls = out.cls ? `${out.cls} proposed` : "proposed";
         out.title = `recommended${out.title ? " — " + out.title : ""}`;
       }
-      if (a.require_reason || (isAsk && name === "reframe")) {
-        out.reason = name === "reframe"
-          ? `${out.ask}\n\nreframe: none of the options fits. Say what they miss; ` +
-            "the agent frames the question again from it (required, journaled):"
-          : `${out.ask}\n\nA reason is required (journaled):`;
+      if (isAsk && name === "reframe") {
+        out.reason = `${out.ask}\n\nreframe: none of the options fits. Say what they miss; ` +
+          "the agent frames the question again from it (required, journaled):";
         out.reasonRequired = true;
       }
       return out;
