@@ -245,6 +245,68 @@ def test_loop_limit_stop(tmp_path):
     assert d.st["status"] == "failed"
 
 
+def test_loop_limit_reset_counts_from_zero_with_the_declared_max(tmp_path):
+    d = Drv(tmp_path, """
+        nodes:
+          step: {prompt: "iter", returns: {ok: {more: bool}}}
+        body:
+          loop:
+            while: "$data.r == null or $data.r.more"
+            max: 2
+            do: {seq: [step], bind: r}
+    """)
+    d.report("step", "ok", {"more": True})
+    d.report("step", "ok", {"more": True})
+    d.st = runtime.extend_loop(None, 1, **d.kw())
+    d.report("step", "ok", {"more": True})
+    lim = d.st["loop_limits"][0]
+    assert (lim["iterations"], lim["max"]) == (3, 3)
+    d.st = runtime.extend_loop(None, reset=True, **d.kw())
+    assert d.st["status"] == "running" and d.tasks() == ["step"]
+    assert d.events("selected")[-1]["option"] == "reset"
+    assert d.events("selected")[-1]["count"] == 3
+    d.report("step", "ok", {"more": True})
+    assert d.st["status"] == "running"
+    d.report("step", "ok", {"more": True})
+    # the earlier +1 is dropped: two more iterations, then the limit again
+    lim = d.st["loop_limits"][0]
+    assert d.st["reason"] == "loop_limit" and (lim["iterations"], lim["max"]) == (2, 2)
+    assert d.state()["approvals"][0]["iterations"] == 2
+    assert d.state()["visits"]["step"] == 5
+
+
+def test_loop_limit_reset_keeps_the_foreach_place(tmp_path):
+    d = Drv(tmp_path, """
+        data: {xs: [one, two, three]}
+        nodes:
+          s: {prompt: "do ${item}", returns: {ok: {n: str}}}
+        body:
+          foreach: {in: "$data.xs", max: 1, do: s}
+    """)
+    d.report("s", "ok", {"n": "one"})
+    assert d.st["reason"] == "loop_limit"
+    d.st = runtime.extend_loop(None, reset=True, **d.kw())
+    assert d.st["tasks"][0]["prompt"] == "do two"
+    d.report("s", "ok", {"n": "two"})
+    d.st = runtime.extend_loop(None, reset=True, **d.kw())
+    d.report("s", "ok", {"n": "three"})
+    assert d.st["status"] == "done"
+    assert d.st["value"] == [{"n": "one"}, {"n": "two"}, {"n": "three"}]
+
+
+def test_loop_limit_reset_refusals(tmp_path):
+    d = Drv(tmp_path, TASKS + """
+        data: {xs: [1, 2, 3]}
+        body:
+          foreach: {in: "$data.xs", par: true, max: 2, do: a}
+    """)
+    with pytest.raises(runtime.FlowError, match="no iterations to reset"):
+        runtime.extend_loop(None, reset=True, **d.kw())
+    with pytest.raises(runtime.FlowError, match="not both"):
+        runtime.extend_loop(None, reset=True, stop=True, **d.kw())
+    assert d.status()["status"] == "waiting_approval"
+
+
 def test_until_runs_body_first(tmp_path):
     d = Drv(tmp_path, """
         nodes:

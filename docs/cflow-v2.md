@@ -1708,7 +1708,13 @@ wait 노드에는 `undecided_max`가 붙는다.
 - 반복 상한: `loop.max`(`retry`·`foreach`의 `max` 포함)는 반복에 한 번 들어갈
   때마다의 회차 상한이다. 반복을 다시 들어가면 다시 0부터 센다. 상한에 닿았는데
   조건이 계속을 요구하면 그 반복 인스턴스가 `waiting_approval`(reason `loop_limit`)로
-  멈춘다(`claunch cflow2 extend`).
+  멈춘다(`claunch cflow2 extend`). 사람의 답은 세 가지다. `--by N`(웹 「Allow one
+  more」는 1)은 상한을 N만큼 올린다. `--reset`(웹 「Reset the count」, 본문
+  `reset: true`)은 회차 수를 0으로 되돌려 반복이 선언된 `max`만큼 다시 돌게 하고,
+  그때까지 올린 상한은 버린다. 반복의 위치는 유지된다: `foreach`는 다음 항목부터
+  이어 가고, `retry`의 `attempt`와 모은 값은 그대로다. 한 회차도 돌지 않은 상한
+  (항목 수가 `max`보다 많은 병렬 `foreach`)에는 `--reset`을 거절한다. `--stop`은
+  그 반복을 `fail`로 끝낸다.
 - 방문 상한: 방문 수는 노드별로 런 전체에서 센다. 차트 최상위 `max_visits`(기본
   200)를 넘는 진입은 그 노드의 본문이 시작되기 전에 멈추고, 런은
   `waiting_approval`(reason `visit_limit`)가 된다. 사람이
@@ -2234,8 +2240,8 @@ spec:
   - 그 밖의 API: `GET /api/cflow2/runs`(v2 런 목록), `GET /api/cflow2/definition?name`
     (컴파일 트리, 검사 결과, 시작 입력 선언, 읽기 전용. `name`은 정의 이름만 받고
     경로면 400), `POST /api/cflow2/select`(사용자 선택, `caller=user`),
-    `POST /api/cflow2/extend`(`loop_limit` 응답, 본문에 `visits: true`면
-    `visit_limit` 응답), `POST /api/cflow2/nudge | abort | archive | report | move`
+    `POST /api/cflow2/extend`(`loop_limit` 응답: `by`·`reset`·`stop`, 본문에
+    `visits: true`면 `visit_limit` 응답이며 `reset`은 400), `POST /api/cflow2/nudge | abort | archive | report | move`
     (사람의 조작, 2.11). v2 런만 있는 슬롯에서 `GET /api/cflow/run`은 `v2: true`를
     싣는다. 런 상세의 `chart.nodes[*].force_target`은 강제 이동 대상 표시다.
   - `GET /api/cflow2/node?cwd&scope&node=<id>`(`daemon/cflow2_web.node_detail`): 런

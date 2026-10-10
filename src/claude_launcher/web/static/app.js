@@ -16414,22 +16414,16 @@ function termCflow2Answers(r, a) {
     });
   }
   if (a.kind === "loop_limit" || a.kind === "visit_limit") {
-    const visits = a.kind === "visit_limit" ? { visits: true } : {};
-    return [
-      {
-        label: visits.visits ? "Allow one more visit" : "Allow one more",
-        cls: "approve", path: "/api/cflow2/extend",
-        body: { ...body, by: 1, ...visits },
-        ask: `Allow one more at ${what}?`,
-      },
-      {
-        label: visits.visits ? "Stop here" : "Stop the loop",
-        title: "it finishes with outcome fail",
-        path: "/api/cflow2/extend",
-        body: { ...body, stop: true, ...visits },
-        ask: "Stop here? It finishes with outcome fail.",
-      },
-    ];
+    return cf2LimitPresses(a.kind === "visit_limit", a.count).map(([label, , extra]) => ({
+      label,
+      ...(extra.by ? { cls: "approve" } : {}),
+      ...(extra.stop ? { title: "it finishes with outcome fail" } : {}),
+      path: "/api/cflow2/extend",
+      body: { ...body, ...extra },
+      ask: extra.by ? `Allow one more at ${what}?`
+        : extra.reset ? `Reset the loop's count at ${what} to 0? It gets its full max again.`
+        : "Stop here? It finishes with outcome fail.",
+    }));
   }
   return [];
 }
@@ -30352,12 +30346,27 @@ function cf2AskLegendItems(opts, isBrief) {
 }
 
 /* The two presses of a loop or visit limit card, with what each does. */
-function cf2LimitPresses(visitsKind) {
-  return visitsKind
-    ? [["Allow one more visit", "raise the limit by one: the node may be entered once more"],
-       ["Stop here", "end it here: it finishes with outcome fail and the run follows that"]]
-    : [["Allow one more", "raise the loop's max by one: it runs one more iteration"],
-       ["Stop the loop", "end it here: it finishes with outcome fail and the run follows that"]];
+/* A limit card's presses as [label, meaning, body]: the body is what the
+   press adds to /api/cflow2/extend. A loop limit also offers a reset of its
+   count when it has run an iteration (a parallel foreach stops before any,
+   because it has more items than max, and a reset there would stop again). */
+function cf2LimitPresses(visitsKind, iterations) {
+  const stop = ["end it here: it finishes with outcome fail and the run follows that",
+                { stop: true }];
+  if (visitsKind) {
+    return [["Allow one more visit", "raise the limit by one: the node may be entered once more",
+             { by: 1, visits: true }],
+            ["Stop here", stop[0], { ...stop[1], visits: true }]];
+  }
+  const presses = [["Allow one more", "raise the loop's max by one: it runs one more iteration",
+                    { by: 1 }]];
+  if (Number(iterations) > 0) {
+    presses.push(["Reset the count",
+                  "count from 0 again: the loop gets its full max, earlier raises are dropped",
+                  { reset: true }]);
+  }
+  presses.push(["Stop the loop", ...stop]);
+  return presses;
 }
 
 /* Why an ask answer may not be sent yet, or "" when it may. reframe sends
@@ -31055,23 +31064,21 @@ function renderCflow2Into(box, data, ui) {
   }
   const limitCard = (lim, title, visitsKind) => {
     const card = cf2Card("limit", lim.label || lim.node, title);
-    const presses = cf2LimitPresses(visitsKind);
-    const more = el("button", "wf-btn sm approve", presses[0][0]);
-    more.addEventListener("click", async () => {
-      more.disabled = true;
-      await post("/api/cflow2/extend",
-                 { node: lim.instance, by: 1, ...(visitsKind ? { visits: true } : {}) });
-    });
-    const stop = el("button", "wf-btn sm", presses[1][0]);
-    stop.title = "it finishes with outcome fail";
-    stop.addEventListener("click", async () => {
-      if (!confirm("Stop here? It finishes with outcome fail.")) return;
-      stop.disabled = true;
-      await post("/api/cflow2/extend",
-                 { node: lim.instance, stop: true, ...(visitsKind ? { visits: true } : {}) });
-    });
+    const presses = cf2LimitPresses(visitsKind, lim.iterations);
     const row = el("div", "cf2-press");
-    row.append(more, stop);
+    for (const [label, , extra] of presses) {
+      const b = el("button", extra.by ? "wf-btn sm approve" : "wf-btn sm", label);
+      if (extra.stop) b.title = "it finishes with outcome fail";
+      b.addEventListener("click", async () => {
+        if (extra.stop && !confirm("Stop here? It finishes with outcome fail.")) return;
+        if (extra.reset && !confirm("Reset the loop's count to 0? It gets its full max again.")) {
+          return;
+        }
+        b.disabled = true;
+        await post("/api/cflow2/extend", { node: lim.instance, ...extra });
+      });
+      row.appendChild(b);
+    }
     card.appendChild(row);
     card.appendChild(cf2AnswerLegend(presses));
     yours.appendChild(card);

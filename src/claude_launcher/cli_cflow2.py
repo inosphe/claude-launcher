@@ -449,11 +449,13 @@ def _cmd_extend(args: argparse.Namespace) -> int:
 
     _refuse_own_session(args.scope, "extend")
     if args.visits:
+        if args.reset:
+            raise SystemExit("error: --reset answers a loop limit, not --visits")
         payload = runtime.extend_visits(args.node, args.by, stop=args.stop, cwd=os.getcwd(),
                                         scope=args.scope)
     else:
-        payload = runtime.extend_loop(args.node, args.by, stop=args.stop, cwd=os.getcwd(),
-                                      scope=args.scope)
+        payload = runtime.extend_loop(args.node, args.by, stop=args.stop, reset=args.reset,
+                                      cwd=os.getcwd(), scope=args.scope)
     _print_status(payload, False)
     return 0
 
@@ -776,12 +778,16 @@ def register(sub) -> None:
     q.add_argument("--reason")
     q.set_defaults(func=_guarded(_cmd_select))
 
-    q = scoped(csub.add_parser("extend", help="answer a loop_limit: allow more iterations "
-                               "or stop the loop"))
+    q = scoped(csub.add_parser("extend", help="answer a loop_limit: allow more iterations, "
+                               "reset the count, or stop the loop"))
     q.add_argument("node", nargs="?", help="loop (or, with --visits, node) instance id "
                    "(default: the only one)")
     q.add_argument("--by", type=int, default=1)
-    q.add_argument("--stop", action="store_true", help="end the loop with outcome fail")
+    g = q.add_mutually_exclusive_group()
+    g.add_argument("--stop", action="store_true", help="end the loop with outcome fail")
+    g.add_argument("--reset", action="store_true",
+                   help="reset the loop's count to 0: it gets its full max again and "
+                   "earlier extensions are dropped (--by is ignored)")
     q.add_argument("--visits", action="store_true",
                    help="answer a visit_limit (a node past the run's max_visits) instead of "
                    "a loop's max: --by more visits, or --stop")
