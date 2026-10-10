@@ -82,6 +82,7 @@ const env = new Function(
    `let newPackRolesShown = new Set();`,
    `let newPackDefaultsPending = false, pendingSeedPacks = null;`,
    `let newPrompterOffer = null, newPrompterTicks = new Set(), newPrompterRequest = 0;`,
+   `let newTaskPrompterOffer = null; const renderNewTaskPrompter = () => {}; const refreshNewTaskPrompter = async () => {};`,
    slice("refreshNewPrompterOffer"), slice("newPrompterSelection"),
    slice("newPackDefaults"), slice("promptPackFormOpened"),
    slice("refreshPromptPackOffer"), slice("applyPendingPackSeed"),
@@ -698,13 +699,13 @@ check("an on-demand pack installs like any pack but is in neither setting", () =
 });
 
 check("server prompts can be previewed, selected, and deselected beside packs", async () => {
-  answers["/api/prompter/prompts"] = [200, {
-    enabled: true, connected: true, url: "https://p.example", prompts: [
+  answers["/api/prompter/contexts"] = [200, {
+    enabled: true, connected: true, url: "https://p.example", contexts: [
       { id: 1, name: "server-rule", title: "Server rule", body: "SERVER BODY\nsecond line" },
     ],
   }];
   await env.refreshPrompter();
-  const remoteBox = () => all(row, (n) => n.name === "prompter_prompt_1")[0];
+  const remoteBox = () => all(row, (n) => n.name === "prompter_context_1")[0];
   assert.equal(remoteBox().checked, false);
   assert.equal(env.prompterSelection(), null);
   const chip = all(row, (n) => n.className.startsWith("pack-chip") &&
@@ -719,10 +720,10 @@ check("server prompts can be previewed, selected, and deselected beside packs", 
   assert.ok(!env.packs(form).includes("prompter:1"));
   box = remoteBox(); box.checked = false; box.handlers.change[0]();
   assert.equal(env.prompterSelection(), null);
-  env.prompter = { enabled: true, connected: false, error: "offline", prompts: [] };
+  env.prompter = { enabled: true, connected: false, error: "offline", contexts: [] };
   env.render();
   assert.match(text(row), /Prompter unavailable: offline/);
-  env.prompter = { enabled: false, connected: false, prompts: [] };
+  env.prompter = { enabled: false, connected: false, contexts: [] };
   env.render();
   assert.doesNotMatch(text(row), /Prompter unavailable/);
 });
@@ -730,8 +731,8 @@ check("server prompts can be previewed, selected, and deselected beside packs", 
 check("new and spawn payload allow the selected server identities", () => {
   const config = new Function(slice("sessionFormConfig") + "; return sessionFormConfig;")();
   for (const mode of ["new", "spawn"]) {
-    assert.ok(config(mode).payload.includes("prompter_prompts"));
-    assert.ok(config(mode).editable.includes("prompter_prompt_*"));
+    assert.ok(config(mode).payload.includes("prompter_contexts"));
+    assert.ok(config(mode).editable.includes("prompter_context_*"));
   }
 });
 

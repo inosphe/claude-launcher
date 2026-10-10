@@ -592,8 +592,9 @@ def test_prompter_selection_reaches_create_and_spawn_and_survives_restore(home, 
     workspaces.add(str(ws), "proj")
     prompter.set_url("https://p.example")
 
-    async def fetch(url):
-        return {"connected": True, "error": "", "prompts": [
+    async def fetch(url, kind):
+        assert kind == "context"
+        return {"connected": True, "error": "", "contexts": [
             {"id": 7, "name": "guidance", "title": "Guidance", "body": "SERVER RULE"},
             {"id": 8, "name": "excluded", "title": "", "body": "UNSELECTED RULE"},
         ]}
@@ -607,7 +608,7 @@ def test_prompter_selection_reaches_create_and_spawn_and_survives_restore(home, 
         try:
             payload = {"profile": "py", "cwd": str(ws), "task": "TASK", "beads": False,
                        "prompt_packs": ["common"],
-                       "prompter_prompts": {"url": "https://p.example", "ids": [7]}}
+                       "prompter_contexts": {"url": "https://p.example", "ids": [7]}}
             for name, endpoint in [("p1", "/api/sessions"), ("p2", "/api/sessions/p1/children")]:
                 requested = {**payload, "name": name}
                 if name == "p2":
@@ -623,13 +624,23 @@ def test_prompter_selection_reaches_create_and_spawn_and_survives_restore(home, 
                 assert SessionDef.from_dict(sdef.to_dict()).prompt_packs == sdef.prompt_packs
                 assert session_reminder.refresh_packs(mgr.get(name)) == (None, [])
                 texts = rebrief.addressable(name, manager=mgr, mesh_mgr=None)
-                assert any(v["kind"] == "prompt pack (prompter:7)" for v in texts.values())
-            bad = {**payload, "name": "bad", "prompter_prompts": {"url": "https://p.example", "ids": [99]}}
+                assert any(v["kind"] == "prompt pack (prompter:context:7)" for v in texts.values())
+            bad = {**payload, "name": "bad", "prompter_contexts": {"url": "https://p.example", "ids": [99]}}
             resp = await client.post("/api/sessions", headers=BEARER, json=bad)
             assert resp.status == 400
             assert "unavailable" in (await resp.json())["error"]
             assert "bad" not in [s.sdef.name for s in mgr.list()]
-            payload.pop("prompter_prompts")
+            for name, endpoint in [("stale", "/api/sessions"), ("stale-child", "/api/sessions/p1/children")]:
+                stale = {**payload, "name": name,
+                         "prompter_prompts": {"url": "https://p.example", "ids": [7]}}
+                if name == "stale-child":
+                    for inherited in ("profile", "cwd"):
+                        stale.pop(inherited)
+                resp = await client.post(endpoint, headers=BEARER, json=stale)
+                assert resp.status == 400
+                assert "Opening task" in (await resp.json())["error"]
+                assert name not in [s.sdef.name for s in mgr.list()]
+            payload.pop("prompter_contexts")
             resp = await client.post("/api/sessions", headers=BEARER, json={**payload, "name": "plain"})
             assert resp.status == 201, await resp.json()
             assert "SERVER RULE" not in seen["plain"]
