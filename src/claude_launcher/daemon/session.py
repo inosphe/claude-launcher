@@ -1721,12 +1721,17 @@ class Session:
         Two paced Enters are still not always enough for Codex: both can
         land inside its paste-burst window and become newlines, and the
         message then sits in the composer as a draft. A write succeeding
-        says nothing about that, so this waits for the positive signal — a
-        busy title frame after ``since`` (the first Enter) — and sends one
-        more Enter per :data:`SUBMIT_CONFIRM_TIMEOUT` without it, at most
+        says nothing about that, so this waits for the positive signal: an
+        idle-to-busy title transition after ``since`` (the first Enter).
+        Without it, send one more Enter per :data:`SUBMIT_CONFIRM_TIMEOUT`, at most
         :data:`SUBMIT_RETRIES` times. An Enter on an empty composer does
         nothing in Codex, so a retry after a submit that was merely slow to
         show costs nothing.
+
+        A turn that was running before the input keeps emitting busy frames
+        even if the input stays in the composer. Those frames cannot confirm
+        this submission. Without a new transition the bounded retries run;
+        a successfully steered input may therefore also receive those retries.
 
         Skipped when the absence of the signal is not evidence: the
         harness has shown no turn yet in this process (no title animation
@@ -1743,7 +1748,7 @@ class Session:
         while True:
             deadline = time.monotonic() + SUBMIT_CONFIRM_TIMEOUT
             while time.monotonic() < deadline:
-                if self.exited or activity.busy_seen_since(since):
+                if self.exited or activity.turn_started_since(since):
                     return extra
                 if person_typed():
                     return extra
@@ -1762,7 +1767,7 @@ class Session:
             await asyncio.sleep(delay)
             # The pacing sleep is a window too: a key typed during it would
             # otherwise be submitted by the Enter written next.
-            if self.exited or person_typed():
+            if self.exited or person_typed() or activity.turn_started_since(since):
                 return extra
             await self.write_bytes(b"\r")
             extra += 1
