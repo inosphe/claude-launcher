@@ -815,10 +815,6 @@ html[data-theme="light"] .xterm {
   font-size: 11px; color: #9fb4cb; line-height: 1.45; font-style: italic;
   white-space: pre-wrap; overflow-wrap: anywhere;
 }
-/* The note line is also the way into editing it (openRailNoteEditor), so it
-   answers the pointer as a text field would. */
-#session-list .rail-note { cursor: text; }
-#session-list .rail-note:hover { color: #c3d4e6; border-left-color: #3b6ea5; }
 /* The box that replaces the note line while it is being edited: the same
    place and the same indent, so opening it does not move the row's other
    lines, and the same border colour the panel's note box takes on focus. */

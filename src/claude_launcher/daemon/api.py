@@ -92,7 +92,7 @@ from . import restart_gate
 from . import restart_notice
 from .harness import HarnessError, SessionDef
 from . import score_goal
-from .manager import ManagerError, SessionManager
+from .manager import MAX_NOTE, ManagerError, SessionManager
 from . import mesh as mesh_mod
 from .mesh import MeshBusy, MeshConflict, MeshError, MeshManager
 from .session import STATUS_IDLE, KeyboardHeld, SessionGone
@@ -7671,6 +7671,17 @@ async def _onboard_and_launch(
         except ValueError as exc:
             raise onboard.OnboardError(str(exc)) from None
         session.sdef = replace(session.sdef, score_goal=selected)
+        # The operator's note, written in the form that starts the session
+        # (claunch-zy9yk): the same field and limit as the note endpoint
+        # (manager.set_note), set here so create and spawn both carry it.
+        if "note" in body:
+            raw_note = body.get("note")
+            if raw_note is not None and not isinstance(raw_note, str):
+                raise onboard.OnboardError("'note' must be text")
+            note_text = str(raw_note or "").strip()
+            if len(note_text) > MAX_NOTE:
+                raise onboard.OnboardError(f"a note is at most {MAX_NOTE} characters")
+            session.sdef = replace(session.sdef, note=note_text or None)
         # Inside the discarding try, and before anything is arranged: a board
         # answer that contradicts itself is checkable without a session, and
         # the alternative is a request that half-happens.

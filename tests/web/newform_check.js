@@ -102,7 +102,7 @@ const where = block('<fieldset id="new-where">', "</fieldset>", form.start);
    form reads as one numbered sequence, not six fenced blocks and four
    orphan rows. */
 check("Identity fences exactly who the session is",
-      named(identity.text), ["parent", "fork_parent", "over_limit", "name"]);
+      named(identity.text), ["parent", "fork_parent", "over_limit", "name", "note"]);
 /* The directory opens the form. It decides which checkout every later row
    acts on, and it is the one answer nothing downstream catches: a session
    created in the wrong tree does not refuse, it works. It spent releases
@@ -131,8 +131,8 @@ check("the form's controls read in the new order", named(form.text), [
   "quick_fork_task",
   // where it works: the project, then the directory its default fills
   "project", "cwd",
-  // who it is
-  "parent", "fork_parent", "over_limit", "name",
+  // who it is, and the operator's own note on it (claunch-zy9yk)
+  "parent", "fork_parent", "over_limit", "name", "note",
   // whose credentials it holds — promoted out of the fold
   "profile", "harness", "model", "effort",
   // what it joins, and what it drives
