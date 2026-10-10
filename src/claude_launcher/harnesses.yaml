@@ -23,6 +23,11 @@ harnesses:
     # URI. Use the stored upload directly to avoid native clipboard reads.
     image_paste_transport: path
     image_paste_path_format: native
+    # The composer draws `[Image #N]` once the pasted path has become an
+    # attachment, which lands after the paste event. An opening with images
+    # waits for it before pasting its text and pressing Enter; s991's opening
+    # (2026-10-10) submitted its text first and left `[Image #2]` behind.
+    image_paste_marker: '\[Image\s*#\d+\]'
     skip_permissions_args: [--dangerously-skip-permissions]
     btw:
       command: /btw

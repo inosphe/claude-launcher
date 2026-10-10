@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from importlib import resources
 
@@ -29,6 +30,21 @@ def test_image_paste_transport_is_declared_and_validated(home):
     with pytest.raises(HarnessConfigError, match="image_paste_path_format"):
         harnesses.parse({"harnesses": {"x": {
             "command": "x", "image_paste_path_format": "invalid",
+        }}})
+
+
+def test_image_paste_marker_is_declared_and_validated(home):
+    """Claude Code draws ``[Image #N]`` once it has taken an image; an
+    opening with images waits for that before submitting (claunch-1lfrh)."""
+    reg = harnesses.registry()
+    marker = reg["claude"].image_paste_marker
+    assert re.search(marker, "> [Image #2] describe this")
+    assert not re.search(marker, "> [Pasted text #1 +381 lines]")
+    assert reg["claude"].to_dict()["image_paste_marker"] == marker
+    assert reg["codex"].image_paste_marker == ""
+    with pytest.raises(HarnessConfigError, match="image_paste_marker"):
+        harnesses.parse({"harnesses": {"x": {
+            "command": "x", "image_paste_marker": "[unclosed",
         }}})
 
 
