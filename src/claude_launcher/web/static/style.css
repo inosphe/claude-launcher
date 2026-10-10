@@ -1248,6 +1248,59 @@ html[data-theme="light"] .xterm {
 #rail-nav a span { display: block; font-size: 15px; line-height: 1.3; }
 #rail-nav a:hover { color: #c6cdd5; background: #22262d; }
 #rail-nav a.active { color: #d8dbe0; border-top-color: #58a6ff; }
+#rail-nav-dock { flex: none; }
+#rail-nav-pin { display: none; }
+
+/* Desktop with a pointer: the nav is one row tall, and the rows past the
+   first open over the session list while the pointer or the focus is in it
+   (claunch-cka36). The dock keeps that one row's place in the rail, so the
+   list never moves; the nav sits on the dock's bottom edge and grows up.
+   The nav is drawn upside down (and each link upside down again) so its
+   first row is the bottom one: the row under the pointer stays where it
+   was when the rest opens above it. Every cell is one fixed row tall --
+   the row height is what the collapsed nav is clipped to. A phone shows
+   the whole nav (the rail is the menu there), and so does a screen with
+   no hover, which would have no way to open it.
+   The pin at the dock's right end keeps every row shown: pinned, the nav
+   stands in the rail's flow (still flipped, so the rows keep the order the
+   hover shows) and the session list gives up its room. The choice is
+   remembered per browser (app.js, RAIL_NAV_PIN_KEY). */
+@media (min-width: 821px) and (hover: hover) {
+  #rail-nav-dock {
+    --rail-nav-row: 46px; --rail-nav-pin: 22px;
+    position: relative; height: calc(var(--rail-nav-row) + 1px);
+    padding-right: var(--rail-nav-pin); background: #1b1e24;
+  }
+  #rail-nav {
+    position: absolute; left: 0; right: var(--rail-nav-pin); bottom: 0; z-index: 30;
+    grid-auto-rows: var(--rail-nav-row);
+    max-height: var(--rail-nav-row); overflow: hidden;
+    transform: scaleY(-1);
+    /* drawn flipped: this border is the top edge on screen */
+    border-top: none; border-bottom: 1px solid #2a2e36;
+    transition: max-height 120ms ease-out;
+  }
+  #rail-nav a { transform: scaleY(-1); line-height: 12px; }
+  /* :focus-visible and not :focus-within -- a click focuses the link too,
+     and the nav would stay open after the pointer has left it. */
+  #rail-nav-dock:hover #rail-nav, #rail-nav:has(a:focus-visible) {
+    max-height: calc(var(--rail-nav-row) * 17);
+    box-shadow: 0 0 12px rgba(0, 0, 0, 0.45);
+  }
+  #rail-nav-pin {
+    display: block; position: absolute; right: 0; bottom: 0; z-index: 31;
+    width: var(--rail-nav-pin); height: calc(var(--rail-nav-row) + 1px); padding: 0;
+    border: none; border-top: 1px solid #2a2e36; background: #1b1e24;
+    font-size: 11px; cursor: pointer; opacity: 0.45; filter: grayscale(1);
+  }
+  #rail-nav-pin:hover { opacity: 0.9; background: #22262d; }
+  #rail-nav-pin[aria-pressed="true"] { opacity: 1; filter: none; }
+  #rail-nav-dock.pinned { height: auto; }
+  #rail-nav-dock.pinned #rail-nav { position: static; max-height: none; box-shadow: none; }
+}
+@media (min-width: 821px) and (hover: hover) and (prefers-reduced-motion: reduce) {
+  #rail-nav { transition: none; }
+}
 
 /* The rail can be resized independently of the window. Give identity its
    own line before the fixed-width actions consume the name's space.
@@ -5178,7 +5231,8 @@ body.embed #main { width: 100%; }
   /* The rail is the whole screen here, so the list takes what it needs and
      the nav sits at the thumb end rather than floating mid-screen. */
   #session-list { flex: 1 0 auto; max-height: none; overflow: visible; }
-  #rail-nav { position: sticky; bottom: 0; font-size: 12px; }
+  #rail-nav-dock { position: sticky; bottom: 0; }
+  #rail-nav { font-size: 12px; }
   #rail-nav a { padding: 12px 4px; }
 
   /* thumb-sized rows */
