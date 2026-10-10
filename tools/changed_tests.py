@@ -1491,6 +1491,7 @@ def run_and_record(
     basetemp, workers = command_basetemp(cmd), command_workers(cmd)
     write_run_summary(basetemp, {
         "tree": tree,
+        "selection": sorted(files),
         "exit_code": code,
         "counts": sweep.parse_counts(output),
         "workers": workers,

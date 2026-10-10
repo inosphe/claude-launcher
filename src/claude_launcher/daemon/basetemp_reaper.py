@@ -32,6 +32,13 @@ that is still running.
 A daemon shutdown is not an ending: the manager does not run exit hooks for
 it, and :meth:`reap_ended` skips every session that is still running or held,
 so a restart deletes nothing a live session is using.
+
+Names are only unique within one daemon instance -- each named instance
+(``<base home>/daemons/<name>``) hands out its own ``sN`` -- while the
+Windows root is one ``C:/t`` for the whole machine. So before anything goes,
+:func:`foreign_live` reads every *other* instance's registry, and a name that
+is running or held there is skipped: an ``s1`` that ended here must not take
+the trees of the ``s1`` still running under ``local2``.
 """
 
 from __future__ import annotations
@@ -41,6 +48,7 @@ import logging
 import os
 import re
 import shutil
+import sqlite3
 import sys
 import threading
 import time
@@ -85,6 +93,68 @@ def owner(name: str, sessions: Iterable[str]) -> Optional[str]:
         if matches(name, session) and (best is None or len(session) > len(best)):
             best = session
     return best
+
+
+def _live(entry: dict) -> Optional[str]:
+    """The name of a registry record that is running or held, else ``None``."""
+    sdef = entry.get("def") if isinstance(entry.get("def"), dict) else {}
+    name = sdef.get("name")
+    if name and (entry.get("was_running") or entry.get("held_at")):
+        return str(name)
+    return None
+
+
+def _registry(directory: Path) -> List[dict]:
+    """The session records an instance directory holds, read-only.
+
+    ``sessions.db`` when there is one (opened ``mode=ro`` so a reader never
+    creates or migrates another daemon's database), else the legacy
+    ``sessions.json`` an instance that predates the database still has.
+    """
+    db = directory / "sessions.db"
+    if db.is_file():
+        try:
+            conn = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True, timeout=5.0)
+            try:
+                rows = conn.execute("SELECT data FROM sessions").fetchall()
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            return []
+        out = []
+        for (data,) in rows:
+            try:
+                entry = json.loads(data)
+            except (ValueError, TypeError):
+                continue
+            if isinstance(entry, dict):
+                out.append(entry)
+        return out
+    try:
+        entries = json.loads((directory / "sessions.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return [e for e in entries if isinstance(e, dict)] if isinstance(entries, list) else []
+
+
+def foreign_live() -> set:
+    """Names running or held in any daemon instance other than this one."""
+    own = paths.daemon_dir().resolve()
+    base = paths.base_home()
+    dirs = [base / "daemon"]
+    try:
+        dirs += [p for p in (base / "daemons").iterdir() if p.is_dir()]
+    except OSError:
+        pass
+    names: set = set()
+    for directory in dirs:
+        try:
+            if not directory.is_dir() or directory.resolve() == own:
+                continue
+        except OSError:
+            continue
+        names.update(n for n in map(_live, _registry(directory)) if n)
+    return names
 
 
 def describe(path: Path) -> dict:
@@ -141,8 +211,10 @@ class BasetempReaper:
         root: Optional[Path] = None,
         history: Optional[Path] = None,
         background: bool = True,
+        foreign: Callable[[], set] = foreign_live,
     ) -> None:
         self._sessions = sessions
+        self._foreign = foreign
         self._root = root
         self._history = history
         self._background = background
@@ -198,7 +270,11 @@ class BasetempReaper:
         """Delete each named session's basetemps; return the rows written."""
         rows: List[dict] = []
         with self._lock:
+            elsewhere = self._foreign()
             for name in names:
+                if name in elsewhere:
+                    log.info("basetemp: %r is live in another daemon instance; kept", name)
+                    continue
                 for path in self.owned(name):
                     rows.append(self._reap_one(name, path))
             if rows:

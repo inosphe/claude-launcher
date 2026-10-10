@@ -28,12 +28,13 @@ def _run_tree(root: Path, name: str, *, workers: int = 2, summary: dict | None =
     return path
 
 
-def _reaper(tmp_path: Path, sessions: list) -> br.BasetempReaper:
+def _reaper(tmp_path: Path, sessions: list, foreign: set = frozenset()) -> br.BasetempReaper:
     return br.BasetempReaper(
         lambda: list(sessions),
         root=tmp_path / "t",
         history=tmp_path / "daemon" / br.HISTORY_NAME,
         background=False,
+        foreign=lambda: set(foreign),
     )
 
 
@@ -208,3 +209,65 @@ def test_the_suite_never_reaps_the_real_root(tmp_path):
     # reap_ended() over registries of made-up names.
     assert br.default_root() == tmp_path / ".basetemp-root"
     assert br.BasetempReaper(lambda: []).root == tmp_path / ".basetemp-root"
+
+
+# ---- other daemon instances -------------------------------------------------- #
+# Names are per instance; C:/t is per machine (s995-rev2, CHANGES REQUESTED @
+# 7fadbd8c: local2 and migtest exist on this host and hand out their own sN).
+
+def test_a_name_live_in_another_instance_is_kept(tmp_path):
+    root = tmp_path / "t"
+    theirs = _run_tree(root, "s1c1011010955")
+    _run_tree(root, "s2c1011010955")
+    sessions = [("s1", True), ("s2", True)]
+
+    _reaper(tmp_path, sessions, foreign={"s1"}).reap_ended()
+
+    assert list(root.iterdir()) == [theirs]
+    assert [r["session"] for r in _rows(tmp_path)] == ["s2"]
+
+
+def _record(name: str, **extra) -> dict:
+    return {"def": {"name": name}, "was_running": False, **extra}
+
+
+def test_foreign_live_reads_every_other_instances_registry(home, monkeypatch):
+    import sqlite3
+
+    # This daemon is the named instance "mine"; the default and "local2"
+    # are the others. One keeps a sessions.db, the other only the legacy
+    # sessions.json an older instance still has.
+    monkeypatch.setenv("CLAUNCH_DAEMON", "mine")
+    mine = home / "daemons" / "mine"
+    mine.mkdir(parents=True)
+    (mine / "sessions.json").write_text(
+        json.dumps([_record("s9", was_running=True)]), encoding="utf-8")
+
+    default = home / "daemon"
+    default.mkdir()
+    conn = sqlite3.connect(default / "sessions.db")
+    conn.execute("CREATE TABLE sessions (name TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at TEXT)")
+    for rec in (_record("s0", was_running=True), _record("s3"),
+                _record("s4", held_at="2026-10-11T00:00:00+00:00")):
+        conn.execute("INSERT INTO sessions (name, data) VALUES (?, ?)",
+                     (rec["def"]["name"], json.dumps(rec)))
+    conn.commit()
+    conn.close()
+
+    local2 = home / "daemons" / "local2"
+    local2.mkdir(parents=True)
+    (local2 / "sessions.json").write_text(
+        json.dumps([_record("s1", was_running=True), _record("s2")]), encoding="utf-8")
+
+    assert br.foreign_live() == {"s0", "s4", "s1"}
+
+
+def test_foreign_live_survives_unreadable_registries(home, monkeypatch):
+    monkeypatch.setenv("CLAUNCH_DAEMON", "mine")
+    broken = home / "daemons" / "broken"
+    broken.mkdir(parents=True)
+    (broken / "sessions.json").write_text("{not json", encoding="utf-8")
+    (home / "daemon").mkdir()
+    (home / "daemon" / "sessions.db").write_bytes(b"not a database")
+
+    assert br.foreign_live() == set()
