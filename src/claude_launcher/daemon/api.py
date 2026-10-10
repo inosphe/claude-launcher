@@ -16,6 +16,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 import socket
 import time
@@ -9888,12 +9889,18 @@ def _opening_image_step(session, images, opening: str):
     """
     done = {"ran": False}
     failed: List[str] = []
+    entry = harness_registry.registry().get(session.sdef.harness or "")
+    marker = (
+        re.compile(entry.image_paste_marker)
+        if entry and entry.image_paste_marker else None
+    )
 
     async def step() -> None:
         if done["ran"]:
             return
         done["ran"] = True
         for img in images:
+            seen = _marker_count(session, marker) if marker else 0
             delivered, _keys, reason = await _deliver_pasted_image(
                 session, img.path, img.media_type
             )
@@ -9903,6 +9910,12 @@ def _opening_image_step(session, images, opening: str):
                     img.path, session.sdef.name, reason,
                 )
                 failed.append(f"- {img.path} ({reason})")
+            elif marker and not await _await_marker(session, marker, seen):
+                log.warning(
+                    "opening image %s for %r: no attachment placeholder "
+                    "within %.0fs; pasting the text anyway",
+                    img.path, session.sdef.name, IMAGE_ATTACH_TIMEOUT,
+                )
         wait = _paste_settle["until"] - asyncio.get_running_loop().time()
         if wait > 0:
             await asyncio.sleep(wait)
@@ -9919,6 +9932,34 @@ def _opening_image_step(session, images, opening: str):
         return "\n\n".join(parts)
 
     return step, text
+
+
+#: How long an opening waits for the harness to show that it took one image
+#: (``image_paste_marker``) before it goes on without that evidence.
+IMAGE_ATTACH_TIMEOUT = 10.0
+
+
+def _marker_count(session, marker) -> int:
+    return sum(len(marker.findall(line)) for line in session.capture())
+
+
+async def _await_marker(session, marker, seen: int) -> bool:
+    """Wait until the screen shows more ``marker`` matches than ``seen``.
+
+    A pasted image is taken after the paste event: Claude Code reads the
+    pasted path and only then draws ``[Image #N]``. Text pasted and submitted
+    before that goes out as a message of its own, and the image is left in an
+    empty composer (claunch-1lfrh). Counting, rather than looking for any
+    match, keeps the second of two images from being satisfied by the first.
+    """
+    deadline = time.monotonic() + IMAGE_ATTACH_TIMEOUT
+    while not session.exited:
+        if _marker_count(session, marker) > seen:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(0.1)
+    return False
 
 
 #: Held across the clipboard write AND the keystroke that reads it back. The

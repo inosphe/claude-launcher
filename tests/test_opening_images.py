@@ -296,3 +296,112 @@ def test_a_spawned_child_takes_opening_images_too(home, tmp_path, monkeypatch):
         assert kept.read_bytes() == PNG
 
     _run(body, ["M-v"])
+
+
+class _Screen:
+    """A session double for :func:`api._opening_image_step`: the screen is a
+    list of lines the test edits, and every paste is recorded."""
+
+    def __init__(self, harness):
+        self.sdef = type("Sdef", (), {"harness": harness, "name": "m1"})()
+        self.exited = False
+        self.lines = ["> "]
+
+    def capture(self, *, history=False):
+        return list(self.lines)
+
+
+def _marker_harness():
+    store.update(lambda doc: doc.update({"harnesses": {"pm": {
+        "command": [sys.executable, "-c", "pass"],
+        "image_paste_transport": "path",
+        "image_paste_marker": r"\[Image\s*#\d+\]",
+    }}}))
+
+
+def test_the_text_waits_until_the_harness_shows_each_image(home, monkeypatch):
+    """claunch-1lfrh: Claude Code takes a pasted path after the paste event.
+    s991's opening pasted its text and pressed Enter first, so the text went
+    out alone and ``[Image #2]`` was left in the empty composer. The step now
+    returns only once the screen shows one more placeholder per image."""
+    _marker_harness()
+    screen = _Screen("pm")
+    events = []
+
+    async def fake_deliver(session, path, media_type):
+        events.append(("image", Path(path).name))
+        n = len(events)
+
+        async def show():
+            await asyncio.sleep(0.3)
+            events.append(("shown", n))
+            screen.lines = ["> " + " ".join(
+                f"[Image #{i}]" for i in range(1, n + 1))]
+
+        asyncio.ensure_future(show())
+        return True, [], ""
+
+    monkeypatch.setattr(api_mod, "_deliver_pasted_image", fake_deliver)
+    images = [opening_images.Image(Path("01-a.png"), "image/png"),
+              opening_images.Image(Path("02-b.png"), "image/png")]
+
+    async def run():
+        step, text = api_mod._opening_image_step(screen, images, "look")
+        started = time.monotonic()
+        await step()
+        events.append(("text", text()))
+        return time.monotonic() - started
+
+    elapsed = asyncio.run(run())
+    assert elapsed >= 0.6
+    assert events == [
+        ("image", "01-a.png"), ("shown", 1),
+        ("image", "02-b.png"), ("shown", 3),
+        ("text", "look"),
+    ]
+
+
+def test_an_image_the_harness_never_shows_does_not_hold_the_text(
+    home, monkeypatch
+):
+    _marker_harness()
+    screen = _Screen("pm")
+    monkeypatch.setattr(api_mod, "IMAGE_ATTACH_TIMEOUT", 0.2)
+
+    async def fake_deliver(session, path, media_type):
+        return True, [], ""
+
+    monkeypatch.setattr(api_mod, "_deliver_pasted_image", fake_deliver)
+    images = [opening_images.Image(Path("01-a.png"), "image/png")]
+
+    async def run():
+        step, text = api_mod._opening_image_step(screen, images, "look")
+        started = time.monotonic()
+        await step()
+        return time.monotonic() - started, text()
+
+    elapsed, out = asyncio.run(run())
+    assert 0.2 <= elapsed < 5
+    assert out == "look"
+
+
+def test_an_image_that_was_not_handed_over_is_not_waited_for(home, monkeypatch):
+    _marker_harness()
+    screen = _Screen("pm")
+    monkeypatch.setattr(api_mod, "IMAGE_ATTACH_TIMEOUT", 30.0)
+
+    async def fake_deliver(session, path, media_type):
+        return False, [], "the session is not ready for an image path paste"
+
+    monkeypatch.setattr(api_mod, "_deliver_pasted_image", fake_deliver)
+    images = [opening_images.Image(Path("01-a.png"), "image/png")]
+
+    async def run():
+        step, text = api_mod._opening_image_step(screen, images, "look")
+        started = time.monotonic()
+        await step()
+        return time.monotonic() - started, text()
+
+    elapsed, out = asyncio.run(run())
+    assert elapsed < 5
+    assert "01-a.png" in out and "not ready" in out

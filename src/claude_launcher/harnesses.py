@@ -256,6 +256,14 @@ class Harness:
     #: Representation accepted by the harness's pasted-path parser.
     #: Keep URI as the default for existing path-transport declarations.
     image_paste_path_format: str = "uri"
+    #: Regular expression for the placeholder the harness draws in its
+    #: composer once it has taken an image (Claude Code: ``[Image #1]``).
+    #: Taking one is not instant -- a pasted path is read and converted after
+    #: the paste event -- so the opening of a session created with images
+    #: waits for one more match on screen before it pastes its text and
+    #: submits (claunch-1lfrh); text submitted earlier goes out alone and the
+    #: image is left in the composer behind it. Empty: no such wait.
+    image_paste_marker: str = ""
     #: cflow v2 capability defaults this harness's CLI provides
     #: (docs/cflow-v2.md 6.3): ``{id: {"enabled": bool, "args": [...]}}``
     #: (``args`` only when declared). Ids are not checked here; the cflow2
@@ -396,6 +404,7 @@ class Harness:
             "image_paste_keys": list(self.image_paste_keys),
             "image_paste_transport": self.image_paste_transport,
             "image_paste_path_format": self.image_paste_path_format,
+            "image_paste_marker": self.image_paste_marker,
             "capabilities": {
                 key: {
                     k: (list(v) if isinstance(v, list) else v)
@@ -636,6 +645,15 @@ def _parse_entry(name: str, body) -> Harness:
             raise HarnessConfigError(
                 f"harness {name!r} paste_enter_delay must be non-negative"
             )
+    image_paste_marker = str(body.get("image_paste_marker") or "").strip()
+    if image_paste_marker:
+        try:
+            re.compile(image_paste_marker)
+        except re.error as exc:
+            raise HarnessConfigError(
+                f"harness {name!r} image_paste_marker is not a regular "
+                f"expression: {exc}"
+            ) from None
     model_aliases = body.get("model_aliases", {})
     if not isinstance(model_aliases, dict) or any(
         not isinstance(k, str) or not k.strip()
@@ -704,6 +722,7 @@ def _parse_entry(name: str, body) -> Harness:
         paste_enter_delay=paste_enter_delay,
         image_paste_transport=strategies["image_paste_transport"][0],
         image_paste_path_format=strategies["image_paste_path_format"][0],
+        image_paste_marker=image_paste_marker,
         image_paste_keys=_as_list(
             body.get("image_paste_keys"),
             f"harness {name!r} image_paste_keys",
