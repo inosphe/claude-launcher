@@ -669,6 +669,20 @@ check("...still inside the header, before the actions",
       skipAt > headerAt && skipAt < actionsAt, true);
 check("...and it starts hidden too: there is usually nothing to skip",
       /id="term-timer-skip"[^>]*class="[^"]*hidden"/.test(html), true);
+/* The two are one group on the header (claunch-0jjv3): a frame that opens
+   before the chip and closes right after the skip, with nothing else of the
+   header inside it. */
+const groupAt = html.indexOf('id="term-reminder"');
+check("the reminder group ships in the header", groupAt > headerAt, true);
+/* The group's own close is the first </span> after the skip button. */
+const groupEnd = html.indexOf("</span>", html.indexOf("</button>", skipAt));
+const groupBody = html.slice(groupAt, groupEnd);
+check("...and holds the chip and the skip", groupAt < chipAt && skipAt < actionsAt
+      && groupBody.includes('id="term-timer"') && groupBody.includes('id="term-timer-skip"'), true);
+check("...and no other header control",
+      /id="term-(?!timer\b|timer-skip\b)[\w-]+"/.test(groupBody.replace(/<!--[\s\S]*?-->/g, "")
+        .replace('id="term-reminder"', "")), false);
+check("...named as a group", /id="term-reminder"[^>]*role="group"/.test(html), true);
 /* One repaint paints both, which is what puts the skip on the same 1s
    interval as the countdown it sits against. A skip painted only by the 2s
    poll would linger for two seconds on a run that has just gone quiet. */
@@ -712,6 +726,12 @@ check("nothing dresses a skip as a state somebody left behind",
       /\.timer-skip\.timer-paused/.test(rules), false);
 check("...and it says when a press is in flight, like both chips beside it",
       /\.timer-skip:disabled \{[^}]*cursor:\s*wait/.test(rules), true);
+check("the reminder group draws a frame of its own",
+      /\.term-reminder \{[^}]*border:/.test(rules), true);
+check("...and leaves the row when neither control is up",
+      /\.term-reminder:not\(:has\(> \.term-btn:not\(\.hidden\)\)\) \{\s*display:\s*none/.test(rules), true);
+check("...and drops its label when the header turns compact",
+      /#term-header\.term-compact \.term-reminder-label \{\s*display:\s*none/.test(rules), true);
 
 if (failures) {
   console.error(`${failures} check(s) failed`);

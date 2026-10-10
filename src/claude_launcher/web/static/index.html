@@ -398,6 +398,15 @@
            and the card show. Hidden for a session that has none (the OAuth
            routes never go through the shim). -->
       <span id="term-tps" class="badge tps hidden"></span>
+      <!-- The reminder controls, framed as one group: the countdown/switch
+           and the skip beside it act on the same clock, and loose in a row
+           of a dozen chips they read as two unrelated widgets. The frame
+           carries a small "reminder" label so the group names itself; it
+           hides when neither control is up (CSS :has), and the toolbar
+           fitter moves it into the overflow menu as one item, both buttons
+           together (claunch-0jjv3). -->
+      <span id="term-reminder" class="term-reminder" role="group" aria-label="reminder">
+      <span class="term-reminder-label" aria-hidden="true">reminder</span>
       <!-- When the daemon will next type into THIS session by itself, and how
            long is left of it. On a session's own header a countdown belonging
            to some other session is a confident lie, so this chip speaks for
@@ -423,6 +432,7 @@
            rendered by paintTermTimerSkip(). -->
       <button id="term-timer-skip" class="term-btn timer-skip hidden"
               type="button"></button>
+      </span>
       <!-- What would happen to a message arriving RIGHT NOW: typed straight
            in, queued — and by what — or REFUSED outright, once this
            session's backlog has hit the mesh's cap and the daemon has
