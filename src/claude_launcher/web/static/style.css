@@ -5291,6 +5291,26 @@ body.embed #main { width: 100%; }
   width: 1100px;
   min-width: min(420px, calc(100vw - 32px));
 }
+/* The quick fork: six rows in a box sized by them. Wide enough that the
+   longest Inherit label sits on one line in a half-width column, and as tall
+   as the rows are, up to nearly the whole viewport, so it does not scroll
+   unless the window is too short for it. */
+#modal-overlay.spawn-open.fork-open .modal-box:has(#new-session) {
+  width: 1040px; height: auto; max-height: 94vh; min-height: 0;
+}
+#new-session #new-quick-fork:not(.session-field-hidden) {
+  display: grid; gap: 14px 18px; margin: 0; padding: 0; border: 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+#new-session #new-quick-fork > legend { display: none; }
+#new-session #new-quick-fork > :is(p, label:has(textarea)) { grid-column: 1 / -1; }
+#new-session #new-quick-fork > label { margin-bottom: 0; }
+#new-session #new-quick-fork > label > select { margin-top: 6px; }
+#new-session #new-quick-fork > p { margin: 0; line-height: 1.5; }
+#new-session #new-quick-fork > .wf-note { margin-top: -6px; }
+@container session-form (max-width: 560px) {
+  #new-session #new-quick-fork:not(.session-field-hidden) { grid-template-columns: minmax(0, 1fr); }
+}
 /* The body takes the slack a taller box creates — without this it keeps its
    content height and the extra pixels open as dead space under the form. */
 #modal-overlay.spawn-open #modal-body {

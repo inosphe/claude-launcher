@@ -120,7 +120,21 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
   await page.getByRole('button',{name:'Cancel',exact:true}).click();
   assert.equal(await page.locator('[name=task]').inputValue(),'page draft');
   assert.equal(await page.locator('#new-tab-spawn').getAttribute('aria-selected'),'true');
+  // claunch-qrvee: the fork box is sized by its rows, not by the size the
+  // New/Spawn box was last dragged to. A remembered 640x380 used to open the
+  // fork at that size, scrolling its six rows inside a slit.
+  await page.evaluate(()=>{ try{localStorage.setItem(SPAWN_SIZE_KEY,JSON.stringify({w:640,h:380}));}catch{} });
   await page.evaluate(()=>openQuickForkModal('lead'));
+  assert.equal(await page.locator('#modal-overlay').evaluate(el=>el.classList.contains('fork-open')),true);
+  const forkBox=await page.locator('#modal-overlay .modal-box').evaluate(el=>({
+    w:el.getBoundingClientRect().width, inline:[el.style.width,el.style.height]}));
+  assert.deepEqual(forkBox.inline,['',''],'the remembered spawn size is not applied to the fork');
+  assert.ok(forkBox.w>640,'the fork box is wider than the remembered spawn size');
+  const forkScroll=await page.locator('#modal-body').evaluate(el=>[el.scrollHeight,el.clientHeight]);
+  assert.ok(forkScroll[0]<=forkScroll[1]+1,`the fork fits without scrolling (${forkScroll})`);
+  const [placeBox,meshBox]=[await rect('[name=quick_fork_place]'),await rect('[name=quick_fork_mesh]')];
+  assert.ok(Math.abs(placeBox.y-meshBox.y)<1 && meshBox.x>placeBox.x+placeBox.width,
+    'Placement and Mesh share a row');
   assert.equal(await page.locator('#new-tabs').isVisible(),false);
   assert.equal(await page.locator('#new-quick-fork').isVisible(),true);
   assert.ok(Math.abs((await rect('#new-quick-fork')).width-(await rect('#new-session')).width)<1,
@@ -168,6 +182,9 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
   await page.getByRole('button',{name:'Cancel',exact:true}).click();
   assert.equal(await page.locator('[name=task]').inputValue(),'page draft');
   assert.equal(await page.locator('[name=task]').isEnabled(),true);
+  assert.deepEqual(await page.evaluate(()=>[JSON.parse(localStorage.getItem(SPAWN_SIZE_KEY)),
+    document.getElementById('modal-overlay').classList.contains('fork-open')]),
+    [{w:640,h:380},false],'closing the fork leaves the spawn size as it was');
   await page.evaluate(()=>{
     route=()=>{};
     api=(url,opts)=>{

@@ -675,7 +675,9 @@
           <legend>Quick fork</legend>
           <p id="new-quick-fork-source"></p>
           <!-- Each of these is its own choice: inherit is the preselected,
-               recommended answer in every row, never the only one. -->
+               recommended answer in every row, never the only one. The four
+               pickers sit two by two and the role note under both rows, so
+               the box holds the whole fork without scrolling. -->
           <label>Placement
             <select name="quick_fork_place"></select>
           </label>
@@ -685,10 +687,10 @@
           <label id="new-quick-fork-role-row">Role
             <select name="quick_fork_role"></select>
           </label>
-          <p id="new-quick-fork-role-note" class="wf-note hidden"></p>
           <label>Workflow
             <select name="quick_fork_workflow"></select>
           </label>
+          <p id="new-quick-fork-role-note" class="wf-note hidden"></p>
           <label>Opening task
             <textarea name="quick_fork_task" rows="3" placeholder="Optional task for the copy"></textarea>
           </label>
