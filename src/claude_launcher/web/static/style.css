@@ -1843,13 +1843,17 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   display: flex; flex: none; flex-wrap: wrap; align-items: center; gap: 4px;
   padding: 5px 8px; min-width: 0; background: #11151b;
   border-bottom: 1px solid #30363d;
+  position: relative; /* containing block for a leaving tab's fading copy */
 }
-.session-tab {
+/* .session-tab-leaving is the fading copy of a tab that just left the bar
+   (animateSessionTabs): drawn like a tab, out of the flow, never a target. */
+.session-tab, .session-tab-leaving {
   display: inline-flex; align-items: center; min-width: 0; max-width: 100%;
   border: 1px solid #30363d; border-radius: 5px; background: #161b22;
 }
-.session-tab.pinned { border-color: #66501e; }
-.session-tab.active { background: #10203a; border-color: #58a6ff; }
+.session-tab.pinned, .session-tab-leaving.pinned { border-color: #66501e; }
+.session-tab-leaving { position: absolute; margin: 0; pointer-events: none; }
+.session-tab.active, .session-tab-leaving.active { background: #10203a; border-color: #58a6ff; }
 /* A tab whose session belongs to another project than the rail shows. The
    dot keeps the session's real state; the dashed outline and the chip say
    where it is filed. */
@@ -1865,7 +1869,7 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 }
 .session-tab-open .dot { flex: none; width: 7px; height: 7px; border-radius: 50%; }
 .session-tab-name { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.session-tab button {
+.session-tab button, .session-tab-leaving button {
   flex: none; background: none; border: 0; color: #8b949e; cursor: pointer;
   padding: 4px; min-width: 24px; min-height: 28px;
 }
