@@ -4807,7 +4807,20 @@ async function refreshSessions(options) {
     // scanning for "which of these has nobody touched" finds it in one
     // column rather than hunting a different offset on every row.
     const railSeen = railSeenLine(s);
-    li.append(dot, head, meta, railCwd, ...(railCtx ? [railCtx] : []),
+    // The role again, on a line of its own under the name. Drawn only on the
+    // selected card (CSS, li.active), where the name line's copy is hidden:
+    // squeezed beside the name, the handle and the rooms, the role is the
+    // pill that gets cut, and the selected session is the one whose role the
+    // reader is looking for. Built on every row so that selecting one is a
+    // class change, not a redraw.
+    const roleLine = document.createElement("span");
+    roleLine.className = "rail-role-line";
+    const roleWhole = document.createElement("span");
+    roleWhole.className = "mesh-role";
+    roleWhole.textContent = role.textContent;
+    roleWhole.title = role.textContent;
+    roleLine.appendChild(roleWhole);
+    li.append(dot, head, meta, roleLine, railCwd, ...(railCtx ? [railCtx] : []),
               ...(railTps ? [railTps] : []),
               ...(railUsage ? [railUsage] : []),
               railSeen, ...(plus ? [plus] : []), ...(pin ? [pin] : []),

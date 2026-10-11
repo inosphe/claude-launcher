@@ -575,6 +575,7 @@ BROWSER_CHECKS = [
         "theme_browser.cjs",
         "railnav_browser.cjs",
         "terminputlayout_browser.cjs",
+        "railroleline_browser.cjs",
 ]
 
 

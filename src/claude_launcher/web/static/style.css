@@ -599,6 +599,20 @@ html[data-theme="light"] .xterm {
   flex: 0 1 auto; padding: 1px 5px; min-width: 3em;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+/* The selected card's role, on a line of its own (app.js, .rail-role-line):
+   whole, wrapping if it must, never an ellipsis. The name line's copy steps
+   aside so the role is not drawn twice. Every other card keeps the role
+   beside the name, as above. */
+#session-list .rail-role-line { display: none; }
+#session-list li.active > .rail-role-line {
+  display: flex; flex-basis: 100%; order: 2; min-width: 0;
+  padding-left: 16px; margin-top: 2px;
+}
+#session-list li.active > .rail-role-line > .mesh-role {
+  flex: 0 1 auto; min-width: 0;
+  white-space: normal; overflow: visible; overflow-wrap: anywhere;
+}
+#session-list li.active > .rail-head > .mesh-role { display: none; }
 /* The name the mesh calls this session by, when that is not the name it sits
    beside. Green rather than the role's blue or the rooms' grey: on this rail
    blue already means "what this session IS" and grey "where it belongs", and

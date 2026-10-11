@@ -332,8 +332,10 @@ served = { sessions: [
      are its lines (raillayout_check pins that), and before the context
      gauge: "where" is read under the name, "how full" under that. */
   const kids = row("s84").kids.map((k) => k.className);
+  // rail-role-line is drawn only on the selected card (claunch-g4owg.1), so
+  // on every other card the directory line is the first line under the name.
   check("the directory line is the row's own child, right after the name line",
-        kids.slice(0, 4), ["dot busy", "rail-head", "meta", "rail-cwd worktree"]);
+        kids.slice(0, 5), ["dot busy", "rail-head", "meta", "rail-role-line", "rail-cwd worktree"]);
   check("...ahead of the context gauge",
         kids.indexOf("rail-cwd worktree") < kids.indexOf("rail-ctx-line unknown"),
         true);
