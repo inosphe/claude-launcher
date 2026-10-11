@@ -3,9 +3,8 @@
 // field stays one row however narrow the bar is (its placeholder does not wrap
 // it open), and the field never shows a scrollbar for content it fits
 // (autogrowTermInput adds the border scrollHeight leaves out) (claunch-hmz62).
-// At rest the field is one row; clicked, it opens upward over the terminal
-// without changing the bar's height, and closes again on blur
-// (claunch-hmz62.2).
+// The whole composer grows in layout and stays expanded during internal
+// focus transfers, leaving preset/prompter buttons usable (claunch-z0h4f).
 const { chromium } = require('playwright');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -38,6 +37,7 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
       const note = document.getElementById('term-input-note');
       return {
         barH: box(form).height, barTop: box(form).top,
+        terminalH: box(document.getElementById("terminal")).height,
         field: { h: box(field).height, w: box(field).width, top: box(field).top, bottom: box(field).bottom,
                  overflow: field.scrollHeight > field.clientHeight },
         buttons: buttons.map(el => ({ id: el.id, h: box(el).height, bottom: box(el).bottom })),
@@ -52,8 +52,23 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
     // the screenshot in the issue showed.
     await page.evaluate(() => {
       const form = document.getElementById('term-input');
-      document.body.appendChild(form);
-      Object.assign(form.style, { position: 'fixed', left: '0', right: '0', bottom: '0' });
+      const host = document.createElement('div');
+      document.body.appendChild(host);
+      Object.assign(host.style, { position: 'fixed', inset: '0', display: 'flex', flexDirection: 'column' });
+      const terminal = document.getElementById('terminal');
+      terminal.classList.remove('hidden');
+      Object.assign(terminal.style, { flex: '1', minHeight: '0' });
+      host.append(terminal);
+      for (const id of ['term-preset-buttons', 'term-prompter-row']) {
+        const row = document.getElementById(id);
+        row.classList.remove('hidden');
+        const button = document.createElement('button');
+        button.type = 'button'; button.className = 'term-btn';
+        button.textContent = id; button.id = id + '-test';
+        button.addEventListener('click', () => insertPromptPreset('snippet'));
+        row.append(button); host.append(row);
+      }
+      host.append(form);
       form.classList.remove('hidden');
       const note = document.getElementById('term-input-note');
       note.textContent = 'this session has ended — a line sent now is queued and typed when the session is back';
@@ -96,6 +111,15 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
     // are three -- the field stays one row until it is clicked
     // (claunch-hmz62.2).
     await page.setViewportSize({ width: 1280, height: 600 });
+    await page.evaluate(() => {
+      railOpen = false;
+      term = new Terminal({ fontSize });
+      fitAddon = new FitAddon.FitAddon();
+      term.loadAddon(fitAddon);
+      term.open(document.getElementById('terminal'));
+      localFit();
+    });
+    const restRows = await page.evaluate(() => term.rows);
     const type = text => page.evaluate(value => {
       const field = document.getElementById('term-input-field');
       field.value = value;
@@ -112,64 +136,122 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
     assert.equal(await page.evaluate(() => getComputedStyle(document.getElementById('term-input-field')).overflowY),
       'hidden', 'a field at rest shows a scrollbar');
 
-    // Clicked: the field opens upward to its content, over the terminal; the
-    // bar keeps its height (the terminal above is not resized) and the
-    // buttons stay on the field's bottom edge.
+    // The composer takes real space from the terminal; every tool remains
+    // above the field and receives pointer hits at its visible position.
     await page.click('#term-input-field');
+    await page.waitForFunction(rows => term.rows < rows, restRows, { timeout: 5000 });
     const open = await measure();
     assert.ok(open.field.h > row + 30, `three lines did not open the field: ${open.field.h}px`);
     assert.equal(open.field.overflow, false, 'an opened three-line field overflows');
-    assert.equal(open.barH, rest.barH, `opening the field changed the bar height ${rest.barH} -> ${open.barH}`);
-    assert.ok(open.field.top < open.barTop, 'the opened field did not rise above the bar');
+    assert.ok(open.barH > rest.barH, 'opening did not grow the composer');
+    assert.ok(open.terminalH < rest.terminalH, 'opening did not reduce the terminal height');
+    assert.ok(open.field.top >= open.barTop, 'field extends outside the composer');
     for (const b of open.buttons) {
-      assert.ok(Math.abs(b.bottom - open.field.bottom) < 1, `${b.id} left the field's bottom edge`);
+      assert.ok(Math.abs(b.bottom - open.field.bottom) < 1, `${b.id} left the field bottom`);
     }
-    // What is on screen where the field rose is the field, over a layer
-    // standing in for xterm's (they stack up to z-index 10) inside the real
-    // #terminal, which holds them (isolation) -- and a page-wide overlay
-    // (#auth-overlay, z-index 10) still covers the field.
-    const hits = await page.evaluate(top => {
-      const form = document.getElementById('term-input');
-      const terminal = document.getElementById('terminal');
-      document.body.insertBefore(terminal, form);
-      // absolute, not fixed: a fixed box is a stacking context of its own and
-      // would hold the layer without the stylesheet's isolation
-      Object.assign(terminal.style, { position: 'absolute', left: '0', right: '0', top: '0',
-        height: `${form.getBoundingClientRect().top}px`, padding: '0' });
-      const layer = document.createElement('div');
-      Object.assign(layer.style, { position: 'absolute', inset: '0', zIndex: '10', background: '#123' });
-      terminal.appendChild(layer);
-      const field = document.getElementById('term-input-field');
-      const r = field.getBoundingClientRect();
-      const over = document.elementFromPoint(r.left + 20, top + 5) === field;
-      const auth = document.getElementById('auth-overlay');
-      auth.classList.remove('hidden');
-      const mid = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
-      const covered = mid !== field && auth.contains(mid);
-      auth.classList.add('hidden');
-      layer.remove();
-      return { over, covered };
-    }, open.field.top);
-    assert.equal(hits.over, true, 'the opened field is covered by the terminal');
-    assert.equal(hits.covered, true, 'the auth overlay does not cover the opened field');
+    for (const id of ['term-preset-buttons-test', 'term-prompter-row-test', 'term-input-send']) {
+      const hit = await page.locator('#' + id).evaluate(button => {
+        const r = button.getBoundingClientRect();
+        return button.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2));
+      });
+      assert.equal(hit, true, `${id} is covered`);
+      await page.focus('#' + id);
+      assert.equal((await measure()).barH, open.barH, `${id} focus collapsed the composer`);
+    }
+    for (const id of ['term-preset-buttons-test', 'term-prompter-row-test']) {
+      const before = await page.inputValue('#term-input-field');
+      await page.click('#' + id);
+      const after = await page.inputValue('#term-input-field');
+      assert.equal(after.length, before.length + 'snippet'.length);
+      assert.ok(after.includes('snippet'), `${id} did not insert its text`);
+      assert.ok((await measure()).field.h > row + 30, `${id} click collapsed the composer`);
+    }
+    // Tab within the input form also retains expansion, and a long draft
+    // remains scrollable when its adjacent controls have the keyboard.
+    await page.focus('#term-input-field');
+    await page.keyboard.press('Tab');
+    assert.ok((await measure()).field.h > row + 30, 'Tab collapsed the composer');
+    await page.focus('#term-input-field');
 
     // Clicked while empty: three lines of room to type in.
     await type('');
     const openEmpty = await measure();
     assert.ok(openEmpty.field.h > row + 30, `an empty clicked field stayed ${openEmpty.field.h}px`);
-    assert.equal(openEmpty.barH, rest.barH, 'an empty opened field changed the bar height');
+    assert.ok(openEmpty.barH > rest.barH, 'an empty opened field did not grow the bar');
 
     // Many lines: capped at 30vh, the rest scrolls.
     await type(Array.from({ length: 40 }, (_, i) => `line ${i}`).join('\n'));
     const tall = await measure();
     assert.ok(tall.field.h <= 600 * 0.3 + 1, `the field passed its ceiling: ${tall.field.h}px`);
 
-    // Blurred: back to one row, its margin cleared.
+    await page.focus('#term-prompter-row-test');
+    assert.equal(await page.locator('#term-input-field').evaluate(el => getComputedStyle(el).overflowY), 'auto');
+    assert.equal((await measure()).field.h, tall.field.h, 'tool focus collapsed a long draft');
+
+    // Focus outside the composer restores terminal space.
+    await page.evaluate(() => {
+      const terminal = document.getElementById('terminal');
+      terminal.tabIndex = 0; terminal.focus();
+    });
     await page.evaluate(() => document.getElementById('term-input-field').blur());
     const back = await measure();
     assert.ok(Math.abs(back.field.h - row) < 1, `blur left the field at ${back.field.h}px`);
     assert.equal(await page.evaluate(() => document.getElementById('term-input-field').style.marginTop), '');
-    assert.equal(back.barH, rest.barH, 'blur changed the bar height');
+    assert.equal(back.barH, rest.barH, 'leaving did not restore the bar height');
+    assert.equal(back.terminalH, rest.terminalH, 'leaving did not restore terminal space');
+    await page.waitForFunction(() => term.rows === fitAddon.proposeDimensions().rows, null, { timeout: 5000 });
+
+    // A narrow viewport still leaves both snippet rows and send reachable.
+    for (const width of [760, 520, 380]) {
+      await page.setViewportSize({ width, height: 600 });
+      await page.focus('#term-input-field');
+      const narrow = await measure();
+      assert.ok(narrow.field.h <= 181, `${width}px: draft exceeded 30vh`);
+      assert.ok(narrow.bar.scroll <= narrow.bar.client, `${width}px: expanded bar overflows`);
+      for (const id of ['term-preset-buttons-test', 'term-prompter-row-test', 'term-input-send']) {
+        assert.equal(await page.locator('#' + id).evaluate(button => {
+          const r = button.getBoundingClientRect();
+          return button.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2));
+        }), true, `${width}px: ${id} covered`);
+        await page.focus('#' + id);
+        assert.equal((await measure()).field.h, narrow.field.h, `${width}px: tool focus collapsed draft`);
+      }
+      await page.focus('#terminal');
+      const closed = await measure();
+      assert.ok(Math.abs(closed.field.h - closed.buttons[0].h) < 1, `${width}px: leaving did not collapse`);
+    }
+
+    // Use the real prompter renderer: More/Less must preserve the focused
+    // toggle and the draft, while xterm follows the changing snippet row.
+    await page.setViewportSize({ width: 1280, height: 600 });
+    await page.evaluate(() => {
+      currentName = 'composer-fixture'; currentPage = 'terminal'; sessionEnded = false;
+      prompterExpanded = false;
+      prompterState = { connected: true, prompts: Array.from({ length: 20 }, (_, i) => ({
+        name: `Prompt ${i} with a long title`, body: `snippet ${i}`,
+      })) };
+      renderTermPrompterRow();
+    });
+    await page.focus('#term-input-field');
+    await page.waitForFunction(() => term.rows === fitAddon.proposeDimensions().rows, null, { timeout: 5000 });
+    const beforeToggle = await measure();
+    const draft = await page.inputValue('#term-input-field');
+    const toggle = page.locator('.term-prompter-toggle');
+    await toggle.click();
+    assert.equal(await toggle.getAttribute('aria-expanded'), 'true');
+    assert.equal(await toggle.evaluate(el => el === document.activeElement), true, 'More lost focus');
+    assert.equal((await measure()).field.h, beforeToggle.field.h, 'More collapsed the draft');
+    assert.ok((await measure()).terminalH < beforeToggle.terminalH, 'More did not change terminal space');
+    await page.waitForFunction(() => term.rows === fitAddon.proposeDimensions().rows, null, { timeout: 5000 });
+    await toggle.click();
+    assert.equal(await toggle.getAttribute('aria-expanded'), 'false');
+    assert.equal(await toggle.evaluate(el => el === document.activeElement), true, 'Less lost focus');
+    assert.equal((await measure()).field.h, beforeToggle.field.h, 'Less collapsed the draft');
+    assert.equal((await measure()).terminalH, beforeToggle.terminalH, 'Less did not restore terminal space');
+    assert.equal(await page.inputValue('#term-input-field'), draft, 'toggle changed the draft');
+    await page.waitForFunction(() => term.rows === fitAddon.proposeDimensions().rows, null, { timeout: 5000 });
+    await page.focus('#terminal');
+    assert.ok(Math.abs((await measure()).field.h - row) < 1, 'leaving prompter did not collapse');
 
     assert.deepEqual(errors, []);
     console.log('terminputlayout_browser: ok');
