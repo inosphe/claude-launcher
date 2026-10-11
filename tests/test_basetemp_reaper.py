@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -147,6 +148,26 @@ def test_a_directory_that_cannot_be_removed_is_skipped_and_recorded(tmp_path, mo
     assert rows["s995c1011010955"]["locked"]
     assert rows["s995c1011020000"]["outcome"] == "removed"
     assert locked.is_dir()
+
+
+def test_read_only_files_are_removed(tmp_path):
+    # git writes .git/objects read-only; Windows' os.unlink refuses those
+    # until the bit is cleared (claunch-4zc51.3: 1129 such files kept two
+    # deployed-daemon basetemps "locked" on every pass).
+    root = tmp_path / "t"
+    tree = _run_tree(root, "s995c1011010955")
+    obj = tree / "popen-gw0" / "test_x0" / "repo" / ".git" / "objects" / "03"
+    obj.mkdir(parents=True)
+    for name in ("e0bec8", "1d0413"):
+        (obj / name).write_bytes(b"blob")
+        os.chmod(obj / name, stat.S_IREAD)
+
+    _reaper(tmp_path, [("s995", True)]).session_exited(_session("s995"))
+
+    assert not tree.exists()
+    [row] = _rows(tmp_path)
+    assert row["outcome"] == "removed"
+    assert "locked" not in row
 
 
 # ---- the boot pass ---------------------------------------------------------- #

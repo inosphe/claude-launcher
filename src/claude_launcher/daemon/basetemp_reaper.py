@@ -49,6 +49,7 @@ import os
 import re
 import shutil
 import sqlite3
+import stat
 import sys
 import threading
 import time
@@ -195,6 +196,25 @@ def _iso(ts: float) -> str:
     return datetime.fromtimestamp(ts, timezone.utc).isoformat(timespec="seconds")
 
 
+def _retry_writable(failed: List[str]) -> Callable:
+    """An rmtree error handler: clear the read-only bit, try once more.
+
+    git writes ``.git/objects`` files read-only, and on Windows
+    ``os.unlink`` refuses a read-only file (WinError 5) -- every test that
+    builds a repository leaves such files, so without the retry a basetemp
+    full of them stayed behind as "locked" on every pass (claunch-4zc51.3).
+    Whatever still fails after the retry is recorded in ``failed``. Fits
+    both ``onexc`` and ``onerror``: the third argument is not read.
+    """
+    def handle(func, path, _exc) -> None:
+        try:
+            os.chmod(path, stat.S_IWRITE)
+            func(path)
+        except OSError:
+            failed.append(path)
+    return handle
+
+
 class BasetempReaper:
     """Deletes ended sessions' basetemps and keeps one line per deletion.
 
@@ -285,13 +305,15 @@ class BasetempReaper:
         row = {"session": session, "path": path.as_posix(), **describe(path)}
         row["reaped_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         failed: List[str] = []
+        handler = _retry_writable(failed)
         if sys.version_info >= (3, 12):
-            shutil.rmtree(path, onexc=lambda _f, p, _e: failed.append(p))
+            shutil.rmtree(path, onexc=handler)
         else:
-            shutil.rmtree(path, onerror=lambda _f, p, _e: failed.append(p))
+            shutil.rmtree(path, onerror=handler)
         if path.exists():
-            # A file another process still holds open (Windows refuses to
-            # delete it). Left for the next ending or boot, and said so.
+            # A file another process still holds open: Windows refuses to
+            # delete it even once it is writable. Left for the next ending
+            # or boot, and said so.
             row["outcome"] = "locked"
             row["locked"] = [Path(p).as_posix() for p in failed[:5]]
             log.warning("basetemp %s: %d entries could not be removed", path, len(failed))
