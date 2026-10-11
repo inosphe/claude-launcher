@@ -591,14 +591,26 @@ def test_restart_commands_outside_the_allowlist_are_refused():
         assert ir.restart_refusal(cmd) is None, cmd
 
 
-def test_a_snapshot_with_a_refused_command_is_not_run(tmp_path):
+@pytest.mark.parametrize("storage", ["legacy", "checkpoint"])
+def test_a_snapshot_with_a_refused_command_is_not_run(tmp_path, storage):
+    from claude_launcher.cflow2 import checkpoint
+
     st = _start(tmp_path, "nodes:\n  r: {prompt: R, restart: {linux: tools/restart_live.sh}}\n"
                           "body: r\n")
     store = runtime.RunStore(str(tmp_path), "own")
     chart = json.loads(store.chart_path.read_text())
     node = next(n for n in chart["nodes"].values() if n.get("restart"))
     node["restart"]["linux"] = "claunch daemon stop"
-    store.chart_path.write_text(json.dumps(chart))
+    text = json.dumps(chart)
+    if storage == "legacy":
+        store.checkpoint_path.unlink()
+        store.chart_path.write_text(text)
+    else:
+        # Exercise the runtime allowlist even with a well-formed, checksummed
+        # persisted definition that predates the command's refusal.
+        with checkpoint.connect(store.checkpoint_path) as db:
+            db.execute("UPDATE definition SET body=?,sha=? WHERE id=1",
+                       (text, checkpoint.digest(text)))
     acts = runtime.claim_restarts(platform="Linux", boot="b", **_kw(tmp_path))
     assert [a["kind"] for a in acts] == ["refused"]
     assert "refused" in cflow2_clock.restart_block(acts[0])

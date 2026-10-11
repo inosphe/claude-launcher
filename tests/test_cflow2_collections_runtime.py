@@ -522,6 +522,7 @@ def test_nested_delegation_run_holds_no_collections(tmp_path):
 
 def test_acting_session_of_a_nested_run(tmp_path):
     parent = RunStore(str(tmp_path), "p")
+    parent.write_chart(_chart(TWO))
     parent.save_state({"delegations": {"d1": {"executor": "session", "assignee": None,
                                               "child": "kid", "status": "running"}}})
     link = {"cwd": str(tmp_path), "scope": "p", "delegation": "d1"}
@@ -556,6 +557,10 @@ def test_mcp_flow_collection(tmp_path, monkeypatch):
 
 def _cli(cwd, *args, session=None):
     env = dict(os.environ)
+    # A subprocess does not inherit pytest's pythonpath setting. Test this
+    # checkout, including its storage format, rather than an editable install.
+    from pathlib import Path
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
     env.pop("CLAUNCH_SESSION", None)
     if session:
         env["CLAUNCH_SESSION"] = session

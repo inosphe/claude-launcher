@@ -301,6 +301,8 @@ def route(*, cwd: Optional[str] = None, scope: Optional[str] = None,
     snap = runtime.Run.load(st, now)
     if snap.status not in runtime.LIVE_STATUSES:
         return []
+    if "storage-recovery" in runtime._halted(snap):
+        return []
     todo = runtime.asks_to_route(snap)
     if not todo:
         return []

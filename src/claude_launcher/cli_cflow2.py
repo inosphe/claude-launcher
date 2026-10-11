@@ -387,6 +387,18 @@ def _cmd_abort(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_recover(args: argparse.Namespace) -> int:
+    from .cflow2 import store
+
+    if args.apply and os.environ.get(store.SESSION_ENV):
+        raise store.StoreError("recovery --apply is an operator action; run it outside an agent "
+                               "session after inspecting the checkpoint and external effects")
+    result = store.RunStore(os.getcwd(), args.scope).recovery(
+        apply=args.apply, expected=args.revision)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
 def _cmd_archive(args: argparse.Namespace) -> int:
     from .cflow2 import runtime
 
@@ -760,6 +772,12 @@ def register(sub) -> None:
     q = scoped(csub.add_parser("status", help="the v2 run here"))
     q.add_argument("--json", action="store_true")
     q.set_defaults(func=_guarded(_cmd_status))
+
+    q = scoped(csub.add_parser("recover", help="inspect the durable checkpoint; optionally "
+                               "preserve damaged files, restore projections and halt the run"))
+    q.add_argument("--apply", action="store_true", help="operator-only: apply the inspected revision")
+    q.add_argument("--revision", type=int, help="revision returned by the inspection")
+    q.set_defaults(func=_guarded(_cmd_recover))
 
     q = scoped(csub.add_parser("journal", help="the run's event log"))
     q.add_argument("-n", type=int, default=None, help="last N events")

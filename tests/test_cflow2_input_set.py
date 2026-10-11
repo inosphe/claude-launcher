@@ -204,6 +204,8 @@ def test_mcp_flow_input(tmp_path, monkeypatch):
 
 def _cli(cwd, *args, session=None):
     env = dict(os.environ)
+    from pathlib import Path
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
     env.pop("CLAUNCH_SESSION", None)
     if session:
         env["CLAUNCH_SESSION"] = session

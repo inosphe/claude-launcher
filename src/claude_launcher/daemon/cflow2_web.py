@@ -864,7 +864,7 @@ _RAIL: Dict[Tuple[str, str], Tuple[Any, Optional[dict]]] = {}
 def _rail_stamp(cwd: str, scope: str) -> Any:
     st = store2.RunStore(cwd, scope)
     out = []
-    for path in (st.state_path, st.chart_path):
+    for path in (st.state_path, st.chart_path, st.checkpoint_path):
         try:
             info = path.stat()
         except OSError:

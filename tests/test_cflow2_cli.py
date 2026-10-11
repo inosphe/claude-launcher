@@ -94,6 +94,25 @@ def test_start_status_journal_abort(project, capsys):
     assert "aborted" in capsys.readouterr().out
 
 
+def test_recover_inspect_apply_and_agent_guard(project, capsys, monkeypatch):
+    from claude_launcher.cflow2.store import RunStore
+
+    assert run("start", "demo-cli", "--scope", "s1") == 0
+    capsys.readouterr()
+    st = RunStore(str(project), "s1")
+    st.state_path.write_bytes(b"\0" * 100)
+    assert run("recover", "--scope", "s1") == 0
+    preview = json.loads(capsys.readouterr().out)
+    assert "state.json" in preview["differences"]
+    revision = str(preview["revision"])
+    monkeypatch.setenv("CLAUNCH_SESSION", "agent")
+    assert run("recover", "--scope", "s1", "--apply", "--revision", revision) == 1
+    assert "operator action" in capsys.readouterr().err
+    monkeypatch.delenv("CLAUNCH_SESSION")
+    assert run("recover", "--scope", "s1", "--apply", "--revision", revision) == 0
+    assert json.loads(capsys.readouterr().out)["halted"] == "storage-recovery"
+
+
 COLDEF = textwrap.dedent("""
     cflow: 2
     name: demo-col
