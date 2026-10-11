@@ -2372,6 +2372,76 @@ def test_no_active_issue_means_the_kill_is_immediate_and_the_setting_turns_it_of
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("operation", ["redefine", "migrate"])
+@pytest.mark.parametrize("outcome", ["success", "launch-failure", "cancelled"])
+def test_session_restart_preserves_work_unless_it_fails(
+    home, tmp_path, repo, monkeypatch, operation, outcome,
+):
+    _register_py_harness()
+    br = FakeBr()
+    br.add(id="w", assignee="w1", status="in_progress")
+    br.add(id="followup", created_by="w1", status="open")
+    br.add(id="other", assignee="w2", status="in_progress")
+    board = _board(br, repo)
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mgr.exit_hooks.append(board.session_exited)
+        endings = []
+        mgr.exit_hooks.append(lambda session: endings.append(session.sdef.name))
+        old = mgr.create(_sdef("w1", repo))
+        other = mgr.create(_sdef("w2", repo))
+        shutdown = old.shutdown
+
+        async def stop():
+            await shutdown()
+            # Unrelated sessions must still be cleaned up during the restart.
+            await other.shutdown()
+            await asyncio.gather(*list(board._tasks))
+            assert br.issues["other"]["status"] == "open"
+            assert br.issues["w"]["status"] == "in_progress"
+            assert not br.comments.get("followup")
+            if outcome == "cancelled":
+                raise asyncio.CancelledError()
+
+        monkeypatch.setattr(old, "shutdown", stop)
+        if outcome == "launch-failure":
+            def fail(*args, **kwargs):
+                raise RuntimeError("restart failed")
+            monkeypatch.setattr(mgr, "create", fail)
+        target = tmp_path / "moved"
+        target.mkdir()
+        try:
+            async def restart():
+                if operation == "migrate":
+                    return (await mgr.migrate("w1", str(target)))[0]
+                return await mgr.redefine("w1", env={"RESTART_TEST": "1"})
+
+            if outcome == "success":
+                new = await restart()
+                await asyncio.gather(*list(board._tasks))
+                assert br.issues["w"]["status"] == "in_progress"
+                assert not br.comments.get("followup")
+                assert endings == ["w2"]
+                # The replacement's subsequent real exit still releases work.
+                await new.shutdown()
+            else:
+                error = RuntimeError if outcome == "launch-failure" else asyncio.CancelledError
+                with pytest.raises(error):
+                    await restart()
+                assert mgr.get("w1") is old and old.exited
+            await asyncio.gather(*list(board._tasks))
+            assert br.issues["w"]["status"] == "open"
+            assert endings == ["w2", "w1"]
+            assert len(br.comments["w"]) == 1
+            assert len(br.comments["followup"]) == 1
+        finally:
+            await mgr.shutdown_all()
+            await board.cancel_all()
+
+    asyncio.run(run())
+
+
 def test_a_daemon_shutdown_is_not_an_exit_and_sweeps_nothing(home, tmp_path, repo):
     _register_py_harness()
     br = FakeBr()
