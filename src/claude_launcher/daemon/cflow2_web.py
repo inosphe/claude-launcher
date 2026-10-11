@@ -550,7 +550,12 @@ def run_detail(cwd: str, scope: str, prompts: bool = False) -> dict:
         # Which nodes have a live instance (the active configuration and its
         # ancestors), and which of those wait on the outside.
         "instances": [
-            {"instance": iid, "node": rec.get("node"), "await": rec.get("await")}
+            {"instance": iid, "node": rec.get("node"), "await": rec.get("await"),
+             "parent": rec.get("parent"), "role": rec.get("role"),
+             "frame": _plain(rec.get("frame") or {}),
+             "returns": runtime.returns_of(chart.node(rec["node"])),
+             "can_step_out": rec.get("parent") is not None and chart.node(rec["node"]).type
+             not in (ir.T_TASK, ir.T_WAIT, ir.T_CONTROL)}
             for iid, rec in sorted(inst.items())
         ],
         "visits": state.get("visits") or {},

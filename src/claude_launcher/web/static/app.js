@@ -18947,6 +18947,7 @@ MOBILE_MQ.addEventListener("change", () => {
 let wfCwd = null;
 let wfScope = "default";
 let wfPollTimer = null;
+let wfRefreshRequest = 0;
 let wfSelectedStep = null; // node picked in the diagram (null = show all)
 let wfLastData = null;     // last payload, for instant re-render on selection
 
@@ -19059,12 +19060,15 @@ async function openWorkflow(cwd, scope) {
 
 async function refreshWf() {
   if (!wfCwd) return;
+  const cwd = wfCwd, scope = wfScope;
+  const request = ++wfRefreshRequest;
   let data;
   try {
     const resp = await api(
       `/api/cflow/run?cwd=${encodeURIComponent(wfCwd)}&scope=${encodeURIComponent(wfScope)}`
     );
     data = await resp.json();
+    if (wfCwd !== cwd || wfScope !== scope || request !== wfRefreshRequest) return;
     if (!resp.ok) {
       $("wf-view").innerHTML = "";
       $("wf-view").appendChild(el("p", "wf-warning", data.error || "cannot load run"));
@@ -19073,10 +19077,10 @@ async function refreshWf() {
   } catch {
     return;
   }
+  if (wfCwd !== cwd || wfScope !== scope || request !== wfRefreshRequest) return;
   if (data.status === "idle" && data.v2) {
-    const cwd = wfCwd;
-    const v2 = await fetchCflow2Run(cwd, wfScope);
-    if (!v2 || wfCwd !== cwd) return;
+    const v2 = await fetchCflow2Run(cwd, scope);
+    if (!v2 || wfCwd !== cwd || wfScope !== scope || request !== wfRefreshRequest) return;
     if (v2.error) {
       $("wf-view").innerHTML = "";
       $("wf-view").appendChild(el("p", "wf-warning", v2.error));
@@ -30969,13 +30973,131 @@ function cflow2LayoutControls(root, cols, main, chart, host) {
   return group;
 }
 
-function renderCflow2Into(box, data, ui) {
+function cflow2StackRows(data) {
+  const nodes = (data.chart || {}).nodes || {};
+  const instances = data.instances || [];
+  const ids = new Set(instances.map((i) => i.instance));
+  const rows = [], seen = new Set();
+  const walk = (i, depth) => {
+    if (seen.has(i.instance)) return;
+    seen.add(i.instance);
+    rows.push({ ...i, depth, definition: nodes[i.node] || {} });
+    for (const child of instances) if (child.parent === i.instance) walk(child, depth + 1);
+  };
+  for (const i of instances) if (!ids.has(i.parent)) walk(i, 0);
+  return rows;
+}
+
+function cflow2Callstack(data, post, live) {
+  const rows = cflow2StackRows(data);
+  const sec = cf2Section("Callstack", rows.length);
+  sec.classList.add("cf2-callstack");
+  sec.appendChild(el("p", "wf-note", "Rollback re-enters a marked frame. Step out cancels its remaining work " +
+    "and returns the chosen outcome to its parent. Existing data and external changes remain."));
+  if (!rows.length) sec.appendChild(el("p", "wf-note", "No live frames."));
+  for (const row of rows) {
+    const n = row.definition;
+    const card = el("div", "cf2-stack-frame");
+    card.dataset.instance = row.instance;
+    card.style.marginLeft = `${Math.min(row.depth, 12) * 12}px`;
+    card.appendChild(el("div", "mono", `${n.type || "frame"} · ${n.label || row.node} · ${row.instance}`));
+    card.appendChild(el("div", "wf-note", `${row.await || "running"}` +
+      (row.role ? ` · ${row.role}` : "") + (row.parent ? ` · parent ${row.parent}` : " · root")));
+    const state = document.createElement("details");
+    state.dataset.cf2Key = `frame:${row.instance}`;
+    state.appendChild(el("summary", null, "Frame state"));
+    state.appendChild(el("pre", "mono", JSON.stringify(row.frame || {}, null, 2)));
+    card.appendChild(state);
+    if (live && (row.can_step_out || n.force_target)) {
+      const actions = el("div", "cf2-press");
+      if (n.force_target) {
+        const rollback = el("button", "wf-btn sm", "Rollback");
+        rollback.title = "cancel work below this marked node and enter it again";
+        rollback.addEventListener("click", async () => {
+          if (!confirm(`Re-enter '${n.label || row.node}'?\n\nOpen work below it is cancelled. ` +
+            "Existing data and external changes remain.")) return;
+          rollback.disabled = true;
+          try { await post("/api/cflow2/move", { node: row.node, reason: "rollback from callstack" }); }
+          finally { rollback.disabled = false; }
+        });
+        actions.appendChild(rollback);
+      }
+      if (row.can_step_out) {
+        const outcomes = cflow2ForceOutcomes(row);
+        const pick = el("select", "cf2-select");
+        pick.setAttribute("aria-label", `Step out outcome for ${row.instance}`);
+        for (const o of outcomes) {
+          const opt = el("option", null, o.name);
+          opt.value = o.name;
+          pick.appendChild(opt);
+        }
+        const release = el("button", "wf-btn sm force", "Step out");
+        release.title = "release this frame and continue its parent with the selected outcome";
+        release.addEventListener("click", async () => {
+          const o = outcomes.find((v) => v.name === pick.value);
+          if (!o) return;
+          let value = null;
+          if (o.required.length) {
+            const raw = prompt(`Return fields for '${o.name}' (JSON):`,
+              JSON.stringify(Object.fromEntries(o.required.map((f) => [f, ""]))));
+            if (raw === null) return;
+            try { value = JSON.parse(raw); } catch { alert("not valid JSON"); return; }
+          }
+          if (!confirm(`Release '${n.label || row.node}' with '${o.name}'?\n\n` +
+            "Its remaining work is cancelled; its parent continues with this result. " +
+            "Existing data and external changes remain.")) return;
+          release.disabled = true;
+          try { await post("/api/cflow2/step-out", { instance: row.instance, outcome: o.name,
+            run: data.run.run, value, reason: "step out from callstack" }); }
+          finally { release.disabled = false; }
+        });
+        actions.append(pick, release);
+      }
+      card.appendChild(actions);
+    }
+    sec.appendChild(card);
+  }
+  return sec;
+}
+
+function captureCflow2View(box) {
+  const scrolls = [];
+  for (let node = box; node; node = node.parentElement) {
+    scrolls.push([node, node.scrollTop, node.scrollLeft]);
+  }
+  const inner = [".cf2-tree", ".cf2-pane-body", ".cf2-col-main", ".cf2-col-chart"]
+    .map((selector) => {
+      const node = box.querySelector(selector);
+      return node ? [selector, node.scrollTop, node.scrollLeft] : null;
+    }).filter(Boolean);
+  const opened = Array.from(box.querySelectorAll("details[data-cf2-key], details.cf2-journal"))
+    .filter((n) => n.open).map((n) => n.dataset.cf2Key || "journal");
+  return () => {
+    for (const node of box.querySelectorAll("details[data-cf2-key], details.cf2-journal")) {
+      node.open = opened.includes(node.dataset.cf2Key || "journal");
+    }
+    for (const [selector, top, left] of inner) {
+      const node = box.querySelector(selector);
+      if (node) { node.scrollTop = top; node.scrollLeft = left; }
+    }
+    for (const [node, top, left] of scrolls) { node.scrollTop = top; node.scrollLeft = left; }
+  };
+}
+
+function renderCflow2Into(box, data, ui, force = false) {
   ui = ui || {};
   // A hand is in a box on this view (a reason being typed, an outcome being
   // picked): leave it; the next poll redraws once focus moves on.
   const act = document.activeElement;
   if (act && act !== document.body && box.contains(act) &&
       act.matches("input, textarea, select")) return;
+  const signature = JSON.stringify(data);
+  if (!force && box._cf2Signature === signature && box.querySelector(".cf2")) return;
+  const identity = JSON.stringify([data.cwd, data.scope, (data.run || {}).run]);
+  const restore = box._cf2Identity === identity ? captureCflow2View(box) : () => {};
+  box._cf2Identity = identity;
+  box._cf2Signature = signature;
+  box._cf2Data = data;
   box.innerHTML = "";
   const run = data.run || {};
   if (!data.run || data.status === "idle") {
@@ -30984,6 +31106,7 @@ function renderCflow2Into(box, data, ui) {
   }
   const host = ui.host || "page";
   const post = async (path, body) => {
+    box._cf2Signature = null;
     const doc = await cflowPost(path, { cwd: data.cwd, scope: data.scope, ...body });
     if (doc && ui.after) ui.after();
     return doc;
@@ -31096,6 +31219,7 @@ function renderCflow2Into(box, data, ui) {
   cols.append(main, side);
   if (data.chart) root.appendChild(cflow2LayoutControls(root, cols, main, side, host));
   root.appendChild(cols);
+  main.appendChild(cflow2Callstack(data, post, live));
 
   // -- waiting on a person: choices, questions, limits ----------------------
   const yours = cf2Section("Waiting on you");
@@ -31319,7 +31443,23 @@ function renderCflow2Into(box, data, ui) {
     tools.appendChild(el("span", "wf-note", marked
       ? `${marked} node(s) marked ⇥ can be moved to — click one`
       : "no node is marked force_target"));
-    const redraw = () => renderCflow2Into(box, data, ui);
+    const redraw = () => renderCflow2Into(box, box._cf2Data, ui, true);
+    const current = el("button", "wf-btn sm", "Current state");
+    current.disabled = !(data.instances || []).length;
+    current.title = "expand and scroll to the current execution state";
+    current.addEventListener("click", () => {
+      const rows = cflow2TreeRows(data.chart, data);
+      const active = rows.filter((r) => r.awaiting);
+      const target = active[0] || rows.filter((r) => r.active).at(-1);
+      if (!target) return;
+      const parents = Object.fromEntries(rows.map((r) => [r.id, r.parent]));
+      const opened = { ...(cf2Open[host] || {}) };
+      for (let p = parents[target.id]; p; p = parents[p]) opened[p] = true;
+      cf2Open[host] = opened;
+      redraw();
+      const row = Array.from(box.querySelectorAll(".cf2-row")).find((r) => r.dataset.node === target.id);
+      if (row) row.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
+    });
     const expand = el("button", "wf-btn sm clear", "Expand all");
     expand.addEventListener("click", () => {
       cf2Open[host] = Object.fromEntries(Object.keys(nodes).map((id) => [id, true]));
@@ -31328,22 +31468,30 @@ function renderCflow2Into(box, data, ui) {
     const fold = el("button", "wf-btn sm clear", "Collapse");
     fold.title = "back to the run's position only";
     fold.addEventListener("click", () => { cf2Open[host] = {}; redraw(); });
-    tools.append(expand, fold);
+    tools.append(current, expand, fold);
     sec.appendChild(tools);
     let sel = cf2Selected[host] || null;
     if (sel && !nodes[sel]) sel = cf2Selected[host] = null;
-    cflow2TreeInto(sec, data.chart, data, {
-      selected: sel,
-      open: cf2Open[host] || {},
-      onSelect: (id) => {
-        cf2Selected[host] = cf2Selected[host] === id ? null : id;  // again = clear
-        redraw();
-      },
-      onToggle: (id, on) => {
-        cf2Open[host] = { ...(cf2Open[host] || {}), [id]: on };
-        redraw();
-      },
-    });
+    const treeSignature = JSON.stringify([identity, data.chart, data.visits,
+      (data.instances || []).map((i) => [i.node, i.await]), sel, cf2Open[host]]);
+    if (box._cf2TreeSignature === treeSignature && box._cf2Tree) {
+      sec.appendChild(box._cf2Tree);
+    } else {
+      cflow2TreeInto(sec, data.chart, data, {
+        selected: sel,
+        open: cf2Open[host] || {},
+        onSelect: (id) => {
+          cf2Selected[host] = cf2Selected[host] === id ? null : id;  // again = clear
+          redraw();
+        },
+        onToggle: (id, on) => {
+          cf2Open[host] = { ...(cf2Open[host] || {}), [id]: on };
+          redraw();
+        },
+      });
+      box._cf2Tree = sec.querySelector(".cf2-tree");
+      box._cf2TreeSignature = treeSignature;
+    }
     side.appendChild(sec);
     if (sel) {
       const close = () => { cf2Selected[host] = null; redraw(); };
@@ -31416,6 +31564,7 @@ function renderCflow2Into(box, data, ui) {
   }
   journal.appendChild(grid);
   main.appendChild(journal);
+  restore();
 }
 
 /* One collection of a v2 run (docs/cflow-v2.md 2.7) as rows: key, status

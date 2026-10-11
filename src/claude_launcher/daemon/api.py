@@ -671,6 +671,7 @@ def build_app(
     r.add_post("/api/cflow2/archive", h_cflow2_archive)
     r.add_post("/api/cflow2/report", h_cflow2_report)
     r.add_post("/api/cflow2/move", h_cflow2_move)
+    r.add_post("/api/cflow2/step-out", h_cflow2_step_out)
     r.add_post("/api/cflow2/move/resolve", h_cflow2_move_resolve)
     r.add_get("/api/cflow2/asks", h_cflow2_asks)
     r.add_post("/api/cflow2/collection", h_cflow2_collection)
@@ -4972,6 +4973,29 @@ async def h_cflow2_move(request: web.Request) -> web.Response:
     reason = str(body.get("reason") or "").strip() or None
     payload = await asyncio.to_thread(
         cflow2_runtime.force_move, target, reason, cwd=cwd, scope=scope,
+    )
+    payload["nudge_scheduled_sessions"] = await _nudge_sessions(
+        request.app["manager"], cwd, scope, NUDGE_CFLOW2_FORCED
+    )
+    return json_response(payload)
+
+
+async def h_cflow2_step_out(request: web.Request) -> web.Response:
+    """Release an exact live container frame and continue its parent (user UI)."""
+    resolved, err = await _cflow_action_cwd(request)
+    if err:
+        return err
+    cwd, scope, body = resolved
+    instance = body.get("instance")
+    if not isinstance(instance, str) or not instance:
+        return json_error(400, "'instance' required in the JSON body")
+    run = body.get("run")
+    if not isinstance(run, str) or not run:
+        return json_error(400, "'run' required in the JSON body")
+    payload = await asyncio.to_thread(
+        cflow2_runtime.step_out, instance, body.get("outcome", "ok"), body.get("value"),
+        str(body.get("reason") or "").strip(), cwd=cwd, scope=scope,
+        expected_run=run,
     )
     payload["nudge_scheduled_sessions"] = await _nudge_sessions(
         request.app["manager"], cwd, scope, NUDGE_CFLOW2_FORCED

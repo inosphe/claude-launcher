@@ -1365,6 +1365,11 @@ def _forget(r: Run, iid: str) -> None:
     (responders that still had the question are told). Status and reason are
     recomputed from what holds remain."""
     r.inst.pop(iid, None)
+    _release_holds(r, iid)
+
+
+def _release_holds(r: Run, iid: str) -> None:
+    """Cancel a frame's external work and approvals, retaining the frame itself."""
     for d in r.state.get("delegations", {}).values():
         if d.get("instance") == iid and d.get("status") in OPEN_DELEGATION + ("verifying",):
             d["status"] = "cancelled"
@@ -3888,6 +3893,55 @@ def _move_run(r: Run, target: str, reason: Optional[str], by: str, moved: Dict[s
         parent = iid
     _enter(r, tid, parent, (path[-1][1] or {}).get("role", ""), env)
 
+
+
+def step_out(instance: str, outcome: str = ir.OUTCOME_OK, value: Any = None,
+             reason: Optional[str] = None, *, by: str = CALLER_USER,
+             expected_run: Optional[str] = None,
+             cwd: Optional[str] = None, scope: Optional[str] = None,
+             now: Optional[float] = None) -> Dict[str, Any]:
+    """Release one live container and return to its parent, as a user override.
+
+    Unlike force_move (re-entry), this cancels the remaining subtree and
+    delivers a result to the caller. Existing data and external effects stay.
+    An exact instance id prevents a stale page from releasing a later visit.
+    """
+    def op(r: Run) -> None:
+        _require_progress(r)
+        if by != CALLER_USER:
+            raise FlowError("step out is a user operation")
+        if expected_run is not None and r.state.get("run_id") != expected_run:
+            raise FlowError("run changed; refresh the callstack")
+        inst = r.inst.get(instance)
+        if inst is None:
+            raise FlowError(f"no live frame {instance!r}; refresh the callstack")
+        node = r.node_of(instance)
+        if inst.get("parent") is None or node.type in (ir.T_TASK, ir.T_WAIT, ir.T_CONTROL):
+            raise FlowError("step out requires a non-root container frame")
+        result = fill_optional(returns_of(node), outcome, value)
+        errors = validate_result(returns_of(node), outcome, result,
+                                 qtypes=(r.chart.meta or {}).get("question_types") or {},
+                                 params=r.env(instance).get("params"))
+        if errors:
+            raise FlowError("step out refused: " + "; ".join(errors))
+        pending = pending_move(r.state)
+        if pending:
+            r.emit("move_superseded", request=pending.get("id"), node=pending.get("node"),
+                   stepped_out=instance, by=by)
+        r.state.pop(MOVE_REQUEST, None)
+        r.emit("stepped_out", instance=instance, node=node.id, parent=inst["parent"],
+               outcome=outcome, value=result, reason=reason or None, by=by)
+        inst["await"] = None
+        _release_holds(r, instance)
+        _cancel_children(r, instance, "step_out")
+        # A selected try still runs its finally body, just as a return does.
+        if node.type == ir.T_TRY and inst["frame"].get("phase") != "finally":
+            _try_finally(r, instance, outcome, result)
+        else:
+            _complete(r, instance, outcome, result)
+
+    _mutate(cwd, scope, now, op)
+    return status(cwd=cwd, scope=scope, now=now, tick=False)
 
 
 def pending_move(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
