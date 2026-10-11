@@ -17,6 +17,7 @@ class FakeSession:
     def __init__(self, name, cwd, project="proj"):
         self.sdef = SimpleNamespace(name=name, cwd=cwd, project=project)
         self.exited = False
+        self.held_at = None
         self.delivered = []
 
     def queue_delivery(self, text):
@@ -112,6 +113,15 @@ def test_user_creates_for_a_session_and_answers(tmp_path):
         assert ans["nudged"] and "stays open" in s2.delivered[-1]
         n = await req("POST", f"/api/sims/{sid}/nudge", {"text": "look at the lock too"})
         assert n["to"] == "s2" and "look at the lock too" in s2.delivered[-1]
+    run(tmp_path, scenario)
+
+
+def test_held_owner_keeps_ownership(tmp_path):
+    async def scenario(req, mgr, s1, s2):
+        sid = (await req("POST", "/api/sims", {"title": "door", "session": "s1"}, status=201))["sim"]["id"]
+        s1.exited, s1.held_at = True, "2026-10-11T00:00:00+00:00"
+        assert sim_api._live(mgr, "s1")
+        await req("POST", f"/api/sims/{sid}/claim", {"session": "s2"}, status=409)
     run(tmp_path, scenario)
 
 

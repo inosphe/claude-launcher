@@ -40,10 +40,14 @@ PREFIX = "[claunch simulation]"
 
 
 def _live(manager, name: str) -> bool:
+    """Still a session that can own something. A held session has ended
+    its program, not itself (Session.held_at): the exit hooks skip it and a
+    delivery brings it back, so it keeps what it owns."""
     try:
-        return not manager.get(name).exited
+        s = manager.get(name)
     except Exception:  # noqa: BLE001 -- no such session
         return False
+    return not s.exited or bool(getattr(s, "held_at", None))
 
 
 def _session_where(manager, name: str) -> tuple:
