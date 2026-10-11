@@ -298,6 +298,8 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
         body["model"] = chosen_model
     if getattr(args, "effort", None):
         body["effort"] = args.effort
+    if getattr(args, "kind", None):
+        body["kind"] = args.kind
     # `is not None`, not truthiness: `[]` is the answer `--tools none` gives
     # and has to reach the daemon, where an ABSENT key means "the profile's
     # default".
@@ -1282,9 +1284,14 @@ def _cmd_sessions(_args: argparse.Namespace) -> int:
         # The project column is only drawn when the list is not already
         # narrowed to one, so the one-project view reads as it always did.
         proj = "" if project_filter else f"{projects.normalize(s.get('project')):<10} "
+        # A declared kind rides the harness column (``pi/pi-durable``): the
+        # same CLI, run for a different purpose.
+        harness = s["harness"] + (f"/{s['kind']}" if s.get("kind") else "")
+        brief = progress_brief(s.get("progress"))
         print(
-            f"{label:<16} [{state:<10}] {s['harness']:<8} {prof:<12} {proj}"
+            f"{label:<16} [{state:<10}] {harness:<8} {prof:<12} {proj}"
             f"{s['cols']}x{s['rows']}  {s.get('cwd', '')}"
+            + (f"  | {brief}" if brief else "")
         )
     dead = [s["name"] for s in sessions if s["status"] == "exited"]
     if dead:
@@ -1514,6 +1521,70 @@ def _cmd_send_keys(args: argparse.Namespace) -> int:
         {"keys": keys, "literal": bool(args.literal)},
         timeout=_keys_timeout(),
     )
+    return 0
+
+
+def progress_brief(prog) -> str:
+    """One line for a session's published progress (daemon/progress.py).
+
+    ``stage 3/10 (2 active) text``, each part only when published; ``""``
+    when there is nothing to show.
+    """
+    if not isinstance(prog, dict):
+        return ""
+    parts = []
+    if prog.get("stage"):
+        parts.append(str(prog["stage"]))
+    done, total = prog.get("done"), prog.get("total")
+    if total is not None:
+        parts.append(f"{done if done is not None else 0}/{total}")
+    elif done is not None:
+        parts.append(str(done))
+    if prog.get("active") is not None:
+        parts.append(f"({prog['active']} active)")
+    if prog.get("text"):
+        parts.append(str(prog["text"]))
+    return " ".join(parts)
+
+
+def _cmd_progress(args: argparse.Namespace) -> int:
+    """Publish, clear or show a session's progress (daemon/progress.py)."""
+    name = args.target or os.environ.get("CLAUNCH_SESSION") or ""
+    if not name:
+        print(
+            "error: no session -- pass -t SESSION, or run inside a managed "
+            "session (CLAUNCH_SESSION)",
+            file=sys.stderr,
+        )
+        return 1
+    client = daemon_client.ensure_running()
+    path = f"/api/sessions/{name}/progress"
+    fields = {
+        key: getattr(args, key)
+        for key in ("stage", "done", "total", "active", "text", "file", "url")
+        if getattr(args, key) is not None
+    }
+    if args.clear and fields:
+        print("error: --clear takes no other field", file=sys.stderr)
+        return 1
+    if args.clear:
+        out = client.delete(path)
+    elif fields:
+        out = client.post(path, fields)
+    else:
+        out = client.get(path)
+    prog = out.get("progress")
+    if args.json:
+        print(json.dumps(prog, ensure_ascii=False))
+    elif prog:
+        print(progress_brief(prog) or "(no summary fields)")
+        for key in ("file", "url"):
+            if prog.get(key):
+                print(f"{key}: {prog[key]}")
+        if prog.get("at"):
+            print(f"at: {prog['at']}")
+    else:
+        print(f"no progress published for {name!r}")
     return 0
 
 
@@ -2739,6 +2810,13 @@ def register(sub) -> None:
     )
     p_new.add_argument("--effort", help="reasoning effort for the selected harness")
     p_new.add_argument(
+        "--kind", metavar="WORD",
+        help="what this session is for, shown beside its harness in the list, "
+        "the API and the dashboard (e.g. 'pi-durable'); a lowercase word of "
+        "1-32 characters. Optional, set at creation only, not inherited by "
+        "spawned children",
+    )
+    p_new.add_argument(
         "--tools", metavar="NAMES",
         help="comma-separated builtin tools claunch adds to the harness "
         "(Pi: full_read); omitted takes the profile's default, the literal "
@@ -3163,6 +3241,33 @@ def register(sub) -> None:
     p_send.add_argument("session", nargs="?")
     p_send.add_argument("keys", nargs=argparse.REMAINDER)
     p_send.set_defaults(func=_cmd_send_keys_dispatch)
+
+    p_progress = sub.add_parser(
+        "progress",
+        help="publish, clear or show a session's progress line",
+        description=(
+            "With fields: replace SESSION's published progress with them. With "
+            "--clear: remove it. With neither: print it. The daemon shows it in "
+            "'claunch sessions', the session list API and the dashboard; it "
+            "never opens --file. A program inside the session's terminal can "
+            "publish the same record without this command by writing "
+            "ESC ] 777;claunch;progress;<JSON> BEL to its output."
+        ),
+    )
+    p_progress.add_argument(
+        "-t", "--target", metavar="SESSION",
+        help="the session (default: $CLAUNCH_SESSION)",
+    )
+    p_progress.add_argument("--stage", help="current stage name (64 chars)")
+    p_progress.add_argument("--done", type=int, help="items done (with --total: done/total)")
+    p_progress.add_argument("--total", type=int, help="items in all")
+    p_progress.add_argument("--active", type=int, help="items in flight right now")
+    p_progress.add_argument("--text", help="one line of detail (200 chars)")
+    p_progress.add_argument("--file", help="path of a fuller status file (shown, never read)")
+    p_progress.add_argument("--url", help="link to a fuller status view")
+    p_progress.add_argument("--clear", action="store_true", help="remove the published progress")
+    p_progress.add_argument("--json", action="store_true", help="print the record as JSON")
+    p_progress.set_defaults(func=_cmd_progress)
 
     p_notice = sub.add_parser(
         "notice",

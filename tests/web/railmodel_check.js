@@ -142,7 +142,7 @@ new Function(
   + slice("ctxKnowable") + slice("modelShort") + slice("modelSentence")
   + slice("ctxSentence") + slice("ctxBreakdown") + slice("ctxTooltip")
   + domLine[0] + "\n" + slice("ctxRailLine")
-  + slice("profileHarnessLabel") + slice("metaRow")
+  + slice("profileHarnessLabel") + slice("metaRow") + slice("progressBrief")
   + slice("selectionInUse") + slice("renderSession")
   + `
 Object.assign(exports, {

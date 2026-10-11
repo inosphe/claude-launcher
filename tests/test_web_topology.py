@@ -510,6 +510,7 @@ CHECKS = [
         "vscode_check.js",
         "sesstask_check.js",
         "railprofile_check.js",
+        "railprogress_check.js",
         "railcompacting_check.js",
         "railkeys_check.js",
         "sessionpins_check.js",

@@ -93,7 +93,7 @@ from . import reposync_gate
 from . import reposync_agent
 from . import restart_gate
 from . import restart_notice
-from .harness import HarnessError, SessionDef
+from .harness import HarnessError, SessionDef, check_kind
 from . import score_goal
 from .manager import MAX_NOTE, ManagerError, SessionManager
 from . import mesh as mesh_mod
@@ -865,6 +865,9 @@ def build_app(
     r.add_post("/api/sessions/{name}/note", h_session_note)
     r.add_post("/api/sessions/{name}/cflow-declined", h_session_cflow_declined)
     r.add_delete("/api/sessions/{name}/cflow-declined", h_session_cflow_declined)
+    r.add_get("/api/sessions/{name}/progress", h_session_progress)
+    r.add_post("/api/sessions/{name}/progress", h_session_progress_set)
+    r.add_delete("/api/sessions/{name}/progress", h_session_progress_clear)
     r.add_post("/api/sessions/{name}/model", h_session_model)
     r.add_post("/api/sessions/{name}/respawn", h_session_respawn)
     r.add_post("/api/sessions/{name}/migrate", h_session_migrate)
@@ -7361,6 +7364,9 @@ async def h_sessions_list(request: web.Request) -> web.Response:
     # here, before the per-session assembly, for the same reason the state
     # filter is: what the reader cannot see is not built.
     project_filter = str(request.query.get("project") or "").strip()
+    # ``?kind=`` keeps the sessions that declared that kind at creation
+    # (SessionDef.kind); absent means every session, kind or not.
+    kind_filter = str(request.query.get("kind") or "").strip()
     reminder_service = request.app.get("session_reminder")
     reminder_cfg = None
     if reminder_service is not None:
@@ -7400,6 +7406,8 @@ async def h_sessions_list(request: web.Request) -> web.Response:
         if list_state == "archived" and not archived:
             continue
         if not projects.matches(s.sdef.project, project_filter):
+            continue
+        if kind_filter and getattr(s.sdef, "kind", None) != kind_filter:
             continue
         sessions.append(s)
     winddowns = request.app["beads"].winddowns
@@ -7518,10 +7526,16 @@ async def h_sessions_list(request: web.Request) -> web.Response:
     # search is on offer is one toggle, not a reason to lose the list.
     rag_service = request.app.get("rag")
     rag_ok = bool(rag_service is not None and rag_service.configured())
+    published = manager.progress.snapshot(info.get("name") or "" for info in attached)
     for info in attached:
         checks = check_digests.get(info.get("name") or "")
         if checks:
             info["status_checks"] = checks
+        # What the session last said about its own progress; absent when it
+        # never published any (daemon/progress.py).
+        prog = published.get(info.get("name") or "")
+        if prog:
+            info["progress"] = prog
     if rail_view:
         # The dashboard reads this resource repeatedly. The detail panel has
         # its own /meta request, so an opening task and environment do not
@@ -7553,6 +7567,10 @@ async def h_sessions_list(request: web.Request) -> web.Response:
             # project's: with it left out, picking any other project drew an
             # empty rail while "All projects" still listed them.
             "project",
+            # What the session declared itself to be at creation, and the
+            # progress it publishes while it runs (daemon/progress.py): the
+            # rail's meta line and progress line read both off this poll.
+            "kind", "progress",
         }
         attached = [
             {key: value for key, value in info.items() if key in rail_fields}
@@ -7627,6 +7645,14 @@ async def _create_session(request: web.Request, body: dict) -> Tuple[int, dict]:
         }
     if not str(body.get("profile") or "").strip():
         return 400, {"error": "a session needs profile; its harness comes from it"}
+    # What the session is for (SessionDef.kind), checked here because the
+    # definition's own reader only trims: a value it would store verbatim
+    # must already be one the list column and the ``?kind=`` filter can take.
+    if "kind" in body:
+        try:
+            body["kind"] = check_kind(body.get("kind"))
+        except ValueError as exc:
+            return 400, {"error": str(exc)}
     # The prompt packs the form's checkboxes left on: only their shape is
     # checked here. They are read from the workspace (together with the ones
     # the session's roles require) in _onboard_and_launch, which spawns share.
@@ -8734,6 +8760,9 @@ async def h_session_meta(request: web.Request) -> web.Response:
 
     body = await asyncio.to_thread(describe)
     info = body["session"]
+    prog = manager.progress.get(info.get("name") or "")
+    if prog:
+        info["progress"] = prog
     # Same branch the rail row carries, so the detail panel's head and the
     # Details list need no second guess. On the loop: a miss schedules its
     # git read there (see _read_branch_later).
@@ -9296,6 +9325,57 @@ async def h_session_cflow_declined(request: web.Request) -> web.Response:
             return json_error(400, f"'{key}' must be text")
         fields[key] = value or ""
     return json_response(manager.set_cflow_declined(name, **fields).info())
+
+
+async def h_session_progress(request: web.Request) -> web.Response:
+    """What one session last published about its progress (daemon/progress.py)."""
+    manager: SessionManager = request.app["manager"]
+    name = request.match_info["name"]
+    try:
+        manager.get(name)
+    except ManagerError:
+        return json_error(404, f"no session named {name!r}")
+    return json_response({"session": name, "progress": manager.progress.get(name)})
+
+
+async def h_session_progress_set(request: web.Request) -> web.Response:
+    """Publish a session's progress from outside its terminal.
+
+    The body is the record itself (``stage``, ``done``, ``total``,
+    ``active``, ``text``, ``file``, ``url``) and replaces the previous one;
+    ``{}`` or ``null`` clears it. The same store the terminal's
+    ``777;claunch;progress;`` sequence writes, so a run may use either. An
+    exited session takes one too: a supervisor reports how its run ended
+    after the terminal is gone. Not parsed with :func:`_json_body`, which
+    reads a malformed body as ``{}`` -- here that would clear.
+    """
+    manager: SessionManager = request.app["manager"]
+    name = request.match_info["name"]
+    try:
+        manager.get(name)
+    except ManagerError:
+        return json_error(404, f"no session named {name!r}")
+    try:
+        raw = await request.json()
+    except Exception:
+        return json_error(400, "progress must be a JSON object (or null to clear)")
+    try:
+        stored = manager.progress.set(name, raw or None)
+    except ValueError as exc:
+        return json_error(400, str(exc))
+    return json_response({"session": name, "progress": stored})
+
+
+async def h_session_progress_clear(request: web.Request) -> web.Response:
+    """Clear a session's published progress."""
+    manager: SessionManager = request.app["manager"]
+    name = request.match_info["name"]
+    try:
+        manager.get(name)
+    except ManagerError:
+        return json_error(404, f"no session named {name!r}")
+    manager.progress.set(name, None)
+    return json_response({"session": name, "progress": None})
 
 
 async def h_session_model(request: web.Request) -> web.Response:

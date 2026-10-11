@@ -96,6 +96,7 @@ function syncSplitPane() {}
 function refreshSession() { bump(); }
 function stopSessRun() {}
 function metaRow() {}
+function progressBrief() { return ""; }
 function profileHarnessLabel() { return ""; }
 function modelSentence() { return ""; }
 function ctxSentence() { return ""; }

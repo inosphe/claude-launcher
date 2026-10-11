@@ -140,6 +140,7 @@ function applyBriefingCards() {}
    decoration below: its wording and its stylesheet contract are
    railnote_check's subject, not this harness's. */
 function decorateNoteRow(li, s) {}
+function decorateProgressRow(li, s) {}
 function decorateBriefingRow(li, s) {}
 function terminalOnScreen() { return false; }
 function attach() {}

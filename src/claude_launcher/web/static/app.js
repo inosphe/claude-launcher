@@ -1595,7 +1595,9 @@ function railMetaText(s) {
   const state = s.archived_at ? "archived" : s.status === "exited"
     ? (s.held_at ? "hold" : s.paused_at ? "paused" : `exit ${s.exit_code ?? "?"}`)
     : s.paused_at ? "pausing" : s.winddown ? "winding down" : "";
-  return [identity, state].filter(Boolean).join(" · ");
+  // The kind the session declared at creation (``pi-durable``) follows the
+  // harness it qualifies: same CLI, run for that purpose.
+  return [identity, s.kind, state].filter(Boolean).join(" · ");
 }
 
 /* ---- rail search ------------------------------------------------------ */
@@ -4546,6 +4548,7 @@ async function refreshSessions(options) {
       // is open, the briefing one-line), and both are idempotent.
       decorateBriefingRow(keptRow, s);
       decorateNoteRow(keptRow, s);
+      decorateProgressRow(keptRow, s);
       place(nestedGroupContainers
         ? (groupBodies[groupBodies.length - 1] || list) : list, keptRow);
       countRow();
@@ -4836,6 +4839,8 @@ async function refreshSessions(options) {
     decorateBriefingRow(li, s);
     // The reader's own note for this session, when there is one.
     decorateNoteRow(li, s);
+    // What the session last published about its own progress.
+    decorateProgressRow(li, s);
     const parent = nestedGroupContainers
       ? (groupBodies[groupBodies.length - 1] || list) : list;
     place(parent, li);
@@ -7757,6 +7762,40 @@ function applyBriefingTop() {
    refreshRailSeen: that tick exists for the lines that carry an age, and a
    note has none — a changed note reaches the rail as a changed sessionsCache,
    which is part of the signature that decides the rebuild. */
+/* A session's published progress as one line: `stage 3/10 (2 active) text`,
+   each part only when published (daemon/progress.py). The CLI's
+   `claunch sessions` prints the same line (cli_sessions.progress_brief). */
+function progressBrief(p) {
+  if (!p || typeof p !== "object") return "";
+  const parts = [];
+  if (p.stage) parts.push(String(p.stage));
+  if (p.total != null) parts.push(`${p.done ?? 0}/${p.total}`);
+  else if (p.done != null) parts.push(String(p.done));
+  if (p.active != null) parts.push(`(${p.active} active)`);
+  if (p.text) parts.push(String(p.text));
+  return parts.join(" ");
+}
+
+/* The progress line under the note, ahead of the path: what the run inside
+   the session says about how far it has got, which its busy/idle state does
+   not tell. The hover names the status file and link it pointed at and when
+   it last changed; the file is the session's to read, never the page's. */
+function decorateProgressRow(li, s) {
+  const text = progressBrief(s.progress);
+  const line = li.querySelector(".rail-progress");
+  if (!text) {
+    if (line) line.remove();
+    return;
+  }
+  const p = s.progress || {};
+  const title = [text, p.file && `file: ${p.file}`, p.url && `url: ${p.url}`,
+    p.at && `at: ${p.at}`].filter(Boolean).join("\n");
+  const node = line || el("div", "rail-progress");
+  node.textContent = text;
+  node.title = title;
+  if (!line) railNotePlace(li, node);
+}
+
 function decorateNoteRow(li, s) {
   const text = String(s.note || "").trim();
   railNoteButton(li, s, text);
@@ -33696,6 +33735,14 @@ function renderSession(data) {
       dl, "profile / harness", profileHarnessLabel(s.profile, s.harness),
       (data.harness || {}).description
     );
+    // What the session declared itself to be at creation, and what it last
+    // published about its progress (daemon/progress.py). The status file is
+    // named, never opened: it is the run's, read by whoever wrote it.
+    metaRow(dl, "kind", s.kind, "declared at creation (--kind)");
+    const prog = s.progress || {};
+    metaRow(dl, "progress", progressBrief(prog), prog.at ? `published ${prog.at}` : "");
+    metaRow(dl, "progress file", prog.file, "named by the session; not read by claunch");
+    metaRow(dl, "progress link", prog.url);
     // Whose token it actually runs on, when that is not the profile's own —
     // invisible from the terminal, and reapplied on every restore.
     metaRow(dl, "borrow", s.borrow, "another profile's token; the config stays this profile's");

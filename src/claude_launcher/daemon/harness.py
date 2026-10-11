@@ -269,6 +269,16 @@ class SessionDef:
     #: the workspace's copy may be edited or removed afterwards, and the id
     #: the session was given names what it was given.
     prompt_packs: Tuple[Dict[str, str], ...] = ()
+    #: What this session *is for*, declared by whoever created it, as one
+    #: short word (``pi-durable``: a pi session whose extension drives a
+    #: durable run). The harness says which CLI runs and how; this says what
+    #: the run is, so two sessions of one harness can be told apart in the
+    #: list, the API and the dashboard. claunch attaches no meaning to the
+    #: value: it is checked against :data:`KIND_PATTERN`, shown, and filtered
+    #: on (``GET /api/sessions?kind=``). Set at creation only and never
+    #: inherited by a spawned child. ``None`` writes no key, so a record that
+    #: never declared one is unchanged on disk.
+    kind: Optional[str] = None
 
     def to_dict(self) -> dict:
         out = {
@@ -330,6 +340,8 @@ class SessionDef:
         # Absent when none were chosen, like the fields above.
         if self.prompt_packs:
             out["prompt_packs"] = [dict(p) for p in self.prompt_packs]
+        if self.kind:
+            out["kind"] = self.kind
         return out
 
     @classmethod
@@ -378,6 +390,7 @@ class SessionDef:
             cflow_declined=_cflow_declined_field(data.get("cflow_declined")),
             project=str(data.get("project") or "").strip() or None,
             prompt_packs=_prompt_packs_field(data.get("prompt_packs")),
+            kind=str(data.get("kind") or "").strip() or None,
         )
 
 
@@ -393,6 +406,32 @@ def _cflow_declined_field(raw) -> Optional[dict]:
         return None
     out = {k: str(raw.get(k) or "").strip() for k in CFLOW_DECLINED_KEYS}
     return out if out["at"] else None
+
+
+#: The spelling a session kind must have: a lowercase word of at most 32
+#: characters, so it fits a list column and a URL query without quoting.
+KIND_PATTERN = re.compile(r"[a-z0-9][a-z0-9._-]{0,31}")
+
+
+def check_kind(raw) -> Optional[str]:
+    """Validate a requested :attr:`SessionDef.kind`; empty means none.
+
+    Raises ``ValueError`` with the rule in its message, for the create
+    route to answer 400 with.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise ValueError("'kind' must be text")
+    text = raw.strip()
+    if not text:
+        return None
+    if not KIND_PATTERN.fullmatch(text):
+        raise ValueError(
+            f"bad session kind {text!r}: a lowercase word of 1-32 characters "
+            "(a-z, 0-9, '.', '_', '-'), starting with a letter or digit"
+        )
+    return text
 
 
 def _prompt_packs_field(raw) -> Tuple[dict, ...]:
