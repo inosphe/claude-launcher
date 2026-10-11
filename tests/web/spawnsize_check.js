@@ -204,6 +204,25 @@ for (const bad of ["", "null", "{", "{}", '{"w":"wide","h":3}', '{"w":null,"h":n
 }
 
 /* --- the key is scoped, like every other remembered pixel ---------------- */
+/* Child creation gets the larger default even when the old shared dialog
+   was small, then remembers its own drag without changing New session. */
+{
+  store[ctx.KEY] = JSON.stringify({ w: 700, h: 400 });
+  const box = boxNode({ width: 1200, height: 900 });
+  ctx.spawnSizeApply(box, true);
+  eq([box.style.width, box.style.height], ["1320px", "940px"],
+     "child creation starts large independently of the old shared size");
+  ctx.spawnSizeRemember(box, true);
+  ctx.spawnSizeApply(box, true);
+  eq([box.style.width, box.style.height], ["1200px", "900px"],
+     "child creation remembers the operator's resize");
+  eq(JSON.parse(store[ctx.KEY]), { w: 700, h: 400 },
+     "child creation preserves the New session size");
+  window.innerWidth = 375; window.innerHeight = 200;
+  ctx.spawnSizeApply(box, true);
+  eq([box.style.width, box.style.height], ["343px", "188px"],
+     "child creation fits even a viewport below the usual resize floors");
+}
 /* Daemons behind one relay share this localStorage; an unscoped key would let
    one daemon's dialog size another's. */
 ok(ctx.KEY.includes("/"), "the size key is scoped by BASE");

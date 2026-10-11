@@ -411,6 +411,10 @@ async function main() {
   check("...and so does the Spawn child box (Settings' every-opening packs)",
         calls.filter((c) => c === "packs-opened").length, 2);
   check("rail Spawn borrows the same form", ids["modal-body"].kids.map(k => k.id), ["new-session"]);
+  check("Spawn opens with the larger child form dimensions",
+        [modalBox.style.width, modalBox.style.height], ["1320px", "940px"]);
+  check("Spawn enables its viewport height rule",
+        ids["modal-overlay"].classes.has("child-spawn-open"), true);
   check("Spawn dialog has no New session tab",
         [ids["new-tabs"].classes.has("hidden"), ids["new-tab-new"].classes.has("hidden")], [true, true]);
   ctx.tab("new");
@@ -436,10 +440,12 @@ async function main() {
         [ids["modal-overlay"].classes.has("hidden"),
          ids["modal-overlay"].classes.has("spawn-open")], [true, false]);
   check("...and the dragged size is remembered under the spawn box's key",
-        JSON.parse(stored["claunch_spawnsize:b"] || "null"),
+        JSON.parse(stored["claunch_spawnsize:b:child"] || "null"),
         { w: 820, h: 640 });
   check("...with the inline pair stripped, so a confirm dialog is prose-wide",
         [modalBox.style.width, modalBox.style.height], ["", ""]);
+  check("...and the child height rule is removed",
+        ids["modal-overlay"].classes.has("child-spawn-open"), false);
   check("closing twice is not a second close",
         ctx.modal(), null);
   check("closing removes Cancel from the page action row",
