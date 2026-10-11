@@ -94,7 +94,7 @@ def test_step_out_returns_to_parent_instead_of_reentering(tmp_path):
 def test_step_out_preserves_parallel_sibling_and_cancels_asks(tmp_path):
     d = Drv(tmp_path, """
         nodes:
-          a: {prompt: A, ask: {prompt: continue?}}
+          a: {prompt: A, ask: {prompt: 'continue?'}}
           b: {prompt: B}
           c: {prompt: C}
         body:
@@ -181,7 +181,7 @@ def test_step_out_cancels_delegation(tmp_path):
     chart = compile_src(TASKS + "body: {seq: [{id: sub, seq: [b], executor: [subagent]}, a]}\n")
     st = runtime.start(chart, cwd=cwd, scope=scope,
                        caps={"subagent.spawn": True, "mcp.claunch": True}, now=T0)
-    iid = st["delegations"][0]["instance"]
+    iid = RunStore(cwd, scope).load_state()["delegations"][st["delegations"][0]["id"]]["instance"]
     st = runtime.step_out(iid, cwd=cwd, scope=scope, now=T0)
     assert [t["label"] for t in st["tasks"]] == ["a"]
     assert [d["status"] for d in st["delegations"]] == ["cancelled"]
@@ -197,7 +197,7 @@ def test_step_out_delegated_try_cancels_its_executor_before_finally(tmp_path):
     """)
     kw = {"cwd": cwd, "scope": scope, "now": T0}
     st = runtime.start(chart, caps={"subagent.spawn": True, "mcp.claunch": True}, **kw)
-    iid = st["delegations"][0]["instance"]
+    iid = RunStore(cwd, scope).load_state()["delegations"][st["delegations"][0]["id"]]["instance"]
     st = runtime.step_out(iid, **kw)
     assert [t["label"] for t in st["tasks"]] == ["plain"]
     assert [d["status"] for d in st["delegations"]] == ["cancelled"]
