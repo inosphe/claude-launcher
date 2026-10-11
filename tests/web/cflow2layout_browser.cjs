@@ -68,6 +68,15 @@ const server = http.createServer((req, res) => {
     assert.equal(await view.locator('.cf2-stack-frame').count(), 3, 'all live frames shown');
     assert.equal(await view.getByRole('button', {name: 'Step out', exact: true}).count(), 1,
       'root and tasks cannot be released');
+    const heights = await view.locator('.cf2-stack-frame').evaluateAll(nodes =>
+      nodes.map(n => n.getBoundingClientRect().height));
+    assert(heights.every(h => h <= 40), `collapsed desktop frames fit one row: ${heights}`);
+    const frameSummary = view.locator('.cf2-stack-frame[data-instance="frame@1"] summary');
+    await frameSummary.focus();
+    await page.keyboard.press('Enter');
+    assert(await frameSummary.evaluate(n => n.parentElement.open), 'keyboard opens frame details');
+    await page.keyboard.press('Enter');
+    assert(!(await frameSummary.evaluate(n => n.parentElement.open)), 'keyboard closes frame details');
     await page.evaluate(() => {
       window.savedCflowRoot = document.querySelector('#wf-view .cf2');
       window.savedCflowTree = document.querySelector('#wf-view .cf2-tree');
@@ -128,6 +137,13 @@ const server = http.createServer((req, res) => {
     await two().click();
     assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'responsive columns do not overflow');
     assert.equal(posts, 0, 'layout does not send state mutations');
+    if (process.env.CLAUNCH_SCRATCH) await page.screenshot({ path: path.join(process.env.CLAUNCH_SCRATCH, 'v2-callstack-mobile.png'), fullPage: true });
+    const dismiss = dialog => dialog.dismiss();
+    page.on('dialog', dismiss);
+    await view.getByRole('button', {name: 'Rollback', exact: true}).click();
+    await view.getByRole('button', {name: 'Step out', exact: true}).click();
+    assert.equal(posts, 0, 'cancelled rollback and step out send no mutations');
+    page.off('dialog', dismiss);
     page.on('dialog', dialog => dialog.accept());
     await Promise.all([
       page.waitForResponse(r => r.url().includes('/api/cflow2/run?')),
@@ -145,6 +161,6 @@ const server = http.createServer((req, res) => {
     assert.equal(actions[1].body.run, 'r-layout');
     assert.equal(actions[1].body.outcome, 'ok');
     assert.deepEqual(errors, []);
-    console.log('cflow2layout_browser: layout, stable polling, scroll, current state, callstack, rollback/stepout passed');
+    console.log(`cflow2layout_browser: compact rows ${heights}, keyboard details, layout, stable polling, scroll, current state, confirmation cancellation, rollback/stepout passed`);
   } finally { await browser.close(); await new Promise(resolve => server.close(resolve)); }
 })().catch(e => { console.error(e); process.exit(1); });
