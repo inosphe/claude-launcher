@@ -483,6 +483,14 @@ def install(app, store: Optional[sim_store.SimStore] = None):
             return err
         return web.json_response(res)
 
+    async def h_triage(request):
+        sid = request.match_info["id"]
+        body = await body_of(request)
+        res, err = await call(sims.triage, sid, actor_of(body), body.get("items") or [], body.get("key"))
+        if err:
+            return err
+        return web.json_response(res)
+
     async def h_runner_done(request):
         sid = request.match_info["id"]
         body = await body_of(request)
@@ -618,4 +626,5 @@ def install(app, store: Optional[sim_store.SimStore] = None):
     r.add_post("/api/sims/{id}/runner/done", h_runner_done)
     r.add_get("/api/sims/{id}/work", h_work)
     r.add_post("/api/sims/{id}/verdicts", h_verdicts)
+    r.add_post("/api/sims/{id}/triage", h_triage)
     return sims

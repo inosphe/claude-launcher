@@ -272,3 +272,23 @@ def test_create_from_another_simulation(env):
     assert st.unjudged(b["id"]) == []
     with pytest.raises(S.NotFound):
         st.create(title="c", root=root, owner="s1", actor="s1", from_sim="sim-zzzzzz")
+
+
+def test_triage_sorts_open_findings(env):
+    st, root, _ = env
+    sim = st.create(title="door", root=root, owner="s1", actor="s1")
+    st.patch_model(sim["id"], "s1", base_patch())
+    st.run_round(sim["id"], "s1")
+    key = "unhandled|door|open|open"
+    with pytest.raises(S.Forbidden):
+        st.triage(sim["id"], "s2", [{"key": key, "verdict": "spec", "why": "x"}])
+    res = st.triage(sim["id"], "s1", [{"key": key, "verdict": "intended", "why": "already open"},
+                                      {"key": key, "verdict": "bogus", "why": "x"},
+                                      {"key": "nope", "verdict": "spec", "why": "x"}], key="t1")
+    assert res["done"] == [key] and len(res["errors"]) == 2
+    f = st.findings(sim["id"])[key]
+    assert f["status"] == "dismissed" and f["triage"]["verdict"] == "intended" and f["triage"]["round"] == 1
+    assert st.triage(sim["id"], "s1", [], key="t1")["duplicate"]
+    assert st.configure(sim["id"], "s1", settings={"triage": False})["settings"]["triage"] is False
+    with pytest.raises(S.SimError):
+        st.configure(sim["id"], "s1", settings={"triage": 1})

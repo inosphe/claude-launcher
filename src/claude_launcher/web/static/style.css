@@ -6948,3 +6948,5 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .sim-step { margin: 3px 0; }
 .sim-step-raised { background: rgba(240,207,138,0.12); }
 .sim-witness button { margin-left: 8px; }
+.sim-triage { font-size: 12px; color: #9fc3e8; }
+.sim-check { display: flex; align-items: center; gap: 4px; }

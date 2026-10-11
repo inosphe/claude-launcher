@@ -62,6 +62,7 @@ DEFAULT_SETTINGS = {
     "budget": 2000,
     "horizon": 12,
     "max_rounds": 20,
+    "triage": True,              # the judge sorts each gap batch before the interpreter answers it
 }
 _ID_RE = re.compile(r"^sim-[0-9a-f]{6,12}$")
 _SUBMIT_CAP = 5000
@@ -367,7 +368,11 @@ class SimStore:
         for k, v in change.items():
             if k not in DEFAULT_SETTINGS:
                 raise SimError(f"unknown setting {k!r}")
-            if k.endswith("_profile") or k.endswith("_model"):
+            if isinstance(DEFAULT_SETTINGS[k], bool):
+                if not isinstance(v, bool):
+                    raise SimError(f"{k} must be true or false")
+                out[k] = v
+            elif k.endswith("_profile") or k.endswith("_model"):
                 if not isinstance(v, str):
                     raise SimError(f"{k} must be a {'profile name' if k.endswith('_profile') else 'model id'}")
                 out[k] = v.strip()
@@ -590,6 +595,48 @@ class SimStore:
                 self._journal(sim_id, actor, "verdicts", ids=done[:50])
             result = {"ok": not errors, "done": done, "errors": errors,
                       "retracted": [*retract["rules"], *retract["invariants"]]}
+            self._remember(sim_id, key, result)
+            return result
+
+    TRIAGE = ("model", "spec", "intended")
+
+    def triage(self, sim_id: str, actor: str, items: List[dict], key: Optional[str] = None) -> dict:
+        """The judge's sort of open findings, before the interpreter answers
+        them: ``model`` (the model misreads the sources: fix the model),
+        ``spec`` (the sources are silent: a person decides, unless a quote
+        turns up), ``intended`` (not a defect: dismissed with the judge's
+        reason). Each item is ``{key, verdict, why}``."""
+        with self._lock:
+            meta = self._meta(sim_id)
+            self._require_owner(meta, actor, "triage findings")
+            seen = self._seen(sim_id, key)
+            if seen is not None:
+                return {**seen, "duplicate": True}
+            ledger = self.findings(sim_id)
+            last = self.rounds(sim_id, 1)
+            n = last[0]["round"] if last else 0
+            done, errors = [], []
+            for it in items or []:
+                f = ledger.get(it.get("key"))
+                verdict, why = it.get("verdict"), str(it.get("why") or "").strip()[:4000]
+                if f is None or f.get("status") != "open":
+                    errors.append(f"{it.get('key')!r} is not an open finding")
+                    continue
+                if verdict not in self.TRIAGE:
+                    errors.append(f"{f['key']}: verdict must be one of {', '.join(self.TRIAGE)}")
+                    continue
+                if not why:
+                    errors.append(f"{f['key']}: a triage verdict needs a why")
+                    continue
+                f["triage"] = {"verdict": verdict, "why": why, "by": actor, "at": _now(), "round": n}
+                if verdict == "intended":
+                    f["status"] = "dismissed"
+                    f["resolution"] = {"by": actor, "at": _now(), "reason": "triage: " + why}
+                done.append(f["key"])
+            _write_json(self._dir(sim_id) / "findings.json", ledger)
+            if done:
+                self._journal(sim_id, actor, "triage", keys=done[:50])
+            result = {"ok": not errors, "done": done, "errors": errors}
             self._remember(sim_id, key, result)
             return result
 

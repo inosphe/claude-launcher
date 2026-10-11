@@ -220,7 +220,16 @@ DRIVER = textwrap.dedent("""
         return JSON.stringify({ patch: { rules: [r] } });
       }
       if (key.startsWith("judge:")) return JSON.stringify([{ section: "rules", id: "r.open", verdict: "confirmed", why: "quoted" }]);
-      if (key.startsWith("gap:")) return JSON.stringify({ patch: fix, resolve: [] });
+      if (key.startsWith("C:triage:") || key.startsWith("triage:")) {
+        // Opening an open door: intended. Anything else: the sources are silent.
+        const keys = [...new Set([...prompt.matchAll(/"key": "([^"]+)"/g)].map((m) => m[1]))];
+        return JSON.stringify(keys.map((k) => ({ key: k, verdict: k.endsWith("|open|open") ? "intended" : "spec", why: "scripted" })));
+      }
+      if (key.startsWith("gap:")) {
+        if (prompt.includes('"key": "unhandled|door|open|open"')) throw new Error("an intended finding reached the interpreter");
+        if (!prompt.includes('"judge"')) throw new Error("the gap prompt must carry the triage");
+        return JSON.stringify({ patch: fix, resolve: [] });
+      }
       throw new Error("unexpected question " + key);
     };
     const progress = [];
@@ -275,4 +284,7 @@ def test_campaign_loop_against_the_daemon(tmp_path):
     assert {"formalize", "judge", "round", "gaps"} <= set(got["progress"])
     sim = sims.get(sid)
     assert sim["state"] == "idle" and sim["model_stats"]["rules"] == 4
+    assert any(a.startswith("C:triage:r1:") for a in got["asked"])
+    f = sims.findings(sid)["unhandled|door|open|open"]
+    assert f["status"] == "dismissed" and f["resolution"]["reason"] == "triage: scripted"
     assert sims.verdicts(sid)["rules:r.open"]["verdict"] == "confirmed"

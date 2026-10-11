@@ -79,6 +79,7 @@ globalThis.SimPage = (() => {
     s.value = value; s.disabled = busy; s.onchange = () => onchange(s.value); return s;
   }
   const sessionOptions = (blank) => [["", blank], ...sessions.map(s => [s.name, s.name + (s.project ? ` (${s.project})` : "")])];
+  const TRIAGE_LABEL = {model: "모델이 원천을 잘못 읽음", spec: "원천에 정해진 내용 없음 (사람이 결정)", intended: "결함 아님"};
   const MODEL_KEYS = ["interpreter_profile", "judge_profile", "interpreter_model", "judge_model", "interpreter_reasoning", "judge_reasoning"];
 
   function render() {
@@ -277,6 +278,7 @@ globalThis.SimPage = (() => {
       }
       if (replays[f.key]) card.append(renderReplay(replays[f.key]));
       if (f.resolution) card.append(node("p", `${f.resolution.by}: ${f.resolution.reason || ""}`, "sim-muted"));
+      if (f.triage) card.append(node("p", `판정자 분류: ${TRIAGE_LABEL[f.triage.verdict] || f.triage.verdict} — ${f.triage.why}`, "sim-triage"));
       if (f.stale) card.append(node("p", "지금 모델에서 재현 경로를 재생할 수 없습니다: " + f.stale, "sim-warn"));
       if (f.reopened) card.append(node("p", `다시 열림: 질문 뒤 원천이 바뀌었습니다 (이전 질문: ${f.prev_question?.text || ""})`, "sim-warn"));
       if (f.question) {
@@ -413,6 +415,10 @@ globalThis.SimPage = (() => {
       const l = node("label", label); const i = node("input"); i.type = "number"; i.min = "1"; i.value = cur[k];
       i.oninput = () => { cur[k] = parseInt(i.value, 10); }; i.disabled = busy; l.append(i); form.append(l);
     }
+    const tri = node("label", null, "sim-check"); const cb = node("input"); cb.type = "checkbox"; cb.checked = cur.triage !== false;
+    cb.disabled = busy; cb.setAttribute("aria-label", "판정자 분류");
+    cb.onchange = () => { cur.triage = cb.checked; };
+    tri.append(cb, node("span", " 해석 전에 판정자가 빈칸을 분류 (모델 오류 / 원천에 없음 / 결함 아님)")); form.append(tri);
     const src = node("label", "원천 (한 줄에 하나)"); const ta = node("textarea"); ta.value = cur.sources; ta.oninput = () => { cur.sources = ta.value; }; ta.disabled = busy; src.append(ta); form.append(src);
     const submit = node("button", "저장", "wf-btn sim-primary"); submit.disabled = busy; form.append(submit);
     form.append(node("p", "바꾼 설정은 다음 라운드와 다음 실행부터 적용됩니다.", "sim-muted"));
@@ -420,6 +426,7 @@ globalThis.SimPage = (() => {
       e.preventDefault();
       const settings = {};
       for (const k of [...MODEL_KEYS, "max_rounds", "budget", "horizon", "seed"]) settings[k] = cur[k];
+      settings.triage = cur.triage !== false;
       act(() => request(base + "/settings", "POST", {settings, sources: cur.sources.split("\n").map(x => x.trim()).filter(Boolean)}),
         () => { settingsDraft = null; return "저장했습니다"; });
     };

@@ -22,7 +22,7 @@ const sim = {id: 'sim-abc123', title: '<b>door</b>', goal: 'find gaps', owner: '
 const findings = [
   {key: 'unhandled|door|open|open', kind: 'unhandled', status: 'open', detail: 'no rule', count: 3, first_round: 1, last_round: 1,
     witness: {steps: [{event: 'open'}, {event: 'open'}]}, assumed: [], provisional: [],
-    reopened: {why: 'x'}, prev_question: {text: 'old q'}},
+    reopened: {why: 'x'}, prev_question: {text: 'old q'}, triage: {verdict: 'spec', why: 'nothing about it'}},
   {key: 'unhandled|door|closed|close', kind: 'unhandled', status: 'question', detail: 'no rule', count: 1, first_round: 1, last_round: 1,
     witness: {steps: [{event: 'close'}]}, question: {text: 'what then?', options: ['nothing', 'error'], by: 's1'}},
 ];
@@ -102,6 +102,7 @@ async function settle() { for (let i = 0; i < 10; i++) await new Promise(resolve
   // Detail.
   ctx.SimPage.open('sim-abc123'); await settle();
   assert(button('실행') && button('소유권 해제'));
+  assert(all().some(n => n.className === 'sim-triage' && n.textContent.includes('사람이 결정') && n.textContent.includes('nothing about it')));
   // Carry: where it came from, rules that lost their quote, a reopened question.
   assert(all().some(n => n.tag === 'a' && n.href === '#/sims/sim-old999'));
   assert(all().some(n => n.className === 'sim-warn' && n.textContent.includes('r.lock')));
@@ -143,9 +144,11 @@ async function settle() { for (let i = 0; i < 10; i++) await new Promise(resolve
   // Settings save the chosen profiles.
   ctx.SimPage.open('sim-abc123', 'settings'); await settle();
   labelled('해석(B) reasoning').value = 'high'; labelled('해석(B) reasoning').onchange();
+  labelled('판정자 분류').checked = false; labelled('판정자 분류').onchange();
   all().find(n => n.tag === 'form').onsubmit({preventDefault() {}}); await settle();
   const saved = calls.find(c => c.url.pathname.endsWith('/settings'));
   assert.strictEqual(saved.body.settings.interpreter_reasoning, 'high');
+  assert.strictEqual(saved.body.settings.triage, false);
   assert.deepStrictEqual(saved.body.sources, ['spec.md']);
   // Leaving the route invalidates an outstanding read.
   ctx.SimPage.open(); await settle();
