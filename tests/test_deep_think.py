@@ -256,6 +256,10 @@ def test_notes_and_the_answer_reach_the_asker_and_the_mesh_log(home, tmp_path, f
         assert all(m["to"] == [] for m in logged)
         assert "X fails because Y" in logged[-1]["body"]
         assert mm.get("room").pending("a") == []
+        channels = [m for m in mm.list() if m.parent_channel]
+        assert channels
+        assert all(not any(m.get("ref", {}).get("deep_think")
+                           for m in channel.messages) for channel in channels)
         # the record now holds the question and the answer
         (event,) = [e for e in search_records.rows("a-dt1") if e["id"] == dt.RECORD_ID]
         assert "why does X fail?" in event["text"] and "X fails because Y" in event["text"]
@@ -361,14 +365,25 @@ def test_a_fork_whose_asker_is_gone_is_ended(home, tmp_path, forkable, typed):
 
 # ---- the mesh log -------------------------------------------------------------- #
 
-def test_record_only_logs_to_owned_meshes_and_addresses_nobody():
+@pytest.mark.parametrize("has_team", [False, True])
+def test_record_only_logs_to_owned_meshes_and_addresses_nobody(has_team):
     mgr = _Manager()
     mgr.add("s1")
     mm = MeshManager(mgr, settle=0.01)
     mm.create("home")
     home = mm.get("home")
-    _member(home, "w1", "s1", role="worker")
-    assert mm.record_only("s1", sender="deep-think:s1-dt1", body="hello", ref={"deep_think": {"kind": "note"}}) == ["home"]
+    if has_team:
+        _member(home, "w1", "s1", role="worker")
+    mm.create("parent-pair")
+    pair = mm.get("parent-pair")
+    pair.parent_channel = ["s1", "s2"]
+    _member(pair, "s1", "s1", role="worker")
+    _member(pair, "s2", "s2", role="worker")
+    assert mm.record_only("s1", sender="deep-think:s1-dt1", body="hello", ref={"deep_think": {"kind": "note"}}) == (["home"] if has_team else [])
+    assert not pair.messages
+    if not has_team:
+        assert not home.messages
+        return
     msg = home.messages[-1]
     assert msg["from"] == "deep-think:s1-dt1" and msg["to"] == [] and msg["type"] == "fyi"
     assert msg["body"] == "-> w1 (s1): hello" and msg["ref"]["for"] == "w1"

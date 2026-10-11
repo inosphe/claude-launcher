@@ -814,6 +814,12 @@ def _print_onboarding(result: dict) -> None:
                 )
             else:
                 print("  mesh join failed: no reason given")
+    channel = result.get("parent_channel") or {}
+    if channel:
+        print(f"  parent channel {channel['mesh']}: "
+              f"{channel['parent_handle']} <-> {channel['child_handle']}")
+        print(f"  send to child: claunch mesh send {channel['mesh']} "
+              f"{channel['child_handle']} \"...\"")
     flow = result.get("workflow") or {}
     if flow:
         print(
@@ -2953,7 +2959,7 @@ def register(sub) -> None:
     p_spawn.add_argument(
         "--mesh",
         help="mesh to enrol the child in (default: the parent's own, opening "
-             "one for the pair if it is in none; '-' for no mesh at all)",
+             "one for the pair if it is in none; '-' for only a parent channel)",
     )
     p_spawn.add_argument("--as", dest="handle", help="the child's mesh handle")
     p_spawn.add_argument("--role", help="the child's mesh role")

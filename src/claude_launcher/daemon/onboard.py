@@ -76,10 +76,8 @@ from .mesh import LEADER_IMPLIES, LEADER_ROLE, MeshError
 
 log = logging.getLogger(__name__)
 
-#: The spelling that declines the inherited mesh — a child deliberately off
-#: the air. A token rather than an omitted field, because omission is what now
-#: means *inherit*: there has to be a way to say "no mesh" that is louder than
-#: saying nothing.
+#: Decline the inherited team mesh while keeping the parent channel.
+#: Omission means inherit, so opting out requires an explicit token.
 NO_MESH = "-"
 
 #: The same spelling, for the run: a child deliberately given none where its
@@ -197,7 +195,8 @@ async def inherit_mesh(
       broadcasts: the child arrives in a room of strangers and reports its
       work to them.
 
-    :data:`NO_MESH` opts out for a child that genuinely should be off the air.
+    :data:`NO_MESH` opts out of a team mesh. The parent channel is still set
+    up by :func:`arrange`.
     """
     named = str(body.get("mesh") or "").strip()
     if named == NO_MESH:
@@ -205,12 +204,13 @@ async def inherit_mesh(
         return
     if named:
         return
-    mine = [m["mesh"] for m in mesh_mgr.meshes_for_session(parent)]
+    mine = [m["mesh"] for m in mesh_mgr.meshes_for_session(parent)
+            if not m.get("parent_channel")]
     if len(mine) > 1:
         raise OnboardError(
             f"session {parent!r} is in {len(mine)} meshes "
             f"({', '.join(sorted(mine))}) — name the one this child belongs "
-            f"in, or pass mesh: {NO_MESH!r} to start it outside every mesh. "
+            f"in, or pass mesh: {NO_MESH!r} for only a parent channel. "
             "A child is put in its parent's mesh by default, and with several "
             "there is no default to take"
         )
@@ -538,7 +538,7 @@ def preflight(
     # child how to answer has to name the same one.
     parent_handle = ""
     if parent and local_mesh is not None:
-        member = mesh_mgr.resolve_sender(mesh, parent)
+        member = mesh_mgr.member_for_session(local_mesh, parent)
         if member is not None:
             parent_handle = member.handle
 
@@ -611,8 +611,8 @@ def _identity_block(
             + (
                 f" It answers in mesh {mesh!r} as {parent_handle!r}."
                 if mesh and parent_handle
-                else " You share no mesh with it, so you have no channel back "
-                "— say so in your first turn rather than working on regardless."
+                else " The opening block names your parent channel and reply "
+                "command; use rebrief to recover them when needed."
             )
         )
     if workflow and workflow_version == 2:
@@ -723,12 +723,6 @@ async def arrange(plan: Plan, *, name: str, cwd: str, mesh_mgr) -> Tuple[dict, s
     result: dict = {}
     sections: list = []
 
-    # First, because it is the frame the rest is read in: a child that learns
-    # its assignment before it learns who assigned it has already started
-    # working out what to do with the result on its own.
-    if plan.parent:
-        sections.append(_parent_block(plan))
-
     if plan.mesh:
         joined = await _join(plan, name, mesh_mgr=mesh_mgr)
         result["mesh"] = joined
@@ -736,6 +730,17 @@ async def arrange(plan: Plan, *, name: str, cwd: str, mesh_mgr) -> Tuple[dict, s
             sections.append(joined.pop("briefing"))
         else:
             joined.pop("briefing", None)
+
+    if plan.parent:
+        # Establish the route before launch; its reply command leads the
+        # opening even when the requested team join failed or is pending.
+        try:
+            channel = await mesh_mgr.ensure_parent_channel(name, plan.parent)
+        except Exception:
+            await unwind(result, name=name, cwd=cwd, mesh_mgr=mesh_mgr)
+            raise
+        result["parent_channel"] = channel
+        sections.insert(0, _parent_block(plan, channel=channel))
 
     if plan.workflow:
         started = _start_workflow(plan, name=name, cwd=cwd)
@@ -788,7 +793,7 @@ async def arrange(plan: Plan, *, name: str, cwd: str, mesh_mgr) -> Tuple[dict, s
     return result, "\n\n".join(sections)
 
 
-def _parent_block(plan: Plan) -> str:
+def _parent_block(plan: Plan, *, channel: Optional[dict] = None) -> str:
     """Who is waiting, and the exact command that answers them.
 
     The system prompt carries the same fact and outlives this block, so the
@@ -801,16 +806,18 @@ def _parent_block(plan: Plan) -> str:
     handle will sometimes assemble it wrong, and a misaddressed report reads
     to its parent exactly like no report at all.
     """
+    mesh = channel["mesh"] if channel else plan.mesh
+    parent_handle = channel["parent_handle"] if channel else plan.parent_handle
     reply = (
-        f"claunch mesh send {plan.mesh} {plan.parent_handle} \"...\""
-        if plan.mesh and plan.parent_handle
+        f"claunch mesh send {mesh} {parent_handle} \"...\""
+        if mesh and parent_handle
         else "(no shared mesh -- you have no channel back; say so in your reply)"
     )
     return (
         "---\n"
         "# claunch: the session that created you -- machine-generated\n"
         f"parent: {plan.parent}\n"
-        + (f"parent_handle: {plan.parent_handle}\n" if plan.parent_handle else "")
+        + (f"parent_handle: {parent_handle}\n" if parent_handle else "")
         + f"reply: {reply}\n"
         "protocol: this session exists because that one asked for it. Send it "
         "progress when the shape of the work changes, and the result when you "
@@ -829,6 +836,12 @@ async def unwind(report: dict, *, name: str, cwd: str, mesh_mgr) -> None:
     the name next. Best-effort: this runs while another error is already on its
     way to the caller, and a failure to tidy up must not replace it.
     """
+    channel = report.get("parent_channel") or {}
+    if channel.get("created"):
+        try:
+            mesh_mgr.delete(channel["mesh"])
+        except Exception as exc:  # noqa: BLE001 — best effort
+            log.warning("could not undo parent channel for %r: %s", name, exc)
     joined = report.get("mesh") or {}
     if joined.get("ok"):
         try:

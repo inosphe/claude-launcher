@@ -22,6 +22,15 @@ def said(capsys, result) -> str:
     return capsys.readouterr().out
 
 
+def test_spawn_prints_the_parent_channel_and_child_address(capsys):
+    out = said(capsys, {"parent_channel": {
+        "mesh": "pair", "parent_handle": "boss", "child_handle": "worker",
+        "created": True,
+    }})
+    assert "parent channel pair: boss <-> worker" in out
+    assert 'claunch mesh send pair worker "..."' in out
+
+
 def test_a_pending_join_is_reported_as_a_wait_not_a_failure(capsys):
     """The old line collapsed `error` and `pending` with `or`, so a pend
     printed "mesh join failed" followed by the pending dict's repr."""

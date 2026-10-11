@@ -338,7 +338,7 @@ def _parent_section(sdef, manager, mesh_mgr) -> str:
     mesh_name = handle = ""
     try:
         for row in mesh_mgr.meshes_for_session(sdef.name):
-            member = mesh_mgr.resolve_sender(row["mesh"], parent)
+            member = mesh_mgr.member_for_session(mesh_mgr.get(row["mesh"]), parent)
             if member is not None:
                 mesh_name, handle = row["mesh"], member.handle
                 break

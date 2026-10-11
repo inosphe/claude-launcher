@@ -2521,10 +2521,10 @@ def test_a_parent_in_no_mesh_says_one_will_be_opened():
     assert "opened for the pair" in wiz.field("mesh").options[0].label
 
 
-def test_no_mesh_at_all_takes_the_handle_and_the_roster_with_it():
+def test_parent_channel_only_hides_the_team_handle_and_roster():
     wiz = spawn_form()
     assert not wiz.field("handle").hidden
-    pick(wiz, "mesh", "- no mesh")
+    pick(wiz, "mesh", "- parent channel only")
     assert wiz.field("handle").hidden
     assert wiz.field("connect").hidden
     args = argparse.Namespace()
