@@ -453,3 +453,61 @@ def test_the_sweep_gate_judges_the_merged_repository(tmp_path, repo_template, mo
                        "--command", green]) == 0
     ld.report("sweep", "ok", value, verify=gate)
     assert ld.tasks() == ["reflect"]  # green: the merged repository's receipt
+
+
+# claunch-4zc51.1.1: the leader's wrapup said "basetemp는 지우지 않는다 --
+# 포렌식 기록" and nothing removed the leader's sweep basetemps afterwards
+# (C:/t held s469w, s469w1..w22 and more). Both leader canonicals now have the
+# leader remove its own name shapes after moving the four values into the
+# final report, the way the worker's wrapup does since claunch-4zc51.1.
+_LEADER_OWN_ARTIFACT_LINES = (
+    "**이 리더 세션이 직접 만든 테스트 부산물은 이 세션이 전부 지운다**",
+    "── 테스트 부산물 정리 (이 리더 세션이 만든 것만, 전부) ──",
+    "`ls -d C:/t/${CLAUNCH_SESSION}w C:/t/${CLAUNCH_SESSION}w[0-9]* "
+    "C:/t/${CLAUNCH_SESSION}c[0-9]* C:/t/${CLAUNCH_SESSION}-* 2>/dev/null`",
+    "접두사만으로 고르지 않는다: `C:/t/s46*`은 s469의 것까지 잡는다.",
+    "`git worktree remove --force <경로>`",
+    "미리보기 ref(`refs/claunch/preview/*`)는 이 절의 대상이 아니다",
+    "워커나 다른 세션의 항목은 그 세션이 이미 종료됐어도 여기서 지우지 않는다",
+    # s469's three conditions (msg-81cfb74ff39f)
+    "지우는 자리는 교대 종료(이 스텝) 하나다. 회차 도중에는 지우지 않는다",
+    "네 값을 최종 보고에 옮긴 뒤에 지운다",
+    "아직 도는 sweep grant가 있으면",
+    "교대를 넘어 디렉터리를 보존할 이유가 없다",
+)
+
+
+def _leader_wrapup(which):
+    import yaml
+    from pathlib import Path
+    wf = Path(__file__).resolve().parents[1] / "src" / "claude_launcher" / "workflows"
+    if which == "v1":
+        step = yaml.safe_load((wf / "improv-leader.yaml").read_text(encoding="utf-8"))
+        step = step["steps"]["wrapup"]
+        return step["instructions"], step["done_when"], None
+    node = yaml.safe_load((wf / "v2" / "improv-leader-v2.yaml").read_text(encoding="utf-8"))
+    node = node["nodes"]["wrapup"]
+    return node["prompt"], node["done_when"], node["effects"]
+
+
+def _flat(text):
+    return " ".join(text.split())
+
+
+@pytest.mark.parametrize("which", ["v1", "v2"])
+def test_leader_wrapup_removes_the_test_artifacts_its_own_session_made(which):
+    words, done, effects = _leader_wrapup(which)
+    words, done = _flat(words), _flat(done)
+    assert "basetemp는 지우지 않는다" not in words
+    for line in _LEADER_OWN_ARTIFACT_LINES:
+        assert _flat(line) in words, line
+    assert "(시작 · 소요 · 워커 수 · 실행량)" in done
+    assert "`C:/t/<세션>w`·`C:/t/<세션>w<숫자>…`·" in done
+    if effects is not None:
+        assert "fs.write" in effects
+
+
+def test_leader_wrapup_names_cover_the_sweep_basetemp():
+    # tools/sweep.py's default command is where `<세션>w` comes from
+    sweep = _load_sweep()
+    assert '--basetemp="{root}/{session}w"' in sweep.DEFAULT_COMMAND
