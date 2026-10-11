@@ -1409,7 +1409,8 @@ html[data-theme="light"] .xterm {
 /* Compact: one line per session -- the dot, the name and its role, the
    state text and the buttons that say something. The role is rigid here:
    it is the reason this line exists, so the name gives up width first (its
-   whole text is on its title) and the rooms are left to the ⓘ panel. The
+   whole text is on its title) and the rooms and the handle are left to the
+   ⓘ panel. The
    detail lines go, and so do the controls that act on them (the checks' and
    briefing's ⟳, the note pen, the spawn +); a pin or an observe pin is kept
    only while it is on, since then it is a state of the row. What stays
@@ -1420,7 +1421,11 @@ html[data-theme="light"] .xterm {
 #session-list.density-compact li[data-name] > .rail-head { order: 0; flex: 1 1 0; }
 #session-list.density-compact .rail-name { flex: 0 1 auto; max-width: none; }
 #session-list.density-compact .rail-head > .mesh-role { flex: none; }
-#session-list.density-compact .rail-meshes { display: none; }
+/* The rooms and the mesh handle are left to the expanded card and the ⓘ
+   panel. The handle's 4em floor beside a rigid role and the name's 2.5em
+   was more than the 260px line holds, and the name group cut the role to
+   make room (claunch-g4owg review) -- the one pill this line promises. */
+#session-list.density-compact :is(.rail-meshes, .rail-handle) { display: none; }
 #session-list.density-compact li[data-name] > .meta {
   margin-left: 0; margin-right: 0; flex: 0 1 auto; min-width: 0; max-width: 38%;
 }

@@ -9,9 +9,10 @@
 
    Expanded (the default): the name and its tags take the first line on
    their own, at both the default 260px rail and a wide one, and no tag is
-   clipped. Compact: one line per session -- the name, the role, the state
-   text and the ⓘ share a line, the detail lines are not drawn, and the
-   role is still whole. The choice is remembered across a reload. */
+   clipped -- the handle, the role and the room. Compact: one line per
+   session -- the name, the role, the state text and the ⓘ share a line,
+   the detail lines, the handle and the room are not drawn, and the role is
+   still whole. The choice is remembered across a reload. */
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const http = require("node:http");
@@ -28,6 +29,19 @@ const sessions = [
   { name: "s954-with-a-longer-name", status: "busy", cwd: "/repo", harness: "claude",
     profile: "nc", role: "worker", parent: "s930" },
 ];
+// Every row is a mesh member under a handle of its own, so each carries the
+// three pills the name line can hold: the handle, the role and the room.
+// Most sessions on a working daemon look like this.
+const meshes = {
+  meshes: [{
+    name: "mesh-0826",
+    members: [
+      { session: "s812", local: true, handle: "s812-planner", role: "free-role" },
+      { session: "s930", local: true, handle: "s930-x", role: "reviewer" },
+      { session: "s954-with-a-longer-name", local: true, handle: "worker-r13", role: "worker" },
+    ],
+  }],
+};
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, "http://fixture");
   if (url.pathname.startsWith("/api/")) {
@@ -36,6 +50,7 @@ const server = http.createServer((req, res) => {
     let data = {};
     if (url.pathname === "/api/daemon") data = { version: "fixture", boot_id: "test" };
     else if (url.pathname === "/api/sessions") data = { sessions, llm_configured: true };
+    else if (url.pathname === "/api/mesh") data = meshes;
     else if (url.pathname.endsWith("/capture")) data = { lines: [] };
     else if (/^\/api\/(profiles|workspaces|mesh|cflow|harnesses|roles)$/.test(url.pathname)) data = [];
     res.end(JSON.stringify(data));
@@ -59,16 +74,25 @@ const measure = (page) => page.evaluate(() => {
       const box = (n) => n.getBoundingClientRect();
       const name = li.querySelector(".rail-name");
       const role = li.querySelector(".mesh-role");
+      const head = li.querySelector(".rail-head");
+      // Cut by its own ellipsis, or by the name group's overflow around it --
+      // the second is how a rigid pill gets cut.
+      const clipped = (n) => n.scrollWidth > n.clientWidth + 1
+        || box(n).right > box(head).right + 1;
+      // Boxes, not the display value: a pill inside a hidden group still
+      // reads its own display.
+      const shown = (n) => n.getClientRects().length > 0;
+      const pills = [...head.querySelectorAll(".rail-handle, .mesh-role, .rail-mesh")];
       const meta = li.querySelector(".meta");
       const info = li.querySelector(".sess-info");
       const cwd = li.querySelector(".rail-cwd");
       return {
         name: li.dataset.name,
         roleText: role.textContent,
-        // Clipped by its own ellipsis, or by the name group's overflow
-        // around it -- the second is how a rigid pill gets cut.
-        roleClipped: role.scrollWidth > role.clientWidth + 1
-          || box(role).right > box(li.querySelector(".rail-head")).right + 1,
+        roleClipped: clipped(role),
+        handleShown: !!head.querySelector(".rail-handle") && shown(head.querySelector(".rail-handle")),
+        meshShown: !!head.querySelector(".rail-mesh") && shown(head.querySelector(".rail-mesh")),
+        clippedPills: pills.filter((n) => shown(n) && clipped(n)).map((n) => n.textContent),
         nameMid: mid(box(name)), nameBottom: box(name).bottom,
         roleMid: mid(box(role)),
         metaMid: mid(box(meta)), metaTop: box(meta).top,
@@ -94,7 +118,8 @@ const measure = (page) => page.evaluate(() => {
         if (w) localStorage.setItem("claunch_railw:/", String(w));
       }, railWidth);
       await page.goto(`http://127.0.0.1:${server.address().port}`);
-      await page.locator('#session-list li.sess-card[data-name="s954-with-a-longer-name"]').waitFor();
+      // The handles arrive with the mesh poll, after the first rows.
+      await page.locator('#session-list li.sess-card[data-name="s954-with-a-longer-name"] .rail-handle').waitFor();
       return page;
     };
 
@@ -108,7 +133,8 @@ const measure = (page) => page.evaluate(() => {
       assert.equal(exp.rows.length, sessions.length);
       for (const r of exp.rows) {
         const where = `${label}, expanded, ${r.name}`;
-        assert.ok(!r.roleClipped, `${where}: the role "${r.roleText}" is drawn whole`);
+        assert.ok(r.handleShown && r.meshShown, `${where}: the handle and the room are drawn`);
+        assert.deepEqual(r.clippedPills, [], `${where}: no pill on the name line is cut`);
         assert.ok(Math.abs(r.roleMid - r.nameMid) <= 4 || r.roleMid > r.nameMid,
           `${where}: the role sits with the name`);
         assert.ok(r.metaTop >= r.nameBottom - 1,
@@ -123,6 +149,9 @@ const measure = (page) => page.evaluate(() => {
       for (const r of cmp.rows) {
         const where = `${label}, compact, ${r.name}`;
         assert.ok(!r.roleClipped, `${where}: the role "${r.roleText}" is drawn whole`);
+        // The handle and the room are the expanded card's and the ⓘ panel's:
+        // beside a whole role they were what cut it on the 260px line.
+        assert.ok(!r.handleShown && !r.meshShown, `${where}: the handle and the room are not drawn`);
         // The state text is on the line where there is room for it, and off
         // the narrow rail's compact line, which is all name and role.
         assert.equal(r.metaShown, !!railWidth, `${where}: the state text is drawn only on the wide rail`);
