@@ -2600,6 +2600,11 @@ class Wizard(Form):
         args.connect = list(self.value("connect") or []) if args.mesh else []
         args.workflow = self.value("workflow") or None
         args.context = (self.value("context") or None) if args.workflow else None
+        # The role's workflow was offered (auto-picked) and the person cleared
+        # it: that is a "no", sent as '-' so the daemon records the refusal
+        # on the session instead of asking it again (claunch-val3l.1).
+        if not args.workflow and args.mesh and getattr(self, "_workflow_auto", ""):
+            args.workflow = "-"
         args.task = self.value("task") or None
         (
             args.issue, args.no_issue, args.no_issue_auto, args.issue_text

@@ -2852,7 +2852,11 @@ def register(sub) -> None:
         help="a member it may message (repeatable); without any it can reach "
              "the whole mesh",
     )
-    p_new.add_argument("--workflow", help="cflow workflow to start for it")
+    p_new.add_argument(
+        "--workflow",
+        help="cflow workflow to start for it; '-' records that you declined "
+        "a run (a mesh leader sees it on the roster)",
+    )
     p_new.add_argument("--context", help="context string for that workflow run")
     p_new.add_argument("--input", action="append", metavar="NAME=VALUE", help=INPUT_HELP)
     p_new.add_argument("--inputs-file", metavar="PATH", help=INPUTS_FILE_HELP)

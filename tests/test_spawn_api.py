@@ -2030,6 +2030,10 @@ def test_a_named_workflow_overrides_the_pair_and_a_dash_refuses_it(home, tmp_pat
             body = await refused.json()
             assert "workflow" not in body, body.get("workflow")
             assert "w2" not in cflow_state.scopes_in(str(tmp_path))
+            # the parent's choice for its child, not a user's refusal: nothing
+            # is recorded for a leader to read (claunch-val3l)
+            assert "cflow" not in body
+            assert mgr.get("w2").sdef.cflow_declined is None
 
             await mgr.shutdown_all()
         finally:

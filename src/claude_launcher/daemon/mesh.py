@@ -8505,6 +8505,17 @@ class MeshManager:
             )
         return out
 
+    def _cflow_declined(self, session: str) -> Optional[dict]:
+        """The recorded cflow refusal on a local member's session, or None
+        (no session behind the member, or none recorded)."""
+        if not session:
+            return None
+        try:
+            record = self.manager.get(session).sdef.cflow_declined
+        except Exception:
+            return None
+        return dict(record) if record else None
+
     def _lineage_map(self, mesh: Mesh) -> Dict[str, str]:
         """Every member's parent, ours derived and the rest as reported.
 
@@ -8627,6 +8638,13 @@ class MeshManager:
                     # as it was: the CLI prints it and the spawn tests read it.
                     "category": category,
                     "parent": parent if parent in mesh.members else None,
+                    # The member's user said no to a cflow run for it
+                    # (claunch-val3l.2): the leader reads this to stop asking
+                    # it for what only a run produces. Ours only -- another
+                    # daemon's sessions are not on this record.
+                    "cflow_declined": (
+                        self._cflow_declined(m.session) if local else None
+                    ),
                 }
             )
         # The whole rank list, ourselves included — the diagram draws nodes

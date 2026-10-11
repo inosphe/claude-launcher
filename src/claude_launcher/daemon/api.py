@@ -862,6 +862,8 @@ def build_app(
     r.add_delete("/api/sessions/{name}", h_session_delete)
     r.add_post("/api/sessions/{name}/keep-alive", h_session_keep_alive)
     r.add_post("/api/sessions/{name}/note", h_session_note)
+    r.add_post("/api/sessions/{name}/cflow-declined", h_session_cflow_declined)
+    r.add_delete("/api/sessions/{name}/cflow-declined", h_session_cflow_declined)
     r.add_post("/api/sessions/{name}/model", h_session_model)
     r.add_post("/api/sessions/{name}/respawn", h_session_respawn)
     r.add_post("/api/sessions/{name}/migrate", h_session_migrate)
@@ -7740,6 +7742,16 @@ async def _onboard_and_launch(
         except beads_mod.BoardRequestError as exc:
             raise onboard.OnboardError(str(exc)) from None
         image_ids = _opening_image_ids(body, session.sdef.harness)
+        # The operator's explicit "no workflow" on a session they create
+        # (claunch-val3l.1): the CLI's --no-workflow, the form's cleared
+        # role default. Taken out before preflight, which reads '-' as a
+        # workflow name, and recorded on the session below. A spawn's '-'
+        # keeps its own meaning (decline the parent's pair, inherit_workflow).
+        declined_at_creation = (
+            not parent and body.get("workflow") == onboard.NO_WORKFLOW
+        )
+        if declined_at_creation:
+            body.pop("workflow")
         if parent:
             await onboard.inherit_mesh(
                 body,
@@ -7877,6 +7889,44 @@ async def _onboard_and_launch(
                 plan,
                 task=(plan.task + "\n\n" if plan.task else "")
                 + beads_mod.compose_none_note(none, session=name),
+            )
+
+    # A session someone created by hand, holding a mesh role, with no run
+    # (claunch-val3l.1). Nothing is started for it here: a run begins only on
+    # its user's explicit yes, so the opening carries the question (when its
+    # role selects a workflow) or, when the operator already said no, the
+    # recorded refusal that a mesh leader reads off the roster.
+    if not parent and plan.mesh and not plan.workflow:
+        offered, version = "", 0
+        if plan.role:
+            try:
+                entries = await asyncio.to_thread(_startable_all, cwd)
+                offered, version = onboard.role_default_workflow(
+                    entries, plan.role, _role_workflows_or_none()
+                )
+            except Exception:  # noqa: BLE001 - a hint, never a refusal
+                log.warning("could not resolve the %s role's workflow for %s",
+                            plan.role, name, exc_info=True)
+        note = ""
+        # A '-' with nothing to refuse (the form judged another directory's
+        # list, or the override picks none) records nothing.
+        if declined_at_creation and offered:
+            session.sdef = replace(session.sdef, cflow_declined={
+                "workflow": offered,
+                "reason": "declined by the operator at creation",
+                "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "by": "operator",
+            })
+            note = onboard.compose_cflow_declined_note(workflow=offered)
+            report["cflow"] = {"declined": True, "workflow": offered}
+        elif offered:
+            note = onboard.compose_cflow_offer(
+                role=plan.role, workflow=offered, version=version
+            )
+            report["cflow"] = {"offered": offered}
+        if note:
+            plan = replace(
+                plan, task=(plan.task + "\n\n" if plan.task else "") + note
             )
 
     # TEMPORARY (claunch-z7b0n), during the v1 -> v2 migration: the run's
@@ -8029,6 +8079,9 @@ async def h_session_children(request: web.Request) -> web.Response:
             run = cflow_clock.run_summary(child, sess.sdef.cwd or "")
             if run:
                 entry["cflow"] = run
+            # No run because the child's user said no (claunch-val3l.2).
+            if sess.sdef.cflow_declined:
+                entry["cflow_declined"] = dict(sess.sdef.cflow_declined)
             children.append(entry)
         parent_cwd = manager.get(name).sdef.cwd or ""
         return {
@@ -9176,6 +9229,30 @@ async def h_session_note(request: web.Request) -> web.Response:
     except ValueError as exc:
         return json_error(400, str(exc))
     return json_response(session.info())
+
+
+async def h_session_cflow_declined(request: web.Request) -> web.Response:
+    """Record (POST) or withdraw (DELETE) a user's "no" to a cflow run for
+    this session (claunch-val3l.2, :attr:`SessionDef.cflow_declined`).
+
+    POST takes ``{"workflow", "reason", "by"}``, all optional text: the
+    workflow that was offered, the user's answer in their words, and who
+    recorded it (the CLI sends the calling session). The record is what a mesh
+    leader reads -- on the roster and on ``children`` -- to tell a worker that
+    runs no cflow by its user's decision from one whose run is missing.
+    """
+    manager: SessionManager = request.app["manager"]
+    name = request.match_info["name"]
+    if request.method == "DELETE":
+        return json_response(manager.clear_cflow_declined(name).info())
+    body = await _json_body(request)
+    fields = {}
+    for key in ("workflow", "reason", "by"):
+        value = body.get(key)
+        if value is not None and not isinstance(value, str):
+            return json_error(400, f"'{key}' must be text")
+        fields[key] = value or ""
+    return json_response(manager.set_cflow_declined(name, **fields).info())
 
 
 async def h_session_model(request: web.Request) -> web.Response:
