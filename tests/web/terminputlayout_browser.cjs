@@ -3,6 +3,9 @@
 // field stays one row however narrow the bar is (its placeholder does not wrap
 // it open), and the field never shows a scrollbar for content it fits
 // (autogrowTermInput adds the border scrollHeight leaves out) (claunch-hmz62).
+// At rest the field is one row; clicked, it opens upward over the terminal
+// without changing the bar's height, and closes again on blur
+// (claunch-hmz62.2).
 const { chromium } = require('playwright');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -34,7 +37,8 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
         && getComputedStyle(el).display !== 'none');
       const note = document.getElementById('term-input-note');
       return {
-        field: { h: box(field).height, w: box(field).width, bottom: box(field).bottom,
+        barH: box(form).height, barTop: box(form).top,
+        field: { h: box(field).height, w: box(field).width, top: box(field).top, bottom: box(field).bottom,
                  overflow: field.scrollHeight > field.clientHeight },
         buttons: buttons.map(el => ({ id: el.id, h: box(el).height, bottom: box(el).bottom })),
         note: { h: box(note).height, w: box(note).width, bottom: box(note).bottom },
@@ -49,7 +53,7 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
     await page.evaluate(() => {
       const form = document.getElementById('term-input');
       document.body.appendChild(form);
-      Object.assign(form.style, { position: 'fixed', left: '0', right: '0', bottom: '0', zIndex: '999' });
+      Object.assign(form.style, { position: 'fixed', left: '0', right: '0', bottom: '0' });
       form.classList.remove('hidden');
       const note = document.getElementById('term-input-note');
       note.textContent = 'this session has ended — a line sent now is queued and typed when the session is back';
@@ -88,27 +92,84 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
       }
     }
 
-    // Typed text: one line stays one row without a scrollbar; three lines grow
-    // the field and the buttons stay on its bottom edge.
+    // Typed text, at rest: one line is one row without a scrollbar, and so
+    // are three -- the field stays one row until it is clicked
+    // (claunch-hmz62.2).
     await page.setViewportSize({ width: 1280, height: 600 });
-    const one = await page.evaluate(() => {
+    const type = text => page.evaluate(value => {
       const field = document.getElementById('term-input-field');
-      field.value = 'hello';
-      autogrowTermInput(field);
-      return { h: field.getBoundingClientRect().height, overflow: field.scrollHeight > field.clientHeight };
-    });
-    assert.equal(one.overflow, false, 'a one-line value overflows its field');
-    await page.evaluate(() => {
-      const field = document.getElementById('term-input-field');
-      field.value = 'one\ntwo\nthree';
-      autogrowTermInput(field);
-    });
-    const three = await measure();
-    assert.ok(three.field.h > one.h + 30, `three lines did not grow the field: ${three.field.h}`);
-    assert.equal(three.field.overflow, false, 'a three-line value overflows its field');
-    for (const b of three.buttons) {
-      assert.ok(Math.abs(b.bottom - three.field.bottom) < 1, `${b.id} left the field's bottom edge`);
+      field.value = value;
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+    }, text);
+    await type('hello');
+    const rest = await measure();
+    const row = rest.buttons[0].h;
+    assert.equal(rest.field.overflow, false, 'a one-line value overflows its field');
+    await type('one\ntwo\nthree');
+    const restThree = await measure();
+    assert.ok(Math.abs(restThree.field.h - row) < 1, `three lines at rest opened the field to ${restThree.field.h}px`);
+    assert.equal(restThree.barH, rest.barH, 'three lines at rest changed the bar height');
+    assert.equal(await page.evaluate(() => getComputedStyle(document.getElementById('term-input-field')).overflowY),
+      'hidden', 'a field at rest shows a scrollbar');
+
+    // Clicked: the field opens upward to its content, over the terminal; the
+    // bar keeps its height (the terminal above is not resized) and the
+    // buttons stay on the field's bottom edge.
+    await page.click('#term-input-field');
+    const open = await measure();
+    assert.ok(open.field.h > row + 30, `three lines did not open the field: ${open.field.h}px`);
+    assert.equal(open.field.overflow, false, 'an opened three-line field overflows');
+    assert.equal(open.barH, rest.barH, `opening the field changed the bar height ${rest.barH} -> ${open.barH}`);
+    assert.ok(open.field.top < open.barTop, 'the opened field did not rise above the bar');
+    for (const b of open.buttons) {
+      assert.ok(Math.abs(b.bottom - open.field.bottom) < 1, `${b.id} left the field's bottom edge`);
     }
+    // What is on screen where the field rose is the field, over a layer
+    // standing in for xterm's (they stack up to z-index 10) inside the real
+    // #terminal, which holds them (isolation) -- and a page-wide overlay
+    // (#auth-overlay, z-index 10) still covers the field.
+    const hits = await page.evaluate(top => {
+      const form = document.getElementById('term-input');
+      const terminal = document.getElementById('terminal');
+      document.body.insertBefore(terminal, form);
+      // absolute, not fixed: a fixed box is a stacking context of its own and
+      // would hold the layer without the stylesheet's isolation
+      Object.assign(terminal.style, { position: 'absolute', left: '0', right: '0', top: '0',
+        height: `${form.getBoundingClientRect().top}px`, padding: '0' });
+      const layer = document.createElement('div');
+      Object.assign(layer.style, { position: 'absolute', inset: '0', zIndex: '10', background: '#123' });
+      terminal.appendChild(layer);
+      const field = document.getElementById('term-input-field');
+      const r = field.getBoundingClientRect();
+      const over = document.elementFromPoint(r.left + 20, top + 5) === field;
+      const auth = document.getElementById('auth-overlay');
+      auth.classList.remove('hidden');
+      const mid = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      const covered = mid !== field && auth.contains(mid);
+      auth.classList.add('hidden');
+      layer.remove();
+      return { over, covered };
+    }, open.field.top);
+    assert.equal(hits.over, true, 'the opened field is covered by the terminal');
+    assert.equal(hits.covered, true, 'the auth overlay does not cover the opened field');
+
+    // Clicked while empty: three lines of room to type in.
+    await type('');
+    const openEmpty = await measure();
+    assert.ok(openEmpty.field.h > row + 30, `an empty clicked field stayed ${openEmpty.field.h}px`);
+    assert.equal(openEmpty.barH, rest.barH, 'an empty opened field changed the bar height');
+
+    // Many lines: capped at 30vh, the rest scrolls.
+    await type(Array.from({ length: 40 }, (_, i) => `line ${i}`).join('\n'));
+    const tall = await measure();
+    assert.ok(tall.field.h <= 600 * 0.3 + 1, `the field passed its ceiling: ${tall.field.h}px`);
+
+    // Blurred: back to one row, its margin cleared.
+    await page.evaluate(() => document.getElementById('term-input-field').blur());
+    const back = await measure();
+    assert.ok(Math.abs(back.field.h - row) < 1, `blur left the field at ${back.field.h}px`);
+    assert.equal(await page.evaluate(() => document.getElementById('term-input-field').style.marginTop), '');
+    assert.equal(back.barH, rest.barH, 'blur changed the bar height');
 
     assert.deepEqual(errors, []);
     console.log('terminputlayout_browser: ok');

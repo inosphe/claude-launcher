@@ -2387,6 +2387,12 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 #terminal {
   flex: 1; padding: 6px; min-height: 0; overflow: hidden; position: relative;
   box-sizing: content-box;
+  /* xterm's layers (up to z-index 10) and the overlays drawn over them stack
+     inside the terminal, so the session line opened over it (#term-input,
+     positioned and after #terminal in the document) is drawn above it
+     without a z-index of its own, and page-wide overlays such as
+     #auth-overlay (z-index 10) still cover both (claunch-hmz62.2). */
+  isolation: isolate;
 }
 /* The throughput overlay on the PTY's top-right corner: the number big
    enough to read from the screen, the rest small under it. It floats
@@ -2519,6 +2525,14 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 #term-input-field:focus { outline: none; border-color: #1f6feb; }
+/* Opened by a click (autogrowTermInput sets its height, at least three
+   lines to type in): drawn upward over the terminal, which keeps xterm's
+   layers inside it (#terminal, isolation).
+   At rest it is one row, its overflow hidden rather than scrolled. */
+#term-input-field[data-expand-on-focus]:focus {
+  position: relative; box-shadow: 0 -4px 14px #0006;
+}
+#term-input-field[data-expand-on-focus]:not(:focus) { overflow-y: hidden; }
 #term-input-field:disabled { opacity: 0.5; cursor: not-allowed; }
 /* Session line sync (daemon/line_sync.py). In remote-sync mode the field is
    the line every browser on the session shares, and says so by its border;
