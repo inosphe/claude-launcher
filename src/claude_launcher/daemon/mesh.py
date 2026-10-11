@@ -9481,7 +9481,7 @@ class MeshManager:
     def record_only(
         self, session: str, *, sender: str, body: str, ref: Optional[dict] = None
     ) -> List[str]:
-        """Write one log-only entry about ``session`` into every mesh this
+        """Write one log-only entry about ``session`` into every team mesh this
         daemon owns that ``session`` belongs to, and deliver it to nobody.
 
         For traffic that already reached its terminal by another path (a
@@ -9491,12 +9491,14 @@ class MeshManager:
         session's handle in ``to`` would read as undelivered to ``pending``
         and be typed in a second time on the next drain. Who it was for is
         in ``body`` and ``ref``. Mirrored meshes are skipped -- their log is
-        the authority's to append to. Returns the mesh names written.
+        the authority's to append to. Auxiliary parent channels are skipped:
+        they carry direct messages, not copies of the session's team activity.
+        Returns the mesh names written.
         """
         written: List[str] = []
         for row in self.meshes_for_session(session):
             mesh = self._meshes.get(row["mesh"])
-            if mesh is None or mesh.primary:
+            if mesh is None or mesh.primary or mesh.parent_channel:
                 continue
             msg = {
                 "id": "msg-" + uuid.uuid4().hex[:12],

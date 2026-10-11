@@ -1780,6 +1780,8 @@ just those two sessions. The spawn response's `parent_channel` gives `mesh`,
 `parent_handle`, and `child_handle`, and the child's opening gives the reply
 command. The auxiliary mesh records `parent_channel` in `mesh.json` so it
 survives restart and is excluded from subsequent default team inheritance.
+Log-only copies of team activity (such as `deep_think` notes and answers)
+exclude auxiliary parent channels; direct messages still use those channels.
 `mesh: "-"` still creates this parent route. A failed launch removes a newly
 created auxiliary mesh together with the child's team membership.
 
