@@ -2359,14 +2359,40 @@ class TriggerClock:
         (:meth:`.landing_route.Router.stacked`). Blocking; call it in a thread."""
         return landing_route.Router(self.manager, self.mesh, self.v1_holders).stacked(cwd, scope)
 
+    async def _landing_facts(self, cwd: str, scope: str) -> Tuple[dict, Optional[str]]:
+        """The worker's landing request as measured now, and why it must not
+        be filed (None when it may).
+
+        Measured in the checkout the session works in, the way the v2 trigger
+        does (:func:`.cflow2_triggers.session_facts`): a run started at the
+        main checkout whose session then moved into a worktree would
+        otherwise file the integration branch and its tip, and the queue
+        marks that landed at once (claunch-4zc51.1.2, claunch-4zc51.1.3).
+        A request measured on a trunk, on a detached HEAD or at a tip the
+        trunk already holds is refused (:func:`.cflow2_triggers.landing_refusal`).
+        """
+        from . import cflow2_triggers as v2
+
+        facts = await asyncio.to_thread(v2.session_facts(self.manager), cwd, scope)
+        if not facts.get("head"):
+            return facts, f"no commit readable in {facts.get('checkout') or cwd}"
+        if facts.get("in_review") is None:
+            return facts, "the issue board could not be read"
+        if not facts["in_review"]:
+            return facts, f"{scope} holds no issue in_review (no landing request on the board)"
+        refused = await asyncio.to_thread(v2.landing_refusal, facts)
+        if refused:
+            log.warning("cflow enqueue-landing from %s refused: %s", scope, refused)
+        return facts, refused
+
     async def _enqueue_landing(self, cwd: str, scope: str) -> Tuple[bool, str]:
         """This worker's landing request, onto the landing queue of the
         nearest direct ancestor that can merge, else of its sibling mesh
         leader (:meth:`landing_target`). With neither it is an error: the
         reason is journalled and logged, and nothing is filed.
 
-        Read, not reported: the tip and branch from the worker's own
-        checkout (the frozen tip its request names), the issues from the
+        Read, not reported: the tip and branch from the checkout the worker
+        works in (the frozen tip its request names, :meth:`_landing_facts`), the issues from the
         board (what it moved to in_review). Runs whether or not the worker is
         still alive -- the request stands either way.
         """
@@ -2384,15 +2410,10 @@ class TriggerClock:
         # the parent's queue.
         via = target.note()
         pcwd, parent = target.holder.cwd, target.owner
-        tip = await asyncio.to_thread(cflow_landing.head, cwd)
-        if not tip:
-            return False, f"no commit readable in {cwd}"
-        branch = await asyncio.to_thread(cflow_landing.branch, cwd)
-        issues = await asyncio.to_thread(cflow_landing.in_review_of, cwd, scope)
-        if issues is None:
-            return False, "the issue board could not be read"
-        if not issues:
-            return False, f"{scope} holds no issue in_review (no landing request on the board)"
+        facts, refused = await self._landing_facts(cwd, scope)
+        if refused:
+            return False, refused
+        tip, branch, issues = facts["head"], facts["branch"], facts["in_review"]
         # The queue may live on one of the target's SUB runs (a stack that
         # manages the children); the holder names it.
         try:
@@ -2445,15 +2466,10 @@ class TriggerClock:
         chosen = landing_route.pick([
             landing_route.Holder(c, sc, sc == cstore.main_scope(sc), "v2") for c, sc in holders
         ])
-        tip = await asyncio.to_thread(cflow_landing.head, cwd)
-        if not tip:
-            return False, f"no commit readable in {cwd}"
-        branch = await asyncio.to_thread(cflow_landing.branch, cwd)
-        issues = await asyncio.to_thread(cflow_landing.in_review_of, cwd, scope)
-        if issues is None:
-            return False, "the issue board could not be read"
-        if not issues:
-            return False, f"{scope} holds no issue in_review (no landing request on the board)"
+        facts, refused = await self._landing_facts(cwd, scope)
+        if refused:
+            return False, refused
+        tip, branch, issues = facts["head"], facts["branch"], facts["in_review"]
         items = [
             {"issue": i, "branch": branch or "", "tip": tip, "requested_by": scope}
             for i in issues
