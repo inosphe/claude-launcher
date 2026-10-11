@@ -176,6 +176,43 @@ def test_the_session_keeps_the_sequence_off_every_screen(home, tmp_path, monkeyp
     asyncio.run(run())
 
 
+def test_a_publish_alone_is_not_output(home, tmp_path, monkeypatch):
+    """A progress-only read must not move the output clocks: an unattended
+    pi (``background_render: false``) judges busy/idle, ``idle_since`` and
+    STARTING from them alone, so a publish would read as a busy session and
+    hold back delivery (review of 92ea3baf, claunch-siz7t)."""
+    from claude_launcher.daemon import session as session_mod
+    from claude_launcher.daemon.session import STATUS_BUSY, STATUS_IDLE, STATUS_STARTING
+
+    async def run():
+        now = [100.0]
+        monkeypatch.setattr(session_mod.time, "monotonic", lambda: now[0])
+        s = Session(SessionDef(name="parked", harness="pi", cwd=str(tmp_path)),
+                    idle_threshold=2, scrollback=20)
+        monkeypatch.setattr(s, "is_focused", lambda: False)
+        try:
+            assert not s.background_render
+            s._on_output(osc({"stage": "boot"}))
+            assert not s._saw_output
+            assert s._heuristic_status(2) == STATUS_STARTING
+
+            s._on_output(b"ready")
+            now[0] += 60
+            assert s.status() == STATUS_IDLE
+            assert s.idle_since() == 60
+
+            s._on_output(osc({"done": 3}))
+            assert s.status() == STATUS_IDLE
+            assert s.idle_since() == 60
+
+            s._on_output(b"x" + osc({"done": 4}))  # real output beside it counts
+            assert s.status() == STATUS_BUSY
+        finally:
+            s._feeder.close()
+            s._log.close()
+    asyncio.run(run())
+
+
 # --------------------------------------------------------------- the store
 
 def test_the_store_dedups_stamps_persists_and_forgets(home):

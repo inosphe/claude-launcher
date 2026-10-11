@@ -779,11 +779,11 @@ class Session:
                 self._inbound_overflowing = False
         if self.exited:
             return
-        self._saw_output = True
-        self.last_output_at = _utcnow()
-        self._last_output_mono = time.monotonic()
         # Progress sequences are for the daemon, not for any screen: taken
-        # out here, before the renderer and the viewers see the chunk.
+        # out here, before the renderer and the viewers see the chunk -- and
+        # before the output clocks below, so a publish alone never reads as
+        # output: it must not move busy/idle, idle_since or STARTING (an
+        # unattended pi judges idle from ``_last_output_mono`` alone).
         chunk, bodies = self._progress_filter.feed(chunk)
         if bodies and self.on_progress is not None:
             for body in bodies:
@@ -793,6 +793,9 @@ class Session:
                     log.debug("progress from %r dropped", self.sdef.name, exc_info=True)
         if not chunk:
             return
+        self._saw_output = True
+        self.last_output_at = _utcnow()
+        self._last_output_mono = time.monotonic()
         # Queued, not rendered here: pyte is CPU-bound and this runs on the
         # event loop, where a flooding session used to stall accept() (see
         # ScreenFeeder). Logging and the viewer broadcast stay inline — both
