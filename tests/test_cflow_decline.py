@@ -351,3 +351,33 @@ def test_a_no_with_nothing_to_refuse_records_nothing(home, tmp_path, monkeypatch
         assert mgr.get("r2").sdef.cflow_declined is None
 
     _creating(tmp_path, monkeypatch, scenario)
+
+
+def test_a_role_read_off_the_handle_or_an_alias_is_asked_too(home, tmp_path, monkeypatch):
+    """The role the join stores, not the raw 'role' field: a member named
+    worker7, or one given an alias, holds the worker role all the same."""
+    _declare_worker_flow(tmp_path)
+
+    async def scenario(client, mgr, openings):
+        inferred = await _create(client, "s7", tmp_path, handle="worker7", task="fix it")
+        assert inferred.status == 201, await inferred.text()
+        assert (await inferred.json())["cflow"] == {"offered": "worker-flow"}
+        assert "role: worker -- this role's workflow" in openings["s7"]
+
+        alias = await _create(client, "s8", tmp_path, role="coder", task="fix it")
+        assert alias.status == 201, await alias.text()
+        assert (await alias.json())["cflow"] == {"offered": "worker-flow"}
+
+        declined = await _create(client, "s9", tmp_path, handle="worker9",
+                                 task="fix it", workflow="-")
+        assert declined.status == 201, await declined.text()
+        assert mgr.get("s9").sdef.cflow_declined["workflow"] == "worker-flow"
+
+    _creating(tmp_path, monkeypatch, scenario)
+
+
+def test_both_blocks_say_how_to_withdraw_before_a_late_start():
+    offer = onboard.compose_cflow_offer(role="worker", workflow="worker-flow", version=1)
+    note = onboard.compose_cflow_declined_note(workflow="worker-flow")
+    for text in (offer, note):
+        assert "claunch cflow decline --clear" in text

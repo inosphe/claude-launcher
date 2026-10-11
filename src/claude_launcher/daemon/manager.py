@@ -1716,8 +1716,9 @@ class SessionManager:
         return session
 
     def clear_cflow_declined(self, name: str) -> AnySession:
-        """Withdraw a recorded refusal -- the user changed their mind, or a
-        run was started after all."""
+        """Withdraw a recorded refusal -- the user changed their mind. Not
+        called on a run start: the session is told to run ``claunch cflow
+        decline --clear`` before it starts one."""
         session = self.get(name)
         if session.sdef.cflow_declined is not None:
             session.sdef = replace(session.sdef, cflow_declined=None)

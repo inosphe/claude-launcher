@@ -686,7 +686,8 @@ def compose_cflow_offer(*, role: str, workflow: str, version: int) -> str:
         "  no  -> record the answer: claunch cflow decline --workflow "
         f"{workflow} --reason \"<the user's answer>\". The mesh roster then "
         "shows the leader that this session runs no cflow by its user's "
-        "decision, and you work the task without a run.",
+        "decision, and you work the task without a run. If they change their "
+        "mind later, run 'claunch cflow decline --clear' before starting it.",
         "---",
     ]
     return "\n".join(lines)
@@ -700,7 +701,9 @@ def compose_cflow_declined_note(*, workflow: str = "") -> str:
         f"cflow: the operator declined a workflow run{what} for this session "
         "when creating it, and that refusal is recorded on the session (the "
         "mesh roster shows it to the leader). Do not start a run; if a mesh "
-        "leader asks for a run's markers, point it at the roster."
+        "leader asks for a run's markers, point it at the roster. If your user "
+        "later asks for the run, withdraw the refusal first (claunch cflow "
+        "decline --clear), then start it."
     )
 
 

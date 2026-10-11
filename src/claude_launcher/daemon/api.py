@@ -7663,21 +7663,10 @@ def _session_prompt_packs(
     Read from the workspace that owns ``cwd``; see :func:`prompt_packs.choose`.
     """
     roles = [r for r in (plan.role, *plan.subroles) if r]
-    mm = _mesh_mgr(request)
-    if plan.mesh and "@" not in plan.mesh and mm is not None:
-        try:
-            roleset = mm.get(plan.mesh).roleset
-        except MeshError:
-            roleset = None
-        if roleset is not None:
-            # The primary role as the join will store it: an explicit one
-            # through the aliases, else inferred from the handle -- so a
-            # member named ``unreal1`` gets the packs ``--role unreal`` would.
-            try:
-                primary = roleset.resolve(plan.handle or name, plan.role)
-            except mesh_roles.RoleError:
-                primary = plan.role
-            roles = [primary, *(roleset.canonical(r) or r for r in plan.subroles)]
+    roleset = _plan_roleset(request, plan)
+    if roleset is not None:
+        roles = [_plan_primary_role(roleset, plan, name),
+                 *(roleset.canonical(r) or r for r in plan.subroles)]
     asked = _asked_prompt_packs(body)
     required = prompt_packs.required_for(roles)
     # The daemon's own prompt comes first, for every role, unless the
@@ -7691,6 +7680,29 @@ def _session_prompt_packs(
         Path(owner.path) if owner is not None else None, asked, roles
     )
     return head + recs, required
+
+
+def _plan_roleset(request: web.Request, plan):
+    """The roleset of the local mesh ``plan`` joins, or None."""
+    mm = _mesh_mgr(request)
+    if not plan.mesh or "@" in plan.mesh or mm is None:
+        return None
+    try:
+        return mm.get(plan.mesh).roleset
+    except MeshError:
+        return None
+
+
+def _plan_primary_role(roleset, plan, name: str) -> str:
+    """The primary role as the join will store it: an explicit one through
+    the aliases, else inferred from the handle -- so a member named
+    ``unreal1`` is treated as ``--role unreal`` would be."""
+    if roleset is None:
+        return plan.role or ""
+    try:
+        return roleset.resolve(plan.handle or name, plan.role) or ""
+    except mesh_roles.RoleError:
+        return plan.role or ""
 
 
 async def _onboard_and_launch(
@@ -7898,15 +7910,17 @@ async def _onboard_and_launch(
     # recorded refusal that a mesh leader reads off the roster.
     if not parent and plan.mesh and not plan.workflow:
         offered, version = "", 0
-        if plan.role:
+        # the role the join stores, handle-inferred or through an alias
+        role = _plan_primary_role(_plan_roleset(request, plan), plan, name)
+        if role:
             try:
                 entries = await asyncio.to_thread(_startable_all, cwd)
                 offered, version = onboard.role_default_workflow(
-                    entries, plan.role, _role_workflows_or_none()
+                    entries, role, _role_workflows_or_none()
                 )
             except Exception:  # noqa: BLE001 - a hint, never a refusal
                 log.warning("could not resolve the %s role's workflow for %s",
-                            plan.role, name, exc_info=True)
+                            role, name, exc_info=True)
         note = ""
         # A '-' with nothing to refuse (the form judged another directory's
         # list, or the override picks none) records nothing.
@@ -7921,7 +7935,7 @@ async def _onboard_and_launch(
             report["cflow"] = {"declined": True, "workflow": offered}
         elif offered:
             note = onboard.compose_cflow_offer(
-                role=plan.role, workflow=offered, version=version
+                role=role, workflow=offered, version=version
             )
             report["cflow"] = {"offered": offered}
         if note:
