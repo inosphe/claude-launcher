@@ -23,6 +23,7 @@ import re
 import shutil
 import sqlite3
 import time
+from contextlib import contextmanager
 # Bound apart from the module: tests stand a stub in for `time` (monotonic
 # only), and the restore timings must not depend on what that stub carries.
 from time import perf_counter as _perf_counter
@@ -197,6 +198,9 @@ class SessionManager:
         #: the endings a daemon shutdown causes, which are not endings at
         #: all — those sessions come back with the next daemon.
         self.exit_hooks: List[Callable[[Session], None]] = []
+        # Old process objects, not names: the replacement must still report
+        # its own exit normally. Values record an exit received during restart.
+        self._restarting: Dict[int, bool] = {}
         #: Called, with nothing, after every :meth:`persist` — the one funnel
         #: every registry change goes through (a session created, exited,
         #: re-parented, re-labelled). The search index's fleet corpus follows
@@ -594,7 +598,10 @@ class SessionManager:
         self.events.record(session, "exit", "세션 프로세스 종료",
                            exit_code=session.exit_code)
         self.persist()
-        self._run_exit_hooks(session)
+        if id(session) in self._restarting:
+            self._restarting[id(session)] = True
+        else:
+            self._run_exit_hooks(session)
 
     def _run_exit_hooks(self, session: AnySession) -> None:
         for hook in list(self.exit_hooks):
@@ -1989,9 +1996,30 @@ class SessionManager:
                 f"session {name!r} already runs exactly that definition — "
                 "nothing to restart for"
             )
-        if not session.exited:
-            await session.shutdown()
-        return self._recreate(name, session, new)
+        with self._restart_exit_hooks(session):
+            if not session.exited:
+                await session.shutdown()
+            return self._recreate(name, session, new)
+
+    @contextmanager
+    def _restart_exit_hooks(self, session: AnySession):
+        """Defer permanent-exit effects until a restart's outcome is known.
+
+        Success keeps the session's work; failure (including cancellation)
+        releases it if the old process ended. An exit arriving after a failed
+        shutdown is handled normally once this guard has been removed.
+        """
+        if id(session) in self._restarting:
+            raise ManagerError(f"session {session.sdef.name!r} is already restarting")
+        self._restarting[id(session)] = False
+        try:
+            yield
+        except BaseException:
+            if self._restarting.pop(id(session)):
+                self._run_exit_hooks(session)
+            raise
+        finally:
+            self._restarting.pop(id(session), None)
 
     def _recreate(
         self, name: str, session: AnySession, new_def: SessionDef
@@ -2285,23 +2313,23 @@ class SessionManager:
                 config_dir = profile_mod.require_selector(old.profile).config_dir
             except profile_mod.ProfileError as exc:
                 raise ManagerError(str(exc)) from exc
-        if not session.exited:
-            await session.shutdown()
-        moved = None
-        if config_dir is not None:
-            moved = transcripts.relocate(
-                config_dir, old.conversation_id, old.cwd, new_cwd
-            )
-        try:
-            relaunched = self._recreate(name, session, replace(old, cwd=new_cwd))
-        except Exception:
-            if moved is not None:
-                # the transcript returns to the old slug, as the record
-                # _recreate restored already keeps its old definition
-                transcripts.relocate(
-                    config_dir, old.conversation_id, new_cwd, old.cwd
+        with self._restart_exit_hooks(session):
+            if not session.exited:
+                await session.shutdown()
+            moved = None
+            if config_dir is not None:
+                moved = transcripts.relocate(
+                    config_dir, old.conversation_id, old.cwd, new_cwd
                 )
-            raise
+            try:
+                relaunched = self._recreate(name, session, replace(old, cwd=new_cwd))
+            except Exception:
+                if moved is not None:
+                    # Restore the transcript alongside the old definition.
+                    transcripts.relocate(
+                        config_dir, old.conversation_id, new_cwd, old.cwd
+                    )
+                raise
         self.events.record(relaunched, "worktree", "세션 작업 디렉터리 이동",
                            previous=old.cwd, current=new_cwd,
                            transcript_moved=moved is not None)
