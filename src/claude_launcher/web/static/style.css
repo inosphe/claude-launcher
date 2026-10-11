@@ -6563,6 +6563,17 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
   .cf2-col-chart { order: 2; }
 }
 .cf2-col-main, .cf2-col-chart { min-width: 0; }
+.cf2-stack-overview {
+  display: flex; align-items: flex-start; gap: 8px; min-width: 0;
+  cursor: pointer; list-style: none; font-size: 12px; line-height: 24px;
+}
+.cf2-stack-overview::-webkit-details-marker { display: none; }
+.cf2-stack-overview::before { content: "\25b8"; flex: none; color: #8b949e; }
+.cf2-stack-detail[open] > summary::before { content: "\25be"; }
+.cf2-stack-overview:focus-visible { outline: 2px solid #58a6ff; outline-offset: 2px; border-radius: 3px; }
+.cf2-stack-paths { flex: 1; min-width: 0; }
+.cf2-stack-path { display: block; white-space: nowrap; overflow-x: auto; }
+.cf2-stack-detail-label { flex: none; color: #8b949e; }
 .cf2-stack-frame {
   display: flex; flex-wrap: wrap; align-items: flex-start; gap: 4px 10px;
   border-left: 2px solid #30363d; padding: 4px 8px; margin-bottom: 2px; overflow-wrap: anywhere;
