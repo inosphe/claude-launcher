@@ -271,9 +271,9 @@ check("...and its header names the full path, with no ⊕",
        head.querySelector(".session-group-name").textContent,
        head.querySelectorAll(".session-group-new").length], ["workspace", "F:/a/b/repo", 0]);
 ctx.render("", [], null);
-check("ungrouped, the strip and the header are hidden and empty",
+check("ungrouped, the strip is hidden and the header keeps only the origin filter",
       [bar.classes.has("hidden"), tabs().length, head.classes.has("hidden"), head.kids.length],
-      [true, 0, true, 0]);
+      [true, 0, false, 1]);
 
 /* ---- the mesh header's local/remote pick ---- */
 check("nothing saved shows both sides", load({}).origin(), "both");
@@ -314,6 +314,12 @@ check("nested, remote drops the emptied local workspace headings",
       ctx.byOrigin(NESTED, "remote").map(rowName),
       ["m1", "@x", "r1", "m2", "@x", "r2"]);
 check("nested, both keeps every row", ctx.byOrigin(NESTED, "both"), NESTED);
+const UNGROUPED = [session("s1"),
+  { type: "group", group: "remote", value: "other-daemon", level: 0 }, shadow("r1")];
+check("ungrouped local removes the empty remote daemon heading",
+      ctx.byOrigin(UNGROUPED, "local").map(rowName), ["s1"]);
+check("ungrouped remote keeps the daemon heading with its remote row",
+      ctx.byOrigin(UNGROUPED, "remote").map(rowName), ["other-daemon", "r1"]);
 const octx = load({});
 octx.render("mesh", split.tabs, "m2");
 const opts = () => head.querySelectorAll(".session-origin-option");
@@ -338,15 +344,21 @@ octx.render("mesh", split.tabs, "(no mesh)");
 check("(no mesh) carries the pick too", opts().length, 3);
 octx.render("workspace", [{ value: "F:/a/b/repo", rows: [session("s1")] }], "F:/a/b/repo");
 check("a workspace header has no local/remote pick", opts().length, 0);
-check("the pick is applied to the mesh grouping before the tabs split",
-      /groupOrder\[0\] === "mesh" && typeof filterSessionOrigin === "function"\s*\? filterSessionOrigin\(allRows, sessionOriginFilter\)/.test(src) &&
-      /sessionGroupTabRows\(originRows, groupOrder\[0\]\)/.test(src), true);
+check("the pick is applied to mesh and ungrouped rows before the tabs split",
+      /\(!groupOrder.length \|\| groupOrder\[0\] === "mesh"\) && typeof filterSessionOrigin === "function"\s*\? filterSessionOrigin\(allRows, sessionOriginFilter\)/.test(src) &&
+      /sessionGroupTabRows\(originRows, groupOrder\[0\]\)/.test(src) &&
+      /const rows = tabbed \? tabbed.rows : originRows;/.test(src), true);
 check("the pick is part of the rail's rebuild signature",
       /typeof sessionOriginFilter === "string" \? sessionOriginFilter : "both"\]/.test(src), true);
 check("the pick has its own styling, on and off",
       [/\.session-origin-option\.active\s*\{/.test(css),
        /\.session-origin-filter\s*\{/.test(css)], [true, true]);
 octx.render("", [], null);
+check("ungrouped retains the selected origin and clears the old group metadata",
+      [opts().map((o) => o.dataset.origin),
+       opts().filter((o) => o.classes.has("active")).map((o) => o.dataset.origin),
+       head.dataset.group, head.dataset.value],
+      [["both", "local", "remote"], ["local"], "", ""]);
 
 /* ---- the page ---- */
 check("the fold and the jump are gone from the rail",

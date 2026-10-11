@@ -1863,9 +1863,8 @@ function setSessionGroupTab(group, value, remember = true) {
 /* Which side of a mesh the rail shows, chosen on the mesh header
    (claunch-no9dy): `local` keeps this daemon's rows, `remote` keeps other
    daemons' members (the remote-shadow rows), `both` keeps every row. One
-   choice for every mesh tab, remembered per browser. It narrows the mesh
-   grouping alone: a workspace tab already files remote rows under their
-   own `@<machine>` heading, and an ungrouped rail trails them under one. */
+   choice for every mesh tab and the ungrouped rail, remembered per browser.
+   A workspace tab keeps its own `@<machine>` grouping without this filter. */
 const SESSION_ORIGIN_FILTERS = ["both", "local", "remote"];
 const SESSION_ORIGIN_KEY = `claunch_session_origin:${BASE}`;
 let sessionOriginFilter = (() => {
@@ -1888,7 +1887,7 @@ function filterSessionOrigin(rows, origin) {
   const drop = origin === "local" ? "shadow" : "session";
   const kept = rows.filter((r) => r.type !== drop);
   return kept.filter((row, i) => {
-    if (row.type !== "group" || !row.level) return true;
+    if (row.type !== "group" || (!row.level && row.group !== "remote")) return true;
     for (let j = i + 1; j < kept.length; j++) {
       const next = kept[j];
       if (next.type === "group") {
@@ -3656,28 +3655,32 @@ function renderSessionGroupTabs(group, tabs, active) {
    alone. It names the group in full (a workspace tab shows only the last two
    parts of its path), counts its sessions, and carries what the group
    offers -- a mesh's ⊕, which opens the create form with that mesh picked.
+   Ungrouped, the same row keeps only the origin filter.
    Pressing the row takes the list to its top, as pressing the open tab does. */
 function renderSessionGroupHeader(group, tab) {
   const head = $("session-group-header");
   if (!head) return;
-  head.classList.toggle("hidden", !group || !tab);
+  head.classList.toggle("hidden", !!group && !tab);
   head.textContent = "";
-  if (!group || !tab) return;
   head.dataset.group = group;
-  head.dataset.value = tab.value;
-  const kind = document.createElement("span");
-  kind.className = "session-group-kind";
-  kind.textContent = group;
-  const name = document.createElement("span");
-  name.className = "session-group-name";
-  name.textContent = tab.value;
-  const sessions = tab.rows.filter((r) => r.type === "session" || r.type === "shadow").length;
-  const count = document.createElement("span");
-  count.className = "session-group-count";
-  count.textContent = `${sessions} session${sessions === 1 ? "" : "s"}`;
-  head.append(kind, name, count);
-  head.title = `${group} ${tab.value} — click to scroll to the top`;
-  if (group === "mesh" && typeof sessionOriginFilter === "string") {
+  head.dataset.value = tab ? tab.value : "";
+  head.title = "click to scroll to the top";
+  if (group && !tab) return;
+  if (group && tab) {
+    const kind = document.createElement("span");
+    kind.className = "session-group-kind";
+    kind.textContent = group;
+    const name = document.createElement("span");
+    name.className = "session-group-name";
+    name.textContent = tab.value;
+    const sessions = tab.rows.filter((r) => r.type === "session" || r.type === "shadow").length;
+    const count = document.createElement("span");
+    count.className = "session-group-count";
+    count.textContent = `${sessions} session${sessions === 1 ? "" : "s"}`;
+    head.append(kind, name, count);
+    head.title = `${group} ${tab.value} — click to scroll to the top`;
+  }
+  if ((!group || group === "mesh") && typeof sessionOriginFilter === "string") {
     const origins = document.createElement("span");
     origins.className = "session-origin-filter";
     origins.setAttribute("role", "radiogroup");
@@ -4412,11 +4415,11 @@ async function refreshSessions(options) {
     })() : entries.map(([session, depth]) => ({ type: "session", session, depth }));
   // Grouped, the rail shows one group at a time: the tab strip names every
   // group, and only the open tab's rows are drawn below it.
-  const originRows = groupOrder[0] === "mesh" && typeof filterSessionOrigin === "function"
+  const originRows = (!groupOrder.length || groupOrder[0] === "mesh") && typeof filterSessionOrigin === "function"
     ? filterSessionOrigin(allRows, sessionOriginFilter) : allRows;
   const tabbed = rebuild && groupOrder.length && typeof sessionGroupTabRows === "function"
     ? sessionGroupTabRows(originRows, groupOrder[0]) : null;
-  const rows = tabbed ? tabbed.rows : allRows;
+  const rows = tabbed ? tabbed.rows : originRows;
   if (rebuild && typeof renderSessionGroupTabs === "function") {
     renderSessionGroupTabs(groupOrder[0] || "", tabbed ? tabbed.tabs : [],
                            tabbed ? tabbed.active : null);
