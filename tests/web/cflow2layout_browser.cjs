@@ -10,16 +10,30 @@ const detail = {
   run: { run: 'r-layout', workflow: 'layout-demo', status: 'running',
     tasks: [{ node: 'task', instance: 'task@1', label: 'Implement' }] },
   chart: { root: 'root', nodes: {
-    root: { id: 'root', type: 'seq', children: ['task'], roles: [''] },
+    root: { id: 'root', type: 'seq', children: [...Array.from({length: 60}, (_, i) => `past${i}`), 'frame'], roles: [] },
+    frame: { id: 'frame', type: 'seq', label: 'Frame', children: ['task'], roles: [''], force_target: true },
     task: { id: 'task', type: 'task', label: 'Implement', title: 'A wide chart label for layout testing', children: [], roles: [] },
   } },
-  instances: [{ node: 'task', instance: 'task@1', await: 'report' }], journal: [],
+  instances: [
+    {node: 'root', instance: 'root@1', parent: null, frame: {idx: 60}},
+    {node: 'frame', instance: 'frame@1', parent: 'root@1', frame: {idx: 0}, can_step_out: true, returns: {ok: {}}},
+    {node: 'task', instance: 'task@1', parent: 'frame@1', await: 'report', frame: {}},
+  ], journal: [],
+};
+for (let i = 0; i < 60; i++) detail.chart.nodes[`past${i}`] = {
+  id: `past${i}`, type: 'task', label: `Earlier task ${i}`, children: [], roles: [],
 };
 let posts = 0;
+const actions = [];
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://fixture');
   if (url.pathname.startsWith('/api/')) {
-    if (req.method === 'POST' && /^\/api\/cflow2?\//.test(url.pathname)) posts++;
+    if (req.method === 'POST' && /^\/api\/cflow2?\//.test(url.pathname)) {
+      posts++;
+      let text = '';
+      req.on('data', chunk => { text += chunk; });
+      req.on('end', () => actions.push({path: url.pathname, body: JSON.parse(text)}));
+    }
     res.setHeader('Content-Type', 'application/json');
     if (url.pathname === '/api/batch') { res.statusCode = 404; return res.end('{}'); }
     let data = {};
@@ -51,6 +65,34 @@ const server = http.createServer((req, res) => {
     const two = () => view.getByRole('button', { name: '2 columns', exact: true });
     await two().waitFor();
     assert.equal(await two().getAttribute('aria-pressed'), 'true');
+    assert.equal(await view.locator('.cf2-stack-frame').count(), 3, 'all live frames shown');
+    assert.equal(await view.getByRole('button', {name: 'Step out', exact: true}).count(), 1,
+      'root and tasks cannot be released');
+    await page.evaluate(() => {
+      window.savedCflowRoot = document.querySelector('#wf-view .cf2');
+      window.savedCflowTree = document.querySelector('#wf-view .cf2-tree');
+      window.savedCflowTree.scrollTop = 140;
+      document.querySelector('#wf-view .cf2-stack-frame details').open = true;
+    });
+    await page.evaluate(() => refreshWf());
+    assert(await page.evaluate(() => savedCflowRoot === document.querySelector('#wf-view .cf2')),
+      'unchanged poll retains DOM');
+    detail.run.reason = 'updated status';
+    await page.evaluate(() => refreshWf());
+    assert(await page.evaluate(() => savedCflowTree === document.querySelector('#wf-view .cf2-tree')),
+      'non-chart updates retain chart DOM');
+    assert.equal(await view.locator('.cf2-tree').evaluate(e => e.scrollTop), 140, 'changed poll retains scroll');
+    assert(await view.locator('.cf2-stack-frame details').first().evaluate(e => e.open), 'frame details remain open');
+    await view.locator('.cf2-row[data-node="root"] .cf2-toggle').click();
+    assert.equal(await view.locator('.cf2-row[data-node="task"]').count(), 0, 'collapsed active ancestor');
+    await view.getByRole('button', {name: 'Current state', exact: true}).click();
+    await page.waitForFunction(() => {
+      const tree = document.querySelector('#wf-view .cf2-tree');
+      const row = tree.querySelector('[data-node="task"]');
+      if (!row) return false;
+      const r = row.getBoundingClientRect(), t = tree.getBoundingClientRect();
+      return r.top >= t.top && r.bottom <= t.bottom;
+    });
     const bounds = () => view.locator('.cf2-cols').evaluate(e => {
       const chart = e.querySelector('.cf2-col-chart').getBoundingClientRect();
       const main = e.querySelector('.cf2-col-main').getBoundingClientRect();
@@ -86,7 +128,23 @@ const server = http.createServer((req, res) => {
     await two().click();
     assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'responsive columns do not overflow');
     assert.equal(posts, 0, 'layout does not send state mutations');
+    page.on('dialog', dialog => dialog.accept());
+    await Promise.all([
+      page.waitForResponse(r => r.url().includes('/api/cflow2/run?')),
+      view.getByRole('button', {name: 'Rollback', exact: true}).click(),
+    ]);
+    await Promise.all([
+      page.waitForResponse(r => r.url().includes('/api/cflow2/run?')),
+      view.getByRole('button', {name: 'Step out', exact: true}).click(),
+    ]);
+    assert.equal(actions.length, 2);
+    assert.equal(actions[0].path, '/api/cflow2/move');
+    assert.equal(actions[0].body.node, 'frame');
+    assert.equal(actions[1].path, '/api/cflow2/step-out');
+    assert.equal(actions[1].body.instance, 'frame@1');
+    assert.equal(actions[1].body.run, 'r-layout');
+    assert.equal(actions[1].body.outcome, 'ok');
     assert.deepEqual(errors, []);
-    console.log('cflow2layout_browser: widths, vertical order, drafts, expansion, polling, reload, mobile passed');
+    console.log('cflow2layout_browser: layout, stable polling, scroll, current state, callstack, rollback/stepout passed');
   } finally { await browser.close(); await new Promise(resolve => server.close(resolve)); }
 })().catch(e => { console.error(e); process.exit(1); });

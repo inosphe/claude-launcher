@@ -118,6 +118,45 @@ def _http(fn):
     return asyncio.run(run())
 
 
+def test_callstack_detail_and_user_step_out(proj):
+    from claude_launcher.cflow2 import frontend
+
+    cwd, scope = str(proj), "stack"
+    chart = frontend.compile_text("""cflow: 2
+name: stack
+nodes:
+  a: {prompt: A}
+  b: {prompt: B}
+body: {seq: [{id: frame, seq: [a]}, b]}
+""")
+    runtime.start(chart, cwd=cwd, scope=scope, caps={})
+
+    async def go(client, bearer):
+        detail = await (await client.get(f"/api/cflow2/run?cwd={cwd}&scope={scope}",
+                                        headers=bearer)).json()
+        frames = detail["instances"]
+        frame = next(i for i in frames if i["node"] == "frame")
+        assert frame["parent"] and frame["frame"] == {"idx": 0}
+        assert frame["can_step_out"] is True
+        assert frame["returns"] == {"ok": {}}
+        task = next(i for i in frames if i["node"].endswith("a"))
+        assert task["parent"] == frame["instance"] and not task["can_step_out"]
+        body = {"cwd": cwd, "scope": scope, "instance": frame["instance"],
+                "run": detail["run"]["run"], "outcome": "ok"}
+        assert (await client.post("/api/cflow2/step-out", json=body)).status == 401
+        for patch in ({"instance": "old@1"}, {"run": "old-run"}, {"outcome": "unknown"}):
+            resp = await client.post("/api/cflow2/step-out", json={**body, **patch}, headers=bearer)
+            assert resp.status == 400
+        resp = await client.post("/api/cflow2/step-out", json=body, headers=bearer)
+        assert resp.status == 200
+        result = await resp.json()
+        assert [t["label"] for t in result["tasks"]] == ["b"]
+        assert "nudge_scheduled_sessions" in result
+        assert (await client.post("/api/cflow2/step-out", json=body, headers=bearer)).status == 400
+
+    _http(go)
+
+
 def _preflight(body, cwd, **kw):
     return onboard.preflight(body, mesh_mgr=None, session_name="w1", cwd=cwd,
                              harness="claude", **kw)

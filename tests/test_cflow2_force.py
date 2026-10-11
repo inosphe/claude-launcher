@@ -68,6 +68,141 @@ class Drv:
 # -- the mark ------------------------------------------------------------------
 
 
+def frame_id(d, label):
+    chart = RunStore(d.cwd, d.scope).load_chart()
+    return next(iid for iid, rec in d.state()["inst"].items()
+                if chart.node(rec["node"]).label == label)
+
+
+def test_step_out_returns_to_parent_instead_of_reentering(tmp_path):
+    d = Drv(tmp_path, TASKS + "body: {seq: [{id: frame, seq: [a, b], force_target: true}, c]}\n")
+    d.do("a")
+    old = d.st["tasks"][0]["instance"]
+    d.move("frame")
+    assert d.tasks() == ["a"]  # rollback restarts the selected frame
+    assert old not in d.state()["inst"]
+    iid = frame_id(d, "frame")
+    d.st = runtime.step_out(iid, reason="release frame", **d.kw())
+    assert d.tasks() == ["c"]  # step out resumes the caller after the frame
+    assert iid not in d.state()["inst"]
+    assert d.events("stepped_out")[-1]["by"] == "user"
+    assert d.events("stepped_out")[-1]["reason"] == "release frame"
+    with pytest.raises(runtime.FlowError, match="no live frame"):
+        runtime.step_out(iid, **d.kw())
+
+
+def test_step_out_preserves_parallel_sibling_and_cancels_asks(tmp_path):
+    d = Drv(tmp_path, """
+        nodes:
+          a: {prompt: A, ask: {prompt: continue?}}
+          b: {prompt: B}
+          c: {prompt: C}
+        body:
+          par:
+            branches:
+              x: {seq: [{id: frame, seq: [a]}, c]}
+              y: b
+    """)
+    sibling = next(t["instance"] for t in d.st["tasks"] if t["label"] == "b")
+    d.st = runtime.step_out(frame_id(d, "frame"), **d.kw())
+    assert set(d.tasks()) == {"b", "c"}
+    assert sibling in d.state()["inst"]
+    assert not d.st.get("asks")
+    assert all(a["status"] != "open" for a in d.state().get("asks", {}).values())
+
+
+def test_step_out_try_runs_finally_then_parent(tmp_path):
+    d = Drv(tmp_path, TASKS + "body: {seq: [{id: frame, try: b, finally: plain}, c]}\n")
+    d.st = runtime.step_out(frame_id(d, "frame"), **d.kw())
+    assert d.tasks() == ["plain"]
+    d.do("plain")
+    assert d.tasks() == ["c"]
+
+
+@pytest.mark.parametrize("which", ["root", "task", "stale_run", "agent"])
+def test_step_out_rejects_invalid_or_stale_selection(tmp_path, which):
+    d = Drv(tmp_path, TASKS + "body: {seq: [{id: frame, seq: [b]}, c]}\n")
+    iid = frame_id(d, "frame")
+    kw = d.kw()
+    if which == "root":
+        iid = next(i for i, rec in d.state()["inst"].items() if rec["parent"] is None)
+    elif which == "task":
+        iid = d.st["tasks"][0]["instance"]
+    elif which == "stale_run":
+        kw["expected_run"] = "previous-run"
+    else:
+        kw["by"] = "agent"
+    before = d.state()
+    with pytest.raises(runtime.FlowError):
+        runtime.step_out(iid, **kw)
+    assert d.state() == before
+
+
+def test_step_out_checks_return_schema_before_cancelling(tmp_path):
+    d = Drv(tmp_path, TASKS + """
+        procedures:
+          p:
+            returns: {ok: {answer: int}}
+            nodes:
+              work: {prompt: work}
+            body: work
+        body:
+          seq:
+            - {id: frame, call: p, bind: answer}
+            - c
+    """)
+    iid = frame_id(d, "frame")
+    with pytest.raises(runtime.FlowError, match="missing field"):
+        runtime.step_out(iid, **d.kw())
+    assert iid in d.state()["inst"]
+    d.st = runtime.step_out(iid, value={"answer": 42}, **d.kw())
+    assert d.tasks() == ["c"]
+    assert d.state()["data"]["answer"] == {"answer": 42}
+
+
+def test_step_out_non_ok_result_follows_parent_catch(tmp_path):
+    d = Drv(tmp_path, TASKS + "body: {try: {id: frame, seq: [b]}, catch: {fail: c}}\n")
+    d.st = runtime.step_out(frame_id(d, "frame"), "fail", **d.kw())
+    assert d.tasks() == ["c"]
+
+
+def test_step_out_supersedes_pending_move_request(tmp_path):
+    d = Drv(tmp_path, TASKS + "body: {seq: [{id: frame, seq: [b]}, c]}\n")
+    runtime.request_move("c", "skip remaining work", by="driver", **d.kw())
+    d.st = runtime.step_out(frame_id(d, "frame"), **d.kw())
+    assert not d.st.get("move_request")
+    assert d.events("move_superseded")[-1]["stepped_out"]
+    d.do("c")
+    assert d.st["status"] == "done"
+
+
+def test_step_out_cancels_delegation(tmp_path):
+    cwd, scope = str(tmp_path), "t"
+    chart = compile_src(TASKS + "body: {seq: [{id: sub, seq: [b], executor: [subagent]}, a]}\n")
+    st = runtime.start(chart, cwd=cwd, scope=scope,
+                       caps={"subagent.spawn": True, "mcp.claunch": True}, now=T0)
+    iid = st["delegations"][0]["instance"]
+    st = runtime.step_out(iid, cwd=cwd, scope=scope, now=T0)
+    assert [t["label"] for t in st["tasks"]] == ["a"]
+    assert [d["status"] for d in st["delegations"]] == ["cancelled"]
+
+
+def test_step_out_delegated_try_cancels_its_executor_before_finally(tmp_path):
+    cwd, scope = str(tmp_path), "t"
+    chart = compile_src(TASKS + """
+        body:
+          seq:
+            - {id: sub, try: b, finally: plain, executor: [subagent]}
+            - a
+    """)
+    kw = {"cwd": cwd, "scope": scope, "now": T0}
+    st = runtime.start(chart, caps={"subagent.spawn": True, "mcp.claunch": True}, **kw)
+    iid = st["delegations"][0]["instance"]
+    st = runtime.step_out(iid, **kw)
+    assert [t["label"] for t in st["tasks"]] == ["plain"]
+    assert [d["status"] for d in st["delegations"]] == ["cancelled"]
+
+
 def test_mark_compiles_onto_tasks_and_combinators():
     chart = compile_src(TASKS + """
         body:

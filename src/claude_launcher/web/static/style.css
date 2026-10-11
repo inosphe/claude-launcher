@@ -6653,6 +6653,9 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
   .cf2-col-chart { order: 2; }
 }
 .cf2-col-main, .cf2-col-chart { min-width: 0; }
+.cf2-stack-frame { border-left: 2px solid #30363d; padding: 6px 10px; margin-bottom: 4px; overflow-wrap: anywhere; }
+.cf2-stack-frame pre { max-height: 220px; overflow: auto; font-size: 11px; }
+.cf2-stack-frame summary { color: #9da5b0; cursor: pointer; font-size: 12px; }
 .cf2-layout { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 12px; }
 .cf2-layout .wf-note { margin: 0 4px 0 0; }
 .cf2-layout [aria-pressed="true"] { background: #172947; color: #a5d6ff; outline: 1px solid #388bfd; }
