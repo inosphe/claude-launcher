@@ -814,6 +814,12 @@ def _print_onboarding(result: dict) -> None:
                 )
             else:
                 print("  mesh join failed: no reason given")
+    channel = result.get("parent_channel") or {}
+    if channel:
+        print(f"  parent channel {channel['mesh']}: "
+              f"{channel['parent_handle']} <-> {channel['child_handle']}")
+        print(f"  send to child: claunch mesh send {channel['mesh']} "
+              f"{channel['child_handle']} \"...\"")
     flow = result.get("workflow") or {}
     if flow:
         print(
