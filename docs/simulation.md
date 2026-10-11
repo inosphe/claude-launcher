@@ -25,13 +25,24 @@ claunch-efnbt. gds6 시뮬레이션 v2(`~/works/gds6`, `notes/designframe-sim-v2
 | 저장소 | `src/claude_launcher/sim/store.py` | 레코드·소유권·모델·라운드·발견 원장. 데몬이 유일한 기록자 |
 | API | `src/claude_launcher/daemon/sim_api.py` | `/api/sims...`, 소유 세션에 알림 입력, 세션 종료 시 소유권 해제 |
 | MCP | `src/claude_launcher/sim_mcp.py` | `sim_*` 도구. 바꾸는 호출은 `$CLAUNCH_SESSION`을 호출자로 보냄 |
-| 화면 | `src/claude_launcher/web/static/sim-page.js` | `#/sims`(목록·새 시뮬레이션), `#/sims/<id>/<탭>` |
+| 화면 | `src/claude_launcher/web/static/sim-page.js` | `#/sims`(목록·새 시뮬레이션), `#/sims/<id>/<탭>`. 세션 터미널 머리줄의 「◬ sims」는 같은 화면을 터미널 아래 분할 창에 그 세션의 시뮬레이션만으로 연다 |
 | 실행 세션 | `src/claude_launcher/sim/pi/{runner,campaign}.mjs` | 데몬이 띄우는 pi 세션의 확장. 형식화·판정·빈칸 해석 고리 |
 | 런타임 | `src/claude_launcher/sim/runtime.py`, `sim/pi/package*.json` | 실행 세션의 Node 의존성(pi-durable 등) 설치 |
 
 저장 위치는 `<런처 홈>/daemon/simulations/<id>/`(`sim.json`, `model.json`, `findings.json`, `rounds.jsonl`,
 `journal.jsonl`, `submits.json`, 판정 기록 `verdicts.json`, 실행 세션의 durable 저장소 `durable.sqlite`와 사건 기록
 `durable.events.jsonl`)이다. 세션이 어느 워크트리에 있든 같은 레코드를 읽는다.
+
+## 세션 화면 (◬ sims)
+
+세션 터미널 머리줄의 「⬒ run」 옆 「◬ sims」는 터미널 아래 분할 창에 그 세션이 소유한 시뮬레이션을 보여 준다.
+분할 창 하나를 두 버튼이 나눠 쓴다: 켜진 버튼을 다시 누르면 창이 닫히고, 다른 버튼을 누르면 창의 내용이 바뀐다.
+선택은 세션별로 기억된다(`sessLayoutFor().pane`).
+
+- 목록은 `GET /api/sims?owner=<세션>`이다. 항목을 누르면 같은 창에서 상세 화면이 열리고, 탭·실행·중지·답하기·편집 제안
+  결정을 `#/sims`와 같이 할 수 있다. 창 안의 이동은 주소(hash)를 바꾸지 않는다.
+- 「새 시뮬레이션」은 그 세션을 소유자로 정해 만든다(맡길 세션 선택이 없다).
+- 「전체 화면에서 열기」와 「모든 시뮬레이션」은 `#/sims` 화면으로 간다. 다른 세션의 시뮬레이션은 그쪽에서 읽는다.
 
 ## 소유권
 
@@ -170,6 +181,7 @@ claunch sim runtime status       # 설치·최신 여부, 아니면 종료 코�
 | `max_rounds` | 20 | 한 번 실행의 라운드 상한 |
 | `triage` | true | 해석 전에 판정 모델이 빈칸을 분류한다 |
 | `max_edits` | 0 | 고리 끝에 만들 편집 제안의 상한(0~50). 0이면 만들지 않는다 |
+| `language` | `한국어` | 사용자가 읽는 글의 언어: 질문·선택지·제외 이유·분류 이유·판정 이유·편집 제안의 이유, 소유 세션에 보내는 생성·끝남 알림의 보고 언어. 편집 제안의 `new`는 그 파일의 언어로 쓴다 |
 
 화면의 프로필 선택지는 pi 하네스로 실행할 수 있는 프로필만 보여 준다(`GET /api/sims/profiles`). 판정 프로필은 그중
 공급자를 pi에 넘길 수 있는 프로필(`judges`)만이다. Anthropic OAuth만 쓰는 프로필은 pi를 자체 로그인으로 실행하므로 두

@@ -156,8 +156,12 @@ def ended_text(sim: dict) -> str:
         + (f"{waiting} edit proposal(s) to the sources wait for the user's decision (sim_proposals {sim['id']}). "
            if (waiting := (sim.get("proposals") or {}).get("proposed")) else "")
         + f"Read the result (sim_show {sim['id']}, sim_findings {sim['id']}) and continue the discussion "
-        "with the user from it."
+        f"with the user from it, in {_language(sim)}."
     )
+
+
+def _language(sim: dict) -> str:
+    return (sim.get("settings") or {}).get("language") or sim_store.DEFAULT_SETTINGS["language"]
 
 
 def created_text(sim: dict) -> str:
@@ -171,7 +175,8 @@ def created_text(sim: dict) -> str:
            if (sim.get("settings") or {}).get("interpreter_profile") else
            "Build the world model from the sources with sim_patch (every rule quotes its source file word for "
            f"word, or is marked provisional with a why), then sim_start {sim['id']} and work the gaps (sim_gaps); ")
-        + "you will be told when it finishes."
+        + "you will be told when it finishes. "
+        f"Questions you raise (sim_resolve ask) and reasons you give go to the user: write them in {_language(sim)}."
     )
 
 

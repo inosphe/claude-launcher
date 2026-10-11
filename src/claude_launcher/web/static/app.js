@@ -17002,6 +17002,8 @@ function sessLayoutFor(name) {
     rail: raw.rail === "wf" || raw.rail === "beads" ? raw.rail : "detail",
     sub: DETAIL_SUBTAB_IDS.has(raw.sub) ? raw.sub : "all",
     split: !!raw.split,
+    // What the split pane shows: the workflow run (⬒) or the simulations (◬).
+    pane: raw.pane === "sims" ? "sims" : "run",
     ratio: clampSplitRatio(Number(raw.ratio)),
   };
 }
@@ -18662,14 +18664,21 @@ function syncSplitPane() {
   // the button must read "on" on a narrowed window too, or pressing it there
   // would silently write the opposite of what it appears to do.
   const btn = $("term-splitbtn");
-  btn.setAttribute("aria-pressed", String(!!lay && lay.split));
-  btn.title = lay && lay.split
+  const runOn = !!lay && lay.split && lay.pane === "run";
+  btn.setAttribute("aria-pressed", String(runOn));
+  btn.title = runOn
     ? "close the run pane — the terminal takes the column back"
     : "this session's workflow run under the terminal — " +
       "drag the bar between them to resize";
+  const sims = $("term-simsbtn");
+  const simsOn = !!lay && lay.split && lay.pane === "sims";
+  sims.setAttribute("aria-pressed", String(simsOn));
+  sims.title = simsOn
+    ? "close the simulations pane — the terminal takes the column back"
+    : "this session's simulations under the terminal — run, answer, decide edit proposals";
   if (up) {
     applySplitRatio(lay.ratio);
-    if (splitFor !== name) openSplit(name);
+    if (splitFor !== name || splitKind !== lay.pane) openSplit(name, lay.pane);
   } else if (splitFor) {
     closeSplit();
   }
@@ -19140,6 +19149,7 @@ const wfPageUi = {
    pane owns its own slot, poll, selection and last payload — the page's
    globals above belong to the page, and the two must be able to differ. */
 let splitFor = null;           // the session the pane is showing (null = shut)
+let splitKind = null;          // "run" or "sims" (sessLayoutFor().pane)
 let splitCwd = null;           // its slot, resolved once from the meta endpoint
 let splitScope = null;
 let splitPollTimer = null;
@@ -19167,9 +19177,12 @@ function renderSplit(data) {
    slot is in there too, so an ask that fails on the first paint (the auth
    overlay is up, the daemon blinked) is simply asked again two seconds on,
    instead of leaving the pane on "loading…" for good. */
-function openSplit(name) {
+function openSplit(name, kind = "run") {
   closeSplit();
   splitFor = name;
+  splitKind = kind;
+  // The simulations view keeps its own poll (sim-page.js).
+  if (kind === "sims") { globalThis.SimPane?.mount($("term-wf"), name); return; }
   $("term-wf").innerHTML = "<p class='wf-note'>loading…</p>";
   refreshSplit();
   splitPollTimer = setInterval(visiblePoll(refreshSplit, () => splitPollTimer), 5000);
@@ -19177,6 +19190,8 @@ function openSplit(name) {
 
 function closeSplit() {
   if (splitPollTimer) { clearInterval(splitPollTimer); splitPollTimer = null; }
+  if (splitKind === "sims") globalThis.SimPane?.unmount();
+  splitKind = null;
   splitFor = null;
   splitCwd = null;
   splitScope = null;
@@ -19187,7 +19202,7 @@ function closeSplit() {
 
 async function refreshSplit() {
   const want = splitFor;
-  if (!want) return;
+  if (!want || splitKind !== "run") return;
   // A run is keyed by (cwd, scope) and the meta endpoint already answers
   // that resolution for a session — ask it rather than re-deriving the slot
   // rules here. null is "not asked yet"; "" is "asked, and there is none",
@@ -19253,10 +19268,16 @@ async function refreshSplit() {
 
 /* The ⬒ button: writes the choice down; syncSplitPane (via the setter) is
    what actually opens and closes the pane, so a press and a reload agree. */
-$("term-splitbtn").addEventListener("click", () => {
+$("term-splitbtn").addEventListener("click", () => toggleSplitPane("run"));
+$("term-simsbtn").addEventListener("click", () => toggleSplitPane("sims"));
+
+/* One pane, two contents: pressing the lit button closes it, pressing the
+   other one switches what the open pane shows. */
+function toggleSplitPane(pane) {
   if (!currentName) return;
-  setSessLayout(currentName, { split: !sessLayoutFor(currentName).split });
-});
+  const lay = sessLayoutFor(currentName);
+  setSessLayout(currentName, lay.split && lay.pane === pane ? { split: false } : { split: true, pane });
+}
 
 /* The bar between the two. The ratio is applied live while the hand moves
    and written down once at release — localStorage is not a place to stream

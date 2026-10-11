@@ -10,6 +10,7 @@ class Element {
   replaceChildren(...items) { this.children = items; }
   setAttribute(name, value) { this.attributes[name] = value; }
   contains(n) { return all(this).includes(n); }
+  remove() {}
 }
 const root = new Element('div');
 const calls = [];
@@ -166,12 +167,41 @@ async function settle() { for (let i = 0; i < 10; i++) await new Promise(resolve
   ctx.SimPage.open('sim-abc123', 'settings'); await settle();
   labelled('해석(B) reasoning').value = 'high'; labelled('해석(B) reasoning').onchange();
   labelled('판정자 분류').checked = false; labelled('판정자 분류').onchange();
+  assert.strictEqual(labelled('언어').value, '한국어');
   all().find(n => n.tag === 'form').onsubmit({preventDefault() {}}); await settle();
   const saved = calls.find(c => c.url.pathname.endsWith('/settings'));
   assert.strictEqual(saved.body.settings.interpreter_reasoning, 'high');
   assert.strictEqual(saved.body.settings.triage, false);
   assert.strictEqual(saved.body.settings.max_edits, 0);
+  assert.strictEqual(saved.body.settings.language, '한국어');
   assert.deepStrictEqual(saved.body.sources, ['spec.md']);
+  // The terminal's pane: one session's simulations, moving without the hash.
+  ctx.SimPage.stop();
+  const pane = new Element('div');
+  loc.hash = '#/s/s1';
+  ctx.SimPane.mount(pane, 's1'); await settle();
+  const inPane = () => all(pane);
+  assert(calls.some(c => c.url.pathname === '/api/sims' && c.url.searchParams.get('owner') === 's1'));
+  assert(inPane().some(n => n.tag === 'h2' && n.textContent === 's1의 시뮬레이션'));
+  const row = inPane().find(n => n.tag === 'li' && n.children.some(k => k.textContent === '<b>door</b>'));
+  row.onclick(); await settle();
+  assert.strictEqual(loc.hash, '#/s/s1');
+  assert(inPane().some(n => n.tag === 'a' && n.className === 'sim-full' && n.href === '#/sims/sim-abc123/findings'));
+  const tabBtn = inPane().find(n => n.tag === 'button' && n.textContent.startsWith('편집 제안'));
+  tabBtn.onclick(); await settle();
+  assert.strictEqual(loc.hash, '#/s/s1');
+  assert(inPane().some(n => n.className === 'sim-add'));
+  inPane().find(n => n.tag === 'a' && n.className === 'sim-back').onclick({preventDefault() {}}); await settle();
+  assert(inPane().some(n => n.tag === 'h2' && n.textContent === 's1의 시뮬레이션'));
+  // A new simulation from the pane is owned by that session, without a picker.
+  inPane().find(n => n.tag === 'button' && n.textContent === '새 시뮬레이션').onclick();
+  assert(!inPane().some(n => n.attributes['aria-label'] === '맡길 세션'));
+  const t2 = inPane().find(n => n.tag === 'input' && n.required); t2.value = 'pane sim'; t2.oninput();
+  inPane().find(n => n.tag === 'form').onsubmit({preventDefault() {}}); await settle();
+  const made2 = calls.filter(c => c.url.pathname === '/api/sims' && c.method === 'POST').pop();
+  assert.strictEqual(made2.body.owner, 's1');
+  assert.strictEqual(loc.hash, '#/s/s1');
+  ctx.SimPane.unmount();
   // Leaving the route invalidates an outstanding read.
   ctx.SimPage.open(); await settle();
   let release; delay = new Promise(resolve => { release = resolve; });

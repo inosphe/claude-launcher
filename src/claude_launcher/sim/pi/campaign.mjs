@@ -107,6 +107,11 @@ const brief = (sim) => [
   sim.sources?.length ? `Sources (paths under the root): ${sim.sources.join(", ")}` : "Sources: none named; find the documents and code that specify the behaviour (list_files, search_text).",
 ].filter(Boolean).join("\n");
 
+/** The language of what the user reads (settings.language): questions,
+ * options and reasons. JSON keys, ids, paths and quotes stay as they are. */
+const language = (sim) => sim.settings?.language || "한국어";
+const langRule = (sim, what) => `Write ${what} in ${language(sim)}. Keep JSON keys, ids, file paths and text quoted from the sources exactly as they are.`;
+
 const QUOTE_RULE = "Every rule and invariant either quotes its source word for word -- source: [{ref: <path under the root>, quote: <exact text from that file>}] -- or is marked provisional: {why: <what the sources leave open>}. A quote the daemon cannot find in the file rejects the whole patch.";
 
 export function formalizePrompt(sim, guide, rejected) {
@@ -129,6 +134,7 @@ export function judgePrompt(sim, items) {
     "For each rule: confirmed -- the quoted text is in the file and says what the rule does; fabricated -- the quote is not there, or it does not support the rule's condition or effect; ambiguous -- the text could be read this way but also another way.",
     "Rules:",
     "```json\n" + JSON.stringify(items.map((r) => ({ section: r.section, id: r.id, on: r.on, when: r.when, do: r.do, check: r.check, source: r.source })), null, 1) + "\n```",
+    langRule(sim, "each why"),
     'Answer with a JSON array [{"section": "rules"|"invariants", "id": ..., "verdict": "confirmed"|"fabricated"|"ambiguous", "why": ...}] in a ```json fence at the end.',
   ].join("\n\n");
 }
@@ -147,6 +153,7 @@ export function gapPrompt(sim, model, batch, guide, rejected) {
     "The model format:",
     guide,
     rejected ? `Your previous patch was rejected by the daemon:\n- ${rejected.join("\n- ")}\nFix exactly these problems.` : "",
+    langRule(sim, "every question, option and dismiss reason (the user reads them)"),
     'Answer with {"patch": <model patch or null>, "resolve": [{"key": ..., "action": "dismiss", "reason": ...} | {"key": ..., "action": "ask", "question": ..., "options": [...]}]} in a ```json fence at the end. Findings your patch handles need no resolve entry: the next walk closes them.',
   ].filter(Boolean).join("\n\n");
 }
@@ -159,6 +166,7 @@ export function editorPrompt(sim, targets, max, rejected) {
     "```json\n" + JSON.stringify(targets.map((f) => ({ key: f.key, kind: f.kind, detail: f.detail, witness: f.witness?.steps, question: f.question?.text, options: f.question?.options, answer: f.answer?.text })), null, 1) + "\n```",
     "Read the files first (read_file, search_text). For an answered finding, write the user's answer into the document where the surrounding behaviour is described (kind complete). For an open question, write the choice as an explicit open decision with its options, without picking one (kind decide). Use clarify only for rewording that does not change the meaning. Never change a decision the document already records.",
     "old must be text copied word for word from the file (it is replaced once); leave old empty to append to the end of the file. Keep each edit small.",
+    `Write new in the language of the file it goes into. ${langRule(sim, "each reason")}`,
     rejected ? `Your previous proposals were rejected by the daemon:\n- ${rejected.join("\n- ")}\nFix exactly these problems.` : "",
     `Answer with a JSON array of at most ${max} items [{"file": <path under the root>, "old": ..., "new": ..., "kind": "clarify"|"complete"|"decide", "reason": ..., "findings": [keys]}] in a \`\`\`json fence at the end.`,
   ].filter(Boolean).join("\n\n");
@@ -173,6 +181,7 @@ export function triagePrompt(sim, model, batch) {
     `Findings at ${batch.place}:`,
     "```json\n" + JSON.stringify(batch.findings.map((f) => ({ key: f.key, kind: f.kind, detail: f.detail, witness: f.witness?.steps })), null, 1) + "\n```",
     "model -- the sources do say what happens here and the model misreads or omits it (name the text); spec -- the sources say nothing that settles it, so a person must decide; intended -- it is not a defect (the situation cannot arise, or doing nothing is plainly what the sources mean); give the reason.",
+    langRule(sim, "each why (the user reads it)"),
     'Answer with a JSON array [{"key": ..., "verdict": "model"|"spec"|"intended", "why": ...}] in a ```json fence at the end.',
   ].join("\n\n");
 }

@@ -79,11 +79,12 @@ function el(tag, cls, text) {
    a scenario can walk between pages the way the router does. */
 const prelude = `
 let splitFor = null;
+let splitKind = null;
 let currentPage = "terminal";
 let currentName = "s15";
 function applySplitRatio(r) { calls.ratios.push(r); }
-function openSplit(name) { splitFor = name; calls.opened.push(name); }
-function closeSplit() { splitFor = null; calls.closed++; }
+function openSplit(name, kind) { splitFor = name; splitKind = kind; calls.opened.push(name); calls.kinds.push(kind); }
+function closeSplit() { splitFor = null; splitKind = null; calls.closed++; }
 `;
 const expose = `
 Object.assign(exports, {
@@ -102,9 +103,9 @@ function build(o = {}) {
     setItem: (k, v) => store.set(k, String(v)),
   };
   const nodes = {};
-  for (const id of ["term-split", "term-wf", "term-splitbtn"]) nodes[id] = node(id);
+  for (const id of ["term-split", "term-wf", "term-splitbtn", "term-simsbtn"]) nodes[id] = node(id);
   const body = node("body");
-  const calls = { opened: [], closed: 0, ratios: [], refits: 0, refreshed: 0 };
+  const calls = { opened: [], kinds: [], closed: 0, ratios: [], refits: 0, refreshed: 0 };
   const ctx = {};
   new Function(
     "exports", "$", "document", "BASE", "localStorage", "MOBILE_MQ",
@@ -281,8 +282,28 @@ check("the key carries the base path",
         tabs3.map((t) => t.classes.has("on")).join(), "false,false,true");
 }
 
+/* --- one pane, two contents: the run (⬒) or the simulations (◬) ---------- */
+{
+  const w = build({ stored: JSON.stringify({ s15: { split: true, pane: "banana" } }) });
+  check("an unknown pane falls back to the run", w.ctx.sessLayoutFor("s15").pane === "run");
+  w.ctx.syncSplitPane();
+  check("the run pane lights ⬒ only",
+        w.nodes["term-splitbtn"].attrs["aria-pressed"] === "true"
+        && w.nodes["term-simsbtn"].attrs["aria-pressed"] === "false");
+  w.ctx.setSessLayout("s15", { pane: "sims" });
+  check("switching to the simulations re-opens the pane with them",
+        w.calls.kinds[w.calls.kinds.length - 1] === "sims"
+        && w.nodes["term-simsbtn"].attrs["aria-pressed"] === "true"
+        && w.nodes["term-splitbtn"].attrs["aria-pressed"] === "false", w.calls.kinds);
+  const opened = w.calls.opened.length;
+  w.ctx.syncSplitPane();
+  check("...and a second sync leaves it alone", w.calls.opened.length === opened);
+  check("the choice is kept per session",
+        JSON.parse(w.store.get("claunch_sesslayout:/")).s15.pane === "sims");
+}
+
 /* --- the markup the code reaches for ------------------------------------- */
-for (const id of ["term-splitbtn", "term-split", "term-wf"]) {
+for (const id of ["term-splitbtn", "term-simsbtn", "term-split", "term-wf"]) {
   check(`index.html declares #${id}`, html.includes(`id="${id}"`));
 }
 check("the bar and the pane sit under the terminal, before the pages",
