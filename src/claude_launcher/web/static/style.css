@@ -6900,6 +6900,8 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .sim-error { color: #ffb4ad; padding: 10px 14px; background: #38262a; border: 1px solid #69434a; border-radius: 8px; }
 .sim-notice { color: #b8e0c2; padding: 10px 14px; background: #1f3326; border: 1px solid #3c6047; border-radius: 8px; }
 .sim-warn { color: #f0cf8a; font-size: 12px; }
+.sim-runner { font-size: 12px; margin: 2px 0; }
+.sim-runner a { color: inherit; text-decoration: underline; }
 .sim-empty { color: var(--sim-muted); border: 1px dashed #394352; border-radius: 10px; padding: 24px; text-align: center; }
 .sim-scroll { overflow-x: auto; }
 .sim-table { width: 100%; border-collapse: collapse; }

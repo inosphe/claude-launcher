@@ -15,7 +15,7 @@ const root = new Element('div');
 const calls = [];
 const sim = {id: 'sim-abc123', title: '<b>door</b>', goal: 'find gaps', owner: 's1', state: 'idle', state_reason: 'created',
   project: 'p', root: '/repo', sources: ['spec.md'], counts: {open: 1, question: 1}, model_stats: {machines: 1, rules: 2},
-  last_round: {round: 1, coverage: {reached: 2, cells: 4}},
+  last_round: {round: 1, coverage: {reached: 2, cells: 4}}, runner: {session: 'sim-abc123-run1', started_at: 't0'},
   settings: {interpreter_profile: 'ds4', judge_profile: 'glm', interpreter_reasoning: 'low', judge_reasoning: 'low',
     seed: 1, budget: 2000, horizon: 12, max_rounds: 20}};
 const findings = [
@@ -32,7 +32,8 @@ async function api(raw, opts = {}) {
   let result, ok = true;
   const p = url.pathname;
   if (p === '/api/sessions') result = {sessions: [{name: 's1', project: 'p', status: 'idle'}, {name: 's2', project: 'p', status: 'busy'}]};
-  else if (p === '/api/sims/profiles') result = {profiles: ['ds4', 'glm'], defaults: {interpreter_profile: 'ds4', judge_profile: ''}};
+  else if (p === '/api/sims/profiles') result = {profiles: ['ds4', 'glm', 'oauth'], judges: ['ds4', 'glm'],
+    models: {ds4: ['flash', 'glm-flash'], glm: ['glm-big']}, defaults: {interpreter_profile: 'ds4', judge_profile: ''}};
   else if (p === '/api/sims' && method === 'GET') { result = {sims: [sim]}; if (delay) { const d = delay; delay = null; await d; } }
   else if (p === '/api/sims' && method === 'POST') result = {sim: {...sim, id: 'sim-new111', owner: body.owner}, nudged: true};
   else if (p.endsWith('/findings')) result = {total: findings.length, findings};
@@ -41,7 +42,7 @@ async function api(raw, opts = {}) {
   else if (p.endsWith('/coverage')) result = {grid: [{machine: 'door', states: ['closed', 'open'], events: ['open', 'close']}],
     handled: ['door\u0000closed\u0000open'], gaps: {'door\u0000open\u0000open': 'open', 'door\u0000closed\u0000close': 'question'}};
   else if (p === '/api/sims/sim-abc123' && method === 'GET') result = {sim, rounds: [{round: 1, at: 'x', by: 's1', new: 2, open: 2}], journal: [], owner_live: true};
-  else if (p.endsWith('/start')) result = {result: {round: 2}, sim, notified: false};
+  else if (p.endsWith('/start')) result = {result: {round: 2}, sim, notified: false, runner: 'sim-abc123-run1'};
   else if (p.endsWith('/nudge')) result = {nudged: true, to: 's1'};
   else if (p.endsWith('/answer')) result = {ok: true, nudged: true};
   else if (p.endsWith('/transfer')) result = {sim};
@@ -68,7 +69,15 @@ async function settle() { for (let i = 0; i < 10; i++) await new Promise(resolve
   button('새 시뮬레이션').onclick();
   const title = all().find(n => n.tag === 'input' && n.required); title.value = 'login'; title.oninput();
   labelled('맡길 세션').value = 's2'; labelled('맡길 세션').onchange();
+  // An OAuth-only profile can interpret but is not offered as a judge.
+  assert(all(labelled('해석(B) 프로필')).some(n => n.tag === 'option' && n.value === 'oauth'));
+  assert(!all(labelled('판정(C) 프로필')).some(n => n.tag === 'option' && n.value === 'oauth'));
+  // Same profile, same model: the page warns; another model of it clears the warning.
+  assert(all().some(n => n.className === 'sim-warn'));
+  labelled('판정(C) 모델').value = 'glm-flash'; labelled('판정(C) 모델').onchange();
+  assert(!all().some(n => n.className === 'sim-warn'));
   labelled('판정(C) 프로필').value = 'glm'; labelled('판정(C) 프로필').onchange();
+  assert(all(labelled('판정(C) 모델')).some(n => n.tag === 'option' && n.value === 'glm-big'));
   // A poll while typing does not redraw over the draft.
   focused = all().find(n => n.tag === 'textarea');
   await ctx.SimPage.open(); await settle();
@@ -79,10 +88,13 @@ async function settle() { for (let i = 0; i < 10; i++) await new Promise(resolve
   assert.strictEqual(made.body.title, 'login');
   assert.strictEqual(made.body.settings.judge_profile, 'glm');
   assert.strictEqual(made.body.settings.interpreter_profile, 'ds4');
+  assert.strictEqual(made.body.settings.judge_model, '');  // a new judge profile resets the model choice
   assert.strictEqual(loc.hash, '#/sims/sim-new111');
   // Detail.
   ctx.SimPage.open('sim-abc123'); await settle();
   assert(button('실행') && button('소유권 해제'));
+  // The attached run session links to its terminal.
+  assert(all().some(n => n.tag === 'a' && n.href === '#/s/sim-abc123-run1'));
   button('실행').onclick(); await settle();
   assert(calls.some(c => c.method === 'POST' && c.url.pathname.endsWith('/start')));
   const say = all().find(n => n.tag === 'input' && /소유 세션에 전할 말/.test(n.placeholder || ''));

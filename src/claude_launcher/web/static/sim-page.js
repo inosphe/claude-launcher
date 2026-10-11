@@ -78,7 +78,7 @@ globalThis.SimPage = (() => {
     s.value = value; s.disabled = busy; s.onchange = () => onchange(s.value); return s;
   }
   const sessionOptions = (blank) => [["", blank], ...sessions.map(s => [s.name, s.name + (s.project ? ` (${s.project})` : "")])];
-  const profileOptions = (blank) => [["", blank], ...(profiles.profiles || []).map(p => [p, p])];
+  const MODEL_KEYS = ["interpreter_profile", "judge_profile", "interpreter_model", "judge_model", "interpreter_reasoning", "judge_reasoning"];
 
   function render() {
     const root = view(); if (!root) return;
@@ -126,7 +126,8 @@ globalThis.SimPage = (() => {
   function createForm() {
     const form = node("form", null, "sim-form");
     draft = draft || {title: "", goal: "", sources: "", owner: "", interpreter_profile: profiles.defaults?.interpreter_profile || "",
-      judge_profile: profiles.defaults?.judge_profile || "", interpreter_reasoning: "low", judge_reasoning: "low"};
+      judge_profile: profiles.defaults?.judge_profile || "", interpreter_model: "", judge_model: "",
+      interpreter_reasoning: "low", judge_reasoning: "low"};
     const field = (label, key, multiline) => {
       const l = node("label", label); const i = node(multiline ? "textarea" : "input");
       i.value = draft[key]; i.oninput = () => { draft[key] = i.value; }; i.disabled = busy; l.append(i); form.append(l); return i;
@@ -143,7 +144,7 @@ globalThis.SimPage = (() => {
       e.preventDefault();
       if (!draft.owner) { error = "맡길 세션을 고르세요"; render(); return; }
       const settings = {};
-      for (const k of ["interpreter_profile", "judge_profile", "interpreter_reasoning", "judge_reasoning"]) settings[k] = draft[k];
+      for (const k of MODEL_KEYS) settings[k] = draft[k];
       act(() => request("/api/sims", "POST", {title: draft.title, goal: draft.goal, owner: draft.owner,
         sources: draft.sources.split("\n").map(s => s.trim()).filter(Boolean), settings}),
         r => { creating = false; draft = null; location.hash = "#/sims/" + r.sim.id; return r.nudged ? `${r.sim.owner}에 요청을 보냈습니다` : "요청을 입력하지 못했습니다 — 세션 상태를 확인하세요"; });
@@ -154,16 +155,26 @@ globalThis.SimPage = (() => {
   function profileFields(cur, set) {
     const box = node("fieldset", null, "sim-models");
     box.append(node("legend", "모델 — pi로 실행할 수 있는 프로필만 고를 수 있습니다"));
-    const same = cur.interpreter_profile && cur.interpreter_profile === cur.judge_profile;
+    const models = profiles.models || {};
+    const bProfile = cur.interpreter_profile || profiles.defaults?.interpreter_profile || "";
+    const cProfile = cur.judge_profile || profiles.defaults?.judge_profile || "";
+    const bModel = cur.interpreter_model || (models[bProfile] || [])[0] || "";
+    const cModel = cProfile && cProfile !== bProfile ? (cur.judge_model || (models[cProfile] || [])[0] || "") : (cur.judge_model || bModel);
+    const same = bProfile && (cProfile || bProfile) === bProfile && cModel === bModel;
     for (const [role, label] of [["interpreter", "해석(B)"], ["judge", "판정(C)"]]) {
       const row = node("div", null, "sim-row");
+      const names = role === "judge" ? (profiles.judges || []) : (profiles.profiles || []);
+      const prof = role === "judge" ? (cProfile || bProfile) : bProfile;
       row.append(node("span", label),
-        select(profileOptions("기본값"), cur[role + "_profile"] || "", v => set({[role + "_profile"]: v}), label + " 프로필"),
+        select([["", role === "judge" ? "해석과 같은 프로필" : "기본값"], ...names.map(p => [p, p])], cur[role + "_profile"] || "",
+          v => set({[role + "_profile"]: v, [role + "_model"]: ""}), label + " 프로필"),
+        select([["", "프로필 기본 모델"], ...(models[prof] || []).map(m => [m, m])], cur[role + "_model"] || "",
+          v => set({[role + "_model"]: v}), label + " 모델"),
         select(REASONING.map(r => [r, "reasoning " + r]), cur[role + "_reasoning"] || "low", v => set({[role + "_reasoning"]: v}), label + " reasoning"));
       box.append(row);
     }
     if (!(profiles.profiles || []).length) box.append(node("p", "pi로 실행할 수 있는 프로필이 없습니다.", "sim-muted"));
-    if (same) box.append(node("p", "해석과 판정에 같은 프로필을 쓰면 판정이 독립적이지 않습니다.", "sim-warn"));
+    if (same) box.append(node("p", "해석과 판정이 같은 모델이면 판정이 독립적이지 않습니다. 판정 모델을 다르게 고르세요.", "sim-warn"));
     return box;
   }
 
@@ -180,12 +191,21 @@ globalThis.SimPage = (() => {
       node("span", ` ${s.state_reason || ""} · ${s.id} · 소유 ${s.owner || "없음"}${s.owner && !detail.owner_live ? " (종료됨)" : ""}` +
         (s.root ? ` · ${s.root}` : "")));
     title.append(meta);
+    if (s.runner && s.runner.session) {
+      const run = node("p", null, "sim-runner");
+      const link = node("a", s.runner.session); link.href = "#/s/" + enc(s.runner.session);
+      run.append(node("span", "실행 세션 "), link, node("span", ` · 해석 ${s.settings.interpreter_profile || "-"} · 판정 ${s.settings.judge_profile || "(해석과 같음)"} · 시작 ${s.runner.started_at || ""}`));
+      title.append(run);
+    } else if (s.last_runner) {
+      const lr = s.last_runner;
+      title.append(node("p", `지난 실행 세션 ${lr.session}: ${lr.failed ? "실패" : "끝남"} · ${lr.reason || ""}`, lr.failed ? "sim-warn" : "sim-muted"));
+    }
     if (s.goal) title.append(node("p", s.goal, "sim-goal"));
     head.append(title); shell.append(head);
 
     const actions = node("div", null, "sim-actions");
     if (s.state === "running") actions.append(button("중지", () => act(() => request(base + "/stop", "POST", {}), r => r.notified ? "중지했고 소유 세션에 알렸습니다" : "중지했습니다")));
-    else actions.append(button("실행", () => act(() => request(base + "/start", "POST", {}), () => "실행했습니다"), "sim-primary"));
+    else actions.append(button("실행", () => act(() => request(base + "/start", "POST", {}), r => r.runner ? `실행 세션 ${r.runner}을 띄웠습니다` : r.manual ? `실행했습니다 (소유 세션이 해석: ${r.manual})` : "실행했습니다"), "sim-primary"));
     actions.append(button("라운드 한 번", () => act(() => request(base + "/round", "POST", {}), r => `라운드 ${r.result.round}: 새 ${r.result.new} · 열림 ${r.result.open}`)));
     const say = node("input"); say.placeholder = "소유 세션에 전할 말 (비우면 계속 진행 요청)"; say.disabled = busy || !s.owner;
     say.value = nudgeDraft; say.oninput = () => { nudgeDraft = say.value; };
@@ -343,7 +363,7 @@ globalThis.SimPage = (() => {
     form.onsubmit = e => {
       e.preventDefault();
       const settings = {};
-      for (const k of ["interpreter_profile", "judge_profile", "interpreter_reasoning", "judge_reasoning", "max_rounds", "budget", "horizon", "seed"]) settings[k] = cur[k];
+      for (const k of [...MODEL_KEYS, "max_rounds", "budget", "horizon", "seed"]) settings[k] = cur[k];
       act(() => request(base + "/settings", "POST", {settings, sources: cur.sources.split("\n").map(x => x.trim()).filter(Boolean)}),
         () => { settingsDraft = null; return "저장했습니다"; });
     };
