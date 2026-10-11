@@ -30970,17 +30970,23 @@ function cflow2Callstack(data, post, live) {
     const n = row.definition;
     const card = el("div", "cf2-stack-frame");
     card.dataset.instance = row.instance;
-    card.style.marginLeft = `${Math.min(row.depth, 12) * 12}px`;
-    card.appendChild(el("div", "mono", `${n.type || "frame"} · ${n.label || row.node} · ${row.instance}`));
-    card.appendChild(el("div", "wf-note", `${row.await || "running"}` +
-      (row.role ? ` · ${row.role}` : "") + (row.parent ? ` · parent ${row.parent}` : " · root")));
+    card.style.marginLeft = `${Math.min(row.depth, 4) * 8}px`;
     const state = document.createElement("details");
     state.dataset.cf2Key = `frame:${row.instance}`;
-    state.appendChild(el("summary", null, "Frame state"));
+    const summary = el("summary", "cf2-stack-summary");
+    summary.title = `${n.label || row.node} · ${row.instance} · ${row.await || "running"}`;
+    summary.appendChild(el("span", "cf2-type", n.type || "frame"));
+    summary.appendChild(el("span", "cf2-stack-label", n.label || row.node));
+    summary.appendChild(el("span", "cf2-stack-status", row.await || "running"));
+    state.appendChild(summary);
+    state.appendChild(el("div", "cf2-stack-name", n.label || row.node));
+    state.appendChild(el("div", "wf-note mono", `${row.instance}` +
+      (row.role ? ` · ${row.role}` : "") + (row.parent ? ` · parent ${row.parent}` : " · root")));
+    state.appendChild(el("div", "wf-note", "Frame state"));
     state.appendChild(el("pre", "mono", JSON.stringify(row.frame || {}, null, 2)));
     card.appendChild(state);
     if (live && (row.can_step_out || n.force_target)) {
-      const actions = el("div", "cf2-press");
+      const actions = el("div", "cf2-press cf2-stack-actions");
       if (n.force_target) {
         const rollback = el("button", "wf-btn sm", "Rollback");
         rollback.title = "cancel work below this marked node and enter it again";
