@@ -124,20 +124,34 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
     for (const b of open.buttons) {
       assert.ok(Math.abs(b.bottom - open.field.bottom) < 1, `${b.id} left the field's bottom edge`);
     }
-    // what is on screen where the field rose is the field, over a layer
-    // standing in for xterm's (they stack up to z-index 10) above the bar
-    assert.equal(await page.evaluate(top => {
+    // What is on screen where the field rose is the field, over a layer
+    // standing in for xterm's (they stack up to z-index 10) inside the real
+    // #terminal, which holds them (isolation) -- and a page-wide overlay
+    // (#auth-overlay, z-index 10) still covers the field.
+    const hits = await page.evaluate(top => {
       const form = document.getElementById('term-input');
+      const terminal = document.getElementById('terminal');
+      document.body.insertBefore(terminal, form);
+      // absolute, not fixed: a fixed box is a stacking context of its own and
+      // would hold the layer without the stylesheet's isolation
+      Object.assign(terminal.style, { position: 'absolute', left: '0', right: '0', top: '0',
+        height: `${form.getBoundingClientRect().top}px`, padding: '0' });
       const layer = document.createElement('div');
-      Object.assign(layer.style, { position: 'fixed', left: '0', right: '0', top: '0',
-        height: `${form.getBoundingClientRect().top}px`, zIndex: '10', background: '#123' });
-      document.body.insertBefore(layer, form);
+      Object.assign(layer.style, { position: 'absolute', inset: '0', zIndex: '10', background: '#123' });
+      terminal.appendChild(layer);
       const field = document.getElementById('term-input-field');
       const r = field.getBoundingClientRect();
-      const hit = document.elementFromPoint(r.left + 20, top + 5) === field;
+      const over = document.elementFromPoint(r.left + 20, top + 5) === field;
+      const auth = document.getElementById('auth-overlay');
+      auth.classList.remove('hidden');
+      const mid = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      const covered = mid !== field && auth.contains(mid);
+      auth.classList.add('hidden');
       layer.remove();
-      return hit;
-    }, open.field.top), true, 'the opened field is covered');
+      return { over, covered };
+    }, open.field.top);
+    assert.equal(hits.over, true, 'the opened field is covered by the terminal');
+    assert.equal(hits.covered, true, 'the auth overlay does not cover the opened field');
 
     // Clicked while empty: three lines of room to type in.
     await type('');
