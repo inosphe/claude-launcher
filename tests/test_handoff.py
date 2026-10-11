@@ -753,7 +753,7 @@ def test_quick_fork_inherits_team_without_reusing_parent_channel(
             team_name = "team" if sibling else "a"
             assert second_doc["quick_fork"]["mesh"] == team_name
             assert set(channel.members) == original_members
-            assert meshes.get(team_name).member_for_session("a-qf2") is not None
+            assert meshes.member_for_session(meshes.get(team_name), "a-qf2") is not None
             assert not meshes.get(team_name).parent_channel
         finally:
             await client.close()
