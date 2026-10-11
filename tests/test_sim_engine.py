@@ -183,3 +183,9 @@ def test_apply_patch_upserts_and_removes():
     ids = [r["id"] for r in m["rules"]]
     assert "r.close" not in ids and m["rules"][ids.index("r.open")]["do"] == []
     assert m["checkpoints"]["locked"]["sm"]["door"] == "locked"
+
+
+def test_explore_ends_when_every_cell_is_stuck():
+    # Regression: an empty model (or one with no events) used to loop forever.
+    r = engine.explore(engine.prepare(M.empty()), seed=1, budget=2000, horizon=12)
+    assert r["steps"] == 0 and [p["finding"]["kind"] for p in r["problems"]] == ["stuck"]

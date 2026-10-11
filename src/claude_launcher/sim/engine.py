@@ -347,6 +347,10 @@ def explore(model: dict, seed: int = 1, budget: int = 2000, horizon: int = 12,
     steps = assumptions = 0
 
     while steps < budget:
+        # A stuck cell never takes a step, so a walk whose every cell is stuck
+        # (no events at all, say) would never use up its budget.
+        if all(c.get("stuck") for c in cells):
+            break
         if policy == "random":
             cell = rng.pick(cells)
         else:
@@ -374,6 +378,7 @@ def explore(model: dict, seed: int = 1, budget: int = 2000, horizon: int = 12,
                 break
             avail = available_events(model, state)
             if not avail:
+                here["stuck"] = True
                 key = f"stuck|{here['sig']}"
                 if key not in problems:
                     problems[key] = {"finding": {"kind": "stuck", "key": key, "state": dict(state["sm"]),
