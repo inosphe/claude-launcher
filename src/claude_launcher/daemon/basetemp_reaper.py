@@ -205,14 +205,25 @@ def _retry_writable(failed: List[str]) -> Callable:
     full of them stayed behind as "locked" on every pass (claunch-4zc51.3).
     Whatever still fails after the retry is recorded in ``failed``. Fits
     both ``onexc`` and ``onerror``: the third argument is not read.
+
+    Only the removals are retried. rmtree also reports failures of
+    ``os.open``, ``os.scandir`` or ``os.lstat`` (POSIX fd-based walk), and
+    calling those again with a path alone either raises ``TypeError`` --
+    which would escape the reap -- or deletes nothing.
     """
     def handle(func, path, _exc) -> None:
+        if func not in _REMOVALS:
+            failed.append(path)
+            return
         try:
             os.chmod(path, stat.S_IWRITE)
             func(path)
         except OSError:
             failed.append(path)
     return handle
+
+
+_REMOVALS = (os.unlink, os.remove, os.rmdir)
 
 
 class BasetempReaper:

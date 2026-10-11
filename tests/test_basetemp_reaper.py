@@ -170,6 +170,28 @@ def test_read_only_files_are_removed(tmp_path):
     assert "locked" not in row
 
 
+@pytest.mark.parametrize("func", [os.open, os.scandir, os.lstat])
+def test_a_failed_walk_call_is_recorded_not_retried(tmp_path, monkeypatch, func):
+    # POSIX rmtree reports os.open/os.scandir/os.lstat failures too; calling
+    # os.open(path) again raises TypeError, which must not escape the reap
+    # (s995-rev3, CHANGES REQUESTED @ aa27b127).
+    root = tmp_path / "t"
+    stuck = _run_tree(root, "s995c1011010955")
+    entry = str(stuck / "popen-gw0")
+
+    def rmtree(path, **kw):
+        handler = kw.get("onexc") or kw.get("onerror")
+        handler(func, entry, PermissionError())
+
+    monkeypatch.setattr(br.shutil, "rmtree", rmtree)
+    _reaper(tmp_path, [("s995", True)]).session_exited(_session("s995"))
+
+    [row] = _rows(tmp_path)
+    assert row["outcome"] == "locked"
+    assert row["locked"] == [Path(entry).as_posix()]
+    assert stuck.is_dir()
+
+
 # ---- the boot pass ---------------------------------------------------------- #
 
 def test_boot_reaps_ended_sessions_and_spares_running_ones(tmp_path):
