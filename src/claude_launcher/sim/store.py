@@ -179,6 +179,34 @@ def check_sources(m: dict, root: str) -> List[str]:
     return out
 
 
+def _touched(m: dict, patch: dict) -> dict:
+    """The rules and invariants of ``m`` that ``patch`` upserts."""
+    out = {}
+    for section in ("rules", "invariants"):
+        ids = {str(x.get("id")) for x in patch.get(section) or [] if isinstance(x, dict)}
+        out[section] = [x for x in m.get(section) or [] if x.get("id") in ids]
+    return out
+
+
+def source_digests(root: str, sources: Iterable[str]) -> Dict[str, str]:
+    """sha256 (12 hex) of each file the simulation names, globs expanded,
+    under ``root``. A question records these; when one changes, the
+    question is looked at again."""
+    out: Dict[str, str] = {}
+    if not root:
+        return out
+    base = Path(root).resolve()
+    for pat in sources:
+        for p in sorted(base.glob(pat)) if any(c in pat for c in "*?[") else [base / pat]:
+            try:
+                p = p.resolve()
+                if p.is_file() and (base in p.parents):
+                    out[p.relative_to(base).as_posix()] = hashlib.sha256(p.read_bytes()).hexdigest()[:12]
+            except (OSError, ValueError):
+                continue
+    return out
+
+
 class SimStore:
     def __init__(self, root: Path, live: Optional[Callable[[str], bool]] = None):
         """``live(session)`` says whether a session still runs; claims and
@@ -292,13 +320,17 @@ class SimStore:
     def create(self, *, title: str, goal: str = "", root: str = "", project: str = "",
                owner: str = "", actor: str = USER, sources: Iterable[str] = (),
                settings: Optional[dict] = None, issue: str = "",
-               defaults: Optional[dict] = None) -> dict:
+               defaults: Optional[dict] = None, from_sim: str = "") -> dict:
+        """``from_sim`` starts from another simulation's model, verdicts and
+        answered questions (its settings are not copied); the first start
+        checks them against this one's root (see :meth:`_carry`)."""
         title = (title or "").strip()
         if not title:
             raise SimError("a simulation needs a title")
         if owner and owner != USER and not self.live(owner):
             raise SimError(f"session {owner!r} is not running; it cannot own a simulation")
         with self._lock:
+            base_meta = self._meta(from_sim) if from_sim else None
             sim_id = "sim-" + secrets.token_hex(3)
             while (self.root / sim_id).exists():
                 sim_id = "sim-" + secrets.token_hex(3)
@@ -312,10 +344,21 @@ class SimStore:
                 "run_rounds": 0, "issue": issue or "", "runner": None,
                 "settings": self._clean_settings(base, settings or {}),
             }
+            if base_meta:
+                meta["from"] = base_meta["id"]
+                if not meta["sources"]:
+                    meta["sources"] = list(base_meta.get("sources") or [])
             self._save_meta(meta)
-            _write_json(self._dir(sim_id) / "model.json", M.empty())
-            _write_json(self._dir(sim_id) / "findings.json", {})
-            self._journal(sim_id, actor, "created", owner=meta["owner"])
+            if base_meta:
+                answered = {k: {**f, "first_round": 0, "last_round": 0}
+                            for k, f in self.findings(base_meta["id"]).items() if f.get("status") == "answered"}
+                _write_json(self._dir(sim_id) / "model.json", self.model(base_meta["id"]))
+                _write_json(self._dir(sim_id) / "findings.json", answered)
+                _write_json(self._dir(sim_id) / "verdicts.json", self.verdicts(base_meta["id"]))
+            else:
+                _write_json(self._dir(sim_id) / "model.json", M.empty())
+                _write_json(self._dir(sim_id) / "findings.json", {})
+            self._journal(sim_id, actor, "created", owner=meta["owner"], **({"from": from_sim} if from_sim else {}))
             return self.summary(meta)
 
     @staticmethod
@@ -556,7 +599,17 @@ class SimStore:
             sim = self.get(sim_id)
             answered = [f for f in self.findings(sim_id).values()
                         if f.get("status") == "answered" and not f.get("applied")]
-            return {"sim": sim, "model": self.model(sim_id), "gaps": self.gap_batches(sim_id, gaps)
+            m = self.model(sim_id)
+            # Rules carried as stale, less those a later patch re-quoted or removed.
+            live = {(sec, x["id"]): x for sec in ("rules", "invariants") for x in m.get(sec) or []}
+            stale = []
+            for s in sim.get("stale_sources") or []:
+                item = live.get((s["section"], s["id"]))
+                if item and item.get("provisional") is None and \
+                        check_sources({s["section"]: [item]}, sim.get("root") or ""):
+                    stale.append({"section": s["section"], **item})
+            return {"sim": sim, "model": m, "stale": stale,
+                    "gaps": self.gap_batches(sim_id, gaps)
                     if sim["counts"].get("open") else [], "answered": answered,
                     "unjudged": self.unjudged(sim_id)}
 
@@ -603,7 +656,10 @@ class SimStore:
                 new = M.apply_patch(self.model(sim_id), patch)
             except ValueError as exc:
                 raise SimError(str(exc))
-            problems = M.check_model(new) or check_sources(new, meta.get("root") or "")
+            # Quotes are checked for what this patch writes: a rule whose file
+            # changed since is carried as stale (see carry), and must not block
+            # every other change until it is re-quoted.
+            problems = M.check_model(new) or check_sources(_touched(new, patch), meta.get("root") or "")
             if problems:
                 return {"ok": False, "rejected": problems[:50], "count": len(problems)}
             _write_json(self._dir(sim_id) / "model.json", new)
@@ -644,12 +700,72 @@ class SimStore:
         with self._lock:
             meta = self._meta(sim_id)
             self._require_owner(meta, actor, "start")
+            carried = self._carry(meta, actor)
+            meta = self._meta(sim_id)
             meta["state"], meta["state_reason"], meta["run_rounds"] = "running", f"started by {actor}", 0
             self._save_meta(meta)
             self._journal(sim_id, actor, "started")
             if not round:
-                return self.summary(meta)
-        return self.run_round(sim_id, actor)
+                return {**self.summary(meta), "carry": carried}
+        return {**self.run_round(sim_id, actor), "carry": carried}
+
+    def _carry(self, meta: dict, actor: str) -> dict:
+        """What a new run takes over from the last one, checked against the
+        sources and model as they are now:
+
+        * rules and invariants whose quote is gone from its file are listed
+          in ``meta.stale_sources``; the run session re-quotes or retracts
+          them (the walk still uses them meanwhile);
+        * a question whose witness the current model no longer reproduces
+          is resolved; one whose sources changed since it was asked goes
+          back to open, its question kept as ``prev_question``;
+        * a finding whose witness no longer replays is marked ``stale``.
+        """
+        sim_id = meta["id"]
+        m = self.model(sim_id)
+        root = meta.get("root") or ""
+        stale = []
+        for section in ("rules", "invariants"):
+            for item in m.get(section) or []:
+                if item.get("provisional") is None and item.get("source") and \
+                        check_sources({section: [item]}, root):
+                    stale.append({"section": section, "id": item["id"]})
+        meta["stale_sources"] = stale
+        self._save_meta(meta)
+        ledger = self.findings(sim_id)
+        walk = engine.prepare(m) if not M.check_model(m) else None
+        docs_now = source_digests(root, meta.get("sources") or [])
+        resolved, reopened, marked = [], [], []
+        for key, f in ledger.items():
+            if f.get("status") not in ("open", "question"):
+                continue
+            if f["status"] == "question":
+                then = (f.get("question") or {}).get("docs") or {}
+                if then and then != {k: docs_now.get(k) for k in then}:
+                    f["prev_question"] = f.pop("question")
+                    f["status"] = "open"
+                    f["reopened"] = {"at": _now(), "why": "the sources changed since the question was asked"}
+                    reopened.append(key)
+                    continue
+            if walk is None or not f.get("witness"):
+                continue
+            try:
+                engine.replay(walk, f["witness"])
+            except (engine.StaleWitness, ValueError, KeyError) as exc:
+                f["stale"] = str(exc)
+                marked.append(key)
+                continue
+            f.pop("stale", None)
+            if f["status"] == "question" and not engine.reproduces(walk, f["witness"], key):
+                f["status"] = "resolved"
+                f["resolution"] = {"by": "carry", "at": _now(),
+                                   "reason": "the current model no longer reaches it"}
+                resolved.append(key)
+        _write_json(self._dir(sim_id) / "findings.json", ledger)
+        out = {"stale_sources": stale, "resolved": resolved, "reopened": reopened, "stale_witness": marked}
+        if any(out.values()):
+            self._journal(sim_id, actor, "carry", **{k: v[:50] for k, v in out.items()})
+        return out
 
     def stop(self, sim_id: str, actor: str, reason: str = "") -> dict:
         with self._lock:
@@ -814,7 +930,8 @@ class SimStore:
                         continue
                     opts = [str(o) for o in (it.get("options") or []) if str(o).strip()][:8]
                     f["status"] = "question"
-                    f["question"] = {"text": q, "options": opts, "by": actor, "at": _now()}
+                    f["question"] = {"text": q, "options": opts, "by": actor, "at": _now(),
+                                     "docs": source_digests(meta.get("root") or "", meta.get("sources") or [])}
                     f.pop("answer", None)
                 elif action == "reopen":
                     f["status"] = "open"

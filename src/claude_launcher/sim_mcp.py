@@ -96,7 +96,8 @@ TOOLS = [
          "title": {"type": "string"}, "goal": {"type": "string"},
          "sources": {"type": "array", "items": {"type": "string"}, "description": "paths/globs the model is built from"},
          "issue": {"type": "string"},
-         "settings": {"type": "object", "description": "interpreter_profile, judge_profile, *_reasoning, seed, budget, horizon, max_rounds"}},
+         "from": {"type": "string", "description": "start from this simulation's model, verdicts and answered questions"},
+         "settings": {"type": "object", "description": "interpreter_profile, judge_profile, *_model, *_reasoning, seed, budget, horizon, max_rounds"}},
          "required": ["title"]}},
     {"name": "sim_configure", "description": "Owner: change title, goal, sources or settings.",
      "inputSchema": {"type": "object", "properties": {
@@ -184,7 +185,7 @@ def call_tool(name: str, args: dict) -> dict:
         return c.get(f"/api/sims/{_sim(args)}/replay?" + urllib.parse.urlencode({"key": args.get("key") or ""}))
     me = _session()
     if name == "sim_create":
-        body = {k: args[k] for k in ("title", "goal", "sources", "issue", "settings") if k in args}
+        body = {k: args[k] for k in ("title", "goal", "sources", "issue", "settings", "from") if k in args}
         return c.post("/api/sims", {**body, "session": me})
     if name == "sim_configure":
         body = {k: args[k] for k in ("title", "goal", "sources", "settings") if k in args}

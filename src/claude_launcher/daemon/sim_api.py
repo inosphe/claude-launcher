@@ -326,7 +326,7 @@ def install(app, store: Optional[sim_store.SimStore] = None):
             sims.create, title=str(body.get("title") or ""), goal=str(body.get("goal") or ""),
             root=root, project=project, owner=owner, actor=actor,
             sources=body.get("sources") or [], settings=body.get("settings") or {},
-            issue=str(body.get("issue") or ""), defaults=_defaults())
+            issue=str(body.get("issue") or ""), defaults=_defaults(), from_sim=str(body.get("from") or ""))
         if err:
             return err
         nudged = False

@@ -139,6 +139,10 @@ globalThis.SimPage = (() => {
     const o = node("label", "맡길 세션 — 이 세션이 소유자가 되고 요청이 그 세션에 입력됩니다");
     o.append(select(sessionOptions("선택"), draft.owner, v => { draft.owner = v; }, "맡길 세션")); form.append(o);
     form.append(profileFields(draft, v => { Object.assign(draft, v); render(); }));
+    const from = node("label", "이어 받기 — 고른 시뮬레이션의 모델·판정·답한 질문으로 시작합니다");
+    from.append(select([["", "없음 (빈 모델)"], ...list.map(x => [x.id, `${x.title} (${x.id})`])], draft.from || "",
+      v => { draft.from = v; }, "이어 받을 시뮬레이션"));
+    form.append(from);
     const submit = node("button", "만들고 요청 보내기", "wf-btn sim-primary"); submit.disabled = busy;
     form.append(submit);
     form.onsubmit = e => {
@@ -147,7 +151,7 @@ globalThis.SimPage = (() => {
       const settings = {};
       for (const k of MODEL_KEYS) settings[k] = draft[k];
       act(() => request("/api/sims", "POST", {title: draft.title, goal: draft.goal, owner: draft.owner,
-        sources: draft.sources.split("\n").map(s => s.trim()).filter(Boolean), settings}),
+        sources: draft.sources.split("\n").map(s => s.trim()).filter(Boolean), settings, ...(draft.from ? {from: draft.from} : {})}),
         r => { creating = false; draft = null; location.hash = "#/sims/" + r.sim.id; return r.nudged ? `${r.sim.owner}에 요청을 보냈습니다` : "요청을 입력하지 못했습니다 — 세션 상태를 확인하세요"; });
     };
     return form;
@@ -201,6 +205,11 @@ globalThis.SimPage = (() => {
       const lr = s.last_runner;
       title.append(node("p", `지난 실행 세션 ${lr.session}: ${lr.failed ? "실패" : "끝남"} · ${lr.reason || ""}`, lr.failed ? "sim-warn" : "sim-muted"));
     }
+    if (s.from) {
+      const f = node("p", "이어 받음: ", "sim-muted"); const a = node("a", s.from); a.href = "#/sims/" + enc(s.from); f.append(a); title.append(f);
+    }
+    if ((s.stale_sources || []).length)
+      title.append(node("p", `원천이 바뀌어 인용을 잃은 규칙 ${s.stale_sources.length}개: ${s.stale_sources.map(x => x.id).join(", ")}`, "sim-warn"));
     if (s.goal) title.append(node("p", s.goal, "sim-goal"));
     head.append(title); shell.append(head);
 
@@ -268,6 +277,8 @@ globalThis.SimPage = (() => {
       }
       if (replays[f.key]) card.append(renderReplay(replays[f.key]));
       if (f.resolution) card.append(node("p", `${f.resolution.by}: ${f.resolution.reason || ""}`, "sim-muted"));
+      if (f.stale) card.append(node("p", "지금 모델에서 재현 경로를 재생할 수 없습니다: " + f.stale, "sim-warn"));
+      if (f.reopened) card.append(node("p", `다시 열림: 질문 뒤 원천이 바뀌었습니다 (이전 질문: ${f.prev_question?.text || ""})`, "sim-warn"));
       if (f.question) {
         const q = node("div", null, "sim-question");
         q.append(node("p", "질문 (" + f.question.by + "): " + f.question.text));

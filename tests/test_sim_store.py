@@ -200,3 +200,75 @@ def test_list_filters(env):
     assert [s["id"] for s in st.list(owner="s1")] == [a["id"]]
     with pytest.raises(S.NotFound):
         st.get("sim-zzzz")
+
+
+# -- carry (S3b) ---------------------------------------------------------------
+
+def test_carry_marks_rules_whose_quote_is_gone(env, tmp_path):
+    st, root, _ = env
+    sim = st.create(title="door", root=root, owner="s1", actor="s1", sources=["spec.md"])
+    st.patch_model(sim["id"], "s1", base_patch())
+    (tmp_path / "repo" / "spec.md").write_text("The door swings open when it is closed.\n", encoding="utf-8")
+    res = st.start(sim["id"], "s1", round=False)
+    assert res["carry"]["stale_sources"] == [{"section": "rules", "id": "r.open"}]
+    assert [x["id"] for x in st.work(sim["id"])["stale"]] == ["r.open"]
+    # A stale rule does not block other changes.
+    other = {"rules": [{"id": "r.close", "on": {"event": "close"}, "when": {"sm": "door", "is": "open"},
+                        "do": [{"sm": "door", "to": "closed"}], "provisional": {"why": "x"}}]}
+    assert st.patch_model(sim["id"], "s1", other)["ok"]
+    # Re-quoting it clears it.
+    fix = base_patch()["rules"][0]
+    fix["source"] = src("The door swings open when it is closed.")
+    assert st.patch_model(sim["id"], "s1", {"rules": [fix]})["ok"]
+    assert st.work(sim["id"])["stale"] == []
+
+
+def test_carry_reopens_a_question_when_its_sources_changed(env, tmp_path):
+    st, root, _ = env
+    sim = st.create(title="door", root=root, owner="s1", actor="s1", sources=["*.md"])
+    st.patch_model(sim["id"], "s1", base_patch())
+    st.run_round(sim["id"], "s1")
+    key = "unhandled|door|open|open"
+    st.resolve(sim["id"], "s1", [{"key": key, "action": "ask", "question": "and then?"}])
+    assert st.findings(sim["id"])[key]["question"]["docs"] == {"spec.md": S.source_digests(root, ["spec.md"])["spec.md"]}
+    # Unchanged sources: the question stays.
+    assert st.start(sim["id"], "s1", round=False)["carry"]["reopened"] == []
+    st.stop(sim["id"], "s1")
+    with open(tmp_path / "repo" / "spec.md", "a", encoding="utf-8") as f:
+        f.write("Opening an open door does nothing.\n")
+    assert st.start(sim["id"], "s1", round=False)["carry"]["reopened"] == [key]
+    f = st.findings(sim["id"])[key]
+    assert f["status"] == "open" and f["prev_question"]["text"] == "and then?" and "question" not in f
+
+
+def test_carry_resolves_a_question_the_model_no_longer_reaches(env):
+    st, root, _ = env
+    sim = st.create(title="door", root=root, owner="s1", actor="s1")
+    st.patch_model(sim["id"], "s1", base_patch())
+    st.run_round(sim["id"], "s1")
+    key = "unhandled|door|open|open"
+    st.resolve(sim["id"], "s1", [{"key": key, "action": "ask", "question": "and then?"}])
+    st.patch_model(sim["id"], "s1", {"rules": [{"id": "r.open2", "on": {"event": "open"},
+                                               "when": {"sm": "door", "is": "open"}, "do": [],
+                                               "provisional": {"why": "no-op"}}]})
+    assert st.start(sim["id"], "s1", round=False)["carry"]["resolved"] == [key]
+    assert st.findings(sim["id"])[key]["resolution"]["by"] == "carry"
+
+
+def test_create_from_another_simulation(env):
+    st, root, _ = env
+    a = st.create(title="a", root=root, owner="s1", actor="s1", sources=["spec.md"])
+    st.patch_model(a["id"], "s1", base_patch())
+    st.run_round(a["id"], "s1")
+    key = "unhandled|door|open|open"
+    st.resolve(a["id"], "s1", [{"key": key, "action": "ask", "question": "q"}])
+    st.answer(a["id"], S.USER, key, "nothing happens")
+    st.judge(a["id"], "s1", [{"id": "r.open", "verdict": "confirmed", "why": "ok"}])
+    b = st.create(title="b", root=root, owner="s2", actor="s2", from_sim=a["id"],
+                  settings={"max_rounds": 5})
+    assert b["from"] == a["id"] and b["sources"] == ["spec.md"] and b["settings"]["max_rounds"] == 5
+    assert b["model_stats"]["rules"] == 1
+    assert list(st.findings(b["id"])) == [key] and st.findings(b["id"])[key]["status"] == "answered"
+    assert st.unjudged(b["id"]) == []
+    with pytest.raises(S.NotFound):
+        st.create(title="c", root=root, owner="s1", actor="s1", from_sim="sim-zzzzzz")

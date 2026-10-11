@@ -16,11 +16,13 @@ const calls = [];
 const sim = {id: 'sim-abc123', title: '<b>door</b>', goal: 'find gaps', owner: 's1', state: 'idle', state_reason: 'created',
   project: 'p', root: '/repo', sources: ['spec.md'], counts: {open: 1, question: 1}, model_stats: {machines: 1, rules: 2},
   last_round: {round: 1, coverage: {reached: 2, cells: 4}}, runner: {session: 'sim-abc123-run1', started_at: 't0'},
+  from: 'sim-old999', stale_sources: [{section: 'rules', id: 'r.lock'}],
   settings: {interpreter_profile: 'ds4', judge_profile: 'glm', interpreter_reasoning: 'low', judge_reasoning: 'low',
     seed: 1, budget: 2000, horizon: 12, max_rounds: 20}};
 const findings = [
   {key: 'unhandled|door|open|open', kind: 'unhandled', status: 'open', detail: 'no rule', count: 3, first_round: 1, last_round: 1,
-    witness: {steps: [{event: 'open'}, {event: 'open'}]}, assumed: [], provisional: []},
+    witness: {steps: [{event: 'open'}, {event: 'open'}]}, assumed: [], provisional: [],
+    reopened: {why: 'x'}, prev_question: {text: 'old q'}},
   {key: 'unhandled|door|closed|close', kind: 'unhandled', status: 'question', detail: 'no rule', count: 1, first_round: 1, last_round: 1,
     witness: {steps: [{event: 'close'}]}, question: {text: 'what then?', options: ['nothing', 'error'], by: 's1'}},
 ];
@@ -87,8 +89,10 @@ async function settle() { for (let i = 0; i < 10; i++) await new Promise(resolve
   focused = all().find(n => n.tag === 'textarea');
   await ctx.SimPage.open(); await settle();
   focused = null;
+  labelled('이어 받을 시뮬레이션').value = 'sim-abc123'; labelled('이어 받을 시뮬레이션').onchange();
   all().find(n => n.tag === 'form').onsubmit({preventDefault() {}}); await settle();
   const made = calls.find(c => c.method === 'POST' && c.url.pathname === '/api/sims');
+  assert.strictEqual(made.body.from, 'sim-abc123');
   assert.strictEqual(made.body.owner, 's2');
   assert.strictEqual(made.body.title, 'login');
   assert.strictEqual(made.body.settings.judge_profile, 'glm');
@@ -98,6 +102,10 @@ async function settle() { for (let i = 0; i < 10; i++) await new Promise(resolve
   // Detail.
   ctx.SimPage.open('sim-abc123'); await settle();
   assert(button('실행') && button('소유권 해제'));
+  // Carry: where it came from, rules that lost their quote, a reopened question.
+  assert(all().some(n => n.tag === 'a' && n.href === '#/sims/sim-old999'));
+  assert(all().some(n => n.className === 'sim-warn' && n.textContent.includes('r.lock')));
+  assert(all().some(n => n.className === 'sim-warn' && n.textContent.includes('old q')));
   // The attached run session links to its terminal.
   assert(all().some(n => n.tag === 'a' && n.href === '#/s/sim-abc123-run1'));
   button('실행').onclick(); await settle();

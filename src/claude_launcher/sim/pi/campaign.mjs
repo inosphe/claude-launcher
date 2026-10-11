@@ -150,6 +150,21 @@ export function gapPrompt(sim, model, batch, guide, rejected) {
   ].filter(Boolean).join("\n\n");
 }
 
+export function requotePrompt(sim, stale, guide, rejected) {
+  return [
+    "The sources of a formal world model changed since these rules were written: each rule's quote is no longer in its file.",
+    brief(sim),
+    "Rules that lost their quote:",
+    "```json\n" + JSON.stringify(stale, null, 1) + "\n```",
+    "Read the files again (read_file, search_text). For each rule: if the sources still say it, re-quote the current text (the same id, the new quote); if they now say something else, rewrite the rule from the new text; if they no longer say it, remove it ({\"remove\": {\"rules\": [ids]}}) or mark it provisional with a why.",
+    QUOTE_RULE,
+    "The model format:",
+    guide,
+    rejected ? `Your previous patch was rejected by the daemon:\n- ${rejected.join("\n- ")}\nFix exactly these problems.` : "",
+    'Answer with {"patch": <model patch>} in a ```json fence at the end.',
+  ].filter(Boolean).join("\n\n");
+}
+
 export function answersPrompt(sim, model, answered, guide, rejected) {
   return [
     "The user answered questions raised about gaps in a formal world model. Put each answer into the model.",
@@ -199,6 +214,23 @@ export async function runCampaign({ simId, session, api, ask, guide, progress = 
         rejected = res.rejected;
       }
       if (!changed) return { reason: "the interpreter could not write a model the daemon accepts", failed: true };
+      work = await api("GET", `/api/sims/${simId}/work?gaps=${limits.gaps}&${q}`);
+    }
+
+    // 1b. carried rules whose quote is gone from the file (the sources changed)
+    if ((work.stale ?? []).length) {
+      show("requote", `${work.stale.length} rules lost their quote`);
+      const base = `requote:${work.stale.map((x) => `${x.section}:${x.id}`).join(",")}:r${r}`;
+      let rejected;
+      for (let a = 1; a <= limits.attempts; a++) {
+        const text = await ask("B", `${base}:${a}`, requotePrompt(sim, work.stale, guide, rejected), true);
+        let res;
+        try { res = await submit(`${base}:${a}`, answerJson(text).patch ?? {}); }
+        catch (error) { res = { ok: false, rejected: [String(error.message)] }; }
+        log("requote", { attempt: a, ok: res.ok });
+        if (res.ok) { changed = true; break; }
+        rejected = res.rejected;
+      }
       work = await api("GET", `/api/sims/${simId}/work?gaps=${limits.gaps}&${q}`);
     }
 

@@ -213,6 +213,12 @@ DRIVER = textwrap.dedent("""
         if (!prompt.includes("word for word")) throw new Error("the retry must carry the rejection");
         return "Here.\\n```json\\n" + JSON.stringify(model) + "\\n```";
       }
+      if (key.startsWith("requote:")) {
+        if (!prompt.includes("no longer in its file")) throw new Error("the requote prompt must say why");
+        const r = JSON.parse(JSON.stringify(model.rules[0]));
+        r.source[0].quote = "The door swings open when it is closed.";
+        return JSON.stringify({ patch: { rules: [r] } });
+      }
       if (key.startsWith("judge:")) return JSON.stringify([{ section: "rules", id: "r.open", verdict: "confirmed", why: "quoted" }]);
       if (key.startsWith("gap:")) return JSON.stringify({ patch: fix, resolve: [] });
       throw new Error("unexpected question " + key);
@@ -223,12 +229,10 @@ DRIVER = textwrap.dedent("""
 """)
 
 
-def test_campaign_loop_against_the_daemon(tmp_path):
+def drive(tmp_path, app, sid):
     node = shutil.which("node")
     if not node:
         pytest.skip("Node.js is required for the campaign loop")
-    app, sims, mgr, owner, run, root = setup(tmp_path)
-    sid = started(sims)
     driver = tmp_path / "driver.mjs"
     driver.write_text(DRIVER % {"campaign": json.dumps(CAMPAIGN.as_uri())}, encoding="utf-8")
 
@@ -241,7 +245,30 @@ def test_campaign_loop_against_the_daemon(tmp_path):
             out, err = await asyncio.wait_for(proc.communicate(), 60)
             assert proc.returncode == 0, err.decode()
             return json.loads(out.decode().strip().splitlines()[-1])
-    got = asyncio.run(go())
+    return asyncio.run(go())
+
+
+def test_campaign_requotes_rules_whose_source_changed(tmp_path):
+    app, sims, mgr, owner, run, root = setup(tmp_path)
+    sim = sims.create(title="door", owner="s1", actor="s1", root=str(root))
+    rule = {"id": "r.open", "on": {"event": "open"}, "when": {"sm": "door", "is": "closed"},
+            "do": [{"sm": "door", "to": "open"}], "source": [{"ref": "spec.md", "quote": "The door opens when closed."}]}
+    sims.patch_model(sim["id"], "s1", {"machines": [{"id": "door", "states": ["closed", "open"], "initial": "closed"}],
+                                       "events": [{"name": "open", "kind": "actor"}, {"name": "close", "kind": "actor"}],
+                                       "rules": [rule]})
+    (root / "spec.md").write_text("The door swings open when it is closed.\n", encoding="utf-8")
+    assert sims.start(sim["id"], "s1", round=False)["carry"]["stale_sources"]
+    sims.attach_runner(sim["id"], "sim-run")
+    got = drive(tmp_path, app, sim["id"])
+    assert got["asked"][0].startswith("B:requote:rules:r.open:r0") and "B:formalize:1" not in got["asked"]
+    assert sims.work(sim["id"])["stale"] == []
+    assert "swings" in sims.model(sim["id"])["rules"][0]["source"][0]["quote"]
+
+
+def test_campaign_loop_against_the_daemon(tmp_path):
+    app, sims, mgr, owner, run, root = setup(tmp_path)
+    sid = started(sims)
+    got = drive(tmp_path, app, sid)
     assert got["res"]["ended"] and "nothing open" in got["res"]["reason"]
     assert got["asked"][:3] == ["B:formalize:1", "B:formalize:2", "C:judge:rules:r.open:r0"]
     assert any(a.startswith("B:gap:r1:") for a in got["asked"])
