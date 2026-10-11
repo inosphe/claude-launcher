@@ -487,6 +487,11 @@ DAEMON_DEFAULTS = {
     "beads_auto_issue": True,
     "beads_winddown": True,
     "beads_winddown_grace": 120.0,
+    # World-model simulations (sim/store.py, claunch-efnbt): the pi profiles
+    # a new simulation's interpreter (B) and judge (C) run on, until its own
+    # settings pick others. Empty means "choose in the simulation".
+    "simulation_interpreter_profile": "",
+    "simulation_judge_profile": "",
     # Idle hold (daemon/hold.py, claunch-5l35i): a running session that has
     # been quiet this many minutes -- no screen change, no keystroke, no
     # viewer, nothing queued for it -- has its program ended and its record

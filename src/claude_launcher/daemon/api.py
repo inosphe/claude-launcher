@@ -505,6 +505,10 @@ def build_app(
     glossary_api.install(app)
     from . import spec_api
     spec_api.install(app)
+    # World-model simulations (daemon/sim_api.py, claunch-efnbt): records,
+    # ownership (released by an exit hook it adds), rounds, owner notices.
+    from . import sim_api
+    sim_api.install(app)
     # deep_think (daemon/deep_think.py): a session asks itself a question and
     # a quick-fork of it answers. Needs app["handoff"] (set above): the answer
     # is a merge, and the module hooks how that merge is written and kept.

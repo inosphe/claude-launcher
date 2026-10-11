@@ -197,6 +197,11 @@ def session_scratch_dir(name: str) -> Path:
     return session_dir(name) / "scratch"
 
 
+def simulations_dir() -> Path:
+    """World-model simulations, one directory per simulation (sim/store.py)."""
+    return daemon_dir() / "simulations"
+
+
 def mesh_root() -> Path:
     """Root for mesh state (definitions, message logs, delivery cursors)."""
     return daemon_dir() / "mesh"
