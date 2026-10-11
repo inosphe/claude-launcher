@@ -68,6 +68,45 @@ def test_held_marker_survives_a_restart_and_owes_no_sweep(home):
     assert [s.sdef.name for s in restarted.take_retired_for_sweep()] == ["dead"]
 
 
+def test_rail_preserves_hold_marker_before_and_after_restart(home):
+    """The rail classifies exited rows from their markers, not server filters."""
+    async def run():
+        mgr = _manager()
+        add_dead(mgr, "asleep", held_at=HELD_AT)
+        add_dead(mgr, "paused", paused_at=HELD_AT)
+        add_dead(mgr, "dead")
+        mgr.persist()
+
+        for restored in (False, True):
+            if restored:
+                mgr = _manager()
+                assert mgr.restore_all() == []
+            client = TestClient(TestServer(build_app(mgr, "sekrit", started_at=0.0)))
+            await client.start_server()
+            try:
+                for state in ("current", "hold"):
+                    response = await client.get(
+                        f"/api/sessions?view=rail&state={state}",
+                        headers={"Authorization": "Bearer sekrit"},
+                    )
+                    assert response.status == 200
+                    rows = {row["name"]: row for row in (await response.json())["sessions"]}
+                    assert rows["asleep"]["status"] == "exited"
+                    assert rows["asleep"]["held_at"] == HELD_AT
+                    assert sum(bool(row["held_at"]) for row in rows.values()) == 1
+                    if state == "current":
+                        assert rows["paused"]["held_at"] is None
+                        assert rows["paused"]["paused_at"] == HELD_AT
+                        assert rows["dead"]["held_at"] is None
+                        assert rows["dead"]["paused_at"] is None
+                    else:
+                        assert set(rows) == {"asleep"}
+            finally:
+                await client.close()
+
+    asyncio.run(run())
+
+
 def test_resumable_only_for_harnesses_that_reopen_their_conversation(monkeypatch):
     from claude_launcher.daemon import harness as harness_mod
     from claude_launcher.daemon.manager import SessionManager
