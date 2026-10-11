@@ -9457,7 +9457,10 @@ async def stage_quick_fork(
     sibling = body.get("sibling") in (True, "true", "1", 1)
     placed = (origin.sdef.parent or "") if sibling else parent
     mesh_mgr = _mesh_mgr(request)
-    origin_meshes = mesh_mgr.meshes_for_session(parent)
+    origin_meshes = [
+        row for row in mesh_mgr.meshes_for_session(parent)
+        if not row.get("parent_channel")
+    ]
     if mesh == ".":
         # The origin's mesh, read here rather than by inherit_mesh downstream
         # when it can be named outright: inherit_mesh reads the PARENT's, and

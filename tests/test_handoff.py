@@ -713,6 +713,54 @@ def test_quick_fork_carries_a_mesh_and_run_when_asked_and_neither_by_default(
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("sibling", [False, True])
+def test_quick_fork_inherits_team_without_reusing_parent_channel(
+    home, tmp_path, forkable, monkeypatch, sibling
+):
+    _register_py_harness()
+
+    async def run():
+        mgr = _mgr()
+        meshes = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, meshes)
+
+        async def launch(session, **kw):
+            return session
+
+        monkeypatch.setattr(mgr, "launch_async", launch)
+        try:
+            mgr.stage(SessionDef(name="a", harness="py", cwd=str(tmp_path)))
+            if sibling:
+                meshes.create("team")
+                await meshes.join("team", "a")
+            first = await client.post(
+                "/api/sessions/a/quick-fork", headers=BEARER,
+                json={"mesh": "-", "workflow": "-", "beads": False},
+            )
+            first_doc = await first.json()
+            assert first.status == 201, first_doc
+            channel = meshes.get(first_doc["parent_channel"]["mesh"])
+            original_members = set(channel.members)
+            assert original_members == {"a", "a-qf1"}
+
+            second = await client.post(
+                "/api/sessions/a/quick-fork", headers=BEARER,
+                json={"mesh": ".", "workflow": "-", "beads": False,
+                      "sibling": sibling},
+            )
+            second_doc = await second.json()
+            assert second.status == 201, second_doc
+            team_name = "team" if sibling else "a"
+            assert second_doc["quick_fork"]["mesh"] == team_name
+            assert set(channel.members) == original_members
+            assert meshes.get(team_name).member_for_session("a-qf2") is not None
+            assert not meshes.get(team_name).parent_channel
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_a_fork_cannot_be_given_a_checkout_of_its_own():
     """Not a gap this round left open — the refusal is the reason the marker
     block warns instead. Asserted here so a later change that 'fixes' the
