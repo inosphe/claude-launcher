@@ -1044,6 +1044,22 @@ def register(sub) -> None:
     q.add_argument("--compact", action="store_true", help="one line of JSON")
     q.set_defaults(func=_cmd_pr_preflight)
 
+    # Packaged workflows need a probe available outside this repository's
+    # tools/ directory. This command only reads board and checkout evidence.
+    from .cflow2.coordinator import command as coordinator_check
+
+    q = csub.add_parser("coordinator-check", help="read-only coordinator evidence check")
+    mode = q.add_mutually_exclusive_group()
+    mode.add_argument("--exists", action="store_true", help="require an existing issue")
+    mode.add_argument("--parent", action="store_true", help="check the parent issue in run inputs")
+    mode.add_argument("--settled", action="store_true", help="recheck all tracked issues")
+    mode.add_argument("--direct-clean", action="store_true", help="check the direct-work checkout")
+    mode.add_argument("--direct-ready", action="store_true", help="check the repository before direct work")
+    q.add_argument("--board", help="canonical absolute repository directory")
+    q.add_argument("--issue", help="beads issue id (must be closed by default)")
+    q.add_argument("--key", help="expected board#issue key")
+    q.set_defaults(func=coordinator_check)
+
     q = scoped(csub.add_parser("resume", help="resume a run a 'halt' monitor stopped "
                                "(waiting_approval, reason monitor_violation)"))
     q.add_argument("monitor", nargs="?", help="only this monitor's hold (default: all)")
