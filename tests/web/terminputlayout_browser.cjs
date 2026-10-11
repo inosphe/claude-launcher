@@ -221,6 +221,38 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
       assert.ok(Math.abs(closed.field.h - closed.buttons[0].h) < 1, `${width}px: leaving did not collapse`);
     }
 
+    // Use the real prompter renderer: More/Less must preserve the focused
+    // toggle and the draft, while xterm follows the changing snippet row.
+    await page.setViewportSize({ width: 1280, height: 600 });
+    await page.evaluate(() => {
+      currentName = 'composer-fixture'; currentPage = 'terminal'; sessionEnded = false;
+      prompterExpanded = false;
+      prompterState = { connected: true, prompts: Array.from({ length: 20 }, (_, i) => ({
+        name: `Prompt ${i} with a long title`, body: `snippet ${i}`,
+      })) };
+      renderTermPrompterRow();
+    });
+    await page.focus('#term-input-field');
+    await page.waitForFunction(() => term.rows === fitAddon.proposeDimensions().rows, null, { timeout: 5000 });
+    const beforeToggle = await measure();
+    const draft = await page.inputValue('#term-input-field');
+    const toggle = page.locator('.term-prompter-toggle');
+    await toggle.click();
+    assert.equal(await toggle.getAttribute('aria-expanded'), 'true');
+    assert.equal(await toggle.evaluate(el => el === document.activeElement), true, 'More lost focus');
+    assert.equal((await measure()).field.h, beforeToggle.field.h, 'More collapsed the draft');
+    assert.ok((await measure()).terminalH < beforeToggle.terminalH, 'More did not change terminal space');
+    await page.waitForFunction(() => term.rows === fitAddon.proposeDimensions().rows, null, { timeout: 5000 });
+    await toggle.click();
+    assert.equal(await toggle.getAttribute('aria-expanded'), 'false');
+    assert.equal(await toggle.evaluate(el => el === document.activeElement), true, 'Less lost focus');
+    assert.equal((await measure()).field.h, beforeToggle.field.h, 'Less collapsed the draft');
+    assert.equal((await measure()).terminalH, beforeToggle.terminalH, 'Less did not restore terminal space');
+    assert.equal(await page.inputValue('#term-input-field'), draft, 'toggle changed the draft');
+    await page.waitForFunction(() => term.rows === fitAddon.proposeDimensions().rows, null, { timeout: 5000 });
+    await page.focus('#terminal');
+    assert.ok(Math.abs((await measure()).field.h - row) < 1, 'leaving prompter did not collapse');
+
     assert.deepEqual(errors, []);
     console.log('terminputlayout_browser: ok');
   } finally {

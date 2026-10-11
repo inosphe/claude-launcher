@@ -14659,7 +14659,9 @@ function renderTermPrompterRow() {
   toggle.addEventListener("click", () => {
     prompterExpanded = !prompterExpanded;
     try { localStorage.setItem("claunch.prompterExpanded", prompterExpanded ? "1" : "0"); } catch { /* storage off */ }
-    renderTermPrompterRow();
+    // Keep the focused button in the DOM while changing the row height.
+    box.classList.toggle("expanded", prompterExpanded);
+    syncPrompterToggle();
   });
   box.appendChild(toggle);
   syncPrompterToggle();
@@ -15519,8 +15521,11 @@ if ($("term-input-field")) {
     region.addEventListener("focusin", ev => autogrowTermInput($("term-input-field"), ev.target));
     region.addEventListener("focusout", ev => autogrowTermInput($("term-input-field"), ev.relatedTarget));
   }
-  if (typeof ResizeObserver === "function" && $("term-input")) {
-    new ResizeObserver(() => localFit()).observe($("term-input"));
+  if (typeof ResizeObserver === "function") {
+    const watch = new ResizeObserver(() => localFit());
+    for (const id of ["term-input", "term-preset-buttons", "term-prompter-row"]) {
+      if ($(id)) watch.observe($(id));
+    }
   }
   $("term-input-field").addEventListener("input", (ev) => {
     autogrowTermInput(ev.currentTarget || ev.target);
