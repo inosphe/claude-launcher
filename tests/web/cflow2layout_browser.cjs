@@ -65,6 +65,16 @@ const server = http.createServer((req, res) => {
     const two = () => view.getByRole('button', { name: '2 columns', exact: true });
     await two().waitFor();
     assert.equal(await two().getAttribute('aria-pressed'), 'true');
+    const stackDetail = view.locator('.cf2-stack-detail');
+    const overview = view.locator('.cf2-stack-overview');
+    assert.equal(await view.locator('.cf2-stack-path').count(), 1, 'serial path occupies one line');
+    assert.equal(await view.locator('.cf2-stack-path').textContent(), 'root › Frame › Implement');
+    assert(!(await stackDetail.evaluate(e => e.open)), 'callstack details default closed');
+    assert.equal(await view.getByRole('button', {name: 'Step out', exact: true}).count(), 0);
+    assert.equal(await view.locator('.cf2-stack-path').evaluate(e => e.getBoundingClientRect().height), 24);
+    await overview.focus();
+    await page.keyboard.press('Enter');
+    assert(await stackDetail.evaluate(e => e.open), 'keyboard expands full callstack');
     assert.equal(await view.locator('.cf2-stack-frame').count(), 3, 'all live frames shown');
     assert.equal(await view.getByRole('button', {name: 'Step out', exact: true}).count(), 1,
       'root and tasks cannot be released');
@@ -92,6 +102,7 @@ const server = http.createServer((req, res) => {
       'non-chart updates retain chart DOM');
     assert.equal(await view.locator('.cf2-tree').evaluate(e => e.scrollTop), 140, 'changed poll retains scroll');
     assert(await view.locator('.cf2-stack-frame details').first().evaluate(e => e.open), 'frame details remain open');
+    assert(await stackDetail.evaluate(e => e.open), 'callstack details remain open after changed poll');
     await view.locator('.cf2-row[data-node="root"] .cf2-toggle').click();
     assert.equal(await view.locator('.cf2-row[data-node="task"]').count(), 0, 'collapsed active ancestor');
     await view.getByRole('button', {name: 'Current state', exact: true}).click();
@@ -138,6 +149,8 @@ const server = http.createServer((req, res) => {
     assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'responsive columns do not overflow');
     assert.equal(posts, 0, 'layout does not send state mutations');
     if (process.env.CLAUNCH_SCRATCH) await page.screenshot({ path: path.join(process.env.CLAUNCH_SCRATCH, 'v2-callstack-mobile.png'), fullPage: true });
+    assert(!(await stackDetail.evaluate(e => e.open)), 'reload starts with compact callstack');
+    await overview.click();
     const dismiss = dialog => dialog.dismiss();
     page.on('dialog', dismiss);
     await view.getByRole('button', {name: 'Rollback', exact: true}).click();
@@ -160,6 +173,28 @@ const server = http.createServer((req, res) => {
     assert.equal(actions[1].body.instance, 'frame@1');
     assert.equal(actions[1].body.run, 'r-layout');
     assert.equal(actions[1].body.outcome, 'ok');
+    await overview.click();
+    detail.chart.nodes.frame.type = 'par';
+    detail.chart.nodes.frame.children.push('other');
+    detail.chart.nodes.other = {id: 'other', type: 'task', label: 'Review a very long parallel branch name for mobile layout', children: [], roles: []};
+    detail.instances.push({node: 'other', instance: 'other@1', parent: 'frame@1', await: 'report', frame: {}});
+    await page.evaluate(() => refreshWf());
+    assert(!(await stackDetail.evaluate(e => e.open)), 'closed details remain closed after poll');
+    assert.deepEqual(await view.locator('.cf2-stack-path').allTextContents(), [
+      'root › Frame › Implement', 'root › Frame › Review a very long parallel branch name for mobile layout',
+    ], 'parallel branches have independent call paths');
+    const pathBounds = await view.locator('.cf2-stack-path').evaluateAll(nodes => nodes.map(e => {
+      const rect = e.getBoundingClientRect();
+      return {top: rect.top, bottom: rect.bottom, height: rect.height};
+    }));
+    assert(pathBounds[0].bottom <= pathBounds[1].top, 'parallel paths use separate lines');
+    assert(pathBounds.every(b => b.height === 24), 'long branch stays on one line');
+    assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'long paths do not overflow mobile');
+    if (process.env.CLAUNCH_SCRATCH) await page.screenshot({ path: path.join(process.env.CLAUNCH_SCRATCH, 'v2-callstack-parallel.png'), fullPage: true });
+    await overview.focus();
+    await page.keyboard.press('Enter');
+    assert.equal(await view.locator('.cf2-stack-frame:visible').count(), 4, 'parallel details include all frames');
+    assert.equal(posts, 2, 'callstack disclosures do not mutate run');
     assert.deepEqual(errors, []);
     console.log(`cflow2layout_browser: compact rows ${heights}, keyboard details, layout, stable polling, scroll, current state, confirmation cancellation, rollback/stepout passed`);
   } finally { await browser.close(); await new Promise(resolve => server.close(resolve)); }

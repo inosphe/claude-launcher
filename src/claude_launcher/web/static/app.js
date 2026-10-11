@@ -31015,9 +31015,32 @@ function cflow2Callstack(data, post, live) {
   const rows = cflow2StackRows(data);
   const sec = cf2Section("Callstack", rows.length);
   sec.classList.add("cf2-callstack");
-  sec.appendChild(el("p", "wf-note", "Rollback re-enters a marked frame. Step out cancels its remaining work " +
+  if (!rows.length) {
+    sec.appendChild(el("p", "wf-note", "No live frames."));
+    return sec;
+  }
+  const detail = document.createElement("details");
+  detail.className = "cf2-stack-detail";
+  detail.dataset.cf2Key = "callstack";
+  const overview = el("summary", "cf2-stack-overview");
+  const paths = el("span", "cf2-stack-paths");
+  const byId = new Map(rows.map((row) => [row.instance, row]));
+  const parents = new Set(rows.map((row) => row.parent));
+  for (const leaf of rows.filter((row) => !parents.has(row.instance))) {
+    const path = [], seen = new Set();
+    for (let row = leaf; row && !seen.has(row.instance); row = byId.get(row.parent)) {
+      seen.add(row.instance);
+      path.unshift(row);
+    }
+    const line = el("span", "cf2-stack-path");
+    line.textContent = path.map((row) => row.definition.label || row.node).join(" › ");
+    line.title = path.map((row) => `${row.definition.label || row.node} (${row.instance})`).join(" › ");
+    paths.appendChild(line);
+  }
+  overview.append(paths, el("span", "cf2-stack-detail-label", "Details"));
+  detail.appendChild(overview);
+  detail.appendChild(el("p", "wf-note", "Rollback re-enters a marked frame. Step out cancels its remaining work " +
     "and returns the chosen outcome to its parent. Existing data and external changes remain."));
-  if (!rows.length) sec.appendChild(el("p", "wf-note", "No live frames."));
   for (const row of rows) {
     const n = row.definition;
     const card = el("div", "cf2-stack-frame");
@@ -31084,8 +31107,9 @@ function cflow2Callstack(data, post, live) {
       }
       card.appendChild(actions);
     }
-    sec.appendChild(card);
+    detail.appendChild(card);
   }
+  sec.appendChild(detail);
   return sec;
 }
 
