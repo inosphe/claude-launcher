@@ -18,7 +18,7 @@ from claude_launcher.cflow import responders
 from claude_launcher.cflow2 import asks, executors, expr, frontend, ir, runtime
 from claude_launcher.cflow2 import mcp as cflow2_mcp
 from claude_launcher.cflow2.store import RunStore
-from claude_launcher.daemon import cflow2_approve
+from claude_launcher.daemon import cflow2_approve, cflow2_clock
 
 T0 = 1_000_000.0
 SCOPE = "w1"
@@ -632,6 +632,65 @@ def test_wait_probes_get_values_through_env_and_undecided_ends(tmp_path):
     assert seen[0]["CFLOW_IN_N"] == "7"
     assert d.tasks() == ["b"]
     assert len(d.events("probe_undecided")) == 3
+
+
+def test_a_wait_probe_runs_as_the_run_driver_not_the_daemon(tmp_path, monkeypatch):
+    # The daemon's clock runs the probe, and the daemon's environment holds the
+    # CLAUNCH_SESSION of whatever terminal started it. landed_check resolves
+    # "my checkout" from that name, so a probe that inherits it measures
+    # somebody else's tree (or the run cwd on master) and answers exit 2 for
+    # a tip that landed (claunch-4zc51.1.4; v1's fix was claunch-04ru).
+    d = Drv(tmp_path, """
+        nodes:
+          a: {prompt: A}
+        body: [{wait: {probe: "check", poll: 1}}, a]
+    """, driver="s995")
+    monkeypatch.setenv("CLAUNCH_SESSION", "s127")
+    code = ("import os, sys; "
+            "sys.exit(0 if os.environ.get('CLAUNCH_SESSION') == 's995' else 2)")
+    seen = []
+
+    def runner(cmd, cwd, env=None):
+        seen.append(env or {})
+        return cflow2_clock.run_probe([sys.executable, "-c", code], cwd, env=env)
+    d.st = runtime.wait_tick(T0 + 10, runner, cwd=d.cwd, scope=d.scope)
+    assert seen[0]["CLAUNCH_SESSION"] == "s995"
+    assert d.tasks() == ["a"]
+
+
+def test_an_unmanaged_run_probe_names_no_session(tmp_path, monkeypatch):
+    d = Drv(tmp_path, """
+        nodes:
+          a: {prompt: A}
+        body: [{wait: {probe: "check", poll: 1}}, a]
+    """, scope="default")
+    monkeypatch.setenv("CLAUNCH_SESSION", "s127")
+    seen = []
+
+    def runner(cmd, cwd, env=None):
+        seen.append(env or {})
+        return (0, "ok")
+    runtime.wait_tick(T0 + 10, runner, cwd=d.cwd, scope=d.scope)
+    # blank, so the daemon's s127 does not survive the merge and
+    # state.current_scope() falls through to its default
+    assert seen[0]["CLAUNCH_SESSION"] == ""
+
+
+def test_an_undecided_probe_journals_why(tmp_path):
+    d = Drv(tmp_path, """
+        nodes:
+          a: {prompt: A}
+          b: {prompt: B}
+        body:
+          try: {seq: [{wait: {probe: "check", poll: 1}}, a]}
+          catch: {undecidable: b}
+    """)
+    noise = "\n".join(f"line {i}" for i in range(200))
+    why = "cannot tell: this checkout is on master, which is the integration target"
+    runtime.wait_tick(T0 + 10, lambda cmd, cwd, env=None: (2, noise + "\n" + why),
+                      cwd=d.cwd, scope=d.scope)
+    (ev,) = d.events("probe_undecided")
+    assert ev["exit"] == 2 and why in ev["output"] and "line 0\n" not in ev["output"]
 
 
 def test_a_wait_probe_reads_a_map_of_data_as_json(tmp_path):
