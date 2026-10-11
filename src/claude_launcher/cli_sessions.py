@@ -2953,7 +2953,7 @@ def register(sub) -> None:
     p_spawn.add_argument(
         "--mesh",
         help="mesh to enrol the child in (default: the parent's own, opening "
-             "one for the pair if it is in none; '-' for no mesh at all)",
+             "one for the pair if it is in none; '-' for only a parent channel)",
     )
     p_spawn.add_argument("--as", dest="handle", help="the child's mesh handle")
     p_spawn.add_argument("--role", help="the child's mesh role")

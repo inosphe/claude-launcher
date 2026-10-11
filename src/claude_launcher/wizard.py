@@ -584,6 +584,8 @@ class DaemonSources(Sources):
 
     def mesh_of(self, session: str) -> str:
         for m in self.meshes():
+            if m.get("parent_channel"):
+                continue
             for x in m.get("members") or []:
                 if x.get("session") == session:
                     return str(m.get("name") or "")
@@ -3681,8 +3683,8 @@ class SpawnWizard(Form):
         )
         mesh.options = [
             Option(inherited, ""),
-            Option("- no mesh at all", self.NO_MESH,
-                   "the child cannot be messaged, and cannot report back"),
+            Option("- parent channel only", self.NO_MESH,
+                   "skip a team mesh; keep the parent/child connection"),
         ] + [
             Option(m.get("name", ""), m.get("name", ""))
             for m in (self.sources.meshes() or [])

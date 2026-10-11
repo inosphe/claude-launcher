@@ -7980,9 +7980,13 @@ async def _onboard_and_launch(
 
     opening = ""
     if plan.wanted:
-        arranged, opening = await onboard.arrange(
-            plan, name=name, cwd=cwd, mesh_mgr=_mesh_mgr(request)
-        )
+        try:
+            arranged, opening = await onboard.arrange(
+                plan, name=name, cwd=cwd, mesh_mgr=_mesh_mgr(request)
+            )
+        except Exception:
+            manager.discard(name)
+            raise
         report.update(arranged)
     if session.sdef.prompt_packs:
         # Ahead of the arranged part, so the opening still ends with the task:
@@ -7992,7 +7996,8 @@ async def _onboard_and_launch(
         # A child's parent block still leads (onboard.arrange: the frame the
         # rest is read in); the packs follow it. Every spawned member with a
         # role now carries its role pack, so this is the common case.
-        head = onboard._parent_block(plan) if plan.parent and plan.wanted else ""
+        head = (onboard._parent_block(plan, channel=report.get("parent_channel"))
+                if plan.parent and plan.wanted else "")
         if head and opening.startswith(head):
             rest = opening[len(head):].lstrip("\n")
             opening = head + "\n\n" + rules + ("\n\n" + rest if rest else "")

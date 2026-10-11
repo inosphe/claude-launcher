@@ -1771,8 +1771,17 @@ parent is briefed about it in the ordinary way, because a session that learns
 of its own membership from a child's first message has been told by the wrong
 party. A parent in *several* is refused with them listed: the wrong guess
 here does not fail, it broadcasts, and the child would report its work to
-strangers. `mesh: "-"` opts out; it has to be a token, because omission is
-what now means inherit.
+strangers. `mesh: "-"` opts out of the team mesh; omission means inherit.
+
+Every spawned child also has a parent/child route, including when the two
+sessions belong to different projects or team meshes. Onboarding reuses a
+shared mesh when available; otherwise it creates a private local mesh with
+just those two sessions. The spawn response's `parent_channel` gives `mesh`,
+`parent_handle`, and `child_handle`, and the child's opening gives the reply
+command. The auxiliary mesh records `parent_channel` in `mesh.json` so it
+survives restart and is excluded from subsequent default team inheritance.
+`mesh: "-"` still creates this parent route. A failed launch removes a newly
+created auxiliary mesh together with the child's team membership.
 
 Ordering: this runs before `preflight`, since preflight is where the mesh
 stops being negotiable — the identity block is built there and the system

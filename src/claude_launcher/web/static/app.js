@@ -19764,10 +19764,9 @@ function syncOnboardPickers() {
     mesh.appendChild(group);
   }
   // Only a child has an inheritance to REFUSE. "-" is the API's own spelling
-  // for "none at all"; on a session of its own the empty answer already
-  // means that, and a second row saying it would be two spellings of one
-  // answer.
-  if (child) mesh.appendChild(new Option("(none) — no mesh", "-"));
+  // for "parent channel only"; on a session of its own the empty answer
+  // already means no mesh.
+  if (child) mesh.appendChild(new Option("(none) — parent channel only", "-"));
   mesh.value = [...mesh.options].some((o) => o.value === keptMesh) ? keptMesh : "";
   // A #/new/<mesh> link's answer, applied on the first fill that actually
   // carries that mesh. Assigning a value a select has no option for is

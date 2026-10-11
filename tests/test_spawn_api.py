@@ -335,7 +335,7 @@ def test_a_parent_in_several_meshes_must_say_which(home, tmp_path):
     asyncio.run(run())
 
 
-def test_a_child_can_be_started_outside_every_mesh(home, tmp_path):
+def test_a_child_can_skip_the_team_but_keeps_a_parent_channel(home, tmp_path):
     _register_py_harness()
 
     async def run():
@@ -356,6 +356,10 @@ def test_a_child_can_be_started_outside_every_mesh(home, tmp_path):
             body = await resp.json()
             assert "mesh" not in body
             assert list(mm.get("team").members) == ["lead"]
+            channel = body["parent_channel"]
+            assert channel["created"] is True
+            assert set(mm.get(channel["mesh"]).members) == {"lead", "w1"}
+            assert mm.get(channel["mesh"]).connected("lead", "w1")
             # still a child, though: lineage is not a mesh property
             assert body["session"]["parent"] == "lead"
 
@@ -1068,7 +1072,7 @@ def test_a_child_with_no_channel_back_is_told_that_too(home, tmp_path):
         {}, mesh_mgr=_FakeMeshMgr(), session_name="w1",
         cwd=str(tmp_path), harness="claude", parent="lead",
     )
-    assert "no mesh" in plan.identity
+    assert "parent channel" in plan.identity
     assert "no shared mesh" in onboard._parent_block(plan)
 
 
@@ -1142,6 +1146,9 @@ class _FakeMeshMgr:
 
     def resolve_sender(self, name, sender):
         return self._Member() if name == "team" and sender == "lead" else None
+
+    def member_for_session(self, mesh, session):
+        return self.resolve_sender(mesh.name, session)
 
 
 def test_the_join_and_the_run_happen_before_the_harness_starts(home, tmp_path):

@@ -909,6 +909,8 @@ class Mesh:
         self.invites: Dict[str, str] = {}
         #: Authority side: who may discover this mesh (see VISIBILITIES).
         self.visibility: str = "private"
+        # Auxiliary parent/child channel; excluded from default team inheritance.
+        self.parent_channel: List[str] = []
         #: Authority side: daemons this mesh was offered to, machine ->
         #: {token, created_at}. The token lets that machine attach without
         #: approval; it lives until the offer is cancelled or redeemed.
@@ -1564,6 +1566,8 @@ class MeshManager:
                             "declined": list(member.declined),
                             "joined_at": member.joined_at,
                             "members": len(mesh.members),
+                            **({"parent_channel": list(mesh.parent_channel)}
+                               if mesh.parent_channel else {}),
                         }
                     )
         return out
@@ -5358,6 +5362,39 @@ class MeshManager:
         rows.sort(key=lambda r: (r["state"] != wire.OPEN, -float(r["at"] or 0.0)))
         return rows
 
+    async def ensure_parent_channel(self, child: str, parent: str) -> dict:
+        """Return a usable parent/child route before the child starts.
+
+        Reuse a shared mesh when possible. Otherwise create a private local
+        mesh for this pair without changing either session's chosen team.
+        """
+        for entry in self.meshes_for_session(child):
+            mesh = self.get(entry["mesh"])
+            above = self.member_for_session(mesh, parent)
+            if above is not None:
+                if not mesh.connected(entry["handle"], above.handle):
+                    await self.set_member_link(
+                        mesh.name, entry["handle"], above.handle, enabled=True
+                    )
+                return {"mesh": mesh.name, "parent_handle": above.handle,
+                        "child_handle": entry["handle"], "created": False}
+
+        mesh = self.create(f"parent-{uuid.uuid4().hex[:12]}")
+        mesh.parent_channel = [parent, child]
+        self._persist_def(mesh)
+        try:
+            # Both endpoints learn the final route from the spawn response /
+            # opening. Do not inject a second opening while staging the child.
+            with self.defer_briefing(parent), self.defer_briefing(child):
+                await self.join(mesh.name, parent, handle=parent, role="free-role")
+                await self.join(mesh.name, child, handle=child, role="free-role")
+            await self.set_member_link(mesh.name, parent, child, enabled=True)
+        except Exception:
+            self.delete(mesh.name)
+            raise
+        return {"mesh": mesh.name, "parent_handle": parent,
+                "child_handle": child, "created": True}
+
     async def link_lineage(self, child: str, parent: str) -> List[dict]:
         """Open the parent edge a re-parented session now needs, in every mesh
         both sessions are members of on this daemon.
@@ -8558,6 +8595,7 @@ class MeshManager:
             "name": mesh.name,
             "address": self.address(mesh),
             "project": mesh.project or projects.DEFAULT,
+            **({"parent_channel": list(mesh.parent_channel)} if mesh.parent_channel else {}),
             "primary": mesh.primary or None,
             "members": members,
             "member_count": len(mesh.members),
@@ -8714,6 +8752,7 @@ class MeshManager:
             "origin": mesh.origin or None,
             "project": mesh.project or projects.DEFAULT,
             "created_at": mesh.created_at,
+            **({"parent_channel": list(mesh.parent_channel)} if mesh.parent_channel else {}),
             "primary": mesh.primary or None,
             "authority": mesh.authority or None,
             "self": mesh.me or None,
@@ -9182,6 +9221,7 @@ class MeshManager:
             me=self.machine or str(doc.get("self") or ""),
             project=str(doc.get("project") or ""),
         )
+        mesh.parent_channel = list(doc.get("parent_channel") or [])
         for entry in (doc.get("members") or {}).values():
             member = Member.from_dict(entry)
             mesh.members[member.handle] = member
@@ -9346,6 +9386,7 @@ class MeshManager:
                 # Absent for the default project, so a mesh that was never
                 # filed writes exactly the file it always did.
                 **({"project": mesh.project} if mesh.project else {}),
+                **({"parent_channel": mesh.parent_channel} if mesh.parent_channel else {}),
                 "peers": mesh.peers,
                 "links": mesh.links,
                 "pair_links": mesh.pair_links,

@@ -244,7 +244,11 @@ yours to carry out, with `spawn`.
 - **Leave `mesh` out.** The child joins the mesh you are in, connected to you
   and to nobody else; if you are in none, one is opened for the two of you.
   Name a `mesh` only to put a child somewhere other than your own. (`'-'`
-  starts it in no mesh, unable to answer you — you will rarely want that.)
+  skips a team mesh; its parent/child channel is still created.) A child in a
+  different mesh receives a private parent/child channel too. The spawn
+  response's `parent_channel` names the mesh and both handles; use that route
+  to exchange messages. These auxiliary channels do not become the default
+  team mesh for later children.
 - **Leave `workflow` out too.** The child starts on the run your OWN workflow
   pairs children with (`default_child_cflow`; `children` reports it as
   `child_cflow`), and on none when your workflow pairs with nothing or you are

@@ -303,7 +303,7 @@ TOOLS = [
                         "is opened for the two of you if you are in none, so "
                         "you can always reach each other. Only name a mesh to "
                         "put the child somewhere other than your own; '-' "
-                        "starts it in no mesh at all, unable to report back"
+                        "skips a team mesh; the parent/child channel is still created"
                     ),
                 },
                 "handle": {
