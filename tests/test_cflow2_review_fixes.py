@@ -796,6 +796,8 @@ def test_deny_rules_cover_other_spellings():
 
 def _cli(cwd, *args, session=None):
     env = dict(os.environ)
+    from pathlib import Path
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
     env.pop("CLAUNCH_SESSION", None)
     if session:
         env["CLAUNCH_SESSION"] = session

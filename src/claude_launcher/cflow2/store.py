@@ -5,13 +5,15 @@ scope is the managed session's name (``$CLAUNCH_SESSION``) or ``default``.
 
 Files in a slot:
 
-- ``chart.json``    -- the IR snapshot written once at ``start``. A run reads
-  only this file for its definition, so editing the source mid-run changes
-  nothing.
+- ``chart.json``    -- the IR snapshot written once at ``start``. The run's
+  definition is fixed at start, so editing the source mid-run changes nothing.
 - ``state.json``    -- the active configuration, data model, visits and
   delegations. Rewritten atomically (scratch file + rename in the same dir).
 - ``journal.jsonl`` -- append-only event log, one ``{ts, event, ...}`` per line.
 - ``receipts/``     -- delegation receipts (``<delegation id>.json``/``.out``).
+- ``checkpoint.sqlite3`` -- authoritative transactional state, chart, journal
+  and receipt recovery data (synchronous=EXTRA, rollback journal). JSON files
+  are exports after migration; never replace the checkpoint from those exports.
 - ``.lock``         -- held across every mutation (two processes write a run:
   the agent's MCP server and the daemon/CLI).
 
@@ -22,16 +24,18 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import re
 import shutil
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
 from .. import atomic
-from . import ir
+from . import checkpoint, ir
 
 SESSION_ENV = "CLAUNCH_SESSION"
 DEFAULT_SCOPE = "default"
@@ -42,7 +46,15 @@ STATE_FILE = "state.json"
 JOURNAL_FILE = "journal.jsonl"
 RECEIPTS_DIR = "receipts"
 LOCK_FILE = ".lock"
-RUN_FILES = (CHART_FILE, STATE_FILE, JOURNAL_FILE)
+RUN_FILES = (CHART_FILE, STATE_FILE, JOURNAL_FILE, checkpoint.FILE,
+             checkpoint.FILE + "-journal")
+log = logging.getLogger(__name__)
+RECOVERY_MONITOR = "storage-recovery"
+
+
+def recovery_held(state: Dict[str, Any]) -> bool:
+    return any(a.get("kind") == "monitor_violation" and a.get("monitor") == RECOVERY_MONITOR
+               for a in state.get("approvals", []))
 
 LOCK_TIMEOUT = 10.0
 #: An O_EXCL lock file older than this is treated as abandoned (non-posix only;
@@ -122,6 +134,17 @@ class RunStore:
         return self.dir / STATE_FILE
 
     @property
+    def checkpoint_path(self) -> Path:
+        return self.dir / checkpoint.FILE
+
+    def _checkpoint(self, *, full: bool = False):
+        try:
+            return checkpoint.read(self.checkpoint_path, full=full)
+        except checkpoint.CheckpointError as exc:
+            raise StoreError(f"{exc}; preserve this run and inspect with "
+                             f"claunch cflow2 recover --scope {self.scope}") from exc
+
+    @property
     def journal_path(self) -> Path:
         return self.dir / JOURNAL_FILE
 
@@ -137,15 +160,19 @@ class RunStore:
 
     # -- reading ---------------------------------------------------------
     def exists(self) -> bool:
-        return self.state_path.is_file()
+        return self.state_path.is_file() or self.checkpoint_path.exists()
 
     def load_state(self) -> Dict[str, Any]:
+        if self.checkpoint_path.exists():
+            return json.loads(self._checkpoint()["state"])
         try:
             raw = self.state_path.read_text(encoding="utf-8")
         except FileNotFoundError:
             raise StoreError(
                 f"no cflow2 run in {self.cwd} for scope {self.scope!r}"
             ) from None
+        except UnicodeError as exc:
+            raise StoreError(f"corrupt {self.state_path}: {exc}") from exc
         try:
             data = json.loads(raw)
         except ValueError as exc:
@@ -155,6 +182,8 @@ class RunStore:
         return data
 
     def load_chart(self) -> ir.Chart:
+        if self.checkpoint_path.exists():
+            return ir.Chart.from_json(self._checkpoint()["chart"])
         try:
             raw = self.chart_path.read_text(encoding="utf-8")
         except FileNotFoundError:
@@ -165,6 +194,9 @@ class RunStore:
             raise StoreError(f"corrupt {self.chart_path}: {exc}") from exc
 
     def journal(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        if self.checkpoint_path.exists():
+            out = [json.loads(line) for line in self._checkpoint(full=True)["journal"].splitlines()]
+            return out[-limit:] if limit else ([] if limit == 0 else out)
         try:
             lines = self.journal_path.read_text(encoding="utf-8").splitlines()
         except FileNotFoundError:
@@ -186,17 +218,63 @@ class RunStore:
     def write_chart(self, chart: ir.Chart) -> None:
         """Snapshot the IR. Written once per run; refuses to overwrite."""
         self.dir.mkdir(parents=True, exist_ok=True)
-        if self.chart_path.exists():
+        if self.chart_path.exists() or self.checkpoint_path.exists():
             raise StoreError(f"{self.chart_path} already exists; archive the run first")
         _atomic_write(self.chart_path, chart.to_json())
 
     def save_state(self, state: Dict[str, Any]) -> None:
+        self.commit(state, [])
+
+    def commit(self, state: Dict[str, Any], events: List[Dict[str, Any]]) -> None:
+        """One durable state/event transaction. Caller holds the run lock.
+
+        Existing JSON-only runs migrate on their first successful write. A
+        corrupt legacy file is never silently imported or replaced.
+        """
         self.dir.mkdir(parents=True, exist_ok=True)
-        _atomic_write(
-            self.state_path, json.dumps(state, ensure_ascii=False, indent=1, default=str)
-        )
+        text = checkpoint.encode(state)
+        creating = not self.checkpoint_path.exists()
+        legacy = []
+        receipts = {}
+        try:
+            if creating:
+                if self.state_path.exists():
+                    self.load_state()  # refuse an already corrupt legacy run
+                chart = self.chart_path.read_text(encoding="utf-8")
+                ir.Chart.from_json(chart)
+                if self.journal_path.exists():
+                    legacy = [json.loads(line) for line in
+                              self.journal_path.read_text(encoding="utf-8").splitlines()
+                              if line.strip()]
+                    if not all(isinstance(e, dict) for e in legacy):
+                        raise ValueError("legacy journal contains a non-object")
+                receipts = {p.name: p.read_text(encoding="utf-8")
+                            for p in self.receipts_dir.glob("*") if p.is_file()}
+            else:
+                previous = self._checkpoint()
+                chart = previous["chart"]
+                if previous["state"] == text and not events:
+                    return
+            stamped = [dict(ev, ts=ev.get("ts", utcnow())) for ev in events]
+            checkpoint.commit(self.checkpoint_path, text, chart, stamped,
+                              legacy=legacy, receipts=receipts)
+        except (checkpoint.CheckpointError, OSError, ValueError) as exc:
+            raise StoreError(f"cannot commit run {self.scope}: {exc}") from exc
+        # The database has committed. Projection failure must not turn a
+        # successful operation into a retry (and repeat its external effects).
+        try:
+            _atomic_write(self.state_path, text)
+            self._append_json(stamped)
+        except OSError:
+            log.exception("committed cflow2 checkpoint; JSON export failed in %s; "
+                          "use claunch cflow2 recover --scope %s", self.dir, self.scope)
 
     def append(self, events: List[Dict[str, Any]]) -> None:
+        if not events:
+            return
+        self.commit(self.load_state(), events)
+
+    def _append_json(self, events: List[Dict[str, Any]]) -> None:
         if not events:
             return
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -205,6 +283,8 @@ class RunStore:
                 rec = dict(ev)
                 rec.setdefault("ts", utcnow())
                 fh.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
 
     def write_receipt(self, delegation_id: str, payload: Any, suffix: str = ".json") -> Path:
         path = self.receipt_path(delegation_id, suffix)
@@ -212,8 +292,83 @@ class RunStore:
         text = payload if isinstance(payload, str) else json.dumps(
             payload, ensure_ascii=False, indent=1, default=str
         )
+        if self.checkpoint_path.exists():
+            try:
+                checkpoint.receipt(self.checkpoint_path, path.name, text)
+            except checkpoint.CheckpointError as exc:
+                raise StoreError(str(exc)) from exc
         _atomic_write(path, text)
         return path
+
+    def recovery(self, *, apply: bool = False, expected: Optional[int] = None) -> Dict[str, Any]:
+        """Inspect a checkpoint, or preserve evidence and restore under the lock.
+
+        Recovery never replays workflow commands. An applied recovery adds the
+        existing monitor halt so timers and agents wait for a person's resume.
+        """
+        if not self.dir.is_dir():
+            raise StoreError(f"no cflow2 run in {self.cwd} for scope {self.scope!r}")
+        with self.lock():
+            if not self.checkpoint_path.exists():
+                raise StoreError("no durable checkpoint for this legacy run; preserve chart.json, "
+                                 "state.json, journal.jsonl and receipts. Journal events alone "
+                                 "cannot reconstruct complete state; restore a known-good backup "
+                                 "or start a new run after reviewing external effects")
+            snap = self._checkpoint(full=True)
+            state = json.loads(snap["state"])
+            chart = ir.Chart.from_json(snap["chart"])
+            if (not isinstance(state, dict) or not state.get("run_id")
+                    or state.get("workflow") != chart.name or state.get("scope") != self.scope
+                    or not isinstance(state.get("inst"), dict)):
+                raise StoreError("checkpoint state/chart identity is invalid; recovery refused")
+            differences = []
+            files = {STATE_FILE: snap["state"], CHART_FILE: snap["chart"],
+                     JOURNAL_FILE: snap["journal"]}
+            files.update({f"{RECEIPTS_DIR}/{name}": body
+                          for name, body in snap["receipts"].items()})
+            for name, body in files.items():
+                try:
+                    matches = (self.dir / name).read_text(encoding="utf-8") == body
+                except (OSError, UnicodeError):
+                    matches = False
+                if not matches:
+                    differences.append(name)
+            result = {"scope": self.scope, "run": state["run_id"],
+                      "revision": snap["revision"], "updated": state.get("updated"),
+                      "active": state.get("active", []), "differences": differences,
+                      "applied": False, "checkpoint": str(self.checkpoint_path)}
+            if not apply:
+                return result
+            if expected is None or expected != snap["revision"]:
+                raise StoreError("checkpoint changed or --revision missing; inspect recover again")
+            evidence = self.dir / "recovery" / uuid.uuid4().hex
+            evidence.mkdir(parents=True)
+            for name in files:
+                src = self.dir / name
+                if src.is_file():
+                    dest = evidence / name
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    with dest.open("wb") as fh:
+                        fh.write(src.read_bytes())
+                        fh.flush()
+                        os.fsync(fh.fileno())
+            # Keep the validated pre-recovery checkpoint data even if publishing
+            # the repaired files fails. Do not overwrite any previous evidence.
+            _atomic_write(evidence / "checkpoint.json", checkpoint.encode(snap))
+            holds = state.setdefault("approvals", [])
+            if not any(a.get("monitor") == "storage-recovery" for a in holds):
+                holds.append({"kind": "monitor_violation", "monitor": "storage-recovery",
+                              "instance": None})
+            if state.get("status") in ("running", "waiting_approval"):
+                state.update(status="waiting_approval", reason="monitor_violation")
+            self.commit(state, [{"event": "storage_recovered", "revision": snap["revision"],
+                                 "evidence": str(evidence), "ts": utcnow()}])
+            repaired = self._checkpoint(full=True)
+            files.update({STATE_FILE: repaired["state"], JOURNAL_FILE: repaired["journal"]})
+            for name, body in files.items():
+                _atomic_write(self.dir / name, body)
+            result.update(applied=True, evidence=str(evidence), halted="storage-recovery")
+            return result
 
     def archive(self, run_id: Optional[str] = None) -> Path:
         """Move the slot's run files (and receipts) to the archive."""
@@ -234,6 +389,9 @@ class RunStore:
             src = self.dir / name
             if src.is_file():
                 shutil.move(str(src), str(target / name))
+        for name in ("recovery",):
+            if (self.dir / name).is_dir():
+                shutil.move(str(self.dir / name), str(target / name))
         if self.receipts_dir.is_dir():
             shutil.move(str(self.receipts_dir), str(target / RECEIPTS_DIR))
         return target
@@ -264,8 +422,17 @@ class RunStore:
 
 def _atomic_write(path: Path, text: str) -> None:
     with atomic.scratch(path) as tmp:
-        tmp.write_text(text, encoding="utf-8")
+        with tmp.open("w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
         atomic.replace(tmp, path)
+        if os.name != "nt":
+            fd = os.open(str(path.parent), os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
 
 
 @contextlib.contextmanager
@@ -329,4 +496,5 @@ def list_scopes(cwd: Optional[str] = None) -> List[str]:
     base = resolve_cwd(cwd) / BASE_DIR / "runs"
     if not base.is_dir():
         return []
-    return sorted(p.name for p in base.iterdir() if (p / STATE_FILE).is_file())
+    return sorted(p.name for p in base.iterdir()
+                  if (p / STATE_FILE).is_file() or (p / checkpoint.FILE).exists())

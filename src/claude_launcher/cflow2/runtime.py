@@ -213,8 +213,7 @@ class Run:
             iid for iid, inst in self.state["inst"].items() if inst.get("await")
         )
         self.state["updated"] = store_mod.utcnow()
-        self.store.save_state(self.state)
-        self.store.append(self.events)
+        self.store.commit(self.state, self.events)
         self.events = []
         for link in self.nested_aborts:
             _abort_nested(link)
@@ -1497,6 +1496,8 @@ def start_next_round(cwd: Optional[str] = None, scope: Optional[str] = None,
     except StoreError:
         return None
     nxt = state.get("next_round") or {}
+    if store_mod.recovery_held(state):
+        return None
     if state.get("status") not in FINISHED_STATUSES or not nxt.get("auto"):
         return None
     t = time.time() if now is None else now
@@ -1826,8 +1827,7 @@ def _abort_nested(link: Dict[str, Any], locked: bool = False) -> None:
             if child.status in LIVE_STATUSES:
                 _abort(child, "its delegation was cancelled in the delegating run")
             child.state["delivered"] = True
-            child.store.save_state(child.state)
-            child.store.append(child.events)
+            child.store.commit(child.state, child.events)
 
         if locked:
             go()
@@ -2398,7 +2398,8 @@ def start(chart: ir.Chart, *, cwd: Optional[str] = None, scope: Optional[str] = 
             previous = old
             if next_round_of is not None and (
                     old.get("run_id") != next_round_of
-                    or not (old.get("next_round") or {}).get("auto")):
+                    or not (old.get("next_round") or {}).get("auto")
+                    or store_mod.recovery_held(old)):
                 raise FlowError("the next-round request was withdrawn or the slot changed")
             if old.get("status") in LIVE_STATUSES:
                 if not force:
@@ -5377,7 +5378,7 @@ def ask_apply_route(plans: List[Dict[str, Any]], *, cwd: Optional[str] = None,
     routed: List[Dict[str, Any]] = []
 
     def op(r: Run) -> None:
-        if r.status not in LIVE_STATUSES:
+        if r.status not in LIVE_STATUSES or store_mod.recovery_held(r.state):
             return
         for plan in plans:
             rec = (r.state.get("asks") or {}).get(plan["ask"])
@@ -6285,6 +6286,8 @@ def claim_triggers(cwd: Optional[str] = None, scope: Optional[str] = None, *,
         recs = state.get("triggers") or []
         if not recs:
             return []
+        if any(a.get("monitor") == "storage-recovery" for a in state.get("approvals", [])):
+            return []
         events: List[Dict[str, Any]] = []
         taken: List[Dict[str, Any]] = []
         for rec in recs:
@@ -6305,9 +6308,7 @@ def claim_triggers(cwd: Optional[str] = None, scope: Optional[str] = None, *,
             taken.append(copy.deepcopy(rec))
         if not taken:
             return []
-        st.save_state(state)
-        if events:
-            st.append(events)
+        st.commit(state, events)
     return taken
 
 
@@ -6328,14 +6329,13 @@ def complete_trigger(cwd: Optional[str], scope: Optional[str], tid: str, perform
         try:
             state = st.load_state()
         except StoreError:
-            state = None
+            return False
         if state is not None:
             recs = state.get("triggers") or []
             kept = [rec for rec in recs if str(rec.get("id") or "") != str(tid)]
             if len(kept) != len(recs):
                 state["triggers"] = kept
-                st.save_state(state)
-        st.append([ev])
+        st.commit(state, [ev])
     return True
 
 

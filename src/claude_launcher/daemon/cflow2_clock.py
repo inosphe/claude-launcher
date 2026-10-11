@@ -481,6 +481,8 @@ class Cflow2Clock:
                   notices: List[Notice]) -> None:
         st = cstore.RunStore(cwd, scope)
         first = st.load_state()
+        if cstore.recovery_held(first):
+            return
         if first.get("triggers"):
             # Before the liveness check: a trigger recorded as the run
             # finished (a leave of the last node) is still performed.
