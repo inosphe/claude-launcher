@@ -361,12 +361,18 @@ ctx.setMeshes([
     "#session-list .rail-note", "#session-list .rail-note-editor",
     "#session-list .sess-cflow", "#session-list .sess-cflow2", "#session-list .sess-brief",
   ];
+  /* And one line that breaks the row ahead of the buttons rather than after
+     them: on the narrow rail in the expanded density the state text takes a
+     line of its own between the name and the buttons (claunch-g4owg), so the
+     buttons and the ▸ keep a line to themselves. It must sort before the
+     toggle -- after it, the ▸ would be left on the line above, alone. */
+  const LEADING = ["#session-list.density-expanded li[data-name] > .meta"];
   const fullWidth = [...rules].filter(([sel, d]) =>
     sel.startsWith("#session-list") &&
     (d["flex-basis"] === "100%" || /(^|\s)100%$/.test(d.flex || ""))
   ).map(([sel]) => sel);
-  check("only the directory line, the beads line, the one-line, the context line, the throughput line, the usage line, the attention line, the quiet line, the note line (or its editor), the status-check line, the cflow line, the cflow v2 line and the briefing card break the row",
-        fullWidth.sort(), [...BREAKERS].sort());
+  check("only the directory line, the beads line, the one-line, the context line, the throughput line, the usage line, the attention line, the quiet line, the note line (or its editor), the status-check line, the cflow line, the cflow v2 line, the briefing card and, expanded on the narrow rail, the state text break the row",
+        fullWidth.sort(), [...BREAKERS, ...LEADING].sort());
 
   /* The one-line summary is the exception to this rail's ellipsis habit: it
      wraps, because it is the only line that says what a session is DOING and
@@ -393,6 +399,11 @@ ctx.setMeshes([
     const o = Number(decl(sel, "order"));
     ok(`${sel} sorts after the toggle so the toggle stays on the name line`,
        Number.isFinite(o) && o > toggleOrder, `order ${decl(sel, "order")} vs toggle ${toggleOrder}`);
+  }
+  for (const sel of LEADING) {
+    const o = Number(decl(sel, "order"));
+    ok(`${sel} sorts before the toggle so the ▸ stays on the buttons' line`,
+       Number.isFinite(o) && o < toggleOrder, `order ${decl(sel, "order")} vs toggle ${toggleOrder}`);
   }
 
   /* The name group holds its line by refusing to wrap and by basing at 0 —
