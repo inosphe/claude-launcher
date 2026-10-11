@@ -1098,7 +1098,7 @@ _OWN_ARTIFACT_LINES = (
 )
 
 
-@pytest.mark.parametrize("which", ["v1", "v2"])
+@pytest.mark.parametrize("which", ["v1"])
 def test_wrapup_removes_the_test_artifacts_its_own_session_made(which):
     if which == "v1":
         step = yaml.safe_load(V1.read_text(encoding="utf-8"))["steps"]["wrapup"]
@@ -1113,7 +1113,7 @@ def test_wrapup_removes_the_test_artifacts_its_own_session_made(which):
     assert "`C:/t/<세션>c<10자리>`·`C:/t/<세션>-*`" in done
 
 
-@pytest.mark.parametrize("which", ["v1", "v2"])
+@pytest.mark.parametrize("which", ["v1"])
 def test_wrapup_keeps_a_held_rounds_preview_ref(which):
     # tools/merge_ready.py reads refs/claunch/preview/<branch> as the landing
     # evidence of a frozen round; deleting it in a hold wrapup sends the
@@ -1130,6 +1130,17 @@ def test_wrapup_keeps_a_held_rounds_preview_ref(which):
     assert "「착지 근거라 남김」" in words
     assert ("hold 회차의 `refs/claunch/preview/<브랜치>`는 착지 근거라 "
             "남기고") in done
+
+
+def test_v2_wrapup_uses_bounded_cleanup_and_records_deferred_items():
+    node = yaml.safe_load(V2.read_text(encoding="utf-8"))["nodes"]["wrapup"]
+    words, done = _words(node["prompt"]), _words(node["done_when"])
+    assert "artifact_cleanup {}" in words and "plan_id" in words
+    assert "cleanup_pending" in words and "cleanup_pending" in done
+    assert "거절 뒤 셸/Python/다른 도구로 삭제를 다시 시도" in words
+    assert "preview ref는 착지 여부와 관계없이 보존" in words
+    assert "보드 마감은 별도 호출" in words
+    assert "git worktree remove --force" not in words
 
 
 def test_v1_wrapup_cleanup_stays_inside_the_reminder_window():

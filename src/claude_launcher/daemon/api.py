@@ -531,6 +531,8 @@ def build_app(
     window = window if window is not None else window_mod.WindowManager(manager)
     app["window"] = window
     manager.exit_hooks.append(window.session_exited)
+    from . import artifact_cleanup_api
+    artifact_cleanup_api.install(app)
     # A restart never lets some endings reach the hook above: restore_all
     # retires what it does not relaunch before this board exists, so each
     # retired record's in_progress issues would keep claiming a dead session

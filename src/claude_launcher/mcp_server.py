@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from . import (
     glossary_mcp, observer_mcp, sim_mcp, operator_mcp, mcp_rpc, mesh_mcp, reposync_mcp, search_mcp, status_checks_mcp, wait_mcp,
-    window_mcp,
+    window_mcp, artifact_cleanup_mcp,
 )
 from .cflow import mcp as cflow_mcp
 from .cflow2 import mcp as cflow2_mcp
@@ -37,6 +37,7 @@ SERVER = mcp_rpc.merge(
         sim_mcp.SERVER,
         cflow2_mcp.SERVER,
         reposync_mcp.SERVER,
+        artifact_cleanup_mcp.SERVER,
     ]
 )
 
