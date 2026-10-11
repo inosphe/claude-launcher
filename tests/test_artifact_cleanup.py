@@ -208,6 +208,39 @@ def test_registered_preview_removal_preserves_ref_and_dirty_worktree(setup, tmp_
     git(repo, "show-ref", "--verify", "refs/claunch/preview/test")
 
 
+@pytest.mark.parametrize("reference", ["absent", "removed_after_plan", "preserved"])
+def test_detached_preview_requires_persistent_reachability(setup, tmp_path, reference):
+    service, _, sessions, registry = setup
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init")
+    commit = ("-c", "user.name=Test", "-c", "user.email=test@example.test",
+              "commit", "--allow-empty", "-m")
+    git(repo, *commit, "base")
+    registry["s1"].sdef.cwd = str(repo)
+    preview = sessions / "s1" / "scratch" / "s1-preview-unique"
+    git(repo, "worktree", "add", "--detach", str(preview))
+    git(preview, *commit, "detached-only")
+    head = ac._git(preview, "rev-parse", "HEAD").strip()
+    ref = "refs/claunch/preview/unique"
+    if reference != "absent":
+        git(repo, "update-ref", ref, head)
+    plan = service.plan("s1")
+    if reference == "absent":
+        assert plan["items"][0]["status"] == "cleanup_pending"
+    else:
+        assert plan["items"][0]["preserving_refs"] == [ref]
+    if reference == "removed_after_plan":
+        git(repo, "update-ref", "-d", ref)
+    result = service.apply("s1", plan["plan_id"])
+    if reference == "preserved":
+        assert result["removed"] == 1 and not preview.exists()
+        assert ac._git(repo, "rev-parse", ref).strip() == head
+    else:
+        assert result["removed"] == 0 and preview.exists()
+        assert "no preserving persistent ref" in result["items"][0]["reason"]
+
+
 def test_mcp_binds_session_and_rejects_paths(monkeypatch):
     calls = []
     client = SimpleNamespace(post=lambda *a, **kw: calls.append((a, kw)) or {})

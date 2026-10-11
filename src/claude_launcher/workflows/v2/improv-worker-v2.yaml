@@ -2460,6 +2460,7 @@ nodes:
          다른 세션이나 인스턴스의 대상, 변경된 대상은 보존한다. 미리보기
          워크트리는 같은 저장소에 등록된 detached·clean 상태만 일반
          worktree remove로 제거한다. --force·전역 prune은 사용하지 않으며
+         HEAD가 영속 ref에서 도달 가능하지 않으면 cleanup_pending이다.
          preview ref는 착지 여부와 관계없이 보존하고 artifacts에 적는다.
       4. 도구 부재·데몬 버전 불일치·정책 거절·사용 중·권한 오류는
          cleanup_pending으로 경로와 실제 사유를 기록한다. 도구가 없어서

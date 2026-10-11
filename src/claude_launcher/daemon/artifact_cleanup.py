@@ -166,7 +166,12 @@ class Cleanup:
                                         capture_output=True, timeout=30)
                 if result.returncode != 1:
                     raise CleanupError("preview must have a detached HEAD")
-                row.update(kind="worktree", head=_git(path, "rev-parse", "HEAD").strip(),
+                head = _git(path, "rev-parse", "HEAD").strip()
+                preserving_refs = _git(repo, "for-each-ref", "--format=%(refname)",
+                                       "--contains", head, "refs/").splitlines()
+                if not preserving_refs:
+                    raise CleanupError("detached HEAD has no preserving persistent ref")
+                row.update(kind="worktree", head=head, preserving_refs=preserving_refs,
                            retained_refs="all preview refs are preserved")
             else:
                 summary = json.loads((path / basetemp.RUN_SUMMARY).read_text(encoding="utf-8"))
