@@ -10658,7 +10658,7 @@ function renderNewTaskPrompter() {
       ? "Prompter has no prompts." : `Prompter unavailable: ${offer.error || "connection failed"}`));
   }
   for (const prompt of prompts) {
-    const button = el("button", "wf-btn", `Append ${prompt.title || prompt.name}`);
+    const button = el("button", "wf-btn", prompt.title || prompt.name);
     button.type = "button";
     button.title = prompt.body;
     button.addEventListener("click", () => {
