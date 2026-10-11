@@ -2347,41 +2347,6 @@ let sessionView = (() => {
   try { return localStorage.getItem(SESSION_VIEW_KEY) === "grid" ? "grid" : "list"; } catch {}
   return "list";
 })();
-/* How much of each session the list card shows (claunch-g4owg), remembered
-   per browser like the view. Expanded gives the name and its tags a line of
-   their own -- role, handle and rooms are drawn whole there, with the state
-   text and the buttons on the line under them -- and keeps every detail line
-   (directory, gauge, seen, board, checks, note, briefing one-liner). Compact
-   is one line per session: the name and its role, the state text and the
-   row's buttons, plus only the lines that want the reader (a cflow run, a
-   held delivery, an open note editor or briefing card). Separate from the
-   briefing ▸, which opens one session's summary card in either mode. */
-const SESSION_DENSITY_KEY = `claunch_session_density:${BASE}`;
-let sessionDensity = (() => {
-  try { return localStorage.getItem(SESSION_DENSITY_KEY) === "compact" ? "compact" : "expanded"; } catch {}
-  return "expanded";
-})();
-
-function setSessionDensity(density, remember = true) {
-  sessionDensity = density === "compact" ? "compact" : "expanded";
-  if (remember) {
-    try { localStorage.setItem(SESSION_DENSITY_KEY, sessionDensity); } catch {}
-  }
-  syncSessionDensity();
-}
-
-/* A class on the list, not a rebuild: every row already carries every line,
-   and the stylesheet decides which of them a density shows. */
-function syncSessionDensity() {
-  const list = $("session-list");
-  if (list) {
-    list.classList.toggle("density-compact", sessionDensity === "compact");
-    list.classList.toggle("density-expanded", sessionDensity !== "compact");
-  }
-  document.querySelectorAll('input[name="session-density"]').forEach((input) => {
-    input.checked = input.value === sessionDensity;
-  });
-}
 const SESSION_GRID_PER_LINE_KEY = `claunch_session_grid_per_line:${BASE}`;
 const SESSION_GRID_PER_LINE = [3, 4, 5];
 let sessionGridPerLine = (() => {
@@ -2443,8 +2408,6 @@ function syncSessionView() {
   // are its grouping, so the mode and the tabs would do nothing there.
   document.querySelectorAll(".session-group-toggle").forEach((el) =>
     el.classList.toggle("hidden", grid));
-  // The density is the list card's; the grid draws its own cells.
-  $("session-density")?.classList.toggle("hidden", grid);
   const groupTabs = $("session-group-tabs");
   if (groupTabs) groupTabs.classList.toggle("view-hidden", grid);
   const groupHeader = $("session-group-header");
@@ -4844,7 +4807,20 @@ async function refreshSessions(options) {
     // scanning for "which of these has nobody touched" finds it in one
     // column rather than hunting a different offset on every row.
     const railSeen = railSeenLine(s);
-    li.append(dot, head, meta, railCwd, ...(railCtx ? [railCtx] : []),
+    // The role again, on a line of its own under the name. Drawn only on the
+    // selected card (CSS, li.active), where the name line's copy is hidden:
+    // squeezed beside the name, the handle and the rooms, the role is the
+    // pill that gets cut, and the selected session is the one whose role the
+    // reader is looking for. Built on every row so that selecting one is a
+    // class change, not a redraw.
+    const roleLine = document.createElement("span");
+    roleLine.className = "rail-role-line";
+    const roleWhole = document.createElement("span");
+    roleWhole.className = "mesh-role";
+    roleWhole.textContent = role.textContent;
+    roleWhole.title = role.textContent;
+    roleLine.appendChild(roleWhole);
+    li.append(dot, head, meta, roleLine, railCwd, ...(railCtx ? [railCtx] : []),
               ...(railTps ? [railTps] : []),
               ...(railUsage ? [railUsage] : []),
               railSeen, ...(plus ? [plus] : []), ...(pin ? [pin] : []),
@@ -13162,11 +13138,6 @@ document.querySelectorAll('input[name="session-view"]').forEach((input) =>
     if (input.checked) setSessionView(input.value);
   }));
 syncSessionView();
-document.querySelectorAll('input[name="session-density"]').forEach((input) =>
-  input.addEventListener("change", () => {
-    if (input.checked) setSessionDensity(input.value);
-  }));
-syncSessionDensity();
 
 /* The rail polls, but a poll is a tick behind at best: a session spawned from
    somewhere else — another agent's `spawn`, a `claunch new` in a terminal, a

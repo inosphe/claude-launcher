@@ -235,12 +235,6 @@ html[data-theme="light"] .xterm {
   background: #1f6feb33; color: #58a6ff;
 }
 
-/* List | Grid, and beside it the list's Compact | Expanded: two segmented
-   radio pairs sharing one line above the filters. */
-.session-view-row {
-  flex: none; display: flex; gap: 8px; background: #11151b;
-}
-.session-view-row > .session-view-tabs { flex: 1 1 0; min-width: 0; }
 /* List | Grid: one segmented radio pair above the filters. */
 .session-view-tabs {
   flex: none; display: flex; gap: 2px; margin: 0; padding: 3px 6px 0;
@@ -577,8 +571,8 @@ html[data-theme="light"] .xterm {
    the name's line keeps the default `order: 0` and declares no
    `flex-basis: 100%`. Only the deliberate line-breakers below
    (.rail-cwd, .rail-ctx-line, .rail-usage-line, .rail-seen, .rail-quiet,
-   .rail-note, .rail-status-checks, .sess-cflow, .sess-cflow2, .sess-brief) are
-   full-width, and they
+   .rail-note, .rail-status-checks, .sess-cflow, .sess-cflow2, .sess-brief,
+   and the selected card's .rail-role-line) are full-width, and they
    carry an `order` above the ▸ toggle's so the toggle still lands at the end
    of the name line. A full-width child at order 0 would break the line
    before the toggle got there.
@@ -605,6 +599,20 @@ html[data-theme="light"] .xterm {
   flex: 0 1 auto; padding: 1px 5px; min-width: 3em;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+/* The selected card's role, on a line of its own (app.js, .rail-role-line):
+   whole, wrapping if it must, never an ellipsis. The name line's copy steps
+   aside so the role is not drawn twice. Every other card keeps the role
+   beside the name, as above. */
+#session-list .rail-role-line { display: none; }
+#session-list li.active > .rail-role-line {
+  display: flex; flex-basis: 100%; order: 2; min-width: 0;
+  padding-left: 16px; margin-top: 2px;
+}
+#session-list li.active > .rail-role-line > .mesh-role {
+  flex: 0 1 auto; min-width: 0;
+  white-space: normal; overflow: visible; overflow-wrap: anywhere;
+}
+#session-list li.active > .rail-head > .mesh-role { display: none; }
 /* The name the mesh calls this session by, when that is not the name it sits
    beside. Green rather than the role's blue or the rooms' grey: on this rail
    blue already means "what this session IS" and grey "where it belongs", and
@@ -1339,110 +1347,6 @@ html[data-theme="light"] .xterm {
     margin-left: 0; margin-right: auto; flex: 1 1 0; min-width: 0;
   }
 }
-
-/* The list card's two densities (claunch-g4owg; syncSessionDensity in
-   app.js puts one of these classes on #session-list). Written after the
-   container rule above and one class more specific than it, so a density
-   holds at every rail width.
-
-   Expanded: the name and the tags that qualify it take the first line on
-   their own, at any rail width -- the arrangement the narrow rail already
-   used, now the default everywhere. On one shared line the head was the
-   only shrinkable thing beside the state text and the row's buttons, so how
-   much of the role survived depended on how long the state text was: a
-   paused row's "codex/codex · paused" cut "free-role" to "fre…" while the
-   running row under it showed the word whole. With the line to itself the
-   head wraps instead of clipping: role, handle and each room are drawn
-   whole (capped at the line, so one very long name still ellipses rather
-   than overflowing the rail). The state text and the buttons share the
-   second line, and the text wraps there rather than ellipsing. The
-   directory line wraps too: in this density a second line costs less than
-   a cut path. */
-/* The name group may now run to two lines (a long name with its tags), and
-   the row centres its items on the line's height -- which would put the
-   dot and the └ halfway down the pair, beside nothing. Both are pinned to
-   the first line instead: it is as tall as a pill (11px text, 1px padding
-   and a 1px border each side, 17px at the 13px row font), so the 8px dot
-   sits 0.65em - 4px down and the 11px tick gets a line box that tall. */
-#session-list.density-expanded li[data-name] > .dot {
-  order: -1; align-self: flex-start; margin-top: calc(0.65em - 4px);
-}
-#session-list.density-expanded li.child::before {
-  order: -1; width: 11px; overflow: hidden; align-self: flex-start; line-height: 1.55;
-}
-#session-list.density-expanded li[data-name] > .rail-head {
-  order: -1; flex: 1 1 calc(100% - 15px); flex-wrap: wrap; row-gap: 3px;
-}
-#session-list.density-expanded li.child > .rail-head { flex-basis: calc(100% - 29px); }
-#session-list.density-expanded .rail-name { flex: 0 1 auto; max-width: 100%; }
-#session-list.density-expanded .rail-head > .mesh-role,
-#session-list.density-expanded .rail-head > .rail-handle,
-#session-list.density-expanded .rail-mesh { flex: none; max-width: 100%; min-width: 0; }
-#session-list.density-expanded .rail-meshes { flex: 0 1 auto; flex-wrap: wrap; max-width: 100%; }
-/* Based at 0 so the buttons are placed first, but never narrower than its
-   longest word: the text breaks between "codex/codex ·" and "paused", not
-   inside "nc/claude". */
-#session-list.density-expanded li[data-name] > .meta {
-  margin-left: 0; margin-right: auto; flex: 1 1 0; min-width: min-content;
-  max-width: none; white-space: normal; overflow-wrap: break-word;
-  /* under the name, past the dot and its gap (8 + 5), and on a child row
-     past the tick and its gap too (11 - 2 + 5) */
-  padding-left: 13px;
-}
-#session-list.density-expanded li.child > .meta { padding-left: 27px; }
-/* On the narrow rail the buttons alone fill most of a line (+, 📌, 👁, ✎,
-   ⓘ, ⟳, ▸ is about 175 of 245px), so the text left beside them was down to
-   one short word and the longer ones pushed the ▸ onto a line of its own
-   (claunch-gge34.1). There the state text takes a line of its own between
-   the name and the buttons. */
-@container session-rail (max-width: 420px) {
-  #session-list.density-expanded li[data-name] > .meta {
-    order: -1; flex: 1 1 100%; min-width: 0;
-  }
-}
-#session-list.density-expanded .rail-cwd { flex-wrap: wrap; row-gap: 0; }
-#session-list.density-expanded .rail-cwd .cwd-path,
-#session-list.density-expanded .rail-cwd .cwd-branch {
-  min-width: 0; white-space: normal; overflow-wrap: anywhere;
-}
-
-/* Compact: one line per session -- the dot, the name and its role, the
-   state text and the buttons that say something. The role is rigid here:
-   it is the reason this line exists, so the name gives up width first (its
-   whole text is on its title) and the rooms and the handle are left to the
-   ⓘ panel. The
-   detail lines go, and so do the controls that act on them (the checks' and
-   briefing's ⟳, the note pen, the spawn +); a pin or an observe pin is kept
-   only while it is on, since then it is a state of the row. What stays
-   below the line is what wants the reader: a cflow run, held delivery, an
-   open note editor and an opened briefing card. */
-#session-list.density-compact li[data-name] > .dot,
-#session-list.density-compact li.child::before { order: 0; }
-#session-list.density-compact li[data-name] > .rail-head { order: 0; flex: 1 1 0; }
-#session-list.density-compact .rail-name { flex: 0 1 auto; max-width: none; }
-#session-list.density-compact .rail-head > .mesh-role { flex: none; }
-/* The rooms and the mesh handle are left to the expanded card and the ⓘ
-   panel. The handle's 4em floor beside a rigid role and the name's 2.5em
-   was more than the 260px line holds, and the name group cut the role to
-   make room (claunch-g4owg review) -- the one pill this line promises. */
-#session-list.density-compact :is(.rail-meshes, .rail-handle) { display: none; }
-#session-list.density-compact li[data-name] > .meta {
-  margin-left: 0; margin-right: 0; flex: 0 1 auto; min-width: 0; max-width: 38%;
-}
-/* On the narrow rail the state text leaves the compact line: 260px less the
-   dot, the ⓘ and the ▸ is room for a name and a role, not for those and
-   "codex/codex · paused" as well, and with the text there the name group
-   was the part that gave way -- cutting the role this density promises
-   whole. The dot's colour still tells running, paused, hold and exited
-   apart, and the row's title says which in words. */
-@container session-rail (max-width: 420px) {
-  #session-list.density-compact li[data-name] > .meta { display: none; }
-}
-#session-list.density-compact li[data-name] > :is(
-  .rail-cwd, .rail-ctx-line, .rail-tps-line, .rail-usage-line, .rail-seen,
-  .rail-beads, .rail-status-checks, .rail-brief, .rail-note,
-  .sess-status-check-rowref, .sess-brief-rowref, .sess-note-edit, .sess-plus,
-  .sess-pin:not(.on), .sess-observe:not(.on)) { display: none; }
 
 /* ---- the pages that live in #main ---- */
 #home-view, #new-view, #meshes-view, #flows-view, #window-view, #beads-view {
