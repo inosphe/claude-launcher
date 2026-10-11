@@ -1863,9 +1863,8 @@ function setSessionGroupTab(group, value, remember = true) {
 /* Which side of a mesh the rail shows, chosen on the mesh header
    (claunch-no9dy): `local` keeps this daemon's rows, `remote` keeps other
    daemons' members (the remote-shadow rows), `both` keeps every row. One
-   choice for every mesh tab, remembered per browser. It narrows the mesh
-   grouping alone: a workspace tab already files remote rows under their
-   own `@<machine>` heading, and an ungrouped rail trails them under one. */
+   choice for every mesh tab and the ungrouped rail, remembered per browser.
+   A workspace tab keeps its own `@<machine>` grouping without this filter. */
 const SESSION_ORIGIN_FILTERS = ["both", "local", "remote"];
 const SESSION_ORIGIN_KEY = `claunch_session_origin:${BASE}`;
 let sessionOriginFilter = (() => {
@@ -1888,7 +1887,7 @@ function filterSessionOrigin(rows, origin) {
   const drop = origin === "local" ? "shadow" : "session";
   const kept = rows.filter((r) => r.type !== drop);
   return kept.filter((row, i) => {
-    if (row.type !== "group" || !row.level) return true;
+    if (row.type !== "group" || (!row.level && row.group !== "remote")) return true;
     for (let j = i + 1; j < kept.length; j++) {
       const next = kept[j];
       if (next.type === "group") {

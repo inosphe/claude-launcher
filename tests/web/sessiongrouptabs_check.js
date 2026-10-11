@@ -314,6 +314,12 @@ check("nested, remote drops the emptied local workspace headings",
       ctx.byOrigin(NESTED, "remote").map(rowName),
       ["m1", "@x", "r1", "m2", "@x", "r2"]);
 check("nested, both keeps every row", ctx.byOrigin(NESTED, "both"), NESTED);
+const UNGROUPED = [session("s1"),
+  { type: "group", group: "remote", value: "other-daemon", level: 0 }, shadow("r1")];
+check("ungrouped local removes the empty remote daemon heading",
+      ctx.byOrigin(UNGROUPED, "local").map(rowName), ["s1"]);
+check("ungrouped remote keeps the daemon heading with its remote row",
+      ctx.byOrigin(UNGROUPED, "remote").map(rowName), ["other-daemon", "r1"]);
 const octx = load({});
 octx.render("mesh", split.tabs, "m2");
 const opts = () => head.querySelectorAll(".session-origin-option");
