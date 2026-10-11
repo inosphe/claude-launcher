@@ -369,7 +369,11 @@ def test_pi_option_env_and_settings_channel(home):
 
 def test_pi_extension_reads_the_context_window_variable():
     text = pi_provider.extension_path().read_text(encoding="utf-8")
-    assert "CLAUNCH_PI_CONTEXT_WINDOW" in text
+    # The default export reads CLAUNCH_PI_* from the process environment;
+    # registerFromEnv takes the prefix so the simulation runner can register
+    # a second provider from CLAUNCH_SIMJ_*.
+    assert 'registerFromEnv(pi, process.env, "CLAUNCH_PI_")' in text
+    assert "env[`${prefix}CONTEXT_WINDOW`]" in text
     assert "contextWindow: 128000" not in text
 
 

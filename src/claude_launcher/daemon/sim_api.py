@@ -12,6 +12,17 @@ into an owner's terminal:
 * when the user creates a simulation for a session from the page, or
   presses Nudge.
 
+The run session. When a simulation's ``interpreter_profile`` names a pi
+profile and the Node runtime is installed (:mod:`claude_launcher.sim.runtime`),
+starting it launches a pi session (kind ``pi-durable``) whose extension
+(``sim/pi/runner.mjs``) does the interpreting: it formalizes the sources, has
+the judge profile check every quoted rule, runs rounds and interprets the gap
+batches, each question in its own durable conversation. The run session acts
+with the owner's authority while attached; stopping the campaign kills it,
+its exit ends the campaign, and either way the owner is told. Without a
+profile or runtime the owner session does the interpreting itself (the S1
+flow), and the start response says why.
+
 Who is calling. A body with ``session`` acts as that session (the MCP tools
 always send ``$CLAUNCH_SESSION``); a body without one acts as the user. This
 is the daemon's usual trust model -- the dashboard and the tools share one
@@ -25,6 +36,7 @@ touches files.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Optional
 
@@ -77,12 +89,61 @@ def pi_profiles() -> list:
     return out
 
 
+def pi_models(names) -> dict:
+    """Model ids each profile offers pi, for profiles whose provider pi can
+    be handed (an OAuth-only profile runs pi on its own login and cannot be
+    registered as a second provider, so it cannot judge)."""
+    from .. import harnesses, pi_provider, profile as profile_mod
+    harness = harnesses.registry(config_store.load()).get("pi")
+    out = {}
+    for name in names:
+        try:
+            proj = pi_provider.resolve(profile_mod.require_selector(name), harness)
+        except Exception:  # noqa: BLE001 -- not a choice
+            continue
+        if proj is not None:
+            out[name] = list(proj.models)
+    return out
+
+
+def _guide() -> str:
+    from .. import sim_mcp
+    return sim_mcp.GUIDE
+
+
 def _defaults() -> dict:
     cfg = config_store.daemon_config()
     return {
         "interpreter_profile": str(cfg.get("simulation_interpreter_profile") or ""),
         "judge_profile": str(cfg.get("simulation_judge_profile") or ""),
     }
+
+
+def judge_projection(profile_name: str, session: str) -> dict:
+    """The judge profile's provider as the run session registers it next to
+    its own: the ``CLAUNCH_PI_*`` values of :func:`pi_provider.apply_env`
+    renamed to ``CLAUNCH_SIMJ_*``, and the key it authenticates with. The
+    key goes over the daemon's authenticated API to the process that uses
+    it and is never written to a session definition."""
+    from .. import harnesses, pi_provider, profile as profile_mod, runner
+    doc = config_store.load()
+    harness = harnesses.registry(doc).get("pi")
+    if harness is None:
+        raise sim_store.SimError("the pi harness is not declared")
+    prof = profile_mod.require_selector(profile_name)
+    env: dict = {}
+    try:
+        pi_provider.apply_env(prof, harness, env)
+    except pi_provider.PiProviderError as exc:
+        raise sim_store.SimError(f"judge profile {profile_name}: {exc}")
+    if not env:
+        raise sim_store.SimError(f"judge profile {profile_name} has no provider the pi harness can use")
+    pi_provider.apply_session_header(env, session)
+    out = {k.replace("CLAUNCH_PI_", "CLAUNCH_SIMJ_", 1): v for k, v in env.items()}
+    out["CLAUNCH_SIMJ_PROVIDER"] = "claunch-judge"
+    out["CLAUNCH_SIMJ_TOKEN_ENV"] = "CLAUNCH_SIMJ_API_KEY"
+    key = runner._api_key_for(prof) if harness.auth == "api-key" else None
+    return {"env": out, "key": key or "", "models": json.loads(env.get("CLAUNCH_PI_MODELS") or "[]")}
 
 
 def ended_text(sim: dict) -> str:
@@ -102,9 +163,13 @@ def created_text(sim: dict) -> str:
     return (
         f"{PREFIX} The user asked you to build and run simulation {sim['id']} \"{sim['title']}\""
         + (f" -- goal: {goal}" if goal else "") + ". "
-        f"You own it. Read it with sim_show {sim['id']}, build the world model from the sources with "
-        "sim_patch (every rule quotes its source file word for word, or is marked provisional with a why), "
-        f"then sim_start {sim['id']} and work the gaps (sim_gaps). You will be told when it finishes."
+        f"You own it. Read it with sim_show {sim['id']}. "
+        + (f"It has an interpreter profile: sim_start {sim['id']} launches a run session that builds the model "
+           "and works the gaps; "
+           if (sim.get("settings") or {}).get("interpreter_profile") else
+           "Build the world model from the sources with sim_patch (every rule quotes its source file word for "
+           f"word, or is marked provisional with a why), then sim_start {sim['id']} and work the gaps (sim_gaps); ")
+        + "you will be told when it finishes."
     )
 
 
@@ -140,13 +205,64 @@ def install(app, store: Optional[sim_store.SimStore] = None):
             log.info("sim: could not deliver to %s", name)
             return False
 
+    def kill_runner(sim: dict) -> None:
+        name = (sim.get("runner") or {}).get("session")
+        if not name:
+            return
+        try:
+            manager.kill(name)
+        except Exception:  # noqa: BLE001 -- already gone
+            log.info("sim: could not kill run session %s", name)
+
     def released(session) -> None:
         name = getattr(getattr(session, "sdef", None), "name", None)
-        if name:
-            try:
-                sims.session_exited(name)
-            except Exception:  # noqa: BLE001 -- the exit funnel must not break
-                log.exception("sim: releasing %s failed", name)
+        if not name:
+            return
+        try:
+            for sid in sims.session_exited(name):
+                # The owner left: nobody is told when its run ends, so stop it.
+                kill_runner(sims.get(sid))
+            for sim in sims.runner_exited(name):
+                notify_end(sim, True)
+        except Exception:  # noqa: BLE001 -- the exit funnel must not break
+            log.exception("sim: releasing %s failed", name)
+
+    async def launch_runner(sid: str) -> dict:
+        """Launch the run session of a campaign that has just started.
+        Returns ``{"session": name}`` or ``{"manual": why}``."""
+        from . import harness as harness_mod
+        from ..sim import runtime
+        sim = await asyncio.to_thread(sims.get, sid)
+        profile = sim["settings"].get("interpreter_profile") or ""
+        if not profile:
+            return {"manual": "no interpreter profile is set; the owner session interprets"}
+        if profile not in await asyncio.to_thread(pi_profiles):
+            return {"manual": f"profile {profile} cannot launch the pi harness here; the owner session interprets"}
+        ext = await asyncio.to_thread(runtime.runner_path)
+        if ext is None:
+            return {"manual": "the simulation runtime is not installed (claunch sim runtime install); "
+                              "the owner session interprets"}
+        n = int(sim.get("runner_count") or 0) + 1
+        name = f"{sid}-run{n}"
+        while name in getattr(manager, "_sessions", {}) or paths.session_dir(name).is_dir():
+            n += 1
+            name = f"{sid}-run{n}"
+        from .. import pi_provider
+        sdef = harness_mod.SessionDef(
+            name=name, profile=f"{profile}:pi", cwd=sim["root"] or "", kind="pi-durable",
+            project=sim.get("project") or None, args=("--extension", str(ext)),
+            env={"CLAUNCH_SIM_ID": sid, "CLAUNCH_SIM_STORE": str(sims.root / sid / "durable.sqlite"),
+                 "CLAUNCH_SIM_DAEMON_DIR": str(paths.daemon_dir()),
+                 "CLAUNCH_SIM_PROVIDER_JS": str(pi_provider.extension_path())},
+            note=f"simulation {sid} run session",
+        )
+        await asyncio.to_thread(sims.attach_runner, sid, name)
+        try:
+            await manager.create_async(sdef)
+        except Exception as exc:  # noqa: BLE001 -- the reason goes back to the caller
+            await asyncio.to_thread(sims.runner_done, sid, "daemon", f"launch failed: {exc}", True)
+            return {"failed": f"could not launch the run session: {exc}"}
+        return {"session": name}
 
     manager.exit_hooks.append(released)
 
@@ -195,7 +311,9 @@ def install(app, store: Optional[sim_store.SimStore] = None):
 
     async def h_profiles(request):
         names = await asyncio.to_thread(pi_profiles)
-        return web.json_response({"profiles": names, "defaults": _defaults()})
+        models = await asyncio.to_thread(pi_models, names)
+        return web.json_response({"profiles": names, "judges": sorted(models), "models": models,
+                                  "defaults": _defaults()})
 
     async def h_create(request):
         body = await body_of(request)
@@ -246,7 +364,9 @@ def install(app, store: Optional[sim_store.SimStore] = None):
         res, err = await call(sims.patch_model, sid, actor, body.get("patch") or {}, body.get("key"))
         if err:
             return err
-        if res.get("ok") and not res.get("duplicate"):
+        # With a run session attached, it runs the rounds itself.
+        auto = body.get("round", True) and not await asyncio.to_thread(sims.runner_of, sid)
+        if res.get("ok") and not res.get("duplicate") and auto:
             sim = await asyncio.to_thread(sims.get, sid)
             if sim["state"] == "running":
                 summary, err = await call(sims.run_round, sid, actor)
@@ -279,7 +399,31 @@ def install(app, store: Optional[sim_store.SimStore] = None):
     async def h_start(request):
         sid = request.match_info["id"]
         body = await body_of(request)
-        return await run_and_report(sid, sims.start, sid, actor_of(body))
+        actor = actor_of(body)
+        sim, err = await call(sims.get, sid)
+        if err:
+            return err
+        running = (sim.get("runner") or {}).get("session")
+        if running and _live(manager, running):
+            return web.json_response({"error": f"run session {running} is already running {sid}"}, status=409)
+        if body.get("runner", True) and sim["settings"].get("interpreter_profile"):
+            res, err = await call(sims.start, sid, actor, False)
+            if err:
+                return err
+            launched = await launch_runner(sid)
+            if "session" in launched:
+                return web.json_response({"result": res, "sim": await asyncio.to_thread(sims.get, sid),
+                                          "runner": launched["session"], "notified": False})
+            if "failed" in launched:
+                sim = await asyncio.to_thread(sims.get, sid)
+                return web.json_response({"error": launched["failed"], "sim": sim,
+                                          "notified": notify_end(sim, True)}, status=502)
+            # No runner possible: the owner interprets, as without a profile.
+            resp = await run_and_report(sid, sims.run_round, sid, actor)
+            data = json.loads(resp.text)
+            data["manual"] = launched["manual"]
+            return web.json_response(data, status=resp.status)
+        return await run_and_report(sid, sims.start, sid, actor)
 
     async def h_round(request):
         sid = request.match_info["id"]
@@ -289,7 +433,67 @@ def install(app, store: Optional[sim_store.SimStore] = None):
     async def h_stop(request):
         sid = request.match_info["id"]
         body = await body_of(request)
-        return await run_and_report(sid, sims.stop, sid, actor_of(body), str(body.get("reason") or ""))
+        sim, err = await call(sims.get, sid)
+        if err:
+            return err
+        resp = await run_and_report(sid, sims.stop, sid, actor_of(body), str(body.get("reason") or ""))
+        if resp.status == 200:
+            kill_runner(sim)
+        return resp
+
+    def require_runner(sid: str, body_or_query) -> Optional[web.Response]:
+        who = str(body_or_query.get("session") or "")
+        if not who or who != sims.runner_of(sid):
+            return web.json_response({"error": f"only the run session of {sid} may do this"}, status=403)
+        return None
+
+    async def h_runner(request):
+        """The run session's configuration: settings and the judge provider."""
+        sid = request.match_info["id"]
+        sim, err = await call(sims.get, sid)
+        if err:
+            return err
+        denied = require_runner(sid, request.query)
+        if denied:
+            return denied
+        st = sim["settings"]
+        judge = None
+        if st.get("judge_profile") and st["judge_profile"] != st.get("interpreter_profile"):
+            judge, err = await call(judge_projection, st["judge_profile"], request.query["session"])
+            if err:
+                return err
+        return web.json_response({"sim": sim, "judge": judge, "guide": _guide()})
+
+    async def h_work(request):
+        sid = request.match_info["id"]
+        try:
+            gaps = int(request.query.get("gaps") or 4)
+        except ValueError:
+            gaps = 4
+        res, err = await call(sims.work, sid, gaps)
+        if err:
+            return err
+        return web.json_response(res)
+
+    async def h_verdicts(request):
+        sid = request.match_info["id"]
+        body = await body_of(request)
+        res, err = await call(sims.judge, sid, actor_of(body), body.get("items") or [], body.get("key"))
+        if err:
+            return err
+        return web.json_response(res)
+
+    async def h_runner_done(request):
+        sid = request.match_info["id"]
+        body = await body_of(request)
+        denied = require_runner(sid, body)
+        if denied:
+            return denied
+        res, err = await call(sims.runner_done, sid, body["session"], str(body.get("reason") or ""),
+                              bool(body.get("failed")))
+        if err:
+            return err
+        return web.json_response({"result": res, "notified": notify_end(res, res.get("ended"))})
 
     async def h_transfer(request):
         sid = request.match_info["id"]
@@ -410,4 +614,8 @@ def install(app, store: Optional[sim_store.SimStore] = None):
     r.add_get("/api/sims/{id}/replay", h_replay)
     r.add_get("/api/sims/{id}/coverage", h_coverage)
     r.add_post("/api/sims/{id}/nudge", h_nudge)
+    r.add_get("/api/sims/{id}/runner", h_runner)
+    r.add_post("/api/sims/{id}/runner/done", h_runner_done)
+    r.add_get("/api/sims/{id}/work", h_work)
+    r.add_post("/api/sims/{id}/verdicts", h_verdicts)
     return sims

@@ -25,9 +25,12 @@ claunch-efnbt. gds6 시뮬레이션 v2(`~/works/gds6`, `notes/designframe-sim-v2
 | API | `src/claude_launcher/daemon/sim_api.py` | `/api/sims...`, 소유 세션에 알림 입력, 세션 종료 시 소유권 해제 |
 | MCP | `src/claude_launcher/sim_mcp.py` | `sim_*` 도구. 바꾸는 호출은 `$CLAUNCH_SESSION`을 호출자로 보냄 |
 | 화면 | `src/claude_launcher/web/static/sim-page.js` | `#/sims`(목록·새 시뮬레이션), `#/sims/<id>/<탭>` |
+| 실행 세션 | `src/claude_launcher/sim/pi/{runner,campaign}.mjs` | 데몬이 띄우는 pi 세션의 확장. 형식화·판정·빈칸 해석 고리 |
+| 런타임 | `src/claude_launcher/sim/runtime.py`, `sim/pi/package*.json` | 실행 세션의 Node 의존성(pi-durable 등) 설치 |
 
 저장 위치는 `<런처 홈>/daemon/simulations/<id>/`(`sim.json`, `model.json`, `findings.json`, `rounds.jsonl`,
-`journal.jsonl`, `submits.json`)이다. 세션이 어느 워크트리에 있든 같은 레코드를 읽는다.
+`journal.jsonl`, `submits.json`, 판정 기록 `verdicts.json`, 실행 세션의 durable 저장소 `durable.sqlite`와 사건 기록
+`durable.events.jsonl`)이다. 세션이 어느 워크트리에 있든 같은 레코드를 읽는다.
 
 ## 소유권
 
@@ -53,6 +56,51 @@ claunch-efnbt. gds6 시뮬레이션 v2(`~/works/gds6`, `notes/designframe-sim-v2
 - 웹의 「새 시뮬레이션」은 레코드를 만들고 고른 세션에 생성 요청을 입력한다. 「소유 세션에 요청」은 임의의 말이나
   계속 진행 요청을 입력한다.
 
+## 실행 세션
+
+- 설정의 `interpreter_profile`이 pi로 실행할 수 있는 프로필이고 런타임이 설치되어 있으면, 실행(`sim_start`, 화면의
+  「실행」)은 첫 라운드를 바로 돌리지 않고 데몬이 실행 세션을 띄운다. 세션 이름은 `<시뮬레이션 id>-run<n>`, kind는
+  `pi-durable`, 작업 디렉터리는 시뮬레이션 루트다.
+- 실행 세션은 붙어 있는 동안 소유 세션과 같은 권한으로 모델을 바꾸고 라운드를 돌린다. 실행 세션이 붙어 있으면 모델
+  변경마다 라운드를 다시 돌리지 않고, 실행 세션이 라운드를 직접 요청한다.
+- 고리(`campaign.mjs`의 `runCampaign`):
+  1. 모델이 비어 있으면 해석 모델(B, 실행 세션 프로필의 모델)이 파일 도구(`read_file`, `list_files`,
+     `search_text`, 루트 밖은 거절)로 원천을 읽고 모델 전체를 제출한다. 거절되면 거절 사유를 붙여 다시 묻는다.
+  2. 판정이 없는 인용 규칙·불변식을 판정 모델(C, `judge_profile`의 모델)이 원천 파일과 대조한다. `confirmed`는 기록만
+     하고, `fabricated`는 모델에서 빼고, `ambiguous`는 남기고 기록한다. 규칙 본문이 바뀌면 판정을 다시 받는다.
+  3. 사용자가 답한 질문을 규칙으로 옮긴다(출처 `user:<발견 키>`). 그 키를 인용한 변경이 받아들여지면 그 발견에
+     `applied`가 붙는다.
+  4. 라운드를 돌린다. 캠페인이 끝나면(열린 발견 0, `max_rounds`) 고리도 끝난다.
+  5. 빈칸 묶음마다 B가 패치, `dismiss`, `ask` 중 하나로 답한다.
+  6. 연속 두 번의 반복에서 받아들여진 변경이 없으면 멈춘다.
+- 물음 하나는 durable 작업 하나이고 새 대화 하나를 쓴다. 작업 열쇠와 제출 열쇠는 물음의 대상(라운드 번호, 자리,
+  시도 번호)에서 나오므로, 데몬 재기동으로 세션이 복원되면 같은 작업을 기다리고 같은 제출은 한 번만 반영된다.
+- 생성 수(12), 한 요청 문맥(200000 토큰), 대화 입력 합(1000000 토큰)에 닿으면 파일 도구가 읽기를 멈춘다. 생각이 같은
+  낱말을 되풀이하면 그 생성을 끊는다(gds6의 `cutLoops`).
+- 판정 모델의 공급자는 실행 세션이 시작할 때 데몬(`GET /api/sims/<id>/runner`, 붙어 있는 실행 세션만 호출 가능)에서
+  받아 프로세스 안에서만 등록한다. 키는 세션 정의에 저장하지 않는다. `judge_profile`이 비었거나 해석과 같으면 B 모델이
+  판정도 한다.
+- 고리가 끝나면 실행 세션이 `runner/done`을 보내고 종료한다. 데몬은 캠페인을 끝내고 소유 세션에 끝남 알림을 입력한다.
+  실행 세션 프로세스가 어떤 이유로든 사라져도 같은 알림이 간다. 「중지」는 실행 세션을 종료한다. 소유 세션이 종료되면
+  실행 세션도 종료된다.
+- 진행 상황은 세션 진행 API(`stage`: formalize, judge, answers, round, gaps)로 세션 목록과 대시보드에 보인다.
+- 프로필이 없거나, pi로 실행할 수 없거나, 런타임이 없으면 S1 방식으로 돌고 응답의 `manual`에 이유를 적는다.
+  `sim_start`에 `runner: false`를 주면 실행 세션 없이 소유 세션이 해석한다.
+
+### 런타임 설치
+
+claunch에는 npm 단계가 없어서 실행 세션의 의존성(`@earendil-works/pi-durable`, `pi-ai`, `chord`, 1.1.0 고정)을
+`sim/pi/package-lock.json`으로 고정하고 `<런처 홈>/sim-runtime`에 `npm ci`로 한 번 설치한다.
+
+```
+claunch sim runtime install      # 설치 또는 갱신 (--force: 다시 설치)
+claunch sim runtime status       # 설치·최신 여부, 아니면 종료 코드 1
+```
+
+`claunch install --global`도 같은 설치를 시도하고, npm이 없으면 한 줄 안내만 남긴다. lock이 바뀌면 `status`가
+`stale`을 보이고 실행 세션은 띄우지 않는다. 확장 파일(`runner.mjs`, `campaign.mjs`)은 실행 세션을 띄울 때마다
+최신본으로 복사된다.
+
 ## 모델 규칙
 
 - 규칙과 불변식에는 출처가 있어야 한다: `source: [{ref, quote}]`. `ref`는 시뮬레이션 루트(소유 세션의
@@ -71,17 +119,20 @@ claunch-efnbt. gds6 시뮬레이션 v2(`~/works/gds6`, `notes/designframe-sim-v2
 | 키 | 기본값 | 뜻 |
 |---|---|---|
 | `interpreter_profile` | 데몬 `simulation_interpreter_profile` | 해석(B)에 쓸 pi 프로필 |
-| `judge_profile` | 데몬 `simulation_judge_profile` | 판정(C)에 쓸 pi 프로필(B와 다른 모델 권장) |
+| `judge_profile` | 데몬 `simulation_judge_profile` | 판정(C)에 쓸 pi 프로필. 비우면 해석 프로필 |
+| `interpreter_model`, `judge_model` | 빈 값(프로필 기본 모델) | 그 프로필이 pi에 주는 모델 중 하나. 같은 프로필에서도 판정 모델을 다르게 고를 수 있다 |
 | `interpreter_reasoning`, `judge_reasoning` | `low` | `none`·`low`·`medium`·`high` |
 | `seed`, `budget`, `horizon` | 1, 2000, 12 | 걸음 씨앗, 라운드당 걸음 수, 셀 하나에서 이어 가는 걸음 수 |
 | `max_rounds` | 20 | 한 번 실행의 라운드 상한 |
 
-화면의 프로필 선택지는 pi 하네스로 실행할 수 있는 프로필만 보여 준다(`GET /api/sims/profiles`). 설정은 언제든 바꿀
+화면의 프로필 선택지는 pi 하네스로 실행할 수 있는 프로필만 보여 준다(`GET /api/sims/profiles`). 판정 프로필은 그중
+공급자를 pi에 넘길 수 있는 프로필(`judges`)만이다. Anthropic OAuth만 쓰는 프로필은 pi를 자체 로그인으로 실행하므로 두
+번째 공급자로 등록할 수 없다. 해석과 판정이 같은 프로필·같은 모델이면 화면이 경고한다. 설정은 언제든 바꿀
 수 있고 다음 라운드·실행부터 적용된다.
 
 ## 단계
 
-- S1(claunch-efnbt.1, 이 문서의 범위): 엔진, 저장소, 소유권, API, MCP, Sims 탭, 알림. 해석은 소유 세션이 직접 한다.
-- S2(claunch-efnbt.2): 데몬이 실행마다 띄우는 pi-durable 실행 세션이 원천 형식화 → 빈칸 묶음 해석(B) → 판정(C, 다른
-  모델)을 물음마다 새 durable 대화로 돌린다. 위 프로필·reasoning 설정을 쓴다. 제출 API는 S1의 키 멱등 제출을 쓴다.
+- S1(claunch-efnbt.1): 엔진, 저장소, 소유권, API, MCP, Sims 탭, 알림. 해석은 소유 세션이 직접 한다.
+- S2(claunch-efnbt.2): 위 「실행 세션」 절. 데몬이 실행마다 띄우는 pi-durable 실행 세션이 형식화, 판정(C), 빈칸
+  해석(B)을 물음마다 새 durable 대화로 돌린다.
 - S3(claunch-efnbt.3): witness 재생 화면, carry, triage, 편집 제안.

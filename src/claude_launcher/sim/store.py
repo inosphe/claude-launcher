@@ -54,6 +54,8 @@ REASONING = ("none", "low", "medium", "high")
 DEFAULT_SETTINGS = {
     "interpreter_profile": "",   # B: pi profile that formalizes and interprets
     "judge_profile": "",         # C: pi profile that judges (a different model)
+    "interpreter_model": "",     # a model of the interpreter profile ("" = its default)
+    "judge_model": "",           # a model of the judge profile, or of the interpreter's when no judge profile
     "interpreter_reasoning": "low",
     "judge_reasoning": "low",
     "seed": 1,
@@ -227,6 +229,8 @@ class SimStore:
             return
         if not actor:
             raise Forbidden(f"{what}: no calling session")
+        if (meta.get("runner") or {}).get("session") == actor:
+            return  # the run session the daemon launched acts for the owner
         if meta.get("owner") != actor:
             who = meta.get("owner") or "nobody (claim it first)"
             raise Forbidden(f"{what}: {meta['id']} is owned by {who}; only the owner or the user may do this")
@@ -320,9 +324,9 @@ class SimStore:
         for k, v in change.items():
             if k not in DEFAULT_SETTINGS:
                 raise SimError(f"unknown setting {k!r}")
-            if k.endswith("_profile"):
+            if k.endswith("_profile") or k.endswith("_model"):
                 if not isinstance(v, str):
-                    raise SimError(f"{k} must be a profile name")
+                    raise SimError(f"{k} must be a {'profile name' if k.endswith('_profile') else 'model id'}")
                 out[k] = v.strip()
             elif k.endswith("_reasoning"):
                 if v not in REASONING:
@@ -419,6 +423,143 @@ class SimStore:
                     out.append(meta["id"])
         return out
 
+    # -- run session ---------------------------------------------------------
+
+    def attach_runner(self, sim_id: str, session: str) -> dict:
+        """Record the run session the daemon launched for this campaign. It
+        acts with the owner's authority while attached."""
+        with self._lock:
+            meta = self._meta(sim_id)
+            meta["runner"] = {"session": session, "started_at": _now()}
+            meta["runner_count"] = int(meta.get("runner_count") or 0) + 1
+            self._save_meta(meta)
+            self._journal(sim_id, "daemon", "runner", session=session)
+            return self.summary(meta)
+
+    def runner_of(self, sim_id: str) -> str:
+        return ((self._meta(sim_id).get("runner") or {}).get("session")) or ""
+
+    def runner_done(self, sim_id: str, actor: str, reason: str = "", failed: bool = False) -> dict:
+        """The run session finished its loop (or gave up). A campaign still
+        running ends here: ``stopped`` with the runner's reason. Returns the
+        summary and ``ended``."""
+        with self._lock:
+            meta = self._meta(sim_id)
+            runner = (meta.get("runner") or {}).get("session")
+            if actor not in (USER, "daemon") and actor != runner:
+                raise Forbidden(f"runner_done: {actor} is not the run session of {sim_id}")
+            was = meta["state"]
+            if was == "running":
+                meta["state"] = "stopped"
+                meta["state_reason"] = ("run session failed: " if failed else "run session finished: ") + (
+                    reason or "no reason given")
+            if runner:
+                meta["last_runner"] = {**(meta.get("runner") or {}), "ended_at": _now(),
+                                       "reason": reason, "failed": bool(failed)}
+            meta["runner"] = None
+            self._save_meta(meta)
+            self._journal(sim_id, actor, "runner_done", reason=reason, failed=bool(failed))
+            if was == "running":
+                self._journal(sim_id, actor, "ended", state=meta["state"], reason=meta["state_reason"])
+            return {**self.summary(meta), "ended": was == "running"}
+
+    def runner_exited(self, name: str) -> List[dict]:
+        """``name`` was a run session and its process is gone: detach it
+        and end the campaign it drove. Returns the summaries that ended."""
+        out = []
+        with self._lock:
+            for meta in self._metas():
+                if (meta.get("runner") or {}).get("session") == name:
+                    res = self.runner_done(meta["id"], "daemon", f"session {name} exited", failed=True)
+                    if res["ended"]:
+                        out.append(res)
+        return out
+
+    # -- judge verdicts --------------------------------------------------------
+
+    VERDICTS = ("confirmed", "fabricated", "ambiguous")
+
+    @staticmethod
+    def rule_digest(item: dict) -> str:
+        """What a verdict is about: the rule as written. A changed rule needs
+        a new verdict."""
+        body = {k: item.get(k) for k in ("on", "when", "do", "source", "priority")}
+        return hashlib.sha256(json.dumps(body, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:12]
+
+    def verdicts(self, sim_id: str) -> Dict[str, dict]:
+        return _read_json(self._dir(sim_id) / "verdicts.json", {})
+
+    def unjudged(self, sim_id: str) -> List[dict]:
+        """Sourced rules and invariants without a verdict on their current
+        text (provisional ones have no quote to check)."""
+        m = self.model(sim_id)
+        seen = self.verdicts(sim_id)
+        out = []
+        for section in ("rules", "invariants"):
+            for item in m.get(section) or []:
+                if item.get("provisional") is not None or not item.get("source"):
+                    continue
+                v = seen.get(f"{section}:{item['id']}")
+                if v and v.get("digest") == self.rule_digest(item):
+                    continue
+                out.append({"section": section, **item})
+        return out
+
+    def judge(self, sim_id: str, actor: str, items: List[dict], key: Optional[str] = None) -> dict:
+        """Record the judge's verdicts: ``confirmed`` (the quote says it),
+        ``fabricated`` (it does not: the rule is retracted from the model),
+        ``ambiguous`` (kept, marked disputed). Each item is
+        ``{section?, id, verdict, why}``."""
+        with self._lock:
+            meta = self._meta(sim_id)
+            self._require_owner(meta, actor, "record verdicts")
+            seen = self._seen(sim_id, key)
+            if seen is not None:
+                return {**seen, "duplicate": True}
+            m = self.model(sim_id)
+            ledger = self.verdicts(sim_id)
+            done, errors, retract = [], [], {"rules": [], "invariants": []}
+            for it in items or []:
+                section = it.get("section") or "rules"
+                rid = str(it.get("id") or "")
+                verdict = it.get("verdict")
+                if section not in retract:
+                    errors.append(f"{rid}: section must be rules or invariants")
+                    continue
+                item = next((x for x in m.get(section) or [] if x.get("id") == rid), None)
+                if item is None:
+                    errors.append(f"no {section[:-1]} {rid!r}")
+                    continue
+                if verdict not in self.VERDICTS:
+                    errors.append(f"{rid}: verdict must be one of {', '.join(self.VERDICTS)}")
+                    continue
+                ledger[f"{section}:{rid}"] = {"verdict": verdict, "why": str(it.get("why") or "")[:4000],
+                                             "digest": self.rule_digest(item), "by": actor, "at": _now()}
+                if verdict == "fabricated":
+                    retract[section].append(rid)
+                done.append(rid)
+            if any(retract.values()):
+                new = M.apply_patch(m, {"remove": {k: v for k, v in retract.items() if v}})
+                _write_json(self._dir(sim_id) / "model.json", new)
+                self._journal(sim_id, actor, "retracted", ids=[*retract["rules"], *retract["invariants"]])
+            _write_json(self._dir(sim_id) / "verdicts.json", ledger)
+            if done:
+                self._journal(sim_id, actor, "verdicts", ids=done[:50])
+            result = {"ok": not errors, "done": done, "errors": errors,
+                      "retracted": [*retract["rules"], *retract["invariants"]]}
+            self._remember(sim_id, key, result)
+            return result
+
+    def work(self, sim_id: str, gaps: int = 4) -> dict:
+        """Everything a run session reads to take its next step."""
+        with self._lock:
+            sim = self.get(sim_id)
+            answered = [f for f in self.findings(sim_id).values()
+                        if f.get("status") == "answered" and not f.get("applied")]
+            return {"sim": sim, "model": self.model(sim_id), "gaps": self.gap_batches(sim_id, gaps)
+                    if sim["counts"].get("open") else [], "answered": answered,
+                    "unjudged": self.unjudged(sim_id)}
+
     def sweep(self) -> List[str]:
         """Release owners that are no longer running (daemon start)."""
         out = []
@@ -428,6 +569,11 @@ class SimStore:
                 if owner and not self.live(owner):
                     self._release(meta, "daemon", f"session {owner} is gone")
                     out.append(meta["id"])
+                runner = (meta.get("runner") or {}).get("session")
+                if runner and not self.live(runner):
+                    self.runner_done(meta["id"], "daemon", f"run session {runner} is gone", failed=True)
+                    if meta["id"] not in out:
+                        out.append(meta["id"])
         return out
 
     def _metas(self) -> List[dict]:
@@ -464,18 +610,45 @@ class SimStore:
             self._journal(sim_id, actor, "model", hash=model_hash(new),
                           changed={k: len(v) for k, v in patch.items() if isinstance(v, (list, dict))})
             result = {"ok": True, "hash": model_hash(new), "stats": M.stats(new)}
+            applied = self._mark_applied(sim_id, patch)
+            if applied:
+                result["applied"] = applied
             self._remember(sim_id, key, result)
             return result
 
+    def _mark_applied(self, sim_id: str, patch: dict) -> List[str]:
+        """An answered question whose finding a patch cites (``user:<key>``)
+        has been put into the model; the run session stops offering it."""
+        refs = set()
+        for section in ("rules", "invariants"):
+            for item in patch.get(section) or []:
+                for s in item.get("source") or []:
+                    ref = str(s.get("ref") or "")
+                    if ref.startswith("user:"):
+                        refs.add(ref[5:])
+        if not refs:
+            return []
+        ledger = self.findings(sim_id)
+        out = [k for k in refs if (ledger.get(k) or {}).get("status") == "answered"]
+        for k in out:
+            ledger[k]["applied"] = _now()
+        if out:
+            _write_json(self._dir(sim_id) / "findings.json", ledger)
+        return out
+
     # -- rounds --------------------------------------------------------------
 
-    def start(self, sim_id: str, actor: str) -> dict:
+    def start(self, sim_id: str, actor: str, round: bool = True) -> dict:
+        """Start a campaign. ``round=False`` leaves the first round to the
+        run session, which formalizes the sources first."""
         with self._lock:
             meta = self._meta(sim_id)
             self._require_owner(meta, actor, "start")
             meta["state"], meta["state_reason"], meta["run_rounds"] = "running", f"started by {actor}", 0
             self._save_meta(meta)
             self._journal(sim_id, actor, "started")
+            if not round:
+                return self.summary(meta)
         return self.run_round(sim_id, actor)
 
     def stop(self, sim_id: str, actor: str, reason: str = "") -> dict:

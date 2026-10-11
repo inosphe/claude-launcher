@@ -1,0 +1,12 @@
+{
+  "name": "claunch-sim-runtime",
+  "private": true,
+  "description": "Node dependencies of the claunch simulation runner (sim/pi/runner.mjs). Installed by `claunch sim runtime install`, never at run time.",
+  "type": "module",
+  "engines": { "node": ">=22.19.0" },
+  "dependencies": {
+    "@earendil-works/chord": "1.1.0",
+    "@earendil-works/pi-ai": "1.1.0",
+    "@earendil-works/pi-durable": "1.1.0"
+  }
+}

@@ -62,7 +62,9 @@ Simulations (sim_* tools): a session builds a formal world model of a feature
 (state machines, events, ECA rules quoting their sources, invariants) and the
 daemon walks it to find gaps, conflicts, broken invariants and dead ends. Any
 session may read any simulation; only its owner (or the user) changes, runs
-or stops it. Call sim_guide before writing a model. A "[claunch simulation]"
+or stops it; started with an interpreter profile, a daemon-launched run
+session does the interpreting and a judge model checks its quotes. Call
+sim_guide before writing a model. A "[claunch simulation]"
 line in your terminal is the daemon: a simulation you own finished, or the
 user answered or asked something about it.
 """
@@ -107,8 +109,12 @@ TOOLS = [
                     "While running, a round reruns after every accepted patch.",
      "inputSchema": {"type": "object", "properties": {
          **_ID, "patch": {"type": "object"}, "key": {"type": "string"}}, "required": ["sim", "patch"]}},
-    {"name": "sim_start", "description": "Owner: start the campaign (runs round 1 now; reruns on every model change).",
-     "inputSchema": {"type": "object", "properties": _ID, "required": ["sim"]}},
+    {"name": "sim_start", "description": "Owner: start the campaign. With an interpreter_profile set (and the runtime "
+                                         "installed) the daemon launches a run session that formalizes, judges and works "
+                                         "the gaps itself -- leave the model to it and wait for the finished line. "
+                                         "Otherwise (or runner: false) round 1 runs now and you work the gaps.",
+     "inputSchema": {"type": "object", "properties": {**_ID, "runner": {"type": "boolean", "description": "false: interpret yourself"}},
+                     "required": ["sim"]}},
     {"name": "sim_round", "description": "Owner: run one round now.",
      "inputSchema": {"type": "object", "properties": _ID, "required": ["sim"]}},
     {"name": "sim_stop", "description": "Owner: stop the campaign.",
@@ -191,6 +197,8 @@ def call_tool(name: str, args: dict) -> dict:
         body = {"session": me}
         if name == "sim_stop" and args.get("reason"):
             body["reason"] = args["reason"]
+        if name == "sim_start" and args.get("runner") is False:
+            body["runner"] = False
         return c.post(f"/api/sims/{_sim(args)}/{verb}", body)
     if name == "sim_resolve":
         return c.post(f"/api/sims/{_sim(args)}/resolve",

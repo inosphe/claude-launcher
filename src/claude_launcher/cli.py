@@ -30,6 +30,7 @@ from . import (
     cli_report,
     cli_search,
     cli_sessions,
+    cli_sim,
     cli_spec,
     cli_sync,
     cli_transcript,
@@ -1094,6 +1095,8 @@ def run_install(
             return 0
     elif global_:
         done = install_mod.install_into_user()
+        from . import cli_sim
+        print(cli_sim.install_note())
     elif profile_name:
         # Installation follows the same PROFILE[:HARNESS] selector contract
         # as run, validate, usage, and the daemon APIs.
@@ -1679,6 +1682,7 @@ def build_parser() -> argparse.ArgumentParser:
     cli_plugins.register(sub)
     cli_report.register(sub)
     cli_spec.register(sub)
+    cli_sim.register(sub)
     cli_commits.register(sub)
     cli_window.register(sub)
     cli_connections.register(sub)
