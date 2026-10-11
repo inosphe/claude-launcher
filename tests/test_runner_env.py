@@ -761,7 +761,7 @@ def test_pi_openai_url_translation_is_idempotent(home):
     assert env[pi_provider.ENV_BASE_URL] == "https://omlx.example/v1"
     extension = pi_provider.extension_path().read_text(encoding="utf-8")
     assert "openai-completions" not in extension
-    assert "const api = process.env.CLAUNCH_PI_API" in extension
+    assert "const api = env[`${prefix}API`]" in extension
     assert "supportsUsageInStreaming: streamUsage" in extension
 
 

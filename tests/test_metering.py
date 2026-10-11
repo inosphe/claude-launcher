@@ -464,8 +464,8 @@ def test_pi_session_header_is_set_and_replaced_not_duplicated():
 
 def test_pi_extension_registers_the_headers_and_the_usage_flag():
     extension = pi_provider.extension_path().read_text(encoding="utf-8")
-    assert 'process.env.CLAUNCH_PI_STREAM_USAGE === "1"' in extension
-    assert "process.env.CLAUNCH_PI_HEADERS" in extension
+    assert 'env[`${prefix}STREAM_USAGE`] === "1"' in extension
+    assert "env[`${prefix}HEADERS`]" in extension
     assert "...(headers ? { headers } : {})" in extension
 
 
