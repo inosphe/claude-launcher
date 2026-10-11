@@ -54,6 +54,12 @@ async function api(raw, opts = {}) {
   else if (p.endsWith('/answer')) result = {ok: true, nudged: true};
   else if (p.endsWith('/transfer')) result = {sim};
   else if (p.endsWith('/settings')) result = {sim};
+  else if (p.endsWith('/proposals')) result = {proposals: [
+    {id: 'e-1234abcd', kind: 'clarify', file: 'spec.md', old: 'opens', new: 'opens once', reason: 'twice is open', status: 'proposed',
+     findings: ['unhandled|door|open|open'], check: {breaks: ['r.open']}},
+    {id: 'e-feedbeef', kind: 'complete', file: 'spec.md', old: '', new: 'close is ignored', reason: 'r', status: 'rejected',
+     findings: ['unhandled|door|closed|close'], check: {breaks: []}, decision: {by: 'user', note: 'not now'}}]};
+  else if (p.includes('/proposals/') && p.endsWith('/decide')) result = {proposal: {}, nudged: true};
   else { result = {error: 'unexpected ' + method + ' ' + p}; ok = false; }
   return {ok, status: ok ? 200 : 500, json: async () => result};
 }
@@ -141,6 +147,21 @@ async function settle() { for (let i = 0; i < 10; i++) await new Promise(resolve
   assert(all().some(n => n.className === 'sim-cell-ask'));
   ctx.SimPage.open('sim-abc123', 'model'); await settle();
   assert(all().some(n => n.className === 'sim-source' && n.textContent.includes('spec.md')));
+  // Edit proposals: a diff, the quotes it would break, decide only while proposed.
+  sim.proposals = {proposed: 1, accepted: 0, rejected: 1};
+  ctx.SimPage.open('sim-abc123', 'proposals'); await settle();
+  assert(button('편집 제안 (1)'));
+  assert(all().some(n => n.className === 'sim-del' && n.textContent === 'opens'));
+  assert(all().some(n => n.className === 'sim-add' && n.textContent === 'opens once'));
+  assert(all().some(n => n.className === 'sim-warn' && n.textContent.includes('r.open')));
+  assert(all().some(n => n.textContent === '파일 끝에 추가'));
+  assert(all().some(n => n.textContent === '메모: not now'));
+  assert.strictEqual(all().filter(n => n.tag === 'button' && n.textContent === '수락').length, 1);
+  const memo = all().find(n => n.tag === 'input' && n.placeholder === '메모 (선택)'); memo.value = 'ok'; memo.oninput();
+  button('수락').onclick(); await settle();
+  const decided = calls.find(c => c.url.pathname.endsWith('/proposals/e-1234abcd/decide'));
+  assert.deepStrictEqual(decided.body, {accept: true, note: 'ok'});
+  delete sim.proposals;
   // Settings save the chosen profiles.
   ctx.SimPage.open('sim-abc123', 'settings'); await settle();
   labelled('해석(B) reasoning').value = 'high'; labelled('해석(B) reasoning').onchange();
@@ -149,6 +170,7 @@ async function settle() { for (let i = 0; i < 10; i++) await new Promise(resolve
   const saved = calls.find(c => c.url.pathname.endsWith('/settings'));
   assert.strictEqual(saved.body.settings.interpreter_reasoning, 'high');
   assert.strictEqual(saved.body.settings.triage, false);
+  assert.strictEqual(saved.body.settings.max_edits, 0);
   assert.deepStrictEqual(saved.body.sources, ['spec.md']);
   // Leaving the route invalidates an outstanding read.
   ctx.SimPage.open(); await settle();

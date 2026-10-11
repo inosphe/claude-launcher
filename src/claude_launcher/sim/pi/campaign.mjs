@@ -151,6 +151,19 @@ export function gapPrompt(sim, model, batch, guide, rejected) {
   ].filter(Boolean).join("\n\n");
 }
 
+export function editorPrompt(sim, targets, max, rejected) {
+  return [
+    "You are the editor. A simulation of the system described by the sources raised questions the sources do not settle, and the user answered some of them. Propose edits to the source files so that the documents themselves settle them.",
+    brief(sim),
+    "Findings:",
+    "```json\n" + JSON.stringify(targets.map((f) => ({ key: f.key, kind: f.kind, detail: f.detail, witness: f.witness?.steps, question: f.question?.text, options: f.question?.options, answer: f.answer?.text })), null, 1) + "\n```",
+    "Read the files first (read_file, search_text). For an answered finding, write the user's answer into the document where the surrounding behaviour is described (kind complete). For an open question, write the choice as an explicit open decision with its options, without picking one (kind decide). Use clarify only for rewording that does not change the meaning. Never change a decision the document already records.",
+    "old must be text copied word for word from the file (it is replaced once); leave old empty to append to the end of the file. Keep each edit small.",
+    rejected ? `Your previous proposals were rejected by the daemon:\n- ${rejected.join("\n- ")}\nFix exactly these problems.` : "",
+    `Answer with a JSON array of at most ${max} items [{"file": <path under the root>, "old": ..., "new": ..., "kind": "clarify"|"complete"|"decide", "reason": ..., "findings": [keys]}] in a \`\`\`json fence at the end.`,
+  ].filter(Boolean).join("\n\n");
+}
+
 export function triagePrompt(sim, model, batch) {
   return [
     "You are the judge. A deterministic simulator walked a formal world model built from the sources and found the gaps below. Before anyone answers them, sort each one. Read the sources with your tools.",
@@ -202,7 +215,38 @@ export function answersPrompt(sim, model, answered, guide, rejected) {
  * returns the answer text; ``api`` is the daemon client; ``progress`` gets a
  * record for the session's progress display. Returns {reason, failed}.
  */
-export async function runCampaign({ simId, session, api, ask, guide, progress = () => {}, limits = LIMITS, log = () => {} }) {
+export async function runCampaign(opts) {
+  const res = await walkCampaign(opts);
+  if (!res.failed) await proposeEdits(opts);
+  return res;
+}
+
+/**
+ * The editor (D): once the campaign has ended, propose edits to the source
+ * files that would settle the questions and record the user's answers --
+ * at most max_edits of them, never applied (the user accepts or rejects).
+ */
+export async function proposeEdits({ simId, session, api, ask, progress = () => {}, limits = LIMITS, log = () => {} }) {
+  const work = await api("GET", `/api/sims/${simId}/work?gaps=0&session=${encodeURIComponent(session)}`);
+  const max = work.sim.settings.max_edits ?? 0;
+  const targets = (work.edit_targets ?? []).slice(0, Math.max(0, max) * 3);
+  if (!max || !targets.length) return;
+  progress({ stage: "edits", text: `${targets.length} findings` });
+  const base = `edit:${targets.map((f) => f.key).sort().join(",")}`;
+  let rejected;
+  for (let a = 1; a <= limits.attempts; a++) {
+    const text = await ask("B", `${base}:${a}`, editorPrompt(work.sim, targets, max, rejected), true);
+    let items;
+    try { items = answerJson(text); } catch (error) { log("edit_unreadable", { error: error.message }); return; }
+    if (!Array.isArray(items)) return;
+    const res = await api("POST", `/api/sims/${simId}/proposals`, { session, key: `${base}:${a}`, items: items.slice(0, max) });
+    log("edits", { attempt: a, done: res.done?.length ?? 0, errors: res.errors?.length ?? 0 });
+    if (res.ok || res.done?.length) return;
+    rejected = res.errors;
+  }
+}
+
+export async function walkCampaign({ simId, session, api, ask, guide, progress = () => {}, limits = LIMITS, log = () => {} }) {
   const q = `session=${encodeURIComponent(session)}`;
   const submit = async (key, patch) => api("POST", `/api/sims/${simId}/model`, { session, patch, key, round: false });
   let idle = 0;

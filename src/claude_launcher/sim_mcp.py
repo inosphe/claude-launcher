@@ -90,6 +90,9 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {**_ID, "limit": {"type": "integer"}}, "required": ["sim"]}},
     {"name": "sim_replay", "description": "Replay a finding's witness on the current model, step by step.",
      "inputSchema": {"type": "object", "properties": {**_ID, "key": {"type": "string"}}, "required": ["sim", "key"]}},
+    {"name": "sim_proposals", "description": "Edit proposals to the sources (the editor's output), with their status "
+                                             "and the quoted rules each would break.",
+     "inputSchema": {"type": "object", "properties": _ID, "required": ["sim"]}},
     {"name": "sim_create",
      "description": "Create a simulation owned by this session, rooted at this session's checkout.",
      "inputSchema": {"type": "object", "properties": {
@@ -183,6 +186,8 @@ def call_tool(name: str, args: dict) -> dict:
         return c.get(f"/api/sims/{_sim(args)}/gaps?" + urllib.parse.urlencode(q))
     if name == "sim_replay":
         return c.get(f"/api/sims/{_sim(args)}/replay?" + urllib.parse.urlencode({"key": args.get("key") or ""}))
+    if name == "sim_proposals":
+        return c.get(f"/api/sims/{_sim(args)}/proposals")
     me = _session()
     if name == "sim_create":
         body = {k: args[k] for k in ("title", "goal", "sources", "issue", "settings", "from") if k in args}

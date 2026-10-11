@@ -145,3 +145,22 @@ def test_exit_releases_and_user_transfers(tmp_path):
         await req("DELETE", f"/api/sims/{sid}")
         await req("GET", f"/api/sims/{sid}", status=404)
     run(tmp_path, scenario)
+
+
+def test_user_accepts_an_edit_proposal_and_the_owner_is_told(tmp_path):
+    async def scenario(req, mgr, s1, s2):
+        sid = (await req("POST", "/api/sims", {"title": "door", "session": "s1"}, status=201))["sim"]["id"]
+        await req("POST", f"/api/sims/{sid}/model", {"session": "s1", "patch": PATCH})
+        await req("POST", f"/api/sims/{sid}/round", {"session": "s1"})
+        key = "unhandled|door|open|open"
+        item = {"file": "spec.md", "old": "", "new": "Opening an open door does nothing.", "kind": "complete",
+                "reason": "user answer", "findings": [key]}
+        await req("POST", f"/api/sims/{sid}/proposals", {"session": "s2", "items": [item]}, status=403)
+        made = await req("POST", f"/api/sims/{sid}/proposals", {"session": "s1", "items": [item]})
+        pid = made["done"][0]
+        assert (await req("GET", f"/api/sims/{sid}/proposals"))["proposals"][0]["id"] == pid
+        await req("POST", f"/api/sims/{sid}/proposals/{pid}/decide", {"session": "s1", "accept": True}, status=403)
+        res = await req("POST", f"/api/sims/{sid}/proposals/{pid}/decide", {"accept": True, "note": "go"})
+        assert res["nudged"] and pid in s1.delivered[-1] and "append to spec.md" in s1.delivered[-1]
+        assert "Opening an open door does nothing." in s1.delivered[-1]
+    run(tmp_path, scenario)

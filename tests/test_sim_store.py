@@ -292,3 +292,44 @@ def test_triage_sorts_open_findings(env):
     assert st.configure(sim["id"], "s1", settings={"triage": False})["settings"]["triage"] is False
     with pytest.raises(S.SimError):
         st.configure(sim["id"], "s1", settings={"triage": 1})
+
+
+# -- edit proposals (S3d) ------------------------------------------------------
+
+def test_edit_proposals_are_checked_and_never_applied(env, tmp_path):
+    st, root, _ = env
+    sim = st.create(title="door", root=root, owner="s1", actor="s1")
+    st.patch_model(sim["id"], "s1", base_patch())
+    st.run_round(sim["id"], "s1")
+    key = "unhandled|door|open|open"
+    st.resolve(sim["id"], "s1", [{"key": key, "action": "ask", "question": "and then?"}])
+    assert [f["key"] for f in st.edit_targets(sim["id"])] == [key]
+    good = {"file": "spec.md", "old": "", "new": "Open decision: what pressing open on an open door does.",
+            "kind": "decide", "reason": "the spec is silent", "findings": [key]}
+    breaking = {"file": "spec.md", "old": "The door opens when closed.", "new": "The door slides open when closed.",
+                "kind": "clarify", "reason": "wording", "findings": [key]}
+    res = st.propose(sim["id"], "s1", [
+        good, breaking,
+        {**good, "old": "not in the file"},
+        {**good, "file": "../outside.md"},
+        {**good, "findings": []},
+        {**good, "kind": "rewrite"},
+    ], key="p1")
+    assert len(res["done"]) == 2 and len(res["errors"]) == 4
+    props = st.proposals(sim["id"])
+    by_kind = {p["kind"]: p for p in props.values()}
+    assert by_kind["decide"]["check"]["breaks"] == []
+    assert by_kind["clarify"]["check"]["breaks"] == ["rule r.open"]  # its quote would be gone
+    assert (tmp_path / "repo" / "spec.md").read_text(encoding="utf-8") == SPEC  # nothing applied
+    assert st.edit_targets(sim["id"]) == []  # covered by a proposal
+    assert st.get(sim["id"])["proposals"]["proposed"] == 2
+    pid = by_kind["decide"]["id"]
+    with pytest.raises(S.Forbidden):
+        st.decide_proposal(sim["id"], "s1", pid, True)
+    got = st.decide_proposal(sim["id"], S.USER, pid, True, "ok")
+    assert got["proposal"]["status"] == "accepted" and got["owner"] == "s1"
+    st.decide_proposal(sim["id"], S.USER, by_kind["clarify"]["id"], False)
+    assert st.get(sim["id"])["proposals"] == {"proposed": 0, "accepted": 1, "rejected": 1}
+    assert st.configure(sim["id"], "s1", settings={"max_edits": 0})["settings"]["max_edits"] == 0
+    with pytest.raises(S.SimError):
+        st.configure(sim["id"], "s1", settings={"max_edits": -1})

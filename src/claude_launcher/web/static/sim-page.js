@@ -18,7 +18,7 @@ globalThis.SimPage = (() => {
   // Drafts outlive a redraw (every poll redraws): the create form, the
   // settings form of the open simulation, answers by finding key, the nudge.
   let draft = null, settingsDraft = null, nudgeDraft = "", transferTo = "";
-  let replays = {};
+  let replays = {}, proposals = null, proposalNotes = {};
   const answers = {};
   const view = () => document.getElementById("sims-view");
 
@@ -52,6 +52,11 @@ globalThis.SimPage = (() => {
           if (mine !== seq) return;
           model = m.model; coverage = c;
         }
+        if (tab === "proposals") {
+          const pr = await request(base + "/proposals");
+          if (mine !== seq) return;
+          proposals = pr.proposals || [];
+        }
       }
       error = "";
     } catch (exc) { if (mine === seq) error = exc.message; }
@@ -79,6 +84,8 @@ globalThis.SimPage = (() => {
     s.value = value; s.disabled = busy; s.onchange = () => onchange(s.value); return s;
   }
   const sessionOptions = (blank) => [["", blank], ...sessions.map(s => [s.name, s.name + (s.project ? ` (${s.project})` : "")])];
+  const PROPOSAL_LABEL = {proposed: "검토 대기", accepted: "수락", rejected: "거절"};
+  const EDIT_KIND_LABEL = {clarify: "명료화", complete: "보충", decide: "결정 필요"};
   const TRIAGE_LABEL = {model: "모델이 원천을 잘못 읽음", spec: "원천에 정해진 내용 없음 (사람이 결정)", intended: "결함 아님"};
   const MODEL_KEYS = ["interpreter_profile", "judge_profile", "interpreter_model", "judge_model", "interpreter_reasoning", "judge_reasoning"];
 
@@ -242,7 +249,7 @@ globalThis.SimPage = (() => {
     shell.append(stats);
 
     const nav = node("nav", null, "sim-tabs");
-    for (const [key, label] of [["findings", "발견"], ["map", "빈칸 지도"], ["model", "모델"], ["rounds", "라운드"], ["settings", "설정"], ["journal", "기록"]]) {
+    for (const [key, label] of [["findings", "발견"], ["map", "빈칸 지도"], ["model", "모델"], ["proposals", "편집 제안" + ((s.proposals?.proposed) ? ` (${s.proposals.proposed})` : "")], ["rounds", "라운드"], ["settings", "설정"], ["journal", "기록"]]) {
       const b = button(label, () => { tab = key; location.hash = `#/sims/${s.id}/${key}`; }, tab === key ? "is-active" : "");
       b.setAttribute("aria-pressed", String(tab === key)); nav.append(b);
     }
@@ -251,6 +258,7 @@ globalThis.SimPage = (() => {
     if (tab === "findings") renderFindings(body, s, base);
     else if (tab === "map") renderMap(body);
     else if (tab === "model") renderModel(body);
+    else if (tab === "proposals") renderProposals(body, base);
     else if (tab === "rounds") renderRounds(body);
     else if (tab === "settings") renderSettings(body, s, base);
     else renderJournal(body);
@@ -367,6 +375,37 @@ globalThis.SimPage = (() => {
     if (!(coverage.grid || []).length) body.append(node("p", "상태 기계가 없습니다.", "sim-empty"));
   }
 
+  // The editor's proposals: never applied by the daemon; an accepted one goes to the owner session.
+  function renderProposals(body, base) {
+    if (!proposals) { body.append(node("p", "불러오는 중…", "sim-muted")); return; }
+    body.append(node("p", "편집 제안은 원천 파일에 적용되지 않은 상태입니다. 수락하면 소유 세션에 적용 요청이 입력됩니다.", "sim-muted"));
+    if (!proposals.length) { body.append(node("p", "편집 제안이 없습니다. 설정의 「최대 편집 제안」을 1 이상으로 두면 실행이 끝날 때 만들어집니다.", "sim-empty")); return; }
+    for (const p of proposals) {
+      const card = node("article", null, "sim-proposal sim-p-" + p.status);
+      const h = node("header");
+      h.append(node("span", PROPOSAL_LABEL[p.status] || p.status, "sim-badge"), node("strong", EDIT_KIND_LABEL[p.kind] || p.kind),
+        node("code", p.file), node("span", p.id, "sim-muted"));
+      card.append(h, node("p", p.reason), node("p", "해결하는 발견: " + p.findings.join(", "), "sim-muted"));
+      const diff = node("div", null, "sim-diff");
+      if (p.old) diff.append(node("pre", p.old, "sim-del"));
+      else diff.append(node("p", "파일 끝에 추가", "sim-muted"));
+      diff.append(node("pre", p.new, "sim-add"));
+      card.append(diff);
+      if (p.check?.breaks?.length) card.append(node("p", "이 편집을 적용하면 인용을 잃는 규칙: " + p.check.breaks.join(", "), "sim-warn"));
+      if (p.decision?.note) card.append(node("p", "메모: " + p.decision.note, "sim-muted"));
+      if (p.status === "proposed") {
+        const note = node("input"); note.placeholder = "메모 (선택)"; note.disabled = busy;
+        note.value = proposalNotes[p.id] || ""; note.oninput = () => { proposalNotes[p.id] = note.value; };
+        const decide = accept => act(() => request(base + "/proposals/" + enc(p.id) + "/decide", "POST", {accept, note: proposalNotes[p.id] || ""}),
+          r => { delete proposalNotes[p.id]; return accept ? (r.nudged ? "수락했고 소유 세션에 적용 요청을 입력했습니다" : "수락했습니다 (소유 세션 없음)") : "거절했습니다"; });
+        const row = node("div", null, "sim-row");
+        row.append(note, button("수락", () => decide(true), "sim-primary"), button("거절", () => decide(false)));
+        card.append(row);
+      }
+      body.append(card);
+    }
+  }
+
   function renderModel(body) {
     if (!model) { body.append(node("p", "불러오는 중…", "sim-muted")); return; }
     const section = (title, rows, fmt) => {
@@ -411,8 +450,8 @@ globalThis.SimPage = (() => {
     const cur = settingsDraft;
     const form = node("form", null, "sim-form");
     form.append(profileFields(cur, v => { Object.assign(cur, v); render(); }));
-    for (const [k, label] of [["max_rounds", "최대 라운드"], ["budget", "라운드당 걸음"], ["horizon", "한 번에 이어 가는 걸음"], ["seed", "씨앗"]]) {
-      const l = node("label", label); const i = node("input"); i.type = "number"; i.min = "1"; i.value = cur[k];
+    for (const [k, label] of [["max_rounds", "최대 라운드"], ["budget", "라운드당 걸음"], ["horizon", "한 번에 이어 가는 걸음"], ["seed", "씨앗"], ["max_edits", "최대 편집 제안 (0 = 만들지 않음)"]]) {
+      const l = node("label", label); const i = node("input"); i.type = "number"; i.min = k === "max_edits" ? "0" : "1"; i.value = cur[k] ?? 0;
       i.oninput = () => { cur[k] = parseInt(i.value, 10); }; i.disabled = busy; l.append(i); form.append(l);
     }
     const tri = node("label", null, "sim-check"); const cb = node("input"); cb.type = "checkbox"; cb.checked = cur.triage !== false;
@@ -425,7 +464,7 @@ globalThis.SimPage = (() => {
     form.onsubmit = e => {
       e.preventDefault();
       const settings = {};
-      for (const k of [...MODEL_KEYS, "max_rounds", "budget", "horizon", "seed"]) settings[k] = cur[k];
+      for (const k of [...MODEL_KEYS, "max_rounds", "budget", "horizon", "seed", "max_edits"]) settings[k] = cur[k] ?? 0;
       settings.triage = cur.triage !== false;
       act(() => request(base + "/settings", "POST", {settings, sources: cur.sources.split("\n").map(x => x.trim()).filter(Boolean)}),
         () => { settingsDraft = null; return "저장했습니다"; });
@@ -443,7 +482,7 @@ globalThis.SimPage = (() => {
   }
 
   function open(id = "", section = "") {
-    if (id !== simId) { detail = findings = model = coverage = settingsDraft = null; notice = ""; nudgeDraft = transferTo = ""; replays = {}; }
+    if (id !== simId) { detail = findings = model = coverage = settingsDraft = null; notice = ""; nudgeDraft = transferTo = ""; replays = {}; proposals = null; proposalNotes = {}; }
     simId = id || ""; if (section) tab = section; else if (!id) tab = "findings";
     render(); load();
     clearInterval(timer);
