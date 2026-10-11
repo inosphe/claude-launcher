@@ -14927,34 +14927,27 @@ function onTermInputSubmit(ev) {
    (style.css), and scrollHeight stops inside the border, so the border is
    added back: without it the box came out 2px short of its own content and
    showed a scrollbar on a single line. */
-function autogrowTermInput(field) {
+function autogrowTermInput(field, focusTarget = document.activeElement) {
   if (!field || !field.style) return;
   field.style.height = "auto";
   const needed = field.scrollHeight;
   const border = (field.offsetHeight || 0) - (field.clientHeight || 0);
   if (needed) field.style.height = `${needed + Math.max(0, border)}px`;
-  // The session line (data-expand-on-focus) is one row while the keyboard
-  // is elsewhere and opens when it is clicked: unfocused, the height goes
-  // back to the bar's row and the text scrolls to its first line; focused,
-  // the content height above stands, and at least three lines over the row.
-  // Either way the field takes one row of the bar's layout: a negative top
-  // margin as tall as the excess hands it back, so the field opens upward
-  // over the terminal and the terminal is not resized (a resize repaints
-  // the whole session) every time the line is clicked. The minimum is set
-  // here with the margin rather than in CSS, so the height never changes
-  // without the margin that cancels it.
+  // The composer occupies its full height in layout, moving preset and
+  // prompter rows above it. Keep it open while focus moves between its tools.
   if (!field.hasAttribute || !field.hasAttribute("data-expand-on-focus")) return;
   const style = getComputedStyle(field);
   const row = parseFloat(style.getPropertyValue("--term-row")) || 0;
-  if (document.activeElement !== field) {
+  const expanded = focusTarget === field || !!focusTarget?.closest?.(
+    "#term-input, #term-preset-buttons, #term-prompter-row");
+  field.toggleAttribute("data-expanded", expanded);
+  if (!expanded) {
     if (row) field.style.height = `${row}px`;
     field.scrollTop = 0;
   } else if (row) {
     const least = row + 3 * (parseFloat(style.fontSize) || 0);
     if (field.offsetHeight < least) field.style.height = `${least}px`;
   }
-  const excess = row ? field.offsetHeight - row : 0;
-  field.style.marginTop = excess > 0 ? `${-excess}px` : "";
 }
 
 /* Ctrl+J breaks the line at the caret, Enter sends — the split Claude Code
@@ -15518,9 +15511,17 @@ if ($("term-input-field")) {
   // listener that only sees the event on its way back up.
   window.addEventListener("keydown", onWindowCtrlJ, true);
   $("term-input-field").addEventListener("paste", onTermInputPaste);
-  // one row at rest, opened while it has the keyboard (autogrowTermInput)
-  $("term-input-field").addEventListener("focus", (ev) => autogrowTermInput(ev.currentTarget || ev.target));
-  $("term-input-field").addEventListener("blur", (ev) => autogrowTermInput(ev.currentTarget || ev.target));
+  // relatedTarget keeps internal focus transfers from collapsing the layout
+  // between pointerdown and click (including preset and prompter buttons).
+  for (const id of ["term-input", "term-preset-buttons", "term-prompter-row"]) {
+    const region = $(id);
+    if (!region) continue;
+    region.addEventListener("focusin", ev => autogrowTermInput($("term-input-field"), ev.target));
+    region.addEventListener("focusout", ev => autogrowTermInput($("term-input-field"), ev.relatedTarget));
+  }
+  if (typeof ResizeObserver === "function" && $("term-input")) {
+    new ResizeObserver(() => localFit()).observe($("term-input"));
+  }
   $("term-input-field").addEventListener("input", (ev) => {
     autogrowTermInput(ev.currentTarget || ev.target);
     pushLineSync();
