@@ -123,6 +123,41 @@ def test_runner_acts_for_owner_and_done_tells_owner(tmp_path):
     asyncio.run(go())
 
 
+def test_end_in_a_round_waits_for_the_run_session(tmp_path):
+    """The run session still proposes edits after the last round: the owner
+    is told once, at runner/done, with the proposals in the notice."""
+    app, sims, mgr, owner, run, root = setup(tmp_path)
+    sid = started(sims, {"max_rounds": 1})
+
+    async def go():
+        async with TestClient(TestServer(app)) as c:
+            before = len(owner.delivered)
+            resp = await c.post(f"/api/sims/{sid}/round", json={"session": "sim-run"})
+            data = await resp.json()
+            assert resp.status == 200 and data["result"]["ended"]["deferred"], data
+            assert not data["notified"] and len(owner.delivered) == before
+            # What the editor would have left behind.
+            S._write_json(sims._dir(sid) / "proposals.json", {"e-1": {"id": "e-1", "status": "proposed", "findings": []}})
+            resp = await c.post(f"/api/sims/{sid}/runner/done", json={"session": "sim-run", "reason": "round 1"})
+            data = await resp.json()
+            assert data["notified"] and len(owner.delivered) == before + 1
+            assert "1 edit proposal(s)" in owner.delivered[-1] and f"sim_proposals {sid}" in owner.delivered[-1]
+    asyncio.run(go())
+    # The process exiting afterwards tells nobody again.
+    mgr.end("sim-run")
+    assert sum("finished" in t for t in owner.delivered) == 1
+
+
+def test_run_session_exit_after_a_deferred_end_tells_the_owner(tmp_path):
+    app, sims, mgr, owner, run, root = setup(tmp_path)
+    sid = started(sims, {"max_rounds": 1})
+    assert sims.run_round(sid, "sim-run")["ended"]["deferred"]
+    before = len(owner.delivered)
+    mgr.end("sim-run")
+    assert len(owner.delivered) == before + 1 and "finished" in owner.delivered[-1]
+    assert sims.get(sid)["runner"] is None
+
+
 def test_runner_exit_ends_campaign_and_stop_kills_runner(tmp_path):
     app, sims, mgr, owner, run, root = setup(tmp_path)
     sid = started(sims)

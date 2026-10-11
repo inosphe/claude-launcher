@@ -510,11 +510,14 @@ class SimStore:
                 meta["last_runner"] = {**(meta.get("runner") or {}), "ended_at": _now(),
                                        "reason": reason, "failed": bool(failed)}
             meta["runner"] = None
+            owed = bool(meta.pop("notice_owed", False))
             self._save_meta(meta)
             self._journal(sim_id, actor, "runner_done", reason=reason, failed=bool(failed))
             if was == "running":
                 self._journal(sim_id, actor, "ended", state=meta["state"], reason=meta["state_reason"])
-            return {**self.summary(meta), "ended": was == "running"}
+            # ``ended``: the owner is told now -- the campaign ends here, or it
+            # ended in a round while this run session was attached.
+            return {**self.summary(meta), "ended": was == "running" or owed}
 
     def runner_exited(self, name: str) -> List[dict]:
         """``name`` was a run session and its process is gone: detach it
@@ -1004,9 +1007,15 @@ class SimStore:
                 elif meta["run_rounds"] >= st["max_rounds"]:
                     meta["state"], meta["state_reason"] = "stopped", f"max_rounds ({st['max_rounds']}) reached"
                 if meta["state"] != "running":
-                    # The campaign ended in this round: the API tells the owner.
+                    # The campaign ended in this round: the API tells the owner --
+                    # unless a run session is attached, which still has work after
+                    # the last round (edit proposals); then the notice waits for
+                    # runner_done or the run session's exit.
                     summary["ended"] = {"state": meta["state"], "reason": meta["state_reason"]}
                     self._journal(sim_id, actor, "ended", **summary["ended"])
+                    if (meta.get("runner") or {}).get("session"):
+                        meta["notice_owed"] = True
+                        summary["ended"]["deferred"] = True
             self._save_meta(meta)
             self._journal(sim_id, actor, "round", round=n, new=new, open=open_now)
             return summary

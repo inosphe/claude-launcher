@@ -153,7 +153,9 @@ def ended_text(sim: dict) -> str:
         f"{PREFIX} {sim['id']} \"{sim['title']}\" finished: {sim['state']} -- {sim.get('state_reason')}. "
         f"After round {last.get('round', '?')}: {c.get('open', 0)} open, {c.get('question', 0)} waiting on the user, "
         f"{c.get('answered', 0)} answered, {c.get('dismissed', 0)} dismissed, {c.get('resolved', 0)} resolved. "
-        f"Read the result (sim_show {sim['id']}, sim_findings {sim['id']}) and continue the discussion "
+        + (f"{waiting} edit proposal(s) to the sources wait for the user's decision (sim_proposals {sim['id']}). "
+           if (waiting := (sim.get("proposals") or {}).get("proposed")) else "")
+        + f"Read the result (sim_show {sim['id']}, sim_findings {sim['id']}) and continue the discussion "
         "with the user from it."
     )
 
@@ -307,7 +309,8 @@ def install(app, store: Optional[sim_store.SimStore] = None):
             return None, web.json_response({"error": str(exc)}, status=exc.status)
 
     def notify_end(sim: dict, ended) -> bool:
-        if not ended or not sim.get("owner"):
+        # A deferred end is told at runner/done or the run session's exit.
+        if not ended or (isinstance(ended, dict) and ended.get("deferred")) or not sim.get("owner"):
             return False
         return deliver(sim["owner"], ended_text(sim))
 
