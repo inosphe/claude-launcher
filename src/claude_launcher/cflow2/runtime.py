@@ -4067,7 +4067,8 @@ def _value_env(r: Run, iid: Optional[str]) -> Dict[str, str]:
     """``CFLOW2_*``, ``CFLOW_IN_*`` and ``CFLOW_DATA_*`` (top-level data,
     scalars as text, the rest as JSON) for a probe."""
     env = {"CFLOW2_RUN": str(r.state.get("run_id") or ""),
-           "CFLOW2_SCOPE": str(r.state.get("scope") or "")}
+           "CFLOW2_SCOPE": str(r.state.get("scope") or ""),
+           store_mod.SESSION_ENV: _probe_session(r)}
     params: Dict[str, Any] = dict(r.state.get("params") or {})
     if iid and iid in r.inst:
         params.update(r.env(iid).get("params") or {})
@@ -4079,6 +4080,24 @@ def _value_env(r: Run, iid: Optional[str]) -> Dict[str, str]:
         if len(text) <= 64 * 1024:
             env[_data_env_name(name)] = text
     return env
+
+
+def _probe_session(r: Run) -> str:
+    """The session a probe acts as: the run's driver. The daemon's clock runs
+    probes, and its own ``CLAUNCH_SESSION`` is whatever terminal started it
+    -- one name for every run on the machine. A gate that asks "which
+    checkout is mine" (``tools/landed_check.py`` through
+    ``cflow.checkout.own_checkout``) would measure that session's tree, or
+    the run's cwd on master, and answer exit 2 for a tip that landed
+    (claunch-4zc51.1.4; v1's ``engine.probe_env`` fixed the same in
+    claunch-04ru). An unmanaged run names nobody: the blank value overrides
+    the daemon's when the runner merges ``env`` over ``os.environ``, and
+    ``state.current_scope`` reads a blank as unset."""
+    driver = str(r.state.get("driver") or "").strip()
+    if driver:
+        return driver
+    scope = str(r.state.get("scope") or "").strip()
+    return "" if scope in ("", store_mod.DEFAULT_SCOPE) else scope
 
 
 def _run_probe(r: Run, iid: Optional[str], runner: ProbeRunner, probe: Any) -> Any:
@@ -4278,7 +4297,8 @@ def _tick_time(r: Run, probe_runner: Optional[ProbeRunner] = None,
                             frame["undecided"] = int(frame.get("undecided") or 0) + 1
                             limit = int(node.get("undecided_max") or DEFAULT_UNDECIDED_MAX)
                             r.emit("probe_undecided", node=node.id, instance=iid, exit=code,
-                                   count=frame["undecided"], max=limit)
+                                   count=frame["undecided"], max=limit,
+                                   output=_tail(output if isinstance(output, str) else ""))
                             if frame["undecided"] >= limit:
                                 value = {"exit": code, "output": output,
                                          "undecided": frame["undecided"]}
