@@ -2452,7 +2452,7 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
    stay together along the bottom (align-items: flex-end) as it grows. Without
    it the buttons were 25px against the field's 32px, the emoji button taller
    than its text neighbours, and the note's text sat below their middles. */
-#term-input { --term-row: 32px; }
+#term-input { --term-row: 32px; z-index: 11; }
 #term-input > .term-btn {
   flex: none; height: var(--term-row); padding-top: 0; padding-bottom: 0;
 }
@@ -2519,6 +2519,14 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 #term-input-field:focus { outline: none; border-color: #1f6feb; }
+/* Opened by a click (autogrowTermInput sets its height, at least three
+   lines to type in): drawn upward over the terminal; the bar's z-index above
+   puts it over xterm's layers (up to z-index 10). At rest it is one row, its
+   overflow hidden rather than scrolled. */
+#term-input-field[data-expand-on-focus]:focus {
+  position: relative; box-shadow: 0 -4px 14px #0006;
+}
+#term-input-field[data-expand-on-focus]:not(:focus) { overflow-y: hidden; }
 #term-input-field:disabled { opacity: 0.5; cursor: not-allowed; }
 /* Session line sync (daemon/line_sync.py). In remote-sync mode the field is
    the line every browser on the session shares, and says so by its border;
