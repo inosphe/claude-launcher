@@ -1,6 +1,12 @@
 /* World-model simulations at #/sims and #/sims/<id> (daemon/sim_api.py,
-   docs/simulation.md). All user text goes through textContent. */
-globalThis.SimPage = (() => {
+   docs/simulation.md), and the same view for one session in the terminal's
+   split pane (◬ sims). All user text goes through textContent.
+
+   makeSimView({root, session, go}): ``root()`` is the element to draw into;
+   ``session`` (pane only) narrows the list to that session's simulations and
+   makes it the owner of a new one; ``go(id, tab)`` moves between list and
+   detail -- the page writes the hash, the pane stays where it is. */
+function makeSimView({root: view, session = "", go}) {
   const node = (tag, text, cls) => {
     const n = document.createElement(tag);
     if (text != null) n.textContent = text;
@@ -20,7 +26,6 @@ globalThis.SimPage = (() => {
   let draft = null, settingsDraft = null, nudgeDraft = "", transferTo = "";
   let replays = {}, proposals = null, proposalNotes = {};
   const answers = {};
-  const view = () => document.getElementById("sims-view");
 
   async function request(path, method = "GET", body) {
     const response = await api(path, {method, ...(body ? {headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)} : {})});
@@ -37,7 +42,7 @@ globalThis.SimPage = (() => {
       if (mine !== seq) return;
       sessions = (sess.sessions || []).filter(s => s.status !== "exited");
       if (!simId) {
-        const q = project ? "?project=" + enc(project) : "";
+        const q = session ? "?owner=" + enc(session) : project ? "?project=" + enc(project) : "";
         const [l, p] = await Promise.all([request("/api/sims" + q), request("/api/sims/profiles")]);
         if (mine !== seq) return;
         list = l.sims || []; profiles = p;
@@ -100,6 +105,7 @@ globalThis.SimPage = (() => {
 
   // -- list ------------------------------------------------------------------
   function renderList(shell) {
+    if (session) { renderSessionList(shell); return; }
     const head = node("header", null, "sim-head");
     const title = node("div");
     title.append(node("span", "WORLD-MODEL SIMULATIONS", "sim-eyebrow"), node("h2", "시뮬레이션"),
@@ -118,7 +124,7 @@ globalThis.SimPage = (() => {
     table.append(hr);
     for (const s of list) {
       const tr = node("tr"); tr.tabIndex = 0;
-      tr.onclick = () => { location.hash = "#/sims/" + s.id; };
+      tr.onclick = () => go(s.id);
       tr.onkeydown = e => { if (e.key === "Enter") tr.onclick(); };
       const t = node("td"); t.append(node("strong", s.title), node("div", s.id + (s.project ? " · " + s.project : ""), "sim-muted"));
       const st = node("td"); st.append(node("span", STATE_LABEL[s.state] || s.state, "sim-badge sim-" + s.state));
@@ -132,9 +138,34 @@ globalThis.SimPage = (() => {
     const wrap = node("div", null, "sim-scroll"); wrap.append(table); shell.append(wrap);
   }
 
+  // The pane's list: only this session's simulations, newest first.
+  function renderSessionList(shell) {
+    const head = node("header", null, "sim-head");
+    const title = node("div");
+    const all = node("a", "모든 시뮬레이션", "sim-full"); all.href = "#/sims";
+    title.append(node("h2", session + "의 시뮬레이션"),
+      node("p", "이 세션이 소유한 시뮬레이션입니다. 다른 세션의 시뮬레이션은 전체 화면에서 읽을 수 있습니다.", "sim-muted"), all);
+    const tools = node("div", null, "sim-tools");
+    tools.append(button(creating ? "닫기" : "새 시뮬레이션", () => { creating = !creating; render(); }, "sim-primary"), button("새로고침", load));
+    head.append(title, tools); shell.append(head);
+    if (creating) shell.append(createForm());
+    if (!list.length) { shell.append(node("p", "이 세션이 소유한 시뮬레이션이 없습니다. 「새 시뮬레이션」을 누르면 이 세션에 생성 요청이 입력됩니다.", "sim-empty")); return; }
+    const ul = node("ul", null, "sim-pane-list");
+    for (const s of [...list].sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""))) {
+      const li = node("li"); li.tabIndex = 0;
+      li.onclick = () => go(s.id);
+      li.onkeydown = e => { if (e.key === "Enter") li.onclick(); };
+      const c = s.counts || {};
+      li.append(node("span", STATE_LABEL[s.state] || s.state, "sim-badge sim-" + s.state), node("strong", s.title),
+        node("span", ` ${s.id} · 열림 ${c.open || 0} · 질문 ${c.question || 0}` + (s.proposals?.proposed ? ` · 편집 제안 ${s.proposals.proposed}` : ""), "sim-muted"));
+      ul.append(li);
+    }
+    shell.append(ul);
+  }
+
   function createForm() {
     const form = node("form", null, "sim-form");
-    draft = draft || {title: "", goal: "", sources: "", owner: "", interpreter_profile: profiles.defaults?.interpreter_profile || "",
+    draft = draft || {title: "", goal: "", sources: "", owner: session, interpreter_profile: profiles.defaults?.interpreter_profile || "",
       judge_profile: profiles.defaults?.judge_profile || "", interpreter_model: "", judge_model: "",
       interpreter_reasoning: "low", judge_reasoning: "low"};
     const field = (label, key, multiline) => {
@@ -144,8 +175,10 @@ globalThis.SimPage = (() => {
     field("제목", "title").required = true;
     field("목표 — 무엇을 확인하려는가", "goal", true);
     field("원천 — 모델을 세울 파일·glob (한 줄에 하나)", "sources", true);
-    const o = node("label", "맡길 세션 — 이 세션이 소유자가 되고 요청이 그 세션에 입력됩니다");
-    o.append(select(sessionOptions("선택"), draft.owner, v => { draft.owner = v; }, "맡길 세션")); form.append(o);
+    if (!session) {
+      const o = node("label", "맡길 세션 — 이 세션이 소유자가 되고 요청이 그 세션에 입력됩니다");
+      o.append(select(sessionOptions("선택"), draft.owner, v => { draft.owner = v; }, "맡길 세션")); form.append(o);
+    } else form.append(node("p", `소유 세션: ${session} — 만들면 이 세션에 생성 요청이 입력됩니다.`, "sim-muted"));
     form.append(profileFields(draft, v => { Object.assign(draft, v); render(); }));
     const from = node("label", "이어 받기 — 고른 시뮬레이션의 모델·판정·답한 질문으로 시작합니다");
     from.append(select([["", "없음 (빈 모델)"], ...list.map(x => [x.id, `${x.title} (${x.id})`])], draft.from || "",
@@ -160,7 +193,7 @@ globalThis.SimPage = (() => {
       for (const k of MODEL_KEYS) settings[k] = draft[k];
       act(() => request("/api/sims", "POST", {title: draft.title, goal: draft.goal, owner: draft.owner,
         sources: draft.sources.split("\n").map(s => s.trim()).filter(Boolean), settings, ...(draft.from ? {from: draft.from} : {})}),
-        r => { creating = false; draft = null; location.hash = "#/sims/" + r.sim.id; return r.nudged ? `${r.sim.owner}에 요청을 보냈습니다` : "요청을 입력하지 못했습니다 — 세션 상태를 확인하세요"; });
+        r => { creating = false; draft = null; go(r.sim.id); return r.nudged ? `${r.sim.owner}에 요청을 보냈습니다` : "요청을 입력하지 못했습니다 — 세션 상태를 확인하세요"; });
     };
     return form;
   }
@@ -197,8 +230,10 @@ globalThis.SimPage = (() => {
     const s = detail.sim, base = "/api/sims/" + enc(s.id);
     const head = node("header", null, "sim-head");
     const title = node("div");
-    const back = node("a", "← 시뮬레이션", "sim-back"); back.href = "#/sims";
+    const back = node("a", session ? "← " + session + "의 시뮬레이션" : "← 시뮬레이션", "sim-back"); back.href = "#/sims";
+    back.onclick = e => { e.preventDefault(); go(""); };
     title.append(back, node("h2", s.title));
+    if (session) { const full = node("a", "전체 화면에서 열기", "sim-full"); full.href = "#/sims/" + enc(s.id) + "/" + tab; title.append(full); }
     const meta = node("p", null, "sim-muted");
     meta.append(node("span", STATE_LABEL[s.state] || s.state, "sim-badge sim-" + s.state),
       node("span", ` ${s.state_reason || ""} · ${s.id} · 소유 ${s.owner || "없음"}${s.owner && !detail.owner_live ? " (종료됨)" : ""}` +
@@ -234,7 +269,7 @@ globalThis.SimPage = (() => {
     if (s.owner) actions.append(button("소유권 해제", () => act(() => request(base + "/release", "POST", {}), () => "해제했습니다")));
     actions.append(button("삭제", () => {
       if (globalThis.confirm(`${s.id} 「${s.title}」를 삭제할까요? 모델과 기록이 모두 지워집니다.`))
-        act(() => request(base, "DELETE"), () => { location.hash = "#/sims"; return ""; });
+        act(() => request(base, "DELETE"), () => { go(""); return ""; });
     }, "sim-danger"));
     shell.append(actions);
 
@@ -250,7 +285,7 @@ globalThis.SimPage = (() => {
 
     const nav = node("nav", null, "sim-tabs");
     for (const [key, label] of [["findings", "발견"], ["map", "빈칸 지도"], ["model", "모델"], ["proposals", "편집 제안" + ((s.proposals?.proposed) ? ` (${s.proposals.proposed})` : "")], ["rounds", "라운드"], ["settings", "설정"], ["journal", "기록"]]) {
-      const b = button(label, () => { tab = key; location.hash = `#/sims/${s.id}/${key}`; }, tab === key ? "is-active" : "");
+      const b = button(label, () => go(s.id, key), tab === key ? "is-active" : "");
       b.setAttribute("aria-pressed", String(tab === key)); nav.append(b);
     }
     shell.append(nav);
@@ -454,6 +489,9 @@ globalThis.SimPage = (() => {
       const l = node("label", label); const i = node("input"); i.type = "number"; i.min = k === "max_edits" ? "0" : "1"; i.value = cur[k] ?? 0;
       i.oninput = () => { cur[k] = parseInt(i.value, 10); }; i.disabled = busy; l.append(i); form.append(l);
     }
+    const lang = node("label", "사용자에게 보이는 글의 언어 — 질문, 선택지, 이유, 소유 세션의 보고"); const li = node("input");
+    li.value = cur.language || "한국어"; li.oninput = () => { cur.language = li.value; }; li.disabled = busy;
+    li.setAttribute("aria-label", "언어"); lang.append(li); form.append(lang);
     const tri = node("label", null, "sim-check"); const cb = node("input"); cb.type = "checkbox"; cb.checked = cur.triage !== false;
     cb.disabled = busy; cb.setAttribute("aria-label", "판정자 분류");
     cb.onchange = () => { cur.triage = cb.checked; };
@@ -466,6 +504,7 @@ globalThis.SimPage = (() => {
       const settings = {};
       for (const k of [...MODEL_KEYS, "max_rounds", "budget", "horizon", "seed", "max_edits"]) settings[k] = cur[k] ?? 0;
       settings.triage = cur.triage !== false;
+      settings.language = (cur.language || "").trim() || "한국어";
       act(() => request(base + "/settings", "POST", {settings, sources: cur.sources.split("\n").map(x => x.trim()).filter(Boolean)}),
         () => { settingsDraft = null; return "저장했습니다"; });
     };
@@ -490,4 +529,25 @@ globalThis.SimPage = (() => {
   }
   function stop() { clearInterval(timer); timer = null; seq++; }
   return {open, stop};
+}
+
+globalThis.SimPage = makeSimView({
+  root: () => document.getElementById("sims-view"),
+  go: (id, tab) => { location.hash = "#/sims" + (id ? "/" + id + (tab ? "/" + tab : "") : ""); },
+});
+
+/* The terminal's split pane (app.js syncSplitPane): one view at a time,
+   bound to the session the terminal shows. */
+globalThis.SimPane = (() => {
+  let view = null, el = null, host = null, name = "";
+  function mount(target, session) {
+    if (view && host === target && name === session && target.contains(el)) return;
+    unmount();
+    el = document.createElement("div"); el.className = "sim-host sim-host-pane";
+    target.replaceChildren(el); name = session; host = target;
+    const v = makeSimView({root: () => el, session, go: (id, tab) => v.open(id, tab)});
+    view = v; v.open();
+  }
+  function unmount() { if (view) view.stop(); view = null; if (el) el.remove(); el = host = null; name = ""; }
+  return {mount, unmount};
 })();

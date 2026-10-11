@@ -64,6 +64,7 @@ DEFAULT_SETTINGS = {
     "max_rounds": 20,
     "triage": True,              # the judge sorts each gap batch before the interpreter answers it
     "max_edits": 0,              # edit proposals to the sources at the end of a run (0 = none)
+    "language": "한국어",         # what the user reads: questions, options, reasons, the owner's report
 }
 _ID_RE = re.compile(r"^sim-[0-9a-f]{6,12}$")
 _SUBMIT_CAP = 5000
@@ -379,6 +380,10 @@ class SimStore:
             elif k.endswith("_profile") or k.endswith("_model"):
                 if not isinstance(v, str):
                     raise SimError(f"{k} must be a {'profile name' if k.endswith('_profile') else 'model id'}")
+                out[k] = v.strip()
+            elif k == "language":
+                if not isinstance(v, str) or not v.strip() or len(v.strip()) > 40:
+                    raise SimError("language must be a language name of at most 40 characters")
                 out[k] = v.strip()
             elif k.endswith("_reasoning"):
                 if v not in REASONING:

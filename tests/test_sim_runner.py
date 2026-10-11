@@ -142,6 +142,7 @@ def test_end_in_a_round_waits_for_the_run_session(tmp_path):
             data = await resp.json()
             assert data["notified"] and len(owner.delivered) == before + 1
             assert "1 edit proposal(s)" in owner.delivered[-1] and f"sim_proposals {sid}" in owner.delivered[-1]
+            assert owner.delivered[-1].endswith("in 한국어.")
     asyncio.run(go())
     # The process exiting afterwards tells nobody again.
     mgr.end("sim-run")
@@ -256,18 +257,21 @@ DRIVER = textwrap.dedent("""
       }
       if (key.startsWith("edit:")) {
         if (!prompt.includes("stays open")) throw new Error("the editor must see the user's answer");
+        if (!prompt.includes("each reason in 한국어") || !prompt.includes("language of the file")) throw new Error("the editor must get the language rule");
         return JSON.stringify([{ file: "spec.md", old: "", new: "Opening an open door leaves it open.", kind: "complete",
                                  reason: "the user's answer", findings: ["unhandled|door|open|open"] }]);
       }
       if (key.startsWith("judge:")) return JSON.stringify([{ section: "rules", id: "r.open", verdict: "confirmed", why: "quoted" }]);
       if (key.startsWith("C:triage:") || key.startsWith("triage:")) {
         // Opening an open door: intended. Anything else: the sources are silent.
+        if (!prompt.includes("in 한국어")) throw new Error("the triage must get the language rule");
         const keys = [...new Set([...prompt.matchAll(/"key": "([^"]+)"/g)].map((m) => m[1]))];
         return JSON.stringify(keys.map((k) => ({ key: k, verdict: k.endsWith("|open|open") ? "intended" : "spec", why: "scripted" })));
       }
       if (key.startsWith("gap:")) {
         if (prompt.includes('"key": "unhandled|door|open|open"')) throw new Error("an intended finding reached the interpreter");
         if (!prompt.includes('"judge"')) throw new Error("the gap prompt must carry the triage");
+        if (!prompt.includes("every question, option and dismiss reason (the user reads them) in 한국어")) throw new Error("the gap prompt must get the language rule");
         return JSON.stringify({ patch: fix, resolve: [] });
       }
       throw new Error("unexpected question " + key);

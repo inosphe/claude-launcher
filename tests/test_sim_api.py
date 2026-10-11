@@ -103,6 +103,7 @@ def test_user_creates_for_a_session_and_answers(tmp_path):
         made = await req("POST", "/api/sims", {"title": "door", "goal": "find gaps", "owner": "s2"}, status=201)
         sid = made["sim"]["id"]
         assert made["nudged"] and "sim_show " + sid in s2.delivered[-1]
+        assert "write them in 한국어" in s2.delivered[-1]
         await req("POST", f"/api/sims/{sid}/model", {"session": "s2", "patch": PATCH})
         await req("POST", f"/api/sims/{sid}/round", {"session": "s2"})
         key = "unhandled|door|open|open"

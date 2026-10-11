@@ -539,6 +539,10 @@
            pressed state. -->
       <button id="term-splitbtn" class="term-btn" type="button" aria-pressed="false"
               title="this session's workflow run under the terminal">⬒ run</button>
+      <!-- The same pane, showing this session's simulations instead
+           (sim-page.js SimPane); one of the two at a time. -->
+      <button id="term-simsbtn" class="term-btn" type="button" aria-pressed="false"
+              title="this session's simulations under the terminal">◬ sims</button>
       <button id="term-details" class="term-btn" type="button" aria-pressed="false"
               title="this session's metadata and workflow">ⓘ details</button>
     </div>
@@ -1340,7 +1344,7 @@
     </div>
     <div id="glossary-view" class="hidden"></div>
     <!-- World-model simulations (docs/simulation.md); drawn by sim-page.js. -->
-    <div id="sims-view" class="hidden"></div>
+    <div id="sims-view" class="sim-host hidden"></div>
     <!-- Work spec import: check, plan and run a spec (docs/work-spec.md);
          drawn by spec-page.js. -->
     <div id="spec-view" class="hidden"></div>

@@ -11,7 +11,7 @@
     "term-scroll": "↥", "term-resume": "▶", "term-brief": "▤",
     "term-observer": "◉", "term-log": "≡", "term-rebrief": "↻",
     "term-fork": "⑂", "term-merge": "↩", "term-pause": "Ⅱ",
-    "term-kill": "×", "term-archive": "▣", "term-splitbtn": "⬒",
+    "term-kill": "×", "term-archive": "▣", "term-splitbtn": "⬒", "term-simsbtn": "◬",
     "term-details": "ⓘ", "term-zoom-level": "A",
     "term-zoom-out": "−", "term-zoom-in": "+",
   };

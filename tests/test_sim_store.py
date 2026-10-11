@@ -168,6 +168,12 @@ def test_settings_validation(env):
         st.configure(sim["id"], "s1", settings={"judge_reasoning": "max"})
     with pytest.raises(S.SimError):
         st.configure(sim["id"], "s1", settings={"bogus": 1})
+    # What the user reads is Korean unless the setting says otherwise.
+    assert sim["settings"]["language"] == "한국어"
+    assert st.configure(sim["id"], "s1", settings={"language": " English "})["settings"]["language"] == "English"
+    for bad in ("", "  ", 3, "x" * 41):
+        with pytest.raises(S.SimError):
+            st.configure(sim["id"], "s1", settings={"language": bad})
 
 
 def test_replay_and_coverage(env):
