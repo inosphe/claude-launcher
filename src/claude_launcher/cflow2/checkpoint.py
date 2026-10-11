@@ -9,8 +9,11 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import os
 import sqlite3
 from pathlib import Path
+
+from .. import atomic
 
 FILE = "checkpoint.sqlite3"
 VERSION = 1
@@ -109,11 +112,42 @@ def commit(path: Path, state: str, chart: str, events: list, *, legacy: list,
            receipts: dict):
     """Commit the complete state and its events together, before publishing JSON.
 
-    The caller holds the run lock. The first transaction imports a strictly
-    parsed legacy journal; an interrupted first transaction is never silently
-    reinterpreted as a healthy legacy run.
+    The caller holds the run lock. The first import commits in a private DB
+    before publishing it. Until publication the legacy files remain authoritative.
+    Once published, a broken checkpoint must never fall back to those files.
     """
     creating = not path.exists()
+    if not creating:
+        return _commit(path, state, chart, events, legacy=legacy,
+                       receipts=receipts, creating=False)
+    with atomic.scratch(path) as tmp:
+        try:
+            revision = _commit(tmp, state, chart, events, legacy=legacy,
+                               receipts=receipts, creating=True)
+            # SQLite is closed and its transaction committed before publication.
+            # A crash earlier may leave a private tmp DB/journal, never a
+            # checkpoint.sqlite3 that would hide the unchanged legacy state.
+            _publish(tmp, path)
+            return revision
+        finally:
+            with contextlib.suppress(OSError):
+                Path(str(tmp) + "-journal").unlink(missing_ok=True)
+
+
+def _publish(tmp: Path, path: Path) -> None:
+    with tmp.open("r+b") as fh:
+        os.fsync(fh.fileno())
+    atomic.replace(tmp, path)
+    if os.name != "nt":
+        fd = os.open(str(path.parent), os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
+def _commit(path: Path, state: str, chart: str, events: list, *, legacy: list,
+            receipts: dict, creating: bool):
     with connect(path, create=creating) as conn:
         conn.execute("BEGIN IMMEDIATE")
         if creating:

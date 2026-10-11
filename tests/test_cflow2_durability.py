@@ -240,3 +240,123 @@ def test_checkpoint_rejects_nonobject_state_with_matching_checksum(run_store):
                    ("[]", checkpoint.digest("[]")))
     with pytest.raises(store.StoreError, match="not an object"):
         st.load_state()
+
+
+@pytest.mark.parametrize("boundary", ["before_schema", "after_schema",
+                                     "before_publish", "after_publish"])
+@pytest.mark.parametrize("failure", ["exception", "process_death"])
+def test_first_import_failure_and_retry(run_store, boundary, failure):
+    st = run_store
+    old = st.load_state()
+    events = st.journal()
+    st.write_receipt("legacy", {"outcome": "ok"})
+    st.checkpoint_path.unlink()  # a healthy legacy fixture
+    files = [st.state_path, st.chart_path, st.journal_path, st.receipt_path("legacy")]
+    original = {p: p.read_bytes() for p in files}
+    program = r'''
+import os, sys
+from claude_launcher.cflow2 import checkpoint, store
+st = store.RunStore(sys.argv[1], sys.argv[2])
+boundary, failure = sys.argv[3:]
+schema, publish = checkpoint._schema, checkpoint._publish
+def stop():
+    if failure == "process_death":
+        os._exit(73)
+    raise OSError("injected import failure")
+def schema_boundary(conn):
+    if boundary == "before_schema":
+        stop()
+    schema(conn)
+    if boundary == "after_schema":
+        stop()
+def publish_boundary(tmp, dest):
+    if boundary == "before_publish":
+        stop()
+    publish(tmp, dest)
+    if boundary == "after_publish":
+        stop()
+checkpoint._schema, checkpoint._publish = schema_boundary, publish_boundary
+try:
+    # This isolated fixture has no concurrent writer; no abandoned slot lock.
+    st.commit(dict(st.load_state(), imported=True), [{"event": "imported"}])
+except store.StoreError:
+    sys.exit(74)
+sys.exit(99)
+'''
+    env = dict(os.environ, PYTHONPATH=str(Path(store.__file__).parents[2]))
+    child = subprocess.run([sys.executable, "-c", program, str(st.cwd), st.scope,
+                            boundary, failure], env=env, capture_output=True, timeout=30)
+    assert child.returncode == (73 if failure == "process_death" else 74), child.stderr
+    assert {p: p.read_bytes() for p in files} == original
+    if boundary == "after_publish":
+        assert st.load_state()["imported"] is True
+        assert st.journal()[-1]["event"] == "imported"
+        assert "state.json" in st.recovery()["differences"]
+        st.recovery(apply=True, expected=st.recovery()["revision"])
+        assert store.recovery_held(st.load_state())
+    else:
+        assert not st.checkpoint_path.exists()
+        assert st.load_state() == old
+        assert st.journal() == events
+        with st.lock():
+            st.commit(dict(old, retried=True), [{"event": "retried"}])
+        assert st.load_state()["retried"] is True
+        assert st.journal()[:-1] == events
+        assert st.journal()[-1]["event"] == "retried"
+        assert st.recovery()["differences"] == []
+    snap = checkpoint.read(st.checkpoint_path, full=True)
+    assert json.loads(snap["receipts"]["legacy.json"]) == {"outcome": "ok"}
+
+
+@pytest.mark.parametrize("boundary", ["fsync", "rename"])
+def test_first_import_publication_io_failure_keeps_legacy(run_store, monkeypatch, boundary):
+    st = run_store
+    old, events = st.load_state(), st.journal()
+    st.checkpoint_path.unlink()
+
+    def fail(*args):
+        raise OSError("publication failure")
+
+    with monkeypatch.context() as patch:
+        if boundary == "fsync":
+            patch.setattr(checkpoint.os, "fsync", fail)
+        else:
+            patch.setattr(checkpoint.atomic, "replace", fail)
+        with st.lock(), pytest.raises(store.StoreError, match="publication failure"):
+            st.commit(dict(old, imported=True), [{"event": "imported"}])
+    assert not st.checkpoint_path.exists()
+    assert not list(st.dir.glob(checkpoint.FILE + ".*.tmp*"))
+    assert st.load_state() == old
+    assert st.journal() == events
+    with st.lock():
+        st.commit(dict(old, retried=True), [{"event": "retried"}])
+    assert st.load_state()["retried"] is True
+    assert st.recovery()["differences"] == []
+
+
+def test_recovery_between_auto_round_check_and_start_keeps_hold(tmp_path, monkeypatch):
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    chart = frontend.compile_text(
+        "cflow: 2\nname: recurring\nrecur: {auto: true, min_gap: 0}\n"
+        "nodes:\n  work: {prompt: work}\nbody: [work]\n")
+    cwd, scope = str(tmp_path), "durable"
+    runtime.start(chart, cwd=cwd, scope=scope, caps={}, now=1000)
+    runtime.report("work", "ok", cwd=cwd, scope=scope, now=1001)
+    st = store.RunStore(cwd, scope)
+    old_id = st.load_state()["run_id"]
+    original = runtime._next_round_chart
+
+    def recover_before_start(slot, state):
+        result = original(slot, state)
+        slot.recovery(apply=True, expected=slot.recovery()["revision"])
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(runtime, "_next_round_chart", recover_before_start)
+        assert runtime.start_next_round(cwd, scope, now=1002) is None
+    assert st.load_state()["run_id"] == old_id
+    assert store.recovery_held(st.load_state())
+    assert st.archived() == []
+    runtime.release_halt("storage-recovery", cwd=cwd, scope=scope)
+    assert runtime.start_next_round(cwd, scope, now=1003)["round"] == 2
+    assert st.load_state()["run_id"] != old_id

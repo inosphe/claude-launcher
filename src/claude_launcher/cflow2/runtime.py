@@ -2398,7 +2398,8 @@ def start(chart: ir.Chart, *, cwd: Optional[str] = None, scope: Optional[str] = 
             previous = old
             if next_round_of is not None and (
                     old.get("run_id") != next_round_of
-                    or not (old.get("next_round") or {}).get("auto")):
+                    or not (old.get("next_round") or {}).get("auto")
+                    or store_mod.recovery_held(old)):
                 raise FlowError("the next-round request was withdrawn or the slot changed")
             if old.get("status") in LIVE_STATUSES:
                 if not force:
