@@ -12615,6 +12615,14 @@ $("new-session").addEventListener("submit", async (e) => {
     // to say no out loud — otherwise the form hands back the very run it was
     // used to take away. Only worth saying when there is a pair to refuse.
     body.workflow = "-";
+  } else if (!parent && f.mesh && f.mesh.value && f.mesh.value !== "-" &&
+             f.role && f.role.value && typeof spawnRankWorkflows === "function" &&
+             spawnRankWorkflows(workflowsCache, f.role.value,
+                                roleWorkflowsCache).auto) {
+    // The picked role offers a workflow and the row was cleared: a "no" the
+    // daemon records on the session, so the session is not told to ask its
+    // user again and a mesh leader sees why it runs none (claunch-val3l.1).
+    body.workflow = "-";
   }
   if (f.task.value.trim()) body.task = f.task.value.trim();
   // The operator's note goes on the session record with the launch

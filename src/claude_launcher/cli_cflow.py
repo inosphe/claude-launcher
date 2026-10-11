@@ -330,6 +330,45 @@ def _cmd_asks(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_decline(args: argparse.Namespace) -> int:
+    """Record that this session's user declined a cflow run (claunch-val3l).
+
+    Run it only with the user's answer in hand: the opening of a session that
+    holds a mesh role with a default workflow, and no run, tells it to ask its
+    user first and to start the run only on a yes. This records the no -- on
+    the session's own record, where a mesh leader reads it (``claunch mesh
+    members``, ``children``) and stops asking the session for what only a run
+    produces. ``--clear`` withdraws it.
+    """
+    session = args.session or os.environ.get("CLAUNCH_SESSION", "")
+    if not session:
+        print("error: no session -- run this inside one, or pass -t <session>",
+              file=sys.stderr)
+        return 1
+    client = daemon_client.ensure_running()
+    path = f"/api/sessions/{session}/cflow-declined"
+    if args.clear:
+        client.delete(path)
+        print(f"session {session!r}: cflow refusal withdrawn")
+        return 0
+    if not (args.reason or "").strip():
+        print("error: --reason is required -- quote the user's answer",
+              file=sys.stderr)
+        return 1
+    info = client.post(path, {
+        "workflow": args.workflow or "",
+        "reason": args.reason,
+        "by": os.environ.get("CLAUNCH_SESSION", "") or "operator",
+    })
+    record = info.get("cflow_declined") or {}
+    print(
+        f"session {session!r}: cflow run declined"
+        + (f" ({record.get('workflow')})" if record.get("workflow") else "")
+        + f" at {record.get('at')} -- the mesh roster shows it to the leader"
+    )
+    return 0
+
+
 def _cmd_checklist(args: argparse.Namespace) -> int:
     """Show the current checklist gate, optionally re-measuring it first.
 
@@ -1270,6 +1309,19 @@ def register(sub) -> None:
     )
     q.add_argument("--json", action="store_true", help="print raw JSON")
     q.set_defaults(func=_cmd_asks)
+
+    q = csub.add_parser(
+        "decline",
+        help="record that this session's user declined a cflow run "
+        "(only with the user's answer)",
+    )
+    q.add_argument("-t", "--session",
+                   help="the session (default: $CLAUNCH_SESSION)")
+    q.add_argument("--workflow", help="the workflow that was offered")
+    q.add_argument("--reason", help="the user's answer, in their words (required)")
+    q.add_argument("--clear", action="store_true",
+                   help="withdraw a recorded refusal")
+    q.set_defaults(func=_cmd_decline)
 
     q = _scoped(csub.add_parser("abort", help="abort the active run"))
     q.set_defaults(func=_cmd_abort)

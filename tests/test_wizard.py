@@ -3363,3 +3363,29 @@ def test_the_summary_names_the_merger_a_leader_is_given():
     assert wizard_mod._role_shown(with_merger, "mesh", "leader") == "leader"
     # claunch-nie6o: a mesh whose vocabulary has no merger gives none.
     assert wizard_mod._role_shown(_Form(["leader", "worker"]), "role", "leader") == "leader"
+
+
+def test_clearing_the_roles_workflow_sends_a_no():
+    """The role's workflow was offered and the person set it to (none): that
+    is their answer, sent as '-' so the daemon records the refusal instead of
+    having the session ask again (claunch-val3l.1)."""
+    sources = FakeSources(workflows={"/srv/api": [
+        {"name": "improv", "default_role": "worker", "priority": 1},
+    ]})
+    wiz = wizard.Wizard(sources, cwd="/work/repo")
+    pick(wiz, "cwd", "api")
+    pick(wiz, "mesh", "team")
+    pick(wiz, "role", "worker")
+    assert wiz.value("workflow") == "improv"
+
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.workflow == "improv"         # left alone: the run starts
+
+    pick(wiz, "workflow", "(none)")
+    wiz.apply(args)
+    assert args.workflow == "-"
+
+    pick(wiz, "role", "(no role)")           # nothing offered, nothing declined
+    wiz.apply(args)
+    assert args.workflow is None

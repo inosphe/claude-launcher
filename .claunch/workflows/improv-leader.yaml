@@ -438,6 +438,19 @@ steps:
         않는다. 표를 읽을 때 `gh pr view <url> --json state,headRefOid`로
         PR이 OPEN이고 headRefOid가 마커의 tip과 같은지 본다 — 다르면 요청이
         아니라 push가 덜 된 것이므로 워커에게 pr-open 재실행을 nudge한다.
+        **런 없는 행**: cflow 런을 몰지 않는 워커가 올린 행이다. 착지 큐
+        등록은 워커 런의 트리거(enqueue-landing)라서 이 행은 큐에 없다 —
+        보드의 in_review 목록과 그 코멘트로 읽고, 판정(태움·미룸·거절)은
+        큐 대신 그 이슈 코멘트에 적는다. `claunch mesh members <mesh>`의
+        그 워커 행에 `no-cflow:declined`가 붙어 있으면(MCP `members`·
+        `children`의 `cflow_declined`) 그 워커의 사용자가 런을 거절한
+        것이다(claunch-val3l): 런을 시작하라고 요구하지 않고, 런만 만드는
+        산출물(저널, 스텝 보고, 착지 큐 항목)을 요구하지 않는다. 심사는
+        로컬 행과 같다 — 보드의 `LANDING REQUEST @ <tip>`·`REVIEWED: pass @
+        <tip>`과 증거 묶음, `tools/merge_ready.py`. 표시 없이 런만 없는
+        워커는 런이 빠진 것이다: 리더가 시작시키지 않고, 그 워커에게 자기
+        사용자에게 시작 여부를 물으라고 한 줄 보낸다 — 시작은 사용자의
+        yes로만 하고, 거절은 `claunch cflow decline`으로 기록된다.
         **표를 먼저 읽고 코멘트는 골라서 당긴다** — 여섯 줄을 다 펼치는 것은
         메시지로 받던 때와 같은 값을 치르는 것이다. 무엇을 당길지는 워커
         nudge의 값 한 줄(착지 델타, 미해결 한계 유무)이 정한다: 한계가

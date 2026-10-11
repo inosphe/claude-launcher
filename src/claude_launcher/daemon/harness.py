@@ -244,6 +244,16 @@ class SessionDef:
     #: an instruction. Persisted with the definition, so it survives a daemon
     #: restart and a respawn with the rest of the session's record.
     note: Optional[str] = None
+    #: The user's "no" to a cflow run for this session (claunch-val3l.2):
+    #: ``{"workflow", "reason", "at", "by"}``, or ``None`` when nobody
+    #: declined one. Written when the operator declines a workflow at creation
+    #: (``workflow: "-"``) or when the session records the answer its user gave
+    #: to the opening's "start <workflow>?" question (``claunch cflow
+    #: decline``). It is what lets a mesh leader tell a worker that runs no
+    #: cflow because its user said so from one whose run is missing, and so
+    #: stop asking it for what only a run produces. Persisted with the
+    #: definition, like the note, so a restart does not reopen the question.
+    cflow_declined: Optional[dict] = None
     #: The project this session is filed under (see :mod:`claude_launcher.
     #: projects`). ``None`` means the default project — the reading every
     #: record written before projects existed gets, so nothing on disk moves.
@@ -308,6 +318,9 @@ class SessionDef:
         # key, so the common record on disk is unchanged by this field.
         if self.note:
             out["note"] = self.note
+        # Same rule again: present only when a run was declined.
+        if self.cflow_declined:
+            out["cflow_declined"] = dict(self.cflow_declined)
         # Absent for the default project, so a record that never named one
         # is byte-for-byte what it was — and reads as the default either way.
         if self.project:
@@ -362,9 +375,24 @@ class SessionDef:
                 else None
             ),
             note=str(data.get("note") or "").strip() or None,
+            cflow_declined=_cflow_declined_field(data.get("cflow_declined")),
             project=str(data.get("project") or "").strip() or None,
             prompt_packs=_prompt_packs_field(data.get("prompt_packs")),
         )
+
+
+#: The keys a recorded cflow refusal keeps (:attr:`SessionDef.cflow_declined`).
+CFLOW_DECLINED_KEYS = ("workflow", "reason", "at", "by")
+
+
+def _cflow_declined_field(raw) -> Optional[dict]:
+    """A recorded refusal as written, keeping only its known text keys; a
+    record that is not a mapping reads as no refusal rather than failing the
+    whole session record on load."""
+    if not isinstance(raw, dict):
+        return None
+    out = {k: str(raw.get(k) or "").strip() for k in CFLOW_DECLINED_KEYS}
+    return out if out["at"] else None
 
 
 def _prompt_packs_field(raw) -> Tuple[dict, ...]:

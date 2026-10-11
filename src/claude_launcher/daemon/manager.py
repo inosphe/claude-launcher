@@ -1698,6 +1698,33 @@ class SessionManager:
         self.persist()
         return session
 
+    def set_cflow_declined(
+        self, name: str, *, workflow: str = "", reason: str = "", by: str = ""
+    ) -> AnySession:
+        """Record that this session's user declined a cflow run for it
+        (:attr:`SessionDef.cflow_declined`). Recording again replaces the
+        earlier answer; :meth:`clear_cflow_declined` withdraws it."""
+        session = self.get(name)
+        record = {
+            "workflow": str(workflow or "").strip(),
+            "reason": str(reason or "").strip()[:MAX_NOTE],
+            "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "by": str(by or "").strip(),
+        }
+        session.sdef = replace(session.sdef, cflow_declined=record)
+        self.persist()
+        return session
+
+    def clear_cflow_declined(self, name: str) -> AnySession:
+        """Withdraw a recorded refusal -- the user changed their mind. Not
+        called on a run start: the session is told to run ``claunch cflow
+        decline --clear`` before it starts one."""
+        session = self.get(name)
+        if session.sdef.cflow_declined is not None:
+            session.sdef = replace(session.sdef, cflow_declined=None)
+            self.persist()
+        return session
+
     def set_model(self, name: str, model: str) -> AnySession:
         """Set the model the session's *next* launch will be started on.
 

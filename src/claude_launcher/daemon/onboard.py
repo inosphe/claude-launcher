@@ -633,6 +633,80 @@ def _identity_block(
     return "\n\n".join(lines)
 
 
+def role_default_workflow(
+    entries: list, role: str, overrides: Optional[dict] = None
+) -> Tuple[str, int]:
+    """The workflow ``role`` selects on its own, as ``(value, version)`` --
+    ``("", 0)`` when it selects none.
+
+    The same answer the create form's picker and the CLI wizard pre-fill
+    (:func:`wizard._workflow_default`): Settings' per-role override, else the
+    highest-priority workflow declaring ``default_role: <role>`` that its own
+    ``filter_roles`` admits. ``entries`` is the startable list the daemon
+    serves (``/api/cflow/workflows``); ``value`` is what the picker would send
+    (a bare name, or ``v2:<name>``).
+    """
+    from .. import wizard
+
+    if not role:
+        return "", 0
+    normal = [wizard._workflow_entry(e) for e in entries or ()]
+    value = wizard._workflow_default(normal, role, overrides or {})
+    if not value:
+        return "", 0
+    if value.startswith("v2:"):
+        return value, 2
+    versions = {e.get("version") for e in normal if e["name"] == value}
+    return value, (1 if 1 in versions or not versions else 2)
+
+
+def compose_cflow_offer(*, role: str, workflow: str, version: int) -> str:
+    """The opening block for a session that holds ``role``, whose role selects
+    ``workflow``, and that was created without a run (claunch-val3l.1).
+
+    Nothing is started for it: a run is begun only on its user's explicit
+    yes. The block says so, says how to start it on a yes and how to record a
+    no, so a mesh leader reading the roster can tell the two apart.
+    """
+    name = workflow[3:] if workflow.startswith("v2:") else workflow
+    start = (
+        f"the flow_start tool with workflow {name!r}" if version == 2
+        else f"the cflow 'start' tool with workflow {name!r}"
+    )
+    lines = [
+        "---",
+        "# claunch cflow: no run -- machine-generated",
+        f"role: {role} -- this role's workflow is {workflow!r}, and this "
+        "session was created without a run of it.",
+        "protocol: before you start the work, ask your user explicitly whether "
+        f"to start {workflow!r} for this session (one question, with the two "
+        "answers below). Never start it without their yes -- not on your own "
+        "judgement, not because a mesh leader asks for its markers.",
+        f"  yes -> start it with {start}, then follow /cflow.",
+        "  no  -> record the answer: claunch cflow decline --workflow "
+        f"{workflow} --reason \"<the user's answer>\". The mesh roster then "
+        "shows the leader that this session runs no cflow by its user's "
+        "decision, and you work the task without a run. If they change their "
+        "mind later, run 'claunch cflow decline --clear' before starting it.",
+        "---",
+    ]
+    return "\n".join(lines)
+
+
+def compose_cflow_declined_note(*, workflow: str = "") -> str:
+    """The opening line for a session whose operator declined a run at
+    creation: recorded already, nothing to ask (claunch-val3l.1)."""
+    what = f" ({workflow!r})" if workflow else ""
+    return (
+        f"cflow: the operator declined a workflow run{what} for this session "
+        "when creating it, and that refusal is recorded on the session (the "
+        "mesh roster shows it to the leader). Do not start a run; if a mesh "
+        "leader asks for a run's markers, point it at the roster. If your user "
+        "later asks for the run, withdraw the refusal first (claunch cflow "
+        "decline --clear), then start it."
+    )
+
+
 async def arrange(plan: Plan, *, name: str, cwd: str, mesh_mgr) -> Tuple[dict, str]:
     """Do every leg of a validated plan, for a session that does not exist yet.
 

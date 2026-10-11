@@ -924,6 +924,10 @@ def _cmd_members(args: argparse.Namespace) -> int:
         # and has said nothing about ('claunch mesh owed' shows which).
         if m.get("owed"):
             flags += f" owed:{m['owed']}"
+        # The member's user declined a cflow run (claunch-val3l.2): a leader
+        # reading the roster must not ask it for a run's markers.
+        if m.get("cflow_declined"):
+            flags += " no-cflow:declined"
         print(
             f"{m['handle']:<16} {_role_label(m):<10} {where + '/' + m['session']:<28} "
             f"[{m['reachability']}]{flags}"
