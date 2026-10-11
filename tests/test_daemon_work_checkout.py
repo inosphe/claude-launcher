@@ -6,7 +6,8 @@ measured the recorded directory and sent ``branch=master`` with master's tip
 as the session's landing request, which the leader's queue marked landed at
 once. These tests pin the transcript reading that finds the real checkout,
 the push that now measures it, and the refusal of a request measured on the
-integration branch.
+integration branch -- on the v2 trigger and on the v1 clock's enqueue-landing,
+which kept measuring the run's checkout (claunch-4zc51.1.3).
 """
 
 from __future__ import annotations
@@ -18,8 +19,8 @@ from pathlib import Path
 
 import pytest
 
-from claude_launcher.cflow import landing as cflow_landing
-from claude_launcher.daemon import cflow2_triggers, ctxsize, work_checkout
+from claude_launcher.cflow import engine as cflow_engine, landing as cflow_landing
+from claude_launcher.daemon import cflow2_triggers, cflow_clock, ctxsize, landing_route, work_checkout
 from claude_launcher.daemon.harness import SessionDef
 
 
@@ -223,6 +224,42 @@ def test_a_detached_scratch_worktree_does_not_displace_the_run_checkout(
 def test_a_trunk_refusal_says_how_to_retry():
     facts = {"head": "abc", "branch": "master", "checkout": "C:/repo"}
     assert cflow2_triggers.RETRY_HINT in cflow2_triggers.landing_refusal(facts)
+
+
+def _v1_clock(manager, monkeypatch):
+    """A v1 trigger clock whose target is a v1 parent queue; the filed
+    requests are collected instead of written."""
+    filed = []
+    clock = cflow_clock.TriggerClock(manager)
+    monkeypatch.setattr(clock, "landing_target", lambda cwd, scope: landing_route.Target(
+        owner="lead", holder=landing_route.Holder(cwd="C:/lead", run=None, main=True)))
+    monkeypatch.setattr(cflow_engine, "enqueue_landing",
+                        lambda issues, branch, tip, **kw: filed.append((branch, tip))
+                        or {"added": list(issues)})
+    return clock, filed
+
+
+def test_the_v1_trigger_files_the_worktree_of_a_root_anchored_run(repo, tmp_path, monkeypatch):
+    """claunch-4zc51.1.3: the v1 route measured the run's checkout (master)."""
+    root, tree = repo
+    path = _transcript(tmp_path / "t.jsonl", {"cwd": str(root)}, {"cwd": str(tree)})
+    monkeypatch.setattr(ctxsize, "transcript_of", lambda sdef: path)
+    monkeypatch.setattr(cflow_landing, "in_review_of", lambda cwd, s: ["c-1"])
+    clock, filed = _v1_clock(_Manager(_Session("w1", root)), monkeypatch)
+    ok, detail = asyncio.run(clock._enqueue_landing(str(root), "w1"))
+    assert ok, detail
+    assert filed == [("w1-feature", _git(tree, "rev-parse", "HEAD"))]
+
+
+def test_the_v1_trigger_files_nothing_measured_on_master(repo, monkeypatch):
+    root, _ = repo
+    monkeypatch.setattr(ctxsize, "transcript_of", lambda sdef: None)
+    monkeypatch.setattr(cflow_landing, "in_review_of", lambda cwd, s: ["c-1"])
+    clock, filed = _v1_clock(_Manager(_Session("w1", root)), monkeypatch)
+    ok, detail = asyncio.run(clock._enqueue_landing(str(root), "w1"))
+    assert not ok
+    assert "integration branch itself" in detail and "nothing was pushed" in detail
+    assert filed == []
 
 
 def test_the_enqueue_landing_trigger_pushes_nothing_from_master(tmp_path):
