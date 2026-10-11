@@ -18,6 +18,7 @@ globalThis.SimPage = (() => {
   // Drafts outlive a redraw (every poll redraws): the create form, the
   // settings form of the open simulation, answers by finding key, the nudge.
   let draft = null, settingsDraft = null, nudgeDraft = "", transferTo = "";
+  let replays = {};
   const answers = {};
   const view = () => document.getElementById("sims-view");
 
@@ -260,7 +261,12 @@ globalThis.SimPage = (() => {
       if (f.assumed?.length) card.append(node("p", "가정에 기댐: " + f.assumed.join(", "), "sim-warn"));
       if (f.provisional?.length) card.append(node("p", "임시 규칙에 기댐: " + f.provisional.join(", "), "sim-warn"));
       const steps = (f.witness?.steps || []).map(x => x.event).join(" → ");
-      if (steps) card.append(node("p", "재현 경로: " + (f.witness.checkpoint ? `[${f.witness.checkpoint}] ` : "") + steps, "sim-witness"));
+      if (steps) {
+        const w = node("p", "재현 경로: " + (f.witness.checkpoint ? `[${f.witness.checkpoint}] ` : "") + steps, "sim-witness");
+        w.append(button(replays[f.key] ? "재생 닫기" : "재생", () => toggleReplay(base, f.key)));
+        card.append(w);
+      }
+      if (replays[f.key]) card.append(renderReplay(replays[f.key]));
       if (f.resolution) card.append(node("p", `${f.resolution.by}: ${f.resolution.reason || ""}`, "sim-muted"));
       if (f.question) {
         const q = node("div", null, "sim-question");
@@ -281,6 +287,45 @@ globalThis.SimPage = (() => {
       body.append(card);
     }
     if (!(findings?.findings || []).length) body.append(node("p", "해당하는 발견이 없습니다.", "sim-empty"));
+  }
+
+  // Replay a finding's witness on the current model, step by step.
+  async function toggleReplay(base, key) {
+    if (replays[key]) { delete replays[key]; render(); return; }
+    replays[key] = {loading: true}; render();
+    try { replays[key] = await request(base + "/replay?key=" + enc(key)); }
+    catch (exc) { replays[key] = {stale: true, why: exc.message}; }
+    render();
+  }
+
+  const showState = st => Object.entries(st.sm || {}).map(([m, v]) => `${m}=${v}`)
+    .concat(Object.entries(st.vars || {}).map(([k, v]) => `$${k}=${JSON.stringify(v)}`)).join(" · ") || "(없음)";
+
+  function renderReplay(r) {
+    const box = node("div", null, "sim-replay");
+    if (r.loading) { box.append(node("p", "재생 중…", "sim-muted")); return box; }
+    if (r.stale) { box.append(node("p", "지금 모델에서는 재생할 수 없습니다: " + (r.why || ""), "sim-warn")); return box; }
+    box.append(node("p", r.reproduces ? "지금 모델에서도 같은 발견이 다시 납니다." : "지금 모델에서는 이 발견이 다시 나지 않습니다.",
+      r.reproduces ? "sim-muted" : "sim-warn"));
+    const ol = node("ol", null, "sim-steps");
+    const first = node("li", null, "sim-step");
+    first.append(node("strong", "시작" + (r.checkpoint ? ` [${r.checkpoint}]` : "")), node("span", " " + showState(r.start)));
+    ol.append(first);
+    for (const st of r.steps || []) {
+      const li = node("li", null, "sim-step" + (st.n === r.raised_at ? " sim-step-raised" : ""));
+      li.append(node("strong", st.event));
+      const ch = Object.entries(st.changed || {}).map(([k, [a, b]]) => `${k}: ${a ?? "-"} → ${b}`).join(", ");
+      li.append(node("span", " " + (ch || "변화 없음"), ch ? "" : "sim-muted"));
+      if (st.fired?.length) li.append(node("div", "적용된 규칙: " + st.fired.join(", "), "sim-muted"));
+      const assumed = Object.entries(st.assume || {});
+      if (assumed.length) li.append(node("div", "가정: " + assumed.map(([k, v]) => `${k}=${v ? "참" : "거짓"}`).join(", "), "sim-warn"));
+      if (st.findings?.length) li.append(node("div", "발견: " + st.findings.join(", "), st.n === r.raised_at ? "sim-warn" : "sim-muted"));
+      ol.append(li);
+    }
+    box.append(ol);
+    const last = (r.steps || []).at(-1);
+    if (last) box.append(node("p", "끝 상태: " + showState(last), "sim-muted"));
+    return box;
   }
 
   function renderMap(body) {
@@ -380,7 +425,7 @@ globalThis.SimPage = (() => {
   }
 
   function open(id = "", section = "") {
-    if (id !== simId) { detail = findings = model = coverage = settingsDraft = null; notice = ""; nudgeDraft = transferTo = ""; }
+    if (id !== simId) { detail = findings = model = coverage = settingsDraft = null; notice = ""; nudgeDraft = transferTo = ""; replays = {}; }
     simId = id || ""; if (section) tab = section; else if (!id) tab = "findings";
     render(); load();
     clearInterval(timer);

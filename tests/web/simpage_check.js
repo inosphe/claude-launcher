@@ -37,6 +37,11 @@ async function api(raw, opts = {}) {
   else if (p === '/api/sims' && method === 'GET') { result = {sims: [sim]}; if (delay) { const d = delay; delay = null; await d; } }
   else if (p === '/api/sims' && method === 'POST') result = {sim: {...sim, id: 'sim-new111', owner: body.owner}, nudged: true};
   else if (p.endsWith('/findings')) result = {total: findings.length, findings};
+  else if (p.endsWith('/replay')) result = url.searchParams.get('key') === 'unhandled|door|open|open'
+    ? {stale: false, reproduces: true, checkpoint: null, start: {sm: {door: 'closed'}, vars: {}}, raised_at: 2,
+       steps: [{n: 1, event: 'open', assume: {}, fired: ['r.open'], findings: [], changed: {door: ['closed', 'open']}, sm: {door: 'open'}, vars: {}},
+               {n: 2, event: 'open', assume: {'r.x': false}, fired: [], findings: ['unhandled|door|open|open'], changed: {}, sm: {door: 'open'}, vars: {}}]}
+    : {stale: true, why: 'rule r.gone is no longer in the model'};
   else if (p.endsWith('/model')) result = {model: {machines: [{id: 'door', states: ['closed', 'open'], initial: 'closed'}], vars: [], events: [{name: 'open'}],
     rules: [{id: 'r.open', on: {event: 'open'}, do: [], source: [{ref: 'spec.md', quote: 'opens'}]}], invariants: [], checkpoints: {}}};
   else if (p.endsWith('/coverage')) result = {grid: [{machine: 'door', states: ['closed', 'open'], events: ['open', 'close']}],
@@ -108,6 +113,18 @@ async function settle() { for (let i = 0; i < 10; i++) await new Promise(resolve
   button('nothing').onclick();
   button('답하기').onclick(); await settle();
   assert(calls.some(c => c.url.pathname.endsWith('/answer') && c.body.text === 'nothing' && c.body.key === 'unhandled|door|closed|close'));
+  // Replay a witness: start state, one row per step, the raising step marked.
+  ctx.SimPage.open('sim-abc123'); await settle();
+  button('재생').onclick(); await settle();
+  assert(calls.some(c => c.url.pathname.endsWith('/replay') && c.url.searchParams.get('key') === 'unhandled|door|open|open'));
+  assert(all().some(n => n.tag === 'li' && n.className === 'sim-step sim-step-raised'));
+  assert(all().some(n => n.textContent === ' door: closed → open'));
+  assert(all().some(n => n.textContent === '가정: r.x=거짓'));
+  assert(button('재생 닫기'));
+  // A stale witness says why instead of showing steps.
+  all().filter(n => n.tag === 'button' && n.textContent === '재생')[0].onclick(); await settle();
+  assert(all().some(n => n.className === 'sim-warn' && n.textContent.includes('r.gone')));
+  button('재생 닫기').onclick(); await settle();
   // Map and model tabs.
   ctx.SimPage.open('sim-abc123', 'map'); await settle();
   assert(all().some(n => n.className === 'sim-cell-gap' && n.textContent === '!'));

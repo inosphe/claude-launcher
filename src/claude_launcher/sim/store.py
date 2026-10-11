@@ -856,11 +856,27 @@ class SimStore:
             if f is None:
                 raise NotFound(f"no finding {finding_key!r}")
             walk = engine.prepare(self.model(sim_id))
+            w = f["witness"]
             try:
-                r = engine.replay(walk, f["witness"])
+                r = engine.replay(walk, w)
             except engine.StaleWitness as exc:
-                return {"stale": True, "why": str(exc)}
+                return {"stale": True, "why": str(exc), "finding": f}
             except (ValueError, KeyError) as exc:
-                return {"stale": True, "why": f"cannot replay on the current model: {exc}"}
-            return {"stale": False, "steps": r["steps"], "fired": r["fired"],
-                    "reproduces": engine.reproduces(walk, f["witness"], finding_key)}
+                return {"stale": True, "why": f"cannot replay on the current model: {exc}", "finding": f}
+            start = M.initial_state(walk, w.get("checkpoint"), w.get("world_seed", 1))
+            start["vars"].update(w.get("inputs") or {})
+            prev = {"sm": dict(start["sm"]), "vars": dict(start["vars"])}
+            steps = []
+            for i, (t, s) in enumerate(zip(w.get("steps") or [], r["steps"])):
+                changed = {f"{m}": [prev["sm"].get(m), v] for m, v in s["sm"].items() if prev["sm"].get(m) != v}
+                changed.update({f"${k}": [prev["vars"].get(k), v] for k, v in s["vars"].items()
+                                if prev["vars"].get(k) != v})
+                steps.append({"n": i + 1, "event": t["event"], "assume": t.get("assume") or {},
+                              "fired": s.get("fired") or [], "unresolved": s.get("unresolved") or [],
+                              "findings": [x["key"] for x in s.get("findings") or []],
+                              "changed": changed, "sm": s["sm"], "vars": s["vars"]})
+                prev = {"sm": s["sm"], "vars": s["vars"]}
+            raised = next((x["n"] for x in steps if finding_key in x["findings"]), None)
+            return {"stale": False, "finding": f, "start": {"sm": start["sm"], "vars": start["vars"]},
+                    "checkpoint": w.get("checkpoint"), "steps": steps, "fired": r["fired"],
+                    "raised_at": raised, "reproduces": engine.reproduces(walk, w, finding_key)}

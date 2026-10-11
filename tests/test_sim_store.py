@@ -177,6 +177,16 @@ def test_replay_and_coverage(env):
     st.run_round(sim["id"], "s1")
     rep = st.replay(sim["id"], "unhandled|door|open|open")
     assert rep["reproduces"] and not rep["stale"]
+    # The trace: start state, then per step the event and what it changed;
+    # the last step raises the finding.
+    assert rep["start"]["sm"] == {"door": "closed"}
+    assert rep["steps"][-1]["event"] == "open" and rep["steps"][-1]["sm"] == {"door": "open"}
+    opened = next(x for x in rep["steps"] if x["changed"])
+    assert opened["changed"] == {"door": ["closed", "open"]} and opened["fired"] == ["r.open"]
+    assert rep["raised_at"] == len(rep["steps"])
+    # A witness whose rule left the model no longer reproduces it.
+    st.patch_model(sim["id"], "s1", {"remove": {"rules": ["r.open"]}})
+    assert st.replay(sim["id"], "unhandled|door|open|open")["reproduces"] is False
     cov = st.coverage(sim["id"])
     assert cov["grid"][0]["machine"] == "door"
     assert any(k.endswith("\x00open") for k in cov["gaps"])
