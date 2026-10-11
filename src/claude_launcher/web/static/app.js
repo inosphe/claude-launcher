@@ -36541,22 +36541,27 @@ const spawnHMax = () => Math.max(SPAWN_H_MIN, Math.round(window.innerHeight * 0.
 
 /* A remembered size is only as good as the window it is restored into: the
    operator may have dragged it wide on a monitor they are no longer at. */
-function clampSpawnSize(size) {
+function clampSpawnSize(size, child = false) {
   if (!size || !Number.isFinite(size.w) || !Number.isFinite(size.h)) return null;
+  const maxW = child ? Math.max(0, window.innerWidth - 32) : spawnWMax();
+  const maxH = child ? Math.round(window.innerHeight * 0.94) : spawnHMax();
   return {
-    w: Math.min(spawnWMax(), Math.max(SPAWN_W_MIN, Math.round(size.w))),
-    h: Math.min(spawnHMax(), Math.max(SPAWN_H_MIN, Math.round(size.h))),
+    w: Math.min(maxW, Math.max(SPAWN_W_MIN, Math.round(size.w))),
+    h: Math.min(maxH, Math.max(SPAWN_H_MIN, Math.round(size.h))),
   };
 }
 
-function spawnSizeRecall() {
+function spawnSizeRecall(child = false) {
   try {
-    return clampSpawnSize(JSON.parse(localStorage.getItem(SPAWN_SIZE_KEY) || "null"));
+    return clampSpawnSize(JSON.parse(localStorage.getItem(SPAWN_SIZE_KEY + (child ? ":child" : "")) || "null"), child);
   } catch { return null; }   // a hand-edited or half-written row is not a size
 }
 
-function spawnSizeApply(box) {
-  const size = spawnSizeRecall();
+function spawnSizeApply(box, child = false) {
+  // Child forms start large without inheriting the older, shared dialog size.
+  // Subsequent opens still respect the operator's own resize.
+  const size = spawnSizeRecall(child) || (child
+    ? clampSpawnSize({ w: 1320, h: window.innerHeight * 0.94 }, true) : null);
   if (!size) return;
   box.style.width = `${size.w}px`;
   box.style.height = `${size.h}px`;
@@ -36565,7 +36570,7 @@ function spawnSizeApply(box) {
 /* Read at close rather than watched while dragging: there is no resize EVENT
    on an element, and the alternative — a ResizeObserver — would be a listener
    to own and unhook for a value nobody needs until the box shuts. */
-function spawnSizeRemember(box) {
+function spawnSizeRemember(box, child = false) {
   const r = box.getBoundingClientRect();
   // A box that is not laid out measures 0x0, and the stylesheet's floors mean
   // a VISIBLE spawn box can never measure under them. So a measurement below
@@ -36573,9 +36578,9 @@ function spawnSizeRemember(box) {
   // and clamping it up to the floor would silently shrink the modal they had.
   // Nothing is written down; the size they last chose stands.
   if (r.width >= SPAWN_W_MIN && r.height >= SPAWN_H_MIN) {
-    const size = clampSpawnSize({ w: r.width, h: r.height });
+    const size = clampSpawnSize({ w: r.width, h: r.height }, child);
     if (size) {
-      try { localStorage.setItem(SPAWN_SIZE_KEY, JSON.stringify(size)); } catch { /* full or blocked */ }
+      try { localStorage.setItem(SPAWN_SIZE_KEY + (child ? ":child" : ""), JSON.stringify(size)); } catch { /* full or blocked */ }
     }
   }
   box.style.width = "";
@@ -37081,8 +37086,10 @@ async function openSessionModal(opts = {}) {
   // the operator last dragged the New/Spawn box to, which on a box shrunk
   // for that form left the fork scrolling inside a slit.
   overlay.classList.toggle("fork-open", tab === "fork");
+  overlay.classList.toggle("child-spawn-open", tab === "spawn");
   st.fork = tab === "fork";
-  if (!st.fork) spawnSizeApply(overlay.querySelector(".modal-box"));
+  st.child = tab === "spawn";
+  if (!st.fork) spawnSizeApply(overlay.querySelector(".modal-box"), st.child);
   if (tab === "fork") {
     configureSessionFork(opts.source);
     renderSessionForm();
@@ -37144,8 +37151,9 @@ function sessionModalClose(opts = {}) {
   // New/Spawn box should open at; only the inline pair is stripped.
   const box = overlay.querySelector(".modal-box");
   if (st.fork) { box.style.width = ""; box.style.height = ""; }
-  else spawnSizeRemember(box);
+  else spawnSizeRemember(box, st.child);
   overlay.classList.remove("fork-open");
+  overlay.classList.remove("child-spawn-open");
   const f = $("new-session");
   f._sessionView = st.previousView;
   // A launch that went through clears the rows it consumed (SESSION_FORM_SPENT)

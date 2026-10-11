@@ -5425,6 +5425,12 @@ body.embed #main { width: 100%; }
   width: 1100px;
   min-width: min(420px, calc(100vw - 32px));
 }
+/* Child creation has enough fields to use most of the viewport. Its saved
+   size is separate from New session, and remains bounded on small screens. */
+#modal-overlay.spawn-open.child-spawn-open .modal-box:has(#new-session) {
+  width: 1320px; height: 94vh; max-height: 94vh;
+  min-height: min(240px, 94vh);
+}
 /* The quick fork: six rows in a box sized by them. Wide enough that the
    longest Inherit label sits on one line in a half-width column, and as tall
    as the rows are, up to nearly the whole viewport, so it does not scroll
