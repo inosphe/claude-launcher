@@ -182,6 +182,18 @@ def answered_text(sim: dict, finding: dict) -> str:
     )
 
 
+def accepted_text(sim: dict, p: dict) -> str:
+    where = f"replace this text in {p['file']}:\n<<<\n{p['old']}\n>>>\nwith:\n<<<\n{p['new']}\n>>>" if p["old"] else \
+        f"append to {p['file']}:\n<<<\n{p['new']}\n>>>"
+    note = (p.get("decision") or {}).get("note") or ""
+    return (
+        f"{PREFIX} The user accepted edit proposal {p['id']} on simulation {sim['id']} \"{sim['title']}\" "
+        f"({p['kind']}: {p['reason']}; settles {', '.join(p['findings'])})" + (f" -- note: {note}" if note else "") +
+        f". Apply it to the source and commit as usual: {where}\n"
+        "Then run the simulation again (sim_start) so the walk checks it."
+    )
+
+
 def nudge_text(sim: dict, text: str = "") -> str:
     if text.strip():
         return f"{PREFIX} On simulation {sim['id']} \"{sim['title']}\", the user says: {text.strip()}"
@@ -326,7 +338,7 @@ def install(app, store: Optional[sim_store.SimStore] = None):
             sims.create, title=str(body.get("title") or ""), goal=str(body.get("goal") or ""),
             root=root, project=project, owner=owner, actor=actor,
             sources=body.get("sources") or [], settings=body.get("settings") or {},
-            issue=str(body.get("issue") or ""), defaults=_defaults())
+            issue=str(body.get("issue") or ""), defaults=_defaults(), from_sim=str(body.get("from") or ""))
         if err:
             return err
         nudged = False
@@ -483,6 +495,45 @@ def install(app, store: Optional[sim_store.SimStore] = None):
             return err
         return web.json_response(res)
 
+    async def h_proposals(request):
+        sid = request.match_info["id"]
+        res, err = await call(sims.proposals, sid)
+        if err:
+            return err
+        rows = sorted(res.values(), key=lambda p: p["at"], reverse=True)
+        return web.json_response({"proposals": rows})
+
+    async def h_propose(request):
+        sid = request.match_info["id"]
+        body = await body_of(request)
+        res, err = await call(sims.propose, sid, actor_of(body), body.get("items") or [], body.get("key"))
+        if err:
+            return err
+        return web.json_response(res)
+
+    async def h_decide(request):
+        sid = request.match_info["id"]
+        body = await body_of(request)
+        if actor_of(body) != sim_store.USER:
+            return web.json_response({"error": "edit proposals are accepted or rejected by the user"}, status=403)
+        res, err = await call(sims.decide_proposal, sid, sim_store.USER, request.match_info["pid"],
+                              bool(body.get("accept")), str(body.get("note") or ""))
+        if err:
+            return err
+        res["nudged"] = False
+        if res["proposal"]["status"] == "accepted":
+            sim = await asyncio.to_thread(sims.get, sid)
+            res["nudged"] = deliver(res["owner"], accepted_text(sim, res["proposal"]))
+        return web.json_response(res)
+
+    async def h_triage(request):
+        sid = request.match_info["id"]
+        body = await body_of(request)
+        res, err = await call(sims.triage, sid, actor_of(body), body.get("items") or [], body.get("key"))
+        if err:
+            return err
+        return web.json_response(res)
+
     async def h_runner_done(request):
         sid = request.match_info["id"]
         body = await body_of(request)
@@ -618,4 +669,8 @@ def install(app, store: Optional[sim_store.SimStore] = None):
     r.add_post("/api/sims/{id}/runner/done", h_runner_done)
     r.add_get("/api/sims/{id}/work", h_work)
     r.add_post("/api/sims/{id}/verdicts", h_verdicts)
+    r.add_post("/api/sims/{id}/triage", h_triage)
+    r.add_get("/api/sims/{id}/proposals", h_proposals)
+    r.add_post("/api/sims/{id}/proposals", h_propose)
+    r.add_post("/api/sims/{id}/proposals/{pid}/decide", h_decide)
     return sims

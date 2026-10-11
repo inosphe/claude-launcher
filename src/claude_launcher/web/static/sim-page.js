@@ -18,6 +18,7 @@ globalThis.SimPage = (() => {
   // Drafts outlive a redraw (every poll redraws): the create form, the
   // settings form of the open simulation, answers by finding key, the nudge.
   let draft = null, settingsDraft = null, nudgeDraft = "", transferTo = "";
+  let replays = {}, proposals = null, proposalNotes = {};
   const answers = {};
   const view = () => document.getElementById("sims-view");
 
@@ -51,6 +52,11 @@ globalThis.SimPage = (() => {
           if (mine !== seq) return;
           model = m.model; coverage = c;
         }
+        if (tab === "proposals") {
+          const pr = await request(base + "/proposals");
+          if (mine !== seq) return;
+          proposals = pr.proposals || [];
+        }
       }
       error = "";
     } catch (exc) { if (mine === seq) error = exc.message; }
@@ -78,6 +84,9 @@ globalThis.SimPage = (() => {
     s.value = value; s.disabled = busy; s.onchange = () => onchange(s.value); return s;
   }
   const sessionOptions = (blank) => [["", blank], ...sessions.map(s => [s.name, s.name + (s.project ? ` (${s.project})` : "")])];
+  const PROPOSAL_LABEL = {proposed: "검토 대기", accepted: "수락", rejected: "거절"};
+  const EDIT_KIND_LABEL = {clarify: "명료화", complete: "보충", decide: "결정 필요"};
+  const TRIAGE_LABEL = {model: "모델이 원천을 잘못 읽음", spec: "원천에 정해진 내용 없음 (사람이 결정)", intended: "결함 아님"};
   const MODEL_KEYS = ["interpreter_profile", "judge_profile", "interpreter_model", "judge_model", "interpreter_reasoning", "judge_reasoning"];
 
   function render() {
@@ -138,6 +147,10 @@ globalThis.SimPage = (() => {
     const o = node("label", "맡길 세션 — 이 세션이 소유자가 되고 요청이 그 세션에 입력됩니다");
     o.append(select(sessionOptions("선택"), draft.owner, v => { draft.owner = v; }, "맡길 세션")); form.append(o);
     form.append(profileFields(draft, v => { Object.assign(draft, v); render(); }));
+    const from = node("label", "이어 받기 — 고른 시뮬레이션의 모델·판정·답한 질문으로 시작합니다");
+    from.append(select([["", "없음 (빈 모델)"], ...list.map(x => [x.id, `${x.title} (${x.id})`])], draft.from || "",
+      v => { draft.from = v; }, "이어 받을 시뮬레이션"));
+    form.append(from);
     const submit = node("button", "만들고 요청 보내기", "wf-btn sim-primary"); submit.disabled = busy;
     form.append(submit);
     form.onsubmit = e => {
@@ -146,7 +159,7 @@ globalThis.SimPage = (() => {
       const settings = {};
       for (const k of MODEL_KEYS) settings[k] = draft[k];
       act(() => request("/api/sims", "POST", {title: draft.title, goal: draft.goal, owner: draft.owner,
-        sources: draft.sources.split("\n").map(s => s.trim()).filter(Boolean), settings}),
+        sources: draft.sources.split("\n").map(s => s.trim()).filter(Boolean), settings, ...(draft.from ? {from: draft.from} : {})}),
         r => { creating = false; draft = null; location.hash = "#/sims/" + r.sim.id; return r.nudged ? `${r.sim.owner}에 요청을 보냈습니다` : "요청을 입력하지 못했습니다 — 세션 상태를 확인하세요"; });
     };
     return form;
@@ -200,6 +213,11 @@ globalThis.SimPage = (() => {
       const lr = s.last_runner;
       title.append(node("p", `지난 실행 세션 ${lr.session}: ${lr.failed ? "실패" : "끝남"} · ${lr.reason || ""}`, lr.failed ? "sim-warn" : "sim-muted"));
     }
+    if (s.from) {
+      const f = node("p", "이어 받음: ", "sim-muted"); const a = node("a", s.from); a.href = "#/sims/" + enc(s.from); f.append(a); title.append(f);
+    }
+    if ((s.stale_sources || []).length)
+      title.append(node("p", `원천이 바뀌어 인용을 잃은 규칙 ${s.stale_sources.length}개: ${s.stale_sources.map(x => x.id).join(", ")}`, "sim-warn"));
     if (s.goal) title.append(node("p", s.goal, "sim-goal"));
     head.append(title); shell.append(head);
 
@@ -231,7 +249,7 @@ globalThis.SimPage = (() => {
     shell.append(stats);
 
     const nav = node("nav", null, "sim-tabs");
-    for (const [key, label] of [["findings", "발견"], ["map", "빈칸 지도"], ["model", "모델"], ["rounds", "라운드"], ["settings", "설정"], ["journal", "기록"]]) {
+    for (const [key, label] of [["findings", "발견"], ["map", "빈칸 지도"], ["model", "모델"], ["proposals", "편집 제안" + ((s.proposals?.proposed) ? ` (${s.proposals.proposed})` : "")], ["rounds", "라운드"], ["settings", "설정"], ["journal", "기록"]]) {
       const b = button(label, () => { tab = key; location.hash = `#/sims/${s.id}/${key}`; }, tab === key ? "is-active" : "");
       b.setAttribute("aria-pressed", String(tab === key)); nav.append(b);
     }
@@ -240,6 +258,7 @@ globalThis.SimPage = (() => {
     if (tab === "findings") renderFindings(body, s, base);
     else if (tab === "map") renderMap(body);
     else if (tab === "model") renderModel(body);
+    else if (tab === "proposals") renderProposals(body, base);
     else if (tab === "rounds") renderRounds(body);
     else if (tab === "settings") renderSettings(body, s, base);
     else renderJournal(body);
@@ -260,8 +279,16 @@ globalThis.SimPage = (() => {
       if (f.assumed?.length) card.append(node("p", "가정에 기댐: " + f.assumed.join(", "), "sim-warn"));
       if (f.provisional?.length) card.append(node("p", "임시 규칙에 기댐: " + f.provisional.join(", "), "sim-warn"));
       const steps = (f.witness?.steps || []).map(x => x.event).join(" → ");
-      if (steps) card.append(node("p", "재현 경로: " + (f.witness.checkpoint ? `[${f.witness.checkpoint}] ` : "") + steps, "sim-witness"));
+      if (steps) {
+        const w = node("p", "재현 경로: " + (f.witness.checkpoint ? `[${f.witness.checkpoint}] ` : "") + steps, "sim-witness");
+        w.append(button(replays[f.key] ? "재생 닫기" : "재생", () => toggleReplay(base, f.key)));
+        card.append(w);
+      }
+      if (replays[f.key]) card.append(renderReplay(replays[f.key]));
       if (f.resolution) card.append(node("p", `${f.resolution.by}: ${f.resolution.reason || ""}`, "sim-muted"));
+      if (f.triage) card.append(node("p", `판정자 분류: ${TRIAGE_LABEL[f.triage.verdict] || f.triage.verdict} — ${f.triage.why}`, "sim-triage"));
+      if (f.stale) card.append(node("p", "지금 모델에서 재현 경로를 재생할 수 없습니다: " + f.stale, "sim-warn"));
+      if (f.reopened) card.append(node("p", `다시 열림: 질문 뒤 원천이 바뀌었습니다 (이전 질문: ${f.prev_question?.text || ""})`, "sim-warn"));
       if (f.question) {
         const q = node("div", null, "sim-question");
         q.append(node("p", "질문 (" + f.question.by + "): " + f.question.text));
@@ -281,6 +308,45 @@ globalThis.SimPage = (() => {
       body.append(card);
     }
     if (!(findings?.findings || []).length) body.append(node("p", "해당하는 발견이 없습니다.", "sim-empty"));
+  }
+
+  // Replay a finding's witness on the current model, step by step.
+  async function toggleReplay(base, key) {
+    if (replays[key]) { delete replays[key]; render(); return; }
+    replays[key] = {loading: true}; render();
+    try { replays[key] = await request(base + "/replay?key=" + enc(key)); }
+    catch (exc) { replays[key] = {stale: true, why: exc.message}; }
+    render();
+  }
+
+  const showState = st => Object.entries(st.sm || {}).map(([m, v]) => `${m}=${v}`)
+    .concat(Object.entries(st.vars || {}).map(([k, v]) => `$${k}=${JSON.stringify(v)}`)).join(" · ") || "(없음)";
+
+  function renderReplay(r) {
+    const box = node("div", null, "sim-replay");
+    if (r.loading) { box.append(node("p", "재생 중…", "sim-muted")); return box; }
+    if (r.stale) { box.append(node("p", "지금 모델에서는 재생할 수 없습니다: " + (r.why || ""), "sim-warn")); return box; }
+    box.append(node("p", r.reproduces ? "지금 모델에서도 같은 발견이 다시 납니다." : "지금 모델에서는 이 발견이 다시 나지 않습니다.",
+      r.reproduces ? "sim-muted" : "sim-warn"));
+    const ol = node("ol", null, "sim-steps");
+    const first = node("li", null, "sim-step");
+    first.append(node("strong", "시작" + (r.checkpoint ? ` [${r.checkpoint}]` : "")), node("span", " " + showState(r.start)));
+    ol.append(first);
+    for (const st of r.steps || []) {
+      const li = node("li", null, "sim-step" + (st.n === r.raised_at ? " sim-step-raised" : ""));
+      li.append(node("strong", st.event));
+      const ch = Object.entries(st.changed || {}).map(([k, [a, b]]) => `${k}: ${a ?? "-"} → ${b}`).join(", ");
+      li.append(node("span", " " + (ch || "변화 없음"), ch ? "" : "sim-muted"));
+      if (st.fired?.length) li.append(node("div", "적용된 규칙: " + st.fired.join(", "), "sim-muted"));
+      const assumed = Object.entries(st.assume || {});
+      if (assumed.length) li.append(node("div", "가정: " + assumed.map(([k, v]) => `${k}=${v ? "참" : "거짓"}`).join(", "), "sim-warn"));
+      if (st.findings?.length) li.append(node("div", "발견: " + st.findings.join(", "), st.n === r.raised_at ? "sim-warn" : "sim-muted"));
+      ol.append(li);
+    }
+    box.append(ol);
+    const last = (r.steps || []).at(-1);
+    if (last) box.append(node("p", "끝 상태: " + showState(last), "sim-muted"));
+    return box;
   }
 
   function renderMap(body) {
@@ -307,6 +373,37 @@ globalThis.SimPage = (() => {
       const wrap = node("div", null, "sim-scroll"); wrap.append(t); body.append(wrap);
     }
     if (!(coverage.grid || []).length) body.append(node("p", "상태 기계가 없습니다.", "sim-empty"));
+  }
+
+  // The editor's proposals: never applied by the daemon; an accepted one goes to the owner session.
+  function renderProposals(body, base) {
+    if (!proposals) { body.append(node("p", "불러오는 중…", "sim-muted")); return; }
+    body.append(node("p", "편집 제안은 원천 파일에 적용되지 않은 상태입니다. 수락하면 소유 세션에 적용 요청이 입력됩니다.", "sim-muted"));
+    if (!proposals.length) { body.append(node("p", "편집 제안이 없습니다. 설정의 「최대 편집 제안」을 1 이상으로 두면 실행이 끝날 때 만들어집니다.", "sim-empty")); return; }
+    for (const p of proposals) {
+      const card = node("article", null, "sim-proposal sim-p-" + p.status);
+      const h = node("header");
+      h.append(node("span", PROPOSAL_LABEL[p.status] || p.status, "sim-badge"), node("strong", EDIT_KIND_LABEL[p.kind] || p.kind),
+        node("code", p.file), node("span", p.id, "sim-muted"));
+      card.append(h, node("p", p.reason), node("p", "해결하는 발견: " + p.findings.join(", "), "sim-muted"));
+      const diff = node("div", null, "sim-diff");
+      if (p.old) diff.append(node("pre", p.old, "sim-del"));
+      else diff.append(node("p", "파일 끝에 추가", "sim-muted"));
+      diff.append(node("pre", p.new, "sim-add"));
+      card.append(diff);
+      if (p.check?.breaks?.length) card.append(node("p", "이 편집을 적용하면 인용을 잃는 규칙: " + p.check.breaks.join(", "), "sim-warn"));
+      if (p.decision?.note) card.append(node("p", "메모: " + p.decision.note, "sim-muted"));
+      if (p.status === "proposed") {
+        const note = node("input"); note.placeholder = "메모 (선택)"; note.disabled = busy;
+        note.value = proposalNotes[p.id] || ""; note.oninput = () => { proposalNotes[p.id] = note.value; };
+        const decide = accept => act(() => request(base + "/proposals/" + enc(p.id) + "/decide", "POST", {accept, note: proposalNotes[p.id] || ""}),
+          r => { delete proposalNotes[p.id]; return accept ? (r.nudged ? "수락했고 소유 세션에 적용 요청을 입력했습니다" : "수락했습니다 (소유 세션 없음)") : "거절했습니다"; });
+        const row = node("div", null, "sim-row");
+        row.append(note, button("수락", () => decide(true), "sim-primary"), button("거절", () => decide(false)));
+        card.append(row);
+      }
+      body.append(card);
+    }
   }
 
   function renderModel(body) {
@@ -353,17 +450,22 @@ globalThis.SimPage = (() => {
     const cur = settingsDraft;
     const form = node("form", null, "sim-form");
     form.append(profileFields(cur, v => { Object.assign(cur, v); render(); }));
-    for (const [k, label] of [["max_rounds", "최대 라운드"], ["budget", "라운드당 걸음"], ["horizon", "한 번에 이어 가는 걸음"], ["seed", "씨앗"]]) {
-      const l = node("label", label); const i = node("input"); i.type = "number"; i.min = "1"; i.value = cur[k];
+    for (const [k, label] of [["max_rounds", "최대 라운드"], ["budget", "라운드당 걸음"], ["horizon", "한 번에 이어 가는 걸음"], ["seed", "씨앗"], ["max_edits", "최대 편집 제안 (0 = 만들지 않음)"]]) {
+      const l = node("label", label); const i = node("input"); i.type = "number"; i.min = k === "max_edits" ? "0" : "1"; i.value = cur[k] ?? 0;
       i.oninput = () => { cur[k] = parseInt(i.value, 10); }; i.disabled = busy; l.append(i); form.append(l);
     }
+    const tri = node("label", null, "sim-check"); const cb = node("input"); cb.type = "checkbox"; cb.checked = cur.triage !== false;
+    cb.disabled = busy; cb.setAttribute("aria-label", "판정자 분류");
+    cb.onchange = () => { cur.triage = cb.checked; };
+    tri.append(cb, node("span", " 해석 전에 판정자가 빈칸을 분류 (모델 오류 / 원천에 없음 / 결함 아님)")); form.append(tri);
     const src = node("label", "원천 (한 줄에 하나)"); const ta = node("textarea"); ta.value = cur.sources; ta.oninput = () => { cur.sources = ta.value; }; ta.disabled = busy; src.append(ta); form.append(src);
     const submit = node("button", "저장", "wf-btn sim-primary"); submit.disabled = busy; form.append(submit);
     form.append(node("p", "바꾼 설정은 다음 라운드와 다음 실행부터 적용됩니다.", "sim-muted"));
     form.onsubmit = e => {
       e.preventDefault();
       const settings = {};
-      for (const k of [...MODEL_KEYS, "max_rounds", "budget", "horizon", "seed"]) settings[k] = cur[k];
+      for (const k of [...MODEL_KEYS, "max_rounds", "budget", "horizon", "seed", "max_edits"]) settings[k] = cur[k] ?? 0;
+      settings.triage = cur.triage !== false;
       act(() => request(base + "/settings", "POST", {settings, sources: cur.sources.split("\n").map(x => x.trim()).filter(Boolean)}),
         () => { settingsDraft = null; return "저장했습니다"; });
     };
@@ -380,7 +482,7 @@ globalThis.SimPage = (() => {
   }
 
   function open(id = "", section = "") {
-    if (id !== simId) { detail = findings = model = coverage = settingsDraft = null; notice = ""; nudgeDraft = transferTo = ""; }
+    if (id !== simId) { detail = findings = model = coverage = settingsDraft = null; notice = ""; nudgeDraft = transferTo = ""; replays = {}; proposals = null; proposalNotes = {}; }
     simId = id || ""; if (section) tab = section; else if (!id) tab = "findings";
     render(); load();
     clearInterval(timer);

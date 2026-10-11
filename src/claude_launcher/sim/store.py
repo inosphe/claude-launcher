@@ -62,6 +62,8 @@ DEFAULT_SETTINGS = {
     "budget": 2000,
     "horizon": 12,
     "max_rounds": 20,
+    "triage": True,              # the judge sorts each gap batch before the interpreter answers it
+    "max_edits": 0,              # edit proposals to the sources at the end of a run (0 = none)
 }
 _ID_RE = re.compile(r"^sim-[0-9a-f]{6,12}$")
 _SUBMIT_CAP = 5000
@@ -179,6 +181,34 @@ def check_sources(m: dict, root: str) -> List[str]:
     return out
 
 
+def _touched(m: dict, patch: dict) -> dict:
+    """The rules and invariants of ``m`` that ``patch`` upserts."""
+    out = {}
+    for section in ("rules", "invariants"):
+        ids = {str(x.get("id")) for x in patch.get(section) or [] if isinstance(x, dict)}
+        out[section] = [x for x in m.get(section) or [] if x.get("id") in ids]
+    return out
+
+
+def source_digests(root: str, sources: Iterable[str]) -> Dict[str, str]:
+    """sha256 (12 hex) of each file the simulation names, globs expanded,
+    under ``root``. A question records these; when one changes, the
+    question is looked at again."""
+    out: Dict[str, str] = {}
+    if not root:
+        return out
+    base = Path(root).resolve()
+    for pat in sources:
+        for p in sorted(base.glob(pat)) if any(c in pat for c in "*?[") else [base / pat]:
+            try:
+                p = p.resolve()
+                if p.is_file() and (base in p.parents):
+                    out[p.relative_to(base).as_posix()] = hashlib.sha256(p.read_bytes()).hexdigest()[:12]
+            except (OSError, ValueError):
+                continue
+    return out
+
+
 class SimStore:
     def __init__(self, root: Path, live: Optional[Callable[[str], bool]] = None):
         """``live(session)`` says whether a session still runs; claims and
@@ -260,7 +290,10 @@ class SimStore:
         for x in f.values():
             counts[x.get("status", "open")] = counts.get(x.get("status", "open"), 0) + 1
         last = self.rounds(meta["id"], 1)
+        props = _read_json(self._dir(meta["id"]) / "proposals.json", {})
         return {**meta, "counts": counts, "last_round": last[0] if last else None,
+                "proposals": {st: sum(1 for p in props.values() if p["status"] == st)
+                              for st in ("proposed", "accepted", "rejected")},
                 "model_stats": M.stats(self.model(meta["id"]))}
 
     def get(self, sim_id: str) -> dict:
@@ -292,13 +325,17 @@ class SimStore:
     def create(self, *, title: str, goal: str = "", root: str = "", project: str = "",
                owner: str = "", actor: str = USER, sources: Iterable[str] = (),
                settings: Optional[dict] = None, issue: str = "",
-               defaults: Optional[dict] = None) -> dict:
+               defaults: Optional[dict] = None, from_sim: str = "") -> dict:
+        """``from_sim`` starts from another simulation's model, verdicts and
+        answered questions (its settings are not copied); the first start
+        checks them against this one's root (see :meth:`_carry`)."""
         title = (title or "").strip()
         if not title:
             raise SimError("a simulation needs a title")
         if owner and owner != USER and not self.live(owner):
             raise SimError(f"session {owner!r} is not running; it cannot own a simulation")
         with self._lock:
+            base_meta = self._meta(from_sim) if from_sim else None
             sim_id = "sim-" + secrets.token_hex(3)
             while (self.root / sim_id).exists():
                 sim_id = "sim-" + secrets.token_hex(3)
@@ -312,10 +349,21 @@ class SimStore:
                 "run_rounds": 0, "issue": issue or "", "runner": None,
                 "settings": self._clean_settings(base, settings or {}),
             }
+            if base_meta:
+                meta["from"] = base_meta["id"]
+                if not meta["sources"]:
+                    meta["sources"] = list(base_meta.get("sources") or [])
             self._save_meta(meta)
-            _write_json(self._dir(sim_id) / "model.json", M.empty())
-            _write_json(self._dir(sim_id) / "findings.json", {})
-            self._journal(sim_id, actor, "created", owner=meta["owner"])
+            if base_meta:
+                answered = {k: {**f, "first_round": 0, "last_round": 0}
+                            for k, f in self.findings(base_meta["id"]).items() if f.get("status") == "answered"}
+                _write_json(self._dir(sim_id) / "model.json", self.model(base_meta["id"]))
+                _write_json(self._dir(sim_id) / "findings.json", answered)
+                _write_json(self._dir(sim_id) / "verdicts.json", self.verdicts(base_meta["id"]))
+            else:
+                _write_json(self._dir(sim_id) / "model.json", M.empty())
+                _write_json(self._dir(sim_id) / "findings.json", {})
+            self._journal(sim_id, actor, "created", owner=meta["owner"], **({"from": from_sim} if from_sim else {}))
             return self.summary(meta)
 
     @staticmethod
@@ -324,7 +372,11 @@ class SimStore:
         for k, v in change.items():
             if k not in DEFAULT_SETTINGS:
                 raise SimError(f"unknown setting {k!r}")
-            if k.endswith("_profile") or k.endswith("_model"):
+            if isinstance(DEFAULT_SETTINGS[k], bool):
+                if not isinstance(v, bool):
+                    raise SimError(f"{k} must be true or false")
+                out[k] = v
+            elif k.endswith("_profile") or k.endswith("_model"):
                 if not isinstance(v, str):
                     raise SimError(f"{k} must be a {'profile name' if k.endswith('_profile') else 'model id'}")
                 out[k] = v.strip()
@@ -333,9 +385,10 @@ class SimStore:
                     raise SimError(f"{k} must be one of {', '.join(REASONING)}")
                 out[k] = v
             else:
-                if not isinstance(v, int) or isinstance(v, bool) or v < 1:
-                    raise SimError(f"{k} must be a positive integer")
-                limit = {"budget": 200000, "horizon": 200, "max_rounds": 500}.get(k)
+                least = 0 if k == "max_edits" else 1
+                if not isinstance(v, int) or isinstance(v, bool) or v < least:
+                    raise SimError(f"{k} must be {'a non-negative' if least == 0 else 'a positive'} integer")
+                limit = {"budget": 200000, "horizon": 200, "max_rounds": 500, "max_edits": 50}.get(k)
                 out[k] = min(v, limit) if limit else v
         return out
 
@@ -550,13 +603,166 @@ class SimStore:
             self._remember(sim_id, key, result)
             return result
 
+    # -- edit proposals (the editor, D) ------------------------------------------
+
+    EDIT_KINDS = ("clarify", "complete", "decide")
+
+    def proposals(self, sim_id: str) -> Dict[str, dict]:
+        return _read_json(self._dir(sim_id) / "proposals.json", {})
+
+    def edit_targets(self, sim_id: str) -> List[dict]:
+        """Findings an edit to the sources would settle: questions (the
+        sources are silent) and answers (the user decided; the sources do
+        not say so yet), less those a proposal already covers."""
+        covered = {k for p in self.proposals(sim_id).values() if p["status"] != "rejected" for k in p["findings"]}
+        return [f for f in self.findings(sim_id).values()
+                if f.get("status") in ("question", "answered") and f["key"] not in covered]
+
+    def propose(self, sim_id: str, actor: str, items: List[dict], key: Optional[str] = None) -> dict:
+        """Record edit proposals to the source files. The daemon never
+        applies one: it checks that ``old`` is in ``file`` word for word
+        (empty ``old`` appends), applies it to a copy, and lists the quoted
+        rules that would lose their quote (``check.breaks``). The user
+        accepts or rejects; an accepted one goes to the owner to apply."""
+        with self._lock:
+            meta = self._meta(sim_id)
+            self._require_owner(meta, actor, "propose edits")
+            seen = self._seen(sim_id, key)
+            if seen is not None:
+                return {**seen, "duplicate": True}
+            root = meta.get("root") or ""
+            base = Path(root).resolve() if root else None
+            ledger, m = self.findings(sim_id), self.model(sim_id)
+            stored = self.proposals(sim_id)
+            done, errors = [], []
+            for it in items or []:
+                rel = str(it.get("file") or "")
+                old, new = str(it.get("old") or ""), str(it.get("new") or "")
+                kind, reason = it.get("kind"), str(it.get("reason") or "").strip()
+                refs = [str(k) for k in it.get("findings") or []]
+                where = f"edit to {rel or '?'}"
+                if base is None:
+                    errors.append(f"{where}: the simulation has no root")
+                    continue
+                path = (base / rel).resolve()
+                if not rel or base not in path.parents:
+                    errors.append(f"{where}: not a file under the root")
+                    continue
+                try:
+                    text = path.read_text(encoding="utf-8")
+                except OSError:
+                    errors.append(f"{where}: not a readable file")
+                    continue
+                if kind not in self.EDIT_KINDS:
+                    errors.append(f"{where}: kind must be one of {', '.join(self.EDIT_KINDS)}")
+                    continue
+                if not reason or not new.strip() or new == old:
+                    errors.append(f"{where}: needs a reason and a changed text")
+                    continue
+                if old and old not in text:
+                    errors.append(f"{where}: old is not in the file word for word")
+                    continue
+                missing = [k for k in refs if k not in ledger]
+                if not refs or missing:
+                    errors.append(f"{where}: must name the findings it settles" + (f" (unknown: {missing})" if missing else ""))
+                    continue
+                after = text.replace(old, new, 1) if old else text.rstrip("\n") + "\n" + new.rstrip("\n") + "\n"
+                breaks = []
+                for section in ("rules", "invariants"):
+                    for item in m.get(section) or []:
+                        if item.get("provisional") is not None:
+                            continue
+                        for s_ in item.get("source") or []:
+                            if str(s_.get("ref") or "").split("#", 1)[0] == rel and \
+                                    _squash(str(s_.get("quote") or "")) not in _squash(after):
+                                breaks.append(f"{section[:-1]} {item['id']}")
+                pid = "e-" + hashlib.sha256(f"{rel}\0{old}\0{new}".encode()).hexdigest()[:8]
+                stored[pid] = {"id": pid, "file": rel, "old": old, "new": new, "kind": kind, "reason": reason[:4000],
+                               "findings": refs, "by": actor, "at": _now(), "status": "proposed",
+                               "base": hashlib.sha256(text.encode()).hexdigest()[:12],
+                               "check": {"breaks": sorted(set(breaks))}}
+                done.append(pid)
+            _write_json(self._dir(sim_id) / "proposals.json", stored)
+            if done:
+                self._journal(sim_id, actor, "proposed", ids=done)
+            result = {"ok": not errors, "done": done, "errors": errors}
+            self._remember(sim_id, key, result)
+            return result
+
+    def decide_proposal(self, sim_id: str, actor: str, pid: str, accept: bool, note: str = "") -> dict:
+        with self._lock:
+            meta = self._meta(sim_id)
+            if actor != USER:
+                raise Forbidden("edit proposals are accepted or rejected by the user")
+            stored = self.proposals(sim_id)
+            p = stored.get(pid)
+            if p is None:
+                raise NotFound(f"no edit proposal {pid!r}")
+            p["status"] = "accepted" if accept else "rejected"
+            p["decision"] = {"by": actor, "at": _now(), "note": note[:2000]}
+            _write_json(self._dir(sim_id) / "proposals.json", stored)
+            self._journal(sim_id, actor, "proposal_" + p["status"], id=pid)
+            return {"proposal": p, "owner": meta.get("owner") or ""}
+
+    TRIAGE = ("model", "spec", "intended")
+
+    def triage(self, sim_id: str, actor: str, items: List[dict], key: Optional[str] = None) -> dict:
+        """The judge's sort of open findings, before the interpreter answers
+        them: ``model`` (the model misreads the sources: fix the model),
+        ``spec`` (the sources are silent: a person decides, unless a quote
+        turns up), ``intended`` (not a defect: dismissed with the judge's
+        reason). Each item is ``{key, verdict, why}``."""
+        with self._lock:
+            meta = self._meta(sim_id)
+            self._require_owner(meta, actor, "triage findings")
+            seen = self._seen(sim_id, key)
+            if seen is not None:
+                return {**seen, "duplicate": True}
+            ledger = self.findings(sim_id)
+            last = self.rounds(sim_id, 1)
+            n = last[0]["round"] if last else 0
+            done, errors = [], []
+            for it in items or []:
+                f = ledger.get(it.get("key"))
+                verdict, why = it.get("verdict"), str(it.get("why") or "").strip()[:4000]
+                if f is None or f.get("status") != "open":
+                    errors.append(f"{it.get('key')!r} is not an open finding")
+                    continue
+                if verdict not in self.TRIAGE:
+                    errors.append(f"{f['key']}: verdict must be one of {', '.join(self.TRIAGE)}")
+                    continue
+                if not why:
+                    errors.append(f"{f['key']}: a triage verdict needs a why")
+                    continue
+                f["triage"] = {"verdict": verdict, "why": why, "by": actor, "at": _now(), "round": n}
+                if verdict == "intended":
+                    f["status"] = "dismissed"
+                    f["resolution"] = {"by": actor, "at": _now(), "reason": "triage: " + why}
+                done.append(f["key"])
+            _write_json(self._dir(sim_id) / "findings.json", ledger)
+            if done:
+                self._journal(sim_id, actor, "triage", keys=done[:50])
+            result = {"ok": not errors, "done": done, "errors": errors}
+            self._remember(sim_id, key, result)
+            return result
+
     def work(self, sim_id: str, gaps: int = 4) -> dict:
         """Everything a run session reads to take its next step."""
         with self._lock:
             sim = self.get(sim_id)
             answered = [f for f in self.findings(sim_id).values()
                         if f.get("status") == "answered" and not f.get("applied")]
-            return {"sim": sim, "model": self.model(sim_id), "gaps": self.gap_batches(sim_id, gaps)
+            m = self.model(sim_id)
+            # Rules carried as stale, less those a later patch re-quoted or removed.
+            live = {(sec, x["id"]): x for sec in ("rules", "invariants") for x in m.get(sec) or []}
+            stale = []
+            for s in sim.get("stale_sources") or []:
+                item = live.get((s["section"], s["id"]))
+                if item and item.get("provisional") is None and \
+                        check_sources({s["section"]: [item]}, sim.get("root") or ""):
+                    stale.append({"section": s["section"], **item})
+            return {"sim": sim, "model": m, "stale": stale, "edit_targets": self.edit_targets(sim_id),
+                    "gaps": self.gap_batches(sim_id, gaps)
                     if sim["counts"].get("open") else [], "answered": answered,
                     "unjudged": self.unjudged(sim_id)}
 
@@ -603,7 +809,10 @@ class SimStore:
                 new = M.apply_patch(self.model(sim_id), patch)
             except ValueError as exc:
                 raise SimError(str(exc))
-            problems = M.check_model(new) or check_sources(new, meta.get("root") or "")
+            # Quotes are checked for what this patch writes: a rule whose file
+            # changed since is carried as stale (see carry), and must not block
+            # every other change until it is re-quoted.
+            problems = M.check_model(new) or check_sources(_touched(new, patch), meta.get("root") or "")
             if problems:
                 return {"ok": False, "rejected": problems[:50], "count": len(problems)}
             _write_json(self._dir(sim_id) / "model.json", new)
@@ -644,12 +853,72 @@ class SimStore:
         with self._lock:
             meta = self._meta(sim_id)
             self._require_owner(meta, actor, "start")
+            carried = self._carry(meta, actor)
+            meta = self._meta(sim_id)
             meta["state"], meta["state_reason"], meta["run_rounds"] = "running", f"started by {actor}", 0
             self._save_meta(meta)
             self._journal(sim_id, actor, "started")
             if not round:
-                return self.summary(meta)
-        return self.run_round(sim_id, actor)
+                return {**self.summary(meta), "carry": carried}
+        return {**self.run_round(sim_id, actor), "carry": carried}
+
+    def _carry(self, meta: dict, actor: str) -> dict:
+        """What a new run takes over from the last one, checked against the
+        sources and model as they are now:
+
+        * rules and invariants whose quote is gone from its file are listed
+          in ``meta.stale_sources``; the run session re-quotes or retracts
+          them (the walk still uses them meanwhile);
+        * a question whose witness the current model no longer reproduces
+          is resolved; one whose sources changed since it was asked goes
+          back to open, its question kept as ``prev_question``;
+        * a finding whose witness no longer replays is marked ``stale``.
+        """
+        sim_id = meta["id"]
+        m = self.model(sim_id)
+        root = meta.get("root") or ""
+        stale = []
+        for section in ("rules", "invariants"):
+            for item in m.get(section) or []:
+                if item.get("provisional") is None and item.get("source") and \
+                        check_sources({section: [item]}, root):
+                    stale.append({"section": section, "id": item["id"]})
+        meta["stale_sources"] = stale
+        self._save_meta(meta)
+        ledger = self.findings(sim_id)
+        walk = engine.prepare(m) if not M.check_model(m) else None
+        docs_now = source_digests(root, meta.get("sources") or [])
+        resolved, reopened, marked = [], [], []
+        for key, f in ledger.items():
+            if f.get("status") not in ("open", "question"):
+                continue
+            if f["status"] == "question":
+                then = (f.get("question") or {}).get("docs") or {}
+                if then and then != {k: docs_now.get(k) for k in then}:
+                    f["prev_question"] = f.pop("question")
+                    f["status"] = "open"
+                    f["reopened"] = {"at": _now(), "why": "the sources changed since the question was asked"}
+                    reopened.append(key)
+                    continue
+            if walk is None or not f.get("witness"):
+                continue
+            try:
+                engine.replay(walk, f["witness"])
+            except (engine.StaleWitness, ValueError, KeyError) as exc:
+                f["stale"] = str(exc)
+                marked.append(key)
+                continue
+            f.pop("stale", None)
+            if f["status"] == "question" and not engine.reproduces(walk, f["witness"], key):
+                f["status"] = "resolved"
+                f["resolution"] = {"by": "carry", "at": _now(),
+                                   "reason": "the current model no longer reaches it"}
+                resolved.append(key)
+        _write_json(self._dir(sim_id) / "findings.json", ledger)
+        out = {"stale_sources": stale, "resolved": resolved, "reopened": reopened, "stale_witness": marked}
+        if any(out.values()):
+            self._journal(sim_id, actor, "carry", **{k: v[:50] for k, v in out.items()})
+        return out
 
     def stop(self, sim_id: str, actor: str, reason: str = "") -> dict:
         with self._lock:
@@ -814,7 +1083,8 @@ class SimStore:
                         continue
                     opts = [str(o) for o in (it.get("options") or []) if str(o).strip()][:8]
                     f["status"] = "question"
-                    f["question"] = {"text": q, "options": opts, "by": actor, "at": _now()}
+                    f["question"] = {"text": q, "options": opts, "by": actor, "at": _now(),
+                                     "docs": source_digests(meta.get("root") or "", meta.get("sources") or [])}
                     f.pop("answer", None)
                 elif action == "reopen":
                     f["status"] = "open"
@@ -856,11 +1126,27 @@ class SimStore:
             if f is None:
                 raise NotFound(f"no finding {finding_key!r}")
             walk = engine.prepare(self.model(sim_id))
+            w = f["witness"]
             try:
-                r = engine.replay(walk, f["witness"])
+                r = engine.replay(walk, w)
             except engine.StaleWitness as exc:
-                return {"stale": True, "why": str(exc)}
+                return {"stale": True, "why": str(exc), "finding": f}
             except (ValueError, KeyError) as exc:
-                return {"stale": True, "why": f"cannot replay on the current model: {exc}"}
-            return {"stale": False, "steps": r["steps"], "fired": r["fired"],
-                    "reproduces": engine.reproduces(walk, f["witness"], finding_key)}
+                return {"stale": True, "why": f"cannot replay on the current model: {exc}", "finding": f}
+            start = M.initial_state(walk, w.get("checkpoint"), w.get("world_seed", 1))
+            start["vars"].update(w.get("inputs") or {})
+            prev = {"sm": dict(start["sm"]), "vars": dict(start["vars"])}
+            steps = []
+            for i, (t, s) in enumerate(zip(w.get("steps") or [], r["steps"])):
+                changed = {f"{m}": [prev["sm"].get(m), v] for m, v in s["sm"].items() if prev["sm"].get(m) != v}
+                changed.update({f"${k}": [prev["vars"].get(k), v] for k, v in s["vars"].items()
+                                if prev["vars"].get(k) != v})
+                steps.append({"n": i + 1, "event": t["event"], "assume": t.get("assume") or {},
+                              "fired": s.get("fired") or [], "unresolved": s.get("unresolved") or [],
+                              "findings": [x["key"] for x in s.get("findings") or []],
+                              "changed": changed, "sm": s["sm"], "vars": s["vars"]})
+                prev = {"sm": s["sm"], "vars": s["vars"]}
+            raised = next((x["n"] for x in steps if finding_key in x["findings"]), None)
+            return {"stale": False, "finding": f, "start": {"sm": start["sm"], "vars": start["vars"]},
+                    "checkpoint": w.get("checkpoint"), "steps": steps, "fired": r["fired"],
+                    "raised_at": raised, "reproduces": engine.reproduces(walk, w, finding_key)}

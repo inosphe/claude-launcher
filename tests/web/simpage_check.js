@@ -16,11 +16,13 @@ const calls = [];
 const sim = {id: 'sim-abc123', title: '<b>door</b>', goal: 'find gaps', owner: 's1', state: 'idle', state_reason: 'created',
   project: 'p', root: '/repo', sources: ['spec.md'], counts: {open: 1, question: 1}, model_stats: {machines: 1, rules: 2},
   last_round: {round: 1, coverage: {reached: 2, cells: 4}}, runner: {session: 'sim-abc123-run1', started_at: 't0'},
+  from: 'sim-old999', stale_sources: [{section: 'rules', id: 'r.lock'}],
   settings: {interpreter_profile: 'ds4', judge_profile: 'glm', interpreter_reasoning: 'low', judge_reasoning: 'low',
     seed: 1, budget: 2000, horizon: 12, max_rounds: 20}};
 const findings = [
   {key: 'unhandled|door|open|open', kind: 'unhandled', status: 'open', detail: 'no rule', count: 3, first_round: 1, last_round: 1,
-    witness: {steps: [{event: 'open'}, {event: 'open'}]}, assumed: [], provisional: []},
+    witness: {steps: [{event: 'open'}, {event: 'open'}]}, assumed: [], provisional: [],
+    reopened: {why: 'x'}, prev_question: {text: 'old q'}, triage: {verdict: 'spec', why: 'nothing about it'}},
   {key: 'unhandled|door|closed|close', kind: 'unhandled', status: 'question', detail: 'no rule', count: 1, first_round: 1, last_round: 1,
     witness: {steps: [{event: 'close'}]}, question: {text: 'what then?', options: ['nothing', 'error'], by: 's1'}},
 ];
@@ -37,6 +39,11 @@ async function api(raw, opts = {}) {
   else if (p === '/api/sims' && method === 'GET') { result = {sims: [sim]}; if (delay) { const d = delay; delay = null; await d; } }
   else if (p === '/api/sims' && method === 'POST') result = {sim: {...sim, id: 'sim-new111', owner: body.owner}, nudged: true};
   else if (p.endsWith('/findings')) result = {total: findings.length, findings};
+  else if (p.endsWith('/replay')) result = url.searchParams.get('key') === 'unhandled|door|open|open'
+    ? {stale: false, reproduces: true, checkpoint: null, start: {sm: {door: 'closed'}, vars: {}}, raised_at: 2,
+       steps: [{n: 1, event: 'open', assume: {}, fired: ['r.open'], findings: [], changed: {door: ['closed', 'open']}, sm: {door: 'open'}, vars: {}},
+               {n: 2, event: 'open', assume: {'r.x': false}, fired: [], findings: ['unhandled|door|open|open'], changed: {}, sm: {door: 'open'}, vars: {}}]}
+    : {stale: true, why: 'rule r.gone is no longer in the model'};
   else if (p.endsWith('/model')) result = {model: {machines: [{id: 'door', states: ['closed', 'open'], initial: 'closed'}], vars: [], events: [{name: 'open'}],
     rules: [{id: 'r.open', on: {event: 'open'}, do: [], source: [{ref: 'spec.md', quote: 'opens'}]}], invariants: [], checkpoints: {}}};
   else if (p.endsWith('/coverage')) result = {grid: [{machine: 'door', states: ['closed', 'open'], events: ['open', 'close']}],
@@ -47,6 +54,12 @@ async function api(raw, opts = {}) {
   else if (p.endsWith('/answer')) result = {ok: true, nudged: true};
   else if (p.endsWith('/transfer')) result = {sim};
   else if (p.endsWith('/settings')) result = {sim};
+  else if (p.endsWith('/proposals')) result = {proposals: [
+    {id: 'e-1234abcd', kind: 'clarify', file: 'spec.md', old: 'opens', new: 'opens once', reason: 'twice is open', status: 'proposed',
+     findings: ['unhandled|door|open|open'], check: {breaks: ['r.open']}},
+    {id: 'e-feedbeef', kind: 'complete', file: 'spec.md', old: '', new: 'close is ignored', reason: 'r', status: 'rejected',
+     findings: ['unhandled|door|closed|close'], check: {breaks: []}, decision: {by: 'user', note: 'not now'}}]};
+  else if (p.includes('/proposals/') && p.endsWith('/decide')) result = {proposal: {}, nudged: true};
   else { result = {error: 'unexpected ' + method + ' ' + p}; ok = false; }
   return {ok, status: ok ? 200 : 500, json: async () => result};
 }
@@ -82,8 +95,10 @@ async function settle() { for (let i = 0; i < 10; i++) await new Promise(resolve
   focused = all().find(n => n.tag === 'textarea');
   await ctx.SimPage.open(); await settle();
   focused = null;
+  labelled('이어 받을 시뮬레이션').value = 'sim-abc123'; labelled('이어 받을 시뮬레이션').onchange();
   all().find(n => n.tag === 'form').onsubmit({preventDefault() {}}); await settle();
   const made = calls.find(c => c.method === 'POST' && c.url.pathname === '/api/sims');
+  assert.strictEqual(made.body.from, 'sim-abc123');
   assert.strictEqual(made.body.owner, 's2');
   assert.strictEqual(made.body.title, 'login');
   assert.strictEqual(made.body.settings.judge_profile, 'glm');
@@ -93,6 +108,11 @@ async function settle() { for (let i = 0; i < 10; i++) await new Promise(resolve
   // Detail.
   ctx.SimPage.open('sim-abc123'); await settle();
   assert(button('실행') && button('소유권 해제'));
+  assert(all().some(n => n.className === 'sim-triage' && n.textContent.includes('사람이 결정') && n.textContent.includes('nothing about it')));
+  // Carry: where it came from, rules that lost their quote, a reopened question.
+  assert(all().some(n => n.tag === 'a' && n.href === '#/sims/sim-old999'));
+  assert(all().some(n => n.className === 'sim-warn' && n.textContent.includes('r.lock')));
+  assert(all().some(n => n.className === 'sim-warn' && n.textContent.includes('old q')));
   // The attached run session links to its terminal.
   assert(all().some(n => n.tag === 'a' && n.href === '#/s/sim-abc123-run1'));
   button('실행').onclick(); await settle();
@@ -108,6 +128,18 @@ async function settle() { for (let i = 0; i < 10; i++) await new Promise(resolve
   button('nothing').onclick();
   button('답하기').onclick(); await settle();
   assert(calls.some(c => c.url.pathname.endsWith('/answer') && c.body.text === 'nothing' && c.body.key === 'unhandled|door|closed|close'));
+  // Replay a witness: start state, one row per step, the raising step marked.
+  ctx.SimPage.open('sim-abc123'); await settle();
+  button('재생').onclick(); await settle();
+  assert(calls.some(c => c.url.pathname.endsWith('/replay') && c.url.searchParams.get('key') === 'unhandled|door|open|open'));
+  assert(all().some(n => n.tag === 'li' && n.className === 'sim-step sim-step-raised'));
+  assert(all().some(n => n.textContent === ' door: closed → open'));
+  assert(all().some(n => n.textContent === '가정: r.x=거짓'));
+  assert(button('재생 닫기'));
+  // A stale witness says why instead of showing steps.
+  all().filter(n => n.tag === 'button' && n.textContent === '재생')[0].onclick(); await settle();
+  assert(all().some(n => n.className === 'sim-warn' && n.textContent.includes('r.gone')));
+  button('재생 닫기').onclick(); await settle();
   // Map and model tabs.
   ctx.SimPage.open('sim-abc123', 'map'); await settle();
   assert(all().some(n => n.className === 'sim-cell-gap' && n.textContent === '!'));
@@ -115,12 +147,30 @@ async function settle() { for (let i = 0; i < 10; i++) await new Promise(resolve
   assert(all().some(n => n.className === 'sim-cell-ask'));
   ctx.SimPage.open('sim-abc123', 'model'); await settle();
   assert(all().some(n => n.className === 'sim-source' && n.textContent.includes('spec.md')));
+  // Edit proposals: a diff, the quotes it would break, decide only while proposed.
+  sim.proposals = {proposed: 1, accepted: 0, rejected: 1};
+  ctx.SimPage.open('sim-abc123', 'proposals'); await settle();
+  assert(button('편집 제안 (1)'));
+  assert(all().some(n => n.className === 'sim-del' && n.textContent === 'opens'));
+  assert(all().some(n => n.className === 'sim-add' && n.textContent === 'opens once'));
+  assert(all().some(n => n.className === 'sim-warn' && n.textContent.includes('r.open')));
+  assert(all().some(n => n.textContent === '파일 끝에 추가'));
+  assert(all().some(n => n.textContent === '메모: not now'));
+  assert.strictEqual(all().filter(n => n.tag === 'button' && n.textContent === '수락').length, 1);
+  const memo = all().find(n => n.tag === 'input' && n.placeholder === '메모 (선택)'); memo.value = 'ok'; memo.oninput();
+  button('수락').onclick(); await settle();
+  const decided = calls.find(c => c.url.pathname.endsWith('/proposals/e-1234abcd/decide'));
+  assert.deepStrictEqual(decided.body, {accept: true, note: 'ok'});
+  delete sim.proposals;
   // Settings save the chosen profiles.
   ctx.SimPage.open('sim-abc123', 'settings'); await settle();
   labelled('해석(B) reasoning').value = 'high'; labelled('해석(B) reasoning').onchange();
+  labelled('판정자 분류').checked = false; labelled('판정자 분류').onchange();
   all().find(n => n.tag === 'form').onsubmit({preventDefault() {}}); await settle();
   const saved = calls.find(c => c.url.pathname.endsWith('/settings'));
   assert.strictEqual(saved.body.settings.interpreter_reasoning, 'high');
+  assert.strictEqual(saved.body.settings.triage, false);
+  assert.strictEqual(saved.body.settings.max_edits, 0);
   assert.deepStrictEqual(saved.body.sources, ['spec.md']);
   // Leaving the route invalidates an outstanding read.
   ctx.SimPage.open(); await settle();

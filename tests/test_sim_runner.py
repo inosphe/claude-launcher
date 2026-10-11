@@ -213,8 +213,28 @@ DRIVER = textwrap.dedent("""
         if (!prompt.includes("word for word")) throw new Error("the retry must carry the rejection");
         return "Here.\\n```json\\n" + JSON.stringify(model) + "\\n```";
       }
+      if (key.startsWith("requote:")) {
+        if (!prompt.includes("no longer in its file")) throw new Error("the requote prompt must say why");
+        const r = JSON.parse(JSON.stringify(model.rules[0]));
+        r.source[0].quote = "The door swings open when it is closed.";
+        return JSON.stringify({ patch: { rules: [r] } });
+      }
+      if (key.startsWith("edit:")) {
+        if (!prompt.includes("stays open")) throw new Error("the editor must see the user's answer");
+        return JSON.stringify([{ file: "spec.md", old: "", new: "Opening an open door leaves it open.", kind: "complete",
+                                 reason: "the user's answer", findings: ["unhandled|door|open|open"] }]);
+      }
       if (key.startsWith("judge:")) return JSON.stringify([{ section: "rules", id: "r.open", verdict: "confirmed", why: "quoted" }]);
-      if (key.startsWith("gap:")) return JSON.stringify({ patch: fix, resolve: [] });
+      if (key.startsWith("C:triage:") || key.startsWith("triage:")) {
+        // Opening an open door: intended. Anything else: the sources are silent.
+        const keys = [...new Set([...prompt.matchAll(/"key": "([^"]+)"/g)].map((m) => m[1]))];
+        return JSON.stringify(keys.map((k) => ({ key: k, verdict: k.endsWith("|open|open") ? "intended" : "spec", why: "scripted" })));
+      }
+      if (key.startsWith("gap:")) {
+        if (prompt.includes('"key": "unhandled|door|open|open"')) throw new Error("an intended finding reached the interpreter");
+        if (!prompt.includes('"judge"')) throw new Error("the gap prompt must carry the triage");
+        return JSON.stringify({ patch: fix, resolve: [] });
+      }
       throw new Error("unexpected question " + key);
     };
     const progress = [];
@@ -223,12 +243,10 @@ DRIVER = textwrap.dedent("""
 """)
 
 
-def test_campaign_loop_against_the_daemon(tmp_path):
+def drive(tmp_path, app, sid):
     node = shutil.which("node")
     if not node:
         pytest.skip("Node.js is required for the campaign loop")
-    app, sims, mgr, owner, run, root = setup(tmp_path)
-    sid = started(sims)
     driver = tmp_path / "driver.mjs"
     driver.write_text(DRIVER % {"campaign": json.dumps(CAMPAIGN.as_uri())}, encoding="utf-8")
 
@@ -241,11 +259,56 @@ def test_campaign_loop_against_the_daemon(tmp_path):
             out, err = await asyncio.wait_for(proc.communicate(), 60)
             assert proc.returncode == 0, err.decode()
             return json.loads(out.decode().strip().splitlines()[-1])
-    got = asyncio.run(go())
+    return asyncio.run(go())
+
+
+def test_campaign_requotes_rules_whose_source_changed(tmp_path):
+    app, sims, mgr, owner, run, root = setup(tmp_path)
+    sim = sims.create(title="door", owner="s1", actor="s1", root=str(root))
+    rule = {"id": "r.open", "on": {"event": "open"}, "when": {"sm": "door", "is": "closed"},
+            "do": [{"sm": "door", "to": "open"}], "source": [{"ref": "spec.md", "quote": "The door opens when closed."}]}
+    sims.patch_model(sim["id"], "s1", {"machines": [{"id": "door", "states": ["closed", "open"], "initial": "closed"}],
+                                       "events": [{"name": "open", "kind": "actor"}, {"name": "close", "kind": "actor"}],
+                                       "rules": [rule]})
+    (root / "spec.md").write_text("The door swings open when it is closed.\n", encoding="utf-8")
+    assert sims.start(sim["id"], "s1", round=False)["carry"]["stale_sources"]
+    sims.attach_runner(sim["id"], "sim-run")
+    got = drive(tmp_path, app, sim["id"])
+    assert got["asked"][0].startswith("B:requote:rules:r.open:r0") and "B:formalize:1" not in got["asked"]
+    assert sims.work(sim["id"])["stale"] == []
+    assert "swings" in sims.model(sim["id"])["rules"][0]["source"][0]["quote"]
+
+
+def test_campaign_loop_against_the_daemon(tmp_path):
+    app, sims, mgr, owner, run, root = setup(tmp_path)
+    sid = started(sims)
+    got = drive(tmp_path, app, sid)
     assert got["res"]["ended"] and "nothing open" in got["res"]["reason"]
     assert got["asked"][:3] == ["B:formalize:1", "B:formalize:2", "C:judge:rules:r.open:r0"]
     assert any(a.startswith("B:gap:r1:") for a in got["asked"])
     assert {"formalize", "judge", "round", "gaps"} <= set(got["progress"])
     sim = sims.get(sid)
     assert sim["state"] == "idle" and sim["model_stats"]["rules"] == 4
+    assert any(a.startswith("C:triage:r1:") for a in got["asked"])
+    f = sims.findings(sid)["unhandled|door|open|open"]
+    assert f["status"] == "dismissed" and f["resolution"]["reason"] == "triage: scripted"
     assert sims.verdicts(sid)["rules:r.open"]["verdict"] == "confirmed"
+
+
+def test_editor_proposes_edits_after_the_campaign(tmp_path):
+    app, sims, mgr, owner, run, root = setup(tmp_path)
+    sim = sims.create(title="door", owner="s1", actor="s1", root=str(root), settings={"max_edits": 2})
+    sims.patch_model(sim["id"], "s1", {"machines": [{"id": "door", "states": ["closed", "open"], "initial": "closed"}],
+                                       "events": [{"name": "open", "kind": "actor"}],
+                                       "rules": [{"id": "r.open", "on": {"event": "open"}, "when": {"sm": "door", "is": "closed"},
+                                                  "do": [{"sm": "door", "to": "open"}], "provisional": {"why": "x"}}]})
+    sims.run_round(sim["id"], "s1")
+    key = "unhandled|door|open|open"
+    sims.resolve(sim["id"], "s1", [{"key": key, "action": "ask", "question": "and then?"}])
+    sims.answer(sim["id"], S.USER, key, "it stays open")
+    sims.attach_runner(sim["id"], "sim-run")
+    got = drive(tmp_path, app, sim["id"])  # idle campaign: straight to the editor
+    assert got["res"]["reason"].startswith("campaign idle") and got["asked"][-1].startswith("B:edit:")
+    (p,) = sims.proposals(sim["id"]).values()
+    assert p["kind"] == "complete" and p["findings"] == [key] and p["by"] == "sim-run"
+    assert (root / "spec.md").read_text(encoding="utf-8") == SPEC

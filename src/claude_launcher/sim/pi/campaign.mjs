@@ -140,13 +140,55 @@ export function gapPrompt(sim, model, batch, guide, rejected) {
     "Current model:",
     "```json\n" + JSON.stringify(model) + "\n```",
     `Findings at ${batch.place}:`,
-    "```json\n" + JSON.stringify(batch.findings.map((f) => ({ key: f.key, kind: f.kind, detail: f.detail, machine: f.machine, state: f.state, event: f.event, witness: f.witness?.steps, assumed: f.assumed, provisional: f.provisional })), null, 1) + "\n```",
+    "```json\n" + JSON.stringify(batch.findings.map((f) => ({ key: f.key, kind: f.kind, detail: f.detail, machine: f.machine, state: f.state, event: f.event, witness: f.witness?.steps, assumed: f.assumed, provisional: f.provisional, ...(f.triage ? { judge: f.triage } : {}) })), null, 1) + "\n```",
     "For each finding decide, reading the sources with your tools: (a) the sources say what happens -- add or change rules that quote them; (b) it cannot happen or is intended -- dismiss it with a reason; (c) only a person can decide -- ask a question (with options when there are a few clear choices).",
+    batch.findings.some((f) => f.triage) ? "A judge has already sorted these findings (the judge field): model -- the model misreads the sources, so fix the rules it names; spec -- the sources say nothing about this, so ask a question unless you find text that settles it, and do not add a provisional rule for it." : "",
     QUOTE_RULE,
     "The model format:",
     guide,
     rejected ? `Your previous patch was rejected by the daemon:\n- ${rejected.join("\n- ")}\nFix exactly these problems.` : "",
     'Answer with {"patch": <model patch or null>, "resolve": [{"key": ..., "action": "dismiss", "reason": ...} | {"key": ..., "action": "ask", "question": ..., "options": [...]}]} in a ```json fence at the end. Findings your patch handles need no resolve entry: the next walk closes them.',
+  ].filter(Boolean).join("\n\n");
+}
+
+export function editorPrompt(sim, targets, max, rejected) {
+  return [
+    "You are the editor. A simulation of the system described by the sources raised questions the sources do not settle, and the user answered some of them. Propose edits to the source files so that the documents themselves settle them.",
+    brief(sim),
+    "Findings:",
+    "```json\n" + JSON.stringify(targets.map((f) => ({ key: f.key, kind: f.kind, detail: f.detail, witness: f.witness?.steps, question: f.question?.text, options: f.question?.options, answer: f.answer?.text })), null, 1) + "\n```",
+    "Read the files first (read_file, search_text). For an answered finding, write the user's answer into the document where the surrounding behaviour is described (kind complete). For an open question, write the choice as an explicit open decision with its options, without picking one (kind decide). Use clarify only for rewording that does not change the meaning. Never change a decision the document already records.",
+    "old must be text copied word for word from the file (it is replaced once); leave old empty to append to the end of the file. Keep each edit small.",
+    rejected ? `Your previous proposals were rejected by the daemon:\n- ${rejected.join("\n- ")}\nFix exactly these problems.` : "",
+    `Answer with a JSON array of at most ${max} items [{"file": <path under the root>, "old": ..., "new": ..., "kind": "clarify"|"complete"|"decide", "reason": ..., "findings": [keys]}] in a \`\`\`json fence at the end.`,
+  ].filter(Boolean).join("\n\n");
+}
+
+export function triagePrompt(sim, model, batch) {
+  return [
+    "You are the judge. A deterministic simulator walked a formal world model built from the sources and found the gaps below. Before anyone answers them, sort each one. Read the sources with your tools.",
+    brief(sim),
+    "Current model:",
+    "```json\n" + JSON.stringify(model) + "\n```",
+    `Findings at ${batch.place}:`,
+    "```json\n" + JSON.stringify(batch.findings.map((f) => ({ key: f.key, kind: f.kind, detail: f.detail, witness: f.witness?.steps })), null, 1) + "\n```",
+    "model -- the sources do say what happens here and the model misreads or omits it (name the text); spec -- the sources say nothing that settles it, so a person must decide; intended -- it is not a defect (the situation cannot arise, or doing nothing is plainly what the sources mean); give the reason.",
+    'Answer with a JSON array [{"key": ..., "verdict": "model"|"spec"|"intended", "why": ...}] in a ```json fence at the end.',
+  ].join("\n\n");
+}
+
+export function requotePrompt(sim, stale, guide, rejected) {
+  return [
+    "The sources of a formal world model changed since these rules were written: each rule's quote is no longer in its file.",
+    brief(sim),
+    "Rules that lost their quote:",
+    "```json\n" + JSON.stringify(stale, null, 1) + "\n```",
+    "Read the files again (read_file, search_text). For each rule: if the sources still say it, re-quote the current text (the same id, the new quote); if they now say something else, rewrite the rule from the new text; if they no longer say it, remove it ({\"remove\": {\"rules\": [ids]}}) or mark it provisional with a why.",
+    QUOTE_RULE,
+    "The model format:",
+    guide,
+    rejected ? `Your previous patch was rejected by the daemon:\n- ${rejected.join("\n- ")}\nFix exactly these problems.` : "",
+    'Answer with {"patch": <model patch>} in a ```json fence at the end.',
   ].filter(Boolean).join("\n\n");
 }
 
@@ -173,7 +215,38 @@ export function answersPrompt(sim, model, answered, guide, rejected) {
  * returns the answer text; ``api`` is the daemon client; ``progress`` gets a
  * record for the session's progress display. Returns {reason, failed}.
  */
-export async function runCampaign({ simId, session, api, ask, guide, progress = () => {}, limits = LIMITS, log = () => {} }) {
+export async function runCampaign(opts) {
+  const res = await walkCampaign(opts);
+  if (!res.failed) await proposeEdits(opts);
+  return res;
+}
+
+/**
+ * The editor (D): once the campaign has ended, propose edits to the source
+ * files that would settle the questions and record the user's answers --
+ * at most max_edits of them, never applied (the user accepts or rejects).
+ */
+export async function proposeEdits({ simId, session, api, ask, progress = () => {}, limits = LIMITS, log = () => {} }) {
+  const work = await api("GET", `/api/sims/${simId}/work?gaps=0&session=${encodeURIComponent(session)}`);
+  const max = work.sim.settings.max_edits ?? 0;
+  const targets = (work.edit_targets ?? []).slice(0, Math.max(0, max) * 3);
+  if (!max || !targets.length) return;
+  progress({ stage: "edits", text: `${targets.length} findings` });
+  const base = `edit:${targets.map((f) => f.key).sort().join(",")}`;
+  let rejected;
+  for (let a = 1; a <= limits.attempts; a++) {
+    const text = await ask("B", `${base}:${a}`, editorPrompt(work.sim, targets, max, rejected), true);
+    let items;
+    try { items = answerJson(text); } catch (error) { log("edit_unreadable", { error: error.message }); return; }
+    if (!Array.isArray(items)) return;
+    const res = await api("POST", `/api/sims/${simId}/proposals`, { session, key: `${base}:${a}`, items: items.slice(0, max) });
+    log("edits", { attempt: a, done: res.done?.length ?? 0, errors: res.errors?.length ?? 0 });
+    if (res.ok || res.done?.length) return;
+    rejected = res.errors;
+  }
+}
+
+export async function walkCampaign({ simId, session, api, ask, guide, progress = () => {}, limits = LIMITS, log = () => {} }) {
   const q = `session=${encodeURIComponent(session)}`;
   const submit = async (key, patch) => api("POST", `/api/sims/${simId}/model`, { session, patch, key, round: false });
   let idle = 0;
@@ -199,6 +272,23 @@ export async function runCampaign({ simId, session, api, ask, guide, progress = 
         rejected = res.rejected;
       }
       if (!changed) return { reason: "the interpreter could not write a model the daemon accepts", failed: true };
+      work = await api("GET", `/api/sims/${simId}/work?gaps=${limits.gaps}&${q}`);
+    }
+
+    // 1b. carried rules whose quote is gone from the file (the sources changed)
+    if ((work.stale ?? []).length) {
+      show("requote", `${work.stale.length} rules lost their quote`);
+      const base = `requote:${work.stale.map((x) => `${x.section}:${x.id}`).join(",")}:r${r}`;
+      let rejected;
+      for (let a = 1; a <= limits.attempts; a++) {
+        const text = await ask("B", `${base}:${a}`, requotePrompt(sim, work.stale, guide, rejected), true);
+        let res;
+        try { res = await submit(`${base}:${a}`, answerJson(text).patch ?? {}); }
+        catch (error) { res = { ok: false, rejected: [String(error.message)] }; }
+        log("requote", { attempt: a, ok: res.ok });
+        if (res.ok) { changed = true; break; }
+        rejected = res.rejected;
+      }
       work = await api("GET", `/api/sims/${simId}/work?gaps=${limits.gaps}&${q}`);
     }
 
@@ -244,8 +334,27 @@ export async function runCampaign({ simId, session, api, ask, guide, progress = 
     // 5. gaps
     work = await api("GET", `/api/sims/${simId}/work?gaps=${limits.gaps}&${q}`);
     let b = 0;
-    for (const batch of work.gaps) {
+    for (const raw of work.gaps) {
       b++;
+      let batch = raw;
+      // The judge sorts the batch first: model errors, silent sources, intended behaviour.
+      if (sim.settings.triage) {
+        show("triage", `round ${n}: ${raw.place} (${b}/${work.gaps.length})`);
+        const tkey = `triage:r${n}:${raw.place}`;
+        const text = await ask("C", tkey, triagePrompt(sim, work.model, raw), true);
+        let verdicts;
+        try { verdicts = answerJson(text); } catch (error) { log("triage_unreadable", { tkey, error: error.message }); }
+        if (Array.isArray(verdicts)) {
+          const res = await api("POST", `/api/sims/${simId}/triage`, { session, key: tkey, items: verdicts });
+          log("triage", { tkey, done: res.done?.length ?? 0 });
+          const by = new Map(verdicts.filter((v) => res.done?.includes(v.key)).map((v) => [v.key, v]));
+          if ([...by.values()].some((v) => v.verdict === "intended")) changed = true;
+          const findings = raw.findings.filter((f) => by.get(f.key)?.verdict !== "intended")
+            .map((f) => (by.has(f.key) ? { ...f, triage: { verdict: by.get(f.key).verdict, why: by.get(f.key).why } } : f));
+          batch = { ...raw, findings };
+        }
+        if (!batch.findings.length) continue;
+      }
       show("gaps", `round ${n}: ${batch.place} (${b}/${work.gaps.length})`);
       const base = `gap:r${n}:${batch.place}`;
       let rejected;
