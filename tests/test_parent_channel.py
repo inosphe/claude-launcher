@@ -120,11 +120,11 @@ def test_parent_channel_does_not_use_another_sessions_handle(home, tmp_path):
                                  parent="parent" if name == "child" else None))
         mm.create("team")
         await mm.join("team", "stranger", handle="parent")
-        await mm.join("team", "child")
         plan = onboard.preflight({"mesh": "team"}, mesh_mgr=mm,
                                  session_name="child", cwd=str(tmp_path),
                                  harness="py", parent="parent")
         assert not plan.parent_handle
+        await mm.join("team", "child")
         channel = await mm.ensure_parent_channel("child", "parent")
         assert channel["created"]
         assert set(mm.get(channel["mesh"]).members) == {"parent", "child"}
