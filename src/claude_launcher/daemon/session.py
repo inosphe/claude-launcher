@@ -27,7 +27,7 @@ from typing import Awaitable, Callable, Dict, List, Optional, Set, Tuple, Union
 
 from .. import atomic
 from .. import harnesses as harness_registry
-from . import compacting, keys as keys_mod, process_priority
+from . import compacting, keys as keys_mod, process_priority, progress
 from . import paths, pty_backend
 from .harness import CLAUDE_HARNESS, SessionDef
 from .idle import IdleTracker
@@ -447,6 +447,10 @@ class Session:
         #: session's ``compacting`` flag.
         self._compacting = compacting.Detector(sdef.harness)
         self._activity = ActivityDetector(sdef.harness)
+        #: Takes ``777;claunch;progress;`` sequences out of the output before
+        #: anything renders it (see :mod:`progress`); their bodies go to
+        #: :attr:`on_progress`.
+        self._progress_filter = progress.OscFilter()
         #: When this session was *first* made, not when this object was.
         #: A relaunch that keeps the name — a daemon restart's restore, a
         #: respawn, a redefine — is the same session continuing, and the
@@ -621,6 +625,10 @@ class Session:
             Callable[["Session", str], None]
         ] = None
         self._submitted_lines = _SubmittedLineTracker()
+        #: Called with the body of every progress sequence the session wrote
+        #: (the bytes after ``777;claunch;progress;``). Set by the manager,
+        #: which validates and stores it; called on the event loop.
+        self.on_progress: Optional[Callable[["Session", bytes], None]] = None
 
         session_dir = paths.session_dir(sdef.name)
         session_dir.mkdir(parents=True, exist_ok=True)
@@ -774,6 +782,17 @@ class Session:
         self._saw_output = True
         self.last_output_at = _utcnow()
         self._last_output_mono = time.monotonic()
+        # Progress sequences are for the daemon, not for any screen: taken
+        # out here, before the renderer and the viewers see the chunk.
+        chunk, bodies = self._progress_filter.feed(chunk)
+        if bodies and self.on_progress is not None:
+            for body in bodies:
+                try:
+                    self.on_progress(self, body)
+                except Exception:  # a bad publish must never break output
+                    log.debug("progress from %r dropped", self.sdef.name, exc_info=True)
+        if not chunk:
+            return
         # Queued, not rendered here: pyte is CPU-bound and this runs on the
         # event loop, where a flooding session used to stall accept() (see
         # ScreenFeeder). Logging and the viewer broadcast stay inline — both

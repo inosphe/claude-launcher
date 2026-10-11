@@ -37,6 +37,7 @@ from .. import transcripts
 from .. import auto_compact as auto_compact_mod
 from .. import codex_mode
 from . import codex_sessions, ctxsize, db, harness as harness_mod, pi_sessions
+from . import progress as progress_mod
 from . import line_sync, paths, search_records, session_events, session_input
 from .harness import SessionDef
 from .screen import BACKGROUND_RENDER_BUDGET, RenderBudget
@@ -143,6 +144,10 @@ class SessionManager:
         self.render_budget = RenderBudget(background_render_budget)
         self._sessions: Dict[str, AnySession] = {}
         self.events = session_events.Events(paths.daemon_dir())
+        #: What each session last published about its own progress (see
+        #: :mod:`progress`): fed by the OSC hook set in :meth:`stage` and by
+        #: ``POST /api/sessions/{name}/progress``, read by the list routes.
+        self.progress = progress_mod.ProgressStore(paths.session_progress_json())
         #: The durable session registry (:mod:`claude_launcher.daemon.db`). One
         #: row per session; :meth:`persist` writes it, :meth:`restore_all` reads
         #: it. A daemon that predates the database hands its ``sessions.json``
@@ -300,8 +305,21 @@ class SessionManager:
         )
         session.on_exit = self._session_exited
         session.on_command_submitted = self._session_command_submitted
+        session.on_progress = self._session_progress
         self._sessions[name] = session
         return session
+
+    def _session_progress(self, session: Session, body: bytes) -> None:
+        """Store a progress sequence a session wrote to its terminal.
+
+        One the store refuses is dropped with a debug line: the program that
+        wrote it has no channel to hear an error on, and its output must go
+        on regardless.
+        """
+        try:
+            self.progress.set(session.sdef.name, progress_mod.parse_osc(body))
+        except ValueError as exc:
+            log.debug("progress from %r refused: %s", session.sdef.name, exc)
 
     def _session_command_submitted(self, session: Session, command: str) -> None:
         """Follow the conversation a TUI's ``/new`` replaces underneath it.
@@ -1637,6 +1655,7 @@ class SessionManager:
             for child in below:
                 del self._sessions[child]
                 line_sync.forget(child)
+            self.progress.forget(below)
             touched = below
         else:
             touched = self.escalate_children(name)
@@ -1644,6 +1663,8 @@ class SessionManager:
         # The shared session line lives beside the record, not in it; a name
         # created again later must not open on the deleted session's line.
         line_sync.forget(name)
+        # Same for the progress it published.
+        self.progress.forget([name])
         # Removing the last record leaves the set empty on purpose, so let this
         # one persist prune the store to empty past the empty-snapshot guard.
         self._allow_empty_persist = True
@@ -1800,6 +1821,7 @@ class SessionManager:
         ]
         for name in sorted(names, key=self.depth):
             self.escalate_children(name)
+        self.progress.forget(names)
         for name in names:
             del self._sessions[name]
             line_sync.forget(name)

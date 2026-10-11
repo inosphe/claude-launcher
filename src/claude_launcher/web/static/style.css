@@ -571,7 +571,7 @@ html[data-theme="light"] .xterm {
    the name's line keeps the default `order: 0` and declares no
    `flex-basis: 100%`. Only the deliberate line-breakers below
    (.rail-cwd, .rail-ctx-line, .rail-usage-line, .rail-seen, .rail-quiet,
-   .rail-note, .rail-status-checks, .sess-cflow, .sess-cflow2, .sess-brief,
+   .rail-note, .rail-progress, .rail-status-checks, .sess-cflow, .sess-cflow2, .sess-brief,
    and the selected card's .rail-role-line) are full-width, and they
    carry an `order` above the ▸ toggle's so the toggle still lands at the end
    of the name line. A full-width child at order 0 would break the line
@@ -823,6 +823,15 @@ html[data-theme="light"] .xterm {
    kinds of statement — the briefing is what the daemon read about the
    session, this is what the person wrote about it — and a reader scanning
    the rail needs to tell at a glance which one they are looking at. */
+/* The run's own progress line (decorateProgressRow): the same place and
+   indent as the note, upright and monospace-free so it reads as a report
+   from the session rather than the person's annotation. */
+#session-list .rail-progress {
+  flex-basis: 100%; order: 2; min-width: 0; margin-left: 12px;
+  padding-left: 8px; border-left: 2px solid #2f6346;
+  font-size: 11px; color: #9fcbaf; line-height: 1.45;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 #session-list .rail-note {
   flex-basis: 100%; order: 2; min-width: 0; margin-left: 12px;
   padding-left: 8px; border-left: 2px solid #2f4a63;

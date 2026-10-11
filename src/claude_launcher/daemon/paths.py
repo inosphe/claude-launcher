@@ -159,6 +159,11 @@ def status_checks_json() -> Path:
     return daemon_dir() / "status-checks.json"
 
 
+def session_progress_json() -> Path:
+    """What each session last published about its progress (daemon/progress.py)."""
+    return daemon_dir() / "session-progress.json"
+
+
 def session_dir(name: str) -> Path:
     """Per-session directory holding its raw output log and metadata."""
     return daemon_dir() / "sessions" / name

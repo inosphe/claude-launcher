@@ -207,6 +207,7 @@ new Function(
   + src.match(/^const SESSION_NOTE_MAX = .+$/m)[0] + "\n"
   + src.match(/^let railNoteEditor = .+$/m)[0] + "\n"
   + slice("decorateNoteRow") + slice("railNotePlace") + slice("railNoteButton")
+  + slice("progressBrief") + slice("decorateProgressRow")
   + slice("railNoteFocused") + slice("closeRailNoteEditor")
   + slice("openRailNoteEditor")
   + slice("renderTermNote")

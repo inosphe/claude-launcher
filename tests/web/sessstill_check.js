@@ -105,6 +105,7 @@ function formInUse() { return false; }
 function sessLayoutFor() { return { rail: rail() }; }
 function stopSessRun() {}
 function metaRow() {}
+function progressBrief() { return ""; }
 function profileHarnessLabel() { return ""; }
 function modelSentence() { return ""; }
 function ctxSentence() { return ""; }

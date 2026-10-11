@@ -171,6 +171,7 @@ function railSeenLine(s) { return el("span", "rail-seen"); }
    decoration below: its wording and its stylesheet contract are
    railnote_check's subject, not this harness's. */
 function decorateNoteRow(li, s) {}
+function decorateProgressRow(li, s) {}
 function decorateBriefingRow(li, s) {}
 `;
 
@@ -356,7 +357,9 @@ ctx.setMeshes([
      .rail-usage-line only for a session whose transcript the daemon can
      total — see usage_check; .rail-note only
      for a session the reader annotated, and .rail-note-editor in its place
-     while that note is being edited on the row — see railnote_check.) */
+     while that note is being edited on the row — see railnote_check;
+     .rail-progress only for a session that published progress — see
+     railprogress_check.) */
   const BREAKERS = [
     "#session-list .rail-cwd", "#session-list .rail-beads",
     "#session-list .rail-brief", "#session-list .rail-ctx-line",
@@ -364,6 +367,7 @@ ctx.setMeshes([
     "#session-list .rail-status-checks", "#session-list .rail-tps-line",
     "#session-list .rail-usage-line",
     "#session-list .rail-note", "#session-list .rail-note-editor",
+    "#session-list .rail-progress",
     "#session-list .sess-cflow", "#session-list .sess-cflow2", "#session-list .sess-brief",
     // the selected card's role, whole on a line of its own (claunch-g4owg.1)
     "#session-list li.active > .rail-role-line",
@@ -372,7 +376,7 @@ ctx.setMeshes([
     sel.startsWith("#session-list") &&
     (d["flex-basis"] === "100%" || /(^|\s)100%$/.test(d.flex || ""))
   ).map(([sel]) => sel);
-  check("only the directory line, the beads line, the one-line, the context line, the throughput line, the usage line, the attention line, the quiet line, the note line (or its editor), the status-check line, the cflow line, the cflow v2 line, the briefing card and the selected card's role line break the row",
+  check("only the directory line, the beads line, the one-line, the context line, the throughput line, the usage line, the attention line, the quiet line, the note line (or its editor), the progress line, the status-check line, the cflow line, the cflow v2 line, the briefing card and the selected card's role line break the row",
         fullWidth.sort(), [...BREAKERS].sort());
 
   /* The one-line summary is the exception to this rail's ellipsis habit: it
