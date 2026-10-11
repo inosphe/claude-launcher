@@ -183,22 +183,11 @@
          by lineage and state; the grid keeps each one in a fixed cell of a
          named row that only a person moves (session-grid.js). Remembered per
          browser. -->
-    <div class="session-view-row">
     <fieldset id="session-view" class="session-view-tabs">
       <legend class="sr-only">Session view</legend>
       <label><input type="radio" name="session-view" value="list" checked><span>List</span></label>
       <label><input type="radio" name="session-view" value="grid"><span>Grid</span></label>
     </fieldset>
-    <!-- How much each list card shows (claunch-g4owg): Expanded gives the
-         name and its tags a line of their own and keeps every detail line;
-         Compact is one line per session. Remembered per browser; hidden in
-         the grid, which draws its own cells. -->
-    <fieldset id="session-density" class="session-view-tabs session-density-tabs">
-      <legend class="sr-only">Session card density</legend>
-      <label title="one line per session"><input type="radio" name="session-density" value="compact"><span>Compact</span></label>
-      <label title="name and tags on their own line, every detail line shown"><input type="radio" name="session-density" value="expanded" checked><span>Expanded</span></label>
-    </fieldset>
-    </div>
     <div id="session-filters" class="session-filters">
     <div class="session-filter-buttons" role="group"
          aria-label="Filter sessions by state">
@@ -254,7 +243,7 @@
          daemon/shadow.py) -- state-only cards with no name key and no
          buttons, filed under the same group headings. Clicking one opens
          #/r/<machine>/<name>. -->
-    <ul id="session-list" class="density-expanded"></ul>
+    <ul id="session-list"></ul>
     <div id="session-grid" class="hidden" aria-label="Sessions by fixed grid position"></div>
     <!-- The working fleet at once. Each button hides itself when it would act on
          nothing, so what is up is a count of what it would do — the bar is
