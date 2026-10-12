@@ -6858,8 +6858,17 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .cf2-run-input-value.empty { color: #484f58; }
 .cf2-undecidable { color: #d29922; }
 
-.cf2-inputs { border: 1px solid #30363d; border-radius: 6px; padding: 6px 8px; margin: 6px 0; }
-.cf2-input { margin: 6px 0; }
+.cf2-inputs { border: 1px solid #58677c; border-radius: 6px; padding: 14px; margin: 6px 0; min-width: 0; }
+.cf2-inputs-title { margin: 0 0 6px; font-size: 14px; color: #d8dbe0; }
+.cf2-input { margin: 12px 0 0; padding-top: 12px; border-top: 1px solid #30363d; min-width: 0; }
+.cf2-input-label.check { display: flex; align-items: flex-start; gap: 8px; }
+.cf2-input-label.check .cf2-input-control { flex: 0 0 auto; }
+#new-session .cf2-input-control input[type=checkbox] { width: auto; margin: 3px 0 0; padding: 0; }
+#new-session .cf2-input-row input { margin-top: 0; }
+#new-session .cf2-input-row button { margin-top: 0; flex: 0 0 auto; align-self: stretch; }
+#new-session .cf2-input-add { margin-top: 6px; }
+.cf2-input-help, .cf2-precheck { overflow-wrap: anywhere; }
+#new-session .cf2-precheck-again { margin-top: 0; flex: 0 0 auto; }
 .cf2-input-label { display: block; font-weight: 600; }
 .cf2-input-control textarea, .cf2-input-control input[type=text],
 .cf2-input-control input[type=number], .cf2-input-control select { width: 100%; box-sizing: border-box; }
