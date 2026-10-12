@@ -1,12 +1,7 @@
-"""The rail annotates a paused session's row with its cflow run.
+"""Every registered session keeps its cflow run on its rail card.
 
-A paused record reads ``exited`` like any other stopped session, but it is one
-a person still selects and resumes, and the rail draws it under *Paused*. The
-two-second poll behind the rail is ``/api/cflow?view=rail``, and it used to
-drop every run whose scope was not a *live* session — so a paused session's run
-never reached its row, and the header chip beside it stayed blank. This pins
-the widened rule: a paused (but not archived) session keeps its run on the
-rail, while a plainly killed one does not.
+Process state controls session actions, not whether its workflow is visible.
+Unbound historical runs remain outside the lightweight rail response.
 """
 
 from __future__ import annotations
@@ -44,11 +39,12 @@ def proj(home, tmp_path, monkeypatch):
     return d
 
 
-def _add_dead(mgr, name, cwd, *, paused_at=None, archived_at=None):
+def _add_dead(mgr, name, cwd, *, paused_at=None, archived_at=None, held_at=None):
     record = DeadSession(
         SessionDef(name=name, harness="claude", cwd=str(cwd)),
         exit_code=0,
         paused_at=paused_at,
+        held_at=held_at,
         archived_at=archived_at,
     )
     mgr._sessions[name] = record
@@ -88,6 +84,8 @@ def _rail_scopes(mgr, *, live=None):
         try:
             resp = await client.get("/api/cflow?view=rail", headers=BEARER)
             runs = (await resp.json())["runs"]
+            assert all(r["sessions"] == [r["scope"]] for r in runs)
+            assert all(r["workflow"] == "linear" and r["step_id"] == "one" for r in runs)
             return {r["scope"] for r in runs}
         finally:
             await client.close()
@@ -95,36 +93,24 @@ def _rail_scopes(mgr, *, live=None):
     return asyncio.run(scenario())
 
 
-def test_paused_session_keeps_its_run_on_the_rail(proj):
+@pytest.mark.parametrize("markers", [
+    {},
+    {"held_at": "2026-10-12T00:00:00+00:00"},
+    {"paused_at": "2026-10-12T00:00:00+00:00"},
+    {"archived_at": "2026-10-12T00:00:00+00:00"},
+    {"paused_at": "2026-10-12T00:00:00+00:00",
+     "archived_at": "2026-10-12T01:00:00+00:00"},
+], ids=["killed", "hold", "paused", "archived", "archived-pause"])
+def test_stopped_session_keeps_its_run_on_the_rail(proj, markers):
     cwd = str(proj)
     mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
-    _add_dead(mgr, "held", cwd, paused_at="2026-09-07T00:00:00+00:00")
-    _add_dead(mgr, "killed", cwd)
-    cflow_engine.start("linear", cwd=cwd, scope="held")
-    cflow_engine.start("linear", cwd=cwd, scope="killed")
+    _add_dead(mgr, "stopped", cwd, **markers)
+    cflow_engine.start("linear", cwd=cwd, scope="stopped")
+    cflow_engine.start("linear", cwd=cwd, scope="unbound")
+    _add_dead(mgr, "no-run", cwd)
+    _add_dead(mgr, "no-cwd", "")
 
-    scopes = _rail_scopes(mgr)
-
-    # The paused session's run rides the rail; the killed one's does not.
-    assert "held" in scopes
-    assert "killed" not in scopes
-
-
-def test_archived_session_is_dropped_like_a_killed_one(proj):
-    cwd = str(proj)
-    mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
-    _add_dead(
-        mgr, "gone", cwd,
-        paused_at="2026-09-07T00:00:00+00:00",
-        archived_at="2026-09-07T01:00:00+00:00",
-    )
-    cflow_engine.start("linear", cwd=cwd, scope="gone")
-
-    scopes = _rail_scopes(mgr)
-
-    # Archiving is terminal: an archived record earns no rail row, even though
-    # it still carries the paused marker.
-    assert "gone" not in scopes
+    assert _rail_scopes(mgr) == {"stopped"}
 
 
 def test_live_session_still_rides_the_rail(proj):

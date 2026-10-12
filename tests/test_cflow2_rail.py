@@ -1,6 +1,6 @@
 """The session rail's cflow v2 line (``GET /api/cflow2/rail``).
 
-Each live session whose own directory holds a v2 run under the session's own
+Each registered session whose own directory holds a v2 run under the session's own
 name gets one entry, keyed by the session: the workflow, where the run stands
 and -- the part the rail exists for -- whether a person owes it something
 (``gated``) and what (``owed``). A user choice and a loop limit are owed; a
@@ -248,12 +248,19 @@ def test_rail_entry_is_recomputed_only_when_the_run_files_change(proj, monkeypat
     assert _rail(cwd, "s1")["s1"]["gated"] is False and calls == ["s1", "s1"]
 
 
-def test_rail_endpoint_keys_entries_by_live_session(proj, monkeypatch):
+@pytest.mark.parametrize("markers", [
+    {"exited": False},
+    {"exited": True},
+    {"exited": True, "held_at": "2026-10-12T00:00:00+00:00"},
+    {"exited": True, "paused_at": "2026-10-12T00:00:00+00:00"},
+    {"exited": True, "archived_at": "2026-10-12T00:00:00+00:00"},
+], ids=["live", "killed", "hold", "paused", "archived"])
+def test_rail_endpoint_keys_entries_by_registered_session(proj, monkeypatch, markers):
     from aiohttp.test_utils import TestClient, TestServer
 
     cwd = str(proj)
     runtime.start(layers.load("pick", cwd), cwd=cwd, scope="s1", caps={})
-    sessions = [SimpleNamespace(sdef=SimpleNamespace(name=n, cwd=c))
+    sessions = [SimpleNamespace(sdef=SimpleNamespace(name=n, cwd=c), **markers)
                 for n, c in (("s1", cwd), ("s2", cwd), ("s3", ""))]
 
     async def run():

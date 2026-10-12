@@ -133,15 +133,16 @@ def test_a_run_no_session_ever_drove_is_not_orphaned(proj):
 
 def test_the_rail_poll_does_not_pay_for_the_mark(proj):
     """``?view=rail`` is the two-second poll behind every session row. Its
-    keys are already cut down to sessions that are alive, so the answer would
-    be False for every one of them — the lookup is skipped rather than made.
+    cards include stopped sessions but do not render the orphan marker.
+    The full Flows response still owns that marker.
     """
     cwd = str(proj)
     mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
     _add_dead(mgr, "gone", cwd)
     cflow_engine.start("linear", cwd=cwd, scope="gone")
 
-    assert "gone" not in _runs(mgr, "?view=rail")
+    assert "gone" in _runs(mgr, "?view=rail")
+    assert not _runs(mgr, "?view=rail")["gone"].get("orphaned")
 
 
 def test_the_tab_lists_what_the_clock_no_longer_pushes(proj):

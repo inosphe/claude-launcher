@@ -3844,22 +3844,24 @@ async def h_cflow_runs(request: web.Request) -> web.Response:
     # once more per run for its timers.  A busy machine has hundreds of run
     # slots, so that repeated sorting and delayed-Codex discovery dominated
     # the endpoint even when every run file was cached.
-    # The rail annotates a session row with its run. "Session" here reaches one
-    # step past the live ones: a *paused* record is still a session a person
-    # selects and resumes, and the rail draws it under Paused — so its run has
-    # to survive the rail filter below and bind to its name, exactly as a live
-    # one does. A killed or archived record is terminal and earns no such row.
-    def _rail_bound(session) -> bool:
+    # Every registered session can have a rail card, including held, killed,
+    # paused and archived records. Bind runs by directory and name regardless
+    # of process state; retain the existing live/paused timer lookup separately.
+    def _live_or_paused(session) -> bool:
         if not session.exited:
             return True
         return bool(getattr(session, "paused_at", None)) and not getattr(
             session, "archived_at", None
         )
 
-    live_sessions = {
+    rail_sessions = {
         (_session_cwd(session), session.sdef.name): session
         for session in manager.list()
-        if _rail_bound(session) and _session_cwd(session)
+        if _session_cwd(session)
+    }
+    live_sessions = {
+        key: session for key, session in rail_sessions.items()
+        if _live_or_paused(session)
     }
     rail_view = request.query.get("view") == "rail"
 
@@ -3881,12 +3883,12 @@ async def h_cflow_runs(request: web.Request) -> web.Response:
             if (explicit, scope) not in keys:
                 keys.append((explicit, scope))
 
-    # The background poll only annotates live session rows.  Historical and
+    # The background poll annotates all registered session rows. Historical
     # unbound runs remain available from the Flows page through the default
     # response, but they no longer require state/journal reads or network
     # transfer in every tab every two seconds.
     if rail_view and not explicit:
-        keys = [key for key in keys if key in live_sessions]
+        keys = [key for key in keys if key in rail_sessions]
 
     # Read once for the whole sweep, not per run: the config is one file and
     # the clocks are two tables, and this handler is on a two-second poll.
@@ -3905,7 +3907,7 @@ async def h_cflow_runs(request: web.Request) -> web.Response:
                 scope,
                 reports=not rail_view,
                 slim=True,
-                live_sessions=live_sessions,
+                live_sessions=rail_sessions if rail_view else live_sessions,
             )
             # An idle slot is only interesting when it was asked about explicitly,
             # or when a human's start request is waiting to be picked up there.
@@ -3922,8 +3924,7 @@ async def h_cflow_runs(request: web.Request) -> web.Response:
                 )
                 # Carried on the entry so the Flows page can list the runs
                 # nobody is driving without re-deriving the rule. Skipped
-                # on the rail poll, whose keys are already filtered down to
-                # sessions that are alive, so the answer is always False.
+                # on the rail poll, which does not render the Orphans tab.
                 if not rail_view and cflow_clock.run_orphaned(
                     manager, cwd, scope, entry
                 ):
@@ -4771,7 +4772,7 @@ async def h_cflow2_runs(request: web.Request) -> web.Response:
 
 async def h_cflow2_rail(request: web.Request) -> web.Response:
     """The session rail's v2 lines: ``{"rows": {session: entry}}`` for each
-    live session whose own directory holds a v2 run under the session's own
+    registered session whose own directory holds a v2 run under the session's own
     name (``cflow2_web.rail_entry``). Its own endpoint rather than a field of
     ``/api/cflow`` or ``/api/cflow2/runs``: the rail asks one question per
     session, keyed by the session, not by the run slots on disk."""
