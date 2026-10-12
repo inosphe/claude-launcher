@@ -3491,12 +3491,12 @@ class SpawnWizard(Form):
             else "a worktree of its own" if choice is not worktree.NEVER
             else ""
         )
-        if child_harness and child_harness != "claude":
+        if child_harness and child_harness not in ("claude", "codex"):
             fork_f.disabled = True
-            fork_f.disabled_note = "the claude harness only"
+            fork_f.disabled_note = "the Claude or Codex harness only"
         elif "fork" not in may:
             fork_f.disabled = True
-            fork_f.disabled_note = "the parent has no claude conversation to copy"
+            fork_f.disabled_note = "the parent has no Claude or Codex conversation to copy"
         elif elsewhere:
             fork_f.disabled = True
             fork_f.disabled_note = (

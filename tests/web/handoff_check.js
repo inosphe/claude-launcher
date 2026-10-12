@@ -118,6 +118,12 @@ const response = (body, ok = true, status = 200) => ({
         ctx.forkControlState(ctx.sessions()[0]), { fork: true, merge: false });
   check("a quick-fork gets merge, not fork",
         ctx.forkControlState(ctx.sessions()[1]), { fork: false, merge: true });
+  check("a live Codex conversation gets fork",
+        ctx.forkControlState({name: "cx", harness: "codex", conversation_id: "u"}),
+        {fork: true, merge: false});
+  check("a Codex session without a pinned conversation cannot fork",
+        ctx.forkControlState({name: "cx", harness: "codex"}),
+        {fork: false, merge: false});
   check("a non-claude session gets neither",
         ctx.forkControlState(ctx.sessions()[2]), { fork: false, merge: false });
   check("an exited record gets neither",

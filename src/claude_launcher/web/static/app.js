@@ -4109,7 +4109,7 @@ const RAIL_CARD_KEYS = [
     keys: ["q"],
     label: "q",
     what: "quick-fork the session",
-    when: "a live claude session with a conversation to copy — the copy "
+    when: "a live Claude or Codex session with a conversation to copy — the copy "
       + "opens, marked 'forked from here'",
     act: (name) => railCardQuickFork(name),
   },
@@ -12153,12 +12153,12 @@ function syncSpawnMode() {
   const row = $("new-fork-row");
   row.classList.toggle("hidden", !parent);
   const forkable =
-    !!parent && parent.harness === "claude" && !!parent.conversation_id;
+    !!parent && ["claude", "codex"].includes(parent.harness) && !!parent.conversation_id;
   f.fork_parent.disabled = !forkable;
   if (!forkable) f.fork_parent.checked = false;
   row.title = forkable
     ? "the child opens a copy of the parent's conversation and diverges from there"
-    : "the parent has no claude conversation to copy";
+    : "the parent has no Claude or Codex conversation to copy";
 }
 
 /* The profile row means different things in the two modes: a session of its
@@ -13358,16 +13358,16 @@ $("term-retro").addEventListener("click", async () => {
    text it is the agent's completion. The header only ever sends the request;
    the completion is the agent's, from inside its own terminal. */
 
-/* Whether the fork/merge buttons apply to a record: fork on a live claude
+/* Whether the fork/merge buttons apply to a record: fork on a live Claude/Codex
    session with a conversation to copy, merge on a live quick-fork. The
    daemon is the authority (it refuses a fork with no transcript on disk),
    this only keeps the button off records it would refuse outright. */
 function forkControlState(session) {
   const s = session || {};
   const live = !!s.name && s.status !== "exited";
-  const claude = String(s.harness || "").startsWith("claude");
+  const forkable = ["claude", "codex"].includes(s.harness);
   return {
-    fork: live && claude && !!s.conversation_id && !s.quick_fork_of,
+    fork: live && forkable && !!s.conversation_id && !s.quick_fork_of,
     merge: live && !!s.quick_fork_of,
   };
 }

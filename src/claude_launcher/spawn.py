@@ -615,7 +615,7 @@ def can_fork(parent: Optional[dict]) -> bool:
     if not parent:
         return False
     return (
-        (parent.get("harness") or "") == "claude"
+        parent.get("harness") in ("claude", "codex")
         and bool(parent.get("conversation_id"))
         and _on_disk(parent)
     )
@@ -651,6 +651,13 @@ def _on_disk(parent: dict) -> bool:
         prof = profile_mod.require_selector(selector)
     except Exception:  # noqa: BLE001 — ProfileError and anything under it
         return True
+    if parent.get("harness") == "codex":
+        from .daemon import codex_sessions
+
+        entry = harnesses.get("codex")
+        return bool(entry and codex_sessions.find(
+            entry.profile_home(prof.config_dir), conversation
+        ))
     return transcripts.exists(
         prof.config_dir, conversation, str(parent.get("cwd") or "")
     )
@@ -659,8 +666,8 @@ def _on_disk(parent: dict) -> bool:
 def _fork_parents_conversation(child: dict, parent: dict, request: dict) -> None:
     """Point the child at a COPY of the parent's own conversation.
 
-    ``fork`` is the spawn-side spelling of claude's ``--resume <id>
-    --fork-session``: the child opens the parent's conversation, copied, so it
+    ``fork`` uses Claude's ``--resume <id> --fork-session`` or Codex's
+    ``fork <id>``: the child opens the parent's conversation, copied, so it
     starts knowing everything the parent knew and diverges from its first
     word. The parent's own conversation is untouched.
 
@@ -671,8 +678,8 @@ def _fork_parents_conversation(child: dict, parent: dict, request: dict) -> None
     reachable before — so there is no unlock to write in ``~/.claunch.yaml``,
     only two things to be true.
 
-    The first is the harness: a forked conversation is a claude transcript,
-    and there is nothing to hand another program. The second is the
+    The first is the harness: only the same harness can read its transcript.
+    The second is the
     directory, and it is the one that surprises people. Claude Code keeps
     transcripts **per working directory** (see
     :func:`claude_launcher.worktree.resolve`), so the parent's conversation
@@ -683,12 +690,13 @@ def _fork_parents_conversation(child: dict, parent: dict, request: dict) -> None
     was asked to inherit everything is the failure nobody would think to look
     for.
     """
-    if (child.get("harness") or "") != "claude":
+    if (
+        parent.get("harness") not in ("claude", "codex")
+        or child.get("harness") != parent.get("harness")
+    ):
         raise SpawnDenied(
-            "'fork' copies the parent's claude conversation, which is a "
-            f"claude transcript — it has no meaning for the "
-            f"{child.get('harness')!r} harness; drop 'fork', or drop the "
-            "harness swap"
+            "'fork' requires the same claude or codex harness as the parent; "
+            f"cannot copy {parent.get('harness')!r} into {child.get('harness')!r}"
         )
     moved = [k for k in _MOVES_THE_CHILD if request.get(k)]
     if moved:
@@ -703,16 +711,27 @@ def _fork_parents_conversation(child: dict, parent: dict, request: dict) -> None
     if not conversation:
         raise SpawnDenied(
             "the parent has no conversation to fork: it steers its own with "
-            "harness args, or it opened claude's picker and nothing is "
+            "harness args, or it opened the harness picker and nothing is "
             "pinned yet — spawn without 'fork'"
         )
     if not _on_disk(parent):
         raise SpawnDenied(
             f"the parent's conversation {conversation} has no transcript on "
-            "disk yet — claude writes it on the session's first turn, and "
-            "'--resume' of a file it never wrote kills the child on startup. "
+            "disk yet — the harness must write a conversation before it "
+            "can be copied. "
             "Let the parent take a turn, then fork"
         )
+    if child["harness"] == "codex":
+        from .daemon.harness import without_restore_subcommand
+
+        # Codex mints the copy's UUID. The manager snapshots rollouts before
+        # launch and pins the new UUID; never pin the source UUID as the copy.
+        if not _on_disk({**child, "conversation_id": conversation}):
+            raise SpawnDenied("the parent's Codex conversation is not in the child's profile")
+        args = without_restore_subcommand(child["args"], "resume")
+        args = without_restore_subcommand(args, "fork")
+        child["args"] = [*args, "fork", conversation]
+        return
     # Spelled as the two fields the harness already knows how to launch:
     # `--resume <id> --fork-session`. normalize() then pins the child a fresh
     # conversation id of its own, so the copy is restorable like any other.

@@ -2721,9 +2721,22 @@ def test_fork_is_offered_only_when_the_parent_has_a_conversation():
     conversation — and an older daemon that never says so greys the row
     rather than offering something it would refuse."""
     assert not spawn_form().field("fork").selectable
-    assert "no claude conversation" in spawn_form().field("fork").disabled_note
+    assert "no Claude or Codex conversation" in spawn_form().field("fork").disabled_note
     wiz = spawn_form(report=_forkable())
     assert wiz.field("fork").selectable
+
+
+def test_codex_parent_can_fork_in_spawn_wizard():
+    sources = FakeSpawnSources(report=_forkable(), sessions=[{
+        "name": "lead", "status": "idle", "harness": "codex",
+        "profile": "work:codex", "cwd": "/work/repo", "conversation_id": "u1",
+    }])
+    wiz = spawn_form(sources=sources)
+    assert wiz.field("fork").selectable
+    pick(wiz, "fork", "yes")
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.fork is True
 
 
 def test_sending_the_child_elsewhere_takes_the_fork_with_it():

@@ -888,6 +888,25 @@ def test_codex_restore_does_not_repeat_the_resume_subcommand(home, tmp_path):
     assert restored.count("resume") == 1
 
 
+@pytest.mark.parametrize("conversation", ["copy-id", None])
+def test_codex_fork_only_runs_on_initial_launch(home, tmp_path, conversation):
+    _profile_for("work", "codex")
+    _declare_harness("codex", restore_args=["resume", "--last"])
+    sdef = harness.normalize(SessionDef(
+        name="copy", profile="work", cwd=str(tmp_path),
+        args=("--no-alt-screen", "fork", "source-id"), conversation_id=conversation,
+    ))
+    fresh, _, _ = harness.build_command(sdef)
+    assert fresh[-2:] == ["fork", "source-id"]
+    restored, _, _ = harness.build_command(sdef, restoring=True)
+    assert "fork" not in restored and "source-id" not in restored
+    assert "--no-alt-screen" in restored
+    if conversation:
+        assert restored[-2:] == ["resume", conversation]
+    else:
+        assert "resume" not in restored
+
+
 def test_codex_restore_replaces_a_conversation_the_first_spawn_named(
     home, tmp_path
 ):

@@ -8,6 +8,7 @@ in ``test_member_graph.py``.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import tempfile
@@ -617,6 +618,34 @@ def test_forking_onto_another_harness_is_refused():
     # ...and on a parent that was never claude either, without a swap.
     with pytest.raises(spawn.SpawnDenied):
         spawn.check(_policy(), {"fork": True}, parent=PARENT, depth=0, children=0)
+
+
+@pytest.mark.parametrize("source_args", [[], ["resume", "old"], ["fork", "older"]])
+def test_codex_fork_uses_native_command_and_requires_rollout(tmp_path, source_args):
+    from claude_launcher import harnesses
+
+    prof = profile.create("cx")
+    lineage.set_harness(prof, "codex")
+    parent = {**TALKER, "harness": "codex", "profile": "cx:codex",
+              "cwd": str(tmp_path), "args": ["--no-alt-screen", *source_args]}
+    assert not spawn.can_fork(parent)
+    with pytest.raises(spawn.SpawnDenied, match="no transcript"):
+        spawn.check(_policy(), {"fork": True}, parent=parent, depth=0, children=0)
+    path = harnesses.get("codex").profile_home(prof.config_dir) / "sessions" / "rollout.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"type": "session_meta", "payload": {
+        "id": parent["conversation_id"], "cwd": str(tmp_path),
+    }}) + "\n", encoding="utf-8")
+    assert spawn.can_fork(parent)
+    child = spawn.check(_policy(), {"fork": True}, parent=parent, depth=0, children=0)
+    assert child["args"] == ["--no-alt-screen", "fork", parent["conversation_id"]]
+    assert not child.get("conversation_id")
+    assert not child.get("resume") and not child.get("fork_session")
+    other = profile.create("other-cx")
+    lineage.set_harness(other, "codex")
+    with pytest.raises(spawn.SpawnDenied, match="child's profile"):
+        spawn.check(_policy(allow_profile=True), {"fork": True, "profile": "other-cx"},
+                    parent=parent, depth=0, children=0)
 
 
 @pytest.mark.parametrize(
