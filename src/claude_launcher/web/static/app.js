@@ -4219,16 +4219,10 @@ async function refreshSessions(options) {
       followSessionProject(projectFollowPending);
     }
   }
-  // What the rail draws: the cache narrowed to the picked project. Reduced
-  // harnesses define no project state and draw the whole cache. Grouped by
-  // mesh, a mesh group also draws its members from other projects: meshes
-  // span projects (claunch-6deos), and a group missing half its roster
-  // reads as if those members were not there to talk to.
-  const meshGrouped = typeof sessionGroupOrder === "undefined"
-    ? sessionGroupByMesh : sessionGroupOrder.includes("mesh");
-  const railList = typeof railSessions !== "function" ? sessionsCache
-    : meshGrouped && typeof railSessionsWithMeshPeers === "function"
-      ? railSessionsWithMeshPeers(sessionsCache) : railSessions(sessionsCache);
+  // Apply the project before grouping so a shared mesh cannot add sessions
+  // from another project. Reduced harnesses without project state draw all.
+  const railList = typeof railSessions !== "function"
+    ? sessionsCache : railSessions(sessionsCache);
   // Other daemons' sessions the rail files among these (remote-shadow rows,
   // refreshShadows). They are drawn in this same list but never enter
   // sessionsCache: every reader of that cache keys on the bare name.
@@ -9697,23 +9691,6 @@ function sessionInCurrentProject(s) {
 /* The sessions the rail draws: the cache, narrowed to the picked project. */
 function railSessions(list = sessionsCache) {
   return (list || []).filter(sessionInCurrentProject);
-}
-
-/* The rail grouped by mesh: the picked project's sessions, plus every session
-   of another project that shares a mesh with one of them. A mesh spans
-   projects (claunch-6deos), so its group shows its whole local roster; a
-   mesh with no member in the picked project stays out, or picking a project
-   would narrow nothing on a daemon where most sessions are in some mesh.
-   Needs sessMeshes (the mesh poll); without it the rail is railSessions. */
-function railSessionsWithMeshPeers(list = sessionsCache) {
-  const own = railSessions(list);
-  if (!currentProject || typeof sessMeshes !== "function") return own;
-  const meshes = new Set();
-  for (const s of own) for (const m of sessMeshes(s.name)) meshes.add(m.mesh);
-  if (!meshes.size) return own;
-  const shown = new Set(own.map((s) => s.name));
-  return (list || []).filter((s) => shown.has(s.name) ||
-    sessMeshes(s.name).some((m) => meshes.has(m.mesh)));
 }
 
 /* The same address with the project set to `name`, or taken out ("" = all). */

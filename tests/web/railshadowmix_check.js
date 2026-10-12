@@ -517,6 +517,32 @@ const tabShadows = () => tabs().flatMap((t) => t._groupRows)
          ["k6@m4", 0]]);
   ctx.set("filter", "current");
 
+  // Project filtering precedes every grouping order, including shared meshes.
+  ctx.set("shadows", []);
+  ctx.set("search", { q: "" });
+  ctx.set("meshes", [{ name: "shared", members: [
+    local("p1", "worker"), local("p2", "worker"),
+  ] }]);
+  served = { sessions: [
+    { name: "p1", project: "one", status: "idle", cwd: "C:/w" },
+    { name: "p2", project: "two", status: "idle", cwd: "C:/w" },
+  ] };
+  for (const order of [["mesh"], ["workspace", "mesh"], ["mesh", "workspace"], []]) {
+    ctx.set("groups", order);
+    ctx.set("project", "one");
+    await ctx.refresh();
+    check(`project one excludes shared-mesh peers (${order})`, shown(), ["p1"]);
+    ctx.set("project", "two");
+    await ctx.refresh({ cached: true });
+    check(`cached project switch excludes previous project (${order})`, shown(), ["p2"]);
+    ctx.set("project", "");
+    await ctx.refresh({ cached: true });
+    check(`all projects keeps both shared-mesh members (${order})`, shown(), ["p1", "p2"]);
+    ctx.set("project", "empty");
+    await ctx.refresh({ cached: true });
+    check(`empty project shows no shared-mesh members (${order})`, shown(), []);
+  }
+
   if (failures) {
     console.error(`${failures} check(s) failed`);
     process.exit(1);
