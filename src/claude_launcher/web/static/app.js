@@ -3596,6 +3596,19 @@ function enableTabDragScroll(bar) {
   });
 }
 
+/* Use the same state and search predicates as the rail's row visibility. */
+function sessionGroupRowVisible(row) {
+  if (row.type === "session") {
+    return sessionMatchesFilter(row.session)
+      && (typeof sessionMatchesSearch !== "function" || sessionMatchesSearch(row.session));
+  }
+  if (row.type === "shadow") {
+    return shadowMatchesFilter(row.shadow)
+      && (typeof shadowMatchesSearch !== "function" || shadowMatchesSearch(row.shadow));
+  }
+  return false;
+}
+
 /* The tab strip above the list. Built on every rebuild of the rail (the
    counts move with the fleet), hidden while the rail is ungrouped. A tab is
    only a picker: what the open group says and offers is on the header row
@@ -3631,8 +3644,7 @@ function renderSessionGroupTabs(group, tabs, active) {
     name.textContent = group === "workspace" ? sessionWorkspaceLabel(tab.value) : tab.value;
     const count = document.createElement("span");
     count.className = "session-group-count";
-    count.textContent = String(tab.rows.filter((r) =>
-      r.type === "session" || r.type === "shadow").length);
+    count.textContent = String(tab.rows.filter(sessionGroupRowVisible).length);
     el.append(name, count);
     el.title = open ? `${group} ${tab.value} — click to scroll to the top`
       : `${group} ${tab.value}`;
@@ -3675,7 +3687,7 @@ function renderSessionGroupHeader(group, tab) {
     const name = document.createElement("span");
     name.className = "session-group-name";
     name.textContent = tab.value;
-    const sessions = tab.rows.filter((r) => r.type === "session" || r.type === "shadow").length;
+    const sessions = tab.rows.filter(sessionGroupRowVisible).length;
     const count = document.createElement("span");
     count.className = "session-group-count";
     count.textContent = `${sessions} session${sessions === 1 ? "" : "s"}`;
@@ -3799,20 +3811,24 @@ function sessionFilterRefreshState() {
     ? sessionFilter[0] : "current";
 }
 
-/* While the search box holds a query, a tab whose group has a match is
-   marked, so a match in a closed tab is still found. */
+/* Keep counts aligned with the visible rows even when a filter/search change
+   does not rebuild the rail. Preserve empty tabs so they remain selectable.
+   Search marks also identify matches in closed tabs. */
 function syncSessionGroupTabSearch() {
   const bar = $("session-group-tabs");
   if (!bar) return;
   const active = typeof sessionSearch !== "undefined" && !!String(sessionSearch.q || "").trim();
   for (const tab of bar.querySelectorAll(".session-group-tab")) {
-    const match = active && (tab._groupRows || []).some((row) =>
-      row.type === "session"
-        ? sessionMatchesFilter(row.session) && sessionMatchesSearch(row.session)
-        : row.type === "shadow"
-          ? shadowMatchesFilter(row.shadow) && shadowMatchesSearch(row.shadow)
-          : false);
-    tab.classList.toggle("search-match", match);
+    const count = (tab._groupRows || []).filter(sessionGroupRowVisible).length;
+    const badge = tab.querySelector(".session-group-count");
+    if (badge) badge.textContent = String(count);
+    tab.classList.toggle("search-match", active && count > 0);
+    const head = $("session-group-header");
+    if (head && head.dataset.group === tab.dataset.group
+        && head.dataset.value === tab.dataset.value) {
+      const headerCount = head.querySelector(".session-group-count");
+      if (headerCount) headerCount.textContent = `${count} session${count === 1 ? "" : "s"}`;
+    }
   }
 }
 

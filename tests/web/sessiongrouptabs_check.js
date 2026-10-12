@@ -131,14 +131,22 @@ function load(seed) {
     constLine("SESSION_ORIGIN_FILTERS") + constLine("SESSION_ORIGIN_KEY") +
     letBlock("sessionOriginFilter") + "\n" +
     "let sessionGroupTabScrollReset = false;\n" +
+    "let sessionFilter = 'current', sessionSearch = {q: ''};\n" +
+    "function sessionMatchesSearch(s) { return !sessionSearch.q || s.name.includes(sessionSearch.q); }\n" +
+    "function shadowMatchesSearch(s) { return !sessionSearch.q || s.session.includes(sessionSearch.q); }\n" +
     // The drag on the strip needs real pointer input: tabdragscroll_browser.cjs.
     "function enableTabDragScroll() {}\n" +
     [slice("sessionWorkspaceLabel"), slice("sessionGroupActiveTab"),
      slice("setSessionGroupTab"), slice("sessionGroupTabRows"),
      slice("scrollSessionListTop"), slice("selectSessionGroupTab"),
      slice("renderSessionGroupTabs"), slice("renderSessionGroupHeader"),
-     slice("filterSessionOrigin"), slice("setSessionOriginFilter")].join("\n") + `
+     slice("filterSessionOrigin"), slice("setSessionOriginFilter"),
+     slice("sessionGroupRowVisible"), slice("sessionCategory"), slice("sessionMatchesFilter"),
+     slice("shadowCategory"), slice("shadowMatchesFilter"),
+     slice("syncSessionGroupTabSearch")].join("\n") + `
 Object.assign(exports, {
+  filter: (value) => { sessionFilter = value; syncSessionGroupTabSearch(); },
+  search: (q) => { sessionSearch = {q}; syncSessionGroupTabSearch(); },
   order: () => sessionGroupOrder,
   tab: () => sessionGroupTab,
   scrollReset: () => sessionGroupTabScrollReset,
@@ -359,6 +367,64 @@ check("ungrouped retains the selected origin and clears the old group metadata",
        opts().filter((o) => o.classes.has("active")).map((o) => o.dataset.origin),
        head.dataset.group, head.dataset.value],
       [["both", "local", "remote"], ["local"], "", ""]);
+
+/* ---- counts follow status and search without a rail rebuild (claunch-3n6ml) ---- */
+const counts = () => tabs().map((t) => t.querySelector(".session-group-count").textContent);
+const headerCount = () => head.querySelector(".session-group-count").textContent;
+const counted = load({ "claunch_session_group_tab:/t/local/": '{"mesh":"claunch"}' });
+const record = (name, extra = {}) => ({ type: "session", session: { name, status: "busy", ...extra } });
+const dead = (name) => record(name, { status: "exited" });
+const screenTabs = [
+  { value: "(no mesh)", rows: Array.from({length: 6}, (_, i) => dead(`none-${i}`)) },
+  { value: "claunch", rows: [
+    ...Array.from({length: 7}, (_, i) => record(`live-${i}`)),
+    ...Array.from({length: 91}, (_, i) => dead(`dead-${i}`)),
+  ] },
+];
+counted.filter(["running", "hold", "paused"]);
+counted.render("mesh", screenTabs, "claunch");
+check("104 records with seven live sessions render filtered counts immediately",
+      [counts(), headerCount()], [["0", "7"], "7 sessions"]);
+counted.filter("current");
+check("current restores the screenshot totals without rebuilding",
+      [counts(), headerCount()], [["6", "98"], "98 sessions"]);
+
+const mixed = [{ value: "claunch", rows: [
+  record("live"), dead("dead"),
+  record("hold", {status: "exited", held_at: "now"}),
+  record("paused", {status: "exited", paused_at: "now"}),
+  record("archived", {status: "exited", archived_at: "now"}),
+  {type: "group", group: "workspace", value: "nested", level: 1},
+  {type: "shadow", shadow: {session: "remote-live", card: {exited: false}}},
+  {type: "shadow", shadow: {session: "remote-dead", card: {exited: true}}},
+] }, {value: "empty", rows: []}];
+counted.render("mesh", mixed, "claunch");
+for (const [filter, want] of [
+  ["current", 6], [["running", "hold", "paused"], 4], ["running", 2],
+  ["hold", 1], ["paused", 1], ["killed", 2], ["archived", 1], [[], 0],
+]) {
+  counted.filter(filter);
+  check(`mixed local/remote counts for ${JSON.stringify(filter)}`,
+        [counts(), headerCount()], [[String(want), "0"], `${want} session${want === 1 ? "" : "s"}`]);
+}
+counted.filter("current");
+counted.search("remote-live");
+check("search updates the remote match count and open header without rebuilding",
+      [counts(), headerCount(), tabs()[0].classes.has("search-match")],
+      [["1", "0"], "1 session", true]);
+counted.filter("killed");
+check("a search match excluded by status contributes nothing",
+      [counts(), headerCount(), tabs()[0].classes.has("search-match")],
+      [["0", "0"], "0 sessions", false]);
+counted.search("");
+check("clearing search restores status counts", counts(), ["2", "0"]);
+counted.filter("running");
+counted.search("live");
+counted.render("workspace", mixed, "claunch");
+check("workspace tabs use the same status and search count",
+      [counts(), headerCount()], [["2", "0"], "2 sessions"]);
+counted.render("mesh", [{value: "claunch", rows: counted.byOrigin(mixed[0].rows, "local")}], "claunch");
+check("origin filtering and status/search compose", [counts(), headerCount()], [["1"], "1 session"]);
 
 /* ---- the page ---- */
 check("the fold and the jump are gone from the rail",

@@ -183,7 +183,7 @@ const names = [
   "byLineage", "sessionCategory", "sessionMatchesFilter", "sessionFilterCounts",
   "sessionGroupActiveTab", "setSessionGroupTab", "sessionGroupTabRows",
   "scrollSessionListTop", "selectSessionGroupTab", "renderSessionGroupTabs",
-  "renderSessionGroupHeader", "syncSessionGroupTabSearch",
+  "renderSessionGroupHeader", "syncSessionGroupTabSearch", "sessionGroupRowVisible",
   "syncSessionFilters",
   "sessionSearchText", "sessionMatchesSearch",
   "recordProject", "sessionInCurrentProject", "railSessions",
@@ -411,8 +411,12 @@ const tabShadows = () => tabs().flatMap((t) => t._groupRows)
   check("a hit by meaning is the local s1's, never the remote one's", shown(), ["s1"]);
   ctx.set("groups", ["mesh"]);
   await ctx.refresh({ cached: true });
+  check("semantic hits count only the local session even with a remote namesake",
+        [tabCount("alpha"), tabCount("bravo"), tabCount("gamma")], ["1", "0", "0"]);
   ctx.set("search", { q: "r4" });
   ctx.filters();
+  check("search updates counts in closed tabs without rebuilding",
+        [tabCount("alpha"), tabCount("gamma")], ["0", "1"]);
   check("a tab whose group holds a matching shadow is marked",
         tabs().filter((t) => t.classes.has("search-match")).map((t) => t.dataset.value),
         ["gamma"]);
@@ -423,6 +427,13 @@ const tabShadows = () => tabs().flatMap((t) => t._groupRows)
 
   /* ---- the tab press and the open card -------------------------------- */
   await open("alpha");
+  ctx.set("filter", "running");
+  ctx.filters();
+  check("filter-only refresh keeps tab and header counts aligned with visible rows",
+        [tabCount("alpha"), groupHeader.querySelector(".session-group-count").text,
+         shown().length, tabCount("bravo")], ["3", "3 sessions", 3, "0"]);
+  ctx.set("filter", "current");
+  ctx.filters();
   list.scrollTop = 120;
   await open("alpha");
   check("pressing the open tab takes the list back to its top", list.scrollTop, 0);
