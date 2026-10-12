@@ -3814,12 +3814,26 @@ function sessionFilterRefreshState() {
 /* Keep counts aligned with the visible rows even when a filter/search change
    does not rebuild the rail. Preserve empty tabs so they remain selectable.
    Search marks also identify matches in closed tabs. */
-function syncSessionGroupTabSearch() {
+function syncSessionGroupTabSearch(sessions = null) {
   const bar = $("session-group-tabs");
   if (!bar) return;
   const active = typeof sessionSearch !== "undefined" && !!String(sessionSearch.q || "").trim();
+  // A held rail keeps its DOM and group membership, while the poll replaces
+  // the records used by syncSessionFilters. Count those same latest records.
+  const latest = sessions && new Map(sessions.map((s) => [s.name, s]));
+  const visible = (row) => {
+    if (row.type === "session" && latest) {
+      const session = latest.get(row.session.name);
+      return !!session && sessionGroupRowVisible({ type: "session", session });
+    }
+    if (row.type === "shadow" && typeof shadowRow === "function") {
+      const shadow = shadowRow(row.shadow.machine, row.shadow.session);
+      return !!shadow && sessionGroupRowVisible({ type: "shadow", shadow });
+    }
+    return sessionGroupRowVisible(row);
+  };
   for (const tab of bar.querySelectorAll(".session-group-tab")) {
-    const count = (tab._groupRows || []).filter(sessionGroupRowVisible).length;
+    const count = (tab._groupRows || []).filter(visible).length;
     const badge = tab.querySelector(".session-group-count");
     if (badge) badge.textContent = String(count);
     tab.classList.toggle("search-match", active && count > 0);
@@ -3888,7 +3902,7 @@ function syncSessionFilters(sessions) {
   }
   // Search can change without rebuilding the rail: mark the tabs that hold
   // a match.
-  if (typeof syncSessionGroupTabSearch === "function") syncSessionGroupTabSearch();
+  if (typeof syncSessionGroupTabSearch === "function") syncSessionGroupTabSearch(sessions);
   if (typeof syncSessionSearchNote === "function") syncSessionSearchNote();
   if (typeof renderSessionGrid === "function") renderSessionGrid();
   if (typeof syncBulkActions === "function") syncBulkActions(sessions || [], sessionFilter);
