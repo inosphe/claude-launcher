@@ -66,7 +66,7 @@ from . import worktree_inventory
 from . import work_checkout
 from . import vscode as vscode_mod
 from . import cflow2_approve, cflow2_web
-from . import session_timers
+from . import session_timers, session_prs
 from ..cflow2 import expr as cflow2_expr, frontend as cflow2_frontend
 from ..cflow2 import ir as cflow2_ir, runtime as cflow2_runtime, store as cflow2_store
 from ..cflow2 import layers as cflow2_layers
@@ -7491,6 +7491,9 @@ async def h_sessions_list(request: web.Request) -> web.Response:
             d = briefing.digest(info.get("name") or "")
             if d:
                 info["briefing"] = d
+            # Same scoped PR records as the detail panel, read locally and
+            # cached; a list poll never starts a GitHub request.
+            info["prs"] = session_prs.for_session(_session_cwd(s), info["name"])
             # A kill that is still a wind-down (see beads.Board): the row says
             # so and its kill button turns into "stop now".
             wd = winddowns.get(info.get("name") or "")
@@ -7579,7 +7582,7 @@ async def h_sessions_list(request: web.Request) -> web.Response:
             # What the session declared itself to be at creation, and the
             # progress it publishes while it runs (daemon/progress.py): the
             # rail's meta line and progress line read both off this poll.
-            "kind", "progress",
+            "kind", "progress", "prs",
         }
         attached = [
             {key: value for key, value in info.items() if key in rail_fields}
@@ -8711,6 +8714,7 @@ async def h_session_meta(request: web.Request) -> web.Response:
         # the workflow files are all reads, and the detail panel polls this
         # every two seconds. Inline it was 80ms of loop per poll, at p90.
         info = ctxsize.attach(session)
+        info["prs"] = session_prs.for_session(cwd, session.sdef.name)
         metering.attach(info)
         tokenusage.attach(info, getattr(session, "sdef", None))
         # A model id the harness registry cannot read back into one of its
@@ -10688,6 +10692,10 @@ async def h_session_pr(request: web.Request) -> web.Response:
     name = session.sdef.name
     result = await asyncio.to_thread(prflow.run, cwd, body, session=name)
     warnings: list = []
+    try:
+        await asyncio.to_thread(session_prs.record, name, result, body)
+    except OSError as exc:
+        warnings.append(f"PR record: {exc}")
     monitor = None
     if body.get("monitor"):
         if not body.get("report"):

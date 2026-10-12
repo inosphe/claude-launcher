@@ -370,6 +370,7 @@ CHECKS = [
         "sessiongrouptabs_check.js",
         "projectsearchline_check.js",
         "railbadge_check.js",
+        "sessionprs_check.js",
         "railcflow2_check.js",
         "sessmesh_check.js",
         "sesshandle_check.js",
@@ -552,6 +553,7 @@ CHECKS = [
 # tests/ rather than tests/web, and `sessiontabs_browser.cjs` and
 # `toolbar_browser.cjs` sat in tests/web unlisted (claunch-6jerx).
 BROWSER_CHECKS = [
+        "sessionprs_browser.cjs",
     "termcflow_browser.cjs",
     "cflow2layout_browser.cjs",
     "glossary_browser.cjs",
