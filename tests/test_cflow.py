@@ -1764,6 +1764,30 @@ def test_the_pool_needs_an_unambiguous_mesh(monkeypatch):
     assert picked.problem == "" and picked.ancestors == ["rev1", "lead1"]
 
 
+def test_a_parent_channel_is_not_a_second_mesh_to_choose(monkeypatch):
+    """A spawned child sits in its team mesh and in the two-member channel to
+    its spawner; the channel is set aside, so the team mesh is the one asked."""
+    channel = {
+        "name": "parent-abc",
+        "parent_channel": ["lead1", "dev1"],
+        "members": [
+            _member("lead1", "lead1", "free-role"),
+            _member("dev1", "dev1", "free-role"),
+        ],
+    }
+    _roster(monkeypatch, TEAM, channel)
+    found = responders.pool(session="dev1")
+    assert found.problem == "" and found.mesh == "team"
+    assert found.ancestors == ["rev1", "lead1"]
+    # a channel alone is still a mesh the session is in
+    _roster(monkeypatch, channel)
+    assert responders.pool(session="dev1").mesh == "parent-abc"
+    # two real meshes stay ambiguous with or without the channel
+    other = {"name": "other", "members": [_member("dev1", "dev1", "worker")]}
+    _roster(monkeypatch, TEAM, other, channel)
+    assert "several meshes (other, team)" in responders.pool(session="dev1").problem
+
+
 def test_the_pool_will_not_mistake_a_remote_namesake_for_us(monkeypatch):
     """Session names are unique per machine, so a roster match is not identity."""
     mirrored = {
