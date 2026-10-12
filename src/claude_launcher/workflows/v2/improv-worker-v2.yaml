@@ -162,6 +162,11 @@ inputs:
     type: int
     label: 최대 회차 수
     help: 이 런이 도는 회차의 상한(비우면 큐가 빌 때까지)
+  require_coding_approval:
+    type: bool
+    default: false
+    label: 코딩 시작 전 사용자 승인
+    help: 켜면 일감별 구현·재작업 전에 변경 계획을 제시하고 사용자 승인을 기다린다. 끄면 기존처럼 자동 진행한다
   force_pr:
     type: bool
     label: PR 강제(force to make PR)
@@ -903,6 +908,37 @@ nodes:
     effects: [fs.write, git.push, board.write]
 
   # ── 일감 하나 (item) ─────────────────────────────────────────────────
+  coding-plan:
+    title: 코딩 승인 요청 준비
+    prompt: |
+      이번 일감의 구현 전에 사용자에게 제시할 변경 계획을 작성한다.
+      이슈와 관련 코드는 읽을 수 있지만 아직 코드·테스트를 수정하거나
+      구현을 자식에게 위임하지 않는다.
+      현재 일감의 이슈 id, 목표, 변경할 파일과 접근 방법, 검증 방법,
+      기대 효과와 리스크를 brief에 기록한다. 재작업이면 수정 사유와
+      이번에 변경할 범위를 포함한다.
+    done_when: 사용자가 구현 착수 여부를 판단할 구체적인 계획과 근거가 brief에 있다.
+    returns:
+      ok: {brief: str}
+    effects: [fs.read]
+
+  coding-approval:
+    title: 코딩 시작 전 사용자 승인
+    ask:
+      prompt: |
+        시작 입력 require_coding_approval이 켜져 있어 구현 착수 전에
+        사용자 승인이 필요하다. 아래 계획에 따라 코딩을 시작할지 결정한다.
+
+        ${result['coding-plan'].value.brief}
+
+        승인: 위 범위의 구현과 검증을 진행한다. 변경으로 인한 리스크는
+        계획에 기재된 내용과 같다.
+        보류: 코드 변경 없이 이 단계에서 기다린다. 구현 완료가 늦어진다.
+      otherwise: human
+    prompt: 사용자의 코딩 착수 승인을 확인했다. 이 작업을 보고하고 구현을 진행한다.
+    done_when: 이번 방문의 사용자 승인이 기록되어 있다.
+    effects: [fs.read]
+
   work:
     title: 작업 실행
     prompt: |
@@ -3156,10 +3192,16 @@ procedures:
       큐의 일감 하나: 작업(발견은 group found) -> 표적 테스트 여부 -> 테스트 작성과
       위임 측정(실패가 0이 될 때까지) 또는 생략 기록 -> 커밋·보고(v1 work,
       test-decision, review, test-skipped, commit). work의 반환값은
-      $data.work_report에 남는다.
+      $data.work_report에 남는다. require_coding_approval이 켜져 있으면
+      방문마다 변경 계획을 제시하고 사용자 승인을 받은 뒤 work에 진입한다.
     params:
       verify: {type: str, default: ""}
     body:
+      - id: coding-approval-check
+        cond:
+          - if: "$data.inputs.require_coding_approval == true"
+            then: [coding-plan, coding-approval]
+          - else: []
       - id: work-group
         group:
           name: found
