@@ -1614,8 +1614,8 @@ body:
 | 조작 | CLI | 웹 API | MCP |
 |---|---|---|---|
 | 강제 이동 | `claunch cflow2 move <노드> [--reason R]` | `POST /api/cflow2/move {cwd, scope, node, reason}` | 없음 |
-| 이동 요청에 답함 | `claunch cflow2 move --approve\|--deny [--reason R]` | `POST /api/cflow2/move/resolve {cwd, scope, decision, reason}` | 없음(요청은 `flow_request_move`) |
-| 강제 결과 보고 | `claunch cflow2 report <작업> <결과> [--value JSON] [--reason R]` | `POST /api/cflow2/report {cwd, scope, node, outcome, value, reason}` | 없음 |
+| 이동·보고 요청에 답함 | `claunch cflow2 move --approve\|--deny [--reason R]` | `POST /api/cflow2/move/resolve {cwd, scope, decision, reason}` | 없음(요청은 `flow_request_move`) |
+| 강제 결과 보고 | `claunch cflow2 report <작업> <결과> [--value JSON] [--reason R]` | `POST /api/cflow2/report {cwd, scope, node, outcome, value, reason}` | 없음(요청은 `flow_request_move`의 `outcome`) |
 | 중단 | `claunch cflow2 abort --reason R` | `POST /api/cflow2/abort {cwd, scope, reason}` | 없음 |
 | 보관 | `claunch cflow2 archive` | `POST /api/cflow2/archive {cwd, scope}` | 없음 |
 | 재촉 | 없음 | `POST /api/cflow2/nudge {cwd, scope}` | 없음 |
@@ -1672,6 +1672,39 @@ v1의 `request_goto`에 해당한다. 드라이버는 런을 직접 옮길 수 �
   `NUDGE_CFLOW2_MOVE_APPROVED`, `NUDGE_CFLOW2_MOVE_DENIED`).
 - 세션 레일은 열린 요청을 사람이 처리할 항목(`owed`의 `move: <노드>`)으로 세고,
   `answers`의 `kind: move` 행이 Move·Refuse 버튼을 싣는다.
+
+#### 드라이버의 결과 보고 요청 (claunch-vwmoj)
+
+강제 결과 보고도 드라이버가 요청할 수 있다. 이 경로가 없을 때 드라이버는 사용자에게
+`claunch cflow2 report <작업> ok --reason …`을 입력하라고 문장으로 부탁했다(2026-10-12,
+s214: `local-landing-policy`의 verify가 `/usr/bin/python3`에서 `claude_launcher`를
+찾지 못해 실패). 그 명령은 verify를 CLI 프로세스의 스레드에서 시작했고, CLI가 끝나면서
+verify가 사라져 작업이 `verifying`으로 남았다.
+
+- 요청: `flow_request_move {node, reason, outcome, value?, skip_verify?}`. `outcome`이
+  있으면 이동 요청 대신 결과 보고 요청이다(`runtime.request_move` → `_request_report`).
+  `node`는 활성 작업의 인스턴스 id나 라벨이다. 결과는 요청할 때 작업의 `returns`로
+  검사한다. `move_request`에 `kind: report`, `instance`, `outcome`, `value`,
+  `skip_verify`, 직전 verify 실패(`last_verify`)가 실린다. 이동 요청은 `kind: move`다.
+  두 종류는 같은 자리 하나를 쓰므로 새 요청은 앞 요청을 바꾼다.
+- `skip_verify: true`는 verify를 거치지 않고 보고해 달라는 요청이다. 결과가 `ok`이고
+  작업에 verify가 있을 때만 받는다. 승인되면 저널에 `verify_skipped`가 남는다. 이
+  표시가 없으면 승인한 보고도 verify를 거친다.
+- 대기·철회·거절은 이동 요청과 같다. 거절된 뒤 드라이버는 그 작업을 다시 보고할 수
+  있다.
+- 승인: run 페이지의 Report 버튼, 터미널 띠의 Report 버튼, 또는
+  `claunch cflow2 move --approve`. 저널에 `move_approved`가 남고, 사람의 강제 결과
+  보고와 같은 경로(`_report_task`, `by: user`)로 보고한다. `reported`의 `text`에
+  요청 id와 요청자가 남는다. 그 사이 작업이 더 이상 보고를 기다리지 않으면 승인은
+  거절되고 요청은 `--deny`로 정리한다.
+- 대체: 요청이 열린 동안 사람이 같은 작업을 직접 보고하면 요청을 지운다(저널
+  `move_superseded`의 `reported`).
+- 안내: 승인 뒤 런의 세션에 `NUDGE_CFLOW2_REPORT_APPROVED`가 타이핑된다. 레일의
+  `owed`에는 `report: <작업>`으로 실리고, `answers`의 `kind: move` 행에
+  `report: true`, `outcome`, `skip_verify`가 붙는다.
+- CLI의 `report`와 `move --approve`는 자기가 시작한 verify가 끝날 때까지 기다린 뒤
+  종료한다(`cli_cflow2._after_verify`). verify는 그 명령을 실행한 프로세스의
+  스레드에서 돌기 때문이다.
 
 ## 3. IR
 
@@ -1903,11 +1936,11 @@ v1 툴과 이름이 겹치지 않도록 `flow_` 접두어를 쓴다.
 | `flow_asks` | 이 세션의 답을 기다리는 ask 목록 |
 | `flow_collection` | 컬렉션 조회와 연산(`action`: `list`, `push`, `set`, `remove`; `collection`, `key`, `item`, `fields`). 주체는 `driver`이고 `access`를 따른다(2.7) |
 | `flow_input` | 시작 뒤에 채우는 입력 쓰기(`name`, `value`). `set_by: [agent]`로 선언되고 비어 있는 입력만, 드라이버만(2.6) |
-| `flow_request_move` | `force_target` 노드로의 이동을 사람에게 요청(`node`, `reason`) 또는 철회(`cancel`). 아무것도 옮기지 않고, 답이 올 때까지 드라이버의 진행을 막는다(2.11) |
+| `flow_request_move` | `force_target` 노드로의 이동(`node`, `reason`) 또는 활성 작업의 결과 보고(`outcome`, `value`, `skip_verify`)를 사람에게 요청, 또는 철회(`cancel`). 아무것도 옮기지 않고, 답이 올 때까지 드라이버의 진행을 막는다(2.11) |
 
 런 중단(abort), 보관(archive), 강제 이동(move), 이동 요청에 대한 답, 사람의 강제 결과
-보고는 MCP 툴이 없다. 사람이 CLI나 웹 UI로 한다(2.11). 드라이버는 이동을 요청만 할 수
-있다(`flow_request_move`).
+보고는 MCP 툴이 없다. 사람이 CLI나 웹 UI로 한다(2.11). 드라이버는 이동과 결과 보고를
+요청만 할 수 있다(`flow_request_move`).
 
 권한(`cflow2/mcp.py`, `runtime.may_drive`):
 

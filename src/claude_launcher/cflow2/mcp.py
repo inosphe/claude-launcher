@@ -320,16 +320,33 @@ TOOLS = [
             "turn and write the person a decision brief. They answer from the run page "
             "(Move / Refuse) or 'claunch cflow2 move --approve|--deny'. 'cancel: true' "
             "withdraws your pending request. Doing the new work outside the run instead "
-            "is what this tool exists to replace."
+            "is what this tool exists to replace. With 'outcome' it asks for the other "
+            "thing only a person may do: report one of your ACTIVE tasks ('node' is its "
+            "instance id or label) with that outcome and 'value' -- e.g. a task whose "
+            "verify cannot run where the run stands. 'skip_verify: true' asks them to "
+            "report it past its verify. Use this instead of writing the user a "
+            "'claunch cflow2 report ...' line to type."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "node": {"type": "string",
-                         "description": "the force_target node's id or label"},
+                         "description": "the force_target node's id or label; with "
+                                        "'outcome', the active task's instance id or label"},
                 "reason": {"type": "string",
-                           "description": "why the run must go there (required): the "
-                                          "person answering did not watch you work"},
+                           "description": "why the run must go there, or why the task "
+                                          "cannot be reported the normal way, with the "
+                                          "evidence (required): the person answering "
+                                          "did not watch you work"},
+                "outcome": {"type": "string",
+                            "description": "ask for a person's report of the task 'node' "
+                                           "with this declared outcome instead of a move"},
+                "value": {"type": "object",
+                          "description": "the outcome's fields (with 'outcome')"},
+                "skip_verify": {"type": "boolean",
+                                "description": "with outcome 'ok': ask the person to report "
+                                               "past the task's verify (say why it cannot "
+                                               "run, and what you ran instead)"},
                 "cancel": {"type": "boolean",
                            "description": "withdraw your pending request instead"},
                 "scope": _SCOPE, "cwd": _CWD, "side": _SIDE,
@@ -526,9 +543,15 @@ def _call(name: str, args: dict) -> Dict[str, Any]:
             return runtime.cancel_move_request(by=by, cwd=cwd, scope=scope)
         node = str(args.get("node") or "").strip()
         if not node:
-            raise runtime.FlowError("'node' is required (a force_target node's id or label)")
+            raise runtime.FlowError("'node' is required (a force_target node's id or label, "
+                                    "or with 'outcome' the active task's)")
+        outcome = args.get("outcome")
+        if outcome is not None:
+            outcome = str(outcome).strip()
         return runtime.request_move(node, str(args.get("reason") or ""), by=by,
-                                    cwd=cwd, scope=scope)
+                                    cwd=cwd, scope=scope, outcome=outcome,
+                                    value=args.get("value"),
+                                    skip_verify=bool(args.get("skip_verify")))
     if name == "flow_rule":
         cwd, scope = _where(args)
         return runtime.rule(str(args.get("name") or ""), cwd=cwd, scope=scope)

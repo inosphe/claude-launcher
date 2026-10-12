@@ -163,3 +163,23 @@ def test_flow_request_move_files_holds_and_withdraws(project):
     assert err is None and "move_request" not in st
     st, err = _call("flow_report", {"node": "work"})
     assert err is None and st["status"] == "done"
+
+
+def test_flow_request_move_with_outcome_asks_for_a_report(project):
+    """claunch-vwmoj: the driver asks a person to report its active task
+    instead of writing them a 'claunch cflow2 report' line to type."""
+    (project / ".claunch" / "workflows" / "v2" / "mv2.yaml").write_text(MOVE_DEF,
+                                                                        encoding="utf-8")
+    st, err = _call("flow_start", {"workflow": "mv2"})
+    assert err is None, err
+    st, err = _call("flow_request_move", {"node": "intake", "outcome": "ok",
+                                          "reason": "only the user can tell"})
+    assert err is None and st["move_request"]["kind"] == "report"
+    assert st["move_request"]["outcome"] == "ok"
+    _, err = _call("flow_report", {"node": "intake"})
+    assert err and "a person to report 'intake'" in err
+    _, err = _call("flow_request_move", {"node": "intake", "outcome": "ok",
+                                         "skip_verify": True, "reason": "x"})
+    assert err and "has none" in err
+    st, err = _call("flow_request_move", {"cancel": True})
+    assert err is None and "move_request" not in st

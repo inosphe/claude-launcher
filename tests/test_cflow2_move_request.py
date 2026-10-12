@@ -200,3 +200,131 @@ def test_a_v1_tool_points_a_v2_session_at_flow_request_move(tmp_path, monkeypatc
     monkeypatch.setenv("CLAUNCH_SESSION", "u")
     with pytest.raises(state_mod.StateError, match="no active cflow run"):
         mcp.call_tool("request_goto", {"step": "intake", "reason": "a new task"})
+
+
+# -- the report kind (claunch-vwmoj) ------------------------------------------
+# s214's run stood on a task whose verify could not run where it stood
+# (/usr/bin/python3 without claude_launcher), and its only way forward was to
+# write the user a 'claunch cflow2 report ...' line to type. The driver now
+# asks for that report with flow_request_move(outcome=...), and a person grants
+# or refuses it like a move request.
+
+VERIFIED = """
+cflow: 2
+name: v
+nodes:
+  policy:
+    prompt: P
+    verify: [check-policy]
+  work:
+    prompt: W
+    returns:
+      ok: {n: int}
+  wrap: {prompt: X}
+body:
+  seq: [policy, work, wrap]
+"""
+
+
+class Runner:
+    def __init__(self, code=0):
+        self.code, self.calls = code, []
+
+    def __call__(self, command, cwd, env, timeout):
+        self.calls.append(command)
+        return self.code, "no module named claude_launcher" if self.code else "", False
+
+
+def _report_drv(tmp_path, runner):
+    d = Drv(tmp_path, VERIFIED)
+    st = runtime.report("policy", "ok", None, **d.kw(), verify_runner=runner)
+    runtime.verify_join()
+    st = runtime.status(cwd=d.cwd, scope=d.scope, now=T0, tick=False)
+    assert st["tasks"][0]["last_verify"]["exit"] == 1
+    d.st = st
+    return d
+
+
+def test_a_report_request_holds_the_driver_and_carries_the_failed_verify(tmp_path):
+    d = _report_drv(tmp_path, Runner(1))
+    st = runtime.request_move("policy", "verify cannot import claude_launcher", by="s1",
+                              outcome="ok", skip_verify=True, **d.kw())
+    req = st["move_request"]
+    assert req["kind"] == "report" and req["instance"].startswith("policy@")
+    assert req["outcome"] == "ok" and req["skip_verify"] is True
+    assert req["last_verify"]["exit"] == 1
+    assert st["next"].startswith("REPORT REQUESTED")
+    assert [t["label"] for t in st["tasks"]] == ["policy"]  # nothing reported yet
+    with pytest.raises(runtime.FlowError, match="a person to report 'policy'"):
+        runtime.report("policy", "ok", None, **d.kw())
+    ev = d.events("move_requested")[-1]
+    assert ev["kind"] == "report" and ev["outcome"] == "ok" and ev["skip_verify"] is True
+
+
+def test_granting_with_skip_verify_reports_past_the_verify(tmp_path):
+    runner = Runner(1)
+    d = _report_drv(tmp_path, runner)
+    runtime.request_move("policy", "verify cannot run here", by="s1", outcome="ok",
+                         skip_verify=True, **d.kw())
+    st = runtime.resolve_move("approve", by="user", reason="checked by hand", **d.kw(),
+                              verify_runner=runner)
+    runtime.verify_join()
+    assert len(runner.calls) == 1  # only the driver's own report ran it
+    assert st["move_request"]["decision"] == "approved"
+    assert "move_request" not in RunStore(d.cwd, d.scope).load_state()
+    assert [t["label"] for t in st["tasks"]] == ["work"]
+    assert d.events("verify_skipped")[-1]["by"] == "user"
+    rep = d.events("reported")[-1]
+    assert rep["by"] == "user" and "s1's request" in rep["text"]
+
+
+def test_granting_without_skip_verify_runs_the_verify(tmp_path):
+    d = _report_drv(tmp_path, Runner(1))
+    runtime.request_move("policy", "the import path is fixed now", by="s1", outcome="ok",
+                         **d.kw())
+    ok = Runner(0)
+    st = runtime.resolve_move("approve", by="user", **d.kw(), verify_runner=ok)
+    assert st["verifying"]["task"] == "policy"
+    runtime.verify_join()
+    st = runtime.status(cwd=d.cwd, scope=d.scope, now=T0, tick=False)
+    assert ok.calls and [t["label"] for t in st["tasks"]] == ["work"]
+    assert not d.events("verify_skipped")
+
+
+def test_a_report_request_is_checked_when_filed(tmp_path):
+    d = Drv(tmp_path, VERIFIED)
+    with pytest.raises(runtime.FlowError, match="'reason' is required"):
+        runtime.request_move("policy", " ", by="s1", outcome="ok", **d.kw())
+    with pytest.raises(runtime.FlowError, match="not active|no active|task"):
+        runtime.request_move("work", "x", by="s1", outcome="ok", value={"n": 1}, **d.kw())
+    d.st = runtime.report("policy", "ok", None, **d.kw(), verify_runner=Runner(0))
+    runtime.verify_join()
+    with pytest.raises(runtime.FlowError, match="refused"):
+        runtime.request_move("work", "x", by="s1", outcome="ok", value={"n": "one"}, **d.kw())
+    with pytest.raises(runtime.FlowError, match="has none"):
+        runtime.request_move("work", "x", by="s1", outcome="ok", value={"n": 1},
+                             skip_verify=True, **d.kw())
+    with pytest.raises(runtime.FlowError, match="give 'outcome' too"):
+        runtime.request_move("intake", "x", by="s1", skip_verify=True, **d.kw())
+
+
+def test_refusing_a_report_request_releases_the_driver(tmp_path):
+    d = _report_drv(tmp_path, Runner(1))
+    runtime.request_move("policy", "x", by="s1", outcome="ok", skip_verify=True, **d.kw())
+    st = runtime.resolve_move("deny", by="user", reason="fix the verify", **d.kw())
+    assert st["move_request"]["decision"] == "denied"
+    shown = runtime.status(cwd=d.cwd, scope=d.scope, now=T0, tick=False)
+    assert "report request for 'policy' was REFUSED" in shown["next"]
+    assert [t["label"] for t in shown["tasks"]] == ["policy"]
+    runtime.report("policy", "fail", None, **d.kw())  # the driver may report again
+
+
+def test_a_persons_own_report_supersedes_a_report_request(tmp_path):
+    d = Drv(tmp_path, VERIFIED)
+    d.st = runtime.report("policy", "ok", None, **d.kw(), verify_runner=Runner(0))
+    runtime.verify_join()
+    runtime.request_move("work", "x", by="s1", outcome="ok", value={"n": 1}, **d.kw())
+    st = runtime.report("work", "ok", {"n": 2}, "by hand", **d.kw(), by="user")
+    assert "move_request" not in st
+    assert d.events("move_superseded")[-1]["reported"].startswith("work@")
+    assert [t["label"] for t in st["tasks"]] == ["wrap"]

@@ -737,7 +737,8 @@ def _landing_queue_v2(slot, args: dict) -> dict:
 #: reached for it got "no active cflow run" and fell back to asking the person
 #: to type ``claunch cflow2 move`` -- which its own shell refuses (claunch-kgfr5).
 _V2_COUNTERPART = {
-    "request_goto": "flow_request_move (node: a force_target node, reason)",
+    "request_goto": "flow_request_move (node: a force_target node, reason; or with "
+                    "outcome: a person's report of an active task)",
     "select": "flow_select", "report": "flow_report", "next": "flow_status",
     "status": "flow_status",
 }
