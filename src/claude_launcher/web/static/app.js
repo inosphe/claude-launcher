@@ -4810,7 +4810,7 @@ async function refreshSessions(options) {
                 ...(meshBox ? [meshBox] : []));
     if (typeof sessionPrBadge === "function") {
       const prBadge = sessionPrBadge(s);
-      if (prBadge) head.appendChild(prBadge);
+      if (prBadge) head.insertBefore(prBadge, keys);
     }
     // Where it runs, then how full it is, then who has been near it: the two
     // identity lines first and the state line under them, so a reader
