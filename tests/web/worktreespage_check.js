@@ -27,6 +27,15 @@ assert.strictEqual(mergeLabel({ trunk: 'master', merged: false, ahead: 2 })[1], 
 assert.strictEqual(mergeLabel({ trunk: 'master', is_trunk: true, merged: true })[0], 'trunk');
 assert.strictEqual(mergeLabel({ trunk: '', merged: null })[0], 'unknown');
 assert.strictEqual(mergeLabel({ trunk: 'master', merged: null })[0], 'unknown');
+
+// How a checkout was made: CoW and its full-copy fallback are named, and a
+// checkout with no record reads as unknown rather than as git.
+const { createLabel } = ctx.WorktreesPage;
+assert.deepStrictEqual(Array.from(createLabel('cow')).slice(0, 2), ['create-cow', 'CoW']);
+assert.strictEqual(createLabel('cow-unavailable')[1], '전체 복사 (CoW 불가)');
+assert.strictEqual(createLabel('git')[1], 'git worktree');
+assert.deepStrictEqual(Array.from(createLabel('')).slice(0, 2), ['create-unknown', '생성 방식 기록 없음']);
+assert.strictEqual(createLabel(undefined)[0], 'create-unknown');
 console.log('ok');
 
 const worktrees = [

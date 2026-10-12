@@ -1059,6 +1059,10 @@
                shows under "existing worktree" and nowhere else. -->
           <label id="new-worktree-from-row">Branch from
             <select name="worktree_from"></select></label>
+          <!-- How the new checkout will be made -- copy-on-write clone or a
+               bare git worktree add -- decided by the daemon before anything
+               is created (/api/git "create", worktree.creation_mode). -->
+          <p id="worktree-create-mode" class="hidden"></p>
           <label class="check"><input type="radio" name="worktree_mode" value="existing">
             <span>existing worktree</span></label>
           <!-- The search box above the picker, in the same hidden row, for

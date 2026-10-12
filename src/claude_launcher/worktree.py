@@ -27,6 +27,17 @@ agent is working in, whoever created it.
 One thing does not come along with the checkout, and :func:`inherit_mcp_approval`
 carries it: which ``.mcp.json`` servers the person has approved. See that
 function for why the omission stops an agent dead.
+
+**A repository may make its own checkouts.** ``git worktree add`` checks out
+tracked files and nothing else, which for an Unreal project means a checkout
+with no ``Intermediate/``, ``DerivedDataCache/`` or ``Binaries/`` -- hours of
+rebuild before the agent can compile anything. ``.claunch/worktree.yaml`` can
+name a command that creates the checkout instead (a copy-on-write clone on a
+ReFS volume, say); see :func:`load_create_hook`. Whether a new checkout will
+be such a clone is decided *before* it is made and shown to whoever is about
+to make one (:func:`creation_mode`), and recorded on the checkout afterwards
+(:func:`created_mode`), because "is this a full copy of my 200 GB tree or a
+bare checkout" is not something to find out from the disk meter.
 """
 
 from __future__ import annotations
@@ -36,10 +47,10 @@ import os
 import re
 import subprocess
 import sys
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple, Union
 
 from . import herdr
 
@@ -79,6 +90,31 @@ LOCAL_SETTINGS = Path(".claude") / "settings.local.json"
 #: The one key a new worktree inherits from the checkout it was cut from.
 MCP_APPROVAL_KEY = "enabledMcpjsonServers"
 
+#: A repository's own worktree settings, relative to its root.
+CREATE_CONFIG = Path(".claunch") / "worktree.yaml"
+
+#: Written into a checkout's git admin directory (``<common>/worktrees/<id>``)
+#: by :func:`create`: how the checkout was made. There and not in the tree,
+#: so it is never an untracked file and goes away with ``git worktree prune``.
+CREATE_RECORD = "claunch-create.json"
+
+#: Seconds a create hook may run when the config does not say. A block clone
+#: of a large Unreal tree takes about a minute; a hook that falls back to a
+#: full copy can take far longer, and is still better finished than killed.
+DEFAULT_CREATE_TIMEOUT = 1800.0
+
+#: Filesystems on which a Windows block clone (FSCTL_DUPLICATE_EXTENTS_TO_FILE)
+#: is possible. NTFS is not one of them: a "copy-on-write" hook run there copies
+#: every byte.
+BLOCK_CLONE_FILESYSTEMS = frozenset({"ReFS"})
+
+#: How a new checkout will be made, as :func:`creation_mode` reports it.
+MODE_GIT = "git"                    # git worktree add: tracked files only
+MODE_HOOK = "hook"                  # the repository's own command
+MODE_COW = "cow"                    # that command, block-cloning on ReFS
+MODE_COW_UNAVAILABLE = "cow-unavailable"  # declared cow, but cannot clone here
+MODE_INVALID = "invalid"            # the config is broken; creating fails
+
 
 class WorktreeError(Exception):
     """Raised when a worktree was asked for and could not be made."""
@@ -101,6 +137,21 @@ class Worktree:
     #: the caller named it -- a branch, a commit, or another worktree. Only
     #: ever set for a fresh checkout, so it and ``rebased`` never both hold.
     branched_from: str = ""
+    #: How a *fresh* checkout was made (one of the ``MODE_*`` values); for a
+    #: reused one, what its creation record says, or ``""`` when it has none.
+    create_mode: str = ""
+
+
+@dataclass(frozen=True)
+class CreateHook:
+    """A repository's own command for making a checkout (``create:``)."""
+
+    #: argv, run with the repository root as the working directory.
+    command: List[str] = field(default_factory=list)
+    timeout: float = DEFAULT_CREATE_TIMEOUT
+    #: The repository says the command block-clones. Only a claim: whether the
+    #: volume can honour it is :func:`creation_mode`'s question.
+    cow: bool = False
 
 
 # --------------------------------------------------------------------------- #
@@ -380,6 +431,263 @@ def hide_worktrees(root: Path) -> bool:
         return False
 
 
+def load_create_hook(root: Path) -> Tuple[Optional[CreateHook], str]:
+    """The repository's create hook, and why it could not be read.
+
+    ``(None, "")`` when ``.claunch/worktree.yaml`` is absent or has no
+    ``create:`` -- the ordinary case, and ``git worktree add`` makes the
+    checkout. ``(None, reason)`` when the file is there but unusable: a
+    repository that asked for its own command must not silently get a bare
+    checkout instead, so :func:`create` refuses on it and the pickers say so.
+
+    The file::
+
+        create:
+          command: [pwsh, -NoProfile, -File, tools/cow-worktree.ps1]
+          timeout: 1800   # seconds, optional
+          cow: true       # the command block-clones; optional
+
+    ``command`` is an argv list, run from the repository root. It must leave a
+    worktree of this repository registered at ``$CLAUNCH_WT_PATH`` on the
+    branch ``$CLAUNCH_WT_BRANCH`` (see :func:`_run_create_hook`).
+    """
+    path = root / CREATE_CONFIG
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None, ""
+    except OSError as exc:
+        return None, f"cannot read {CREATE_CONFIG.as_posix()}: {exc}"
+    import yaml
+
+    try:
+        data = yaml.safe_load(text) or {}
+    except yaml.YAMLError as exc:
+        return None, f"{CREATE_CONFIG.as_posix()} is not valid YAML: {exc}"
+    if not isinstance(data, dict):
+        return None, f"{CREATE_CONFIG.as_posix()} must be a mapping"
+    spec = data.get("create")
+    if spec is None:
+        return None, ""
+    where = f"{CREATE_CONFIG.as_posix()}: create"
+    if not isinstance(spec, dict):
+        return None, f"{where} must be a mapping"
+    command = spec.get("command")
+    if (not isinstance(command, list) or not command
+            or not all(isinstance(a, str) and a for a in command)):
+        return None, f"{where}.command must be a non-empty list of strings"
+    timeout = spec.get("timeout", DEFAULT_CREATE_TIMEOUT)
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) \
+            or timeout <= 0:
+        return None, f"{where}.timeout must be a positive number of seconds"
+    cow = spec.get("cow", False)
+    if not isinstance(cow, bool):
+        return None, f"{where}.cow must be true or false"
+    return CreateHook(command=list(command), timeout=float(timeout), cow=cow), ""
+
+
+def _existing_ancestor(path: Path) -> Path:
+    """``path`` or its nearest ancestor that exists (the worktrees directory
+    is created on the first checkout, and the volume is asked before that)."""
+    current = Path(os.path.abspath(path))
+    while not current.exists() and current.parent != current:
+        current = current.parent
+    return current
+
+
+def _volume_root(path: Path) -> str:
+    """The mount point ``path`` lives on (``F:\\``, or a mounted folder);
+    ``""`` off Windows or when Windows will not say."""
+    if os.name != "nt":
+        return ""
+    import ctypes
+
+    buf = ctypes.create_unicode_buffer(1024)
+    ok = ctypes.windll.kernel32.GetVolumePathNameW(
+        str(_existing_ancestor(path)), buf, len(buf)
+    )
+    return buf.value if ok else ""
+
+
+def volume_filesystem(path: Path) -> str:
+    """The filesystem name of the volume ``path`` is on (``ReFS``, ``NTFS``).
+
+    ``""`` when it cannot be read -- including on every platform but Windows,
+    where block cloning means something else and no hook claims it today.
+    """
+    volume = _volume_root(path)
+    if not volume:
+        return ""
+    import ctypes
+
+    name = ctypes.create_unicode_buffer(261)
+    ok = ctypes.windll.kernel32.GetVolumeInformationW(
+        volume, None, 0, None, None, None, name, len(name)
+    )
+    return name.value if ok else ""
+
+
+def _same_volume(a: Path, b: Path) -> Optional[bool]:
+    """Whether ``a`` and ``b`` are on one volume; ``None`` when unknown.
+    A block clone cannot cross volumes, whatever both of them are."""
+    va, vb = _volume_root(a), _volume_root(b)
+    if not va or not vb:
+        return None
+    return os.path.normcase(va) == os.path.normcase(vb)
+
+
+def creation_mode(root: Path) -> dict:
+    """How a *new* worktree of ``root`` would be made, decided before it is.
+
+    The answer every picker shows next to "new worktree", so the person
+    creating one knows whether they are about to get a block-cloned copy of
+    the whole tree (build caches and all), a bare ``git worktree add``, or --
+    the case worth a warning -- a hook that claims copy-on-write on a volume
+    that cannot do it and will therefore copy every byte.
+
+    ``mode`` is one of the ``MODE_*`` values; ``summary`` is one line for a
+    person, written to follow the mode's name in :data:`MODE_WORDS`
+    ("copy-on-write: block-cloned on ReFS by ..."); the rest are the facts it
+    was decided from.
+    """
+    hook, error = load_create_hook(root)
+    target = worktrees_dir(root)
+    filesystem = volume_filesystem(target)
+    same = _same_volume(root, target)
+    block_clone = filesystem in BLOCK_CLONE_FILESYSTEMS and same is not False
+    command = " ".join(hook.command) if hook else ""
+    if error:
+        mode = MODE_INVALID
+        summary = f"{error} -- creating a worktree will fail until it is fixed"
+    elif hook is None:
+        mode = MODE_GIT
+        summary = ("tracked files only (no create hook in "
+                   f"{CREATE_CONFIG.as_posix()})")
+    elif not hook.cow:
+        mode = MODE_HOOK
+        summary = f"made by {command}"
+    elif block_clone:
+        mode = MODE_COW
+        summary = f"block-cloned on {filesystem} by {command}"
+    else:
+        mode = MODE_COW_UNAVAILABLE
+        if same is False:
+            why = "the worktrees directory is on a different volume from the repository"
+        else:
+            why = f"{target.anchor or 'the volume'} is {filesystem or 'not a known filesystem'}"
+        summary = (f"the create hook is declared copy-on-write, but {why}: "
+                   "block cloning is unavailable, so every file will be copied")
+    return {
+        "mode": mode,
+        "summary": summary,
+        "cow": mode == MODE_COW,
+        "command": list(hook.command) if hook else [],
+        "config": (root / CREATE_CONFIG).as_posix() if (hook or error) else "",
+        "filesystem": filesystem,
+        "same_volume": same,
+        "block_clone": block_clone,
+        "error": error,
+    }
+
+
+def _admin_dir(path: Path) -> Optional[Path]:
+    """A linked checkout's git admin directory, read from its ``.git`` file.
+
+    Read rather than asked of git, because the Worktrees page reads it for
+    every row of every repository and a git process per row is what that
+    page is careful not to spend.
+    """
+    try:
+        text = (Path(path) / ".git").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not text.startswith("gitdir:"):
+        return None
+    admin = Path(text[len("gitdir:"):].strip())
+    return admin if admin.is_absolute() else Path(path) / admin
+
+
+def _record_creation(path: Path, mode: str, hook: Optional[CreateHook]) -> None:
+    """Note on the checkout how it was made. Best effort: a record that
+    cannot be written costs a badge, never a launch."""
+    admin = _admin_dir(path)
+    if admin is None:
+        return
+    try:
+        (admin / CREATE_RECORD).write_text(json.dumps({
+            "mode": mode,
+            "command": list(hook.command) if hook else [],
+            "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def created_mode(path: Path) -> str:
+    """How the checkout at ``path`` was made, from its creation record.
+
+    ``""`` for a checkout claunch did not make, or made before the record
+    existed -- unknown, which is not the same as ``git``.
+    """
+    admin = _admin_dir(path)
+    if admin is None:
+        return ""
+    try:
+        data = json.loads((admin / CREATE_RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    mode = data.get("mode") if isinstance(data, dict) else None
+    return mode if isinstance(mode, str) else ""
+
+
+def _run_create_hook(
+    root: Path, hook: CreateHook, path: Path, name: str, *,
+    new_branch: bool, start: str,
+) -> None:
+    """Run the repository's create command and hold it to the contract.
+
+    The command gets the request in its environment -- ``CLAUNCH_WT_ROOT``
+    (the main checkout), ``CLAUNCH_WT_PATH`` (where the checkout must be),
+    ``CLAUNCH_WT_BRANCH``, ``CLAUNCH_WT_NEW_BRANCH`` (``1`` to cut that branch,
+    ``0`` to check out the existing one) and ``CLAUNCH_WT_START`` (where a new
+    branch starts; empty for HEAD). Exiting zero is not enough: the checkout
+    must then be a registered worktree of this repository, or the launch would
+    land in a directory git does not know.
+    """
+    env = dict(os.environ)
+    env.update({
+        "CLAUNCH_WT_ROOT": str(root),
+        "CLAUNCH_WT_PATH": str(path),
+        "CLAUNCH_WT_BRANCH": name,
+        "CLAUNCH_WT_NEW_BRANCH": "1" if new_branch else "0",
+        "CLAUNCH_WT_START": start,
+    })
+    shown = " ".join(hook.command)
+    try:
+        done = subprocess.run(
+            hook.command, cwd=str(root), env=env, capture_output=True,
+            text=True, encoding="utf-8", errors="replace",
+            stdin=subprocess.DEVNULL, timeout=hook.timeout,
+        )
+    except FileNotFoundError as exc:
+        raise WorktreeError(f"create hook {shown!r} could not start: {exc}")
+    except subprocess.TimeoutExpired:
+        raise WorktreeError(
+            f"create hook {shown!r} did not finish in {hook.timeout:g}s"
+        )
+    if done.returncode != 0:
+        tail = "\n".join((done.stderr or done.stdout or "").strip().splitlines()[-15:])
+        raise WorktreeError(
+            f"create hook {shown!r} exited {done.returncode}" +
+            (f":\n{tail}" if tail else "")
+        )
+    if not path.exists() or not _registered(root, path):
+        raise WorktreeError(
+            f"create hook {shown!r} exited 0 but {path} is not a registered "
+            "worktree of this repository"
+        )
+
+
 def create(root: Path, name: str, *, start: str = "") -> Worktree:
     """Create -- or reuse -- the worktree ``name`` of the repository at ``root``.
 
@@ -393,6 +701,10 @@ def create(root: Path, name: str, *, start: str = "") -> Worktree:
     on its own branch, the way a stacked pull request begins on the one
     below it, names that branch here. Ignored when the branch already
     exists: a branch that has history is checked out as it stands.
+
+    A new checkout is made by the repository's create hook when it has one
+    (:func:`load_create_hook`) and by ``git worktree add`` otherwise; either
+    way the checkout is stamped with how (:func:`created_mode`).
     """
     name = validate_name(name)
     path = worktrees_dir(root) / name
@@ -403,26 +715,38 @@ def create(root: Path, name: str, *, start: str = "") -> Worktree:
                 f"{path} already exists and is not a worktree of this repository"
             )
         return Worktree(
-            path=path, name=name, branch=current_branch(path) or name, created=False
+            path=path, name=name, branch=current_branch(path) or name, created=False,
+            create_mode=created_mode(path),
         )
+    hook, error = load_create_hook(root)
+    if error:
+        raise WorktreeError(error)
     path.parent.mkdir(parents=True, exist_ok=True)
     # An existing branch is checked out as it stands (resuming named work); a
     # new one is cut from HEAD, or from `start` when the caller named one.
     # `git worktree add` refuses either if the branch is checked out somewhere
     # else, which is the refusal we want.
     reused_branch = _branch_exists(root, name)
-    args = (
-        ["worktree", "add", str(path), name]
-        if reused_branch
-        else ["worktree", "add", "-b", name, str(path), *([start] if start else [])]
-    )
-    done = _git(args, cwd=str(root))
-    if done.returncode != 0:
-        detail = (done.stderr or done.stdout or "").strip()
-        raise WorktreeError(f"git worktree add failed: {detail}")
+    if hook is not None:
+        mode = creation_mode(root)["mode"]
+        _run_create_hook(root, hook, path, name,
+                         new_branch=not reused_branch, start=start)
+    else:
+        mode = MODE_GIT
+        args = (
+            ["worktree", "add", str(path), name]
+            if reused_branch
+            else ["worktree", "add", "-b", name, str(path), *([start] if start else [])]
+        )
+        done = _git(args, cwd=str(root))
+        if done.returncode != 0:
+            detail = (done.stderr or done.stdout or "").strip()
+            raise WorktreeError(f"git worktree add failed: {detail}")
+    _record_creation(path, mode, hook)
     inherit_mcp_approval(root, path)
     return Worktree(
-        path=path, name=name, branch=current_branch(path) or name, created=True
+        path=path, name=name, branch=current_branch(path) or name, created=True,
+        create_mode=mode,
     )
 
 
@@ -581,7 +905,7 @@ def info(cwd: str) -> dict:
     if root is None:
         return {"repo": False, "root": "", "branch": "", "branches": [],
                 "worktrees": [], "paths": {}, "worktree_branches": {},
-                "root_branch": ""}
+                "root_branch": "", "create": None}
     pairs = _existing_paths(root)
     return {
         "repo": True,
@@ -599,6 +923,9 @@ def info(cwd: str) -> dict:
         # name -> the branch checked out there ("" when detached), so a
         # "branch from" picker can say what a new checkout would start on.
         "worktree_branches": _existing_branches(root),
+        # How a new checkout would be made -- copy-on-write or a bare
+        # `git worktree add` -- so the picker can say so before it is made.
+        "create": creation_mode(root),
     }
 
 
@@ -662,7 +989,7 @@ def rebase(wt: "Worktree", base: str) -> "Worktree":
         )
     return Worktree(
         path=wt.path, name=wt.name, branch=current_branch(wt.path) or wt.branch,
-        created=wt.created, rebased=base,
+        created=wt.created, rebased=base, create_mode=wt.create_mode,
     )
 
 # --------------------------------------------------------------------------- #
@@ -691,6 +1018,10 @@ def interactive() -> bool:
 def _ask(root: Path) -> Optional[str]:
     """Ask whether to branch off, and under what name. ``None`` = stay put."""
     suggestion = default_name()
+    how = creation_mode(root)
+    print(f"new worktrees of {root.name}: "
+          f"{MODE_WORDS.get(how['mode'], how['mode'])}: {how['summary']}",
+          file=sys.stderr)
     try:
         answer = input(
             f"create a git worktree for this launch, so it does not share "
@@ -862,7 +1193,7 @@ def _checkout(
     wt = create(root, name, start=start_point(root, branch_from))
     return Worktree(
         path=wt.path, name=wt.name, branch=wt.branch, created=wt.created,
-        branched_from=branch_from,
+        branched_from=branch_from, create_mode=wt.create_mode,
     )
 
 
@@ -880,7 +1211,20 @@ def announce(wt: Optional[Worktree], stream=None) -> None:
         verb = f"reusing (rebased onto {wt.rebased})"
     if wt.branched_from:
         verb = f"created (branched from {wt.branched_from})"
+    how = MODE_WORDS.get(wt.create_mode, "")
     print(
-        f"{verb} worktree {wt.name!r} on branch {wt.branch!r}: {wt.path}",
+        f"{verb} worktree {wt.name!r} on branch {wt.branch!r}"
+        f"{f' [{how}]' if how else ''}: {wt.path}",
         file=stream or sys.stderr,
     )
+
+
+#: How :func:`announce` and the wizard name a creation mode. The cow-unavailable case says
+#: what it cost, since that is the one a person did not mean to get.
+MODE_WORDS = {
+    MODE_GIT: "git worktree add",
+    MODE_HOOK: "create hook",
+    MODE_COW: "copy-on-write",
+    MODE_COW_UNAVAILABLE: "full copy: copy-on-write unavailable",
+    MODE_INVALID: "create config error",
+}

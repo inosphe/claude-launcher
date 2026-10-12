@@ -327,6 +327,58 @@ A worktree that was *asked for* and could not be made fails the launch rather
 than quietly falling back to the shared checkout — that fallback is the exact
 collision the flag was used to avoid.
 
+#### A repository's own create command (copy-on-write checkouts)
+
+`git worktree add` checks out tracked files only. For a repository whose
+working tree is mostly untracked build output — an Unreal project's
+`Intermediate/`, `DerivedDataCache/`, `Binaries/` — that is a checkout that
+needs hours of rebuilding before an agent can compile in it. A repository can
+name its own command for making checkouts instead, in
+`.claunch/worktree.yaml`:
+
+```yaml
+create:
+  command: [pwsh, -NoProfile, -File, tools/cow-worktree.ps1]  # argv, run from the repo root
+  timeout: 1800   # seconds (default 1800)
+  cow: true       # the command block-clones (ReFS); used to say so up front
+```
+
+The command is run only for a **new** checkout (a reused one is entered as
+it is) and receives the request in its environment: `CLAUNCH_WT_ROOT` (the
+main checkout), `CLAUNCH_WT_PATH` (where the checkout must be),
+`CLAUNCH_WT_BRANCH`, `CLAUNCH_WT_NEW_BRANCH` (`1` to cut that branch, `0` to
+check out the existing one) and `CLAUNCH_WT_START` (where a new branch starts;
+empty for HEAD). It must leave a registered worktree of the repository at
+`CLAUNCH_WT_PATH`: a non-zero exit, a timeout, or a zero exit with no worktree
+there fails the launch with the command's last lines of output. A config that
+cannot be read also fails it — a repository that asked for its own command
+never silently gets a bare checkout.
+
+**Whether a new checkout will be copy-on-write is decided before it is made,
+and shown.** The daemon reads the config and the volume the worktrees
+directory is on, and every place that offers "new worktree" says which of
+these it will be:
+
+| Mode | Shown as | When |
+| ---- | -------- | ---- |
+| `cow` | copy-on-write | `cow: true` and the worktrees directory is on ReFS, on the repository's volume |
+| `cow-unavailable` | full copy (warning) | `cow: true`, but the volume is not ReFS or is a different volume: the hook will copy every file |
+| `hook` | create hook | a create command without `cow: true` |
+| `git` | git worktree add | no create command |
+| `invalid` | config error | `.claunch/worktree.yaml` cannot be read; creating fails until it is fixed |
+
+It appears in the web form's Worktree step under *new worktree*, in the
+wizard's *new worktree* rows, before the interactive `claunch run` question,
+and in the launch line (`created worktree 'x' on branch 'x' [copy-on-write]`).
+`GET /api/git` carries it as `create`. Each checkout claunch makes is stamped
+with how it was made (`claunch-create.json` in the checkout's git admin
+directory, so the tree stays clean), and the Worktrees page shows that on
+every card — a checkout made before the stamp existed, or not by claunch,
+reads *생성 방식 기록 없음* rather than being guessed — together with each
+repository's mode for the next checkout. The volume probe is Windows-only;
+elsewhere the filesystem reads as unknown and a `cow: true` hook is reported
+as `cow-unavailable`.
+
 ## Login & tokens
 
 `claude setup-token` runs an interactive flow (it renders a full-screen TUI), so
