@@ -33904,6 +33904,105 @@ function sessTask(s) {
   return box;
 }
 
+/* The prompt packs this session was opened with.
+
+   `SessionDef.prompt_packs` is the record of every pack that went into the
+   opening, text included (daemon/harness.py): the workspace's copy, claunch's
+   own copy of a pack a role requires, the daemon's prompt, a prompter server's
+   snapshot. A pack is a page of instructions, and a session usually has three
+   or four of them, so drawing them one after another would bury the briefing
+   and the send box under them. The section is a row of labels instead — one
+   chip per pack, in opening order — and pressing a chip opens that pack's
+   detail under the row: where its text came from, why it is there, and the
+   text itself as it was recorded. Pressing the open chip again shuts it.
+
+   Which chip is open is held per session in a map outside the panel, for the
+   reason sessTaskOpen gives: the 2s poll rebuilds every node in here.
+
+   Empty is drawn, like the task above it: no packs recorded is the ordinary
+   case for a session opened by hand, and a section that appeared only
+   sometimes would read as one that failed to load. */
+const sessPackOpen = new Map();   // session name -> index of the open pack
+
+/* Where a recorded pack's text came from, in the words of the header the
+   opening gave it (prompt_packs.opening_block). */
+function packOrigin(p) {
+  const req = p.required_by || [];
+  switch (p.source) {
+    case "package":
+      return "shipped with claunch, not installed in this workspace — " + (
+        req.length ? `required by role${req.length > 1 ? "s" : ""} ${req.join(", ")}`
+          : p.ticked ? "ticked at session creation" : "reason not recorded");
+    case "daemon":
+      return "this daemon's own prompt, given to every session it starts";
+    case "prompter":
+      return "from the configured prompter server, selected at session creation";
+    default:
+      return "installed in this workspace (.claunch/prompts/" + p.id +
+        ".md), chosen at session creation";
+  }
+}
+
+function sessPromptPacks(s) {
+  const box = el("div", "sess-packs");
+  const packs = (s.prompt_packs || []).filter((p) => p && p.id);
+  const head = el("h3", null, `Prompt packs (${packs.length})`);
+  head.title =
+    "the packs that went into this session's opening, recorded at creation " +
+    "— the text below is what it was given, even if the workspace's copy " +
+    "has changed since";
+  box.appendChild(head);
+  if (!packs.length) {
+    box.appendChild(el(
+      "p", "wf-note",
+      "no prompt packs recorded — a session opened by hand often has none"
+    ));
+    return box;
+  }
+  const name = s.name || "";
+  let open = sessPackOpen.get(name);
+  if (!(open >= 0 && open < packs.length)) open = -1;
+  const row = el("div", "sess-pack-chips");
+  row.setAttribute("role", "tablist");
+  packs.forEach((p, i) => {
+    const on = i === open;
+    const chip = el("button", "sess-pack-chip" + (on ? " on" : ""),
+                    p.source === "prompter" && p.title ? p.title : p.id);
+    chip.setAttribute("role", "tab");
+    chip.setAttribute("aria-selected", on ? "true" : "false");
+    chip.title = on ? "hide this pack" : packOrigin(p);
+    chip.addEventListener("click", () => {
+      if (on) sessPackOpen.delete(name);
+      else sessPackOpen.set(name, i);
+      refreshSession();   // redraw now, not at the poll's leisure
+    });
+    row.appendChild(chip);
+  });
+  box.appendChild(row);
+  if (open < 0) return box;
+
+  const p = packs[open];
+  const text = String(p.text || "");
+  const detail = el("div", "sess-pack-detail");
+  detail.setAttribute("role", "tabpanel");
+  const dl = el("dl", "sess-pack-facts");
+  const fact = (label, value) => {
+    if (!value) return;
+    dl.appendChild(el("dt", null, label));
+    dl.appendChild(el("dd", null, String(value)));
+  };
+  fact("id", p.id);
+  if (p.source === "prompter") fact("title", p.title);
+  fact("source", packOrigin(p));
+  if (p.source === "prompter") fact("url", p.url);
+  fact("size", `${text.split("\n").length} lines, ${text.length} characters`);
+  detail.appendChild(dl);
+  // As recorded, not rendered — the same reason the task above is a <pre>.
+  detail.appendChild(el("pre", "sess-pack-text", text));
+  box.appendChild(detail);
+  return box;
+}
+
 /* ---- the panel's standing marks ---------------------------------------
 
    Three flags a reader sets ON a session, as opposed to the facts above them
@@ -34353,6 +34452,10 @@ function renderSession(data) {
     // what the session has made of the job, and comparing the two is only
     // possible with the original in front of you.
     view.appendChild(sessTask(s));
+
+    // And what it was given to work by: the packs that went into the same
+    // opening, as labels to open one at a time.
+    view.appendChild(sessPromptPacks(s));
 
     // What this session is DOING, next to the facts above: the llm summary,
     // fetched on first open and repainted by the 2s poll, with the card's own

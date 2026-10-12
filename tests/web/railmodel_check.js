@@ -122,6 +122,7 @@ function sessBeads() { return el("div", "sess-beads"); }
 function sessCommits() { return el("div", "sess-commits"); }
 function sessVscode() { return el("div", "sess-vscode"); }
 function sessTask() { return el("div", "sess-task"); }
+function sessPromptPacks() { return el("div", "sess-packs"); }
 /* The three standing marks under the facts list — sessflags_check's subject;
    here it is only a call that has to resolve. */
 function sessFlags() { return el("div", "sess-flags"); }

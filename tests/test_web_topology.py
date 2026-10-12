@@ -512,6 +512,7 @@ CHECKS = [
         "sesscommits_check.js",
         "vscode_check.js",
         "sesstask_check.js",
+        "sessprompts_check.js",
         "railprofile_check.js",
         "railprogress_check.js",
         "railcompacting_check.js",

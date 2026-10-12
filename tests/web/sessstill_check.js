@@ -132,6 +132,7 @@ function sessMigrate() { return el("div", "sess-migrate"); }
 function sessNote() { return el("div", "sess-note"); }
 function sessFlags() { return el("div", "sess-flags"); }
 function sessTask() { return el("div", "sess-task"); }
+function sessPromptPacks() { return el("div", "sess-packs"); }
 function sessInputJournal() { return el("div", "sess-input-journal"); }
 function rolePanels() { return []; }
 function sessBeads() { return el("div", "sess-beads"); }
