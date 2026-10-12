@@ -674,6 +674,70 @@ def test_held_deliveries_share_one_restore_and_keep_queue_order(home, tmp_path, 
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("sender", ["old", "staged", "wake"])
+def test_deferred_messages_keep_order_during_actual_restore_staging(
+    home, tmp_path, monkeypatch, sender
+):
+    import sys
+    from claude_launcher import store
+    from test_daemon_e2e import CHILD
+
+    _register_py_harness()
+
+    def configure(doc):
+        doc["harnesses"]["py"]["input_readiness"] = "bracketed-paste"
+        doc["harnesses"]["py"]["command"] = [
+            sys.executable, "-u", "-c",
+            "import sys; sys.stdout.write('\\x1b[?2004h'); sys.stdout.flush()\n" + CHILD,
+        ]
+
+    store.update(configure)
+
+    async def run():
+        mgr = _manager()
+        mgr.resumable = lambda s: True
+        entered, release = asyncio.Event(), asyncio.Event()
+        received = []
+        original_launch = mgr.launch_async
+        original_deliver = Session._deliver
+
+        async def launch(session, **kwargs):
+            entered.set()
+            await release.wait()
+            return await original_launch(session, **kwargs)
+
+        async def deliver(session, text, **kwargs):
+            result = await original_deliver(session, text, **kwargs)
+            if result:
+                received.append(text)
+            return result
+
+        monkeypatch.setattr(mgr, "launch_async", launch)
+        monkeypatch.setattr(Session, "_deliver", deliver)
+        try:
+            original = mgr.create(SessionDef(name="sleepy", harness="py", cwd=str(tmp_path)))
+            await _wait_screen(original, "READY")
+            mgr.hold("sleepy")
+            await original.wait_for("exited", timeout=10, threshold=0.5)
+            assert original.queue_delivery("first")
+            await asyncio.wait_for(entered.wait(), 15)
+            current = mgr.get("sleepy")
+            assert current is not original and not current.exited
+            if sender == "wake":
+                assert mgr.wake_soon("sleepy", deliver="second")
+            else:
+                assert (original if sender == "old" else current).queue_delivery("second")
+            release.set()
+            await asyncio.wait_for(asyncio.gather(*list(mgr._wake_tasks)), 15)
+            await asyncio.wait_for(asyncio.gather(*list(current._deferred_deliveries)), 15)
+            assert received == ["first", "second"]
+        finally:
+            release.set()
+            await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
 def test_failed_restore_leaves_operator_input_queued_for_retry(home, monkeypatch):
     from unittest.mock import AsyncMock
     from claude_launcher.daemon import session_input

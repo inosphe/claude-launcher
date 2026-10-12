@@ -1302,9 +1302,12 @@ class Session:
         are not a durable mailbox across daemon restarts. Waiting in a task
         keeps HTTP handlers and other sessions' clock ticks responsive.
         """
-        if self.exited or getattr(self, "held_at", None):
+        pending = getattr(self, "message_restore_pending", None)
+        restoring = bool(pending and pending(self.sdef.name))
+        if self.exited or getattr(self, "held_at", None) or restoring:
             enqueue = getattr(self, "queue_on_message", None)
-            return bool(enqueue and self.held_at and enqueue(self.sdef.name, text))
+            return bool(enqueue and (getattr(self, "held_at", None) or restoring)
+                        and enqueue(self.sdef.name, text))
 
         # Lazily, and inline rather than through the helper, because this
         # method is also borrowed by doubles that are not Sessions at all:
