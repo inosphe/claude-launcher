@@ -39,11 +39,20 @@ const server = http.createServer((req, res) => {
       window.write = text => new Promise(resolve => t.write(text, resolve));
       window.realClipboard = navigator.clipboard;
     });
-    const hover = async row => {
+    const point = async (row, col = 0) => {
       const rect = await page.locator('.xterm-screen').boundingBox();
-      await page.mouse.move(rect.x + 15, rect.y + (row + 0.5) * rect.height / 10);
+      return [rect.x + (col + 0.5) * rect.width / 40, rect.y + (row + 0.5) * rect.height / 10];
     };
-    const button = page.locator('.term-command-copy');
+    const hover = async (row, col = 0) => page.mouse.move(...await point(row, col));
+    const clickAt = async (row, col = 0) => { await hover(row, col); await page.mouse.down(); await page.mouse.up(); };
+    // The layer itself has no box; its underline rows are what shows.
+    const link = page.locator('.term-command-link-row').first();
+    const copied = () => page.waitForFunction(() => {
+      const badge = document.querySelector('.term-command-copied');
+      return !badge.hidden && badge.textContent === 'Copied';
+    });
+    const clipboard = () => page.evaluate(() => realClipboard.readText());
+    assert.equal(await page.locator('button').count(), 0, 'no Copy command button');
     const command = '! echo "한국어 and two  spaces ' + 'x'.repeat(45) + '"';
     await page.evaluate(async cmd => {
       await realClipboard.writeText('unchanged');
@@ -51,40 +60,57 @@ const server = http.createServer((req, res) => {
       await write('\x1b[?1000h\x1b[32m' + cmd + '\x1b[0m\r\nordinary output');
     }, command);
     await hover(1); // second physical row of a single command
-    assert.equal(await button.isVisible(), true);
-    assert.equal(await page.evaluate(() => realClipboard.readText()), 'unchanged');
-    await button.click();
-    await page.waitForFunction(() => document.querySelector('.term-command-copy').textContent === 'Copied');
-    assert.equal(await page.evaluate(() => realClipboard.readText()), command);
-    assert.deepEqual(await page.evaluate(() => sent), [], 'button never sends PTY mouse/input bytes');
+    assert.equal(await link.isVisible(), true, 'hovering the text underlines it');
+    assert.equal(await page.locator('.term-command-link-row').count(), 2, 'one underline per wrapped row');
+    const underline = await page.locator('.term-command-link-row').first()
+      .evaluate(el => getComputedStyle(el).borderBottomStyle);
+    assert.equal(underline, 'solid');
+    assert.equal(await page.locator('.xterm-screen').evaluate(el => getComputedStyle(el).cursor), 'pointer',
+      'link cursor over the command even while the PTY tracks the mouse');
+    assert.equal(await clipboard(), 'unchanged', 'hover never copies');
+    await hover(1, 39); // past the end of the command on its last row
+    assert.equal(await link.isVisible(), false, 'off the text the underline goes away');
+    assert.notEqual(await page.locator('.xterm-screen').evaluate(el => getComputedStyle(el).cursor), 'pointer');
+    await clickAt(1, 3);
+    await copied();
+    assert.equal(await clipboard(), command);
+    assert.deepEqual(await page.evaluate(() => sent), [], 'click on the command never sends PTY mouse/input bytes');
+    // Mouse tracking off: a drag over the command is a normal selection.
+    await page.evaluate(async () => { await write('\x1b[?1000l'); await realClipboard.writeText('unchanged'); });
+    await hover(0, 2); await page.mouse.down(); await hover(0, 12); await page.mouse.up();
+    assert.equal(await page.evaluate(() => t.hasSelection()), true, 'drag still selects text');
+    assert.equal(await clipboard(), 'unchanged', 'a drag never copies');
+    await clickAt(0, 4);
+    await copied();
+    assert.equal(await clipboard(), command, 'a plain click copies with tracking off');
     // A two-column character that cannot fit in the last column leaves a
     // null padding cell. Real spaces at this boundary must still survive.
     for (const prefix of ['x'.repeat(31), 'x'.repeat(30), 'x'.repeat(30) + ' ', 'x'.repeat(31) + ' ', 'x'.repeat(29) + '  ']) {
       const wide = '! echo "' + prefix + '한국어"';
-      await page.evaluate(async cmd => { t.reset(); await write(cmd); }, wide);
+      await page.evaluate(async cmd => { t.reset(); await realClipboard.writeText('unchanged'); await write(cmd); }, wide);
       assert.equal(await page.evaluate(() => terminalCommandAt(t, 0)), wide);
-      await hover(1);
-      await button.click();
-      await page.waitForFunction(() => document.querySelector('.term-command-copy').textContent === 'Copied');
-      assert.equal(await page.evaluate(() => realClipboard.readText()), wide, 'wide wrap and literal spaces preserved');
+      await clickAt(1, 0);
+      await page.waitForFunction(() => realClipboard.readText().then(text => text !== 'unchanged'));
+      assert.equal(await clipboard(), wide, 'wide wrap and literal spaces preserved');
     }
     // Force the plain-HTTP fallback and check the real browser clipboard.
     await page.evaluate(() => Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true }));
     await page.evaluate(async () => { t.reset(); await write('! echo fallback'); });
-    await hover(0);
-    await button.click();
-    await page.waitForFunction(() => document.querySelector('.term-command-copy').textContent === 'Copied');
-    assert.equal(await page.evaluate(() => realClipboard.readText()), '! echo fallback');
+    await clickAt(0, 2);
+    await copied();
+    assert.equal(await clipboard(), '! echo fallback');
     assert.equal(await page.locator('.xterm > textarea').count(), 0, 'fallback removes its temporary textarea');
+    await hover(0, 2);
+    assert.equal(await link.isVisible(), true);
     await page.evaluate(async () => { await write('\r\x1b[2Kordinary output'); });
-    assert.equal(await button.isVisible(), false, 'repaint clears hover');
-    await hover(0); assert.equal(await button.isVisible(), false);
+    assert.equal(await link.isVisible(), false, 'repaint clears the link');
     await page.evaluate(async () => { await write('\r\x1b[2K! resize'); });
-    await hover(0); assert.equal(await button.isVisible(), true);
+    assert.equal(await link.isVisible(), true, 'repaint re-measures under a still pointer');
     await page.evaluate(() => t.resize(50, 10));
-    assert.equal(await button.isVisible(), false);
+    assert.equal(await link.isVisible(), false);
     await page.evaluate(() => t.dispose());
-    assert.equal(await button.count(), 0);
-    console.log('browser command copy: real xterm, ANSI, Korean/wraps, mouse tracking, clipboard and HTTP fallback passed');
+    assert.equal(await page.locator('.term-command-link').count(), 0);
+    assert.equal(await page.locator('.term-command-copied').count(), 0);
+    console.log('browser command copy: real xterm, hover underline/cursor, click vs drag, ANSI, Korean/wraps, mouse tracking, clipboard and HTTP fallback passed');
   } finally { await browser.close(); server.close(); }
 })().catch(error => { console.error(error); server.close(); process.exitCode = 1; });
