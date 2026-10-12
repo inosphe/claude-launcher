@@ -115,6 +115,48 @@ def _rail(cwd, *names):
     return cflow2_web.rail_entries([(n, cwd) for n in names])
 
 
+TYPED = """\
+cflow: 2
+name: typed
+description: declares start inputs
+inputs:
+  goal: {type: text, default: ""}
+  relation: {type: enum, choices: [stacked, independent], default: stacked}
+  max_rounds: {type: int, required: false}
+  scope: {type: list, default: []}
+nodes:
+  w: {title: W, prompt: work}
+body: w
+"""
+
+
+def test_rail_entry_carries_the_start_inputs(proj):
+    """``inputs`` (claunch-76iqh): the values the run was launched with, so
+    "Spawn same setup" can seed a child's form from the rail row instead of
+    the schema defaults."""
+    cwd = str(proj)
+    v2 = proj / ".claunch" / "workflows" / "v2"
+    (v2 / "typed.yaml").write_text(TYPED, encoding="utf-8")
+    runtime.start(layers.load("typed", cwd), cwd=cwd, scope="s1", caps={},
+                  inputs={"goal": "carry the variables", "relation": "stacked",
+                          "max_rounds": 5, "scope": ["src/a"]})
+    r = _rail(cwd, "s1")["s1"]
+    assert r["inputs"]["goal"] == "carry the variables"
+    assert r["inputs"]["relation"] == "stacked"
+    assert r["inputs"]["max_rounds"] == 5
+    assert r["inputs"]["scope"] == ["src/a"]
+
+    # A run started with nothing left out comes back as its schema default,
+    # not as an absent key -- the child's box shows where the value stands.
+    runtime.start(layers.load("typed", cwd), cwd=cwd, scope="s2", caps={})
+    r = _rail(cwd, "s2")["s2"]
+    assert r["inputs"]["relation"] == "stacked" and r["inputs"]["scope"] == []
+
+    # A workflow that declares no inputs carries none.
+    runtime.start(layers.load("pick", cwd), cwd=cwd, scope="s3", caps={})
+    assert _rail(cwd, "s3")["s3"]["inputs"] is None
+
+
 def test_rail_entry_follows_the_run_and_flags_what_a_person_owes(proj):
     cwd = str(proj)
     runtime.start(layers.load("pick", cwd), cwd=cwd, scope="s1", caps={})
