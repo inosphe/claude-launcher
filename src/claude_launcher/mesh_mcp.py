@@ -468,7 +468,7 @@ TOOLS = [
                         "from the task line alone — useful when the context "
                         "is long and re-explaining it would lose detail. "
                         "Yours is untouched; the copy diverges from the "
-                        "child's first word. Needs the claude harness and a "
+                        "child's first word. Needs the Claude or Codex harness and a "
                         "conversation of your own ('children' lists 'fork' "
                         "in may_choose when you have one), and cannot be "
                         "combined with 'workspace', 'cwd' or 'worktree': "

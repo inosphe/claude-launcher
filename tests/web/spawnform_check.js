@@ -716,7 +716,7 @@ async function main() {
         [form.fork_parent.disabled, form.fork_parent.checked], [true, false]);
   check("...and the row says why",
         box_["new-fork-row"].title,
-        "the parent has no claude conversation to copy");
+        "the parent has no Claude or Codex conversation to copy");
   check("another parent is another policy — nothing is carried over",
         greyed(), [true, true, true, true, true, true, true, true, true, true, true, true]);
 
@@ -727,13 +727,14 @@ async function main() {
   const late = ctx.policy();
   form.parent.value = "pi";
   ctx.sync();
+  check("a Codex parent with a pinned conversation can be forked",
+        form.fork_parent.disabled, false);
   await late;
   check("a late report for an abandoned parent opens nothing",
         form.profile.disabled, true);
 
-  /* Another harness: the transcript being copied is claude's. */
-  check("a non-claude parent has no transcript to copy",
-        form.fork_parent.disabled, true);
+  check("the Codex fork offer survives an unrelated late policy response",
+        form.fork_parent.disabled, false);
 
   /* Back to no parent: every row is handed back, and the create form's own
      rules decide them again. */

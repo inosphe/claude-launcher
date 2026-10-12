@@ -1163,6 +1163,10 @@ def build_command(
             model_args = [f"--model={model_id}"]
         effort_args = selection_args(entry.effort_args, sdef.effort)
         session_args = list(sdef.args)
+        if restoring and sdef.harness == "codex":
+            # A fork is only the initial launch. Restore the copy's pinned
+            # UUID instead of creating another copy of its source.
+            session_args = without_restore_subcommand(session_args, "fork")
         if restoring and entry.restore_args:
             # The first spawn's own conversation subcommand, dropped so the
             # restore below is the only thing that names a conversation. See

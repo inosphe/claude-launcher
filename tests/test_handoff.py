@@ -14,6 +14,7 @@ the way back, what a kill does to a pending request — is exercised for real.
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import time
 
@@ -172,6 +173,72 @@ def test_quick_fork_makes_a_marked_child_of_the_origin(home, tmp_path, forkable,
             assert [n for n, _ in typed if n == "a"] == []
             await mgr.shutdown_all()
         finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_codex_quick_fork_pins_new_rollout_restores_and_merges(home, tmp_path, typed):
+    from claude_launcher import harnesses
+    from claude_launcher.daemon import db, harness
+
+    source_id = "11111111-2222-3333-4444-555555555555"
+    copy_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    # Stand in for the native CLI, including its new-rollout side effect.
+    # Spawn validation, command building, discovery and persistence are real.
+    program = (
+        "import os,json,pathlib,sys\n"
+        "if 'fork' in sys.argv:\n"
+        f" assert sys.argv[sys.argv.index('fork')+1] == {source_id!r}\n"
+        " assert 'resume' not in sys.argv\n"
+        " p=pathlib.Path(os.environ['CODEX_HOME'])/'sessions'/'copy.jsonl'\n"
+        f" p.write_text(json.dumps({{'type':'session_meta','payload':{{'id':{copy_id!r},'cwd':os.getcwd()}}}})+'\\n')\n"
+        "print('READY',flush=True)\n"
+        "for line in sys.stdin: pass\n"
+    )
+    store.update(lambda doc: doc.update({"harnesses": {"codex": {
+        "command": [sys.executable, "-u", "-c", program],
+        "home_env": "CODEX_HOME", "restore_args": ["resume", "--last"],
+    }}}))
+    prof = profile.create("cx")
+    lineage.set_harness(prof, "codex")
+    path = harnesses.get("codex").profile_home(prof.config_dir) / "sessions" / "source.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    original = json.dumps({"type": "session_meta", "payload": {
+        "id": source_id, "cwd": str(tmp_path),
+    }}) + "\n"
+    path.write_text(original, encoding="utf-8")
+
+    async def run():
+        mgr = _mgr()
+        client = await _serve(mgr, MeshManager(mgr, root=tmp_path / "mesh"))
+        try:
+            origin = mgr.create(SessionDef(
+                name="cx", profile="cx", cwd=str(tmp_path),
+                args=("resume", source_id), conversation_id=source_id,
+            ))
+            resp = await client.post("/api/sessions/cx/quick-fork", headers=BEARER)
+            doc = await resp.json()
+            assert resp.status == 201, doc
+            child = mgr.get("cx-qf1")
+            await _wait_for(lambda: child.sdef.conversation_id == copy_id, "Codex copy ID")
+            assert child.sdef.quick_fork_of == "cx"
+            assert "--- forked from here ---" in child.sdef.task
+            assert origin.sdef.conversation_id == source_id
+            saved = {row["def"]["name"]: row["def"] for row in db.open_default().load_all()}
+            assert saved["cx-qf1"]["conversation_id"] == copy_id
+            argv, _, _ = harness.build_command(child.sdef, restoring=True)
+            assert argv[-2:] == ["resume", copy_id]
+            assert "fork" not in argv and source_id not in argv
+            assert path.read_text(encoding="utf-8") == original
+            resp = await client.post("/api/sessions/cx-qf1/handoff",
+                                     json={"text": "Codex fork result"}, headers=BEARER)
+            assert resp.status == 200, await resp.text()
+            await _wait_for(lambda: child.exited, "merged copy exit")
+            assert any(n == "cx" and "Codex fork result" in text for n, text in typed)
+            assert not origin.exited
+        finally:
+            await mgr.shutdown_all()
             await client.close()
 
     asyncio.run(run())

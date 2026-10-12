@@ -3013,9 +3013,9 @@ def register(sub) -> None:
     p_spawn.add_argument(
         "--fork", action="store_true",
         help="give the child a COPY of the PARENT's conversation "
-        "(--resume <the parent's> --fork-session), so it starts with "
+        "(Claude --resume/--fork-session or Codex fork), so it starts with "
         "everything the parent knows instead of the opening task alone -- "
-        "the parent's own conversation is left untouched. Needs the claude "
+        "the parent's own conversation is left untouched. Needs the Claude or Codex "
         "harness and a parent that has one, and cannot be combined with "
         "--workspace or --worktree: claude keeps transcripts per directory, "
         "so a child started elsewhere would find nothing to open",

@@ -9458,8 +9458,8 @@ async def h_session_quick_fork(request: web.Request) -> web.Response:
     begins — the one-press fork (see :mod:`daemon.handoff`).
 
     Built on the spawn route's own pieces rather than beside them: the child
-    is staged with ``fork: true`` (claude's ``--resume --fork-session`` of
-    the parent's pinned conversation), so it is a child of this session and
+    is staged with ``fork: true`` (Claude's ``--resume --fork-session`` or
+    Codex's ``fork`` of the parent's pinned conversation), so it is a child of this session and
     restores like one. What this route adds is the marker block as the
     child's opening — the line the merge later refers back to — and the
     record (``quick_fork_of``) that makes merge available on the copy.
@@ -9526,7 +9526,7 @@ async def stage_quick_fork(
         raise QuickForkError(
             400,
             f"session {parent!r} has no conversation to copy: quick-fork needs "
-            "a claude session whose conversation is on disk (its first turn "
+            "a Claude or Codex session whose conversation is on disk (its first turn "
             "has landed)",
         )
     name = str(body.get("name") or "").strip() or handoff_mod.fork_name(

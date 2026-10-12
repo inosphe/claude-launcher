@@ -2941,6 +2941,11 @@ with a reason that is not true.
 The fork above is a creation-time choice with a form around it. **quick-fork**
 is the one-press version, and it comes with its way back:
 
+Quick-fork supports both Claude and Codex sessions once their conversation ID
+and transcript are available. Codex uses `codex fork <SESSION_ID>`; claunch
+records the copy's new ID and uses `codex resume <COPY_ID>` on restart. Both
+harnesses keep the copy in the origin's working directory.
+
 ```bash
 claunch quick-fork A                    # start A-qf1: a copy of A's conversation
 claunch quick-fork A --task "try the other approach" -a
@@ -2981,9 +2986,9 @@ the marker was held under the origin's role, the marker block carries a
 origin's role and its duties stay with the origin, and which stance to read.
 
 **The copy shares the origin's checkout, and cannot be given one of its
-own.** Claude keeps transcripts per working directory, so a copy started
-anywhere else would resolve no conversation and boot empty — `fork` together
-with `worktree` is refused for exactly that reason. Two claude sessions then
+own.** This is the shared fork policy for both harnesses. Claude keeps
+transcripts per working directory, so its conversation must open there;
+`fork` together with `worktree` is refused. The two sessions then
 edit the same files with one shared git state and no lock between them. The
 marker block says so in the copy's first screen, and the CLI prints it on
 every fork, because the only defence is that both sessions know: keep them to

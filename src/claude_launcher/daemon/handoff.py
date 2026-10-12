@@ -3,8 +3,8 @@
 Two verbs share this module because they are one mechanism with two
 spellings:
 
-* **quick-fork / merge.** ``A`` is copied into ``B`` (claude's
-  ``--resume --fork-session`` through the spawn path, so ``B`` is a child of
+* **quick-fork / merge.** ``A`` is copied into ``B`` (Claude's
+  ``--resume --fork-session`` or Codex's ``fork <id>`` through the spawn path, so ``B`` is a child of
   ``A`` holding the same conversation up to now) with a marker block at the
   top of the copy — *forked from here*. ``B`` works. When it is done it
   *merges*: it writes a wrap-up of everything since the marker, the daemon
@@ -137,8 +137,8 @@ def compose_marker(
         "session's alone, and nothing typed here reaches the origin by itself.",
         f"checkout: this copy runs in the SAME working directory as {origin}"
         + (f" ({cwd})" if cwd else "")
-        + " -- a fork cannot be given a checkout of its own, because claude "
-        "keeps transcripts per directory. So the two of you edit the same "
+        + " -- claunch keeps a fork in its origin's checkout (Claude "
+        "keeps transcripts per directory). So the two of you edit the same "
         "files with no lock between you, and the git state (branch, index, "
         "stash) is one. Keep to an area the origin is not writing, or settle "
         "the boundary with it through a merge, before you touch a file it "
