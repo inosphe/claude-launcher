@@ -79,6 +79,11 @@ steps:
   intake:
     title: 목표 수립
     instructions: |
+      먼저 대상 저장소의 local-sync 정책을 조회한다. PR-only 관리 대상이면
+      이 로컬 착지 workflow로 통합을 요청하지 않는다. improv-worker-remote 또는
+      improv-worker-v2의 PR 경로를 사용하도록 상위에 알리고 전환을 요청한다.
+      담당자 부재·PR 장애는 local fallback 사유가 아니며 관리 정책을 해제하지 않는다.
+
       새 회차다 — 이번 회차의 목표 하나를 확정한다. 출처는 둘 중 하나다:
       터미널 사용자의 직접 지시, 또는 리더의 브리핑. 목표가 아직 없으면
       여기서 대기한다(회차는 목표가 생길 때 시작된다).

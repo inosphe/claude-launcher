@@ -712,6 +712,13 @@ def _cmd_pr_preflight(args: argparse.Namespace) -> int:
         "account": auth.get("account"),
         "blockers": doc["blockers"],
     }
+    from . import local_sync
+    try:
+        out["pr_only"] = local_sync.protected(cwd, out["remote"] or "", out["base"])
+    except Exception as exc:
+        out["pr_only"] = None
+        out["ready"] = False
+        out["blockers"].append("cannot determine integration policy: " + str(exc))
     print(json.dumps(out, ensure_ascii=False, indent=None if args.compact else 1))
     return PR_READY if out["ready"] else PR_BLOCKED
 

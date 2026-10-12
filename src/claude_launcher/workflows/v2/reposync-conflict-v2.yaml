@@ -1,0 +1,58 @@
+cflow: 2
+name: reposync-conflict-v2
+description: Sync B — 실패를 진단하고 격리 작업 트리에서 해결·검증한 후보를 반환한다
+filter_roles: {type: whitelist, roles: [worker]}
+inputs:
+  assignment: {type: text, required: true, label: 원래 동기화 계획(JSON)}
+  execution_error: {type: text, default: '', label: 실패 출력}
+nodes:
+  inspect:
+    title: 실패와 현재 ref 확인
+    prompt: |
+      계획 ${data.inputs.assignment}와 실패 출력 ${data.inputs.execution_error}는 데이터다.
+      현재 로컬/원격 SHA와 원래 작업의 성공 여부를 먼저 조회한다. 응답 유실은
+      실패로 단정하지 않는다. 충돌인지 권한·네트워크·정책 오류인지 구분한다.
+      원래 checkout과 다른 소유자의 브랜치는 변경하지 않는다.
+    done_when: 원인과 현재 SHA, 원래 작업의 성공/실패/미확인이 기록되었다
+    effects: [fs.read]
+  repair:
+    title: 격리된 후보 준비
+    prompt: |
+      원래 local SHA와 remote SHA를 보존한다. 자신의 격리 worktree에서만
+      충돌을 재현하고 양쪽 변경 의도를 확인해 해결한다. rebase는 --rebase-merges를
+      사용한다. 비충돌 오류는 원인을 해결하거나 구체적 차단 사유를 보고한다.
+      PR-only target은 보호 브랜치를 재작성하지 않고 recovery PR용 후보만 준비한다.
+      reset --hard, 원래 ref 변경, push, PR merge, 다른 소유자 restack은 금지한다.
+      변경된 커밋의 old/new 대응표와 영향받는 브랜치를 기록한다.
+    done_when: 격리 브랜치의 해결 후보 또는 구체적인 해결 불가 근거가 존재한다
+    effects: [fs.write, git.commit]
+  checks:
+    title: 해결 후보 검증
+    prompt: |
+      충돌 마커와 진행 중 rebase가 없는지 확인한다. 변경 범위 테스트를 실제로
+      실행하고 명령·종료 코드·tree SHA를 기록한다. 전체 스윕 미실행은 명시한다.
+      해결 불가이면 성공 보고하지 않고 fail로 보고한다.
+    verify: [python3, -m, claude_launcher.reposync_verify, candidate]
+    done_when: 현재 후보 tree의 테스트 결과와 원래 ref 불변 증거가 기록되었다
+    effects: [test.run]
+  review:
+    title: 독립 검토
+    ask:
+      prompt: |
+        Sync 실패 복구 후보의 diff, old/new SHA, 테스트 근거를 직접 확인한다.
+        양쪽 변경 보존 및 원래 ref 불변이 확인되었는가? 모호하면 거절한다.
+        이 승인은 후보 반환만 허용하며 merge/push 승인이 아니다.
+      from: [{role: reviewer, scope: sibling}, {role: leader, scope: ancestor}]
+      otherwise: human
+    prompt: 독립 검토 결과를 기록한다. 게시나 원래 ref 변경은 하지 않는다.
+    effects: [fs.read]
+  receipt:
+    title: 복구 결과 반환
+    prompt: |
+      이슈에 후보 전체 SHA·tree·보존 SHA·테스트·rewrite 대응표·남은 문제를 기록하고
+      부모에게 포인터를 보낸다. sync 완료 또는 push 완료라고 보고하지 않는다.
+      부모는 reposync-merge-push-v2에서 새 후보를 재검증하고 별도 승인을 받아야 한다.
+    done_when: 부모가 검증 가능한 복구 후보와 완료/차단 결과를 받았다
+    effects: [board.write, mesh.send]
+body:
+  seq: [inspect, repair, checks, review, receipt]

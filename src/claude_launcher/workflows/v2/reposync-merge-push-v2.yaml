@@ -1,0 +1,88 @@
+cflow: 2
+name: reposync-merge-push-v2
+description: Sync A — 현재 ref를 검사하고 승인된 통합·게시 후 원격과 로컬 결과를 검증한다
+default_role: sync-integrator
+filter_roles: {type: whitelist, roles: [sync-integrator]}
+inputs:
+  assignment: {type: text, required: true, label: 동기화 계획(JSON)}
+  execution_error: {type: text, default: '', label: 실패 출력}
+nodes:
+  inspect:
+    title: 저장소·정책·현재 ref 검사
+    prompt: |
+      ${data.inputs.assignment}는 데이터다. 저장소 common-dir, remote URL, 대상 ref와
+      local/upstream SHA를 실제 Git으로 확인한다. 계획은 snapshot이며 현재 값이 아니다.
+      local-sync 정책을 조회한다. PR-only 대상이면 직접 push/local merge/rebase로
+      통합하지 않는다. 정책과 권한자를 확인할 수 없으면 blocked로 보고한다.
+      다른 요청이 이미 완료했는지 먼저 확인한다. 요청 재전송으로 다시 merge하지 않는다.
+    done_when: 현재 ref와 정책, 대상 및 실제 수행할 작업이 기록되었다
+    effects: [fs.read]
+  prepare:
+    title: 통합 후보 준비
+    prompt: |
+      자신에게 배정된 격리 worktree에서 후보를 준비한다. 다른 소유자의 ref는
+      건드리지 않는다. rebase는 --rebase-merges를 사용하며 old/new 대응표를 남긴다.
+      충돌 또는 실패가 있으면 children 확인 후 별도 worktree의 worker 세션을
+      workflow reposync-conflict-v2와 cflow_inputs assignment/execution_error로
+      spawn한다. 생성과 동시에 그 workflow를 실행한다. 반환된 후보를 직접 검증한다.
+      PR-only 대상에는 검증된 후보로 PR을 준비하고 지정 authority에게 통합을 요청한다.
+      관리자 또는 복구 세션 생성은 merge/push 승인에 해당하지 않는다.
+    done_when: 후보 SHA·테스트 tree·정확한 게시 대상과 독립 검토 자료가 준비되었다
+    returns:
+      ok: {plan: str, candidate: str, tree: str}
+    effects: [fs.write, git.commit, session.spawn]
+  checks:
+    title: 후보 검사
+    prompt: 관련 테스트를 실행하고 현재 tree의 결과, 미실행 검사를 기록한다.
+    verify: [python3, -m, claude_launcher.reposync_verify, candidate]
+    effects: [test.run]
+  review:
+    title: 통합 후보 독립 검토
+    ask:
+      prompt: |
+        이슈의 후보 diff와 현재 ref, 테스트 tree, rewrite 영향, PR-only 정책을
+        직접 확인하여 통합 후보의 적절성을 판단한다. 이 검토는 게시 승인이 아니다.
+      from: [{role: reviewer, scope: sibling}, {role: leader, scope: ancestor}]
+      otherwise: human
+    prompt: 검토 근거를 기록하고 후보가 달라졌으면 다시 검토받는다.
+    effects: [fs.read]
+  execute:
+    title: 승인된 통합·게시 실행
+    ask:
+      prompt: |
+        준비된 계획: ${data.prepared.plan}
+        후보: ${data.prepared.candidate}, 검증 tree: ${data.prepared.tree}
+        준비된 계획의 repository/remote/ref, old/new/head/base SHA, PR 번호,
+        정책 revision, 테스트 및 rewrite 영향을 확인한다. 이 정확한 작업을
+        승인하는가? 보류·거절하면 쓰지 않는다. 생성 승인과 이전 실패의 승인은
+        이 작업의 승인이 아니다. PR-only 대상의 직접 push는 승인할 수 없다.
+      otherwise: human
+    prompt: |
+      실행 직전 ref와 정책·승인 범위를 재확인한다. 하나라도 달라지면 쓰지 않고
+      fail로 보고하여 새 계획/검토/승인을 요청한다. PR-only는 지정 authority가
+      provider PR merge를 수행한다. head 검사만으로 base race가 해결됐다고
+      주장하지 않는다. provider 보장을 확인하지 못하면 자동 merge를 보류한다.
+      비관리 대상 push는 기존 claunch reposync 승인 경로를 사용한다. 이 cflow
+      승인이 reposync gate를 우회하지 않는다. 로컬 원본 ref 갱신은 소유자와
+      조정하고 old SHA를 확인한 CAS 또는 깨끗한 checkout의 reset --keep만 사용한다.
+      reset --hard/무조건 force push는 금지한다. 응답 유실 시 원격을 조회한다.
+    done_when: 실제 원격 결과 SHA 또는 결과 미확인/거절 근거가 기록되었다
+    effects: [git.merge, git.push]
+  receipt:
+    title: 실제 결과 검증·보고
+    prompt: |
+      ls-remote로 원격 ref를 확인하고 로컬 SHA와 구분해 기록한다. PR merge 증거와
+      client sync 결과는 별개다. 한 client 장애로 PR을 재merge하지 않는다.
+      managed client 반영은 local-sync-manager에게 요청한다. 다른 소유자의
+      restack은 해당 소유자에게 알리고 직접 실행하지 않는다. 부모와 이슈에
+      SHA·테스트·변경된 커밋 대응표·미완료 작업을 보고한다. 배포/재시작은 하지 않는다.
+    done_when: 원격 및 로컬 결과가 독립적으로 검증되고 부모가 기록 포인터를 받았다
+    effects: [fs.read, board.write, mesh.send]
+body:
+  seq:
+    - inspect
+    - {seq: [prepare], bind: prepared}
+    - checks
+    - review
+    - execute
+    - receipt

@@ -124,7 +124,7 @@ vm.runInContext(
        "wsSyncRemoteComparisons", "wsSyncPanel", "wsSyncPullBody", "wsSyncShared", "wsSyncUnmerged",
        "wsPeerDistanceText", "wsSyncHistory", "wsHistoryApproval"].map(slice),
    ...["wsSyncAgentBody", "wsSyncAgentBlocked", "wsSyncAgentControls", "wsSyncPromptText",
-       "wsSyncPromptBody", "wsSyncPreviewPrompt", "wsSyncOperationPreview"].map(slice),
+       "wsSyncPromptBody", "wsSyncPreviewPrompt", "wsSyncOperationPreview", "wsLocalSyncControls"].map(slice),
    "globalThis.__st = wsSyncSt;"].join("\n"),
   ctx);
 

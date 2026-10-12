@@ -218,7 +218,7 @@ def test_sync_agent_a_stages_isolated_child_without_executing_or_pushing(world, 
         assert Path(child.sdef.cwd) != world["a"]
         assert _git(Path(child.sdef.cwd), "rev-parse", "HEAD") == mine
         assert assignment["worktree"] is True
-        assert assignment["branch_from"] == mine and assignment["workflow"] == "-"
+        assert assignment["branch_from"] == mine and assignment["workflow"] == "reposync-merge-push-v2"
         assert '"remote": "origin"' in child.sdef.task
         assert "Delegation does not approve a push" in child.sdef.task
         assert _git(world["remote"], "rev-parse", "master") == before
@@ -263,6 +263,9 @@ def test_sync_agent_b_real_conflict_only_delegates_when_enabled(world, monkeypat
         assert _git(world["remote"], "rev-parse", "master") == before
         if mode == "on_failure":
             assert len(assignments) == 1 and doc["status"] == "delegated"
+            assert assignments[0][1]["workflow"] == "reposync-conflict-v2"
+            assert assignments[0][1]["role"] == "worker"
+            assert assignments[0][1]["cflow_inputs"]["execution_error"]
             assert "base.txt" in doc["operation_error"]
             assert "base.txt" in assignments[0][0].sdef.task
             assert "aborted" in assignments[0][0].sdef.task

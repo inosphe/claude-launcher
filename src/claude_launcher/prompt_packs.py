@@ -517,6 +517,8 @@ DEFAULT_ROLE_PACKS: Dict[str, List[str]] = {
     "specialist": ["role-specialist"],
     "unreal": ["unreal-operator"],
     "worker": ["role-worker"],
+    "sync-integrator": ["role-sync-integrator"],
+    "local-sync-manager": ["role-local-sync-manager"],
 }
 
 #: The default packs of an untouched config (:func:`default_packs`). A

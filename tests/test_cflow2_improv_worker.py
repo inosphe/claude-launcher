@@ -444,13 +444,15 @@ def test_remote_setup_reads_the_preflight_and_the_force_inputs():
 # -- the pr-or-local skeleton at run time (claunch-yq80p.11) --------------------
 
 
-def _medium_flow(tmp_path):
+def _medium_flow(tmp_path, *, verified=False):
     """landing-medium and pr-publish as they are in the definition, with their
     skeleton and the two attempt tasks, in a small workflow."""
     doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
-    procs = {k: doc["procedures"][k] for k in ("pr-or-local", "landing-medium", "pr-publish")}
+    procs = {k: doc["procedures"][k] for k in ("pr-or-local", "local-landing", "landing-medium", "pr-publish")}
     nodes = {k: {kk: vv for kk, vv in doc["nodes"][k].items() if kk in ("title", "prompt", "returns")}
-             for k in ("remote-setup", "pr-open")}
+             for k in ("remote-setup", "pr-open", "local-landing-policy")}
+    if verified:
+        nodes["local-landing-policy"]["verify"] = doc["nodes"]["local-landing-policy"]["verify"]
     nodes["after"] = {"prompt": "after"}
     flow = {"cflow": 2, "name": "medium-flow", "include": ["ask-common"],
             "params": {"force_pr": {"default": False}},
@@ -496,6 +498,8 @@ def test_pr_or_local_retries_then_falls_back_locally(tmp_path, monkeypatch):
                        "base": "master", "pr_url": None, "pr_number": None}
     # pr-publish without force_pr: a failed pr-open falls back to local, no question
     st = report("pr-open", "failed", {"reason": "push refused: stale info"})
+    assert st["tasks"][0]["label"].rsplit("/", 1)[-1] == "local-landing-policy"
+    st = report("local-landing-policy")
     published = runtime.RunStore(cwd, "m").load_state()["data"]["published"]
     assert published["medium"] == "local" and published["reason"] == "push refused: stale info"
     assert published["pr_url"] is None
@@ -513,6 +517,9 @@ def test_pr_or_local_user_local_answer(tmp_path, monkeypatch):
     assert "no remote" in st["tasks"][0]["prompt"]
     runtime.report(iid, "ok", {"brief": BRIEF}, **kw)
     runtime.approve(None, decision="local", reason="this round only", **kw)
+    st = runtime.status(**kw)
+    assert st["tasks"][0]["label"].rsplit("/", 1)[-1] == "local-landing-policy"
+    runtime.report(st["tasks"][0]["instance"], "ok", {}, **kw)
     landing = runtime.RunStore(str(tmp_path), "m").load_state()["data"]["landing"]
     assert landing["medium"] == "local"
     assert landing["reason"] == "user chose local while PR was blocked"
@@ -532,18 +539,18 @@ MEDIUM_SCENARIOS = {
     "landing-retry-ok": (False, [("remote-setup", "blocked", {"reason": "R1"}),
                                  ("answer", "retry", None), ("remote-setup", "ok", _SETUP),
                                  ("pr-open", "failed", {"reason": "F1"})],
-                         ["remote-setup", "ask-frame", "remote-setup", "pr-open", "after"],
+                         ["remote-setup", "ask-frame", "remote-setup", "pr-open", "local-landing-policy", "after"],
                          {"landing": _LANDED,
                           "published": {"medium": "local", "reason": "F1", **_NONE}}),
     "landing-local": (False, [("remote-setup", "blocked", {"reason": "R1"}),
                               ("answer", "local", None)],
-                      ["remote-setup", "ask-frame", "pr-open"],
+                      ["remote-setup", "ask-frame", "local-landing-policy", "pr-open"],
                       {"landing": {"medium": "local",
                                    "reason": "user chose local while PR was blocked", **_NONE}}),
     "force-retry-local": (True, [("remote-setup", "ok", _SETUP),
                                  ("pr-open", "failed", {"reason": "F1"}), ("answer", "retry", None),
                                  ("pr-open", "failed", {"reason": "F2"}), ("answer", "local", None)],
-                          ["remote-setup", "pr-open", "ask-frame", "pr-open", "ask-frame", "after"],
+                          ["remote-setup", "pr-open", "ask-frame", "pr-open", "ask-frame", "local-landing-policy", "after"],
                           {"landing": _LANDED,
                            "published": {"medium": "local",
                                          "reason": "user chose local after pr-open failed",
@@ -557,7 +564,7 @@ MEDIUM_SCENARIOS = {
     # a brief spelling 'Local' answers the definition's 'local' (Z2)
     "case-Local": (False, [("remote-setup", "blocked", {"reason": "R1"}),
                            ("answer", "Local", ("retry", "Local"))],
-                   ["remote-setup", "ask-frame", "pr-open"],
+                   ["remote-setup", "ask-frame", "local-landing-policy", "pr-open"],
                    {"landing": {"medium": "local",
                                 "reason": "user chose local while PR was blocked", **_NONE}}),
 }
@@ -589,6 +596,9 @@ def test_pr_or_local_scenarios(scen, tmp_path, monkeypatch):
         else:
             iid = next(t["instance"] for t in st["tasks"] if t["label"].rsplit("/", 1)[-1] == label)
             st = runtime.report(iid, outcome, value, **kw)
+        if st.get("tasks") and st["tasks"][0]["label"].rsplit("/", 1)[-1] == "local-landing-policy":
+            seen.append("local-landing-policy")
+            st = runtime.report(st["tasks"][0]["instance"], "ok", {}, **kw)
     seen.extend(t["label"].rsplit("/", 1)[-1] for t in st.get("tasks") or [])
     assert seen == order
     state = runtime.RunStore(str(tmp_path), "m").load_state()

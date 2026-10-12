@@ -735,9 +735,30 @@ nodes:
     effects: [fs.write, git.branch]
 
   # ── 착지 매체 (claunch-yq80p.5) ──────────────────────────────────────
+  local-landing-policy:
+    title: 로컬 착지 정책 검사
+    prompt: |
+      관리 정책이 없는 저장소에서만 로컬 착지로 진행한다. 관리 대상이 있거나
+      정책을 읽을 수 없으면 PR 경로를 복구한다. 이 검사 실패를 승인으로 덮지 않는다.
+    done_when: 저장소에 PR 전용 정책이 없음을 verifier가 확인했다
+    verify: [python3, -m, claude_launcher.local_sync, allow-local]
+    effects: [fs.read]
+
   remote-setup:
     title: 착지 매체 결정 (PR · 로컬)
     prompt: |
+      ── 관리 대상 정책 우선 ──
+      먼저 repo_sync local_status 또는 claunch cflow2 pr-preflight로 대상 정책을
+      조회한다. pr_only=true이면 아래의 로컬 통합·직접 base push·PR 실패 시
+      local fallback·force_no_pr 경로는 사용할 수 없다. 정책 조회 실패도 보류다.
+      child 결과를 받는 stack도 등록된 protected target이면 PR만 허용한다.
+      지정된 target authority가 정확한 head/base와 독립 검증을 확인하고 PR을
+      통합한다. 권한이 명확하지 않으면 구체적인 계획으로 사용자 승인을 받는다.
+      manager는 로컬 복제만 맡으며 merge/push 권한을 받지 않는다.
+      원격 착지 증거와 각 host의 로컬 반영은 구분하고, 로컬 FF는 manager에게
+      요청한다. 한 host의 반영 실패로 PR을 다시 merge하지 않는다.
+      이하의 로컬 방식은 관리 대상이 아닌 경우에만 적용한다.
+
       피처 브랜치가 만들어졌다. 이 회차의 착지 매체를 정한다 — PR(원격 base로
       pull request, 상위가 `gh pr merge`로 머지) 또는 로컬(상위가 내 브랜치를
       --no-ff로 머지). 시작 입력: force_pr=${data.inputs.force_pr},
@@ -811,6 +832,18 @@ nodes:
   pr-open:
     title: push · pull request (리뷰 통과 직후, 요청 직전)
     prompt: |
+      ── 관리 대상 정책 우선 ──
+      먼저 repo_sync local_status 또는 claunch cflow2 pr-preflight로 대상 정책을
+      조회한다. pr_only=true이면 아래의 로컬 통합·직접 base push·PR 실패 시
+      local fallback·force_no_pr 경로는 사용할 수 없다. 정책 조회 실패도 보류다.
+      child 결과를 받는 stack도 등록된 protected target이면 PR만 허용한다.
+      지정된 target authority가 정확한 head/base와 독립 검증을 확인하고 PR을
+      통합한다. 권한이 명확하지 않으면 구체적인 계획으로 사용자 승인을 받는다.
+      manager는 로컬 복제만 맡으며 merge/push 권한을 받지 않는다.
+      원격 착지 증거와 각 host의 로컬 반영은 구분하고, 로컬 FF는 manager에게
+      요청한다. 한 host의 반영 실패로 PR을 다시 merge하지 않는다.
+      이하의 로컬 방식은 관리 대상이 아닌 경우에만 적용한다.
+
       동료 리뷰가 통과했다. 리뷰어가 본 tip을 원격에 올리고 PR이 그 tip을
       가리키게 한다. 요청 자체(in_review 전이·LANDING REQUEST 코멘트·nudge)는
       다음 단계(integration-request)가 한다.
@@ -2832,6 +2865,18 @@ nodes:
     effects: [board.write, mesh.send]
 
 procedures:
+  local-landing:
+    params:
+      reason: {type: str, required: true}
+    returns:
+      ok: {medium: str, reason: str, remote: "str?", repo: "str?", base: "str?",
+           pr_url: "str?", pr_number: "int?"}
+    body:
+      seq:
+        - local-landing-policy
+        - return: ok
+          value: {medium: local, reason: "$params.reason"}
+
   pr-or-local:
     description: >-
       착지 매체를 PR로 세우는 시도의 공통 골격(claunch-yq80p.11). attempt 블록이
@@ -2870,11 +2915,17 @@ procedures:
                     cases:
                       retry: {continue: attempts}
                       local:
-                        return: ok
-                        value: {medium: local, reason: "$params.local_reason"}
+                        waterfall:
+                          - call: local-landing
+                            with: {reason: "$params.local_reason"}
+                          - return: ok
+                            value: {medium: local, reason: "$prev.reason"}
                 - else:
-                    return: ok
-                    value: {medium: local, reason: "$prev.reason"}
+                    waterfall:
+                      - call: local-landing
+                        with: {reason: "$prev.reason"}
+                      - return: ok
+                        value: {medium: local, reason: "$prev.reason"}
             failed: *recover
 
   landing-medium:
@@ -2901,6 +2952,10 @@ procedures:
           상위가 다른 머신이면 local은 착지를 만들지 못하므로 권하지 않는다.
         attempt:
           - remote-setup
+          - cond:
+              - if: "$result['remote-setup'].value.medium == 'local'"
+                then: local-landing-policy
+              - else: {seq: []}
           - return: ok
             value: {medium: "$result['remote-setup'].value.medium",
                     reason: "$result['remote-setup'].value.reason",

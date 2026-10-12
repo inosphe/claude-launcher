@@ -164,7 +164,8 @@ def test_collection_writes_are_denied_to_the_agent():
 
 def test_pr_preflight_prints_the_facts_and_exits_by_readiness(tmp_path, capsys, monkeypatch):
     # claunch-yq80p.5: the remote-setup task reads this to choose PR or local
-    from claude_launcher import prflow
+    from claude_launcher import prflow, local_sync
+    monkeypatch.setattr(local_sync, "protected", lambda *args: False)
 
     ready = {"repo": True, "remote": "origin", "base": "master", "branch": "w1-x",
              "head": "a" * 40, "gh": {"installed": True, "version": "2.45.0"},
@@ -192,6 +193,8 @@ def test_pr_preflight_prints_the_facts_and_exits_by_readiness(tmp_path, capsys, 
 
 
 def test_pr_preflight_base_must_be_on_the_remote(tmp_path, capsys, monkeypatch):
+    from claude_launcher import local_sync
+    monkeypatch.setattr(local_sync, "protected", lambda *args: False)
     # claunch-yq80p.2 stage B: a stack child's PR base is its parent's
     # <parent>-stack, which the parent pushes; until then it is a blocker
     import subprocess

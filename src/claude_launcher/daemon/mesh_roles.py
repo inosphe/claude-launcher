@@ -196,6 +196,10 @@ class LinkPattern:
         # position: a leader carrying `reviewer` as a subrole is wired to the
         # workers exactly as a plain reviewer is, which is the point of
         # taking the subrole.
+        # Service roots do not inherit the generic root-to-root graph. Only
+        # an explicitly named service rule (or a human connection) admits them.
+        if facts.role == "local-sync-manager" and self.role != "local-sync-manager":
+            return False
         if self.role is not None and self.role not in facts.held:
             return False
         if self.tier is not None and facts.tier != self.tier:
@@ -493,6 +497,22 @@ roles:
     stance: |
       You are a PRODUCER: do the real work and ground every claim in code,
       docs or tests, citing the files you stand on.
+
+  sync-integrator:
+    aliases: []
+    stance: |
+      Execute only the repository integration assigned by reposync-merge-push-v2.
+      Delegation is not merge or publish approval. Revalidate exact refs, policy
+      and independent review before every write. Managed targets require PRs.
+      Delegate conflict repair to reposync-conflict-v2; never deploy or restart.
+
+  local-sync-manager:
+    aliases: []
+    stance: |
+      Own local synchronization requests for one daemon and canonical git repository.
+      Fetch and fast-forward only after validating the policy and current lease.
+      Never push protected targets, merge PRs, or change other owners' worktrees.
+      Preserve divergent commits and request an explicit recovery decision.
 
   reviewer:
     aliases: [review, peer, critic, auditor, checker, qa]

@@ -10,6 +10,8 @@ are still where they were when it was approved.
 
 from __future__ import annotations
 
+import os
+from urllib.parse import quote
 from typing import Optional
 
 from . import daemon_client, mcp_rpc, reposync, reposync_flow as flow
@@ -18,6 +20,9 @@ TOOLS = [
     {
         "name": "repo_sync",
         "description": (
+            "Managed PR-only targets use local_status, local_request and local_apply. "
+            "local_request returns an explicit operator resolution when a manager is absent; "
+            "never silently appoint a worker. local_apply is only for the bound local-sync-manager. "
             "Keep a repository in step with its clones on other machines through "
             "the remote they share. Clones are matched by remote ADDRESS (host/"
             "owner/repo), never by remote or workspace name. Actions: 'status' "
@@ -51,7 +56,8 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "action": {"type": "string",
-                           "enum": ["status", "plan", "sync", "branch_push", "branch_pull"]},
+                           "enum": ["status", "plan", "sync", "branch_push", "branch_pull", "local_status", "local_request", "local_apply"]},
+                "local_request": {"type": "object", "description": "Durable local-sync request binding; see local_status policy. local_apply: request_id and epoch."},
                 "workspace": {"type": "string",
                               "description": "workspace name or path (default: this session's directory)"},
                 "remote": {"type": "string", "description": "local remote to sync through"},
@@ -185,6 +191,20 @@ def call_tool(name: str, args: dict) -> dict:
         raise ReposyncMcpError(f"unknown tool {name!r}")
     action = args.get("action")
     try:
+        if action in ("local_status", "local_request", "local_apply"):
+            _, workspace = flow.resolve_repo(args.get("workspace"))
+            if not workspace:
+                raise ReposyncMcpError("local synchronization requires a registered workspace")
+            endpoint = "/api/local-sync/workspaces/" + quote(workspace, safe="")
+            client = flow.client()
+            if action == "local_status":
+                return client.get(endpoint + "/status")
+            payload = dict(args.get("local_request") or {})
+            if action == "local_apply":
+                payload["session"] = os.environ.get("CLAUNCH_SESSION", "")
+                return client.post(endpoint + "/apply", payload)
+            payload["requester"] = os.environ.get("CLAUNCH_SESSION", "")
+            return client.post(endpoint + "/request", payload)
         if action == "status":
             return _status(args)
         if action == "plan":

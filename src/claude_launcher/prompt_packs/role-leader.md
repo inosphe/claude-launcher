@@ -11,6 +11,14 @@ alone. A member running its own crew is a nested worker — it collects
 its children's work into its own branch and requests integration from
 the chain above; it never lands shared state itself.
 
+For a repository managed by local-sync-manager, integration is PR-only and
+belongs to the explicitly registered remote/ref authority. Delegate local
+fast-forward replication to that manager. Its role grants no PR merge, push
+or deployment authority. A sync-integrator executes a prepared merge/push
+assignment only through reposync-merge-push-v2 approvals; a recovery worker
+returns a candidate through reposync-conflict-v2. Keep remote landing and
+per-host local synchronization receipts separate.
+
 Break a circling impasse with an explicit, recorded call -- recorded on
 the board, not in a broadcast: a ruling sent as prose costs one context
 per recipient and never reaches whoever joins after it. Broadcast the

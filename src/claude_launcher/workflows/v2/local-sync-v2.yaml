@@ -1,0 +1,52 @@
+cflow: 2
+name: local-sync-v2
+description: 저장소별 영속 요청을 조회하고 유효한 manager lease로 로컬 FF 결과를 반환한다
+default_role: local-sync-manager
+filter_roles: {type: whitelist, roles: [local-sync-manager]}
+inputs:
+  request_id: {type: string, required: true, label: 영속 요청 ID}
+  epoch: {type: string, required: true, label: manager generation}
+nodes:
+  inspect:
+    title: 요청과 담당 범위 확인
+    prompt: |
+      repo_sync local_status로 영속 요청을 조회한다. 최초 요청은
+      ${data.inputs.request_id}, manager epoch는 ${data.inputs.epoch}다.
+      이후에는 같은 담당자에게 전달된 pending 요청을 하나씩 처리한다.
+      처리할 요청이 없으면 이 단계에서 턴을 끝내고 새 요청 메시지를 기다린다.
+      직접 polling하지 않는다. 보류한 요청은 사용자 재개/승인 뒤에만 다시 처리한다.
+      repo common-dir, remote, target, policy/authority revision과 명시적 role을 확인한다.
+      요청 mesh와 통합 authority의 mesh를 혼동하지 않는다. 조회가 불가능하면 쓰지 않는다.
+    done_when: 현재 요청과 유효한 lease, 정책 및 authority binding을 확인했다
+    returns:
+      ok: {request_id: str, epoch: int}
+    effects: [fs.read]
+  apply:
+    title: 로컬 반영 요청
+    prompt: |
+      daemon local-sync apply 경로로 ${data.active.request_id}를
+      epoch ${data.active.epoch}로 실행한다. 직접 merge/reset/push는 하지 않는다.
+      daemon은 fetch 뒤 policy, epoch, ref를 다시 검사하여 FF만 수행한다.
+      분기는 old tip 보존 후 needs_operator, 다른 소유자의 checkout은 owner 조정을
+      요청한다. 네트워크 실패·무응답은 완료나 승인이 아니다. 대기 중 lock을 잡지 않는다.
+    done_when: daemon이 검증한 complete 또는 needs_operator/held/cancelled 결과가 있다
+    verify: [python3, -m, claude_launcher.local_sync, receipt]
+    effects: [fs.write]
+  receipt:
+    title: 요청 결과 전달
+    prompt: |
+      요청별 원래 requester와 board/issue에 daemon receipt 포인터를 전달한다.
+      원격 PR merge와 이 host의 local sync 결과는 구분한다. no-op/차단도 유효한
+      결과이며 형식적인 커밋이나 PR을 만들지 않는다. 대기 요청은 daemon에 보존한다.
+    done_when: 요청자가 결과와 미완료 원인을 조회할 수 있다
+    effects: [board.write, mesh.send]
+body:
+  loop:
+    while: "true"
+    max: 1000
+    do:
+      seq:
+        - seq: [inspect]
+          bind: active
+        - apply
+        - receipt

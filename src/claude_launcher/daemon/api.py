@@ -382,6 +382,8 @@ def build_app(
     mesh_chat.install(app)
     operator_bot.install(app, create=_create_session, gates=_operator_gates,
                          work=lambda sessions: _operator_work(app, sessions))
+    from . import local_sync_api
+    local_sync_api.install(app)
     clipboard.install(app)
     vscode_mod.install(app)
     app["relay_state"] = relay_state if relay_state is not None else _relay_unconfigured
@@ -6329,7 +6331,11 @@ async def h_reposync_ws_agent_preview(request: web.Request) -> web.Response:
             return json_error(400, "kind must be sync or push")
     except reposync.SyncError as exc:
         return json_error(409, str(exc))
-    return json_response({"prompt": reposync_agent.task(card), "plan": card})
+    mode = body.get("agent_mode", "agent")
+    if mode not in reposync_agent.WORKFLOWS:
+        return json_error(400, "agent_mode must be agent or on_failure")
+    return json_response({"prompt": reposync_agent.task(card, mode=mode), "plan": card,
+                          "workflow": reposync_agent.WORKFLOWS[mode]})
 
 
 async def _ws_sync_serialized(request: web.Request, handler) -> web.Response:
@@ -6371,11 +6377,8 @@ async def _ws_start_agent(request: web.Request, card: dict, body: dict, *, error
     """Use normal spawn policy, board onboarding and launch; never approve a push."""
     manager = request.app["manager"]
     parent = body["agent_parent"]
-    assignment = {
-        "workspace": request.match_info["name"], "worktree": True,
-        "branch_from": card["local"], "workflow": "-", "role": "worker",
-        "task": reposync_agent.task(card, error=error),
-    }
+    assignment = reposync_agent.assignment(card, mode=body["agent_mode"], error=error)
+    assignment["workspace"] = request.match_info["name"]
     warnings = []
     child = None
     try:
