@@ -198,6 +198,13 @@ const names = [
   "renderShadowCard",
 ];
 
+// Load the former cross-project expansion when testing an older app.js.
+// Otherwise refreshSessions takes its reduced-harness fallback and hides the
+// regression even though the real page includes that helper.
+if (src.includes("function railSessionsWithMeshPeers(")) {
+  names.push("railSessionsWithMeshPeers");
+}
+
 const ctx = {};
 new Function(
   "exports", "document", "el", "api", "$", "location", "meshCache", "sessionGroupOrder",
