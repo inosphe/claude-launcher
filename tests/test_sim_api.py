@@ -98,6 +98,20 @@ def test_session_creates_owns_and_is_told_when_it_ends(tmp_path):
     run(tmp_path, scenario)
 
 
+def test_rail_list_exposes_ownership_with_compact_metadata(tmp_path):
+    async def scenario(req, mgr, s1, s2):
+        made = await req("POST", "/api/sims", {"title": "door", "session": "s1"}, status=201)
+        sim = made["sim"]
+        rows = (await req("GET", "/api/sims?view=rail&owner=s1&project=proj"))["sims"]
+        assert rows == [{
+            **{k: sim[k] for k in ("id", "owner", "title", "state", "updated_at", "run_rounds")},
+            "max_rounds": sim["settings"]["max_rounds"], "runner_session": None,
+        }]
+        assert (await req("GET", "/api/sims?view=rail&owner=s2"))["sims"] == []
+        assert "model_stats" in (await req("GET", "/api/sims"))["sims"][0]
+    run(tmp_path, scenario)
+
+
 def test_user_creates_for_a_session_and_answers(tmp_path):
     async def scenario(req, mgr, s1, s2):
         made = await req("POST", "/api/sims", {"title": "door", "goal": "find gaps", "owner": "s2"}, status=201)

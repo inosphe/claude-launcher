@@ -129,6 +129,7 @@ function build(opts) {
     // here it only has to exist.
     "ensureControlSocket",
     "refreshCflow2Rail",
+    "refreshSessionSims",
     // The poll's batch also reads the window strip (termwindow_check).
     "refreshTermWindow",
     // and the timer line (termtimers_check).
@@ -157,6 +158,7 @@ function build(opts) {
     () => {},
     () => {},   // refreshProjects
     () => {},   // refreshCflow2Rail (the rail's v2 line; railcflow2_check)
+    () => {},   // refreshSessionSims (sessionresources_check)
 
     () => {},   // refreshTermWindow (the header's window strip; termwindow_check)
     () => {},   // refreshTermTimers (the timer line; termtimers_check)

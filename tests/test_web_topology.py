@@ -397,6 +397,7 @@ CHECKS = [
         "wheel_check.js",
         "transcript_check.js",
         "sesslayout_check.js",
+        "sessionresources_check.js",
         "rolepanel_check.js",
         "sessionmodal_check.js",
         "newformdraft_check.js",
@@ -580,6 +581,7 @@ BROWSER_CHECKS = [
         "railnav_browser.cjs",
         "terminputlayout_browser.cjs",
         "railroleline_browser.cjs",
+        "sessionresources_browser.cjs",
 ]
 
 

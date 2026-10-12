@@ -301,7 +301,8 @@ class SimStore:
         with self._lock:
             return self.summary(self._meta(sim_id))
 
-    def list(self, project: Optional[str] = None, owner: Optional[str] = None) -> List[dict]:
+    def list(self, project: Optional[str] = None, owner: Optional[str] = None,
+             *, compact: bool = False) -> List[dict]:
         with self._lock:
             out = []
             if not self.root.is_dir():
@@ -317,7 +318,16 @@ class SimStore:
                     continue
                 if owner is not None and (meta.get("owner") or "") != owner:
                     continue
-                out.append(self.summary(meta))
+                # The always-visible session rail needs ownership, not model
+                # statistics or findings. Avoid reading those on every poll.
+                if compact:
+                    row = {k: meta.get(k) for k in
+                           ("id", "owner", "title", "state", "updated_at", "run_rounds")}
+                    row["max_rounds"] = (meta.get("settings") or {}).get("max_rounds")
+                    row["runner_session"] = (meta.get("runner") or {}).get("session")
+                    out.append(row)
+                else:
+                    out.append(self.summary(meta))
             out.sort(key=lambda m: m.get("updated_at") or "", reverse=True)
             return out
 

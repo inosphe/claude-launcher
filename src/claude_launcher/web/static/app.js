@@ -4984,6 +4984,7 @@ async function refreshSessions(options) {
   if (rebuild) {
     applyCflowBadges();
     if (typeof applyCflow2Badges === "function") applyCflow2Badges();
+    if (typeof applySimulationBadges === "function") applySimulationBadges();
     // Guarded like the other optional painters: the isolated rail harnesses
     // slice refreshSessions without the beads line.
     if (typeof applyRailBeads === "function") applyRailBeads();
@@ -5367,6 +5368,93 @@ function applyCflowBadges() {
 let cflow2RailCache = {};
 let cflow2RailSig = null;
 
+// Ownership is independent of whether a simulation is currently running.
+let sessionSimCache = [];
+let sessionSimSig = null;
+let sessionSimLoading = false;
+
+async function refreshSessionSims() {
+  if (sessionSimLoading) return;
+  sessionSimLoading = true;
+  try {
+    const resp = await api("/api/sims?view=rail");
+    if (!resp.ok) return;
+    const data = await resp.json();
+    const rows = (data.sims || []).filter(s => s.owner).map(s => ({
+      id: s.id, owner: s.owner, title: s.title, state: s.state,
+      run_rounds: s.run_rounds,
+      max_rounds: s.max_rounds ?? s.settings?.max_rounds,
+      runner_session: s.runner_session ?? s.runner?.session,
+    }));
+    const sig = JSON.stringify(rows);
+    if (sig === sessionSimSig) return;
+    sessionSimCache = rows;
+    sessionSimSig = sig;
+    applySimulationBadges();
+    syncSessionResourceButtons();
+  } catch {
+    // Keep the last successful ownership snapshot on a transient failure.
+  } finally {
+    sessionSimLoading = false;
+  }
+}
+
+function applySimulationBadges() {
+  const list = $("session-list");
+  if (!list) return;
+  const states = {idle: "대기", running: "실행 중", stopped: "중지됨"};
+  for (const li of list.querySelectorAll("li[data-name]")) {
+    const sims = sessionSimCache.filter(s => s.owner === li.dataset.name);
+    const old = li.querySelector(".sess-sims");
+    if (!sims.length) { if (old) old.remove(); continue; }
+    const sig = JSON.stringify(sims);
+    if (old && old.dataset.sims === sig) continue;
+    const line = old || document.createElement("span");
+    line.className = "sess-sims";
+    line.dataset.sims = sig;
+    line.replaceChildren();
+    for (const s of sims) {
+      const link = document.createElement("a");
+      link.href = "#/sims/" + encodeURIComponent(s.id);
+      link.textContent = `◬ ${s.title || s.id} · ${states[s.state] || s.state}`;
+      link.title = `${s.id} · ${s.owner}`;
+      link.addEventListener("click", e => e.stopPropagation());
+      if (s.state === "running") {
+        link.className = "sess-sim-running";
+        link.textContent = "";
+        const title = document.createElement("strong");
+        title.textContent = `◬ ${s.title || s.id}`;
+        const status = document.createElement("span");
+        status.className = "sess-sim-status";
+        status.textContent = "실행 중";
+        const progress = document.createElement("span");
+        progress.className = "sess-sim-progress";
+        const rounds = s.run_rounds == null ? "" : ` · ${s.run_rounds}회 완료` +
+          (s.max_rounds == null ? "" : ` / 최대 ${s.max_rounds}회`);
+        progress.textContent = `실행 세션 ${s.runner_session || s.owner}${rounds}`;
+        link.appendChild(title);
+        link.appendChild(status);
+        link.appendChild(progress);
+      }
+      line.appendChild(link);
+    }
+    if (!old) li.appendChild(line);
+  }
+}
+
+function syncSessionResourceButtons() {
+  const name = currentPage === "terminal" ? currentName : null;
+  const present = {
+    "term-simsbtn": !!name && sessionSimCache.some(s => s.owner === name),
+    "term-splitbtn": !!name && !!(sessCflowRun(name) || cflow2RailCache[name]),
+  };
+  for (const [id, hasResource] of Object.entries(present)) {
+    const btn = $(id);
+    if (btn && btn.classList.contains("has-resource") !== hasResource)
+      btn.classList.toggle("has-resource", hasResource);
+  }
+}
+
 async function refreshCflow2Rail() {
   let data;
   try {
@@ -5381,6 +5469,7 @@ async function refreshCflow2Rail() {
   if (sig === cflow2RailSig) return;
   cflow2RailSig = sig;
   cflow2RailCache = rows;
+  if (typeof syncSessionResourceButtons === "function") syncSessionResourceButtons();
   applyCflow2Badges();
   // the answer strip over the attached terminal reads the same rows
   if (typeof renderTermCflow === "function") renderTermCflow();
@@ -8539,6 +8628,7 @@ async function refreshCflow() {
   }
   const runs = data.runs || [];
   cflowCache = runs;
+  if (typeof syncSessionResourceButtons === "function") syncSessionResourceButtons();
   const signature = JSON.stringify(
     runs,
     (key, value) => key === "due_in" || key === "fired_ago" ? undefined : value,
@@ -18665,6 +18755,7 @@ function syncDetailPanel() {
 let splitWasUp = false;
 
 function syncSplitPane() {
+  if (typeof syncSessionResourceButtons === "function") syncSessionResourceButtons();
   const name = currentPage === "terminal" ? currentName : null;
   const lay = name ? sessLayoutFor(name) : null;
   const up = !!lay && lay.split && !MOBILE_MQ.matches;
@@ -43727,6 +43818,7 @@ async function boot() {
     refreshMeshList(),
     refreshCflow(),
     refreshCflow2Rail(),
+    refreshSessionSims(),
   ]);
   // Last, and once. A #/s/<name> link attaches here — which is why a reload
   // puts you back in the session instead of at an empty slot — and it renders
@@ -44384,6 +44476,7 @@ async function pollOnce() {
     refreshMeshList(),
     refreshCflow(),
     refreshCflow2Rail(),
+    refreshSessionSims(),
     refreshTermQueued(),
     refreshTermWindow(),
     refreshTermTimers(),
