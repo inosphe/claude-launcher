@@ -1075,6 +1075,41 @@ class SimStore:
                                "observed": sum(1 for v in cells.values()
                                                if v["observed"] and (v["observed"]["handled"] or v["observed"]["unhandled"]))}}
 
+    # -- the run sessions' event log --------------------------------------------
+
+    def durable_events(self, sim_id: str, session: str = "", since: int = 0) -> dict:
+        """The run sessions' event log (``durable.events.jsonl``, written by
+        ``sim/pi/runner.mjs``), narrowed to one ``session`` when given.
+        ``since`` is the number of that session's events the caller already
+        holds: the file is append-only, so the index of an event in the
+        narrowed list never changes and the caller asks only for the tail.
+        A line that does not parse (the runner is mid-write) ends the read;
+        it is read whole on the next call."""
+        self._meta(sim_id)
+        rows: List[dict] = []
+        sessions: List[str] = []
+        try:
+            with open(self._dir(sim_id) / "durable.events.jsonl", encoding="utf-8") as f:
+                for line in f:
+                    if not line.endswith("\n"):
+                        break
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(row, dict):
+                        continue
+                    who = str(row.get("session") or "")
+                    if who and who not in sessions:
+                        sessions.append(who)
+                    if not session or who == session:
+                        rows.append(row)
+        except OSError:
+            pass
+        since = max(0, min(int(since or 0), len(rows)))
+        return {"sim": sim_id, "session": session or None, "sessions": sessions,
+                "total": len(rows), "since": since, "events": rows[since:]}
+
     # -- findings ------------------------------------------------------------
 
     def list_findings(self, sim_id: str, status: Optional[str] = None, kind: Optional[str] = None,

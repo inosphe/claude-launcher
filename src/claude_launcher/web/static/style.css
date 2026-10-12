@@ -3974,6 +3974,31 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .wfd-epace { fill: #6e7681; font-size: 9px; }
 .wfd-epace.held { fill: #c6cdd5; }
 
+/* A pi-durable run session's history (durable-flow.js): one column per phase
+   of the campaign loop, nodes in time order. The SVG is kept across polls and
+   only grows, so a node fades in once, when it is first drawn. */
+.dfl-headline .dfl-meta { font-size: 11px; color: #8b949e; }
+.dfl-scroll { overflow-x: auto; overscroll-behavior-x: contain; }
+.dfl { display: block; }
+.dfl-head { fill: #7d8590; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+.dfl-node { animation: dfl-in 0.35s ease-out; }
+.dfl-node rect { fill: #1b1e24; stroke: #30363d; stroke-width: 1.5; transition: stroke 0.3s, fill 0.3s; }
+.dfl-node.st-ok rect { stroke: #2f6f43; }
+.dfl-node.st-fail rect { stroke: #b0413e; fill: #2a1617; }
+.dfl-node.st-warn rect { stroke: #d29922; }
+.dfl-node.round rect { fill: #14233a; stroke: #3b6ea8; }
+.dfl-node.st-live rect { fill: none; stroke: #58a6ff; stroke-dasharray: 6 4; animation: dfl-march 1s linear infinite; }
+.dfl-node { transition: transform 0.3s ease-out; }
+.dfl-title { fill: #d8dbe0; font-size: 12px; }
+.dfl-sub { fill: #8b949e; font-size: 10px; }
+.dfl-edge { fill: none; stroke: #4d5566; stroke-width: 1.4; }
+.dfl-edge.live { stroke: #58a6ff; stroke-dasharray: 4 4; }
+@keyframes dfl-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes dfl-march { to { stroke-dashoffset: -20; } }
+@media (prefers-reduced-motion: reduce) {
+  .dfl-node, .dfl-node rect, .dfl-node.st-live rect { animation: none; transition: none; }
+}
+
 /* The same steps on a clock — the run's journal in the time domain, under the
    graph it belongs to. One lane per step, one bar per visit; the bar's fill
    is time the run was WORKING, and the bands laid over it are the doors it

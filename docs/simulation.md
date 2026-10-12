@@ -105,6 +105,19 @@ claunch-efnbt. gds6 시뮬레이션 v2(`~/works/gds6`, `notes/designframe-sim-v2
   먼저 기록된다(claunch-efnbt.4). 「중지」는 실행 세션을 종료한다. 소유 세션이 종료되면
   실행 세션도 종료된다.
 - 진행 상황은 세션 진행 API(`stage`: formalize, judge, answers, round, gaps)로 세션 목록과 대시보드에 보인다.
+- 실행 세션의 터미널 머리줄 「⬒ run」은 워크플로 런 대신 그 세션의 실행 기록(`durable.events.jsonl`)을 흐름도로 보여
+  준다(`web/static/durable-flow.js`, claunch-neeya). 읽는 곳은 `GET /api/sessions/<실행 세션>/durable?since=<n>`이다.
+  세션 정의의 `CLAUNCH_SIM_ID`(세션이 사라졌으면 이름 `<시뮬레이션 id>-run<n>`)로 시뮬레이션을 찾고, 그 세션의 줄만
+  돌려준다. `since`는 이미 받은 사건 수이고 응답은 그 뒤의 사건만 싣는다. `live`, `progress`가 함께 온다.
+  시뮬레이션 전체의 기록은 `GET /api/sims/<id>/events?session=&since=`이다.
+  - 열은 고리가 들어간 단계 순서다: 시작, 형식화, 재인용, 판정, 답 반영, 라운드 N, 편집 제안, 끝. 앞서 지난 단계에 다시
+    들어가면 새 열이 생긴다. 열 안의 노드는 시간 순서다.
+  - 물음(`ask`) 하나가 노드 하나다. 결과 사건(`formalize`, `judge`, `triage`, `gap_patch`, `edits` 등)은 새 노드를 만들지
+    않고 그 물음의 노드 상태를 바꾼다(초록 성공, 빨강 실패·해석 실패, 노랑 일부 오류). 노드 위에 마우스를 올리면 시각,
+    물음 열쇠, 토큰 내역이 보인다.
+  - 세션이 살아 있고 `done`이 없으면 마지막 노드 뒤에 점선 「진행 중」 노드가 진행 API의 단계와 문구를 보여 준다.
+  - 2초마다 뒤쪽 사건만 받아 이미 그린 SVG에 새 노드와 선을 덧붙이고, 상태가 바뀐 노드의 글자와 class만 고친다. SVG를
+    다시 만들지 않으므로 스크롤 위치와 마우스 올림이 유지된다. 세션이 종료되면 폴링을 멈춘다.
 - 프로필이 없거나, pi로 실행할 수 없거나, 런타임이 없으면 S1 방식으로 돌고 응답의 `manual`에 이유를 적는다.
   `sim_start`에 `runner: false`를 주면 실행 세션 없이 소유 세션이 해석한다.
 

@@ -179,3 +179,37 @@ def test_user_accepts_an_edit_proposal_and_the_owner_is_told(tmp_path):
         assert res["nudged"] and pid in s1.delivered[-1] and "append to spec.md" in s1.delivered[-1]
         assert "Opening an open door does nothing." in s1.delivered[-1]
     run(tmp_path, scenario)
+
+
+def test_run_session_events_are_read_by_session_and_by_tail(tmp_path):
+    """The run pane of a pi-durable session reads its runner's event log
+    (claunch-neeya): only that session's lines, and only the tail it lacks."""
+    import json as _json
+
+    async def scenario(req, mgr, s1, s2):
+        sid = (await req("POST", "/api/sims", {"title": "door", "session": "s1"}, status=201))["sim"]["id"]
+        log = tmp_path / "sims" / sid / "durable.events.jsonl"
+        rows = [
+            {"session": f"{sid}-run1", "event": "session_start"},
+            {"session": f"{sid}-run1", "event": "ask", "role": "B", "key": "formalize:1"},
+            {"session": f"{sid}-run2", "event": "session_start"},
+            {"session": f"{sid}-run1", "event": "formalize", "attempt": 1, "ok": True},
+        ]
+        log.write_text("".join(_json.dumps(r) + "\n" for r in rows) + '{"session": "half', encoding="utf-8")
+        got = await req("GET", f"/api/sessions/{sid}-run1/durable")
+        assert [e["event"] for e in got["events"]] == ["session_start", "ask", "formalize"]
+        assert got["total"] == 3 and got["sim"] == sid and got["live"] is False
+        assert got["sessions"] == [f"{sid}-run1", f"{sid}-run2"]
+        tail = await req("GET", f"/api/sessions/{sid}-run1/durable?since=2")
+        assert [e["event"] for e in tail["events"]] == ["formalize"] and tail["since"] == 2
+        # A live run session is found by its env, whatever its name.
+        run = FakeSession("renamed", str(tmp_path))
+        run.sdef.env = {"CLAUNCH_SIM_ID": sid}
+        mgr.sessions["renamed"] = run
+        live = await req("GET", "/api/sessions/renamed/durable")
+        assert live["live"] is True and live["events"] == [] and live["total"] == 0
+        assert (await req("GET", f"/api/sims/{sid}/events?since=1"))["total"] == 4
+        await req("GET", "/api/sessions/s1/durable", status=404)
+        await req("GET", "/api/sessions/sim-00000000-run1/durable", status=404)
+        await req("GET", f"/api/sessions/{sid}-run1/durable?since=x", status=400)
+    run(tmp_path, scenario)
