@@ -15053,66 +15053,181 @@ function terminalCommandAt(t, row) {
   return /^![ \t]*[^!\s]/.test(text) ? text : null;
 }
 
-/* A per-terminal button: it follows cached terminals and is disposed with
-   xterm. Hover never copies or sends input. Copy runs inside a real click,
-   through the same browser-PC clipboard helper as the Clipboard menu.
+/* The cells a detected command occupies, one segment per physical row:
+   [{ row, from, to }] in buffer rows and columns, `to` exclusive. Detection
+   stays terminalCommandAt's; this only locates its text on screen, from the
+   first "!" to the last visible cell (a closing Markdown backtick excluded). */
+function terminalCommandCells(t, row) {
+  const command = terminalCommandAt(t, row);
+  if (!command) return null;
+  const buffer = t.buffer.active;
+  let start = row;
+  while (start > 0 && buffer.getLine(start)?.isWrapped) start--;
+  let end = start;
+  while (buffer.getLine(end + 1)?.isWrapped) end++;
+  const cells = [];
+  for (let r = start; r <= end; r++) {
+    const line = buffer.getLine(r);
+    for (let c = 0; c < line.length; c++) {
+      const cell = line.getCell(c);
+      const width = cell?.getWidth() ?? 0;
+      if (width) cells.push({ row: r, col: c, width, chars: cell.getChars() });
+    }
+  }
+  const first = cells.findIndex((cell) => cell.chars === "!");
+  if (first < 0) return null;
+  let last = cells.length - 1;
+  while (last > first && !cells[last].chars.trim()) last--;
+  if (last > first && cells[last].chars === "`" && !command.endsWith("`")) last--;
+  const segments = [];
+  for (const cell of cells.slice(first, last + 1)) {
+    const segment = segments.at(-1);
+    if (segment?.row === cell.row) segment.to = cell.col + cell.width;
+    else segments.push({ row: cell.row, from: cell.col, to: cell.col + cell.width });
+  }
+  return { command, row, segments };
+}
+
+/* A per-terminal link layer: it follows cached terminals and is disposed with
+   xterm. Hovering the command text underlines it and shows a pointer; a click
+   on the text copies it through the same browser-PC clipboard helper as the
+   Clipboard menu. The underline ignores the pointer, so a drag still selects
+   text as usual and a drag never copies. While the PTY tracks the mouse, a
+   click on the command is kept from the application (it would otherwise get
+   the click as input); Shift still reaches xterm's forced selection.
    No extra daemon endpoint is needed: the normal PTY WebSocket/relay has
    already delivered the text this viewer is looking at. */
 function installTerminalCommandCopy(t) {
   const host = t.element;
   const screen = host.querySelector(".xterm-screen");
   if (!screen) return;
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "term-command-copy";
-  button.hidden = true;
-  button.textContent = "Copy command";
-  button.title = "Copy this ! command to this computer's clipboard";
-  host.appendChild(button);
-  let command = null;
-  let bufferRow = null;
-  const hide = () => { button.hidden = true; command = null; bufferRow = null; };
-  const move = (event) => {
-    if (button.contains(event.target)) return;
-    const rect = screen.getBoundingClientRect();
-    if (!rect.height || event.clientX < rect.left || event.clientX >= rect.right
-        || event.clientY < rect.top || event.clientY >= rect.bottom) return hide();
-    const row = Math.floor((event.clientY - rect.top) * t.rows / rect.height);
-    const nextRow = t.buffer.active.viewportY + row;
-    const next = terminalCommandAt(t, nextRow);
-    if (!next) return hide();
-    if (next !== command || nextRow !== bufferRow) button.textContent = "Copy command";
-    command = next;
-    bufferRow = nextRow;
-    const parent = host.getBoundingClientRect();
-    button.hidden = false;
-    button.style.top = `${Math.max(0, Math.min(rect.top - parent.top + row * rect.height / t.rows,
-      rect.bottom - parent.top - button.offsetHeight))}px`;
-    button.style.left = `${Math.max(0, rect.right - parent.left - button.offsetWidth - 4)}px`;
+  const layer = document.createElement("div");
+  layer.className = "term-command-link";
+  layer.hidden = true;
+  const badge = document.createElement("div");
+  badge.className = "term-command-copied";
+  badge.hidden = true;
+  host.appendChild(layer);
+  host.appendChild(badge);
+  let target = null;
+  let down = null;
+  let pointer = null;
+  let badgeTimer = null;
+  const hideBadge = () => { clearTimeout(badgeTimer); badge.hidden = true; };
+  const hide = () => {
+    target = null;
+    layer.hidden = true;
+    layer.classList.remove("term-command-link-active");
+    host.classList.remove("term-command-hot");
   };
-  const press = (event) => { event.preventDefault(); event.stopPropagation(); };
+  const cellAt = (event) => {
+    const rect = screen.getBoundingClientRect();
+    if (!rect.height || !rect.width || event.clientX < rect.left || event.clientX >= rect.right
+        || event.clientY < rect.top || event.clientY >= rect.bottom) return null;
+    return {
+      rect,
+      row: t.buffer.active.viewportY + Math.floor((event.clientY - rect.top) * t.rows / rect.height),
+      col: Math.floor((event.clientX - rect.left) * t.cols / rect.width),
+    };
+  };
+  const hit = (event) => {
+    const cell = cellAt(event);
+    if (!cell) return null;
+    const found = terminalCommandCells(t, cell.row);
+    if (!found || !found.segments.some((s) => s.row === cell.row
+        && cell.col >= s.from && cell.col < s.to)) return null;
+    return { ...found, rect: cell.rect };
+  };
+  const show = (found) => {
+    const parent = host.getBoundingClientRect();
+    const width = found.rect.width / t.cols;
+    const height = found.rect.height / t.rows;
+    const top = found.rect.top - parent.top;
+    const left = found.rect.left - parent.left;
+    const viewportY = t.buffer.active.viewportY;
+    layer.replaceChildren(...found.segments.map((s) => {
+      const part = document.createElement("div");
+      part.className = "term-command-link-row";
+      part.style.top = `${top + (s.row - viewportY) * height}px`;
+      part.style.left = `${left + s.from * width}px`;
+      part.style.width = `${(s.to - s.from) * width}px`;
+      part.style.height = `${height}px`;
+      return part;
+    }));
+    layer.hidden = false;
+    host.classList.add("term-command-hot");
+    target = found;
+  };
+  const tracking = () => (t.modes?.mouseTrackingMode ?? "none") !== "none";
+  const move = (event) => {
+    pointer = { clientX: event.clientX, clientY: event.clientY };
+    if (down) {
+      // A press that moved is a selection drag: drop the link look.
+      if (Math.hypot(event.clientX - down.x, event.clientY - down.y) > 4) hide();
+      return;
+    }
+    const found = hit(event);
+    if (!found) return hide();
+    if (found.command !== target?.command || found.segments[0].row !== target?.segments[0].row
+        || layer.hidden) show(found);
+  };
+  const press = (event) => {
+    if (event.button !== 0) return;
+    const found = hit(event);
+    if (!found) return;
+    down = { x: event.clientX, y: event.clientY, found };
+    layer.classList.add("term-command-link-active");
+    if (tracking() && !event.shiftKey) { event.preventDefault(); event.stopPropagation(); }
+  };
   const copy = async (event) => {
-    press(event);
-    const text = command;
+    const pressed = down;
+    down = null;
+    layer.classList.remove("term-command-link-active");
+    if (!pressed || event.button !== 0) return;
+    if (tracking() && !event.shiftKey) { event.preventDefault(); event.stopPropagation(); }
+    // Only a click that stayed put copies; a drag or a selection is the
+    // ordinary text selection and is left alone.
+    if (Math.hypot(event.clientX - pressed.x, event.clientY - pressed.y) > 4) return;
+    if (t.hasSelection?.() && t.getSelection?.()) return;
+    const text = pressed.found.command;
     // Revalidate on click in case the PTY repainted between hover and click.
-    if (!text || terminalCommandAt(t, bufferRow) !== text) return hide();
+    if (terminalCommandAt(t, pressed.found.row) !== text) return hide();
     const ok = await copyToBrowserClipboard(text, host);
-    if (command === text) button.textContent = ok ? "Copied" : "Copy failed";
+    const last = pressed.found.segments.at(-1);
+    const rect = pressed.found.rect;
+    const parent = host.getBoundingClientRect();
+    badge.textContent = ok ? "Copied" : "Copy failed";
+    badge.classList.toggle("term-command-copied-failed", !ok);
+    badge.style.top = `${rect.top - parent.top + (last.row - t.buffer.active.viewportY) * rect.height / t.rows}px`;
+    badge.hidden = false;
+    // Beside the command's end, kept inside the terminal at the right edge.
+    badge.style.left = `${Math.max(0, Math.min(rect.left - parent.left + last.to * rect.width / t.cols + 4,
+      rect.right - parent.left - badge.offsetWidth))}px`;
+    clearTimeout(badgeTimer);
+    badgeTimer = setTimeout(hideBadge, 1500);
     if (!ok) notify("Copy failed", "Select the command and copy it by hand.", { key: "command-copy" });
   };
+  const leave = () => { pointer = null; if (!down) hide(); };
+  const reset = () => { down = null; hide(); hideBadge(); };
+  // Output and scrolling move text under a still pointer: measure again.
+  const repaint = () => { if (down) return; hide(); if (pointer) move(pointer); };
   host.addEventListener("mousemove", move);
-  host.addEventListener("mouseleave", hide);
-  button.addEventListener("pointerdown", press);
-  button.addEventListener("mousedown", press);
-  button.addEventListener("click", copy);
-  const subscriptions = [t.onScroll(hide), t.onResize(hide), t.onWriteParsed(hide)];
+  host.addEventListener("mouseleave", leave);
+  host.addEventListener("mousedown", press, true);
+  window.addEventListener("mouseup", copy, true);
+  const subscriptions = [t.onScroll(repaint), t.onResize(reset), t.onWriteParsed(repaint)];
   t.loadAddon({
     activate() {},
     dispose() {
       subscriptions.forEach((s) => s.dispose());
+      clearTimeout(badgeTimer);
       host.removeEventListener("mousemove", move);
-      host.removeEventListener("mouseleave", hide);
-      button.remove();
+      host.removeEventListener("mouseleave", leave);
+      host.removeEventListener("mousedown", press, true);
+      window.removeEventListener("mouseup", copy, true);
+      host.classList.remove("term-command-hot");
+      layer.remove();
+      badge.remove();
     },
   });
 }
