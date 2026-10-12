@@ -28953,7 +28953,8 @@ async function wsSyncPreviewPrompt(name, kind) {
   const body = wsSyncPromptBody(st, kind);
   if (!body) return;
   const preview = { kind, key: JSON.stringify(body), loading: true, prompt: "", error: "" };
-  st.agentPreview = preview;
+  st.agentPreviews ||= {};
+  st.agentPreviews[kind] = preview;
   renderWorkspaces();
   try {
     const resp = await api(`/api/reposync/workspaces/${encodeURIComponent(name)}/agent-preview`, {
@@ -28966,7 +28967,7 @@ async function wsSyncPreviewPrompt(name, kind) {
     preview.error = String(err.message || err);
   }
   preview.loading = false;
-  if (st.agentPreview === preview && wsOpen) renderWorkspaces();
+  if (st.agentPreviews[kind] === preview && wsOpen) renderWorkspaces();
 }
 
 function wsSyncAgentControls(st, name) {
@@ -29003,34 +29004,35 @@ function wsSyncAgentControls(st, name) {
     box.appendChild(el("p", "wf-note", "Push approval still applies to the agent's final changes."));
   }
   box.appendChild(form);
-  if (st.agentMode !== "commands") {
-    const previews = el("div", "ws-sync-form");
-    for (const kind of ["sync", "push"]) {
-      const button = el("button", "wf-btn clear", `Preview ${kind} prompt`);
-      button.disabled = !wsSyncPromptBody(st, kind) || !!st.busy;
-      button.addEventListener("click", () => wsSyncPreviewPrompt(name, kind));
-      previews.appendChild(button);
-    }
-    box.appendChild(previews);
-    box.appendChild(el("p", "wf-note", "The assignment uses git rebase --rebase-merges. Standard parent and mesh instructions are added at launch."));
-    if (st.agentMode === "on_failure") box.appendChild(el("p", "wf-note",
-      "B mode adds the actual failure details when the agent starts. The sent prompt remains available below."));
-    const preview = st.agentPreview;
-    if (preview && preview.key === JSON.stringify(wsSyncPromptBody(st, preview.kind))) {
-      if (preview.loading) box.appendChild(el("p", "wf-note", "Loading prompt…"));
-      else if (preview.error) box.appendChild(el("p", "wf-note wf-warning", preview.error));
-      else {
-        const detail = wsSyncPromptText(`Agent prompt preview (${preview.kind})`, preview.prompt);
-        detail.open = true;
-        box.appendChild(detail);
-      }
-    }
-  }
   if (st.doc && st.doc.agent) {
     const link = el("a", "ws-sync-agent-link", `Agent ${st.doc.agent.session} (${st.doc.agent.status}) — open session`);
     link.href = `#/s/${encodeURIComponent(st.doc.agent.session)}`;
     box.appendChild(link);
     if (st.doc.agent.prompt) box.appendChild(wsSyncPromptText("Sent agent prompt", st.doc.agent.prompt));
+  }
+  return box;
+}
+
+// Keep each preview with the operation and inputs that produced it.
+function wsSyncOperationPreview(st, name, kind) {
+  const box = el("div", "ws-sync-operation-preview");
+  if (!st.agentMode || st.agentMode === "commands") return box;
+  const button = el("button", "wf-btn clear", `Preview ${kind} prompt`);
+  button.disabled = !wsSyncPromptBody(st, kind) || !!st.busy;
+  button.addEventListener("click", () => wsSyncPreviewPrompt(name, kind));
+  box.appendChild(button);
+  box.appendChild(el("p", "wf-note", "Previewing does not start an agent. The assignment uses git rebase --rebase-merges; parent and mesh instructions are added at launch."));
+  if (st.agentMode === "on_failure") box.appendChild(el("p", "wf-note",
+    "Failure details are added if the commands fail and an agent starts."));
+  const preview = st.agentPreviews && st.agentPreviews[kind];
+  if (preview && preview.key === JSON.stringify(wsSyncPromptBody(st, kind))) {
+    if (preview.loading) box.appendChild(el("p", "wf-note", "Loading prompt…"));
+    else if (preview.error) box.appendChild(el("p", "wf-note wf-warning", preview.error));
+    else {
+      const detail = wsSyncPromptText(`Agent prompt preview (${kind})`, preview.prompt);
+      detail.open = true;
+      box.appendChild(detail);
+    }
   }
   return box;
 }
@@ -29097,8 +29099,9 @@ function wsSyncPanel(w) {
   panel.appendChild(wsSyncRemoteComparisons(doc));
 
   // master
-  const master = el("div", "ws-sync-section");
-  master.appendChild(el("h4", null, "Master"));
+  const master = el("section", "ws-sync-section ws-sync-master");
+  master.setAttribute("aria-label", "Sync master");
+  master.appendChild(el("h4", null, "Sync master"));
   if (doc.plan) {
     master.appendChild(wsSyncPlanLine(doc.plan));
     master.appendChild(el("p", "wf-note", doc.plan.summary));
@@ -29111,6 +29114,7 @@ function wsSyncPanel(w) {
         : st.agentMode === "agent" ? "Delegate sync" : (WS_SYNC_LABEL[doc.plan.action] || "Up to date"));
     go.disabled = !!st.busy || st.loading || doc.plan.action === "up-to-date" || wsSyncAgentBlocked(st);
     go.addEventListener("click", () => wsSyncRun(w.name));
+    master.appendChild(wsSyncOperationPreview(st, w.name, "sync"));
     master.appendChild(go);
   } else {
     master.appendChild(el("p", "wf-note wf-warning", doc.plan_error || "no plan"));
@@ -29121,9 +29125,14 @@ function wsSyncPanel(w) {
   // work branches
   const work = el("div", "ws-sync-section");
   work.appendChild(el("h4", null, "Work branches"));
+  const pushSection = el("section", "ws-sync-operation ws-sync-push");
+  pushSection.setAttribute("aria-label", "Push a local branch");
+  pushSection.appendChild(el("h5", null, "Push a local branch"));
+  pushSection.appendChild(el("p", "wf-note", `Local branch → shared remote as ${doc.machine}/<branch>.`));
   const pushRow = el("div", "ws-sync-form");
   const pick = el("select");
   pick.id = `ws-sync-push-${w.name}`;
+  pick.setAttribute("aria-label", "Local branch to push");
   for (const b of doc.branches || []) {
     const opt = new Option(b, b);
     if (b === st.pushBranch) opt.selected = true;
@@ -29143,10 +29152,15 @@ function wsSyncPanel(w) {
     : st.agentMode === "agent" ? "Delegate push" : `Push as ${doc.machine}/…`);
   push.disabled = !!st.busy || !(doc.branches || []).length || wsSyncAgentBlocked(st);
   push.addEventListener("click", () => { st.pushBranch = pick.value; wsSyncBranch(w.name, "push"); });
-  pushRow.appendChild(push);
-  work.appendChild(pushRow);
+  pushSection.appendChild(pushRow);
+  pushSection.appendChild(wsSyncOperationPreview(st, w.name, "push"));
+  pushSection.appendChild(push);
+  work.appendChild(pushSection);
   if (doc.plan) work.appendChild(wsSyncShared(w.name, doc, st));
 
+  const pullSection = el("section", "ws-sync-operation ws-sync-pull");
+  pullSection.setAttribute("aria-label", "Pull from another machine");
+  pullSection.appendChild(el("h5", null, "Pull from another machine"));
   const pullRow = el("div", "ws-sync-form");
   const machine = el("input");
   machine.id = `ws-sync-machine-${w.name}`;
@@ -29169,10 +29183,11 @@ function wsSyncPanel(w) {
   pull.disabled = !!st.busy;
   pull.addEventListener("click", () => wsSyncBranch(w.name, "pull"));
   pullRow.appendChild(pull);
-  work.appendChild(pullRow);
-  work.appendChild(el("p", "wf-note",
+  pullSection.appendChild(pullRow);
+  pullSection.appendChild(el("p", "wf-note",
     "A work branch travels as <machine>/<branch> on the shared remote; " +
     "pull fetches another machine's into the local branch of that name."));
+  work.appendChild(pullSection);
   panel.appendChild(work);
 
   if (st.result) panel.appendChild(wsSyncResult(st.result));
