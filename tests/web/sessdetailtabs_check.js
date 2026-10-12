@@ -83,7 +83,8 @@ const localStorage = {
 };
 let refreshed = 0;
 const sections = [
-  "sessFlags", "sessNote", "sessTask", "sessBriefSection", "sessInputJournal",
+  "sessFlags", "sessNote", "sessTask", "sessPromptPacks", "sessBriefSection",
+  "sessInputJournal",
   "sessHandoff", "sessSend", "sessMeshJoin", "sessBeads", "sessCommits",
   "sessVscode", "sessReborrow", "sessPerms", "sessSandbox", "sessCompact", "sessMigrate",
 ];
@@ -188,7 +189,7 @@ check("five sub-tabs, All first",
 
 /* ---- what each sub-tab draws -------------------------------------------- */
 const OVERVIEW = ["sess-meta", "sessFlags", "sessNote", "sessTask",
-                  "sessBriefSection"];
+                  "sessPromptPacks", "sessBriefSection"];
 const MESSAGES = ["sessInputJournal", "sessHandoff", "sessSend", "sessQueued",
                   "sess-meshes"];
 const WORK = ["sessBeads", "sessCommits", "sessVscode", "roleQuickJob"];
@@ -204,7 +205,7 @@ check("Overview draws its group alone, with no head",
       renderWith("overview"), [...TOP, ...OVERVIEW]);
 check("...and builds nothing else",
       built.filter((b) => !["sessFlags", "sessNote", "sessTask",
-                            "sessBriefSection"].includes(b)), []);
+                            "sessPromptPacks", "sessBriefSection"].includes(b)), []);
 check("Messages draws its group alone", renderWith("messages"),
       [...TOP, ...MESSAGES]);
 check("Work draws its group alone", renderWith("work"), [...TOP, ...WORK]);
