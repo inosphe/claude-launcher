@@ -1038,7 +1038,7 @@ async def _deliver_until_it_lands(session, block, *, before=None) -> None:
     """
     deadline = time.monotonic() + OPENING_RETRY_WINDOW
     while time.monotonic() < deadline:
-        if session.exited:
+        if session.exited and not getattr(session, "held_at", None):
             return
         kw = {"before": before} if before is not None else {}
         if await session.deliver(block, **kw):

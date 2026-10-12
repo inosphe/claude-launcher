@@ -347,6 +347,8 @@ class SessionManager:
         session.on_exit = self._session_exited
         session.on_command_submitted = self._session_command_submitted
         session.on_progress = self._session_progress
+        session.wake_on_message = self.wake_async
+        session.queue_on_message = self.queue_message
         self._sessions[name] = session
         return session
 
@@ -1676,8 +1678,15 @@ class SessionManager:
         lock = self._wake_locks.setdefault(name, asyncio.Lock())
         async with lock:
             session = self.get(name)
-            if not session.exited or not getattr(session, "held_at", None):
+            if not getattr(session, "held_at", None):
                 return session
+            # hold marks the record before the asynchronous process exit.
+            # Messages in that interval must wait rather than enter the dying PTY.
+            if not session.exited:
+                await session.wait_for("exited", timeout=10.0, threshold=self.idle_threshold)
+                session = self.get(name)
+                if not session.exited or not getattr(session, "held_at", None):
+                    return session
             delayed = bool(getattr(session, "delayed_at", None))
             self._waking.add(name)
             try:
@@ -1739,6 +1748,13 @@ class SessionManager:
         """Whether :meth:`wake_async` is relaunching ``name`` right now."""
         return name in self._waking
 
+    def queue_message(self, name: str, text: str) -> bool:
+        """Queue against the current incarnation, waking a held record first."""
+        session = self.get(name)
+        if session.exited or getattr(session, "held_at", None):
+            return self.wake_soon(name, by="message", deliver=text)
+        return session.queue_delivery(text)
+
     def wake_soon(self, name: str, *, by: str = "", deliver: str = "") -> bool:
         """Schedule :meth:`wake_async` from synchronous code on the loop, and
         queue ``deliver`` into the woken session. Returns whether a wake was
@@ -1747,7 +1763,7 @@ class SessionManager:
             session = self.get(name)
         except ManagerError:
             return False
-        if not session.exited or not getattr(session, "held_at", None):
+        if not getattr(session, "held_at", None):
             return False
         try:
             loop = asyncio.get_running_loop()
@@ -2950,6 +2966,8 @@ class SessionManager:
             idle_threshold=self.idle_threshold,
         )
         self._sessions[sdef.name] = dead
+        dead.wake_on_message = self.wake_async
+        dead.queue_on_message = self.queue_message
         # This ending never reaches the exit hooks (see
         # :attr:`_retired_for_sweep`), so the issue sweep it owes has to be
         # claimed at boot instead — by whoever owns the board.

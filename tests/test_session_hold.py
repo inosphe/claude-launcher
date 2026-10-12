@@ -14,6 +14,8 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from aiohttp.test_utils import TestClient, TestServer
 
 from claude_launcher.daemon import hold as hold_mod
@@ -550,5 +552,195 @@ def test_a_mesh_message_wakes_a_held_recipient_and_lands_after_the_respawn(
         finally:
             for s in list(mgr.list()):
                 await s.shutdown()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("route", ["input", "keys", "paste", "deliver", "defer", "checks", "peer",
+                                   "cflow-checks", "v2-checks", "cflow-nudge", "observer", "opening"])
+@pytest.mark.parametrize("retired", [False, True])
+def test_messages_restore_hold_and_reach_the_program(home, tmp_path, route, retired):
+    from claude_launcher.daemon import session_input, shadow, status_checks
+
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mgr.resumable = lambda s: True
+        client = TestClient(TestServer(build_app(mgr, "sekrit", started_at=0.0)))
+        await client.start_server()
+        headers = {"Authorization": "Bearer sekrit"}
+        try:
+            original = mgr.create(SessionDef(name="sleepy", harness="py", cwd=str(tmp_path)))
+            await _wait_screen(original, "READY")
+            mgr.hold("sleepy")
+            await original.wait_for("exited", timeout=10, threshold=0.5)
+            if retired:
+                mgr._retire(original.sdef, original.info())
+            text = "hold-message-received"
+            path = "/api/sessions/sleepy/"
+            if route in ("cflow-checks", "v2-checks", "cflow-nudge"):
+                from claude_launcher.daemon import cflow_clock, cflow2_triggers
+                from claude_launcher.daemon.api import _nudge_sessions
+                if route == "cflow-nudge":
+                    assert await _nudge_sessions(mgr, str(tmp_path), "sleepy", text) == ["sleepy"]
+                else:
+                    status_checks.set_entries([{"name": "Tests", "question": "Tests passed?"}])
+                    if route == "cflow-checks":
+                        result = await cflow_clock.TriggerClock(mgr)._perform(str(tmp_path), "sleepy", {"do": "checks"})
+                    else:
+                        result = await cflow2_triggers.perform(mgr, str(tmp_path), "sleepy", {"do": "checks"}, driver="sleepy")
+                    assert result[0], result
+                    text = status_checks.REFRESH_PROMPT.splitlines()[0]
+            elif route == "observer":
+                from claude_launcher.daemon.observer_reports import Reports
+                reports = Reports(tmp_path, mgr)
+                event = reports.publish("sleepy", {"text": "Continue?", "question": True})
+                result = await reports.answer("sleepy", event["id"], {"text": text})
+                assert result["delivery"] == "sent"
+                text = "[Observer user answer]"
+            elif route == "opening":
+                from claude_launcher.daemon.onboard import _deliver_until_it_lands
+                await _deliver_until_it_lands(mgr.get("sleepy"), text)
+            elif route == "peer":
+                result = await shadow.type_line(mgr.get("sleepy"), text, "peer-1", origin="peer:test")
+                assert result["ok"]
+            else:
+                if route == "checks":
+                    status_checks.set_entries([{"name": "Tests", "question": "Tests passed?"}])
+                    endpoint, body = "status-checks/refresh", {}
+                    text = status_checks.REFRESH_PROMPT.splitlines()[0]
+                elif route in ("deliver", "defer"):
+                    endpoint, body = "deliver", {"text": text, "defer": route == "defer"}
+                elif route == "paste":
+                    endpoint, body = "keys", {"paste": text, "enter": True}
+                else:
+                    endpoint, body = "keys", {"keys": [text, "Enter"], "force": True}
+                    if route == "input":
+                        body["input_id"] = "input-1"
+                response = await client.post(path + endpoint, json=body, headers=headers)
+                assert response.status in (200, 202), await response.text()
+                result = await response.json()
+                if route in ("deliver", "checks"):
+                    assert result["delivered"] is True
+                if route == "defer":
+                    assert result["queued"] is True
+            if mgr._wake_tasks:
+                await asyncio.wait_for(asyncio.gather(*list(mgr._wake_tasks)), 15)
+            if mgr._input_flush_tasks:
+                await asyncio.wait_for(asyncio.gather(*list(mgr._input_flush_tasks)), 15)
+            current = mgr.get("sleepy")
+            assert current is not original and not current.exited
+            assert current.held_at is None
+            await _wait_screen(current, "echo:" + text)
+            if route == "input":
+                assert session_input.latest("sleepy", "input-1")["status"] == "sent"
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_held_deliveries_share_one_restore_and_keep_queue_order(home, tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    async def run():
+        mgr = _manager()
+        held = mgr._retire(SessionDef(name="sleepy", harness="py"), {"held_at": HELD_AT})
+        started, release = asyncio.Event(), asyncio.Event()
+        received = []
+        live = SimpleNamespace(exited=False, queue_delivery=lambda text: received.append(text) or True)
+
+        async def respawn(name):
+            started.set()
+            await release.wait()
+            mgr._sessions[name] = live
+            return live
+
+        spawn = AsyncMock(side_effect=respawn)
+        monkeypatch.setattr(mgr, "respawn_async", spawn)
+        assert held.queue_delivery("first")
+        await started.wait()
+        assert held.queue_delivery("second")
+        release.set()
+        await asyncio.gather(*list(mgr._wake_tasks))
+        assert received == ["first", "second"]
+        assert spawn.await_count == 1
+        # A sender can still hold a reference to the old incarnation.
+        assert held.queue_delivery("third")
+        assert received == ["first", "second", "third"]
+
+    asyncio.run(run())
+
+
+def test_failed_restore_leaves_operator_input_queued_for_retry(home, monkeypatch):
+    from unittest.mock import AsyncMock
+    from claude_launcher.daemon import session_input
+
+    async def run():
+        mgr = _manager()
+        held = mgr._retire(SessionDef(name="sleepy", harness="py"), {"held_at": HELD_AT})
+        spawn = AsyncMock(side_effect=ManagerError("restore failed"))
+        monkeypatch.setattr(mgr, "respawn_async", spawn)
+        client = TestClient(TestServer(build_app(mgr, "sekrit", started_at=0.0)))
+        await client.start_server()
+        try:
+            body = {"keys": ["keep this", "Enter"], "input_id": "retry-1"}
+            for duplicate in (False, True):
+                response = await client.post("/api/sessions/sleepy/keys", json=body,
+                                             headers={"Authorization": "Bearer sekrit"})
+                assert response.status == (200 if duplicate else 202)
+                await asyncio.gather(*list(mgr._wake_tasks))
+            assert spawn.await_count == 2
+            assert mgr.get("sleepy") is held
+            assert [r["text"] for r in session_input.pending("sleepy")] == ["keep this"]
+            assert not await held.deliver("a failed delivery is not acknowledged")
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("markers", [{}, {"paused_at": HELD_AT}, {"archived_at": HELD_AT}])
+def test_messages_do_not_restore_other_exited_states(home, monkeypatch, markers):
+    from unittest.mock import AsyncMock
+
+    async def run():
+        mgr = _manager()
+        dead = mgr._retire(SessionDef(name="dead", harness="py"), markers)
+        spawn = AsyncMock()
+        monkeypatch.setattr(mgr, "respawn_async", spawn)
+        assert not await dead.deliver("message")
+        assert not dead.queue_delivery("message")
+        spawn.assert_not_called()
+
+    asyncio.run(run())
+
+
+def test_message_waits_for_hold_process_exit_before_restore(home, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    async def run():
+        mgr = _manager()
+        terminating = SimpleNamespace(exited=False, held_at=HELD_AT)
+        live = SimpleNamespace(exited=False, held_at=None)
+        mgr._sessions["sleepy"] = terminating
+        calls = []
+
+        async def wait_for(*args, **kwargs):
+            calls.append("exit")
+            terminating.exited = True
+
+        async def respawn(name):
+            assert terminating.exited
+            calls.append("restore")
+            mgr._sessions[name] = live
+            return live
+
+        terminating.wait_for = wait_for
+        monkeypatch.setattr(mgr, "respawn_async", AsyncMock(side_effect=respawn))
+        assert await mgr.wake_async("sleepy", by="message") is live
+        assert calls == ["exit", "restore"]
 
     asyncio.run(run())

@@ -126,7 +126,7 @@ class Reports:
         self.save(name)
         try:
             session = self.session(name)
-            if session.exited:
+            if session.exited and not getattr(session, "held_at", None):
                 raise ValueError("session has exited; answer remains available via observer_requests")
             message = "[Observer user answer] " + json.dumps({"request_id":event_id,"question":event["text"],"answer":text},ensure_ascii=False)
             sent = await asyncio.wait_for(session.deliver(message), timeout=20)

@@ -458,7 +458,7 @@ class Handoffs:
                 f"no session named {target!r} to hand off to"
                 + (" — the quick-fork's origin is gone; use a handoff to a live session instead" if kind == MERGE else "")
             ) from None
-        if dst.exited:
+        if dst.exited and not getattr(dst, "held_at", None):
             raise HandoffError(
                 f"session {target!r} has exited — a report typed into an exited "
                 "terminal reaches nobody. Resume it first, or hand off elsewhere."
@@ -609,7 +609,7 @@ class Handoffs:
             raise HandoffError(f"no merge or handoff is pending on {source!r}")
         try:
             session = manager.get(source)
-            if not session.exited:
+            if not session.exited or getattr(session, "held_at", None):
                 task = asyncio.ensure_future(
                     session.deliver(compose_cancel(kind=row["kind"], target=row["target"]))
                 )

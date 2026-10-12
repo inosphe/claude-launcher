@@ -395,6 +395,21 @@ def delivery_stamp() -> str:
     )
 
 
+async def _deliver_after_hold(session, text, **kwargs) -> bool:
+    """Resolve the new incarnation before using its readiness and input locks."""
+    wake = getattr(session, "wake_on_message", None)
+    if not getattr(session, "held_at", None) or wake is None:
+        return False
+    try:
+        current = await wake(session.sdef.name, by="message")
+    except Exception:
+        log.exception("message wake of %r failed", session.sdef.name)
+        return False
+    if current.exited:
+        return False
+    return await current.deliver(text, **kwargs)
+
+
 class Session:
     """Owns one PTY child; created and torn down by the SessionManager.
 
@@ -1264,6 +1279,10 @@ class Session:
         after the keyboard wait; returning an empty string cancels the send.
         ``before`` is :meth:`_deliver`'s pre-paste step.
         """
+        if self.exited or getattr(self, "held_at", None):
+            return await _deliver_after_hold(
+                self, text, force=force, wait_for_draft=wait_for_draft, before=before
+            )
         while True:
             async with self._delivery_lock:
                 result = await self._deliver(
@@ -1283,8 +1302,9 @@ class Session:
         are not a durable mailbox across daemon restarts. Waiting in a task
         keeps HTTP handlers and other sessions' clock ticks responsive.
         """
-        if self.exited:
-            return False
+        if self.exited or getattr(self, "held_at", None):
+            enqueue = getattr(self, "queue_on_message", None)
+            return bool(enqueue and self.held_at and enqueue(self.sdef.name, text))
 
         # Lazily, and inline rather than through the helper, because this
         # method is also borrowed by doubles that are not Sessions at all:
@@ -2360,10 +2380,13 @@ class DeadSession:
         self, text: str, *, force: bool = False, wait_for_draft: bool = False,
         before=None,
     ) -> bool:
-        return False  # nothing is running to read it, forced or not
+        return await _deliver_after_hold(
+            self, text, force=force, wait_for_draft=wait_for_draft, before=before
+        )
 
     def queue_delivery(self, text: str) -> bool:
-        return False
+        enqueue = getattr(self, "queue_on_message", None)
+        return bool(enqueue and self.held_at and enqueue(self.sdef.name, text))
 
     async def write_bytes(self, data: bytes, writer: object = None) -> None:
         raise self._gone()

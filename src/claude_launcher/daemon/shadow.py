@@ -358,6 +358,10 @@ async def type_line(session, text, input_id, *, origin: str) -> dict:
     if not isinstance(input_id, str) or not input_id.strip():
         raise ShadowRefused(400, "'input_id' must be a non-empty string")
     name = session.sdef.name
+    wake = getattr(session, "wake_on_message", None)
+    if getattr(session, "held_at", None) and wake:
+        session = await wake(name, by="peer-input")
+        await session.await_input_ready()
     if getattr(session, "exited", False):
         raise ShadowRefused(409, f"session {name!r} has exited — nothing was typed")
     prior = session_input.latest(name, input_id)

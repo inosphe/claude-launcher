@@ -6,7 +6,8 @@ id, so a reconnect can distinguish an accepted line from one that was never
 sent.
 
 A line submitted while the session has exited has no terminal to go to, so
-it is recorded as ``queued`` and nothing else happens.  The journal is the
+it is recorded as ``queued``. A held session is automatically restored;
+other exited sessions wait for an explicit relaunch. The journal is the
 queue: when the session is launched again (respawn, resume, or a daemon
 restore) :func:`flush` types every request whose latest status is still
 ``queued``, oldest first, and records ``sent`` or ``failed`` for each.  Until

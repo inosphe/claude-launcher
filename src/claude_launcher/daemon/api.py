@@ -10694,13 +10694,23 @@ async def h_session_keys(request: web.Request) -> web.Response:
         return json_error(400, str(exc))
     if feedback != "none" and not session.sdef.score_goal:
         return json_error(409, "score goal is not enabled for this session")
-    if session.exited and request_id is not None:
+    if request_id is not None:
+        prior = session_input.latest(session.sdef.name, request_id)
+        if prior and prior.get("status") in ("accepted", "sent"):
+            return json_response(_keys_payload(session, 0, duplicate=True))
+    if request_id is not None and (
+        session.exited or getattr(session, "held_at", None)
+        or session_input.pending(session.sdef.name)
+    ):
         return _queue_session_input(request, session, body, request_id,
                                     feedback)
     paste = body.get("paste")
     if paste is not None:
         if not isinstance(paste, str):
             return json_error(400, "'paste' must be a string")
+        if getattr(session, "held_at", None):
+            session = await request.app["manager"].wake_async(session.sdef.name, by="input")
+            await session.await_input_ready()
         # A paste is text by definition: like send_keys with text, it queues
         # behind a human typing at this terminal rather than splicing into
         # their half-written line — and refuses outright rather than typing
@@ -10747,6 +10757,9 @@ async def h_session_keys(request: web.Request) -> web.Response:
     keys = body.get("keys")
     if not isinstance(keys, list) or not all(isinstance(k, str) for k in keys):
         return json_error(400, "'keys' must be a list of strings")
+    if getattr(session, "held_at", None):
+        session = await request.app["manager"].wake_async(session.sdef.name, by="input")
+        await session.await_input_ready()
     audit_text = keys[0] if request_id and len(keys) == 2 and keys[1] == "Enter" else None
     if request_id is not None:
         if audit_text is None:
@@ -10807,6 +10820,8 @@ def _queue_session_input(request, session, body: dict, request_id: str,
         text = keys[0]
     prior = session_input.latest(name, request_id)
     if prior:
+        if prior.get("status") == "queued" and getattr(session, "held_at", None):
+            request.app["manager"].wake_soon(name, by="input")
         return json_response({"ok": True, "bytes": 0, "duplicate": True,
                               "status": prior.get("status")})
     session_input.queue(name, request_id=request_id, text=text)
@@ -10818,7 +10833,9 @@ def _queue_session_input(request, session, body: dict, request_id: str,
         current = manager.get(name)
     except Exception:  # noqa: BLE001 — cleared meanwhile; stays queued
         current = None
-    if current is not None and not current.exited:
+    if current is not None and getattr(current, "held_at", None):
+        manager.wake_soon(name, by="input")
+    elif current is not None and not current.exited:
         manager.flush_queued_input(current)
     return json_response({
         "ok": True, "bytes": 0, "queued": True, "input_id": request_id,
@@ -10883,7 +10900,7 @@ async def h_session_deliver(request: web.Request) -> web.Response:
                 session.sdef.name, by="deliver", deliver=text)
             return json_response({"ok": True, "queued": queued, "delivered": False,
                                   "woken": queued})
-        queued = session.queue_delivery(text) if not session.exited else False
+        queued = session.queue_delivery(text)
         return json_response({"ok": True, "queued": queued, "delivered": False})
     delivered = await session.deliver(text)
     return json_response({"ok": True, "delivered": delivered})
@@ -11060,7 +11077,7 @@ async def h_session_pr(request: web.Request) -> web.Response:
         result["monitor"] = monitor
     delivered = None
     if body.get("report"):
-        if session.exited:
+        if session.exited and not getattr(session, "held_at", None):
             warnings.append("report: the session has exited; nothing was delivered")
         else:
             delivered = await session.deliver(prflow.report_block(result))
@@ -12376,7 +12393,7 @@ async def h_session_beads_create(request: web.Request) -> web.Response:
         )
     except beads_mod.BoardRequestError as exc:
         return json_error(400, str(exc))
-    if session.exited:
+    if session.exited and not getattr(session, "held_at", None):
         return json_error(
             409, f"{session.sdef.name} has exited -- file it on the board "
             "and queue it to a running session instead"
