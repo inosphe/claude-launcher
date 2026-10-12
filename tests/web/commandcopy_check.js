@@ -34,7 +34,11 @@ const t = { element: host, rows: 10, buffer: { active: {
   onWriteParsed: subscribe('write'), loadAddon(addon) { this.addon = addon; addon.activate(this); } };
 function setLines(...rows) {
   lines = rows.map(row => { const [text, wrapped = false] = Array.isArray(row) ? row : [row];
-    return { isWrapped: wrapped, translateToString(trim) { return trim ? text.trimEnd() : text; } }; });
+    return { isWrapped: wrapped, length: text.length,
+      getCell(col) { return { getCode: () => text.charCodeAt(col), getWidth: () => 1 }; },
+      translateToString(trim, start = 0, end = text.length) {
+        const part = text.slice(start, end); return trim ? part.trimEnd() : part;
+      } }; });
 }
 function hover(row = 0) {
   host.events.mousemove({ target: host, clientX: 30, clientY: 20 + row * 20 + 10 });

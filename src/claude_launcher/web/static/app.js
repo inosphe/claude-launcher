@@ -15032,8 +15032,16 @@ function terminalCommandAt(t, row) {
   do {
     const line = buffer.getLine(end);
     if (!line) return null;
-    const continues = buffer.getLine(end + 1)?.isWrapped;
-    text += line.translateToString(!continues);
+    const next = buffer.getLine(end + 1);
+    const continues = next?.isWrapped;
+    let columns = line.length;
+    // xterm pads the last column with a null cell when a two-column glyph
+    // wraps. Drop only that padding; a typed space has code 32, and the
+    // trailing half of a wide glyph has width 0, so both remain intact.
+    const last = line.getCell(columns - 1);
+    if (continues && last?.getCode() === 0 && last.getWidth() === 1
+        && next.getCell(0)?.getWidth() === 2) columns--;
+    text += line.translateToString(!continues, 0, columns);
     if (!continues) break;
     end++;
     if (end - start > 100) return null;

@@ -57,6 +57,17 @@ const server = http.createServer((req, res) => {
     await page.waitForFunction(() => document.querySelector('.term-command-copy').textContent === 'Copied');
     assert.equal(await page.evaluate(() => realClipboard.readText()), command);
     assert.deepEqual(await page.evaluate(() => sent), [], 'button never sends PTY mouse/input bytes');
+    // A two-column character that cannot fit in the last column leaves a
+    // null padding cell. Real spaces at this boundary must still survive.
+    for (const prefix of ['x'.repeat(31), 'x'.repeat(30), 'x'.repeat(30) + ' ', 'x'.repeat(31) + ' ', 'x'.repeat(29) + '  ']) {
+      const wide = '! echo "' + prefix + '한국어"';
+      await page.evaluate(async cmd => { t.reset(); await write(cmd); }, wide);
+      assert.equal(await page.evaluate(() => terminalCommandAt(t, 0)), wide);
+      await hover(1);
+      await button.click();
+      await page.waitForFunction(() => document.querySelector('.term-command-copy').textContent === 'Copied');
+      assert.equal(await page.evaluate(() => realClipboard.readText()), wide, 'wide wrap and literal spaces preserved');
+    }
     // Force the plain-HTTP fallback and check the real browser clipboard.
     await page.evaluate(() => Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true }));
     await page.evaluate(async () => { t.reset(); await write('! echo fallback'); });
