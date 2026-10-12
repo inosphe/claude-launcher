@@ -50,6 +50,12 @@ function sliceLet(name) {
   return src.slice(start, src.indexOf(";", start) + 1);
 }
 
+function sliceConst(name) {
+  const start = src.indexOf(`const ${name} =`);
+  if (start < 0) throw new Error(`cannot locate const ${name} in app.js`);
+  return src.slice(start, src.indexOf("};", start) + 2);
+}
+
 /* ---- stub DOM ---- */
 function control(value = "") {
   return { value, checked: false, disabled: false, options: [] };
@@ -86,7 +92,8 @@ for (const id of ["new-worktree", "new-worktree-name-row",
                   "new-worktree-existing-row", "new-worktree-rebase-row",
                   "new-worktree-from-row",
                   "new-worktree-session-row",
-                  "worktree-hint", "worktree-rebase-trunk", "cwd-hint"]) {
+                  "worktree-hint", "worktree-rebase-trunk", "cwd-hint",
+                  "worktree-create-mode"]) {
   box_[id] = box(id);
 }
 
@@ -115,7 +122,9 @@ const REPOS = {
                root_branch: "master",
                branches: ["master", "feature", "loose"],
                worktrees: ["w-alpha", "w-beta"],
-               worktree_branches: { "w-alpha": "w-alpha", "w-beta": "feature" } },
+               worktree_branches: { "w-alpha": "w-alpha", "w-beta": "feature" },
+               create: { mode: "cow", config: "F:/repo/.claunch/worktree.yaml",
+                         summary: "block-cloned on ReFS by pwsh x.ps1" } },
   "F:/other": { repo: true, root: "F:/other", branch: "main",
                 branches: ["main"], worktrees: ["o-one"] },
 };
@@ -144,6 +153,7 @@ new Function(
    slice("renderWorktreeSessionOptions"), slice("pickWorktreeSession"),
    slice("renderWorktreeFromOptions"), slice("worktreeFromBranch"),
    slice("syncNewWorktree"),
+   sliceConst("WORKTREE_CREATE_TAG"), slice("renderWorktreeCreateMode"),
    // The pack offer rides the same directory edges; its own check is
    // prompt_packs_check.js.
    `function refreshPromptPackOffer() {}`,
@@ -252,6 +262,27 @@ async function main() {
   check("the hint names the directory the list was read from",
         [hint.textContent, hint.classes.has("hidden"), hint.classes.has("info")],
         ["checkouts of F:/other", false, true]);
+
+  /* -- a NEW checkout says how it will be made, before it is ------------- */
+  const how = box_["worktree-create-mode"];
+  check("an existing checkout carries no creation line",
+        how.classes.has("hidden"), true);
+  form.cwd.value = "F:/repo";
+  await ctx.refresh();
+  form.worktree_mode.value = "new";
+  ctx.sync();
+  check("copy-on-write is said before Create, with the config as its title",
+        [how.textContent, how.classes.has("create-cow"), how.classes.has("hidden"),
+         how.title],
+        ["copy-on-write: block-cloned on ReFS by pwsh x.ps1",
+         true, false, "F:/repo/.claunch/worktree.yaml"]);
+  form.cwd.value = "F:/other";
+  await ctx.refresh();
+  ctx.sync();
+  check("a repository whose answer has no mode hides the line again",
+        [how.classes.has("hidden"), how.classes.has("create-cow")], [true, false]);
+  form.worktree_mode.value = "existing";
+  ctx.sync();
 
   /* -- a filter written against one repository does not outlive it ------- */
   ctx.filter("o-one");

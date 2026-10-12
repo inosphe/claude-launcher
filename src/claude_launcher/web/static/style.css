@@ -1747,6 +1747,15 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 /* The same line, saying where the list came from rather than what is wrong
    with the form — so it is read as a caption, not as a warning. */
 #worktree-hint.info { color: #7d8590; }
+/* How a NEW checkout of the selected repository would be made, said before
+   it is (worktree.creation_mode): copy-on-write green, a hook that would copy
+   every file amber, a config that would fail red, a bare git worktree grey. */
+#worktree-create-mode {
+  margin: -2px 0 8px; font-size: 11px; line-height: 1.45; color: #7d8590;
+}
+#worktree-create-mode.create-cow { color: #3fb950; }
+#worktree-create-mode.create-cow-unavailable { color: #d29922; }
+#worktree-create-mode.create-invalid { color: #f85149; }
 /* WHO it runs as. Fenced like the two fieldsets below it so the form reads
    as three questions and a fold, not as a pile of rows — and placed with the
    parent and the name because whose credentials a session holds belongs with
@@ -6647,6 +6656,14 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 .wt-chip.merge-merged, .wt-chip.merge-trunk { background: #1a3d24; color: #7ee787; }
 .wt-chip.merge-unmerged { background: #3d2e00; color: #e3b341; }
 .wt-chip.merge-unknown { background: #30363d; color: #8b949e; }
+/* How a checkout was (or will be) made. CoW green, a full copy that meant to
+   be CoW amber, a broken config red, the rest grey. */
+.wt-chip.create-cow { background: #1a3d24; color: #7ee787; }
+.wt-chip.create-cow-unavailable { background: #3d2e00; color: #e3b341; }
+.wt-chip.create-invalid { background: #3a2422; color: #ffa198; }
+.wt-chip.create-git, .wt-chip.create-hook,
+.wt-chip.create-unknown { background: #30363d; color: #8b949e; }
+.wt-create-mode { margin: 4px 0; font-size: 12px; color: #8b949e; }
 .wt-sessions { display: flex; flex-wrap: wrap; gap: 4px; }
 .wt-session { display: inline-flex; align-items: center; gap: 4px; text-decoration: none;
   color: #c9d1d9; background: #161b22; border: 1px solid #30363d; border-radius: 4px; padding: 1px 6px; }

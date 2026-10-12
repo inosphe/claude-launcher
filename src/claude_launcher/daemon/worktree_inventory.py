@@ -251,11 +251,14 @@ def list_repo(root: str, sessions: List[dict]) -> dict:
             "locked": "locked" in entry,
             "prunable": "prunable" in entry,
             "created_at": created_at(path),
+            # How claunch made it ("cow", "git", ...); "" when unrecorded.
+            "create_mode": worktree_mod.created_mode(Path(path)),
             "sessions": joined,
             "state": _state(joined),
         })
     items.sort(key=lambda w: w.get("created_at") or "", reverse=True)
-    return {"root": root, "trunk": base, "worktrees": items}
+    return {"root": root, "trunk": base, "worktrees": items,
+            "create": worktree_mod.creation_mode(Path(root))}
 
 
 def inventory(roots: Iterable[str], sessions: List[dict]) -> dict:

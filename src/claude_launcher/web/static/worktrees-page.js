@@ -34,6 +34,32 @@ globalThis.WorktreesPage = (() => {
     return "older";
   }
 
+  /* How a checkout was made (worktree.created_mode, recorded at creation)
+     or how a new one would be (worktree.creation_mode). Said on every card
+     because a block-cloned copy of a whole Unreal tree and a bare
+     `git worktree add` look the same in a list and differ by hours of
+     rebuild and by hundreds of GB on the disk meter. */
+  const CREATE_LABEL = {
+    cow: "CoW",
+    "cow-unavailable": "전체 복사 (CoW 불가)",
+    hook: "생성 훅",
+    git: "git worktree",
+    invalid: "생성 설정 오류",
+  };
+  const CREATE_TITLE = {
+    cow: "생성 훅이 ReFS 블록 클로닝으로 만든 체크아웃이다. 미추적 빌드 산출물까지 들어 있다",
+    "cow-unavailable": "CoW로 선언된 생성 훅이 블록 클로닝을 쓸 수 없는 볼륨에서 모든 파일을 복사해 만들었다",
+    hook: "저장소의 생성 훅(.claunch/worktree.yaml)이 만든 체크아웃이다",
+    git: "git worktree add로 만든 체크아웃이다. 추적 파일만 들어 있다",
+    invalid: ".claunch/worktree.yaml을 읽을 수 없다",
+  };
+
+  function createLabel(mode) {
+    return [mode ? `create-${mode}` : "create-unknown",
+      CREATE_LABEL[mode] || (mode ? mode : "생성 방식 기록 없음"),
+      CREATE_TITLE[mode] || "claunch가 생성 방식을 기록하기 전에 만들었거나 claunch가 만들지 않은 체크아웃이다"];
+  }
+
   function mergeLabel(w) {
     if (!w.trunk) return ["unknown", "trunk 없음", "master/main 브랜치가 없다"];
     if (w.is_trunk) return ["trunk", w.trunk, "트렁크 자체가 체크아웃되어 있다"];
@@ -284,6 +310,10 @@ globalThis.WorktreesPage = (() => {
     const merged = node("span", `wt-chip merge-${cls}`, text);
     merged.title = title;
     branchLine.appendChild(merged);
+    const [howCls, howText, howTitle] = createLabel(w.create_mode);
+    const how = node("span", `wt-chip ${howCls}`, howText);
+    how.title = howTitle;
+    branchLine.appendChild(how);
     box.appendChild(branchLine);
     const meta = node("div", "wt-line wt-muted");
     const when = w.created_at ? new Date(w.created_at) : null;
@@ -350,6 +380,17 @@ globalThis.WorktreesPage = (() => {
     for (const e of (data && data.errors) || []) {
       root.appendChild(node("p", "wt-error", `${e.root}: ${e.error}`));
     }
+    // How the NEXT worktree of each repository would be made, decided by
+    // the daemon before anything is created (worktree.creation_mode).
+    for (const repo of (data && data.repos) || []) {
+      if (!repo.create) continue;
+      const [cls, text] = createLabel(repo.create.mode);
+      const line = node("p", `wt-create-mode ${cls}`);
+      line.appendChild(node("span", `wt-chip ${cls}`, text));
+      line.appendChild(node("span", null,
+        ` 새 워크트리 (${repo.root}): ${repo.create.summary || ""}`));
+      root.appendChild(line);
+    }
     const body = node("div", "wt-body");
     root.appendChild(body);
     renderBody();
@@ -405,5 +446,5 @@ globalThis.WorktreesPage = (() => {
 
   function stop() { sequence++; loading = false; }
 
-  return { open, stop, bucketOf, mergeLabel, changesPanel, filterItems, pathRow };
+  return { open, stop, bucketOf, mergeLabel, createLabel, changesPanel, filterItems, pathRow };
 })();

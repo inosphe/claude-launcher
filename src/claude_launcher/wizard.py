@@ -919,6 +919,9 @@ def sync_worktree(form: "Form", cwd: str, *, allowed: bool = True, note: str = "
         form._worktrees_for = signature
         keep = wt.value
         info = form.sources.git(cwd) if cwd else {}
+        # How a NEW checkout would be made (worktree.creation_mode), named on
+        # the two "new worktree" rows so it is seen before it is chosen.
+        form._worktree_create = info.get("create") or {}
         if not allowed:
             wt.options, wt.hidden, wt.disabled = [], False, True
             wt.disabled_note = note
@@ -926,7 +929,7 @@ def sync_worktree(form: "Form", cwd: str, *, allowed: bool = True, note: str = "
             wt.options = [
                 Option("(none) - work in the directory as it stands", False),
                 Option("new worktree", "", auto_detail(form)),
-                Option("new worktree, named...", NAME_IT),
+                Option("new worktree, named...", NAME_IT, create_detail(form)),
             ] + [
                 Option(n, n, "existing") for n in (info.get("worktrees") or [])
             ]
@@ -990,9 +993,20 @@ def sync_worktree(form: "Form", cwd: str, *, allowed: bool = True, note: str = "
 
 
 def auto_detail(form: "Form") -> str:
-    """What "new worktree" would call itself, spelled out in the picker."""
+    """What "new worktree" would call itself, spelled out in the picker --
+    and how it would be made, when the daemon said."""
     name = form.auto_worktree_name()
-    return f"auto-named: {name}" if name else "auto-named"
+    named = f"auto-named: {name}" if name else "auto-named"
+    how = create_detail(form)
+    return f"{named} · {how}" if how else named
+
+
+def create_detail(form: "Form") -> str:
+    """How a new checkout of the form's repository would be made: the
+    copy-on-write case and the full-copy case it can silently become are
+    the two a person needs to see before choosing (worktree.creation_mode)."""
+    create = getattr(form, "_worktree_create", None) or {}
+    return worktree.MODE_WORDS.get(create.get("mode", ""), create.get("mode", ""))
 
 
 def check_worktree(form: "Form") -> List[tuple]:

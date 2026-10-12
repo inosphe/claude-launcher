@@ -11042,7 +11042,37 @@ function syncNewWorktree() {
         : starts);
   hint.classList.toggle("info", !locked);
   hint.classList.toggle("hidden", !hint.textContent);
+  renderWorktreeCreateMode(!locked && mode === "new" ? newWorktreeGit.create : null);
   syncWorktreeTrunkButton();
+}
+
+/* The tag in front of the creation line, per worktree.creation_mode. */
+const WORKTREE_CREATE_TAG = {
+  cow: "copy-on-write",
+  "cow-unavailable": "full copy",
+  hook: "create hook",
+  git: "git worktree add",
+  invalid: "config error",
+};
+
+/* Say how a NEW checkout would be made before Create is pressed: a
+   block-cloned copy of the whole tree (build caches included) and a bare
+   `git worktree add` differ by hours of rebuild for an Unreal project, and a
+   hook that claims copy-on-write on a volume that cannot clone copies every
+   byte. `create` is /api/git's answer (null hides the line). */
+function renderWorktreeCreateMode(create) {
+  const line = $("worktree-create-mode");
+  if (!line) return;
+  for (const mode of Object.keys(WORKTREE_CREATE_TAG)) {
+    line.classList.remove(`create-${mode}`);
+  }
+  const mode = (create && create.mode) || "";
+  if (mode) line.classList.add(`create-${mode}`);
+  line.textContent = mode
+    ? `${WORKTREE_CREATE_TAG[mode] || mode}: ${create.summary || ""}`
+    : "";
+  line.title = (create && create.config) || "";
+  line.classList.toggle("hidden", !mode);
 }
 
 async function refreshNewWorktree() {
