@@ -42,6 +42,12 @@ const server = http.createServer((req, res) => {
     assert.equal(await page.locator('#term-simsbtn').getAttribute('aria-pressed'), 'false');
     assert.equal(await page.locator('#session-list .sess-sims a').textContent(), '◬ 긴 제목의 simulation <test> 확인 · 대기');
     assert.ok(await page.locator('.sess-sims').evaluate(n => n.scrollWidth <= n.clientWidth + 1));
+    sims = [{...sims[0], state: 'running', run_rounds: 2, max_rounds: 8, runner_session: 'sim-runner'}];
+    await page.evaluate(() => refreshSessionSims());
+    await page.locator('.sess-sim-running').waitFor();
+    assert.equal(await page.locator('.sess-sim-status').textContent(), '실행 중');
+    assert.equal(await page.locator('.sess-sim-progress').textContent(), '실행 세션 sim-runner · 2회 완료 / 최대 8회');
+    assert.ok(await page.locator('.sess-sims').evaluate(n => n.scrollWidth <= n.clientWidth + 1));
     await page.evaluate(() => { location.hash = '#/s/s2'; });
     await page.waitForFunction(() => !document.getElementById('term-simsbtn').classList.contains('has-resource'));
     assert.ok(!await page.locator('#term-splitbtn').evaluate(n => n.classList.contains('has-resource')));
@@ -49,6 +55,7 @@ const server = http.createServer((req, res) => {
     await page.evaluate(async () => { await refreshSessionSims(); await refreshCflow2Rail(); });
     assert.equal(await page.locator('[data-name="s1"] .sess-sims').count(), 0);
     assert.equal(await page.locator('[data-name="s2"] .sess-sims a').count(), 1);
+    assert.equal(await page.locator('.sess-sim-running').count(), 0);
     await page.locator('#term-simsbtn.has-resource').waitFor();
     await page.locator('[data-name="s2"] .sess-sims a').click();
     assert.ok(page.url().endsWith('#/sims/sim-test'));

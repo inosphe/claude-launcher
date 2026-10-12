@@ -55,7 +55,10 @@ def test_compact_list_avoids_model_and_findings_reads(env, monkeypatch):
         monkeypatch.setattr(st, name, unexpected)
     rows = st.list(project="proj", owner="s1", compact=True)
     assert len(rows) == 1
-    assert rows[0] == {k: sim[k] for k in ("id", "owner", "title", "state", "updated_at")}
+    assert rows[0] == {
+        **{k: sim[k] for k in ("id", "owner", "title", "state", "updated_at", "run_rounds")},
+        "max_rounds": sim["settings"]["max_rounds"], "runner_session": None,
+    }
     assert st.list(owner="missing", compact=True) == []
 
 

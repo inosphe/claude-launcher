@@ -320,9 +320,14 @@ class SimStore:
                     continue
                 # The always-visible session rail needs ownership, not model
                 # statistics or findings. Avoid reading those on every poll.
-                out.append({k: meta.get(k) for k in
-                            ("id", "owner", "title", "state", "updated_at")}
-                           if compact else self.summary(meta))
+                if compact:
+                    row = {k: meta.get(k) for k in
+                           ("id", "owner", "title", "state", "updated_at", "run_rounds")}
+                    row["max_rounds"] = (meta.get("settings") or {}).get("max_rounds")
+                    row["runner_session"] = (meta.get("runner") or {}).get("session")
+                    out.append(row)
+                else:
+                    out.append(self.summary(meta))
             out.sort(key=lambda m: m.get("updated_at") or "", reverse=True)
             return out
 

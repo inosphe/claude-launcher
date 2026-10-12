@@ -748,6 +748,14 @@ html[data-theme="light"] .xterm {
 }
 #session-list .sess-sims a { color: #a5d6ff; overflow-wrap: anywhere; }
 #session-list .sess-sims a:focus-visible { outline: 1px solid #58a6ff; }
+#session-list .sess-sims .sess-sim-running {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 3px 8px;
+  padding: 6px 8px; border: 1px solid #264a3a; border-left: 3px solid #3fb950;
+  border-radius: 5px; background: #10251b; text-decoration: none;
+}
+#session-list .sess-sim-running strong { min-width: 0; flex: 1; }
+#session-list .sess-sim-status { color: #7ee787; font-weight: 600; }
+#session-list .sess-sim-progress { width: 100%; color: #b1bac4; }
 /* The "the daemon will not type here" line: delivery held, cflow reminder off.
    Its own full-width line rather than pills loose on the name row — see the
    invariant on .rail-head; anything at order 0 that does not shrink pushes

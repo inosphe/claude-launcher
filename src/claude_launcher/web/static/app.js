@@ -5354,6 +5354,9 @@ async function refreshSessionSims() {
     const data = await resp.json();
     const rows = (data.sims || []).filter(s => s.owner).map(s => ({
       id: s.id, owner: s.owner, title: s.title, state: s.state,
+      run_rounds: s.run_rounds,
+      max_rounds: s.max_rounds ?? s.settings?.max_rounds,
+      runner_session: s.runner_session ?? s.runner?.session,
     }));
     const sig = JSON.stringify(rows);
     if (sig === sessionSimSig) return;
@@ -5388,6 +5391,23 @@ function applySimulationBadges() {
       link.textContent = `◬ ${s.title || s.id} · ${states[s.state] || s.state}`;
       link.title = `${s.id} · ${s.owner}`;
       link.addEventListener("click", e => e.stopPropagation());
+      if (s.state === "running") {
+        link.className = "sess-sim-running";
+        link.textContent = "";
+        const title = document.createElement("strong");
+        title.textContent = `◬ ${s.title || s.id}`;
+        const status = document.createElement("span");
+        status.className = "sess-sim-status";
+        status.textContent = "실행 중";
+        const progress = document.createElement("span");
+        progress.className = "sess-sim-progress";
+        const rounds = s.run_rounds == null ? "" : ` · ${s.run_rounds}회 완료` +
+          (s.max_rounds == null ? "" : ` / 최대 ${s.max_rounds}회`);
+        progress.textContent = `실행 세션 ${s.runner_session || s.owner}${rounds}`;
+        link.appendChild(title);
+        link.appendChild(status);
+        link.appendChild(progress);
+      }
       line.appendChild(link);
     }
     if (!old) li.appendChild(line);

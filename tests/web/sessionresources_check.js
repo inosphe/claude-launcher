@@ -31,13 +31,17 @@ vm.runInContext(src.slice(src.indexOf("let sessionSimCache ="), src.indexOf("asy
 const has = n => n.classList.contains("has-resource");
 (async () => {
   rows = [{id: "sim-1", owner: "a", title: "<unsafe>", state: "idle"},
-          {id: "sim-2", owner: "a", title: "Second", state: "running"},
+          {id: "sim-2", owner: "a", title: "Second", state: "running", run_rounds: 2, max_rounds: 10, runner_session: "runner-1"},
           {id: "sim-3", owner: "", title: "Unowned", state: "stopped"}];
   await ctx.refreshSessionSims();
   assert.equal(a.children[0].children.length, 2);
   assert.equal(b.children.length, 0);
   assert.equal(a.children[0].children[0].textContent, "◬ <unsafe> · 대기");
   assert.equal(a.children[0].children[0].href, "#/sims/sim-1");
+  const block = a.children[0].children[1];
+  assert.equal(block.className, "sess-sim-running");
+  assert.equal(block.children[1].textContent, "실행 중");
+  assert.equal(block.children[2].textContent, "실행 세션 runner-1 · 2회 완료 / 최대 10회");
   let stopped = false;
   a.children[0].children[0].handlers.click({stopPropagation() { stopped = true; }});
   assert.ok(stopped);
@@ -45,6 +49,13 @@ const has = n => n.classList.contains("has-resource");
   const stable = a.children[0].children[0];
   await ctx.refreshSessionSims();
   assert.equal(a.children[0].children[0], stable, "unchanged polls preserve links");
+  rows[1].run_rounds = 3;
+  await ctx.refreshSessionSims();
+  assert.ok(a.children[0].children[1].children[2].textContent.includes("3회 완료"));
+  rows[1].state = "stopped";
+  await ctx.refreshSessionSims();
+  assert.equal(a.children[0].children[1].className, "");
+  assert.equal(a.children[0].children[1].textContent, "◬ Second · 중지됨");
   rows = [{id: "sim-1", owner: "b", title: "Transferred", state: "stopped"}];
   await ctx.refreshSessionSims();
   assert.equal(a.children.length, 0); assert.equal(b.children.length, 1);
