@@ -232,6 +232,23 @@ claunch sim runtime status       # 설치·최신 여부, 아니면 종료 코�
   그 편집을 적용하고 다시 실행하라는 요청이 입력된다. 다음 실행의 carry가 바뀐 원천으로 질문을 다시 확인한다.
 - 세션은 `sim_proposals` 도구로 제안 목록을 읽는다.
 
+## 실행 기록과 하위 절차 sim-run
+
+- 실행(`start`)마다 번호가 하나 늘고 `sim.run`에 기록된다: `{seq, by, started_at, model_hash_in, runner, ended_at,
+  state, reason, model_hash_out, failed}`. 끝남의 정본은 `run.ended_at`이다. 끝남 알림은 다시 확인하라는 신호다.
+  - 실행 세션이 없으면 캠페인을 끝내는 라운드·중지·소유권 해제가 기록을 닫는다.
+  - 실행 세션이 있으면 그 세션의 `runner/done`이나 종료가 닫는다.
+  - `runner/done`은 그 세션이 받은 `run`을 함께 보내고, 지금 실행과 다르면 거절된다(늦은 보고가 새 실행을 닫지 않는다).
+- `workflows/v2/sim-run.yaml`(`kind: procedure`)은 시뮬레이션 한 번을 cflow v2 절차로 정의한다: 범위 → 모델 → 실행 →
+  (커버리지 미달이면 보강 후 재실행, 최대 2회) → 정리. 지금은 정적 `call: sim-run`으로 부른다.
+  - 반환 `ok`는 `assessment`(consistent·gaps·inconclusive)와 그 근거인 `findings`(clear·gaps)·`adequacy`
+    (adequate·inadequate), 커버리지, 미결 항목 수, 한계를 싣는다.
+  - 기술적으로 실행할 수 없을 때만 `fail`, 시간 예산을 넘기면 `timeout`이다.
+  - 실행 세션이 없으면 절차가 직접 빈칸에 답해 라운드를 진행한다.
+  - 전수 탐색과 오류 주입 시험은 아직 없으므로 `exhaustive`·`controls`는 null이고 한계에 적힌다.
+  - 기본값(도달 칸 비율 0.5, 1800초)은 검증된 기준이 아닌 제안값이다.
+  - 동적 호출과 호출 허용 정책은 claunch-4avda의 범위다.
+
 ## 모델 규칙
 
 - 규칙과 불변식에는 출처가 있어야 한다: `source: [{ref, quote}]`. `ref`는 시뮬레이션 루트(소유 세션의

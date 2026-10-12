@@ -696,8 +696,9 @@ def install(app, store: Optional[sim_store.SimStore] = None):
         denied = require_runner(sid, body)
         if denied:
             return denied
+        run = body.get("run")
         res, err = await call(sims.runner_done, sid, body["session"], str(body.get("reason") or ""),
-                              bool(body.get("failed")))
+                              bool(body.get("failed")), run if isinstance(run, int) else None)
         if err:
             return err
         return web.json_response({"result": res, "notified": notify_end(res, res.get("ended"))})
