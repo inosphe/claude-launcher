@@ -39,13 +39,15 @@ def _member(request, registry, session, mesh):
     if agent.exited or local_sync.common_dir(agent.sdef.cwd) != registry.path.parent:
         raise local_sync.PolicyError("manager must be live in this repository")
     memberships = request.app["mesh"].meshes_for_session(session)
-    if not any(m["mesh"] == mesh and m["role"] == "local-sync-manager" for m in memberships):
+    membership = next((m for m in memberships
+                       if m["mesh"] == mesh and m["role"] == "local-sync-manager"), None)
+    if membership is None:
         raise local_sync.PolicyError("manager needs explicit role and membership in request mesh")
     run = RunStore(agent.sdef.cwd, session)
     if (not run.exists() or run.load_chart().name != "local-sync-v2"
             or run.load_state().get("status") in ("done", "aborted")):
         raise local_sync.PolicyError("manager must run local-sync-v2")
-    return agent
+    return membership["handle"]
 
 
 async def _notify(request, registry, rid):
@@ -54,11 +56,13 @@ async def _notify(request, registry, rid):
         return "explicit manager binding required"
     try:
         payload = json.loads(registry.get(rid)["payload"])
-        _member(request, registry, manager["session"], payload["mesh"])
-        await request.app["mesh"].send(
-            payload["mesh"], payload["requester"], manager["session"],
+        handle = _member(request, registry, manager["session"], payload["mesh"])
+        delivery = await request.app["mesh"].send(
+            payload["mesh"], payload["requester"], handle,
             "Local sync request " + rid + ": use repo_sync local_status; "
             "follow local-sync-v2 and report the durable receipt.", type="say")
+        if delivery.get("queued") or delivery.get("undeliverable") or delivery.get("deferred"):
+            return "delivery pending: " + str(delivery.get("notice") or "mesh recipient unavailable")
         return ""
     except Exception as exc:
         # Persisted work is retained even if the caller's mesh is disconnected.

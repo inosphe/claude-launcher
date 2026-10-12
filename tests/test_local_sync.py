@@ -194,3 +194,31 @@ def test_local_landing_and_receipt_verifiers_fail_closed(world):
     local_sync.verify_receipt(str(world["a"]), request["id"], 1)
     with pytest.raises(local_sync.PolicyError, match="another manager"):
         local_sync.verify_receipt(str(world["a"]), request["id"], 2)
+
+
+@pytest.mark.parametrize("queued", [False, True])
+def test_manager_notification_uses_mesh_handle_and_reports_pending_delivery(world, monkeypatch, queued):
+    import asyncio
+    from types import SimpleNamespace
+    from claude_launcher.daemon import local_sync_api
+    registry, request = setup(world)
+    bind(registry)
+    agent = SimpleNamespace(exited=False, sdef=SimpleNamespace(cwd=str(world["a"])))
+    delivered = []
+
+    async def send(mesh, sender, to, text, **kwargs):
+        # Mesh recipients are handles; session IDs are not accepted here.
+        assert to == "local-sync-alias"
+        delivered.append((mesh, sender, to))
+        return {"queued": queued, "notice": "relay disconnected" if queued else ""}
+
+    mesh = SimpleNamespace(send=send, meshes_for_session=lambda session: [
+        {"mesh": request["mesh"], "role": "local-sync-manager", "handle": "local-sync-alias"}])
+    run = SimpleNamespace(exists=lambda: True,
+                          load_chart=lambda: SimpleNamespace(name="local-sync-v2"),
+                          load_state=lambda: {"status": "running"})
+    monkeypatch.setattr(local_sync_api, "RunStore", lambda *args: run)
+    api_request = SimpleNamespace(app={"manager": SimpleNamespace(get=lambda session: agent), "mesh": mesh})
+    error = asyncio.run(local_sync_api._notify(api_request, registry, request["id"]))
+    assert delivered == [(request["mesh"], request["requester"], "local-sync-alias")]
+    assert error == ("delivery pending: relay disconnected" if queued else "")
