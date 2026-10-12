@@ -10725,11 +10725,19 @@ function syncWorktreeTrunkButton() {
   );
 }
 
-/* The picker's rows, narrowed by the box above it. Rebuilt rather than
-   filtered in place, for the reason the board's picker is: a hidden <option>
-   can still be what `select.value` holds, and a filter that leaves a pick
-   standing that the operator can no longer see is a filter that lies about
-   what Reuse will do. */
+function updateWorktreeOptions(sel, rows) {
+  // Polls also reach the form while it is open. Keep unchanged option nodes:
+  // replacing them interrupts native pickers and rebuilds accessibility trees.
+  const signature = JSON.stringify(rows);
+  if (sel._worktreeSignature === signature) return;
+  sel.innerHTML = "";
+  for (const [label, value] of rows) sel.appendChild(new Option(label, value));
+  sel._worktreeSignature = signature;
+}
+
+/* The picker's rows, narrowed by the box above it. Changed lists are rebuilt
+   rather than filtered in place: a hidden <option> can still be what
+   `select.value` holds. Unchanged lists retain their native option nodes. */
 function renderWorktreeOptions() {
   const f = $("new-session");
   const sel = f && f.worktree_existing;
@@ -10748,17 +10756,16 @@ function renderWorktreeOptions() {
     .filter((n) => !offer || n !== offer.name);
   const shown = all.filter(matches);
   const kept = sel.value;
-  sel.innerHTML = "";
-  sel.appendChild(offer
-    ? new Option(
+  const rows = [offer
+    ? [
         `parent's checkout — ${offer.name || cwdShort(offer.cwd)} (${offer.parent})`,
-        PARENT_WORKTREE)
-    : new Option("(pick a worktree)", ""));
+        PARENT_WORKTREE]
+    : ["(pick a worktree)", ""]];
   for (const name of shown) {
     const who = (owners[name] || []).map((s) => s.name);
-    sel.appendChild(
-      new Option(who.length ? `${name} — ${who.join(", ")}` : name, name));
+    rows.push([who.length ? `${name} — ${who.join(", ")}` : name, name]);
   }
+  updateWorktreeOptions(sel, rows);
   // The parent's checkout is where an untouched picker stands, so the row
   // reads back what the launch will do instead of an empty "(pick ...)".
   const keep = shown.includes(kept) || (!!offer && kept === PARENT_WORKTREE);
@@ -10847,14 +10854,14 @@ function renderWorktreeSessionOptions() {
   rows.sort((a, b) =>
     a[0].name.localeCompare(b[0].name, undefined, { numeric: true }));
   const kept = sel.value;
-  sel.innerHTML = "";
-  sel.appendChild(new Option(
+  const options = [[
     rows.length ? "(pick a session)" : "(no session stands in these checkouts)",
-    ""));
+    ""]];
   for (const [s, name] of rows) {
     const state = s.status === "exited" ? ", exited" : "";
-    sel.appendChild(new Option(`${s.name} — ${name}${state}`, s.name));
+    options.push([`${s.name} — ${name}${state}`, s.name]);
   }
+  updateWorktreeOptions(sel, options);
   const target = worktreeOfSession(kept);
   sel.value = target && target === f.worktree_existing.value ? kept : "";
 }
@@ -10875,10 +10882,9 @@ function renderWorktreeFromOptions() {
   const owners = worktreeSessions();
   const offer = worktreeParentOffer();
   const kept = sel.value;
-  sel.innerHTML = "";
   const head = git.root_branch || "";
-  sel.appendChild(new Option(
-    head ? `repository HEAD — ${head}` : "repository HEAD (detached)", ""));
+  const rows = [[
+    head ? `repository HEAD — ${head}` : "repository HEAD (detached)", ""]];
   const names = (git.worktrees || []).slice();
   if (offer && offer.name && names.includes(offer.name)) {
     names.splice(names.indexOf(offer.name), 1);
@@ -10890,13 +10896,14 @@ function renderWorktreeFromOptions() {
       ? ` — parent's checkout (${offer.parent})`
       : ((owners[name] || []).length
           ? ` — ${owners[name].map((s) => s.name).join(", ")}` : "");
-    sel.appendChild(new Option(`worktree ${name}${branch}${who}`, name));
+    rows.push([`worktree ${name}${branch}${who}`, name]);
   }
   const taken = new Set(Object.values(onWt).filter(Boolean));
   for (const b of git.branches || []) {
     if (taken.has(b)) continue;
-    sel.appendChild(new Option(`branch ${b}`, `refs/heads/${b}`));
+    rows.push([`branch ${b}`, `refs/heads/${b}`]);
   }
+  updateWorktreeOptions(sel, rows);
   sel.value = [...sel.options].some((o) => o.value === kept) ? kept : "";
 }
 
