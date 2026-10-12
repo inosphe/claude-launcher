@@ -65,12 +65,15 @@ Bind manager로 지정한다. workflow는 요청 처리 후 대기 단계로 돌
 세션을 지정할 수 없다. 다른 mesh의 요청에 연결이 없으면 담당자를 바꾸지 않고
 그 연결의 해소를 요청한다. 세션 생성·지정은 게시나 PR merge를 승인하지 않는다.
 
-fetch는 요청/정책 DB 잠금 밖에서 수행한다. 이후 정책 revision·authority·epoch·
+요청 target ref만 고유한 임시 ref로 fetch하며, 삭제된 target이나 오래된 tracking
+ref를 완료 근거로 쓰지 않는다. fetch는 요청/정책 DB 잠금 밖에서 수행한다. 이후 정책 revision·authority·epoch·
 현재 old SHA를 다시 검사하고, 요청 SHA가 fetched target에 포함되는 경우에만
 로컬 FF를 수행한다. 대상이 다른 checkout에 체크아웃되어 있으면 owner 조정을
 요청한다. 대시보드에서 owner 조정을 확인한 뒤 정확한 old/new SHA의 로컬 FF를
 승인하거나, owner가 다른 branch로 이동한 뒤 같은 요청을 다시 실행할 수 있다.
-checkout 승인은 epoch·정책 revision·old/new SHA에 묶이고 30분 후 만료된다.
+checkout 승인은 canonical 경로·worktree git-dir·directory identity와 epoch·정책
+revision·old/new SHA에 묶이고 30분 후 만료된다. 승인 전후 대상 checkout이
+바뀌면 새 계획과 owner 승인을 요구한다.
 원격이 다시 이동하거나 checkout이 dirty이면 이전 승인은 쓰기를 허용하지 않는다.
 분기한 local tip은 `refs/claunch/preserved/<old SHA>`로 보존하고 복구 결정을
 요청한다. reset --hard나 무조건 force push는 경로에 없다.

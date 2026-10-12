@@ -44444,7 +44444,7 @@ function wsLocalSyncControls(name) {
           content.appendChild(el("p", "wf-note", `Owner coordination required: ${plan.checkout}. Local fast-forward ${plan.old} → ${plan.upstream}. Confirm that this checkout's owners have released it. No publication is authorized.`));
           const approve = el("button", "wf-btn", "Approve this checkout fast-forward");
           approve.onclick = async () => { try {
-            await call("approve-checkout", {request_id: row.id, epoch: doc.manager.epoch, old: plan.old, new: plan.upstream});
+            await call("approve-checkout", {request_id: row.id, epoch: doc.manager.epoch, old: plan.old, new: plan.upstream, checkout_identity: plan.checkout_identity});
             await refresh();
           } catch (err) { content.appendChild(el("p", "wf-warning", String(err.message || err))); } };
           content.appendChild(approve);

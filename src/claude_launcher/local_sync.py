@@ -15,6 +15,7 @@ import re
 from pathlib import Path
 import sqlite3
 import time
+import uuid
 
 from . import reposync
 
@@ -64,6 +65,30 @@ def protected(repo: str, remote: str, branch: str) -> bool:
 def require_pr(repo: str, remote: str, branch: str, operation: str) -> None:
     if protected(repo, remote, branch):
         raise PolicyError(f"PR-only target {branch}: {operation} refused; request local-sync-manager")
+
+
+def checkout_identity(path: str) -> dict:
+    """Bind owner consent to this checkout, including its worktree admin dir."""
+    canonical = os.path.realpath(path)
+    st = os.stat(canonical)
+    return {"path": canonical, "device": st.st_dev, "inode": st.st_ino,
+            "git_dir": os.path.realpath(reposync.git(
+                canonical, "rev-parse", "--absolute-git-dir"))}
+
+
+def fetch_target(repo: str, remote: str, ref: str) -> str:
+    """Read exactly this advertised branch into a private ref for this fetch.
+
+    A broad fetch can leave deleted/excluded tracking refs behind. A unique
+    destination also prevents another request's fetch from replacing our SHA.
+    """
+    temporary = "refs/claunch/local-sync-fetch/" + uuid.uuid4().hex
+    try:
+        reposync.git(repo, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
+                     remote, "+" + ref + ":" + temporary)
+        return reposync.git(repo, "rev-parse", "--verify", temporary + "^{commit}")
+    finally:
+        reposync.git(repo, "update-ref", "-d", temporary, check=False)
 
 
 class Registry:
@@ -211,7 +236,7 @@ class Registry:
             db.execute("UPDATE requests SET state=? WHERE id=? AND state!='complete'", (state, rid))
         return self.get(rid)
 
-    def approve_checkout(self, rid: str, *, epoch: int, old: str, new: str) -> dict:
+    def approve_checkout(self, rid: str, *, epoch: int, old: str, new: str, identity: dict) -> dict:
         """Person-only consent for the exact checked-out FF, never a reset."""
         with self.tx() as db:
             row = db.execute("SELECT * FROM requests WHERE id=?", (rid,)).fetchone()
@@ -222,7 +247,11 @@ class Registry:
                 raise PolicyError("checkout plan changed")
             payload = json.loads(row["payload"])
             self._binding(db, payload)
+            checkout = reposync.checkout_of(self.repo, payload["ref"][len("refs/heads/"):])
+            if not checkout or identity != plan.get("checkout_identity") or checkout_identity(checkout) != identity:
+                raise PolicyError("checkout identity changed; obtain a new plan and owner approval")
             binding = {"old": old, "new": new, "epoch": epoch,
+                       "checkout_identity": plan["checkout_identity"],
                        "revision": payload["policy_revision"], "expires": time.time() + 1800}
             db.execute("INSERT OR REPLACE INTO checkout_consents VALUES (?,?)", (rid, json.dumps(binding)))
             return binding
@@ -236,7 +265,7 @@ class Registry:
         payload = json.loads(row["payload"])
         # Fetch may block; do it outside the write transaction, then recheck all
         # authority/lease/ref facts immediately before the local CAS.
-        reposync.fetch(self.repo, payload["remote"])
+        upstream = fetch_target(self.repo, payload["remote"], payload["ref"])
         with self.tx() as db:
             current = db.execute("SELECT state FROM requests WHERE id=?", (rid,)).fetchone()[0]
             if current not in ("pending", "waiting_dependency", "needs_operator"):
@@ -246,7 +275,6 @@ class Registry:
             if not manager or (manager["session"], manager["epoch"], manager["state"]) != (session, epoch, "ready"):
                 raise PolicyError("stale manager lease")
             branch = payload["ref"][len("refs/heads/"):]
-            upstream = reposync.git(self.repo, "rev-parse", "--verify", f"refs/remotes/{payload['remote']}/{branch}^{{commit}}")
             old = reposync.git(self.repo, "rev-parse", "--verify", payload["ref"])
             if not reposync._ok(self.repo, "merge-base", "--is-ancestor", payload["required_sha"], upstream):
                 raise PolicyError("fetched target does not contain requested commit")
@@ -261,15 +289,18 @@ class Registry:
             if old != upstream and checkout:
                 consent = db.execute("SELECT binding FROM checkout_consents WHERE id=?", (rid,)).fetchone()
                 consent = json.loads(consent[0]) if consent else {}
-                expected = (old, upstream, epoch, payload["policy_revision"])
-                actual = tuple(consent.get(k) for k in ("old", "new", "epoch", "revision"))
+                identity = checkout_identity(checkout)
+                expected = (old, upstream, epoch, payload["policy_revision"], identity)
+                actual = tuple(consent.get(k) for k in ("old", "new", "epoch", "revision", "checkout_identity"))
                 if actual != expected or consent.get("expires", 0) <= time.time():
-                    plan = {"status": "needs_operator", "checkout": checkout, "old": old, "upstream": upstream}
+                    plan = {"status": "needs_operator", "checkout": checkout,
+                            "checkout_identity": identity, "old": old, "upstream": upstream}
                     db.execute("UPDATE requests SET state='needs_operator',receipt=? WHERE id=?", (json.dumps(plan), rid))
                     return plan
                 if (reposync.git(checkout, "status", "--porcelain")
                         or reposync.git(checkout, "symbolic-ref", "HEAD") != payload["ref"]
-                        or reposync.git(checkout, "rev-parse", "HEAD") != old):
+                        or reposync.git(checkout, "rev-parse", "HEAD") != old
+                        or checkout_identity(checkout) != identity):
                     raise PolicyError("checkout changed or dirty; obtain owner coordination again")
                 reposync.git(checkout, "merge", "--ff-only", "--no-edit", upstream)
                 db.execute("DELETE FROM checkout_consents WHERE id=?", (rid,))

@@ -119,7 +119,7 @@ async def handle(request):
         elif action == "approve-checkout":
             _person(request)
             result = registry.approve_checkout(body["request_id"], epoch=body["epoch"],
-                                               old=body["old"], new=body["new"])
+                                               old=body["old"], new=body["new"], identity=body["checkout_identity"])
             result["dispatch_error"] = await _notify(request, registry, body["request_id"])
         elif action == "resolve":
             _person(request)

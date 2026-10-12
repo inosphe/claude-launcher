@@ -173,12 +173,12 @@ def test_exact_owner_approval_allows_checked_out_ff_and_stale_approval_does_not(
     new = _commit(world["b"], "remote.txt")
     _git(world["b"], "push", "origin", "master")
     registry.apply(request["id"], session="manager", epoch=1)
-    registry.approve_checkout(request["id"], epoch=1, old=request["required_sha"], new=new)
+    registry.approve_checkout(request["id"], epoch=1, old=request["required_sha"], new=new, identity=local_sync.checkout_identity(str(world["a"])))
     newer = _commit(world["b"], "later.txt")
     _git(world["b"], "push", "origin", "master")
     assert registry.apply(request["id"], session="manager", epoch=1)["status"] == "needs_operator"
     assert _git(world["a"], "rev-parse", "master") == request["required_sha"]
-    registry.approve_checkout(request["id"], epoch=1, old=request["required_sha"], new=newer)
+    registry.approve_checkout(request["id"], epoch=1, old=request["required_sha"], new=newer, identity=local_sync.checkout_identity(str(world["a"])))
     assert registry.apply(request["id"], session="manager", epoch=1)["new"] == newer
 
 
@@ -222,3 +222,62 @@ def test_manager_notification_uses_mesh_handle_and_reports_pending_delivery(worl
     error = asyncio.run(local_sync_api._notify(api_request, registry, request["id"]))
     assert delivered == [(request["mesh"], request["requester"], "local-sync-alias")]
     assert error == ("delivery pending: relay disconnected" if queued else "")
+
+
+@pytest.mark.parametrize("approve_before_move", [False, True])
+def test_checkout_owner_consent_cannot_follow_branch_to_another_worktree(world, tmp_path, approve_before_move):
+    registry, request = setup(world)
+    bind(registry)
+    new = _commit(world["b"], "remote.txt")
+    _git(world["b"], "push", "origin", "master")
+    plan = registry.apply(request["id"], session="manager", epoch=1)
+    assert plan["checkout"] == str(world["a"])
+    if approve_before_move:
+        registry.approve_checkout(request["id"], epoch=1, old=request["required_sha"], new=new, identity=local_sync.checkout_identity(str(world["a"])))
+    _git(world["a"], "switch", "-c", "away")
+    other = tmp_path / "other-owner"
+    _git(world["a"], "worktree", "add", str(other), "master")
+    before = (_git(other, "rev-parse", "HEAD"), _git(other, "write-tree"),
+              {str(p.relative_to(other)): p.read_bytes() for p in other.rglob("*") if p.is_file()})
+    if not approve_before_move:
+        with pytest.raises(local_sync.PolicyError, match="checkout identity changed"):
+            registry.approve_checkout(request["id"], epoch=1, old=request["required_sha"], new=new, identity=local_sync.checkout_identity(str(world["a"])))
+    result = registry.apply(request["id"], session="manager", epoch=1)
+    assert result["status"] == "needs_operator" and result["checkout"] == str(other)
+    with pytest.raises(local_sync.PolicyError, match="checkout identity changed"):
+        registry.approve_checkout(request["id"], epoch=1, old=request["required_sha"], new=new,
+                                  identity=plan["checkout_identity"])
+    after = (_git(other, "rev-parse", "HEAD"), _git(other, "write-tree"),
+             {str(p.relative_to(other)): p.read_bytes() for p in other.rglob("*") if p.is_file()})
+    assert before == after
+
+
+def test_deleted_remote_target_cannot_complete_from_stale_tracking_ref(world):
+    registry, request = setup(world)
+    bind(registry)
+    _git(world["a"], "switch", "-c", "work")
+    new = _commit(world["b"], "remote.txt")
+    _git(world["b"], "push", "origin", "master")
+    _git(world["a"], "fetch", "origin")
+    _git(world["remote"], "update-ref", "-d", "refs/heads/master")
+    assert _git(world["a"], "rev-parse", "origin/master") == new
+    with pytest.raises(reposync.SyncError, match="couldn't find remote ref"):
+        registry.apply(request["id"], session="manager", epoch=1)
+    assert _git(world["a"], "rev-parse", "master") == request["required_sha"]
+    assert registry.get(request["id"])["state"] == "pending"
+    assert registry.get(request["id"])["receipt"] is None
+
+
+def test_exact_fetch_ignores_tracking_refspec_that_excludes_target(world):
+    registry, request = setup(world)
+    bind(registry)
+    _git(world["a"], "switch", "-c", "work")
+    _git(world["b"], "push", "origin", "master:unrelated")
+    _git(world["a"], "config", "remote.origin.fetch", "+refs/heads/unrelated:refs/remotes/origin/unrelated")
+    new = _commit(world["b"], "remote.txt")
+    _git(world["b"], "push", "origin", "master")
+    assert _git(world["a"], "rev-parse", "origin/master") != new
+    result = registry.apply(request["id"], session="manager", epoch=1)
+    assert result["new"] == new
+    assert _git(world["a"], "rev-parse", "master") == new
+    assert _git(world["a"], "for-each-ref", "--format=%(refname)", "refs/claunch/local-sync-fetch/") == ""
