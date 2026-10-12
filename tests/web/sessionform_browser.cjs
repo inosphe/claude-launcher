@@ -47,6 +47,38 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
   // scrolled fields (including the floating Operator control).
   const rect = selector => page.locator(selector).boundingBox();
   async function checkLayout(host, columns) {
+   await page.evaluate(() => {
+    const box = document.getElementById('new-inputs');
+    box.innerHTML = ''; box.classList.remove('hidden');
+    cflowInputsForm(box, [
+     {name:'goal',type:'text',label:'Goal'},
+     {name:'scope',type:'list',label:'Scope'},
+     {name:'force_pr',type:'bool',label:'PR 강제(force to make PR)',help:'착지를 PR로만 한다.'},
+     {name:'force_no_pr',type:'bool',label:'PR 금지(force not to make PR)'},
+    ], []);
+    const row = box.querySelector('[data-input="force_pr"]');
+    const line = el('div','cf2-precheck ok');
+    line.appendChild(el('span','cf2-precheck-text','gh 2.45.0 ✓ signed in to github.ncsoft.com as yusanghyun'));
+    const button = el('button','wf-btn cf2-precheck-again','Re-check');
+    button.type = 'button'; line.appendChild(button); row.appendChild(line);
+   });
+   const geometry = await page.locator('#new-inputs').evaluate(box => {
+    const rect = e => { const r=e.getBoundingClientRect(); return {x:r.x,y:r.y,width:r.width,right:r.right}; };
+    const row=box.querySelector('[data-input="force_pr"]');
+    return {border:getComputedStyle(box).borderTopWidth, title:box.querySelector('h4').textContent,
+     row:rect(row), checkbox:rect(row.querySelector('input')),
+     list:[...box.querySelector('.cf2-input-row').children].map(rect),
+     overflow:box.scrollWidth > box.clientWidth+1};
+   });
+   assert.equal(geometry.border,'1px');
+   assert.equal(geometry.title,'Workflow variables');
+   assert.ok(geometry.checkbox.width < 24, `${host}: checkbox keeps native width`);
+   assert.ok(Math.abs(geometry.checkbox.x-geometry.row.x)<2, `${host}: checkbox aligns left`);
+   assert.ok(Math.abs(geometry.list[0].y-geometry.list[1].y)<2, `${host}: remove aligns with input`);
+   assert.equal(geometry.overflow,false, `${host}: workflow inputs fit their container`);
+   const check = page.locator('[data-input="force_no_pr"] input');
+   await page.locator('[data-input="force_no_pr"] label').click();
+   assert.equal(await check.isChecked(),true, `${host}: caption toggles checkbox`);
    const where=await rect('#new-where'), identity=await rect('#new-identity');
    const form=await rect('#new-session'), task=await rect('#new-task');
    if(columns===2) {

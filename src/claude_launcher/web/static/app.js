@@ -20044,7 +20044,7 @@ const CFLOW_INPUT_CHECK_TYPES = ["invariants", "acceptance"];
    find it again. */
 function cflowInputControl(field) {
   const t = field.type || "string";
-  const wrap = el("div", "cf2-input-control");
+  const wrap = el(t === "bool" ? "span" : "div", "cf2-input-control");
   const text = (cls, value, ph) => {
     const i = document.createElement("input");
     i.type = "text";
@@ -20112,6 +20112,7 @@ function cflowInputControl(field) {
 }
 
 function cflowInputsForm(box, fields, constraints) {
+  box.appendChild(el("h4", "cf2-inputs-title", "Workflow variables"));
   box.appendChild(el("p", "wf-note", "Start inputs of this workflow (* = required)"));
   for (const field of fields) {
     const row = el("div", "cf2-input");
@@ -20120,8 +20121,15 @@ function cflowInputsForm(box, fields, constraints) {
     if (field.precheck) row.dataset.precheck = field.precheck;
     const label = el("label", "cf2-input-label",
                      (field.label || field.name) + (field.required ? " *" : ""));
-    row.appendChild(label);
-    row.appendChild(cflowInputControl(field));
+    const control = cflowInputControl(field);
+    if (field.type === "bool") {
+      label.classList.add("check");
+      label.insertBefore(control, label.firstChild);
+      row.appendChild(label);
+    } else {
+      row.appendChild(label);
+      row.appendChild(control);
+    }
     if (field.help) row.appendChild(el("p", "wf-note cf2-input-help", field.help));
     row.appendChild(el("p", "cf2-input-error hidden"));
     box.appendChild(row);
