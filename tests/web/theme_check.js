@@ -3,6 +3,12 @@
    Pinned here:
      - a grey inverts its lightness exactly: the page background and the body
        text trade places, and a mid grey stays a mid grey;
+     - muted grey text and borders are darkened past 1 - L (claunch-zguui),
+       keeping their order, and black/white stay at the ends;
+     - a dark surface used as a background is lifted past 1 - L toward white
+       (claunch-zguui), keeps its order against the other surfaces, and the
+       lift ends at SURFACE_L so mid-tone fills and borders still invert
+       exactly;
      - hue and saturation survive the flip (red stays red);
      - translucent black and black inside a shadow are left alone, so a
        shadow does not become a glow;
@@ -28,14 +34,30 @@ const lum = ([r, g, b]) => (Math.max(r, g, b) + Math.min(r, g, b)) / 2 / 255;
 // Greys: lightness 1 - L, exactly (to the rounding of a channel).
 const bg = rgb(theme.lightColor("#14161a", "background-color"));
 check("page background turns light", lum(bg) > 0.88, bg);
+check("page background lifted past 1 - L", lum(bg) > 0.94, bg);
+const plain = rgb(theme.lightColor("#14161a", "fill"));
+check("same grey outside a background is not lifted", Math.abs(lum(plain) - (1 - lum(rgb("#14161a")))) < 0.01, plain);
+const rail = rgb(theme.lightColor("#1b1e24", "background-color"));
+check("surfaces keep their order", lum(rail) < lum(bg), [rail, bg]);
+const midFill = rgb(theme.lightColor("#808080", "background-color"));
+check("mid-grey fill not lifted", Math.abs(lum(midFill) - 0.5) < 0.02, midFill);
 const text = rgb(theme.lightColor("#d8dbe0", "color"));
 check("body text turns dark", lum(text) < 0.18, text);
 check("pure white to pure black", theme.lightColor("#fff", "background-color") === "rgb(0, 0, 0)",
   theme.lightColor("#fff", "background-color"));
 check("white keyword", theme.lightColor("white", "border-color") === "rgb(0, 0, 0)");
 check("black keyword", theme.lightColor("black", "background-color") === "rgb(255, 255, 255)");
-const mid = rgb(theme.lightColor("#808080", "border-color"));
+const mid = rgb(theme.lightColor("#808080", "fill"));
 check("mid grey stays mid", Math.abs(lum(mid) - 0.5) < 0.02, mid);
+
+// Muted grey text and borders are darkened past 1 - L, keeping their order.
+const muted = rgb(theme.lightColor("#7d8590", "color"));
+check("muted grey text darkened", lum(muted) < 0.36, muted);
+const dimmer = rgb(theme.lightColor("#6b7280", "color"));
+check("grey text keeps its order", lum(dimmer) > lum(muted), [dimmer, muted]);
+const hair = rgb(theme.lightColor("#30363d", "border-color"));
+check("hairline border darkened", lum(hair) < 0.75, hair);
+check("black text stays white", theme.lightColor("#000", "color") === "rgb(255, 255, 255)");
 
 // Hue survives.
 const red = rgb(theme.lightColor("#ff7b72", "background-color"));
