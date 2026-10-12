@@ -411,6 +411,7 @@ CHECKS = [
         "sendinput_check.js",
         "linesync_check.js",
         "clipboard_check.js",
+        "commandcopy_check.js",
         "osc52_check.js",
         "termselect_check.js",
         "promptpresets_check.js",
@@ -554,7 +555,8 @@ CHECKS = [
 # tests/ rather than tests/web, and `sessiontabs_browser.cjs` and
 # `toolbar_browser.cjs` sat in tests/web unlisted (claunch-6jerx).
 BROWSER_CHECKS = [
-        "sessionprs_browser.cjs",
+    "sessionprs_browser.cjs",
+    "commandcopy_browser.cjs",
     "termcflow_browser.cjs",
     "cflow2layout_browser.cjs",
     "glossary_browser.cjs",
