@@ -15016,6 +15016,99 @@ function installOsc52(t) {
   });
 }
 
+/* Read a logical line from the rendered PTY buffer, not a transport chunk:
+   ANSI escapes are already decoded and soft wraps belong to one command.
+   Keep the ! prefix so the copied recommendation can be pasted as shown.
+   Hard newlines never join unrelated output onto a command. */
+function terminalCommandAt(t, row) {
+  const buffer = t.buffer.active;
+  if (row < 0 || row >= buffer.length) return null;
+  let start = row;
+  while (start > 0 && buffer.getLine(start)?.isWrapped) start--;
+  // A trimmed scrollback can start halfway through a command.
+  if (buffer.getLine(start)?.isWrapped) return null;
+  let text = "";
+  let end = start;
+  do {
+    const line = buffer.getLine(end);
+    if (!line) return null;
+    const continues = buffer.getLine(end + 1)?.isWrapped;
+    text += line.translateToString(!continues);
+    if (!continues) break;
+    end++;
+    if (end - start > 100) return null;
+  } while (end < buffer.length);
+  text = text.trim();
+  // Markdown may still be visible in a harness's plain-text output.
+  text = text.replace(/^(?:[-*•] )\s*/, "");
+  if (text.startsWith("`") && text.endsWith("`")) text = text.slice(1, -1);
+  return /^![ \t]*[^!\s]/.test(text) ? text : null;
+}
+
+/* A per-terminal button: it follows cached terminals and is disposed with
+   xterm. Hover never copies or sends input. Copy runs inside a real click,
+   through the same browser-PC clipboard helper as the Clipboard menu.
+   No extra daemon endpoint is needed: the normal PTY WebSocket/relay has
+   already delivered the text this viewer is looking at. */
+function installTerminalCommandCopy(t) {
+  const host = t.element;
+  const screen = host.querySelector(".xterm-screen");
+  if (!screen) return;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "term-command-copy";
+  button.hidden = true;
+  button.textContent = "Copy command";
+  button.title = "Copy this ! command to this computer's clipboard";
+  host.appendChild(button);
+  let command = null;
+  let bufferRow = null;
+  const hide = () => { button.hidden = true; command = null; bufferRow = null; };
+  const move = (event) => {
+    if (button.contains(event.target)) return;
+    const rect = screen.getBoundingClientRect();
+    if (!rect.height || event.clientX < rect.left || event.clientX >= rect.right
+        || event.clientY < rect.top || event.clientY >= rect.bottom) return hide();
+    const row = Math.floor((event.clientY - rect.top) * t.rows / rect.height);
+    const nextRow = t.buffer.active.viewportY + row;
+    const next = terminalCommandAt(t, nextRow);
+    if (!next) return hide();
+    if (next !== command || nextRow !== bufferRow) button.textContent = "Copy command";
+    command = next;
+    bufferRow = nextRow;
+    const parent = host.getBoundingClientRect();
+    button.hidden = false;
+    button.style.top = `${Math.max(0, Math.min(rect.top - parent.top + row * rect.height / t.rows,
+      rect.bottom - parent.top - button.offsetHeight))}px`;
+    button.style.left = `${Math.max(0, rect.right - parent.left - button.offsetWidth - 4)}px`;
+  };
+  const press = (event) => { event.preventDefault(); event.stopPropagation(); };
+  const copy = async (event) => {
+    press(event);
+    const text = command;
+    // Revalidate on click in case the PTY repainted between hover and click.
+    if (!text || terminalCommandAt(t, bufferRow) !== text) return hide();
+    const ok = await copyToBrowserClipboard(text, host);
+    if (command === text) button.textContent = ok ? "Copied" : "Copy failed";
+    if (!ok) notify("Copy failed", "Select the command and copy it by hand.", { key: "command-copy" });
+  };
+  host.addEventListener("mousemove", move);
+  host.addEventListener("mouseleave", hide);
+  button.addEventListener("pointerdown", press);
+  button.addEventListener("mousedown", press);
+  button.addEventListener("click", copy);
+  const subscriptions = [t.onScroll(hide), t.onResize(hide), t.onWriteParsed(hide)];
+  t.loadAddon({
+    activate() {},
+    dispose() {
+      subscriptions.forEach((s) => s.dispose());
+      host.removeEventListener("mousemove", move);
+      host.removeEventListener("mouseleave", hide);
+      button.remove();
+    },
+  });
+}
+
 async function deleteHostClipboard(id) {
   const request = ++hostClipboardRequest;
   try {
@@ -17629,6 +17722,7 @@ function buildCliTerm() {
     }
   });
   if (typeof installOsc52 === "function") installOsc52(cliTerm);
+  if (typeof installTerminalCommandCopy === "function") installTerminalCommandCopy(cliTerm);
   // A resize we applied from a server broadcast must not be echoed back, or
   // two viewers ping-pong forever (the session terminal's rule, verbatim).
   cliTerm.onResize(({ cols, rows }) => {
@@ -17895,6 +17989,7 @@ function freshAttach(name) {
   // Guarded like onTermKeyEvent below, for the harnesses that boot this
   // function without the clipboard block.
   if (typeof installOsc52 === "function") installOsc52(term);
+  if (typeof installTerminalCommandCopy === "function") installTerminalCommandCopy(term);
   watchComposer(term);
   term.onResize(({ cols, rows }) => {
     // A resize we applied from a server broadcast must not be echoed back, or

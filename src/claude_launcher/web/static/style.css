@@ -2359,6 +2359,20 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 .term-notice-warn { background: #ca8a04; color: #1c1917; }
 .term-notice-error { background: #b91c1c; }
 #terminal .xterm { height: 100%; }
+.term-command-copy {
+  position: absolute;
+  z-index: 20;
+  padding: 3px 9px;
+  border: 1px solid #7c91ad;
+  border-radius: 4px;
+  background: #202b3b;
+  color: #fff;
+  font: 12px/1.4 sans-serif;
+  cursor: pointer;
+  box-shadow: 0 2px 8px #0008;
+}
+.term-command-copy:hover, .term-command-copy:focus-visible { background: #354b69; }
+.term-command-copy[hidden] { display: none; }
 /* An ended session's last screen, drawn as plain text instead of a live xterm
    (app.js snapshotAttach). The browser owns the wheel here — a real scrollbar
    over a box that clips, never the whole page — so it scrolls inside itself in
