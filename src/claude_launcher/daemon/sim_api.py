@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from typing import Optional
 
 from aiohttp import web
@@ -49,6 +50,10 @@ from . import paths
 log = logging.getLogger(__name__)
 
 PREFIX = "[claunch simulation]"
+
+
+#: ``<simulation id>-run<n>``: the name launch_runner gives a run session.
+RUN_SESSION_RE = re.compile(r"^(sim-[0-9a-f]{6,12})-run[0-9]+$")
 
 
 def _live(manager, name: str) -> bool:
@@ -640,6 +645,46 @@ def install(app, store: Optional[sim_store.SimStore] = None):
             return err
         return web.json_response(res)
 
+    async def h_events(request):
+        q = request.query
+        try:
+            since = int(q.get("since") or 0)
+        except ValueError:
+            return web.json_response({"error": "since must be an integer"}, status=400)
+        res, err = await call(sims.durable_events, request.match_info["id"], q.get("session") or "", since)
+        if err:
+            return err
+        return web.json_response(res)
+
+    async def h_session_durable(request):
+        """A pi-durable run session's own events, found from the session:
+        the run pane of its terminal reads this instead of a workflow run."""
+        name = request.match_info["name"]
+        try:
+            since = int(request.query.get("since") or 0)
+        except ValueError:
+            return web.json_response({"error": "since must be an integer"}, status=400)
+        session = None
+        try:
+            session = manager.get(name)
+        except Exception:  # noqa: BLE001 -- gone from the manager: the name still says which simulation
+            pass
+        sid = ""
+        if session is not None:
+            sid = str((getattr(session.sdef, "env", None) or {}).get("CLAUNCH_SIM_ID") or "")
+        if not sid:
+            m = RUN_SESSION_RE.match(name)
+            sid = m.group(1) if m else ""
+        if not sid:
+            return web.json_response({"error": f"{name} is not a simulation run session"}, status=404)
+        res, err = await call(sims.durable_events, sid, name, since)
+        if err:
+            return err
+        live = session is not None and not session.exited
+        res["live"] = live
+        res["progress"] = manager.progress.get(name) if live and hasattr(manager, "progress") else None
+        return web.json_response(res)
+
     async def h_nudge(request):
         sid = request.match_info["id"]
         body = await body_of(request)
@@ -673,6 +718,8 @@ def install(app, store: Optional[sim_store.SimStore] = None):
     r.add_post("/api/sims/{id}/answer", h_answer)
     r.add_get("/api/sims/{id}/replay", h_replay)
     r.add_get("/api/sims/{id}/coverage", h_coverage)
+    r.add_get("/api/sims/{id}/events", h_events)
+    r.add_get("/api/sessions/{name}/durable", h_session_durable)
     r.add_post("/api/sims/{id}/nudge", h_nudge)
     r.add_get("/api/sims/{id}/runner", h_runner)
     r.add_post("/api/sims/{id}/runner/done", h_runner_done)

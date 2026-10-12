@@ -19480,6 +19480,7 @@ let splitScope = null;
 let splitPollTimer = null;
 let splitSelectedStep = null;
 let splitLastData = null;
+let splitDurable = null;       // a pi-durable run session's event flow (durable-flow.js)
 
 const splitUi = {
   host: "split",
@@ -19516,6 +19517,7 @@ function openSplit(name, kind = "run") {
 function closeSplit() {
   if (splitPollTimer) { clearInterval(splitPollTimer); splitPollTimer = null; }
   if (splitKind === "sims") globalThis.SimPane?.unmount();
+  if (splitDurable) { splitDurable.unmount(); splitDurable = null; }
   splitKind = null;
   splitFor = null;
   splitCwd = null;
@@ -19528,21 +19530,31 @@ function closeSplit() {
 async function refreshSplit() {
   const want = splitFor;
   if (!want || splitKind !== "run") return;
+  if (splitDurable) return;   // it keeps its own poll
   // A run is keyed by (cwd, scope) and the meta endpoint already answers
   // that resolution for a session — ask it rather than re-deriving the slot
   // rules here. null is "not asked yet"; "" is "asked, and there is none",
   // which unlike a failed ask is an answer, so the poll stops asking.
   if (splitCwd === null) {
-    let flow;
+    let flow, kind;
     try {
       const resp = await api(`/api/sessions/${encodeURIComponent(want)}/meta`);
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) return;   // the poll will come back round
       flow = data.cflow || null;
+      kind = (data.session && data.session.kind) || "";
     } catch {
       return;
     }
     if (splitFor !== want) return;   // repointed while the reply was in flight
+    // A pi-durable run session drives no workflow: its run is the campaign
+    // loop it logs, drawn as a flow diagram that updates in place.
+    if (kind === "pi-durable" && globalThis.DurableFlow) {
+      if (splitPollTimer) { clearInterval(splitPollTimer); splitPollTimer = null; }
+      splitCwd = "";
+      splitDurable = globalThis.DurableFlow.mount($("term-wf"), want, { api });
+      return;
+    }
     if (!flow || !flow.cwd) {
       splitCwd = "";
       $("term-wf").innerHTML = "";

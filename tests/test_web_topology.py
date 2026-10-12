@@ -537,6 +537,7 @@ CHECKS = [
         "worktreespage_check.js",
         "glossarypage_check.js",
         "simpage_check.js",
+        "durableflow_check.js",
         "specpage_check.js",
         "shadowcard_check.js",
         "railshadowmix_check.js",
