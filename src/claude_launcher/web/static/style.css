@@ -587,6 +587,15 @@ html[data-theme="light"] .xterm {
   display: flex; align-items: center; gap: 4px; flex-wrap: nowrap;
   flex: 1 1 0; min-width: 0; overflow: hidden;
 }
+#session-list .rail-pr {
+  flex: none; font-size: 10px; padding: 1px 5px; border-radius: 4px;
+  border: 1px solid #3b4655; color: #a5c9f5; white-space: nowrap;
+}
+.sess-prs { margin: 10px 0; }
+.sess-prs h3 { margin: 0 0 6px; font-size: 13px; }
+.sess-pr { padding: 8px 0; border-bottom: 1px solid #2a2e36; overflow-wrap: anywhere; }
+.sess-pr-link { font-weight: 600; }
+.sess-pr-repo, .sess-pr-facts { font-size: 11px; color: #9ca3af; margin-top: 4px; }
 /* Role and rooms share the squeeze rather than one of them absorbing all of
    it. Left rigid, the role pill ("specialist" is 55px of a 114px budget)
    pushed the whole shortfall onto the rooms beside it, which then shrank past

@@ -174,6 +174,14 @@ def test_post_runs_the_engine_and_reports_into_the_session(home, tmp_path, monke
             assert resp.status == 200
             doc = await resp.json()
             assert doc["delivered"] is None and delivered == []
+            # The PR belongs to the session even without a terminal report.
+            resp = await client.get("/api/sessions?view=rail", headers=BEARER)
+            rail = await resp.json()
+            rows = rail["sessions"]
+            prs = next(s for s in rows if s["name"] == "s1")["prs"]
+            assert len(prs) == 1 and prs[0]["branch"] == "s1-pr-2"
+            resp = await client.get("/api/sessions/s1/meta", headers=BEARER)
+            assert (await resp.json())["session"]["prs"] == prs
             await mgr.shutdown_all()
         finally:
             await client.close()

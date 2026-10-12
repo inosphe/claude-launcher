@@ -4808,6 +4808,10 @@ async function refreshSessions(options) {
     head.append(label, keys, ...(handleBox ? [handleBox] : []),
                 ...(role ? [role] : []), ...(comp ? [comp] : []),
                 ...(meshBox ? [meshBox] : []));
+    if (typeof sessionPrBadge === "function") {
+      const prBadge = sessionPrBadge(s);
+      if (prBadge) head.appendChild(prBadge);
+    }
     // Where it runs, then how full it is, then who has been near it: the two
     // identity lines first and the state line under them, so a reader
     // scanning for "which of these has nobody touched" finds it in one
@@ -33392,6 +33396,47 @@ function sessRailTabs(name) {
    Drawn under the panel radio, smaller, so the two read as a level and the
    level under it. Same lit-and-dead rule as the bar above; the choice is the
    session's, remembered with its layout (sessLayoutFor). */
+function sessionPrRows(s) {
+  return (Array.isArray(s.prs) ? s.prs : []).filter((pr) => {
+    try {
+      const u = new URL(pr.url);
+      return ["https:", "http:"].includes(u.protocol) && !u.username && !u.password
+        && /^\/[^/]+\/[^/]+\/pull\/[1-9][0-9]*\/?$/.test(u.pathname);
+    } catch (_) { return false; }
+  });
+}
+
+function sessionPrBadge(s) {
+  const rows = sessionPrRows(s);
+  if (!rows.length) return null;
+  const badge = el("span", "rail-pr", rows.length === 1 ? `PR #${rows[0].number}` : `PR ×${rows.length}`);
+  badge.title = rows.map((pr) => `${pr.repo} #${pr.number}${pr.status ? ` · ${pr.status}` : ""}`).join("\n");
+  return badge;
+}
+
+function sessionPrPanel(s) {
+  const rows = sessionPrRows(s);
+  if (!rows.length) return null;
+  const box = el("section", "sess-prs");
+  box.appendChild(el("h3", null, "Pull requests"));
+  box.appendChild(el("p", "wf-note", "Recorded PR information; open the link for the latest status."));
+  for (const pr of rows) {
+    const row = el("div", "sess-pr");
+    const link = el("a", "sess-pr-link", `PR #${pr.number}${pr.title ? ` · ${pr.title}` : ""}`);
+    link.href = pr.url;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    row.appendChild(link);
+    row.appendChild(el("div", "sess-pr-repo", pr.repo));
+    const facts = [pr.status, pr.draft ? "draft" : null,
+      pr.branch && pr.base ? `${pr.branch} → ${pr.base}` : pr.branch || pr.base,
+      ...(pr.issues || [])].filter(Boolean);
+    if (facts.length) row.appendChild(el("div", "sess-pr-facts", facts.join(" · ")));
+    box.appendChild(row);
+  }
+  return box;
+}
+
 function sessDetailTabs(name) {
   const bar = el("div", "seq-tabs sess-subtabs");
   bar.setAttribute("role", "tablist");
@@ -33795,6 +33840,10 @@ function renderSession(data) {
   };
 
   if (show("overview")) {
+    if (typeof sessionPrPanel === "function") {
+      const prs = sessionPrPanel(s);
+      if (prs) view.appendChild(prs);
+    }
     const dl = el("dl", "sess-meta");
     metaRow(
       dl, "profile / harness", profileHarnessLabel(s.profile, s.harness),

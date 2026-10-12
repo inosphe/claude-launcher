@@ -370,6 +370,7 @@ CHECKS = [
         "sessiongrouptabs_check.js",
         "projectsearchline_check.js",
         "railbadge_check.js",
+        "sessionprs_check.js",
         "railcflow2_check.js",
         "sessmesh_check.js",
         "sesshandle_check.js",
