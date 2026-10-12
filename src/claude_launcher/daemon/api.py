@@ -10696,11 +10696,13 @@ async def h_session_keys(request: web.Request) -> web.Response:
         return json_error(409, "score goal is not enabled for this session")
     if request_id is not None:
         prior = session_input.latest(session.sdef.name, request_id)
-        if prior and prior.get("status") in ("accepted", "sent"):
+        if prior and (prior.get("status") == "sent"
+                      or session_input.delivering(session.sdef.name, request_id)):
             return json_response(_keys_payload(session, 0, duplicate=True))
     if request_id is not None and (
         session.exited or getattr(session, "held_at", None)
         or session_input.pending(session.sdef.name)
+        or session_input.flushing(session.sdef.name)
     ):
         return _queue_session_input(request, session, body, request_id,
                                     feedback)

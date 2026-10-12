@@ -744,3 +744,58 @@ def test_message_waits_for_hold_process_exit_before_restore(home, monkeypatch):
         assert calls == ["exit", "restore"]
 
     asyncio.run(run())
+
+
+def test_input_during_restore_flush_keeps_order_without_suppressing_old_retries(
+    home, tmp_path, monkeypatch
+):
+    from claude_launcher.daemon import session_input
+
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        client = TestClient(TestServer(build_app(mgr, "sekrit", started_at=0.0)))
+        await client.start_server()
+        entered, release = asyncio.Event(), asyncio.Event()
+        original_type = session_input.type_line
+        typed = []
+
+        async def type_line(session, text):
+            typed.append(text)
+            if text == "first":
+                entered.set()
+                await release.wait()
+            return await original_type(session, text)
+
+        monkeypatch.setattr(session_input, "type_line", type_line)
+        headers = {"Authorization": "Bearer sekrit"}
+        try:
+            session = mgr.create(SessionDef(name="sleepy", harness="py", cwd=str(tmp_path)))
+            await _wait_screen(session, "READY")
+            session_input.queue("sleepy", request_id="first", text="first")
+            mgr.flush_queued_input(session)
+            await asyncio.wait_for(entered.wait(), 15)
+            for rid in ("first", "second"):
+                response = await client.post("/api/sessions/sleepy/keys", headers=headers,
+                    json={"keys": [rid, "Enter"], "input_id": rid, "force": True})
+                doc = await response.json()
+                assert response.status == (200 if rid == "first" else 202), doc
+                assert doc.get("duplicate" if rid == "first" else "queued") is True
+            release.set()
+            await asyncio.wait_for(asyncio.gather(*list(mgr._input_flush_tasks)), 15)
+            assert typed == ["first", "second"]
+            await _wait_screen(session, "echo:second")
+            # A previous daemon's accepted entry is not an in-flight send.
+            session_input.write("sleepy", "input_accepted", request_id="old", text="retry-old", status="accepted")
+            response = await client.post("/api/sessions/sleepy/keys", headers=headers,
+                json={"keys": ["retry-old", "Enter"], "input_id": "old", "force": True})
+            assert response.status == 200
+            assert not (await response.json()).get("duplicate")
+            await _wait_screen(session, "echo:retry-old")
+        finally:
+            release.set()
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
