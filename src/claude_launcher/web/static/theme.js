@@ -17,6 +17,19 @@
      - accent-coloured TEXT (green "ok", blue links) sits at mid lightness, so
        1 - L leaves it at mid lightness too: readable on near-black, faint on
        near-white. Saturated text colours are capped at ACCENT_TEXT_L.
+     - the dark surfaces sit close to black (the page is L 0.09), so 1 - L
+       puts them at a grey (L 0.91) on which the faintest text greys lack
+       contrast (claunch-zguui). A background darker than SURFACE_L is
+       lifted further toward white: 1 - L * k, k rising from SURFACE_LIFT
+       at black to 1 at SURFACE_L, so the curve meets 1 - L there, stays
+       monotonic (the surfaces keep their order) and mid-tone fills are
+       untouched.
+     - the dark theme's muted greys (secondary text, button labels such as
+       Clipboard / Sync off, hairline borders) sit near mid lightness, and
+       1 - L leaves them there: faint on a near-white page (claunch-zguui).
+       Grey text is darkened by a power curve (L ** GREY_TEXT_GAMMA) and
+       borders/outlines by a milder one (BORDER_GAMMA); both keep black at
+       black and white at white, and keep every grey's order.
      - `color-scheme: dark` asks the platform for dark scrollbars and popups;
        it becomes `light`.
 
@@ -43,6 +56,10 @@
   const THEMES = ["dark", "light"];
   const ACCENT_TEXT_L = 0.40;
   const ACCENT_S = 0.30;
+  const SURFACE_L = 0.30;
+  const SURFACE_LIFT = 0.25;
+  const GREY_TEXT_GAMMA = 1.5;
+  const BORDER_GAMMA = 1.3;
   const TEXT_PROPS = new Set(["color", "caret-color", "-webkit-text-fill-color"]);
   const COLOR_PROP = /color|background|border|outline|shadow|^fill$|^stroke$|column-rule|text-decoration|^--/;
   const COLOR_TOKEN = /#[0-9a-fA-F]{3,8}\b|rgba?\([^)]*\)|hsla?\([^)]*\)|\b(?:white|black)\b/g;
@@ -125,7 +142,12 @@
     if (black && (a < 1 || /shadow/.test(prop || ""))) return token;
     const [h, s, l] = rgbToHsl(r, g, b);
     let next = 1 - l;
+    if (/background/.test(prop || "") && l < SURFACE_L) {
+      next = 1 - l * (SURFACE_LIFT + (1 - SURFACE_LIFT) * (l / SURFACE_L));
+    }
     if (TEXT_PROPS.has(prop) && s > ACCENT_S) next = Math.min(next, ACCENT_TEXT_L);
+    else if (TEXT_PROPS.has(prop)) next = Math.pow(next, GREY_TEXT_GAMMA);
+    else if (/^(border|outline|column-rule)/.test(prop || "")) next = Math.pow(next, BORDER_GAMMA);
     return formatColor([...hslToRgb(h, s, next), a]);
   }
 
