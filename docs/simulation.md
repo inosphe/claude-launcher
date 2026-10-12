@@ -240,7 +240,8 @@ claunch sim runtime status       # 설치·최신 여부, 아니면 종료 코�
   - 실행 세션이 있으면 그 세션의 `runner/done`이나 종료가 닫는다.
   - `runner/done`은 그 세션이 받은 `run`을 함께 보내고, 지금 실행과 다르면 거절된다(늦은 보고가 새 실행을 닫지 않는다).
 - `workflows/v2/sim-run.yaml`(`kind: procedure`)은 시뮬레이션 한 번을 cflow v2 절차로 정의한다: 범위 → 모델 → 실행 →
-  (커버리지 미달이면 보강 후 재실행, 최대 2회) → 정리. 지금은 정적 `call: sim-run`으로 부른다.
+  (커버리지 미달이면 보강 후 재실행, 최대 2회. 반복 상한 승인 대기를 피하려고 두 단계로 펼쳐 썼다) → 정리.
+  지금은 정적 `call: sim-run`으로 부른다.
   - 반환 `ok`는 `assessment`(consistent·gaps·inconclusive)와 그 근거인 `findings`(clear·gaps)·`adequacy`
     (adequate·inadequate), 커버리지, 미결 항목 수, 한계를 싣는다.
   - 기술적으로 실행할 수 없을 때만 `fail`, 시간 예산을 넘기면 `timeout`이다.

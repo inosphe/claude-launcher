@@ -133,12 +133,21 @@ body:
   - sim-scope
   - sim-build
   - sim-walk
+  # 커버리지 보강은 최대 두 번. loop의 max에 닿으면 사람의 연장을 기다리므로
+  # (runtime._loop_limit, claunch-4avda CALL-CONTRACT-3) 반복 대신 두 단계로 펼친다:
+  # 두 번 보강해도 미달이면 그대로 정리로 가고 adequacy가 inadequate가 된다.
   - id: walk-again
-    loop:
-      while: "$result['sim-walk'].value.coverage.met == false"
-      max: 2
-      do:
-        seq: [sim-reinforce, sim-walk]
+    cond:
+      - if: "$result['sim-walk'].value.coverage.met == false"
+        then:
+          seq:
+            - sim-reinforce
+            - sim-walk
+            - cond:
+                - if: "$result['sim-walk'].value.coverage.met == false"
+                  then: {seq: [sim-reinforce, sim-walk]}
+                - else: {seq: []}
+      - else: {seq: []}
   - sim-report
   - return: ok
     value:
