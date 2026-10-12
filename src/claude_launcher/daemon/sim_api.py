@@ -324,7 +324,8 @@ def install(app, store: Optional[sim_store.SimStore] = None):
     async def h_list(request):
         q = request.query
         owner = q.get("owner")
-        rows, err = await call(sims.list, project=q.get("project") or None, owner=owner)
+        rows, err = await call(sims.list, project=q.get("project") or None, owner=owner,
+                               compact=q.get("view") == "rail")
         if err:
             return err
         return web.json_response({"sims": rows})

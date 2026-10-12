@@ -43,6 +43,22 @@ def test_owner_only_changes_and_anyone_reads(env):
     assert st.run_round(sim["id"], S.USER)["round"] == 1  # the user may do anything
 
 
+def test_compact_list_avoids_model_and_findings_reads(env, monkeypatch):
+    st, root, _ = env
+    sim = st.create(title="door", root=root, owner="s1", actor="s1", project="proj")
+    st.create(title="other", root=root, owner="s2", actor="s2")
+
+    def unexpected(*args):
+        pytest.fail("rail polling must only read simulation metadata")
+
+    for name in ("summary", "model", "findings", "rounds"):
+        monkeypatch.setattr(st, name, unexpected)
+    rows = st.list(project="proj", owner="s1", compact=True)
+    assert len(rows) == 1
+    assert rows[0] == {k: sim[k] for k in ("id", "owner", "title", "state", "updated_at")}
+    assert st.list(owner="missing", compact=True) == []
+
+
 def test_quotes_are_checked_against_the_root(env):
     st, root, _ = env
     sim = st.create(title="door", root=root, owner="s1", actor="s1")
