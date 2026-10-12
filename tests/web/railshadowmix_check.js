@@ -149,7 +149,8 @@ let railRedrawPending = false, briefingLLM = true, ragConfigured = false;
 let currentProject = "";
 let shadowRows = [], shadowOpen = null;
 let sessionGroupTab = {}, sessionGroupTabScrollReset = false;
-function railHeld() { return false; }
+let held = false;
+function railHeld() { return held; }
 function forgetDeadSessions() {}
 function refreshResumeChoices() {}
 function refreshParentChoices() {}
@@ -183,7 +184,7 @@ const names = [
   "byLineage", "sessionCategory", "sessionMatchesFilter", "sessionFilterCounts",
   "sessionGroupActiveTab", "setSessionGroupTab", "sessionGroupTabRows",
   "scrollSessionListTop", "selectSessionGroupTab", "renderSessionGroupTabs",
-  "renderSessionGroupHeader", "syncSessionGroupTabSearch",
+  "renderSessionGroupHeader", "syncSessionGroupTabSearch", "sessionGroupRowVisible",
   "syncSessionFilters",
   "sessionSearchText", "sessionMatchesSearch",
   "recordProject", "sessionInCurrentProject", "railSessions",
@@ -214,6 +215,7 @@ Object.assign(exports, {
       case "project": currentProject = value; break;
       case "shadows": shadowRows = value; break;
       case "filter": sessionFilter = value; break;
+      case "held": held = value; break;
       case "search": sessionSearch = { q: "", hits: null, pending: false, error: "",
                                        index: null, ...value }; break;
       case "page": currentPage = value; break;
@@ -411,8 +413,12 @@ const tabShadows = () => tabs().flatMap((t) => t._groupRows)
   check("a hit by meaning is the local s1's, never the remote one's", shown(), ["s1"]);
   ctx.set("groups", ["mesh"]);
   await ctx.refresh({ cached: true });
+  check("semantic hits count only the local session even with a remote namesake",
+        [tabCount("alpha"), tabCount("bravo"), tabCount("gamma")], ["1", "0", "0"]);
   ctx.set("search", { q: "r4" });
   ctx.filters();
+  check("search updates counts in closed tabs without rebuilding",
+        [tabCount("alpha"), tabCount("gamma")], ["0", "1"]);
   check("a tab whose group holds a matching shadow is marked",
         tabs().filter((t) => t.classes.has("search-match")).map((t) => t.dataset.value),
         ["gamma"]);
@@ -423,6 +429,36 @@ const tabShadows = () => tabs().flatMap((t) => t._groupRows)
 
   /* ---- the tab press and the open card -------------------------------- */
   await open("alpha");
+  ctx.set("filter", "running");
+  ctx.filters();
+  check("filter-only refresh keeps tab and header counts aligned with visible rows",
+        [tabCount("alpha"), groupHeader.querySelector(".session-group-count").text,
+         shown().length, tabCount("bravo")], ["3", "3 sessions", 3, "0"]);
+  ctx.set("held", true);
+  const beforeHold = served.sessions;
+  served = {sessions: beforeHold.map((s) => s.name === "s1" ? {...s, status: "exited"} : s)};
+  await ctx.refresh();
+  check("held rail counts a replaced local record with its latest status",
+        [tabCount("alpha"), groupHeader.querySelector(".session-group-count").text,
+         shown().length], ["2", "2 sessions", 2]);
+  ctx.set("shadows", SHADOWS.map((s) => s.session === "s1"
+    ? {...s, card: {...s.card, exited: true}} : s));
+  await ctx.refresh({cached: true});
+  check("held rail counts the latest remote record independently of its local namesake",
+        [tabCount("alpha"), groupHeader.querySelector(".session-group-count").text,
+         shown().length], ["1", "1 session", 1]);
+  served = {sessions: beforeHold.filter((s) => s.name !== "s1")};
+  ctx.set("shadows", SHADOWS.filter((s) => s.session !== "s1"));
+  ctx.set("filter", "current");
+  await ctx.refresh();
+  check("removed local and remote records do not count while the rail is held",
+        [tabCount("alpha"), shown().length], ["2", 2]);
+  served = {sessions: beforeHold};
+  ctx.set("shadows", SHADOWS);
+  ctx.set("held", false);
+  await ctx.refresh();
+  ctx.set("filter", "current");
+  ctx.filters();
   list.scrollTop = 120;
   await open("alpha");
   check("pressing the open tab takes the list back to its top", list.scrollTop, 0);
