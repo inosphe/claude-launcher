@@ -4596,6 +4596,11 @@ NUDGE_CFLOW2_MOVE_APPROVED = (
     "cflow2: the user approved your move request from the dashboard - the run "
     "moved where you asked; call the flow_status tool and continue from its tasks"
 )
+NUDGE_CFLOW2_REPORT_APPROVED = (
+    "cflow2: the user granted your report request from the dashboard - the task "
+    "was reported as you asked (its verify may still be running); call the "
+    "flow_status tool and continue from its tasks"
+)
 NUDGE_CFLOW2_MOVE_DENIED = (
     "cflow2: the user refused your move request from the dashboard - the run "
     "stays where it was; call the flow_status tool, read the refusal "
@@ -5019,7 +5024,8 @@ async def h_cflow2_move_resolve(request: web.Request) -> web.Response:
     """A person answers the driver's move request (``flow_request_move``) --
     the dashboard half of ``claunch cflow2 move --approve|--deny``. Body:
     cwd, scope, decision (approve | deny), reason. The driver is nudged
-    either way: an approval moved its run, a refusal released it."""
+    either way: an approval moved its run (or, for a report request,
+    reported its task), a refusal released it."""
     resolved, err = await _cflow_action_cwd(request)
     if err:
         return err
@@ -5034,7 +5040,10 @@ async def h_cflow2_move_resolve(request: web.Request) -> web.Response:
     )
     payload["nudge_scheduled_sessions"] = await _nudge_sessions(
         request.app["manager"], cwd, scope,
-        NUDGE_CFLOW2_MOVE_APPROVED if decision == "approve" else NUDGE_CFLOW2_MOVE_DENIED,
+        NUDGE_CFLOW2_MOVE_DENIED if decision != "approve"
+        else NUDGE_CFLOW2_REPORT_APPROVED
+        if (payload.get("move_request") or {}).get("kind") == cflow2_runtime.MOVE_KIND_REPORT
+        else NUDGE_CFLOW2_MOVE_APPROVED,
     )
     return json_response(payload)
 

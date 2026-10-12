@@ -16805,21 +16805,26 @@ function termCflow2Answers(r, a) {
   const what = a.label || a.instance || "?";
   if (a.kind === "move") {
     // the driver's move request (flow_request_move): the run page's Move / Refuse
+    // (a.report: the report kind -- report this task as a.outcome, claunch-vwmoj)
     const slot = { cwd: r.cwd, scope: r.scope };
     return [
       {
-        label: `Move to '${what}'`, cls: "approve",
+        label: a.report ? `Report '${a.outcome}'` : `Move to '${what}'`, cls: "approve",
         path: "/api/cflow2/move/resolve",
         body: { ...slot, decision: "approve", reason: "" },
-        ask: `Move the run to '${what}', as ${a.by || "the driver"} asked?` +
+        ask: (a.report
+          ? `Report '${what}' as '${a.outcome}'${skip}, as ${a.by || "the driver"} asked?`
+          : `Move the run to '${what}', as ${a.by || "the driver"} asked?`) +
           (a.reason ? `\n\n${a.reason}` : ""),
       },
       {
         label: "Refuse",
-        title: "the run stays where it is; the driver is told and continues",
+        title: a.report ? "the task stays open; the driver is told and continues"
+          : "the run stays where it is; the driver is told and continues",
         path: "/api/cflow2/move/resolve",
         body: { ...slot, decision: "deny", reason: "" },
-        reason: "Refuse the move? A reason is optional but is what the driver reads:",
+        reason: (a.report ? "Refuse the report?" : "Refuse the move?") +
+          " A reason is optional but is what the driver reads:",
       },
     ];
   }
@@ -31652,7 +31657,46 @@ function renderCflow2Into(box, data, ui, force = false) {
   // because nothing moves by the driver's hand until it is answered. Move
   // grants it, Refuse hands the reason back; v1's waiting_goto card.
   const mr = run.move_request;
-  if (mr && !mr.decision) {
+  // A report request (claunch-vwmoj): the driver asks a person to report one
+  // of its active tasks with a given result, instead of typing out a
+  // 'claunch cflow2 report' line for them; same slot, same answer endpoint.
+  if (mr && !mr.decision && mr.kind === "report") {
+    const target = mr.title || mr.label || mr.node;
+    const card = cf2Card("report", target,
+      `${mr.by || "the driver"} asks you to report this task as '${mr.outcome}'`);
+    if (mr.reason) card.appendChild(mdInto(el("div", "md cf2-body"), mr.reason));
+    if (mr.value && Object.keys(mr.value).length) {
+      card.appendChild(el("pre", "wf-note", JSON.stringify(mr.value, null, 2)));
+    }
+    const lv = mr.last_verify;
+    if (lv) {
+      const tail = String(lv.tail || "").trim().split("\n").pop();
+      card.appendChild(el("p", "wf-note",
+        `last verify failed (${lv.why || "?"})${tail ? ": " + tail : ""}`));
+    }
+    card.appendChild(el("p", "wf-note",
+      "its verify runs on the grant; a failure puts the task back with the output"));
+    const key = `${host}:move:${mr.id}`;
+    const grant = el("button", "wf-btn sm approve", `Report '${mr.outcome}'`);
+    const refuse = el("button", "wf-btn sm", "Refuse");
+    refuse.title = "the task stays open; the driver reads your reason and continues";
+    const { row, reason } = answerRow(key, [grant, refuse]);
+    reason.placeholder = "reason (optional; the driver reads it)";
+    grant.addEventListener("click", async () => {
+      if (!confirm(`Report '${target}' as '${mr.outcome}', as ${mr.by || "the driver"} asked?`)) return;
+      grant.disabled = true;
+      delete cf2Drafts[key];
+      await post("/api/cflow2/move/resolve", { decision: "approve", reason: reason.value.trim() });
+    });
+    refuse.addEventListener("click", async () => {
+      if (!confirm(`Refuse to report '${target}'?`)) return;
+      refuse.disabled = true;
+      delete cf2Drafts[key];
+      await post("/api/cflow2/move/resolve", { decision: "deny", reason: reason.value.trim() });
+    });
+    card.appendChild(row);
+    yours.appendChild(card);
+  } else if (mr && !mr.decision) {
     const target = mr.title || mr.label || mr.node;
     const card = cf2Card("move", target, `${mr.by || "the driver"} asks to move the run here`);
     if (mr.reason) card.appendChild(mdInto(el("div", "md cf2-body"), mr.reason));
@@ -31682,7 +31726,8 @@ function renderCflow2Into(box, data, ui, force = false) {
     yours.appendChild(card);
   } else if (mr && mr.decision === "denied") {
     main.appendChild(el("p", "wf-note",
-      `move to '${mr.title || mr.label || mr.node}' refused by ${mr.decided_by || "a person"}` +
+      `${mr.kind === "report" ? "report of" : "move to"} ` +
+      `'${mr.title || mr.label || mr.node}' refused by ${mr.decided_by || "a person"}` +
       (mr.decided_reason ? ` — ${mr.decided_reason}` : "")));
   }
   for (const c of run.choices || []) {

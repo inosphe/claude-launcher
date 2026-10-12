@@ -283,3 +283,44 @@ def test_move_answers_the_drivers_request(project, capsys):
     assert run("move", "--approve") == 0
     assert "moved to intake" in capsys.readouterr().out
     assert [t["label"] for t in runtime.status(cwd=str(project))["tasks"]] == ["intake"]
+
+
+VERIFY_DEF = textwrap.dedent("""
+    cflow: 2
+    name: verify-cli
+    nodes:
+      chk: {prompt: chk, verify: [sh, -c, "exit 0"]}
+      next: {prompt: next}
+    body: [chk, next]
+""")
+
+
+def test_a_cli_report_waits_for_the_verify_it_started(project, capsys, monkeypatch):
+    """s214 (claunch-vwmoj): 'claunch cflow2 report' started the task's verify
+    in a thread of the CLI process and exited, so the verify died with it and
+    the task sat in 'verifying'. The command now waits for it."""
+    from claude_launcher.cflow2 import runtime
+
+    (project / ".claunch" / "workflows" / "v2" / "verify-cli.yaml").write_text(
+        VERIFY_DEF, encoding="utf-8")
+    assert run("start", "verify-cli", "--scope", "other") == 0
+    assert run("report", "chk", "ok", "--scope", "other", "--reason", "by hand") == 0
+    out = capsys.readouterr().out
+    assert "verifying chk" in out and "task next@" in out
+    st = runtime.status(cwd=str(project), scope="other", tick=False)
+    assert [t["label"] for t in st["tasks"]] == ["next"] and not st.get("verifying")
+
+
+def test_cli_approve_grants_a_report_request(project, capsys):
+    from claude_launcher.cflow2 import runtime
+
+    (project / ".claunch" / "workflows" / "v2" / "verify-cli.yaml").write_text(
+        VERIFY_DEF, encoding="utf-8")
+    assert run("start", "verify-cli", "--scope", "other") == 0
+    runtime.request_move("chk", "only a person may report this", by="other", outcome="ok",
+                         cwd=str(project), scope="other")
+    assert run("move", "--approve", "--scope", "other") == 0
+    out = capsys.readouterr().out
+    assert "reported chk as ok" in out
+    st = runtime.status(cwd=str(project), scope="other", tick=False)
+    assert [t["label"] for t in st["tasks"]] == ["next"]

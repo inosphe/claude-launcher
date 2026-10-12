@@ -492,7 +492,18 @@ unchanged; these are the parts that differ.
    the web dashboard). Present the question and your recommendation, then
    end your turn; you are nudged when it is answered. Waits fire on the
    daemon's clock; do not poll them.
-5. **A person may move the run while you are stopped** (`claunch cflow2
+5. **A task you cannot report the normal way is a request too.** When
+   only a person may report a task's result (a forced report: your own
+   report is refused, or the result is theirs to decide), do NOT write
+   the user a `claunch cflow2 report ...` line to type. File
+   `flow_request_move {node: <the task's instance>, outcome, value, reason}`
+   with the evidence in `reason` (the verify's `last_verify` tail, the
+   command you ran and its exit code), then stop and write the brief. The
+   person answers from the run page (Report / Refuse), the terminal strip
+   or `claunch cflow2 move --approve|--deny`. The task's `verify` still
+   runs on their grant: a verify that fails on the work itself is fixed,
+   not asked past.
+6. **A person may move the run while you are stopped** (`claunch cflow2
    move <node>`, which also supersedes a pending request of yours). After
    any nudge, `flow_status` is the current truth, even if it puts you back
    on a task you already finished.

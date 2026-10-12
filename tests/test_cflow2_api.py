@@ -913,3 +913,29 @@ def test_the_person_answers_the_drivers_move_request(proj):
     status, payload = out["approve"]
     assert status == 200 and [t["label"] for t in payload["tasks"]] == ["c"]
     assert payload["move_request"]["decision"] == "approved"
+
+
+def test_the_person_grants_the_drivers_report_request(proj):
+    """A report request (flow_request_move with outcome, claunch-vwmoj): the
+    rail owes 'report: <task>' with the outcome on its answer row, and the
+    run page's Report press reports the task as the driver asked."""
+    cwd = str(proj)
+    (proj / ".claunch" / "workflows" / "v2" / "move.yaml").write_text(MOVE, encoding="utf-8")
+    runtime.start(layers.load("move", cwd), cwd=cwd, scope="s5", caps={})
+    task = runtime.status(cwd=cwd, scope="s5")["tasks"][0]["instance"]
+    runtime.report(task, cwd=cwd, scope="s5")  # a -> b
+    runtime.request_move("b", "only the user can count it", by="s5", cwd=cwd, scope="s5",
+                         outcome="ok", value={"n": 3})
+    rail = cflow2_web.rail_entry(cwd, "s5")
+
+    async def go(client, bearer):
+        resp = await client.post("/api/cflow2/move/resolve", headers=bearer,
+                                 json={"cwd": cwd, "scope": "s5", "decision": "approve"})
+        return resp.status, await resp.json()
+
+    status, payload = _http(go)
+    assert "report: B" in rail["owed"]
+    row = [a for a in rail["answers"] if a["kind"] == "move"][0]
+    assert row["report"] is True and row["outcome"] == "ok"
+    assert status == 200 and payload["move_request"]["decision"] == "approved"
+    assert [t["label"] for t in payload["tasks"]] == ["c"]

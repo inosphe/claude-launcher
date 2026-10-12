@@ -753,7 +753,8 @@ def rail_entry(cwd: str, scope: str) -> Optional[dict]:
     if move is not None:
         # The driver asked a person to move the run (flow_request_move): the
         # driver is held until somebody answers, whatever the status says.
-        owed.append(f"move: {move.get('title') or move.get('label') or move.get('node')}")
+        what = "report" if move.get("kind") == runtime.MOVE_KIND_REPORT else "move"
+        owed.append(f"{what}: {move.get('title') or move.get('label') or move.get('node')}")
     answers = _rail_answers(str(st.cwd), st.scope, state) if owed else []
     return {
         "cwd": str(st.cwd),
@@ -799,13 +800,18 @@ def _rail_answers(cwd: str, scope: str, state: dict) -> List[dict]:
     move = runtime.pending_move(state)
     if move is not None:
         # First: while it is pending nothing else moves by the driver's hand.
+        report = move.get("kind") == runtime.MOVE_KIND_REPORT
+        asks = (f"asks you to report {move.get('label') or move.get('node')} as "
+                f"{move.get('outcome')}"
+                if report else
+                f"asks to move the run to {move.get('label') or move.get('node')}")
         out.append({
             "kind": "move", "request": move.get("id"), "node": move.get("node"),
             "label": move.get("title") or move.get("label") or move.get("node"),
             "by": move.get("by"), "reason": _rail_prompt(move.get("reason")),
             "from": move.get("from") or [],
-            "prompt": _rail_prompt(f"{move.get('by') or 'the driver'} asks to move the run "
-                                   f"to {move.get('label') or move.get('node')}: "
+            "report": report, "outcome": move.get("outcome"),
+            "prompt": _rail_prompt(f"{move.get('by') or 'the driver'} {asks}: "
                                    f"{move.get('reason') or ''}"),
         })
     for c in payload.get("choices") or []:

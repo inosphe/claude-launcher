@@ -281,6 +281,10 @@ def _print_status(payload: Dict[str, Any], as_json: bool) -> None:
         return
     for t in payload.get("tasks") or []:
         print(f"  task {t['instance']}: {t.get('title') or t.get('label')}")
+        last = t.get("last_verify") or {}
+        if last:
+            tail = (last.get("tail") or "").strip().splitlines()
+            print(f"    verify failed ({last.get('why')})" + (f": {tail[-1]}" if tail else ""))
     for c in payload.get("choices") or []:
         opts = ", ".join(o["name"] for o in c["options"])
         print(f"  choice {c['instance']} ({c['chooser']}): {opts}")
@@ -422,10 +426,17 @@ def _cmd_move(args: argparse.Namespace) -> int:
         payload = runtime.resolve_move("approve" if args.approve else "deny",
                                        reason=args.reason, cwd=os.getcwd(), scope=args.scope)
         req = payload.get("move_request") or {}
+        what = ("the report of" if req.get("kind") == runtime.MOVE_KIND_REPORT
+                else "the move to")
         if req.get("decision") == "denied":
-            print(f"refused the move to {req.get('label') or req.get('node')} "
+            print(f"refused {what} {req.get('label') or req.get('node')} "
                   f"({req.get('id')}); the driver reads the refusal on its next flow_status")
             _print_status(payload, False)
+            return 0
+        if req.get("kind") == runtime.MOVE_KIND_REPORT:
+            print(f"reported {req.get('label') or req.get('node')} as {req.get('outcome')} "
+                  f"({req.get('id')})")
+            _print_status(_after_verify(payload, args.scope), False)
             return 0
     elif not args.node:
         raise runtime.FlowError("name the node to move to, or answer the driver's request "
@@ -448,8 +459,24 @@ def _cmd_report(args: argparse.Namespace) -> int:
     text = "forced by a person" + (f": {args.reason}" if args.reason else "")
     payload = runtime.report(args.node, args.outcome, value, text, cwd=os.getcwd(),
                              scope=args.scope, by=runtime.CALLER_USER)
-    _print_status(payload, False)
+    _print_status(_after_verify(payload, args.scope), False)
     return 0
+
+
+def _after_verify(payload: Dict[str, Any], scope: Optional[str]) -> Dict[str, Any]:
+    """A report this command filed may have started the task's verify, which
+    runs in a thread of THIS process: wait for it before exiting, or it dies
+    with the process and the task sits in 'verifying' until the lost-verify
+    grace passes (s214, claunch-vwmoj). Returns the status after it."""
+    from .cflow2 import runtime
+
+    job = payload.get("verifying")
+    if not job:
+        return payload
+    print(f"verifying {job.get('task')} (up to {float(job.get('timeout') or 0):g}s) ...",
+          flush=True)
+    runtime.verify_join()
+    return runtime.status(cwd=os.getcwd(), scope=scope, tick=False)
 
 
 def _cmd_recur(args: argparse.Namespace) -> int:
