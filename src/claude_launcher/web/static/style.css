@@ -6972,3 +6972,9 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .sim-pane-list { list-style: none; margin: 8px 0; padding: 0; }
 .sim-pane-list li { padding: 6px 8px; border-bottom: 1px solid var(--sim-border); cursor: pointer; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
 .sim-pane-list li:hover, .sim-pane-list li:focus { background: #242d38; }
+
+/* Operation boundaries keep inputs, previews and execution together. */
+.ws-sync-operation { margin: 8px 0; padding: 10px; border: 1px solid #30363d; border-radius: 6px; min-width: 0; }
+.ws-sync-operation h5 { margin: 0 0 6px; font-size: 12px; }
+.ws-sync-operation-preview { min-width: 0; margin: 8px 0; }
+.ws-sync-section, .ws-sync-agent { min-width: 0; overflow-wrap: anywhere; }

@@ -56,18 +56,26 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
     assert.equal(await page.getByRole('button', { name: 'Delegate sync', exact: true }).isDisabled(), true);
     await page.getByLabel('Sync agent parent session').selectOption('parent');
     await page.getByRole('button', { name: 'Preview push prompt' }).click();
-    await page.locator('.ws-sync-agent pre').waitFor();
-    assert.match(await page.locator('.ws-sync-agent pre').innerText(), /Assignment: push master/);
+    await page.locator('.ws-sync-push pre').waitFor();
+    assert.match(await page.locator('.ws-sync-push pre').innerText(), /Assignment: push master/);
     await page.locator('#ws-sync-push-example').selectOption('work');
-    assert.equal(await page.locator('.ws-sync-agent pre').count(), 0, 'branch change hides old preview');
+    assert.equal(await page.locator('.ws-sync-push pre').count(), 0, 'branch change hides old preview');
     await page.getByRole('button', { name: 'Preview push prompt' }).click();
-    await page.locator('.ws-sync-agent pre').waitFor();
-    assert.match(await page.locator('.ws-sync-agent pre').innerText(), /Assignment: push work/);
+    await page.locator('.ws-sync-push pre').waitFor();
+    assert.match(await page.locator('.ws-sync-push pre').innerText(), /Assignment: push work/);
     await page.getByRole('button', { name: 'Preview sync prompt' }).click();
-    await page.waitForFunction(() => document.querySelector('.ws-sync-agent pre')?.textContent.includes('Assignment: sync'));
+    await page.waitForFunction(() => document.querySelector('.ws-sync-master pre')?.textContent.includes('Assignment: sync'));
+    assert.equal(await page.locator('.ws-sync-agent button').count(), 0, 'shared settings contain no operation previews');
+    assert.match(await page.locator('.ws-sync-push pre').innerText(), /Assignment: push work/, 'sync preview preserves push preview');
+    assert.equal(await page.locator('.ws-sync-pull .ws-sync-operation-preview').count(), 0);
+    await page.locator('.ws-sync-push input[type="checkbox"]').check();
+    assert.equal(await page.locator('.ws-sync-push pre').count(), 0, 'force change hides stale push preview');
+    assert.equal(await page.locator('.ws-sync-master pre').count(), 1, 'push inputs do not hide sync preview');
+    await page.getByRole('button', { name: 'Preview push prompt' }).click();
+    await page.locator('.ws-sync-push pre').waitFor();
     for (const width of [1440, 1024, 768, 390, 320]) {
       await page.setViewportSize({ width, height: 1100 });
-      const layout = await page.locator('.ws-sync-agent').evaluate(node => {
+      const layout = await page.locator('.ws-sync').evaluate(node => {
         const box = node.getBoundingClientRect();
         return { overflow: node.scrollWidth > node.clientWidth + 1,
           outside: [...node.querySelectorAll('select')].some(n => {
@@ -78,6 +86,13 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
       assert.deepEqual(layout, { overflow: false, outside: false }, `viewport ${width}`);
       assert.equal(await page.locator('.ws-sync-remotes').evaluate(n => n.scrollWidth > n.clientWidth + 1), false, `remote rows viewport ${width}`);
       assert.match(await page.locator('.ws-sync-remotes').innerText(), /Diverged[\s\S]*ahead 2 · behind 1/);
+    }
+    await mode.selectOption('commands');
+    assert.equal(await page.locator('.ws-sync-operation-preview button').count(), 0);
+    await mode.selectOption('agent');
+    if (process.env.CLAUNCH_SCRATCH) {
+      await page.setViewportSize({ width: 1024, height: 1400 });
+      await page.screenshot({ path: path.join(process.env.CLAUNCH_SCRATCH, 'reposync-layout.png'), fullPage: true });
     }
     await page.getByRole('button', { name: 'Delegate sync', exact: true }).click();
     await page.getByRole('link', { name: 'Assigned to agent sync-child' }).waitFor();

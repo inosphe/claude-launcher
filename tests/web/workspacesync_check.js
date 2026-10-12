@@ -124,7 +124,7 @@ vm.runInContext(
        "wsSyncRemoteComparisons", "wsSyncPanel", "wsSyncPullBody", "wsSyncShared", "wsSyncUnmerged",
        "wsPeerDistanceText", "wsSyncHistory", "wsHistoryApproval"].map(slice),
    ...["wsSyncAgentBody", "wsSyncAgentBlocked", "wsSyncAgentControls", "wsSyncPromptText",
-       "wsSyncPromptBody", "wsSyncPreviewPrompt"].map(slice),
+       "wsSyncPromptBody", "wsSyncPreviewPrompt", "wsSyncOperationPreview"].map(slice),
    "globalThis.__st = wsSyncSt;"].join("\n"),
   ctx);
 
@@ -470,11 +470,12 @@ async function tick() {
   await ctx.wsSyncPreviewPrompt("proj", "push");
   assert.equal(posts()[1].body.branch, st.pushBranch);
   st.pushBranch = "changed-branch";
-  nodes = walk(ctx.wsSyncPanel(W));
+  nodes = walk(ctx.wsSyncOperationPreview(st, "proj", "push"));
   assert.ok(!nodes.some((n) => n.tag === "pre" && n.text === prompt), "hide stale branch preview");
+  assert.ok(walk(ctx.wsSyncOperationPreview(st, "proj", "sync")).some((n) => n.tag === "pre" && n.text === prompt), "sync preview survives push input change");
   reply = () => ({ status: 409, body: { error: "Refresh the changed plan" } });
   await ctx.wsSyncPreviewPrompt("proj", "sync");
-  assert.equal(st.agentPreview.error, "Refresh the changed plan");
+  assert.equal(st.agentPreviews.sync.error, "Refresh the changed plan");
   delegated.agent.prompt = prompt + "\nconflict: file.txt";
   assert.ok(walk(ctx.wsSyncResult({ doc: delegated })).some((n) => n.tag === "pre" && n.text === delegated.agent.prompt));
   const remoteText = walk(ctx.wsSyncRemoteComparisons({remote_comparisons: [
