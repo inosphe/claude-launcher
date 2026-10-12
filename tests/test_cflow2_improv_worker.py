@@ -140,6 +140,80 @@ def _labels(chart) -> set:
     return {n.label for n in chart.nodes.values() if n.label}
 
 
+def _coding_item(tmp_path, monkeypatch, approval):
+    """Run the real item route, replacing only the implementation tasks."""
+    import json
+
+    from claude_launcher.cflow2 import frontend, inputs, runtime
+
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    doc = yaml.load(V2.read_text(encoding="utf-8"), Loader=frontend._Loader)
+    doc["body"] = [{"call": "item"}, {"call": "item"}]
+    doc.pop("spec", None)
+    for name in ("work", "test-skipped", "commit"):
+        doc["nodes"][name] = {"prompt": name}
+    chart = frontend.compile_text(json.dumps(doc, ensure_ascii=False),
+                                  resolve_include=layers.resolver())
+    chart = inputs.apply(chart, {} if approval is None else {
+        "require_coding_approval": approval,
+    })
+    kw = {"cwd": str(tmp_path), "scope": "coding", "now": 1.0}
+    return runtime.start(chart, caps={}, **kw), kw
+
+
+@pytest.mark.parametrize("approval", [None, False])
+def test_coding_approval_disabled_preserves_direct_work(tmp_path, monkeypatch, approval):
+    st, _ = _coding_item(tmp_path, monkeypatch, approval)
+    assert [t["label"] for t in st["tasks"]] == ["work"]
+    assert not st.get("asks")
+
+
+def test_coding_approval_requires_user_each_item_visit(tmp_path, monkeypatch):
+    from claude_launcher.cflow2 import runtime
+
+    st, kw = _coding_item(tmp_path, monkeypatch, True)
+    for visit in (1, 2):
+        [plan] = st["tasks"]
+        assert plan["label"] == "coding-plan"
+        brief = f"item {visit}: edit workflow and test true/false routing"
+        st = runtime.report(plan["instance"], "ok", {"brief": brief}, **kw)
+        assert not st["tasks"]
+        [ask] = st["asks"]
+        assert ask["label"] == "coding-approval"
+        assert brief in ask["prompt"]
+        with pytest.raises(runtime.FlowError, match="not yours to answer"):
+            runtime.approve(None, caller="agent", **kw)
+        with pytest.raises(runtime.FlowError):
+            runtime.report(ask["instance"], "ok", {}, **kw)
+        # Time alone must not release a human gate.
+        later = runtime.status(**{**kw, "now": 100000.0})
+        assert not later["tasks"] and later["asks"]
+        runtime.approve(None, reason="plan accepted", **kw)
+        st = runtime.status(**kw)
+        [gate] = st["tasks"]
+        assert gate["label"] == "coding-approval"
+        st = runtime.report(gate["instance"], "ok", {}, **kw)
+        [work] = st["tasks"]
+        assert work["label"] == "work"
+        st = runtime.report(work["instance"], "ok", {}, **kw)
+        st = runtime.select(st["choices"][0]["instance"], "skip", reason="fixture", **kw)
+        for label in ("test-skipped", "commit"):
+            [task] = st["tasks"]
+            assert task["label"] == label
+            st = runtime.report(task["instance"], "ok", {}, **kw)
+    assert st["status"] == "done"
+
+
+def test_coding_approval_is_a_false_by_default_boolean_and_human_only():
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    declaration = doc["inputs"]["require_coding_approval"]
+    assert declaration["type"] == "bool"  # shared form renders bool as checkbox
+    assert declaration["default"] is False
+    ask = doc["nodes"]["coding-approval"]["ask"]
+    assert ask["otherwise"] == "human"
+    assert "from" not in ask and "timeout" not in ask
+
+
 # -- compile and check -------------------------------------------------------
 
 
