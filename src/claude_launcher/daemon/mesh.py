@@ -1543,7 +1543,13 @@ class MeshManager:
             return False
         if not (self._is_local(mesh, ma) and self._is_local(mesh, mb)):
             return False
-        return self.manager.direct_kin(ma.session, mb.session)
+        return self._session_kin(ma.session, mb.session)
+
+    def _session_kin(self, a: str, b: str) -> bool:
+        """:meth:`SessionManager.direct_kin`, or False for a manager that has
+        no tree to ask (a test double)."""
+        direct_kin = getattr(self.manager, "direct_kin", None)
+        return bool(direct_kin and direct_kin(a, b))
 
     def _is_local(self, mesh: Mesh, member: Member) -> bool:
         """Whether ``member``'s session lives on THIS daemon.
@@ -3614,7 +3620,7 @@ class MeshManager:
         targets = [to] if isinstance(to, str) else list(to)
         kin = [
             t for t in targets
-            if t not in mesh.members and self.manager.direct_kin(me, t)
+            if t not in mesh.members and self._session_kin(me, t)
         ]
         if not kin:
             return to, []

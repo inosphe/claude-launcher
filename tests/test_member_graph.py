@@ -298,6 +298,9 @@ def test_an_isolated_members_broadcast_explains_itself(home, tmp_path):
         mgr = _manager()
         mm = MeshManager(mgr, root=tmp_path / "mesh")
         await _team(mm, mgr)
+        # A direct parent/child pair reaches each other over any cut
+        # (claunch-mz09h); an isolated member is one with no parent here.
+        mgr.detach("w1")
         await mm.isolate_member("team", "w1", keep=())
         with pytest.raises(MeshError) as exc:
             await mm.send("team", "w1", "*", "anyone?")
@@ -573,6 +576,9 @@ def test_cutting_an_edge_settles_the_debt_it_carried(home, tmp_path):
         assert len(mesh.owed("w1")) == 1
         assert _unanswered(mesh, "w1") is True
 
+        # A cut between a direct parent and child does not hold
+        # (claunch-mz09h); the pair is detached first so it can.
+        mgr.detach("w1")
         await mm.set_member_link("team", "lead", "w1", enabled=False)
         assert mesh.owed("w1") == []
         assert _unanswered(mesh, "w1") is False
