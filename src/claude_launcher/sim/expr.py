@@ -181,6 +181,34 @@ def eval_cond(c: Any, env: Env) -> Truth:
     raise ExprError(f"unknown condition: {canon(c)}")
 
 
+def eval_partial(c: Any, sm: Dict[str, Any]) -> Truth:
+    """Three-valued with only some machine states known: a test of a machine
+    in ``sm`` is decided, every other atom (other machines, variables,
+    prose) is UNKNOWN. Polarity and disjunction are kept, so a state under
+    ``not`` or one branch of ``any`` is not read as handled."""
+    if c is True:
+        return True
+    if not _is_obj(c):
+        return UNKNOWN
+    if "all" in c or "any" in c:
+        conj = "all" in c
+        unknown = False
+        for x in c.get("all", c.get("any")) or []:
+            t = eval_partial(x, sm)
+            if t is (not conj):
+                return not conj
+            if t == UNKNOWN:
+                unknown = True
+        return UNKNOWN if unknown else conj
+    if "not" in c:
+        t = eval_partial(c["not"], sm)
+        return t if t == UNKNOWN else (not t)
+    if "sm" in c and "is" in c and c["sm"] in sm:
+        want = c["is"] if isinstance(c["is"], list) else [c["is"]]
+        return sm[c["sm"]] in want
+    return UNKNOWN
+
+
 def atoms_of(c: Any, out: Optional[List[Any]] = None) -> List[Any]:
     """The atomic predicates of a condition (variable comparisons, machine
     tests, prose), each once. Guard predicates are the walk's abstraction:

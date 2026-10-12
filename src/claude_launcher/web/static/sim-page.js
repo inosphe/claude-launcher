@@ -384,10 +384,34 @@ function makeSimView({root: view, session = "", go}) {
     return box;
   }
 
+  // The map keeps two sources apart (claunch-efnbt.7): what the model text
+  // says per cell (rule, available: yes/maybe/no) and what the walk saw in
+  // the last round on this model (observed handled/unhandled counts).
+  const TRI = {yes: "있음", maybe: "조건부", no: "없음"};
+  const AVAIL = {yes: "가능", maybe: "조건부", no: "불가"};
+  function mapCell(c) {
+    if (!c) return ["none", ""];
+    if (c.available === "no") return ["na", "×"];
+    if (c.finding === "open") return ["gap", "!"];
+    if (c.finding === "question" || c.finding === "answered") return ["ask", "?"];
+    if (c.finding) return ["done", "–"];
+    const o = c.observed;
+    if (!o) return ["nodata", ""];
+    if (o.handled && o.unhandled) return ["mixed", "±"];
+    if (o.handled) return ["ok", "✓"];
+    if (o.unhandled) return ["gap", "!"];
+    return ["unseen", "·"];
+  }
   function renderMap(body) {
     if (!coverage) { body.append(node("p", "불러오는 중…", "sim-muted")); return; }
-    body.append(node("p", "칸 = 상태 기계의 상태 × 그 기계의 규칙이 받는 사건. 초록: 규칙 있음 · 빨강: 걸음이 도달했는데 규칙 없음(열림) · 노랑: 질문/답 · 회색: 제외·해결 · 빈칸: 아직 도달 안 함.", "sim-muted"));
-    const handled = new Set(coverage.handled || []);
+    body.append(node("p", "칸 = 상태 기계의 상태 × 그 기계의 규칙이 받는 사건. 색은 마지막 라운드의 관측입니다: ✓ 처리됨 · ! 규칙 없음(열린 발견) · ± 같은 칸에서 처리와 미처리가 모두 관측됨(변수에 따라 다름) · · 마지막 라운드에서 관측되지 않음(전체 실행에서 방문하지 않았다는 뜻은 아님) · ? 질문/답 · – 제외·해결 · × 사건 가용 조건이 이 상태에서 거짓(정적 평가). 테두리는 모델 문장 기준입니다: 실선 = 규칙 있음, 점선 = 조건부(다른 기계·변수에 따라 다름).", "sim-muted"));
+    const of = coverage.observed_from, n = coverage.counts || {};
+    if (!of) body.append(node("p", "관측 자료 없음: 칸별 관측을 기록하기 전의 실행입니다. 라운드를 한 번 돌리면 생깁니다.", "sim-warn"));
+    else if (!of.current) body.append(node("p", `라운드 ${of.round}의 관측은 모델이 바뀌기 전 것이라 표시하지 않습니다. 라운드를 다시 돌리면 갱신됩니다.`, "sim-warn"));
+    else body.append(node("p", `관측: 라운드 ${of.round} (모델 ${of.model_hash})`, "sim-muted"));
+    if (n.cells != null)
+      body.append(node("p", `전체 ${n.cells}칸 · 가용 후보(조건부 포함) ${n.candidates}칸 · 마지막 라운드 관측 ${n.observed}칸`, "sim-muted"));
+    const cells = coverage.cells || {};
     for (const g of coverage.grid || []) {
       const t = node("table", null, "sim-map");
       const hr = node("tr"); hr.append(node("th", g.machine));
@@ -397,10 +421,13 @@ function makeSimView({root: view, session = "", go}) {
         const tr = node("tr"); tr.append(node("th", st));
         for (const e of g.events) {
           const k = `${g.machine}\u0000${st}\u0000${e}`;
-          const gap = coverage.gaps?.[k];
-          const cls = handled.has(k) ? "ok" : gap === "open" ? "gap" : gap === "question" || gap === "answered" ? "ask" : gap ? "done" : "none";
-          const td = node("td", cls === "ok" ? "✓" : cls === "gap" ? "!" : cls === "ask" ? "?" : cls === "done" ? "–" : "", "sim-cell-" + cls);
-          td.title = `${st} × ${e}` + (gap ? ` (${STATUS_LABEL[gap] || gap})` : "");
+          const c = cells[k];
+          const [cls, mark] = mapCell(c);
+          const td = node("td", mark, "sim-cell-" + cls + (c && c.rule !== "no" ? " sim-rule-" + c.rule : ""));
+          const o = c?.observed;
+          td.title = `${st} × ${e}` + (c ? ` · 규칙 ${TRI[c.rule]} · 사건 ${AVAIL[c.available]} · 관측 ` +
+            (o ? `처리 ${o.handled} · 미처리 ${o.unhandled}` : "자료 없음") : "") +
+            (c?.finding ? ` · 발견 ${STATUS_LABEL[c.finding] || c.finding}` : "");
           tr.append(td);
         }
         t.append(tr);

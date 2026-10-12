@@ -189,3 +189,61 @@ def test_explore_ends_when_every_cell_is_stuck():
     # Regression: an empty model (or one with no events) used to loop forever.
     r = engine.explore(engine.prepare(M.empty()), seed=1, budget=2000, horizon=12)
     assert r["steps"] == 0 and [p["finding"]["kind"] for p in r["problems"]] == ["stuck"]
+
+
+def coverage_model():
+    """The map's cases (claunch-efnbt.7): handling stated only by
+    availability, polarity, disjunction, a variable that splits a cell."""
+    P = {"why": "test"}
+    return {
+        "machines": [{"id": "door", "states": ["closed", "open", "locked"], "initial": "closed"}],
+        "vars": [{"name": "keys", "init": 0, "domain": [0, 1]}],
+        "events": [{"name": "open", "kind": "actor", "available": {"not": {"sm": "door", "is": "locked"}}},
+                   *({"name": n, "kind": "actor"} for n in ("close", "lock", "unlock", "key_on", "key_off"))],
+        "rules": [
+            # no state in the guard: the event's availability says where it applies
+            {"id": "r.open", "on": {"event": "open"}, "do": [{"sm": "door", "to": "open"}], "provisional": P},
+            {"id": "r.close", "on": {"event": "close"}, "when": {"not": {"sm": "door", "is": "closed"}},
+             "do": [{"sm": "door", "to": "closed"}], "provisional": P},
+            {"id": "r.lock", "on": {"event": "lock"},
+             "when": {"all": [{"sm": "door", "is": "closed"}, {"var": "keys", "eq": 1}]},
+             "do": [{"sm": "door", "to": "locked"}], "provisional": P},
+            {"id": "r.unlock", "on": {"event": "unlock"},
+             "when": {"any": [{"sm": "door", "is": "locked"}, {"var": "keys", "eq": 1}]},
+             "do": [{"sm": "door", "to": "closed"}], "provisional": P},
+            {"id": "r.key_on", "on": {"event": "key_on"}, "do": [{"set": "keys", "value": 1}], "provisional": P},
+            {"id": "r.key_off", "on": {"event": "key_off"}, "do": [{"set": "keys", "value": 0}], "provisional": P},
+        ],
+        "invariants": [], "checkpoints": {},
+    }
+
+
+def test_static_cells_keep_polarity_disjunction_and_availability():
+    m = coverage_model()
+    assert not M.check_model(m), M.check_model(m)
+    s = engine.static_cells(engine.prepare(m))
+    cell = lambda st, ev: s[f"door\x00{st}\x00{ev}"]
+    # availability-only handling: the rule has no state guard
+    assert cell("closed", "open") == {"rule": "yes", "available": "yes"}
+    assert cell("locked", "open") == {"rule": "yes", "available": "no"}
+    # a state under not is not handled by that rule
+    assert cell("closed", "close")["rule"] == "no" and cell("open", "close")["rule"] == "yes"
+    # a variable in the guard: undecided, not green
+    assert cell("closed", "lock")["rule"] == "maybe" and cell("open", "lock")["rule"] == "no"
+    # one branch of any decides it where it is true, the other leaves it open
+    assert cell("locked", "unlock")["rule"] == "yes" and cell("closed", "unlock")["rule"] == "maybe"
+    cov = engine.coverage(engine.prepare(m), [])
+    assert "door\x00closed\x00close" not in cov["handled_cells"]
+    assert "door\x00locked\x00open" in cov["handled_cells"]
+
+
+def test_the_walk_observes_handled_unhandled_and_mixed_cells():
+    m = engine.prepare(coverage_model())
+    obs = engine.explore(m, seed=3, budget=3000, horizon=12)["observed"]
+    h, u = obs["door\x00closed\x00close"]
+    assert h == 0 and u > 0                      # reached, no rule: unhandled
+    h, u = obs["door\x00closed\x00open"]
+    assert h > 0 and u == 0                      # handled through availability alone
+    h, u = obs["door\x00closed\x00lock"]
+    assert h > 0 and u > 0                       # keys splits the cell: mixed, kept as both
+    assert "door\x00locked\x00open" not in obs   # not available there: never taken

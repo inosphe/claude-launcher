@@ -167,7 +167,31 @@ claunch sim runtime status       # 설치·최신 여부, 아니면 종료 코�
 - 상태는 Markov여야 한다. 다음 걸음이 과거 서술에 기대면 변수가 하나 모자란 것이다.
 - 모델 변경(`sim_patch`)은 검사를 통과하지 못하면 통째로 거절되고, 이유 목록을 돌려준다. `key`를 주면 같은
   키의 재제출은 한 번만 반영된다.
+- 시나리오가 아니라 업무 영역을 모델로 만든다. 업무 상태와 사용자 행동은 하나의 집합을 재사용하고, 시나리오 번호는
+  경로의 메타데이터(checkpoint 이름, 출처 인용)로 둔다. 시나리오마다 전용 단계·사건을 만들면 칸 지도 대부분이 빈다.
 - 식·효과 형식 전체는 `sim_guide` 도구가 돌려준다.
+
+## 칸 지도
+
+칸은 한 상태 기계의 상태 × 그 기계를 언급하는 규칙이 받는 사건이다(`GET /api/sims/<id>/coverage`, Sims 탭의
+「칸 지도」). 칸마다 두 출처를 따로 싣는다(claunch-efnbt.7).
+
+- 정적 판정(`cells[k].rule`, `cells[k].available`: `yes`|`maybe`|`no`): 그 기계의 상태만 고정하고 나머지 기계·변수·
+  `prose`는 모름으로 둔 3값 평가(`expr.eval_partial`). `rule`은 그 사건의 규칙 중 `when ∧ event.available`이 참인
+  것이 있으면 `yes`, 모름이면 `maybe`. `not`·`any` 아래의 원자도 극성대로 평가하므로 `{not: {sm, is: s}}`가 `s` 칸을
+  「규칙 있음」으로 만들지 않는다. 상태 조건이 `event.available`에만 있는 규칙도 셈에 들어간다. `available: no`
+  칸은 「가용하지 않음」(×)이다. 표본에서 안 나왔다는 이유로는 제외하지 않는다.
+- 관측(`cells[k].observed`: `{handled, unhandled}`): 마지막 라운드의 걸음이 그 칸에서 사건을 처리한 횟수와 처리하지
+  못한 횟수. `run_round`가 `coverage.json`(`round`, `at`, `model_hash`, `knobs`, `cells`)에 덮어쓴다. 누적하지
+  않는다. `observed_from.current`가 거짓이면(모델이 그 뒤 바뀜) 관측은 `null`로 내려가 처리 증거로 쓰이지 않는다.
+  `coverage.json`이 없는 과거 실행은 `observed_from: null`로 「관측 자료 없음」을 표시하고 복원하지 않는다.
+- 표시: ✓ 처리됨, ! 규칙 없음(열린 발견), ± 처리와 미처리가 모두 관측됨(변수에 따라 다름), · 마지막 라운드
+  미관측(전체 실행에서 방문하지 않았다는 뜻은 아님), ? 질문·답, – 제외·해결, × 가용하지 않음. 테두리는 정적
+  판정(실선 = 규칙 있음, 점선 = 조건부)이다. 한 번 처리되었다는 사실은 그 칸의 모든 변수 조합이 안전하다는
+  증명이 될 수 없다.
+- 분모: 전체 칸(`counts.cells`), 가용 후보(조건부 포함, `counts.candidates` = 정적 거짓만 뺀 칸), 마지막 라운드
+  관측 칸(`counts.observed`).
+- 기존 키 `grid`·`handled`·`gaps`는 유지한다. `handled`의 뜻은 「정적 판정 `rule: yes`」로 좁혀졌다.
 
 ## 설정
 

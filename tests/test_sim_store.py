@@ -358,3 +358,32 @@ def test_edit_proposals_are_checked_and_never_applied(env, tmp_path):
     assert st.configure(sim["id"], "s1", settings={"max_edits": 0})["settings"]["max_edits"] == 0
     with pytest.raises(S.SimError):
         st.configure(sim["id"], "s1", settings={"max_edits": -1})
+
+
+def test_coverage_separates_static_text_from_the_last_rounds_observation(env):
+    st, root, _ = env
+    sim = st.create(title="door", root=root, owner="s1", actor="s1")
+    st.patch_model(sim["id"], "s1", base_patch())
+    # Before any round: no observation file, which is not "unseen".
+    cov = st.coverage(sim["id"])
+    assert cov["observed_from"] is None
+    assert all(c["observed"] is None for c in cov["cells"].values())
+    st.run_round(sim["id"], "s1")
+    cov = st.coverage(sim["id"])
+    k = "door\x00closed\x00open"
+    assert cov["observed_from"]["current"] and cov["observed_from"]["round"] == 1
+    assert cov["cells"][k]["rule"] == "yes" and cov["cells"][k]["observed"]["handled"] > 0
+    gap = "door\x00open\x00open"
+    assert cov["cells"][gap]["observed"]["unhandled"] > 0 and cov["cells"][gap]["finding"] == "open"
+    assert cov["counts"]["cells"] == len(cov["cells"]) and cov["counts"]["candidates"] == len(cov["cells"])
+    assert 0 < cov["counts"]["observed"] <= cov["counts"]["cells"]
+    # The old keys stay for the existing reader.
+    assert k in cov["handled"] and cov["gaps"][gap] == "open"
+    # After a model change the last round no longer counts as evidence.
+    p = base_patch()
+    p["rules"].append({"id": "r.close", "on": {"event": "close"}, "when": {"sm": "door", "is": "open"},
+                       "do": [{"sm": "door", "to": "closed"}], "provisional": {"why": "symmetry"}})
+    st.patch_model(sim["id"], "s1", p)
+    cov = st.coverage(sim["id"])
+    assert cov["observed_from"]["current"] is False
+    assert all(c["observed"] is None for c in cov["cells"].values())
