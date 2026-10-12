@@ -412,6 +412,16 @@ def pool(*, session: str, mesh: str = "", cwd: Optional[str] = None) -> Pool:
             f"machine, so it can reach nobody — join one, or let the question "
             f"go to a human"
         )
+    if len(found) > 1 and not mesh:
+        # A spawned child also sits in a two-member parent channel (the
+        # spawner and itself). It is a reporting line, not a team to route a
+        # question through, so it does not count as a second choice — the
+        # same rule daemon/api.py and daemon/onboard.py apply when they pick
+        # a session's mesh. Only when every match is such a channel is there
+        # nothing to set aside.
+        teams = [info for info in found if not info.get("parent_channel")]
+        if teams:
+            found = teams
     if len(found) > 1:
         names = ", ".join(sorted(str(i.get("name")) for i in found))
         return Pool(
