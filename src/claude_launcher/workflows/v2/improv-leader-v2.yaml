@@ -43,6 +43,10 @@ collections:
 
 fragments:
   remote-mesh: |
+    먼저 대상 저장소의 PR-only 정책을 조회한다. 관리 대상이면 아래 ahead base
+    직접 push를 실행하지 않고 recovery PR과 지정 authority 검증을 준비한다.
+    로컬 갱신은 local-sync-manager에게 위임한다. 이 정책은 담당자 종료와
+    무관하게 유지되며 PR 연결 실패가 local fallback을 허용하지 않는다.
     ── 원격 메시(다른 머신의 워커) ──
     판별: `claunch mesh members`의 machine이 리더와 다른 멤버가 있으면 그
     워커와의 git 동작은 공통 원격(`<remote>`, 보통 origin)만 거친다. 상대
@@ -181,6 +185,18 @@ nodes:
   integrate:
     title: 배치 머지(PR 후보, 로컬 후보 --no-ff)
     prompt: |
+      ── 관리 대상 정책 우선 ──
+      먼저 repo_sync local_status 또는 claunch cflow2 pr-preflight로 대상 정책을
+      조회한다. pr_only=true이면 아래의 로컬 통합·직접 base push·PR 실패 시
+      local fallback·force_no_pr 경로는 사용할 수 없다. 정책 조회 실패도 보류다.
+      child 결과를 받는 stack도 등록된 protected target이면 PR만 허용한다.
+      지정된 target authority가 정확한 head/base와 독립 검증을 확인하고 PR을
+      통합한다. 권한이 명확하지 않으면 구체적인 계획으로 사용자 승인을 받는다.
+      manager는 로컬 복제만 맡으며 merge/push 권한을 받지 않는다.
+      원격 착지 증거와 각 host의 로컬 반영은 구분하고, 로컬 FF는 manager에게
+      요청한다. 한 host의 반영 실패로 PR을 다시 merge하지 않는다.
+      이하의 로컬 방식은 관리 대상이 아닌 경우에만 적용한다.
+
       머지는 통합 심사가 정한 대상 저장소에서 한다(이 런의 cwd가 아닐 수 있다).
       먼저 PR 후보를 아래 PR 절차(3–7: 리뷰 기록, --match-head-commit 머지, fetch
       뒤 확인, 로컬 master fast-forward)대로 머지한다. 그다음

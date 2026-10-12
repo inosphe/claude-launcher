@@ -765,6 +765,18 @@ steps:
         subagent다.
       otherwise: self
     instructions: |
+      ── 관리 대상 정책 우선 ──
+      먼저 repo_sync local_status 또는 claunch cflow2 pr-preflight로 대상 정책을
+      조회한다. pr_only=true이면 아래의 로컬 통합·직접 base push·PR 실패 시
+      local fallback·force_no_pr 경로는 사용할 수 없다. 정책 조회 실패도 보류다.
+      child 결과를 받는 stack도 등록된 protected target이면 PR만 허용한다.
+      지정된 target authority가 정확한 head/base와 독립 검증을 확인하고 PR을
+      통합한다. 권한이 명확하지 않으면 구체적인 계획으로 사용자 승인을 받는다.
+      manager는 로컬 복제만 맡으며 merge/push 권한을 받지 않는다.
+      원격 착지 증거와 각 host의 로컬 반영은 구분하고, 로컬 FF는 manager에게
+      요청한다. 한 host의 반영 실패로 PR을 다시 merge하지 않는다.
+      이하의 로컬 방식은 관리 대상이 아닌 경우에만 적용한다.
+
       지금 대기 중인 것을 통합한다 — 보통 브랜치 하나, 스윕이 도는 동안
       쌓였으면 여럿이다. 수를 채우려고 기다리지 않는다.
       머지 전에 수합 표를 워커 저널과 대조한다 — claunch cflow journal -t

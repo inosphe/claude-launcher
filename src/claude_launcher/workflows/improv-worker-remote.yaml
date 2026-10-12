@@ -65,6 +65,18 @@ steps:
   remote-setup:
     title: 원격 준비 (remote · gh · upstream)
     instructions: |
+      ── 관리 대상 정책 우선 ──
+      먼저 repo_sync local_status 또는 claunch cflow2 pr-preflight로 대상 정책을
+      조회한다. pr_only=true이면 아래의 로컬 통합·직접 base push·PR 실패 시
+      local fallback·force_no_pr 경로는 사용할 수 없다. 정책 조회 실패도 보류다.
+      child 결과를 받는 stack도 등록된 protected target이면 PR만 허용한다.
+      지정된 target authority가 정확한 head/base와 독립 검증을 확인하고 PR을
+      통합한다. 권한이 명확하지 않으면 구체적인 계획으로 사용자 승인을 받는다.
+      manager는 로컬 복제만 맡으며 merge/push 권한을 받지 않는다.
+      원격 착지 증거와 각 host의 로컬 반영은 구분하고, 로컬 FF는 manager에게
+      요청한다. 한 host의 반영 실패로 PR을 다시 merge하지 않는다.
+      이하의 로컬 방식은 관리 대상이 아닌 경우에만 적용한다.
+
       피처 브랜치는 만들어졌다. 이 회차의 착지 매체가 PR이므로, 착수 전에
       원격·클라이언트·통합 대상을 사실로 확정하고 보고에 남긴다. 아래 네
       값은 뒤 스텝(정렬·PR 생성·착지 확인)이 그대로 읽는다.
@@ -151,6 +163,18 @@ steps:
   pr-open:
     title: push · pull request (리뷰 통과 직후, 요청 직전)
     instructions: |
+      ── 관리 대상 정책 우선 ──
+      먼저 repo_sync local_status 또는 claunch cflow2 pr-preflight로 대상 정책을
+      조회한다. pr_only=true이면 아래의 로컬 통합·직접 base push·PR 실패 시
+      local fallback·force_no_pr 경로는 사용할 수 없다. 정책 조회 실패도 보류다.
+      child 결과를 받는 stack도 등록된 protected target이면 PR만 허용한다.
+      지정된 target authority가 정확한 head/base와 독립 검증을 확인하고 PR을
+      통합한다. 권한이 명확하지 않으면 구체적인 계획으로 사용자 승인을 받는다.
+      manager는 로컬 복제만 맡으며 merge/push 권한을 받지 않는다.
+      원격 착지 증거와 각 host의 로컬 반영은 구분하고, 로컬 FF는 manager에게
+      요청한다. 한 host의 반영 실패로 PR을 다시 merge하지 않는다.
+      이하의 로컬 방식은 관리 대상이 아닌 경우에만 적용한다.
+
       동료 리뷰가 통과했다. 리뷰어가 본 tip이 원격에 올라가고 PR이 그 tip을
       가리키게 한 뒤, 정본의 통합 요청 스텝으로 간다 — 이 스텝은 요청의
       매체(브랜치·PR)를 만들고, 요청 자체(in_review 전이·LANDING REQUEST

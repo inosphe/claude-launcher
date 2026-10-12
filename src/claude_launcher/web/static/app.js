@@ -28950,10 +28950,10 @@ function wsSyncPromptBody(st, kind) {
   const doc = st.doc || {};
   const plan = doc.plan;
   if (kind === "sync") return plan ? {
-    kind, remote: plan.remote, branch: plan.branch, local: plan.local, upstream: plan.upstream,
+    kind, agent_mode: st.agentMode === "on_failure" ? "on_failure" : "agent", remote: plan.remote, branch: plan.branch, local: plan.local, upstream: plan.upstream,
   } : null;
   const branch = st.pushBranch || (doc.branches || [])[0];
-  return branch ? { kind, branch, remote: plan && plan.remote, force_with_lease: !!st.force } : null;
+  return branch ? { kind, agent_mode: st.agentMode === "on_failure" ? "on_failure" : "agent", branch, remote: plan && plan.remote, force_with_lease: !!st.force } : null;
 }
 
 async function wsSyncPreviewPrompt(name, kind) {
@@ -29008,7 +29008,7 @@ function wsSyncAgentControls(st, name) {
     form.appendChild(parent);
     box.appendChild(el("p", "wf-note", st.agentMode === "agent"
       ? "Start a child agent in its own worktree to handle sync or push. It inherits the selected parent's settings."
-      : "Try the commands first. If execution fails, start a child agent to diagnose and resolve the failure."));
+      : "Try the commands first. On failure, start a recovery workflow that returns a tested candidate. Integration and publication require a separate approval."));
     box.appendChild(el("p", "wf-note", "Push approval still applies to the agent's final changes."));
   }
   box.appendChild(form);
@@ -29099,6 +29099,7 @@ function wsSyncPanel(w) {
 
   const remotes = Object.entries(doc.remotes || {});
   panel.appendChild(wsSyncAgentControls(st, w.name));
+  panel.appendChild(wsLocalSyncControls(w.name));
   panel.appendChild(el("div", "wf-note",
     "Remotes: " + (remotes.length
       ? remotes.map(([key, name]) => `${name} (${key})`).join(", ")
@@ -44384,3 +44385,94 @@ globalThis.GlossaryComposer?.mount({field: $("term-input-field"),
   session: () => currentName, resize: autogrowTermInput});
 
 boot();
+
+// Explicit per-repository policy and provisioning decisions. This service is
+// separate from the one-shot A/B execution choices above.
+function wsLocalSyncControls(name) {
+  const box = el("details", "ws-sync-agent");
+  box.appendChild(el("summary", null, "Local synchronization manager"));
+  let loaded = false;
+  let deliveryError = "";
+  const content = el("div", "ws-sync-form");
+  box.appendChild(content);
+  const endpoint = `/api/local-sync/workspaces/${encodeURIComponent(name)}`;
+  async function call(action, body) {
+    const resp = await api(`${endpoint}/${action}`, body === undefined ? {} : {
+      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body),
+    });
+    const doc = await resp.json();
+    if (!resp.ok) throw new Error(doc.error || `HTTP ${resp.status}`);
+    if (body !== undefined) deliveryError = doc.dispatch_error || "";
+    return doc;
+  }
+  function field(label, value = "") {
+    const wrap = el("label");
+    wrap.appendChild(document.createTextNode(label));
+    const input = el("input"); input.value = value;
+    wrap.appendChild(input); content.appendChild(wrap);
+    return input;
+  }
+  async function refresh() {
+    content.replaceChildren();
+    try {
+      const doc = await call("status");
+      if (deliveryError) content.appendChild(el("p", "wf-warning", `Saved, but manager notification failed: ${deliveryError}. Resolve the mesh connection and retry the request.`));
+      const reload = el("button", "wf-btn clear", "Refresh status");
+      reload.onclick = refresh;
+      content.appendChild(reload);
+      const p = doc.policy || {};
+      content.appendChild(el("p", "wf-note", p.integration_mode === "pr_only"
+        ? `PR-only policy active (revision ${p.revision}). Manager: ${doc.manager.session || "not assigned"}.`
+        : "Enable PR-only integration and choose the authority for this local repository."));
+      if (!p.revision) {
+        const remote = field("Remote", Object.keys(doc.remote_identities || {})[0] || "origin");
+        const branch = field("Protected branch", "master");
+        const mesh = field("Authority mesh");
+        const authority = field("Integration authority handle");
+        const revision = field("Shared authority revision");
+        content.appendChild(el("p", "wf-note", "Use the same authority binding on every host. Enabling blocks direct target pushes and local integration. Manager creation and PR merge need separate decisions."));
+        const enable = el("button", "wf-btn", "Enable PR-only policy");
+        enable.onclick = async () => {
+          try {
+            await call("configure", {revision: 0, targets: [{
+              remote_key: doc.remote_identities[remote.value], ref: `refs/heads/${branch.value}`,
+              mesh: mesh.value, authority: authority.value, authority_revision: revision.value,
+            }]}); await refresh();
+          } catch (err) { content.appendChild(el("p", "wf-warning", String(err.message || err))); }
+        };
+        content.appendChild(enable);
+      }
+      for (const row of doc.requests || []) {
+        const payload = JSON.parse(row.payload);
+        content.appendChild(el("p", null, `${row.id}: ${row.state} — ${payload.mesh} / ${payload.issue}`));
+        if (["complete", "cancelled"].includes(row.state)) continue;
+        content.appendChild(el("p", "wf-note", `Create a dedicated session in this workspace with role local-sync-manager and workflow local-sync-v2; use request ${row.id}, epoch ${doc.manager.epoch}. Connect it to request mesh ${payload.mesh}, then bind it below. Provisioning grants no publish or merge approval.`));
+        const plan = row.receipt ? JSON.parse(row.receipt) : {};
+        if (plan.checkout) {
+          content.appendChild(el("p", "wf-note", `Owner coordination required: ${plan.checkout}. Local fast-forward ${plan.old} → ${plan.upstream}. Confirm that this checkout's owners have released it. No publication is authorized.`));
+          const approve = el("button", "wf-btn", "Approve this checkout fast-forward");
+          approve.onclick = async () => { try {
+            await call("approve-checkout", {request_id: row.id, epoch: doc.manager.epoch, old: plan.old, new: plan.upstream, checkout_identity: plan.checkout_identity});
+            await refresh();
+          } catch (err) { content.appendChild(el("p", "wf-warning", String(err.message || err))); } };
+          content.appendChild(approve);
+        }
+        const session = field("Existing explicit manager session", doc.manager.session || "");
+        for (const [label, action, body] of [
+          ["Bind manager", "bind", () => ({request_id: row.id, session: session.value, epoch: doc.manager.epoch})],
+          ["Replace manager", "resolve", () => ({request_id: row.id, state: "replace_manager", epoch: doc.manager.epoch})],
+          ["Hold request", "resolve", () => ({request_id: row.id, state: "held"})],
+          ["Cancel request", "resolve", () => ({request_id: row.id, state: "cancelled"})],
+          ["Resume request", "resolve", () => ({request_id: row.id, state: "pending"})],
+        ]) {
+          const button = el("button", "wf-btn clear", label);
+          button.onclick = async () => { try { await call(action, body()); await refresh(); }
+            catch (err) { content.appendChild(el("p", "wf-warning", String(err.message || err))); } };
+          content.appendChild(button);
+        }
+      }
+    } catch (err) { content.appendChild(el("p", "wf-warning", String(err.message || err))); }
+  }
+  box.addEventListener("toggle", () => { if (box.open && !loaded) { loaded = true; refresh(); } });
+  return box;
+}

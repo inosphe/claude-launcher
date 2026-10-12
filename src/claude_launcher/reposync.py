@@ -502,6 +502,8 @@ def _move_branch(p: Plan, new: str, *, old: Optional[str] = None) -> None:
 
 
 def _push(p: Plan, sha: str) -> None:
+    from .local_sync import require_pr
+    require_pr(p.repo, p.remote, p.branch, "push")
     # never forced: a rejected push means the remote moved after the fetch
     git(p.repo, "push", "--quiet", p.remote, f"{sha}:refs/heads/{p.branch}")
 
@@ -511,6 +513,8 @@ def execute(p: Plan, *, scratch: str) -> Result:
     with nothing moved when the work cannot be finished whole."""
     if p.action == UP_TO_DATE:
         return Result(plan=p, new=p.local, pushed=False)
+    from .local_sync import require_pr
+    require_pr(p.repo, p.remote, p.branch, "generic sync")
     if p.action == FAST_FORWARD:
         _move_branch(p, p.upstream)
         return Result(plan=p, new=p.upstream, pushed=False)
@@ -576,6 +580,8 @@ def publish_branch(repo: str, remote: str, branch: str, machine: str, *,
     if not sha:
         raise SyncError(f"no local branch {branch!r}")
     target = shared_ref(machine, branch)
+    from .local_sync import require_pr
+    require_pr(repo, remote, target, "publish")
     args = ["push", "--quiet"]
     if force_with_lease:
         args.append(f"--force-with-lease=refs/heads/{target}")
@@ -587,6 +593,8 @@ def receive_branch(repo: str, remote: str, machine: str, branch: str) -> Tuple[s
     """Fetch ``<machine>/<branch>`` from the remote into the local branch of
     the same name, fast-forward only. Returns ``(local branch, sha)``."""
     target = shared_ref(machine, branch)
+    from .local_sync import require_pr
+    require_pr(repo, remote, target, "receive")
     # a tracking ref follows the remote even across its rewrites ("+"); the
     # fast-forward check below guards the local branch, which is the one
     # that can hold work

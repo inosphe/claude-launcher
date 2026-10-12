@@ -349,6 +349,11 @@ def push(cwd: str, remote: str, sha: str, branch: str, *, force: bool = False) -
     ``git push``: that reads the checkout's upstream, which is the session's
     own business."""
     branch = validate_branch(cwd, branch)
+    from .local_sync import require_pr, PolicyError
+    try:
+        require_pr(cwd, remote, branch, "PR branch publish")
+    except PolicyError as exc:
+        raise PrError("push", str(exc)) from None
     if not remote:
         raise PrError("push", "no remote chosen")
     argv = ["push"]
