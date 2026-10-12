@@ -753,6 +753,30 @@ TOOLS = [
         },
     },
     {
+        "name": "detach",
+        "description": (
+            "End the parent/child relation between a session you spawned (or "
+            "a descendant of one) and its parent: it becomes a root. A direct "
+            "parent and child may message each other whatever mesh or project "
+            "they are in; after a detach they are an ordinary pair, so the "
+            "private channel the daemon opened for them is cut. Its own "
+            "children stay under it. There is no re-attach tool."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session": {
+                    "type": "string",
+                    "description": (
+                        "the session to detach, as 'children' lists it (the "
+                        "session name, not its mesh handle)"
+                    ),
+                },
+            },
+            "required": ["session"],
+        },
+    },
+    {
         "name": "reparent",
         "description": (
             "Move a session you spawned (or a descendant of one) — with its "
@@ -1046,6 +1070,13 @@ def call_tool(name: str, args: dict) -> dict:
         return _client().post(f"/api/sessions/{_session()}/handoff", body)
     if name == "deep_think":
         return _deep_think(args)
+    if name == "detach":
+        child = str(args.get("session") or "")
+        if not child:
+            raise MeshMcpError("'session' is required")
+        return _client().post(
+            f"/api/sessions/{child}/detach", {"actor": _session()},
+        )
     if name == "reparent":
         child = str(args.get("session") or "")
         parent = str(args.get("parent") or "")

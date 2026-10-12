@@ -1405,6 +1405,50 @@ class SessionManager:
             "depth": self.depth(child),
         }
 
+    def direct_kin(self, a: str, b: str) -> bool:
+        """Whether sessions ``a`` and ``b`` are a direct parent/child pair,
+        either way round (claunch-mz09h).
+
+        One generation only: a grandparent is not kin here. This is the pair
+        the mesh lets talk regardless of mesh wiring, membership or project
+        (:meth:`MeshManager._kin_pair`), so it is read from the live tree on
+        every ask — a :meth:`detach` ends it at once.
+        """
+        if not a or not b or a == b:
+            return False
+        sa, sb = self._sessions.get(a), self._sessions.get(b)
+        if sa is None or sb is None:
+            return False
+        return sa.sdef.parent == b or sb.sdef.parent == a
+
+    def detach(self, child: str, *, actor: str = "") -> dict:
+        """Cut ``child`` loose from its parent: it becomes a root.
+
+        The inverse of nothing — there is no re-attach verb beyond
+        :meth:`reparent`, which an operator may still use, but nothing undoes
+        a detach by itself. The child's own subtree stays under it.
+
+        With an ``actor`` (an agent) the actor must command ``child`` — its
+        parent or an ancestor above it — exactly as for :meth:`reparent`;
+        a session cannot detach itself. An operator passes none.
+        """
+        target = self.get(child)
+        if actor and actor == child:
+            raise ManagerError(
+                f"session {child!r} cannot detach itself: a detach is done by "
+                "the session that commands it, or by an operator"
+            )
+        previous = target.sdef.parent
+        if not previous:
+            raise ManagerError(f"session {child!r} has no parent to detach from")
+        if actor:
+            self.require_commands(actor, child)
+        target.sdef = replace(target.sdef, parent=None)
+        self.events.record(target, "detach", "부모-자식 관계 해제",
+                           previous=previous, actor=actor or "operator")
+        self.persist()
+        return {"session": child, "previous": previous}
+
     def kill(self, name: str, *, force: bool = False) -> AnySession:
         """Kill a running session; leave an already-exited one alone.
 

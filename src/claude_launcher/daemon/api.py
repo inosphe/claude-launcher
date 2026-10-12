@@ -857,6 +857,7 @@ def build_app(
     r.add_post("/api/sessions/{name}/children", h_session_spawn)
     r.add_post("/api/sessions/{name}/children/{child}/kill", h_session_child_kill)
     r.add_post("/api/sessions/{name}/parent", h_session_reparent)
+    r.add_post("/api/sessions/{name}/detach", h_session_detach)
     r.add_post("/api/sessions/{name}/kill", h_session_kill)
     # A copy of this session's conversation to work in, and the way back
     # (daemon/handoff.py). The merge and the general handoff share a route:
@@ -8273,6 +8274,33 @@ async def h_session_reparent(request: web.Request) -> web.Response:
         return json_error(400, msg)
     mm = request.app.get("mesh")
     result["connected"] = await mm.link_lineage(child, parent) if mm else []
+    return json_response(result)
+
+
+async def h_session_detach(request: web.Request) -> web.Response:
+    """End a session's parent/child relation: it becomes a root
+    (claunch-mz09h).
+
+    :meth:`SessionManager.detach` holds the rules (an ``actor`` must command
+    the child; nobody detaches itself). Once the pair is no longer kin the
+    mesh stops letting them past a cut edge, and the private channel the
+    daemon opened for them is cut here; a team mesh both share keeps its own
+    wiring. There is no re-attach beyond the operator's reparent.
+    """
+    manager: SessionManager = request.app["manager"]
+    child = request.match_info["name"]
+    body = await _json_body(request)
+    try:
+        result = manager.detach(child, actor=str(body.get("actor") or ""))
+    except ManagerError as exc:
+        msg = str(exc)
+        if "no session named" in msg:
+            return json_error(404, msg)
+        if "does not command" in msg or "cannot detach itself" in msg:
+            return json_error(403, msg)
+        return json_error(400, msg)
+    mm = request.app.get("mesh")
+    result["cut"] = await mm.unlink_lineage(child, result["previous"]) if mm else []
     return json_response(result)
 
 

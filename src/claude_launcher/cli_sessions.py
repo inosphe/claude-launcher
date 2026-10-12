@@ -2743,6 +2743,24 @@ def _cmd_reparent(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_detach(args: argparse.Namespace) -> int:
+    """End a session's parent/child relation, as an operator (claunch-mz09h).
+
+    The agents' ``detach`` tool sends the same request with an ``actor``;
+    this command sends none, so it can detach any session that has a parent.
+    """
+    client = daemon_client.ensure_running()
+    try:
+        result = client.post(f"/api/sessions/{args.session}/detach", {})
+    except daemon_client.DaemonClientError as exc:
+        print(exc)
+        return 1
+    print(f"{result.get('session')}: detached from {result.get('previous')}, now a root")
+    for edge in result.get("cut") or []:
+        print(f"  mesh {edge['mesh']}: cut {edge['a']} <-> {edge['b']}")
+    return 0
+
+
 # --------------------------------------------------------------------------- #
 # parser wiring
 # --------------------------------------------------------------------------- #
@@ -3180,6 +3198,15 @@ def register(sub) -> None:
     p_reparent.add_argument("session", help="the session to move")
     p_reparent.add_argument("parent", help="its new parent")
     p_reparent.set_defaults(func=_cmd_reparent)
+
+    p_detach = sub.add_parser(
+        "detach",
+        help="end a session's parent/child relation: it becomes a root and "
+             "its former parent no longer reaches it past mesh wiring -- the "
+             "operator's form of the agents' 'detach' tool",
+    )
+    p_detach.add_argument("session", help="the child session to detach")
+    p_detach.set_defaults(func=_cmd_detach)
 
     p_ls = sub.add_parser("sessions", aliases=["lss"], help="list daemon-managed sessions")
     p_ls.add_argument(
