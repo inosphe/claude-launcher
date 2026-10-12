@@ -954,6 +954,7 @@ class SimStore:
             found: Dict[str, dict] = {}
             steps = cells = assumptions = 0
             tried: set = set()
+            observed: Dict[str, List[int]] = {}
             fired: Dict[str, int] = {}
             for cp in [None, *sorted(walk["checkpoints"])]:
                 r = engine.explore(walk, seed=st["seed"], budget=st["budget"], horizon=st["horizon"], checkpoint=cp)
@@ -961,6 +962,10 @@ class SimStore:
                 cells += r["cells"]
                 assumptions += r["assumptions"]
                 tried.update(r["tried"])
+                for k, (h, u) in r["observed"].items():
+                    o = observed.setdefault(k, [0, 0])
+                    o[0] += h
+                    o[1] += u
                 for k, v in r["fired"].items():
                     fired[k] = fired.get(k, 0) + v
                 for p in r["problems"]:
@@ -1005,6 +1010,11 @@ class SimStore:
                 "knobs": {k: st[k] for k in ("seed", "budget", "horizon")},
             }
             _append(self._dir(sim_id) / "rounds.jsonl", summary)
+            # What the walk saw, per cell, in this round only (overwritten
+            # each round): the map's evidence, valid for this model hash.
+            _write_json(self._dir(sim_id) / "coverage.json", {
+                "round": n, "at": summary["at"], "model_hash": summary["model"], "knobs": summary["knobs"],
+                "cells": {k: observed[k] for k in sorted(observed)}})
             if meta["state"] == "running":
                 meta["run_rounds"] = int(meta.get("run_rounds") or 0) + 1
                 if open_now == 0:
@@ -1034,9 +1044,26 @@ class SimStore:
                 if f.get("kind") == "unhandled" and f.get("machine"):
                     reached.add(f"{f['machine']}\x00{f['state']}\x00{f['event']}")
             cov = engine.coverage(walk, [])
-            return {"grid": cov["grid"], "handled": cov["handled_cells"],
-                    "gaps": {k: (ledger.get("unhandled|" + k.replace(chr(0), "|")) or {}).get("status", "open")
-                             for k in sorted(reached)}}
+            gaps = {k: (ledger.get("unhandled|" + k.replace(chr(0), "|")) or {}).get("status", "open")
+                    for k in sorted(reached)}
+            static = engine.static_cells(walk)
+            # The last round's observation, if it was made on this model.
+            # No file: a run from before observations were kept.
+            obs = _read_json(self._dir(sim_id) / "coverage.json", None)
+            current = bool(obs) and obs.get("model_hash") == model_hash(self.model(sim_id))
+            seen = (obs or {}).get("cells") or {}
+            cells = {}
+            for k, v in static.items():
+                h, u = seen.get(k, (0, 0))
+                cells[k] = {**v, "observed": {"handled": h, "unhandled": u} if current else None,
+                            "finding": gaps.get(k)}
+            return {"grid": cov["grid"], "handled": cov["handled_cells"], "gaps": gaps, "cells": cells,
+                    "observed_from": {"round": obs.get("round"), "at": obs.get("at"),
+                                      "model_hash": obs.get("model_hash"), "current": current} if obs else None,
+                    "counts": {"cells": len(cells),
+                               "candidates": sum(1 for v in cells.values() if v["available"] != "no"),
+                               "observed": sum(1 for v in cells.values()
+                                               if v["observed"] and (v["observed"]["handled"] or v["observed"]["unhandled"]))}}
 
     # -- findings ------------------------------------------------------------
 

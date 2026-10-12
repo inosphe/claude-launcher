@@ -47,8 +47,7 @@ async function api(raw, opts = {}) {
     : {stale: true, why: 'rule r.gone is no longer in the model'};
   else if (p.endsWith('/model')) result = {model: {machines: [{id: 'door', states: ['closed', 'open'], initial: 'closed'}], vars: [], events: [{name: 'open'}],
     rules: [{id: 'r.open', on: {event: 'open'}, do: [], source: [{ref: 'spec.md', quote: 'opens'}]}], invariants: [], checkpoints: {}}};
-  else if (p.endsWith('/coverage')) result = {grid: [{machine: 'door', states: ['closed', 'open'], events: ['open', 'close']}],
-    handled: ['door\u0000closed\u0000open'], gaps: {'door\u0000open\u0000open': 'open', 'door\u0000closed\u0000close': 'question'}};
+  else if (p.endsWith('/coverage')) result = coverage;
   else if (p === '/api/sims/sim-abc123' && method === 'GET') result = {sim, rounds: [{round: 1, at: 'x', by: 's1', new: 2, open: 2}], journal: [], owner_live: true};
   else if (p.endsWith('/start')) result = {result: {round: 2}, sim, notified: false, runner: 'sim-abc123-run1'};
   else if (p.endsWith('/nudge')) result = {nudged: true, to: 's1'};
@@ -70,6 +69,18 @@ const ctx = vm.createContext({document: {createElement: tag => new Element(tag),
   get activeElement() { return focused; }}, api, location: loc, URLSearchParams, setInterval: () => 1, clearInterval: () => {},
   confirm: () => true, console, encodeURIComponent});
 vm.runInContext(fs.readFileSync(path.join(__dirname, '../../src/claude_launcher/web/static/sim-page.js'), 'utf8'), ctx);
+// The map keeps static rule text and the last round's observation apart.
+const K = (st, e) => `door\u0000${st}\u0000${e}`;
+const cell = (rule, available, observed, finding = null) => ({rule, available, observed, finding});
+let coverage = {grid: [{machine: 'door', states: ['closed', 'open'], events: ['open', 'close', 'lock']}],
+  handled: [K('closed', 'open')], gaps: {[K('open', 'open')]: 'open', [K('closed', 'close')]: 'question'},
+  cells: {[K('closed', 'open')]: cell('yes', 'yes', {handled: 3, unhandled: 0}),
+          [K('open', 'open')]: cell('no', 'yes', {handled: 0, unhandled: 2}, 'open'),
+          [K('closed', 'close')]: cell('no', 'maybe', {handled: 0, unhandled: 0}, 'question'),
+          [K('open', 'close')]: cell('maybe', 'yes', {handled: 1, unhandled: 1}),
+          [K('closed', 'lock')]: cell('no', 'no', {handled: 0, unhandled: 0}),
+          [K('open', 'lock')]: cell('no', 'yes', {handled: 0, unhandled: 0})},
+  observed_from: {round: 1, at: 't', model_hash: 'abc', current: true}, counts: {cells: 6, candidates: 5, observed: 3}};
 function all(node = root) { return [node, ...node.children.flatMap(c => typeof c === 'object' ? all(c) : [])]; }
 const button = label => all().find(n => n.tag === 'button' && n.textContent === label);
 const labelled = label => all().find(n => n.attributes['aria-label'] === label);
@@ -143,9 +154,33 @@ async function settle() { for (let i = 0; i < 10; i++) await new Promise(resolve
   button('재생 닫기').onclick(); await settle();
   // Map and model tabs.
   ctx.SimPage.open('sim-abc123', 'map'); await settle();
-  assert(all().some(n => n.className === 'sim-cell-gap' && n.textContent === '!'));
-  assert(all().some(n => n.className === 'sim-cell-ok'));
-  assert(all().some(n => n.className === 'sim-cell-ask'));
+  const td = () => all().filter(n => n.tag === 'td');
+  const at = (i) => td()[i];   // row-major: closed×open, closed×close, closed×lock, open×open, ...
+  assert.strictEqual(at(0).className, 'sim-cell-ok sim-rule-yes');
+  assert.strictEqual(at(1).className, 'sim-cell-ask');
+  assert.strictEqual(at(2).className, 'sim-cell-na');
+  assert.strictEqual(at(2).textContent, '×');
+  assert.strictEqual(at(3).className, 'sim-cell-gap');
+  assert.strictEqual(at(3).textContent, '!');
+  assert.strictEqual(at(4).className, 'sim-cell-mixed sim-rule-maybe');
+  assert.strictEqual(at(5).className, 'sim-cell-unseen');
+  assert(at(0).title.includes('규칙 있음') && at(0).title.includes('처리 3'));
+  assert(at(1).title.includes('사건 조건부'));
+  assert(all().some(n => n.textContent === '전체 6칸 · 가용 후보(조건부 포함) 5칸 · 마지막 라운드 관측 3칸'));
+  assert(all().some(n => n.textContent.includes('전체 실행에서 방문하지 않았다는 뜻은 아님')));
+  assert(!all().some(n => n.textContent.includes('아직 도달 안 함')));
+  // An observation made on an older model is not shown as evidence.
+  const stale = (current) => {
+    coverage = {...coverage, observed_from: current === null ? null : {...coverage.observed_from, current},
+      cells: Object.fromEntries(Object.entries(coverage.cells).map(([k, v]) => [k, {...v, observed: null}]))};
+  };
+  stale(false); ctx.SimPage.open('sim-abc123', 'overview'); await settle(); ctx.SimPage.open('sim-abc123', 'map'); await settle();
+  assert(all().some(n => n.className === 'sim-warn' && n.textContent.includes('모델이 바뀌기 전')));
+  assert.strictEqual(at(0).className, 'sim-cell-nodata sim-rule-yes');
+  assert(at(0).title.includes('관측 자료 없음'));
+  stale(null); ctx.SimPage.open('sim-abc123', 'overview'); await settle(); ctx.SimPage.open('sim-abc123', 'map'); await settle();
+  assert(all().some(n => n.className === 'sim-warn' && n.textContent.startsWith('관측 자료 없음')));
+  assert.strictEqual(at(3).className, 'sim-cell-gap');   // the ledger still marks a raised finding
   ctx.SimPage.open('sim-abc123', 'model'); await settle();
   assert(all().some(n => n.className === 'sim-source' && n.textContent.includes('spec.md')));
   // Edit proposals: a diff, the quotes it would break, decide only while proposed.

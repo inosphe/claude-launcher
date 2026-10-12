@@ -47,6 +47,15 @@ Rules:
   provisional: {why}. Answers from the user use ref "user:<finding key>".
 - Keep the state Markov: anything the next step depends on is a machine or
   a variable, never history.
+- Model the domain, not the scenarios: reuse one set of business states
+  and user actions, and keep scenario numbers as metadata on the path (a
+  checkpoint name, a source quote), never as their own steps or events.
+  A model stitched from per-scenario states leaves most of the map empty.
+- The map (Sims tab) keeps two things apart per state x event cell: what the
+  model text says (rule yes/maybe/no, event available yes/maybe/no, judged
+  with every other machine and variable unknown) and what the last round
+  saw there (handled/unhandled counts). A rule whose state test lives only
+  in the event's available condition still counts.
 - Work gaps in batches (sim_gaps groups them by place). For big models,
   hand each batch to a subagent so this conversation stays small.
 - A gap that is intended or impossible: sim_resolve dismiss with the

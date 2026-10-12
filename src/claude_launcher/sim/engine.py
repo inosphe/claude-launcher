@@ -147,7 +147,10 @@ def step(model: dict, state: dict, event: str,
     count as false and are listed in ``unresolved``."""
     idx = index_of(model)
     s = M.clone_state(state)
-    res = {"state": s, "fired": [], "matched": [], "findings": [], "unresolved": [], "out_of_model": []}
+    # cells: what this step observed per (machine, state, event) -- handled
+    # or not -- for every event of the chain, emitted ones included.
+    res = {"state": s, "fired": [], "matched": [], "findings": [], "unresolved": [], "out_of_model": [],
+           "cells": []}
     queue: List[str] = []
     first = event
     if event == WAIT:
@@ -221,7 +224,11 @@ def step(model: dict, state: dict, event: str,
                                         "rules": [r["id"]], "detail": str(exc)})
 
         for m, evs in idx.events_of.items():
-            if ev not in evs or any(m in idx.machines_of[r["id"]] for r in matched):
+            if ev not in evs:
+                continue
+            handled = any(m in idx.machines_of[r["id"]] for r in matched)
+            res["cells"].append((f"{m}\x00{before[m]}\x00{ev}", handled))
+            if handled:
                 continue
             res["findings"].append({
                 "kind": "unhandled", "key": f"unhandled|{m}|{before[m]}|{ev}", "event": ev,
@@ -343,6 +350,7 @@ def explore(model: dict, seed: int = 1, budget: int = 2000, horizon: int = 12,
 
     problems: Dict[str, dict] = {}
     tried: Set[str] = set()
+    observed: Dict[str, List[int]] = {}   # cell -> [handled, unhandled]
     fired: Dict[str, int] = {}
     steps = assumptions = 0
 
@@ -406,6 +414,8 @@ def explore(model: dict, seed: int = 1, budget: int = 2000, horizon: int = 12,
             for m, evs in idx.events_of.items():
                 if ev in evs:
                     tried.add(f"{m}\x00{state['sm'][m]}\x00{ev}")
+            for key, handled in res["cells"]:
+                observed.setdefault(key, [0, 0])[0 if handled else 1] += 1
             path.append({"event": ev, "assume": dict(assume)} if assume else {"event": ev})
             for f in res["findings"]:
                 p = problems.get(f["key"])
@@ -418,7 +428,7 @@ def explore(model: dict, seed: int = 1, budget: int = 2000, horizon: int = 12,
             here = add_cell(state, path, prov, cell["inputs"])
 
     return {"cells": len(cells), "problems": list(problems.values()), "steps": steps,
-            "tried": sorted(tried), "assumptions": assumptions, "fired": fired}
+            "tried": sorted(tried), "assumptions": assumptions, "fired": fired, "observed": observed}
 
 
 class StaleWitness(Exception):
@@ -459,16 +469,48 @@ def reproduces(model: dict, w: dict, key: str) -> bool:
     return bool(r["steps"]) and any(f["key"] == key for f in r["steps"][-1]["findings"])
 
 
+def static_cells(model: dict) -> Dict[str, dict]:
+    """Per grid cell (machine, state, event), what the model text says with
+    only that machine's state fixed (expr.eval_partial):
+
+    * ``rule``: ``yes`` -- a rule for the event that concerns the machine
+      holds there; ``maybe`` -- one might (it depends on other machines,
+      variables or prose); ``no`` -- none can.
+    * ``available``: the event's ``available`` there -- ``yes``, ``maybe`` or
+      ``no``. ``no`` is the only ground for leaving a cell out.
+
+    Neither says the walk went there; that is the observation's job."""
+    idx = index_of(model)
+    word = {True: "yes", False: "no", expr.UNKNOWN: "maybe"}
+    out: Dict[str, dict] = {}
+    for m in model["machines"]:
+        for ev in sorted(idx.events_of.get(m["id"], ())):
+            decl = idx.event_decl.get(ev) or {}
+            for st in m["states"]:
+                known = {m["id"]: st}
+                avail = expr.eval_partial(decl["available"], known) if "available" in decl else True
+                rule = False
+                for r in idx.by_event.get(ev, []):
+                    if m["id"] not in idx.machines_of[r["id"]]:
+                        continue
+                    t = expr.eval_partial(r["when"], known) if "when" in r else True
+                    if t is True:
+                        rule = True
+                        break
+                    if t == expr.UNKNOWN:
+                        rule = expr.UNKNOWN
+                out[f"{m['id']}\x00{st}\x00{ev}"] = {"rule": word[rule], "available": word[avail]}
+    return out
+
+
 def coverage(model: dict, tried: List[str]) -> dict:
     """The (machine, state, event) grid: cells the rules address, how many
     the walk reached, and how many have a rule."""
     idx = index_of(model)
-    handled: Set[str] = set()
-    for r in (x for lst in idx.by_event.values() for x in lst):
-        for a in expr.atoms_of(r.get("when", True)):
-            if isinstance(a, dict) and "is" in a:
-                for st in (a["is"] if isinstance(a["is"], list) else [a["is"]]):
-                    handled.add(f"{a['sm']}\x00{st}\x00{r['on']['event']}")
+    # A rule that certainly holds there (static_cells), not any state named
+    # somewhere in a guard: a state under not or in one branch of any is not
+    # handled by that.
+    handled: Set[str] = {k for k, v in static_cells(model).items() if v["rule"] == "yes"}
     total = 0
     grid = []
     for m in model["machines"]:
