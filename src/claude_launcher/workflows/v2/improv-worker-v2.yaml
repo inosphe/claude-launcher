@@ -746,7 +746,7 @@ nodes:
       관리 정책이 없는 저장소에서만 로컬 착지로 진행한다. 관리 대상이 있거나
       정책을 읽을 수 없으면 PR 경로를 복구한다. 이 검사 실패를 승인으로 덮지 않는다.
     done_when: 저장소에 PR 전용 정책이 없음을 verifier가 확인했다
-    verify: [python3, -m, claude_launcher.local_sync, allow-local]
+    verify: [claunch, reposync, verify, allow-local]
     effects: [fs.read]
 
   remote-setup:

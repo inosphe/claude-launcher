@@ -34,7 +34,7 @@ nodes:
   checks:
     title: 후보 검사
     prompt: 관련 테스트를 실행하고 현재 tree의 결과, 미실행 검사를 기록한다.
-    verify: [python3, -m, claude_launcher.reposync_verify, candidate]
+    verify: [claunch, reposync, verify, candidate]
     effects: [test.run]
   review:
     title: 통합 후보 독립 검토

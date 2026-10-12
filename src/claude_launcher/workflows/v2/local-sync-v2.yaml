@@ -30,7 +30,7 @@ nodes:
       분기는 old tip 보존 후 needs_operator, 다른 소유자의 checkout은 owner 조정을
       요청한다. 네트워크 실패·무응답은 완료나 승인이 아니다. 대기 중 lock을 잡지 않는다.
     done_when: daemon이 검증한 complete 또는 needs_operator/held/cancelled 결과가 있다
-    verify: [python3, -m, claude_launcher.local_sync, receipt]
+    verify: [claunch, reposync, verify, receipt]
     effects: [fs.write]
   receipt:
     title: 요청 결과 전달

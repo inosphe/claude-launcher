@@ -281,3 +281,24 @@ def test_exact_fetch_ignores_tracking_refspec_that_excludes_target(world):
     assert result["new"] == new
     assert _git(world["a"], "rev-parse", "master") == new
     assert _git(world["a"], "for-each-ref", "--format=%(refname)", "refs/claunch/local-sync-fetch/") == ""
+
+
+def test_claunch_reposync_verify_allow_local(world, monkeypatch, capsys):
+    # The workflow verify line runs through claunch's own interpreter
+    # (claunch-pr46o): a bare python3 on PATH need not have the package.
+    from claude_launcher import cli
+    monkeypatch.chdir(world["a"])
+    assert cli.main(["reposync", "verify", "allow-local"]) == 0
+    setup(world)
+    assert cli.main(["reposync", "verify", "allow-local"]) == 1
+    assert "PR-only repository" in capsys.readouterr().err
+
+
+def test_packaged_verify_lines_do_not_name_a_bare_interpreter():
+    from pathlib import Path
+    import claude_launcher
+    root = Path(claude_launcher.__file__).parent / "workflows"
+    bad = [f"{p.relative_to(root)}:{n}" for p in sorted(root.rglob("*.yaml"))
+           for n, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1)
+           if "verify:" in line and "claude_launcher." in line]
+    assert bad == [], "use 'claunch reposync verify <check>': " + ", ".join(bad)
