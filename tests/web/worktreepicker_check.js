@@ -136,6 +136,7 @@ new Function(
    slice("cwdSplit"), slice("shortenPath"), slice("cwdShort"),
    slice("spawnParent"), slice("newSessionCwd"), slice("newWorktreeMode"),
    slice("worktreeTrunkBranch"), slice("syncWorktreeTrunkButton"),
+   slice("updateWorktreeOptions"),
    slice("renderWorktreeOptions"), slice("worktreeRowUsable"),
    `const PARENT_WORKTREE = "@parent";`,
    slice("worktreePathKey"), slice("worktreeParentOffer"),
@@ -588,6 +589,35 @@ async function main() {
   check("a child's Branch from leads with the parent's checkout",
         fromRows()[1],
         ["worktree w-alpha on w-alpha — parent's checkout (lead)", "w-alpha"]);
+
+  // Background refreshes must retain native option nodes while the operator
+  // is using the form, including when unrelated session fields change.
+  const pickers = [form.worktree_existing, form.worktree_session, form.worktree_from];
+  const before = pickers.map((sel) => sel.options.slice());
+  form.worktree_from.value = "w-beta";
+  await ctx.refresh();
+  check("unchanged poll preserves all option identities",
+        pickers.every((sel, i) => sel.options.length === before[i].length &&
+          sel.options.every((o, j) => o === before[i][j])), true);
+  check("unchanged poll preserves branch selection", form.worktree_from.value, "w-beta");
+
+  ctx.setSessions([
+    { name: "lead", status: "working", cwd: `${WT}/w-alpha`, task: "new task" },
+    { name: "s13", status: "exited", cwd: `${WT}/w-beta` },
+  ]);
+  await ctx.refresh();
+  check("session exit updates its label",
+        form.worktree_session.options.some((o) => o.label === "s13 — w-beta, exited"), true);
+  check("session exit leaves unchanged branch nodes in place",
+        form.worktree_from.options.every((o, j) => o === before[2][j]), true);
+  const afterExit = pickers.map((sel) => sel.options.slice());
+  ctx.setSessions([
+    { name: "lead", status: "idle", cwd: `${WT}/w-alpha`, task: "other task" },
+    { name: "s13", status: "exited", cwd: `${WT}/w-beta`, note: "updated" },
+  ]);
+  await ctx.refresh();
+  check("unrelated session updates retain option nodes",
+        pickers.every((sel, i) => sel.options.every((o, j) => o === afterExit[i][j])), true);
 
   if (failures) process.exit(1);
   console.log("worktreepicker_check: ok");
