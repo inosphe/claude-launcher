@@ -802,7 +802,7 @@ def _rail_answers(cwd: str, scope: str, state: dict) -> List[dict]:
         # First: while it is pending nothing else moves by the driver's hand.
         report = move.get("kind") == runtime.MOVE_KIND_REPORT
         asks = (f"asks you to report {move.get('label') or move.get('node')} as "
-                f"{move.get('outcome')}" + (" past its verify" if move.get("skip_verify") else "")
+                f"{move.get('outcome')}"
                 if report else
                 f"asks to move the run to {move.get('label') or move.get('node')}")
         out.append({
@@ -811,7 +811,6 @@ def _rail_answers(cwd: str, scope: str, state: dict) -> List[dict]:
             "by": move.get("by"), "reason": _rail_prompt(move.get("reason")),
             "from": move.get("from") or [],
             "report": report, "outcome": move.get("outcome"),
-            "skip_verify": bool(move.get("skip_verify")),
             "prompt": _rail_prompt(f"{move.get('by') or 'the driver'} {asks}: "
                                    f"{move.get('reason') or ''}"),
         })

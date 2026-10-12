@@ -936,6 +936,6 @@ def test_the_person_grants_the_drivers_report_request(proj):
     status, payload = _http(go)
     assert "report: B" in rail["owed"]
     row = [a for a in rail["answers"] if a["kind"] == "move"][0]
-    assert row["report"] is True and row["outcome"] == "ok" and not row["skip_verify"]
+    assert row["report"] is True and row["outcome"] == "ok"
     assert status == 200 and payload["move_request"]["decision"] == "approved"
     assert [t["label"] for t in payload["tasks"]] == ["c"]

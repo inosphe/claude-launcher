@@ -248,37 +248,34 @@ def _report_drv(tmp_path, runner):
 def test_a_report_request_holds_the_driver_and_carries_the_failed_verify(tmp_path):
     d = _report_drv(tmp_path, Runner(1))
     st = runtime.request_move("policy", "verify cannot import claude_launcher", by="s1",
-                              outcome="ok", skip_verify=True, **d.kw())
+                              outcome="ok", **d.kw())
     req = st["move_request"]
     assert req["kind"] == "report" and req["instance"].startswith("policy@")
-    assert req["outcome"] == "ok" and req["skip_verify"] is True
+    assert req["outcome"] == "ok" and "skip_verify" not in req
     assert req["last_verify"]["exit"] == 1
     assert st["next"].startswith("REPORT REQUESTED")
     assert [t["label"] for t in st["tasks"]] == ["policy"]  # nothing reported yet
     with pytest.raises(runtime.FlowError, match="a person to report 'policy'"):
         runtime.report("policy", "ok", None, **d.kw())
     ev = d.events("move_requested")[-1]
-    assert ev["kind"] == "report" and ev["outcome"] == "ok" and ev["skip_verify"] is True
+    assert ev["kind"] == "report" and ev["outcome"] == "ok"
 
 
-def test_granting_with_skip_verify_reports_past_the_verify(tmp_path):
+def test_a_granted_report_still_runs_the_verify_and_a_failure_keeps_the_task(tmp_path):
     runner = Runner(1)
     d = _report_drv(tmp_path, runner)
-    runtime.request_move("policy", "verify cannot run here", by="s1", outcome="ok",
-                         skip_verify=True, **d.kw())
+    runtime.request_move("policy", "verify cannot run here", by="s1", outcome="ok", **d.kw())
     st = runtime.resolve_move("approve", by="user", reason="checked by hand", **d.kw(),
                               verify_runner=runner)
-    runtime.verify_join()
-    assert len(runner.calls) == 1  # only the driver's own report ran it
     assert st["move_request"]["decision"] == "approved"
     assert "move_request" not in RunStore(d.cwd, d.scope).load_state()
-    assert [t["label"] for t in st["tasks"]] == ["work"]
-    assert d.events("verify_skipped")[-1]["by"] == "user"
-    rep = d.events("reported")[-1]
-    assert rep["by"] == "user" and "s1's request" in rep["text"]
+    runtime.verify_join()
+    assert len(runner.calls) == 2  # the driver's report, then the person's grant
+    st = runtime.status(cwd=d.cwd, scope=d.scope, now=T0, tick=False)
+    assert [t["label"] for t in st["tasks"]] == ["policy"]
 
 
-def test_granting_without_skip_verify_runs_the_verify(tmp_path):
+def test_granting_runs_the_verify(tmp_path):
     d = _report_drv(tmp_path, Runner(1))
     runtime.request_move("policy", "the import path is fixed now", by="s1", outcome="ok",
                          **d.kw())
@@ -288,7 +285,8 @@ def test_granting_without_skip_verify_runs_the_verify(tmp_path):
     runtime.verify_join()
     st = runtime.status(cwd=d.cwd, scope=d.scope, now=T0, tick=False)
     assert ok.calls and [t["label"] for t in st["tasks"]] == ["work"]
-    assert not d.events("verify_skipped")
+    rep = d.events("reported")[-1]
+    assert rep["by"] == "user" and "s1's request" in rep["text"]
 
 
 def test_a_report_request_is_checked_when_filed(tmp_path):
@@ -301,16 +299,13 @@ def test_a_report_request_is_checked_when_filed(tmp_path):
     runtime.verify_join()
     with pytest.raises(runtime.FlowError, match="refused"):
         runtime.request_move("work", "x", by="s1", outcome="ok", value={"n": "one"}, **d.kw())
-    with pytest.raises(runtime.FlowError, match="has none"):
-        runtime.request_move("work", "x", by="s1", outcome="ok", value={"n": 1},
-                             skip_verify=True, **d.kw())
     with pytest.raises(runtime.FlowError, match="give 'outcome' too"):
-        runtime.request_move("intake", "x", by="s1", skip_verify=True, **d.kw())
+        runtime.request_move("intake", "x", by="s1", value={"n": 1}, **d.kw())
 
 
 def test_refusing_a_report_request_releases_the_driver(tmp_path):
     d = _report_drv(tmp_path, Runner(1))
-    runtime.request_move("policy", "x", by="s1", outcome="ok", skip_verify=True, **d.kw())
+    runtime.request_move("policy", "x", by="s1", outcome="ok", **d.kw())
     st = runtime.resolve_move("deny", by="user", reason="fix the verify", **d.kw())
     assert st["move_request"]["decision"] == "denied"
     shown = runtime.status(cwd=d.cwd, scope=d.scope, now=T0, tick=False)

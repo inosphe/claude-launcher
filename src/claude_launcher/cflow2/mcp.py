@@ -323,8 +323,8 @@ TOOLS = [
             "is what this tool exists to replace. With 'outcome' it asks for the other "
             "thing only a person may do: report one of your ACTIVE tasks ('node' is its "
             "instance id or label) with that outcome and 'value' -- e.g. a task whose "
-            "verify cannot run where the run stands. 'skip_verify: true' asks them to "
-            "report it past its verify. Use this instead of writing the user a "
+            "verify failed for a reason outside the work. The task's verify still runs "
+            "on their grant. Use this instead of writing the user a "
             "'claunch cflow2 report ...' line to type."
         ),
         "inputSchema": {
@@ -343,10 +343,6 @@ TOOLS = [
                                            "with this declared outcome instead of a move"},
                 "value": {"type": "object",
                           "description": "the outcome's fields (with 'outcome')"},
-                "skip_verify": {"type": "boolean",
-                                "description": "with outcome 'ok': ask the person to report "
-                                               "past the task's verify (say why it cannot "
-                                               "run, and what you ran instead)"},
                 "cancel": {"type": "boolean",
                            "description": "withdraw your pending request instead"},
                 "scope": _SCOPE, "cwd": _CWD, "side": _SIDE,
@@ -550,8 +546,7 @@ def _call(name: str, args: dict) -> Dict[str, Any]:
             outcome = str(outcome).strip()
         return runtime.request_move(node, str(args.get("reason") or ""), by=by,
                                     cwd=cwd, scope=scope, outcome=outcome,
-                                    value=args.get("value"),
-                                    skip_verify=bool(args.get("skip_verify")))
+                                    value=args.get("value"))
     if name == "flow_rule":
         cwd, scope = _where(args)
         return runtime.rule(str(args.get("name") or ""), cwd=cwd, scope=scope)

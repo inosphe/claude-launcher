@@ -1681,15 +1681,14 @@ s214: `local-landing-policy`의 verify가 `/usr/bin/python3`에서 `claude_launc
 찾지 못해 실패). 그 명령은 verify를 CLI 프로세스의 스레드에서 시작했고, CLI가 끝나면서
 verify가 사라져 작업이 `verifying`으로 남았다.
 
-- 요청: `flow_request_move {node, reason, outcome, value?, skip_verify?}`. `outcome`이
+- 요청: `flow_request_move {node, reason, outcome, value?}`. `outcome`이
   있으면 이동 요청 대신 결과 보고 요청이다(`runtime.request_move` → `_request_report`).
   `node`는 활성 작업의 인스턴스 id나 라벨이다. 결과는 요청할 때 작업의 `returns`로
   검사한다. `move_request`에 `kind: report`, `instance`, `outcome`, `value`,
-  `skip_verify`, 직전 verify 실패(`last_verify`)가 실린다. 이동 요청은 `kind: move`다.
+  직전 verify 실패(`last_verify`)가 실린다. 이동 요청은 `kind: move`다.
   두 종류는 같은 자리 하나를 쓰므로 새 요청은 앞 요청을 바꾼다.
-- `skip_verify: true`는 verify를 거치지 않고 보고해 달라는 요청이다. 결과가 `ok`이고
-  작업에 verify가 있을 때만 받는다. 승인되면 저널에 `verify_skipped`가 남는다. 이
-  표시가 없으면 승인한 보고도 verify를 거친다.
+- 승인한 보고도 verify를 거친다. verify 면제는 이 요청의 범위에서 제외한다(보드
+  claunch-vwmoj의 DECISION, 2026-10-12).
 - 대기·철회·거절은 이동 요청과 같다. 거절된 뒤 드라이버는 그 작업을 다시 보고할 수
   있다.
 - 승인: run 페이지의 Report 버튼, 터미널 띠의 Report 버튼, 또는
@@ -1701,7 +1700,7 @@ verify가 사라져 작업이 `verifying`으로 남았다.
   `move_superseded`의 `reported`).
 - 안내: 승인 뒤 런의 세션에 `NUDGE_CFLOW2_REPORT_APPROVED`가 타이핑된다. 레일의
   `owed`에는 `report: <작업>`으로 실리고, `answers`의 `kind: move` 행에
-  `report: true`, `outcome`, `skip_verify`가 붙는다.
+  `report: true`, `outcome`이 붙는다.
 - CLI의 `report`와 `move --approve`는 자기가 시작한 verify가 끝날 때까지 기다린 뒤
   종료한다(`cli_cflow2._after_verify`). verify는 그 명령을 실행한 프로세스의
   스레드에서 돌기 때문이다.
@@ -1936,7 +1935,7 @@ v1 툴과 이름이 겹치지 않도록 `flow_` 접두어를 쓴다.
 | `flow_asks` | 이 세션의 답을 기다리는 ask 목록 |
 | `flow_collection` | 컬렉션 조회와 연산(`action`: `list`, `push`, `set`, `remove`; `collection`, `key`, `item`, `fields`). 주체는 `driver`이고 `access`를 따른다(2.7) |
 | `flow_input` | 시작 뒤에 채우는 입력 쓰기(`name`, `value`). `set_by: [agent]`로 선언되고 비어 있는 입력만, 드라이버만(2.6) |
-| `flow_request_move` | `force_target` 노드로의 이동(`node`, `reason`) 또는 활성 작업의 결과 보고(`outcome`, `value`, `skip_verify`)를 사람에게 요청, 또는 철회(`cancel`). 아무것도 옮기지 않고, 답이 올 때까지 드라이버의 진행을 막는다(2.11) |
+| `flow_request_move` | `force_target` 노드로의 이동(`node`, `reason`) 또는 활성 작업의 결과 보고(`outcome`, `value`)를 사람에게 요청, 또는 철회(`cancel`). 아무것도 옮기지 않고, 답이 올 때까지 드라이버의 진행을 막는다(2.11) |
 
 런 중단(abort), 보관(archive), 강제 이동(move), 이동 요청에 대한 답, 사람의 강제 결과
 보고는 MCP 툴이 없다. 사람이 CLI나 웹 UI로 한다(2.11). 드라이버는 이동과 결과 보고를

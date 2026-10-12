@@ -3040,18 +3040,12 @@ def _check_report(r: Run, iid: str, outcome: str, value: Any) -> ir.Node:
 
 def _report_task(r: Run, iid: str, outcome: str, value: Any, text: Optional[str],
                  by: Optional[str], verify_runner: Optional[VerifyRunner],
-                 now: Optional[float], job: Dict[str, Any],
-                 skip_verify: bool = False) -> None:
+                 now: Optional[float], job: Dict[str, Any]) -> None:
     """Apply a report of the active task ``iid`` inside a mutation: an ``ok``
     of a task with ``verify`` starts the verify (``job`` is filled), any other
-    report completes the task at once. ``skip_verify`` is a person's grant of
-    a driver's request to report past the verify (``request_move`` with
-    ``skip_verify``); it is journaled as ``verify_skipped``."""
+    report completes the task at once."""
     n = _check_report(r, iid, outcome, value)
     spec = verify_spec(n) if outcome == ir.OUTCOME_OK else None
-    if spec and skip_verify:
-        r.emit("verify_skipped", node=n.id, instance=iid, by=by)
-        spec = None
     if spec:
         token = secrets.token_hex(4)
         r.inst[iid]["await"] = AW_VERIFY
@@ -4008,8 +4002,7 @@ def _require_no_move_request(r: Run) -> None:
 
 def request_move(target: str, reason: str, *, by: str, cwd: Optional[str] = None,
                  scope: Optional[str] = None, now: Optional[float] = None,
-                 outcome: Optional[str] = None, value: Any = None,
-                 skip_verify: bool = False) -> Dict[str, Any]:
+                 outcome: Optional[str] = None, value: Any = None) -> Dict[str, Any]:
     """The driver's side of an off-route move: ask a person to move the run
     to ``target`` -- a node the definition marks ``force_target`` -- and hold
     until they answer (docs 2.11). Moves nothing.
@@ -4030,14 +4023,13 @@ def request_move(target: str, reason: str, *, by: str, cwd: Optional[str] = None
     for the user to run. The result is checked against the task's
     ``returns`` now, so nobody is asked to grant a report the engine would
     refuse. The task's ``verify`` runs on the grant as it would on any
-    report, unless ``skip_verify`` asks the person to report past it (a
-    verify that cannot run where the run stands); the card says so."""
+    report -- a person's grant does not exempt the result from it."""
     if outcome is not None:
-        return _request_report(target, reason, outcome, value, skip_verify, by=by, cwd=cwd,
+        return _request_report(target, reason, outcome, value, by=by, cwd=cwd,
                                scope=scope, now=now)
-    if skip_verify or value is not None:
-        raise FlowError("'value' and 'skip_verify' belong to a report request: give "
-                        "'outcome' too (and name the active task in 'node')")
+    if value is not None:
+        raise FlowError("'value' belongs to a report request: give 'outcome' too (and "
+                        "name the active task in 'node')")
     note = (reason or "").strip()
     if not note:
         raise FlowError("'reason' is required: the person answering has not watched you "
@@ -4079,8 +4071,7 @@ def request_move(target: str, reason: str, *, by: str, cwd: Optional[str] = None
     return payload
 
 
-def _request_report(target: str, reason: str, outcome: str, value: Any, skip_verify: bool,
-                    *, by: str, cwd: Optional[str], scope: Optional[str],
+def _request_report(target: str, reason: str, outcome: str, value: Any, *, by: str, cwd: Optional[str], scope: Optional[str],
                     now: Optional[float]) -> Dict[str, Any]:
     """The report kind of :func:`request_move`: file a request that a person
     report the active task ``target``. Moves nothing and holds the driver
@@ -4099,23 +4090,19 @@ def _request_report(target: str, reason: str, outcome: str, value: Any, skip_ver
         _require_progress(r)
         iid = _task_for_report(r, target)
         n = _check_report(r, iid, outcome, value)
-        if skip_verify and not (outcome == ir.OUTCOME_OK and verify_spec(n)):
-            raise FlowError(f"'skip_verify' asks to report past a verify, and {n.label or n.id} "
-                            f"has none for outcome {outcome!r}")
         previous = pending_move(r.state)
         last = r.inst[iid]["frame"].get("last_verify") or None
         request = {
             "id": f"mr-{secrets.token_hex(3)}", "kind": MOVE_KIND_REPORT,
             "node": n.id, "instance": iid, "label": n.label or None,
             "title": n.get("title") or None, "outcome": outcome, "value": value,
-            "skip_verify": bool(skip_verify), "reason": note, "by": by,
+            "reason": note, "by": by,
             "from": [iid], "at": _iso(r.now),
             **({"last_verify": last} if last else {}),
         }
         r.state[MOVE_REQUEST] = request
         r.emit("move_requested", request=request["id"], kind=MOVE_KIND_REPORT, node=n.id,
                instance=iid, label=n.label or None, by=by, reason=note, outcome=outcome,
-               skip_verify=bool(skip_verify) or None,
                **({"replaces": previous.get("id")} if previous else {}))
         filed.update(request)
 
@@ -4125,10 +4112,8 @@ def _request_report(target: str, reason: str, outcome: str, value: Any, skip_ver
     payload["note"] = (
         "recorded; the run does not advance by your hand until a person answers. Stop your "
         "turn and write them the decision brief -- which task, the result you ask them to "
-        "report, why the normal report cannot carry it (the evidence), and"
-        + (" why its verify should not run" if skip_verify else
-           " that its verify still runs on the grant")
-        + ". They answer from the run page (Report / Refuse) or with 'claunch cflow2 move "
+        "report, why the normal report cannot carry it (the evidence), and that its verify "
+        "still runs on the grant. They answer from the run page (Report / Refuse) or with 'claunch cflow2 move "
         "--approve' / '--deny'")
     return payload
 
@@ -4189,7 +4174,7 @@ def resolve_move(decision: str, *, by: str = CALLER_USER, reason: Optional[str] 
                         f"request ({pending.get('id')}): {pending.get('reason')}"
                         + (f" -- {note}" if note else ""))
                 _report_task(r, iid, pending["outcome"], pending.get("value"), text, by,
-                             verify_runner, now, job, bool(pending.get("skip_verify")))
+                             verify_runner, now, job)
                 out.update(move_request={**pending, "decision": "approved"})
                 return
             r.emit("move_approved", request=pending.get("id"), node=pending.get("node"),

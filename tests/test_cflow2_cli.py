@@ -317,10 +317,10 @@ def test_cli_approve_grants_a_report_request(project, capsys):
     (project / ".claunch" / "workflows" / "v2" / "verify-cli.yaml").write_text(
         VERIFY_DEF, encoding="utf-8")
     assert run("start", "verify-cli", "--scope", "other") == 0
-    runtime.request_move("chk", "verify cannot run here", by="other", outcome="ok",
-                         skip_verify=True, cwd=str(project), scope="other")
+    runtime.request_move("chk", "only a person may report this", by="other", outcome="ok",
+                         cwd=str(project), scope="other")
     assert run("move", "--approve", "--scope", "other") == 0
     out = capsys.readouterr().out
-    assert "reported chk as ok" in out and "verify skipped" in out
+    assert "reported chk as ok" in out
     st = runtime.status(cwd=str(project), scope="other", tick=False)
     assert [t["label"] for t in st["tasks"]] == ["next"]

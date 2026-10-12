@@ -435,8 +435,7 @@ def _cmd_move(args: argparse.Namespace) -> int:
             return 0
         if req.get("kind") == runtime.MOVE_KIND_REPORT:
             print(f"reported {req.get('label') or req.get('node')} as {req.get('outcome')} "
-                  f"({req.get('id')}" + (", verify skipped" if req.get("skip_verify") else "")
-                  + ")")
+                  f"({req.get('id')})")
             _print_status(_after_verify(payload, args.scope), False)
             return 0
     elif not args.node:

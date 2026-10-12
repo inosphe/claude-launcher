@@ -178,8 +178,8 @@ def test_flow_request_move_with_outcome_asks_for_a_report(project):
     assert st["move_request"]["outcome"] == "ok"
     _, err = _call("flow_report", {"node": "intake"})
     assert err and "a person to report 'intake'" in err
-    _, err = _call("flow_request_move", {"node": "intake", "outcome": "ok",
-                                         "skip_verify": True, "reason": "x"})
-    assert err and "has none" in err
+    _, err = _call("flow_request_move", {"node": "intake", "value": {"a": 1},
+                                         "reason": "x"})
+    assert err and "give 'outcome' too" in err
     st, err = _call("flow_request_move", {"cancel": True})
     assert err is None and "move_request" not in st

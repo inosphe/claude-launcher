@@ -16692,10 +16692,9 @@ function termCflow2Answers(r, a) {
     // the driver's move request (flow_request_move): the run page's Move / Refuse
     // (a.report: the report kind -- report this task as a.outcome, claunch-vwmoj)
     const slot = { cwd: r.cwd, scope: r.scope };
-    const skip = a.skip_verify ? " (skip verify)" : "";
     return [
       {
-        label: a.report ? `Report '${a.outcome}'${skip}` : `Move to '${what}'`, cls: "approve",
+        label: a.report ? `Report '${a.outcome}'` : `Move to '${what}'`, cls: "approve",
         path: "/api/cflow2/move/resolve",
         body: { ...slot, decision: "approve", reason: "" },
         ask: (a.report
@@ -31560,19 +31559,16 @@ function renderCflow2Into(box, data, ui, force = false) {
       card.appendChild(el("p", "wf-note",
         `last verify failed (${lv.why || "?"})${tail ? ": " + tail : ""}`));
     }
-    card.appendChild(el("p", "wf-note", mr.skip_verify
-      ? "its verify will NOT run: the result applies as soon as you grant it"
-      : "its verify runs on the grant; a failure puts the task back with the output"));
+    card.appendChild(el("p", "wf-note",
+      "its verify runs on the grant; a failure puts the task back with the output"));
     const key = `${host}:move:${mr.id}`;
-    const grant = el("button", "wf-btn sm approve",
-      `Report '${mr.outcome}'${mr.skip_verify ? " (skip verify)" : ""}`);
+    const grant = el("button", "wf-btn sm approve", `Report '${mr.outcome}'`);
     const refuse = el("button", "wf-btn sm", "Refuse");
     refuse.title = "the task stays open; the driver reads your reason and continues";
     const { row, reason } = answerRow(key, [grant, refuse]);
     reason.placeholder = "reason (optional; the driver reads it)";
     grant.addEventListener("click", async () => {
-      if (!confirm(`Report '${target}' as '${mr.outcome}', as ${mr.by || "the driver"} asked?` +
-                   (mr.skip_verify ? "\n\nIts verify will not run." : ""))) return;
+      if (!confirm(`Report '${target}' as '${mr.outcome}', as ${mr.by || "the driver"} asked?`)) return;
       grant.disabled = true;
       delete cf2Drafts[key];
       await post("/api/cflow2/move/resolve", { decision: "approve", reason: reason.value.trim() });
