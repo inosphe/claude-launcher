@@ -338,16 +338,18 @@ def verify_receipt(repo: str, rid: str, epoch: int) -> None:
             raise PolicyError("receipt belongs to another manager generation")
 
 
-def main() -> int:
+def main(argv: list | None = None) -> int:
+    """Workflow verify entry: ``claunch reposync verify allow-local|receipt``."""
     import sys
+    argv = sys.argv[1:] if argv is None else argv
     try:
-        if sys.argv[1:] == ["allow-local"]:
+        if argv == ["allow-local"]:
             allow_local(os.getcwd())
-        elif sys.argv[1:] == ["receipt"]:
+        elif argv == ["receipt"]:
             active = json.loads(os.environ["CFLOW_DATA_ACTIVE"])
             verify_receipt(os.getcwd(), active["request_id"], active["epoch"])
         else:
-            print("usage: python -m claude_launcher.local_sync allow-local|receipt", file=sys.stderr)
+            print("usage: claunch reposync verify allow-local|receipt", file=sys.stderr)
             return 2
     except (reposync.SyncError, sqlite3.Error, ValueError, KeyError) as exc:
         print(str(exc), file=sys.stderr)

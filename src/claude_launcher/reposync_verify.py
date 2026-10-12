@@ -32,11 +32,13 @@ def candidate(cwd: str, assignment: dict) -> dict:
             "original": current}
 
 
-def main() -> int:
+def main(argv: list | None = None) -> int:
+    """Workflow verify entry: ``claunch reposync verify candidate``."""
+    argv = sys.argv[1:] if argv is None else argv
     try:
         inputs = json.loads(os.environ["CFLOW_DATA_INPUTS"])
         assignment = json.loads(inputs["assignment"])
-        if sys.argv[1:] != ["candidate"]:
+        if argv != ["candidate"]:
             raise ValueError("expected candidate")
         result = candidate(os.getcwd(), assignment)
         prepared = json.loads(os.environ.get("CFLOW_DATA_PREPARED", "{}"))

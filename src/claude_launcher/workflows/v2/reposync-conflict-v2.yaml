@@ -32,7 +32,7 @@ nodes:
       충돌 마커와 진행 중 rebase가 없는지 확인한다. 변경 범위 테스트를 실제로
       실행하고 명령·종료 코드·tree SHA를 기록한다. 전체 스윕 미실행은 명시한다.
       해결 불가이면 성공 보고하지 않고 fail로 보고한다.
-    verify: [python3, -m, claude_launcher.reposync_verify, candidate]
+    verify: [claunch, reposync, verify, candidate]
     done_when: 현재 후보 tree의 테스트 결과와 원래 ref 불변 증거가 기록되었다
     effects: [test.run]
   review:

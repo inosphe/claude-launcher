@@ -4,6 +4,7 @@
     claunch reposync master [WORKSPACE] [--remote R] [--branch B] [--dry-run] [--yes]
     claunch reposync branch push BRANCH [WORKSPACE] [--remote R] [--force-with-lease] [--yes]
     claunch reposync branch pull MACHINE BRANCH [WORKSPACE] [--remote R]
+    claunch reposync verify allow-local|receipt|candidate
 
 See :mod:`reposync` (git) and :mod:`reposync_flow` (peers, approval, board).
 """
@@ -296,3 +297,29 @@ def register(sub) -> None:
     bl.add_argument("branch")
     common(bl)
     bl.set_defaults(func=_guard(_cmd_branch_pull))
+
+    vf = rsub.add_parser(
+        "verify",
+        help="read-only workflow verify checks, run by the cflow engine from a "
+             "task's verify: line (exit 0 pass / 1 fail)",
+    )
+    vf.add_argument("check", choices=sorted(_VERIFY_CHECKS),
+                    help="allow-local: no PR-only policy here; receipt: the active "
+                         "sync request has a durable result; candidate: the isolated "
+                         "sync candidate still matches its plan")
+    vf.set_defaults(func=_cmd_verify)
+
+
+def _cmd_verify(args: argparse.Namespace) -> int:
+    # The checks live in their modules; this entry exists so a workflow's
+    # verify: runs them with claunch's own interpreter -- a bare python3 on
+    # PATH need not have claude_launcher installed.
+    from importlib import import_module
+    return import_module(_VERIFY_CHECKS[args.check]).main([args.check])
+
+
+_VERIFY_CHECKS = {
+    "allow-local": "claude_launcher.local_sync",
+    "receipt": "claude_launcher.local_sync",
+    "candidate": "claude_launcher.reposync_verify",
+}
