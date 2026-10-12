@@ -35489,18 +35489,20 @@ function sessHead(s) {
   const close = el("button", "sess-close", "×");
   close.title = "close details";
   close.addEventListener("click", closeDetail);
-  // "Spawn same setup": the spawn wizard under this session, filled with what
-  // it was itself created with (spawnSameSeed). Denied on the same state as
-  // the plain Spawn below, for the same reason.
+  // "Spawn same setup": the session wizard filled with what this session was
+  // itself created with (spawnSameSeed). It opens on the Child session tab
+  // under this session and keeps the New session tab beside it, so the same
+  // setup can be launched as a top-level session too (claunch-vg6bv). An
+  // exited session cannot be a parent, so it opens on the New session tab
+  // alone instead of being greyed.
   const same = el("button", "wf-btn", "Spawn same setup");
   same.title = s.status === "exited"
-    ? "an exited session cannot spawn children"
-    : "the spawn wizard with this session as the parent, filled with the "
-      + "role, mesh, workflow, task, worktree and prompt packs it was "
-      + "created with";
-  if (s.status === "exited") same.disabled = true;
-  same.addEventListener("click", () => openSpawnModal(s.name,
-    { seed: spawnSameSeed(s) }));
+    ? "the new session wizard, filled with the role, mesh, workflow, task, "
+      + "worktree and prompt packs this session was created with"
+    : "the session wizard filled with the role, mesh, workflow, task, "
+      + "worktree and prompt packs this session was created with -- as a "
+      + "child of this session or as a new top-level session";
+  same.addEventListener("click", () => openSpawnSame(s));
   // Docked beside its own terminal the head drops the verbs reachable from
   // elsewhere (the rail row's + is the plain Spawn; Open terminal would open
   // what is open). "Spawn same setup" has no other way in, so it stays
@@ -39250,8 +39252,10 @@ function sessionFormPayload(mode, body) {
 
 function createSessionFormView(mode, host, options = {}) {
   return {
-    mode, modes: host === "page" ? ["new", "spawn"] : [mode],
+    mode,
+    modes: host === "page" ? ["new", "spawn"] : (options.modes || [mode]),
     parent: options.parent || "", source: options.source || null,
+    newSeed: options.newSeed || null,
   };
 }
 
@@ -39571,7 +39575,39 @@ function setSessionModalTab(tab) {
   }
   renderSessionForm();
   if (want !== "fork") applySessionParentChange();
+  // The New session tab of "Spawn same setup": the directory a child would
+  // have inherited from its parent, written once, the first time the tab is
+  // opened (later visits keep what the operator picked there).
+  if (want === "new") spendSpawnSameDirectory(f, view);
+  // The box is sized per tab (child-spawn-open in the sheet).
+  if (sessionModal && !sessionModal.fork) {
+    const overlay = $("modal-overlay");
+    const box = overlay.querySelector(".modal-box");
+    spawnSizeRemember(box, sessionModal.child);
+    sessionModal.child = want === "spawn";
+    overlay.classList.toggle("child-spawn-open", sessionModal.child);
+    spawnSizeApply(box, sessionModal.child);
+  }
   renderSessionForm();
+  syncSessionModalChrome();
+}
+
+/* Point the Directory row at the held newSeed's `cwd`, matched the way
+   paths are compared elsewhere (worktreePathKey: slashes and case do not
+   count). The seed is spent only once the row offers that directory: the
+   workspace list can land after the tab is first shown, and openSessionModal
+   asks again once it has. */
+function spendSpawnSameDirectory(f, view) {
+  const seed = view && view.newSeed;
+  if (!seed || view.mode !== "new" || !f.cwd) return;
+  const key = worktreePathKey(seed.cwd);
+  const hit = key
+    && [...(f.cwd.options || [])].find((o) => worktreePathKey(o.value) === key);
+  if (!hit) return;
+  view.newSeed = null;
+  if (f.cwd.value === hit.value) return;
+  f.cwd.value = hit.value;
+  applySessionCwdChange();
 }
 
 /* Mode selects the fields; choosing or clearing a parent never changes it. */
@@ -39663,7 +39699,10 @@ async function openSessionModal(opts = {}) {
   const previousFields = Array.from(f.querySelectorAll("input[name], select[name], textarea[name]"))
     .map((control) => ({ control, value: control.value, checked: control.checked }));
   const st = { busy: false, previousView, previousFields };
-  f._sessionView = createSessionFormView(tab, "dialog", { parent, source: opts.source });
+  f._sessionView = createSessionFormView(tab, "dialog", {
+    parent, source: opts.source, newSeed: opts.newSeed,
+    modes: tab === "fork" ? null : opts.modes,
+  });
   sessionModal = st;
   // The page head says "New session" above a form that is now inside a box
   // with a title of its own, so it is the one part of the page the modal
@@ -39734,6 +39773,7 @@ async function openSessionModal(opts = {}) {
   // drop. The second pass is what makes a quick job's pickers survive the
   // arrival of the daemon's own option sets.
   if (opts.seed) applySessionModalSeed(f, opts.seed);
+  spendSpawnSameDirectory(f, f._sessionView);
   syncSessionModalChrome();
 }
 
@@ -39800,6 +39840,29 @@ async function openSpawnModal(parentName, opts = {}) {
   if (!parentName) return;
   await openSessionModal({ tab: "spawn", parent: parentName,
                            seed: (opts || {}).seed || null });
+}
+
+/* "Spawn same setup": the wizard with both tabs offered. The Child session
+   tab is pinned to `s`; the New session tab is the same seed plus the
+   directory, which a child inherits from `s` but a top-level session has to
+   be told (the repository `s` works in, its main checkout rather than the
+   launcher worktree `s` stands in -- the seed's worktree row asks for a
+   fresh one of those). */
+async function openSpawnSame(s) {
+  const seed = spawnSameSeed(s);
+  const newSeed = { cwd: spawnSameRoot(s.cwd) };
+  if (s.status === "exited") {
+    await openSessionModal({ tab: "new", seed, newSeed });
+    return;
+  }
+  await openSessionModal({ tab: "spawn", parent: s.name, seed,
+                           modes: ["spawn", "new"], newSeed });
+}
+
+/* The repository root a session's directory belongs to: its own path, less
+   a launcher worktree's `.claude/worktrees/<name>` tail. */
+function spawnSameRoot(cwd) {
+  return String(cwd || "").replace(/[\\/]\.claude[\\/]worktrees[\\/][^\\/]+[\\/]?$/, "");
 }
 
 /* The detail head's "Spawn same setup": what `s` was created with, as a seed

@@ -8,7 +8,9 @@
    What must hold:
 
    1. the head carries the button, it opens the spawn tab under THIS session
-      with spawnSameSeed's answer, and an exited session has it greyed;
+      with spawnSameSeed's answer and the New session tab beside it (with
+      the repository as the directory), and an exited session gets the New
+      session tab alone (claunch-vg6bv);
    2. spawnSameSeed carries the mesh and roles the session holds, the
       workflow its run follows (v2 marked), its task, whether it stands in a
       launcher worktree, and the prompt packs it was given by tick — and
@@ -56,10 +58,49 @@ const docked = head.slice(head.indexOf("if (mine && terminalOnScreen()"));
 check("...and kept when the panel is docked beside its own terminal (claunch-b6ril)",
       /^if \(mine && terminalOnScreen\(\) && !MOBILE_MQ\.matches\) \{\s*head\.appendChild\(same\);/
         .test(docked));
-check("...which opens the spawn wizard under this session with its own seed",
-      /openSpawnModal\(s\.name,\s*\{ seed: spawnSameSeed\(s\) \}\)/.test(head));
-check("...and is greyed on an exited session",
-      /if \(s\.status === "exited"\) same\.disabled = true;/.test(head));
+check("...which opens the wizard through openSpawnSame",
+      /same\.addEventListener\("click", \(\) => openSpawnSame\(s\)\)/.test(head));
+check("...and stays pressable on an exited session (it opens New session only)",
+      !/same\.disabled = true/.test(head));
+const opener = slice("openSpawnSame");
+check("openSpawnSame offers both tabs, Child session first, pinned to s (claunch-vg6bv)",
+      /tab: "spawn", parent: s\.name, seed,\s*modes: \["spawn", "new"\], newSeed/.test(opener));
+check("...an exited session opens on New session alone",
+      /s\.status === "exited"[\s\S]*tab: "new", seed, newSeed/.test(opener));
+check("the dialog view takes the modes it is given",
+      /options\.modes \|\| \[mode\]/.test(slice("createSessionFormView")));
+check("switching to New session spends the held directory",
+      /if \(want === "new"\) spendSpawnSameDirectory\(f, view\);/.test(slice("setSessionModalTab")));
+check("...and openSessionModal asks again once the workspace list has landed",
+      /spendSpawnSameDirectory\(f, f\._sessionView\);\s*syncSessionModalChrome\(\);\s*\}$/
+        .test(slice("openSessionModal")));
+{
+  const rctx = {};
+  vm.createContext(rctx);
+  vm.runInContext(slice("spawnSameRoot") + "\nthis.f = spawnSameRoot;", rctx);
+  check("the root of a launcher worktree is its repository",
+        rctx.f("F:\\works\\repo\\.claude\\worktrees\\wt-1") === "F:\\works\\repo"
+        && rctx.f("C:/r/.claude/worktrees/x/") === "C:/r");
+  check("...and a main checkout is itself", rctx.f("C:/repo") === "C:/repo");
+}
+{
+  const dctx = { calls: 0, applySessionCwdChange() { dctx.calls++; } };
+  vm.createContext(dctx);
+  vm.runInContext(slice("worktreePathKey") + "\n" + slice("spendSpawnSameDirectory")
+    + "\nthis.f = spendSpawnSameDirectory;", dctx);
+  const form = { cwd: { value: "D:/other", options: [] } };
+  const view = { mode: "new", newSeed: { cwd: "F:\\Works\\Repo" } };
+  dctx.f(form, view);
+  check("a directory the row does not offer yet is held", !!view.newSeed && dctx.calls === 0);
+  form.cwd.options = [{ value: "D:/other" }, { value: "f:/works/repo" }];
+  dctx.f(form, view);
+  check("...and written once it is offered, matched by path key",
+        form.cwd.value === "f:/works/repo" && view.newSeed === null && dctx.calls === 1);
+  const spawnView = { mode: "spawn", newSeed: { cwd: "f:/works/repo" } };
+  form.cwd.value = "D:/other";
+  dctx.f(form, spawnView);
+  check("...never on the Child session tab", form.cwd.value === "D:/other" && !!spawnView.newSeed);
+}
 
 /* ---- 2. the seed ------------------------------------------------------- */
 const ctx = {

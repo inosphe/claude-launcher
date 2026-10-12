@@ -348,6 +348,7 @@ function Option(label, value) {
   + slice("syncSessionModalTabStrip") + slice("syncSessionModalChrome")
   + slice("createSessionFormView") + slice("sessionFormConfig") + slice("sessionFormView") + slice("renderSessionForm")
   + slice("applySessionParentChange") + slice("openSessionModal")
+  + slice("spendSpawnSameDirectory") + slice("worktreePathKey")
   + slice("openNewSession")
   + slice("refreshScoreGoalDefault")
   + slice("sessionModalClose") + slice("openSpawnModal") + `
