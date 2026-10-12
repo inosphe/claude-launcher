@@ -20234,6 +20234,11 @@ function syncOnboardPickers() {
    row draws one field per input. Rebuilt -- so cleared -- whenever the pick
    changes; kept while the same workflow stays picked. */
 let newInputsFor = null;
+/* A seed's start-input values (applySessionModalSeed), held until a box that
+   can carry them is built. The pick that draws the box may not have arrived
+   yet when the seed lands, so the values park the same way the prompt packs
+   do; syncCflowInputs spends them on the first build that has fields. */
+let pendingSeedInputs = null;
 function syncCflowInputs() {
   const f = $("new-session");
   const box = $("new-inputs");
@@ -20246,7 +20251,9 @@ function syncCflowInputs() {
   box.innerHTML = "";
   box.classList.toggle("hidden", !fields.length);
   if (fields.length) {
-    cflowInputsForm(box, fields, entry.input_constraints || []);
+    const seeded = pendingSeedInputs;
+    if (seeded) pendingSeedInputs = null;
+    cflowInputsForm(box, fields, entry.input_constraints || [], seeded);
     cflowInputsLive(box, f.workflow.value, newSessionCwd);
     // TEMPORARY (claunch-z7b0n, v1 -> v2 migration): the daemon writes the
     // issue the Board answer settles into the run's `issue` input. The field
@@ -20404,7 +20411,13 @@ function cflowInputControl(field) {
     sel.className = "cf2-input-value";
     if (!field.required || field.default == null) sel.appendChild(new Option("(none)", ""));
     for (const c of field.choices || []) sel.appendChild(new Option(c, c));
-    sel.value = field.default == null ? "" : String(field.default);
+    const dv = field.default == null ? "" : String(field.default);
+    // A seeded value outside the choices stays visible rather than dropped
+    // by a silent select assignment; the start re-checks it either way.
+    if (dv && ![...sel.options].some((o) => o.value === dv)) {
+      sel.appendChild(new Option(dv, dv));
+    }
+    sel.value = dv;
     wrap.appendChild(sel);
   } else if (t === "list" || CFLOW_INPUT_CHECK_TYPES.includes(t)) {
     const rows = el("div", "cf2-input-rows");
@@ -20436,18 +20449,23 @@ function cflowInputControl(field) {
   return wrap;
 }
 
-function cflowInputsForm(box, fields, constraints) {
+function cflowInputsForm(box, fields, constraints, seeded) {
   box.appendChild(el("h4", "cf2-inputs-title", "Workflow variables"));
   box.appendChild(el("p", "wf-note", "Start inputs of this workflow (* = required)"));
   for (const field of fields) {
+    // A seeded value (Spawn same setup) stands in for the schema default:
+    // what the parent's run was launched with, for the operator to edit.
+    const field_ = seeded && Object.prototype.hasOwnProperty.call(seeded, field.name)
+      ? Object.assign({}, field, { default: seeded[field.name] })
+      : field;
     const row = el("div", "cf2-input");
-    row.dataset.input = field.name;
-    row.dataset.type = field.type || "string";
-    if (field.precheck) row.dataset.precheck = field.precheck;
+    row.dataset.input = field_.name;
+    row.dataset.type = field_.type || "string";
+    if (field_.precheck) row.dataset.precheck = field_.precheck;
     const label = el("label", "cf2-input-label",
-                     (field.label || field.name) + (field.required ? " *" : ""));
-    const control = cflowInputControl(field);
-    if (field.type === "bool") {
+                     (field_.label || field_.name) + (field_.required ? " *" : ""));
+    const control = cflowInputControl(field_);
+    if (field_.type === "bool") {
       label.classList.add("check");
       label.insertBefore(control, label.firstChild);
       row.appendChild(label);
@@ -20455,7 +20473,7 @@ function cflowInputsForm(box, fields, constraints) {
       row.appendChild(label);
       row.appendChild(control);
     }
-    if (field.help) row.appendChild(el("p", "wf-note cf2-input-help", field.help));
+    if (field_.help) row.appendChild(el("p", "wf-note cf2-input-help", field_.help));
     row.appendChild(el("p", "cf2-input-error hidden"));
     box.appendChild(row);
   }
@@ -37290,6 +37308,17 @@ function applySessionModalSeed(f, seed) {
     // must not come back over it on the next sync (see syncOnboardPickers).
     newWfPicked = true;
   }
+  // The seeded workflow's start inputs (claunch-76iqh): parked until the
+  // inputs box is built for the pick, then spent as the fields' defaults.
+  // The rebuild is forced — a box still standing from an earlier opening of
+  // this form would early-return syncCflowInputs and the seed would never
+  // land; at seed time nothing is typed in the box to lose.
+  if (seed.cflow_inputs !== undefined) {
+    pendingSeedInputs = seed.cflow_inputs && Object.keys(seed.cflow_inputs).length
+      ? seed.cflow_inputs : null;
+    newInputsFor = null;
+    if (typeof syncCflowInputs === "function") syncCflowInputs();
+  }
   if (seed.worktree !== undefined && f.worktree_mode) {
     f.worktree_mode.value = seed.worktree ? "new" : "";
     syncNewWorktree();
@@ -37679,6 +37708,7 @@ function sessionModalClose(opts = {}) {
   // the box: the next opening asks the recall again.
   pendingWorktreeMode = "";
   pendingSeedPacks = null;
+  pendingSeedInputs = null;
   $("new-session-actions").removeChild(sessionModal.cancelBtn);
   sessionModal = null;
   const overlay = $("modal-overlay");
@@ -37739,9 +37769,12 @@ async function openSpawnModal(parentName, opts = {}) {
    spawn asks afresh: the mesh and roles `s` holds, the workflow its run
    follows, the task it was opened with, whether it got a worktree of its
    own, and the prompt packs it was given by tick (a role's required pack
-   comes back with the role). Left out on purpose: the name and handle, which
-   are one session's, and the issue, which is `s`'s record -- the child gets
-   its own unless the task names one. */
+   comes back with the role). A v2 run's start inputs come over too
+   (cflow_inputs), so the workflow variables box is filled with what `s` was
+   launched with rather than the schema defaults. Left out on purpose: the
+   name and handle, which are one session's, and the issue -- both the spawn
+   field and the v2 start input of that name, which is `s`'s record; the
+   child gets its own unless the task names one (claunch-76iqh). */
 function spawnSameSeed(s) {
   const seed = { name: "" };
   const member = (typeof sessMeshes === "function"
@@ -37755,6 +37788,19 @@ function spawnSameSeed(s) {
   if (run && run.workflow) {
     seed.workflow = run.workflow;
     if (Number(run.version) === 2) seed.workflow_version = 2;
+  }
+  // A v2 run the v1 cache does not see (it lives in .cflow2, keyed by the
+  // session on its own rail poll): the workflow name and the start inputs
+  // come from here instead.
+  const run2 = (typeof cflow2RailCache === "object" && cflow2RailCache[s.name]) || null;
+  if (run2 && run2.workflow && !seed.workflow) {
+    seed.workflow = run2.workflow;
+    seed.workflow_version = 2;
+  }
+  if (run2 && run2.workflow && Number(run2.workflow_version || 2) === 2
+      && run2.inputs && typeof run2.inputs === "object") {
+    seed.cflow_inputs = Object.fromEntries(
+      Object.entries(run2.inputs).filter(([k]) => k !== "issue"));
   }
   if (s.task) seed.task = s.task;
   // A launcher worktree is a directory under <repo>/.claude/worktrees

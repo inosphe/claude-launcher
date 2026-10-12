@@ -63,7 +63,7 @@ check("...and is greyed on an exited session",
 
 /* ---- 2. the seed ------------------------------------------------------- */
 const ctx = {
-  meshes: {}, runs: {},
+  meshes: {}, runs: {}, cflow2RailCache: {},
   sessMeshes(name) { return ctx.meshes[name] || []; },
   sessCflowRun(name) { return ctx.runs[name] || null; },
 };
@@ -105,6 +105,95 @@ check("...no packs recorded seeds an empty tick list", eq(bare.prompt_packs, [])
 check("a directory that merely contains 'worktrees' is not a launcher worktree",
       ctx.spawnSameSeed({ name: "x", cwd: "/home/u/worktrees/a" }).worktree === false);
 
+/* ---- 2b. the v2 run's start inputs (claunch-76iqh) ---------------------- */
+/* A v2 run lives on its own rail poll (cflow2RailCache), which the v1 cache
+   does not see: the workflow comes from there when sessCflowRun is silent,
+   and the start inputs come with it -- minus the issue, which is `s`'s
+   record; the child settles its own on the Board. */
+ctx.cflow2RailCache.s9 = {
+  workflow: "improv-worker-v2", status: "running",
+  inputs: { goal: "carry the variables", issue: "claunch-parent",
+            relation: "stacked", scope: ["src/a"], max_rounds: 5 },
+};
+const seededInputs = ctx.spawnSameSeed({
+  name: "s9", cwd: "C:/repo", issue: "claunch-abc",
+});
+check("a v2 rail row's start inputs come over as cflow_inputs",
+      eq(seededInputs.cflow_inputs,
+         { goal: "carry the variables", relation: "stacked",
+           scope: ["src/a"], max_rounds: 5 }),
+      seededInputs.cflow_inputs);
+check("...the issue input does not (the child settles its own)",
+      !("issue" in (seededInputs.cflow_inputs || {})), seededInputs.cflow_inputs);
+
+ctx.cflow2RailCache.s11 = { workflow: "improv-worker-v2", status: "running",
+                            inputs: null };
+const fromRailOnly = ctx.spawnSameSeed({ name: "s11", cwd: "C:/repo" });
+check("a v2 run the v1 cache does not see still seeds the workflow",
+      fromRailOnly.workflow === "improv-worker-v2"
+      && fromRailOnly.workflow_version === 2, fromRailOnly);
+check("...a run with no inputs seeds none",
+      !("cflow_inputs" in fromRailOnly), fromRailOnly);
+
+/* ---- 2c. syncCflowInputs spends the parked seed ------------------------- */
+/* The box is built when the workflow pick's fields are on hand; the seed is
+   spent on that build, and only then -- a pick with no v2 fields leaves the
+   seed held, and a second build of the same pick does not re-spend it. */
+{
+  const classList2 = () => {
+    const set = new Set();
+    return { add: (c) => set.add(c), remove: (c) => set.delete(c),
+             contains: (c) => set.has(c),
+             toggle: (c, on) => { if (on === undefined ? !set.has(c) : on)
+               set.add(c); else set.delete(c); } };
+  };
+  const sctx = {
+    workflowsCache: [{ name: "improv-worker-v2", version: 2,
+      inputs: [{ name: "goal", type: "text", default: "" },
+               { name: "relation", type: "enum", choices: ["stacked"],
+                 default: "stacked" }] }],
+    newInputsFor: null, pendingSeedInputs: null,
+    newSessionCwd: () => "C:/repo",
+    cflowPickEntry: (v, cache) => cache.find((e) => e.name === v) || null,
+    cflowInputsLive() {},
+    el: (tag, cls, text) => ({ tag, className: cls || "", textContent: text,
+                               children: [], appendChild() {} }),
+  };
+  const forms = [];
+  sctx.forms = forms;
+  sctx.cflowInputsForm = (box, fields, constraints, seeded) => {
+    forms.push({ fields, seeded });
+  };
+  sctx.swf = { workflow: { value: "improv-worker-v2" } };
+  sctx.sbox = { innerHTML: "", hidden: true, classList: classList2(),
+                appendChild() {}, querySelector: () => null };
+  sctx.$ = (id) => (id === "new-session" ? sctx.swf : sctx.sbox);
+  vm.createContext(sctx);
+  vm.runInContext(slice("syncCflowInputs")
+    + "\nthis.sync = syncCflowInputs;"
+    + "\nthis.parked = () => pendingSeedInputs;"
+    + "\nthis.formSeeds = () => forms.map((f) => f.seeded);"
+    + "\nthis.pick = (v) => { swf.workflow.value = v; };", sctx);
+
+  sctx.pendingSeedInputs = { goal: "g" };
+  sctx.sync();
+  check("the box is built with the seeded values, and the seed is spent",
+        eq(sctx.formSeeds(), [{ goal: "g" }]) && sctx.parked() === null,
+        sctx.formSeeds());
+  sctx.pendingSeedInputs = { goal: "g2" };
+  sctx.sync();
+  check("the same pick again does not rebuild -- the seed stays held",
+        sctx.formSeeds().length === 1 && eq(sctx.parked(), { goal: "g2" }));
+  sctx.pick("");
+  sctx.sync();
+  check("a pick with no v2 fields builds nothing and holds the seed",
+        sctx.formSeeds().length === 1 && eq(sctx.parked(), { goal: "g2" }));
+  sctx.pick("improv-worker-v2");
+  sctx.sync();
+  check("the fields' return spends it", eq(sctx.formSeeds().length, 2)
+        && sctx.parked() === null);
+}
+
 /* ---- 3. applying it ---------------------------------------------------- */
 function select(values) {
   return {
@@ -117,6 +206,7 @@ const actx = {
   pendingNewMesh: "", newWfPicked: false, newSubroleTicks: new Set(),
   pendingSeedIssue: "", pendingSeedPacks: null, newPackOffer: null,
   newPackOfferFor: null, newPackTicks: new Map(), cwd: "C:/repo", renders: 0,
+  pendingSeedInputs: null, newInputsFor: null,
   workspacesCache: [],
   Option: function (label, value) { this.text = label; this.value = value; },
   renderRoleStance() {}, renderSubroles() { actx.renders++; },
@@ -131,7 +221,7 @@ vm.runInContext(
     .join("\n")
   + "\nthis.apply = applySessionModalSeed; this.applyPacks = applyPendingPackSeed;"
   + "\nthis.state = () => ({ pendingNewMesh, newWfPicked, newSubroleTicks,"
-  + " pendingSeedPacks, newPackTicks });"
+  + " pendingSeedPacks, newPackTicks, pendingSeedInputs });"
   + "\nthis.setOffer = (o, f) => { newPackOffer = o; newPackOfferFor = f; };",
   actx);
 // The slices read these as bare globals; vm keeps `let`-less names on ctx.
@@ -179,11 +269,28 @@ const f1 = { ...f, workflow: select(["", "improv-worker"]) };
 actx.apply(f1, { workflow: "improv-worker" });
 check("a v1 workflow is picked by its bare name", f1.workflow.value === "improv-worker");
 
+/* ---- 3b. the seeded start inputs are parked, not lost (claunch-76iqh) --- */
+/* The inputs box is built by syncCflowInputs when the workflow lists arrive,
+   so the seed holds the values until a box with fields exists -- the same
+   hold the pack ticks use. (This context has no syncCflowInputs: the guard
+   skips it, and the park is what is checked here.) */
+const f3 = { ...f, workflow: select(["", "improv-worker-v2", "v2:improv-worker-v2"]) };
+actx.apply(f3, { workflow: "improv-worker-v2", workflow_version: 2,
+                 cflow_inputs: { goal: "g", relation: "stacked" } });
+check("a seeded workflow's start inputs are parked for the inputs box",
+      eq(actx.state().pendingSeedInputs, { goal: "g", relation: "stacked" }),
+      actx.state().pendingSeedInputs);
+actx.apply(f3, { workflow: "improv-worker-v2", workflow_version: 2,
+                 cflow_inputs: {} });
+check("...an empty set parks nothing", actx.state().pendingSeedInputs === null);
+
 /* ---- the wiring around the modal --------------------------------------- */
 check("the offer's arrival applies a held seed",
       (slice("refreshPromptPackOffer").match(/applyPendingPackSeed\(\)/g) || []).length === 2);
 check("closing the modal drops a seed that never landed",
       slice("sessionModalClose").includes("pendingSeedPacks = null;"));
+check("...and a start-input seed with it",
+      slice("sessionModalClose").includes("pendingSeedInputs = null;"));
 
 if (failures) {
   console.log(`spawnsame_check: ${failures} failure(s)`);

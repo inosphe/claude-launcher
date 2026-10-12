@@ -768,6 +768,10 @@ def rail_entry(cwd: str, scope: str) -> Optional[dict]:
         "owed": owed,
         "gated": bool(owed),
         "answers": answers,
+        # The start inputs the run was launched with (runtime.status carries
+        # the same under "inputs"). "Spawn same setup" seeds a child's spawn
+        # form from this row, so the workflow's variables come over with it.
+        "inputs": (state.get("data") or {}).get("inputs"),
     }
 
 
