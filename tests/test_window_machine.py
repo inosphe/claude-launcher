@@ -469,3 +469,121 @@ def test_off_the_loop_the_lock_wait_is_the_long_one(tmp_path, monkeypatch):
         window_mod._unflock(holder)
         holder.close()
     assert elapsed >= 1.1
+
+
+# --------------------------------------------------------------------------- #
+# a decision taken without the lock (claunch-f1lk4)
+# --------------------------------------------------------------------------- #
+def _holder_ids(path) -> set:
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    return {h["grant_id"] for h in doc.get("holders") or []}
+
+
+def test_a_release_without_the_lock_does_not_overwrite_the_file(tmp_path, monkeypatch):
+    """While a peer holds the lock, this daemon's write would replace whatever
+    the peer saves under it; the release waits for the lock instead."""
+    main, kimyori = _pair(tmp_path)
+    path = main._state_path
+
+    async def grant():
+        return await main.acquire("targeted", session="a", pid=os.getpid())
+
+    mine = asyncio.run(grant())["grant_id"]
+    peer = open(main._lock_path, "a+b")
+    assert window_mod._try_flock(peer)
+    monkeypatch.setattr(window_mod, "LOCK_WAIT", 0.1)
+    try:
+        before = path.read_text(encoding="utf-8")
+        assert main.release(mine) is True
+        assert path.read_text(encoding="utf-8") == before
+        # This daemon's own view already has the release.
+        assert all(h["grant_id"] != mine for h in main.status()["holders"])
+    finally:
+        window_mod._unflock(peer)
+        peer.close()
+    main.status()
+    assert mine not in _holder_ids(path)
+
+
+def test_a_peer_grant_saved_meanwhile_survives_the_deferred_release(tmp_path, monkeypatch):
+    """The lost update itself: the peer read the file, then holds the lock
+    while this daemon releases; the peer then saves its read-modify-write.
+    Both decisions reach the file."""
+    main, _ = _pair(tmp_path)
+    path = main._state_path
+
+    async def grant():
+        return await main.acquire("targeted", session="a", pid=os.getpid())
+
+    mine = asyncio.run(grant())["grant_id"]
+    peer = open(main._lock_path, "a+b")
+    assert window_mod._try_flock(peer)
+    peer_view = json.loads(path.read_text(encoding="utf-8"))
+    monkeypatch.setattr(window_mod, "LOCK_WAIT", 0.1)
+    try:
+        assert main.release(mine) is True
+        # The peer's write under its lock: its view plus its own grant.
+        theirs = dict(peer_view["holders"][0], grant_id="peer00000001",
+                      session="k", instance="kimyori")
+        peer_view["holders"].append(theirs)
+        path.write_text(json.dumps(peer_view), encoding="utf-8")
+    finally:
+        window_mod._unflock(peer)
+        peer.close()
+    main.status()
+    theirs = "peer00000001"
+    ids = _holder_ids(path)
+    assert theirs in ids
+    assert mine not in ids
+
+
+def test_a_deferred_change_does_not_bring_back_a_grant_the_peer_released(
+    tmp_path, monkeypatch
+):
+    """An unlocked edit of a holder is re-applied only while the file still
+    has that holder: a release made under the lock meanwhile stays."""
+    main, _ = _pair(tmp_path)
+    path = main._state_path
+
+    async def grant():
+        return await main.acquire("targeted", session="a", pid=os.getpid())
+
+    mine = asyncio.run(grant())["grant_id"]
+    peer = open(main._lock_path, "a+b")
+    assert window_mod._try_flock(peer)
+    monkeypatch.setattr(window_mod, "LOCK_WAIT", 0.1)
+    try:
+        with main._locked():
+            main._holders[0]["label"] = "edited without the lock"
+            main._save()
+        peer_view = json.loads(path.read_text(encoding="utf-8"))
+        peer_view["holders"] = []
+        path.write_text(json.dumps(peer_view), encoding="utf-8")
+    finally:
+        window_mod._unflock(peer)
+        peer.close()
+    main.status()
+    assert mine not in _holder_ids(path)
+
+
+def test_a_grant_without_the_lock_reaches_the_file_once_the_lock_frees(tmp_path, monkeypatch):
+    main, kimyori = _pair(tmp_path)
+    path = main._state_path
+    peer = open(main._lock_path, "a+b")
+    assert window_mod._try_flock(peer)
+    monkeypatch.setattr(window_mod, "LOCK_WAIT", 0.1)
+
+    async def grant():
+        return await main.acquire("targeted", session="a", pid=os.getpid())
+
+    try:
+        mine = asyncio.run(grant())["grant_id"]
+        assert not path.exists() or mine not in _holder_ids(path)
+    finally:
+        window_mod._unflock(peer)
+        peer.close()
+    # Any locked operation, from either daemon side, carries it to the file.
+    assert any(h["grant_id"] == mine for h in kimyori.status()["holders"]) is False
+    main.status()
+    assert mine in _holder_ids(path)
+    assert any(h["grant_id"] == mine for h in kimyori.status()["holders"])
