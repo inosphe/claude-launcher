@@ -9581,6 +9581,52 @@ async def h_session_quick_fork(request: web.Request) -> web.Response:
     return json_response(out, status=201)
 
 
+def _quick_fork_run(workflow: str, version: int, *, parent: str, cwd: str) -> Tuple[str, int]:
+    """``(name, version)`` of the run a quick-fork is started on, for its
+    marker: ``("", 0)`` for none, version 0 when it cannot be told.
+
+    A "." is resolved the way the child's inheritance will resolve it -- the
+    origin is the copy's parent there -- so the marker can name the run
+    instead of leaving it out. Nothing here changes what is started; a
+    reading that fails only costs the marker its tool names.
+    """
+    if workflow == onboard.NO_WORKFLOW:
+        return "", 0
+    if workflow == ".":
+        try:
+            return onboard._paired(parent=parent, parent_cwd=cwd, cwd=cwd)
+        except Exception as exc:  # noqa: BLE001 - the marker only
+            log.debug("could not read %r's paired workflow: %s", parent, exc)
+            return "", 0
+    if version in (1, 2):
+        return workflow, version
+    try:
+        chosen = cflow2_web.choose(workflow, None, cwd=cwd, roots=(cwd,))
+    except Exception as exc:  # noqa: BLE001 - onboarding reports the real error
+        log.debug("could not tell %r's cflow version: %s", workflow, exc)
+        return workflow, 0
+    return workflow, 2 if chosen is not None else 1
+
+
+def _origin_run_name(origin: str, cwd: str) -> str:
+    """The workflow of the run ``origin`` drives in ``cwd`` (v2 first, then
+    v1), or "" -- named in the copy's marker so the copy can tell that run's
+    steps in the conversation it inherited from its own run's."""
+    if not cwd:
+        return ""
+    state = cflow2_web.live_run(cwd, origin)
+    if state:
+        return str(state.get("workflow") or "")
+    try:
+        status = cflow_engine.status(cwd, scope=origin)
+    except Exception as exc:  # noqa: BLE001 - the marker only
+        log.debug("no v1 run to read for %r: %s", origin, exc)
+        return ""
+    if not status or status.get("status") in ("idle", "done", "aborted"):
+        return ""
+    return str(status.get("workflow") or "")
+
+
 class QuickForkError(Exception):
     """A quick-fork that cannot be made, with the HTTP status it answers."""
 
@@ -9669,6 +9715,15 @@ async def stage_quick_fork(
         workflow_version = 0
     inherit_mesh = mesh == "."
     inherit_workflow = workflow == "."
+    # What the marker says about the run, which the spawn body does not
+    # settle: the name an inherited one resolves to (the same pair the
+    # child's inherit_workflow reads, the origin being its parent), the
+    # version whose tools drive it, and the origin's own run, which the copy
+    # must not mistake for its own (claunch-ychal).
+    marker_workflow, marker_version = _quick_fork_run(
+        workflow, workflow_version, parent=parent, cwd=str(origin.sdef.cwd or ""),
+    )
+    origin_workflow = _origin_run_name(parent, str(origin.sdef.cwd or ""))
     named_mesh = "" if mesh in (onboard.NO_MESH, ".") else mesh
     # The origin's role where the copy lands (or, with no mesh, its only one),
     # and the copy's own: asked for, or what the join will resolve its name to.
@@ -9691,9 +9746,10 @@ async def stage_quick_fork(
         # An inherited one the origin's roster could not name is not named
         # here: it is settled downstream, and the block would be guessing.
         mesh=named_mesh,
-        workflow="" if workflow in (onboard.NO_WORKFLOW, ".") else workflow,
+        workflow=marker_workflow,
         role=fork_role, origin_role=origin_role,
         sibling=sibling, placed_under=placed,
+        workflow_version=marker_version, origin_workflow=origin_workflow,
     )
     task = str(body.get("task") or "").strip()
     if task:

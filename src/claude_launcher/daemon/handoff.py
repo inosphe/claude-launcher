@@ -95,6 +95,7 @@ def compose_marker(
     mesh: str = "", workflow: str = "",
     role: str = "", origin_role: str = "",
     sibling: bool = False, placed_under: str = "",
+    workflow_version: int = 0, origin_workflow: str = "",
 ) -> str:
     """The block at the top of the copy: where the fork begins, and how it
     ends. Fenced like every other machine-generated block a session gets, so
@@ -122,7 +123,10 @@ def compose_marker(
 
     ``mesh`` and ``workflow`` are named only when the fork was given them.
     The copy joins neither by default, and a line about a mesh it is not in
-    would be a room it cannot send to.
+    would be a room it cannot send to. ``workflow_version`` (1, 2, or 0 when
+    unknown) picks the tool names the run is driven with, and
+    ``origin_workflow`` names the run the origin drives, if any -- see
+    :func:`_workflow_lines` for why both are spelled out.
     """
     lines = [
         "---",
@@ -193,12 +197,69 @@ def compose_marker(
             f"{origin}, and there is no roster here to send to."
         )
     if workflow:
-        lines.append(
-            f"workflow: you were started on the {workflow} cflow run, scoped "
-            f"to {fork}. Call the cflow 'status' tool to pick it up."
-        )
+        lines.extend(_workflow_lines(
+            origin=origin, fork=fork, workflow=workflow,
+            version=workflow_version, origin_workflow=origin_workflow,
+        ))
     lines.append("---")
     return "\n".join(lines)
+
+
+def _workflow_lines(
+    *, origin: str, fork: str, workflow: str, version: int, origin_workflow: str,
+) -> list:
+    """What the copy is told about the run it was started on.
+
+    One line naming the run was not enough (claunch-ychal). The copy reads
+    the origin's whole conversation first, and that conversation is usually
+    in the middle of the ORIGIN's run -- its steps, its gates, its reports.
+    s270-qf1 was started on improv-worker-v2 while s270 was a
+    sync-integrator; it called flow_status once, saw the run parked at
+    intake, and then did the opening task straight away, outside the run.
+    So the block says three things in as many words: the run is new and
+    starts at its first task, the origin's run (named when there is one)
+    is not this one, and the task typed below the block is taken in through
+    that first task -- with the tool names of the run's own version, since
+    a v2 run answers to flow_status and not to the v1 'status'.
+    """
+    if version == 2:
+        kind, look, report = "cflow v2", "the flow_status tool", "flow_report (flow_select for a choice)"
+    elif version == 1:
+        kind, look, report = "cflow", "the cflow 'status' tool", "the cflow 'report' and 'next' tools"
+    else:
+        kind = "cflow"
+        look = ("flow_status (a cflow v2 run) or the cflow 'status' tool (v1) "
+                "-- the 'run assigned at creation' block names which")
+        report = "that version's report tool"
+    if origin_workflow:
+        same = origin_workflow == workflow
+        theirs = (
+            f"{origin}'s own {origin_workflow} run stays with {origin}"
+            + (" -- the same workflow, but a separate run with its own position"
+               if same else " -- a different workflow from yours")
+            + ". Every workflow step, task, gate and report in the "
+            f"conversation above belongs to that run: it does not bind you, "
+            "and you do not continue it here."
+        )
+    else:
+        theirs = (
+            f"{origin} drove no run of this workflow: any workflow step, task "
+            "or gate in the conversation above is not this run's and does not "
+            "bind you."
+        )
+    return [
+        f"workflow: you were started on a NEW {workflow} run ({kind}), scoped "
+        f"to {fork}. It is this session's own run and it starts at its first "
+        "task with nothing done.",
+        f"origin run: {theirs}",
+        f"first: before reading for the task or editing a file, call {look} "
+        "and do the task it hands you. A task typed below this block is the "
+        "work this run carries: take it in through the run's first task (it "
+        "is that task's goal), then do each task the run hands out in turn and "
+        f"report it with {report}. Doing the task straight away, outside the "
+        "run, leaves the run parked at its first task while the work happens "
+        "somewhere it does not record.",
+    ]
 
 
 def compose_request(*, kind: str, source: str, target: str, marker: str = "") -> str:
