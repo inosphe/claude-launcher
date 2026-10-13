@@ -159,7 +159,7 @@ def test_a_held_nudge_and_its_window_reach_the_session_line(tmp_path):
     assert [(t["kind"], t["state"]) for t in out["timers"]] == [("window", "closed")]
     win = out["timers"][0]
     assert abs(win["due"] - (now + 480)) <= 1 and win["since"] == pytest.approx(win["due"] - 600)
-    assert win["link"].startswith("#/wf/s1%7C")
+    assert win["link"].startswith("#/wf/s1%40main%7C")  # the slot names its daemon
 
     # picking nudge inside the window holds it: the same line now says held
     runtime.select(None, "nudge", "no answer yet", **_kw(tmp_path, "s1", now - 60))

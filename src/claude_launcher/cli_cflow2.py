@@ -429,6 +429,31 @@ def _cmd_recover(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_slots(args: argparse.Namespace) -> int:
+    """The plan for this directory's run slots written before the daemon
+    qualifier (claunch-9jmdz): which daemon owns each and where it would move.
+    Read-only: the move is the owning daemon's, when it starts."""
+    from .cflow2 import slot_migration
+    from .daemon import cflow2_slots, paths
+
+    me = paths.instance_id()
+    report = slot_migration.migrate([args.cwd or os.getcwd()], me,
+                                    cflow2_slots.known_sessions(), apply=False)
+    doc = report.as_dict()
+    if args.json:
+        print(json.dumps(doc, ensure_ascii=False, indent=2))
+        return 0
+    if not report.entries:
+        print("no run slots without a daemon here")
+        return 0
+    for e in report.entries:
+        what = {slot_migration.MOVE: f"-> {e.target} (this daemon, @{me}, at its next start)",
+                slot_migration.OTHER: f"-> {e.target} (daemon {e.owner}, at its next start)",
+                slot_migration.LEAVE: "stays"}[e.action]
+        print(f"{e.slot} {what}: {e.why}")
+    return 0
+
+
 def _cmd_archive(args: argparse.Namespace) -> int:
     from .cflow2 import runtime
 
@@ -845,6 +870,13 @@ def register(sub) -> None:
     q.add_argument("--apply", action="store_true", help="operator-only: apply the inspected revision")
     q.add_argument("--revision", type=int, help="revision returned by the inspection")
     q.set_defaults(func=_guarded(_cmd_recover))
+
+    q = csub.add_parser("slots", help="read-only: which daemon owns each run slot here "
+                        "written before the daemon qualifier, and where it moves at that "
+                        "daemon's next start")
+    q.add_argument("--cwd", default=None, help="directory (default: here)")
+    q.add_argument("--json", action="store_true")
+    q.set_defaults(func=_guarded(_cmd_slots))
 
     q = scoped(csub.add_parser("journal", help="the run's event log"))
     q.add_argument("-n", type=int, default=None, help="last N events")

@@ -235,7 +235,7 @@ def test_a_subtree_with_a_choice_becomes_a_nested_run(tmp_path):
     d = Drv(tmp_path, NESTED, caps=SUBAGENT_CAPS, driver="drv")
     (dl,) = d.st["delegations"]
     nested = dl["nested"]
-    assert nested["scope"] == f"{SCOPE}~{dl['id']}"
+    assert nested["scope"] == f"{SCOPE}@main~{dl['id']}"
     assert "nested run" in dl["brief"]["submit"] and dl["brief"]["nested"] == nested
     # the delegate drives it with the normal tools, under the nested scope
     kw = {"cwd": nested["cwd"], "scope": nested["scope"], "now": T0}
