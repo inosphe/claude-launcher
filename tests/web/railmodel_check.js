@@ -117,6 +117,7 @@ function sessMigrate() { return el("div", "sess-migrate"); }
 /* The note editor, fixed like the rest: this harness is about the model row,
    and the note's own behaviour is railnote_check's subject. */
 function sessNote() { return el("div", "sess-note"); }
+function sessReminderNote() { return el("div", "sess-reminder-note"); }
 function rolePanels() { return []; }
 function sessBeads() { return el("div", "sess-beads"); }
 function sessCommits() { return el("div", "sess-commits"); }

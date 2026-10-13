@@ -33888,6 +33888,7 @@ let sessPermsBox = null;    // and the permissions toggle — same reason again
 let sessSandboxBox = null;  // and the sandbox toggle — same reason again
 let sessCompactBox = null;  // and the auto-compact form — it holds a typed threshold
 let sessNoteBox = null;     // and the note editor — it holds a half-typed note
+let sessReminderNoteBox = null;  // and the temporary-instructions editor, likewise
 let sessRunFold = null;   // reused across polls too: it holds open/shut
 let sessRunTimer = null;  // the fold's own poll, alive only while it is open
 let sessQuickJobBox = null; // the quick-job form — it holds a typed task
@@ -33917,6 +33918,7 @@ function dropDetail() {
   sessJournalBox = null;
   sessRunFold = null;
   sessNoteBox = null;
+  sessReminderNoteBox = null;
   $("sess-view").innerHTML = "";
   markDetailRow();
 }
@@ -33956,6 +33958,7 @@ function repointDetail(name) {
   sessJournalBox = null;
   sessRunFold = null;
   sessNoteBox = null;
+  sessReminderNoteBox = null;
   $("sess-view").innerHTML = "<p class='wf-note'>loading…</p>";
   markDetailRow();
   refreshSession();
@@ -34842,6 +34845,12 @@ function renderSession(data) {
     // its whole reason for existing is to be read before the rest.
     if (s.name) view.appendChild(sessNote(s));
 
+    // The person's temporary instructions for the session: unlike the note
+    // above, these are delivered — every session reminder carries them as
+    // its last section until they are cleared (claunch-ozyje). An exited
+    // session receives no reminder, so it has no editor.
+    if (s.name && s.status !== "exited") view.appendChild(sessReminderNote(s));
+
     // What it was asked to do, in the words it was asked in. Above the
     // briefing because the briefing is a reading OF this — the summary says
     // what the session has made of the job, and comparing the two is only
@@ -35727,6 +35736,98 @@ function sessNote(s) {
   clear.addEventListener("click", () => write("", "clearing"));
   form.addEventListener("keydown", (ev) => {
     // Enter in a note is a newline; the shortcut is the send box's.
+    if (ev.key === "Enter" && (ev.ctrlKey || ev.metaKey)) {
+      ev.preventDefault();
+      write(area.value, "saving");
+    }
+  });
+  return box;
+}
+
+/* ---- temporary instructions: restated with every session reminder ----
+   For a session that keeps losing an instruction mid-run (claunch-ozyje).
+   The text is stored on the session record (reminder_note) and the daemon
+   appends it, as a "Temporary instructions" section, to every session
+   reminder it delivers into this session — so it reaches the agent on the
+   reminder's schedule and only there: it starts no reminder of its own, and
+   it ends when it is cleared. Same form mechanics as the note above (slot
+   keyed on the saved text, so a poll does not eat a half-typed edit). */
+function sessReminderNote(s) {
+  const box = el("div", "sess-note sess-reminder-note");
+  const head = el("h3", null, "Temporary instructions");
+  head.title =
+    "for the agent, for this session only — appended to every session " +
+    "reminder delivered here until you clear it";
+  box.appendChild(head);
+  const saved = String(s.reminder_note || "");
+  const key = `${s.name}|${saved}`;
+  if (sessReminderNoteBox && sessReminderNoteBox.dataset.slot === key) {
+    box.appendChild((typeof carried === "function" ? carried(sessReminderNoteBox) : sessReminderNoteBox));
+    return box;
+  }
+  const form = el("div", "sess-note-form");
+  form.dataset.slot = key;
+  sessReminderNoteBox = form;
+  box.appendChild(form);
+
+  const area = document.createElement("textarea");
+  area.className = "sess-note-area";
+  area.rows = 3;
+  area.maxLength = SESSION_NOTE_MAX;
+  area.value = saved;
+  area.placeholder = "an instruction this session keeps losing…";
+  area.setAttribute("aria-label", "temporary instructions");
+  const save = el("button", "wf-btn option", "Save");
+  save.type = "button";
+  save.title =
+    `append this to every reminder sent to this session (up to ${SESSION_NOTE_MAX} characters)`;
+  const clear = el("button", "wf-btn option", "Clear");
+  clear.type = "button";
+  clear.title = "stop appending temporary instructions to this session's reminders";
+  const actions = el("div", "sess-note-actions");
+  actions.append(save, clear);
+  const status = el("p", saved ? "wf-note" : "wf-note hidden");
+  if (saved) status.textContent = "active — rides every reminder to this session";
+  form.append(area, actions, status);
+
+  const say = (msg, cls) => {
+    status.className = cls || "wf-note";
+    status.textContent = msg;
+  };
+
+  async function write(value, verb) {
+    if (save.disabled) return;
+    save.disabled = clear.disabled = true;
+    say(`${verb}…`);
+    let doc = {};
+    let resp;
+    try {
+      resp = await api(`/api/sessions/${encodeURIComponent(s.name)}/reminder/note`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ note: value }),
+      });
+      doc = await resp.json().catch(() => ({}));
+    } catch {
+      say("could not reach the daemon — nothing was changed", "wf-warning");
+      save.disabled = clear.disabled = false;
+      return;
+    }
+    save.disabled = clear.disabled = false;
+    if (!resp.ok) {
+      say(doc.error || `HTTP ${resp.status}`, "wf-warning");
+      return;
+    }
+    const kept = String(doc.reminder_note || "");
+    area.value = kept;
+    form.dataset.slot = `${s.name}|${kept}`;
+    say(kept ? "saved — appended to every reminder from now on" : "cleared");
+    if (typeof refreshSessions === "function") await refreshSessions();
+  }
+
+  save.addEventListener("click", () => write(area.value, "saving"));
+  clear.addEventListener("click", () => write("", "clearing"));
+  form.addEventListener("keydown", (ev) => {
     if (ev.key === "Enter" && (ev.ctrlKey || ev.metaKey)) {
       ev.preventDefault();
       write(area.value, "saving");

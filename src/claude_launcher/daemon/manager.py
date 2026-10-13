@@ -1770,6 +1770,27 @@ class SessionManager:
         self.persist()
         return session
 
+    def set_reminder_note(self, name: str, note: str) -> AnySession:
+        """Set (or, with an empty value, clear) a session's temporary
+        instructions (:attr:`SessionDef.reminder_note`).
+
+        The same shape as :meth:`set_note` -- trimmed, capped at
+        :data:`MAX_NOTE`, empty clears -- but refused on an exited session:
+        this text exists to be delivered, and an exited session receives no
+        reminder.
+        """
+        session = self.get(name)
+        if getattr(session, "exited", False):
+            raise ValueError(f"session {name!r} has exited")
+        text = str(note or "").strip()
+        if len(text) > MAX_NOTE:
+            raise ValueError(
+                f"temporary instructions are at most {MAX_NOTE} characters"
+            )
+        session.sdef = replace(session.sdef, reminder_note=text or None)
+        self.persist()
+        return session
+
     def set_cflow_declined(
         self, name: str, *, workflow: str = "", reason: str = "", by: str = ""
     ) -> AnySession:

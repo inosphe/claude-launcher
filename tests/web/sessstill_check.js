@@ -130,6 +130,7 @@ function sessCompact() { return el("div", "sess-compact"); }
 function sessSandbox() { return el("div", "sess-sandbox"); }
 function sessMigrate() { return el("div", "sess-migrate"); }
 function sessNote() { return el("div", "sess-note"); }
+function sessReminderNote() { return el("div", "sess-reminder-note"); }
 function sessFlags() { return el("div", "sess-flags"); }
 function sessTask() { return el("div", "sess-task"); }
 function sessPromptPacks() { return el("div", "sess-packs"); }

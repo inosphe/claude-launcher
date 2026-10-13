@@ -855,6 +855,7 @@ def build_app(
     r.add_get("/api/sessions/{name}/score-goal", h_session_score_goal)
     r.add_post("/api/sessions/{name}/reminder", h_session_reminder_set)
     r.add_post("/api/sessions/{name}/reminder/skip", h_session_reminder_skip)
+    r.add_post("/api/sessions/{name}/reminder/note", h_session_reminder_note)
     r.add_get("/api/sessions/{name}/children", h_session_children)
     r.add_post("/api/sessions/{name}/children", h_session_spawn)
     r.add_post("/api/sessions/{name}/children/{child}/kill", h_session_child_kill)
@@ -7609,6 +7610,7 @@ async def h_sessions_list(request: web.Request) -> web.Response:
             "name", "harness", "profile", "cwd", "args", "model", "effort",
             "tools", "restore", "conversation_id", "role", "parent", "borrow",
             "null_token", "issue", "keep_alive", "reminder_paused", "note",
+            "reminder_note",
             "status",
             "score_goal", "user_reward", "user_penalty",
             "pid", "exit_code", "created_at", "last_output_at",
@@ -8706,6 +8708,29 @@ async def h_session_reminder_skip(request: web.Request) -> web.Response:
             "sources": sources,
         }
     )
+
+
+async def h_session_reminder_note(request: web.Request) -> web.Response:
+    """Set (or, with an empty value, clear) a session's temporary
+    instructions (claunch-ozyje, :attr:`SessionDef.reminder_note`).
+
+    Every session reminder delivered into the session carries the text as
+    its last section until it is cleared. Refused on an exited session, like
+    the other reminder levers: nothing would be delivered there.
+    """
+    manager: SessionManager = request.app["manager"]
+    body = await _json_body(request)
+    note = body.get("note")
+    if note is not None and not isinstance(note, str):
+        return json_error(400, "'note' must be text, or null to clear it")
+    session = _session(request)
+    if session.exited:
+        return json_error(409, f"session {session.sdef.name!r} has exited")
+    try:
+        session = manager.set_reminder_note(session.sdef.name, note or "")
+    except ValueError as exc:
+        return json_error(400, str(exc))
+    return json_response(session.info())
 
 
 async def _stats_call(app: web.Application, request: dict):
