@@ -227,6 +227,12 @@ def qa_db() -> Path:
     return daemon_dir() / "qa.sqlite3"
 
 
+def threads_db() -> Path:
+    """Sub-topic conversations between the user and each session
+    (threads/store.py, claunch-doj98)."""
+    return daemon_dir() / "threads.sqlite3"
+
+
 def mesh_root() -> Path:
     """Root for mesh state (definitions, message logs, delivery cursors)."""
     return daemon_dir() / "mesh"
