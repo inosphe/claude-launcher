@@ -251,6 +251,43 @@ def test_preflight_and_arrange_start_a_v2_workflow_by_name(proj):
     assert runtime.status(cwd=str(proj), scope="w1", tick=False)["status"] == "aborted"
 
 
+def test_run_page_actions_take_the_scope_the_run_page_names(proj):
+    """The run page posts back the scope its payload carries -- since the slot
+    names its daemon that is 's1@main', which the v1 scope check refused with
+    a 400 on every button (claunch-nrm7u)."""
+    cwd = str(proj)
+    runtime.start(layers.load("pick", cwd), cwd=cwd, scope="s1", caps={})
+
+    async def go(client, bearer):
+        page = await (await client.get(f"/api/cflow2/run?cwd={cwd}&scope=s1",
+                                       headers=bearer)).json()
+        out = {"scope": page["scope"]}
+        q = f"cwd={cwd}&scope={page['scope']}"
+        resp = await client.get(f"/api/cflow/run?{q}", headers=bearer)
+        out["v1"] = (resp.status, await resp.json())
+        resp = await client.get(f"/api/cflow?{q}", headers=bearer)
+        out["v1_runs"] = (resp.status, await resp.json())
+        resp = await client.post("/api/cflow2/abort", headers=bearer,
+                                 json={"cwd": cwd, "scope": page["scope"], "reason": "end"})
+        out["abort"] = (resp.status, await resp.json())
+        resp = await client.post("/api/cflow2/abort", headers=bearer,
+                                 json={"cwd": cwd, "scope": "../s1@main"})
+        out["bad"] = resp.status
+        return out
+
+    out = _http(go)
+    assert out["scope"] == "s1@main"
+    # the v1 endpoint the views ask first points them at the v2 run
+    status, payload = out["v1"]
+    assert status == 200 and payload["status"] == "idle" and payload["v2"] is True
+    status, payload = out["v1_runs"]
+    assert status == 200 and payload["runs"] == []
+    status, payload = out["abort"]
+    assert status == 200, payload
+    assert payload["status"] == "aborted"
+    assert out["bad"] == 400
+
+
 def test_preflight_keeps_v1_on_a_shared_name_and_takes_v2_when_asked(proj):
     assert _preflight({"workflow": "demo"}, str(proj)).workflow_version == 1
     assert _preflight({"workflow": "demo", "workflow_version": 2},
