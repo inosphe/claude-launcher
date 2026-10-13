@@ -122,3 +122,21 @@ def test_live_and_failed_duration_and_empty(tmp_path):
     assert row["duration_s"] == 3600 and row["completed_at"] is None
     st.state_path.unlink()
     assert metrics.observations(st)["runs"] == []
+
+
+@pytest.mark.parametrize("broken", ["old_ir", "invalid_chart"])
+def test_archived_checkpoint_ir_failure_isolated_without_json_fallback(tmp_path, broken):
+    st = RunStore(str(tmp_path), "s"); saved(st, "current", merges=False)
+    old = RunStore(str(tmp_path), "s"); old.dir = st.archive_root() / "001"
+    saved(old, "old", merges=False)
+    # Checksum-valid but unreadable IR must not use the valid JSON projection.
+    chart = json.loads(old.chart_path.read_text())
+    if broken == "old_ir":
+        chart["ir_version"] = 0
+    else:
+        chart.pop("root")
+    checkpoint.commit(old.checkpoint_path, old.state_path.read_text(), json.dumps(chart),
+                      [], legacy=[], receipts={})
+    data = metrics.observations(st, now="2026-10-13T12:00:00Z")
+    assert data["unavailable"] == 1
+    assert [r["run"] for r in data["runs"]] == ["current"]

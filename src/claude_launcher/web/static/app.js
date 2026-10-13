@@ -32339,10 +32339,17 @@ function cflow2Throughput(data, state) {
   const now = Date.parse(data.observed_at);
   if (!Number.isFinite(now)) return section;
   const utcInput = ms => new Date(ms).toISOString().slice(0, 19);
-  if (!state.metric) Object.assign(state, {metric: "runs", span: "6", bin: "3600000",
-    start: utcInput(now - 6 * 3600000), end: utcInput(now),
-    beforeStart: utcInput(now - 6 * 3600000), beforeEnd: utcInput(now - 3 * 3600000),
-    afterStart: utcInput(now - 3 * 3600000), afterEnd: utcInput(now)});
+  if (!state.metric) Object.assign(state, {metric: "runs", span: "6", bin: "3600000"});
+  const updatePeriods = () => {
+    if (!state.chartManual) Object.assign(state, {
+      start: utcInput(now - Number(state.span) * 3600000), end: utcInput(now)});
+    const a = Date.parse(state.start + "Z"), b = Date.parse(state.end + "Z");
+    if (!Number.isFinite(a) || !Number.isFinite(b)) return;
+    const mid = (a + b) / 2;
+    if (!state.beforeManual) Object.assign(state, {beforeStart: utcInput(a), beforeEnd: utcInput(mid)});
+    if (!state.afterManual) Object.assign(state, {afterStart: utcInput(mid), afterEnd: utcInput(b)});
+  };
+  updatePeriods();
   const controls = el("div", "cf2-throughput-controls");
   const output = el("div", "cf2-throughput-output");
   const select = (label, key, options) => {
@@ -32353,9 +32360,8 @@ function cflow2Throughput(data, state) {
     input.addEventListener("change", () => {
       state[key] = input.value;
       if (key === "span") {
-        const a = now - Number(state.span) * 3600000, mid = (a + now) / 2;
-        Object.assign(state, {start: utcInput(a), end: utcInput(now), beforeStart: utcInput(a),
-          beforeEnd: utcInput(mid), afterStart: utcInput(mid), afterEnd: utcInput(now)});
+        state.chartManual = state.span === "custom";
+        updatePeriods();
         for (const node of controls.querySelectorAll("input")) node.value = state[node.dataset.metricField];
       }
       draw();
@@ -32364,7 +32370,7 @@ function cflow2Throughput(data, state) {
   if (!data.runs.some(r => r.merge_source)) state.metric = "runs";
   select("Metric", "metric", [["runs", "Completed runs / hour"],
     ...(data.runs.some(r => r.merge_source) ? [["merges", "Reported merges / hour"]] : [])]);
-  select("Period", "span", [["1", "Past 1 hour"], ["6", "Past 6 hours"], ["24", "Past 24 hours"], ["168", "Past 7 days"]]);
+  select("Period", "span", [["1", "Past 1 hour"], ["6", "Past 6 hours"], ["24", "Past 24 hours"], ["168", "Past 7 days"], ["custom", "Custom chart period"]]);
   select("Bin", "bin", [["900000", "15 minutes"], ["3600000", "1 hour"], ["21600000", "6 hours"], ["86400000", "1 day"]]);
   for (const [key, label] of [["start", "Chart start UTC"], ["end", "Chart end UTC"],
     ["beforeStart", "Before start UTC"], ["beforeEnd", "Before end UTC"],
@@ -32372,7 +32378,18 @@ function cflow2Throughput(data, state) {
     const wrap = el("label", null, label + " ");
     const input = el("input"); input.type = "datetime-local"; input.step = "1";
     input.dataset.metricField = key; input.value = state[key]; wrap.appendChild(input); controls.appendChild(wrap);
-    input.addEventListener("change", () => {state[key] = input.value; draw();});
+    input.addEventListener("change", () => {
+      state[key] = input.value;
+      if (key.startsWith("before")) state.beforeManual = true;
+      else if (key.startsWith("after")) state.afterManual = true;
+      else {
+        state.chartManual = true; state.span = "custom";
+        controls.querySelector('[data-metric-field="span"]').value = "custom";
+      }
+      updatePeriods();
+      for (const node of controls.querySelectorAll("input")) node.value = state[node.dataset.metricField];
+      draw();
+    });
   }
   section.appendChild(el("p", "wf-note", "UTC · completed runs use saved status done and finished time. Reported merges use structured git.merge task reports and report time. Counts are deduplicated. Coverage includes saved run intervals only; gaps and retention outside those intervals are unknown."));
   section.appendChild(el("p", "wf-note", `Saved samples: ${data.runs.length} runs · limit ${data.limit} · older records ${data.truncated ? "omitted" : "none omitted by limit"} · unavailable ${data.unavailable} · incomplete merge journals ${data.journal_incomplete}. Journal scan: ${data.event_limit} events / ${data.byte_limit} bytes per run.`));

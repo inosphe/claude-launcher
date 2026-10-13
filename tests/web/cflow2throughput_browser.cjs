@@ -61,6 +61,19 @@ detail.throughput = {observed_at: at(16), limit: 64, event_limit: 2048, byte_lim
     const errors = []; page.on('pageerror', e => errors.push(String(e)));
     await page.goto(`http://127.0.0.1:${server.address().port}/#/wf/s29|%2Frepo`);
     const section = page.locator('#wf-view .cf2-throughput'); await section.waitFor();
+    // Presets roll with newly observed data; a newly reported merge is included.
+    detail.throughput.observed_at = at(17); detail.throughput.runs[2].ended = at(17);
+    detail.throughput.runs[2].merges.push(merge(16, 'f')); detail.journal.push({event: 'reported'});
+    await page.evaluate(() => refreshWf());
+    assert.match(await section.locator('[data-metric-field="end"]').inputValue(), /^2026-10-13T17:00/);
+    assert.match(await section.locator('[data-metric-field="beforeEnd"]').inputValue(), /^2026-10-13T14:00/);
+    assert.match(await section.locator('[data-metric-field="afterEnd"]').inputValue(), /^2026-10-13T17:00/);
+    await section.locator('[data-metric-field="metric"]').selectOption('merges');
+    assert.match(await section.locator('.cf2-throughput-comparison').textContent(), /After: 1 observed reported merges/);
+    detail.throughput.observed_at = at(16); detail.throughput.runs[2].ended = at(16);
+    detail.throughput.runs[2].merges.pop();
+    await page.locator('body').click({position: {x: 1, y: 1}}); await page.evaluate(() => refreshWf());
+    await section.locator('[data-metric-field="metric"]').selectOption('runs');
     const set = async (key, value) => {const input = section.locator(`[data-metric-field="${key}"]`); await input.fill(value.slice(0, 16)); await input.dispatchEvent('change');};
     await set('start', at(9).slice(0, -1)); await set('end', at(16).slice(0, -1));
     await set('beforeStart', at(9).slice(0, -1)); await set('beforeEnd', at(11).slice(0, -1));
@@ -77,9 +90,13 @@ detail.throughput = {observed_at: at(16), limit: 64, event_limit: 2048, byte_lim
     await section.locator('summary').click();
     assert.equal(await section.locator('table tr').count(), 8);
     await page.locator('body').click({position: {x: 1, y: 1}});
+    detail.throughput.observed_at = at(17); detail.throughput.runs[2].ended = at(17);
     detail.journal.push({event: 'loop_iteration'}); await page.evaluate(() => refreshWf());
     assert.equal(await section.locator('[data-metric-field="metric"]').inputValue(), 'merges');
     assert.match(await section.locator('[data-metric-field="beforeStart"]').inputValue(), /^2026-10-13T09:00/);
+    assert.match(await section.locator('[data-metric-field="afterEnd"]').inputValue(), /^2026-10-13T16:00/);
+    assert.match(await section.locator('[data-metric-field="end"]').inputValue(), /^2026-10-13T16:00/);
+    assert.equal(await section.locator('[data-metric-field="span"]').inputValue(), 'custom');
     assert(await section.locator('details').evaluate(e => e.open), 'bins disclosure survives poll');
     await set('beforeEnd', '2026-10-13T09:15:00');
     assert.match(await comparison.textContent(), /not calculable \(zero baseline or insufficient coverage\)/);

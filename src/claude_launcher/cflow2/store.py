@@ -447,8 +447,11 @@ class RunStore:
                                                    byte_limit=byte_limit)
             except checkpoint.CheckpointError as exc:
                 raise StoreError(str(exc)) from exc
-            return {**snap, "state": json.loads(snap["state"]),
-                    "chart": ir.Chart.from_json(snap["chart"])}
+            try:
+                return {**snap, "state": json.loads(snap["state"]),
+                        "chart": ir.Chart.from_json(snap["chart"])}
+            except (ir.IRError, KeyError, ValueError) as exc:
+                raise StoreError(f"corrupt metrics snapshot {self.checkpoint_path}: {exc}") from exc
         state, chart = self.load_state(), self.load_chart()
         events, complete, size = [], True, 0
         try:
