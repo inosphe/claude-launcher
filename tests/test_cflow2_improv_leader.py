@@ -159,7 +159,8 @@ def test_default_and_enabled_restart_deploy_before_notice_without_sweep(tmp_path
         ld.report("reflect")
     ld.restart()
     ld.report("reflect")
-    assert ld.st["waits"][0]["label"].rsplit("/", 1)[-1] == "deployed-wait"
+    assert len(ld.st["waits"]) == 1
+    assert ld.st["waits"][0]["checks"][0]["id"] == "deployed"
     ld.tick(lambda cmd, cwd: (0, "live commit confirmed"))
     assert ld.tasks() == ["landed-notice"]
     ld.report("landed-notice")
