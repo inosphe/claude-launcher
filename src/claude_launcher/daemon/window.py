@@ -86,8 +86,10 @@ deciding anything. The arbiter is still "one decision at a time"; the lock is
 what makes that true across processes. What only the owning daemon can judge
 stays with it: each entry names its ``instance``, a session's liveness is
 judged by the instance that runs it, a foreign *waiter* is dropped when the
-daemon process holding its long-poll (``daemon_pid``) is gone, and a foreign
-*bound* holder is reaped by its pid as before (same machine, same pid space).
+daemon process holding its long-poll (``daemon_pid``) is gone, a foreign
+*bound* holder is reaped by its pid as before (same machine, same pid space),
+and a foreign session-held grant is reaped once its daemon is gone and no
+daemon serves that instance any more (claunch-afmzw.3).
 ``window_scope: instance`` in the daemon config restores the per-instance file.
 
 The worker budget adapts (claunch-afmzw): measured on 2026-10-1x, a run whose
@@ -412,6 +414,19 @@ def default_state_path() -> Path:
     if scope == "instance":
         return paths.daemon_dir() / "window.json"
     return paths.base_home() / "daemon" / "window.json"
+
+
+def _instance_served(instance: str) -> bool:
+    """Whether a daemon process is running for ``instance`` now, by the pid
+    its ``daemon.json`` records. Unreadable or absent counts as not served."""
+    base = paths.base_home()
+    state = base / "daemons" / instance if instance else base / "daemon"
+    try:
+        doc = json.loads((state / "daemon.json").read_text(encoding="utf-8"))
+        pid = int(doc.get("pid") or 0)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
+    return pid > 0 and pid_alive(pid)
 
 
 def _on_event_loop() -> bool:
@@ -1073,7 +1088,16 @@ class WindowManager:
                 owner = int(entry.get("daemon_pid") or 0)
                 return owner > 0 and not pid_alive(owner)
             if entry.get("session"):
-                return False
+                # Its daemon judges the session; once that daemon is gone and
+                # no process serves the instance any more, nobody will
+                # (claunch-afmzw.3). A restarted daemon keeps its sessions
+                # and judges them itself, so a live instance is left alone.
+                owner = int(entry.get("daemon_pid") or 0)
+                return (
+                    owner > 0
+                    and not pid_alive(owner)
+                    and not _instance_served(entry.get("instance") or "")
+                )
             pid = entry.get("pid") or 0
             return not pid_alive(pid)
         session = entry.get("session")
