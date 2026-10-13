@@ -12,6 +12,7 @@ pins the budget's halving on timeouts and its recovery on passes.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import subprocess
 import sys
@@ -179,6 +180,57 @@ def test_a_bound_grant_of_another_instance_is_reaped_by_its_pid(tmp_path):
         assert held["granted"]
         got = await main.acquire("targeted", session="a", pid=os.getpid())
         assert got["granted"]
+
+    asyncio.run(run())
+
+
+async def _foreign_session_sweep(kimyori, daemon_pid):
+    kimyori._daemon_pid = daemon_pid
+    held = await kimyori.acquire("sweep", session="k", pid=_dead_pid())
+    assert held["granted"]
+    return held
+
+
+def test_a_session_grant_of_a_daemon_that_is_gone_is_reaped(tmp_path, monkeypatch):
+    """kimyori died holding a grant for its session ``k`` (not bound: taken
+    with ``claunch window acquire``). Its exit hook never ran and no daemon
+    serves kimyori, so nobody else would ever release it (claunch-afmzw.3)."""
+    monkeypatch.setenv("CLAUNCH_INSTANCE_BASE", str(tmp_path))
+
+    async def run():
+        main, kimyori = _pair(tmp_path)
+        await _foreign_session_sweep(kimyori, _dead_pid())
+        got = await main.acquire("targeted", session="a", pid=os.getpid())
+        assert got["granted"]
+
+    asyncio.run(run())
+
+
+def test_a_restarted_daemon_keeps_its_sessions_grants(tmp_path, monkeypatch):
+    """The grant's daemon pid is gone but kimyori is served again (it
+    restarted): its sessions live on and that daemon judges them."""
+    monkeypatch.setenv("CLAUNCH_INSTANCE_BASE", str(tmp_path))
+    state = tmp_path / "daemons" / "kimyori"
+    state.mkdir(parents=True)
+    (state / "daemon.json").write_text(json.dumps({"pid": os.getpid()}))
+
+    async def run():
+        main, kimyori = _pair(tmp_path)
+        await _foreign_session_sweep(kimyori, _dead_pid())
+        got = await main.acquire("targeted", session="a", pid=os.getpid())
+        assert not got["granted"]
+
+    asyncio.run(run())
+
+
+def test_a_live_daemons_session_grant_is_not_ours_to_reap(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUNCH_INSTANCE_BASE", str(tmp_path))
+
+    async def run():
+        main, kimyori = _pair(tmp_path)
+        await _foreign_session_sweep(kimyori, os.getpid())
+        got = await main.acquire("targeted", session="a", pid=os.getpid())
+        assert not got["granted"]
 
     asyncio.run(run())
 
@@ -365,3 +417,55 @@ def test_pytest_result_counts_the_failures_that_read_as_timeouts():
     result = test_window.pytest_result(1, {"failed": failed, "error": errored}, 6, 1.0)
     assert result["timeouts"] == 4
     assert window_mod.clean_result(result)["timeouts"] == 4
+
+
+# --------------------------------------------------------------------------- #
+# a peer that holds the state lock (claunch-afmzw.2)
+# --------------------------------------------------------------------------- #
+def test_a_stuck_lock_holder_stalls_the_event_loop_only_briefly(tmp_path):
+    """Another daemon holding ``window.lock`` must not freeze this daemon's
+    loop for LOCK_WAIT: on the loop thread the wait is LOOP_LOCK_WAIT."""
+    main, _ = _pair(tmp_path)
+    holder = open(main._lock_path, "a+b")
+    assert window_mod._try_flock(holder)
+
+    async def run():
+        ticks = 0
+
+        async def ticker():
+            nonlocal ticks
+            while True:
+                await asyncio.sleep(0.01)
+                ticks += 1
+
+        task = asyncio.create_task(ticker())
+        await asyncio.sleep(0.05)
+        started = time.monotonic()
+        main.status()
+        elapsed = time.monotonic() - started
+        await asyncio.sleep(0.05)
+        task.cancel()
+        return elapsed, ticks
+
+    try:
+        elapsed, ticks = asyncio.run(run())
+    finally:
+        window_mod._unflock(holder)
+        holder.close()
+    assert elapsed < window_mod.LOOP_LOCK_WAIT + 0.5 < window_mod.LOCK_WAIT
+    assert ticks > 0
+
+
+def test_off_the_loop_the_lock_wait_is_the_long_one(tmp_path, monkeypatch):
+    main, _ = _pair(tmp_path)
+    holder = open(main._lock_path, "a+b")
+    assert window_mod._try_flock(holder)
+    monkeypatch.setattr(window_mod, "LOCK_WAIT", 1.2)
+    try:
+        started = time.monotonic()
+        main.status()
+        elapsed = time.monotonic() - started
+    finally:
+        window_mod._unflock(holder)
+        holder.close()
+    assert elapsed >= 1.1
