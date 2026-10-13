@@ -84,6 +84,39 @@
     else { populateMenu(); menu.showPopover(); positionMenu(); }
   });
   menu.addEventListener("toggle", () => more.setAttribute("aria-expanded", String(menu.matches(":popover-open"))));
+  // The lifecycle group (resume | pause | kill | archive) keeps one Tab stop
+  // and moves between its segments with the arrow keys, as a radio group does
+  // (claunch-468ec). The stop is the focused segment, else the checked one,
+  // else the first that can be pressed — the checked segment is often the one
+  // the state disables (resume while it runs). An arrow only moves focus: it
+  // does not press, because kill and archive end the session and a key that
+  // walks the group must not fire them. Space or Enter presses, as on any
+  // button.
+  const life = document.getElementById("term-life");
+  const lifeSegments = () => (life ? [...life.querySelectorAll('[role="radio"]')] : []);
+  const pressable = (b) => !b.disabled && !b.classList.contains("hidden") && !b.closest(".toolbar-overflow");
+  function syncLifeTabstop() {
+    const segments = lifeSegments();
+    const open = segments.filter(pressable);
+    const stop = open.find(b => b === document.activeElement)
+      || open.find(b => b.getAttribute("aria-checked") === "true") || open[0];
+    for (const b of segments) {
+      const value = b === stop ? "0" : "-1";
+      if (b.getAttribute("tabindex") !== value) b.setAttribute("tabindex", value);
+    }
+  }
+  if (life) life.addEventListener("keydown", (e) => {
+    const open = lifeSegments().filter(pressable);
+    const at = open.indexOf(document.activeElement);
+    if (at < 0) return;
+    const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[e.key];
+    const next = step ? open[(at + step + open.length) % open.length]
+      : e.key === "Home" ? open[0] : e.key === "End" ? open[open.length - 1] : null;
+    if (!next) return;
+    e.preventDefault();
+    next.focus();
+    syncLifeTabstop();
+  });
   // The label-plus-description each control's tooltip and aria-label carry.
   // Written only where it moved: the session poll rewrites these controls
   // every tick, and each write is a mutation a page-watching extension pays
@@ -103,6 +136,7 @@
       el.title = rendered;
       el.setAttribute("aria-label", rendered);
     }
+    syncLifeTabstop();
   }
   function fit() {
     frame = 0;
@@ -137,6 +171,9 @@
       if (!overflow.length) menu.hidePopover();
       else if (!menu.contains(document.activeElement)) { populateMenu(); positionMenu(); }
     }
+    // Again now the overflow is settled: a group moved into the menu has no
+    // stop on the row.
+    syncLifeTabstop();
     watch();
   }
   function watch() {

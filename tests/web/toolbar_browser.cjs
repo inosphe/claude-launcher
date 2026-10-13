@@ -175,6 +175,44 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
     });
     await check(1920);
     assert.equal(await page.locator("#term-header").evaluate(el => el.classList.contains("term-compact")), false);
+    // The lifecycle group on the row is one Tab stop walked by the arrow keys
+    // (claunch-468ec). Kill is checked but disabled here (and resume is
+    // disabled), so the stop is the first segment that can be pressed, and
+    // the arrows skip the disabled ones. An arrow only moves focus: nothing
+    // is pressed by walking the group.
+    const LIFE = ["term-resume", "term-pause", "term-kill", "term-archive"];
+    const stops = () => page.evaluate((ids) => ids.map(id => document.getElementById(id).getAttribute("tabindex")), LIFE);
+    const focused = () => page.evaluate(() => document.activeElement && document.activeElement.id);
+    await page.evaluate((ids) => {
+      window.lifePresses = [];
+      for (const id of ids) document.getElementById(id).addEventListener("click", () => window.lifePresses.push(id));
+    }, LIFE);
+    assert.deepEqual(await stops(), ["-1", "0", "-1", "-1"], "the stop is the first pressable segment");
+    await page.locator("#term-pause").focus();
+    const walk = [];
+    for (const key of ["ArrowRight", "ArrowRight", "ArrowLeft", "Home", "End", "ArrowDown", "ArrowUp"]) {
+      await page.keyboard.press(key);
+      walk.push(await focused());
+    }
+    assert.deepEqual(walk, ["term-archive", "term-pause", "term-archive", "term-pause", "term-archive",
+      "term-pause", "term-archive"], `arrow walk: ${JSON.stringify(walk)}`);
+    assert.deepEqual(await stops(), ["-1", "-1", "-1", "0"], "the stop follows focus");
+    assert.deepEqual(await page.evaluate(() => window.lifePresses), [], "walking the group presses nothing");
+    await page.keyboard.press("Tab");
+    assert(!LIFE.includes(await focused()), "Tab leaves the group from its stop");
+    await page.keyboard.press("Shift+Tab");
+    assert.equal(await focused(), "term-archive", "Shift+Tab comes back to the stop");
+    // When the state changes with focus elsewhere, the stop goes to the
+    // checked segment where it can be pressed (a paused record: kill).
+    await page.evaluate(() => {
+      document.activeElement.blur();
+      document.getElementById("term-kill").disabled = false;
+    });
+    await page.waitForTimeout(80);
+    assert.deepEqual(await stops(), ["-1", "-1", "0", "-1"], "the stop moves to the checked segment");
+    await page.locator("#term-kill").focus();
+    await page.keyboard.press("Enter");
+    assert.deepEqual(await page.evaluate(() => window.lifePresses), ["term-kill"], "Enter presses the focused segment");
     // Exercise the real column hierarchy: wrapped tabs above the header,
     // with a resizable detail panel beside the terminal column.
     await page.evaluate(() => {
