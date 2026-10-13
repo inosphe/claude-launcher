@@ -586,7 +586,7 @@ html[data-theme="light"] .xterm {
    the name's line keeps the default `order: 0` and declares no
    `flex-basis: 100%`. Only the deliberate line-breakers below
    (.rail-cwd, .rail-ctx-line, .rail-usage-line, .rail-seen, .rail-quiet,
-   .rail-note, .rail-progress, .rail-status-checks, .sess-cflow, .sess-cflow2, .sess-brief,
+   .rail-note, .rail-progress, .rail-procs, .rail-status-checks, .sess-cflow, .sess-cflow2, .sess-brief,
    and the selected card's .rail-role-line) are full-width, and they
    carry an `order` above the ▸ toggle's so the toggle still lands at the end
    of the name line. A full-width child at order 0 would break the line
@@ -870,6 +870,25 @@ html[data-theme="light"] .xterm {
   font-size: 11px; color: #9fcbaf; line-height: 1.45;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+/* Processes the daemon started for the session (decorateProcsRow): short
+   chips with an X, on their own line under the name like the progress line. */
+#session-list .rail-procs {
+  flex-basis: 100%; order: 2; min-width: 0; margin-left: 12px;
+  display: flex; flex-wrap: wrap; gap: 3px 6px; font-size: 11px;
+}
+#session-list .rail-proc {
+  display: inline-flex; align-items: center; gap: 4px; min-width: 0; max-width: 100%;
+  padding: 0 0 0 6px; border: 1px solid #3b4655; border-radius: 4px; color: #c9d1d9;
+}
+#session-list .rail-proc-name {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: ui-monospace, monospace; font-size: 10px;
+}
+#session-list .rail-proc-x {
+  flex: none; padding: 0 5px; border: none; border-left: 1px solid #3b4655;
+  background: transparent; color: #f0a0a0; font: inherit; font-size: 10px; cursor: pointer;
+}
+#session-list .rail-proc-x:hover { background: #3a1a1a; }
 #session-list .rail-note {
   flex-basis: 100%; order: 2; min-width: 0; margin-left: 12px;
   padding-left: 8px; border-left: 2px solid #2f4a63;
@@ -2304,6 +2323,26 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 #term-timers .tt-state-held { color: #79c0ff; border-color: #1f3a5c; --tt-fill: #10243b; }
 #term-timers .tt-state-closed { color: #9da7b3; }
 #term-timers .tt-due { color: #d29922; border-color: #5a4312; }
+/* The session's process line (claunch-ihwel): what the daemon's restart
+   command left running for it, one line per process with a kill button. */
+#term-procs {
+  display: flex; flex-direction: column; gap: 2px;
+  background: #11151b; border-bottom: 1px solid #2a2e36;
+  color: #c6cdd5; font-size: 12px; flex: none; padding: 4px 14px;
+}
+#term-procs .tp-line { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+#term-procs .tp-pid { color: #7d8590; font-variant-numeric: tabular-nums; flex: none; }
+#term-procs .tp-label { color: #79c0ff; flex: none; font-size: 11px; }
+#term-procs .tp-cmd {
+  flex: 1 1 0; min-width: 0; font-family: ui-monospace, monospace; font-size: 11px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#term-procs .tp-kids { color: #7d8590; flex: none; font-size: 11px; }
+#term-procs .tp-kill {
+  flex: none; padding: 0 8px; border: 1px solid #5a2a2a; border-radius: 4px;
+  background: transparent; color: #f0a0a0; font: inherit; font-size: 11px; cursor: pointer;
+}
+#term-procs .tp-kill:hover { background: #3a1a1a; border-color: #8a3a3a; }
 /* The cflow answer strip: the attached session's run is waiting on a person.
    The gate amber of the rail line it repeats (`.wf-waiting`), one row high
    at desktop width; on a narrow window the buttons wrap to a second row

@@ -131,6 +131,7 @@ function applyBriefingCards() {
    railnote_check's subject, not this harness's. */
 function decorateNoteRow(li, s) {}
 function decorateProgressRow(li, s) {}
+function decorateProcsRow(li, s) {}
 function decorateBriefingRow() {}
 function terminalOnScreen() { return false; }
 function attach() {}

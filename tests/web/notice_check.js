@@ -136,6 +136,8 @@ function build(opts) {
     "refreshTermWindow",
     // and the timer line (termtimers_check).
     "refreshTermTimers",
+    // and the process line (termprocs_check).
+    "refreshTermProcs",
     // The first boot restores the New tab's draft before it routes
     // (newformdraft_check).
     "restoreNewFormDraft",
@@ -165,6 +167,7 @@ function build(opts) {
 
     () => {},   // refreshTermWindow (the header's window strip; termwindow_check)
     () => {},   // refreshTermTimers (the timer line; termtimers_check)
+    () => {},   // refreshTermProcs (the process line; termprocs_check)
     async () => {},   // restoreNewFormDraft (newformdraft_check)
   );
 

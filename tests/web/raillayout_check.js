@@ -172,6 +172,7 @@ function railSeenLine(s) { return el("span", "rail-seen"); }
    railnote_check's subject, not this harness's. */
 function decorateNoteRow(li, s) {}
 function decorateProgressRow(li, s) {}
+function decorateProcsRow(li, s) {}
 function decorateBriefingRow(li, s) {}
 `;
 
@@ -367,6 +368,7 @@ ctx.setMeshes([
     "#session-list .rail-status-checks", "#session-list .rail-tps-line",
     "#session-list .rail-usage-line",
     "#session-list .rail-note", "#session-list .rail-note-editor",
+    "#session-list .rail-procs",
     "#session-list .rail-progress",
     "#session-list .sess-cflow", "#session-list .sess-cflow2", "#session-list .sess-sims", "#session-list .sess-brief",
     // the selected card's role, whole on a line of its own (claunch-g4owg.1)
@@ -376,7 +378,7 @@ ctx.setMeshes([
     sel.startsWith("#session-list") &&
     (d["flex-basis"] === "100%" || /(^|\s)100%$/.test(d.flex || ""))
   ).map(([sel]) => sel);
-  check("only the directory line, the beads line, the one-line, the context line, the throughput line, the usage line, the attention line, the quiet line, the note line (or its editor), the progress line, the status-check line, the cflow line, the cflow v2 line, the simulation line, the briefing card and the selected card's role line break the row",
+  check("only the directory line, the beads line, the one-line, the context line, the throughput line, the usage line, the attention line, the quiet line, the note line (or its editor), the progress line, the process line, the status-check line, the cflow line, the cflow v2 line, the simulation line, the briefing card and the selected card's role line break the row",
         fullWidth.sort(), [...BREAKERS].sort());
 
   /* The one-line summary is the exception to this rail's ellipsis habit: it

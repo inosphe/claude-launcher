@@ -4661,6 +4661,7 @@ async function refreshSessions(options) {
       decorateBriefingRow(keptRow, s);
       decorateNoteRow(keptRow, s);
       decorateProgressRow(keptRow, s);
+      decorateProcsRow(keptRow, s);
       place(nestedGroupContainers
         ? (groupBodies[groupBodies.length - 1] || list) : list, keptRow);
       countRow();
@@ -4963,6 +4964,8 @@ async function refreshSessions(options) {
     decorateNoteRow(li, s);
     // What the session last published about its own progress.
     decorateProgressRow(li, s);
+    // What the daemon started for it and is still running (claunch-ihwel).
+    decorateProcsRow(li, s);
     const parent = nestedGroupContainers
       ? (groupBodies[groupBodies.length - 1] || list) : list;
     place(parent, li);
@@ -8243,6 +8246,36 @@ function decorateNoteRow(li, s) {
    as the beads line's — anchor on a line that is always present, because
    the ones between here and there come and go with the session's state. The
    editor takes the same place, so opening it does not move the rest. */
+/* The processes the daemon started for this session and that still run
+   (a restart command's dev server, claunch-ihwel): one short chip each, with
+   an X that ends it. The full command is the chip's hover; the session's own
+   terminal header has the same rows as lines (#term-procs). */
+function decorateProcsRow(li, s) {
+  const rows = Array.isArray(s.procs) ? s.procs : [];
+  const line = li.querySelector(".rail-procs");
+  if (!rows.length) {
+    if (line) line.remove();
+    return;
+  }
+  const node = line || el("div", "rail-procs");
+  node.innerHTML = "";
+  for (const p of rows) {
+    const chip = el("span", "rail-proc");
+    chip.title = procTitle(p);
+    chip.appendChild(el("span", "rail-proc-name", procShort(p, 32)));
+    const x = el("button", "rail-proc-x", "X");
+    x.type = "button";
+    x.title = `terminate pid ${p.pid}` + (p.children ? ` and the ${p.children} under it` : "");
+    x.addEventListener("click", (e) => {
+      e.stopPropagation();   // the row itself attaches; this button does not
+      killSessionProc(s.name, p);
+    });
+    chip.appendChild(x);
+    node.appendChild(chip);
+  }
+  if (!line) railNotePlace(li, node);
+}
+
 function railNotePlace(li, node) {
   const cwd = li.querySelector(".rail-cwd");
   if (cwd) li.insertBefore(node, cwd);
@@ -18791,6 +18824,131 @@ function setTranscriptBlockbar(on) {
 }
 $("term-blockbar")?.addEventListener("click", () => setTranscriptBlockbar(!transcriptBlockbar));
 
+/* ---- session process line (#term-procs, claunch-ihwel) ----
+   Processes the daemon started on the attached session's behalf that are
+   still running: a workflow step's restart command and what it left behind
+   (another project's restart script starts `npm run dev` and exits). The
+   daemon tracks them (daemon/session_procs.py) and answers
+   GET /api/sessions/<name>/procs with one row per top of a tree still
+   running; `children` counts what runs under it. One line each, with a
+   `kill` button that ends the row and everything under it.
+
+   The header's `procs` button is up only while there is a row, and folds
+   the line away without forgetting it; the choice is remembered per
+   browser. The session card shows the same rows as short chips with an X. */
+const TERM_PROCS_KEY = `claunch_term_procs:${BASE}`;
+let termProcsOpen = (() => {
+  try { return localStorage.getItem(TERM_PROCS_KEY) !== "off"; } catch {}
+  return true;
+})();
+let termProcsView = null;   // the last GET /api/sessions/<name>/procs
+
+/* A process's short name: the program's base name and its arguments. */
+function procShort(p, max = 48) {
+  const cmd = String((p && p.cmd) || "").trim();
+  const parts = cmd.split(/\s+/);
+  if (parts.length && parts[0]) parts[0] = parts[0].replace(/^.*[\\/]/, "");
+  const text = parts.join(" ") || `pid ${p && p.pid}`;
+  return text.length > max ? text.slice(0, max - 1) + "…" : text;
+}
+
+function procTitle(p) {
+  const lines = [String(p.cmd || ""), `pid ${p.pid}`];
+  if (p.label) lines.push(`started by: ${p.label}`);
+  const since = Number(p.since);
+  if (Number.isFinite(since) && since > 0) {
+    lines.push(`running for ${fmtSpan(Math.max(0, Date.now() / 1000 - since))}`);
+  }
+  if (p.children) lines.push(`${p.children} process(es) under it, ended with it`);
+  return lines.join("\n");
+}
+
+async function killSessionProc(name, p) {
+  const ok = await modalConfirm(
+    `End process ${p.pid}?`,
+    `${p.cmd || ""}\n\nThis process${p.children ? ` and the ${p.children} under it` : ""} ` +
+      `will be terminated. The session '${name}' keeps running.`,
+    "kill");
+  if (!ok) return;
+  try {
+    const resp = await api(
+      `/api/sessions/${encodeURIComponent(name)}/procs/${encodeURIComponent(p.pid)}/kill`,
+      { method: "POST" });
+    const info = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      await modalInfo(`Could not end process ${p.pid}`, info.error || `HTTP ${resp.status}`);
+    } else if (name === currentName) {
+      renderTermProcs(info);
+    }
+  } catch (err) {
+    await modalInfo(`Could not end process ${p.pid}`, err.message);
+  } finally {
+    await refreshSessions({ state: "current" });
+  }
+}
+
+function setTermProcsOpen(on) {
+  termProcsOpen = !!on;
+  try { localStorage.setItem(TERM_PROCS_KEY, termProcsOpen ? "on" : "off"); } catch {}
+  renderTermProcs(termProcsView);
+}
+$("term-procsbtn")?.addEventListener("click", () => setTermProcsOpen(!termProcsOpen));
+
+function renderTermProcs(v) {
+  const box = $("term-procs");
+  const button = $("term-procsbtn");
+  if (!box) return;
+  if (v && v.session !== currentName) v = null;   // a previous session's read
+  termProcsView = v;
+  const rows = v && Array.isArray(v.procs) ? v.procs : [];
+  const any = rows.length > 0 && currentPage === "terminal" && !!currentName;
+  if (button) {
+    button.classList.toggle("hidden", !any);
+    button.setAttribute("aria-pressed", termProcsOpen ? "true" : "false");
+    button.textContent = any ? `procs ${rows.length} ${termProcsOpen ? "▾" : "▸"}` : "procs";
+  }
+  const show = any && termProcsOpen;
+  const sig = show ? rows.map((r) => `${r.pid}:${r.children}:${r.cmd}`).join(",") : "hidden";
+  const changed = box.dataset.sig !== sig;
+  box.dataset.sig = sig;
+  if (!changed) return;
+  box.innerHTML = "";
+  box.classList.toggle("hidden", !show);
+  if (show) {
+    const name = currentName;
+    for (const p of rows) {
+      const line = el("div", "tp-line");
+      line.title = procTitle(p);
+      line.appendChild(el("span", "tp-pid", String(p.pid)));
+      if (p.label) line.appendChild(el("span", "tp-label", p.label));
+      line.appendChild(el("span", "tp-cmd", String(p.cmd || "")));
+      if (p.children) line.appendChild(el("span", "tp-kids", `+${p.children}`));
+      const kill = el("button", "tp-kill", "kill");
+      kill.type = "button";
+      kill.title = `terminate pid ${p.pid}` + (p.children ? ` and the ${p.children} under it` : "");
+      kill.addEventListener("click", () => killSessionProc(name, p));
+      line.appendChild(kill);
+      box.appendChild(line);
+    }
+  }
+  refitSoon(60);
+}
+
+async function refreshTermProcs() {
+  const name = currentName;
+  if (!name || currentPage !== "terminal") { renderTermProcs(null); return; }
+  let v = null;
+  try {
+    const resp = await api(`/api/sessions/${encodeURIComponent(name)}/procs`);
+    if (!resp.ok) { renderTermProcs(null); return; } // older daemon: no route
+    v = await resp.json();
+  } catch {
+    return; // offline — the health poll owns saying so; keep the last truth
+  }
+  if (name !== currentName || currentPage !== "terminal") return;
+  renderTermProcs(v);
+}
+
 /* The session header on the page on screen. It is up wherever the session
    line is (sessionLineOnPage): the terminal (the CLI view) and the attached
    session's own transcript (the HTML view). A transcript of another session
@@ -19856,6 +20014,9 @@ function showView(name) {
   // The timer line, the same way: re-asked-for on the way back in.
   if (!showTerm) renderTermTimers(null);
   else refreshTermTimers();
+  // The process line, the same way.
+  if (!showTerm) renderTermProcs(null);
+  else refreshTermProcs();
   for (const [page, id] of Object.entries(VIEWS)) {
     $(id).classList.toggle("hidden", name !== page);
   }
@@ -45791,6 +45952,7 @@ async function pollOnce() {
     refreshTermQueued(),
     refreshTermWindow(),
     refreshTermTimers(),
+    refreshTermProcs(),
   ];
   // Polled because the registry is edited from the CLI, in another window;
   // it redraws only when the list really changed (see refreshWorkspaces).

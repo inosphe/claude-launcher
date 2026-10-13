@@ -289,6 +289,12 @@ def spawn_daemon(env: Optional[dict] = None) -> Optional[subprocess.Popen]:
     outlives every CLI that starts it.
     """
     paths.daemon_dir().mkdir(parents=True, exist_ok=True)
+    # A daemon started from a restart command the daemon ran for a session
+    # inherits that session's owner tag; carried on, every process the new
+    # daemon starts would be listed as that session's (claunch-ihwel).
+    from .daemon import session_procs
+
+    env = session_procs.strip_owner(env)
     log = _open_log_for_child()
     kwargs = {}
     if sys.platform == "win32":
