@@ -778,7 +778,10 @@ def nudge(session: str, message: str, *, cwd: str) -> List[str]:
         return []
     want = state_mod.resolve_cwd(cwd)
     for s in sessions:
-        if s.get("name") != target or s.get("status") == "exited":
+        # A held record (daemon/hold.py) is a target: ``/deliver`` wakes it
+        # and queues the nudge into the woken session (claunch-2xyjw).
+        if s.get("name") != target or (s.get("status") == "exited"
+                                       and not s.get("held_at")):
             continue
         try:
             if state_mod.resolve_cwd(str(s.get("cwd") or "")) != want:

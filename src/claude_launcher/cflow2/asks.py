@@ -444,6 +444,24 @@ def pending_for(session: str) -> List[Dict[str, Any]]:
     return out
 
 
+def nudge_driver(message: str, *, cwd: Optional[str] = None,
+                 scope: Optional[str] = None,
+                 nudge_fn: Optional[NudgeFn] = None) -> Any:
+    """Type ``message`` into the session driving the run at (cwd, scope):
+    a person's command changed the run and the driver should read it now
+    (claunch-2xyjw). A held driver is woken for it (``/deliver``). Best
+    effort: the change is recorded either way; returns the targets that
+    accepted it, or None."""
+    try:
+        st = RunStore(cwd, scope)
+        driver = _driver(st) or _session_of(st.scope)
+        if not driver:
+            return None
+        return (nudge_fn or default_nudge)(driver, message, str(st.cwd)) or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def human_approve(node: Optional[str] = None, *, decision: Optional[str] = None,
                   decline: bool = False, reason: Optional[str] = None,
                   by: Optional[str] = None, cwd: Optional[str] = None,

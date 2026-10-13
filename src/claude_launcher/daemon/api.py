@@ -3730,14 +3730,19 @@ def _scope_sessions(
     scope: str,
     *,
     live_sessions: Optional[Dict[Tuple[str, str], object]] = None,
+    include_held: bool = False,
 ) -> list:
-    """The session this run maps 1:1 to (scope == session name), if alive."""
+    """The session this run maps 1:1 to (scope == session name), if alive.
+
+    ``include_held`` also answers a held record (daemon/hold.py): a person
+    acting on its run is a use of it, and the nudge that follows wakes it
+    (:func:`_cflow_nudge_held`, claunch-2xyjw)."""
     if live_sessions is not None:
         return [scope] if (cwd, scope) in live_sessions else []
     for session in manager.list():
         if (
             session.sdef.name == scope
-            and not session.exited
+            and (not session.exited or (include_held and cflow_clock.is_held(session)))
             and _session_cwd(session) == cwd
         ):
             return [scope]
@@ -4303,14 +4308,28 @@ async def _nudge_sessions(
     name, 1:1), so an agent that stopped its turn picks the run back up.
     Default-scope runs belong to no session — nothing to nudge."""
     nudged = []
-    for name in _scope_sessions(manager, cwd, scope):
+    for name in _scope_sessions(manager, cwd, scope, include_held=True):
         try:
             session = manager.get(name)
         except Exception:  # noqa: BLE001 — raced with a removal
             continue
-        if session.queue_delivery(message):
+        if cflow_clock.is_held(session):
+            if _cflow_nudge_held(manager, name, message):
+                nudged.append(name)
+        elif session.queue_delivery(message):
             nudged.append(name)
     return nudged
+
+
+def _cflow_nudge_held(manager: SessionManager, name: str, message: str) -> bool:
+    """Wake a held driver for a person's action on its run and queue the
+    nudge into the woken session (claunch-2xyjw). Without this the action
+    lands on disk and the run waits until something else wakes it."""
+    try:
+        return bool(manager.wake_soon(name, by="cflow", deliver=message))
+    except Exception:  # noqa: BLE001 — a failed wake leaves it held
+        log.exception("wake of held session %r for a cflow nudge failed", name)
+        return False
 
 
 def _schedule_cflow_nudges(
@@ -4336,10 +4355,16 @@ def _schedule_cflow_nudges(
     manager: SessionManager = app["manager"]
     scheduled = []
     tasks: Set[asyncio.Task] = app["cflow_nudge_tasks"]
-    for name in _scope_sessions(manager, cwd, scope):
+    for name in _scope_sessions(manager, cwd, scope, include_held=True):
         try:
             session = manager.get(name)
         except Exception:  # noqa: BLE001 — raced with a removal
+            continue
+        if cflow_clock.is_held(session):
+            # A woken session has no draft to keep whole: ``force`` has
+            # nothing to do there.
+            if _cflow_nudge_held(manager, name, message):
+                scheduled.append(name)
             continue
         task = asyncio.create_task(_deliver_cflow_nudge(session, message, force=force))
         tasks.add(task)
@@ -10770,6 +10795,14 @@ async def h_session_deliver(request: web.Request) -> web.Response:
     if not isinstance(text, str) or not text:
         return json_error(400, "'text' must be a non-empty string")
     if body.get("defer") is True:
+        if cflow_clock.is_held(session):
+            # A held session wakes for it and takes it once back (the CLI's
+            # cflow nudges, claunch-2xyjw); acceptance is not a receipt here
+            # either.
+            queued = request.app["manager"].wake_soon(
+                session.sdef.name, by="deliver", deliver=text)
+            return json_response({"ok": True, "queued": queued, "delivered": False,
+                                  "woken": queued})
         queued = session.queue_delivery(text) if not session.exited else False
         return json_response({"ok": True, "queued": queued, "delivered": False})
     delivered = await session.deliver(text)
