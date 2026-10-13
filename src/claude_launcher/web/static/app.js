@@ -14407,28 +14407,34 @@ function railCardQuickFork(name) {
    while it runs, pause while it is paused, kill once it was killed, archive
    once it is filed (archive wins over the others, it is the last thing done
    to the record). A held record checks none: it is ended for now and wakes
-   by itself, which none of the four says. Every segment stays on screen and
-   a move the state does not allow is disabled:
+   by itself, which none of the four says. A failed record checks none too
+   (claunch-z3nc7): the program ended on its own with an error and nobody
+   pressed kill — the same split session_category draws on the daemon. A
+   clean exit 0 the harness made by itself stays killed there
+   (_failed_on_its_own), and the record carries nothing that tells it apart,
+   so it checks kill here as well. Every segment stays on screen and a move
+   the state does not allow is disabled:
    - resume only relaunches an exited session;
    - pause only stops a live one;
-   - kill stays on a paused or held record — the process is already gone,
-     and the press files the pause as killed, so the bulk resume of the
-     paused no longer brings it back (h_session_kill); a killed record has
+   - kill stays on a paused, held or failed record — the process is already
+     gone, and the press files the record as killed (unpause/unhold in
+     h_session_kill), so the bulk resume of the paused no longer brings it
+     back and a failed record's board sweep runs; a killed record has
      nothing left for it to change;
    - archive is gone once the record is filed.
    The verdict is kept on each button (data-life-off) because kill's disabled
    state is also written by syncSessionKillControls, and the pause and resume
    handlers re-enable their button when the request settles. */
-function syncTermLife({ exited, paused, held, archived }) {
+function syncTermLife({ exited, paused, held, failed, archived }) {
   const checked = archived ? "term-archive"
     : !exited ? "term-resume"
     : paused ? "term-pause"
-    : held ? ""
+    : held || failed ? ""
     : "term-kill";
   const off = {
     "term-resume": !exited,
     "term-pause": exited,
-    "term-kill": exited && !paused && !held,
+    "term-kill": exited && !paused && !held && !failed,
     "term-archive": archived,
   };
   for (const [id, disabled] of Object.entries(off)) {
@@ -14475,7 +14481,7 @@ function setStatusBadge(status) {
   $("term-rebrief").classList.toggle("hidden", exited);
   $("term-retro").classList.toggle("hidden", exited);
   if ($("term-idle-hold")) $("term-idle-hold").classList.toggle("hidden", exited);
-  syncTermLife({ exited, paused, held, archived });
+  syncTermLife({ exited, paused, held, failed, archived });
   if (typeof syncSessionPinUi === "function") syncSessionPinUi();
   syncSessionKillControls();
   if (typeof syncSessionHandoffControls === "function") syncSessionHandoffControls();
