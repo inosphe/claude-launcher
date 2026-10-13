@@ -83,8 +83,8 @@ const localStorage = {
 };
 let refreshed = 0;
 const sections = [
-  "sessFlags", "sessNote", "sessTask", "sessPromptPacks", "sessBriefSection",
-  "sessInputJournal",
+  "sessFlags", "sessNote", "sessReminderNote", "sessTask", "sessPromptPacks",
+  "sessBriefSection", "sessInputJournal",
   "sessHandoff", "sessSend", "sessMeshJoin", "sessBeads", "sessCommits",
   "sessReborrow", "sessPerms", "sessSandbox", "sessCompact", "sessMigrate",
 ];
@@ -188,7 +188,7 @@ check("five sub-tabs, All first",
 }
 
 /* ---- what each sub-tab draws -------------------------------------------- */
-const OVERVIEW = ["sess-meta", "sessFlags", "sessNote", "sessTask",
+const OVERVIEW = ["sess-meta", "sessFlags", "sessNote", "sessReminderNote", "sessTask",
                   "sessPromptPacks", "sessBriefSection"];
 const MESSAGES = ["sessInputJournal", "sessHandoff", "sessSend", "sessQueued",
                   "sess-meshes"];
@@ -204,7 +204,7 @@ check("no stored choice is All", renderWith(undefined)[3], "#Overview");
 check("Overview draws its group alone, with no head",
       renderWith("overview"), [...TOP, ...OVERVIEW]);
 check("...and builds nothing else",
-      built.filter((b) => !["sessFlags", "sessNote", "sessTask",
+      built.filter((b) => !["sessFlags", "sessNote", "sessReminderNote", "sessTask",
                             "sessPromptPacks", "sessBriefSection"].includes(b)), []);
 check("Messages draws its group alone", renderWith("messages"),
       [...TOP, ...MESSAGES]);

@@ -452,8 +452,15 @@ def reminder_block(
     cflow_guidance: bool = False,
     goal: str = "",
     packs: Optional[List[str]] = None,
+    instructions: str = "",
 ) -> str:
-    """Render one session reminder with its peer source sections."""
+    """Render one session reminder with its peer source sections.
+
+    ``instructions`` is the person's temporary instructions for this session
+    (:attr:`SessionDef.reminder_note`). It is no source of its own -- it
+    never makes a reminder due -- and rides every delivery as the last
+    section, after everything the daemon itself states.
+    """
     sections: List[Tuple[str, List[str]]] = []
     if goal:
         sections.append(("Score goal", [goal]))
@@ -472,6 +479,19 @@ def reminder_block(
     situation_lines = _situation_section(list(situation or []))
     if situation_lines:
         sections.append(("Situation", situation_lines))
+    note = str(instructions or "").strip()
+    if note:
+        sections.append(
+            (
+                "Temporary instructions",
+                [
+                    "set by a person for this session only, and restated "
+                    "with every reminder until they clear it -- follow them "
+                    "alongside your other instructions:",
+                    *note.splitlines(),
+                ],
+            )
+        )
 
     lines = [
         "---",
@@ -1192,6 +1212,7 @@ class SessionReminderService:
                 context=context,
                 cflow_guidance=cflow_full,
                 packs=pack_lines,
+                instructions=getattr(session.sdef, "reminder_note", None) or "",
             )
 
         # Score may change while delivery waits for the person's input draft.

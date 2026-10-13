@@ -244,6 +244,14 @@ class SessionDef:
     #: an instruction. Persisted with the definition, so it survives a daemon
     #: restart and a respawn with the rest of the session's record.
     note: Optional[str] = None
+    #: A person's temporary instructions for this session (claunch-ozyje),
+    #: written from the detail panel. Unlike :attr:`note` this one *is* for
+    #: the agent: every session reminder the daemon delivers into this
+    #: session carries it as its last section, so an instruction the session
+    #: keeps losing is restated on the reminder's schedule. It applies to
+    #: this session only and only while set -- clearing it is how it ends.
+    #: Persisted with the definition, like the note.
+    reminder_note: Optional[str] = None
     #: The user's "no" to a cflow run for this session (claunch-val3l.2):
     #: ``{"workflow", "reason", "at", "by"}``, or ``None`` when nobody
     #: declined one. Written when the operator declines a workflow at creation
@@ -328,6 +336,8 @@ class SessionDef:
         # key, so the common record on disk is unchanged by this field.
         if self.note:
             out["note"] = self.note
+        if self.reminder_note:
+            out["reminder_note"] = self.reminder_note
         # Same rule again: present only when a run was declined.
         if self.cflow_declined:
             out["cflow_declined"] = dict(self.cflow_declined)
@@ -387,6 +397,7 @@ class SessionDef:
                 else None
             ),
             note=str(data.get("note") or "").strip() or None,
+            reminder_note=str(data.get("reminder_note") or "").strip() or None,
             cflow_declined=_cflow_declined_field(data.get("cflow_declined")),
             project=str(data.get("project") or "").strip() or None,
             prompt_packs=_prompt_packs_field(data.get("prompt_packs")),
