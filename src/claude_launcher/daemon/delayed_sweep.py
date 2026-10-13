@@ -93,13 +93,3 @@ class Clock:
             except Exception:
                 log.exception("delayed sweep tick failed")
             await asyncio.sleep(self.poll)
-
-
-async def start(app):
-    clock = Clock(app["manager"], window=app["window"])
-    app["delayed_sweep_clock"] = clock
-    clock.start()
-
-
-async def stop(app):
-    await app["delayed_sweep_clock"].shutdown()
