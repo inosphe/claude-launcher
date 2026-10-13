@@ -859,6 +859,7 @@ def build_app(
     r.add_post("/api/sessions/{name}/procs/{pid}/kill", h_session_proc_kill)
     r.add_post("/api/sessions/{name}/queued/flush", h_session_queued_flush)
     r.add_post("/api/sessions/{name}/queued/hold", h_session_hold)
+    r.add_post("/api/sessions/{name}/mcp-ready", h_session_mcp_ready)
     r.add_get("/api/sessions/{name}/reminder", h_session_reminder)
     r.add_get("/api/score-goal/defaults", h_score_goal_defaults)
     r.add_put("/api/score-goal/defaults", h_score_goal_defaults_set)
@@ -9216,6 +9217,17 @@ async def h_session_hold(request: web.Request) -> web.Response:
     return json_response(
         {"hold": held, "queued": _session_queued(request, session)}
     )
+
+
+async def h_session_mcp_ready(request: web.Request) -> web.Response:
+    """``claunch mcp`` of this session finished its handshake (claunch-xixag).
+
+    The opening of a session with MCP servers waits for it
+    (:mod:`mcp_ready`); recording it twice is harmless.
+    """
+    session = _session(request)
+    session.note_mcp_ready()
+    return json_response({"ready": True})
 
 
 def _mesh_holds(request: web.Request, name: str) -> List[dict]:

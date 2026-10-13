@@ -1246,6 +1246,16 @@ class Session:
             return False
         return True
 
+    def mcp_ready_event(self) -> asyncio.Event:
+        """Set once this session's ``claunch mcp`` has announced itself."""
+        event = getattr(self, "_mcp_ready", None)
+        if event is None:
+            event = self._mcp_ready = asyncio.Event()
+        return event
+
+    def note_mcp_ready(self) -> None:
+        self.mcp_ready_event().set()
+
     async def deliver(
         self, text: Union[str, Callable[[], str]], *, force: bool = False, wait_for_draft: bool = False,
         before: Optional[Callable[[], Awaitable[None]]] = None,

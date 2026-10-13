@@ -70,7 +70,7 @@ from ..cflow import engine as cflow_engine
 from ..cflow import state as cflow_state
 from ..cflow.model import WorkflowError
 from . import cflow2_web
-from . import harness as harness_mod, mesh_roles
+from . import harness as harness_mod, mcp_ready, mesh_roles
 from .harness import CLAUDE_HARNESS
 from .mesh import LEADER_IMPLIES, LEADER_ROLE, MeshError
 
@@ -995,7 +995,29 @@ def open_with(session, block: str, *, before=None) -> None:
     # ``before`` is passed only when there is one, so an opening without
     # images makes exactly the calls it made before the step existed.
     kw = {"before": before} if before is not None else {}
-    asyncio.ensure_future(_deliver_until_it_lands(session, block, **kw))
+    plan = (
+        mcp_ready.plan_for(session.sdef)
+        if session.sdef.harness == harness_mod.CLAUDE_HARNESS
+        else mcp_ready.Plan()
+    )
+    if plan.waits:
+        asyncio.ensure_future(_deliver_after_mcp(session, block, plan, **kw))
+    else:
+        asyncio.ensure_future(_deliver_until_it_lands(session, block, **kw))
+
+
+async def _deliver_after_mcp(session, block, plan, **kw) -> None:
+    """Hold a claude opening back until the session's MCP servers are up.
+
+    The first turn of a claude session that goes out before they connect has
+    no tools (claunch-xixag); see :mod:`mcp_ready`.
+    """
+    try:
+        await mcp_ready.wait(session, plan)
+    except Exception:
+        log.exception("waiting for MCP before the opening of %r failed",
+                      session.sdef.name)
+    await _deliver_until_it_lands(session, block, **kw)
 
 
 #: How long :func:`open_with` keeps trying to hand over the opening block.
