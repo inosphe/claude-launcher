@@ -26,7 +26,9 @@ qa_delete withdraws it, qa_list reads yours. Every change takes the
 -- often the user just answered it. When the user saves an answer, a
 "[claunch qa]" block is typed into your terminal with the question and the
 answer (and the answer it replaced, for a rewrite). Editing an answered
-question marks its answer stale and asks the user again.
+question marks its answer stale and asks the user again. The user may also
+nudge you from the pane ("[claunch qa] ... nudge qn-..."): file what you
+need to ask with qa_ask, or reply qa_nothing when you have nothing to ask.
 """
 
 _ID = {"id": {"type": "string", "description": "question id (qa-xxxxxxxx)"}}
@@ -69,6 +71,13 @@ TOOLS = [
     {"name": "qa_delete",
      "description": "Withdraw one of your questions entirely (asked by mistake).",
      "inputSchema": {"type": "object", "properties": {**_ID, **_REV}, "required": ["id", "revision"]}},
+    {"name": "qa_nothing",
+     "description": "Reply to the user's nudge (\"[claunch qa] ... nudge qn-...\"): you have nothing to ask "
+                    "right now. Filing a question with qa_ask is the other reply and needs no call here.",
+     "inputSchema": {"type": "object", "properties": {
+         "nudge": {"type": "string", "description": "the nudge id (qn-xxxxxxxx); omit for your waiting nudge"},
+         "note": {"type": "string", "description": "one line on why there is nothing to ask"},
+     }}},
     {"name": "qa_list",
      "description": "Your questions with their status (open, answered, stale, closed), revision and answer.",
      "inputSchema": {"type": "object", "properties": {
@@ -140,6 +149,10 @@ def _call(c, me: str, name: str, args: dict) -> dict:
         return c.post(f"/api/qa/{_qid(args)}/close", {**body, "session": me})
     if name == "qa_delete":
         return c.post(f"/api/qa/{_qid(args)}/delete", {"revision": args.get("revision"), "session": me})
+    if name == "qa_nothing":
+        nid = urllib.parse.quote(str(args.get("nudge") or "latest"), safe="")
+        body = {"note": args["note"]} if "note" in args else {}
+        return c.post(f"/api/qa/nudge/{nid}/nothing", {**body, "session": me})
     raise QaMcpError(f"unknown tool {name!r}")
 
 

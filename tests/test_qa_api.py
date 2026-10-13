@@ -132,3 +132,33 @@ def test_an_exited_session_still_gets_the_answer_filed(tmp_path):
         assert res["delivered"] is False
         assert res["question"]["status"] == "answered"
     run(tmp_path, scenario)
+
+
+def test_nudge_is_typed_into_the_session_and_answered_by_qa_nothing(tmp_path):
+    async def scenario(req, mgr):
+        res = await req("POST", "/api/qa/nudge", {"to": "s1"})
+        nid = res["nudge"]["id"]
+        assert res["delivered"] is True and res["nudge"]["status"] == "sent"
+        block = mgr.sessions["s1"].delivered[-1]
+        assert block.startswith(qa_api.PREFIX) and nid in block
+        assert "qa_ask" in block and f'qa_nothing (nudge "{nid}")' in block
+        assert (await req("GET", "/api/qa?session=s1"))["nudge"]["id"] == nid
+
+        await req("POST", f"/api/qa/nudge/{nid}/nothing", {"session": "s2"}, status=403)
+        done = await req("POST", "/api/qa/nudge/latest/nothing", {"session": "s1", "note": "none"})
+        assert (done["nudge"]["status"], done["nudge"]["reply"]) == ("nothing", "none")
+        err = await req("POST", f"/api/qa/nudge/{nid}/nothing", {"session": "s1"}, status=409)
+        assert err["current"]["status"] == "nothing"
+        await req("POST", "/api/qa/nudge/latest/nothing", {"session": "s1"}, status=404)
+    run(tmp_path, scenario)
+
+
+def test_nudge_identity_rules(tmp_path):
+    async def scenario(req, mgr):
+        await req("POST", "/api/qa/nudge", {}, status=400)
+        await req("POST", "/api/qa/nudge", {"to": "ghost"}, status=404)
+        await req("POST", "/api/qa/nudge", {"to": "s1", "session": "s2"}, status=403)
+        mgr.sessions["s1"].exited = True
+        res = await req("POST", "/api/qa/nudge", {"to": "s1"})
+        assert res["delivered"] is False and res["nudge"]["status"] == "sent"
+    run(tmp_path, scenario)

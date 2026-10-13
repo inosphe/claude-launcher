@@ -27,7 +27,7 @@ class Client:
 
 def test_tools_are_registered():
     names = {t["name"] for t in mcp_server.TOOLS}
-    assert {"qa_ask", "qa_update", "qa_close", "qa_delete", "qa_list"} <= names
+    assert {"qa_ask", "qa_update", "qa_close", "qa_delete", "qa_list", "qa_nothing"} <= names
     assert "qa_answer" not in names   # answering is the user's
 
 
@@ -43,6 +43,10 @@ def test_calls_carry_the_session(monkeypatch):
     assert client.calls[-1] == ("POST", "/api/qa/qa-1/close", {"revision": 2, "note": "done", "session": "s7"})
     qa_mcp.call_tool("qa_delete", {"id": "qa-1", "revision": 3})
     assert client.calls[-1] == ("POST", "/api/qa/qa-1/delete", {"revision": 3, "session": "s7"})
+    qa_mcp.call_tool("qa_nothing", {"nudge": "qn-1", "note": "all decided"})
+    assert client.calls[-1] == ("POST", "/api/qa/nudge/qn-1/nothing", {"note": "all decided", "session": "s7"})
+    qa_mcp.call_tool("qa_nothing", {})
+    assert client.calls[-1] == ("POST", "/api/qa/nudge/latest/nothing", {"session": "s7"})
     qa_mcp.call_tool("qa_list", {})
     assert parse_qs(urlsplit(client.calls[-1][1]).query) == {"session": ["s7"], "closed": ["0"]}
 

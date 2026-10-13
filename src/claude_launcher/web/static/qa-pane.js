@@ -10,7 +10,12 @@
 
    The pane polls on its own (3s) and never rebuilds a card the reader is
    typing in. All user and agent text goes through textContent (or the
-   page's markdown renderer, which builds nodes). */
+   page's markdown renderer, which builds nodes).
+
+   "질문 요청" in the head nudges the session (POST /api/qa/nudge,
+   claunch-l8vyi.1): it is told to file its questions with qa_ask or to
+   reply qa_nothing. It is sent at once, questions or not; the line under
+   the button shows how the last nudge was settled. */
 globalThis.QaPane = (() => {
   const POLL_MS = 3000;
   const STATUS = {
@@ -21,6 +26,7 @@ globalThis.QaPane = (() => {
   };
   let host = null, name = "", api = null, onChange = null;
   let timer = null, seq = 0, data = null, error = "";
+  let nudging = false, nudgeNotice = null;   // {text, bad} after a press
   // Per question id: {text, choices: [labels], base: revision the edit
   // started from, notice, conflict}. Outlives redraws and repoints within
   // a page load; dropped on a successful save.
@@ -95,11 +101,24 @@ globalThis.QaPane = (() => {
     const qs = (data && data.questions) || [];
     const live = qs.filter((q) => q.status !== "closed");
     const closed = qs.filter((q) => q.status === "closed");
+    const ask = node("button", "term-btn qa-nudge", nudging ? "보내는 중…" : "질문 요청");
+    ask.type = "button";
+    ask.disabled = nudging;
+    ask.title = "세션에게 QA 도구로 질문을 올리라고 요청합니다. 질문이 없으면 세션은 '질문 없음'으로 답합니다.";
+    ask.addEventListener("click", nudge);
     head.replaceChildren(
       node("h2", null, `${name} — 질문`),
       node("span", "qa-count",
            data ? `미해결 ${data.unresolved} · 전체 ${live.length}` : "불러오는 중…"),
+      ask,
     );
+    const state = nudgeState(data && data.nudge);
+    if (state || nudgeNotice) {
+      const line = node("p", "qa-nudge-state");
+      if (state) line.append(node("span", `qa-nudge-${data.nudge.status}`, state));
+      if (nudgeNotice) line.append(node("span", `qa-notice ${nudgeNotice.bad ? "wf-warning" : ""}`, nudgeNotice.text));
+      head.append(line);
+    }
     if (error) head.append(node("p", "wf-warning", error));
 
     const keep = new Set(qs.map((q) => q.id));
@@ -109,7 +128,8 @@ globalThis.QaPane = (() => {
     if (!live.length && data) {
       if (!list.querySelector(".qa-empty")) {
         list.replaceChildren(node("p", "wf-note qa-empty",
-          "이 세션이 남긴 질문이 없습니다. 세션은 qa_ask 도구로 여기에 질문을 올립니다."));
+          "이 세션이 남긴 질문이 없습니다. 세션은 qa_ask 도구로 여기에 질문을 올립니다. " +
+          "'질문 요청'을 누르면 세션에게 질문할 것이 있는지 묻습니다."));
       }
     } else {
       list.querySelector(".qa-empty")?.remove();
@@ -290,6 +310,48 @@ globalThis.QaPane = (() => {
     if (onChange) onChange();
   }
 
+  function clock(iso) {
+    const t = new Date(iso);
+    return isNaN(t) ? "" : t.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
+  }
+
+  function nudgeState(n) {
+    if (!n) return "";
+    const at = clock(n.created_at);
+    if (n.status === "sent") return `질문 요청 보냄 (${at}) · 응답 대기`;
+    if (n.status === "asked") return `질문 요청 (${at}) → 질문으로 응답: ${n.questions.join(", ")}`;
+    if (n.status === "nothing") return `질문 요청 (${at}) → 질문 없음${n.reply ? `: ${n.reply}` : ""}`;
+    return "";
+  }
+
+  async function nudge() {
+    if (nudging || !name) return;
+    const want = name;
+    nudging = true;
+    nudgeNotice = null;
+    render();
+    let resp, doc;
+    try {
+      resp = await api("/api/qa/nudge", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({to: want}),
+      });
+      doc = await resp.json().catch(() => ({}));
+    } catch {
+      resp = null;
+    }
+    if (want !== name) return;
+    nudging = false;
+    if (!resp) nudgeNotice = {text: "보내지 못함: 데몬에 연결할 수 없습니다", bad: true};
+    else if (!resp.ok) nudgeNotice = {text: doc.error || `HTTP ${resp.status}`, bad: true};
+    else {
+      nudgeNotice = doc.delivered ? null : {text: "세션이 종료되어 전달하지 못함", bad: true};
+      if (data) data.nudge = doc.nudge;
+    }
+    render();
+  }
+
   function replace(q) {
     if (!data || !q) return;
     data.questions = data.questions.map((x) => (x.id === q.id ? q : x));
@@ -305,6 +367,8 @@ globalThis.QaPane = (() => {
     onChange = opts.onChange || null;
     data = null;
     error = "";
+    nudging = false;
+    nudgeNotice = null;
     cards.clear();
     target.replaceChildren();
     render();
