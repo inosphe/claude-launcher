@@ -107,6 +107,42 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
       }
     }
 
+    // An ended session says "queued" in the field itself -- placeholder,
+    // dashed border, title -- and leaves the note hidden, so the field keeps
+    // the bar's width; a live session gets the plain placeholder and title
+    // back (claunch-tww0b).
+    await page.setViewportSize({ width: 1280, height: 600 });
+    const ended = await page.evaluate(() => {
+      const field = document.getElementById('term-input-field');
+      const note = document.getElementById('term-input-note');
+      const baseTitle = field.title;
+      sessionEnded = true;
+      refreshTermInput();
+      autogrowTermInput(field);
+      const out = {
+        noteHidden: note.classList.contains('hidden'),
+        placeholder: field.placeholder, queued: field.classList.contains('queued'),
+        border: getComputedStyle(field).borderTopStyle,
+        title: field.title, w: field.getBoundingClientRect().width,
+        h: field.getBoundingClientRect().height,
+      };
+      sessionEnded = false;
+      refreshTermInput();
+      out.livePlaceholder = field.placeholder;
+      out.liveQueued = field.classList.contains('queued');
+      out.liveTitleRestored = field.title === baseTitle;
+      return out;
+    });
+    const endedRow = (await measure()).buttons[0].h;
+    assert.ok(ended.noteHidden, 'an ended session shows a standing note beside the field');
+    assert.match(ended.placeholder, /queued/, `ended placeholder: ${ended.placeholder}`);
+    assert.ok(ended.queued && ended.border === 'dashed', `ended field not marked: ${JSON.stringify(ended)}`);
+    assert.match(ended.title, /queued/, `ended title: ${ended.title}`);
+    assert.ok(ended.w >= 250, `ended field squeezed to ${ended.w}px`);
+    assert.ok(Math.abs(ended.h - endedRow) < 1, `ended field ${ended.h}px against button ${endedRow}px`);
+    assert.match(ended.livePlaceholder, /^type for this session/, `live placeholder: ${ended.livePlaceholder}`);
+    assert.ok(!ended.liveQueued && ended.liveTitleRestored, `live field keeps the ended marks: ${JSON.stringify(ended)}`);
+
     // Typed text, at rest: one line is one row without a scrollbar, and so
     // are three -- the field stays one row until it is clicked
     // (claunch-hmz62.2).

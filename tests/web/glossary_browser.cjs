@@ -29,6 +29,7 @@ ${fn('autogrowTermInput')}
 ${fn('termInputNote')}
 ${fn('sendKeyLine')}
 ${fn('resetTermInputAttachment')}
+${fn('renderTermInputField')}
 ${fn('refreshTermInput')}
 const keptTerms = new Map();
 const stopWfPoll = () => {}, stopMeshPoll = () => {}, dropKept = () => {};
