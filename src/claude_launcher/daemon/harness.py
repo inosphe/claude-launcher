@@ -27,7 +27,7 @@ from .. import borrowing, harnesses as harness_registry
 from .. import lineage, metering, pi_provider, profile as profile_mod, projects, providers, routing, runner
 from .. import store, transcripts
 from .. import config as launcher_config
-from . import instance_manifest, mesh_roles, paths, pty_backend
+from . import instance_manifest, mcp_ready, mesh_roles, paths, pty_backend
 
 log = logging.getLogger("claunch.daemon.harness")
 
@@ -1137,9 +1137,12 @@ def build_command(
             argv.extend(str(arg).replace("{effort}", sdef.effort)
                         for arg in entry.effort_args)
         argv.extend(sdef.args)
-        if opening and not restoring:
+        if opening and not restoring and not mcp_ready.plan_for(sdef).waits:
             # The positional prompt — claude's first turn; see _append_opening
-            # for the stamp, the ``--`` and the length ceiling.
+            # for the stamp, the ``--`` and the length ceiling. Not with MCP
+            # servers attached: claude sends it before they connect, and the
+            # turn goes out with no tools (claunch-xixag). That opening is
+            # typed in once they are up (onboard.open_with).
             _append_opening(argv, opening, harness=sdef.harness)
     else:
         entry = harness_registry.get(sdef.harness)

@@ -66,7 +66,14 @@ class Server:
                     **({"instructions": self.instructions} if self.instructions else {}),
                 },
             )
-        if method in ("notifications/initialized", "notifications/cancelled"):
+        if method == "notifications/initialized":
+            # The host finished its handshake: tell the daemon, so a session's
+            # opening can wait for its servers (claunch-xixag).
+            from .daemon import mcp_ready
+
+            mcp_ready.announce()
+            return None
+        if method == "notifications/cancelled":
             return None
         if method == "ping":
             return _result(msg_id, {})
