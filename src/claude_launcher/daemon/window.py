@@ -471,6 +471,45 @@ def _unflock(handle) -> None:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
+def _delta(base: dict, now: dict) -> dict:
+    """What one unlocked section changed, as rows to put and rows to drop."""
+    out: dict = {}
+    for key in ("holders", "queue"):
+        was, cur = base[key], now[key]
+        out[key] = {
+            "upsert": {gid: row for gid, row in cur.items() if was.get(gid) != row},
+            # Rows this section created; a changed row is only re-applied
+            # while the file still has it, so a peer's release stays a release.
+            "added": {gid for gid in cur if gid not in was},
+            "gone": {gid for gid in was if gid not in cur},
+        }
+    for key in ("adaptive", "overrides", "limits_meta"):
+        if base[key] != now[key]:
+            out[key] = now[key]
+    return out
+
+
+def _merge_delta(older: Optional[dict], newer: dict) -> Optional[dict]:
+    """Compose two deltas; None when neither changed anything."""
+    if older is None:
+        merged = newer
+    else:
+        merged = {k: v for k, v in older.items() if k not in ("holders", "queue")}
+        merged.update({k: v for k, v in newer.items() if k not in ("holders", "queue")})
+        for key in ("holders", "queue"):
+            upsert = {g: r for g, r in older[key]["upsert"].items()
+                      if g not in newer[key]["gone"]}
+            upsert.update(newer[key]["upsert"])
+            gone = (older[key]["gone"] - set(newer[key]["upsert"])) | newer[key]["gone"]
+            added = (older[key]["added"] | newer[key]["added"]) - newer[key]["gone"]
+            merged[key] = {"upsert": upsert, "added": added, "gone": gone}
+    empty = all(not merged[k]["upsert"] and not merged[k]["gone"]
+                for k in ("holders", "queue"))
+    if empty and not any(k in merged for k in ("adaptive", "overrides", "limits_meta")):
+        return None
+    return merged
+
+
 def _shared(method):
     """Run a public method on the machine's current state, under its lock."""
 
@@ -549,6 +588,12 @@ class WindowManager:
         self._owns_limits = bool(owns_limits)
         self._lock_handle = None
         self._lock_depth = 0
+        # Decisions taken while the lock was not had: kept here instead of
+        # written over a file a peer may be rewriting, and laid over the file
+        # at the next locked operation (claunch-f1lk4).
+        self._pending: Optional[dict] = None
+        self._unlocked_base: Optional[dict] = None
+        self._save_deferred = False
         # A save that failed leaves memory newer than the file; reloading
         # then would roll the window back, so it is skipped until a save works.
         self._saved_ok = True
@@ -576,6 +621,9 @@ class WindowManager:
                 self._lock_depth -= 1
             return
         handle = None
+        # A peer holds the lock (as opposed to no lock file to be had): the
+        # file may be mid-rewrite, so this section's save is deferred.
+        contended = False
         try:
             self._lock_path.parent.mkdir(parents=True, exist_ok=True)
             handle = open(self._lock_path, "a+b")
@@ -585,10 +633,12 @@ class WindowManager:
                 if time.monotonic() >= deadline:
                     log.warning(
                         "window: state lock %s not taken in %.1fs; deciding on "
-                        "this daemon's view", self._lock_path, wait,
+                        "this daemon's view, saved once the lock frees",
+                        self._lock_path, wait,
                     )
                     handle.close()
                     handle = None
+                    contended = True
                     break
                 time.sleep(0.02)
         except OSError as exc:
@@ -600,14 +650,54 @@ class WindowManager:
         self._lock_depth = 1
         try:
             self._load()
+            self._apply_pending()
+            if contended:
+                self._unlocked_base = self._snapshot()
+            elif self._pending is not None:
+                self._pending = None
+                self._save()
             self._refresh_history()
             yield
         finally:
+            if self._unlocked_base is not None and self._save_deferred:
+                self._pending = _merge_delta(
+                    self._pending, _delta(self._unlocked_base, self._snapshot())
+                )
+            self._unlocked_base = None
+            self._save_deferred = False
             self._lock_depth = 0
             self._lock_handle = None
             if handle is not None:
                 _unflock(handle)
                 handle.close()
+
+    def _snapshot(self) -> dict:
+        return {
+            "holders": {h["grant_id"]: dict(h) for h in self._holders},
+            "queue": {q["grant_id"]: dict(q) for q in self._queue},
+            "adaptive": dict(self._adaptive),
+            "overrides": dict(self._overrides),
+            "limits_meta": dict(self._limits_meta),
+        }
+
+    def _apply_pending(self) -> None:
+        """Lay the unsaved decisions over the state just read."""
+        pending = self._pending
+        if not pending:
+            return
+        for key in ("holders", "queue"):
+            upsert, gone = pending[key]["upsert"], pending[key]["gone"]
+            rows = [r for r in getattr(self, "_" + key) if r["grant_id"] not in gone]
+            seen = {r["grant_id"] for r in rows}
+            rows = [dict(upsert[r["grant_id"]]) if r["grant_id"] in upsert else r
+                    for r in rows]
+            rows += [dict(r) for gid, r in upsert.items()
+                     if gid not in seen and gid in pending[key]["added"]]
+            setattr(self, "_" + key, rows)
+        self._sort_queue()
+        for key in ("adaptive", "overrides", "limits_meta"):
+            if key in pending:
+                setattr(self, "_" + key, dict(pending[key]))
 
     def _mine(self, entry: dict) -> bool:
         """Whether this daemon instance made ``entry`` (absent = the default
@@ -776,6 +866,11 @@ class WindowManager:
         self._save()
 
     def _save(self) -> None:
+        if self._unlocked_base is not None:
+            # Written now, this view would replace what the lock's holder is
+            # saving; ``_locked`` keeps the change for the next locked pass.
+            self._save_deferred = True
+            return
         doc = {
             "version": _STATE_VERSION,
             "saved_at": _utcnow(),
