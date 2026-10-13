@@ -18457,9 +18457,7 @@ document.addEventListener("visibilitychange", () => {
    The same page reads another daemon's session (#/rlog/<machine>/<name>):
    a remote shadow's terminal takes no scroll, so this is the only place
    what it said earlier can be read. Only where the pages come from changes
-   (its host, through /api/shadows/...) and where Back goes; the session
-   info tab is hidden, because what it looks up is a LOCAL session and a
-   remote `s1` is not the local one. */
+   (its host, through /api/shadows/...) and where Back goes. */
 const TRANSCRIPT_PAGE = 40;
 const TRANSCRIPT_FOLLOW_MAX = 200;
 const TRANSCRIPT_NEAR_TOP = 400;   // px from the top that triggers an older page
