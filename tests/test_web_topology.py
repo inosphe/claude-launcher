@@ -343,6 +343,7 @@ testing this project, never a requirement for using it.
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -661,3 +662,31 @@ def test_browser_harness(script):
         capture_output=True, text=True, encoding="utf-8", timeout=60,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+# The browser harnesses that load the real app.js drop its trailing `boot();`
+# call so the page runs only on their fixtures. They do it with one regex, and
+# when ab19cbf31 put code after that call the old `/boot\(\);\s*$/` stopped
+# matching: the real boot() ran, routed home and hid the elements under test.
+# Four harnesses went red and nothing reported it, because test_browser_harness
+# skips without Playwright (claunch-1bhp2.1). This check needs neither node nor
+# a browser, so it runs in every gate.
+BOOT_STRIP = "replace(/^boot\\(\\);$/m, '')"
+
+
+def test_browser_harnesses_strip_the_real_boot_call():
+    app = (WEB.parents[1] / "src" / "claude_launcher" / "web" / "static" / "app.js")
+    calls = re.findall(r"^boot\(\);$", app.read_text(encoding="utf-8"), re.M)
+    assert len(calls) == 1, (
+        f"app.js has {len(calls)} top-level `boot();` lines; the browser "
+        "harnesses strip exactly one"
+    )
+    for harness in sorted(WEB.glob("*_browser.cjs")):
+        text = harness.read_text(encoding="utf-8")
+        strips = [line for line in text.splitlines()
+                  if "app.js" in line and "boot" in line and "replace(" in line]
+        for line in strips:
+            assert BOOT_STRIP in line, (
+                f"{harness.name} strips boot() with a pattern other than "
+                f"{BOOT_STRIP}: {line.strip()}"
+            )

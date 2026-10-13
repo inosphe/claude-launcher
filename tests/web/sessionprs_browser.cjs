@@ -12,7 +12,7 @@ const root = path.join(__dirname, '../../src/claude_launcher/web/static');
    if(u.pathname.startsWith('/api/')) return route.fulfill({json:{}});
    const file = u.pathname==='/'?'index.html':u.pathname.replace('/static/','');
    let body = fs.readFileSync(path.join(root,file));
-   if(file==='app.js') body=body.toString().replace(/boot\(\);\s*$/, '');
+   if(file==='app.js') body=body.toString().replace(/^boot\(\);$/m, '');
    return route.fulfill({body,contentType:file.endsWith('.js')?'text/javascript':file.endsWith('.css')?'text/css':'text/html'});
   });
   await page.goto('http://pr.test/');
