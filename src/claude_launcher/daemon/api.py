@@ -449,6 +449,11 @@ def build_app(
         _mesh_audience, manager, board
     )
     manager.exit_hooks.append(board.session_exited)
+    # A failed session's sweep waits for the person settling it
+    # (claunch-0j6gb.1); test registries may not have the list.
+    settle_hooks = getattr(manager, "settle_hooks", None)
+    if settle_hooks is not None:
+        settle_hooks.append(board.session_exited)
     # A finished sweep stamps ``swept_at`` on the session; persisting right
     # after is what keeps the next restart from sweeping that ending again.
     # Tests hand in registries without persist.
@@ -7445,7 +7450,8 @@ async def h_sessions_list(request: web.Request) -> web.Response:
     rail_view = request.query.get("view") == "rail"
     list_state = request.query.get("state") or "all"
     if list_state not in {
-        "all", "active", "current", "killed", "paused", "hold", "archived",
+        "all", "active", "current", "killed", "paused", "hold", "delayed",
+        "failed", "archived",
     }:
         return json_error(400, f"invalid session list state: {list_state!r}")
     # ``?project=`` narrows the list to one project's sessions; absent means
@@ -7491,6 +7497,10 @@ async def h_sessions_list(request: web.Request) -> web.Response:
         if list_state == "paused" and not paused:
             continue
         if list_state == "hold" and category != session_mod.CATEGORY_HOLD:
+            continue
+        if list_state == "delayed" and category != session_mod.CATEGORY_DELAYED:
+            continue
+        if list_state == "failed" and category != session_mod.CATEGORY_FAILED:
             continue
         if list_state == "archived" and not archived:
             continue
@@ -11360,6 +11370,8 @@ async def h_transcripts_list(request: web.Request) -> web.Response:
         "killed": session_mod.CATEGORY_KILLED,
         "paused": session_mod.CATEGORY_PAUSED,
         "hold": session_mod.CATEGORY_HOLD,
+        "delayed": session_mod.CATEGORY_DELAYED,
+        "failed": session_mod.CATEGORY_FAILED,
         "archived": session_mod.CATEGORY_ARCHIVED,
     }
     if state not in states:

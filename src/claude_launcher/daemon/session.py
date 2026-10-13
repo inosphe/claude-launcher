@@ -294,9 +294,9 @@ STATUS_IDLE = "idle"
 STATUS_EXITED = "exited"
 
 #: The lifecycle partition every reader filters a record by. An exited record
-#: is ``killed`` unless it carries the hold or the pause marker, and an
-#: archived one is none of those however it exited — so a record lands in
-#: exactly one of the five and the counts of the filters built on this add
+#: is ``killed`` unless it carries the delayed, hold, failed or pause marker,
+#: and an archived one is none of those however it exited — so a record lands
+#: in exactly one of the seven and the counts of the filters built on this add
 #: up. Defined once, here: the session rail (``daemon/api.py``) and the mesh
 #: roster (``daemon/mesh.py``) both ask this question, and two copies of the
 #: answer would let the same record be filed two ways on one page.
@@ -305,15 +305,25 @@ CATEGORY_HOLD = "hold"
 CATEGORY_KILLED = "killed"
 CATEGORY_PAUSED = "paused"
 CATEGORY_ARCHIVED = "archived"
+#: Waiting in the boot's restore queue (claunch-0j6gb.2): a held record whose
+#: relaunch the daemon has scheduled rather than run (``delayed_at``).
+CATEGORY_DELAYED = "delayed"
+#: Ended on its own with a nonzero code, nobody having asked (claunch-0j6gb.1,
+#: ``failed_at``).
+CATEGORY_FAILED = "failed"
 
 
 def session_category(session) -> str:
-    """Which of the five partitions ``session`` belongs to."""
+    """Which of the seven partitions ``session`` belongs to."""
     if getattr(session, "archived_at", None):
         return CATEGORY_ARCHIVED
     if session.exited:
         if getattr(session, "held_at", None):
+            if getattr(session, "delayed_at", None):
+                return CATEGORY_DELAYED
             return CATEGORY_HOLD
+        if getattr(session, "failed_at", None):
+            return CATEGORY_FAILED
         return (
             CATEGORY_PAUSED
             if getattr(session, "paused_at", None)
@@ -510,6 +520,19 @@ class Session:
         #: a respawn (fresh Session), or by a kill of the held record, which
         #: is when those hooks finally run (:meth:`SessionManager.unhold`).
         self.held_at: Optional[str] = None
+        #: The restore-queue marker (claunch-0j6gb.2), only ever set together
+        #: with :attr:`held_at` and only on a retired record: the boot's
+        #: restore put this session in the queue instead of relaunching it,
+        #: and the queue (or the first use, which every hold wake already
+        #: covers) brings it back. A live Session never carries it.
+        self.delayed_at: Optional[str] = None
+        #: The failure marker (claunch-0j6gb.1): set by the manager when the
+        #: program ended on its own with a nonzero code — no kill, pause or
+        #: hold asked for it. The exit hooks run as for a kill, except the
+        #: board sweep: its issue stays in_progress for the respawn, and is
+        #: swept when a person settles it by kill, archive or remove
+        #: (:meth:`SessionManager.unhold`). Cleared by a respawn.
+        self.failed_at: Optional[str] = None
         #: When the board sweep this incarnation's ending owed was made
         #: (:meth:`beads.Board.sweep_many`). Persisted with the record, so a
         #: restart that retires it does not sweep the same ending again
@@ -929,7 +952,8 @@ class Session:
         self.exited = True
         for task in self._deferred_deliveries:
             task.cancel()
-        self.exit_code = self.pty.exit_code()
+        reap = getattr(self.pty, "reap", None)
+        self.exit_code = reap() if reap is not None else self.pty.exit_code()
         self.exited_at = _utcnow()
         self._status = STATUS_EXITED
         # The last words of a session are the ones somebody reads afterwards,
@@ -2186,6 +2210,8 @@ class Session:
             "archived_at": self.archived_at,
             "paused_at": self.paused_at,
             "held_at": self.held_at,
+            "delayed_at": self.delayed_at,
+            "failed_at": self.failed_at,
             # A person's standing "type nothing in here" (:meth:`delivery_held`).
             # On the list poll rather than only on the per-session queued
             # endpoint, because the rail draws one row per session and the
@@ -2249,6 +2275,8 @@ class DeadSession:
         archived_at: Optional[str] = None,
         paused_at: Optional[str] = None,
         held_at: Optional[str] = None,
+        delayed_at: Optional[str] = None,
+        failed_at: Optional[str] = None,
         swept_at: Optional[str] = None,
         scrollback: int = 5000,
         idle_threshold: float = 2.0,
@@ -2267,6 +2295,8 @@ class DeadSession:
         self.archived_at = archived_at
         self.paused_at = paused_at
         self.held_at = held_at
+        self.delayed_at = delayed_at
+        self.failed_at = failed_at
         self.swept_at = swept_at
         #: A retired record was not ended by the OS in this daemon's lifetime,
         #: whatever its exit code says; see Session.ended_by_os.
@@ -2439,6 +2469,8 @@ class DeadSession:
             "archived_at": self.archived_at,
             "paused_at": self.paused_at,
             "held_at": self.held_at,
+            "delayed_at": self.delayed_at,
+            "failed_at": self.failed_at,
             "delivery_hold": self.delivery_held(),  # always False; see above
             "pending_deliveries": [],   # nothing is queued for a session that ended
         }

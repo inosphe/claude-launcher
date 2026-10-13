@@ -526,10 +526,16 @@ class RestartNotice:
     async def _attempt(self, debt: dict) -> bool:
         """One pass at one debt. True once it leaves the pending list."""
         name = debt.get("session") or ""
+        if getattr(self.manager, "is_waking", lambda _n: False)(name):
+            return False  # mid-relaunch: the record is out of the registry
         try:
             session = self.manager.get(name)
         except Exception:
             session = None
+        if (session is not None and getattr(session, "exited", True)
+                and getattr(session, "delayed_at", None)):
+            # In the restore queue (claunch-0j6gb.2): its terminal is coming.
+            return False
         if session is None or getattr(session, "exited", True):
             log.info(
                 "restart notice for %r retired undelivered: no terminal to "

@@ -1276,7 +1276,14 @@ def _cmd_sessions(_args: argparse.Namespace) -> int:
         state = s["status"]
         if state == "exited":
             code = s.get("exit_code")
-            state = f"exited({code})" if code is not None else "exited"
+            if s.get("delayed_at"):
+                # Waiting in the boot's restore queue (claunch-0j6gb.2).
+                state = "delayed"
+            elif s.get("failed_at"):
+                # Ended on its own, nobody asked (claunch-0j6gb.1).
+                state = f"failed({code})" if code is not None else "failed"
+            else:
+                state = f"exited({code})" if code is not None else "exited"
         prof = s.get("profile") or "-"
         # ASCII only: this prints to a Windows console as often as not, and
         # the box-drawing characters arrive there as mojibake.

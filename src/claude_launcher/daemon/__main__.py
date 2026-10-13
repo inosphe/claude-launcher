@@ -21,7 +21,8 @@ from .. import daemon_client, providers, store
 from . import basetemp_reaper
 from . import cflow2_clock as cflow2_clock_mod
 from . import cflow_clock, paths, restart_notice, resume, runtime_state, window as window_mod
-from . import hold as hold_mod, instance_manifest, session_reminder
+from . import harness as harness_mod
+from . import hold as hold_mod, instance_manifest, restore_queue, session_reminder
 from .api import build_app, notify_shutdown
 from .manager import SessionManager
 from .mesh import MeshError, MeshManager
@@ -94,6 +95,7 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
         focused_session_scheduling=bool(cfg["focused_session_scheduling"]),
         background_render_delay=float(cfg["background_render_delay"]),
         background_render_budget=float(cfg["background_render_budget_kib"]) * 1024,
+        restore_stagger=float(cfg.get("restore_stagger_seconds") or 0.0),
     )
     failed = manager.restore_all()
     if failed:
@@ -106,7 +108,8 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
             len(failed), ", ".join(failed),
         )
     restored = [s.sdef.name for s in manager.list() if not s.exited]
-    retired = [s.sdef.name for s in manager.list() if s.exited]
+    retired = [s.sdef.name for s in manager.list()
+               if s.exited and s.sdef.name not in manager.restore_queue]
     if restored:
         log.info("restored sessions: %s", ", ".join(restored))
     if retired:
@@ -280,6 +283,28 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
         mesh_mgr=mesh_manager,
     )
     resume_nudge.start()
+
+    def _delayed_woken(session) -> None:
+        # Whether a codex restore came back blank is decided by its launch,
+        # which for a delayed record ran after the nudge above was built.
+        name = session.sdef.name
+        if name in manager.resumed_blank:
+            return
+        if harness_mod.codex_restores_blank(session.sdef):
+            manager.resumed_blank.append(name)
+            resume_nudge.adopt_blank(name)
+
+    manager.delayed_wake_hooks.append(_delayed_woken)
+    # The sessions restore_all filed as delayed (claunch-0j6gb.2), started in
+    # priority order a few seconds apart; any use starts one at once.
+    queue = restore_queue.RestoreQueue(
+        manager,
+        roles_of=lambda name: [
+            role for m in mesh_manager.meshes_for_session(name)
+            for role in (m.get("roles") or [m.get("role")])
+        ],
+    )
+    queue.start()
     # Started alongside it, and deliberately not merged into it: the nudge is
     # allowed to give up on a session that is working again, and this is not
     # (see restart_notice's module docstring). Where both are owed, whichever
@@ -328,6 +353,7 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
         except (asyncio.CancelledError, Exception):
             pass
         await teardown.step("hold_clock", hold_clock.stop())
+        await teardown.step("restore_queue", queue.stop())
         await teardown.step("resume_nudge", resume_nudge.shutdown())
         # Undelivered debts stay on disk; shutdown only stops offering them.
         await teardown.step("restart_notice", restart_notice_task.shutdown())

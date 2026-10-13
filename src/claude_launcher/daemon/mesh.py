@@ -181,9 +181,14 @@ def recipient_body(msg: dict, handle: str) -> str:
 #: filter the page applies and a filter the daemon applies must agree about
 #: what "current" means.
 MEMBER_STATES = (
-    "all", "current", "running", "remote", "hold",
-    "killed", "paused", "archived", "missing",
+    "all", "current", "running", "remote", "hold", "delayed",
+    "failed", "killed", "paused", "archived", "missing",
 )
+
+
+#: The partitions the roster's ``current`` keeps: alive, unknowable, or asleep
+#: in a way a message ends (held, or delayed in the restore queue).
+CURRENT_CATEGORIES = ("running", "remote", "hold", "delayed")
 
 
 def member_in_state(category: str, state: str) -> bool:
@@ -197,7 +202,9 @@ def member_in_state(category: str, state: str) -> bool:
         return True
     if state == "current":
         # A held member is asleep, not gone (claunch-5l35i): a message wakes it.
-        return category in ("running", "remote", "hold")
+        # So is a delayed one — a held record the restore queue has not
+        # reached yet (claunch-0j6gb.2).
+        return category in CURRENT_CATEGORIES
     return category == state
 
 
@@ -3315,7 +3322,7 @@ class MeshManager:
             handle
             for handle, peer in mesh.members.items()
             if handle != member.handle
-            and self._member_category(mesh, peer) in ("running", "remote", "hold")
+            and self._member_category(mesh, peer) in CURRENT_CATEGORIES
         }
         reachable = [h for h in mesh.neighbours(member.handle) if h in available]
         others = ", ".join(
@@ -8393,7 +8400,8 @@ class MeshManager:
         rows = []
         counts = {
             "all": 0, "current": 0, "running": 0, "remote": 0, "hold": 0,
-            "killed": 0, "paused": 0, "archived": 0, "missing": 0,
+            "delayed": 0, "failed": 0, "killed": 0, "paused": 0, "archived": 0,
+            "missing": 0,
         }
         for h in sorted(mesh.members):
             member = mesh.members[h]
@@ -8401,7 +8409,7 @@ class MeshManager:
             counts["all"] += 1
             if category in counts:
                 counts[category] += 1
-            if category in ("running", "remote", "hold"):
+            if category in CURRENT_CATEGORIES:
                 counts["current"] += 1
             if handle is not None:
                 if h != handle:
@@ -8768,7 +8776,8 @@ class MeshManager:
         lineage = self._local_lineage(mesh)
         counts = {
             "all": 0, "current": 0, "running": 0, "remote": 0, "hold": 0,
-            "killed": 0, "paused": 0, "archived": 0, "missing": 0,
+            "delayed": 0, "failed": 0, "killed": 0, "paused": 0, "archived": 0,
+            "missing": 0,
         }
         for handle in sorted(mesh.members):
             m = mesh.members[handle]
@@ -8776,7 +8785,7 @@ class MeshManager:
             counts["all"] += 1
             if category in counts:
                 counts[category] += 1
-            if category in ("running", "remote", "hold"):
+            if category in CURRENT_CATEGORIES:
                 counts["current"] += 1
             if not member_in_state(category, state):
                 continue
