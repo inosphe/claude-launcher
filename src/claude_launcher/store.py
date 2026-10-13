@@ -463,6 +463,16 @@ DAEMON_DEFAULTS = {
     "window_targeted_width": 4,
     "window_worker_budget": 12,
     "window_targeted_per_session": 1,
+    # One window per machine (claunch-afmzw): every daemon instance under the
+    # same base home shares <base home>/daemon/window.json under a file lock,
+    # so a named instance's runs spend the same budget. "instance" keeps a
+    # window per instance (the behaviour before). Read at daemon start.
+    "window_scope": "machine",
+    # AIMD on the worker budget (claunch-afmzw): a run whose failures read as
+    # timeouts halves the budget in force, never below the floor; each passed
+    # run adds one back up to window_worker_budget. 0 turns it off.
+    "window_adaptive": 1,
+    "window_adaptive_floor": 4,
     # The resume nudge's machine switch: after a daemon restart, whether the
     # sessions that were mid-turn when it went down are told to carry on.
     # Restored sessions come back alive but idle — nothing is driving them —
