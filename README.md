@@ -1815,6 +1815,7 @@ and a form painted into its PTY would hang the session it was creating.
 | `handoff --to C [TEXT] [-f FILE] [-t D]` | Hand `D`'s work to `C` and end `D` — with text it happens now, without it `D` is asked to write one; `--cancel` withdraws a pending request. Detail-panel-only in the web UI, because it needs the target picked. |
 | `kill-session S`      | Terminate a running session (`--force` skips graceful terminate). Idempotent: an already-exited session is left alone — dropping a record is a different verb, below. |
 | `reparent S PARENT`   | Move a session — with everything spawned under it — under another parent. The operator's form of the agents' `reparent` MCP tool, which is scoped to the caller's own subtree; this one is not. Refused for a cycle, an exited parent, or a move that would push any session past `spawn.max_depth`. Opens the session's edge to its new parent in every mesh the two share. |
+| `detach S`            | End a session's parent/child relation: it becomes a root, its own children stay under it. The operator's form of the agents' `detach` MCP tool (scoped to the caller's own subtree). Cuts the private parent channel the daemon opened for the pair; there is no re-attach verb beyond `reparent`. Also a `detach` button on the detail panel's "spawned by" row. |
 | `clear-sessions` (`clear`) | Drop the records of **all** exited sessions at once — running ones are untouched. They are kept indefinitely otherwise (a restart never discards them), so this is the explicit cleanup; `--logs` also deletes their output logs, freeing their auto-generated names. |
 | `resize S COLS ROWS`  | Resize the session's terminal. |
 | `harnesses`           | List the declared harnesses (`claude`, `codex`, `pi`, `kimi`, `agent`, plus your own) and whether each is installed here. |
@@ -3807,6 +3808,17 @@ with a `stack` sub run beside it).
         (three branches, three sweeps)                  / | \
                                                       w1 w2  w3
   ```
+
+- **A direct parent and child always reach each other** (claunch-mz09h).
+  In a mesh both are in, their pair is connected even over a recorded cut.
+  Named by session name from a mesh the other is not in (another mesh,
+  another project), a send is carried on the pair's own channel — a mesh
+  they already share, or a private two-member one opened on first use —
+  and the answer names it under `rerouted`. One generation only: a
+  grandparent is not covered. `detach` (MCP, scoped) or `claunch detach S`
+  ends the relation, and with it this exception. The web rail likewise
+  keeps a visible session's descendants in sight across the project pick
+  and the mesh tabs, marked with a purple edge.
 
 - **The nested worker keeps a stack: a stacked pull request in a sub run.**
   It runs `improv-worker` like any worker and stands a `stack` sub run

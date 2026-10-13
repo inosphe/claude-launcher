@@ -1450,6 +1450,31 @@ const modalConfirm = (title, body, label, danger = true) =>
     ],
   });
 
+/* End a session's parent/child relation (claunch-mz09h). The daemon makes
+   it a root and cuts the private channel it opened for the pair; there is no
+   button that puts it back. */
+async function detachSessionParent(name, parent) {
+  if (!(await modalConfirm(
+    `Detach ${name} from ${parent}?`,
+    `${name} becomes a root session. The two stop reaching each other past ` +
+    `mesh wiring, and the private parent/child channel is cut. Its own ` +
+    `children stay under it. This cannot be re-attached from here.`,
+    "Detach"
+  ))) return;
+  const resp = await api(`/api/sessions/${encodeURIComponent(name)}/detach`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  if (!resp.ok) {
+    let msg = `HTTP ${resp.status}`;
+    try { msg = (await resp.json()).error || msg; } catch {}
+    await modalInfo("Detach failed", msg);
+    return;
+  }
+  await refreshSessions();
+}
+
 /* A bulk call answers with what it did *and* with what it did not: a session
    that would not stop, one that would not come back. That omission is why
    the rail a second later does not match the count on the button, and left
@@ -3421,13 +3446,35 @@ function showSessionGridTip(cell, row, col, name, inView, pin = false) {
    comes back with the depth it went in with. */
 function regroupDepths(entries) {
   const depths = new Map();
-  return entries.map(([session, depth]) => {
+  return entries.map(([session, depth, ...rest]) => {
     const parent = session.parent;
     const own = depth > 0 && parent && depths.has(parent)
       ? depths.get(parent) + 1 : 0;
     depths.set(session.name, own);
-    return [session, own];
+    return [session, own, ...rest];
   });
+}
+
+/* One bucket's entries, with the descendants of its sessions that grouping
+   filed under another heading added back (claunch-mz09h): a child that
+   joined another mesh still shows under its parent's tab. Added entries
+   carry a third element, `true`, which the row draws as `kin-outside`.
+   `entries` is the whole rail in lineage order, so the bucket keeps that
+   order and a parent always precedes the descendants added under it. */
+function bucketWithDescendants(entries, inside) {
+  const own = new Set(inside.map((entry) => entry[0].name));
+  const shown = new Set(own);
+  const out = [];
+  for (const entry of entries) {
+    const s = entry[0];
+    if (own.has(s.name)) {
+      out.push(entry);
+    } else if (s.parent && s.parent !== s.name && shown.has(s.parent)) {
+      shown.add(s.name);
+      out.push([s, entry[1], true]);
+    }
+  }
+  return out;
 }
 
 /* Convert lineage-ordered rows into headings and rows. Each selected group
@@ -3443,8 +3490,8 @@ function regroupDepths(entries) {
    (shadowLineage) among the shadows of that bucket. */
 function sessionGroupRows(entries, groups, level = 0, meshGroup = null, shadows = []) {
   if (level >= groups.length) return [
-    ...regroupDepths(entries).map(([session, depth]) =>
-      ({ type: "session", session, depth, meshGroup })),
+    ...regroupDepths(entries).map(([session, depth, kin]) =>
+      ({ type: "session", session, depth, meshGroup, kin: !!kin })),
     // Guarded like the other late-defined helpers: a harness that lifts only
     // this function gets the shadows flat, in the order they came.
     ...(typeof shadowLineage === "function"
@@ -3470,7 +3517,11 @@ function sessionGroupRows(entries, groups, level = 0, meshGroup = null, shadows 
     // and nothing is suppressed under it.
     const under = group === "mesh" && value !== "(no mesh)" ? value : meshGroup;
     const { entries: inside, shadows: remote } = buckets.get(value);
-    out.push(...sessionGroupRows(inside, groups, level + 1, under, remote));
+    // Guarded like the other late-defined helpers: a harness that lifts only
+    // this function gets the bucket as grouping filed it.
+    const shown = typeof bucketWithDescendants === "function"
+      ? bucketWithDescendants(entries, inside) : inside;
+    out.push(...sessionGroupRows(shown, groups, level + 1, under, remote));
   }
   return out;
 }
@@ -4393,8 +4444,8 @@ async function refreshSessions(options) {
   // Everything a row draws from, other than the stamps refreshRailSeen moves
   // on in place. The same row is drawn twice under two mesh headings, so the
   // heading it sits under is part of it.
-  const rowSignature = (s, depth, meshGroup) => JSON.stringify(
-    [s, depth, meshGroup || null, s.name === currentName, s.name === sessName,
+  const rowSignature = (s, depth, meshGroup, kin) => JSON.stringify(
+    [s, depth, meshGroup || null, !!kin, s.name === currentName, s.name === sessName,
      pins.includes(s.name), briefingLLM, sessMeshes(s.name), handleTag(s.name),
      railMeshTags(s.name, meshGroup || null), railMetaText(s)],
     unstamped,
@@ -4569,7 +4620,11 @@ async function refreshSessions(options) {
       continue;
     }
     const { session: s, depth } = row;
-    const rowSig = inPlace ? rowSignature(s, depth, row.meshGroup) : "";
+    // Drawn because it descends from a session this rail shows, though its
+    // own project or mesh is filtered out (claunch-mz09h).
+    const kin = !!row.kin || (typeof sessionShownForLineage === "function"
+      && sessionShownForLineage(s));
+    const rowSig = inPlace ? rowSignature(s, depth, row.meshGroup, kin) : "";
     const keptRow = inPlace ? takeKeptRow(s.name, rowSig) : null;
     if (keptRow) {
       // Both decorations read state beside the record (the note editor that
@@ -4606,6 +4661,12 @@ async function refreshSessions(options) {
       li.style.paddingLeft = `${12 + Math.min(depth, 4) * 10}px`;
       li.classList.add("child");
       li.title = `spawned by ${s.parent}`;
+    }
+    if (kin) {
+      li.classList.add("kin-outside");
+      li.title = `${li.title ? li.title + " · " : ""}shown as a descendant`
+        + ` (project ${recordProject(s)}${row.meshGroup || !sessMeshes(s.name).length
+          ? "" : ", mesh " + sessMeshes(s.name)[0].mesh})`;
     }
     const dot = document.createElement("span");
     // The status class is the socket's word; `paused` is the record's, laid
@@ -9825,9 +9886,45 @@ function sessionInCurrentProject(s) {
   return !currentProject || recordProject(s) === currentProject;
 }
 
-/* The sessions the rail draws: the cache, narrowed to the picked project. */
+/* Every descendant (child, grandchild, ...) of the `base` sessions found in
+   `list` that is not itself in `base`, parent-before-child (claunch-mz09h).
+   A session a person can see keeps its subtree in sight wherever that
+   subtree is filed: another project, another mesh. The rows it returns are
+   the ones the rail marks as shown for their lineage (`kin-outside`). */
+function lineageDescendants(base, list) {
+  const kids = new Map();
+  for (const s of list || []) {
+    if (!s || !s.parent || s.parent === s.name) continue;
+    if (!kids.has(s.parent)) kids.set(s.parent, []);
+    kids.get(s.parent).push(s);
+  }
+  const seen = new Set((base || []).map((s) => s.name));
+  const out = [];
+  const queue = [...seen];
+  while (queue.length) {
+    for (const kid of kids.get(queue.shift()) || []) {
+      if (seen.has(kid.name)) continue;
+      seen.add(kid.name);
+      out.push(kid);
+      queue.push(kid.name);
+    }
+  }
+  return out;
+}
+
+/* The sessions the rail draws: the cache, narrowed to the picked project,
+   plus the descendants of those sessions that are filed under another one
+   (lineageDescendants). */
 function railSessions(list = sessionsCache) {
-  return (list || []).filter(sessionInCurrentProject);
+  const base = (list || []).filter(sessionInCurrentProject);
+  if (!currentProject || typeof lineageDescendants !== "function") return base;
+  return [...base, ...lineageDescendants(base, list)];
+}
+
+/* Whether the rail draws `s` only because it descends from a session of
+   the picked project (railSessions). */
+function sessionShownForLineage(s) {
+  return !!currentProject && !sessionInCurrentProject(s);
 }
 
 /* The same address with the project set to `name`, or taken out ("" = all). */
@@ -34481,6 +34578,14 @@ function renderSession(data) {
     // below it reads: an inherited mesh and a scoped run are the parent's
     // arrangement, not choices this session made.
     metaRow(dl, "spawned by", s.parent, "the session that created this one");
+    // Ending the relation (claunch-mz09h) sits on the row it ends.
+    if (s.parent && dl.lastChild && typeof detachSessionParent === "function") {
+      const cut = el("button", "sess-detach", "detach");
+      cut.type = "button";
+      cut.title = `end the parent/child relation with ${s.parent}: this session becomes a root`;
+      cut.addEventListener("click", () => detachSessionParent(s.name, s.parent));
+      dl.lastChild.append(" ", cut);
+    }
     // A quick-fork is a child with one more fact: whose conversation it is a
     // copy of, which is also where its merge goes.
     metaRow(

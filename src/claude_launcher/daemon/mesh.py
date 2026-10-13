@@ -911,6 +911,11 @@ class Mesh:
         self.visibility: str = "private"
         # Auxiliary parent/child channel; excluded from default team inheritance.
         self.parent_channel: List[str] = []
+        #: ``(a, b) -> bool``: are these two members' sessions a direct
+        #: parent/child pair on this daemon? Bound by the MeshManager that
+        #: registers the mesh (:meth:`MeshManager._kin_pair`); None for a
+        #: bare Mesh. Never persisted -- the tree is the session records'.
+        self.kin: Optional[Callable[[str, str], bool]] = None
         #: Authority side: daemons this mesh was offered to, machine ->
         #: {token, created_at}. The token lets that machine attach without
         #: approval; it lives until the offer is cancelled or redeemed.
@@ -1110,6 +1115,12 @@ class Mesh:
         graph governs what the members may do, not what may be said to them.
         """
         if a == b:
+            return True
+        # A direct parent/child pair always reaches each other, over any
+        # recorded cut (claunch-mz09h): a child that cannot report to its
+        # parent is a broken spawn, not a topology choice. Ending that is a
+        # detach of the pair, not an edge edit.
+        if self.kin is not None and self.kin(a, b):
             return True
         recorded = self.member_edges.get(self.member_key(a, b))
         if recorded is not None:
@@ -1514,6 +1525,31 @@ class MeshManager:
                         )
                 mesh.me = self._machine
             self._migrate_v2(mesh)
+
+    def _bind_kin(self, mesh: Mesh) -> None:
+        """Give ``mesh`` its view of the session tree (:attr:`Mesh.kin`)."""
+        mesh.kin = lambda a, b, _mesh=mesh: self._kin_pair(_mesh, a, b)
+
+    def _kin_pair(self, mesh: Mesh, a: str, b: str) -> bool:
+        """Whether members ``a`` and ``b`` run sessions that are a direct
+        parent/child pair here (:meth:`SessionManager.direct_kin`).
+
+        Local members only: another daemon's session is not in this tree,
+        and a guest's handle that happens to equal a local session name must
+        not borrow that session's lineage.
+        """
+        ma, mb = mesh.members.get(a), mesh.members.get(b)
+        if ma is None or mb is None or not ma.session or not mb.session:
+            return False
+        if not (self._is_local(mesh, ma) and self._is_local(mesh, mb)):
+            return False
+        return self._session_kin(ma.session, mb.session)
+
+    def _session_kin(self, a: str, b: str) -> bool:
+        """:meth:`SessionManager.direct_kin`, or False for a manager that has
+        no tree to ask (a test double)."""
+        direct_kin = getattr(self.manager, "direct_kin", None)
+        return bool(direct_kin and direct_kin(a, b))
 
     def _is_local(self, mesh: Mesh, member: Member) -> bool:
         """Whether ``member``'s session lives on THIS daemon.
@@ -2042,6 +2078,7 @@ class MeshManager:
                 )
                 continue
             self._meshes[mesh.name] = mesh
+            self._bind_kin(mesh)
             if entry.name != mesh.name:
                 # A mirror written before addresses lives under its bare
                 # name; its key is now name@origin. Move it so a local mesh
@@ -2117,6 +2154,7 @@ class MeshManager:
             raise MeshError(str(exc)) from None
         mesh = Mesh(name, me=self.machine, project=project)
         self._meshes[name] = mesh
+        self._bind_kin(mesh)
         self._persist_def(mesh)
         self._ensure_worker(name)
         return mesh
@@ -2523,6 +2561,7 @@ class MeshManager:
             )
         if attach:
             self._meshes[mesh.name] = mesh
+            self._bind_kin(mesh)
             self._persist_def(mesh)
             self._persist_cursors(mesh)
             self._ensure_worker(mesh.name)
@@ -2539,6 +2578,7 @@ class MeshManager:
             cursor = len(mesh.messages)
         mesh.cursors[member.handle] = cursor
         self._meshes[mesh.name] = mesh
+        self._bind_kin(mesh)
         self._persist_def(mesh)
         self._persist_cursors(mesh)
         self._ensure_worker(mesh.name)
@@ -3517,6 +3557,12 @@ class MeshManager:
         unreachable (result carries ``queued: True``).
         """
         mesh = self.get(name)
+        to, kin_sent = await self._send_to_kin_elsewhere(
+            mesh, sender, to, body, type=type, ref=ref, sections=sections,
+        )
+        if to is None:
+            first = dict(kin_sent[0]["result"])
+            return {**first, "rerouted": kin_sent}
         to, unreached = await self._resolve_audience(mesh, sender, to)
         if mesh.primary:
             result = await self._send_from_mirror(
@@ -3537,7 +3583,69 @@ class MeshManager:
             )
             prior = result.get("notice")
             result = {**result, "notice": f"{prior} {note}" if prior else note}
+        if kin_sent:
+            result = {**result, "rerouted": kin_sent}
         return result
+
+    async def _send_to_kin_elsewhere(
+        self,
+        mesh: Mesh,
+        sender: str,
+        to: Union[str, List[str]],
+        body: str,
+        *,
+        type: str,
+        ref: Optional[dict],
+        sections: Optional[dict],
+    ) -> Tuple[Optional[Union[str, List[str]]], List[dict]]:
+        """Deliver to a direct parent or child that is not a member here.
+
+        A parent and its child may talk whatever mesh or project either of
+        them sits in (claunch-mz09h). A target named in ``to`` that is not a
+        member of ``mesh`` but is the session name of the sender's direct
+        parent or child is sent on the pair's own channel instead
+        (:meth:`ensure_parent_channel` — a mesh both already share, or a
+        private two-member one it opens). Everything else is left in ``to``
+        for the ordinary path, which refuses an unknown name as before.
+
+        Returns the remaining address (``None`` when nothing is left) and one
+        ``{session, mesh, result}`` per rerouted target. ``reply_to`` is not
+        carried: it names a message of this mesh's log.
+        """
+        if to == "*" or (isinstance(to, str) and to.startswith("@")):
+            return to, []
+        member = self.resolve_sender(mesh.name, sender)
+        if member is None or not member.session or not self._is_local(mesh, member):
+            return to, []
+        me = member.session
+        targets = [to] if isinstance(to, str) else list(to)
+        kin = [
+            t for t in targets
+            if t not in mesh.members and self._session_kin(me, t)
+        ]
+        if not kin:
+            return to, []
+        if sections:
+            raise MeshError(
+                f"{', '.join(kin)} is not a member of mesh {mesh.name!r}: a "
+                "batch send cannot be rerouted to a parent or child elsewhere "
+                "-- send it to them on its own"
+            )
+        sent: List[dict] = []
+        for other in kin:
+            mine = self.manager.get(me).sdef.parent == other
+            child, parent = (me, other) if mine else (other, me)
+            route = await self.ensure_parent_channel(child, parent)
+            mine_handle = route["child_handle"] if mine else route["parent_handle"]
+            their_handle = route["parent_handle"] if mine else route["child_handle"]
+            result = await self.send(
+                route["mesh"], mine_handle, their_handle, body, type=type, ref=ref,
+            )
+            sent.append({"session": other, "mesh": route["mesh"], "result": result})
+        rest = [t for t in targets if t not in set(kin)]
+        if not rest:
+            return None, sent
+        return (rest[0] if isinstance(to, str) else rest), sent
 
     # ------------------------------------------------------------------ #
     # urgent one-shot send
@@ -5437,6 +5545,30 @@ class MeshManager:
             await self.set_member_link(mesh.name, mine, above, enabled=True)
             opened.append({"mesh": mesh.name, "a": mine, "b": above})
         return opened
+
+    async def unlink_lineage(self, child: str, parent: str) -> List[dict]:
+        """Close the private channel a detached pair used to talk on.
+
+        Only a mesh :meth:`ensure_parent_channel` opened for exactly this
+        pair (``parent_channel``) is touched: its one edge is cut and the log
+        is kept. A team mesh both happen to share keeps its wiring -- that
+        edge was the team's decision, and the detach ended the lineage, not
+        the team. Returns the edges cut, ``{mesh, a, b}`` each.
+        """
+        cut: List[dict] = []
+        for mesh in list(self._meshes.values()):
+            if mesh.parent_channel != [parent, child]:
+                continue
+            ends = [
+                h for h, m in mesh.members.items()
+                if m.session in (parent, child) and self._is_local(mesh, m)
+            ]
+            if len(ends) != 2:
+                continue
+            a, b = sorted(ends)
+            await self.set_member_link(mesh.name, a, b, enabled=False)
+            cut.append({"mesh": mesh.name, "a": a, "b": b})
+        return cut
 
     async def rewire_members(
         self, name: str, *, actor: str = ""

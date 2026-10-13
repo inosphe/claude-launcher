@@ -1854,7 +1854,7 @@ def test_mesh_mcp_tools(home, monkeypatch):
         # (what every session this daemon starts is told: daemon_prompt)
         "daemon_prompt",
         "rebrief", "kill", "handoff", "deep_think",
-        "reparent", "connect",
+        "detach", "reparent", "connect",
         "disconnect",
         # ... and answering the members who asked to be wired themselves
         "wire_requests",

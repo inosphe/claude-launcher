@@ -530,6 +530,14 @@ html[data-theme="light"] .xterm {
 #session-list li.child::before {
   content: "└"; color: #6e7681; font-size: 11px; flex: none; margin-right: -2px;
 }
+/* A descendant drawn although its own project or mesh is filtered out: it
+   is here because a session on this rail spawned it (claunch-mz09h). A
+   purple inset edge and tint mark it without moving the row by a pixel. */
+#session-list li.kin-outside {
+  background: rgba(163, 113, 247, 0.08); box-shadow: inset 2px 0 0 #a371f7;
+}
+#session-list li.kin-outside:hover { background: rgba(163, 113, 247, 0.16); }
+#session-list li.kin-outside.active { background: #33294a; }
 #session-list .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
 .dot.idle { background: #3fb950; }
 .dot.busy { background: #d29922; }
@@ -7115,3 +7123,12 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .ws-sync-operation h5 { margin: 0 0 6px; font-size: 12px; }
 .ws-sync-operation-preview { min-width: 0; margin: 8px 0; }
 .ws-sync-section, .ws-sync-agent { min-width: 0; overflow-wrap: anywhere; }
+
+/* The detail panel's "spawned by" row carries the verb that ends it
+   (claunch-mz09h): small, beside the parent's name. */
+.sess-meta .sess-detach {
+  margin-left: 6px; padding: 0 6px; font-size: 11px; line-height: 16px;
+  background: transparent; color: #f85149; border: 1px solid #6e3630;
+  border-radius: 4px; cursor: pointer;
+}
+.sess-meta .sess-detach:hover { background: #3d1d1b; }

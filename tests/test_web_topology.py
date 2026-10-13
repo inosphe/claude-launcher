@@ -366,6 +366,7 @@ CHECKS = [
         "render_check.js",
         "lineage_check.js",
         "railgroupdepth_check.js",
+        "raillineagekin_check.js",
         "sessionfilters_check.js",
         "sessiongrouptabs_check.js",
         "projectsearchline_check.js",
