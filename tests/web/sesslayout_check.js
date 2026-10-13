@@ -85,6 +85,9 @@ let currentName = "s15";
 function applySplitRatio(r) { calls.ratios.push(r); }
 function openSplit(name, kind) { splitFor = name; splitKind = kind; calls.opened.push(name); calls.kinds.push(kind); }
 function closeSplit() { splitFor = null; splitKind = null; calls.closed++; }
+// The 🗪 threads button's news mark (threadspane_check holds what it reads).
+function threadsNews() { return true; }
+function markThreadsSeen(name) { calls.seen.push(name); }
 `;
 const expose = `
 Object.assign(exports, {
@@ -103,9 +106,9 @@ function build(o = {}) {
     setItem: (k, v) => store.set(k, String(v)),
   };
   const nodes = {};
-  for (const id of ["term-split", "term-wf", "term-splitbtn", "term-simsbtn", "term-chartbtn", "term-qabtn"]) nodes[id] = node(id);
+  for (const id of ["term-split", "term-wf", "term-splitbtn", "term-simsbtn", "term-chartbtn", "term-qabtn", "term-threadsbtn"]) nodes[id] = node(id);
   const body = node("body");
-  const calls = { opened: [], kinds: [], closed: 0, ratios: [], refits: 0, refreshed: 0 };
+  const calls = { opened: [], kinds: [], closed: 0, ratios: [], refits: 0, refreshed: 0, seen: [] };
   const ctx = {};
   new Function(
     "exports", "$", "document", "BASE", "localStorage", "MOBILE_MQ",
@@ -316,10 +319,21 @@ check("the key carries the base path",
         && w.nodes["term-chartbtn"].attrs["aria-pressed"] === "false"
         && w.nodes["term-splitbtn"].attrs["aria-pressed"] === "false", w.calls.kinds);
   check("...and the qa choice survives a reload", w.ctx.sessLayoutFor("s15").pane === "qa");
+  // The session's sub-topic threads (🗪, claunch-doj98) are a fifth.
+  check("while closed, 🗪 says the session wrote since you looked",
+        /since you last looked/.test(w.nodes["term-threadsbtn"].title) && w.calls.seen.length === 0);
+  w.ctx.setSessLayout("s15", { pane: "threads" });
+  check("the threads pane opens with the threads and lights 🗪 only",
+        w.calls.kinds[w.calls.kinds.length - 1] === "threads"
+        && w.nodes["term-threadsbtn"].attrs["aria-pressed"] === "true"
+        && w.nodes["term-chartbtn"].attrs["aria-pressed"] === "false"
+        && w.nodes["term-splitbtn"].attrs["aria-pressed"] === "false", w.calls.kinds);
+  check("...showing them is seeing them", w.calls.seen[w.calls.seen.length - 1] === "s15");
+  check("...and the threads choice survives a reload", w.ctx.sessLayoutFor("s15").pane === "threads");
 }
 
 /* --- the markup the code reaches for ------------------------------------- */
-for (const id of ["term-splitbtn", "term-simsbtn", "term-chartbtn", "term-qabtn", "term-split", "term-wf"]) {
+for (const id of ["term-splitbtn", "term-simsbtn", "term-chartbtn", "term-qabtn", "term-threadsbtn", "term-split", "term-wf"]) {
   check(`index.html declares #${id}`, html.includes(`id="${id}"`));
 }
 check("the bar and the pane sit under the terminal, before the pages",

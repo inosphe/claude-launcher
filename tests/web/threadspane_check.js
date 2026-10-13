@@ -1,0 +1,212 @@
+/* Session threads pane (threads-pane.js) and its header button (app.js),
+   claunch-doj98.
+
+   What has to hold:
+     helpers   -- excerpt takes the first non-empty line and shortens it;
+                  unseen marks threads whose last message is the agent's and
+                  newer than this browser's read position; Enter sends,
+                  Shift+Enter and IME composition do not; pick keeps the
+                  remembered thread, else the first open one.
+     pane      -- mounting lists the session's threads, opens the first open
+                  one, renders user text as text, and a send posts the text to
+                  that thread; a new thread posts {to, title, text}; close
+                  posts to /close; reading a thread moves its read position;
+                  unmount stops the poll.
+     rail      -- 🗪 threads lights while the session has an open thread, and
+                  carries has-news when the session wrote past what this
+                  browser saw; a session never seen here starts caught up.
+     wired     -- the button and script in index.html (before app.js), the
+                  split pane opens/closes ThreadsPane, the poll and boot read
+                  the rail, and threads-pane.js never assigns HTML. */
+const assert = require("assert/strict");
+const fs = require("fs");
+const path = require("path");
+const vm = require("vm");
+const root = path.join(__dirname, "..", "..", "src", "claude_launcher", "web", "static");
+const src = fs.readFileSync(path.join(root, "threads-pane.js"), "utf8");
+const app = fs.readFileSync(path.join(root, "app.js"), "utf8");
+const html = fs.readFileSync(path.join(root, "index.html"), "utf8");
+
+/* ---- a small DOM: enough for the pane's own calls ---- */
+function makeDoc() {
+  const doc = {activeElement: null};
+  function el(tag) {
+    const classes = new Set();
+    const n = {
+      tagName: tag.toUpperCase(), children: [], parent: null, handlers: {}, dataset: {},
+      textContent: "", value: "", title: "", placeholder: "", rows: 0, type: "", scrollTop: 0, scrollHeight: 0,
+      get className() { return [...classes].join(" "); },
+      set className(v) { classes.clear(); String(v).split(/\s+/).filter(Boolean).forEach((c) => classes.add(c)); },
+      classList: {
+        add: (c) => classes.add(c), remove: (c) => classes.delete(c), contains: (c) => classes.has(c),
+        toggle: (c, on) => { const want = on === undefined ? !classes.has(c) : !!on; want ? classes.add(c) : classes.delete(c); },
+      },
+      get firstChild() { return n.children[0] || null; },
+      get lastChild() { return n.children[n.children.length - 1] || null; },
+      append(...kids) { for (const k of kids) { k.parent = n; n.children.push(k); } },
+      replaceChildren(...kids) { n.children = []; n.append(...kids); },
+      addEventListener(k, fn) { (n.handlers[k] ||= []).push(fn); },
+      fire(k, e = {}) { (n.handlers[k] || []).forEach((fn) => fn({preventDefault() {}, ...e})); },
+      focus() { doc.activeElement = n; },
+      contains(o) { for (let x = o; x; x = x.parent) if (x === n) return true; return false; },
+      all() { return n.children.flatMap((c) => [c, ...c.all()]); },
+      querySelector(sel) { return n.querySelectorAll(sel)[0] || null; },
+      querySelectorAll(sel) {
+        const parts = sel.trim().split(/\s+/);
+        const match = (x, p) => p.startsWith(".") ? x.classList.contains(p.slice(1)) : x.tagName === p.toUpperCase();
+        let found = n.all().filter((x) => match(x, parts[parts.length - 1]));
+        if (parts.length === 2) found = found.filter((x) => { for (let y = x.parent; y; y = y.parent) if (match(y, parts[0])) return true; return false; });
+        return found;
+      },
+      text() { return n.textContent + n.children.map((c) => c.text()).join(""); },
+    };
+    Object.defineProperty(n, "innerHTML", {set() { throw new Error("threads-pane.js assigned innerHTML"); }});
+    return n;
+  }
+  doc.createElement = el;
+  doc.hidden = false;
+  return doc;
+}
+
+const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r)); };
+
+(async () => {
+  const document = makeDoc();
+  const store = new Map();
+  const localStorage = {getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v))};
+  const timers = [];
+  const ctx = vm.createContext({
+    document, localStorage, console, JSON, Date, Map, Set, Error, Promise,
+    setInterval: (fn, ms) => { timers.push(fn); return timers.length; },
+    clearInterval: (id) => { timers[id - 1] = null; },
+    setTimeout: () => 0,
+  });
+  vm.runInContext(src, ctx);
+  const P = vm.runInContext("ThreadsPane", ctx);
+
+  /* helpers */
+  assert.equal(P.excerpt("\n  \nfirst line\nsecond"), "first line");
+  assert.equal(P.excerpt("x".repeat(100), 10), "xxxxxxxxx…");
+  const ts = [
+    {id: "th-a", status: "closed", last_seq: 9, last: {author: "agent"}},
+    {id: "th-b", status: "open", last_seq: 5, last: {author: "agent"}},
+    {id: "th-c", status: "open", last_seq: 7, last: {author: "user"}},
+  ];
+  assert.deepEqual([...P.unseen(ts, {"th-a": 9, "th-b": 4})], ["th-b"]);
+  assert.equal(P.sendKey({key: "Enter"}), true);
+  assert.equal(P.sendKey({key: "Enter", shiftKey: true}), false);
+  assert.equal(P.sendKey({key: "Enter", isComposing: true}), false);
+  assert.equal(P.sendKey({key: "Enter", keyCode: 229}), false);
+  assert.equal(P.pick(ts, "th-c"), "th-c");
+  assert.equal(P.pick(ts, "th-gone"), "th-b");
+  assert.equal(P.pick([], ""), "");
+
+  /* the pane against a fake daemon */
+  const threads = [
+    {id: "th-1", title: "Log format", status: "open", opened_by: "user", last_seq: 2,
+     last: {author: "agent", body: "because tools"}},
+    {id: "th-2", title: "Old topic", status: "closed", opened_by: "agent", last_seq: 1, last: null},
+  ];
+  const messages = {"th-1": [
+    {seq: 1, author: "user", body: "<b>why json?</b>", at: "2026-10-13T00:00:00+00:00"},
+    {seq: 2, author: "agent", body: "because tools", at: "2026-10-13T00:00:01+00:00"},
+  ]};
+  const calls = [];
+  const api = async (p, opts = {}) => {
+    calls.push([opts.method || "GET", p, opts.body ? JSON.parse(opts.body) : undefined]);
+    let doc = {};
+    if (p.startsWith("/api/threads?session=")) doc = {session: "s1", threads, open: 1, agent_seq: 2};
+    else if (/^\/api\/threads\/th-1\?after=/.test(p)) {
+      const after = Number(p.split("after=")[1]);
+      doc = {thread: threads[0], messages: messages["th-1"].filter((m) => m.seq > after)};
+    } else if (p === "/api/threads/th-1/messages") doc = {message: {seq: 3}, delivered: true};
+    else if (p === "/api/threads") doc = {thread: {id: "th-9"}, delivered: false};
+    else if (p.endsWith("/close")) doc = {thread: threads[0]};
+    return {ok: true, status: 200, json: async () => doc};
+  };
+  let changed = 0;
+  const host = document.createElement("div");
+  P.mount(host, "s1", {api, storageKey: "k", onChange: () => changed++});
+  await settle();
+  assert.equal(calls[0][1], "/api/threads?session=s1");
+  const items = host.querySelectorAll(".th-item");
+  assert.deepEqual(items.map((i) => i.dataset.id), ["th-1", "th-2"]);
+  assert.ok(items[0].classList.contains("on"), "the first open thread is shown");
+  assert.ok(items[1].classList.contains("closed"));
+  const msgs = host.querySelectorAll(".th-msg");
+  assert.equal(msgs.length, 2);
+  assert.equal(msgs[0].querySelector(".th-msg-body").textContent, "<b>why json?</b>", "user text stays text");
+  assert.deepEqual(JSON.parse(store.get("k")), {"th-1": 2}, "showing a thread reads it");
+
+  // send: Enter in the composer posts to the thread
+  const box = host.querySelector(".th-compose .th-text");
+  box.value = "and yaml?";
+  box.fire("keydown", {key: "Enter"});
+  await settle();
+  assert.deepEqual(calls.find((c) => c[0] === "POST"), ["POST", "/api/threads/th-1/messages", {text: "and yaml?"}]);
+  assert.ok(changed >= 1, "a send refreshes the header light");
+
+  // close
+  const toggle = host.querySelector(".th-convo-head .term-btn");
+  assert.equal(toggle.textContent, "닫기");
+  toggle.fire("click");
+  await settle();
+  assert.ok(calls.some((c) => c[0] === "POST" && c[1] === "/api/threads/th-1/close"));
+
+  // new thread: + opens the form, 시작 posts {to, title, text}; a failed delivery is said
+  host.querySelector(".th-new").fire("click");
+  await settle();
+  const form = host.querySelector(".th-newform");
+  form.querySelector(".th-title-input").value = "Deploy";
+  form.querySelector(".th-text").value = "when?";
+  form.querySelector(".term-btn").fire("click");
+  await settle();
+  assert.deepEqual(calls.filter((c) => c[1] === "/api/threads").pop(), ["POST", "/api/threads", {to: "s1", title: "Deploy", text: "when?"}]);
+  assert.match(host.querySelector(".th-head").text(), /전달하지 못했습니다/);
+
+  // unmount stops the poll and empties the host
+  P.unmount();
+  assert.equal(host.children.length, 0);
+  assert.ok(timers.every((t) => t === null), "no poll outlives the pane");
+
+  /* the header button's rail (app.js) */
+  const start = app.indexOf("function syncSessionResourceButtons(");
+  const end = app.indexOf("async function refreshCflow2Rail(");
+  assert.ok(start > 0 && end > start);
+  const btn = document.createElement("button");
+  const rail = {sessions: {}};
+  const appStore = new Map();
+  const actx = vm.createContext({
+    BASE: "/", currentPage: "terminal", currentName: "s1", sessionSimCache: [], cflow2RailCache: {},
+    sessionsCache: [], sessCflowRun: () => null, isPiDurable: () => false, $: (id) => (id === "term-threadsbtn" ? btn : null),
+    sessLayoutFor: () => ({split: false, pane: "run"}),
+    localStorage: {getItem: (k) => (appStore.has(k) ? appStore.get(k) : null), setItem: (k, v) => appStore.set(k, String(v))},
+    api: async () => ({ok: true, json: async () => rail}),
+    JSON,
+  });
+  vm.runInContext(app.slice(start, end), actx);
+  rail.sessions = {s1: {open: 1, agent_seq: 5}};
+  await actx.refreshThreadsRail();
+  assert.ok(btn.classList.contains("has-resource"), "an open thread lights 🗪");
+  assert.ok(!btn.classList.contains("has-news"), "a session never seen here starts caught up");
+  rail.sessions = {s1: {open: 1, agent_seq: 8}};
+  await actx.refreshThreadsRail();
+  assert.ok(btn.classList.contains("has-news"), "a newer agent message is news");
+  actx.markThreadsSeen("s1");
+  actx.syncSessionResourceButtons();
+  assert.ok(!btn.classList.contains("has-news"), "seen is caught up");
+  rail.sessions = {s1: {open: 0, agent_seq: 8}};
+  await actx.refreshThreadsRail();
+  assert.ok(!btn.classList.contains("has-resource"), "all closed: dark");
+
+  /* wiring */
+  assert.ok(html.includes('id="term-threadsbtn"'));
+  assert.ok(html.indexOf('src="static/threads-pane.js"') > 0
+            && html.indexOf('src="static/threads-pane.js"') < html.indexOf('src="static/app.js"'));
+  assert.ok(/kind === "threads"[\s\S]{0,200}ThreadsPane\?\.mount/.test(app), "openSplit mounts the pane");
+  assert.ok(app.includes('if (splitKind === "threads") globalThis.ThreadsPane?.unmount();'));
+  assert.ok(app.includes('$("term-threadsbtn").addEventListener("click", () => toggleSplitPane("threads"));'));
+  assert.equal(app.split("refreshThreadsRail(),").length - 1, 2, "boot and the poll both read the rail");
+  assert.ok(!/innerHTML/.test(src), "threads-pane.js never assigns HTML");
+  console.log("threads pane checks passed");
+})().catch((e) => { console.error(e); process.exitCode = 1; });
