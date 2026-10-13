@@ -528,6 +528,58 @@ def delegations(state: dict, journal: List[dict]) -> List[dict]:
     return out
 
 
+RUN_HISTORY_LIMIT = 10
+
+
+def run_history(st: store2.RunStore, state: dict) -> dict:
+    """Current run and recent archives; only saved start events imply a cause.
+
+    Round numbers, visits and forced moves cannot establish a new run or a
+    reload. Deduplicate by the saved run ID, and expose no task context.
+    """
+    paths = st.archived()
+    selected = paths[-(RUN_HISTORY_LIMIT - 1):]
+    records = [(st, state, True)]
+    unavailable = 0
+    for path in reversed(selected):
+        old = store2.RunStore(str(st.cwd), st.scope)
+        old.dir = path
+        try:
+            records.append((old, old.load_state(), False))
+        except (store2.StoreError, OSError, ValueError):
+            unavailable += 1
+    rows = []
+    seen = set()
+    for source, saved, current in records:
+        rid = saved.get("run_id")
+        if not rid:
+            unavailable += 1
+            continue
+        if rid in seen:
+            continue
+        seen.add(rid)
+        try:
+            events = source.start_events()
+        except (store2.StoreError, OSError, ValueError):
+            events = []
+        auto = next((e for e in events if e.get("event") == "round_auto_started"), None)
+        start = next((e for e in events if e.get("event") == "started"
+                      and e.get("run") == rid), None)
+        evidence = auto or start or {}
+        rows.append({
+            "run": rid, "current": current,
+            **{k: saved.get(k) for k in ("workflow", "round", "status", "started", "finished")},
+            "transition": {
+                "event": evidence.get("event"), "at": evidence.get("ts"),
+                "previous": auto.get("previous") if auto else None,
+                "reloaded": auto.get("reloaded") if auto and
+                isinstance(auto.get("reloaded"), bool) else None,
+            },
+        })
+    return {"runs": rows, "limit": RUN_HISTORY_LIMIT,
+            "truncated": len(paths) > len(selected), "unavailable": unavailable}
+
+
 def run_detail(cwd: str, scope: str, prompts: bool = False) -> dict:
     """``GET /api/cflow2/run``: the run, its chart, the journal tail and the
     delegation rows."""
@@ -547,6 +599,7 @@ def run_detail(cwd: str, scope: str, prompts: bool = False) -> dict:
         "status": state.get("status"),
         "run": payload,
         "chart": chart_view(chart, prompts),
+        "history": run_history(st, state),
         # Which nodes have a live instance (the active configuration and its
         # ancestors), and which of those wait on the outside.
         "instances": [

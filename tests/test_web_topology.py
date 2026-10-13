@@ -563,6 +563,7 @@ BROWSER_CHECKS = [
     "commandcopy_browser.cjs",
     "termcflow_browser.cjs",
     "cflow2layout_browser.cjs",
+    "cflow2history_browser.cjs",
     "glossary_browser.cjs",
     "flows_browser.cjs",
         "diagramviewport_browser.cjs",

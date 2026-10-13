@@ -402,6 +402,39 @@ class RunStore:
             return []
         return sorted(p for p in root.iterdir() if p.is_dir())
 
+    def start_events(self) -> List[Dict[str, Any]]:
+        """Start evidence for a run history, including events outside the tail.
+
+        Old JSON-only runs are scanned up to 1 MiB; absent evidence stays
+        unknown. Checkpoint-backed runs inspect the first 2048 events and
+        select at most eight matches.
+        """
+        names = ["started", "round_auto_started"]
+        if self.checkpoint_path.exists():
+            try:
+                return checkpoint.read_events(self.checkpoint_path, names, 8)
+            except checkpoint.CheckpointError as exc:
+                raise StoreError(str(exc)) from exc
+        out = []
+        try:
+            with self.journal_path.open("rb") as fh:
+                raw = fh.read(1024 * 1024)
+                # Do not parse a partial final line when the scan was capped.
+                if fh.read(1):
+                    raw = raw.rsplit(b"\n", 1)[0] if b"\n" in raw else b""
+        except FileNotFoundError:
+            return []
+        for line in raw.splitlines():
+            try:
+                event = json.loads(line)
+            except (ValueError, UnicodeError):
+                continue
+            if isinstance(event, dict) and event.get("event") in names:
+                out.append(event)
+                if len(out) == 8:
+                    break
+        return out
+
     # -- locking ---------------------------------------------------------
     @contextlib.contextmanager
     def lock(self, timeout: float = LOCK_TIMEOUT) -> Iterator[None]:
