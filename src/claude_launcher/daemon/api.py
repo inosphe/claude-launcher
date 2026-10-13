@@ -93,7 +93,7 @@ from . import reposync_gate
 from . import reposync_agent
 from . import restart_gate
 from . import restart_notice
-from .harness import HarnessError, SessionDef, check_kind
+from .harness import PI_HARNESS, HarnessError, SessionDef, check_kind
 from . import score_goal
 from .manager import MAX_NOTE, ManagerError, SessionManager
 from . import mesh as mesh_mod
@@ -575,6 +575,7 @@ def build_app(
     r.add_post("/api/daemon/restart-request/extend", h_restart_request_extend)
     r.add_get("/api/profiles", h_profiles)
     r.add_post("/api/profiles/permission-mode", h_profiles_permission_mode)
+    r.add_post("/api/profiles/pi-tui-mode", h_profiles_pi_tui_mode)
     r.add_get("/api/install", h_install_overview)
     r.add_get("/api/install/plan", h_install_plan)
     r.add_post("/api/install/apply", h_install_apply)
@@ -1940,6 +1941,98 @@ def _permission_mode(profile_obj, doc: dict) -> dict:
     }
 
 
+#: Pi's TUI mode, a key of pi's own ``settings.json``. claunch does not keep
+#: it anywhere new: a profile declares it on the channel every pi settings
+#: key already rides (``harness_options.pi.settings``), and the launch merges
+#: that into the profile's pi home (``translators`` -> ``runner``). Absent
+#: means pi's own default, fullscreen.
+PI_TUI_MODE_KEY = "tuiMode"
+PI_TUI_MODES = ("regular", "fullscreen")
+PI_TUI_MODE_DEFAULT = "fullscreen"
+
+
+def _runs_pi(profile_obj, default_harness: str, doc: Optional[dict] = None) -> bool:
+    """Whether a session of this profile can be launched on pi.
+
+    Either pi is the profile's default harness, or the harness policy allows
+    the explicit ``<profile>:pi`` selector -- the common case, since a pi
+    profile usually keeps Claude as its default.
+    """
+    if default_harness == PI_HARNESS:
+        return True
+    try:
+        return bool(harness_policy.evaluate(profile_obj, PI_HARNESS, doc=doc).allowed)
+    except (
+        harness_policy.HarnessPolicyError,
+        lineage.LineageError,
+        providers.ProviderError,
+    ):
+        return False
+
+
+def _pi_tui_mode(profile_obj, doc: dict, entry) -> dict:
+    """What the next pi session of this profile runs its TUI in, and why.
+
+    * ``declared``   -- this profile's own declaration, ``None`` when it has
+                        none (the page's selector edits exactly this).
+    * ``effective``  -- what the launch writes: the declaration merged over
+                        template, provider and parent profiles. ``None`` when
+                        no layer declares one, and the launch leaves the key
+                        in the file alone.
+    * ``file_value`` -- what the profile's pi ``settings.json`` holds now. A
+                        hand-written value there survives a launch only while
+                        ``effective`` is ``None``.
+    * ``next``       -- the mode the next session gets, all of the above
+                        resolved; ``source`` says which of them decided it.
+    """
+    own = store.profile_entry(profile_obj.name, doc).get(provider_spec.HARNESS_OPTIONS_FIELD)
+    declared = None
+    if isinstance(own, dict):
+        block = own.get(PI_HARNESS)
+        channel = block.get("settings") if isinstance(block, dict) else None
+        if isinstance(channel, dict):
+            declared = channel.get(PI_TUI_MODE_KEY)
+    error = None
+    effective = None
+    try:
+        declared_settings = providers.spec_for(profile_obj, doc=doc).options(
+            PI_HARNESS
+        ).get("settings")
+        if isinstance(declared_settings, dict):
+            effective = declared_settings.get(PI_TUI_MODE_KEY)
+    except (providers.ProviderError, lineage.LineageError) as exc:
+        error = str(exc)
+    file_value = None
+    if entry is not None:
+        path = entry.profile_home(profile_obj.config_dir) / translators.PI_SETTINGS_FILE
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8") or "{}")
+        except (OSError, ValueError):
+            loaded = {}
+        if isinstance(loaded, dict):
+            file_value = loaded.get(PI_TUI_MODE_KEY)
+    if effective is not None:
+        source = "profile" if declared is not None else "inherited"
+        nxt = effective
+    elif file_value is not None:
+        source = "file"
+        nxt = file_value
+    else:
+        source = "pi-default"
+        nxt = PI_TUI_MODE_DEFAULT
+    return {
+        "key": PI_TUI_MODE_KEY,
+        "declared": declared,
+        "effective": effective,
+        "file_value": file_value,
+        "next": nxt,
+        "source": source,
+        "default": PI_TUI_MODE_DEFAULT,
+        "modes": list(PI_TUI_MODES),
+        "error": error,
+    }
+
+
 #: The two rule lists the profiles page reports on, spelled once each for the
 #: same reason :data:`PERMISSION_MODE_KEY` is. ``defaultMode`` is one value and
 #: the page shows it; these are lists, and the question a person asks about a
@@ -2143,6 +2236,15 @@ async def h_profiles(request: web.Request) -> web.Response:
                         if name == harness_registry.CLAUDE_HARNESS
                         else None
                     ),
+                    # A pi settings key: answered for a profile that can run
+                    # pi at all, which is usually not its default harness (a
+                    # Claude profile launched as ``<p>:pi``). None elsewhere,
+                    # for the same reason as above.
+                    "pi_tui_mode": (
+                        _pi_tui_mode(p, doc, registry.get(PI_HARNESS))
+                        if _runs_pi(p, name, doc)
+                        else None
+                    ),
                 }
             )
         except lineage.LineageError as exc:
@@ -2233,6 +2335,81 @@ def _compact_problems(doc: dict) -> dict:
         return providers.compact_problems(doc)
     except (providers.ProviderError, store.StoreError):
         return {}
+
+
+async def h_profiles_pi_tui_mode(request: web.Request) -> web.Response:
+    """Declare (or, with ``mode: null``, undeclare) one pi profile's TUI mode.
+
+    Writes ``profiles.<profile>.harness_options.pi.settings.tuiMode`` and
+    nothing else: the next pi session of that profile gets it merged into its
+    ``settings.json`` at launch, and a session already running keeps what it
+    started with. Undeclaring prunes the containers it leaves empty, so the
+    config reads as if the page had never touched it.
+    """
+    body = await _json_body(request)
+    name = body.get("profile")
+    if not isinstance(name, str) or not name.strip():
+        return json_error(400, "profile must be a non-empty profile name")
+    try:
+        target = profile_mod.require(name)
+        if target.name not in {p.name for p in profile_mod.list_all()}:
+            return json_error(400, "profile must name an existing profile")
+        if not _runs_pi(target, lineage.effective_harness(target)):
+            return json_error(
+                400, "TUI mode is only available for profiles that can run pi"
+            )
+    except (profile_mod.ProfileError, lineage.LineageError) as exc:
+        return json_error(400, str(exc))
+    if "mode" not in body:
+        return json_error(400, "mode is required; use null to restore pi's default")
+    raw = body.get("mode")
+    declared = str(raw).strip() if raw is not None else ""
+    if declared and declared not in PI_TUI_MODES:
+        return json_error(
+            400,
+            f"unknown TUI mode {declared!r} (known: {', '.join(PI_TUI_MODES)})",
+        )
+
+    def _mutate(doc: dict) -> None:
+        section = doc.get("profiles")
+        entry = section.get(target.name) if isinstance(section, dict) else None
+        if not isinstance(entry, dict):
+            if not declared:
+                return
+            entry = store._writable_entry(doc, target.name)
+        path = (provider_spec.HARNESS_OPTIONS_FIELD, PI_HARNESS, "settings")
+        if declared:
+            node = entry
+            for key in path:
+                child = node.get(key)
+                if not isinstance(child, dict):
+                    child = {}
+                    node[key] = child
+                node = child
+            node[PI_TUI_MODE_KEY] = declared
+            return
+        chain = [entry]
+        for key in path:
+            child = chain[-1].get(key)
+            if not isinstance(child, dict):
+                return
+            chain.append(child)
+        chain[-1].pop(PI_TUI_MODE_KEY, None)
+        for parent, key in zip(reversed(chain[:-1]), reversed(path)):
+            if parent[key]:
+                break
+            parent.pop(key)
+
+    doc = store.update(_mutate)
+    return json_response(
+        {
+            "profile": target.name,
+            "declared": declared or None,
+            "pi_tui_mode": _pi_tui_mode(
+                target, doc, harness_registry.registry(doc).get(PI_HARNESS)
+            ),
+        }
+    )
 
 
 async def h_profiles_permission_mode(request: web.Request) -> web.Response:

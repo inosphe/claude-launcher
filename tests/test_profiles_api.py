@@ -581,3 +581,134 @@ def test_an_unreadable_provider_reports_null_and_why(home):
     assert rows
     assert all(r.get("reasoning_effort") is None for r in rows)
     assert all("nowhere" in r["reasoning_effort_problem"] for r in rows)
+
+
+# --------------------------------------------------------------------------- #
+# pi's TUI mode: harness_options.pi.settings.tuiMode, read and written
+# --------------------------------------------------------------------------- #
+def post_tui(payload):
+    return asyncio.run(api.h_profiles_pi_tui_mode(_Request(payload)))
+
+
+def tui_by_profile(body):
+    return {
+        row["profile"]: row.get("pi_tui_mode")
+        for row in body["profile_details"]
+        if row.get("explicit") is False
+    }
+
+
+def _pi_profile(name, parent=None):
+    p = profile.create(name)
+    store.set_profile_field(name, "harness", "pi")
+    if parent:
+        store.set_profile_field(name, "parent", parent)
+    return p
+
+
+def test_a_claude_profile_allowed_to_run_pi_is_answered_too(home):
+    """glm-flash's shape: Claude by default, launched on pi as ``<p>:pi``."""
+    from claude_launcher import lineage
+
+    p = profile.create("glm")
+    assert lineage.effective_harness(p) == "claude"
+    assert tui_by_profile(listing())["glm"]["next"] == "fullscreen"
+    assert post_tui({"profile": "glm", "mode": "regular"}).status == 200
+    assert tui_by_profile(listing())["glm"]["declared"] == "regular"
+
+
+def test_a_profile_that_may_not_run_pi_has_no_tui_mode(home):
+    """A profile whose policy leaves pi out never reads a pi key."""
+    profile.create("work")
+    store.set_profile_field("work", "allowed_harnesses", ["claude"])
+    assert tui_by_profile(listing())["work"] is None
+    before = store.load()
+    assert post_tui({"profile": "work", "mode": "regular"}).status == 400
+    assert store.load() == before
+
+
+def test_a_pi_profile_with_nothing_declared_gets_pis_default(home):
+    _pi_profile("glm")
+    row = tui_by_profile(listing())["glm"]
+    assert row["declared"] is None
+    assert row["effective"] is None
+    assert row["next"] == "fullscreen"
+    assert row["source"] == "pi-default"
+    assert row["modes"] == ["regular", "fullscreen"]
+
+
+def test_declaring_regular_writes_only_the_settings_channel(home):
+    _pi_profile("glm")
+    store.update(lambda doc: doc["profiles"]["glm"].update(
+        {"harness_options": {"pi": {"env": {"X": "1"}}}}))
+    resp = post_tui({"profile": "glm", "mode": "regular"})
+    assert resp.status == 200
+    entry = store.profile_entry("glm")
+    assert entry["harness_options"]["pi"] == {
+        "env": {"X": "1"}, "settings": {"tuiMode": "regular"}}
+    row = tui_by_profile(listing())["glm"]
+    assert (row["declared"], row["effective"], row["next"], row["source"]) == (
+        "regular", "regular", "regular", "profile")
+
+
+def test_undeclaring_prunes_what_it_leaves_empty(home):
+    _pi_profile("glm")
+    post_tui({"profile": "glm", "mode": "fullscreen"})
+    assert post_tui({"profile": "glm", "mode": None}).status == 200
+    assert "harness_options" not in store.profile_entry("glm")
+    # An empty string undeclares too, and undeclaring nothing is harmless.
+    assert post_tui({"profile": "glm", "mode": ""}).status == 200
+
+
+def test_a_child_profile_inherits_its_parents_mode(home):
+    _pi_profile("glm")
+    _pi_profile("glm-1m", parent="glm")
+    post_tui({"profile": "glm", "mode": "regular"})
+    row = tui_by_profile(listing())["glm-1m"]
+    assert row["declared"] is None
+    assert (row["effective"], row["source"]) == ("regular", "inherited")
+
+
+def test_a_hand_written_file_value_holds_until_a_declaration(home):
+    p = _pi_profile("glm")
+    pi_home = p.config_dir / "pi"
+    pi_home.mkdir(parents=True)
+    (pi_home / "settings.json").write_text(json.dumps({"tuiMode": "regular"}))
+    row = tui_by_profile(listing())["glm"]
+    assert (row["file_value"], row["next"], row["source"]) == (
+        "regular", "regular", "file")
+    post_tui({"profile": "glm", "mode": "fullscreen"})
+    row = tui_by_profile(listing())["glm"]
+    # The declaration wins at the next launch; the file still says regular.
+    assert (row["file_value"], row["next"], row["source"]) == (
+        "regular", "fullscreen", "profile")
+
+
+@pytest.mark.parametrize("payload", [
+    {"mode": "regular"},
+    {"profile": "glm"},
+    {"profile": "glm", "mode": "tiny"},
+    {"profile": "nobody", "mode": "regular"},
+])
+def test_invalid_tui_mode_edits_do_not_write(home, payload):
+    _pi_profile("glm")
+    before = store.load()
+    assert post_tui(payload).status == 400
+    assert store.load() == before
+
+
+def test_the_declared_mode_reaches_the_launchs_settings_file(home):
+    """End to end on the launch side: the declaration is merged into pi's
+    settings.json by the same translation a session start runs, and the
+    keys a person wrote there by hand are kept."""
+    from claude_launcher import harnesses, providers, runner, translators
+
+    p = _pi_profile("glm")
+    pi_home = harnesses.registry().get("pi").profile_home(p.config_dir)
+    pi_home.mkdir(parents=True)
+    (pi_home / "settings.json").write_text(json.dumps({"theme": "dark"}))
+    post_tui({"profile": "glm", "mode": "regular"})
+    translation = translators.pi(providers.spec_for(p))
+    runner._write_translated_files(pi_home, translation)
+    written = json.loads((pi_home / "settings.json").read_text())
+    assert written == {"theme": "dark", "tuiMode": "regular"}
