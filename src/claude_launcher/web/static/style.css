@@ -1857,11 +1857,12 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   background: none; color: #7d8590;
   border: 1px solid #30363d; border-radius: 5px;
 }
-#term-simsbtn.has-resource, #term-splitbtn.has-resource, #term-chartbtn.has-resource {
+#term-simsbtn.has-resource, #term-splitbtn.has-resource, #term-chartbtn.has-resource,
+#term-qabtn.has-resource {
   background: #10203a; color: #58a6ff; border-color: #1f6feb;
 }
 #term-simsbtn[aria-pressed="true"], #term-splitbtn[aria-pressed="true"],
-#term-chartbtn[aria-pressed="true"] {
+#term-chartbtn[aria-pressed="true"], #term-qabtn[aria-pressed="true"] {
   box-shadow: inset 0 -2px #58a6ff;
 }
 /* Keep the toggle inside the terminal header when the detail panel opens.
@@ -7154,3 +7155,41 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
   border-radius: 4px; cursor: pointer;
 }
 .sess-meta .sess-detach:hover { background: #3d1d1b; }
+
+/* Session QA pane (qa-pane.js, claunch-l8vyi): one card per question. */
+.qa-pane { padding: 10px 0 4px; }
+.qa-head { position: sticky; top: 0; z-index: 1; display: flex; flex-wrap: wrap; align-items: baseline;
+  gap: 6px 12px; padding: 4px 0 8px; background: inherit; }
+#term-wf .qa-head { background: #0d1117; }
+.qa-head h2 { font-size: 15px; margin: 0; }
+.qa-count { color: #7d8590; font-size: 12px; }
+.qa-card { border: 1px solid #30363d; border-left-width: 3px; border-radius: 6px; padding: 8px 12px;
+  margin: 0 0 10px; }
+.qa-card.qa-open { border-left-color: #d29922; }
+.qa-card.qa-stale { border-left-color: #db6d28; }
+.qa-card.qa-answered { border-left-color: #3fb950; }
+.qa-card.qa-closed { border-left-color: #484f58; opacity: 0.8; }
+.qa-card-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; }
+.qa-title { font-size: 14px; flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.qa-meta { color: #7d8590; font-size: 11px; font-family: ui-monospace, monospace; }
+.qa-status { font-size: 11px; padding: 0 6px; border-radius: 9px; border: 1px solid currentColor; }
+.qa-status.qa-open { color: #d29922; }
+.qa-status.qa-stale { color: #db6d28; }
+.qa-status.qa-answered { color: #3fb950; }
+.qa-status.qa-closed { color: #7d8590; }
+.qa-body { margin: 6px 0; font-size: 13px; overflow-wrap: anywhere; }
+.qa-answer { margin: 6px 0; padding: 6px 8px; background: #161b22; border-radius: 4px; font-size: 13px; }
+.qa-answer-label { display: block; color: #7d8590; font-size: 11px; margin-bottom: 2px; }
+.qa-answer-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.qa-options { display: flex; flex-direction: column; gap: 4px; margin: 6px 0; }
+.qa-option { display: flex; gap: 8px; align-items: flex-start; cursor: pointer; font-size: 13px; }
+.qa-option-text { display: flex; flex-direction: column; }
+.qa-option-desc { color: #7d8590; font-size: 12px; }
+.qa-clear { align-self: flex-start; }
+.qa-text { width: 100%; box-sizing: border-box; resize: vertical; font: inherit; font-size: 13px;
+  background: #0d1117; color: inherit; border: 1px solid #30363d; border-radius: 4px; padding: 6px; }
+.qa-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 6px; }
+.qa-notice { font-size: 12px; color: #3fb950; }
+.qa-notice.wf-warning { color: #db6d28; }
+.qa-moved { margin: 4px 0; font-size: 12px; }
+.qa-closed-list summary { cursor: pointer; color: #7d8590; font-size: 12px; margin: 4px 0 8px; }

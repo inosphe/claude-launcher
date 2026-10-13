@@ -18,9 +18,9 @@ function node() {
   };
 }
 const a = node(), b = node(); a.dataset.name = "a"; b.dataset.name = "b";
-const run = node(), sim = node(), chart = node();
+const run = node(), sim = node(), chart = node(), qa = node();
 const dom = {"session-list": {querySelectorAll: () => [a, b]}, "term-simsbtn": sim, "term-splitbtn": run,
-             "term-chartbtn": chart};
+             "term-chartbtn": chart, "term-qabtn": qa};
 let rows = [], fail = false, requests = 0;
 const ctx = vm.createContext({
   document: {createElement: node}, $: id => dom[id],
@@ -83,5 +83,11 @@ const has = n => n.classList.contains("has-resource");
   const before = requests;
   await Promise.all([ctx.refreshSessionSims(), ctx.refreshSessionSims()]);
   assert.equal(requests - before, 1, "overlapping polls share one request");
+  // ? qa lights while a question of the session waits (claunch-l8vyi).
+  ctx.currentPage = "terminal"; ctx.currentName = "a";
+  vm.runInContext('qaRailCache = {a: {unresolved: 1, agent_seq: 4}, b: {unresolved: 0, agent_seq: 9}}', ctx);
+  ctx.syncSessionResourceButtons(); assert.ok(has(qa), "an unanswered question lights ? qa");
+  ctx.currentName = "b"; ctx.syncSessionResourceButtons(); assert.ok(!has(qa), "answered or closed only: dark");
+  ctx.currentName = "ghost"; ctx.syncSessionResourceButtons(); assert.ok(!has(qa), "no questions: dark");
   console.log("session resources checks passed");
 })().catch(e => { console.error(e); process.exitCode = 1; });

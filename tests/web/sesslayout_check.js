@@ -103,7 +103,7 @@ function build(o = {}) {
     setItem: (k, v) => store.set(k, String(v)),
   };
   const nodes = {};
-  for (const id of ["term-split", "term-wf", "term-splitbtn", "term-simsbtn", "term-chartbtn"]) nodes[id] = node(id);
+  for (const id of ["term-split", "term-wf", "term-splitbtn", "term-simsbtn", "term-chartbtn", "term-qabtn"]) nodes[id] = node(id);
   const body = node("body");
   const calls = { opened: [], kinds: [], closed: 0, ratios: [], refits: 0, refreshed: 0 };
   const ctx = {};
@@ -308,10 +308,18 @@ check("the key carries the base path",
         && w.nodes["term-splitbtn"].attrs["aria-pressed"] === "false"
         && w.nodes["term-simsbtn"].attrs["aria-pressed"] === "false", w.calls.kinds);
   check("...and the chart choice survives a reload", w.ctx.sessLayoutFor("s15").pane === "chart");
+  // The session's questions (? qa, claunch-l8vyi) are a fourth.
+  w.ctx.setSessLayout("s15", { pane: "qa" });
+  check("the qa pane opens with the questions and lights ? qa only",
+        w.calls.kinds[w.calls.kinds.length - 1] === "qa"
+        && w.nodes["term-qabtn"].attrs["aria-pressed"] === "true"
+        && w.nodes["term-chartbtn"].attrs["aria-pressed"] === "false"
+        && w.nodes["term-splitbtn"].attrs["aria-pressed"] === "false", w.calls.kinds);
+  check("...and the qa choice survives a reload", w.ctx.sessLayoutFor("s15").pane === "qa");
 }
 
 /* --- the markup the code reaches for ------------------------------------- */
-for (const id of ["term-splitbtn", "term-simsbtn", "term-chartbtn", "term-split", "term-wf"]) {
+for (const id of ["term-splitbtn", "term-simsbtn", "term-chartbtn", "term-qabtn", "term-split", "term-wf"]) {
   check(`index.html declares #${id}`, html.includes(`id="${id}"`));
 }
 check("the bar and the pane sit under the terminal, before the pages",

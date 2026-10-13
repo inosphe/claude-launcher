@@ -130,6 +130,8 @@ function build(opts) {
     "ensureControlSocket",
     "refreshCflow2Rail",
     "refreshSessionSims",
+    // and the session QA rail (qapane_check).
+    "refreshQaRail",
     // The poll's batch also reads the window strip (termwindow_check).
     "refreshTermWindow",
     // and the timer line (termtimers_check).
@@ -159,6 +161,7 @@ function build(opts) {
     () => {},   // refreshProjects
     () => {},   // refreshCflow2Rail (the rail's v2 line; railcflow2_check)
     () => {},   // refreshSessionSims (sessionresources_check)
+    () => {},   // refreshQaRail (the ? qa light; qapane_check)
 
     () => {},   // refreshTermWindow (the header's window strip; termwindow_check)
     () => {},   // refreshTermTimers (the timer line; termtimers_check)

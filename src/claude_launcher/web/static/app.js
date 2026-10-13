@@ -5536,12 +5536,77 @@ function syncSessionResourceButtons() {
     "term-simsbtn": !!name && sessionSimCache.some(s => s.owner === name),
     "term-splitbtn": !!name && !!(sessCflowRun(name) || cflow2RailCache[name]),
     "term-chartbtn": isPiDurable(name),
+    "term-qabtn": !!name && (qaRailCache[name]?.unresolved || 0) > 0,
   };
   for (const [id, hasResource] of Object.entries(present)) {
     const btn = $(id);
     if (btn && btn.classList.contains("has-resource") !== hasResource)
       btn.classList.toggle("has-resource", hasResource);
   }
+}
+
+/* Session QA (qa-pane.js, daemon/qa_api.py, claunch-l8vyi): per session,
+   how many questions wait on the user (lights ? qa like ⬒ run and ◬ sims)
+   and the sequence of the last change the session itself made. When that
+   sequence moves past the one this browser last showed, the pane opens on
+   its own; closing it by hand sticks until the session changes something
+   again. The shown sequence is remembered per browser and per session. */
+let qaRailCache = {};
+let qaRailSig = null;
+// A function, not a constant: BASE is read when it is used.
+const qaSeenKey = () => `claunch_qaseen:${BASE}`;
+
+function loadQaSeen() {
+  try {
+    const doc = JSON.parse(localStorage.getItem(qaSeenKey()) || "{}");
+    return doc && typeof doc === "object" && !Array.isArray(doc) ? doc : {};
+  } catch {
+    return {};
+  }
+}
+
+function markQaSeen(name) {
+  const row = name && qaRailCache[name];
+  if (!row) return;
+  const seen = loadQaSeen();
+  if (seen[name] === row.agent_seq) return;
+  seen[name] = row.agent_seq;
+  try { localStorage.setItem(qaSeenKey(), JSON.stringify(seen)); } catch { /* private mode */ }
+}
+
+/* Open the QA pane for the terminal's session if the session changed its
+   questions since this browser last showed them. A session never seen here
+   opens only for questions still waiting: its closed history is no news. */
+function maybeOpenQaPane() {
+  const name = currentPage === "terminal" ? currentName : null;
+  const row = name && qaRailCache[name];
+  if (!row || !row.agent_seq) return;
+  const seen = loadQaSeen()[name];
+  if (seen === undefined && !row.unresolved) { markQaSeen(name); return; }
+  if (seen !== undefined && row.agent_seq <= seen) return;
+  const lay = sessLayoutFor(name);
+  markQaSeen(name);
+  if (!(lay.split && lay.pane === "qa")) setSessLayout(name, { split: true, pane: "qa" });
+}
+
+async function refreshQaRail() {
+  let data;
+  try {
+    const resp = await api("/api/qa/rail");
+    if (!resp.ok) return;
+    data = await resp.json();
+  } catch {
+    return;
+  }
+  const rows = (data && data.sessions) || {};
+  const sig = JSON.stringify(rows);
+  if (sig !== qaRailSig) {
+    qaRailSig = sig;
+    qaRailCache = rows;
+    syncSessionResourceButtons();
+    if (splitKind === "qa") globalThis.QaPane?.refresh();
+  }
+  maybeOpenQaPane();
 }
 
 async function refreshCflow2Rail() {
@@ -17501,9 +17566,9 @@ function sessLayoutFor(name) {
     rail: raw.rail === "wf" || raw.rail === "beads" ? raw.rail : "detail",
     sub: DETAIL_SUBTAB_IDS.has(raw.sub) ? raw.sub : "all",
     split: !!raw.split,
-    // What the split pane shows: the workflow run (⬒), the simulations (◬)
-    // or a pi-durable session's event chart (◇).
-    pane: raw.pane === "sims" || raw.pane === "chart" ? raw.pane : "run",
+    // What the split pane shows: the workflow run (⬒), the simulations (◬),
+    // a pi-durable session's event chart (◇) or the session's questions (?).
+    pane: raw.pane === "sims" || raw.pane === "chart" || raw.pane === "qa" ? raw.pane : "run",
     ratio: clampSplitRatio(Number(raw.ratio)),
   };
 }
@@ -19234,6 +19299,14 @@ function syncSplitPane() {
   chart.title = chartOn
     ? "close the chart pane — the terminal takes the column back"
     : "this pi-durable session's run as a flow chart, updated as it logs";
+  const qa = $("term-qabtn");
+  const qaOn = !!lay && lay.split && lay.pane === "qa";
+  qa.setAttribute("aria-pressed", String(qaOn));
+  qa.title = qaOn
+    ? "close the questions pane — it opens again when the session changes a question"
+    : "questions this session put to you — answer them here";
+  // Showing it is seeing it: a pane open on the questions is caught up.
+  if (qaOn && typeof markQaSeen === "function") markQaSeen(name);
   if (up) {
     applySplitRatio(lay.ratio);
     if (splitFor !== name || splitKind !== lay.pane) openSplit(name, lay.pane);
@@ -19707,7 +19780,7 @@ const wfPageUi = {
    pane owns its own slot, poll, selection and last payload — the page's
    globals above belong to the page, and the two must be able to differ. */
 let splitFor = null;           // the session the pane is showing (null = shut)
-let splitKind = null;          // "run", "sims" or "chart" (sessLayoutFor().pane)
+let splitKind = null;          // "run", "sims", "chart" or "qa" (sessLayoutFor().pane)
 let splitCwd = null;           // its slot, resolved once from the meta endpoint
 let splitScope = null;
 let splitPollTimer = null;
@@ -19742,6 +19815,12 @@ function openSplit(name, kind = "run") {
   splitKind = kind;
   // The simulations view keeps its own poll (sim-page.js).
   if (kind === "sims") { globalThis.SimPane?.mount($("term-wf"), name); return; }
+  // And the session's questions (qa-pane.js): a save moves the header's
+  // light at once rather than at the next dashboard poll.
+  if (kind === "qa") {
+    globalThis.QaPane?.mount($("term-wf"), name, { api, onChange: () => refreshQaRail() });
+    return;
+  }
   // So does a pi-durable session's chart: its run is the event log it
   // writes, drawn as a flow diagram that updates in place.
   if (kind === "chart") {
@@ -19756,6 +19835,7 @@ function openSplit(name, kind = "run") {
 function closeSplit() {
   if (splitPollTimer) { clearInterval(splitPollTimer); splitPollTimer = null; }
   if (splitKind === "sims") globalThis.SimPane?.unmount();
+  if (splitKind === "qa") globalThis.QaPane?.unmount();
   if (splitDurable) { splitDurable.unmount(); splitDurable = null; }
   splitKind = null;
   splitFor = null;
@@ -19837,6 +19917,7 @@ async function refreshSplit() {
 $("term-splitbtn").addEventListener("click", () => toggleSplitPane("run"));
 $("term-simsbtn").addEventListener("click", () => toggleSplitPane("sims"));
 $("term-chartbtn").addEventListener("click", () => toggleSplitPane("chart"));
+$("term-qabtn").addEventListener("click", () => toggleSplitPane("qa"));
 
 /* One pane, two contents: pressing the lit button closes it, pressing the
    other one switches what the open pane shows. */
@@ -44715,6 +44796,7 @@ async function boot() {
     refreshCflow(),
     refreshCflow2Rail(),
     refreshSessionSims(),
+    refreshQaRail(),
   ]);
   // Last, and once. A #/s/<name> link attaches here — which is why a reload
   // puts you back in the session instead of at an empty slot — and it renders
@@ -45373,6 +45455,7 @@ async function pollOnce() {
     refreshCflow(),
     refreshCflow2Rail(),
     refreshSessionSims(),
+    refreshQaRail(),
     refreshTermQueued(),
     refreshTermWindow(),
     refreshTermTimers(),
