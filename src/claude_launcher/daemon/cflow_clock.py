@@ -956,6 +956,15 @@ def ReminderClock(manager, mesh=None, *, poll: float = REMINDER_POLL):
     return SessionReminderService(manager, mesh, poll=poll)
 
 
+def session_name(scope: str) -> str:
+    """The session name a run's scope stands for: a v2 slot of this daemon
+    (``s15@main``) without its daemon; another daemon's v2 slot names no
+    session here (""). A v1 scope is the name itself."""
+    if cflow2_store.DAEMON_SEP not in str(scope or ""):
+        return scope
+    return cflow2_store.own_name(scope) or ""
+
+
 def session_for(manager, cwd: str, scope: str, *, held: bool = False):
     """The live session a run maps 1:1 to, or None.
 
@@ -969,7 +978,7 @@ def session_for(manager, cwd: str, scope: str, *, held: bool = False):
     caller that wakes it to deliver (:func:`waking_deliver`, claunch-t1r9j).
     """
     try:
-        session = manager.get(scope)
+        session = manager.get(session_name(scope))
     except Exception:
         return None
     if session.exited and not (held and is_held(session)):
@@ -2835,7 +2844,7 @@ def driver_gone(manager, cwd: str, scope: str) -> bool:
     matching name in another directory is somebody else's session.
     """
     try:
-        session = manager.get(scope)
+        session = manager.get(session_name(scope))
     except Exception:
         return False
     if not session.sdef.cwd:
@@ -3481,7 +3490,7 @@ class RunEventClock:
         a skip, never a guess.
         """
         try:
-            parent = self.manager.get(scope).sdef.parent or ""
+            parent = self.manager.get(session_name(scope)).sdef.parent or ""
         except Exception:
             parent = ""
         if parent:

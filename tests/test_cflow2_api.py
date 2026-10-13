@@ -384,7 +384,9 @@ def test_run_detail_and_the_users_answers(proj):
     assert d["journal"][0]["event"] == "started"
 
     runs = out["runs"]["runs"]
-    assert [(r["scope"], r["workflow"], r["version"]) for r in runs] == [("s1", "pick", 2)]
+    # the slot names its daemon; ``session`` is what the page links (claunch-9jmdz)
+    assert [(r["scope"], r["session"], r["workflow"], r["version"]) for r in runs] == \
+        [("s1@main", "s1", "pick", 2)]
     assert runs[0]["current"]  # the open choice, by its node id (it has no label)
 
     status, payload = out["select"]

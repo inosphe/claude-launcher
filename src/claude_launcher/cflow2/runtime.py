@@ -334,7 +334,7 @@ def driver_of(state: Dict[str, Any]) -> str:
     if "driver" in state:
         return str(state.get("driver") or "")
     scope = str(state.get("scope") or "")
-    return "" if scope in ("", store_mod.DEFAULT_SCOPE) else scope
+    return "" if scope in ("", store_mod.DEFAULT_SCOPE) else store_mod.session_of(scope)
 
 
 def _cap_on(value: Any) -> bool:
@@ -2227,6 +2227,7 @@ def _new_run(st: RunStore, chart: ir.Chart, *, params: Dict[str, Any], data: Any
         "caps": caps if isinstance(caps, dict) or caps is None else _caps_to_json(caps),
         "probe": {}, "outcome": None, "value": None,
         "scope": st.scope, "cwd": str(st.cwd), "driver": driver or "",
+        store_mod.DAEMON_KEY: store_mod.daemon_of(st.scope),
     }
     if parent:
         state["parent"] = parent
@@ -2322,7 +2323,7 @@ def default_driver(scope: Optional[str] = None) -> str:
     if env:
         return env
     scope = (scope or "").strip()
-    return "" if scope in ("", store_mod.DEFAULT_SCOPE) else scope
+    return "" if scope in ("", store_mod.DEFAULT_SCOPE) else store_mod.session_of(scope)
 
 
 def _carry_checks(chart: ir.Chart, raw: Optional[Dict[str, Any]], st: RunStore
@@ -6123,8 +6124,11 @@ def abort_sides(session: str, cwd: str, reason: str,
     """Abort every live side run of ``session`` in ``cwd`` (the daemon, when
     the session ended: doc 2.9). Returns the slots aborted."""
     out = []
-    main = store_mod.main_scope(str(session or ""))
-    if not main:
+    if not str(session or "").strip():
+        return out
+    try:
+        main = store_mod.main_scope(store_mod.normalize_scope(str(session)))
+    except StoreError:
         return out
     for scope in peer_scopes(cwd, main):
         if not store_mod.side_of(scope):

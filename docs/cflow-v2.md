@@ -1782,6 +1782,57 @@ wait 노드에는 `undecided_max`가 붙는다.
 
 중첩 위임 런(7절)은 같은 디렉터리의 `.cflow2/runs/<scope>~<위임 id>/`에 놓인다.
 
+#### 4.1.1 slot 이름의 daemon 구분자 (claunch-9jmdz)
+
+scope는 세션 이름 뒤에 그 세션을 매긴 daemon을 붙인 형태다:
+`<세션>@<daemon>`. side 런은 `<세션>@<daemon>+<side>`, 중첩 런은 그 뒤에
+`~<위임 id>`가 붙는다(`s15@main`, `s15@main+stack`, `s15@main+stack~d2`).
+세션 이름은 daemon마다 따로 매겨지므로, 기본 daemon과 이름 있는 인스턴스가 같은
+디렉터리에 세션을 두면 둘 다 `s15`를 가질 수 있다. 구분자 전에는 둘이
+`runs/s15` 하나를 같이 썼다.
+
+| 항목 | 규칙 |
+|---|---|
+| daemon id | 이름 있는 인스턴스는 그 이름, 기본 daemon은 `main`(`daemon.paths.DEFAULT_INSTANCE_ID`, 이 값을 쓰는 곳은 이 상수 하나만 읽는다) |
+| 예약 | `main`은 이름 있는 인스턴스 이름으로 쓸 수 없다(`validate_instance`가 거절, `known_instances`가 제외). `default`는 여전히 유효한 인스턴스 이름이다 |
+| daemon을 생략한 scope | 그 프로세스의 daemon 것으로 읽는다(`store.qualify` — `$CLAUNCH_DAEMON`, 없으면 `main`). 세션 이름만 넘기는 소비자(MCP·CLI·onboard·rail)는 그대로 맞는 slot에 닿는다 |
+| `default` | 세션이 없는 slot이라 daemon을 붙이지 않는다 |
+| 세션 이름으로 되돌리기 | `store.session_of`(`s15@main+stack~d2` → `s15`), 세션 관리자 조회는 `store.own_name`(다른 daemon의 slot이면 None) |
+| 기록 | 런은 시작할 때 `state["daemon"]`에 자기 daemon을 남긴다 |
+
+**구분자 이전 slot.** `runs/s15`처럼 daemon이 없는 slot은 그 daemon이 다음에
+기동할 때 한 번 옮긴다(`cflow2/slot_migration.py`, 기동 훅
+`daemon/cflow2_slots.py`). 옮기기 전에는 그 자리에서 그대로 읽고 쓴다
+(`store.legacy_dir`): 정규 이름의 slot이 없고 옛 slot의 런이 다른 daemon을
+기록하지 않았으면 옛 slot을 쓴다. 목록(`list_scopes`)은 옛 slot을 그 런이 기록한
+daemon, 없으면 현재 daemon의 이름으로 보여 준다 — 구분자 전과 같은 판정이고,
+옮긴 뒤에는 남지 않는다.
+
+| 단계 | 규칙 |
+|---|---|
+| 시점 | 각 daemon이 기동할 때 한 번(사용자가 재시작할 때). 결과는 daemon 디렉터리의 `cflow2-slots.json`에 남고, 이 파일이 있으면 다시 하지 않는다. 다시 하려면 파일을 지운다 |
+| 대상 디렉터리 | 그 daemon의 모든 세션(종료 포함)의 cwd와 cflow2 clock이 마지막으로 훑은 디렉터리 |
+| 귀속 | (1) 런이 기록한 daemon (2) 런 시작 시점에 그 이름의 세션이 살아 있던 daemon이 하나 (3) 그 이름의 세션을 가진 daemon이 하나. 모든 daemon의 `sessions.db`를 읽기 전용으로 본다 |
+| 귀속 불가 | 후보가 없거나 둘 이상이면 옮기지 않고 기록·로그에 남긴다 |
+| 다른 daemon의 slot | 건드리지 않는다. 그 daemon이 기동할 때 옮긴다 |
+| 이동 | slot의 lock을 잡고 디렉터리 이름을 바꾼 뒤, 런이 가진 scope 문자열(`scope`, 중첩 런의 `parent`, 위임의 `nested`, side 런의 `main`)을 새 이름으로 고쳐 쓰고 `slot_moved`를 저널에 남긴다 |
+| 옛 이름 | 새 이름을 가리키는 심볼릭 링크를 남긴다. 재시작 전부터 살아 있는 세션의 MCP 서버는 시작할 때의 코드로 돌아 옛 이름을 읽기 때문이다. 새 코드는 링크를 목록에 넣지도 읽지도 않는다. 링크를 만들 수 없는 환경(권한 없는 Windows)에서는 로그만 남긴다 |
+| 이미 있는 새 이름 | 옮기지 않는다 |
+| 보관(`archive/<옛 이름>`) | 옮기지 않는다 |
+| 미리 보기 | `claunch cflow2 slots [--cwd D] [--json]` — 읽기만 한다 |
+
+기본 daemon은 같은 기동에서 `daemons/main`(예약 전에 `main`으로 띄운 이름 있는
+인스턴스의 디렉터리)을 정리한다: 세션이 0건이고 그 디렉터리에서 도는 서버가
+없으면 지우고, 아니면 남기고 로그에 적는다. `daemons/default`는 손대지 않는다.
+
+**설계 선택(2026-10-14, claunch-9jmdz 코멘트의 DECISION).** 후보는 둘이었다:
+slot 이름에 접미(`runs/s15@main`)와 디렉터리 한 층(`runs/<daemon>/s15`). 접미를
+골랐다. 같은 이름 충돌이 남는 자리는 scope 문자열만 들고 다니는 곳(런 상태에
+영속된 `parent`·`nested`, clock의 `owns`, 웹 주소, CLI `--scope`)이고, 접미를 붙이면
+그 문자열 하나가 daemon을 품는다. 디렉터리 층은 상태 문자열을 그대로 두지만 scope만으로
+런을 식별하지 못하게 되어 `list_scopes` 호출자와 웹 API가 (daemon, scope) 쌍을
+다뤄야 한다. 메시 핸들의 daemon 구분은 이 절의 범위 밖이다(claunch-9jmdz.1).
+
 ### 4.2 실행 의미
 
 - 활성 구성은 현재 진행 중인 원자 상태(task, wait)와 그 조상 복합 상태의
@@ -2107,9 +2158,9 @@ capability에도 기대지 않으므로 마지막 경로는 항상 존재한다.
 지키는 규칙이다.
 
 **소유 daemon** (claunch-7iub9). clock은 자기 세션들이 서 있는 디렉터리의 slot을
-전부 읽지만, 다루는 것은 slot의 드라이버 세션(`store.main_scope(scope)` — side·중첩
-slot은 메인 slot의 세션)이 이 daemon의 세션이고 끝나지 않은 경우뿐이다
-(`Cflow2Clock.owns`). 끝나지 않았다는 것은 live이거나, exited여도 hold·pause
+전부 읽지만, 다루는 것은 slot이 이 daemon을 가리키고(`s15@main`의 `@main`,
+4.1.1) 드라이버 세션(`store.session_of(scope)` — side·중첩 slot은 메인 slot의
+세션)이 이 daemon의 세션이며 끝나지 않은 경우뿐이다(`Cflow2Clock.owns`). 끝나지 않았다는 것은 live이거나, exited여도 hold·pause
 상태라는 뜻이다. 이 판정은 wait·monitor·dispatch·budget·ask·trigger·restart·
 round·wake-up·watch 전부의 앞에 있고, 디스패치 훅이 더한 디렉터리(`extra_cwds`)에도
 같이 적용된다.
@@ -2120,6 +2171,8 @@ round·wake-up·watch 전부의 앞에 있고, 디스패치 훅이 더한 디렉
 | 이 daemon의 세션이고 exited이지만 hold 또는 pause | 틱한다(돌아올 세션이고, hold된 드라이버는 통지로 깨운다) |
 | 이 daemon의 세션이고 exited(hold·pause 아님) | 틱하지 않는다 |
 | 이 daemon에 없는 이름, 또는 `default` | 틱하지 않는다 |
+| 다른 daemon의 slot(`s15@kimyori`) — 이 daemon에 같은 이름의 live·hold·pause 세션이 있어도 | 틱하지 않는다 |
+| 옮기기 전 slot(daemon 없음) | 이름만으로 판정한다(구분자 전과 같다) |
 
 드라이버가 끝난 런에는 주인이 없다. clock의 동작은 전부 드라이버에게 알리거나
 드라이버를 대신해 하는 일(restart는 그 세션의 `CLAUNCH_SESSION`으로 나간다)인데,
@@ -2132,8 +2185,8 @@ round·wake-up·watch 전부의 앞에 있고, 디스패치 훅이 더한 디렉
 이 규칙 전에는 두 daemon(이름 있는 인스턴스와 기본)이 같은 디렉터리에 세션을 두면
 둘 다 같은 런을 틱했고, 남의 런의 restart를 자기 `CLAUNCH_DAEMON`으로 실행했다
 (2026-10-13 gds6: 기본 daemon의 `s15` 런 restart를 kimyori daemon이 실행해 dev
-서버와 그 서버가 띄운 세션들이 kimyori에 섰다). 같은 이름 충돌 자체는 slot 경로에
-daemon 구분이 없어서 남는다 — claunch-9jmdz.
+서버와 그 서버가 띄운 세션들이 kimyori에 섰다). 같은 이름 충돌 자체는 slot 이름의
+daemon 구분자(4.1.1, claunch-9jmdz)가 없앤다.
 
 **엔진 동작의 환경.** restart 명령(`RestartClock._execute`)과 wait·monitor·watch
 probe(`run_probe`)는 daemon의 환경을 그대로 물려받지 않는다

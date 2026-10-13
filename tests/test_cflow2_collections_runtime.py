@@ -469,7 +469,7 @@ def test_watch_env_names_and_session(tmp_path):
 def test_holders(tmp_path):
     _start(tmp_path, TWO, driver="lead")
     assert runtime.holders("landing", "lead", [str(tmp_path)]) == \
-        [(str(tmp_path.resolve()), "t")]
+        [(str(tmp_path.resolve()), "t@main")]
     assert runtime.holders("landing", "other", [str(tmp_path)]) == []
     assert runtime.holders("nope", "lead", [str(tmp_path)]) == []
     runtime.abort("x", **_kw(tmp_path))
@@ -508,7 +508,7 @@ def test_nested_delegation_run_holds_no_collections(tmp_path):
     assert "collections" not in ns and not ns.get("triggers")
     # only the delegating run holds 'landing' for its driver
     assert runtime.holders("landing", "lead", [str(tmp_path)]) == \
-        [(str(tmp_path.resolve()), "t")]
+        [(str(tmp_path.resolve()), "t@main")]
     kw = {"cwd": nested["cwd"], "scope": nested["scope"], "now": T0}
     runtime.report("a", **kw)
     runtime.select(None, "go", **kw)

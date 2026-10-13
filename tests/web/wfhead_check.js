@@ -115,7 +115,7 @@ new Function(
   stubs + "\n" +
   [slice("answerFellToUs"), slice("wfDotClass"), slice("shortenPath"),
    slice("captureWfScrolls"), slice("restoreWfScrolls"),
-   slice("wfOwnerChip"), slice("renderWfInto"), slice("mobileTitle")].join("\n") +
+   slice("scopeSession"), slice("wfOwnerChip"), slice("renderWfInto"), slice("mobileTitle")].join("\n") +
   `
 Object.assign(exports, {
   renderWfInto, wfOwnerChip, mobileTitle,
@@ -225,6 +225,13 @@ const data = (over) => ({
   check("wfOwnerChip agrees on its own",
         ctx.wfOwnerChip({ scope: "default" }) === null &&
         ctx.wfOwnerChip({}) === null);
+  // a v2 slot names its daemon (claunch-9jmdz): the chip links the session
+  // the server maps it to, and none for another daemon's slot
+  const own = ctx.wfOwnerChip({ scope: "s15@main+stack", session: "s15", sessions: ["s15"] });
+  check("wfOwnerChip links the session of a qualified slot",
+        own && own.textContent === "session s15" && own.href === "#/s/s15");
+  check("wfOwnerChip has no link for another daemon's slot",
+        ctx.wfOwnerChip({ scope: "s15@kimyori", session: "" }) === null);
 }
 
 /* ---- the phone's top bar names the same run the same way -------------- */

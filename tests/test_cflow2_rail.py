@@ -165,7 +165,7 @@ def test_rail_entry_follows_the_run_and_flags_what_a_person_owes(proj):
     assert set(rows) == {"s1"}  # s2 has no run here
     r = rows["s1"]
     assert r["workflow"] == "pick" and r["status"] == "running"
-    assert r["scope"] == "s1" and r["cwd"] == str(runtime.RunStore(cwd, "s1").cwd)
+    assert r["scope"] == "s1@main" and r["cwd"] == str(runtime.RunStore(cwd, "s1").cwd)
     assert r["gated"] is True and len(r["owed"]) == 1
     assert r["owed"][0].startswith("choose: ")
 

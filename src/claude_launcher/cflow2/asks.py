@@ -194,7 +194,7 @@ def default_withdraw(answered: Dict[str, Any], *, sender: str) -> Optional[str]:
 
 
 def _session_of(scope: str) -> str:
-    return "" if scope in ("", store_mod.DEFAULT_SCOPE) else scope
+    return "" if scope in ("", store_mod.DEFAULT_SCOPE) else store_mod.session_of(scope)
 
 
 def _driver(st: RunStore, state: Optional[Dict[str, Any]] = None) -> str:
@@ -485,7 +485,7 @@ def human_approve(node: Optional[str] = None, *, decision: Optional[str] = None,
         _index_drop(answered["ask"])
     try:
         payload["nudged"] = (nudge_fn or default_nudge)(
-            driver or st.scope, "[cflow2] a person answered an ask of your run "
+            driver or _session_of(st.scope), "[cflow2] a person answered an ask of your run "
             f"({answered.get('decision')}). Call flow_status and continue.", str(st.cwd)) or None
     except Exception:  # noqa: BLE001
         payload["nudged"] = None

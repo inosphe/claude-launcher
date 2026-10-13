@@ -601,6 +601,7 @@ def run_detail(cwd: str, scope: str, prompts: bool = False) -> dict:
     return {
         "cwd": str(st.cwd),
         "scope": st.scope,
+        "session": slot_session(st.scope),
         "status": state.get("status"),
         "run": payload,
         "chart": chart_view(chart, prompts),
@@ -725,6 +726,7 @@ def run_summary(cwd: str, scope: str) -> Optional[dict]:
         "version": 2,
         "cwd": str(st.cwd),
         "scope": st.scope,
+        "session": slot_session(st.scope),
         "run": state.get("run_id"),
         "workflow": state.get("workflow"),
         "status": state.get("status"),
@@ -735,6 +737,15 @@ def run_summary(cwd: str, scope: str) -> Optional[dict]:
         "delegations": sum(1 for d in (state.get("delegations") or {}).values()
                            if d.get("status") in ("pending", "queued", "running")),
     }
+
+
+def slot_session(scope: str) -> str:
+    """The session of this daemon a slot's page links to: its driver's name
+    without ``@<daemon>`` (``s15`` for ``s15@main+stack``); "" for another
+    daemon's slot or ``default``, whose session is not here to attach."""
+    if store2.main_scope(scope) == store2.DEFAULT_SCOPE:
+        return ""
+    return store2.session_of(scope) if store2.is_own(scope) else ""
 
 
 def list_runs(cwds: Sequence[str]) -> List[dict]:
@@ -1077,8 +1088,9 @@ _TIMERS: Dict[Tuple[str, str], Tuple[Any, List[dict]]] = {}
 
 
 def session_timers(cwd: str, session: str) -> List[dict]:
-    """The timers of the v2 runs ``session`` drives in ``cwd``: the main run
-    (scope = the session's name) and its side runs (``<session>+<side>``)."""
+    """The timers of the v2 runs ``session`` (this daemon's) drives in
+    ``cwd``: the main run (``<session>@<daemon>``) and its side runs
+    (``<session>@<daemon>+<side>``)."""
     from ..cflow2 import runtime
 
     try:
@@ -1087,7 +1099,9 @@ def session_timers(cwd: str, session: str) -> List[dict]:
         return []
     out: List[dict] = []
     for scope in scopes:
-        if scope != session and not scope.startswith(session + "+"):
+        bare = store2.unqualified(scope)
+        if (bare != session and not bare.startswith(session + store2.SIDE_SEP)) \
+                or not store2.is_own(scope):
             continue
         key = (cwd, scope)
         try:

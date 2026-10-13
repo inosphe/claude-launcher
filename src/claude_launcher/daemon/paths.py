@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
+from typing import Optional
 
 from .. import config
 
@@ -32,6 +33,11 @@ INSTANCE_BASE_ENV = "CLAUNCH_INSTANCE_BASE"
 
 _INSTANCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
+#: The default (unnamed) instance's id wherever a daemon has to be named: the
+#: ``@<daemon>`` of a cflow2 run slot (``s15@main``, claunch-9jmdz). Reserved,
+#: so no named instance can take it. Every other place reads this constant.
+DEFAULT_INSTANCE_ID = "main"
+
 
 def validate_instance(name: str) -> str:
     """Return ``name`` if it is a safe instance name, else raise ValueError.
@@ -44,6 +50,11 @@ def validate_instance(name: str) -> str:
             f"bad daemon instance name {name!r} (use letters, digits, '-', '_', "
             "'.'; must start with a letter or digit, max 64 chars)"
         )
+    if name == DEFAULT_INSTANCE_ID:
+        raise ValueError(
+            f"bad daemon instance name {name!r}: it is the default daemon's id "
+            f"(leave CLAUNCH_DAEMON unset and drop -L for the default daemon)"
+        )
     return name
 
 
@@ -51,6 +62,14 @@ def instance() -> str:
     """The active daemon instance name ('' = the default instance)."""
     name = os.environ.get(INSTANCE_ENV, "").strip()
     return validate_instance(name) if name else ""
+
+
+def instance_id(name: Optional[str] = None) -> str:
+    """The id of instance ``name`` (default: the active one):
+    :data:`DEFAULT_INSTANCE_ID` for the default instance, else its name."""
+    if name is None:
+        name = instance()
+    return name or DEFAULT_INSTANCE_ID
 
 
 def base_home() -> Path:
@@ -79,7 +98,7 @@ def known_instances() -> list:
     if root.is_dir():
         names.extend(sorted(
             p.name for p in root.iterdir()
-            if p.is_dir() and _INSTANCE_RE.match(p.name)
+            if p.is_dir() and _INSTANCE_RE.match(p.name) and p.name != DEFAULT_INSTANCE_ID
         ))
     return names
 
