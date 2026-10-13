@@ -285,8 +285,8 @@ def test_codex_model_survives_a_turn_larger_than_usage_tail(tmp_path):
 
 @pytest.mark.parametrize("model", ["gpt-6.1-sol", None])
 def test_codex_older_model_scan_handles_split_and_missing_records(tmp_path, monkeypatch, model):
-    monkeypatch.setattr(ctxsize, "FIRST_CHUNK", 127)
-    monkeypatch.setattr(ctxsize, "MAX_TAIL", 508)
+    monkeypatch.setattr(ctxsize, "FIRST_CHUNK", 257)
+    monkeypatch.setattr(ctxsize, "MAX_TAIL", 1028)
     records = [codex_context(model=model)] if model else []
     path = write_jsonl(
         tmp_path, *records,
