@@ -511,6 +511,16 @@ DAEMON_DEFAULTS = {
     # keep_alive sessions and those that would come back blank are never
     # held.
     "hold_idle_minutes": 60.0,
+    # Staggered restore (daemon/restore_queue.py, claunch-0j6gb.2): at a
+    # daemon start, the sessions to bring back are not all launched at once.
+    # Each one that would come back with its conversation is filed
+    # "delayed" (a hold the restore queue owns) and relaunched in priority
+    # order -- leaders, then parents, then the ones that were working, then
+    # the most recently active -- this many seconds apart. Using one first
+    # (attaching, a mesh message, a checks request, typing to it) relaunches
+    # it at once. 0 restores everything up front, before listening, as
+    # before.
+    "restore_stagger_seconds": 3.0,
     # A merge/handoff completion (daemon/handoff.py) waits this long for the
     # target to take the report before it gives up and KEEPS the source —
     # the target's keyboard may be busy, and the report is the only thing of

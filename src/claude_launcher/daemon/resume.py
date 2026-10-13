@@ -134,6 +134,7 @@ WAIT_WORKING = "working"
 WAIT_SETTLING = "settling"
 WAIT_RUN = "run-unreadable"
 WAIT_PASTE = "paste-refused"
+WAIT_DELAYED = "delayed"
 
 #: The same keys as the sentence the give-up line prints. Written out rather
 #: than interpolated so the line reads as a reason and not as a code.
@@ -144,6 +145,7 @@ _WAIT_REASONS = {
     WAIT_SETTLING: "it never held still long enough to paste into",
     WAIT_RUN: "its cflow run state could not be read",
     WAIT_PASTE: "the terminal would not take the paste",
+    WAIT_DELAYED: "the restore queue had not started it yet",
 }
 
 
@@ -270,6 +272,18 @@ class ResumeNudge:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
 
+    def adopt_blank(self, name: str) -> None:
+        """Owe ``name`` the blank-restore message after all: a delayed codex
+        record whose relaunch (by the restore queue, after this nudge was
+        built) found no rollout of its own (claunch-0j6gb.2)."""
+        self._blank.add(name)
+        self._recent.discard(name)
+        if name not in self.pending:
+            self.pending.append(name)
+        if self.enabled and (self._task is None or self._task.done()):
+            self._task = None
+            self.start()
+
     async def _run(self) -> None:
         log.info(
             "resume nudge: %d restored session(s) were working or recently "
@@ -306,11 +320,18 @@ class ResumeNudge:
     async def _attempt(self, name: str) -> bool:
         """One pass at one session. Returns whether it is settled (delivered,
         dropped, or refused) and should leave the pending list."""
+        if getattr(self.manager, "is_waking", lambda _n: False)(name):
+            return False  # mid-relaunch: the record is out of the registry
         try:
             session = self.manager.get(name)
         except Exception:
             return True  # killed or cleared while we waited
         if getattr(session, "exited", True):
+            # Still in the restore queue (claunch-0j6gb.2): it is owed the
+            # nudge once it is up, not dropped for not being up yet.
+            if getattr(session, "delayed_at", None):
+                self._waiting[name] = WAIT_DELAYED
+                return False
             return True
 
         state = self._readiness(session, name)

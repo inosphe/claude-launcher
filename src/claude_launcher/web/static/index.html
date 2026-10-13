@@ -197,7 +197,7 @@
            syncSessionFilters ran. The count span carries a 0 placeholder and
            is rewritten from the live cache on the first successful poll. -->
       <button id="session-filter-current" type="button" data-filter="current"
-              title="Current — Running, Hold, Paused, Killed" aria-label="Current (0)" aria-pressed="true"><span class="session-filter-icon filter-icon-current" aria-hidden="true"></span><span class="session-filter-count">0</span></button>
+              title="Current — Running, Hold, Delayed, Failed, Paused, Killed" aria-label="Current (0)" aria-pressed="true"><span class="session-filter-icon filter-icon-current" aria-hidden="true"></span><span class="session-filter-count">0</span></button>
       <button id="session-filter-running-paused" type="button" data-filter="running-paused"
               title="Running || Paused" aria-label="Running || Paused (0)" aria-pressed="false"><span class="session-filter-icon filter-icon-running-paused" aria-hidden="true"></span><span class="session-filter-count">0</span></button>
       <button id="session-filter-running" type="button" data-filter="running"
@@ -207,6 +207,15 @@
            include it. -->
       <button id="session-filter-hold" type="button" data-filter="hold"
               title="Hold" aria-label="Hold (0)" aria-pressed="true"><span class="session-filter-icon filter-icon-hold" aria-hidden="true"></span><span class="session-filter-count">0</span></button>
+      <!-- Delayed: sessions the daemon's start put in its restore queue
+           (claunch-0j6gb.2); they start in priority order, and opening one
+           starts it at once. -->
+      <button id="session-filter-delayed" type="button" data-filter="delayed"
+              title="Delayed" aria-label="Delayed (0)" aria-pressed="true"><span class="session-filter-icon filter-icon-delayed" aria-hidden="true"></span><span class="session-filter-count">0</span></button>
+      <!-- Failed: the program ended by itself with an error, nobody asked
+           (claunch-0j6gb.1); its issue is kept for the respawn. -->
+      <button id="session-filter-failed" type="button" data-filter="failed"
+              title="Failed" aria-label="Failed (0)" aria-pressed="true"><span class="session-filter-icon filter-icon-failed" aria-hidden="true"></span><span class="session-filter-count">0</span></button>
       <!-- Paused: exited records carrying the pause marker — the operator's
            temporary stop, filed apart from the killed so the two never share
            a count and the bulk resume below reaches exactly this set. -->

@@ -16,6 +16,11 @@ import sys
 from typing import Dict, Optional, Sequence
 
 
+
+#: Seconds :meth:`PtyHandle.reap` waits for a child that has closed its
+#: terminal to be collected.
+REAP_TIMEOUT = 0.5
+
 class PtyError(Exception):
     """Raised when a PTY child cannot be spawned."""
 
@@ -50,6 +55,14 @@ class PtyHandle:
 
     def exit_code(self) -> Optional[int]:
         raise NotImplementedError
+
+    def reap(self, timeout: float = REAP_TIMEOUT) -> Optional[int]:
+        """The exit code, read once the output has ended (EOF).
+
+        :meth:`exit_code` is a poll; this is the reading for the end of the
+        session, where a backend may have to wait a moment for the child to
+        be collected. The default has nothing to wait for."""
+        return self.exit_code()
 
     def terminate(self, force: bool = False) -> None:
         raise NotImplementedError
@@ -319,6 +332,17 @@ class _UnixPty(PtyHandle):
 
     def exit_code(self) -> Optional[int]:
         return self._proc.poll()
+
+    def reap(self, timeout: float = REAP_TIMEOUT) -> Optional[int]:
+        # EOF on the master comes when the child closes its end of the PTY,
+        # which is a moment before the kernel has a status to collect: a bare
+        # poll() here read None for a child that exited 3 (claunch-0j6gb.1),
+        # and an unknown code cannot tell a failure from a kill. Wait the
+        # moment, bounded, for a child that closed its terminal and lives on.
+        try:
+            return self._proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return None
 
     def terminate(self, force: bool = False) -> None:
         try:

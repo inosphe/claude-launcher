@@ -85,7 +85,8 @@ from .. import (
     beads_db, beads_meta, cli_beads, reports as reports_mod, store, workspaces,
 )
 from .session import (
-    CATEGORY_HOLD, CATEGORY_PAUSED, CATEGORY_RUNNING, STATUS_BUSY, STATUS_IDLE, Session,
+    CATEGORY_DELAYED, CATEGORY_FAILED, CATEGORY_HOLD, CATEGORY_PAUSED, CATEGORY_RUNNING,
+    STATUS_BUSY, STATUS_IDLE, Session,
     session_category,
 )
 
@@ -2303,7 +2304,8 @@ class Board:
                 created = created_of(active, name)
                 category = session_category(s) if s is not None else None
                 if (s is not None and s.status() == "exited"
-                        and category not in (CATEGORY_PAUSED, CATEGORY_HOLD)
+                        and category not in (CATEGORY_PAUSED, CATEGORY_HOLD,
+                                             CATEGORY_DELAYED, CATEGORY_FAILED)
                         and not queue and not created):
                     continue
                 lane: dict = {
@@ -2328,7 +2330,8 @@ class Board:
                 # The page's own fold rule (app.js beadsLaneSpent).
                 if (fold and "spent" not in opened
                         and category not in (CATEGORY_RUNNING, CATEGORY_PAUSED,
-                                             CATEGORY_HOLD)):
+                                             CATEGORY_HOLD, CATEGORY_DELAYED,
+                                             CATEGORY_FAILED)):
                     lane.update(folded=True, count=len(queue), issues=[], created=[])
                 elif s is not None and activity_for is not None:
                     # Only for a head that is drawn: a folded lane has none.
@@ -2905,7 +2908,13 @@ class Board:
     def session_exited(self, session) -> None:
         """The manager's exit hook: sweep the board for a session that is
         gone. Scheduled, never awaited — the funnel it is called from is
-        synchronous and must not wait on a subprocess."""
+        synchronous and must not wait on a subprocess.
+
+        A *failed* session (claunch-0j6gb.1) is not swept here: its issue
+        stays in_progress for the respawn, and the sweep comes through
+        ``SessionManager.settle_hooks`` once a person settles the record."""
+        if getattr(session, "failed_at", None):
+            return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:

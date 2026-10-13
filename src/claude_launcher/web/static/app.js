@@ -1618,7 +1618,8 @@ function railMetaText(s) {
   // the pause is the operator's. A marker on a still-running row is a pause
   // whose signal has not landed yet — the same window a kill has.
   const state = s.archived_at ? "archived" : s.status === "exited"
-    ? (s.held_at ? "hold" : s.paused_at ? "paused" : `exit ${s.exit_code ?? "?"}`)
+    ? (s.delayed_at ? "delayed" : s.held_at ? "hold" : s.failed_at ? `failed ${s.exit_code ?? "?"}`
+      : s.paused_at ? "paused" : `exit ${s.exit_code ?? "?"}`)
     : s.paused_at ? "pausing" : s.winddown ? "winding down" : "";
   // The kind the session declared at creation (``pi-durable``) follows the
   // harness it qualifies: same CLI, run for that purpose.
@@ -1762,14 +1763,16 @@ async function runSessionSearch(q) {
 const SESSION_FILTER_KEY = `claunch_session_filter:${BASE}`;
 const SESSION_GROUP_KEY = `claunch_session_group:${BASE}`;
 const SESSION_GROUP_ORDER_KEY = `claunch_session_group_order:${BASE}`;
-const SESSION_FILTERS = ["current", "running-paused", "running", "hold", "killed", "paused", "archived"];
+const SESSION_FILTERS = ["current", "running-paused", "running", "hold", "delayed", "failed", "killed", "paused", "archived"];
 /* The two presets. Hold (claunch-5l35i) is a running session whose program
    the daemon freed while nobody used it; it wakes on attach, so both presets
    that show the running ones show it too. The functions further down spell
    the same lists out, because the page checks slice them out of this file
-   one function at a time. */
-const SESSION_FILTER_CURRENT = ["running", "hold", "killed", "paused"];
-const SESSION_FILTER_RUNNING_PAUSED = ["running", "hold", "paused"];
+   one function at a time. Delayed (claunch-0j6gb.2) is a hold the boot's
+   restore queue owns and goes wherever hold goes; failed (claunch-0j6gb.1)
+   is an exit nobody asked for and goes wherever killed goes. */
+const SESSION_FILTER_CURRENT = ["running", "hold", "delayed", "failed", "killed", "paused"];
+const SESSION_FILTER_RUNNING_PAUSED = ["running", "hold", "delayed", "paused"];
 const SESSION_GROUPS = ["mesh", "workspace"];
 function restoreSessionFilter(saved) {
   const current = SESSION_FILTER_CURRENT.slice();
@@ -1784,6 +1787,10 @@ function restoreSessionFilter(saved) {
       if (!states.includes("hold") && states.includes("running") && states.includes("paused")) {
         states.push("hold");
       }
+      // And for the two partitions added after it: delayed follows hold,
+      // failed follows killed.
+      if (states.includes("hold") && !states.includes("delayed")) states.push("delayed");
+      if (states.includes("killed") && !states.includes("failed")) states.push("failed");
       return SESSION_FILTERS.filter((s) => states.includes(s));
     }
   } catch { /* Old or invalid browser storage falls back to Current. */ }
@@ -2153,6 +2160,7 @@ function renderSessionTabs() {
     // repaint the title, and the bar is otherwise only rebuilt when the
     // fields above move.
     return [name, isSessionPinned(name), name === active, rec?.status, rec?.paused_at, rec?.held_at,
+            rec?.delayed_at, rec?.failed_at,
             typeof dotGrade === "function" ? dotGrade(rec) : "",
             rec?.observe_pin, rec?.briefing, sessionTabOtherProject(rec)];
   }));
@@ -2475,7 +2483,7 @@ function renderSessionGrid(force = false) {
     layout.rows, currentName, sessionGridPerLine,
     // The dot's grade rides here, not the readings under it: those move on
     // most polls, the grade only when a bound is crossed.
-    visible.map((s) => [s.name, s.status, s.paused_at, s.held_at,
+    visible.map((s) => [s.name, s.status, s.paused_at, s.held_at, s.delayed_at, s.failed_at,
                         typeof dotGrade === "function" ? dotGrade(s) : "", s.role,
                         handleTag(s.name)?.handle || null,
                         searching ? sessionMatchesSearch(s) : true,
@@ -3840,7 +3848,8 @@ function setSessionGroupByMesh(enabled, remember = true) {
 function sessionCategory(s) {
   if (s && s.archived_at) return "archived";
   if (s && s.status === "exited") {
-    if (s.held_at) return "hold";
+    if (s.held_at) return s.delayed_at ? "delayed" : "hold";
+    if (s.failed_at) return "failed";
     return s.paused_at ? "paused" : "killed";
   }
   return "running";
@@ -3849,16 +3858,16 @@ function sessionCategory(s) {
 function sessionMatchesFilter(s, filter = sessionFilter) {
   const category = sessionCategory(s);
   if (Array.isArray(filter)) return filter.includes(category);
-  if (filter === "running-paused") return ["running", "hold", "paused"].includes(category);
+  if (filter === "running-paused") return ["running", "hold", "delayed", "paused"].includes(category);
   return filter === "current" ? category !== "archived" : category === filter;
 }
 
 function sessionFilterCounts(sessions) {
-  const counts = { current: 0, "running-paused": 0, running: 0, hold: 0, killed: 0, paused: 0, archived: 0 };
+  const counts = { current: 0, "running-paused": 0, running: 0, hold: 0, delayed: 0, failed: 0, killed: 0, paused: 0, archived: 0 };
   for (const session of sessions || []) {
     const category = sessionCategory(session);
     counts[category]++;
-    if (["running", "hold", "paused"].includes(category)) counts["running-paused"]++;
+    if (["running", "hold", "delayed", "paused"].includes(category)) counts["running-paused"]++;
     if (category !== "archived") counts.current++;
   }
   return counts;
@@ -3866,8 +3875,8 @@ function sessionFilterCounts(sessions) {
 
 function setSessionFilter(filter, remember = true) {
   if (!SESSION_FILTERS.includes(filter)) return;
-  sessionFilter = filter === "current" ? ["running", "hold", "killed", "paused"].slice()
-    : filter === "running-paused" ? ["running", "hold", "paused"].slice()
+  sessionFilter = filter === "current" ? ["running", "hold", "delayed", "failed", "killed", "paused"].slice()
+    : filter === "running-paused" ? ["running", "hold", "delayed", "paused"].slice()
     : SESSION_FILTERS.filter((s) => s !== "current" && s !== "running-paused"
       && (s === filter ? !sessionFilter.includes(s) : sessionFilter.includes(s)));
   if (remember) localStorage.setItem(SESSION_FILTER_KEY, JSON.stringify(sessionFilter));
@@ -3947,11 +3956,11 @@ function syncSessionFilters(sessions) {
       })
     );
     const pressed = filter === "current"
-      ? sessionFilter.length === ["running", "hold", "killed", "paused"].length
-        && ["running", "hold", "killed", "paused"].every((s) => sessionFilter.includes(s))
+      ? sessionFilter.length === ["running", "hold", "delayed", "failed", "killed", "paused"].length
+        && ["running", "hold", "delayed", "failed", "killed", "paused"].every((s) => sessionFilter.includes(s))
       : filter === "running-paused"
-        ? sessionFilter.length === ["running", "hold", "paused"].length
-          && ["running", "hold", "paused"].every((s) => sessionFilter.includes(s))
+        ? sessionFilter.length === ["running", "hold", "delayed", "paused"].length
+          && ["running", "hold", "delayed", "paused"].every((s) => sessionFilter.includes(s))
       : sessionFilter.includes(filter);
     button.setAttribute("aria-pressed", String(pressed));
   }
@@ -7382,7 +7391,8 @@ function dotGrade(s) {
    for a caller that holds a fresher one (the mobile bar). */
 function dotClassOf(s, status) {
   const st = status || (s && s.status) || "unknown";
-  const paused = st === "exited" && s && s.held_at ? " hold"
+  const paused = st === "exited" && s && s.held_at ? (s.delayed_at ? " hold delayed" : " hold")
+    : st === "exited" && s && s.failed_at ? " failed"
     : st === "exited" && s && s.paused_at ? " paused" : "";
   return `dot ${st}${paused}${dotGrade(s && { ...s, status: st })}`;
 }
@@ -8762,7 +8772,7 @@ function filterCflowRuns(runs, sessions, filter, query) {
   return (runs || []).filter((run) => {
     const category = cflowSessionCategory(run, sessions);
     const matches = filter === "all" || category === filter ||
-      (filter === "running-paused" && ["running", "hold", "paused"].includes(category));
+      (filter === "running-paused" && ["running", "hold", "delayed", "paused"].includes(category));
     return matches && (!needle || [run.workflow, run.scope, run.title, run.step_id, run.cwd]
       .some((value) => String(value || "").toLowerCase().includes(needle)));
   });
@@ -14094,8 +14104,14 @@ function setStatusBadge(status) {
   // badge reads `hold` only for the moment the wake takes, or when it failed
   // and resume is the way back.
   const held = exited && !!record.held_at;
-  badge.textContent = held ? "hold" : paused ? "paused" : status;
-  badge.className = `badge ${status}${held ? " hold" : paused ? " paused" : ""}`;
+  // Delayed: waiting in the boot's restore queue (claunch-0j6gb.2), and
+  // opening it starts it. Failed: the program ended by itself with an error
+  // (claunch-0j6gb.1); respawn is the way back.
+  const delayed = held && !!record.delayed_at;
+  const failed = exited && !held && !!record.failed_at;
+  const marker = delayed ? "delayed" : held ? "hold" : failed ? "failed" : paused ? "paused" : "";
+  badge.textContent = marker || status;
+  badge.className = `badge ${status}${held ? " hold" : ""}${marker && marker !== "hold" ? ` ${marker}` : ""}`;
   // The rail dot's grade in words (dotTitle): how many rows a busy session
   // moved in the last minute, how long an idle one has sat. Only when the
   // poll's record agrees with the socket's word, or the two would contradict.
@@ -24040,7 +24056,9 @@ function beadsLaneCount(lane) {
 function beadsLaneSpent(lane) {
   if (lane.pool) return false;
   if (!lane.known) return true;
-  if (lane.category) return !["running", "hold", "paused"].includes(lane.category);
+  // A failed session keeps its issue in_progress for the respawn
+  // (claunch-0j6gb.1), so its lane is not spent either.
+  if (lane.category) return !["running", "hold", "delayed", "failed", "paused"].includes(lane.category);
   return lane.status === "exited";
 }
 
@@ -24106,7 +24124,7 @@ function beadsQueueLane(grid, lane, root, statuses, opts = {}) {
     const state = el("div", "beads-q-state");
     if (lane.known) {
       // A paused session's status is "exited"; the badge says which exit.
-      const shown = lane.category === "paused" || lane.category === "hold"
+      const shown = ["paused", "hold", "delayed", "failed"].includes(lane.category)
         ? lane.category : lane.status;
       state.appendChild(el("span", `beads-sess ${shown || ""}`, shown || "?"));
     } else {

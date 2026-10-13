@@ -31,6 +31,10 @@ const sessions = [
   { name: "held", status: "exited", paused_at: "2026-09-02T00:00:00Z" },
   { name: "old", status: "exited", archived_at: "2026-08-28T00:00:00Z" },
   { name: "asleep", status: "exited", held_at: "2026-10-09T00:00:00Z" },
+  // In the boot's restore queue (claunch-0j6gb.2): a hold the queue owns.
+  { name: "queued", status: "exited", held_at: "2026-10-13T00:00:00Z", delayed_at: "2026-10-13T00:00:00Z" },
+  // Ended by itself with an error (claunch-0j6gb.1).
+  { name: "crashed", status: "exited", exit_code: 1, failed_at: "2026-10-13T00:00:00Z" },
 ];
 const rows = sessions.map((session) => {
   const state = classes();
@@ -38,7 +42,7 @@ const rows = sessions.map((session) => {
 });
 const list = { querySelectorAll: (selector) => selector === "li[data-name]" ? rows : [] };
 const buttons = {};
-for (const filter of ["current", "running-paused", "running", "hold", "killed", "paused", "archived"]) {
+for (const filter of ["current", "running-paused", "running", "hold", "delayed", "failed", "killed", "paused", "archived"]) {
   buttons[filter] = {
     textContent: "", children: [], attrs: {},
     append(...children) { this.children.push(...children); },
@@ -86,81 +90,87 @@ function check(what, got, want) {
   }
 }
 
-check("the five lifecycle categories are disjoint",
-      sessions.map(ctx.category), ["running", "killed", "paused", "archived", "hold"]);
-check("current combines running, killed, paused and hold",
-      sessions.map((s) => ctx.matches(s, "current")), [true, true, true, false, true]);
-check("running-paused includes hold",
-      sessions.map((s) => ctx.matches(s, "running-paused")), [true, false, true, false, true]);
+check("the seven lifecycle categories are disjoint",
+      sessions.map(ctx.category), ["running", "killed", "paused", "archived", "hold", "delayed", "failed"]);
+check("current combines running, killed, paused, hold, delayed and failed",
+      sessions.map((s) => ctx.matches(s, "current")), [true, true, true, false, true, true, true]);
+check("running-paused includes hold and delayed, not failed",
+      sessions.map((s) => ctx.matches(s, "running-paused")), [true, false, true, false, true, true, false]);
 check("hold alone shows only the held record",
-      sessions.map((s) => ctx.matches(s, ["hold"])), [false, false, false, false, true]);
+      sessions.map((s) => ctx.matches(s, ["hold"])), [false, false, false, false, true, false, false]);
+check("delayed alone shows only the queued record",
+      sessions.map((s) => ctx.matches(s, ["delayed"])), [false, false, false, false, false, true, false]);
+check("failed alone shows only the failed record",
+      sessions.map((s) => ctx.matches(s, ["failed"])), [false, false, false, false, false, false, true]);
 check("every count describes its exact partition", ctx.counts(sessions),
-      { current: 4, "running-paused": 3, running: 1, hold: 1, killed: 1, paused: 1, archived: 1 });
+      { current: 6, "running-paused": 4, running: 1, hold: 1, delayed: 1, failed: 1, killed: 1, paused: 1, archived: 1 });
 
 ctx.sync(sessions);
 check("the remembered killed filter is selected",
       Object.values(buttons).map((b) => b.attrs["aria-pressed"]),
-      ["false", "false", "false", "false", "true", "false", "false"]);
-check("killed shows only killed rows — a paused or held record is not one",
-      rows.map((row) => row.classes.has("session-filtered")), [true, false, true, true, true]);
+      ["false", "false", "false", "false", "false", "false", "true", "false", "false"]);
+check("killed shows only killed rows — a paused, held, delayed or failed record is not one",
+      rows.map((row) => row.classes.has("session-filtered")), [true, false, true, true, true, true, true]);
 check("counts are rendered beside every label",
       Object.values(buttons).map((b) => b.children[1].textContent),
-      ["4", "3", "1", "1", "1", "1", "1"]);
+      ["6", "4", "1", "1", "1", "1", "1", "1", "1"]);
 
-check("legacy combined selection migrates", ctx.restore("running-paused"), ["running", "hold", "paused"]);
-check("legacy current migrates", ctx.restore("current"), ["running", "hold", "killed", "paused"]);
-check("a current preset saved before hold existed gains hold",
-      ctx.restore('["running","killed","paused"]'), ["running", "hold", "killed", "paused"]);
-check("a running-paused preset saved before hold existed gains hold",
-      ctx.restore('["running","paused"]'), ["running", "hold", "paused"]);
-check("invalid storage resets", ctx.restore('{bad'), ["running", "hold", "killed", "paused"]);
-check("invalid state resets", ctx.restore('["unknown"]'), ["running", "hold", "killed", "paused"]);
+check("legacy combined selection migrates", ctx.restore("running-paused"), ["running", "hold", "delayed", "paused"]);
+check("legacy current migrates", ctx.restore("current"), ["running", "hold", "delayed", "failed", "killed", "paused"]);
+check("a current preset saved before hold existed gains hold, delayed and failed",
+      ctx.restore('["running","killed","paused"]'), ["running", "hold", "delayed", "failed", "killed", "paused"]);
+check("a current preset saved before delayed and failed existed gains both",
+      ctx.restore('["running","hold","killed","paused"]'), ["running", "hold", "delayed", "failed", "killed", "paused"]);
+check("a running-paused preset saved before hold existed gains hold and delayed",
+      ctx.restore('["running","paused"]'), ["running", "hold", "delayed", "paused"]);
+check("invalid storage resets", ctx.restore('{bad'), ["running", "hold", "delayed", "failed", "killed", "paused"]);
+check("invalid state resets", ctx.restore('["unknown"]'), ["running", "hold", "delayed", "failed", "killed", "paused"]);
 check("empty selection survives reload", ctx.restore('[]'), []);
 check("saved combination survives reload", ctx.restore('["running","archived"]'), ["running", "archived"]);
 
 ctx.set("running");
-check("running adds to killed", sessions.map((s) => ctx.matches(s)), [true, true, false, false, false]);
+check("running adds to killed", sessions.map((s) => ctx.matches(s)), [true, true, false, false, false, false, false]);
 ctx.set("killed");
 ctx.set("paused");
-check("running and paused can both be pressed", sessions.map((s) => ctx.matches(s)), [true, false, true, false, false]);
+check("running and paused can both be pressed", sessions.map((s) => ctx.matches(s)), [true, false, true, false, false, false, false]);
 check("independent buttons reflect the combination — without hold it is not the preset",
       Object.values(buttons).map((b) => b.attrs["aria-pressed"]),
-      ["false", "false", "true", "false", "false", "true", "false"]);
+      ["false", "false", "true", "false", "false", "false", "false", "true", "false"]);
 check("combination is remembered", writes.at(-1), ["claunch_session_filter:/t/local/", '["running","paused"]']);
 ctx.set("running");
 check("paused alone refreshes its partition", refreshes.at(-1), "paused");
 ctx.set("archived");
-check("archive adds to paused", sessions.map((s) => ctx.matches(s)), [false, false, true, true, false]);
+check("archive adds to paused", sessions.map((s) => ctx.matches(s)), [false, false, true, true, false, false, false]);
 check("mixed archive refreshes all selected categories", refreshes.at(-1), "all");
 ctx.set("paused");
 check("archive alone refreshes archived", refreshes.at(-1), "archived");
 ctx.set("archived");
-check("all buttons can be released", sessions.map((s) => ctx.matches(s)), [false, false, false, false, false]);
+check("all buttons can be released", sessions.map((s) => ctx.matches(s)), [false, false, false, false, false, false, false]);
 check("empty selection is saved", writes.at(-1)[1], "[]");
 ctx.set("current");
-check("current restores the working fleet", rows.map((row) => row.classes.has("session-filtered")), [false, false, false, true, false]);
-check("current presses its four component buttons", Object.values(buttons).map((b) => b.attrs["aria-pressed"]),
-      ["true", "false", "true", "true", "true", "true", "false"]);
+check("current restores the working fleet", rows.map((row) => row.classes.has("session-filtered")), [false, false, false, true, false, false, false]);
+check("current presses its six component buttons", Object.values(buttons).map((b) => b.attrs["aria-pressed"]),
+      ["true", "false", "true", "true", "true", "true", "true", "true", "false"]);
 ctx.set("current");
-check("current is an idempotent preset", ctx.current(), ["running", "hold", "killed", "paused"]);
+check("current is an idempotent preset", ctx.current(), ["running", "hold", "delayed", "failed", "killed", "paused"]);
 ctx.set("archived");
 check("adding archived releases current indicator", buttons.current.attrs["aria-pressed"], "false");
 ctx.set("current");
 check("current releases archived", buttons.archived.attrs["aria-pressed"], "false");
 ctx.set("running-paused");
-check("combined preset selects running, hold and paused", ctx.current(), ["running", "hold", "paused"]);
-check("combined preset count includes all three categories", buttons["running-paused"].attrs["aria-label"], "Running || Paused (3)");
+check("combined preset selects running, hold, delayed and paused", ctx.current(), ["running", "hold", "delayed", "paused"]);
+check("combined preset count includes all four categories", buttons["running-paused"].attrs["aria-label"], "Running || Paused (4)");
 check("combined preset has tooltip", buttons["running-paused"].attrs.title, "Running || Paused");
 ctx.set("running-paused");
-check("combined preset is idempotent", ctx.current(), ["running", "hold", "paused"]);
+check("combined preset is idempotent", ctx.current(), ["running", "hold", "delayed", "paused"]);
 ctx.set("killed");
 check("adding killed releases combined preset", buttons["running-paused"].attrs["aria-pressed"], "false");
 ctx.set("archived");
 ctx.set("running-paused");
-check("preset clears killed and archived", sessions.map((s) => ctx.matches(s)), [true, false, true, false, true]);
-check("preset stores only actual categories", writes.at(-1)[1], '["running","hold","paused"]');
+check("preset clears killed, failed and archived", sessions.map((s) => ctx.matches(s)), [true, false, true, false, true, true, false]);
+check("preset stores only actual categories", writes.at(-1)[1], '["running","hold","delayed","paused"]');
 check("combined preset is second in the page", [...html.matchAll(/id="session-filter-([^"]+)"/g)].map((m) => m[1]),
-      ["current", "running-paused", "running", "hold", "paused", "killed", "archived"]);
+      ["current", "running-paused", "running", "hold", "delayed", "failed", "paused", "killed", "archived"]);
 ctx.set("current");
 check("buttons stay in a scrolling single row", /\.session-filter-buttons\s*\{[^}]*flex-wrap:\s*nowrap;[^}]*overflow-x:\s*auto/.test(css), true);
 
@@ -192,11 +202,11 @@ check("turning the grouping off leaves none",
         ["claunch_session_group:/t/local/", "false"],
       ]);
 
-check("the shipped page contains all seven state controls",
-      ["current", "running-paused", "running", "hold", "killed", "paused", "archived"].every((name) =>
+check("the shipped page contains all nine state controls",
+      ["current", "running-paused", "running", "hold", "delayed", "failed", "killed", "paused", "archived"].every((name) =>
         html.includes(`id="session-filter-${name}"`)), true);
 check("every icon button has a tooltip and accessible name before polling",
-      ["current", "running", "hold", "paused", "killed", "archived"].every((name) => {
+      ["current", "running", "hold", "delayed", "failed", "paused", "killed", "archived"].every((name) => {
         const tag = html.match(new RegExp(`id="session-filter-${name}"[^>]*>`))?.[0] || "";
         return tag.includes(`title="${name[0].toUpperCase() + name.slice(1)}`)
           && tag.includes('aria-label="')

@@ -49,6 +49,10 @@ function sessionBadge(row) {
   // A held session (claunch-5l35i) is idle with its program freed; it wakes
   // when it is opened or messaged, so it reads as waiting, not as ended.
   if (row.category === "hold") return {label: "hold", kind: "idle"};
+  // Delayed: in the boot's restore queue; opening it starts it at once.
+  if (row.category === "delayed") return {label: "시작 대기", kind: "idle"};
+  // Failed: ended by itself with an error; its issue is kept for a respawn.
+  if (row.category === "failed") return {label: "실패", kind: "blocked"};
   if (row.category === "killed" || row.category === "archived") return {label: "종료", kind: "idle"};
   if (row.questions) return {label: `질문 ${row.questions}`, kind: "waiting"};
   if (row.state === "blocked") return {label: "차단", kind: "blocked"};
@@ -96,8 +100,9 @@ function modeSelect(current, onpick) {
 function dotClass(record) {
   if (!record) return "dot exited";
   const status = record.status || "exited";
-  const held = record.category === "hold" || (status === "exited" && record.held_at);
-  if (held) return "dot exited hold";
+  const held = ["hold", "delayed"].includes(record.category) || (status === "exited" && record.held_at);
+  if (held) return record.category === "delayed" || record.delayed_at ? "dot exited hold delayed" : "dot exited hold";
+  if (record.category === "failed" || (status === "exited" && record.failed_at)) return "dot exited failed";
   const paused = record.category === "paused" || (status === "exited" && record.paused_at);
   return `dot ${paused ? "exited paused" : status}`;
 }

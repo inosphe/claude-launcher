@@ -65,6 +65,14 @@ MAX_NOTE = 2000
 OS_ENDED_EXIT_CODES = frozenset({0x40010004})
 log = logging.getLogger(__name__)
 
+#: The ``by`` the restore queue wakes a delayed record with.
+RESTORE_QUEUE = "restore-queue"
+
+
+def _now_iso() -> str:
+    """The lifecycle-marker timestamp format (``archived_at`` and the rest)."""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
 
 def ended_by_os(exit_code: Optional[int]) -> bool:
     """Whether ``exit_code`` says Windows ended the process at a logoff or
@@ -133,8 +141,14 @@ class SessionManager:
         focused_session_scheduling: bool = True,
         background_render_delay: float = 0.05,
         background_render_budget: float = BACKGROUND_RENDER_BUDGET,
+        restore_stagger: float = 0.0,
     ) -> None:
         self.idle_threshold = idle_threshold
+        #: Seconds between the restore queue's relaunches
+        #: (``restore_stagger_seconds``, claunch-0j6gb.2). 0 — the default
+        #: here, so a manager built without the daemon's config behaves as it
+        #: always did — relaunches everything inside :meth:`restore_all`.
+        self.restore_stagger = max(0.0, float(restore_stagger or 0.0))
         self.scrollback = scrollback
         self.restore_default = restore_default
         self.focused_session_scheduling = focused_session_scheduling
@@ -192,6 +206,29 @@ class SessionManager:
         #: or on neither, and an *idle* blank restore still lost everything it
         #: knew — so this list is not filtered by what the session was doing.
         self.resumed_blank: List[str] = []
+        #: Names :meth:`restore_all` filed as *delayed* instead of relaunching
+        #: (claunch-0j6gb.2), in registry order; the restore queue
+        #: (:mod:`claude_launcher.daemon.restore_queue`) ranks and wakes
+        #: them. They are also on :attr:`resumed_busy` / :attr:`resumed_idle`
+        #: as their state said, so the resume nudge reaches them once they
+        #: are up.
+        self.restore_queue: List[str] = []
+        #: The delayed names that were mid-turn when the previous daemon went
+        #: down. A delayed record reads ``exited``, so :meth:`persist` would
+        #: otherwise write ``was_busy: False`` for it and a second restart
+        #: before its turn would forget it was working.
+        self._delayed_busy: Set[str] = set()
+        #: Called with the new incarnation each time a delayed record comes
+        #: back, whatever woke it (the queue, a viewer, a message). The resume
+        #: nudge registers here: whether a codex restore is blank is only
+        #: known once the launch has run.
+        self.delayed_wake_hooks: List[Callable[[Session], None]] = []
+        #: Called with a *failed* record when a person settles it (kill,
+        #: archive, remove — :meth:`unhold`): the part of its ending the
+        #: failure put off. The board registers its sweep here as well as on
+        #: :attr:`exit_hooks`, and skips a failed session on the latter
+        #: (claunch-0j6gb.1); every other exit hook already ran at the exit.
+        self.settle_hooks: List[Callable[[AnySession], None]] = []
         #: Called with a session once its child is gone for good — whatever
         #: ended it. Registered by whoever has a stake in an ending (the
         #: board sweep, :mod:`claude_launcher.daemon.beads`); not called for
@@ -595,13 +632,42 @@ class SessionManager:
                                exit_code=session.exit_code)
             self.persist()
             return
-        self.events.record(session, "exit", "세션 프로세스 종료",
-                           exit_code=session.exit_code)
+        if self._failed_on_its_own(session):
+            # Nobody asked for this ending (claunch-0j6gb.1): the program
+            # died under the session — a harness that could not start, a
+            # crash. Filed apart from a kill. The exit hooks run as for any
+            # ending (the parent hears of the crash, the window is given
+            # back), except the board sweep: the issue stays in_progress for
+            # the respawn that is the usual answer, and is swept when a
+            # person settles the record (kill, archive or remove → unhold →
+            # settle_hooks).
+            session.failed_at = _now_iso()
+            self.events.record(session, "fail", "요청 없이 비정상 종료",
+                               exit_code=session.exit_code)
+            log.warning(
+                "session %r exited on its own with code %s; filed as failed",
+                session.sdef.name, session.exit_code,
+            )
+        else:
+            self.events.record(session, "exit", "세션 프로세스 종료",
+                               exit_code=session.exit_code)
         self.persist()
         if id(session) in self._restarting:
             self._restarting[id(session)] = True
         else:
             self._run_exit_hooks(session)
+
+    def _failed_on_its_own(self, session: Session) -> bool:
+        """Whether an exit is a failure: a nonzero code, and no kill, pause,
+        hold or relaunch asked for it. A clean exit 0 the agent's harness
+        made by itself (``/exit``) is an ending somebody chose, and stays
+        killed."""
+        if getattr(session, "kill_requested", False):
+            return False
+        if getattr(session, "paused_at", None) or id(session) in self._restarting:
+            return False
+        code = session.exit_code
+        return code is not None and code != 0
 
     def _run_exit_hooks(self, session: AnySession) -> None:
         for hook in list(self.exit_hooks):
@@ -1526,7 +1592,11 @@ class SessionManager:
         shell, pi, a claude that has not written its first line yet) would
         come back blank, so it is never held.
         """
-        sdef = session.sdef
+        return SessionManager._resumable_def(session.sdef)
+
+    @staticmethod
+    def _resumable_def(sdef: SessionDef) -> bool:
+        """:meth:`resumable` asked of a definition (no session object yet)."""
         if not sdef.conversation_id:
             return False
         if sdef.harness == harness_mod.CLAUDE_HARNESS:
@@ -1558,14 +1628,40 @@ class SessionManager:
         """Turn a hold into a real ending: the operator killed (or archived)
         a held record. The exit hooks the hold skipped run now — the board
         sweep returns its issue, side runs end — and the record reads killed.
-        Returns whether the marker was cleared."""
+        Returns whether the marker was cleared.
+
+        A delayed record (a hold the restore queue owns) is settled the same
+        way. So is a failed one (claunch-0j6gb.1), except that its exit hooks
+        already ran at the exit and only the board sweep it put off is owed:
+        that is :attr:`settle_hooks`."""
         session = self.get(name)
-        if not session.exited or not getattr(session, "held_at", None):
+        if not session.exited:
             return False
+        held = getattr(session, "held_at", None)
+        failed = getattr(session, "failed_at", None)
+        if not held and not failed:
+            return False
+        delayed = getattr(session, "delayed_at", None)
         session.held_at = None
-        self.events.record(session, "kill", "hold된 세션을 종료로 전환")
+        session.failed_at = None
+        if hasattr(session, "delayed_at"):
+            session.delayed_at = None
+        self._delayed_busy.discard(name)
+        self.events.record(
+            session, "kill",
+            "실패한 세션을 종료로 전환" if failed and not held
+            else "대기 중인 세션을 종료로 전환" if delayed
+            else "hold된 세션을 종료로 전환",
+        )
         self.persist()
-        self._run_exit_hooks(session)
+        if held:
+            self._run_exit_hooks(session)
+        else:
+            for hook in list(self.settle_hooks):
+                try:
+                    hook(session)
+                except Exception:  # one hook must not silence the next
+                    log.exception("settle hook %r failed for %r", hook, name)
         return True
 
     async def wake_async(self, name: str, *, by: str = "") -> AnySession:
@@ -1581,13 +1677,54 @@ class SessionManager:
             session = self.get(name)
             if not session.exited or not getattr(session, "held_at", None):
                 return session
+            delayed = bool(getattr(session, "delayed_at", None))
             self._waking.add(name)
             try:
                 relaunched = await self.respawn_async(name)
             finally:
                 self._waking.discard(name)
-            log.info("held session %r woken (%s)", name, by or "respawn")
+            if delayed:
+                self._delayed_woken(relaunched, by)
+            else:
+                log.info("held session %r woken (%s)", name, by or "respawn")
             return relaunched
+
+    def _delayed_woken(self, session: Session, by: str) -> None:
+        """Book-keeping for a delayed record that just came back."""
+        name = session.sdef.name
+        self._delayed_busy.discard(name)
+        if by == RESTORE_QUEUE:
+            # The queue is the restore running late, not a person asking for
+            # this incarnation (Session.resumed_by_human).
+            session.resumed_by_human = False
+        log.info("delayed session %r started (%s)", name, by or "respawn")
+        for hook in list(self.delayed_wake_hooks):
+            try:
+                hook(session)
+            except Exception:  # one hook must not silence the next
+                log.exception("delayed wake hook %r failed for %r", hook, name)
+
+    def fail_delayed(self, name: str, reason: str = "") -> bool:
+        """File a delayed record whose relaunch raised as *failed*
+        (claunch-0j6gb.1): the queue will not try it again, and a person
+        reads why instead of a record that stays "delayed" forever. Its
+        exit hooks run now, as a failure's do — all but the board sweep,
+        which waits for the person settling it. Returns whether the record
+        was delayed."""
+        session = self.get(name)
+        if not session.exited or not getattr(session, "delayed_at", None):
+            return False
+        session.held_at = None
+        session.delayed_at = None
+        session.failed_at = _now_iso()
+        self._delayed_busy.discard(name)
+        self.events.record(session, "fail", "대기 중이던 세션 복원 실패",
+                           reason=reason)
+        self.persist()
+        # A delayed record is a hold, so none of its ending ran; now it has
+        # ended, as a failure — everything but the board sweep.
+        self._run_exit_hooks(session)
+        return True
 
     def is_waking(self, name: str) -> bool:
         """Whether :meth:`wake_async` is relaunching ``name`` right now."""
@@ -1938,6 +2075,9 @@ class SessionManager:
         # Session.resumed_by_human for what this buys the session.
         relaunched.resumed_by_human = True
         action = "resume" if session.paused_at else "respawn"
+        if getattr(session, "delayed_at", None):
+            self.events.record(relaunched, "resume", "대기 중이던 세션 복원")
+            return relaunched
         if getattr(session, "held_at", None):
             self.events.record(relaunched, "wake", "hold된 세션 복귀")
             return relaunched
@@ -2507,7 +2647,8 @@ class SessionManager:
                     # the last moment before the daemon went down — the one
                     # question a restored-but-idle terminal cannot answer
                     # about itself (see daemon/resume.py).
-                    "was_busy": session.status() == STATUS_BUSY,
+                    "was_busy": session.status() == STATUS_BUSY
+                    or session.sdef.name in self._delayed_busy,
                     "exit_code": session.exit_code,
                     # carried across restarts so a retired record keeps
                     # answering like the session it was
@@ -2533,6 +2674,14 @@ class SessionManager:
                     # back from a restart as a plain kill would lose its wake
                     # and owe a board sweep it must not make.
                     "held_at": getattr(session, "held_at", None),
+                    # The restore queue's marker (claunch-0j6gb.2): a boot
+                    # that finds it relaunches the record through the queue
+                    # again rather than leaving it a plain hold.
+                    "delayed_at": getattr(session, "delayed_at", None),
+                    # The failure marker (claunch-0j6gb.1): a failed record
+                    # that came back as a plain kill would owe the board
+                    # sweep its failure put off.
+                    "failed_at": getattr(session, "failed_at", None),
                     # Whether this ending's board sweep was made. Without it
                     # every boot swept every exited record again, and the one
                     # write a sweep makes that does not change state -- the
@@ -2610,7 +2759,9 @@ class SessionManager:
             # so this line is what the log shows for the seconds a CLI spends
             # waiting on a daemon that has not announced itself yet.
             relaunching = sum(
-                1 for e in entries if isinstance(e, dict) and e.get("was_running")
+                1 for e in entries
+                if isinstance(e, dict)
+                and (e.get("was_running") or e.get("delayed_at"))
             )
             if relaunching:
                 log.info(
@@ -2625,7 +2776,13 @@ class SessionManager:
                     continue
                 if sdef.name in self._sessions:
                     continue  # a duplicated record must not clobber a live one
-                if sdef.restore and entry.get("was_running"):
+                # A record still delayed when the previous daemon went down
+                # was never started by it: it is owed the restore it did not
+                # get, not left a plain hold.
+                if sdef.restore and (entry.get("was_running") or entry.get("delayed_at")):
+                    if self.restore_stagger > 0 and self._resumable_def(sdef):
+                        self._defer_restore(sdef, entry)
+                        continue
                     # Asked before the relaunch, not after: the answer is about
                     # the transcript the *previous* daemon left behind, and the
                     # session we are about to start writes one of its own.
@@ -2696,6 +2853,30 @@ class SessionManager:
             )
         return failed
 
+    def _defer_restore(self, sdef: SessionDef, entry: dict) -> DeadSession:
+        """File a session the boot owes a relaunch as *delayed* (a hold the
+        restore queue owns, claunch-0j6gb.2) instead of relaunching it now.
+
+        Only for a definition that comes back with its conversation
+        (:meth:`_resumable_def`): a hold's wake is a respawn, and a blank
+        relaunch would be decided by when it ran. Every wake path a hold has
+        — a viewer, a mesh message, a cflow notice, a checks request, typing
+        to it — therefore brings it forward of the queue for free.
+        """
+        stamp = entry.get("delayed_at") or _now_iso()
+        dead = self._retire(
+            sdef, {**entry, "held_at": entry.get("held_at") or stamp,
+                   "delayed_at": stamp, "failed_at": None},
+        )
+        self.restore_queue.append(sdef.name)
+        if entry.get("was_busy"):
+            self.resumed_busy.append(sdef.name)
+            self._delayed_busy.add(sdef.name)
+        else:
+            self.resumed_idle[sdef.name] = entry.get("last_output_at")
+        self.events.record(dead, "delayed", "데몬 재시작 후 복원 대기열에 등록")
+        return dead
+
     def _retire(self, sdef: SessionDef, entry: dict) -> DeadSession:
         """Register a definition as an exited record (nothing is running)."""
         dead = DeadSession(
@@ -2710,6 +2891,8 @@ class SessionManager:
             archived_at=entry.get("archived_at"),
             paused_at=entry.get("paused_at"),
             held_at=entry.get("held_at"),
+            delayed_at=entry.get("delayed_at"),
+            failed_at=entry.get("failed_at"),
             swept_at=entry.get("swept_at"),
             scrollback=self.scrollback,
             idle_threshold=self.idle_threshold,
@@ -2731,7 +2914,9 @@ class SessionManager:
         # owed once per ending, and the only records still owing it are the
         # ones that ended across the restart or whose sweep never finished.
         # And so is a held one: a hold is not an ending (Session.held_at).
-        if not dead.archived_at and not dead.swept_at and not dead.held_at:
+        # And a failed one, for the same reason (claunch-0j6gb.1).
+        if (not dead.archived_at and not dead.swept_at and not dead.held_at
+                and not dead.failed_at):
             self._retired_for_sweep.append(dead)
         return dead
 
