@@ -104,6 +104,14 @@ const server = http.createServer((req, res) => {
         return res.end(JSON.stringify({name, pinned:on}));
       }
       if(req.method === "GET") {
+        // The detail panel's own read: enough of a session for the panel to
+        // draw its sections, the Observation one among them.
+        const meta=req.url.match(/^\/api\/sessions\/([^/?]+)\/meta$/);
+        if(meta) {
+          const name=decodeURIComponent(meta[1]), row=data.sessions.find(s=>s.name===name)||{};
+          return res.end(JSON.stringify({session:{name, status:row.status||"idle", running:!!row.running,
+            cols:80, rows:24}, meshes:[]}));
+        }
         if(req.url === "/api/daemon") return res.end('{"version":"test","boot_id":"test"}');
         // The rail reads `data.sessions`; a bare array leaves it empty, which
         // is what this fixture served until the round that put the observe
@@ -640,35 +648,42 @@ async function fadeCost(page, selector, fade) {
     data.sessions[0].events=previousEvents;
     await page.selectOption("#observer-scope","global");
     {
-    // Transcript session details reuse observer data, independent of its filters.
+    // The transcript page is the conversation alone (claunch-two6y): what its
+    // 세션 정보 tab showed is the detail panel's Observation section, which
+    // reuses the observer data independent of the observer page's filters.
     await page.evaluate(()=>location.hash="#/log/s1");
     await page.getByText("Transcript retained",{exact:true}).waitFor();
-    await page.click("#log-info-tab");
-    await page.waitForSelector('#log-info-pane .observer-card[data-session="s1"]');
-    assert.equal(await page.locator('#log-info-pane .observer-card').count(),1);
-    assert.match(await page.locator('#log-info-pane').innerText(),/테스트 12개 통과/);
-    assert.equal(await page.locator('#term-log-pane').isVisible(),false);
-    assert.equal(await page.locator('#log-info-tab').getAttribute('aria-selected'),'true');
+    assert.equal(await page.locator('#log-tabs, #log-info-tab, #log-transcript-tab, #log-info-pane').count(),0);
+    await page.evaluate(()=>location.hash="#/log/s1?detail=s1");
+    const section=page.locator('#sess-view .sess-observer[data-session="s1"]');
+    await section.getByText(/테스트 12개 통과/).waitFor();
+    assert.match(await section.innerText(),/배포 환경을 선택하십시오/,"the event timeline is there");
+    assert.equal(await section.getByRole('button',{name:'확인 표시'}).count(),1,"and its acknowledge action");
+    assert.match(await section.innerText(),/관찰 API 사용량/,"and the meter");
+    // What the rest of the panel already says is not said again here: the
+    // meshes, the pin, the waiting gates, the terminal and transcript links,
+    // the composer target.
+    assert.equal(await section.locator('.observer-gate, .observer-pin').count(),0);
+    assert.equal(await section.locator('a[href^="#/s/"], a[href^="#/log/"]').count(),0);
+    assert.equal(await section.locator('a[href="#/observer/session/s1"]').count(),1);
+    assert.doesNotMatch(await section.innerText(),/team-a|메시 없음|이 세션에 입력/);
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
-    await page.locator('#log-info-tab').press('ArrowLeft');
-    assert.equal(await page.getByText("Transcript retained",{exact:true}).isVisible(),true);
-    await page.waitForTimeout(200);
-    const transcriptStoppedReads=observerReads;
-    await page.waitForTimeout(300);
-    assert.equal(observerReads,transcriptStoppedReads,'info poll stops on transcript tab');
-    await page.click('#log-info-tab');
+    // 지금 갱신 asks for one pass on this session and redraws from the reply.
     data.sessions[0].summary='Updated session summary';
-    await page.getByText('Updated session summary',{exact:true}).waitFor();
-    await page.evaluate(()=>location.hash="#/log/s2");
-    await page.waitForFunction(()=>document.getElementById('log-title').textContent==='s2');
-    assert.equal(await page.locator('#term-log-pane').isVisible(),true);
-    await page.click('#log-info-tab');
-    await page.waitForSelector('#log-info-pane .observer-card[data-session="s2"]');
-    assert.equal(await page.locator('#log-info-pane .observer-card[data-session="s1"]').count(),0);
-    await page.evaluate(()=>location.hash="#/log/missing");
-    await page.waitForFunction(()=>document.getElementById('log-title').textContent==='missing');
-    await page.click('#log-info-tab');
-    await page.getByText('아직 이 세션의 관찰 정보가 없습니다.',{exact:true}).waitFor();
+    const before=sent.filter(r=>r.url.endsWith("/refresh")).length;
+    await section.getByRole('button',{name:'지금 갱신'}).click();
+    await section.getByText('Updated session summary',{exact:true}).waitFor();
+    await section.getByText(/갱신됨 · 새 항목/).waitFor();
+    assert.equal(sent.filter(r=>r.url.endsWith("/refresh")).length,before+1);
+    assert.equal(sent.filter(r=>r.url.endsWith("/refresh")).at(-1).url,"/api/observer/s1/refresh");
+    // Repointed at another session, the section is that session's.
+    await page.evaluate(()=>location.hash="#/log/s2?detail=s2");
+    // (s2's summary was rewritten earlier in this run, so its own link is the mark.)
+    await page.waitForSelector('#sess-view .sess-observer[data-session="s2"] a[href="#/observer/session/s2"]');
+    assert.equal(await page.locator('#sess-view .sess-observer[data-session="s1"]').count(),0);
+    await page.evaluate(()=>location.hash="#/log/missing?detail=missing");
+    await page.locator('#sess-view .sess-observer[data-session="missing"]')
+      .getByText('아직 이 세션의 관찰 정보가 없습니다.',{exact:true}).waitFor();
     await page.evaluate(()=>location.hash="#/observer");
     await page.waitForSelector('#observer-view:not(.hidden)');
     // The rail's observe-pin box, beside the 📌 pin. It is checked last and on

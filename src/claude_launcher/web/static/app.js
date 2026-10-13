@@ -18695,9 +18695,7 @@ document.addEventListener("visibilitychange", () => {
    The same page reads another daemon's session (#/rlog/<machine>/<name>):
    a remote shadow's terminal takes no scroll, so this is the only place
    what it said earlier can be read. Only where the pages come from changes
-   (its host, through /api/shadows/...) and where Back goes; the session
-   info tab is hidden, because what it looks up is a LOCAL session and a
-   remote `s1` is not the local one. */
+   (its host, through /api/shadows/...) and where Back goes. */
 const TRANSCRIPT_PAGE = 40;
 const TRANSCRIPT_FOLLOW_MAX = 200;
 const TRANSCRIPT_NEAR_TOP = 400;   // px from the top that triggers an older page
@@ -18826,8 +18824,6 @@ function openTranscript(name, machine = null) {
   $("log-title").textContent = machine ? `${name} @${machine}` : name;
   const back = $("log-back");
   if (back) back.href = machine ? shadowHash(machine, name) : `#/s/${encodeURIComponent(name)}`;
-  const info = $("log-info-tab");
-  if (info) info.hidden = !!machine;
   if (transcriptName === name && transcriptMachine === machine) {
     if (typeof syncSessionLine === "function") syncSessionLine();
     return;
@@ -18839,7 +18835,6 @@ function openTranscript(name, machine = null) {
   // showView ran before the name was set; the footer follows the session
   // this page now reads.
   if (typeof syncSessionLine === "function") syncSessionLine();
-  globalThis.TranscriptTabs?.select("transcript");
   transcriptCursor = null;
   transcriptSeen = -1;
   transcriptMore = false;
@@ -18867,7 +18862,6 @@ function openTranscript(name, machine = null) {
    forgotten too: a conversation moves on while you are away, and coming back
    should land at the bottom rather than at a cursor into a stale page. */
 function closeTranscript() {
-  globalThis.ObserverPage?.closeSession();
   stopTranscriptPoll();
   transcriptGeneration += 1;
   transcriptName = null;
@@ -35213,6 +35207,16 @@ function renderSession(data) {
     // ⟳ for a fresh read. Here, high up, because it is the reason the panel
     // gets opened more often than the metadata is.
     if (s.name) view.appendChild(sessBriefSection(s.name));
+
+    // And what the observer has read off it: its summary, the reports and
+    // questions it has raised, and the meter for those reads. Under the
+    // briefing because the two are both readings of the session by a model,
+    // and this one is the one that asks the reader to act. observer.js keeps
+    // the node and its own slower poll; this only places it.
+    if (s.name && globalThis.ObserverPage) {
+      const box = globalThis.ObserverPage.panelSection(s.name);
+      view.appendChild(typeof carried === "function" ? carried(box) : box);   // the live node, or its stand-in (carried)
+    }
   }
 
   if (show("messages")) {

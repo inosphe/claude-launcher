@@ -2609,9 +2609,6 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 #log-body {
   flex: 1; min-height: 0; display: flex; position: relative;
 }
-/* The info tab hides the row (observer.js); [hidden] is restated because
-   the display:flex above outranks it. */
-#log-body[hidden] { display: none; }
 #term-log-pane {
   position: relative; min-width: 0;
   flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
@@ -2638,7 +2635,6 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 #log-view .log-format-tabs { align-self: flex-start; padding: 0 20px 8px; background: none; }
 #log-view .log-format-tabs label { flex: none; }
 #log-view .log-format-tabs span { padding: 4px 12px; }
-#log-view .log-format-tabs[hidden] { display: none; }
 /* The HTML view of the attached session: the session header is up above the
    page (syncTermHeader), so the page-head's way back and title fold away,
    and the header's line-header button can fold the format row too. */
@@ -2866,14 +2862,14 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 .sess-migrate, .sess-reborrow, .sess-perms, .sess-brief-section, .sess-task,
 .sess-packs,
 .sess-note, .sess-flags, .sess-input-journal, .sess-beads, .sess-commits,
-.sess-quickjob, .sess-kids {
+.sess-quickjob, .sess-kids, .sess-observer {
   margin: 12px 0; padding: 12px 16px; background: #1b1e24;
   border: 1px solid #2a2e36; border-radius: 8px; max-width: 760px;
 }
 .sess-meshes h3, .sess-wf h3, .sess-send h3, .sess-queued h3, .sess-bp h3,
 .sess-migrate h3, .sess-reborrow h3, .sess-perms h3, .sess-brief-section h3,
 .sess-task h3, .sess-packs h3, .sess-note h3, .sess-flags h3, .sess-beads h3,
-.sess-commits h3, .sess-quickjob h3, .sess-kids h3,
+.sess-commits h3, .sess-quickjob h3, .sess-kids h3, .sess-observer h3,
 .sess-input-journal > summary {
   font-size: 12px; font-weight: 600; text-transform: uppercase;
   color: #7d8590; margin-bottom: 10px;
@@ -3750,7 +3746,8 @@ a.beads-q-name:hover { color: #79c0ff; text-decoration: underline; }
 .docked .sess-migrate, .docked .sess-reborrow, .docked .sess-perms,
 .docked .sess-quickjob, .docked .sess-kids, .docked .sess-task, .docked .sess-packs,
 .docked .sess-note, .docked .sess-flags, .docked .sess-brief-section,
-.docked .sess-input-journal, .docked .sess-beads, .docked .sess-commits {
+.docked .sess-input-journal, .docked .sess-beads, .docked .sess-commits,
+.docked .sess-observer {
   margin: 10px 0; padding: 10px 12px; max-width: none; background: #16181d;
 }
 /* a rail column has no room for two controls side by side */

@@ -241,7 +241,7 @@ async function setObservePin(name,on) {
 }
 async function oneShot(name) {
   if(refreshing.has(name))return;
-  refreshing.add(name);refreshNotes.set(name,"갱신 중…");render();
+  refreshing.add(name);refreshNotes.set(name,"갱신 중…");redraw();
   try {
     const result=await request(`api/observer/${encodeURIComponent(name)}/refresh`,{});
     refreshNotes.set(name,result.called?`갱신됨 · 새 항목 ${result.events}개`:"갱신됨 · 새 기록 없음");
@@ -561,35 +561,77 @@ function fillSession(body,s,actionsOnly=false) {
   const usage=usageBlock(s);
   if(usage)body.append(usage);
 }
-let embedded = null, embeddedPoll = null;
+/* The detail panel's Observation section: what this page knows about one
+   session, drawn in the rail beside what the panel already says about it.
+   The rail rebuilds every 2s and calls this on each build, so the box is kept
+   here and handed back each time (the panel moves the same node, as it does
+   its send box), and the observer is asked again at most once every ten
+   seconds — the cadence the observer page itself polls at. Nothing runs
+   while the rail is not drawing the section, since only its calls ask.
+   It carries only what the rest of the panel does not: the meshes are the
+   Meshes box, a waiting cflow gate is the Workflow panel, the pin is the
+   Flags box, the times are the metadata, and the terminal and transcript are
+   the header's view radio. */
+let panelBox = null, panelAsked = 0, panelLoaded = false;
+const PANEL_POLL_MS = 10000;
+function panelSection(name) {
+  if(!panelBox||panelBox.dataset.session!==name) {
+    panelBox=node("div","","sess-observer");panelBox.dataset.session=name;
+    panelAsked=0;
+    renderPanel();
+  }
+  if(Date.now()-panelAsked>=PANEL_POLL_MS&&!document.hidden) {
+    panelAsked=Date.now();refresh();
+  }
+  return panelBox;
+}
+function renderPanel() {
+  if(!panelBox)return;
+  const name=panelBox.dataset.session, s=snapshot.sessions.find(s=>s.name===name);
+  // A redraw closes every fold it replaces, so the open ones are read off
+  // the old draw first and opened again on the new one.
+  const foldKey=d=>`${d.closest("[data-event]")?.dataset.event||""}|${d.querySelector("summary")?.textContent||""}`;
+  const open=new Set([...panelBox.querySelectorAll("details")].filter(d=>d.open).map(foldKey));
+  const title=node("h3","Observation ");
+  if(s){const state=activity(s);title.append(node("span",state.label,`state ${state.kind}`));}
+  const parts=[title];
+  const updated=s&&updatedText(s);
+  if(updated)parts.push(node("small",updated,"observer-updated"));
+  const notice=node("p",!panelLoaded?"관찰 정보를 불러오는 중…":cflowError?"cflow 상태 조회 실패 · 마지막 조회 결과 표시":snapshot.error||(snapshot.enabled?"관찰 중":"관찰이 꺼져 있습니다 · 「지금 갱신」은 사용할 수 있습니다."),"meta");
+  notice.setAttribute("role","status");parts.push(notice);
+  const links=node("nav","","observer-links");
+  const page=node("a","관찰 결과");page.href="#/observer/session/"+encodeURIComponent(name);
+  const update=node("button","지금 갱신","observer-action");update.type="button";
+  update.disabled=refreshing.has(name);
+  update.title=`${name}을 지금 한 번 관찰합니다. 관찰이 꺼져 있어도 이 한 번은 수행됩니다.`;
+  update.onclick=()=>oneShot(name);
+  links.append(page,update);
+  const note=refreshNotes.get(name);
+  if(note)links.append(node("small",note,"observer-action-note"));
+  parts.push(links);
+  if(panelLoaded&&!s)parts.push(node("p","아직 이 세션의 관찰 정보가 없습니다."));
+  if(s) {
+    parts.push(s.summary?richLine(s.summary,"obs-summary"):node("p","아직 관찰 결과가 없습니다."));
+    if(s.error)parts.push(node("p",s.error));
+    for(const e of sessionEvents(s).reverse())parts.push(eventItem(s,e));
+    // A session the meter never reached and whose last call was never recorded
+    // has nothing to report; the block is omitted rather than shown empty.
+    const usage=usageBlock(s);
+    if(usage)parts.push(usage);
+  }
+  panelBox.replaceChildren(...parts);
+  for(const d of panelBox.querySelectorAll("details"))if(open.has(foldKey(d)))d.open=true;
+}
 function showError(message) {
-  if(embedded) {
-    const notice=embedded.host.querySelector('[role="status"]');
-    if(notice)notice.textContent=message;
-  } else $("notice").textContent=message;
+  const notice=panelBox?.isConnected&&panelBox.querySelector('[role="status"]');
+  if(notice&&!document.body.classList.contains("observer-active"))notice.textContent=message;
+  else $("notice").textContent=message;
 }
-function closeSession() {
-  clearInterval(embeddedPoll);embeddedPoll=null;embedded=null;
-}
-function renderSession() {
-  if(!embedded)return;
-  const {name,host}=embedded, s=snapshot.sessions.find(s=>s.name===name);
-  const scroll=host.scrollTop;
-  host.replaceChildren();
-  const notice=node("p",cflowError?"cflow 상태 조회 실패 · 마지막 조회 결과 표시":snapshot.error||(snapshot.enabled?"관찰 중":"관찰이 꺼져 있습니다 · 「지금 갱신」은 사용할 수 있습니다."));
-  notice.setAttribute("role","status");host.append(notice);
-  if(!s) {host.append(node("p","아직 이 세션의 관찰 정보가 없습니다."));return;}
-  const card=sessionHeader(s), body=node("div");
-  fillSession(body,s);card.append(body);host.append(card);host.scrollTop=scroll;
-}
-async function openSession(name,host) {
-  closeSession();
-  const target={name,host};embedded=target;
-  host.replaceChildren(node("p","세션 정보를 불러오는 중…"));
-  const loaded=await refresh();
-  if(embedded!==target)return;
-  if(loaded)renderSession();
-  embeddedPoll=setInterval(()=>{if(!document.hidden)refresh();},10000);
+/* Both readers of the snapshot: the observer page when it is on screen, and
+   the detail panel's section when the rail has one. */
+function redraw() {
+  if(document.body.classList.contains("observer-active"))render();
+  renderPanel();
 }
 function render() {
   const visible=visibleSessions(), cards=$("cards"), mobile=mobileView.matches;
@@ -686,13 +728,14 @@ function refresh() {
       if(!cflowError) runs=cflow.runs||[];
       const signature=JSON.stringify([data,runs,cflowError,Math.floor(Date.now()/60000)]);
       if(document.activeElement?.matches(".observer-answer textarea,.observer-gate textarea,.observer-gate input,.observer-gate select"))return;
+      panelLoaded=true;
       if(signature!==lastSnapshot) {
         snapshot=data; lastSnapshot=signature;
         selections();
-        if(embedded)renderSession();else render();
+        redraw();
       }
       return true;
-    } catch(err) { if(embedded)embedded.host.replaceChildren(node("p",err.message));else showError(err.message);lastSnapshot="";return false; }
+    } catch(err) { showError(err.message);lastSnapshot="";return false; }
     finally { refreshTask=null; }
   })();
   return refreshTask;
@@ -764,32 +807,5 @@ async function open(scope = "global", name = "") {
   poll=setInterval(()=>{if(!document.hidden)refresh();},10000);
 }
 composerState();
-return {open, stop, openSession, closeSession};
-})();
-
-/* Transcript panels keep the conversation DOM and its scroll position intact. */
-globalThis.TranscriptTabs = (() => {
-  const transcript=document.getElementById("term-log-pane"), info=document.getElementById("log-info-pane");
-  const tabs=[document.getElementById("log-transcript-tab"),document.getElementById("log-info-tab")];
-  function select(value) {
-    // A hidden info tab (a remote shadow's transcript: it would look up the LOCAL session of that name) is never selected, arrow keys included.
-    const showInfo=value==="info"&&!tabs[1].hidden;
-    transcript.hidden=showInfo;info.hidden=!showInfo;
-    const format=document.getElementById("log-format");if(format)format.hidden=showInfo;
-    // The pane's row (its minimap and new-turns button) goes with it, or it keeps the free height the info pane needs.
-    const body=document.getElementById("log-body");if(body)body.hidden=showInfo;
-    tabs.forEach((tab,index)=>{const active=(index===1)===showInfo;tab.setAttribute("aria-selected",String(active));tab.tabIndex=active?0:-1;});
-    if(showInfo)ObserverPage.openSession(transcriptName,info);
-    else ObserverPage.closeSession();
-  }
-  tabs.forEach((tab,index)=>{
-    tab.onclick=()=>select(index?"info":"transcript");
-    tab.onkeydown=event=>{
-      if(!["ArrowLeft","ArrowRight","Home","End"].includes(event.key))return;
-      event.preventDefault();
-      const next=event.key==="Home"?0:event.key==="End"?1:1-index;
-      select(next?"info":"transcript");tabs[next].focus();
-    };
-  });
-  return {select};
+return {open, stop, panelSection};
 })();
