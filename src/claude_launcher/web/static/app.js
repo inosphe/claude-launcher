@@ -29410,7 +29410,7 @@ function wsSyncAgentControls(st, name) {
     parent.setAttribute("aria-label", "Sync agent parent session");
     parent.appendChild(new Option("Choose parent session", ""));
     for (const p of (st.doc && st.doc.agent_parents) || []) {
-      parent.appendChild(new Option(`${p.name} (${p.profile})`, p.name));
+      parent.appendChild(new Option(`${p.name} (${p.profile}${p.held ? ", hold — woken on delegate" : ""})`, p.name));
     }
     if (!(st.doc && (st.doc.agent_parents || []).length)) {
       box.appendChild(el("p", "wf-note", "Start a parent agent session to enable delegation."));

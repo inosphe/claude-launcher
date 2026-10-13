@@ -306,6 +306,79 @@ def test_mesh_wakes_a_held_recipient_instead_of_reporting_it_stranded(home, tmp_
     asyncio.run(run())
 
 
+def test_a_held_recipient_is_not_reported_dead_to_senders(home, tmp_path):
+    """claunch-8tvq7: a sender was told a held recipient "has exited —
+    nothing is reading that terminal … stop sending there", and the roster,
+    the join briefing and the cflow responder pool all read it as gone. It
+    is asleep: the delivery pass wakes it. A killed one still reads dead."""
+    from claude_launcher.cflow import responders
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "meshes")
+        mesh = mm.create("sleepy")
+        for handle in ("carol", "bob", "dan"):
+            mesh.members[handle] = mesh_mod.Member(handle, handle)
+        add_dead(mgr, "carol")
+        add_dead(mgr, "bob", held_at=HELD_AT)
+        add_dead(mgr, "dan")
+
+        sent = mm._send_core(mesh, "carol", ["bob", "dan"], "are you there", type="ask")
+        assert [e["handle"] for e in sent["undeliverable"]] == ["dan"]
+        assert "bob" not in (sent.get("notice") or "")
+        assert mm.stranded_recipients(mesh, ["bob"]) == []
+
+        rows = {r["handle"]: r for r in mm.mesh_info(mesh)["members"]}
+        assert rows["bob"]["reachability"] == "held"
+        assert rows["dan"]["reachability"] == "exited"
+        assert responders.Responder("bob", "bob", "worker",
+                                    reachability="held").answerable
+        assert not responders.Responder("dan", "dan", "worker",
+                                        reachability="exited").answerable
+
+        # Mid-wake the record is briefly out of the registry: still asleep,
+        # never "missing".
+        del mgr._sessions["bob"]
+        mgr._waking.add("bob")
+        try:
+            assert mm.stranded_recipients(mesh, ["bob"]) == []
+            assert mm._reachability(mesh, mesh.members["bob"]) == "held"
+        finally:
+            mgr._waking.discard("bob")
+
+    asyncio.run(run())
+
+
+def test_join_briefing_lists_a_held_peer(home, tmp_path):
+    mgr = _manager()
+    mm = MeshManager(mgr, root=tmp_path / "meshes")
+    mesh = mm.create("sleepy")
+    for handle in ("alice", "bob", "dan"):
+        mesh.members[handle] = mesh_mod.Member(handle, handle)
+    add_dead(mgr, "alice", held_at=HELD_AT)  # the reader; its own state is moot
+    add_dead(mgr, "bob", held_at=HELD_AT)
+    add_dead(mgr, "dan")
+    block = mm.briefing_block(mesh, mesh.members["alice"])
+    members = next(l for l in block.splitlines() if l.startswith("members:"))
+    assert "bob" in members and "dan" not in members
+
+
+def test_a_held_holder_keeps_an_exclusive_role_and_a_killed_one_frees_it(home, tmp_path):
+    """A held leader comes back holding the role (claunch-8tvq7): a second
+    leader joining meanwhile would leave two once it wakes. A killed holder
+    still frees the role for a successor, as before."""
+    mgr = _manager()
+    mm = MeshManager(mgr, root=tmp_path / "meshes")
+    mesh = mm.create("sleepy")
+    mesh.members["lead1"] = mesh_mod.Member("lead1", "lead1", role="leader")
+    add_dead(mgr, "lead1", held_at=HELD_AT)
+    holder = mm.exclusive_holder(mesh, "lead2", "leader")
+    assert holder is not None and holder.handle == "lead1"
+
+    add_dead(mgr, "lead1")  # killed: the record carries no hold marker
+    assert mm.exclusive_holder(mesh, "lead2", "leader") is None
+
+
 def test_unhold_runs_the_exit_hooks_on_archive_and_remove(home):
     mgr = _manager()
     exits = []
