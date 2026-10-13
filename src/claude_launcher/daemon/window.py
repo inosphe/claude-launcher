@@ -212,6 +212,11 @@ SHARED_POLL = 1.0
 #: proceeds on its own view (logged). Operations hold the lock for one
 #: read-modify-write of a small JSON file, so this is a stuck peer, not load.
 LOCK_WAIT = 10.0
+#: The same wait on the thread that runs the daemon's event loop: there a
+#: sleeping wait stops every API request and terminal of this daemon, so a
+#: stuck peer costs at most this long before the operation proceeds on this
+#: daemon's view (claunch-afmzw.2).
+LOOP_LOCK_WAIT = 0.5
 
 #: Server-side ceiling on an acquire's wait.  A client may choose a shorter
 #: wait at assignment time, but no request may keep a daemon connection open
@@ -409,6 +414,15 @@ def default_state_path() -> Path:
     return paths.base_home() / "daemon" / "window.json"
 
 
+def _on_event_loop() -> bool:
+    """Whether the caller runs on a thread that is running an asyncio loop."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
 def _try_flock(handle) -> bool:
     try:
         if sys.platform == "win32":
@@ -546,12 +560,13 @@ class WindowManager:
         try:
             self._lock_path.parent.mkdir(parents=True, exist_ok=True)
             handle = open(self._lock_path, "a+b")
-            deadline = time.monotonic() + LOCK_WAIT
+            wait = LOOP_LOCK_WAIT if _on_event_loop() else LOCK_WAIT
+            deadline = time.monotonic() + wait
             while not _try_flock(handle):
                 if time.monotonic() >= deadline:
                     log.warning(
-                        "window: state lock %s not taken in %.0fs; deciding on "
-                        "this daemon's view", self._lock_path, LOCK_WAIT,
+                        "window: state lock %s not taken in %.1fs; deciding on "
+                        "this daemon's view", self._lock_path, wait,
                     )
                     handle.close()
                     handle = None

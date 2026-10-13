@@ -343,3 +343,55 @@ def test_pytest_result_counts_the_failures_that_read_as_timeouts():
     result = test_window.pytest_result(1, {"failed": failed, "error": errored}, 6, 1.0)
     assert result["timeouts"] == 4
     assert window_mod.clean_result(result)["timeouts"] == 4
+
+
+# --------------------------------------------------------------------------- #
+# a peer that holds the state lock (claunch-afmzw.2)
+# --------------------------------------------------------------------------- #
+def test_a_stuck_lock_holder_stalls_the_event_loop_only_briefly(tmp_path):
+    """Another daemon holding ``window.lock`` must not freeze this daemon's
+    loop for LOCK_WAIT: on the loop thread the wait is LOOP_LOCK_WAIT."""
+    main, _ = _pair(tmp_path)
+    holder = open(main._lock_path, "a+b")
+    assert window_mod._try_flock(holder)
+
+    async def run():
+        ticks = 0
+
+        async def ticker():
+            nonlocal ticks
+            while True:
+                await asyncio.sleep(0.01)
+                ticks += 1
+
+        task = asyncio.create_task(ticker())
+        await asyncio.sleep(0.05)
+        started = time.monotonic()
+        main.status()
+        elapsed = time.monotonic() - started
+        await asyncio.sleep(0.05)
+        task.cancel()
+        return elapsed, ticks
+
+    try:
+        elapsed, ticks = asyncio.run(run())
+    finally:
+        window_mod._unflock(holder)
+        holder.close()
+    assert elapsed < window_mod.LOOP_LOCK_WAIT + 0.5 < window_mod.LOCK_WAIT
+    assert ticks > 0
+
+
+def test_off_the_loop_the_lock_wait_is_the_long_one(tmp_path, monkeypatch):
+    main, _ = _pair(tmp_path)
+    holder = open(main._lock_path, "a+b")
+    assert window_mod._try_flock(holder)
+    monkeypatch.setattr(window_mod, "LOCK_WAIT", 1.2)
+    try:
+        started = time.monotonic()
+        main.status()
+        elapsed = time.monotonic() - started
+    finally:
+        window_mod._unflock(holder)
+        holder.close()
+    assert elapsed >= 1.1
