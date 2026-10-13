@@ -129,7 +129,6 @@ function build() {
     "term-log-pane": mkel("div"),
     "log-title": mkel("span"),
     "log-back": mkel("a"),
-    "log-info-tab": mkel("button"),
     "log-minimap": mkel("div"),
     "log-new": mkel("button"),
   };
@@ -648,8 +647,7 @@ const texts = (pane) => pane.children
    scrollback, so this page is where another daemon's session is read. The
    same page: only the source of the pages (the host, via /api/shadows) and
    where Back goes change. And the remote `s8` is never the local `s8` --
-   not to the fetch, not to the "already open" check, not to the info tab,
-   which looks a session up by bare name on THIS daemon. */
+   not to the fetch and not to the "already open" check. */
 (async () => {
   const w = build();
   w.script([{ status: 200, body: {
@@ -665,8 +663,6 @@ const texts = (pane) => pane.children
         w.nodes["log-title"].textContent === "s8 @pcA", w.nodes["log-title"].textContent);
   check("Back returns to the shadow view, not the local session of that name",
         w.nodes["log-back"].href === "#/r/pcA/s8", w.nodes["log-back"].href);
-  check("the info tab is hidden: it would describe the LOCAL s8",
-        w.nodes["log-info-tab"].hidden === true);
   check("the page knows which daemon it reads", w.api.machine === "pcA");
 
   w.pane.scrollTop = 0;
@@ -691,9 +687,9 @@ const texts = (pane) => pane.children
         w.calls.slice(before));
   check("its records replace the remote ones", texts(w.pane).join(",") === "0,1,2",
         texts(w.pane));
-  check("and it gets its own title, Back and info tab again",
+  check("and it gets its own title and Back again",
         w.nodes["log-title"].textContent === "s8" && w.nodes["log-back"].href === "#/s/s8"
-        && w.nodes["log-info-tab"].hidden === false && w.api.machine === null);
+        && w.api.machine === null);
 })();
 
 (async () => {
@@ -766,10 +762,6 @@ const texts = (pane) => pane.children
         /parts\[0\] === "rlog" && parts\[1\] && parts\[2\]\) \{\s*return \{ page: "log", machine: parts\[1\], name: parts\[2\] \}/.test(src));
   check("which route() hands to the page",
         /case "log": openTranscript\(r\.name, r\.machine\); break;/.test(src));
-  check("a hidden info tab is never selected, arrow keys included",
-        /const showInfo=value==="info"&&!tabs\[1\]\.hidden;/.test(
-          fs.readFileSync(path.join(__dirname, "..", "..", "src", "claude_launcher", "web",
-                                    "static", "observer.js"), "utf8")));
   check("and route() stops its poll on the way out, like every other page",
         /r\.page !== "log"\) closeTranscript\(\)/.test(src));
   check("the pane is a real scroller — this is the whole feature, so pin it",
@@ -779,16 +771,18 @@ const texts = (pane) => pane.children
   check("the format is a radio group of two, raw checked by default",
         /name="log-format" value="raw" checked/.test(html)
         && /name="log-format" value="markdown"/.test(html));
-  check("it sits between the tabs and the transcript it formats",
-        html.indexOf('id="log-format"') > html.indexOf('id="log-tabs"')
+  check("it sits between the page head and the transcript it formats",
+        html.indexOf('id="log-format"') > html.indexOf('id="log-title"')
         && html.indexOf('id="log-format"') < html.indexOf('id="term-log-pane"'));
+  // The page is the conversation alone (claunch-two6y): what the 세션 정보 tab
+  // showed is the detail panel's Observation section now.
+  const observerSrc = fs.readFileSync(path.join(__dirname, "..", "..", "src", "claude_launcher", "web",
+                                                "static", "observer.js"), "utf8");
+  check("the page has no Transcript / 세션 정보 tab row and no info pane",
+        !/id="log-tabs"|id="log-info-tab"|id="log-transcript-tab"|id="log-info-pane"/.test(html)
+        && !/TranscriptTabs|log-info/.test(src + observerSrc));
   check("the radios are wired to the switch",
         /name="log-format"\]'\)\.forEach[\s\S]{0,160}setTranscriptFormat\(input\.value\)/.test(src));
-  check("the info tab hides it, and CSS lets [hidden] win over display:flex",
-        /getElementById\("log-format"\)[^;]*;if\(format\)format\.hidden=showInfo/.test(
-          fs.readFileSync(path.join(__dirname, "..", "..", "src", "claude_launcher", "web",
-                                    "static", "observer.js"), "utf8"))
-        && /\.log-format-tabs\[hidden\]\s*\{\s*display:\s*none/.test(css));
   check("prose wraps rather than growing a sideways scrollbar",
         /\.log-text\s*\{[^}]*white-space:\s*pre-wrap/.test(css));
   const pre = (css.match(/\n\.log-pre\s*\{[^}]*\}/) || [""])[0];
@@ -806,11 +800,6 @@ const texts = (pane) => pane.children
         ["user", "assistant", "thinking", "tool", "result", "error"].every(
           (k) => html.includes(`class="log-key" data-kind="${k}"`)
                  && css.includes(`[data-kind="${k}"] { --log-kind-color`)));
-  check("the info tab hides the pane's whole row, minimap included, and [hidden] wins",
-        /getElementById\("log-body"\);if\(body\)body\.hidden=showInfo/.test(
-          fs.readFileSync(path.join(__dirname, "..", "..", "src", "claude_launcher", "web",
-                                    "static", "observer.js"), "utf8"))
-        && /#log-body\[hidden\]\s*\{\s*display:\s*none/.test(css));
   check("the new-turns button starts hidden", /id="log-new"[^>]*class="[^"]*hidden/.test(html));
   check("on the transcript page the footer is ordered under the conversation",
         /body\[data-page="log"\] #term-input\s*\{\s*order:\s*1/.test(css));

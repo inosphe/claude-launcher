@@ -18588,8 +18588,6 @@ function openTranscript(name, machine = null) {
   $("log-title").textContent = machine ? `${name} @${machine}` : name;
   const back = $("log-back");
   if (back) back.href = machine ? shadowHash(machine, name) : `#/s/${encodeURIComponent(name)}`;
-  const info = $("log-info-tab");
-  if (info) info.hidden = !!machine;
   if (transcriptName === name && transcriptMachine === machine) {
     if (typeof syncSessionLine === "function") syncSessionLine();
     return;
@@ -18601,7 +18599,6 @@ function openTranscript(name, machine = null) {
   // showView ran before the name was set; the footer follows the session
   // this page now reads.
   if (typeof syncSessionLine === "function") syncSessionLine();
-  globalThis.TranscriptTabs?.select("transcript");
   transcriptCursor = null;
   transcriptSeen = -1;
   transcriptMore = false;
@@ -18629,7 +18626,6 @@ function openTranscript(name, machine = null) {
    forgotten too: a conversation moves on while you are away, and coming back
    should land at the bottom rather than at a cursor into a stale page. */
 function closeTranscript() {
-  globalThis.ObserverPage?.closeSession();
   stopTranscriptPoll();
   transcriptGeneration += 1;
   transcriptName = null;
@@ -34865,6 +34861,16 @@ function renderSession(data) {
     // ⟳ for a fresh read. Here, high up, because it is the reason the panel
     // gets opened more often than the metadata is.
     if (s.name) view.appendChild(sessBriefSection(s.name));
+
+    // And what the observer has read off it: its summary, the reports and
+    // questions it has raised, and the meter for those reads. Under the
+    // briefing because the two are both readings of the session by a model,
+    // and this one is the one that asks the reader to act. observer.js keeps
+    // the node and its own slower poll; this only places it.
+    if (s.name && globalThis.ObserverPage) {
+      const box = globalThis.ObserverPage.panelSection(s.name);
+      view.appendChild(typeof carried === "function" ? carried(box) : box);   // the live node, or its stand-in (carried)
+    }
   }
 
   if (show("messages")) {
