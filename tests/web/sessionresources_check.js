@@ -18,9 +18,10 @@ function node() {
   };
 }
 const a = node(), b = node(); a.dataset.name = "a"; b.dataset.name = "b";
-const run = node(), sim = node(), chart = node(), qa = node();
+const run = node(), sim = node(), chart = node(), qa = node(), threads = node();
 const dom = {"session-list": {querySelectorAll: () => [a, b]}, "term-simsbtn": sim, "term-splitbtn": run,
-             "term-chartbtn": chart, "term-qabtn": qa};
+             "term-chartbtn": chart, "term-qabtn": qa,
+             "term-threadsbtn": threads};
 let rows = [], fail = false, requests = 0;
 const ctx = vm.createContext({
   document: {createElement: node}, $: id => dom[id],
@@ -89,5 +90,11 @@ const has = n => n.classList.contains("has-resource");
   ctx.syncSessionResourceButtons(); assert.ok(has(qa), "an unanswered question lights ? qa");
   ctx.currentName = "b"; ctx.syncSessionResourceButtons(); assert.ok(!has(qa), "answered or closed only: dark");
   ctx.currentName = "ghost"; ctx.syncSessionResourceButtons(); assert.ok(!has(qa), "no questions: dark");
+  // 🗪 threads lights while the session has an open thread (claunch-doj98).
+  ctx.currentName = "a";
+  vm.runInContext('threadsRailCache = {a: {open: 2, agent_seq: 4}, b: {open: 0, agent_seq: 9}}', ctx);
+  ctx.syncSessionResourceButtons(); assert.ok(has(threads), "an open thread lights 🗪 threads");
+  ctx.currentName = "b"; ctx.syncSessionResourceButtons(); assert.ok(!has(threads), "closed threads only: dark");
+  ctx.currentName = "ghost"; ctx.syncSessionResourceButtons(); assert.ok(!has(threads), "no threads: dark");
   console.log("session resources checks passed");
 })().catch(e => { console.error(e); process.exitCode = 1; });
