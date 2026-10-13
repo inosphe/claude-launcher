@@ -13354,6 +13354,12 @@ function reconcileKillUiState(sessions = sessionsCache) {
   }
 }
 
+/* What the lifecycle group allows for this button right now (see
+   syncTermLife); a button outside the group, or not synced yet, is allowed. */
+function lifeAllows(btn) {
+  return !(btn && btn.dataset && btn.dataset.lifeOff === "1");
+}
+
 function syncSessionKillControls(name = currentName) {
   if (!name || name !== currentName) return;
   const session = sessionsCache.find((s) => s.name === name);
@@ -13362,7 +13368,9 @@ function syncSessionKillControls(name = currentName) {
     const button = $(id);
     if (!button) continue;
     button.textContent = state.label;
-    button.disabled = state.disabled;
+    // The header's kill is a segment of the lifecycle group, which also
+    // disables it where the state has no kill to offer (syncTermLife).
+    button.disabled = state.disabled || !lifeAllows(button);
     button.title = state.title;
     button.setAttribute("aria-busy", state.phase === "pending" ? "true" : "false");
     button.classList.toggle("kill-pending", state.phase === "pending");
@@ -13467,7 +13475,7 @@ async function pauseSession(name) {
     await modalInfo(`Could not pause '${name}'`,
                     err && err.message ? err.message : "request failed");
   } finally {
-    if (btn) btn.disabled = false;
+    if (btn) btn.disabled = !lifeAllows(btn);
     syncSessionKillControls(name);
     await refreshSessions({ state: "current" });
   }
@@ -13777,7 +13785,7 @@ $("term-resume").addEventListener("click", async () => {
     await refreshSessions();
     attach(info.name || name);
   } catch { /* auth overlay is up */ }
-  finally { btn.disabled = false; }
+  finally { btn.disabled = !lifeAllows(btn); }
 });
 
 /* The top briefing button: fold open (or shut) the current session's summary
@@ -14318,6 +14326,45 @@ function railCardQuickFork(name) {
 
 /* ---- end quick-fork and handoff ------------------------------------- */
 
+/* The lifecycle radio group (claunch-ndz47): resume, pause, kill and archive
+   sit welded in #term-life with the state the session is in checked — resume
+   while it runs, pause while it is paused, kill once it was killed, archive
+   once it is filed (archive wins over the others, it is the last thing done
+   to the record). A held record checks none: it is ended for now and wakes
+   by itself, which none of the four says. Every segment stays on screen and
+   a move the state does not allow is disabled:
+   - resume only relaunches an exited session;
+   - pause only stops a live one;
+   - kill stays on a paused or held record — the process is already gone,
+     and the press files the pause as killed, so the bulk resume of the
+     paused no longer brings it back (h_session_kill); a killed record has
+     nothing left for it to change;
+   - archive is gone once the record is filed.
+   The verdict is kept on each button (data-life-off) because kill's disabled
+   state is also written by syncSessionKillControls, and the pause and resume
+   handlers re-enable their button when the request settles. */
+function syncTermLife({ exited, paused, held, archived }) {
+  const checked = archived ? "term-archive"
+    : !exited ? "term-resume"
+    : paused ? "term-pause"
+    : held ? ""
+    : "term-kill";
+  const off = {
+    "term-resume": !exited,
+    "term-pause": exited,
+    "term-kill": exited && !paused && !held,
+    "term-archive": archived,
+  };
+  for (const [id, disabled] of Object.entries(off)) {
+    const btn = $(id);
+    if (!btn) continue;
+    btn.classList.toggle("hidden", false);
+    btn.setAttribute("aria-checked", String(id === checked));
+    btn.dataset.lifeOff = disabled ? "1" : "";
+    if (id !== "term-kill") btn.disabled = disabled;
+  }
+}
+
 function setStatusBadge(status) {
   const badge = $("term-status");
   // Every session is archivable — a live one is ended by the press (see
@@ -14347,19 +14394,12 @@ function setStatusBadge(status) {
   // poll's record agrees with the socket's word, or the two would contradict.
   badge.title = typeof dotTitle === "function" && record.status === status
     ? dotTitle(record) : "";
-  $("term-resume").classList.toggle("hidden", !exited);
   // Rebrief types into a live terminal; on an exited one there is nobody to
   // read it, so the button yields its spot to resume.
   $("term-rebrief").classList.toggle("hidden", exited);
   $("term-retro").classList.toggle("hidden", exited);
-  // Kill stays on a paused record: the process is already gone, and the
-  // press files the pause as killed, so the bulk resume of the paused no
-  // longer brings it back (h_session_kill). A killed record has nothing
-  // left for it to change.
-  $("term-kill").classList.toggle("hidden", exited && !paused && !held);
-  if ($("term-pause")) $("term-pause").classList.toggle("hidden", exited);
   if ($("term-idle-hold")) $("term-idle-hold").classList.toggle("hidden", exited);
-  $("term-archive").classList.toggle("hidden", archived);
+  syncTermLife({ exited, paused, held, archived });
   if (typeof syncSessionPinUi === "function") syncSessionPinUi();
   syncSessionKillControls();
   if (typeof syncSessionHandoffControls === "function") syncSessionHandoffControls();

@@ -135,6 +135,22 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
     await page.locator("#term-overflow-menu button").filter({ hasText: /^HTML$/ }).click();
     assert.equal(await page.evaluate(() => document.querySelector('input[name="term-view"][value="html"]').checked), true,
       "the HTML proxy selects the HTML radio");
+    // The lifecycle group (claunch-ndz47) folds in the same way: one button
+    // per segment, pressed on the state the session is in, and a segment the
+    // state does not allow stays in the menu disabled.
+    await page.evaluate(() => {
+      document.getElementById("term-kill").setAttribute("aria-checked", "true");
+      for (const id of ["term-kill", "term-resume"]) document.getElementById(id).disabled = true;
+    });
+    await page.waitForTimeout(80);
+    await page.locator("#term-more").click();
+    const life = await page.locator("#term-overflow-menu button").evaluateAll(
+      bs => bs.filter(b => ["resume", "pause", "kill", "archive"].includes(b.textContent))
+        .map(b => [b.textContent, b.getAttribute("aria-pressed"), b.disabled]));
+    assert.deepEqual(life, [["resume", "false", true], ["pause", "false", false],
+      ["kill", "true", true], ["archive", "false", false]],
+      `lifecycle radios in the menu: ${JSON.stringify(life)}`);
+    await page.keyboard.press("Escape");
     await page.locator("#term-more").click();
     await page.keyboard.press("Escape");
     assert.equal(await page.locator("#term-more").getAttribute("aria-expanded"), "false");
@@ -148,7 +164,15 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
     });
     for (const width of [360, 800, 1193]) await check(width);
     assert.match(await page.locator("#term-hold").getAttribute("title"), /queued.*999.*Resume delivery/);
-    await page.evaluate(() => { document.getElementById("term-title").textContent = "s581"; });
+    // Back to the ordinary row: a short name and the socket up again. The
+    // header leaves compact mode once the row fits — what this asserts is
+    // that the compact state is undone, not how many pixels the stress step
+    // above had to spare (the lifecycle group keeps all four of its
+    // segments on the row, claunch-ndz47).
+    await page.evaluate(() => {
+      document.getElementById("term-title").textContent = "s581";
+      document.getElementById("term-link").classList.add("hidden");
+    });
     await check(1920);
     assert.equal(await page.locator("#term-header").evaluate(el => el.classList.contains("term-compact")), false);
     // Exercise the real column hierarchy: wrapped tabs above the header,
