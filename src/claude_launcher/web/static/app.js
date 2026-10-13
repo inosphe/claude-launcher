@@ -25112,8 +25112,9 @@ function windowEntry(entry, position = null, queued = false) {
   }
   if (entry.forced) label.appendChild(el("span", "window-tag window-forced", "forced"));
   if (queued && Number(entry.priority)) {
-    label.appendChild(el("span", "window-tag window-priority",
+    const priority = label.appendChild(el("span", "window-tag window-priority",
       `priority ${Number(entry.priority)}`));
+    priority.title = "Higher values are served first; -1 is background verification, 0 is normal tests.";
   }
   const age = el("span", "window-age", windowAge(entry));
   age.title = entry.acquired_at || entry.enqueued_at || "timestamp unavailable";
@@ -25121,11 +25122,14 @@ function windowEntry(entry, position = null, queued = false) {
   if (queued) {
     const busy = windowCancelBusy.has(entry.grant_id);
     const actions = row.appendChild(el("span", "window-actions"));
-    for (const [action, text] of [
-      ["prioritize", "Top"], ["force", "Force"], ["cancel", "Cancel"],
+    for (const [action, text, title] of [
+      ["prioritize", "Top", "Move this waiting request to the highest queue priority. Running tests continue and resource limits still apply."],
+      ["force", "Force", "Grant this request immediately, bypassing capacity and worker limits. It may run alongside current tests."],
+      ["cancel", "Cancel", "Cancel this waiting request."],
     ]) {
       const button = el("button", `wf-btn clear window-${action}`, text);
       button.type = "button";
+      button.title = title;
       button.disabled = busy;
       button.addEventListener("click", () => windowAction(action, entry, button));
       actions.appendChild(button);
