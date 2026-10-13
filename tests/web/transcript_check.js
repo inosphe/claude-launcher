@@ -813,7 +813,8 @@ const texts = (pane) => pane.children
         && /#log-body\[hidden\]\s*\{\s*display:\s*none/.test(css));
   check("the new-turns button starts hidden", /id="log-new"[^>]*class="[^"]*hidden/.test(html));
   check("on the transcript page the footer is ordered under the conversation",
-        /body\[data-page="log"\] #term-input\s*\{\s*order:\s*1/.test(css));
+        // the footer is the composer group (presets, prompter row, input bar)
+        /body\[data-page="log"\] #term-composer\s*\{\s*order:\s*1/.test(css));
   check("the minimap's press and drag are wired",
         /map\.addEventListener\("pointerdown"[\s\S]{0,200}seekTranscriptMinimap/.test(src));
 }
