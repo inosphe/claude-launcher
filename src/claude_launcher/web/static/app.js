@@ -7434,8 +7434,13 @@ function railBeadsLine(name, lane) {
   for (const { i, created } of shown) {
     const pill = el("a", `rail-bead ${i.status || ""}${created ? " created" : ""}`, i.id || "?");
     pill.href = "#/beads/" + encodeURIComponent(i.id || "");
-    // No `title` here: the hover card already says the id, the status, the
-    // title and the facts, and a native tooltip would land on top of it.
+    // An empty `title`, set on purpose: the hover card already says the id,
+    // the status, the title and the facts, and a native tooltip would land on
+    // top of it. Leaving the attribute off is not enough -- the browser then
+    // shows the nearest ancestor's `title`, and the row carries one (its
+    // context note, `ctxNoteOnRow`). `title=""` stops that lookup at the pill
+    // (claunch-45jzn).
+    pill.title = "";
     if (!created && i.id && i.id === next) pill.classList.add("next");
     pill.addEventListener("click", (e) => e.stopPropagation());   // the row attaches; the pill navigates
     pill.addEventListener("mouseenter", () => showBeadPop(pill, i, name));
