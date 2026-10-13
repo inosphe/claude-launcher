@@ -13420,6 +13420,16 @@ function killControlState(session, localState = null) {
         + "filter and resuming the paused no longer brings it back",
     };
   }
+  // A failed record has no program left to terminate: the press settles it
+  // (unhold in h_session_kill) — it reads killed, and the board sweep it
+  // put off at the exit runs (claunch-dba28).
+  if (session && session.status === "exited" && session.failed_at) {
+    return {
+      label: "kill", disabled: false, phase: "ready",
+      title: "file this failed session as killed: it leaves the Failed "
+        + "filter and its in-progress board issues go back to open",
+    };
+  }
   return {
     label: "kill", disabled: false, phase: "ready",
     title: "terminate the program running in this session",
@@ -19968,8 +19978,11 @@ function syncMobileBars() {
   const dot = $("m-dot");
   // The header badge reads `paused` for a paused record while the status
   // underneath is `exited`; the mobile bar mirrors the word and keeps the
-  // status for its controls.
-  const marker = status === "paused" || status === "hold" ? status : "";
+  // status for its controls. The same holds for every word setStatusBadge
+  // puts over an exited record — `delayed` and `failed` too (claunch-dba28):
+  // left unfolded, a failed record lost resume and offered pause here while
+  // the header offered resume and kill.
+  const marker = ["paused", "hold", "delayed", "failed"].includes(status) ? status : "";
   if (marker) status = "exited";
   dot.className = sess && typeof dotClassOf === "function"
     ? dotClassOf(sess, status) : `dot ${status}`;
@@ -19977,14 +19990,16 @@ function syncMobileBars() {
   dot.classList.toggle("hidden", !has);
   const badge = $("m-status");
   badge.textContent = marker || status;
-  badge.className = `badge ${status}${marker ? " " + marker : ""}`;
+  // A delayed record is a hold the restore queue owns, and the header's
+  // badge carries both words — so the hold colour reaches this one too.
+  badge.className = `badge ${status}${marker === "delayed" ? " hold" : ""}${marker ? " " + marker : ""}`;
   badge.classList.toggle("hidden", !has);
   // Mirrors of the hidden header's buttons — see the click handlers below.
   $("m-resume").classList.toggle("hidden", status !== "exited");
   // Nothing to size without a terminal under the bar.
   $("m-zoom").classList.toggle("hidden", !has);
-  // A paused record keeps kill: it files the pause as killed (see
-  // setStatusBadge).
+  // A paused, held or failed record keeps kill: it files the record as
+  // killed (see syncTermLife).
   $("m-kill").classList.toggle("hidden", !has || (status === "exited" && !marker));
   if ($("m-pause")) {
     $("m-pause").classList.toggle("hidden", !has || status === "exited");

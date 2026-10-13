@@ -200,6 +200,63 @@ check("and only while the terminal is the visible view",
         nodes["m-resume"] && nodes["m-resume"].classList.contains("hidden") === false);
 }
 
+/* ---- the mobile bar folds every word the header puts on an exited record --
+   setStatusBadge writes `delayed` and `failed` over an exited record as well
+   as `paused` and `hold` (claunch-dba28). Unfolded, a failed record lost
+   resume and offered pause on the mobile bar while the header offered resume
+   and kill — the bar mirrors the header's moves, so each word is driven
+   through the real function and read back as the four mirrored controls. */
+{
+  function elem() {
+    const n = {
+      text: "", cls: "", classes: new Set(),
+      get textContent() { return n.text; },
+      set textContent(v) { n.text = String(v); },
+      get className() { return n.cls; },
+      set className(v) { n.cls = String(v); },
+      classList: {
+        toggle: (c, on) => (on ? n.classes.add(c) : n.classes.delete(c)),
+        add: (c) => n.classes.add(c),
+        remove: (c) => n.classes.delete(c),
+        contains: (c) => n.classes.has(c),
+      },
+    };
+    return n;
+  }
+  const body = slice("function syncMobileBars() {", "\n// ☰ is");
+  function bar(word, record) {
+    const nodes = {};
+    const $ = (id) => (nodes[id] || (nodes[id] = elem()));
+    $("term-status").textContent = word;
+    let currentName = "s1";
+    const sessionsCache = [Object.assign({ name: "s1", profile: "p", harness: "claude" }, record)];
+    function mobileTitle() { return "s1"; }
+    function profileHarnessLabel() { return "claude"; }
+    function syncSessionKillControls() {}
+    eval(`(${body})()`);
+    const shown = (id) => !$(id).classList.contains("hidden");
+    return { badge: $("m-status").textContent, cls: $("m-status").className,
+             resume: shown("m-resume"), pause: shown("m-pause"),
+             kill: shown("m-kill"), archive: shown("m-archive") };
+  }
+  // The class is the header's (setStatusBadge), so style.css's
+  // .badge.exited.<word> rule colours both badges alike.
+  const ended = { resume: true, pause: false, kill: true, archive: true };
+  for (const [word, record, cls] of [
+    ["failed", { status: "exited", exit_code: 1, failed_at: "t" }, "badge exited failed"],
+    ["delayed", { status: "exited", held_at: "t", delayed_at: "t" }, "badge exited hold delayed"],
+    ["hold", { status: "exited", held_at: "t" }, "badge exited hold"],
+  ]) {
+    const got = bar(word, record);
+    check(`a ${word} record: the bar reads ${word} over exited, offers resume and kill, no pause`,
+          JSON.stringify(got) === JSON.stringify({ badge: word, cls, ...ended }), JSON.stringify(got));
+  }
+  // A clean exit 0 reads `exited` and has nothing for kill to change.
+  const killed = bar("exited", { status: "exited", exit_code: 0 });
+  check("a killed record: resume, no pause, no kill",
+        [killed.resume, killed.pause, killed.kill].join() === "true,false,false", JSON.stringify(killed));
+}
+
 if (failures) {
   console.log(`${failures} check(s) failed`);
   process.exit(1);

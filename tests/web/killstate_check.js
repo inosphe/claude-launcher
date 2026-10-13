@@ -165,6 +165,18 @@ const response = (body, ok = true, status = 200) => ({
         [ctx.sessions()[0].paused_at, buttons["term-kill"].disabled],
         [null, false]);
 
+  /* A failed record (claunch-dba28): no program is left to terminate, so the
+     title says what the press does there — it settles the record as killed
+     and runs the board sweep the exit put off. */
+  ctx.setSessions([{ name: "s1", status: "exited", exit_code: 1, failed_at: "2026-09-01T00:00:00Z" }]);
+  ctx.syncSessionKillControls();
+  check("a failed record offers kill, and says it files the record as killed",
+        [buttons["term-kill"].textContent, buttons["term-kill"].disabled,
+         /failed session as killed/.test(buttons["term-kill"].title),
+         /terminate the program/.test(buttons["term-kill"].title),
+         buttons["m-kill"].title === buttons["term-kill"].title],
+        ["kill", false, true, false, true]);
+
   /* The header's lifecycle group (claunch-ndz47): resume | pause | kill |
      archive are one radio group, with the state the session is in checked
      and a move the state does not allow disabled — never hidden. */
