@@ -3,6 +3,15 @@
 SQLite's rollback journal and synchronous=EXTRA cover process/OS crashes.
 JSON files are readable projections. Once a checkpoint exists it is authoritative;
 never fall back to an older JSON state automatically, which can repeat an effect.
+
+Hot readers (the daemon's clock and web API load the same runs many times a
+second) go through :func:`read_state` and :func:`read_chart`. Each call still
+opens the database and reads the committed revision inside a read transaction;
+the verified and parsed value is reused only while that revision and the file's
+stat (device, inode, size, mtime) are unchanged. Every write -- this process,
+the CLI, another daemon -- bumps the revision and rewrites the file, so a write
+anywhere makes the next read verify the checksums and parse again. A state read
+verifies only the state; the chart is verified when the chart is read.
 """
 from __future__ import annotations
 
@@ -11,7 +20,10 @@ import hashlib
 import json
 import os
 import sqlite3
+import threading
+from collections import OrderedDict
 from pathlib import Path
+from typing import Any, Callable, Tuple
 
 from .. import atomic
 
@@ -85,6 +97,98 @@ def _snapshot(conn):
             "chart": chart, "chart_sha": chart_sha}
 
 
+#: Paths whose verified state/chart is kept (least recently used dropped).
+CACHE_MAX = 32
+_cache_lock = threading.Lock()
+_cache: "OrderedDict[Tuple[str, str], Tuple[Any, Any]]" = OrderedDict()
+
+
+def _identity(conn, path: Path):
+    """The committed generation a read transaction sees: the revision (every
+    commit and receipt bumps it), SQLite's file change counter (header bytes
+    24-27, bumped by any write transaction, ours or not) and the file's stat,
+    taken while the shared lock keeps writers out."""
+    _version(conn)
+    row = conn.execute("SELECT revision FROM snapshot WHERE id=1").fetchone()
+    if row is None:
+        raise CheckpointError("checkpoint has no committed state")
+    fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_BINARY", 0))
+    try:
+        st = os.fstat(fd)
+        header = os.read(fd, 28)
+    finally:
+        os.close(fd)
+    return (row[0], header[24:28], st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+
+
+def _cached(path: Path, part: str, identity):
+    key = (str(path), part)
+    with _cache_lock:
+        hit = _cache.get(key)
+        if hit is None or hit[0] != identity:
+            return None
+        _cache.move_to_end(key)
+        return hit
+
+
+def _remember(path: Path, part: str, identity, value) -> None:
+    with _cache_lock:
+        _cache[(str(path), part)] = (identity, value)
+        _cache.move_to_end((str(path), part))
+        while len(_cache) > CACHE_MAX * 2:
+            _cache.popitem(last=False)
+
+
+def _state(path: Path) -> Tuple[str, Any]:
+    """The committed state text, and its parsed object on a fresh verify
+    (None when the text came from the cache)."""
+    with connect(path) as conn:
+        conn.execute("BEGIN")  # identity and body from one committed generation
+        identity = _identity(conn, path)
+        hit = _cached(path, "state", identity)
+        if hit is not None:
+            return hit[1], None
+        state, state_sha = conn.execute(
+            "SELECT state,state_sha FROM snapshot WHERE id=1").fetchone()
+        if not isinstance(state, str) or digest(state) != state_sha:
+            raise CheckpointError("checkpoint checksum mismatch")
+        parsed = json.loads(state)
+        if not isinstance(parsed, dict):
+            raise CheckpointError("checkpoint state is not an object")
+        _remember(path, "state", identity, state)
+        return state, parsed
+
+
+def read_state(path: Path) -> dict:
+    """The committed state as a new dict (callers may change it)."""
+    text, parsed = _state(path)
+    return parsed if parsed is not None else json.loads(text)
+
+
+def read_state_text(path: Path) -> str:
+    return _state(path)[0]
+
+
+def read_chart(path: Path, parse: Callable[[str], Any]):
+    """``parse(chart text)`` of the committed chart. The parsed value is
+    shared between callers of the same generation: treat it as read-only."""
+    with connect(path) as conn:
+        conn.execute("BEGIN")
+        identity = _identity(conn, path)
+        hit = _cached(path, "chart", identity)
+        if hit is not None:
+            return hit[1]
+        row = conn.execute("SELECT body,sha FROM definition WHERE id=1").fetchone()
+        if row is None:
+            raise CheckpointError("checkpoint has no committed state")
+        chart, chart_sha = row
+        if not isinstance(chart, str) or digest(chart) != chart_sha:
+            raise CheckpointError("checkpoint checksum mismatch")
+    value = parse(chart)
+    _remember(path, "chart", identity, value)
+    return value
+
+
 def read(path: Path, *, full: bool = False):
     with connect(path) as conn:
         conn.execute("BEGIN")  # all reads see one committed generation
@@ -112,7 +216,8 @@ def commit(path: Path, state: str, chart: str, events: list, *, legacy: list,
            receipts: dict):
     """Commit the complete state and its events together, before publishing JSON.
 
-    The caller holds the run lock. The first import commits in a private DB
+    The caller holds the run lock. ``chart`` may be None for an existing
+    checkpoint (its committed definition is kept). The first import commits in a private DB
     before publishing it. Until publication the legacy files remain authoritative.
     Once published, a broken checkpoint must never fall back to those files.
     """
@@ -156,7 +261,7 @@ def _commit(path: Path, state: str, chart: str, events: list, *, legacy: list,
             revision = 1
         else:
             previous = _snapshot(conn)
-            if previous["chart_sha"] != digest(chart):
+            if chart is not None and previous["chart_sha"] != digest(chart):
                 raise CheckpointError("chart changed within a run; preserve and recover the slot")
             revision = previous["revision"] + 1
         for event in (legacy if creating else []) + events:

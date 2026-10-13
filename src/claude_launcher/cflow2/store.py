@@ -23,6 +23,7 @@ Finished runs are moved to ``<cwd>/.cflow2/archive/<scope>/<run_id>/``.
 from __future__ import annotations
 
 import contextlib
+import functools
 import json
 import logging
 import os
@@ -113,7 +114,17 @@ def side_of(scope: str) -> Optional[str]:
 
 
 def resolve_cwd(cwd: Optional[str] = None) -> Path:
-    return Path(cwd or os.getcwd()).resolve()
+    path = Path(cwd or os.getcwd())
+    if not path.is_absolute():
+        return path.resolve()
+    return _resolve_absolute(str(path))
+
+
+@functools.lru_cache(maxsize=256)
+def _resolve_absolute(path: str) -> Path:
+    # The daemon builds a RunStore per read for the same few directories;
+    # resolving walks every component (a stat each) every time.
+    return Path(path).resolve()
 
 
 class RunStore:
@@ -138,8 +149,11 @@ class RunStore:
         return self.dir / checkpoint.FILE
 
     def _checkpoint(self, *, full: bool = False):
+        return self._read(checkpoint.read, self.checkpoint_path, full=full)
+
+    def _read(self, fn, *args, **kwargs):
         try:
-            return checkpoint.read(self.checkpoint_path, full=full)
+            return fn(*args, **kwargs)
         except checkpoint.CheckpointError as exc:
             raise StoreError(f"{exc}; preserve this run and inspect with "
                              f"claunch cflow2 recover --scope {self.scope}") from exc
@@ -164,7 +178,7 @@ class RunStore:
 
     def load_state(self) -> Dict[str, Any]:
         if self.checkpoint_path.exists():
-            return json.loads(self._checkpoint()["state"])
+            return self._read(checkpoint.read_state, self.checkpoint_path)
         try:
             raw = self.state_path.read_text(encoding="utf-8")
         except FileNotFoundError:
@@ -183,7 +197,8 @@ class RunStore:
 
     def load_chart(self) -> ir.Chart:
         if self.checkpoint_path.exists():
-            return ir.Chart.from_json(self._checkpoint()["chart"])
+            # Shared with every reader of this checkpoint generation: read-only.
+            return self._read(checkpoint.read_chart, self.checkpoint_path, ir.Chart.from_json)
         try:
             raw = self.chart_path.read_text(encoding="utf-8")
         except FileNotFoundError:
@@ -251,9 +266,9 @@ class RunStore:
                 receipts = {p.name: p.read_text(encoding="utf-8")
                             for p in self.receipts_dir.glob("*") if p.is_file()}
             else:
-                previous = self._checkpoint()
-                chart = previous["chart"]
-                if previous["state"] == text and not events:
+                chart = None  # kept; checkpoint.commit verifies it under the write lock
+                if (self._read(checkpoint.read_state_text, self.checkpoint_path) == text
+                        and not events):
                     return
             stamped = [dict(ev, ts=ev.get("ts", utcnow())) for ev in events]
             checkpoint.commit(self.checkpoint_path, text, chart, stamped,
