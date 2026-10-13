@@ -71,6 +71,48 @@ _KEY_ENV = {
 #: instances in-process saves and restores.
 ENV_VARS = (APPLIED_ENV, BASE_ENV, PREV_ENV, *_KEY_ENV.values())
 
+#: The variables that say which daemon instance a process tree belongs to:
+#: the instance name, the port it binds and the manifest's bookkeeping. A
+#: command the daemon runs for a session (a cflow restart, a v2 probe) must
+#: not inherit them from the daemon as they are -- see :func:`engine_env`.
+IDENTITY_ENV = (paths.INSTANCE_ENV, PORT_ENV, APPLIED_ENV, PREV_ENV, BASE_ENV)
+
+
+def engine_env(env: Dict[str, str], instance: Optional[str]) -> Dict[str, str]:
+    """``env`` for a command the cflow engine runs on a session's behalf.
+
+    The daemon's own identity (:data:`IDENTITY_ENV`) is taken out, and the
+    variables its manifest moved (launcher home, config, port) go back to
+    what they were before it applied (``PREV_ENV``). Then the session's
+    instance is given explicitly: ``CLAUNCH_DAEMON=<instance>`` for a named
+    one, nothing for the default one. A ``claunch`` inside the command applies
+    that instance's manifest itself (``cli.main``), as it does in the
+    session's terminal; it never sees the daemon's port.
+
+    Inheriting the variables let a restart run by the wrong daemon start a
+    dev server -- and every session that server later spawned -- on that
+    daemon (claunch-7iub9: ``CLAUNCH_DAEMON=kimyori`` under a run driven from
+    the default daemon).
+    """
+    out = dict(env)
+    raw = out.get(PREV_ENV)
+    if raw:
+        try:
+            prev = json.loads(raw)
+        except ValueError:
+            prev = None
+        if isinstance(prev, dict):
+            for var, value in prev.items():
+                if value is None:
+                    out.pop(str(var), None)
+                else:
+                    out[str(var)] = str(value)
+    for var in IDENTITY_ENV:
+        out.pop(var, None)
+    if instance:
+        out[paths.INSTANCE_ENV] = instance
+    return out
+
 
 class InstanceManifestError(Exception):
     """A manifest that cannot be read or would break isolation."""

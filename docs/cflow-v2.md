@@ -2106,6 +2106,46 @@ capability에도 기대지 않으므로 마지막 경로는 항상 존재한다.
 데몬의 cflow2 clock(`daemon/cflow2_clock.py`)과 실행기(`daemon/cflow2_exec.py`)가
 지키는 규칙이다.
 
+**소유 daemon** (claunch-7iub9). clock은 자기 세션들이 서 있는 디렉터리의 slot을
+전부 읽지만, 다루는 것은 slot의 드라이버 세션(`store.main_scope(scope)` — side·중첩
+slot은 메인 slot의 세션)이 이 daemon의 세션이고 끝나지 않은 경우뿐이다
+(`Cflow2Clock.owns`). 끝나지 않았다는 것은 live이거나, exited여도 hold·pause
+상태라는 뜻이다. 이 판정은 wait·monitor·dispatch·budget·ask·trigger·restart·
+round·wake-up·watch 전부의 앞에 있고, 디스패치 훅이 더한 디렉터리(`extra_cwds`)에도
+같이 적용된다.
+
+| slot의 드라이버 | 처리 |
+|---|---|
+| 이 daemon의 live 세션 | 틱한다 |
+| 이 daemon의 세션이고 exited이지만 hold 또는 pause | 틱한다(돌아올 세션이고, hold된 드라이버는 통지로 깨운다) |
+| 이 daemon의 세션이고 exited(hold·pause 아님) | 틱하지 않는다 |
+| 이 daemon에 없는 이름, 또는 `default` | 틱하지 않는다 |
+
+드라이버가 끝난 런에는 주인이 없다. clock의 동작은 전부 드라이버에게 알리거나
+드라이버를 대신해 하는 일(restart는 그 세션의 `CLAUNCH_SESSION`으로 나간다)인데,
+끝난 세션은 둘 다 받지 못한다. 또 세션 이름은 daemon마다 따로 매겨지므로, 같은
+이름의 exited 기록은 오래전 다른 세션의 것일 수 있다(실례: 이름 있는 인스턴스에
+10-01의 옛 `s15` 기록이 있었고, 기본 daemon의 `s15`가 런을 몰고 있었다). 이런 런은
+드라이버 자신의 호출(`flow_status`가 wait를 확인한다)로 진행되고, 같은 daemon에서
+드라이버가 다시 살아나면 다음 패스부터 다시 틱한다. exited 세션의 side 런 중단은
+이 판정과 별개로 그 daemon의 종료 훅(`end_sides`)에서 온다.
+이 규칙 전에는 두 daemon(이름 있는 인스턴스와 기본)이 같은 디렉터리에 세션을 두면
+둘 다 같은 런을 틱했고, 남의 런의 restart를 자기 `CLAUNCH_DAEMON`으로 실행했다
+(2026-10-13 gds6: 기본 daemon의 `s15` 런 restart를 kimyori daemon이 실행해 dev
+서버와 그 서버가 띄운 세션들이 kimyori에 섰다). 같은 이름 충돌 자체는 slot 경로에
+daemon 구분이 없어서 남는다 — claunch-9jmdz.
+
+**엔진 동작의 환경.** restart 명령(`RestartClock._execute`)과 wait·monitor·watch
+probe(`run_probe`)는 daemon의 환경을 그대로 물려받지 않는다
+(`instance_manifest.engine_env`): daemon의 정체 변수(`CLAUNCH_DAEMON`,
+`CLAUNCH_DAEMON_PORT`, `CLAUNCH_INSTANCE_APPLIED`, `CLAUNCH_INSTANCE_PREV`,
+`CLAUNCH_INSTANCE_BASE` — `instance_manifest.IDENTITY_ENV`)를 빼고, 매니페스트가
+바꾼 변수(launcher home, config, port)는 `CLAUNCH_INSTANCE_PREV`의 이전 값으로
+되돌린다. 그다음 드라이버 세션의 인스턴스를 명시적으로 준다 — 이름 있는 인스턴스면
+`CLAUNCH_DAEMON=<이름>`, 기본이면 없음. 소유 규칙 덕분에 실행하는 daemon의 인스턴스가
+곧 드라이버의 인스턴스다. 명령 안의 `claunch`는 세션 터미널에서와 같이 그
+인스턴스의 매니페스트를 스스로 적용하고(`cli.main`), daemon의 포트는 보지 않는다.
+
 **session 자식.**
 
 - spawn 호출 전에 위임을 `running` + `runner.phase: spawning`으로 저장한다. 오프닝

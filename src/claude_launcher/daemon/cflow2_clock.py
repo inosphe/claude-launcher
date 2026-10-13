@@ -1,8 +1,10 @@
 """The daemon clock of cflow v2 runs (``docs/cflow-v2.md`` sections 4, 6.4, 7, 8).
 
-One periodic loop over every v2 run slot (``<cwd>/.cflow2/runs/<scope>``) in
+One periodic loop over the v2 run slots (``<cwd>/.cflow2/runs/<scope>``) in
 the directories the daemon's live sessions stand in -- the scope is the
-session name, as for v1 -- that does what no agent call does:
+session name, as for v1 -- whose driver is one of this daemon's sessions
+(:meth:`Cflow2Clock.owns`: another daemon's run in the same directory, or one
+whose driver ended, is not touched), that does what no agent call does:
 
 * **waits**: :func:`..cflow2.runtime.wait_tick` with :func:`run_probe` (its
   own process group, run values only through the environment; probes run
@@ -41,7 +43,8 @@ session name, as for v1 -- that does what no agent call does:
   and the driver is told;
 * **restarts**: an active task with ``restart:`` has its command claimed once
   per visit (:func:`..cflow2.runtime.claim_restarts`) and run after the pass
-  in a worker thread with the driver's ``CLAUNCH_SESSION`` (v1's
+  in a worker thread with the driver's ``CLAUNCH_SESSION`` and its daemon
+  instance, never this daemon's own identity variables (v1's
   :meth:`.cflow_clock.RestartClock._execute`), its result recorded with
   :func:`..cflow2.runtime.complete_restart`;
 * **wake-up**: a pass that moved a run on its own (a wait passed or timed
@@ -89,7 +92,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from .. import store
 from ..cflow2 import asks, executors, ir, runtime
 from ..cflow2 import store as cstore
-from . import cflow2_exec, cflow2_triggers
+from . import cflow2_exec, cflow2_triggers, instance_manifest, paths
 
 log = logging.getLogger("claunch.daemon.cflow2")
 
@@ -136,7 +139,9 @@ def run_probe(probe: Any, cwd: str, timeout: float = PROBE_TIMEOUT,
 
     The probe text is run as written; run values reach it only through
     ``env`` (the runtime's ``CFLOW_IN_*``/``CFLOW_DATA_*`` variables, added
-    to the daemon's environment), never by being pasted into the command.
+    to the daemon's environment less its instance identity --
+    :func:`.instance_manifest.engine_env`), never by being pasted into the
+    command.
     The command runs in its own process group, killed whole on timeout
     (exit 124). Exit codes are returned as they are; what 0, 1 and others
     mean is the runtime's (doc 2.3, wait).
@@ -144,7 +149,10 @@ def run_probe(probe: Any, cwd: str, timeout: float = PROBE_TIMEOUT,
     import subprocess
     import sys
 
-    full_env = dict(os.environ)
+    # The process environment without the daemon's instance identity, with
+    # the session's instance given back (claunch-7iub9; this daemon's, the
+    # driver's own since the clock only ticks its sessions' runs).
+    full_env = instance_manifest.engine_env(dict(os.environ), paths.instance())
     if env:
         full_env.update({str(k): str(v) for k, v in env.items()})
     cmd = runtime.expand_argv(probe, full_env) if isinstance(probe, list) else str(probe)
@@ -430,6 +438,45 @@ class Cflow2Clock:
                 found.append((bool(getattr(session, "exited", False)), name))
         return sorted(found)[0][1] if found else None
 
+    def owns(self, scope: str) -> bool:
+        """Whether this daemon drives the slot ``scope`` (claunch-7iub9).
+
+        It does when the slot's driver session (:func:`..cflow2.store.main_scope`
+        -- a side or nested slot reads as its main one) is one of this
+        daemon's sessions and has not ended: live, or held or paused (it comes
+        back, and a held driver is woken by its notice -- :meth:`_deliver`).
+
+        Every other slot is left alone, whatever directory it stands in. Two
+        daemons (a named instance and the default) can have sessions in the
+        same directory; the scan reads every slot there, and without this
+        check both ticked every run -- one daemon ran the other's restart
+        with its own ``CLAUNCH_DAEMON`` and the services it started belonged
+        to the wrong daemon from then on.
+
+        A run whose driver ended (exited without a hold or a pause), or that
+        names no session (``default``), has no owner: no daemon ticks it.
+        Every clock action is either told to the driver or done on its behalf
+        (a restart carries its ``CLAUNCH_SESSION``), and an ended session is
+        not there to take either; a session record with the same name may be
+        another one's from long ago, on either daemon. The driver's own calls
+        still advance the run (``flow_status`` checks its waits), and a driver
+        respawned on this daemon owns it again on the next pass. Side runs of
+        an exited session are aborted by :meth:`end_sides` all the same --
+        that path starts from this daemon's own exit hook, not from the scan.
+        """
+        name = cstore.main_scope(scope)
+        if not name or name == cstore.DEFAULT_SCOPE:
+            return False
+        try:
+            session = self.manager.get(name)
+        except Exception:
+            return False
+        if session is None:
+            return False
+        if not getattr(session, "exited", True):
+            return True
+        return bool(getattr(session, "held_at", None) or getattr(session, "paused_at", None))
+
     def cwds(self) -> List[str]:
         out: Set[str] = set()
         for session in self._live_sessions():
@@ -465,6 +512,10 @@ class Cflow2Clock:
                 for scope in cstore.list_scopes(cwd):
                     if self.stop.is_set():
                         return notices
+                    if not self.owns(scope):
+                        # another daemon's session, or one that ended
+                        self._open_delegations.pop((cwd, scope), None)
+                        continue
                     self._mark()
                     self._beat()
                     try:
@@ -594,7 +645,7 @@ class Cflow2Clock:
             from .cflow_clock import RestartClock
 
             def runner(c: str, a: Dict[str, Any], sess: str) -> Dict[str, Any]:
-                return RestartClock._execute(c, a, sess)
+                return RestartClock._execute(c, a, sess, instance=paths.instance())
         try:
             result = runner(cwd, action, session)
         except Exception as exc:  # noqa: BLE001 - record it, or the task waits on 'running'
