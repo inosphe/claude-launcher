@@ -2463,6 +2463,13 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   overflow: auto; user-select: text; font-size: 12px;
 }
 .clipboard-entry time { display: block; color: #9da7b3; font-size: 11px; }
+/* The composer group (index.html): the preset strip, the prompter row and
+   the input bar stacked as the column's bottom block. A focus target only so
+   presses inside it stay inside it, so it draws no focus ring. */
+#term-composer {
+  flex: none; display: flex; flex-direction: column; min-width: 0;
+}
+#term-composer:focus { outline: none; }
 #term-preset-buttons, #shadow-preset-buttons {
   flex: none; display: flex; gap: 6px; overflow-x: auto; min-width: 0;
   padding: 6px 12px; background: #1b1e24; border-top: 1px solid #2a2e36;
@@ -2707,9 +2714,7 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 /* The session line follows the reader onto this page (sessionLineOnPage):
    #main is a column and these come before #log-view in the markup, so on
    this page they are ordered after it, under the conversation. */
-body[data-page="log"] #term-preset-buttons,
-body[data-page="log"] #term-prompter-row,
-body[data-page="log"] #term-input { order: 1; }
+body[data-page="log"] #term-composer { order: 1; }
 .log-err .log-kind { color: #e88; }
 .log-err .log-pre { background: #241b1b; }
 .log-note { color: #8b93a1; padding: 12px 0; }

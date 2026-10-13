@@ -15694,12 +15694,18 @@ function autogrowTermInput(field, focusTarget = document.activeElement) {
   const border = (field.offsetHeight || 0) - (field.clientHeight || 0);
   if (needed) field.style.height = `${needed + Math.max(0, border)}px`;
   // The composer occupies its full height in layout, moving preset and
-  // prompter rows above it. Keep it open while focus moves between its tools.
+  // prompter rows above it. Its open state belongs to the composer group
+  // (#term-composer): the field opens it, a tool inside the group keeps the
+  // state it finds, and focus leaving the group closes it. A tool must not
+  // open it: a press focuses the tool before the release, and opening then
+  // moves the tool out from under the pointer, so the click is lost
+  // (claunch-1bhp2).
   if (!field.hasAttribute || !field.hasAttribute("data-expand-on-focus")) return;
   const style = getComputedStyle(field);
   const row = parseFloat(style.getPropertyValue("--term-row")) || 0;
-  const expanded = focusTarget === field || !!focusTarget?.closest?.(
-    "#term-input, #term-preset-buttons, #term-prompter-row");
+  const inside = !!focusTarget?.closest?.("#term-composer");
+  const expanded = focusTarget === field
+    || (inside && field.hasAttribute("data-expanded"));
   field.toggleAttribute("data-expanded", expanded);
   if (!expanded) {
     if (row) field.style.height = `${row}px`;
@@ -16265,13 +16271,12 @@ if ($("term-input-field")) {
   // listener that only sees the event on its way back up.
   window.addEventListener("keydown", onWindowCtrlJ, true);
   $("term-input-field").addEventListener("paste", onTermInputPaste);
-  // relatedTarget keeps internal focus transfers from collapsing the layout
-  // between pointerdown and click (including preset and prompter buttons).
-  for (const id of ["term-input", "term-preset-buttons", "term-prompter-row"]) {
-    const region = $(id);
-    if (!region) continue;
-    region.addEventListener("focusin", ev => autogrowTermInput($("term-input-field"), ev.target));
-    region.addEventListener("focusout", ev => autogrowTermInput($("term-input-field"), ev.relatedTarget));
+  // One focus region for the field and its tools: relatedTarget tells a move
+  // inside the group (kept) from a move out of it (closes).
+  const composer = $("term-composer");
+  if (composer) {
+    composer.addEventListener("focusin", ev => autogrowTermInput($("term-input-field"), ev.target));
+    composer.addEventListener("focusout", ev => autogrowTermInput($("term-input-field"), ev.relatedTarget));
   }
   if (typeof ResizeObserver === "function") {
     const watch = new ResizeObserver(() => localFit());
