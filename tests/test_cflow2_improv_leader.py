@@ -1,10 +1,9 @@
 """improv-leader-v2: the v2 port of improv-leader.yaml (claunch-yq80p.6).
 
 Compile and check the package definition, then walk a round through the
-runtime with stub probes, verify and restart: the integrate window, the
-sweep verify, the daemon-run restart, the ``deployed`` checks, the retry
-after an expired gate, the landed notice, recur auto into round 2, and the
-wind-down that ends the loop."""
+runtime with stub probes: merge admission, immutable checkpoint recording,
+regression repair delegation, notice before post-verification, recur into
+round 2, and the wind-down that ends the loop."""
 
 from __future__ import annotations
 

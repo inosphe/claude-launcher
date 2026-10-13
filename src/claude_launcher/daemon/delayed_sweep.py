@@ -55,8 +55,8 @@ class Clock:
                     queue.notified(job["id"])
             except KeyError:
                 pass
-        if self.runner and self.runner.returncode is None:
-            return
+        # Queue.claim persists runner leases and permits one repair to wait
+        # ahead of the background runner. Resource exclusivity belongs to Window.
         window = self.window.status() if self.window is not None else {}
         idle = not window.get("holders") and not window.get("queue")
         job = queue.claim(background=idle)

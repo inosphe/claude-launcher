@@ -146,18 +146,24 @@ class Queue:
                     self.finish(row["id"], "retry", detail=str(exc))
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            background_running = False
             for row in db.execute("SELECT * FROM jobs WHERE status='running'").fetchall():
-                if row["pid"] and pid_alive(row["pid"]):
-                    return None
-                # The claimant owns the short spawn interval; don't reclaim it.
-                if not row["pid"] and row["available"] > time.time():
-                    return None
+                live = row["pid"] and pid_alive(row["pid"])
+                spawning = not row["pid"] and row["available"] > time.time()
+                if live or spawning:
+                    if row["priority"] >= 0:
+                        return None
+                    # A repair may join the window ahead of a waiting background
+                    # runner. The window still prevents concurrent sweeps.
+                    background_running = True
+                    continue
                 db.execute("UPDATE jobs SET status='retry',pid=0,detail='runner interrupted' WHERE id=?", (row["id"],))
             row = db.execute("""SELECT j.* FROM jobs j LEFT JOIN pauses p ON p.common=j.common
                 WHERE j.status IN ('queued','retry') AND j.available<=?
                 AND (j.priority>=0 OR ?)
                 AND (p.job IS NULL OR p.job='' OR p.repair_issue=j.issue)
-                ORDER BY j.priority DESC,j.created,j.id LIMIT 1""", (time.time(), background)).fetchone()
+                ORDER BY j.priority DESC,j.created,j.id LIMIT 1""",
+                (time.time(), background and not background_running)).fetchone()
             if row is None:
                 return None
             db.execute("UPDATE jobs SET status='running',pid=0,available=?,attempts=attempts+1 WHERE id=?",
@@ -203,7 +209,6 @@ def run_one(queue, ident, scratch):
     """Run against a detached, clean checkout; infrastructural failures retry."""
     import importlib.util
     import shlex
-    import sys
     from types import SimpleNamespace
     row = queue.get(ident)
     if row["status"] != "running":
@@ -218,12 +223,20 @@ def run_one(queue, ident, scratch):
         git(row["repo"], "worktree", "add", "--detach", str(checkout), row["sha"])
         if git(checkout, "rev-parse", row["ref"]) != row["sha"]:
             raise ValueError("immutable checkpoint ref changed")
-        # A fresh worktree has no venv. Use the configured runner interpreter;
+        # Install the snapshot's dependencies and plugins in its own venv;
         # pytest's repository pythonpath imports the checked-out sources.
         command = row["command"]
         if not command:
-            interpreter = (subprocess.list2cmdline([sys.executable, "-m", "pytest"])
-                           if os.name == "nt" else shlex.join([sys.executable, "-m", "pytest"]))
+            env = dict(os.environ)
+            env.pop("UV_PROJECT_ENVIRONMENT", None)
+            env.pop("VIRTUAL_ENV", None)
+            subprocess.run(["uv", "sync", "--extra", "test"], cwd=checkout,
+                           env=env, check=True)
+            python = checkout / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+            if not python.exists():
+                raise ValueError("snapshot test environment has no Python interpreter")
+            interpreter = (subprocess.list2cmdline([str(python), "-m", "pytest"])
+                           if os.name == "nt" else shlex.join([str(python), "-m", "pytest"]))
             command = sweep.default_command(row["owner"] + "-" + ident).replace(
                 "uv run --no-sync pytest", interpreter, 1)
         args = SimpleNamespace(repo=checkout, branch=row["ref"], command=command,

@@ -175,6 +175,31 @@ def test_interrupted_runner_retries_but_live_runner_is_never_duplicated(repo, tm
     assert q.get(job["id"])["attempts"] == 2
 
 
+def test_a_repair_can_join_the_window_while_a_background_runner_is_alive(repo, tmp_path, monkeypatch):
+    q = queue(tmp_path)
+    background, _ = enqueue(q, repo, "background")
+    assert q.claim()["id"] == background["id"]
+    q.spawned(background["id"], os.getpid())
+    bad, _ = enqueue(q, repo, "bad")
+    q.finish(bad["id"], "failed")
+    q.repair(repo, bad["id"], "repair")
+    repair, _ = enqueue(q, repo, "fix", "repair")
+    launched = []
+    async def launch(*args, **kwargs):
+        launched.append(args)
+        return SimpleNamespace(pid=os.getpid(), returncode=None)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", launch)
+    manager = SimpleNamespace(get=lambda owner: SimpleNamespace(exited=True))
+    window = SimpleNamespace(status=lambda: {"holders": [{"cls": "targeted"}], "queue": []})
+    clock = Clock(manager, q, window=window)
+    clock.runner = SimpleNamespace(pid=os.getpid(), returncode=None)
+    asyncio.run(clock.tick())
+    assert repair["id"] in launched[0]
+    assert q.get(repair["id"])["status"] == "running"
+    assert q.get(background["id"])["attempts"] == 1
+    assert q.claim() is None  # never submit a duplicate live repair
+
+
 def test_a_paused_repository_does_not_stop_another_repository(repo, tmp_path):
     q = queue(tmp_path)
     bad, _ = enqueue(q, repo, "bad")
@@ -220,6 +245,8 @@ def test_runner_tests_the_fixed_sha_after_master_moves_and_releases_checkout(rep
 def test_runner_never_turns_an_old_red_receipt_into_a_new_regression(repo, tmp_path, monkeypatch):
     q = queue(tmp_path)
     job, _ = enqueue(q, repo, "a")
+    with q.connect() as db:
+        db.execute("UPDATE jobs SET command='unused' WHERE id=?", (job["id"],))
     q.claim()
     # The existing receipt is a real prior judgement. This attempt obtains no
     # window, so its infrastructure failure must stay retry, with no pause.
@@ -238,6 +265,58 @@ def test_runner_never_turns_an_old_red_receipt_into_a_new_regression(repo, tmp_p
     mod.run_one(q, job["id"], tmp_path / "scratch")
     assert q.get(job["id"])["status"] == "retry"
     assert not q.status(repo)["pauses"]
+
+
+@pytest.mark.parametrize("setup_fails", [False, True])
+def test_default_runner_prepares_snapshot_dependencies_before_testing(repo, tmp_path, monkeypatch, setup_fails):
+    q = queue(tmp_path)
+    job, _ = enqueue(q, repo, "a")
+    tool = tmp_path / "snapshot_sweep.py"
+    tool.write_text('''
+import json
+from datetime import datetime, timezone
+from claude_launcher.delayed_sweep import git
+def default_command(owner):
+    return "uv run --no-sync pytest"
+def receipt_path(repo, sha):
+    return repo.parent / "receipt.json"
+def cmd_run(args):
+    assert ".venv" in args.command and "-m pytest" in args.command
+    receipt_path(args.repo, "").write_text(json.dumps({
+        "commit": git(args.repo, "rev-parse", "HEAD"),
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "counts": {"passed": 3}}))
+    return 0
+def is_green(data):
+    return data["counts"] == {"passed": 3}
+''')
+    with q.connect() as db:
+        db.execute("UPDATE jobs SET tool=? WHERE id=?", (str(tool), job["id"]))
+    (repo / ".git/info/exclude").write_text(".venv/\n")
+    monkeypatch.setenv("UV_PROJECT_ENVIRONMENT", str(tmp_path / "foreign"))
+    monkeypatch.setenv("VIRTUAL_ENV", str(tmp_path / "foreign"))
+    real_run = subprocess.run
+    synced = []
+    def run(args, **kwargs):
+        if args[:2] == ["uv", "sync"]:
+            synced.append(kwargs)
+            assert args[2:] == ["--extra", "test"]
+            assert "UV_PROJECT_ENVIRONMENT" not in kwargs["env"]
+            assert "VIRTUAL_ENV" not in kwargs["env"]
+            if setup_fails:
+                raise subprocess.CalledProcessError(2, args)
+            python = kwargs["cwd"] / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+            python.parent.mkdir(parents=True)
+            python.touch()
+            return subprocess.CompletedProcess(args, 0)
+        return real_run(args, **kwargs)
+    monkeypatch.setattr(subprocess, "run", run)
+    q.claim()
+    mod.run_one(q, job["id"], tmp_path / "scratch")
+    assert q.get(job["id"])["status"] == ("retry" if setup_fails else "passed")
+    assert not q.status(repo)["pauses"]
+    assert "checkout" == synced[0]["cwd"].name
+    assert not synced[0]["cwd"].exists()
 
 
 def test_clock_uses_a_daemon_owned_process_and_persists_its_pid(repo, tmp_path, monkeypatch):

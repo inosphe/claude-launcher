@@ -2585,8 +2585,12 @@ uv run --no-sync python tools/delayed_sweep.py repair --repo <repo> --job <faile
 ```
 
 다른 저장소는 enqueue의 `--command`에 해당 저장소의 전체 스윕 명령을 준다.
-기본 명령은 claunch 전체 스위트이며, detached worktree에 환경을 새로 설치하지
-않고 enqueue를 실행한 환경의 Python을 기록해 그 환경에서 실행한다. 따라서 다른 저장소의 전용 환경이
-필요하면 `--command`에 정확한 환경의 실행 파일과 명령을 지정한다.
+기본 명령은 claunch 전체 스위트다. enqueue의 Python은 큐 실행기를 시작하는 데
+사용하고, 테스트는 고정 checkout에서 `uv sync --extra test`로 준비한 전용
+venv에서 실행한다. 환경 준비 실패는 회귀 판정 없이 재시도한다. 다른 저장소의
+전용 환경이 필요하면 `--command`에 정확한 환경의 실행 파일과 명령을 지정한다.
+일반 검증 runner가 창을 기다리고 있어도 수정 검증은 별도로 제출할 수 있다.
+수정 검증의 priority=0이 대기 중 priority=-1보다 먼저 부여되며, 이미 시작한
+스윕은 완료까지 유지한다.
 워크플로 정본은 다음 recur 회차 경계에서 다시 로드된다. 새 큐 실행 코드는
 데몬에 설치·반영되어야 동작한다. 에이전트가 데몬을 직접 재기동하지 않는다.

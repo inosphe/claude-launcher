@@ -286,8 +286,9 @@ nodes:
       않고 그 이슈와 자식을 복구해 repair로 등록한다.
       본문에 재현 명령·실패 SHA·현재 master·로그 경로·완료 기준을 기록한다.
       `children`으로 슬롯을 확인하고 `spawn`으로 worker 자식 세션을 만든다.
-      별도 세션 접두사 worktree, issue=<수정 이슈>를 준다. 관계는 independent,
-      workflow는 improv-worker-v2다. 기준은 현재 master, 통합 요청 수신자는
+      별도 세션 접두사 worktree, issue=<수정 이슈>를 준다.
+      cflow_inputs: {relation: independent}, workflow: improv-worker-v2를 명시한다.
+      기준은 현재 master, 통합 요청 수신자는
       이 리더다. 자식이 실패를 재현·수정·표적 검증하고 수정 머지를 요청한다.
       생성 후 `tools/delayed_sweep.py repair --repo <대상 저장소> --job <실패 job>
       --issue <수정 이슈>`로 유일한 허용 후보를 등록한다. 슬롯이 없거나 생성이
