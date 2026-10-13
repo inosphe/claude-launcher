@@ -1259,8 +1259,33 @@ def test_nothing_in_flight_is_idle_and_the_rate_drains_with_the_window(home):
     assert live["state"] == "idle" and live["inflight"] == 0
     later = metering.live_summary("s1", now=clock.t + metering.LIVE_RATE_WINDOW_S + 1)
     assert later["state"] == "idle" and later["rate"] == 0.0
-    board.flush()  # one write after the last change, then the board forgets it
+    board.flush()  # nothing new: no write, but the bins are kept for the chart
+    assert board.active()
+    clock.t += metering.LIVE_SPAN_S + 1
+    board.flush()  # the bins have left the span: now the board forgets it
     assert not board.active()
+
+
+def test_the_chart_keeps_the_previous_call_when_the_next_one_begins(home):
+    """s312-rev on f0560da9: the board dropped a quiet session's bins, so the
+    next call's file was written from empty bins and the chart showed only it."""
+    clock = _Clock()
+    board = metering.LiveBoard("fp", clock=clock)
+    a = _streaming_meter()
+    board.begin(a)
+    clock.t += 0.25
+    a.chunk(_delta("x" * 4000))
+    board.end(a, {"output_tokens": 1000})
+    for _ in range(20):  # 5 quiet seconds: a tool run between two calls
+        clock.t += 0.25
+        board.flush()
+    b = _streaming_meter()
+    board.begin(b)
+    clock.t += 0.25
+    b.chunk(_delta("x" * 400))
+    board.flush()
+    series = metering.live_summary("s1", now=clock.t)["series"]
+    assert len([v for v in series if v]) == 2  # call A and call B
 
 
 def test_a_finished_call_calibrates_the_tokens_per_character(home):
@@ -1352,11 +1377,6 @@ def test_metering_live_api_answers_one_session(home, tmp_path):
     from claude_launcher.daemon.manager import SessionManager
     from claude_launcher.daemon.mesh import MeshManager
 
-    board = metering.LiveBoard("fp")
-    m = _streaming_meter("s1")
-    board.begin(m)
-    m.chunk(_delta("x" * 80))
-    board.flush()
     bearer = {"Authorization": "Bearer sekrit"}
 
     async def run():
@@ -1368,6 +1388,14 @@ def test_metering_live_api_answers_one_session(home, tmp_path):
         )))
         await client.start_server()
         try:
+            # Written on the real clock right before the request: written
+            # before the app was built, a loaded machine could age it out of
+            # LIVE_RATE_WINDOW_S first and read rate 0.
+            board = metering.LiveBoard("fp")
+            m = _streaming_meter("s1")
+            board.begin(m)
+            m.chunk(_delta("x" * 80))
+            board.flush()
             one = await client.get("/api/metering/live?session=s1", headers=bearer)
             assert one.status == 200
             body = await one.json()

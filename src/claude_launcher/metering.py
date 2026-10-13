@@ -1051,8 +1051,10 @@ class LiveBoard:
         A session with a call in flight is rewritten on every flush even with
         nothing new: the ``updated`` stamp is the heartbeat that tells the
         daemon the in-flight count is current (:data:`LIVE_STALE_S`). A session
-        with nothing in flight is written once more after its last change and
-        then forgotten here; its file keeps its bins for the daemon to age.
+        with nothing in flight is written once more after its last change; its
+        bins are kept here until they leave :data:`LIVE_SPAN_S`, so the next
+        call's file still carries the calls before it, and only then is the
+        session forgotten.
         """
         now = self._clock() if now is None else now
         written: List[Path] = []
@@ -1061,11 +1063,17 @@ class LiveBoard:
             ratio = self._ratio.get(session, LIVE_TOKENS_PER_CHAR)
             for call in st["calls"].values():
                 self._take(st, call, ratio, now)
-            if not st["calls"] and not st["dirty"]:
-                del self._sessions[session]
-                continue
             floor = now - LIVE_SPAN_S
             st["bins"] = {t: v for t, v in st["bins"].items() if t >= floor}
+            if not st["calls"] and not st["dirty"]:
+                # Nothing to write. The bins stay until they age out of the
+                # span: the next call's file is written from this state, and
+                # forgetting it here would drop the previous call from the
+                # chart the moment the next one began (an agent's calls are
+                # seconds apart, between its tool runs).
+                if not st["bins"]:
+                    del self._sessions[session]
+                continue
             calls = [c for c in st["calls"].values()]
             doc = {
                 "session": session,
