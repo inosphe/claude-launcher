@@ -77,6 +77,7 @@ new Function(
    ${code}
    Object.assign(exports, {
      forkControlState, handoffControlState, quickForkSession, requestHandoff,
+     quickForkMergeTarget,
      cancelHandoff, syncSessionHandoffControls, railCardQuickFork,
      quickForkInheritance, openQuickForkModal,
      quickForkExclusiveHolders, quickForkRoleState,
@@ -116,8 +117,30 @@ const response = (body, ok = true, status = 200) => ({
   // which button a record gets
   check("a live claude session with a conversation gets fork, not merge",
         ctx.forkControlState(ctx.sessions()[0]), { fork: true, merge: false });
-  check("a quick-fork gets merge, not fork",
-        ctx.forkControlState(ctx.sessions()[1]), { fork: false, merge: true });
+  check("a quick-fork gets merge, and fork too: a copy can be copied again",
+        ctx.forkControlState(ctx.sessions()[1]), { fork: true, merge: true });
+
+  // where a merge lands: the origin while live, else the nearest live above
+  const chain = [
+    {name: "r", status: "idle"},
+    {name: "o", status: "exited", parent: "r"},
+    {name: "o-qf1", status: "exited", parent: "o", quick_fork_of: "o"},
+    {name: "o-qf1-qf1", status: "idle", parent: "o-qf1", quick_fork_of: "o-qf1"},
+  ];
+  check("a live origin takes the merge",
+        ctx.quickForkMergeTarget({name: "a-qf1", quick_fork_of: "a", parent: "a"}, ctx.sessions()).target,
+        "a");
+  check("an ended origin delegates up the copies and then the parents",
+        ctx.quickForkMergeTarget(chain[3], chain),
+        {origin: "o-qf1", target: "r", chain: [
+          {name: "o-qf1", state: "exited"}, {name: "o", state: "exited"}, {name: "r", state: "live"}]});
+  check("a removed origin is stepped over to the (escalated) parent",
+        ctx.quickForkMergeTarget({name: "x", quick_fork_of: "gone", parent: "r"}, chain),
+        {origin: "gone", target: "r", chain: [{name: "gone", state: "gone"}, {name: "r", state: "live"}]});
+  check("nothing live above: no target",
+        ctx.quickForkMergeTarget({name: "y", quick_fork_of: "o"}, chain.slice(1)).target, "");
+  check("a session that is not a copy has no merge target",
+        ctx.quickForkMergeTarget({name: "z"}, chain), {origin: "", target: "", chain: []});
   check("a live Codex conversation gets fork",
         ctx.forkControlState({name: "cx", harness: "codex", conversation_id: "u"}),
         {fork: true, merge: false});
@@ -148,10 +171,10 @@ const response = (body, ok = true, status = 200) => ({
   // the merge press, on the copy
   ctx.setCurrent("a-qf1");
   ctx.syncSessionHandoffControls();
-  check("the attached copy shows merge only, in its resting face",
+  check("the attached copy shows both fork and merge, merge in its resting face",
         [buttons["term-fork"].classes.has("hidden"), buttons["term-merge"].classes.has("hidden"),
          buttons["term-merge"].textContent],
-        [true, false, "↩ merge"]);
+        [false, false, "↩ merge"]);
   const merge = ctx.requestHandoff("a-qf1", "", "merge");
   check("merge posts the handoff route as a request (no text), kind merge",
         calls[1], { url: "/api/sessions/a-qf1/handoff", options: {
@@ -204,8 +227,8 @@ const response = (body, ok = true, status = 200) => ({
         errors[1], ["Could not quick-fork 'a'", "offline"]);
 
   // the rail key
-  check("q forks a forkable card and refuses the others",
-        [ctx.railCardQuickFork("py"), ctx.railCardQuickFork("a-qf1")], [false, false]);
+  check("q refuses a card with no conversation to copy",
+        ctx.railCardQuickFork("py"), false);
   const postsBefore = calls.length;
   const viaKey = ctx.railCardQuickFork("a");
   check("q opens the reusable Fork view without posting",

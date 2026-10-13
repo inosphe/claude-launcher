@@ -530,9 +530,10 @@
                 title="send the retrospective prompt pack: the agent reviews its own session and the cflow definition it followed, and proposes changes (claunch retro)">retro</button>
         <!-- quick-fork: a copy of this session's conversation, as a child,
              marked "forked from here"; merge is the copy's way back (the
-             wrap-up typed into the origin, then the copy ends). Only one of
-             the two is on screen: fork on a session with a conversation,
-             merge on a session that is a quick-fork. -->
+             wrap-up typed into the origin -- or the nearest live session
+             above it when the origin has ended -- then the copy ends). Fork
+             is on a session with a conversation, merge on a session that is
+             a quick-fork; a copy has both, so it can be forked again. -->
         <button id="term-fork" class="term-btn hidden" type="button"
                 title="quick-fork: start a copy of this session's conversation as a child, marked 'forked from here'">⑂ fork</button>
         <button id="term-merge" class="term-btn hidden" type="button"

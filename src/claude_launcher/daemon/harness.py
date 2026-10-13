@@ -222,7 +222,8 @@ class SessionDef:
     #: The session this one is a quick-fork of, by name (see
     #: :mod:`claude_launcher.daemon.handoff`). Written only by the quick-fork
     #: route, never by a plain spawn: it is what makes ``merge`` available on
-    #: this session — the wrap-up goes back to that one — and the marker block
+    #: this session — the wrap-up goes back to that one, or past it to the
+    #: nearest live session above when it has ended — and the marker block
     #: at the top of the copied conversation names the same session. Kept as
     #: a name for the same reason ``parent`` is: the origin may exit first,
     #: and the record still has to say where this copy came from.

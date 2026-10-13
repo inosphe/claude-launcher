@@ -662,10 +662,14 @@ TOOLS = [
             "delivery that fails keeps you alive and says so — call again "
             "or pick another target. A quick-fork (your opening carries a "
             "'--- forked from here ---' marker naming the origin) needs no "
-            "'to': the wrap-up goes back to the origin. A quick-fork calls "
-            "this only after a 'MERGE requested' block from the operator "
-            "arrives (unless its marker says it may merge on its own); "
-            "before that the daemon refuses it. Any other session "
+            "'to': the wrap-up goes back to the origin, or to the nearest "
+            "live session above it when the origin has ended. With none "
+            "live the reply has 'undelivered': true -- the text was saved "
+            "(its 'note' says where), this session was NOT ended, and you "
+            "tell the user. A quick-fork calls this only after a 'MERGE "
+            "requested' block from the operator arrives (unless its marker "
+            "says it may merge on its own); before that the daemon refuses "
+            "it. Any other session "
             "names its target with 'to'. Do not call this before the work is "
             "done: the text is the only thing of this session that survives."
         ),
@@ -680,7 +684,8 @@ TOOLS = [
                     "type": "string",
                     "description": (
                         "the session to hand off to (its session name). "
-                        "Omit in a quick-fork: the merge goes to the origin"
+                        "Omit in a quick-fork: the merge goes to the origin "
+                        "(or the nearest live session above it)"
                     ),
                 },
             },

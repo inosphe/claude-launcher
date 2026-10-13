@@ -293,7 +293,10 @@ quick-fork, `to` (the session that carries on). The daemon types the text
 into that session as a fenced block and only then ends yours, so a delivery
 that fails keeps you alive and says so. A quick-fork (your opening carries a
 `--- forked from here ---` marker naming its origin) leaves `to` out: the
-wrap-up goes back to the origin. An operator can ask for it from the
+wrap-up goes back to the origin, or to the nearest live session above it
+when the origin has ended (a copy can itself be quick-forked). With none
+live the reply says `undelivered`: the text was saved, you were not ended,
+and telling the user is yours. An operator can ask for it from the
 dashboard (the copy's **merge** button, or the detail panel's **Hand off**
 box) — the request is typed into your terminal, and answering it is this
 same call. Do not call it before the work is done: the text is the only
