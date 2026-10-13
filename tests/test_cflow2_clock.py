@@ -692,8 +692,10 @@ def test_heartbeat_refreshed_between_probes(tmp_path, monkeypatch):
         time.sleep(0.05)
         return (1, "")
 
-    clock = _clock(FakeManager(FakeSession("own", str(tmp_path))), probe_runner=probe,
-                   heartbeat=True)
+    # each slot's driver is a session of this daemon (claunch-7iub9)
+    clock = _clock(FakeManager(FakeSession("own", str(tmp_path)),
+                               FakeSession("two", str(tmp_path))),
+                   probe_runner=probe, heartbeat=True)
     clock.scan(now=T0 + 1)
     assert len(stamps) == 2 and stamps[1] > stamps[0]
 
@@ -768,3 +770,149 @@ def test_the_landing_queue_watch_probe_sees_a_landed_tip(tmp_path):
     git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "c")
     env["CFLOW_ITEM_TIP"] = git("rev-parse", "HEAD")
     assert cflow2_clock.run_probe(probe, str(repo), env=env)[0] == 1
+
+
+# -- the owning daemon (claunch-7iub9) ---------------------------------------------
+
+OWNED = """
+    nodes:
+      reflect:
+        prompt: R
+        restart: {linux: "bash tools/restart_live.sh", windows: "pwsh -File tools/restart_live.ps1", timeout: 30}
+    body:
+      seq:
+        - wait: {probe: "check", poll: 10}
+        - reflect
+"""
+
+
+def _counting_probe(calls):
+    def probe(cmd, cwd, *a, **k):
+        calls.append(cmd)
+        return (1, "")
+    return probe
+
+
+def test_a_daemon_does_not_tick_another_daemons_run_in_the_same_directory(tmp_path):
+    """The gds6 incident: a named instance with a live session in the same
+    directory as the default daemon's driver ticked its run and ran its
+    restart. Only the daemon whose session drives the slot touches it."""
+    _start(tmp_path, OWNED, scope="s15")
+    other_calls, own_calls = [], []
+    # the named instance: a live session of its own in the same directory
+    other = _clock(FakeManager(FakeSession("k1", str(tmp_path))),
+                   probe_runner=_counting_probe(other_calls), platform="Linux")
+    other.scan(now=T0 + 1)
+    assert other_calls == [] and other.restarts == []
+    # the driver's daemon ticks it
+    own = _clock(FakeManager(FakeSession("s15", str(tmp_path))),
+                 probe_runner=_counting_probe(own_calls), platform="Linux")
+    own.scan(now=T0 + 1)
+    assert own_calls == ["check"]
+
+
+def test_an_old_exited_record_with_the_drivers_name_does_not_own_the_run(tmp_path):
+    """Session names are per daemon: the named instance had an exited ``s15``
+    from 10-01 while the default daemon's ``s15`` drove the run."""
+    _start(tmp_path, OWNED, scope="s15")
+    old = FakeSession("s15", str(tmp_path))
+    old.exited = True
+    calls = []
+    other = _clock(FakeManager(old, FakeSession("k1", str(tmp_path))),
+                   probe_runner=_counting_probe(calls))
+    other.scan(now=T0 + 1)
+    assert calls == []
+
+
+@pytest.mark.parametrize("mark", ["held_at", "paused_at"])
+def test_a_held_or_paused_driver_still_owns_its_run(tmp_path, mark):
+    _start(tmp_path, OWNED, scope="s15")
+    driver = FakeSession("s15", str(tmp_path))
+    driver.exited = True
+    setattr(driver, mark, "2026-10-14T00:00:00Z")
+    calls = []
+    clock = _clock(FakeManager(driver, FakeSession("k1", str(tmp_path))),
+                   probe_runner=_counting_probe(calls))
+    clock.scan(now=T0 + 1)
+    assert calls == ["check"]
+
+
+def test_owner_reads_side_and_nested_slots_as_their_main_session(tmp_path):
+    clock = _clock(FakeManager(FakeSession("s15", str(tmp_path))))
+    assert clock.owns("s15") and clock.owns("s15+stack") and clock.owns("s15~d2")
+    assert clock.owns("s15+stack~d2")
+    assert not clock.owns("s16") and not clock.owns("s16+stack")
+    assert not clock.owns("default") and not clock.owns("")
+
+
+def test_a_directory_added_by_dispatch_follows_the_same_rule(tmp_path):
+    """``extra_cwds`` (the in-process dispatcher) makes a directory scanned;
+    it does not make the runs there this daemon's."""
+    _start(tmp_path / "w", OWNED, scope="s15")
+    calls = []
+    clock = _clock(FakeManager(FakeSession("k1", str(tmp_path / "elsewhere"))),
+                   probe_runner=_counting_probe(calls))
+    clock.extra_cwds.add(str((tmp_path / "w").resolve()))
+    assert str((tmp_path / "w").resolve()) in clock.cwds()
+    clock.scan(now=T0 + 1)
+    assert calls == []
+
+
+def test_the_owner_claims_the_restart_the_other_daemon_left(tmp_path):
+    _start(tmp_path, """
+        nodes:
+          reflect:
+            prompt: R
+            restart: {linux: "bash tools/restart_live.sh", windows: "pwsh -File tools/restart_live.ps1", timeout: 30}
+        body: reflect
+    """, scope="s15")
+    other = _clock(FakeManager(FakeSession("k1", str(tmp_path))), platform="Linux")
+    other.scan(now=T0 + 1)
+    assert other.restarts == []
+    st = runtime.status(cwd=str(tmp_path), scope="s15", tick=False)
+    assert st["tasks"][0]["restart"]["status"] == "pending"
+    own = _clock(FakeManager(FakeSession("s15", str(tmp_path))), platform="Linux")
+    own.scan(now=T0 + 1)
+    assert [a["command"] for _, _, a in own.restarts] == ["bash tools/restart_live.sh"]
+
+
+# -- engine env: the daemon's instance identity (claunch-7iub9) ----------------------
+
+def _instance_env(monkeypatch, tmp_path):
+    from claude_launcher.daemon import instance_manifest
+
+    monkeypatch.setenv("CLAUNCH_DAEMON", "kimyori")
+    monkeypatch.setenv("CLAUNCH_DAEMON_PORT", "8379")
+    monkeypatch.setenv("CLAUNCH_INSTANCE_APPLIED", "kimyori")
+    monkeypatch.setenv("CLAUNCH_INSTANCE_BASE", str(tmp_path / "base"))
+    monkeypatch.setenv("CLAUNCH_INSTANCE_PREV", json.dumps(
+        {"CLAUDE_LAUNCHER_HOME": str(tmp_path / "base"), "CLAUNCH_DAEMON_PORT": None}))
+    monkeypatch.setenv("CLAUDE_LAUNCHER_HOME", str(tmp_path / "team"))
+    return instance_manifest
+
+
+def test_engine_env_drops_the_daemons_identity_and_restores_what_its_manifest_moved(
+        monkeypatch, tmp_path):
+    im = _instance_env(monkeypatch, tmp_path)
+    env = im.engine_env(dict(os.environ), "")
+    for var in im.IDENTITY_ENV:
+        assert var not in env
+    assert env["CLAUDE_LAUNCHER_HOME"] == str(tmp_path / "base")
+    named = im.engine_env(dict(os.environ), "kimyori")
+    assert named["CLAUNCH_DAEMON"] == "kimyori"
+    assert not {"CLAUNCH_DAEMON_PORT", "CLAUNCH_INSTANCE_APPLIED", "CLAUNCH_INSTANCE_PREV",
+                "CLAUNCH_INSTANCE_BASE"} & set(named)
+
+
+def test_a_probe_gets_no_daemon_port_or_manifest_bookkeeping(monkeypatch, tmp_path):
+    _instance_env(monkeypatch, tmp_path)
+    code, out = cflow2_clock.run_probe(
+        [sys.executable, "-c",
+         "import os; print(sorted(k for k in os.environ if k.startswith('CLAUNCH_')))"],
+        str(tmp_path))
+    assert code == 0
+    # the session's instance (this daemon's), and nothing else of the daemon's
+    assert "CLAUNCH_DAEMON'" in out
+    for var in ("CLAUNCH_DAEMON_PORT", "CLAUNCH_INSTANCE_APPLIED", "CLAUNCH_INSTANCE_PREV",
+                "CLAUNCH_INSTANCE_BASE"):
+        assert var not in out

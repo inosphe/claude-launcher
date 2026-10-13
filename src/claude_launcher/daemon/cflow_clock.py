@@ -63,7 +63,8 @@ from typing import Awaitable, Callable, Dict, List, Optional, Set, Tuple
 from .. import store
 from ..cflow import engine as cflow_engine, landing as cflow_landing, model as cflow_model, state as cflow_state
 from ..cflow2 import ir as cflow2_ir, runtime as cflow2_runtime, store as cflow2_store
-from . import briefing, landing_route, session_procs, status_checks
+from . import briefing, instance_manifest, landing_route, session_procs, status_checks
+from . import paths as daemon_paths
 from .session import STATUS_BUSY, STATUS_IDLE
 
 log = logging.getLogger("claunch.daemon.cflow")
@@ -2042,7 +2043,8 @@ class RestartClock:
 
     @staticmethod
     def _execute(cwd: str, action: dict, scope: str = "", *,
-                 holding=_gate_holding, hold_poll: float = RESTART_HOLD_POLL) -> dict:
+                 holding=_gate_holding, hold_poll: float = RESTART_HOLD_POLL,
+                 instance: Optional[str] = None) -> dict:
         # Output goes to a file, not a pipe. The restart command is a shell
         # whose descendants (this repository's tools/restart_live.ps1 runs
         # `claunch daemon restart`) inherit stdout; with a pipe, the reader
@@ -2079,7 +2081,16 @@ class RestartClock:
         # :mod:`.session_procs`, the owner tag rides in its environment, and
         # the process table is re-read every TRACK_POLL seconds while it runs
         # so a grandchild is recorded before its parent exits.
-        env = dict(os.environ)
+        #
+        # The daemon's own instance identity is not inherited
+        # (claunch-7iub9): the command gets the instance of the session it
+        # runs for -- ``instance``, by default this daemon's, which is the
+        # driver's own once the v2 clock only ticks the runs of its sessions
+        # (``Cflow2Clock.owns``) -- and none of the daemon's manifest
+        # bookkeeping or port (``instance_manifest.engine_env``).
+        if instance is None:
+            instance = daemon_paths.instance()
+        env = instance_manifest.engine_env(dict(os.environ), instance)
         session = ""
         if scope and scope != cflow_state.DEFAULT_SCOPE:
             env[cflow_state.SESSION_ENV] = scope

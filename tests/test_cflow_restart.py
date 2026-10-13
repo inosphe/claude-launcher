@@ -241,3 +241,27 @@ def test_a_nameless_run_is_never_held(proj):
     )
     assert result["exit_code"] is None
     assert asked == []
+
+
+def test_restart_command_does_not_inherit_the_daemons_instance(proj, monkeypatch):
+    """claunch-7iub9: a restart run under the default daemon's session must not
+    go out as the named instance whose daemon happens to execute it -- the dev
+    server it starts, and every session that server spawns, would belong to
+    that daemon. The session's instance is given explicitly; the daemon's own
+    identity variables are not passed on."""
+    monkeypatch.setenv("CLAUNCH_DAEMON", "kimyori")
+    monkeypatch.setenv("CLAUNCH_DAEMON_PORT", "8379")
+    monkeypatch.setenv("CLAUNCH_INSTANCE_APPLIED", "kimyori")
+    monkeypatch.setenv("CLAUNCH_INSTANCE_PREV", "{}")
+    monkeypatch.setenv("CLAUNCH_INSTANCE_BASE", str(proj))
+    body = ("import os; print(sorted(k + '=' + v for k, v in os.environ.items() "
+            "if k.startswith('CLAUNCH_')))")
+    action = {"command": f'"{sys.executable}" -c "{body}"', "timeout": 20}
+    result = cflow_clock.RestartClock._execute(str(proj), action, "s15", instance="")
+    assert result["exit_code"] == 0
+    assert "CLAUNCH_SESSION=s15" in result["output"]
+    for var in ("CLAUNCH_DAEMON=", "CLAUNCH_DAEMON_PORT", "CLAUNCH_INSTANCE_"):
+        assert var not in result["output"]
+    named = cflow_clock.RestartClock._execute(str(proj), action, "s15", instance="team")
+    assert "CLAUNCH_DAEMON=team" in named["output"]
+    assert "CLAUNCH_DAEMON_PORT" not in named["output"]
