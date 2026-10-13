@@ -16989,7 +16989,7 @@ function termCflow2Answers(r, a) {
         path: "/api/cflow2/move/resolve",
         body: { ...slot, decision: "approve", reason: "" },
         ask: (a.report
-          ? `Report '${what}' as '${a.outcome}'${skip}, as ${a.by || "the driver"} asked?`
+          ? `Report '${what}' as '${a.outcome}', as ${a.by || "the driver"} asked?`
           : `Move the run to '${what}', as ${a.by || "the driver"} asked?` +
             (a.effect ? `\n\nCallstack: ${a.effect}` : "")) +
           (a.reason ? `\n\n${a.reason}` : ""),
