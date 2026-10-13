@@ -6891,6 +6891,8 @@ def holders(name: str, session: str, cwds: List[str]) -> List[Tuple[str, str]]:
             continue
         seen.add(base)
         for scope in store_mod.list_scopes(base):
+            if not store_mod.is_own(scope):
+                continue  # another daemon's session of the same name
             st = RunStore(base, scope)
             try:
                 state = st.load_state()

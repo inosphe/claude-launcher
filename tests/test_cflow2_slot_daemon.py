@@ -355,3 +355,22 @@ def test_flow_start_takes_the_session_name_as_its_own_slot(tmp_path, monkeypatch
     assert out["scope"] == "s15@main"
     with pytest.raises(runtime.FlowError, match="another's"):
         cflow2_mcp.call_tool("flow_start", {"workflow": "t", "scope": "s15@kimyori"})
+
+
+def test_holders_are_this_daemons_runs_only(tmp_path, monkeypatch):
+    chart = CHART + textwrap.dedent("""
+        collections:
+          landing:
+            kind: queue
+            key: issue
+            item: {issue: str}
+        """)
+    for daemon in ("", "kimyori"):
+        if daemon:
+            monkeypatch.setenv("CLAUNCH_DAEMON", daemon)
+        runtime.start(frontend.compile_text(textwrap.dedent(chart)), cwd=str(tmp_path),
+                      scope="s15", caps={}, driver="s15", now=T0)
+        monkeypatch.delenv("CLAUNCH_DAEMON", raising=False)
+    assert [s for _, s in runtime.holders("landing", "s15", [str(tmp_path)])] == ["s15@main"]
+    monkeypatch.setenv("CLAUNCH_DAEMON", "kimyori")
+    assert [s for _, s in runtime.holders("landing", "s15", [str(tmp_path)])] == ["s15@kimyori"]
