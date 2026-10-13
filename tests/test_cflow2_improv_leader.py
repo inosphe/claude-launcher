@@ -76,7 +76,7 @@ class Leader:
         return self.st
 
     def tasks(self):
-        return [t["label"] for t in self.st.get("tasks") or []]
+        return [t["label"].rsplit("/", 1)[-1] for t in self.st.get("tasks") or []]
 
     def report(self, label, outcome="ok", value=None, verify=None):
         iid = next(t["instance"] for t in self.st["tasks"] if t["label"].rsplit("/", 1)[-1] == label)
@@ -159,7 +159,7 @@ def test_default_and_enabled_restart_deploy_before_notice_without_sweep(tmp_path
         ld.report("reflect")
     ld.restart()
     ld.report("reflect")
-    assert ld.st["waits"][0]["label"] == "deployed-wait"
+    assert ld.st["waits"][0]["label"].rsplit("/", 1)[-1] == "deployed-wait"
     ld.tick(lambda cmd, cwd: (0, "live commit confirmed"))
     assert ld.tasks() == ["landed-notice"]
     ld.report("landed-notice")
