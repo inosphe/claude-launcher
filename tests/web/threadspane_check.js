@@ -146,6 +146,19 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   assert.deepEqual(calls.find((c) => c[0] === "POST"), ["POST", "/api/threads/th-1/messages", {text: "and yaml?"}]);
   assert.ok(changed >= 1, "a send refreshes the header light");
 
+  // a second Enter before the first answer is not a second message (claunch-7xp0f)
+  const posts = () => calls.filter((c) => c[0] === "POST" && c[1] === "/api/threads/th-1/messages").length;
+  const sent = posts();
+  const box2 = host.querySelector(".th-compose .th-text");
+  box2.value = "twice?";
+  box2.fire("keydown", {key: "Enter"});
+  assert.ok(host.querySelector(".th-compose .term-btn").disabled, "보내기 is disabled while the post is out");
+  host.querySelector(".th-compose .th-text").fire("keydown", {key: "Enter"});
+  host.querySelector(".th-compose .term-btn").fire("click");
+  await settle();
+  assert.equal(posts(), sent + 1, "one message for a double send");
+  assert.ok(!host.querySelector(".th-compose .term-btn").disabled, "보내기 comes back after the answer");
+
   // close
   const toggle = host.querySelector(".th-convo-head .term-btn");
   assert.equal(toggle.textContent, "닫기");
@@ -159,8 +172,12 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   const form = host.querySelector(".th-newform");
   form.querySelector(".th-title-input").value = "Deploy";
   form.querySelector(".th-text").value = "when?";
-  form.querySelector(".term-btn").fire("click");
+  const startBtn = form.querySelector(".term-btn");
+  startBtn.fire("click");
+  startBtn.fire("click");   // a double click before the first answer (claunch-7xp0f)
+  assert.ok(startBtn.disabled, "시작 is disabled while the post is out");
   await settle();
+  assert.equal(calls.filter((c) => c[1] === "/api/threads").length, 1, "one thread for a double click");
   assert.deepEqual(calls.filter((c) => c[1] === "/api/threads").pop(), ["POST", "/api/threads", {to: "s1", title: "Deploy", text: "when?"}]);
   assert.match(host.querySelector(".th-head").text(), /전달하지 못했습니다/);
 

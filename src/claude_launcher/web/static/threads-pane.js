@@ -24,6 +24,7 @@ globalThis.ThreadsPane = (() => {
   let composing = false;     // the new-thread form is open
   let notice = "";
   const drafts = new Map();  // thread id ("" = new thread) -> text
+  const inflight = new Set(); // thread ids ("" = new thread) with a post still out
   const drawn = {side: "", main: ""};   // what each half last drew
 
   const node = (tag, cls, text) => {
@@ -137,16 +138,31 @@ globalThis.ThreadsPane = (() => {
     if (onChange) onChange();
   }
 
+  /* One post per target at a time: a double click (or Enter pressed twice)
+     before the first answer would otherwise open two threads or send the
+     message twice (claunch-7xp0f). The button shows it as disabled. */
+  async function once(key, fn) {
+    if (inflight.has(key)) return;
+    inflight.add(key);
+    render();
+    try {
+      await fn();
+    } finally {
+      inflight.delete(key);
+      render();
+    }
+  }
+
   function send(tid, text) {
-    return act(async () => {
+    return once(tid, () => act(async () => {
       const res = await request(`/api/threads/${encodeURIComponent(tid)}/messages`, {text});
       drafts.delete(tid);
       if (res.delivered === false) notice = `${name} 세션에 전달하지 못했습니다(종료됨). 메시지는 쓰레드에 남았습니다.`;
-    });
+    }));
   }
 
   function create(title, text) {
-    return act(async () => {
+    return once("", () => act(async () => {
       const body = {to: name, title};
       if (text) body.text = text;
       const res = await request("/api/threads", body);
@@ -154,7 +170,7 @@ globalThis.ThreadsPane = (() => {
       composing = false;
       current = res.thread.id;
       if (res.delivered === false) notice = `${name} 세션에 전달하지 못했습니다(종료됨). 메시지는 쓰레드에 남았습니다.`;
-    });
+    }));
   }
 
   function setStatus(tid, verb) {
@@ -194,9 +210,12 @@ globalThis.ThreadsPane = (() => {
       const first = textBox("th-text", "", "첫 메시지(선택) — 세션에 전달됩니다");
       const go = node("button", "term-btn", "시작");
       go.type = "button";
+      go.disabled = inflight.has("");
       const submit = () => {
+        if (inflight.has("")) return;
         if (!title.value.trim()) { title.focus(); return; }
         drafts.delete("\u0000title");
+        go.disabled = true;
         create(title.value.trim(), first.value.trim());
       };
       go.addEventListener("click", submit);
@@ -273,6 +292,7 @@ globalThis.ThreadsPane = (() => {
                         () => { const v = box.value.trim(); if (v) send(t.id, v); });
     const go = node("button", "term-btn", "보내기");
     go.type = "button";
+    go.disabled = inflight.has(t.id);
     go.addEventListener("click", () => { const v = box.value.trim(); if (v) send(t.id, v); });
     compose.append(box, go);
 
@@ -304,13 +324,13 @@ globalThis.ThreadsPane = (() => {
     // Redraw only what changed, so a poll neither scrolls the reader back
     // to the bottom nor rebuilds what they are typing in.
     const read = loadRead();
-    const sideSig = JSON.stringify([threads, current, composing, [...unseen(threads, read)]]);
+    const sideSig = JSON.stringify([threads, current, composing, [...unseen(threads, read)], inflight.has("")]);
     if (!typingIn(side) && (sideSig !== drawn.side || !side.firstChild)) {
       drawn.side = sideSig;
       renderList(side, threads, read);
     }
     const t = convo && convo.thread;
-    const mainSig = JSON.stringify(convo ? [convo.id, t.title, t.status, convo.messages.length] : null);
+    const mainSig = JSON.stringify(convo ? [convo.id, t.title, t.status, convo.messages.length, inflight.has(convo.id)] : null);
     if (mainSig === drawn.main && main.firstChild) return;
     drawn.main = mainSig;
     const keep = main.querySelector(".th-compose textarea");
@@ -346,6 +366,7 @@ globalThis.ThreadsPane = (() => {
     convo = null;
     current = "";
     composing = false;
+    inflight.clear();
     notice = error = "";
     drawn.side = drawn.main = "";
   }
