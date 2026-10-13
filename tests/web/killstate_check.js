@@ -214,6 +214,19 @@ const response = (body, ok = true, status = 200) => ({
   badge.setStatusBadge("exited");
   check("a killed header checks kill and has no kill left to offer",
         life(), [["term-kill"], ["term-resume", "term-archive"], []]);
+  // A failed record ended on its own (claunch-z3nc7): nobody pressed kill,
+  // so kill is not checked, and the press is still what settles it (unhold).
+  badge.setSessions([{ name: "s1", status: "exited", exit_code: 1, failed_at: "x" }]);
+  badge.setStatusBadge("exited");
+  check("a failed header checks none and offers resume, kill and archive",
+        [hdr["term-status"].textContent, life()],
+        ["failed", [[], ["term-resume", "term-kill", "term-archive"], []]]);
+  // A clean exit 0 the harness made by itself carries no marker: the daemon
+  // files it killed (_failed_on_its_own), and the header agrees.
+  badge.setSessions([{ name: "s1", status: "exited", exit_code: 0 }]);
+  badge.setStatusBadge("exited");
+  check("a clean exit with no marker reads killed, as the daemon files it",
+        life(), [["term-kill"], ["term-resume", "term-archive"], []]);
   badge.setSessions([{ name: "s1", status: "exited", held_at: "x" }]);
   badge.setStatusBadge("exited");
   check("a held header checks none and offers resume, kill and archive",
