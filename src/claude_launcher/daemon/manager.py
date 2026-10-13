@@ -1757,7 +1757,7 @@ class SessionManager:
         async def run() -> None:
             try:
                 woken = await self.wake_async(name, by=by)
-            except Exception:  # noqa: BLE001 -- a failed wake leaves it held
+            except Exception:  # noqa: BLE001 -- held stays held; delayed is now failed
                 log.exception("wake of held session %r failed", name)
                 return
             if deliver and not woken.exited:
