@@ -1878,7 +1878,7 @@ and a form painted into its PTY would hang the session it was creating.
 | `wait-for S`          | Block until `--idle` (default) or `--exited`; `--timeout SECS`, `--idle-threshold SECS`. Exits 1 on timeout. |
 | `rebrief [--session S]` | Print the session's briefing re-derived from current daemon state: mesh memberships and roster, replies it owes, the cflow run it drives, parent/children, and its recorded opening `--task`. Managed claude sessions run it **automatically** — a `SessionStart` hook injected at spawn fires it after `/compact` and `/clear`, and claude reads the output back into context — so an agent's lost context is restored without the agent having to remember to ask. The same hook also posts the payload's `session_id` back to the daemon: `/clear` mints a new conversation id, and reporting it keeps the pinned conversation (what a daemon restart resumes, and what the transcript page reads) pointing at the conversation the session is actually in. Defaults to `$CLAUNCH_SESSION`; also a **rebrief** button in the web UI, which types the same block into the session's terminal. |
 | `quick-fork [S] [--as NAME] [--task T] [--mesh M] [--workflow W] [--role R] [--sibling] [-a]` | Start a **copy** of `S`'s conversation as a child of it (`--sibling`: beside it, under `S`'s parent), marked `--- forked from here ---` (see [quick-fork and merge](#quick-fork-and-merge--a-scratch-copy-that-reports-back)). `S` defaults to `$CLAUNCH_SESSION`. The copy joins no mesh and drives no run unless `--mesh`/`--workflow` say otherwise; `.` means the origin's mesh and, for the workflow, the pair the origin's run declares (`default_child_cflow`). `--role` sets the copy's role in that mesh; a second leader is refused. It always shares the origin's checkout. |
-| `quick-fork merge [TEXT] [-f FILE] [-t COPY]` | The way back from a copy: with text (or `-f`), from inside the copy, the wrap-up is typed into the origin and the copy ends; without text (`-t COPY` from outside) the copy is asked to write one. |
+| `quick-fork merge [TEXT] [-f FILE] [-t COPY]` | The way back from a copy: with text (or `-f`), from inside the copy, the wrap-up is typed into the origin (or, when it has ended, the nearest live session above it) and the copy ends; without text (`-t COPY` from outside) the copy is asked to write one. With no live session above, nothing is typed, the wrap-up is saved beside the copy's record and the copy is kept (exit 1). |
 | `handoff --to C [TEXT] [-f FILE] [-t D]` | Hand `D`'s work to `C` and end `D` — with text it happens now, without it `D` is asked to write one; `--cancel` withdraws a pending request. Detail-panel-only in the web UI, because it needs the target picked. |
 | `kill-session S`      | Terminate a running session (`--force` skips graceful terminate). Idempotent: an already-exited session is left alone — dropping a record is a different verb, below. |
 | `reparent S PARENT`   | Move a session — with everything spawned under it — under another parent. The operator's form of the agents' `reparent` MCP tool, which is scoped to the caller's own subtree; this one is not. Refused for a cycle, an exited parent, or a move that would push any session past `spawn.max_depth`. Opens the session's edge to its new parent in every mesh the two share. |
@@ -3080,6 +3080,28 @@ ends the copy. In that order, always: a delivery that fails or times out
 keeps the copy alive and says so, because the wrap-up is the only thing of
 the copy that survives. Nothing reads the transcript; the agent writes the
 wrap-up, since it is the one that knows what since-the-marker meant.
+
+**A copy can be quick-forked again.** A copy has both buttons, **⑂ fork**
+and **↩ merge**, so `A` → `A-qf1` → `A-qf1-qf1` is a chain, and each copy
+merges back to the one it was copied from. When that origin has ended by the
+time the merge comes, the merge is **delegated** to the nearest live session
+above it: from each session the walk goes to its own origin when it is a
+copy, otherwise to its parent, and a record that was removed is stepped over
+(its children were already moved up to its parent). The request and the
+delivered block both carry a `delegated:` line naming the origin that ended,
+and the detail panel's **Merge back to …** button names the session it will
+actually reach. With **no** live session above the copy, the operator's
+press is refused with the chain it checked. A copy hands its wrap-up in
+only after that press (or when it may merge on its own), so the other case
+is a copy whose press was accepted and whose sessions above all ended
+before it handed in; that completion is answered rather than refused: the wrap-up is saved as
+`merge-undelivered-<time>.md` in the copy's session directory, the copy is
+**not** ended, its viewers get a notice, and the reply (`undelivered: true`,
+`saved`, `note`) tells the agent to tell the user — who resumes one of those
+sessions and merges again, hands the work off to a live session, or ends
+the copy. A `deep_think` copy is the exception: its answer belongs to the
+session that asked, so it is never delegated past it. Nesting still counts
+against `spawn.max_depth`.
 
 ### deep_think — a session asks itself, a copy answers
 
@@ -4445,7 +4467,7 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | GET    | `/api/stats/compare`           | the Stats page's compare mode (`#/compare/<a,b,c>`): `?sessions=a,b,c&unit=…` (at most 12) — per figure (requests, tokens, tokens per request, cache read share, active buckets, input and triggered shares by origin, ...) every session's value, the mean, median, sample standard deviation, min and max across the set, and each session's z-score and rank; the origin shares; and the sessions' tokens on one bucket timeline. Descriptive statistics only |
 | POST   | `/api/sessions/{name}/respawn` | relaunch an exited session (claude resumes its conversation) |
 | POST   | `/api/sessions/{name}/quick-fork` | copy this session's conversation into a child marked `--- forked from here ---` (`{name?, task?, mesh?, workflow?, role?, sibling?}`; joins no mesh and drives no run unless named, and `"."` means this session's mesh, or the workflow its run pairs a child with; `role` is refused for an exclusive role a live member holds; `sibling: true` records the copy under this session's parent, or as a root). 201 with the child, `origin`, `marker`, `forked_at`, and `quick_fork` — `{mesh, workflow, role, sibling, parent, cwd, shared_checkout}`, what the copy actually ended up in. A fork always stands in the origin's checkout; it cannot be given a worktree |
-| POST/DELETE | `/api/sessions/{name}/handoff` | POST without `text`: ask this session for its wrap-up (`kind: merge`, quick-forks only, back to the origin) or handoff (`to`), recorded as pending on its row; POST with `text`: the completion — delivered to the target as a fenced block, then this session ends, in that order. DELETE withdraws a pending request |
+| POST/DELETE | `/api/sessions/{name}/handoff` | POST without `text`: ask this session for its wrap-up (`kind: merge`, quick-forks only, back to the origin — or the nearest live session above it when the origin has ended, `delegated: true`; 400 when none is live) or handoff (`to`), recorded as pending on its row; POST with `text`: the completion — delivered to the target as a fenced block, then this session ends, in that order. A merge with no live session above answers 200 with `completed: false`, `undelivered: true`, `saved` (the wrap-up's file) and `note`, and the session is kept. DELETE withdraws a pending request |
 | POST   | `/api/sessions/{name}/migrate` | move to another checkout: exactly one of `{worktree: NAME-or-""}` / `{cwd: DIR}`; `{children: true}` moves the descendants standing in the same directory. The claude transcript is carried to the new directory's slug |
 | POST   | `/api/sessions/{name}/reborrow` | restart on another answer to "whose token": `{borrow: NAME-or-null, null_token?}` — picking one clears the others; the session is relaunched with the definition's auth swapped, the directory untouched |
 | POST   | `/api/sessions/{name}/skip-permissions` | restart with permission prompts toggled: `{skip: true|false}` adds/removes `--dangerously-skip-permissions` in the definition's args and relaunches |
