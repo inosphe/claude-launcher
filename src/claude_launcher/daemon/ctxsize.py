@@ -294,6 +294,35 @@ def read_pi_tail(path: Path) -> Optional[dict]:
     return read_tail(path, pi_usage_of)
 
 
+def _codex_model_before(path: Path, end: int) -> Optional[str]:
+    """Find the closest model before a newline boundary, in fixed-size reads.
+
+    A turn can contain megabytes of tool output between its model and usage.
+    Only model lines need decoding here; usage remains bounded by MAX_TAIL.
+    """
+    pending = b""
+    try:
+        with path.open("rb") as fh:
+            while end > 0:
+                start = max(0, end - FIRST_CHUNK)
+                fh.seek(start)
+                lines = (fh.read(end - start) + pending).split(b"\n")
+                pending = lines.pop(0) if start else b""
+                for line in reversed(lines):
+                    if b'"turn_context"' not in line:
+                        continue
+                    try:
+                        model = codex_model_of(json.loads(line))
+                    except ValueError:
+                        continue
+                    if model:
+                        return model
+                end = start
+    except OSError:
+        return None
+    return None
+
+
 def read_codex_tail(path: Path) -> Optional[dict]:
     """Return the newest Codex context reading in ``path``.
 
@@ -335,6 +364,11 @@ def read_codex_tail(path: Path) -> Optional[dict]:
                 reading["model"] = model
                 return reading
         if window >= size or window >= MAX_TAIL:
+            if reading is not None and size > window:
+                # The first partial line was discarded above. Include that
+                # entire line in the older scan, in case it is turn_context.
+                boundary = size - window + blob.find(b"\n") + 1
+                reading["model"] = _codex_model_before(path, boundary)
             return reading
         window = min(window * 4, MAX_TAIL)
 

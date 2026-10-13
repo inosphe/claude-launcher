@@ -267,6 +267,42 @@ def test_codex_read_widens_to_find_the_model_before_large_tool_output(tmp_path):
     assert got["model"] == "gpt-5.6-sol"
 
 
+def test_codex_model_survives_a_turn_larger_than_usage_tail(tmp_path):
+    filler = json.dumps({"type": "response_item", "payload": {
+        "type": "custom_tool_call_output", "output": "x" * ctxsize.MAX_TAIL,
+    }})
+    path = write_jsonl(
+        tmp_path, codex_context(model="gpt-6.1-sol"), filler, filler,
+        codex_count(input_tokens=90_000, cached=80_000),
+        codex_context(model="gpt-6-astra"),
+    )
+
+    got = ctxsize.read_codex_tail(path)
+
+    assert got["tokens"] == 90_000
+    assert got["model"] == "gpt-6.1-sol"
+
+
+@pytest.mark.parametrize("model", ["gpt-6.1-sol", None])
+def test_codex_older_model_scan_handles_split_and_missing_records(tmp_path, monkeypatch, model):
+    monkeypatch.setattr(ctxsize, "FIRST_CHUNK", 127)
+    monkeypatch.setattr(ctxsize, "MAX_TAIL", 508)
+    records = [codex_context(model=model)] if model else []
+    path = write_jsonl(
+        tmp_path, *records,
+        '{"type":"turn_context","payload":',  # malformed model entry
+        json.dumps({"type": "response_item", "payload": {
+            "output": "한글" * 500, "model": "unrelated-model",
+        }}, ensure_ascii=False),
+        codex_count(input_tokens=90_000, cached=80_000),
+    )
+
+    got = ctxsize.read_codex_tail(path)
+
+    assert got["tokens"] == 90_000
+    assert got["model"] == model
+
+
 # --------------------------------------------------------------------------- #
 # the pi reading: the same input-side sum under camelCase names
 # --------------------------------------------------------------------------- #
