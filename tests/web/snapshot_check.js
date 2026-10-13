@@ -235,19 +235,21 @@ check("and only while the terminal is the visible view",
     function syncSessionKillControls() {}
     eval(`(${body})()`);
     const shown = (id) => !$(id).classList.contains("hidden");
-    return { badge: $("m-status").textContent, exited: /\bexited\b/.test($("m-status").className),
+    return { badge: $("m-status").textContent, cls: $("m-status").className,
              resume: shown("m-resume"), pause: shown("m-pause"),
              kill: shown("m-kill"), archive: shown("m-archive") };
   }
-  const ended = { exited: true, resume: true, pause: false, kill: true, archive: true };
-  for (const [word, record] of [
-    ["failed", { status: "exited", exit_code: 1, failed_at: "t" }],
-    ["delayed", { status: "exited", held_at: "t", delayed_at: "t" }],
-    ["hold", { status: "exited", held_at: "t" }],
+  // The class is the header's (setStatusBadge), so style.css's
+  // .badge.exited.<word> rule colours both badges alike.
+  const ended = { resume: true, pause: false, kill: true, archive: true };
+  for (const [word, record, cls] of [
+    ["failed", { status: "exited", exit_code: 1, failed_at: "t" }, "badge exited failed"],
+    ["delayed", { status: "exited", held_at: "t", delayed_at: "t" }, "badge exited hold delayed"],
+    ["hold", { status: "exited", held_at: "t" }, "badge exited hold"],
   ]) {
     const got = bar(word, record);
     check(`a ${word} record: the bar reads ${word} over exited, offers resume and kill, no pause`,
-          JSON.stringify(got) === JSON.stringify({ badge: word, ...ended }), JSON.stringify(got));
+          JSON.stringify(got) === JSON.stringify({ badge: word, cls, ...ended }), JSON.stringify(got));
   }
   // A clean exit 0 reads `exited` and has nothing for kill to change.
   const killed = bar("exited", { status: "exited", exit_code: 0 });

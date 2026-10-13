@@ -19990,7 +19990,9 @@ function syncMobileBars() {
   dot.classList.toggle("hidden", !has);
   const badge = $("m-status");
   badge.textContent = marker || status;
-  badge.className = `badge ${status}${marker ? " " + marker : ""}`;
+  // A delayed record is a hold the restore queue owns, and the header's
+  // badge carries both words — so the hold colour reaches this one too.
+  badge.className = `badge ${status}${marker === "delayed" ? " hold" : ""}${marker ? " " + marker : ""}`;
   badge.classList.toggle("hidden", !has);
   // Mirrors of the hidden header's buttons — see the click handlers below.
   $("m-resume").classList.toggle("hidden", status !== "exited");
