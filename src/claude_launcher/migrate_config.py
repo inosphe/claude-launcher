@@ -34,7 +34,7 @@ import shutil
 from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Tuple
 
-from . import provider_spec, store, translators
+from . import provider_spec, store, template, translators
 from .provider_spec import (
     CLAUDE_COMPACT_WINDOW,
     CLAUDE_MODEL_KEYS,
@@ -248,6 +248,31 @@ def _profile_layer(entry: dict, what: str) -> ProviderSpec:
     return provider_spec.overlay(reverse, declared)
 
 
+def _resolved_api_keys(entries: list) -> list:
+    """Apply profile key clears before comparing migration environments."""
+    keys = []
+    for entry in entries:
+        if "api_key" in entry:
+            keys.append({"api_key": entry["api_key"]})
+        elif "api-key" in entry:
+            keys.append({"api_key": entry["api-key"]})
+        else:
+            keys.append({})
+    resolved = template.resolve_layers(keys)
+    return [
+        {**{k: v for k, v in entry.items() if k not in ("api_key", "api-key")}, **key}
+        for entry, key in zip(entries, resolved)
+    ]
+
+
+def _preserve_key_clear(entry: dict, original: dict) -> None:
+    """A null declaration must survive the spec's omission of absent keys."""
+    field = "api_key" if "api_key" in original else "api-key"
+    if field in original and original[field] is None:
+        entry.pop("api-key", None)
+        entry["api_key"] = None
+
+
 def convert_profile(
     name: str, entry: dict, report: Report, *, orig: dict, new_doc: dict
 ) -> dict:
@@ -280,8 +305,8 @@ def convert_profile(
     orig_profiles = orig.get("profiles") or {}
     chain = _chain(name, orig_profiles)
     before: Dict[str, str] = dict(_legacy_provider_env(provider, orig))
-    for item in chain:
-        original = orig_profiles.get(item) or {}
+    originals = [orig_profiles.get(item) or {} for item in chain]
+    for item, original in zip(chain, _resolved_api_keys(originals)):
         declared_key = provider_spec.from_entry(original, f"profiles.{item}", profile=True).api_key
         if declared_key:
             before[provider_spec.CLAUDE_AUTH_TOKEN] = declared_key
@@ -297,11 +322,14 @@ def convert_profile(
     except provider_spec.SpecError as exc:
         raise MigrateConfigError(f"providers.{provider}: {exc}") from exc
     new_profiles = new_doc.get("profiles") or {}
+    resolved = _resolved_api_keys([
+        *[new_profiles.get(item) or {} for item in chain[:-1]], entry
+    ])
     layers = [
-        _profile_layer(new_profiles.get(item) or {}, f"profiles.{item}")
-        for item in chain[:-1]
+        _profile_layer(layer, f"profiles.{item}")
+        for item, layer in zip(chain[:-1], resolved[:-1])
     ]
-    own = _profile_layer({k: v for k, v in entry.items() if k != "env"} | {"env": legacy_env}, what)
+    own = _profile_layer({**resolved[-1], "env": legacy_env}, what)
     own = replace(own, harness_options={
         h: {c: v for c, v in b.items() if c != "env"} for h, b in own.harness_options.items()
     })
@@ -340,9 +368,11 @@ def convert_profile(
             "dropped -- set models.default on the profile if Pi should "
             "launch with a different model than Claude"
         )
+    original = dict(entry)
     for key in ("env", LEGACY_HARNESSES_FIELD, *provider_spec.PROFILE_SPEC_FIELDS, HARNESS_OPTIONS_FIELD):
         entry.pop(key, None)
     entry.update(_spec_to_entry(replace(own, endpoints={})))
+    _preserve_key_clear(entry, original)
     return entry
 
 
@@ -384,9 +414,11 @@ def convert_template(entry: dict, report: Report) -> dict:
             f"  {what}: keeps {', '.join(sorted(leftover))} under "
             "harness_options.claude.env"
         )
+    original = dict(entry)
     for key in ("env", *provider_spec.PROFILE_SPEC_FIELDS, HARNESS_OPTIONS_FIELD):
         entry.pop(key, None)
-    entry.update(_spec_to_entry(replace(layer, api_key=None, endpoints={})))
+    entry.update(_spec_to_entry(replace(layer, endpoints={})))
+    _preserve_key_clear(entry, original)
     return entry
 
 

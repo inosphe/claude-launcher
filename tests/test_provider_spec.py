@@ -405,6 +405,39 @@ def test_migration_preserves_declared_profile_api_key(home):
     assert runner.child_env(p, with_token=True, base_env={})["ANTHROPIC_AUTH_TOKEN"] == before
 
 
+@pytest.mark.parametrize("harness", ["claude", "pi"])
+@pytest.mark.parametrize("key_field", ["api_key", "api-key"])
+def test_migration_preserves_profile_key_null_clear(home, harness, key_field):
+    _provider("ds", DEEPSEEK)
+    parent = _profile_on("parent", "ds")
+    child = _profile_on("child", "ds", harness=harness)
+    lineage.set_parent(child, parent.name)
+    store.set_profile_field(parent.name, "api_key", "sk-parent")
+    store.update(lambda doc: doc["profiles"][child.name].update({
+        key_field: None, "env": {"ANTHROPIC_MODEL": "pinned"}
+    }))
+
+    def key():
+        if harness == "claude":
+            return runner.child_env(child, with_token=True, base_env={})["ANTHROPIC_AUTH_TOKEN"]
+        return runner.harness_child_env(child, harnesses.get(harness), base_env={})["ANTHROPIC_API_KEY"]
+
+    assert key() == "sk-deepseek"
+    assert cli_main(["migrate-config"]) == 0
+    assert store.profile_entry(child.name)["api_key"] is None
+    assert key() == "sk-deepseek"
+
+
+@pytest.mark.parametrize("key_field", ["api_key", "api-key"])
+@pytest.mark.parametrize("key", ["sk-template", None])
+def test_migration_preserves_declared_template_api_key(key_field, key):
+    doc = {"template": {key_field: key, "env": {"ANTHROPIC_MODEL": "pinned"}}}
+    converted, _ = migrate_config.convert(doc)
+    assert converted["template"]["api_key"] == key
+    assert provider_spec.from_entry(converted["template"], "template", profile=True).api_key == key
+    assert migrate_config.convert(converted)[0] == converted
+
+
 @pytest.mark.parametrize("parent_field", ["api_key", "api-key"])
 @pytest.mark.parametrize("child_field", ["api_key", "api-key"])
 def test_yaml_key_inheritance_and_null_clear(home, parent_field, child_field):
