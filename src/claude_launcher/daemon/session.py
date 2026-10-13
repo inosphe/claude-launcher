@@ -15,6 +15,7 @@ painting a spinner" apart from "the program printed something new".
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import functools
 import json
@@ -347,6 +348,27 @@ TURN_MARKER_FRESH_FOR = float(
 
 def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _typing_lock(session) -> asyncio.Lock:
+    """The lock one typed input holds from its text to its submitting Enter.
+
+    :meth:`Session.paste` and :meth:`Session.send_keys` write the text, sleep,
+    then write the Enter in a separate write. Two writers that each did that
+    unlocked could interleave: a peer's session line typed in the gap after a
+    delivery's paste joined the delivery's last line and was submitted with it
+    (``---hello``), and neither line reached the program as sent
+    (claunch-i8aor). The delivery lock does not cover it -- it is held across
+    the readiness and keyboard waits, and operator lines do not take it.
+
+    Created on first use rather than in ``__init__`` because both methods are
+    also borrowed by test doubles that never run it.
+    """
+    lock = getattr(session, "_typing_lock_obj", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        session._typing_lock_obj = lock
+    return lock
 
 
 #: How much of a queued message the rail shows. Long enough to tell a cflow
@@ -1634,36 +1656,40 @@ class Session:
                     )
             if self.exited:
                 raise SessionGone(f"session {self.sdef.name!r} has exited")
-        self.note_human_input(data=data)
-        head, submit = keys_mod.split_submit(data)
-        if submit and self.screen.bracketed_paste:
-            # Text and its submitting CR in one write is the same trap
-            # :meth:`paste` documents: a bracketed-paste TUI reads the chunk
-            # as one paste and folds the CR into the text, so the line is
-            # typed but never sent. Split it here too — this path is reached
-            # by hand ('claunch send-keys ... Enter') where the caller has no
-            # way to know the difference.
-            await self.write_bytes(head)
-            entry = harness_registry.get(self.sdef.harness)
-            delay = (
-                entry.paste_enter_delay
-                if entry is not None and entry.paste_enter_delay is not None
-                else PASTE_ENTER_DELAY
-            )
-            await asyncio.sleep(delay)
-            since = time.monotonic()
-            await self.write_bytes(submit)
-            if entry is not None and entry.submit_strategy == "screen":
-                # Keep the web "type for this session" path and CLI
-                # send-keys aligned with automated delivery: Codex may make
-                # the first Enter a newline after text, so give it a second
-                # paced Enter to submit the resulting draft.
+        # Text holds the typing lock from its write to its Enter; a bare key
+        # is not held behind someone else's paste, for the reason above.
+        held = _typing_lock(self) if has_text else contextlib.nullcontext()
+        async with held:
+            self.note_human_input(data=data)
+            head, submit = keys_mod.split_submit(data)
+            if submit and self.screen.bracketed_paste:
+                # Text and its submitting CR in one write is the same trap
+                # :meth:`paste` documents: a bracketed-paste TUI reads the chunk
+                # as one paste and folds the CR into the text, so the line is
+                # typed but never sent. Split it here too — this path is reached
+                # by hand ('claunch send-keys ... Enter') where the caller has no
+                # way to know the difference.
+                await self.write_bytes(head)
+                entry = harness_registry.get(self.sdef.harness)
+                delay = (
+                    entry.paste_enter_delay
+                    if entry is not None and entry.paste_enter_delay is not None
+                    else PASTE_ENTER_DELAY
+                )
                 await asyncio.sleep(delay)
+                since = time.monotonic()
                 await self.write_bytes(submit)
-                await self._confirm_submit(since, delay)
+                if entry is not None and entry.submit_strategy == "screen":
+                    # Keep the web "type for this session" path and CLI
+                    # send-keys aligned with automated delivery: Codex may make
+                    # the first Enter a newline after text, so give it a second
+                    # paced Enter to submit the resulting draft.
+                    await asyncio.sleep(delay)
+                    await self.write_bytes(submit)
+                    await self._confirm_submit(since, delay)
+                return data
+            await self.write_bytes(data)
             return data
-        await self.write_bytes(data)
-        return data
 
     async def submit_open_draft(self) -> None:
         """Submit the line sitting unsent in the composer, for an operator
@@ -1706,35 +1732,36 @@ class Session:
             if strategy == "screen" and self.screen.bracketed_paste
             else None
         )
-        await self.write_bytes(data)
-        if not enter:
-            return data
-        if strategy == "screen" and self.screen.bracketed_paste:
-            # Codex acknowledges a large paste by rendering its compact
-            # placeholder. Waiting for that repaint keeps Enter out of the
-            # consumer's own paste-suppression window; a producer-side sleep
-            # alone cannot, because ConPTY may batch two separate writes into
-            # one read. Bounded fallback keeps an unobservable repaint from
-            # losing the message.
-            deadline = time.monotonic() + PASTE_RENDER_TIMEOUT
-            while time.monotonic() < deadline and not self.exited:
-                changed = self.tracker.last_meaningful_change()
-                if changed is not None and changed != before:
-                    break
-                await asyncio.sleep(0.05)
-        await asyncio.sleep(delay)
-        since = time.monotonic()
-        await self.write_bytes(b"\r")
-        if strategy == "screen" and self.screen.bracketed_paste:
-            # Codex can interpret the first Enter after a pasted delivery as
-            # a newline in its composer. A second, separately paced Enter
-            # submits that draft; on versions that submit on the first one,
-            # the second reaches an empty composer.
+        async with _typing_lock(self):
+            await self.write_bytes(data)
+            if not enter:
+                return data
+            if strategy == "screen" and self.screen.bracketed_paste:
+                # Codex acknowledges a large paste by rendering its compact
+                # placeholder. Waiting for that repaint keeps Enter out of the
+                # consumer's own paste-suppression window; a producer-side sleep
+                # alone cannot, because ConPTY may batch two separate writes into
+                # one read. Bounded fallback keeps an unobservable repaint from
+                # losing the message.
+                deadline = time.monotonic() + PASTE_RENDER_TIMEOUT
+                while time.monotonic() < deadline and not self.exited:
+                    changed = self.tracker.last_meaningful_change()
+                    if changed is not None and changed != before:
+                        break
+                    await asyncio.sleep(0.05)
             await asyncio.sleep(delay)
+            since = time.monotonic()
             await self.write_bytes(b"\r")
-            extra = await self._confirm_submit(since, delay)
-            return data + b"\r\r" + b"\r" * extra
-        return data + b"\r"
+            if strategy == "screen" and self.screen.bracketed_paste:
+                # Codex can interpret the first Enter after a pasted delivery as
+                # a newline in its composer. A second, separately paced Enter
+                # submits that draft; on versions that submit on the first one,
+                # the second reaches an empty composer.
+                await asyncio.sleep(delay)
+                await self.write_bytes(b"\r")
+                extra = await self._confirm_submit(since, delay)
+                return data + b"\r\r" + b"\r" * extra
+            return data + b"\r"
 
     async def _confirm_submit(self, since: float, delay: float) -> int:
         """Send Enter again until the harness shows a turn, for a

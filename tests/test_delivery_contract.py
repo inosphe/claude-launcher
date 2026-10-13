@@ -238,6 +238,47 @@ def test_deliver_serializes_each_message_paste_and_enter(monkeypatch):
     ]
 
 
+def test_a_typed_line_waits_for_the_delivery_enter_and_a_bare_key_does_not(monkeypatch):
+    """A session line (send_keys with text) typed while a delivery sits between
+    its paste and its Enter goes in after that Enter, not into the pasted line:
+    unheld, a peer's ``hello`` was submitted as ``---hello`` behind a join
+    briefing (claunch-i8aor). An interrupt is not held behind the paste."""
+    monkeypatch.setattr(session_mod, "PASTE_ENTER_DELAY", 0.0)
+    s, writes = _fake_session(bracketed=True)
+    first_paste = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def write_bytes(data: bytes) -> None:
+        writes.append(data)
+        if len(writes) == 1:
+            first_paste.set()
+            await release_first.wait()
+
+    s.write_bytes = write_bytes
+
+    async def run() -> None:
+        delivery = asyncio.create_task(s.deliver("mesh: briefing"))
+        await asyncio.wait_for(first_paste.wait(), timeout=1)
+        line = asyncio.create_task(s.send_keys(["hello", "Enter"]))
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert writes == [b"\x1b[200~[T]\rmesh: briefing\x1b[201~"]
+        await s.send_keys(["C-c"])
+        assert writes[-1] == b"\x03"
+        release_first.set()
+        assert await delivery is True
+        await line
+
+    asyncio.run(run())
+    assert writes == [
+        b"\x1b[200~[T]\rmesh: briefing\x1b[201~",
+        b"\x03",
+        b"\r",
+        b"hello",
+        b"\r",
+    ]
+
+
 def test_codex_waits_for_the_paste_repaint_before_submitting(home, monkeypatch):
     """Codex's strategy does not submit until its TUI consumed the paste."""
     monkeypatch.setattr(session_mod, "PASTE_RENDER_TIMEOUT", 1.0)
