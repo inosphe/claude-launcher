@@ -26,7 +26,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database", type=Path)
     sub = parser.add_subparsers(dest="action", required=True)
-    for action in ("enqueue", "admit", "repair", "status"):
+    for action in ("enqueue", "admit", "repair", "release", "status"):
         p = sub.add_parser(action)
         p.add_argument("--repo", type=Path, required=True)
         if action in ("enqueue", "admit", "repair"):
@@ -35,8 +35,10 @@ def main(argv=None):
             p.add_argument("--merge", required=True)
             p.add_argument("--owner", default=os.environ.get("CLAUNCH_SESSION"))
             p.add_argument("--command")
-        if action == "repair":
+        if action in ("repair", "release"):
             p.add_argument("--job", required=True)
+        if action == "release":
+            p.add_argument("--reason", required=True)
     for action in ("check-batch", "check-enqueued"):
         p = sub.add_parser(action)
         p.add_argument("--env", required=True)
@@ -55,6 +57,9 @@ def main(argv=None):
         elif args.action == "repair":
             queue.repair(args.repo, args.job, args.issue)
             result = {"repair_issue": args.issue, "job": args.job}
+        elif args.action == "release":
+            queue.release(args.repo, args.job, args.reason)
+            result = {"released": args.job}
         elif args.action == "status":
             result = queue.status(args.repo)
         elif args.action in ("check-batch", "check-enqueued"):

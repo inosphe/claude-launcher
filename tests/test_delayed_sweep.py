@@ -156,6 +156,31 @@ def test_a_failure_pauses_only_its_repository_and_only_green_repair_resumes(repo
     q.admit(repo, "new-work")
 
 
+def test_a_failure_of_a_sha_master_cannot_reach_creates_no_pause(repo, tmp_path):
+    q = queue(tmp_path)
+    gone, _ = enqueue(q, repo, "gone")
+    git(repo, "reset", "-q", "--hard", gone["sha"] + "^1")  # discarded after enqueue
+    q.finish(gone["id"], "failed", "receipt", "old conftest defect")
+    q.admit(repo, "anything")
+    assert q.status(repo)["pauses"] == [] or not q.status(repo)["pauses"][0]["job"]
+
+
+def test_leader_releases_a_pause_only_for_an_unreachable_sha_with_a_reason(repo, tmp_path):
+    q = queue(tmp_path)
+    bad, _ = enqueue(q, repo, "bad")
+    q.finish(bad["id"], "failed", "receipt", "x")  # reachable: paused
+    with pytest.raises(ValueError, match="reachable"):
+        q.release(repo, bad["id"], "why")
+    git(repo, "reset", "-q", "--hard", bad["sha"] + "^1")  # now unreachable
+    with pytest.raises(ValueError, match="reason"):
+        q.release(repo, bad["id"], " ")
+    with pytest.raises(ValueError, match="active failed job"):
+        q.release(repo, "nope", "why")
+    q.release(repo, bad["id"], "discarded local merge")
+    q.admit(repo, "anything")
+    assert "discarded local merge" in q.get(bad["id"])["detail"]
+
+
 def test_unrelated_green_and_invalid_repair_cannot_clear_a_pause(repo, tmp_path):
     q = queue(tmp_path)
     bad, _ = enqueue(q, repo, "bad")

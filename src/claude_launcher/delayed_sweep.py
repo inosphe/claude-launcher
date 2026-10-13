@@ -197,6 +197,9 @@ class Queue:
             if status == "failed":
                 # A late verdict about pre-repair history must not pause it again.
                 covered = pause and pause["cleared_sha"] and self.contains(row["repo"], row["sha"], pause["cleared_sha"])
+                # A SHA master cannot reach (merge discarded after enqueue) has no
+                # repair that could contain it, so its failure would pause forever.
+                covered = covered or self.orphaned(row["repo"], row["sha"])
                 if not covered and (not pause or not pause["job"]):
                     db.execute("INSERT INTO pauses(common,job) VALUES (?,?) ON CONFLICT(common) "
                                "DO UPDATE SET job=excluded.job,repair_issue=NULL", (row["common"], ident))
@@ -205,6 +208,30 @@ class Queue:
                 if self.contains(row["repo"], failed["sha"], row["sha"]):
                     db.execute("UPDATE pauses SET job='',repair_issue=NULL,cleared_sha=? WHERE common=?",
                                (row["sha"], row["common"]))
+
+    def release(self, repo, job, reason):
+        """Leader escape hatch: clear a pause whose failed SHA master cannot reach."""
+        if not reason or not reason.strip():
+            raise ValueError("release requires a reason")
+        common = self.common(repo)
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            pause = db.execute("SELECT * FROM pauses WHERE common=?", (common,)).fetchone()
+            if not pause or pause["job"] != job:
+                raise ValueError("release must name the active failed job")
+            failed = self.get(job)
+            if not self.orphaned(failed["repo"], failed["sha"]):
+                raise ValueError("failed commit is reachable from master; only a green repair releases it")
+            db.execute("UPDATE pauses SET job='',repair_issue=NULL WHERE common=?", (common,))
+            db.execute("UPDATE jobs SET detail=? WHERE id=?",
+                       (f"pause released, sha unreachable from master: {reason.strip()}", job))
+
+    @classmethod
+    def orphaned(cls, repo, sha):
+        """True when refs/heads/master exists and does not contain sha."""
+        ref = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "-q", "refs/heads/master"],
+                             capture_output=True)
+        return ref.returncode == 0 and not cls.contains(repo, sha, "refs/heads/master")
 
     @staticmethod
     def contains(repo, ancestor, head):
