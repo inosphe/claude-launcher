@@ -29547,6 +29547,14 @@ async function wsSyncPreviewPrompt(name, kind) {
   if (st.agentPreviews[kind] === preview && wsOpen) renderWorkspaces();
 }
 
+// "s29 (nc:claude) · leader @ claunch": the role and mesh of each membership
+// say what a candidate parent is on the team (claunch-7ez8s).
+function wsSyncParentLabel(p) {
+  const meshes = (p.meshes || []).map((m) => `${m.role || "no role"} @ ${m.mesh}`);
+  const held = p.held ? ", hold — woken on delegate" : "";
+  return `${p.name} (${p.profile}${held}) · ${meshes.length ? meshes.join(", ") : "no mesh"}`;
+}
+
 function wsSyncAgentControls(st, name) {
   const box = el("div", "ws-sync-agent");
   box.appendChild(el("h4", null, "Sync / push execution"));
@@ -29566,7 +29574,7 @@ function wsSyncAgentControls(st, name) {
     parent.setAttribute("aria-label", "Sync agent parent session");
     parent.appendChild(new Option("Choose parent session", ""));
     for (const p of (st.doc && st.doc.agent_parents) || []) {
-      parent.appendChild(new Option(`${p.name} (${p.profile}${p.held ? ", hold — woken on delegate" : ""})`, p.name));
+      parent.appendChild(new Option(wsSyncParentLabel(p), p.name));
     }
     if (!(st.doc && (st.doc.agent_parents || []).length)) {
       box.appendChild(el("p", "wf-note", "Start a parent agent session to enable delegation."));

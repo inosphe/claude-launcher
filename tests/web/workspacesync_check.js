@@ -123,7 +123,7 @@ vm.runInContext(
        "wsSyncBranch", "wsSyncPlanLine", "wsSyncPeers", "wsSyncResult",
        "wsSyncRemoteComparisons", "wsSyncPanel", "wsSyncPullBody", "wsSyncShared", "wsSyncUnmerged",
        "wsPeerDistanceText", "wsSyncHistory", "wsHistoryApproval"].map(slice),
-   ...["wsSyncAgentBody", "wsSyncAgentBlocked", "wsSyncAgentControls", "wsSyncPromptText",
+   ...["wsSyncAgentBody", "wsSyncAgentBlocked", "wsSyncAgentControls", "wsSyncParentLabel", "wsSyncPromptText",
        "wsSyncPromptBody", "wsSyncPreviewPrompt", "wsSyncOperationPreview", "wsLocalSyncControls"].map(slice),
    "globalThis.__st = wsSyncSt;"].join("\n"),
   ctx);
@@ -413,6 +413,13 @@ async function tick() {
   assert.equal(posts().length, 0, "must select a live parent before spawning");
   nodes = walk(ctx.wsSyncPanel(W));
   const parentPick = nodes.find((n) => (n.attrs || {})["aria-label"] === "Sync agent parent session");
+  /* Each candidate shows its role and mesh (claunch-7ez8s). */
+  assert.equal(parentPick.children[1].text, "parent (coder) · no mesh");
+  assert.equal(ctx.wsSyncParentLabel({ name: "s29", profile: "nc:claude",
+    meshes: [{ mesh: "claunch", role: "leader" }, { mesh: "ops", role: "" }] }),
+  "s29 (nc:claude) · leader @ claunch, no role @ ops");
+  assert.equal(ctx.wsSyncParentLabel({ name: "s7", profile: "p", held: true, meshes: [] }),
+    "s7 (p, hold — woken on delegate) · no mesh");
   parentPick.value = "parent";
   parentPick.handlers.change[0]();
   const delegated = { status: "delegated", agent: { session: "child", status: "busy" },

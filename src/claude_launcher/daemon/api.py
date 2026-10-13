@@ -6251,9 +6251,14 @@ async def h_reposync_ws_status(request: web.Request) -> web.Response:
     doc["unreadable"] = unreadable
     agent = reposync_agent.active(request.app["manager"], doc["repo"]) if doc.get("repo") else None
     doc["agent"] = reposync_agent.summary(agent) if agent else None
+    # The picker labels each candidate with its meshes and its role in each,
+    # so a parent is chosen by what it is on the team (claunch-7ez8s).
+    mesh_mgr = request.app["mesh"]
     doc["agent_parents"] = [
         {"name": s.sdef.name, "profile": s.sdef.profile,
-         "held": bool(s.exited and getattr(s, "held_at", None))}
+         "held": bool(s.exited and getattr(s, "held_at", None)),
+         "meshes": [{"mesh": m["mesh"], "role": m["role"]}
+                    for m in mesh_mgr.meshes_for_session(s.sdef.name)]}
         for s in request.app["manager"].list()
         if _ws_parent_usable(s)
     ]

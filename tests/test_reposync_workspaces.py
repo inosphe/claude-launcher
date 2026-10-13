@@ -180,6 +180,25 @@ def _agent_parent(client, world, monkeypatch):
     return parent, assignments
 
 
+def test_agent_parents_carry_mesh_and_role(world, monkeypatch):
+    """The parent picker labels each candidate with its meshes and roles
+    (claunch-7ez8s); a session in no mesh carries an empty list."""
+    async def body(client):
+        parent, _ = _agent_parent(client, world, monkeypatch)
+        url = "/api/reposync/workspaces/proj/status?peers=0&fetch=0"
+        status = await (await client.get(url, headers=AUTH)).json()
+        row = next(p for p in status["agent_parents"] if p["name"] == parent.sdef.name)
+        assert row["meshes"] == []
+        mm = client.app["mesh"]
+        mm.create("team")
+        await mm.join("team", parent.sdef.name, handle="lead", role="leader")
+        status = await (await client.get(url, headers=AUTH)).json()
+        row = next(p for p in status["agent_parents"] if p["name"] == parent.sdef.name)
+        assert row["meshes"] == [{"mesh": "team", "role": "leader"}]
+
+    _with_app(body)
+
+
 def test_sync_agent_a_stages_isolated_child_without_executing_or_pushing(world, monkeypatch):
     from claude_launcher.daemon import api, reposync_agent
 
