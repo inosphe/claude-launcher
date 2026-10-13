@@ -300,14 +300,21 @@ def _codex_model_before(path: Path, end: int) -> Optional[str]:
     A turn can contain megabytes of tool output between its model and usage.
     Only model lines need decoding here; usage remains bounded by MAX_TAIL.
     """
-    pending = b""
+    pending = []
     try:
         with path.open("rb") as fh:
             while end > 0:
                 start = max(0, end - FIRST_CHUNK)
                 fh.seek(start)
-                lines = (fh.read(end - start) + pending).split(b"\n")
-                pending = lines.pop(0) if start else b""
+                block = fh.read(end - start)
+                lines = block.split(b"\n")
+                if len(lines) == 1 and start:
+                    # Avoid copying a large tool-result line on every chunk.
+                    pending.append(block)
+                    end = start
+                    continue
+                lines[-1] += b"".join(reversed(pending))
+                pending = [lines.pop(0)] if start else []
                 for line in reversed(lines):
                     if b'"turn_context"' not in line:
                         continue
