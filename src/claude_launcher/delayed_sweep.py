@@ -26,7 +26,7 @@ def git(repo, *args):
 
 def default_database():
     from .daemon import paths
-    return paths.daemon_dir() / "delayed-sweeps.sqlite3"
+    return paths.base_home() / "daemon" / "delayed-sweeps.sqlite3"
 
 
 class Queue:
@@ -39,6 +39,7 @@ class Queue:
                     id TEXT PRIMARY KEY, repo TEXT NOT NULL, common TEXT NOT NULL,
                     sha TEXT NOT NULL, ref TEXT NOT NULL, issue TEXT NOT NULL,
                     owner TEXT NOT NULL, tool TEXT NOT NULL, python TEXT NOT NULL, command TEXT,
+                    origin TEXT NOT NULL DEFAULT '{}',
                     status TEXT NOT NULL, priority INTEGER NOT NULL DEFAULT -1,
                     created REAL NOT NULL, available REAL NOT NULL DEFAULT 0,
                     pid INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0,
@@ -50,6 +51,10 @@ class Queue:
                     repair_issue TEXT, cleared_sha TEXT
                 );
             """)
+            # Preserve pre-release queue files without inventing their origin.
+            db.execute("BEGIN IMMEDIATE")
+            if "origin" not in {r["name"] for r in db.execute("PRAGMA table_info(jobs)")}:
+                db.execute("ALTER TABLE jobs ADD COLUMN origin TEXT NOT NULL DEFAULT '{}'")
 
     @contextmanager
     def connect(self):
@@ -66,6 +71,8 @@ class Queue:
         return os.path.normcase(str(Path(git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()))
 
     def enqueue(self, repo, sha, issue, owner, tool, command=None):
+        from . import config
+        from .daemon import paths
         repo = str(Path(repo).resolve())
         common = self.common(repo)
         commit = git(repo, "rev-parse", f"{sha}^{{commit}}")
@@ -77,12 +84,16 @@ class Queue:
             raise ValueError("verification checkpoint must be a two-parent merge")
         ident = hashlib.sha256((common + ":" + sha).encode()).hexdigest()[:24]
         ref = f"refs/heads/delayed-sweep/{owner}/{sha}"
+        origin = json.dumps({"instance": paths.instance(),
+                             "home": str(config.launcher_home().resolve()),
+                             "base": str(paths.base_home().resolve()),
+                             "scratch": str(paths.session_scratch_dir(owner).resolve())})
         with self.connect() as db:
             db.execute("INSERT OR IGNORE INTO jobs "
-                       "(id,repo,common,sha,ref,issue,owner,tool,python,command,status,created) "
-                       "VALUES (?,?,?,?,?,?,?,?,?,?,'pending',?)",
+                       "(id,repo,common,sha,ref,issue,owner,tool,python,command,origin,status,created) "
+                       "VALUES (?,?,?,?,?,?,?,?,?,?,?,'pending',?)",
                        (ident, repo, common, sha, ref, issue, owner,
-                        str(Path(tool).resolve()), sys.executable, command, time.time()))
+                        str(Path(tool).resolve()), sys.executable, command, origin, time.time()))
             row = dict(db.execute("SELECT * FROM jobs WHERE id=?", (ident,)).fetchone())
             if row["issue"] != issue:
                 raise ValueError("the merge already belongs to a different verification issue")

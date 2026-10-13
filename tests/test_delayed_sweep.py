@@ -12,8 +12,15 @@ import pytest
 
 from claude_launcher import delayed_sweep as mod, test_window
 from claude_launcher.daemon.delayed_sweep import Clock
+from claude_launcher.daemon import paths
 
 TOOL = Path(__file__).resolve().parents[1] / "tools" / "sweep.py"
+
+
+@pytest.fixture(autouse=True)
+def isolated_instance_paths(tmp_path, monkeypatch):
+    monkeypatch.setenv(paths.INSTANCE_BASE_ENV, str(tmp_path / ".home"))
+    monkeypatch.setenv(paths.INSTANCE_ENV, "")
 
 
 def git(repo, *args):
@@ -161,6 +168,89 @@ def test_unrelated_green_and_invalid_repair_cannot_clear_a_pause(repo, tmp_path)
     q.repair(repo, bad["id"], "fix")
     with pytest.raises(ValueError, match="already assigned"):
         q.repair(repo, bad["id"], "different-fix")
+
+
+@pytest.mark.parametrize("first_instance", ["", "review-a"])
+def test_pause_and_green_repair_are_shared_across_daemon_instances(repo, tmp_path, monkeypatch, first_instance):
+    base = tmp_path / "shared-home"
+    monkeypatch.setenv("CLAUDE_LAUNCHER_HOME", str(base))
+    monkeypatch.setenv(paths.INSTANCE_BASE_ENV, str(base))
+    monkeypatch.setenv(paths.INSTANCE_ENV, first_instance)
+    first = mod.Queue()
+    bad, _ = enqueue(first, repo, "bad")
+    first.finish(bad["id"], "failed")
+    # A named daemon may also have a different home in its manifest.
+    monkeypatch.setenv("CLAUDE_LAUNCHER_HOME", str(tmp_path / "other-home"))
+    monkeypatch.setenv(paths.INSTANCE_ENV, "review-b")
+    second = mod.Queue()
+    assert first.database == second.database == base / "daemon/delayed-sweeps.sqlite3"
+    with pytest.raises(ValueError, match="paused"):
+        second.admit(repo, "ordinary")
+    second.repair(repo, bad["id"], "repair")
+    first.admit(repo, "repair")
+    second.admit(repo, "repair")
+    with pytest.raises(ValueError, match="already assigned"):
+        first.repair(repo, bad["id"], "different-repair")
+    repair, _ = enqueue(second, repo, "fix", "repair")
+    assert first.claim()["id"] == repair["id"]
+    second.finish(repair["id"], "passed")
+    first.admit(repo, "ordinary")
+    second.admit(repo, "ordinary")
+
+
+def test_only_the_originating_instance_delivers_the_result(repo, tmp_path, monkeypatch):
+    monkeypatch.setenv(paths.INSTANCE_ENV, "review-a")
+    q = queue(tmp_path)
+    bad, _ = enqueue(q, repo, "bad")
+    q.finish(bad["id"], "failed")
+    notices = []
+    async def deliver(notice):
+        notices.append(notice)
+        return True
+    manager = SimpleNamespace(get=lambda owner: SimpleNamespace(exited=False, deliver=deliver))
+    monkeypatch.setenv(paths.INSTANCE_ENV, "review-b")
+    asyncio.run(Clock(manager, q).tick())
+    assert not notices
+    assert not q.get(bad["id"])["notified"]
+    monkeypatch.setenv(paths.INSTANCE_ENV, "review-a")
+    asyncio.run(Clock(manager, q).tick())
+    assert len(notices) == 1
+    assert bad["id"] in notices[0]
+    assert q.get(bad["id"])["notified"]
+    asyncio.run(Clock(manager, q).tick())
+    assert len(notices) == 1
+
+
+def test_another_instance_runs_with_the_recorded_origin_without_duplication(repo, tmp_path, monkeypatch):
+    base = tmp_path / "shared-home"
+    home = tmp_path / "origin-home"
+    monkeypatch.setenv("CLAUDE_LAUNCHER_HOME", str(home))
+    monkeypatch.setenv(paths.INSTANCE_BASE_ENV, str(base))
+    monkeypatch.setenv(paths.INSTANCE_ENV, "review-a")
+    first = mod.Queue()
+    job, _ = enqueue(first, repo, "a")
+    expected_scratch = paths.session_scratch_dir("leader")
+    monkeypatch.setenv("CLAUDE_LAUNCHER_HOME", str(tmp_path / "other-home"))
+    monkeypatch.setenv(paths.INSTANCE_ENV, "review-b")
+    seen = []
+    async def launch(*args, **kwargs):
+        seen.append((args, kwargs))
+        return SimpleNamespace(pid=os.getpid(), returncode=None)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", launch)
+    second = mod.Queue()
+    asyncio.run(Clock(SimpleNamespace(), second).tick())
+    args, kwargs = seen[0]
+    assert args[0] == job["python"]
+    assert args[-1] == str(expected_scratch)
+    env = kwargs["env"]
+    assert env[paths.INSTANCE_ENV] == "review-a"
+    assert env[paths.INSTANCE_BASE_ENV] == str(base)
+    assert env["CLAUDE_LAUNCHER_HOME"] == str(home)
+    assert env["CLAUNCH_SCRATCH"] == str(expected_scratch)
+    assert (expected_scratch / ("delayed-sweep-" + job["id"] + ".log")).exists()
+    asyncio.run(Clock(SimpleNamespace(), first).tick())
+    assert len(seen) == 1
+    assert first.get(job["id"])["attempts"] == 1
 
 
 def test_interrupted_runner_retries_but_live_runner_is_never_duplicated(repo, tmp_path):

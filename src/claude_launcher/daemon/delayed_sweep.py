@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 from pathlib import Path
 
 from ..delayed_sweep import Queue
-from .. import test_window
+from .. import config, test_window
 from . import paths
 
 log = logging.getLogger("claunch.daemon.delayed_sweep")
@@ -39,6 +40,10 @@ class Clock:
         for job in queue.status()["jobs"]:
             if job["status"] not in ("passed", "failed") or job["notified"]:
                 continue
+            origin = json.loads(job["origin"])
+            if (origin.get("instance") != paths.instance()
+                    or origin.get("base") != str(paths.base_home().resolve())):
+                continue
             try:
                 session = self.manager.get(job["owner"])
                 if session.exited:
@@ -62,7 +67,11 @@ class Clock:
         job = queue.claim(background=idle)
         if not job:
             return
-        scratch = paths.session_scratch_dir(job["owner"])
+        origin = json.loads(job["origin"])
+        if not {"instance", "home", "base", "scratch"} <= origin.keys():
+            queue.finish(job["id"], "retry", detail="job has no recorded originating instance")
+            return
+        scratch = Path(origin["scratch"])
         scratch.mkdir(parents=True, exist_ok=True)
         logfile = scratch / ("delayed-sweep-" + job["id"] + ".log")
         script = Path(job["tool"]).with_name("delayed_sweep.py")
@@ -74,6 +83,9 @@ class Clock:
                      test_window.WINDOW_WORKERS_ENV, test_window.WINDOW_REPORT_ENV):
             env.pop(name, None)
         env["CLAUNCH_SCRATCH"] = str(scratch)
+        env[config.LAUNCHER_HOME_ENV] = origin["home"]
+        env[paths.INSTANCE_BASE_ENV] = origin["base"]
+        env[paths.INSTANCE_ENV] = origin["instance"]
         try:
             with logfile.open("ab") as output:
                 self.runner = await asyncio.create_subprocess_exec(
