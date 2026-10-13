@@ -588,6 +588,7 @@ def run_detail(cwd: str, scope: str, prompts: bool = False) -> dict:
     """``GET /api/cflow2/run``: the run, its chart, the journal tail and the
     delegation rows."""
     from ..cflow2 import runtime
+    from . import cflow2_metrics
 
     st = store2.RunStore(cwd, scope)
     if not st.exists():
@@ -604,6 +605,7 @@ def run_detail(cwd: str, scope: str, prompts: bool = False) -> dict:
         "run": payload,
         "chart": chart_view(chart, prompts),
         "history": run_history(st, state),
+        "throughput": cflow2_metrics.observations(st),
         # Which nodes have a live instance (the active configuration and its
         # ancestors), and which of those wait on the outside.
         "instances": [

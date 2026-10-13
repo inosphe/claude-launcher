@@ -435,6 +435,47 @@ class RunStore:
                     break
         return out
 
+    def metrics_snapshot(self, limit: int = 2048, byte_limit: int = 256 * 1024) -> dict:
+        """Read-only metrics input; a checkpoint never falls back to projections.
+
+        State, chart and events share one SQLite generation. Legacy inputs
+        must carry a matching started event before their journal is trusted.
+        """
+        if self.checkpoint_path.exists():
+            try:
+                snap = checkpoint.metrics_snapshot(self.checkpoint_path, limit=limit,
+                                                   byte_limit=byte_limit)
+            except checkpoint.CheckpointError as exc:
+                raise StoreError(str(exc)) from exc
+            try:
+                return {**snap, "state": json.loads(snap["state"]),
+                        "chart": ir.Chart.from_json(snap["chart"])}
+            except (ir.IRError, KeyError, ValueError) as exc:
+                raise StoreError(f"corrupt metrics snapshot {self.checkpoint_path}: {exc}") from exc
+        state, chart = self.load_state(), self.load_chart()
+        events, complete, size = [], True, 0
+        try:
+            with self.journal_path.open("rb") as fh:
+                for _ in range(limit + 1):
+                    line = fh.readline(min(65537, byte_limit - size + 1))
+                    if not line:
+                        break
+                    if len(events) == limit or size + len(line) > byte_limit or not line.endswith(b"\n"):
+                        complete = False
+                        break
+                    size += len(line)
+                    event = json.loads(line)
+                    if not isinstance(event, dict):
+                        raise ValueError("journal event is not an object")
+                    events.append(event)
+        except FileNotFoundError:
+            complete = False
+        starts = [e.get("run") for e in events if e.get("event") == "started"]
+        if starts != [state.get("run_id")]:
+            events, complete = [], False
+        return {"state": state, "chart": chart, "events": events,
+                "complete": complete, "bytes": size}
+
     # -- locking ---------------------------------------------------------
     @contextlib.contextmanager
     def lock(self, timeout: float = LOCK_TIMEOUT) -> Iterator[None]:
