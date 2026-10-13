@@ -112,8 +112,10 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
     {seq: 2, author: "agent", body: "because tools", at: "2026-10-13T00:00:01+00:00"},
   ]};
   const calls = [];
+  let failCreate = false;
   const api = async (p, opts = {}) => {
     calls.push([opts.method || "GET", p, opts.body ? JSON.parse(opts.body) : undefined]);
+    if (failCreate && p === "/api/threads") return {ok: false, status: 500, json: async () => ({error: "boom"})};
     let doc = {};
     if (p.startsWith("/api/threads?session=")) doc = {session: "s1", threads, open: 1, agent_seq: 2};
     else if (/^\/api\/threads\/th-1\?after=/.test(p)) {
@@ -169,6 +171,18 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   // new thread: + opens the form, 시작 posts {to, title, text}; a failed delivery is said
   host.querySelector(".th-new").fire("click");
   await settle();
+  // a failed create keeps what was typed and frees 시작 for a retry
+  failCreate = true;
+  const typed = host.querySelector(".th-newform .th-title-input");
+  typed.value = "Deploy";
+  typed.fire("input");
+  host.querySelector(".th-newform .term-btn").fire("click");
+  await settle();
+  assert.equal(host.querySelector(".th-newform .th-title-input").value, "Deploy", "a failed create keeps the title");
+  assert.ok(!host.querySelector(".th-newform .term-btn").disabled, "시작 comes back after a failure");
+  assert.match(host.querySelector(".th-head").text(), /boom/);
+  failCreate = false;
+  calls.length = 0;
   const form = host.querySelector(".th-newform");
   form.querySelector(".th-title-input").value = "Deploy";
   form.querySelector(".th-text").value = "when?";

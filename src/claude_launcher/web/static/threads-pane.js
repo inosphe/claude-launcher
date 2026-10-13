@@ -167,6 +167,7 @@ globalThis.ThreadsPane = (() => {
       if (text) body.text = text;
       const res = await request("/api/threads", body);
       drafts.delete("");
+      drafts.delete("\u0000title");
       composing = false;
       current = res.thread.id;
       if (res.delivered === false) notice = `${name} 세션에 전달하지 못했습니다(종료됨). 메시지는 쓰레드에 남았습니다.`;
@@ -214,7 +215,6 @@ globalThis.ThreadsPane = (() => {
       const submit = () => {
         if (inflight.has("")) return;
         if (!title.value.trim()) { title.focus(); return; }
-        drafts.delete("\u0000title");
         go.disabled = true;
         create(title.value.trim(), first.value.trim());
       };
