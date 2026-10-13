@@ -987,3 +987,111 @@ def test_cli_quick_fork_passes_role_and_sibling(fake_daemon, capsys, monkeypatch
                              {"mesh": ".", "role": "worker", "sibling": True})]
     out = capsys.readouterr().out
     assert "in mesh mesh-9 and role worker, as a sibling under 'g'" in out
+
+
+# ---- the run the copy was started on (claunch-ychal) --------------------- #
+
+def _lines(block: str, prefix: str) -> list:
+    return [ln for ln in block.split("\n") if ln.startswith(prefix)]
+
+
+def test_the_marker_tells_a_copy_its_v2_run_is_new_and_not_the_origins():
+    """s270-qf1: started on improv-worker-v2 while its origin was a
+    sync-integrator, it called flow_status once and then did the opening task
+    outside the run. The block now says the run is new, that the origin's run
+    is another one, and that the task goes in through the first task -- in
+    the v2 run's own tool names."""
+    block = handoff_mod.compose_marker(
+        origin="s270", fork="s270-qf1", marker="qf-1", forked_at="T",
+        workflow="improv-worker-v2", workflow_version=2,
+        origin_workflow="reposync-merge-push-v2",
+    )
+    run = _lines(block, "workflow: ")
+    assert len(run) == 1, block
+    assert "NEW improv-worker-v2 run (cflow v2)" in run[0] and "s270-qf1" in run[0]
+    assert "starts at its first task" in run[0]
+    theirs = _lines(block, "origin run: ")
+    assert len(theirs) == 1, block
+    assert "s270's own reposync-merge-push-v2 run stays with s270" in theirs[0]
+    assert "a different workflow from yours" in theirs[0]
+    assert "does not bind you" in theirs[0]
+    first = _lines(block, "first: ")
+    assert len(first) == 1, block
+    assert "call the flow_status tool" in first[0] and "flow_report" in first[0]
+    assert "before reading for the task or editing a file" in first[0]
+    assert "run's first task" in first[0] and "outside the run" in first[0]
+    # the v1 tool name is the one s270-qf1 was given, and it is not a v2 tool
+    assert "cflow 'status'" not in block
+    assert block.strip().endswith("---")
+
+
+def test_the_marker_names_v1_tools_and_a_same_workflow_origin_run():
+    block = handoff_mod.compose_marker(
+        origin="a", fork="a-qf1", marker="qf-1", forked_at="T",
+        workflow="improv-worker", workflow_version=1, origin_workflow="improv-worker",
+    )
+    first = _lines(block, "first: ")[0]
+    assert "the cflow 'status' tool" in first and "'next'" in first
+    assert "flow_status" not in block
+    theirs = _lines(block, "origin run: ")[0]
+    assert "the same workflow, but a separate run" in theirs
+
+
+def test_the_marker_without_a_version_or_origin_run_still_points_at_both_tools():
+    block = handoff_mod.compose_marker(
+        origin="a", fork="a-qf1", marker="qf-1", forked_at="T", workflow="w",
+    )
+    first = _lines(block, "first: ")[0]
+    assert "flow_status" in first and "cflow 'status'" in first
+    theirs = _lines(block, "origin run: ")[0]
+    assert "a drove no run of this workflow" in theirs
+
+
+def test_quick_fork_run_reads_the_version_and_resolves_an_inherited_name(monkeypatch):
+    from claude_launcher.daemon import api as api_mod
+
+    assert api_mod._quick_fork_run("-", 0, parent="a", cwd="/x") == ("", 0)
+    assert api_mod._quick_fork_run("w", 2, parent="a", cwd="/x") == ("w", 2)
+
+    monkeypatch.setattr(api_mod.cflow2_web, "choose", lambda *a, **k: ("w", object()))
+    assert api_mod._quick_fork_run("w", 0, parent="a", cwd="/x") == ("w", 2)
+    monkeypatch.setattr(api_mod.cflow2_web, "choose", lambda *a, **k: None)
+    assert api_mod._quick_fork_run("w", 0, parent="a", cwd="/x") == ("w", 1)
+
+    def broken(*a, **k):
+        raise ValueError("no such workflow")
+
+    monkeypatch.setattr(api_mod.cflow2_web, "choose", broken)
+    assert api_mod._quick_fork_run("w", 0, parent="a", cwd="/x") == ("w", 0)
+
+    seen = {}
+
+    def paired(**kw):
+        seen.update(kw)
+        return "improv-worker-v2", 2
+
+    monkeypatch.setattr(api_mod.onboard, "_paired", paired)
+    assert api_mod._quick_fork_run(".", 0, parent="a", cwd="/x") == ("improv-worker-v2", 2)
+    # the origin is the copy's parent, so its run is the one paired against
+    assert seen == {"parent": "a", "parent_cwd": "/x", "cwd": "/x"}
+
+
+def test_origin_run_name_reads_the_origins_v2_run_then_its_v1_run(monkeypatch):
+    from claude_launcher.daemon import api as api_mod
+
+    assert api_mod._origin_run_name("a", "") == ""
+    monkeypatch.setattr(
+        api_mod.cflow2_web, "live_run",
+        lambda cwd, scope: {"workflow": "reposync-merge-push-v2"} if scope == "a" else None,
+    )
+    assert api_mod._origin_run_name("a", "/x") == "reposync-merge-push-v2"
+
+    monkeypatch.setattr(
+        api_mod.cflow_engine, "status",
+        lambda cwd, scope=None: {"status": "step", "workflow": "improv-worker"},
+    )
+    assert api_mod._origin_run_name("b", "/x") == "improv-worker"
+    monkeypatch.setattr(
+        api_mod.cflow_engine, "status", lambda cwd, scope=None: {"status": "idle"},
+    )
+    assert api_mod._origin_run_name("b", "/x") == ""
