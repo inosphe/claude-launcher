@@ -240,15 +240,34 @@ class RunStore:
     def save_state(self, state: Dict[str, Any]) -> None:
         self.commit(state, [])
 
-    def commit(self, state: Dict[str, Any], events: List[Dict[str, Any]]) -> None:
+    def commit(self, state: Dict[str, Any], events: List[Dict[str, Any]], *,
+               touch: Optional[str] = None) -> None:
         """One durable state/event transaction. Caller holds the run lock.
+
+        ``touch`` names a timestamp key set to now only when the commit
+        changes something else (an event, or another key of the state): a
+        save that would only move that stamp writes nothing, and ``state``
+        keeps the committed stamp.
 
         Existing JSON-only runs migrate on their first successful write. A
         corrupt legacy file is never silently imported or replaced.
         """
         self.dir.mkdir(parents=True, exist_ok=True)
-        text = checkpoint.encode(state)
         creating = not self.checkpoint_path.exists()
+        if touch and not creating and not events:
+            previous = self._read(checkpoint.read_state, self.checkpoint_path)
+            stamp = previous.get(touch)
+            if stamp is not None:
+                fresh = state.get(touch)
+                state[touch] = stamp
+                # Compact output differs from encode()'s only in whitespace,
+                # and json's C encoder writes it (indent= runs the Python one).
+                if _compact(state) == _compact(previous):
+                    return
+                state[touch] = fresh
+        if touch:
+            state[touch] = utcnow()
+        text = checkpoint.encode(state)
         legacy = []
         receipts = {}
         try:
@@ -433,6 +452,10 @@ class RunStore:
             return
         with _excl_lock(path, timeout):
             yield
+
+
+def _compact(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, default=str)
 
 
 def _atomic_write(path: Path, text: str) -> None:

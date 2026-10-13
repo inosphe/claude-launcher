@@ -429,3 +429,29 @@ def test_cache_skips_verification_of_an_unchanged_revision(run_store, monkeypatc
     calls.clear()
     st.load_state()
     assert len(calls) == 1  # the new state only; the chart is verified when read
+
+
+def test_save_that_changes_only_the_updated_stamp_writes_nothing(run_store):
+    st = run_store
+
+    def revision():
+        return checkpoint.read(st.checkpoint_path)["revision"]
+
+    before, stamp = revision(), st.load_state()["updated"]
+    with st.lock():
+        r = runtime.Run.load(st, 5000)
+        r.state["updated"] = "2099-01-01T00:00:00+00:00"
+        r.save()
+    assert revision() == before and r.state["updated"] == stamp
+    assert st.load_state()["updated"] == stamp
+    with st.lock():
+        r = runtime.Run.load(st, 5000)
+        r.state["marker"] = 1
+        r.save()
+    assert revision() == before + 1
+    assert st.load_state()["updated"] == r.state["updated"] != "2099-01-01T00:00:00+00:00"
+    with st.lock():
+        r = runtime.Run.load(st, 5000)
+        r.events.append({"event": "noted"})
+        r.save()
+    assert revision() == before + 2 and st.journal()[-1]["event"] == "noted"

@@ -216,8 +216,9 @@ class Run:
         self.state["active"] = sorted(
             iid for iid, inst in self.state["inst"].items() if inst.get("await")
         )
-        self.state["updated"] = store_mod.utcnow()
-        self.store.commit(self.state, self.events)
+        # "updated" moves only with a change: a pass of the clock that changes
+        # nothing writes no new checkpoint revision.
+        self.store.commit(self.state, self.events, touch="updated")
         self.events = []
         for link in self.nested_aborts:
             _abort_nested(link)
