@@ -32228,6 +32228,51 @@ function captureCflow2View(box) {
   };
 }
 
+function cflow2RecurText(chart) {
+  if (!chart || !chart.meta) return "unconfirmed";
+  const recur = chart.meta.recur;
+  if (!recur) return "none";
+  const mode = recur.auto ? "automatic" : "manual";
+  return mode + (recur.min_gap != null ? ` · min_gap ${recur.min_gap}s` : " · min_gap unconfirmed");
+}
+
+function cflow2RunHistory(history) {
+  const section = cf2Section("Run history");
+  section.classList.add("cf2-run-history");
+  const rows = (history || {}).runs || [];
+  section.appendChild(el("p", "wf-note",
+    "Each run ID is a separate run. Loop iterations and forced moves within the same run keep its ID."));
+  if (!rows.length) section.appendChild(el("p", "wf-note", "Run history unconfirmed — no saved records available."));
+  const previous = el("details", "cf2-history-previous");
+  previous.dataset.cf2Key = "run-history-previous";
+  previous.appendChild(el("summary", null, `Previous runs · ${rows.filter(r => !r.current).length}`));
+  for (const run of rows) {
+    const card = el("div", "cf2-card");
+    card.appendChild(el("div", "mono", `${run.current ? "Current" : "Previous"} run ${run.run}`));
+    card.appendChild(el("div", "wf-note",
+      `${run.workflow || "workflow unconfirmed"} · round ${run.round == null ? "unconfirmed" : run.round} · ${run.status || "status unconfirmed"}`));
+    card.appendChild(el("div", "wf-note",
+      `Started: ${run.started || "unconfirmed"} · Finished: ${run.finished || (run.status === "running" || run.status === "waiting_approval" ? "pending" : "unconfirmed")}`));
+    const t = run.transition || {};
+    const cause = t.event === "round_auto_started" ? "automatic recur (round_auto_started)"
+      : t.event === "started" ? "started · cause unconfirmed"
+      : "unconfirmed";
+    card.appendChild(el("div", "wf-note", `Transition: ${cause} · At: ${t.at || "unconfirmed"}`));
+    card.appendChild(el("div", "wf-note", `previous: ${t.previous || "unconfirmed"} · reloaded: ` +
+      (t.reloaded === true ? "true · definition reloaded" : t.reloaded === false
+        ? "false · saved IR reused after definition load failure" : "unconfirmed")));
+    (run.current ? section : previous).appendChild(card);
+  }
+  if (previous.childNodes.length > 1) section.appendChild(previous);
+  if (history && (history.truncated || history.unavailable)) {
+    section.appendChild(el("p", "wf-note",
+      `Showing up to ${history.limit} recent runs` +
+      (history.truncated ? " · older archives omitted" : "") +
+      (history.unavailable ? ` · ${history.unavailable} saved records unavailable` : "")));
+  }
+  return section;
+}
+
 function renderCflow2Into(box, data, ui, force = false) {
   ui = ui || {};
   // A hand is in a box on this view (a reason being typed, an outcome being
@@ -32338,6 +32383,8 @@ function renderCflow2Into(box, data, ui, force = false) {
     meta.appendChild(s);
   };
   metaItem("run", run.run || "?", "mono");
+  metaItem("round", run.round == null ? "unconfirmed" : String(run.round));
+  metaItem("recur", cflow2RecurText(data.chart));
   if (run.started) metaItem("started", String(run.started).replace("T", " ").replace("+00:00", "Z"));
   if (run.reason) metaItem("reason", run.reason);
   if (run.outcome !== undefined && run.outcome !== null) metaItem("outcome", String(run.outcome));
@@ -32731,6 +32778,7 @@ function renderCflow2Into(box, data, ui, force = false) {
     main.appendChild(sec);
   }
 
+  main.appendChild(cflow2RunHistory(data.history));
   const events = (data.journal || []).slice().reverse();
   const journal = document.createElement("details");
   journal.className = "cf2-journal";

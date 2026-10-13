@@ -108,6 +108,27 @@ def read(path: Path, *, full: bool = False):
         return result
 
 
+def read_events(path: Path, names: list[str], limit: int) -> list[dict]:
+    """Read a bounded selection without loading receipts or the whole journal."""
+    with connect(path) as conn:
+        conn.execute("BEGIN")
+        _version(conn)
+        marks = ",".join("?" for _ in names)
+        rows = conn.execute(
+            "SELECT body,sha FROM (SELECT id,body,sha FROM events ORDER BY id LIMIT 2048) "
+            f"WHERE json_extract(body,'$.event') IN ({marks}) ORDER BY id LIMIT ?",
+            (*names, limit))
+        result = []
+        for body, sha in rows:
+            if not isinstance(body, str) or digest(body) != sha:
+                raise CheckpointError("checkpoint event checksum mismatch")
+            event = json.loads(body)
+            if not isinstance(event, dict):
+                raise CheckpointError("checkpoint event is not an object")
+            result.append(event)
+        return result
+
+
 def commit(path: Path, state: str, chart: str, events: list, *, legacy: list,
            receipts: dict):
     """Commit the complete state and its events together, before publishing JSON.
