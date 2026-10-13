@@ -1184,7 +1184,7 @@ def test_web_page_draws_an_idle_session_as_none_rather_than_its_last_number():
     static = Path(metering.__file__).with_name("web") / "static"
     js = (static / "app.js").read_text(encoding="utf-8")
     css = (static / "style.css").read_text(encoding="utf-8")
-    assert 'if (t.idle) return "tps none";' in js  # the one-line glance
+    assert 'if (t.idle) return "idle";' in js  # the one-line glance
     assert 'if (t && t.idle) return " stale idle";' in js  # and its class
     assert "!t.idle && t.counted && Number.isFinite(t.tps)" in js  # the PTY overlay's big number
     assert "no call in the last ${fmtAge(t.max_age_s)}" in js  # the tooltip says why
@@ -1193,3 +1193,231 @@ def test_web_page_draws_an_idle_session_as_none_rather_than_its_last_number():
     assert ".sess-brief-tps.idle" in css and ".badge.tps.idle" in css
     assert "#session-list .rail-tps-line.idle .rail-tps" in css
     assert "#term-tps-overlay.idle" in css
+
+
+# --------------------------------------------------------------------------- #
+# live view: calls in flight (claunch-2fut4)
+# --------------------------------------------------------------------------- #
+def _delta(text):
+    return _sse([{"type": "content_block_delta", "index": 0,
+                  "delta": {"type": "text_delta", "text": text}}])
+
+
+class _Clock:
+    def __init__(self, t=1000.0):
+        self.t = t
+
+    def __call__(self):
+        return self.t
+
+
+def _streaming_meter(session="s1"):
+    m = metering.Meter(session=session, path="/v1/messages")
+    m.headers(200, _Headers({"content-type": "text/event-stream"}))
+    return m
+
+
+def test_a_call_in_flight_reads_waiting_until_content_arrives(home):
+    clock = _Clock()
+    board = metering.LiveBoard("fp", clock=clock)
+    m = _streaming_meter()
+    board.begin(m)
+    board.flush()
+    clock.t += 1.5
+    board.flush()
+    live = metering.live_summary("s1", now=clock.t)
+    assert live["state"] == "waiting" and live["inflight"] == 1
+    assert live["since_s"] == 1.5 and live["rate"] == 0.0
+
+
+def test_streamed_characters_become_a_short_window_rate_and_a_series(home):
+    clock = _Clock()
+    board = metering.LiveBoard("fp", clock=clock)
+    m = _streaming_meter()
+    board.begin(m)
+    for _ in range(8):  # 40 chars every 0.25s: 160 chars/s, 40 tok/s at 0.25
+        clock.t += 0.25
+        m.chunk(_delta("x" * 40))
+        board.flush()
+    live = metering.live_summary("s1", now=clock.t)
+    assert live["state"] == "streaming" and live["estimated"] is True
+    assert live["rate"] == 40.0
+    assert len(live["series"]) == int(metering.LIVE_SPAN_S / metering.LIVE_BIN_S)
+    assert live["series"][-3:-1] == [40.0, 40.0]  # full bins, tokens/s
+
+
+def test_nothing_in_flight_is_idle_and_the_rate_drains_with_the_window(home):
+    clock = _Clock()
+    board = metering.LiveBoard("fp", clock=clock)
+    m = _streaming_meter()
+    board.begin(m)
+    clock.t += 0.25
+    m.chunk(_delta("x" * 400))
+    board.end(m, {"output_tokens": 100})
+    board.flush()
+    live = metering.live_summary("s1", now=clock.t)
+    assert live["state"] == "idle" and live["inflight"] == 0
+    later = metering.live_summary("s1", now=clock.t + metering.LIVE_RATE_WINDOW_S + 1)
+    assert later["state"] == "idle" and later["rate"] == 0.0
+    board.flush()  # one write after the last change, then the board forgets it
+    assert not board.active()
+
+
+def test_a_finished_call_calibrates_the_tokens_per_character(home):
+    board = metering.LiveBoard("fp", clock=_Clock())
+    m = _streaming_meter()
+    board.begin(m)
+    m.chunk(_delta("x" * 1000))
+    board.end(m, {"output_tokens": 500})  # 0.5 tok/char measured
+    assert board._ratio["s1"] == (metering.LIVE_TOKENS_PER_CHAR + 0.5) / 2
+    tiny = _streaming_meter()
+    board.begin(tiny)
+    tiny.chunk(_delta("x" * 10))
+    board.end(tiny, {"output_tokens": 50})  # too few characters to learn from
+    assert board._ratio["s1"] == (metering.LIVE_TOKENS_PER_CHAR + 0.5) / 2
+
+
+def test_a_live_file_whose_shim_stopped_writing_is_not_in_flight(home):
+    clock = _Clock()
+    board = metering.LiveBoard("fp", clock=clock)
+    board.begin(_streaming_meter())
+    board.flush()
+    live = metering.live_summary("s1", now=clock.t + metering.LIVE_STALE_S + 0.5)
+    assert live["state"] == "idle" and live["inflight"] == 0
+
+
+def test_ending_a_call_twice_or_one_that_never_began_is_harmless(home):
+    board = metering.LiveBoard("fp", clock=_Clock())
+    m = _streaming_meter()
+    board.end(m)
+    board.begin(m)
+    board.end(m)
+    board.end(m)
+    board.flush()
+    assert metering.live_summary("s1")["inflight"] == 0
+
+
+def test_two_shims_serving_one_session_add_up(home):
+    clock = _Clock()
+    a, b = metering.LiveBoard("fpa", clock=clock), metering.LiveBoard("fpb", clock=clock)
+    ma, mb = _streaming_meter(), _streaming_meter()
+    a.begin(ma)
+    b.begin(mb)
+    clock.t += 0.25
+    ma.chunk(_delta("x" * 40))
+    mb.chunk(_delta("x" * 40))
+    a.flush()
+    b.flush()
+    live = metering.live_summary("s1", now=clock.t)
+    assert live["inflight"] == 2 and live["rate"] == 10.0
+
+
+def test_openai_chunks_count_content_reasoning_and_tool_arguments():
+    m = metering.Meter(session="s1", path="/chat/completions")
+    m.headers(200, _Headers({"content-type": "text/event-stream"}))
+    m.chunk(_openai_sse([
+        _oa(choices=[{"index": 0, "delta": {"reasoning_content": "abc"}}]),
+        _oa(choices=[{"index": 0, "delta": {"content": "hello"}}]),
+        _oa(choices=[{"index": 0, "delta": {"tool_calls": [
+            {"index": 0, "function": {"arguments": "{\"a\":1}"}}]}}]),
+    ]))
+    assert m.out_chars == 3 + 5 + 7
+
+
+def test_a_session_without_a_live_file_has_no_live_view(home):
+    assert metering.live_summary("nobody") is None
+    info = {"name": "nobody"}
+    metering.attach(info, live=metering.live_index())
+    assert "tps" not in info
+
+
+def test_attach_carries_live_without_the_series_even_before_the_first_record(home):
+    board = metering.LiveBoard("fp")
+    board.begin(_streaming_meter("s9"))
+    board.flush()
+    info = {"name": "s9"}
+    metering.attach(info, live=metering.live_index())
+    assert info["tps"] == {"live": info["tps"]["live"]}
+    assert info["tps"]["live"]["state"] == "waiting" and "series" not in info["tps"]["live"]
+    metering.append("fp", _rec(session="s9", tps_total=33.0))
+    info = {"name": "s9"}
+    metering.attach(info, live=metering.live_index())
+    assert info["tps"]["tps"] == 33.0 and info["tps"]["live"]["inflight"] == 1
+
+
+def test_metering_live_api_answers_one_session(home, tmp_path):
+    import asyncio
+
+    from claude_launcher.daemon.api import build_app
+    from claude_launcher.daemon.manager import SessionManager
+    from claude_launcher.daemon.mesh import MeshManager
+
+    board = metering.LiveBoard("fp")
+    m = _streaming_meter("s1")
+    board.begin(m)
+    m.chunk(_delta("x" * 80))
+    board.flush()
+    bearer = {"Authorization": "Bearer sekrit"}
+
+    async def run():
+        from aiohttp.test_utils import TestClient, TestServer
+
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        client = TestClient(TestServer(build_app(
+            mgr, "sekrit", started_at=time.monotonic(), mesh=MeshManager(mgr)
+        )))
+        await client.start_server()
+        try:
+            one = await client.get("/api/metering/live?session=s1", headers=bearer)
+            assert one.status == 200
+            body = await one.json()
+            assert body["session"] == "s1" and body["live"]["state"] == "streaming"
+            assert body["live"]["rate"] > 0 and len(body["live"]["series"]) == 60
+            none = await client.get("/api/metering/live?session=other", headers=bearer)
+            assert (await none.json())["live"] is None
+            bad = await client.get("/api/metering/live", headers=bearer)
+            assert bad.status == 400
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.slow_shim
+def test_a_metering_shim_writes_the_live_file_and_ends_the_call(home, upstream, shims):
+    base = routing.ensure_shim(upstream.url, {})
+    fp = routing.fingerprint(upstream.url, {})
+    req = urllib.request.Request(
+        base + "v1/messages",
+        data=json.dumps({"model": "m", "stream": True}).encode(),
+        headers={"content-type": "application/json", "X-Claunch-Session": "s79"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        resp.read()
+    _wait_for_record(fp)
+    deadline = time.monotonic() + 10
+    live = None
+    while time.monotonic() < deadline:
+        live = metering.live_summary("s79")
+        if live and live["inflight"] == 0:
+            break
+        time.sleep(0.05)
+    assert live is not None and live["state"] == "idle"
+    assert metering.live_file(fp, "s79").exists()
+
+
+def test_web_page_draws_the_live_view_over_the_pty():
+    from pathlib import Path
+
+    static = Path(metering.__file__).with_name("web") / "static"
+    js = (static / "app.js").read_text(encoding="utf-8")
+    css = (static / "style.css").read_text(encoding="utf-8")
+    for fn in ("tpsLiveText", "pollTermLive", "tpsSparkline", "termTpsReading"):
+        assert f"function {fn}(" in js
+    assert "/api/metering/live?session=" in js
+    assert "const TPS_LIVE_POLL_MS = 500;" in js
+    assert 'if (l.state === "idle") return "idle";' in js
+    assert 'if (t && t.live) return t.live.state === "idle" ? " stale idle" : " live";' in js
+    assert "#term-tps-overlay.live" in css and ".term-tps-chart polyline" in css

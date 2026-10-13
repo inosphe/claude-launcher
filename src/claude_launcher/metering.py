@@ -204,6 +204,10 @@ class Meter:
     _buffer: bytearray = field(default_factory=bytearray)
     _overflow: bool = False
     _chunk_content: bool = False
+    #: Characters of generated content seen so far (text, thinking, tool-call
+    #: arguments). Only the live view reads it: it is what the rate of a call
+    #: still in flight is estimated from, the usage block arriving at the end.
+    out_chars: int = 0
 
     def headers(self, status: int, headers) -> None:
         """Called once the upstream answered (before any body byte)."""
@@ -290,6 +294,9 @@ class Meter:
                 self.first_token = now
             self.streamed = True
             self._chunk_content = True
+            delta = doc.get("delta")
+            if isinstance(delta, dict):
+                self.out_chars += _delta_chars(delta, ("text", "thinking", "partial_json"))
         elif kind == "message_delta":
             usage = doc.get("usage")
             if isinstance(usage, dict):
@@ -303,11 +310,13 @@ class Meter:
             # still arriving, which ``_feed_read`` reads off ``_chunk_content``.
             if self._chunk_carries_content(doc):
                 self._chunk_content = True
+                self.out_chars += self._chunk_chars(doc)
             return
         if self._chunk_carries_content(doc):
             self.first_token = now
             self.streamed = True
             self._chunk_content = True
+            self.out_chars += self._chunk_chars(doc)
 
     @staticmethod
     def _chunk_carries_content(doc: dict) -> bool:
@@ -321,6 +330,22 @@ class Meter:
             ):
                 return True
         return False
+
+    @staticmethod
+    def _chunk_chars(doc: dict) -> int:
+        n = 0
+        choices = doc.get("choices")
+        for choice in choices if isinstance(choices, list) else []:
+            delta = choice.get("delta") if isinstance(choice, dict) else None
+            if not isinstance(delta, dict):
+                continue
+            n += _delta_chars(delta, ("content", "reasoning_content"))
+            calls = delta.get("tool_calls")
+            for call in calls if isinstance(calls, list) else []:
+                fn = call.get("function") if isinstance(call, dict) else None
+                if isinstance(fn, dict):
+                    n += _delta_chars(fn, ("arguments",))
+        return n
 
     # -- JSON --------------------------------------------------------------- #
     def _take_message(self, message: dict) -> None:
@@ -413,6 +438,10 @@ class Meter:
             "tps_total": tps_total,
             "counted": out_tokens is not None,
         }
+
+
+def _delta_chars(delta: dict, keys) -> int:
+    return sum(len(v) for v in (delta.get(k) for k in keys) if isinstance(v, str))
 
 
 def _ms(later: Optional[float], earlier: float) -> Optional[int]:
@@ -866,6 +895,7 @@ def attach(
     info: dict,
     index: Optional[Dict[str, List[dict]]] = None,
     max_age: Optional[float] = None,
+    live: Optional[Dict[str, List[dict]]] = None,
 ) -> dict:
     """``info`` (a session record) with a ``tps`` key when there is one to give.
 
@@ -882,10 +912,330 @@ def attach(
     ``index``: a :func:`snapshot` shared by every row of one list build.
     ``max_age``: :func:`summary_max_age`, read once by that build -- each read
     is a copy of the whole config document (claunch-2t37a).
+    ``live``: a :func:`live_index` taken by that build. When the session has a
+    live file, the key carries ``live`` (:func:`live_brief`): whether a call is
+    in flight right now, which the finished-call summary cannot say. A session
+    whose first call is still in flight has ``live`` and nothing else.
     """
     name = info.get("name")
     if name:
         summary = session_summary(str(name), index=index, max_age=max_age)
+        brief = live_brief(str(name), live) if live is not None else None
+        if brief:
+            summary = dict(summary or {})
+            summary["live"] = brief
         if summary:
             info[INFO_KEY] = summary
     return info
+
+
+# --------------------------------------------------------------------------- #
+# live view: the calls still in flight (claunch-2fut4)
+# --------------------------------------------------------------------------- #
+# A record is written when a call ends, so everything above describes calls
+# that are over: a two-minute generation shows nothing for two minutes, and the
+# last number then stands for ``summary_max_age`` seconds after it. The live
+# view is the other half. Each shim keeps, per session, the calls it is
+# forwarding right now and the output they produced in short time bins, and
+# rewrites one small file per session a few times a second while anything is in
+# flight. The daemon reads those files on demand (``live_summary``): a rate over
+# the last couple of seconds, a short series for a chart, and -- when nothing is
+# in flight -- ``idle``, said outright.
+#
+# The output of a call in flight is counted in characters, because the token
+# count arrives only with the usage block at the end. Characters become tokens
+# through a per-session ratio taken from that session's own finished calls
+# (``LIVE_TOKENS_PER_CHAR`` until there is one), so the live number is an
+# estimate and is labelled as one; the record written at the end stays exact.
+
+#: Width of one time bin, in seconds.
+LIVE_BIN_S = 0.5
+
+#: How much history a live file keeps, in seconds (the chart's width).
+LIVE_SPAN_S = 30.0
+
+#: How often the shim rewrites the files of sessions with a call in flight.
+LIVE_FLUSH_S = 0.25
+
+#: A live file not rewritten for this long says nothing about calls in flight:
+#: the shim that wrote it stopped (killed mid-call, or replaced by an older
+#: build). Its bins are still history; its in-flight counts are not believed.
+LIVE_STALE_S = 3.0
+
+#: The window the live rate is taken over, in seconds.
+LIVE_RATE_WINDOW_S = 2.0
+
+#: Tokens per character before a session has a finished call to calibrate on.
+LIVE_TOKENS_PER_CHAR = 0.25
+
+#: A finished call recalibrates the ratio only when it streamed at least this
+#: many characters: a few characters against a token count carries mostly the
+#: count's rounding.
+LIVE_CALIBRATE_MIN_CHARS = 200
+
+
+def live_dir() -> Path:
+    return records_dir() / "live"
+
+
+def _live_key(session: str) -> str:
+    return "".join(c if c.isalnum() or c in "-_." else "_" for c in session)
+
+
+def live_file(fingerprint: str, session: str) -> Path:
+    return live_dir() / f"{_live_key(session)}@{fingerprint}.json"
+
+
+class LiveBoard:
+    """The calls one shim is forwarding now, per session, and their output bins.
+
+    Driven by the shim: :meth:`begin` when a metered request goes out,
+    :meth:`end` when it is over (with the record :meth:`Meter.finish` wrote),
+    and :meth:`flush` on a short timer. Not thread-safe; the shim calls it
+    from its one event loop.
+    """
+
+    def __init__(self, fingerprint: str, *, clock=time.time) -> None:
+        self.fingerprint = fingerprint
+        self._clock = clock
+        self._sessions: Dict[str, dict] = {}
+        self._ratio: Dict[str, float] = {}
+
+    def _state(self, session: str) -> dict:
+        st = self._sessions.get(session)
+        if st is None:
+            st = {"calls": {}, "bins": {}, "dirty": True}
+            self._sessions[session] = st
+        return st
+
+    def begin(self, meter: Meter) -> None:
+        if not meter.session:
+            return
+        st = self._state(meter.session)
+        st["calls"][id(meter)] = {"meter": meter, "seen": 0, "since": self._clock()}
+        st["dirty"] = True
+
+    def _take(self, st: dict, call: dict, ratio: float, now: float) -> None:
+        delta = call["meter"].out_chars - call["seen"]
+        if delta <= 0:
+            return
+        call["seen"] += delta
+        start = round(now - now % LIVE_BIN_S, 3)
+        st["bins"][start] = st["bins"].get(start, 0.0) + delta * ratio
+        st["dirty"] = True
+
+    def end(self, meter: Meter, record: Optional[dict] = None) -> None:
+        """The call is over: count what it streamed last, and recalibrate.
+
+        Safe to call twice or for a call that never began (the shim calls it
+        from a ``finally``).
+        """
+        st = self._sessions.get(meter.session or "")
+        call = st["calls"].pop(id(meter), None) if st else None
+        if call is None:
+            return
+        ratio = self._ratio.get(meter.session, LIVE_TOKENS_PER_CHAR)
+        self._take(st, call, ratio, self._clock())
+        st["dirty"] = True
+        out = (record or {}).get("output_tokens")
+        if isinstance(out, int) and out > 0 and meter.out_chars >= LIVE_CALIBRATE_MIN_CHARS:
+            measured = out / meter.out_chars
+            self._ratio[meter.session] = round((ratio + measured) / 2, 4)
+
+    def active(self) -> bool:
+        return bool(self._sessions)
+
+    def flush(self, now: Optional[float] = None) -> List[Path]:
+        """Rewrite the file of every session that changed or has a call in flight.
+
+        A session with a call in flight is rewritten on every flush even with
+        nothing new: the ``updated`` stamp is the heartbeat that tells the
+        daemon the in-flight count is current (:data:`LIVE_STALE_S`). A session
+        with nothing in flight is written once more after its last change and
+        then forgotten here; its file keeps its bins for the daemon to age.
+        """
+        now = self._clock() if now is None else now
+        written: List[Path] = []
+        for session in list(self._sessions):
+            st = self._sessions[session]
+            ratio = self._ratio.get(session, LIVE_TOKENS_PER_CHAR)
+            for call in st["calls"].values():
+                self._take(st, call, ratio, now)
+            if not st["calls"] and not st["dirty"]:
+                del self._sessions[session]
+                continue
+            floor = now - LIVE_SPAN_S
+            st["bins"] = {t: v for t, v in st["bins"].items() if t >= floor}
+            calls = [c for c in st["calls"].values()]
+            doc = {
+                "session": session,
+                "fingerprint": self.fingerprint,
+                "updated": round(now, 3),
+                "inflight": len(calls),
+                "waiting": sum(1 for c in calls if c["meter"].first_token is None),
+                "since": round(min(c["since"] for c in calls), 3) if calls else None,
+                "model": next((c["meter"].model for c in calls if c["meter"].model), None),
+                "bin_s": LIVE_BIN_S,
+                "bins": [[t, round(v, 2)] for t, v in sorted(st["bins"].items())],
+                "tokens_per_char": ratio,
+            }
+            path = live_file(self.fingerprint, session)
+            if _write_atomic(path, doc):
+                written.append(path)
+                st["dirty"] = False
+        return written
+
+
+def _write_atomic(path: Path, doc: dict) -> bool:
+    """Replace ``path`` with ``doc`` in one rename; never raises.
+
+    A reader holding the old file open on Windows makes the rename fail; the
+    next flush, a quarter of a second later, tries again.
+    """
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(doc), encoding="utf-8")
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return False
+
+
+def _live_docs(session: str) -> List[dict]:
+    out: List[dict] = []
+    try:
+        paths = list(live_dir().glob(f"{_live_key(session)}@*.json"))
+    except OSError:
+        return out
+    for path in paths:
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(doc, dict) and doc.get("session") == session:
+            out.append(doc)
+    return out
+
+
+def live_summary(
+    session: str,
+    *,
+    now: Optional[float] = None,
+    span: float = LIVE_SPAN_S,
+    docs: Optional[List[dict]] = None,
+) -> Optional[dict]:
+    """What the session's backend is doing now, merged across its shims.
+
+    ``None`` when the session has no live file at all (never went through a
+    shim of this build). Otherwise ``state`` is one of:
+
+    * ``idle`` -- no call in flight. ``rate`` is 0 once the window has passed.
+    * ``waiting`` -- a call is in flight and has produced no content yet
+      (``since`` says how long it has been waiting).
+    * ``streaming`` -- content is arriving; ``rate`` is the estimated output
+      tokens per second over the last :data:`LIVE_RATE_WINDOW_S` seconds.
+
+    ``series`` is tokens per second per :data:`LIVE_BIN_S` bin over the last
+    ``span`` seconds, oldest first, ending at the bin that holds ``now``.
+    """
+    docs = _live_docs(session) if docs is None else docs
+    if not docs:
+        return None
+    now = time.time() if now is None else now
+    inflight = waiting = 0
+    since: Optional[float] = None
+    model = None
+    bins: Dict[float, float] = {}
+    for doc in docs:
+        fresh = now - float(doc.get("updated") or 0) <= LIVE_STALE_S
+        if fresh and doc.get("inflight"):
+            inflight += int(doc.get("inflight") or 0)
+            waiting += int(doc.get("waiting") or 0)
+            if doc.get("since") is not None:
+                since = float(doc["since"]) if since is None else min(since, float(doc["since"]))
+            model = model or doc.get("model")
+        for pair in doc.get("bins") or []:
+            try:
+                t, v = float(pair[0]), float(pair[1])
+            except (TypeError, ValueError, IndexError):
+                continue
+            bins[t] = bins.get(t, 0.0) + v
+    n = max(1, int(round(span / LIVE_BIN_S)))
+    last = now - now % LIVE_BIN_S
+    series = []
+    for i in range(n):
+        t = round(last - (n - 1 - i) * LIVE_BIN_S, 3)
+        series.append(round(bins.get(t, 0.0) / LIVE_BIN_S, 1))
+    # The bin holding ``now`` is still filling, so the window ends at ``now``
+    # and starts LIVE_RATE_WINDOW_S before it; the partial bin counts in full.
+    floor = now - LIVE_RATE_WINDOW_S
+    recent_tokens = sum(v for t, v in bins.items() if t + LIVE_BIN_S > floor and t <= now)
+    rate = round(recent_tokens / LIVE_RATE_WINDOW_S, 1)
+    if not inflight:
+        state = "idle"
+    elif waiting >= inflight and not recent_tokens:
+        state = "waiting"
+    else:
+        state = "streaming"
+    return {
+        "state": state,
+        "inflight": inflight,
+        "waiting": waiting,
+        "since_s": round(now - since, 1) if since is not None else None,
+        "model": model,
+        "rate": rate,
+        "estimated": True,
+        "window_s": LIVE_RATE_WINDOW_S,
+        "bin_s": LIVE_BIN_S,
+        "series": series,
+    }
+
+
+_live_cache: Dict[str, tuple] = {}
+
+
+def live_index() -> Dict[str, List[dict]]:
+    """Every live file, by session: one listing per session-list build.
+
+    Each file is re-read only when its (mtime, size) moved, the same trade
+    :func:`_tail` makes for the record files.
+    """
+    out: Dict[str, List[dict]] = {}
+    try:
+        paths = list(live_dir().glob("*.json"))
+    except OSError:
+        return out
+    for path in paths:
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        key = (st.st_mtime_ns, st.st_size)
+        with _tail_lock:
+            hit = _live_cache.get(str(path))
+        if hit and hit[0] == key:
+            doc = hit[1]
+        else:
+            try:
+                doc = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            with _tail_lock:
+                _live_cache[str(path)] = (key, doc)
+        if isinstance(doc, dict) and doc.get("session"):
+            out.setdefault(str(doc["session"]), []).append(doc)
+    return out
+
+
+def live_brief(session: str, live: Dict[str, List[dict]], now: Optional[float] = None) -> Optional[dict]:
+    """:func:`live_summary` without the series: what a session row carries."""
+    summary = live_summary(session, now=now, docs=live.get(session) or [])
+    if summary is None:
+        return None
+    summary.pop("series", None)
+    return summary

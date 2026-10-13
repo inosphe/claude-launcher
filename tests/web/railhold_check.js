@@ -274,6 +274,7 @@ new Function(
   + slice("byLineage") + slice("sessionMeshGroup") + slice("profileHarnessLabel")
   + slice("railMetaText") + slice("fmtAge")
   + slice("tpsFmt") + slice("ttftFmt") + slice("tpsLatencyText") + slice("tpsAgeSecs")
+  + slice("tpsSecs") + slice("tpsLiveText")
   + slice("tpsText") + slice("tpsTooltip") + slice("tpsStaleClass") + slice("tpsRailLine")
   + slice("refreshRailSeen")
   + slice("refreshSessions")

@@ -117,6 +117,20 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
         # bytes going past, and a gzip'd answer would be forwarded blind.
         headers.popall("accept-encoding", None)
         headers["accept-encoding"] = "identity"
+    live: "metering.LiveBoard" = request.app["live"]
+    if meter is not None:
+        live.begin(meter)
+    try:
+        return await _forward(request, cfg, body, headers, meter)
+    finally:
+        # Every way out -- an answer, an upstream error, a client that hung up
+        # and cancelled this handler -- ends the call in the live view, or the
+        # session would read as in flight for as long as the shim lives.
+        if meter is not None:
+            live.end(meter)
+
+
+async def _forward(request, cfg, body, headers, meter) -> web.StreamResponse:
     session: aiohttp.ClientSession = request.app["session"]
     try:
         upstream = await session.request(
@@ -166,11 +180,34 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
 def _record(app: web.Application, meter: "metering.Meter") -> None:
     cfg = app["cfg"]
     try:
-        metering.append(
-            cfg["fingerprint"], meter.finish(), upstream=cfg["upstream"]
-        )
+        record = meter.finish()
+        metering.append(cfg["fingerprint"], record, upstream=cfg["upstream"])
+        app["live"].end(meter, record)
     except Exception as exc:  # noqa: BLE001 - a record must never break a request
         print(f"metering record failed: {exc}", file=sys.stderr)
+
+
+async def _live_flusher(app: web.Application):
+    """Rewrite the live files a few times a second while a call is in flight."""
+
+    async def loop() -> None:
+        board: metering.LiveBoard = app["live"]
+        while True:
+            await asyncio.sleep(metering.LIVE_FLUSH_S)
+            if not board.active():
+                continue
+            try:
+                board.flush()
+            except Exception as exc:  # noqa: BLE001 - the live view must never stop the shim
+                print(f"metering live flush failed: {exc}", file=sys.stderr)
+
+    task = asyncio.get_running_loop().create_task(loop())
+    yield
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
 
 
 async def _health(request: web.Request) -> web.Response:
@@ -224,7 +261,9 @@ async def _client_session(app: web.Application):
 def build_app(upstream: str, spec: dict, fingerprint: str) -> web.Application:
     app = web.Application(client_max_size=1024 * 1024 * 256)
     app["cfg"] = {"upstream": upstream, "spec": spec, "fingerprint": fingerprint}
+    app["live"] = metering.LiveBoard(fingerprint)
     app.cleanup_ctx.append(_client_session)
+    app.cleanup_ctx.append(_live_flusher)
     app.router.add_get(routing.HEALTH_PATH, _health)
     app.router.add_post(routing.SHUTDOWN_PATH, _shutdown)
     app.router.add_route("*", "/{tail:.*}", _proxy)

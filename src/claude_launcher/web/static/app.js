@@ -4337,7 +4337,10 @@ async function refreshSessions(options) {
     key === "last_visited_at" || key === "last_input_at" ||
     key === "last_activity_at" || key === "last_output_at" ||
     key === "viewers" || key === "moved_rows" || key === "tool_calls" ||
-    key === "age_s"
+    key === "age_s" ||
+    // The live reading (tps.live) moves on every answer while a call is in
+    // flight; the tps line below is swapped in place for it.
+    (key === "live" && value && typeof value === "object" && "bin_s" in value)
   ) ? undefined : value;
   const signature = JSON.stringify(
     // The project is outside the old tuple so the tuple keeps its shape;
@@ -6613,7 +6616,7 @@ function ctxRailLine(s) {
    Three states, not two. A session that went quiet comes back with `idle`
    set and no rate: the daemon's window is bounded in time (`max_age_s`
    seconds, 10 minutes by default), and past that the last call describes
-   nothing about now. That row shows "none" and how long ago the last call
+   nothing about now. That row shows "idle" and how long ago the last call
    was -- which is a different thing from a session that was never measured,
    and is drawn differently on purpose.
 
@@ -6623,7 +6626,19 @@ function ctxRailLine(s) {
    answer watched arriving a piece at a time, and an upstream that generates
    ahead and then flushes would report the flush as if it were the
    generation. `claunch tps` prints the backend's speed beside this one, over
-   the calls that can carry it. */
+   the calls that can carry it.
+
+   Live (claunch-2fut4). A record is written when a call ends, so the three
+   states above describe calls that are over -- a long generation showed
+   nothing until it finished, and its number then stood for ten minutes. The
+   shim also keeps the calls it is forwarding right now (metering.LiveBoard)
+   and the daemon hangs that on the row as `tps.live`: `state` is `idle` (no
+   call in flight), `waiting` (in flight, no content yet, `since_s`) or
+   `streaming` (`rate`: estimated output tokens/s over the last two seconds).
+   Where it is present it is what the glance shows; the finished-call numbers
+   move to the tooltip. The attached terminal does not wait for the list
+   poll: it asks /api/metering/live twice a second while it is on screen and
+   draws the last thirty seconds as a line. */
 function tpsFmt(v) {
   if (!Number.isFinite(v)) return "?";
   return v >= 100 ? String(Math.round(v)) : v.toFixed(1);
@@ -6651,12 +6666,14 @@ function tpsLatencyText(t) {
 /* The one-line glance: "38.1 tok/s · ttft 0.7s". A last call that was not
    counted (an error answer, a compressed body) shows its status instead of
    a number, so the row still says that the session called out. An idle
-   session shows "none": it has been quiet past the measuring window, so
+   session shows "idle": it has been quiet past the measuring window, so
    there is no current rate to give and the last one would be a stale
    number wearing the same font as a live one. */
 function tpsText(t) {
   if (!t) return "";
-  if (t.idle) return "tps none";
+  const live = typeof tpsLiveText === "function" ? tpsLiveText(t.live) : "";
+  if (live) return live;
+  if (t.idle) return "idle";
   if (!t.counted || !Number.isFinite(t.tps)) {
     return t.status && t.status !== 200 ? `HTTP ${t.status}` : "tps ?";
   }
@@ -6664,16 +6681,43 @@ function tpsText(t) {
   return `${tpsFmt(t.tps)} tok/s` + (lat ? ` · ${lat}` : "");
 }
 
+/* The live glance: "≈42 tok/s" while content arrives, "waiting 3.2s" while
+   a call is out with nothing back yet, "idle" when nothing is in flight. The
+   rate is estimated from the characters streamed so far (the token count
+   comes with the end of the call), hence the "≈". */
+function tpsLiveText(l) {
+  if (!l) return "";
+  if (l.state === "streaming") return `≈${tpsFmt(l.rate)} tok/s`;
+  if (l.state === "waiting") {
+    return Number.isFinite(l.since_s) ? `waiting ${tpsSecs(l.since_s)}` : "waiting";
+  }
+  if (l.state === "idle") return "idle";
+  return "";
+}
+
+function tpsSecs(v) {
+  return v < 10 ? `${v.toFixed(1)}s` : `${Math.round(v)}s`;
+}
+
 /* The story behind the number, for the tooltip. */
 function tpsTooltip(t) {
   if (!t) return "";
   const lines = [];
+  const l = t.live;
+  if (l) {
+    lines.push(l.state === "idle" ? "idle: no call in flight"
+      : l.state === "waiting" ? `waiting for the first token (${l.inflight} call${l.inflight === 1 ? "" : "s"} in flight)`
+      : `streaming: ≈${tpsFmt(l.rate)} tokens/s over the last ${l.window_s}s` +
+        ` (${l.inflight} call${l.inflight === 1 ? "" : "s"} in flight; estimated from the characters streamed)`);
+  }
   const age = tpsAgeSecs(t);
-  lines.push(`last call${age !== null ? " " + fmtAge(age) + " ago" : ""}` +
-             (t.model ? ` on ${t.model}` : "") + (t.status ? ` (HTTP ${t.status})` : ""));
+  if (t.ts) {
+    lines.push(`last call${age !== null ? " " + fmtAge(age) + " ago" : ""}` +
+               (t.model ? ` on ${t.model}` : "") + (t.status ? ` (HTTP ${t.status})` : ""));
+  }
   if (t.idle) {
     lines.push(`no call in the last ${fmtAge(t.max_age_s)} -- nothing to measure,` +
-               " so this row shows none rather than the last number");
+               " so this row shows idle rather than the last number");
   }
   if (t.counted && Number.isFinite(t.tps)) {
     lines.push(`${tpsFmt(t.tps)} tokens/s over the whole call` +
@@ -6706,6 +6750,7 @@ function tpsTooltip(t) {
    this branch is reached by a payload from a daemon that has not been
    restarted since -- where dimming at the old threshold is still right. */
 function tpsStaleClass(t) {
+  if (t && t.live) return t.live.state === "idle" ? " stale idle" : " live";
   if (t && t.idle) return " stale idle";
   const age = tpsAgeSecs(t);
   const bound = t && Number.isFinite(t.max_age_s) ? t.max_age_s : 600;
@@ -6741,11 +6786,84 @@ function tpsChip(name) {
    no record, and the overlay is only drawn while the terminal is on screen.
    Guarded element by element: embedded consumers boot this file against a
    partial DOM. */
+/* The attached terminal's own fast read of the live view, kept apart from
+   the list row so a 5-second list poll cannot overwrite a newer answer. */
+const TPS_LIVE_POLL_MS = 500;
+const TPS_LIVE_FRESH_MS = 3000;
+let tpsLiveTimer = null;
+let tpsLiveBusy = false;
+let tpsLiveGone = false;
+let termLive = null;
+
+function termTpsReading(s) {
+  const t = s && s.tps;
+  const fresh = termLive && s && termLive.name === s.name &&
+    Date.now() - termLive.at < TPS_LIVE_FRESH_MS ? termLive.live : null;
+  if (!fresh) return t || null;
+  return { ...(t || {}), live: fresh };
+}
+
+/* Asks only while it is worth asking: a metered session (its row carries
+   `tps`), its terminal on screen, the tab visible. A daemon without the
+   endpoint answers 404 once and is not asked again until a reload. */
+async function pollTermLive() {
+  if (tpsLiveBusy || tpsLiveGone || !currentName) return;
+  if (typeof document !== "undefined" && document.hidden === true) return;
+  if (!terminalOnScreen()) return;
+  const s = sessionsCache.find((x) => x.name === currentName);
+  if (!s || !s.tps) return;
+  const name = currentName;
+  tpsLiveBusy = true;
+  try {
+    const resp = await api(`/api/metering/live?session=${encodeURIComponent(name)}`);
+    if (resp.status === 404) { tpsLiveGone = true; return; }
+    if (!resp.ok) return;
+    const body = await resp.json();
+    termLive = { name, live: body.live || null, at: Date.now() };
+    if (name === currentName) renderTermTps();
+  } catch (_) {
+    /* the next tick asks again */
+  } finally {
+    tpsLiveBusy = false;
+  }
+}
+
+/* The last thirty seconds as a line: tokens/s per half-second bin, scaled
+   to its own peak (at least 1, so a flat zero sits on the floor). */
+function tpsSparkline(series) {
+  const NS = "http://www.w3.org/2000/svg";
+  const w = 120, h = 22;
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("class", "term-tps-chart");
+  svg.setAttribute("width", String(w));
+  svg.setAttribute("height", String(h));
+  svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+  const vals = Array.isArray(series) ? series : [];
+  if (vals.length > 1) {
+    const peak = Math.max(1, ...vals);
+    const pts = vals.map((v, i) =>
+      `${((i / (vals.length - 1)) * w).toFixed(1)},${(h - 1 - (v / peak) * (h - 2)).toFixed(1)}`);
+    const line = document.createElementNS(NS, "polyline");
+    line.setAttribute("points", pts.join(" "));
+    svg.appendChild(line);
+  }
+  return svg;
+}
+
+/* Started by the first paint that has an overlay to feed; each tick decides
+   for itself whether there is anything to ask (pollTermLive). */
+function ensureTermLivePoll() {
+  if (!tpsLiveTimer) tpsLiveTimer = setInterval(pollTermLive, TPS_LIVE_POLL_MS);
+}
+
 function renderTermTps() {
   const badge = $("term-tps");
   const overlay = $("term-tps-overlay");
   const s = currentName ? sessionsCache.find((x) => x.name === currentName) : null;
-  const t = s && s.tps;
+  // Guarded like the callers of this function: the node harnesses slice it
+  // without the live-view half.
+  const t = typeof termTpsReading === "function" ? termTpsReading(s) : (s && s.tps) || null;
+  if (overlay && typeof ensureTermLivePoll === "function") ensureTermLivePoll();
   if (badge) {
     badge.classList.toggle("hidden", !t);
     if (t) {
@@ -6757,7 +6875,21 @@ function renderTermTps() {
   if (overlay) {
     const show = !!t && terminalOnScreen();
     overlay.classList.toggle("hidden", !show);
-    if (show) {
+    if (show && t.live && typeof tpsSparkline === "function") {
+      /* Live: the state big, the line under it, the last finished call small. */
+      const l = t.live;
+      const model = l.model || t.model;
+      overlay.className = "term-tps-overlay" + tpsStaleClass(t);
+      overlay.replaceChildren(
+        el("span", "term-tps-big", tpsLiveText(l)),
+        tpsSparkline(l.series),
+        el("span", "term-tps-small",
+          [model ? modelShort(model) : "",
+           t.counted && Number.isFinite(t.tps) ? `last ${tpsFmt(t.tps)} tok/s` : "",
+           tpsAgeSecs(t) !== null ? fmtAge(tpsAgeSecs(t)) + " ago" : ""]
+            .filter(Boolean).join(" · "))
+      );
+    } else if (show) {
       overlay.className = "term-tps-overlay" + tpsStaleClass(t);
       overlay.replaceChildren(
         el("span", "term-tps-big", !t.idle && t.counted && Number.isFinite(t.tps)
