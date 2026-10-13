@@ -64,6 +64,10 @@
           proxy.type = "button";
           proxy.disabled = source.disabled;
           if (source.hasAttribute("aria-pressed")) proxy.setAttribute("aria-pressed", source.getAttribute("aria-pressed"));
+          // A segment of the lifecycle group (resume | pause | kill |
+          // archive) is a radio: in the menu it is pressed on the state the
+          // session is in, like the view switch's buttons.
+          if (source.getAttribute("role") === "radio") proxy.setAttribute("aria-pressed", source.getAttribute("aria-checked") || "false");
           proxy.addEventListener("click", () => { menu.hidePopover(); source.click(); });
         }
         menu.append(proxy);
@@ -137,14 +141,14 @@
   }
   function watch() {
     observer.observe(header, { subtree: true, childList: true, characterData: true, attributes: true,
-      attributeFilter: ["class", "title", "disabled", "aria-pressed"] });
+      attributeFilter: ["class", "title", "disabled", "aria-pressed", "aria-checked"] });
   }
   function schedule() { if (!frame) frame = requestAnimationFrame(fit); }
   // A tooltip or a pressed state does not change what fits on the line, so
   // those alone re-describe the controls without the measuring pass, which
   // takes the compact and overflow classes off and puts them back.
   const observer = new MutationObserver((records) => {
-    if (records.every(r => r.type === "attributes" && (r.attributeName === "title" || r.attributeName === "aria-pressed"))) {
+    if (records.every(r => r.type === "attributes" && (r.attributeName === "title" || r.attributeName === "aria-pressed" || r.attributeName === "aria-checked"))) {
       if (frame) return;
       observer.disconnect();
       describe();

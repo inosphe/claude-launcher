@@ -1968,6 +1968,28 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 /* at a limit there is nothing left to press, and saying so is kinder than a
    button that swallows the click */
 .term-zoom .term-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* ---- lifecycle ----
+   resume | pause | kill | archive as one radio group (claunch-ndz47): welded
+   like the text-size pill, the segment for the state the session is in lit
+   the way the CLI | HTML switch lights its view. Each segment keeps its own
+   colour (blue resume, red kill); a move the state does not allow is dimmed
+   in place rather than taken off the row, so the group does not change width
+   as the session changes state. */
+.term-life { display: flex; align-items: center; }
+.term-life .term-btn { position: relative; border-radius: 0; }
+.term-life .term-btn + .term-btn { margin-left: -1px; }
+.term-life .term-btn:first-child { border-radius: 5px 0 0 5px; }
+.term-life .term-btn:last-child { border-radius: 0 5px 5px 0; }
+.term-life .term-btn:hover:not(:disabled) { z-index: 1; }
+.term-life .term-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.term-life .term-btn:disabled:hover { background: none; }
+/* the state the session is in: lit, and at full strength even though there is
+   nothing to press on it (resume while running, archive once filed) */
+#term-life .term-btn[aria-checked="true"] {
+  z-index: 2; opacity: 1; cursor: default;
+  color: #e6edf3; background: #243247; border-color: #385273;
+}
 /* a readout first and a reset second: tabular figures so stepping through the
    sizes doesn't jog the two buttons it sits between */
 #term-zoom-level {
