@@ -466,3 +466,18 @@ def test_git_identity_lookup_runs_off_the_event_loop(repo, tmp_path, monkeypatch
         await Clock(SimpleNamespace(), q).tick()
     asyncio.run(tick())
     assert threads["ensure"] != threads["loop"]
+
+
+def test_runner_path_starts_with_the_interpreters_directory(repo, tmp_path, monkeypatch):
+    monkeypatch.setenv("PATH", "/usr/bin")
+    q = mod.Queue()
+    job, _ = enqueue(q, repo, "a")
+    seen = []
+    async def launch(*args, **kwargs):
+        seen.append(kwargs["env"])
+        return SimpleNamespace(pid=os.getpid(), returncode=None)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", launch)
+    asyncio.run(Clock(SimpleNamespace(), q).tick())
+    first, rest = seen[0]["PATH"].split(os.pathsep, 1)
+    assert first == str(Path(job["python"]).parent)
+    assert rest == "/usr/bin"

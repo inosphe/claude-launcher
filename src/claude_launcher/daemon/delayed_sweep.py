@@ -104,6 +104,10 @@ class Clock:
                      test_window.WINDOW_WORKERS_ENV, test_window.WINDOW_REPORT_ENV):
             env.pop(name, None)
         env["CLAUNCH_SCRATCH"] = str(scratch)
+        # The runner is started by absolute interpreter path, so the suite's
+        # `python` check commands find no interpreter unless its directory
+        # is on PATH (what activating the venv would do).
+        env["PATH"] = str(Path(job["python"]).parent) + os.pathsep + env.get("PATH", "")
         env[config.LAUNCHER_HOME_ENV] = origin["home"]
         env[paths.INSTANCE_BASE_ENV] = origin["base"]
         # The default instance is the absence of the variable: an empty value

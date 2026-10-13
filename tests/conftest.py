@@ -160,6 +160,18 @@ def home(tmp_path, monkeypatch):
     # env-assembly tests would each start one against a made-up upstream.
     # Off by default here — the tests of the feature set it back to "1".
     monkeypatch.setenv("CLAUNCH_METERING", "0")
+    # The delayed-sweep runner (and any session) exports the live daemon's
+    # instance variables. CLAUNCH_INSTANCE_BASE wins over the launcher home in
+    # paths.base_home(), so left set it points every instance path back at the
+    # developer's real ~/.claude-launcher and overrides the home above
+    # (claunch-llmi1: 24 failures in the delayed sweep, none in a shell).
+    for name in ("CLAUNCH_INSTANCE_BASE", "CLAUNCH_INSTANCE", "CLAUNCH_DAEMON"):
+        monkeypatch.delenv(name, raising=False)
+    # Workflow check commands say `python`. A runner that starts pytest by
+    # absolute interpreter path has no `python` on PATH unless the venv's bin
+    # directory is (the runner now adds it; this keeps a bare shell the same).
+    monkeypatch.setenv(
+        "PATH", str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", ""))
     # The basetemp root is C:/t on Windows whatever the launcher home is, and
     # the daemon's reaper deletes ended sessions' trees under it. A test that
     # boots the real daemon over a registry of made-up names would otherwise
