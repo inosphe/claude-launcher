@@ -49,8 +49,9 @@ def test_meta_and_collection():
 def test_async_verification_gates_and_merge_interval_are_declared():
     chart = _chart()
     by_label = {n.label: n for n in chart.nodes.values() if n.label}
-    assert not [n for n in chart.nodes.values() if n.get("restart")]
-    assert "sweep" not in by_label and "reflect" not in by_label
+    assert [n for n in chart.nodes.values() if n.get("restart")]
+    assert "sweep" not in by_label and "reflect" in by_label
+    assert chart.meta["inputs"]["restart_live"]["default"] is True
     opts = {o["name"]: o for o in chart.node("standby").get("options")}
     assert opts["integrate"]["interval"] == 300
     assert "handle-regression" in opts
@@ -61,11 +62,11 @@ def test_async_verification_gates_and_merge_interval_are_declared():
 
 
 class Leader:
-    def __init__(self, tmp_path):
+    def __init__(self, tmp_path, restart_live=False):
         self.cwd = str(tmp_path)
         self.now = T0
         self.st = runtime.start(_chart(), cwd=self.cwd, scope="lead", caps={}, now=T0,
-                                driver="lead")
+                                driver="lead", inputs={} if restart_live is None else {"restart_live": restart_live})
 
     def kw(self):
         return {"cwd": self.cwd, "scope": "lead", "now": self.now}
@@ -75,7 +76,7 @@ class Leader:
         return self.st
 
     def tasks(self):
-        return [t["label"] for t in self.st.get("tasks") or []]
+        return [t["label"].rsplit("/", 1)[-1] for t in self.st.get("tasks") or []]
 
     def report(self, label, outcome="ok", value=None, verify=None):
         iid = next(t["instance"] for t in self.st["tasks"] if t["label"].rsplit("/", 1)[-1] == label)
@@ -118,7 +119,7 @@ def _merged(ld):
         "merge_sha": "b" * 40}], "master": "b" * 40, "repo": "/repo"})
 
 
-def test_round_finishes_without_waiting_for_sweep_or_deployment(tmp_path):
+def test_disabled_restart_finishes_without_waiting_for_sweep_or_deployment(tmp_path):
     ld = Leader(tmp_path)
     _preflight(ld)
     _merged(ld)
@@ -143,6 +144,88 @@ def test_round_finishes_without_waiting_for_sweep_or_deployment(tmp_path):
     ld.now = T0 + 300
     ld.tick()
     assert ld.tasks() == ["integrate-preflight"]
+
+
+@pytest.mark.parametrize("restart_live", [None, True])
+def test_default_and_enabled_restart_deploy_before_notice_without_sweep(tmp_path, restart_live):
+    ld = Leader(tmp_path, restart_live=restart_live)
+    assert ld.st["inputs"]["restart_live"] is True
+    _preflight(ld)
+    _merged(ld)
+    ld.report("checkpoint-check", verify=_allow)
+    assert ld.tasks() == ["reflect"]
+    assert not ld.st.get("delegations")  # no full sweep on the critical path
+    with pytest.raises(runtime.FlowError, match="restart is pending"):
+        ld.report("reflect")
+    ld.restart()
+    ld.report("reflect")
+    assert len(ld.st["waits"]) == 1
+    assert ld.st["waits"][0]["checks"][0]["id"] == "deployed"
+    ld.tick(lambda cmd, cwd: (0, "live commit confirmed"))
+    assert ld.tasks() == ["landed-notice"]
+    ld.report("landed-notice")
+    assert ld.st["status"] == "done" and ld.st["next_round"]["auto"]
+
+
+def test_disabled_restart_hides_pending_reflection_and_persists_in_next_round(tmp_path):
+    ld = Leader(tmp_path, restart_live=False)
+    ld.report("intake")
+    assert "reflect-pending" not in {o["name"] for o in ld.st["choices"][0]["options"]}
+    ld.select("integrate")
+    ld.report("integrate-preflight", "ok", {"batch": [{"issue": "x"}], "repo": "/repo"})
+    ld.report("admission", verify=_allow)
+    _merged(ld)
+    ld.report("checkpoint-check", verify=_allow)
+    assert ld.tasks() == ["landed-notice"]
+    assert runtime.claim_restarts(platform="Linux", boot="b", **ld.kw()) == []
+    ld.report("landed-notice")
+    ld.now += 60
+    next_round = runtime.start_next_round(ld.cwd, "lead", ld.now)
+    assert next_round["round"] == 2
+    assert runtime.status(**ld.kw())["inputs"]["restart_live"] is False
+
+
+def test_paused_repository_can_reflect_existing_merges_without_admitting_new_merges(tmp_path):
+    ld = Leader(tmp_path, restart_live=True)
+    ld.report("intake")
+    ld.select("integrate")
+    ld.report("integrate-preflight", "ok", {"batch": [{"issue": "x"}], "repo": "/repo"})
+    ld.report("admission", "paused", {"reason": "repair requires new daemon code"})
+    ld.select("reflect-pending")
+    assert ld.tasks() == ["reflect"]
+    ld.restart()
+    ld.report("reflect")
+    ld.tick(lambda cmd, cwd: (0, "repair runner code is live"))
+    assert [c["label"] for c in ld.st["choices"]] == ["standby"]
+    assert not [e for e in runtime.journal(cwd=ld.cwd, scope="lead")
+                if e["event"] == "task_reported" and e.get("node") == "integrate"]
+
+
+def test_failed_deployment_retries_then_records_failure_before_notice(tmp_path):
+    ld = Leader(tmp_path, restart_live=True)
+    _preflight(ld)
+    _merged(ld)
+    ld.report("checkpoint-check", verify=_allow)
+    ld.restart(code=1)
+    ld.report("reflect")
+    ld.tick(lambda cmd, cwd: (1, "still serving old code"))
+    ld.now += 601
+    ld.tick(lambda cmd, cwd: (1, "still serving old code"))
+    assert ld.tasks() == ["reflect-pregate"]
+    ld.report("reflect-pregate")
+    ld.select("retry")
+    assert ld.tasks() == ["reflect"]
+    ld.restart()
+    ld.report("reflect")
+    ld.tick(lambda cmd, cwd: (2, "cannot determine live commit"))
+    ld.now += 601
+    ld.tick(lambda cmd, cwd: (2, "cannot determine live commit"))
+    assert ld.tasks() == ["reflect-pregate"]
+    ld.report("reflect-pregate")
+    ld.select("close")
+    assert ld.tasks() == ["reflect-closed"]
+    ld.report("reflect-closed")
+    assert ld.tasks() == ["landed-notice"]
 
 
 def test_missing_checkpoint_holds_the_report_without_running_tests(tmp_path):
