@@ -3265,8 +3265,9 @@ class MeshManager:
         # "Known to have exited or been removed" is `_member_category`'s
         # question, so it is asked in the one place that answers it rather
         # than re-derived from `session.exited` here: that category is
-        # ``running``, ``killed``, ``paused``, ``archived`` or ``missing``,
-        # and the two a briefing keeps are the running ones and ``remote``
+        # ``running``, ``hold``, ``killed``, ``paused``, ``archived`` or
+        # ``missing``, and the three a briefing keeps are the running ones,
+        # the held ones (a message wakes them, claunch-8tvq7) and ``remote``
         # (unknowable, so not called dead). Deriving it twice is how the
         # roster, the filter above it and this briefing would come to
         # disagree about which peers are still around.
@@ -3274,7 +3275,7 @@ class MeshManager:
             handle
             for handle, peer in mesh.members.items()
             if handle != member.handle
-            and self._member_category(mesh, peer) in ("running", "remote")
+            and self._member_category(mesh, peer) in ("running", "remote", "hold")
         }
         reachable = [h for h in mesh.neighbours(member.handle) if h in available]
         others = ", ".join(
@@ -4176,6 +4177,12 @@ class MeshManager:
             member = mesh.members.get(handle)
             if member is None or not self._is_local(mesh, member):
                 continue
+            # A held recipient is asleep, not gone: :meth:`_deliver_to` wakes
+            # it and delivers after the respawn (claunch-8tvq7). Reporting it
+            # here told senders to stop sending to a session that would have
+            # read the message.
+            if self._asleep(member.session):
+                continue
             try:
                 session = self.manager.get(member.session)
             except ManagerError:
@@ -4793,6 +4800,8 @@ class MeshManager:
                 continue
             if not self._is_local(mesh, member):
                 return member
+            if self._asleep(member.session):
+                return member  # held: it comes back holding the role
             try:
                 session = self.manager.get(member.session)
             except ManagerError:
@@ -8790,11 +8799,31 @@ class MeshManager:
             },
         }
 
+    def _asleep(self, name: str) -> bool:
+        """Whether session ``name`` is held or being woken from a hold.
+
+        Either way a message for it is delivered: the delivery pass wakes a
+        held record (:meth:`_deliver_to`), and a waking one is briefly absent
+        from the registry while its respawn runs, which must not read as
+        ``missing``.
+        """
+        if getattr(self.manager, "is_waking", lambda _n: False)(name):
+            return True
+        try:
+            session = self.manager.get(name)
+        except ManagerError:
+            return False
+        return bool(session.exited and getattr(session, "held_at", None))
+
     def _reachability(self, mesh: Mesh, member: Member) -> str:
         if not self._is_local(mesh, member):
             return (
                 "remote-connected" if self.relay_connected() else "remote-disconnected"
             )
+        # Its own word, so readers that treat ``exited`` as gone (the cflow
+        # responder pool, the CLI roster) keep a held member reachable.
+        if self._asleep(member.session):
+            return "held"
         try:
             session = self.manager.get(member.session)
         except ManagerError:
@@ -9031,10 +9060,7 @@ class MeshManager:
             # persisted here: it is an optimisation, and a daemon that reads
             # the older number back simply re-walks once.
             mesh.cursors[member.handle] = len(mesh.messages)
-        if gone and pending and (
-            getattr(session, "held_at", None)
-            or getattr(self.manager, "is_waking", lambda _n: False)(member.session)
-        ):
+        if gone and pending and self._asleep(member.session):
             # A held recipient is not gone, only asleep (claunch-5l35i): wake
             # it, and the pass after the respawn delivers as usual. No
             # stranded report -- nobody is waiting on a closed terminal.

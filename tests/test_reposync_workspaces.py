@@ -239,6 +239,47 @@ def test_sync_agent_a_stages_isolated_child_without_executing_or_pushing(world, 
     _with_app(body)
 
 
+def test_sync_agent_a_held_parent_is_offered_and_woken_before_staging(world, monkeypatch):
+    """A held session is asleep, not gone (claunch-8tvq7): the Sync panel
+    offers it as a parent, and delegating to it wakes it before the child is
+    staged under it. A killed one stays off the list and is refused."""
+    _commit(world["a"], "mine.txt")
+
+    async def body(client):
+        parent, assignments = _agent_parent(client, world, monkeypatch)
+        manager = client.app["manager"]
+        parent.exited, parent.held_at = True, "2026-10-13T00:00:00+00:00"
+        woken = []
+
+        async def wake(name, *, by=""):
+            woken.append((name, by))
+            parent.exited, parent.held_at = False, None
+            return parent
+
+        monkeypatch.setattr(manager, "wake_async", wake)
+        status = await (await client.get("/api/reposync/workspaces/proj/status?peers=0",
+                                        headers=AUTH)).json()
+        rows = {p["name"]: p for p in status["agent_parents"]}
+        assert rows[parent.sdef.name]["held"] is True
+        req = _shown(status["plan"], agent_mode="agent", agent_parent=parent.sdef.name)
+        resp = await client.post("/api/reposync/workspaces/proj/sync", json=req, headers=AUTH)
+        assert resp.status == 202, await resp.json()
+        assert woken == [(parent.sdef.name, "workspace-sync")]
+        assert len(assignments) == 1 and assignments[0][2] == parent.sdef.name
+
+        # Killed: not offered, and naming it anyway is refused.
+        reposync_child = assignments[0][0]
+        reposync_child.exited = True
+        parent.exited, parent.held_at = True, None
+        status = await (await client.get("/api/reposync/workspaces/proj/status?peers=0&fetch=0",
+                                        headers=AUTH)).json()
+        assert parent.sdef.name not in [p["name"] for p in status["agent_parents"]]
+        resp = await client.post("/api/reposync/workspaces/proj/sync", json=req, headers=AUTH)
+        assert resp.status == 400 and "live agent parent" in (await resp.json())["error"]
+
+    _with_app(body)
+
+
 @pytest.mark.parametrize("mode", ["commands", "on_failure"])
 def test_sync_agent_b_real_conflict_only_delegates_when_enabled(world, monkeypatch, mode):
     for repo, content in [(world["a"], "ours\n"), (world["b"], "theirs\n")]:

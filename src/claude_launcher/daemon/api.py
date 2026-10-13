@@ -6251,9 +6251,10 @@ async def h_reposync_ws_status(request: web.Request) -> web.Response:
     agent = reposync_agent.active(request.app["manager"], doc["repo"]) if doc.get("repo") else None
     doc["agent"] = reposync_agent.summary(agent) if agent else None
     doc["agent_parents"] = [
-        {"name": s.sdef.name, "profile": s.sdef.profile}
+        {"name": s.sdef.name, "profile": s.sdef.profile,
+         "held": bool(s.exited and getattr(s, "held_at", None))}
         for s in request.app["manager"].list()
-        if not s.exited and s.sdef.harness != "shell"
+        if _ws_parent_usable(s)
     ]
     return json_response(doc)
 
@@ -6367,9 +6368,18 @@ def _ws_agent_options(request: web.Request, body: dict) -> str:
         if not isinstance(parent, str) or not parent:
             raise ValueError("select a parent session for the sync agent")
         session = request.app["manager"].get(parent)
-        if session.exited or session.sdef.harness == "shell":
+        if not _ws_parent_usable(session):
             raise ValueError("the sync agent needs a live agent parent session")
     return mode
+
+
+def _ws_parent_usable(session) -> bool:
+    """Whether ``session`` may parent a sync agent: an agent session that is
+    live or held. A held one is woken before the child is staged
+    (:func:`_ws_start_agent`, claunch-8tvq7)."""
+    if session.sdef.harness == "shell":
+        return False
+    return not session.exited or bool(getattr(session, "held_at", None))
 
 
 def _ws_active_agent(request: web.Request, card: dict, mode: str):
@@ -6392,6 +6402,9 @@ async def _ws_start_agent(request: web.Request, card: dict, body: dict, *, error
     warnings = []
     child = None
     try:
+        # A held parent comes back first: staging refuses an exited parent,
+        # and the child reports to it over the mesh.
+        await manager.wake_async(parent, by="workspace-sync")
         child = manager.stage_child(parent, assignment, warnings=warnings)
         arranged = await _onboard_and_launch(request, child, assignment, parent=parent)
     except (spawn_mod.SpawnDenied, ManagerError, HarnessError, worktree_mod.WorktreeError,
