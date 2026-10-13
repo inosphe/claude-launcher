@@ -3951,7 +3951,10 @@ async def h_cflow_runs(request: web.Request) -> web.Response:
         scopes = cflow_state.scopes_in(explicit) or [cflow_state.DEFAULT_SCOPE]
         wanted = request.query.get("scope")
         if wanted and not cflow_state.valid_scope(wanted):
-            return json_error(400, f"invalid scope: {wanted!r}")
+            if not _valid_cflow2_scope(wanted):
+                return json_error(400, f"invalid scope: {wanted!r}")
+            # A v2 slot ('s15@main'): it has no v1 run to list.
+            scopes, wanted = [], None
         for scope in [wanted] if wanted else scopes:
             if (explicit, scope) not in keys:
                 keys.append((explicit, scope))
@@ -4222,7 +4225,16 @@ async def h_cflow_run_detail(request: web.Request) -> web.Response:
     cwd = cflow_state.resolve_cwd(raw)
     scope = request.query.get("scope") or cflow_state.DEFAULT_SCOPE
     if not cflow_state.valid_scope(scope):
-        return json_error(400, f"invalid scope: {scope!r}")
+        if not _valid_cflow2_scope(scope):
+            return json_error(400, f"invalid scope: {scope!r}")
+        # A v2 slot name ('s15@main'): no v1 run can live there, so this is
+        # the idle answer below, pointing the view at /api/cflow2/run.
+        return json_response({
+            "cwd": cwd, "scope": scope, "status": "idle",
+            "sessions": _scope_sessions(request.app["manager"], cwd, scope),
+            "pending_start": None,
+            **({"v2": True} if cflow2_web.has_run(cwd, scope) else {}),
+        })
     manager: SessionManager = request.app["manager"]
     sessions = _scope_sessions(manager, cwd, scope)
     payload = cflow_engine.status(cwd, scope=scope)
@@ -4303,11 +4315,21 @@ async def _cflow_action_cwd(request: web.Request):
         return None, json_error(400, f"no such directory: {cwd}")
     # Same reason, one level up: the scope becomes the *next* path component,
     # and every action below writes through it (the lock, the request file,
-    # the run itself).
+    # the run itself). The v2 handlers share this, and a v2 slot is named
+    # '<session>@<daemon>' ('+side', '~delegation'), which the v1 check
+    # refuses: cflow2's own check is the one that knows those names.
     scope = str(body.get("scope") or "") or cflow_state.DEFAULT_SCOPE
-    if not cflow_state.valid_scope(scope):
+    if not (cflow_state.valid_scope(scope) or _valid_cflow2_scope(scope)):
         return None, json_error(400, f"invalid scope: {scope!r}")
     return (str(cwd), scope, body), None
+
+
+def _valid_cflow2_scope(scope: str) -> bool:
+    try:
+        cflow2_store.normalize_scope(scope)
+    except cflow2_store.StoreError:
+        return False
+    return True
 
 
 async def _nudge_sessions(
