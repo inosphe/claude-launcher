@@ -408,3 +408,17 @@ def test_the_plan_is_dropped_once_answered_and_never_drawn_for_a_report(tmp_path
     runtime.request_move("intake", "x", by="s1", outcome="ok", **d.kw())
     assert "plan" not in runtime.status(cwd=d.cwd, scope=d.scope, now=T0,
                                         tick=False)["move_request"]
+
+
+def test_the_terminal_strip_answer_carries_the_plan_in_one_line(tmp_path):
+    from claude_launcher.daemon import cflow2_web
+
+    d = Drv(tmp_path)
+    d.do("intake", "work")
+    runtime.request_move("intake", "redo the intake", by="s1", **d.kw())
+    line = runtime.move_plan_line(_plan(d))
+    assert line == "off the callstack under 'rounds.do'; rewind 1, step in 1"
+    move = cflow2_web.rail_entry(d.cwd, d.scope)["answers"][0]
+    assert move["kind"] == "move" and move["effect"] == line
+    assert f"asks to move the run to intake ({line}): redo the intake" in move["prompt"]
+    assert runtime.move_plan_line({"problems": ["x"]}) == "callstack effect unknown"

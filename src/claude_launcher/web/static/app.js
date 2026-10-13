@@ -16975,7 +16975,8 @@ function termCflow2Answers(r, a) {
         body: { ...slot, decision: "approve", reason: "" },
         ask: (a.report
           ? `Report '${what}' as '${a.outcome}'${skip}, as ${a.by || "the driver"} asked?`
-          : `Move the run to '${what}', as ${a.by || "the driver"} asked?`) +
+          : `Move the run to '${what}', as ${a.by || "the driver"} asked?` +
+            (a.effect ? `\n\nCallstack: ${a.effect}` : "")) +
           (a.reason ? `\n\n${a.reason}` : ""),
       },
       {

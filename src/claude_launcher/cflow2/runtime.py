@@ -4035,6 +4035,23 @@ def move_plan(r: Run, target: str) -> Dict[str, Any]:
     return plan
 
 
+def move_plan_line(plan: Dict[str, Any]) -> str:
+    """:func:`move_plan` in one line, for a surface that has one line (the
+    terminal strip's answer): the relation, the levels unwound and entered,
+    and the frame the move lands under."""
+    if not plan or plan.get("problems"):
+        return "callstack effect unknown"
+    name = lambda f: (f or {}).get("label") or (f or {}).get("node") or "?"  # noqa: E731
+    anchor, target = name(plan.get("anchor")), name(plan.get("target"))
+    head = {
+        "reenter": f"re-enters live {target!r}",
+        "branch": f"off the callstack under {anchor!r}",
+        "unrelated": f"unrelated to the callstack: shares only the root {anchor!r}",
+        "step_in": f"steps in under {anchor!r}",
+    }.get(str(plan.get("relation")), f"moves to {target!r}")
+    return f"{head}; rewind {plan.get('rewind', 0)}, step in {plan.get('step_in', 0)}"
+
+
 def step_out(instance: str, outcome: str = ir.OUTCOME_OK, value: Any = None,
              reason: Optional[str] = None, *, by: str = CALLER_USER,
              expected_run: Optional[str] = None,

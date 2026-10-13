@@ -313,6 +313,18 @@ const RUN = {
         && ctx.actions()[0][1].reason === "finish this first", ctx.actions());
   ctx.reset();
 
+  /* the callstack effect of the move (claunch-1qsz4) rides on the confirm */
+  ctx.setRail({ s16: { ...ROW, gated: true, owed: ["move: round"], answers: [
+    { kind: "move", request: "mr-2", node: "round", label: "round", by: "s16",
+      reason: "a new task came in", effect: "re-enters live 'round'; rewind 2, step in 1",
+      prompt: "s16 asks to move the run to round (re-enters live 'round'; rewind 2, step in 1)" }] } });
+  ctx.renderTermCflow();
+  await buttons(strip)[0].fire("click");
+  check("v2 move: the confirm says what the move does to the callstack",
+        ctx.asked().some((q) => q.includes("Callstack: re-enters live 'round'; rewind 2, step in 1")),
+        ctx.asked());
+  ctx.reset();
+
   /* require_reason constrains agents; a person may select without a reason,
      just as on the run page (docs 2.11). */
   ctx.setRail({ s16: { ...ROW, gated: true, owed: ["choose: x"], answers: [
