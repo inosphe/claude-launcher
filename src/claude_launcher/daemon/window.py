@@ -75,6 +75,31 @@ are dropped on load and whenever the file is appended to. It is an operating
 record for "how long do runs wait and hold, and how often do they fail", not
 an archive; the evidence a round cites stays in its receipts.
 
+One window per machine, not per daemon (claunch-afmzw, 2026-10-13): a named
+instance (``CLAUNCH_DAEMON=kimyori``) is a second daemon process on the same
+machine, and while each instance kept its own ``window.json`` the two worker
+budgets of 12 were spent side by side without either seeing the other. So
+every instance under one base home (:func:`paths.base_home`) reads and writes
+one state file -- the default instance's ``<base home>/daemon/window.json`` --
+and every operation reloads it under an OS file lock (``window.lock``) before
+deciding anything. The arbiter is still "one decision at a time"; the lock is
+what makes that true across processes. What only the owning daemon can judge
+stays with it: each entry names its ``instance``, a session's liveness is
+judged by the instance that runs it, a foreign *waiter* is dropped when the
+daemon process holding its long-poll (``daemon_pid``) is gone, and a foreign
+*bound* holder is reaped by its pid as before (same machine, same pid space).
+``window_scope: instance`` in the daemon config restores the per-instance file.
+
+The worker budget adapts (claunch-afmzw): measured on 2026-10-1x, a run whose
+lifetime overlapped 0-3 other workers failed 19% of the time and one that
+overlapped 16-19 failed 68%. A run that reports test failures classified as
+timeouts (``result.timeouts``, counted by ``test_window.pytest_result``) halves
+the effective budget, down to ``window_adaptive_floor``; each passed run adds
+one back until the configured budget is reached again (AIMD, as in TCP
+congestion control). Like TCP's one decrease per window, a run granted before
+the last decrease does not decrease it again -- it ran under the old load.
+``window_adaptive: 0`` turns this off.
+
 What is deliberately NOT here:
 
 * a wall-clock TTL. The repository has already paid for that confusion once
@@ -104,6 +129,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
 import logging
 import os
@@ -138,7 +164,19 @@ DEFAULT_LIMITS = {
     "targeted_width": 4,
     "worker_budget": 12,
     "targeted_per_session": 1,
+    # AIMD on the worker budget (claunch-afmzw): 1 = on, 0 = off; the floor
+    # is the lowest budget a run of timeouts can drive it to.
+    "adaptive": 1,
+    "adaptive_floor": 4,
 }
+
+#: How often a queued request re-reads the shared state: a grant made by
+#: another daemon process (or a release there) sets no event in this one.
+SHARED_POLL = 1.0
+#: How long an operation waits for the cross-process state lock before it
+#: proceeds on its own view (logged). Operations hold the lock for one
+#: read-modify-write of a small JSON file, so this is a stuck peer, not load.
+LOCK_WAIT = 10.0
 
 #: Server-side ceiling on an acquire's wait.  A client may choose a shorter
 #: wait at assignment time, but no request may keep a daemon connection open
@@ -181,6 +219,8 @@ RESULT_FIELDS = {
     "skipped": int,
     "collected": int,
     "duration": float,
+    # Failed/errored tests whose report reads as a timeout (claunch-afmzw).
+    "timeouts": int,
 }
 OUTCOMES = ("passed", "failed", "error", "interrupted", "no_tests")
 
@@ -273,6 +313,55 @@ def pid_alive(pid: int) -> bool:
         return False
 
 
+def default_state_path() -> Path:
+    """Where this daemon's window lives: the machine's file under the base
+    home, unless the config keeps the window per instance."""
+    scope = str(store.daemon_config().get("window_scope") or "machine").strip().lower()
+    if scope == "instance":
+        return paths.daemon_dir() / "window.json"
+    return paths.base_home() / "daemon" / "window.json"
+
+
+def _try_flock(handle) -> bool:
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError:
+        return False
+
+
+def _unflock(handle) -> None:
+    with contextlib.suppress(OSError):
+        if sys.platform == "win32":
+            import msvcrt
+
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _shared(method):
+    """Run a public method on the machine's current state, under its lock."""
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._locked():
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 class WindowManager:
     """Holds and grants the measurement window; persists it across restarts.
 
@@ -295,6 +384,7 @@ class WindowManager:
         limits: Optional[Callable[[], dict]] = None,
         state_path: Optional[Path] = None,
         cores: Optional[int] = None,
+        instance: Optional[str] = None,
     ) -> None:
         self._manager = manager
         self._caps = caps or self._caps_from_config
@@ -307,17 +397,87 @@ class WindowManager:
             self._limits = lambda: dict(DEFAULT_LIMITS)
         else:
             self._limits = self._limits_from_config
-        self._state_path = state_path or (paths.daemon_dir() / "window.json")
+        self._state_path = state_path or default_state_path()
         self._cores = cores or (os.cpu_count() or 4)
         self._holders: List[dict] = []
         self._queue: List[dict] = []
+        # The AIMD budget (None = the configured budget) and when it last
+        # went down; shared through the state file like the holders.
+        self._adaptive: dict = {"budget": None, "decreased_at": None, "reason": ""}
         self._granted_events: Dict[str, asyncio.Event] = {}
         self._history_path = self._state_path.parent / "window-history.jsonl"
         self._history: List[dict] = []
         self._history_pruned_at = 0.0
-        self._load()
-        self._load_history()
-        self._drop_restored_queue()
+        self._history_sig: Optional[Tuple[int, int]] = None
+        # Which daemon this is: entries carry it so a second daemon on the
+        # same state file judges only its own sessions (claunch-afmzw).
+        self._instance = paths.instance() if instance is None else instance
+        self._daemon_pid = os.getpid()
+        self._lock_path = self._state_path.parent / "window.lock"
+        self._lock_handle = None
+        self._lock_depth = 0
+        # A save that failed leaves memory newer than the file; reloading
+        # then would roll the window back, so it is skipped until a save works.
+        self._saved_ok = True
+        with self._locked():
+            self._drop_restored_queue()
+
+    # ---- the cross-process lock (claunch-afmzw) ------------------------- #
+
+    @contextlib.contextmanager
+    def _locked(self):
+        """Hold the state lock and work on the file's current state.
+
+        Re-entrant: the public methods nest (``release_session`` releases),
+        and only the outermost entry locks and reloads.
+        """
+        if self._lock_depth:
+            self._lock_depth += 1
+            try:
+                yield
+            finally:
+                self._lock_depth -= 1
+            return
+        handle = None
+        try:
+            self._lock_path.parent.mkdir(parents=True, exist_ok=True)
+            handle = open(self._lock_path, "a+b")
+            deadline = time.monotonic() + LOCK_WAIT
+            while not _try_flock(handle):
+                if time.monotonic() >= deadline:
+                    log.warning(
+                        "window: state lock %s not taken in %.0fs; deciding on "
+                        "this daemon's view", self._lock_path, LOCK_WAIT,
+                    )
+                    handle.close()
+                    handle = None
+                    break
+                time.sleep(0.02)
+        except OSError as exc:
+            log.warning("window: state lock unavailable: %s", exc)
+            if handle is not None:
+                handle.close()
+            handle = None
+        self._lock_handle = handle
+        self._lock_depth = 1
+        try:
+            self._load()
+            self._refresh_history()
+            yield
+        finally:
+            self._lock_depth = 0
+            self._lock_handle = None
+            if handle is not None:
+                _unflock(handle)
+                handle.close()
+
+    def _mine(self, entry: dict) -> bool:
+        """Whether this daemon instance made ``entry`` (absent = the default
+        instance: entries written before claunch-afmzw came from it)."""
+        return (entry.get("instance") or "") == self._instance
+
+    def _same_session(self, entry: dict, session: Optional[str]) -> bool:
+        return bool(session) and entry.get("session") == session and self._mine(entry)
 
     # ---- configuration --------------------------------------------------- #
 
@@ -355,8 +515,26 @@ class WindowManager:
     def workers_in_use(self) -> int:
         return sum(self._held_width(h) for h in self._holders)
 
-    def _budget(self) -> int:
+    def _configured_budget(self) -> int:
         return int(self._limits().get("worker_budget", DEFAULT_LIMITS["worker_budget"]))
+
+    def _adaptive_on(self) -> bool:
+        return bool(int(self._limits().get("adaptive", DEFAULT_LIMITS["adaptive"]) or 0))
+
+    def _adaptive_floor(self) -> int:
+        floor = int(self._limits().get("adaptive_floor", DEFAULT_LIMITS["adaptive_floor"]) or 1)
+        return max(1, min(floor, max(1, self._configured_budget())))
+
+    def _budget(self) -> int:
+        """The budget grants are decided against: the configured one, or the
+        AIMD budget below it after timeouts (claunch-afmzw). 0 = off."""
+        configured = self._configured_budget()
+        if configured <= 0 or not self._adaptive_on():
+            return configured
+        current = self._adaptive.get("budget")
+        if current is None:
+            return configured
+        return max(self._adaptive_floor(), min(configured, int(current)))
 
     def _budget_left(self) -> Optional[int]:
         """Workers the budget still allows; None when the budget is off."""
@@ -381,6 +559,8 @@ class WindowManager:
         """Read the persisted window, if any. Reaping is deliberately NOT done
         here: on boot the sessions that held grants may still be restoring, so
         death is judged lazily at the next acquire/status instead."""
+        if not self._saved_ok:
+            return
         try:
             doc = json.loads(self._state_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -389,6 +569,13 @@ class WindowManager:
             return
         self._holders = list(doc.get("holders") or [])
         self._queue = list(doc.get("queue") or [])
+        adaptive = doc.get("adaptive")
+        if isinstance(adaptive, dict):
+            self._adaptive = {
+                "budget": adaptive.get("budget"),
+                "decreased_at": adaptive.get("decreased_at"),
+                "reason": adaptive.get("reason") or "",
+            }
 
     def _drop_restored_queue(self) -> None:
         """Forget the waiters a previous daemon process left on disk.
@@ -400,13 +587,15 @@ class WindowManager:
         later recorded a holder no one would release (claunch-zawnr).
         Holders are kept -- a grant outlives its request by design.
         """
-        if not self._queue:
+        mine = [q for q in self._queue if self._mine(q)]
+        if not mine:
             return
-        for entry in self._queue:
+        for entry in mine:
             self._record(entry, "disconnected")
         log.info("window: dropped %d waiter(s) left by the previous daemon",
-                 len(self._queue))
-        self._queue = []
+                 len(mine))
+        # Another instance's waiters are long-polls on a daemon that lives on.
+        self._queue = [q for q in self._queue if not self._mine(q)]
         self._save()
 
     def _save(self) -> None:
@@ -415,6 +604,7 @@ class WindowManager:
             "saved_at": _utcnow(),
             "holders": self._holders,
             "queue": self._queue,
+            "adaptive": self._adaptive,
         }
         try:
             self._state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -423,15 +613,31 @@ class WindowManager:
                     json.dumps(doc, indent=1, ensure_ascii=False), encoding="utf-8"
                 )
                 atomic.replace(tmp, self._state_path)
+            self._saved_ok = True
         except OSError as exc:
             # The in-memory window is the arbiter; the file is its survivor.
             # A failed save must not fail the grant it was recording.
+            self._saved_ok = False
             log.warning("window: state not saved: %s", exc)
 
     # ---- run history (7 days) ------------------------------------------- #
 
     def _history_cutoff(self, now: Optional[float] = None) -> float:
         return (time.time() if now is None else now) - HISTORY_RETENTION
+
+    def _history_signature(self) -> Optional[Tuple[int, int]]:
+        try:
+            st = self._history_path.stat()
+        except OSError:
+            return None
+        return (st.st_mtime_ns, st.st_size)
+
+    def _refresh_history(self) -> None:
+        """Re-read the log when another daemon process appended to it."""
+        sig = self._history_signature()
+        if sig is not None and sig != self._history_sig:
+            self._load_history()
+            self._history_sig = self._history_signature()
 
     def _load_history(self) -> None:
         """Read the kept days of the log; expired lines are dropped here."""
@@ -466,6 +672,7 @@ class WindowManager:
         except OSError as exc:
             log.warning("window: history not rewritten: %s", exc)
         self._history_pruned_at = time.monotonic()
+        self._history_sig = self._history_signature()
 
     def _prune_history(self) -> bool:
         cutoff = self._history_cutoff()
@@ -484,6 +691,7 @@ class WindowManager:
             "grant_id": entry.get("grant_id"),
             "cls": entry.get("cls"),
             "session": entry.get("session"),
+            "instance": entry.get("instance") or "",
             "pid": entry.get("pid"),
             "label": entry.get("label") or "",
             "workers": entry.get("workers"),
@@ -509,7 +717,9 @@ class WindowManager:
                 fh.write(json.dumps(line, ensure_ascii=False) + "\n")
         except OSError as exc:
             log.warning("window: history line not written: %s", exc)
+        self._history_sig = self._history_signature()
 
+    @_shared
     def report_result(self, grant_id: str, result) -> bool:
         """Attach a run's result to a live grant. False = no such holder.
 
@@ -522,9 +732,85 @@ class WindowManager:
         if holder is None or cleaned is None:
             return False
         holder["result"] = cleaned
+        self._adapt(holder, cleaned)
         self._save()
         return True
 
+    def _adapt(self, holder: dict, result: dict) -> None:
+        """AIMD on the worker budget from one reported run (claunch-afmzw).
+
+        Timeouts halve the budget (not below the floor); a passed run adds
+        one back. A run granted before the last decrease changes nothing:
+        it was measured under the load that decrease already answered, and
+        letting every run of one overloaded moment halve again would take
+        the budget to the floor on a single burst. Each grant adds at most
+        once (a nested pytest reports into its parent's grant).
+        """
+        configured = self._configured_budget()
+        if configured <= 0 or not self._adaptive_on():
+            return
+        decreased = self._adaptive.get("decreased_at")
+        acquired = holder.get("acquired_ts")
+        if acquired is None:
+            acquired = _parse_ts(holder.get("acquired_at"))
+        after_decrease = (
+            decreased is None or acquired is None or acquired >= float(decreased)
+        )
+        current = self._budget()
+        if int(result.get("timeouts") or 0) > 0:
+            if not after_decrease:
+                return
+            lowered = max(self._adaptive_floor(), current // 2)
+            if lowered >= current:
+                return
+            self._adaptive = {
+                "budget": lowered,
+                "decreased_at": time.time(),
+                "reason": (
+                    f"{result['timeouts']} timeout(s) in {holder.get('grant_id')} "
+                    f"({holder.get('session') or 'no session'})"
+                ),
+            }
+            log.info("window: worker budget %d -> %d after timeouts in %s",
+                     current, lowered, holder.get("grant_id"))
+            return
+        if (
+            result.get("outcome") == "passed"
+            and after_decrease
+            and not holder.get("credited")
+            and self._adaptive.get("budget") is not None
+        ):
+            holder["credited"] = True
+            raised = current + 1
+            self._adaptive = dict(self._adaptive)
+            if raised >= configured:
+                self._adaptive["budget"] = None
+                self._adaptive["reason"] = "recovered to the configured budget"
+            else:
+                self._adaptive["budget"] = raised
+            log.info("window: worker budget %d -> %d after a passed run",
+                     current, min(raised, configured))
+
+    def adaptive_view(self) -> dict:
+        """The AIMD state as the status answer and the CLI show it."""
+        decreased = self._adaptive.get("decreased_at")
+        return {
+            "enabled": self._adaptive_on(),
+            "budget": self._budget(),
+            "configured": self._configured_budget(),
+            "floor": self._adaptive_floor(),
+            "lowered": self._adaptive.get("budget") is not None,
+            "decreased_at": (
+                datetime.fromtimestamp(float(decreased), timezone.utc).isoformat(
+                    timespec="seconds"
+                )
+                if decreased
+                else None
+            ),
+            "reason": self._adaptive.get("reason") or "",
+        }
+
+    @_shared
     def history(
         self,
         *,
@@ -541,7 +827,8 @@ class WindowManager:
             for e in self._history
             if (_parse_ts(e.get("ended_at")) or 0) >= cutoff
             and (not cls or e.get("cls") == cls)
-            and (not session or e.get("session") == session)
+            # A session name is this instance's (claunch-afmzw).
+            and (not session or self._same_session(e, session))
         ]
         return {
             "retention_days": HISTORY_RETENTION_DAYS,
@@ -592,7 +879,7 @@ class WindowManager:
             return True  # the daemon never heard of it: gone
         return bool(getattr(session, "exited", False))
 
-    def _dead(self, entry: dict) -> bool:
+    def _dead(self, entry: dict, *, waiting: bool = False) -> bool:
         """A holder/waiter nobody is behind: dead session, or a sessionless
         (manual) entry whose pid is gone.
 
@@ -607,6 +894,18 @@ class WindowManager:
         if entry.get("bound") and (entry.get("pid") or 0) > 0:
             if not pid_alive(int(entry["pid"])):
                 return True
+        if not self._mine(entry):
+            # Another daemon instance's entry (claunch-afmzw): its sessions
+            # are not in this manager, so their liveness is not ours to
+            # judge -- that daemon's exit hook releases them. A waiter is a
+            # long-poll on that daemon's process and dies with it.
+            if waiting:
+                owner = int(entry.get("daemon_pid") or 0)
+                return owner > 0 and not pid_alive(owner)
+            if entry.get("session"):
+                return False
+            pid = entry.get("pid") or 0
+            return not pid_alive(pid)
         session = entry.get("session")
         if session:
             return self._session_gone(session)
@@ -621,7 +920,7 @@ class WindowManager:
         for holder in dead:
             self._record(holder, "reaped")
         self._holders = [h for h in self._holders if h not in dead]
-        self._queue = [q for q in self._queue if not self._dead(q)]
+        self._queue = [q for q in self._queue if not self._dead(q, waiting=True)]
         dropped = before_h - len(self._holders) + before_q - len(self._queue)
         if dropped:
             log.info("window: reaped %d dead holder/waiter entr(ies)", dropped)
@@ -630,14 +929,22 @@ class WindowManager:
     # ---- granting ----------------------------------------------------------- #
 
     def _blocker(
-        self, cls: str, session: Optional[str], ahead: List[dict]
+        self,
+        cls: str,
+        session: Optional[str],
+        ahead: List[dict],
+        instance: Optional[str] = None,
     ) -> Optional[str]:
         """Why a request of this class cannot be granted now, or None.
 
         ``ahead`` is the part of the queue that outranks the request. The
         reason is returned to the requester, so a refused caller learns which
-        rule it met instead of guessing from the holder list.
+        rule it met instead of guessing from the holder list. ``instance`` is
+        the daemon instance the requesting session runs under (None = this
+        one): session names are per instance, so ``s92`` here and ``s92`` on
+        another instance are two sessions.
         """
+        instance = self._instance if instance is None else instance
         if cls == SWEEP:
             if self._holders:
                 return "the window is held and a sweep is exclusive"
@@ -658,7 +965,9 @@ class WindowManager:
             mine = sum(
                 1
                 for h in self._holders
-                if h["cls"] == TARGETED and h.get("session") == session
+                if h["cls"] == TARGETED
+                and h.get("session") == session
+                and (h.get("instance") or "") == instance
             )
             if mine >= per_session:
                 return (
@@ -687,6 +996,8 @@ class WindowManager:
         else:
             holder["workers"] = self._width(holder["cls"], requested)
         holder["acquired_at"] = _utcnow()
+        # Sub-second, for the AIMD's "granted before the last decrease".
+        holder["acquired_ts"] = time.time()
         # Kept for the history's wait time; the queue field name goes.
         holder["requested_at"] = holder.pop("enqueued_at", None) or holder["acquired_at"]
         holder.pop("priority", None)
@@ -722,7 +1033,9 @@ class WindowManager:
         granted = []
         ahead: List[dict] = []
         for entry in list(self._queue):
-            if self._blocker(entry["cls"], entry.get("session"), ahead) is not None:
+            if self._blocker(
+                entry["cls"], entry.get("session"), ahead, entry.get("instance") or ""
+            ) is not None:
                 ahead.append(entry)
                 continue
             self._queue.remove(entry)
@@ -778,10 +1091,6 @@ class WindowManager:
                 "error": "force is an operator action; a session-held request "
                 "cannot be forced (ask the operator to run `claunch window force`)",
             }
-        changed = self._reap()
-        if changed:
-            self._process_queue()
-            self._save()
         entry = {
             "grant_id": secrets.token_hex(6),
             "cls": cls,
@@ -790,106 +1099,143 @@ class WindowManager:
             "label": label,
             "enqueued_at": _utcnow(),
             "priority": 0,
+            "instance": self._instance,
+            "daemon_pid": self._daemon_pid,
         }
         if bound:
             entry["bound"] = True
         if workers:
             entry["requested"] = max(1, int(workers))
-        if force:
-            holder = self._grant(entry, forced=True)
-            self._save()
-            log.info("window: operator forced a %s grant (%s)", cls, holder["grant_id"])
-            return {
-                "granted": True,
-                "grant_id": holder["grant_id"],
-                "advisory_n": holder["workers"],
-                "forced": True,
-            }
-        ahead = self._ahead_of(0)
-        blocker = self._blocker(cls, session, ahead)
-        if not ahead and blocker is None:
-            holder = self._grant(entry)
-            self._save()
-            return {
-                "granted": True,
-                "grant_id": holder["grant_id"],
-                "advisory_n": holder["workers"],
-            }
-        reason = blocker or f"{len(ahead)} request(s) are queued ahead"
-        if wait <= 0:
+        grant_id = entry["grant_id"]
+        with self._locked():
+            changed = self._reap()
             if changed:
+                self._process_queue()
                 self._save()
-            return {
-                "granted": False,
-                "position": len(ahead) + 1,
-                "reason": reason,
-                "window": self.status(),
-            }
-        event = asyncio.Event()
-        self._granted_events[entry["grant_id"]] = event
-        self._queue.append(entry)
-        self._sort_queue()
-        # Entries ahead may be blocked by a rule that does not bind this one
-        # (another session's per-session limit); the queue decides, in order.
-        self._process_queue()
-        self._save()
+            if force:
+                holder = self._grant(entry, forced=True)
+                self._save()
+                log.info("window: operator forced a %s grant (%s)", cls, grant_id)
+                return {
+                    "granted": True,
+                    "grant_id": grant_id,
+                    "advisory_n": holder["workers"],
+                    "forced": True,
+                }
+            ahead = self._ahead_of(0)
+            blocker = self._blocker(cls, session, ahead)
+            if not ahead and blocker is None:
+                holder = self._grant(entry)
+                self._save()
+                return {
+                    "granted": True,
+                    "grant_id": grant_id,
+                    "advisory_n": holder["workers"],
+                }
+            reason = blocker or f"{len(ahead)} request(s) are queued ahead"
+            if wait <= 0:
+                return {
+                    "granted": False,
+                    "position": len(ahead) + 1,
+                    "reason": reason,
+                    "window": self.status(),
+                }
+            event = asyncio.Event()
+            self._granted_events[grant_id] = event
+            self._queue.append(entry)
+            self._sort_queue()
+            # Entries ahead may be blocked by a rule that does not bind this
+            # one (another session's per-session limit); the queue decides,
+            # in order.
+            self._process_queue()
+            self._save()
         deadline = time.monotonic() + min(wait, MAX_WAIT)
+        # The state is shared with every daemon instance on this machine
+        # (claunch-afmzw): a grant or a release made by another process sets
+        # no event here, so the wait also re-reads the state every poll.
+        poll = min(GONE_POLL, SHARED_POLL) if gone else SHARED_POLL
         try:
             while not event.is_set():
                 left = deadline - time.monotonic()
                 if left <= 0:
                     raise asyncio.TimeoutError
                 try:
-                    await asyncio.wait_for(
-                        event.wait(),
-                        timeout=min(left, GONE_POLL) if gone else left,
-                    )
+                    await asyncio.wait_for(event.wait(), timeout=min(left, poll))
                 except asyncio.TimeoutError:
-                    if gone is not None and gone() and not event.is_set():
-                        if entry in self._queue:
-                            self._queue.remove(entry)
-                            self._record(entry, "disconnected")
-                            self._save()
+                    pass
+                if event.is_set():
+                    break
+                with self._locked():
+                    if self._holder(grant_id) is not None:
+                        break
+                    if self._queued(grant_id) is None:
+                        # Cancelled or reaped while waiting, here or elsewhere.
+                        return {"granted": False, "cancelled": True}
+                    if gone is not None and gone():
+                        self._unqueue(grant_id, "disconnected")
+                        self._save()
                         return {"granted": False, "disconnected": True}
+                    if self._reap():
+                        self._save()
+                    if self._process_queue():
+                        self._save()
+                    if self._holder(grant_id) is not None:
+                        break
+                    if self._queued(grant_id) is None:
+                        return {"granted": False, "cancelled": True}
         except asyncio.TimeoutError:
-            if entry in self._queue:
-                self._queue.remove(entry)
-                self._record(entry, "timeout")
-                self._save()
-            return {
-                "granted": False,
-                "timeout": True,
-                "window": self.status(),
-            }
+            with self._locked():
+                if self._holder(grant_id) is None:
+                    if self._unqueue(grant_id, "timeout"):
+                        self._save()
+                    return {
+                        "granted": False,
+                        "timeout": True,
+                        "window": self.status(),
+                    }
         except asyncio.CancelledError:
             # A disconnected long-poll must not leave an orphan that can be
             # granted later without a client to receive the grant id.
-            if entry in self._queue:
-                self._queue.remove(entry)
-                self._record(entry, "disconnected")
-                self._save()
+            with self._locked():
+                if self._unqueue(grant_id, "disconnected"):
+                    self._save()
             raise
         finally:
-            self._granted_events.pop(entry["grant_id"], None)
-        holder = next(
-            (h for h in self._holders if h["grant_id"] == entry["grant_id"]), {}
-        )
-        if gone is not None and gone() and holder:
-            # Granted while its client was leaving: nobody will read the id.
-            self._holders.remove(holder)
-            self._record(holder, "disconnected")
-            self._process_queue()
-            self._save()
-            return {"granted": False, "disconnected": True}
-        result = {
-            "granted": True,
-            "grant_id": entry["grant_id"],
-            "advisory_n": holder.get("workers") or self._width(cls, workers or None),
-        }
-        if holder.get("forced"):
-            result["forced"] = True
-        return result
+            self._granted_events.pop(grant_id, None)
+        with self._locked():
+            holder = self._holder(grant_id) or {}
+            if gone is not None and gone() and holder:
+                # Granted while its client was leaving: nobody will read the id.
+                self._holders = [h for h in self._holders if h["grant_id"] != grant_id]
+                self._record(holder, "disconnected")
+                self._process_queue()
+                self._save()
+                return {"granted": False, "disconnected": True}
+            result = {
+                "granted": True,
+                "grant_id": grant_id,
+                "advisory_n": holder.get("workers") or self._width(cls, workers or None),
+            }
+            if holder.get("forced"):
+                result["forced"] = True
+            return result
 
+    def _holder(self, grant_id: str) -> Optional[dict]:
+        return next((h for h in self._holders if h["grant_id"] == grant_id), None)
+
+    def _queued(self, grant_id: str) -> Optional[dict]:
+        return next((q for q in self._queue if q["grant_id"] == grant_id), None)
+
+    def _unqueue(self, grant_id: str, end: str) -> bool:
+        """Take one waiter out of the queue into the log. False = not queued."""
+        entry = self._queued(grant_id)
+        if entry is None:
+            return False
+        self._queue = [q for q in self._queue if q["grant_id"] != grant_id]
+        self._record(entry, end)
+        return True
+
+    @_shared
     def release(self, grant_id: str) -> bool:
         """Hand the window back. False = no such grant (already reaped?)."""
         holder = next((h for h in self._holders if h["grant_id"] == grant_id), None)
@@ -901,11 +1247,13 @@ class WindowManager:
         self._save()
         return True
 
+    @_shared
     def release_session(self, session: str) -> int:
         """Everything this session holds, back. Returns how many."""
-        ids = [h["grant_id"] for h in self._holders if h.get("session") == session]
+        ids = [h["grant_id"] for h in self._holders if self._same_session(h, session)]
         return sum(1 for gid in ids if self.release(gid))
 
+    @_shared
     def cancel(self, grant_id: str) -> bool:
         """Remove one waiting request.  A holder cannot be cancelled here."""
         entry = next((q for q in self._queue if q["grant_id"] == grant_id), None)
@@ -917,9 +1265,10 @@ class WindowManager:
         self._save()
         return True
 
+    @_shared
     def cancel_session(self, session: str) -> int:
         """Drop every waiting request from this session (a waiter giving up)."""
-        entries = [q for q in self._queue if q.get("session") == session]
+        entries = [q for q in self._queue if self._same_session(q, session)]
         for entry in entries:
             self._queue.remove(entry)
             self._granted_events.pop(entry["grant_id"], None)
@@ -930,6 +1279,7 @@ class WindowManager:
 
     # ---- operator overrides (claunch-8kald) ------------------------------------ #
 
+    @_shared
     def prioritize(self, grant_id: str, priority: Optional[int] = None) -> Optional[dict]:
         """Give one waiting request a priority; None = move it to the top.
 
@@ -959,6 +1309,7 @@ class WindowManager:
         )
         return {"priority": entry["priority"], "granted": granted, "position": position}
 
+    @_shared
     def force(self, grant_id: str) -> Optional[dict]:
         """Grant one waiting request now, past every limit. None = no such request.
 
@@ -974,6 +1325,7 @@ class WindowManager:
         log.info("window: operator forced %s (%s)", grant_id, holder["cls"])
         return holder
 
+    @_shared
     def status(self) -> dict:
         """The window as state anyone can read -- the whole point.
 
@@ -993,11 +1345,18 @@ class WindowManager:
             "advisory_n_now": self._width(TARGETED, None),
             "limits": dict(self._limits()),
             "workers_in_use": self.workers_in_use(),
+            # The budget in force (claunch-afmzw): below limits.worker_budget
+            # while timeouts have lowered it.
+            "worker_budget": self._budget(),
+            "adaptive": self.adaptive_view(),
+            "instance": self._instance,
+            "state_path": str(self._state_path),
             "history_retention_days": HISTORY_RETENTION_DAYS,
         }
 
     # ---- one session's view (the terminal header's strip) ------------------ #
 
+    @_shared
     def estimate(self, cls: str, label: str = "") -> Optional[dict]:
         """How long a grant like this one usually holds, from the kept log.
 
@@ -1042,6 +1401,7 @@ class WindowManager:
             "grant_id": holder.get("grant_id"),
             "cls": holder.get("cls"),
             "session": holder.get("session"),
+            "instance": holder.get("instance") or "",
             "label": holder.get("label") or "",
             "workers": holder.get("workers"),
             "forced": bool(holder.get("forced")),
@@ -1054,6 +1414,7 @@ class WindowManager:
             "result": holder.get("result"),
         }
 
+    @_shared
     def session_view(self, session: str, now: Optional[float] = None) -> dict:
         """The window as it concerns ONE session: what it holds, where it waits.
 
@@ -1068,10 +1429,10 @@ class WindowManager:
         """
         now = time.time() if now is None else now
         holders = [self._brief_holder(h, now) for h in self._holders]
-        holding = [h for h in holders if h["session"] == session]
+        holding = [h for h in holders if self._same_session(h, session)]
         waiting = []
         for index, entry in enumerate(self._queue):
-            if entry.get("session") != session:
+            if not self._same_session(entry, session):
                 continue
             ahead = self._queue[:index]
             enqueued = _parse_ts(entry.get("enqueued_at"))
@@ -1099,7 +1460,7 @@ class WindowManager:
                 }
             )
         last = next(
-            (r for r in reversed(self._history) if r.get("session") == session),
+            (r for r in reversed(self._history) if self._same_session(r, session)),
             None,
         )
         sweep_cap, targeted_cap = self._caps()
@@ -1121,6 +1482,7 @@ class WindowManager:
 
     # ---- the exit hook -------------------------------------------------------- #
 
+    @_shared
     def session_exited(self, session) -> None:
         """The manager's exit funnel: a session that ends gives the window back.
 
@@ -1132,14 +1494,14 @@ class WindowManager:
         reaper at the next acquire finishes the job.
         """
         name = session.sdef.name
-        held = [h for h in self._holders if h.get("session") == name]
-        queued = [q for q in self._queue if q.get("session") == name]
+        held = [h for h in self._holders if self._same_session(h, name)]
+        queued = [q for q in self._queue if self._same_session(q, name)]
         if not held and not queued:
             return
         for entry in held + queued:
             self._record(entry, "session_exited")
-        self._holders = [h for h in self._holders if h.get("session") != name]
-        self._queue = [q for q in self._queue if q.get("session") != name]
+        self._holders = [h for h in self._holders if not self._same_session(h, name)]
+        self._queue = [q for q in self._queue if not self._same_session(q, name)]
         self._process_queue()
         self._save()
 
@@ -1217,13 +1579,19 @@ class WindowReminderClock:
     def scan(self, now: Optional[float] = None) -> List[dict]:
         """Return session-held grants whose next 3-minute reminder is due."""
         stamp = time.monotonic() if now is None else now
-        holders = self.window.status().get("holders") or []
+        status = self.window.status()
+        holders = status.get("holders") or []
+        here = status.get("instance") or ""
         live = set()
         due: List[dict] = []
         for holder in holders:
             grant_id = str(holder.get("grant_id") or "")
             session = holder.get("session")
             if not grant_id or not session:
+                continue
+            if (holder.get("instance") or "") != here:
+                # Another daemon instance's session: its name means nothing
+                # in this manager (claunch-afmzw).
                 continue
             live.add(grant_id)
             armed_at = self._seen.setdefault(grant_id, stamp)

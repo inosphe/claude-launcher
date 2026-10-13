@@ -55,6 +55,10 @@ def _operator_only(what: str) -> bool:
 
 def _fmt_holder(entry: dict) -> str:
     who = entry.get("session") or f"pid {entry.get('pid')}"
+    if entry.get("session") and entry.get("instance"):
+        # Another daemon instance on this machine shares the window
+        # (claunch-afmzw); its session names are its own.
+        who = f"{who}@{entry['instance']}"
     since = entry.get("acquired_at") or entry.get("enqueued_at") or "?"
     label = entry.get("label") or ""
     extra = []
@@ -88,12 +92,19 @@ def _cmd_status(args) -> int:
     )
     limits = status.get("limits") or {}
     if limits:
-        budget = limits.get("worker_budget", "?")
+        budget = status.get("worker_budget", limits.get("worker_budget", "?"))
         print(
             f"workers: {status.get('workers_in_use', '?')} of budget "
             f"{budget if budget else 'off'}; targeted width {limits.get('targeted_width', '?')}, "
             f"sweep width {limits.get('sweep_width', '?')}; "
             f"targeted per session {limits.get('targeted_per_session', '?') or 'unlimited'}"
+        )
+    adaptive = status.get("adaptive") or {}
+    if adaptive.get("lowered"):
+        print(
+            f"budget lowered: {adaptive.get('budget')} of {adaptive.get('configured')} "
+            f"(floor {adaptive.get('floor')}) since {adaptive.get('decreased_at') or '?'}"
+            f" -- {adaptive.get('reason') or 'timeouts'}; each passed run adds one back"
         )
     for entry in holders:
         print(f"  held: {_fmt_holder(entry)}")
@@ -266,7 +277,9 @@ def _fmt_result(result) -> str:
     if not result:
         return "unreported"
     counts = ", ".join(
-        f"{result[k]} {k}" for k in ("passed", "failed", "errors", "skipped") if result.get(k)
+        f"{result[k]} {k}"
+        for k in ("passed", "failed", "errors", "skipped", "timeouts")
+        if result.get(k)
     )
     return f"{result.get('outcome', '?')}" + (f" ({counts})" if counts else "")
 
@@ -308,6 +321,8 @@ def _cmd_history(args) -> int:
         )
     for entry in answer.get("entries") or []:
         who = entry.get("session") or f"pid {entry.get('pid')}"
+        if entry.get("session") and entry.get("instance"):
+            who = f"{who}@{entry['instance']}"
         print(
             f"  {entry.get('ended_at', '?')} {entry.get('cls', '?')}:{who} "
             f"{entry.get('end', '?')} wait {_fmt_seconds(entry.get('wait_seconds'))} "

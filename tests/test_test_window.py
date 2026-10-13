@@ -237,6 +237,7 @@ def test_a_pytest_session_maps_to_the_result_fields():
     assert result == {
         "outcome": "failed", "exit_code": 1, "passed": 3, "failed": 1,
         "errors": 0, "skipped": 2, "collected": 6, "duration": 12.3,
+        "timeouts": 0,
     }
     assert test_window.pytest_result(0, {}, 0, 0)["outcome"] == "passed"
     assert test_window.pytest_result(2, {}, 0, 0)["outcome"] == "interrupted"

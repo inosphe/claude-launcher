@@ -24492,6 +24492,9 @@ async function refreshWindow() {
           advisory_n_now: data.advisory_n_now,
           limits: data.limits || {},
           workers_in_use: data.workers_in_use,
+          // The budget in force and its AIMD state (claunch-afmzw).
+          worker_budget: data.worker_budget,
+          adaptive: data.adaptive || {},
         };
         windowError = "";
       }
@@ -24715,12 +24718,16 @@ function renderWindow() {
     "Recommended workers", Number.isFinite(advisory) ? advisory : "?", null,
     "pytest -n for the next grant"));
   const limits = windowCache.limits || {};
-  const budget = Number(limits.worker_budget);
+  const adaptive = windowCache.adaptive || {};
+  const budget = Number(windowCache.worker_budget ?? limits.worker_budget);
   const inUse = Number(windowCache.workers_in_use);
   if (Number.isFinite(budget) && Number.isFinite(inUse)) {
+    const note = budget <= 0 ? "budget off"
+      : adaptive.lowered
+        ? `lowered from ${adaptive.configured} after timeouts; each passed run adds one`
+        : "xdist workers granted machine-wide";
     summary.appendChild(windowSummary(
-      "Worker budget", inUse, budget > 0 ? budget : null,
-      budget > 0 ? "xdist workers granted machine-wide" : "budget off"));
+      "Worker budget", inUse, budget > 0 ? budget : null, note));
   }
   const cores = windowCache.cores === null || windowCache.cores === undefined
     ? null : Number(windowCache.cores);

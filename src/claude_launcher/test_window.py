@@ -20,6 +20,7 @@ switching it off for itself is the case the window was built against.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import time
 from contextlib import contextmanager
@@ -289,7 +290,10 @@ def _fallback(
 
 
 def _lock_path(name: str) -> Path:
-    path = paths.daemon_dir() / name
+    # The base home's daemon directory, not this instance's: the fallback
+    # guards the machine, like the daemon's window it stands in for
+    # (claunch-afmzw).
+    path = paths.base_home() / "daemon" / name
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -401,6 +405,34 @@ def report_result(grant_id: str, result: dict) -> bool:
     return bool(answer.get("reported"))
 
 
+#: What a failed test's report says when it failed by running out of time:
+#: an exception type (``TimeoutError``, ``asyncio.TimeoutError``,
+#: ``subprocess.TimeoutExpired``, ``concurrent.futures.TimeoutError``) or a
+#: helper's wait-loop message ("timed out waiting for ..."). The window lowers
+#: its worker budget on these (claunch-afmzw), so a false positive costs
+#: parallelism, not a verdict.
+TIMEOUT_PATTERN = re.compile(
+    r"\b(?:\w+\.)*Timeout(?:Error|Expired)\b|\btimed[ -]out\b|\btimeout (?:after|waiting|expired)\b",
+    re.IGNORECASE,
+)
+
+
+def count_timeouts(reports) -> int:
+    """How many failed/errored test reports read as timeouts."""
+    count = 0
+    for report in reports or ():
+        text = getattr(report, "longreprtext", None)
+        if text is None:
+            text = str(getattr(report, "longrepr", "") or "")
+        # Only pytest's "E" lines (the exception and its message): the rest
+        # of a traceback quotes source, and source that merely handles a
+        # TimeoutError is not a timeout.
+        errors = [ln for ln in (text or "").splitlines() if ln.startswith("E ")]
+        if TIMEOUT_PATTERN.search("\n".join(errors) if errors else (text or "")):
+            count += 1
+    return count
+
+
 def pytest_result(exitstatus: int, stats: Mapping, collected: int, duration: float) -> dict:
     """A pytest session's end state in the window's result fields."""
     outcome = {0: "passed", 1: "failed", 2: "interrupted", 5: "no_tests"}.get(
@@ -415,6 +447,9 @@ def pytest_result(exitstatus: int, stats: Mapping, collected: int, duration: flo
         "skipped": len(stats.get("skipped", ())),
         "collected": int(collected or 0),
         "duration": round(float(duration), 1),
+        "timeouts": count_timeouts(
+            list(stats.get("failed", ())) + list(stats.get("error", ()))
+        ),
     }
 
 
