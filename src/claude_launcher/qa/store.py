@@ -31,7 +31,7 @@ Status:
 Nudges (claunch-l8vyi.1): the user can press "질문 요청" in the pane to ask
 the session whether it has anything to ask. Each press is a row in
 ``nudges``; it waits (``sent``) until the session either files a question
-(``asked`` -- the qa_ask settles it) or says it has none (``nothing``, with
+(``asked`` -- a qa_ask, or a qa_update that changes a question, settles it) or says it has none (``nothing``, with
 a note). A newer nudge supersedes a waiting one, so a session has at most
 one waiting nudge (a partial unique index), and a settled nudge never
 changes again (a trigger).
@@ -308,6 +308,15 @@ class QaStore:
             )
 
     @staticmethod
+    def _settle_nudge(db, session: str, qid: str) -> None:
+        """A question filed or rewritten while the user's nudge waits is the
+        reply to it (the nudge text offers both)."""
+        db.execute(
+            "UPDATE nudges SET status='asked', questions=?, settled_at=? WHERE session=? AND status='sent'",
+            (json.dumps([qid]), _now(), session),
+        )
+
+    @staticmethod
     def _last_nudge(db, session: str) -> Optional[dict]:
         r = db.execute("SELECT * FROM nudges WHERE session = ? ORDER BY rowid DESC LIMIT 1", (session,)).fetchone()
         return _nudge_row(r) if r else None
@@ -380,11 +389,7 @@ class QaStore:
             )
             q = self._load(db, qid)
             self._event(db, q, actor, "ask")
-            # A question filed while the user's nudge waits is the reply to it.
-            db.execute(
-                "UPDATE nudges SET status='asked', questions=?, settled_at=? WHERE session=? AND status='sent'",
-                (json.dumps([qid]), now, actor),
-            )
+            self._settle_nudge(db, actor, qid)
         return q
 
     def update(self, actor: str, qid: str, revision, *, title=None, body=None, options=None, multi=None) -> dict:
@@ -416,6 +421,7 @@ class QaStore:
             after = self._load(db, qid)
             changed = [k for k in new if new[k] != q[k]]
             self._event(db, after, actor, "update", {"changed": changed, "was": q["status"]})
+            self._settle_nudge(db, actor, qid)
         return after
 
     def close(self, actor: str, qid: str, revision, *, note=None) -> dict:

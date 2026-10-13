@@ -203,6 +203,16 @@ def test_nudge_is_settled_by_a_question_or_by_nothing(qa):
     assert qa.list("s1")["nudge"]["status"] == "nothing"
 
 
+def test_a_rewritten_question_also_answers_the_nudge(qa):
+    q = qa.ask("s1", title="Q")
+    n = qa.nudge(Q.USER, "s1")
+    qa.update("s1", q["id"], 1, title="Q")              # unchanged: a no-op, not a reply
+    assert qa.list("s1")["nudge"]["status"] == "sent"
+    qa.update("s1", q["id"], 1, title="Q, reworded")
+    after = qa.list("s1")["nudge"]
+    assert (after["id"], after["status"], after["questions"]) == (n["id"], "asked", [q["id"]])
+
+
 def test_a_newer_nudge_supersedes_the_waiting_one_and_moves_agent_seq_only_on_reply(qa):
     seq = qa.list("s1")["agent_seq"]
     first = qa.nudge(Q.USER, "s1")
