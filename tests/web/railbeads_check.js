@@ -12,7 +12,8 @@
       rest; each issue pill links to the issue and its click does not attach
       the row, and carries NO native `title` -- the hover card below is its
       only affordance, so the browser's own tooltip cannot land on top of it
-      (claunch-1qa8e). The "+n" is a count rather than an issue: it opens no
+      (claunch-1qa8e). It is an empty `title` set on purpose, since a pill
+      without the attribute shows the row's `title` instead (claunch-45jzn). The "+n" is a count rather than an issue: it opens no
       card, so it keeps the `title` that names what it stands for;
    3. hovering a pill fills the one card with the issue's id, status,
       priority, title, facts (including who created it, when that differs
@@ -49,7 +50,11 @@ function slice(name) {
 function node(tag) {
   const n = {
     tag, children: [], text: "", classes: new Set(), handlers: {}, dataset: {},
-    style: {}, title: "", href: "", parent: null,
+    style: {}, href: "", parent: null, attrs: {},
+    // `title` as an attribute: set at all (even to "") is not the same as
+    // never set -- the browser falls back to an ancestor's only for the latter
+    get title() { return this.attrs.title || ""; },
+    set title(v) { this.attrs.title = String(v); },
     appendChild(c) { c.parent = this; this.children.push(c); return c; },
     insertBefore(c, ref) {
       c.parent = this;
@@ -198,6 +203,11 @@ check("the next one is outlined", pills.map((p) => p.classes.has("next")), [fals
 check("a pill links to the issue", pills[0].href, "#/beads/x-1");
 check("and carries no native tooltip -- the hover card is the only one",
       pills.map((p) => p.title), ["", "", "", ""]);
+// An empty `title` attribute, not a missing one: without it the browser shows
+// the row's own `title` (its context note) on top of the hover card
+// (claunch-45jzn).
+check("the empty title is set, so the row's title is not inherited",
+      pills.map((p) => "title" in p.attrs), [true, true, true, true]);
 const more = line.find("rail-bead-more")[0];
 check("the rest is counted and named", [more.text, more.title], ["+2", "x-5 [blocked]\nx-6 [open]"]);
 let stopped = 0;
