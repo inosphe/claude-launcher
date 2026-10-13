@@ -6659,7 +6659,6 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .ws-vscode { display: inline-flex; gap: 6px; align-items: center; flex: none; }
 .ws-vscode-pick { max-width: 220px; }
 .vscode-server .ws-text .error { display: block; }
-.sess-vscode { margin: 14px 0; }
 @media (max-width: 640px) {
   .vscode-setting { grid-template-columns: 1fr; }
   .vscode-setting .wf-note { grid-column: 1; }

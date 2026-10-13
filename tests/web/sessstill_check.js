@@ -137,7 +137,6 @@ function sessInputJournal() { return el("div", "sess-input-journal"); }
 function rolePanels() { return []; }
 function sessBeads() { return el("div", "sess-beads"); }
 function sessCommits() { return el("div", "sess-commits"); }
-function sessVscode() { return el("div", "sess-vscode"); }
 function sessHandles() { return []; }
 function handleTag() { return null; }
 function go() {}

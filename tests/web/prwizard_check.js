@@ -113,6 +113,7 @@ function cwdLine() { return el("div", "sess-cwd"); }
 function closeDetail() {}
 function go() {}
 function openSpawnModal() {}
+function sessVscodeButton() { return el("button", "wf-btn", "VS Code"); }
 /* The session form is a node the session modal borrows, and this dialog
    clears the body it would be sitting in — so openPrModal gives it back
    first. Nothing here opens that modal, so the state is simply absent. */
@@ -166,7 +167,7 @@ async function main() {
   const prBtn = buttons(head).find((b) => b.text === "Open PR");
   check("the detail head has an Open PR button", !!prBtn);
   check("...between Spawn and Open terminal", buttons(head).map((b) => b.text).join(",")
-    === "Spawn,Spawn same setup,Open PR,Open terminal,×", buttons(head).map((b) => b.text));
+    === "Spawn,Spawn same setup,VS Code,Open PR,Open terminal,×", buttons(head).map((b) => b.text));
   const exitedHead = ctx.sessHead({ name: "s1", status: "exited", cwd: "C:/repo" });
   const exitedPr = buttons(exitedHead).find((b) => b.text === "Open PR");
   check("an exited session still has a directory to push", exitedPr && !exitedPr.disabled);

@@ -27388,21 +27388,21 @@ function wsVscodeControls(w) {
   return box;
 }
 
-/* The session panel's share: open the server for this session's directory
-   — its worktree's, its workspace's, or one of its own when the directory
-   is outside the registry. */
-function sessVscode(data) {
-  const s = data.session || {};
-  const box = el("div", "sess-vscode");
-  box.appendChild(el("h3", null, "VS Code"));
+/* The session panel's share, as a button on the detail head beside "Spawn
+   same setup": open the server for this session's directory — its
+   worktree's, its workspace's, or one of its own when the directory is
+   outside the registry. It was a block of its own under Work (a heading,
+   the path, the button); the path is already the head's own bottom line
+   (cwdLine) and the Details list's `directory` row, so the block said
+   nothing the button does not (claunch-rvly4). */
+function sessVscodeButton(s) {
   if (!vscodeState) { refreshVscode(); }
+  const btn = vscodeButton("VS Code", { session: s.name });
   if (!s.cwd) {
-    box.appendChild(el("p", "wf-note", "this session has no directory"));
-    return box;
+    btn.disabled = true;
+    btn.title = "this session has no directory";
   }
-  box.appendChild(el("p", "wf-note mono", s.cwd));
-  box.appendChild(vscodeButton("Open in VS Code", { session: s.name }));
-  return box;
+  return btn;
 }
 
 /* The Workspaces page (#/workspaces; #/settings/workspaces from when it was a
@@ -34163,8 +34163,12 @@ function sessHead(s) {
   // elsewhere (the rail row's + is the plain Spawn; Open terminal would open
   // what is open). "Spawn same setup" has no other way in, so it stays
   // (claunch-b6ril).
+  // VS Code rides beside it, in every arrangement, for the same reason: the
+  // head is its only way in (claunch-rvly4).
+  const code = sessVscodeButton(s);
   if (mine && terminalOnScreen() && !MOBILE_MQ.matches) {
     head.appendChild(same);
+    head.appendChild(code);
     head.appendChild(close);
     return head;
   }
@@ -34181,8 +34185,10 @@ function sessHead(s) {
   head.appendChild(spawn);
 
   // The same wizard, filled with what this session was itself created with
-  // (spawnSameSeed), built above because the docked arrangement keeps it.
+  // (spawnSameSeed), built above because the docked arrangement keeps it,
+  // and the editor for this session's directory on the same line.
   head.appendChild(same);
+  head.appendChild(code);
 
   // The PR wizard: push what this session's directory holds under a new
   // branch and open the pull request, without touching its checkout. An
@@ -35022,8 +35028,6 @@ function renderSession(data) {
     // round reports because the three are one answer read from three places:
     // what it was asked to do, what it wrote up, what it committed.
     view.appendChild(sessCommits(data));
-    // And the editor for that directory, beside what was committed in it.
-    view.appendChild(sessVscode(data));
 
     // What this session is FOR, by role: a leader gets its dispatch and reaping
     // panels here, other roles whatever ROLE_PANELS declares for them. Between

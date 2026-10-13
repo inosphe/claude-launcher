@@ -120,7 +120,6 @@ function sessNote() { return el("div", "sess-note"); }
 function rolePanels() { return []; }
 function sessBeads() { return el("div", "sess-beads"); }
 function sessCommits() { return el("div", "sess-commits"); }
-function sessVscode() { return el("div", "sess-vscode"); }
 function sessTask() { return el("div", "sess-task"); }
 function sessPromptPacks() { return el("div", "sess-packs"); }
 /* The three standing marks under the facts list — sessflags_check's subject;
