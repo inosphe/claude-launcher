@@ -14508,14 +14508,41 @@ function endSession() {
 
 /* An ended session keeps the box open: a line sent there is queued in the
    session's input journal and typed, oldest first, when the session is
-   resumed (daemon/session_input.py). This is the standing note that says so,
-   so nobody reads a queued line as one the agent has already seen. */
+   resumed (daemon/session_input.py). This is the standing notice that says
+   so, so nobody reads a queued line as one the agent has already seen. It is
+   the field's own placeholder (and its border, .queued), not the note beside
+   it: a standing sentence in the note took up to 40% of the bar for as long
+   as the session stayed ended and squeezed the field (claunch-tww0b). The
+   note is left to the outcome of a send. */
 function termInputQueueNote(ended) {
   if (ended) {
-    return "this session has ended — a line sent now is queued and typed " +
-      "when the session is resumed";
+    return "session ended — a line sent now is queued and typed when the " +
+      "session is resumed";
   }
   return "";
+}
+
+/* The field's placeholder, border and title for the session's state: ended
+   (queued, above) over remote-sync (shared) over the plain local line. The
+   one writer of the placeholder, called from renderLineSync and
+   refreshTermInput, so neither undoes the other. */
+function renderTermInputField(field, shared, ended) {
+  if (!field || !field.classList) return;
+  if (field.dataset && field.dataset.baseTitle === undefined) {
+    field.dataset.baseTitle = field.title || "";
+  }
+  const queueNote = termInputQueueNote(ended);
+  field.classList.toggle("line-shared", shared);
+  field.classList.toggle("queued", !!queueNote);
+  field.placeholder = queueNote || (shared
+    ? "shared with every browser on this session — Enter to send, Ctrl+J for a newline"
+    : "type for this session — Enter to send, Ctrl+J for a newline");
+  const base = field.dataset ? field.dataset.baseTitle : "";
+  field.title = queueNote
+    ? "this session has ended — a line sent now is queued in the session " +
+      "input journal and typed when the session is resumed" +
+      (base ? "\n" + base : "")
+    : base;
 }
 
 function termInputNote(note, message, warn = false) {
@@ -14617,7 +14644,7 @@ async function sendKeyLine(field, btn, note) {
 
 /* The field stays open whatever the session's state. A live session takes
    the line now; an ended one has no PTY, so the daemon queues the line and
-   the note under the box says so (termInputQueueNote). */
+   the field's placeholder says so (termInputQueueNote). */
 function renderScoreGoal() {
   const box = $("term-score-goal");
   if (!box) return;
@@ -14822,12 +14849,11 @@ function refreshTermInput() {
   if (!field || !btn) return;
   // State frames do not change ownership or unlock an in-flight send.
   if (field.sendPending != null && field.sendPending === field.sendEpoch) return;
-  const queueNote = termInputQueueNote(sessionEnded);
   field.disabled = false;
   btn.disabled = false;
-  if (queueNote) {
-    termInputNote(note, queueNote);
-  } else {
+  renderTermInputField(field,
+    typeof lineSyncShared === "function" && lineSyncShared(), sessionEnded);
+  if (note) {
     note.classList.add("hidden");
     note.textContent = "";
     note.title = "";
@@ -15685,13 +15711,7 @@ function renderLineSync() {
       : "local-only: this line stays in this browser. Click to share it with " +
         "every browser on this session";
   }
-  const field = $("term-input-field");
-  if (field && field.classList) {
-    field.classList.toggle("line-shared", shared);
-    field.placeholder = shared
-      ? "shared with every browser on this session — Enter to send, Ctrl+J for a newline"
-      : "type for this session — Enter to send, Ctrl+J for a newline";
-  }
+  renderTermInputField($("term-input-field"), shared, sessionEnded);
   const keep = $("term-local-keep");
   if (keep && keep.classList) {
     keep.classList.toggle("hidden", !(shared && keep.value));

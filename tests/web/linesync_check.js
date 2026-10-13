@@ -101,9 +101,11 @@ function renderScoreGoal() {}
 ${clientDecl[0]}
 ${lineDecl[0]}
 let lineSyncComposing = false;
+let sessionEnded = false;
 ` + [
     "autogrowTermInput", "termInputNote", "sendKeyLine", "lineSyncShared",
     "resetLineSync", "loadLineSync", "setLineText", "applyLineSync",
+    "termInputQueueNote", "renderTermInputField",
     "renderLineSync", "pushLineSync", "clearSentLine", "toggleLineSync",
   ].map(slice).join("\n") + `
 exports.LINE_SYNC_CLIENT = LINE_SYNC_CLIENT;

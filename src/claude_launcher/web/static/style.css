@@ -2512,6 +2512,12 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 }
 #term-input-field.line-shared { border-color: #8957e5; }
 #term-input-field.line-shared:focus { border-color: #a371f7; }
+/* An ended session: a line sent now is queued (termInputQueueNote). The
+   field says so itself, by its placeholder and this amber dashed border,
+   instead of a standing note beside it that took the field's width. */
+#term-input-field.queued { border-style: dashed; border-color: #9e6a03; }
+#term-input-field.queued:focus { border-color: #d29922; }
+#term-input-field.queued::placeholder { color: #d29922; opacity: 0.8; }
 #term-local-keep {
   flex: 0 1 30%; min-width: 0; min-height: var(--term-row);
   padding: 5px 10px; font-size: 13px;
