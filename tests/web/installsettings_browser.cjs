@@ -16,7 +16,7 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
       if (url.pathname.startsWith('/api/')) return route.fulfill({ json: {} });
       const name = url.pathname === '/' ? 'index.html' : url.pathname.replace('/static/', '');
       let content = fs.readFileSync(path.join(root, name));
-      if (name === 'app.js') content = content.toString().replace(/boot\(\);\s*$/, '');
+      if (name === 'app.js') content = content.toString().replace(/^boot\(\);$/m, '');
       await route.fulfill({ body: content, contentType: name.endsWith('.js') ? 'text/javascript'
         : name.endsWith('.css') ? 'text/css' : 'text/html' });
     });
