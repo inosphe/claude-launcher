@@ -94,6 +94,28 @@ def test_a_sweep_on_one_instance_excludes_the_other(tmp_path):
     asyncio.run(run())
 
 
+def test_a_background_sweep_yields_to_normal_tests_across_instances(tmp_path):
+    async def run():
+        main, kimyori = _pair(tmp_path)
+        first = await main.acquire("targeted", session="a", pid=os.getpid())
+        waiting = asyncio.create_task(kimyori.acquire(
+            "sweep", session="k", pid=os.getpid(), priority=-1, wait=10))
+        await asyncio.sleep(0.2)
+        assert main.status()["queue"][0]["priority"] == -1
+        normal = await main.acquire("targeted", session="b", pid=os.getpid())
+        assert normal["granted"]
+        assert not waiting.done()
+        main.release(first["grant_id"])
+        assert not waiting.done()
+        main.release(normal["grant_id"])
+        background = await asyncio.wait_for(waiting, timeout=5)
+        assert background["granted"]
+        assert main.status()["holders"][0]["instance"] == "kimyori"
+        assert not (await main.acquire("targeted", session="c", pid=os.getpid()))["granted"]
+        kimyori.release(background["grant_id"])
+    asyncio.run(run())
+
+
 def test_a_waiter_is_granted_by_a_release_on_the_other_instance(tmp_path):
     async def run():
         main, kimyori = _pair(tmp_path)

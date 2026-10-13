@@ -161,8 +161,9 @@ nodes:
   `CFLOW_DATA_<NAME>`을 더한다. 스칼라는 텍스트로, 스칼라가 아닌 값(`bind`로
   묶인 결과 등)은 JSON 텍스트로 싣는다. JSON이 64KB를 넘는 값은 빠진다(wait·
   모니터의 probe와 같은 규칙, `runtime.verify_env`). 예: improv-leader-v2의
-  sweep verify는 integrate가 묶은 `data.merged`를 `CFLOW_DATA_MERGED`로 읽어
-  머지한 저장소를 판정한다(claunch-6xg).
+  checkpoint-check verify는 integrate가 묶은 `data.merged`를
+  `CFLOW_DATA_MERGED`로 읽어 머지한 저장소의 검증 작업 기록을 판정한다
+  (claunch-6xg, claunch-61xvf).
 - 비동기 실행: `flow_report`는 작업을 `verifying` 상태로 두고(저널
   `verify_started`) 바로 돌아온다. 응답에 `verifying`이 실린다. 명령은 MCP 서버
   프로세스의 백그라운드 스레드에서 런 잠금 밖으로 실행된다. 끝나면 잠금을 잡고, 같은
@@ -2528,3 +2529,71 @@ PR은 닫고 브랜치는 지웠다.
 | 3 | 실행 주체: inline, subagent, session (headless는 claunch-xjbrh에서 제거) |
 | 4 | 데몬 연동(대기 probe, timer, 실행 시간 모니터, session 자식), API, 웹 화면 |
 | 5 | `improv-worker-v2` 정의, v1 deprecated 표시 |
+
+
+### 리더의 단계별 사후 검증 (claunch-61xvf)
+
+`improv-leader-v2`는 각 성공한 PR/로컬 머지 직후 그 누적 결과를
+`tools/delayed_sweep.py enqueue`로 기록한다. 예를 들어 A, B, C를 순서대로
+머지하면 A, A+B, A+B+C의 SHA마다 고정 브랜치가 생긴다. 브랜치는
+`delayed-sweep/<리더>/<40자 SHA>`이며 이후 머지로 이동하지 않는다.
+`merges` 반환값은 `{issue, tip, merge_sha}` 행들의 목록이다. 동일 SHA를
+다시 enqueue해도 작업이 추가되지 않는다. `checkpoint-check`는 성공한
+모든 머지의 고정 브랜치와 큐 기록을 확인한 뒤 착지 통지로 진행한다.
+스윕과 라이브 반영의 완료는 다음 머지 회차를 지연시키지 않는다.
+
+검증 작업은 `<base_home>/daemon/delayed-sweeps.sqlite3`에 보존된다. 같은
+base home을 사용하는 데몬 인스턴스들이 큐와 저장소별 중단 상태를 공유한다.
+다른 인스턴스가 작업을 실행해도 등록 당시의 인스턴스·런처 홈·scratch를
+사용하며, 결과 알림은 등록한 인스턴스의 세션에만 전달한다. 데몬의 실행
+프로세스는 고정 SHA의 깨끗한 detached worktree에서 기존 `tools/sweep.py`를
+실행하고 SHA별 영수증을 남긴다. 작업 공간과 로그는 해당 리더의 세션별
+scratch 경로에 둔다. 실행 중인 PID가 살아 있으면 재시작한 데몬은 같은
+작업을 중복 실행하지 않는다. 실행 중단·창 대기 실패는 `retry`로 남고,
+실제 테스트 실패는 `failed`로 남는다. 미완료 작업과 고정 브랜치는 리더의
+회차 종료나 교대 종료 때 삭제하지 않고 다음 리더에게 인계한다.
+
+일반 사후 스윕의 테스트 윈도우 우선순위는 -1, 기존 표적 테스트와 필수
+스윕의 기본값은 0이다. 데몬은 윈도우가 유휴일 때 일반 사후 작업을 시작한다.
+음수 우선순위의 대기 스윕은 새 우선순위 0 표적 테스트를 막지 않는다.
+실행 중인 스윕은 완료까지 독점한다. 일반 작업이 계속되면 사후 작업은
+오래 대기할 수 있다. 음수 우선순위 작업은 데몬이 없거나 연결이 끊겼을 때
+OS 잠금 fallback으로 실행하지 않고 재시도한다. 에이전트는 우선순위를
+낮출 수 있으며 양수 우선순위·force는 운영자 권한을 유지한다.
+
+회귀 실패가 기록되면 큐는 해당 git common directory의 일반 머지를 중단한다.
+리더는 `handle-regression`에서 원래 머지 이슈의 자식 수정 이슈를 만들고
+별도 워크트리의 `improv-worker-v2` 자식 세션에 위임한다. `repair`로 등록한
+수정 이슈만 머지할 수 있으며 그 머지의 검증은 우선순위 0으로 처리한다.
+실패 SHA를 포함하는 수정 머지의 전체 스윕이 통과하면 큐가 머지를 재개한다.
+그동안 다른 저장소의 머지는 계속할 수 있다. 수정 자식 슬롯이 없으면
+위임 대기로 기록하고 해당 저장소의 머지 중단을 유지한다. 여러 리더가
+같은 머신·git common directory를 공유하면 같은 pause를 읽는다. 다른 머신의
+통합 authority에도 실패 SHA와 수정 이슈를 통지하고 그쪽에서 같은 정책을
+적용한다. 이미 시작한 원격 머지는 결과를 보존하고 이후 일반 머지를 중단한다.
+
+라이브 반영은 이 워크플로에서 분리됐다. 착지 통지는 「머지 완료·사후 검증
+대기」를 구분하며 배포 완료로 보고하지 않는다. 별도 배포 절차는 배포할
+정확한 SHA의 검증 영수증을 확인해야 한다. `restart_live.* --branch master`를
+과거 SHA의 검증 영수증에 근거해 실행해서는 안 된다. 이 변경은 별도 배포
+파이프라인을 새로 구현하거나 자동 재기동하지 않는다.
+
+조회와 수동 복구 명령:
+
+```sh
+uv run --no-sync python tools/delayed_sweep.py status --repo <repo>
+uv run --no-sync python tools/delayed_sweep.py admit --repo <repo> --issue <issue>
+uv run --no-sync python tools/delayed_sweep.py enqueue --repo <repo> --merge <sha> --issue <issue> --owner <leader>
+uv run --no-sync python tools/delayed_sweep.py repair --repo <repo> --job <failed-job> --issue <repair-issue>
+```
+
+다른 저장소는 enqueue의 `--command`에 해당 저장소의 전체 스윕 명령을 준다.
+기본 명령은 claunch 전체 스위트다. enqueue의 Python은 큐 실행기를 시작하는 데
+사용하고, 테스트는 고정 checkout에서 `uv sync --extra test`로 준비한 전용
+venv에서 실행한다. 환경 준비 실패는 회귀 판정 없이 재시도한다. 다른 저장소의
+전용 환경이 필요하면 `--command`에 정확한 환경의 실행 파일과 명령을 지정한다.
+일반 검증 runner가 창을 기다리고 있어도 수정 검증은 별도로 제출할 수 있다.
+수정 검증의 priority=0이 대기 중 priority=-1보다 먼저 부여되며, 이미 시작한
+스윕은 완료까지 유지한다.
+워크플로 정본은 다음 recur 회차 경계에서 다시 로드된다. 새 큐 실행 코드는
+데몬에 설치·반영되어야 동작한다. 에이전트가 데몬을 직접 재기동하지 않는다.

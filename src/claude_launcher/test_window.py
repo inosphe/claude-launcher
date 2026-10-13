@@ -139,6 +139,7 @@ def acquire(
     wait: float = DEFAULT_WAIT,
     session: Optional[str] = None,
     workers: int = 0,
+    priority: int = 0,
 ) -> WindowGrant:
     """Acquire a daemon grant, or the documented deployment fallback.
 
@@ -148,8 +149,12 @@ def acquire(
     """
     if cls not in CLASSES:
         raise ValueError(f"unknown test window class {cls!r}")
+    if isinstance(priority, bool) or not isinstance(priority, int):
+        raise ValueError("priority must be an integer")
     inherited = inherited_grant()
     if inherited is not None:
+        if priority < 0:
+            raise WindowUnavailable("background tests must request their own priority grant")
         if cls == SWEEP and inherited.cls != SWEEP:
             raise WindowUnavailable(
                 "a targeted parent grant cannot cover an exclusive sweep"
@@ -158,6 +163,8 @@ def acquire(
 
     owner = session or os.environ.get("CLAUNCH_SESSION")
     if os.environ.get(WINDOW_MODE_ENV, "").strip().lower() == "off":
+        if priority < 0:
+            raise WindowUnavailable("background tests require an enabled daemon priority queue")
         managed = os.environ.get("CLAUNCH_SESSION")
         if managed:
             print(
@@ -189,6 +196,8 @@ def acquire(
         }
         if workers:
             body["workers"] = max(1, int(workers))
+        if priority:
+            body["priority"] = priority
         # Said before the POST, which blocks until the grant or the budget runs
         # out. Without it a run that queues on the machine's window and is then
         # killed by its own shell `timeout` leaves no output at all, and
@@ -211,6 +220,8 @@ def acquire(
                 timeout=max(5.0, wait + 5.0),
             )
         except daemon_client.DaemonClientError as exc:
+            if priority < 0:
+                raise WindowUnavailable("background tests require the daemon priority queue") from exc
             return _fallback(cls, owner, started, wait, reason=str(exc))
         if result.get("granted"):
             fallback = (
@@ -241,6 +252,8 @@ def acquire(
             f"test window {cls} {detail} after {time.monotonic() - started:.0f}s"
         )
 
+    if priority < 0:
+        raise WindowUnavailable("background tests require the daemon priority queue")
     return _fallback(cls, owner, started, wait, reason="daemon unavailable")
 
 

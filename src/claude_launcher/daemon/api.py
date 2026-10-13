@@ -1550,6 +1550,7 @@ async def h_window_acquire(request: web.Request) -> web.Response:
         label=str(body.get("label") or ""),
         wait=float(body.get("wait") or 0),
         workers=int(body.get("workers") or 0),
+        priority=body.get("priority", 0),
         force=bool(body.get("force")),
         # A pid is only this machine's to check from a loopback caller.
         bound=bool(body.get("bound")) and request.remote in ("127.0.0.1", "::1"),

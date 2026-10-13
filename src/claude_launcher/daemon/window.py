@@ -124,8 +124,12 @@ What is deliberately NOT here:
 
 Operator overrides (claunch-8kald): the queue is FIFO with writer preference
 until the operator says otherwise. ``prioritize`` gives a waiting request a
-priority (higher first, FIFO within a priority; the default is 0), and
-``force`` grants a waiting request -- or a fresh operator acquisition --
+priority (higher first, FIFO within a priority; the default is 0). Requests
+can also lower their own priority at acquisition: a background sweep at -1
+does not block new default-priority targeted requests while it waits. Once
+granted it remains exclusive and is not preempted. Positive acquisition
+priority remains an operator action. ``force``
+grants a waiting request -- or a fresh operator acquisition --
 immediately, past every cap, budget and exclusivity rule. A forced holder
 still counts against the caps and the budget for everyone after it. Both are
 operator actions: the CLI refuses them inside a managed session (the
@@ -1218,6 +1222,7 @@ class WindowManager:
         label: str = "",
         wait: float = 0.0,
         workers: int = 0,
+        priority: int = 0,
         force: bool = False,
         bound: bool = False,
         gone: Optional[Callable[[], bool]] = None,
@@ -1240,6 +1245,10 @@ class WindowManager:
         """
         if cls not in CLASSES:
             return {"granted": False, "error": f"unknown window class {cls!r}"}
+        if isinstance(priority, bool) or not isinstance(priority, int):
+            return {"granted": False, "error": "priority must be an integer"}
+        if session and priority > 0:
+            return {"granted": False, "error": "positive priority is an operator action"}
         if force and session:
             return {
                 "granted": False,
@@ -1253,7 +1262,7 @@ class WindowManager:
             "pid": pid,
             "label": label,
             "enqueued_at": _utcnow(),
-            "priority": 0,
+            "priority": priority,
             "instance": self._instance,
             "daemon_pid": self._daemon_pid,
         }
@@ -1277,7 +1286,7 @@ class WindowManager:
                     "advisory_n": holder["workers"],
                     "forced": True,
                 }
-            ahead = self._ahead_of(0)
+            ahead = self._ahead_of(priority)
             blocker = self._blocker(cls, session, ahead)
             if not ahead and blocker is None:
                 holder = self._grant(entry)

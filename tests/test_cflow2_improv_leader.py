@@ -1,10 +1,9 @@
 """improv-leader-v2: the v2 port of improv-leader.yaml (claunch-yq80p.6).
 
 Compile and check the package definition, then walk a round through the
-runtime with stub probes, verify and restart: the integrate window, the
-sweep verify, the daemon-run restart, the ``deployed`` checks, the retry
-after an expired gate, the landed notice, recur auto into round 2, and the
-wind-down that ends the loop."""
+runtime with stub probes: merge admission, immutable checkpoint recording,
+regression repair delegation, notice before post-verification, recur into
+round 2, and the wind-down that ends the loop."""
 
 from __future__ import annotations
 
@@ -47,24 +46,18 @@ def test_meta_and_collection():
     assert chart.returns == {"wound_down": {}}
 
 
-def test_restart_interval_and_checks_are_declared():
+def test_async_verification_gates_and_merge_interval_are_declared():
     chart = _chart()
     by_label = {n.label: n for n in chart.nodes.values() if n.label}
-    restart = by_label["reflect"].get("restart")
-    assert restart["linux"] == "bash tools/restart_live.sh"
-    assert restart["windows"].endswith("tools/restart_live.ps1")
-    assert restart["timeout"] == 900
-    standby = chart.node("standby")
-    opts = {o["name"]: o for o in standby.get("options")}
-    assert opts["integrate"]["interval"] == 300 and "interval" not in opts["wind-down"]
-    wait = chart.node("deployed-wait")
-    assert [c["id"] for c in wait.get("checks")] == ["deployed"]
-    assert wait.get("seconds") == 600 and wait.get("poll") == 30
-    assert by_label["sweep"].executor == ["subagent", "inline"]
-    run = by_label["sweep"].get("verify")["run"]
-    # the merged repository, never the working directory (claunch-6xg)
-    assert run[4:6] == ["tools/sweep.py", "check"]
-    assert run[-2:] == ["--merged-env", "CFLOW_DATA_MERGED"] and "--repo" not in run
+    assert not [n for n in chart.nodes.values() if n.get("restart")]
+    assert "sweep" not in by_label and "reflect" not in by_label
+    opts = {o["name"]: o for o in chart.node("standby").get("options")}
+    assert opts["integrate"]["interval"] == 300
+    assert "handle-regression" in opts
+    for label, action in (("admission", "check-batch"), ("checkpoint-check", "check-enqueued")):
+        run = by_label[label].get("verify")["run"]
+        assert run[4:6] == ["tools/delayed_sweep.py", action]
+    assert by_label["checkpoint-check"].get("verify")["run"][-1] == "CFLOW_DATA_MERGED"
 
 
 class Leader:
@@ -108,186 +101,107 @@ class Leader:
         return self.status()
 
 
-def _deploy(code):
-    def run(cmd, cwd):
-        assert "deploy_check.py" in cmd
-        return (code, f"deploy_check exit {code}")
-    return run
+def _allow(cmd, cwd, env, timeout):
+    return 0, "queue admission/checkpoint verified"
 
 
-def test_a_round_end_to_end(tmp_path):
-    ld = Leader(tmp_path)
-    assert ld.st["round"] == 1 and ld.tasks() == ["intake"]
+def _preflight(ld):
     ld.report("intake")
-    assert [c["label"] for c in ld.st["choices"]] == ["standby"]
+    ld.select("integrate")
+    ld.report("integrate-preflight", "ok", {"batch": [{"issue": "x"}], "repo": "/repo"})
+    ld.report("admission", verify=_allow)
+    assert ld.tasks() == ["integrate"]
 
-    # nothing ready: the preflight finds an empty batch and goes back to standby
-    ld.select("integrate", "a candidate")
-    ld.report("integrate-preflight", "empty", {"reason": "evidence incomplete"})
-    assert [c["label"] for c in ld.st["choices"]] == ["standby"]
 
-    # the window opened at T0: a second take inside 300s is held
-    ld.now = T0 + 60
-    ld.select("integrate", "x-1 ready")
-    assert ld.st["held"]["option"] == "integrate" and ld.tasks() == []
+def _merged(ld):
+    ld.report("integrate", "ok", {"merges": [{"issue": "x", "tip": "a" * 40,
+        "merge_sha": "b" * 40}], "master": "b" * 40, "repo": "/repo"})
+
+
+def test_round_finishes_without_waiting_for_sweep_or_deployment(tmp_path):
+    ld = Leader(tmp_path)
+    _preflight(ld)
+    _merged(ld)
+    assert ld.tasks() == ["checkpoint-check"]
+    seen = []
+    def check(cmd, cwd, env, timeout):
+        import json
+        seen.append(json.loads(env["CFLOW_DATA_MERGED"]))
+        return 0, "two queued checkpoint records"
+    ld.report("checkpoint-check", verify=check)
+    assert seen[0]["repo"] == "/repo"
+    assert ld.tasks() == ["landed-notice"]
+    assert not ld.st.get("waits") and not ld.st.get("delegations")
+    ld.report("landed-notice")
+    assert ld.st["status"] == "done" and ld.st["next_round"]["auto"]
+    ld.now += 60
+    assert runtime.start_next_round(ld.cwd, "lead", ld.now)["round"] == 2
+    ld.status()
+    ld.report("intake")
+    ld.select("integrate")
+    assert ld.st["held"]["option"] == "integrate"
     ld.now = T0 + 300
     ld.tick()
     assert ld.tasks() == ["integrate-preflight"]
 
-    ld.report("integrate-preflight", "ok", {"batch": ["x-1"], "repo": "/repo"})
-    ld.report("integrate", "ok", {"merges": [["x-1", "a" * 40, "b" * 40]], "master": "b" * 40,
-                                  "repo": "/repo"})
-    assert ld.tasks() == ["sweep"]
-    ran = []
-    ld.report("sweep", "ok", {"tip": "b" * 40, "passed": 10, "failed": 0, "receipt": "r"},
-              verify=lambda cmd, cwd, env, timeout: ran.append(cmd) or (0, "green"))
-    assert ran and ran[0][4:6] == ["tools/sweep.py", "check"]
-    assert ld.tasks() == ["reflect"]
 
-    # the report waits for the daemon's restart
-    with pytest.raises(runtime.FlowError, match="restart is pending"):
-        ld.report("reflect")
-    ld.restart(0)
-    ld.report("reflect")
-    assert ld.st["waits"][0]["node"] == "deployed-wait"
-
-    # the gate does not open in 600s: the decision point; retry re-enters reflect
-    ld.now += 1
-    ld.tick(_deploy(1))
-    ld.now += 600
-    ld.tick()
-    assert ld.tasks() == ["reflect-pregate"]
-    ld.report("reflect-pregate")
-    ld.select("retry", "exit 1: restart was refused; asked again")
-    assert ld.tasks() == ["reflect"]
-    assert ld.st["tasks"][0]["restart"]["status"] == "pending"  # a new visit
-    ld.restart(0)
-    ld.report("reflect")
-    ld.now += 1
-    ld.tick(_deploy(0))
-    assert ld.tasks() == ["landed-notice"]
-    ld.report("landed-notice")
-    assert ld.st["status"] == "done" and ld.st["next_round"]["auto"] is True
-
-    # recur auto: the daemon starts round 2 after min_gap; the window record carries over
-    assert runtime.start_next_round(ld.cwd, "lead", ld.now) is None
-    ld.now += 60
-    started = runtime.start_next_round(ld.cwd, "lead", ld.now)
-    assert started["round"] == 2
-    ld.status()
-    assert ld.st["round"] == 2 and ld.tasks() == ["intake"]
-    state = runtime.RunStore(ld.cwd, "lead").load_state()
-    assert list(state["windows"].values()) == [T0 + 300]
-    ld.report("intake")
-    ld.select("integrate", "y")  # 300s have passed since the last take
-    assert ld.tasks() == ["integrate-preflight"]
-
-
-def _to_sweep(ld):
-    ld.report("intake")
-    ld.select("integrate")
-    ld.report("integrate-preflight", "ok", {"batch": ["x"], "repo": "/repo"})
-
-
-def _deploy_ok(ld):
-    ld.restart(0)
-    ld.report("reflect")
-    ld.now += 1
-    ld.tick(_deploy(0))
-
-
-def test_a_red_sweep_keeps_the_round_and_still_reflects(tmp_path):
-    """X1: a sweep fail after the merge does not end the round failed; the
-    follow-up is requested and the merged items go on to reflect and notice."""
+def test_missing_checkpoint_holds_the_report_without_running_tests(tmp_path):
     ld = Leader(tmp_path)
-    _to_sweep(ld)
-    ld.report("integrate", "ok", {"merges": [["x", "a" * 40, "b" * 40]], "master": "b" * 40,
-                                  "repo": "/repo"})
-    ld.report("sweep", "fail", {"reason": "2 failed: tests/test_x.py"})
-    assert ld.st["status"] == "running" and ld.tasks() == ["batch-failed"]
-    ld.report("batch-failed", "ok", {"failed": "sweep", "cause": "test_x after x",
-                                     "followups": ["s9: x-2"]})
-    assert ld.tasks() == ["reflect"]
-    _deploy_ok(ld)
-    ld.report("landed-notice")
-    assert ld.st["status"] == "done" and ld.st["outcome"] == "ok"
-    assert ld.st["next_round"]["round"] == 2
-
-
-def test_an_integrate_fail_with_nothing_merged_returns_to_standby(tmp_path):
-    ld = Leader(tmp_path)
-    _to_sweep(ld)
-    ld.report("integrate", "fail", {"reason": "ff-only refused", "merges": []})
-    assert ld.tasks() == ["batch-failed"]
-    ld.report("batch-failed", "nothing_merged", {"reason": "no merge before the stop"})
+    _preflight(ld)
+    _merged(ld)
+    ld.report("checkpoint-check", verify=lambda *args: (2, "merge has no queued checkpoint"))
+    assert ld.tasks() == ["checkpoint-check"]
     assert ld.st["status"] == "running"
-    assert [c["label"] for c in ld.st["choices"]] == ["standby"]
+    ld.report("checkpoint-check", verify=_allow)
+    assert ld.tasks() == ["landed-notice"]
 
 
-def test_an_integrate_fail_after_merges_reflects_them(tmp_path):
-    ld = Leader(tmp_path)
-    _to_sweep(ld)
-    ld.report("integrate", "fail", {"reason": "ff-only refused", "merges": [["x", "a", "b"]]})
-    ld.report("batch-failed", "ok", {"failed": "integrate", "cause": "local master ahead",
-                                     "followups": []})
-    assert ld.tasks() == ["reflect"]
-
-
-def test_all_candidates_dropped_at_merge_time_skip_sweep(tmp_path):
-    """Y11: integrate empty goes back to standby without a sweep or a restart."""
-    ld = Leader(tmp_path)
-    _to_sweep(ld)
-    ld.report("integrate", "empty", {"reason": "both conflicted"})
-    assert ld.st["status"] == "running" and ld.tasks() == []
-    assert [c["label"] for c in ld.st["choices"]] == ["standby"]
-
-
-def test_exhausted_reflect_retries_close_the_round(tmp_path):
-    """Y12: five failed deploy attempts close the round without deploy (ok,
-    so recur continues) instead of failing the run."""
-    ld = Leader(tmp_path)
-    _to_sweep(ld)
-    ld.report("integrate", "ok", {"merges": [], "master": "m", "repo": "/repo"})
-    ld.report("sweep", "ok", {"tip": "m", "passed": 1, "failed": 0, "receipt": "r"},
-              verify=lambda *a: (0, ""))
-    for attempt in range(5):
-        assert ld.tasks() == ["reflect"], attempt
-        ld.restart(1)
-        ld.report("reflect")
-        ld.now += 1
-        ld.tick(_deploy(1))
-        ld.now += 600
-        ld.tick()
-        assert ld.tasks() == ["reflect-pregate"], attempt
-        ld.report("reflect-pregate")
-        ld.select("retry", f"exit 1, attempt {attempt}")
-    assert ld.st["status"] == "running" and ld.tasks() == ["reflect-closed"]
-    ld.report("reflect-closed")
-    ld.report("landed-notice")
-    assert ld.st["status"] == "done" and ld.st["next_round"]["round"] == 2
-
-
-def test_close_ends_the_round_without_deploy(tmp_path):
+def test_a_pause_between_preflight_and_merge_returns_to_standby(tmp_path):
     ld = Leader(tmp_path)
     ld.report("intake")
     ld.select("integrate")
-    ld.report("integrate-preflight", "ok", {"batch": ["x"], "repo": "/repo"})
-    ld.report("integrate", "ok", {"merges": [], "master": "m", "repo": "/repo"})
-    ld.report("sweep", "ok", {"tip": "m", "passed": 1, "failed": 0, "receipt": "r"},
-              verify=lambda *a: (0, ""))
-    ld.restart(1)
-    ld.report("reflect")
-    ld.now += 1
-    for _ in range(3):  # exit 3 (dirty checkout) is undecided
-        ld.tick(_deploy(3))
-        ld.now += 30
-    assert ld.tasks() == ["reflect-pregate"]
-    ld.report("reflect-pregate")
-    ld.select("close", "exit 3: another session's files; asked it to commit")
-    assert ld.tasks() == ["reflect-closed"]
-    ld.report("reflect-closed")
-    ld.report("landed-notice")
-    assert ld.st["status"] == "done" and ld.st["next_round"]["round"] == 2
+    ld.report("integrate-preflight", "ok", {"batch": [{"issue": "x"}], "repo": "/repo"})
+    ld.report("admission", "paused", {"reason": "regression detected"})
+    assert [c["label"] for c in ld.st["choices"]] == ["standby"]
+    ld.select("handle-regression")
+    assert ld.tasks() == ["handle-regression"]
+    ld.report("handle-regression")
+    assert [c["label"] for c in ld.st["choices"]] == ["standby"]
+
+
+def test_an_empty_preflight_or_dropped_batch_returns_to_standby(tmp_path):
+    ld = Leader(tmp_path)
+    ld.report("intake")
+    ld.select("integrate")
+    ld.report("integrate-preflight", "empty", {"reason": "all candidates paused"})
+    assert [c["label"] for c in ld.st["choices"]] == ["standby"]
+    ld.now += 300
+    ld.select("integrate")
+    ld.report("integrate-preflight", "ok", {"batch": [{"issue": "x"}], "repo": "/repo"})
+    ld.report("admission", verify=_allow)
+    ld.report("integrate", "empty", {"reason": "head changed"})
+    assert [c["label"] for c in ld.st["choices"]] == ["standby"]
+
+
+def test_partial_merge_failure_preserves_checkpoints_before_notice(tmp_path):
+    ld = Leader(tmp_path)
+    _preflight(ld)
+    merges = [{"issue": "x", "tip": "a" * 40, "merge_sha": "b" * 40}]
+    ld.report("integrate", "fail", {"reason": "ff-only refused", "merges": merges, "repo": "/repo"})
+    assert ld.tasks() == ["batch-failed"]
+    ld.report("batch-failed", "ok", {"repo": "/repo", "merges": merges,
+              "failed": "integrate", "cause": "ff-only refused", "followups": []})
+    assert ld.tasks() == ["checkpoint-check"]
+    ld.report("checkpoint-check", verify=_allow)
+    assert ld.tasks() == ["landed-notice"]
+
+
+def test_no_merge_before_failure_returns_to_standby(tmp_path):
+    ld = Leader(tmp_path)
+    _preflight(ld)
+    ld.report("integrate", "fail", {"reason": "git error", "merges": [], "repo": "/repo"})
+    ld.report("batch-failed", "nothing_merged", {"reason": "no successful merges"})
+    assert [c["label"] for c in ld.st["choices"]] == ["standby"]
 
 
 WIND_DOWN = {
@@ -378,7 +292,7 @@ def test_the_leader_registers_a_remote_workers_pr_request(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# claunch-6xg: the sweep gate judges the repository the batch was merged into
+# claunch-6xg: the checkpoint gate judges the repository the batch was merged into
 
 
 def _load_sweep():
@@ -391,68 +305,18 @@ def _load_sweep():
     return module
 
 
-def _commit_repo(path):
-    import subprocess
-    for args in (["init", "-q"], ["config", "user.name", "t"],
-                 ["config", "user.email", "t@t"]):
-        subprocess.run(["git", *args], cwd=path, check=True)
-    (path / "a.txt").write_text("one\n", encoding="utf-8")
-    for args in (["add", "-A"], ["commit", "-q", "-m", "first"], ["branch", "-M", "master"]):
-        subprocess.run(["git", *args], cwd=path, check=True)
-
-
-def test_the_sweep_gate_judges_the_merged_repository(tmp_path, repo_template, monkeypatch):
-    """The leader's run sits in one repository and the batch is merged into
-    another (run-945d034a). The integrate step's `repo` is bound to
-    data.merged, the verify reads it through CFLOW_DATA_MERGED, and the gate
-    asks for THAT repository's receipt: red without it, green with it. The
-    leader's own checkout holds a green receipt the whole time -- a fallback
-    to the working directory would turn the first answer green."""
+def test_checkpoint_gate_receives_the_merged_repository_not_leader_cwd(tmp_path):
     import json
-    import os
-    import sys
-    from unittest import mock
-
-    sweep = _load_sweep()
-    for key in (sweep.test_window.WINDOW_GRANT_ENV, sweep.test_window.WINDOW_CLASS_ENV,
-                sweep.test_window.WINDOW_WORKERS_ENV):
-        monkeypatch.delenv(key, raising=False)
-    home = repo_template("leader-6xg", _commit_repo, tmp_path / "leader")
-    merged = repo_template("leader-6xg", _commit_repo, tmp_path / "merged")
-    (merged / "b.txt").write_text("two\n", encoding="utf-8")  # a different tip
-    import subprocess
-    subprocess.run(["git", "add", "-A"], cwd=merged, check=True)
-    subprocess.run(["git", "commit", "-q", "-m", "batch"], cwd=merged, check=True)
-    receipts = tmp_path / "receipts"
-    green = f'"{sys.executable}" -c "print(\'3 passed in 0.1s\')"'
-    assert sweep.main(["run", "--repo", str(home), "--receipts", str(receipts),
-                       "--command", green]) == 0
-
-    tip = subprocess.run(["git", "rev-parse", "master"], cwd=merged, check=True,
-                         capture_output=True, text=True).stdout.strip()
-    ld = Leader(home)
-    _to_sweep(ld)
-    ld.report("integrate", "ok", {"merges": [["x", "a" * 40, tip]], "master": tip,
-                                  "repo": str(merged)})
-    assert ld.tasks() == ["sweep"]
+    ld = Leader(tmp_path)
+    _preflight(ld)
+    _merged(ld)
     seen = []
-
-    def gate(cmd, cwd, env, timeout):
-        # the packaged argv after `uv run --no-sync python tools/sweep.py`
-        assert cmd[:5] == ["uv", "run", "--no-sync", "python", "tools/sweep.py"]
+    def check(cmd, cwd, env, timeout):
         seen.append((cwd, json.loads(env["CFLOW_DATA_MERGED"])["repo"]))
-        with mock.patch.dict(os.environ, env, clear=True):
-            code = sweep.main([*cmd[5:], "--receipts", str(receipts)])
-        return (code, f"sweep check exit {code}")
-
-    value = {"tip": "b" * 40, "passed": 3, "failed": 0, "receipt": "r"}
-    ld.report("sweep", "ok", value, verify=gate)
-    assert seen == [(str(home), str(merged))]
-    assert ld.tasks() == ["sweep"]  # red: no receipt for the merged repository's tip
-    assert sweep.main(["run", "--repo", str(merged), "--receipts", str(receipts),
-                       "--command", green]) == 0
-    ld.report("sweep", "ok", value, verify=gate)
-    assert ld.tasks() == ["reflect"]  # green: the merged repository's receipt
+        return 2, "no queued checkpoint for merged repo"
+    ld.report("checkpoint-check", verify=check)
+    assert seen == [(str(tmp_path), "/repo")]
+    assert ld.tasks() == ["checkpoint-check"]
 
 
 # claunch-4zc51.1.1: the leader's wrapup said "basetemp는 지우지 않는다 --

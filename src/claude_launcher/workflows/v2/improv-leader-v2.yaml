@@ -1,24 +1,15 @@
 cflow: 2
 name: improv-leader-v2
 description: >
-  자유 진행 관제 리더(v1 improv-leader의 v2 포트, claunch-yq80p.6) — 한 회차 =
-  운영 확인 -> 관제 대기(워커 요청 처리·증거 수합) -> 증거가 찬 착지 요청이
-  있으면 통합 창(직전 통합에서 300초)에 모아 배치로 심사·머지 -> 머지 결과 트리의
-  전체 스윕(subagent) -> 라이브 반영(데몬이 restart 실행, 기계 확인 checks) ->
-  착지 통지로 마감, 또는 (ask-user로 사용자가 확정한) 교대 종료. 착지 요청은 landing 컬렉션이
-  담는다: v1·v2 워커의 enqueue-landing trigger가 넣고, 다른 머신의 워커가 메시로
-  보낸 요청은 리더가 직접 넣는다. landed는 데몬이 git으로 잰다. 머지 실행과
-  스윕은 리더의 턴에서 일어나지 않는다 — subagent가 실행하고 리더는 돌아온
-  값을 값싼 읽기로 되확인한다. 회차가 ok로 끝나면 데몬이 다음 회차를 시작한다
-  (recur auto). 교대 종료는 결과 wound_down으로 끝나 루프도 함께 끝난다.
-  통합 후보는 두 매체로 온다: 착지 항목에 pr_url이 있으면 PR 후보(리뷰를
-  gh pr review로 기록하고 gh pr merge --merge --match-head-commit <tip>, 사용자
-  승인 없음), 없으면 로컬 후보(master에 --no-ff). 심사·창·스윕·마감은 매체와
-  무관하게 하나다(docs/cflow-v2.md 10a).
+  배치 머지를 처리하고 각 성공한 머지 결과를 고정 브랜치와 지속 검증 큐에
+  기록하는 리더. 사후 스윕은 데몬 큐 실행 프로세스가 낮은 테스트 우선순위로
+  수행하며 다음 머지 회차를 막지 않는다. 회귀 실패 시 해당 저장소의 새 일반
+  머지를 중단하고 수정 자식 세션을 생성한다. 수정 머지의 전체 검증이 통과하면
+  재개한다. 라이브 반영은 별도 절차다. PR·로컬 후보의 심사와 착지 확인은
+  기존과 같고, 회차가 끝나면 다음 회차를 자동으로 시작한다.
 
 # 회차마다 다음 회차를 요청하고 데몬이 시작한다(docs/cflow-v2.md 2.1 recur).
-# 마지막 단계가 라이브 재기동이라 회차를 닫는 턴이 재기동과 함께 사라질 수
-# 있으므로 시작을 드라이버에게 맡기지 않는다(v1 improv-leader와 같은 이유).
+# 사후 검증은 회차 밖의 지속 큐에 남는다. 다음 머지 회차는 스윕을 기다리지 않는다.
 recur: {auto: true}
 
 # 관제 런은 leader 역할 세션만 몬다. default_role은 두지 않는다: v1
@@ -99,7 +90,9 @@ fragments:
        그 이슈에 `claunch beads comments add <이슈> "PR-REVIEW #<번호> <판정>: <근거>"`
        를 남기고 보고에 매체(review 또는 comment)를 적는다. 판정 자체(머지 여부)는
        매체와 무관하다.
-    4. `gh pr merge <pr_number> --merge --match-head-commit <tip>`. 다른 tip이면
+    4. 먼저 `tools/delayed_sweep.py admit --repo <대상 저장소> --issue <이슈>`가
+       통과하는지 다시 확인한다. 거절되면 deferred로 두고 머지하지 않는다.
+       `gh pr merge <pr_number> --merge --match-head-commit <tip>`. 다른 tip이면
        gh가 거절한다(실측 `Head branch was modified`) — 그때는 1부터 다시 한다.
        다시 하는 것은 두 번까지다. 세 번째 거절이면 deferred로 두고 워커에게
        「PR head가 계속 바뀐다: 마지막 headRefOid <sha>」로 알린다.
@@ -109,6 +102,8 @@ fragments:
        그 둘째 부모가 tip인지 `git log -1 --format=%P <merge>`로 확인한다.
        원격 base가 그 tip을 포함하는지 `tools/commit_check.py --remote <remote>
        --ref master --sha <tip> --contains`로 확인한다.
+       이 시점에서 위 enqueue 명령으로 PR의 머지 SHA를 즉시 큐에 기록한다.
+       로컬 FF에 실패해도 원격에서 성공한 머지의 검증 작업은 보존된다.
     6. 로컬 master를 `git merge --ff-only <remote>/master`로 맞춘다. 착지 큐의
        landed는 데몬 watch가 로컬 master 기준으로 잰다 — 손으로 set하지 않는다.
        ff-only가 거절되면(로컬 master에 원격에 없는 커밋이 있다) 강제로 맞추지
@@ -117,11 +112,11 @@ fragments:
        결과 fail(reason, merges = 여기까지 머지된 것)로 끝낸다. 이미 원격에서
        머지된 PR 항목은 그 상태로 남고, batch-failed가 처리한다.
     7. 워커에게 `<merge sha> @ <remote>/master`를 통지한다(landed-notice에서
-       반영 결과와 함께 한 번 더).
+       검증 큐 상태와 함께 한 번 더).
   subagent-runs: |
     ── 실행은 subagent, 심사는 리더 ──
-    머지와 전체 스윕은 리더의 턴에서 돌리지 않는다. 한 subagent = 한 일(스윕
-    하나, 머지 하나). subagent가 가져온 해시·수치를 리더가 값싼 읽기 명령
+    머지는 subagent가 실행한다. 전체 스윕은 데몬의 지속 검증 큐 실행
+    프로세스가 수행하며 리더는 스윕 완료를 기다리지 않는다. 한 subagent = 한 머지 실행. subagent가 가져온 해시·수치를 리더가 값싼 읽기 명령
     (`git rev-parse`, `git log -1`, 영수증 읽기)으로 되확인한 뒤 심사에만 쓴다.
     subagent가 실패를 가져오면 그 자리에서 고치지 않는다 — 실패 요약을 실어
     새 subagent를 띄우거나, 그 후보를 이번 배치에서 뺀다.
@@ -136,8 +131,17 @@ nodes:
         (default_child_cflow). v1 워커(improv-worker)를 쓰는 자식은 spawn에
         workflow를 명시한다 — v1 워커의 착지 요청도 같은 landing 컬렉션에
         들어온다(docs/cflow-v2.md 10절 「v1 연결」).
-      - 테스트 분업: 워커는 바꾼 영역만 표적으로 돌리고, 전체 스윕은 리더가
-        배치당 한 번 subagent에 맡긴다.
+      - 테스트 분업: 워커의 표적 테스트 실행 또는 생략 근거를 심사한다.
+        각 성공한 머지 단계의 누적 결과(A, A+B, A+B+C)를 고정 브랜치로 보존하고
+        전체 검증 큐에 넣는다. 기본 priority=-1, 수정 머지 검증은 priority=0이다.
+        대기 중 사후 스윕은 일반 테스트를 막지 않으며, 이미 실행 중인 스윕은
+        완료까지 독점한다. 유휴 자원이 없으면 대기는 길어질 수 있다.
+      - 지속 큐: `tools/delayed_sweep.py status --repo <대상 저장소>`를 읽는다.
+        큐는 회차와 리더 세션을 넘어 남으며 데몬이 재개한다. 활성 pauses가
+        있으면 해당 저장소는 수정 이슈만 허용한다. 미위임 실패는 관제 대기의
+        handle-regression으로 처리한다. 다른 저장소의 통합은 계속한다.
+      - 라이브 반영: 이번 런은 재기동·배포하지 않는다. 검증된 SHA와 영수증을
+        별도 배포 절차에 전달한다. 그 절차는 배포할 정확한 SHA의 검증을 확인한다.
       - 원격 편성: 다른 머신의 워커가 있으면 아래 원격 메시 규칙을 이 회차에
         적용한다고 확인한다(원격 이름, base, `gh auth status --hostname <host>`).
       - 착지 큐: flow_status의 collections.landing에서 지난 회차에서 넘어온
@@ -154,7 +158,7 @@ nodes:
       0. 머지 대상 저장소를 정한다: 후보 브랜치가 있는 저장소의 절대경로이고,
          그 저장소 안에서 `git rev-parse --show-toplevel`이 출력한 값을 그대로
          쓴다(Windows에서는 `F:/...` 형식 — `/f/...` 형식은 절대경로로 읽히지
-         않아 스윕 게이트가 판정 불가로 멈춘다).
+         않아 검증 큐의 저장소 판정이 불가로 멈춘다).
          이 런의 cwd(리더의 체크아웃)와 다를 수 있다 — 리더가 claude-launcher에
          서 있고 배치가 gds5로 간 회차가 실제로 있었다(claunch-6xg). 아래 심사·
          머지·스윕은 모두 이 저장소에서 한다. 한 배치는 한 저장소다 — 다른
@@ -163,7 +167,10 @@ nodes:
          그리고 `claunch beads list --status in_review --json`. 둘이 어긋나면
          (보드에는 있는데 큐에 없음 등) 이유를 적는다. 원격 워커의 요청은
          직접 넣었는지 확인한다.
-      2. 각 후보를 `uv run --no-sync python tools/merge_ready.py --repo <대상 저장소>
+      2. 각 후보를 넣기 전에 `uv run --no-sync python tools/delayed_sweep.py
+         admit --repo <대상 저장소> --issue <이슈>`를 실행한다. 거절되면 그 후보는
+         deferred(사유: 저장소 회귀 실패로 일반 머지 중단)다. 수정 이슈만 통과한다.
+         그다음 각 후보를 `uv run --no-sync python tools/merge_ready.py --repo <대상 저장소>
          --branch <브랜치>`(원격이면 `<remote>/<브랜치>`)로 심사한다. 큐의 tip과 브랜치 tip이
          다르면 그 후보는 이번 배치에서 빼고 워커에게 tip 불일치를 알린다.
       3. 통과한 후보는 flow_collection set으로 status waiting, 이번에 넣지 않는
@@ -201,6 +208,17 @@ nodes:
       먼저 PR 후보를 아래 PR 절차(3–7: 리뷰 기록, --match-head-commit 머지, fetch
       뒤 확인, 로컬 master fast-forward)대로 머지한다. 그다음
       배치의 로컬 후보를 master에 `git merge --no-ff <브랜치>`로 차례로 머지한다.
+      각 PR 또는 로컬 머지를 시작하기 직전에 `tools/delayed_sweep.py admit
+      --repo <대상 저장소> --issue <이슈>`를 다시 실행한다. 회귀 실패가 배치
+      도중 확인되면 이미 시작한 머지의 결과를 기록하고, 이후 일반 후보는
+      deferred로 둔다. 수정 이슈만 계속할 수 있다.
+      성공한 머지는 매번 즉시 `uv run --no-sync python tools/delayed_sweep.py
+      enqueue --repo <대상 저장소> --merge <40자 머지 SHA> --issue <이슈>
+      --owner <이 리더 세션>`으로 기록한다. 다른 저장소의 스윕 명령은
+      `--command`로 명시한다. 마지막 머지 뒤 한 번만 기록하지 않는다.
+      반환되는 ref는 고정 브랜치다. 덮어쓰거나 삭제하지 않는다.
+      enqueue 실패 시 다음 후보를 머지하지 않고 fail로 보고한다. 재실행은
+      같은 SHA를 중복 생성하지 않는다. 테스트 작업은 여기서 기다리지 않는다.
       실행은 subagent 하나가 한다(머지 하나 = subagent 하나, 또는 배치 전체를
       한 subagent에 차례로 — 리더가 정한 순서대로). 충돌이 나면 그 후보는
       머지하지 않고 deferred로 돌리고 워커에게 `master @ <sha>` 기준 rebase를
@@ -216,141 +234,107 @@ nodes:
       <대상 저장소> rev-parse master`의 출력)를 담는다 — 브랜치 이름이나 짧은
       sha는 판정 불가로 멈춘다. 게이트는 그
       master가 repo의 커밋이고 지금 master에 포함되는지 확인한다 — 둘이 다른
-      저장소를 가리키면 판정 불가로 멈춘다. 이 값은 data.merged로 묶여 스윕 단계의 verify가 그
-      저장소의 영수증을 찾는 근거가 된다 — 비우거나 이 런의 cwd로 대신 적으면
-      스윕 게이트가 엉뚱한 저장소를 판정한다. 배치의 후보가 모두 머지 시점에 빠졌으면
-      (충돌, review 거절, head 불일치) 결과 empty로 스윕·반영 없이 관제 대기로
+      저장소를 가리키면 판정 불가로 멈춘다. 이 값은 data.merged로 묶여 checkpoint-check가 해당 저장소의
+      모든 머지 결과가 큐에 기록됐는지 검증하는 근거가 된다. 배치의 후보가 모두 머지 시점에 빠졌으면
+      (충돌, review 거절, head 불일치) 결과 empty로 관제 대기로
       돌아간다. 머지 도중 멈춰야 했으면(ff-only 거절, 복구할 수 없는 git 오류)
-      결과 fail에 사유와 그때까지 머지된 것을 적는다 — master는 되돌리지 않는다.
+      결과 fail에 repo와 사유, 그때까지 머지된 것을 적는다 — master는 되돌리지 않는다.
       ${frag:pr-merge}
       ${frag:subagent-runs}
       ${frag:remote-mesh}
     returns:
       ok: {merges: list, master: str, repo: str}
       empty: {reason: str}
-      fail: {reason: str, merges: list}
+      fail: {reason: str, merges: list, repo: str}
     done_when: |
       머지 커밋마다 (issue, 매체, tip, merge sha; PR이면 번호와 리뷰 판정)와 머지 후
-      master tip(원격이 있으면 `<remote>/master`와 같음)이 보고에 있다
+      merges는 각 행 {issue, tip, merge_sha}이고, master tip(원격이 있으면 `<remote>/master`와 같음)이 보고에 있다
     effects: [git.merge, git.push, board.write]
 
-  sweep:
-    title: 머지 결과 트리의 전체 스윕
+  admission:
+    title: 저장소 실패 상태 재확인
     prompt: |
-      머지한 저장소(data.merged.repo, integrate가 돌려준 값)의 master tip 전체
-      스윕을 `tools/sweep.py run --repo <그 저장소의 깨끗한 체크아웃> --branch
-      master`로 돌리고 영수증을 남긴다(그 저장소의 스윕 명령이 이 저장소의 것과
-      다르면 `--command`로 준다). 이 런의 cwd 저장소를 스윕하지 않는다. 테스트 창은 pytest가 스스로 잡는다(손으로 acquire하지
-      않는다). 통합 심사에서 같은 트리를 이미 쓸었으면 그 영수증을 재사용한다
-      (머지 커밋의 트리 해시가 같은지 확인). 결과는 tip, 통과·실패 수,
-      영수증 경로로 돌려준다.
-    returns:
-      ok: {tip: str, passed: int, failed: int, receipt: str}
-      fail: {reason: str}
-    # verify는 스윕이 아니다: subagent가 남긴 영수증이 지금 master tip에 대한
-    # green인지 보는 값싼 검사다. 판정할 저장소는 integrate가 묶은
-    # data.merged의 repo다(CFLOW_DATA_MERGED, JSON). 기록이 없으면 exit 2(판정
-    # 불가)로 멈추고 cwd로 떨어지지 않는다 — cwd는 리더의 체크아웃이고 배치가
-    # 간 저장소가 아닐 수 있다(claunch-6xg).
-    verify: [uv, run, --no-sync, python, tools/sweep.py, check, --branch, master,
-             --merged-env, CFLOW_DATA_MERGED]
-    executor: [subagent, inline]
-    effects: [test.run, fs.write]
-    done_when: 지금 master tip에 대한 green 스윕 영수증이 있다
+      data.reviewed의 후보를 머지하기 전에 지속 큐의 저장소 pause를 재확인한다.
+      활성 실패 때문에 후보가 거절되면 paused로 보고하고 관제 대기로 돌아간다.
+      미위임 실패는 handle-regression으로 처리한다. ok는 verify가 다시 확인한다.
+    returns: {ok: {}, paused: {reason: str}}
+    verify: [uv, run, --no-sync, python, tools/delayed_sweep.py, check-batch,
+             --env, CFLOW_DATA_REVIEWED]
+    effects: [fs.read]
+    done_when: 모든 후보가 현재 저장소의 머지 허용 정책을 통과한다
 
-  reflect:
-    title: 라이브 서버 반영
+  checkpoint-check:
+    title: 머지 단계별 검증 작업 기록 확인
     prompt: |
-      이 작업에 들어오면 데몬의 cflow2 clock이 아래 restart 명령
-      (tools/restart_live.*)을 실행한다. 리더는 그 명령도 `claunch daemon
-      restart`도 직접 실행하지 않는다(AGENTS.md). 명령은 이 런의 드라이버 세션
-      이름을 달고 나가므로 웹 UI 승인 게이트로 올라가고, 무응답이면 300초 뒤
-      승인으로 나간다(daemon/restart_gate.py). 사용자는 연장을 횟수 제한 없이
-      고를 수 있고, 카드에는 restart_live가 만든 재기동 이유(deploy_check
-      판정과 아직 서빙되지 않은 master 커밋 목록)가 표시된다.
-      restart 결과 블록이 오기 전에는 보고가 거절된다. 결과가 오면 새 데몬이
-      섰는지 재기동 통지 블록이나 재기동 전후 pid로 판정하고(응답이 있다는
-      사실은 판정이 아니다), 새 머지 커밋의 기능이 실제로 서빙되는지 하나
-      이상 확인한다. 반영 판정 자체는 다음 대기(deployed-wait)의 checks가 한다.
-    restart:
-      windows: 'powershell -NoProfile -ExecutionPolicy Bypass -File tools/restart_live.ps1'
-      linux: 'bash tools/restart_live.sh'
-      # 게이트 밖에서 멈춘 스크립트를 끊는 상한이다. 게이트가 이 세션의
-      # 요청을 붙들고 있는 동안에는 clock이 이 시한으로 셸을 죽이지 않는다
-      # (restart_gate.holding, claunch-mm8zv; v1과 같음).
-      timeout: 900
-    done_when: |
-      새 데몬을 무엇으로 판정했는지(통지 블록 또는 pid)와, 새 머지 커밋의
-      기능이 서빙됨을 확인한 방법과 결과가 보고에 있다.
-    effects: []
+      data.merged.repo의 merges 각 행(issue, tip, merge_sha)에 대해 고정 브랜치와
+      지속 검증 작업이 존재하는지 확인한다. 빠진 항목은 enqueue로 복구한다.
+      전체 스윕을 기다리지 않는다. 영수증이 아직 없어도 정상 대기 상태다.
+    verify: [uv, run, --no-sync, python, tools/delayed_sweep.py, check-enqueued,
+             --env, CFLOW_DATA_MERGED]
+    done_when: 성공한 모든 머지 단계의 고정 브랜치와 검증 작업이 기록되어 있다
+    effects: [fs.read, fs.write]
 
-  reflect-pregate:
-    title: 반영 재시도 판단
+  handle-regression:
+    title: 회귀 실패 수정 자식 생성
     prompt: |
-      deployed-wait의 checks가 600초 안에 모두 통과하지 못했다. flow_status의
-      대기 값(checks: 항목별 exit와 출력)과 저널의 restart_completed /
-      restart_interrupted를 먼저 읽는다. deploy_check의 종료 코드로 갈린다:
-      exit 1(옛 코드 서빙) — 재기동이 실행되지 않았거나 실패했다. exit 3(체크아웃이
-      더러움) — 판정문의 미커밋 경로를 정리(다른 세션 것이면 요청)한다.
-      exit 2(판정 불가) — 판정문의 원인을 고친다. 정리했으면 retry(reflect에
-      다시 들어가 restart가 다시 실행된다), 이 턴에 정리할 수 없으면 close.
+      `tools/delayed_sweep.py status --repo <대상 저장소>`의 활성 pauses를 읽는다.
+      실패 SHA, 영수증, 실패 테스트와 로그, 현재 master SHA를 확인한다.
+      실패 원인이 미확인이면 「원인 미상」으로 기록한다. 이미 repair_issue가
+      있으면 기존 자식의 진행 상태를 확인하고 중복으로 만들지 않는다.
+      미위임 실패마다 원래 머지 이슈 아래에 수정 이슈를 만든다(중복 검색 먼저).
+      이미 같은 실패의 수정 이슈를 맡은 살아 있는 자식이 있으면 새로 spawn하지
+      않고 그 이슈와 자식을 복구해 repair로 등록한다.
+      본문에 재현 명령·실패 SHA·현재 master·로그 경로·완료 기준을 기록한다.
+      `children`으로 슬롯을 확인하고 `spawn`으로 worker 자식 세션을 만든다.
+      별도 세션 접두사 worktree, issue=<수정 이슈>를 준다.
+      cflow_inputs: {relation: independent}, workflow: improv-worker-v2를 명시한다.
+      기준은 현재 master, 통합 요청 수신자는
+      이 리더다. 자식이 실패를 재현·수정·표적 검증하고 수정 머지를 요청한다.
+      생성 후 `tools/delayed_sweep.py repair --repo <대상 저장소> --job <실패 job>
+      --issue <수정 이슈>`로 유일한 허용 후보를 등록한다. 슬롯이 없거나 생성이
+      거절되면 위임 대기로 기록하고 pause를 유지한다 — 일반 머지 재개 근거가 아니다.
+      수정 머지는 같은 enqueue 경로를 사용하며 검증 priority=0이 된다.
+      실패 SHA를 포함하는 수정 머지의 전체 검증 통과를 큐가 확인하면 pause를
+      해제한다. 자식의 표적 테스트 통과나 단순 머지 통지만으로 해제하지 않는다.
+      로그·커밋·수정 이슈·자식 세션은 보드에, 메시는 이슈 포인터만 남긴다.
+      같은 원격 저장소를 통합하는 다른 머신의 리더 또는 target authority에도
+      실패 SHA와 수정 이슈를 알려 일반 머지 중단 정책을 적용하게 한다.
+    done_when: 활성 실패마다 수정 이슈·자식과 repair 등록 또는 위임 대기 사유가 기록돼 있다
+    effects: [board.write, session.spawn, fs.write]
 
   batch-failed:
-    title: 머지 뒤 실패 처리
+    title: 머지 실행 중단 처리
     prompt: |
-      머지 이후 단계가 실패했다 — integrate의 fail(머지 도중 중단), sweep의
-      fail(스윕 red 또는 실행 실패) 중 하나다. 어느 작업이 어떤 결과로 끝났는지
-      flow_status와 저널(`claunch cflow2 journal`)에서 먼저 읽는다. master는
-      되돌리지 않는다(v1과 같음) — 이미 머지된 커밋은 그대로 두고 후속 브랜치로
-      고친다.
-      1. 실패 원인을 좁힌다. 스윕 red면 실패 테스트와 그 테스트를 바꾼 머지
-         커밋(`git log --oneline <이전 master>..master -- <테스트 경로>`)을 찾는다.
-         실행 실패(subagent 중단, 창 대기 초과)면 그 사실만 적는다 — 다음 회차의
-         sweep이 다시 돈다.
-      2. 원인이 된 머지의 담당 워커에게 후속 브랜치를 요청한다: 실패 테스트,
-         `master @ <sha>`(원격 편성이면 `<sha> @ <remote>/master`), 재현 명령.
-         보드의 그 이슈에 같은 내용을 코멘트로 남긴다.
-      3. 이미 머지된 항목은 그대로 반영(reflect)과 착지 통지로 이어 간다 —
-         회차는 ok로 끝나고 다음 회차가 열린다. 다음 회차의 통합이 후속 브랜치를
-         머지한 뒤 스윕을 다시 한다.
-      결과: 보통은 ok(failed = 실패한 작업, cause, followups = 후속을 요청한
-      워커와 이슈). integrate가 아무것도 머지하지 못한 채 멈췄으면(merges가 빈
-      목록) nothing_merged로 끝낸다 — 반영할 것이 없어 관제 대기로 돌아간다.
+      머지 실행이 중단됐다. 성공한 부분의 repo와 merges(issue, tip, merge_sha)를
+      기록하고 각 머지의 검증 작업을 enqueue로 복구한다. master는 되돌리지 않는다.
+      실패 사유와 후속 작업을 보드에 남긴다. 전체 스윕은 지속 큐가 수행한다.
+      하나도 머지하지 못했으면 nothing_merged로 관제 대기로 돌아간다.
     returns:
-      ok: {failed: str, cause: str, followups: list}
+      ok: {repo: str, merges: list, failed: str, cause: str, followups: list}
       nothing_merged: {reason: str}
-    done_when: |
-      실패한 작업과 결과, 좁힌 원인(또는 「원인 미상」), 후속 브랜치를 요청한
-      워커와 보드 코멘트 위치가 보고에 있다
-    effects: [board.write]
-
-  reflect-closed:
-    title: 반영 없이 마감 기록
-    prompt: |
-      이번 회차는 반영 없이 마감한다. 마지막 판정(checks의 exit와 출력)과 정리하지
-      못한 이유를 보고에 남긴다. 재시도 5회를 모두 써서 여기에 온 경우도 같다 —
-      저널의 restart_completed·checks_expired를 횟수와 함께 적는다. 다음 회차의
-      reflect가 다시 시도한다.
-    done_when: 마지막 판정과 정리하지 못한 이유가 보고에 있다
-    effects: []
+    done_when: 성공한 머지와 해당 검증 작업, 중단 사유 및 후속 작업이 기록되어 있다
+    effects: [board.write, fs.write]
 
   landed-notice:
     title: 착지 통지
     prompt: |
-      이번 회차에 landed가 된 착지 항목(flow_status의 collections.landing)마다
-      요청한 세션에 머지 커밋과 반영 결과를 알린다: `<머지 sha> @ <remote>/<base>`
-      (원격 편성) 또는 `master @ <sha>`, 반영 여부(deployed-wait 통과, 반영 없이
-      마감), batch-failed를 거쳤으면 실패 사유와 후속을 요청한 대상. 워커는 그 커밋이 자기 tip을 부모로 갖는지 스스로
-      확인한 뒤 착지로 판정한다. 통지는 @in_review 한 건으로 몰지 않고 항목별로
-      보낸다.
-    done_when: landed 항목마다 통지한 대상과 내용(머지 sha, 반영 여부)이 보고에 있다
-    effects: []
+      landed 항목마다 요청자에게 머지 SHA와 큐의 job/ref를 알린다. 상태를
+      「머지 완료·사후 검증 대기」로 기록한다. 검증 완료·라이브 반영 완료로
+      보고하지 않는다. 라이브 반영은 별도 절차다. 검증 결과는 지속 큐와
+      영수증으로 확인하고 실패는 handle-regression에서 별도 수정 자식에 위임한다.
+      통지는 요청자에게 항목별로 보낸다. 근거 묶음은 원래 이슈 코멘트에 남긴다.
+    done_when: landed 항목마다 머지 SHA·검증 job·반영 분리 상태가 통지됐다
+    effects: [board.write]
 
   wrapup:
     title: 교대 종료
     prompt: |
       워커마다 진행 중인 작업이 있는지 묻고, `claunch cflow2 status -t <세션>`으로
-      교차 확인한다. 양쪽에서 유휴가 확인된 세션만 종료한다. 아직 돌고 있는
+      교차 확인한다. 양쪽에서 유휴가 확인된 세션만 종료한다.
+      데몬 검증 큐의 pending/queued/running/retry와 활성 실패·수정 자식은
+      다음 리더에게 인계한다. 검증 작업과 고정 브랜치를 삭제하지 않는다.
+      데몬 큐 실행 중인 작업의 scratch·worktree·basetemp는 아래 정리에서
+      제외한다. 영수증과 실패 로그는 큐의 증거 경로로 보존한다. 아직 돌고 있는
       subagent가 있으면 그 결과를 받은 뒤 최종 보고를 쓴다. 최종 보고: 교대 동안의
       회차 요약(처리한 요청, 머지 커밋, 반영 여부, 남은 통합 대기)과 보드 잔량.
       **이 리더 세션이 직접 만든 테스트 부산물은 이 세션이 전부 지운다** —
@@ -426,7 +410,8 @@ body:
               선택을 보류하고(waiting_window) 창이 열리면 데몬이 확정해 이
               터미널을 깨운다 — 턴을 끝내고 기다린다. 그사이 후보가 늘면 같은
               옵션을 다시 골라 reason을 갱신한다. 교대 종료 지시가 오면 wind-down.
-              둘 다 아니면 고르지 않고 관제를 계속한다. master가 움직였다는
+              활성 회귀 실패의 수정 자식이 아직 없으면 handle-regression을 고른다.
+              그 외에는 고르지 않고 관제를 계속한다. master가 움직였다는
               통지는 「그 해시로 잰 수치는 낡았다」만 뜻하게 하고, 착지 요청을
               올리지 않은 세션에 재정렬을 요구하지 않는다.
               ${frag:remote-mesh}
@@ -436,76 +421,30 @@ body:
                 interval: 300
                 then:
                   seq:
-                    - integrate-preflight
-                    # 머지가 시작된 뒤의 실패(integrate fail, sweep fail)는 회차를
-                    # 끝내지 않는다(v1과 같이 열어 둔 채 처리): batch-failed가
-                    # 원인을 보고하고 담당 워커에게 후속 브랜치를 요청한 뒤, 이미
-                    # 머지된 항목에 대해 반영과 착지 통지를 이어 간다. master는
-                    # 되돌리지 않는다. 처리 없이 두면 런이 failed로 끝나 recur가 멈춘다.
+                    - {seq: [integrate-preflight], bind: reviewed}
+                    - seq: [admission]
+                      on:
+                        paused: {continue: null}
                     - id: batch
                       try:
-                        # integrate의 값(repo 포함)이 data.merged다 — sweep의
-                        # verify가 그 저장소를 판정한다(claunch-6xg).
                         seq:
                           - {seq: [integrate], bind: merged}
-                          - sweep
                       catch:
-                        # 머지 시점에 후보가 모두 빠졌다 — 스윕·반영 없이 관제 대기로
                         empty: {continue: null}
                         fail:
-                          id: batch-failed-handler
-                          seq:
-                            - batch-failed
+                          seq: [batch-failed]
+                          bind: merged
                           on:
-                            # 머지된 것이 하나도 없다 — 반영할 것이 없으니 관제 대기로
                             nothing_merged: {continue: null}
-                    # 재시도 5회 소진도 회차를 끝내지 않는다 — 반영 없이 마감
-                    - id: reflect-guard
-                      try:
-                        id: reflect-retry
-                        retry:
-                          max: 5
-                          do:
-                            seq:
-                              - reflect
-                              - id: deployed-wait
-                                wait:
-                                  describe: 라이브 데몬이 이번 머지 이후에 재기동됐다
-                                  poll: 30
-                                  seconds: 600
-                                  checks:
-                                    # 0 = 머지 이후 재기동 확인, 1 = 재기동 없음,
-                                    # 2 = 판정 불가, 3 = 체크아웃이 더러움(판정 불가로 센다)
-                                    - id: deployed
-                                      describe: 라이브 데몬이 master의 이번 머지 이후에 재기동됐다
-                                      probe: 'uv run --no-sync python tools/deploy_check.py --branch master'
-                                # 만료(timeout)와 판정 불가(undecidable)는 같은 결정 자리로
-                                # 간다(v1 checklist otherwise -> reflect-pregate).
-                                on:
-                                  timeout: &pregate
-                                    seq:
-                                      - reflect-pregate
-                                      - choose:
-                                          require_reason: true
-                                          prompt: |
-                                            원인을 정리했으면 retry로 reflect에 다시 들어가 재기동을
-                                            다시 실행한다. 이 턴에 정리할 수 없으면 close로 반영 없이
-                                            마감한다. reason에 종료 코드와 정리한 내용(또는 못 한
-                                            이유)을 적는다.
-                                          options:
-                                            retry:
-                                              description: 원인을 정리했다 — reflect로 다시 들어간다(새 방문, restart가 다시 실행된다)
-                                              then: {continue: null}   # 감싸는 retry의 다음 시도
-                                            close:
-                                              description: 이 턴에 정리할 수 없다 — 반영 없이 마감하고 착지 통지로
-                                              then: reflect-closed
-                                  undecidable: *pregate
-                      catch:
-                        "*": reflect-closed
+                    - checkpoint-check
                     - landed-notice
                     - {break: null}
                   on:
                     empty: {continue: null}
+              handle-regression:
+                description: 활성 회귀 실패의 수정 작업을 자식 세션에 위임한다
+                then:
+                  seq: [handle-regression]
               wind-down:
                 description: 사용자가 교대 종료를 지시했다 — 사용자에게 종료를 확정받는다
                 then:
@@ -537,4 +476,3 @@ body:
                   # 세 번째 답도 reframe이면 질문을 접고 관제 대기로 돌아간다
                   on:
                     reframe: {continue: null}
-

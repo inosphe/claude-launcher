@@ -138,6 +138,8 @@ def _cmd_acquire(args) -> int:
     }
     if getattr(args, "workers", None):
         body["workers"] = args.workers
+    if getattr(args, "priority", 0):
+        body["priority"] = args.priority
     if force:
         body["force"] = True
     result = client.post(
@@ -432,6 +434,8 @@ def register(sub) -> None:
         help="queue and wait (default with no value: up to 30 minutes; omitted: ask once)",
     )
     p.add_argument("--label", help="what the window is being used for")
+    p.add_argument("--priority", type=int, default=0,
+                   help="queue priority; negative values run behind normal tests")
     p.add_argument(
         "--session",
         help="holder name (default: $CLAUNCH_SESSION; empty = a manual, "
