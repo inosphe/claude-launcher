@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,7 +13,7 @@ import pytest
 
 from claude_launcher import delayed_sweep as mod, test_window
 from claude_launcher.daemon.delayed_sweep import Clock
-from claude_launcher.daemon import paths
+from claude_launcher.daemon import delayed_sweep as daemon_sweep, paths
 
 TOOL = Path(__file__).resolve().parents[1] / "tools" / "sweep.py"
 
@@ -448,3 +449,20 @@ def test_runner_env_has_no_empty_instance_and_always_a_git_identity(repo, tmp_pa
     commit = subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", "x"], cwd=repo,
                             env=env, capture_output=True, text=True)
     assert commit.returncode == 0, commit.stderr
+
+
+def test_git_identity_lookup_runs_off_the_event_loop(repo, tmp_path, monkeypatch):
+    q = queue(tmp_path)
+    enqueue(q, repo, "a")
+    threads = {}
+    def ensure(env):
+        threads["ensure"] = threading.get_ident()
+    async def launch(*args, **kwargs):
+        return SimpleNamespace(pid=os.getpid(), returncode=None)
+    monkeypatch.setattr(daemon_sweep, "_ensure_git_identity", ensure)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", launch)
+    async def tick():
+        threads["loop"] = threading.get_ident()
+        await Clock(SimpleNamespace(), q).tick()
+    asyncio.run(tick())
+    assert threads["ensure"] != threads["loop"]
