@@ -5,7 +5,9 @@ description: >
   기록하는 리더. 사후 스윕은 데몬 큐 실행 프로세스가 낮은 테스트 우선순위로
   수행하며 다음 머지 회차를 막지 않는다. 회귀 실패 시 해당 저장소의 새 일반
   머지를 중단하고 수정 자식 세션을 생성한다. 수정 머지의 전체 검증이 통과하면
-  재개한다. 라이브 반영은 별도 절차다. PR·로컬 후보의 심사와 착지 확인은
+  재개한다. restart_live 입력(기본 true)에 따라 배치 뒤 라이브 반영을 확인한다.
+  전체 스윕 완료를 기다리지 않고 반영하므로 검증 전 코드가 라이브에 올라갈 수 있다.
+  PR·로컬 후보의 심사와 착지 확인은
   기존과 같고, 회차가 끝나면 다음 회차를 자동으로 시작한다.
 
 # 회차마다 다음 회차를 요청하고 데몬이 시작한다(docs/cflow-v2.md 2.1 recur).
@@ -22,6 +24,13 @@ filter_roles:
 default_child_cflow: improv-worker-v2
 
 include: [improv-common]
+
+inputs:
+  restart_live:
+    type: bool
+    default: true
+    label: 라이브 반영·데몬 재기동
+    help: 배치 뒤 필요한 재기동과 반영 확인을 수행한다. 전체 스윕 완료를 기다리지 않는다. false이면 라이브 반영을 생략한다
 
 returns:
   # 교대 종료: done이지만 ok가 아니므로 다음 회차가 요청되지 않는다.
@@ -140,8 +149,13 @@ nodes:
         큐는 회차와 리더 세션을 넘어 남으며 데몬이 재개한다. 활성 pauses가
         있으면 해당 저장소는 수정 이슈만 허용한다. 미위임 실패는 관제 대기의
         handle-regression으로 처리한다. 다른 저장소의 통합은 계속한다.
-      - 라이브 반영: 이번 런은 재기동·배포하지 않는다. 검증된 SHA와 영수증을
-        별도 배포 절차에 전달한다. 그 절차는 배포할 정확한 SHA의 검증을 확인한다.
+      - 라이브 반영: restart_live=${data.inputs.restart_live}(기본 true).
+        true면 각 배치의 checkpoint-check 뒤 reflect/deployed-wait를 수행한다.
+        전체 스윕을 기다리지 않으며 반영 후에도 사후 검증 대기/실패 상태는 유지한다.
+        false면 재기동과 반영 확인을 생략하고 그 사실을 착지 통지에 적는다.
+        재기동은 데몬의 restart: 경로와 기존 승인 게이트가 실행한다.
+        이미 머지된 수정이 미반영이면 새 일반 머지 없이 reflect-pending을 고른다.
+        반영 성공만으로 회귀 pause를 해제하지 않는다.
       - 원격 편성: 다른 머신의 워커가 있으면 아래 원격 메시 규칙을 이 회차에
         적용한다고 확인한다(원격 이름, base, `gh auth status --hostname <host>`).
       - 착지 큐: flow_status의 collections.landing에서 지난 회차에서 넘어온
@@ -274,6 +288,53 @@ nodes:
     done_when: 성공한 모든 머지 단계의 고정 브랜치와 검증 작업이 기록되어 있다
     effects: [fs.read, fs.write]
 
+  reflect:
+    title: 라이브 서버 반영
+    prompt: |
+      이 작업에 들어오면 데몬의 cflow2 clock이 아래 restart 명령
+      (tools/restart_live.*)을 실행한다. 리더는 그 명령도 `claunch daemon
+      restart`도 직접 실행하지 않는다(AGENTS.md). 명령은 이 런의 드라이버 세션
+      이름을 달고 나가므로 웹 UI 승인 게이트로 올라가고, 무응답이면 300초 뒤
+      승인으로 나간다(daemon/restart_gate.py). 사용자는 연장을 횟수 제한 없이
+      고를 수 있고, 카드에는 restart_live가 만든 재기동 이유(deploy_check
+      판정과 아직 서빙되지 않은 master 커밋 목록)가 표시된다.
+      restart 결과 블록이 오기 전에는 보고가 거절된다. 결과가 오면 새 데몬이
+      섰는지 재기동 통지 블록이나 재기동 전후 pid로 판정하고(응답이 있다는
+      사실은 판정이 아니다), 새 머지 커밋의 기능이 실제로 서빙되는지 하나
+      이상 확인한다. 반영 판정 자체는 다음 대기(deployed-wait)의 checks가 한다.
+    restart:
+      windows: 'powershell -NoProfile -ExecutionPolicy Bypass -File tools/restart_live.ps1'
+      linux: 'bash tools/restart_live.sh'
+      # 게이트 밖에서 멈춘 스크립트를 끊는 상한이다. 게이트가 이 세션의
+      # 요청을 붙들고 있는 동안에는 clock이 이 시한으로 셸을 죽이지 않는다
+      # (restart_gate.holding, claunch-mm8zv; v1과 같음).
+      timeout: 900
+    done_when: |
+      새 데몬을 무엇으로 판정했는지(통지 블록 또는 pid)와, 새 머지 커밋의
+      기능이 서빙됨을 확인한 방법과 결과가 보고에 있다.
+    effects: []
+
+  reflect-pregate:
+    title: 반영 재시도 판단
+    prompt: |
+      deployed-wait의 checks가 600초 안에 모두 통과하지 못했다. flow_status의
+      대기 값(checks: 항목별 exit와 출력)과 저널의 restart_completed /
+      restart_interrupted를 먼저 읽는다. deploy_check의 종료 코드로 갈린다:
+      exit 1(옛 코드 서빙) — 재기동이 실행되지 않았거나 실패했다. exit 3(체크아웃이
+      더러움) — 판정문의 미커밋 경로를 정리(다른 세션 것이면 요청)한다.
+      exit 2(판정 불가) — 판정문의 원인을 고친다. 정리했으면 retry(reflect에
+      다시 들어가 restart가 다시 실행된다), 이 턴에 정리할 수 없으면 close.
+
+  reflect-closed:
+    title: 반영 없이 마감 기록
+    prompt: |
+      이번 회차는 반영 없이 마감한다. 마지막 판정(checks의 exit와 출력)과 정리하지
+      못한 이유를 보고에 남긴다. 재시도 5회를 모두 써서 여기에 온 경우도 같다 —
+      저널의 restart_completed·checks_expired를 횟수와 함께 적는다. 다음 회차의
+      reflect가 다시 시도한다.
+    done_when: 마지막 판정과 정리하지 못한 이유가 보고에 있다
+    effects: []
+
   handle-regression:
     title: 회귀 실패 수정 자식 생성
     prompt: |
@@ -319,11 +380,14 @@ nodes:
     title: 착지 통지
     prompt: |
       landed 항목마다 요청자에게 머지 SHA와 큐의 job/ref를 알린다. 상태를
-      「머지 완료·사후 검증 대기」로 기록한다. 검증 완료·라이브 반영 완료로
-      보고하지 않는다. 라이브 반영은 별도 절차다. 검증 결과는 지속 큐와
-      영수증으로 확인하고 실패는 handle-regression에서 별도 수정 자식에 위임한다.
+      「머지 완료·사후 검증 대기」와 라이브 반영 상태를 구분한다.
+      restart_live=false이면 「라이브 반영 생략」, true이면 deployed-wait의
+      실제 판정에 따라 「반영 완료」 또는 reflect-closed의 「반영 실패/미확인」을
+      적는다. 재기동 명령 exit0만으로 반영 완료를 단정하지 않는다.
+      검증 결과는 지속 큐와 영수증으로 확인하고 실패는 handle-regression에서
+      별도 수정 자식에 위임한다.
       통지는 요청자에게 항목별로 보낸다. 근거 묶음은 원래 이슈 코멘트에 남긴다.
-    done_when: landed 항목마다 머지 SHA·검증 job·반영 분리 상태가 통지됐다
+    done_when: landed 항목마다 머지 SHA·검증 job·라이브 반영 완료/생략/실패 상태가 통지됐다
     effects: [board.write]
 
   wrapup:
@@ -392,6 +456,57 @@ nodes:
       보고에 있다). 1의 명령을 다시 돌린 출력이 보고에 있다.
     effects: [fs.write, board.write]
 
+procedures:
+  reflect-live:
+    description: restart_live 입력에 따라 기존 재기동·반영 확인·재시도 경로를 수행한다
+    body:
+      cond:
+        - if: "$data.inputs.restart_live == true"
+          then:
+            - id: reflect-guard
+              try:
+                id: reflect-retry
+                retry:
+                  max: 5
+                  do:
+                    seq:
+                      - reflect
+                      - id: deployed-wait
+                        wait:
+                          describe: 라이브 데몬이 이번 머지 이후에 재기동됐다
+                          poll: 30
+                          seconds: 600
+                          checks:
+                            # 0 = 머지 이후 재기동 확인, 1 = 재기동 없음,
+                            # 2 = 판정 불가, 3 = 체크아웃이 더러움(판정 불가로 센다)
+                            - id: deployed
+                              describe: 라이브 데몬이 master의 이번 머지 이후에 재기동됐다
+                              probe: 'uv run --no-sync python tools/deploy_check.py --branch master'
+                        # 만료(timeout)와 판정 불가(undecidable)는 같은 결정 자리로
+                        # 간다(v1 checklist otherwise -> reflect-pregate).
+                        on:
+                          timeout: &pregate
+                            seq:
+                              - reflect-pregate
+                              - choose:
+                                  require_reason: true
+                                  prompt: |
+                                    원인을 정리했으면 retry로 reflect에 다시 들어가 재기동을
+                                    다시 실행한다. 이 턴에 정리할 수 없으면 close로 반영 없이
+                                    마감한다. reason에 종료 코드와 정리한 내용(또는 못 한
+                                    이유)을 적는다.
+                                  options:
+                                    retry:
+                                      description: 원인을 정리했다 — reflect로 다시 들어간다(새 방문, restart가 다시 실행된다)
+                                      then: {continue: null}   # 감싸는 retry의 다음 시도
+                                    close:
+                                      description: 이 턴에 정리할 수 없다 — 반영 없이 마감하고 착지 통지로
+                                      then: reflect-closed
+                          undecidable: *pregate
+              catch:
+                "*": reflect-closed
+        - else: []
+
 body:
   seq:
     - intake
@@ -411,6 +526,8 @@ body:
               터미널을 깨운다 — 턴을 끝내고 기다린다. 그사이 후보가 늘면 같은
               옵션을 다시 골라 reason을 갱신한다. 교대 종료 지시가 오면 wind-down.
               활성 회귀 실패의 수정 자식이 아직 없으면 handle-regression을 고른다.
+              restart_live=true이고 이미 머지된 코드가 아직 라이브에 반영되지
+              않았으면 reflect-pending을 고른다. pause가 있어도 이 경로는 허용된다.
               그 외에는 고르지 않고 관제를 계속한다. master가 움직였다는
               통지는 「그 해시로 잰 수치는 낡았다」만 뜻하게 하고, 착지 요청을
               올리지 않은 세션에 재정렬을 요구하지 않는다.
@@ -437,10 +554,16 @@ body:
                           on:
                             nothing_merged: {continue: null}
                     - checkpoint-check
+                    - call: reflect-live
                     - landed-notice
                     - {break: null}
                   on:
                     empty: {continue: null}
+              reflect-pending:
+                description: 이미 머지된 코드의 라이브 반영을 확인한다 — 새 머지 없이 pause 중에도 가능
+                when: "$data.inputs.restart_live == true"
+                then:
+                  call: reflect-live
               handle-regression:
                 description: 활성 회귀 실패의 수정 작업을 자식 세션에 위임한다
                 then:
