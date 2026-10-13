@@ -112,23 +112,91 @@ def test_deletion_failure_has_real_reason_and_saved_intent(setup, monkeypatch):
     assert mine.exists()
 
 
-@pytest.mark.parametrize("nested", [False, True])
-def test_links_never_remove_external_files(setup, tmp_path, nested):
-    service, root, _, _ = setup
-    outside = completed(tmp_path / "external")
-    if nested:
-        candidate = completed(root / "s1c1012000000")
-        link = candidate / "link"
-    else:
-        link = root / "s1c1012000000"
+def link(path, target):
     try:
-        link.symlink_to(outside, target_is_directory=True)
+        path.symlink_to(target, target_is_directory=Path(target).is_dir())
     except OSError:
         pytest.skip("symlink privilege unavailable")
+    return path
+
+
+def test_target_root_link_stays_pending_and_external_files_survive(setup, tmp_path):
+    service, root, _, _ = setup
+    outside = completed(tmp_path / "external")
+    link(root / "s1c1012000000", outside)
     plan = service.plan("s1")
     assert plan["items"][0]["status"] == "cleanup_pending"
+    assert "link or reparse point" in plan["items"][0]["reason"]
     assert service.apply("s1", plan["plan_id"])["removed"] == 0
     assert (outside / "payload").exists()
+
+
+def test_pytest_current_links_to_siblings_are_unlinked_and_tree_removed(setup):
+    service, root, _, _ = setup
+    mine = completed(root / "s1c1012000000")
+    sibling = mine / "test_a0"
+    sibling.mkdir()
+    (sibling / "data").write_text("x" * 100)
+    link(mine / "test_acurrent", sibling)  # absolute, as pytest makes it
+    plan = service.plan("s1")
+    item = plan["items"][0]
+    assert item["status"] == "ready", item
+    # The link adds no file and no bytes: the sibling is counted once.
+    assert item["files"] == 3
+    assert item["bytes"] == sum(f.stat().st_size for f in mine.rglob("*")
+                                if f.is_file() and not f.is_symlink())
+    result = service.apply("s1", plan["plan_id"])
+    assert result["removed"] == 1 and not mine.exists()
+
+
+def test_links_out_of_the_tree_are_unlinked_and_their_targets_kept(setup, tmp_path, monkeypatch):
+    service, root, _, _ = setup
+    outside = completed(tmp_path / "external")
+    (outside / "big").write_bytes(b"0" * 4096)
+    mine = completed(root / "s1c1012000000")
+    link(mine / "dirlink", outside)
+    link(mine / "filelink", outside / "big")
+    item = service.plan("s1")["items"][0]
+    assert item["status"] == "ready", item
+    assert item["files"] == 2 and item["bytes"] < 4096
+    removed = []
+    real = ac._unlink_links
+    def spy(path):
+        real(path)
+        removed.append(sorted(p.name for p in path.iterdir()))
+    monkeypatch.setattr(ac, "_unlink_links", spy)
+    result = service.apply("s1", service.plan("s1")["plan_id"])
+    assert result["removed"] == 1 and not mine.exists()
+    # Links were gone before rmtree ran; the targets are untouched.
+    assert removed == [[ac.basetemp.RUN_SUMMARY, "payload"]]
+    assert (outside / "payload").exists() and (outside / "big").stat().st_size == 4096
+
+
+def test_link_retargeted_after_plan_is_a_change(setup, tmp_path):
+    service, root, _, _ = setup
+    mine = completed(root / "s1c1012000000")
+    (mine / "a").mkdir()
+    (mine / "b").mkdir()
+    current = link(mine / "current", mine / "a")
+    plan = service.plan("s1")
+    assert plan["items"][0]["status"] == "ready"
+    current.unlink()
+    current.symlink_to(mine / "b", target_is_directory=True)
+    result = service.apply("s1", plan["plan_id"])
+    assert result["removed"] == 0
+    assert result["items"][0]["reason"] == "artifact changed since plan"
+    assert (mine / "current").is_symlink()
+
+
+def test_linked_run_receipt_is_not_completion_evidence(setup, tmp_path):
+    service, root, _, _ = setup
+    donor = completed(tmp_path / "donor")
+    mine = root / "s1c1012000000"
+    mine.mkdir()
+    link(mine / ac.basetemp.RUN_SUMMARY, donor / ac.basetemp.RUN_SUMMARY)
+    item = service.plan("s1")["items"][0]
+    assert item["status"] == "cleanup_pending"
+    assert item["reason"] == "test run receipt is not a regular file"
 
 
 def test_scratch_unknown_browser_and_nested_worktree_are_preserved(setup):

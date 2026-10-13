@@ -13,8 +13,9 @@ TOOLS = [{
         "pending reasons before submitting that plan_id to delete ready items. "
         "Plans expire after ten minutes and are revalidated before deletion. "
         "No arbitrary paths, commands, other sessions, force removal or ref "
-        "deletion are accepted. Unknown, changed, linked or incomplete artifacts "
-        "are kept as cleanup_pending. Execution requires an idle measurement "
+        "deletion are accepted. Unknown, changed or incomplete artifacts, and "
+        "artifacts that are links themselves, are kept as cleanup_pending; a link "
+        "inside an artifact is unlinked, never followed. Execution requires an idle measurement "
         "window and writes a durable receipt. A denial must be reported, not "
         "retried through shell commands or another tool."
     ),
