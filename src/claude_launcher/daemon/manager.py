@@ -1670,7 +1670,8 @@ class SessionManager:
         Anything else is returned as it is: a live session is already awake,
         and a killed or paused record is not this verb's to revive. Concurrent
         wakes of one name (a viewer and a mesh delivery at once) share one
-        respawn.
+        respawn. A delayed record whose relaunch raises is filed failed
+        (:meth:`fail_delayed`) before the error is re-raised.
         """
         lock = self._wake_locks.setdefault(name, asyncio.Lock())
         async with lock:
@@ -1681,6 +1682,14 @@ class SessionManager:
             self._waking.add(name)
             try:
                 relaunched = await self.respawn_async(name)
+            except Exception as exc:
+                # A delayed record whose relaunch raised is failed, whoever
+                # woke it (claunch-f9ene). Left delayed, nothing would try it
+                # again: the queue passes a record it finds mid-wake (it is
+                # out of the registry then), and a use-wake does not retry.
+                if delayed:
+                    self.fail_delayed(name, reason=str(exc))
+                raise
             finally:
                 self._waking.discard(name)
             if delayed:
