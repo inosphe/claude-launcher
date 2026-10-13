@@ -180,7 +180,8 @@ def test_disabled_restart_hides_pending_reflection_and_persists_in_next_round(tm
     ld.report("landed-notice")
     ld.now += 60
     next_round = runtime.start_next_round(ld.cwd, "lead", ld.now)
-    assert next_round["inputs"]["restart_live"] is False
+    assert next_round["round"] == 2
+    assert runtime.status(**ld.kw())["inputs"]["restart_live"] is False
 
 
 def test_paused_repository_can_reflect_existing_merges_without_admitting_new_merges(tmp_path):
