@@ -561,6 +561,16 @@ async def perform(manager: Any, cwd: str, scope: str, trig: Dict[str, Any], *,
     do = str(trig.get("do") or "")
     if driver is None:
         driver = await asyncio.to_thread(_driver, cwd, scope)
+    if do == DO_CHECKS and driver:
+        # A held driver is asleep, not gone: the request wakes it and is
+        # typed after the respawn (claunch-t1r9j).
+        try:
+            held = manager.get(driver)
+        except Exception:
+            held = None
+        if held is not None and cflow_clock.is_held(held):
+            return await cflow_clock.request_checks(
+                held, cflow_clock.waking_deliver(manager, driver, by="cflow2-checks"))
     if do in (DO_BRIEFING, DO_CHECKS):
         session = live_session(manager, driver)
         if session is None:

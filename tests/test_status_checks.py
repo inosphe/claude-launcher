@@ -90,6 +90,55 @@ def test_status_checks_api_reports_and_force_refresh(home, tmp_path):
     asyncio.run(run())
 
 
+def test_refresh_wakes_a_held_session_and_queues_the_request(home, tmp_path):
+    """claunch-t1r9j: a held session is asleep, not gone. The checks button
+    wakes it and the refresh block is typed into the woken session; a killed
+    record is still refused."""
+    from claude_launcher.daemon.session import DeadSession
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        client = await _serve(mgr)
+        try:
+            status_checks.set_entries([{"name": "Tests", "question": "Tests passed?"}])
+            for name, held_at in (("asleep", "2026-10-13T08:00:00+00:00"), ("dead", None)):
+                mgr._sessions[name] = DeadSession(
+                    SessionDef(name=name, harness="claude", cwd=str(tmp_path)),
+                    exit_code=0, held_at=held_at,
+                )
+            woken = []
+            mgr.wake_soon = lambda name, **kw: woken.append((name, kw)) or True
+
+            response = await client.post(
+                "/api/sessions/asleep/status-checks/refresh", headers=BEARER
+            )
+            assert response.status == 200
+            body = await response.json()
+            assert body["delivered"] is True and body["woken"] is True
+            assert [c["name"] for c in body["checks"]] == ["Tests"]
+            assert woken == [("asleep", {"by": "status-checks",
+                                         "deliver": status_checks.REFRESH_PROMPT})]
+
+            response = await client.post(
+                "/api/sessions/dead/status-checks/refresh", headers=BEARER
+            )
+            assert response.status == 409
+            assert len(woken) == 1
+
+            # Nothing configured: nothing to ask, so nothing is woken.
+            status_checks.set_entries([])
+            response = await client.post(
+                "/api/sessions/asleep/status-checks/refresh", headers=BEARER
+            )
+            assert (await response.json())["delivered"] is False
+            assert len(woken) == 1
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_status_checks_mcp_reads_and_reports_only_its_session(monkeypatch):
     class Client:
         def __init__(self):
