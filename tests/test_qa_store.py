@@ -181,3 +181,74 @@ def test_newer_schema_is_refused(tmp_path):
     db.close()
     with pytest.raises(Q.QaError, match="schema version"):
         Q.QaStore(path)
+
+
+def test_nudge_is_settled_by_a_question_or_by_nothing(qa):
+    n = qa.nudge(Q.USER, "s1")
+    assert (n["status"], n["settled_at"]) == ("sent", None) and n["id"].startswith("qn-")
+    assert qa.list("s1")["nudge"]["id"] == n["id"]
+    q = qa.ask("s1", title="Q")
+    asked = qa.list("s1")["nudge"]
+    assert (asked["status"], asked["questions"]) == ("asked", [q["id"]])
+    with pytest.raises(Q.Conflict) as err:           # already settled by the question
+        qa.nothing("s1", n["id"], note="late")
+    assert err.value.current["status"] == "asked"
+
+    n2 = qa.nudge(Q.USER, "s1")
+    done = qa.nothing("s1", None, note="all decided")  # None: the waiting one
+    assert (done["id"], done["status"], done["reply"]) == (n2["id"], "nothing", "all decided")
+    with pytest.raises(Q.NotFound):
+        qa.nothing("s1")
+    qa.ask("s1", title="later")                       # no waiting nudge: nothing to settle
+    assert qa.list("s1")["nudge"]["status"] == "nothing"
+
+
+def test_a_newer_nudge_supersedes_the_waiting_one_and_moves_agent_seq_only_on_reply(qa):
+    seq = qa.list("s1")["agent_seq"]
+    first = qa.nudge(Q.USER, "s1")
+    second = qa.nudge(Q.USER, "s1")
+    assert qa.list("s1")["agent_seq"] == seq          # the user's press is not the agent's change
+    db = sqlite3.connect(str(qa.path))
+    try:
+        rows = dict(db.execute("SELECT id, status FROM nudges").fetchall())
+    finally:
+        db.close()
+    assert rows == {first["id"]: "superseded", second["id"]: "sent"}
+    qa.nothing("s1", second["id"])
+    assert qa.list("s1")["agent_seq"] > seq           # the reply opens the pane like a question would
+
+
+def test_nudge_identity_rules(qa):
+    with pytest.raises(Q.Forbidden):
+        qa.nudge("s1", "s2")                          # sessions do not nudge
+    n = qa.nudge(Q.USER, "s1")
+    with pytest.raises(Q.Forbidden):
+        qa.nothing("s2", n["id"])                     # not the session it was sent to
+    with pytest.raises(Q.Forbidden):
+        qa.nothing(Q.USER, n["id"])
+
+
+def test_schema_keeps_one_waiting_nudge_and_settled_nudges_fixed(qa):
+    n = qa.nudge(Q.USER, "s1")
+    db = sqlite3.connect(str(qa.path))
+    try:
+        with pytest.raises(sqlite3.IntegrityError):   # a second waiting nudge
+            db.execute("INSERT INTO nudges (id, session, created_at) VALUES ('qn-x', 's1', 'now')")
+        with pytest.raises(sqlite3.IntegrityError):   # settled without a time
+            db.execute("UPDATE nudges SET status='nothing' WHERE id=?", (n["id"],))
+        db.execute("UPDATE nudges SET status='nothing', settled_at='now' WHERE id=?", (n["id"],))
+        db.commit()
+        with pytest.raises(sqlite3.IntegrityError):   # settled stays settled
+            db.execute("UPDATE nudges SET status='sent', settled_at=NULL WHERE id=?", (n["id"],))
+    finally:
+        db.close()
+
+
+def test_a_version_1_file_gains_the_nudge_table(tmp_path):
+    path = tmp_path / "qa.sqlite3"
+    db = sqlite3.connect(str(path))
+    db.executescript(Q._SCHEMA.split("CREATE TABLE IF NOT EXISTS nudges")[0])
+    db.execute("PRAGMA user_version = 1")
+    db.close()
+    qa = Q.QaStore(path)
+    assert qa.nudge(Q.USER, "s1")["status"] == "sent"

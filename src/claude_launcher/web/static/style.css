@@ -7261,6 +7261,10 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 #term-wf .qa-head { background: #0d1117; }
 .qa-head h2 { font-size: 15px; margin: 0; }
 .qa-count { color: #7d8590; font-size: 12px; }
+.qa-nudge { margin-left: auto; }
+.qa-nudge-state { flex-basis: 100%; margin: 0; display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 12px;
+  color: #7d8590; }
+.qa-nudge-sent { color: #d29922; }
 .qa-card { border: 1px solid #30363d; border-left-width: 3px; border-radius: 6px; padding: 8px 12px;
   margin: 0 0 10px; }
 .qa-card.qa-open { border-left-color: #d29922; }

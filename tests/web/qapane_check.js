@@ -187,6 +187,45 @@ function q(over = {}) {
     h.pane.unmount();
   }
 
+  /* --- 질문 요청: sent at once, questions or not; the head says how it ended */
+  {
+    const h = paneHarness();
+    h.setList({ session: "s1", unresolved: 0, agent_seq: 5, questions: [], nudge: null });
+    const host = new N("div");
+    h.pane.mount(host, "s1", { api: h.api });
+    await tick();
+    const btn = host.querySelector(".qa-nudge");
+    assert.ok(btn, "the head carries the nudge button");
+    assert.equal(host.querySelector(".qa-nudge-state"), null, "no nudge yet: no state line");
+    const sent = { id: "qn-1", session: "s1", status: "sent", reply: "", questions: [],
+                   created_at: "2026-10-14T01:00:00+00:00", settled_at: null };
+    h.reply(() => ({ status: 200, doc: { nudge: sent, delivered: true } }));
+    btn.fire("click");
+    await tick();
+    assert.equal(h.posts.length, 1, "one press, one POST -- no confirmation, no question needed");
+    assert.equal(h.posts[0].url, "/api/qa/nudge");
+    assert.deepEqual(h.posts[0].body, { to: "s1" });
+    assert.ok(host.querySelector(".qa-nudge-state").textContent.includes("응답 대기"));
+
+    h.setList({ session: "s1", unresolved: 0, agent_seq: 6, questions: [],
+                nudge: { ...sent, status: "nothing", reply: "all decided", settled_at: "x" } });
+    h.pane.refresh();
+    await tick();
+    assert.ok(host.querySelector(".qa-nudge-state").textContent.includes("질문 없음: all decided"));
+
+    h.setList({ session: "s1", unresolved: 1, agent_seq: 7, questions: [q()],
+                nudge: { ...sent, id: "qn-2", status: "asked", questions: ["qa-1"], settled_at: "x" } });
+    h.pane.refresh();
+    await tick();
+    assert.ok(host.querySelector(".qa-nudge-state").textContent.includes("질문으로 응답: qa-1"));
+
+    h.reply(() => ({ status: 200, doc: { nudge: { ...sent, id: "qn-3" }, delivered: false } }));
+    host.querySelector(".qa-nudge").fire("click");
+    await tick();
+    assert.ok(host.querySelector(".qa-nudge-state").textContent.includes("전달하지 못함"), "a gone session is said");
+    h.pane.unmount();
+  }
+
   /* --- app.js: the pane opens itself on the session's change ------------- */
   {
     const src = fs.readFileSync(path.join(STATIC, "app.js"), "utf8");

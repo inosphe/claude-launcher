@@ -8,6 +8,8 @@ answered in the session's QA pane.
   POST /api/qa/{id}/close                  close    {session, revision, note?}
   POST /api/qa/{id}/delete                 delete   {session, revision}
   POST /api/qa/{id}/answer                 answer   {revision, text?, choices?}   (the user)
+  POST /api/qa/nudge                       nudge    {to}                          (the user)
+  POST /api/qa/nudge/{id}/nothing          nothing  {session, note?}   id "latest" = the waiting one
 
 Who is calling follows sim_api: a body naming ``session`` is that session
 (the qa_* MCP tools send ``$CLAUNCH_SESSION``), a body without one is the
@@ -17,6 +19,11 @@ a session's hand on the answer.
 An answer saved by the user is typed into the owning session as a
 ``[claunch qa]`` block carrying the question, the answer and -- for a
 rewrite -- the answer it replaced, so the agent acts on it without a read.
+
+A nudge ("질문 요청" in the pane, claunch-l8vyi.1) is typed in the same way:
+it asks the session to file whatever it needs from the user with qa_ask,
+or to reply qa_nothing when it has nothing to ask. It is sent whether or
+not the session has questions; the pane shows how it was settled.
 """
 
 from __future__ import annotations
@@ -66,6 +73,19 @@ def answered_text(q: dict, previous: Optional[dict]) -> str:
         f"qa_close it (revision {q['revision']}). Editing it marks the answer stale and asks the user again."
     )
     return "\n".join(lines)
+
+
+def nudge_text(n: dict) -> str:
+    nid = n["id"]
+    return "\n".join([
+        f"{PREFIX} The user asks whether you have questions for them (nudge {nid}).",
+        "Look at your current work: decisions you are waiting on, assumptions you made without the user's "
+        "confirmation, ambiguities in the task, blockers. File each as its own question with qa_ask "
+        "(options where they fit) -- not in the terminal. Questions already in your pane count; "
+        "qa_update one that has changed.",
+        f"If you have nothing to ask, call qa_nothing (nudge \"{nid}\") with a one-line note on why.",
+        "Either reply settles this nudge in the user's QA pane. Reply before going on with other work.",
+    ])
 
 
 def install(app, store: Optional[qa_store.QaStore] = None):
@@ -166,6 +186,28 @@ def install(app, store: Optional[qa_store.QaStore] = None):
         res["delivered"] = deliver(q["session"], answered_text(q, res["previous"]))
         return web.json_response(res)
 
+    async def h_nudge(request):
+        body = await body_of(request)
+        to = body.get("to")
+        if not isinstance(to, str) or not to:
+            return web.json_response({"error": "to (the session to nudge) is required"}, status=400)
+        if not known(to):
+            return web.json_response({"error": f"no session {to!r} on this daemon"}, status=404)
+        res, err = await call(qa.nudge, actor_of(body), to)
+        if err:
+            return err
+        return web.json_response({"nudge": res, "delivered": deliver(to, nudge_text(res))})
+
+    async def h_nothing(request):
+        body = await body_of(request)
+        nid = request.match_info["id"]
+        res, err = await call(qa.nothing, actor_of(body), None if nid == "latest" else nid,
+                              note=body.get("note"))
+        return err or web.json_response({"nudge": res})
+
+    # The nudge routes go first: "/api/qa/{id}" would take "nudge" as an id.
+    app.router.add_post("/api/qa/nudge", h_nudge)
+    app.router.add_post("/api/qa/nudge/{id}/nothing", h_nothing)
     app.router.add_get("/api/qa", h_list)
     app.router.add_get("/api/qa/rail", h_rail)
     app.router.add_post("/api/qa", h_ask)

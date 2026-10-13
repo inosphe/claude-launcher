@@ -27,6 +27,14 @@ Status:
   closed    the agent settled it (kept for the record; not unresolved)
 
 ``open`` and ``stale`` are what the header button lights up for.
+
+Nudges (claunch-l8vyi.1): the user can press "질문 요청" in the pane to ask
+the session whether it has anything to ask. Each press is a row in
+``nudges``; it waits (``sent``) until the session either files a question
+(``asked`` -- the qa_ask settles it) or says it has none (``nothing``, with
+a note). A newer nudge supersedes a waiting one, so a session has at most
+one waiting nudge (a partial unique index), and a settled nudge never
+changes again (a trigger).
 """
 
 from __future__ import annotations
@@ -41,7 +49,7 @@ from typing import Iterator, Optional
 
 USER = "user"
 UNRESOLVED = ("open", "stale")
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 MAX_TITLE = 300
 MAX_BODY = 20_000
@@ -114,6 +122,23 @@ WHEN NEW.revision <> OLD.revision + 1
 BEGIN
     SELECT RAISE(ABORT, 'qa: a write must advance revision by exactly one');
 END;
+CREATE TABLE IF NOT EXISTS nudges (
+    id TEXT PRIMARY KEY,
+    session TEXT NOT NULL CHECK (length(session) > 0),
+    status TEXT NOT NULL DEFAULT 'sent' CHECK (status IN ('sent', 'asked', 'nothing', 'superseded')),
+    reply TEXT NOT NULL DEFAULT '',
+    questions TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(questions)),
+    created_at TEXT NOT NULL,
+    settled_at TEXT,
+    CHECK ((status = 'sent') = (settled_at IS NULL))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS nudges_one_waiting ON nudges (session) WHERE status = 'sent';
+CREATE TRIGGER IF NOT EXISTS nudges_settled_fixed
+BEFORE UPDATE ON nudges
+WHEN OLD.status <> 'sent'
+BEGIN
+    SELECT RAISE(ABORT, 'qa: a settled nudge does not change');
+END;
 CREATE TRIGGER IF NOT EXISTS questions_identity_fixed
 BEFORE UPDATE OF id, session, created_at ON questions
 WHEN NEW.id <> OLD.id OR NEW.session <> OLD.session OR NEW.created_at <> OLD.created_at
@@ -169,6 +194,18 @@ def _revision(value) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise QaError("revision is required: the question revision you last read (an integer >= 1)")
     return value
+
+
+def _nudge_row(r: sqlite3.Row) -> dict:
+    return {
+        "id": r["id"],
+        "session": r["session"],
+        "status": r["status"],
+        "reply": r["reply"],
+        "questions": json.loads(r["questions"]),
+        "created_at": r["created_at"],
+        "settled_at": r["settled_at"],
+    }
 
 
 def _row(r: sqlite3.Row) -> dict:
@@ -270,6 +307,11 @@ class QaStore:
                 current=q,
             )
 
+    @staticmethod
+    def _last_nudge(db, session: str) -> Optional[dict]:
+        r = db.execute("SELECT * FROM nudges WHERE session = ? ORDER BY rowid DESC LIMIT 1", (session,)).fetchone()
+        return _nudge_row(r) if r else None
+
     # -- reads -------------------------------------------------------------
 
     def get(self, qid: str) -> dict:
@@ -285,11 +327,13 @@ class QaStore:
             seq = db.execute(
                 "SELECT COALESCE(MAX(seq), 0) FROM events WHERE session = ? AND actor <> ?", (session, USER)
             ).fetchone()[0]
+            nudge = self._last_nudge(db, session)
         return {
             "session": session,
             "questions": rows,
             "unresolved": sum(1 for q in rows if q["status"] in UNRESOLVED),
             "agent_seq": int(seq),
+            "nudge": nudge,
         }
 
     def rail(self) -> dict:
@@ -336,6 +380,11 @@ class QaStore:
             )
             q = self._load(db, qid)
             self._event(db, q, actor, "ask")
+            # A question filed while the user's nudge waits is the reply to it.
+            db.execute(
+                "UPDATE nudges SET status='asked', questions=?, settled_at=? WHERE session=? AND status='sent'",
+                (json.dumps([qid]), now, actor),
+            )
         return q
 
     def update(self, actor: str, qid: str, revision, *, title=None, body=None, options=None, multi=None) -> dict:
@@ -433,3 +482,46 @@ class QaStore:
             after = self._load(db, qid)
             self._event(db, after, USER, "answer", {"previous": previous})
         return {"question": after, "previous": previous}
+
+    # -- nudges ------------------------------------------------------------
+
+    def nudge(self, actor: str, session: str) -> dict:
+        """The user asks ``session`` whether it has questions. A nudge still
+        waiting is superseded by this one."""
+        if actor != USER:
+            raise Forbidden("only the user nudges a session for questions")
+        if not isinstance(session, str) or not session:
+            raise QaError("session is required")
+        now = _now()
+        with self._write() as db:
+            db.execute("UPDATE nudges SET status='superseded', settled_at=? WHERE session=? AND status='sent'",
+                       (now, session))
+            nid = "qn-" + secrets.token_hex(4)
+            db.execute("INSERT INTO nudges (id, session, created_at) VALUES (?,?,?)", (nid, session, now))
+            n = self._last_nudge(db, session)
+            self._event(db, {"session": session, "id": nid}, USER, "nudge")
+        return n
+
+    def nothing(self, actor: str, nid: Optional[str] = None, *, note=None) -> dict:
+        """The session's reply to a nudge: nothing to ask. ``nid`` None means
+        the session's waiting nudge."""
+        if not actor or actor == USER:
+            raise Forbidden("a nudge is answered by the session it was sent to")
+        note = _text(note, "note", MAX_BODY)
+        with self._write() as db:
+            if nid:
+                r = db.execute("SELECT * FROM nudges WHERE id = ?", (nid,)).fetchone()
+            else:
+                r = db.execute("SELECT * FROM nudges WHERE session = ? AND status = 'sent'", (actor,)).fetchone()
+            if r is None:
+                raise NotFound(f"no nudge {nid!r}" if nid else f"session {actor} has no nudge waiting")
+            n = _nudge_row(r)
+            if n["session"] != actor:
+                raise Forbidden(f"nudge {n['id']} was sent to session {n['session']}")
+            if n["status"] != "sent":
+                raise Conflict(f"nudge {n['id']} is already settled ({n['status']})", current=n)
+            db.execute("UPDATE nudges SET status='nothing', reply=?, settled_at=? WHERE id=?",
+                       (note, _now(), n["id"]))
+            after = _nudge_row(db.execute("SELECT * FROM nudges WHERE id = ?", (n["id"],)).fetchone())
+            self._event(db, {"session": actor, "id": n["id"]}, actor, "nothing", {"note": note} if note else None)
+        return after
