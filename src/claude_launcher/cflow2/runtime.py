@@ -3886,16 +3886,7 @@ def _move_run(r: Run, target: str, reason: Optional[str], by: str, moved: Dict[s
     path, problems = ir.force_path(r.chart, tid)
     if problems:
         raise FlowError(f"cannot move to {target!r}: " + "; ".join(problems))
-    roots = [iid for iid, rec in r.inst.items()
-             if rec.get("parent") is None and rec.get("node") == path[0][0]]
-    if not roots:
-        raise FlowError(f"run {r.state.get('run_id')} has no live root instance to move")
-    cur, k = roots[0], 1
-    while True:
-        kids = [c for c in r.children_of(cur) if r.inst[c]["node"] == path[k][0]]
-        if not kids or k == len(path) - 1:
-            break
-        cur, k = kids[0], k + 1
+    cur, k = _move_anchor(r, path)
     left = sorted(rec["node"] for rec in r.inst.values() if rec.get("await"))
     node = r.chart.node(tid)
     pending = pending_move(r.state)
@@ -3926,6 +3917,122 @@ def _move_run(r: Run, target: str, reason: Optional[str], by: str, moved: Dict[s
         parent = iid
     _enter(r, tid, parent, (path[-1][1] or {}).get("role", ""), env)
 
+
+
+def _move_anchor(r: Run, path: List[Tuple[str, Optional[Dict[str, Any]]]]) -> Tuple[str, int]:
+    """Where a move along ``path`` (``ir.force_path``) lands: the deepest
+    live instance on the chain that stays, and the index in ``path`` of the
+    first node entered under it. Shared by the move and its preview
+    (:func:`move_plan`), so what the approval card shows is what the move
+    does."""
+    roots = [iid for iid, rec in r.inst.items()
+             if rec.get("parent") is None and rec.get("node") == path[0][0]]
+    if not roots:
+        raise FlowError(f"run {r.state.get('run_id')} has no live root instance to move")
+    cur, k = roots[0], 1
+    while True:
+        kids = [c for c in r.children_of(cur) if r.inst[c]["node"] == path[k][0]]
+        if not kids or k == len(path) - 1:
+            break
+        cur, k = kids[0], k + 1
+    return cur, k
+
+
+def _plan_frame(r: Run, node_id: str, iid: Optional[str] = None) -> Dict[str, Any]:
+    node = r.chart.node(node_id)
+    out: Dict[str, Any] = {"node": node_id, "label": node.label or None, "type": node.type}
+    if node.get("title"):
+        out["title"] = node.get("title")
+    if iid is not None:
+        out["instance"] = iid
+        frame = r.inst[iid].get("frame") or {}
+        if node.type == ir.T_LOOP and frame.get("iter"):
+            out["iter"] = frame["iter"]
+    return out
+
+
+def move_plan(r: Run, target: str) -> Dict[str, Any]:
+    """What moving the run to ``target`` would do to its callstack, measured
+    the way :func:`_move_run` moves it (claunch-1qsz4): the frames that stay
+    (``kept``, root to the anchor), the live frames below the anchor that are
+    cancelled (``unwound``; ``rewind`` levels deep), the frames entered from
+    the anchor down to the target (``entered``; ``step_in`` levels), the
+    callstack paths before and after, and ``relation``:
+
+    - ``reenter``: the target is a live frame now; the move unwinds to it and
+      enters it afresh
+    - ``branch``: the target is off the current stack under a shared frame
+      below the root
+    - ``unrelated``: the root is the only frame the target shares with the
+      current stack
+    - ``step_in``: nothing below the anchor is live; the move only enters
+
+    ``seq`` says where the anchor's sequence goes when the anchor is a seq
+    (from its current step to the target's step: ``back``/``forward``/
+    ``same``). A plan that cannot be made carries ``problems`` instead."""
+    try:
+        tid = _force_target_id(r.chart, target)
+    except FlowError as e:
+        return {"problems": [str(e)]}
+    path, problems = ir.force_path(r.chart, tid)
+    if problems:
+        return {"problems": problems}
+    try:
+        cur, k = _move_anchor(r, path)
+    except FlowError as e:
+        return {"problems": [str(e)]}
+    kept: List[Dict[str, Any]] = []
+    iid: Optional[str] = cur
+    while iid is not None:
+        kept.insert(0, _plan_frame(r, r.inst[iid]["node"], iid))
+        iid = r.inst[iid].get("parent")
+    unwound: List[Dict[str, Any]] = []
+    leaves: List[List[str]] = []
+
+    def walk(parent: str, depth: int, trail: List[str]) -> None:
+        kids = sorted(r.children_of(parent))
+        if not kids and parent != cur:
+            leaves.append(trail)
+        for c in kids:
+            unwound.append({**_plan_frame(r, r.inst[c]["node"], c), "depth": depth})
+            walk(c, depth + 1, trail + [c])
+
+    walk(cur, 1, [])
+    entered = [_plan_frame(r, nid) for nid, _slot in path[k:]]
+    # the anchor walk stops above a live target, so it is a cancelled child
+    if any(f["node"] == tid and f["depth"] == 1 for f in unwound):
+        relation = "reenter"
+    elif not unwound:
+        relation = "step_in"
+    elif len(kept) == 1:
+        relation = "unrelated"
+    else:
+        relation = "branch"
+    names = {f["instance"]: f for f in kept + unwound}
+    label = lambda f: f.get("label") or f["node"]  # noqa: E731
+    before = [[label(f) for f in kept] + [label(names[i]) for i in trail]
+              for trail in leaves] or [[label(f) for f in kept]]
+    plan: Dict[str, Any] = {
+        "target": _plan_frame(r, tid), "relation": relation,
+        "anchor": kept[-1], "kept": kept, "unwound": unwound,
+        "rewind": max((f["depth"] for f in unwound), default=0),
+        "entered": entered, "step_in": len(entered),
+        "before": before, "after": [label(f) for f in kept] + [label(f) for f in entered],
+    }
+    anchor_node = r.node_of(cur)
+    slot = path[k][1] or {}
+    if anchor_node.type == ir.T_SEQ and "idx" in slot:
+        steps = list(anchor_node.get("children") or [])
+        now_idx = (r.inst[cur].get("frame") or {}).get("idx")
+        to_idx = int(slot["idx"])
+        seq: Dict[str, Any] = {"steps": len(steps), "to": to_idx,
+                               "to_label": label(_plan_frame(r, steps[to_idx]))}
+        if isinstance(now_idx, int) and 0 <= now_idx < len(steps):
+            seq.update(at=now_idx, at_label=label(_plan_frame(r, steps[now_idx])),
+                       direction=("back" if to_idx < now_idx else
+                                  "forward" if to_idx > now_idx else "same"))
+        plan["seq"] = seq
+    return plan
 
 
 def step_out(instance: str, outcome: str = ir.OUTCOME_OK, value: Any = None,
@@ -4994,6 +5101,10 @@ def describe(r: Run) -> Dict[str, Any]:
     out["data"] = s.get("data")
     move_req = s.get(MOVE_REQUEST)
     if isinstance(move_req, dict):
+        if move_req.get("kind", MOVE_KIND_MOVE) == MOVE_KIND_MOVE and not move_req.get("decision") \
+                and r.status in LIVE_STATUSES:
+            # measured now, not when filed: the card shows what a grant does
+            move_req = {**move_req, "plan": move_plan(r, str(move_req.get("node") or ""))}
         out["move_request"] = move_req
     hints = []
     if tasks:
