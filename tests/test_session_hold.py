@@ -363,6 +363,22 @@ def test_join_briefing_lists_a_held_peer(home, tmp_path):
     assert "bob" in members and "dan" not in members
 
 
+def test_a_held_holder_keeps_an_exclusive_role_and_a_killed_one_frees_it(home, tmp_path):
+    """A held leader comes back holding the role (claunch-8tvq7): a second
+    leader joining meanwhile would leave two once it wakes. A killed holder
+    still frees the role for a successor, as before."""
+    mgr = _manager()
+    mm = MeshManager(mgr, root=tmp_path / "meshes")
+    mesh = mm.create("sleepy")
+    mesh.members["lead1"] = mesh_mod.Member("lead1", "lead1", role="leader")
+    add_dead(mgr, "lead1", held_at=HELD_AT)
+    holder = mm.exclusive_holder(mesh, "lead2", "leader")
+    assert holder is not None and holder.handle == "lead1"
+
+    add_dead(mgr, "lead1")  # killed: the record carries no hold marker
+    assert mm.exclusive_holder(mesh, "lead2", "leader") is None
+
+
 def test_unhold_runs_the_exit_hooks_on_archive_and_remove(home):
     mgr = _manager()
     exits = []
