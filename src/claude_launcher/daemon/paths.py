@@ -202,6 +202,12 @@ def simulations_dir() -> Path:
     return daemon_dir() / "simulations"
 
 
+def qa_db() -> Path:
+    """Questions sessions put to the user, and the user's answers
+    (qa/store.py, claunch-l8vyi)."""
+    return daemon_dir() / "qa.sqlite3"
+
+
 def mesh_root() -> Path:
     """Root for mesh state (definitions, message logs, delivery cursors)."""
     return daemon_dir() / "mesh"

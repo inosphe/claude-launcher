@@ -511,6 +511,10 @@ def build_app(
     # ownership (released by an exit hook it adds), rounds, owner notices.
     from . import sim_api
     sim_api.install(app)
+    # Session QA (daemon/qa_api.py, claunch-l8vyi): questions a session puts
+    # to the user, answered in its QA pane and typed back into it.
+    from . import qa_api
+    qa_api.install(app)
     # deep_think (daemon/deep_think.py): a session asks itself a question and
     # a quick-fork of it answers. Needs app["handoff"] (set above): the answer
     # is a merge, and the module hooks how that merge is written and kept.
