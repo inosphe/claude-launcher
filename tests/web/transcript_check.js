@@ -732,16 +732,32 @@ const texts = (pane) => pane.children
   const css = fs.readFileSync(
     path.join(__dirname, "..", "..", "src", "claude_launcher", "web", "static",
               "style.css"), "utf8");
-  check("index.html declares the button and the pane",
-        html.includes('id="term-log"') && html.includes('id="term-log-pane"'));
+  check("index.html declares the view radios, the line-header button and the pane",
+        /name="term-view" value="cli" checked/.test(html)
+        && /name="term-view" value="html"/.test(html)
+        && /id="term-blockbar"[^>]*class="[^"]*hidden/.test(html)
+        && html.includes('id="term-log-pane"'));
+  check("the line-header button sits beside the view radios",
+        html.indexOf('id="term-blockbar"') > html.indexOf('id="term-view"')
+        && html.indexOf('id="term-blockbar"') - html.indexOf('</fieldset>', html.indexOf('id="term-view"')) < 600);
   check("the pane sits in the terminal's own column, after the grid",
         html.indexOf('id="term-log-pane"') > html.indexOf('id="terminal"'));
   check("the page starts hidden, like every other view",
         /id="log-view"[^>]*class="[^"]*hidden/.test(html));
   check("and the scroller inside it is NOT hidden — the view owns that now",
         !/id="term-log-pane"[^>]*class="[^"]*hidden/.test(html));
-  check("the header button walks to the route rather than toggling a pane",
-        /location\.hash = `#\/log\/\$\{encodeURIComponent\(currentName\)\}`/.test(src));
+  check("the view radios walk to the routes rather than toggling a pane",
+        /name="term-view"\]'\)\.forEach[\s\S]{0,300}location\.hash = input\.value === "html" \? `#\/log\/\$\{name\}` : `#\/s\/\$\{name\}`/.test(src));
+  check("folded into the overflow menu, the view radios come back as buttons",
+        /input\[type="radio"\]'\);[\s\S]{0,900}source\.closest\("label"\)[\s\S]{0,400}source\.click\(\)/.test(
+          fs.readFileSync(path.join(__dirname, "..", "..", "src", "claude_launcher", "web",
+                                    "static", "toolbar.js"), "utf8")));
+  check("the HTML view folds the page-head and, on request, the line block header",
+        /#log-view\.in-session \.page-head\s*\{\s*display:\s*none/.test(css)
+        && /#log-view\.in-session\.blockbar-off \.log-format-tabs\s*\{\s*display:\s*none/.test(css));
+  check("the legend lives in the line block header",
+        html.indexOf('id="log-legend"') > html.indexOf('id="log-format"')
+        && html.indexOf('id="log-legend"') < html.indexOf('</fieldset>', html.indexOf('id="log-format"')));
   check("the route is registered as a view",
         /log:\s*"log-view"/.test(src));
   check("the hash parser knows it",
@@ -866,6 +882,76 @@ const texts = (pane) => pane.children
   await flush();
   check("a previous session response cannot add records", texts(world.pane).length === 5);
 })();
+
+/* --- the session header on the HTML view (syncTermHeader) ---------------- */
+{
+  function cls() {
+    const set = new Set();
+    return { set, toggle: (c, on) => (on ? set.add(c) : set.delete(c)), contains: (c) => set.has(c) };
+  }
+  function world() {
+    const attrs = {};
+    const nodes = {
+      "term-header": { classList: cls() },
+      "term-blockbar": {
+        classList: cls(),
+        getAttribute: (k) => (k in attrs ? attrs[k] : null),
+        setAttribute: (k, v) => { attrs[k] = v; },
+      },
+      "log-view": { classList: cls() },
+    };
+    const radios = ["cli", "html"].map((value) => ({ value, checked: false }));
+    const env = {};
+    const run = new Function("$", "document", "env", `
+let currentName = null, currentPage = "home", transcriptName = null, transcriptMachine = null;
+let transcriptBlockbar = true;
+${slice("sessionLineOnPage")}
+${slice("syncTermHeader")}
+env.set = (o) => {
+  if ("name" in o) currentName = o.name;
+  if ("page" in o) currentPage = o.page;
+  if ("log" in o) transcriptName = o.log;
+  if ("machine" in o) transcriptMachine = o.machine;
+  if ("bar" in o) transcriptBlockbar = o.bar;
+  syncTermHeader();
+};`);
+    run((id) => nodes[id],
+        { querySelectorAll: (sel) => (sel === 'input[name="term-view"]' ? radios : []) }, env);
+    const view = () => radios.find((r) => r.checked)?.value;
+    return { nodes, attrs, env, view };
+  }
+  const w = world();
+  w.env.set({ name: "s1", page: "terminal" });
+  check("on the terminal the header is up and the view reads CLI",
+        !w.nodes["term-header"].classList.contains("hidden") && w.view() === "cli");
+  check("and the line-header button is down there",
+        w.nodes["term-blockbar"].classList.contains("hidden"));
+  w.env.set({ page: "log", log: "s1", machine: null });
+  check("on the attached session's transcript the header STAYS up",
+        !w.nodes["term-header"].classList.contains("hidden"), [...w.nodes["term-header"].classList.set]);
+  check("and the view reads HTML, with the line-header button beside it",
+        w.view() === "html" && !w.nodes["term-blockbar"].classList.contains("hidden")
+        && w.attrs["aria-pressed"] === "true");
+  check("the page is marked as the session's view, line block header shown",
+        w.nodes["log-view"].classList.contains("in-session")
+        && !w.nodes["log-view"].classList.contains("blockbar-off"));
+  w.env.set({ bar: false });
+  check("hiding the line block header marks the page and unpresses the button",
+        w.nodes["log-view"].classList.contains("blockbar-off") && w.attrs["aria-pressed"] === "false");
+  w.env.set({ log: "s2" });
+  check("another session's transcript is a page of its own: no header",
+        w.nodes["term-header"].classList.contains("hidden")
+        && !w.nodes["log-view"].classList.contains("in-session"));
+  w.env.set({ log: "s1", machine: "pcA" });
+  check("nor a remote shadow's of the same name",
+        w.nodes["term-header"].classList.contains("hidden"));
+  w.env.set({ name: null, page: "log", log: "s1", machine: null });
+  check("nor any transcript while no session is attached",
+        w.nodes["term-header"].classList.contains("hidden"));
+  w.env.set({ name: "s1", page: "beads" });
+  check("and other pages keep the header down, as before",
+        w.nodes["term-header"].classList.contains("hidden"));
+}
 
 process.on("exit", (code) => {
   if (failures) { console.log(`${failures} check(s) failed`); process.exitCode = 1; }

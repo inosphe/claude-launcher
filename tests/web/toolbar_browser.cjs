@@ -126,6 +126,15 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
     await page.locator("#term-more").click();
     await page.locator("#term-overflow-menu button").filter({ hasText: "⬒ run" }).click();
     assert.equal(await page.evaluate(() => window.clicks), 1, "overflow forwards original action");
+    // The view switch folds in as one button per radio, pressed on the view
+    // on screen, and pressing one selects that radio.
+    await page.locator("#term-more").click();
+    const views = await page.locator("#term-overflow-menu button").evaluateAll(
+      bs => bs.filter(b => ["CLI", "HTML"].includes(b.textContent)).map(b => [b.textContent, b.getAttribute("aria-pressed")]));
+    assert.deepEqual(views, [["CLI", "true"], ["HTML", "false"]], `view radios in the menu: ${JSON.stringify(views)}`);
+    await page.locator("#term-overflow-menu button").filter({ hasText: /^HTML$/ }).click();
+    assert.equal(await page.evaluate(() => document.querySelector('input[name="term-view"][value="html"]').checked), true,
+      "the HTML proxy selects the HTML radio");
     await page.locator("#term-more").click();
     await page.keyboard.press("Escape");
     assert.equal(await page.locator("#term-more").getAttribute("aria-expanded"), "false");

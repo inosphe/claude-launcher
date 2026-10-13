@@ -2605,6 +2605,17 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 #log-view .log-format-tabs label { flex: none; }
 #log-view .log-format-tabs span { padding: 4px 12px; }
 #log-view .log-format-tabs[hidden] { display: none; }
+/* The HTML view of the attached session: the session header is up above the
+   page (syncTermHeader), so the page-head's way back and title fold away,
+   and the header's line-header button can fold the format row too. */
+#log-view.in-session .page-head { display: none; }
+#log-view.in-session .log-format-tabs { padding-top: 6px; }
+#log-view.in-session.blockbar-off .log-format-tabs { display: none; }
+/* CLI | HTML in the session header: the segmented pair of the session list,
+   sized to its labels and sitting on the header's own background. */
+#term-header .term-view-tabs { padding: 0; background: none; align-items: center; }
+#term-header .term-view-tabs label { flex: none; }
+#term-header .term-view-tabs span { padding: 2px 9px; }
 .log-md { overflow-wrap: anywhere; }
 .log-think { margin: 4px 0; padding-left: 10px; border-left: 2px solid #3a3f4a; color: #8b93a1; }
 .log-kind { font-size: 11px; color: #8b93a1; margin-bottom: 2px; }
@@ -5367,6 +5378,10 @@ body.embed #main { width: 100%; }
   /* the header duplicates the bar above it, and every pixel here is a
      terminal row */
   #term-header { display: none !important; }
+  /* With the header gone, the transcript keeps its own way back and its
+     format row, whatever the desktop's line-header button last said. */
+  #log-view.in-session .page-head { display: flex; }
+  #log-view.in-session.blockbar-off .log-format-tabs:not([hidden]) { display: flex; }
   #terminal { padding: 2px; }
 
   /* ---- rail mode ----
