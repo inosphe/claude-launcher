@@ -177,6 +177,13 @@ def run_probe(probe: Any, cwd: str, timeout: float = PROBE_TIMEOUT,
     return proc.returncode, out or ""
 
 
+
+def _name(scope: str) -> str:
+    """A notice's recipient for a slot of this daemon with no recorded driver:
+    the slot as the session manager names it (``s15`` for ``s15@main``; a side
+    slot ``s15+stack``, which :meth:`Cflow2Clock._deliver` reads as ``s15``)."""
+    return cstore.own_name(scope) or scope
+
 class Cflow2Clock:
     def __init__(
         self,
@@ -353,8 +360,10 @@ class Cflow2Clock:
     def _deliver(self, cwd: str, name: str, text: str) -> None:
         # a side run's slot (``s1+stack``) or a nested run's is driven by the
         # session of its main slot (doc 2.9)
+        if not cstore.is_own(name):
+            return
         try:
-            session = self.manager.get(cstore.main_scope(name))
+            session = self.manager.get(cstore.session_of(name))
         except Exception:
             return
         if getattr(session, "exited", True):
@@ -416,7 +425,9 @@ class Cflow2Clock:
             return None
         try:
             # a slot name reads as the session that drives it (doc 2.9)
-            session = self.manager.get(cstore.main_scope(name))
+            if not cstore.is_own(name):
+                return None
+            session = self.manager.get(cstore.session_of(name))
         except Exception:
             return None
         return None if getattr(session, "exited", True) else session
@@ -441,10 +452,15 @@ class Cflow2Clock:
     def owns(self, scope: str) -> bool:
         """Whether this daemon drives the slot ``scope`` (claunch-7iub9).
 
-        It does when the slot's driver session (:func:`..cflow2.store.main_scope`
-        -- a side or nested slot reads as its main one) is one of this
-        daemon's sessions and has not ended: live, or held or paused (it comes
-        back, and a held driver is woken by its notice -- :meth:`_deliver`).
+        It does when the slot names this daemon (``s15@main`` -- the
+        ``@<daemon>`` of :func:`..cflow2.store.daemon_of`, claunch-9jmdz) and
+        its driver session (:func:`..cflow2.store.session_of` -- a side or
+        nested slot reads as its main one) is one of this daemon's sessions
+        and has not ended: live, or held or paused (it comes back, and a held
+        driver is woken by its notice -- :meth:`_deliver`). A slot of another
+        daemon is not this one's even when a session here has the same name,
+        held or paused records included. A slot not moved yet (no
+        ``@<daemon>``) is decided by the session name alone, as before.
 
         Every other slot is left alone, whatever directory it stands in. Two
         daemons (a named instance and the default) can have sessions in the
@@ -464,8 +480,8 @@ class Cflow2Clock:
         an exited session are aborted by :meth:`end_sides` all the same --
         that path starts from this daemon's own exit hook, not from the scan.
         """
-        name = cstore.main_scope(scope)
-        if not name or name == cstore.DEFAULT_SCOPE:
+        name = cstore.session_of(scope)
+        if not name or name == cstore.DEFAULT_SCOPE or not cstore.is_own(scope):
             return False
         try:
             session = self.manager.get(name)
@@ -543,14 +559,14 @@ class Cflow2Clock:
             if (first.get("next_round") or {}).get("auto") and not self.stop.is_set():
                 started = runtime.start_next_round(cwd, scope, now)
                 if started:
-                    notices.append((cwd, started.get("driver") or scope, round_block(started)))
+                    notices.append((cwd, started.get("driver") or _name(scope), round_block(started)))
             return
         probe = self._probe if self.probe_runner is not None else None
         payload = runtime.wait_tick(now, probe, cwd=cwd, scope=scope)
         if payload.get("ticked") and _waits_on_driver(payload):
-            notices.append((cwd, payload.get("driver") or scope, moved_block(scope, payload)))
+            notices.append((cwd, payload.get("driver") or _name(scope), moved_block(scope, payload)))
         elif self._delegation_closed(cwd, scope, first) and _waits_on_driver(payload):
-            notices.append((cwd, payload.get("driver") or scope,
+            notices.append((cwd, payload.get("driver") or _name(scope),
                             moved_block(scope, payload, why=WHY_DELEGATION)))
         # Taken now, not only at the end of the pass: a step below that raises
         # would leave the old set, and every later pass would announce the
@@ -559,10 +575,10 @@ class Cflow2Clock:
         self._claim_restarts(cwd, scope, now, notices)
         for text in asks.tick(cwd=cwd, scope=scope, now=now, pool_fn=self.ask_pool,
                               deliver_fn=self.ask_deliver):
-            notices.append((cwd, scope, text))
+            notices.append((cwd, _name(scope), text))
         for v in runtime.monitors_tick(now, probe, cwd=cwd, scope=scope):
             if v["action"] in (runtime.MON_NOTIFY, runtime.MON_HALT):
-                notices.append((cwd, scope, monitor_block(scope, v)))
+                notices.append((cwd, _name(scope), monitor_block(scope, v)))
         self._watch_collections(cwd, scope, now)
         self._watch_lost(cwd, scope)
         state = st.load_state()
@@ -611,7 +627,7 @@ class Cflow2Clock:
             log.debug("cflow2 restart claim skipped %s/%s: %s", cwd, scope, exc)
             return
         for action in actions:
-            notices.append((cwd, action.get("driver") or scope, restart_block(action)))
+            notices.append((cwd, action.get("driver") or _name(scope), restart_block(action)))
             if action.get("kind") == "run":
                 with self._lock:
                     self.restarts.append((cwd, scope, action))
@@ -639,7 +655,7 @@ class Cflow2Clock:
         """Run one claimed restart and record it. Blocking. The command runs
         with the driver's ``CLAUNCH_SESSION`` so a ``claunch daemon restart``
         inside it goes through the web UI's approval gate."""
-        session = str(action.get("driver") or scope)
+        session = str(action.get("driver") or _name(scope))
         runner = self.restart_runner
         if runner is None:
             from .cflow_clock import RestartClock
@@ -657,7 +673,7 @@ class Cflow2Clock:
                                         cwd=cwd, scope=scope)
         if not done:
             return []
-        return [(cwd, done.get("driver") or scope, restart_result_block(done))]
+        return [(cwd, done.get("driver") or _name(scope), restart_result_block(done))]
 
     # -- triggers and collection watch ---------------------------------------
     def _claim(self, cwd: str, scope: str, state: Dict[str, Any]) -> None:
@@ -782,7 +798,7 @@ class Cflow2Clock:
             found = None
             if marker:
                 with contextlib.suppress(Exception):
-                    found = self.find_child(cstore.main_scope(scope), marker)
+                    found = self.find_child(cstore.session_of(scope), marker)
             if found:
                 cflow2_exec._record_child(cwd, scope, did, found,
                                           dict(runner, boot=self.boot), marker,
@@ -894,7 +910,7 @@ class Cflow2Clock:
             child = None
             if marker:
                 with contextlib.suppress(Exception):
-                    child = self.find_child(cstore.main_scope(scope), marker)
+                    child = self.find_child(cstore.session_of(scope), marker)
             rec = dels.get(did) or {}
             if child and child == rec.get("child"):
                 with contextlib.suppress(OSError):
@@ -903,7 +919,7 @@ class Cflow2Clock:
             if child:
                 outcome = "killed"
                 try:
-                    self.kill_child(scope, child)
+                    self.kill_child(cstore.session_of(scope), child)
                 except Exception as exc:  # noqa: BLE001 - journal what we could not do
                     outcome = f"kill failed: {exc}"
                 with contextlib.suppress(Exception):
@@ -933,7 +949,7 @@ class Cflow2Clock:
             did, f"budget.seconds {float(seconds):g} ran out ({ex} delegation)",
             outcome=ir.OUTCOME_TIMEOUT, detail={"seconds": seconds}, cwd=cwd, scope=scope)
         label = rec.get("label") or rec.get("node")
-        notices.append((cwd, scope, (
+        notices.append((cwd, _name(scope), (
             f"[cflow2] delegation {did} ({label}, {ex}) ran past its budget of "
             f"{float(seconds):g}s and has been ended with outcome 'timeout'. Stop the "
             f"{'sub-agent' if ex == ir.EXEC_SUBAGENT else 'child session'} working on it; "

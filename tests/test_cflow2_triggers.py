@@ -789,7 +789,7 @@ def test_leader_push_skips_the_parents_side_run(tmp_path):
     assert _items(mid, "m1+stack") == {}
     # parent: still reaches the parent's stack run
     ok, detail = _push(mgr, work)
-    assert ok and "m1+stack" in detail
+    assert ok and "m1@main+stack" in detail
     assert set(_items(mid, "m1+stack")) == {"c-1", "c-2"}
 
 

@@ -221,7 +221,7 @@ new Function(
   + slice("seenAgo") + slice("seenPair") + slice("railSeenLine")
   + slice("profileHarnessLabel") + slice("railMetaText")
   + slice("answerFellToUs") + slice("answerBranchOptions")
-  + slice("sessCflowRun")
+  + slice("scopeSession") + slice("sessCflowRun")
   + keysBlock() + slice("killSession") + slice("pauseSession")
   + slice("archiveSession") + slice("refreshSessions")
   + `

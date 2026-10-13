@@ -3733,20 +3733,24 @@ def _scope_sessions(
     live_sessions: Optional[Dict[Tuple[str, str], object]] = None,
     include_held: bool = False,
 ) -> list:
-    """The session this run maps 1:1 to (scope == session name), if alive.
+    """The session this run maps 1:1 to (scope == session name; a v2 slot of
+    this daemon without its ``@<daemon>``), if alive.
 
     ``include_held`` also answers a held record (daemon/hold.py): a person
     acting on its run is a use of it, and the nudge that follows wakes it
     (:func:`_cflow_nudge_held`, claunch-2xyjw)."""
+    name = cflow_clock.session_name(scope)
+    if not name:
+        return []
     if live_sessions is not None:
-        return [scope] if (cwd, scope) in live_sessions else []
+        return [name] if (cwd, name) in live_sessions else []
     for session in manager.list():
         if (
-            session.sdef.name == scope
+            session.sdef.name == name
             and (not session.exited or (include_held and cflow_clock.is_held(session)))
             and _session_cwd(session) == cwd
         ):
-            return [scope]
+            return [name]
     return []
 
 
@@ -4703,7 +4707,7 @@ NUDGE_CFLOW2_ABORTED = (
 
 def _scope_profile(manager: SessionManager, scope: str) -> Optional[str]:
     try:
-        return manager.get(scope).sdef.profile or None
+        return manager.get(cflow_clock.session_name(scope)).sdef.profile or None
     except Exception:  # noqa: BLE001 - a scope with no session: ambient caps
         return None
 

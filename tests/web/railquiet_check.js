@@ -82,7 +82,7 @@ function row(name) {
 const ctx = {};
 new Function(
   "exports", "$", "document", "sessionsCache", "cflowCache",
-  [slice("el"), slice("sessCflowRun"), slice("railQuietFlags"),
+  [slice("el"), slice("scopeSession"), slice("sessCflowRun"), slice("railQuietFlags"),
    slice("applyRailQuiet")].join("\n") + `
 exports.apply = applyRailQuiet;
 exports.flags = railQuietFlags;

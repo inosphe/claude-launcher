@@ -89,7 +89,7 @@ const ctx = {};
 new Function(
   "exports", "$", "el",
   stubs
-  + ["askWho", "answerFellToUs", "answerBranchOptions", "sessCflowRun",
+  + ["askWho", "answerFellToUs", "answerBranchOptions", "scopeSession", "sessCflowRun",
      "sessCflowGated", "sessCflowLabel", "sessCflowGateStep", "fmtOpensAt",
      "termCflowAnswers", "termCflowQuestion", "cf2LimitPresses", "termCflow2Answers",
      "termCflow2Question", "termCflowView", "renderTermCflow"]

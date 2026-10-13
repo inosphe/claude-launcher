@@ -90,7 +90,7 @@ const ctx = {};
 new Function(
   "exports", "$", "document", "location", "cflowCache",
   [wfGlyphTable(), slice("wfDotClass"), slice("wfMarkState"), slice("wfMark"), slice("askWho"),
-   slice("answerFellToUs"), slice("answerBranchOptions"), slice("sessCflowRun"),
+   slice("answerFellToUs"), slice("answerBranchOptions"), slice("scopeSession"), slice("sessCflowRun"),
    slice("sessCflowGated"), slice("sessCflowLabel"), slice("sessCflowGateStep"), slice("fmtOpensAt"),
    slice("applyCflowBadges")].join("\n") + `
 exports.apply = applyCflowBadges;

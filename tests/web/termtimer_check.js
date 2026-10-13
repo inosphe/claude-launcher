@@ -117,7 +117,7 @@ new Function(
   [table("RAIL_TIMER_RANK"), table("RAIL_TIMER_GLYPH"),
    slice("fmtCountdown"), slice("timerClockName"), slice("railTimerPick"),
    slice("railTimerTitle"),
-   slice("railTimerLine"), slice("sessCflowRun"),
+   slice("railTimerLine"), slice("scopeSession"), slice("sessCflowRun"),
    slice("termTimerRun"), slice("termSessionReminder"),
    slice("termTimerSubject"), table("TERM_TIMER_HOLD_GLYPH"),
    slice("renderTermTimer"), slice("termTimerHold"), slice("termTimerTitle"),
