@@ -11,7 +11,7 @@ from pathlib import Path
 
 from ..delayed_sweep import Queue
 from .. import config, test_window
-from . import paths
+from . import instance_manifest, paths
 
 log = logging.getLogger("claunch.daemon.delayed_sweep")
 
@@ -110,6 +110,15 @@ class Clock:
         env["PATH"] = str(Path(job["python"]).parent) + os.pathsep + env.get("PATH", "")
         env[config.LAUNCHER_HOME_ENV] = origin["home"]
         env[paths.INSTANCE_BASE_ENV] = origin["base"]
+        # The daemon of a named instance carries its manifest's bookkeeping
+        # (applied name, previous values, port). The suite's first cli.main()
+        # would see an "applied" instance that differs from the default one
+        # and undo it, restoring CLAUDE_LAUNCHER_HOME to the pre-manifest
+        # value -- the test's throwaway home becomes the real one. The runner
+        # gets its home and instance explicitly, so none of it is passed on.
+        for name in (instance_manifest.APPLIED_ENV, instance_manifest.PREV_ENV,
+                     instance_manifest.PORT_ENV):
+            env.pop(name, None)
         # The default instance is the absence of the variable: an empty value
         # is still "set" and the suite's leaked-instance-state guard rejects it.
         if origin["instance"]:

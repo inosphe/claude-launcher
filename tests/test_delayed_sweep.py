@@ -13,7 +13,7 @@ import pytest
 
 from claude_launcher import delayed_sweep as mod, test_window
 from claude_launcher.daemon.delayed_sweep import Clock
-from claude_launcher.daemon import delayed_sweep as daemon_sweep, paths
+from claude_launcher.daemon import delayed_sweep as daemon_sweep, instance_manifest as im, paths
 
 TOOL = Path(__file__).resolve().parents[1] / "tools" / "sweep.py"
 
@@ -277,6 +277,28 @@ def test_another_instance_runs_with_the_recorded_origin_without_duplication(repo
     asyncio.run(Clock(SimpleNamespace(), first).tick())
     assert len(seen) == 1
     assert first.get(job["id"])["attempts"] == 1
+
+
+def test_runner_env_drops_the_daemons_manifest_bookkeeping(repo, tmp_path, monkeypatch):
+    # A named instance's daemon exports its manifest bookkeeping; the suite's
+    # first cli.main() would undo it and put the pre-manifest home over the
+    # test's throwaway one (claunch-egr6y).
+    monkeypatch.setenv(paths.INSTANCE_ENV, "review-a")
+    q = mod.Queue()
+    enqueue(q, repo, "a")
+    for name, value in ((im.APPLIED_ENV, "review-a"), (im.PORT_ENV, "8379"),
+                        (im.PREV_ENV, '{"CLAUDE_LAUNCHER_HOME": null}')):
+        monkeypatch.setenv(name, value)
+    seen = []
+    async def launch(*args, **kwargs):
+        seen.append(kwargs)
+        return SimpleNamespace(pid=os.getpid(), returncode=None)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", launch)
+    asyncio.run(Clock(SimpleNamespace(), q).tick())
+    env = seen[0]["env"]
+    assert env[paths.INSTANCE_ENV] == "review-a"
+    for name in (im.APPLIED_ENV, im.PREV_ENV, im.PORT_ENV):
+        assert name not in env
 
 
 def test_interrupted_runner_retries_but_live_runner_is_never_duplicated(repo, tmp_path):
