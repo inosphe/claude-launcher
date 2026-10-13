@@ -105,16 +105,25 @@ claunch-efnbt. gds6 시뮬레이션 v2(`~/works/gds6`, `notes/designframe-sim-v2
   먼저 기록된다(claunch-efnbt.4). 「중지」는 실행 세션을 종료한다. 소유 세션이 종료되면
   실행 세션도 종료된다.
 - 진행 상황은 세션 진행 API(`stage`: formalize, judge, answers, round, gaps)로 세션 목록과 대시보드에 보인다.
-- 실행 세션의 터미널 머리줄 「⬒ run」은 워크플로 런 대신 그 세션의 실행 기록(`durable.events.jsonl`)을 흐름도로 보여
-  준다(`web/static/durable-flow.js`, claunch-neeya). 읽는 곳은 `GET /api/sessions/<실행 세션>/durable?since=<n>`이다.
-  세션 정의의 `CLAUNCH_SIM_ID`(세션이 사라졌으면 이름 `<시뮬레이션 id>-run<n>`)로 시뮬레이션을 찾고, 그 세션의 줄만
-  돌려준다. `since`는 이미 받은 사건 수이고 응답은 그 뒤의 사건만 싣는다. `live`, `progress`가 함께 온다.
+- kind가 `pi-durable`인 세션의 터미널 머리줄에는 「◇ chart」 버튼이 보이고, 누르면 분할 창에 그 세션의 실행 기록을
+  흐름도로 보여 준다(`web/static/durable-flow.js`, claunch-neeya, claunch-neeya.1). 「⬒ run」은 이 세션에서도 워크플로
+  런을 보여 준다. 읽는 곳은 `GET /api/sessions/<세션>/durable?since=<n>`이고, 기록을 찾는 경로는 둘이다.
+  - 세션 정의의 `CLAUNCH_SIM_ID`(세션이 사라졌으면 이름 `<시뮬레이션 id>-run<n>`)가 있으면 그 시뮬레이션의
+    `durable.events.jsonl`에서 그 세션의 줄만 돌려준다.
+  - 그것이 없고 세션 정의에 `SIM_RUN_DIR`이 있으면(gds6의 sim2 실행기) 그 디렉터리의 `<디렉터리 이름>.events.jsonl`을
+    돌려준다. 응답의 `sim`은 디렉터리 이름, `run_dir`은 그 경로다. 둘 다 없으면 404다.
+  `since`는 이미 받은 사건 수이고 응답은 그 뒤의 사건만 싣는다. `live`, `progress`가 함께 온다.
   시뮬레이션 전체의 기록은 `GET /api/sims/<id>/events?session=&since=`이다.
   - 열은 고리가 들어간 단계 순서다: 시작, 형식화, 재인용, 판정, 답 반영, 라운드 N, 편집 제안, 끝. 앞서 지난 단계에 다시
     들어가면 새 열이 생긴다. 열 안의 노드는 시간 순서다.
   - 물음(`ask`) 하나가 노드 하나다. 결과 사건(`formalize`, `judge`, `triage`, `gap_patch`, `edits` 등)은 새 노드를 만들지
     않고 그 물음의 노드 상태를 바꾼다(초록 성공, 빨강 실패·해석 실패, 노랑 일부 오류). 노드 위에 마우스를 올리면 시각,
     물음 열쇠, 토큰 내역이 보인다.
+  - sim2 기록(`ask`에 `askRole`이 있다)은 한 실행에 물음이 수백~천 개이고 동시에 돌기 때문에 물음 하나가 노드 하나가
+    아니라 단계 묶음 하나가 노드 하나다: `B:<단계>`는 열 「모델 구성」(효과, 충돌, 형식화 등), `C:triage`는 「분류」,
+    `A:<N>:p<k>`·`C:r<N>:j`·`C:r<N>:f…`는 「라운드 N」(플레이, 판정, 발견 검토), `D:<cr>`는 「편집 제안」에 들어간다.
+    노드에는 물음 수(`×N`)와 토큰 합이 붙고, 잘린 답(`stop`이 `stop`이 아님)이 있으면 노랑이다. 단계가 처음 연 열을
+    계속 쓴다. `run_end`가 끝 노드다(done 초록, stopped 노랑 「중단」, 그 밖은 빨강 「실패」).
   - 세션이 살아 있고 `done`이 없으면 마지막 노드 뒤에 점선 「진행 중」 노드가 진행 API의 단계와 문구를 보여 준다.
   - 2초마다 뒤쪽 사건만 받아 이미 그린 SVG에 새 노드와 선을 덧붙이고, 상태가 바뀐 노드의 글자와 class만 고친다. SVG를
     다시 만들지 않으므로 스크롤 위치와 마우스 올림이 유지된다. 세션이 종료되면 폴링을 멈춘다.

@@ -657,8 +657,11 @@ def install(app, store: Optional[sim_store.SimStore] = None):
         return web.json_response(res)
 
     async def h_session_durable(request):
-        """A pi-durable run session's own events, found from the session:
-        the run pane of its terminal reads this instead of a workflow run."""
+        """A pi-durable session's own events, found from the session: the
+        chart pane of its terminal reads this. Two producers: a simulation's
+        run session (env ``CLAUNCH_SIM_ID``, or the name ``<sid>-run<n>``)
+        logs into the simulation store; any other runner that names its run
+        directory in env ``SIM_RUN_DIR`` (gds6's sim2) keeps the log there."""
         name = request.match_info["name"]
         try:
             since = int(request.query.get("since") or 0)
@@ -669,15 +672,20 @@ def install(app, store: Optional[sim_store.SimStore] = None):
             session = manager.get(name)
         except Exception:  # noqa: BLE001 -- gone from the manager: the name still says which simulation
             pass
-        sid = ""
-        if session is not None:
-            sid = str((getattr(session.sdef, "env", None) or {}).get("CLAUNCH_SIM_ID") or "")
+        env = (getattr(session.sdef, "env", None) or {}) if session is not None else {}
+        sid = str(env.get("CLAUNCH_SIM_ID") or "")
         if not sid:
             m = RUN_SESSION_RE.match(name)
             sid = m.group(1) if m else ""
-        if not sid:
-            return web.json_response({"error": f"{name} is not a simulation run session"}, status=404)
-        res, err = await call(sims.durable_events, sid, name, since)
+        run_dir = str(env.get("SIM_RUN_DIR") or "")
+        if sid:
+            res, err = await call(sims.durable_events, sid, name, since)
+        elif run_dir:
+            res, err = await call(sim_store.run_dir_events, run_dir, since)
+        else:
+            return web.json_response(
+                {"error": f"{name} keeps no pi-durable event log "
+                          "(neither CLAUNCH_SIM_ID nor SIM_RUN_DIR is set for it)"}, status=404)
         if err:
             return err
         live = session is not None and not session.exited

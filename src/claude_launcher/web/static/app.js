@@ -5442,11 +5442,20 @@ function applySimulationBadges() {
   }
 }
 
+/* A pi-durable session logs its run as events; only it has a chart to show. */
+function isPiDurable(name) {
+  return !!name && sessionsCache.some((s) => s.name === name && s.kind === "pi-durable");
+}
+
 function syncSessionResourceButtons() {
   const name = currentPage === "terminal" ? currentName : null;
+  const chart = $("term-chartbtn");
+  if (chart && chart.classList.contains("hidden") === isPiDurable(name))
+    chart.classList.toggle("hidden", !isPiDurable(name));
   const present = {
     "term-simsbtn": !!name && sessionSimCache.some(s => s.owner === name),
     "term-splitbtn": !!name && !!(sessCflowRun(name) || cflow2RailCache[name]),
+    "term-chartbtn": isPiDurable(name),
   };
   for (const [id, hasResource] of Object.entries(present)) {
     const btn = $(id);
@@ -17324,8 +17333,9 @@ function sessLayoutFor(name) {
     rail: raw.rail === "wf" || raw.rail === "beads" ? raw.rail : "detail",
     sub: DETAIL_SUBTAB_IDS.has(raw.sub) ? raw.sub : "all",
     split: !!raw.split,
-    // What the split pane shows: the workflow run (⬒) or the simulations (◬).
-    pane: raw.pane === "sims" ? "sims" : "run",
+    // What the split pane shows: the workflow run (⬒), the simulations (◬)
+    // or a pi-durable session's event chart (◇).
+    pane: raw.pane === "sims" || raw.pane === "chart" ? raw.pane : "run",
     ratio: clampSplitRatio(Number(raw.ratio)),
   };
 }
@@ -19001,6 +19011,12 @@ function syncSplitPane() {
   sims.title = simsOn
     ? "close the simulations pane — the terminal takes the column back"
     : "this session's simulations under the terminal — run, answer, decide edit proposals";
+  const chart = $("term-chartbtn");
+  const chartOn = !!lay && lay.split && lay.pane === "chart";
+  chart.setAttribute("aria-pressed", String(chartOn));
+  chart.title = chartOn
+    ? "close the chart pane — the terminal takes the column back"
+    : "this pi-durable session's run as a flow chart, updated as it logs";
   if (up) {
     applySplitRatio(lay.ratio);
     if (splitFor !== name || splitKind !== lay.pane) openSplit(name, lay.pane);
@@ -19474,13 +19490,13 @@ const wfPageUi = {
    pane owns its own slot, poll, selection and last payload — the page's
    globals above belong to the page, and the two must be able to differ. */
 let splitFor = null;           // the session the pane is showing (null = shut)
-let splitKind = null;          // "run" or "sims" (sessLayoutFor().pane)
+let splitKind = null;          // "run", "sims" or "chart" (sessLayoutFor().pane)
 let splitCwd = null;           // its slot, resolved once from the meta endpoint
 let splitScope = null;
 let splitPollTimer = null;
 let splitSelectedStep = null;
 let splitLastData = null;
-let splitDurable = null;       // a pi-durable run session's event flow (durable-flow.js)
+let splitDurable = null;       // the chart pane's event flow (durable-flow.js)
 
 const splitUi = {
   host: "split",
@@ -19509,6 +19525,12 @@ function openSplit(name, kind = "run") {
   splitKind = kind;
   // The simulations view keeps its own poll (sim-page.js).
   if (kind === "sims") { globalThis.SimPane?.mount($("term-wf"), name); return; }
+  // So does a pi-durable session's chart: its run is the event log it
+  // writes, drawn as a flow diagram that updates in place.
+  if (kind === "chart") {
+    splitDurable = globalThis.DurableFlow?.mount($("term-wf"), name, { api }) || null;
+    return;
+  }
   $("term-wf").innerHTML = "<p class='wf-note'>loading…</p>";
   refreshSplit();
   splitPollTimer = setInterval(visiblePoll(refreshSplit, () => splitPollTimer), 5000);
@@ -19530,31 +19552,21 @@ function closeSplit() {
 async function refreshSplit() {
   const want = splitFor;
   if (!want || splitKind !== "run") return;
-  if (splitDurable) return;   // it keeps its own poll
   // A run is keyed by (cwd, scope) and the meta endpoint already answers
   // that resolution for a session — ask it rather than re-deriving the slot
   // rules here. null is "not asked yet"; "" is "asked, and there is none",
   // which unlike a failed ask is an answer, so the poll stops asking.
   if (splitCwd === null) {
-    let flow, kind;
+    let flow;
     try {
       const resp = await api(`/api/sessions/${encodeURIComponent(want)}/meta`);
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) return;   // the poll will come back round
       flow = data.cflow || null;
-      kind = (data.session && data.session.kind) || "";
     } catch {
       return;
     }
     if (splitFor !== want) return;   // repointed while the reply was in flight
-    // A pi-durable run session drives no workflow: its run is the campaign
-    // loop it logs, drawn as a flow diagram that updates in place.
-    if (kind === "pi-durable" && globalThis.DurableFlow) {
-      if (splitPollTimer) { clearInterval(splitPollTimer); splitPollTimer = null; }
-      splitCwd = "";
-      splitDurable = globalThis.DurableFlow.mount($("term-wf"), want, { api });
-      return;
-    }
     if (!flow || !flow.cwd) {
       splitCwd = "";
       $("term-wf").innerHTML = "";
@@ -19607,6 +19619,7 @@ async function refreshSplit() {
    what actually opens and closes the pane, so a press and a reload agree. */
 $("term-splitbtn").addEventListener("click", () => toggleSplitPane("run"));
 $("term-simsbtn").addEventListener("click", () => toggleSplitPane("sims"));
+$("term-chartbtn").addEventListener("click", () => toggleSplitPane("chart"));
 
 /* One pane, two contents: pressing the lit button closes it, pressing the
    other one switches what the open pane shows. */

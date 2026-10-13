@@ -18,12 +18,14 @@ function node() {
   };
 }
 const a = node(), b = node(); a.dataset.name = "a"; b.dataset.name = "b";
-const run = node(), sim = node();
-const dom = {"session-list": {querySelectorAll: () => [a, b]}, "term-simsbtn": sim, "term-splitbtn": run};
+const run = node(), sim = node(), chart = node();
+const dom = {"session-list": {querySelectorAll: () => [a, b]}, "term-simsbtn": sim, "term-splitbtn": run,
+             "term-chartbtn": chart};
 let rows = [], fail = false, requests = 0;
 const ctx = vm.createContext({
   document: {createElement: node}, $: id => dom[id],
   currentName: "a", currentPage: "terminal", cflow2RailCache: {},
+  sessionsCache: [{name: "a", kind: ""}, {name: "b", kind: "pi-durable"}],
   v1: null, sessCflowRun(name) { return ctx.v1?.scope === name ? ctx.v1 : null; },
   api: async () => { requests++; if (fail) throw Error("offline"); return {ok: true, json: async () => ({sims: rows})}; },
 });
@@ -46,6 +48,11 @@ const has = n => n.classList.contains("has-resource");
   a.children[0].children[0].handlers.click({stopPropagation() { stopped = true; }});
   assert.ok(stopped);
   assert.ok(has(sim)); assert.ok(!has(run));
+  // ◇ chart shows only on a pi-durable session (claunch-neeya.1).
+  assert.ok(chart.classList.contains("hidden"), "a plain session has no chart button");
+  ctx.currentName = "b"; ctx.syncSessionResourceButtons();
+  assert.ok(!chart.classList.contains("hidden") && has(chart), "a pi-durable session shows it");
+  ctx.currentName = "a"; ctx.syncSessionResourceButtons();
   const stable = a.children[0].children[0];
   await ctx.refreshSessionSims();
   assert.equal(a.children[0].children[0], stable, "unchanged polls preserve links");
