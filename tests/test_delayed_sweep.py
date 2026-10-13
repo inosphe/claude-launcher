@@ -424,3 +424,27 @@ def test_clock_uses_a_daemon_owned_process_and_persists_its_pid(repo, tmp_path, 
     env = seen[0][1]["env"]
     assert "CLAUNCH_SESSION" not in env
     assert test_window.WINDOW_GRANT_ENV not in env
+
+
+def test_runner_env_has_no_empty_instance_and_always_a_git_identity(repo, tmp_path, monkeypatch):
+    home = tmp_path / "bare-home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    for name in ("GIT_CONFIG_GLOBAL", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
+                 "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv(paths.INSTANCE_ENV, "")
+    q = mod.Queue()
+    enqueue(q, repo, "a")
+    seen = []
+    async def launch(*args, **kwargs):
+        seen.append(kwargs["env"])
+        return SimpleNamespace(pid=os.getpid(), returncode=None)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", launch)
+    asyncio.run(Clock(SimpleNamespace(), q).tick())
+    env = seen[0]
+    assert paths.INSTANCE_ENV not in env
+    commit = subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", "x"], cwd=repo,
+                            env=env, capture_output=True, text=True)
+    assert commit.returncode == 0, commit.stderr

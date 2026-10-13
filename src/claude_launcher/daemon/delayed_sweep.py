@@ -6,6 +6,7 @@ import contextlib
 import json
 import logging
 import os
+import subprocess
 from pathlib import Path
 
 from ..delayed_sweep import Queue
@@ -13,6 +14,26 @@ from .. import config, test_window
 from . import paths
 
 log = logging.getLogger("claunch.daemon.delayed_sweep")
+
+
+def _ensure_git_identity(env):
+    """Give the runner a commit identity when git resolves none in `env`.
+
+    The daemon has no GIT_CONFIG_GLOBAL, so tests that commit in scratch
+    repositories fail with "Author identity unknown". A configured identity
+    is left alone.
+    """
+    for key, var in (("user.name", "NAME"), ("user.email", "EMAIL")):
+        try:
+            found = subprocess.run(["git", "config", "--get", key], env=env,
+                                   capture_output=True, text=True, timeout=10)
+            resolved = found.returncode == 0 and found.stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            resolved = False
+        if not resolved:
+            value = "claunch delayed sweep" if var == "NAME" else "delayed-sweep@claunch.invalid"
+            env.setdefault("GIT_AUTHOR_" + var, value)
+            env.setdefault("GIT_COMMITTER_" + var, value)
 
 
 class Clock:
@@ -85,7 +106,13 @@ class Clock:
         env["CLAUNCH_SCRATCH"] = str(scratch)
         env[config.LAUNCHER_HOME_ENV] = origin["home"]
         env[paths.INSTANCE_BASE_ENV] = origin["base"]
-        env[paths.INSTANCE_ENV] = origin["instance"]
+        # The default instance is the absence of the variable: an empty value
+        # is still "set" and the suite's leaked-instance-state guard rejects it.
+        if origin["instance"]:
+            env[paths.INSTANCE_ENV] = origin["instance"]
+        else:
+            env.pop(paths.INSTANCE_ENV, None)
+        _ensure_git_identity(env)
         try:
             with logfile.open("ab") as output:
                 self.runner = await asyncio.create_subprocess_exec(
