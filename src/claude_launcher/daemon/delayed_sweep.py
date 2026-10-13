@@ -112,7 +112,8 @@ class Clock:
             env[paths.INSTANCE_ENV] = origin["instance"]
         else:
             env.pop(paths.INSTANCE_ENV, None)
-        _ensure_git_identity(env)
+        # git config lookups can take seconds; keep them off the event loop.
+        await asyncio.to_thread(_ensure_git_identity, env)
         try:
             with logfile.open("ab") as output:
                 self.runner = await asyncio.create_subprocess_exec(
