@@ -955,7 +955,7 @@ def ReminderClock(manager, mesh=None, *, poll: float = REMINDER_POLL):
     return SessionReminderService(manager, mesh, poll=poll)
 
 
-def session_for(manager, cwd: str, scope: str):
+def session_for(manager, cwd: str, scope: str, *, held: bool = False):
     """The live session a run maps 1:1 to, or None.
 
     Same containment rule as the dashboard's ``_scope_sessions``: the scope
@@ -963,12 +963,17 @@ def session_for(manager, cwd: str, scope: str):
     directory is never typed into by that directory's run. Shared by every
     clock here that types into a driver, so the containment rule is stated
     once and cannot drift between them.
+
+    ``held=True`` also answers with a held record (asleep, not gone): for a
+    caller that wakes it to deliver (:func:`waking_deliver`, claunch-t1r9j).
     """
     try:
         session = manager.get(scope)
     except Exception:
         return None
-    if session.exited or not session.sdef.cwd:
+    if session.exited and not (held and is_held(session)):
+        return None
+    if not session.sdef.cwd:
         return None
     try:
         if cflow_state.resolve_cwd(session.sdef.cwd) != cwd:
@@ -2487,6 +2492,13 @@ class TriggerClock:
                 # in_review issues), and the session's main run files it.
                 return False, "a sub run does not file the session's landing request"
             return await self._enqueue_landing(cwd, scope)
+        if do == cflow_model.TRIGGER_CHECKS:
+            # A held driver is asleep, not gone: the request wakes it and is
+            # typed after the respawn (claunch-t1r9j).
+            held = session_for(self.manager, cwd, scope, held=True)
+            if held is not None and is_held(held):
+                return await request_checks(held, waking_deliver(
+                    self.manager, held.sdef.name, by="cflow-checks"))
         session = session_for(self.manager, cwd, scope)
         if session is None:
             return False, "no live session drives this run"
@@ -2522,6 +2534,26 @@ class TriggerClock:
     @staticmethod
     async def _briefing(session) -> Tuple[bool, str]:
         return await recompose_briefing(session)
+
+
+def is_held(session) -> bool:
+    """Whether ``session`` is a held record: its program freed, the session
+    kept, and brought back by :meth:`SessionManager.wake_async`."""
+    return bool(getattr(session, "exited", False) and getattr(session, "held_at", None))
+
+
+def waking_deliver(manager, name: str, *, by: str) -> Callable[[str], Awaitable[bool]]:
+    """A ``deliver`` for a held session: wake it, then queue the block into
+    the woken session (:meth:`SessionManager.wake_soon`). Returns whether the
+    wake was scheduled -- the block rides behind the respawn, so acceptance
+    is not a delivery receipt, the same as ``queue_delivery``'s."""
+    async def deliver(block: str) -> bool:
+        try:
+            return bool(manager.wake_soon(name, by=by, deliver=block))
+        except Exception:
+            log.exception("wake of held session %r for delivery failed", name)
+            return False
+    return deliver
 
 
 async def request_checks(

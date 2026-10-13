@@ -11148,14 +11148,19 @@ async def h_session_status_checks_report(request: web.Request) -> web.Response:
 
 
 async def h_session_status_checks_refresh(request: web.Request) -> web.Response:
-    """Ask an active agent to read current checks and report fresh values."""
+    """Ask an active agent to read current checks and report fresh values.
+
+    A held session is asleep, not gone: the request wakes it and the refresh
+    block is queued into the woken session (``woken: true``, claunch-t1r9j).
+    """
     manager: SessionManager = request.app["manager"]
     name = request.match_info["name"]
     try:
         session = manager.get(name)
     except ManagerError:
         return json_error(404, f"no session named {name!r}")
-    if session.exited:
+    held = bool(session.exited and getattr(session, "held_at", None))
+    if session.exited and not held:
         return json_error(409, f"session {name!r} has exited")
     try:
         checks = status_checks.session_entries(name, enabled_only=True)
@@ -11163,6 +11168,11 @@ async def h_session_status_checks_refresh(request: web.Request) -> web.Response:
         return json_error(500, str(exc))
     if not checks:
         return json_response({"session": name, "delivered": False, "checks": []})
+    if held:
+        delivered = manager.wake_soon(
+            name, by="status-checks", deliver=status_checks.REFRESH_PROMPT)
+        return json_response({"session": name, "delivered": delivered,
+                              "woken": delivered, "checks": checks})
     delivered = await session.deliver(status_checks.REFRESH_PROMPT)
     return json_response({"session": name, "delivered": delivered, "checks": checks})
 

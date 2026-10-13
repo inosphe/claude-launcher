@@ -293,7 +293,8 @@ web dashboard by hand:
 * ``checks`` — the daemon types a status-check refresh request into the
   DRIVING session (the same text as ``POST
   /api/sessions/{name}/status-checks/refresh``), and the agent answers it
-  with the ``status_checks`` and ``report_status_checks`` MCP tools. It costs
+  with the ``status_checks`` and ``report_status_checks`` MCP tools. A held
+  driver is woken first and the request is typed after the respawn. It costs
   the driver a few lines of context, so it belongs at the few positions where
   the answers have just changed.
 * ``briefing`` — the daemon recomposes that session's LLM briefing

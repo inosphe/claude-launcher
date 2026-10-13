@@ -470,3 +470,34 @@ def test_improv_worker_declares_the_triggers_it_stopped_asking_for_in_prose():
     commit = workflow.steps["commit"].instructions
     assert "요청이 도착하면" in commit
     assert "커밋 또는 `--no-ff` 병합을 마칠 때마다 그" not in commit
+
+
+def test_checks_wake_a_held_driver(proj, monkeypatch):
+    """claunch-t1r9j: a held driver is asleep, not gone -- the request wakes
+    it and is queued into the woken session."""
+    cwd = str(proj)
+    session = _FakeSession("w1", cwd)
+    session.exited = True
+    session.held_at = "2026-10-13T08:00:00+00:00"
+    monkeypatch.setattr(
+        status_checks, "session_entries",
+        lambda name, enabled_only=False: [{"id": "green", "name": "master green"}],
+    )
+    engine.start("triggered", cwd=cwd, scope="w1")
+    clock = _clock(proj, session)
+    woken = []
+    clock.manager.wake_soon = lambda name, **kw: woken.append((name, kw)) or True
+    performed, detail = asyncio.run(
+        clock._perform(cwd, "w1", {"do": "checks", "step": "two", "visit": 1})
+    )
+    assert performed and "1 status check" in detail
+    assert woken == [("w1", {"by": "cflow-checks", "deliver": status_checks.REFRESH_PROMPT})]
+    assert session.queued == []
+
+    # Killed (not held): still nobody to ask.
+    session.held_at = None
+    performed, detail = asyncio.run(
+        clock._perform(cwd, "w1", {"do": "checks", "step": "two", "visit": 1})
+    )
+    assert not performed and "no live session" in detail
+    assert len(woken) == 1

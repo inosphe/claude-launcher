@@ -200,6 +200,28 @@ def test_a_session_delegations_nested_run_acts_on_the_child(tmp_path, monkeypatc
             if e["event"].startswith("trigger_")] == ["trigger_queued", "trigger_done"]
 
 
+def test_checks_wake_a_held_driver_and_ride_behind_the_respawn(tmp_path, monkeypatch):
+    """claunch-t1r9j: a held driver is asleep, not gone -- the checks request
+    wakes it and is queued into the woken session. A briefing does not wake
+    it (no terminal is typed into)."""
+    monkeypatch.setattr(status_checks, "session_entries",
+                        lambda name, enabled_only=False: [{"id": 1}])
+    s = Session("w1", tmp_path, exited=True)
+    s.held_at = "2026-10-13T08:00:00+00:00"
+    mgr = Manager(s)
+    woken = []
+    mgr.wake_soon = lambda name, **kw: woken.append((name, kw)) or True
+    ok, detail = asyncio.run(cflow2_triggers.perform(
+        mgr, str(tmp_path), "w1", {"do": "checks"}, driver="w1"))
+    assert ok and "1 status check" in detail
+    assert woken == [("w1", {"by": "cflow2-checks", "deliver": status_checks.REFRESH_PROMPT})]
+    assert s.delivered == []
+
+    ok, detail = asyncio.run(cflow2_triggers.perform(
+        mgr, str(tmp_path), "w1", {"do": "briefing"}, driver="w1"))
+    assert not ok and "not live" in detail and len(woken) == 1
+
+
 @pytest.mark.parametrize("do", ["checks", "briefing"])
 def test_a_driver_that_is_not_live_is_a_skip(tmp_path, do):
     mgr = Manager(Session("w1", tmp_path, exited=True))

@@ -441,7 +441,8 @@ work:
 - **`checks`** — the daemon queues the same refresh request the operator's
   button sends (`POST /api/sessions/{name}/status-checks/refresh`), and the
   agent answers it with the `status_checks` and `report_status_checks` MCP
-  tools. It costs the driver a few lines of context, so put it where the
+  tools. A held driver is woken first and the request is typed after the
+  respawn. It costs the driver a few lines of context, so put it where the
   answers have just changed rather than on every step.
 - **`briefing`** — the daemon recomposes the session's LLM briefing. Nothing
   is typed into the terminal and the driver spends nothing; the cost is one
