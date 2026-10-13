@@ -3504,15 +3504,32 @@ function sessionGroupRows(entries, groups, level = 0, meshGroup = null, shadows 
     if (!buckets.has(value)) buckets.set(value, { entries: [], shadows: [] });
     return buckets.get(value);
   };
-  for (const entry of entries) bucket(sessionGroupValue(group, entry[0])).entries.push(entry);
-  for (const row of shadows) bucket(shadowGroupValue(group, row)).shadows.push(row);
+  // Mesh tabs overlap: every membership contributes a row to its own tab.
+  // Workspace groups still partition the fleet. Deduplicate mesh names so
+  // repeated membership records cannot duplicate a card within one tab.
+  for (const entry of entries) {
+    const values = group === "mesh" && typeof sessMeshes === "function"
+      ? [...new Set(sessMeshes(entry[0].name).map((m) => m.mesh))]
+      : [sessionGroupValue(group, entry[0])];
+    for (const value of values.length ? values : ["(no mesh)"]) {
+      bucket(value).entries.push(entry);
+    }
+  }
+  for (const row of shadows) {
+    const values = group === "mesh" && typeof shadowMeshes === "function"
+      ? [...new Set(shadowMeshes(row).map((m) => m.mesh))]
+      : [shadowGroupValue(group, row)];
+    for (const value of values.length ? values : ["(no mesh)"]) {
+      bucket(value).shadows.push(row);
+    }
+  }
   const out = [];
   for (const value of [...buckets.keys()].sort((a, b) =>
     a.localeCompare(b, undefined, { sensitivity: "base" }))) {
     out.push({ type: "group", group, value, level });
     // Which mesh heading a row ends up under, carried to the row itself. A
-    // session can be in several meshes but lands in exactly one of these
-    // buckets, so the row has to know which one so it can say the others.
+    // session can appear in several buckets, so each row has to know which
+    // mesh it is shown under to draw that membership's role and other meshes.
     // `(no mesh)` is a bucket of sessions that joined nothing, not a mesh,
     // and nothing is suppressed under it.
     const under = group === "mesh" && value !== "(no mesh)" ? value : meshGroup;
@@ -5171,12 +5188,10 @@ function sessMeshes(name) {
    several, and five pills would push the name it belongs to off the row.
 
    `under` is the mesh heading the row sits below when the rail is grouped by
-   mesh, and that membership is dropped from the pills. The grouping picks one
-   mesh per session (the alphabetically first, sessionMeshGroup), so without
-   this the row spends one of its two slots repeating the heading directly
-   above it while the memberships the grouping could not show fall into the
-   `+N` count. Dropping it spends both slots on the rooms the heading does not
-   already name. Ungrouped rows pass nothing and keep every pill. */
+   mesh, and that membership is dropped from the pills. Without this the row
+   spends one of its two slots repeating the open tab while other memberships
+   fall into the `+N` count. Dropping it spends both slots on the rooms the tab
+   does not already name. Ungrouped rows pass nothing and keep every pill. */
 const RAIL_MESH_TAGS = 2;
 
 function railMeshTags(name, under = null) {

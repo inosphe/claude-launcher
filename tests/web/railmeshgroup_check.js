@@ -1,12 +1,7 @@
 /* A session that joined more than one mesh, on a rail grouped by mesh.
 
-   The grouping files each session under exactly one heading —
-   `sessionMeshGroup` takes the alphabetically first membership — so the other
-   rooms it is in have no heading of their own to appear under. Before this
-   harness they were also being crowded off the row: the pills are capped at
-   two, and one of those two was spent repeating the mesh named in the heading
-   directly above the row, which pushed the rooms the heading could not show
-   into the `+N` count.
+   Each membership places the session in that mesh's group. Within a group,
+   the row's pills omit that mesh, leaving their two slots for other meshes.
 
    What has to hold: the row knows which heading it landed under
    (`sessionGroupRows` carries it), the pills drop that mesh and spend both
@@ -155,7 +150,7 @@ const member = (session, role) => ({
   session, handle: session, role, roles: [role], local: true, machine: "",
 });
 served = { sessions: [
-  // Three rooms: filed under `alpha`, the alphabetically first of them.
+  // Three rooms: shown in all three mesh groups.
   { name: "wide", status: "idle", profile: "nc", parent: null, cwd: "C:/w" },
   // Two rooms, and a different role in each.
   { name: "twin", status: "idle", profile: "nc", parent: null, cwd: "C:/w" },
@@ -180,19 +175,16 @@ ctx.setMeshes([
     .map((t) => t.text);
   const roleOf = (name) => rowOf(name).querySelector(".mesh-role").text;
 
-  check("every session still gets exactly one row",
-        ["wide", "twin", "solo", "loner"].map((n) => !!rowOf(n)),
-        [true, true, true, true]);
+  check("each session has a row for every membership, or one with no mesh",
+        ["wide", "twin", "solo", "loner"].map((name) =>
+          walk(list).filter((n) => n.tag === "li" && n.dataset.name === name).length),
+        [3, 2, 1, 1]);
 
-  /* The headings, so what follows is read against the rail the reader
-     actually sees. A heading is drawn per BUCKET, and a bucket holds the
-     sessions filed into it: `delta` gets none, because its only member
-     (`wide`) was filed under `alpha`. That is what the pills below are for —
-     with no heading of its own, `delta` is named on the row or nowhere. */
+  /* Every joined mesh contributes a group, including the third membership. */
   const headings = list.kids
     .filter((n) => n.classes.has("session-group-heading")).map((n) => n.text);
-  check("a mesh whose members were all filed elsewhere gets no heading",
-        headings, ["mesh · (no mesh)", "mesh · alpha", "mesh · bravo"]);
+  check("every joined mesh has a heading",
+        headings, ["mesh · (no mesh)", "mesh · alpha", "mesh · bravo", "mesh · delta"]);
 
   /* The point of the change. `wide` is filed under `alpha`, so both of its
      pill slots go to `bravo` and `delta`; before, `alpha` took one of them
@@ -230,7 +222,26 @@ ctx.setMeshes([
   check("the mesh a row landed under is carried through a nested group",
         sessions,
         [["loner", null], ["wide", "alpha"], ["twin", "alpha"],
-         ["solo", "bravo"]]);
+         ["wide", "bravo"], ["twin", "bravo"], ["solo", "bravo"],
+         ["wide", "delta"]]);
+
+  check("each copy draws the role of its own mesh",
+        walk(list).filter((n) => n.tag === "li" && n.dataset.name === "twin")
+          .map((n) => n.querySelector(".mesh-role").text),
+        ["leader", "reviewer"]);
+  check("each copy omits only its own mesh from the pills",
+        walk(list).filter((n) => n.tag === "li" && n.dataset.name === "wide")
+          .map((n) => n.querySelectorAll(".rail-mesh").map((t) => t.text)),
+        [["bravo", "delta"], ["alpha", "delta"], ["alpha", "bravo"]]);
+
+  check("ungrouped rows contain each session once",
+        ctx.rows(served.sessions.map((s) => [s, 0]), []).map((r) => r.session.name),
+        ["wide", "twin", "solo", "loner"]);
+  ctx.setMeshes([{ name: "alpha", members: [member("wide", "worker"),
+                                           member("wide", "worker")] }]);
+  check("duplicate membership records produce one card per mesh",
+        ctx.rows([[served.sessions[0], 0]], ["mesh"])
+          .filter((r) => r.type === "session").length, 1);
 
   const flat = ctx.rows(served.sessions.map((s) => [s, 0]), ["workspace"])
     .filter((r) => r.type === "session").map((r) => r.meshGroup);
