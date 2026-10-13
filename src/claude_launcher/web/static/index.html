@@ -562,6 +562,11 @@
            (durable-flow.js); shown only on such a session. -->
       <button id="term-chartbtn" class="term-btn hidden" type="button" aria-pressed="false"
               title="this pi-durable session's run as a flow chart">◇ chart</button>
+      <!-- The same pane, showing the questions this session put to the user
+           (qa-pane.js, daemon/qa_api.py); lit while one waits on an answer,
+           and opened by itself when the session changes a question. -->
+      <button id="term-qabtn" class="term-btn" type="button" aria-pressed="false"
+              title="questions this session put to you">? qa</button>
       <button id="term-details" class="term-btn" type="button" aria-pressed="false"
               title="this session's metadata and workflow">ⓘ details</button>
     </div>
@@ -1402,6 +1407,7 @@
 <script src="static/spec-page.js"></script>
 <script src="static/sim-page.js"></script>
 <script src="static/durable-flow.js"></script>
+<script src="static/qa-pane.js"></script>
 <script src="static/glossary-composer.js"></script>
 <script src="static/operator.js"></script>
 <script src="static/chat.js"></script>
