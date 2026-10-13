@@ -383,11 +383,37 @@ def _cmd_journal(args: argparse.Namespace) -> int:
     return 0
 
 
+#: What a person's command types into the run's driver, so it picks the run
+#: back up at once -- and a held driver is woken for it (claunch-2xyjw). The
+#: dashboard's buttons send the same through the daemon (``daemon/api.py``).
+NUDGE_SELECTED = ("[cflow2] a person took a choice of your run ({option}). Call "
+                  "flow_status and continue.")
+NUDGE_MOVED = ("[cflow2] a person moved your run - what you were doing there is "
+               "cancelled; call flow_status and continue from its tasks.")
+NUDGE_MOVE_ANSWERED = ("[cflow2] a person answered your move request ({decision}). "
+                       "Call flow_status and continue.")
+NUDGE_REPORTED = ("[cflow2] a person reported your run's task - stop working on it; "
+                  "call flow_status and continue.")
+NUDGE_ABORTED = ("[cflow2] a person aborted your v2 workflow run - stop working on it; "
+                 "flow_status shows it aborted.")
+NUDGE_EXTENDED = ("[cflow2] a person answered your run's limit hold. Call flow_status "
+                  "and continue.")
+
+
+def _nudge_driver(scope: Optional[str], message: str) -> None:
+    from .cflow2 import asks
+
+    nudged = asks.nudge_driver(message, cwd=os.getcwd(), scope=scope)
+    if nudged:
+        print(f"nudge accepted for session(s): {', '.join(nudged)}")
+
+
 def _cmd_abort(args: argparse.Namespace) -> int:
     from .cflow2 import runtime
 
     _refuse_own_session(args.scope, "abort")
     _print_status(runtime.abort(args.reason, cwd=os.getcwd(), scope=args.scope), False)
+    _nudge_driver(args.scope, NUDGE_ABORTED)
     return 0
 
 
@@ -428,15 +454,18 @@ def _cmd_move(args: argparse.Namespace) -> int:
         req = payload.get("move_request") or {}
         what = ("the report of" if req.get("kind") == runtime.MOVE_KIND_REPORT
                 else "the move to")
+        answered = NUDGE_MOVE_ANSWERED.format(decision=req.get("decision") or "")
         if req.get("decision") == "denied":
             print(f"refused {what} {req.get('label') or req.get('node')} "
                   f"({req.get('id')}); the driver reads the refusal on its next flow_status")
             _print_status(payload, False)
+            _nudge_driver(args.scope, answered)
             return 0
         if req.get("kind") == runtime.MOVE_KIND_REPORT:
             print(f"reported {req.get('label') or req.get('node')} as {req.get('outcome')} "
                   f"({req.get('id')})")
             _print_status(_after_verify(payload, args.scope), False)
+            _nudge_driver(args.scope, answered)
             return 0
     elif not args.node:
         raise runtime.FlowError("name the node to move to, or answer the driver's request "
@@ -448,6 +477,7 @@ def _cmd_move(args: argparse.Namespace) -> int:
     print(f"moved to {moved.get('label') or moved.get('node')} (from {moved.get('at')}; "
           f"cancelled: {', '.join(moved.get('left') or []) or 'nothing open'})")
     _print_status(payload, False)
+    _nudge_driver(args.scope, NUDGE_MOVED)
     return 0
 
 
@@ -460,6 +490,7 @@ def _cmd_report(args: argparse.Namespace) -> int:
     payload = runtime.report(args.node, args.outcome, value, text, cwd=os.getcwd(),
                              scope=args.scope, by=runtime.CALLER_USER)
     _print_status(_after_verify(payload, args.scope), False)
+    _nudge_driver(args.scope, NUDGE_REPORTED)
     return 0
 
 
@@ -501,6 +532,7 @@ def _cmd_select(args: argparse.Namespace) -> int:
     payload = runtime.select(args.node, args.option, args.reason, caller=runtime.CALLER_USER,
                              cwd=os.getcwd(), scope=args.scope)
     _print_status(payload, False)
+    _nudge_driver(args.scope, NUDGE_SELECTED.format(option=args.option))
     return 0
 
 
@@ -517,6 +549,7 @@ def _cmd_extend(args: argparse.Namespace) -> int:
         payload = runtime.extend_loop(args.node, args.by, stop=args.stop, reset=args.reset,
                                       cwd=os.getcwd(), scope=args.scope)
     _print_status(payload, False)
+    _nudge_driver(args.scope, NUDGE_EXTENDED)
     return 0
 
 
