@@ -341,3 +341,17 @@ def test_slots_cli_is_read_only(tmp_path, monkeypatch, capsys):
     runs = tmp_path / ".cflow2" / "runs"
     assert (runs / "s15").is_dir() and not (runs / "s15").is_symlink()
     assert not (runs / "s15@main").exists()
+
+
+def test_flow_start_takes_the_session_name_as_its_own_slot(tmp_path, monkeypatch):
+    from claude_launcher.cflow2 import mcp as cflow2_mcp
+
+    (tmp_path / ".claunch" / "workflows" / "v2").mkdir(parents=True)
+    (tmp_path / ".claunch" / "workflows" / "v2" / "t.yaml").write_text(textwrap.dedent(CHART),
+                                                              encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CLAUNCH_SESSION", "s15")
+    out = cflow2_mcp.call_tool("flow_start", {"workflow": "t", "scope": "s15"})
+    assert out["scope"] == "s15@main"
+    with pytest.raises(runtime.FlowError, match="another's"):
+        cflow2_mcp.call_tool("flow_start", {"workflow": "t", "scope": "s15@kimyori"})
