@@ -13,6 +13,15 @@ import pytest
 from claude_launcher import pytest_venv, test_window
 
 
+#: The daemon instance variables a runner or session exports. Cleared once,
+#: here, as well as per test by the ``home`` fixture: test modules snapshot
+#: them when they are imported (tests/test_instance_manifest.py compares each
+#: test's start against that snapshot), so a value still set at import time
+#: would differ from the per-test cleared one (claunch-w5c4u: 23 errors).
+_DAEMON_INSTANCE_VARS = ("CLAUNCH_INSTANCE_BASE", "CLAUNCH_INSTANCE", "CLAUNCH_DAEMON")
+for _name in _DAEMON_INSTANCE_VARS:
+    os.environ.pop(_name, None)
+
 _test_window_grant = None
 #: The grant this pytest reports its result into, and when it started
 #: (claunch-8kald: the window's run history).
@@ -165,7 +174,7 @@ def home(tmp_path, monkeypatch):
     # paths.base_home(), so left set it points every instance path back at the
     # developer's real ~/.claude-launcher and overrides the home above
     # (claunch-llmi1: 24 failures in the delayed sweep, none in a shell).
-    for name in ("CLAUNCH_INSTANCE_BASE", "CLAUNCH_INSTANCE", "CLAUNCH_DAEMON"):
+    for name in _DAEMON_INSTANCE_VARS:
         monkeypatch.delenv(name, raising=False)
     # Workflow check commands say `python`. A runner that starts pytest by
     # absolute interpreter path has no `python` on PATH unless the venv's bin
