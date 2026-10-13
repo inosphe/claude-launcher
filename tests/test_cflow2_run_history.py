@@ -151,3 +151,17 @@ def test_corrupt_checkpoint_start_stays_unknown_without_json_fallback(home, tmp_
     row = cflow2_web.run_history(st, st.load_state())["runs"][0]
     assert row["transition"]["event"] is None
     assert row["transition"]["reloaded"] is None
+
+
+def test_slot_turnover_does_not_attach_another_runs_reload(tmp_path):
+    st = RunStore(str(tmp_path), "owner")
+    st.dir.mkdir(parents=True)
+    state = {"run_id": "before-turnover", "status": "done"}
+    st.journal_path.write_text(
+        '{"event":"started","run":"after-turnover"}\n'
+        '{"event":"round_auto_started","previous":"before-turnover","reloaded":true}\n')
+    row = cflow2_web.run_history(st, state)["runs"][0]
+    assert row["run"] == "before-turnover"
+    assert row["transition"]["event"] is None
+    assert row["transition"]["previous"] is None
+    assert row["transition"]["reloaded"] is None

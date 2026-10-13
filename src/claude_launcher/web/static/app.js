@@ -32012,6 +32012,7 @@ function cflow2RunHistory(history) {
     "Each run ID is a separate run. Loop iterations and forced moves within the same run keep its ID."));
   if (!rows.length) section.appendChild(el("p", "wf-note", "Run history unconfirmed — no saved records available."));
   const previous = el("details", "cf2-history-previous");
+  previous.dataset.cf2Key = "run-history-previous";
   previous.appendChild(el("summary", null, `Previous runs · ${rows.filter(r => !r.current).length}`));
   for (const run of rows) {
     const card = el("div", "cf2-card");

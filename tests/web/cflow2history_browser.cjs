@@ -63,8 +63,12 @@ const server = http.createServer((req, res) => {
     assert.match(await history.textContent(), /Current run 20261013-122639-851fe8/);
     assert.match(await history.textContent(), /previous: 20261013-120649-d4f3ac · reloaded: true/);
     await history.locator('summary').click();
+    assert(await history.locator('details').evaluate(e => e.open));
     assert.match(await history.innerText(), /reloaded: false · saved IR reused after definition load failure/);
     assert.equal(await history.locator('.cf2-card').count(), 2, 'visits and force events do not create runs');
+    detail.journal.push({event: 'entered', node: 'work'});
+    await page.evaluate(() => refreshWf());
+    assert(await history.locator('details').evaluate(e => e.open), 'previous runs remain open after changed poll');
     if (process.env.CLAUNCH_SCRATCH) await page.screenshot({path: path.join(process.env.CLAUNCH_SCRATCH, 'v2-run-history.png'), fullPage: true});
     detail.chart.meta.recur = {auto: false, min_gap: 0};
     detail.history.runs[0].transition = {event: 'started', at: null, previous: null, reloaded: null};
@@ -74,6 +78,10 @@ const server = http.createServer((req, res) => {
     delete detail.chart.meta.recur;
     await page.evaluate(() => refreshWf());
     assert.match(await meta(), /recurnone/);
+    detail.run.run = 'new-run-id';
+    detail.history.runs[0].run = 'new-run-id';
+    await page.evaluate(() => refreshWf());
+    assert(!(await history.locator('details').evaluate(e => e.open)), 'new run resets disclosure state');
     delete detail.history;
     await page.evaluate(() => refreshWf());
     assert.match(await history.textContent(), /Run history unconfirmed/);

@@ -562,9 +562,13 @@ def run_history(st: store2.RunStore, state: dict) -> dict:
             events = source.start_events()
         except (store2.StoreError, OSError, ValueError):
             events = []
-        auto = next((e for e in events if e.get("event") == "round_auto_started"), None)
         start = next((e for e in events if e.get("event") == "started"
                       and e.get("run") == rid), None)
+        # The live slot may turn over between the state and event reads.
+        # An event log identifying another run cannot supply this run's cause.
+        mismatch = start is None and any(e.get("event") == "started" for e in events)
+        auto = next((e for e in events if e.get("event") == "round_auto_started"), None) \
+            if not mismatch else None
         evidence = auto or start or {}
         rows.append({
             "run": rid, "current": current,
