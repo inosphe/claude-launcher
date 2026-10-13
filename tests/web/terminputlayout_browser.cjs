@@ -5,6 +5,9 @@
 // (autogrowTermInput adds the border scrollHeight leaves out) (claunch-hmz62).
 // The whole composer grows in layout and stays expanded during internal
 // focus transfers, leaving preset/prompter buttons usable (claunch-z0h4f).
+// The field, presets and prompter row form one focus group (#term-composer):
+// only the field opens it, so a press on a collapsed composer's tool does not
+// move the tool before the release (claunch-1bhp2).
 const { chromium } = require('playwright');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -23,7 +26,7 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
       if (url.pathname.startsWith('/api/')) return route.fulfill({ json: {} });
       const name = url.pathname === '/' ? 'index.html' : url.pathname.replace('/static/', '');
       let content = fs.readFileSync(path.join(root, name));
-      if (name === 'app.js') content = content.toString().replace(/boot\(\);\s*$/, '');
+      if (name === 'app.js') content = content.toString().replace(/^boot\(\);$/m, '');
       await route.fulfill({ body: content, contentType: name.endsWith('.js') ? 'text/javascript' : name.endsWith('.css') ? 'text/css' : 'text/html' });
     });
     await page.goto('http://bar.test/');
@@ -66,9 +69,10 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
         button.type = 'button'; button.className = 'term-btn';
         button.textContent = id; button.id = id + '-test';
         button.addEventListener('click', () => insertPromptPreset('snippet'));
-        row.append(button); host.append(row);
+        row.append(button);
       }
-      host.append(form);
+      // the group as the page has it: presets, prompter row, then the bar
+      host.append(document.getElementById('term-composer'));
       form.classList.remove('hidden');
       const note = document.getElementById('term-input-note');
       note.textContent = 'this session has ended — a line sent now is queued and typed when the session is back';
@@ -200,6 +204,33 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
     assert.equal(back.barH, rest.barH, 'leaving did not restore the bar height');
     assert.equal(back.terminalH, rest.terminalH, 'leaving did not restore terminal space');
     await page.waitForFunction(() => term.rows === fitAddon.proposeDimensions().rows, null, { timeout: 5000 });
+
+    // A real click on a tool while the composer is collapsed: the press must
+    // not open the composer under the pointer, or the button moves before the
+    // release and the click lands on something else (claunch-1bhp2).
+    for (const id of ['term-preset-buttons-test', 'term-prompter-row-test']) {
+      await page.focus('#terminal');
+      const before = await page.inputValue('#term-input-field');
+      const at = await page.locator('#' + id).boundingBox();
+      await page.mouse.move(at.x + at.width / 2, at.y + at.height / 2);
+      await page.mouse.down();
+      const pressed = await page.locator('#' + id).boundingBox();
+      assert.equal(pressed.y, at.y, `${id} moved under the pointer on press`);
+      await page.mouse.up();
+      const after = await page.inputValue('#term-input-field');
+      assert.equal(after.length, before.length + 'snippet'.length, `${id} click was lost`);
+    }
+    // Pressing the bare strip between buttons keeps an open composer open.
+    await page.focus('#term-input-field');
+    const openStrip = await measure();
+    const strip = await page.locator('#term-preset-buttons').boundingBox();
+    await page.mouse.click(strip.x + strip.width - 4, strip.y + strip.height / 2);
+    assert.equal((await measure()).field.h, openStrip.field.h, 'pressing the preset strip collapsed the composer');
+    await page.focus('#terminal');
+    await page.evaluate(() => document.getElementById('term-input-field').blur());
+    await page.evaluate(() => { document.getElementById('term-input-field').value = ''; });
+    await type(Array.from({ length: 40 }, (_, i) => `line ${i}`).join('\n'));
+    await page.focus('#terminal');
 
     // A narrow viewport still leaves both snippet rows and send reachable.
     for (const width of [760, 520, 380]) {
