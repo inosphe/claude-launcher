@@ -109,3 +109,86 @@ console.log("cflow2inputs_check: ok");
   assert.deepStrictEqual(ok.guide, []);
 }
 
+
+// The form builder with a seeded value (claunch-76iqh): "Spawn same setup"
+// hands the parent run's start inputs over, and each field is drawn with the
+// seeded value standing in for the schema default — for the operator to
+// edit, with a value outside an enum's choices kept visible.
+{
+  function classList2() {
+    const set = new Set();
+    return { add: (c) => set.add(c), remove: (c) => set.delete(c),
+             contains: (c) => set.has(c),
+             toggle: (c, on) => { if (on === undefined ? !set.has(c) : on) set.add(c); else set.delete(c); } };
+  }
+  function byClass(root, q) {
+    const cls = q.replace(/^\./, "");
+    const out = [];
+    const walk = (n) => {
+      for (const c of n.children || []) {
+        if ((c.className || "").split(/\s+/).includes(cls)) out.push(c);
+        walk(c);
+      }
+    };
+    return (walk(root), out);
+  }
+  function elem(tag) {
+    const e = {
+      tag, children: [], dataset: {}, className: "", textContent: "",
+      value: "", checked: false, type: "", rows: 0, placeholder: "", title: "",
+      options: [],
+      appendChild(c) { e.children.push(c); return c; },
+      append(...cs) { for (const c of cs) e.children.push(c); },
+      insertBefore(c, ref) {
+        const i = e.children.indexOf(ref);
+        if (i < 0) e.children.push(c); else e.children.splice(i, 0, c);
+        return c;
+      },
+      addEventListener() {},
+      querySelector(q) { return byClass(e, q)[0] || null; },
+      querySelectorAll(q) { return byClass(e, q); },
+    };
+    e.classList = classList2();
+    return e;
+  }
+  const fctx = { document: { createElement: (t) => elem(t) } };
+  fctx.Option = function (label, value) {
+    this.text = label; this.value = value === undefined ? label : value;
+  };
+  new Function("ctx", "document", "Option",
+    `const CFLOW_INPUT_CHECK_TYPES = ["invariants", "acceptance"];
+     function el(tag, cls, text) {
+       const n = document.createElement(tag);
+       if (cls) n.className = cls;
+       if (text !== undefined) n.textContent = text;
+       return n;
+     }
+     ${slice("cflowInputsForm")}
+     ${slice("cflowInputControl")}
+     ctx.cflowInputsForm = cflowInputsForm;`)(fctx, fctx.document, fctx.Option);
+
+  const FIELDS = [
+    { name: "goal", type: "text", default: "", required: true },
+    { name: "relation", type: "enum", choices: ["stacked", "independent"],
+      default: "stacked" },
+    { name: "max_rounds", type: "int" },
+    { name: "force_pr", type: "bool", default: false },
+    { name: "scope", type: "list", default: [] },
+    { name: "color", type: "enum", choices: ["red", "blue"], default: "red" },
+  ];
+  const b = elem("div");
+  fctx.cflowInputsForm(b, FIELDS, [], {
+    goal: "carry it", max_rounds: 5, force_pr: true, scope: ["src/a"],
+    color: "green",
+  });
+  assert.deepStrictEqual(ctx.cflowInputsValues(b), {
+    goal: "carry it", relation: "stacked", max_rounds: 5, force_pr: true,
+    scope: ["src/a"], color: "green",
+  });
+
+  const d = elem("div");
+  fctx.cflowInputsForm(d, FIELDS, [], null);
+  assert.deepStrictEqual(ctx.cflowInputsValues(d), {
+    relation: "stacked", force_pr: false, color: "red",
+  });
+}
