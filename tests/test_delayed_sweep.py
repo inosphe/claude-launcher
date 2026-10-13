@@ -1,0 +1,221 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from claude_launcher import delayed_sweep as mod, test_window
+from claude_launcher.daemon.delayed_sweep import Clock
+
+TOOL = Path(__file__).resolve().parents[1] / "tools" / "sweep.py"
+
+
+def git(repo, *args):
+    return mod.git(repo, *args)
+
+
+@pytest.fixture
+def repo(tmp_path):
+    path = tmp_path / "repo"
+    path.mkdir()
+    for args in (("init", "-q"), ("config", "user.email", "test@example.com"),
+                 ("config", "user.name", "test")):
+        git(path, *args)
+    (path / "base").write_text("base")
+    git(path, "add", ".")
+    git(path, "commit", "-qm", "base")
+    git(path, "branch", "-M", "master")
+    return path
+
+
+def merge(repo, name):
+    git(repo, "switch", "-qc", name)
+    (repo / name).write_text(name)
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", name)
+    tip = git(repo, "rev-parse", "HEAD")
+    git(repo, "switch", "-q", "master")
+    git(repo, "merge", "--no-ff", "-qm", "merge " + name, name)
+    return git(repo, "rev-parse", "HEAD"), tip
+
+
+def queue(tmp_path):
+    return mod.Queue(tmp_path / "jobs.sqlite3")
+
+
+def enqueue(q, repo, name, issue=None):
+    sha, tip = merge(repo, name)
+    return q.enqueue(repo, sha, issue or name, "leader", TOOL), tip
+
+
+def test_each_merge_has_an_immutable_cumulative_checkpoint(repo, tmp_path):
+    q = queue(tmp_path)
+    first, _ = enqueue(q, repo, "a")
+    second, _ = enqueue(q, repo, "b")
+    assert git(repo, "rev-parse", first["ref"]) == first["sha"]
+    assert git(repo, "rev-parse", second["ref"]) == second["sha"]
+    assert git(repo, "ls-tree", "--name-only", first["ref"]).split() == ["a", "base"]
+    assert git(repo, "ls-tree", "--name-only", second["ref"]).split() == ["a", "b", "base"]
+    assert q.enqueue(repo, first["sha"], "a", "leader", TOOL)["id"] == first["id"]
+    restored = mod.Queue(q.database)
+    assert len(restored.status(repo)["jobs"]) == 2
+    assert restored.claim()["id"] == first["id"]
+
+
+def test_changed_checkpoint_ref_is_refused(repo, tmp_path):
+    q = queue(tmp_path)
+    first, _ = enqueue(q, repo, "a")
+    second, _ = enqueue(q, repo, "b")
+    git(repo, "update-ref", first["ref"], second["sha"])
+    with pytest.raises(ValueError, match="ref moved"):
+        q.enqueue(repo, first["sha"], "a", "leader", TOOL)
+
+
+def test_pending_record_recovers_the_ref_before_claim(repo, tmp_path):
+    q = queue(tmp_path)
+    job, _ = enqueue(q, repo, "a")
+    git(repo, "update-ref", "-d", job["ref"])
+    with q.connect() as db:
+        db.execute("UPDATE jobs SET status='pending' WHERE id=?", (job["id"],))
+    assert mod.Queue(q.database).claim()["id"] == job["id"]
+    assert git(repo, "rev-parse", job["ref"]) == job["sha"]
+
+
+def test_a_failure_pauses_only_its_repository_and_only_green_repair_resumes(repo, tmp_path):
+    q = queue(tmp_path)
+    bad, _ = enqueue(q, repo, "bad")
+    queued, _ = enqueue(q, repo, "normal")
+    q.finish(bad["id"], "failed", "receipt", "test_x failed")
+    with pytest.raises(ValueError, match="paused"):
+        q.admit(repo, "normal")
+    assert q.claim() is None  # already-merged ordinary backlog waits for repair
+    q.repair(repo, bad["id"], "repair-issue")
+    q.admit(repo, "repair-issue")
+    repair, _ = enqueue(q, repo, "fix", "repair-issue")
+    assert repair["priority"] == 0
+    assert q.claim()["id"] == repair["id"]
+    q.finish(repair["id"], "retry", detail="window timeout")
+    with pytest.raises(ValueError, match="paused"):
+        q.admit(repo, "normal")
+    q.finish(repair["id"], "passed", "green receipt")
+    q.admit(repo, "normal")
+    assert q.claim()["id"] == queued["id"]
+    # A delayed result about history covered by the green repair is still red,
+    # but it must not pause the repaired repository again.
+    q.finish(queued["id"], "failed", "historical receipt")
+    q.admit(repo, "new-work")
+
+
+def test_unrelated_green_and_invalid_repair_cannot_clear_a_pause(repo, tmp_path):
+    q = queue(tmp_path)
+    bad, _ = enqueue(q, repo, "bad")
+    other, _ = enqueue(q, repo, "other")
+    q.finish(bad["id"], "failed")
+    q.finish(other["id"], "passed")
+    with pytest.raises(ValueError, match="paused"):
+        q.admit(repo, "new")
+    with pytest.raises(ValueError, match="active failed"):
+        q.repair(repo, other["id"], "fix")
+    q.repair(repo, bad["id"], "fix")
+    with pytest.raises(ValueError, match="already assigned"):
+        q.repair(repo, bad["id"], "different-fix")
+
+
+def test_interrupted_runner_retries_but_live_runner_is_never_duplicated(repo, tmp_path):
+    q = queue(tmp_path)
+    job, _ = enqueue(q, repo, "a")
+    assert q.claim()["id"] == job["id"]
+    q.spawned(job["id"], os.getpid())
+    assert mod.Queue(q.database).claim() is None
+    with q.connect() as db:
+        db.execute("UPDATE jobs SET pid=0,available=0 WHERE id=?", (job["id"],))
+    assert mod.Queue(q.database).claim()["id"] == job["id"]
+    assert q.get(job["id"])["attempts"] == 2
+
+
+def test_a_paused_repository_does_not_stop_another_repository(repo, tmp_path):
+    q = queue(tmp_path)
+    bad, _ = enqueue(q, repo, "bad")
+    other = tmp_path / "other"
+    subprocess.run(["git", "clone", "-q", str(repo), str(other)], check=True)
+    git(other, "config", "user.name", "test")
+    git(other, "config", "user.email", "test@example.com")
+    good, _ = enqueue(q, other, "independent")
+    q.finish(bad["id"], "failed")
+    q.admit(other, "next")
+    assert q.claim()["id"] == good["id"]
+
+
+def test_busy_window_leaves_background_work_in_the_durable_queue(repo, tmp_path):
+    q = queue(tmp_path)
+    job, _ = enqueue(q, repo, "a")
+    window = SimpleNamespace(status=lambda: {"holders": [{"cls": "targeted"}], "queue": []})
+    asyncio.run(Clock(SimpleNamespace(), q, window=window).tick())
+    assert q.get(job["id"])["status"] == "queued"
+
+
+def test_runner_tests_the_fixed_sha_after_master_moves_and_releases_checkout(repo, tmp_path, monkeypatch):
+    q = queue(tmp_path)
+    job, _ = enqueue(q, repo, "a")
+    merge(repo, "b")
+    command = subprocess.list2cmdline([sys.executable, "-c", "print('3 passed in 0.1s')"])
+    with q.connect() as db:
+        db.execute("UPDATE jobs SET command=? WHERE id=?", (command, job["id"]))
+    q.claim()
+    grant = test_window.WindowGrant("sweep", "unit", 1, "inherited", 0, None, _owns=False)
+    seen = []
+    monkeypatch.setattr(test_window, "acquire", lambda cls, **kw: seen.append(kw) or grant)
+    mod.run_one(q, job["id"], tmp_path / "scratch")
+    result = q.get(job["id"])
+    assert result["status"] == "passed", result
+    receipt = json.loads(Path(result["receipt"]).read_text())
+    assert receipt["commit"] == job["sha"]
+    assert receipt["commit"] != git(repo, "rev-parse", "master")
+    assert seen[0]["priority"] == -1
+    assert not (tmp_path / "scratch" / ("delayed-sweep-" + job["id"]) / "1" / "checkout").exists()
+
+
+def test_runner_never_turns_an_old_red_receipt_into_a_new_regression(repo, tmp_path, monkeypatch):
+    q = queue(tmp_path)
+    job, _ = enqueue(q, repo, "a")
+    q.claim()
+    # The existing receipt is a real prior judgement. This attempt obtains no
+    # window, so its infrastructure failure must stay retry, with no pause.
+    # Use sweep's own receipt location rather than assuming its key algorithm.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("sweep_for_test", TOOL)
+    sweep = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(sweep)
+    path = sweep.receipt_path(repo, job["sha"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"commit": job["sha"], "started_at": "2000-01-01",
+                                "counts": {"failed": 1}, "exit_code": 1}))
+    def unavailable(*args, **kwargs):
+        raise test_window.WindowUnavailable("timeout")
+    monkeypatch.setattr(test_window, "acquire", unavailable)
+    mod.run_one(q, job["id"], tmp_path / "scratch")
+    assert q.get(job["id"])["status"] == "retry"
+    assert not q.status(repo)["pauses"]
+
+
+def test_clock_uses_a_daemon_owned_process_and_persists_its_pid(repo, tmp_path, monkeypatch):
+    q = queue(tmp_path)
+    job, _ = enqueue(q, repo, "a")
+    seen = []
+    async def launch(*args, **kwargs):
+        seen.append((args, kwargs))
+        return SimpleNamespace(pid=os.getpid(), returncode=None)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", launch)
+    monkeypatch.setenv("CLAUNCH_SESSION", "leader")
+    monkeypatch.setenv(test_window.WINDOW_GRANT_ENV, "parent-grant")
+    asyncio.run(Clock(SimpleNamespace(), q).tick())
+    assert q.get(job["id"])["pid"] == os.getpid()
+    env = seen[0][1]["env"]
+    assert "CLAUNCH_SESSION" not in env
+    assert test_window.WINDOW_GRANT_ENV not in env

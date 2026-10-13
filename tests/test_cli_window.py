@@ -92,6 +92,8 @@ def test_the_operator_parser_knows_the_new_subcommands():
     assert args.func is cli_window._cmd_force
     args = parser.parse_args(["window", "acquire", "--class", "targeted", "--workers", "2"])
     assert (args.workers, args.force) == (2, False)
+    args = parser.parse_args(["window", "acquire", "--priority", "-1"])
+    assert args.priority == -1
 
 
 def test_window_history_prints_the_retention_statistics_and_rows(monkeypatch, capsys):

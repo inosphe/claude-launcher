@@ -533,6 +533,9 @@ def build_app(
     window = window if window is not None else window_mod.WindowManager(manager)
     app["window"] = window
     manager.exit_hooks.append(window.session_exited)
+    from . import delayed_sweep
+    app.on_startup.append(delayed_sweep.start)
+    app.on_shutdown.append(delayed_sweep.stop)
     from . import artifact_cleanup_api
     artifact_cleanup_api.install(app)
     # A restart never lets some endings reach the hook above: restore_all
@@ -1550,6 +1553,7 @@ async def h_window_acquire(request: web.Request) -> web.Response:
         label=str(body.get("label") or ""),
         wait=float(body.get("wait") or 0),
         workers=int(body.get("workers") or 0),
+        priority=body.get("priority", 0),
         force=bool(body.get("force")),
         # A pid is only this machine's to check from a loopback caller.
         bound=bool(body.get("bound")) and request.remote in ("127.0.0.1", "::1"),

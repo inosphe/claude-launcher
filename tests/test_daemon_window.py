@@ -84,6 +84,38 @@ def _make(tmp_path, manager=None, caps=(1, 5), cores=32, **limits) -> WindowMana
     )
 
 
+def test_background_sweep_waits_without_blocking_new_normal_targeted_runs(tmp_path):
+    async def run():
+        w = _make(tmp_path)
+        holder = await w.acquire("targeted", session="a", pid=os.getpid())
+        delayed = asyncio.create_task(w.acquire("sweep", session="leader", pid=os.getpid(),
+                                                 priority=-1, wait=5))
+        await asyncio.sleep(0)
+        normal = await w.acquire("targeted", session="b", pid=os.getpid())
+        assert normal["granted"]
+        assert w.status()["queue"][0]["priority"] == -1
+        w.release(grant_id=holder["grant_id"])
+        assert not delayed.done()
+        w.release(grant_id=normal["grant_id"])
+        result = await delayed
+        assert result["granted"]
+        refused = await w.acquire("targeted", session="c", pid=os.getpid())
+        assert not refused["granted"]  # in-flight sweeps remain exclusive
+        w.release(grant_id=result["grant_id"])
+    asyncio.run(run())
+
+
+def test_agents_can_demote_but_cannot_request_operator_priority(tmp_path):
+    async def run():
+        w = _make(tmp_path)
+        assert "operator" in (await w.acquire("sweep", session="s", priority=1))["error"]
+        assert "integer" in (await w.acquire("sweep", session="s", priority=True))["error"]
+        granted = await w.acquire("sweep", session="s", pid=os.getpid(), priority=-1)
+        assert granted["granted"]
+        w.release(grant_id=granted["grant_id"])
+    asyncio.run(run())
+
+
 def _session(name: str):
     return SimpleNamespace(sdef=SimpleNamespace(name=name))
 

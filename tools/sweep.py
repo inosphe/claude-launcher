@@ -682,6 +682,7 @@ def cmd_run(args) -> int:
         grant = test_window.acquire(
             test_window.SWEEP,
             label=f"sweep.py run --branch {args.branch}",
+            priority=getattr(args, "priority", 0),
         )
     except test_window.WindowUnavailable as exc:
         print(f"cannot sweep: {exc}", file=sys.stderr)
@@ -1204,6 +1205,8 @@ def main(argv: Optional[list] = None) -> int:
                 ),
             )
         if name == "run":
+            p.add_argument("--priority", type=int, default=0,
+                           help="test window priority (negative: background, default: 0)")
             p.add_argument(
                 "--command", default=None, help="sweep command (default: this repo's)"
             )

@@ -72,6 +72,23 @@ def test_the_requested_width_travels_to_the_daemon(monkeypatch):
     assert "workers" not in client.calls[0][1]  # 0 = the class ceiling
 
 
+def test_background_priority_travels_to_the_daemon_and_never_uses_fallback(monkeypatch):
+    client = _Client()
+    monkeypatch.setattr(test_window.daemon_client, "connect", lambda: client)
+    test_window.acquire("sweep", priority=-1).release()
+    assert client.calls[0][1]["priority"] == -1
+    monkeypatch.setattr(test_window.daemon_client, "connect", lambda: None)
+    with pytest.raises(test_window.WindowUnavailable, match="priority queue"):
+        test_window.acquire("sweep", priority=-1, wait=0)
+
+
+def test_background_priority_cannot_inherit_a_normal_grant(monkeypatch):
+    monkeypatch.setenv(test_window.WINDOW_GRANT_ENV, "normal-parent")
+    monkeypatch.setenv(test_window.WINDOW_CLASS_ENV, "sweep")
+    with pytest.raises(test_window.WindowUnavailable, match="background"):
+        test_window.acquire("sweep", priority=-1)
+
+
 def test_a_refusal_reason_reaches_the_caller(monkeypatch):
     class _Refusing(_Client):
         def post(self, path, body, **kwargs):
