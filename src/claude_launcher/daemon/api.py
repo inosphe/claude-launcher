@@ -580,6 +580,7 @@ def build_app(
     r.add_post("/api/install/apply", h_install_apply)
     r.add_get("/api/usage", h_usage)
     r.add_get("/api/metering", h_metering)
+    r.add_get("/api/metering/live", h_metering_live)
     r.add_get("/api/borrow-options", h_borrow_options)
     r.add_get("/api/roles", h_roles)
     r.add_get("/api/projects", h_projects)
@@ -2374,6 +2375,21 @@ async def h_metering(request: web.Request) -> web.Response:
         }
 
     return json_response(await asyncio.to_thread(read))
+
+
+async def h_metering_live(request: web.Request) -> web.Response:
+    """What a session's backend is doing right now (``metering.live_summary``).
+
+    ``?session=<name>`` is required. Answers ``{"session", "live"}`` with
+    ``live`` null when the session has no live file (never went through a
+    shim of this build). Polled about twice a second by the page while the
+    session's terminal is on screen, so it reads only that session's files.
+    """
+    session = str(request.query.get("session") or "").strip()
+    if not session:
+        return json_error(400, "session is required")
+    live = await asyncio.to_thread(metering.live_summary, session)
+    return json_response({"session": session, "live": live})
 
 
 async def h_usage(request: web.Request) -> web.Response:
@@ -7512,6 +7528,8 @@ async def h_sessions_list(request: web.Request) -> web.Response:
         # rows read it (claunch-vyw9s), and one read of its age bound
         # (claunch-2t37a).
         meter = metering.snapshot()
+        # And one listing of the live files: whether a call is in flight now.
+        meter_live = metering.live_index()
         try:
             meter_age = metering.summary_max_age()
         except store.StoreError:
@@ -7532,7 +7550,7 @@ async def h_sessions_list(request: web.Request) -> web.Response:
                 # The session's latest throughput through the metering shim
                 # (``tps``), read off the record file tails; absent when the
                 # session never went through a shim (the OAuth routes).
-                metering.attach(info, meter, meter_age)
+                metering.attach(info, meter, meter_age, meter_live)
                 # What the conversation has spent so far (``token_usage``),
                 # read incrementally off the same transcript; absent where the
                 # harness has no reader.
@@ -8801,7 +8819,7 @@ async def h_session_meta(request: web.Request) -> web.Response:
         # every two seconds. Inline it was 80ms of loop per poll, at p90.
         info = ctxsize.attach(session)
         info["prs"] = session_prs.for_session(cwd, session.sdef.name)
-        metering.attach(info)
+        metering.attach(info, live=metering.live_index())
         tokenusage.attach(info, getattr(session, "sdef", None))
         # A model id the harness registry cannot read back into one of its
         # aliases. Reconciliation deliberately leaves the saved model alone in

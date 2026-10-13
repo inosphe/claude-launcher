@@ -79,7 +79,7 @@ const ctx = {};
 new Function(
   "exports", "el", "$", "sessionsCache", "currentName", "railOpen",
   ["fmtAge", "modelShort", "terminalOnScreen", "tpsFmt", "tpsAgeSecs", "ttftFmt",
-   "tpsLatencyText", "tpsText", "tpsTooltip", "tpsStaleClass", "tpsRailLine",
+   "tpsLatencyText", "tpsSecs", "tpsLiveText", "tpsText", "tpsTooltip", "tpsStaleClass", "tpsRailLine",
    "tpsChip", "renderTermTps"].map(slice).join("\n") + `
 exports.text = tpsText;
 exports.tooltip = tpsTooltip;
@@ -153,7 +153,7 @@ check("an uncounted error answer shows its status where the number would be",
       ctx.text(ERR), "HTTP 502");
 check("no block at all is an empty string, never a zero", ctx.text(null), "");
 check("a session that has gone quiet reads none, not its last number",
-      ctx.text(IDLE), "tps none");
+      ctx.text(IDLE), "idle");
 
 /* ---- the story ---- */
 const tip = ctx.tooltip(FAST);
@@ -193,7 +193,7 @@ check("a reading an hour old from a daemon with no bound still dims",
       ctx.rail(QUIET).className, "rail-tps-line stale");
 check("a quiet session's line is the word none and the age, dimmed and marked idle",
       [ctx.rail(GONE).className, ctx.rail(GONE).kids.map((k) => k.textContent)],
-      ["rail-tps-line stale idle", ["⚡", "tps none", "1h00m ago"]]);
+      ["rail-tps-line stale idle", ["⚡", "idle", "1h00m ago"]]);
 check("an error answer still gets a line", ctx.rail(BROKEN).kids[1].textContent, "HTTP 502");
 check("a whole-body answer's rate reaches the rail line too",
       ctx.rail(WHOLEBODY).kids[1].textContent, "2.4 tok/s · first byte 3.2s");
@@ -209,7 +209,7 @@ check("the chip is the glance with the story on hover",
 check("and dims when stale", ctx.chip("quiet").className, "sess-brief-tps stale");
 check("and reads none, marked idle, for a session that went quiet",
       [ctx.chip("gone-quiet").textContent, ctx.chip("gone-quiet").className],
-      ["tps none", "sess-brief-tps stale idle"]);
+      ["idle", "sess-brief-tps stale idle"]);
 check("and a whole-body answer's rate is drawn on the chip too",
       ctx.chip("whole").textContent, "2.4 tok/s · first byte 3.2s");
 check("no chip for an unmetered session, nor for one the rail no longer knows",
@@ -253,8 +253,8 @@ check("a quiet session's badge and overlay say none instead of the last rate",
       [dom["term-tps"].className, dom["term-tps"].textContent,
        dom["term-tps-overlay"].className,
        dom["term-tps-overlay"].kids.map((k) => k.textContent)],
-      ["badge tps stale idle", "tps none", "term-tps-overlay stale idle",
-       ["tps none", "deepseek flash · 1h00m ago"]]);
+      ["badge tps stale idle", "idle", "term-tps-overlay stale idle",
+       ["idle", "deepseek flash · 1h00m ago"]]);
 
 ctx.setCurrent("whole");
 ctx.render();
@@ -275,6 +275,28 @@ ctx.setCurrent(null);
 ctx.render();
 check("and so does no session at all",
       dom["term-tps"].classList.contains("hidden"), true);
+
+// Live (claunch-2fut4): a call in flight is what the glance shows, and a
+// session with nothing in flight says idle outright -- even when its last
+// finished call is recent enough to still carry a number.
+const LIVE = (live) => ({ ...FAST, live: { window_s: 2, bin_s: 0.5, inflight: 1, ...live } });
+check("a call that is streaming reads its live estimate",
+      ctx.text(LIVE({ state: "streaming", rate: 41.25 })), "≈41.3 tok/s");
+check("a call with nothing back yet reads waiting and for how long",
+      [ctx.text(LIVE({ state: "waiting", rate: 0, since_s: 3.21 })),
+       ctx.text(LIVE({ state: "waiting", rate: 0, since_s: 42.6 }))],
+      ["waiting 3.2s", "waiting 43s"]);
+check("nothing in flight reads idle, not the last call's rate",
+      ctx.text(LIVE({ state: "idle", inflight: 0, rate: 0 })), "idle");
+check("the live states are classed apart",
+      [ctx.rail({ name: "a", tps: LIVE({ state: "streaming", rate: 5 }) }).className,
+       ctx.rail({ name: "b", tps: LIVE({ state: "idle", inflight: 0, rate: 0 }) }).className],
+      ["rail-tps-line live", "rail-tps-line stale idle"]);
+check("the tooltip says what is in flight before the last call",
+      ctx.tooltip(LIVE({ state: "waiting", rate: 0, since_s: 1 })).split("\n")[0],
+      "waiting for the first token (1 call in flight)");
+check("a session whose first call is still in flight has only the live part",
+      ctx.text({ live: { state: "waiting", inflight: 1, since_s: 0.5 } }), "waiting 0.5s");
 
 if (failures) {
   console.error(`${failures} check(s) failed`);

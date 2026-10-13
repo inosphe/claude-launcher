@@ -1068,7 +1068,7 @@ html[data-theme="light"] .xterm {
 #session-list .rail-tps-line.stale .rail-tps { color: #7d8590; }
 #session-list .rail-tps-line.stale .rail-tps-bolt { color: #6e7681; }
 /* An idle row: the session has records but none recent enough to describe
-   now, so the line reads "tps none" beside the age of the last call. Dimmer
+   now, so the line reads "idle" beside the age of the last call. Dimmer
    again than a merely stale number, because it is not a number. */
 #session-list .rail-tps-line.idle .rail-tps,
 .sess-brief-tps.idle,
@@ -2356,6 +2356,18 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 #term-tps-overlay .term-tps-big { font-size: 15px; font-weight: 600; line-height: 18px; }
 #term-tps-overlay .term-tps-small { font-size: 10px; color: #8b949e; line-height: 12px; }
 #term-tps-overlay.stale { color: #7d8590; border-color: #21262d; }
+/* Live (claunch-2fut4): a call in flight. The line under the number is the
+   last thirty seconds of estimated output tokens/s, scaled to its own peak. */
+#term-tps-overlay.live { color: #3fb950; border-color: #238636; }
+#term-tps-overlay .term-tps-chart { display: block; overflow: visible; }
+#term-tps-overlay .term-tps-chart polyline {
+  fill: none; stroke: currentColor; stroke-width: 1.2;
+  stroke-linejoin: round; stroke-linecap: round;
+}
+#term-tps-overlay.idle .term-tps-chart polyline { stroke: #484f58; }
+#session-list .rail-tps-line.live .rail-tps,
+.sess-brief-tps.live,
+.badge.tps.live { color: #3fb950; }
 /* The daemon's notice for the person at this terminal (ws.py "Notices"):
    a banner over the grid's top edge, never a line in it. */
 .term-notice {
