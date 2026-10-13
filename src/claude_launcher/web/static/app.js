@@ -16975,7 +16975,8 @@ function termCflow2Answers(r, a) {
         body: { ...slot, decision: "approve", reason: "" },
         ask: (a.report
           ? `Report '${what}' as '${a.outcome}'${skip}, as ${a.by || "the driver"} asked?`
-          : `Move the run to '${what}', as ${a.by || "the driver"} asked?`) +
+          : `Move the run to '${what}', as ${a.by || "the driver"} asked?` +
+            (a.effect ? `\n\nCallstack: ${a.effect}` : "")) +
           (a.reason ? `\n\n${a.reason}` : ""),
       },
       {
@@ -31470,6 +31471,84 @@ function cf2Section(title, count, cls) {
   return sec;
 }
 
+/* What granting a move request does to the callstack (claunch-1qsz4): the
+   runtime measures it the way the move runs (runtime.move_plan) each time
+   the run is read, so the card shows where the run lands from where it
+   stands now. One headline, the counts as facts, then the callstack with
+   the frames that stay, the ones cancelled (-) and the ones entered (+). */
+function cf2MovePlanView(plan) {
+  const box = el("div", "cf2-move-plan");
+  if ((plan.problems || []).length) {
+    box.appendChild(el("p", "wf-warning", "callstack effect unknown: " + plan.problems.join("; ")));
+    return box;
+  }
+  const name = (f) => (f && (f.label || f.node)) || "?";
+  const levels = (n) => `${n} level${n === 1 ? "" : "s"}`;
+  const target = name(plan.target), anchor = name(plan.anchor);
+  const rewind = plan.rewind || 0, stepIn = plan.step_in || 0;
+  const headline = {
+    reenter: `Re-enters '${target}', a frame on the current callstack: ` +
+      `unwinds ${levels(rewind)} to it and starts it again`,
+    branch: `Rewinds ${levels(rewind)} to '${anchor}', then steps in ${levels(stepIn)} ` +
+      `to '${target}' (not on the current callstack)`,
+    unrelated: `Unrelated to the current callstack: only the root '${anchor}' is shared — ` +
+      `unwinds ${levels(rewind)}, then steps in ${levels(stepIn)} to '${target}'`,
+    step_in: `Steps in ${levels(stepIn)} below '${anchor}' to '${target}'; nothing is unwound`,
+  }[plan.relation] || `Moves to '${target}'`;
+  box.appendChild(el("p", "cf2-move-head", headline));
+  const facts = el("div", "cf2-facts");
+  const fact = (k, v) => {
+    const s = el("span", "cf2-fact");
+    s.append(el("span", "cf2-fact-k", k), el("span", null, v));
+    facts.appendChild(s);
+  };
+  fact("relation", plan.relation);
+  fact("rewind", `−${rewind}`);
+  fact("step in", `+${stepIn}`);
+  const deepest = Math.max(...(plan.before || [[]]).map((p) => p.length));
+  const net = (plan.after || []).length - deepest;
+  fact("depth", `${deepest} → ${(plan.after || []).length} (${net > 0 ? "+" : ""}${net})`);
+  const seq = plan.seq;
+  if (seq && seq.direction) {
+    const gap = Math.abs(seq.to - seq.at);
+    fact(`in '${anchor}'`, seq.direction === "same"
+      ? `same step ${seq.at + 1}/${seq.steps} '${seq.to_label}' again`
+      : `${seq.direction} ${gap} step${gap === 1 ? "" : "s"}: ` +
+        `${seq.at + 1} '${seq.at_label}' → ${seq.to + 1} '${seq.to_label}' of ${seq.steps}`);
+  } else if (seq) {
+    fact(`in '${anchor}'`, `step ${seq.to + 1}/${seq.steps} '${seq.to_label}'`);
+  }
+  for (const f of plan.kept || []) {
+    if (f.type === "loop" && f.iter) fact(`loop '${name(f)}'`, `stays in iteration ${f.iter}`);
+  }
+  for (const f of plan.entered || []) {
+    if (f.type === "loop") fact(`loop '${name(f)}'`, "entered fresh: iteration 1");
+  }
+  box.appendChild(facts);
+  const stack = el("div", "cf2-move-stack");
+  stack.setAttribute("aria-label", "callstack after the move");
+  const line = (mark, cls, f, depth, note) => {
+    const row = el("div", "cf2-move-frame " + cls);
+    row.style.paddingLeft = `${Math.min(depth, 8) * 12}px`;
+    row.appendChild(el("span", "cf2-move-mark", mark));
+    row.appendChild(el("span", "cf2-stack-label", name(f)));
+    row.appendChild(el("span", "cf2-type", f.type || "frame"));
+    if (note) row.appendChild(el("span", "cf2-stack-status", note));
+    row.title = f.instance ? `${name(f)} (${f.instance})` : name(f);
+    stack.appendChild(row);
+  };
+  const kept = plan.kept || [];
+  kept.forEach((f, i) => line(" ", "kept", f, i,
+    i === kept.length - 1 ? "stays (anchor)" : "stays"));
+  for (const f of plan.unwound || []) {
+    line("−", "unwound", f, kept.length - 1 + f.depth, "cancelled");
+  }
+  (plan.entered || []).forEach((f, i) => line("+", "entered", f, kept.length + i,
+    f.node === (plan.target || {}).node ? "entered (target)" : "entered"));
+  box.appendChild(stack);
+  return box;
+}
+
 function cf2Card(kind, title, sub) {
   const card = el("div", "cf2-card");
   const head = el("div", "cf2-card-head");
@@ -32095,6 +32174,7 @@ function renderCflow2Into(box, data, ui, force = false) {
     const target = mr.title || mr.label || mr.node;
     const card = cf2Card("move", target, `${mr.by || "the driver"} asks to move the run here`);
     if (mr.reason) card.appendChild(mdInto(el("div", "md cf2-body"), mr.reason));
+    if (mr.plan) card.appendChild(cf2MovePlanView(mr.plan));
     if ((mr.from || []).length) {
       card.appendChild(el("p", "wf-note", `cancels what is open: ${mr.from.join(", ")}`));
     }

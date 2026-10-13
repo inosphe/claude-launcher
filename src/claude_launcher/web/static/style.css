@@ -6735,6 +6735,15 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .cf2-stack-label { color: #e6edf3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cf2-stack-status { margin-left: auto; flex: none; color: #8b949e; font-size: 11px; }
 .cf2-stack-frame > .cf2-stack-actions { margin: 0; max-width: 100%; }
+.cf2-move-plan { margin: 6px 0; padding: 6px 8px; border-left: 2px solid #30363d; }
+.cf2-move-head { margin: 0 0 4px; color: #e6edf3; font-size: 13px; overflow-wrap: anywhere; }
+.cf2-move-stack { margin-top: 6px; font-size: 12px; }
+.cf2-move-frame { display: flex; align-items: center; gap: 6px; min-height: 22px; min-width: 0; }
+.cf2-move-mark { flex: none; width: 1ch; font-family: ui-monospace, monospace; font-weight: 700; }
+.cf2-move-frame.kept .cf2-stack-label { color: #c9d1d9; }
+.cf2-move-frame.unwound .cf2-move-mark, .cf2-move-frame.unwound .cf2-stack-status { color: #ff7b72; }
+.cf2-move-frame.unwound .cf2-stack-label { color: #8b949e; text-decoration: line-through; }
+.cf2-move-frame.entered .cf2-move-mark, .cf2-move-frame.entered .cf2-stack-status { color: #3fb950; }
 .cf2-stack-actions .cf2-select { min-width: 0; max-width: 120px; }
 .cf2-layout { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 12px; }
 .cf2-layout .wf-note { margin: 0 4px 0 0; }

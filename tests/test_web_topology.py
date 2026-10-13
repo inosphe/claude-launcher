@@ -405,6 +405,7 @@ CHECKS = [
         "spawnsame_check.js",
         "queued_check.js",
         "termcflow_check.js",
+        "moveplan_check.js",
         "termwindow_check.js",
         "termtimers_check.js",
         "window_check.js",

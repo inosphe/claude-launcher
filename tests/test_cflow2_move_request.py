@@ -323,3 +323,102 @@ def test_a_persons_own_report_supersedes_a_report_request(tmp_path):
     assert "move_request" not in st
     assert d.events("move_superseded")[-1]["reported"].startswith("work@")
     assert [t["label"] for t in st["tasks"]] == ["wrap"]
+
+
+# -- what a grant does to the callstack (claunch-1qsz4) -----------------------
+
+
+def _stack_paths(d):
+    """The live callstack as the run page draws it: one root-to-leaf path of
+    labels (node id when unlabelled) per live leaf."""
+    st = RunStore(d.cwd, d.scope)
+    chart, inst = st.load_chart(), st.load_state()["inst"]
+    name = lambda iid: chart.node(inst[iid]["node"]).label or inst[iid]["node"]  # noqa: E731
+    parents = {rec.get("parent") for rec in inst.values()}
+    out = []
+    for iid in inst:
+        if iid in parents:
+            continue
+        path, cur = [], iid
+        while cur is not None:
+            path.insert(0, name(cur))
+            cur = inst[cur].get("parent")
+        out.append(path)
+    return sorted(out)
+
+
+def _plan(d):
+    return runtime.status(cwd=d.cwd, scope=d.scope, now=T0, tick=False)["move_request"]["plan"]
+
+
+def test_the_plan_of_a_move_off_the_stack_is_what_the_grant_does(tmp_path):
+    d = Drv(tmp_path)
+    d.do("intake", "work")  # the round's seq stands on its choice
+    before = _stack_paths(d)
+    runtime.request_move("intake", "redo the intake", by="s1", **d.kw())
+    plan = _plan(d)
+    assert plan["relation"] == "branch"
+    assert plan["anchor"]["node"] == "rounds.do" and plan["anchor"]["type"] == "seq"
+    assert [f["node"] for f in plan["kept"]] == ["body", "rounds", "rounds.do"]
+    assert [(f["type"], f["depth"]) for f in plan["unwound"]] == [("choose", 1)]
+    assert (plan["rewind"], plan["step_in"]) == (1, 1)
+    assert [f["node"] for f in plan["entered"]] == ["intake"]
+    assert plan["kept"][1]["iter"] == 1  # the loop stays in its iteration
+    assert plan["seq"] == {"steps": 3, "to": 0, "to_label": "intake", "at": 2,
+                           "at_label": "rounds.do.2", "direction": "back"}
+    assert plan["before"] == before
+    runtime.resolve_move("approve", by="user", **d.kw())
+    assert _stack_paths(d) == [plan["after"]]
+
+
+def test_the_plan_of_a_live_target_is_a_reentry(tmp_path):
+    d = Drv(tmp_path)
+    runtime.request_move("intake", "start over", by="s1", **d.kw())
+    plan = _plan(d)
+    assert plan["relation"] == "reenter"
+    assert (plan["rewind"], plan["step_in"]) == (1, 1)
+    assert plan["unwound"][0]["node"] == "intake"
+    assert plan["seq"]["direction"] == "same"
+    runtime.resolve_move("approve", by="user", **d.kw())
+    assert _stack_paths(d) == [plan["after"]]
+
+
+def test_the_plan_from_the_end_decision_shares_only_the_root(tmp_path):
+    d = Drv(tmp_path)
+    d.to_end_decision()  # the rounds loop is over; the try's finally runs
+    runtime.request_move("intake", "a new task", by="s1", **d.kw())
+    plan = _plan(d)
+    assert plan["relation"] == "unrelated"
+    assert [f["node"] for f in plan["kept"]] == ["body"]
+    assert plan["rewind"] == 2 and plan["step_in"] == 3
+    assert [f["type"] for f in plan["entered"]] == ["loop", "seq", "task"]
+    assert "seq" not in plan  # the anchor is a try
+    runtime.resolve_move("approve", by="user", **d.kw())
+    assert _stack_paths(d) == [plan["after"]]
+
+
+def test_the_plan_is_dropped_once_answered_and_never_drawn_for_a_report(tmp_path):
+    d = Drv(tmp_path)
+    runtime.request_move("intake", "x", by="s1", **d.kw())
+    assert "plan" in runtime.status(cwd=d.cwd, scope=d.scope, now=T0, tick=False)["move_request"]
+    assert "plan" not in RunStore(d.cwd, d.scope).load_state()["move_request"]  # not stored
+    runtime.resolve_move("deny", by="user", **d.kw())
+    assert "plan" not in runtime.status(cwd=d.cwd, scope=d.scope, now=T0,
+                                        tick=False)["move_request"]
+    runtime.request_move("intake", "x", by="s1", outcome="ok", **d.kw())
+    assert "plan" not in runtime.status(cwd=d.cwd, scope=d.scope, now=T0,
+                                        tick=False)["move_request"]
+
+
+def test_the_terminal_strip_answer_carries_the_plan_in_one_line(tmp_path):
+    from claude_launcher.daemon import cflow2_web
+
+    d = Drv(tmp_path)
+    d.do("intake", "work")
+    runtime.request_move("intake", "redo the intake", by="s1", **d.kw())
+    line = runtime.move_plan_line(_plan(d))
+    assert line == "off the callstack under 'rounds.do'; rewind 1, step in 1"
+    move = cflow2_web.rail_entry(d.cwd, d.scope)["answers"][0]
+    assert move["kind"] == "move" and move["effect"] == line
+    assert f"asks to move the run to intake ({line}): redo the intake" in move["prompt"]
+    assert runtime.move_plan_line({"problems": ["x"]}) == "callstack effect unknown"

@@ -805,16 +805,20 @@ def _rail_answers(cwd: str, scope: str, state: dict) -> List[dict]:
     if move is not None:
         # First: while it is pending nothing else moves by the driver's hand.
         report = move.get("kind") == runtime.MOVE_KIND_REPORT
+        plan = (payload.get("move_request") or {}).get("plan")
+        effect = runtime.move_plan_line(plan) if plan else None
         asks = (f"asks you to report {move.get('label') or move.get('node')} as "
                 f"{move.get('outcome')}"
                 if report else
-                f"asks to move the run to {move.get('label') or move.get('node')}")
+                f"asks to move the run to {move.get('label') or move.get('node')}"
+                + (f" ({effect})" if effect else ""))
         out.append({
             "kind": "move", "request": move.get("id"), "node": move.get("node"),
             "label": move.get("title") or move.get("label") or move.get("node"),
             "by": move.get("by"), "reason": _rail_prompt(move.get("reason")),
             "from": move.get("from") or [],
             "report": report, "outcome": move.get("outcome"),
+            **({"effect": effect} if effect else {}),
             "prompt": _rail_prompt(f"{move.get('by') or 'the driver'} {asks}: "
                                    f"{move.get('reason') or ''}"),
         })
