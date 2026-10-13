@@ -25,12 +25,21 @@ class CleanupError(ValueError):
     pass
 
 
+def _is_link(st) -> bool:
+    return stat.S_ISLNK(st.st_mode) or bool(getattr(st, "st_file_attributes", 0) & 0x400)
+
+
 def _plain(path: Path) -> None:
     """Reject links/reparse points in the entire absolute ancestor chain."""
     for part in (path, *path.parents):
-        st = part.lstat()
-        if stat.S_ISLNK(st.st_mode) or getattr(st, "st_file_attributes", 0) & 0x400:
+        if _is_link(part.lstat()):
             raise CleanupError(f"link or reparse point: {part}")
+
+
+def _regular(path: Path) -> bool:
+    """Whether ``path`` is a regular file itself, never through a link."""
+    st = path.lstat()
+    return stat.S_ISREG(st.st_mode) and not _is_link(st)
 
 
 def _snapshot(path: Path) -> dict:
@@ -42,15 +51,23 @@ def _snapshot(path: Path) -> dict:
         for name in sorted(dirs + names):
             item = Path(root) / name
             st = item.lstat()
-            if stat.S_ISLNK(st.st_mode) or getattr(st, "st_file_attributes", 0) & 0x400:
-                raise CleanupError(f"link or reparse point: {item}")
+            if _is_link(st):
+                # A link inside the tree is unlinked, never followed: only the
+                # link and its target string are evidence, so a retargeted link
+                # changes the fingerprint. os.walk enters a Windows junction
+                # unless it is pruned here.
+                if name in dirs:
+                    dirs.remove(name)
+                digest.update(repr((str(item.relative_to(path)), "link", st.st_ino,
+                                    st.st_mtime_ns, os.readlink(item))).encode())
+                continue
             if not (stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode)):
                 raise CleanupError(f"special file: {item}")
-            if name == ".git" and item.is_file() and item.parent != path:
+            if name == ".git" and stat.S_ISREG(st.st_mode) and item.parent != path:
                 raise CleanupError(f"nested linked worktree: {item.parent}")
             digest.update(repr((str(item.relative_to(path)), st.st_mode, st.st_ino,
                                 st.st_size, st.st_mtime_ns)).encode())
-            if item.is_file():
+            if stat.S_ISREG(st.st_mode):
                 files += 1
                 size += st.st_size
     st = path.stat()
@@ -60,6 +77,27 @@ def _snapshot(path: Path) -> dict:
 
 def _walk_error(error):
     raise error
+
+
+def _unlink_links(path: Path) -> None:
+    """Remove every link under ``path`` -- the link itself, never its target.
+
+    Explicit, so deletion does not rest on rmtree declining to follow a link.
+    A Windows directory link or junction is removed with rmdir, which takes
+    the reparse point and leaves the target's contents.
+    """
+    for root, dirs, names in os.walk(path, followlinks=False, onerror=_walk_error):
+        for name in [*dirs, *names]:
+            item = os.path.join(root, name)
+            st = os.lstat(item)
+            if not _is_link(st):
+                continue
+            if name in dirs:
+                dirs.remove(name)
+            if getattr(st, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_DIRECTORY:
+                os.rmdir(item)
+            else:
+                os.unlink(item)
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -152,7 +190,8 @@ class Cleanup:
             row.update(_snapshot(path))
             if not path.is_dir():
                 raise CleanupError("not a directory")
-            if (path / ".git").is_file():
+            git = path / ".git"
+            if git.exists() and _regular(git):
                 # Only detached, clean, registered preview worktrees. Never force,
                 # prune other registrations, or remove an integration proof ref.
                 listing = _git(repo, "worktree", "list", "--porcelain", "-z")
@@ -174,7 +213,11 @@ class Cleanup:
                 row.update(kind="worktree", head=head, preserving_refs=preserving_refs,
                            retained_refs="all preview refs are preserved")
             else:
-                summary = json.loads((path / basetemp.RUN_SUMMARY).read_text(encoding="utf-8"))
+                receipt = path / basetemp.RUN_SUMMARY
+                if not _regular(receipt):
+                    # A linked receipt could vouch for a run this tree never had.
+                    raise CleanupError("test run receipt is not a regular file")
+                summary = json.loads(receipt.read_text(encoding="utf-8"))
                 if not isinstance(summary, dict) or not summary.get("finished_at") or type(summary.get("exit_code")) is not int:
                     raise CleanupError("no completed test run receipt")
                 start = datetime.fromisoformat(str(summary.get("started_at", "")).replace("Z", "+00:00"))
@@ -240,6 +283,7 @@ class Cleanup:
                     _git(repo, "worktree", "remove", str(path))
                 else:
                     import shutil
+                    _unlink_links(path)
                     # Read-only git fixture objects are a recorded failure, not
                     # a reason to change permissions or retry through another tool.
                     shutil.rmtree(path)
