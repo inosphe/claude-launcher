@@ -325,9 +325,13 @@ const tabShadows = () => tabs().flatMap((t) => t._groupRows)
   check("a mesh only remote sessions are in",
         [tabOf("gamma")._groupRows.map((r) => r.shadow
           ? `${r.shadow.session}@${r.shadow.machine}` : r.session.name),
-         tabCount("gamma")], [["r4@m3"], "1"]);
-  check("a shadow in two meshes is drawn once, under the first",
-        tabShadows().filter((k) => k === "r3@m3").length, 1);
+         tabCount("gamma")], [["r3@m3", "r4@m3"], "2"]);
+  check("a shadow in two meshes has a row in both tabs",
+        tabShadows().filter((k) => k === "r3@m3").length, 2);
+  await open("gamma");
+  check("opening the other membership tab draws the shared shadow once",
+        items(list).map(who), ["r3@m3", "r4@m3"]);
+  await open("alpha");
   check("there is no second rail", walk(list).some((n) => n.classes.has("shadow-group")), false);
 
   /* ---- the kinds stay apart ------------------------------------------ */
@@ -351,7 +355,7 @@ const tabShadows = () => tabs().flatMap((t) => t._groupRows)
   pick("default");
   await ctx.refresh({ cached: true });
   check("a project shows only the shadows it owns through a mesh",
-        tabShadows().sort(), ["r3@m3", "r4@m3", "r5@m2", "s1@m2"]);
+        tabShadows().sort(), ["r3@m3", "r3@m3", "r4@m3", "r5@m2", "s1@m2"]);
   check("and no tab for another project's mesh",
         tabValues(), ["(no mesh)", "alpha", "bravo", "gamma"]);
   pick("other");
@@ -472,7 +476,7 @@ const tabShadows = () => tabs().flatMap((t) => t._groupRows)
   list.scrollTop = 120;
   await open("gamma");
   check("pressing another tab opens it, from the top",
-        [openTab(), items(list).map(who), list.scrollTop], [["gamma"], ["r4@m3"], 0]);
+        [openTab(), items(list).map(who), list.scrollTop], [["gamma"], ["r3@m3", "r4@m3"], 0]);
   await open("alpha");
 
   ctx.set("page", "shadow");
@@ -585,6 +589,51 @@ const tabShadows = () => tabs().flatMap((t) => t._groupRows)
     await ctx.refresh({ cached: true });
     check(`empty project shows no shared-mesh members (${order})`, shown(), []);
   }
+
+  /* Local sessions shared across mesh tabs, with a role in each mesh. */
+  pick("");
+  ctx.set("groups", ["mesh"]);
+  ctx.set("filter", "current");
+  ctx.set("search", { q: "" });
+  ctx.set("shadows", [{ machine: "m2", session: "shared",
+    meshes: [via("alpha", "default", "shared"), via("alpha", "default", "shared"),
+             via("bravo", "default", "shared")], card: card("shared") }]);
+  served = { sessions: [
+    { name: "parent", status: "idle", cwd: "C:/w" },
+    { name: "child", parent: "parent", status: "idle", cwd: "C:/w" },
+  ] };
+  ctx.set("meshes", [
+    { name: "alpha", members: [local("parent", "worker"), local("child", "leader")] },
+    { name: "bravo", members: [local("child", "reviewer"), local("child", "reviewer")] },
+  ]);
+  await ctx.refresh();
+  await open("alpha");
+  const localDepth = (n) => n.classes.has("child") ? n.style.paddingLeft : 0;
+  check("the first mesh tab holds the shared child under its parent",
+        items(list).map((n) => [who(n), localDepth(n)]),
+        [["parent", 0], ["child", "22px"], ["shared@m2", 0]]);
+  check("each tab counts distinct membership cards",
+        [tabCount("alpha"), tabCount("bravo")], ["3", "2"]);
+  check("the first tab draws its own role",
+        items(list).find((n) => n.dataset.name === "child").querySelector(".mesh-role").text,
+        "leader");
+  await open("bravo");
+  check("the second tab draws the shared child once with no absent-parent indent",
+        items(list).map((n) => [who(n), localDepth(n)]),
+        [["child", 0], ["shared@m2", 0]]);
+  check("the second tab draws its own role",
+        items(list).find((n) => n.dataset.name === "child").querySelector(".mesh-role").text,
+        "reviewer");
+  ctx.set("search", { q: "child" });
+  ctx.filters();
+  check("search counts the shared session in both mesh tabs",
+        [tabCount("alpha"), tabCount("bravo")], ["1", "1"]);
+  ctx.set("search", { q: "" });
+  ctx.set("groups", ["workspace"]);
+  await ctx.refresh({ cached: true });
+  await open("C:/w");
+  check("workspace grouping draws every local session once",
+        items(list).map(who), ["parent", "child"]);
 
   if (failures) {
     console.error(`${failures} check(s) failed`);
