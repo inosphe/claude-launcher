@@ -129,6 +129,29 @@ def read_events(path: Path, names: list[str], limit: int) -> list[dict]:
         return result
 
 
+def metrics_snapshot(path: Path, *, limit: int, byte_limit: int) -> dict:
+    """One committed generation, with a bounded, checksum-verified event prefix."""
+    with connect(path) as conn:
+        conn.execute("BEGIN")
+        result = _snapshot(conn)
+        events, size, complete = [], 0, True
+        for length, body, sha in conn.execute(
+                "SELECT length(body),substr(body,1,65537),sha FROM events ORDER BY id LIMIT ?",
+                (limit + 1,)):
+            if len(events) == limit or length > 65536 or size + len(body.encode()) > byte_limit:
+                complete = False
+                break
+            if digest(body) != sha:
+                raise CheckpointError("checkpoint event checksum mismatch")
+            event = json.loads(body)
+            if not isinstance(event, dict):
+                raise CheckpointError("checkpoint event is not an object")
+            events.append(event)
+            size += len(body.encode())
+        result.update(events=events, complete=complete, bytes=size)
+        return result
+
+
 def commit(path: Path, state: str, chart: str, events: list, *, legacy: list,
            receipts: dict):
     """Commit the complete state and its events together, before publishing JSON.

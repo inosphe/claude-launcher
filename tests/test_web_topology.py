@@ -566,6 +566,7 @@ BROWSER_CHECKS = [
     "termcflow_browser.cjs",
     "cflow2layout_browser.cjs",
     "cflow2history_browser.cjs",
+    "cflow2throughput_browser.cjs",
     "glossary_browser.cjs",
     "flows_browser.cjs",
         "diagramviewport_browser.cjs",
