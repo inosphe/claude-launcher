@@ -1,18 +1,23 @@
-/* The execution history of a pi-durable run session as a flow diagram
-   (claunch-neeya).
+/* The execution history of a pi-durable session as a flow diagram
+   (claunch-neeya, claunch-neeya.1).
 
-   A simulation's run session (kind ``pi-durable``, sim/pi/runner.mjs) logs
-   every step of its campaign loop to ``durable.events.jsonl``: the start,
-   each question it asks B or C (one durable task each), what the daemon did
-   with the answer, every round, the end. The session's ⬒ run pane has no
-   workflow run to show, so it shows this instead -- read from
-   ``GET /api/sessions/<name>/durable`` (daemon/sim_api.py).
+   Two producers log a run as JSONL events, both read from
+   ``GET /api/sessions/<name>/durable`` (daemon/sim_api.py):
+   - a simulation's run session (sim/pi/runner.mjs) logs every step of its
+     campaign loop to ``durable.events.jsonl``: the start, each question it
+     asks B or C (one durable task each), what the daemon did with the
+     answer, every round, the end;
+   - gds6's sim2 runner (env ``SIM_RUN_DIR``) logs its start, every question
+     (``ask`` with ``askRole``) and ``run_end`` to ``<run>.events.jsonl``.
+   The terminal's ◇ chart pane shows it; ⬒ run stays the workflow run.
 
    Layout: one column per phase in the order the loop entered it (start,
    formalize, judge, round N, ..., edits, end); a phase entered again later
    gets a new column, so the picture reads left to right as the run went.
-   Within a column the nodes stack in time order. The log is append-only and
-   a result event only ever completes a node already drawn, so a node's
+   sim2 questions are grouped per stage into one counted node, and a stage
+   keeps the column it opened (its questions interleave). Within a column
+   the nodes stack in time order. The log is append-only and a later event
+   only ever completes or counts into a node already drawn, so a node's
    place never changes once drawn: an update adds the new nodes and edges to
    the SVG that is already on screen and rewrites the text and class of the
    nodes whose state changed. Nothing is redrawn wholesale -- a hover, the
@@ -30,6 +35,7 @@
   const PHASE_TITLE = {
     start: "시작", formalize: "형식화", requote: "재인용", judge: "판정",
     answers: "답 반영", edits: "편집 제안", end: "끝", other: "기타",
+    model: "모델 구성", triage: "분류",
   };
 
   function phaseTitle(phase) {
@@ -74,8 +80,35 @@
     return k || "ask";
   }
 
+  /* gds6's sim2 runner (a session with env SIM_RUN_DIR) asks one role per
+     question and keys it `<role>:<stage>[...]` -- `B:effects|<hash>:0`,
+     `C:r1:j`, `A:1:p2:7:0`, `D:cr-000003:0:0`. A run asks a thousand of
+     them, mostly in parallel, so they are drawn one node per stage group
+     (counted) rather than one per question. */
+  const B_STAGE = {
+    formalize: "형식화", effects: "효과", available: "가용성", world: "세계",
+    interp: "해석", clash: "충돌", invariants: "불변식", start: "시작 상태", screen: "화면",
+  };
+
+  function sim2Group(key) {
+    const k = String(key || "").split("|", 1)[0];
+    let m;
+    if ((m = /^B:([^:]+)/.exec(k))) {
+      return { phase: "model", group: "B:" + m[1], label: B_STAGE[m[1]] || "기능 " + m[1] };
+    }
+    if (k === "C:triage" || k.startsWith("C:triage:")) return { phase: "triage", group: "C:triage", label: "분류" };
+    if ((m = /^C:r(\d+):j/.exec(k))) return { phase: "round:" + m[1], group: "C:r" + m[1] + ":j", label: "판정" };
+    if ((m = /^C:r(\d+):f/.exec(k))) return { phase: "round:" + m[1], group: "C:r" + m[1] + ":f", label: "발견 검토" };
+    if ((m = /^A:(\d+):(p\d+)/.exec(k))) {
+      return { phase: "round:" + m[1], group: "A:" + m[1] + ":" + m[2], label: "플레이 " + m[2] };
+    }
+    if ((m = /^D:([^:]+)/.exec(k))) return { phase: "edits", group: "D:" + m[1], label: "변경 " + m[1] };
+    return { phase: "other", group: k.split(":", 1)[0] || "?", label: k || "ask" };
+  }
+
   function tokens(n) {
     const v = Number(n) || 0;
+    if (v >= 1e6) return (v / 1e6).toFixed(2) + "M";
     return v >= 1000 ? (v / 1000).toFixed(1) + "k" : String(v);
   }
 
@@ -97,16 +130,22 @@
     const nodes = [];       // {id, col, row, label, sub, status, tip, key}
     const byId = new Map();
     const seen = new Map(); // ask key -> times drawn (a resumed run asks again)
-    let tokensTotal = 0, ended = null, first = null, lastAt = null;
+    let tokensTotal = 0, asks = 0, ended = null, first = null, lastAt = null;
 
-    function column(phase) {
+    // A phase entered again gets a new column -- except a grouped (sim2)
+    // stage, whose questions interleave: it keeps the column it opened.
+    function column(phase, reuse) {
+      if (reuse) {
+        const at = cols.findIndex((c) => c.phase === phase);
+        if (at >= 0) return at;
+      }
       const last = cols[cols.length - 1];
       if (last && last.phase === phase) return cols.length - 1;
       cols.push({ phase, title: phaseTitle(phase), nodes: [] });
       return cols.length - 1;
     }
-    function add(phase, base, fields) {
-      const c = column(phase);
+    function add(phase, base, fields, reuse) {
+      const c = column(phase, reuse);
       let id = base, n = 1;
       while (byId.has(id)) id = base + "#" + (++n);
       const node = { id, col: c, row: cols[c].nodes.length, label: "", sub: "",
@@ -122,6 +161,9 @@
         if (nodes[i].key !== null && test(nodes[i].key)) return nodes[i];
       }
       return null;
+    }
+    function tail() {
+      return nodes[nodes.length - 1] || null;
     }
     function settle(node, ok, note, phase, label) {
       if (!node) {
@@ -145,14 +187,37 @@
             sub: ev.reason || "", tip: [when, "session_start " + (ev.reason || "")],
           });
           break;
-        case "harness_open": {
+        case "harness_open":
+        case "run_start": {
           const host = [...nodes].reverse().find((x) => x.id.startsWith("start"));
-          const sub = "B " + modelName(ev.b) + " · C " + modelName(ev.c);
-          if (host) { host.sub = sub; host.tip.push("root " + (ev.root || "")); }
-          else add("start", "start", { label: "시작", sub, tip: [when] });
+          const sub = ev.b ? "B " + modelName(ev.b) + " · C " + modelName(ev.c) : "";
+          const tip = ev.event === "run_start"
+            ? when + " run_start " + [ev.preset, ev.rounds != null ? ev.rounds + " rounds" : ""].filter(Boolean).join(" · ")
+            : "root " + (ev.root || ev.file || "");
+          if (host) { if (sub) host.sub = sub; host.tip.push(tip); }
+          else add("start", "start", { label: "시작", sub, tip: [when, tip] });
           break;
         }
         case "ask": {
+          if (ev.askRole) {
+            // sim2: one node per stage group, counted.
+            const g = sim2Group(ev.key);
+            const u = ev.usage || {};
+            tokensTotal += Number(u.totalTokens) || 0;
+            asks += 1;
+            let node = byId.get("grp:" + g.group);
+            if (!node) {
+              node = add(g.phase, "grp:" + g.group, { key: g.group, count: 0, tok: 0, status: "done" }, true);
+            }
+            node.count += 1;
+            node.tok += Number(u.totalTokens) || 0;
+            node.label = g.label + " ×" + node.count;
+            node.sub = ev.askRole + " · " + tokens(node.tok) + " tok";
+            if (ev.stop && ev.stop !== "stop") node.status = "warn";
+            node.tip = [when + " 마지막 " + String(ev.key || ""), "stop " + (ev.stop || "?")];
+            break;
+          }
+          asks += 1;
           const key = String(ev.key || "");
           const u = ev.usage || {};
           tokensTotal += Number(u.totalTokens) || 0;
@@ -233,6 +298,25 @@
           add("end", "interrupted", { label: "중단", sub: String(ev.error || "").slice(0, 40), status: "warn",
                                       tip: [when, String(ev.error || "")] });
           break;
+        case "run_end": {
+          // done, stopped (asked to stop), or anything else (it broke).
+          const stopped = ev.state === "stopped" && !ev.error;
+          const failed = !stopped && (ev.state !== "done" || !!ev.error);
+          ended = { failed, reason: String(ev.error || ev.state || "") };
+          let sum = 0;
+          for (const r of Object.values(ev.tally || {})) sum += Number(r && r.total) || 0;
+          add("end", "run_end", { label: failed ? "실패" : stopped ? "중단" : "끝",
+                                  sub: String(ev.state || "") + (sum ? " · " + tokens(sum) + " tok" : ""),
+                                  status: failed ? "fail" : stopped ? "warn" : "ok",
+                                  tip: [when, ev.error ? String(ev.error).slice(0, 400) : ""] });
+          break;
+        }
+        case "agent_end":
+        case "harness_closed": {
+          const t = tail();
+          if (t) t.tip.push(when + " " + ev.event);
+          break;
+        }
         case "session_shutdown": {
           const tail = nodes[nodes.length - 1];
           if (tail && cols[tail.col].phase === "end") {
@@ -256,14 +340,20 @@
                   label: "진행 중" + (progress && progress.stage ? " · " + progress.stage : ""),
                   sub: (progress && progress.text) || "", status: "live", tip: [] };
     }
+    // Each node hangs off the one drawn before it -- or, when a grouped stage
+    // landed back in an earlier column, off the node above it there.
     const edges = [];
     for (let i = 1; i < nodes.length; i++) {
-      edges.push({ id: nodes[i - 1].id + ">" + nodes[i].id, from: nodes[i - 1], to: nodes[i] });
+      const to = nodes[i];
+      let from = nodes[i - 1];
+      if (to.col < from.col) from = to.row ? byId.get(cols[to.col].nodes[to.row - 1]) : null;
+      if (from) edges.push({ id: from.id + ">" + to.id, from, to });
     }
     if (pending && nodes.length) {
       edges.push({ id: "live-edge", from: nodes[nodes.length - 1], to: pending });
     }
-    return { cols, nodes, edges, pending, ended, tokens: tokensTotal, first, lastAt, count: (events || []).length };
+    return { cols, nodes, edges, pending, ended, tokens: tokensTotal, asks, first, lastAt,
+             count: (events || []).length };
   }
 
   function pos(n) {
@@ -384,8 +474,7 @@
 
   function summary(m, data) {
     const parts = [data.sim || "", data.live ? (m.ended ? "끝남" : "실행 중") : "세션 종료"];
-    parts.push("사건 " + m.count, "질문 " + m.nodes.filter((n) => n.key !== null).length,
-               "토큰 " + tokens(m.tokens));
+    parts.push("사건 " + m.count, "질문 " + m.asks, "토큰 " + tokens(m.tokens));
     if (m.first && m.lastAt) parts.push("경과 " + elapsed(m.first, m.lastAt));
     return parts.filter(Boolean).join(" · ");
   }
@@ -465,5 +554,5 @@
     };
   }
 
-  globalThis.DurableFlow = { model, mount, makeView, keyPhase, askLabel };
+  globalThis.DurableFlow = { model, mount, makeView, keyPhase, askLabel, sim2Group };
 })();

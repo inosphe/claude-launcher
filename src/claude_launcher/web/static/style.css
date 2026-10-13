@@ -1849,10 +1849,11 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   background: none; color: #7d8590;
   border: 1px solid #30363d; border-radius: 5px;
 }
-#term-simsbtn.has-resource, #term-splitbtn.has-resource {
+#term-simsbtn.has-resource, #term-splitbtn.has-resource, #term-chartbtn.has-resource {
   background: #10203a; color: #58a6ff; border-color: #1f6feb;
 }
-#term-simsbtn[aria-pressed="true"], #term-splitbtn[aria-pressed="true"] {
+#term-simsbtn[aria-pressed="true"], #term-splitbtn[aria-pressed="true"],
+#term-chartbtn[aria-pressed="true"] {
   box-shadow: inset 0 -2px #58a6ff;
 }
 /* Keep the toggle inside the terminal header when the detail panel opens.

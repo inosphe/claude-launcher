@@ -135,6 +135,52 @@ def _squash(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def read_event_log(path: Path, session: str = "", since: int = 0) -> dict:
+    """An append-only JSONL event log of a pi-durable run, read as
+    ``{sessions, total, since, events}``: narrowed to the rows whose
+    ``session`` is ``session`` when given, ``events`` the narrowed rows from
+    index ``since`` on (the caller already holds the ones before it). A line
+    without its newline is a write in progress and ends the read; it is read
+    whole next time. A line that does not parse is skipped."""
+    rows: List[dict] = []
+    sessions: List[str] = []
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                if not line.endswith("\n"):
+                    break
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(row, dict):
+                    continue
+                who = str(row.get("session") or "")
+                if who and who not in sessions:
+                    sessions.append(who)
+                if not session or who == session:
+                    rows.append(row)
+    except OSError:
+        pass
+    since = max(0, min(int(since or 0), len(rows)))
+    return {"sessions": sessions, "total": len(rows), "since": since, "events": rows[since:]}
+
+
+def run_dir_events(run_dir: str, since: int = 0) -> dict:
+    """The event log of a run kept outside the simulation store: a run
+    directory (a session's ``SIM_RUN_DIR``, e.g. gds6's sim2 runner) holds one
+    ``<run>.events.jsonl`` named after the directory. Its rows carry no
+    ``session``, so the whole log is the run's."""
+    d = Path(run_dir)
+    path = d / (d.name + ".events.jsonl")
+    if not path.is_file():
+        found = sorted(d.glob("*.events.jsonl")) if d.is_dir() else []
+        if len(found) != 1:
+            raise NotFound(f"no event log in run directory {run_dir}")
+        path = found[0]
+    return {"sim": d.name, "session": None, "run_dir": str(d), **read_event_log(path, "", since)}
+
+
 def model_hash(m: dict) -> str:
     return hashlib.sha256(json.dumps(M.normalize(m), sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:12]
 
@@ -1082,33 +1128,11 @@ class SimStore:
         ``sim/pi/runner.mjs``), narrowed to one ``session`` when given.
         ``since`` is the number of that session's events the caller already
         holds: the file is append-only, so the index of an event in the
-        narrowed list never changes and the caller asks only for the tail.
-        A line that does not parse (the runner is mid-write) ends the read;
-        it is read whole on the next call."""
+        narrowed list never changes and the caller asks only for the tail
+        (``read_event_log``)."""
         self._meta(sim_id)
-        rows: List[dict] = []
-        sessions: List[str] = []
-        try:
-            with open(self._dir(sim_id) / "durable.events.jsonl", encoding="utf-8") as f:
-                for line in f:
-                    if not line.endswith("\n"):
-                        break
-                    try:
-                        row = json.loads(line)
-                    except ValueError:
-                        continue
-                    if not isinstance(row, dict):
-                        continue
-                    who = str(row.get("session") or "")
-                    if who and who not in sessions:
-                        sessions.append(who)
-                    if not session or who == session:
-                        rows.append(row)
-        except OSError:
-            pass
-        since = max(0, min(int(since or 0), len(rows)))
-        return {"sim": sim_id, "session": session or None, "sessions": sessions,
-                "total": len(rows), "since": since, "events": rows[since:]}
+        res = read_event_log(self._dir(sim_id) / "durable.events.jsonl", session, since)
+        return {"sim": sim_id, "session": session or None, **res}
 
     # -- findings ------------------------------------------------------------
 

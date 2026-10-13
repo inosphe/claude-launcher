@@ -213,3 +213,40 @@ def test_run_session_events_are_read_by_session_and_by_tail(tmp_path):
         await req("GET", "/api/sessions/sim-00000000-run1/durable", status=404)
         await req("GET", f"/api/sessions/{sid}-run1/durable?since=x", status=400)
     run(tmp_path, scenario)
+
+
+def test_run_dir_session_events_are_read_from_its_run_directory(tmp_path):
+    """A pi-durable session that names its run directory in SIM_RUN_DIR
+    (gds6's sim2 runner, no CLAUNCH_SIM_ID) is read from
+    ``<run>/<run>.events.jsonl`` -- the chart pane used to get a 404
+    "is not a simulation run session" for it (claunch-neeya.1)."""
+    import json as _json
+
+    async def scenario(req, mgr, s1, s2):
+        run_dir = tmp_path / "runs" / "20261013-040416-simulation"
+        run_dir.mkdir(parents=True)
+        rows = [
+            {"role": "sim-run", "event": "session_start", "reason": "startup"},
+            {"role": "sim-run", "event": "run_start", "rounds": 1},
+            {"role": "sim-run", "event": "ask", "askRole": "B", "key": "B:clash|4bf:0"},
+        ]
+        (run_dir / f"{run_dir.name}.events.jsonl").write_text(
+            "".join(_json.dumps(r) + "\n" for r in rows) + '{"event": "as', encoding="utf-8")
+        name = "sim-20261013-040416-simulation"
+        sess = FakeSession(name, str(tmp_path))
+        sess.sdef.env = {"SIM_ROLE": "sim-run", "SIM_RUN_DIR": str(run_dir)}
+        mgr.sessions[name] = sess
+        got = await req("GET", f"/api/sessions/{name}/durable")
+        assert [e["event"] for e in got["events"]] == ["session_start", "run_start", "ask"]
+        assert got["total"] == 3 and got["sim"] == run_dir.name and got["live"] is True
+        assert got["run_dir"] == str(run_dir)
+        tail = await req("GET", f"/api/sessions/{name}/durable?since=2")
+        assert [e["event"] for e in tail["events"]] == ["ask"] and tail["since"] == 2
+        # A run directory without its log is a 404, and so is a session with neither env.
+        empty = FakeSession("empty", str(tmp_path))
+        empty.sdef.env = {"SIM_RUN_DIR": str(tmp_path / "nowhere")}
+        mgr.sessions["empty"] = empty
+        await req("GET", "/api/sessions/empty/durable", status=404)
+        miss = await req("GET", "/api/sessions/s1/durable", status=404)
+        assert "SIM_RUN_DIR" in miss["error"]
+    run(tmp_path, scenario)

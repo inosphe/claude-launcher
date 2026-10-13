@@ -1,5 +1,5 @@
-/* durable-flow.js (claunch-neeya): a pi-durable run session's event log as a
-   flow diagram in its ⬒ run pane, updated in place.
+/* durable-flow.js (claunch-neeya, claunch-neeya.1): a pi-durable session's
+   event log as a flow diagram in its ◇ chart pane, updated in place.
 
    - model(): one column per phase in the order the loop entered it, nodes in
      time order; a result event completes the node of its ask instead of
@@ -8,7 +8,11 @@
    - mount(): polls only the tail (`since`), keeps ONE <svg> across polls,
      keeps every node element it drew (same object), appends the new ones,
      rewrites the state of the ones that changed, moves the pending node and
-     drops it when the run ends; the poll stops once the session is gone. */
+     drops it when the run ends; the poll stops once the session is gone.
+   - sim2 (gds6, env SIM_RUN_DIR): questions grouped per stage into one
+     counted node; a stage keeps its column; run_end ends the run.
+   - app.js: ◇ chart opens the flow; ⬒ run is the workflow run again, for a
+     pi-durable session too. */
 const assert = require("assert");
 const fs = require("fs");
 const path = require("path");
@@ -170,44 +174,115 @@ const timers = { setInterval: () => 7, clearInterval: () => { cleared++; } };
   console.log("durableflow_check: ok");
 })().catch((e) => { console.error(e); process.exit(1); });
 
-// -- app.js: the ⬒ run pane of a pi-durable session mounts the flow ----------
+// -- sim2: grouped stages ----------------------------------------------------
+const a2 = (s) => "2026-10-13T04:" + s + ".000Z";
+const SIM2 = [
+  { at: a2("04:24"), role: "sim-run", event: "session_start", reason: "startup" },
+  { at: a2("04:24"), role: "sim-run", event: "harness_open", file: "/runs/r/r.sqlite", pendingTasks: 0 },
+  { at: a2("04:26"), role: "sim-run", event: "run_start", runDir: "/runs/r", rounds: 1, preset: "quick",
+    b: { modelId: "a/glm-5p3-flash" }, c: { modelId: "a/glm-5p3-flash" } },
+  { at: a2("05:57"), event: "ask", askRole: "B", key: "B:clash|4bf4698eb95f:0", usage: u(92220), stop: "stop" },
+  { at: a2("06:10"), event: "ask", askRole: "B", key: "B:effects|aa:0", usage: u(1000), stop: "stop" },
+  { at: a2("06:20"), event: "ask", askRole: "B", key: "B:clash|77:1", usage: u(8), stop: "length" },
+  { at: a2("07:00"), event: "ask", askRole: "A", key: "A:1:p1:0:0", usage: u(10), stop: "stop" },
+  { at: a2("07:01"), event: "ask", askRole: "B", key: "B:effects|bb:0", usage: u(2000), stop: "stop" },
+  { at: a2("07:02"), event: "ask", askRole: "C", key: "C:r1:j", usage: u(30), stop: "stop" },
+  { at: a2("07:03"), event: "ask", askRole: "C", key: "C:triage", usage: u(40), stop: "stop" },
+  { at: a2("07:04"), event: "ask", askRole: "D", key: "D:cr-000001:0:0", usage: u(50), stop: "stop" },
+  { at: a2("07:05"), event: "run_end", state: "done", error: null, tally: { B: { total: 2500000 }, A: { total: 10 } } },
+  { at: a2("07:06"), event: "agent_end", simRunStarted: true },
+  { at: a2("07:06"), event: "session_shutdown", reason: "quit" },
+  { at: a2("07:06"), event: "harness_closed" },
+];
+const s2 = DF.model(SIM2, true);
+const by2 = Object.fromEntries(s2.nodes.map((n) => [n.id, n]));
+assert.deepStrictEqual(Array.from(s2.cols, (c) => c.title), ["시작", "모델 구성", "라운드 1", "분류", "편집 제안", "끝"]);
+assert.strictEqual(by2.start.sub, "B glm-5p3-flash · C glm-5p3-flash", "run_start names the models");
+assert.ok(by2.start.tip.some((t) => /run_start quick · 1 rounds/.test(t)));
+assert.strictEqual(by2["grp:B:clash"].label, "충돌 ×2");
+assert.strictEqual(by2["grp:B:clash"].status, "warn", "a cut-off answer marks its stage");
+assert.strictEqual(by2["grp:B:effects"].label, "효과 ×2");
+assert.strictEqual(by2["grp:B:effects"].sub, "B · 3.0k tok");
+assert.strictEqual(by2["grp:B:effects"].col, by2["grp:B:clash"].col, "a stage keeps the column it opened");
+assert.strictEqual(by2["grp:A:1:p1"].label, "플레이 p1 ×1");
+assert.strictEqual(by2["grp:C:r1:j"].col, by2["grp:A:1:p1"].col);
+assert.strictEqual(by2["grp:D:cr-000001"].label, "변경 cr-000001 ×1");
+assert.strictEqual(by2.run_end.label, "끝");
+assert.strictEqual(by2.run_end.sub, "done · 2.50M tok");
+assert.strictEqual(s2.asks, 8);
+assert.strictEqual(s2.pending, null, "run_end ends the run");
+assert.strictEqual(s2.nodes.length, 8, s2.nodes.map((n) => n.id).join(" "));
+assert.ok(s2.edges.every((e) => e.to.col >= e.from.col), "no edge runs backwards");
+assert.ok(by2.run_end.tip.some((t) => /harness_closed/.test(t)), "closing notes annotate, add no node");
+for (let k = 1; k <= SIM2.length; k++) {
+  for (const n of DF.model(SIM2.slice(0, k), true).nodes) {
+    assert.deepStrictEqual([n.col, n.row], [by2[n.id].col, by2[n.id].row], `sim2 prefix ${k}: ${n.id} moved`);
+  }
+}
+const stopped = DF.model([...SIM2.slice(0, 4), { event: "run_end", state: "stopped", error: null, tally: {} }], true);
+assert.deepStrictEqual([stopped.nodes.at(-1).label, stopped.nodes.at(-1).status], ["중단", "warn"]);
+const broke = DF.model([...SIM2.slice(0, 4), { event: "run_end", state: "failed", error: "Harness is closed" }], true);
+assert.deepStrictEqual([broke.nodes.at(-1).label, broke.nodes.at(-1).status], ["실패", "fail"]);
+assert.deepStrictEqual(JSON.parse(JSON.stringify(DF.sim2Group("B:combat-ranged|x:0"))),
+  { phase: "model", group: "B:combat-ranged", label: "기능 combat-ranged" });
+console.log("durableflow_check: sim2 ok");
+
+// -- app.js: ◇ chart opens the flow; ⬒ run is the workflow run ---------------
 (async () => {
   const src = fs.readFileSync(path.join(__dirname, "../../src/claude_launcher/web/static/app.js"), "utf8");
-  const start = src.indexOf("async function refreshSplit(");
-  let depth = 0, end = -1;
-  for (let j = src.indexOf("{", start); j < src.length; j++) {
-    if (src[j] === "{") depth++;
-    else if (src[j] === "}") { depth--; if (!depth) { end = j + 1; break; } }
-  }
+  const html = fs.readFileSync(path.join(__dirname, "../../src/claude_launcher/web/static/index.html"), "utf8");
+  const fn = (name) => {
+    const start = src.indexOf(name);
+    assert.ok(start >= 0, name);
+    let depth = 0;
+    for (let j = src.indexOf("{", start); j < src.length; j++) {
+      if (src[j] === "{") depth++;
+      else if (src[j] === "}") { depth--; if (!depth) return src.slice(start, j + 1); }
+    }
+    throw new Error(name);
+  };
+  assert.match(html, /<button id="term-chartbtn" class="term-btn hidden"[^>]*>◇ chart<\/button>/);
+  assert.match(src, /\$\("term-chartbtn"\)\.addEventListener\("click", \(\) => toggleSplitPane\("chart"\)\)/);
   const pane = new El("div");
   const mounted = [];
   const asked = [];
   const sandbox = vm.createContext({
-    encodeURIComponent, clearInterval: () => { sandbox.cleared = true; },
+    encodeURIComponent, clearInterval: () => {}, setInterval: () => 9, visiblePoll: (f) => f,
     $: () => pane, el: (t, c, x) => { const e = new El(t); e.className = c; e.textContent = x; return e; },
     api: async (url) => { asked.push(url); return { ok: true, json: async () => ({
-      session: { name: "sim-abc123-run1", kind: url.includes("plain") ? undefined : "pi-durable" },
+      session: { name: "sim-20261013-040416-simulation", kind: "pi-durable" },
       cflow: { cwd: "/repo", scope: "x" } }) }; },
     DurableFlow: { mount: (host, name, opts) => { mounted.push({ host, name, opts }); return { unmount() { sandbox.unmounted = true; } }; } },
+    SimPane: { mount() {}, unmount() {} },
+    renderSplit: () => { sandbox.rendered = true; },
+    sessionsCache: [{ name: "sim-20261013-040416-simulation", kind: "pi-durable" }, { name: "s1", kind: "" }],
+    loadSessLayouts: () => ({ a: { pane: "chart" }, b: { pane: "bogus" } }),
+    DETAIL_SUBTAB_IDS: new Set(), clampSplitRatio: (r) => r || 0.5,
   });
-  vm.runInContext(`var splitFor = "sim-abc123-run1", splitKind = "run", splitCwd = null, splitScope = null,
-    splitPollTimer = 3, splitDurable = null; var globalThis = this; ${src.slice(start, end)}`, sandbox);
-  await vm.runInContext("refreshSplit()", sandbox);
+  vm.runInContext(`var splitFor = null, splitKind = null, splitCwd = null, splitScope = null,
+    splitPollTimer = null, splitDurable = null, splitSelectedStep = null, splitLastData = null;
+    var globalThis = this;
+    ${fn("function isPiDurable(")} ${fn("function sessLayoutFor(")}
+    ${fn("function openSplit(")} ${fn("function closeSplit(")} ${fn("async function refreshSplit(")}`, sandbox);
+  assert.strictEqual(vm.runInContext(`isPiDurable("sim-20261013-040416-simulation")`, sandbox), true);
+  assert.strictEqual(vm.runInContext(`isPiDurable("s1")`, sandbox), false);
+  assert.strictEqual(vm.runInContext(`sessLayoutFor("a").pane`, sandbox), "chart");
+  assert.strictEqual(vm.runInContext(`sessLayoutFor("b").pane`, sandbox), "run");
+  // The chart pane mounts the flow and asks nothing else.
+  vm.runInContext(`openSplit("sim-20261013-040416-simulation", "chart")`, sandbox);
   assert.strictEqual(mounted.length, 1);
-  assert.strictEqual(mounted[0].name, "sim-abc123-run1");
+  assert.strictEqual(mounted[0].name, "sim-20261013-040416-simulation");
   assert.strictEqual(mounted[0].host, pane);
-  assert.ok(sandbox.cleared, "the run poll stops; the flow keeps its own");
-  assert.deepStrictEqual(asked, ["/api/sessions/sim-abc123-run1/meta"], "no workflow run is asked for");
-  await vm.runInContext("refreshSplit()", sandbox);
-  assert.strictEqual(mounted.length, 1, "mounted once");
-  assert.strictEqual(asked.length, 1);
-  // closeSplit unmounts it.
-  assert.match(src, /if \(splitDurable\) \{ splitDurable\.unmount\(\); splitDurable = null; \}/);
-  // Any other session is left to the workflow run.
-  vm.runInContext(`splitFor = "plain"; splitCwd = null; splitDurable = null;`, sandbox);
-  asked.length = 0;
-  await vm.runInContext("refreshSplit()", sandbox).catch(() => {});
-  assert.strictEqual(mounted.length, 1);
-  assert.ok(asked.some((u) => u.startsWith("/api/cflow/run?")), asked.join(" "));
-  console.log("durableflow_check: run pane ok");
+  assert.deepStrictEqual(asked, []);
+  // Leaving it unmounts the flow.
+  vm.runInContext(`closeSplit()`, sandbox);
+  assert.ok(sandbox.unmounted);
+  // The run pane of the same pi-durable session is the workflow run.
+  vm.runInContext(`openSplit("sim-20261013-040416-simulation", "run")`, sandbox);
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+  assert.strictEqual(mounted.length, 1, "⬒ run does not mount the chart");
+  assert.ok(asked.some((x) => x.startsWith("/api/cflow/run?")), asked.join(" "));
+  assert.ok(sandbox.rendered, "the workflow run is drawn");
+  console.log("durableflow_check: chart pane ok");
 })().catch((e) => { console.error(e); process.exit(1); });
