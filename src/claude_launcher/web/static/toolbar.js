@@ -9,7 +9,7 @@
     "term-note": "note",
     "term-timer-skip": "⏭", "term-hold": "⇥", "term-link": "↻",
     "term-scroll": "↥", "term-resume": "▶", "term-brief": "▤",
-    "term-observer": "◉", "term-log": "≡", "term-rebrief": "↻",
+    "term-observer": "◉", "term-blockbar": "☰", "term-rebrief": "↻",
     "term-fork": "⑂", "term-merge": "↩", "term-pause": "Ⅱ",
     "term-kill": "×", "term-archive": "▣", "term-splitbtn": "⬒", "term-simsbtn": "◬",
     "term-chartbtn": "◇",
@@ -38,9 +38,23 @@
     menu.replaceChildren();
     for (const item of overflow) {
       // A group (the reminder frame) goes into the menu as its visible
-      // buttons, together; a hidden one has nothing to offer there.
-      const sources = item.matches("button") ? [item] : item.querySelectorAll("button:not(.hidden)");
+      // buttons, together; a hidden one has nothing to offer there. The view
+      // switch (CLI | HTML) goes in as one button per radio, pressed on the
+      // view on screen.
+      const sources = item.matches("button") ? [item]
+        : item.querySelectorAll('button:not(.hidden), input[type="radio"]');
       for (const source of sources.length ? sources : [item]) {
+        if (source.matches('input[type="radio"]')) {
+          const proxy = document.createElement("button");
+          proxy.type = "button";
+          proxy.className = "term-btn";
+          proxy.textContent = source.closest("label")?.textContent.trim() || source.value;
+          proxy.title = source.closest("label")?.title || "";
+          proxy.setAttribute("aria-pressed", String(source.checked));
+          proxy.addEventListener("click", () => { menu.hidePopover(); source.click(); });
+          menu.append(proxy);
+          continue;
+        }
         const proxy = document.createElement(source.matches("button") ? "button" : "span");
         proxy.className = "term-btn";
         proxy.textContent = source.textContent.trim() || source.getAttribute("aria-label");

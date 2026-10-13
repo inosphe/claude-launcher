@@ -2115,7 +2115,11 @@ function renderSessionTabs() {
   const bar = $("session-tabs");
   if (!bar || !sessionTabHistory) return;
   const names = sessionTabHistory.names();
-  const active = currentPage === "terminal" ? currentName : null;
+  // The HTML view is the same session on screen, so its tab stays lit.
+  // Guarded: reduced harnesses slice this function alone.
+  const onPage = typeof sessionLineOnPage === "function"
+    ? sessionLineOnPage(currentPage) : currentPage === "terminal";
+  const active = currentName && onPage ? currentName : null;
   const records = new Map(sessionsCache.map(s => [s.name, s]));
   const signature = JSON.stringify(names.map(name => {
     const rec = records.get(name);
@@ -13386,18 +13390,23 @@ $("term-brief").addEventListener("click", () => {
   if (currentName) toggleBriefing(currentName);
 });
 
-/* The transcript button: walk to this session's conversation page. A route,
-   not a toggle — see the transcript page's own block for why the fourth
-   reading of a session deserves the same standing as the other three. The
-   terminal is not torn down by the trip; it is parked like any navigation,
-   socket and all, and the back button brings it straight back. */
 $("term-observer").addEventListener("click", () => {
   if (currentName) go("#/observer/session/" + encodeURIComponent(currentName));
 });
 
-$("term-log").addEventListener("click", () => {
-  if (currentName) location.hash = `#/log/${encodeURIComponent(currentName)}`;
-});
+/* The view radios: CLI walks to this session's terminal, HTML to its
+   conversation page. Routes, not toggles — see the transcript page's own
+   block for why the fourth reading of a session deserves the same standing
+   as the other three. The terminal is not torn down by the trip; it is
+   parked like any navigation, socket and all, and the back button brings it
+   straight back. The radios follow the page (syncTermHeader), so a press
+   that the route does not take leaves them where the page is. */
+document.querySelectorAll('input[name="term-view"]').forEach((input) =>
+  input.addEventListener("change", () => {
+    if (!input.checked || !currentName) return;
+    const name = encodeURIComponent(currentName);
+    location.hash = input.value === "html" ? `#/log/${name}` : `#/s/${name}`;
+  }));
 
 /* Rebrief: have the daemon re-derive this session's briefing (mesh roster,
    owed replies, cflow position, parent/children, opening task) and type it
@@ -14713,6 +14722,7 @@ function syncSessionLine() {
   const page = typeof currentPage === "undefined" ? "terminal" : currentPage;
   if ($("term-input"))
     $("term-input").classList.toggle("hidden", !(currentName && sessionLineOnPage(page)));
+  syncTermHeader();
   renderTermPresetButtons();
 }
 
@@ -18368,6 +18378,55 @@ document.querySelectorAll('input[name="log-format"]').forEach((input) =>
   }));
 setTranscriptFormat(transcriptFormat, false);
 
+/* Whether the HTML view shows its line block header (#log-format: the
+   format radios and the timeline legend). Remembered per browser; only the
+   HTML view under the session header honours it, since the button that
+   brings the row back lives in that header. */
+const TRANSCRIPT_BLOCKBAR_KEY = `claunch_transcript_blockbar:${BASE}`;
+let transcriptBlockbar = (() => {
+  try { return localStorage.getItem(TRANSCRIPT_BLOCKBAR_KEY) !== "off"; } catch {}
+  return true;
+})();
+
+function setTranscriptBlockbar(on) {
+  transcriptBlockbar = !!on;
+  try { localStorage.setItem(TRANSCRIPT_BLOCKBAR_KEY, transcriptBlockbar ? "on" : "off"); } catch {}
+  syncTermHeader();
+  // The pane gains or loses the row's height; the minimap's box follows it.
+  scheduleTranscriptMinimap();
+}
+$("term-blockbar")?.addEventListener("click", () => setTranscriptBlockbar(!transcriptBlockbar));
+
+/* The session header on the page on screen. It is up wherever the session
+   line is (sessionLineOnPage): the terminal (the CLI view) and the attached
+   session's own transcript (the HTML view). A transcript of another session
+   or of a remote shadow is a page of its own, with its own way back. The
+   view radios and the line-header button follow the page. Declared as a
+   function so showView can reach it before this block has run; the state it
+   reads is guarded the same way sessionLineOnPage guards its own. */
+function syncTermHeader() {
+  const page = typeof currentPage === "undefined" ? "terminal" : currentPage;
+  const up = !!currentName && sessionLineOnPage(page);
+  const html = up && page === "log";
+  let bar = true;
+  try { bar = transcriptBlockbar; } catch {}
+  $("term-header")?.classList.toggle("hidden", !up);
+  document.querySelectorAll('input[name="term-view"]').forEach((input) => {
+    input.checked = input.value === (html ? "html" : "cli");
+  });
+  const button = $("term-blockbar");
+  if (button) {
+    button.classList.toggle("hidden", !html);
+    if (button.getAttribute("aria-pressed") !== String(bar))
+      button.setAttribute("aria-pressed", String(bar));
+  }
+  const view = $("log-view");
+  if (view) {
+    view.classList.toggle("in-session", html);
+    view.classList.toggle("blockbar-off", !bar);
+  }
+}
+
 /* Where a session's pages are served: this daemon's route for its own
    sessions, the shadow route (relayed to the host) for another's. */
 function transcriptPath(name, machine) {
@@ -19376,11 +19435,11 @@ function showView(name) {
   // here: a live PTY socket and 5000 lines of scrollback must survive every
   // navigation, so pages hide it rather than replace it. Only attach() and
   // detach() own that object's life.
-  $("term-header").classList.toggle("hidden", !(showTerm && currentName));
   $("terminal").classList.toggle("hidden", !showTerm);
   // The send-keys input belongs to an attached session: up on the terminal,
   // and on that session's transcript page (sessionLineOnPage), only while one
-  // is attached.
+  // is attached. The header follows the same rule (syncTermHeader, called
+  // from there): it is the session's, and HTML is one of its views.
   syncSessionLine();
   // The transcript is its own page now (VIEWS below hides and shows it like
   // any other), so nothing here has to reach for it. The terminal button that

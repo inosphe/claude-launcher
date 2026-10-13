@@ -480,15 +480,29 @@
              glyph and the disabled state are owned by applyBriefingTop. -->
         <button id="term-brief" class="term-btn"
                 title="briefing: goal, current work, state — summarised">briefing</button>
-        <!-- The conversation, as a page that scrolls itself. The terminal
-             cannot answer "what did this session say an hour ago": claude
-             repaints the alternate screen instead of scrolling it, so nothing
-             reaches any scrollback and the record lives only in claude's own
-             jsonl. This reads that, paged, in an ordinary scroller — with a
-             scrollbar, momentum, PgUp and find-in-page behind it. -->
         <button id="term-observer" class="term-btn" type="button">observer</button>
-        <button id="term-log" class="term-btn" type="button" aria-pressed="false"
-                title="this session's conversation — scrollable, the whole of it">transcript</button>
+        <!-- The session's view: CLI is the terminal, HTML the conversation
+             as a page that scrolls itself (the transcript, #/log/<name>). The
+             terminal cannot answer "what did this session say an hour ago":
+             claude repaints the alternate screen instead of scrolling it, so
+             nothing reaches any scrollback and the record lives only in
+             claude's own jsonl. HTML reads that, paged, in an ordinary
+             scroller — with a scrollbar, momentum, PgUp and find-in-page
+             behind it. Each choice is a route, so this header stays up on
+             both and the back button walks between them. toolbar.js never
+             moves this group into the overflow menu. Synced by
+             syncTermHeader(). -->
+        <fieldset id="term-view" class="session-view-tabs term-view-tabs">
+          <legend class="sr-only">Session view</legend>
+          <label title="the session's terminal"><input type="radio" name="term-view" value="cli" checked><span>CLI</span></label>
+          <label title="this session's conversation as a page — scrollable, the whole of it"><input type="radio" name="term-view" value="html"><span>HTML</span></label>
+        </fieldset>
+        <!-- HTML view only: show or hide the line block header above the
+             conversation (#log-format — Raw text | Markdown and the
+             timeline legend). Remembered per browser. -->
+        <button id="term-blockbar" class="term-btn hidden" type="button" aria-pressed="true"
+                aria-controls="log-format"
+                title="show or hide the HTML view's line block header (format and timeline legend)">line header</button>
         <button id="term-rebrief" class="term-btn"
                 title="re-type this session's briefing (mesh, run, parent, task) into its terminal — for an agent whose context was cleared or compacted">rebrief</button>
         <!-- retro: the retrospective prompt pack, an on-demand pack typed into
@@ -1227,7 +1241,11 @@
          for an EXITED session too (the material is claude's jsonl on disk,
          not the live PTY). #term-log-pane is one ordinary overflow scroller —
          the browser owns the wheel here; older pages arrive as the reader
-         nears the top. Driven by openTranscript(). -->
+         nears the top. Driven by openTranscript(). Opened for the attached
+         session it is that session's HTML view: the terminal header stays
+         up above it (syncTermHeader puts .in-session here), so its own
+         page-head — the way back and the title, which the header's CLI
+         radio and name already say — folds away. -->
     <div id="log-view" class="hidden">
       <div class="page-head">
         <a id="log-back" class="term-btn" href="#/">← terminal</a>
@@ -1237,10 +1255,12 @@
         <button id="log-transcript-tab" role="tab" aria-selected="true" aria-controls="term-log-pane" type="button">Transcript</button>
         <button id="log-info-tab" role="tab" aria-selected="false" aria-controls="log-info-pane" tabindex="-1" type="button">세션 정보</button>
       </div>
-      <!-- How the conversation's prose is drawn: as typed, or through the
-           dashboard's markdown renderer. Tool traffic is preformatted either
-           way. A sub-tab of Transcript, so the info tab hides it; the choice
-           is remembered per browser (setTranscriptFormat). -->
+      <!-- The line block header. How the conversation's prose is drawn: as
+           typed, or through the dashboard's markdown renderer. Tool traffic
+           is preformatted either way. A sub-tab of Transcript, so the info
+           tab hides it; the choice is remembered per browser
+           (setTranscriptFormat). In the HTML view the header's
+           #term-blockbar shows or hides the whole row (.blockbar-off). -->
       <fieldset id="log-format" class="session-view-tabs log-format-tabs">
         <legend class="sr-only">Transcript format</legend>
         <label><input type="radio" name="log-format" value="raw" checked><span>Raw text</span></label>
