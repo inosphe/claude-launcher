@@ -2582,6 +2582,11 @@ OS 잠금 fallback으로 실행하지 않고 재시도한다. 에이전트는 �
 끝나지 않은 코드가 라이브에 올라갈 수 있다. 반영 성공은 사후 검증 통과나
 회귀 pause 해제의 근거가 아니다.
 
+`refs/heads/master`가 포함하지 않는 SHA(enqueue 뒤 master에서 버려진 머지)의
+실패는 pause를 만들지 않는다. 이를 포함하는 repair가 존재할 수 없기 때문이다.
+이미 걸린 pause의 실패 SHA가 도달 불가이면 `release`가 사유를 job 기록에 남기고
+해제한다. 도달 가능한 SHA의 pause는 `release`가 거절하며 green repair만 해제한다.
+
 `restart_live=false`이면 배치 뒤 재기동과 반영 확인을 모두 생략한다.
 착지 통지는 머지/사후 검증 상태와 라이브 반영 완료·생략·실패 상태를 구분한다.
 입력은 새 run에서 정하고 자동 recur 시 유지된다. 이미 실행 중인 run의
@@ -2602,6 +2607,7 @@ uv run --no-sync python tools/delayed_sweep.py status --repo <repo>
 uv run --no-sync python tools/delayed_sweep.py admit --repo <repo> --issue <issue>
 uv run --no-sync python tools/delayed_sweep.py enqueue --repo <repo> --merge <sha> --issue <issue> --owner <leader>
 uv run --no-sync python tools/delayed_sweep.py repair --repo <repo> --job <failed-job> --issue <repair-issue>
+uv run --no-sync python tools/delayed_sweep.py release --repo <repo> --job <failed-job> --reason <사유>
 ```
 
 다른 저장소는 enqueue의 `--command`에 해당 저장소의 전체 스윕 명령을 준다.
