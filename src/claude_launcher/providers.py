@@ -100,6 +100,14 @@ def _layers(
         (f"profiles.{p.name}", store.profile_entry(p.name, doc))
         for p in lineage.chain(profile, doc)
     ]
+    # Normalize the key alias before applying null clears across ancestors.
+    normalized = []
+    for what, entry in raw:
+        entry = dict(entry)
+        if "api-key" in entry:
+            entry.setdefault("api_key", entry.pop("api-key"))
+        normalized.append((what, entry))
+    raw = normalized
     resolved = template.resolve_layers([entry for _, entry in raw])
     layers = []
     for (what, _), entry in zip(raw, resolved):

@@ -157,6 +157,8 @@ def claude_layer(ctx: ProviderSpec, layer: ProviderSpec) -> Dict[str, str]:
         follow = "xlarge" if "large" in layer.models and not ctx.models.get("xlarge") else None
         roles = tuple(r for r in MODEL_ROLES if r in layer.models or r == follow)
     env = _claude_model_vars(ctx, roles)
+    if layer.api_key:
+        env[CLAUDE_AUTH_TOKEN] = layer.api_key
     if layer.auto_compact_at:
         env[CLAUDE_COMPACT_WINDOW] = str(layer.auto_compact_at)
     if layer.reasoning_effort:

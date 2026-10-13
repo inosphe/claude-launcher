@@ -619,9 +619,9 @@ profiles:
     provider: default          # pin one profile back to plain Anthropic
 ```
 
-A profile overlays `models`, `context_window`, `auto_compact_at`,
+A profile overlays `api_key`, `models`, `context_window`, `auto_compact_at`,
 `reasoning_effort` and `harness_options` on its provider (root ancestor first,
-the profile itself last); `api_key`, `endpoints` and
+the profile itself last); `endpoints` and
 `openai_reasoning_format` identify the backend and stay on the provider.
 
 `endpoints.openai` is the OpenAI-compatible API base URL, including any
@@ -871,8 +871,11 @@ claunch set-token work fw_...  # Claude provider route -> ANTHROPIC_AUTH_TOKEN
 claunch run work
 ```
 
-A plaintext `api_key` in the yaml still works when the profile has no stored
-token, but the stored token always wins when both exist -- for every harness
+A plaintext `api_key` (also accepted as `api-key`) in the yaml is the fallback
+when the profile has no nonempty stored token, including inherited tokens.
+The provider supplies the default key; a nonempty profile key overrides it.
+An empty or null profile key falls back to the provider key. A stored token
+always wins when both exist -- for every API-key harness
 the provider is used with. The trigger is the **provider selection itself** — env vars like
 `ANTHROPIC_BASE_URL` set in a profile's `env` (or inherited from the shell)
 don't change auth handling on their own. `run` tells you when this happens:
@@ -3370,7 +3373,7 @@ Which builtin tools a session gets is decided in two layers:
   The choice is stored on the session record (`tools`) and survives a
   daemon restart.
 The key an API-key harness receives is the profile's `set-token` secret;
-without one, the provider's `api_key` is used, so a provider configured once
+without one, the profile's `api_key`, then the provider's `api_key`, is used, so a provider configured once
 authenticates every harness. This prevents changing a profile's harness from
 silently carrying a Claude backend or OAuth token into another CLI.
 
