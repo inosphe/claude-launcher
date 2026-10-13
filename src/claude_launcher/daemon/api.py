@@ -520,6 +520,10 @@ def build_app(
     # to the user, answered in its QA pane and typed back into it.
     from . import qa_api
     qa_api.install(app)
+    # Session threads (daemon/threads_api.py, claunch-doj98): sub-topic
+    # conversations beside the terminal, typed into the session by id.
+    from . import threads_api
+    threads_api.install(app)
     # deep_think (daemon/deep_think.py): a session asks itself a question and
     # a quick-fork of it answers. Needs app["handoff"] (set above): the answer
     # is a merge, and the module hooks how that merge is written and kept.

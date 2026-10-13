@@ -5563,12 +5563,75 @@ function syncSessionResourceButtons() {
     "term-splitbtn": !!name && !!(sessCflowRun(name) || cflow2RailCache[name]),
     "term-chartbtn": isPiDurable(name),
     "term-qabtn": !!name && (qaRailCache[name]?.unresolved || 0) > 0,
+    "term-threadsbtn": !!name && (threadsRailCache[name]?.open || 0) > 0,
   };
   for (const [id, hasResource] of Object.entries(present)) {
     const btn = $(id);
     if (btn && btn.classList.contains("has-resource") !== hasResource)
       btn.classList.toggle("has-resource", hasResource);
   }
+  const threads = $("term-threadsbtn");
+  const news = threadsNews(name);
+  if (threads && threads.classList.contains("has-news") !== news)
+    threads.classList.toggle("has-news", news);
+}
+
+/* Session threads (threads-pane.js, daemon/threads_api.py, claunch-doj98):
+   per session, how many threads are open (lights 🗪 threads like ◬ sims)
+   and the seq of the session's last message in any of them. A message past
+   the one this browser last showed marks the button as news until the
+   threads pane is opened on that session. The shown seq is remembered per
+   browser and per session; a session never seen here starts caught up. */
+let threadsRailCache = {};
+let threadsRailSig = null;
+// Functions, not constants: BASE is read when they are used.
+const threadsSeenKey = () => `claunch_threadsseen:${BASE}`;
+const threadsReadKey = () => `claunch_threadread:${BASE}`;
+
+function loadThreadsSeen() {
+  try {
+    const doc = JSON.parse(localStorage.getItem(threadsSeenKey()) || "{}");
+    return doc && typeof doc === "object" && !Array.isArray(doc) ? doc : {};
+  } catch {
+    return {};
+  }
+}
+
+function markThreadsSeen(name) {
+  const row = name && threadsRailCache[name];
+  if (!row) return;
+  const seen = loadThreadsSeen();
+  if (seen[name] === row.agent_seq) return;
+  seen[name] = row.agent_seq;
+  try { localStorage.setItem(threadsSeenKey(), JSON.stringify(seen)); } catch { /* private mode */ }
+}
+
+function threadsNews(name) {
+  const row = name && threadsRailCache[name];
+  if (!row || !row.agent_seq) return false;
+  const seen = loadThreadsSeen()[name];
+  if (seen === undefined) { markThreadsSeen(name); return false; }
+  return row.agent_seq > seen;
+}
+
+async function refreshThreadsRail() {
+  let data;
+  try {
+    const resp = await api("/api/threads/rail");
+    if (!resp.ok) return;
+    data = await resp.json();
+  } catch {
+    return;
+  }
+  const rows = (data && data.sessions) || {};
+  const sig = JSON.stringify(rows);
+  if (sig === threadsRailSig) return;
+  threadsRailSig = sig;
+  threadsRailCache = rows;
+  // A pane open on the threads is caught up with them.
+  const lay = currentPage === "terminal" && currentName ? sessLayoutFor(currentName) : null;
+  if (lay && lay.split && lay.pane === "threads") markThreadsSeen(currentName);
+  syncSessionResourceButtons();
 }
 
 /* Session QA (qa-pane.js, daemon/qa_api.py, claunch-l8vyi): per session,
@@ -17826,8 +17889,10 @@ function sessLayoutFor(name) {
     sub: DETAIL_SUBTAB_IDS.has(raw.sub) ? raw.sub : "all",
     split: !!raw.split,
     // What the split pane shows: the workflow run (⬒), the simulations (◬),
-    // a pi-durable session's event chart (◇) or the session's questions (?).
-    pane: raw.pane === "sims" || raw.pane === "chart" || raw.pane === "qa" ? raw.pane : "run",
+    // a pi-durable session's event chart (◇), the session's questions (?)
+    // or its threads (🗪).
+    pane: raw.pane === "sims" || raw.pane === "chart" || raw.pane === "qa" || raw.pane === "threads"
+      ? raw.pane : "run",
     ratio: clampSplitRatio(Number(raw.ratio)),
   };
 }
@@ -19685,6 +19750,15 @@ function syncSplitPane() {
     : "questions this session put to you — answer them here";
   // Showing it is seeing it: a pane open on the questions is caught up.
   if (qaOn && typeof markQaSeen === "function") markQaSeen(name);
+  const threads = $("term-threadsbtn");
+  const threadsOn = !!lay && lay.split && lay.pane === "threads";
+  threads.setAttribute("aria-pressed", String(threadsOn));
+  threads.title = threadsOn
+    ? "close the threads pane — the terminal takes the column back"
+    : "talk to this session in sub-topic threads, apart from the terminal" +
+      (threadsNews(name) ? " — the session wrote in a thread since you last looked" : "");
+  // Showing them is seeing them.
+  if (threadsOn) { markThreadsSeen(name); threads.classList.toggle("has-news", false); }
   if (up) {
     applySplitRatio(lay.ratio);
     if (splitFor !== name || splitKind !== lay.pane) openSplit(name, lay.pane);
@@ -20161,7 +20235,7 @@ const wfPageUi = {
    pane owns its own slot, poll, selection and last payload — the page's
    globals above belong to the page, and the two must be able to differ. */
 let splitFor = null;           // the session the pane is showing (null = shut)
-let splitKind = null;          // "run", "sims", "chart" or "qa" (sessLayoutFor().pane)
+let splitKind = null;          // "run", "sims", "chart", "qa" or "threads" (sessLayoutFor().pane)
 let splitCwd = null;           // its slot, resolved once from the meta endpoint
 let splitScope = null;
 let splitPollTimer = null;
@@ -20202,6 +20276,13 @@ function openSplit(name, kind = "run") {
     globalThis.QaPane?.mount($("term-wf"), name, { api, onChange: () => refreshQaRail() });
     return;
   }
+  // And the session's threads (threads-pane.js): a send moves the header's
+  // light at once rather than at the next dashboard poll.
+  if (kind === "threads") {
+    globalThis.ThreadsPane?.mount($("term-wf"), name,
+                                  { api, storageKey: threadsReadKey(), onChange: () => refreshThreadsRail() });
+    return;
+  }
   // So does a pi-durable session's chart: its run is the event log it
   // writes, drawn as a flow diagram that updates in place.
   if (kind === "chart") {
@@ -20217,6 +20298,7 @@ function closeSplit() {
   if (splitPollTimer) { clearInterval(splitPollTimer); splitPollTimer = null; }
   if (splitKind === "sims") globalThis.SimPane?.unmount();
   if (splitKind === "qa") globalThis.QaPane?.unmount();
+  if (splitKind === "threads") globalThis.ThreadsPane?.unmount();
   if (splitDurable) { splitDurable.unmount(); splitDurable = null; }
   splitKind = null;
   splitFor = null;
@@ -20299,6 +20381,7 @@ $("term-splitbtn").addEventListener("click", () => toggleSplitPane("run"));
 $("term-simsbtn").addEventListener("click", () => toggleSplitPane("sims"));
 $("term-chartbtn").addEventListener("click", () => toggleSplitPane("chart"));
 $("term-qabtn").addEventListener("click", () => toggleSplitPane("qa"));
+$("term-threadsbtn").addEventListener("click", () => toggleSplitPane("threads"));
 
 /* One pane, two contents: pressing the lit button closes it, pressing the
    other one switches what the open pane shows. */
@@ -45505,6 +45588,7 @@ async function boot() {
     refreshCflow2Rail(),
     refreshSessionSims(),
     refreshQaRail(),
+    refreshThreadsRail(),
   ]);
   // Last, and once. A #/s/<name> link attaches here — which is why a reload
   // puts you back in the session instead of at an empty slot — and it renders
@@ -46164,6 +46248,7 @@ async function pollOnce() {
     refreshCflow2Rail(),
     refreshSessionSims(),
     refreshQaRail(),
+    refreshThreadsRail(),
     refreshTermQueued(),
     refreshTermWindow(),
     refreshTermTimers(),

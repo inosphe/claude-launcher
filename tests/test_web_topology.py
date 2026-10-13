@@ -543,6 +543,7 @@ CHECKS = [
         "simpage_check.js",
         "durableflow_check.js",
         "qapane_check.js",
+        "threadspane_check.js",
         "specpage_check.js",
         "shadowcard_check.js",
         "railshadowmix_check.js",
