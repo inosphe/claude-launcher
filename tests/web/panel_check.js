@@ -161,6 +161,7 @@ function handleTag(name) { return null; }
 function refreshMeshList() {}
 function refreshWorkflowChoices() {}
 function refreshCflow() {}
+function sessVscodeButton() { return el("button", "wf-btn", "VS Code"); }
 `;
 
 // The two pages that are objects rather than functions; route() calls them.
@@ -382,27 +383,27 @@ check("docked beside its own terminal: the × stays",
       kidsOf(h, "sess-close").length === 1);
 check("...and no Open terminal that opens what is open",
       !kidsOf(h, "wf-btn").some((b) => b.text === "Open terminal"));
-check("...but Spawn same setup, which has no other way in, stays",
-      kidsOf(h, "wf-btn").map((b) => b.text).join(",") === "Spawn same setup",
+check("...but Spawn same setup and VS Code, which have no other way in, stay",
+      kidsOf(h, "wf-btn").map((b) => b.text).join(",") === "Spawn same setup,VS Code",
       kidsOf(h, "wf-btn").map((b) => b.text));
 check("...but still says which session", h.kids[0].text === "coder3");
 
 h = headOf("s7");
-// wf-btn is three verbs since the PR wizard joined the head: Spawn, Open PR,
-// Open terminal. The × is its own class.
+// wf-btn is the head's verbs: Spawn, Spawn same setup, VS Code
+// (claunch-rvly4), Open PR, Open terminal. The × is its own class.
 check("aimed elsewhere it keeps both ways out and the spawn and PR verbs",
-      kidsOf(h, "sess-close").length === 1 && kidsOf(h, "wf-btn").length === 4);
+      kidsOf(h, "sess-close").length === 1 && kidsOf(h, "wf-btn").length === 5);
 check("...and says it is elsewhere", kidsOf(h, "sess-elsewhere").length === 1);
 
 termUp = false;                                // a page is over the terminal
 h = headOf("coder3");
 check("with the terminal covered both come back — there is no chip on screen",
-      kidsOf(h, "sess-close").length === 1 && kidsOf(h, "wf-btn").length === 4);
+      kidsOf(h, "sess-close").length === 1 && kidsOf(h, "wf-btn").length === 5);
 
 termUp = true; narrow = true;                  // and a phone has no header at all
 h = headOf("coder3");
 check("on a phone both stay", kidsOf(h, "sess-close").length === 1 &&
-      kidsOf(h, "wf-btn").length === 4);
+      kidsOf(h, "wf-btn").length === 5);
 narrow = false;
 ctx.setCur("coder2");
 

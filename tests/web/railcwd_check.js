@@ -145,6 +145,7 @@ let termUp = false, narrow = false;
 function terminalOnScreen() { return termUp; }
 const MOBILE_MQ = { get matches() { return narrow; } };
 function openSpawnModal() {}
+function sessVscodeButton() { return el("button", "wf-btn", "VS Code"); }
 function go() {}
 function closeDetail() {}
 `;

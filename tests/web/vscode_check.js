@@ -67,8 +67,8 @@ new Function("exports", "document", "el", "Option", "opened", "bump",
   "let vscodeState = null; let vscodeBusy = '';\n"
   + "function vscodeOpen(body) { opened.push(body); }\n"
   + "function refreshVscode() { bump(); }\n"
-  + slice("vscodeButton") + slice("wsVscodeControls") + slice("sessVscode")
-  + "Object.assign(exports, { vscodeButton, wsVscodeControls, sessVscode,"
+  + slice("vscodeButton") + slice("wsVscodeControls") + slice("sessVscodeButton")
+  + "Object.assign(exports, { vscodeButton, wsVscodeControls, sessVscodeButton,"
   + " setState(s) { vscodeState = s; }, setBusy(b) { vscodeBusy = b; } });"
 )(ctx, document, el, Option, opened, () => { refreshed++; });
 
@@ -123,16 +123,19 @@ check("...and resets the picker", pick.value, "");
 const lone = ctx.wsVscodeControls({ name: "solo" });
 check("no worktrees, no picker", lone.kids.map((k) => k.tag), ["button"]);
 
-/* ---- the session block -------------------------------------------------- */
-let sb = ctx.sessVscode({ session: { name: "s7", cwd: "/w/proj" } });
-const btn = sb.all().find((n) => n.tag === "button");
-btn.listeners.click();
+/* ---- the session head's button (claunch-rvly4) ------------------------- */
+let sb = ctx.sessVscodeButton({ name: "s7", cwd: "/w/proj" });
+check("the head button is one button labelled VS Code", [sb.tag, sb.textContent],
+      ["button", "VS Code"]);
+check("...live for a session with a directory", sb.disabled, false);
+sb.listeners.click();
 check("opens by session name", opened.pop(), { session: "s7" });
-sb = ctx.sessVscode({ session: { name: "s8", cwd: "" } });
-check("no directory, no button", sb.all().some((n) => n.tag === "button"), false);
+sb = ctx.sessVscodeButton({ name: "s8", cwd: "" });
+check("no directory: greyed", sb.disabled, true);
+check("...and says why", sb.title, "this session has no directory");
 ctx.setState(null);
 refreshed = 0;
-ctx.sessVscode({ session: { name: "s9", cwd: "/x" } });
+ctx.sessVscodeButton({ name: "s9", cwd: "/x" });
 check("asks for the state when it has none", refreshed, 1);
 
 if (failures) {
