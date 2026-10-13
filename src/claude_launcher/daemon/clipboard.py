@@ -453,7 +453,7 @@ class History:
             self.last = text
             if not text:
                 return
-            self._record(text)
+            self._record(text, "host")
 
     async def add(self, text: str):
         """Record text a browser copied (an OSC 52 write the web terminal
@@ -461,12 +461,15 @@ class History:
         and ``last`` stays the host's, so the next sample still compares
         against what the host holds."""
         async with self.lock:
-            return self._record(text)
+            return self._record(text, "browser")
 
-    def _record(self, text: str):
+    def _record(self, text: str, source: str):
         self.serial += 1
         self.items = [item for item in self.items if item["text"] != text]
-        item = {"id": str(self.serial), "text": text,
+        # ``source`` says whose clipboard the text was on: ``host`` (sampled
+        # here) or ``browser`` (an OSC 52 copy the page posted). The page
+        # relays only host entries to the browser (claunch-tn5ba).
+        item = {"id": str(self.serial), "text": text, "source": source,
                 "copied_at": datetime.now(timezone.utc).isoformat()}
         self.items.insert(0, item)
         del self.items[MAX_ITEMS:]

@@ -20731,6 +20731,98 @@ function installOsc52(t) {
   });
 }
 
+/* A harness declared `copy_transport: host` (Codex 0.160.1) copies onto the
+   clipboard of the machine it runs on and writes OSC 52 only over SSH or
+   tmux, so the handler above never sees its copy: the daemon's history gains
+   the text and the computer the browser runs on gets nothing (claunch-tn5ba).
+   After a key that can copy in such a session — Enter (`/copy`, a choice in
+   its copy picker) or Ctrl+O — on the session terminal or the session line,
+   the page watches that history for HOST_COPY_WATCH_MS and puts the first
+   host entry newer than the one it saw at the key onto this computer's
+   clipboard. Entries the page posted itself (`source: browser`, an OSC 52
+   copy) are on it already. The window is a key the person pressed plus a few
+   seconds, the span in which browsers still allow the execCommand fallback;
+   whatever reaches the daemon's clipboard inside it is relayed, including a
+   copy someone at that machine makes. */
+const HOST_COPY_WATCH_MS = 4000;
+const HOST_COPY_POLL_MS = 400;
+let hostCopyWatch = null;   // {session, until, baseline}
+
+function sessionCopiesToHost(name) {
+  const rec = (sessionsCache || []).find((s) => s.name === name);
+  const harness = (rec && rec.harness) || "claude";
+  const detail = (typeof harnessDetails === "object" && harnessDetails)
+    ? harnessDetails[harness] : null;
+  return !!detail && detail.copy_transport === "host";
+}
+
+function isHostCopyKey(ev) {
+  if (ev.key === "Enter") return !ev.isComposing && !ev.shiftKey;
+  return ev.ctrlKey && !ev.altKey && !ev.metaKey && (ev.key === "o" || ev.key === "O");
+}
+
+async function hostCopyItems() {
+  try {
+    const response = await api("/api/clipboard");
+    if (!response.ok) return null;
+    const doc = await response.json();
+    return Array.isArray(doc.items) ? doc.items : null;
+  } catch {
+    return null;
+  }
+}
+
+async function watchHostCopy() {
+  const name = currentName;
+  if (!name || !sessionCopiesToHost(name)) return;
+  const until = Date.now() + HOST_COPY_WATCH_MS;
+  if (hostCopyWatch && hostCopyWatch.session === name) {
+    hostCopyWatch.until = until;
+    return;
+  }
+  const watch = { session: name, until, baseline: null };
+  hostCopyWatch = watch;
+  try {
+    while (hostCopyWatch === watch && Date.now() <= watch.until) {
+      const items = await hostCopyItems();
+      if (hostCopyWatch !== watch || currentName !== name) return;
+      if (items && watch.baseline === null) {
+        watch.baseline = items.reduce((max, item) => Math.max(max, Number(item.id) || 0), 0);
+      } else if (items) {
+        const fresh = items.find((item) => item.source === "host" &&
+          Number(item.id) > watch.baseline && typeof item.text === "string");
+        if (fresh) {
+          const ok = await copyToBrowserClipboard(fresh.text, document.body);
+          if (!ok) {
+            notify(
+              "Copy did not reach this computer's clipboard",
+              "The browser refused it — the Clipboard menu's Copy can still take it.",
+              { key: "osc52" },
+            );
+          }
+          return;
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, HOST_COPY_POLL_MS));
+    }
+  } finally {
+    if (hostCopyWatch === watch) hostCopyWatch = null;
+  }
+}
+
+/* The keys on the session terminal start a watch. Only the terminal on
+   screen counts, as for the session line: the watch is for `currentName`. */
+function installHostCopyRelay(t) {
+  t.element?.addEventListener("keydown", (ev) => {
+    if (t === term && isHostCopyKey(ev)) watchHostCopy();
+  }, true);
+}
+if (osc52SessionLine) {
+  osc52SessionLine.addEventListener("keydown", (ev) => {
+    if (isHostCopyKey(ev)) watchHostCopy();
+  }, true);
+}
+
 /* Read a logical line from the rendered PTY buffer, not a transport chunk:
    ANSI escapes are already decoded and soft wraps belong to one command.
    Keep the ! prefix so the copied recommendation can be pasted as shown.
@@ -24809,6 +24901,7 @@ function freshAttach(name) {
   // Guarded like onTermKeyEvent below, for the harnesses that boot this
   // function without the clipboard block.
   if (typeof installOsc52 === "function") installOsc52(term);
+  if (typeof installHostCopyRelay === "function") installHostCopyRelay(term);
   if (typeof installTerminalCommandCopy === "function") installTerminalCommandCopy(term);
   watchComposer(term);
   term.onResize(({ cols, rows }) => {

@@ -90,6 +90,9 @@ def test_a_browser_copy_joins_the_history_without_touching_the_host(home):
             assert (await response.json())["item"]["text"] == "한글 <copy>\nline two"
             items = (await (await client.get("/api/clipboard", headers=headers)).json())["items"]
             assert [item["text"] for item in items] == ["한글 <copy>\nline two", "on the host"]
+            # The page relays host entries only (claunch-tn5ba): one it posted
+            # is on the browser's clipboard already.
+            assert [item["source"] for item in items] == ["browser", "host"]
             # The same text again moves to the front instead of repeating.
             await client.post("/api/clipboard", json={"text": "on the host"}, headers=headers)
             items = (await (await client.get("/api/clipboard", headers=headers)).json())["items"]

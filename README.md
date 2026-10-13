@@ -4132,6 +4132,13 @@ harnesses:
     login_args: [login]      # optional interactive login argv
     image_paste_transport: clipboard # clipboard (default) or path
     image_paste_path_format: uri     # uri (default) or native; for path transport
+    copy_transport: terminal # terminal (default): its copy writes OSC 52,
+                             # which the web terminal puts on the browser
+                             # computer's clipboard. host: it writes only
+                             # the daemon machine's clipboard; after an
+                             # Enter or Ctrl+O in that session the web page
+                             # copies what the daemon's clipboard history
+                             # gained in the next few seconds.
     image_paste_keys: [M-v]  # optional; the key this harness reads a
                              # clipboard image with, in tmux key names.
                              # Alt+V on the terminal and a paste onto it
