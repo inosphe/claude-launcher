@@ -77,6 +77,42 @@ def test_changed_checkpoint_ref_is_refused(repo, tmp_path):
         q.enqueue(repo, first["sha"], "a", "leader", TOOL)
 
 
+def checkpoint_gate(q, record):
+    return subprocess.run(
+        [sys.executable, str(TOOL.with_name("delayed_sweep.py")),
+         "--database", str(q.database), "check-enqueued", "--env", "CHECKPOINT_RECORD"],
+        env={**os.environ, "CHECKPOINT_RECORD": json.dumps(record)},
+        capture_output=True, text=True,
+    )
+
+
+def test_checkpoint_gate_checks_the_reported_master_and_merge_second_parent(repo, tmp_path):
+    q = queue(tmp_path)
+    job, tip = enqueue(q, repo, "a")
+    item = {"issue": "a", "tip": tip, "merge_sha": job["sha"]}
+    record = {"repo": str(repo), "master": job["sha"], "merges": [item]}
+    merge(repo, "b")  # master may advance between integration and the gate
+    assert checkpoint_gate(q, record).returncode == 0
+    result = checkpoint_gate(q, {**record, "master": "master"})
+    assert result.returncode == 2
+    assert "full commit SHA" in result.stderr
+    result = checkpoint_gate(q, {**record, "merges": [{**item, "tip": job["sha"]}]})
+    assert result.returncode == 2
+    assert "second parent" in result.stderr
+
+
+def test_checkpoint_gate_refuses_a_queued_merge_removed_from_master(repo, tmp_path):
+    q = queue(tmp_path)
+    job, tip = enqueue(q, repo, "a")
+    git(repo, "reset", "--hard", job["sha"] + "^1")
+    # Partial-batch failure reports have no master field; every merge must
+    # still be contained in master and match its requested branch tip.
+    result = checkpoint_gate(q, {"repo": str(repo), "merges": [
+        {"issue": "a", "tip": tip, "merge_sha": job["sha"]}]})
+    assert result.returncode == 2
+    assert "not contained in master" in result.stderr
+
+
 def test_pending_record_recovers_the_ref_before_claim(repo, tmp_path):
     q = queue(tmp_path)
     job, _ = enqueue(q, repo, "a")

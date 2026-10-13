@@ -4,11 +4,22 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import subprocess
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from claude_launcher.delayed_sweep import Queue, git, run_one
+
+
+def check_commit(repo, sha):
+    if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha):
+        raise ValueError("checkpoint requires a full commit SHA")
+    if git(repo, "rev-parse", f"{sha}^{{commit}}") != sha:
+        raise ValueError("checkpoint SHA does not name a commit")
+    if not Queue.contains(repo, sha, "refs/heads/master"):
+        raise ValueError("checkpoint commit is not contained in master")
 
 
 def main(argv=None):
@@ -52,11 +63,17 @@ def main(argv=None):
             items = value["batch"] if args.action == "check-batch" else value["merges"]
             if not repo.is_absolute() or not items:
                 raise ValueError("batch requires an absolute repo and nonempty items")
+            if args.action == "check-enqueued" and "master" in value:
+                check_commit(repo, value["master"])
             for item in items:
                 if args.action == "check-batch":
                     queue.admit(repo, item["issue"])
                 else:
                     sha = item["merge_sha"]
+                    check_commit(repo, sha)
+                    parents = git(repo, "show", "-s", "--format=%P", sha).split()
+                    if len(parents) != 2 or parents[1] != item["tip"]:
+                        raise ValueError("merge second parent does not match the requested tip")
                     matches = [j for j in queue.status(repo)["jobs"] if j["sha"] == sha]
                     if not matches or matches[0]["status"] == "pending":
                         raise ValueError(f"merge {sha} has no queued checkpoint")
@@ -69,7 +86,7 @@ def main(argv=None):
             result = queue.get(args.job)
         print(json.dumps(result, ensure_ascii=False))
         return 0
-    except (ValueError, KeyError, OSError) as exc:
+    except (ValueError, KeyError, OSError, subprocess.CalledProcessError) as exc:
         print(f"delayed sweep: {exc}", file=sys.stderr)
         return 2
 
