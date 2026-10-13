@@ -9893,19 +9893,26 @@ function followSessionProject(name) {
   if (theirs !== currentProject) setCurrentProject(theirs);
 }
 
-/* Fill the Directory row from the picked project's default workspace. A
-   default only: applied when the directory is still the daemon's own (the
-   empty answer) or still the previous project's default — never over a
-   directory the operator chose by hand. */
-function applyProjectDefaultCwd(form) {
+/* Fill the Directory row from the picked project's default workspace.
+   Followed from the rail (setCurrentProject) it is a default only: applied
+   when the directory is still the daemon's own (the empty answer) or still
+   the previous project's default — never over a directory the operator chose
+   by hand. A pick on the form's own Project row (`force`, claunch-c7pwc) is
+   the operator asking for that project, so its default goes in over whatever
+   the row held — a draft or a recall restores the last session's directory,
+   and that left the row on another project's checkout. A project with no
+   default still only lets the previous project's default go. */
+function applyProjectDefaultCwd(form, opts) {
+  const force = !!(opts && opts.force);
   const f = form.form || form.closest && form.closest("form") || $("new-session");
   const picked = projectsCache.find((p) => p.name === form.value);
   const previous = projectsCache.find((p) => p.name === (form._lastProject || ""));
   form._lastProject = form.value;
-  applyProjectDefaultMesh(f, picked, previous);
+  applyProjectDefaultMesh(f, picked, previous, force);
   const cwd = f && f.cwd;
-  if (!cwd) return;
-  const untouched = !cwd.value || (previous && cwd.value === previous.default_cwd);
+  if (!cwd || cwd.disabled) return;
+  const before = cwd.value;
+  const untouched = force || !cwd.value || (previous && cwd.value === previous.default_cwd);
   if (!untouched) return;
   const target = picked && picked.default_cwd;
   if (target && [...cwd.options].some((o) => o.value === target)) {
@@ -9916,22 +9923,38 @@ function applyProjectDefaultCwd(form) {
     // under one project and start it in another's checkout.
     if (previous && cwd.value === previous.default_cwd) cwd.value = "";
   }
+  // The worktree list, the workflows and the board follow the directory; a
+  // value set here fires no change event of its own.
+  if (cwd.value !== before && typeof applySessionCwdChange === "function") {
+    applySessionCwdChange();
+  }
 }
 
 /* The Mesh row follows the picked project's default mesh by the directory's
    rule: only over a row that is still empty or still holds the previous
    project's default. A default of none (null) and no setting at all
    (undefined) both leave an untouched row empty. A child spawn is left
-   alone: its empty answer means "inherit the parent's mesh". */
-function applyProjectDefaultMesh(f, picked, previous) {
+   alone: its empty answer means "inherit the parent's mesh".
+   A pick on the form's Project row (`force`) puts the project's default mesh
+   in over any value, a child's inherit entry included; with no default the
+   row only lets the previous project's default go (back to "" — for a child,
+   the parent's mesh). */
+function applyProjectDefaultMesh(f, picked, previous, force = false) {
   const mesh = f && f.mesh;
-  if (!mesh) return;
-  if (typeof spawnParent === "function" && spawnParent()) return;
+  if (!mesh || mesh.disabled) return;
   const before = (previous && previous.default_mesh) || "";
-  if (mesh.value && mesh.value !== before) return;
   const target = (picked && picked.default_mesh) || "";
-  const next = target && [...mesh.options].some((o) => o.value === target)
-    ? target : "";
+  const offered = !!target && [...mesh.options].some((o) => o.value === target);
+  let next;
+  if (force) {
+    if (offered) next = target;
+    else if (mesh.value === before) next = "";
+    else return;
+  } else {
+    if (typeof spawnParent === "function" && spawnParent()) return;
+    if (mesh.value && mesh.value !== before) return;
+    next = offered ? target : "";
+  }
   if (next === mesh.value) return;
   mesh.value = next;
   // The roles, handle and peer rows hang off the mesh's change handler.
@@ -9969,7 +9992,10 @@ function renderProjectTabs() {
       el.title = active ? `${tab.title} — click to scroll to the top` : tab.title;
       const press = () => {
         if (tab.name === currentProject) scrollSessionListTop();
-        else setCurrentProject(tab.name);
+        else {
+          selectProjectGroupTab(tab.name);
+          setCurrentProject(tab.name);
+        }
       };
       el.addEventListener("click", press);
       el.addEventListener("keydown", (ev) => {
@@ -10000,6 +10026,24 @@ function renderProjectTabs() {
     ? `project ${picked.name}` + (picked.default_cwd ? ` — ${picked.default_cwd}` : "")
       + " — click to scroll to the top"
     : "every project — click to scroll to the top";
+}
+
+/* A project picked on the rail opens the group tab its defaults name, by the
+   grouping in force (claunch-c7pwc): Mesh opens the project's default mesh,
+   Workspace its default workspace, and Off has no tab to open. A project with
+   no such default, and "All projects", leave the open tab as it was. Only a
+   press on the strip does this — a rail that moves to follow an opened
+   session keeps the tab that shows that session. */
+function selectProjectGroupTab(name) {
+  const group = sessionGroupOrder[0];
+  const picked = name ? projectsCache.find((p) => p.name === name) : null;
+  if (!group || !picked) return;
+  const value = group === "mesh" ? (picked.default_mesh || "")
+    : group === "workspace" && picked.default_cwd
+      ? sessionWorkspaceGroup({ cwd: picked.default_cwd }) : "";
+  if (!value) return;
+  setSessionGroupTab(group, value);
+  sessionGroupTabScrollReset = true;
 }
 
 function projectSelectOptions(select, withAll) {
@@ -13267,7 +13311,8 @@ if (projectHeader) {
 {
   const formProject = document.querySelector("#new-session select[name=project]");
   if (formProject) {
-    formProject.addEventListener("change", () => applyProjectDefaultCwd(formProject));
+    formProject.addEventListener("change",
+      () => applyProjectDefaultCwd(formProject, { force: true }));
   }
 }
 // Off, Mesh or Workspace: the grouping whose groups become the tabs.

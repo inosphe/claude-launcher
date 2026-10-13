@@ -220,14 +220,18 @@ const BASE = "/t";
    never a spawn — what that arm does with the row is spawnform_check's, and
    these two only have to exist. */
 let spawnResyncs = 0;
-const spawnParent = () => null;
+let spawnChild = null;
+const spawnParent = () => spawnChild;
 const syncSpawnMode = () => { spawnResyncs++; };
+/* The rows that follow the Directory row, counted rather than run. */
+let cwdChanges = 0;
+const applySessionCwdChange = () => { cwdChanges++; };
 
 const ctx = {
   Option, document, $, api, localStorage, refreshSessions, refreshMeshList,
   scrollSessionListTop,
   renderHome, renderWorkspaces, wsOpen, currentPage, BASE,
-  spawnParent, syncSpawnMode, location, history,
+  spawnParent, syncSpawnMode, location, history, applySessionCwdChange,
 };
 const stateBlock = src.slice(
   src.indexOf("const PROJECT_KEY = "),
@@ -235,6 +239,10 @@ const stateBlock = src.slice(
 const code = [
   "let sessionsCache = [];",
   "let meshCache = [];",
+  "let sessionGroupOrder = [];", "let sessionGroupTab = {};",
+  "let sessionGroupTabScrollReset = false;",
+  "const SESSION_GROUP_TAB_KEY = 'claunch_session_group_tab:/t';",
+  slice("sessionWorkspaceGroup"), slice("setSessionGroupTab"),
   stateBlock,
   slice("recordProject"), slice("sessionInCurrentProject"),
   slice("railSessions"), slice("sessMeshes"),
@@ -244,6 +252,7 @@ const code = [
   slice("sessionTabOtherProject"), slice("hashQuery"),
   slice("applyProjectDefaultMesh"),
   slice("applyProjectDefaultCwd"),
+  slice("selectProjectGroupTab"),
   // The drag on the strip needs real pointer input: tabdragscroll_browser.cjs.
   "function enableTabDragScroll() {}", slice("renderProjectTabs"),
   slice("projectSelectOptions"), slice("refreshProjects"),
@@ -253,7 +262,10 @@ const code = [
   "setMeshes: (l) => { meshCache = l; }, " +
   "pending: () => projectFollowPending, " +
   "projectSelectOptions, refreshProjects, current: () => currentProject, " +
-  "cache: () => projectsCache };",
+  "cache: () => projectsCache, " +
+  "setGroupOrder: (o) => { sessionGroupOrder = o; }, " +
+  "setGroupTab: (t) => { sessionGroupTab = t; }, " +
+  "groupTab: () => ({ ...sessionGroupTab }) };",
 ].join("\n");
 const fns = new Function(...Object.keys(ctx), code)(...Object.values(ctx));
 
@@ -369,6 +381,84 @@ const fns = new Function(...Object.keys(ctx), code)(...Object.values(ctx));
   check("a mesh picked by hand survives a project change", meshRow.value, "other");
   form.value = "default";
   fns.applyProjectDefaultCwd(form);
+
+  /* a pick on the form's own Project row puts the project's defaults in,
+     over whatever the rows held (claunch-c7pwc) */
+  form._lastProject = "default";
+  form.form.cwd.value = "E:\\other";
+  meshRow.value = "other";
+  cwdChanges = 0;
+  meshChanges = 0;
+  form.value = "hq";
+  fns.applyProjectDefaultCwd(form, { force: true });
+  check("a Project-row pick fills the directory over a hand-picked one",
+        [form.form.cwd.value, cwdChanges], ["D:\\hq", 1]);
+  check("...and the mesh over a hand-picked one", [meshRow.value, meshChanges], ["room", 1]);
+  form.value = "solo";
+  fns.applyProjectDefaultCwd(form, { force: true });
+  check("...a project with no defaults lets the previous project's go",
+        [form.form.cwd.value, meshRow.value, cwdChanges], ["", "", 2]);
+  form.form.cwd.value = "E:\\other";
+  meshRow.value = "other";
+  form.value = "default";
+  fns.applyProjectDefaultCwd(form, { force: true });
+  check("...and keeps a hand-picked value it has nothing to put over",
+        [form.form.cwd.value, meshRow.value, cwdChanges], ["E:\\other", "other", 2]);
+  form.form.cwd.disabled = true;
+  form.value = "hq";
+  fns.applyProjectDefaultCwd(form, { force: true });
+  check("...nor over a directory the spawn policy keeps shut",
+        [form.form.cwd.value, meshRow.value], ["E:\\other", "room"]);
+  form.form.cwd.disabled = false;
+  /* a child spawn: the rail's sync leaves its mesh to the parent, a pick on
+     the row does not */
+  spawnChild = { name: "p" };
+  form._lastProject = "default";
+  form.form.cwd.value = "";
+  meshRow.value = "";
+  form.value = "hq";
+  fns.applyProjectDefaultCwd(form);
+  check("a rail sync on a child fills the directory and leaves the mesh inherited",
+        [form.form.cwd.value, meshRow.value], ["D:\\hq", ""]);
+  form._lastProject = "default";
+  form.form.cwd.value = "";
+  form.value = "hq";
+  fns.applyProjectDefaultCwd(form, { force: true });
+  check("a Project-row pick on a child fills both",
+        [form.form.cwd.value, meshRow.value], ["D:\\hq", "room"]);
+  spawnChild = null;
+  meshRow.value = "";
+  form.form.cwd.value = "";
+  form.value = "default";
+  fns.applyProjectDefaultCwd(form);
+
+  /* a press on the rail's project tab opens the grouping's default tab */
+  const pressProject = (name) => tabs().find((t) => t.dataset.project === name).handlers.click();
+  const tabsBefore = { mesh: "elsewhere", workspace: "E:\\other" };
+  fns.setCurrentProject("");
+  fns.setGroupOrder([]);
+  fns.setGroupTab({ ...tabsBefore });
+  pressProject("hq");
+  check("grouping Off: a project pick opens no group tab", fns.groupTab(), tabsBefore);
+  fns.setCurrentProject("");
+  fns.setGroupOrder(["mesh"]);
+  pressProject("hq");
+  check("grouping Mesh: the project's default mesh tab opens",
+        [fns.current(), fns.groupTab()], ["hq", { ...tabsBefore, mesh: "room" }]);
+  fns.setCurrentProject("");
+  fns.setGroupOrder(["workspace"]);
+  fns.setGroupTab({ ...tabsBefore });
+  pressProject("hq");
+  check("grouping Workspace: the project's default workspace tab opens",
+        fns.groupTab(), { ...tabsBefore, workspace: "D:\\hq" });
+  fns.setCurrentProject("");
+  fns.setGroupTab({ ...tabsBefore });
+  pressProject("solo");
+  check("a project with no default leaves the open tab", fns.groupTab(), tabsBefore);
+  fns.setGroupOrder(["mesh"]);
+  fns.setCurrentProject("hq");
+  check("a rail moved by anything but the press keeps its tab", fns.groupTab(), tabsBefore);
+  fns.setGroupOrder([]);
 
   /* the three states on the Projects card */
   const meshFns = new Function(
