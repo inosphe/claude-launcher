@@ -346,6 +346,80 @@ def test_pi_falls_back_to_provider_api_key_without_stored_token(home):
     assert env["ANTHROPIC_API_KEY"] == "sk-deepseek"
 
 
+@pytest.mark.parametrize("harness", ["claude", "pi"])
+@pytest.mark.parametrize("key_field", ["api_key", "api-key"])
+@pytest.mark.parametrize("profile_key", [None, "", "   ", "sk-profile"])
+@pytest.mark.parametrize("stored", [None, "", "  \n", "sk-stored"])
+def test_yaml_key_fallback_and_stored_token_precedence(
+    home, harness, key_field, profile_key, stored
+):
+    _provider("ds", {**{k: v for k, v in DEEPSEEK.items() if k != "api_key"},
+                     key_field: "sk-provider"})
+    p = _profile_on("work", "ds", harness=harness)
+    store.update(lambda doc: doc["profiles"][p.name].update({key_field: profile_key}))
+    if stored is not None:
+        (p.config_dir / credentials.TOKEN_FILENAME).write_text(stored, encoding="utf-8")
+    if harness == "claude":
+        env = runner.child_env(p, with_token=True, base_env={})
+        token_env = "ANTHROPIC_AUTH_TOKEN"
+    else:
+        env = runner.harness_child_env(p, harnesses.get(harness), base_env={})
+        token_env = "ANTHROPIC_API_KEY"
+    expected = (stored or "").strip() or (profile_key or "").strip() or "sk-provider"
+    assert env[token_env] == expected
+
+
+@pytest.mark.parametrize("harness", ["claude", "pi"])
+def test_clear_token_restores_yaml_profile_key_after_inherited_token(home, harness):
+    _provider("ds", DEEPSEEK)
+    parent = _profile_on("parent", "ds")
+    child = _profile_on("child", "ds", harness=harness)
+    lineage.set_parent(child, parent.name)
+    store.set_profile_field(child.name, "api_key", "sk-profile")
+    credentials.save_token(parent, "sk-parent")
+    credentials.save_token(child, "sk-child")
+
+    def key():
+        if harness == "claude":
+            return runner.child_env(child, with_token=True, base_env={})["ANTHROPIC_AUTH_TOKEN"]
+        return runner.harness_child_env(child, harnesses.get(harness), base_env={})["ANTHROPIC_API_KEY"]
+
+    assert key() == "sk-child"
+    assert cli_main(["set-token", "child", "--clear"]) == 0
+    assert key() == "sk-parent"
+    assert cli_main(["set-token", "parent", "--clear"]) == 0
+    assert key() == "sk-profile"
+    store.set_profile_field(child.name, "api_key", None)
+    assert key() == "sk-deepseek"
+
+
+def test_migration_preserves_declared_profile_api_key(home):
+    _provider("ds", DEEPSEEK)
+    p = _profile_on("work", "ds")
+    store.set_profile_field(p.name, "api_key", "sk-profile")
+    store.set_profile_field(p.name, "env", {"ANTHROPIC_MODEL": "pinned"})
+    before = runner.child_env(p, with_token=True, base_env={})["ANTHROPIC_AUTH_TOKEN"]
+    assert cli_main(["migrate-config"]) == 0
+    assert store.profile_entry(p.name)["api_key"] == "sk-profile"
+    assert runner._api_key_for(p) == "sk-profile"
+    assert runner.child_env(p, with_token=True, base_env={})["ANTHROPIC_AUTH_TOKEN"] == before
+
+
+@pytest.mark.parametrize("parent_field", ["api_key", "api-key"])
+@pytest.mark.parametrize("child_field", ["api_key", "api-key"])
+def test_yaml_key_inheritance_and_null_clear(home, parent_field, child_field):
+    _provider("ds", DEEPSEEK)
+    parent = _profile_on("parent", "ds")
+    child = _profile_on("child", "ds")
+    lineage.set_parent(child, parent.name)
+    store.set_profile_field(parent.name, parent_field, "sk-parent-yaml")
+    assert runner._api_key_for(child) == "sk-parent-yaml"
+    store.set_profile_field(child.name, child_field, "sk-child-yaml")
+    assert runner._api_key_for(child) == "sk-child-yaml"
+    store.update(lambda doc: doc["profiles"][child.name].update({child_field: None}))
+    assert runner._api_key_for(child) == "sk-deepseek"
+
+
 def test_pi_option_env_and_settings_channel(home):
     _provider("ds", DEEPSEEK)
     p = _profile_on("work", "ds", harness="pi")

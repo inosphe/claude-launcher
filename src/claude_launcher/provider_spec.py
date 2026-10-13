@@ -41,9 +41,9 @@ Pi's in-process provider registration.
         auto_compact_at: 600000
         harness_options: {...}
 
-A profile overlays ``models``, ``context_window``, ``auto_compact_at``,
+A profile overlays ``api_key``, ``models``, ``context_window``, ``auto_compact_at``,
 ``reasoning_effort`` and ``harness_options`` on its provider (root ancestor
-first, the profile itself last).  ``api_key``, ``endpoints`` and
+first, the profile itself last).  ``endpoints`` and
 ``openai_reasoning_format`` identify the backend and stay on the provider.
 
 The pre-schema form -- a provider ``env:`` of Claude-vocabulary variables --
@@ -150,6 +150,7 @@ SPEC_FIELDS: Tuple[str, ...] = (
 )
 #: The subset a profile entry may overlay.
 PROFILE_SPEC_FIELDS: Tuple[str, ...] = (
+    "api_key",
     "models",
     "context_window",
     "auto_compact_at",
@@ -424,6 +425,8 @@ def from_entry(entry: dict, what: str, *, profile: bool = False) -> ProviderSpec
     as before the schema).
     """
     entry = entry if isinstance(entry, dict) else {}
+    if "api-key" in entry and "api_key" not in entry:
+        entry = {**entry, "api_key": entry["api-key"]}
     allowed = PROFILE_SPEC_FIELDS if profile else SPEC_FIELDS
     for name in SPEC_FIELDS:
         if name in entry and name not in allowed:

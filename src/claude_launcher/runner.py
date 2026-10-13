@@ -594,15 +594,15 @@ def _api_key_for(auth_source: Profile) -> Optional[str]:
     """The one secret an API-key harness receives for ``auth_source``.
 
     The profile's ``set-token`` secret (own or inherited) wins; without one,
-    the key written in its provider's ``env`` is used, so a provider configured
-    once for the Claude harness authenticates every other harness too. The
+    the profile's effective YAML key is used (profile over provider). A provider
+    configured once for the Claude harness authenticates other API-key harnesses. The
     same precedence the Claude harness applies to ``ANTHROPIC_AUTH_TOKEN``.
     """
     stored = lineage.stored_auth_token(auth_source)
     if stored:
         return stored
     try:
-        return providers.auth_token(providers.resolve_name(auth_source))
+        return providers.spec_for(auth_source).api_key
     except providers.ProviderError as exc:
         raise RunnerError(str(exc)) from exc
 

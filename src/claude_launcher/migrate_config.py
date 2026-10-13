@@ -280,8 +280,12 @@ def convert_profile(
     orig_profiles = orig.get("profiles") or {}
     chain = _chain(name, orig_profiles)
     before: Dict[str, str] = dict(_legacy_provider_env(provider, orig))
-    for item in chain[:-1]:
-        raw = (orig_profiles.get(item) or {}).get("env")
+    for item in chain:
+        original = orig_profiles.get(item) or {}
+        declared_key = provider_spec.from_entry(original, f"profiles.{item}", profile=True).api_key
+        if declared_key:
+            before[provider_spec.CLAUDE_AUTH_TOKEN] = declared_key
+        raw = original.get("env")
         if isinstance(raw, dict):
             before.update({str(k): str(v) for k, v in raw.items()})
     before.update(legacy_env)
@@ -338,7 +342,7 @@ def convert_profile(
         )
     for key in ("env", LEGACY_HARNESSES_FIELD, *provider_spec.PROFILE_SPEC_FIELDS, HARNESS_OPTIONS_FIELD):
         entry.pop(key, None)
-    entry.update(_spec_to_entry(replace(own, api_key=None, endpoints={})))
+    entry.update(_spec_to_entry(replace(own, endpoints={})))
     return entry
 
 
