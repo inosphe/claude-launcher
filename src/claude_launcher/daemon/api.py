@@ -560,6 +560,8 @@ def build_app(
     r.add_post("/api/window/force", h_window_force)
     r.add_post("/api/window/report", h_window_report)
     r.add_get("/api/window/history", h_window_history)
+    r.add_get("/api/window/limits", h_window_limits)
+    r.add_put("/api/window/limits", h_window_set_limits)
     r.add_post("/api/auth/session", h_auth_session)
     r.add_get("/api/daemon", h_daemon_info)
     r.add_post("/api/daemon/shutdown", h_daemon_shutdown)
@@ -1614,6 +1616,33 @@ async def h_window_history(request: web.Request) -> web.Response:
             limit=limit,
         )
     )
+
+
+async def h_window_limits(request: web.Request) -> web.Response:
+    """The test window's limits: what is in force and who may change them."""
+    return json_response(request.app["window"].status()["limits_control"])
+
+
+async def h_window_set_limits(request: web.Request) -> web.Response:
+    """Change the test window's limits (claunch-k7x63).
+
+    Body ``{"limits": {name: value | null}, "by": "<who>"}``; ``null`` clears
+    an override back to the config default. Only the daemon that owns the
+    limits accepts it -- the main daemon on a machine window. A daemon that
+    shares the main one's window answers 409 and names where to set them.
+    """
+    body = await _json_body(request)
+    changes = body.get("limits")
+    try:
+        view = request.app["window"].set_limits(
+            changes if isinstance(changes, dict) else {},
+            by=str(body.get("by") or "").strip()[:80],
+        )
+    except window_mod.LimitsNotEditable as exc:
+        return json_response({"error": str(exc), "editable": False}, status=409)
+    except ValueError as exc:
+        return json_response({"error": str(exc)}, status=400)
+    return json_response(view)
 
 
 async def h_window_force(request: web.Request) -> web.Response:

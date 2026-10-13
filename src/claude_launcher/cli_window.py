@@ -13,8 +13,8 @@ apart "the daemon said no" from "the daemon could not be asked" would plan
 its retry wrong, so the two do not share a code -- the same discipline
 ``tools/merge_ready.py`` gives its verdicts.
 
-``prioritize``, ``force`` and ``acquire --force`` are the operator's queue
-overrides (claunch-8kald). They are refused inside a managed session
+``prioritize``, ``force``, ``acquire --force`` and ``limits --set/--clear``
+(claunch-k7x63) are the operator's queue overrides (claunch-8kald). They are refused inside a managed session
 (``$CLAUNCH_SESSION`` set), the rule ``claunch daemon restart`` already
 applies: an agent that could reorder or force the machine's test queue
 could always put itself first, and the queue would stop meaning anything.
@@ -262,6 +262,72 @@ def _cmd_force(args) -> int:
     return 0
 
 
+def _parse_limit_args(sets, clears) -> dict:
+    changes = {}
+    for item in sets or []:
+        key, sep, value = item.partition("=")
+        if not sep or not key.strip():
+            raise ValueError(f"--set wants name=value, got {item!r}")
+        changes[key.strip()] = value.strip()
+    for key in clears or []:
+        changes[key.strip()] = None
+    return changes
+
+
+def _print_limits(view: dict) -> None:
+    values = view.get("values") or {}
+    overrides = view.get("overrides") or {}
+    bounds = view.get("bounds") or {}
+    if view.get("editable"):
+        print(f"limits: set on this daemon ({view.get('by') or 'default'})")
+    elif view.get("source") == "published":
+        print(
+            f"limits: published by the main daemon ({view.get('by') or 'default'}); "
+            "change them there"
+        )
+    else:
+        print("limits: this daemon's config (no main daemon has published limits yet)")
+    for key in bounds or values:
+        low, high = (bounds.get(key) or [None, None])[:2]
+        mark = "  (override)" if key in overrides else ""
+        print(f"  {key:<22} {values.get(key, '-')!s:>5}   range {low}..{high}{mark}")
+    if view.get("set_at"):
+        print(f"  last changed {view['set_at']} by {view.get('set_by') or '?'}")
+
+
+def _cmd_limits(args) -> int:
+    try:
+        changes = _parse_limit_args(args.set, args.clear)
+    except ValueError as exc:
+        print(f"not changed: {exc}", file=sys.stderr)
+        return 1
+    if changes and _operator_only("limits --set/--clear"):
+        return 2
+    client = _client()
+    if client is None:
+        return 2
+    try:
+        if changes:
+            view = client.put(
+                "/api/window/limits", {"limits": changes, "by": "cli"}
+            )
+        else:
+            view = client.get("/api/window/limits")
+    except daemon_client.DaemonClientError as exc:
+        print(f"not changed: {exc}" if changes else f"cannot read limits: {exc}", file=sys.stderr)
+        return 1
+    if view.get("error"):
+        print(f"not changed: {view['error']}", file=sys.stderr)
+        return 1
+    if args.json:
+        import json
+
+        print(json.dumps(view, indent=2, ensure_ascii=False))
+        return 0
+    _print_limits(view)
+    return 0
+
+
 def _fmt_seconds(value) -> str:
     if value is None:
         return "-"
@@ -419,6 +485,22 @@ def register(sub) -> None:
     )
     p.add_argument("grant_id", help="the waiting request (ids: `claunch window status`)")
     p.set_defaults(func=_cmd_force)
+
+    p = wsub.add_parser(
+        "limits",
+        help="the test window's limits (caps, widths, worker budget); "
+        "--set/--clear are operator only and work on the main daemon",
+    )
+    p.add_argument(
+        "--set", action="append", metavar="NAME=VALUE",
+        help="override one limit, e.g. --set worker_budget=8 (repeatable)",
+    )
+    p.add_argument(
+        "--clear", action="append", metavar="NAME",
+        help="drop an override so the config default applies again (repeatable)",
+    )
+    p.add_argument("--json", action="store_true", help="the API answer as JSON")
+    p.set_defaults(func=_cmd_limits)
 
     p = wsub.add_parser(
         "history",

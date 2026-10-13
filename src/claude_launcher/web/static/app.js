@@ -24675,6 +24675,22 @@ let windowError = "";
 let windowTimer = null;
 let windowPageOpen = false;
 let windowCancelBusy = new Set();
+// The limits editor (claunch-k7x63): typed values survive the 5 s poll's
+// re-render; the main daemon owns the limits, others show them read-only.
+let windowLimitsDraft = {};
+let windowLimitsBusy = false;
+let windowLimitsMessage = "";
+
+const WINDOW_LIMIT_LABELS = [
+  ["targeted_cap", "Targeted grants at once"],
+  ["sweep_cap", "Sweep grants at once"],
+  ["targeted_width", "Targeted pytest -n"],
+  ["sweep_width", "Sweep pytest -n"],
+  ["worker_budget", "Worker budget (0 = off)"],
+  ["targeted_per_session", "Targeted grants per session (0 = off)"],
+  ["adaptive", "Lower budget after timeouts (1 = on)"],
+  ["adaptive_floor", "Lowest adaptive budget"],
+];
 
 function openWindowPage() {
   windowPageOpen = true;
@@ -24714,6 +24730,7 @@ async function refreshWindow() {
           // The budget in force and its AIMD state (claunch-afmzw).
           worker_budget: data.worker_budget,
           adaptive: data.adaptive || {},
+          limits_control: data.limits_control || null,
         };
         windowError = "";
       }
@@ -24896,8 +24913,120 @@ function windowSummary(title, used, cap, detail) {
   return card;
 }
 
+async function saveWindowLimits(changes) {
+  if (windowLimitsBusy) return;
+  windowLimitsBusy = true;
+  windowLimitsMessage = "";
+  renderWindow();
+  try {
+    const resp = await api("/api/window/limits", {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ limits: changes, by: "web" }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      windowLimitsMessage = `not saved: ${data.error || `HTTP ${resp.status}`}`;
+    } else {
+      windowLimitsDraft = {};
+      windowLimitsMessage = "saved";
+      if (windowCache) windowCache.limits_control = data;
+    }
+  } catch (err) {
+    windowLimitsMessage = `not saved: ${err.message || err}`;
+  } finally {
+    windowLimitsBusy = false;
+  }
+  renderWindow();
+  refreshWindow();
+}
+
+function windowLimitsSection(ctl) {
+  const values = ctl.values || {};
+  const overrides = ctl.overrides || {};
+  const bounds = ctl.bounds || {};
+  const editable = !!ctl.editable;
+  const box = el("section", "window-section window-limits");
+  const boxHead = el("div", "window-section-head");
+  boxHead.appendChild(el("h3", null, "Limits"));
+  box.appendChild(boxHead);
+  const owner = ctl.by || "default";
+  box.appendChild(el("p", "wf-note", editable
+    ? "These limits apply to every daemon on this machine. Changes are kept " +
+      "in this machine's window state; a cleared field returns to the " +
+      "window_* value in this daemon's config."
+    : ctl.source === "published"
+      ? `Set on the main daemon (${owner}). This daemon uses the values it ` +
+        "published; change them on the main daemon's Window page."
+      : "No main daemon has published limits yet, so this daemon uses its " +
+        "own config. Change them on the main daemon's Window page."));
+  const grid = el("div", "window-limits-grid");
+  for (const [key, label] of WINDOW_LIMIT_LABELS) {
+    if (!(key in values) && !(key in bounds)) continue;
+    const row = el("label", "window-limit");
+    const [low, high] = bounds[key] || [null, null];
+    row.appendChild(el("span", "window-limit-name",
+      overrides[key] !== undefined ? `${label} (override)` : label));
+    const input = document.createElement("input");
+    input.type = "number";
+    input.dataset.limit = key;
+    if (low !== null && low !== undefined) input.min = String(low);
+    if (high !== null && high !== undefined) input.max = String(high);
+    input.step = "1";
+    input.value = key in windowLimitsDraft ? windowLimitsDraft[key]
+      : String(values[key] ?? "");
+    input.disabled = !editable || windowLimitsBusy;
+    input.addEventListener("input", () => {
+      if (input.value === String(values[key] ?? "")) delete windowLimitsDraft[key];
+      else windowLimitsDraft[key] = input.value;
+    });
+    row.appendChild(input);
+    row.appendChild(el("span", "window-stat-detail",
+      low !== null && low !== undefined ? `${low}–${high}` : ""));
+    if (editable && overrides[key] !== undefined) {
+      const reset = el("button", "wf-btn clear", "Reset");
+      reset.title = "drop the override; the config default applies again";
+      reset.disabled = windowLimitsBusy;
+      reset.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        delete windowLimitsDraft[key];
+        saveWindowLimits({ [key]: null });
+      });
+      row.appendChild(reset);
+    }
+    grid.appendChild(row);
+  }
+  box.appendChild(grid);
+  const foot = el("div", "window-limits-foot");
+  if (editable) {
+    const save = el("button", "wf-btn", windowLimitsBusy ? "Saving…" : "Save");
+    save.disabled = windowLimitsBusy || !Object.keys(windowLimitsDraft).length;
+    save.addEventListener("click", () => {
+      const changes = {};
+      for (const [k, v] of Object.entries(windowLimitsDraft)) {
+        changes[k] = v === "" ? null : Number(v);
+      }
+      saveWindowLimits(changes);
+    });
+    foot.appendChild(save);
+    const discard = el("button", "wf-btn clear", "Discard edits");
+    discard.disabled = windowLimitsBusy || !Object.keys(windowLimitsDraft).length;
+    discard.addEventListener("click", () => { windowLimitsDraft = {}; renderWindow(); });
+    foot.appendChild(discard);
+  }
+  if (windowLimitsMessage) foot.appendChild(el("span", "wf-note", windowLimitsMessage));
+  if (ctl.set_at) {
+    foot.appendChild(el("span", "window-stat-detail",
+      `last changed ${ctl.set_at} by ${ctl.set_by || "?"}`));
+  }
+  box.appendChild(foot);
+  return box;
+}
+
 function renderWindow() {
   const view = $("window-view");
+  // The poll re-renders every 5 s; keep the caret in the limit being typed.
+  const act = typeof document !== "undefined" ? document.activeElement : null;
+  const focusLimit = act && view.contains(act) && act.dataset ? act.dataset.limit : null;
   view.innerHTML = "";
   const head = el("div", "wf-head");
   head.appendChild(el("h2", null, "Measurement window"));
@@ -24976,10 +25105,17 @@ function renderWindow() {
   };
   view.appendChild(section("Holders", holders, "no grants are held", false));
   view.appendChild(section("Queue", queue, "nothing is waiting", true));
+  if (windowCache.limits_control) {
+    view.appendChild(windowLimitsSection(windowCache.limits_control));
+  }
   if (windowHistory) view.appendChild(windowHistorySection(windowHistory));
   view.appendChild(el("p", "window-footnote",
     "Entries are the arbiter's recorded state. Process liveness is checked " +
     "when a new acquisition is decided."));
+  if (focusLimit) {
+    const again = view.querySelector(`input[data-limit="${focusLimit}"]`);
+    if (again && !again.disabled) again.focus();
+  }
 }
 
 /* ------------------------------------------------------------------ */

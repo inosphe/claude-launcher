@@ -100,6 +100,18 @@ congestion control). Like TCP's one decrease per window, a run granted before
 the last decrease does not decrease it again -- it ran under the old load.
 ``window_adaptive: 0`` turns this off.
 
+The limits themselves are the main daemon's (claunch-k7x63, 2026-10-13): on
+one machine window every instance must apply the same caps, widths and
+budget, and each instance reads its own config file. So the default instance
+publishes the limits it enforces into the shared state (``limits``), and an
+instance on a shared window enforces what the main one published, not its
+own ``window_*`` keys. An operator who changes a limit on the Window page
+changes it on the main daemon only (:meth:`WindowManager.set_limits`); the
+change is kept in the shared state as an override of the main daemon's config
+-- machine-local, so ``~/.claunch.yaml``, which is synced between machines,
+does not carry one machine's core count to another. The config keys stay the
+defaults an override replaces; clearing an override returns to them.
+
 What is deliberately NOT here:
 
 * a wall-clock TTL. The repository has already paid for that confusion once
@@ -169,6 +181,29 @@ DEFAULT_LIMITS = {
     "adaptive": 1,
     "adaptive_floor": 4,
 }
+
+#: Every limit the Window page and ``PUT /api/window/limits`` may set, with
+#: the range a value must fall in (claunch-k7x63). ``worker_budget`` 0 turns
+#: the budget off and ``targeted_per_session`` 0 removes the per-session limit,
+#: as in the config keys they override.
+LIMIT_BOUNDS = {
+    "sweep_cap": (1, 8),
+    "targeted_cap": (1, 64),
+    "sweep_width": (1, 512),
+    "targeted_width": (1, 512),
+    "worker_budget": (0, 4096),
+    "targeted_per_session": (0, 64),
+    "adaptive": (0, 1),
+    "adaptive_floor": (1, 4096),
+}
+
+#: The caps' config defaults, beside ``DEFAULT_LIMITS``.
+DEFAULT_CAPS = {"sweep_cap": 1, "targeted_cap": 3}
+
+
+class LimitsNotEditable(Exception):
+    """The limits are set on another daemon (the main one)."""
+
 
 #: How often a queued request re-reads the shared state: a grant made by
 #: another daemon process (or a release there) sets no event in this one.
@@ -313,6 +348,58 @@ def pid_alive(pid: int) -> bool:
         return False
 
 
+def _clean_limits(raw) -> dict:
+    """The known, in-range integer limits of a stored ``limits`` block.
+
+    The state file is shared between processes and edited by hand at worst;
+    a value that does not parse or falls outside :data:`LIMIT_BOUNDS` is
+    dropped, and the config default stands in for it."""
+    if not isinstance(raw, dict):
+        return {}
+    out = {}
+    for key, (low, high) in LIMIT_BOUNDS.items():
+        if key not in raw:
+            continue
+        try:
+            value = int(raw[key])
+        except (TypeError, ValueError):
+            continue
+        if low <= value <= high:
+            out[key] = value
+    return out
+
+
+def validate_limits(changes) -> dict:
+    """Check a ``set_limits`` request: known keys, integers, in range.
+
+    ``None`` as a value clears that override. Raises ValueError naming the
+    first bad entry -- a request is applied whole or not at all."""
+    if not isinstance(changes, dict) or not changes:
+        raise ValueError("limits must be a non-empty object of name: value")
+    out = {}
+    for key, value in changes.items():
+        if key not in LIMIT_BOUNDS:
+            raise ValueError(
+                f"unknown limit {key!r} (known: {', '.join(LIMIT_BOUNDS)})"
+            )
+        if value is None:
+            out[key] = None
+            continue
+        if isinstance(value, bool):
+            value = int(value)
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"{key} must be an integer, got {value!r}") from None
+        if isinstance(value, float) and value != number:
+            raise ValueError(f"{key} must be an integer, got {value!r}")
+        low, high = LIMIT_BOUNDS[key]
+        if not low <= number <= high:
+            raise ValueError(f"{key} must be between {low} and {high}, got {number}")
+        out[key] = number
+    return out
+
+
 def default_state_path() -> Path:
     """Where this daemon's window lives: the machine's file under the base
     home, unless the config keeps the window per instance."""
@@ -385,18 +472,19 @@ class WindowManager:
         state_path: Optional[Path] = None,
         cores: Optional[int] = None,
         instance: Optional[str] = None,
+        owns_limits: Optional[bool] = None,
     ) -> None:
         self._manager = manager
-        self._caps = caps or self._caps_from_config
+        self._caps_src = caps or self._caps_from_config
         if limits is not None:
-            self._limits = limits
+            self._limits_src = limits
         elif caps is not None:
             # A caller that injects its caps is a test fixing the window's
             # shape; reading the machine's config under it would make the
             # test depend on whoever runs it.
-            self._limits = lambda: dict(DEFAULT_LIMITS)
+            self._limits_src = lambda: dict(DEFAULT_LIMITS)
         else:
-            self._limits = self._limits_from_config
+            self._limits_src = self._limits_from_config
         self._state_path = state_path or default_state_path()
         self._cores = cores or (os.cpu_count() or 4)
         self._holders: List[dict] = []
@@ -414,6 +502,18 @@ class WindowManager:
         self._instance = paths.instance() if instance is None else instance
         self._daemon_pid = os.getpid()
         self._lock_path = self._state_path.parent / "window.lock"
+        # The limits the main daemon published, and the overrides set on it
+        # from the Window page (claunch-k7x63). Owning the limits: the main
+        # daemon on the machine window, or every daemon on its own window.
+        self._published: Optional[dict] = None
+        self._overrides: dict = {}
+        self._limits_meta: dict = {}
+        if owns_limits is None:
+            owns_limits = self._instance == "" or (
+                self._state_path.parent.resolve()
+                != (paths.base_home() / "daemon").resolve()
+            )
+        self._owns_limits = bool(owns_limits)
         self._lock_handle = None
         self._lock_depth = 0
         # A save that failed leaves memory newer than the file; reloading
@@ -421,6 +521,10 @@ class WindowManager:
         self._saved_ok = True
         with self._locked():
             self._drop_restored_queue()
+            if self._owns_limits:
+                # Publish this daemon's limits now: an instance that starts
+                # before the next grant must not enforce its own config.
+                self._save()
 
     # ---- the cross-process lock (claunch-afmzw) ------------------------- #
 
@@ -497,6 +601,38 @@ class WindowManager:
             for key, default in DEFAULT_LIMITS.items()
         }
 
+    def _own_limits(self) -> dict:
+        """The limits this daemon would enforce on its own: its config (or
+        the injected values), with the Window page's overrides on top."""
+        sweep_cap, targeted_cap = self._caps_src()
+        merged = {"sweep_cap": int(sweep_cap), "targeted_cap": int(targeted_cap)}
+        merged.update({k: int(v) for k, v in dict(self._limits_src()).items()})
+        merged.update(self._overrides)
+        return merged
+
+    def _all_limits(self) -> dict:
+        """The limits in force: the owner's own, or what the owner published.
+
+        An instance that does not own the limits falls back to its own config
+        only while nothing was ever published (no main daemon has run on this
+        machine window yet)."""
+        if self._owns_limits or not self._published:
+            return self._own_limits()
+        merged = self._own_limits()
+        merged.update(self._published)
+        return merged
+
+    def _caps(self) -> Tuple[int, int]:
+        limits = self._all_limits()
+        return (
+            int(limits.get("sweep_cap", DEFAULT_CAPS["sweep_cap"])),
+            int(limits.get("targeted_cap", DEFAULT_CAPS["targeted_cap"])),
+        )
+
+    def _limits(self) -> dict:
+        limits = self._all_limits()
+        return {k: limits.get(k, v) for k, v in DEFAULT_LIMITS.items()}
+
     def _cap(self, cls: str) -> int:
         sweep_cap, targeted_cap = self._caps()
         return max(1, sweep_cap if cls == SWEEP else targeted_cap)
@@ -569,6 +705,13 @@ class WindowManager:
             return
         self._holders = list(doc.get("holders") or [])
         self._queue = list(doc.get("queue") or [])
+        limits = doc.get("limits")
+        if isinstance(limits, dict):
+            self._published = _clean_limits(limits.get("values")) or None
+            self._overrides = _clean_limits(limits.get("overrides"))
+            self._limits_meta = {
+                k: limits.get(k) for k in ("by", "set_by", "set_at") if limits.get(k)
+            }
         adaptive = doc.get("adaptive")
         if isinstance(adaptive, dict):
             self._adaptive = {
@@ -606,6 +749,18 @@ class WindowManager:
             "queue": self._queue,
             "adaptive": self._adaptive,
         }
+        if self._owns_limits:
+            # The owner republishes on every save, so an edit of its config
+            # keys reaches the other instances with the next decision.
+            self._published = self._own_limits()
+        if self._published or self._overrides:
+            doc["limits"] = {
+                "values": self._published or {},
+                "overrides": self._overrides,
+                **self._limits_meta,
+            }
+            if self._owns_limits:
+                doc["limits"]["by"] = self._instance or "default"
         try:
             self._state_path.parent.mkdir(parents=True, exist_ok=True)
             with atomic.scratch(self._state_path) as tmp:
@@ -1326,6 +1481,65 @@ class WindowManager:
         return holder
 
     @_shared
+    def limits_view(self) -> dict:
+        """Who sets the limits and what is in force (claunch-k7x63)."""
+        return {
+            "values": self._all_limits(),
+            "overrides": dict(self._overrides),
+            "editable": self._owns_limits,
+            # "published": a sub daemon enforcing the main daemon's limits;
+            # "own": the owner, or a sub daemon nobody has published to yet.
+            "source": (
+                "own" if self._owns_limits or not self._published else "published"
+            ),
+            "by": self._limits_meta.get("by")
+            or (self._instance or "default" if self._owns_limits else None),
+            "set_by": self._limits_meta.get("set_by"),
+            "set_at": self._limits_meta.get("set_at"),
+            "bounds": {k: list(v) for k, v in LIMIT_BOUNDS.items()},
+        }
+
+    @_shared
+    def set_limits(self, changes: dict, *, by: str = "") -> dict:
+        """Override limits on the daemon that owns them (the main one).
+
+        A value replaces the config key it overrides; ``None`` drops the
+        override so the config default applies again. Raises
+        :class:`LimitsNotEditable` on a daemon that enforces another
+        daemon's limits, and ValueError on a bad request (nothing applied).
+        """
+        if not self._owns_limits:
+            raise LimitsNotEditable(
+                "the test window's limits are set on the main daemon "
+                f"({self._limits_meta.get('by') or 'default'}); this daemon "
+                f"({self._instance or 'default'}) shares its window and queue"
+            )
+        cleaned = validate_limits(changes)
+        before = self._all_limits()
+        for key, value in cleaned.items():
+            if value is None:
+                self._overrides.pop(key, None)
+            else:
+                self._overrides[key] = value
+        self._limits_meta["set_by"] = by or None
+        self._limits_meta["set_at"] = _utcnow()
+        after = self._all_limits()
+        # A lowered budget no longer above the new configured one is moot.
+        current = self._adaptive.get("budget")
+        if current is not None and current >= self._configured_budget():
+            self._adaptive["budget"] = None
+        # A raised cap or budget may admit a waiter now.
+        self._process_queue()
+        self._save()
+        changed = {
+            k: [before.get(k), after.get(k)]
+            for k in after
+            if before.get(k) != after.get(k)
+        }
+        log.info("window: limits changed by %s: %s", by or "?", changed)
+        return self.limits_view()
+
+    @_shared
     def status(self) -> dict:
         """The window as state anyone can read -- the whole point.
 
@@ -1349,6 +1563,7 @@ class WindowManager:
             # while timeouts have lowered it.
             "worker_budget": self._budget(),
             "adaptive": self.adaptive_view(),
+            "limits_control": self.limits_view(),
             "instance": self._instance,
             "state_path": str(self._state_path),
             "history_retention_days": HISTORY_RETENTION_DAYS,
