@@ -18,6 +18,14 @@ Files in a slot:
   the agent's MCP server and the daemon/CLI).
 
 Finished runs are moved to ``<cwd>/.cflow2/archive/<scope>/<run_id>/``.
+
+A scope names its daemon: ``<session>@<daemon>`` (``s15@main``; a side run
+``s15@main+stack``, a nested run ``s15@main+stack~d2``). Session names are
+numbered per daemon, so two daemons with sessions in one directory both have
+an ``s15``; the qualifier keeps their slots apart (claunch-9jmdz, doc 4.1).
+A scope given without it is this process's daemon's (:func:`qualify`).
+Slots written before the qualifier (``runs/s15``) are read in place until the
+owning daemon moves them at its next start (:mod:`.slot_migration`).
 """
 
 from __future__ import annotations
@@ -61,12 +69,18 @@ LOCK_TIMEOUT = 10.0
 #: ``flock`` locks die with their holder).
 LOCK_STALE_AFTER = 120.0
 
-#: A scope is a session name; ``~`` joins a nested delegation run's scope to
-#: its parent's (``<scope>~<delegation id>``, doc 7) and ``+`` a side run's
-#: name to its session's (``<session>+<side>``, doc 2.9).
-_SCOPE_RE = re.compile(r"^[A-Za-z0-9._~+-]+$")
+#: A scope is a session name qualified by its daemon (``<session>@<daemon>``,
+#: claunch-9jmdz); ``~`` joins a nested delegation run's scope to its
+#: parent's (``<scope>~<delegation id>``, doc 7) and ``+`` a side run's name
+#: to its session's (``<session>@<daemon>+<side>``, doc 2.9).
+_SCOPE_RE = re.compile(r"^[A-Za-z0-9._~+@-]+$")
 NESTED_SEP = "~"
 SIDE_SEP = "+"
+DAEMON_SEP = "@"
+#: A daemon id after ``@``: an instance name, or the default daemon's id.
+_DAEMON_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+#: The state key a run records its daemon under (stamped at start).
+DAEMON_KEY = "daemon"
 #: A side run's name (``sides:`` keys, doc 2.9).
 SIDE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
 
@@ -79,16 +93,96 @@ def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def current_daemon() -> str:
+    """This process's daemon id: ``$CLAUNCH_DAEMON``, or the default
+    daemon's id (:data:`..daemon.paths.DEFAULT_INSTANCE_ID`)."""
+    from ..daemon import paths
+
+    try:
+        return paths.instance_id()
+    except ValueError as exc:
+        raise StoreError(str(exc)) from None
+
+
+def _head(scope: str) -> int:
+    """Where a scope's session part ends: before its first ``+`` or ``~``."""
+    cut = [i for i in (scope.find(SIDE_SEP), scope.find(NESTED_SEP)) if i >= 0]
+    return min(cut) if cut else len(scope)
+
+
+def qualify(scope: str, daemon: Optional[str] = None) -> str:
+    """``scope`` with ``@<daemon>`` after its session part, unless it has one
+    (``s15+stack`` -> ``s15@main+stack``). ``daemon`` defaults to this
+    process's (:func:`current_daemon`). ``default`` names no session and stays
+    as it is."""
+    scope = str(scope or "")
+    cut = _head(scope)
+    head = scope[:cut]
+    if not head or DAEMON_SEP in head or head == DEFAULT_SCOPE:
+        return scope
+    return f"{head}{DAEMON_SEP}{daemon or current_daemon()}{scope[cut:]}"
+
+
+def unqualified(scope: str) -> str:
+    """``scope`` without its ``@<daemon>``: the slot name written before the
+    qualifier (``s15@main+stack`` -> ``s15+stack``)."""
+    scope = str(scope or "")
+    cut = _head(scope)
+    return scope[:cut].split(DAEMON_SEP, 1)[0] + scope[cut:]
+
+
+def session_of(scope: str) -> str:
+    """The session that drives ``scope``: its main slot's session name, without
+    the daemon (``s15`` for ``s15@main+stack~d2``)."""
+    return main_scope(scope).split(DAEMON_SEP, 1)[0]
+
+
+def daemon_of(scope: str) -> Optional[str]:
+    """The daemon id ``scope`` names; None for a slot name without one (written
+    before the qualifier, or ``default``)."""
+    head = main_scope(scope)
+    return head.split(DAEMON_SEP, 1)[1] if DAEMON_SEP in head else None
+
+
+def is_own(scope: str, daemon: Optional[str] = None) -> bool:
+    """Whether ``scope`` belongs to ``daemon`` (default: this process's). A
+    slot name without a daemon could be anyone's and reads as own -- the
+    behaviour before the qualifier, until the slot is moved."""
+    named = daemon_of(scope)
+    return named is None or named == (daemon or current_daemon())
+
+
+def own_name(scope: str) -> Optional[str]:
+    """``scope`` as this daemon's session manager names it: without the
+    ``@<daemon>`` (``s15@main`` -> ``s15``, ``s15@main+stack`` ->
+    ``s15+stack``, which names no session, as before), or None when the slot
+    is another daemon's. For callers that look a slot up as a session name."""
+    if not is_own(scope):
+        return None
+    return unqualified(scope)
+
+
 def normalize_scope(scope: Optional[str]) -> str:
-    """The scope as a path component (a session name), or :class:`StoreError`."""
+    """The scope as a path component (a session name qualified by its daemon),
+    or :class:`StoreError`. A session name without ``@<daemon>`` is this
+    process's daemon's."""
     scope = (scope or os.environ.get(SESSION_ENV) or DEFAULT_SCOPE).strip()
     if not _SCOPE_RE.match(scope) or scope in (".", ".."):
         raise StoreError(
             f"invalid cflow2 scope {scope!r}: a scope is a session name -- "
-            f"letters, digits, '.', '_', '-' (and '~' for a nested delegation run, "
-            f"'+' for a side run)"
+            f"letters, digits, '.', '_', '-' (then '@<daemon>', '+' for a side run, "
+            f"'~' for a nested delegation run)"
         )
-    return scope
+    head = scope[:_head(scope)]
+    if DAEMON_SEP in scope[len(head):] or head.count(DAEMON_SEP) > 1:
+        raise StoreError(f"invalid cflow2 scope {scope!r}: '@<daemon>' comes once, "
+                         f"right after the session name")
+    if DAEMON_SEP in head:
+        name, daemon = head.split(DAEMON_SEP, 1)
+        if not name or not _DAEMON_RE.match(daemon):
+            raise StoreError(f"invalid cflow2 scope {scope!r}: '<session>@<daemon>' "
+                             f"needs both parts")
+    return qualify(scope)
 
 
 def side_scope(session: str, side: str) -> str:
@@ -100,14 +194,15 @@ def side_scope(session: str, side: str) -> str:
 
 
 def main_scope(scope: str) -> str:
-    """The session slot a scope belongs to: ``s1`` for ``s1``, ``s1+stack``
-    and a nested run under either (``s1+stack~d2``)."""
+    """The session slot a scope belongs to: ``s1@main`` for ``s1@main``,
+    ``s1@main+stack`` and a nested run under either (``s1@main+stack~d2``).
+    The daemon stays: it is part of the slot (:func:`session_of` drops it)."""
     return str(scope or "").split(NESTED_SEP, 1)[0].split(SIDE_SEP, 1)[0]
 
 
 def side_of(scope: str) -> Optional[str]:
-    """The side run name of a side slot (``stack`` for ``s1+stack``); None for
-    a main slot. A nested run's scope reads as its top run's."""
+    """The side run name of a side slot (``stack`` for ``s1@main+stack``); None
+    for a main slot. A nested run's scope reads as its top run's."""
     top = str(scope or "").split(NESTED_SEP, 1)[0]
     return top.split(SIDE_SEP, 1)[1] if SIDE_SEP in top else None
 
@@ -122,7 +217,27 @@ class RunStore:
     def __init__(self, cwd: Optional[str] = None, scope: Optional[str] = None):
         self.cwd = resolve_cwd(cwd)
         self.scope = normalize_scope(scope)
-        self.dir = self.cwd / BASE_DIR / "runs" / self.scope
+        runs = self.cwd / BASE_DIR / "runs"
+        self.dir = runs / self.scope
+        #: True when the run is read from its slot written before the daemon
+        #: qualifier (``runs/s15``), not moved yet (:func:`legacy_dir`).
+        self.legacy = False
+        old = legacy_dir(runs, self.scope)
+        if old is not None and not self.dir.exists():
+            self.dir = old
+            self.legacy = True
+
+    @classmethod
+    def at(cls, path: Path) -> "RunStore":
+        """The store over the slot directory ``path`` under the name it has on
+        disk (``.cflow2/runs/<name>``), for code that walks the directories
+        themselves (:mod:`.slot_migration`)."""
+        st = cls.__new__(cls)
+        st.cwd = Path(path).parent.parent.parent
+        st.scope = Path(path).name
+        st.dir = Path(path)
+        st.legacy = daemon_of(st.scope) is None
+        return st
 
     # -- paths -----------------------------------------------------------
     @property
@@ -156,7 +271,9 @@ class RunStore:
         return self.receipts_dir / f"{delegation_id}{suffix}"
 
     def archive_root(self) -> Path:
-        return self.cwd / BASE_DIR / "archive" / self.scope
+        # the slot directory's name: a run read from its unmoved slot keeps
+        # archiving where it did
+        return self.cwd / BASE_DIR / "archive" / self.dir.name
 
     # -- reading ---------------------------------------------------------
     def exists(self) -> bool:
@@ -565,10 +682,63 @@ def _excl_lock(path: Path, timeout: float) -> Iterator[None]:
             path.unlink()
 
 
+def legacy_dir(runs: Path, scope: str) -> Optional[Path]:
+    """The unmoved slot ``scope`` is read from: ``runs/<scope without
+    @daemon>`` when that is a real directory holding a run that is not another
+    daemon's (its state names no daemon, or this one). None otherwise.
+
+    Before its daemon moves it (:mod:`.slot_migration`) a slot is read and
+    written where it is, as it was before the qualifier. A run started since
+    records its daemon (:data:`DAEMON_KEY`), so a session of another daemon
+    with the same name does not take it over in the meantime. A symlink is
+    what a move leaves behind for processes still running the old code: the
+    qualified slot is the run, the link is not read."""
+    name = unqualified(scope)
+    if name == scope:
+        return None
+    old = runs / name
+    if old.is_symlink() or not old.is_dir():
+        return None
+    if not ((old / STATE_FILE).is_file() or (old / checkpoint.FILE).exists()):
+        return None
+    owner = slot_daemon(old)
+    if owner is not None and owner != daemon_of(scope):
+        return None
+    return old
+
+
+def slot_daemon(path: Path) -> Optional[str]:
+    """The daemon a slot directory's run recorded at start, or None."""
+    try:
+        if (path / checkpoint.FILE).exists():
+            state = json.loads(checkpoint.read(path / checkpoint.FILE)["state"])
+        else:
+            state = json.loads((path / STATE_FILE).read_text(encoding="utf-8"))
+    except (checkpoint.CheckpointError, OSError, ValueError, KeyError):
+        return None
+    value = state.get(DAEMON_KEY) if isinstance(state, dict) else None
+    return str(value) if value else None
+
+
 def list_scopes(cwd: Optional[str] = None) -> List[str]:
-    """Scopes in ``cwd`` that hold a run."""
+    """Scopes in ``cwd`` that hold a run, each with its daemon.
+
+    A slot not moved yet (``runs/s15``) is listed under the daemon its run
+    recorded, else this process's daemon -- the name :class:`RunStore` reads
+    it back by (:func:`legacy_dir`). The link a move leaves behind is not
+    listed."""
     base = resolve_cwd(cwd) / BASE_DIR / "runs"
     if not base.is_dir():
         return []
-    return sorted(p.name for p in base.iterdir()
-                  if (p / STATE_FILE).is_file() or (p / checkpoint.FILE).exists())
+    out = set()
+    for p in base.iterdir():
+        if p.is_symlink() or not ((p / STATE_FILE).is_file() or (p / checkpoint.FILE).exists()):
+            continue
+        name = p.name
+        if daemon_of(name) is None and main_scope(name) != DEFAULT_SCOPE:
+            try:
+                name = qualify(name, slot_daemon(p))
+            except StoreError:
+                continue
+        out.add(name)
+    return sorted(out)

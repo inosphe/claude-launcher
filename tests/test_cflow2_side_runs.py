@@ -148,11 +148,13 @@ def _select(tmp_path, scope, option, reason=None):
 
 
 def test_scope_helpers():
-    assert cstore.side_scope("w1", "stack") == "w1+stack"
-    assert cstore.side_scope("w1+other", "stack") == "w1+stack"
+    # a slot names its daemon (claunch-9jmdz); the tests run as the default one
+    assert cstore.side_scope("w1", "stack") == "w1@main+stack"
+    assert cstore.side_scope("w1+other", "stack") == "w1@main+stack"
+    assert cstore.side_scope("w1@other", "stack") == "w1@other+stack"
     assert cstore.main_scope("w1+stack~d2") == "w1" == cstore.main_scope("w1")
     assert cstore.side_of("w1+stack~d2") == "stack" and cstore.side_of("w1~d1") is None
-    assert cstore.normalize_scope("w1+stack") == "w1+stack"
+    assert cstore.normalize_scope("w1+stack") == "w1@main+stack"
     for bad in ("", "9x", "a b", "a+b"):
         with pytest.raises(cstore.StoreError):
             cstore.side_scope("w1", bad)
@@ -176,8 +178,8 @@ def test_start_side_needs_a_live_main_that_declares_it(tmp_path):
     with pytest.raises(runtime.FlowError, match="not a session's main run"):
         runtime.start_side("s", cwd=_cwd(tmp_path), main="w1+s", now=T0)
     st = _start_side(tmp_path)
-    assert st["scope"] == "w1+s" and st["driver"] == "w1"
-    assert st["side"] == {"name": "s", "main": "w1",
+    assert st["scope"] == "w1@main+s" and st["driver"] == "w1"
+    assert st["side"] == {"name": "s", "main": "w1@main",
                           "main_run": _status(tmp_path, "w1")["run"]}
     main = _status(tmp_path, "w1")
     assert main["sides"]["s"]["live"] is True and main["sides"]["s"]["declared"] == "side-def"
@@ -335,7 +337,7 @@ def test_abort_sides(tmp_path):
     _start_main(tmp_path)
     _start_side(tmp_path)
     cwd = _cwd(tmp_path)
-    assert runtime.abort_sides("w1", cwd, "session w1 ended", now=T0) == ["w1+s"]
+    assert runtime.abort_sides("w1", cwd, "session w1 ended", now=T0) == ["w1@main+s"]
     side = RunStore(cwd, "w1+s").load_state()
     assert side["status"] == "aborted" and side["reason"] == "session w1 ended"
     assert RunStore(cwd, "w1").load_state()["status"] == "running"
@@ -374,7 +376,7 @@ def test_clock_ends_side_runs_of_an_exited_session(tmp_path):
     assert RunStore(cwd, "w1+s").load_state()["status"] == "running"
     del live["w1"]
     clock.session_exited(sess)
-    assert clock.end_sides(T0) == [(os.path.realpath(cwd), "w1+s")]
+    assert clock.end_sides(T0) == [(os.path.realpath(cwd), "w1@main+s")]
     assert RunStore(cwd, "w1+s").load_state()["status"] == "aborted"
 
 
@@ -386,11 +388,11 @@ def test_mcp_side_argument(tmp_path, monkeypatch):
     monkeypatch.chdir(cwd)
     monkeypatch.setenv("CLAUNCH_SESSION", "w1")
     out = cflow2_mcp.call_tool("flow_start", {"workflow": "m"})
-    assert out["scope"] == "w1"
+    assert out["scope"] == "w1@main"
     out = cflow2_mcp.call_tool("flow_start", {"side": "s"})
-    assert out["scope"] == "w1+s" and out["driver"] == "w1"
+    assert out["scope"] == "w1@main+s" and out["driver"] == "w1"
     st = cflow2_mcp.call_tool("flow_status", {"side": "s"})
-    assert st["scope"] == "w1+s" and [t["label"] for t in st["tasks"]] == ["open"]
+    assert st["scope"] == "w1@main+s" and [t["label"] for t in st["tasks"]] == ["open"]
     out = cflow2_mcp.call_tool("flow_report", {"side": "s", "node": "open"})
     assert out["choices"]
     with pytest.raises(runtime.FlowError, match="not both"):

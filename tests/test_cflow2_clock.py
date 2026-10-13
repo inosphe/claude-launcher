@@ -250,7 +250,7 @@ def test_session_executor_spawns_child_and_child_submits(tmp_path, monkeypatch):
     assert calls and calls[0][0] == "own"
     body = calls[0][1]
     assert body["workflow"] == "-" and body["beads"] is False
-    assert "review thing" in body["task"] and 'scope="own"' in body["task"]
+    assert "review thing" in body["task"] and 'scope="own@main"' in body["task"]
     assert str(run_dir.resolve()) in body["task"]
     rec = RunStore(str(run_dir), "own").load_state()["delegations"][did]
     assert rec["status"] == "running" and rec["child"] == "kid"

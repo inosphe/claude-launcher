@@ -210,6 +210,14 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
     p2p_hub = _start_p2p(cfg, actual_port, token)
     app["p2p"] = p2p_hub
     mesh_manager.start()
+    # Before any clock reads a v2 run: this daemon's run slots written before
+    # the daemon qualifier move to <session>@<daemon>, once (claunch-9jmdz).
+    from . import cflow2_slots
+
+    try:
+        await asyncio.to_thread(cflow2_slots.run_at_start, manager)
+    except Exception:  # noqa: BLE001 - old slots stay readable where they are
+        log.exception("cflow2 slots: start-time move failed; old slots stay in place")
     ask_clock = cflow_clock.AskClock()
     ask_clock.start()
     reminder_clock = session_reminder.SessionReminderService(manager, mesh_manager)

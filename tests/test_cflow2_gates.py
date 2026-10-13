@@ -118,7 +118,7 @@ def test_verify_pass_carries_run_env_and_proceeds(tmp_path):
     env = seen["env"]
     assert env["CFLOW2_RUN"] == d.state()["run_id"] and env["CFLOW2_NODE"] == "a"
     assert env["CFLOW_IN_WHO"] == "me" and env["CFLOW_IN_N"] == "3"
-    assert env["CFLOW2_SCOPE"] == SCOPE
+    assert env["CFLOW2_SCOPE"] == f"{SCOPE}@main"  # the slot names its daemon
     assert d.events("verify_passed")[0]["exit"] == 0
 
 

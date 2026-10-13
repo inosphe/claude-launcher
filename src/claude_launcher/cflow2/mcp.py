@@ -421,7 +421,7 @@ def _call(name: str, args: dict) -> Dict[str, Any]:
         if side:
             return _start_side(side, args, cwd, own, session)
         scope = _scope(args)
-        if scope and scope != own:
+        if scope and store.normalize_scope(scope) != own:
             raise runtime.FlowError(
                 f"a run starts in this session's own slot ({own!r}); scope {scope!r} is "
                 f"another's")

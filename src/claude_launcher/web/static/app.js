@@ -5315,12 +5315,23 @@ function renderTermNote() {
   chip.title = note;
 }
 
+/* The session a run's scope stands for. A v1 scope is the session's name; a
+   v2 slot names its daemon too (`s15@main`, `s15@main+stack`), and the server
+   sends the session it maps to here as `session` ("" when the slot is another
+   daemon's, claunch-9jmdz). */
+function scopeSession(scope, session) {
+  if (!scope || !scope.includes("@")) return scope || "";
+  return session || "";
+}
+
 /* The cflow run a rail row speaks for. Runs are keyed (cwd, session); after a
    migrate-session a stale run under the old cwd can share the scope, so the
-   one whose canonical cwd still holds the live session wins. */
+   one whose canonical cwd still holds the live session wins. Only a session's
+   main run: a side or nested slot (`+`, `~`) is not the row's. */
 function sessCflowRun(name) {
   const runs = (cflowCache || []).filter(
-    (r) => r.scope === name && r.status !== "idle"
+    (r) => !/[+~]/.test(r.scope || "") && scopeSession(r.scope, r.session) === name
+      && r.status !== "idle"
   );
   return runs.find((r) => (r.sessions || []).includes(name)) || runs[0] || null;
 }
@@ -8992,7 +9003,8 @@ async function refreshCflow() {
 // Independent of the rail's filter. Reuse its session categories, including
 // the pause marker on exited sessions, rather than the workflow's status.
 function cflowSessionCategory(run, sessions) {
-  const session = (sessions || []).find((s) => s.name === run.scope);
+  const name = scopeSession(run.scope, run.session);
+  const session = (sessions || []).find((s) => s.name === name);
   if (session) return sessionCategory(session);
   return "unknown";
 }
@@ -9160,10 +9172,11 @@ function cflowCard(r) {
   // exited is exactly the one a human mistakes for someone else's, and the
   // exited session is still there to attach (it resumes).
   if (scoped) {
-    const live = (r.sessions || []).includes(r.scope);
+    const owner = scopeSession(r.scope, r.session);
+    const live = (r.sessions || []).includes(owner);
     const category = cflowSessionCategory(r, sessionsCache);
     const sess = cflowLine(
-      `session: ${r.scope} · ${category === "unknown" ? "no session record" : category}`, "dim"
+      `session: ${owner || r.scope} · ${category === "unknown" ? "no session record" : category}`, "dim"
     );
     sess.classList.add("linkish");
     sess.title = live
@@ -9171,7 +9184,7 @@ function cflowCard(r) {
       : "this run's session is not running — open it to resume";
     sess.addEventListener("click", (e) => {
       e.stopPropagation();
-      location.hash = "#/s/" + encodeURIComponent(r.scope);
+      location.hash = "#/s/" + encodeURIComponent(owner || r.scope);
     });
     li.appendChild(sess);
   }
@@ -30530,9 +30543,11 @@ function restoreWfScrolls(view, keep) {
    wanted here. */
 function wfOwnerChip(data) {
   if (!data.scope || data.scope === "default") return null;
-  const owner = el("a", "cflow-scope", `session ${data.scope}`);
-  owner.href = "#/s/" + encodeURIComponent(data.scope);
-  owner.title = (data.sessions || []).includes(data.scope)
+  const name = scopeSession(data.scope, data.session);
+  if (!name) return null;  // another daemon's run: its session is not here
+  const owner = el("a", "cflow-scope", `session ${name}`);
+  owner.href = "#/s/" + encodeURIComponent(name);
+  owner.title = (data.sessions || []).includes(name)
     ? "attach this run's session"
     : "this run's session is not running — open it to resume";
   return owner;
@@ -32700,7 +32715,7 @@ function renderCflow2Into(box, data, ui, force = false) {
   const owner = wfOwnerChip(data);
   if (owner) nav.appendChild(owner);
   for (const s of sessions) {
-    if (s === data.scope) continue;  // the chip already is that link
+    if (s === scopeSession(data.scope, data.session)) continue;  // the chip already is that link
     const link = el("a", "wf-session", `attach: ${s}`);
     link.href = "#/s/" + encodeURIComponent(s);
     nav.appendChild(link);

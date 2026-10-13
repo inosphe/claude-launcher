@@ -27,7 +27,7 @@ import sys
 from typing import Any, Callable, Dict, Optional
 
 from ..cflow2 import executors, ir, runtime
-from ..cflow2.store import RunStore
+from ..cflow2.store import RunStore, unqualified
 
 log = logging.getLogger("claunch.daemon.cflow2")
 
@@ -148,13 +148,16 @@ def spawn_session(cwd: str, scope: str, did: str, *,
     body = spawn_body(brief, cwd=str(st.cwd), scope=st.scope,
                       receipt_path=str(st.receipt_path(did, ".child.json")), mcp=mcp,
                       marker=marker, receipt_token=token)
+    # the parent is named as the session manager names it: the slot without
+    # its daemon (``s15`` for ``s15@main``, claunch-9jmdz)
+    parent = unqualified(st.scope)
     try:
-        child = spawn(scope, body)
+        child = spawn(parent, body)
     except Exception as exc:  # noqa: BLE001 - every refusal reroutes
         found = None
         if find_child is not None:
             with contextlib.suppress(Exception):
-                found = find_child(scope, marker)
+                found = find_child(parent, marker)
         if found:
             _record_child(cwd, scope, did, found, runner, marker, adopted=str(exc))
             return {"delegation": did, "result": "adopted", "child": found, "error": str(exc)}
