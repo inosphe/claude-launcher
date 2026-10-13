@@ -325,6 +325,25 @@ const RUN = {
         ctx.asked());
   ctx.reset();
 
+  /* the report kind of the same request (claunch-vwmoj): Report / Refuse on
+     the same endpoint; the row once threw a ReferenceError (claunch-cjb97) */
+  ctx.setRail({ s16: { ...ROW, gated: true, owed: ["report: policy"], answers: [
+    { kind: "move", request: "mr-2", node: "policy", label: "policy", by: "s16",
+      report: true, outcome: "ok", reason: "verify cannot import claude_launcher",
+      prompt: "s16 asks you to report policy as ok: verify cannot import" }] } });
+  ctx.renderTermCflow();
+  bs = buttons(strip);
+  check("v2 report: Report and Refuse", bs.map((b) => b.text).join() === "Report 'ok',Refuse",
+        bs.map((b) => b.text));
+  await bs[0].fire("click");
+  check("v2 report: the confirm names the task and the result",
+        ctx.asked().some((q) => q.startsWith("Report 'policy' as 'ok', as s16 asked?")),
+        ctx.asked());
+  check("v2 report: Report posts approve",
+        ctx.actions().length === 1 && ctx.actions()[0][0] === "/api/cflow2/move/resolve"
+        && ctx.actions()[0][1].decision === "approve", ctx.actions());
+  ctx.reset();
+
   /* require_reason constrains agents; a person may select without a reason,
      just as on the run page (docs 2.11). */
   ctx.setRail({ s16: { ...ROW, gated: true, owed: ["choose: x"], answers: [
