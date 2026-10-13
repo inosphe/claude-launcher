@@ -171,6 +171,7 @@ function railCwdLine() { return el("span", "rail-cwd"); }
 function railSeenLine() { return el("span", "rail-seen"); }
 function decorateNoteRow() {}
 function decorateProgressRow() {}
+function decorateProcsRow() {}
 function decorateBriefingRow() {}
 function openDetail() {}
 function openSpawnModal() {}

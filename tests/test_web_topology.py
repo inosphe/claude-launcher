@@ -409,6 +409,7 @@ CHECKS = [
         "moveplan_check.js",
         "termwindow_check.js",
         "termtimers_check.js",
+        "termprocs_check.js",
         "window_check.js",
         "stats_check.js",
         "sendinput_check.js",

@@ -66,7 +66,7 @@ from . import worktree_inventory
 from . import work_checkout
 from . import vscode as vscode_mod
 from . import cflow2_approve, cflow2_web
-from . import session_timers, session_prs
+from . import session_timers, session_prs, session_procs
 from ..cflow2 import expr as cflow2_expr, frontend as cflow2_frontend
 from ..cflow2 import ir as cflow2_ir, runtime as cflow2_runtime, store as cflow2_store
 from ..cflow2 import layers as cflow2_layers
@@ -855,6 +855,8 @@ def build_app(
     r.add_get("/api/sessions/{name}/queued", h_session_queued)
     r.add_get("/api/sessions/{name}/window", h_session_window)
     r.add_get("/api/sessions/{name}/timers", h_session_timers)
+    r.add_get("/api/sessions/{name}/procs", h_session_procs)
+    r.add_post("/api/sessions/{name}/procs/{pid}/kill", h_session_proc_kill)
     r.add_post("/api/sessions/{name}/queued/flush", h_session_queued_flush)
     r.add_post("/api/sessions/{name}/queued/hold", h_session_hold)
     r.add_get("/api/sessions/{name}/reminder", h_session_reminder)
@@ -7545,6 +7547,13 @@ async def h_sessions_list(request: web.Request) -> web.Response:
         meter = metering.snapshot()
         # And one listing of the live files: whether a call is in flight now.
         meter_live = metering.live_index()
+        # What the daemon's restart commands left running for each session
+        # (claunch-ihwel): the tracker's memory, kept current by its own
+        # clock, so a list poll reads no process table.
+        try:
+            running = session_procs.tracker().summary()
+        except Exception:
+            running = {}
         try:
             meter_age = metering.summary_max_age()
         except store.StoreError:
@@ -7597,6 +7606,8 @@ async def h_sessions_list(request: web.Request) -> web.Response:
             ho = handoffs.get(info.get("name") or "")
             if ho:
                 info["handoff"] = ho
+            if running.get(info.get("name") or ""):
+                info["procs"] = running[info["name"]]
             if reminder_service is not None:
                 info["session_reminder"] = reminder_service.status(
                     info.get("name") or "", cfg=reminder_cfg, session=s,
@@ -9082,6 +9093,35 @@ async def h_session_timers(request: web.Request) -> web.Response:
     data = await asyncio.to_thread(
         session_timers.collect, session.sdef.name, _session_cwd(session), app=request.app)
     return json_response(data)
+
+
+async def h_session_procs(request: web.Request) -> web.Response:
+    """The processes the daemon started for this session (a restart
+    command) that are still running, with what they started -- the
+    terminal's process line (#term-procs) polls it (claunch-ihwel)."""
+    session = _session(request)
+    found = session_procs.tracker()
+    await asyncio.to_thread(found.refresh)
+    return json_response({"session": session.sdef.name,
+                          "procs": found.listing(session.sdef.name)})
+
+
+async def h_session_proc_kill(request: web.Request) -> web.Response:
+    """End one of this session's tracked processes and everything under it.
+    Only a pid the tracker holds for this session is signalled: any other
+    is 404, so this route cannot be used to stop an arbitrary process."""
+    session = _session(request)
+    try:
+        pid = int(request.match_info["pid"])
+    except ValueError:
+        return json_error(400, "pid must be an integer")
+    found = session_procs.tracker()
+    try:
+        killed = await asyncio.to_thread(found.kill, session.sdef.name, pid)
+    except session_procs.NotAMember as exc:
+        return json_error(404, str(exc))
+    return json_response({"session": session.sdef.name, "killed": killed,
+                          "procs": found.listing(session.sdef.name)})
 
 
 async def h_session_queued_flush(request: web.Request) -> web.Response:

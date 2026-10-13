@@ -513,6 +513,13 @@
         <button id="term-blockbar" class="term-btn hidden" type="button" aria-pressed="true"
                 aria-controls="log-format"
                 title="show or hide the HTML view's line block header (format and timeline legend)">line header</button>
+        <!-- The process line (#term-procs): what the daemon's restart
+             command left running for this session (a dev server). Up only
+             while there is one; shows or hides the line, remembered per
+             browser (claunch-ihwel). -->
+        <button id="term-procsbtn" class="term-btn hidden" type="button" aria-pressed="true"
+                aria-controls="term-procs"
+                title="show or hide the processes the daemon started for this session (a restart command and what it left running)">procs</button>
         <button id="term-rebrief" class="term-btn"
                 title="re-type this session's briefing (mesh, run, parent, task) into its terminal — for an agent whose context was cleared or compacted">rebrief</button>
         <!-- retro: the retrospective prompt pack, an on-demand pack typed into
@@ -600,6 +607,13 @@
          hidden while there is no timer. A chip opens the run it belongs to. -->
     <div id="term-timers" class="hidden" role="status"
          aria-label="session timers"></div>
+    <!-- Processes the daemon started for this session that are still
+         running -- a workflow restart command and what it left behind, such
+         as `npm run dev` -- one line each with a kill button, from
+         GET /api/sessions/<name>/procs. Rendered by renderTermProcs();
+         hidden while there is none or when #term-procsbtn folds it. -->
+    <div id="term-procs" class="hidden" role="status"
+         aria-label="session processes"></div>
     <!-- The attached session's cflow run is stopped on a person: one line
          with the step, the question and a button per answer, the same
          presses the run page makes. Rendered by renderTermCflow(); hidden

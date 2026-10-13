@@ -208,6 +208,7 @@ new Function(
   + src.match(/^let railNoteEditor = .+$/m)[0] + "\n"
   + slice("decorateNoteRow") + slice("railNotePlace") + slice("railNoteButton")
   + slice("progressBrief") + slice("decorateProgressRow")
+  + "function decorateProcsRow() {}\n"
   + slice("railNoteFocused") + slice("closeRailNoteEditor")
   + slice("openRailNoteEditor")
   + slice("renderTermNote")

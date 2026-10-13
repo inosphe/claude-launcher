@@ -22,7 +22,7 @@ from . import basetemp_reaper
 from . import cflow2_clock as cflow2_clock_mod
 from . import cflow_clock, paths, restart_notice, resume, runtime_state, window as window_mod
 from . import harness as harness_mod
-from . import hold as hold_mod, instance_manifest, restore_queue, session_reminder
+from . import hold as hold_mod, instance_manifest, restore_queue, session_procs, session_reminder
 from .api import build_app, notify_shutdown
 from .manager import SessionManager
 from .mesh import MeshError, MeshManager
@@ -229,6 +229,10 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
     checklist_clock.start()
     restart_clock = cflow_clock.RestartClock(manager, boot_id=app["boot_id"])
     restart_clock.start()
+    # What restart commands left running, kept current for the session
+    # list and the terminal's process line (claunch-ihwel).
+    procs_clock = session_procs.RefreshClock()
+    procs_clock.start()
     trigger_clock = cflow_clock.TriggerClock(manager, mesh_manager)
     trigger_clock.start()
     round_clock = cflow_clock.RoundStartClock(manager)
@@ -362,6 +366,7 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
         await teardown.step("beads", app["beads"].cancel_all())
         await teardown.step("checklist_clock", checklist_clock.shutdown())
         await teardown.step("restart_clock", restart_clock.shutdown())
+        await teardown.step("procs_clock", procs_clock.shutdown())
         await teardown.step("trigger_clock", trigger_clock.shutdown())
         await teardown.step("event_clock", event_clock.shutdown())
         if cflow2_clock is not None:

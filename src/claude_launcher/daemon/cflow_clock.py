@@ -63,7 +63,7 @@ from typing import Awaitable, Callable, Dict, List, Optional, Set, Tuple
 from .. import store
 from ..cflow import engine as cflow_engine, landing as cflow_landing, model as cflow_model, state as cflow_state
 from ..cflow2 import ir as cflow2_ir, runtime as cflow2_runtime, store as cflow2_store
-from . import briefing, landing_route, status_checks
+from . import briefing, landing_route, session_procs, status_checks
 from .session import STATUS_BUSY, STATUS_IDLE
 
 log = logging.getLogger("claunch.daemon.cflow")
@@ -2073,6 +2073,12 @@ class RestartClock:
         # restarts the daemon later -- the journal and the machine disagreeing.
         # So when the timeout comes, the clock asks the gate whether it still
         # holds this session's request, and keeps waiting while it does.
+        #
+        # What the command starts and leaves running (a dev server) is the
+        # session's to see and to stop (claunch-ihwel): the shell is adopted by
+        # :mod:`.session_procs`, the owner tag rides in its environment, and
+        # the process table is re-read every TRACK_POLL seconds while it runs
+        # so a grandchild is recorded before its parent exits.
         env = dict(os.environ)
         session = ""
         if scope and scope != cflow_state.DEFAULT_SCOPE:
@@ -2080,27 +2086,44 @@ class RestartClock:
             session = scope
         else:
             env.pop(cflow_state.SESSION_ENV, None)
+        env = session_procs.owner_env(env, session)
+        procs = _tracker() if session else None
         try:
             with tempfile.TemporaryFile(mode="w+b") as out:
                 proc = subprocess.Popen(
                     action["command"], cwd=cwd, shell=True, env=env,
                     stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                 )
-                wait = float(action["timeout"])
+                if procs is not None:
+                    _quietly(procs.adopt, session, proc.pid,
+                             label="restart:" + str(action.get("step") or action.get("label")
+                                                    or action.get("node") or ""),
+                             command=str(action["command"]))
+                deadline = time.monotonic() + float(action["timeout"])
                 held = False
                 while True:
+                    left = deadline - time.monotonic()
                     try:
-                        code = proc.wait(timeout=wait)
+                        if procs is not None and left > 0:
+                            code = proc.wait(timeout=min(left, TRACK_POLL))
+                        else:
+                            code = proc.wait(timeout=max(left, 0))
                         break
                     except subprocess.TimeoutExpired:
+                        if procs is not None:
+                            _quietly(procs.refresh)
+                        if time.monotonic() < deadline:
+                            continue
                         if session and holding(session):
                             held = True
-                            wait = hold_poll
+                            deadline = time.monotonic() + hold_poll
                             continue
                         proc.kill()
                         proc.wait()
                         output = _read_back(out) + "\nrestart command timed out"
                         return {"exit_code": None, "output": output}
+                if procs is not None:
+                    _quietly(procs.refresh)
                 output = _read_back(out)
                 if held:
                     output += ("\nrestart command outlived its timeout while the "
@@ -2117,6 +2140,26 @@ class RestartClock:
             session.queue_delivery(block)
         except Exception:
             log.exception("cflow restart notice delivery to %r failed", scope)
+
+
+#: How often a running restart command's process tree is re-read.
+TRACK_POLL = 1.0
+
+
+def _quietly(fn, *args, **kwargs) -> None:
+    """Process tracking is a view: a failure there must not fail a restart."""
+    try:
+        fn(*args, **kwargs)
+    except Exception:
+        log.exception("session process tracking failed")
+
+
+def _tracker():
+    try:
+        return session_procs.tracker()
+    except Exception:
+        log.exception("session process tracker unavailable")
+        return None
 
 
 def _read_back(fh) -> str:

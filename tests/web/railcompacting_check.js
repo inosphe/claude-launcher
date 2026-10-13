@@ -114,6 +114,7 @@ function applyBriefingCards() {}
    railnote_check's subject, not this harness's. */
 function decorateNoteRow(li, s) {}
 function decorateProgressRow(li, s) {}
+function decorateProcsRow(li, s) {}
 function decorateBriefingRow(li, s) {}
 /* s248's handle pill and header chip are another session's harness subject
    (sesshandle_check), not this one's — no-op them the way the other
