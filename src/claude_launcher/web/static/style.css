@@ -5943,6 +5943,20 @@ body.embed #main { width: 100%; }
   border-radius: 9px; font-size: 10px; font-variant-numeric: tabular-nums;
 }
 .window-section > .wf-note { margin: 0; padding: 12px; }
+.window-limits-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 8px 16px; padding: 4px 12px 10px;
+}
+.window-limit {
+  display: grid; grid-template-columns: 1fr 72px auto auto; gap: 8px;
+  align-items: center; font-size: 12px; color: #c6cdd5;
+}
+.window-limit input { width: 72px; }
+.window-limits-foot {
+  display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+  padding: 8px 12px 12px;
+}
+.window-limits-foot > .wf-note { margin: 0; }
 .window-row {
   display: grid;
   grid-template-columns: 45px 72px minmax(90px, 140px) minmax(150px, 1fr) 70px auto;
