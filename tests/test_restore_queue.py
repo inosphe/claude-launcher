@@ -297,3 +297,75 @@ def test_killing_a_delayed_record_settles_it(home):
     assert record.delayed_at is None and record.held_at is None
     assert session_mod.session_category(record) == "killed"
     assert exits == ["d"]
+
+
+def test_a_used_delayed_record_whose_relaunch_fails_is_filed_failed(home, monkeypatch):
+    """A viewer, a mesh message or a cflow notice wakes a delayed record ahead
+    of the queue. When that relaunch raises, the record is filed failed --
+    the same as the queue's own failure -- instead of staying delayed with
+    nobody left to try it (claunch-f9ene)."""
+    mgr = _staggered()
+    _owed(mgr, "d")
+    mgr.restore_queue.append("d")
+
+    async def refuse(self, **kw):
+        raise RuntimeError("spawn refused")
+
+    monkeypatch.setattr(SessionManager, "create_async", refuse)
+    exits = []
+    mgr.exit_hooks.append(lambda s: exits.append(s.sdef.name))
+
+    async def run():
+        try:
+            await mgr.wake_async("d", by="attach")
+        except RuntimeError:
+            return True
+        return False
+
+    assert asyncio.run(run()) is True
+    record = mgr.get("d")
+    assert record.delayed_at is None and record.held_at is None
+    assert record.failed_at
+    assert session_mod.session_category(record) == "failed"
+    assert exits == ["d"]
+
+
+def test_the_queue_does_not_strand_a_record_whose_use_wake_fails_mid_turn(
+        home, monkeypatch):
+    """The queue's turn comes while a use-wake of the same record is still
+    relaunching it: the record is out of the registry for that moment, so the
+    queue passes it. The relaunch then fails. The record must not come back
+    delayed -- the queue has gone past it and nothing else would retry it
+    (claunch-f9ene)."""
+    mgr = _staggered()
+    _owed(mgr, "d")
+    mgr.restore_queue.append("d")
+
+    async def run():
+        release = asyncio.Event()
+        entered = asyncio.Event()
+
+        async def slow_refuse(self, **kw):
+            entered.set()
+            await release.wait()
+            raise RuntimeError("spawn refused")
+
+        monkeypatch.setattr(SessionManager, "create_async", slow_refuse)
+        use = asyncio.get_running_loop().create_task(
+            mgr.wake_async("d", by="mesh"))
+        await entered.wait()
+        queue = restore_queue.RestoreQueue(mgr, interval=0.0)
+        queue.start()
+        await queue._task
+        release.set()
+        try:
+            await use
+        except RuntimeError:
+            pass
+        return queue
+
+    queue = asyncio.run(run())
+    assert queue.started == []
+    record = mgr.get("d")
+    assert record.delayed_at is None and record.held_at is None
+    assert session_mod.session_category(record) == "failed"
