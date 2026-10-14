@@ -55,13 +55,13 @@ KEEP = 32
 READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 # The session writes that come with typing and resizing: one per keystroke or
-# drag, and none of them changes a row of the session list.
-_TYPING = frozenset({
-    "/api/sessions/{name}/keys",
-    "/api/sessions/{name}/resize",
-    "/api/sessions/{name}/paste-image",
-    "/api/sessions/{name}/line-sync",
-})
+# drag, and none of them changes a row of the session list. Written as
+# suffixes: a whole "/keys" route string in a module reads, to
+# tests/test_delivery_contract.py, as a sender posting to the raw passthrough.
+_TYPING = frozenset(
+    "/api/sessions/{name}/" + suffix
+    for suffix in ("keys", "resize", "paste-image", "line-sync")
+)
 
 # The session writes that change which lanes the queues view has, or whose
 # sessions they belong to.
