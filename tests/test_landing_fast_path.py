@@ -233,8 +233,15 @@ def test_the_leader_knows_a_landing_question_is_now_an_exception(path):
     )
     assert "예외" in standby
     assert "claunch cflow journal -t" in standby, (
-        "the leader is told to read what broke before answering"
+        "the leader is told to read which reason opened the door before answering"
     )
+    # claunch-zklwy: the worker's question names two reasons since
+    # claunch-gbw47 -- a broken machine check, or a landing path the worker
+    # could not decide. The leader reading only the first looks for a broken
+    # check that is not there.
+    assert "착지 경로를 스스로 정할 수 없다고 판단했다" in " ".join(standby.split())
+    assert "어느 사유인지" in standby
+    assert "하나라도 깨졌을 때만" not in standby
     # ...and told not to redo the preflight's measuring in the answer, which
     # is where the duplicated turn came from (ask-19ed7b).
     assert "integrate-preflight의 일" in standby
