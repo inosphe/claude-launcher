@@ -195,7 +195,7 @@ def test_a_definition_that_would_come_back_blank_is_not_delayed(home, monkeypatc
     assert launched == ["blank"]
 
 
-def test_rank_puts_leaders_then_parents_then_working_then_recent():
+def test_rank_puts_leaders_then_working_then_parents_then_recent():
     mgr = _manager()
     _owed(mgr, "idle-old", output="2026-10-13T01:00:00+00:00")
     _owed(mgr, "idle-new", output="2026-10-13T08:00:00+00:00")
@@ -209,7 +209,26 @@ def test_rank_puts_leaders_then_parents_then_working_then_recent():
         roles_of=lambda n: ["leader"] if n == "lead" else ["worker"],
         busy=["busy"],
     )
-    assert order == ["lead", "parent", "busy", "idle-new", "idle-old", "child"]
+    assert order == ["lead", "busy", "parent", "idle-new", "idle-old", "child"]
+
+
+def test_rank_starts_a_busy_worker_before_every_idle_parent():
+    # claunch-z6c4b: s469 was mid-landing at the restart and came back 41st,
+    # behind 40 idle parents (each with a reviewer child), 4m48s later.
+    mgr = _manager()
+    names = []
+    for i in range(3):
+        _owed(mgr, f"p{i}", output="2026-10-13T08:00:00+00:00")
+        _owed(mgr, f"p{i}-rev", parent=f"p{i}")
+        names += [f"p{i}", f"p{i}-rev"]
+    _owed(mgr, "busy-parent")
+    _owed(mgr, "busy-parent-rev", parent="busy-parent")
+    _owed(mgr, "busy-worker", output="2026-10-13T01:00:00+00:00")
+    names += ["busy-worker", "busy-parent", "busy-parent-rev"]
+    order = restore_queue.rank(mgr, names, busy=["busy-worker", "busy-parent"])
+    # Working first, a parent ahead among them; then the idle parents.
+    assert order[:2] == ["busy-parent", "busy-worker"]
+    assert order[2:5] == ["p0", "p1", "p2"]
 
 
 def test_the_queue_wakes_in_order_skips_the_used_and_fails_a_broken_relaunch(home):

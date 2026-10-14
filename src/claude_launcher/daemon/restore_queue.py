@@ -57,8 +57,12 @@ def rank(manager, names: Iterable[str], *, roles_of: Optional[RolesOf] = None,
 
     1. a mesh leader — the session that hands out and lands everyone
        else's work;
-    2. a parent, more descendants first — its children answer to it;
-    3. mid-turn when the previous daemon went down (``busy``);
+    2. mid-turn when the previous daemon went down (``busy``) — the restart
+       cut a turn short, and every interval it waits is that work standing
+       still (claunch-z6c4b: a worker mid-landing came back 41st, behind 40
+       idle parents, 4m48s after the restart);
+    3. a parent, more descendants first — its children answer to it; this
+       orders the busy ones among themselves as well as the idle ones;
     4. most recent output — the nearest thing to "was working" for an idle
        record.
 
@@ -89,7 +93,7 @@ def rank(manager, names: Iterable[str], *, roles_of: Optional[RolesOf] = None,
             return 0.0
 
     keyed = [
-        ((not leader(n), -descendants(n), n not in working, -output(n), i), n)
+        ((not leader(n), n not in working, -descendants(n), -output(n), i), n)
         for i, n in enumerate(names)
     ]
     return [n for _, n in sorted(keyed)]
