@@ -10,6 +10,8 @@ T5 list orders open before closed and reports open/agent_seq; rail counts
    per session
 T6 bad input: empty title/text, unknown thread, too many open threads
 T7 read pages with after/limit
+T8 history: every session's threads, newest activity first, paged, filtered
+   by session and status, each with its last messages (claunch-8k02k)
 """
 
 import pytest
@@ -122,3 +124,48 @@ def test_t7_read_pages(st):
     assert st.read(tid, after=seqs[-1])["messages"] == []
     with pytest.raises(S.ThreadError):
         st.read(tid, after="x")
+
+
+def test_t8_history_across_sessions(st, monkeypatch):
+    clock = iter(f"2026-10-14T10:{m:02d}:00+00:00" for m in range(60))
+    monkeypatch.setattr(S, "_now", lambda: next(clock))
+    a = st.open(S.USER, "s1", "alpha", "a1")["thread"]["id"]
+    b = st.open("s2", "s2", "beta", "b1")["thread"]["id"]
+    c = st.open(S.USER, "s3", "gamma")["thread"]["id"]
+    st.post("s1", a, "a2")                      # alpha is now the most recent
+    st.set_status(S.USER, b, "closed")          # ...until beta is closed
+
+    h = st.history()
+    assert [t["id"] for t in h["threads"]] == [b, a, c]
+    assert h["total"] == 3 and h["page"] == 1 and h["pages"] == 1
+    alpha = h["threads"][1]
+    assert [(m["author"], m["body"]) for m in alpha["messages"]] == [("user", "a1"), ("agent", "a2")]
+    assert alpha["omitted"] == 0 and h["threads"][2]["messages"] == []
+    assert [s["session"] for s in h["sessions"]] == ["s2", "s1", "s3"]
+    assert all(s["threads"] == 1 for s in h["sessions"])
+
+    p1, p2 = st.history(per_page=2), st.history(page=2, per_page=2)
+    assert [t["id"] for t in p1["threads"]] == [b, a] and p1["pages"] == 2
+    assert [t["id"] for t in p2["threads"]] == [c]
+    assert st.history(page=9, per_page=2)["threads"] == []
+
+    assert [t["id"] for t in st.history(session="s1")["threads"]] == [a]
+    assert [t["id"] for t in st.history(status="closed")["threads"]] == [b]
+    only = st.history(session="s1", status="closed")
+    assert only["threads"] == [] and only["total"] == 0 and only["pages"] == 1
+    assert len(only["sessions"]) == 3           # the filter's choices do not shrink with it
+
+    with pytest.raises(S.ThreadError):
+        st.history(page="x")
+    with pytest.raises(S.ThreadError):
+        st.history(status="gone")
+
+
+def test_t8_history_keeps_the_last_messages(st, monkeypatch):
+    monkeypatch.setattr(S, "HISTORY_MESSAGES", 3)
+    tid = st.open(S.USER, "s1", "long")["thread"]["id"]
+    for i in range(5):
+        st.post(S.USER, tid, f"m{i}")
+    t = st.history()["threads"][0]
+    assert [m["body"] for m in t["messages"]] == ["m2", "m3", "m4"] and t["omitted"] == 2
+    assert st.history(per_page=10_000)["per_page"] == S.HISTORY_MAX_PAGE

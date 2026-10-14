@@ -122,6 +122,24 @@ def test_identity_rules(tmp_path):
     run(tmp_path, scenario)
 
 
+def test_history_lists_every_sessions_threads(tmp_path):
+    async def scenario(req, mgr):
+        one = (await req("POST", "/api/threads", {"to": "s1", "title": "one", "text": "hi"}))["thread"]["id"]
+        two = (await req("POST", "/api/threads", {"session": "s2", "title": "two", "text": "fyi"}))["thread"]["id"]
+        h = await req("GET", "/api/threads/history")
+        assert {t["id"] for t in h["threads"]} == {one, two} and h["total"] == 2
+        assert {t["session"]: t["messages"][0]["body"] for t in h["threads"]} == {"s1": "hi", "s2": "fyi"}
+        assert {s["session"] for s in h["sessions"]} == {"s1", "s2"}
+        h = await req("GET", "/api/threads/history?session=s2&per_page=1&page=1")
+        assert [t["id"] for t in h["threads"]] == [two] and h["per_page"] == 1
+        await req("POST", f"/api/threads/{one}/close", {})
+        assert [t["id"] for t in (await req("GET", "/api/threads/history?status=closed"))["threads"]] == [one]
+        await req("GET", "/api/threads/history?page=x", status=400)
+        await req("GET", "/api/threads/history?status=nope", status=400)
+        assert mgr.sessions["s2"].delivered == []      # reading the history types nothing anywhere
+    run(tmp_path, scenario)
+
+
 def test_a_held_session_is_woken_and_an_exited_one_keeps_the_message(tmp_path):
     async def scenario(req, mgr):
         tid = (await req("POST", "/api/threads", {"to": "s1", "title": "t"}))["thread"]["id"]

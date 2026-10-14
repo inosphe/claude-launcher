@@ -20204,6 +20204,7 @@ function mobileTitle() {
     case "beads": return beadsSection === "reports" ? "reports"
       : beadsSection === "queues" ? "queues" : "beads";
     case "worktrees": return "worktrees";
+    case "threads": return "threads";
     case "glossary": return "용어집";
     case "sims": return "simulations";
     case "spec": return "work spec";
@@ -20369,6 +20370,7 @@ const VIEWS = {
   cli: "cli-view",
   beads: "beads-view",
   worktrees: "worktrees-view",
+  threads: "threads-view",
   glossary: "glossary-view",
   sims: "sims-view",
   spec: "spec-view",
@@ -21057,6 +21059,7 @@ function parseHash(h) {
     : { page: "beads", id: parts[1] || "" };
   if (parts[0] === "reports") return { page: "beads", section: "reports" };
   if (parts[0] === "worktrees") return { page: "worktrees" };
+  if (parts[0] === "threads") return { page: "threads" };
   if (parts[0] === "glossary") return { page: "glossary" };
   if (parts[0] === "sims") return { page: "sims", id: parts[1] || "", section: parts[2] || "" };
   if (parts[0] === "spec") return { page: "spec" };
@@ -21123,6 +21126,7 @@ function route() {
   if (r.page !== "profile-usage") globalThis.ProfileUsagePage?.stop();
   if (r.page !== "beads") { stopBeadsPoll(); stopReportsPoll(); }
   if (r.page !== "worktrees") globalThis.WorktreesPage?.stop();
+  if (r.page !== "threads") globalThis.ThreadsHistoryPage?.stop();
   if (r.page !== "glossary") globalThis.GlossaryPage?.stop();
   if (r.page !== "sims") globalThis.SimPage?.stop();
   if (r.page !== "spec") globalThis.SpecPage?.stop();
@@ -21206,6 +21210,7 @@ function route() {
     case "workspaces": openSettings("workspaces"); break;
     case "beads": openBeads(r.id, r.section); break;
     case "worktrees": showView("worktrees"); globalThis.WorktreesPage.open(); break;
+    case "threads": showView("threads"); globalThis.ThreadsHistoryPage.open(); break;
     case "glossary": showView("glossary"); globalThis.GlossaryPage.open(); break;
     case "sims": showView("sims"); globalThis.SimPage.open(r.id, r.section); break;
     case "spec": showView("spec"); globalThis.SpecPage.open(); break;

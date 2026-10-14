@@ -53,6 +53,9 @@ MAX_TITLE = 200
 MAX_BODY = 20_000
 MAX_OPEN_PER_SESSION = 50
 PAGE = 500
+HISTORY_PAGE = 20
+HISTORY_MAX_PAGE = 100
+HISTORY_MESSAGES = 200
 
 
 class ThreadError(Exception):
@@ -345,6 +348,55 @@ class ThreadStore:
         with self._connect() as db:
             return [dict(r) for r in db.execute(
                 "SELECT id, title, status, qa FROM threads WHERE session = ? ORDER BY created_at, id", (session,))]
+
+    def history(self, *, page=1, per_page=HISTORY_PAGE, session=None, status=None) -> dict:
+        """Every session's threads with their conversations, most recently
+        active first, one page at a time (claunch-8k02k). Each thread carries
+        its last ``HISTORY_MESSAGES`` messages in order; ``omitted`` counts
+        the older ones left out. ``sessions`` lists every session that has
+        threads (with how many), for the page's filter."""
+        try:
+            page = max(1, int(page or 1))
+            per_page = max(1, min(HISTORY_MAX_PAGE, int(per_page or HISTORY_PAGE)))
+        except (TypeError, ValueError):
+            raise ThreadError("page and per_page are integers") from None
+        if status not in (None, "", "open", "closed"):
+            raise ThreadError("status is open or closed")
+        where, args = [], []
+        if session:
+            where.append("session = ?")
+            args.append(str(session))
+        if status:
+            where.append("status = ?")
+            args.append(status)
+        cond = (" WHERE " + " AND ".join(where)) if where else ""
+        with self._connect() as db:
+            total = int(db.execute("SELECT COUNT(*) FROM threads" + cond, args).fetchone()[0])
+            rows = db.execute(
+                "SELECT * FROM threads" + cond + " ORDER BY updated_at DESC, id LIMIT ? OFFSET ?",
+                (*args, per_page, (page - 1) * per_page),
+            ).fetchall()
+            threads = []
+            for r in rows:
+                t = _thread(r, self._unread(db, r), self._last(db, r["id"]))
+                recent = db.execute(
+                    "SELECT * FROM messages WHERE thread = ? ORDER BY seq DESC LIMIT ?",
+                    (r["id"], HISTORY_MESSAGES),
+                ).fetchall()
+                count = int(db.execute("SELECT COUNT(*) FROM messages WHERE thread = ?", (r["id"],)).fetchone()[0])
+                t["messages"] = [_message(m) for m in reversed(recent)]
+                t["omitted"] = count - len(recent)
+                threads.append(t)
+            sessions = [{"session": r["session"], "threads": int(r["n"])} for r in db.execute(
+                "SELECT session, COUNT(*) AS n FROM threads GROUP BY session ORDER BY MAX(updated_at) DESC, session")]
+        return {
+            "threads": threads,
+            "total": total,
+            "page": page,
+            "per_page": per_page,
+            "pages": max(1, -(-total // per_page)),
+            "sessions": sessions,
+        }
 
     def rail(self) -> dict:
         """Per session with threads: how many are open, and the seq of the
