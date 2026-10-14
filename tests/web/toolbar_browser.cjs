@@ -10,6 +10,13 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
   const browser = await chromium.launch({ headless: true });
   try {
     const page = await browser.newPage({ viewport: { width: 1920, height: 800 } });
+    // The toolbar re-fits on the frame after a resize or a mutation
+    // (ResizeObserver / MutationObserver -> requestAnimationFrame -> fit).
+    // Wait for those frames rather than for a fixed 80ms: under a loaded
+    // runner the timer can expire before the fitting frame (claunch-gqp8c).
+    const settle = () => page.evaluate(() => new Promise(done => {
+      let n = 3; const step = () => (--n ? requestAnimationFrame(step) : done()); requestAnimationFrame(step);
+    }));
     const errors = [];
     page.on("pageerror", e => errors.push(String(e)));
     await page.setContent(`<div id="layout">${header}</div>`);
@@ -34,7 +41,7 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
       // Desktop columns can be narrow even while the viewport stays wide;
       // phones already use the separate mobile controls.
       await page.locator("#layout").evaluate((el, width) => { el.style.width = `${width}px`; }, width);
-      await page.waitForTimeout(80);
+      await settle();
       const geometry = await page.evaluate(() => {
         const h = document.getElementById("term-header");
         const rects = [...h.querySelectorAll("button, #term-title, .badge, .term-handle")]
@@ -122,7 +129,7 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
     });
     await check(1920);
     await page.locator("#layout").evaluate(el => { el.style.width = "180px"; });
-    await page.waitForTimeout(80);
+    await settle();
     await page.locator("#term-more").click();
     await page.locator("#term-overflow-menu button").filter({ hasText: "⬒ run" }).click();
     assert.equal(await page.evaluate(() => window.clicks), 1, "overflow forwards original action");
@@ -142,7 +149,7 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
       document.getElementById("term-kill").setAttribute("aria-checked", "true");
       for (const id of ["term-kill", "term-resume"]) document.getElementById(id).disabled = true;
     });
-    await page.waitForTimeout(80);
+    await settle();
     await page.locator("#term-more").click();
     const life = await page.locator("#term-overflow-menu button").evaluateAll(
       bs => bs.filter(b => ["resume", "pause", "kill", "archive"].includes(b.textContent))
@@ -208,7 +215,7 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
       document.activeElement.blur();
       document.getElementById("term-kill").disabled = false;
     });
-    await page.waitForTimeout(80);
+    await settle();
     assert.deepEqual(await stops(), ["-1", "-1", "0", "-1"], "the stop moves to the checked segment");
     await page.locator("#term-kill").focus();
     await page.keyboard.press("Enter");
@@ -237,7 +244,7 @@ const header = html.slice(html.indexOf('<div id="term-header"'), html.indexOf(' 
           panel.classList.toggle("hidden", !panelWidth);
           panel.style.setProperty("--detail-w", `${panelWidth}px`);
         }, { width, panelWidth });
-        await page.waitForTimeout(80);
+        await settle();
         const headerBox = await page.locator("#term-header").boundingBox();
         const details = await page.locator("#term-details").boundingBox();
         assert(details.x >= headerBox.x && details.x + details.width <= headerBox.x + headerBox.width,
