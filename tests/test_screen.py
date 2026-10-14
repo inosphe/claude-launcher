@@ -883,3 +883,24 @@ def test_history_limit_can_shrink_and_grow():
     for i in range(50, 100):
         s.feed_render(b"line %d\r\n" % i)
     assert 20 < s.history_len <= 100
+
+
+def test_private_dsr_query_is_not_fed_to_pyte():
+    # pyte dispatches CSI ? Ps n with private=True, which report_device_status
+    # does not take; the query draws nothing, so it is dropped from the feed.
+    s = ScreenState(20, 5)
+    s.feed(b"ab\x1b[?6ncd\x1b[?996nef")
+    assert s.render_screen()[0] == "abcdef"
+
+
+def test_private_dsr_query_split_across_chunks():
+    s = ScreenState(20, 5)
+    s.feed(b"ab\x1b[?")
+    s.feed(b"6ncd")
+    assert s.render_screen()[0] == "abcd"
+
+
+def test_private_mode_sequences_still_reach_pyte():
+    s = ScreenState(20, 5)
+    s.feed(b"\x1b[?25lab\x1b[?25h")
+    assert s.render_screen()[0] == "ab"

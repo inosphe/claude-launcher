@@ -104,6 +104,12 @@ _TAIL = 16
 #: untouched (Session._on_output), and only the emulator feed is filtered. So
 #: the grid is right without them and wrong with them.
 _CSI_UNPARSEABLE = b"<=>"
+#: ``CSI ? Ps n`` is a private device status query (``?6n`` is DECXCPR, the
+#: cursor position request). pyte routes it to ``report_device_status`` with
+#: ``private=True``, a keyword that method does not take, so the feed raises
+#: ``TypeError``. It is a question for the terminal and draws nothing, so
+#: :meth:`ScreenState._strip_unparseable_csi` drops it from the emulator feed
+#: like the sequences above.
 
 #: How far past an ``ESC [`` :meth:`ScreenState._strip_unparseable_csi` looks
 #: for the final byte before giving up and handing the bytes to pyte
@@ -255,7 +261,11 @@ class ScreenState:
                     break
                 self._csi_carry = buf[j:]
                 break
-            if buf[j + 2] not in _CSI_UNPARSEABLE:
+            if buf[j + 2] in _CSI_UNPARSEABLE:
+                pass
+            elif buf[j + 2] == 0x3F and buf[k] == 0x6E:
+                pass  # CSI ? ... n: a private DSR query, which pyte cannot dispatch
+            else:
                 out += buf[j : k + 1]
             i = k + 1
         return bytes(out)
