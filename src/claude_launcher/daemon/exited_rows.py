@@ -20,7 +20,14 @@ on later polls for as long as the files it was read from are unchanged:
 
 A change to any of them, a new exit (``exited_at``) or a change to what the
 record points at (harness, profile, conversation, directory) reads the row
-again. A spend reading still being caught up (``partial``) is not kept.
+again. Looking at the files is itself a handful of stats per row, which on
+590 exited rows was 3,000 stats a poll (claunch-lcwv3); so a kept row is
+handed back without looking for :data:`CHECK_TTL` seconds (spread by
+:data:`CHECK_SPREAD`, so rows filled by one poll do not all fall due on the
+same later one). A change to what the record points at is seen at once, as
+it takes no stat; a PR the wizard records here calls :func:`expire`; the
+run state and the transcript are seen within the TTL. A spend reading still
+being caught up (``partial``) is not kept.
 The tool-call count is time-dependent: the times are kept and counted
 against the clock at every poll, as :func:`ctxsize.tool_calls_for_session`
 does. The context reading is kept as read off the transcript, and the windows
@@ -35,7 +42,9 @@ from __future__ import annotations
 
 import copy
 import os
+import random
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
@@ -52,6 +61,16 @@ FIELDS = (tokenusage.INFO_KEY, work_checkout.FIELD, "prs")
 #: daemon leave theirs behind).
 MAX_ROWS = 4096
 
+#: Seconds a kept row is handed back before its files are looked at again,
+#: as the list's branch lookup (``api._BRANCH_TTL``) and the other miss TTLs.
+CHECK_TTL = 30.0
+
+#: Each row's wait is ``CHECK_TTL`` stretched by up to this fraction, drawn
+#: per check.
+CHECK_SPREAD = 0.5
+
+_now = time.monotonic
+
 
 @dataclass
 class _Row:
@@ -63,6 +82,7 @@ class _Row:
     tool_times: Optional[List[float]]
     reading: Optional[dict]
     fields: dict
+    due: float = 0.0
 
 
 _rows: dict = {}
@@ -73,6 +93,22 @@ def forget() -> None:
     """Drop every kept row. For tests."""
     with _lock:
         _rows.clear()
+
+
+def _due() -> float:
+    return _now() + CHECK_TTL * (1.0 + CHECK_SPREAD * random.random())
+
+
+def expire(name: str) -> None:
+    """Look at ``name``'s files on its next poll, whatever its wait.
+
+    For a writer in this process that changed one of them (the PR wizard's
+    ``prs.json``) and should not wait :data:`CHECK_TTL` to be seen.
+    """
+    with _lock:
+        row = _rows.get(name)
+        if row is not None:
+            row.due = 0.0
 
 
 def _ident(session: Any) -> Tuple:
@@ -142,8 +178,16 @@ def attach(session: Any, spend: tokenusage.Budget, cwd: str) -> dict:
     ident = _ident(session)
     with _lock:
         row = _rows.get(name)
-    if row is not None and row.ident == ident and _fresh(row, sdef):
-        return _answer(session, row)
+    if row is not None and row.ident == ident:
+        due = row.due
+        if _now() < due:
+            return _answer(session, row)
+        if _fresh(row, sdef):
+            with _lock:
+                # Unless :func:`expire` ran while the files were looked at.
+                if row.due == due:
+                    row.due = _due()
+            return _answer(session, row)
     # Stamped before reading: a write that lands during the read is a change
     # the next poll sees.
     transcript = ctxsize.transcript_of(sdef)
@@ -167,6 +211,7 @@ def attach(session: Any, spend: tokenusage.Budget, cwd: str) -> dict:
         stamps=stamps, tool_times=list(tool_times) if tool_times is not None else None,
         reading=copy.deepcopy(reading),
         fields=copy.deepcopy({k: info[k] for k in FIELDS if k in info}),
+        due=_due(),
     )
     with _lock:
         if len(_rows) >= MAX_ROWS:

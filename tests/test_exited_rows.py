@@ -4,7 +4,9 @@
 per-row read for exited sessions on each poll. The tests pin the three things
 the user decided -- the row is read once after the exit, later polls answer
 from the kept row without touching the readers, and a change to a source file
-reads it again -- and that the kept answer equals the live one.
+reads it again -- and that the kept answer equals the live one. The files
+are looked at once every ``CHECK_TTL`` seconds, not on every poll
+(claunch-lcwv3).
 """
 
 from __future__ import annotations
@@ -25,7 +27,10 @@ CID = "cafe0000-0000-0000-0000-0000000000aa"
 
 
 @pytest.fixture(autouse=True)
-def _fresh():
+def _fresh(monkeypatch):
+    # Most tests below pin what a look at the files sees, so they look at
+    # every poll; the wait between looks (claunch-lcwv3) has its own tests.
+    monkeypatch.setattr(exited_rows, "CHECK_TTL", 0.0)
     ctxsize.forget()
     exited_rows.forget()
     yield
@@ -290,3 +295,112 @@ def test_the_session_list_reads_an_exited_row_once(home, tmp_path, monkeypatch):
             await client.close()
 
     asyncio.run(run())
+
+
+class _Clock:
+    def __init__(self, at=1000.0):
+        self.at = at
+
+    def __call__(self):
+        return self.at
+
+
+def _waits(monkeypatch, *, ttl=30.0, spread=0.5, draw=1.0):
+    """A ``CHECK_TTL`` of ``ttl`` on a clock the test moves; every drawn
+    spread is ``draw``. Returns the clock and the list of looks at a file."""
+    clock = _Clock()
+    monkeypatch.setattr(exited_rows, "CHECK_TTL", ttl)
+    monkeypatch.setattr(exited_rows, "CHECK_SPREAD", spread)
+    monkeypatch.setattr(exited_rows, "_now", clock)
+    monkeypatch.setattr(exited_rows.random, "random", lambda: draw)
+    looks = []
+    real = exited_rows._stat
+    monkeypatch.setattr(exited_rows, "_stat",
+                        lambda p: looks.append(p) or real(p))
+    return clock, looks
+
+
+def test_a_kept_row_is_not_looked_at_until_its_wait_is_over(home, tmp_path, monkeypatch):
+    now = time.time()
+    session, path = _session(tmp_path, _turn("m1", now - 30, read=1_000, out=5))
+    cwd = session.sdef.cwd
+    clock, looks = _waits(monkeypatch)
+    _kept(session, cwd)
+    looks.clear()
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(_turn("m2", now - 10, read=2_000, out=7) + "\n")
+    clock.at += 44.0  # inside 30s stretched by the drawn 50%
+    for _ in range(5):
+        row = _kept(session, cwd)
+    assert looks == []
+    assert row[tokenusage.INFO_KEY]["output"] == 5
+    clock.at += 1.0  # the wait is over: the files are looked at
+    row = _kept(session, cwd)
+    assert looks
+    assert row[tokenusage.INFO_KEY]["output"] == 12
+
+
+def test_an_unchanged_row_waits_again_after_a_look(home, tmp_path, monkeypatch):
+    session, _ = _session(tmp_path, _turn("m1", time.time() - 30, read=1_000, out=5))
+    cwd = session.sdef.cwd
+    clock, looks = _waits(monkeypatch, draw=0.0)
+    calls = _count_reads(monkeypatch)
+    _kept(session, cwd)
+    clock.at += 30.0
+    looks.clear()
+    _kept(session, cwd)
+    assert looks and len(calls) == 4  # looked, unchanged, not read again
+    looks.clear()
+    clock.at += 29.0
+    _kept(session, cwd)
+    assert looks == []
+
+
+def test_the_spread_keeps_each_wait_between_the_ttl_and_its_stretch(home, tmp_path, monkeypatch):
+    session, _ = _session(tmp_path, _turn("m1", time.time() - 30, read=1_000, out=5))
+    clock, _ = _waits(monkeypatch, draw=0.25)
+    _kept(session, session.sdef.cwd)
+    assert exited_rows._rows["old"].due == clock.at + 30.0 * 1.125
+
+
+def test_expire_looks_at_the_files_on_the_next_poll(home, tmp_path, monkeypatch):
+    session, _ = _session(tmp_path, _turn("m1", time.time() - 30, read=1_000, out=5))
+    cwd = session.sdef.cwd
+    _waits(monkeypatch)
+    assert _kept(session, cwd)["prs"] == []
+    session_prs.record("old", {"ok": True, "branch": "b", "base": "master",
+                               "pr": {"url": "https://h/o/r/pull/9"}}, {"title": "t"})
+    assert _kept(session, cwd)["prs"] == []  # inside the wait
+    exited_rows.expire("old")
+    assert [p["number"] for p in _kept(session, cwd)["prs"]] == [9]
+    exited_rows.expire("nobody")  # no kept row: nothing to do
+
+
+def test_expire_during_a_look_is_not_lost(home, tmp_path, monkeypatch):
+    """A write and its :func:`expire` landing while another poll looks at the
+    files (and finds them unchanged) still reach the next poll."""
+    session, _ = _session(tmp_path, _turn("m1", time.time() - 30, read=1_000, out=5))
+    cwd = session.sdef.cwd
+    clock, _ = _waits(monkeypatch)
+    _kept(session, cwd)
+    clock.at += 60.0
+    real = exited_rows._fresh
+
+    def racing(row, sdef):
+        fresh = real(row, sdef)
+        exited_rows.expire("old")
+        return fresh
+    monkeypatch.setattr(exited_rows, "_fresh", racing)
+    _kept(session, cwd)
+    assert exited_rows._rows["old"].due == 0.0
+
+
+def test_a_new_exit_inside_the_wait_reads_the_row_again(home, tmp_path, monkeypatch):
+    session, _ = _session(tmp_path, _turn("m1", time.time() - 30, read=1_000, out=5))
+    cwd = session.sdef.cwd
+    _waits(monkeypatch)
+    _kept(session, cwd)
+    calls = _count_reads(monkeypatch)
+    session.exited_at = "2026-10-14T07:00:00+00:00"
+    _kept(session, cwd)
+    assert len(calls) == 4
