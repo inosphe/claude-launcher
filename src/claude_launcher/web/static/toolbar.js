@@ -83,6 +83,11 @@
     if (menu.matches(":popover-open")) menu.hidePopover();
     else { populateMenu(); menu.showPopover(); positionMenu(); }
   });
+  // `beforetoggle` fires synchronously as the popover opens or closes (Escape,
+  // light dismiss, hidePopover); `toggle` is queued as a task and can land
+  // well after, leaving the button reading expanded on a closed menu
+  // (claunch-gqp8c). `toggle` stays to settle on the state that took.
+  menu.addEventListener("beforetoggle", (e) => more.setAttribute("aria-expanded", String(e.newState === "open")));
   menu.addEventListener("toggle", () => more.setAttribute("aria-expanded", String(menu.matches(":popover-open"))));
   // The lifecycle group (resume | pause | kill | archive) keeps one Tab stop
   // and moves between its segments with the arrow keys, as a radio group does
