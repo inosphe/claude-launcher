@@ -66,6 +66,10 @@ class FakeManager:
     def __init__(self, sessions):
         self.sessions = {s.sdef.name: s for s in sessions}
         self.woken = []
+        self.restoring = set()
+
+    def message_restore_pending(self, name):
+        return name in self.restoring
 
     def get(self, name):
         if name not in self.sessions:
@@ -264,4 +268,45 @@ def test_a_closed_question_is_reanswered_and_rechecked(tmp_path):
         assert res["reopened"] is True and res["question"]["status"] == "answered"
         block = s1.delivered[-1]
         assert "You had closed this question" in block and "> stack after all" in block
+    run(tmp_path, scenario)
+
+
+def test_an_answer_saved_while_the_session_is_being_woken_is_held_not_pending(tmp_path):
+    # Review of 90b6c293: between the wake's stage() and start_async the
+    # registry holds a Session with no held_at whose messages still go to
+    # the wake queue -- which never reports back. "pending" there would
+    # stay forever and "지금 전달" would type the answer a second time.
+    async def scenario(req, mgr):
+        s1 = mgr.sessions["s1"]
+        q = (await req("POST", "/api/qa", {"session": "s1", "title": "Ship it?"}))["question"]
+        mgr.restoring.add("s1")
+        wake_queue = []
+
+        def into_wake_queue(text, on_done=None):
+            wake_queue.append(text() if callable(text) else text)
+            return True
+        s1.queue_delivery = into_wake_queue
+        res = await req("POST", f"/api/qa/{q['id']}/answer", {"revision": 1, "text": "yes"})
+        assert res["delivery"]["state"] == "held"
+        assert len(wake_queue) == 1 and "> yes" in wake_queue[0]
+        await req("POST", f"/api/qa/{q['id']}/deliver", {}, status=409)
+        assert s1.delivered == []
+    run(tmp_path, scenario)
+
+
+def test_deliver_now_leaves_a_notification_that_is_already_being_typed(tmp_path):
+    async def scenario(req, mgr):
+        s1 = mgr.sessions["s1"]
+        q = (await req("POST", "/api/qa", {"session": "s1", "title": "Ship it?"}))["question"]
+        s1.waiting = True
+        await req("POST", f"/api/qa/{q['id']}/answer", {"revision": 1, "text": "yes"})
+        (factory, on_done), = s1.queue
+        typed = factory()                      # the queued copy reaches the paste
+        assert "> yes" in typed
+        listed = (await req("GET", "/api/qa?session=s1"))["questions"][0]
+        assert listed["delivery"]["state"] == "typing"
+        await req("POST", f"/api/qa/{q['id']}/deliver", {}, status=409)
+        assert s1.forced == [], "no second copy"
+        on_done(True)
+        assert (await req("GET", "/api/qa?session=s1"))["questions"][0]["delivery"]["state"] == "delivered"
     run(tmp_path, scenario)

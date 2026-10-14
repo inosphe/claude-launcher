@@ -160,6 +160,12 @@ class Outbox:
             rec["state"] = state
             rec["settled_at"] = _now()
 
+    def _restoring(self, session: str) -> bool:
+        try:
+            return bool(self.manager.message_restore_pending(session))
+        except Exception:  # noqa: BLE001 -- a manager without the notion
+            return False
+
     def view(self, key: str) -> Optional[dict]:
         rec = self.latest.get(key)
         if rec is None:
@@ -188,25 +194,40 @@ class Outbox:
         self.latest[key] = rec
         while len(self.latest) > self.KEEP:
             # Oldest first (insertion order); a waiting one is never dropped.
-            stale = next((k for k, r in self.latest.items() if r["state"] not in ("pending", "forcing")), None)
+            stale = next((k for k, r in self.latest.items() if r["state"] not in ("pending", "typing", "forcing")), None)
             if stale is None:
                 break
             del self.latest[stale]
 
+        queued = False
+
         def text() -> str:
-            # Called again when the terminal is free: a record replaced (or
-            # forced through) meanwhile types nothing.
-            return make() if rec["state"] == "pending" else ""
+            # Inside queue_delivery this is the preview (or the text a held
+            # session's wake queue keeps). Called again when the terminal is
+            # free: a record replaced (or forced through) meanwhile types
+            # nothing, and one about to be typed is marked so "지금 전달"
+            # leaves it alone rather than typing it a second time.
+            if not queued:
+                return make()
+            if rec["state"] != "pending":
+                return ""
+            rec["state"] = "typing"
+            return make()
 
         def done(ok: bool) -> None:
-            self._settle(rec, "pending", "delivered" if ok else "failed")
+            state = "delivered" if ok else "failed"
+            self._settle(rec, "typing", state)
+            self._settle(rec, "pending", state)
 
         try:
             s = self.manager.get(session)
-            held = bool(getattr(s, "held_at", None))
+            # A session being woken has no held_at yet but its messages
+            # still go to the wake queue, which reports no outcome.
+            held = bool(getattr(s, "held_at", None)) or self._restoring(session)
             accepted = s.queue_delivery(text, on_done=done)
         except Exception:  # noqa: BLE001 -- gone or not deliverable
             held, accepted = False, False
+        queued = True
         if accepted and held:
             rec["state"] = "held"   # typed when the session is woken
         elif not accepted:

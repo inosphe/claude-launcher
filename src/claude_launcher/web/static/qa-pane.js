@@ -314,7 +314,7 @@ globalThis.QaPane = (() => {
       now.title = "입력창에 보내지 않은 줄이 있으면 그 줄을 먼저 전송한 뒤 이 알림을 이어서 보냅니다.";
       now.addEventListener("click", () => deliverNow(q.id));
       line.append(now);
-    } else if (dv.state === "forcing") {
+    } else if (dv.state === "forcing" || dv.state === "typing") {
       line.textContent = `${what} 알림 전달 중…`;
     } else if (dv.state === "held") {
       line.textContent = `${what} 알림: 세션이 hold 상태라 깨어나면 전달됩니다`;
