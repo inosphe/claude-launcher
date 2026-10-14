@@ -46,6 +46,7 @@ from typing import List, Optional
 from aiohttp import web
 
 from .. import store
+from . import actors
 from . import handoff as handoff_mod
 from . import search_records
 
@@ -376,6 +377,7 @@ async def ask(request: web.Request, origin: str, body: dict) -> dict:
             # The answer is handed in as a merge the fork makes on its own;
             # there is no operator press to wait for.
             self_merge_allowed=True,
+            created_by=actors.with_reason(actors.from_request(request), "deep-think"),
         )
     except api.QuickForkError as exc:
         raise DeepThinkError(exc.status, str(exc)) from None
@@ -415,7 +417,8 @@ async def cancel(app, origin: str, fork: str) -> dict:
     manager = app["manager"]
     session = _fork_of(manager, origin, fork)
     record = dict(record_of(session))
-    manager.kill(fork, force=False)
+    manager.kill(fork, force=False,
+                 by=actors.make(actors.AGENT, origin, reason="deep-think-cancel"))
     _remember(fork, record, outcome=f"cancelled by {origin}")
     _log(app, origin, fork, "cancelled", f"{origin} cancelled the question: {_head(record.get('question', ''))}")
     return {"id": fork, "cancelled": True}
@@ -516,7 +519,8 @@ async def sweep(app, now: Optional[datetime] = None) -> List[tuple]:
         busy.add(fork)
         try:
             if origin is None or origin.exited:
-                manager.kill(fork, force=False)
+                manager.kill(fork, force=False,
+                             by=actors.make(actors.DAEMON, reason="deep-think-orphaned"))
                 _remember(fork, record, outcome=f"ended: the asker {origin_name} is gone")
                 moved.append((fork, "orphaned"))
                 continue
@@ -538,7 +542,8 @@ async def sweep(app, now: Optional[datetime] = None) -> List[tuple]:
             elif state == WRAPPING:
                 if now < since + timedelta(seconds=grace):
                     continue
-                manager.kill(fork, force=False)
+                manager.kill(fork, force=False,
+                             by=actors.make(actors.DAEMON, reason="deep-think-overdue"))
                 why = (
                     f"{fork} ran past its deadline, was asked for what it had, "
                     "and did not hand anything in; it has been ended."

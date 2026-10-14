@@ -37,7 +37,7 @@ from .. import spawn as spawn_mod
 from .. import transcripts
 from .. import auto_compact as auto_compact_mod
 from .. import codex_mode
-from . import codex_sessions, ctxsize, db, harness as harness_mod, pi_sessions
+from . import actors, codex_sessions, ctxsize, db, harness as harness_mod, pi_sessions
 from . import progress as progress_mod
 from . import line_sync, paths, search_records, session_events, session_input
 from .harness import SessionDef
@@ -628,6 +628,7 @@ class SessionManager:
         """
         if self.shutting_down:
             return
+        self._attribute_ending(session)
         if ended_by_os(session.exit_code):
             # Windows is logging off or shutting down, and got to the child
             # before it got to the daemon. That is the daemon's shutdown
@@ -642,7 +643,7 @@ class SessionManager:
             )
             session.ended_by_os = True
             self.events.record(session, "exit", "OS 종료로 세션 프로세스 종료",
-                               exit_code=session.exit_code)
+                               exit_code=session.exit_code, ended_by=session.ended_by)
             self.persist()
             return
         if getattr(session, "held_at", None):
@@ -651,7 +652,7 @@ class SessionManager:
             # nobody is told the session is gone. The hooks run if and when
             # the hold is turned into a real ending (unhold).
             self.events.record(session, "hold", "유휴 세션 hold: 프로세스 종료",
-                               exit_code=session.exit_code)
+                               exit_code=session.exit_code, ended_by=session.ended_by)
             self.persist()
             return
         if self._failed_on_its_own(session):
@@ -665,19 +666,43 @@ class SessionManager:
             # settle_hooks).
             session.failed_at = _now_iso()
             self.events.record(session, "fail", "요청 없이 비정상 종료",
-                               exit_code=session.exit_code)
+                               exit_code=session.exit_code, ended_by=session.ended_by)
             log.warning(
                 "session %r exited on its own with code %s; filed as failed",
                 session.sdef.name, session.exit_code,
             )
         else:
             self.events.record(session, "exit", "세션 프로세스 종료",
-                               exit_code=session.exit_code)
+                               exit_code=session.exit_code, ended_by=session.ended_by)
         self.persist()
         if id(session) in self._restarting:
             self._restarting[id(session)] = True
         else:
             self._run_exit_hooks(session)
+
+    def _attribute_ending(self, session: Session) -> None:
+        """Fill in who ended ``session`` when no verb said so (claunch-o6xws).
+
+        A verb that knows its caller writes :attr:`Session.ended_by` before
+        it signals; what is left here is what only the exit can tell: the
+        machine went down (``os``), or nobody asked at all -- no kill, pause,
+        hold or relaunch -- so the session's own program ended (``self``:
+        ``/exit``, a crash). An asked-for ending whose asker is not known
+        (a path that does not pass one) stays None, which the rail reads as
+        "unknown" rather than guessing.
+        """
+        if getattr(session, "ended_by", None) is not None:
+            return
+        if ended_by_os(session.exit_code):
+            session.ended_by = actors.make(actors.OS)
+            return
+        if id(session) in self._restarting:
+            return
+        if getattr(session, "kill_requested", False):
+            return
+        if getattr(session, "paused_at", None) or getattr(session, "held_at", None):
+            return
+        session.ended_by = actors.make(actors.SELF)
 
     def _failed_on_its_own(self, session: Session) -> bool:
         """Whether an exit is a failure: a nonzero code, and no kill, pause,
@@ -1160,6 +1185,7 @@ class SessionManager:
         warnings: Optional[List[str]] = None,
         exempt_depth: bool = False,
         place_under: Optional[str] = None,
+        created_by: Optional[dict] = None,
     ) -> Session:
         """Register a child of ``parent`` under the spawn policy, unstarted.
 
@@ -1245,6 +1271,9 @@ class SessionManager:
                     # copy whose vocabulary or delivery differs by harness.
                     "role": None,
                     "parent": placed or None,
+                    # The caller's (SessionDef.created_by), never inherited
+                    # from the parent's definition nor read off the request.
+                    "created_by": created_by,
                     # Set explicitly: spawn.check() hands back the inherited
                     # subset and ``restore`` is not in it, so leaving it out
                     # would take from_dict's default and ignore a parent
@@ -1549,7 +1578,8 @@ class SessionManager:
         self.persist()
         return {"session": child, "previous": previous}
 
-    def kill(self, name: str, *, force: bool = False) -> AnySession:
+    def kill(self, name: str, *, force: bool = False,
+             by: Optional[dict] = None) -> AnySession:
         """Kill a running session; leave an already-exited one alone.
 
         Idempotent for every caller, operator included: a second kill of a
@@ -1567,12 +1597,14 @@ class SessionManager:
         """
         session = self.get(name)
         if not session.exited:
-            session.kill(force=force)
-            self.events.record(session, "kill", "세션 종료 요청", force=force)
+            session.kill(force=force, by=by)
+            self.events.record(session, "kill", "세션 종료 요청", force=force,
+                               by=by)
             self.persist()
         return session
 
-    def pause(self, name: str, *, force: bool = False) -> AnySession:
+    def pause(self, name: str, *, force: bool = False,
+              by: Optional[dict] = None) -> AnySession:
         """Pause a running session: the same ending as :meth:`kill`, with the
         record marked ``paused_at`` so it reads as a pause rather than a kill.
 
@@ -1585,12 +1617,13 @@ class SessionManager:
         """
         session = self.get(name)
         if not session.exited:
-            session.pause(force=force)
-            self.events.record(session, "pause", "세션 일시 중지 요청", force=force)
+            session.pause(force=force, by=by)
+            self.events.record(session, "pause", "세션 일시 중지 요청", force=force,
+                               by=by)
             self.persist()
         return session
 
-    def unpause(self, name: str) -> bool:
+    def unpause(self, name: str, *, by: Optional[dict] = None) -> bool:
         """File a paused record as killed: the operator's kill of a pause.
 
         The process ended at the pause, so the only thing left for a kill to
@@ -1610,7 +1643,10 @@ class SessionManager:
         if not session.exited or not getattr(session, "paused_at", None):
             return False
         session.paused_at = None
-        self.events.record(session, "kill", "일시 중지된 세션을 종료로 전환")
+        # The record now reads as this kill, so it names this kill's asker.
+        if by:
+            session.ended_by = dict(by)
+        self.events.record(session, "kill", "일시 중지된 세션을 종료로 전환", by=by)
         self.persist()
         return True
 
@@ -1637,7 +1673,8 @@ class SessionManager:
             return not harness_mod.restores_blank(sdef)
         return sdef.harness == "codex"
 
-    def hold(self, name: str, *, force: bool = False, reason: str = "") -> AnySession:
+    def hold(self, name: str, *, force: bool = False, reason: str = "",
+             by: Optional[dict] = None) -> AnySession:
         """Free a running session's program and file the record as held.
 
         The session stays what it was everywhere else — its issue, its mesh
@@ -1652,13 +1689,13 @@ class SessionManager:
                 f"session {name!r} cannot be held: a respawn would not reopen "
                 "its conversation"
             )
-        session.hold(force=force)
+        session.hold(force=force, by=actors.with_reason(by, reason))
         self.events.record(session, "hold", "세션 hold 요청", force=force,
-                           reason=reason)
+                           reason=reason, by=by)
         self.persist()
         return session
 
-    def unhold(self, name: str) -> bool:
+    def unhold(self, name: str, *, by: Optional[dict] = None) -> bool:
         """Turn a hold into a real ending: the operator killed (or archived)
         a held record. The exit hooks the hold skipped run now — the board
         sweep returns its issue, side runs end — and the record reads killed.
@@ -1681,11 +1718,18 @@ class SessionManager:
         if hasattr(session, "delayed_at"):
             session.delayed_at = None
         self._delayed_busy.discard(name)
+        # A hold freed the program and the asker now ends the session, so
+        # the record names them. A failure's ending stays its own: the
+        # program died by itself, and settling the record does not change
+        # who ended it.
+        if held and by:
+            session.ended_by = dict(by)
         self.events.record(
             session, "kill",
             "실패한 세션을 종료로 전환" if failed and not held
             else "대기 중인 세션을 종료로 전환" if delayed
             else "hold된 세션을 종료로 전환",
+            by=by,
         )
         self.persist()
         if held:
@@ -2249,7 +2293,7 @@ class SessionManager:
         return session
 
     async def stop_and_archive(
-        self, name: str, *, force: bool = False
+        self, name: str, *, force: bool = False, by: Optional[dict] = None
     ) -> AnySession:
         """Archive a session whatever state it is in, ending it first if it
         is still running.
@@ -2284,9 +2328,10 @@ class SessionManager:
         if not session.exited:
             self.events.record(
                 session, "kill", "보관을 위한 세션 종료",
-                force=force, reason="archive",
+                force=force, reason="archive", by=by,
             )
-            await session.shutdown(grace=0.0 if force else 5.0)
+            await session.shutdown(grace=0.0 if force else 5.0,
+                                   by=actors.with_reason(by, "archive"))
             self.persist()
         return self.archive(name)
 
@@ -2852,6 +2897,10 @@ class SessionManager:
                     # ORPHANED FOLLOW-UP comment -- piled up once per restart
                     # (claunch-fh8u1.2: 29 copies on one issue).
                     "swept_at": getattr(session, "swept_at", None),
+                    # Who ended this incarnation (claunch-o6xws): only the
+                    # live object knew, and a record retired at the next boot
+                    # must keep answering the rail's "killed by whom".
+                    "ended_by": getattr(session, "ended_by", None),
                     # A person's standing "type nothing in here". Written
                     # here so it survives the restart that has nothing to do
                     # with them; an exited record always reports False (see
@@ -3058,6 +3107,7 @@ class SessionManager:
             delayed_at=entry.get("delayed_at"),
             failed_at=entry.get("failed_at"),
             swept_at=entry.get("swept_at"),
+            ended_by=actors.coerce(entry.get("ended_by")),
             scrollback=self.scrollback,
             idle_threshold=self.idle_threshold,
         )

@@ -296,6 +296,16 @@ class SessionDef:
     #: inherited by a spawned child. ``None`` writes no key, so a record that
     #: never declared one is unchanged on disk.
     kind: Optional[str] = None
+    #: Who created this session (daemon/actors.py, claunch-o6xws): a person
+    #: at the dashboard or a shell, an agent session, a workflow run, or the
+    #: daemon itself. Written by the daemon from the creating request, never
+    #: taken from a request body, and kept across respawns and restarts like
+    #: the rest of the definition -- a respawn re-creates the process, not
+    #: the session. Unlike :attr:`parent`, which says where the session sits
+    #: in the tree and is rewritten by reparent and detach, this does not
+    #: change after creation. ``None`` writes no key: a record from before
+    #: the field reads as unknown.
+    created_by: Optional[Dict[str, str]] = None
 
     def to_dict(self) -> dict:
         out = {
@@ -363,6 +373,8 @@ class SessionDef:
             out["prompt_packs"] = [dict(p) for p in self.prompt_packs]
         if self.kind:
             out["kind"] = self.kind
+        if self.created_by:
+            out["created_by"] = dict(self.created_by)
         return out
 
     @classmethod
@@ -414,7 +426,14 @@ class SessionDef:
             project=str(data.get("project") or "").strip() or None,
             prompt_packs=_prompt_packs_field(data.get("prompt_packs")),
             kind=str(data.get("kind") or "").strip() or None,
+            created_by=_created_by_field(data.get("created_by")),
         )
+
+
+def _created_by_field(value) -> Optional[Dict[str, str]]:
+    from . import actors
+
+    return actors.coerce(value)
 
 
 #: The keys a recorded cflow refusal keeps (:attr:`SessionDef.cflow_declined`).

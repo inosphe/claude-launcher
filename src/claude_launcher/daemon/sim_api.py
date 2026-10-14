@@ -45,7 +45,7 @@ from aiohttp import web
 
 from .. import store as config_store
 from ..sim import store as sim_store
-from . import paths
+from . import actors, paths
 
 log = logging.getLogger(__name__)
 
@@ -281,7 +281,7 @@ def install(app, store: Optional[sim_store.SimStore] = None):
         if not name:
             return
         try:
-            manager.kill(name)
+            manager.kill(name, by=actors.make(actors.DAEMON, reason="simulation"))
         except Exception:  # noqa: BLE001 -- already gone
             log.info("sim: could not kill run session %s", name)
 
@@ -326,6 +326,7 @@ def install(app, store: Optional[sim_store.SimStore] = None):
                  "CLAUNCH_SIM_DAEMON_DIR": str(paths.daemon_dir()),
                  "CLAUNCH_SIM_PROVIDER_JS": str(pi_provider.extension_path())},
             note=f"simulation {sid} run session",
+            created_by=actors.make(actors.DAEMON, reason="simulation"),
         )
         await asyncio.to_thread(sims.attach_runner, sid, name)
         try:

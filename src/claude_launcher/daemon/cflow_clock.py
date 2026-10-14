@@ -63,7 +63,7 @@ from typing import Awaitable, Callable, Dict, List, Optional, Set, Tuple
 from .. import store
 from ..cflow import engine as cflow_engine, landing as cflow_landing, model as cflow_model, state as cflow_state
 from ..cflow2 import ir as cflow2_ir, runtime as cflow2_runtime, store as cflow2_store
-from . import briefing, instance_manifest, landing_route, session_procs, status_checks
+from . import actors, briefing, instance_manifest, landing_route, session_procs, status_checks
 from . import paths as daemon_paths
 from .session import STATUS_BUSY, STATUS_IDLE
 
@@ -3362,7 +3362,8 @@ class RunEventClock:
         if reap_reviewers:
             self._end_reviewers(scope, run_id)
         try:
-            session.kill(force=False)
+            session.kill(force=False, by=actors.make(
+                actors.CFLOW, scope, reason="kill-on-end"))
             self.manager.persist()
             log.info("cflow kill-on-end: ended %r (run %s)", scope, run_id)
         except Exception as exc:
@@ -3430,7 +3431,8 @@ class RunEventClock:
             if "reviewer" not in roles:
                 continue
             try:
-                child.kill(force=False)
+                child.kill(force=False, by=actors.make(
+                    actors.CFLOW, driver, reason="reviewer-reap"))
             except Exception as exc:
                 log.warning(
                     "cflow kill-on-end: ending reviewer %r of %r failed: %s",

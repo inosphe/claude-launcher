@@ -2829,7 +2829,8 @@ class Board:
         view = await self.session_view(session)
         return [i for i in view["issues"] if i.get("status") in ACTIVE_STATUSES]
 
-    async def begin_winddown(self, session: Session, manager) -> bool:
+    async def begin_winddown(self, session: Session, manager,
+                             by: Optional[dict] = None) -> bool:
         """Start ending ``session`` the considerate way, if there is a reason.
 
         True when a wind-down is now running (or already was): the caller
@@ -2862,6 +2863,11 @@ class Board:
             "issues": [i["id"] for i in issues],
             "delivered": None,
         }
+        # The ending is the asker's from this moment: the kill that closes
+        # the wind-down is this request's, however long the turn takes.
+        note = getattr(session, "note_ender", None)
+        if note is not None:
+            note(by)
         task = asyncio.ensure_future(self._winddown(session, manager, text, grace))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)

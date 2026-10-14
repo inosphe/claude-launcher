@@ -92,7 +92,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from .. import store
 from ..cflow2 import asks, executors, ir, runtime
 from ..cflow2 import store as cstore
-from . import cflow2_exec, cflow2_triggers, instance_manifest, paths
+from . import actors, cflow2_exec, cflow2_triggers, instance_manifest, paths
 
 log = logging.getLogger("claunch.daemon.cflow2")
 
@@ -995,6 +995,9 @@ def default_kill_child(parent: str, child: str) -> Any:
     client = daemon_client.connect()
     if client is None:
         raise RuntimeError("the daemon API is not reachable")
+    # The same route the parent's own kill tool takes; the header is what
+    # records this ending as the run's rather than the parent agent's.
+    client.actor = actors.header_value(actors.CFLOW, parent)
     return client.post(f"/api/sessions/{parent}/children/{child}/kill", {}, timeout=60.0)
 
 

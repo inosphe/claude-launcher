@@ -54,7 +54,7 @@ from .. import ghcli, prflow, projects, reposync, reposync_flow, spawn as spawn_
 from .. import workspace_usage
 from .. import plugins, prompt_packs, settings
 from .. import worktree as worktree_mod
-from . import beads as beads_mod, channel, clipboard, connections
+from . import actors, beads as beads_mod, channel, clipboard, connections
 from . import p2p
 from . import opening_images
 from . import handoff as handoff_mod
@@ -360,9 +360,13 @@ def build_auth_middleware(token: str, cookie_sessions: set):
             return await handler(request)
         auth = request.headers.get("Authorization", "")
         if auth.startswith("Bearer ") and _token_eq(auth[7:], token):
+            request[actors.AUTH_VIA_KEY] = actors.AUTH_BEARER
             return await handler(request)
         cookie = request.cookies.get(cookie_key)
         if cookie and cookie in cookie_sessions:
+            # How it authenticated is the one thing that tells the dashboard
+            # from a shell: actors.from_request reads it (claunch-o6xws).
+            request[actors.AUTH_VIA_KEY] = actors.AUTH_COOKIE
             return await handler(request)
         # Write the refusal down. Nothing else does: the access log is off,
         # and a refused upgrade never reaches a handler, so a terminal that
@@ -3068,7 +3072,9 @@ async def h_worktrees_remove(request: web.Request) -> web.Response:
                 else:
                     request.app["handoff"].forget(name)
                     request.app["beads"].winddowns.pop(name, None)
-                    await manager.stop_and_archive(name)
+                    await manager.stop_and_archive(
+                        name, by=actors.with_reason(
+                            actors.from_request(request), "worktree-remove"))
                 # Recorded per session as it lands, so a failure further
                 # down the list still reports the ones already archived.
                 archived.append(name)
@@ -6832,7 +6838,10 @@ async def _ws_start_agent(request: web.Request, card: dict, body: dict, *, error
         # A held parent comes back first: staging refuses an exited parent,
         # and the child reports to it over the mesh.
         await manager.wake_async(parent, by="workspace-sync")
-        child = manager.stage_child(parent, assignment, warnings=warnings)
+        child = manager.stage_child(
+            parent, assignment, warnings=warnings,
+            created_by=actors.with_reason(actors.from_request(request), "workspace-sync"),
+        )
         arranged = await _onboard_and_launch(request, child, assignment, parent=parent)
     except (spawn_mod.SpawnDenied, ManagerError, HarnessError, worktree_mod.WorktreeError,
             onboard.OnboardError, ValueError, TypeError, OSError) as exc:
@@ -8169,6 +8178,8 @@ async def _create_session(request: web.Request, body: dict) -> Tuple[int, dict]:
     definition.pop("prompt_packs", None)
     # v2 start inputs belong to the run (chart.json), not to the session.
     definition.pop("cflow_inputs", None)
+    # Who created it is the request's, never the body's (claunch-o6xws).
+    definition["created_by"] = actors.from_request(request)
     try:
         sdef = SessionDef.from_dict(definition)
     except (KeyError, ValueError, TypeError) as exc:
@@ -8691,7 +8702,8 @@ async def h_session_spawn(request: web.Request) -> web.Response:
         return json_error(404, str(exc))
     warnings: list = []
     try:
-        session = manager.stage_child(parent, body, warnings=warnings)
+        session = manager.stage_child(parent, body, warnings=warnings,
+                                      created_by=actors.from_request(request))
     except spawn_mod.SpawnDenied as exc:
         return json_error(403, str(exc))
     except worktree_mod.WorktreeError as exc:
@@ -8824,7 +8836,8 @@ async def h_sessions_clear(request: web.Request) -> web.Response:
         if live:
             # Concurrently: the grace period is per session, and waiting out
             # ten of them in a row is ten graces long for no reason.
-            await asyncio.gather(*(s.shutdown() for s in live))
+            by = actors.with_reason(actors.from_request(request), "clear")
+            await asyncio.gather(*(s.shutdown(by=by) for s in live))
         stopped = [s.sdef.name for s in live]
     kept: List[dict] = []
     for name, held in (
@@ -8861,15 +8874,16 @@ async def h_sessions_kill_all(request: web.Request) -> web.Response:
     killed: List[str] = []
     winding: List[str] = []
     failed: List[dict] = []
+    by = actors.from_request(request)
     for session in list(manager.list()):
         if session.exited:
             continue
         name = session.sdef.name
         try:
-            if await _winding_down(request, session, force=force):
+            if await _winding_down(request, session, force=force, by=by):
                 winding.append(name)
                 continue
-            manager.kill(name, force=force)
+            manager.kill(name, force=force, by=by)
         except Exception as exc:  # one refusal must not strand the other nine
             failed.append({"name": name, "error": str(exc)})
         else:
@@ -8897,6 +8911,7 @@ async def h_sessions_pause_all(request: web.Request) -> web.Response:
     board = request.app["beads"]
     paused: List[str] = []
     failed: List[dict] = []
+    by = actors.from_request(request)
     for session in list(manager.list()):
         if session.exited:
             continue
@@ -8906,7 +8921,7 @@ async def h_sessions_pause_all(request: web.Request) -> web.Response:
             # the pause is the second, immediate stop that the kill button
             # turns into while one runs.
             board.winddowns.pop(name, None)
-            manager.pause(name, force=force)
+            manager.pause(name, force=force, by=by)
         except Exception as exc:  # one refusal must not strand the other nine
             failed.append({"name": name, "error": str(exc)})
         else:
@@ -9676,20 +9691,21 @@ async def h_session_kill(request: web.Request) -> web.Response:
     name = request.match_info["name"]
     force = request.query.get("force") in ("1", "true")
     session = manager.get(name)  # ManagerError -> 400, as it always did
+    by = actors.from_request(request)
     if session.exited:
-        unpaused = manager.unpause(name)
+        unpaused = manager.unpause(name, by=by)
         # A held record is filed as killed the same way, and the exit hooks
         # the hold put off run now (SessionManager.unhold).
-        unheld = manager.unhold(name)
+        unheld = manager.unhold(name, by=by)
         body = {**session.info(), "already_exited": True}
         if unpaused:
             body["unpaused"] = True
         if unheld:
             body["unheld"] = True
         return json_response(body)
-    if await _winding_down(request, session, force=force):
+    if await _winding_down(request, session, force=force, by=by):
         return json_response({**session.info(), "winding_down": True})
-    session = manager.kill(name, force=force)
+    session = manager.kill(name, force=force, by=by)
     return json_response(session.info())
 
 
@@ -9717,7 +9733,7 @@ async def h_session_pause(request: web.Request) -> web.Response:
     if session.exited:
         return json_response({**session.info(), "already_exited": True})
     request.app["beads"].winddowns.pop(name, None)
-    session = manager.pause(name, force=force)
+    session = manager.pause(name, force=force, by=actors.from_request(request))
     return json_response(session.info())
 
 
@@ -9735,7 +9751,8 @@ async def h_session_idle_hold(request: web.Request) -> web.Response:
     session = manager.get(name)
     if session.exited:
         return json_response({**session.info(), "already_exited": True})
-    session = manager.hold(name, force=force, reason="manual")
+    session = manager.hold(name, force=force, reason="manual",
+                           by=actors.from_request(request))
     return json_response(session.info())
 
 
@@ -9854,7 +9871,8 @@ async def h_session_archive(request: web.Request) -> web.Response:
         return json_response(manager.archive(name).info())
     request.app["handoff"].forget(name)
     request.app["beads"].winddowns.pop(name, None)
-    session = await manager.stop_and_archive(name, force=force)
+    session = await manager.stop_and_archive(
+        name, force=force, by=actors.from_request(request))
     return json_response({**session.info(), "stopped": True})
 
 
@@ -9993,7 +10011,8 @@ async def h_session_model(request: web.Request) -> web.Response:
     return json_response(session.info())
 
 
-async def _winding_down(request: web.Request, session, *, force: bool) -> bool:
+async def _winding_down(request: web.Request, session, *, force: bool,
+                        by: Optional[dict] = None) -> bool:
     """Whether a kill of ``session`` is now a wind-down instead (see
     :meth:`beads.Board.begin_winddown`) — the considerate ending for a live
     session holding active board issues. Skipped by ``force`` (the operator
@@ -10011,7 +10030,8 @@ async def _winding_down(request: web.Request, session, *, force: bool) -> bool:
     if session.sdef.name in request.app["beads"].winddowns:
         request.app["beads"].winddowns.pop(session.sdef.name, None)
         return False
-    return await request.app["beads"].begin_winddown(session, request.app["manager"])
+    return await request.app["beads"].begin_winddown(
+        session, request.app["manager"], by=by)
 
 
 def _quick_fork_joined(reported, inherited: bool, asked: str) -> str:
@@ -10136,6 +10156,7 @@ async def stage_quick_fork(
     request: web.Request, parent: str, body: dict, *, tag: str = "qf",
     spawn_extra: Optional[dict] = None, before_launch=None,
     self_merge_allowed: Optional[bool] = None,
+    created_by: Optional[dict] = None,
 ) -> dict:
     """The quick-fork itself, shared by the operator's press (above) and the
     ``deep_think`` tool (daemon/deep_think.py), which forks the asking
@@ -10286,6 +10307,7 @@ async def stage_quick_fork(
         session = manager.stage_child(
             parent, spawn_body, warnings=warnings,
             place_under=None if not sibling else placed,
+            created_by=created_by or actors.from_request(request),
         )
     except spawn_mod.SpawnDenied as exc:
         raise QuickForkError(403, str(exc)) from None
@@ -10456,9 +10478,13 @@ async def h_session_child_kill(request: web.Request) -> web.Response:
         # know the second ask changed nothing, or it will keep asking.
         return json_response({**target.info(), "already_exited": True})
     force = request.query.get("force") in ("1", "true")
-    if await _winding_down(request, target, force=force):
+    # The parent named in the path, unless the request says the parent's
+    # run did it (the cflow2 orphan reap sends ``cflow:<parent>``).
+    by = actors.parse_header(request.headers.get(actors.HEADER)) or actors.make(
+        actors.AGENT, parent)
+    if await _winding_down(request, target, force=force, by=by):
         return json_response({**target.info(), "winding_down": True})
-    session = manager.kill(child, force=force)
+    session = manager.kill(child, force=force, by=by)
     return json_response(session.info())
 
 
@@ -11337,7 +11363,10 @@ async def _spawn_pr_monitor(
         ),
     }
     try:
-        child = manager.stage_child(parent, body, warnings=warnings, exempt_depth=True)
+        child = manager.stage_child(
+            parent, body, warnings=warnings, exempt_depth=True,
+            created_by=actors.with_reason(actors.from_request(request), "pr-monitor"),
+        )
     except spawn_mod.SpawnDenied as exc:
         warnings.append(f"monitor: spawn refused -- {exc}")
         return None
