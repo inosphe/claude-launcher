@@ -108,7 +108,8 @@ def env_header(env: Optional[Mapping[str, str]] = None) -> Optional[str]:
 
 def from_request(request) -> dict:
     """The actor behind an API request (see the module docstring)."""
-    declared = parse_header(request.headers.get(HEADER))
+    headers = getattr(request, "headers", None) or {}
+    declared = parse_header(headers.get(HEADER))
     if declared is not None:
         return declared
     try:
