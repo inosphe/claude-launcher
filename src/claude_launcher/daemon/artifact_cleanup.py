@@ -16,6 +16,7 @@ import secrets
 import sqlite3
 import stat
 import subprocess
+import threading
 import time
 
 from . import basetemp_reaper as basetemp, paths
@@ -69,7 +70,13 @@ def _gitdir_verdict(gitfile: Path, data: bytes, tree: Path) -> str:
     raise CleanupError(f"nested linked worktree: {gitfile.parent} (gitdir {real})")
 
 
-def _snapshot(path: Path) -> dict:
+#: How long one plan may spend fingerprinting before the rest of its items are
+#: reported unmeasured. The MCP client gives up after 120s and the daemon's
+#: work does not stop with it, so a plan must answer well inside that.
+PLAN_BUDGET = 60.0
+
+
+def _snapshot(path: Path, deadline: float | None = None) -> dict:
     _plain(path)
     # A preview worktree (a top-level .git file) keeps the strict rule: its
     # removal goes through git, and nested worktrees inside it are not ours.
@@ -77,11 +84,18 @@ def _snapshot(path: Path) -> dict:
     worktree = os.path.lexists(top) and _regular(top)
     digest = hashlib.sha256()
     size = files = 0
-    for root, dirs, names in os.walk(path, followlinks=False, onerror=_walk_error):
+    base = os.fspath(path)
+    for root, dirs, names in os.walk(base, followlinks=False, onerror=_walk_error):
+        if deadline is not None and time.monotonic() > deadline:
+            raise CleanupError("not measured within the plan's time budget; request a new plan")
+        # Relative names by slicing: Path.relative_to per entry was most of
+        # the plan's CPU time on large basetemps (claunch-30rkn).
+        prefix = "" if root == base else root[len(base) + 1:] + os.sep
         dirs.sort()
         for name in sorted(dirs + names):
-            item = Path(root) / name
-            st = item.lstat()
+            item = os.path.join(root, name)
+            relative = prefix + name
+            st = os.lstat(item)
             if _is_link(st):
                 # A link inside the tree is unlinked, never followed: only the
                 # link and its target string are evidence, so a retargeted link
@@ -89,21 +103,22 @@ def _snapshot(path: Path) -> dict:
                 # unless it is pruned here.
                 if name in dirs:
                     dirs.remove(name)
-                digest.update(repr((str(item.relative_to(path)), "link", st.st_ino,
+                digest.update(repr((relative, "link", st.st_ino,
                                     st.st_mtime_ns, os.readlink(item))).encode())
                 continue
             if not (stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode)):
                 raise CleanupError(f"special file: {item}")
-            if name == ".git" and stat.S_ISREG(st.st_mode) and item.parent != path:
+            if name == ".git" and stat.S_ISREG(st.st_mode) and root != base:
                 if worktree:
-                    raise CleanupError(f"nested linked worktree: {item.parent}")
+                    raise CleanupError(f"nested linked worktree: {root}")
                 # The verdict and the file's bytes are evidence: a gitdir
                 # rewritten after the plan changes the fingerprint even when
                 # size and mtime are restored, and apply re-judges it.
-                data = item.read_bytes()
-                digest.update(repr((str(item.relative_to(path)), "gitdir",
-                                    _gitdir_verdict(item, data, path), data)).encode())
-            digest.update(repr((str(item.relative_to(path)), st.st_mode, st.st_ino,
+                gitfile = Path(item)
+                data = gitfile.read_bytes()
+                digest.update(repr((relative, "gitdir",
+                                    _gitdir_verdict(gitfile, data, path), data)).encode())
+            digest.update(repr((relative, st.st_mode, st.st_ino,
                                 st.st_size, st.st_mtime_ns)).encode())
             if stat.S_ISREG(st.st_mode):
                 files += 1
@@ -175,10 +190,43 @@ def _foreign_names() -> set:
     return names
 
 
+def _registered_worktrees(repo: Path) -> set:
+    """Resolved paths of ``repo``'s linked worktrees; empty if git cannot say.
+
+    Only widens what a plan looks at: every listed path is still judged by
+    ``Cleanup._item`` before anything is removed.
+    """
+    try:
+        listing = _git(repo, "worktree", "list", "--porcelain", "-z")
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return set()
+    return {Path(x[9:]).resolve() for x in listing.split("\0") if x.startswith("worktree ")}
+
+
+def _scratch_artifact(path: Path, registered: set) -> bool:
+    """Whether a scratch entry is a test artifact whatever its name.
+
+    The name rule alone missed nearly every preview worktree sessions made
+    (`preview-r2`, `bt-preview`; claunch-30rkn): a registered worktree, a
+    completed-run receipt, or a pytest ``-n`` basetemp (``popen-gw*``) is
+    listed so the plan shows it, as ready or with the reason it stays.
+    """
+    try:
+        if _is_link(path.lstat()) or not path.is_dir():
+            return False
+        if path.resolve() in registered or os.path.lexists(path / basetemp.RUN_SUMMARY):
+            return True
+        return any(entry.name.startswith("popen-gw") for entry in os.scandir(path))
+    except OSError:
+        return False
+
+
 class Cleanup:
     def __init__(self, manager):
         self.manager = manager
         self.plans = {}
+        # Plans of different sessions may now run at once (claunch-30rkn).
+        self._plans_lock = threading.Lock()
 
     def _context(self, session):
         if not isinstance(session, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", session):
@@ -190,10 +238,11 @@ class Cleanup:
             raise CleanupError("cleanup is only available to a live session")
         return Path(current.sdef.cwd), paths.session_scratch_dir(session), basetemp.default_root()
 
-    def _candidates(self, session, scratch, root):
+    def _candidates(self, session, scratch, root, repo):
         sessions = self.manager.list()
         names = [s.sdef.name for s in sessions]
         foreign = _foreign_names()
+        registered = _registered_worktrees(repo) if scratch.exists() else set()
         result = []
         for directory, area in ((root, "basetemp"), (scratch, "scratch")):
             if not directory.exists():
@@ -206,7 +255,8 @@ class Cleanup:
                     reserved = any(basetemp.matches(path.name, name) for name in foreign)
                 else:
                     if not (path.name.startswith("pytest-") or path.name == "browser"
-                            or path.name.startswith(session + "-") and "preview" in path.name):
+                            or path.name.startswith(session + "-") and "preview" in path.name
+                            or _scratch_artifact(path, registered)):
                         continue
                     reserved = False
                 reason = "other daemon owns matching name" if reserved else ""
@@ -220,12 +270,12 @@ class Cleanup:
                 result.append((path, reason))
         return result
 
-    def _item(self, path, repo, reserved=""):
+    def _item(self, path, repo, reserved="", deadline=None):
         row = {"path": str(path), "status": "cleanup_pending"}
         try:
             if reserved:
                 raise CleanupError(reserved)
-            row.update(_snapshot(path))
+            row.update(_snapshot(path, deadline))
             if not path.is_dir():
                 raise CleanupError("not a directory")
             git = path / ".git"
@@ -268,16 +318,19 @@ class Cleanup:
             row["reason"] = str(exc)
         return row
 
-    def plan(self, session):
+    def plan(self, session, budget=PLAN_BUDGET):
         repo, scratch, root = self._context(session)
-        now = time.time()
-        self.plans = {k: v for k, v in self.plans.items() if now - v["created_at"] < 600}
-        # One outstanding plan per session, bounded by the session registry.
-        self.plans = {k: v for k, v in self.plans.items() if v["session"] != session}
+        deadline = time.monotonic() + budget
         token = secrets.token_hex(16)
-        plan = {"plan_id": token, "session": session, "created_at": now,
-                "items": [self._item(p, repo, why) for p, why in self._candidates(session, scratch, root)]}
-        self.plans[token] = plan
+        items = [self._item(p, repo, why, deadline)
+                 for p, why in self._candidates(session, scratch, root, repo)]
+        now = time.time()
+        plan = {"plan_id": token, "session": session, "created_at": now, "items": items}
+        with self._plans_lock:
+            self.plans = {k: v for k, v in self.plans.items() if now - v["created_at"] < 600}
+            # One outstanding plan per session, bounded by the session registry.
+            self.plans = {k: v for k, v in self.plans.items() if v["session"] != session}
+            self.plans[token] = plan
         return plan
 
     def _save(self, document):
@@ -296,12 +349,13 @@ class Cleanup:
 
     def apply(self, session, token):
         repo, scratch, root = self._context(session)
-        plan = self.plans.get(token)
-        if not plan or plan["session"] != session or time.time() - plan["created_at"] >= 600:
-            raise CleanupError("unknown, expired or foreign plan; request a new plan")
-        self.plans.pop(token)
+        with self._plans_lock:
+            plan = self.plans.get(token)
+            if not plan or plan["session"] != session or time.time() - plan["created_at"] >= 600:
+                raise CleanupError("unknown, expired or foreign plan; request a new plan")
+            self.plans.pop(token)
         # Recompute ownership and candidates before any deletion.
-        allowed = {str(p): why for p, why in self._candidates(session, scratch, root)}
+        allowed = {str(p): why for p, why in self._candidates(session, scratch, root, repo)}
         document = {**plan, "items": [dict(row) for row in plan["items"]]}
         document["receipt"] = self._save(document)  # failure prevents every deletion
         for row in document["items"]:
