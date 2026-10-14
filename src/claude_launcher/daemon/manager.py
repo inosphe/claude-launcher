@@ -69,6 +69,15 @@ log = logging.getLogger(__name__)
 RESTORE_QUEUE = "restore-queue"
 
 
+def _on_running_loop() -> bool:
+    """Whether the caller is on a thread with a running event loop."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
 def _now_iso() -> str:
     """The lifecycle-marker timestamp format (``archived_at`` and the rest)."""
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -2767,9 +2776,14 @@ class SessionManager:
         self.persist()
 
     def persist(self) -> None:
-        handle, self._persist_handle = self._persist_handle, None
-        if handle is not None:
-            handle.cancel()  # this write covers what it was scheduled for
+        handle = self._persist_handle
+        if handle is not None and _on_running_loop():
+            # This write covers what the pending one was scheduled for. Not
+            # from a worker thread (the model-reconcile clock persists there):
+            # a timer is the loop's to cancel, and the pending write is then
+            # only one write too many.
+            self._persist_handle = None
+            handle.cancel()
         # The last chance to catch a model switch made since the timer's last
         # pass: at a shutdown this runs before anything is torn down, and what
         # it writes is exactly what restore_all will relaunch from.

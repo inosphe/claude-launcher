@@ -217,3 +217,26 @@ def test_unchanged_saves_still_prune_and_still_guard(tmp_path, caplog):
 
     store.save([_entry("s2")], prune=False)  # a restore still filling the set
     assert {e["def"]["name"] for e in store.load_all()} == {"s1", "s2"}
+
+
+def test_saves_from_two_threads_leave_the_last_state_on_disk(tmp_path):
+    """The manager saves from the loop and from a worker thread; whatever
+    interleaving, a later save of the current state must reach the disk."""
+    import threading
+
+    store = db.SessionStore(tmp_path / "sessions.db")
+    names = [f"s{i}" for i in range(30)]
+    barrier = threading.Barrier(2)
+
+    def writer(code):
+        barrier.wait()
+        for _ in range(10):
+            store.save([_entry(n, exit_code=code) for n in names])
+
+    threads = [threading.Thread(target=writer, args=(c,)) for c in (1, 2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    store.save([_entry(n, exit_code=3) for n in names])
+    assert {e["exit_code"] for e in store.load_all()} == {3}

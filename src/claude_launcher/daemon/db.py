@@ -35,6 +35,7 @@ import itertools
 import json
 import logging
 import sqlite3
+import threading
 import uuid
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
@@ -87,6 +88,11 @@ class SessionStore:
         self._token_base = uuid.uuid4().hex
         self._token_seq = itertools.count(1)
         self._token: Optional[str] = None
+        #: Writes are serialised: the manager persists from the loop and,
+        #: for the model-reconcile clock, from a worker thread, and two saves
+        #: interleaving their reads of :attr:`_written` with their commits
+        #: could leave it naming a row the other one changed.
+        self._lock = threading.Lock()
 
     # -- connection ---------------------------------------------------- #
 
@@ -147,6 +153,17 @@ class SessionStore:
         *,
         prune: bool = True,
         allow_empty: bool = False,
+    ) -> None:
+        """Write the current fleet; see :meth:`_save`."""
+        with self._lock:
+            self._save(entries, prune=prune, allow_empty=allow_empty)
+
+    def _save(
+        self,
+        entries: List[dict],
+        *,
+        prune: bool,
+        allow_empty: bool,
     ) -> None:
         """Write the current fleet in one transaction.
 
@@ -234,6 +251,10 @@ class SessionStore:
 
     def delete(self, names: Iterable[str]) -> None:
         """Remove the named rows (a no-op for names not present)."""
+        with self._lock:
+            self._delete(names)
+
+    def _delete(self, names: Iterable[str]) -> None:
         conn = self._connect()
         try:
             for name in names:

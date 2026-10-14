@@ -213,3 +213,21 @@ def test_a_failing_teardown_step_is_still_timed(caplog, monkeypatch):
     with caplog.at_level(logging.INFO, logger=daemon_main.log.name):
         assert asyncio.run(run())
     assert any("'boom'" in r.getMessage() for r in caplog.records)
+
+
+def test_a_persist_from_a_worker_thread_leaves_the_pending_one(home, monkeypatch):
+    """The model-reconcile clock persists on a worker thread; it must not
+    cancel the loop's timer from there. The pending write still runs."""
+    _register_py_harness()
+    monkeypatch.setattr(Session, "start", lambda self, argv, env, cwd: None)
+    monkeypatch.setattr(SessionManager, "PERSIST_COALESCE_SECONDS", 0.05)
+
+    async def run():
+        mgr = _CountingManager(idle_threshold=0.5, scrollback=100, restore_default=True)
+        mgr.create(SessionDef(name="s9", harness="py", restore=True), restoring=True)
+        await asyncio.to_thread(mgr.persist)
+        assert mgr.persists == 1
+        await asyncio.sleep(0.2)
+        assert mgr.persists == 2
+
+    asyncio.run(run())
