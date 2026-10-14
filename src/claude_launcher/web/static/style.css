@@ -2070,7 +2070,11 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 #term-title {
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   min-width: 0; flex-shrink: 0; max-width: calc(100% - 40px);
+  cursor: copy; border-radius: 4px;
 }
+/* A click copies the name (app.js copyTermTitle). */
+#term-title:hover { text-decoration: underline dotted; }
+#term-title:focus-visible { outline: 2px solid #58a6ff; outline-offset: 2px; }
 #term-header.term-compact { padding-right: 50px; gap: 4px; }
 #term-header.term-compact [data-toolbar-icon] {
   font-size: 0; min-width: 28px; width: 28px; max-width: 28px;

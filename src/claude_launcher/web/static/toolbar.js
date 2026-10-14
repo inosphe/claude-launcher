@@ -123,7 +123,12 @@
   // for (claunch-v87).
   function describe() {
     const title = document.getElementById("term-title");
-    if (title) title.title = title.textContent.trim();
+    if (title) {
+      // The tooltip carries the full name a long title clips, and what a click does.
+      const name = title.textContent.trim();
+      const tip = name ? `${name} — click to copy` : "";
+      if (title.title !== tip) title.title = tip;
+    }
     for (const [id, icon] of Object.entries(icons)) {
       const el = document.getElementById(id);
       if (!el) continue;
