@@ -294,7 +294,10 @@ def shared(name: str):
     def wrap(handler):
         @functools.wraps(handler)
         async def wrapped(request: web.Request):
-            reads = request.app.get("shared_reads")
+            # A route called straight, with a request that has no app (the
+            # profile route's own tests do this), runs as written too.
+            app = getattr(request, "app", None)
+            reads = app.get("shared_reads") if app is not None else None
             if reads is None or not reads.enabled:
                 return await handler(request)
             return await reads.read(name, request, handler)
