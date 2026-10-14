@@ -386,8 +386,9 @@ def _cmd_journal(args: argparse.Namespace) -> int:
 #: What a person's command types into the run's driver, so it picks the run
 #: back up at once -- and a held driver is woken for it (claunch-2xyjw). The
 #: dashboard's buttons send the same through the daemon (``daemon/api.py``).
-NUDGE_SELECTED = ("[cflow2] a person took a choice of your run ({option}). Call "
-                  "flow_status and continue.")
+NUDGE_SELECTED = ("[cflow2] a person took a choice of your run ({option}){note}. Call "
+                  "flow_status and continue (its person_picks keeps the pick and the "
+                  "whole note).")
 NUDGE_MOVED = ("[cflow2] a person moved your run - what you were doing there is "
                "cancelled; call flow_status and continue from its tasks.")
 NUDGE_MOVE_ANSWERED = ("[cflow2] a person answered your move request ({decision}). "
@@ -557,7 +558,8 @@ def _cmd_select(args: argparse.Namespace) -> int:
     payload = runtime.select(args.node, args.option, args.reason, caller=runtime.CALLER_USER,
                              cwd=os.getcwd(), scope=args.scope)
     _print_status(payload, False)
-    _nudge_driver(args.scope, NUDGE_SELECTED.format(option=args.option))
+    note = runtime.person_pick_words(payload, args.option)["note"]
+    _nudge_driver(args.scope, NUDGE_SELECTED.format(option=args.option, note=note))
     return 0
 
 

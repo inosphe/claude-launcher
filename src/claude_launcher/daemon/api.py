@@ -4768,6 +4768,13 @@ NUDGE_CFLOW2_ANSWERED = (
     "cflow2: the user answered your run's open question from the dashboard - "
     "call the flow_status tool and continue"
 )
+#: A choice the user took from the dashboard: which option, and the note they
+#: typed with it -- their instruction to the agent (claunch-e437w).
+NUDGE_CFLOW2_PICKED = (
+    "cflow2: the user picked '{option}' for {label} from the dashboard{note} - "
+    "call the flow_status tool and continue (its person_picks keeps the pick "
+    "and the whole note)"
+)
 #: The run page's Nudge button on a v2 run (the v1 line names /cflow).
 NUDGE_CFLOW2_CONTINUE = (
     "cflow2: continue your v2 workflow run - call the flow_status tool and drive "
@@ -5043,8 +5050,10 @@ async def h_cflow2_select(request: web.Request) -> web.Response:
         cflow2_runtime.select, node, option, reason,
         caller=cflow2_runtime.CALLER_USER, cwd=cwd, scope=scope,
     )
+    words = cflow2_runtime.person_pick_words(payload, option)
     payload["nudge_scheduled_sessions"] = await _nudge_sessions(
-        request.app["manager"], cwd, scope, NUDGE_CFLOW2_ANSWERED
+        request.app["manager"], cwd, scope,
+        NUDGE_CFLOW2_PICKED.format(option=option, **words),
     )
     return json_response(payload)
 

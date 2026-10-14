@@ -978,3 +978,33 @@ def test_the_person_grants_the_drivers_report_request(proj):
     assert row["report"] is True and row["outcome"] == "ok"
     assert status == 200 and payload["move_request"]["decision"] == "approved"
     assert [t["label"] for t in payload["tasks"]] == ["c"]
+
+
+def test_a_dashboard_pick_carries_the_users_note_to_the_driver(proj, monkeypatch):
+    """claunch-e437w: the note a person types with a pick is their
+    instruction; the nudge names the option and carries the note, and
+    flow_status keeps both in person_picks."""
+    cwd = str(proj)
+    runtime.start(layers.load("pick", cwd), cwd=cwd, scope="s1", caps={})
+    sent = []
+
+    async def fake_nudge(manager, cwd_, scope, message):
+        sent.append((scope, message))
+        return [scope]
+
+    monkeypatch.setattr(api_mod, "_nudge_sessions", fake_nudge)
+
+    async def go(client, bearer):
+        resp = await client.post("/api/cflow2/select", headers=bearer, json={
+            "cwd": cwd, "scope": "s1", "option": "left",
+            "reason": "fix the workflow yaml in claunch"})
+        return resp.status, await resp.json()
+
+    status, payload = _http(go)
+    assert status == 200
+    assert sent == [("s1", api_mod.NUDGE_CFLOW2_PICKED.format(
+        option="left", label=payload["person_picks"][0]["label"],
+        note=" -- their note: fix the workflow yaml in claunch"))]
+    assert "'left'" in sent[0][1] and "fix the workflow yaml in claunch" in sent[0][1]
+    pick = runtime.status(cwd=cwd, scope="s1")["person_picks"][0]
+    assert pick["option"] == "left" and pick["reason"] == "fix the workflow yaml in claunch"
