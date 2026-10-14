@@ -1,5 +1,6 @@
-/* Descendants stay on the rail across project and mesh filters
-   (claunch-mz09h), run against the real helpers in app.js.
+/* Descendants and direct ancestors stay on the rail across project, mesh
+   and search filters (claunch-mz09h, claunch-78p7b), run against the real
+   helpers in app.js.
 
    A session a person can see keeps its children and grandchildren in sight
    wherever they are filed. Two filters used to hide them: the project pick
@@ -7,7 +8,10 @@
    mesh). What has to hold: the project pick adds every descendant of a
    picked-project session and nothing else; a mesh tab adds the descendants
    of its own rows, under their parent and marked `kin`; a session's own
-   bucket is unchanged; and no project pick means no additions. */
+   bucket is unchanged; and no project pick means no additions. The line
+   upward is kept the same way: the project pick and a mesh tab add the
+   direct ancestors of their rows (not the ancestors' other children), and
+   the search keeps the descendants and ancestors of what it matches. */
 const fs = require("fs");
 const path = require("path");
 const src = fs.readFileSync(
@@ -39,11 +43,17 @@ new Function("exports", "meshCache",
   [
     "let currentProject = '';",
     "let sessionsCache = [];",
+    "let sessionSearch = { q: '', hits: null };",
+    "let sessionFilter = ['running'];",
     slice("byLineage"), slice("regroupDepths"), slice("bucketWithDescendants"),
     slice("sessionGroupRows"), slice("sessionGroupValue"),
     slice("sessionMeshGroup"), slice("sessionWorkspaceGroup"), slice("sessMeshes"),
     slice("recordProject"), slice("sessionInCurrentProject"),
-    slice("lineageDescendants"), slice("railSessions"),
+    slice("lineageDescendants"), slice("lineageAncestors"), slice("railSessions"),
+    slice("sessionSearchText"), slice("sessionMatchesSearch"),
+    slice("sessionSearchLineage"), slice("sessionSearchNote"),
+    slice("sessionCategory"), slice("sessionMatchesFilter"),
+    slice("sessionGroupRowVisible"), slice("sessionGroupRowsVisible"),
     slice("sessionShownForLineage"),
     "exports.pick = (p) => { currentProject = p; };",
     "exports.byLineage = byLineage;",
@@ -51,9 +61,15 @@ new Function("exports", "meshCache",
     "exports.lineageDescendants = lineageDescendants;",
     "exports.railSessions = railSessions;",
     "exports.sessionShownForLineage = sessionShownForLineage;",
+    "exports.lineageAncestors = lineageAncestors;",
+    "exports.search = (q) => { sessionSearch = { q, hits: null }; };",
+    "exports.sessionSearchLineage = sessionSearchLineage;",
+    "exports.sessionSearchNote = sessionSearchNote;",
+    "exports.sessionGroupRowsVisible = sessionGroupRowsVisible;",
   ].join("\n"))(ctx, rooms);
 const { byLineage, sessionGroupRows, lineageDescendants, railSessions,
-        sessionShownForLineage } = ctx;
+        sessionShownForLineage, lineageAncestors, sessionSearchLineage,
+        sessionSearchNote, sessionGroupRowsVisible } = ctx;
 
 let failures = 0;
 function check(what, got, want) {
@@ -86,8 +102,11 @@ check("a pulled-in descendant is marked, a picked-project row is not",
   [sessionShownForLineage(FLEET[1]), sessionShownForLineage(FLEET[0])],
   [true, false]);
 ctx.pick("side");
-check("the other project: its own rows, nothing pulled up from above",
-  names(railSessions(FLEET)), ["kid", "grandkid", "stranger"]);
+check("the other project: its own rows, with the ancestor above them",
+  names(railSessions(FLEET)), ["kid", "grandkid", "stranger", "lead"]);
+check("...the ancestor is marked as shown for its lineage",
+  [sessionShownForLineage(FLEET[0]), sessionShownForLineage(FLEET[1])],
+  [true, false]);
 ctx.pick("");
 check("no pick: every row, none marked",
   [names(railSessions(FLEET)), sessionShownForLineage(FLEET[1])],
@@ -102,11 +121,68 @@ check("a mesh tab draws its rows' descendants from other meshes, marked",
   [
     "# (no mesh)", "stranger",
     "# alpha", "lead", "  kid *", "    grandkid *", "solo",
-    "# beta", "kid", "  grandkid",
+    "# beta", "lead *", "  kid", "    grandkid",
   ]);
 check("an ungrouped rail adds nothing and marks nothing",
   shape(sessionGroupRows(byLineage(FLEET), [])),
   ["lead", "  kid", "    grandkid", "solo", "stranger"]);
+
+/* ---- the ancestors ---------------------------------------------------- */
+const TREE = [
+  { name: "root" },
+  { name: "mid", parent: "root" },
+  { name: "leaf", parent: "mid" },
+  { name: "aunt", parent: "root" },
+  { name: "cousin", parent: "aunt" },
+  { name: "loner" },
+  { name: "loop-a", parent: "loop-b" },
+  { name: "loop-b", parent: "loop-a" },
+];
+check("ancestors of a leaf: the whole line up, nearest first",
+  names(lineageAncestors([TREE[2]], TREE)), ["mid", "root"]);
+check("an ancestor's other children are not added",
+  names(lineageAncestors([TREE[2], TREE[4]], TREE)), ["mid", "root", "aunt"]);
+check("a base row is never added as an ancestor",
+  names(lineageAncestors([TREE[2], TREE[0]], TREE)), ["mid"]);
+check("a cleared parent ends the line",
+  names(lineageAncestors([{ name: "orphan", parent: "gone" }], TREE)), []);
+check("a cycle ends",
+  names(lineageAncestors([TREE[6]], TREE)), ["loop-b"]);
+
+/* ---- the search -------------------------------------------------------- */
+const sorted = (set) => set && [...set].sort();
+ctx.search("");
+check("an empty box keeps everything", sessionSearchLineage(TREE), null);
+ctx.search("mid");
+check("a match keeps its ancestors and descendants, nothing beside them",
+  sorted(sessionSearchLineage(TREE)), ["leaf", "mid", "root"]);
+ctx.search("cousin");
+check("a deep match brings its whole line up",
+  sorted(sessionSearchLineage(TREE)), ["aunt", "cousin", "root"]);
+ctx.search("root");
+check("a match at the top keeps its whole subtree",
+  sorted(sessionSearchLineage(TREE)), ["aunt", "cousin", "leaf", "mid", "root"]);
+ctx.search("mid");
+check("lineage is counted only among the rows of the view",
+  sorted(sessionSearchLineage([TREE[1], TREE[2]])), ["leaf", "mid"]);
+check("the note counts the matches and the rows kept for their lineage",
+  sessionSearchNote({ q: "mid", hits: null }, TREE),
+  "1 of 8 match (+2 lineage) — Enter searches by meaning");
+check("...and adds nothing when no lineage was kept",
+  sessionSearchNote({ q: "loner", hits: null }, TREE),
+  "1 of 8 match — Enter searches by meaning");
+
+const row = (session) => ({ type: "session", session, depth: 0 });
+const states = [
+  { name: "p" }, { name: "c", parent: "p" },
+  { name: "dead", parent: "p", status: "exited" }, { name: "other" },
+];
+ctx.search("c");
+check("a tab counts the match and its parent, not the filtered-out sibling",
+  sessionGroupRowsVisible(states.map(row)).map((r) => r.session.name), ["p", "c"]);
+ctx.search("");
+check("an empty box counts every row the state filter admits",
+  sessionGroupRowsVisible(states.map(row)).map((r) => r.session.name), ["p", "c", "other"]);
 
 if (failures) {
   console.error(`${failures} check(s) failed`);

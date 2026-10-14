@@ -534,8 +534,13 @@ html[data-theme="light"] .xterm {
 #session-list li.child::before {
   content: "└"; color: #6e7681; font-size: 11px; flex: none; margin-right: -2px;
 }
-/* A descendant drawn although its own project or mesh is filtered out: it
-   is here because a session on this rail spawned it (claunch-mz09h). A
+/* A row the search does not match, kept in view because it is the parent,
+   an ancestor or a descendant of a match (claunch-78p7b): faded so the
+   matches stand out from the tree around them. */
+#session-list li.search-kin { opacity: 0.6; }
+/* An ancestor or descendant drawn although its own project or mesh is
+   filtered out: it is in the lineage of a session on this rail
+   (claunch-mz09h, claunch-78p7b). A
    purple inset edge and tint mark it without moving the row by a pixel. */
 #session-list li.kin-outside {
   background: rgba(163, 113, 247, 0.08); box-shadow: inset 2px 0 0 #a371f7;

@@ -1652,18 +1652,40 @@ function sessionMatchesSearch(s, search = sessionSearch) {
   return q.split(/\s+/).filter(Boolean).every((t) => hay.includes(t));
 }
 
+/* The names a search leaves in view among `sessions` (one view of the rail:
+   the open tab, the grid): the sessions it matches, with their descendants
+   and their direct ancestors among those same sessions, so a match is shown
+   where it sits in its tree (claunch-78p7b). null when the box is empty. */
+function sessionSearchLineage(sessions, search = sessionSearch) {
+  if (!String(search.q || "").trim()) return null;
+  const list = sessions || [];
+  const hits = list.filter((s) => sessionMatchesSearch(s, search));
+  const shown = new Set(hits.map((s) => s.name));
+  if (typeof lineageDescendants === "function") {
+    for (const s of lineageDescendants(hits, list)) shown.add(s.name);
+  }
+  if (typeof lineageAncestors === "function") {
+    for (const s of lineageAncestors(hits, list)) shown.add(s.name);
+  }
+  return shown;
+}
+
 function sessionSearchNote(search = sessionSearch,
     sessions = typeof railSessions === "function" ? railSessions() : sessionsCache) {
   if (!search.q) return "";
   if (search.pending) return "searching by meaning…";
   if (search.error) return `search failed: ${search.error}`;
   const shown = (sessions || []).filter((s) => sessionMatchesSearch(s, search)).length;
+  // The rows shown only because they are in a match's lineage.
+  const lineage = typeof sessionSearchLineage === "function"
+    ? sessionSearchLineage(sessions, search) : null;
+  const kin = lineage && lineage.size > shown ? ` (+${lineage.size - shown} lineage)` : "";
   if (!search.hits) {
-    return `${shown} of ${(sessions || []).length} match — Enter searches by meaning`;
+    return `${shown} of ${(sessions || []).length} match${kin} — Enter searches by meaning`;
   }
   const idx = search.index || {};
   const cover = idx.total ? ` · ${idx.indexed}/${idx.total} indexed` : "";
-  return `${shown} of ${(sessions || []).length} by meaning${cover} — Esc clears`;
+  return `${shown} of ${(sessions || []).length} by meaning${kin}${cover} — Esc clears`;
 }
 
 function syncSessionSearchNote() {
@@ -2478,7 +2500,11 @@ function renderSessionGrid(force = false) {
   const visible = sessionGridVisible();
   layout.place(visible);
   const records = new Map(visible.map((s) => [s.name, s]));
-  const searching = typeof sessionMatchesSearch === "function";
+  // A search keeps each match's lineage in view, as the list does.
+  const lineage = typeof sessionSearchLineage === "function"
+    ? sessionSearchLineage(visible) : null;
+  const searching = typeof sessionMatchesSearch !== "function" ? null
+    : (s) => (lineage ? lineage.has(s.name) : sessionMatchesSearch(s));
   const signature = JSON.stringify([
     layout.rows, currentName, sessionGridPerLine,
     // The dot's grade rides here, not the readings under it: those move on
@@ -2486,7 +2512,7 @@ function renderSessionGrid(force = false) {
     visible.map((s) => [s.name, s.status, s.paused_at, s.held_at, s.delayed_at, s.failed_at,
                         typeof dotGrade === "function" ? dotGrade(s) : "", s.role,
                         handleTag(s.name)?.handle || null,
-                        searching ? sessionMatchesSearch(s) : true,
+                        searching ? searching(s) : true,
                         s.briefing?.one_line || null,
                         sessionGridChecks(s).map(statusCheckText),
                         sessionGridGated(s.name), s.parent || null]),
@@ -2937,7 +2963,7 @@ function sessionGridCell(layout, row, r, c, records, present, searching) {
     cell.append(num, Object.assign(document.createElement("span"),
       { className: "sg-name", textContent: name }));
   } else if (s) {
-    if (searching && !sessionMatchesSearch(s)) cell.classList.add("session-filtered");
+    if (searching && !searching(s)) cell.classList.add("session-filtered");
     const dot = document.createElement("span");
     if (typeof applyDotGrade === "function") applyDotGrade(dot, s);
     else dot.className = `dot ${s.status}${s.status === "exited" && s.paused_at ? " paused" : ""}`;
@@ -3463,20 +3489,35 @@ function regroupDepths(entries) {
   });
 }
 
-/* One bucket's entries, with the descendants of its sessions that grouping
-   filed under another heading added back (claunch-mz09h): a child that
-   joined another mesh still shows under its parent's tab. Added entries
-   carry a third element, `true`, which the row draws as `kin-outside`.
-   `entries` is the whole rail in lineage order, so the bucket keeps that
-   order and a parent always precedes the descendants added under it. */
+/* One bucket's entries, with the lineage of its sessions that grouping
+   filed under another heading added back: the descendants (claunch-mz09h),
+   so a child that joined another mesh still shows under its parent's tab,
+   and the direct ancestors (claunch-78p7b), so a row keeps the chain above
+   it in that tab. Added entries carry a third element, `true`, which the
+   row draws as `kin-outside`. `entries` is the whole rail in lineage order,
+   so the bucket keeps that order and a parent always precedes what is added
+   under it. An added ancestor brings only the line upward: its other
+   children stay where grouping filed them. */
 function bucketWithDescendants(entries, inside) {
   const own = new Set(inside.map((entry) => entry[0].name));
   const shown = new Set(own);
+  const byName = new Map(entries.map((entry) => [entry[0].name, entry[0]]));
+  const above = new Set();
+  for (const name of own) {
+    let up = byName.get(name);
+    while (up && up.parent && up.parent !== up.name && byName.has(up.parent)
+           && !own.has(up.parent) && !above.has(up.parent)) {
+      above.add(up.parent);
+      up = byName.get(up.parent);
+    }
+  }
   const out = [];
   for (const entry of entries) {
     const s = entry[0];
     if (own.has(s.name)) {
       out.push(entry);
+    } else if (above.has(s.name)) {
+      out.push([s, entry[1], true]);
     } else if (s.parent && s.parent !== s.name && shown.has(s.parent)) {
       shown.add(s.name);
       out.push([s, entry[1], true]);
@@ -3689,6 +3730,20 @@ function sessionGroupRowVisible(row) {
   return false;
 }
 
+/* The rows of one tab the state filter and the search leave in view. The
+   search keeps the lineage of what it matches among these same rows
+   (sessionSearchLineage), the way the open list draws them. */
+function sessionGroupRowsVisible(rows) {
+  const list = rows || [];
+  if (typeof sessionSearchLineage !== "function") return list.filter(sessionGroupRowVisible);
+  const lineage = sessionSearchLineage(list
+    .filter((row) => row.type === "session" && sessionMatchesFilter(row.session))
+    .map((row) => row.session));
+  return list.filter((row) => row.type === "session" && lineage
+    ? sessionMatchesFilter(row.session) && lineage.has(row.session.name)
+    : sessionGroupRowVisible(row));
+}
+
 /* The tab strip above the list. Built on every rebuild of the rail (the
    counts move with the fleet), hidden while the rail is ungrouped. A tab is
    only a picker: what the open group says and offers is on the header row
@@ -3724,7 +3779,8 @@ function renderSessionGroupTabs(group, tabs, active) {
     name.textContent = group === "workspace" ? sessionWorkspaceLabel(tab.value) : tab.value;
     const count = document.createElement("span");
     count.className = "session-group-count";
-    count.textContent = String(tab.rows.filter(sessionGroupRowVisible).length);
+    count.textContent = String((typeof sessionGroupRowsVisible === "function"
+      ? sessionGroupRowsVisible(tab.rows) : tab.rows.filter(sessionGroupRowVisible)).length);
     el.append(name, count);
     el.title = open ? `${group} ${tab.value} — click to scroll to the top`
       : `${group} ${tab.value}`;
@@ -3767,7 +3823,8 @@ function renderSessionGroupHeader(group, tab) {
     const name = document.createElement("span");
     name.className = "session-group-name";
     name.textContent = tab.value;
-    const sessions = tab.rows.filter(sessionGroupRowVisible).length;
+    const sessions = (typeof sessionGroupRowsVisible === "function"
+      ? sessionGroupRowsVisible(tab.rows) : tab.rows.filter(sessionGroupRowVisible)).length;
     const count = document.createElement("span");
     count.className = "session-group-count";
     count.textContent = `${sessions} session${sessions === 1 ? "" : "s"}`;
@@ -3902,19 +3959,22 @@ function syncSessionGroupTabSearch(sessions = null) {
   // A held rail keeps its DOM and group membership, while the poll replaces
   // the records used by syncSessionFilters. Count those same latest records.
   const latest = sessions && new Map(sessions.map((s) => [s.name, s]));
-  const visible = (row) => {
+  // Each row read off its latest record; a row whose record is gone drops.
+  const current = (row) => {
     if (row.type === "session" && latest) {
       const session = latest.get(row.session.name);
-      return !!session && sessionGroupRowVisible({ type: "session", session });
+      return session ? [{ type: "session", session }] : [];
     }
     if (row.type === "shadow" && typeof shadowRow === "function") {
       const shadow = shadowRow(row.shadow.machine, row.shadow.session);
-      return !!shadow && sessionGroupRowVisible({ type: "shadow", shadow });
+      return shadow ? [{ type: "shadow", shadow }] : [];
     }
-    return sessionGroupRowVisible(row);
+    return [row];
   };
   for (const tab of bar.querySelectorAll(".session-group-tab")) {
-    const count = (tab._groupRows || []).filter(visible).length;
+    const rows = (tab._groupRows || []).flatMap(current);
+    const count = (typeof sessionGroupRowsVisible === "function"
+      ? sessionGroupRowsVisible(rows) : rows.filter(sessionGroupRowVisible)).length;
     const badge = tab.querySelector(".session-group-count");
     if (badge) badge.textContent = String(count);
     tab.classList.toggle("search-match", active && count > 0);
@@ -3965,11 +4025,24 @@ function syncSessionFilters(sessions) {
     button.setAttribute("aria-pressed", String(pressed));
   }
   const searching = typeof sessionMatchesSearch === "function";
-  for (const row of list.querySelectorAll("li[data-name]")) {
-    const session = (sessions || []).find((s) => s.name === row.dataset.name);
-    row.classList.toggle("session-filtered", !session
+  const byName = new Map((sessions || []).map((s) => [s.name, s]));
+  const rows = [...list.querySelectorAll("li[data-name]")];
+  // The search keeps the lineage of each match among the rows drawn and
+  // admitted by the state filter (claunch-78p7b); a row shown only for that
+  // lineage is marked `search-kin`.
+  const lineage = searching && typeof sessionSearchLineage === "function"
+    ? sessionSearchLineage([...new Set(rows.map((row) => row.dataset.name))]
+      .map((name) => byName.get(name))
+      .filter((s) => s && sessionMatchesFilter(s)))
+    : null;
+  for (const row of rows) {
+    const session = byName.get(row.dataset.name);
+    const hidden = !session
       || !sessionMatchesFilter(session)
-      || (searching && !sessionMatchesSearch(session)));
+      || (lineage ? !lineage.has(session.name)
+        : searching && !sessionMatchesSearch(session));
+    row.classList.toggle("session-filtered", hidden);
+    row.classList.toggle("search-kin", !hidden && !!lineage && !sessionMatchesSearch(session));
   }
   // Other daemons' sessions, drawn in the same list: the same filter and the
   // same search, asked of their own record (they are not in `sessions`).
@@ -4694,7 +4767,7 @@ async function refreshSessions(options) {
     }
     if (kin) {
       li.classList.add("kin-outside");
-      li.title = `${li.title ? li.title + " · " : ""}shown as a descendant`
+      li.title = `${li.title ? li.title + " · " : ""}shown for its lineage`
         + ` (project ${recordProject(s)}${row.meshGroup || !sessMeshes(s.name).length
           ? "" : ", mesh " + sessMeshes(s.name)[0].mesh})`;
     }
@@ -10257,17 +10330,39 @@ function lineageDescendants(base, list) {
   return out;
 }
 
+/* Every direct ancestor (parent, grandparent, ...) of the `base` sessions
+   found in `list` that is not itself in `base`, nearest first
+   (claunch-78p7b). The chain stops at a parent `list` does not hold. Only
+   the line upward is added: an ancestor's other children are not. */
+function lineageAncestors(base, list) {
+  const byName = new Map((list || []).filter(Boolean).map((s) => [s.name, s]));
+  const seen = new Set((base || []).map((s) => s.name));
+  const out = [];
+  for (const s of base || []) {
+    let up = s;
+    while (up && up.parent && up.parent !== up.name && !seen.has(up.parent)) {
+      const parent = byName.get(up.parent);
+      if (!parent) break;
+      seen.add(parent.name);
+      out.push(parent);
+      up = parent;
+    }
+  }
+  return out;
+}
+
 /* The sessions the rail draws: the cache, narrowed to the picked project,
-   plus the descendants of those sessions that are filed under another one
-   (lineageDescendants). */
+   plus the ancestors and descendants of those sessions that are filed under
+   another one (lineageAncestors, lineageDescendants). */
 function railSessions(list = sessionsCache) {
   const base = (list || []).filter(sessionInCurrentProject);
   if (!currentProject || typeof lineageDescendants !== "function") return base;
-  return [...base, ...lineageDescendants(base, list)];
+  const above = typeof lineageAncestors === "function" ? lineageAncestors(base, list) : [];
+  return [...base, ...above, ...lineageDescendants(base, list)];
 }
 
-/* Whether the rail draws `s` only because it descends from a session of
-   the picked project (railSessions). */
+/* Whether the rail draws `s` only because it is in the lineage of a session
+   of the picked project (railSessions). */
 function sessionShownForLineage(s) {
   return !!currentProject && !sessionInCurrentProject(s);
 }
