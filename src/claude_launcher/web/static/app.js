@@ -5774,6 +5774,7 @@ async function refreshQaRail() {
   if (sig !== qaRailSig) {
     qaRailSig = sig;
     qaRailCache = rows;
+    qaNoticeSync(rows);
     syncSessionResourceButtons();
     if (isTalkPane(splitKind)) globalThis.TalkPane?.refreshQa();
   }
@@ -45460,12 +45461,20 @@ function notify(title, sub, opts) {
   if (!host) return null;
   const key = o.key || `n${(noticeSeq += 1)}`;
   dismissNotice(key);            // one card per key, always the newest
-  noticeRecord({ title, sub: sub || "", kind: o.kind || "" });
+  noticeRecord(Object.assign(
+    { title, sub: sub || "", kind: o.kind || "" },
+    o.session ? { session: o.session } : {}
+  ));
   const node = el("div", "notice" + (o.kind ? ` ${o.kind}` : ""));
   node.appendChild(el("div", "notice-title", title));
   if (sub) node.appendChild(el("div", "notice-sub", sub));
-  node.title = "click to dismiss";
-  node.addEventListener("click", () => dismissNotice(key));
+  // A card about one session (a QA request) opens it: the reader's next
+  // move is that session's pane, and the click puts the card away as well.
+  node.title = o.session ? `open ${o.session}` : "click to dismiss";
+  node.addEventListener("click", () => {
+    dismissNotice(key);
+    if (o.session) location.hash = "#/s/" + encodeURIComponent(o.session);
+  });
   host.appendChild(node);
   const timer = o.sticky
     ? null
@@ -45898,6 +45907,12 @@ function noticePanelHistoryRow(entry) {
   }
   row.appendChild(head);
   if (entry.sub) row.appendChild(el("div", "notice-sub", entry.sub));
+  if (entry.session) {
+    const who = el("div", "notice-sub");
+    who.appendChild(el("span", null, "session "));
+    who.appendChild(gateSessionLink(entry.session));
+    row.appendChild(who);
+  }
   row.appendChild(el(
     "div", "notice-sub notice-when",
     noticeStamp(entry.at) +
@@ -45950,6 +45965,67 @@ function noticePanelPaint() {
 
 // The bell's dot for what an earlier visit left unread, before any poll.
 noticeBellPaint();
+
+/* ------------------------------------------------------------------ */
+/* QA requests as notices (claunch-k7c32)                              */
+/* ------------------------------------------------------------------ */
+/* A question a session files with qa_ask lights its rail button and opens
+   its pane — but only when that session's terminal is the one on screen.
+   A person looking at another session, or at the mesh page, was not told.
+   Every request now also puts up a card and so lands in the notification
+   history, from the QA rail poll (`waiting` in /api/qa/rail).
+
+   One card per request, announced once per browser: the keys already
+   announced are kept in localStorage, and shared with the page's other
+   tabs through it. A request is a new question (`<id>:open`) or an answered
+   one the session rewrote, which asks the user again (`<id>:stale:<answer
+   revision>` — further edits before the user answers are the same request).
+   The first poll of a browser that has never kept the list announces
+   nothing: arriving is not an event, and the rail button already counts
+   what is waiting. A card is sticky until the request is answered, closed
+   or withdrawn, wherever that happened; the history row stays. */
+const QA_NOTICED_KEY = "claunch.qaNoticed";
+let qaNoticed = null;   // keys announced, as of the last sync
+
+function qaNoticeKey(q) {
+  return q.status === "stale"
+    ? `${q.id}:stale:${q.answer_revision == null ? 0 : q.answer_revision}`
+    : `${q.id}:open`;
+}
+
+function qaNoticeCard(session, q) {
+  notify(
+    q.status === "stale"
+      ? `${session} asks again (your answer is stale)`
+      : `${session} asks you`,
+    q.title,
+    { key: `qa-${q.id}`, sticky: true, session }
+  );
+}
+
+function qaNoticeSync(rows) {
+  const saved = noticeLoad(QA_NOTICED_KEY, null);
+  const first = qaNoticed === null && !Array.isArray(saved);
+  const known = new Set(qaNoticed || []);
+  if (Array.isArray(saved)) for (const k of saved) known.add(k);
+  const live = new Set();
+  const liveIds = new Set();
+  for (const [session, row] of Object.entries(rows || {})) {
+    for (const q of (row && row.waiting) || []) {
+      const key = qaNoticeKey(q);
+      live.add(key);
+      liveIds.add(q.id);
+      if (!first && !known.has(key)) qaNoticeCard(session, q);
+    }
+  }
+  // A request no longer waiting takes its card down (the history keeps it).
+  for (const key of known) {
+    const id = key.split(":")[0];
+    if (!liveIds.has(id)) dismissNotice(`qa-${id}`);
+  }
+  qaNoticed = live;
+  noticeSave(QA_NOTICED_KEY, [...live]);
+}
 
 /* ------------------------------------------------------------------ */
 /* the restart gate: an agent session's restart, waiting on a person   */

@@ -183,6 +183,24 @@ def test_rail_counts_unresolved_and_moves_agent_seq_only_on_session_writes(qa):
     assert qa.list("s1")["agent_seq"] == qa.rail()["s1"]["agent_seq"]
 
 
+def test_rail_lists_the_questions_waiting_on_the_user(qa):
+    # claunch-k7c32: the dashboard announces each of these once as a notice.
+    q = qa.ask("s1", title="Q")
+    qa.ask("s1", title="Q-other")
+    waiting = qa.rail()["s1"]["waiting"]
+    assert [w["title"] for w in waiting] == ["Q", "Q-other"]
+    assert waiting[0] == {"id": q["id"], "title": "Q", "status": "open", "revision": 1,
+                          "answer_revision": None, "updated_at": waiting[0]["updated_at"]}
+    qa.answer(Q.USER, q["id"], 1, text="a")
+    assert [w["title"] for w in qa.rail()["s1"]["waiting"]] == ["Q-other"]
+    qa.update("s1", q["id"], 2, title="Q2")          # answered (rev 2), then rewritten: asked again
+    again = [w for w in qa.rail()["s1"]["waiting"] if w["id"] == q["id"]]
+    assert again and again[0]["status"] == "stale" and again[0]["answer_revision"] == 2
+    qa.update("s1", q["id"], 3, title="Q3")          # the same re-ask, edited once more
+    again = [w for w in qa.rail()["s1"]["waiting"] if w["id"] == q["id"]]
+    assert again[0]["revision"] == 4 and again[0]["answer_revision"] == 2
+
+
 def test_schema_refuses_inconsistent_rows_written_around_the_store(qa):
     q = qa.ask("s1", title="Q")
     db = sqlite3.connect(str(qa.path))

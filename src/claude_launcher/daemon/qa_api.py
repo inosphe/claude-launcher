@@ -2,7 +2,7 @@
 answered in the session's QA pane.
 
   GET  /api/qa?session=<name>[&closed=0]   one session's questions
-  GET  /api/qa/rail                        per session: unresolved, agent_seq
+  GET  /api/qa/rail                        per session: unresolved, agent_seq, waiting
   POST /api/qa                             ask      {session, title, body?, options?, multi?, thread?}
   POST /api/qa/{id}                        edit     {session, revision, title?, body?, options?, multi?}
   POST /api/qa/{id}/close                  close    {session, revision, note?}

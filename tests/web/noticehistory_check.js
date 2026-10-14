@@ -13,7 +13,13 @@
    gets the daemon's word for how it ended; a hidden id is forgotten once its
    request leaves the pending set; and all of it survives a reload through
    localStorage, while a page without storage still works. Time, storage and
-   the network belong to the harness. */
+   the network belong to the harness.
+
+   QA requests (claunch-k7c32): a question a session files, or an answered
+   one it rewrites (stale), puts up a card that opens the session and writes
+   a history row naming it; each request is announced once per browser, the
+   first poll of a fresh browser announces nothing, and the card goes when
+   the request stops waiting. */
 const fs = require("fs");
 const path = require("path");
 const STATIC = path.join(__dirname, "..", "..", "src", "claude_launcher", "web",
@@ -143,6 +149,7 @@ function build(opts) {
   };
 
   const storage = o.storage === undefined ? memoryStorage() : o.storage;
+  const loc = { hash: "" };
   const code = slice("/* notices — the page's own voice",
                      "pollTimer = setInterval(pollTick, DASHBOARD_POLL_MS);");
   const noop = () => {};
@@ -156,12 +163,12 @@ function build(opts) {
     "refreshTermWindow", "refreshTermTimers",
     code +
     "\nreturn {notify, refreshRestartGate, refreshGotoGate, refreshReposyncGate," +
-    " noticePanelToggle, noticeHistory," +
+    " noticePanelToggle, noticeHistory, qaNoticeSync," +
     " get cards() { return [...notices.keys()]; }};"
   )(
     (id) => nodes[id],
     (tag, cls, text) => node(cls, text),
-    setTimeoutStub, clearTimeoutStub, FakeDate, apiStub, { hash: "" },
+    setTimeoutStub, clearTimeoutStub, FakeDate, apiStub, loc,
     storage, async () => null,
     noop, noop, noop, noop, noop, noop, noop, noop, noop, noop, noop, noop,
     noop, noop, noop, noop, noop,
@@ -169,7 +176,7 @@ function build(opts) {
 
   const all = (n, out) => { out.push(n); n.children.forEach((c) => all(c, out)); return out; };
   return {
-    api, nodes, clock, gate, apiCalls, storage,
+    api, nodes, clock, gate, apiCalls, storage, loc,
     strip: () => nodes.notices.children,
     said: () => nodes.notices.children.map((c) => c.text()).join(" | "),
     panel: () => nodes["notice-panel-body"].text(),
@@ -327,6 +334,58 @@ function gotoRec(rec) {
     await new Promise((r) => setImmediate(r));
     check("Deny in the panel posts the goto gate's deny",
           w.apiCalls.includes("/api/cflow/goto-requests/g1/deny"), w.apiCalls);
+  }
+
+  /* --- QA requests become notices (claunch-k7c32) ---------------------- */
+  {
+    const ask = (id, title, extra) => ({ id, title, status: "open", revision: 1,
+                                         answer_revision: null, ...(extra || {}) });
+    const storage = memoryStorage();
+    const w = build({ storage });
+    w.api.qaNoticeSync({ s1: { unresolved: 1, waiting: [ask("qa-old", "what was asked before")] } });
+    check("a fresh browser's first poll announces nothing", w.strip().length === 0, w.said());
+    check("and remembers what it saw",
+          /qa-old:open/.test(storage.getItem("claunch.qaNoticed") || ""), [...storage.data.keys()]);
+    w.api.qaNoticeSync({ s1: { unresolved: 2, waiting: [ask("qa-old", "what was asked before"),
+                                                         ask("qa-new", "which base branch?")] } });
+    check("a new question puts up one card", w.strip().length === 1 && /s1 asks you/.test(w.said()) &&
+            /which base branch\?/.test(w.said()), w.said());
+    const row = w.api.noticeHistory[0];
+    check("and writes a history row naming the session",
+          row && row.title === "s1 asks you" && row.sub === "which base branch?" && row.session === "s1",
+          row);
+    w.api.qaNoticeSync({ s1: { unresolved: 2, waiting: [ask("qa-old", "what was asked before"),
+                                                         ask("qa-new", "which base branch? (edited)",
+                                                             { revision: 2 })] } });
+    check("editing a question nobody answered is not a second request",
+          w.api.noticeHistory.length === 1, w.api.noticeHistory);
+    w.api.noticePanelToggle(true);
+    check("the panel shows the row with the session", /s1 asks you/.test(w.panel()) &&
+            /session/.test(w.panel()), w.panel());
+    w.strip()[0].click();
+    check("clicking the card opens the session", w.loc.hash === "#/s/s1", w.loc.hash);
+    check("and puts the card away", w.strip().length === 0, w.said());
+
+    w.api.qaNoticeSync({ s2: { unresolved: 1, waiting: [ask("qa-b", "pick one")] } });
+    check("a card per request", w.strip().length === 1, w.said());
+    w.api.qaNoticeSync({ s2: { unresolved: 0, waiting: [] } });
+    check("an answered request takes its card down", w.strip().length === 0, w.said());
+    check("the history keeps it", w.api.noticeHistory.some((e) => e.sub === "pick one"),
+          w.api.noticeHistory);
+    const stale = (rev, arev) => ({ s2: { unresolved: 1, waiting: [
+      ask("qa-b", "pick one, again", { status: "stale", revision: rev, answer_revision: arev })] } });
+    w.api.qaNoticeSync(stale(3, 2));
+    check("a rewritten answered question asks again",
+          w.strip().length === 1 && /s2 asks again/.test(w.said()), w.said());
+    const n = w.api.noticeHistory.length;
+    w.api.qaNoticeSync(stale(4, 2));
+    check("further edits before the answer are the same request", w.api.noticeHistory.length === n,
+          w.api.noticeHistory.length);
+
+    const tab = build({ storage });
+    tab.api.qaNoticeSync(stale(4, 2));
+    check("another tab of the same browser does not announce it again",
+          tab.strip().length === 0 && tab.api.noticeHistory.length === n, tab.said());
   }
 
   /* --- no storage is not an error --------------------------------------- */
