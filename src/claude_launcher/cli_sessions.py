@@ -1726,6 +1726,11 @@ def _cmd_quick_fork(args: argparse.Namespace) -> int:
         body = {"kind": "merge"}
         if text.strip():
             body["text"] = text
+        elif os.environ.get("CLAUNCH_SESSION"):
+            # A request filed from inside a session: the daemon refuses it
+            # for a quick-fork that may not merge on its own -- that request
+            # is the operator's press.
+            body["actor"] = os.environ["CLAUNCH_SESSION"]
         info = client.post(f"/api/sessions/{target}/handoff", body)
         if info.get("completed"):
             print(
@@ -1764,6 +1769,8 @@ def _cmd_quick_fork(args: argparse.Namespace) -> int:
         body["role"] = str(args.role).strip()
     if getattr(args, "sibling", False):
         body["sibling"] = True
+    if getattr(args, "allow_self_merge", False):
+        body["self_merge_allowed"] = True
     info = client.post(f"/api/sessions/{origin}/quick-fork", body)
     child = info["session"]
     got = info.get("quick_fork") or {}
@@ -1795,10 +1802,16 @@ def _cmd_quick_fork(args: argparse.Namespace) -> int:
         "its own, so both sessions edit the same files. Keep them to "
         "different areas."
     )
-    print(
-        "From inside it, when the work is done: "
-        "claunch quick-fork merge -f <wrap-up file>"
-    )
+    if child.get("self_merge_allowed"):
+        print(
+            "From inside it, when the work is done: "
+            "claunch quick-fork merge -f <wrap-up file>"
+        )
+    else:
+        print(
+            "It merges only when you ask: press merge in the web UI, or "
+            f"claunch quick-fork merge -t {child['name']} from your own shell."
+        )
     for w in info.get("warnings") or []:
         print(f"warning: {w}")
     if getattr(args, "attach", False):
@@ -1832,6 +1845,10 @@ def _cmd_handoff(args: argparse.Namespace) -> int:
     body = {"to": args.to, "kind": "handoff"}
     if text.strip():
         body["text"] = text
+    elif os.environ.get("CLAUNCH_SESSION"):
+        # Who filed the request: refused for a quick-fork that may not end
+        # on its own (see 'quick-fork merge' above).
+        body["actor"] = os.environ["CLAUNCH_SESSION"]
     info = client.post(f"/api/sessions/{source}/handoff", body)
     if info.get("completed"):
         print(
@@ -3513,6 +3530,11 @@ def register(sub) -> None:
     p_qf.add_argument("-f", "--file", help="with 'merge': read the wrap-up from FILE ('-' = stdin)")
     p_qf.add_argument("--as", dest="as_name", help="name for the copy (default: <origin>-qf<n>)")
     p_qf.add_argument("--task", help="what the copy should do, typed under the marker")
+    p_qf.add_argument(
+        "--allow-self-merge", action="store_true",
+        help="let the copy merge on its own when it decides the work is done. "
+             "Default: it merges only after an operator's merge request",
+    )
     p_qf.add_argument(
         "--mesh",
         help="put the copy in this mesh ('.' = the origin's, which OPENS one "

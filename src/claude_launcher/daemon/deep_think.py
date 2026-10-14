@@ -373,6 +373,9 @@ async def ask(request: web.Request, origin: str, body: dict) -> dict:
                 origin=origin, fork=fork, question=question, deadline=deadline,
             )},
             tag=TAG, spawn_extra=extra, before_launch=before_launch,
+            # The answer is handed in as a merge the fork makes on its own;
+            # there is no operator press to wait for.
+            self_merge_allowed=True,
         )
     except api.QuickForkError as exc:
         raise DeepThinkError(exc.status, str(exc)) from None

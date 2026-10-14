@@ -662,7 +662,10 @@ TOOLS = [
             "delivery that fails keeps you alive and says so — call again "
             "or pick another target. A quick-fork (your opening carries a "
             "'--- forked from here ---' marker naming the origin) needs no "
-            "'to': the wrap-up goes back to the origin. Any other session "
+            "'to': the wrap-up goes back to the origin. A quick-fork calls "
+            "this only after a 'MERGE requested' block from the operator "
+            "arrives (unless its marker says it may merge on its own); "
+            "before that the daemon refuses it. Any other session "
             "names its target with 'to'. Do not call this before the work is "
             "done: the text is the only thing of this session that survives."
         ),

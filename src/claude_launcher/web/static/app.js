@@ -14106,6 +14106,7 @@ function configureSessionFork(source) {
     + "The copy shares the original checkout and reports back with Merge. "
     + "Avoid editing the same files in both sessions.";
   f.quick_fork_task.value = "";
+  f.quick_fork_self_merge.checked = false;
   quickForkFill(f.quick_fork_place, [
     { value: "child", label: `As child of ${source.name} (recommended)` },
     { value: "sibling", label: inherited.parent
@@ -14222,6 +14223,7 @@ function quickForkRequestOptions(f, view) {
   const meshName = quickForkMeshName(f, inherited);
   const options = {};
   if (f.quick_fork_place.value === "sibling") options.sibling = true;
+  if (f.quick_fork_self_merge.checked) options.self_merge_allowed = true;
   const mesh = f.quick_fork_mesh.value;
   if (mesh && mesh !== "-") options.mesh = mesh;
   const wf = f.quick_fork_workflow.value;
@@ -14276,6 +14278,7 @@ async function quickForkSession(name, task, options, view = {}) {
   if (options && options.workflow) body.workflow = options.workflow;
   if (options && options.role) body.role = options.role;
   if (options && options.sibling) body.sibling = true;
+  if (options && options.self_merge_allowed) body.self_merge_allowed = true;
   const payload = sessionFormPayload("fork", body);
   let resp;
   try {
@@ -38686,8 +38689,8 @@ function sessionFormConfig(mode) {
         "fork", "connect", "over_limit", "auto_compact"] },
     fork: { title: "Quick fork", submit: "Fork", sections: ["new-quick-fork"],
       editable: ["quick_fork_place", "quick_fork_mesh", "quick_fork_role",
-        "quick_fork_workflow", "quick_fork_task"],
-      payload: ["task", "mesh", "workflow", "role", "sibling"] },
+        "quick_fork_workflow", "quick_fork_task", "quick_fork_self_merge"],
+      payload: ["task", "mesh", "workflow", "role", "sibling", "self_merge_allowed"] },
   };
   return modes[mode] || modes.new;
 }

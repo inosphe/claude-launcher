@@ -1882,6 +1882,28 @@ class SessionManager:
         self.persist()
         return session
 
+    def set_self_merge_allowed(self, name: str, on: bool, *, actor: str = "") -> AnySession:
+        """Set (or clear) whether a quick-fork may merge on its own.
+
+        Only a quick-fork carries the flag, and the fork itself may not set
+        it: the flag stands in for the operator's merge press (see
+        :mod:`claude_launcher.daemon.handoff`).
+        """
+        session = self.get(name)
+        if not session.sdef.quick_fork_of:
+            raise ManagerError(
+                f"session {name!r} is not a quick-fork: only a quick-fork's merge "
+                "waits for the operator, so there is nothing to allow"
+            )
+        if actor and actor == name:
+            raise ManagerError(
+                f"session {name!r} cannot allow its own merge: that is the "
+                "operator's choice, made from the web UI"
+            )
+        session.sdef = replace(session.sdef, self_merge_allowed=bool(on))
+        self.persist()
+        return session
+
     def set_observe_pin(self, name: str, on: bool) -> AnySession:
         """Set (or clear) whether the observer's pinned-only scope covers this.
 

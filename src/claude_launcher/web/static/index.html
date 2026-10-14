@@ -789,6 +789,12 @@
           <label>Opening task
             <textarea name="quick_fork_task" rows="3" placeholder="Optional task for the copy"></textarea>
           </label>
+          <!-- Off by default: the copy ends only when you press merge. -->
+          <label class="check">
+            <input type="checkbox" name="quick_fork_self_merge">
+            <span>Let the copy merge on its own (default: it merges only
+              when you press Merge)</span>
+          </label>
         </fieldset>
         <!-- The form asks WHO this session is before HOW it runs. What the
              user came here to decide is the arrangement — whose child it is,
