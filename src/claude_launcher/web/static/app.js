@@ -5708,9 +5708,13 @@ async function refreshThreadsRail() {
   if (sig === threadsRailSig) return;
   threadsRailSig = sig;
   threadsRailCache = rows;
+  threadNoticeSync(rows);
   // A pane open on the threads is caught up with them.
   const lay = currentPage === "terminal" && currentName ? sessLayoutFor(currentName) : null;
-  if (lay && lay.split && talkShows(lay.pane, "threads")) markThreadsSeen(currentName);
+  if (lay && lay.split && talkShows(lay.pane, "threads")) {
+    markThreadsSeen(currentName);
+    threadNoticeClear(currentName);
+  }
   syncSessionResourceButtons();
 }
 
@@ -20116,7 +20120,11 @@ function syncSplitPane() {
     : "talk to this session in sub-topic threads, apart from the terminal" +
       (threadsNews(name) ? " — the session wrote in a thread since you last looked" : "");
   // Showing them is seeing them.
-  if (threadsOn) { markThreadsSeen(name); threads.classList.toggle("has-news", false); }
+  if (threadsOn) {
+    markThreadsSeen(name);
+    threadNoticeClear(name);
+    threads.classList.toggle("has-news", false);
+  }
   if (up) {
     applySplitRatio(lay.ratio);
     if (splitFor !== name || splitKind !== lay.pane) openSplit(name, lay.pane);
@@ -45596,7 +45604,8 @@ function notify(title, sub, opts) {
   node.title = o.session ? `open ${o.session}` : "click to dismiss";
   node.addEventListener("click", () => {
     dismissNotice(key);
-    if (o.session) location.hash = "#/s/" + encodeURIComponent(o.session);
+    if (o.open) o.open();
+    else if (o.session) location.hash = "#/s/" + encodeURIComponent(o.session);
   });
   host.appendChild(node);
   const timer = o.sticky
@@ -46148,6 +46157,86 @@ function qaNoticeSync(rows) {
   }
   qaNoticed = live;
   noticeSave(QA_NOTICED_KEY, [...live]);
+}
+
+/* ------------------------------------------------------------------ */
+/* thread replies as notices (claunch-gfv7l)                           */
+/* ------------------------------------------------------------------ */
+/* A session's answer in one of its threads (thread_reply, or a thread it
+   opened with a first message) marks 🗪 threads as news — but only on that
+   session's own header. Every reply now also puts up a card and so lands in
+   the notification history, the way a QA request does, from the threads
+   rail poll (`replies` in /api/threads/rail: each session's last few agent
+   messages).
+
+   Announced once per browser: the highest reply seq announced per session is
+   kept in localStorage, shared with the page's other tabs through it. The
+   first poll of a browser that has never kept it announces nothing, as with
+   QA. One card per thread (the newest reply replaces the older one); it is
+   sticky until clicked or until the threads pane is shown on that session,
+   and the history row stays. A click opens the session
+   with its threads pane on that thread. */
+const THREAD_NOTICED_KEY = "claunch.threadNoticed";
+let threadNoticed = null;    // session -> highest reply seq announced
+const threadNoticeKeys = new Map();   // session -> card keys still up
+
+function threadNoticeOpen(session, tid) {
+  globalThis.ThreadsPane?.focus(session, tid);
+  const lay = sessLayoutFor(session);
+  if (!(lay.split && talkShows(lay.pane, "threads"))) {
+    try {
+      setSessLayout(session, {
+        split: true, pane: lay.split && lay.pane === "qa" ? "both" : "threads",
+      });
+    } catch { /* storage off: the session still opens */ }
+  }
+  location.hash = "#/s/" + encodeURIComponent(session);
+}
+
+function threadNoticeCard(session, r) {
+  const key = `thread-${r.thread}`;
+  notify(`${session} replied in “${r.title}”`, r.excerpt || "", {
+    key, sticky: true, session, open: () => threadNoticeOpen(session, r.thread),
+  });
+  if (!threadNoticeKeys.has(session)) threadNoticeKeys.set(session, new Set());
+  threadNoticeKeys.get(session).add(key);
+}
+
+/* The threads pane shown on `session` has the replies in view: their cards
+   go down (the history keeps them). */
+function threadNoticeClear(session) {
+  const keys = threadNoticeKeys.get(session);
+  if (!keys) return;
+  for (const key of keys) dismissNotice(key);
+  threadNoticeKeys.delete(session);
+}
+
+function threadNoticeSync(rows) {
+  const saved = noticeLoad(THREAD_NOTICED_KEY, null);
+  const keep = saved && typeof saved === "object" && !Array.isArray(saved);
+  const first = threadNoticed === null && !keep;
+  // Another tab may have announced further: the higher seq of the two wins.
+  const known = Object.assign({}, threadNoticed || {});
+  if (keep) {
+    for (const [session, seq] of Object.entries(saved)) {
+      if (Number(seq) > (Number(known[session]) || 0)) known[session] = Number(seq);
+    }
+  }
+  // A session missing from this answer keeps its mark: dropping it would
+  // announce its old replies again the next time it appears.
+  const next = Object.assign({}, known);
+  for (const [session, row] of Object.entries(rows || {})) {
+    const replies = (row && row.replies) || [];
+    let top = Number(known[session]) || 0;
+    for (const r of replies) {
+      if (!(r.seq > top)) continue;
+      if (!first) threadNoticeCard(session, r);
+      top = r.seq;
+    }
+    if (top) next[session] = top;
+  }
+  threadNoticed = next;
+  noticeSave(THREAD_NOTICED_KEY, next);
 }
 
 /* ------------------------------------------------------------------ */

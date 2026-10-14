@@ -150,6 +150,7 @@ function build(opts) {
 
   const storage = o.storage === undefined ? memoryStorage() : o.storage;
   const loc = { hash: "" };
+  const layouts = {};   // session -> split layout, as setSessLayout left it
   const code = slice("/* notices — the page's own voice",
                      "pollTimer = setInterval(pollTick, DASHBOARD_POLL_MS);");
   const noop = () => {};
@@ -161,9 +162,10 @@ function build(opts) {
     "refreshTermQueued", "reconnectNow", "route", "refreshNewWorktree",
     "refreshProjects", "ensureControlSocket", "refreshCflow2Rail",
     "refreshTermWindow", "refreshTermTimers",
+    "sessLayoutFor", "setSessLayout", "talkShows",
     code +
     "\nreturn {notify, refreshRestartGate, refreshGotoGate, refreshReposyncGate," +
-    " noticePanelToggle, noticeHistory, qaNoticeSync," +
+    " noticePanelToggle, noticeHistory, qaNoticeSync, threadNoticeSync, threadNoticeClear," +
     " get cards() { return [...notices.keys()]; }};"
   )(
     (id) => nodes[id],
@@ -172,11 +174,14 @@ function build(opts) {
     storage, async () => null,
     noop, noop, noop, noop, noop, noop, noop, noop, noop, noop, noop, noop,
     noop, noop, noop, noop, noop,
+    (name) => layouts[name] || { split: false, pane: "run" },
+    (name, patch) => { layouts[name] = { ...(layouts[name] || { split: false, pane: "run" }), ...patch }; },
+    (pane, what) => pane === what || pane === "both",
   );
 
   const all = (n, out) => { out.push(n); n.children.forEach((c) => all(c, out)); return out; };
   return {
-    api, nodes, clock, gate, apiCalls, storage, loc,
+    api, nodes, clock, gate, apiCalls, storage, loc, layouts,
     strip: () => nodes.notices.children,
     said: () => nodes.notices.children.map((c) => c.text()).join(" | "),
     panel: () => nodes["notice-panel-body"].text(),
@@ -386,6 +391,61 @@ function gotoRec(rec) {
     tab.api.qaNoticeSync(stale(4, 2));
     check("another tab of the same browser does not announce it again",
           tab.strip().length === 0 && tab.api.noticeHistory.length === n, tab.said());
+  }
+
+  /* --- thread replies become notices (claunch-gfv7l) -------------------- */
+  {
+    const reply = (seq, thread, title, excerpt) => ({ seq, thread, title, excerpt, at: "t" });
+    const storage = memoryStorage();
+    const w = build({ storage });
+    const focused = [];
+    globalThis.ThreadsPane = { focus: (s, t) => focused.push([s, t]) };
+    w.api.threadNoticeSync({ s1: { open: 1, agent_seq: 4, replies: [reply(4, "th-a", "deploy", "old answer")] } });
+    check("a fresh browser's first threads poll announces nothing", w.strip().length === 0, w.said());
+    check("and remembers the last reply it saw",
+          JSON.parse(storage.getItem("claunch.threadNoticed") || "{}").s1 === 4, [...storage.data.keys()]);
+    w.api.threadNoticeSync({ s1: { open: 1, agent_seq: 4, replies: [reply(4, "th-a", "deploy", "old answer")] } });
+    check("the same reply is not announced again", w.strip().length === 0, w.said());
+    w.api.threadNoticeSync({ s1: { open: 2, agent_seq: 9, replies: [
+      reply(4, "th-a", "deploy", "old answer"), reply(7, "th-a", "deploy", "use the blue one"),
+      reply(9, "th-b", "flaky", "it was the clock")] } });
+    check("each thread with a new reply puts up one card", w.strip().length === 2 &&
+            /s1 replied in “deploy”/.test(w.said()) && /use the blue one/.test(w.said()) &&
+            /s1 replied in “flaky”/.test(w.said()) && /it was the clock/.test(w.said()), w.said());
+    const rows = w.api.noticeHistory.filter((e) => /replied in/.test(e.title));
+    check("and each reply writes a history row naming the session",
+          rows.length === 2 && rows.every((e) => e.session === "s1") &&
+            rows.some((e) => e.sub === "it was the clock"), rows);
+    w.api.threadNoticeSync({ s1: { open: 2, agent_seq: 10, replies: [
+      reply(7, "th-a", "deploy", "use the blue one"), reply(9, "th-b", "flaky", "it was the clock"),
+      reply(10, "th-a", "deploy", "and restart it")] } });
+    check("a newer reply in the same thread replaces its card",
+          w.strip().length === 2 && /and restart it/.test(w.said()) && !/use the blue one/.test(w.said()),
+          w.said());
+    check("while the history keeps both", w.api.noticeHistory.filter((e) => /deploy/.test(e.title)).length === 2,
+          w.api.noticeHistory);
+    const card = w.strip().find((c) => /and restart it/.test(c.text()));
+    card.click();
+    check("clicking the card opens the session on that thread",
+          w.loc.hash === "#/s/s1" && JSON.stringify(focused) === JSON.stringify([["s1", "th-a"]]) &&
+            w.layouts.s1 && w.layouts.s1.split === true && w.layouts.s1.pane === "threads",
+          { hash: w.loc.hash, focused, layout: w.layouts.s1 });
+    check("and puts that card away", w.strip().length === 1, w.said());
+    w.api.threadNoticeClear("s1");
+    check("showing the session's threads takes its remaining cards down", w.strip().length === 0, w.said());
+    w.layouts.s2 = { split: true, pane: "qa" };
+    w.api.threadNoticeSync({ s2: { open: 1, agent_seq: 12, replies: [reply(12, "th-c", "q", "see qa")] } });
+    check("a session not seen before announces its replies once the list is kept",
+          w.strip().length === 1 && /s2 replied/.test(w.said()), w.said());
+    w.strip()[0].click();
+    check("over an open QA pane the threads join it", w.layouts.s2.pane === "both", w.layouts.s2);
+
+    const tab = build({ storage });
+    tab.api.threadNoticeSync({ s1: { open: 2, agent_seq: 10, replies: [reply(10, "th-a", "deploy", "and restart it")] },
+                               s2: { open: 1, agent_seq: 12, replies: [reply(12, "th-c", "q", "see qa")] } });
+    check("another tab of the same browser does not announce them again",
+          tab.strip().length === 0, tab.said());
+    delete globalThis.ThreadsPane;
   }
 
   /* --- no storage is not an error --------------------------------------- */

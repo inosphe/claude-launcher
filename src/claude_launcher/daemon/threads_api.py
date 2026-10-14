@@ -2,7 +2,7 @@
 user and a session, held in the session's threads pane.
 
   GET  /api/threads?session=<name>[&closed=0]    one session's threads
-  GET  /api/threads/rail                         per session: open, agent_seq
+  GET  /api/threads/rail                         per session: open, agent_seq, replies
   POST /api/threads                              open    {session | to, title, text?, qa?}
   GET  /api/threads/{id}[?after=&limit=&reader=] the thread and its messages
   POST /api/threads/{id}/messages                post    {session?, text, ask_qa?}

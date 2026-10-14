@@ -134,6 +134,8 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
     else if (/^\/api\/threads\/th-1\?after=/.test(p)) {
       const after = Number(p.split("after=")[1]);
       doc = {thread: threads[0], messages: messages["th-1"].filter((m) => m.seq > after)};
+    } else if (/^\/api\/threads\/th-2\?after=/.test(p)) {
+      doc = {thread: threads[1], messages: []};
     } else if (p === "/api/threads/th-1/messages") doc = {message: {seq: 3}, delivered: true, hold: postHold};
     else if (p === "/api/threads") doc = {thread: {id: "th-9"}, delivered: false};
     else if (p.endsWith("/close")) doc = {thread: threads[0]};
@@ -282,6 +284,25 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   assert.deepEqual(calls.map((c) => c[1]), ["/api/threads?session=s2"]);
   await settle();
   P.unmount();
+  // a reply's notice card asks for its thread before the pane is mounted
+  // there (claunch-gfv7l): a mount on another session leaves the wish alone,
+  // the mount on that session opens the thread instead of the remembered one
+  P.focus("s1", "th-2");
+  calls.length = 0;
+  P.mount(host, "s2", {api, storageKey: "k"});
+  assert.ok(!calls.some((c) => c[1].startsWith("/api/threads/th-2?")), "another session ignores the wish");
+  await settle();
+  P.unmount();
+  calls.length = 0;
+  P.mount(host, "s1", {api, storageKey: "k"});
+  assert.ok(calls.some((c) => c[1].startsWith("/api/threads/th-2?")), "the wished thread is read, not th-1");
+  await settle();
+  P.unmount();
+  calls.length = 0;
+  P.mount(host, "s1", {api, storageKey: "k"});
+  assert.ok(P.focus.length === 2, "focus(session, tid)");
+  await settle();
+  P.unmount();
 
   /* the header button's rail (app.js) */
   const start = app.indexOf("function syncSessionResourceButtons(");
@@ -290,12 +311,16 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   const btn = document.createElement("button");
   const rail = {sessions: {}};
   const appStore = new Map();
+  const noticed = [], cleared = [];
   const actx = vm.createContext({
     BASE: "/", currentPage: "terminal", currentName: "s1", sessionSimCache: [], cflow2RailCache: {},
     sessionsCache: [], sessCflowRun: () => null, isPiDurable: () => false, $: (id) => (id === "term-threadsbtn" ? btn : null),
     sessLayoutFor: () => ({split: false, pane: "run"}),
+    talkShows: (pane, what) => pane === what || pane === "both",
     localStorage: {getItem: (k) => (appStore.has(k) ? appStore.get(k) : null), setItem: (k, v) => appStore.set(k, String(v))},
     api: async () => ({ok: true, json: async () => rail}),
+    threadNoticeSync: (rows) => noticed.push(Object.keys(rows)),
+    threadNoticeClear: (name) => cleared.push(name),
     JSON,
   });
   vm.runInContext(app.slice(start, end), actx);
@@ -306,9 +331,16 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   rail.sessions = {s1: {open: 1, agent_seq: 8}};
   await actx.refreshThreadsRail();
   assert.ok(btn.classList.contains("has-news"), "a newer agent message is news");
+  assert.deepEqual(noticed, [["s1"], ["s1"]], "each changed rail goes to the reply notices");
   actx.markThreadsSeen("s1");
   actx.syncSessionResourceButtons();
   assert.ok(!btn.classList.contains("has-news"), "seen is caught up");
+  assert.deepEqual(cleared, [], "the button's news alone leaves the reply cards up");
+  actx.sessLayoutFor = () => ({split: true, pane: "threads"});
+  rail.sessions = {s1: {open: 1, agent_seq: 9}};
+  await actx.refreshThreadsRail();
+  assert.deepEqual(cleared, ["s1"], "a threads pane on the session takes its reply cards down");
+  actx.sessLayoutFor = () => ({split: false, pane: "run"});
   rail.sessions = {s1: {open: 0, agent_seq: 8}};
   await actx.refreshThreadsRail();
   assert.ok(!btn.classList.contains("has-resource"), "all closed: dark");
