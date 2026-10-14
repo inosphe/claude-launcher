@@ -625,7 +625,7 @@ def run_detail(cwd: str, scope: str, prompts: bool = False) -> dict:
     payload = runtime.status(cwd=str(st.cwd), scope=st.scope, tick=False)
     state = st.load_state()
     chart = st.load_chart()
-    journal = st.journal(JOURNAL_TAIL)
+    journal = st.journal_tail(JOURNAL_TAIL)
     inst = state.get("inst") or {}
     return {
         "cwd": str(st.cwd),
@@ -729,7 +729,7 @@ def node_detail(cwd: str, scope: str, node_id: str) -> Optional[dict]:
                       for iid, rec in sorted(inst.items()) if rec.get("node") == node.id],
         "visits": int((state.get("visits") or {}).get(key) or 0),
         "result": _plain((state.get("result") or {}).get(key)),
-        "journal": [e for e in st.journal(JOURNAL_TAIL) if e.get("node") == node.id],
+        "journal": [e for e in st.journal_tail(JOURNAL_TAIL) if e.get("node") == node.id],
     }
 
 

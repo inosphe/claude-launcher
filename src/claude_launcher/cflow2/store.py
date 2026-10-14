@@ -346,6 +346,14 @@ class RunStore:
             out = out[-limit:] if limit else []
         return out
 
+    def journal_tail(self, limit: int) -> List[Dict[str, Any]]:
+        """The last ``limit`` events for a view. ``journal(limit)`` reads a
+        checkpoint whole (quick_check, every event and receipt) before it
+        slices; this reads only the tail."""
+        if self.checkpoint_path.exists():
+            return self._read(checkpoint.read_tail, self.checkpoint_path, limit)
+        return self.journal(limit)
+
     # -- writing ---------------------------------------------------------
     def write_chart(self, chart: ir.Chart) -> None:
         """Snapshot the IR. Written once per run; refuses to overwrite."""

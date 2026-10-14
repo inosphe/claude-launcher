@@ -165,3 +165,25 @@ def test_slot_turnover_does_not_attach_another_runs_reload(tmp_path):
     assert row["transition"]["event"] is None
     assert row["transition"]["previous"] is None
     assert row["transition"]["reloaded"] is None
+
+
+def test_detail_reads_only_the_journal_tail(home, tmp_path, monkeypatch):
+    # claunch-02w8s: the run page sliced 200 events off a whole-checkpoint read.
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    cwd = str(tmp_path)
+    runtime.start(chart(), cwd=cwd, scope="owner", caps={})
+    st = RunStore(cwd, "owner")
+    st.append([{"event": "loop_iteration", "round": n} for n in range(250)])
+    assert st.checkpoint_path.exists()
+    full = st.journal(cflow2_web.JOURNAL_TAIL)
+    assert st.journal_tail(cflow2_web.JOURNAL_TAIL) == full
+    assert st.journal_tail(0) == []
+    from claude_launcher.cflow2 import checkpoint
+    monkeypatch.setattr(checkpoint, "read", lambda *a, **k: pytest.fail("whole checkpoint read"))
+    detail = cflow2_web.run_detail(cwd, "owner")
+    assert detail["journal"] == full
+    with sqlite3.connect(st.checkpoint_path) as conn:
+        conn.execute("UPDATE events SET sha='bad' WHERE id=(SELECT max(id) FROM events)")
+    from claude_launcher.cflow2.store import StoreError
+    with pytest.raises(StoreError):
+        st.journal_tail(5)
