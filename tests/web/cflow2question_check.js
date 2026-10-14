@@ -126,17 +126,15 @@ check("...and says reframe re-asks from the reason",
 check("a plain ask with its own options lists their descriptions",
       fns.cf2AskLegendItems([{ name: "go", description: "ship it" }], false), [["go", "ship it"]]);
 check("a loop limit names its presses and says what each does",
-      fns.cf2LimitPresses(false, 5).map(([n, m]) => [n, /fail/.test(m)]),
-      [["Allow one more", false], ["Reset the count", false], ["Stop the loop", true]]);
+      fns.cf2LimitPresses(false).map(([n, m]) => [n, /fail/.test(m)]),
+      [["Allow 5 more", false], ["Allow 15 more", false], ["Stop the loop", true]]);
 check("...and what each adds to the extend body",
-      fns.cf2LimitPresses(false, 5).map(([, , b]) => b),
-      [{ by: 1 }, { reset: true }, { stop: true }]);
-check("a loop limit with no iteration run offers no reset",
-      fns.cf2LimitPresses(false, 0).map(([n]) => n), ["Allow one more", "Stop the loop"]);
+      fns.cf2LimitPresses(false).map(([, , b]) => b),
+      [{ by: 5 }, { by: 15 }, { stop: true }]);
 check("a visit limit names its own presses, without a reset",
-      fns.cf2LimitPresses(true, 9).map(([n]) => n), ["Allow one more visit", "Stop here"]);
+      fns.cf2LimitPresses(true).map(([n]) => n), ["Allow one more visit", "Stop here"]);
 check("...and both carry visits: true",
-      fns.cf2LimitPresses(true, 9).map(([, , b]) => b),
+      fns.cf2LimitPresses(true).map(([, , b]) => b),
       [{ by: 1, visits: true }, { stop: true, visits: true }]);
 const legend = fns.cf2AnswerLegend([["a", "does A"], ["b", ""], ["c", "does C"]]);
 check("the legend is a .cf2-legend list, one row per meaning, empty ones left out",
@@ -162,7 +160,7 @@ check("the ask card draws its legend from cf2AskLegendItems",
 const limitSrc = src.slice(src.indexOf("const limitCard = "),
                            src.indexOf("for (const lim of run.loop_limits"));
 check("the limit card labels its presses and legend from cf2LimitPresses",
-      limitSrc.includes("cf2LimitPresses(visitsKind, lim.iterations)")
+      limitSrc.includes("cf2LimitPresses(visitsKind)")
         && limitSrc.includes("cf2AnswerLegend(presses)"),
       true);
 const choiceSrc = src.slice(src.indexOf("for (const c of run.choices || [])"),
