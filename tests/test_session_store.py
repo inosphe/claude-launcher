@@ -120,3 +120,123 @@ def test_migrate_tolerates_a_missing_or_torn_file(tmp_path):
     torn.write_text("[{\"def\": {\"na", encoding="utf-8")
     store2 = db.SessionStore(tmp_path / "sessions2.db")
     assert store2.migrate_from_json(torn) == 0
+
+
+# -- only the rows that changed are written (claunch-7l7b7) ------------- #
+
+
+def _traced(store, monkeypatch):
+    """Record the upserts ``store`` issues."""
+    upserts = []
+    connect = store._connect
+
+    def traced():
+        conn = connect()
+        conn.set_trace_callback(
+            lambda sql: upserts.append(sql)
+            if sql.lstrip().upper().startswith("INSERT INTO SESSIONS") else None
+        )
+        return conn
+
+    monkeypatch.setattr(store, "_connect", traced)
+    return upserts
+
+
+def test_save_writes_only_the_rows_that_changed(tmp_path, monkeypatch):
+    store = db.SessionStore(tmp_path / "sessions.db")
+    upserts = _traced(store, monkeypatch)
+    entries = [_entry(f"s{i}", exit_code=None) for i in range(20)]
+    store.save(entries)
+    assert len(upserts) == 20
+
+    upserts.clear()
+    store.save(entries)
+    assert upserts == []
+
+    entries[3] = _entry("s3", exit_code=0)
+    store.save(entries)
+    assert len(upserts) == 1
+    assert {e["def"]["name"]: e["exit_code"] for e in store.load_all()}["s3"] == 0
+
+
+def test_another_writer_makes_the_next_save_write_every_row(tmp_path):
+    """What this store remembers writing is no evidence once someone else
+    has written: an overlapping daemon's row must be overwritten, not kept."""
+    path = tmp_path / "sessions.db"
+    mine, other = db.SessionStore(path), db.SessionStore(path)
+    entries = [_entry("s1", exit_code=None), _entry("s2", exit_code=None)]
+    mine.save(entries)
+    other.save([_entry("s1", exit_code=9)], prune=False)
+
+    mine.save(entries)
+    assert {e["def"]["name"]: e["exit_code"] for e in mine.load_all()} == {
+        "s1": None, "s2": None,
+    }
+
+
+def test_a_delete_from_another_store_is_written_back(tmp_path):
+    path = tmp_path / "sessions.db"
+    mine, other = db.SessionStore(path), db.SessionStore(path)
+    entries = [_entry("s1"), _entry("s2")]
+    mine.save(entries)
+    other.delete(["s1"])
+
+    mine.save(entries)
+    assert {e["def"]["name"] for e in mine.load_all()} == {"s1", "s2"}
+
+
+def test_a_failed_save_forgets_what_was_written(tmp_path, monkeypatch):
+    store = db.SessionStore(tmp_path / "sessions.db")
+    store.save([_entry("s1", exit_code=None)])
+    bad = _entry("s2", exit_code=None)
+    bad["unserialisable"] = object()
+    try:
+        store.save([_entry("s1", exit_code=0), bad])
+    except TypeError:
+        pass
+    else:
+        raise AssertionError("expected the save to raise")
+    # Rolled back: s1 is still the old row on disk.
+    assert store.load_all()[0]["exit_code"] is None
+
+    upserts = _traced(store, monkeypatch)
+    store.save([_entry("s1", exit_code=0)])
+    assert len(upserts) == 1
+    assert store.load_all()[0]["exit_code"] == 0
+
+
+def test_unchanged_saves_still_prune_and_still_guard(tmp_path, caplog):
+    store = db.SessionStore(tmp_path / "sessions.db")
+    store.save([_entry("s1"), _entry("s2")])
+    store.save([_entry("s1")])  # s1 unchanged, s2 gone
+    assert [e["def"]["name"] for e in store.load_all()] == ["s1"]
+
+    store.save([])  # nobody asked for an empty registry
+    assert [e["def"]["name"] for e in store.load_all()] == ["s1"]
+    assert "refusing to clear" in caplog.text
+
+    store.save([_entry("s2")], prune=False)  # a restore still filling the set
+    assert {e["def"]["name"] for e in store.load_all()} == {"s1", "s2"}
+
+
+def test_saves_from_two_threads_leave_the_last_state_on_disk(tmp_path):
+    """The manager saves from the loop and from a worker thread; whatever
+    interleaving, a later save of the current state must reach the disk."""
+    import threading
+
+    store = db.SessionStore(tmp_path / "sessions.db")
+    names = [f"s{i}" for i in range(30)]
+    barrier = threading.Barrier(2)
+
+    def writer(code):
+        barrier.wait()
+        for _ in range(10):
+            store.save([_entry(n, exit_code=code) for n in names])
+
+    threads = [threading.Thread(target=writer, args=(c,)) for c in (1, 2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    store.save([_entry(n, exit_code=3) for n in names])
+    assert {e["exit_code"] for e in store.load_all()} == {3}

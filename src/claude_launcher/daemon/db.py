@@ -31,11 +31,14 @@ erase the fleet, and this store will not act on it.
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import sqlite3
+import threading
+import uuid
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 from . import paths
 
@@ -59,6 +62,11 @@ CREATE TABLE IF NOT EXISTS meta (
 #: if the table is later emptied by a genuine clear.
 _MIGRATED_KEY = "migrated_sessions_json"
 
+#: Key in ``meta`` naming the store object that wrote the table last (see
+#: :meth:`SessionStore.save`). A save finding someone else's token there
+#: cannot trust what it remembers writing, and writes every row.
+_WRITER_KEY = "last_writer"
+
 
 class SessionStore:
     """The durable session registry, one row per session keyed by name."""
@@ -67,6 +75,24 @@ class SessionStore:
         self._path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
+        #: What this object last committed for each name, read back from the
+        #: JSON it wrote (so it shares nothing with the caller's objects).
+        #: :meth:`save` writes only the rows whose entry differs: the manager
+        #: persists the whole fleet on every change, and serialising and
+        #: rewriting 574 unchanged rows per relaunch held the event loop for
+        #: seconds after a restart (claunch-7l7b7). Anything JSON does not
+        #: round-trip (a tuple, a non-string key) compares unequal and is
+        #: written again, which is the safe direction. Valid only while
+        #: :attr:`_token` is still the table's last writer.
+        self._written: Dict[str, dict] = {}
+        self._token_base = uuid.uuid4().hex
+        self._token_seq = itertools.count(1)
+        self._token: Optional[str] = None
+        #: Writes are serialised: the manager persists from the loop and,
+        #: for the model-reconcile clock, from a worker thread, and two saves
+        #: interleaving their reads of :attr:`_written` with their commits
+        #: could leave it naming a row the other one changed.
+        self._lock = threading.Lock()
 
     # -- connection ---------------------------------------------------- #
 
@@ -128,6 +154,17 @@ class SessionStore:
         prune: bool = True,
         allow_empty: bool = False,
     ) -> None:
+        """Write the current fleet; see :meth:`_save`."""
+        with self._lock:
+            self._save(entries, prune=prune, allow_empty=allow_empty)
+
+    def _save(
+        self,
+        entries: List[dict],
+        *,
+        prune: bool,
+        allow_empty: bool,
+    ) -> None:
         """Write the current fleet in one transaction.
 
         Upserts every entry, then — when ``prune`` — deletes the rows for
@@ -140,11 +177,18 @@ class SessionStore:
         for. ``prune`` itself is passed False while a restore is still filling
         the set (each per-session persist would otherwise delete the records not
         loaded yet) and left True in steady state.
+
+        Only the rows whose entry differs from what this object last committed
+        are serialised and written (claunch-7l7b7). That memory is trusted only while the
+        ``meta`` writer token is still the one this object wrote; any other
+        writer in between, or a failed save, and every row is written again.
+        Nothing is committed when nothing changed.
         """
         rows = [(self._name_of(e), e) for e in entries]
         rows = [(n, e) for (n, e) in rows if n]
         names = {n for (n, _e) in rows}
         conn = self._connect()
+        written = dict(self._written)
         try:
             existing = int(
                 conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
@@ -156,7 +200,18 @@ class SessionStore:
                     existing,
                 )
                 prune = False
+            row = conn.execute(
+                "SELECT value FROM meta WHERE key=?", (_WRITER_KEY,)
+            ).fetchone()
+            if self._token is None or (row[0] if row else None) != self._token:
+                # Another writer (an overlapping daemon, a second store on
+                # the same file) may have changed rows this object remembers:
+                # nothing remembered is evidence of what is on disk now.
+                written = {}
+            changed = False
             for name, entry in rows:
+                if written.get(name) == entry:
+                    continue
                 blob = json.dumps(entry, ensure_ascii=False)
                 conn.execute(
                     "INSERT INTO sessions(name, data, updated_at) "
@@ -165,23 +220,56 @@ class SessionStore:
                     "data=excluded.data, updated_at=excluded.updated_at",
                     (name, blob),
                 )
+                written[name] = json.loads(blob)
+                changed = True
             if prune:
                 have = [r[0] for r in conn.execute("SELECT name FROM sessions")]
                 for n in have:
                     if n not in names:
                         conn.execute("DELETE FROM sessions WHERE name=?", (n,))
-            conn.commit()
+                        written.pop(n, None)
+                        changed = True
+            if changed:
+                token = f"{self._token_base}:{next(self._token_seq)}"
+                conn.execute(
+                    "INSERT INTO meta(key, value) VALUES(?,?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (_WRITER_KEY, token),
+                )
+                conn.commit()
+                self._token = token
+            else:
+                conn.rollback()
+            self._written = written
+        except BaseException:
+            # What was committed is unknown: the next save writes every row.
+            self._written = {}
+            self._token = None
+            raise
         finally:
             conn.close()
 
     def delete(self, names: Iterable[str]) -> None:
         """Remove the named rows (a no-op for names not present)."""
+        with self._lock:
+            self._delete(names)
+
+    def _delete(self, names: Iterable[str]) -> None:
         conn = self._connect()
         try:
             for name in names:
                 conn.execute("DELETE FROM sessions WHERE name=?", (name,))
+            # Not a save: mark the table as written by nobody, so every
+            # store's next save (this one's too) writes all its rows.
+            conn.execute(
+                "INSERT INTO meta(key, value) VALUES(?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (_WRITER_KEY, uuid.uuid4().hex),
+            )
             conn.commit()
         finally:
+            self._written = {}
+            self._token = None
             conn.close()
 
     # -- migration ----------------------------------------------------- #

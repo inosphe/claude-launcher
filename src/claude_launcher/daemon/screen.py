@@ -319,6 +319,28 @@ class ScreenState:
         self._screen.resize(lines=rows, columns=cols)
         self._revision += 1
 
+    def adopt(self, other: "ScreenState") -> None:
+        """Take ``other``'s whole state in place, keeping this object.
+
+        For a screen built off the event loop (a restored session's replayed
+        log, claunch-7l7b7) and handed over in one step: the session, its
+        feeder and every reader hold *this* object, so it is the contents
+        that move, not the reference. What changed here while ``other`` was
+        being built -- a resize, a new history bound from a viewer focusing
+        -- is applied again on top, and nothing cached about the old grid
+        survives the swap.
+        """
+        cols, rows = self.cols, self.rows
+        limit, revision = self.history_limit, self._revision
+        self.__dict__.update(other.__dict__)
+        self._revision = max(revision, self._revision) + 1
+        self._hashes = None
+        self._line_cache = None
+        if self.history_limit != limit:
+            self.set_history_limit(limit)
+        if (self.cols, self.rows) != (cols, rows):
+            self.resize(cols, rows)
+
     @property
     def history_limit(self) -> int:
         return self._screen.history.size
