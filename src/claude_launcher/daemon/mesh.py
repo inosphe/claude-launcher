@@ -38,7 +38,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
 
 import yaml
 
@@ -3107,6 +3107,7 @@ class MeshManager:
                     "parent": self.parent_handle_for(mesh, session),
                 },
             )
+            lone, before = self._lone_locals(mesh), set(mesh.members)
             member = Member.from_dict(payload)
             mesh.members[member.handle] = member
             # ...and the edges its join just decided, for the same reason the
@@ -3115,6 +3116,7 @@ class MeshManager:
             edges = payload.get("member_edges")
             if isinstance(edges, dict):
                 mesh.member_edges = {str(k): bool(v) for k, v in edges.items()}
+            self._tell_reached(mesh, lone, before)
             # The primary tells us its log length at join time: messages
             # sequenced before the join never deliver to this member, even
             # ones still in flight to this mirror.
@@ -5357,6 +5359,16 @@ class MeshManager:
             # the next sync re-sends the whole table anyway.
             self._mark_member_edge(mesh, a, b, enabled)
             granted = self._grant_wire_request(mesh, a, b, decider) if enabled else None
+            # Our own endpoints are told here; the authority tells its own
+            # (peer_member_link_accept). A sync that brings this edge back
+            # finds them no longer alone and says nothing twice.
+            for h in alone:
+                if granted and h == granted["by"]:
+                    continue
+                self._tell_soon(
+                    mesh, h,
+                    wire.edge_opened_note(b if h == a else a, mesh.name, joined=False),
+                )
             self._persist_def(mesh)
             return {
                 "a": a, "b": b, "enabled": bool(enabled),
@@ -5945,6 +5957,50 @@ class MeshManager:
             if h != handle and h != besides
         )
 
+    def _lone_locals(self, mesh: Mesh) -> Set[str]:
+        """This daemon's members that can reach nobody right now."""
+        return {
+            h for h, m in mesh.members.items()
+            if m.session and self._is_local(mesh, m) and self._alone(mesh, h)
+        }
+
+    def _tell_reached(
+        self,
+        mesh: Mesh,
+        lone: Set[str],
+        members_before: Set[str],
+        *,
+        skip: Tuple[str, ...] = (),
+    ) -> None:
+        """Tell each of ``lone`` that is no longer alone who it can reach now.
+
+        For the paths that do not open the edge themselves and so cannot say
+        whom it was opened to at the point of opening: a mirror adopting the
+        authority's roster and edge table, a guest join that brings the
+        authority's edges back, and the authority applying an edit a guest
+        forwarded (claunch-mvg3c). ``lone`` is :meth:`_lone_locals` taken
+        before the change; ``members_before`` tells a member that arrived
+        from an edge that was opened between two who were both here. Kin is
+        skipped as in :meth:`_wire_member` — a parent spawned the child.
+        """
+        if not lone:
+            return
+        lineage = self._lineage_map(mesh)
+        for h in sorted(lone):
+            if h not in mesh.members or h in skip:
+                continue
+            for other in sorted(mesh.members):
+                if other == h or not mesh.connected(h, other):
+                    continue
+                if lineage.get(other) == h or lineage.get(h) == other:
+                    continue
+                self._tell_soon(
+                    mesh, h,
+                    wire.edge_opened_note(
+                        other, mesh.name, joined=other not in members_before
+                    ),
+                )
+
     def peer_member_link_accept(
         self, name: str, machine: str, token: str, a: str, b: str, enabled: bool
     ) -> dict:
@@ -5953,7 +6009,9 @@ class MeshManager:
         self._check_link_token(mesh, machine, token)
         self._require_authority(mesh, "the member graph")
         self._validate_member_edge(mesh, a, b)
+        lone = self._lone_locals(mesh) if enabled else set()
         self._mark_member_edge(mesh, a, b, enabled)
+        self._tell_reached(mesh, lone, set(mesh.members))
         self._persist_def(mesh)
         self._roster_changed(mesh)
         self._flush_guests_soon(mesh)
@@ -8011,6 +8069,7 @@ class MeshManager:
         self._check_primary_token(mesh, machine, token)
         if int(base) != len(mesh.messages):
             return {"resync": len(mesh.messages)}
+        lone, before = self._lone_locals(mesh), set(mesh.members)
         now = time.monotonic()
         appended = 0
         for m in messages:
@@ -8094,6 +8153,9 @@ class MeshManager:
             mesh.members = adopted
             self._persist_def(mesh)
             self._persist_cursors(mesh)
+        # The authority wired a join or an edge and told only its own
+        # members; ours learn it here, from the table it just sent.
+        self._tell_reached(mesh, lone, before)
         if policy is not None:
             mesh.policy = mesh_policy.load_policy(policy)
         for nudge in nudges:
