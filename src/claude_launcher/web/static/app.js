@@ -17948,7 +17948,20 @@ function sessLayoutFor(name) {
     pane: raw.pane === "sims" || raw.pane === "chart" || raw.pane === "qa" || raw.pane === "threads"
       ? raw.pane : "run",
     ratio: clampSplitRatio(Number(raw.ratio)),
+    // The session's view the reader last had up: its terminal (cli) or its
+    // conversation page (html). route() writes it on every in-session page
+    // and reads it back when a link brings the reader in from another
+    // session, so the links themselves all keep saying #/s/<name>.
+    view: raw.view === "html" ? "html" : "cli",
   };
+}
+
+/* Write the session's view down only when it changed: route() calls this on
+   every navigation, and a localStorage write (plus the split re-sync the
+   setter does) per hashchange is waste. */
+function rememberSessView(name, view) {
+  if (!name || sessLayoutFor(name).view === view) return;
+  try { setSessLayout(name, { view }); } catch { /* storage off */ }
 }
 
 function setSessLayout(name, patch) {
@@ -19182,8 +19195,9 @@ function openTranscript(name, machine = null) {
   transcriptName = name;
   transcriptMachine = machine;
   // showView ran before the name was set; the footer follows the session
-  // this page now reads.
+  // this page now reads, and so does the split pane under it.
   if (typeof syncSessionLine === "function") syncSessionLine();
+  if (typeof syncSplitPane === "function") syncSplitPane();
   transcriptCursor = null;
   transcriptSeen = -1;
   transcriptMore = false;
@@ -19771,7 +19785,10 @@ let splitWasUp = false;
 
 function syncSplitPane() {
   if (typeof syncSessionResourceButtons === "function") syncSessionResourceButtons();
-  const name = currentPage === "terminal" ? currentName : null;
+  // Under either of the session's views: the terminal, or its own
+  // conversation page (sessionLineOnPage) — the pane goes under the
+  // conversation there, at the same remembered ratio.
+  const name = sessionLineOnPage(currentPage) ? currentName : null;
   const lay = name ? sessLayoutFor(name) : null;
   const up = !!lay && lay.split && !MOBILE_MQ.matches;
   $("term-split").classList.toggle("hidden", !up);
@@ -20470,10 +20487,14 @@ $("term-split").addEventListener("pointerdown", (e) => {
   $("term-split").classList.add("dragging");
   splitDragRatio = sessLayoutFor(currentName).ratio;
 });
+/* The pane's upper half: the terminal, or the conversation in the HTML view. */
+function splitUpperPane() {
+  return currentPage === "log" ? $("log-view") : $("terminal");
+}
 $("term-split").addEventListener("pointermove", (e) => {
   if (splitDragRatio === null) return;
   const bar = $("term-split");
-  const top = $("terminal").getBoundingClientRect().top;
+  const top = splitUpperPane().getBoundingClientRect().top;
   const span = $("term-wf").getBoundingClientRect().bottom - top - bar.offsetHeight;
   if (span <= 0) return;
   splitDragRatio = clampSplitRatio((e.clientY - top - bar.offsetHeight / 2) / span);
@@ -20886,10 +20907,11 @@ function route() {
   if (r.page !== "shadow" && typeof closeShadow === "function") closeShadow();
 
   switch (r.page) {
-    case "terminal":
+    case "terminal": {
       // Opening a session the narrowed rail does not list moves the rail to
       // the session's project; "All projects" lists it already.
       if (typeof followSessionProject === "function") followSessionProject(r.name);
+      const arriving = currentName !== r.name;
       // Re-entering the route we are already attached to must not tear the
       // socket down and build it again — coming back from another page is
       // the common case, and it would cost the scrollback every time.
@@ -20902,14 +20924,49 @@ function route() {
         // relied on — that is the link's job now.
         reconnectNow();
       } else attach(r.name);
+      // Every link to a session says #/s/<name>; which of its two views
+      // opens is the session's own remembered choice (sessLayoutFor().view).
+      // Only for a link just followed from another session: walking from
+      // this session's HTML view to its CLI (the radio, the mobile bar, Back)
+      // is the reader choosing CLI, and that is written down instead.
+      // Replaced, not pushed, so Back skips the #/s/ stop the reader never
+      // saw. The terminal stays attached underneath, as after the radio.
+      // Guarded like syncRouteProject: reduced harnesses slice route() alone.
+      const remembered = typeof sessLayoutFor === "function";
+      if (remembered && arriving && fresh && currentName === r.name &&
+          sessLayoutFor(r.name).view === "html") {
+        history.replaceState({ ...(history.state || {}), sessView: true }, "",
+          "#/log/" + location.hash.slice("#/s/".length));
+        r.page = "log";
+        openTranscript(r.name);
+      } else if (remembered) {
+        rememberSessView(r.name, "cli");
+      }
       break;
+    }
     case "session": showView("session"); break;
     case "shadow": openShadow(r.machine, r.name); break;
     case "observer": showView("observer"); globalThis.ObserverPage.open(r.scope, r.name); break;
     case "operator": showView("operator"); globalThis.OperatorPanel.open(); break;
     case "chat": showView("chat"); globalThis.ChatPanel.open(r.name); break;
     case "wf": openWorkflow(r.cwd, r.scope); break;
-    case "log": openTranscript(r.name, r.machine); break;
+    case "log": {
+      // An entry that was a session's HTML view (stamped below, or by the
+      // terminal case's rewrite) is that view again when Back or Forward
+      // lands on it, whichever session is attached by then: attach the one
+      // it reads, so the session header comes up with it.
+      const sessView = !r.machine && !!(history.state && history.state.sessView);
+      if (sessView && r.name !== currentName && typeof attach === "function") attach(r.name);
+      openTranscript(r.name, r.machine);
+      // The attached session's own conversation is its HTML view; another
+      // session's or a shadow's transcript is a page of its own and says
+      // nothing about how the reader likes that session.
+      if (!r.machine && r.name === currentName) {
+        if (!sessView) history.replaceState({ ...(history.state || {}), sessView: true }, "");
+        if (typeof rememberSessView === "function") rememberSessView(r.name, "html");
+      }
+      break;
+    }
     case "msg": openTrace(r.name, r.mesh); break;
     case "mesh": openMesh(r.name); break;
     case "flow": openFlowTopology(r.name); break;

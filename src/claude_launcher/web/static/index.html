@@ -652,7 +652,9 @@
     <!-- Split mode's bar and pane, under the terminal they halve. The pane
          renders the same material as #/wf/<scope|cwd>; both stay hidden
          unless the header's ⬒ run toggle is on for the attached session
-         (syncSplitPane), and the bar drags the ratio between the two. -->
+         (syncSplitPane), and the bar drags the ratio between the two. The
+         session's HTML view carries them too: there style.css orders them
+         under #log-view, which takes the terminal's share. -->
     <div id="term-split" class="hidden"></div>
     <div id="term-wf" class="hidden"></div>
     <!-- The composer: the preset strip, the prompter row and the input bar

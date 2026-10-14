@@ -82,6 +82,10 @@ let splitFor = null;
 let splitKind = null;
 let currentPage = "terminal";
 let currentName = "s15";
+// The transcript page's state (sessionLineOnPage reads it): which session's
+// conversation is on screen, and from which daemon.
+let transcriptName = null;
+let transcriptMachine = null;
 function applySplitRatio(r) { calls.ratios.push(r); }
 function openSplit(name, kind) { splitFor = name; splitKind = kind; calls.opened.push(name); calls.kinds.push(kind); }
 function closeSplit() { splitFor = null; splitKind = null; calls.closed++; }
@@ -96,6 +100,7 @@ Object.assign(exports, {
   splitFor: () => splitFor,
   setPage: (p) => { currentPage = p; },
   setName: (n) => { currentName = n; },
+  setTranscript: (n, m = null) => { transcriptName = n; transcriptMachine = m; },
 });`;
 
 function build(o = {}) {
@@ -116,6 +121,7 @@ function build(o = {}) {
     prelude +
     sliceTo("const SESSLAYOUT_KEY =", "/* Bind the terminal to a session") +
     sliceLine("let splitWasUp") +
+    sliceFn("sessionLineOnPage") + "\n" +
     sliceFn("syncSplitPane") + "\n" + sliceFn("sessRailTabs") +
     expose
   )(ctx, (id) => nodes[id], { body }, "/", storage,
@@ -217,6 +223,35 @@ check("the key carries the base path",
         w.nodes["term-wf"].classes.has("hidden") && w.calls.closed === 1
         && !w.body.classes.has("term-split"));
   check("...but not the choice", w.ctx.sessLayoutFor("s15").split === true);
+}
+/* --- the HTML view carries the pane too (claunch-br7qh) ------------------ */
+{
+  const w = build({ stored: JSON.stringify({ s15: { split: true, pane: "threads", ratio: 0.55 } }) });
+  w.ctx.setPage("log");
+  w.ctx.setTranscript("s15");
+  w.ctx.syncSplitPane();
+  check("the session's own conversation page brings the pane up",
+        !w.nodes["term-wf"].classes.has("hidden")
+        && !w.nodes["term-split"].classes.has("hidden")
+        && w.body.classes.has("term-split"));
+  check("...with the remembered content and ratio",
+        w.calls.kinds.join() === "threads" && w.calls.ratios.includes(0.55),
+        { kinds: w.calls.kinds, ratios: w.calls.ratios });
+  // CLI <-> HTML on the same session: the pane stays pointed, no reopen.
+  w.ctx.setPage("terminal");
+  w.ctx.syncSplitPane();
+  check("walking to the terminal keeps the same pane open",
+        w.calls.opened.length === 1 && w.calls.closed === 0, w.calls);
+  // Another session's transcript is a page of its own: no pane.
+  w.ctx.setPage("log");
+  w.ctx.setTranscript("s99");
+  w.ctx.syncSplitPane();
+  check("another session's transcript shuts it",
+        w.nodes["term-wf"].classes.has("hidden") && w.calls.closed === 1);
+  w.ctx.setTranscript("s15", "m2");
+  w.ctx.syncSplitPane();
+  check("...and so does a shadow's of the same name",
+        w.nodes["term-wf"].classes.has("hidden"));
 }
 {
   const w = build({ stored: JSON.stringify({ s15: { split: true } }),
