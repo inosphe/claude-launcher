@@ -573,6 +573,77 @@ def test_briefing_keeps_remote_peers_with_unknown_liveness(home, mirror):
     assert "note: 1 other member(s)" in block
 
 
+def _listed(block: str, prefix: str = "members: ") -> str:
+    return next(
+        (line for line in block.splitlines() if line.startswith(prefix)), ""
+    )
+
+
+def test_a_briefing_at_the_cap_still_names_every_peer(home):
+    """Up to the cap nothing changes: every reachable peer is named."""
+    mgr = _Manager()
+    mm, mesh = _mesh(mgr)
+    me = _member(mesh, "me", mgr.add("self"), role="worker")
+    for i in range(mesh_mod._BRIEFING_NAMED_CAP):
+        _member(mesh, f"w{i:02d}", mgr.add(f"s{i:02d}"), role="worker")
+        _connect(mesh, "me", f"w{i:02d}")
+
+    block = mm.briefing_block(mesh, me)
+    assert _listed(block).count("(worker)") == mesh_mod._BRIEFING_NAMED_CAP
+    assert "also connected:" not in block
+
+
+def test_a_crowded_briefing_names_kin_leaders_and_reviewers_and_counts_the_rest(home):
+    """claunch-5x55u: past the cap the line names who a member addresses.
+
+    Its parent and children whatever their role, leaders and reviewers. The
+    other peers are counted by role and stay connected — the count says so.
+    """
+    mgr = _Manager()
+    mm, mesh = _mesh(mgr)
+    mgr.add("boss-s")
+    me = _member(mesh, "me", mgr.add("self", parent="boss-s"), role="worker")
+    _member(mesh, "boss", "boss-s", role="worker")
+    _member(mesh, "kid", mgr.add("kid-s", parent="self"), role="worker")
+    _member(mesh, "lead", mgr.add("lead-s"), role="leader")
+    _member(mesh, "rev", mgr.add("rev-s"), role="reviewer")
+    _member(mesh, "free", mgr.add("free-s"), role="free-role")
+    peers = ["boss", "kid", "lead", "rev", "free"]
+    for i in range(mesh_mod._BRIEFING_NAMED_CAP):
+        _member(mesh, f"w{i:02d}", mgr.add(f"s{i:02d}"), role="worker")
+        peers.append(f"w{i:02d}")
+    for h in peers:
+        _connect(mesh, "me", h)
+
+    block = mm.briefing_block(mesh, me)
+    assert _listed(block) == (
+        "members: boss (worker), kid (worker), lead (leader), rev (reviewer)"
+    )
+    count = mesh_mod._BRIEFING_NAMED_CAP + 1
+    assert _listed(block, "also connected: ") == (
+        f"also connected: {count} more member(s) "
+        f"(free-role 1, worker {count - 1}), not listed by name -- you can "
+        "message any of them; 'claunch mesh members m' lists them"
+    )
+    # Only the line is cut: the graph the member sends along is untouched.
+    assert set(mesh.neighbours("me")) == set(peers)
+
+
+def test_a_crowded_briefing_with_nobody_to_name_says_so(home):
+    """No kin, no leader, no reviewer: the line must not read as alone."""
+    mgr = _Manager()
+    mm, mesh = _mesh(mgr)
+    me = _member(mesh, "me", mgr.add("self"), role="worker")
+    for i in range(mesh_mod._BRIEFING_NAMED_CAP + 1):
+        _member(mesh, f"w{i:02d}", mgr.add(f"s{i:02d}"), role="worker")
+        _connect(mesh, "me", f"w{i:02d}")
+
+    block = mm.briefing_block(mesh, me)
+    assert _listed(block) == "members: (none by name)"
+    assert "nobody else yet" not in block
+    assert f"also connected: {mesh_mod._BRIEFING_NAMED_CAP + 1} more" in block
+
+
 def test_a_legacy_session_role_still_gets_the_common_stance_briefing(home):
     """SessionDef.role no longer selects a harness-specific delivery path."""
     block = _brief(_Manager(), session_role="worker", member_role="worker")
