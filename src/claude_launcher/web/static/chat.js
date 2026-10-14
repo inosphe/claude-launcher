@@ -26,7 +26,10 @@ async function request(path, body) {
   if (!response.ok) throw Error(data.error || `HTTP ${response.status}`);
   return data;
 }
-const roomPath = mesh => `api/chat/rooms/${encodeURIComponent(mesh)}/messages`;
+// Spelled from the root: api() batches only "/api/..." reads, so a read
+// written "api/..." went out alone and took one of the page's two HTTP
+// slots on every poll (claunch-8utpv).
+const roomPath = mesh => `/api/chat/rooms/${encodeURIComponent(mesh)}/messages`;
 
 /* ---- pure helpers (tests/web/chat_check.js) ---- */
 const KEY_RE = /^[A-Za-z0-9_-]{8,64}$/;
@@ -162,7 +165,7 @@ async function loadRoom(mesh) {
 }
 async function poll() {
   let doc;
-  try { doc = await request("api/chat/rooms"); } catch (err) { status(err.message); return; }
+  try { doc = await request("/api/chat/rooms"); } catch (err) { status(err.message); return; }
   status("");
   rooms = doc.rooms || [];
   localMachine = doc.machine || "";
@@ -406,7 +409,10 @@ function cycle() {
 function schedule() {
   clearTimeout(timer);
   const fast = (pageOpen || modal.open) && document.visibilityState === "visible";
-  timer = setTimeout(cycle, fast ? 3000 : document.visibilityState === "visible" ? 8000 : 20000);
+  // A background tab's poll only keeps its badge and notifications current,
+  // and chat is seldom used: it costs a read on every open tab, so it runs
+  // once a minute there (claunch-8utpv).
+  timer = setTimeout(cycle, fast ? 3000 : document.visibilityState === "visible" ? 8000 : 60000);
 }
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") { if (onScreen(current)) markRead(current); cycle(); }

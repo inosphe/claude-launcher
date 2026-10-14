@@ -2251,6 +2251,7 @@ def _converge_profiles() -> list:
     return out
 
 
+@shared_reads.shared("profiles")
 async def h_profiles(request: web.Request) -> web.Response:
     # One config read for the whole listing, one availability probe per
     # harness. Both used to happen inside the double loop below: fourteen
