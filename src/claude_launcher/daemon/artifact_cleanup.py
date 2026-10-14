@@ -52,15 +52,20 @@ def _gitdir_verdict(gitfile: Path, data: bytes, tree: Path) -> str:
     """
     text = data.decode("utf-8")
     target = text[len("gitdir: "):].strip() if text.startswith("gitdir: ") else ""
-    if not target:
+    if not target or "\n" in target or "\r" in target:
         raise CleanupError(f"nested linked worktree: {gitfile.parent} (no gitdir line)")
     # Git resolves a relative gitdir against the directory holding the file.
     real = os.path.normcase(os.path.realpath(os.path.join(gitfile.parent, target)))
     root = os.path.normcase(os.path.realpath(tree))
     if real == root or real.startswith(root.rstrip(os.sep) + os.sep):
         return "inside"
-    if not os.path.exists(real):
+    try:
+        os.lstat(real)
+    except (FileNotFoundError, NotADirectoryError):
         return "missing"
+    except OSError as exc:
+        # A gitdir that cannot be looked at is not a gitdir that is gone.
+        raise CleanupError(f"nested linked worktree: {gitfile.parent} (gitdir {real}: {exc.strerror})")
     raise CleanupError(f"nested linked worktree: {gitfile.parent} (gitdir {real})")
 
 

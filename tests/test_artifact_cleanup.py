@@ -246,7 +246,8 @@ def test_nested_gitdir_reaching_outside_through_a_link_in_the_tree_is_preserved(
     assert (outside / "gitdir").exists()
 
 
-@pytest.mark.parametrize("content", [b"", b"not a gitfile", b"gitdir: ", b"gitdir: \xff\xfe"])
+@pytest.mark.parametrize("content", [b"", b"not a gitfile", b"gitdir: ", b"gitdir: \xff\xfe",
+                                     b"gitdir: gone\nsecond line\n"])
 def test_nested_gitfile_that_names_no_gitdir_is_preserved(setup, content):
     service, root, _, _ = setup
     mine = completed(root / "s1c1012000000")
@@ -254,6 +255,22 @@ def test_nested_gitfile_that_names_no_gitdir_is_preserved(setup, content):
     (mine / "nested" / ".git").write_bytes(content)
     result = service.apply("s1", service.plan("s1")["plan_id"])
     assert result["removed"] == 0 and mine.exists()
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="POSIX permissions")
+def test_gitdir_that_cannot_be_looked_at_is_not_taken_for_gone(setup, tmp_path):
+    service, root, _, _ = setup
+    sealed = tmp_path / "sealed"
+    (sealed / "gitdir").mkdir(parents=True)
+    mine = completed(root / "s1c1012000000")
+    nested_gitfile(mine, sealed / "gitdir")
+    sealed.chmod(0)
+    try:
+        result = service.apply("s1", service.plan("s1")["plan_id"])
+    finally:
+        sealed.chmod(0o755)
+    assert result["removed"] == 0 and mine.exists()
+    assert "nested linked worktree" in result["items"][0]["reason"]
 
 
 def test_worktree_fixtures_whose_gitdir_is_in_the_same_tree_are_removed(setup):
