@@ -4552,6 +4552,22 @@ nudge also waits for the TUI to be able to take it, and is dropped if the
 session starts working on its own first. `claunch daemon config resume_nudge
 true|false` (read at restore, so an edit applies to the next restart).
 
+**QA nudges (Jev).** A session that ends its turn by asking the user
+something in plain text, instead of putting the question in its QA pane with
+`qa_ask`, can be told to use the pane. When a session goes busy -> idle, the
+daemon reads the turn's final reply from the transcript and, unless the turn
+already used `qa_ask`, the session has no claunch MCP, or it was nudged and no
+person has typed since, asks [Jev](https://docs.typesafe.ai/introduction)
+(TypeSafe's System One model) one Choice over the nudge actions
+(`none` | `use_qa`; more are added in `daemon/qa_nudge.py`). `use_qa` at or
+above `qa_nudge_min_confidence` types the nudge. Only the final reply is sent,
+clipped to `qa_nudge_max_chars` characters. Off by default
+(`claunch daemon config qa_nudge true`, or Settings ▸ General ▸ QA nudges);
+the API key is saved from that card into a 0600 file beside the daemon, or
+read from the environment variable `jev_api_key_env` names
+(`TYPESAFE_API_KEY`). Every judgment is logged to
+`~/.claude-launcher/daemon/qa_nudge.jsonl`.
+
 Daemon settings live under `daemon:` in `~/.claunch.yaml`
 (`host`, `port`, `idle_threshold`, `scrollback_lines`, `restore`,
 `cflow_reminder`, `cflow_reminder_interval`, `role_reminder`,
