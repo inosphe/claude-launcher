@@ -7,7 +7,11 @@ first saved interval and gaps between intervals remain unknown.
 """
 from __future__ import annotations
 
+import os
 import re
+import threading
+import time
+from collections import OrderedDict
 from datetime import datetime, timezone
 
 from ..cflow2 import store
@@ -28,6 +32,92 @@ def timestamp(value):
         return None
 
 
+def _facts(snap: dict) -> dict:
+    """What ``observations`` needs from one saved run, none of it relative
+    to the observation time: the identity, the times as saved, which tasks
+    carry a merge contract and the reports that could fill one."""
+    state, chart = snap["state"], snap["chart"]
+    rid = state.get("run_id")
+    if not isinstance(rid, str) or not rid:
+        raise ValueError("missing run identity")
+    contracts = {}
+    for node in chart.tasks():
+        if "git.merge" not in (node.get("effects") or []):
+            continue
+        outcomes = {name for name, fields in (node.get("returns") or {}).items()
+                    if isinstance(fields, dict) and fields.get("merges") == "list"}
+        if outcomes:
+            contracts[node.id] = outcomes
+    reports = [event for event in snap["events"]
+               if event.get("event") == "reported" and event.get("node") in contracts
+               and event.get("outcome") in contracts[event["node"]]]
+    return {"run": rid, "state": {k: state.get(k) for k in
+                                  ("workflow", "status", "started", "finished")},
+            "contracts": bool(contracts), "complete": snap["complete"], "reports": reports}
+
+
+#: Facts of saved runs by slot directory, valid while its files' stats hold.
+#: The run page asks for the same runs on every poll, and an archive is not
+#: written again: re-reading up to RUN_LIMIT checkpoints (each a checksum
+#: pass over up to EVENT_LIMIT events) took seconds per poll on a busy daemon
+#: (claunch-02w8s).
+FACTS_CACHE_MAX = 512
+#: A file changed this recently is not cached: a second write inside the
+#: same mtime tick would leave its stat unchanged (git's "racily clean").
+RACY_NS = 2_000_000_000
+_facts_lock = threading.Lock()
+_facts_cache: "OrderedDict[str, tuple]" = OrderedDict()
+
+
+def _stamp(source: store.RunStore) -> tuple | None:
+    """The slot files' stats, or None when one changed too recently to trust."""
+    out = []
+    now = time.time_ns()
+    for path in (source.checkpoint_path, source.state_path, source.chart_path,
+                 source.journal_path):
+        try:
+            st = os.stat(path)
+        except OSError:
+            out.append(None)
+            continue
+        if now - st.st_mtime_ns < RACY_NS:
+            return None
+        out.append((st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns))
+    return tuple(out)
+
+
+def _read_facts(source: store.RunStore) -> dict:
+    return _facts(source.metrics_snapshot(EVENT_LIMIT, BYTE_LIMIT))
+
+
+def _cached_facts(source: store.RunStore):
+    """``_facts`` of a saved run, or the error reading it gave, through the
+    cache. Both are kept: an unreadable run stays unreadable until its files
+    change."""
+    key = str(source.dir)
+    stamp = _stamp(source)
+    if stamp is not None:
+        with _facts_lock:
+            hit = _facts_cache.get(key)
+            if hit is not None and hit[0] == stamp:
+                _facts_cache.move_to_end(key)
+                return hit[1]
+    try:
+        value = _read_facts(source)
+    except _UNAVAILABLE as exc:
+        value = exc
+    if stamp is not None and stamp == _stamp(source):
+        with _facts_lock:
+            _facts_cache[key] = (stamp, value)
+            _facts_cache.move_to_end(key)
+            while len(_facts_cache) > FACTS_CACHE_MAX:
+                _facts_cache.popitem(last=False)
+    return value
+
+
+_UNAVAILABLE = (store.StoreError, OSError, ValueError, KeyError)
+
+
 def observations(st: store.RunStore, *, now: str | None = None) -> dict:
     now = now or datetime.now(timezone.utc).isoformat(timespec="seconds")
     until = timestamp(now)
@@ -41,11 +131,10 @@ def observations(st: store.RunStore, *, now: str | None = None) -> dict:
     unavailable = incomplete = 0
     for source in sources:
         try:
-            snap = source.metrics_snapshot(EVENT_LIMIT, BYTE_LIMIT)
-            state, chart = snap["state"], snap["chart"]
-            rid = state.get("run_id")
-            if not isinstance(rid, str) or not rid:
-                raise ValueError("missing run identity")
+            facts = _cached_facts(source)
+            if isinstance(facts, Exception):
+                raise facts
+            rid, state = facts["run"], facts["state"]
             if rid in seen:
                 continue
             seen.add(rid)
@@ -54,21 +143,9 @@ def observations(st: store.RunStore, *, now: str | None = None) -> dict:
             live = state.get("status") in ("running", "waiting_approval")
             end = until if live and finish is None else finish
             valid = start is not None and end is not None and start <= end <= until
-            contracts = {}
-            for node in chart.tasks():
-                if "git.merge" not in (node.get("effects") or []):
-                    continue
-                outcomes = {name for name, fields in (node.get("returns") or {}).items()
-                            if isinstance(fields, dict) and fields.get("merges") == "list"}
-                if outcomes:
-                    contracts[node.id] = outcomes
-            complete = snap["complete"]
+            complete = facts["complete"]
             merges = []
-            for event in snap["events"]:
-                if event.get("event") != "reported" or event.get("node") not in contracts:
-                    continue
-                if event.get("outcome") not in contracts[event["node"]]:
-                    continue
+            for event in facts["reports"]:
                 value = event.get("value")
                 at = timestamp(event.get("ts"))
                 if (not isinstance(value, dict) or not isinstance(value.get("merges"), list)
@@ -87,16 +164,16 @@ def observations(st: store.RunStore, *, now: str | None = None) -> dict:
                                    "identity": value["repo"] + ":" + row["merge_sha"].lower()})
             if not valid:
                 unavailable += 1
-            if contracts and not complete:
+            if facts["contracts"] and not complete:
                 incomplete += 1
             runs.append({"run": rid, "workflow": state.get("workflow"),
                          "started": state.get("started") if valid else None,
                          "ended": now if live and valid else state.get("finished") if valid else None,
                          "completed_at": state.get("finished") if valid and state.get("status") == "done" else None,
                          "duration_s": finish - start if valid and finish is not None else None,
-                         "merge_source": bool(contracts), "merge_complete": complete,
+                         "merge_source": facts["contracts"], "merge_complete": complete,
                          "merges": merges})
-        except (store.StoreError, OSError, ValueError, KeyError):
+        except _UNAVAILABLE:
             unavailable += 1
     # Re-reports in later runs do not move a merge into a later time bin.
     retained = set()
