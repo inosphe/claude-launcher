@@ -38,7 +38,8 @@ async function api(raw, opts = {}) {
   else if (p === '/api/sims/profiles') result = {profiles: ['ds4', 'glm', 'oauth'], judges: ['ds4', 'glm'],
     models: {ds4: ['flash', 'glm-flash'], glm: ['glm-big']}, defaults: {interpreter_profile: 'ds4', judge_profile: ''}};
   else if (p === '/api/sims' && method === 'GET') { result = {sims: [sim]}; if (delay) { const d = delay; delay = null; await d; } }
-  else if (p === '/api/sims' && method === 'POST') result = {sim: {...sim, id: 'sim-new111', owner: body.owner}, nudged: true};
+  else if (p === '/api/sims' && method === 'POST') result = {sim: {...sim, id: 'sim-new111', owner: body.owner,
+    ...(body.fill && !(body.title && body.goal) ? {fill_pending: true, title: body.title} : {})}, nudged: true};
   else if (p.endsWith('/findings')) result = {total: findings.length, findings};
   else if (p.endsWith('/replay')) result = url.searchParams.get('key') === 'unhandled|door|open|open'
     ? {stale: false, reproduces: true, checkpoint: null, start: {sm: {door: 'closed'}, vars: {}}, raised_at: 2,
@@ -237,6 +238,24 @@ async function settle() { for (let i = 0; i < 10; i++) await new Promise(resolve
   assert.strictEqual(made2.body.owner, 's1');
   assert.strictEqual(loc.hash, '#/s/s1');
   ctx.SimPane.unmount();
+  // 「세션에 맡기기」: no title, no goal -- the owner fills them; the title field's
+  // required does not stand in the way because the button does not submit the form.
+  ctx.SimPage.open(); await settle();
+  button('새 시뮬레이션').onclick();
+  labelled('맡길 세션').value = 's1'; labelled('맡길 세션').onchange();
+  button('세션에 맡기기').onclick(); await settle();
+  const filled = calls.filter(c => c.url.pathname === '/api/sims' && c.method === 'POST').pop();
+  assert.strictEqual(filled.body.fill, true);
+  assert.strictEqual(filled.body.title, '');
+  assert.strictEqual(filled.body.owner, 's1');
+  assert.strictEqual(filled.body.settings.interpreter_profile, 'ds4');
+  // A simulation still waiting for its title: a placeholder heading, a warning, no run.
+  Object.assign(sim, {fill_pending: true, title: '', goal: ''});
+  ctx.SimPage.open('sim-abc123'); await settle();
+  assert(all().some(n => n.tag === 'h2' && n.textContent === '(세션이 제목을 정하는 중)'));
+  assert(all().some(n => n.className === 'sim-warn' && n.textContent.includes('제목·목표')));
+  assert.strictEqual(button('실행').disabled, true);
+  Object.assign(sim, {fill_pending: undefined, title: '<b>door</b>'});
   // Leaving the route invalidates an outstanding read.
   ctx.SimPage.open(); await settle();
   let release; delay = new Promise(resolve => { release = resolve; });

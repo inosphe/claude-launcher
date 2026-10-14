@@ -93,6 +93,8 @@ function makeSimView({root: view, session = "", go}) {
   const EDIT_KIND_LABEL = {clarify: "명료화", complete: "보충", decide: "결정 필요"};
   const TRIAGE_LABEL = {model: "모델이 원천을 잘못 읽음", spec: "원천에 정해진 내용 없음 (사람이 결정)", intended: "결함 아님"};
   const MODEL_KEYS = ["interpreter_profile", "judge_profile", "interpreter_model", "judge_model", "interpreter_reasoning", "judge_reasoning"];
+  // A simulation created with 「세션에 맡기기」 has no title until its owner fills it.
+  const simTitle = s => s.title || (s.fill_pending ? "(세션이 제목을 정하는 중)" : s.id);
 
   function render() {
     const root = view(); if (!root) return;
@@ -126,7 +128,7 @@ function makeSimView({root: view, session = "", go}) {
       const tr = node("tr"); tr.tabIndex = 0;
       tr.onclick = () => go(s.id);
       tr.onkeydown = e => { if (e.key === "Enter") tr.onclick(); };
-      const t = node("td"); t.append(node("strong", s.title), node("div", s.id + (s.project ? " · " + s.project : ""), "sim-muted"));
+      const t = node("td"); t.append(node("strong", simTitle(s)), node("div", s.id + (s.project ? " · " + s.project : ""), "sim-muted"));
       const st = node("td"); st.append(node("span", STATE_LABEL[s.state] || s.state, "sim-badge sim-" + s.state));
       const ms = s.model_stats || {};
       tr.append(t, node("td", s.owner || "없음"), st, node("td", String(s.counts?.open ?? 0)),
@@ -156,7 +158,7 @@ function makeSimView({root: view, session = "", go}) {
       li.onclick = () => go(s.id);
       li.onkeydown = e => { if (e.key === "Enter") li.onclick(); };
       const c = s.counts || {};
-      li.append(node("span", STATE_LABEL[s.state] || s.state, "sim-badge sim-" + s.state), node("strong", s.title),
+      li.append(node("span", STATE_LABEL[s.state] || s.state, "sim-badge sim-" + s.state), node("strong", simTitle(s)),
         node("span", ` ${s.id} · 열림 ${c.open || 0} · 질문 ${c.question || 0}` + (s.proposals?.proposed ? ` · 편집 제안 ${s.proposals.proposed}` : ""), "sim-muted"));
       ul.append(li);
     }
@@ -165,8 +167,9 @@ function makeSimView({root: view, session = "", go}) {
 
   function createForm() {
     const form = node("form", null, "sim-form");
-    draft = draft || {title: "", goal: "", sources: "", owner: session, interpreter_profile: profiles.defaults?.interpreter_profile || "",
-      judge_profile: profiles.defaults?.judge_profile || "", interpreter_model: "", judge_model: "",
+    const d = profiles.defaults || {};
+    draft = draft || {title: "", goal: "", sources: "", owner: session, interpreter_profile: d.interpreter_profile || "",
+      judge_profile: d.judge_profile || "", interpreter_model: d.interpreter_model || "", judge_model: d.judge_model || "",
       interpreter_reasoning: "low", judge_reasoning: "low"};
     const field = (label, key, multiline) => {
       const l = node("label", label); const i = node(multiline ? "textarea" : "input");
@@ -181,20 +184,30 @@ function makeSimView({root: view, session = "", go}) {
     } else form.append(node("p", `소유 세션: ${session} — 만들면 이 세션에 생성 요청이 입력됩니다.`, "sim-muted"));
     form.append(profileFields(draft, v => { Object.assign(draft, v); render(); }));
     const from = node("label", "이어 받기 — 고른 시뮬레이션의 모델·판정·답한 질문으로 시작합니다");
-    from.append(select([["", "없음 (빈 모델)"], ...list.map(x => [x.id, `${x.title} (${x.id})`])], draft.from || "",
+    from.append(select([["", "없음 (빈 모델)"], ...list.map(x => [x.id, `${simTitle(x)} (${x.id})`])], draft.from || "",
       v => { draft.from = v; }, "이어 받을 시뮬레이션"));
     form.append(from);
     const submit = node("button", "만들고 요청 보내기", "wf-btn sim-primary"); submit.disabled = busy;
-    form.append(submit);
-    form.onsubmit = e => {
-      e.preventDefault();
+    // The deferred path: no run yet -- the owner names the simulation from
+    // its own work (sim_configure), then builds and starts it.
+    const fill = button("세션에 맡기기", () => send(true));
+    fill.title = "제목·목표를 비운 채 만들고, 소유 세션이 하는 일에서 그것을 정해 채운 뒤 실행하도록 요청합니다";
+    form.append(submit, fill,
+      node("p", "「세션에 맡기기」: 제목·목표를 비워 두면 소유 세션이 지금 하는 일에서 정해 채우고 실행합니다. 채우기 전에는 실행할 수 없습니다.", "sim-muted"));
+    const send = deferred => {
       if (!draft.owner) { error = "맡길 세션을 고르세요"; render(); return; }
       const settings = {};
       for (const k of MODEL_KEYS) settings[k] = draft[k];
       act(() => request("/api/sims", "POST", {title: draft.title, goal: draft.goal, owner: draft.owner,
-        sources: draft.sources.split("\n").map(s => s.trim()).filter(Boolean), settings, ...(draft.from ? {from: draft.from} : {})}),
-        r => { creating = false; draft = null; go(r.sim.id); return r.nudged ? `${r.sim.owner}에 요청을 보냈습니다` : "요청을 입력하지 못했습니다 — 세션 상태를 확인하세요"; });
+        sources: draft.sources.split("\n").map(s => s.trim()).filter(Boolean), settings, ...(draft.from ? {from: draft.from} : {}),
+        ...(deferred ? {fill: true} : {})}),
+        r => {
+          creating = false; draft = null; go(r.sim.id);
+          if (!r.nudged) return "요청을 입력하지 못했습니다 — 세션 상태를 확인하세요";
+          return r.sim.fill_pending ? `${r.sim.owner}에 제목·목표를 정해 실행하라고 요청했습니다` : `${r.sim.owner}에 요청을 보냈습니다`;
+        });
     };
+    form.onsubmit = e => { e.preventDefault(); send(false); };
     return form;
   }
 
@@ -232,7 +245,7 @@ function makeSimView({root: view, session = "", go}) {
     const title = node("div");
     const back = node("a", session ? "← " + session + "의 시뮬레이션" : "← 시뮬레이션", "sim-back"); back.href = "#/sims";
     back.onclick = e => { e.preventDefault(); go(""); };
-    title.append(back, node("h2", s.title));
+    title.append(back, node("h2", simTitle(s)));
     if (session) { const full = node("a", "전체 화면에서 열기", "sim-full"); full.href = "#/sims/" + enc(s.id) + "/" + tab; title.append(full); }
     const meta = node("p", null, "sim-muted");
     meta.append(node("span", STATE_LABEL[s.state] || s.state, "sim-badge sim-" + s.state),
@@ -254,10 +267,13 @@ function makeSimView({root: view, session = "", go}) {
     if ((s.stale_sources || []).length)
       title.append(node("p", `원천이 바뀌어 인용을 잃은 규칙 ${s.stale_sources.length}개: ${s.stale_sources.map(x => x.id).join(", ")}`, "sim-warn"));
     if (s.goal) title.append(node("p", s.goal, "sim-goal"));
+    if (s.fill_pending)
+      title.append(node("p", `소유 세션이 정해 채울 항목: ${[!s.title && "제목", !s.goal && "목표"].filter(Boolean).join("·")}. 채우기 전에는 실행할 수 없습니다.`, "sim-warn"));
     head.append(title); shell.append(head);
 
     const actions = node("div", null, "sim-actions");
     if (s.state === "running") actions.append(button("중지", () => act(() => request(base + "/stop", "POST", {}), r => r.notified ? "중지했고 소유 세션에 알렸습니다" : "중지했습니다")));
+    else if (s.fill_pending) { const run = button("실행", () => {}, "sim-primary"); run.disabled = true; run.title = "소유 세션이 제목·목표를 채운 뒤 실행할 수 있습니다"; actions.append(run); }
     else actions.append(button("실행", () => act(() => request(base + "/start", "POST", {}), r => r.runner ? `실행 세션 ${r.runner}을 띄웠습니다` : r.manual ? `실행했습니다 (소유 세션이 해석: ${r.manual})` : "실행했습니다"), "sim-primary"));
     actions.append(button("라운드 한 번", () => act(() => request(base + "/round", "POST", {}), r => `라운드 ${r.result.round}: 새 ${r.result.new} · 열림 ${r.result.open}`)));
     const say = node("input"); say.placeholder = "소유 세션에 전할 말 (비우면 계속 진행 요청)"; say.disabled = busy || !s.owner;
@@ -268,7 +284,7 @@ function makeSimView({root: view, session = "", go}) {
       button("소유권 이관", () => { const to = transferTo; if (to) act(() => request(base + "/transfer", "POST", {to}), () => { transferTo = ""; return `${to}로 이관했습니다`; }); }));
     if (s.owner) actions.append(button("소유권 해제", () => act(() => request(base + "/release", "POST", {}), () => "해제했습니다")));
     actions.append(button("삭제", () => {
-      if (globalThis.confirm(`${s.id} 「${s.title}」를 삭제할까요? 모델과 기록이 모두 지워집니다.`))
+      if (globalThis.confirm(`${s.id} 「${simTitle(s)}」를 삭제할까요? 모델과 기록이 모두 지워집니다.`))
         act(() => request(base, "DELETE"), () => { go(""); return ""; });
     }, "sim-danger"));
     shell.append(actions);

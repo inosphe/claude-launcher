@@ -158,6 +158,12 @@ claunch sim runtime status       # 설치·최신 여부, 아니면 종료 코�
 
 모델 변경의 인용 검사는 그 변경이 쓰는 규칙에만 적용된다. 인용을 잃은 옛 규칙이 다른 변경을 막지 않는다.
 
+화면의 생성 폼에서 제목·목표를 비워 두고 「세션에 맡기기」를 누르면 지연 생성이다(`POST /api/sims`의
+`fill: true`). 데몬은 제목·목표가 빈 레코드를 `fill_pending: true`로 만들고(원천·설정·이어 받기는 폼에서 고른
+대로), 소유 세션에 「지금 하는 일에서 무엇을 시뮬레이션할지 정해 `sim_configure`로 제목·목표를 채우고 실행하라」는
+요청을 입력한다. 제목과 목표가 모두 채워지면 표시가 지워지고, 그 전에는 `sim_start`가 409로 거절한다. 소유
+세션이 없으면 400이다.
+
 다른 시뮬레이션에서 이어 받아 만들 수도 있다(`sim_create`의 `from`, 화면의 「이어 받기」): 그 시뮬레이션의 모델, 판정,
 답한 질문을 복사하고 설정은 복사하지 않는다. 첫 실행 때 위 확인이 새 루트를 기준으로 돈다.
 
@@ -221,7 +227,7 @@ claunch sim runtime status       # 설치·최신 여부, 아니면 종료 코�
 |---|---|---|
 | `interpreter_profile` | 데몬 `simulation_interpreter_profile` | 해석(B)에 쓸 pi 프로필 |
 | `judge_profile` | 데몬 `simulation_judge_profile` | 판정(C)에 쓸 pi 프로필. 비우면 해석 프로필 |
-| `interpreter_model`, `judge_model` | 빈 값(프로필 기본 모델) | 그 프로필이 pi에 주는 모델 중 하나. 같은 프로필에서도 판정 모델을 다르게 고를 수 있다 |
+| `interpreter_model`, `judge_model` | 데몬 `simulation_interpreter_model`·`simulation_judge_model`, 비었으면 빈 값(프로필 기본 모델) | 그 프로필이 pi에 주는 모델 중 하나. 같은 프로필에서도 판정 모델을 다르게 고를 수 있다. 요청이 기본과 다른 프로필을 고르고 모델을 주지 않으면 기본 모델은 쓰지 않는다 |
 | `interpreter_reasoning`, `judge_reasoning` | `low` | `none`·`low`·`medium`·`high` |
 | `seed`, `budget`, `horizon` | 1, 2000, 12 | 걸음 씨앗, 라운드당 걸음 수, 셀 하나에서 이어 가는 걸음 수 |
 | `max_rounds` | 20 | 한 번 실행의 라운드 상한 |
@@ -233,6 +239,11 @@ claunch sim runtime status       # 설치·최신 여부, 아니면 종료 코�
 공급자를 pi에 넘길 수 있는 프로필(`judges`)만이다. Anthropic OAuth만 쓰는 프로필은 pi를 자체 로그인으로 실행하므로 두
 번째 공급자로 등록할 수 없다. 해석과 판정이 같은 프로필·같은 모델이면 화면이 경고한다. 설정은 언제든 바꿀
 수 있고 다음 라운드·실행부터 적용된다.
+
+데몬 기본값 네 개(`simulation_interpreter_profile`, `simulation_interpreter_model`, `simulation_judge_profile`,
+`simulation_judge_model`)는 Settings 페이지(General)의 「Simulation models」 카드에서 고른다(`PUT /api/sims/defaults`).
+데몬은 저장할 때 프로필이 pi를 실행할 수 있는지, 모델이 그 프로필(판정 프로필이 비었으면 해석 프로필)이 주는
+모델인지 확인한다. 빈 값은 설정 파일에서 키를 지운다.
 
 ## 단계
 

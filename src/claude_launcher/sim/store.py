@@ -71,6 +71,14 @@ _SUBMIT_CAP = 5000
 _UNVERIFIED_REF = re.compile(r"^(issue|user|session|url|https?):", re.I)
 
 
+def _profile_of(role: str, settings: dict) -> str:
+    """The profile a role's model belongs to: the judge without a profile of
+    its own judges on the interpreter's."""
+    if role == "judge":
+        return settings.get("judge_profile") or settings.get("interpreter_profile") or ""
+    return settings.get("interpreter_profile") or ""
+
+
 class SimError(Exception):
     """A request the store refuses; the message is for the caller."""
 
@@ -369,6 +377,8 @@ class SimStore:
                 if compact:
                     row = {k: meta.get(k) for k in
                            ("id", "owner", "title", "state", "updated_at", "run_rounds")}
+                    if meta.get("fill_pending"):
+                        row["fill_pending"] = True
                     row["max_rounds"] = (meta.get("settings") or {}).get("max_rounds")
                     row["runner_session"] = (meta.get("runner") or {}).get("session")
                     out.append(row)
@@ -382,13 +392,21 @@ class SimStore:
     def create(self, *, title: str, goal: str = "", root: str = "", project: str = "",
                owner: str = "", actor: str = USER, sources: Iterable[str] = (),
                settings: Optional[dict] = None, issue: str = "",
-               defaults: Optional[dict] = None, from_sim: str = "") -> dict:
+               defaults: Optional[dict] = None, from_sim: str = "", deferred: bool = False) -> dict:
         """``from_sim`` starts from another simulation's model, verdicts and
         answered questions (its settings are not copied); the first start
-        checks them against this one's root (see :meth:`_carry`)."""
+        checks them against this one's root (see :meth:`_carry`).
+
+        ``deferred``: the user left the title and goal (either or both) for
+        the owner session to fill. The record holds the rest of the request
+        (sources, settings, ``from``) and stays ``fill_pending`` -- unstartable
+        -- until :meth:`configure` has given it both."""
         title = (title or "").strip()
-        if not title:
+        if deferred and not owner:
+            raise SimError("a simulation left for its owner to fill needs an owner session")
+        if not title and not deferred:
             raise SimError("a simulation needs a title")
+        deferred = bool(deferred) and not (title and (goal or "").strip())
         if owner and owner != USER and not self.live(owner):
             raise SimError(f"session {owner!r} is not running; it cannot own a simulation")
         with self._lock:
@@ -397,6 +415,14 @@ class SimStore:
             while (self.root / sim_id).exists():
                 sim_id = "sim-" + secrets.token_hex(3)
             base = {**DEFAULT_SETTINGS, **(defaults or {})}
+            settings = settings or {}
+            if not isinstance(settings, dict):
+                raise SimError("settings must be an object")
+            for role in ("interpreter", "judge"):
+                # A default model belongs to the default profile: a request
+                # that picks another profile and no model gets that profile's.
+                if f"{role}_model" not in settings and _profile_of(role, {**base, **settings}) != _profile_of(role, base):
+                    base[f"{role}_model"] = ""
             meta = {
                 "id": sim_id, "title": title[:200], "goal": (goal or "")[:20000],
                 "root": root or "", "project": project or "",
@@ -406,6 +432,8 @@ class SimStore:
                 "run_rounds": 0, "issue": issue or "", "runner": None,
                 "settings": self._clean_settings(base, settings or {}),
             }
+            if deferred:
+                meta["fill_pending"] = True
             if base_meta:
                 meta["from"] = base_meta["id"]
                 if not meta["sources"]:
@@ -420,7 +448,8 @@ class SimStore:
             else:
                 _write_json(self._dir(sim_id) / "model.json", M.empty())
                 _write_json(self._dir(sim_id) / "findings.json", {})
-            self._journal(sim_id, actor, "created", owner=meta["owner"], **({"from": from_sim} if from_sim else {}))
+            self._journal(sim_id, actor, "created", owner=meta["owner"], **({"from": from_sim} if from_sim else {}),
+                          **({"fill_pending": True} if deferred else {}))
             return self.summary(meta)
 
     @staticmethod
@@ -469,8 +498,11 @@ class SimStore:
                 meta["sources"] = [str(s) for s in sources if str(s).strip()][:200]
             if issue is not None:
                 meta["issue"] = issue
+            filled = meta.get("fill_pending") and meta["title"].strip() and meta["goal"].strip()
+            if filled:
+                meta.pop("fill_pending", None)
             self._save_meta(meta)
-            self._journal(sim_id, actor, "configured", settings=settings or {})
+            self._journal(sim_id, actor, "configured", settings=settings or {}, **({"filled": True} if filled else {}))
             return self.summary(meta)
 
     def delete(self, sim_id: str, actor: str) -> None:
@@ -917,6 +949,10 @@ class SimStore:
         with self._lock:
             meta = self._meta(sim_id)
             self._require_owner(meta, actor, "start")
+            if meta.get("fill_pending"):
+                missing = [k for k in ("title", "goal") if not (meta.get(k) or "").strip()]
+                raise Conflict(f"{sim_id} still waits for its {' and '.join(missing)}: "
+                               f"fill {'them' if len(missing) > 1 else 'it'} with sim_configure first")
             carried = self._carry(meta, actor)
             meta = self._meta(sim_id)
             meta["state"], meta["state_reason"], meta["run_rounds"] = "running", f"started by {actor}", 0
