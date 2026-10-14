@@ -404,3 +404,60 @@ def test_a_new_exit_inside_the_wait_reads_the_row_again(home, tmp_path, monkeypa
     session.exited_at = "2026-10-14T07:00:00+00:00"
     _kept(session, cwd)
     assert len(calls) == 4
+
+
+def test_a_pr_the_wizard_records_shows_on_the_next_list_poll(home, tmp_path, monkeypatch):
+    """Through ``POST /api/sessions/<name>/pr``: the wizard's record expires
+    the kept row (:func:`exited_rows.expire`), so the list shows the PR on
+    its next poll instead of after ``CHECK_TTL`` (claunch-lcwv3)."""
+    import asyncio
+    import sys
+
+    from claude_launcher import prflow, store
+    from claude_launcher.daemon.api import build_app
+    from claude_launcher.daemon.manager import SessionManager
+    from claude_launcher.daemon.mesh import MeshManager
+
+    monkeypatch.setattr(exited_rows, "CHECK_TTL", 3600.0)
+    store.update(lambda doc: doc.update({"harnesses": {
+        "quick": {"command": [sys.executable, "-u", "-c", "pass"]},
+    }}))
+    monkeypatch.setattr(prflow, "run", lambda cwd, request, *, session="": {
+        "ok": True, "cwd": cwd, "remote": "gh", "base": "master",
+        "branch": "done-pr-1", "pr": {"url": "https://h/o/r/pull/5", "number": 5},
+        "steps": []})
+    bearer = {"Authorization": "Bearer sekrit"}
+
+    async def run():
+        from aiohttp.test_utils import TestClient, TestServer
+
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        client = TestClient(TestServer(build_app(
+            mgr, "sekrit", started_at=time.monotonic(), mesh=MeshManager(mgr)
+        )))
+        await client.start_server()
+        try:
+            mgr.create(SessionDef(name="done", harness="quick", cwd=str(tmp_path)))
+            for _ in range(200):
+                if mgr.get("done").exited:
+                    break
+                await asyncio.sleep(0.05)
+            assert mgr.get("done").exited
+
+            async def prs():
+                resp = await client.get("/api/sessions?view=rail", headers=bearer)
+                assert resp.status == 200
+                rows = (await resp.json())["sessions"]
+                return next(s for s in rows if s["name"] == "done")["prs"]
+
+            assert await prs() == []  # kept, and not looked at for an hour
+            resp = await client.post("/api/sessions/done/pr",
+                                     json={"remote": "gh", "branch": "done-pr-1"},
+                                     headers=bearer)
+            assert resp.status == 200
+            assert [p["number"] for p in await prs()] == [5]
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
