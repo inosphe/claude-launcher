@@ -116,12 +116,37 @@ def _guide() -> str:
     return sim_mcp.GUIDE
 
 
+#: Settings the machine gives a new simulation (Settings page), each read
+#: from the daemon config key ``simulation_<name>``.
+DEFAULT_KEYS = ("interpreter_profile", "interpreter_model", "judge_profile", "judge_model")
+
+
 def _defaults() -> dict:
     cfg = config_store.daemon_config()
-    return {
-        "interpreter_profile": str(cfg.get("simulation_interpreter_profile") or ""),
-        "judge_profile": str(cfg.get("simulation_judge_profile") or ""),
-    }
+    return {k: str(cfg.get("simulation_" + k) or "") for k in DEFAULT_KEYS}
+
+
+def check_defaults(body: dict, profiles: list, models: dict) -> dict:
+    """The defaults a PUT asks for, checked against what this machine can
+    run: a profile must launch pi, a model must be one its profile offers
+    (the judge's when it has no profile of its own: the interpreter's).
+    Empty means "choose in the simulation" / "the profile's default"."""
+    out = {}
+    for k in DEFAULT_KEYS:
+        v = body.get(k, "")
+        if not isinstance(v, str):
+            raise ValueError(f"{k} must be a string")
+        out[k] = v.strip()
+    for role in ("interpreter", "judge"):
+        prof = out[role + "_profile"]
+        if prof and prof not in profiles:
+            raise ValueError(f"profile {prof} cannot launch the pi harness here")
+        owner = sim_store._profile_of(role, out)
+        model = out[role + "_model"]
+        if model and model not in (models.get(owner) or []):
+            raise ValueError(f"model {model} is not one profile {owner or '(none)'} offers"
+                             if owner else f"{role}_model needs a profile to belong to")
+    return out
 
 
 def judge_projection(profile_name: str, session: str) -> dict:
@@ -203,6 +228,28 @@ def accepted_text(sim: dict, p: dict) -> str:
         f"({p['kind']}: {p['reason']}; settles {', '.join(p['findings'])})" + (f" -- note: {note}" if note else "") +
         f". Apply it to the source and commit as usual: {where}\n"
         "Then run the simulation again (sim_start) so the walk checks it."
+    )
+
+
+def fill_text(sim: dict) -> str:
+    """The deferred create: the user left the title or goal for the owner."""
+    missing = [k for k in ("title", "goal") if not (sim.get(k) or "").strip()]
+    given = [f"{k}: {sim[k].strip()}" for k in ("title", "goal") if (sim.get(k) or "").strip()]
+    srcs = sim.get("sources") or []
+    return (
+        f"{PREFIX} The user asked you to set up and run simulation {sim['id']} and left its "
+        f"{' and '.join(missing)} for you to fill" + (f" ({'; '.join(given)})" if given else "") + ". "
+        "Decide from the work you are doing (your current task and issue) what feature to simulate and what to "
+        f"check, then give it with sim_configure {sim['id']} (title, goal"
+        + (")" if srcs else ", and the source files/globs to build from as sources)")
+        + f" -- it refuses to start until both are set. You own it; sim_show {sim['id']} has the settings the "
+        "user chose. Then "
+        + ("sim_start launches a run session that builds the model and works the gaps; "
+           if (sim.get("settings") or {}).get("interpreter_profile") else
+           "build the world model from the sources with sim_patch (every rule quotes its source file word for "
+           "word, or is marked provisional with a why), sim_start and work the gaps (sim_gaps); ")
+        + "you will be told when it finishes. "
+        f"Write the title, goal, questions and reasons in {_language(sim)}."
     )
 
 
@@ -352,13 +399,35 @@ def install(app, store: Optional[sim_store.SimStore] = None):
             sims.create, title=str(body.get("title") or ""), goal=str(body.get("goal") or ""),
             root=root, project=project, owner=owner, actor=actor,
             sources=body.get("sources") or [], settings=body.get("settings") or {},
-            issue=str(body.get("issue") or ""), defaults=_defaults(), from_sim=str(body.get("from") or ""))
+            issue=str(body.get("issue") or ""), defaults=_defaults(), from_sim=str(body.get("from") or ""),
+            deferred=body.get("fill") is True)
         if err:
             return err
         nudged = False
         if actor == sim_store.USER and owner and body.get("nudge", True):
-            nudged = deliver(owner, created_text(sim))
+            nudged = deliver(owner, fill_text(sim) if sim.get("fill_pending") else created_text(sim))
         return web.json_response({"sim": sim, "nudged": nudged}, status=201)
+
+    async def h_defaults(request):
+        body = await body_of(request)
+        names = await asyncio.to_thread(pi_profiles)
+        models = await asyncio.to_thread(pi_models, names)
+        try:
+            vals = check_defaults(body, names, models)
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+
+        def write(doc: dict) -> None:
+            block = doc.get("daemon")
+            if not isinstance(block, dict):
+                block = doc["daemon"] = {}
+            for k, v in vals.items():
+                if v:
+                    block["simulation_" + k] = v
+                else:
+                    block.pop("simulation_" + k, None)
+        await asyncio.to_thread(config_store.update, write)
+        return web.json_response({"defaults": _defaults()})
 
     async def h_get(request):
         sid = request.match_info["id"]
@@ -703,12 +772,17 @@ def install(app, store: Optional[sim_store.SimStore] = None):
         if not to:
             return web.json_response({"error": "nobody owns this simulation; transfer it to a session first"},
                                      status=409)
-        return web.json_response({"nudged": deliver(to, nudge_text(sim, str(body.get("text") or ""))), "to": to})
+        text = str(body.get("text") or "")
+        # Asked again to continue one still waiting for its title or goal:
+        # the request it needs is the fill request.
+        msg = fill_text(sim) if sim.get("fill_pending") and not text.strip() else nudge_text(sim, text)
+        return web.json_response({"nudged": deliver(to, msg), "to": to})
 
     r = app.router
     r.add_get("/api/sims", h_list)
     r.add_post("/api/sims", h_create)
     r.add_get("/api/sims/profiles", h_profiles)
+    r.add_put("/api/sims/defaults", h_defaults)
     r.add_get("/api/sims/{id}", h_get)
     r.add_delete("/api/sims/{id}", h_delete)
     r.add_get("/api/sims/{id}/model", h_model)

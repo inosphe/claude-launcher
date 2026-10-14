@@ -250,3 +250,94 @@ def test_run_dir_session_events_are_read_from_its_run_directory(tmp_path):
         miss = await req("GET", "/api/sessions/s1/durable", status=404)
         assert "SIM_RUN_DIR" in miss["error"]
     run(tmp_path, scenario)
+
+
+def test_user_leaves_title_and_goal_for_the_owner_to_fill(tmp_path):
+    """「세션에 맡기기」: no run, a fill request to the owner, start refused
+    until sim_configure has given the title and the goal."""
+    async def scenario(req, mgr, s1, s2):
+        made = await req("POST", "/api/sims", {"title": "", "goal": "", "owner": "s2", "fill": True,
+                                               "sources": ["spec.md"],
+                                               "settings": {"max_rounds": 3}}, status=201)
+        sim = made["sim"]
+        sid = sim["id"]
+        assert sim["fill_pending"] is True and sim["title"] == "" and sim["state"] == "idle"
+        assert sim["settings"]["max_rounds"] == 3 and sim["sources"] == ["spec.md"]
+        told = s2.delivered[-1]
+        assert made["nudged"] and f"sim_configure {sid}" in told and "title and goal" in told
+        assert "sources)" not in told  # the user gave the sources
+        # The rail row says it is waiting, and has no title to show.
+        row = (await req("GET", "/api/sims?view=rail&owner=s2"))["sims"][0]
+        assert row["fill_pending"] is True and row["title"] == ""
+        # Nobody runs it before the owner has named it.
+        refused = await req("POST", f"/api/sims/{sid}/start", {"session": "s2"}, status=409)
+        assert "title and goal" in refused["error"]
+        await req("POST", f"/api/sims/{sid}/start", {}, status=409)
+        # An empty nudge repeats the fill request.
+        await req("POST", f"/api/sims/{sid}/nudge", {})
+        assert f"sim_configure {sid}" in s2.delivered[-1]
+        # Half filled is still waiting.
+        half = await req("POST", f"/api/sims/{sid}/settings", {"session": "s2", "title": "door"})
+        assert half["sim"]["fill_pending"] is True
+        await req("POST", f"/api/sims/{sid}/start", {"session": "s2"}, status=409)
+        done = await req("POST", f"/api/sims/{sid}/settings", {"session": "s2", "goal": "find gaps"})
+        assert "fill_pending" not in done["sim"]
+        started = await req("POST", f"/api/sims/{sid}/start", {"session": "s2"})
+        assert started["sim"]["state"] in ("running", "done", "idle")
+    run(tmp_path, scenario)
+
+
+def test_fill_with_a_title_given_asks_only_for_the_goal(tmp_path):
+    async def scenario(req, mgr, s1, s2):
+        made = await req("POST", "/api/sims", {"title": "door", "owner": "s2", "fill": True}, status=201)
+        assert made["sim"]["fill_pending"] is True
+        told = s2.delivered[-1]
+        assert "left its goal for you" in told and "title: door" in told and "as sources" in told
+        # Both given: the fill flag has nothing to wait for; the usual create request goes out.
+        full = await req("POST", "/api/sims", {"title": "door", "goal": "g", "owner": "s2", "fill": True}, status=201)
+        assert "fill_pending" not in full["sim"] and "sim_configure" not in s2.delivered[-1]
+        # Without an owner nobody would fill it.
+        await req("POST", "/api/sims", {"title": "", "fill": True}, status=400)
+        # And without the flag a title is still required.
+        await req("POST", "/api/sims", {"title": "", "owner": "s2"}, status=400)
+    run(tmp_path, scenario)
+
+
+def test_defaults_are_saved_checked_and_used_by_new_simulations(tmp_path, monkeypatch):
+    from claude_launcher import store as config_store
+    monkeypatch.setattr(sim_api, "pi_profiles", lambda: ["work", "judge"])
+    monkeypatch.setattr(sim_api, "pi_models", lambda names: {"work": ["w-big", "w-small"], "judge": ["j-1"]})
+
+    async def scenario(req, mgr, s1, s2):
+        bad = [
+            {"interpreter_profile": "nope"},
+            {"interpreter_profile": "work", "interpreter_model": "j-1"},
+            {"interpreter_model": "w-big"},
+            {"interpreter_profile": "work", "judge_model": "j-1"},  # no judge profile: a model of "work"
+            {"interpreter_profile": 3},
+        ]
+        for body in bad:
+            await req("PUT", "/api/sims/defaults", body, status=400)
+        saved = await req("PUT", "/api/sims/defaults", {
+            "interpreter_profile": "work", "interpreter_model": "w-big",
+            "judge_profile": "", "judge_model": "w-small"})
+        assert saved["defaults"] == {"interpreter_profile": "work", "interpreter_model": "w-big",
+                                     "judge_profile": "", "judge_model": "w-small"}
+        daemon = config_store.load().get("daemon") or {}
+        assert daemon["simulation_interpreter_model"] == "w-big" and "simulation_judge_profile" not in daemon
+        prof = await req("GET", "/api/sims/profiles")
+        assert prof["defaults"]["judge_model"] == "w-small"
+        made = (await req("POST", "/api/sims", {"title": "door", "owner": "s2"}, status=201))["sim"]
+        assert {k: made["settings"][k] for k in sim_api.DEFAULT_KEYS} == saved["defaults"]
+        # Another interpreter profile and no model: the default model is not that profile's.
+        other = (await req("POST", "/api/sims", {"title": "door", "owner": "s2",
+                                                 "settings": {"interpreter_profile": "judge"}}, status=201))["sim"]
+        assert other["settings"]["interpreter_model"] == "" and other["settings"]["judge_model"] == ""
+        # A judge profile of its own: the interpreter keeps its default model, the judge does not.
+        own = (await req("POST", "/api/sims", {"title": "door", "owner": "s2",
+                                               "settings": {"judge_profile": "judge"}}, status=201))["sim"]
+        assert own["settings"]["interpreter_model"] == "w-big" and own["settings"]["judge_model"] == ""
+        # Clearing removes the keys.
+        await req("PUT", "/api/sims/defaults", {})
+        assert not any(k.startswith("simulation_") for k in (config_store.load().get("daemon") or {}))
+    run(tmp_path, scenario)

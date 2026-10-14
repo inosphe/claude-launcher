@@ -22451,6 +22451,7 @@ function openSettings(section) {
   refreshHarnesses().then(() => { if (wsOpen) renderWorkspaces(); });
   refreshRoleWorkflowSettings();
   refreshLlmSettings();
+  refreshSimDefaults();
   refreshFaq();
   refreshPromptPresets();
   refreshPrompterSettings();
@@ -27870,6 +27871,7 @@ function renderWorkspaces() {
 
   view.appendChild(modelChoicesCard());
   view.appendChild(llmSettingsCard());
+  view.appendChild(simDefaultsCard());
 
   view.appendChild(faqCard());
 
@@ -28611,6 +28613,126 @@ function modelChoicesCard() {
   card.appendChild(form);
   if (modelChoicesError) card.appendChild(el("p", "error", modelChoicesError));
   if (modelChoicesNotice) card.appendChild(el("p", "wf-note", modelChoicesNotice));
+  return card;
+}
+
+/* Simulation models (General) — the interpreter (B) and judge (C) a new
+   simulation starts with: the daemon's simulation_* keys, read from
+   GET /api/sims/profiles (its `defaults`, with the pi-capable profiles and
+   the models each offers) and written with PUT /api/sims/defaults, which
+   checks the pair against the same lists. A simulation's own form still
+   picks others. */
+let simDefaults = null;     // the /api/sims/profiles payload
+let simDefaultsDraft = null; // the form while edited; null = the saved values
+let simDefaultsError = "";
+let simDefaultsNotice = "";
+let simDefaultsBusy = false;
+
+async function refreshSimDefaults() {
+  try {
+    const resp = await api("/api/sims/profiles");
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    simDefaults = data;
+    simDefaultsError = "";
+  } catch (err) {
+    simDefaultsError = String(err);
+  }
+  if (wsOpen) renderWorkspaces();
+}
+
+async function saveSimDefaults(body) {
+  simDefaultsBusy = true;
+  simDefaultsNotice = "";
+  renderWorkspaces();
+  try {
+    const resp = await api("/api/sims/defaults", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    simDefaults = { ...(simDefaults || {}), defaults: data.defaults };
+    simDefaultsDraft = null;
+    simDefaultsError = "";
+    simDefaultsNotice = "Saved. New simulations start with these models.";
+  } catch (err) {
+    simDefaultsError = String(err);
+  }
+  simDefaultsBusy = false;
+  renderWorkspaces();
+}
+
+function simDefaultsCard() {
+  const card = el("section", "ws-add sim-defaults-settings");
+  card.appendChild(el("h3", null, "Simulation models"));
+  card.appendChild(el("p", "wf-note",
+    "The models a new simulation interprets (B) and judges (C) with, until " +
+    "its own form picks others. Only profiles that can launch the pi harness " +
+    "are offered; a judge without a profile of its own runs on the " +
+    "interpreter's. Pick a different judge model from the interpreter's, or " +
+    "the judgement is not independent."));
+  if (simDefaultsError) card.appendChild(el("p", "error", simDefaultsError));
+  if (!simDefaults) {
+    card.appendChild(el("p", "wf-note", "reading…"));
+    return card;
+  }
+  const saved = simDefaults.defaults || {};
+  const draft = simDefaultsDraft || (simDefaultsDraft = {
+    interpreter_profile: saved.interpreter_profile || "",
+    interpreter_model: saved.interpreter_model || "",
+    judge_profile: saved.judge_profile || "",
+    judge_model: saved.judge_model || "",
+  });
+  const models = simDefaults.models || {};
+  const form = el("form", "llm-settings-form");
+  const picker = (id, labelText, options, value, onChange) => {
+    const label = el("label", null, labelText);
+    const select = document.createElement("select");
+    select.id = id;
+    // A saved value this machine no longer offers is still shown, or the
+    // form would quietly propose clearing it.
+    if (value && !options.some(([v]) => v === value)) options = [...options, [value, `${value} (not offered here)`]];
+    for (const [v, text] of options) select.appendChild(new Option(text, v));
+    select.value = value;
+    select.disabled = simDefaultsBusy;
+    select.addEventListener("change", () => { onChange(select.value); renderWorkspaces(); });
+    label.appendChild(select);
+    form.appendChild(label);
+  };
+  for (const [role, title] of [["interpreter", "Interpreter (B)"], ["judge", "Judge (C)"]]) {
+    const names = role === "judge" ? (simDefaults.judges || []) : (simDefaults.profiles || []);
+    const own = role === "judge" ? (draft.judge_profile || draft.interpreter_profile) : draft.interpreter_profile;
+    picker(`sim-default-${role}-profile`, `${title} profile`,
+      [["", role === "judge" ? "— same as the interpreter —" : "— choose in each simulation —"], ...names.map((n) => [n, n])],
+      draft[role + "_profile"], (v) => {
+        draft[role + "_profile"] = v;
+        // A model id belongs to the profile that offers it.
+        draft[role + "_model"] = "";
+        if (role === "interpreter" && !draft.judge_profile) draft.judge_model = "";
+      });
+    picker(`sim-default-${role}-model`, `${title} model`,
+      [["", "— the profile's default —"], ...(models[own] || []).map((m) => [m, m])],
+      draft[role + "_model"], (v) => { draft[role + "_model"] = v; });
+  }
+  if (!(simDefaults.profiles || []).length) {
+    card.appendChild(el("p", "wf-note", "No profile can launch the pi harness on this machine."));
+  }
+  const bModel = draft.interpreter_model;
+  if (bModel && (draft.judge_profile || draft.interpreter_profile) === draft.interpreter_profile && draft.judge_model === bModel) {
+    form.appendChild(el("p", "wf-note", "The judge uses the interpreter's model: its judgement is not independent."));
+  }
+  const save = el("button", "wf-btn", simDefaultsBusy ? "Saving…" : "Save simulation models");
+  save.type = "submit";
+  save.disabled = simDefaultsBusy;
+  form.appendChild(save);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    saveSimDefaults({ ...draft });
+  });
+  card.appendChild(form);
+  if (simDefaultsNotice) card.appendChild(el("p", "wf-note", simDefaultsNotice));
   return card;
 }
 
