@@ -2766,6 +2766,9 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 #term-log-pane [data-kind="result"] { border-left-color: #8a6fc9; }
 #term-log-pane [data-kind="error"] { border-left-color: #d05a5a; }
 #log-legend { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; margin-left: 12px; font-size: 11px; color: #8b93a1; }
+/* Loaded / total, and "load all", at the row's end. */
+#log-view .log-progress { margin-left: 12px; align-self: center; font-size: 11px; color: #8b93a1; white-space: nowrap; }
+#log-view .log-load-all { flex: none; align-self: center; margin-left: 8px; padding: 2px 8px; font-size: 11px; }
 .log-key::before {
   content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 4px;
   border-radius: 2px; background: var(--log-kind-color, #6b7280);
