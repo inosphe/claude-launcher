@@ -386,6 +386,13 @@ DAEMON_DEFAULTS = {
     # applied (see daemon/goto_gate.py). Seconds; same start-time wiring as
     # the restart gate's timeout above.
     "goto_approval_timeout": 300.0,
+    # Seconds a finished answer of a route every dashboard polls (the session
+    # list, the board queues) is served again to the next reader, instead of
+    # each open tab running it anew -- daemon/shared_reads.py, claunch-jkvpv.
+    # A write the daemon accepts that changes the answer drops it at once;
+    # this bounds only changes made outside the daemon. 0 turns it off.
+    # Read when the daemon starts.
+    "shared_read_max_age": 4.0,
     # The cflow reminder clock's machine defaults: whether runs get their
     # current step's instructions re-typed into the driving session, and
     # after how many seconds without progress. Per-run overrides live in run
