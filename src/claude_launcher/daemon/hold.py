@@ -34,6 +34,7 @@ import time
 from typing import Callable, List, Optional
 
 from .. import store
+from . import actors
 from .session import STATUS_IDLE
 
 log = logging.getLogger(__name__)
@@ -79,7 +80,8 @@ def sweep(manager, threshold: float, now: Optional[float] = None) -> List[str]:
         try:
             if not eligible(manager, session, threshold, now):
                 continue
-            manager.hold(session.sdef.name, reason="idle")
+            manager.hold(session.sdef.name, reason="idle",
+                         by=actors.make(actors.DAEMON))
         except Exception:  # noqa: BLE001 -- one session must not stop the pass
             log.exception("idle hold of %r failed", session.sdef.name)
             continue

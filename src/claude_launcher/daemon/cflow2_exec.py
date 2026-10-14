@@ -28,6 +28,7 @@ from typing import Any, Callable, Dict, Optional
 
 from ..cflow2 import executors, ir, runtime
 from ..cflow2.store import RunStore, unqualified
+from . import actors
 
 log = logging.getLogger("claunch.daemon.cflow2")
 
@@ -66,6 +67,9 @@ def default_spawn(parent: str, body: Dict[str, Any]) -> str:
     client = daemon_client.connect()
     if client is None:
         raise SpawnRefused("the daemon API is not reachable")
+    # The run's machinery spawns this child, not the parent agent: say so,
+    # or the record would name the session the daemon happens to run under.
+    client.actor = actors.header_value(actors.CFLOW, parent)
     try:
         doc = client.post(f"/api/sessions/{parent}/children", body, timeout=120.0)
     except daemon_client.DaemonClientError as exc:

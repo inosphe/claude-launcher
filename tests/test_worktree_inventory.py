@@ -219,7 +219,7 @@ class _Manager:
         s.category, s.archived_at = "archived", "now"
         return s
 
-    async def stop_and_archive(self, name, force=False):
+    async def stop_and_archive(self, name, force=False, by=None):
         self.stopped.append(name)
         return self.archive(name)
 

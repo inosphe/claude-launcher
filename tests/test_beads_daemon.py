@@ -2257,6 +2257,49 @@ def test_a_kill_winds_down_first_then_terminates_and_sweeps(home, tmp_path, repo
     asyncio.run(run())
 
 
+def test_a_winddown_kill_is_recorded_as_the_person_who_pressed_kill(
+    home, tmp_path, repo, monkeypatch
+):
+    # claunch-o6xws: the dashboard's kill button on a session holding an issue
+    # does not end it -- the wind-down does, from its own task, turns later.
+    # That later kill is still the person's: begin_winddown records the asker
+    # before it hands off, and nothing after it may claim the ending.
+    from claude_launcher.daemon.api import cookie_name
+
+    _register_py_harness()
+    store.update(lambda doc: doc.update({"daemon": {"beads_winddown_grace": 5.0}}))
+    monkeypatch.setattr(beads_mod, "REACT_WINDOW", 0.3)
+    br = FakeBr()
+    br.add(id="w", title="the job", assignee="w1", status="in_progress")
+    board = _board(br, repo)
+
+    async def fake_deliver(self, text):
+        return True
+
+    monkeypatch.setattr(Session, "deliver", fake_deliver)
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.2, scrollback=200, restore_default=True)
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm, board)
+        try:
+            mgr.create(SessionDef(name="w1", harness="py", cwd=str(repo)))
+            resp = await client.post("/api/auth/session", json={"token": "sekrit"})
+            cookies = {cookie_name("sekrit"): resp.cookies[cookie_name("sekrit")].value}
+            resp = await client.post("/api/sessions/w1/kill", cookies=cookies)
+            assert (await resp.json())["winding_down"] is True
+            assert not mgr.get("w1").exited
+            await _wait_for(lambda: mgr.get("w1").exited, "the wind-down's kill")
+            assert mgr.get("w1").ended_by == {"kind": "user", "via": "web"}
+            resp = await client.get("/api/sessions", headers=BEARER)
+            [row] = (await resp.json())["sessions"]
+            assert row["ended_by"] == {"kind": "user", "via": "web"}
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_an_archive_skips_the_winddown_and_ends_the_session_now(
     home, tmp_path, repo, monkeypatch
 ):

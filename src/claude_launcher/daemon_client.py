@@ -20,7 +20,7 @@ import urllib.error
 import urllib.request
 from typing import Optional
 
-from .daemon import paths, runtime_state
+from .daemon import actors, paths, runtime_state
 
 #: How long auto-start waits for the daemon to come up when it cannot see
 #: the process it spawned (a monkeypatched spawn, or one that already exited
@@ -64,9 +64,14 @@ class DaemonClientError(Exception):
 
 
 class DaemonClient:
-    def __init__(self, base_url: str, token: str) -> None:
+    def __init__(self, base_url: str, token: str, *, actor: Optional[str] = None) -> None:
         self.base_url = base_url.rstrip("/")
         self.token = token
+        #: The ``X-Claunch-Actor`` this client declares (daemon/actors.py):
+        #: by default the managed session whose shell this is, so the daemon
+        #: can record an agent's spawn or kill as the agent's rather than a
+        #: person's (claunch-o6xws). The daemon's own calls set it explicitly.
+        self.actor = actor if actor is not None else actors.env_header()
 
     # ------------------------------------------------------------------ #
     # transport
@@ -84,6 +89,8 @@ class DaemonClient:
         data = json.dumps(body).encode("utf-8") if body is not None else None
         req = urllib.request.Request(url, data=data, method=method)
         req.add_header("Authorization", f"Bearer {self.token}")
+        if self.actor:
+            req.add_header(actors.HEADER, self.actor)
         if data is not None:
             req.add_header("Content-Type", "application/json")
         try:

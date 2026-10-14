@@ -590,6 +590,14 @@ class Session:
         #: run event clock tells a parent only about the endings nobody
         #: asked for. In memory only; a respawn constructs a fresh Session.
         self.kill_requested = False
+        #: Who ended this incarnation (daemon/actors.py, claunch-o6xws): set
+        #: with the request by :meth:`kill`/:meth:`shutdown` callers that
+        #: know it, and by the manager's exit funnel for an ending nobody
+        #: asked for (``self``) or one the machine caused (``os``). The first
+        #: writer wins: a person's kill that starts a wind-down stays the
+        #: person's when the wind-down's own kill lands. Persisted with the
+        #: record; a respawn constructs a fresh Session at None.
+        self.ended_by: Optional[dict] = None
         #: Set by :meth:`SessionManager.respawn` right after this instance is
         #: constructed: a person explicitly asked for this incarnation, as
         #: opposed to :meth:`SessionManager.restore_all` starting it back up
@@ -2034,13 +2042,20 @@ class Session:
                 raise asyncio.TimeoutError()
             await asyncio.sleep(0.2)
 
-    def kill(self, *, force: bool = False) -> None:
+    def note_ender(self, by: Optional[dict]) -> None:
+        """Record who asked for this ending, unless somebody already did."""
+        if by and self.ended_by is None and not self.exited:
+            self.ended_by = dict(by)
+
+    def kill(self, *, force: bool = False, by: Optional[dict] = None) -> None:
         if self.exited or self.pty is None:
             return
+        if by:
+            self.note_ender(by)
         self.kill_requested = True
         self.pty.terminate(force=force)
 
-    def pause(self, *, force: bool = False) -> None:
+    def pause(self, *, force: bool = False, by: Optional[dict] = None) -> None:
         """Kill, and mark the record as paused rather than killed.
 
         The marker is written *before* the signal: the exit that follows is
@@ -2053,9 +2068,9 @@ class Session:
         if self.exited or self.pty is None:
             return
         self.paused_at = _utcnow()
-        self.kill(force=force)
+        self.kill(force=force, by=by)
 
-    def hold(self, *, force: bool = False) -> None:
+    def hold(self, *, force: bool = False, by: Optional[dict] = None) -> None:
         """Kill, and mark the record as held (see :attr:`held_at`).
 
         Marker before signal, for the reason :meth:`pause` gives: the exit
@@ -2064,10 +2079,14 @@ class Session:
         if self.exited or self.pty is None:
             return
         self.held_at = _utcnow()
-        self.kill(force=force)
+        self.kill(force=force, by=by)
 
     async def shutdown(self, grace: float = 5.0) -> None:
-        """Terminate the child and wait briefly; force-kill stragglers."""
+        """Terminate the child and wait briefly; force-kill stragglers.
+
+        Takes no asker: a caller that knows one records it with
+        :meth:`note_ender` first (redefine and migrate are relaunches, not
+        endings, and have none)."""
         pending = tuple(self._deferred_deliveries)
         for task in pending:
             task.cancel()
@@ -2354,6 +2373,7 @@ class Session:
             "held_at": self.held_at,
             "delayed_at": self.delayed_at,
             "failed_at": self.failed_at,
+            "ended_by": self.ended_by,
             # A person's standing "type nothing in here" (:meth:`delivery_held`).
             # On the list poll rather than only on the per-session queued
             # endpoint, because the rail draws one row per session and the
@@ -2420,6 +2440,7 @@ class DeadSession:
         delayed_at: Optional[str] = None,
         failed_at: Optional[str] = None,
         swept_at: Optional[str] = None,
+        ended_by: Optional[dict] = None,
         scrollback: int = 5000,
         idle_threshold: float = 2.0,
     ) -> None:
@@ -2440,6 +2461,7 @@ class DeadSession:
         self.delayed_at = delayed_at
         self.failed_at = failed_at
         self.swept_at = swept_at
+        self.ended_by = ended_by
         #: A retired record was not ended by the OS in this daemon's lifetime,
         #: whatever its exit code says; see Session.ended_by_os.
         self.ended_by_os = False
@@ -2514,7 +2536,7 @@ class DeadSession:
     def resize(self, cols: int, rows: int) -> None:
         raise self._gone()
 
-    def kill(self, *, force: bool = False) -> None:
+    def kill(self, *, force: bool = False, by: Optional[dict] = None) -> None:
         return None
 
     async def shutdown(self, grace: float = 5.0) -> None:
@@ -2621,6 +2643,7 @@ class DeadSession:
             "held_at": self.held_at,
             "delayed_at": self.delayed_at,
             "failed_at": self.failed_at,
+            "ended_by": self.ended_by,
             "delivery_hold": self.delivery_held(),  # always False; see above
             "pending_deliveries": [],   # nothing is queued for a session that ended
         }

@@ -55,6 +55,7 @@ from datetime import datetime, timezone
 from typing import Dict, Optional
 
 from .. import store
+from . import actors
 
 log = logging.getLogger("claunch.handoff")
 
@@ -593,7 +594,9 @@ class Handoffs:
                 log.exception("handoff: completion hook failed for %r", source)
         ended = False
         try:
-            manager.kill(source, force=False)
+            # The session asked for this ending itself, by handing off.
+            manager.kill(source, force=False,
+                         by=actors.make(actors.SELF, reason="handoff"))
             ended = True
         except Exception as exc:  # the report landed; say the ending did not
             log.warning("handoff: %r reported to %r but could not be ended: %s", source, settled["target"], exc)
