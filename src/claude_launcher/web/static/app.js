@@ -20433,12 +20433,13 @@ async function refreshWf() {
   // in one batch, so a v2 run (the usual case) costs one round trip on the
   // daemon's loop instead of two (claunch-74t39). Its answer is only used
   // when the v1 slot says idle and points at v2.
+  const v1Read = api(
+    `/api/cflow/run?cwd=${encodeURIComponent(wfCwd)}&scope=${encodeURIComponent(wfScope)}`
+  );
   const v2Read = fetchCflow2Run(cwd, scope);
   let data;
   try {
-    const resp = await api(
-      `/api/cflow/run?cwd=${encodeURIComponent(wfCwd)}&scope=${encodeURIComponent(wfScope)}`
-    );
+    const resp = await v1Read;
     data = await resp.json();
     if (wfCwd !== cwd || wfScope !== scope || request !== wfRefreshRequest) return;
     if (!resp.ok) {
@@ -20601,12 +20602,15 @@ async function refreshSplit() {
     splitScope = flow.scope || want;
   }
   if (!splitCwd) return;   // resolved: this session has no slot
+  // Beside the v1 read, in the same batch, as on the run page (refreshWf).
+  const v1Read = api(
+    `/api/cflow/run?cwd=${encodeURIComponent(splitCwd)}` +
+    `&scope=${encodeURIComponent(splitScope)}`
+  );
+  const v2Read = fetchCflow2Run(splitCwd, splitScope);
   let data;
   try {
-    const resp = await api(
-      `/api/cflow/run?cwd=${encodeURIComponent(splitCwd)}` +
-      `&scope=${encodeURIComponent(splitScope)}`
-    );
+    const resp = await v1Read;
     data = await resp.json();
     if (!resp.ok) {
       $("term-wf").innerHTML = "";
@@ -20620,7 +20624,7 @@ async function refreshSplit() {
   if (splitFor !== want) return;   // repointed while the reply was in flight
   // No v1 run, a v2 one: drawn by the v2 renderer (see renderCflow2Into).
   if (data.status === "idle" && data.v2) {
-    const v2 = await fetchCflow2Run(splitCwd, splitScope);
+    const v2 = await v2Read;
     if (!v2 || splitFor !== want) return;
     if (v2.error) {
       $("term-wf").innerHTML = "";
@@ -38280,12 +38284,15 @@ async function refreshSessRun() {
   const fold = sessRunFold;
   if (!fold || !fold.open) return;
   const body = fold.querySelector(".sess-run-body");
+  // Beside the v1 read, in the same batch, as on the run page (refreshWf).
+  const v1Read = api(
+    `/api/cflow/run?cwd=${encodeURIComponent(fold.dataset.cwd)}` +
+    `&scope=${encodeURIComponent(fold.dataset.scope)}`
+  );
+  const v2Read = fetchCflow2Run(fold.dataset.cwd, fold.dataset.scope);
   let data;
   try {
-    const resp = await api(
-      `/api/cflow/run?cwd=${encodeURIComponent(fold.dataset.cwd)}` +
-      `&scope=${encodeURIComponent(fold.dataset.scope)}`
-    );
+    const resp = await v1Read;
     data = await resp.json().catch(() => ({}));
     if (!resp.ok) {
       body.innerHTML = "";
@@ -38299,7 +38306,7 @@ async function refreshSessRun() {
   // after that belongs to a run this fold no longer shows.
   if (sessRunFold !== fold || !fold.open) return;
   if (data.status === "idle" && data.v2) {
-    const v2 = await fetchCflow2Run(fold.dataset.cwd, fold.dataset.scope);
+    const v2 = await v2Read;
     if (!v2 || sessRunFold !== fold || !fold.open) return;
     if (v2.error) {
       body.innerHTML = "";

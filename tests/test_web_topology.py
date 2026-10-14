@@ -439,6 +439,7 @@ CHECKS = [
         "gpurender_check.js",
         "theme_check.js",
         "hiddenpoll_check.js",
+        "runbatch_check.js",
         "briefcard_check.js",
         "briefingtop_check.js",
         "briefmodel_check.js",
