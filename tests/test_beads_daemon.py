@@ -3043,6 +3043,43 @@ def test_the_queues_view_answers_a_stale_listing_and_rereads_it_behind(repo):
     asyncio.run(run())
 
 
+def test_the_session_view_answers_stale_only_when_asked(repo):
+    """``/meta`` polls every 5 s, past ``CACHE_TTL``, so it asks with
+    ``stale_ok`` and gets the listing it has while a fresh one is read behind
+    it (claunch-74t39). The default -- a wind-down's active issues, a read
+    right after a write -- still reads before it answers."""
+    br = FakeBr()
+    br.add(id="a", assignee="s1", status="open")
+    now = [100.0]
+    board = beads_mod.Board(br, root_for=lambda cwd: repo if cwd else None,
+                            clock=lambda: now[0])
+    s1 = _Sess(_sdef("s1", repo), status="busy")
+
+    def lists():
+        return sum(1 for c in br.calls if "list" in c)
+
+    async def ids(**kw):
+        v = await board.session_view(s1, **kw)
+        return sorted(i["id"] for i in v["issues"])
+
+    async def run():
+        assert await ids(stale_ok=True) == ["a"] and lists() == 1
+        br.add(id="b", assignee="s1", status="open")
+        now[0] += beads_mod.CACHE_TTL + 1
+        # answered from what it had; the reread runs behind it
+        assert await ids(stale_ok=True) == ["a"]
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert lists() == 2
+        assert await ids(stale_ok=True) == ["a", "b"]
+        # the default waits on a fresh listing
+        br.add(id="c", assignee="s1", status="open")
+        now[0] += beads_mod.CACHE_TTL + 1
+        assert await ids() == ["a", "b", "c"] and lists() == 3
+
+    asyncio.run(run())
+
+
 class _Fleet:
     """A manager as ``adoption`` reads it: which names are running here."""
 

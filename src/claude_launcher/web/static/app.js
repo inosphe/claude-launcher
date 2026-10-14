@@ -20429,6 +20429,11 @@ async function refreshWf() {
   if (!wfCwd) return;
   const cwd = wfCwd, scope = wfScope;
   const request = ++wfRefreshRequest;
+  // The v2 read goes out beside the v1 one rather than after it: both land
+  // in one batch, so a v2 run (the usual case) costs one round trip on the
+  // daemon's loop instead of two (claunch-74t39). Its answer is only used
+  // when the v1 slot says idle and points at v2.
+  const v2Read = fetchCflow2Run(cwd, scope);
   let data;
   try {
     const resp = await api(
@@ -20446,7 +20451,7 @@ async function refreshWf() {
   }
   if (wfCwd !== cwd || wfScope !== scope || request !== wfRefreshRequest) return;
   if (data.status === "idle" && data.v2) {
-    const v2 = await fetchCflow2Run(cwd, scope);
+    const v2 = await v2Read;
     if (!v2 || wfCwd !== cwd || wfScope !== scope || request !== wfRefreshRequest) return;
     if (v2.error) {
       $("wf-view").innerHTML = "";
