@@ -46,7 +46,7 @@ class FakeManager:
             raise KeyError(name)
         return self.sessions[name]
 
-    def kill(self, name, force=False):
+    def kill(self, name, force=False, by=None):
         self.end(name)
 
     def end(self, name):

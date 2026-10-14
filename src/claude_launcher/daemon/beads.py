@@ -84,6 +84,7 @@ from typing import Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
 from .. import (
     beads_db, beads_meta, cli_beads, reports as reports_mod, store, workspaces,
 )
+from . import actors
 from .session import (
     CATEGORY_DELAYED, CATEGORY_FAILED, CATEGORY_HOLD, CATEGORY_PAUSED, CATEGORY_RUNNING,
     STATUS_BUSY, STATUS_IDLE, Session,
@@ -2865,9 +2866,7 @@ class Board:
         }
         # The ending is the asker's from this moment: the kill that closes
         # the wind-down is this request's, however long the turn takes.
-        note = getattr(session, "note_ender", None)
-        if note is not None:
-            note(by)
+        actors.note(session, by)
         task = asyncio.ensure_future(self._winddown(session, manager, text, grace))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)

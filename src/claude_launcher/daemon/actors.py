@@ -124,6 +124,15 @@ def with_reason(actor: Optional[dict], reason: Optional[str]) -> Optional[dict]:
     return {**actor, "reason": str(reason)[:_MAX]}
 
 
+def note(session, by: Optional[dict]) -> None:
+    """Record who asked for ``session``'s ending before the caller signals
+    it (``Session.note_ender``: the first asker wins). A stand-in session
+    without the method records nothing."""
+    method = getattr(session, "note_ender", None)
+    if method is not None and by:
+        method(by)
+
+
 def label(actor: Optional[Mapping]) -> str:
     """One short phrase for logs and events: ``user (web)``, ``agent s12``."""
     actor = coerce(actor)

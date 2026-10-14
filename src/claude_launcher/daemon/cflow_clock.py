@@ -3362,8 +3362,8 @@ class RunEventClock:
         if reap_reviewers:
             self._end_reviewers(scope, run_id)
         try:
-            session.kill(force=False, by=actors.make(
-                actors.CFLOW, scope, reason="kill-on-end"))
+            actors.note(session, actors.make(actors.CFLOW, scope, reason="kill-on-end"))
+            session.kill(force=False)
             self.manager.persist()
             log.info("cflow kill-on-end: ended %r (run %s)", scope, run_id)
         except Exception as exc:
@@ -3431,8 +3431,9 @@ class RunEventClock:
             if "reviewer" not in roles:
                 continue
             try:
-                child.kill(force=False, by=actors.make(
+                actors.note(child, actors.make(
                     actors.CFLOW, driver, reason="reviewer-reap"))
+                child.kill(force=False)
             except Exception as exc:
                 log.warning(
                     "cflow kill-on-end: ending reviewer %r of %r failed: %s",

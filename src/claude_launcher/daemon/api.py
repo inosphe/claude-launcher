@@ -8837,7 +8837,9 @@ async def h_sessions_clear(request: web.Request) -> web.Response:
             # Concurrently: the grace period is per session, and waiting out
             # ten of them in a row is ten graces long for no reason.
             by = actors.with_reason(actors.from_request(request), "clear")
-            await asyncio.gather(*(s.shutdown(by=by) for s in live))
+            for s in live:
+                actors.note(s, by)
+            await asyncio.gather(*(s.shutdown() for s in live))
         stopped = [s.sdef.name for s in live]
     kept: List[dict] = []
     for name, held in (

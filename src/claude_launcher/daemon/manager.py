@@ -83,6 +83,13 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _known(**details) -> dict:
+    """Event details minus the ones nobody knew: an actor is added to an
+    event only when there is one (claunch-o6xws), so the events of a path
+    that passes none read as they always did."""
+    return {k: v for k, v in details.items() if v is not None}
+
+
 def ended_by_os(exit_code: Optional[int]) -> bool:
     """Whether ``exit_code`` says Windows ended the process at a logoff or
     shutdown (see :data:`OS_ENDED_EXIT_CODES`)."""
@@ -643,7 +650,8 @@ class SessionManager:
             )
             session.ended_by_os = True
             self.events.record(session, "exit", "OS 종료로 세션 프로세스 종료",
-                               exit_code=session.exit_code, ended_by=session.ended_by)
+                               exit_code=session.exit_code,
+                               **_known(ended_by=getattr(session, "ended_by", None)))
             self.persist()
             return
         if getattr(session, "held_at", None):
@@ -652,7 +660,8 @@ class SessionManager:
             # nobody is told the session is gone. The hooks run if and when
             # the hold is turned into a real ending (unhold).
             self.events.record(session, "hold", "유휴 세션 hold: 프로세스 종료",
-                               exit_code=session.exit_code, ended_by=session.ended_by)
+                               exit_code=session.exit_code,
+                               **_known(ended_by=getattr(session, "ended_by", None)))
             self.persist()
             return
         if self._failed_on_its_own(session):
@@ -666,14 +675,16 @@ class SessionManager:
             # settle_hooks).
             session.failed_at = _now_iso()
             self.events.record(session, "fail", "요청 없이 비정상 종료",
-                               exit_code=session.exit_code, ended_by=session.ended_by)
+                               exit_code=session.exit_code,
+                               **_known(ended_by=getattr(session, "ended_by", None)))
             log.warning(
                 "session %r exited on its own with code %s; filed as failed",
                 session.sdef.name, session.exit_code,
             )
         else:
             self.events.record(session, "exit", "세션 프로세스 종료",
-                               exit_code=session.exit_code, ended_by=session.ended_by)
+                               exit_code=session.exit_code,
+                               **_known(ended_by=getattr(session, "ended_by", None)))
         self.persist()
         if id(session) in self._restarting:
             self._restarting[id(session)] = True
@@ -1597,9 +1608,10 @@ class SessionManager:
         """
         session = self.get(name)
         if not session.exited:
-            session.kill(force=force, by=by)
+            actors.note(session, by)
+            session.kill(force=force)
             self.events.record(session, "kill", "세션 종료 요청", force=force,
-                               by=by)
+                               **_known(by=by))
             self.persist()
         return session
 
@@ -1617,9 +1629,10 @@ class SessionManager:
         """
         session = self.get(name)
         if not session.exited:
-            session.pause(force=force, by=by)
+            actors.note(session, by)
+            session.pause(force=force)
             self.events.record(session, "pause", "세션 일시 중지 요청", force=force,
-                               by=by)
+                               **_known(by=by))
             self.persist()
         return session
 
@@ -1646,7 +1659,7 @@ class SessionManager:
         # The record now reads as this kill, so it names this kill's asker.
         if by:
             session.ended_by = dict(by)
-        self.events.record(session, "kill", "일시 중지된 세션을 종료로 전환", by=by)
+        self.events.record(session, "kill", "일시 중지된 세션을 종료로 전환", **_known(by=by))
         self.persist()
         return True
 
@@ -1689,9 +1702,10 @@ class SessionManager:
                 f"session {name!r} cannot be held: a respawn would not reopen "
                 "its conversation"
             )
-        session.hold(force=force, by=actors.with_reason(by, reason))
+        actors.note(session, actors.with_reason(by, reason))
+        session.hold(force=force)
         self.events.record(session, "hold", "세션 hold 요청", force=force,
-                           reason=reason, by=by)
+                           reason=reason, **_known(by=by))
         self.persist()
         return session
 
@@ -1729,7 +1743,7 @@ class SessionManager:
             "실패한 세션을 종료로 전환" if failed and not held
             else "대기 중인 세션을 종료로 전환" if delayed
             else "hold된 세션을 종료로 전환",
-            by=by,
+            **_known(by=by),
         )
         self.persist()
         if held:
@@ -2328,10 +2342,10 @@ class SessionManager:
         if not session.exited:
             self.events.record(
                 session, "kill", "보관을 위한 세션 종료",
-                force=force, reason="archive", by=by,
+                force=force, reason="archive", **_known(by=by),
             )
-            await session.shutdown(grace=0.0 if force else 5.0,
-                                   by=actors.with_reason(by, "archive"))
+            actors.note(session, actors.with_reason(by, "archive"))
+            await session.shutdown(grace=0.0 if force else 5.0)
             self.persist()
         return self.archive(name)
 

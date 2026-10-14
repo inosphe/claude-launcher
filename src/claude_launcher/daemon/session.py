@@ -2050,7 +2050,8 @@ class Session:
     def kill(self, *, force: bool = False, by: Optional[dict] = None) -> None:
         if self.exited or self.pty is None:
             return
-        self.note_ender(by)
+        if by:
+            self.note_ender(by)
         self.kill_requested = True
         self.pty.terminate(force=force)
 
@@ -2080,8 +2081,12 @@ class Session:
         self.held_at = _utcnow()
         self.kill(force=force, by=by)
 
-    async def shutdown(self, grace: float = 5.0, *, by: Optional[dict] = None) -> None:
-        """Terminate the child and wait briefly; force-kill stragglers."""
+    async def shutdown(self, grace: float = 5.0) -> None:
+        """Terminate the child and wait briefly; force-kill stragglers.
+
+        Takes no asker: a caller that knows one records it with
+        :meth:`note_ender` first (redefine and migrate are relaunches, not
+        endings, and have none)."""
         pending = tuple(self._deferred_deliveries)
         for task in pending:
             task.cancel()
@@ -2091,7 +2096,6 @@ class Session:
             return
         # An asked-for ending like kill(): redefine, migrate, archive and
         # clear --running end sessions through here, not through kill().
-        self.note_ender(by)
         self.kill_requested = True
         self.pty.terminate(force=False)
         deadline = time.monotonic() + grace
@@ -2535,7 +2539,7 @@ class DeadSession:
     def kill(self, *, force: bool = False, by: Optional[dict] = None) -> None:
         return None
 
-    async def shutdown(self, grace: float = 5.0, *, by: Optional[dict] = None) -> None:
+    async def shutdown(self, grace: float = 5.0) -> None:
         return None
 
     # ------------------------------------------------------------------ #
