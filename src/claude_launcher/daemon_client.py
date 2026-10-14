@@ -139,19 +139,46 @@ def _base_url(doc: dict) -> str:
     return f"http://{connect_host}:{doc.get('port')}"
 
 
+#: Why the most recent :func:`_health_ok` returned False ("" after a success).
+#: Read by :func:`diagnose` to put the error next to each probe's duration
+#: (claunch-9gm02); the return value stays a bool for every other caller.
+_last_probe_error = ""
+
+
 def _health_ok(base_url: str) -> bool:
+    global _last_probe_error
     try:
         req = urllib.request.Request(base_url + "/api/health")
         with urllib.request.urlopen(req, timeout=HEALTH_TIMEOUT) as resp:
-            return resp.status == 200
-    except Exception:
+            ok = resp.status == 200
+            _last_probe_error = "" if ok else f"HTTP {resp.status}"
+            return ok
+    except Exception as exc:
+        _last_probe_error = f"{type(exc).__name__}: {exc}"
         return False
+
+
+def format_probe_trace(report: dict) -> str:
+    """One line per health probe of ``report``: its duration and its outcome.
+
+    Empty when the report carries no trace. Printed by callers that give up
+    on a daemon so the next occurrence says whether the probes timed out
+    (a busy loop) or were refused (nothing listening)."""
+    return "\n".join(
+        f"  probe {i}: {t['elapsed']:.3f}s {t['outcome']}"
+        for i, t in enumerate(report.get("trace") or [], 1)
+    )
 
 
 def is_serving() -> bool:
     """True when an announced daemon actually answers health checks."""
     doc = runtime_state.read_daemon_json()
     return bool(doc) and _health_ok(_base_url(doc))
+
+
+#: The report behind the most recent :func:`connect_with_diagnosis`, kept so
+#: :func:`ensure_running` can log why it spawned (claunch-9gm02).
+_last_report: dict = {}
 
 
 def connect_with_diagnosis(
@@ -189,6 +216,8 @@ def connect_with_diagnosis(
     report = diagnose(
         budget=OBSERVATION_BUDGET if budget is None else budget, gap=gap
     )
+    global _last_report
+    _last_report = report
     if report["state"] != SERVING:
         return None, report
     token = runtime_state.load_or_create_token()
@@ -275,7 +304,35 @@ def _open_log_for_child() -> int:
         raise
 
 
-def spawn_daemon(env: Optional[dict] = None) -> Optional[subprocess.Popen]:
+def _parent_command(ppid: int) -> str:
+    """The parent's command line, or "?" where the platform does not say."""
+    try:
+        raw = open(f"/proc/{ppid}/cmdline", "rb").read()
+    except OSError:
+        return "?"
+    return raw.replace(b"\0", b" ").decode("utf-8", "replace").strip() or "?"
+
+
+def spawn_record(reason: str) -> str:
+    """The log line :func:`spawn_daemon` leaves about who started a daemon.
+
+    The candidate daemon this starts may lose the singleton lock and exit
+    within seconds, leaving "another daemon holds the lock" in daemon.log
+    with no trace of its sender (claunch-ny5i3). Command, parent and the
+    verdict that led here are what identify the sender afterwards."""
+    ppid = os.getppid()
+    return (
+        f"{time.strftime('%Y-%m-%d %H:%M:%S')} claunch.spawn INFO "
+        f"spawn_daemon: pid={os.getpid()} ppid={ppid} "
+        f"session={os.environ.get('CLAUNCH_SESSION') or '-'} "
+        f"cmd={' '.join(sys.argv)!r} parent={_parent_command(ppid)!r} "
+        f"reason={reason}\n"
+    )
+
+
+def spawn_daemon(
+    env: Optional[dict] = None, *, reason: str = "unspecified"
+) -> Optional[subprocess.Popen]:
     """Start the daemon as a fully detached background process.
 
     ``env`` replaces the child's whole environment; ``None`` (the default)
@@ -296,6 +353,10 @@ def spawn_daemon(env: Optional[dict] = None) -> Optional[subprocess.Popen]:
 
     env = session_procs.strip_owner(env)
     log = _open_log_for_child()
+    try:
+        os.write(log, spawn_record(reason).encode("utf-8", "replace"))
+    except OSError:
+        pass
     kwargs = {}
     if sys.platform == "win32":
         CREATE_NO_WINDOW = 0x08000000
@@ -333,11 +394,14 @@ def ensure_running(*, auto_start: bool = True) -> DaemonClient:
     client = connect()
     if client is not None:
         return client
+    report = _last_report
     if not auto_start:
         raise DaemonClientError(
             "daemon is not running (start it with 'claunch daemon start')"
         )
-    proc = spawn_daemon()
+    proc = spawn_daemon(
+        reason=f"ensure_running: {report.get('state')} -- {report.get('why')}"
+    )
     started = time.monotonic()
     deadline = started + START_TIMEOUT
     alive_deadline = started + START_ALIVE_TIMEOUT
@@ -615,15 +679,23 @@ def diagnose(*, budget: Optional[float] = None, gap: float = PROBE_GAP) -> dict:
             "lock_free": runtime_state.lock_is_free(),
             "budget": budget,
             "probes": probes,
+            "trace": trace,
             "successes": 0,
             "why": f"daemon.json names pid {pid}, which is gone",
         }
 
     deadline = time.monotonic() + max(0.0, budget)
     probes = 0
+    trace: list = []
     while True:
         probes += 1
-        if _health_ok(base_url):
+        t0 = time.monotonic()
+        answered = _health_ok(base_url)
+        trace.append({
+            "elapsed": time.monotonic() - t0,
+            "outcome": "ok" if answered else (_last_probe_error or "failed"),
+        })
+        if answered:
             return {
                 "state": SERVING,
                 "pid": pid,
@@ -632,6 +704,7 @@ def diagnose(*, budget: Optional[float] = None, gap: float = PROBE_GAP) -> dict:
                 "lock_free": False,
                 "budget": budget,
                 "probes": probes,
+                "trace": trace,
                 "successes": 1,
                 "why": f"answering /api/health (probe {probes})",
             }
@@ -655,6 +728,7 @@ def diagnose(*, budget: Optional[float] = None, gap: float = PROBE_GAP) -> dict:
             "lock_free": runtime_state.lock_is_free(),
             "budget": budget,
             "probes": probes,
+            "trace": trace,
             "successes": 0,
             "why": (
                 f"pid {pid} is alive and {base_url} is announced, yet "
@@ -670,6 +744,7 @@ def diagnose(*, budget: Optional[float] = None, gap: float = PROBE_GAP) -> dict:
         "lock_free": runtime_state.lock_is_free(),
         "budget": budget,
         "probes": probes,
+        "trace": trace,
         "successes": 0,
         "why": (
             f"pid {pid} is alive and {base_url} is announced, but nothing "

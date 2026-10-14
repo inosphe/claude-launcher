@@ -737,7 +737,9 @@ def main(argv=None) -> int:
             lock.release()
         if code == RESTART_CODE:
             log.info("spawning successor daemon")
-            daemon_client.spawn_daemon(_successor_env(bound.get("port")))
+            daemon_client.spawn_daemon(
+                _successor_env(bound.get("port")), reason="successor after restart"
+            )
             code = 0
     finally:
         _close_loop(loop)

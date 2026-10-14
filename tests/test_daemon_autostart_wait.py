@@ -50,7 +50,7 @@ def test_a_live_daemon_that_needs_longer_than_the_fixed_wait_is_waited_for(
     short_clocks, monkeypatch, capsys
 ):
     client = _serving_after(monkeypatch, 0.8)  # past START_TIMEOUT, inside ALIVE
-    monkeypatch.setattr(daemon_client, "spawn_daemon", lambda env=None: _FakeProc())
+    monkeypatch.setattr(daemon_client, "spawn_daemon", lambda env=None, **_: _FakeProc())
 
     assert daemon_client.ensure_running() is client
     err = capsys.readouterr().err
@@ -62,7 +62,7 @@ def test_a_daemon_that_exited_with_an_error_is_reported_as_such_not_as_slow(
 ):
     monkeypatch.setattr(daemon_client, "connect", lambda: None)
     monkeypatch.setattr(
-        daemon_client, "spawn_daemon", lambda env=None: _FakeProc(exit_after=0.05, code=1)
+        daemon_client, "spawn_daemon", lambda env=None, **_: _FakeProc(exit_after=0.05, code=1)
     )
     t0 = time.monotonic()
     with pytest.raises(daemon_client.DaemonClientError) as exc:
@@ -80,7 +80,7 @@ def test_a_lock_loser_exiting_zero_still_gives_the_winner_the_fixed_wait(
     for START_TIMEOUT, since there is no live process of ours to follow."""
     client = _serving_after(monkeypatch, 0.2)
     monkeypatch.setattr(
-        daemon_client, "spawn_daemon", lambda env=None: _FakeProc(exit_after=0.0, code=0)
+        daemon_client, "spawn_daemon", lambda env=None, **_: _FakeProc(exit_after=0.0, code=0)
     )
     assert daemon_client.ensure_running() is client
 
@@ -88,7 +88,7 @@ def test_a_lock_loser_exiting_zero_still_gives_the_winner_the_fixed_wait(
 def test_an_unwatchable_spawn_keeps_the_fixed_wait(short_clocks, monkeypatch):
     """Spawns the tests monkeypatch return None; that path is the old one."""
     monkeypatch.setattr(daemon_client, "connect", lambda: None)
-    monkeypatch.setattr(daemon_client, "spawn_daemon", lambda env=None: None)
+    monkeypatch.setattr(daemon_client, "spawn_daemon", lambda env=None, **_: None)
     t0 = time.monotonic()
     with pytest.raises(daemon_client.DaemonClientError) as exc:
         daemon_client.ensure_running()
@@ -101,7 +101,7 @@ def test_a_live_daemon_that_never_listens_fails_at_the_alive_cap(
 ):
     monkeypatch.setattr(daemon_client, "START_ALIVE_TIMEOUT", 0.7)
     monkeypatch.setattr(daemon_client, "connect", lambda: None)
-    monkeypatch.setattr(daemon_client, "spawn_daemon", lambda env=None: _FakeProc())
+    monkeypatch.setattr(daemon_client, "spawn_daemon", lambda env=None, **_: _FakeProc())
     with pytest.raises(daemon_client.DaemonClientError) as exc:
         daemon_client.ensure_running()
     assert "did not come up" in str(exc.value)

@@ -2128,11 +2128,18 @@ def _gated_restart(reason: str = "") -> int:
         print(daemon_client.unreachable_reason(report), file=sys.stderr)
         return 1
     session = os.environ.get("CLAUNCH_SESSION") or "?"
-    client = daemon_client.connect()
+    client, seen = daemon_client.connect_with_diagnosis()
     if client is None:
         # Gone between the diagnosis and the ask — start nothing behind its
         # back; the caller re-runs the command.
         print("daemon went away before the request could be filed", file=sys.stderr)
+        # Per-probe duration and error (claunch-9gm02): a timeout and a
+        # refusal read the same in the sentence above.
+        print(
+            f"  second look: {seen.get('state')} -- {seen.get('why')}\n"
+            + (daemon_client.format_probe_trace(seen) or "  (no probes)"),
+            file=sys.stderr,
+        )
         return 1
     body = {"session": session}
     reason = (reason or "").strip()

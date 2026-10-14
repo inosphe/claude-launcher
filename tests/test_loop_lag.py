@@ -36,3 +36,20 @@ def test_a_blocking_call_on_the_loop_shows_up_as_lag():
 
     snap = asyncio.run(go())
     assert snap["max_ms"] >= 150.0
+
+
+def test_a_wake_up_at_or_over_the_threshold_is_written_to_the_log(caplog):
+    lag = LoopLag(log_threshold=1.0)
+    with caplog.at_level("WARNING", logger="claunch.daemon.loop_lag"):
+        lag.record(100.0, 0.999)
+        assert not caplog.records
+        lag.record(101.0, 2.5)
+    assert len(caplog.records) == 1
+    assert "event loop stalled" in caplog.text and "2.500s" in caplog.text
+
+
+def test_a_zero_threshold_turns_the_log_off(caplog):
+    lag = LoopLag(log_threshold=0)
+    with caplog.at_level("WARNING", logger="claunch.daemon.loop_lag"):
+        lag.record(100.0, 30.0)
+    assert not caplog.records

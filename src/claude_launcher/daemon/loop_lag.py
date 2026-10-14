@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import collections
 import contextlib
+import logging
 import time
 from typing import Callable, Deque, Optional, Tuple
 
@@ -28,6 +29,14 @@ INTERVAL = 0.1
 #: 5 seconds; stalls seen on the live daemon came about every 10 seconds, so
 #: a window shorter than that would read a busy loop as idle between them.
 WINDOW = 30.0
+#: Seconds of lateness at or above which a wake-up is written to daemon.log
+#: (``daemon.loop_lag_log_s``; 0 turns it off). The page's latency badge shows
+#: the last 30 seconds only, so a stall that ended before anyone looked left
+#: no evidence (claunch-ny5i3: health probes went unanswered for up to ~10s
+#: with nothing recorded).
+LOG_THRESHOLD = 1.0
+
+log = logging.getLogger("claunch.daemon.loop_lag")
 
 
 class LoopLag:
@@ -37,7 +46,9 @@ class LoopLag:
         interval: float = INTERVAL,
         window: float = WINDOW,
         clock: Callable[[], float] = time.monotonic,
+        log_threshold: float = LOG_THRESHOLD,
     ) -> None:
+        self.log_threshold = log_threshold
         self.interval = interval
         self.window = window
         self._clock = clock
@@ -66,6 +77,15 @@ class LoopLag:
             self.record(now, max(0.0, now - due))
 
     def record(self, now: float, late: float) -> None:
+        if self.log_threshold > 0 and late >= self.log_threshold:
+            log.warning(
+                "event loop stalled: woke %.3fs late (threshold %.3fs, "
+                "interval %.3fs, at %s)",
+                late,
+                self.log_threshold,
+                self.interval,
+                time.strftime("%H:%M:%S"),
+            )
         self._samples.append((now, late))
         horizon = now - self.window
         while self._samples and self._samples[0][0] < horizon:

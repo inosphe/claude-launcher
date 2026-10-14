@@ -378,6 +378,10 @@ DAEMON_DEFAULTS = {
     # of machine; thirty unattended pi sessions asked for more than that.
     "background_render_budget_kib": 256,
     "restore": True,
+    # Seconds of event-loop lateness at or above which the daemon writes a
+    # "event loop stalled" line to daemon.log (daemon/loop_lag.py,
+    # claunch-9gm02). 0 turns it off. Read when the daemon starts.
+    "loop_lag_log_s": 1.0,
     # How long an agent-requested daemon restart may wait on the web UI's
     # approval before it counts as approved and goes out (see
     # daemon/restart_gate.py). Seconds. Read when the daemon constructs its

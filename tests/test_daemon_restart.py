@@ -119,7 +119,7 @@ def _drive_main(monkeypatch, code: int, *, bound_port: int = 0) -> list:
     monkeypatch.setattr(daemon_main, "_setup_logging", lambda foreground: None)
     monkeypatch.setattr(daemon_main, "_serve", fake_serve)
     monkeypatch.setattr(
-        daemon_main.daemon_client, "spawn_daemon", lambda env=None: spawned.append(env)
+        daemon_main.daemon_client, "spawn_daemon", lambda env=None, **_: spawned.append(env)
     )
     assert daemon_main.main([]) == 0
     return spawned
@@ -241,7 +241,7 @@ def test_the_lock_is_released_while_an_executor_thread_is_still_blocked(
     monkeypatch.setattr(daemon_main, "_setup_logging", lambda foreground: None)
     monkeypatch.setattr(daemon_main, "_serve", fake_serve)
     monkeypatch.setattr(
-        daemon_main.daemon_client, "spawn_daemon", lambda env=None: spawned.append(env)
+        daemon_main.daemon_client, "spawn_daemon", lambda env=None, **_: spawned.append(env)
     )
 
     worker = threading.Thread(target=lambda: daemon_main.main([]), daemon=True)

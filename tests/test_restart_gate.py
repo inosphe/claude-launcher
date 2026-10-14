@@ -89,6 +89,9 @@ class _FakeDaemon:
     def connect(self):
         return self.client
 
+    def connect_with_diagnosis(self, **kw):
+        return self.client, {"state": self.state}
+
     def stop(self, **kw):
         self.stop_calls += 1
         return True
