@@ -319,6 +319,8 @@ function refreshSpawnPolicy() { state.calls.push("policy"); }
 function refreshNewWorktree() { state.calls.push("worktree"); }
 function refreshWorkflowChoices() { state.calls.push("workflows"); }
 function refreshWorkspaces() { state.calls.push("workspaces"); }
+function refreshProjects() { state.calls.push("projects"); }
+function refreshResumeChoices() { state.calls.push("resume"); }
 function refreshRoles(mesh) { state.calls.push("roles:" + mesh); }
 function refreshIssueChoices() { state.calls.push("issues"); }
 function beadsMode() { return "new"; }
@@ -410,6 +412,11 @@ async function main() {
   await ctx.spawn("lead");
   check("...and so does the Spawn child box (Settings' every-opening packs)",
         calls.filter((c) => c === "packs-opened").length, 2);
+  // The dashboard poll leaves these rows alone while the form is off screen
+  // (claunch-p3i0n.1), so both openings read them on the way in.
+  check("the page and the box both read the Resume, Parent and Project rows",
+        ["resume", "parents", "projects"].map((c) => calls.filter((x) => x === c).length >= 2),
+        [true, true, true]);
   check("rail Spawn borrows the same form", ids["modal-body"].kids.map(k => k.id), ["new-session"]);
   check("Spawn opens with the larger child form dimensions",
         [modalBox.style.width, modalBox.style.height], ["1320px", "940px"]);

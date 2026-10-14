@@ -4996,13 +4996,11 @@ async function refreshSessions(options) {
   if ((!rebuild || inPlace) && !railHeld() && typeof refreshRailSeen === "function") {
     refreshRailSeen(list);
   }
-  // The spawn form offers these same conversations and sessions -- but not
-  // rebuilt while the form is open (sessionFormHeld, claunch-p3i0n).
-  const formHeld = typeof sessionFormHeld === "function" && sessionFormHeld();
-  if (!formHeld) {
-    refreshResumeChoices();
-    refreshParentChoices();
-  }
+  // The create form offers these same conversations and sessions, but this
+  // poll does not rebuild its Resume and Parent rows: not while the form is
+  // open (claunch-p3i0n), and not while it is off screen either
+  // (claunch-p3i0n.1). Opening it reads them (openSessionModal,
+  // openNewSession).
   // the queues, on a slower clock than this poll (guarded for the same reason)
   if (typeof refreshRailBeads === "function") refreshRailBeads();
   // ...and the Queues tab's lane dots, off the record this poll just brought
@@ -10185,6 +10183,12 @@ let rolesRequest = 0;
    the <select> on every poll would slam shut a dropdown the user has open,
    so the options are only rebuilt when the list actually differs. */
 let workspacesRendered = null;
+/* ...and of the list the create form's Directory row was last built from.
+   Kept apart because the poll keeps the registry (home, the workspaces page)
+   current while the form is off screen, and only an opening rebuilds the
+   form (claunch-p3i0n.1): one signature for both would let the poll's
+   answer mark the form as drawn when it was not. */
+let workspacesFormRendered = null;
 
 /* Projects: the tier above meshes and sessions (see projects.py). The rail's
    selector picks one, or "" for every project; the choice narrows the rail's
@@ -10208,6 +10212,7 @@ let workspacesRendered = null;
 const PROJECT_KEY = `claunch_project:${BASE}`;
 let projectsCache = [];
 let projectsRendered = null;
+let projectsFormRendered = null;  // the form's Project row; see workspacesFormRendered
 let currentProject = (() => {
   // The address first: it is what a reload or a shared link carries.
   try {
@@ -10504,7 +10509,8 @@ function projectSelectOptions(select, withAll) {
   select.value = [...select.options].some((o) => o.value === kept) ? kept : "";
 }
 
-async function refreshProjects() {
+async function refreshProjects(opts) {
+  const form = !(opts && opts.form === false);
   let list;
   try {
     const resp = await api("/api/projects");
@@ -10517,31 +10523,36 @@ async function refreshProjects() {
     return;
   }
   const signature = JSON.stringify(list);
-  if (signature === projectsRendered) return;
-  projectsRendered = signature;
-  projectsCache = list;
-  // A remembered project that was removed since falls back to "all", and
-  // the memory is corrected so the next load does not ask for it. Asked of
-  // the registry, not of a picker's value: on the first build a picker has
-  // no value to keep, and comparing that dropped every reload's pick.
-  if (currentProject && !projectsCache.some((p) => p.name === currentProject)) {
-    setCurrentProject("");
-  } else renderProjectTabs();
-  const form = document.querySelector("#new-session select[name=project]");
-  if (form) {
-    projectSelectOptions(form, false);
-    if (currentProject && [...form.options].some((o) => o.value === currentProject)) {
-      form.value = currentProject;
+  if (signature !== projectsRendered) {
+    projectsRendered = signature;
+    projectsCache = list;
+    // A remembered project that was removed since falls back to "all", and
+    // the memory is corrected so the next load does not ask for it. Asked of
+    // the registry, not of a picker's value: on the first build a picker has
+    // no value to keep, and comparing that dropped every reload's pick.
+    if (currentProject && !projectsCache.some((p) => p.name === currentProject)) {
+      setCurrentProject("");
+    } else renderProjectTabs();
+    if (wsOpen) renderWorkspaces();
+    if (currentPage === "home") renderHome();
+  }
+  // The form's row: only on an opening's read, never the poll's
+  // (claunch-p3i0n.1).
+  if (!form || signature === projectsFormRendered) return;
+  projectsFormRendered = signature;
+  const row = document.querySelector("#new-session select[name=project]");
+  if (row) {
+    projectSelectOptions(row, false);
+    if (currentProject && [...row.options].some((o) => o.value === currentProject)) {
+      row.value = currentProject;
     }
-    form._lastProject = form.value;
+    row._lastProject = row.value;
     // The rebuild just dropped the child's inherit entry and put a project
     // name in its place, which is the one state that makes an untouched row
     // move the child. Asked back here rather than left to the next sync:
     // between the two the form would submit a project nobody chose.
     if (spawnParent()) syncSpawnMode();
   }
-  if (wsOpen) renderWorkspaces();
-  if (currentPage === "home") renderHome();
 }
 
 /* The same guard for the two create-form pickers built out of the session
@@ -10990,7 +11001,8 @@ async function refreshHarnesses() {
   syncSpawnMode();
 }
 
-async function refreshWorkspaces() {
+async function refreshWorkspaces(opts) {
+  const form = !(opts && opts.form === false);
   const select = document.querySelector("#new-session select[name=cwd]");
   let list;
   try {
@@ -11001,7 +11013,7 @@ async function refreshWorkspaces() {
     // A daemon older than these assets has no /api/workspaces (it serves
     // static files from disk but runs the Python it started with). Leave the
     // form usable rather than showing an empty, un-submittable picker.
-    if (!select.options.length) {
+    if (form && !select.options.length) {
       select.appendChild(new Option("(daemon cwd)", ""));
       const stale = $("cwd-hint");
       stale.textContent =
@@ -11011,13 +11023,18 @@ async function refreshWorkspaces() {
     return;
   }
   const signature = JSON.stringify(list);
-  if (signature === workspacesRendered) return;
-  workspacesRendered = signature;
-  // The manage page reads the same poll: the registry is also edited from a
-  // shell, so a 'claunch workspace add' in another window lands here too.
-  workspacesCache = list;
-  if (wsOpen) renderWorkspaces();
-  if (currentPage === "home") renderHome();
+  if (signature !== workspacesRendered) {
+    workspacesRendered = signature;
+    // The manage page reads the same poll: the registry is also edited from a
+    // shell, so a 'claunch workspace add' in another window lands here too.
+    workspacesCache = list;
+    if (wsOpen) renderWorkspaces();
+    if (currentPage === "home") renderHome();
+  }
+  // The form's Directory row: only on an opening's read, never the poll's
+  // (claunch-p3i0n.1) -- the next opening rebuilds it if the list moved.
+  if (!form || signature === workspacesFormRendered) return;
+  workspacesFormRendered = signature;
 
   const previous = select.value;
   select.innerHTML = "";
@@ -21044,6 +21061,8 @@ async function openNewSession(mesh) {
   if (sessionModal) sessionModalClose({ route: false });
   if (sessionModal) return; // A pending creation still owns the form.
   $("new-session")._sessionView = createSessionFormView("new", "page");
+  // As in openSessionModal: the rows the poll leaves alone are read here.
+  refreshResumeChoices();
   refreshParentChoices();
   setSessionModalTab("new");
   promptPackFormOpened();
@@ -21061,6 +21080,7 @@ async function openNewSession(mesh) {
   if (typeof maybeLoadRemoteMeshes === "function") maybeLoadRemoteMeshes();
   await Promise.all([
     Promise.resolve(refreshWorkspaces()).catch(() => {}),
+    Promise.resolve(refreshProjects()).catch(() => {}),
     Promise.resolve(refreshWorkflowChoices()).catch(() => {}),
   ]);
   syncOnboardPickers();
@@ -39498,6 +39518,9 @@ async function openSessionModal(opts = {}) {
     return;
   }
   if (opts.mesh) pendingNewMesh = opts.mesh;
+  // The rows the poll no longer keeps up behind a closed form
+  // (claunch-p3i0n.1) are read here, on the way in.
+  refreshResumeChoices();
   refreshParentChoices();
   setSessionModalTab(tab);
   promptPackFormOpened();
@@ -39518,6 +39541,7 @@ async function openSessionModal(opts = {}) {
   // about worktrees is not a reason to refuse to draw the form.
   await Promise.all([
     Promise.resolve(refreshWorkspaces()).catch(() => {}),
+    Promise.resolve(refreshProjects()).catch(() => {}),
     Promise.resolve(refreshWorkflowChoices()).catch(() => {}),
     Promise.resolve(refreshRoles(f.mesh.value || "")).catch(() => {}),
   ]);
@@ -40481,8 +40505,9 @@ async function refreshMeshList(options) {
   // that owns the fact, and this is where the fact arrives.
   renderTermHandle();
   renderOutgoingJoins(outgoing);
-  // An open create form keeps the mesh list it opened with (claunch-p3i0n).
-  if (!(typeof sessionFormHeld === "function" && sessionFormHeld())) syncOnboardPickers();
+  // The create form's mesh and workflow rows are not redrawn from here:
+  // an open form keeps the list it opened with (claunch-p3i0n), and one off
+  // screen is synced when it opens (claunch-p3i0n.1).
   if (currentPage === "home") renderHome();
 }
 
@@ -46632,14 +46657,15 @@ async function pollOnce() {
   ];
   // Polled because the registry is edited from the CLI, in another window;
   // it redraws only when the list really changed (see refreshWorkspaces).
-  // Not while the create form is open: these three feed its pickers, which
-  // are read once on opening and then only on an input's change
-  // (sessionFormHeld, claunch-p3i0n). The first tick after it closes
-  // catches up.
+  // For home and the workspaces page only ({ form: false }): the create
+  // form's pickers are read once on opening and then only on an input's
+  // change. So not at all while the form is open (sessionFormHeld,
+  // claunch-p3i0n), and while it is off screen the form is left alone --
+  // the worktree pickers this poll used to re-render were ~970 nodes a tick
+  // into a form nobody was looking at (claunch-p3i0n.1).
   if (!(typeof sessionFormHeld === "function" && sessionFormHeld())) {
-    refreshes.push(refreshWorkspaces());
-    refreshes.push(refreshProjects());
-    refreshes.push(refreshNewWorktree());
+    refreshes.push(refreshWorkspaces({ form: false }));
+    refreshes.push(refreshProjects({ form: false }));
   }
   // Other daemons' mesh members: a list of its own, at its own pace.
   refreshes.push(refreshShadows());
