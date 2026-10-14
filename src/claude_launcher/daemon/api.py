@@ -11397,6 +11397,9 @@ async def h_session_pr(request: web.Request) -> web.Response:
     warnings: list = []
     try:
         await asyncio.to_thread(session_prs.record, name, result, body)
+        # An exited row is kept and its files looked at every CHECK_TTL
+        # seconds (claunch-lcwv3): this record shows on the next poll.
+        exited_rows.expire(name)
     except OSError as exc:
         warnings.append(f"PR record: {exc}")
     monitor = None
