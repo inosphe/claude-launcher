@@ -16,8 +16,13 @@
         rail polled and make no form request and no record inside the form;
      2. changing the Directory row is the one read it causes (/api/git once);
      3. after the dialog closes, the first tick reads the registry again;
-     4. Spawn child dialog: the same twelve ticks, the same zero;
-     5. the #/new page form: the same. */
+     4. back on home, the form is off screen (#new-view, hidden): twelve ticks
+        keep home's registry fresh and rewrite nothing inside the form, and
+        a workspace added meanwhile reaches its Directory row on the next
+        opening (claunch-p3i0n.1; measured before the fix: 288 records in
+        twelve ticks -- worktree, mesh, workflow, parent and resume rows);
+     5. Spawn child dialog: the same twelve ticks, the same zero;
+     6. the #/new page form: the same. */
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const http = require("node:http");
@@ -35,7 +40,7 @@ const sessions = () => [
 const workspaces = [
   { name: "repo", path: "/repo", exists: true },
   { name: "other", path: "/other", exists: true },
-];
+];  // step 4 adds one, as 'claunch workspace add' in another window would
 const git = (cwd) => ({
   repo: true, root_branch: "master", branches: ["master", "feature"],
   worktrees: ["c1", "w2"], paths: { c1: `${cwd}/.claude/worktrees/c1`, w2: `${cwd}/.claude/worktrees/w2` },
@@ -159,14 +164,31 @@ const FORM_READS = /^\/api\/(workspaces|projects|git|roles|cflow\/workflows|prom
     await settle();
     assert(log.slice(from).includes("/api/workspaces"), "the registry is polled again once the form is shut");
 
-    /* ---- 4. Spawn child dialog ----------------------------------------- */
+    /* ---- 4. off screen on home: left alone, then caught up on opening -- */
+    assert.equal(await page.locator("#new-session").isVisible(), false, "the form is off screen");
+    workspaces.push({ name: "added", path: "/added", exists: true });
+    const hidden = await ticks();
+    assert(hidden.sessions >= 12, `home: the rail kept polling (${hidden.sessions} /api/sessions)`);
+    assert(hidden.reqs.includes("/api/workspaces"), "home: the registry is still polled for home");
+    assert.deepEqual(hidden.form.filter((p) => !/^\/api\/(workspaces|projects)$/.test(p)), [],
+      "home: no read for the form's own rows (git, roles, workflows, packs)");
+    assert.deepEqual(hidden.records, [], "home: nothing inside the hidden form was rewritten");
+    assert.equal(await page.locator('#new-session select[name=cwd] option[value="/added"]').count(), 0,
+      "the hidden Directory row still holds the list it was drawn with");
+    await page.evaluate(() => openSessionModal({ tab: "new" }));
+    await settle();
+    assert.equal(await page.locator('#new-session select[name=cwd] option[value="/added"]').count(), 1,
+      "opening rebuilds the Directory row from the registry it reads");
+    await page.evaluate(() => sessionModalClose());
+
+    /* ---- 5. Spawn child dialog ----------------------------------------- */
     await page.evaluate(() => openSpawnModal("p0"));
     await settle();
     assert.equal(await page.locator("#modal-overlay").isVisible(), true);
     quiet("spawn child dialog", await ticks());
     await page.evaluate(() => sessionModalClose());
 
-    /* ---- 5. the #/new page form ---------------------------------------- */
+    /* ---- 6. the #/new page form ---------------------------------------- */
     await page.evaluate(() => { location.hash = "#/new"; });
     await page.locator("#new-view #new-session").waitFor();
     await settle();

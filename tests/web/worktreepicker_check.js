@@ -151,6 +151,7 @@ new Function(
    // back. Everything it closes over that is a function arrives as a
    // parameter; the module state it reads is declared here.
    sliceLet("workspacesRendered"),
+   sliceLet("workspacesFormRendered"),
    `let wsOpen = false, currentPage = "home";`,
    slice("refreshWorkspaces"),
    slice("applySessionCwdChange"),

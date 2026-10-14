@@ -216,6 +216,9 @@ const server = http.createServer((req, res) => {
     /* ---- 5. the session pickers keep their options --------------------- */
     const picker = await page.evaluate(() => {
       const select = document.querySelector("#new-session select[name=resume]");
+      // Filled as an opening fills it: the poll no longer builds the rows of
+      // a form that is off screen (claunch-p3i0n.1).
+      refreshResumeChoices();
       const before = new Map([...select.options].map((o) => [o.value, o]));
       sessionsCache = sessionsCache.map((s) => s.name === "p0" ? { ...s, status: "busy" } : s);
       refreshResumeChoices();
