@@ -31206,7 +31206,7 @@ function renderWfInto(view, data, ui) {
   // The owning session is not in this line any more: it moved up to the head
   // (wfOwnerChip), which holds still while everything here scrolls away.
   meta.appendChild(el("span", null, `run ${run.run || "?"}`));
-  meta.appendChild(el("span", null, `started ${(run.started_at || "?").replace("T", " ")}`));
+  meta.appendChild(el("span", null, `started ${localStamp(run.started_at) || "?"}`));
   meta.appendChild(el("span", null, `${run.steps_completed ?? 0} steps done`));
   meta.appendChild(el("span", "mono", data.cwd));
   for (const s of data.sessions || []) {
@@ -31332,7 +31332,7 @@ function renderWfInto(view, data, ui) {
   journal.appendChild(el("summary", null, `journal (${(data.journal || []).length} events)`));
   for (const e of (data.journal || []).slice().reverse()) {
     const line =
-      `${(e.at || "").replace("T", " ")}  ${e.event || ""}` +
+      `${localStamp(e.at)}  ${e.event || ""}` +
       `${e.step ? "  " + e.step : ""}${e.option ? "  -> " + e.option : ""}` +
       `${e.reason ? "  — reason: " + e.reason : ""}`;
     journal.appendChild(el("div", "wf-journal-line mono", line));
@@ -31864,7 +31864,7 @@ function wfStateBlock(data, ui) {
     const who = [`written by ${by.join(" or ") || "?"}`];
     if (entry.set_by) {
       who.push(`last set by ${entry.set_by} at ` +
-        `${(entry.set_at || "?").replace("T", " ")}`);
+        `${localStamp(entry.set_at) || "?"}`);
     }
     row.appendChild(el("span", "wf-note wf-state-by", who.join(" · ")));
     if (entry.describe) row.appendChild(el("p", "wf-note wf-state-desc", entry.describe));
@@ -31912,7 +31912,7 @@ function wfLandingBlock(data) {
         `${e.branch || "?"} @ ${String(e.tip || "").slice(0, 8) || "?"}`
       ));
       const asked = e.requested_by || "?";
-      const at = e.requested_at ? ` · ${e.requested_at.replace("T", " ")}` : "";
+      const at = e.requested_at ? ` · ${localStamp(e.requested_at)}` : "";
       tr.appendChild(el("td", null, asked + at));
       tr.appendChild(el("td", null, e.note || ""));
       table.appendChild(tr);
@@ -34189,7 +34189,7 @@ function wfReports(data, ui) {
     const card = el("div", expanded ? "wf-report" : "wf-report folded");
     const rhead = el("div", "wf-report-head");
     rhead.appendChild(el("span", "wf-report-step", r.visit > 1 ? `${r.step} ×${r.visit}` : r.step));
-    rhead.appendChild(el("span", "wf-report-at", (r.at || "").replace("T", " ")));
+    rhead.appendChild(el("span", "wf-report-at", localStamp(r.at)));
     card.appendChild(rhead);
     if (expanded) {
       card.appendChild(mdInto(el("div", "wf-report-summary md"), r.summary || ""));

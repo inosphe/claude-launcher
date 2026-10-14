@@ -115,7 +115,7 @@ new Function(
   stubs + "\n" +
   [slice("answerFellToUs"), slice("wfDotClass"), slice("shortenPath"),
    slice("captureWfScrolls"), slice("restoreWfScrolls"),
-   slice("scopeSession"), slice("wfOwnerChip"), slice("renderWfInto"), slice("mobileTitle")].join("\n") +
+   slice("scopeSession"), slice("wfOwnerChip"), slice("localStamp"), slice("renderWfInto"), slice("mobileTitle")].join("\n") +
   `
 Object.assign(exports, {
   renderWfInto, wfOwnerChip, mobileTitle,

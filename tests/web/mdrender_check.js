@@ -77,6 +77,7 @@ new Function("document", "exports", `
   ${slice("mdInto")}
   ${slice("mdText")}
   ${slice("mdPlain")}
+  ${slice("localStamp")}
   ${slice("wfReports")}
   Object.assign(exports, {
     el, mdBlocks, mdInto, mdText, mdPlain, wfReports,
