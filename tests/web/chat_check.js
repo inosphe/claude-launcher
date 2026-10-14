@@ -99,6 +99,11 @@ check("the modal opens from anywhere through the floating button, a segment of t
 check("a post carries this browser's key and name to the chat API",
       [src.includes("api/chat/rooms/${encodeURIComponent(mesh)}/messages"), src.includes("{key: me.key, name: me.name, body: text}")],
       [true, true]);
+check("chat reads are spelled from the root, so they join the page's batch (claunch-8utpv)",
+      [src.includes('request("/api/chat/rooms")'), src.includes("`/api/chat/rooms/${encodeURIComponent(mesh)}/messages`"),
+       /request\("api\/|`api\/chat/.test(src)], [true, true, false]);
+check("a background tab polls once a minute; on screen it stays at 8 s",
+      src.includes('fast ? 3000 : document.visibilityState === "visible" ? 8000 : 60000'), true);
 check("nothing is sent to a terminal",
       /api\/sessions\/[^"`]*\/(deliver|keys)|api\/mesh\/[^"`]*\/messages/.test(src), false);
 check("the identity lives in localStorage under its own key",
