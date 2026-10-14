@@ -4777,6 +4777,7 @@ async function refreshSessions(options) {
       decorateNoteRow(keptRow, s);
       decorateProgressRow(keptRow, s);
       decorateProcsRow(keptRow, s);
+      if (typeof decorateCommitsRow === "function") decorateCommitsRow(keptRow, s);
       place(nestedGroupContainers
         ? (groupBodies[groupBodies.length - 1] || list) : list, keptRow);
       countRow();
@@ -5048,10 +5049,6 @@ async function refreshSessions(options) {
     head.append(label, keys, ...(handleBox ? [handleBox] : []),
                 ...(role ? [role] : []), ...(comp ? [comp] : []),
                 ...(meshBox ? [meshBox] : []));
-    if (typeof sessionPrBadge === "function") {
-      const prBadge = sessionPrBadge(s);
-      if (prBadge) head.insertBefore(prBadge, keys);
-    }
     // Where it runs, then how full it is, then who has been near it: the two
     // identity lines first and the state line under them, so a reader
     // scanning for "which of these has nobody touched" finds it in one
@@ -5087,6 +5084,8 @@ async function refreshSessions(options) {
     decorateProgressRow(li, s);
     // What the daemon started for it and is still running (claunch-ihwel).
     decorateProcsRow(li, s);
+    // Its newest commits, framed by the PR that carries them (claunch-h5m6f).
+    if (typeof decorateCommitsRow === "function") decorateCommitsRow(li, s);
     const parent = nestedGroupContainers
       ? (groupBodies[groupBodies.length - 1] || list) : list;
     place(parent, li);
@@ -36038,12 +36037,73 @@ function sessionPrRows(s) {
   });
 }
 
-function sessionPrBadge(s) {
-  const rows = sessionPrRows(s);
-  if (!rows.length) return null;
-  const badge = el("span", "rail-pr", rows.length === 1 ? `PR #${rows[0].number}` : `PR ×${rows.length}`);
-  badge.title = rows.map((pr) => `${pr.repo} #${pr.number}${pr.status ? ` · ${pr.status}` : ""}`).join("\n");
-  return badge;
+/* The card's commit line (claunch-h5m6f): the session's newest stamped
+   commits (`rail_commits`, session_commits.rail) as short chips, each
+   prefixed with one mark for where the commit has got to --
+     ✓  master has it (merged)
+     ↑  a remote has it, master does not (pushed)
+     ○  only this machine has it (local)
+   -- and every recorded PR as a bordered frame, its number on the frame,
+   around the chips of the commits that PR carries. A PR whose commits the
+   daemon could not tell apart (a deleted head branch, a squash merge) is a
+   frame with only its number; a commit no PR carries sits after the frames.
+   No line at all when there is neither: an empty reading is not a claim
+   that the session committed nothing (session_commits.for_session). */
+const RAIL_COMMIT_MARKS = {
+  merged: ["✓", "merged: master has it"],
+  pushed: ["↑", "pushed: a remote has it, master does not"],
+  local: ["○", "local: no remote has it"],
+};
+
+function railCommitChip(c) {
+  const [mark, what] = RAIL_COMMIT_MARKS[c.state] || ["?", "state unknown"];
+  const chip = el("span", "rail-commit rail-commit-" + (RAIL_COMMIT_MARKS[c.state] ? c.state : "unknown"));
+  chip.appendChild(el("span", "rail-commit-mark", mark));
+  chip.appendChild(el("span", "rail-commit-sha", String(c.short || "").slice(0, 7)));
+  chip.title = `${c.short || ""} ${c.subject || ""}\n${mark} ${what}`;
+  return chip;
+}
+
+function railPrFrame(pr, commits) {
+  const box = el("span", "rail-prgroup" + (pr.status ? " rail-prgroup-" + pr.status : ""));
+  const label = el("a", "rail-prgroup-label", `#${pr.number}`);
+  label.href = pr.url;
+  label.target = "_blank";
+  label.rel = "noopener noreferrer";
+  label.title = [`PR #${pr.number}${pr.title ? ` · ${pr.title}` : ""}`, pr.repo,
+    [pr.status, pr.branch && pr.base ? `${pr.branch} → ${pr.base}` : pr.branch || pr.base]
+      .filter(Boolean).join(" · ")].filter(Boolean).join("\n");
+  // The card's own click attaches to the session; this one opens the PR.
+  label.addEventListener("click", (e) => e.stopPropagation());
+  box.appendChild(label);
+  for (const c of commits) box.appendChild(railCommitChip(c));
+  return box;
+}
+
+function decorateCommitsRow(li, s) {
+  const prs = sessionPrRows(s);
+  const rc = s.rail_commits && Array.isArray(s.rail_commits.commits) ? s.rail_commits : null;
+  const commits = rc ? rc.commits : [];
+  const line = li.querySelector(".rail-commits");
+  if (!prs.length && !commits.length) {
+    if (line) line.remove();
+    return;
+  }
+  const node = line || el("div", "rail-commits");
+  node.innerHTML = "";
+  const framed = new Set(prs.map((pr) => pr.number));
+  for (const pr of prs) {
+    node.appendChild(railPrFrame(pr, commits.filter((c) => c.pr === pr.number)));
+  }
+  for (const c of commits) {
+    if (!framed.has(c.pr)) node.appendChild(railCommitChip(c));
+  }
+  if (rc && rc.more > 0) {
+    const more = el("span", "rail-commit-more", `+${rc.more}`);
+    more.title = `${rc.more} older commit(s) not shown; the Details panel lists them`;
+    node.appendChild(more);
+  }
+  if (!line) railNotePlace(li, node);
 }
 
 function sessionPrPanel(s) {
