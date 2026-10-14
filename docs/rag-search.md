@@ -27,6 +27,8 @@ disabled default, never an error.
 
 ```yaml
 rag:
+  source: custom        # custom = base_url + api_key below; profile = a profile's backend
+  profile: ds4          # with source: profile, its provider's endpoints.openai + key
   base_url: https://omlx.inosphe.work/v1     # OpenAI-compatible root
   api_key: <key>                             # or CLAUNCH_RAG_API_KEY in the env
   embedding_model: mlx-community--Qwen3-Embedding-4B-mxfp8
@@ -40,8 +42,21 @@ rag:
   watch_interval: 30    # seconds between checks of each board's .beads files; 0 = off
 ```
 
-The feature is on when `base_url`, `api_key` and `embedding_model` are all
-set; `rerank_model` empty means vector order only. The key leaves the
+`source` picks where the endpoint and key come from (claunch-dkrqf).
+`custom` (the default, and what a block without `source` means) uses the
+typed `base_url` and `api_key` — a local server such as oMLX. `profile`
+uses the named claunch profile's backend instead: its provider's
+`endpoints.openai` as the base and the profile's stored token (else the
+provider's `api_key`) as the key, the same resolution the Observer and the
+briefing use — e.g. `ds4` → Fireworks. The typed pair stays in the block
+while `profile` is chosen, so switching back is one choice in **Settings ▸
+Search settings**. `CLAUNCH_RAG_API_KEY` is a key for the typed endpoint and
+applies to `custom` only. The embedding and rerank model ids are always typed
+in: a profile's `models` are chat models. Changing the source changes the
+base URL, so the index is rebuilt.
+
+The feature is on when the chosen source yields a base URL and a key and
+`embedding_model` is set; `rerank_model` empty means vector order only. The key leaves the
 process only as the `Authorization` header; status and error messages never
 carry it. `sync.sections` does not include `rag` by default, so a synced
 config does not carry the key unless the operator lists the section.

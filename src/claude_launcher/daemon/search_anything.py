@@ -175,16 +175,27 @@ def _build(boards, snaps):
     return docs
 
 
-EDITABLE = {"base_url", "api_key", "embedding_model", "rerank_model", "verify_tls", "timeout", "batch", "candidates", "rerank_top", "watch_interval"}
+EDITABLE = {"source", "profile", "base_url", "api_key", "embedding_model", "rerank_model", "verify_tls", "timeout", "batch", "candidates", "rerank_top", "watch_interval"}
+SOURCES = ("custom", "profile")
 
 
 def proposed(body):
+    """The config document a save (or a test) would write.
+
+    Both connection paths stay in the block: choosing ``source: profile``
+    keeps the typed ``base_url``/``api_key`` for a later switch back, and
+    choosing ``custom`` keeps the profile name. Only the chosen path is
+    validated, so a profile-backed block needs no typed address.
+    """
     if not isinstance(body, dict) or set(body) - EDITABLE:
         raise ValueError("unsupported search setting")
     doc = store.load()
     block = dict(doc.get("rag") or {})
     for key, value in body.items():
-        if key in ("base_url", "api_key", "embedding_model", "rerank_model"):
+        if key == "source":
+            if value not in SOURCES:
+                raise ValueError("source must be custom or profile")
+        elif key in ("profile", "base_url", "api_key", "embedding_model", "rerank_model"):
             if not isinstance(value, str):
                 raise ValueError(f"{key} must be text")
             if key == "api_key" and not value:
@@ -201,17 +212,60 @@ def proposed(body):
             if key in ("batch", "candidates", "rerank_top") and int(value) != value:
                 raise ValueError(f"{key} must be an integer")
         block[key] = value
-    address = urlsplit(block.get("base_url", ""))
-    if address.scheme not in ("http", "https") or not address.hostname or address.username or address.password or address.query or address.fragment:
-        raise ValueError("base_url must be an HTTP(S) endpoint without credentials, query or fragment")
+    source = "profile" if block.get("source") == "profile" else "custom"
+    if source == "profile":
+        if not block.get("profile"):
+            raise ValueError("choose a profile for the profile connection")
+        store.rag_profile_backend(block["profile"], doc)
+    if source == "custom" or block.get("base_url"):
+        address = urlsplit(block.get("base_url", ""))
+        if address.scheme not in ("http", "https") or not address.hostname or address.username or address.password or address.query or address.fragment:
+            raise ValueError("base_url must be an HTTP(S) endpoint without credentials, query or fragment")
     block.pop("dimensions", None)  # Output width is learned from model responses.
     doc["rag"] = block
     return doc
 
 
+def profile_rows(doc=None):
+    """Every profile semantic search could call: name, endpoint, whether it has a key.
+
+    A profile whose provider has no OpenAI-compatible endpoint is left out:
+    this list is a picker. The configured one is still diagnosed by
+    ``profile_error`` when it cannot be resolved.
+    """
+    from .. import profile as profile_mod
+
+    doc = store.load() if doc is None else doc
+    rows = []
+    for prof in profile_mod.list_all():
+        try:
+            base, key = store.rag_profile_backend(prof.name, doc)
+        except ValueError:
+            continue
+        rows.append({"name": prof.name, "base_url": base, "has_key": bool(key)})
+    return rows
+
+
 def public_settings():
-    cfg = store.rag_config()
-    return {**{k: cfg[k] for k in EDITABLE - {"api_key"}}, "api_key_set": bool(cfg["api_key"])}
+    """What the Settings card draws. No secret crosses this boundary.
+
+    ``base_url`` is the typed custom address (what the form field holds);
+    ``resolved`` is what a call would use under the chosen ``source``.
+    """
+    doc = store.load()
+    block = doc.get("rag") if isinstance(doc.get("rag"), dict) else {}
+    cfg = store.rag_config(doc)
+    custom = store.rag_config({"rag": {**block, "source": "custom"}})
+    out = {k: cfg[k] for k in EDITABLE - {"api_key", "base_url"}}
+    out.update({
+        "base_url": custom["base_url"],
+        "api_key_set": bool(custom["api_key"]),
+        "configured": store.rag_configured(cfg),
+        "profile_error": cfg["profile_error"],
+        "resolved": {"base_url": cfg["base_url"], "has_key": bool(cfg["api_key"])},
+        "profiles": profile_rows(doc),
+    })
+    return out
 
 
 def install(app):
@@ -247,6 +301,8 @@ def install(app):
         try:
             cfg = store.rag_config(proposed(await request.json()))
             if not store.rag_configured(cfg):
+                if cfg["profile_error"]:
+                    return web.json_response({"error": f"Profile connection unavailable: {cfg['profile_error']}", "stage": "config"}, status=400)
                 raise ValueError("API address, key and embedding model are required")
             client = service._client(cfg)
             vectors = await client.embed(["search connection test"])

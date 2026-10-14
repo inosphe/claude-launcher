@@ -354,14 +354,43 @@ globalThis.SearchAnything = (() => {
         if (type === "checkbox") input.checked = cfg[key];
         label.append(input); parent.append(label); fields[key] = input;
       }
-      field("base_url", "oMLX API 주소"); field("api_key", "API key", "password");
+      // Two connection paths, both kept in the rag block: a typed endpoint
+      // (a local oMLX server) or a claunch profile's provider backend.
+      const sourceBox = document.createElement("fieldset"); sourceBox.append(node("legend", "연결 방식"));
+      const sources = {};
+      for (const [value, title] of [["custom", "Custom API (직접 입력)"], ["profile", "Profile (provider)"]]) {
+        const label = node("label", ""), radio = document.createElement("input");
+        radio.type = "radio"; radio.name = "rag-source"; radio.value = value; radio.checked = (cfg.source || "custom") === value;
+        label.append(radio, " " + title); sourceBox.append(label); sources[value] = radio;
+      }
+      form.append(sourceBox);
+      const customBox = document.createElement("fieldset"); customBox.append(node("legend", "Custom API"));
+      field("base_url", "API 주소 (예: oMLX)", "text", customBox); field("api_key", "API key", "password", customBox);
+      const profileBox = document.createElement("fieldset"); profileBox.append(node("legend", "Profile"));
+      const profileLabel = node("label", "프로필"), profileSelect = document.createElement("select");
+      profileSelect.name = "profile"; profileSelect.append(new Option("프로필 선택", ""));
+      const rows = cfg.profiles || [];
+      for (const row of rows) profileSelect.append(new Option(`${row.name} · ${row.base_url}${row.has_key ? "" : " · API key 없음"}`, row.name));
+      if (cfg.profile && !rows.some(row => row.name === cfg.profile)) profileSelect.append(new Option(`${cfg.profile} · 사용 불가`, cfg.profile));
+      profileSelect.value = cfg.profile || "";
+      profileLabel.append(profileSelect); profileBox.append(profileLabel); fields.profile = profileSelect;
+      profileBox.append(node("p", "프로필의 provider가 가진 OpenAI 호환 endpoint와 API key를 사용합니다. Embedding 모델은 아래에 직접 입력합니다."));
+      if (cfg.profile_error && cfg.source === "profile") profileBox.append(node("p", "현재 프로필을 사용할 수 없습니다: " + cfg.profile_error));
+      form.append(customBox, profileBox);
+      function showSource() { customBox.hidden = !sources.custom.checked; profileBox.hidden = !sources.profile.checked; }
+      for (const radio of Object.values(sources)) radio.onchange = showSource;
+      showSource();
       field("embedding_model", "Embedding model"); field("rerank_model", "Rerank model (선택)");
       const advanced = document.createElement("details"); advanced.append(node("summary", "고급 설정"));
       for (const [key, title] of [["candidates", "검색 후보 수"], ["rerank_top", "Rerank 대상 수"], ["batch", "Embedding 배치 크기"], ["timeout", "요청 제한 시간 (초)"], ["watch_interval", "변경 확인 주기 (초)"]]) field(key, title, "number", advanced);
       field("verify_tls", "TLS 인증서 검증", "checkbox", advanced); form.append(advanced);
-      form.append(node("p", "차원 수는 모델 응답에서 자동으로 읽습니다. Embedding 모델이나 API 주소를 변경하면 색인을 다시 구성합니다."));
+      form.append(node("p", "차원 수는 모델 응답에서 자동으로 읽습니다. 연결 방식, Embedding 모델이나 API 주소를 변경하면 색인을 다시 구성합니다. 선택하지 않은 방식의 값도 설정 파일에 그대로 보존됩니다."));
       const save = node("button", "저장"), test = node("button", "연결 테스트"); save.type = "submit"; test.type = "button";
-      function values() { return Object.fromEntries(Object.entries(fields).map(([key, input]) => [key, input.type === "checkbox" ? input.checked : input.type === "number" ? Number(input.value) : input.value])); }
+      function values() {
+        const out = Object.fromEntries(Object.entries(fields).map(([key, input]) => [key, input.type === "checkbox" ? input.checked : input.type === "number" ? Number(input.value) : input.value]));
+        out.source = sources.profile.checked ? "profile" : "custom";
+        return out;
+      }
       async function action(testOnly) {
         save.disabled = test.disabled = true; status.textContent = testOnly ? "연결 확인 중…" : "저장 중…";
         try {

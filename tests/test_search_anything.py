@@ -847,3 +847,106 @@ def test_import_current_reads_only_the_sessions_it_imports(monkeypatch):
     # A second pass finds them all and writes nothing.
     monkeypatch.setattr(search_records, "capture", lambda *a, **k: pytest.fail("imported twice"))
     search_records.import_current()
+
+
+def _rag_profile(name="ds4", *, provider="fireworks", api_key="fw-secret",
+                 endpoints=None):
+    """A profile whose provider serves an OpenAI-compatible API (claunch-dkrqf)."""
+    from claude_launcher import profile
+    profile.create(name)
+
+    def mutate(doc):
+        doc.setdefault("providers", {})[provider] = {
+            "api_key": api_key,
+            "endpoints": {"openai": "https://api.fireworks.ai/inference/v1"} if endpoints is None else endpoints,
+            "models": {"default": "accounts/fireworks/models/deepseek-v4p1-flash"},
+        }
+        doc.setdefault("profiles", {}).setdefault(name, {})["provider"] = provider
+    store.update(mutate)
+
+
+def test_a_block_without_source_reads_as_the_typed_endpoint():
+    cfg = store.rag_config({"rag": {"base_url": "http://localhost:8000/v1", "api_key": "k",
+                                    "embedding_model": "e", "profile": "ds4"}})
+    assert cfg["source"] == "custom"
+    assert (cfg["base_url"], cfg["api_key"]) == ("http://localhost:8000/v1", "k")
+    assert store.rag_configured(cfg)
+
+
+def test_profile_source_uses_the_profile_backend_and_keeps_the_typed_pair():
+    _rag_profile()
+    store.update(lambda doc: doc.__setitem__("rag", {
+        "base_url": "http://localhost:8000/v1", "api_key": "local-secret", "embedding_model": "embed"}))
+    doc = search_anything.proposed({"source": "profile", "profile": "ds4", "api_key": ""})
+    # Both paths stay in the file; only the choice moved.
+    assert doc["rag"]["base_url"] == "http://localhost:8000/v1"
+    assert doc["rag"]["api_key"] == "local-secret"
+    cfg = store.rag_config(doc)
+    assert cfg["source"] == "profile" and not cfg["profile_error"]
+    assert cfg["base_url"] == "https://api.fireworks.ai/inference/v1"
+    assert cfg["api_key"] == "fw-secret"
+    store.save(doc)
+    public = search_anything.public_settings()
+    assert public["source"] == "profile" and public["profile"] == "ds4"
+    assert public["base_url"] == "http://localhost:8000/v1"  # the form keeps the typed address
+    assert public["resolved"] == {"base_url": "https://api.fireworks.ai/inference/v1", "has_key": True}
+    assert public["configured"] and public["api_key_set"]
+    assert [row["name"] for row in public["profiles"]] == ["ds4"]
+    assert "fw-secret" not in str(public) and "local-secret" not in str(public)
+    back = store.rag_config(search_anything.proposed({"source": "custom"}))
+    assert (back["base_url"], back["api_key"]) == ("http://localhost:8000/v1", "local-secret")
+    assert back["profile"] == "ds4"
+
+
+def test_the_environment_key_belongs_to_the_custom_endpoint(monkeypatch):
+    _rag_profile()
+    monkeypatch.setenv("CLAUNCH_RAG_API_KEY", "env-secret")
+    block = {"base_url": "http://localhost:8000/v1", "embedding_model": "e", "profile": "ds4"}
+    assert store.rag_config({"rag": {**block, "source": "custom"}})["api_key"] == "env-secret"
+    assert store.rag_config({**store.load(), "rag": {**block, "source": "profile"}})["api_key"] == "fw-secret"
+
+
+def test_profile_source_validation():
+    _rag_profile()
+    _rag_profile("anthropic-only", provider="anth", endpoints={"anthropic": "https://example.test/anthropic"})
+    store.save({**store.load(), "rag": {"embedding_model": "e"}})
+    # A profile-backed block needs no typed address.
+    assert search_anything.proposed({"source": "profile", "profile": "ds4"})["rag"]["source"] == "profile"
+    for bad in ({"source": "other"}, {"source": "profile"}, {"source": "profile", "profile": "no-such"},
+                {"source": "profile", "profile": "anthropic-only"}, {"source": "custom"}):
+        with pytest.raises(ValueError):
+            search_anything.proposed(bad)
+    rows = search_anything.profile_rows()
+    assert [row["name"] for row in rows] == ["ds4"]
+    cfg = store.rag_config({**store.load(), "rag": {"source": "profile", "profile": "no-such", "embedding_model": "e"}})
+    assert cfg["profile_error"] and not store.rag_configured(cfg)
+
+
+def test_settings_routes_call_the_profile_backend(tmp_path):
+    async def run():
+        endpoint = Endpoint()
+        server = await _start_endpoint(endpoint)
+        _rag_profile(endpoints={"openai": str(server.make_url("/v1"))})
+        store.save({**store.load(), "rag": _cfg(server, watch_interval=0, base_url="http://localhost:9/v1")})
+        service = rag.RagService(root_dir=tmp_path / "index")
+        app = web.Application()
+        app["rag"] = service
+        app["observer"] = SimpleNamespace()
+        search_anything.install(app)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            response = await client.post("/api/rag/test", json={"source": "profile", "profile": "ds4"})
+            assert response.status == 200, await response.text()
+            assert endpoint.headers[-1]["Authorization"] == "Bearer fw-secret"
+            response = await client.put("/api/rag/settings", json={"source": "profile", "profile": "ds4"})
+            assert response.status == 200
+            text = await response.text()
+            assert "fw-secret" not in text and "rag-secret" not in text
+            assert store.load()["rag"]["base_url"] == "http://localhost:9/v1"
+            assert store.rag_config()["base_url"] == str(server.make_url("/v1"))
+        finally:
+            await service.shutdown()
+            await client.close()
+            await server.close()
+    asyncio.run(run())
