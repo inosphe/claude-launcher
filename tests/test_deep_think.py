@@ -270,6 +270,8 @@ def test_notes_and_the_answer_reach_the_asker_and_the_mesh_log(home, tmp_path, f
 def test_a_plain_quick_fork_keeps_its_merge_header(home, tmp_path, forkable, typed):
     async def scenario(mgr, mm, client):
         await client.post("/api/sessions/a/quick-fork", headers=BEARER)
+        # a person's copy merges on the operator's press, unlike a deep_think fork
+        await client.post("/api/sessions/a-qf1/handoff", json={}, headers=BEARER)
         resp = await client.post("/api/sessions/a-qf1/handoff", json={"text": "did it"}, headers=BEARER)
         assert resp.status == 200
         report = [t for n, t in typed if n == "a"][-1]

@@ -885,6 +885,7 @@ def build_app(
     r.add_post("/api/sessions/{name}/quick-fork", h_session_quick_fork)
     r.add_post("/api/sessions/{name}/handoff", h_session_handoff)
     r.add_delete("/api/sessions/{name}/handoff", h_session_handoff_cancel)
+    r.add_post("/api/sessions/{name}/self-merge", h_session_self_merge)
     r.add_post("/api/sessions/{name}/pause", h_session_pause)
     r.add_post("/api/sessions/{name}/hold", h_session_idle_hold)
     r.add_post("/api/sessions/{name}/wake", h_session_wake)
@@ -7731,7 +7732,7 @@ async def h_sessions_list(request: web.Request) -> web.Response:
             # leaving them out is not a saving: it hid ``↩ merge`` on every
             # quick-fork there has ever been, and left ``⑂ fork`` offered on
             # the copy — the fork button's guard is the same absent field.
-            "quick_fork_of", "handoff",
+            "quick_fork_of", "handoff", "self_merge_allowed",
             "status_checks", "tps",
             # The project a session is filed under. The page polls every
             # project and narrows the rail itself (``railSessions`` in
@@ -9802,6 +9803,7 @@ class QuickForkError(Exception):
 async def stage_quick_fork(
     request: web.Request, parent: str, body: dict, *, tag: str = "qf",
     spawn_extra: Optional[dict] = None, before_launch=None,
+    self_merge_allowed: Optional[bool] = None,
 ) -> dict:
     """The quick-fork itself, shared by the operator's press (above) and the
     ``deep_think`` tool (daemon/deep_think.py), which forks the asking
@@ -9809,6 +9811,10 @@ async def stage_quick_fork(
     (``<parent>-<tag><n>``), ``spawn_extra`` rides the spawn body (``model``
     and ``effort``, under the spawn policy like any child's), and
     ``before_launch(session)`` writes onto the staged copy before it starts.
+    ``self_merge_allowed`` (the body's field when not given) lets the copy
+    merge without the operator's press; it is written onto the staged record
+    here rather than carried by the spawn body, so a plain spawn has no way
+    to set it.
     Raises :class:`QuickForkError` with the status the route answers.
     """
     manager: SessionManager = request.app["manager"]
@@ -9844,6 +9850,8 @@ async def stage_quick_fork(
     # conversation, its directory -- which is what stage_child's place_under
     # keeps apart.
     sibling = body.get("sibling") in (True, "true", "1", 1)
+    if self_merge_allowed is None:
+        self_merge_allowed = body.get("self_merge_allowed") in (True, "true", "1", 1)
     placed = (origin.sdef.parent or "") if sibling else parent
     mesh_mgr = _mesh_mgr(request)
     origin_meshes = [
@@ -9914,6 +9922,7 @@ async def stage_quick_fork(
         role=fork_role, origin_role=origin_role,
         sibling=sibling, placed_under=placed,
         workflow_version=marker_version, origin_workflow=origin_workflow,
+        self_merge_allowed=self_merge_allowed,
     )
     task = str(body.get("task") or "").strip()
     if task:
@@ -9952,6 +9961,9 @@ async def stage_quick_fork(
         raise QuickForkError(400, f"bad quick-fork request: {exc}") from None
     except ManagerError as exc:
         raise QuickForkError(409 if "already exists" in str(exc) else 400, str(exc)) from None
+    if self_merge_allowed:
+        session.sdef = replace(session.sdef, self_merge_allowed=True)
+        manager.persist()
     if before_launch is not None:
         before_launch(session)
     try:
@@ -10002,7 +10014,10 @@ async def h_session_handoff(request: web.Request) -> web.Response:
 
     ``to`` names the target for a handoff; a quick-fork's merge needs none
     (it goes back to the origin) and refuses any other. ``kind`` may force
-    ``handoff`` on a quick-fork that wants to report elsewhere.
+    ``handoff`` on a quick-fork that wants to report elsewhere. ``actor`` is
+    the session filing a request (the CLI sends ``$CLAUNCH_SESSION``); a
+    quick-fork's request is the operator's, so one with an actor is refused
+    unless the copy may merge on its own (see ``Handoffs.request``).
     """
     manager: SessionManager = request.app["manager"]
     name = request.match_info["name"]
@@ -10010,16 +10025,39 @@ async def h_session_handoff(request: web.Request) -> web.Response:
     to = str(body.get("to") or "").strip()
     kind = str(body.get("kind") or "").strip()
     text = body.get("text")
+    actor = str(body.get("actor") or "").strip()
     handoffs: handoff_mod.Handoffs = request.app["handoff"]
     try:
         if text is not None and str(text).strip():
             result = await handoffs.complete(manager, name, text=str(text), to=to, kind=kind)
             return json_response({"completed": True, **result})
-        result = await handoffs.request(manager, name, to=to, kind=kind)
+        result = await handoffs.request(manager, name, to=to, kind=kind, actor=actor)
         return json_response({"requested": True, "source": name, **result})
     except handoff_mod.HandoffError as exc:
         msg = str(exc)
         return json_error(404 if "no session named" in msg else 400, msg)
+
+
+async def h_session_self_merge(request: web.Request) -> web.Response:
+    """Set (or, with ``?off=1``, clear) whether a quick-fork may merge on its
+    own (:attr:`SessionDef.self_merge_allowed`).
+
+    The operator's lever, like the merge press it stands in for: a body
+    ``actor`` naming the fork itself is refused, since a copy that could
+    grant itself the flag would need no press at all.
+    """
+    manager: SessionManager = request.app["manager"]
+    name = request.match_info["name"]
+    body = await _json_body(request)
+    on = request.query.get("off") not in ("1", "true")
+    try:
+        session = manager.set_self_merge_allowed(
+            name, on, actor=str(body.get("actor") or "").strip(),
+        )
+    except ManagerError as exc:
+        msg = str(exc)
+        return json_error(404 if "no session" in msg.lower() else 400, msg)
+    return json_response({**session.info(), "self_merge_allowed": bool(on)})
 
 
 async def h_session_handoff_cancel(request: web.Request) -> web.Response:

@@ -128,7 +128,7 @@ check("the decision blocks are numbered in reading order",
    what it joins, how it runs (folded), what it is told first. */
 check("the form's controls read in the new order", named(form.text), [
   "quick_fork_place", "quick_fork_mesh", "quick_fork_role", "quick_fork_workflow",
-  "quick_fork_task",
+  "quick_fork_task", "quick_fork_self_merge",
   // where it works: the project, then the directory its default fills
   "project", "cwd",
   // who it is, and the operator's own note on it (claunch-zy9yk)

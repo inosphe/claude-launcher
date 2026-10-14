@@ -236,6 +236,15 @@ class SessionDef:
     #: deadline sweep picks a running question back up after a daemon restart.
     #: Only ever set together with ``quick_fork_of``.
     deep_think: Optional[dict] = None
+    #: Whether this quick-fork may complete a merge (or a handoff) on its
+    #: own, with no operator request pending. Off by default: a person's
+    #: quick-fork ends only through the web UI's merge press, which types the
+    #: "MERGE requested" block and records the request the completion is then
+    #: checked against (see :meth:`daemon.handoff.Handoffs.complete`). On for
+    #: a ``deep_think`` fork, whose answer IS its merge, and for a fork the
+    #: operator created (or later set) with the flag. Meaningless without
+    #: :attr:`quick_fork_of`; written only when on.
+    self_merge_allowed: bool = False
     #: A person's own free-text annotation on this session, written from the
     #: web UI and read back in the rail row, the session header and the detail
     #: panel. It belongs to the *user*, not to the session: nothing injects it
@@ -332,6 +341,8 @@ class SessionDef:
             out["quick_fork_of"] = self.quick_fork_of
         if self.deep_think:
             out["deep_think"] = dict(self.deep_think)
+        if self.self_merge_allowed:
+            out["self_merge_allowed"] = True
         # Same rule as the two blocks above: a session with no note writes no
         # key, so the common record on disk is unchanged by this field.
         if self.note:
@@ -396,6 +407,7 @@ class SessionDef:
                 if isinstance(data.get("deep_think"), dict) and data["deep_think"]
                 else None
             ),
+            self_merge_allowed=bool(data.get("self_merge_allowed")),
             note=str(data.get("note") or "").strip() or None,
             reminder_note=str(data.get("reminder_note") or "").strip() or None,
             cflow_declined=_cflow_declined_field(data.get("cflow_declined")),

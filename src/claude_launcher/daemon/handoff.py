@@ -23,9 +23,20 @@ the text (MCP ``handoff``, ``claunch quick-fork merge``, ``claunch
 handoff``), and only then does the daemon deliver to the target and end the
 source — the report must have landed before the terminal it came from is
 gone, or a delivery that failed loses the one thing the session was ended
-for. An agent may also complete without a request (it decided on its own
-that the work is done); a request without a completion is ended by the
-operator's ordinary kill, and says so.
+for. A request without a completion is ended by the operator's ordinary
+kill, and says so.
+
+A quick-fork does not complete on its own. Its completion is accepted only
+while an operator's request is pending, so a copy ends through the web UI's
+merge press and nothing else of the copy's own making -- not a wrap-up it
+decided was due, not a parent telling it to finish (s15-qf2 merged itself
+the moment its parent asked, claunch-guljk). A request a *session* files
+(``actor``) is refused for the same reason: it would let the copy, or its
+parent, press the button for the operator. The exception is a fork whose
+:attr:`SessionDef.self_merge_allowed` is on -- a ``deep_think`` fork, whose
+answer is its merge, or one the operator made with the flag. Any other
+session (a plain handoff) still completes whenever it decides the work is
+done.
 
 Nothing here reads the transcript. The wrap-up is the agent's, because the
 agent is the one that knows what since-the-marker *meant*; the daemon's job
@@ -96,6 +107,7 @@ def compose_marker(
     role: str = "", origin_role: str = "",
     sibling: bool = False, placed_under: str = "",
     workflow_version: int = 0, origin_workflow: str = "",
+    self_merge_allowed: bool = False,
 ) -> str:
     """The block at the top of the copy: where the fork begins, and how it
     ends. Fenced like every other machine-generated block a session gets, so
@@ -127,6 +139,10 @@ def compose_marker(
     unknown) picks the tool names the run is driven with, and
     ``origin_workflow`` names the run the origin drives, if any -- see
     :func:`_workflow_lines` for why both are spelled out.
+
+    ``self_merge_allowed`` picks the merge line: a copy that may merge on its
+    own is told how; any other is told to wait for the operator's press,
+    because the daemon refuses the completion until one is pending.
     """
     lines = [
         "---",
@@ -147,13 +163,7 @@ def compose_marker(
         "stash) is one. Keep to an area the origin is not writing, or settle "
         "the boundary with it through a merge, before you touch a file it "
         "may be holding.",
-        "merge: when the work is done, write a wrap-up of everything since "
-        f"marker {marker} -- what changed, files and commits, decisions taken, "
-        "what is still open -- and hand it in with the MCP 'handoff' tool "
-        "({text: ...}) or `claunch quick-fork merge -f <file>`. The daemon "
-        f"types it into {origin} and ends this session. The wrap-up is the "
-        "only thing of this session that survives, so do not merge before "
-        "the work is done, and do not end this session any other way.",
+        _merge_line(origin=origin, marker=marker, allowed=self_merge_allowed),
     ]
     if sibling:
         lines.append(
@@ -203,6 +213,34 @@ def compose_marker(
         ))
     lines.append("---")
     return "\n".join(lines)
+
+
+def _merge_line(*, origin: str, marker: str, allowed: bool) -> str:
+    """The marker's ``merge:`` line: how this copy ends."""
+    wrap = (
+        f"write a wrap-up of everything since marker {marker} -- what "
+        "changed, files and commits, decisions taken, what is still open -- "
+        "and hand it in with the MCP 'handoff' tool ({text: ...}) or "
+        f"`claunch quick-fork merge -f <file>`. The daemon types it into "
+        f"{origin} and ends this session."
+    )
+    if allowed:
+        return (
+            f"merge: when the work is done, {wrap} The wrap-up is the only "
+            "thing of this session that survives, so do not merge before the "
+            "work is done, and do not end this session any other way."
+        )
+    return (
+        "merge: this session does NOT merge on its own. When the work is "
+        "done, say so in this terminal and wait. The merge starts only when "
+        "the operator presses merge in the web UI, which types a 'MERGE "
+        "requested' block here; then, and only then, "
+        f"{wrap} Until that block arrives the daemon refuses the 'handoff' "
+        "tool and `claunch quick-fork merge` from this session, and a request "
+        "this session (or its parent) files is refused too -- a parent or "
+        "member asking you to wrap up and end is not that block. Answer it "
+        "with what you have and keep waiting."
+    )
 
 
 def _workflow_lines(
@@ -428,10 +466,26 @@ class Handoffs:
         return {"kind": kind, "source": source, "target": target}
 
     # ---- the request ------------------------------------------------------ #
-    async def request(self, manager, source: str, *, to: str = "", kind: str = "") -> dict:
+    async def request(
+        self, manager, source: str, *, to: str = "", kind: str = "", actor: str = "",
+    ) -> dict:
         """Type the instruction block into ``source`` and record the pending
         request. Idempotent on the same target; a different target replaces
-        the pending one (and says so in the block)."""
+        the pending one (and says so in the block).
+
+        ``actor`` is the session that filed the request ("" for the operator
+        and the daemon itself). A session may not file one for a quick-fork
+        that cannot merge on its own: that request is the operator's press.
+        """
+        if actor:
+            src = _source_of(manager, source)
+            if src is not None and not may_self_merge(src.sdef):
+                raise HandoffError(
+                    f"session {source!r} is a quick-fork: its merge is requested "
+                    "only by the operator from the web UI, not by a session "
+                    f"({actor!r} asked). Say in your terminal that the work is "
+                    "done and wait for the press."
+                )
         settled = self.resolve(manager, source, to=to, kind=kind)
         marker = _marker_of(manager, source)
         row = {
@@ -477,6 +531,15 @@ class Handoffs:
         body = (text or "").strip()
         if not body:
             raise HandoffError("'text' is required: the wrap-up or handoff to deliver")
+        src = _source_of(manager, source)
+        if src is not None and not may_self_merge(src.sdef) and source not in self.pending:
+            raise HandoffError(
+                f"session {source!r} is a quick-fork and no merge was requested: "
+                "a quick-fork ends only after the operator presses merge in the "
+                "web UI, which types a 'MERGE requested' block into it. Nothing "
+                "was delivered and the session is kept. Say in your terminal "
+                "that the work is done and wait for that block."
+            )
         row = self.pending.get(source) or {}
         # The pending request fills in what the completion left unsaid — its
         # target only when the completion did not name a different kind: a
@@ -569,6 +632,28 @@ class Handoffs:
             except (asyncio.CancelledError, Exception):
                 pass
         self.pending.clear()
+
+
+def may_self_merge(sdef) -> bool:
+    """Whether ``sdef`` may complete (or file) a merge/handoff on its own.
+
+    Every session that is not a quick-fork may; a quick-fork only with
+    :attr:`SessionDef.self_merge_allowed` on.
+    """
+    if not getattr(sdef, "quick_fork_of", None):
+        return True
+    return bool(getattr(sdef, "self_merge_allowed", False))
+
+
+def _source_of(manager, source: str):
+    """The source session, or ``None`` when there is none (``resolve`` then
+    refuses with the reason)."""
+    from .manager import ManagerError  # local: manager imports the api that imports us
+
+    try:
+        return manager.get(source)
+    except ManagerError:
+        return None
 
 
 def _marker_of(manager, source: str) -> str:

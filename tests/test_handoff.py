@@ -112,6 +112,14 @@ def test_the_marker_block_names_origin_fork_marker_and_the_way_back():
     assert "claunch quick-fork merge -f <file>" in text
     assert "'handoff' tool" in text
     assert text.endswith("\n---")
+    # by default the copy waits for the operator's press
+    assert "does NOT merge on its own" in text and "'MERGE requested'" in text
+    allowed = handoff_mod.compose_marker(
+        origin="a", fork="a-qf1", marker="qf-0123abcd",
+        forked_at="2026-09-16T05:00:00+00:00", self_merge_allowed=True,
+    )
+    assert "merge: when the work is done" in allowed
+    assert "does NOT merge" not in allowed
 
 
 def test_the_report_block_carries_the_agents_text_verbatim_under_a_header():
@@ -139,6 +147,10 @@ def test_the_field_is_written_only_when_set_and_read_back():
     assert copy.to_dict()["quick_fork_of"] == "x"
     assert SessionDef.from_dict(copy.to_dict()).quick_fork_of == "x"
     assert SessionDef.from_dict({"name": "y", "quick_fork_of": ""}).quick_fork_of is None
+    assert "self_merge_allowed" not in copy.to_dict()
+    allowed = SessionDef(name="x-qf2", quick_fork_of="x", self_merge_allowed=True)
+    assert allowed.to_dict()["self_merge_allowed"] is True
+    assert SessionDef.from_dict(allowed.to_dict()).self_merge_allowed is True
 
 
 # ---- quick-fork --------------------------------------------------------- #
@@ -231,6 +243,7 @@ def test_codex_quick_fork_pins_new_rollout_restores_and_merges(home, tmp_path, t
             assert argv[-2:] == ["resume", copy_id]
             assert "fork" not in argv and source_id not in argv
             assert path.read_text(encoding="utf-8") == original
+            await client.post("/api/sessions/cx-qf1/handoff", json={}, headers=BEARER)
             resp = await client.post("/api/sessions/cx-qf1/handoff",
                                      json={"text": "Codex fork result"}, headers=BEARER)
             assert resp.status == 200, await resp.text()
@@ -417,6 +430,97 @@ def test_merge_completion_delivers_to_the_origin_then_ends_the_fork(home, tmp_pa
     asyncio.run(run())
 
 
+def test_a_quick_fork_does_not_merge_without_the_operators_request(home, tmp_path, forkable, typed):
+    """claunch-guljk: s15-qf2 merged itself (and was ended) the moment its
+    parent asked it to wrap up. A quick-fork's completion now waits for the
+    operator's press; neither the copy nor its parent can file that press."""
+    _register_py_harness()
+
+    async def run():
+        mgr = _mgr()
+        client = await _serve(mgr, MeshManager(mgr, root=tmp_path / "mesh"))
+        try:
+            mgr.create(SessionDef(name="a", harness="py", cwd=str(tmp_path)))
+            mgr.create(SessionDef(name="c", harness="py", cwd=str(tmp_path)))
+            resp = await client.post("/api/sessions/a/quick-fork", headers=BEARER)
+            child = (await resp.json())["session"]
+            assert "self_merge_allowed" not in child
+            assert "does NOT merge on its own" in child["task"]
+            # the copy's own completion, merge or handoff: refused, nothing typed
+            for body in ({"text": "wrap"}, {"text": "wrap", "to": "c"}):
+                resp = await client.post("/api/sessions/a-qf1/handoff", json=body, headers=BEARER)
+                assert resp.status == 400
+                assert "no merge was requested" in (await resp.json())["error"]
+            assert not any(n in ("a", "c") for n, _ in typed)
+            assert not mgr.get("a-qf1").exited
+            # a request filed by a session -- the copy or its parent -- is refused
+            for actor in ("a-qf1", "a"):
+                resp = await client.post("/api/sessions/a-qf1/handoff",
+                                         json={"actor": actor}, headers=BEARER)
+                assert resp.status == 400
+                assert "only by the operator" in (await resp.json())["error"]
+            resp = await client.get("/api/sessions", headers=BEARER)
+            rows = {r["name"]: r for r in (await resp.json())["sessions"]}
+            assert "handoff" not in rows["a-qf1"]
+            # the operator's press (no actor): then the completion lands
+            resp = await client.post("/api/sessions/a-qf1/handoff", json={}, headers=BEARER)
+            assert resp.status == 200
+            resp = await client.post("/api/sessions/a-qf1/handoff", json={"text": "wrap"}, headers=BEARER)
+            assert resp.status == 200 and (await resp.json())["ended"] is True
+            await _wait_for(lambda: mgr.get("a-qf1").exited, "the fork to end")
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_the_allowed_flag_lets_a_quick_fork_merge_on_its_own(home, tmp_path, forkable, typed):
+    _register_py_harness()
+
+    async def run():
+        mgr = _mgr()
+        client = await _serve(mgr, MeshManager(mgr, root=tmp_path / "mesh"))
+        try:
+            mgr.create(SessionDef(name="a", harness="py", cwd=str(tmp_path)))
+            mgr.create(SessionDef(name="c", harness="py", cwd=str(tmp_path)))
+            # given at creation
+            resp = await client.post("/api/sessions/a/quick-fork",
+                                     json={"self_merge_allowed": True}, headers=BEARER)
+            child = (await resp.json())["session"]
+            assert child["self_merge_allowed"] is True
+            assert "merge: when the work is done" in child["task"]
+            assert mgr.get("a-qf1").sdef.self_merge_allowed is True
+            resp = await client.post("/api/sessions/a-qf1/handoff", json={"text": "wrap"}, headers=BEARER)
+            assert resp.status == 200 and (await resp.json())["ended"] is True
+            # set afterwards, by the operator -- not by the copy, and not on a non-fork
+            await client.post("/api/sessions/a/quick-fork", headers=BEARER)
+            resp = await client.post("/api/sessions/a-qf2/self-merge",
+                                     json={"actor": "a-qf2"}, headers=BEARER)
+            assert resp.status == 400 and "cannot allow its own" in (await resp.json())["error"]
+            resp = await client.post("/api/sessions/c/self-merge", headers=BEARER)
+            assert resp.status == 400 and "not a quick-fork" in (await resp.json())["error"]
+            resp = await client.post("/api/sessions/a-qf2/self-merge", headers=BEARER)
+            assert resp.status == 200 and (await resp.json())["self_merge_allowed"] is True
+            resp = await client.post("/api/sessions/a-qf2/self-merge?off=1", headers=BEARER)
+            assert (await resp.json())["self_merge_allowed"] is False
+            resp = await client.post("/api/sessions/a-qf2/handoff", json={"text": "w"}, headers=BEARER)
+            assert resp.status == 400
+            await client.post("/api/sessions/a-qf2/self-merge", headers=BEARER)
+            resp = await client.post("/api/sessions/a-qf2/handoff", json={"text": "w"}, headers=BEARER)
+            assert resp.status == 200
+            # a plain session's handoff is untouched: it still completes on its own
+            mgr.create(SessionDef(name="d", harness="py", cwd=str(tmp_path)))
+            resp = await client.post("/api/sessions/d/handoff",
+                                     json={"to": "c", "text": "x"}, headers=BEARER)
+            assert resp.status == 200
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_merge_refuses_a_non_fork_another_target_and_a_gone_origin(home, tmp_path, forkable, typed):
     _register_py_harness()
 
@@ -437,6 +541,8 @@ def test_merge_refuses_a_non_fork_another_target_and_a_gone_origin(home, tmp_pat
             resp = await client.post("/api/sessions/a-qf1/handoff", json={"to": "c"}, headers=BEARER)
             assert resp.status == 200 and (await resp.json())["kind"] == "handoff"
             # origin gone: the completion keeps the fork alive and says so
+            # (the handoff request to c above is still pending, so this is
+            # the gone origin's refusal and not the no-request one)
             mgr.kill("a")
             await _wait_for(lambda: mgr.get("a").exited, "a to exit")
             resp = await client.post("/api/sessions/a-qf1/handoff", json={"text": "x", "kind": "merge"}, headers=BEARER)
@@ -586,7 +692,11 @@ def test_cli_quick_fork_creates_the_copy_and_says_how_to_merge(fake_daemon, caps
     assert client.calls == [("post", "/api/sessions/a/quick-fork", {"task": "try it"})]
     out = capsys.readouterr().out
     assert "quick-fork 'a-qf1' of 'a' started" in out
-    assert "claunch quick-fork merge -f" in out
+    # a copy that may not merge on its own: the operator is told how to ask
+    assert "claunch quick-fork merge -t a-qf1" in out
+    assert "claunch quick-fork merge -f" not in out
+    assert cli.main(["quick-fork", "a", "--allow-self-merge"]) == 0
+    assert client.calls[-1] == ("post", "/api/sessions/a/quick-fork", {"self_merge_allowed": True})
     # no session at all: refused before any call
     assert cli.main(["quick-fork"]) == 1
     # inside a session the origin defaults to it
@@ -633,7 +743,8 @@ def test_cli_handoff_hands_in_asks_and_cancels(fake_daemon, capsys, monkeypatch)
         "/api/sessions/d/handoff": {"requested": True, "target": "c", "kind": "handoff"},
     })
     assert cli.main(["handoff", "-t", "d", "--to", "c"]) == 0
-    assert client.calls[-1] == ("post", "/api/sessions/d/handoff", {"to": "c", "kind": "handoff"})
+    # filed from inside a session: the request names who filed it
+    assert client.calls[-1] == ("post", "/api/sessions/d/handoff", {"to": "c", "kind": "handoff", "actor": "d"})
     assert "handoff requested" in capsys.readouterr().out
     assert cli.main(["handoff", "--cancel"]) == 0
     assert client.calls[-1] == ("delete", "/api/sessions/d/handoff", None)
