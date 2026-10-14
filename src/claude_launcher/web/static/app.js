@@ -15540,6 +15540,20 @@ async function copyToBrowserClipboard(text, host) {
   }
 }
 
+/* Clicking the session name in the terminal header copies it (claunch-8dz6j):
+   the name is what every other command and message takes, and the header is
+   where it is on screen. The text is read at click time because attach,
+   snapshot and reconnect each rewrite the title. A notice reports the result
+   either way, since the title itself does not change. */
+async function copyTermTitle() {
+  const title = $("term-title");
+  const name = title ? title.textContent.trim() : "";
+  if (!name) return;
+  const ok = await copyToBrowserClipboard(name, document.body);
+  if (ok) notify("Copied session name", name, { key: "term-title-copy", ms: 1500 });
+  else notify("Copy failed", "The browser refused it — select the name and copy it by hand.", { key: "term-title-copy" });
+}
+
 /* OSC 52 (`ESC ] 52 ; <targets> ; <base64> BEL`): a program in the terminal
    asking for text to go on the clipboard. Claude Code copies both ways — a
    native write on the machine it runs on, and this sequence — and xterm.js
@@ -15874,6 +15888,12 @@ function toggleHostClipboard() {
   loadHostClipboard();
 }
 
+$("term-title")?.addEventListener("click", copyTermTitle);
+$("term-title")?.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  event.preventDefault();
+  copyTermTitle();
+});
 $("term-clipboard-toggle")?.addEventListener("click", toggleHostClipboard);
 $("term-clipboard-refresh")?.addEventListener("click", loadHostClipboard);
 $("term-clipboard-clear")?.addEventListener("click", () => deleteHostClipboard());

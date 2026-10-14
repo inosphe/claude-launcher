@@ -418,6 +418,7 @@ CHECKS = [
         "terminputended_check.js",
         "clipboard_check.js",
         "commandcopy_check.js",
+        "termtitlecopy_check.js",
         "osc52_check.js",
         "termselect_check.js",
         "promptpresets_check.js",

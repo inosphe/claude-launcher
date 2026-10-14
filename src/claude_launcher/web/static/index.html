@@ -372,7 +372,8 @@
     <!-- The terminal is never rebuilt by navigation: it holds a live PTY
          socket and 5000 lines of scrollback, so pages are laid over it. -->
     <div id="term-header" class="hidden">
-      <span id="term-title"></span>
+      <!-- A click (or Enter/Space) copies the session name: copyTermTitle(). -->
+      <span id="term-title" role="button" tabindex="0"></span>
       <!-- The name the mesh calls this session by, when that is not the name
            to its left. A session joins under a handle of its own choosing
            (`s236` answers to `merger-r13`), and every message about it on the
