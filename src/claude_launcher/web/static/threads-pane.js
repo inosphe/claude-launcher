@@ -12,8 +12,14 @@
    for messages after the last one it holds. A draft is kept per thread for
    the page's lifetime. Which agent messages this browser has seen is kept
    per thread in localStorage, so a thread with an unseen reply carries a
-   dot. User text is rendered as text; agent text through the page's
-   markdown renderer, which builds nodes.
+   dot. Both sides' messages go through the page's markdown renderer
+   (mdInto, app.js), which builds nodes and never parses HTML; without it a
+   message is shown as plain text (claunch-5usj6).
+
+   Sending (claunch-5usj6): Enter empties the composer at once and shows the
+   message in the conversation as a pending bubble ("전송 중…") until the
+   daemon answers; a failed post marks the bubble "전송 실패" and puts the text
+   back in the composer. One post per thread is out at a time (claunch-7xp0f).
 
    QA links (claunch-78dpm, daemon/talk_links.py): each thread carries
    `links` to the QA questions it touches. The conversation head shows them
@@ -34,6 +40,7 @@ globalThis.ThreadsPane = (() => {
   let notice = "";
   const drafts = new Map();  // thread id ("" = new thread) -> text
   const inflight = new Set(); // thread ids ("" = new thread) with a post still out
+  const pending = new Map();  // thread id -> {text, failed?: error}: the message being sent
   const drawn = {side: "", main: ""};   // what each half last drew
 
   const node = (tag, cls, text) => {
@@ -74,6 +81,15 @@ globalThis.ThreadsPane = (() => {
     if (want && ts.some((t) => t.id === want)) return want;
     const open = ts.find((t) => t.status === "open");
     return (open || ts[0] || {}).id || "";
+  }
+
+  /* A message's time for its bubble: the clock for today, else the date
+     and the clock. */
+  function stamp(at, now = new Date()) {
+    const d = new Date(at);
+    if (isNaN(d)) return String(at || "");
+    const hm = d.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
+    return d.toDateString() === now.toDateString() ? hm : `${d.toLocaleDateString()} ${hm}`;
   }
 
   /* What a link chip says: the relation, the question id and its title. */
@@ -185,11 +201,23 @@ globalThis.ThreadsPane = (() => {
   }
 
   function send(tid, text, askQa = false) {
+    if (inflight.has(tid)) return undefined;
+    // The composer empties now, before the answer: what was sent shows as a
+    // pending bubble, so nothing is left in the box to send a second time.
+    drafts.delete(tid);
+    pending.set(tid, {text});
     return once(tid, () => act(async () => {
       const body = {text};
       if (askQa) body.ask_qa = true;
-      const res = await request(`/api/threads/${encodeURIComponent(tid)}/messages`, body);
-      drafts.delete(tid);
+      let res;
+      try {
+        res = await request(`/api/threads/${encodeURIComponent(tid)}/messages`, body);
+      } catch (e) {
+        pending.set(tid, {text, failed: (e && e.message) || String(e)});
+        if (!(drafts.get(tid) || "").trim()) drafts.set(tid, text);
+        throw e;
+      }
+      pending.delete(tid);
       notice = deliveryNotice(res);
     }));
   }
@@ -220,14 +248,47 @@ globalThis.ThreadsPane = (() => {
     return !!a && !!n && n.contains(a) && (a.tagName === "TEXTAREA" || a.tagName === "INPUT");
   }
 
-  function textBox(cls, key, placeholder, onSend) {
+  /* The box grows with what is typed, up to a cap, then scrolls. */
+  function fit(box) {
+    if (!box.style) return;
+    box.style.height = "auto";
+    box.style.height = `${Math.min(box.scrollHeight || 0, 220)}px`;
+  }
+
+  function textBox(cls, key, placeholder, onSend, rows = 3) {
     const box = node("textarea", cls);
-    box.rows = 3;
+    box.rows = rows;
     box.placeholder = placeholder;
     box.value = drafts.get(key) || "";
-    box.addEventListener("input", () => drafts.set(key, box.value));
+    box.addEventListener("input", () => { drafts.set(key, box.value); fit(box); });
     if (onSend) box.addEventListener("keydown", (e) => { if (sendKey(e)) { e.preventDefault(); onSend(); } });
     return box;
+  }
+
+  /* A message body: markdown for both authors when the renderer is on the
+     page, plain text otherwise. */
+  function bodyOf(text) {
+    const body = node("div", "th-msg-body");
+    if (typeof globalThis.mdInto === "function") {
+      body.classList.add("md");
+      globalThis.mdInto(body, text);
+    } else {
+      body.classList.add("plain");
+      body.textContent = text;
+    }
+    return body;
+  }
+
+  function bubble(author, text, when, state) {
+    const row = node("div", `th-msg th-${author}`);
+    if (state) row.classList.add(`th-${state}`);
+    const meta = node("div", "th-msg-meta");
+    meta.append(node("span", "th-msg-who", author === "agent" ? name : "나"));
+    if (when) meta.append(node("span", "th-msg-at", when));
+    if (state === "sending") meta.append(node("span", "th-msg-state", "전송 중…"));
+    if (state === "failed") meta.append(node("span", "th-msg-state", "전송 실패 — 입력창에 되돌렸습니다"));
+    row.append(meta, bodyOf(text));
+    return row;
   }
 
   function renderList(side, threads, read) {
@@ -253,7 +314,7 @@ globalThis.ThreadsPane = (() => {
         drop.addEventListener("click", () => { composeQa = null; render(); });
         about.append(drop);
       }
-      const go = node("button", "term-btn", "시작");
+      const go = node("button", "term-btn th-send", inflight.has("") ? "여는 중…" : "시작");
       go.type = "button";
       go.disabled = inflight.has("");
       const submit = () => {
@@ -345,28 +406,25 @@ globalThis.ThreadsPane = (() => {
     }
 
     const msgs = node("div", "th-messages");
-    for (const m of convo.messages) {
-      const row = node("div", `th-msg th-${m.author}`);
-      const meta = node("div", "th-msg-meta");
-      meta.append(node("span", "th-msg-who", m.author === "agent" ? name : "나"));
-      const at = new Date(m.at);
-      meta.append(node("span", "th-meta", isNaN(at) ? m.at : at.toLocaleString()));
-      const body = node("div", "th-msg-body");
-      if (m.author === "agent" && typeof globalThis.mdInto === "function") globalThis.mdInto(body, m.body);
-      else body.textContent = m.body;
-      row.append(meta, body);
-      msgs.append(row);
+    for (const m of convo.messages) msgs.append(bubble(m.author, m.body, stamp(m.at)));
+    const out = pending.get(t.id);
+    if (out) msgs.append(bubble("user", out.text, "", out.failed ? "failed" : "sending"));
+    if (!convo.messages.length && !out) {
+      msgs.append(node("p", "th-empty", "아직 메시지가 없습니다. 아래 입력창에 첫 메시지를 쓰세요."));
     }
-    if (!convo.messages.length) msgs.append(node("p", "wf-note", "아직 메시지가 없습니다."));
 
+    const sending = inflight.has(t.id);
     const compose = node("div", "th-compose");
-    const box = textBox("th-text", t.id, `${name}에게 이 쓰레드로 보내기 — Enter 전송, Shift+Enter 줄바꿈`,
-                        () => { const v = box.value.trim(); if (v) send(t.id, v); });
-    const go = node("button", "term-btn", "보내기");
+    const submit = () => { const v = box.value.trim(); if (v) send(t.id, v); };
+    const box = textBox("th-text", t.id, `${name}에게 보내기`, submit, 2);
+    const foot = node("div", "th-compose-foot");
+    foot.append(node("span", "th-hint", "Enter 전송 · Shift+Enter 줄바꿈 · markdown 지원"));
+    const go = node("button", "term-btn th-send", sending ? "전송 중…" : "보내기");
     go.type = "button";
-    go.disabled = inflight.has(t.id);
-    go.addEventListener("click", () => { const v = box.value.trim(); if (v) send(t.id, v); });
-    compose.append(box, go);
+    go.disabled = sending;
+    go.addEventListener("click", submit);
+    foot.append(go);
+    compose.append(box, foot);
 
     main.replaceChildren(head, ...(links ? [links] : []), msgs, compose);
     msgs.scrollTop = msgs.scrollHeight;
@@ -402,13 +460,16 @@ globalThis.ThreadsPane = (() => {
       renderList(side, threads, read);
     }
     const t = convo && convo.thread;
-    const mainSig = JSON.stringify(convo ? [convo.id, t.title, t.status, t.links || [], convo.messages.length, inflight.has(convo.id)] : null);
+    const mainSig = JSON.stringify(convo ? [convo.id, t.title, t.status, t.links || [], convo.messages.length,
+                                            inflight.has(convo.id), pending.get(convo.id) || null] : null);
     if (mainSig === drawn.main && main.firstChild) return;
     drawn.main = mainSig;
     const keep = main.querySelector(".th-compose textarea");
     const focused = keep && document.activeElement === keep;
     renderConvo(main);
-    if (focused) main.querySelector(".th-compose textarea")?.focus();
+    const box = main.querySelector(".th-compose textarea");
+    if (box) fit(box);
+    if (focused) box?.focus();
   }
 
   function mount(target, session, opts = {}) {
@@ -441,6 +502,7 @@ globalThis.ThreadsPane = (() => {
     composing = false;
     composeQa = null;
     inflight.clear();
+    pending.clear();
     notice = error = "";
     drawn.side = drawn.main = "";
   }
@@ -464,5 +526,5 @@ globalThis.ThreadsPane = (() => {
     render();
   }
 
-  return {mount, unmount, refresh: () => host && load(), select, compose, excerpt, unseen, sendKey, pick, linkLabel};
+  return {mount, unmount, refresh: () => host && load(), select, compose, excerpt, unseen, sendKey, pick, linkLabel, stamp};
 })();

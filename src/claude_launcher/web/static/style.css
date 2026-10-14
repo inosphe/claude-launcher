@@ -7335,16 +7335,17 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .th-meta { color: #7d8590; font-size: 11px; font-family: ui-monospace, monospace; }
 .th-body { display: flex; flex: 1 1 0; min-height: 0; gap: 10px; }
 .th-side { flex: 0 0 220px; min-width: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
-.th-new { align-self: flex-start; }
+.th-new { align-self: stretch; text-align: center; }
 .th-newform { display: flex; flex-direction: column; gap: 4px; }
 .th-title-input, .th-text { width: 100%; box-sizing: border-box; font: inherit; font-size: 13px;
   background: #0d1117; color: inherit; border: 1px solid #30363d; border-radius: 4px; padding: 5px 6px; }
 .th-text { resize: vertical; }
 .th-newform .term-btn { align-self: flex-end; }
 .th-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
-.th-item { padding: 5px 8px; border-radius: 5px; cursor: pointer; border-left: 3px solid transparent; }
+.th-item { padding: 6px 8px 6px 9px; border-radius: 6px; cursor: pointer; border-left: 3px solid transparent;
+  transition: background 0.12s; }
 .th-item:hover { background: #161b22; }
-.th-item.on { background: #161b22; border-left-color: #58a6ff; }
+.th-item.on { background: #1b2230; border-left-color: #58a6ff; }
 .th-item.closed { opacity: 0.6; }
 .th-item-top { display: flex; align-items: baseline; gap: 6px; }
 .th-item-title { flex: 1 1 auto; min-width: 0; font-size: 13px; overflow: hidden; text-overflow: ellipsis;
@@ -7352,24 +7353,52 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .th-item.unseen .th-item-title { font-weight: 600; }
 .th-item-last { color: #7d8590; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .th-chip { font-size: 10px; color: #7d8590; border: 1px solid #30363d; border-radius: 8px; padding: 0 5px; }
-.th-dot { color: #d29922; font-size: 10px; }
+.th-dot { color: #d29922; font-size: 10px; flex-shrink: 0; }
 .th-main { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; min-height: 0; }
 .th-convo-head { display: flex; align-items: baseline; gap: 8px; padding-bottom: 4px;
   border-bottom: 1px solid #21262d; }
 .th-convo-title { font-size: 14px; margin: 0; flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
 .th-messages { flex: 1 1 0; min-height: 60px; overflow-y: auto; display: flex; flex-direction: column;
-  gap: 8px; padding: 8px 2px; }
-.th-msg { max-width: 85%; padding: 6px 10px; border-radius: 8px; font-size: 13px; }
-.th-msg.th-user { align-self: flex-end; background: #10203a; border: 1px solid #1f6feb; }
-.th-msg.th-agent { align-self: flex-start; background: #161b22; border: 1px solid #30363d; }
-.th-msg-meta { display: flex; gap: 8px; align-items: baseline; margin-bottom: 2px; }
-.th-msg-who { font-size: 11px; color: #7d8590; font-weight: 600; }
+  gap: 10px; padding: 10px 4px; overscroll-behavior: contain; }
+.th-empty { margin: auto; color: #7d8590; font-size: 12px; text-align: center; }
+/* One bubble per message (claunch-5usj6): the agent's on the left, the
+   user's on the right in the accent colour; both bodies are markdown. */
+.th-msg { max-width: min(88%, 760px); padding: 8px 12px 9px; border-radius: 10px; font-size: 13px;
+  line-height: 1.5; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25); }
+.th-msg.th-user { align-self: flex-end; background: #12274a; border: 1px solid #1f4f99;
+  border-bottom-right-radius: 3px; }
+.th-msg.th-agent { align-self: flex-start; background: #161b22; border: 1px solid #30363d;
+  border-bottom-left-radius: 3px; }
+.th-msg.th-sending { opacity: 0.65; border-style: dashed; }
+.th-msg.th-failed { border-color: #f85149; background: #2a1215; }
+.th-msg-meta { display: flex; gap: 8px; align-items: baseline; margin-bottom: 4px; font-size: 11px; }
+.th-msg.th-user .th-msg-meta { justify-content: flex-end; }
+.th-msg-who { color: #9da5b0; font-weight: 600; }
+.th-msg.th-agent .th-msg-who { color: #58a6ff; }
+.th-msg-at { color: #7d8590; font-family: ui-monospace, monospace; }
+.th-msg-state { color: #d29922; }
+.th-msg.th-failed .th-msg-state { color: #f85149; }
 .th-msg-body { overflow-wrap: anywhere; }
-.th-msg.th-user .th-msg-body { white-space: pre-wrap; }
+.th-msg-body.plain { white-space: pre-wrap; }
 .th-msg-body > :first-child { margin-top: 0; }
 .th-msg-body > :last-child { margin-bottom: 0; }
-.th-compose { display: flex; gap: 6px; align-items: flex-end; padding-top: 6px; }
-.th-compose .th-text { flex: 1 1 auto; }
+.th-msg-body .md-pre { max-width: 100%; overflow-x: auto; }
+.th-msg-body .md-table { display: block; max-width: 100%; overflow-x: auto; }
+.th-msg.th-user .md-code, .th-msg.th-user .md-pre { background: #0b1a33; }
+.th-msg.th-user .md-link { color: #79c0ff; }
+/* The composer: one framed box, the text on top and a footer with the key
+   hint and the send button. The box grows with its text (fit()). */
+.th-compose { display: flex; flex-direction: column; gap: 0; margin-top: 6px; border: 1px solid #30363d;
+  border-radius: 8px; background: #0d1117; }
+.th-compose:focus-within { border-color: #1f6feb; box-shadow: 0 0 0 1px #1f6feb; }
+.th-compose .th-text { border: none; background: transparent; resize: none; padding: 8px 10px 4px;
+  min-height: 40px; max-height: 220px; outline: none; line-height: 1.45; }
+.th-compose-foot { display: flex; align-items: center; gap: 8px; padding: 4px 6px 6px 10px; }
+.th-hint { flex: 1 1 auto; min-width: 0; color: #6e7681; font-size: 11px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.th-send { background: #1f6feb; border-color: #1f6feb; color: #fff; font-weight: 600; padding: 3px 14px; }
+.th-send:hover:not(:disabled) { background: #388bfd; border-color: #388bfd; }
+.th-send:disabled { background: #21262d; border-color: #30363d; color: #7d8590; cursor: default; }
 
 /* The session's conversation pane (talk-pane.js, claunch-78dpm): a tab bar
    over the threads pane, the QA pane, or both in two columns. Each column

@@ -27,6 +27,16 @@ def test_tools_are_registered():
     assert "[claunch thread" in threads_mcp.INSTRUCTIONS
 
 
+def test_the_reply_format_is_markdown():
+    """The agent is told the pane renders markdown, in the server
+    instructions and on both tools that write text (claunch-5usj6)."""
+    assert "GitHub-flavored markdown" in threads_mcp.INSTRUCTIONS
+    tools = {t["name"]: t for t in threads_mcp.TOOLS}
+    assert "markdown" in tools["thread_reply"]["description"]
+    for name in ("thread_reply", "thread_open"):
+        assert "markdown" in tools[name]["inputSchema"]["properties"]["text"]["description"]
+
+
 def test_calls_carry_the_session(monkeypatch):
     client = Client()
     monkeypatch.setattr(threads_mcp, "_client", lambda: client)

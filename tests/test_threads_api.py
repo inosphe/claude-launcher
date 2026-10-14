@@ -79,6 +79,7 @@ def test_user_opens_and_writes_and_the_session_is_told(tmp_path):
         assert block.startswith(f'{threads_api.PREFIX} {tid} "Log format"]')
         assert "opened a new thread" in block and "  > why json?" in block
         assert f'thread_reply(thread_id="{tid}"' in block
+        assert "in markdown" in block                      # the reply format is said (claunch-5usj6)
 
         await req("POST", f"/api/threads/{tid}/messages", {"session": "s1", "text": "because tools"})
         assert len(mgr.sessions["s1"].delivered) == 1       # the agent's own reply is not typed back
