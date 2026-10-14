@@ -109,6 +109,90 @@ def test_checkpoint_gate_checks_the_reported_master_and_merge_second_parent(repo
     assert "second parent" in result.stderr
 
 
+def gate(q, action, record, *extra):
+    return subprocess.run(
+        [sys.executable, str(TOOL.with_name("delayed_sweep.py")),
+         "--database", str(q.database), action, "--json", json.dumps(record), *extra],
+        capture_output=True, text=True)
+
+
+def bundle(repo, tmp_path):
+    """One branch merged once, carrying two issues: the incident of gds6 run 20261013-173755."""
+    q = queue(tmp_path)
+    job, tip = enqueue(q, repo, "a", issue="x.6")
+    rows = [{"issue": "x.6", "tip": tip, "merge_sha": job["sha"]},
+            {"issue": "x.5", "tip": tip, "merge_sha": job["sha"]}]
+    return q, job, tip, rows
+
+
+def test_two_issue_merge_still_fails_the_hard_gate_and_classifies_as_mismatch(repo, tmp_path):
+    q, job, tip, rows = bundle(repo, tmp_path)
+    record = {"repo": str(repo), "master": job["sha"], "merges": rows}
+    assert checkpoint_gate(q, record).returncode == 2  # the ownership check is intentional
+    result = gate(q, "check-enqueued", record, "--classify")
+    assert result.returncode == 2
+    out = json.loads(result.stdout)
+    assert out["class"] == "mismatch"
+    assert [r["kind"] for r in out["rows"]] == ["ok", "mismatch"]
+    # the suggested regrouping keeps the job's own issue and passes the unchanged gate
+    suggested = out["suggested"]
+    assert suggested["merges"] == [{"issue": "x.6", "tip": tip, "merge_sha": job["sha"], "also": ["x.5"]}]
+    assert suggested["master"] == job["sha"]
+    assert checkpoint_gate(q, suggested).returncode == 0
+    assert gate(q, "check-enqueued", suggested, "--classify").returncode == 0
+
+
+def test_classify_conflict_missing_and_invalid_are_not_repaired_by_regrouping(repo, tmp_path):
+    q, job, tip, rows = bundle(repo, tmp_path)
+    # the job's own issue is not in the report: relabelling would hide a wrong attribution
+    wrong = {"repo": str(repo), "merges": [{**rows[0], "issue": "other"}]}
+    out = json.loads(gate(q, "check-enqueued", wrong, "--classify").stdout)
+    assert out["class"] == "conflict" and "x.6" in out["rows"][0]["problem"]
+    # a merge with no job is the old recovery path (enqueue the same SHA again)
+    sha, tip2 = merge(repo, "b")
+    out = json.loads(gate(q, "check-enqueued", {"repo": str(repo), "merges": [
+        {"issue": "b", "tip": tip2, "merge_sha": sha}]}, "--classify").stdout)
+    assert out["class"] == "missing"
+    # a moved fixed ref or a wrong tip is not a reporting error
+    out = json.loads(gate(q, "check-enqueued", {"repo": str(repo), "merges": [
+        {**rows[0], "tip": job["sha"]}]}, "--classify").stdout)
+    assert out["class"] == "invalid" and "second parent" in out["rows"][0]["problem"]
+    other, _ = enqueue(q, repo, "c")
+    git(repo, "update-ref", job["ref"], other["sha"])
+    out = json.loads(gate(q, "check-enqueued", {"repo": str(repo), "merges": rows[:1]}, "--classify").stdout)
+    assert out["class"] == "invalid" and "moved" in out["rows"][0]["problem"]
+    assert q.status(repo)["jobs"][0]["issue"] == "x.6"  # classifying wrote nothing
+
+
+def test_classify_never_creates_jobs_or_refs(repo, tmp_path):
+    q, job, tip, rows = bundle(repo, tmp_path)
+    before = (json.dumps(q.status(repo), sort_keys=True), git(repo, "for-each-ref"))
+    gate(q, "check-enqueued", {"repo": str(repo), "merges": rows}, "--classify")
+    assert before == (json.dumps(q.status(repo), sort_keys=True), git(repo, "for-each-ref"))
+
+
+def test_check_merges_wants_one_row_per_merge_and_the_jobs_issue(repo, tmp_path):
+    q, job, tip, rows = bundle(repo, tmp_path)
+    result = gate(q, "check-merges", {"repo": str(repo), "merges": rows})
+    assert result.returncode == 2 and "reported twice" in result.stderr
+    ok = {"repo": str(repo), "merges": [{**rows[0], "also": ["x.5"]}]}
+    assert gate(q, "check-merges", ok).returncode == 0
+    result = gate(q, "check-merges", {"repo": str(repo), "merges": [{**rows[1], "also": []}]})
+    assert result.returncode == 2 and "x.6" in result.stderr
+    result = gate(q, "check-merges", {"repo": str(repo), "merges": [{**rows[0], "also": ["x.6"]}]})
+    assert result.returncode == 2 and "also" in result.stderr
+    # before the enqueue exists the gate owns that question, not this advisory check
+    sha, tip2 = merge(repo, "b")
+    assert gate(q, "check-merges", {"repo": str(repo), "merges": [
+        {"issue": "b", "tip": tip2, "merge_sha": sha}]}).returncode == 0
+
+
+def test_re_enqueue_under_another_issue_is_still_refused(repo, tmp_path):
+    q, job, tip, rows = bundle(repo, tmp_path)
+    with pytest.raises(ValueError, match="different verification issue"):
+        q.enqueue(repo, job["sha"], "x.5", "leader", TOOL)
+
+
 def test_checkpoint_gate_refuses_a_queued_merge_removed_from_master(repo, tmp_path):
     q = queue(tmp_path)
     job, tip = enqueue(q, repo, "a")
