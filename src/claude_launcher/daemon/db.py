@@ -74,13 +74,16 @@ class SessionStore:
         self._path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
-        #: The blob this object last committed for each name. :meth:`save`
-        #: upserts only the rows whose blob differs: the manager persists the
-        #: whole fleet on every change, and rewriting 574 unchanged rows per
-        #: relaunch held the event loop for seconds after a restart
-        #: (claunch-7l7b7). Valid only while :attr:`_token` is still the
-        #: table's last writer.
-        self._written: Dict[str, str] = {}
+        #: What this object last committed for each name, read back from the
+        #: JSON it wrote (so it shares nothing with the caller's objects).
+        #: :meth:`save` writes only the rows whose entry differs: the manager
+        #: persists the whole fleet on every change, and serialising and
+        #: rewriting 574 unchanged rows per relaunch held the event loop for
+        #: seconds after a restart (claunch-7l7b7). Anything JSON does not
+        #: round-trip (a tuple, a non-string key) compares unequal and is
+        #: written again, which is the safe direction. Valid only while
+        #: :attr:`_token` is still the table's last writer.
+        self._written: Dict[str, dict] = {}
         self._token_base = uuid.uuid4().hex
         self._token_seq = itertools.count(1)
         self._token: Optional[str] = None
@@ -158,8 +161,8 @@ class SessionStore:
         the set (each per-session persist would otherwise delete the records not
         loaded yet) and left True in steady state.
 
-        Only the rows whose JSON differs from what this object last committed
-        are written (claunch-7l7b7). That memory is trusted only while the
+        Only the rows whose entry differs from what this object last committed
+        are serialised and written (claunch-7l7b7). That memory is trusted only while the
         ``meta`` writer token is still the one this object wrote; any other
         writer in between, or a failed save, and every row is written again.
         Nothing is committed when nothing changed.
@@ -190,9 +193,9 @@ class SessionStore:
                 written = {}
             changed = False
             for name, entry in rows:
-                blob = json.dumps(entry, ensure_ascii=False)
-                if written.get(name) == blob:
+                if written.get(name) == entry:
                     continue
+                blob = json.dumps(entry, ensure_ascii=False)
                 conn.execute(
                     "INSERT INTO sessions(name, data, updated_at) "
                     "VALUES(?,?,datetime('now')) "
@@ -200,7 +203,7 @@ class SessionStore:
                     "data=excluded.data, updated_at=excluded.updated_at",
                     (name, blob),
                 )
-                written[name] = blob
+                written[name] = json.loads(blob)
                 changed = True
             if prune:
                 have = [r[0] for r in conn.execute("SELECT name FROM sessions")]
