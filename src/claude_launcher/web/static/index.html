@@ -1341,6 +1341,12 @@
           <span class="log-key" data-kind="result">result</span>
           <span class="log-key" data-kind="error">error</span>
         </span>
+        <!-- How much of the conversation is loaded against the whole file
+             (records), and the button that fetches everything above, so a
+             reader need not walk up page by page (loadTranscriptAll). -->
+        <span id="log-progress" class="log-progress" aria-live="polite"></span>
+        <button id="log-load-all" class="term-btn log-load-all hidden" type="button"
+                title="load the whole conversation, so scrolling up needs no more fetches">load all</button>
       </fieldset>
       <!-- The conversation and its timeline. The minimap is a strip beside the
            scroller with one coloured mark per block of what is loaded (user

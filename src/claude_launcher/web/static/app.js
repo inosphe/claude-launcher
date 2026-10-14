@@ -19120,6 +19120,7 @@ document.addEventListener("visibilitychange", () => {
    what it said earlier can be read. Only where the pages come from changes
    (its host, through /api/shadows/...) and where Back goes. */
 const TRANSCRIPT_PAGE = 40;
+const TRANSCRIPT_PAGE_MAX = 200;   // the daemon's PAGE_MAX: "load all" asks for this much at a time
 const TRANSCRIPT_FOLLOW_MAX = 200;
 const TRANSCRIPT_NEAR_TOP = 400;   // px from the top that triggers an older page
 const TRANSCRIPT_NEAR_END = 40;    // px from the bottom that still counts as "live"
@@ -19128,6 +19129,9 @@ let transcriptMachine = null;      // its daemon when it is a remote shadow, els
 let transcriptCursor = null;       // oldest seq loaded; the next page ends here
 let transcriptSeen = -1;           // newest seq loaded, for the follow-forward
 let transcriptMore = false;        // is there anything above what is loaded
+let transcriptTotal = null;        // records in the whole file, as the daemon last counted
+let transcriptKeepAll = false;     // the reader pressed "load all": the follow-forward keeps everything
+let transcriptLoadingAll = false;  // loadTranscriptAll is walking up
 let transcriptBusy = false;        // one fetch at a time, or a flick sends ten
 let transcriptGeneration = 0;
 let transcriptUnread = 0;          // turns appended below a reader who scrolled up
@@ -19387,7 +19391,11 @@ function openTranscript(name, machine = null) {
   transcriptCursor = null;
   transcriptSeen = -1;
   transcriptMore = false;
+  transcriptTotal = null;
+  transcriptKeepAll = false;
+  transcriptLoadingAll = false;
   setTranscriptUnread(0);
+  renderTranscriptProgress();
   const pane = $("term-log-pane");
   if (pane) {
     pane.innerHTML = "";
@@ -19416,10 +19424,14 @@ function closeTranscript() {
   transcriptName = null;
   transcriptMachine = null;
   transcriptBusy = false;
+  transcriptTotal = null;
+  transcriptKeepAll = false;
+  transcriptLoadingAll = false;
   setTranscriptUnread(0);
   const pane = $("term-log-pane");
   if (pane) pane.innerHTML = "";
   renderTranscriptMinimap();
+  renderTranscriptProgress();
 }
 
 function transcriptIsOpen() {
@@ -19451,17 +19463,18 @@ function transcriptAtEnd(pane) {
    infinite scroller feel like a long page instead of a trapdoor. */
 async function loadTranscriptPage(opts) {
   const older = !!(opts && opts.older);
+  const limit = (opts && opts.limit) || TRANSCRIPT_PAGE;
   const name = transcriptName;
   const machine = transcriptMachine;
   const generation = transcriptGeneration;
-  if (!name || transcriptBusy) return;
+  if (!name || transcriptBusy) return false;
   transcriptBusy = true;
   const pane = $("term-log-pane");
   if (pane && !pane.children.length) {
     pane.appendChild(el("div", "log-note", "reading the conversation…"));
   }
   try {
-    const q = `limit=${TRANSCRIPT_PAGE}`
+    const q = `limit=${limit}`
       + (older && transcriptCursor !== null ? `&before=${transcriptCursor}` : "");
     const res = await api(`${transcriptPath(name, machine)}?${q}`);
     if (!res.ok) {
@@ -19474,16 +19487,18 @@ async function loadTranscriptPage(opts) {
     const data = await res.json();
     // The reader may have closed it, or walked to another session, while this
     // was in flight; its answer is not theirs any more.
-    if (transcriptGeneration !== generation) return;
+    if (transcriptGeneration !== generation) return false;
     renderTranscriptPage(data, older);
+    return true;
   } catch (err) {
-    if (transcriptGeneration !== generation) return;
+    if (transcriptGeneration !== generation) return false;
     const box = $("term-log-pane");
     if (box && !box.querySelector(".log-rec")) {
       box.innerHTML = "";
       box.appendChild(el("div", "log-note",
                          `could not read the conversation — ${err.message}`));
     }
+    return false;
   } finally {
     if (transcriptGeneration === generation) transcriptBusy = false;
   }
@@ -19498,6 +19513,7 @@ function renderTranscriptPage(data, older) {
   const records = (data.records || []).filter(
     (r) => older || r.seq > transcriptSeen
   );
+  if (typeof data.total === "number") transcriptTotal = data.total;
   if (older) {
     transcriptMore = !!data.has_more;
     transcriptCursor = data.cursor === undefined ? transcriptCursor : data.cursor;
@@ -19512,6 +19528,7 @@ function renderTranscriptPage(data, older) {
   for (const r of records) {
     if (r.seq > transcriptSeen) transcriptSeen = r.seq;
   }
+  renderTranscriptProgress();
 
   if (!records.length) {
     if (!pane.querySelector(".log-rec")) {
@@ -19544,10 +19561,13 @@ function renderTranscriptPage(data, older) {
       const retained = Array.from(pane.children).filter((node) =>
         node.classList.contains("log-rec"));
       const excess = retained.length - TRANSCRIPT_FOLLOW_MAX;
-      if (excess > 0) {
+      // Not after "load all": the reader asked for the whole conversation,
+      // and trimming the top would put them back to walking up for it.
+      if (excess > 0 && !transcriptKeepAll) {
         for (const node of retained.slice(0, excess)) node.remove();
         transcriptCursor = Number(retained[excess].dataset.seq);
         transcriptMore = true;
+        renderTranscriptProgress();
       }
       pane.scrollTop = pane.scrollHeight;
     }
@@ -19564,6 +19584,60 @@ function setTranscriptUnread(n) {
   chip.textContent = transcriptUnread
     ? `↓ ${transcriptUnread} new ${transcriptUnread === 1 ? "turn" : "turns"}` : "";
   chip.classList.toggle("hidden", !transcriptUnread);
+}
+
+/* How much of the conversation is on the page, against the whole file:
+   the loaded records run from the top cursor to the end of the file (the
+   follow-forward keeps the tail), so the count is `total - cursor`. Beside
+   it, "load all" is up while there is anything above. */
+function renderTranscriptProgress() {
+  const label = $("log-progress");
+  const button = $("log-load-all");
+  const total = transcriptTotal;
+  if (label) {
+    if (!transcriptName || typeof total !== "number" || transcriptCursor === null) {
+      label.textContent = "";
+      label.title = "";
+    } else {
+      const loaded = Math.max(0, Math.min(total, total - transcriptCursor));
+      const pct = total ? Math.floor((loaded / total) * 1000) / 10 : 100;
+      label.textContent = `${loaded.toLocaleString()} / ${total.toLocaleString()} records · ${pct}%`;
+      label.title = "records loaded on this page / records in the whole conversation";
+    }
+  }
+  if (button) {
+    button.classList.toggle("hidden", !transcriptName || (!transcriptMore && !transcriptLoadingAll));
+    button.disabled = transcriptLoadingAll;
+    button.textContent = transcriptLoadingAll ? "loading…" : "load all";
+  }
+}
+
+/* "load all": walk up to the first record in the daemon's largest pages,
+   each prepended the way a scroll-up page is (the reader stays where they
+   were). From then on the follow-forward keeps everything. A failed page
+   stops the walk; the button stays up for another try. */
+async function loadTranscriptAll() {
+  if (!transcriptName || transcriptLoadingAll) return;
+  const generation = transcriptGeneration;
+  transcriptKeepAll = true;
+  transcriptLoadingAll = true;
+  renderTranscriptProgress();
+  try {
+    while (transcriptMore && transcriptGeneration === generation) {
+      if (transcriptBusy) {
+        // A scroll page or the poll is in flight; let it land first.
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        continue;
+      }
+      const ok = await loadTranscriptPage({ older: true, limit: TRANSCRIPT_PAGE_MAX });
+      if (!ok) break;
+    }
+  } finally {
+    if (transcriptGeneration === generation) {
+      transcriptLoadingAll = false;
+      renderTranscriptProgress();
+    }
+  }
 }
 
 function onTranscriptNewClick() {
@@ -19689,6 +19763,7 @@ function wireTranscriptMinimap() {
   map.addEventListener("pointerup", stop);
   map.addEventListener("pointercancel", stop);
   $("log-new")?.addEventListener("click", onTranscriptNewClick);
+  $("log-load-all")?.addEventListener("click", loadTranscriptAll);
 }
 wireTranscriptMinimap();
 

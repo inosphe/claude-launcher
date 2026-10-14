@@ -131,6 +131,8 @@ function build() {
     "log-back": mkel("a"),
     "log-minimap": mkel("div"),
     "log-new": mkel("button"),
+    "log-progress": mkel("span"),
+    "log-load-all": mkel("button"),
   };
   const radios = ["raw", "markdown"].map((value) => ({ value, checked: false }));
   const store = {};
@@ -168,6 +170,7 @@ function build() {
     slice("transcriptBlockKind"), slice("transcriptMinimapSegments"),
     slice("scheduleTranscriptMinimap"), slice("renderTranscriptMinimap"),
     slice("syncTranscriptMinimapView"),
+    slice("renderTranscriptProgress"), slice("loadTranscriptAll"),
   ].join("\n");
   new Function(
     "exports", "$", "document", "api", "setInterval", "clearInterval",
@@ -182,6 +185,7 @@ const BASE = "/";
 ${src.match(/const TRANSCRIPT_FORMAT_KEY = [^;]+;/)[0]}
 let transcriptFormat = "raw";
 const TRANSCRIPT_PAGE = 40;
+${src.match(/const TRANSCRIPT_PAGE_MAX = \d+;/)[0]}
 ${src.match(/const TRANSCRIPT_FOLLOW_MAX = \d+;/)[0]}
 const TRANSCRIPT_NEAR_TOP = 400;
 const TRANSCRIPT_NEAR_END = 40;
@@ -190,6 +194,7 @@ let transcriptUnread = 0, transcriptMinimapFrame = 0;
 let transcriptName = null, transcriptMachine = null, transcriptCursor = null, transcriptSeen = -1;
 let transcriptMore = false, transcriptBusy = false, transcriptTimer = null;
 let transcriptGeneration = 0;
+let transcriptTotal = null, transcriptKeepAll = false, transcriptLoadingAll = false;
 ` + code + `
 exports.open = openTranscript;
 exports.close = closeTranscript;
@@ -198,6 +203,7 @@ exports.poll = pollTranscript;
 exports.shown = () => shown;
 exports.setFormat = setTranscriptFormat;
 exports.newClick = onTranscriptNewClick;
+exports.loadAll = loadTranscriptAll;
 exports.segments = () => transcriptMinimapSegments($("term-log-pane"));
 Object.defineProperty(exports, "unread", { get: () => transcriptUnread });
 Object.defineProperty(exports, "format", { get: () => transcriptFormat });
@@ -280,6 +286,70 @@ const texts = (pane) => pane.children
         + " of what was inserted above them",
         w.pane.scrollTop === 100 + grew, { top: w.pane.scrollTop, grew });
   check("the cursor walked back with them", w.api.cursor === 20, w.api.cursor);
+})();
+
+/* --- "load all": everything above in the largest pages, reader held still,
+   with loaded / total on the line block header -------------------------- */
+(async () => {
+  const w = build();
+  w.script([{ status: 200, body: { records: recs(400, 440), has_more: true, cursor: 400, total: 440 } }]);
+  w.api.open("s8");
+  await flush(); await flush();
+
+  const label = w.nodes["log-progress"];
+  const button = w.nodes["log-load-all"];
+  check("the header says how much of the whole is loaded",
+        label.textContent === "40 / 440 records · 9%", label.textContent);
+  check("and offers to load the rest", !button.classList.contains("hidden"));
+
+  const top = w.pane.scrollTop;
+  const heightBefore = w.pane.scrollHeight;
+  w.script([
+    { status: 200, body: { records: recs(200, 400), has_more: true, cursor: 200, total: 440 } },
+    { status: 200, body: { records: recs(0, 200), has_more: false, cursor: 0, total: 440 } },
+  ]);
+  const walk = w.api.loadAll();
+  check("while it walks the button is disabled", button.disabled === true);
+  await walk;
+
+  check("it asked in the daemon's largest pages, from the cursor up",
+        w.calls[1].includes("limit=200") && w.calls[1].includes("before=400")
+        && w.calls[2].includes("before=200"), w.calls);
+  check("and stopped at the top", w.calls.length === 3 && w.api.more === false, w.calls);
+  check("the whole conversation is on the page",
+        texts(w.pane).length === 440 && texts(w.pane)[0] === "0", texts(w.pane).length);
+  check("the reader did not move",
+        w.pane.scrollTop === top + (w.pane.scrollHeight - heightBefore),
+        { top: w.pane.scrollTop });
+  check("the header reads all of it", label.textContent === "440 / 440 records · 100%",
+        label.textContent);
+  check("and the button is down: nothing is left above",
+        button.classList.contains("hidden") && button.disabled === false);
+
+  // The follow-forward no longer trims the top past TRANSCRIPT_FOLLOW_MAX.
+  w.script([{ status: 200, body: { records: recs(440, 700), has_more: true, cursor: 500, total: 700 } }]);
+  w.api.poll();
+  await flush(); await flush();
+  check("after load all, the follow-forward keeps everything",
+        texts(w.pane).length === 700 && w.api.cursor === 0, { n: texts(w.pane).length, c: w.api.cursor });
+  check("and the count follows the file", label.textContent === "700 / 700 records · 100%",
+        label.textContent);
+})();
+
+/* --- a failed page stops the walk and leaves the button for another try --- */
+(async () => {
+  const w = build();
+  w.script([{ status: 200, body: { records: recs(400, 440), has_more: true, cursor: 400, total: 440 } }]);
+  w.api.open("s8");
+  await flush(); await flush();
+  w.script([{ status: 500, body: { error: "boom" } }]);
+  await w.api.loadAll();
+  const button = w.nodes["log-load-all"];
+  check("one failed page ends the walk", w.calls.length === 2, w.calls);
+  check("and the button is back, enabled",
+        !button.classList.contains("hidden") && button.disabled === false
+        && button.textContent === "load all");
+  check("the count is unchanged", w.nodes["log-progress"].textContent === "40 / 440 records · 9%");
 })();
 
 /* --- the top is the end of the asking ------------------------------------ */
