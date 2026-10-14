@@ -56,6 +56,9 @@ INBOUND_MAX = 4 * 1024 * 1024
 #: a full-screen TUI repaint, small enough that neither attaching nor a daemon
 #: restart stalls on it.
 REPLAY_TAIL_BYTES = 256 * 1024
+#: How much of that tail the off-loop replay feeds between handing the GIL
+#: back (:meth:`Session.seed_screen_from_log_async`).
+REPLAY_SLICE_BYTES = 4 * 1024
 
 #: Gap between a paste and its submitting Enter (seconds), so the CR arrives in
 #: its own PTY read — see :meth:`Session.paste`. Measured against Claude Code:
@@ -929,7 +932,11 @@ class Session:
             return None
         screen = ScreenState(cols, rows, history=self._scrollback)
         screen.set_history_limit(limit)
-        self._replay_into(screen, data)
+        for at in range(0, len(data), REPLAY_SLICE_BYTES):
+            screen.feed(data[at:at + REPLAY_SLICE_BYTES])
+            time.sleep(0)  # hand the GIL to the loop between slices
+        screen.scroll_grid_into_history()
+        screen.forget_modes()
         return screen
 
     def _replay_tail(self) -> bytes:

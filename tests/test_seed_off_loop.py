@@ -83,6 +83,36 @@ def test_off_loop_replay_builds_the_same_screen(home, tmp_path):
     asyncio.run(run())
 
 
+def test_sliced_replay_matches_across_split_sequences(home, tmp_path):
+    """The off-loop replay feeds the tail in slices; a slice boundary can
+    fall inside an escape sequence or a multi-byte character, and the
+    screen must come out the same as from one feed."""
+    _register_py_harness()
+    line = "".join(f"{ESC}[3{k % 8};1m단어{k}{ESC}[0m " for k in range(9))
+    body = "".join(f"{i:05d} {line}\r\n" for i in range(400)).encode()
+    assert len(body) > 8 * 4096
+    for name in ("one", "sliced"):
+        log = paths.session_log(name)
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_bytes(body)
+
+    async def run():
+        mgr = _manager()
+        a = mgr.stage(SessionDef(name="one", harness="py", cwd=str(tmp_path)))
+        b = mgr.stage(SessionDef(name="sliced", harness="py", cwd=str(tmp_path)))
+        try:
+            a.seed_screen_from_log()
+            await b.seed_screen_from_log_async()
+            assert _snapshot(a) == _snapshot(b)
+            for offset in (0, 30, 200):
+                assert a.screen.repaint_sequence(offset) == b.screen.repaint_sequence(offset)
+        finally:
+            mgr.discard("one")
+            mgr.discard("sliced")
+
+    asyncio.run(run())
+
+
 def test_no_log_leaves_the_screen_alone(home, tmp_path):
     _register_py_harness()
 
