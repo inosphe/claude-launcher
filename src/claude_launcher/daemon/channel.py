@@ -263,14 +263,16 @@ class Carrier:
         """
         await self._put(("str", data), wait=False)
 
-    async def send_bulk(self, frame: dict, *, parts: bool = False, key: Any = None) -> None:
+    async def send_bulk(self, frame: dict | str, *, parts: bool = False, key: Any = None) -> None:
         """Queue a read answer in the bulk lane and wait until it is written.
 
-        ``parts`` splits its JSON into ``read_part`` frames the page puts back
+        ``frame`` is the answer, or its JSON text when the caller already has
+        it (a control read, built around the routes' own text). ``parts``
+        splits that text into ``read_part`` frames the page puts back
         together, each held to the window above; ``key`` is the read's id,
         which every part carries.
         """
-        text = json.dumps(frame)
+        text = frame if isinstance(frame, str) else json.dumps(frame)
         if not parts or len(text) <= self.PART_CHARS:
             await self._put(("str", text), wait=True, bulk=True)
             return
