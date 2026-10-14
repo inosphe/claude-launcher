@@ -138,13 +138,49 @@ def json_response(payload, *, status: int = 200, headers=None) -> web.Response:
     its zlib executor, so a megabyte of session list is squeezed off the loop
     that pumps every terminal, not on it.
     """
-    text = _dumps(payload)
+    return json_text_response(_dumps(payload), status=status, headers=headers)
+
+
+def json_text_response(text: str, *, status: int = 200, headers=None) -> web.Response:
+    """:func:`json_response` for a body that is already JSON text."""
     resp = web.Response(
         text=text, status=status, headers=headers, content_type="application/json",
     )
     if len(text) >= JSON_GZIP_MIN:
         resp.enable_compression()
     return resp
+
+
+class JSONText(str):
+    """A route's JSON body, carried as the text the route wrote.
+
+    A batched read used to parse each route's body back into objects, only
+    for the batch to encode them again around it: two passes over every
+    payload on the loop that pumps the terminals, for bytes that were
+    already right (claunch-xrrn0 -- JSON was 14.8% of the daemon's leaves,
+    and the control socket's reads alone 11.1% of the loop). A value of this
+    type is spliced into the reply as written; see :func:`_with_answers`.
+    """
+
+
+def _with_answers(head: dict, answers: dict) -> str:
+    """``head`` as JSON text with an ``answers`` member spliced in last.
+
+    The reply of a batch and of a control-socket read: everything but the
+    answers is small and encoded here; a :class:`JSONText` answer is the
+    route's own text, anything else (a read with no body, a test's stub) is
+    encoded. Joined once, so each answer is copied once: a rail is a
+    megabyte, and every intermediate string would be another.
+    """
+    text = _dumps(head)
+    parts = [text[:-1], ", " if head else "", '"answers": {']
+    for i, (key, value) in enumerate(answers.items()):
+        if i:
+            parts.append(", ")
+        parts += [_dumps(key), ": ",
+                  value if isinstance(value, JSONText) else _dumps(value)]
+    parts.append("}}")
+    return "".join(parts)
 
 
 def json_error(status: int, message: str) -> web.Response:
@@ -1176,7 +1212,8 @@ async def h_batch(request: web.Request) -> web.Response:
         except Exception as exc:  # noqa: BLE001 -- one bad read, eight good
             log.debug("batch read %s failed", raw, exc_info=True)
             errors[raw] = repr(exc)
-    return json_response({"answers": answers, "errors": errors, "statuses": statuses})
+    return json_text_response(
+        _with_answers({"errors": errors, "statuses": statuses}, answers))
 
 
 class _ReadRefused(Exception):
@@ -1215,6 +1252,12 @@ async def _batch_one(template: web.Request, path: str):
     The route is resolved through the same router that serves it normally,
     so a batched read and a direct one are the same code answering: there is
     no second copy of any payload to drift.
+
+    A JSON body comes back as the route wrote it, as :class:`JSONText`, and
+    the reply splices it in rather than parsing and re-encoding it
+    (claunch-xrrn0). That trusts the route's ``application/json`` to be
+    JSON, which holds for :func:`json_response` and aiohttp's own, the two
+    ways a route here writes one. Any other body is parsed, as before.
     """
     sub = template.clone(rel_url=path)
     match = await template.app.router.resolve(sub)
@@ -1233,7 +1276,10 @@ async def _batch_one(template: web.Request, path: str):
     payload = getattr(response, "body", None)
     if payload is None:
         return None
-    return json.loads(bytes(payload).decode("utf-8"))
+    text = bytes(payload).decode("utf-8")
+    if getattr(response, "content_type", None) == "application/json":
+        return JSONText(text)
+    return json.loads(text)
 
 
 #: How long a control socket waits between heartbeats. Same value the
@@ -1318,13 +1364,14 @@ async def h_control_ws(request: web.Request) -> web.WebSocketResponse:
         # The bulk lane: a pong or a terminal's output queued after this goes
         # ahead of it, and a page that takes parts gets it in parts
         # (claunch-iss86, see channel.Carrier).
-        await carrier.send_bulk({
+        # Encoded around the routes' own text, not parsed and re-encoded
+        # (claunch-xrrn0): this runs on the loop every terminal waits on.
+        await carrier.send_bulk(_with_answers({
             "type": "read_result",
             "id": frame.get("id"),
-            "answers": answers,
             "errors": errors,
             "statuses": statuses,
-        }, parts=frame.get("parts") is True, key=frame.get("id"))
+        }, answers), parts=frame.get("parts") is True, key=frame.get("id"))
 
     try:
         init = {"type": "init"}
