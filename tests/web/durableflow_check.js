@@ -263,7 +263,7 @@ console.log("durableflow_check: sim2 ok");
     splitPollTimer = null, splitDurable = null, splitSelectedStep = null, splitLastData = null;
     var globalThis = this;
     ${fn("function isPiDurable(")} ${fn("function sessLayoutFor(")} ${fn("function isTalkPane(")}
-    ${fn("function openSplit(")} ${fn("function closeSplit(")} ${fn("async function refreshSplit(")}`, sandbox);
+    ${fn("async function fetchCflow2Run(")} ${fn("function openSplit(")} ${fn("function closeSplit(")} ${fn("async function refreshSplit(")}`, sandbox);
   assert.strictEqual(vm.runInContext(`isPiDurable("sim-20261013-040416-simulation")`, sandbox), true);
   assert.strictEqual(vm.runInContext(`isPiDurable("s1")`, sandbox), false);
   assert.strictEqual(vm.runInContext(`sessLayoutFor("a").pane`, sandbox), "chart");

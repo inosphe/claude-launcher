@@ -3043,6 +3043,84 @@ def test_the_queues_view_answers_a_stale_listing_and_rereads_it_behind(repo):
     asyncio.run(run())
 
 
+def test_the_session_view_answers_stale_only_when_asked(repo):
+    """``/meta`` polls every 5 s, past ``CACHE_TTL``, so it asks with
+    ``stale_ok`` and gets the listing it has while a fresh one is read behind
+    it (claunch-74t39). The default -- a wind-down's active issues, a read
+    right after a write -- still reads before it answers."""
+    br = FakeBr()
+    br.add(id="a", assignee="s1", status="open")
+    now = [100.0]
+    board = beads_mod.Board(br, root_for=lambda cwd: repo if cwd else None,
+                            clock=lambda: now[0])
+    s1 = _Sess(_sdef("s1", repo), status="busy")
+
+    def lists():
+        return sum(1 for c in br.calls if "list" in c)
+
+    async def ids(**kw):
+        v = await board.session_view(s1, **kw)
+        return sorted(i["id"] for i in v["issues"])
+
+    async def run():
+        assert await ids(stale_ok=True) == ["a"] and lists() == 1
+        br.add(id="b", assignee="s1", status="open")
+        now[0] += beads_mod.CACHE_TTL + 1
+        # answered from what it had; the reread runs behind it
+        assert await ids(stale_ok=True) == ["a"]
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert lists() == 2
+        assert await ids(stale_ok=True) == ["a", "b"]
+        # the default waits on a fresh listing
+        br.add(id="c", assignee="s1", status="open")
+        now[0] += beads_mod.CACHE_TTL + 1
+        assert await ids() == ["a", "b", "c"] and lists() == 3
+
+    asyncio.run(run())
+
+
+def test_the_meta_route_answers_from_a_stale_listing(home, tmp_path, repo):
+    """The route half of the case above: ``/api/sessions/<name>/meta`` is the
+    caller that passes ``stale_ok``. Past ``CACHE_TTL`` its answer carries the
+    listing the board already has, with no ``br list`` before it, and the
+    reread lands for the next poll (claunch-74t39)."""
+    _register_py_harness()
+    br = FakeBr()
+    br.add(id="a", assignee="w1", status="open")
+    now = [100.0]
+    board = beads_mod.Board(br, root_for=lambda cwd: repo if cwd else None,
+                            clock=lambda: now[0])
+
+    def lists():
+        return sum(1 for c in br.calls if "list" in c)
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=50, restore_default=False)
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm, board)
+        try:
+            mgr.create(SessionDef(name="w1", harness="py", cwd=str(repo)))
+
+            async def meta_ids():
+                resp = await client.get("/api/sessions/w1/meta", headers=BEARER)
+                assert resp.status == 200
+                return sorted(i["id"] for i in (await resp.json())["beads"]["issues"])
+
+            assert await meta_ids() == ["a"]
+            before = lists()
+            br.add(id="b", assignee="w1", status="open")
+            now[0] += beads_mod.CACHE_TTL + 1
+            assert await meta_ids() == ["a"]
+            await _wait_for(lambda: lists() > before, "the background reread")
+            assert await meta_ids() == ["a", "b"]
+        finally:
+            await client.close()
+            await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
 class _Fleet:
     """A manager as ``adoption`` reads it: which names are running here."""
 

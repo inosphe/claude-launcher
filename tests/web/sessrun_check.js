@@ -149,7 +149,8 @@ new Function(
    slice("answerFellToUs"), slice("answerBranchOptions"), slice("wfActions"),
    slice("reminderControl"), slice("pendingBanner"), slice("localStamp"),
    "const hiddenSkippedPolls = new Map();", slice("visiblePoll"),
-   slice("sessRunFoldFor"), slice("stopSessRun"), slice("refreshSessRun"),
+   slice("sessRunFoldFor"), slice("stopSessRun"), slice("fetchCflow2Run"),
+   slice("refreshSessRun"),
    slice("renderSessRun"), slice("sessRunTrack")].join("\n") +
   `
 Object.assign(exports, {
@@ -230,11 +231,14 @@ const f2 = ctx.sessRunFoldFor(flow);
 apiDoc = DATA;
 f2.open = true;
 f2.fire("toggle");
-check("opening asks for this slot's run",
-      fetched.length === 1 && fetched[0].startsWith("/api/cflow/run?"), fetched);
-check("...keyed by the pair a run is keyed by",
-      fetched[0].includes(`cwd=${encodeURIComponent(DATA.cwd)}`) &&
-      fetched[0].includes("scope=coder3"), fetched[0]);
+// The v1 slot and its v2 twin, in one turn so they share a batch: the v2
+// answer is drawn when the v1 slot is idle and names it (claunch-74t39).
+check("opening asks for this slot's run, v1 and v2 together",
+      fetched.length === 2 && fetched[0].startsWith("/api/cflow/run?") &&
+      fetched[1].startsWith("/api/cflow2/run?"), fetched);
+check("...each keyed by the pair a run is keyed by",
+      fetched.every((p) => p.includes(`cwd=${encodeURIComponent(DATA.cwd)}`) &&
+                           p.includes("scope=coder3")), fetched);
 check("and starts a poll", timers === 1, timers);
 f2.open = false;
 f2.fire("toggle");

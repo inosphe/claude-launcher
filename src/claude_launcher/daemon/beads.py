@@ -1915,8 +1915,15 @@ class Board:
         raise missing
 
     # ---- per-session views ---------------------------------------------- #
-    async def session_view(self, session) -> dict:
-        """What the board says about one session — for the rail."""
+    async def session_view(self, session, *, stale_ok: bool = False) -> dict:
+        """What the board says about one session — for the rail.
+
+        ``stale_ok`` lets the listing come from :meth:`issues_or_stale`: for
+        the detail panel's ``/meta``, polled every 5 s, which is past
+        :data:`CACHE_TTL`, so without it nearly every poll waited on a ``br``
+        fork of the whole board before it answered (claunch-74t39). A wind-down
+        or a read right after a write keeps the default and reads fresh.
+        """
         sdef = session.sdef
         view = {
             "available": self.available(),
@@ -1964,7 +1971,7 @@ class Board:
         view["db"] = head["db"]
         view["workspace"] = head["workspace"]
         try:
-            rows = await self.issues(root)
+            rows = await (self.issues_or_stale(root) if stale_ok else self.issues(root))
         except cli_beads.BeadsError as exc:
             view["error"] = str(exc)
             return view

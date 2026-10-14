@@ -9301,7 +9301,26 @@ async def h_session_meta(request: web.Request) -> web.Response:
             out["cflow2"] = cflow2_web.run_summary(cwd, info["name"])
         return out
 
-    body = await asyncio.to_thread(describe)
+    async def commits():
+        # In a thread: this is a git walk over every ref, and the detail
+        # panel polls. A pathological repository must cost this response,
+        # never the whole daemon's loop.
+        if not cwd:
+            return None
+        return session_commits.summary(
+            await asyncio.to_thread(session_commits.for_session, cwd, session.sdef.name)
+        )
+
+    # The three slow reads do not depend on each other, so they run side by
+    # side: the response waits for the slowest of them, not their sum
+    # (claunch-74t39). The board's listing may be one poll old -- the panel
+    # polls past its cache, and waiting on a ``br`` fork of the whole board
+    # was most of a poll's time.
+    body, beads_view, commit_summary = await asyncio.gather(
+        asyncio.to_thread(describe),
+        request.app["beads"].session_view(session, stale_ok=True),
+        commits(),
+    )
     info = body["session"]
     prog = manager.progress.get(info.get("name") or "")
     if prog:
@@ -9317,7 +9336,7 @@ async def h_session_meta(request: web.Request) -> web.Response:
         # The board's slice for this session: the issue it is for and every
         # issue that names it (see beads.match). Keyed by repository, not by
         # session — one board per repo, reached from any worktree.
-        "beads": await request.app["beads"].session_view(session),
+        "beads": beads_view,
         # What this session actually committed, read back off the
         # ``Claunch-Session`` trailers rather than kept in a registry (see
         # :mod:`claude_launcher.session_commits`). It belongs beside the
@@ -9332,18 +9351,11 @@ async def h_session_meta(request: web.Request) -> web.Response:
         # actually true is that there was no repository to look in. The panel
         # draws nothing for ``None`` and says so for ``[]``, and those are the
         # two different facts.
-        "commits": None,
+        "commits": commit_summary,
         # The pending merge/handoff on this session, if any — the detail
         # panel's Hand off box reads it to show the request and its cancel.
         "handoff": request.app["handoff"].state(name),
     })
-    if cwd:
-        # In a thread: this is a git walk over every ref, and the detail
-        # panel polls. A pathological repository must cost this response,
-        # never the whole daemon's loop.
-        body["commits"] = session_commits.summary(
-            await asyncio.to_thread(session_commits.for_session, cwd, name)
-        )
     return json_response(body)
 
 
