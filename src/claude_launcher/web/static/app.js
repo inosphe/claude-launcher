@@ -26799,6 +26799,10 @@ let profileModeBusy = false;
 let profileModeNotice = "";
 let profileModeError = "";
 let profileModeScope = null;
+/* Pi's TUI mode editor: which profile is being written, and what came back. */
+let piTuiBusy = "";
+let piTuiNotice = { profile: "", text: "" };
+let piTuiError = { profile: "", text: "" };
 
 function settingsTabs() {
   const tabs = el("div", "seq-tabs settings-tabs");
@@ -27062,6 +27066,87 @@ function profileModeEditor(row) {
   return box;
 }
 
+/* What a pi profile's next session runs its TUI in, and the selector that
+   declares it. The value lives in harness_options.pi.settings.tuiMode and is
+   merged into the profile's pi settings.json at launch; a running session
+   keeps the mode it started with. */
+function piTuiModeLabel(tui) {
+  const why = {
+    profile: "declared here",
+    inherited: "inherited",
+    file: "hand-written in settings.json",
+    "pi-default": "pi's default",
+  }[tui.source] || tui.source;
+  return `${tui.next} (${why})`;
+}
+
+async function piTuiModeApply(profile, mode) {
+  piTuiBusy = profile;
+  piTuiNotice = { profile: "", text: "" };
+  piTuiError = { profile: "", text: "" };
+  if (wsOpen) renderWorkspaces();
+  try {
+    const resp = await api("/api/profiles/pi-tui-mode", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ profile, mode: mode || null }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    const tui = data.pi_tui_mode || {};
+    piTuiNotice = { profile, text:
+      `Saved — new sessions of ${profile} start in ${tui.next || "?"} mode.` };
+  } catch (err) {
+    piTuiError = { profile, text: String(err) };
+  }
+  piTuiBusy = "";
+  await refreshProfileSettings();
+}
+
+function piTuiModeEditor(row) {
+  const tui = row.pi_tui_mode;
+  const box = el("div", "profile-mode-editor");
+  const form = el("form", "profile-mode-form");
+  const select = el("select", "ws-input");
+  select.setAttribute("aria-label", `Pi TUI mode for ${row.profile}`);
+  const fallback = el("option", null, `Default (${tui.default})`);
+  fallback.value = "";
+  select.appendChild(fallback);
+  for (const name of tui.modes) {
+    const option = el("option", null, name);
+    option.value = name;
+    select.appendChild(option);
+  }
+  select.value = tui.declared || "";
+  select.disabled = !!piTuiBusy;
+  form.appendChild(select);
+  const apply = el("button", "wf-btn",
+    piTuiBusy === row.profile ? "Saving…" : "Save");
+  apply.type = "submit";
+  apply.disabled = !!piTuiBusy;
+  form.appendChild(apply);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    return piTuiModeApply(row.profile, select.value);
+  });
+  box.appendChild(form);
+  box.appendChild(el("p", "wf-note",
+    "Applies to new sessions; running sessions keep their mode."));
+  if (tui.effective != null && tui.file_value != null
+      && tui.file_value !== tui.effective) {
+    box.appendChild(el("p", "wf-note",
+      `settings.json holds ${tui.file_value}; the declared ${tui.effective} ` +
+      "overwrites it at the next launch."));
+  }
+  if (tui.error) box.appendChild(el("p", "wf-error", tui.error));
+  if (piTuiError.profile === row.profile) {
+    box.appendChild(el("p", "wf-error", piTuiError.text));
+  } else if (piTuiNotice.profile === row.profile) {
+    box.appendChild(el("p", "wf-note", piTuiNotice.text));
+  }
+  return box;
+}
+
 function profilesPanel() {
   const panel = el("div", "profiles-panel");
   panel.appendChild(el(
@@ -27095,7 +27180,8 @@ function profilesPanel() {
   const thead = el("thead", null);
   const hrow = el("tr", null);
   for (const label of [
-    "Profile", "Harness", "Provider", "Permission mode", "Rules", "Directory",
+    "Profile", "Harness", "Provider", "Permission mode", "Rules", "Pi TUI mode",
+    "Directory",
   ]) {
     hrow.appendChild(el("th", null, label));
   }
@@ -27108,7 +27194,7 @@ function profilesPanel() {
     tr.appendChild(el("td", null, row.profile || row.name || "?"));
     if (row.error) {
       const cell = el("td", "profile-error", row.error);
-      cell.colSpan = 5;
+      cell.colSpan = 6;
       tr.appendChild(cell);
       body.appendChild(tr);
       continue;
@@ -27143,6 +27229,15 @@ function profilesPanel() {
       }
       tr.appendChild(el("td", gaps.length ? "profile-pending" : "profile-ok",
         gaps.length ? gaps.join(" · ") : "guard ok"));
+    }
+    const tui = row.pi_tui_mode;
+    if (!tui) {
+      // A pi settings key: any other harness never reads it.
+      tr.appendChild(el("td", "profile-muted", "—"));
+    } else {
+      const cell = el("td", null, piTuiModeLabel(tui));
+      cell.appendChild(piTuiModeEditor(row));
+      tr.appendChild(cell);
     }
     tr.appendChild(el("td", null, row.directory || ""));
     body.appendChild(tr);

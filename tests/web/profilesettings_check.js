@@ -192,7 +192,8 @@ vm.runInContext(
   // One row per profile: the per-harness selector row is not a profile.
   assert.equal(rows.length, 3);
   assert.deepEqual(all(table).filter((n) => n.tag === "th").map((n) => n.text), [
-    "Profile", "Harness", "Provider", "Permission mode", "Rules", "Directory",
+    "Profile", "Harness", "Provider", "Permission mode", "Rules", "Pi TUI mode",
+    "Directory",
   ]);
   assert.equal(rows[0].children[0].text, "work");
   assert.equal(rows[0].children[2].text, "deepseek");
@@ -203,7 +204,10 @@ vm.runInContext(
   // ...and the rules column sits between it and the path, settled.
   assert.equal(rows[0].children[4].text, "guard ok");
   assert.equal(rows[0].children[4].cls.includes("profile-ok"), true);
-  assert.equal(rows[0].children[5].text, "C:\\profiles\\work");
+  // Not a pi profile: the pi TUI mode column is a dash, then the path.
+  assert.equal(rows[0].children[5].text, "—");
+  assert.equal(rows[0].children[5].cls.includes("profile-muted"), true);
+  assert.equal(rows[0].children[6].text, "C:\\profiles\\work");
 
   // Another harness gets a dash in both Claude Code columns: these are keys
   // it never reads, so an empty cell is the honest answer, not a zero.
@@ -305,6 +309,64 @@ vm.runInContext(
   await context.refreshProfileSettings();
   assert.match(textOf(context.profileModeCard()), /No Claude Code profile yet/);
   assert.match(textOf(context.permissionRulesCard()), /No Claude Code profile yet/);
+
+  // --- pi's TUI mode ------------------------------------------------------
+  // Only a pi profile's row carries `pi_tui_mode`; the cell says what the next
+  // session gets and why, and the selector edits the profile's own declaration.
+  const piTui = (over = {}) => ({ key: "tuiMode", declared: null, effective: null,
+    file_value: null, next: "fullscreen", source: "pi-default",
+    default: "fullscreen", modes: ["regular", "fullscreen"], error: null, ...over });
+  const piRow = { name: "glm", profile: "glm", harness: "pi", explicit: false,
+    directory: "C:\\profiles\\glm", harness_policy: { provider: "fireworks" },
+    permission_mode: null, permission_rules: null, pi_tui_mode: piTui() };
+  response = { profile_details: [piRow] };
+  await context.refreshProfileSettings();
+  let piCells = all(find(context.profilesPanel(), (n) => n.tag === "table"))
+    .filter((n) => n.tag === "tr")[1].children;
+  assert.equal(piCells[3].text, "—");
+  assert.match(piCells[5].text, /^fullscreen \(pi's default\)$/);
+  let tuiEditor = context.piTuiModeEditor(piRow);
+  const tuiSelect = find(tuiEditor, (n) => n.tag === "select");
+  assert.deepEqual(tuiSelect.children.map((o) => o.value), ["", "regular", "fullscreen"]);
+  assert.equal(tuiSelect.children[0].text, "Default (fullscreen)");
+  assert.equal(tuiSelect.value, "");
+  assert.match(textOf(tuiEditor), /Applies to new sessions/);
+
+  requests.length = 0;
+  writeResponse = { profile: "glm", declared: "regular",
+    pi_tui_mode: piTui({ declared: "regular", effective: "regular", next: "regular", source: "profile" }) };
+  tuiSelect.value = "regular";
+  await find(tuiEditor, (n) => n.tag === "form").handlers.submit({ preventDefault() {} });
+  assert.equal(requests[0][0], "/api/profiles/pi-tui-mode");
+  assert.equal(requests[0][1].method, "POST");
+  assert.deepEqual(JSON.parse(requests[0][1].body), { profile: "glm", mode: "regular" });
+  assert.match(textOf(context.piTuiModeEditor(piRow)), /new sessions of glm start in regular mode/);
+
+  // Back to the default sends null, the same undeclare the mode card uses.
+  requests.length = 0;
+  writeResponse = { profile: "glm", declared: null, pi_tui_mode: piTui() };
+  await context.piTuiModeApply("glm", "");
+  assert.deepEqual(JSON.parse(requests[0][1].body), { profile: "glm", mode: null });
+
+  // A hand-written file value the declaration will overwrite is said so.
+  const overwritten = { ...piRow, pi_tui_mode: piTui({ declared: "fullscreen",
+    effective: "fullscreen", file_value: "regular", next: "fullscreen", source: "profile" }) };
+  tuiEditor = context.piTuiModeEditor(overwritten);
+  assert.equal(find(tuiEditor, (n) => n.tag === "select").value, "fullscreen");
+  assert.match(textOf(tuiEditor),
+    /settings.json holds regular; the declared fullscreen overwrites it at the next launch/);
+  response = { profile_details: [{ ...piRow, pi_tui_mode: piTui({
+    file_value: "regular", next: "regular", source: "file" }) }] };
+  await context.refreshProfileSettings();
+  piCells = all(find(context.profilesPanel(), (n) => n.tag === "table"))
+    .filter((n) => n.tag === "tr")[1].children;
+  assert.equal(piCells[5].text, "regular (hand-written in settings.json)");
+
+  ok = false;
+  writeResponse = { error: "TUI mode is only available for profiles that can run pi" };
+  await context.piTuiModeApply("glm", "regular");
+  assert.match(textOf(context.piTuiModeEditor(piRow)), /only available for profiles that can run pi/);
+  ok = true;
 
   console.log("profilesettings_check: ok");
 })();
