@@ -160,3 +160,140 @@ def test_check_reads_the_label_pointer(tmp_path, monkeypatch):
     ptr.write_text(str(tmp_path / "m"), encoding="utf-8")
     assert perf_probe.main(["check", "--label", "baseline"]) == 0
     assert perf_probe.main(["check", "--label", "after"]) == 1
+
+
+# -- user permission every round ---------------------------------------------
+
+#: The goal's central property: each round, a person decides what happens to
+#: the proposal and whether another round runs. These are ask-user calls with
+#: fixed choices and no other responder; a change that let the driver or a
+#: session answer them would fail here.
+USER_QUESTIONS = {
+    "proposal": ["delegate", "file-only", "revise", "skip"],
+    "round-end": ["next-round", "end"],
+    "wait-unclear-choice": ["proceed", "stop"],
+}
+
+
+def test_round_decisions_are_user_questions_with_fixed_choices():
+    chart = _chart()
+    seen = set()
+    for n in chart.nodes.values():
+        if not n.get("cases"):
+            continue
+        assert n.type == "seq", n.id
+        call = chart.node(n.get("children")[0])
+        assert call.type == "scope" and call.get("proc") == "ask-user", n.id
+        w = call.get("with_")
+        assert n.label in USER_QUESTIONS, n.id
+        assert n.get("cases") == USER_QUESTIONS[n.label], n.label
+        assert w["choices"] == {"lit": USER_QUESTIONS[n.label]}, n.label
+        assert w["require_reason"] == {"lit": True}, n.label
+        assert "from" not in w, f"{n.label}: a user question has no other responder"
+        seen.add(n.label)
+    assert seen == set(USER_QUESTIONS)
+
+
+def test_no_choice_is_left_to_the_driver():
+    chart = _chart()
+    assert [n.label or n.id for n in chart.nodes.values() if n.type == "choose"] == []
+
+
+# -- wait gates ----------------------------------------------------------------
+
+
+def _env_issues(monkeypatch, ids):
+    monkeypatch.setenv("CFLOW_DATA_DELEGATION", json.dumps({"issues": ids}))
+
+
+def _rows(monkeypatch, rows):
+    monkeypatch.setattr(perf_probe, "_show", lambda issue: rows.get(issue))
+
+
+def test_issues_closed_reads_ids_from_bound_data(monkeypatch):
+    _env_issues(monkeypatch, ["a", "b"])
+    _rows(monkeypatch, {"a": {"status": "closed"}, "b": {"status": "closed"}})
+    assert perf_probe.main(["issues-closed", "--from-env", "delegation"]) == 0
+
+
+def test_issues_closed_waits_on_an_open_issue(monkeypatch):
+    _env_issues(monkeypatch, ["a", "b"])
+    _rows(monkeypatch, {"a": {"status": "closed"}, "b": {"status": "in_progress"}})
+    assert perf_probe.main(["issues-closed", "--from-env", "delegation"]) == 1
+
+
+def test_issues_closed_without_ids_or_row_is_undecidable(monkeypatch):
+    monkeypatch.delenv("CFLOW_DATA_DELEGATION", raising=False)
+    assert perf_probe.main(["issues-closed", "--from-env", "delegation"]) == 2
+    _env_issues(monkeypatch, ["a"])
+    _rows(monkeypatch, {})
+    assert perf_probe.main(["issues-closed", "--from-env", "delegation"]) == 2
+
+
+class _Proc:
+    def __init__(self, rc):
+        self.returncode = rc
+
+
+def _serving(monkeypatch, rows, rc_by_hash, head="feedbeef"):
+    _rows(monkeypatch, rows)
+    monkeypatch.setattr(perf_probe, "_daemon_doc", lambda: {"code": {"head": head}})
+    monkeypatch.setattr(perf_probe.subprocess, "run",
+                        lambda cmd, **kw: _Proc(rc_by_hash[cmd[-2]]))
+
+
+def test_serving_when_every_merge_is_in_the_daemon_head(monkeypatch):
+    _env_issues(monkeypatch, ["a"])
+    _serving(monkeypatch, {"a": {"close_reason": "merged abc1234 (sweep 1500)"}},
+             {"abc1234": 0})
+    assert perf_probe.main(["serving", "--from-env", "delegation"]) == 0
+
+
+def test_serving_waits_for_a_merge_the_daemon_does_not_run(monkeypatch):
+    _env_issues(monkeypatch, ["a", "b"])
+    _serving(monkeypatch, {"a": {"close_reason": "merged abc1234"},
+                           "b": {"close_reason": "merged def5678"}},
+             {"abc1234": 0, "def5678": 1})
+    assert perf_probe.main(["serving", "--from-env", "delegation"]) == 1
+
+
+def test_serving_without_a_merge_hash_is_undecidable(monkeypatch):
+    _env_issues(monkeypatch, ["a"])
+    _serving(monkeypatch, {"a": {"close_reason": "done"}}, {})
+    assert perf_probe.main(["serving", "--from-env", "delegation"]) == 2
+
+
+def test_serving_with_an_unknown_hash_is_undecidable(monkeypatch):
+    # git merge-base exits 128 for an object this checkout does not have.
+    _env_issues(monkeypatch, ["a"])
+    _serving(monkeypatch, {"a": {"close_reason": "merged abc1234"}}, {"abc1234": 128})
+    assert perf_probe.main(["serving", "--from-env", "delegation"]) == 2
+
+
+def test_serving_without_ids_is_undecidable(monkeypatch):
+    monkeypatch.delenv("CFLOW_DATA_DELEGATION", raising=False)
+    _serving(monkeypatch, {}, {})
+    assert perf_probe.main(["serving", "--from-env", "delegation"]) == 2
+
+
+def _uptime(monkeypatch, seconds):
+    monkeypatch.setattr(perf_probe, "_daemon_doc", lambda: {"pid": 1})
+    monkeypatch.setattr(perf_probe, "_uptime", lambda doc: seconds)
+
+
+def test_warm_reads_the_floor_from_run_inputs(monkeypatch):
+    monkeypatch.setenv("CFLOW_DATA_INPUTS", json.dumps({"warmup_seconds": 600}))
+    _uptime(monkeypatch, 600)
+    assert perf_probe.main(["warm"]) == 0
+    _uptime(monkeypatch, 599)
+    assert perf_probe.main(["warm"]) == 1
+
+
+def test_warm_defaults_to_900_and_unreadable_uptime_is_undecidable(monkeypatch):
+    monkeypatch.delenv("CFLOW_DATA_INPUTS", raising=False)
+    _uptime(monkeypatch, 899)
+    assert perf_probe.main(["warm"]) == 1
+    _uptime(monkeypatch, 900)
+    assert perf_probe.main(["warm"]) == 0
+    _uptime(monkeypatch, None)
+    assert perf_probe.main(["warm"]) == 2

@@ -537,6 +537,10 @@ def cmd_serving(args) -> int:
         if rc == 1:
             behind.append(f"{issue}@{m.group(1)[:8]}")
         elif rc != 0:
+            # 128: a hash this checkout's object store does not have (or a
+            # malformed one). Undecidable, not "behind": the workflow's wait
+            # hands three of these in a row to the user. The leader merges in
+            # this checkout's master, so a real merge hash is normally present.
             print(f"{issue}: git cannot compare {m.group(1)} with {head}")
             return 2
     print(f"daemon head {head[:8]}: " + ("serves every merge" if not behind
