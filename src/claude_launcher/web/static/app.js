@@ -4996,8 +4996,13 @@ async function refreshSessions(options) {
   if ((!rebuild || inPlace) && !railHeld() && typeof refreshRailSeen === "function") {
     refreshRailSeen(list);
   }
-  refreshResumeChoices();  // the spawn form offers these same conversations
-  refreshParentChoices();  // ...and the same sessions, as parents to spawn from
+  // The spawn form offers these same conversations and sessions -- but not
+  // rebuilt while the form is open (sessionFormHeld, claunch-p3i0n).
+  const formHeld = typeof sessionFormHeld === "function" && sessionFormHeld();
+  if (!formHeld) {
+    refreshResumeChoices();
+    refreshParentChoices();
+  }
   // the queues, on a slower clock than this poll (guarded for the same reason)
   if (typeof refreshRailBeads === "function") refreshRailBeads();
   // ...and the Queues tab's lane dots, off the record this poll just brought
@@ -38841,6 +38846,20 @@ function spawnSizeRemember(box, child = false) {
    page tabs and contextual dialogs supply the host. */
 let sessionModal = null;
 
+/* The create form is on screen: the New / Spawn child dialog, or the #/new
+   page. Its option sets are read once when it opens and then again only on
+   the edge of an input the operator changes (the Directory row, the parent,
+   the mesh). The dashboard poll keeps the rail fresh but does not reach into
+   the form while this holds -- measured with the dialog open, every 5s tick
+   rebuilt the three worktree pickers (~970 nodes) and the parent, mesh and
+   workflow rows behind the operator's back (claunch-p3i0n). Guarded with
+   typeof: harnesses that slice a poll function alone do not carry the
+   binding. */
+function sessionFormHeld() {
+  return (typeof sessionModal !== "undefined" && !!sessionModal) ||
+    (typeof currentPage !== "undefined" && currentPage === "new");
+}
+
 /* Operation policy is independent of its host. A page offers New/Spawn;
    contextual dialogs expose just the operation their opener requested.
    editable is the UI ceiling; spawn policy can narrow it further.
@@ -40340,7 +40359,8 @@ async function refreshMeshList(options) {
   // that owns the fact, and this is where the fact arrives.
   renderTermHandle();
   renderOutgoingJoins(outgoing);
-  syncOnboardPickers();
+  // An open create form keeps the mesh list it opened with (claunch-p3i0n).
+  if (!(typeof sessionFormHeld === "function" && sessionFormHeld())) syncOnboardPickers();
   if (currentPage === "home") renderHome();
 }
 
@@ -46490,9 +46510,15 @@ async function pollOnce() {
   ];
   // Polled because the registry is edited from the CLI, in another window;
   // it redraws only when the list really changed (see refreshWorkspaces).
-  refreshes.push(refreshWorkspaces());
-  refreshes.push(refreshProjects());
-  refreshes.push(refreshNewWorktree());
+  // Not while the create form is open: these three feed its pickers, which
+  // are read once on opening and then only on an input's change
+  // (sessionFormHeld, claunch-p3i0n). The first tick after it closes
+  // catches up.
+  if (!(typeof sessionFormHeld === "function" && sessionFormHeld())) {
+    refreshes.push(refreshWorkspaces());
+    refreshes.push(refreshProjects());
+    refreshes.push(refreshNewWorktree());
+  }
   // Other daemons' mesh members: a list of its own, at its own pace.
   refreshes.push(refreshShadows());
   // The restart gate can be opened from any session's terminal, so the card

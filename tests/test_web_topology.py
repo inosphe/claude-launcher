@@ -598,6 +598,7 @@ BROWSER_CHECKS = [
         "railroleline_browser.cjs",
         "sessionresources_browser.cjs",
         "sessview_browser.cjs",
+        "modalonce_browser.cjs",
 ]
 
 
