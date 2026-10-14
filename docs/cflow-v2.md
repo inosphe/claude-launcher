@@ -1050,9 +1050,10 @@ nodes:
     leader(아래)에 넣는다.
   - `leader:landing`(independent): mesh leader에만 넣는다. 조상의 메인 런이라도 leader가
     아니면 대상이 아니다.
-  - mesh leader: 워커가 속한 mesh의 `leader` 역할 멤버 중 워커의 형제(같은 부모. 둘 다
-    부모가 없으면 형제로 본다)이거나 직계 조상인 세션만 대상이다. 삼촌이나 자식 관계인
-    leader는 대상이 아니다. 병합 가능한 leader가 정확히 하나가 아니면 `trigger_skipped`다.
+  - mesh leader: 워커가 속한 mesh의 `leader` 역할 멤버 중 워커의 직계 조상이거나, 워커
+    또는 데몬이 아는 직계 조상의 형제(같은 부모. 둘 다 부모가 없으면 형제로 본다)인
+    세션만 대상이다. 부모가 병합할 수 없는 free-role 루트면 그 옆 루트 leader(워커의
+    삼촌)가 받는다(claunch-g0ttr). 사촌·형제의 자식·자식 관계인 leader는 대상이 아니다. 병합 가능한 leader가 정확히 하나가 아니면 `trigger_skipped`다.
   - 대상이 없으면 `trigger_skipped`(지나간 세션과 사유)를 남기고 데몬 로그에 경고를
     쓴다. 대체 대상으로 넣었으면 `trigger_done`의 사유가 지나간 세션과 대상
     (`fell back to '<세션>' at <cwd>`)을 적는다.
@@ -2436,7 +2437,7 @@ spec:
   넣는다. v2 런이 여럿이면 메인 런이 먼저이고, 그다음은 순서에서 처음 것이다.
 - v1 워커의 부모가 병합을 수행할 수 없으면 v1 `TriggerClock.landing_target`이 2.8의
   「착지 요청의 대상」과 같은 규칙(`landing_route.Router.stacked`)으로 직계 조상, 그다음
-  형제이거나 직계 조상인 mesh leader의 v1 큐 런을 찾는다. 이 경로는 조부모 이상의
+  직계 조상이거나 워커·조상의 형제인 mesh leader의 v1 큐 런을 찾는다. 이 경로는 조부모 이상의
   v2 `landing` 런은 보지 않는다.
 - MCP `landing_queue` 도구는 호출 세션의 v1 런에 `landing_queue`가 없고 v2 런이
   `landing` 컬렉션을 가지면 그 컬렉션을 보여 주고 바꾼다(`status` 값은 v1과 같다).
@@ -2511,7 +2512,7 @@ v2 워커의 착지 요청은 기본으로 pull request를 거친다. 로컬 착
 | 항목 | stacked (기본) | independent |
 |---|---|---|
 | 기준 브랜치 | 부모의 스택 브랜치(`<부모>-stack`, 부모가 리더면 master) | 대상 브랜치(master) |
-| 착지 요청 | `parent:landing` — 부모 워커의 stack 런(부모가 리더면 리더 런). 부모가 병합할 수 없으면 직계 조상, 그다음 mesh leader(2.8) | `leader:landing` — mesh leader(형제 또는 직계 조상)의 착지 큐(2.8) |
+| 착지 요청 | `parent:landing` — 부모 워커의 stack 런(부모가 리더면 리더 런). 부모가 병합할 수 없으면 직계 조상, 그다음 mesh leader(2.8) | `leader:landing` — mesh leader(직계 조상, 또는 워커·조상의 형제)의 착지 큐(2.8) |
 | PR base | 부모의 원격 스택 브랜치(아래 「stacked PR」) | master |
 | 부모의 역할 | 리뷰, 기준 이동 통지, 컷 | 상태 관제(정지·실패·완료 확인) |
 | 부모 기준이 바뀔 때 | stack 런이 새 tip과 `rebase --onto` 명령을 통지(아래) | 영향 없음 |

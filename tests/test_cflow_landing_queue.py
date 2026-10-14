@@ -534,10 +534,26 @@ def test_the_parents_own_queue_wins_over_the_mesh_leader(proj, feature, monkeypa
     assert _queue(engine.status(cwd=lcwd, scope="lead")) == {}
 
 
+def test_a_leader_beside_a_parent_that_cannot_merge_takes_the_request(proj, feature, monkeypatch):
+    # claunch-g0ttr: the parent is a free-role root with no workflow, the
+    # leader another root -- the leader is the worker's uncle, and takes it.
+    lcwd = state_mod.resolve_cwd(str(proj))
+    engine.start("lead", cwd=lcwd, scope="lead")
+    wcwd = _worker_at_request(feature)
+    monkeypatch.setattr(landing, "in_review_of", lambda repo, session: ["x-1"])
+    performed, detail = _fallback_run(
+        wcwd, [_Session("lead", lcwd), _Session("top", lcwd)],
+        {"w1": ["worker"], "lead": ["leader"], "top": []}, parent="top",
+    )
+    assert performed, detail
+    assert "parent 'top' holds no 'merger' role" in detail and "fell back to 'lead'" in detail
+    assert "x-1" in _queue(engine.status(cwd=lcwd, scope="lead"))
+
+
 @pytest.mark.parametrize(
     "parent, lead_parent, sessions",
     [
-        ("top", None, ["top"]),      # the leader is a sibling of the parent (an uncle)
+        ("top", "other", ["top", "other"]),  # the leader is the parent's nephew (a cousin)
         (None, "w1", []),            # the leader is the worker's own child
         ("gone", None, []),          # the parent is not a session; the leader is a root
     ],
