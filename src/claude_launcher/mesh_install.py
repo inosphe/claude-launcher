@@ -277,8 +277,9 @@ yours to do, but clearing and respawning are the user's (`claunch
 clear-sessions`, `claunch respawn`), and a session your mesh still lists
 cannot be cleared until it leaves the roster.
 
-**A `held` (or `delayed`) member is asleep, not ended.** The daemon stopped
-its process to free resources; its conversation, run and worktree are kept.
+**A `held` (or `delayed`) member is asleep, not ended.** Its process is not
+running — a hold stopped it, or a daemon restart has not relaunched it yet
+(`delayed`) — but its conversation, run and worktree are kept.
 A message you send it wakes it and is delivered once it is back up — so
 keep addressing it as you would a busy peer, and do not give up on it,
 re-assign its work or report it gone. The other stopped states (`exited`,
