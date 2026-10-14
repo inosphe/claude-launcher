@@ -600,7 +600,13 @@ def build_app(
     app.on_shutdown.append(_stop_rag)
     # How late the loop runs its callbacks: the part of the page's round
     # trip that is the daemon being busy (claunch-y9ax9).
-    app["loop_lag"] = loop_lag_mod.LoopLag()
+    try:
+        lag_threshold = float(
+            store.daemon_config().get("loop_lag_log_s", loop_lag_mod.LOG_THRESHOLD)
+        )
+    except (TypeError, ValueError):
+        lag_threshold = loop_lag_mod.LOG_THRESHOLD
+    app["loop_lag"] = loop_lag_mod.LoopLag(log_threshold=lag_threshold)
     app.on_startup.append(_start_loop_lag)
     app.on_shutdown.append(_stop_loop_lag)
     # The Stats page reads transcripts in a child process, off this loop's
