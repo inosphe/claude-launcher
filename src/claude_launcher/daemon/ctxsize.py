@@ -547,7 +547,10 @@ def transcript_of(sdef) -> Optional[Path]:
             elif harness == CODEX_HARNESS:
                 # One reading of the rollouts for every row of a list that
                 # asks within MISS_TTL -- the staleness a miss already has
-                # here (claunch-cb65c).
+                # here (claunch-cb65c). A rollout created after that reading
+                # can stay unseen up to about 2 x MISS_TTL (index age plus
+                # this miss cache); a session's rollout appears on its first
+                # turn, so that delay only touches a brand-new session.
                 path = codex_sessions.find(
                     entry.profile_home(prof.config_dir), str(cid), max_age=MISS_TTL
                 )
