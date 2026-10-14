@@ -522,7 +522,7 @@ DAEMON_DEFAULTS = {
     # daemon start, the sessions to bring back are not all launched at once.
     # Each one that would come back with its conversation is filed
     # "delayed" (a hold the restore queue owns) and relaunched in priority
-    # order -- leaders, then parents, then the ones that were working, then
+    # order -- leaders, then the ones that were working, then parents, then
     # the most recently active -- this many seconds apart. Using one first
     # (attaching, a mesh message, a checks request, typing to it) relaunches
     # it at once. 0 restores everything up front, before listening, as
