@@ -412,7 +412,15 @@ class QaStore:
 
     def rail(self) -> dict:
         """Per session: how many questions wait on the user, and the last
-        change the session made (the pane opens itself when that moves)."""
+        change the session made (the pane opens itself when that moves).
+
+        ``waiting`` lists those questions (id, title, status, revision,
+        answer_revision, updated_at), oldest first: the dashboard turns each
+        one it has not announced yet into a notice card and a row in its
+        notification history (claunch-k7c32). ``answer_revision`` is what
+        tells a stale question's re-ask apart from the next edit of it. Ties
+        in ``created_at`` (one second) fall back to insertion order, not to
+        the random id."""
         out: dict[str, dict] = {}
         with self._connect() as db:
             for r in db.execute(
@@ -420,12 +428,22 @@ class QaStore:
                 "FROM questions GROUP BY session"
             ):
                 out[r["session"]] = {"unresolved": int(r["unresolved"] or 0), "total": int(r["total"]),
-                                     "agent_seq": 0}
+                                     "agent_seq": 0, "waiting": []}
             for r in db.execute(
                 "SELECT session, MAX(seq) AS seq FROM events WHERE actor <> ? GROUP BY session", (USER,)
             ):
-                out.setdefault(r["session"], {"unresolved": 0, "total": 0, "agent_seq": 0})
+                out.setdefault(r["session"], {"unresolved": 0, "total": 0, "agent_seq": 0, "waiting": []})
                 out[r["session"]]["agent_seq"] = int(r["seq"])
+            for r in db.execute(
+                "SELECT session, id, title, status, revision, answer_revision, updated_at FROM questions "
+                "WHERE status IN ('open','stale') ORDER BY created_at, rowid"
+            ):
+                out[r["session"]]["waiting"].append({
+                    "id": r["id"], "title": r["title"], "status": r["status"],
+                    "revision": int(r["revision"]),
+                    "answer_revision": None if r["answer_revision"] is None else int(r["answer_revision"]),
+                    "updated_at": r["updated_at"],
+                })
         return out
 
     # -- the session's writes ---------------------------------------------
