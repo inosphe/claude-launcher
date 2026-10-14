@@ -33,6 +33,11 @@ A closed question is not final: the user can rewrite its answer or ask for
 a direction check against it ("[claunch qa] ... direction check"), which
 reopens it. Compare your current work with the answer, change course where
 you drifted, and qa_close it again with a note -- the note is your reply.
+
+A question that comes out of a thread conversation takes qa_ask thread=<id>,
+so it links back to that thread; the user can also open a thread about any
+question from its QA card. Each question's 'links' lists those threads, and
+an answer's block names them -- carry the answer back into the thread there.
 """
 
 _ID = {"id": {"type": "string", "description": "question id (qa-xxxxxxxx)"}}
@@ -57,6 +62,8 @@ TOOLS = [
          "body": {"type": "string", "description": "context the user needs to answer (markdown text)"},
          "options": _OPTIONS,
          "multi": {"type": "boolean", "description": "the user may pick several options (default one)"},
+         "thread": {"type": "string", "description": "the thread (th-xxxxxx) this question came out of; "
+                                                     "it is linked both ways"},
      }, "required": ["title"]}},
     {"name": "qa_update",
      "description": "Rewrite one of your questions (only the fields given change). If it was answered, "
@@ -144,7 +151,7 @@ def _call(c, me: str, name: str, args: dict) -> dict:
         q = {"session": me, "closed": "1" if args.get("closed") else "0"}
         return c.get("/api/qa?" + urllib.parse.urlencode(q))
     if name == "qa_ask":
-        body = {k: args[k] for k in ("title", "body", "options", "multi") if k in args}
+        body = {k: args[k] for k in ("title", "body", "options", "multi", "thread") if k in args}
         return c.post("/api/qa", {**body, "session": me})
     if name == "qa_update":
         body = {k: args[k] for k in ("revision", "title", "body", "options", "multi") if k in args}

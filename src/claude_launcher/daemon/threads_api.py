@@ -3,9 +3,9 @@ user and a session, held in the session's threads pane.
 
   GET  /api/threads?session=<name>[&closed=0]    one session's threads
   GET  /api/threads/rail                         per session: open, agent_seq
-  POST /api/threads                              open    {session | to, title, text?}
+  POST /api/threads                              open    {session | to, title, text?, qa?}
   GET  /api/threads/{id}[?after=&limit=&reader=] the thread and its messages
-  POST /api/threads/{id}/messages                post    {session?, text}
+  POST /api/threads/{id}/messages                post    {session?, text, ask_qa?}
   POST /api/threads/{id}/close                   close   {session?}
   POST /api/threads/{id}/reopen                  reopen  {session?}
   POST /api/threads/{id}/title                   rename  {session?, title}
@@ -23,6 +23,14 @@ is woken for it. ``delivered`` says the message was accepted for that
 session, not that it is in the terminal yet: when something at the session
 end is holding it back, ``hold`` names it (claunch-a41i5), so the pane can say
 why nothing appeared instead of looking like a lost message.
+
+QA links (claunch-78dpm, daemon/talk_links.py). A thread may be opened about
+one of the session's QA questions (``qa`` on open); the question must exist
+and be the same session's. Every thread this module returns carries
+``links``: the question it is about and the questions filed out of it. A
+user message about a question repeats the question in the delivered block,
+and a post with ``ask_qa: true`` asks the agent to file what the thread
+settled as a QA question linked back to it (qa_ask ``thread=``).
 """
 
 from __future__ import annotations
@@ -34,7 +42,7 @@ from typing import Optional
 from aiohttp import web
 
 from ..threads import store as thread_store
-from . import paths
+from . import paths, talk_links
 
 log = logging.getLogger(__name__)
 
@@ -45,7 +53,18 @@ def _quote(text: str) -> str:
     return "\n".join("  > " + line for line in (text or "").splitlines()) or "  > (empty)"
 
 
-def user_wrote_text(thread: dict, message: dict, *, opened: bool = False, reopened: bool = False) -> str:
+def _subject_line(thread: dict) -> list[str]:
+    for link in thread.get("links") or []:
+        if link["rel"] == "subject":
+            if link["status"] == "deleted":
+                return [f"This thread is about your QA question {link['id']} (since deleted)."]
+            return [f"This thread is about your QA question {link['id']} ({link['status']}): \"{link['title']}\". "
+                    "If the discussion changes the question, qa_update it; if it settles it, say so here."]
+    return []
+
+
+def user_wrote_text(thread: dict, message: dict, *, opened: bool = False, reopened: bool = False,
+                    ask_qa: bool = False) -> str:
     tid = thread["id"]
     if opened:
         head = "The user opened a new thread with you:"
@@ -53,13 +72,17 @@ def user_wrote_text(thread: dict, message: dict, *, opened: bool = False, reopen
         head = "The user reopened this thread and wrote:"
     else:
         head = "The user wrote in this thread:"
-    return "\n".join([
-        f"{PREFIX} {tid} \"{thread['title']}\"] {head}",
-        _quote(message["body"]),
+    lines = [f"{PREFIX} {tid} \"{thread['title']}\"] {head}", _quote(message["body"]), *_subject_line(thread)]
+    if ask_qa:
+        lines.append(
+            "The user asks you to turn this thread into a QA question: file the decision it needs from them "
+            f"with qa_ask(..., thread=\"{tid}\") so the question links back here, then reply in the thread "
+            "with the question id. If there is nothing to decide, reply in the thread saying why.")
+    lines.append(
         f"Answer in the thread, not the terminal: thread_reply(thread_id=\"{tid}\", text=...). "
         f"thread_read(thread_id=\"{tid}\") has the whole conversation; thread_list shows all your threads. "
-        "Keep this sub-topic's discussion in this thread.",
-    ])
+        "Keep this sub-topic's discussion in this thread.")
+    return "\n".join(lines)
 
 
 def install(app, store: Optional[thread_store.ThreadStore] = None):
@@ -102,6 +125,18 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
             return "typing"
         return None
 
+    def link(res_threads: list[dict], session: str) -> None:
+        talk_links.attach_to_threads(res_threads, app.get("qa"), session)
+
+    def question_of(qid: str) -> Optional[dict]:
+        qa = app.get("qa")
+        if qa is None:
+            return None
+        try:
+            return qa.get(qid)
+        except Exception:  # noqa: BLE001 -- no such question
+            return None
+
     def tell(res: dict, name: str, text: str) -> None:
         res["delivered"] = deliver(name, text)
         res["hold"] = hold_of(name) if res["delivered"] else None
@@ -139,7 +174,10 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
             return web.json_response({"error": "session is required"}, status=400)
         closed = request.query.get("closed", "1") not in ("0", "false", "no")
         res, err = await call(threads.list, session, closed=closed)
-        return err or web.json_response(res)
+        if err:
+            return err
+        await asyncio.to_thread(link, res["threads"], session)
+        return web.json_response(res)
 
     async def h_rail(_request):
         res, err = await call(threads.rail)
@@ -153,9 +191,18 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
             return web.json_response({"error": "to is required: the session the thread is with"}, status=400)
         if not known(target):
             return web.json_response({"error": f"no session {target!r} on this daemon"}, status=404)
-        res, err = await call(threads.open, actor, target, body.get("title"), body.get("text"))
+        qid = body.get("qa")
+        if qid:
+            q = await asyncio.to_thread(question_of, str(qid))
+            if q is None:
+                return web.json_response({"error": f"no QA question {qid!r}"}, status=404)
+            if q["session"] != target:
+                return web.json_response(
+                    {"error": f"question {qid} belongs to session {q['session']}, not {target}"}, status=400)
+        res, err = await call(threads.open, actor, target, body.get("title"), body.get("text"), qa=qid)
         if err:
             return err
+        await asyncio.to_thread(link, [res["thread"]], target)
         if actor == thread_store.USER and res["message"]:
             tell(res, target, user_wrote_text(res["thread"], res["message"], opened=True))
         return web.json_response(res)
@@ -165,7 +212,10 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
         res, err = await call(threads.read, request.match_info["id"], after=q.get("after") or 0,
                               limit=q.get("limit") or thread_store.PAGE,
                               reader=q.get("reader") or thread_store.USER)
-        return err or web.json_response(res)
+        if err:
+            return err
+        await asyncio.to_thread(link, [res["thread"]], res["thread"]["session"])
+        return web.json_response(res)
 
     async def h_post(request):
         body = await body_of(request)
@@ -173,22 +223,30 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
         res, err = await call(threads.post, actor, request.match_info["id"], body.get("text"))
         if err:
             return err
+        t = res["thread"]
+        await asyncio.to_thread(link, [t], t["session"])
         if actor == thread_store.USER:
-            t = res["thread"]
-            tell(res, t["session"], user_wrote_text(t, res["message"], reopened=res["reopened"]))
+            tell(res, t["session"], user_wrote_text(t, res["message"], reopened=res["reopened"],
+                                                    ask_qa=body.get("ask_qa") is True))
         return web.json_response(res)
 
     def status_route(status: str):
         async def handler(request):
             body = await body_of(request)
             res, err = await call(threads.set_status, actor_of(body), request.match_info["id"], status)
-            return err or web.json_response(res)
+            if err:
+                return err
+            await asyncio.to_thread(link, [res["thread"]], res["thread"]["session"])
+            return web.json_response(res)
         return handler
 
     async def h_title(request):
         body = await body_of(request)
         res, err = await call(threads.rename, actor_of(body), request.match_info["id"], body.get("title"))
-        return err or web.json_response(res)
+        if err:
+            return err
+        await asyncio.to_thread(link, [res["thread"]], res["thread"]["session"])
+        return web.json_response(res)
 
     r = app.router
     r.add_get("/api/threads", h_list)

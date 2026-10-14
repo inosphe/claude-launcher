@@ -591,7 +591,9 @@
               title="this pi-durable session's run as a flow chart">◇ chart</button>
       <!-- The same pane, showing the questions this session put to the user
            (qa-pane.js, daemon/qa_api.py); lit while one waits on an answer,
-           and opened by itself when the session changes a question. -->
+           and opened by itself when the session changes a question. This
+           and 🗪 threads open one conversation pane (talk-pane.js) whose
+           tabs show threads, QA, or both side by side. -->
       <button id="term-qabtn" class="term-btn" type="button" aria-pressed="false"
               title="questions this session put to you">? qa</button>
       <!-- The same pane, holding this session's sub-topic threads
@@ -1463,6 +1465,7 @@
 <script src="static/durable-flow.js"></script>
 <script src="static/qa-pane.js"></script>
 <script src="static/threads-pane.js"></script>
+<script src="static/talk-pane.js"></script>
 <script src="static/glossary-composer.js"></script>
 <script src="static/operator.js"></script>
 <script src="static/chat.js"></script>
