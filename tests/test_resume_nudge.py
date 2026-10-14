@@ -22,7 +22,7 @@ import pytest
 
 from claude_launcher import store
 from claude_launcher.cflow import engine as cflow_engine
-from claude_launcher.daemon import db, paths, resume
+from claude_launcher.daemon import activity, db, paths, resume
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import SessionManager
 
@@ -517,6 +517,73 @@ def test_a_session_working_again_is_left_alone(home, tmp_path, monkeypatch, inst
 
     assert session.delivered == []
     assert nudge.delivered == []
+
+
+_BUSY_TITLE = "\x1b]0;◐ working\x07".encode()
+
+
+class _AnimatedSession(_Session):
+    """A session with a real turn detector. ``turn_at`` lists the polls at
+    which the harness animates its title -- a turn starting -- as it does
+    when a message, a person or a reminder drives it."""
+
+    def __init__(self, name: str, cwd: str, *, turn_at=()) -> None:
+        super().__init__(name, cwd)
+        self._activity = activity.Detector("claude")
+        self.turn_at = set(turn_at)
+
+    def status(self, threshold=None) -> str:
+        if self._seen in self.turn_at:
+            self._activity.feed(_BUSY_TITLE)
+        return super().status(threshold)
+
+
+def test_busy_after_a_turn_began_is_left_alone(home, tmp_path, monkeypatch, instant):
+    """The real ``working again``: a turn started after the arm."""
+    monkeypatch.setattr(resume, "gate", lambda cwd, scope: True)
+    session = _AnimatedSession("w1", str(tmp_path), turn_at={1})
+    session.statuses = ["idle", "busy"]
+    nudge = resume.ResumeNudge(
+        _Manager({"w1": session}), ["w1"], poll=0.01, window=5.0
+    )
+    asyncio.run(_drain(nudge))
+
+    assert session.delivered == []
+    assert nudge.pending == []
+
+
+def test_busy_without_a_turn_is_waited_out_and_nudged(
+        home, tmp_path, monkeypatch, instant):
+    """Screen movement with no turn behind it is not somebody driving the
+    session. On 2026-10-14 s498 was dropped this way and sat idle until a
+    person typed (claunch-f9ene.2)."""
+    monkeypatch.setattr(resume, "gate", lambda cwd, scope: True)
+    session = _AnimatedSession("w1", str(tmp_path))
+    session.statuses = ["idle", "busy", "busy", "idle", "idle"]
+    nudge = resume.ResumeNudge(
+        _Manager({"w1": session}), ["w1"], poll=0.01, window=5.0
+    )
+    asyncio.run(_drain(nudge))
+
+    assert nudge.delivered == ["w1"]
+    assert len(session.delivered) == 1
+
+
+def test_a_turn_from_before_the_arm_does_not_count(
+        home, tmp_path, monkeypatch, instant):
+    """The restored TUI may animate while it starts; only a turn that began
+    after the session settled says somebody else is driving it."""
+    monkeypatch.setattr(resume, "gate", lambda cwd, scope: True)
+    session = _AnimatedSession("w1", str(tmp_path))
+    session._activity.feed(_BUSY_TITLE)
+    session._activity.feed(b"\x1b]0;claude\x07")
+    session.statuses = ["idle", "busy", "idle", "idle"]
+    nudge = resume.ResumeNudge(
+        _Manager({"w1": session}), ["w1"], poll=0.01, window=5.0
+    )
+    asyncio.run(_drain(nudge))
+
+    assert nudge.delivered == ["w1"]
 
 
 def test_a_refused_delivery_is_tried_again(home, tmp_path, monkeypatch, instant):
