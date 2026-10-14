@@ -182,6 +182,8 @@ def _possible_outcomes(node: ir.Node) -> Set[str]:
                 outs |= {o.get("outcome") or o.get("name") for o in ask["options"]}
             else:
                 outs.add(ask.get("on_decline") or "declined")
+            if ask.get("on_unroutable"):
+                outs.add(ask["on_unroutable"])
     else:
         outs.add(ir.OUTCOME_OK)
         if node.type == ir.T_WAIT and (node.get("probe") or node.get("checks")):
@@ -398,7 +400,10 @@ class _Builder:
             child = p["child"]
             between = p.get("between")
             add(v(_in(nid)), v(_in(child)))
-            if p.get("mode") != ir.LOOP_RETRY:
+            # zero iterations: every loop but a retry and a ``while`` whose
+            # guard is the literal true (it enters its body at least once)
+            if p.get("mode") != ir.LOOP_RETRY and not (
+                    p.get("mode") == ir.LOOP_WHILE and _literal(p.get("guard")) == (True, True)):
                 add(v(_in(nid)), v(_done(nid)))
             add(v(_out(child)), v(_done(nid)))
             add(v(_out(child)), v(_loop_again(node)))

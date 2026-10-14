@@ -2214,7 +2214,8 @@ def _new_run(st: RunStore, chart: ir.Chart, *, params: Dict[str, Any], data: Any
              parent: Optional[Dict[str, Any]] = None,
              inputs: Optional[Dict[str, Any]] = None,
              previous: Optional[Dict[str, Any]] = None,
-             side: Optional[Dict[str, Any]] = None) -> Run:
+             side: Optional[Dict[str, Any]] = None,
+             mesh: Optional[str] = None) -> Run:
     """A fresh run in ``st`` (lock held, slot empty): snapshot, state, root
     entered. The caller saves."""
     run_id = time.strftime("%Y%m%d-%H%M%S", time.gmtime(now if now is not None else None)) \
@@ -2228,6 +2229,7 @@ def _new_run(st: RunStore, chart: ir.Chart, *, params: Dict[str, Any], data: Any
         "caps": caps if isinstance(caps, dict) or caps is None else _caps_to_json(caps),
         "probe": {}, "outcome": None, "value": None,
         "scope": st.scope, "cwd": str(st.cwd), "driver": driver or "",
+        "mesh": str(mesh or "").strip(),
         store_mod.DAEMON_KEY: store_mod.daemon_of(st.scope),
     }
     if parent:
@@ -2244,7 +2246,8 @@ def _new_run(st: RunStore, chart: ir.Chart, *, params: Dict[str, Any], data: Any
     st.write_chart(chart)
     r = Run(st, chart, state, now)
     r.emit("started", run=run_id, workflow=chart.name, source=chart.source or None,
-           params=params, driver=driver or None, parent=parent, inputs=inputs, side=side)
+           params=params, driver=driver or None, parent=parent, inputs=inputs, side=side,
+           mesh=str(mesh or "").strip() or None)
     _init_collections(r, previous)
     _enter(r, chart.root, None, "root")
     _tick_time(r)
@@ -2366,8 +2369,16 @@ def start(chart: ir.Chart, *, cwd: Optional[str] = None, scope: Optional[str] = 
           driver: Optional[str] = None, caller: str = CALLER_USER,
           inputs: Optional[Dict[str, Any]] = None,
           side: Optional[Dict[str, Any]] = None,
-          next_round_of: Optional[str] = None) -> Dict[str, Any]:
+          next_round_of: Optional[str] = None,
+          mesh: Optional[str] = None) -> Dict[str, Any]:
     """Start a run of ``chart`` in the (cwd, scope) slot; returns :func:`status`.
+
+    ``mesh`` is the mesh the run's asks are routed in (``state.mesh``,
+    claunch-5itbf). The callers that know the session pin it here: the daemon
+    from the mesh the session was enrolled in, the MCP and CLI starts from
+    the one team mesh the driver is in (:func:`.asks.home_mesh`). Empty
+    leaves it to the roster at each ask, which is ambiguous once the driver
+    is in several meshes; :func:`set_mesh` names it later.
 
     ``next_round_of`` (:func:`start_next_round`): the run whose auto
     next-round request this start fulfils; under the lock the slot must still
@@ -2429,7 +2440,7 @@ def start(chart: ir.Chart, *, cwd: Optional[str] = None, scope: Optional[str] = 
         r = _new_run(st, chart, params=values, data=chart.data, caps=_caps_to_json(caps),
                      driver=who, now=now, inputs=input_values,
                      previous=previous if (previous or {}).get("workflow") == chart.name
-                     else None, side=side)
+                     else None, side=side, mesh=mesh)
         r.save()
     r.run_after()
     return status(cwd=cwd, scope=scope, now=now, tick=False)
@@ -3632,6 +3643,43 @@ def set_input(name: str, value: Any, *, session: str = "", cwd: Optional[str] = 
         data["inputs"] = current
         r.emit("input_set", name=name, value=got, by=session or "unmanaged")
         r.events[-1]["was"] = was  # kept when empty: what the write replaced
+    _mutate(cwd, scope, now, op)
+    return status(cwd=cwd, scope=scope, now=now, tick=False)
+
+
+def mesh_of(state: Dict[str, Any]) -> str:
+    """The mesh a run's asks are routed in (``state.mesh``); empty when the
+    run named none and the roster decides at each ask."""
+    return str(state.get("mesh") or "").strip()
+
+
+def set_mesh(mesh: str, *, session: str = "", caller: str = CALLER_AGENT,
+             cwd: Optional[str] = None, scope: Optional[str] = None,
+             now: Optional[float] = None) -> Dict[str, Any]:
+    """Name the mesh this run's asks are routed in (claunch-5itbf).
+
+    The driver needs it when it is in several team meshes and the roster
+    cannot choose (``responders.Pool.ambiguous``). Asks that are still
+    routing pick it up at their next routing; an ask already put to someone
+    keeps the mesh it went out in. Only the run's driver (or a person,
+    ``caller`` user) writes it. Empty clears it. Journal ``mesh_set {mesh,
+    was, by}``. Returns the status payload."""
+    name = str(mesh or "").strip()
+    session = str(session or "").strip()
+
+    def op(r: Run) -> None:
+        if caller != CALLER_USER and not may_drive(r.state, session):
+            raise FlowError(f"run {r.state.get('run_id')} is driven by "
+                            f"{driver_of(r.state) or 'no session'}; "
+                            f"{session or 'an unmanaged caller'} may not name its mesh")
+        was = mesh_of(r.state)
+        r.state["mesh"] = name
+        for rec in (r.state.get("asks") or {}).values():
+            if rec.get("status") == "open" and rec.get("resolution") == RES_ROUTING:
+                rec["mesh"] = name
+                rec["retry_at"] = None
+        r.emit("mesh_set", mesh=name or None, was=was or None,
+               by=session or ("user" if caller == CALLER_USER else "unmanaged"))
     _mutate(cwd, scope, now, op)
     return status(cwd=cwd, scope=scope, now=now, tick=False)
 
@@ -4941,6 +4989,8 @@ def describe(r: Run) -> Dict[str, Any]:
         "scope": s.get("scope"), "started": s.get("started"),
         "driver": driver_of(s) or None,
     }
+    if s.get("mesh"):
+        out["mesh"] = s["mesh"]
     if s.get("parent"):
         out["parent"] = s["parent"]
     inputs = (s.get("data") or {}).get("inputs")
@@ -5302,6 +5352,7 @@ def _ask_spec(node: ir.Node) -> Dict[str, Any]:
         "default_option": raw.get("default_option") or (default or None),
         "timeout": float(raw["timeout"]) if raw.get("timeout") else None,
         "on_decline": raw.get("on_decline") or ASK_DECLINED,
+        "on_unroutable": raw.get("on_unroutable") or None,
         "options": list(options) if options else None,
     }
 
@@ -5422,6 +5473,7 @@ def _open_ask(r: Run, iid: str, node: ir.Node) -> None:
         "from": spec["from"], "otherwise": spec["otherwise"],
         "default_option": spec["default_option"], "timeout": spec["timeout"],
         "on_decline": None if spec["options"] else spec["on_decline"],
+        "on_unroutable": spec.get("on_unroutable"),
         "options": spec["options"], "status": "open",
         "resolution": RES_ROUTING if spec["from"] else None,
         "group": 0, "asked": [], "skipped": [], "deadline": None, "deferrals": 0,
@@ -5480,6 +5532,32 @@ def _ask_fall(r: Run, rec: Dict[str, Any], cause: str) -> None:
             return  # a default naming no option: the driver decides
         _ask_resolve(r, rec, default, by="unanswered",
                      reason="declared default, taken unanswered", channel="default")
+
+
+def _ask_unroutable(r: Run, rec: Dict[str, Any], problem: str, meshes: List[str]) -> None:
+    """Every group ran out because the roster could not be read as a pool --
+    several meshes and none named, no membership, no daemon -- and the ask
+    declares ``on_unroutable``: the task finishes with that outcome instead of
+    taking ``otherwise`` (claunch-5itbf). ``otherwise`` answers "nobody holds
+    the role"; this is "nobody could be looked for", and the definition
+    decides what that means (improv-worker-v2 puts it to the agent as a
+    choice, so the skipped review is a recorded decision, not a default)."""
+    iid = rec["instance"]
+    outcome = str(rec["on_unroutable"])
+    rec["asked"], rec["deadline"], rec["retry_at"] = [], None, None
+    rec["status"] = "unroutable"
+    rec["closed"] = store_mod.utcnow()
+    r.state["approvals"] = [a for a in r.state.get("approvals") or []
+                            if not (a.get("kind") == "ask" and a.get("ask") == rec["id"])]
+    r.emit("fallback", decision="ask", ask=rec["id"], node=rec["node"], instance=iid,
+           cause=problem, route=f"ask -> {outcome}")
+    if iid not in r.inst:
+        return
+    value: Dict[str, Any] = {"reason": problem, "ask": rec["id"],
+                             "mesh": mesh_of(r.state) or None}
+    if meshes:
+        value["meshes"] = list(meshes)
+    _complete(r, iid, outcome, value)
 
 
 def _withdraw(r: Run, rec: Dict[str, Any], why: str,
@@ -5668,6 +5746,9 @@ def ask_apply_route(plans: List[Dict[str, Any]], *, cwd: Optional[str] = None,
                 routed.append({**plan, "record": json.loads(json.dumps(rec)),
                                "workflow": r.state.get("workflow"),
                                "run": r.state.get("run_id")})
+            elif plan.get("unroutable") and rec.get("on_unroutable"):
+                rec["group"] = int(plan["group"])
+                _ask_unroutable(r, rec, str(plan["unroutable"]), plan.get("meshes") or [])
             else:
                 rec["group"] = int(plan["group"])
                 reasons = [s.get("reason") for s in rec.get("skipped") or []]

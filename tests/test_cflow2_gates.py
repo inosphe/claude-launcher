@@ -712,3 +712,156 @@ def test_fork_applies_defaults_and_refuses_missing_required(tmp_path):
     runtime.fork("g", {"need": "y", "who": "bo"}, **d.kw())
     prompts = sorted(t["prompt"] for t in d.status()["tasks"])
     assert prompts == ["hi bo 2 y", "lead"]
+
+
+# -- the run's mesh and unroutable asks (claunch-5itbf) -------------------------
+
+
+UNROUTABLE = """
+    nodes:
+      r:
+        prompt: prepare the review material
+        ask:
+          prompt: review?
+          from: [{role: reviewer, scope: sibling}, {role: leader, scope: ancestor}]
+          otherwise: "self:pass"
+          on_unroutable: unrouted
+          options: {pass: {outcome: ok}, changes: {outcome: changes}}
+        returns: {ok: {}, changes: {}, unrouted: {reason: str, meshes: "list?"}}
+      b: {prompt: b}
+      c: {prompt: "c ${result.r.value.meshes}"}
+    body:
+      try: [r, b]
+      catch: {unrouted: c}
+"""
+
+
+def _ambiguous(**_):
+    return responders.Pool(problem="session 'w1' is in several meshes (m, t)",
+                           ambiguous=("m", "t"))
+
+
+def test_an_unroutable_ask_finishes_with_on_unroutable_not_otherwise(tmp_path):
+    d = Drv(tmp_path, UNROUTABLE)
+    out = Outbox()
+    _route(d, pool=_ambiguous, out=out)
+    assert out.sent == []
+    st = d.status()
+    assert st["tasks"][0]["label"] == "c" and '["m", "t"]' in st["tasks"][0]["prompt"]
+    value = d.state()["result"]["r"]["value"]
+    assert value["meshes"] == ["m", "t"] and "several meshes" in value["reason"]
+    rec = next(iter(d.state()["asks"].values()))
+    assert rec["status"] == "unroutable" and not d.state()["approvals"]
+    fb = [e for e in d.events("fallback") if e.get("decision") == "ask"]
+    assert fb[-1]["route"] == "ask -> unrouted"
+    assert not d.events("ask_answered")  # nobody answered, not even "unanswered"
+
+
+def test_nobody_holding_the_role_still_takes_otherwise(tmp_path):
+    d = Drv(tmp_path, UNROUTABLE)
+    _route(d, pool=_pool(members={}, reachable=set(), ancestors=[], siblings=set()))
+    assert d.status()["tasks"][0]["label"] == "b"  # self:pass, unanswered
+    assert d.events("ask_answered")[0]["by"] == "unanswered"
+
+
+def test_without_on_unroutable_an_unroutable_ask_falls_to_otherwise(tmp_path):
+    d = Drv(tmp_path, DELEGATED)
+    _route(d, pool=_ambiguous)
+    assert d.status()["asks"][0]["resolution"] == "human"
+
+
+def test_on_unroutable_validation():
+    with pytest.raises(frontend.FrontendError, match="on_unroutable cannot be 'ok'"):
+        _compile("nodes:\n  a: {prompt: a, ask: {prompt: p, from: [{role: r}], "
+                 "on_unroutable: ok}}\nbody: a\n")
+    with pytest.raises(frontend.FrontendError, match="outcome name"):
+        _compile("nodes:\n  a: {prompt: a, ask: {prompt: p, from: [{role: r}], "
+                 "on_unroutable: 'bad name'}}\nbody: a\n")
+
+
+def test_the_run_mesh_is_kept_and_used_for_routing(tmp_path):
+    seen = []
+
+    def pool(**kw):
+        seen.append(kw["mesh"])
+        return _pool()(**kw)
+
+    st = runtime.start(_compile(DELEGATED), cwd=str(tmp_path), scope=SCOPE, caps={}, now=T0,
+                       mesh="team")
+    assert st["mesh"] == "team"
+    asks.route(cwd=str(tmp_path), scope=SCOPE, now=T0, pool_fn=pool, deliver_fn=Outbox())
+    assert seen == ["team"]
+    assert asks.who_answers("a", cwd=str(tmp_path), scope=SCOPE, pool_fn=pool)["mesh"] == "m"
+    assert seen[-1] == "team"
+    asks.who_answers("a", cwd=str(tmp_path), scope=SCOPE, mesh="other", pool_fn=pool)
+    assert seen[-1] == "other"
+
+
+def test_set_mesh_reroutes_a_routing_ask_and_only_the_driver_writes_it(tmp_path):
+    d = Drv(tmp_path, UNROUTABLE)
+    seen = []
+
+    def pool(**kw):
+        seen.append(kw["mesh"])
+        return _pool()(**kw) if kw["mesh"] == "m" else _ambiguous()
+
+    silent = lambda **_: responders.Pool(problem="no reply", unreadable=True)  # noqa: E731
+    _route(d, pool=silent)  # deferred: still routing
+    with pytest.raises(runtime.FlowError, match="may not name its mesh"):
+        runtime.set_mesh("m", session="intruder", **d.kw())
+    st = runtime.set_mesh("m", session=SCOPE, **d.kw())
+    assert st["mesh"] == "m"
+    assert d.events("mesh_set")[-1]["mesh"] == "m"
+    _route(d, pool=pool)
+    assert seen == ["m"] and d.status()["asks"][0]["asked"] == ["rev"]
+    # a person's terminal may name it too; empty clears it
+    assert "mesh" not in runtime.set_mesh("", caller=runtime.CALLER_USER, **d.kw())
+
+
+def test_home_mesh_is_the_one_mesh_or_nothing():
+    assert asks.home_mesh("", pool_fn=_pool()) == ""
+    assert asks.home_mesh("w1", pool_fn=_pool()) == "m"
+    assert asks.home_mesh("w1", pool_fn=_ambiguous) == ""
+
+
+def test_responders_cli_says_cannot_tell_for_several_meshes(tmp_path, monkeypatch, capsys):
+    from claude_launcher import cli_cflow2
+
+    d = Drv(tmp_path, REVIEW)
+    monkeypatch.chdir(tmp_path)
+    seen = []
+
+    def pool(**kw):
+        seen.append(kw["mesh"])
+        return _preview_pool()(**kw) if kw["mesh"] == "m" else _ambiguous()
+
+    monkeypatch.setattr(asks, "default_pool", pool)
+
+    def run(mesh=None):
+        return cli_cflow2._cmd_responders(SimpleNamespace(
+            node="review", role="reviewer", scope=d.scope, json=False, mesh=mesh))
+
+    assert run() == 2
+    assert "claunch cflow2 mesh" in capsys.readouterr().err
+    assert run("m") == 0 and seen[-1] == "m"
+    runtime.set_mesh("m", caller=runtime.CALLER_USER, cwd=d.cwd, scope=d.scope)
+    assert run() == 0 and seen[-1] == "m"
+
+
+def test_cli_mesh_shows_and_names_the_run_mesh(tmp_path, monkeypatch, capsys):
+    from claude_launcher import cli_cflow2
+
+    d = Drv(tmp_path, REVIEW)
+    monkeypatch.chdir(tmp_path)
+
+    def run(name=None, clear=False):
+        return cli_cflow2._guarded(cli_cflow2._cmd_mesh)(
+            SimpleNamespace(name=name, clear=clear, scope=d.scope))
+
+    assert run() == 0 and "none named" in capsys.readouterr().out
+    assert run("team") == 0 and "mesh = team" in capsys.readouterr().out
+    assert d.state()["mesh"] == "team"
+    monkeypatch.setenv("CLAUNCH_SESSION", "someone-else")
+    assert run("x") == 1 and "may not operate" in capsys.readouterr().err
+    monkeypatch.delenv("CLAUNCH_SESSION")
+    assert run(clear=True) == 0 and d.state()["mesh"] == ""

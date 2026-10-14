@@ -80,6 +80,9 @@ TOOLS = [
                 "params": {"type": "object", "description": "values for the definition's params"},
                 "inputs": {"type": "object", "description": "values for the definition's "
                            "typed start inputs (its 'inputs' schema)"},
+                "mesh": {"type": "string", "description": "the mesh the run's asks are "
+                         "routed in. Omit: the one team mesh this session is in now, kept "
+                         "for the run ('claunch cflow2 mesh <name>' changes it later)"},
                 "force": {
                     "type": "boolean",
                     "description": "abort and archive a live run of yours first -- only "
@@ -440,9 +443,14 @@ def _call(name: str, args: dict) -> Dict[str, Any]:
         if force:
             runtime.authorize(cwd=cwd, scope=own, session=session)
         chart = runtime.load_definition(workflow, cwd)
+        mesh = str(args.get("mesh") or "").strip()
+        if not mesh:
+            from . import asks
+
+            mesh = asks.home_mesh(session, cwd=cwd)
         return runtime.start(chart, cwd=cwd, scope=own, params=params, inputs=inputs,
                              caps=runtime.resolve_caps(), force=force,
-                             driver=session, caller=runtime.CALLER_AGENT)
+                             driver=session, caller=runtime.CALLER_AGENT, mesh=mesh)
     if name == "flow_status":
         cwd, scope = _where(args)
         st = store.RunStore(cwd, scope)

@@ -1255,3 +1255,109 @@ def test_round_report_reads_the_round_records_before_writing():
     assert node["executor"][0] == "session"
     for flag in ("-t <scope>", "--session <scope>", "report path --session <scope>"):
         assert flag in words, flag
+
+
+# -- claunch-5itbf: an unroutable peer review is the agent's recorded choice ---
+
+
+def _peer_review_loop(tmp_path):
+    """The definition's peer-review loop (the review question and its
+    unrouted handler) run on its own, followed by a marker task."""
+    import json
+
+    from claude_launcher.cflow2 import frontend, runtime
+
+    doc = yaml.load(V2.read_text(encoding="utf-8"), Loader=frontend._Loader)
+
+    def find(o):
+        if isinstance(o, dict):
+            if o.get("id") == "peer-review-loop":
+                return o
+            o = list(o.values())
+        if isinstance(o, list):
+            for v in o:
+                hit = find(v)
+                if hit:
+                    return hit
+        return None
+
+    flow = {"cflow": 2, "name": "peer-review-route",
+            "returns": {"rework": {"reason": "str?", "rework": "bool"}},
+            "nodes": {"peer-review": doc["nodes"]["peer-review"], "after": {"prompt": "after"}},
+            "body": [find(doc["procedures"]) or find(doc["body"]), "after"]}
+    chart = frontend.compile_text(json.dumps(flow, ensure_ascii=False))
+    runtime.start(chart, cwd=str(tmp_path), scope="m", caps={}, now=1.0)
+    return {"cwd": str(tmp_path), "scope": "m", "now": 1.0}
+
+
+def _ambiguous_pool(**_):
+    from claude_launcher.cflow import responders
+
+    return responders.Pool(problem="session 'm' is in several meshes (gds6, temp)",
+                           ambiguous=("gds6", "temp"))
+
+
+def _reviewer_pool(**kw):
+    from claude_launcher.cflow import responders
+
+    if kw.get("mesh") != "gds6":
+        return _ambiguous_pool()
+    rev = responders.Responder(session="s-rev", handle="rev", role="reviewer", local=True,
+                               reachability="idle")
+    return responders.Pool(mesh="gds6", me="m", members={"rev": rev}, reachable={"rev"},
+                           descendants={"rev"}, generation={"rev": 1})
+
+
+def test_peer_review_declares_on_unroutable():
+    chart = _chart()
+    node = next(n for n in chart.nodes.values() if n.label == "peer-review")
+    assert node.get("ask")["on_unroutable"] == "unrouted"
+    assert node.get("ask")["otherwise"] == "self"  # self:pass still covers "nobody"
+    assert "unrouted" in node.get("returns")
+    choice = next(n for n in chart.nodes.values() if n.label == "review-unrouted")
+    assert choice.type == "choose" and choice.get("chooser") == "agent"
+    assert choice.get("require_reason") is True
+    assert sorted(o["name"] for o in choice.get("options")) == [
+        "direct-changes", "direct-pass", "retry", "skip"]
+
+
+def test_unroutable_review_goes_to_the_agent_and_retry_asks_again(tmp_path, monkeypatch):
+    from claude_launcher.cflow2 import asks, runtime
+
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    kw = _peer_review_loop(tmp_path)
+    sent = []
+    deliver = lambda rec, ctx: sent.append(ctx) or None  # noqa: E731
+    asks.route(pool_fn=_ambiguous_pool, deliver_fn=deliver, **kw)
+    st = runtime.status(tick=False, **kw)
+    assert sent == [] and st["tasks"] == []
+    (choice,) = st["choices"]
+    assert choice["label"] == "review-unrouted" and "several meshes" in choice["prompt"]
+    with pytest.raises(runtime.FlowError):
+        runtime.select(None, "retry", **kw)  # require_reason
+    runtime.set_mesh("gds6", caller=runtime.CALLER_USER, **kw)
+    runtime.select(None, "retry", "named gds6 for the run", **kw)
+    asks.route(pool_fn=_reviewer_pool, deliver_fn=deliver, **kw)
+    (a,) = runtime.status(tick=False, **kw)["asks"]
+    assert a["label"] == "peer-review" and a["asked"] == ["rev"]
+    assert sent[-1]["mesh"] == "gds6"
+    runtime.answer(a["ask"], "pass", "ok", by_session="s-rev", **kw)
+    assert [t["label"] for t in runtime.status(tick=False, **kw)["tasks"]] == ["after"]
+    picked = [e for e in runtime.journal(cwd=kw["cwd"], scope="m") if e["event"] == "selected"]
+    assert picked and picked[-1].get("reason") == "named gds6 for the run"
+
+
+@pytest.mark.parametrize("option,end", [("skip", "after"), ("direct-pass", "after"),
+                                        ("direct-changes", "rework")])
+def test_unroutable_review_options(tmp_path, monkeypatch, option, end):
+    from claude_launcher.cflow2 import asks, runtime
+
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    kw = _peer_review_loop(tmp_path)
+    asks.route(pool_fn=_ambiguous_pool, deliver_fn=lambda *a: None, **kw)
+    runtime.select("review-unrouted", option, "checked the board", **kw)
+    st = runtime.status(tick=False, **kw)
+    if end == "after":
+        assert [t["label"] for t in st["tasks"]] == ["after"]
+    else:
+        assert st["status"] == "done" and st.get("outcome") == "rework"

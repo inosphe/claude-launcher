@@ -187,6 +187,11 @@ class Pool:
     #: mesh's own edge table stores no such attribution, and an edge nobody
     #: can tell from a deliberate one erases the judgement that made it.
     wired: List[str] = field(default_factory=list)
+    #: The meshes the session is in when ``problem`` is that there are
+    #: several and nothing named one. Unlike the other problems it is a
+    #: setting, not a fact about the roster: naming the mesh settles it, so a
+    #: preview reports it as "could not tell" rather than "nobody".
+    ambiguous: Tuple[str, ...] = ()
 
     def relation(self, handle: str) -> str:
         """``ancestor`` / ``descendant`` / ``sibling`` / ``collateral`` — how
@@ -423,11 +428,13 @@ def pool(*, session: str, mesh: str = "", cwd: Optional[str] = None) -> Pool:
         if teams:
             found = teams
     if len(found) > 1:
-        names = ", ".join(sorted(str(i.get("name")) for i in found))
+        meshes = tuple(sorted(str(i.get("name")) for i in found))
         return Pool(
-            problem=f"session {session!r} is in several meshes ({names}) and "
-            f"the run does not say which one to ask — start it with an "
-            f"explicit mesh"
+            problem=f"session {session!r} is in several meshes "
+            f"({', '.join(meshes)}) and the run does not say which one to ask — "
+            f"name it for the run ('claunch cflow2 mesh <name>' for a v2 run, "
+            f"start a v1 run with an explicit mesh)",
+            ambiguous=meshes,
         )
     return _pool_from(found[0], session)
 

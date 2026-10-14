@@ -358,11 +358,16 @@ def _cmd_start(args: argparse.Namespace) -> int:
 
     if args.force:
         _refuse_own_session(args.scope, "start --force")
+    from .cflow2 import asks
+
     chart = _load(args.workflow)
+    mesh = getattr(args, "mesh", None) or asks.home_mesh(
+        runtime.default_driver(args.scope), cwd=os.getcwd())
     payload = runtime.start(chart, cwd=os.getcwd(), scope=args.scope,
                             params=_parse_params(args.param),
                             inputs=_parse_inputs(args.input, args.inputs_file),
-                            caps=runtime.resolve_caps(args.profile), force=args.force)
+                            caps=runtime.resolve_caps(args.profile), force=args.force,
+                            mesh=mesh)
     _print_status(payload, args.json)
     return 0
 
@@ -600,14 +605,15 @@ def _cmd_responders(args: argparse.Namespace) -> int:
 
     Exit 0 when some group reaches an answerable member, 1 when none does, 2
     when it cannot be told (no v2 run here, no such node, a node that asks
-    nobody, a roster that did not answer) -- so a step can tell "nobody" from
-    "could not look" (claunch-3va8h).
+    nobody, a roster that did not answer, a session in several meshes with
+    none named for the run) -- so a step can tell "nobody" from "could not
+    look" (claunch-3va8h, claunch-5itbf).
     """
     from .cflow2 import asks
 
     try:
         payload = asks.who_answers(args.node, role=args.role or "", cwd=os.getcwd(),
-                                   scope=args.scope)
+                                   scope=args.scope, mesh=getattr(args, "mesh", "") or "")
     except _errors() as exc:
         print(f"responders: {exc}", file=sys.stderr)
         return 2
@@ -622,7 +628,34 @@ def _cmd_responders(args: argparse.Namespace) -> int:
             print(f"  {group['candidate']}: " + (who or f"nobody -- {group.get('reason')}"))
     if payload["unreadable"]:
         return 2
+    if payload.get("ambiguous") and not payload["resolves"]:
+        # not "nobody": nobody was looked for. Naming the mesh settles it.
+        print(f"cannot tell: the session is in several meshes "
+              f"({', '.join(payload['ambiguous'])}); name the run's with "
+              f"'claunch cflow2 mesh <name>' (or pass --mesh to look in one)",
+              file=sys.stderr)
+        return 2
     return 0 if payload["resolves"] else 1
+
+
+def _cmd_mesh(args: argparse.Namespace) -> int:
+    """Show or name the mesh the run's asks are routed in (claunch-5itbf).
+    Inside a session only the run's driver names it; a person's terminal
+    (no session) may too."""
+    from .cflow2 import runtime, store
+
+    if args.name is None and not args.clear:
+        payload = runtime.status(cwd=os.getcwd(), scope=args.scope, tick=False)
+        print(payload.get("mesh") or "(none named -- the roster decides at each ask)")
+        return 0
+    session = os.environ.get(store.SESSION_ENV, "").strip()
+    if session:
+        runtime.authorize(cwd=os.getcwd(), scope=args.scope, session=session)
+    payload = runtime.set_mesh("" if args.clear else args.name, session=session,
+                               caller=runtime.CALLER_AGENT if session else runtime.CALLER_USER,
+                               cwd=os.getcwd(), scope=args.scope)
+    print(f"mesh = {payload.get('mesh') or '(none)'}")
+    return 0
 
 
 def _cmd_resume(args: argparse.Namespace) -> int:
@@ -858,6 +891,8 @@ def register(sub) -> None:
     q.add_argument("--inputs-file", metavar="PATH",
                    help="a JSON object of start inputs (--input overrides its keys)")
     q.add_argument("--force", action="store_true", help="abort and archive a live run first")
+    q.add_argument("--mesh", help="the mesh the run's asks are routed in (default: the one "
+                   "team mesh the driving session is in now)")
     q.add_argument("--json", action="store_true")
     q.set_defaults(func=_guarded(_cmd_start))
 
@@ -956,8 +991,16 @@ def register(sub) -> None:
     q.add_argument("node", help="the task whose ask to resolve (name or node id)")
     q.add_argument("--role", help="only the groups naming this role -- e.g. 'reviewer', so a "
                    "leader group does not answer 'is there a reviewer'")
+    q.add_argument("--mesh", help="look in this mesh instead of the run's own (state.mesh) "
+                   "-- for a session in several meshes")
     q.add_argument("--json", action="store_true", help="print raw JSON")
     q.set_defaults(func=_cmd_responders)
+
+    q = scoped(csub.add_parser("mesh", help="show or name the mesh this run's asks are "
+                               "routed in (needed when its session is in several meshes)"))
+    q.add_argument("name", nargs="?", help="the mesh to route asks in; omit to show it")
+    q.add_argument("--clear", action="store_true", help="name none: the roster decides")
+    q.set_defaults(func=_guarded(_cmd_mesh))
 
     q = csub.add_parser("collection", help="the run's collections: list them, or change "
                         "one as a person (push, set, remove)")

@@ -1926,7 +1926,7 @@ nodes:
       종료 코드가 판정이다 — 0이면 reviewer 그룹 중 하나가 답할 세션에
       닿는다(자식 리뷰어, 형제 리뷰어, 조상 리뷰어 순서), 1이면 아무
       그룹도 닿지 않는다, 2이면 재지 못했다(이 디렉터리에 v2 런이 없음,
-      roster 무응답 등).
+      roster 무응답, 세션이 팀 메시 여럿에 있는데 런이 메시를 지정하지 않음 등).
 
       · 0 — 할 일이 없다. 출력(어느 그룹이 누구에게 닿는지와 그 관계)을
         보고에 옮기고 넘어간다. 이 런이 앞 회차에 세운 자식 리뷰어가
@@ -1957,8 +1957,12 @@ nodes:
         채 태어나므로 배선할 것이 없다). 스폰이 정책으로 거절되면
         (`spawn.<키>`) 재시도하지 않는다 — 거절 문구를 보고에 옮기고
         넘어간다: peer-review는 리더에게 가거나 리뷰 없이 통과한다.
-      · 2 — 재지 못한 것은 없는 것이 아니다. 한 번 더 재고, 그래도 2면
-        출력 그대로 보고에 남기고 스폰 없이 넘어간다.
+      · 2 — 재지 못한 것은 없는 것이 아니다. 출력이 `several meshes`면
+        리뷰어가 있는(또는 세울) 메시를 런에 지정한다 — `claunch cflow2 mesh
+        <메시>` — 그리고 다시 잰다(claunch-5itbf; 런의 질문은 그 메시로
+        나간다). 그 밖이면 한 번 더 재고, 그래도 2면 출력 그대로 보고에
+        남기고 스폰 없이 넘어간다. 넘어간 peer-review가 명단을 못 읽으면
+        review-unrouted 선택으로 온다.
 
       이 런이 세운 자식 리뷰어는 런이 끝날 때까지 산다 — 재리뷰(changes
       → work → … → peer-review)와 다음 회차의 리뷰에 다시 쓴다. 끝내는
@@ -2019,6 +2023,11 @@ nodes:
         - {role: leader, scope: ancestor}
         - {role: leader, scope: sibling}
       otherwise: "self:pass"
+      # 메시 명단을 읽어 낼 수 없어서(세션이 팀 메시 여럿에 있고 런이 메시를
+      # 지정하지 않음, 메시 소속 없음, 데몬 무응답) 아무 그룹도 찾아보지 못한
+      # 경우는 「응답자 없음」과 다르다 — self:pass로 조용히 통과하지 않고
+      # unrouted로 끝나 review-unrouted 선택(에이전트)으로 간다(claunch-5itbf).
+      on_unroutable: unrouted
       timeout: 900
       options:
         pass: {outcome: ok, description: 리뷰 통과 — 상위 통합 요청으로 간다}
@@ -2046,6 +2055,7 @@ nodes:
     returns:
       ok: {}
       changes: {what: "str?"}
+      unrouted: {reason: str, ask: "str?", mesh: "str?", meshes: "list?"}
     effects: [board.write, mesh.send]
 
   integration-request:
@@ -3491,11 +3501,63 @@ procedures:
                       value: {merge: "$result.landed.value.merge", tip: "$result.landed.value.tip"}
                 - else: []
             - reviewer-ensure
-            - seq: [peer-review]
-              on:
-                changes:
-                  return: rework
-                  value: {reason: "$result['peer-review'].value.what", rework: true}
+            # peer-review가 unrouted로 끝나면(질문을 보낼 명단을 읽지 못함) 에이전트가
+            # 처리를 고르고 그 선택과 이유가 저널에 남는다 — 사람을 세우지 않는다
+            # (claunch-5itbf). retry는 메시를 지정한 뒤 같은 질문을 다시 연다.
+            - id: peer-review-loop
+              loop:
+                while: "true"
+                max: 5
+                do:
+                  - try:
+                      seq: [peer-review]
+                      on:
+                        changes:
+                          return: rework
+                          value: {reason: "$result['peer-review'].value.what", rework: true}
+                    catch:
+                      unrouted:
+                        id: review-unrouted
+                        choose:
+                          chooser: agent
+                          require_reason: true
+                          prompt: |
+                            peer-review의 질문이 아무에게도 나가지 못했다. 응답자가 없어서가
+                            아니라 응답자를 찾을 명단을 읽지 못해서다:
+                              ${result['peer-review'].value.reason}
+                            런의 메시: ${result['peer-review'].value.mesh}, 소속 메시: ${result['peer-review'].value.meshes}
+
+                            처리를 고르고, reason에 무엇을 확인해 무엇이 나왔는지 적는다.
+                            · retry — 원인을 고쳤다. 소속 메시가 여럿이면 리뷰어가 있는
+                              메시를 런에 지정한다: `claunch cflow2 mesh <메시>` 뒤
+                              `claunch cflow2 responders peer-review --role reviewer`가
+                              0인지 본다. 데몬 무응답이었으면 다시 응답하는지 확인한다.
+                              같은 질문이 다시 열린다.
+                            · direct-pass — 런의 질문 없이 리뷰어(`<내 세션>-rev` 등)에게
+                              메시로 직접 리뷰를 청했고, 보드에 그 리뷰어의
+                              `REVIEWED: pass @ <tip>` 코멘트가 있다. reason에 그 코멘트의
+                              리뷰어와 tip을 적는다.
+                            · direct-changes — 같은 직접 리뷰의 결과가 `CHANGES REQUESTED:`
+                              코멘트다. 작업으로 돌아간다.
+                            · skip — 리뷰 없이 통합 요청으로 간다. 리뷰어가 없고 세울 수도
+                              없을 때만 고른다. 이슈에 `REVIEW SKIPPED: <이유>` 코멘트를
+                              남기고, 방어선은 상위의 통합 후 전체 스윕이다.
+                          options:
+                            retry:
+                              description: 메시 지정 등으로 원인을 고쳤다 — peer-review를 다시 연다
+                              then: {continue: peer-review-loop}
+                            direct-pass:
+                              description: 리뷰어에게 직접 받은 리뷰가 통과다(보드의 REVIEWED 코멘트)
+                              then: {break: peer-review-loop}
+                            direct-changes:
+                              description: 리뷰어에게 직접 받은 리뷰가 CHANGES REQUESTED다 — 작업으로 돌아간다
+                              then:
+                                return: rework
+                                value: {reason: "직접 리뷰의 CHANGES REQUESTED 코멘트(보드)", rework: true}
+                            skip:
+                              description: 리뷰 없이 진행한다(REVIEW SKIPPED 코멘트를 남긴다)
+                              then: {break: peer-review-loop}
+                  - {break: peer-review-loop}
             - id: publish
               cond:
                 - if: "$data.landing.medium == 'pr'"
