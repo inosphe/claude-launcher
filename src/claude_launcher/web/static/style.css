@@ -7426,8 +7426,11 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
    the left, the chosen conversation and its composer on the right. The pane
    fills the split slot; each half scrolls on its own. */
 .th-pane { display: flex; flex-direction: column; height: 100%; min-height: 0; }
-.th-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; padding: 8px 0 6px; }
-.th-head h2 { font-size: 15px; margin: 0; }
+.th-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; padding: 4px 0 4px; }
+.th-head h2 { font-size: 14px; margin: 0; }
+.th-fold { font-size: 11px; padding: 1px 8px; }
+/* The list folded away (claunch-1n081): the conversation takes the width. */
+.th-pane.th-folded .th-side { display: none; }
 .th-head .wf-warning { flex-basis: 100%; margin: 0; font-size: 12px; }
 .th-meta { color: #7d8590; font-size: 11px; font-family: ui-monospace, monospace; }
 .th-body { display: flex; flex: 1 1 0; min-height: 0; gap: 10px; }
@@ -7456,11 +7459,13 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
   border-bottom: 1px solid #21262d; }
 .th-convo-title { font-size: 14px; margin: 0; flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
 .th-messages { flex: 1 1 0; min-height: 60px; overflow-y: auto; display: flex; flex-direction: column;
-  gap: 10px; padding: 10px 4px; overscroll-behavior: contain; }
+  gap: 8px; padding: 8px 2px; overscroll-behavior: contain; }
 .th-empty { margin: auto; color: #7d8590; font-size: 12px; text-align: center; }
 /* One bubble per message (claunch-5usj6): the agent's on the left, the
-   user's on the right in the accent colour; both bodies are markdown. */
-.th-msg { max-width: min(88%, 760px); padding: 8px 12px 9px; border-radius: 10px; font-size: 13px;
+   user's on the right in the accent colour; both bodies are markdown.
+   No fixed width cap (claunch-1n081): a bubble may use the column's width,
+   less a margin that keeps the two sides apart. */
+.th-msg { max-width: 94%; padding: 8px 12px 9px; border-radius: 10px; font-size: 13px;
   line-height: 1.5; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25); }
 .th-msg.th-user { align-self: flex-end; background: #12274a; border: 1px solid #1f4f99;
   border-bottom-right-radius: 3px; }
@@ -7484,13 +7489,14 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .th-msg.th-user .md-code, .th-msg.th-user .md-pre { background: #0b1a33; }
 .th-msg.th-user .md-link { color: #79c0ff; }
 /* The composer: one framed box, the text on top and a footer with the key
-   hint and the send button. The box grows with its text (fit()). */
+   hint and the send button. Empty, it is one line high (claunch-1n081);
+   the box grows with its text (fit()). */
 .th-compose { display: flex; flex-direction: column; gap: 0; margin-top: 6px; border: 1px solid #30363d;
   border-radius: 8px; background: #0d1117; }
 .th-compose:focus-within { border-color: #1f6feb; box-shadow: 0 0 0 1px #1f6feb; }
 .th-compose .th-text { border: none; background: transparent; resize: none; padding: 8px 10px 4px;
-  min-height: 40px; max-height: 220px; outline: none; line-height: 1.45; }
-.th-compose-foot { display: flex; align-items: center; gap: 8px; padding: 4px 6px 6px 10px; }
+  min-height: 30px; max-height: 220px; outline: none; line-height: 1.45; }
+.th-compose-foot { display: flex; align-items: center; gap: 8px; padding: 2px 6px 4px 10px; }
 .th-hint { flex: 1 1 auto; min-width: 0; color: #6e7681; font-size: 11px; overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; }
 .th-send { background: #1f6feb; border-color: #1f6feb; color: #fff; font-weight: 600; padding: 3px 14px; }
@@ -7501,7 +7507,7 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
    over the threads pane, the QA pane, or both in two columns. Each column
    scrolls on its own, so the slot itself does not. */
 .talk-pane { display: flex; flex-direction: column; height: 100%; min-height: 0; }
-.talk-tabs { display: flex; gap: 2px; padding: 8px 0 4px; border-bottom: 1px solid #21262d; }
+.talk-tabs { display: flex; gap: 2px; padding: 4px 0 2px; border-bottom: 1px solid #21262d; }
 .talk-tab { background: transparent; color: #7d8590; border: 1px solid transparent; border-bottom: none;
   border-radius: 5px 5px 0 0; padding: 3px 12px; font: inherit; font-size: 12px; cursor: pointer; }
 .talk-tab:hover { color: #e6edf3; }
