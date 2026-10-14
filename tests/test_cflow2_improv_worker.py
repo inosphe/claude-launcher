@@ -1123,6 +1123,28 @@ def test_self_improve_is_a_library_procedure_any_v2_definition_can_call(tmp_path
         assert ("claunch-x" in st["tasks"][0]["prompt"]) == bool(issues)
 
 
+def test_self_improve_without_an_issue_renders_the_issue_as_empty(tmp_path, monkeypatch):
+    """claunch-8dzu2: a round with no claimed issue (no-issue-wait) leaves
+    ``$data.claim.issue`` null. The engine turns a null argument into the
+    param's default and leaves a reference to a null value unrendered, so
+    without a default the review prompt carried the literal
+    ``${params.issue}``. The param defaults to the empty string the
+    description promises."""
+    from claude_launcher.cflow2 import frontend, runtime
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    flow = {"cflow": 2, "name": "other-flow", "include": ["self-improve-common"],
+            "data": {"claim": {"issue": None}},
+            "body": [{"id": "improve", "call": "self-improve",
+                      "with": {"issue": "$data.claim.issue", "workflow": "other-flow"}}]}
+    chart = frontend.compile_text(yaml.safe_dump(flow, allow_unicode=True, sort_keys=False),
+                                  resolve_include=layers.resolver(str(tmp_path)))
+    st = runtime.start(chart, caps={}, cwd=str(tmp_path), now=1.0)
+    review = next(t for t in st["tasks"] if t["label"].endswith("self-improve-review"))
+    assert "${params.issue}" not in review["prompt"]
+    assert "None" not in review["prompt"]
+    assert "주 이슈: \n" in review["prompt"]
+
+
 def test_improv_worker_calls_self_improve_with_its_own_issue_and_definition():
     """claunch-c4e6f.1: the worker hands the library its claimed issue, its
     canonical definition and the retrospective's RETRO comment as the basis."""
