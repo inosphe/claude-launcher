@@ -7981,6 +7981,19 @@ async def h_sessions_list(request: web.Request) -> web.Response:
             # cached; a list poll never starts a GitHub request.
             if not kept:
                 info["prs"] = session_prs.for_session(_session_cwd(s), info["name"])
+            # The card's commit chips: the newest stamped commits, whether
+            # master or a remote has each, and which recorded PR carries it.
+            # One walk per repository, kept until its refs move
+            # (session_commits.rail), so the rows of a fleet share it. An
+            # exited session's card does not get them: its checkout is often
+            # pruned, and the list carries hundreds of those (claunch-0gysk).
+            if not s.exited:
+                chips = session_commits.rail(
+                    info.get(work_checkout.FIELD) or _session_cwd(s),
+                    info["name"], info.get("prs"),
+                )
+                if chips:
+                    info["rail_commits"] = chips
             # A kill that is still a wind-down (see beads.Board): the row says
             # so and its kill button turns into "stop now".
             wd = winddowns.get(info.get("name") or "")
@@ -8072,7 +8085,7 @@ async def h_sessions_list(request: web.Request) -> web.Response:
             # What the session declared itself to be at creation, and the
             # progress it publishes while it runs (daemon/progress.py): the
             # rail's meta line and progress line read both off this poll.
-            "kind", "progress", "prs",
+            "kind", "progress", "prs", "rail_commits",
         }
         attached = [
             {key: value for key, value in info.items() if key in rail_fields}

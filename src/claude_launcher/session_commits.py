@@ -31,8 +31,10 @@ the dashboard and the terminal cannot drift apart.
 from __future__ import annotations
 
 import subprocess
+import threading
+import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 #: Trailer keys, spelled as ``commit-stamp`` teaches them. Changing either
 #: spelling here without changing it there silently empties every list.
@@ -186,3 +188,265 @@ def summary(commits: List[Dict[str, str]]) -> Dict[str, object]:
         "latest": commits[0]["short"] if commits else None,
         "worktrees": worktrees,
     }
+
+
+# ---- the rail card's commit chips -------------------------------------------
+#
+# The session list polls every few seconds and carries every row, so the card
+# cannot afford :func:`for_session`'s one walk per session per poll. Instead
+# one walk per *repository* serves every session that works in it: a single
+# ``git log --all`` over every stamped commit, grouped by trailer, plus two
+# ``rev-list`` calls that say which of those commits a remote has and which
+# ``master`` has. The result is kept until the repository's refs change (a
+# commit, push, fetch or merge all move a ref), so a quiet repository costs
+# one ``for-each-ref`` per poll.
+
+#: Commits a card shows; the rest are counted, not drawn.
+RAIL_LIMIT = 6
+
+#: Seconds a snapshot is trusted even when the refs did not move (a commit on
+#: a detached HEAD moves no ref). Short enough to self-heal, long enough that
+#: a fleet of rows in one repository shares one walk.
+RAIL_TTL = 60
+
+#: The integration branch's names, in the order they are looked for.
+_BASE_NAMES = ("master", "main")
+
+_RAIL_FORMAT = _FS.join(
+    ["%H", "%h", "%s", f"%(trailers:key={SESSION_TRAILER},valueonly)"]
+) + _RS
+
+_rail_lock = threading.RLock()
+#: cwd -> (expires, common dir or None)
+_rail_dirs: Dict[str, Tuple[float, Optional[str]]] = {}
+#: common dir -> snapshot dict
+_rail_snaps: Dict[str, Dict[str, object]] = {}
+
+
+def _git(cwd: str, *args: str, stdin: Optional[str] = None) -> Optional[str]:
+    try:
+        proc = subprocess.run(
+            ["git", "-C", cwd, *args],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=TIMEOUT,
+            input=stdin,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def _common_dir(cwd: str) -> Optional[str]:
+    now = time.monotonic()
+    with _rail_lock:
+        hit = _rail_dirs.get(cwd)
+        if hit and hit[0] > now:
+            return hit[1]
+    found: Optional[str] = None
+    if Path(cwd).is_dir():
+        out = _git(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir")
+        found = out.strip() or None if out else None
+    with _rail_lock:
+        if len(_rail_dirs) >= 4096:
+            _rail_dirs.clear()
+        _rail_dirs[cwd] = (now + RAIL_TTL, found)
+    return found
+
+
+def _refs(cwd: str) -> Optional[Dict[str, str]]:
+    out = _git(cwd, "for-each-ref", "--format=%(objectname) %(refname)")
+    if out is None:
+        return None
+    refs: Dict[str, str] = {}
+    for line in out.splitlines():
+        sha, _, name = line.partition(" ")
+        if name:
+            refs[name] = sha
+    return refs
+
+
+def _base_refs(refs: Dict[str, str]) -> List[str]:
+    for base in _BASE_NAMES:
+        found = [
+            r for r in refs
+            if r == f"refs/heads/{base}"
+            or (r.startswith("refs/remotes/") and r.endswith(f"/{base}")
+                and r.count("/") == 3)
+        ]
+        if found:
+            return sorted(found)
+    return []
+
+
+def _branch_refs(refs: Dict[str, str], branch: str) -> List[str]:
+    """The local and remote-tracking refs a PR's head branch goes by."""
+    if not branch:
+        return []
+    return sorted(
+        r for r in refs
+        if r == f"refs/heads/{branch}"
+        or (r.startswith("refs/remotes/") and r.split("/", 3)[-1] == branch
+            and r.count("/") >= 3)
+    )
+
+
+def _not_reachable(cwd: str, shas: List[str], refs: List[str]) -> Optional[set]:
+    """Which of ``shas`` no ref in ``refs`` reaches (all of them when no refs)."""
+    if not shas:
+        return set()
+    if not refs:
+        return set(shas)
+    # Every revision goes through stdin, negations included, so a fleet's
+    # worth of commits never meets the argv length limit.
+    feed = "\n".join(shas + [f"^{r}" for r in refs]) + "\n"
+    out = _git(cwd, "rev-list", "--stdin", stdin=feed)
+    if out is None:
+        return None
+    return set(shas) & set(out.split())
+
+
+def _pr_commits(cwd: str, refs: Dict[str, str], head: str, base: str) -> frozenset:
+    """The commits a PR from ``head`` into ``base`` carries.
+
+    Open: what the head branch has that the base does not. Merged with a
+    merge commit: the base no longer lacks anything, so the PR's commits are
+    the ones that merge brought in — reachable from the head, not from the
+    merge's first parent. A fast-forward or squash merge leaves nothing to
+    tell the PR's commits from the base's, and an unknown or deleted head
+    branch nothing to start from: both answer empty, and the card draws the
+    PR's frame without commits in it rather than guess.
+    """
+    heads = _branch_refs(refs, head)
+    bases = _branch_refs(refs, base) if base else []
+    bases = bases or _base_refs(refs)
+    if not heads or not bases:
+        return frozenset()
+    out = _git(cwd, "rev-list", *heads, "--not", *bases)
+    if out is None:
+        return frozenset()
+    own = set(out.split())
+    if own:
+        return frozenset(own)
+    # Every head commit is on the base. Walk the base back to the merge that
+    # brought the (remote, when there is one) head in.
+    remote = [r for r in heads if r.startswith("refs/remotes/")]
+    tip = refs[(remote or heads)[0]]
+    base_ref = ([r for r in bases if r.startswith("refs/remotes/")] or bases)[0]
+    merges = _git(cwd, "rev-list", "--ancestry-path", "--merges", "--reverse",
+                  f"{tip}..{base_ref}")
+    first = (merges or "").split()
+    if not first:
+        return frozenset()
+    out = _git(cwd, "rev-list", tip, f"^{first[0]}^1")
+    return frozenset((out or "").split())
+
+
+def _snapshot(cwd: str, common: str) -> Optional[Dict[str, object]]:
+    refs = _refs(cwd)
+    if refs is None:
+        return None
+    stamp = hash(tuple(sorted(refs.items())))
+    now = time.monotonic()
+    with _rail_lock:
+        snap = _rail_snaps.get(common)
+        if snap and snap["stamp"] == stamp and snap["expires"] > now:
+            return snap
+    out = _git(
+        # --topo-order: a child before its parent even when both were made
+        # in the same second on different branches, where date order ties.
+        cwd, "log", "--all", "--topo-order", "--no-notes", "--extended-regexp",
+        f"--grep=^{SESSION_TRAILER}:", f"--format={_RAIL_FORMAT}",
+    )
+    if out is None:
+        return None
+    by_session: Dict[str, List[Dict[str, str]]] = {}
+    counts: Dict[str, int] = {}
+    for record in out.split(_RS):
+        fields = record.strip("\n").split(_FS)
+        if len(fields) < 4:
+            continue
+        sha, short, subject, stamped = fields[:4]
+        who = _first_line(stamped)
+        if not who:
+            continue
+        counts[who] = counts.get(who, 0) + 1
+        rows = by_session.setdefault(who, [])
+        if len(rows) < RAIL_LIMIT:
+            rows.append({"sha": sha, "short": short, "subject": subject})
+    shas = [c["sha"] for rows in by_session.values() for c in rows]
+    unpushed = _not_reachable(
+        cwd, shas, sorted(r for r in refs if r.startswith("refs/remotes/")))
+    unmerged = _not_reachable(cwd, shas, _base_refs(refs))
+    if unpushed is None or unmerged is None:
+        return None
+    for rows in by_session.values():
+        for c in rows:
+            # master first: a local landing is merged before anyone pushes.
+            c["state"] = ("merged" if c["sha"] not in unmerged
+                          else "local" if c["sha"] in unpushed else "pushed")
+    snap = {"stamp": stamp, "expires": now + RAIL_TTL, "refs": refs,
+            "sessions": by_session, "counts": counts, "members": {}}
+    with _rail_lock:
+        if len(_rail_snaps) >= 256:
+            _rail_snaps.clear()
+        _rail_snaps[common] = snap
+    return snap
+
+
+def rail(
+    cwd: Optional[str],
+    session: str,
+    prs: Optional[List[Dict[str, object]]] = None,
+) -> Optional[Dict[str, object]]:
+    """The session's newest commits for its rail card, or ``None``.
+
+    Each row is ``{short, subject, state, pr?}``: ``state`` is ``merged``
+    (``master`` or a remote's ``master`` reaches it), ``pushed`` (some
+    remote-tracking ref reaches it) or ``local``; ``pr`` is the number of the
+    recorded PR (``prs``, the rows :mod:`claude_launcher.daemon.session_prs`
+    serves) whose head branch carries the commit. A commit two stacked PRs both
+    carry belongs to the one whose branch carries fewer of this session's
+    commits — the lower layer of the stack. ``more`` counts the commits past
+    the shown ones.
+
+    ``None`` — never an empty list — when nothing was found, for the reason
+    :func:`for_session` gives: an empty reading is not evidence that the
+    session committed nothing, so the card draws no line rather than a claim.
+    """
+    session = (session or "").strip()
+    if not session or not cwd:
+        return None
+    common = _common_dir(str(cwd))
+    if not common:
+        return None
+    snap = _snapshot(str(cwd), common)
+    if not snap:
+        return None
+    rows = snap["sessions"].get(session) or []
+    if not rows:
+        return None
+    prs = [p for p in (prs or []) if isinstance(p, dict) and p.get("number")]
+    shas = {c["sha"] for c in rows}
+    owner: Dict[str, Tuple[int, int]] = {}
+    for pr in prs:
+        key = (str(pr.get("branch") or ""), str(pr.get("base") or ""))
+        with _rail_lock:
+            inside = snap["members"].get(key)
+        if inside is None:
+            inside = _pr_commits(str(cwd), snap["refs"], *key)
+            with _rail_lock:
+                snap["members"][key] = inside
+        mine = inside & shas
+        for sha in mine:
+            if sha not in owner or len(inside) < owner[sha][0]:
+                owner[sha] = (len(inside), int(pr["number"]))
+    out = []
+    for c in rows:
+        row = {"short": c["short"], "subject": c["subject"], "state": c["state"]}
+        if c["sha"] in owner:
+            row["pr"] = owner[c["sha"]][1]
+        out.append(row)
+    return {"commits": out, "more": max(0, snap["counts"].get(session, 0) - len(out))}

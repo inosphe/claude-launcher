@@ -189,6 +189,149 @@ def test_summary_of_nothing_is_still_a_shape(repo):
 
 
 # --------------------------------------------------------------------------- #
+# the rail card's chips (claunch-h5m6f)
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def fresh_rail(monkeypatch):
+    """Each test starts with empty repository caches; the module keeps them
+    across calls on purpose (one walk per repository per refs state)."""
+    monkeypatch.setattr(session_commits, "_rail_dirs", {})
+    monkeypatch.setattr(session_commits, "_rail_snaps", {})
+
+
+@pytest.fixture
+def remote(tmp_path, repo):
+    """A bare remote the repository pushes to, so "pushed" has a meaning."""
+    bare = tmp_path / "remote.git"
+    git("init", "-q", "--bare", str(bare), cwd=tmp_path)
+    git("remote", "add", "origin", str(bare), cwd=repo)
+    return bare
+
+
+def rail_rows(repo, session, prs=None):
+    found = session_commits.rail(str(repo), session, prs)
+    return found and [(c["short"], c["state"], c.get("pr")) for c in found["commits"]]
+
+
+def test_rail_marks_merged_pushed_and_local(repo, remote, fresh_rail):
+    merged = commit(repo, "feat: on master", session="s1")
+    git("push", "-q", "origin", "master", cwd=repo)
+    git("checkout", "-qb", "s1-feature", cwd=repo)
+    pushed = commit(repo, "feat: pushed", session="s1")
+    git("push", "-q", "origin", "s1-feature", cwd=repo)
+    local = commit(repo, "feat: not pushed", session="s1")
+    assert rail_rows(repo, "s1") == [
+        (local, "local", None), (pushed, "pushed", None), (merged, "merged", None),
+    ]
+
+
+def test_rail_counts_local_master_as_merged_without_a_remote(repo, fresh_rail):
+    """A local landing (the leader's --no-ff merge) is in master before any
+    push; with no remote at all, every unmerged commit is local."""
+    on_master = commit(repo, "feat: landed", session="s1")
+    git("checkout", "-qb", "s1-feature", cwd=repo)
+    off = commit(repo, "feat: off master", session="s1")
+    assert rail_rows(repo, "s1") == [(off, "local", None), (on_master, "merged", None)]
+
+
+def test_rail_frames_an_open_prs_commits_and_not_the_base_under_it(repo, remote, fresh_rail):
+    """The head branch also reaches everything master had when it was cut;
+    those commits are master's, not the PR's."""
+    old = commit(repo, "feat: older work", session="s1")
+    git("push", "-q", "origin", "master", cwd=repo)
+    git("checkout", "-qb", "s1-feature", cwd=repo)
+    a = commit(repo, "feat: a", session="s1")
+    b = commit(repo, "feat: b", session="s1")
+    git("push", "-q", "origin", "s1-feature", cwd=repo)
+    pr = {"number": 7, "branch": "s1-feature", "base": "master"}
+    assert rail_rows(repo, "s1", [pr]) == [
+        (b, "pushed", 7), (a, "pushed", 7), (old, "merged", None),
+    ]
+
+
+def test_rail_keeps_a_merged_prs_frame_through_its_merge_commit(repo, remote, fresh_rail):
+    old = commit(repo, "feat: older work", session="s1")
+    git("checkout", "-qb", "s1-feature", cwd=repo)
+    a = commit(repo, "feat: a", session="s1")
+    git("checkout", "-q", "master", cwd=repo)
+    git("merge", "-q", "--no-ff", "-m", "Merge pull request #7", "s1-feature", cwd=repo)
+    git("push", "-q", "origin", "master", "s1-feature", cwd=repo)
+    pr = {"number": 7, "branch": "s1-feature", "base": "master"}
+    assert rail_rows(repo, "s1", [pr]) == [(a, "merged", 7), (old, "merged", None)]
+
+
+def test_rail_gives_a_stacked_commit_to_the_lower_pr(repo, fresh_rail):
+    """Two stacked PRs: the upper branch reaches the lower one's commits too.
+    Each commit belongs to the PR whose base does not already have it."""
+    commit(repo, "chore: base")
+    git("checkout", "-qb", "s1-low", cwd=repo)
+    low = commit(repo, "feat: low", session="s1")
+    git("checkout", "-qb", "s1-high", cwd=repo)
+    high = commit(repo, "feat: high", session="s1")
+    prs = [{"number": 8, "branch": "s1-high", "base": "s1-low"},
+           {"number": 7, "branch": "s1-low", "base": "master"}]
+    assert rail_rows(repo, "s1", prs) == [(high, "local", 8), (low, "local", 7)]
+
+
+def test_rail_leaves_a_pr_without_a_known_branch_empty(repo, fresh_rail):
+    commit(repo, "chore: base")
+    mine = commit(repo, "feat: x", session="s1")
+    prs = [{"number": 7, "branch": "deleted-after-merge", "base": "master"},
+           {"number": 8}]
+    assert rail_rows(repo, "s1", prs) == [(mine, "merged", None)]
+
+
+def test_rail_shows_the_newest_and_counts_the_rest(repo, fresh_rail, monkeypatch):
+    monkeypatch.setattr(session_commits, "RAIL_LIMIT", 2)
+    for n in range(4):
+        commit(repo, f"feat: {n}", session="s1")
+    found = session_commits.rail(str(repo), "s1")
+    assert [c["subject"] for c in found["commits"]] == ["feat: 3", "feat: 2"]
+    assert found["more"] == 2
+
+
+def test_rail_is_none_when_nothing_was_found(repo, tmp_path, fresh_rail):
+    """None, never an empty list: an empty reading is not evidence of no
+    commits, and the card draws no line for it."""
+    commit(repo, "feat: someone else", session="s191")
+    assert session_commits.rail(str(repo), "s19") is None
+    assert session_commits.rail(str(tmp_path / "gone"), "s1") is None
+    assert session_commits.rail(None, "s1") is None
+    assert session_commits.rail(str(repo), "") is None
+
+
+def test_rail_reuses_one_walk_until_the_refs_move(repo, fresh_rail, monkeypatch):
+    """The list poll calls this for every row; one walk per repository per
+    refs state is the whole budget."""
+    commit(repo, "feat: one", session="s1")
+    commit(repo, "feat: theirs", session="s2")
+    walks = []
+    real = session_commits._git
+
+    def counting(cwd, *args, **kw):
+        if args and args[0] == "log":
+            walks.append(args)
+        return real(cwd, *args, **kw)
+
+    monkeypatch.setattr(session_commits, "_git", counting)
+    session_commits.rail(str(repo), "s1")
+    session_commits.rail(str(repo), "s2")
+    session_commits.rail(str(repo), "s1")
+    assert len(walks) == 1
+    newer = commit(repo, "feat: two", session="s1")
+    assert session_commits.rail(str(repo), "s1")["commits"][0]["short"] == newer
+    assert len(walks) == 2
+
+
+def test_the_session_list_carries_rail_commits_for_the_card():
+    """The rail view filters fields by name; a field left out of that list
+    never reaches the card (the same trap the comment there records)."""
+    src = (Path(__file__).resolve().parent.parent / "src/claude_launcher/daemon/api.py").read_text(encoding="utf-8")
+    assert '"kind", "progress", "prs", "rail_commits",' in src
+    assert 'info["rail_commits"] = chips' in src
+
+
+# --------------------------------------------------------------------------- #
 # claunch commits
 # --------------------------------------------------------------------------- #
 def run_cli(*argv) -> int:
