@@ -916,3 +916,59 @@ def test_a_probe_gets_no_daemon_port_or_manifest_bookkeeping(monkeypatch, tmp_pa
     for var in ("CLAUNCH_DAEMON_PORT", "CLAUNCH_INSTANCE_APPLIED", "CLAUNCH_INSTANCE_PREV",
                 "CLAUNCH_INSTANCE_BASE"):
         assert var not in out
+
+
+# -- session_workflow: the child gets a run of its own (claunch-pbh7k) ------------
+
+SESSION_JOB = """
+    nodes:
+      t: {prompt: "review ${params.x}", returns: {ok: {verdict: str}},
+          executor: [session, subagent], session_workflow: oneshot-job-v2}
+      after: {prompt: after}
+    params: {x: {default: thing}}
+    body: [t, after]
+"""
+
+
+def test_a_session_workflow_child_is_started_on_that_run(tmp_path, monkeypatch):
+    """A child spawned with no run is never ended by the v2 kill-on-end, so
+    it stayed alive after submitting; with ``session_workflow`` it is spawned
+    on that v2 workflow and told what finishing it does."""
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    mgr = FakeManager(FakeSession("own", str(run_dir)))
+    calls = []
+
+    def spawn(parent_name, body):
+        calls.append(body)
+        mgr.sessions["kid"] = FakeSession("kid", str(run_dir))
+        return "kid"
+
+    clock = _clock(mgr, spawn=spawn)
+    clock.scan()
+    st = _start(run_dir, SESSION_JOB, caps=SESSION_CAPS)
+    did = st["delegations"][0]["id"]
+    clock.scan()
+    [body] = calls
+    assert body["workflow"] == "oneshot-job-v2" and body["workflow_version"] == 2
+    assert body["beads"] is False
+    assert body["cflow_inputs"] == {"delegation": did, "delegation_scope": "own@main",
+                                    "delegation_cwd": str(run_dir.resolve())}
+    assert "review thing" in body["task"]
+    assert "'oneshot-job-v2'" in body["task"] and "daemon ends this session" in body["task"]
+
+
+def test_without_session_workflow_the_child_has_no_run():
+    body = cflow2_exec.spawn_body({"delegation": "d1", "node": "n", "tasks": [],
+                                   "returns": {"ok": {}}},
+                                  cwd="/w", scope="s1", receipt_path="/w/r.json")
+    assert body["workflow"] == "-" and "cflow_inputs" not in body
+    assert "workflow_version" not in body and "daemon ends this session" not in body["task"]
+
+
+def test_session_workflow_inputs_are_narrowed_to_what_the_chart_declares(tmp_path):
+    values = {"delegation": "d1", "delegation_scope": "s1", "delegation_cwd": "/w"}
+    assert cflow2_exec.session_workflow_inputs("oneshot-job-v2", str(tmp_path), values) == values
+    assert cflow2_exec.session_workflow_inputs("sample-v2", str(tmp_path), values) == {}
+    assert cflow2_exec.session_workflow_inputs("no-such-v2", str(tmp_path), values) == {}

@@ -196,7 +196,7 @@ LIBRARY_KEYS = ("cflow", "name", "description", "kind", "include", "fragments", 
 TASK_KEYS = (
     "title", "prompt", "done_when", "verify", "ask", "executor", "needs",
     "returns", "effects", "paths", "budget", "rules", "strict_budget",
-    "do", "triggers", "restart", "force_target",
+    "do", "triggers", "restart", "force_target", "session_workflow",
 )
 #: ``$data.inputs`` is the run's start inputs (docs 2.6): written by the start
 #: request and, for an input declared ``set_by: [agent]``, once by the driver
@@ -858,10 +858,13 @@ def _compile_task(ctx: _Ctx, sc: _Scope, name: str, parent: Optional[str], line:
     returns = (_returns(ctx, tfile, raw["returns"], _key_line(raw, "returns", tline))
                if raw.get("returns") is not None else {ir.OUTCOME_OK: {}})
 
+    executor = _executor(ctx, tfile, raw.get("executor"), tline)
+    session_workflow = _session_workflow(ctx, tfile, name, raw, executor, tline)
+
     nid = _alloc(ctx, sc.prefix + name)
     node = ir.Node(
         id=nid, type=ir.T_TASK, parent=parent, src=_where(tfile, tline), label=name,
-        executor=_executor(ctx, tfile, raw.get("executor"), tline),
+        executor=executor,
         needs=_str_list(ctx, tfile, raw.get("needs"), "needs", tline),
         budget=_budget(ctx, tfile, raw.get("budget"), tline),
         props={
@@ -882,11 +885,32 @@ def _compile_task(ctx: _Ctx, sc: _Scope, name: str, parent: Optional[str], line:
             "strict_budget": strict,
         },
     )
+    if session_workflow:
+        node.props["session_workflow"] = session_workflow
     if _force_target(ctx, tfile, raw, node, tline):
         ctx.task_marks.add(nid)
     _effects_and_triggers(ctx, tfile, raw, node, tline)
     _add(ctx, node)
     return nid
+
+
+def _session_workflow(ctx: _Ctx, file: str, name: str, raw: Dict[str, Any],
+                      executor: List[str], line: int) -> Optional[str]:
+    """``session_workflow: <v2 workflow>``: the run a ``session`` executor's
+    child is started on, instead of none (claunch-pbh7k). A child with a run
+    of its own is ended by the daemon when that run reaches ``done`` (the v2
+    kill-on-end); one without stays until somebody kills it. The name is
+    resolved when the child is spawned, from the layers of the run's cwd."""
+    value = raw.get("session_workflow")
+    if value is None:
+        return None
+    where = _key_line(raw, "session_workflow", line)
+    if not isinstance(value, str) or not value.strip():
+        raise ctx.err(file, where, f"task {name!r}: session_workflow must be a workflow name")
+    if ir.EXEC_SESSION not in executor:
+        raise ctx.err(file, where, f"task {name!r}: session_workflow names the run of a "
+                                   f"'session' executor's child, and executor has no session")
+    return value.strip()
 
 
 def _force_target(ctx: _Ctx, file: str, raw: Dict[str, Any], node: ir.Node, line: int) -> bool:
