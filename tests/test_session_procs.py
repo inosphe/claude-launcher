@@ -265,6 +265,22 @@ def test_reader_keeps_what_it_read_across_an_exec_that_keeps_comm(tmp_path):
     assert r.snapshot()[10].cmd == "sh -c a"
     # a new reader (the old behaviour: read every time) sees the new image
     assert fp.reader().snapshot()[10].cmd == "sh -c b"
+    # the same holds for an owner tag that appears with that exec: the first
+    # read (no tag) stays. The daemon's tag goes in through Popen(shell=True,
+    # env=...): the child is the daemon (comm python3) until it execs /bin/sh
+    # (comm sh), so that exec changes comm and is read again (next test).
+    fp.put(10, 1, comm="sh", argv=("sh", "-c", "b"), env=(f"{session_procs.OWNER_ENV}=s1",))
+    assert r.snapshot()[10].owner is None
+
+
+def test_reader_sees_the_tag_the_daemon_puts_in_through_exec(tmp_path):
+    fp = FakeProc(tmp_path)
+    fp.put(10, 1, comm="python3", argv=("python3", "-m", "claude_launcher.daemon"))
+    r = fp.reader()
+    assert r.snapshot()[10].owner is None  # forked, not yet exec'd
+    fp.put(10, 1, comm="sh", argv=("/bin/sh", "-c", "tools/restart_live.sh"),
+           env=(f"{session_procs.OWNER_ENV}=s1",))
+    assert r.snapshot()[10].owner == "s1"
 
 
 def test_reader_forgets_processes_that_are_gone(tmp_path):
