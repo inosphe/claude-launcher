@@ -48,7 +48,9 @@ sync is running is queued for one more pass, so a change that landed mid-sync
 is not lost. Every pass is the same content-hash diff, so a corpus synced five
 times over embeds each changed document once.
 
-Configuration is the ``rag:`` block (``store.rag_config``). An empty api key
+Configuration is the ``rag:`` block (``store.rag_config``); its ``source``
+says whether the endpoint and key are typed into the block (``custom``) or
+come from a claunch profile's backend (``profile``). An empty api key
 means the feature is off: every producer is a no-op and the queue stays empty
 until the block is filled in, at which point the watcher's next tick catches
 up. The key leaves this module only as the ``Authorization`` header of the
@@ -1770,6 +1772,8 @@ class RagService:
             indexes.append(row)
         return {
             "configured": store.rag_configured(cfg),
+            "source": cfg.get("source") or "custom",
+            "profile": cfg.get("profile") or "",
             "host": host,
             "embedding_model": cfg.get("embedding_model") or "",
             "rerank_model": cfg.get("rerank_model") or "",

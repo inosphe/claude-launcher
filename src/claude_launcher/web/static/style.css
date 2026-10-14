@@ -6430,6 +6430,10 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 .search-settings label { display: flex; flex-direction: column; gap: 4px; margin: 10px 0; }
 .search-settings input { max-width: 100%; box-sizing: border-box; padding: 8px; font-size: 16px; }
 .search-settings input[type=checkbox] { align-self: flex-start; }
+.search-settings fieldset { border: 1px solid var(--border, #ccc); border-radius: 6px; margin: 10px 0; padding: 4px 12px; min-width: 0; }
+.search-settings fieldset[hidden] { display: none; }
+.search-settings label:has(> input[type=radio]) { flex-direction: row; align-items: center; gap: 6px; }
+.search-settings select { max-width: 100%; box-sizing: border-box; padding: 8px; font-size: 16px; }
 .search-settings button { margin-right: 8px; }
 #search-anything-open { display: flex; align-items: center; justify-content: center; width: 28px; min-height: 26px; padding: 0; }
 @media (max-width: 820px) {

@@ -27,7 +27,7 @@ const rail = railMarkup(fs.readFileSync(path.join(root, 'index.html'), 'utf8'));
 const writes = [];
 const searches = [];
 const now = Date.parse('2026-09-18T10:00:00Z');
-const cfg = {base_url:'http://omlx/v1', api_key_set:true, embedding_model:'embed', rerank_model:'rank', candidates:40, rerank_top:12, batch:16, timeout:120, watch_interval:30, verify_tls:true};
+const cfg = {source:'custom', profile:'', profiles:[{name:'ds4', base_url:'https://api.fireworks.ai/inference/v1', has_key:true}], base_url:'http://omlx/v1', api_key_set:true, embedding_model:'embed', rerank_model:'rank', candidates:40, rerank_top:12, batch:16, timeout:120, watch_interval:30, verify_tls:true};
 const server = http.createServer(async (req,res) => {
   if (req.url === '/') { res.setHeader('Content-Type','text/html; charset=utf-8'); res.end(`<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="/style.css"></head><body>
     <aside style="width:260px">${rail}</aside><input id="editor"><div class="xterm"><textarea id="terminal"></textarea></div><div id="settings"></div>
@@ -260,6 +260,17 @@ const server = http.createServer(async (req,res) => {
     await page.getByRole('button',{name:'연결 테스트',exact:true}).click();await page.getByText(/실제 차원 2560/).waitFor();
     await page.getByRole('button',{name:'저장',exact:true}).click();await page.getByText(/저장됨 · 검색 색인/).waitFor();
     assert.equal(writes.at(-1).body.embedding_model,'replacement');assert.equal(writes.at(-1).body.api_key,'');
+    assert.equal(writes.at(-1).body.source,'custom');
+    // claunch-dkrqf: the profile path hides the typed endpoint and sends both paths' values.
+    assert.equal(await page.locator('select[name=profile]').isVisible(),false);
+    await page.getByLabel('Profile (provider)').check();
+    assert.equal(await page.locator('input[name=base_url]').isVisible(),false);
+    await page.locator('select[name=profile]').selectOption('ds4');
+    await page.getByRole('button',{name:'저장',exact:true}).click();await page.getByText(/저장됨 · 검색 색인/).waitFor();
+    assert.equal(writes.at(-1).body.source,'profile');assert.equal(writes.at(-1).body.profile,'ds4');
+    assert.equal(writes.at(-1).body.base_url,'http://omlx/v1');
+    await page.getByLabel('Custom API (직접 입력)').check();
+    assert.equal(await page.locator('input[name=base_url]').isVisible(),true);
     await page.locator('#search-anything-open').click();
     await page.locator('dialog input[type=search]').fill('grouped');await page.keyboard.press('Enter');
     await page.locator('dialog .search-anything-matches').waitFor();

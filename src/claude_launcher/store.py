@@ -42,6 +42,8 @@ Schema::
       max_tokens: 4096          # bounds the whole completion, reasoning included
       params: {<extra chat/completions field>: <value>, ...}
     rag:                        # semantic search over the board and the fleet; see daemon/rag.py
+      source: custom            # custom = base_url + api_key below; profile = the profile's backend
+      profile: <profile name>   # with source: profile, its provider's endpoints.openai + key
       base_url: https://host/v1  # OpenAI-compatible base: /embeddings and /rerank hang off it
       api_key: <key>            # empty = the feature is off (or CLAUNCH_RAG_API_KEY)
       embedding_model: <model id>
@@ -950,6 +952,8 @@ def set_briefing_faq(rows: List[dict]) -> List[dict]:
 #: board's ``.beads/beads.db`` / ``issues.jsonl`` for a write it did not make
 #: itself (``claunch beads …`` runs ``br`` directly); 0 turns that watcher off.
 RAG_DEFAULTS = {
+    "source": "custom",
+    "profile": "",
     "base_url": "",
     "api_key": "",
     "embedding_model": "",
@@ -961,6 +965,9 @@ RAG_DEFAULTS = {
     "candidates": 40,
     "rerank_top": 12,
     "watch_interval": 30.0,
+    #: Derived, never read from the file: why ``source: profile`` resolved
+    #: to no endpoint (empty when it did, or when the source is ``custom``).
+    "profile_error": "",
 }
 
 
@@ -972,6 +979,17 @@ def rag_config(doc: Optional[dict] = None) -> dict:
     api key may come from ``CLAUNCH_RAG_API_KEY`` instead of the file, the
     same arrangement the relay token has, so a synced config need not carry
     it. It never leaves this dict except as an ``Authorization`` header.
+
+    ``source`` picks where ``base_url`` and ``api_key`` come from. ``custom``
+    reads the block's own two fields (a local server typed in directly).
+    ``profile`` reads the named profile's backend instead -- its provider's
+    ``endpoints.openai`` and the key that reaches it (:func:`rag_profile_backend`)
+    -- and leaves the typed pair in the file untouched, so switching back is
+    one choice rather than retyping. A block written before ``source``
+    existed has none and reads as ``custom``. A profile that cannot be
+    resolved is the not-configured case, with the reason in
+    ``profile_error``. ``CLAUNCH_RAG_API_KEY`` is a key for the typed
+    endpoint and so applies to ``custom`` only.
     """
     import os
 
@@ -980,11 +998,23 @@ def rag_config(doc: Optional[dict] = None) -> dict:
     if not isinstance(block, dict):
         block = {}
     out = dict(RAG_DEFAULTS)
-    for key in ("base_url", "api_key", "embedding_model", "rerank_model"):
+    for key in ("profile", "base_url", "api_key", "embedding_model", "rerank_model"):
         out[key] = str(block.get(key) or "").strip()
-    env_key = os.environ.get("CLAUNCH_RAG_API_KEY")
-    if env_key:
-        out["api_key"] = env_key.strip()
+    out["source"] = "profile" if block.get("source") == "profile" else "custom"
+    out["profile_error"] = ""
+    if out["source"] == "profile":
+        out["base_url"], out["api_key"] = "", ""
+        if not out["profile"]:
+            out["profile_error"] = "no profile selected"
+        else:
+            try:
+                out["base_url"], out["api_key"] = rag_profile_backend(out["profile"], doc)
+            except ValueError as exc:
+                out["profile_error"] = str(exc)
+    else:
+        env_key = os.environ.get("CLAUNCH_RAG_API_KEY")
+        if env_key:
+            out["api_key"] = env_key.strip()
     out["verify_tls"] = block.get("verify_tls", True) is not False
     for key in ("dimensions", "batch", "candidates", "rerank_top"):
         try:
@@ -1006,6 +1036,33 @@ def rag_config(doc: Optional[dict] = None) -> dict:
     except (TypeError, ValueError):
         out["watch_interval"] = RAG_DEFAULTS["watch_interval"]
     return out
+
+
+def rag_profile_backend(name: str, doc: Optional[dict] = None) -> Tuple[str, str]:
+    """``(base_url, api_key)`` for semantic search through profile ``name``.
+
+    The same resolution the Observer and the session briefing perform: the
+    profile's provider records the OpenAI-compatible endpoint, and the key is
+    the launcher-managed token first, the provider's ``api_key`` second. The
+    base URL is the ``/v1`` root (a Chat Completions URL recorded there is cut
+    back to it) because ``/embeddings`` and ``/rerank`` hang off it. Raises
+    ``ValueError`` with a message that names no secret.
+    """
+    from . import lineage, profile as profile_mod, provider_spec, providers
+
+    doc = load() if doc is None else doc
+    try:
+        prof = profile_mod.require_selector(name)
+        spec = providers.spec_for(prof, doc=doc)
+        base = provider_spec.openai_urls(spec.endpoint("openai") or "").base_url
+    except (profile_mod.ProfileError, providers.ProviderError, provider_spec.SpecError) as exc:
+        raise ValueError(str(exc)) from exc
+    if not base:
+        raise ValueError(
+            f"profile {prof.name!r} has no OpenAI-compatible endpoint "
+            f"(set providers.<provider>.endpoints.openai)"
+        )
+    return base, str(lineage.stored_auth_token(prof) or spec.api_key or "")
 
 
 def rag_configured(cfg: dict) -> bool:
