@@ -86,7 +86,17 @@ const FORM_READS = /^\/api\/(workspaces|projects|git|roles|cflow\/workflows|prom
     });
     await page.goto(`http://127.0.0.1:${server.address().port}`);
     await page.locator('#session-list li.sess-card[data-name="q2"]').waitFor();
-    const settle = () => page.waitForTimeout(150);
+    // Every read the page started has been answered and painted: nothing in
+    // flight, nothing queued for the next batch, and a moment for the paint.
+    // An input's change starts reads of its own (the Directory row re-reads
+    // that directory's checkouts and workflows); those are allowed, so a
+    // window starts only after they have landed rather than counting them as
+    // the poll's.
+    const settle = async () => {
+      await page.waitForFunction(() => httpInFlight === 0 && batchPending === null);
+      await page.waitForTimeout(150);
+      await page.waitForFunction(() => httpInFlight === 0 && batchPending === null);
+    };
 
     // Twelve polls by hand with the fixture moving under each; the records
     // a MutationObserver sees inside the form, and the requests made.
