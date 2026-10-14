@@ -192,6 +192,26 @@ def test_a_kept_row_is_not_shared_with_its_readers(home, tmp_path):
     assert row["context"]["tokens"] > 0 and row[tokenusage.INFO_KEY]["output"] == 5
 
 
+def test_the_configured_windows_follow_the_configuration(home, tmp_path, monkeypatch):
+    """``compact_window`` and ``model_context_window`` come from the config
+    store, not the transcript: a kept row shows a changed value as the live
+    path does (s463-rev, CHANGES REQUESTED @ 5553fb13)."""
+    session, _ = _session(tmp_path, _turn("m1", time.time() - 30, read=1_000, out=5))
+    cwd = session.sdef.cwd
+    monkeypatch.setattr(ctxsize, "compact_window_of", lambda sdef: 100_000)
+    monkeypatch.setattr(ctxsize, "declared_context_window", lambda sdef: 400_000)
+    first = _kept(session, cwd)
+    assert first["context"]["compact_window"] == 100_000
+    assert first["context"]["model_context_window"] == 400_000
+    monkeypatch.setattr(ctxsize, "compact_window_of", lambda sdef: 200_000)
+    monkeypatch.setattr(ctxsize, "declared_context_window", lambda sdef: 1_000_000)
+    kept = _kept(session, cwd)
+    live = _live(session, cwd)
+    assert kept["context"] == live["context"]
+    assert kept["context"]["compact_window"] == 200_000
+    assert kept["context"]["model_context_window"] == 1_000_000
+
+
 def test_a_partial_spend_reading_is_not_kept(home, tmp_path, monkeypatch):
     session, _ = _session(tmp_path, _turn("m1", time.time() - 30, read=1_000, out=5))
     cwd = session.sdef.cwd

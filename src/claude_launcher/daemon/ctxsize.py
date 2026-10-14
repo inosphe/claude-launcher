@@ -712,16 +712,27 @@ def attach(session) -> dict:
     calls = tool_calls_for_session(sdef)
     if calls is not None:
         info["tool_calls"] = calls
-    reading = for_session(sdef)
-    if reading:
-        info["context"] = dict(reading)
-        window = compact_window_of(sdef)
-        if window:
-            info["context"]["compact_window"] = window
-        # A harness that reports its own window (Codex) wins; otherwise the
-        # spec's declared context_window draws the ceiling.
-        if not info["context"].get("model_context_window"):
-            declared = declared_context_window(sdef)
-            if declared:
-                info["context"]["model_context_window"] = declared
+    context = context_of(sdef, for_session(sdef))
+    if context:
+        info["context"] = context
     return info
+
+
+def context_of(sdef, reading: Optional[dict]) -> Optional[dict]:
+    """The row's ``context``: a copy of the transcript ``reading`` with the
+    windows the configuration declares for ``sdef`` hung on it. Those come
+    from the config store (cached for ``WINDOW_TTL``), never the transcript,
+    so a caller that keeps a reading re-annotates it here on every ask."""
+    if not reading:
+        return None
+    context = dict(reading)
+    window = compact_window_of(sdef)
+    if window:
+        context["compact_window"] = window
+    # A harness that reports its own window (Codex) wins; otherwise the
+    # spec's declared context_window draws the ceiling.
+    if not context.get("model_context_window"):
+        declared = declared_context_window(sdef)
+        if declared:
+            context["model_context_window"] = declared
+    return context

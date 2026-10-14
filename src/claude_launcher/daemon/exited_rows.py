@@ -21,9 +21,12 @@ on later polls for as long as the files it was read from are unchanged:
 A change to any of them, a new exit (``exited_at``) or a change to what the
 record points at (harness, profile, conversation, directory) reads the row
 again. A spend reading still being caught up (``partial``) is not kept.
-The tool-call count is the one time-dependent value: the times are kept and
-counted against the clock at every poll, as :func:`ctxsize.tool_calls_for_session`
-does. ``tps`` (:mod:`metering`) is not here: the list reads it off one shared
+The tool-call count is time-dependent: the times are kept and counted
+against the clock at every poll, as :func:`ctxsize.tool_calls_for_session`
+does. The context reading is kept as read off the transcript, and the windows
+the configuration declares (``compact_window``, ``model_context_window``) are
+hung on it at every poll (:func:`ctxsize.context_of`), so a profile or
+provider change reaches an exited row as fast as a live one. ``tps`` (:mod:`metering`) is not here: the list reads it off one shared
 snapshot, with no per-row file read, and its ``idle`` answer moves with the
 clock.
 """
@@ -40,8 +43,10 @@ from typing import Any, List, Optional, Tuple
 from . import ctxsize, session_prs, tokenusage, work_checkout
 from .harness import CLAUDE_HARNESS
 
-#: The row keys this module keeps. ``tool_calls`` is counted at every poll.
-FIELDS = ("context", tokenusage.INFO_KEY, work_checkout.FIELD, "prs")
+#: The row keys this module keeps as they were read. ``context`` is kept as
+#: its transcript reading and annotated at every poll; ``tool_calls`` is
+#: counted at every poll.
+FIELDS = (tokenusage.INFO_KEY, work_checkout.FIELD, "prs")
 
 #: More rows than this and the table starts over (records removed from the
 #: daemon leave theirs behind).
@@ -56,6 +61,7 @@ class _Row:
     work_cwd: Optional[str]
     stamps: Tuple
     tool_times: Optional[List[float]]
+    reading: Optional[dict]
     fields: dict
 
 
@@ -112,6 +118,12 @@ def _answer(session: Any, row: _Row) -> dict:
     calls = ctxsize.count_tool_calls(row.tool_times)
     if calls is not None:
         info["tool_calls"] = calls
+    # The windows on ``context`` come from the configuration, not the
+    # transcript: hung on again here, as the live path does on every poll.
+    context = ctxsize.context_of(
+        getattr(session, "sdef", None), copy.deepcopy(row.reading))
+    if context:
+        info["context"] = context
     # Copied: the kept row outlives this response and its readers.
     info.update(copy.deepcopy(row.fields))
     return info
@@ -142,6 +154,7 @@ def attach(session: Any, spend: tokenusage.Budget, cwd: str) -> dict:
     before = _stamps(transcript, watch, None)
     info = ctxsize.attach(session)
     tool_times = ctxsize.tool_times_for_session(sdef)
+    reading = ctxsize.for_session(sdef)
     tokenusage.attach(info, sdef, spend)
     work_checkout.attach(info, sdef)
     info["prs"] = session_prs.for_session(cwd, name)
@@ -152,6 +165,7 @@ def attach(session: Any, spend: tokenusage.Budget, cwd: str) -> dict:
     kept = _Row(
         ident=ident, transcript=transcript, watch=watch, work_cwd=work_cwd,
         stamps=stamps, tool_times=list(tool_times) if tool_times is not None else None,
+        reading=copy.deepcopy(reading),
         fields=copy.deepcopy({k: info[k] for k in FIELDS if k in info}),
     )
     with _lock:
