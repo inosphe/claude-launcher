@@ -47,6 +47,7 @@ globalThis.ThreadsPane = (() => {
   let composeQa = null;      // {id, title}: the question the new thread is about
   let notice = "";
   let wanted = null;         // {session, tid}: the thread to show at the next mount there
+  let focusCompose = false;  // a thread was just opened: its composer takes the focus
   const drafts = new Map();  // thread id ("" = new thread) -> text
   const inflight = new Set(); // thread ids ("" = new thread) with a post still out
   const pending = new Map();  // thread id -> {text, failed?: error}: the message being sent
@@ -292,6 +293,7 @@ globalThis.ThreadsPane = (() => {
       composing = false;
       composeQa = null;
       current = res.thread.id;
+      focusCompose = true;
       notice = deliveryNotice(res);
     }));
   }
@@ -360,7 +362,7 @@ globalThis.ThreadsPane = (() => {
     if (composing) {
       const form = node("div", "th-newform");
       const title = node("input", "th-title-input");
-      title.placeholder = "주제(한 줄) — qa-xxxxxxxx를 넣으면 그 QA 질문과 연결";
+      title.placeholder = "주제(선택) — 비우면 Thread #N, qa-xxxxxxxx를 넣으면 그 QA 질문과 연결";
       title.value = drafts.get("\u0000title") || "";
       title.addEventListener("input", () => drafts.set("\u0000title", title.value));
       const first = textBox("th-text", "", "첫 메시지(선택) — 세션에 전달됩니다");
@@ -378,7 +380,6 @@ globalThis.ThreadsPane = (() => {
       go.disabled = inflight.has("");
       const submit = () => {
         if (inflight.has("")) return;
-        if (!title.value.trim()) { title.focus(); return; }
         go.disabled = true;
         create(title.value.trim(), first.value.trim());
       };
@@ -389,7 +390,7 @@ globalThis.ThreadsPane = (() => {
       if (!title.value) setTimeout(() => title.focus(), 0);
     }
     if (!threads.length) {
-      side.append(node("p", "wf-note", "쓰레드가 없습니다. 주제별로 쓰레드를 열면 세션과 따로 대화할 수 있습니다."));
+      side.append(node("p", "wf-note", "쓰레드가 없습니다. 주제별로 쓰레드를 열면 세션과 따로 대화할 수 있습니다. 주제와 첫 메시지는 비워 두어도 됩니다."));
       return;
     }
     const ul = node("ul", "th-list");
@@ -500,6 +501,9 @@ globalThis.ThreadsPane = (() => {
       root.lastChild.append(node("div", "th-side"), node("div", "th-main"));
       host.replaceChildren(root);
     }
+    // With no thread on screen there is no conversation to hold the right
+    // half for: the list (and the new-thread form) takes the whole width.
+    root.classList.toggle("th-solo", !convo);
     const head = root.querySelector(".th-head");
     const side = root.querySelector(".th-side");
     const main = root.querySelector(".th-main");
@@ -539,7 +543,8 @@ globalThis.ThreadsPane = (() => {
     renderConvo(main);
     const box = main.querySelector(".th-compose textarea");
     if (box) fit(box);
-    if (focused) box?.focus();
+    if (focused || (focusCompose && convo)) box?.focus();
+    if (convo) focusCompose = false;
   }
 
   function mount(target, session, opts = {}) {
@@ -573,6 +578,7 @@ globalThis.ThreadsPane = (() => {
     current = "";
     composing = false;
     composeQa = null;
+    focusCompose = false;
     inflight.clear();
     pending.clear();
     notice = error = "";

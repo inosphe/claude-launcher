@@ -3,12 +3,16 @@ user and a session, held in the session's threads pane.
 
   GET  /api/threads?session=<name>[&closed=0]    one session's threads
   GET  /api/threads/rail                         per session: open, agent_seq, replies
-  POST /api/threads                              open    {session | to, title, text?, qa?}
+  POST /api/threads                              open    {session | to, title?, text?, qa?}
   GET  /api/threads/{id}[?after=&limit=&reader=] the thread and its messages
   POST /api/threads/{id}/messages                post    {session?, text, ask_qa?}
   POST /api/threads/{id}/close                   close   {session?}
   POST /api/threads/{id}/reopen                  reopen  {session?}
   POST /api/threads/{id}/title                   rename  {session?, title}
+
+A blank title opens the thread under the session's next default name
+(``Thread #N``); without ``text`` the thread starts empty and nothing is
+typed into the session until the first message.
 
 Who is calling follows sim_api: a body naming ``session`` is that session
 (the thread_* MCP tools send ``$CLAUNCH_SESSION``), a body without one is
