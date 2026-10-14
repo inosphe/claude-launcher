@@ -144,13 +144,19 @@ class Outbox:
     """The latest notification per question (or nudge) and what became of
     it. In memory: a daemon restart drops both the queue and this record."""
 
+    KEEP = 1000   # settled records kept for the pane, oldest dropped first
+
     def __init__(self, manager):
         self.manager = manager
         self.latest: dict[str, dict] = {}
         self._seq = 0
 
-    def _settle(self, rec: dict, state: str) -> None:
-        if rec["state"] in ("pending", "forcing"):
+    @staticmethod
+    def _settle(rec: dict, was: str, state: str) -> None:
+        # Only the path that owns the record settles it: a queued copy
+        # finishing (typing nothing) while "지금 전달" types the text must
+        # not write "failed" over the forced outcome.
+        if rec["state"] == was:
             rec["state"] = state
             rec["settled_at"] = _now()
 
@@ -180,6 +186,12 @@ class Outbox:
         rec = {"n": self._seq, "kind": kind, "session": session, "make": make, "state": "pending",
                "queued_at": _now(), "settled_at": None, "forced": False}
         self.latest[key] = rec
+        while len(self.latest) > self.KEEP:
+            # Oldest first (insertion order); a waiting one is never dropped.
+            stale = next((k for k, r in self.latest.items() if r["state"] not in ("pending", "forcing")), None)
+            if stale is None:
+                break
+            del self.latest[stale]
 
         def text() -> str:
             # Called again when the terminal is free: a record replaced (or
@@ -187,7 +199,7 @@ class Outbox:
             return make() if rec["state"] == "pending" else ""
 
         def done(ok: bool) -> None:
-            self._settle(rec, "delivered" if ok else "failed")
+            self._settle(rec, "pending", "delivered" if ok else "failed")
 
         try:
             s = self.manager.get(session)
@@ -206,7 +218,7 @@ class Outbox:
                 rec["state"] = "held"
             else:
                 log.info("qa: could not deliver to %s", session)
-                self._settle(rec, "failed")
+                self._settle(rec, "pending", "failed")
         return rec
 
     async def force(self, key: str) -> Optional[dict]:
@@ -222,7 +234,7 @@ class Outbox:
             ok = bool(await self.manager.get(rec["session"]).deliver(rec["make"](), force=True))
         except Exception:  # noqa: BLE001 -- gone
             ok = False
-        self._settle(rec, "delivered" if ok else "failed")
+        self._settle(rec, "forcing", "delivered" if ok else "failed")
         return rec
 
 

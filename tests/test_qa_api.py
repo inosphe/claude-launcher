@@ -54,6 +54,9 @@ class FakeSession:
         return self.draft
 
     async def deliver(self, text, *, force=False):
+        # The queued copy reaches the terminal first, the way it can while
+        # a forced send waits out the typing grace -- and types nothing.
+        self.release()
         self.forced.append(force)
         self.delivered.append(text)
         return True
@@ -230,7 +233,6 @@ def test_deliver_now_forces_the_waiting_notification_once(tmp_path):
         res = await req("POST", f"/api/qa/{q['id']}/deliver", {})
         assert res["delivery"]["state"] == "delivered" and res["delivery"]["forced"] is True
         assert s1.forced == [True] and "> yes" in s1.delivered[0]
-        s1.release()
         assert len(s1.delivered) == 1, "the queued copy no longer types"
         assert (await req("GET", "/api/qa?session=s1"))["questions"][0]["delivery"]["state"] == "delivered"
         await req("POST", f"/api/qa/{q['id']}/deliver", {}, status=409)
