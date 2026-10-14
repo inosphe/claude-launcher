@@ -360,3 +360,98 @@ def test_recovery_between_auto_round_check_and_start_keeps_hold(tmp_path, monkey
     runtime.release_halt("storage-recovery", cwd=cwd, scope=scope)
     assert runtime.start_next_round(cwd, scope, now=1003)["round"] == 2
     assert st.load_state()["run_id"] != old_id
+
+
+# -- the verified read cache (checkpoint.read_state/read_chart) -------------
+
+def test_cached_state_read_sees_another_process_commit(run_store):
+    st = run_store
+    assert "other_marker" not in st.load_state()
+    st.load_state()  # a second read of the same revision comes from the cache
+    program = r'''
+import json, sys
+from pathlib import Path
+from claude_launcher.cflow2 import checkpoint
+p = Path(sys.argv[1])
+snap = checkpoint.read(p)
+state = json.loads(snap['state'])
+state['other_marker'] = 1
+checkpoint.commit(p, checkpoint.encode(state), snap['chart'], [], legacy=[], receipts={})
+'''
+    env = dict(os.environ, PYTHONPATH=str(Path(store.__file__).parents[2]))
+    subprocess.run([sys.executable, "-c", program, str(st.checkpoint_path)],
+                   env=env, check=True, timeout=30)
+    assert st.load_state()["other_marker"] == 1
+
+
+def test_cached_read_detects_tampering_that_keeps_the_revision(run_store):
+    st = run_store
+    st.load_state()
+    st.load_chart()
+    with checkpoint.connect(st.checkpoint_path) as db:
+        db.execute("UPDATE snapshot SET state='{}' WHERE id=1")
+    with pytest.raises(store.StoreError, match="checksum"):
+        st.load_state()
+
+
+def test_state_read_does_not_verify_chart_and_chart_read_does(run_store):
+    st = run_store
+    st.load_chart()
+    with checkpoint.connect(st.checkpoint_path) as db:
+        db.execute("UPDATE definition SET body=body||' ' WHERE id=1")
+    assert st.load_state()["run_id"]
+    with pytest.raises(store.StoreError, match="checksum"):
+        st.load_chart()
+
+
+def test_cached_state_is_a_new_object_per_read(run_store):
+    st = run_store
+    first = st.load_state()
+    first["inst"].clear()
+    first["scribble"] = True
+    second = st.load_state()
+    assert "scribble" not in second and second["inst"]
+
+
+def test_cache_skips_verification_of_an_unchanged_revision(run_store, monkeypatch):
+    st = run_store
+    st.load_state()
+    st.load_chart()
+    calls = []
+    original = checkpoint.digest
+    monkeypatch.setattr(checkpoint, "digest", lambda text: calls.append(1) or original(text))
+    for _ in range(3):
+        st.load_state()
+        st.load_chart()
+    assert calls == []
+    with st.lock():
+        st.commit(dict(st.load_state(), marker=1), [])
+    calls.clear()
+    st.load_state()
+    assert len(calls) == 1  # the new state only; the chart is verified when read
+
+
+def test_save_that_changes_only_the_updated_stamp_writes_nothing(run_store):
+    st = run_store
+
+    def revision():
+        return checkpoint.read(st.checkpoint_path)["revision"]
+
+    before, stamp = revision(), st.load_state()["updated"]
+    with st.lock():
+        r = runtime.Run.load(st, 5000)
+        r.state["updated"] = "2099-01-01T00:00:00+00:00"
+        r.save()
+    assert revision() == before and r.state["updated"] == stamp
+    assert st.load_state()["updated"] == stamp
+    with st.lock():
+        r = runtime.Run.load(st, 5000)
+        r.state["marker"] = 1
+        r.save()
+    assert revision() == before + 1
+    assert st.load_state()["updated"] == r.state["updated"] != "2099-01-01T00:00:00+00:00"
+    with st.lock():
+        r = runtime.Run.load(st, 5000)
+        r.events.append({"event": "noted"})
+        r.save()
+    assert revision() == before + 2 and st.journal()[-1]["event"] == "noted"

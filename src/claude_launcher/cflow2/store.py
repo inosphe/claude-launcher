@@ -31,6 +31,7 @@ owning daemon moves them at its next start (:mod:`.slot_migration`).
 from __future__ import annotations
 
 import contextlib
+import functools
 import json
 import logging
 import os
@@ -208,7 +209,17 @@ def side_of(scope: str) -> Optional[str]:
 
 
 def resolve_cwd(cwd: Optional[str] = None) -> Path:
-    return Path(cwd or os.getcwd()).resolve()
+    path = Path(cwd or os.getcwd())
+    if not path.is_absolute():
+        return path.resolve()
+    return _resolve_absolute(str(path))
+
+
+@functools.lru_cache(maxsize=256)
+def _resolve_absolute(path: str) -> Path:
+    # The daemon builds a RunStore per read for the same few directories;
+    # resolving walks every component (a stat each) every time.
+    return Path(path).resolve()
 
 
 class RunStore:
@@ -253,8 +264,11 @@ class RunStore:
         return self.dir / checkpoint.FILE
 
     def _checkpoint(self, *, full: bool = False):
+        return self._read(checkpoint.read, self.checkpoint_path, full=full)
+
+    def _read(self, fn, *args, **kwargs):
         try:
-            return checkpoint.read(self.checkpoint_path, full=full)
+            return fn(*args, **kwargs)
         except checkpoint.CheckpointError as exc:
             raise StoreError(f"{exc}; preserve this run and inspect with "
                              f"claunch cflow2 recover --scope {self.scope}") from exc
@@ -281,7 +295,7 @@ class RunStore:
 
     def load_state(self) -> Dict[str, Any]:
         if self.checkpoint_path.exists():
-            return json.loads(self._checkpoint()["state"])
+            return self._read(checkpoint.read_state, self.checkpoint_path)
         try:
             raw = self.state_path.read_text(encoding="utf-8")
         except FileNotFoundError:
@@ -300,7 +314,8 @@ class RunStore:
 
     def load_chart(self) -> ir.Chart:
         if self.checkpoint_path.exists():
-            return ir.Chart.from_json(self._checkpoint()["chart"])
+            # Shared with every reader of this checkpoint generation: read-only.
+            return self._read(checkpoint.read_chart, self.checkpoint_path, ir.Chart.from_json)
         try:
             raw = self.chart_path.read_text(encoding="utf-8")
         except FileNotFoundError:
@@ -342,15 +357,34 @@ class RunStore:
     def save_state(self, state: Dict[str, Any]) -> None:
         self.commit(state, [])
 
-    def commit(self, state: Dict[str, Any], events: List[Dict[str, Any]]) -> None:
+    def commit(self, state: Dict[str, Any], events: List[Dict[str, Any]], *,
+               touch: Optional[str] = None) -> None:
         """One durable state/event transaction. Caller holds the run lock.
+
+        ``touch`` names a timestamp key set to now only when the commit
+        changes something else (an event, or another key of the state): a
+        save that would only move that stamp writes nothing, and ``state``
+        keeps the committed stamp.
 
         Existing JSON-only runs migrate on their first successful write. A
         corrupt legacy file is never silently imported or replaced.
         """
         self.dir.mkdir(parents=True, exist_ok=True)
-        text = checkpoint.encode(state)
         creating = not self.checkpoint_path.exists()
+        if touch and not creating and not events:
+            previous = self._read(checkpoint.read_state, self.checkpoint_path)
+            stamp = previous.get(touch)
+            if stamp is not None:
+                fresh = state.get(touch)
+                state[touch] = stamp
+                # Compact output differs from encode()'s only in whitespace,
+                # and json's C encoder writes it (indent= runs the Python one).
+                if _compact(state) == _compact(previous):
+                    return
+                state[touch] = fresh
+        if touch:
+            state[touch] = utcnow()
+        text = checkpoint.encode(state)
         legacy = []
         receipts = {}
         try:
@@ -368,9 +402,9 @@ class RunStore:
                 receipts = {p.name: p.read_text(encoding="utf-8")
                             for p in self.receipts_dir.glob("*") if p.is_file()}
             else:
-                previous = self._checkpoint()
-                chart = previous["chart"]
-                if previous["state"] == text and not events:
+                chart = None  # kept; checkpoint.commit verifies it under the write lock
+                if (self._read(checkpoint.read_state_text, self.checkpoint_path) == text
+                        and not events):
                     return
             stamped = [dict(ev, ts=ev.get("ts", utcnow())) for ev in events]
             checkpoint.commit(self.checkpoint_path, text, chart, stamped,
@@ -609,6 +643,10 @@ class RunStore:
             return
         with _excl_lock(path, timeout):
             yield
+
+
+def _compact(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, default=str)
 
 
 def _atomic_write(path: Path, text: str) -> None:
