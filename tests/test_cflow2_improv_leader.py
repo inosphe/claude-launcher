@@ -228,6 +228,70 @@ def test_failed_deployment_retries_then_records_failure_before_notice(tmp_path):
     assert ld.tasks() == ["landed-notice"]
 
 
+def _reach_reflect(ld):
+    _preflight(ld)
+    _merged(ld)
+    ld.report("checkpoint-check", verify=_allow)
+    assert ld.tasks() == ["reflect"]
+
+
+def test_failed_restart_goes_to_pregate_without_the_deploy_wait(tmp_path):
+    ld = Leader(tmp_path, restart_live=True)
+    _reach_reflect(ld)
+    ld.restart(code=1)
+    ld.report("reflect", "restart_failed", {"reason": "WEDGED exit 1"})
+    assert not ld.st["waits"]
+    assert ld.tasks() == ["reflect-pregate"]
+    ld.report("reflect-pregate")
+    ld.select("retry")
+    # a new visit: the daemon claims and runs the restart again (the command goes
+    # through the approval gate each time), the leader runs nothing itself
+    assert ld.tasks() == ["reflect"]
+    ld.restart(code=0)
+    ld.report("reflect")
+    assert len(ld.st["waits"]) == 1
+    ld.tick(lambda cmd, cwd: (0, "live commit confirmed"))
+    assert ld.tasks() == ["landed-notice"]
+
+
+def test_failed_restart_close_skips_the_wait_and_ends_in_reflect_closed(tmp_path):
+    ld = Leader(tmp_path, restart_live=True)
+    _reach_reflect(ld)
+    ld.restart(code=1)
+    ld.report("reflect", "restart_failed", {"reason": "WEDGED exit 1"})
+    ld.report("reflect-pregate")
+    ld.select("close")
+    assert ld.tasks() == ["reflect-closed"]
+    assert not ld.st["waits"]
+    ld.report("reflect-closed")
+    assert ld.tasks() == ["landed-notice"]
+    assert not ld.st["waits"]
+
+
+def test_restart_failures_exhaust_five_attempts_into_reflect_closed(tmp_path):
+    ld = Leader(tmp_path, restart_live=True)
+    _reach_reflect(ld)
+    for attempt in range(5):
+        assert ld.tasks() == ["reflect"]
+        ld.restart(code=1)
+        ld.report("reflect", "restart_failed", {"reason": f"attempt {attempt + 1}"})
+        assert ld.tasks() == ["reflect-pregate"]
+        ld.report("reflect-pregate")
+        ld.select("retry")
+    assert ld.tasks() == ["reflect-closed"]
+    ld.report("reflect-closed")
+    assert ld.tasks() == ["landed-notice"]
+    assert not ld.st["waits"]
+
+
+def test_restart_failed_requires_a_reason(tmp_path):
+    ld = Leader(tmp_path, restart_live=True)
+    _reach_reflect(ld)
+    ld.restart(code=1)
+    with pytest.raises(runtime.FlowError):
+        ld.report("reflect", "restart_failed", {})
+
+
 def test_missing_checkpoint_holds_the_report_without_running_tests(tmp_path):
     ld = Leader(tmp_path)
     _preflight(ld)

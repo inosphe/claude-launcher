@@ -302,6 +302,16 @@ nodes:
       섰는지 재기동 통지 블록이나 재기동 전후 pid로 판정하고(응답이 있다는
       사실은 판정이 아니다), 새 머지 커밋의 기능이 실제로 서빙되는지 하나
       이상 확인한다. 반영 판정 자체는 다음 대기(deployed-wait)의 checks가 한다.
+      restart 결과가 failed(exit≠0, 예: 데몬 WEDGED 판정 exit 1) · interrupted ·
+      unsupported이면 ok를 보고하지 않는다. restart_failed를 보고하고 reason에
+      exit 코드와 출력의 판정문을 적는다 — deployed-wait의 600초를 기다리지 않고
+      바로 reflect-pregate로 간다. 거기서 retry를 고르면 reflect에 새 방문으로
+      다시 들어가 restart가 다시 실행되고(웹 UI 승인 게이트를 다시 거친다), 리더가
+      재기동 명령을 직접 실행하는 일은 없다. 시도는 deployed-wait 만료와 합쳐
+      5회이고, 소진하거나 close를 고르면 reflect-closed(반영 실패/미확인)다.
+    returns:
+      ok: {}
+      restart_failed: {reason: str}
     restart:
       windows: 'powershell -NoProfile -ExecutionPolicy Bypass -File tools/restart_live.ps1'
       linux: 'bash tools/restart_live.sh'
@@ -470,22 +480,9 @@ procedures:
                   max: 5
                   do:
                     seq:
-                      - reflect
-                      - id: deployed-wait
-                        wait:
-                          describe: 라이브 데몬이 이번 머지 이후에 재기동됐다
-                          poll: 30
-                          seconds: 600
-                          checks:
-                            # 0 = 머지 이후 재기동 확인, 1 = 재기동 없음,
-                            # 2 = 판정 불가, 3 = 체크아웃이 더러움(판정 불가로 센다)
-                            - id: deployed
-                              describe: 라이브 데몬이 master의 이번 머지 이후에 재기동됐다
-                              probe: 'uv run --no-sync python tools/deploy_check.py --branch master'
-                        # 만료(timeout)와 판정 불가(undecidable)는 같은 결정 자리로
-                        # 간다(v1 checklist otherwise -> reflect-pregate).
+                      - seq: [reflect]
                         on:
-                          timeout: &pregate
+                          restart_failed: &pregate
                             seq:
                               - reflect-pregate
                               - choose:
@@ -501,7 +498,22 @@ procedures:
                                       then: {continue: null}   # 감싸는 retry의 다음 시도
                                     close:
                                       description: 이 턴에 정리할 수 없다 — 반영 없이 마감하고 착지 통지로
-                                      then: reflect-closed
+                                      then: {seq: [reflect-closed, {break: null}]}   # restart_failed 경로는 deployed-wait로 흘러가지 않는다
+                      - id: deployed-wait
+                        wait:
+                          describe: 라이브 데몬이 이번 머지 이후에 재기동됐다
+                          poll: 30
+                          seconds: 600
+                          checks:
+                            # 0 = 머지 이후 재기동 확인, 1 = 재기동 없음,
+                            # 2 = 판정 불가, 3 = 체크아웃이 더러움(판정 불가로 센다)
+                            - id: deployed
+                              describe: 라이브 데몬이 master의 이번 머지 이후에 재기동됐다
+                              probe: 'uv run --no-sync python tools/deploy_check.py --branch master'
+                        # 만료(timeout)와 판정 불가(undecidable)는 같은 결정 자리로
+                        # 간다(v1 checklist otherwise -> reflect-pregate).
+                        on:
+                          timeout: *pregate
                           undecidable: *pregate
               catch:
                 "*": reflect-closed
