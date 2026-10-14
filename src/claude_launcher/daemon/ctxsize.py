@@ -475,6 +475,13 @@ def tool_calls_for_session(sdef, now: Optional[float] = None) -> Optional[int]:
     the window before the file's own mtime is out of the window for every
     later ``now`` as well, so that is where the read may stop.
     """
+    return count_tool_calls(tool_times_for_session(sdef), now)
+
+
+def tool_times_for_session(sdef) -> Optional[List[float]]:
+    """The tool-call times :func:`tool_calls_for_session` counts, or ``None``
+    when there is no transcript to read. The list is the cache's own: read it,
+    do not change it."""
     path = transcript_of(sdef)
     if path is None:
         return None
@@ -485,13 +492,19 @@ def tool_calls_for_session(sdef, now: Optional[float] = None) -> Optional[int]:
     key = str(path)
     cached = _tool_reads.get(key)
     if cached is not None and cached[0] == stat.st_mtime and cached[1] == stat.st_size:
-        times = cached[2]
-    else:
-        read = read_tool_times(path, stat.st_mtime - TOOL_WINDOW)
-        if read is None:
-            return None
-        times = read
-        _tool_reads[key] = (stat.st_mtime, stat.st_size, times)
+        return cached[2]
+    read = read_tool_times(path, stat.st_mtime - TOOL_WINDOW)
+    if read is None:
+        return None
+    _tool_reads[key] = (stat.st_mtime, stat.st_size, read)
+    return read
+
+
+def count_tool_calls(times: Optional[List[float]],
+                     now: Optional[float] = None) -> Optional[int]:
+    """How many of ``times`` fall within :data:`TOOL_WINDOW` of ``now``."""
+    if times is None:
+        return None
     at = time.time() if now is None else now
     return sum(1 for t in times if at - t <= TOOL_WINDOW)
 
@@ -699,16 +712,27 @@ def attach(session) -> dict:
     calls = tool_calls_for_session(sdef)
     if calls is not None:
         info["tool_calls"] = calls
-    reading = for_session(sdef)
-    if reading:
-        info["context"] = dict(reading)
-        window = compact_window_of(sdef)
-        if window:
-            info["context"]["compact_window"] = window
-        # A harness that reports its own window (Codex) wins; otherwise the
-        # spec's declared context_window draws the ceiling.
-        if not info["context"].get("model_context_window"):
-            declared = declared_context_window(sdef)
-            if declared:
-                info["context"]["model_context_window"] = declared
+    context = context_of(sdef, for_session(sdef))
+    if context:
+        info["context"] = context
     return info
+
+
+def context_of(sdef, reading: Optional[dict]) -> Optional[dict]:
+    """The row's ``context``: a copy of the transcript ``reading`` with the
+    windows the configuration declares for ``sdef`` hung on it. Those come
+    from the config store (cached for ``WINDOW_TTL``), never the transcript,
+    so a caller that keeps a reading re-annotates it here on every ask."""
+    if not reading:
+        return None
+    context = dict(reading)
+    window = compact_window_of(sdef)
+    if window:
+        context["compact_window"] = window
+    # A harness that reports its own window (Codex) wins; otherwise the
+    # spec's declared context_window draws the ceiling.
+    if not context.get("model_context_window"):
+        declared = declared_context_window(sdef)
+        if declared:
+            context["model_context_window"] = declared
+    return context

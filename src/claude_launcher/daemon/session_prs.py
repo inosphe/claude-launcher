@@ -70,6 +70,15 @@ def record(name: str, result: dict, request: dict) -> None:
             atomic.replace(tmp, path)
 
 
+def sources(cwd: str, name: str, st: RunStore | None = None) -> list:
+    """The files :func:`for_session` reads: a change to any of them is a
+    change to its answer."""
+    if st is None and cwd:
+        st = RunStore(cwd, name)
+    path = paths.session_dir(name) / "prs.json"
+    return [path] + ([st.state_path, st.checkpoint_path] if st else [])
+
+
 def for_session(cwd: str, name: str) -> list[dict]:
     """Merge the wizard record and this session's own v2 PR collection.
 
@@ -78,7 +87,7 @@ def for_session(cwd: str, name: str) -> list[dict]:
     """
     path = paths.session_dir(name) / "prs.json"
     st = RunStore(cwd, name) if cwd else None
-    files = [path] + ([st.state_path, st.checkpoint_path] if st else [])
+    files = sources(cwd, name, st)
     stamps = []
     for file in files:
         try:
