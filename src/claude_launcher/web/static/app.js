@@ -1622,8 +1622,50 @@ function railMetaText(s) {
       : s.paused_at ? "paused" : `exit ${s.exit_code ?? "?"}`)
     : s.paused_at ? "pausing" : s.winddown ? "winding down" : "";
   // The kind the session declared at creation (``pi-durable``) follows the
-  // harness it qualifies: same CLI, run for that purpose.
-  return [identity, s.kind, state].filter(Boolean).join(" · ");
+  // harness it qualifies: same CLI, run for that purpose. Who ended it sits
+  // right after the state it qualifies, and who created it closes the line
+  // (claunch-o6xws); the full actors ride the row's title (actorLabel).
+  // Guarded like the other late-defined helpers: a check that lifts only
+  // this function out of app.js still gets the line it always got.
+  const ended = typeof railEndedText === "function" ? railEndedText(s) : "";
+  const created = typeof railCreatedText === "function" ? railCreatedText(s) : "";
+  return [identity, s.kind, state, ended, created].filter(Boolean).join(" · ");
+}
+
+/* Who did it, in the fewest words a rail row can spare (claunch-o6xws).
+   ``created_by`` / ``ended_by`` are daemon/actors.py's dicts: a person
+   ("user"), an agent session (its name), a workflow run ("cflow"), the
+   daemon itself, the session's own program ("self") or the machine ("os").
+   A record from before the fields carries neither and says nothing. */
+function actorWho(a) {
+  if (!a || !a.kind) return "";
+  if (a.kind === "agent") return a.name || "agent";
+  if (a.kind === "os") return "OS";
+  return a.kind;
+}
+
+function railEndedText(s) {
+  const a = s.ended_by;
+  if (!a || !a.kind || s.archived_at || s.status !== "exited") return "";
+  if (a.kind === "self") return a.reason === "handoff" ? "handed off" : "self-exit";
+  if (a.kind === "os") return "OS shutdown";
+  const verb = s.paused_at ? "paused" : s.held_at ? "held" : "killed";
+  return `${verb} by ${actorWho(a)}`;
+}
+
+function railCreatedText(s) {
+  const a = s.created_by;
+  return a && a.kind ? `spawned by ${actorWho(a)}` : "";
+}
+
+/* The long form for a title: "agent s12", "user (web)", "cflow s3 [kill-on-end]". */
+function actorLabel(a) {
+  if (!a || !a.kind) return "unknown";
+  let text = a.kind;
+  if (a.name) text += ` ${a.name}`;
+  if (a.via) text += ` (${a.via})`;
+  if (a.reason) text += ` [${a.reason}]`;
+  return text;
 }
 
 /* ---- rail search ------------------------------------------------------ */
@@ -4866,6 +4908,12 @@ async function refreshSessions(options) {
         : s.paused_at
         ? "paused — open it to resume; the bulk resume brings every paused one back"
         : "exited — open it to resume or archive"].filter(Boolean).join(" · ");
+      if (s.ended_by && s.ended_by.kind && typeof actorLabel === "function") {
+        li.title += `\nended by: ${actorLabel(s.ended_by)}`;
+      }
+    }
+    if (s.created_by && s.created_by.kind && typeof actorLabel === "function") {
+      li.title = [li.title, `created by: ${actorLabel(s.created_by)}`].filter(Boolean).join("\n");
     }
     // How full this session's context is, on the rail row itself. The story
     // lives in the tooltip (a note on both the row and its name — that is
