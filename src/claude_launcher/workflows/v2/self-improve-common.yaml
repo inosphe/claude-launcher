@@ -1,0 +1,187 @@
+cflow: 2
+name: self-improve-common
+kind: library
+description: >-
+  세션이 스스로를 리뷰해 개선사항을 두 갈래(일반 · cflow v2)로 보고하고, 사용자와
+  논의한 뒤 사람이 합의한 항목만 beads 이슈로 등록하는 프로시저 self-improve.
+  improv-worker-v2의 end-decision이 부르고, 다른 v2 정의도 include해서 부를 수
+  있다(claunch-c4e6f.1).
+
+# ── 이 파일의 자리 ──────────────────────────────────────────────────────
+# claunch-c4e6f가 improv-worker-v2 안에 만든 흐름(리뷰 → 논의 → 합의 게이트 →
+# 등록)을 그대로 옮겼다. 정의마다 다른 것 셋만 params로 받는다: 기록이 붙을
+# 주 이슈, 리뷰할 정의, 리뷰의 출발점이 될 기존 기록. 등록 규칙(label
+# self-improve, assignee 없음, REGISTERED 마커)은 고정이다 — improv-worker-v2의
+# settle-check 예외와 end-new-task 배정이 그 세 값을 읽는다.
+#
+# 부르는 쪽이 할 일:
+#   include: [self-improve-common]
+#   - id: <이름>
+#     call: self-improve
+#     with: {issue: "$data.claim.issue", workflow: "<정의 이름과 정본 경로>",
+#            basis: "<있으면 앞 노드가 남긴 기록>"}
+# 돌아오면 ok이고 issues에 등록(또는 덧붙인) 이슈 id가 있다. drop이면 issues가
+# 없다. 이 프로시저는 세션을 끝내지 않는다 — 부르는 쪽이 다음을 정한다(예:
+# improv-worker-v2는 종료 결정을 다시 묻는다).
+
+# 합의 게이트가 ask-user를 부른다(docs/cflow-v2.md 2.10).
+include: [ask-common]
+
+procedures:
+  self-improve:
+    description: >-
+      이 세션을 스스로 리뷰해 일반 개선사항과 cflow(v2) 개선사항을 보고하고,
+      사용자와 논의해 합의 게이트(사람만 답한다)에서 register를 받은 항목만
+      label self-improve, assignee 없이 이슈로 등록한다. revise면 논의로
+      돌아가고 drop이면 아무것도 등록하지 않는다.
+    params:
+      issue: {type: str, required: true, description: "리뷰 전문과 REGISTERED 마커가 붙을 주 이슈 id. 없으면 빈 문자열"}
+      workflow: {type: str, required: true, description: "리뷰할 cflow 정의 — 이름과 정본 경로, include한 파일"}
+      basis: {type: str, default: "", description: "리뷰의 출발점이 될 기존 기록(예: 앞 노드가 남긴 회고 코멘트). 비면 기록을 직접 읽는다"}
+    returns:
+      ok: {issues: "list?"}
+    nodes:
+      self-improve-review:
+        title: 자기 개선 리뷰 (일반 · cflow v2)
+        prompt: |
+          사용자가 self-improve를 골랐다. 이 세션을 스스로 리뷰해 개선사항을 두
+          갈래로 보고한다. 등록은 이 노드의 일이 아니다 — 보고를 바탕으로 사용자와
+          논의(self-improve-discuss)하고, 사람이 합의 게이트(self-improve-align)에서
+          register를 답한 항목만 self-improve-register가 등록한다.
+
+          주 이슈: ${params.issue}
+          리뷰할 정의: ${params.workflow}
+          출발점: ${params.basis}
+
+          출발점이 주어졌으면 그 기록을 다시 쓰지 않고 출발점으로 삼는다(예: 회고가
+          주 이슈에 남긴 `RETRO @ <런 id>` 코멘트 — `claunch beads comments <주 이슈
+          id> --json`). 출발점이 비었거나 그 기록이 없으면 `claunch retro --print`의
+          1절(근거 모으기)대로 기록을 직접 읽는다 — 기억으로 쓰지 않는다. 이 런의
+          `TRIED:` 코멘트, `claunch cflow2 journal -t $CLAUNCH_SESSION`, 메시 기록도
+          근거다.
+
+          두 갈래:
+          · **general** — 세션 진행 중 나온 일반 개선사항: 저장소 규칙·문서, 도구·스크립트,
+            테스트(느림·불안정·빠진 것), 보드·메시 사용, 이 세션의 판단에서 반복된 비용.
+          · **cflow** — cflow(v2)에 관련된 개선사항: 위의 리뷰할 정의(정본과 include한
+            파일)의 스텝·지시·게이트·done_when, 그리고 엔진·`flow_*` 도구·`claunch
+            cflow2` CLI·대시보드의 동작.
+          항목마다: 갈래, 한 줄 제목, 관찰(이 세션에서 일어난 일과 근거 — 저널 노드,
+          명령 출력, 커밋, 메시지 id), 제안(바꿀 것), 기대 효과와 리스크, 우선순위
+          (P2 실제 실패·재작업을 만듦 / P3 비용만 늘림 / P4 아이디어), 그리고 이슈로
+          등록한다면의 초안(제목, 범위, 부모 — 주 이슈 기능의 후속일 때만 그 id).
+          관찰에 근거가 없는 항목은 쓰지 않는다. 한 갈래에 항목이 없으면 「없음」과
+          그렇게 본 근거를 적는다.
+
+          기록: 전문을 `$CLAUNCH_SCRATCH/self-improve-<런 id>.md`에 쓰고(첫 줄
+          `SELF-IMPROVE @ <런 id>`, 아래에 `## general`, `## cflow`), 주 이슈에
+          `claunch beads comments add <주 이슈 id> -f <그 파일>`로 붙인다. 주 이슈가
+          없으면 파일 경로만 보고한다.
+          터미널에는 갈래별 항목 수와 항목마다 한 줄(번호, 제목, 우선순위)만 보고한다.
+
+          이 노드에서는 코드·정의 파일을 고치지 않고 이슈를 만들지 않는다.
+        done_when: |
+          주 이슈에 `SELF-IMPROVE @ <런 id>` 코멘트가 붙어 있고(주 이슈가 없으면
+          `$CLAUNCH_SCRATCH`의 파일 경로), 그 안에 general·cflow 두 절이 있으며, 보고에
+          그 위치와 갈래별 항목 수가 있다. 이슈는 하나도 만들지 않았다.
+        # 리뷰 대상이 이 세션의 대화라서 위임하지 않는다(회고와 같은 이유).
+        executor: [inline]
+        returns:
+          ok: {where: str, general: int, cflow: int}
+        effects: [fs.read, fs.write, board.write]
+
+      self-improve-discuss:
+        title: 개선사항 논의 (사용자와)
+        prompt: |
+          self-improve 리뷰를 바탕으로 터미널의 사용자와 논의한다. 목적은 등록할 목록에
+          사용자와 맞추는 것(align)이다 — 어느 항목을 이슈로 남길지, 제목·범위·우선순위를
+          어떻게 할지.
+
+          1. 사용자에게 항목을 제안서 형식으로 보여 준다: 갈래별로 번호, 제목, 관찰 한 줄,
+             제안, 우선순위, 권장 판정(register 또는 drop)과 그 이유. 전문은 주 이슈
+             (${params.issue})의 `SELF-IMPROVE @ <런 id>` 코멘트(또는 파일 경로)를 가리킨다.
+          2. 사용자에게 항목별 의견을 묻고 **턴을 끝낸다.** 이 작업은 사용자가 답할 때까지
+             열려 있다. 답이 오면 반영하고, 새로 나온 항목·바뀐 범위가 있으면 목록에
+             넣는다. 사용자가 더 할 말이 없다고 하거나 모든 항목에 판정이 서면 끝낸다.
+          3. 사용자가 이 자리에서 「바로 이 작업을 시작하자」고 하면 그 항목을 register로
+             두고 그 사실을 note에 적는다 — 새 작업의 시작은 이 프로시저가 끝난 뒤
+             부르는 쪽이 정한다. 런 밖에서 작업을 시작하지 않는다.
+          사용자가 말하지 않은 판정을 지어내지 않는다. 답이 없는 항목은 판정 없이 두지
+          않고 drop으로 두되, 그 이유를 「사용자 답 없음」이라고 적는다.
+          논의 중에는 이슈를 만들지 않는다 — 등록은 사람이 합의 게이트에서 register를
+          답한 뒤다.
+        done_when: |
+          사용자가 논의에 답했고, 보고의 items에 항목마다 갈래·제목·우선순위·판정
+          (register·drop)과 그 근거가 된 사용자의 말이 있다. 이슈는 만들지 않았다.
+        returns:
+          ok: {items: list, agreed: int, note: "str?"}
+        effects: [fs.read]
+
+      self-improve-register:
+        title: 합의한 개선사항 등록 (beads)
+        prompt: |
+          사람이 합의 게이트(self-improve-align)에서 register를 답했다. 논의 보고의 items 중
+          판정이 register인 항목만 이슈로 등록한다. 답의 reason이 고칠 점을 말했으면
+          (제목·우선순위·제외) 그대로 반영한다. 목록에 없는 항목을 더하지 않는다.
+
+          주 이슈: ${params.issue}
+
+          항목마다:
+          1. 중복 확인: `claunch beads search "<핵심어>" --json`과 open·in_ready·
+             in_progress 목록. 같은 일이 있으면 만들지 않고 `claunch beads comments add
+             <그 id> "SELF-IMPROVE: <요지> (from <런 id>)"`로 덧붙이고 그 id를 결과에 싣는다.
+          2. 없으면 만든다: `claunch beads create "<제목>" --type task --priority <P>
+             --labels self-improve --description "<## 목표 / ## 범위(포함·제외) / ## 완료 증거
+             기준 / ## 출처>"`. 출처에는 `self-improve @ <런 id>`, 주 이슈 id, 사용자 합의(합의
+             게이트 답의 reason)를 적는다. 주 이슈 기능의 후속이면 `--parent <주 이슈 id>`를
+             붙이고, 관계가 없으면 붙이지 않는다. **assignee는 비워 둔다** — 사용자가 보드
+             풀에 남기기로 합의한 일감이다. 이 세션이 바로 맡을 일은 부르는 쪽(예:
+             improv-worker-v2 end-decision의 new-task)이 잡는다.
+          3. 끝나면 주 이슈에 `claunch beads comments add <주 이슈 id> "SELF-IMPROVE
+             REGISTERED @ <런 id>: <id,...>"`를 남긴다. 이 코멘트가 부르는 쪽 정산 규칙의
+             예외(사용자가 보드 풀에 남기기로 승인한 self-improve 이슈 — improv-worker-v2의
+             settle-check)의 근거다. 주 이슈가 없으면 그 사실과 id 목록을 보고에 적는다.
+          상위 세션이 있으면 fyi 한 줄로 등록한 id를 알린다(없으면 그 사실).
+        done_when: |
+          register 항목마다 새 이슈 id 또는 덧붙인 기존 이슈 id가 결과에 있고, 새 이슈는
+          label `self-improve`에 assignee가 비어 있으며, 주 이슈에 `SELF-IMPROVE REGISTERED
+          @ <런 id>` 코멘트가 있다.
+        returns:
+          ok: {issues: list}
+        effects: [board.write, mesh.send]
+    body:
+      # 논의와 합의: 사용자가 목록을 고치라고 하면(revise) 논의로 돌아간다.
+      - self-improve-review
+      - id: self-improve-talk
+        loop:
+          while: "true"
+          max: 10
+          do:
+            - self-improve-discuss
+            # 등록은 보드에 남는 일이라 사람의 답으로만 연다(ask-user의
+            # 기본 응답자는 사람뿐) — 논의 중의 동의를 에이전트가 대신
+            # 승인으로 옮기지 않는다.
+            - id: self-improve-align
+              call: ask-user
+              with:
+                require_reason: true
+                topic: |
+                  self-improve 논의(self-improve-discuss)에서 정리한 등록 목록을 확정한다.
+                  brief에는 그 보고의 items를 그대로 싣는다 — 항목마다 갈래(general·cflow),
+                  제목, 우선순위, 판정(register·drop)과 그 근거가 된 사용자의 말.
+
+                  register: 판정이 register인 항목만 beads 이슈로 등록하고 부르는 쪽으로
+                  돌아간다. 답의 reason에 고칠 점(제목·우선순위·제외)이 있으면 그대로
+                  반영해 등록한다.
+                  revise: 목록이 아직 맞지 않는다 — 논의로 돌아간다. reason이 고칠 점이다.
+                  drop: 아무것도 등록하지 않고 부르는 쪽으로 돌아간다.
+
+                  판단 근거: 주 이슈의 `SELF-IMPROVE @ <런 id>` 코멘트(리뷰 전문),
+                  `claunch cflow2 journal -t <세션>`의 self-improve-discuss 보고.
+              cases:
+                register:
+                  - self-improve-register
+                  - return: ok
+                    value: {issues: "$result['self-improve-register'].value.issues"}
+                revise: {continue: self-improve-talk}
+                drop: {return: ok}
