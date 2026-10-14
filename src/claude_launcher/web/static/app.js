@@ -28053,12 +28053,13 @@ function wsVscodeControls(w) {
   const box = el("span", "ws-vscode");
   const st = vscodeState;
   if (!st) return box;
-  box.appendChild(vscodeButton("VS Code", { workspace: w.name }));
+  box.appendChild(vscodeButton("VS Code", { workspace: w.name }, "clear"));
   const trees = (st.targets || []).filter((t) => t.kind === "worktree" && t.workspace === w.name);
   if (trees.length) {
     const pick = document.createElement("select");
     pick.className = "ws-vscode-pick";
-    pick.appendChild(new Option(`worktree… (${trees.length})`, ""));
+    pick.setAttribute("aria-label", "Open a worktree in VS Code");
+    pick.appendChild(new Option(`…or a worktree (${trees.length})`, ""));
     for (const t of trees) {
       const running = t.server && t.server.state === "running" ? " ●" : "";
       pick.appendChild(new Option(t.worktree + running, t.worktree));
@@ -29761,64 +29762,81 @@ function wsWorktreeList(w) {
   return box;
 }
 
+/* One registered workspace, in two lines. The head names it and says how it
+   stands (sessions, branch, ahead/behind, changes); the action bar groups
+   what can be done with it, each group a kind of action: start a session,
+   open it in VS Code, unfold one of its panels (worktrees, Sync), measure it,
+   and -- set apart at the far end -- unregister it. Every button in the bar
+   is the same size; only "New session" is a primary button. */
 function wsRow(w) {
   const row = el("div", "ws-row");
+  const head = el("div", "ws-row-head");
   const text = el("div", "ws-text");
   text.appendChild(el("span", "ws-name", w.name));
   text.appendChild(el("span", "ws-path mono", w.path));
-  row.appendChild(text);
+  head.appendChild(text);
 
+  const status = el("div", "ws-row-status");
   // A workspace on a removable drive is legitimately absent half the time,
   // so the entry stays (it is still the user's) and says which it is.
-  if (!w.exists) row.appendChild(el("span", "badge exited", "missing"));
+  if (!w.exists) status.appendChild(el("span", "badge exited", "missing"));
   const here = wsSessionsIn(w.path);
   if (here.length) {
-    row.appendChild(el(
+    status.appendChild(el(
       "span", "badge idle",
       here.length === 1 ? "1 session" : `${here.length} sessions`
     ));
   }
-  if (w.exists) for (const b of wsGitBadges(wsGitSummary[w.name])) row.appendChild(b);
+  if (w.exists) for (const b of wsGitBadges(wsGitSummary[w.name])) status.appendChild(b);
   const progress = wsRefreshAllBadge(w.name);
-  if (progress) row.appendChild(progress);
-  if (w.exists) row.appendChild(wsUsageButton(w));
-  const trees =w.exists ? ((wsGitSummary[w.name] || {}).worktrees || []) : [];
-  if (trees.length) {
-    const open = wsTreesOpen.has(w.name);
-    const tb = el("button", "wf-btn clear" + (open ? " on" : ""),
-      `${trees.length} worktree${trees.length === 1 ? "" : "s"} ${open ? "▴" : "▾"}`);
-    tb.title = "the linked git worktrees of this repository, and the sessions standing in them";
-    tb.addEventListener("click", () => {
-      if (wsTreesOpen.has(w.name)) wsTreesOpen.delete(w.name); else wsTreesOpen.add(w.name);
-      renderWorkspaces();
-    });
-    row.appendChild(tb);
-  }
+  if (progress) status.appendChild(progress);
+  head.appendChild(status);
+  row.appendChild(head);
+
+  const bar = el("div", "ws-row-actions");
+  const group = (cls) => bar.appendChild(el("div", "ws-action-group " + cls));
 
   // Start a session here (claunch-dbik7): the one creation modal, with this
   // workspace already picked as its directory -- the same seed the Beads
   // detail's Start block hands it for an issue's recorded workspace.
   if (w.exists && typeof openSessionModal === "function") {
-    const start = el("button", "wf-btn", "New session");
+    const start = el("button", "wf-btn approve", "New session");
     start.title = `open the new-session form with ${w.path} as its directory`;
     start.addEventListener("click", () => {
       openSessionModal({ tab: "new", seed: { workspace: w.name } });
     });
-    row.appendChild(start);
+    group("ws-group-start").appendChild(start);
   }
-  if (w.exists) row.appendChild(wsVscodeControls(w));
+  if (w.exists) group("ws-group-open").appendChild(wsVscodeControls(w));
+
   if (w.exists) {
+    const panels = group("ws-group-panels");
+    const trees = (wsGitSummary[w.name] || {}).worktrees || [];
+    if (trees.length) {
+      const open = wsTreesOpen.has(w.name);
+      const tb = el("button", "wf-btn clear ws-toggle" + (open ? " on" : ""),
+        `${trees.length} worktree${trees.length === 1 ? "" : "s"} ${open ? "▴" : "▾"}`);
+      tb.title = "the linked git worktrees of this repository, and the sessions standing in them";
+      tb.addEventListener("click", () => {
+        if (wsTreesOpen.has(w.name)) wsTreesOpen.delete(w.name); else wsTreesOpen.add(w.name);
+        renderWorkspaces();
+      });
+      panels.appendChild(tb);
+    }
     const open = wsSyncOpen.has(w.name);
-    const sync = el("button", "wf-btn" + (open ? " on" : ""), open ? "Sync ▴" : "Sync ▾");
+    const sync = el("button", "wf-btn clear ws-toggle" + (open ? " on" : ""), open ? "Sync ▴" : "Sync ▾");
     sync.title = "sync this repository's master with the shared remote, " +
       "and push or pull work branches (reposync)";
     sync.addEventListener("click", () => wsSyncToggle(w));
-    row.appendChild(sync);
+    panels.appendChild(sync);
+    panels.appendChild(wsUsageButton(w));
   }
 
-  const rm = el("button", "wf-btn clear", "Unregister");
+  const rm = el("button", "wf-btn clear ws-unregister", "Unregister");
+  rm.title = "remove this directory from the registry (nothing on disk is deleted)";
   rm.addEventListener("click", () => wsRemove(w, here));
-  row.appendChild(rm);
+  group("ws-group-end").appendChild(rm);
+  row.appendChild(bar);
   return row;
 }
 
@@ -30152,10 +30170,13 @@ function wsPeerDistanceText(d) {
    that did not answer is a row of its own. Peers are read when the panel
    opens and on Refresh, never on page load: one round trip per peer. */
 function wsSyncPeers(doc) {
-  const box = el("div", "ws-sync-peers");
+  const box = el("details", "ws-sync-section ws-sync-peers");
   const rows = doc.peers || [];
   const unreadable = doc.unreadable || [];
-  box.appendChild(el("h4", null, `Peers sharing this address (${rows.length})`));
+  box.appendChild(el("summary", null, `Other machines with this repository (${rows.length})`));
+  box.appendChild(el("p", "wf-note",
+    "Clones of the same remote on relay peers, and how their master stands. " +
+    "For reference only: Sync works from the shared remote and does not need them."));
   if (!rows.length && !unreadable.length) {
     box.appendChild(el("p", "wf-note",
       "No relay peer reports a clone of this remote. Sync does not need one."));
@@ -30236,8 +30257,49 @@ function wsSyncResult(result) {
 /* Local branches the remote's master does not hold yet (claunch-6p7ri),
    newest commit first: how far each is ahead, when it last moved, and the
    session that stamped its tip (the Claunch-Session trailer), linked to
-   that session's page. Read with the plan, so as of its fetch. */
-function wsSyncUnmerged(doc) {
+   that session's page. Read with the plan, so as of its fetch.
+   A busy repository carries dozens, so the section leads with one line of
+   counts and shows the newest WS_UNMERGED_SHOWN; the rest are one click
+   away under a fold. Each row is a single line: branch, +commits, age (the
+   full time on hover), session. */
+const WS_UNMERGED_SHOWN = 5;
+
+/* "12m", "3h", "4d" since an ISO time; "" when it does not parse. */
+function wsAgo(iso, now = Date.now()) {
+  const t = Date.parse(iso || "");
+  if (!Number.isFinite(t)) return "";
+  const s = Math.max(0, Math.floor((now - t) / 1000));
+  if (s < 60) return "now";
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h`;
+  return `${Math.floor(s / 86400)}d`;
+}
+
+function wsSyncUnmergedRow(r, base, now) {
+  const line = el("div", "ws-sync-unmerged-row");
+  const name = el("span", "mono ws-sync-unmerged-branch", r.branch);
+  name.title = r.subject || "";
+  line.appendChild(name);
+  const ahead = el("span", "badge busy",
+    r.ahead !== null && r.ahead !== undefined ? `+${r.ahead}` : "+?");
+  ahead.title = r.ahead !== null && r.ahead !== undefined
+    ? `${r.ahead} commit(s) not on ${base}` : `not on ${base}`;
+  line.appendChild(ahead);
+  const when = el("span", "wf-note ws-sync-unmerged-age", wsAgo(r.date, now));
+  when.title = r.date ? r.date.slice(0, 16).replace("T", " ") : "";
+  line.appendChild(when);
+  if (r.session) {
+    const sess = el("a", "ws-sync-unmerged-session", r.session);
+    sess.href = `#/s/${encodeURIComponent(r.session)}`;
+    sess.title = "the session stamped on the tip commit (Claunch-Session)";
+    line.appendChild(sess);
+  } else {
+    line.appendChild(el("span", "wf-note", "unstamped"));
+  }
+  return line;
+}
+
+function wsSyncUnmerged(doc, now = Date.now()) {
   const box = el("div", "ws-sync-section ws-sync-unmerged");
   const rows = doc.unmerged || [];
   const base = doc.plan ? `${doc.plan.remote}/${doc.plan.branch}` : "master";
@@ -30246,26 +30308,20 @@ function wsSyncUnmerged(doc) {
     box.appendChild(el("p", "wf-note", `Every local branch is already on ${base}.`));
     return box;
   }
-  for (const r of rows) {
-    const line = el("div", "ws-sync-unmerged-row");
-    const name = el("span", "mono", r.branch);
-    name.title = r.subject || "";
-    line.appendChild(name);
-    if (r.ahead !== null && r.ahead !== undefined) {
-      const ahead = el("span", "badge busy", `+${r.ahead}`);
-      ahead.title = `${r.ahead} commit(s) not on ${base}`;
-      line.appendChild(ahead);
-    }
-    if (r.date) line.appendChild(el("span", "wf-note", r.date.slice(0, 16).replace("T", " ")));
-    if (r.session) {
-      const sess = el("a", "ws-sync-unmerged-session", r.session);
-      sess.href = `#/s/${encodeURIComponent(r.session)}`;
-      sess.title = "the session stamped on the tip commit (Claunch-Session)";
-      line.appendChild(sess);
-    } else {
-      line.appendChild(el("span", "wf-note", "unstamped"));
-    }
-    box.appendChild(line);
+  const stamped = rows.filter((r) => r.session).length;
+  box.appendChild(el("p", "wf-note",
+    `Local branches with commits ${base} does not have yet, newest first` +
+    ` — ${stamped} made by a session, ${rows.length - stamped} unstamped.`));
+  const list = el("div", "ws-sync-unmerged-list");
+  for (const r of rows.slice(0, WS_UNMERGED_SHOWN)) list.appendChild(wsSyncUnmergedRow(r, base, now));
+  box.appendChild(list);
+  if (rows.length > WS_UNMERGED_SHOWN) {
+    const more = el("details", "ws-sync-unmerged-more");
+    more.appendChild(el("summary", "wf-note", `Show ${rows.length - WS_UNMERGED_SHOWN} more`));
+    const rest = el("div", "ws-sync-unmerged-list");
+    for (const r of rows.slice(WS_UNMERGED_SHOWN)) rest.appendChild(wsSyncUnmergedRow(r, base, now));
+    more.appendChild(rest);
+    box.appendChild(more);
   }
   return box;
 }
@@ -30288,9 +30344,13 @@ function wsHistoryApproval(a) {
 }
 
 function wsSyncHistory(doc) {
-  const box = el("div", "ws-sync-section ws-sync-history");
+  // Folded: a record to look back on, not something to act on.
+  const box = el("details", "ws-sync-section ws-sync-history");
   const rows = doc.history || [];
-  box.appendChild(el("h4", null, `History (${rows.length})`));
+  box.appendChild(el("summary", null, `History (${rows.length})`));
+  box.appendChild(el("p", "wf-note",
+    "Syncs, pushes and pulls run from this machine through the Sync panel, " +
+    "the claunch CLI or a session's repo_sync tool. A plain git push is not recorded here."));
   if (!rows.length) {
     box.appendChild(el("p", "wf-note", "Nothing synced, pushed or pulled from this machine yet."));
     return box;
@@ -30384,15 +30444,22 @@ function wsSyncParentLabel(p) {
   return `${p.name} (${p.profile}${held}) · ${meshes.length ? meshes.join(", ") : "no mesh"}`;
 }
 
+/* What each execution mode does, shown under the picker for the one picked. */
+const WS_SYNC_MODE_NOTE = {
+  commands: "The daemon runs git here, now. A push waits for an approval card at the top of the page.",
+  agent: "Start a child agent in its own worktree to handle sync or push. It inherits the selected parent's settings.",
+  on_failure: "Try the commands first. On failure, start a recovery workflow that returns a tested candidate. Integration and publication require a separate approval.",
+};
+
 function wsSyncAgentControls(st, name) {
-  const box = el("div", "ws-sync-agent");
-  box.appendChild(el("h4", null, "Sync / push execution"));
+  const box = el("div", "ws-sync-section ws-sync-agent");
+  box.appendChild(el("h4", null, "How Sync and Push run"));
   const form = el("div", "ws-sync-form");
   const mode = el("select");
   mode.setAttribute("aria-label", "Sync execution mode");
   for (const [value, label] of [
-    ["commands", "Run commands"], ["agent", "A — Delegate to agent"],
-    ["on_failure", "B — Agent on failure"],
+    ["commands", "Run commands here"], ["agent", "Delegate to an agent"],
+    ["on_failure", "Run commands, agent on failure"],
   ]) mode.appendChild(new Option(label, value));
   mode.value = st.agentMode || "commands";
   mode.disabled = !!st.busy;
@@ -30412,12 +30479,12 @@ function wsSyncAgentControls(st, name) {
     parent.disabled = !!st.busy;
     parent.addEventListener("change", () => { st.agentParent = parent.value; renderWorkspaces(); });
     form.appendChild(parent);
-    box.appendChild(el("p", "wf-note", st.agentMode === "agent"
-      ? "Start a child agent in its own worktree to handle sync or push. It inherits the selected parent's settings."
-      : "Try the commands first. On failure, start a recovery workflow that returns a tested candidate. Integration and publication require a separate approval."));
-    box.appendChild(el("p", "wf-note", "Push approval still applies to the agent's final changes."));
   }
   box.appendChild(form);
+  box.appendChild(el("p", "wf-note", WS_SYNC_MODE_NOTE[st.agentMode || "commands"] || ""));
+  if (st.agentMode && st.agentMode !== "commands") {
+    box.appendChild(el("p", "wf-note", "Push approval still applies to the agent's final changes."));
+  }
   if (st.doc && st.doc.agent) {
     const link = el("a", "ws-sync-agent-link", `Agent ${st.doc.agent.session} (${st.doc.agent.status}) — open session`);
     link.href = `#/s/${encodeURIComponent(st.doc.agent.session)}`;
@@ -30452,10 +30519,13 @@ function wsSyncOperationPreview(st, name, kind) {
 }
 
 function wsSyncRemoteComparisons(doc) {
-  const section = el("div", "ws-sync-section ws-sync-remotes");
-  section.appendChild(el("h4", null, "Remote comparisons"));
-  section.appendChild(el("p", "wf-note",
-    "Ahead / behind counts are relative to the local branch. Refresh (fetch) updates every remote."));
+  const section = el("div", "ws-sync-remotes");
+  // remote name -> its address, said once per row instead of a line of its own
+  const where = {};
+  for (const [key, name] of Object.entries(doc.remotes || {})) where[name] = key;
+  if (doc.remotes && !Object.keys(doc.remotes).length) {
+    section.appendChild(el("p", "wf-note", "Remotes: none with a network address"));
+  }
   const labels = {
     "up-to-date": "Up to date", ahead: "Ahead · remote can fast-forward",
     behind: "Behind · local can fast-forward", diverged: "Diverged",
@@ -30464,10 +30534,13 @@ function wsSyncRemoteComparisons(doc) {
   };
   for (const row of doc.remote_comparisons || []) {
     const line = el("div", "ws-sync-remote-row");
-    line.appendChild(el("strong", null, `${row.remote}/${row.branch || "—"}`));
+    line.appendChild(el("strong", "mono", `${row.remote}/${row.branch || "—"}`));
+    if (where[row.remote]) line.appendChild(el("span", "wf-note", where[row.remote]));
     line.appendChild(el("span", null, labels[row.state] || labels.unknown));
-    line.appendChild(el("span", null,
-      `ahead ${row.ahead == null ? "—" : row.ahead} · behind ${row.behind == null ? "—" : row.behind}`));
+    const counts = el("span", "wf-note",
+      `ahead ${row.ahead == null ? "—" : row.ahead} · behind ${row.behind == null ? "—" : row.behind}`);
+    counts.title = "relative to the local branch";
+    line.appendChild(counts);
     line.appendChild(el("span", "wf-note", row.fetched ? "Fetched" : "Cached refs · freshness unverified"));
     if (row.error) line.appendChild(el("span", "wf-note wf-warning", row.error));
     section.appendChild(line);
@@ -30476,19 +30549,61 @@ function wsSyncRemoteComparisons(doc) {
   return section;
 }
 
+/* Why the master button or the push button cannot be pressed, in words next
+   to it -- the delegate labels ("Delegate sync") otherwise hide the reason
+   the plain labels carry ("Up to date"). "" when it can be pressed or while
+   an operation runs (its label says that). */
+function wsSyncWhyDisabled(st, kind) {
+  const doc = st.doc || {};
+  if (st.busy || st.loading) return "";
+  if (kind === "sync") {
+    const plan = doc.plan;
+    if (plan && plan.action === "up-to-date") {
+      return `Nothing to sync: ${plan.branch} already equals ${plan.remote}/${plan.branch}.`;
+    }
+  } else if (!(doc.branches || []).length) {
+    return "No local branch to push.";
+  }
+  if (doc.agent) return `Agent ${doc.agent.session} is already handling this repository.`;
+  if (st.agentMode && st.agentMode !== "commands" &&
+      !(doc.agent_parents || []).some((p) => p.name === st.agentParent)) {
+    return "Choose a parent session above to delegate.";
+  }
+  return "";
+}
+
+function wsSyncButtonRow(st, button, kind) {
+  const row = el("div", "ws-sync-button-row");
+  row.appendChild(button);
+  const why = wsSyncWhyDisabled(st, kind);
+  if (why) row.appendChild(el("span", "wf-note ws-sync-why", why));
+  return row;
+}
+
+/* The Sync panel, top to bottom in the order it is used: how operations run,
+   master against the shared remote, the branches not on it yet, moving one
+   work branch between machines, and -- folded -- the optional PR-only
+   policy, the other machines and the record of what ran. */
 function wsSyncPanel(w) {
   const st = wsSyncSt(w.name);
   const panel = el("div", "ws-sync");
   const doc = st.doc;
 
   const head = el("div", "ws-sync-head");
-  head.appendChild(el("span", "wf-note",
+  const title = el("div", "ws-sync-title");
+  title.appendChild(el("strong", null, "Sync"));
+  title.appendChild(el("span", "wf-note",
     st.loading ? "reading…" : doc ? `as ${doc.machine}` + (doc.fetched ? " · fetched" : " · not fetched") : ""));
+  head.appendChild(title);
   const refresh = el("button", "wf-btn clear", "Refresh (fetch)");
+  refresh.title = "fetch every remote, then read the status again";
   refresh.disabled = st.loading || !!st.busy;
   refresh.addEventListener("click", () => wsSyncRefresh(w.name, true));
   head.appendChild(refresh);
   panel.appendChild(head);
+  panel.appendChild(el("p", "wf-note ws-sync-intro",
+    "Keep this repository's master level with the shared remote, and move work branches " +
+    "between machines through it. Every push waits for an approval card."));
 
   if (st.error) panel.appendChild(el("p", "wf-note wf-warning", st.error));
   if (st.waiting) {
@@ -30497,29 +30612,27 @@ function wsSyncPanel(w) {
       `Waiting for approval: answer the "repository sync wants to push" card ` +
       `at the top of the page${until}. Nothing is pushed until it is approved.`));
   }
+  if (st.result) panel.appendChild(wsSyncResult(st.result));
   if (!doc) return panel;
   if (doc.error) {
     panel.appendChild(el("p", "wf-note wf-warning", doc.error));
     return panel;
   }
 
-  const remotes = Object.entries(doc.remotes || {});
   panel.appendChild(wsSyncAgentControls(st, w.name));
-  panel.appendChild(wsLocalSyncControls(w.name));
-  panel.appendChild(el("div", "wf-note",
-    "Remotes: " + (remotes.length
-      ? remotes.map(([key, name]) => `${name} (${key})`).join(", ")
-      : "none with a network address")));
-
-  panel.appendChild(wsSyncRemoteComparisons(doc));
 
   // master
   const master = el("section", "ws-sync-section ws-sync-master");
   master.setAttribute("aria-label", "Sync master");
   master.appendChild(el("h4", null, "Sync master"));
+  master.appendChild(el("p", "wf-note",
+    "Behind the remote: fast-forward. Ahead: push. Both: rebase the local commits and push."));
   if (doc.plan) {
     master.appendChild(wsSyncPlanLine(doc.plan));
-    master.appendChild(el("p", "wf-note", doc.plan.summary));
+    // the badge already says "up-to-date"; a longer summary is worth a line
+    if (doc.plan.summary && doc.plan.summary !== doc.plan.action) {
+      master.appendChild(el("p", "wf-note", doc.plan.summary));
+    }
     if ((doc.plan.affected || []).length) {
       master.appendChild(el("p", "wf-note",
         `left on the old commits: ${doc.plan.affected.join(", ")}`));
@@ -30530,16 +30643,21 @@ function wsSyncPanel(w) {
     go.disabled = !!st.busy || st.loading || doc.plan.action === "up-to-date" || wsSyncAgentBlocked(st);
     go.addEventListener("click", () => wsSyncRun(w.name));
     master.appendChild(wsSyncOperationPreview(st, w.name, "sync"));
-    master.appendChild(go);
+    master.appendChild(wsSyncButtonRow(st, go, "sync"));
   } else {
     master.appendChild(el("p", "wf-note wf-warning", doc.plan_error || "no plan"));
   }
+  master.appendChild(wsSyncRemoteComparisons(doc));
   panel.appendChild(master);
   if (doc.plan) panel.appendChild(wsSyncUnmerged(doc));
 
   // work branches
-  const work = el("div", "ws-sync-section");
+  const work = el("div", "ws-sync-section ws-sync-work");
   work.appendChild(el("h4", null, "Work branches"));
+  work.appendChild(el("p", "wf-note",
+    `A work branch travels between machines as <machine>/<branch> on the shared remote; ` +
+    `this machine publishes as ${doc.machine}/….`));
+  const cards = el("div", "ws-sync-cards");
   const pushSection = el("section", "ws-sync-operation ws-sync-push");
   pushSection.setAttribute("aria-label", "Push a local branch");
   pushSection.appendChild(el("h5", null, "Push a local branch"));
@@ -30556,6 +30674,7 @@ function wsSyncPanel(w) {
   pick.addEventListener("change", () => { st.pushBranch = pick.value; renderWorkspaces(); });
   pushRow.appendChild(pick);
   const force = el("label", "wf-note");
+  force.title = "overwrite the remote branch only if it is still where this machine last saw it";
   const box = el("input");
   box.type = "checkbox";
   box.checked = !!st.force;
@@ -30569,17 +30688,20 @@ function wsSyncPanel(w) {
   push.addEventListener("click", () => { st.pushBranch = pick.value; wsSyncBranch(w.name, "push"); });
   pushSection.appendChild(pushRow);
   pushSection.appendChild(wsSyncOperationPreview(st, w.name, "push"));
-  pushSection.appendChild(push);
-  work.appendChild(pushSection);
-  if (doc.plan) work.appendChild(wsSyncShared(w.name, doc, st));
+  pushSection.appendChild(wsSyncButtonRow(st, push, "push"));
+  cards.appendChild(pushSection);
 
   const pullSection = el("section", "ws-sync-operation ws-sync-pull");
   pullSection.setAttribute("aria-label", "Pull from another machine");
   pullSection.appendChild(el("h5", null, "Pull from another machine"));
+  pullSection.appendChild(el("p", "wf-note",
+    "Fetch another machine's branch into the local branch of that name (fast-forward only, no approval)."));
+  if (doc.plan) pullSection.appendChild(wsSyncShared(w.name, doc, st));
   const pullRow = el("div", "ws-sync-form");
   const machine = el("input");
   machine.id = `ws-sync-machine-${w.name}`;
   machine.placeholder = "machine";
+  machine.setAttribute("aria-label", "Machine to pull from");
   machine.value = st.pullMachine;
   machine.setAttribute("list", `ws-sync-machines-${w.name}`);
   machine.addEventListener("input", () => { st.pullMachine = machine.value.trim(); });
@@ -30591,6 +30713,7 @@ function wsSyncPanel(w) {
   const branch = el("input");
   branch.id = `ws-sync-branch-${w.name}`;
   branch.placeholder = "branch";
+  branch.setAttribute("aria-label", "Branch to pull");
   branch.value = st.pullBranch;
   branch.addEventListener("input", () => { st.pullBranch = branch.value.trim(); });
   pullRow.appendChild(branch);
@@ -30599,15 +30722,15 @@ function wsSyncPanel(w) {
   pull.addEventListener("click", () => wsSyncBranch(w.name, "pull"));
   pullRow.appendChild(pull);
   pullSection.appendChild(pullRow);
-  pullSection.appendChild(el("p", "wf-note",
-    "A work branch travels as <machine>/<branch> on the shared remote; " +
-    "pull fetches another machine's into the local branch of that name."));
-  work.appendChild(pullSection);
+  cards.appendChild(pullSection);
+  work.appendChild(cards);
   panel.appendChild(work);
 
-  if (st.result) panel.appendChild(wsSyncResult(st.result));
-  panel.appendChild(wsSyncPeers(doc));
-  panel.appendChild(wsSyncHistory(doc));
+  const more = el("div", "ws-sync-more");
+  more.appendChild(wsLocalSyncControls(w.name));
+  more.appendChild(wsSyncPeers(doc));
+  more.appendChild(wsSyncHistory(doc));
+  panel.appendChild(more);
   return panel;
 }
 
@@ -46430,8 +46553,15 @@ boot();
 // Explicit per-repository policy and provisioning decisions. This service is
 // separate from the one-shot A/B execution choices above.
 function wsLocalSyncControls(name) {
-  const box = el("details", "ws-sync-agent");
-  box.appendChild(el("summary", null, "Local synchronization manager"));
+  const box = el("details", "ws-sync-section ws-sync-localsync");
+  const title = el("summary", null, "PR-only protection and local sync manager");
+  box.appendChild(title);
+  // In the summary, so it reads while folded: the name alone did not say
+  // what it is for.
+  title.appendChild(el("span", "wf-note ws-sync-localsync-what",
+    "Optional. Lets a protected branch (master) change only through pull requests on every machine, " +
+    "and names a manager session that fast-forwards this clone after each merge. " +
+    "Off until a policy is enabled here."));
   let loaded = false;
   let deliveryError = "";
   const content = el("div", "ws-sync-form");

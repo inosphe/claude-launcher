@@ -4,8 +4,8 @@ Sync의 실행 모드는 두 개의 cflow v2로 구분한다.
 
 | 선택 | 생성 시 시작하는 workflow | 역할 | 완료 결과 |
 |---|---|---|---|
-| A — Delegate to agent | reposync-merge-push-v2 | sync-integrator | 검증·독립 검토·사용자 승인 후 통합/게시 결과 |
-| B — Agent on failure | reposync-conflict-v2 | worker | 실패 원인과 격리 worktree의 검증된 복구 후보 |
+| A — Delegate to an agent | reposync-merge-push-v2 | sync-integrator | 검증·독립 검토·사용자 승인 후 통합/게시 결과 |
+| B — Run commands, agent on failure | reposync-conflict-v2 | worker | 실패 원인과 격리 worktree의 검증된 복구 후보 |
 
 B는 명령이 실제로 실패했을 때 생성한다. 승인 거절·오래된 계획은 실행
 실패로 취급하지 않는다. B는 원래 branch를 갱신하거나 push하지 않는다.
@@ -34,7 +34,7 @@ publish adapter는 보호 ref에 대한 직접 쓰기를 거절한다. 정책을
 
 ## 사용자 결정과 운용
 
-Workspaces의 Sync 패널에서 Local synchronization manager를 열어 PR-only
+Workspaces의 Sync 패널 아래쪽 「PR-only protection and local sync manager」를 열어 PR-only
 정책을 활성화한다. 원격·보호 branch·authority mesh·통합 담당 handle 및 공유
 authority revision을 명시한다. 각 호스트는 같은 authority 계약을 등록해야 한다.
 이 로컬 DB는 여러 daemon 사이에서 authority를 자동 선출하거나 합의하지 않는다.

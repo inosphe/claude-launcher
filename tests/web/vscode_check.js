@@ -35,7 +35,8 @@ function slice(name) {
 function node(tag) {
   const n = {
     tag, kids: [], text: "", classes: new Set(), title: "", disabled: false,
-    listeners: {}, options: [], value: "",
+    listeners: {}, options: [], value: "", attrs: {},
+    setAttribute(k, v) { this.attrs[k] = String(v); },
     appendChild(c) { if (this.tag === "select") this.options.push(c); this.kids.push(c); return c; },
     addEventListener(ev, fn) { this.listeners[ev] = fn; },
     get textContent() { return this.text; },
@@ -115,7 +116,7 @@ const box = ctx.wsVscodeControls({ name: "proj" });
 const pick = box.kids.find((k) => k.tag === "select");
 check("root button, then one picker", box.kids.map((k) => k.tag), ["button", "select"]);
 check("the picker lists this workspace's worktrees only, running marked",
-      pick.options.map((o) => o.text), ["worktree… (2)", "a ●", "b"]);
+      pick.options.map((o) => o.text), ["…or a worktree (2)", "a ●", "b"]);
 pick.value = "b";
 pick.listeners.change();
 check("picking opens that worktree", opened.pop(), { workspace: "proj", worktree: "b" });

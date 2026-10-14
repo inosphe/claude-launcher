@@ -51,6 +51,13 @@ function el(tag, cls, text) {
   };
 }
 
+// The row is a head and an action bar (claunch-mhz4g.1): read it as one
+// flat list of everything drawn in it.
+function flat(n, out = []) {
+  for (const c of n.children || []) { out.push(c); flat(c, out); }
+  return out;
+}
+
 let renders = 0;
 let answer = null;
 const opened = [];
@@ -128,11 +135,11 @@ assert.equal(ctx.badges(undefined).length, 0);
   await ctx.refresh();
   assert.equal(renders, 1);
   const row = ctx.row({ name: "proj", path: "/r", exists: true });
-  const all = row.children.map((c) => c.text);
+  const all = flat(row).map((c) => c.text);
   assert.ok(all.includes("master") && all.includes("↓2"), all.join("|"));
   // A missing workspace gets no git badge even if a stale entry is there.
   const gone = ctx.row({ name: "proj", path: "/r", exists: false });
-  assert.ok(!gone.children.some((c) => c.text === "master"));
+  assert.ok(!flat(gone).some((c) => c.text === "master"));
 
   // An older daemon: 404 leaves the summary and the rows as they were.
   answer = { ok: false, status: 404, json: async () => ({}) };
@@ -152,7 +159,7 @@ assert.equal(ctx.badges(undefined).length, 0);
   } }) };
   await ctx.refresh();
   let r = ctx.row({ name: "proj", path: "/r", exists: true });
-  const toggle = r.children.find((c) => c.tag === "button" && /worktree/.test(c.text));
+  const toggle = flat(r).find((c) => c.tag === "button" && /worktree/.test(c.text));
   assert.ok(toggle, "a row with worktrees carries the toggle");
   assert.equal(toggle.text, "2 worktrees ▾");
   const before = renders;
@@ -160,7 +167,7 @@ assert.equal(ctx.badges(undefined).length, 0);
   assert.ok(ctx.treesOpen.has("proj"));
   assert.equal(renders, before + 1);
   r = ctx.row({ name: "proj", path: "/r", exists: true });
-  assert.equal(r.children.find((c) => c.tag === "button" && /worktree/.test(c.text)).text,
+  assert.equal(flat(r).find((c) => c.tag === "button" && /worktree/.test(c.text)).text,
                "2 worktrees ▴");
   const list = ctx.trees({ name: "proj" });
   assert.equal(list.children.length, 2);
@@ -187,10 +194,10 @@ assert.equal(ctx.badges(undefined).length, 0);
     proj: { branch: "master", ahead: 0, behind: 0, changed: 0, worktrees: [] } } }) };
   await ctx.refresh();
   r = ctx.row({ name: "proj", path: "/r", exists: true });
-  assert.ok(!r.children.some((c) => c.tag === "button" && /worktree/.test(c.text)));
+  assert.ok(!flat(r).some((c) => c.tag === "button" && /worktree/.test(c.text)));
 
   /* ---- start a session here ------------------------------------------- */
-  const startOf = (row) => row.children.find((c) => c.tag === "button" && c.text === "New session");
+  const startOf = (row) => flat(row).find((c) => c.tag === "button" && c.text === "New session");
   r = ctx.row({ name: "proj", path: "C:/r", exists: true });
   const start = startOf(r);
   assert.ok(start, "a present workspace's row carries the start button");
@@ -206,6 +213,18 @@ assert.equal(ctx.badges(undefined).length, 0);
   delete ctx.openSessionModal;
   assert.equal(startOf(ctx.row({ name: "proj", path: "C:/r", exists: true })), undefined);
   ctx.openSessionModal = keep;
+
+  /* ---- the row's two lines (claunch-mhz4g.1) ---------------------------- */
+  r = ctx.row({ name: "proj", path: "C:/r", exists: true });
+  assert.deepEqual(r.children.map((c) => c.cls), ["ws-row-head", "ws-row-actions"]);
+  const groups = r.children[1].children.map((g) => g.cls.replace("ws-action-group ", ""));
+  assert.deepEqual(groups, ["ws-group-start", "ws-group-open", "ws-group-panels", "ws-group-end"],
+                   "start, open, panels, then unregister set apart");
+  const buttons = flat(r.children[1]).filter((c) => c.tag === "button");
+  assert.deepEqual(buttons.filter((b) => /approve/.test(b.cls)).map((b) => b.text), ["New session"],
+                   "one primary button");
+  assert.equal(r.children[1].children[3].children[0].text, "Unregister");
+  assert.ok(flat(r.children[0]).some((c) => c.text === "master"), "status badges sit in the head");
 
   console.log("ok");
 })().catch((err) => { console.error(err); process.exit(1); });
