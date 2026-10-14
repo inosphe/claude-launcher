@@ -1582,7 +1582,7 @@ include: [self-improve-common]
 - id: improve
   call: self-improve
   with:
-    issue: "$data.claim.issue"   # 리뷰 전문(SELF-IMPROVE @)과 REGISTERED 마커가 붙는 이슈
+    issue: "$data.claim.issue"   # 리뷰 전문(SELF-IMPROVE @)과 REGISTERED 마커가 붙는 이슈 — 선택, null이면 빈 문자열
     workflow: <정의 이름과 정본 경로, include한 파일>
     basis: <리뷰의 출발점이 될 기존 기록 — 선택, 비면 기록을 직접 읽는다>
 # 결과: ok {issues?} — register면 등록(또는 덧붙인) 이슈 id, drop이면 없음

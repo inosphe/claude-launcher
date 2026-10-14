@@ -35,7 +35,10 @@ procedures:
       label self-improve, assignee 없이 이슈로 등록한다. revise면 논의로
       돌아가고 drop이면 아무것도 등록하지 않는다.
     params:
-      issue: {type: str, required: true, description: "리뷰 전문과 REGISTERED 마커가 붙을 주 이슈 id. 없으면 빈 문자열"}
+      # default가 null 인자를 받는다: 엔진은 null 인자를 default로 바꾸고, null인
+      # 값을 가리키는 ${...}는 그대로 남긴다. default가 없으면 이슈 없는 회차
+      # (claim.issue null)의 프롬프트에 리터럴 ${params.issue}가 실린다(claunch-8dzu2).
+      issue: {type: str, default: "", description: "리뷰 전문과 REGISTERED 마커가 붙을 주 이슈 id. 없으면(null 포함) 빈 문자열"}
       workflow: {type: str, required: true, description: "리뷰할 cflow 정의 — 이름과 정본 경로, include한 파일"}
       basis: {type: str, default: "", description: "리뷰의 출발점이 될 기존 기록(예: 앞 노드가 남긴 회고 코멘트). 비면 기록을 직접 읽는다"}
     returns:
