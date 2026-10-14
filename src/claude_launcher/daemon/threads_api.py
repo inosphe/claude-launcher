@@ -19,7 +19,10 @@ when it owns the thread.
 A message the user writes is typed into the owning session as a
 ``[claunch thread <id>]`` block carrying the thread's title and the message,
 so the agent can answer into the right thread without a read; a held session
-is woken for it.
+is woken for it. ``delivered`` says the message was accepted for that
+session, not that it is in the terminal yet: when something at the session
+end is holding it back, ``hold`` names it (claunch-a41i5), so the pane can say
+why nothing appeared instead of looking like a lost message.
 """
 
 from __future__ import annotations
@@ -78,6 +81,31 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
             log.info("threads: could not deliver to %s", name)
             return False
 
+    def hold_of(name: str) -> Optional[str]:
+        """Why a message just accepted for ``name`` is not typed in yet, read
+        from the same signals :meth:`Session.deliver` waits on: ``asleep``
+        (a held session being woken; it goes in once it is back), ``draft``
+        (an unsent line in that terminal's composer; it goes in after the
+        human sends or clears it), ``typing`` (keys in the last few seconds).
+        None when nothing is in the way. A snapshot at accept time only."""
+        try:
+            s = manager.get(name)
+        except Exception:  # noqa: BLE001 -- gone between deliver and here
+            return None
+        if getattr(s, "held_at", None):
+            return "asleep"
+        draft = getattr(s, "draft_open", None)
+        if callable(draft) and draft():
+            return "draft"
+        busy = getattr(s, "keyboard_busy", None)
+        if callable(busy) and busy():
+            return "typing"
+        return None
+
+    def tell(res: dict, name: str, text: str) -> None:
+        res["delivered"] = deliver(name, text)
+        res["hold"] = hold_of(name) if res["delivered"] else None
+
     def known(name: str) -> bool:
         try:
             manager.get(name)
@@ -129,7 +157,7 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
         if err:
             return err
         if actor == thread_store.USER and res["message"]:
-            res["delivered"] = deliver(target, user_wrote_text(res["thread"], res["message"], opened=True))
+            tell(res, target, user_wrote_text(res["thread"], res["message"], opened=True))
         return web.json_response(res)
 
     async def h_read(request):
@@ -147,7 +175,7 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
             return err
         if actor == thread_store.USER:
             t = res["thread"]
-            res["delivered"] = deliver(t["session"], user_wrote_text(t, res["message"], reopened=res["reopened"]))
+            tell(res, t["session"], user_wrote_text(t, res["message"], reopened=res["reopened"]))
         return web.json_response(res)
 
     def status_route(status: str):
