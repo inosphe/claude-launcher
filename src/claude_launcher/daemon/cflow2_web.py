@@ -315,10 +315,33 @@ def _compile_path(path: Path, cwd: str) -> ir.Chart:
 
 
 def load(ref: str, cwd: str) -> ir.Chart:
-    """The chart a :func:`choose` ``ref`` names (compiled again at start)."""
+    """The chart a :func:`choose` ``ref`` names (the compile cache's copy
+    unless a file changed in between)."""
     if ref.endswith((".yaml", ".yml")):
         return _compile_path(Path(ref), cwd)
     return layers.load(ref, cwd)
+
+
+def warm(
+    cwd: str,
+    workflow: str = "",
+    version: Any = None,
+    roots: Sequence[Optional[str]] = (),
+) -> None:
+    """Compile what a session start in ``cwd`` will read, so the calls the
+    start makes on the daemon loop (preflight, ``inherit_workflow``, the run's
+    start) find it in the caches. Meant for a worker thread
+    (claunch-cb65c.1); every error is left for those calls to report."""
+    try:
+        startable(cwd)
+    except Exception as exc:  # noqa: BLE001 - the real call reports it
+        log.debug("v2 warm-up of %s: %s", cwd, exc)
+    if not workflow:
+        return
+    try:
+        choose(workflow, version, cwd=cwd, roots=roots)
+    except Exception as exc:  # noqa: BLE001 - the real call reports it
+        log.debug("v2 warm-up of %r in %s: %s", workflow, cwd, exc)
 
 
 def check_params(chart: ir.Chart, params: Optional[dict]) -> dict:

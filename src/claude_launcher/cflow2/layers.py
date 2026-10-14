@@ -15,6 +15,8 @@ the daemon checks (``daemon/cflow2_web.choose``) before :func:`load_file`.
 from __future__ import annotations
 
 import os
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
@@ -28,6 +30,15 @@ LAYER_PACKAGE = "package"
 LAYER_FILE = "file"
 
 PROJECT_V2 = Path(".claunch") / "workflows" / "v2"
+
+#: compiled charts by (path as given, its stat, :func:`layer_stamp`) -- an
+#: ``include``/``call`` resolves by name from the layer files, so their stamp
+#: covers everything a chart was built from (claunch-cb65c.1: a session start
+#: compiled the same files three times on the daemon loop). The charts are
+#: shared: a caller must not change one (``inputs.apply`` copies first).
+_COMPILED: "OrderedDict[tuple, ir.Chart]" = OrderedDict()
+_COMPILED_MAX = 256
+_COMPILED_LOCK = threading.Lock()
 
 
 @dataclass
@@ -109,17 +120,56 @@ def resolver(cwd: Optional[str] = None):
     return lambda name: find(name, cwd)
 
 
+def layer_stamp(cwd: Optional[str] = None) -> tuple:
+    """``(path, mtime_ns, size)`` of every ``*.yaml`` in the layers visible
+    from ``cwd``. A missing directory adds nothing, so two directories with
+    no project layer share one stamp."""
+    out = []
+    for _layer, base in search_dirs(cwd):
+        try:
+            names = sorted(n for n in os.listdir(base) if n.endswith(".yaml"))
+        except OSError:
+            continue
+        for name in names:
+            path = os.path.join(str(base), name)
+            try:
+                st = os.stat(path)
+            except OSError:
+                continue
+            out.append((path, st.st_mtime_ns, st.st_size))
+    return tuple(out)
+
+
+def _compile(path: Path, cwd: Optional[str]) -> ir.Chart:
+    from . import frontend
+
+    try:
+        st = os.stat(path)
+    except OSError:
+        return frontend.compile_file(path, resolve_include=resolver(cwd))
+    key = (str(path), st.st_mtime_ns, st.st_size, layer_stamp(cwd))
+    with _COMPILED_LOCK:
+        hit = _COMPILED.get(key)
+        if hit is not None:
+            _COMPILED.move_to_end(key)
+            return hit
+    chart = frontend.compile_file(path, resolve_include=resolver(cwd))
+    with _COMPILED_LOCK:
+        _COMPILED[key] = chart
+        while len(_COMPILED) > _COMPILED_MAX:
+            _COMPILED.popitem(last=False)
+    return chart
+
+
 def list_definitions(cwd: Optional[str] = None) -> List[Located2]:
     """Every v2 definition visible from ``cwd``; a file that does not
     compile is listed with ``error`` set rather than dropped."""
-    from . import frontend
-
     out: List[Located2] = []
     for name, hits in sorted(_candidates(cwd).items()):
         layer, path = hits[0]
         item = Located2(name, path, layer, tuple(p for _, p in hits[1:]))
         try:
-            chart = frontend.compile_file(path, resolve_include=resolver(cwd))
+            chart = _compile(path, cwd)
         except Exception as exc:  # noqa: BLE001 - a listing must survive any file
             item.error = str(exc) or type(exc).__name__
         else:
@@ -145,7 +195,7 @@ def load(name: str, cwd: Optional[str] = None) -> ir.Chart:
             f"no v2 definition named {name!r} (available: {names}; searched "
             f"{', '.join(str(d) for _, d in search_dirs(cwd))})"
         )
-    return frontend.compile_file(path, resolve_include=resolver(cwd))
+    return _compile(path, cwd)
 
 
 def load_file(path: Union[str, Path], cwd: Optional[str] = None) -> ir.Chart:
@@ -153,6 +203,4 @@ def load_file(path: Union[str, Path], cwd: Optional[str] = None) -> ir.Chart:
     :func:`list_definitions`, or a generated file whose containment the
     caller checked. Its includes and calls resolve by name in ``cwd``'s
     layers."""
-    from . import frontend
-
-    return frontend.compile_file(Path(path), resolve_include=resolver(cwd))
+    return _compile(Path(path), cwd)

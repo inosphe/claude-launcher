@@ -8307,6 +8307,11 @@ async def _onboard_and_launch(
         )
         if declined_at_creation:
             body.pop("workflow")
+        # The v2 layers compiled off the loop (claunch-cb65c.1): what follows
+        # reads them synchronously, and a cold cache (a new cwd, a daemon
+        # just started) cost seconds of compile on the loop.
+        parent_cwd = manager.get(parent).sdef.cwd if parent else ""
+        await asyncio.to_thread(cflow2_web.warm, cwd)
         if parent:
             await onboard.inherit_mesh(
                 body,
@@ -8319,6 +8324,11 @@ async def _onboard_and_launch(
                 parent=parent,
                 parent_cwd=manager.get(parent).sdef.cwd,
                 cwd=cwd,
+            )
+        if body.get("workflow"):
+            await asyncio.to_thread(
+                cflow2_web.warm, cwd, str(body.get("workflow") or "").strip(),
+                body.get("workflow_version"), (parent_cwd,),
             )
         plan = onboard.preflight(
             body,
