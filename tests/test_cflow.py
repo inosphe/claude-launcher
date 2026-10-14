@@ -1758,10 +1758,15 @@ def test_an_unwired_member_is_named_with_the_command_that_fixes_it(monkeypatch):
 def test_the_pool_needs_an_unambiguous_mesh(monkeypatch):
     other = {"name": "other", "members": [_member("dev1", "dev1", "worker")]}
     _roster(monkeypatch, TEAM, other)
-    assert "several meshes (other, team)" in responders.pool(session="dev1").problem
+    found = responders.pool(session="dev1")
+    assert "several meshes (other, team)" in found.problem
+    # a setting, not a fact: it names the meshes and how to choose one
+    assert found.ambiguous == ("other", "team") and not found.unreadable
+    assert "claunch cflow2 mesh" in found.problem
     # naming one settles it
     picked = responders.pool(session="dev1", mesh="team")
     assert picked.problem == "" and picked.ancestors == ["rev1", "lead1"]
+    assert picked.ambiguous == ()
 
 
 def test_a_parent_channel_is_not_a_second_mesh_to_choose(monkeypatch):

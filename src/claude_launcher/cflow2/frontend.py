@@ -927,7 +927,7 @@ def _narrow_task_marks(ctx: _Ctx, chart: ir.Chart) -> None:
 
 VERIFY_KEYS = ("run", "command", "timeout")
 ASK_KEYS = ("prompt", "from", "otherwise", "timeout", "on_decline", "options",
-            "brief", "format", "choices", "require_reason")
+            "brief", "format", "choices", "require_reason", "on_unroutable")
 #: ``${params.NAME}`` -- the one reference ask.format/choices/from may hold.
 _PARAM_REF = re.compile(r"^\$\{\s*\$?params\.([A-Za-z_][A-Za-z0-9_]*)\s*\}$")
 _PARAM_REF_BARE = re.compile(r"^\$params\.([A-Za-z_][A-Za-z0-9_]*)$")
@@ -1041,6 +1041,23 @@ def _outcome_name(ctx: _Ctx, file: str, line: int, value: Any, what: str) -> str
     return value
 
 
+def _ask_unroutable(ctx: _Ctx, file: str, name: str, ask: Dict[str, Any],
+                    aline: int) -> Optional[str]:
+    """``ask.on_unroutable``: the outcome the task finishes with when every
+    candidate group ran out because the mesh roster gave no pool at all
+    (several meshes and none named, no membership, no daemon) rather than
+    because nobody holds the role (claunch-5itbf). Absent: ``otherwise``
+    covers both, as before."""
+    if ask.get("on_unroutable") is None:
+        return None
+    out = _outcome_name(ctx, file, aline, ask.get("on_unroutable"),
+                        f"task {name!r}: ask.on_unroutable")
+    if out == ir.OUTCOME_OK:
+        raise ctx.err(file, aline, f"task {name!r}: ask.on_unroutable cannot be 'ok' -- "
+                      f"an unasked question is not an answer")
+    return out
+
+
 def _ask(ctx: _Ctx, file: str, name: str, value: Any, line: int) -> Dict[str, Any]:
     """``ask`` normalised: ``{prompt, from: [{role, scope, connect}], otherwise,
     default_option, timeout, on_decline, options}``.
@@ -1138,6 +1155,7 @@ def _ask(ctx: _Ctx, file: str, name: str, value: Any, line: int) -> Dict[str, An
         "default_option": default,
         "timeout": delegate.timeout,
         "on_decline": on_decline,
+        "on_unroutable": _ask_unroutable(ctx, file, name, ask, aline),
         "options": options,
     }
 
@@ -1850,6 +1868,7 @@ def _ask_brief(ctx: _Ctx, file: str, name: str, ask: Dict[str, Any], aline: int)
         "default_option": default,
         "timeout": delegate.timeout,
         "on_decline": None,
+        "on_unroutable": _ask_unroutable(ctx, file, name, ask, aline),
         "options": None,
     }
 

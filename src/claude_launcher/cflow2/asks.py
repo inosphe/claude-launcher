@@ -90,6 +90,20 @@ def default_pool(*, session: str, mesh: str = "", cwd: Optional[str] = None) -> 
     return responders.pool(session=session, mesh=mesh, cwd=cwd)
 
 
+def home_mesh(session: str, *, cwd: Optional[str] = None,
+              pool_fn: Optional[PoolFn] = None) -> str:
+    """The one mesh ``session`` would be asked from right now, or "" (no
+    session, no daemon, no mesh, several). A run started outside the daemon
+    pins it (``runtime.start(mesh=...)``, claunch-5itbf) so a mesh the driver
+    joins later does not make its asks ambiguous."""
+    if not str(session or "").strip():
+        return ""
+    pool = (pool_fn or default_pool)(session=session, mesh="", cwd=cwd)
+    if getattr(pool, "problem", ""):
+        return ""
+    return str(getattr(pool, "mesh", "") or "")
+
+
 def question_text(rec: Dict[str, Any], *, workflow: str, sender: str, cwd: str,
                   scope: str) -> str:
     """The message a responder receives: the question, the answers, the tool."""
@@ -231,13 +245,21 @@ def plan_route(rec: Dict[str, Any], pool: Any) -> Dict[str, Any]:
                                 "reason": reason or "nobody matched"})
         group += 1
     plan["group"] = group
+    if not plan["asked"] and getattr(pool, "problem", ""):
+        # Every group ran out because the roster gave no pool at all (several
+        # meshes and none named, no membership, no daemon) -- not because
+        # nobody holds the role. An ask declaring ``on_unroutable`` finishes
+        # with that outcome instead of its ``otherwise`` (claunch-5itbf).
+        plan["unroutable"] = str(pool.problem)
+        if getattr(pool, "ambiguous", ()):
+            plan["meshes"] = list(pool.ambiguous)
     if getattr(pool, "wired", None):
         plan["wired"] = list(pool.wired)
     return plan
 
 
 def who_answers(node_ref: str, *, role: str = "", cwd: Optional[str] = None,
-                scope: Optional[str] = None,
+                scope: Optional[str] = None, mesh: str = "",
                 pool_fn: Optional[PoolFn] = None) -> Dict[str, Any]:
     """Who task ``node_ref``'s ``ask`` would go to right now, one entry per
     ``from`` group (read-only) -- v1's :func:`..cflow.engine.who_answers` for
@@ -249,6 +271,9 @@ def who_answers(node_ref: str, *, role: str = "", cwd: Optional[str] = None,
     groups naming that role ("is there a *reviewer*" must not be answered yes
     by the leader group below it). Nothing is wired: a ``connect: true`` group
     lists the answerable members it would wire when the question opens.
+
+    The roster is read in ``mesh`` when given, else in the run's own mesh
+    (``state.mesh``) -- the one its asks are routed in.
     """
     from ..cflow import model as v1
 
@@ -263,7 +288,8 @@ def who_answers(node_ref: str, *, role: str = "", cwd: Optional[str] = None,
     if not spec["from"]:
         raise runtime.FlowError(
             f"node {node_ref!r} asks nobody -- it declares no 'ask' with 'from' groups")
-    pool = (pool_fn or default_pool)(session=_driver(st, snap.state), mesh="",
+    mesh = str(mesh or "").strip() or runtime.mesh_of(snap.state)
+    pool = (pool_fn or default_pool)(session=_driver(st, snap.state), mesh=mesh,
                                      cwd=str(st.cwd))
     wanted = role.strip().lower()
     groups = []
@@ -288,6 +314,7 @@ def who_answers(node_ref: str, *, role: str = "", cwd: Optional[str] = None,
         "groups": groups, "resolves": any(g["asks"] for g in groups),
         "unreadable": bool(getattr(pool, "unreadable", False)),
         "problem": getattr(pool, "problem", ""),
+        "ambiguous": list(getattr(pool, "ambiguous", ()) or ()),
     }
 
 
@@ -307,8 +334,8 @@ def route(*, cwd: Optional[str] = None, scope: Optional[str] = None,
     if not todo:
         return []
     session = _driver(st, snap.state)
-    pool = (pool_fn or default_pool)(session=session, mesh=str(todo[0].get("mesh") or ""),
-                                     cwd=str(st.cwd))
+    mesh = str(todo[0].get("mesh") or "") or runtime.mesh_of(snap.state)
+    pool = (pool_fn or default_pool)(session=session, mesh=mesh, cwd=str(st.cwd))
     plans = [plan_route(rec, pool) for rec in todo]
     routed = runtime.ask_apply_route(plans, cwd=cwd, scope=scope, now=now)
     deliver = deliver_fn or default_deliver

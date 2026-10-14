@@ -257,6 +257,7 @@ ask:
   otherwise: human        # human(기본) | self | self:<option>(options가 있을 때)
   timeout: 900            # 그룹마다의 응답 기한(초). 없으면 기한 없음
   on_decline: declined    # 거절 시 작업의 결과 이름(기본 declined)
+  on_unroutable: unrouted # 선택. 명단을 읽지 못해 아무도 찾지 못했을 때의 결과 이름
   # options: {pass: {outcome: ok, description: …}, changes: {description: …}}
 ```
 
@@ -286,8 +287,27 @@ ask:
   | `self` | 모든 그룹이 소진되고 `otherwise: self` | 드라이버(`flow_approve`) |
 
   `otherwise: self:<option>`이면 그룹 소진 시점에 그 옵션을 응답자 없이 택한다
-  (`ask_answered`의 `by`가 `unanswered`). 사람의 답은 해소 단계와 관계없이 적용되고,
+  (`ask_answered`의 `by`가 `unanswered`).
+- `on_unroutable`(claunch-5itbf): 그룹이 소진된 이유가 「그 역할을 가진 세션이
+  없음」이 아니라 「명단에서 풀을 만들 수 없음」(세션이 팀 메시 여럿에 있는데 런이
+  메시를 지정하지 않음, 메시 소속 없음, 명단 미루기 한도 뒤에도 데몬 무응답)이면
+  작업이 `otherwise` 대신 이 결과로 끝난다. 값은 `{reason, ask, mesh, meshes?}`이고
+  (`meshes`는 소속 메시 목록), ask 레코드의 `status`는 `unroutable`이며 저널에는
+  `fallback`(`route: ask -> <결과>`)만 남고 `ask_answered`는 없다. `ok`는 쓸 수 없다.
+  없으면 두 경우 모두 지금처럼 `otherwise`로 간다. 예: `improv-worker-v2`의
+  peer-review는 `unrouted`를 에이전트 선택 `review-unrouted`(retry / direct-pass /
+  direct-changes / skip, reason 필수)로 받는다 — 리뷰 없이 지나가는 경우가
+  기본값이 아니라 기록된 선택이 된다. 사람의 답은 해소 단계와 관계없이 적용되고,
   질문을 받고 있던 응답자에게는 질문이 닫혔다는 `fyi` 메시지가 간다.
+- 런의 메시(`state.mesh`, claunch-5itbf): 질문은 이 메시의 명단으로 라우팅된다.
+  시작할 때 고정한다 — 데몬이 만드는 세션의 런은 그 세션이 가입한 메시, MCP
+  `flow_start`(`mesh` 인자)와 CLI `start`(`--mesh`)는 인자가 없으면 드라이버가
+  지금 속한 단 하나의 팀 메시(`asks.home_mesh`, 여럿이거나 없으면 비움). 비어
+  있으면 질문마다 명단이 정하므로, 드라이버가 팀 메시 여럿에 있으면 아무 그룹도
+  찾지 못한다. `claunch cflow2 mesh [<이름> | --clear]`가 런의 메시를 보이거나
+  바꾼다(드라이버만, 세션 밖의 사람 터미널도 가능; 저널 `mesh_set`). 바꾸면
+  라우팅 중인 질문은 다음 라우팅부터 새 메시를 쓰고, 이미 나간 질문은 나간 메시를
+  유지한다. `flow_status`가 `mesh`를 싣는다.
 - 라우팅(`cflow2/asks.py`): 런 잠금 밖에서 v1의 `responders.pool`로 명단을 한 번
   읽고 `Pool.match`로 그룹을 앞에서부터 해석한다. 후보 규칙(질문한 세션과 그
   하위 세션 제외, `scope`, `connect: true`의 연결 생성, 원격·종료 세션 제외)은 v1과
@@ -298,6 +318,9 @@ ask:
 - 미리 보기(`claunch cflow2 responders <작업> [--role R] [--json]`, claunch-3va8h):
   질문을 열기 전에 그 작업의 `from` 그룹이 지금 누구에게 닿는지 그룹마다 한 줄로
   보여 준다(`asks.who_answers`). 명단을 읽기만 하고 연결은 만들지 않는다.
+  런의 메시에서 찾고, `--mesh <이름>`이면 그 메시에서 찾는다. 종료 코드는 0(어느
+  그룹이든 닿음), 1(아무도 없음), 2(잴 수 없음 — 런·노드 없음, 명단 무응답, 그리고
+  세션이 메시 여럿에 있는데 런이 메시를 지정하지 않음)이다.
   `connect: true` 그룹은 질문이 열릴 때 연결될 응답 가능 멤버를 싣는다. `--role`은
   그 역할을 지명한 그룹만 남긴다. 종료 코드는 0(어느 그룹이 응답 가능한 멤버에
   닿음), 1(아무 그룹도 닿지 않음), 2(판정 불가: 이 디렉터리에 v2 런이 없음, 그런

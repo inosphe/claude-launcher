@@ -956,6 +956,10 @@ def _start_v2(plan: Plan, *, name: str, cwd: str) -> dict:
         payload = cflow2_web.start_run(
             chart, inputs=plan.cflow_inputs, cwd=cwd, scope=name, params=plan.workflow_params,
             caps=cflow2_runtime.resolve_caps(plan.profile or None),
+            # the mesh the session was enrolled in is the one its run asks in,
+            # pinned so a mesh it joins later does not make that ambiguous
+            # (claunch-5itbf)
+            mesh=plan.mesh or None,
         )
     except Exception as exc:  # noqa: BLE001 — compile, params, a live run...
         return {"ok": False, "error": str(exc), "version": 2}

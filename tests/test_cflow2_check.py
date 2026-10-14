@@ -110,7 +110,8 @@ body:
     assert succ["a"] == ["body.1/b"]
     assert succ["body.1/b"] == ["END"]   # return leaves the scope, then `end`
     assert "body.1/c" in succ           # still a node, just unreachable
-    assert succ["START"] == ["a", "body.1/b"]
+    # while "true" enters its body at least once: no edge past the loop
+    assert succ["START"] == ["a"]
 
 
 # -- codes ---------------------------------------------------------------------
@@ -172,6 +173,28 @@ spec:
     found = findings(bad, "must-pass")
     assert len(found) == 1 and found[0].level == "error"
     assert "START -> a -> c -> END" in found[0].message
+
+
+def test_a_while_true_loop_enters_its_body_at_least_once():
+    """``while: "true"`` cannot finish before its first iteration, so a
+    must-pass node inside it is passed (claunch-5itbf, improv-worker-v2's
+    peer-review-loop); a guard that may be false still can skip it."""
+    def chart(guard):
+        return C(SIMPLE + f"""
+body:
+  - a
+  - id: l
+    loop:
+      while: "{guard}"
+      max: 3
+      do: [b, {{break: l}}]
+  - c
+spec:
+  paths: {{p: {{to: c, must_pass: [b]}}}}
+""")
+    assert findings(chart("true"), "must-pass") == []
+    found = findings(chart("$data.again"), "must-pass")
+    assert len(found) == 1 and "START -> a -> c" in found[0].message
 
 
 def test_must_pass_to_a_task_and_unknown_labels():
@@ -373,11 +396,10 @@ spec:
     succ = check.cfg(chart)
     assert succ["body.0/a"] == ["body.0/b"]        # return runs the finally
     assert not any("p1" in f.message for f in findings(chart, "must-pass"))
-    # the loop may run zero times (p2 fails for that reason only), and a
-    # break inside it runs c before leaving
+    # a break inside the loop runs c before leaving, and while "true" cannot
+    # leave before its first iteration, so p2 holds too
     assert "c" in succ["body.0/b"]
-    assert [f.message for f in findings(chart, "must-pass")] == [
-        "path p2: START -> body.0/a -> body.0/b -> END reaches end without passing c"]
+    assert findings(chart, "must-pass") == []
 
 
 def test_uncaught_failure_runs_nested_finallys_in_order():

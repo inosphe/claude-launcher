@@ -5015,6 +5015,21 @@ def _scope_profile(manager: SessionManager, scope: str) -> Optional[str]:
         return None
 
 
+def _scope_home_mesh(request: web.Request, scope: str) -> Optional[str]:
+    """The one team mesh the session a run scope names is in, or None (no
+    session, none, several). A v2 run pins it at start so its asks keep
+    routing there after the session joins another mesh (claunch-5itbf)."""
+    from ..cflow2 import store as cflow2_store
+
+    try:
+        session = cflow2_store.session_of(cflow2_store.normalize_scope(scope))
+        rows = [row for row in _mesh_mgr(request).meshes_for_session(session)
+                if not row.get("parent_channel")]
+    except Exception:  # noqa: BLE001 - no session behind the scope: nothing to pin
+        return None
+    return rows[0]["mesh"] if len(rows) == 1 else None
+
+
 async def _cflow2_start(request: web.Request, cwd: str, scope: str, body: dict,
                         context: Optional[str]) -> Optional[web.Response]:
     """Start ``body['workflow']`` on the cflow2 runtime when it is a v2
@@ -5029,11 +5044,12 @@ async def _cflow2_start(request: web.Request, cwd: str, scope: str, body: dict,
     params = cflow2_web.params_for(chart, body.get("workflow_params"), context or "")
     values = cflow2_web.check_inputs(chart, body.get("cflow_inputs"))  # InputsInvalid -> 400
     profile = _scope_profile(request.app["manager"], scope)
+    mesh = _scope_home_mesh(request, scope)
 
     def start() -> dict:
         return cflow2_web.start_run(
             chart, inputs=values, cwd=cwd, scope=scope, params=params,
-            caps=cflow2_runtime.resolve_caps(profile),
+            caps=cflow2_runtime.resolve_caps(profile), mesh=mesh,
         )
 
     payload = await asyncio.to_thread(start)

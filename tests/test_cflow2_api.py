@@ -251,6 +251,19 @@ def test_preflight_and_arrange_start_a_v2_workflow_by_name(proj):
     assert runtime.status(cwd=str(proj), scope="w1", tick=False)["status"] == "aborted"
 
 
+def test_a_spawned_v2_run_keeps_the_mesh_its_session_was_enrolled_in(proj):
+    """claunch-5itbf: the run's asks route in that mesh even after the session
+    joins a second one."""
+    import dataclasses
+
+    plan = _preflight({"workflow": "pick", "task": "go"}, str(proj))
+    started = onboard._start_v2(dataclasses.replace(plan, mesh="team"), name="w2",
+                                cwd=str(proj))
+    assert started["ok"] is True
+    assert RunStore(str(proj), "w2").load_state()["mesh"] == "team"
+    assert runtime.status(cwd=str(proj), scope="w2", tick=False)["mesh"] == "team"
+
+
 def test_run_page_actions_take_the_scope_the_run_page_names(proj):
     """The run page posts back the scope its payload carries -- since the slot
     names its daemon that is 's1@main', which the v1 scope check refused with
