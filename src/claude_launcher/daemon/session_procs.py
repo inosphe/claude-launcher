@@ -80,11 +80,22 @@ class _LinuxReader:
 
     ``stat`` (parent, start time, comm) is read for every process on every
     snapshot. ``cmdline`` and ``environ`` (where :data:`OWNER_ENV` is found)
-    are read once per process image and remembered under its pid, start time
-    and comm: an ``exec`` replaces both and changes comm, and a recycled pid
-    has another start time. Reading all three files of every process each
-    time cost 36 ms per snapshot on a machine with 360 processes, and the
-    restart clock takes one every second (claunch-b6mnl).
+    are read once per process image and remembered under its pid, start time,
+    comm and the addresses of its arguments and environment (``stat``
+    fields 48-51): an ``exec`` keeps the pid and start time and, into a
+    program of the same name, comm, but lays the new image out at new
+    addresses; a recycled pid has another start time. Reading all three
+    files of every process each time cost 36 ms per snapshot on a machine
+    with 360 processes, and the restart clock takes one every second
+    (claunch-b6mnl).
+
+    The kernel shows those addresses as 0 to a reader without ptrace access
+    (another user's process, a non-dumpable one) and leaves them out before
+    Linux 3.5; an exec that keeps comm then goes unseen. ``environ`` is
+    closed to that reader too, so no owner tag is missed. An empty
+    ``cmdline`` (a process in the middle of an exec, a zombie) is not
+    remembered, so what the process becomes is read on the next snapshot;
+    a kernel thread's always is empty and is remembered (claunch-d2pgg).
 
     :meth:`tree` reads only some processes and their descendants, following
     ``/proc/<pid>/task/<tid>/children``.
@@ -93,7 +104,7 @@ class _LinuxReader:
     def __init__(self, proc_root: str = "/proc") -> None:
         self.proc_root = proc_root
         self._lock = threading.Lock()
-        #: pid -> (start time, comm, command line, owner tag)
+        #: pid -> ((start time, comm, image addresses), command line, owner tag)
         self._known: Dict[int, tuple] = {}
         self._children_ok: Optional[bool] = None
 
@@ -111,18 +122,22 @@ class _LinuxReader:
             return None
         comm = stat[stat.find("(") + 1:close]
         start = fields[19]
+        ppid = int(fields[1])
+        image = (start, comm, tuple(fields[45:49]))
         with self._lock:
             known = self._known.get(pid)
-        if known is not None and known[0] == start and known[1] == comm:
-            cmd, owner = known[2], known[3]
+        if known is not None and known[0] == image:
+            cmd, owner = known[1], known[2]
         else:
-            cmd, owner = self._details(base, comm)
-            with self._lock:
-                self._known[pid] = (start, comm, cmd, owner)
-        return Proc(pid=pid, ppid=int(fields[1]), ident=f"start:{start}", cmd=cmd, owner=owner)
+            argv, owner = self._details(base)
+            cmd = " ".join(argv) or f"[{comm}]"
+            if argv or pid == 2 or ppid == 2:  # kthreadd and its kernel threads
+                with self._lock:
+                    self._known[pid] = (image, cmd, owner)
+        return Proc(pid=pid, ppid=ppid, ident=f"start:{start}", cmd=cmd, owner=owner)
 
     @staticmethod
-    def _details(base: str, comm: str) -> tuple:
+    def _details(base: str) -> tuple:
         marker = (OWNER_ENV + "=").encode()
         try:
             with open(os.path.join(base, "cmdline"), "rb") as fh:
@@ -138,7 +153,7 @@ class _LinuxReader:
                         break
         except OSError:
             pass
-        return " ".join(argv) or f"[{comm}]", owner
+        return argv, owner
 
     def snapshot(self) -> Snapshot:
         out: Snapshot = {}

@@ -184,10 +184,16 @@ class FakeProc:
         self.root = root
         self.opened = []
 
-    def put(self, pid, ppid, *, comm="sh", start=1000, argv=("sh",), env=(), children=()):
+    def put(self, pid, ppid, *, comm="sh", start=1000, argv=("sh",), env=(), children=(),
+            image=None):
+        """``image`` is the stat line's arg_start, arg_end, env_start and
+        env_end (fields 48-51, new with each exec); None writes the short
+        line of a kernel before 3.5, without them."""
         base = self.root / str(pid)
         (base / "task" / str(pid)).mkdir(parents=True, exist_ok=True)
         rest = ["S", str(ppid)] + ["0"] * 17 + [str(start)] + ["0"] * 5
+        if image is not None:
+            rest += ["0"] * 20 + [str(a) for a in image] + ["0"]
         (base / "stat").write_text(f"{pid} ({comm}) " + " ".join(rest))
         (base / "cmdline").write_bytes(b"\0".join(a.encode() for a in argv) + b"\0")
         (base / "environ").write_bytes(b"\0".join(e.encode() for e in env) + b"\0")
@@ -249,28 +255,62 @@ def test_reader_rereads_after_exec_and_for_a_recycled_pid(tmp_path):
     assert (recycled.cmd, recycled.owner, recycled.ident) == ("node other", None, "start:2000")
 
 
-def test_reader_keeps_what_it_read_across_an_exec_that_keeps_comm(tmp_path):
-    """The one exec the cache key does not see: same program name, so same
-    comm (sh -> sh). The reader answers what it read first. The tracker
-    stores a member's cmd once, when it first sees the process as a member,
-    and only the daemon sets the owner tag (in the adopted command's
-    environment, inherited from there), so an exec that keeps comm changes
-    no member set or listing the uncached reader would have produced -- see
-    test_tracking_is_the_same_with_the_cached_reader."""
+def test_reader_rereads_after_an_exec_that_keeps_comm(tmp_path):
+    """sh -> sh keeps pid, start time and comm; the new image has its
+    arguments and environment at new addresses, and the reader reads it
+    again -- the owner tag that comes in with that exec too (claunch-d2pgg)."""
     fp = FakeProc(tmp_path)
-    fp.put(10, 1, comm="sh", argv=("sh", "-c", "a"))
+    fp.put(10, 1, comm="sh", argv=("sh", "-c", "a"), image=(100, 110, 110, 200))
+    r = fp.reader()
+    assert r.snapshot()[10].cmd == "sh -c a"
+    fp.put(10, 1, comm="sh", argv=("sh", "-c", "b"), image=(300, 310, 310, 400),
+           env=(f"{session_procs.OWNER_ENV}=s1",))
+    after = r.snapshot()[10]
+    assert (after.cmd, after.owner) == ("sh -c b", "s1")
+
+
+def test_reader_keeps_what_it_read_where_the_image_is_hidden(tmp_path, monkeypatch):
+    """The kernel shows the addresses as 0 to a reader without ptrace access
+    (another user's process, a non-dumpable one) and not at all before 3.5.
+    The key is then pid, start time and comm, and an exec that keeps comm
+    goes unseen. Such a process's environ is closed to the reader as well, so
+    it never carries an owner tag the reader could see; what stays is the
+    first command line. It stays cached: reading those processes again on
+    every snapshot is the cost claunch-b6mnl took away."""
+    fp = FakeProc(tmp_path)
+    fp.put(10, 1, comm="sh", argv=("sh", "-c", "a"), image=(0, 0, 0, 0))
+    fp.put(11, 1, comm="sh", argv=("sh", "-c", "a"))
     r = fp.reader()
     r.snapshot()
-    fp.put(10, 1, comm="sh", argv=("sh", "-c", "b"))
-    assert r.snapshot()[10].cmd == "sh -c a"
-    # a new reader (the old behaviour: read every time) sees the new image
+    fp.put(10, 1, comm="sh", argv=("sh", "-c", "b"), image=(0, 0, 0, 0))
+    fp.put(11, 1, comm="sh", argv=("sh", "-c", "b"))
+    opened = _count_opens(monkeypatch)
+    again = r.snapshot()
+    assert (again[10].cmd, again[11].cmd) == ("sh -c a", "sh -c a")
+    assert sorted(opened) == ["stat", "stat"]
+    # a new reader sees the new image
     assert fp.reader().snapshot()[10].cmd == "sh -c b"
-    # the same holds for an owner tag that appears with that exec: the first
-    # read (no tag) stays. The daemon's tag goes in through Popen(shell=True,
-    # env=...): the child is the daemon (comm python3) until it execs /bin/sh
-    # (comm sh), so that exec changes comm and is read again (next test).
-    fp.put(10, 1, comm="sh", argv=("sh", "-c", "b"), env=(f"{session_procs.OWNER_ENV}=s1",))
-    assert r.snapshot()[10].owner is None
+
+
+def test_reader_does_not_keep_an_empty_command_line(tmp_path, monkeypatch):
+    """An empty cmdline is a process in the middle of an exec (or a zombie):
+    the answer '[comm]' is not remembered, and the next snapshot reads the
+    process again. A kernel thread's cmdline is always empty; it is
+    remembered."""
+    fp = FakeProc(tmp_path)
+    fp.put(10, 1, comm="python3", argv=(), image=(100, 110, 110, 200))
+    fp.put(2, 0, comm="kthreadd", argv=())
+    fp.put(30, 2, comm="kworker/0:1", argv=())
+    r = fp.reader()
+    first = r.snapshot()
+    assert (first[10].cmd, first[2].cmd, first[30].cmd) == (
+        "[python3]", "[kthreadd]", "[kworker/0:1]")
+    fp.put(10, 1, comm="python3", argv=("python3", "-m", "x"), image=(100, 110, 110, 200),
+           env=(f"{session_procs.OWNER_ENV}=s1",))
+    opened = _count_opens(monkeypatch)
+    after = r.snapshot()
+    assert (after[10].cmd, after[10].owner) == ("python3 -m x", "s1")
+    assert sorted(opened) == ["cmdline", "environ", "stat", "stat", "stat"]
 
 
 def test_reader_sees_the_tag_the_daemon_puts_in_through_exec(tmp_path):
@@ -412,10 +452,13 @@ def test_a_nameless_run_is_not_tracked(tmp_path):
 @linux_only
 def test_reader_sees_a_real_exec():
     proc = subprocess.Popen([sys.executable, "-c",
-                             "import os, sys; sys.stdin.readline(); "
+                             "import os, sys; print('ready', flush=True); sys.stdin.readline(); "
                              "os.execv('/bin/sleep', ['sleep', '30'])"],
-                            stdin=subprocess.PIPE)
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE)
     try:
+        # Read only once the child runs its own code: right after Popen it
+        # may still be in the exec of the interpreter (claunch-d2pgg).
+        assert proc.stdout.readline() == b"ready\n"
         r = session_procs._LinuxReader()
         before = r.tree([proc.pid])[proc.pid]
         assert "execv" in before.cmd
@@ -428,6 +471,35 @@ def test_reader_sees_a_real_exec():
             after = r.snapshot()[proc.pid]
         assert after.cmd == "sleep 30"
         assert after.ident == before.ident
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+@linux_only
+def test_reader_sees_an_exec_into_the_same_program():
+    """A real python -> python exec: pid, start time and comm stay, and the
+    reader still answers the new command line and environment."""
+    tag = f"{session_procs.OWNER_ENV}=s-after"
+    code = ("import os, sys; print('ready', flush=True); sys.stdin.readline(); "
+            "env = dict(os.environ); env[%r] = %r; "
+            "os.execve(sys.executable, [sys.executable, '-c', "
+            "\"import sys; print('exec', flush=True); sys.stdin.readline()\", 'after-exec'], env)"
+            % tuple(tag.split("=", 1)))
+    proc = subprocess.Popen([sys.executable, "-c", code], stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE)
+    try:
+        assert proc.stdout.readline() == b"ready\n"
+        r = session_procs._LinuxReader()
+        before = r.tree([proc.pid])[proc.pid]
+        assert "readline" in before.cmd and before.owner is None
+        proc.stdin.write(b"go\n")
+        proc.stdin.flush()
+        assert proc.stdout.readline() == b"exec\n"
+        after = r.tree([proc.pid])[proc.pid]
+        assert after.ident == before.ident
+        assert after.cmd.endswith("after-exec")
+        assert after.owner == "s-after"
     finally:
         proc.kill()
         proc.wait()
