@@ -199,6 +199,21 @@ def recent_idle(idle: Dict[str, Optional[str]], now: Optional[float] = None,
     return out
 
 
+def _turn_began(session, since: float) -> bool:
+    """Whether a turn started in ``session`` at or after monotonic ``since``.
+
+    The positive signal is the harness's own turn animation
+    (:meth:`activity.Detector.turn_started_since`), retained through idle so a
+    turn that began and ended between two polls still counts. A session
+    object without a detector (a test double) keeps the old reading: busy
+    after the settle is a turn.
+    """
+    activity = getattr(session, "_activity", None)
+    if activity is None:
+        return True
+    return activity.turn_started_since(since)
+
+
 class ResumeNudge:
     """Tells the sessions a restart interrupted to carry on. One shot."""
 
@@ -465,7 +480,16 @@ class ResumeNudge:
             else:
                 self._waiting[name] = WAIT_SETTLING
             return "wait"
-        # Settled once. Working now is somebody else driving it.
+        # Settled once. Working now is somebody else driving it -- but only
+        # when a turn actually began since the arm. Busy without one is the
+        # screen moving, not a turn: on 2026-10-14 fifteen of seventeen
+        # sessions dropped here had no transcript entry around the drop, and
+        # s498 sat idle five minutes until a person typed (claunch-f9ene.2).
+        # Such a reading starts the settle again instead of settling the name.
+        if status == STATUS_BUSY and not _turn_began(session, armed):
+            del self._ready_since[name]
+            self._waiting[name] = WAIT_WORKING
+            return "wait"
         self._waiting.pop(name, None)
         return "driven" if status == STATUS_BUSY else "ready"
 
