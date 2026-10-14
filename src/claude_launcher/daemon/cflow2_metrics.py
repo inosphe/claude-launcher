@@ -91,9 +91,10 @@ def _read_facts(source: store.RunStore) -> dict:
 
 
 def _cached_facts(source: store.RunStore):
-    """``_facts`` of a saved run, or the error reading it gave, through the
-    cache. Both are kept: an unreadable run stays unreadable until its files
-    change."""
+    """``_facts`` of a saved run through the cache, or None when it cannot be
+    read. Both are kept: an unreadable run stays unreadable until its files
+    change. The error itself is not kept: re-raising one cached exception on
+    every poll would grow its traceback by a frame each time."""
     key = str(source.dir)
     stamp = _stamp(source)
     if stamp is not None:
@@ -104,8 +105,8 @@ def _cached_facts(source: store.RunStore):
                 return hit[1]
     try:
         value = _read_facts(source)
-    except _UNAVAILABLE as exc:
-        value = exc
+    except _UNAVAILABLE:
+        value = None
     if stamp is not None and stamp == _stamp(source):
         with _facts_lock:
             _facts_cache[key] = (stamp, value)
@@ -132,8 +133,9 @@ def observations(st: store.RunStore, *, now: str | None = None) -> dict:
     for source in sources:
         try:
             facts = _cached_facts(source)
-            if isinstance(facts, Exception):
-                raise facts
+            if facts is None:
+                unavailable += 1
+                continue
             rid, state = facts["run"], facts["state"]
             if rid in seen:
                 continue

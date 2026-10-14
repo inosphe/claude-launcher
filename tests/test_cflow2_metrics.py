@@ -194,3 +194,8 @@ def test_fresh_files_and_unreadable_runs(tmp_path, monkeypatch):
     assert metrics.observations(st)["unavailable"] == 1
     assert metrics.observations(st)["unavailable"] == 1
     assert len(reads) == 2, "an unreadable archive is remembered as unreadable"
+    # No exception object is cached: re-raising one per poll grew its
+    # traceback (and the frames it holds) by one entry each time.
+    for _ in range(20):
+        metrics.observations(st)
+    assert not any(isinstance(v, BaseException) for _, v in metrics._facts_cache.values())
