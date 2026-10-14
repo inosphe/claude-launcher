@@ -141,6 +141,11 @@ def test_codex_launch_does_not_wait_for_the_rollout_on_the_loop(
     """The launch-time rollout wait runs in a thread: create() returns at
     once, and the loop keeps serving while Codex takes its time. Measured
     before the change: 2.03 s of loop stall per Codex spawn (claunch-wpd0).
+
+    The scan blocks until the test releases it, so the check does not depend
+    on how long create() takes on a loaded machine (claunch-i8aor): a create()
+    that waited on the scan would come back only after the scan's own
+    deadline, with the conversation already claimed.
     """
     store.update(lambda doc: doc.update({"harnesses": {"codex": {
         "command": [sys.executable, "-u", "-c", CHILD],
@@ -149,29 +154,40 @@ def test_codex_launch_does_not_wait_for_the_rollout_on_the_loop(
     }}}))
     lineage.set_harness(profile.create("codex"), "codex")
     monkeypatch.setattr(codex_sessions, "snapshot", lambda _home: {"old"})
+    scanning = threading.Event()
+    release = threading.Event()
 
     def slow_claim(_home, cwd, known, *, timeout=2.0, poll=0.02):
         if timeout == 0:
             return None
-        time.sleep(0.5)
+        scanning.set()
+        release.wait(10)
         return "codex-thread-slow"
 
     monkeypatch.setattr(codex_sessions, "claim_new", slow_claim)
 
     async def run():
         mgr = _manager()
-        t0 = time.monotonic()
         session = mgr.create(SessionDef(
             name="cx", profile="codex", cwd=str(tmp_path)
         ))
-        assert time.monotonic() - t0 < 0.4, "create() waited on the scan"
-        # The loop is live while the thread waits.
-        ticks = 0
-        while session.sdef.conversation_id is None and ticks < 200:
+        assert session.sdef.conversation_id is None, "create() waited on the scan"
+        # The loop is live while the thread waits: it turns until the scan
+        # has started, and keeps turning while the scan is held.
+        for _ in range(1000):
+            if scanning.is_set():
+                break
             await asyncio.sleep(0.01)
-            ticks += 1
+        assert scanning.is_set(), "the scan never started"
+        for _ in range(10):
+            await asyncio.sleep(0.01)
+        assert session.sdef.conversation_id is None
+        release.set()
+        for _ in range(1000):
+            if session.sdef.conversation_id is not None:
+                break
+            await asyncio.sleep(0.01)
         assert session.sdef.conversation_id == "codex-thread-slow"
-        assert ticks >= 10, "the loop did not turn while the scan ran"
         await mgr.shutdown_all()
 
     asyncio.run(run())

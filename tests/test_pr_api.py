@@ -270,9 +270,15 @@ def test_monitor_spawns_a_watcher_child_past_the_tree_limits(home, tmp_path, mon
             assert facts["pr_url"].endswith("/pull/1")
             assert facts["branch"] == "s1-pr-1" and facts["tip"] == "f" * 40
             assert facts["parent"] == "s1" and facts["issue"] == "claunch-0001"
-            # the report block names the child, so the parent knows who will talk
-            assert len(delivered) == 1
-            assert f"monitor: child session {child}" in delivered[0]
+            # the report block names the child, so the parent knows who will talk.
+            # The spawn also enrols s1 in the child's mesh, and that join
+            # briefing is pasted whenever s1 goes idle -- before or after this
+            # point depending on load (claunch-i8aor, claunch-9rt3j) -- so it
+            # is not one of the blocks counted here.
+            reports = [t for t in delivered
+                       if not t.startswith("---\n# claunch mesh: join briefing")]
+            assert len(reports) == 1, reports
+            assert f"monitor: child session {child}" in reports[0]
             assert not any(w.startswith("monitor:") for w in doc["warnings"]), doc["warnings"]
 
             # monitor without report is refused as a form error, not a spawn

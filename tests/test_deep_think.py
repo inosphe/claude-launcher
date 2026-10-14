@@ -93,6 +93,19 @@ def typed(monkeypatch):
     return seen
 
 
+JOIN_BRIEFING = "---\n# claunch mesh: join briefing"
+
+
+def _typed_to(typed, name):
+    """What was typed into ``name``, less its mesh join briefing.
+
+    The briefing is pasted once the member goes idle (``MeshManager._brief``),
+    so on a loaded machine it can land after the blocks a test sends later and
+    take the last place in the list (claunch-i8aor, claunch-b9p8p).
+    """
+    return [t for n, t in typed if n == name and not t.startswith(JOIN_BRIEFING)]
+
+
 def _mgr():
     return SessionManager(idle_threshold=0.2, scrollback=200, restore_default=True)
 
@@ -235,7 +248,7 @@ def test_notes_and_the_answer_reach_the_asker_and_the_mesh_log(home, tmp_path, f
         doc = await resp.json()
         assert resp.status == 200, doc
         assert doc["delivered"] is True and doc["logged_in"] == ["room"]
-        note = [t for n, t in typed if n == "a"][-1]
+        note = _typed_to(typed, "a")[-1]
         assert note.startswith("---\n# claunch deep-think: NOTE from a-dt1")
         assert note.endswith("editing src/x.py:10 to add a log line")
         # the answer is the merge, with this module's header
@@ -245,7 +258,7 @@ def test_notes_and_the_answer_reach_the_asker_and_the_mesh_log(home, tmp_path, f
         )
         doc = await resp.json()
         assert resp.status == 200 and doc["target"] == "a", doc
-        answer = [t for n, t in typed if n == "a"][-1]
+        answer = _typed_to(typed, "a")[-1]
         assert answer.startswith("---\n# claunch deep-think: ANSWER from a-dt1")
         assert "question: why does X fail?" in answer
         assert answer.endswith("X fails because Y (src/x.py:12)")
