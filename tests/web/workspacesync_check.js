@@ -118,11 +118,12 @@ vm.createContext(ctx);
 vm.runInContext(
   [constant("wsSyncOpen"), constant("wsSyncState"), constant("WS_SYNC_LABEL"),
    constant("WS_SYNC_PATH"), constant("WS_SYNC_POLL_MS"), constant("WS_SHARED_STATE"),
-   constant("WS_HISTORY_KIND"),
+   constant("WS_HISTORY_KIND"), constant("WS_SYNC_MODE_NOTE"), constant("WS_UNMERGED_SHOWN"),
    ...["wsSyncSt", "wsSyncRefresh", "wsSyncSend", "wsSyncWait", "wsSyncRun",
        "wsSyncBranch", "wsSyncPlanLine", "wsSyncPeers", "wsSyncResult",
        "wsSyncRemoteComparisons", "wsSyncPanel", "wsSyncPullBody", "wsSyncShared", "wsSyncUnmerged",
-       "wsPeerDistanceText", "wsSyncHistory", "wsHistoryApproval"].map(slice),
+       "wsPeerDistanceText", "wsSyncHistory", "wsHistoryApproval", "wsAgo", "wsSyncUnmergedRow",
+       "wsSyncWhyDisabled", "wsSyncButtonRow"].map(slice),
    ...["wsSyncAgentBody", "wsSyncAgentBlocked", "wsSyncAgentControls", "wsSyncParentLabel", "wsSyncPromptText",
        "wsSyncPromptBody", "wsSyncPreviewPrompt", "wsSyncOperationPreview", "wsLocalSyncControls"].map(slice),
    "globalThis.__st = wsSyncSt;"].join("\n"),
@@ -157,6 +158,18 @@ async function tick() {
   nodes = walk(ctx.wsSyncPanel(W));
   const upToDate = nodes.find((n) => n.text === "Up to date");
   assert.ok(upToDate && upToDate.disabled, "an up-to-date plan offers nothing to press");
+  assert.ok(nodes.some((n) => n.text === "Nothing to sync: master already equals origin/master."),
+            "and says why next to the button");
+  // delegated, the label no longer carries the reason: the note still does
+  st.agentMode = "agent";
+  nodes = walk(ctx.wsSyncPanel(W));
+  assert.ok(nodes.find((n) => n.text === "Delegate sync").disabled);
+  assert.ok(nodes.some((n) => n.text === "Nothing to sync: master already equals origin/master."));
+  assert.ok(nodes.some((n) => n.text === "Choose a parent session above to delegate."),
+            "the push says what it waits for");
+  st.agentMode = "commands";
+  assert.equal(ctx.wsSyncWhyDisabled({ ...st, doc: { ...st.doc, plan: PLAN } }, "sync"), "",
+               "a plan to carry out: nothing to explain");
 
   /* ---- fast-forward: asks here, declining sends nothing ----------------- */
   st.doc.plan = { ...PLAN, action: "ff", ahead: 0, affected: [] };
@@ -324,12 +337,32 @@ async function tick() {
   const landRows = walk(land).filter((n) => n.cls === "ws-sync-unmerged-row");
   assert.equal(landRows.length, 2);
   assert.deepEqual(landRows[0].children.map((n) => n.text),
-                   ["s1-open", "+3", "2026-10-08 17:01", "s43"]);
+                   ["s1-open", "+3", ctx.wsAgo("2026-10-08T17:01:02+09:00"), "s43"]);
+  assert.equal(landRows[0].children[2].title, "2026-10-08 17:01", "the full time on hover");
+  assert.ok(landTexts.some((t) => /1 made by a session, 1 unstamped/.test(t)), "one line of counts");
   const link = landRows[0].children[3];
   assert.equal(link.tag, "a");
   assert.equal(link.href, "#/s/s43");
   assert.match(landRows[0].children[1].title, /not on origin\/master/);
   assert.equal(landRows[1].children[3].text, "unstamped");
+  // many: the newest WS_UNMERGED_SHOWN in view, the rest under a fold
+  const many = Array.from({ length: 8 }, (_, i) => ({
+    branch: `b${i}`, sha: String(i).repeat(40), date: "2026-10-08T10:00:00+00:00",
+    subject: "", ahead: 1, session: i % 2 ? `s${i}` : null }));
+  st.doc = { ...DOC, plan: PLAN, unmerged: many };
+  const big = walk(ctx.wsSyncPanel(W)).find((n) => (n.cls || "").includes("ws-sync-unmerged"));
+  const landFold = walk(big).find((n) => n.cls === "ws-sync-unmerged-more");
+  assert.ok(landFold, "the rest is folded");
+  assert.equal(landFold.children[0].text, "Show 3 more");
+  assert.equal(walk(big).filter((n) => n.cls === "ws-sync-unmerged-row").length, 8, "every row is still there");
+  assert.equal(walk(landFold).filter((n) => n.cls === "ws-sync-unmerged-row").length, 3);
+  // ages
+  const now = Date.parse("2026-10-08T12:00:00Z");
+  assert.equal(ctx.wsAgo("2026-10-08T11:59:30Z", now), "now");
+  assert.equal(ctx.wsAgo("2026-10-08T11:48:00Z", now), "12m");
+  assert.equal(ctx.wsAgo("2026-10-08T09:00:00Z", now), "3h");
+  assert.equal(ctx.wsAgo("2026-10-04T12:00:00Z", now), "4d");
+  assert.equal(ctx.wsAgo("", now), "");
   st.doc = { ...DOC, plan: PLAN, unmerged: [] };
   nodes = walk(ctx.wsSyncPanel(W)).map((n) => n.text);
   assert.ok(nodes.includes("Waiting to land (0)"));
@@ -384,8 +417,13 @@ async function tick() {
   nodes = walk(ctx.wsSyncPanel(W));
   const hist = nodes.find((n) => n.cls === "ws-sync-section ws-sync-history");
   assert.ok(hist, "the panel carries the history section");
-  const [h, sync, push, pull] = hist.children;
+  assert.equal(hist.tag, "details", "folded: a record to look back on");
+  const h = hist.children[0];
+  const [sync, push, pull] = hist.children.filter((n) => n.cls === "ws-sync-history-row");
+  assert.equal(h.tag, "summary");
   assert.equal(h.text, "History (3)");
+  assert.ok(hist.children.some((n) => /plain git push is not recorded/.test(n.text)),
+            "says what the record leaves out");
   assert.deepEqual(sync.children.map((n) => n.text), [
     "2026-10-08 10:05", "sync · pushed", "origin/master", "aaaaaaaa → bbbbbbbb", "s9",
     "approved on card r1 (web 10:04 UTC)"]);

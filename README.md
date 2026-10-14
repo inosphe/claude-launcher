@@ -2495,8 +2495,9 @@ the card it filed; the same body with that `request` runs once the card is
 approved (`GET /api/reposync/requests/<id>` says when), and answers 409 when
 the card was rejected or expired or the tips moved after the approval.
 
-The Workspaces → Sync **Remote comparisons** section compares the local sync
-branch with the same branch on every configured remote, including aliases.
+The Workspaces → Sync **Sync master** section ends with one row per configured
+remote (including aliases, each with its address), comparing the local sync
+branch with the same branch there.
 Ahead and behind are local commit counts: ahead means the remote can
 fast-forward; behind means the local branch can fast-forward; both means
 histories diverged. Unrelated histories and missing tracking refs are shown
@@ -2505,12 +2506,12 @@ each remote. A failed fetch retains an explicit error and marks its comparison
 as cached, while the other remotes remain visible. This analysis does not
 rebase, push, or change the selected sync remote.
 
-**Sync / push execution** selects how the panel performs master sync and
-work-branch push:
+**How Sync and Push run** selects how the panel performs master sync and
+work-branch push; the line under the picker says what the chosen mode does:
 
-- **Run commands** keeps the existing behavior and is the default.
-- **A — Delegate to agent** starts a child session to perform the sync or push.
-- **B — Agent on failure** tries the commands first and starts a child only
+- **Run commands here** keeps the existing behavior and is the default.
+- **Delegate to an agent** (A) starts a child session to perform the sync or push.
+- **Run commands, agent on failure** (B) tries the commands first and starts a child only
   after execution fails. Pending or refused approval and stale plans do not
   trigger recovery.
 
@@ -2600,9 +2601,11 @@ is folded away separately. The status answer carries them as `shared:
 The panel's **Waiting to land** section lists the local branches the
 remote's master does not hold yet (as the plan read it, so a branch counts
 as landed once the shared master has it, whatever the local master says),
-newest commit first: how many commits each has beyond that master, when it
-last moved, and the session stamped on its tip commit (the
-`Claunch-Session` trailer), linked to that session. The status answer
+newest commit first: how many commits each has beyond that master, how long
+ago it last moved (the full time on hover), and the session stamped on its
+tip commit (the `Claunch-Session` trailer), linked to that session. One line
+counts them first (made by a session / unstamped); the newest five are
+shown and the rest open under **Show N more**. The status answer
 carries them as `unmerged: [{branch, sha, date, subject, ahead, session}]`.
 
 The peers are a table, one row per peer clone of the same repository: its

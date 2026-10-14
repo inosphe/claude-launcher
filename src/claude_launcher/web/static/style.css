@@ -5068,10 +5068,24 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .ws-add-row input:first-child { flex: 3 1 0; min-width: 0; }
 .ws-add-row input:nth-child(2) { flex: 1 1 0; min-width: 0; }
 .ws-add-row .wf-btn { flex: none; margin: 0; }
+/* A workspace row is two lines (wsRow): the head (name, path, status
+   badges) and the action bar, its buttons grouped by kind. */
 .ws-row {
-  display: flex; align-items: center; gap: 10px;
-  padding: 8px 0; border-top: 1px solid #22262d;
+  display: flex; flex-direction: column; align-items: stretch; gap: 8px;
+  padding: 12px 0; border-top: 1px solid #22262d;
 }
+.ws-row-head { display: flex; align-items: flex-start; gap: 10px 16px; flex-wrap: wrap; }
+.ws-row-status { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.ws-row-actions { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; }
+.ws-action-group { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }
+.ws-action-group + .ws-action-group { padding-left: 12px; border-left: 1px solid #2a2e36; }
+.ws-action-group.ws-group-end { margin-left: auto; }
+/* One button size in the bar: the primary "New session" keeps its colour,
+   everything else is the small grey button. */
+.ws-row-actions .wf-btn { margin: 0; padding: 4px 12px; font-size: 12px; line-height: 1.4; }
+.ws-row-actions .wf-btn.ws-toggle.on { background: #1c2b44; color: #58a6ff; }
+.ws-row-actions .wf-btn.ws-unregister { background: transparent; color: #8b949e; }
+.ws-row-actions .wf-btn.ws-unregister:hover { background: #3a1d22; color: #f85149; }
 .ws-row:first-of-type { border-top: none; }
 .ws-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
 .ws-name { font-size: 14px; color: #e6edf3; }
@@ -5082,8 +5096,7 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .ws-row .badge { flex: none; }
 /* Registry rows can include git badges, worktrees and editor controls.
    Keep the directory readable and let the controls use additional lines. */
-#workspaces-view .ws-row { flex-wrap: wrap; }
-#workspaces-view .ws-text { flex-basis: 100%; overflow-wrap: anywhere; }
+#workspaces-view .ws-text { flex: 1 1 260px; overflow-wrap: anywhere; }
 #workspaces-view .ws-row .wf-btn { white-space: nowrap; }
 #workspaces-view .ws-vscode { flex-wrap: wrap; max-width: 100%; }
 #workspaces-view .ws-vscode-pick { min-width: 0; max-width: 100%; }
@@ -5144,6 +5157,44 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .ws-sync-prompt pre { white-space: pre-wrap; overflow-wrap: anywhere;
   max-height: 360px; overflow-y: auto; padding: 10px; background: #101419;
   color: #c9d1d9; font-size: 12px; user-select: text; }
+/* Sync panel layout (claunch-mhz4g.1) */
+.ws-sync-title { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.ws-sync-title strong { color: #e6edf3; font-size: 13px; }
+.ws-sync-intro { margin: 0; }
+.ws-sync h5 { margin: 6px 0 4px; font-size: 12px; font-weight: 600; color: #c9d1d9; }
+.ws-sync-button-row { display: flex; align-items: center; gap: 4px 10px; flex-wrap: wrap; margin-top: 6px; }
+.ws-sync-button-row .wf-btn { margin: 0; flex: none; }
+.ws-sync-why { margin: 0 !important; }
+.ws-sync-agent .ws-sync-form select { flex: 0 1 300px; }
+.ws-sync-remotes { margin-top: 6px; }
+.ws-sync-remotes .ws-sync-remote-row { padding: 4px 0; font-size: 12px; }
+.ws-sync-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr)); gap: 10px; }
+.ws-sync-cards .ws-sync-operation { margin: 0; }
+.ws-sync-unmerged-list { display: flex; flex-direction: column; }
+.ws-sync-unmerged-row { display: grid; grid-template-columns: minmax(0, 26em) 3em 3em minmax(0, 1fr);
+  justify-items: start;
+  align-items: center; gap: 8px; padding: 2px 0; font-size: 12px; }
+.ws-sync-unmerged-row > * { min-width: 0; max-width: 100%; }
+.ws-sync-unmerged-row .ws-sync-unmerged-branch { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* On a narrow screen the groups wrap onto lines of their own: no dividers. */
+@media (max-width: 700px) {
+  .ws-action-group + .ws-action-group { padding-left: 0; border-left: none; }
+  .ws-action-group.ws-group-end { margin-left: 0; }
+  .ws-sync-unmerged-row { grid-template-columns: minmax(0, 1fr) auto auto minmax(0, 5em); }
+}
+.ws-sync-unmerged-row .badge { white-space: nowrap; }
+.ws-sync-unmerged-age { justify-self: end; font-variant-numeric: tabular-nums; }
+.ws-sync-unmerged-more > summary, .ws-sync-more summary { cursor: pointer; }
+.ws-sync-more { display: flex; flex-direction: column; gap: 8px; }
+.ws-sync-more > details > summary { font-size: 11px; text-transform: uppercase; color: #7d8590; }
+.ws-sync-localsync-what { display: block; text-transform: none; font-size: 12px; margin: 2px 0 0 14px; }
+.ws-sync-unmerged-session, .ws-sync-history-session, .ws-worktree-session {
+  color: #58a6ff; text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ws-sync-unmerged-session:hover, .ws-sync-history-session:hover, .ws-worktree-session:hover { text-decoration: underline; }
+.ws-sync-history-row .wf-note { margin: 0 !important; font-size: 12px; }
+/* Form controls of the page follow its dark surface. */
+#workspaces-view select, #workspaces-view input:not([type="checkbox"]) {
+  background: #0d1117; color: #e6edf3; border: 1px solid #30363d; border-radius: 4px; padding: 4px 6px; }
 
 /* ------------------------------------------------------------------ */
 /* Beads boards: which database each workspace's board reads            */
@@ -6795,6 +6846,9 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .vscode-panel > .wf-note { margin: 10px 0; }
 .ws-vscode { display: inline-flex; gap: 6px; align-items: center; flex: none; }
 .ws-vscode-pick { max-width: 220px; }
+#workspaces-view .ws-vscode-pick { font-size: 12px; padding: 3px 6px; max-width: 170px; }
+/* The page's own cards get the width the Sync panel needs. */
+#workspaces-view :is(.ws-add, .ws-list, .ws-card) { max-width: 980px; }
 .vscode-server .ws-text .error { display: block; }
 @media (max-width: 640px) {
   .vscode-setting { grid-template-columns: 1fr; }
@@ -7207,7 +7261,7 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .thh-meta { display: flex; gap: 8px; align-items: baseline; margin-bottom: 2px; font-size: 11px; color: #7d8590; }
 .thh-who { font-weight: 600; }
 
-.ws-sync-remote-row { display: flex; flex-wrap: wrap; gap: 6px 16px; padding: 8px 0; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
+.ws-sync-remote-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 16px; padding: 8px 0; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
 .ws-sync-remote-row > * { min-width: 0; }
 
 /* World-model simulations (#/sims, sim-page.js). Dark like the glossary page. */
