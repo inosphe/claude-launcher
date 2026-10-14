@@ -78,6 +78,7 @@ from . import paths
 from . import daemon_prompt
 from . import sessionstats, statscompare, statsworker
 from . import tokenusage
+from . import exited_rows
 from . import transcript_view
 from . import window as window_mod
 from .. import cli_beads
@@ -7674,8 +7675,17 @@ async def h_sessions_list(request: web.Request) -> web.Response:
             # control socket -- waits (claunch-vyw9s). Nobody is watching a
             # retired session's numbers move; its detail panel still reads
             # them all when opened (``h_session_meta``).
-            if session_mod.session_category(s) == session_mod.CATEGORY_ARCHIVED:
+            archived = session_mod.session_category(s) == session_mod.CATEGORY_ARCHIVED
+            # An exited record's transcript no longer grows: its readings
+            # (and its PRs) are read once after the exit and kept while the
+            # files they came from are unchanged (claunch-0gysk). Only
+            # ``tps`` is read here, off the shared snapshot.
+            kept = s.exited and not archived
+            if archived:
                 info = s.info()
+            elif kept:
+                info = exited_rows.attach(s, usage_budget, _session_cwd(s))
+                metering.attach(info, meter, meter_age, meter_live)
             else:
                 info = ctxsize.attach(s)
                 # The session's latest throughput through the metering shim
@@ -7701,7 +7711,8 @@ async def h_sessions_list(request: web.Request) -> web.Response:
                 info["briefing"] = d
             # Same scoped PR records as the detail panel, read locally and
             # cached; a list poll never starts a GitHub request.
-            info["prs"] = session_prs.for_session(_session_cwd(s), info["name"])
+            if not kept:
+                info["prs"] = session_prs.for_session(_session_cwd(s), info["name"])
             # A kill that is still a wind-down (see beads.Board): the row says
             # so and its kill button turns into "stop now".
             wd = winddowns.get(info.get("name") or "")
