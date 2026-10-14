@@ -2635,6 +2635,25 @@ PR은 닫고 브랜치는 지웠다.
 모든 머지의 고정 브랜치와 큐 기록을 확인한다. 전체 스윕은 비동기로
 실행되어 다음 머지 회차를 지연시키지 않는다. 라이브 반영은 아래 입력이 제어한다.
 
+머지 보고는 **머지 SHA당 한 행**이다. 같은 브랜치·tip을 공유하는 다른 이슈는
+행의 `also: [...]`에 적는다(`tools/delayed_sweep.py check-merges`가 형태를
+읽기 전용으로 확인한다). 검증 작업의 issue는 소유 귀속이라 한 SHA를 다른
+이슈로 다시 등록하지 못하고, 강한 관문(`check-enqueued --env`)은 이 불변식을
+그대로 지킨다. 그래서 한 SHA를 두 이슈의 행으로 나눠 보고하면 관문을 통과할 수
+없다. 이전에는 이때 사람의 승인 말고 풀 길이 없었다(claunch-rvi59). 이제
+`checkpoint-check`는 읽기 전용 판정(`check-enqueued --classify`, 큐에 아무것도 쓰지
+않는다)에 따라 결과를 `ok`/`mismatch`/`blocked`로 보고한다.
+
+- `mismatch`(보고 행만 틀림): `checkpoint-repair`가 행을 머지당 하나로 바로잡아
+  `data.merged` 전체(repo, merges, master)를 대체하고 `checkpoint-check`로
+  돌아간다. 바로잡았다는 것은 통과가 아니다 — 같은 검사와 verify를 다시 거쳐야
+  reflect·landed-notice로 간다. 최대 3회, 소진되면 보류로.
+- `blocked`(작업의 issue가 보고에 없음, tip 불일치, 고정 ref 이동): 바로
+  `checkpoint-hold`. 보류의 verify는 예전과 같은 강한 관문이며 사람이 큐 쪽 원인을
+  풀거나 승인한다. 새 작업·ref·머지를 만들거나 작업의 issue를 덮지 않는다.
+- `bind`는 결과와 상관없이 값을 통째로 대입하므로 `checkpoint-repair`는 blocked에도
+  원래 기록을 싣는다.
+
 검증 작업은 `<base_home>/daemon/delayed-sweeps.sqlite3`에 보존된다. 같은
 base home을 사용하는 데몬 인스턴스들이 큐와 저장소별 중단 상태를 공유한다.
 다른 인스턴스가 작업을 실행해도 등록 당시의 인스턴스·런처 홈·scratch를

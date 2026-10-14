@@ -231,6 +231,12 @@ nodes:
       --owner <이 리더 세션>`으로 기록한다. 다른 저장소의 스윕 명령은
       `--command`로 명시한다. 마지막 머지 뒤 한 번만 기록하지 않는다.
       반환되는 ref는 고정 브랜치다. 덮어쓰거나 삭제하지 않는다.
+      머지 보고는 **머지 SHA당 한 행**이다: {issue, tip, merge_sha}에 같은 브랜치·tip을
+      공유하는 다른 이슈가 있으면 `also: [이슈...]`로 적는다. 한 SHA를 두 이슈의 행으로
+      나누어 적지 않는다(검증 작업의 issue는 하나이고 다른 이슈로 다시 등록되지 않는다 —
+      checkpoint-check가 막는다). 서로 다른 브랜치를 한 머지 단계로 합치지 않는다.
+      결과를 보고하기 전에 `tools/delayed_sweep.py check-merges --json '<merges 보고>'`로
+      형태를 확인한다(조언용·읽기 전용).
       enqueue 실패 시 다음 후보를 머지하지 않고 fail로 보고한다. 재실행은
       같은 SHA를 중복 생성하지 않는다. 테스트 작업은 여기서 기다리지 않는다.
       실행은 subagent 하나가 한다(머지 하나 = subagent 하나, 또는 배치 전체를
@@ -281,8 +287,69 @@ nodes:
     title: 머지 단계별 검증 작업 기록 확인
     prompt: |
       data.merged.repo의 merges 각 행(issue, tip, merge_sha)에 대해 고정 브랜치와
-      지속 검증 작업이 존재하는지 확인한다. 빠진 항목은 enqueue로 복구한다.
+      지속 검증 작업이 존재하는지 확인한다. 한 머지 = 행 하나 = 검증 작업 하나다 —
+      같은 브랜치·tip의 다른 이슈는 그 행의 `also`에 있다. 작업의 issue는 소유 귀속이라
+      다른 이슈로 같은 SHA를 다시 등록하지 못한다(의도된 검사다).
+      먼저 판정을 읽는다(읽기 전용, 큐에 아무것도 쓰지 않는다):
+      `uv run --no-sync python tools/delayed_sweep.py check-enqueued --classify
+      --json '<flow_status의 data.merged 그대로>'`. 출력의 class로 갈린다.
+      - ok: ok로 보고한다. verify가 같은 검사를 한 번 더 한다(마지막 관문이다).
+      - missing: 작업이나 고정 ref가 빠진 머지다. 그 머지마다 같은 SHA로 다시
+        enqueue한다(`tools/delayed_sweep.py enqueue --repo <repo> --merge <sha>
+        --issue <그 행의 issue> --owner <이 세션>`, 멱등이다). 그다음 판정을 다시 읽는다.
+      - mismatch: 보고 행만 틀렸다 — 한 머지를 여러 행이 나눠 가졌다. 결과
+        mismatch로 보고하고 rows에 판정의 rows를, reason에 요지를 싣는다.
+        checkpoint-repair가 행을 바로잡고 이 작업으로 돌아온다. 새 작업·ref는
+        만들지 않는다.
+      - conflict 또는 invalid: 보고만 고쳐서는 안 된다(작업의 issue가 보고에 없다,
+        요청한 tip의 머지가 아니다, 고정 ref가 옮겨졌다). 결과 blocked로 보고하고
+        판정 출력을 reason에 싣는다. 작업의 issue를 덮어쓰거나 맞는 척하지 않는다.
       전체 스윕을 기다리지 않는다. 영수증이 아직 없어도 정상 대기 상태다.
+    returns:
+      ok: {}
+      mismatch: {rows: list, reason: str}
+      blocked: {reason: str}
+    verify: [uv, run, --no-sync, python, tools/delayed_sweep.py, check-enqueued,
+             --env, CFLOW_DATA_MERGED]
+    done_when: 성공한 모든 머지 단계의 고정 브랜치와 검증 작업이 기록되어 있다
+    effects: [fs.read, fs.write]
+
+  checkpoint-repair:
+    title: 머지 보고 행 바로잡기(읽기 전용)
+    prompt: |
+      checkpoint-check가 mismatch를 보고했다 — 큐는 맞고 보고 행이 틀렸다.
+      행을 머지당 하나로 바로잡는다. 읽기 전용이다.
+      - 근거: flow_status의 data.merged(원래 기록)와
+        `tools/delayed_sweep.py check-enqueued --classify --json '<data.merged>'`
+        출력의 suggested. suggested의 merges는 머지당 한 행이다: issue = 큐 작업의
+        issue(귀속은 바꾸지 않는다), also = 같은 머지의 나머지 이슈.
+      - 이번 배치의 머지 SHA만 다룬다. repo 전체 status의 다른 작업이나 다른
+        리더의 머지를 행에 넣지 않는다.
+      - 결과 값이 data.merged **전체를 대체한다**: repo, merges, 그리고 원래 기록에
+        master가 있었으면 그 master를 그대로 싣는다(없었으면 싣지 않는다).
+        merges만 싣지 않는다.
+      - 새 머지·새 SHA·고정 ref 이동·큐 작업 변경은 하지 않는다. 판정이 conflict나
+        invalid로 바뀌었거나 어느 행도 작업의 issue로 맞춰지지 않으면 blocked로
+        보고한다. blocked에도 **원래 기록을 바꾸지 않고 그대로**(repo, merges, master)
+        싣고 reason만 더한다 — 엔진은 보고 값을 결과와 상관없이 data.merged에 대입하므로,
+        reason만 싣으면 원래 기록이 사라져 보류의 verify가 영영 통과하지 못한다.
+      보고하면 checkpoint-check로 돌아가 같은 검사와 verify를 다시 거친다.
+      바로잡았다는 것은 통과가 아니다.
+    returns:
+      ok: {repo: str, merges: list, master: "str?"}
+      blocked: {repo: str, merges: list, master: "str?", reason: str}
+    done_when: data.merged를 대체할 {repo, merges[, master]}가 머지당 한 행으로 보고에 있다
+    effects: [fs.read]
+
+  checkpoint-hold:
+    title: 검증 기록 확인 보류(사람 대기)
+    prompt: |
+      자동 바로잡기(checkpoint-repair, 최대 3회)가 소진됐거나 blocked로 멈췄다.
+      여기서는 verify가 통과해야만 ok다 — 예전과 같은 관문이다. 통과시키는
+      우회는 없다. 사람에게 한 번만 알린다: qa_ask나 mesh로 막힌 원인, 판정
+      출력(`check-enqueued --classify`), 풀리는 조건을 적는다. 사람은 큐 쪽 원인을
+      풀거나 이 작업의 report를 승인(`claunch cflow2 move --approve`)한다. 같은
+      알림을 반복하지 않는다.
     verify: [uv, run, --no-sync, python, tools/delayed_sweep.py, check-enqueued,
              --env, CFLOW_DATA_MERGED]
     done_when: 성공한 모든 머지 단계의 고정 브랜치와 검증 작업이 기록되어 있다
@@ -367,7 +434,9 @@ nodes:
     title: 머지 실행 중단 처리
     prompt: |
       머지 실행이 중단됐다. 성공한 부분의 repo와 merges(issue, tip, merge_sha)를
-      기록하고 각 머지의 검증 작업을 enqueue로 복구한다. master는 되돌리지 않는다.
+      기록하고 각 머지의 검증 작업을 enqueue로 복구한다. 머지 SHA당 한 행이고, 같은
+      브랜치·tip을 공유하는 다른 이슈는 `also`에 적는다(integrate와 같다).
+      master는 되돌리지 않는다.
       실패 사유와 후속 작업을 보드에 남긴다. 전체 스윕은 지속 큐가 수행한다.
       하나도 머지하지 못했으면 nothing_merged로 관제 대기로 돌아간다.
     returns:
@@ -379,7 +448,7 @@ nodes:
   landed-notice:
     title: 착지 통지
     prompt: |
-      landed 항목마다 요청자에게 머지 SHA와 큐의 job/ref를 알린다. 상태를
+      landed 항목마다(머지 행의 `also` 이슈 포함) 요청자에게 머지 SHA와 큐의 job/ref를 알린다. 상태를
       「머지 완료·사후 검증 대기」와 라이브 반영 상태를 구분한다.
       restart_live=false이면 「라이브 반영 생략」, true이면 deployed-wait의
       실제 판정에 따라 「반영 완료」 또는 reflect-closed의 「반영 실패/미확인」을
@@ -553,7 +622,34 @@ body:
                           bind: merged
                           on:
                             nothing_merged: {continue: null}
-                    - checkpoint-check
+                    - id: checkpoint-gate
+                      try:
+                        id: checkpoint-retry
+                        retry:
+                          max: 3
+                          do:
+                            seq:
+                              - seq: [checkpoint-check]
+                                on:
+                                  # 보고 행만 틀렸다: 바로잡아 전체 기록을 바꾸고
+                                  # checkpoint-check로 다시 들어간다. 바로잡은 것이
+                                  # 통과는 아니다 — ok 보고와 verify가 다시 있어야
+                                  # 다음 노드(reflect)로 간다.
+                                  mismatch:
+                                    seq:
+                                      # bind는 결과와 상관없이 값을 통째로 대입한다 — blocked도 마찬가지다.
+                                      # 그래서 checkpoint-repair는 blocked에도 원래 기록(repo, merges[, master])을
+                                      # 그대로 싣고, reason만 더한다(값 모양이 같아 기록을 잃지 않는다).
+                                      # 바로잡을 수 없으면 재시도 없이 보류로 — 보류는
+                                      # verify가 통과해야만 ok다.
+                                      - seq: [checkpoint-repair]
+                                        bind: merged
+                                        on: {blocked: checkpoint-hold}
+                                      - {continue: null}
+                                  # 보고만 고쳐서는 안 되는 충돌 — 바로 보류로.
+                                  blocked: checkpoint-hold
+                      catch:
+                        "*": checkpoint-hold
                     - call: reflect-live
                     - landed-notice
                     - {break: null}

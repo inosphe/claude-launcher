@@ -402,6 +402,105 @@ def test_checkpoint_gate_receives_the_merged_repository_not_leader_cwd(tmp_path)
     assert ld.tasks() == ["checkpoint-check"]
 
 
+# claunch-rvi59: one merge SHA reported under two issues stalled the round at
+# checkpoint-check with no route but a person (the queue job has one issue, so
+# the hard verify can never pass). A report-shape mismatch now routes to a
+# read-only repair that returns to the same gate; the hard verify stays the only
+# way to reflect/notice.
+_BUNDLE_ROWS = [
+    {"issue": "x.6", "tip": "a" * 40, "merge_sha": "b" * 40},
+    {"issue": "x.5", "tip": "a" * 40, "merge_sha": "b" * 40},
+]
+_BUNDLE_FIXED = [{"issue": "x.6", "also": ["x.5"], "tip": "a" * 40, "merge_sha": "b" * 40}]
+
+
+def _bundled(ld):
+    ld.report("integrate", "ok", {"merges": _BUNDLE_ROWS, "master": "b" * 40, "repo": "/repo"})
+
+
+def test_checkpoint_nodes_declare_the_typed_outcomes():
+    chart = _chart()
+    by_label = {n.label: n for n in chart.nodes.values() if n.label}
+    assert set(by_label["checkpoint-check"].get("returns")) == {"ok", "mismatch", "blocked"}
+    assert set(by_label["checkpoint-repair"].get("returns")) == {"ok", "blocked"}
+    # only the hard gates verify; the repair itself never counts as a pass
+    assert by_label["checkpoint-repair"].get("verify") is None
+    assert by_label["checkpoint-hold"].get("verify")["run"][-1] == "CFLOW_DATA_MERGED"
+
+
+def test_bundle_mismatch_repairs_then_revisits_the_hard_gate_before_reflecting(tmp_path):
+    import json
+    ld = Leader(tmp_path)
+    _preflight(ld)
+    _bundled(ld)
+    ld.report("checkpoint-check", "mismatch", {"rows": _BUNDLE_ROWS, "reason": "x.6/x.5 share b"})
+    assert ld.tasks() == ["checkpoint-repair"]
+    ld.report("checkpoint-repair", "ok", {"repo": "/repo", "merges": _BUNDLE_FIXED,
+                                          "master": "b" * 40})
+    # a repaired report is not a pass: the gate is entered again, nothing else runs
+    assert ld.tasks() == ["checkpoint-check"]
+    seen = []
+    def check(cmd, cwd, env, timeout):
+        seen.append(json.loads(env["CFLOW_DATA_MERGED"]))
+        return 0, "ok"
+    ld.report("checkpoint-check", verify=check)
+    assert seen == [{"repo": "/repo", "merges": _BUNDLE_FIXED, "master": "b" * 40}]
+    assert ld.tasks() == ["landed-notice"]
+
+
+def test_repair_that_fails_the_hard_verify_stays_at_the_gate(tmp_path):
+    ld = Leader(tmp_path)
+    _preflight(ld)
+    _bundled(ld)
+    ld.report("checkpoint-check", "mismatch", {"rows": _BUNDLE_ROWS, "reason": "r"})
+    ld.report("checkpoint-repair", "ok", {"repo": "/repo", "merges": _BUNDLE_FIXED})
+    ld.report("checkpoint-check", verify=lambda *a: (2, "does not match"))
+    assert ld.tasks() == ["checkpoint-check"]
+    assert ld.st["status"] == "running"
+
+
+@pytest.mark.parametrize("stage", ["check", "repair"])
+def test_blocked_conflict_goes_to_the_hold_which_keeps_the_hard_verify(tmp_path, stage):
+    import json
+    ld = Leader(tmp_path)
+    _preflight(ld)
+    _bundled(ld)
+    if stage == "check":
+        ld.report("checkpoint-check", "blocked", {"reason": "conflict: job issue not reported"})
+    else:
+        ld.report("checkpoint-check", "mismatch", {"rows": _BUNDLE_ROWS, "reason": "r"})
+        ld.report("checkpoint-repair", "blocked", {"repo": "/repo", "merges": _BUNDLE_ROWS,
+                                                      "master": "b" * 40,
+                                                      "reason": "no row matches the job issue"})
+    assert ld.tasks() == ["checkpoint-hold"]
+    ld.report("checkpoint-hold", verify=lambda *a: (2, "still blocked"))
+    assert ld.tasks() == ["checkpoint-hold"]
+    seen = []
+    def passed(cmd, cwd, env, timeout):
+        seen.append(json.loads(env["CFLOW_DATA_MERGED"]))
+        return 0, "ok"
+    ld.report("checkpoint-hold", verify=passed)
+    # the hold never rewrites the record: the original report is what was verified
+    want = {"repo": "/repo", "merges": _BUNDLE_ROWS, "master": "b" * 40}
+    assert seen == [want | ({"reason": "no row matches the job issue"} if stage == "repair" else {})]
+    if stage == "repair":
+        # a released repair-blocked hold re-enters the gate once (no shortcut)
+        assert ld.tasks() == ["checkpoint-check"]
+        ld.report("checkpoint-check", verify=_allow)
+    assert ld.tasks() == ["landed-notice"]
+
+
+def test_repair_attempts_are_bounded_before_the_hold(tmp_path):
+    ld = Leader(tmp_path)
+    _preflight(ld)
+    _bundled(ld)
+    for _ in range(3):
+        assert ld.tasks() == ["checkpoint-check"]
+        ld.report("checkpoint-check", "mismatch", {"rows": _BUNDLE_ROWS, "reason": "r"})
+        ld.report("checkpoint-repair", "ok", {"repo": "/repo", "merges": _BUNDLE_ROWS})
+    assert ld.tasks() == ["checkpoint-hold"]
+
+
 # claunch-4zc51.1.1: the leader's wrapup said "basetemp는 지우지 않는다 --
 # 포렌식 기록" and nothing removed the leader's sweep basetemps afterwards
 # (C:/t held s469w, s469w1..w22 and more). Both leader canonicals now have the
