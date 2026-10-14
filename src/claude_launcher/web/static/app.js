@@ -22908,13 +22908,14 @@ function ragCard() {
   if (!st.configured) {
     card.appendChild(el("p", "wf-warning", "Off — the rag: block is not filled in."));
     card.appendChild(el("pre", "rag-yaml",
-      "rag:\n  base_url: https://host/v1\n  api_key: <key>        # or CLAUNCH_RAG_API_KEY\n" +
+      "rag:\n  source: custom             # or profile (with profile: <name>)\n" +
+      "  base_url: https://host/v1\n  api_key: <key>        # or CLAUNCH_RAG_API_KEY\n" +
       "  embedding_model: <model id>\n  rerank_model: <model id>   # optional\n" +
       "  verify_tls: true           # false for a self-signed chain"));
     return card;
   }
   const facts = [
-    `endpoint ${st.host || "?"}`,
+    st.source === "profile" ? `profile ${st.profile} · ${st.host || "?"}` : `endpoint ${st.host || "?"}`,
     `embed ${st.embedding_model}`,
     `rerank ${st.rerank_model || "(none — vector order only)"}`,
     st.verify_tls ? "tls verified" : "tls NOT verified",
