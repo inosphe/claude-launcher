@@ -150,7 +150,7 @@ def test_api_operator_boundary_and_missing_manager_resolution(world):
         denied = await client.post(endpoint + "/configure", json=body, headers=AUTH)
         assert denied.status == 403
         client.app["cookie_sessions"].add("operator-cookie")
-        browser = {**AUTH, "Cookie": "claunch_session=operator-cookie"}
+        browser = {**AUTH, "Cookie": f"{client.app['cookie_name']}=operator-cookie"}
         enabled = await client.post(endpoint + "/configure", json=body, headers=browser)
         assert enabled.status == 200
         sha = _git(world["a"], "rev-parse", "master")

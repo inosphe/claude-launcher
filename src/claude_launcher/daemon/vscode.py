@@ -50,7 +50,11 @@ SWEEP_INTERVAL = 15.0
 STOP_GRACE = 5.0
 
 #: Cookies the proxy never forwards: the daemon's login and the relay's.
+#: The login cookie's name ends in a per-daemon digest (api.cookie_name), so
+#: it is matched by prefix; the bare name is what a browser may still hold
+#: from before the digest was added.
 _PRIVATE_COOKIES = ("claunch_session", "relay_session")
+_PRIVATE_COOKIE_PREFIX = "claunch_session_"
 
 #: Hop-by-hop headers (RFC 9110 7.6.1) plus the ones this proxy owns.
 _HOP = frozenset({
@@ -387,6 +391,10 @@ def _log_tail(path: Path, lines: int = 3) -> str:
 # --------------------------------------------------------------------------- #
 # the proxy
 # --------------------------------------------------------------------------- #
+def _private_cookie(name: str) -> bool:
+    return name in _PRIVATE_COOKIES or name.startswith(_PRIVATE_COOKIE_PREFIX)
+
+
 def _forward_headers(request: web.Request, *, websocket: bool) -> Dict[str, str]:
     out: Dict[str, str] = {}
     for name, value in request.headers.items():
@@ -398,7 +406,7 @@ def _forward_headers(request: web.Request, *, websocket: bool) -> Dict[str, str]
         out[name] = value
     cookies = [
         part.strip() for part in request.headers.get("Cookie", "").split(";")
-        if part.strip() and part.split("=", 1)[0].strip() not in _PRIVATE_COOKIES
+        if part.strip() and not _private_cookie(part.split("=", 1)[0].strip())
     ]
     if cookies:
         out["Cookie"] = "; ".join(cookies)

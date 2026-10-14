@@ -210,7 +210,7 @@ def test_a_refused_upgrade_is_recorded_with_what_it_presented(home, tmp_path):
 
     from aiohttp.test_utils import TestClient, TestServer
 
-    from claude_launcher.daemon.api import COOKIE_NAME, build_app
+    from claude_launcher.daemon.api import build_app, cookie_name
     from claude_launcher.daemon.manager import SessionManager
 
     async def run():
@@ -225,7 +225,7 @@ def test_a_refused_upgrade_is_recorded_with_what_it_presented(home, tmp_path):
             # A cookie from a daemon that is no longer running.
             assert (
                 await client.get(
-                    "/api/sessions/s584/ws", cookies={COOKIE_NAME: "from-a-dead-daemon"}
+                    "/api/sessions/s584/ws", cookies={cookie_name("sekrit"): "from-a-dead-daemon"}
                 )
             ).status == 401
 

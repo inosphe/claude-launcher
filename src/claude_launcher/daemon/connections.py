@@ -171,7 +171,7 @@ class Registry:
             "peer_port": peer_port,
             "user_agent": request.headers.get("User-Agent", ""),
             "origin": request.headers.get("Origin", ""),
-            "had_cookie": bool(request.cookies.get(reason_cookie_name())),
+            "had_cookie": bool(request.cookies.get(request.app.get("cookie_name", ""))),
             "had_bearer": request.headers.get("Authorization", "").startswith("Bearer "),
             "reason": reason,
         })
@@ -338,13 +338,6 @@ def _agent_kind(user_agent: str) -> str:
     if "python" in agent or "aiohttp" in agent or "claunch" in agent:
         return "claunch"
     return "other" if user_agent else "none"
-
-
-def reason_cookie_name() -> str:
-    """The login cookie's name, read late to avoid an import cycle."""
-    from .api import COOKIE_NAME
-
-    return COOKIE_NAME
 
 
 def _peer(request: web.Request) -> tuple[str, Optional[int]]:
