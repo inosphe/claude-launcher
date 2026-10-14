@@ -14,7 +14,9 @@
                   until the answer, and a failed send marks the bubble and
                   puts the text back (claunch-5usj6); a new thread posts {to, title, text}; close
                   posts to /close; reading a thread moves its read position;
-                  unmount stops the poll.
+                  unmount stops the poll; ◂ 목록 folds the list away while a
+                  conversation is open and the fold is remembered
+                  (claunch-1n081).
      rail      -- 🗪 threads lights while the session has an open thread, and
                   carries has-news when the session wrote past what this
                   browser saw; a session never seen here starts caught up.
@@ -29,6 +31,7 @@ const root = path.join(__dirname, "..", "..", "src", "claude_launcher", "web", "
 const src = fs.readFileSync(path.join(root, "threads-pane.js"), "utf8");
 const app = fs.readFileSync(path.join(root, "app.js"), "utf8");
 const html = fs.readFileSync(path.join(root, "index.html"), "utf8");
+const css = fs.readFileSync(path.join(root, "style.css"), "utf8");
 
 /* ---- a small DOM: enough for the pane's own calls ---- */
 function makeDoc() {
@@ -48,6 +51,8 @@ function makeDoc() {
       get lastChild() { return n.children[n.children.length - 1] || null; },
       append(...kids) { for (const k of kids) { k.parent = n; n.children.push(k); } },
       replaceChildren(...kids) { n.children = []; n.append(...kids); },
+      attrs: {},
+      setAttribute(k, v) { n.attrs[k] = String(v); },
       addEventListener(k, fn) { (n.handlers[k] ||= []).push(fn); },
       fire(k, e = {}) { (n.handlers[k] || []).forEach((fn) => fn({preventDefault() {}, ...e})); },
       focus() { doc.activeElement = n; },
@@ -203,6 +208,23 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   host.querySelector(".th-compose .th-send").fire("click");
   await settle();
   assert.equal(host.querySelectorAll(".th-failed").length, 0, "a retry clears the failure");
+
+  // fold: the list goes, the conversation keeps the pane; the fold is remembered
+  const pane = host.querySelector(".th-pane");
+  const foldBtn = () => host.querySelector(".th-head .th-fold");
+  assert.ok(!pane.classList.contains("th-folded"), "the list starts unfolded");
+  assert.equal(foldBtn().attrs["aria-pressed"], "false");
+  assert.ok(!foldBtn().disabled, "a shown conversation can fold the list");
+  foldBtn().fire("click");
+  assert.ok(pane.classList.contains("th-folded"), "◂ 목록 folds the list");
+  assert.equal(store.get(P.FOLD_KEY), "1", "the fold is kept for this browser");
+  assert.equal(foldBtn().attrs["aria-pressed"], "true");
+  assert.ok(host.querySelector(".th-compose"), "the conversation stays on screen");
+  foldBtn().fire("click");
+  assert.ok(!pane.classList.contains("th-folded"), "▸ 목록 brings the list back");
+  assert.equal(store.get(P.FOLD_KEY), "0");
+  assert.ok(/\.th-pane\.th-folded \.th-side \{ display: none; \}/.test(css), "a folded pane hides the list column");
+  assert.ok(!/\.th-msg \{[^}]*760px/.test(css), "a bubble has no fixed width cap");
 
   // close
   const toggle = host.querySelector(".th-convo-head .term-btn");

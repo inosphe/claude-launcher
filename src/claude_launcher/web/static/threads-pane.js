@@ -27,7 +27,11 @@
    "QA로 정리 요청" posts a message with ask_qa, asking the session to file
    the thread's open decision as a question linked back here. compose()
    opens the new-thread form prefilled for a question (QA card's "쓰레드로
-   논의"); the thread is opened with `qa` set. */
+   논의"); the thread is opened with `qa` set.
+
+   Space (claunch-1n081): "◂ 목록" in the head folds the thread list away
+   while a conversation is open, so the bubbles take the pane's whole
+   width; the fold is kept in localStorage (FOLD_KEY) for every session. */
 globalThis.ThreadsPane = (() => {
   "use strict";
   const POLL_MS = 3000;
@@ -42,6 +46,7 @@ globalThis.ThreadsPane = (() => {
   const inflight = new Set(); // thread ids ("" = new thread) with a post still out
   const pending = new Map();  // thread id -> {text, failed?: error}: the message being sent
   const drawn = {side: "", main: ""};   // what each half last drew
+  const FOLD_KEY = "claunch_threadfold";  // localStorage: the list column is folded away
 
   const node = (tag, cls, text) => {
     const n = document.createElement(tag);
@@ -119,6 +124,18 @@ globalThis.ThreadsPane = (() => {
     if ((read[tid] || 0) >= upto) return;
     read[tid] = upto;
     try { localStorage.setItem(storageKey, JSON.stringify(read)); } catch { /* private mode */ }
+  }
+
+  /* ---- the list column folded away (claunch-1n081) ---- */
+
+  /* Folding hides the thread list so the conversation takes the pane's
+     whole width; the choice is this browser's, for every session. */
+  function loadFold() {
+    try { return localStorage.getItem(FOLD_KEY) === "1"; } catch { return false; }
+  }
+
+  function saveFold(on) {
+    try { localStorage.setItem(FOLD_KEY, on ? "1" : "0"); } catch { /* private mode */ }
   }
 
   /* ---- talking to the daemon ---- */
@@ -416,7 +433,7 @@ globalThis.ThreadsPane = (() => {
     const sending = inflight.has(t.id);
     const compose = node("div", "th-compose");
     const submit = () => { const v = box.value.trim(); if (v) send(t.id, v); };
-    const box = textBox("th-text", t.id, `${name}에게 보내기`, submit, 2);
+    const box = textBox("th-text", t.id, `${name}에게 보내기`, submit, 1);
     const foot = node("div", "th-compose-foot");
     foot.append(node("span", "th-hint", "Enter 전송 · Shift+Enter 줄바꿈 · markdown 지원"));
     const go = node("button", "term-btn th-send", sending ? "전송 중…" : "보내기");
@@ -445,7 +462,18 @@ globalThis.ThreadsPane = (() => {
     const side = root.querySelector(".th-side");
     const main = root.querySelector(".th-main");
     const threads = (list && list.threads) || [];
+    // The list folds only while a conversation is on screen: without one
+    // the list is the only thing the pane has to show.
+    const folded = loadFold();
+    root.classList.toggle("th-folded", folded && !!convo);
+    const fold = node("button", "term-btn th-fold", folded ? "▸ 목록" : "◂ 목록");
+    fold.type = "button";
+    fold.title = folded ? "쓰레드 목록을 다시 펼칩니다" : "쓰레드 목록을 접어 대화에 폭 전체를 씁니다";
+    fold.setAttribute("aria-pressed", folded ? "true" : "false");
+    fold.disabled = !convo;
+    fold.addEventListener("click", () => { saveFold(!loadFold()); render(); });
     head.replaceChildren(
+      fold,
       node("h2", null, `${name} — 쓰레드`),
       node("span", "th-meta", list ? `열림 ${list.open} · 전체 ${threads.length}` : "불러오는 중…"),
     );
@@ -526,5 +554,6 @@ globalThis.ThreadsPane = (() => {
     render();
   }
 
-  return {mount, unmount, refresh: () => host && load(), select, compose, excerpt, unseen, sendKey, pick, linkLabel, stamp};
+  return {mount, unmount, refresh: () => host && load(), select, compose, excerpt, unseen, sendKey, pick, linkLabel, stamp,
+          FOLD_KEY};
 })();
