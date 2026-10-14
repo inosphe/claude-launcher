@@ -18,6 +18,14 @@ class FakeSession:
         self.exited = False
         self.held_at = None
         self.delivered = []
+        self.draft = False
+        self.typing = False
+
+    def draft_open(self):
+        return self.draft
+
+    def keyboard_busy(self):
+        return self.draft or self.typing
 
     def queue_delivery(self, text):
         if self.exited:
@@ -120,10 +128,31 @@ def test_a_held_session_is_woken_and_an_exited_one_keeps_the_message(tmp_path):
         s1 = mgr.sessions["s1"]
         s1.exited, s1.held_at = True, "now"
         res = await req("POST", f"/api/threads/{tid}/messages", {"text": "wake up"})
-        assert res["delivered"] is True
+        assert res["delivered"] is True and res["hold"] == "asleep"
         assert mgr.woken[0][:2] == ("s1", "thread") and threads_api.PREFIX in mgr.woken[0][2]
         s1.held_at = None
         res = await req("POST", f"/api/threads/{tid}/messages", {"text": "anyone?"})
-        assert res["delivered"] is False
+        assert res["delivered"] is False and res["hold"] is None
         assert [m["body"] for m in (await req("GET", f"/api/threads/{tid}"))["messages"]] == ["wake up", "anyone?"]
+    run(tmp_path, scenario)
+
+
+def test_a_message_held_behind_the_terminal_says_why(tmp_path):
+    """s29, 2026-10-14: a thread question sat ~100 s behind an unsent line in
+    that terminal's composer while the pane showed nothing (claunch-a41i5)."""
+    async def scenario(req, mgr):
+        s1 = mgr.sessions["s1"]
+        res = await req("POST", "/api/threads", {"to": "s1", "title": "t", "text": "plain"})
+        assert res["delivered"] is True and res["hold"] is None
+        tid = res["thread"]["id"]
+        s1.draft = True
+        res = await req("POST", "/api/threads", {"to": "s1", "title": "t2", "text": "behind a draft"})
+        assert res["delivered"] is True and res["hold"] == "draft"
+        res = await req("POST", f"/api/threads/{tid}/messages", {"text": "still behind it"})
+        assert res["hold"] == "draft"
+        s1.draft, s1.typing = False, True
+        assert (await req("POST", f"/api/threads/{tid}/messages", {"text": "keys"}))["hold"] == "typing"
+        s1.typing = False
+        assert (await req("POST", f"/api/threads/{tid}/messages", {"text": "clear"}))["hold"] is None
+        assert len(s1.delivered) == 5                       # every one was accepted for delivery
     run(tmp_path, scenario)

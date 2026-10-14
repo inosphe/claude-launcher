@@ -153,11 +153,23 @@ globalThis.ThreadsPane = (() => {
     }
   }
 
+  /* What the post's answer says about the message reaching the terminal.
+     delivered=true only means the session accepted it; `hold` names what
+     is keeping it out of the terminal right now (claunch-a41i5), and
+     without saying so a held message looks like a lost one. */
+  function deliveryNotice(res) {
+    if (res.delivered === false) return `${name} 세션에 전달하지 못했습니다(종료됨). 메시지는 쓰레드에 남았습니다.`;
+    if (res.hold === "draft") return `${name} 터미널 입력창에 보내지 않은 입력이 있어 전달 대기 중입니다. 그 입력을 보내거나(Enter) 지우면(Ctrl-C) 이어서 전달됩니다.`;
+    if (res.hold === "typing") return `${name} 터미널에 키보드 입력이 이어지고 있어 전달 대기 중입니다. 입력이 멈추면 전달됩니다.`;
+    if (res.hold === "asleep") return `${name} 세션을 깨우는 중입니다. 깨어나면 전달됩니다.`;
+    return "";
+  }
+
   function send(tid, text) {
     return once(tid, () => act(async () => {
       const res = await request(`/api/threads/${encodeURIComponent(tid)}/messages`, {text});
       drafts.delete(tid);
-      if (res.delivered === false) notice = `${name} 세션에 전달하지 못했습니다(종료됨). 메시지는 쓰레드에 남았습니다.`;
+      notice = deliveryNotice(res);
     }));
   }
 
@@ -170,7 +182,7 @@ globalThis.ThreadsPane = (() => {
       drafts.delete("\u0000title");
       composing = false;
       current = res.thread.id;
-      if (res.delivered === false) notice = `${name} 세션에 전달하지 못했습니다(종료됨). 메시지는 쓰레드에 남았습니다.`;
+      notice = deliveryNotice(res);
     }));
   }
 

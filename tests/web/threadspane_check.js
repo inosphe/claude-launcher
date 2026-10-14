@@ -113,6 +113,7 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   ]};
   const calls = [];
   let failCreate = false;
+  let postHold = null;
   const api = async (p, opts = {}) => {
     calls.push([opts.method || "GET", p, opts.body ? JSON.parse(opts.body) : undefined]);
     if (failCreate && p === "/api/threads") return {ok: false, status: 500, json: async () => ({error: "boom"})};
@@ -121,7 +122,7 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
     else if (/^\/api\/threads\/th-1\?after=/.test(p)) {
       const after = Number(p.split("after=")[1]);
       doc = {thread: threads[0], messages: messages["th-1"].filter((m) => m.seq > after)};
-    } else if (p === "/api/threads/th-1/messages") doc = {message: {seq: 3}, delivered: true};
+    } else if (p === "/api/threads/th-1/messages") doc = {message: {seq: 3}, delivered: true, hold: postHold};
     else if (p === "/api/threads") doc = {thread: {id: "th-9"}, delivered: false};
     else if (p.endsWith("/close")) doc = {thread: threads[0]};
     return {ok: true, status: 200, json: async () => doc};
@@ -160,6 +161,19 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   await settle();
   assert.equal(posts(), sent + 1, "one message for a double send");
   assert.ok(!host.querySelector(".th-compose .term-btn").disabled, "보내기 comes back after the answer");
+  assert.equal(host.querySelectorAll(".wf-warning").length, 0, "a message that went straight in says nothing");
+
+  // a message the session accepted but is holding says why (claunch-a41i5)
+  for (const [hold, words] of [["draft", "보내지 않은 입력"], ["typing", "키보드 입력"], ["asleep", "깨우는 중"]]) {
+    postHold = hold;
+    host.querySelector(".th-compose .th-text").value = `held ${hold}?`;
+    host.querySelector(".th-compose .th-text").fire("keydown", {key: "Enter"});
+    await settle();
+    const warn = host.querySelectorAll(".wf-warning");
+    assert.equal(warn.length, 1, `a ${hold} hold is shown`);
+    assert.ok(warn[0].textContent.includes(words) && warn[0].textContent.includes("s1"), warn[0].textContent);
+  }
+  postHold = null;
 
   // close
   const toggle = host.querySelector(".th-convo-head .term-btn");
