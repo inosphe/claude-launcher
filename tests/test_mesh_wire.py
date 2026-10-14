@@ -1001,3 +1001,123 @@ def test_the_state_line_is_left_out_when_nothing_is_known():
     assert "state now" not in wire.notice_body(
         req, "m", kind="common", states={"w1": "", "w2": ""}
     )
+
+
+# --------------------------------------------------------------------------- #
+# D. the same news across a machine boundary (claunch-mvg3c)
+#
+# The authority wires every join and every forwarded edit, but a roster note
+# can only be typed into a terminal on the daemon that hosts it. A member on
+# a guest was therefore told nothing by C: the authority's note was dropped
+# as not local, and the mirror that does host it only adopted a table.
+# --------------------------------------------------------------------------- #
+def _guest(mgr, name="tmp"):
+    """A mirror on pcB of a mesh whose authority is pcA."""
+    mm, mesh = _mesh(mgr, name)
+    mm._machine = "pcB"
+    mesh.me = "pcB"
+    mesh.peers = ["pcA", "pcB"]
+    mm._inbound = lambda *a, **k: mesh
+    mm._check_primary_token = lambda *a, **k: None
+    # the ack's activity report reads live session status; not under test
+    mm._activity_report = lambda mesh: {}
+    return mm, mesh
+
+
+def _sync(mm, mesh, members, edges, lineage=None):
+    return mm.peer_sync_accept(
+        mesh.name, "pcA", "tok", len(mesh.messages), [],
+        [m.to_dict() for m in members], None, [],
+        member_edges=edges, lineage=lineage,
+    )
+
+
+def test_a_guest_member_that_was_alone_hears_of_a_join_through_sync(home):
+    mgr = _Manager()
+    mgr.add("sa")
+    mm, mesh = _guest(mgr)
+    notes = _record_notes(mm)
+    a = _member(mesh, "a", "sa", role="worker", machine="pcB")
+    b = Member("b", "far", role="worker", wired=True, machine="")
+    key = mesh.member_key("a", "b")
+
+    _sync(mm, mesh, [a, b], {key: True})
+    assert [h for h, _ in notes] == ["a"]
+    assert "b joined mesh 'tmp'" in notes[0][1]
+
+    # the next sync carries the same table: a is no longer alone, so quiet
+    _sync(mm, mesh, [a, b], {key: True})
+    assert len(notes) == 1
+
+
+def test_a_sync_that_brings_a_child_does_not_announce_it_to_its_parent(home):
+    mgr = _Manager()
+    mgr.add("sa")
+    mm, mesh = _guest(mgr)
+    notes = _record_notes(mm)
+    a = _member(mesh, "a", "sa", role="lead", machine="pcB")
+    c = Member("c", "far", role="worker", wired=True, machine="")
+
+    _sync(mm, mesh, [a, c], {mesh.member_key("a", "c"): True}, lineage={"c": "a"})
+    assert notes == []
+
+
+def test_a_sync_says_nothing_to_a_member_that_already_had_peers(home):
+    mgr = _Manager()
+    mgr.add("sa")
+    mm, mesh = _guest(mgr)
+    notes = _record_notes(mm)
+    a = _member(mesh, "a", "sa", role="worker", machine="pcB")
+    b = _member(mesh, "b", "far", role="worker", machine="")
+    _connect(mesh, "a", "b")
+    c = Member("c", "far2", role="worker", wired=True, machine="")
+
+    _sync(mm, mesh, [a, b, c], {
+        mesh.member_key("a", "b"): True, mesh.member_key("a", "c"): True,
+    })
+    assert notes == []
+
+
+def test_the_authority_tells_its_own_member_of_a_forwarded_edge(home):
+    mgr = _Manager()
+    mgr.add("sa")
+    mm, mesh = _mesh(mgr, "tmp")
+    mm._inbound = lambda *a, **k: mesh
+    mm._check_link_token = lambda *a, **k: None
+    notes = _record_notes(mm)
+    _member(mesh, "a", "sa", role="worker")
+    _member(mesh, "b", "far", role="worker", machine="pcB")
+
+    mm.peer_member_link_accept("tmp", "pcB", "tok", "a", "b", True)
+    # b lives on pcB, whose own set_member_link tells it
+    assert [h for h, _ in notes] == ["a"]
+    assert "connected to b in mesh 'tmp'" in notes[0][1]
+
+    mm.peer_member_link_accept("tmp", "pcB", "tok", "a", "b", True)
+    assert len(notes) == 1
+
+
+def test_a_guest_connecting_its_own_member_tells_it_without_waiting(home):
+    async def run():
+        mgr = _Manager()
+        mgr.add("sa")
+        mm, mesh = _guest(mgr)
+
+        async def forwarded(*a, **k):
+            return {}
+
+        mm._peer_call_primary = forwarded
+        notes = _record_notes(mm)
+        _member(mesh, "a", "sa", role="worker", machine="pcB")
+        _member(mesh, "b", "far", role="worker", machine="")
+        _member(mesh, "c", "far2", role="worker", machine="")
+        _connect(mesh, "b", "c")
+
+        await mm.set_member_link("tmp", "a", "b", enabled=True)
+        assert [h for h, _ in notes] == ["a"]
+
+        # the authority's sync then returns the edge: nothing twice
+        _sync(mm, mesh, list(mesh.members.values()), dict(mesh.member_edges))
+        assert len(notes) == 1
+
+    asyncio.run(run())
