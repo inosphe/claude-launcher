@@ -18,7 +18,14 @@ from claude_launcher import pytest_venv, test_window
 #: them when they are imported (tests/test_instance_manifest.py compares each
 #: test's start against that snapshot), so a value still set at import time
 #: would differ from the per-test cleared one (claunch-w5c4u: 23 errors).
-_DAEMON_INSTANCE_VARS = ("CLAUNCH_INSTANCE_BASE", "CLAUNCH_INSTANCE", "CLAUNCH_DAEMON")
+#: A named instance's daemon also exports its manifest's bookkeeping
+#: (applied name, previous values, port); left set, the first ``cli.main()``
+#: of a worker undoes it and restores the pre-manifest launcher home over the
+#: test's throwaway one (claunch-egr6y).
+_DAEMON_INSTANCE_VARS = (
+    "CLAUNCH_INSTANCE_BASE", "CLAUNCH_INSTANCE", "CLAUNCH_DAEMON",
+    "CLAUNCH_INSTANCE_APPLIED", "CLAUNCH_INSTANCE_PREV", "CLAUNCH_DAEMON_PORT",
+)
 for _name in _DAEMON_INSTANCE_VARS:
     os.environ.pop(_name, None)
 
