@@ -20,7 +20,8 @@ is a reason string.
   (:func:`..cflow2.runtime.holders`, pushed with principal ``child``). None,
   more than one, or one of each is a skip. A ``landing`` push is routed
   instead by :mod:`.landing_route` (:func:`push_landing`): ``parent:`` walks
-  the direct ancestors, then the sibling mesh leader; ``leader:`` is the mesh
+  the direct ancestors, then the mesh leader beside the worker or one of
+  them; ``leader:`` is the mesh
   leader only; a v1 run declaring ``landing_queue:`` counts as a holder
   (:func:`..cflow.engine.enqueue_landing`), and of several holders one is
   picked (a main run first, then the first in order).
@@ -523,7 +524,8 @@ def push_landing(manager: Any, mesh: Any, *, cwd: str, session: str, target: str
                  tid: Optional[str] = None) -> Result:
     """A landing request (``parent:landing`` or ``leader:landing``) onto the
     queue :class:`.landing_route.Router` names: for ``parent`` the nearest
-    direct ancestor that can merge, else the sibling mesh leader; for
+    direct ancestor that can merge, else the mesh leader beside the worker
+    or one of its ancestors; for
     ``leader`` the mesh leader only. The detail says who was passed over."""
     from .landing_route import Router
 
