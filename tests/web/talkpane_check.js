@@ -14,7 +14,8 @@
                  brings the card in; "QA로 정리 요청" posts ask_qa.
      wired    -- talk-pane.js loads after both panes and before app.js;
                  openSplit/closeSplit go through TalkPane; the header
-                 buttons read "both" as on; talk-pane.js never assigns HTML. */
+                 buttons read "both" as on, and pressing one there hides
+                 only its column; talk-pane.js never assigns HTML. */
 const assert = require("assert/strict");
 const fs = require("fs");
 const path = require("path");
@@ -263,6 +264,26 @@ function harness() {
     assert.ok(app.includes('const qaOn = !!lay && lay.split && talkShows(lay.pane, "qa");'));
     assert.ok(app.includes('const threadsOn = !!lay && lay.split && talkShows(lay.pane, "threads");'));
     assert.ok(!/innerHTML/.test(src), "talk-pane.js never assigns HTML");
+    // A header button that reads as on turns its pane off: in "both" only
+    // its column goes, alone the split closes; an off button opens its pane.
+    const start = app.indexOf("function splitAfterPress(");
+    let end = app.indexOf("{", start);
+    for (let depth = 0; ; end++) {
+      if (app[end] === "{") depth++;
+      else if (app[end] === "}" && !--depth) break;
+    }
+    const press = vm.runInNewContext(`(${app.slice(start, end + 1)})`);
+    const on = (pane) => ({split: true, pane});
+    assert.deepEqual({...press(on("both"), "qa")}, {split: true, pane: "threads"});
+    assert.deepEqual({...press(on("both"), "threads")}, {split: true, pane: "qa"});
+    assert.deepEqual({...press(on("qa"), "qa")}, {split: false});
+    assert.deepEqual({...press(on("threads"), "threads")}, {split: false});
+    assert.deepEqual({...press(on("threads"), "qa")}, {split: true, pane: "qa"});
+    assert.deepEqual({...press(on("both"), "chart")}, {split: true, pane: "chart"});
+    assert.deepEqual({...press({split: false, pane: "both"}, "qa")}, {split: true, pane: "qa"});
+    assert.ok(app.includes("setSessLayout(currentName, splitAfterPress(sessLayoutFor(currentName), pane));"));
+    assert.ok(app.includes('"hide the questions column — the threads keep the pane"'));
+    assert.ok(app.includes('"hide the threads column — the questions keep the pane"'));
   }
   console.log("talk pane checks passed");
 })().catch((e) => { console.error(e); process.exitCode = 1; });

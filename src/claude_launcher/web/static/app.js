@@ -19952,7 +19952,9 @@ function syncSplitPane() {
   const qaOn = !!lay && lay.split && talkShows(lay.pane, "qa");
   qa.setAttribute("aria-pressed", String(qaOn));
   qa.title = qaOn
-    ? "close the questions pane — it opens again when the session changes a question"
+    ? (lay.pane === "both"
+      ? "hide the questions column — the threads keep the pane"
+      : "close the questions pane — it opens again when the session changes a question")
     : "questions this session put to you — answer them here";
   // Showing it is seeing it: a pane open on the questions is caught up.
   if (qaOn && typeof markQaSeen === "function") markQaSeen(name);
@@ -19960,7 +19962,9 @@ function syncSplitPane() {
   const threadsOn = !!lay && lay.split && talkShows(lay.pane, "threads");
   threads.setAttribute("aria-pressed", String(threadsOn));
   threads.title = threadsOn
-    ? "close the threads pane — the terminal takes the column back"
+    ? (lay.pane === "both"
+      ? "hide the threads column — the questions keep the pane"
+      : "close the threads pane — the terminal takes the column back")
     : "talk to this session in sub-topic threads, apart from the terminal" +
       (threadsNews(name) ? " — the session wrote in a thread since you last looked" : "");
   // Showing them is seeing them.
@@ -20601,10 +20605,20 @@ $("term-threadsbtn").addEventListener("click", () => toggleSplitPane("threads"))
 
 /* One pane, two contents: pressing the lit button closes it, pressing the
    other one switches what the open pane shows. */
+/* What a header button press turns the split into. A button that is on
+   turns its pane off: alone, the split closes; in the "both" columns only
+   its column goes and the other stays (claunch-78dpm). */
+function splitAfterPress(lay, pane) {
+  if (lay.split && lay.pane === pane) return { split: false };
+  if (lay.split && lay.pane === "both" && (pane === "qa" || pane === "threads")) {
+    return { split: true, pane: pane === "qa" ? "threads" : "qa" };
+  }
+  return { split: true, pane };
+}
+
 function toggleSplitPane(pane) {
   if (!currentName) return;
-  const lay = sessLayoutFor(currentName);
-  setSessLayout(currentName, lay.split && lay.pane === pane ? { split: false } : { split: true, pane });
+  setSessLayout(currentName, splitAfterPress(sessLayoutFor(currentName), pane));
 }
 
 /* The bar between the two. The ratio is applied live while the hand moves
