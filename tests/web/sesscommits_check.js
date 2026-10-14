@@ -17,6 +17,9 @@
                       is drawn; neither case is evidence about commits.
 
    Slice the real function out of app.js and drive it against a stub DOM. */
+// Stamps are shown in the reader's zone (localStamp, claunch-ox5qs); pin it
+// so the expected strings below do not depend on the machine running this.
+process.env.TZ = "Asia/Seoul";
 const fs = require("fs");
 const path = require("path");
 const src = fs.readFileSync(
@@ -66,7 +69,7 @@ function el(tag, cls, text) {
 
 const ctx = {};
 new Function("exports", "document", "el",
-  slice("sessCommits")
+  slice("localStamp") + slice("sessCommits")
   + "Object.assign(exports, { commits: sessCommits });")(ctx, document, el);
 
 let failures = 0;

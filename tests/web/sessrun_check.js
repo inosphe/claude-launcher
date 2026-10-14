@@ -147,7 +147,7 @@ new Function(
    slice("flowState"), slice("flowMetrics"), slice("flowPipShape"),
    slice("flowTrackSvg"), slice("svg"), slice("askWho"),
    slice("answerFellToUs"), slice("answerBranchOptions"), slice("wfActions"),
-   slice("reminderControl"), slice("pendingBanner"),
+   slice("reminderControl"), slice("pendingBanner"), slice("localStamp"),
    "const hiddenSkippedPolls = new Map();", slice("visiblePoll"),
    slice("sessRunFoldFor"), slice("stopSessRun"), slice("refreshSessRun"),
    slice("renderSessRun"), slice("sessRunTrack")].join("\n") +

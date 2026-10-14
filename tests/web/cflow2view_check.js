@@ -8,6 +8,9 @@
    (cflowPickValue / cflowPickBody / cflowPickEntry), the role ranking keeping
    v1 as the auto-pick (spawnRankWorkflows), and the indented chart rows the
    v2 run view draws (cflow2TreeRows). */
+// Stamps are shown in the reader's zone (localStamp, claunch-ox5qs); pin it
+// so the expected strings below do not depend on the machine running this.
+process.env.TZ = "Asia/Seoul";
 const fs = require("fs");
 const path = require("path");
 const src = fs.readFileSync(
@@ -36,7 +39,7 @@ const fns = new Function(
   [sliceConst("CFLOW2_ICONS"), slice("cflowVersionTag"), slice("cflowPickValue"),
    slice("cflowPickBody"), slice("cflowPickEntry"), slice("cflow2NodeText"),
    slice("cflow2NodeBits"), slice("cflow2TreeRows"), slice("cflow2TreeOpen"),
-   slice("cflow2Reports"), slice("wfOptionLabel"), slice("spawnWorkflowEntry"),
+   slice("localStamp"), slice("cflow2Reports"), slice("wfOptionLabel"), slice("spawnWorkflowEntry"),
    slice("spawnWorkflowAdmits"), slice("spawnRankWorkflows"),
    slice("cflow2RunActions"), slice("cflow2ForceOutcomes")].join("\n") +
   "\nreturn { cflowVersionTag, cflowPickValue, cflowPickBody, cflowPickEntry," +
@@ -182,8 +185,8 @@ check("reported events, newest first, with the task's own name",
         { ts: "2026-10-08T10:02:00+00:00", event: "reported", node: "commit", outcome: "fail",
           by: "user" },
       ]).map((r) => [r.label, r.outcome, r.by, r.ts, r.text]),
-      [["commit", "fail", "user", "2026-10-08 10:02:00", ""],
-       ["work", "ok", "", "2026-10-08 10:00:00", "did it"]]);
+      [["commit", "fail", "user", "2026-10-08 19:02:00", ""],
+       ["work", "ok", "", "2026-10-08 19:00:00", "did it"]]);
 
 /* ---- the run page's presses (the v1 bar's counterparts) ---- */
 check("a live run offers nudge and abort",

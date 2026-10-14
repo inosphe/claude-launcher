@@ -13,6 +13,9 @@
      the values change otherwise;
    - the landing queue lists every entry and folds the last reset open when
      it carries a board warning. */
+// Stamps are shown in the reader's zone (localStamp, claunch-ox5qs); pin it
+// so the expected strings below do not depend on the machine running this.
+process.env.TZ = "Asia/Seoul";
 const fs = require("fs");
 const path = require("path");
 const src = fs.readFileSync(
@@ -28,8 +31,9 @@ function slice(from, to) {
   return src.slice(a, b);
 }
 
-const code = slice("let wfStateBoxes = {};",
-                   "/* Idle (cwd, scope): offer to start a new run. */");
+const code = slice("function localStamp(", "/* The clock time a turn landed at") +
+  slice("let wfStateBoxes = {};",
+        "/* Idle (cwd, scope): offer to start a new run. */");
 
 /* ---- stub DOM --------------------------------------------------------- */
 function node(tag) {
@@ -122,7 +126,7 @@ check("every declared path is a row, with who may write it", () => {
      ["steps.review.skip", "notes", "auto"]);
   const all_ = texts(box);
   if (!/written by user/.test(all_)) throw new Error("no writer line: " + all_);
-  if (!/last set by user at 2026-09-23 11:00/.test(all_)) {
+  if (!/last set by user at 2026-09-23 20:00/.test(all_)) {
     throw new Error("no last-writer line: " + all_);
   }
 });
@@ -198,7 +202,7 @@ check("every entry is a row with issue, status, branch @ tip and requester", () 
   eq(rows.length, 2, "rows");
   const t = texts(box);
   for (const want of ["claunch-a1", "waiting", "s1-x @ 7faf432c",
-                      "s1 · 2026-09-23 10:00", "this round", "claunch-b2",
+                      "s1 · 2026-09-23 19:00", "this round", "claunch-b2",
                       "deferred"]) {
     if (!t.includes(want)) throw new Error(`missing ${want}: ${t}`);
   }

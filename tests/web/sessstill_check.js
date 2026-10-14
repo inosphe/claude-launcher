@@ -146,7 +146,7 @@ function go() {}
 const ctx = {};
 new Function(
   "exports", "document", "el", "view", "window", "rail",
-  stubs + slice("selectionInUse") + slice("renderSession") + `
+  stubs + slice("localStamp") + slice("selectionInUse") + slice("renderSession") + `
 Object.assign(exports, { render: renderSession });`
 )(ctx, document, el, view,
   { getSelection: () => selection }, () => railNow);

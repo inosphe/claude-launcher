@@ -16,6 +16,9 @@
    children, and the children are half of what a reader opens a parent to see.
    Slice the real functions out of app.js and drive them against a stub
    DOM. */
+// Stamps are shown in the reader's zone (localStamp, claunch-ox5qs); pin it
+// so the expected strings below do not depend on the machine running this.
+process.env.TZ = "Asia/Seoul";
 const fs = require("fs");
 const path = require("path");
 const src = fs.readFileSync(
@@ -106,7 +109,7 @@ new Function(
   + slice("beadsStatusBadge") + slice("beadsPriBadge") + slice("beadsIssueRow")
   + slice("beadsBoardLabel") + slice("beadsBoardWhere")
   + slice("beadsNameOfRoot") + slice("sessBeadsBoardLine")
-  + slice("sessBeads") + slice("sessBeadsCreate")
+  + slice("localStamp") + slice("sessBeads") + slice("sessBeadsCreate")
   + slice("sessBeadsCreateForm") + slice("sessBeadsFiledNote")
   + slice("url")
   + slice("sessReports") + slice("sessReportRow")
