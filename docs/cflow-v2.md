@@ -1565,6 +1565,34 @@ Finding이다.
 대상이 아니다. `improv-leader-v2`(claunch-yq80p.6)의 교대 종료 승인도 같은 방식으로
 바꿨다(`wind-down-decision`: `call: ask-user`, choices `[end-shift, keep]`).
 
+#### `self-improve-common.yaml` (claunch-c4e6f.1)
+
+`kind: library`. 프로시저 `self-improve` 하나를 둔다: 세션이 스스로를 리뷰해
+개선사항을 두 갈래(general·cflow)로 보고하고(`self-improve-review`), 사용자와
+논의한 뒤(`self-improve-discuss`) 사람만 답하는 합의 게이트(`self-improve-align`,
+`call: ask-user`, choices `[register, revise, drop]`)에서 register를 받은 항목만
+label `self-improve`, assignee 없이 등록한다(`self-improve-register`). revise는
+논의로 돌아가고, register·drop은 프로시저를 끝낸다. 자기는 `include: [ask-common]`을
+한다.
+
+```yaml
+include: [self-improve-common]
+...
+- id: improve
+  call: self-improve
+  with:
+    issue: "$data.claim.issue"   # 리뷰 전문(SELF-IMPROVE @)과 REGISTERED 마커가 붙는 이슈
+    workflow: <정의 이름과 정본 경로, include한 파일>
+    basis: <리뷰의 출발점이 될 기존 기록 — 선택, 비면 기록을 직접 읽는다>
+# 결과: ok {issues?} — register면 등록(또는 덧붙인) 이슈 id, drop이면 없음
+```
+
+세션을 끝내지 않으므로 다음은 부르는 쪽이 정한다. `improv-worker-v2`는
+`end-decision`의 답 `self-improve`에서 이 프로시저를 부르고(basis는 회고의
+`RETRO @ <런 id>` 코멘트), 돌아오면 종료 결정을 다시 묻는다. 그 정의의
+settle-check 예외와 end-new-task 배정은 이 프로시저의 고정된 등록 규칙(label,
+assignee 없음, `SELF-IMPROVE REGISTERED @ <런 id>: <id,...>` 코멘트)을 읽는다.
+
 ### 2.11 사람의 강제 조작: force_target, 강제 이동, 강제 결과 보고 (claunch-huwmp)
 
 v1의 run 페이지에는 그래프에서 스텝을 골라 그 스텝으로 런을 옮기는 Force 버튼이

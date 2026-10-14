@@ -23,6 +23,7 @@ WF_DIR = Path(claude_launcher.__file__).parent / "workflows"
 V1 = WF_DIR / "improv-worker.yaml"
 V2 = WF_DIR / "v2" / "improv-worker-v2.yaml"
 COMMON = WF_DIR / "v2" / "improv-common.yaml"
+SELF_IMPROVE = WF_DIR / "v2" / "self-improve-common.yaml"
 
 # copied from tests/test_beads_protocol.py (not imported: that module is the
 # v1 suite and is not edited by this port)
@@ -945,7 +946,7 @@ def test_the_end_question_can_be_posed(tmp_path, monkeypatch):
     monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
     doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
     decision = _find_id(doc["procedures"], "end-watch")
-    flow = {"cflow": 2, "name": "end-flow", "include": ["ask-common"],
+    flow = {"cflow": 2, "name": "end-flow", "include": ["ask-common", "self-improve-common"],
             "nodes": _end_stubs(), "body": [decision]}
     from claude_launcher.cflow2 import frontend
     chart = frontend.compile_text(yaml.safe_dump(flow, allow_unicode=True, sort_keys=False),
@@ -979,8 +980,12 @@ def test_end_new_task_starts_the_next_run_and_keeps_the_session():
 
 
 #: The nodes the end-watch loop runs, stubbed: every one prints its own name.
-END_NODES = ("end-notice", "end-hold", "end-new-task", "self-improve-review",
-             "self-improve-discuss", "self-improve-register")
+#: The self-improve nodes are the library's own (self-improve-common).
+END_NODES = ("end-notice", "end-hold", "end-new-task")
+#: A value each self-improve node accepts.
+SI_VALUES = {"self-improve-review": {"where": "c", "general": 1, "cflow": 1},
+             "self-improve-discuss": {"items": [], "agreed": 0},
+             "self-improve-register": {"issues": ["claunch-x"]}}
 
 
 def _end_stubs():
@@ -1001,7 +1006,8 @@ def test_self_improve_reviews_aligns_registers_and_asks_again(tmp_path, monkeypa
     from claude_launcher.cflow2 import frontend, runtime
     monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
     doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
-    flow = {"cflow": 2, "name": "self-improve-flow", "include": ["ask-common"],
+    flow = {"cflow": 2, "name": "self-improve-flow",
+            "include": ["ask-common", "self-improve-common"],
             "nodes": _end_stubs(), "body": [_find_id(doc["procedures"], "end-watch")]}
     chart = frontend.compile_text(yaml.safe_dump(flow, allow_unicode=True, sort_keys=False),
                                   resolve_include=layers.resolver(str(tmp_path)))
@@ -1015,7 +1021,7 @@ def test_self_improve_reviews_aligns_registers_and_asks_again(tmp_path, monkeypa
 
     def report(st, label, value=None):
         iid = next(t["instance"] for t in st["tasks"] if t["label"].rsplit("/", 1)[-1] == label)
-        return runtime.report(iid, "ok", value, **kw)
+        return runtime.report(iid, "ok", SI_VALUES.get(label, value), **kw)
 
     def answer(st, brief, decision):
         st = report(st, "ask-frame", {"brief": brief})
@@ -1051,7 +1057,11 @@ def test_self_improve_nodes_keep_registration_behind_the_person():
     register (after the person's register answer) does, with label
     self-improve, no assignee, and the REGISTERED marker settle-check reads."""
     doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
-    nodes = doc["nodes"]
+    lib = yaml.safe_load(SELF_IMPROVE.read_text(encoding="utf-8"))
+    assert lib["kind"] == "library" and lib["include"] == ["ask-common"]
+    nodes = dict(lib["procedures"]["self-improve"]["nodes"], **doc["nodes"])
+    for name in ("self-improve-review", "self-improve-discuss", "self-improve-register"):
+        assert name not in doc["nodes"], f"{name} lives in self-improve-common only"
     review = _words(nodes["self-improve-review"]["prompt"])
     assert "RETRO @ <런 id>" in review and "SELF-IMPROVE @ <런 id>" in review
     assert "**general**" in review and "**cflow**" in review
@@ -1076,6 +1086,53 @@ def test_self_improve_nodes_keep_registration_behind_the_person():
     new_task = _words(nodes["end-new-task"]["prompt"])
     assert "label `self-improve`" in new_task
     assert "claunch beads update <id> --assignee $CLAUNCH_SESSION" in new_task
+
+
+def test_self_improve_is_a_library_procedure_any_v2_definition_can_call(tmp_path, monkeypatch):
+    """claunch-c4e6f.1: the flow lives in self-improve-common, so a
+    definition other than improv-worker-v2 includes it and calls it. It
+    returns ok with the registered ids on register and without on drop,
+    and the caller goes on to its own next node."""
+    from claude_launcher.cflow2 import frontend, runtime
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    flow = {"cflow": 2, "name": "other-flow", "include": ["self-improve-common"],
+            "nodes": {"after": {"prompt": "after: ${result['improve'].value.issues}"}},
+            "body": [{"id": "improve", "call": "self-improve",
+                      "with": {"issue": "claunch-y", "workflow": "other-flow"}},
+                     "after"]}
+    chart = frontend.compile_text(yaml.safe_dump(flow, allow_unicode=True, sort_keys=False),
+                                  resolve_include=layers.resolver(str(tmp_path)))
+    align_q = _brief("register", "revise", "drop")
+    for scope, decision, issues in (("r", "register", ["claunch-x"]), ("d", "drop", None)):
+        kw = {"cwd": str(tmp_path), "scope": scope, "now": 1.0}
+        st = runtime.start(chart, caps={}, **kw)
+        review = next(t for t in st["tasks"] if t["label"].endswith("self-improve-review"))
+        assert "claunch-y" in review["prompt"] and "other-flow" in review["prompt"]
+        for label in ("self-improve-review", "self-improve-discuss"):
+            iid = next(t["instance"] for t in st["tasks"] if t["label"].endswith(label))
+            st = runtime.report(iid, "ok", SI_VALUES[label], **kw)
+        iid = next(t["instance"] for t in st["tasks"] if t["label"].endswith("ask-frame"))
+        st = runtime.report(iid, "ok", {"brief": align_q}, **kw)
+        runtime.approve(None, decision=decision, reason="r", **kw)
+        st = runtime.status(**kw)
+        if decision == "register":
+            iid = next(t["instance"] for t in st["tasks"]
+                       if t["label"].endswith("self-improve-register"))
+            st = runtime.report(iid, "ok", SI_VALUES["self-improve-register"], **kw)
+        assert [t["label"] for t in st["tasks"]] == ["after"]
+        assert ("claunch-x" in st["tasks"][0]["prompt"]) == bool(issues)
+
+
+def test_improv_worker_calls_self_improve_with_its_own_issue_and_definition():
+    """claunch-c4e6f.1: the worker hands the library its claimed issue, its
+    canonical definition and the retrospective's RETRO comment as the basis."""
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    assert "self-improve-common" in doc["include"]
+    call = _find_id(doc["procedures"], "self-improve")
+    assert call["call"] == "self-improve"
+    assert call["with"]["issue"] == "$data.claim.issue"
+    assert "improv-worker-v2.yaml" in call["with"]["workflow"]
+    assert "RETRO @ <런 id>" in call["with"]["basis"]
 
 
 def test_settle_check_excepts_only_a_user_approved_self_improve_issue():
