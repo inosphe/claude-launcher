@@ -2734,6 +2734,10 @@ OS 잠금 fallback으로 실행하지 않고 재시도한다. 에이전트는 �
 기본값은 `true`이며 배치의 `checkpoint-check` 뒤 기존 `reflect`의
 `restart:` 경로와 `deployed-wait` 확인을 수행한다. 데몬이 기존 승인 게이트를
 거쳐 `restart_live.*`를 실행하며, 이미 같은 코드를 서빙하면 재기동을 생략한다.
+restart 명령이 실패(exit≠0)·중단·미지원이면 `reflect`를 `restart_failed`(reason 필수)로
+보고해 `deployed-wait`의 600초를 건너뛰고 바로 `reflect-pregate`로 간다. 재시도는
+`reflect`의 새 방문이라 데몬이 restart를 다시 실행하고 승인 게이트를 다시 거친다.
+시도는 `deployed-wait` 만료와 합쳐 5회다.
 실패/판정 불가는 `reflect-pregate`에서 원인을 확인하고 최대 5회 재시도하거나
 `reflect-closed`에 미반영 근거를 기록한다. 실제 반영 확인까지는 다음 회차가
 기다리지만 전체 스윕 완료는 선행 조건이 아니다. 따라서 아직 전체 검증이
