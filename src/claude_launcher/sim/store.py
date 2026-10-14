@@ -949,10 +949,7 @@ class SimStore:
         with self._lock:
             meta = self._meta(sim_id)
             self._require_owner(meta, actor, "start")
-            if meta.get("fill_pending"):
-                missing = [k for k in ("title", "goal") if not (meta.get(k) or "").strip()]
-                raise Conflict(f"{sim_id} still waits for its {' and '.join(missing)}: "
-                               f"fill {'them' if len(missing) > 1 else 'it'} with sim_configure first")
+            self._require_filled(meta)
             carried = self._carry(meta, actor)
             meta = self._meta(sim_id)
             meta["state"], meta["state_reason"], meta["run_rounds"] = "running", f"started by {actor}", 0
@@ -961,6 +958,15 @@ class SimStore:
             if not round:
                 return {**self.summary(meta), "carry": carried}
         return {**self.run_round(sim_id, actor), "carry": carried}
+
+    @staticmethod
+    def _require_filled(meta: dict) -> None:
+        """A simulation left for its owner to fill neither starts nor walks a
+        round until its title and goal are set."""
+        if meta.get("fill_pending"):
+            missing = [k for k in ("title", "goal") if not (meta.get(k) or "").strip()]
+            raise Conflict(f"{meta['id']} still waits for its {' and '.join(missing)}: "
+                           f"fill {'them' if len(missing) > 1 else 'it'} with sim_configure first")
 
     def _carry(self, meta: dict, actor: str) -> dict:
         """What a new run takes over from the last one, checked against the
@@ -1037,6 +1043,7 @@ class SimStore:
         with self._lock:
             meta = self._meta(sim_id)
             self._require_owner(meta, actor, "run a round")
+            self._require_filled(meta)
             stored = self.model(sim_id)
             problems = M.check_model(stored)
             if problems:
