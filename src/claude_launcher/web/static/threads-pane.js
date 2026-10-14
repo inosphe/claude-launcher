@@ -43,6 +43,7 @@ globalThis.ThreadsPane = (() => {
   let composing = false;     // the new-thread form is open
   let composeQa = null;      // {id, title}: the question the new thread is about
   let notice = "";
+  let wanted = null;         // {session, tid}: the thread to show at the next mount there
   const drafts = new Map();  // thread id ("" = new thread) -> text
   const inflight = new Set(); // thread ids ("" = new thread) with a post still out
   const pending = new Map();  // thread id -> {text, failed?: error}: the message being sent
@@ -548,6 +549,7 @@ globalThis.ThreadsPane = (() => {
     onQuestion = opts.onQuestion || null;
     storageKey = opts.storageKey || "claunch_threadread";
     current = remembered(session);
+    if (wanted && wanted.session === session) { current = wanted.tid; wanted = null; }
     host.replaceChildren(node("p", "wf-note", "불러오는 중…"));
     load();
     timer = setInterval(() => {
@@ -582,6 +584,14 @@ globalThis.ThreadsPane = (() => {
     load();
   }
 
+  /* Show thread `tid` of `session` (a notice card about its reply): now
+     if the pane is on that session, else as soon as it is mounted there. */
+  function focus(session, tid) {
+    if (!session || !tid) return;
+    if (host && name === session) { wanted = null; select(tid); return; }
+    wanted = {session, tid};
+  }
+
   /* Open the new-thread form about question `q` ({id, title}), its title
      prefilled; a title already typed for this question is kept. */
   function compose(q) {
@@ -593,6 +603,6 @@ globalThis.ThreadsPane = (() => {
     render();
   }
 
-  return {mount, unmount, refresh: () => host && load(), select, compose, excerpt, unseen, sendKey, pick, linkLabel, stamp,
+  return {mount, unmount, refresh: () => host && load(), select, focus, compose, excerpt, unseen, sendKey, pick, linkLabel, stamp,
           FOLD_KEY};
 })();

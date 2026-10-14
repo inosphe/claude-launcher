@@ -89,9 +89,36 @@ def test_t5_list_and_rail(st):
     assert [t["id"] for t in st.list("s1", closed=False)["threads"]] == [b]
     reply = st.post("s1", b, "agent answer")["message"]
     rail = st.rail()
-    assert rail["s1"] == {"open": 1, "agent_seq": reply["seq"]}   # a stays closed
-    assert rail["s2"] == {"open": 1, "agent_seq": 0}
+    assert rail["s1"]["open"] == 1 and rail["s1"]["agent_seq"] == reply["seq"]   # a stays closed
+    assert rail["s2"] == {"open": 1, "agent_seq": 0, "replies": []}
     assert st.list("s1")["agent_seq"] == reply["seq"]
+
+
+def test_t5b_rail_replies(st):
+    """The rail carries each session's last agent replies, oldest first, so
+    the dashboard can announce them as notices (claunch-gfv7l)."""
+    a = st.open(S.USER, "s1", "deploy plan", "how?")["thread"]["id"]
+    b = st.open(S.USER, "s1", "flaky test")["thread"]["id"]
+    st.open(S.USER, "s2", "other")
+    st.post(S.USER, a, "user words are not replies")
+    first = st.post("s1", a, "\n  first line of the answer  \nsecond line")["message"]
+    second = st.post("s1", b, "x" * 400)["message"]
+    replies = st.rail()["s1"]["replies"]
+    assert [r["seq"] for r in replies] == [first["seq"], second["seq"]]
+    assert replies[0] == {"seq": first["seq"], "thread": a, "title": "deploy plan",
+                          "excerpt": "first line of the answer", "at": first["at"]}
+    assert replies[1]["thread"] == b and replies[1]["title"] == "flaky test"
+    assert len(replies[1]["excerpt"]) == S.RAIL_EXCERPT and replies[1]["excerpt"].endswith("\u2026")
+    assert st.rail()["s2"]["replies"] == []
+    # Only the newest RAIL_REPLIES per session are kept, and a rename shows.
+    seqs = [st.post("s1", a, f"r{i}")["message"]["seq"] for i in range(S.RAIL_REPLIES + 2)]
+    st.rename(S.USER, a, "deploy plan v2")
+    replies = st.rail()["s1"]["replies"]
+    assert [r["seq"] for r in replies] == seqs[-S.RAIL_REPLIES:]
+    assert {r["title"] for r in replies} == {"deploy plan v2"}
+    # An agent opening a thread with a first message is a reply too.
+    opened = st.open("s2", "s2", "agent topic", "I opened this")["message"]
+    assert [r["seq"] for r in st.rail()["s2"]["replies"]] == [opened["seq"]]
 
 
 def test_t6_bad_input(st):

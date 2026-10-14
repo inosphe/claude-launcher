@@ -56,6 +56,8 @@ PAGE = 500
 HISTORY_PAGE = 20
 HISTORY_MAX_PAGE = 100
 HISTORY_MESSAGES = 200
+RAIL_REPLIES = 5
+RAIL_EXCERPT = 160
 
 
 class ThreadError(Exception):
@@ -124,6 +126,12 @@ def _qa_id(value) -> Optional[str]:
     if not isinstance(value, str) or not re.fullmatch(r"qa-[0-9a-f]{1,32}", value.strip()):
         raise ThreadError("qa must be a QA question id (qa-xxxxxxxx)")
     return value.strip()
+
+
+def _excerpt(body: str) -> str:
+    """The first non-blank line of a message, cut to RAIL_EXCERPT."""
+    line = next((ln.strip() for ln in (body or "").splitlines() if ln.strip()), "")
+    return line if len(line) <= RAIL_EXCERPT else line[:RAIL_EXCERPT - 1] + "…"
 
 
 def _author(actor: str) -> str:
@@ -399,17 +407,39 @@ class ThreadStore:
         }
 
     def rail(self) -> dict:
-        """Per session with threads: how many are open, and the seq of the
+        """Per session with threads: how many are open, the seq of the
         last agent message (the page lights its button when that passes
-        what this browser has seen)."""
+        what this browser has seen), and the last RAIL_REPLIES agent
+        messages, oldest first.
+
+        ``replies`` (seq, thread, title, excerpt, at) is what the dashboard
+        turns into a notice card and a row of its notification history for
+        each reply it has not announced yet (claunch-gfv7l), the way a QA
+        question is announced from ``waiting`` in the QA rail."""
         out: dict[str, dict] = {}
+
+        def row(session: str) -> dict:
+            return out.setdefault(session, {"open": 0, "agent_seq": 0, "replies": []})
+
         with self._connect() as db:
             for r in db.execute(
                 "SELECT session, SUM(status = 'open') AS open FROM threads GROUP BY session"
             ):
-                out[r["session"]] = {"open": int(r["open"] or 0), "agent_seq": 0}
+                row(r["session"])["open"] = int(r["open"] or 0)
             for r in db.execute(
                 "SELECT session, MAX(seq) AS seq FROM messages WHERE author = 'agent' GROUP BY session"
             ):
-                out.setdefault(r["session"], {"open": 0, "agent_seq": 0})["agent_seq"] = int(r["seq"] or 0)
+                row(r["session"])["agent_seq"] = int(r["seq"] or 0)
+            for r in db.execute(
+                "SELECT m.seq, m.session, m.thread, m.body, m.at, t.title FROM ("
+                " SELECT seq, session, thread, body, at,"
+                " ROW_NUMBER() OVER (PARTITION BY session ORDER BY seq DESC) AS n"
+                " FROM messages WHERE author = 'agent') AS m"
+                " JOIN threads t ON t.id = m.thread WHERE m.n <= ? ORDER BY m.seq",
+                (RAIL_REPLIES,),
+            ):
+                row(r["session"])["replies"].append({
+                    "seq": r["seq"], "thread": r["thread"], "title": r["title"],
+                    "excerpt": _excerpt(r["body"]), "at": r["at"],
+                })
         return out

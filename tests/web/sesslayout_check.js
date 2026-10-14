@@ -92,6 +92,8 @@ function closeSplit() { splitFor = null; splitKind = null; calls.closed++; }
 // The 🗪 threads button's news mark (threadspane_check holds what it reads).
 function threadsNews() { return true; }
 function markThreadsSeen(name) { calls.seen.push(name); }
+// Reply notices (claunch-gfv7l): a threads pane shown takes their cards down.
+function threadNoticeClear(name) { calls.cleared.push(name); }
 `;
 const expose = `
 Object.assign(exports, {
@@ -113,7 +115,7 @@ function build(o = {}) {
   const nodes = {};
   for (const id of ["term-split", "term-wf", "term-splitbtn", "term-simsbtn", "term-chartbtn", "term-qabtn", "term-threadsbtn"]) nodes[id] = node(id);
   const body = node("body");
-  const calls = { opened: [], kinds: [], closed: 0, ratios: [], refits: 0, refreshed: 0, seen: [] };
+  const calls = { opened: [], kinds: [], closed: 0, ratios: [], refits: 0, refreshed: 0, seen: [], cleared: [] };
   const ctx = {};
   new Function(
     "exports", "$", "document", "BASE", "localStorage", "MOBILE_MQ",
@@ -364,6 +366,7 @@ check("the key carries the base path",
         && w.nodes["term-chartbtn"].attrs["aria-pressed"] === "false"
         && w.nodes["term-splitbtn"].attrs["aria-pressed"] === "false", w.calls.kinds);
   check("...showing them is seeing them", w.calls.seen[w.calls.seen.length - 1] === "s15");
+  check("...and takes their reply cards down", w.calls.cleared[w.calls.cleared.length - 1] === "s15");
   check("...and the threads choice survives a reload", w.ctx.sessLayoutFor("s15").pane === "threads");
 }
 
