@@ -252,9 +252,14 @@ def test_nested_gitfile_that_names_no_gitdir_is_preserved(setup, content):
     service, root, _, _ = setup
     mine = completed(root / "s1c1012000000")
     (mine / "nested").mkdir()
-    (mine / "nested" / ".git").write_bytes(content)
-    result = service.apply("s1", service.plan("s1")["plan_id"])
-    assert result["removed"] == 0 and mine.exists()
+    broken = mine / "nested" / ".git"
+    broken.write_bytes(content)
+    try:
+        result = service.apply("s1", service.plan("s1")["plan_id"])
+        assert result["removed"] == 0 and mine.exists()
+    finally:
+        # Left behind, this file keeps the whole basetemp cleanup_pending.
+        broken.unlink(missing_ok=True)
 
 
 @pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="POSIX permissions")
