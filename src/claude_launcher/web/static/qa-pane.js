@@ -15,7 +15,16 @@
    "질문 요청" in the head nudges the session (POST /api/qa/nudge,
    claunch-l8vyi.1): it is told to file its questions with qa_ask or to
    reply qa_nothing. It is sent at once, questions or not; the line under
-   the button shows how the last nudge was settled. */
+   the button shows how the last nudge was settled.
+
+   Delivery is shown as it happened (claunch-564kn): the daemon types a
+   notification only once the session's terminal is free, so each card says
+   whether its latest one is waiting (and whether an unsent line in the
+   session's composer is what holds it), offers "지금 전달" to force it, and
+   says when it was typed. A closed question can still be answered again
+   ("답 다시 고치기"), and an answered or closed one can be sent a direction
+   check ("방향 점검") with a note; the session settles that by closing the
+   question with a note, shown under the card. */
 globalThis.QaPane = (() => {
   const POLL_MS = 3000;
   const STATUS = {
@@ -33,6 +42,8 @@ globalThis.QaPane = (() => {
   const drafts = new Map();
   const notices = new Map();
   const cards = new Map();   // id -> {node, sig}
+  const editing = new Set();   // closed question ids whose answer editor is open
+  const checking = new Map();  // id -> direction-check note being written
 
   const node = (tag, cls, text) => {
     const n = document.createElement(tag);
@@ -79,7 +90,8 @@ globalThis.QaPane = (() => {
 
   function cardSig(q) {
     const d = drafts.get(q.id);
-    return JSON.stringify([q, d && {c: d.choices, b: d.base, t: d.touched}, notices.get(q.id) || null]);
+    return JSON.stringify([q, d && {c: d.choices, b: d.base, t: d.touched}, notices.get(q.id) || null,
+                           editing.has(q.id), checking.has(q.id)]);
   }
 
   function typingIn(n) {
@@ -194,7 +206,23 @@ globalThis.QaPane = (() => {
       if (q.answer.text) a.append(node("div", "qa-answer-text", q.answer.text));
       box.append(a);
     }
-    if (q.status === "closed") return box;
+    const sent = deliveryLine(q);
+    if (sent) box.append(sent);
+    if (q.check) box.append(checkLine(q.check));
+    if (q.status === "closed" && !editing.has(q.id)) {
+      const actions = node("div", "qa-actions");
+      const edit = node("button", "term-btn qa-reopen", "답 다시 고치기");
+      edit.type = "button";
+      edit.title = "닫힌 질문의 답을 고쳐 저장하면 질문이 다시 열리고 세션에 새 답이 전달됩니다.";
+      edit.addEventListener("click", () => { editing.add(q.id); render(); });
+      actions.append(edit);
+      if (q.answer) actions.append(checkButton(q));
+      const n = notices.get(q.id);
+      if (n) actions.append(node("span", `qa-notice ${n.bad ? "wf-warning" : ""}`, n.text));
+      box.append(actions);
+      if (checking.has(q.id)) box.append(checkForm(q));
+      return box;
+    }
 
     const cur = d || {text: q.answer ? q.answer.text : "", choices: q.answer ? q.answer.choices : []};
     if (q.options.length) {
@@ -246,20 +274,149 @@ globalThis.QaPane = (() => {
       if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); save(q.id); }
     });
     const actions = node("div", "qa-actions");
-    const btn = node("button", "term-btn qa-save", q.answer ? "답 수정 저장" : "저장");
+    const closed = q.status === "closed";
+    const btn = node("button", "term-btn qa-save",
+                     closed ? "답 수정 저장 (질문 다시 열기)" : q.answer ? "답 수정 저장" : "저장");
     btn.type = "button";
     btn.addEventListener("click", () => save(q.id));
     actions.append(btn);
+    if (q.status === "answered") actions.append(checkButton(q));
     const n = notices.get(q.id);
     if (n) actions.append(node("span", `qa-notice ${n.bad ? "wf-warning" : ""}`, n.text));
-    if (d && d.touched) {
-      const reset = node("button", "term-btn qa-discard", "초안 버리기");
+    if ((d && d.touched) || closed) {
+      const reset = node("button", "term-btn qa-discard", closed ? "취소" : "초안 버리기");
       reset.type = "button";
-      reset.addEventListener("click", () => { drafts.delete(q.id); notices.delete(q.id); render(); });
+      reset.addEventListener("click", () => {
+        drafts.delete(q.id); notices.delete(q.id); editing.delete(q.id); render();
+      });
       actions.append(reset);
     }
     box.append(ta, actions);
+    if (checking.has(q.id)) box.append(checkForm(q));
     return box;
+  }
+
+  const DELIVERY_WHAT = {answer: "답", recheck: "방향 점검", nudge: "질문 요청"};
+
+  /* The card's latest notification: waiting (and why), typed, or not. */
+  function deliveryLine(q) {
+    const dv = q.delivery;
+    if (!dv || dv.state === "replaced") return null;
+    const what = DELIVERY_WHAT[dv.kind] || "알림";
+    const line = node("p", `qa-delivery qa-delivery-${dv.state}`);
+    if (dv.state === "pending") {
+      line.append(node("span", null,
+        `${what} 알림 전달 대기 중 (${clock(dv.queued_at)}부터) — ` +
+        (dv.draft ? "세션 터미널 입력창에 보내지 않은 줄이 있어 그 줄이 전송되거나 지워질 때까지 기다립니다"
+                  : "세션 터미널이 입력을 받을 수 있을 때까지 기다립니다")));
+      const now = node("button", "term-btn qa-deliver-now", "지금 전달");
+      now.type = "button";
+      now.title = "입력창에 보내지 않은 줄이 있으면 그 줄을 먼저 전송한 뒤 이 알림을 이어서 보냅니다.";
+      now.addEventListener("click", () => deliverNow(q.id));
+      line.append(now);
+    } else if (dv.state === "forcing") {
+      line.textContent = `${what} 알림 전달 중…`;
+    } else if (dv.state === "held") {
+      line.textContent = `${what} 알림: 세션이 hold 상태라 깨어나면 전달됩니다`;
+    } else if (dv.state === "delivered") {
+      line.textContent = `${what} 알림 세션에 전달됨 (${clock(dv.settled_at)}${dv.forced ? ", 강제 전달" : ""})`;
+    } else if (dv.state === "failed") {
+      line.textContent = `${what} 알림 전달 실패 — 세션이 종료되었거나 터미널에 쓸 수 없습니다`;
+    }
+    return line;
+  }
+
+  function checkLine(c) {
+    const at = clock(c.at);
+    const text = c.settled
+      ? `방향 점검 (${at}) → 세션 응답: ${c.reply || "(메모 없이 닫음)"}`
+      : `방향 점검 요청 (${at}) · 세션 응답 대기`;
+    return node("p", `qa-check ${c.settled ? "qa-check-settled" : "qa-check-waiting"}`, text);
+  }
+
+  function checkButton(q) {
+    const b = node("button", "term-btn qa-check-open", "방향 점검");
+    b.type = "button";
+    b.title = "세션에게 지금 하는 작업이 이 답과 맞는지 확인하라고 요청합니다. 닫힌 질문은 다시 열립니다.";
+    b.addEventListener("click", () => {
+      if (checking.has(q.id)) checking.delete(q.id); else checking.set(q.id, "");
+      render();
+    });
+    return b;
+  }
+
+  function checkForm(q) {
+    const form = node("div", "qa-check-form");
+    const ta = node("textarea", "qa-check-note");
+    ta.rows = 2;
+    ta.placeholder = "어긋났다고 보는 점 (선택) — Enter 보내기, Shift+Enter 줄바꿈";
+    ta.value = checking.get(q.id) || "";
+    ta.addEventListener("input", () => checking.set(q.id, ta.value));
+    ta.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); recheck(q.id); }
+    });
+    const send = node("button", "term-btn qa-check-send", "점검 요청 보내기");
+    send.type = "button";
+    send.addEventListener("click", () => recheck(q.id));
+    form.append(ta, send);
+    return form;
+  }
+
+  function deliveryNotice(doc) {
+    const st = doc.delivery ? doc.delivery.state : (doc.delivered ? "delivered" : "failed");
+    if (st === "delivered") return {text: "세션에 전달됨", bad: false};
+    if (st === "pending") return {text: "전달 대기 중 (아래 상태 참고)", bad: false};
+    if (st === "held") return {text: "세션이 깨어나면 전달됨", bad: false};
+    return {text: "세션이 종료되어 전달하지 못함", bad: true};
+  }
+
+  async function post(url, body) {
+    try {
+      const resp = await api(url, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(body),
+      });
+      return {resp, doc: await resp.json().catch(() => ({}))};
+    } catch {
+      return {resp: null, doc: {}};
+    }
+  }
+
+  async function recheck(id) {
+    const q = ((data && data.questions) || []).find((x) => x.id === id);
+    if (!q) return;
+    const want = name;
+    const {resp, doc} = await post(`/api/qa/${encodeURIComponent(id)}/recheck`,
+                                   {revision: q.revision, note: checking.get(id) || ""});
+    if (want !== name) return;
+    if (!resp) notices.set(id, {text: "보내지 못함: 데몬에 연결할 수 없습니다", bad: true});
+    else if (resp.status === 409 && doc.current) {
+      replace(doc.current);
+      notices.set(id, {text: "질문이 바뀌어 보내지 않았습니다. 현재 질문을 확인한 뒤 다시 보내세요.", bad: true});
+    } else if (!resp.ok) notices.set(id, {text: doc.error || `HTTP ${resp.status}`, bad: true});
+    else {
+      checking.delete(id);
+      const dn = deliveryNotice(doc);
+      notices.set(id, {text: `방향 점검 요청 · ${dn.text}`, bad: dn.bad});
+      replace({...doc.question, check: doc.check, delivery: doc.delivery});
+      if (onChange) onChange();
+    }
+    render();
+  }
+
+  async function deliverNow(id) {
+    const want = name;
+    const q = ((data && data.questions) || []).find((x) => x.id === id);
+    if (q && q.delivery) { q.delivery = {...q.delivery, state: "forcing"}; render(); }
+    const {resp, doc} = await post(`/api/qa/${encodeURIComponent(id)}/deliver`, {});
+    if (want !== name) return;
+    if (!resp) notices.set(id, {text: "보내지 못함: 데몬에 연결할 수 없습니다", bad: true});
+    else if (!resp.ok && !doc.delivery) notices.set(id, {text: doc.error || `HTTP ${resp.status}`, bad: true});
+    const cur = ((data && data.questions) || []).find((x) => x.id === id);
+    if (cur && doc.delivery) cur.delivery = doc.delivery;
+    render();
+    load();
   }
 
   async function save(id) {
@@ -303,9 +460,10 @@ globalThis.QaPane = (() => {
       return;
     }
     drafts.delete(id);
-    notices.set(id, {text: doc.delivered ? "저장됨 · 세션에 전달됨"
-                                         : "저장됨 · 세션이 종료되어 전달하지 못함", bad: !doc.delivered});
-    replace(doc.question);
+    editing.delete(id);
+    const dn = deliveryNotice(doc);
+    notices.set(id, {text: `저장됨 · ${dn.text}`, bad: dn.bad});
+    replace(doc.delivery ? {...doc.question, delivery: doc.delivery} : doc.question);
     render();
     if (onChange) onChange();
   }
@@ -318,7 +476,12 @@ globalThis.QaPane = (() => {
   function nudgeState(n) {
     if (!n) return "";
     const at = clock(n.created_at);
-    if (n.status === "sent") return `질문 요청 보냄 (${at}) · 응답 대기`;
+    if (n.status === "sent") {
+      const dv = n.delivery;
+      if (dv && dv.state === "pending") return `질문 요청 (${at}) · 세션 터미널에 전달 대기 중`;
+      if (dv && dv.state === "held") return `질문 요청 (${at}) · 세션이 깨어나면 전달`;
+      return `질문 요청 보냄 (${at}) · 응답 대기`;
+    }
     if (n.status === "asked") return `질문 요청 (${at}) → 질문으로 응답: ${n.questions.join(", ")}`;
     if (n.status === "nothing") return `질문 요청 (${at}) → 질문 없음${n.reply ? `: ${n.reply}` : ""}`;
     return "";
@@ -354,7 +517,7 @@ globalThis.QaPane = (() => {
 
   function replace(q) {
     if (!data || !q) return;
-    data.questions = data.questions.map((x) => (x.id === q.id ? q : x));
+    data.questions = data.questions.map((x) => (x.id === q.id ? {check: x.check, delivery: x.delivery, ...q} : x));
     data.unresolved = data.questions.filter((x) => x.status === "open" || x.status === "stale").length;
   }
 
@@ -370,6 +533,8 @@ globalThis.QaPane = (() => {
     nudging = false;
     nudgeNotice = null;
     cards.clear();
+    editing.clear();
+    checking.clear();
     target.replaceChildren();
     render();
     load();

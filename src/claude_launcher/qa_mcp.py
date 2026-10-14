@@ -29,6 +29,10 @@ answer (and the answer it replaced, for a rewrite). Editing an answered
 question marks its answer stale and asks the user again. The user may also
 nudge you from the pane ("[claunch qa] ... nudge qn-..."): file what you
 need to ask with qa_ask, or reply qa_nothing when you have nothing to ask.
+A closed question is not final: the user can rewrite its answer or ask for
+a direction check against it ("[claunch qa] ... direction check"), which
+reopens it. Compare your current work with the answer, change course where
+you drifted, and qa_close it again with a note -- the note is your reply.
 """
 
 _ID = {"id": {"type": "string", "description": "question id (qa-xxxxxxxx)"}}
@@ -66,7 +70,8 @@ TOOLS = [
      "description": "Settle one of your questions: its answer has been acted on (or it no longer matters). "
                     "It stays readable but no longer waits on the user.",
      "inputSchema": {"type": "object", "properties": {
-         **_ID, **_REV, "note": {"type": "string", "description": "what came of it (kept in the record)"},
+         **_ID, **_REV, "note": {"type": "string", "description": "what came of it (kept in the record; for a direction check, "
+                                                    "whether you were on track and what you changed)"},
      }, "required": ["id", "revision"]}},
     {"name": "qa_delete",
      "description": "Withdraw one of your questions entirely (asked by mistake).",

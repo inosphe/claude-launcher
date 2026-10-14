@@ -183,7 +183,95 @@ function q(over = {}) {
     assert.ok(host.querySelector(".qa-empty"), "no live question: the empty note");
     const closed = host.querySelector(".qa-closed-list");
     assert.ok(closed.textContent.includes("닫힌 질문 1"));
-    assert.equal(closed.querySelector("textarea"), null, "a closed question takes no answer");
+    assert.equal(closed.querySelector("textarea"), null, "a closed card shows no editor until asked");
+    h.pane.unmount();
+  }
+
+  /* --- delivery state: waiting behind a draft, forced, typed (claunch-564kn) */
+  {
+    const h = paneHarness();
+    const answer = { text: "yes", choices: [], revision: 2, at: "", saves: 1 };
+    const waiting = { kind: "answer", state: "pending", queued_at: "2026-10-14T07:00:00+00:00",
+                      settled_at: null, forced: false, draft: true };
+    h.setList({ session: "s1", unresolved: 0, agent_seq: 3,
+                questions: [q({ options: [], status: "answered", revision: 2, answer, delivery: waiting })] });
+    const host = new N("div");
+    h.pane.mount(host, "s1", { api: h.api });
+    await tick();
+    const line = host.querySelector(".qa-delivery");
+    assert.ok(line.textContent.includes("전달 대기 중"), "a waiting notification is said to wait");
+    assert.ok(line.textContent.includes("보내지 않은 줄"), "...and why");
+    const typed = { ...waiting, state: "delivered", settled_at: "2026-10-14T07:01:00+00:00", forced: true };
+    delete typed.draft;
+    h.reply(() => ({ status: 200, doc: { delivery: typed } }));
+    h.setList({ session: "s1", unresolved: 0, agent_seq: 3,
+                questions: [q({ options: [], status: "answered", revision: 2, answer, delivery: typed })] });
+    host.querySelector(".qa-deliver-now").fire("click");
+    await tick(); await tick();
+    assert.equal(h.posts.at(-1).url, "/api/qa/qa-1/deliver");
+    assert.ok(host.querySelector(".qa-delivery").textContent.includes("세션에 전달됨"));
+    assert.ok(host.querySelector(".qa-delivery").textContent.includes("강제 전달"));
+
+    // A save that is only queued says so, not "delivered".
+    h.setList({ session: "s1", unresolved: 1, agent_seq: 4, questions: [q({ options: [] })] });
+    h.pane.refresh();
+    await tick();
+    const ta = host.querySelector(".qa-card").querySelector("textarea");
+    ta.value = "go"; ta.fire("input");
+    h.reply(() => ({ status: 200, doc: { delivered: true, previous: null, reopened: false,
+      delivery: { ...waiting, draft: false },
+      question: q({ options: [], status: "answered", revision: 2, answer: { ...answer, text: "go" } }) } }));
+    host.querySelector(".qa-save").fire("click");
+    await tick();
+    assert.ok(host.textContent.includes("저장됨 · 전달 대기 중"));
+    assert.ok(!host.textContent.includes("세션에 전달됨"));
+    h.pane.unmount();
+  }
+
+  /* --- closed: answer again (reopens) and the direction check ------------ */
+  {
+    const h = paneHarness();
+    const answer = { text: "master", choices: [], revision: 2, at: "", saves: 1 };
+    h.setList({ session: "s1", unresolved: 0, agent_seq: 5,
+                questions: [q({ options: [], status: "closed", revision: 3, answer })] });
+    const host = new N("div");
+    h.pane.mount(host, "s1", { api: h.api });
+    await tick();
+    const closedBox = host.querySelector(".qa-closed-list");
+    closedBox.querySelector(".qa-reopen").fire("click");
+    const editor = host.querySelector(".qa-closed-list").querySelector("textarea");
+    assert.ok(editor, "answering again opens the editor on a closed card");
+    assert.equal(editor.value, "master", "starting from the saved answer");
+    editor.value = "stack"; editor.fire("input");
+    h.reply(() => ({ status: 200, doc: { delivered: true, reopened: true, previous: answer,
+      delivery: { kind: "answer", state: "delivered", queued_at: "", settled_at: "2026-10-14T07:02:00+00:00", forced: false },
+      question: q({ options: [], status: "answered", revision: 4, answer: { ...answer, text: "stack", revision: 4 } }) } }));
+    host.querySelector(".qa-save").fire("click");
+    await tick();
+    assert.deepEqual(h.posts.at(-1).body, { revision: 3, text: "stack", choices: [] });
+    assert.ok(host.querySelector(".qa-list").textContent.includes("stack"), "reopened: back among the live ones");
+
+    // Direction check from the (now answered) card, with a note.
+    host.querySelector(".qa-check-open").fire("click");
+    const note = host.querySelector(".qa-check-note");
+    assert.ok(note, "the check opens a note box");
+    note.value = "you are still on master"; note.fire("input");
+    h.reply(() => ({ status: 200, doc: { reopened: false,
+      question: q({ options: [], status: "answered", revision: 4, answer: { ...answer, text: "stack", revision: 4 } }),
+      check: { seq: 9, at: "2026-10-14T07:03:00+00:00", note: "you are still on master", settled: false, reply: "", settled_at: null },
+      delivery: { kind: "recheck", state: "pending", queued_at: "2026-10-14T07:03:00+00:00", settled_at: null, forced: false, draft: false } } }));
+    host.querySelector(".qa-check-send").fire("click");
+    await tick();
+    assert.deepEqual(h.posts.at(-1), { url: "/api/qa/qa-1/recheck", body: { revision: 4, note: "you are still on master" } });
+    assert.ok(host.querySelector(".qa-check").textContent.includes("세션 응답 대기"));
+    assert.ok(host.querySelector(".qa-delivery").textContent.includes("방향 점검 알림 전달 대기 중"));
+
+    h.setList({ session: "s1", unresolved: 0, agent_seq: 6, questions: [q({ options: [], status: "closed", revision: 5,
+      answer: { ...answer, text: "stack", revision: 4 },
+      check: { seq: 9, at: "2026-10-14T07:03:00+00:00", note: "x", settled: true, reply: "moved to stack", settled_at: "y" } })] });
+    h.pane.refresh();
+    await tick();
+    assert.ok(host.querySelector(".qa-check").textContent.includes("세션 응답: moved to stack"));
     h.pane.unmount();
   }
 

@@ -24,7 +24,11 @@ Status:
   answered  the user's answer is for the current revision
   stale     answered, then the agent changed the question; the old answer is
             kept and shown, and the user re-confirms or rewrites it
-  closed    the agent settled it (kept for the record; not unresolved)
+  closed    the agent settled it (kept for the record; not unresolved).
+            The user may still rewrite the answer, or ask for a direction
+            check against it (:meth:`QaStore.recheck`); either reopens it
+            as ``answered`` and the session settles it again with a close
+            (claunch-564kn).
 
 ``open`` and ``stale`` are what the header button lights up for.
 
@@ -321,6 +325,34 @@ class QaStore:
         r = db.execute("SELECT * FROM nudges WHERE session = ? ORDER BY rowid DESC LIMIT 1", (session,)).fetchone()
         return _nudge_row(r) if r else None
 
+    @staticmethod
+    def _checks(db, qids: list) -> dict:
+        """Per question, the user's last direction check and how the session
+        settled it: the note of the first close after it, if any."""
+        out: dict = {}
+        if not qids:
+            return out
+        marks = ",".join("?" * len(qids))
+        for r in db.execute(
+            f"SELECT question, MAX(seq) AS seq FROM events WHERE kind = 'recheck' AND question IN ({marks}) "
+            "GROUP BY question", qids,
+        ):
+            ev = db.execute("SELECT at, data FROM events WHERE seq = ?", (r["seq"],)).fetchone()
+            data = json.loads(ev["data"] or "{}")
+            reply = db.execute(
+                "SELECT at, data FROM events WHERE question = ? AND kind = 'close' AND seq > ? ORDER BY seq LIMIT 1",
+                (r["question"], r["seq"]),
+            ).fetchone()
+            out[r["question"]] = {
+                "seq": int(r["seq"]),
+                "at": ev["at"],
+                "note": data.get("note", ""),
+                "settled": reply is not None,
+                "reply": json.loads(reply["data"] or "{}").get("note", "") if reply else "",
+                "settled_at": reply["at"] if reply else None,
+            }
+        return out
+
     # -- reads -------------------------------------------------------------
 
     def get(self, qid: str) -> dict:
@@ -333,6 +365,9 @@ class QaStore:
             if not closed:
                 sql += " AND status <> 'closed'"
             rows = [_row(r) for r in db.execute(sql + " ORDER BY created_at, id", (session,))]
+            checks = self._checks(db, [q["id"] for q in rows])
+            for q in rows:
+                q["check"] = checks.get(q["id"])
             seq = db.execute(
                 "SELECT COALESCE(MAX(seq), 0) FROM events WHERE session = ? AND actor <> ?", (session, USER)
             ).fetchone()[0]
@@ -465,8 +500,7 @@ class QaStore:
         with self._write() as db:
             q = self._load(db, qid)
             self._expect(q, revision, actor)
-            if q["status"] == "closed":
-                raise Conflict(f"question {qid} was closed by {q['session']}; it takes no more answers", current=q)
+            reopened = q["status"] == "closed"
             labels = [o["label"] for o in q["options"]]
             unknown = [c for c in choices if c not in labels]
             if unknown:
@@ -486,8 +520,50 @@ class QaStore:
                 (text, json.dumps(choices, ensure_ascii=False), _now(), _now(), qid),
             )
             after = self._load(db, qid)
-            self._event(db, after, USER, "answer", {"previous": previous})
-        return {"question": after, "previous": previous}
+            data = {"previous": previous}
+            if reopened:
+                data["reopened"] = True
+            self._event(db, after, USER, "answer", data)
+        return {"question": after, "previous": previous, "reopened": reopened}
+
+    def recheck(self, actor: str, qid: str, revision, *, note=None) -> dict:
+        """The user asks the session to check its current work against an
+        answer it already has (a direction check, claunch-564kn). A closed
+        question is reopened as ``answered`` so the session settles the check
+        the way it settles any question: qa_close with a note. Returns
+        ``{"question", "check", "reopened"}``."""
+        if actor != USER:
+            raise Forbidden("only the user asks for a direction check")
+        revision = _revision(revision)
+        note = _text(note, "note", MAX_ANSWER)
+        with self._write() as db:
+            q = self._load(db, qid)
+            self._expect(q, revision, actor)
+            if not q["answer"]:
+                raise QaError(f"question {qid} has no answer to check the work against; answer it instead")
+            if q["status"] == "stale":
+                raise QaError(f"question {qid} changed after its answer; confirm or rewrite the answer instead")
+            reopened = q["status"] == "closed"
+            if reopened:
+                edited = db.execute(
+                    "SELECT 1 FROM events WHERE question = ? AND kind = 'update' AND revision > ? LIMIT 1",
+                    (qid, q["answer"]["revision"]),
+                ).fetchone()
+                if edited:
+                    # Closed after an edit: the answer is for wording the
+                    # session no longer shows.
+                    raise QaError(f"question {qid} changed after its answer; answer it again instead")
+                db.execute("UPDATE questions SET status='answered', answer_revision=revision+1, "
+                           "revision=revision+1, updated_at=? WHERE id=?", (_now(), qid))
+                after = self._load(db, qid)
+            else:
+                after = q
+            data = {"note": note} if note else {}
+            if reopened:
+                data["reopened"] = True
+            seq = self._event(db, after, USER, "recheck", data)
+            check = self._checks(db, [qid]).get(qid) or {"seq": seq}
+        return {"question": after, "check": check, "reopened": reopened}
 
     # -- nudges ------------------------------------------------------------
 

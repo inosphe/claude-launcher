@@ -7304,6 +7304,15 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .qa-notice.wf-warning { color: #db6d28; }
 .qa-moved { margin: 4px 0; font-size: 12px; }
 .qa-closed-list summary { cursor: pointer; color: #7d8590; font-size: 12px; margin: 4px 0 8px; }
+.qa-delivery, .qa-check { margin: 4px 0; font-size: 12px; color: #7d8590; display: flex; flex-wrap: wrap;
+  align-items: center; gap: 4px 8px; }
+.qa-delivery-pending, .qa-delivery-held, .qa-delivery-forcing, .qa-check-waiting { color: #d29922; }
+.qa-delivery-failed { color: #db6d28; }
+.qa-check-settled { color: #3fb950; }
+.qa-check-form { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+.qa-check-note { width: 100%; box-sizing: border-box; resize: vertical; font: inherit; font-size: 13px;
+  background: #0d1117; color: inherit; border: 1px solid #30363d; border-radius: 4px; padding: 6px; }
+.qa-check-form .term-btn { align-self: flex-start; }
 
 /* Session threads pane (threads-pane.js, claunch-doj98): the thread list on
    the left, the chosen conversation and its composer on the right. The pane

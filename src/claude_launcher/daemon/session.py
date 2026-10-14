@@ -1294,20 +1294,34 @@ class Session:
             # delivery can still submit the draft and release this wait.
             await asyncio.sleep(0.2)
 
-    def queue_delivery(self, text: str) -> bool:
+    def queue_delivery(
+        self, text: Union[str, Callable[[], str]], *,
+        on_done: Optional[Callable[[bool], None]] = None,
+    ) -> bool:
         """Accept a notification for delivery after an input draft is released.
 
         Acceptance is not a delivery receipt. Tasks belong to this live
         session, preserve delivery ordering, and are cancelled on exit; they
         are not a durable mailbox across daemon restarts. Waiting in a task
         keeps HTTP handlers and other sessions' clock ticks responsive.
+
+        ``text`` may be a factory, as for :meth:`deliver`: it is called once
+        for the queue's preview and again when the terminal is free, and an
+        empty string then cancels the send -- a sender whose message went out
+        of date while it waited (a QA answer rewritten again) drops it there.
+        ``on_done`` receives the outcome of a send this queue accepted
+        (False for a failure, a cancelled task or an empty factory). It is
+        not called for a message handed to a held session's wake queue.
         """
         pending = getattr(self, "message_restore_pending", None)
         restoring = bool(pending and pending(self.sdef.name))
         if self.exited or getattr(self, "held_at", None) or restoring:
             enqueue = getattr(self, "queue_on_message", None)
-            return bool(enqueue and (getattr(self, "held_at", None) or restoring)
+            if callable(text) and enqueue:
+                text = text()
+            return bool(enqueue and text and (getattr(self, "held_at", None) or restoring)
                         and enqueue(self.sdef.name, text))
+        preview = text() if callable(text) else text
 
         # Lazily, and inline rather than through the helper, because this
         # method is also borrowed by doubles that are not Sessions at all:
@@ -1321,12 +1335,13 @@ class Session:
         record = {
             "id": self._delivery_seq,
             "at": _utcnow(),
-            "chars": len(text),
-            "preview": _delivery_preview(text),
+            "chars": len(preview),
+            "preview": _delivery_preview(preview),
         }
         queue.append(record)
 
         async def send() -> None:
+            delivered = False
             try:
                 async with self._deferred_delivery_lock:
                     delivered = await self.deliver(text, wait_for_draft=True)
@@ -1335,6 +1350,11 @@ class Session:
                     self.sdef.name, "delivered" if delivered else "failed",
                 )
             finally:
+                if on_done is not None:
+                    try:
+                        on_done(bool(delivered))
+                    except Exception:  # noqa: BLE001 -- a sender's bookkeeping
+                        log.exception("queued notification callback for %r failed", self.sdef.name)
                 # Cancelled, failed or delivered, it is no longer waiting --
                 # a queue that only ever grows would be worse than none.
                 try:
@@ -2387,9 +2407,14 @@ class DeadSession:
             self, text, force=force, wait_for_draft=wait_for_draft, before=before
         )
 
-    def queue_delivery(self, text: str) -> bool:
+    def queue_delivery(self, text: Union[str, Callable[[], str]], *,
+                       on_done: Optional[Callable[[bool], None]] = None) -> bool:
         enqueue = getattr(self, "queue_on_message", None)
-        return bool(enqueue and self.held_at and enqueue(self.sdef.name, text))
+        if not (enqueue and self.held_at):
+            return False
+        if callable(text):
+            text = text()
+        return bool(text and enqueue(self.sdef.name, text))
 
     async def write_bytes(self, data: bytes, writer: object = None) -> None:
         raise self._gone()
