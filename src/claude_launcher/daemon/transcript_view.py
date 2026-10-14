@@ -437,8 +437,13 @@ def _source_of(sdef, *, deep: bool = True) -> Optional[Path]:
 
     Pi's file is not found by scanning: claunch named it at launch, and
     :func:`ctxsize.transcript_of` already computes that path (and caches the
-    lookup) for the context gauge. Every other harness goes through the
-    briefing's locator, as before.
+    lookup) for the context gauge. Claude goes through the briefing's
+    locator, as before.
+
+    Codex shares the context gauge's cached path, including for a page or
+    search. A cache miss still falls through to the fresh locator when
+    ``deep`` is enabled, so a newly created rollout need not wait for the
+    gauge's negative-cache TTL before it can be read.
 
     ``deep`` is what a fleet listing turns off. Both deep searches cost a
     directory walk per session -- claude's id scan reads every project
@@ -452,8 +457,12 @@ def _source_of(sdef, *, deep: bool = True) -> Optional[Path]:
     harness = str(getattr(sdef, "harness", None) or "")
     if harness == PI_HARNESS:
         return ctxsize.transcript_of(sdef)
-    if harness == ctxsize.CODEX_HARNESS and not deep:
-        return ctxsize.transcript_of(sdef)
+    if harness == ctxsize.CODEX_HARNESS:
+        source = ctxsize.transcript_of(sdef)
+        if source is not None and source.is_file():
+            return source
+        if not deep:
+            return None
     return locate_transcript(sdef, deep=deep)
 
 

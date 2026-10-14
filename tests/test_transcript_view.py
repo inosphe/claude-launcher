@@ -99,6 +99,55 @@ def test_paging_walks_backwards_to_the_top(transcript):
     assert third["has_more"] is False, "the top is reached, not looped"
 
 
+def test_codex_pages_info_and_search_reuse_the_context_gauge_path(transcript, monkeypatch):
+    from types import SimpleNamespace
+
+    _write(transcript, [_codex("message", role="user", content=[
+        {"type": "input_text", "text": f"message {i}"},
+    ]) for i in range(50)])
+    sdef = SimpleNamespace(name="s1", harness="codex")
+    monkeypatch.setattr(tv.ctxsize, "transcript_of", lambda _: transcript)
+
+    def no_scan(*args, **kwargs):
+        pytest.fail("a known Codex transcript must not rescan the profile")
+
+    monkeypatch.setattr(tv, "locate_transcript", no_scan)
+    tail = tv.page("s1", sdef, limit=10)
+    older = tv.page("s1", sdef, before=tail["cursor"], limit=10)
+    assert tail["total"] == 50
+    assert older["records"][0]["blocks"][0]["text"] == "message 30"
+    assert tv.info("s1", sdef, deep=True)["records"] == 50
+    assert tv.search("s1", sdef, query="message 0")["matches"][0]["seq"] == 0
+
+
+@pytest.mark.parametrize("stale", [False, True])
+def test_codex_deep_lookup_finds_a_new_file_despite_cached_miss(
+    transcript, monkeypatch, stale,
+):
+    from types import SimpleNamespace
+
+    _write(transcript, [_codex("message", role="user", content=[
+        {"type": "input_text", "text": "new conversation"},
+    ])])
+    sdef = SimpleNamespace(name="s1", harness="codex")
+    # A cached profile index may still refer to a removed rollout; deep
+    # reads must find the replacement just as they find a newly born one.
+    cached = transcript.with_name("removed.jsonl") if stale else None
+    monkeypatch.setattr(tv.ctxsize, "transcript_of", lambda _: cached)
+    scans = []
+
+    def locate(_, **kwargs):
+        scans.append(kwargs)
+        return transcript
+
+    monkeypatch.setattr(tv, "locate_transcript", locate)
+    assert tv.source_of(sdef, deep=False) is None
+    assert scans == [], "a fleet listing still avoids deep lookup"
+    page = tv.page("s1", sdef)
+    assert page["records"][0]["blocks"][0]["text"] == "new conversation"
+    assert scans == [{"deep": True}]
+
+
 def test_tool_traffic_is_clipped_but_prose_is_not(transcript):
     """A tool_result can be a megabyte of file content; the reader came for
     the prose, and wants only to see that a tool ran."""
