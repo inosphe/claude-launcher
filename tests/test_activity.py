@@ -153,3 +153,20 @@ def test_pi_activity_extension_lifecycle():
         capture_output=True, text=True, encoding="utf-8", timeout=30,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_replay_survives_a_sequence_pyte_cannot_dispatch(home, tmp_path):
+    """One bad sequence in the log costs its slice, not the respawn."""
+    async def run():
+        s = Session(SessionDef(name="replay-bad", harness="claude", cwd=str(tmp_path)), idle_threshold=2, scrollback=20)
+        try:
+            s._log.write(b"before\r\n\x1b[?1;2cmiddle\r\n")
+            s._log.write(b"x" * 8192 + b"\r\nafter\r\n")
+            s._log.flush()
+            s.seed_screen_from_log()  # must not raise
+            text = "\n".join(s.screen.render_history())
+            assert "after" in text
+        finally:
+            s._feeder.close()
+            s._log.close()
+    asyncio.run(run())

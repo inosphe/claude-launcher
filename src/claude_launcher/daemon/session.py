@@ -32,7 +32,7 @@ from . import paths, pty_backend
 from .harness import CLAUDE_HARNESS, SessionDef
 from .idle import IdleTracker
 from .activity import Detector as ActivityDetector
-from .screen import BACKGROUND_HISTORY, RenderBudget, ScreenFeeder, ScreenState
+from .screen import BACKGROUND_HISTORY, SLICE, RenderBudget, ScreenFeeder, ScreenState
 
 #: Screen sampling cadence for idle detection (seconds).
 SAMPLE_INTERVAL = 0.4
@@ -897,7 +897,20 @@ class Session:
             return  # no log (or unreadable): an empty screen is honest enough
         if not data:
             return
-        self.screen.feed(data)
+        # Slice by slice, like ScreenFeeder: pyte raises on a sequence it
+        # parses but cannot dispatch, and one such sequence in the log must
+        # cost its slice, not the respawn of the whole session.
+        errors = 0
+        for i in range(0, len(data), SLICE):
+            chunk = data[i : i + SLICE]
+            try:
+                self.screen.feed(chunk)
+            except Exception:  # noqa: BLE001 — see above
+                errors += 1
+                if errors == 1:
+                    log.warning("session %s: screen replay error (slice of %d "
+                                "bytes dropped)", self.sdef.name, len(chunk),
+                                exc_info=True)
         self.screen.scroll_grid_into_history()
         self.screen.forget_modes()
 
