@@ -16,6 +16,9 @@
        run on the way back;
      - a failing async poll on the way back does not throw out of the
        visibility handler;
+     - a tick while the previous tick's read is still out does not start
+       another (claunch-02w8s), unless that read is older than
+       POLL_STUCK_MS;
      - every page poll's setInterval goes through visiblePoll. */
 const fs = require("fs");
 const path = require("path");
@@ -55,7 +58,8 @@ function world() {
     hidden: false,
     addEventListener(type, fn) { if (type === "visibilitychange") listeners.push(fn); },
   };
-  const ctx = { document };
+  const clock = { now: 1000 };
+  const ctx = { document, clock, Date: { now: () => clock.now } };
   vm.createContext(ctx);
   vm.runInContext(`${block}\nthis.visiblePoll = visiblePoll;`, ctx);
   const show = () => { document.hidden = false; listeners.forEach((fn) => fn()); };
@@ -114,6 +118,42 @@ function world() {
   a(); b(); a();
   w.show();
   check("each skipped poll runs once on return", order.join("") === "ab", order);
+}
+
+{
+  const w = world();
+  let runs = 0;
+  let release = null;
+  const tick = w.ctx.visiblePoll(() => {
+    runs += 1;
+    return new Promise((resolve) => { release = resolve; });
+  }, () => true);
+  tick();
+  tick(); tick();
+  check("ticks while the read is out start nothing", runs === 1, runs);
+  w.ctx.clock.now += 60000;
+  tick();
+  check("a read out past POLL_STUCK_MS no longer holds the poll", runs === 2, runs);
+  const late = release;
+  tick();
+  check("the new read holds it again", runs === 2, runs);
+  late();
+  release();
+  setTimeout(() => {
+    tick();
+    check("once the read settles the next tick runs", runs === 3, runs);
+  }, 0);
+}
+
+{
+  const w = world();
+  let runs = 0;
+  const tick = w.ctx.visiblePoll(() => { runs += 1; return Promise.reject(new Error("x")); }, () => true);
+  tick();
+  setTimeout(() => {
+    tick();
+    check("a failed read frees the poll too", runs === 2, runs);
+  }, 0);
 }
 
 /* Every page poll is wrapped. The dashboard tick (pollTick) has its own

@@ -19869,17 +19869,35 @@ function fmtLogTime(iso) {
    a hidden dashboard tab spent 3.4 s of CPU in 12 s on it). A tick that
    comes due while hidden is remembered rather than run, and runs once the
    moment the tab is shown again -- but only if its timer is still the live
-   one (`alive`), so a page closed in the meantime is not redrawn. */
+   one (`alive`), so a page closed in the meantime is not redrawn.
+   A tick that comes due while the previous tick's read is still out is
+   dropped: a read slower than the interval (the run page's /api/cflow2/run
+   took seconds on a loaded daemon) otherwise stacks a new one behind it
+   every period, and each stacked read makes the next one slower
+   (claunch-02w8s). A read out longer than POLL_STUCK_MS no longer holds the
+   poll, so a request that never settles cannot stop it for good. */
 const hiddenSkippedPolls = new Map();
+const POLL_STUCK_MS = 60000;
 
 function visiblePoll(fn, alive) {
+  let pending = null;
+  let since = 0;
   const tick = () => {
     if (typeof document !== "undefined" && document.hidden === true) {
       hiddenSkippedPolls.set(tick, alive);
       return undefined;
     }
     hiddenSkippedPolls.delete(tick);
-    return fn();
+    if (pending && Date.now() - since < POLL_STUCK_MS) return undefined;
+    const out = fn();
+    if (out && typeof out.then === "function") {
+      const mine = out;
+      pending = mine;
+      since = Date.now();
+      const settle = () => { if (pending === mine) pending = null; };
+      mine.then(settle, settle);
+    }
+    return out;
   };
   return tick;
 }
