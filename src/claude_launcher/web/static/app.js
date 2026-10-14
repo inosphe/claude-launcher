@@ -19692,6 +19692,25 @@ function transcriptClipped(b) {
   return `${b.text}\n… ${ctxShort(rest)} more characters`;
 }
 
+/* A daemon timestamp, written in the reader's own zone as
+   `YYYY-MM-DD HH:MM:SS` (claunch-ox5qs). The daemon records every stamp in
+   UTC; shown as written, a reader at UTC+9 had to add nine hours to every
+   line of the detail panel. A stamp without an offset is read as UTC, the
+   daemon's own convention, rather than as local time — Date.parse would read
+   it as local and print it unshifted. Anything that does not parse as a
+   date-time (a bare date, a word, "?") comes back as written. */
+function localStamp(iso) {
+  const s = String(iso || "");
+  const m = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?)(Z|[+-]\d{2}:?\d{2})?$/.exec(s);
+  if (!m) return s.replace("T", " ");
+  const t = Date.parse(`${m[1]}T${m[2]}${m[3] || "Z"}`);
+  if (!Number.isFinite(t)) return s.replace("T", " ");
+  const d = new Date(t);
+  const p2 = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ` +
+    `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`;
+}
+
 /* The clock time a turn landed at, in the reader's own zone. The date is
    dropped — a conversation is read as a sequence, not a calendar — and the
    full ISO stamp rides the title for the one time somebody needs the day. */
@@ -25097,7 +25116,7 @@ function sessBeads(data) {
   if (where) box.appendChild(where);
   if (b.winddown) {
     const w = el("p", "wf-warning",
-      `winding down since ${String(b.winddown.since || "").replace("T", " ").slice(0, 19)} — ` +
+      `winding down since ${localStamp(b.winddown.since)} — ` +
       `asked to settle ${(b.winddown.issues || []).join(", ")}; terminated once ` +
       `idle or after ${Math.round(b.winddown.grace || 0)}s. Kill again to stop now.`);
     box.appendChild(w);
@@ -25165,7 +25184,7 @@ function sessBeadsPanel(data) {
   if (panelWhere) box.appendChild(panelWhere);
   if (b.winddown) {
     box.appendChild(el("p", "wf-warning",
-      `winding down since ${String(b.winddown.since || "").replace("T", " ").slice(0, 19)} — ` +
+      `winding down since ${localStamp(b.winddown.since)} — ` +
       `asked to settle ${(b.winddown.issues || []).join(", ")}; terminated once ` +
       `idle or after ${Math.round(b.winddown.grace || 0)}s. Kill again to stop now.`));
   }
@@ -25452,7 +25471,7 @@ function sessCommits(data) {
     const row = el("div", "sess-commit");
     row.appendChild(el("span", "sess-commit-sha", r.short || ""));
     row.appendChild(el("span", "sess-commit-subject", r.subject || ""));
-    const bits = [String(r.committed_at || "").replace("T", " ").slice(0, 19)];
+    const bits = [localStamp(r.committed_at)];
     if (r.worktree) bits.push(r.worktree);
     row.appendChild(el("span", "sess-commit-bits", bits.join("  ·  ")));
     row.title = r.sha || "";
@@ -31970,10 +31989,10 @@ function pendingBanner(data, after) {
     "p", "wf-note",
     recur
       ? `this workflow recurs: the round that finished at ` +
-        `${(req.at || "?").replace("T", " ")} filed this itself. The agent ` +
+        `${localStamp(req.at) || "?"} filed this itself. The agent ` +
         `starts the next round on its next cflow 'status' call; withdrawing ` +
         `the request is how the loop is stopped.`
-      : `asked by ${req.by || "?"} at ${(req.at || "").replace("T", " ")} — the ` +
+      : `asked by ${req.by || "?"} at ${localStamp(req.at)} — the ` +
         `session's agent starts it itself, so it knows what it is running. It ` +
         `picks the request up on its next cflow 'status' call.`
   ));
@@ -32472,7 +32491,7 @@ function cflow2Reports(journal) {
   return (journal || []).filter((e) => e && e.event === "reported").reverse().map((e) => ({
     node: e.node || "", label: String(e.node || "").split("/").pop(),
     outcome: e.outcome || "ok", by: e.by || "",
-    ts: String(e.ts || "").replace("T", " ").replace("+00:00", ""),
+    ts: localStamp(e.ts),
     text: typeof e.text === "string" ? e.text : "", value: e.value,
   }));
 }
@@ -32771,7 +32790,7 @@ function cf2NodePaneBody(body, data, n, doc, live, post, host, onSelect) {
     for (const e of doc.journal.slice().reverse()) {
       const rest = Object.keys(e).filter((k) => !["ts", "event", "node", "instance"].includes(k))
         .map((k) => `${k}=${typeof e[k] === "object" ? JSON.stringify(e[k]) : e[k]}`).join(" ");
-      grid.appendChild(el("span", "cf2-when", String(e.ts || "").replace("T", " ").replace("+00:00", "")));
+      grid.appendChild(el("span", "cf2-when", localStamp(e.ts)));
       grid.appendChild(el("span", "cf2-ev " + (e.event || ""), e.event || ""));
       const rs = el("span", "cf2-jrest", rest);
       rs.title = rest;
@@ -33321,7 +33340,7 @@ function renderCflow2Into(box, data, ui, force = false) {
   metaItem("run", run.run || "?", "mono");
   metaItem("round", run.round == null ? "unconfirmed" : String(run.round));
   metaItem("recur", cflow2RecurText(data.chart));
-  if (run.started) metaItem("started", String(run.started).replace("T", " ").replace("+00:00", "Z"));
+  if (run.started) metaItem("started", localStamp(run.started));
   if (run.reason) metaItem("reason", run.reason);
   if (run.outcome !== undefined && run.outcome !== null) metaItem("outcome", String(run.outcome));
   if (run.acceptance && run.acceptance.status) {
@@ -33475,7 +33494,7 @@ function renderCflow2Into(box, data, ui, force = false) {
     } else if (a.prompt) card.appendChild(mdInto(el("div", "md cf2-body"), a.prompt));
     if ((a.asked || []).length) {
       card.appendChild(el("p", "wf-note", `asked: ${a.asked.join(", ")}` +
-        (a.deadline ? ` (until ${String(a.deadline).replace("T", " ")})` : "")));
+        (a.deadline ? ` (until ${localStamp(a.deadline)})` : "")));
     }
     const opts = (a.options || []).length ? a.options
       : [{ name: "approve", description: "enter the task" },
@@ -33556,7 +33575,7 @@ function renderCflow2Into(box, data, ui, force = false) {
   for (const v of run.verifying || []) {
     const cmd = v.verify && v.verify.run;
     const card = cf2Card("verify", v.label || v.node,
-      v.started_at ? `since ${String(v.started_at).replace("T", " ")}` : "");
+      v.started_at ? `since ${localStamp(v.started_at)}` : "");
     if (cmd) card.appendChild(el("div", "mono cf2-cmd", Array.isArray(cmd) ? cmd.join(" ") : cmd));
     prog.appendChild(card);
   }
@@ -33725,7 +33744,7 @@ function renderCflow2Into(box, data, ui, force = false) {
     const rest = Object.keys(e).filter((k) => !["ts", "event", "node", "instance", "text"].includes(k))
       .map((k) => `${k}=${typeof e[k] === "object" ? JSON.stringify(e[k]) : e[k]}`)
       .join(" ");
-    grid.appendChild(el("span", "cf2-when", String(e.ts || "").replace("T", " ").replace("+00:00", "")));
+    grid.appendChild(el("span", "cf2-when", localStamp(e.ts)));
     grid.appendChild(el("span", "cf2-ev " + (e.event || ""), e.event || ""));
     grid.appendChild(el("span", "cf2-jnode", e.instance || e.node || ""));
     const r = el("span", "cf2-jrest", rest);
@@ -33797,7 +33816,7 @@ function cflow2TriggerLines(events) {
     const detail = e.detail || e.reason || "";
     return {
       cls: kind,
-      text: `${String(e.ts || "").replace("T", " ")}  ${kind}  ${what}${where}${at}` +
+      text: `${localStamp(e.ts)}  ${kind}  ${what}${where}${at}` +
         (id ? ` [${id}]` : "") + (detail ? ` — ${detail}` : ""),
     };
   });
@@ -36039,7 +36058,7 @@ function renderSession(data) {
     // named, never opened: it is the run's, read by whoever wrote it.
     metaRow(dl, "kind", s.kind, "declared at creation (--kind)");
     const prog = s.progress || {};
-    metaRow(dl, "progress", progressBrief(prog), prog.at ? `published ${prog.at}` : "");
+    metaRow(dl, "progress", progressBrief(prog), prog.at ? `published ${localStamp(prog.at)}` : "");
     metaRow(dl, "progress file", prog.file, "named by the session; not read by claunch");
     metaRow(dl, "progress link", prog.url);
     // Whose token it actually runs on, when that is not the profile's own —
@@ -36149,16 +36168,16 @@ function renderSession(data) {
     // below, where it can be changed as well as read — one fact drawn twice
     // inside one panel is a fact that gets read twice and believed once.
     metaRow(dl, "pid", s.pid);
-    metaRow(dl, "created", (s.created_at || "").replace("T", " "));
-    metaRow(dl, "last output", (s.last_output_at || "").replace("T", " "));
+    metaRow(dl, "created", localStamp(s.created_at));
+    metaRow(dl, "last output", localStamp(s.last_output_at));
     if (s.status === "exited") {
-      metaRow(dl, "exited", `${(s.exited_at || "").replace("T", " ")} (code ${s.exit_code ?? "?"})`);
+      metaRow(dl, "exited", `${localStamp(s.exited_at)} (code ${s.exit_code ?? "?"})`);
     }
     if (s.paused_at) {
-      metaRow(dl, "paused", (s.paused_at || "").replace("T", " "));
+      metaRow(dl, "paused", localStamp(s.paused_at));
     }
     if (s.held_at) {
-      metaRow(dl, "hold", (s.held_at || "").replace("T", " "));
+      metaRow(dl, "hold", localStamp(s.held_at));
     }
     view.appendChild(dl);
 
@@ -36238,7 +36257,7 @@ function renderSession(data) {
       const chip = el("a", "sess-mesh", `${m.mesh} · ${m.handle} (${memberRoleLabel(m)})` +
         (auto.length ? ` · auto: ${auto.map((a) => a.role).join(", ")}` : ""));
       chip.href = "#/mesh/" + encodeURIComponent(m.mesh);
-      chip.title = `${m.members} member(s); joined ${(m.joined_at || "").replace("T", " ")}` +
+      chip.title = `${m.members} member(s); joined ${localStamp(m.joined_at)}` +
         auto.map((a) => `\n${a.role}: granted by the daemon — ${a.why}`).join("");
       meshBox.appendChild(chip);
     }
@@ -36692,7 +36711,7 @@ function sessInputJournalRow(box, name, entry) {
   const status = entry.status || entry.event || "?";
   const row = el("div", "wf-journal-line mono sess-input-row");
   row.appendChild(el("span", "sess-input-at",
-    `${(entry.at || "").replace("T", " ")}  `));
+    `${localStamp(entry.at)}  `));
   const badge = el("span", `sess-input-status sess-input-${status}`, status);
   badge.title = SESS_INPUT_STATUS_TITLE[status] || status;
   row.appendChild(badge);
@@ -38255,7 +38274,7 @@ function renderSessRun(body, data) {
   meta.appendChild(el("span", null, `run ${run.run || "?"}`));
   meta.appendChild(el("span", null, `${run.steps_completed ?? 0} steps done`));
   meta.appendChild(el("span", null,
-    `started ${(run.started_at || "?").replace("T", " ")}`));
+    `started ${localStamp(run.started_at) || "?"}`));
   body.appendChild(meta);
   for (const w of (wf || {}).warnings || []) {
     body.appendChild(el("p", "wf-warning", `⚠ ${w}`));
@@ -38274,7 +38293,7 @@ function renderSessRun(body, data) {
     const head = el("div", "wf-report-head");
     head.appendChild(el("span", "wf-report-step",
       r.visit > 1 ? `${r.step} ×${r.visit}` : r.step));
-    head.appendChild(el("span", "wf-report-at", (r.at || "").replace("T", " ")));
+    head.appendChild(el("span", "wf-report-at", localStamp(r.at)));
     card.appendChild(head);
     card.appendChild(mdInto(el("div", "wf-report-summary md"), r.summary || ""));
     if (r.details) {
@@ -38305,7 +38324,7 @@ function renderSessRun(body, data) {
   journal.appendChild(el("summary", null, `journal (${total} events)`));
   for (const e of events.slice(0, SESS_RUN_JOURNAL)) {
     journal.appendChild(el("div", "wf-journal-line mono",
-      `${(e.at || "").replace("T", " ")}  ${e.event || ""}` +
+      `${localStamp(e.at)}  ${e.event || ""}` +
       `${e.step ? "  " + e.step : ""}${e.option ? "  -> " + e.option : ""}`));
   }
   if (total > SESS_RUN_JOURNAL) {

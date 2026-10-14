@@ -31,6 +31,9 @@
 
    Slice the real functions out of app.js and drive them against a stub
    DOM. */
+// Stamps are shown in the reader's zone (localStamp, claunch-ox5qs); pin it
+// so the expected strings below do not depend on the machine running this.
+process.env.TZ = "Asia/Seoul";
 const fs = require("fs");
 const path = require("path");
 const src = fs.readFileSync(
@@ -110,7 +113,7 @@ new Function(
   + "const BEADS_ACTIVE = new Set([\"open\", \"in_ready\", \"in_progress\", \"in_review\", \"blocked\"]);\n"
   + slice("beadsPriBadge") + slice("beadsCard")
   + slice("beadsBoardWhere") + slice("sessBeadsBoardLine")
-  + slice("sessBeadsPanel") + slice("sessBeadsLane")
+  + slice("localStamp") + slice("sessBeadsPanel") + slice("sessBeadsLane")
   + `
 Object.assign(exports, {
   panel: sessBeadsPanel, lane: sessBeadsLane, created, went,
@@ -250,7 +253,7 @@ const WIND = {
   },
 };
 check("a session being wound down still says so here",
-      ctx.panel(WIND).find("wf-warning").map((n) => /winding down since 2026-09-02 07:00:00/.test(n.text)),
+      ctx.panel(WIND).find("wf-warning").map((n) => /winding down since 2026-09-02 16:00:00/.test(n.text)),
       [true]);
 
 if (failures) process.exit(1);

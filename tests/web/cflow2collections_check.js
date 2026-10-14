@@ -1,5 +1,8 @@
 /* The v2 run view's collections table and trigger lines (docs/cflow-v2.md
    2.7, 2.8), run against the real functions sliced from app.js. */
+// Stamps are shown in the reader's zone (localStamp, claunch-ox5qs); pin it
+// so the expected strings below do not depend on the machine running this.
+process.env.TZ = "Asia/Seoul";
 const fs = require("fs");
 const path = require("path");
 const assert = require("assert");
@@ -20,7 +23,7 @@ function slice(name) {
 
 const ctx = {};
 new Function("ctx",
-  `${slice("cflow2CollectionRows")} ${slice("cflow2StatusValues")} ${slice("cflow2TriggerLines")}
+  `${slice("localStamp")} ${slice("cflow2CollectionRows")} ${slice("cflow2StatusValues")} ${slice("cflow2TriggerLines")}
    Object.assign(ctx, { cflow2CollectionRows, cflow2StatusValues, cflow2TriggerLines });`)(ctx);
 
 // A queue: keyed by its key field, status apart, the rest as name=value.
@@ -78,7 +81,7 @@ const lines = ctx.cflow2TriggerLines([
 ]);
 assert.strictEqual(lines.length, 3);
 assert.strictEqual(lines[0].cls, "queued");
-assert.strictEqual(lines[0].text, "2026-10-06 10:00:00  queued  enqueue-landing req (leave) [t1]");
+assert.strictEqual(lines[0].text, "2026-10-06 19:00:00  queued  enqueue-landing req (leave) [t1]");
 assert.strictEqual(lines[1].cls, "skipped");
 assert.ok(lines[1].text.endsWith("— parent 'lead' has no live run that declares 'landing'"));
 assert.strictEqual(lines[2].cls, "done");
@@ -90,6 +93,6 @@ const joined = ctx.cflow2TriggerLines([
   { ts: "2026-10-06T10:00:02", event: "trigger_skipped", trigger: "t9", reason: "the run has no driver session" },
 ]);
 assert.strictEqual(joined[1].text,
-  "2026-10-06 10:00:02  skipped  briefing n1 (enter) [t9] — the run has no driver session");
+  "2026-10-06 19:00:02  skipped  briefing n1 (enter) [t9] — the run has no driver session");
 
 console.log("cflow2collections ok");

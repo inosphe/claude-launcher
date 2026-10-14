@@ -414,6 +414,7 @@ CHECKS = [
         "window_check.js",
         "stats_check.js",
         "sendinput_check.js",
+        "localstamp_check.js",
         "linesync_check.js",
         "terminputended_check.js",
         "clipboard_check.js",

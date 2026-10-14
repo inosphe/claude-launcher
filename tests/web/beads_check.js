@@ -106,7 +106,7 @@ new Function(
   + slice("beadsStatusBadge") + slice("beadsPriBadge") + slice("beadsIssueRow")
   + slice("beadsBoardLabel") + slice("beadsBoardWhere")
   + slice("beadsNameOfRoot") + slice("sessBeadsBoardLine")
-  + slice("sessBeads") + slice("sessBeadsCreate")
+  + slice("localStamp") + slice("sessBeads") + slice("sessBeadsCreate")
   + slice("sessBeadsCreateForm") + slice("sessBeadsFiledNote")
   + slice("url")
   + slice("sessReports") + slice("sessReportRow")

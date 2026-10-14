@@ -127,7 +127,7 @@ new Function(
   + slice("clampSplitRatio") + slice("loadSessLayouts")
   + slice("sessLayoutFor") + slice("setSessLayout")
   + slice("sessDetailTabs") + slice("sessGroupHead")
-  + slice("renderSession") + `
+  + slice("localStamp") + slice("renderSession") + `
 Object.assign(exports, {
   render: renderSession, tabs: sessDetailTabs, layout: sessLayoutFor,
   setLayout: setSessLayout, SUBTABS: DETAIL_SUBTABS,

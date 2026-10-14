@@ -66,7 +66,7 @@ function el(tag, cls, text) {
 
 const ctx = {};
 new Function("exports", "document", "el",
-  slice("sessCommits")
+  slice("localStamp") + slice("sessCommits")
   + "Object.assign(exports, { commits: sessCommits });")(ctx, document, el);
 
 let failures = 0;
