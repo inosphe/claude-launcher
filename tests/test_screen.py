@@ -789,27 +789,39 @@ def test_a_foreground_feeder_ignores_the_budget():
 
 def _paced_background_drain(chunks, *, delay):
     """Feed ``chunks`` to a background feeder paced at ``delay`` per slice;
-    return (seconds to drain, the slices pyte was handed)."""
-    import time as _t
+    return (the pacing waits it asked for, the slices pyte was handed).
 
+    The pacing wait is ``asyncio.wait_for(..., delay)``; here it is replaced
+    by a recorder that times out at once, so the drain is judged by how long
+    the feeder *asked* to wait and not by how long a loaded machine took."""
     renders = []
+    waits = []
 
     class Counting(ScreenState):
         def feed_render(self, data):
             renders.append(len(data))
             super().feed_render(data)
 
+    async def fake_wait_for(awaitable, timeout):
+        waits.append(timeout)
+        awaitable.close()                          # the never-awaited Event.wait()
+        raise asyncio.TimeoutError
+
     async def run():
         feeder = ScreenFeeder(Counting(120, 30), foreground=lambda: False,
                               background_delay=delay)
-        t0 = _t.monotonic()
         for chunk in chunks:                       # all queued before the pump runs
             feeder.submit(chunk)
         await feeder.drained()
         feeder.close()
-        return _t.monotonic() - t0
 
-    return asyncio.run(run()), renders
+    real_wait_for = asyncio.wait_for
+    asyncio.wait_for = fake_wait_for
+    try:
+        asyncio.run(run())
+    finally:
+        asyncio.wait_for = real_wait_for
+    return waits, renders
 
 
 def test_background_pacing_is_per_slice_of_bytes_not_per_chunk():
@@ -823,15 +835,13 @@ def test_background_pacing_is_per_slice_of_bytes_not_per_chunk():
 
 def test_small_and_large_chunks_drain_at_the_same_byte_rate():
     """The ceiling is bytes per second whatever the chunking: 20 KB as 200
-    small chunks takes as long as 20 KB in one, ~5 slices x delay."""
+    small chunks is paced as long as 20 KB in one, 5 slices x delay."""
     delay = 0.05
     small, _ = _paced_background_drain([b"x" * 100] * 200, delay=delay)
     large, _ = _paced_background_drain([b"x" * 20_000], delay=delay)
     # Per chunk it was 200 x 0.05 = 10 s; per slice it is 5 x 0.05 = 0.25 s.
-    assert small < 1.0
-    assert large < 1.0
-    assert small < large + 0.2
-    assert small >= 4 * delay                      # still paced, not unpaced
+    assert small == large == [delay] * 5
+    assert sum(small) < 1.0                        # not per chunk (10 s)
 
 
 def test_an_attached_only_feeder_parks_its_tail_until_a_viewer_arrives():
