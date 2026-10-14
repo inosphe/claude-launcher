@@ -259,7 +259,7 @@ def test_nested_gitfile_that_names_no_gitdir_is_preserved(setup, content):
         assert result["removed"] == 0 and mine.exists()
     finally:
         # Left behind, this file keeps the whole basetemp cleanup_pending.
-        broken.unlink()
+        broken.unlink(missing_ok=True)
 
 
 @pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="POSIX permissions")
