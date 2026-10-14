@@ -6992,38 +6992,79 @@ def watch_apply(cwd: Optional[str], scope: Optional[str], name: str, key: Any, c
 def holders(name: str, session: str, cwds: List[str]) -> List[Tuple[str, str]]:
     """``(cwd, scope)`` of every live v2 run in ``cwds`` whose driver is
     ``session`` and whose chart declares collection ``name``."""
-    session = str(session or "").strip()
-    out: List[Tuple[str, str]] = []
-    if not session:
+    return HolderIndex(name).holders(session, cwds)
+
+
+class HolderIndex:
+    """:func:`holders` for many sessions over one reading of the slots.
+
+    Every live run of a directory is read once, whoever drives it, and the
+    answer for a session is a filter over what was read. A caller that asks
+    for many sessions in one pass -- the merger grant asks for every live
+    mesh member each minute, a landing route for each ancestor in turn --
+    reads each slot once instead of once per session: with ~90 members over
+    ~66 slots that pass was ~6000 state reads a minute on the daemon, the
+    largest GIL holder beside screen replay while a restart's queue ran
+    (claunch-cb65c). What was read is not re-read, so an instance answers as
+    of its first look at each directory: make one per pass.
+    """
+
+    def __init__(self, name: str):
+        self.name = name
+        #: base directory -> [(scope, driver)] of its live top-level runs
+        self._bases: Dict[str, List[Tuple[str, str]]] = {}
+        #: (base, scope) -> whether its chart declares ``name``; read only for
+        #: a run some caller asked about, as :func:`holders` always did
+        self._declares: Dict[Tuple[str, str], bool] = {}
+
+    def holders(self, session: str, cwds: List[str]) -> List[Tuple[str, str]]:
+        session = str(session or "").strip()
+        out: List[Tuple[str, str]] = []
+        if not session:
+            return out
+        seen = set()
+        for cwd in cwds or []:
+            try:
+                base = str(store_mod.resolve_cwd(cwd))
+            except (OSError, ValueError):
+                continue
+            if base in seen:
+                continue
+            seen.add(base)
+            for scope, driver in self._live(base):
+                if driver == session and self._declared(base, scope):
+                    out.append((base, scope))
         return out
-    seen = set()
-    for cwd in cwds or []:
-        try:
-            base = str(store_mod.resolve_cwd(cwd))
-        except (OSError, ValueError):
-            continue
-        if base in seen:
-            continue
-        seen.add(base)
+
+    def _live(self, base: str) -> List[Tuple[str, str]]:
+        found = self._bases.get(base)
+        if found is not None:
+            return found
+        found = []
         for scope in store_mod.list_scopes(base):
             if not store_mod.is_own(scope):
                 continue  # another daemon's session of the same name
-            st = RunStore(base, scope)
             try:
-                state = st.load_state()
+                state = RunStore(base, scope).load_state()
             except StoreError:
                 continue
             if state.get("parent"):
                 continue  # a nested delegation run holds no collections
-            if state.get("status") not in LIVE_STATUSES or driver_of(state) != session:
-                continue
+            if state.get("status") in LIVE_STATUSES:
+                found.append((scope, driver_of(state)))
+        self._bases[base] = found
+        return found
+
+    def _declared(self, base: str, scope: str) -> bool:
+        key = (base, scope)
+        if key not in self._declares:
             try:
-                chart = st.load_chart()
+                chart = RunStore(base, scope).load_chart()
             except StoreError:
-                continue
-            if name in _chart_col_specs(chart):
-                out.append((base, scope))
-    return out
+                self._declares[key] = False
+            else:
+                self._declares[key] = self.name in _chart_col_specs(chart)
+        return self._declares[key]
 
 
 _ENTER: Dict[str, Callable[[Run, str, ir.Node], None]] = {

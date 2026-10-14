@@ -139,10 +139,16 @@ def session_cwds(manager: Any, *extra: Optional[str]) -> List[str]:
 # -- holders ------------------------------------------------------------------
 
 
-def v2_holders(name: str, parent: str, cwds: Sequence[str]) -> List[Tuple[str, str]]:
-    """Live v2 runs driven by ``parent`` that declare collection ``name``."""
+def v2_holders(name: str, parent: str, cwds: Sequence[str],
+               index: Optional["runtime.HolderIndex"] = None) -> List[Tuple[str, str]]:
+    """Live v2 runs driven by ``parent`` that declare collection ``name``.
+    ``index`` (a :class:`..cflow2.runtime.HolderIndex` for ``name``) is the
+    reading shared by a caller that asks for several sessions in one pass."""
     try:
-        found = runtime.holders(name, parent, list(cwds))
+        if index is not None:
+            found = index.holders(parent, list(cwds))
+        else:
+            found = runtime.holders(name, parent, list(cwds))
     except Exception as exc:  # noqa: BLE001 - an unreadable slot is not a holder
         log.debug("cflow2 holders(%s, %s) failed: %s", name, parent, exc)
         return []
@@ -465,9 +471,10 @@ def push_to_leader(manager: Any, *, session: str, name: str,
     if not cur:
         return False, f"{session or 'this run'} has no parent session"
     passed: List[str] = []
+    index = runtime.HolderIndex(name)  # one reading of the slots for the whole walk
     while cur and cur not in seen and len(passed) < LEADER_HOPS:
         seen.add(cur)
-        v2 = [h for h in v2_holders(name, cur, list(cwds) + session_cwds(manager, cur))
+        v2 = [h for h in v2_holders(name, cur, list(cwds) + session_cwds(manager, cur), index)
               if h[1] == cstore.main_scope(h[1])]
         v1 = [h for h in v1_landing_holders(cur) if h[1] is None] if name == LANDING else []
         if v2 or v1:
@@ -506,10 +513,16 @@ def landing_holders(manager: Any, cwds: Sequence[str]) -> Callable[[str, str], L
     from ..cflow2 import store as cstore
     from .landing_route import Holder
 
+    # One reading of the slots for every session this closure is asked about:
+    # a Router walks ancestors and the merger grant asks for every live member
+    # (claunch-cb65c). The closure lives for one route or one grant pass.
+    index = runtime.HolderIndex(LANDING)
+
     def holders(session: str, repo: Optional[str]) -> List[Holder]:
         out: List[Holder] = []
         for c, sc in sorted(set(v2_holders(LANDING, session,
-                                           list(cwds) + session_cwds(manager, session)))):
+                                           list(cwds) + session_cwds(manager, session),
+                                           index))):
             if repo is None or cflow_landing.common_dir(c) == repo:
                 out.append(Holder(c, sc, sc == cstore.main_scope(sc), "v2"))
         for c, run in v1_landing_holders(session):

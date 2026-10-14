@@ -476,6 +476,26 @@ def test_holders(tmp_path):
     assert runtime.holders("landing", "lead", [str(tmp_path)]) == []
 
 
+def test_holder_index_reads_each_slot_once(tmp_path, monkeypatch):
+    # The merger grant asks about every live member in one pass; the index
+    # answers each the way holders() does from one reading (claunch-cb65c).
+    _start(tmp_path, TWO, driver="lead")
+    runtime.start(_chart(TWO, COLS), cwd=str(tmp_path), scope="u", caps={},
+                  driver="other", now=T0)
+    reads = []
+    real = RunStore.load_state
+    monkeypatch.setattr(RunStore, "load_state",
+                        lambda self: reads.append(self.scope) or real(self))
+    index = runtime.HolderIndex("landing")
+    base = str(tmp_path.resolve())
+    assert index.holders("lead", [str(tmp_path)]) == [(base, "t@main")]
+    assert index.holders("other", [str(tmp_path), str(tmp_path)]) == [(base, "u@main")]
+    assert index.holders("nobody", [str(tmp_path)]) == []
+    assert index.holders("", [str(tmp_path)]) == []
+    assert sorted(reads) == ["t@main", "u@main"]
+    assert runtime.HolderIndex("nope").holders("lead", [str(tmp_path)]) == []
+
+
 NESTED = """
 nodes:
   a: {prompt: A}
