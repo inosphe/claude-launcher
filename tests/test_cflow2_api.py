@@ -310,6 +310,45 @@ def test_preflight_keeps_v1_on_a_shared_name_and_takes_v2_when_asked(proj):
         _preflight({"workflow": "helper", "workflow_version": 2}, str(proj))
 
 
+def _break(proj, name, text):
+    """Rewrite ``name`` with a key the compiler refuses -- the shape of a
+    definition on disk that is newer than the daemon's loaded compiler
+    (claunch-qjgfr)."""
+    (proj / ".claunch" / "workflows" / "v2" / f"{name}.yaml").write_text(
+        text.replace("nodes:", "not_a_key: 1\nnodes:", 1), encoding="utf-8")
+
+
+def test_a_v2_definition_that_does_not_compile_is_refused_with_its_error(proj):
+    cwd = str(proj)
+    _break(proj, "pick", PICK)
+    _break(proj, "demo", V2_DEMO)
+    error = cflow2_web.v2_error("pick", cwd)
+    assert error and "not_a_key" in error
+    assert "pick" not in cflow2_web.v2_names(cwd)
+    assert cflow2_web.v2_error("kid", cwd) is None
+    assert cflow2_web.v2_error("ghost", cwd) is None
+    # Named plainly or as v2, the refusal carries the compile error rather
+    # than "no v2 workflow named 'pick'".
+    for args in (("pick",), ("pick", 2), ("v2:pick",)):
+        with pytest.raises(cflow2_web.ChoiceError, match="does not compile.*not_a_key"):
+            cflow2_web.choose(*args, cwd=cwd)
+    with pytest.raises(onboard.OnboardError, match="'pick'.*does not compile.*not_a_key"):
+        _preflight({"workflow": "pick"}, cwd)
+    # A name v1 also declares still falls back to v1 when not asked for v2.
+    assert cflow2_web.choose("demo", cwd=cwd) is None
+    with pytest.raises(cflow2_web.ChoiceError, match="does not compile.*not_a_key"):
+        cflow2_web.choose("demo", 2, cwd=cwd)
+
+
+def test_a_paired_child_that_does_not_compile_is_logged_with_its_error(proj, caplog):
+    cwd = str(proj)
+    runtime.start(layers.load("pick", cwd), cwd=cwd, scope="pm", caps={})
+    _break(proj, "kid", KID)
+    with caplog.at_level("WARNING"):
+        assert onboard.paired_child_workflow(parent="pm", parent_cwd=cwd, cwd=cwd) == ""
+    assert "does not compile" in caplog.text and "not_a_key" in caplog.text
+
+
 def test_preflight_admits_a_generated_v2_file_and_refuses_one_elsewhere(proj, tmp_path):
     gen = proj / ".cflow2" / "generated"
     gen.mkdir(parents=True)

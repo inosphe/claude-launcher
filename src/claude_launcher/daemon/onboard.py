@@ -299,6 +299,17 @@ def _paired(*, parent: str, parent_cwd: str, cwd: str) -> Tuple[str, int]:
         return paired, 1
     if paired in v2:
         return paired, 2
+    try:
+        broken = cflow2_web.v2_error(paired, cwd or "")
+    except Exception:  # noqa: BLE001 - the log line is all this feeds
+        broken = None
+    if broken:
+        log.warning(
+            "%r's run pairs children with %r, which does not compile in %s (%s) "
+            "— child of %r starts with no run",
+            parent, paired, cwd or "the daemon cwd", broken, parent,
+        )
+        return "", 1
     log.info(
         "%r's run pairs children with %r, which is not declared in %s "
         "— child of %r starts with no run",

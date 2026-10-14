@@ -156,6 +156,24 @@ def v2_names(cwd: str) -> List[str]:
     return [e["name"] for e in startable(cwd) if not e.get("error")]
 
 
+def v2_error(name: str, cwd: str) -> Optional[str]:
+    """The compile error of the v2 definition ``name`` in ``cwd``, ``None``
+    when it compiles or no v2 layer declares it. :func:`v2_names` leaves a
+    broken definition out; a refusal that names the workflow quotes this so
+    the reason is not lost (claunch-qjgfr: a daemon whose compiler predates
+    a definition on disk refused it as "no v2 workflow named ...")."""
+    for entry in startable(cwd):
+        if entry["name"] == name and entry.get("error"):
+            return str(entry["error"])
+    return None
+
+
+def _broken(name: str, cwd: str, error: str) -> "ChoiceError":
+    return ChoiceError(
+        f"v2 workflow {name!r} in {cwd or 'the daemon cwd'} does not compile -- {error}"
+    )
+
+
 def v1_names(cwd: str) -> List[str]:
     return [name for name, _ in cflow_state.list_workflows(cwd or None)]
 
@@ -258,16 +276,27 @@ def choose(
         # v2 layers are consulted (an unreadable directory, a definition that
         # breaks the compiler) must not refuse a v1 spawn -- the request is
         # read as v1 and the v2 problem is logged.
+        broken = None
         try:
-            if workflow in v2_names(cwd) and workflow not in v1_names(cwd):
-                return workflow, layers.load(workflow, cwd)
+            v2 = v2_names(cwd)
+            if workflow not in v1_names(cwd):
+                if workflow in v2:
+                    return workflow, layers.load(workflow, cwd)
+                # No v1 definition to fall back to: a v2 one that fails to
+                # compile is what the request named, and its error is the answer.
+                broken = v2_error(workflow, cwd)
         except Exception as exc:  # noqa: BLE001 - see above
             log.warning("cflow v2: could not decide whether %r is a v2 workflow in %s; "
                         "treating it as v1: %s", workflow, cwd, exc)
+        if broken:
+            raise _broken(workflow, cwd, broken)
         return None
     v2 = v2_names(cwd)
     if want == 2:
         if workflow not in v2:
+            broken = v2_error(workflow, cwd)
+            if broken:
+                raise _broken(workflow, cwd, broken)
             raise ChoiceError(
                 f"no v2 workflow named {workflow!r} in {cwd or 'the daemon cwd'} -- "
                 f"available: {', '.join(v2) or '(none)'}"
