@@ -298,6 +298,9 @@ class _Watch:
     judged: Optional[Tuple[Any, ...]] = None
     nudged_at: Optional[float] = None
     pending: bool = False
+    #: busy seen again while a judgment was pending: that is the next turn,
+    #: and it must survive the re-arm at the judgment's end.
+    rebusy: bool = False
     extra: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -383,7 +386,9 @@ class QaNudgeClock:
             live.add(name)
             w = self._watch.setdefault(name, _Watch())
             if status == STATUS_BUSY:
-                if not w.busy_seen:
+                if w.pending:
+                    w.rebusy = True
+                elif not w.busy_seen:
                     w.busy_seen = True
                     w.qa_seq = self._qa_seq(name)
                 continue
@@ -426,9 +431,9 @@ class QaNudgeClock:
         try:
             return await self._judge(name, w)
         finally:
-            w.busy_seen = False
+            w.busy_seen, w.rebusy = w.rebusy, False
             w.pending = False
-            w.qa_seq = None
+            w.qa_seq = self._qa_seq(name) if w.busy_seen else None
 
     async def _judge(self, name: str, w: _Watch) -> Optional[str]:
         session = self._session(name)

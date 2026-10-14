@@ -253,6 +253,18 @@ def test_only_a_busy_to_idle_edge_is_judged(on):
     assert clock.scan(32.0) == []
 
 
+def test_a_turn_that_starts_while_one_is_judged_is_not_lost(on):
+    on["answer"] = ("none", 0.9)
+    s = _FakeSession("s1")
+    clock = _clock(s)
+    assert _turn(clock, s) == ["s1"]
+    s.status_value = "busy"          # a person typed while Jev was answering
+    assert clock.scan(120.0) == []
+    run(clock.judge("s1"))
+    s.status_value = "idle"
+    assert clock.scan(130.0) == ["s1"]
+
+
 def test_use_qa_is_delivered_and_journaled(on):
     s = _FakeSession("s1")
     clock = _clock(s)
