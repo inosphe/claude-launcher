@@ -200,6 +200,40 @@ def home(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def ptyhost_leak_check():
+    """Fail a test that leaves a PTY host running (claunch-xnnct).
+
+    A host outlives the process that started it by design, and it is the
+    parent of the session children; one left behind keeps running children
+    nobody watches. Every host is started through ``ptyhost.client.start_host``,
+    which records it, so the check is the record. A leftover host is ended
+    (SIGTERM ends its sessions first) and the test fails.
+    """
+    yield
+    mod = sys.modules.get("claude_launcher.daemon.ptyhost.client")
+    if mod is None:
+        return
+    started = list(mod._started)
+    mod._started.clear()
+    leaked = []
+    for proc in started:
+        # A host that was told to stop is a moment away from gone.
+        try:
+            proc.wait(timeout=3)
+        except Exception:
+            leaked.append(proc)
+    for proc in leaked:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except Exception:
+            proc.kill()
+            proc.wait(timeout=5)
+    if leaked:
+        pytest.fail(f"PTY host(s) left running: {[p.pid for p in leaked]}")
+
+
+@pytest.fixture(autouse=True)
 def no_linux_clipboard_reads(monkeypatch):
     """Keep the daemon's clipboard history off the developer's clipboard on Linux.
 

@@ -382,6 +382,9 @@ DAEMON_DEFAULTS = {
     # "event loop stalled" line to daemon.log (daemon/loop_lag.py,
     # claunch-9gm02). 0 turns it off. Read when the daemon starts.
     "loop_lag_log_s": 1.0,
+    # Run session PTYs in a separate PTY host process (claunch-xnnct, stage
+    # 1: POSIX only; a daemon exit still ends its sessions). Read at start.
+    "pty_host": False,
     # How long an agent-requested daemon restart may wait on the web UI's
     # approval before it counts as approved and goes out (see
     # daemon/restart_gate.py). Seconds. Read when the daemon constructs its
