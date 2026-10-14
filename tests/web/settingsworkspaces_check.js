@@ -53,7 +53,7 @@ assert.deepEqual(parseHash("#/workspaces"), { page: "workspaces" });
 /* ---- which cards each section draws ------------------------------------ */
 const CARDS = [
   "keyHelpCard", "scoreGoalSettingsCard", "roleWorkflowsCard", "railStaleCard", "modelChoicesCard",
-  "llmSettingsCard", "faqCard", "promptPresetCard", "prompterSettingsCard",
+  "llmSettingsCard", "simDefaultsCard", "faqCard", "promptPresetCard", "prompterSettingsCard",
   "statusCheckCard", "ragCard", "ghCard", "relaySettingsCard",
   "wsAddCard", "projectsCard", "beadsBoardsCard",
 ];
@@ -149,7 +149,7 @@ assert.deepEqual(shown, ["workspaces", "settings", "settings"]);
 /* ---- which data each section fetches ------------------------------------ */
 const called = [];
 const REFRESHERS = [
-  "refreshHarnesses", "refreshLlmSettings", "refreshFaq", "refreshPromptPresets",
+  "refreshHarnesses", "refreshLlmSettings", "refreshSimDefaults", "refreshFaq", "refreshPromptPresets",
   "refreshPrompterSettings", "refreshStatusChecks", "refreshRagStatus",
   "refreshGhStatus", "refreshRelaySettings", "refreshBeadsBoards",
   "refreshProjects", "refreshProfileSettings", "refreshInstallOverview",
@@ -185,6 +185,8 @@ octx.openSettings("");
 assert.equal(called.includes("refreshBeadsBoards"), false,
              "General no longer fetches the board listing it does not draw");
 assert.equal(called.includes("refreshLlmSettings"), true);
+assert.equal(called.includes("refreshSimDefaults"), true,
+             "General fetches the Simulation models card's data");
 assert.equal(called.includes("refreshRoleWorkflowSettings"), true,
              "General fetches the Role workflows card's data");
 
