@@ -62,6 +62,7 @@ from . import loop_lag as loop_lag_mod
 from . import line_sync
 from . import notice as notice_mod
 from . import rag as rag_mod
+from . import shared_reads
 from . import worktree_inventory
 from . import work_checkout
 from . import vscode as vscode_mod
@@ -392,6 +393,7 @@ def build_app(
     window: "window_mod.WindowManager | None" = None,
     gate_timeout: float = restart_gate.GATE_TIMEOUT,
     goto_timeout: float = goto_gate.GATE_TIMEOUT,
+    shared_read_max_age: float = 0.0,
 ) -> web.Application:
     cookie_sessions: set = set()
     # Identifies this daemon *process*, and is handed out by /api/health (which
@@ -409,9 +411,16 @@ def build_app(
             error_middleware,
             record_middleware,
             build_auth_middleware(token, cookie_sessions),
+            # Inside auth, so only a write that was let in drops a shared
+            # answer (claunch-jkvpv).
+            shared_reads.build_middleware(),
         ]
     )
     app["manager"] = manager
+    # One answer per read for the routes every open dashboard polls; off
+    # (0) unless the daemon's configuration turns it on -- see
+    # daemon/shared_reads.py.
+    app["shared_reads"] = shared_reads.SharedReads(shared_read_max_age)
     app["mesh"] = mesh if mesh is not None else MeshManager(manager)
     from . import mesh_chat, observer, operator_bot
     observer.install(app)
@@ -597,6 +606,7 @@ def build_app(
     r.add_post("/api/batch", h_batch)
     r.add_get("/api/control/ws", h_control_ws)
     r.add_get("/api/connections", h_connections)
+    r.add_get("/api/shared-reads", h_shared_reads)
     r.add_post("/api/connections/close", h_connections_close)
     # The measurement window (daemon/window.py): the machine's test-run
     # arbiter as readable state — who holds it, who waits — so the sweep
@@ -1551,6 +1561,18 @@ async def h_connections(request: web.Request) -> web.Response:
             connections.live_peer_ports(request.app),
         )
     )
+
+
+async def h_shared_reads(request: web.Request) -> web.Response:
+    """What the shared reads did since the daemon started (claunch-jkvpv).
+
+    Per wrapped route: how many reads ran it (``computes``), were answered
+    from a stored answer (``hits``) or waited on one being built
+    (``joins``), and which accepted writes dropped its answers. Two readings
+    a minute apart give the rates the live measurement compares across tab
+    counts; see daemon/shared_reads.py.
+    """
+    return json_response(request.app["shared_reads"].stats())
 
 
 async def h_connections_close(request: web.Request) -> web.Response:
@@ -7554,6 +7576,7 @@ async def h_peer_ops_lease(request: web.Request) -> web.Response:
     return json_response(result)
 
 
+@shared_reads.shared("sessions")
 async def h_sessions_list(request: web.Request) -> web.Response:
     manager: SessionManager = request.app["manager"]
     rail_view = request.query.get("view") == "rail"
@@ -12001,6 +12024,7 @@ def _lane_activity(session) -> dict:
     return out
 
 
+@shared_reads.shared("beads-queues")
 async def h_beads_queues(request: web.Request) -> web.Response:
     """Every board's queues, one lane per session — the Beads page's Queues
     tab. Same boards as :func:`h_beads_fleet` (the sessions' directories and

@@ -139,6 +139,7 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
         relay_state=_relay_state,
         gate_timeout=float(cfg["restart_approval_timeout"]),
         goto_timeout=float(cfg["goto_approval_timeout"]),
+        shared_read_max_age=float(cfg["shared_read_max_age"] or 0),
     )
 
     runner = web.AppRunner(app, access_log=None)
