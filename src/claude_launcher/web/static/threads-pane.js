@@ -31,6 +31,7 @@
 globalThis.ThreadsPane = (() => {
   "use strict";
   const POLL_MS = 3000;
+  const REMEMBER = 64;       // sessions whose last-shown thread is kept
   let host = null, name = "", api = null, onChange = null, onQuestion = null, storageKey = "";
   let timer = null, seq = 0, list = null, error = "";
   let current = "";          // the selected thread id
@@ -113,6 +114,29 @@ globalThis.ThreadsPane = (() => {
     }
   }
 
+  /* The thread last shown for each session, so the next open of the pane
+     can read it beside the list (load). */
+  function remembered(session) {
+    try {
+      const doc = JSON.parse(localStorage.getItem(`${storageKey}:open`) || "{}");
+      return doc && typeof doc[session] === "string" ? doc[session] : "";
+    } catch {
+      return "";
+    }
+  }
+
+  function remember(tid) {
+    if (!tid || !storageKey || remembered(name) === tid) return;
+    try {
+      const doc = JSON.parse(localStorage.getItem(`${storageKey}:open`) || "{}");
+      const out = doc && typeof doc === "object" && !Array.isArray(doc) ? doc : {};
+      delete out[name];   // re-added last, so the oldest session goes first
+      out[name] = tid;
+      for (const key of Object.keys(out).slice(0, -REMEMBER)) delete out[key];
+      localStorage.setItem(`${storageKey}:open`, JSON.stringify(out));
+    } catch { /* private mode */ }
+  }
+
   function markRead(tid, upto) {
     if (!tid || !upto || !storageKey) return;
     const read = loadRead();
@@ -137,12 +161,19 @@ globalThis.ThreadsPane = (() => {
     const mine = ++seq;
     const want = name;
     try {
+      // A thread with nothing on screen yet is read beside the list rather
+      // than after it: the two go out in one batch, so opening the pane
+      // costs one round trip to the daemon instead of two (claunch-8utpv).
+      // A poll of a thread already shown still waits for the list, which
+      // says whether there is anything new to read.
+      const early = current && !(convo && convo.id === current) ? readThread(current, 0) : null;
       const doc = await request(`/api/threads?session=${encodeURIComponent(want)}`);
       if (mine !== seq || want !== name) return;
       error = "";
       list = doc;
       current = pick(list.threads, current);
-      await loadThread();
+      remember(current);
+      await loadThread(early);
     } catch (e) {
       if (mine !== seq || want !== name) return;
       if (e && e.message && !/fetch/i.test(e.message)) error = e.message;
@@ -150,14 +181,21 @@ globalThis.ThreadsPane = (() => {
     if (mine === seq && want === name) render();
   }
 
-  async function loadThread() {
+  function readThread(tid, after) {
+    const promise = request(`/api/threads/${encodeURIComponent(tid)}?after=${after}`);
+    promise.catch(() => {});   // an early read the list made moot is not an error
+    return {tid, after, promise};
+  }
+
+  async function loadThread(early = null) {
     const tid = current;
     if (!tid) { convo = null; return; }
     const have = convo && convo.id === tid ? convo : null;
     const after = have && have.messages.length ? have.messages[have.messages.length - 1].seq : 0;
     const row = (list.threads || []).find((t) => t.id === tid);
     if (have && row && row.last_seq <= after) { have.thread = row; return; }
-    const doc = await request(`/api/threads/${encodeURIComponent(tid)}?after=${after}`);
+    const read = early && early.tid === tid && early.after === after ? early : readThread(tid, after);
+    const doc = await read.promise;
     if (tid !== current) return;
     convo = {id: tid, thread: doc.thread, messages: (have ? have.messages : []).concat(doc.messages || [])};
   }
@@ -481,6 +519,7 @@ globalThis.ThreadsPane = (() => {
     onChange = opts.onChange || null;
     onQuestion = opts.onQuestion || null;
     storageKey = opts.storageKey || "claunch_threadread";
+    current = remembered(session);
     host.replaceChildren(node("p", "wf-note", "불러오는 중…"));
     load();
     timer = setInterval(() => {

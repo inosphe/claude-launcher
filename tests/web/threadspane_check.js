@@ -243,6 +243,24 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   assert.equal(host.children.length, 0);
   assert.ok(timers.every((t) => t === null), "no poll outlives the pane");
 
+  // reopening the pane reads the thread it last showed beside the list, in
+  // the same turn -- one batch, one round trip (claunch-8utpv)
+  assert.deepEqual(JSON.parse(store.get("k:open")), {s1: "th-1"}, "the shown thread is remembered per session");
+  calls.length = 0;
+  P.mount(host, "s1", {api, storageKey: "k"});
+  assert.deepEqual(calls.map((c) => c[1]).sort(), ["/api/threads/th-1?after=0", "/api/threads?session=s1"],
+    "list and conversation go out before either answers");
+  await settle();
+  assert.equal(calls.filter((c) => c[1].startsWith("/api/threads/th-1?")).length, 1, "the early read is used, not repeated");
+  assert.equal(host.querySelectorAll(".th-msg").length >= 2, true);
+  P.unmount();
+  // a session never shown here still starts with the list alone
+  calls.length = 0;
+  P.mount(host, "s2", {api, storageKey: "k"});
+  assert.deepEqual(calls.map((c) => c[1]), ["/api/threads?session=s2"]);
+  await settle();
+  P.unmount();
+
   /* the header button's rail (app.js) */
   const start = app.indexOf("function syncSessionResourceButtons(");
   const end = app.indexOf("async function refreshCflow2Rail(");
