@@ -754,6 +754,11 @@ const texts = (pane) => pane.children
   check("the legend lives in the line block header",
         html.indexOf('id="log-legend"') > html.indexOf('id="log-format"')
         && html.indexOf('id="log-legend"') < html.indexOf('</fieldset>', html.indexOf('id="log-format"')));
+  check("and the tab look stops at the radios' own labels, so the legend's spans keep the row's line",
+        /\.session-view-tabs label > span\s*\{[^}]*display:\s*block/.test(css)
+        && !/\.session-view-tabs span\s*\{/.test(css)
+        && /#log-view \.log-format-tabs label > span\s*\{/.test(css)
+        && !/#log-view \.log-format-tabs span\s*\{/.test(css));
   check("the route is registered as a view",
         /log:\s*"log-view"/.test(src));
   check("the hash parser knows it",

@@ -237,7 +237,9 @@ html[data-theme="light"] .xterm {
   background: #1f6feb33; color: #58a6ff;
 }
 
-/* List | Grid: one segmented radio pair above the filters. */
+/* List | Grid: one segmented radio pair above the filters. The tab look is
+   the radio's own <span> (label > span): a fieldset may carry other spans,
+   the transcript's #log-legend, which must keep the row's line. */
 .session-view-tabs {
   flex: none; display: flex; gap: 2px; margin: 0; padding: 3px 6px 0;
   border: 0; background: #11151b;
@@ -247,11 +249,11 @@ html[data-theme="light"] .xterm {
 }
 .session-view-tabs label { flex: 1; position: relative; cursor: pointer; }
 .session-view-tabs input { position: absolute; width: 1px; height: 1px; opacity: 0; }
-.session-view-tabs span {
+.session-view-tabs label > span {
   display: block; padding: 4px 0; border-radius: 4px; text-align: center;
   color: #7d8590; font-size: 11px; font-weight: 600;
 }
-.session-view-tabs label:hover span { color: #c9d1d9; background: #1d2128; }
+.session-view-tabs label:hover > span { color: #c9d1d9; background: #1d2128; }
 .session-view-tabs input:checked + span {
   color: #e6edf3; background: #243247; box-shadow: inset 0 0 0 1px #385273;
 }
@@ -2707,7 +2709,7 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
    [hidden] is restated because the class's display:flex outranks it. */
 #log-view .log-format-tabs { align-self: flex-start; padding: 0 20px 8px; background: none; }
 #log-view .log-format-tabs label { flex: none; }
-#log-view .log-format-tabs span { padding: 4px 12px; }
+#log-view .log-format-tabs label > span { padding: 4px 12px; }
 /* The HTML view of the attached session: the session header is up above the
    page (syncTermHeader), so the page-head's way back and title fold away,
    and the header's line-header button can fold the format row too. */
