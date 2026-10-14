@@ -19,6 +19,7 @@ from claude_launcher.cflow import engine as cflow_engine
 from claude_launcher.daemon import cflow_clock
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.mesh import Member
+from claude_launcher.daemon.session import Session
 
 import pytest
 
@@ -78,6 +79,10 @@ def proj(home, tmp_path, monkeypatch):
 
 
 class _FakeSession:
+    # who asked for the ending: the real rule (first asker wins), so a test
+    # reads the same record the rail draws
+    note_ender = Session.note_ender
+
     def __init__(
         self,
         name: str,
@@ -88,6 +93,7 @@ class _FakeSession:
         resumed_by_human: bool = False,
     ) -> None:
         self.exited = False
+        self.ended_by = None
         self.sdef = SessionDef(
             name=name, cwd=cwd, parent=parent, keep_alive=keep_alive
         )
@@ -538,6 +544,7 @@ def test_kill_on_end_records_then_ends(proj):
     asyncio.run(clock._finish_end(cwd, "w1", run_id))
     assert worker.killed is True
     assert worker.exited is True
+    assert worker.ended_by == {"kind": "cflow", "name": "w1", "reason": "kill-on-end"}
     assert clock.scan() == []                   # marked — never replayed
 
 
@@ -955,6 +962,23 @@ def test_v2_end_ends_the_drivers_own_reviewer_first(proj):
     assert order == ["w1-rev", "w1"]            # reviewer before its driver
     assert sessions["w1-kid"].exited is False   # a worker child is not ours
     assert sessions["w1-kid-rev"].exited is False  # nor a grandchild reviewer
+
+
+def test_v2_end_records_cflow_as_the_ender_of_driver_and_reviewer(proj):
+    # claunch-o6xws: the rail says who ended a session; for this path it is
+    # the run, named by its driver, with the reason each kill was for.
+    cwd = str(proj)
+    _v2_finish(cwd, "w1")
+    clock, sessions, order = _reviewer_tree(cwd)
+    clock.scan()
+    [queued] = clock._end_pending
+    asyncio.run(clock._finish_end(*queued[:4], reap_reviewers=queued[4]))
+    assert order == ["w1-rev", "w1"]
+    assert sessions["w1"].ended_by == {
+        "kind": "cflow", "name": "w1", "reason": "kill-on-end"}
+    assert sessions["w1-rev"].ended_by == {
+        "kind": "cflow", "name": "w1", "reason": "reviewer-reap"}
+    assert sessions["w1-kid"].ended_by is None   # not ended, nothing recorded
 
 
 def test_v2_end_keep_alive_keeps_the_reviewer_too(proj):
