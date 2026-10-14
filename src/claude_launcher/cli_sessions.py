@@ -1279,6 +1279,11 @@ def _cmd_sessions(_args: argparse.Namespace) -> int:
             if s.get("delayed_at"):
                 # Waiting in the boot's restore queue (claunch-0j6gb.2).
                 state = "delayed"
+            elif s.get("held_at"):
+                # Asleep, not ended: a message wakes it (claunch-5l35i). Read
+                # as "exited", an agent took a held peer for gone and stopped
+                # writing to it (claunch-1vqm4).
+                state = "held"
             elif s.get("failed_at"):
                 # Ended on its own, nobody asked (claunch-0j6gb.1).
                 state = f"failed({code})" if code is not None else "failed"
@@ -1300,12 +1305,21 @@ def _cmd_sessions(_args: argparse.Namespace) -> int:
             f"{s['cols']}x{s['rows']}  {s.get('cwd', '')}"
             + (f"  | {brief}" if brief else "")
         )
-    dead = [s["name"] for s in sessions if s["status"] == "exited"]
+    exited = [s for s in sessions if s["status"] == "exited"]
+    asleep = [s["name"] for s in exited if s.get("held_at")]
+    dead = [s["name"] for s in exited if not s.get("held_at")]
+    if asleep:
+        print(
+            f"\n{len(asleep)} held/delayed session(s) are asleep, not ended: "
+            f"a mesh message to one wakes it and is delivered once it is up"
+        )
     if dead:
         print(
-            f"\n{len(dead)} exited session(s) kept for respawn: "
+            ("" if asleep else "\n")
+            + f"{len(dead)} exited session(s) kept for respawn: "
             f"'claunch respawn {dead[0]}' revives one, "
             f"'claunch clear-sessions' drops them all"
+            + (" (and the held ones)" if asleep else "")
         )
     if footer:
         print(footer)
