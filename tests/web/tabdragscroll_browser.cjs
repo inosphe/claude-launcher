@@ -57,8 +57,8 @@ for (const [renderer, id] of [["renderProjectTabs", "project-tabs"],
 }
 
 const STRIPS = [
-  { id: "project-tabs", tab: "project-tab" },
-  { id: "session-group-tabs", tab: "session-group-tab" },
+  { id: "project-tabs", tab: "project-tab", label: "project" },
+  { id: "session-group-tabs", tab: "session-group-tab", label: "group" },
 ];
 const page_html = `<!doctype html><html><head><meta charset="utf-8"><style>${css}</style></head>
 <body style="margin:0"><aside id="sidebar" style="width:260px;display:flex;flex-direction:column">
@@ -80,7 +80,11 @@ ${STRIPS.map(s => strip(s.id)).join("\n")}
         for (let i = 0; i < 12; i++) {
           const el = document.createElement("div");
           el.className = s.tab;
-          el.textContent = `${s.id}-tab-${i}`;
+          // Short labels: a tab may grow to its max-width (180px) and the
+          // label's width depends on the fonts the host has, so long labels
+          // can leave no tab whole in the 260px rail once it has scrolled
+          // (claunch-lt6ph.1).
+          el.textContent = `${s.label}-${i}`;
           el.addEventListener("click", () => window.picked.push(el.textContent));
           bar.appendChild(el);
         }
@@ -130,7 +134,7 @@ ${STRIPS.map(s => strip(s.id)).join("\n")}
         });
       });
       assert.ok(shown >= 0, `#${s.id} shows a whole tab`);
-      const name = `${s.id}-tab-${shown}`;
+      const name = `${s.label}-${shown}`;
       const tab = page.locator(`#${s.id} .${s.tab}`).nth(shown);
       const tb = await tab.boundingBox();
       await page.mouse.move(tb.x + 10, tb.y + tb.height / 2);
@@ -165,7 +169,7 @@ ${STRIPS.map(s => strip(s.id)).join("\n")}
     await page.mouse.move(ob.x + 30, ob.y + ob.height / 2, { steps: 3 });
     await page.mouse.up();
     assert.equal(await page.locator("#project-tabs").evaluate(n => n.classList.contains("dragging")), false);
-    assert.deepEqual(await page.evaluate(() => window.picked.splice(0)), ["project-tabs-tab-0"]);
+    assert.deepEqual(await page.evaluate(() => window.picked.splice(0)), ["project-0"]);
 
     assert.deepEqual(errors, []);
     console.log("tabdragscroll_browser: ok");
