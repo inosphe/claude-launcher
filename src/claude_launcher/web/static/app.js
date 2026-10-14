@@ -29016,7 +29016,7 @@ function qaNudgeCard() {
     api_key: "",
   });
   const form = el("form", "llm-settings-form");
-  const toggle = el("label", null);
+  const toggle = el("label", "qa-nudge-toggle");
   const box = document.createElement("input");
   box.type = "checkbox";
   box.id = "qa-nudge-enabled";
