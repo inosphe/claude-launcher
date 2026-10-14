@@ -153,7 +153,8 @@ def test_truncated_frame_and_frame_without_op_are_refused():
 
 
 def test_socket_path_moves_to_temp_dir_when_too_long(tmp_path):
-    short = tmp_path / "s"
+    # Not under tmp_path: its length depends on the basetemp the run chose.
+    short = Path("/claunch-ptyhost-test/s")
     assert socket_path(short) == short / "ptyhost.sock"
     deep = tmp_path / ("d" * 120)
     p = socket_path(deep)
@@ -275,7 +276,7 @@ def test_long_directory_uses_temp_socket_and_cleans_it(tmp_path):
 # -- the daemon side: Session on a RemotePty ---------------------------------------
 
 def test_session_runs_unchanged_on_the_host(home, client, tmp_path, monkeypatch):
-    from tests.test_daemon_e2e import _manager, _register_py_harness, _wait_screen
+    from test_daemon_e2e import _manager, _register_py_harness, _wait_screen
     from claude_launcher.daemon import paths
     from claude_launcher.daemon.harness import SessionDef
 
