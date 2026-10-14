@@ -1,0 +1,467 @@
+cflow: 2
+name: perf-monitor-v2
+description: >
+  라이브 데몬의 CPU를 회차마다 같은 방법으로 측정하고(tools/perf_probe.py),
+  핫스팟을 기존 이슈와 대조해 개선안을 제안한다. 사용자가 제안을 승인하면
+  이슈를 등록하고 improv-worker-v2 워커에 위임하며, 착지·사용자의 데몬 재기동
+  뒤에 같은 조건으로 다시 재서 전후를 비교한다. 제안의 처리와 다음 회차 진행은
+  매 회차 사용자가 정한다.
+
+# 출처: 2026-10-14 s430 세션의 수동 절차(claunch-2b734·claunch-xrrn0·claunch-jkvpv·
+# claunch-0gysk 코멘트). 그 세션에서 손으로 발견한 문제를 이 정의의 장치로 옮겼다.
+# - 측정 조건이 회차마다 달랐다(15초·50 Hz와 60초·100 Hz, 기동 3분과 50분, load 1과 40)
+#   -> 측정은 tools/perf_probe.py record 하나로 하고, warm 대기가 기동 직후 측정을 막으며,
+#   compare가 조건 차이를 표 옆에 적는다.
+# - 라이브 측정을 착지 조건으로 두려던 워커가 있었다(라이브 데몬은 master를 실행한다)
+#   -> 재측정은 이슈가 닫히고(issues-closed) 데몬이 그 머지를 실행할 때(serving)만 연다.
+# - 데몬 재기동은 사용자 명령이다(AGENTS.md) -> restart-request는 요청만 하고, 반영은
+#   serving 프로브가 판정한다.
+
+# 이 런을 모는 세션이 spawn한 자식은 v2 워커 런을 돈다(delegate 단계).
+default_child_cflow: improv-worker-v2
+
+include: [ask-common]
+
+inputs:
+  focus:
+    type: text
+    label: 측정 관점
+    help: 이번 런이 특히 볼 증상이나 경로(예 /api/sessions 지연, 이벤트 루프 점유). 비우면 전체 핫스팟을 본다
+    default: ""
+  seconds:
+    type: int
+    label: 측정 시간(초)
+    help: py-spy record 시간. 회차 사이에 바꾸면 compare가 조건 차이로 표시한다
+    default: 60
+  rate:
+    type: int
+    label: 샘플링 빈도(Hz)
+    default: 100
+  warmup_seconds:
+    type: int
+    label: 기동 후 대기(초)
+    help: 데몬이 기동한 지 이 시간이 지나야 측정한다. 기동 직후에는 transcript 초기 읽기가 측정에 섞인다
+    default: 900
+  probe_path:
+    type: string
+    label: 응답 시간 프로브 경로
+    help: 측정과 함께 반복 GET할 API 경로. 비우면 프로브 없이 측정한다
+    default: /api/sessions
+
+fragments:
+  measure-how: |
+    ## 측정 방법
+
+    측정은 아래 명령 하나로 한다. 옵션을 바꾸거나 py-spy를 직접 부르지 않는다
+    — 회차 사이의 비교가 같은 축이어야 하기 때문이다.
+
+    ```
+    uv run --no-sync python tools/perf_probe.py record --label <라벨> \
+      --seconds ${data.inputs.seconds} --rate ${data.inputs.rate} \
+      --min-uptime ${data.inputs.warmup_seconds} \
+      --probe-path "${data.inputs.probe_path}"
+    ```
+
+    - `probe_path`가 비어 있으면 `--probe-path` 인자를 빼고 실행한다.
+    - 결과는 세션 스크래치(`$CLAUNCH_SCRATCH/perf-monitor/<시각>-<라벨>`)에 남고
+      `last-<라벨>` 포인터가 그 디렉터리를 가리킨다. `/tmp`에 옮기지 않는다.
+    - 종료 코드 3은 데몬 기동 후 시간이 `warmup_seconds`보다 짧다는 뜻이다. 앞의
+      대기가 통과했는데 3이 나왔으면 그사이 데몬이 재기동된 것이다 — 보고에 그
+      사실을 적고 `fail`로 보고한다.
+    - 종료 코드 2는 측정 불가다(데몬 없음, py-spy 없음, py-spy 실패). 출력 끝을
+      보고에 옮기고 `fail`로 보고한다.
+
+    ## 보고에 남길 것
+
+    `meta.json`의 조건 줄(데몬 pid·head·uptime, load average, 세션 행 수와 상태별
+    수, 열린 연결 수, 샘플 수와 샘플링 오류 수, 프로브의 평균·p95·최대·실패 수)과
+    `summarize`의 세 표(가장 바깥 claude_launcher 프레임, 가장 깊은 프레임, 리프)
+    상위 항목. 샘플링 오류가 샘플의 20%를 넘으면 그 비율을 적는다 — 샘플 수가
+    과소 집계됐다는 뜻이다.
+
+  delegate-how: |
+    ## 워커 위임 방식
+
+    이슈 하나에 워커 하나를 MCP `spawn`으로 세운다. 필드:
+
+    | 필드 | 값 |
+    |---|---|
+    | `handle` | `worker-<이슈 id 꼬리>` |
+    | `role` | `worker` |
+    | `workflow` | `improv-worker-v2` |
+    | `issue` | 그 이슈 id |
+    | `worktree` | `<이 세션 이름>-<이슈 id 꼬리>-<요지>` |
+    | `cflow_inputs` | `{issue: <id>, relation: independent, goal: <한 문장>}`. 설계 비교가 첫 산출물인 이슈는 `require_coding_approval: true`를 더한다 |
+    | `connect` | 메시의 리더 handle. 같은 핸들러·파일을 다루는 다른 워커가 있으면 그 handle도 넣는다 |
+    | `task` | 이슈를 `claunch beads show`로 읽으라는 지시, 부모가 이 세션이라는 것, 착지는 리더 큐로 직접 요청한다는 것, 데몬 재기동은 사용자 명령이라 실행하지 말고 라이브 측정이 필요하면 이 세션에 요청하라는 것 |
+
+    - `relation: independent`를 쓰는 이유: 이 세션은 스택 브랜치를 두지 않으므로
+      워커는 master 위에서 작업하고 리더의 착지 큐로 직접 요청한다.
+    - 리더와 연결하지 않으면 워커의 착지 요청 메시지가 거부되고 연결 요청이 이
+      세션에 온다. 그 요청이 오면 `connect`로 허용한다.
+    - 착수 순서는 사용자의 승인 답(reason)을 따른다. 답이 순서를 말하지 않으면
+      의존 순서(blocks)대로 한 번에 하나씩 세우고, 앞 이슈가 닫히면 다음을 세운다.
+      서로 다른 파일을 다루는 이슈만 병렬로 세운다.
+    - 워커가 이슈를 닫았다고 보고하면(머지 해시 포함) 그 세션을 MCP `kill`로
+      종료한다. 착지 전에는 종료하지 않는다.
+    - 워커의 설계 승인 요청(`coding-approval` 게이트)은 사용자가 웹 UI에서 답한다.
+      요청이 오면 설계 요지를 사용자에게 전하고, 이 세션이 대신 답하지 않는다.
+
+rules:
+  no-daemon-restart:
+    text: |
+      데몬 재기동·정지(`claunch daemon restart|stop`, `/api/daemon/*` 직접 호출,
+      `CLAUNCH_SESSION`을 지우고 실행하는 우회 포함)는 실행하지 않는다. 재기동이
+      필요하면 사용자에게 요청하고, 반영 여부는 `serving` 프로브가 판정한다.
+    why: >-
+      재기동은 데몬에 붙은 모든 터미널과 관리 세션을 함께 내린다. 그래서 사용자만
+      실행한다(AGENTS.md 「데몬 재기동·정지는 사용자의 명령이다」).
+    deliver: all
+  comparable-axis:
+    text: |
+      전후 수치를 나란히 적을 때는 `tools/perf_probe.py compare`의 conditions 줄을
+      함께 적는다. 「NOT one axis」이면 전체 샘플 수·비율의 차이를 개선이나
+      악화로 적지 않고, 조건 차이와 「비교 불가」를 적는다. 특정 경로의 샘플이
+      0이 된 것처럼 조건과 무관하게 서는 결론만 적는다.
+    why: >-
+      2026-10-14 측정에서 머지 후 측정은 기동 3분·load 40, 기준선은 기동 50분·load 1이었고
+      전체 샘플 수가 9배였다(claunch-xrrn0 코멘트). 조건을 적지 않은 전후 표는 그 차이를
+      코드 변경의 효과로 읽게 만든다.
+    deliver: [analyze, compare-report, wrapup]
+
+procedures:
+  wait-unclear:
+    description: >-
+      대기 프로브가 판정하지 못했거나(undecidable) 기한 안에 참이 되지 않았다(timeout).
+      사람이 상태를 보고 계속할지 정한다.
+    params:
+      what: {type: str, required: true}
+      why: {type: str, default: timeout}
+    returns:
+      ok: {}
+      stop: {}
+    body:
+      - id: wait-unclear-choice
+        call: ask-user
+        bind: wait_unclear
+        with:
+          context: "$params.why"
+          require_reason: true
+          topic: |
+            대기 중인 조건이 서지 않았다. 무엇을 기다렸는지와 사유(timeout 또는
+            undecidable)는 근거 칸에 있다. undecidable은 프로브가 판정 불가(종료 코드
+            2)를 세 번 연속 냈다는 뜻이고, timeout은 기한 동안 「아직」이었다는 뜻이다.
+            프로브 명령을 직접 실행한 출력으로 선택지를 채운다.
+            선택지: proceed — 사람이 상태를 확인했고 이 대기를 지나간다. stop — 이
+            회차의 나머지(재측정)를 건너뛰고 회차 마감으로 간다.
+        cases:
+          proceed: []
+          stop:
+            return: stop
+        on:
+          reframe: {return: stop}
+
+nodes:
+  intake:
+    title: 회차 목표 확인
+    prompt: |
+      성능 모니터 회차를 시작한다.
+
+      - 런 시작 입력의 측정 관점: ${data.inputs.focus}
+      - 직전 회차 마감 때 사용자가 남긴 답(첫 회차면 비어 있다): ${data.round_end}
+
+      할 일:
+      1. 이번 회차의 관점을 한 문장으로 정한다. 직전 회차 답의 reason이 관점을
+         말하면 그것을 따르고, 아니면 시작 입력을 따른다. 둘 다 비었으면 「전체
+         핫스팟」이다.
+      2. 보드의 열린 성능 이슈를 읽는다:
+         `claunch beads list --label perf --status open --status in_ready --status in_progress --status in_review --limit 0 --json`.
+         id·제목·상태·assignee를 보고에 옮긴다. 이 목록이 analyze의 대조 대상이다.
+      3. 진행 중인 위임(이 세션의 자식 워커, MCP `children`)이 있으면 세션·이슈·
+         런 위치를 적는다.
+    done_when: 이번 회차의 관점과 열린 perf 이슈 목록, 진행 중인 자식 워커 목록이 보고에 있다.
+    returns:
+      ok: {focus: str, open_issues: list, children: "list?"}
+    effects: [fs.read]
+
+  measure-baseline:
+    title: 기준 측정
+    prompt: |
+      이번 회차의 기준 측정을 한다. 라벨은 `baseline`이다.
+
+      ${frag:measure-how}
+    done_when: |
+      `perf-monitor/last-baseline`이 이번 회차의 측정 디렉터리를 가리키고, 조건 줄과
+      세 표의 상위 항목이 보고에 있다.
+    verify: uv run --no-sync python tools/perf_probe.py check --label baseline --max-age 3600
+    returns:
+      ok: {dir: str, conditions: str, top: str}
+    effects: [fs.read, fs.write]
+
+  analyze:
+    title: 핫스팟 분석과 개선안 작성
+    prompt: |
+      기준 측정(`perf-monitor/last-baseline`)을 분석해 개선안 목록을 만든다.
+
+      - 이번 회차 관점: ${result.intake.value.focus}
+      - 직전 제안에 대한 사용자 답(revise로 돌아왔으면 그 이유가 있다): ${data.proposal}
+
+      ## 분석 순서
+      1. `summary.json`의 가장 바깥 프레임 상위 항목마다 그 아래를 나눈다. 원자료는
+         같은 디렉터리의 `profile.raw`(py-spy collapsed 형식: 스택 `;` 구분, 끝에
+         샘플 수)다. 진입점 하나를 골라 그 아래 3–5 프레임 단위로 샘플을 묶어
+         비용의 구성을 적는다.
+      2. 이벤트 루프 스레드의 샘플(`summary.json`의 `event_loop`)을 따로 적는다.
+         이 스레드는 터미널 출력도 처리하므로, 같은 CPU라도 루프 위의 비용이 지연에
+         직접 영향을 준다.
+      3. 상위 경로의 코드를 읽고 원인을 코드 위치(`파일:줄`)로 적는다. 확인하지
+         못한 원인은 「원인 미상」으로 적는다.
+      4. 각 원인을 intake의 열린 perf 이슈와 대조한다. 같은 원인을 다루는 이슈가
+         있으면 새 개선안 대신 그 이슈 id와 「기존 이슈에 측정 추가」로 적는다.
+      5. 프로브 결과(`meta.json`의 probe)가 있으면 응답 시간 분포와 실패 수를
+         관점과 연결해 적는다.
+
+      ## 개선안 항목의 형식
+      항목마다: 제목, 근거(샘플 수와 비율, 경로), 원인 위치, 설계 방향(선택지가
+      둘 이상이면 모두), 예상 영향 범위(파일·핸들러), 기존 이슈 관계, 권장
+      우선순위와 착수 순서.
+
+      항목 수가 0이어도 된다. 그때는 「설계 차원의 후보 없음」과 그 근거를 적는다.
+    done_when: |
+      개선안 목록(또는 「후보 없음」과 근거)이 위 형식으로 보고에 있고, 각 항목이
+      측정 수치와 코드 위치를 근거로 든다.
+    returns:
+      ok: {candidates: list, report: str}
+    effects: [fs.read]
+
+  file-issues:
+    title: 승인된 개선안의 이슈 등록
+    prompt: |
+      사용자가 개선안을 승인했다. 사용자의 답: ${data.proposal}
+
+      - 답의 reason이 일부 항목만 승인하거나 우선순위·순서를 바꿨으면 그대로 따른다.
+      - 개선안: ${result.analyze.value.candidates}
+
+      항목마다:
+      1. `claunch beads search "<핵심어>" --json`으로 중복을 확인한다. 같은 원인의
+         이슈가 있으면 새로 만들지 않고 측정 결과를 코멘트로 추가한다
+         (`claunch beads comments add <id> -f <파일>`).
+      2. 없으면 만든다: `claunch beads create "<제목>" -t task -p <우선순위> -l perf
+         --description-file <파일>`. 본문은 `## 문제 / ## 측정 / ## 목표 / ## 범위 /
+         ## 관련`이고, 측정 절에는 측정 디렉터리·데몬 head·조건 줄을 넣는다. 파일은
+         `$CLAUNCH_SCRATCH`에 쓴다.
+      3. 이슈 사이의 순서는 `claunch beads dep add <뒤> <앞>`(blocks), 관련은
+         `-t related`로 잇는다.
+
+      보고의 `issues`에는 이번 회차에 위임 대상이 되는 이슈 id만 넣는다(기존
+      이슈에 코멘트만 단 것은 `commented`에).
+    done_when: 승인된 항목마다 이슈가 있거나 기존 이슈에 측정 코멘트가 있고, 그 id 목록이 보고에 있다.
+    returns:
+      ok: {issues: list, commented: "list?"}
+    effects: [board.write, fs.write]
+
+  delegate:
+    title: 워커 위임
+    prompt: |
+      등록한 이슈를 워커에 위임한다.
+
+      - 위임 대상 이슈: ${result['file-issues'].value.issues}
+      - 사용자의 승인 답: ${data.proposal}
+
+      ${frag:delegate-how}
+
+      이 작업은 위임 대상 전부를 세웠거나(병렬), 순서상 첫 워커를 세웠을 때
+      (순차) 끝난다. 순차면 남은 이슈의 착수는 이 세션이 앞 이슈의 종료를 보고
+      이어서 하며, 아래 대기가 전부 닫힐 때까지 기다린다.
+
+      보고의 `issues`는 착지를 기다릴 이슈 id 전부다(순차에서 아직 세우지 않은
+      것도 포함). 대기 프로브가 이 목록을 읽는다.
+    done_when: 위임 대상 이슈의 첫 워커(병렬이면 전부)가 스폰됐고, 세션·이슈 쌍과 기다릴 이슈 id 목록이 보고에 있다.
+    returns:
+      ok: {issues: list, workers: list}
+    effects: [session.spawn, mesh.send, board.write]
+
+  restart-request:
+    title: 데몬 재기동 요청
+    prompt: |
+      위임한 이슈가 모두 닫혔다(머지 해시가 close reason에 있다). 라이브 데몬이
+      그 머지를 실행해야 재측정할 수 있다.
+
+      1. 각 이슈의 머지 해시와 현재 데몬 head(`daemon.json`의 code.head)의 관계를
+         잰다: `uv run --no-sync python tools/perf_probe.py serving --issue <id>
+         [--issue <id> ...]`(위임 이슈: ${data.delegation}). 종료 코드 0은 모두
+         반영, 1은 일부 미반영, 2는 판정 불가다.
+      2. 데몬이 이미 모든 머지를 실행 중이면 그 사실을 보고하고 끝낸다.
+      3. 아니면 사용자에게 데몬 재기동을 요청한다 — 어떤 머지가 아직 반영되지
+         않았는지와 재기동 명령(`claunch daemon restart`)을 터미널 응답에 적는다.
+         이 세션은 재기동 명령을 실행하지 않는다.
+    done_when: 머지 해시와 데몬 head의 관계가 보고에 있고, 반영되지 않았으면 사용자에게 재기동을 요청했다.
+    returns:
+      ok: {merges: list, serving: bool}
+    effects: [fs.read]
+
+  measure-after:
+    title: 재측정
+    prompt: |
+      위임한 개선이 라이브 데몬에 반영됐고 기동 후 대기도 지났다. 라벨 `after`로
+      다시 잰다.
+
+      ${frag:measure-how}
+    done_when: |
+      `perf-monitor/last-after`가 이번 회차의 재측정 디렉터리를 가리키고, 조건 줄과
+      세 표의 상위 항목이 보고에 있다.
+    verify: uv run --no-sync python tools/perf_probe.py check --label after --max-age 3600
+    returns:
+      ok: {dir: str, conditions: str, top: str}
+    effects: [fs.read, fs.write]
+
+  compare-report:
+    title: 전후 비교 기록
+    prompt: |
+      기준 측정과 재측정을 비교한다:
+      `uv run --no-sync python tools/perf_probe.py compare`
+      (인자 없이 실행하면 last-baseline과 last-after를 비교한다).
+
+      1. 위임한 이슈(${data.delegation})마다 그 이슈가 겨냥한 경로의 샘플 수 전후를
+         `profile.raw`에서 직접 센다(이슈 본문의 측정 절이 경로를 적는다).
+      2. 결과를 이슈마다 코멘트로 남긴다: 측정 디렉터리 두 개, 표, conditions 줄,
+         경로별 전후 샘플 수, 판정(효과 확인 / 효과 없음 / 비교 불가). 닫힌
+         이슈에도 코멘트를 달 수 있다.
+      3. 효과가 없거나 새 핫스팟이 생겼으면 다음 회차 관점 후보로 적는다.
+    done_when: 위임한 이슈마다 전후 비교 코멘트가 있고, 판정과 다음 회차 관점 후보가 보고에 있다.
+    returns:
+      ok: {verdicts: list, next_focus: "str?"}
+    effects: [fs.read, board.write]
+
+  wrapup:
+    title: 런 마감 보고
+    prompt: |
+      사용자가 모니터링을 끝냈다. 이 런의 모든 회차를 정리한다.
+
+      - 회차마다: 관점, 기준 측정 디렉터리와 조건, 제안 수와 사용자 결정, 등록·위임한
+        이슈와 그 상태, 재측정 판정.
+      - 아직 열린 위임 이슈와 그 워커 세션(살아 있으면 계속 일하는 중이다).
+      - 측정 데이터 위치(`$CLAUNCH_SCRATCH/perf-monitor/`).
+    done_when: 회차별 요약과 열린 위임 목록이 보고에 있다.
+    returns:
+      ok: {summary: str}
+    effects: [fs.read]
+
+body:
+  seq:
+    - id: rounds
+      loop:
+        while: "true"
+        max: 50
+        do:
+          seq:
+            - intake
+            # 기준 측정부터 제안 처리까지. 대기에서 사람이 stop을 고르거나 측정이
+            # fail로 끝나면 이 회차의 나머지를 건너뛰고 회차 마감 질문으로 간다 —
+            # 런 전체를 실패로 끝내지 않는다. 사유는 그 작업의 보고에 남는다.
+            - id: round-work
+              try:
+                seq:
+                - id: warm-baseline
+                  wait:
+                    probe: uv run --no-sync python tools/perf_probe.py warm
+                    poll: 120
+                    seconds: 7200
+                    describe: 데몬이 기동 후 warmup_seconds 이상 실행 중이다
+                  on:
+                    undecidable: {call: wait-unclear, with: {what: 데몬 기동 시간, why: undecidable}}
+                    timeout: {call: wait-unclear, with: {what: 데몬 기동 시간, why: timeout}}
+                - measure-baseline
+                - id: proposal-loop
+                  loop:
+                    while: "true"
+                    max: 10
+                    do:
+                      seq:
+                        - analyze
+                        - id: proposal
+                          call: ask-user
+                          bind: proposal
+                          with:
+                            require_reason: true
+                            context: |
+                              analyze 보고(측정 디렉터리 perf-monitor/last-baseline,
+                              개선안 목록과 근거)
+                            topic: |
+                              이번 회차의 측정과 개선안이 analyze 보고에 있다. 개선안을
+                              어떻게 처리할지 정한다. 판단 기준은 analyze 보고의 측정 수치와
+                              코드 위치이며, 근거가 측정과 맞지 않는 항목은 승인하지 않는다.
+                              일부만 승인하거나 착수 순서를 정하려면 이유 칸에 적는다.
+                              선택지: delegate — 승인한 항목을 이슈로 등록하고 워커에
+                              위임한 뒤, 착지·재기동·재측정까지 이 회차에서 진행한다.
+                              file-only — 이슈만 등록하고 위임하지 않는다. revise — 이유
+                              칸의 지적을 반영해 분석을 다시 한다. skip — 이번 회차에는
+                              아무것도 등록하지 않는다.
+                          cases:
+                            delegate:
+                              seq:
+                                - file-issues
+                                - {seq: [delegate], bind: delegation}
+                                - id: landed-wait
+                                  wait:
+                                    probe: uv run --no-sync python tools/perf_probe.py issues-closed --from-env delegation
+                                    poll: 300
+                                    seconds: 172800
+                                    describe: 위임한 이슈가 모두 닫혔다(머지 뒤 assignee가 닫는다)
+                                  on:
+                                    undecidable: {call: wait-unclear, with: {what: 위임 이슈 종료, why: undecidable}}
+                                    timeout: {call: wait-unclear, with: {what: 위임 이슈 종료, why: timeout}}
+                                - restart-request
+                                - id: serving-wait
+                                  wait:
+                                    probe: uv run --no-sync python tools/perf_probe.py serving --from-env delegation
+                                    poll: 120
+                                    seconds: 172800
+                                    describe: 라이브 데몬의 code head가 위임 이슈의 머지를 모두 포함한다
+                                  on:
+                                    undecidable: {call: wait-unclear, with: {what: 머지 반영, why: undecidable}}
+                                    timeout: {call: wait-unclear, with: {what: 머지 반영, why: timeout}}
+                                - id: warm-after
+                                  wait:
+                                    probe: uv run --no-sync python tools/perf_probe.py warm
+                                    poll: 120
+                                    seconds: 7200
+                                    describe: 재기동한 데몬이 warmup_seconds 이상 실행 중이다
+                                  on:
+                                    undecidable: {call: wait-unclear, with: {what: 데몬 기동 시간, why: undecidable}}
+                                    timeout: {call: wait-unclear, with: {what: 데몬 기동 시간, why: timeout}}
+                                - measure-after
+                                - compare-report
+                                - {break: null}
+                              on:
+                                stop: {break: null}
+                            file-only:
+                              seq:
+                                - file-issues
+                                - {break: null}
+                            revise: {continue: null}
+                            skip: {break: null}
+                          on:
+                            reframe: {continue: null}
+              catch:
+                stop: []
+                fail: []
+            - id: round-end
+              call: ask-user
+              bind: round_end
+              with:
+                require_reason: true
+                context: |
+                  이번 회차의 intake·analyze·compare-report 보고
+                topic: |
+                  성능 모니터 회차가 끝났다. 다음 회차를 진행할지 정한다. 다음 회차는
+                  새 기준 측정부터 시작한다. 이유 칸에 다음 회차의 관점(특정 경로,
+                  증상)을 적으면 intake가 그것을 관점으로 쓴다.
+                  선택지: next-round — 다음 회차를 진행한다. end — 모니터링을 끝내고
+                  런 마감 보고를 쓴다. 진행 중인 위임 워커는 종료하지 않는다.
+              cases:
+                next-round: {continue: null}
+                end: {break: null}
+              on:
+                reframe: {continue: null}
+    - wrapup
