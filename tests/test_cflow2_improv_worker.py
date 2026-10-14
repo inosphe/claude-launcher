@@ -325,7 +325,8 @@ USER_QUESTIONS = {
     "landed-unclear-choice": ["confirmed", "held"],
     "rework-decision": ["rework", "hold"],
     "settle-stall": ["proceed", "keep-waiting"],
-    "end-decision": ["end", "hold", "new-task"],
+    "end-decision": ["end", "hold", "new-task", "self-improve"],
+    "self-improve-align": ["register", "revise", "drop"],
 }
 #: The two PR-medium questions go through the pr-or-local skeleton
 #: (claunch-yq80p.11): the label is the skeleton's call, the ask-user calls
@@ -943,17 +944,16 @@ def test_the_end_question_can_be_posed(tmp_path, monkeypatch):
     from claude_launcher.cflow2 import runtime
     monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
     doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
-    decision = _find_id(doc["procedures"], "end-decision")
+    decision = _find_id(doc["procedures"], "end-watch")
     flow = {"cflow": 2, "name": "end-flow", "include": ["ask-common"],
-            "nodes": {"end-notice": {"prompt": "end"}, "end-hold": {"prompt": "hold"},
-                      "end-new-task": {"prompt": "new"}},
-            "body": [decision]}
+            "nodes": _end_stubs(), "body": [decision]}
     from claude_launcher.cflow2 import frontend
     chart = frontend.compile_text(yaml.safe_dump(flow, allow_unicode=True, sort_keys=False),
                                   resolve_include=layers.resolver(str(tmp_path)))
     brief = dict(BRIEF, recommendation="end", options=[
         dict(BRIEF["options"][0], name="end"), dict(BRIEF["options"][1], name="hold"),
-        dict(BRIEF["options"][1], name="new-task")])
+        dict(BRIEF["options"][1], name="new-task"),
+        dict(BRIEF["options"][1], name="self-improve")])
     for scope, answer, then in (("m", "end", "end-notice"), ("n", "new-task", "end-new-task")):
         kw = {"cwd": str(tmp_path), "scope": scope, "now": 1.0}
         st = runtime.start(chart, caps={}, **kw)
@@ -976,6 +976,121 @@ def test_end_new_task_starts_the_next_run_and_keeps_the_session():
     assert "flow_start" in text and "inputs: {issue: <그 id>}" in text
     assert "--labels user-direct" in text and "--parent" in text
     assert node["returns"] == {"ok": {"issue": "str"}}
+
+
+#: The nodes the end-watch loop runs, stubbed: every one prints its own name.
+END_NODES = ("end-notice", "end-hold", "end-new-task", "self-improve-review",
+             "self-improve-discuss", "self-improve-register")
+
+
+def _end_stubs():
+    return {name: {"prompt": name} for name in END_NODES}
+
+
+def _brief(*names):
+    return dict(BRIEF, recommendation=names[0],
+                options=[dict(BRIEF["options"][0], name=n) for n in names])
+
+
+def test_self_improve_reviews_aligns_registers_and_asks_again(tmp_path, monkeypatch):
+    """claunch-c4e6f: self-improve is a fourth answer to the end question.
+    It runs the review, the discussion and the person's alignment gate --
+    revise goes back to the discussion, register registers -- and then the
+    end question is asked again, where new-task can start a registered
+    issue. Nothing ends the run until one of end/hold/new-task is answered."""
+    from claude_launcher.cflow2 import frontend, runtime
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    flow = {"cflow": 2, "name": "self-improve-flow", "include": ["ask-common"],
+            "nodes": _end_stubs(), "body": [_find_id(doc["procedures"], "end-watch")]}
+    chart = frontend.compile_text(yaml.safe_dump(flow, allow_unicode=True, sort_keys=False),
+                                  resolve_include=layers.resolver(str(tmp_path)))
+    kw = {"cwd": str(tmp_path), "scope": "m", "now": 1.0}
+    st = runtime.start(chart, caps={}, **kw)
+    end_q = _brief("end", "hold", "new-task", "self-improve")
+    align_q = _brief("register", "revise", "drop")
+
+    def labels(st):
+        return [t["label"].rsplit("/", 1)[-1] for t in st["tasks"]]
+
+    def report(st, label, value=None):
+        iid = next(t["instance"] for t in st["tasks"] if t["label"].rsplit("/", 1)[-1] == label)
+        return runtime.report(iid, "ok", value, **kw)
+
+    def answer(st, brief, decision):
+        st = report(st, "ask-frame", {"brief": brief})
+        assert st["status"] == "waiting_approval"
+        runtime.approve(None, decision=decision, reason="r", **kw)
+        return runtime.status(**kw)
+
+    st = answer(st, end_q, "self-improve")
+    assert labels(st) == ["self-improve-review"]
+    st = report(st, "self-improve-review")
+    assert labels(st) == ["self-improve-discuss"]
+    st = report(st, "self-improve-discuss")
+    st = answer(st, align_q, "revise")          # back to the discussion
+    assert labels(st) == ["self-improve-discuss"]
+    st = report(st, "self-improve-discuss")
+    st = answer(st, align_q, "register")
+    assert labels(st) == ["self-improve-register"]
+    st = report(st, "self-improve-register")
+    # the end question again; drop on a second pass registers nothing
+    st = answer(st, end_q, "self-improve")
+    st = report(st, "self-improve-review")
+    st = report(st, "self-improve-discuss")
+    st = answer(st, align_q, "drop")
+    assert labels(st) == ["ask-frame"]
+    st = answer(st, end_q, "new-task")
+    assert labels(st) == ["end-new-task"]
+    st = report(st, "end-new-task")
+    assert st["status"] == "done"
+
+
+def test_self_improve_nodes_keep_registration_behind_the_person():
+    """claunch-c4e6f: the review and the discussion create no issue; only
+    register (after the person's register answer) does, with label
+    self-improve, no assignee, and the REGISTERED marker settle-check reads."""
+    doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
+    nodes = doc["nodes"]
+    review = _words(nodes["self-improve-review"]["prompt"])
+    assert "RETRO @ <런 id>" in review and "SELF-IMPROVE @ <런 id>" in review
+    assert "**general**" in review and "**cflow**" in review
+    assert "이슈를 만들지 않는다" in review
+    assert nodes["self-improve-review"]["executor"] == ["inline"]
+    assert nodes["self-improve-review"]["returns"] == {
+        "ok": {"where": "str", "general": "int", "cflow": "int"}}
+    discuss = _words(nodes["self-improve-discuss"]["prompt"])
+    assert "턴을 끝낸다" in discuss and "이슈를 만들지 않는다" in discuss
+    assert "board.write" not in nodes["self-improve-discuss"]["effects"]
+    register = _words(nodes["self-improve-register"]["prompt"])
+    assert "--labels self-improve" in register
+    assert "--assignee" not in register.split("**assignee는 비워 둔다**")[0]
+    assert "SELF-IMPROVE REGISTERED @ <런 id>: <id,...>" in register
+    assert nodes["self-improve-register"]["returns"] == {"ok": {"issues": "list"}}
+    # the person, not the worker, opens registration
+    chart = _chart()
+    align = next(n for n in chart.nodes.values() if n.label == "self-improve-align")
+    _, w = _asked(chart, align)
+    assert "from" not in w
+    # end-new-task takes a registered issue by assigning it to itself
+    new_task = _words(nodes["end-new-task"]["prompt"])
+    assert "label `self-improve`" in new_task
+    assert "claunch beads update <id> --assignee $CLAUNCH_SESSION" in new_task
+
+
+def test_settle_check_excepts_only_a_user_approved_self_improve_issue():
+    """claunch-c4e6f (leader s29, msg-74aacd2fcfd6): an issue the person
+    agreed to leave on the board is not unsettled -- only with all three of
+    label, no assignee and the REGISTERED marker."""
+    chart = _chart()
+    words = _words(next(n for n in chart.nodes.values()
+                        if n.label == "settle-check").props["prompt"])
+    assert "세 조건을 모두 만족할 때만이다" in words
+    assert "label에 `self-improve`가 있다" in words
+    assert "assignee가 비어 있다" in words
+    assert "`SELF-IMPROVE REGISTERED @ <런 id>: <id,...>` 코멘트" in words
+    # the beads-common block is untouched: still byte-compared with v1
+    assert "self-improve" not in COMMON.read_text(encoding="utf-8")
 
 
 # -- claunch-jbk5w: the landing wait paces the nudge, not the whole choice ----
@@ -1126,7 +1241,7 @@ def test_the_retrospective_reads_the_pack_and_runs_inline():
     ids = [b.get("id") if isinstance(b, dict) else b for b in body]
     retro = next(i for i, b in enumerate(body)
                  if isinstance(b, dict) and b.get("try") == {"seq": ["retrospective"]})
-    assert ids.index("settle-watch") < retro < ids.index("end-decision")
+    assert ids.index("settle-watch") < retro < ids.index("end-watch")
 
 
 @pytest.mark.parametrize("outcome", ["ok", "fail"])
