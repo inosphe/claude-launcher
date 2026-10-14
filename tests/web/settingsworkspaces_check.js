@@ -53,7 +53,7 @@ assert.deepEqual(parseHash("#/workspaces"), { page: "workspaces" });
 /* ---- which cards each section draws ------------------------------------ */
 const CARDS = [
   "keyHelpCard", "scoreGoalSettingsCard", "roleWorkflowsCard", "railStaleCard", "modelChoicesCard",
-  "llmSettingsCard", "simDefaultsCard", "faqCard", "promptPresetCard", "prompterSettingsCard",
+  "llmSettingsCard", "simDefaultsCard", "qaNudgeCard", "faqCard", "promptPresetCard", "prompterSettingsCard",
   "statusCheckCard", "ragCard", "ghCard", "relaySettingsCard",
   "wsAddCard", "projectsCard", "beadsBoardsCard",
 ];
@@ -149,7 +149,7 @@ assert.deepEqual(shown, ["workspaces", "settings", "settings"]);
 /* ---- which data each section fetches ------------------------------------ */
 const called = [];
 const REFRESHERS = [
-  "refreshHarnesses", "refreshLlmSettings", "refreshSimDefaults", "refreshFaq", "refreshPromptPresets",
+  "refreshHarnesses", "refreshLlmSettings", "refreshSimDefaults", "refreshQaNudge", "refreshFaq", "refreshPromptPresets",
   "refreshPrompterSettings", "refreshStatusChecks", "refreshRagStatus",
   "refreshGhStatus", "refreshRelaySettings", "refreshBeadsBoards",
   "refreshProjects", "refreshProfileSettings", "refreshInstallOverview",

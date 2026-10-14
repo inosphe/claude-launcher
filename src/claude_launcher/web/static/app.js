@@ -22654,6 +22654,7 @@ function openSettings(section) {
   refreshRoleWorkflowSettings();
   refreshLlmSettings();
   refreshSimDefaults();
+  refreshQaNudge();
   refreshFaq();
   refreshPromptPresets();
   refreshPrompterSettings();
@@ -28075,6 +28076,7 @@ function renderWorkspaces() {
   view.appendChild(modelChoicesCard());
   view.appendChild(llmSettingsCard());
   view.appendChild(simDefaultsCard());
+  view.appendChild(qaNudgeCard());
 
   view.appendChild(faqCard());
 
@@ -28936,6 +28938,153 @@ function simDefaultsCard() {
   });
   card.appendChild(form);
   if (simDefaultsNotice) card.appendChild(el("p", "wf-note", simDefaultsNotice));
+  return card;
+}
+
+/* QA nudges (General) — claunch-165w6. When a session's turn ends with a
+   plain-text question to the user instead of qa_ask, the daemon asks Jev
+   (TypeSafe System One) what follow-up it needs and types a nudge to use
+   the QA pane. The daemon's qa_nudge* / jev_* keys, read and written with
+   GET/PUT /api/qa-nudge. The API key goes to a 0600 file beside the daemon
+   and is never sent back: the card only learns whether one is set and
+   where it came from. */
+let qaNudgeSettings = null;
+let qaNudgeDraft = null;
+let qaNudgeError = "";
+let qaNudgeNotice = "";
+let qaNudgeBusy = false;
+
+async function refreshQaNudge() {
+  try {
+    const resp = await api("/api/qa-nudge");
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    qaNudgeSettings = data.settings;
+    qaNudgeError = "";
+  } catch (err) {
+    qaNudgeError = String(err);
+  }
+  if (wsOpen) renderWorkspaces();
+}
+
+async function saveQaNudge(body, notice) {
+  qaNudgeBusy = true;
+  qaNudgeNotice = "";
+  renderWorkspaces();
+  try {
+    const resp = await api("/api/qa-nudge", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    qaNudgeSettings = data.settings;
+    qaNudgeDraft = null;
+    qaNudgeError = "";
+    qaNudgeNotice = notice || "Saved. Applies within one clock tick.";
+  } catch (err) {
+    qaNudgeError = String(err);
+  }
+  qaNudgeBusy = false;
+  renderWorkspaces();
+}
+
+function qaNudgeCard() {
+  const card = el("section", "ws-add qa-nudge-settings");
+  card.appendChild(el("h3", null, "QA nudges (Jev)"));
+  card.appendChild(el("p", "wf-note",
+    "When a session stops after asking the user something in plain text " +
+    "instead of with qa_ask, Jev classifies the turn and the daemon types a " +
+    "nudge to use the QA pane. Switched on, the turn's final reply (up to " +
+    "the character cap) is sent to the Jev endpoint. Every judgment is " +
+    "logged to qa_nudge.jsonl in the daemon directory."));
+  if (qaNudgeError) card.appendChild(el("p", "error", qaNudgeError));
+  if (!qaNudgeSettings) {
+    card.appendChild(el("p", "wf-note", "reading…"));
+    return card;
+  }
+  const s = qaNudgeSettings;
+  const draft = qaNudgeDraft || (qaNudgeDraft = {
+    enabled: !!s.enabled,
+    min_confidence: String(s.min_confidence),
+    cooldown: String(Math.round(s.cooldown)),
+    max_chars: String(s.max_chars),
+    jev_model: s.jev_model || "",
+    jev_base_url: s.jev_base_url || "",
+    jev_api_key_env: s.jev_api_key_env || "",
+    api_key: "",
+  });
+  const form = el("form", "llm-settings-form");
+  const toggle = el("label", null);
+  const box = document.createElement("input");
+  box.type = "checkbox";
+  box.id = "qa-nudge-enabled";
+  box.checked = draft.enabled;
+  box.disabled = qaNudgeBusy;
+  box.addEventListener("change", () => { draft.enabled = box.checked; });
+  toggle.append(box, " Nudge sessions that ask in plain text");
+  form.appendChild(toggle);
+  const field = (id, labelText, key, type, attrs) => {
+    const label = el("label", null, labelText);
+    const input = document.createElement("input");
+    input.id = id;
+    input.type = type;
+    for (const [k, v] of Object.entries(attrs || {})) input.setAttribute(k, v);
+    input.value = draft[key];
+    input.disabled = qaNudgeBusy;
+    input.addEventListener("input", () => { draft[key] = input.value; });
+    label.appendChild(input);
+    form.appendChild(label);
+    return input;
+  };
+  field("qa-nudge-confidence", "Minimum confidence (0–1)", "min_confidence", "number",
+    { min: "0", max: "1", step: "0.05" });
+  field("qa-nudge-cooldown", "Cooldown between nudges (seconds)", "cooldown", "number",
+    { min: "0", step: "30" });
+  field("qa-nudge-max-chars", "Characters of the reply sent", "max_chars", "number",
+    { min: "200", max: "30000", step: "100" });
+  field("qa-nudge-model", "Jev model", "jev_model", "text", { placeholder: "jev-latest" });
+  field("qa-nudge-base-url", "Jev base URL", "jev_base_url", "text",
+    { placeholder: "https://api.typesafe.ai" });
+  field("qa-nudge-key-env", "API key environment variable", "jev_api_key_env", "text",
+    { placeholder: "TYPESAFE_API_KEY" });
+  const key = field("qa-nudge-api-key", "API key (stored in a file, never shown)", "api_key",
+    "password", { autocomplete: "off", placeholder: s.key_set ? "•••••• (set)" : "not set" });
+  key.spellcheck = false;
+  form.appendChild(el("p", "wf-note",
+    s.key_set
+      ? `Key in use: ${s.key_source === "file" ? "the saved key file" : s.key_source}.`
+      : "No key: judgments are skipped until one is saved here or the daemon's environment has it."));
+  form.appendChild(el("p", "wf-note", `Actions: ${(s.actions || []).join(" | ")}`));
+  const save = el("button", "wf-btn", qaNudgeBusy ? "Saving…" : "Save QA nudges");
+  save.type = "submit";
+  save.disabled = qaNudgeBusy;
+  form.appendChild(save);
+  if (s.key_source === "file") {
+    const clear = el("button", "wf-btn clear", "Remove saved key");
+    clear.type = "button";
+    clear.disabled = qaNudgeBusy;
+    clear.addEventListener("click", () => saveQaNudge({ api_key: "" }, "Saved key removed."));
+    form.appendChild(clear);
+  }
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const body = {
+      enabled: draft.enabled,
+      min_confidence: Number(draft.min_confidence),
+      cooldown: Number(draft.cooldown),
+      max_chars: Number(draft.max_chars),
+      jev_model: draft.jev_model,
+      jev_base_url: draft.jev_base_url,
+      jev_api_key_env: draft.jev_api_key_env,
+    };
+    // An empty box keeps the saved key; "Remove saved key" is the way to drop it.
+    if (draft.api_key.trim()) body.api_key = draft.api_key.trim();
+    saveQaNudge(body);
+  });
+  card.appendChild(form);
+  if (qaNudgeNotice) card.appendChild(el("p", "wf-note", qaNudgeNotice));
   return card;
 }
 

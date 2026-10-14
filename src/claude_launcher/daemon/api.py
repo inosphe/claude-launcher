@@ -587,6 +587,11 @@ def build_app(
     # to the user, answered in its QA pane and typed back into it.
     from . import qa_api
     qa_api.install(app)
+    # Turn-end QA nudges (daemon/qa_nudge.py, claunch-165w6): a session that
+    # ended its turn asking the user in plain text is told to use qa_ask.
+    # After qa_api: the clock reads app["qa"] for the agent's own writes.
+    from . import qa_nudge
+    qa_nudge.install(app)
     # Session threads (daemon/threads_api.py, claunch-doj98): sub-topic
     # conversations beside the terminal, typed into the session by id.
     from . import threads_api

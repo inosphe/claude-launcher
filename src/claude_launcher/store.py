@@ -448,6 +448,24 @@ DAEMON_DEFAULTS = {
         "This run has not moved in a long time and nothing is holding it. "
         "Pick it back up, or say what you are waiting for."
     ),
+    # Turn-end QA nudges (daemon/qa_nudge.py, claunch-165w6): when a session
+    # goes busy -> idle and its last reply asked the user something in plain
+    # text instead of through qa_ask, Jev (daemon/jev.py) classifies the
+    # follow-up and the daemon types a nudge to use the QA pane. OFF by
+    # default: switched on, the turn's final assistant text (at most
+    # qa_nudge_max_chars characters) is sent to the Jev endpoint. An answer
+    # under qa_nudge_min_confidence counts as "none"; after a nudge the
+    # session is not nudged again until a person types into it and
+    # qa_nudge_cooldown seconds have passed. The key is never a config value:
+    # it is the 0600 file the settings page writes (<daemon dir>/jev.key) or
+    # the environment variable jev_api_key_env names. Read LIVE every tick.
+    "qa_nudge": False,
+    "qa_nudge_min_confidence": 0.6,
+    "qa_nudge_cooldown": 300.0,
+    "qa_nudge_max_chars": 8000,
+    "jev_model": "jev-latest",
+    "jev_base_url": "https://api.typesafe.ai",
+    "jev_api_key_env": "TYPESAFE_API_KEY",
     # The measurement window (daemon/window.py): how many test runs of each
     # class may hold the window at once. "sweep" (a full suite) is exclusive
     # against everything regardless of this number; "targeted" (a
