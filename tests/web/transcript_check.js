@@ -761,7 +761,7 @@ const texts = (pane) => pane.children
   check("and a shadow's address, onto the same page with its daemon",
         /parts\[0\] === "rlog" && parts\[1\] && parts\[2\]\) \{\s*return \{ page: "log", machine: parts\[1\], name: parts\[2\] \}/.test(src));
   check("which route() hands to the page",
-        /case "log": openTranscript\(r\.name, r\.machine\); break;/.test(src));
+        /case "log": \{[\s\S]{0,900}?openTranscript\(r\.name, r\.machine\);/.test(src));
   check("and route() stops its poll on the way out, like every other page",
         /r\.page !== "log"\) closeTranscript\(\)/.test(src));
   check("the pane is a real scroller — this is the whole feature, so pin it",
@@ -802,8 +802,9 @@ const texts = (pane) => pane.children
                  && css.includes(`[data-kind="${k}"] { --log-kind-color`)));
   check("the new-turns button starts hidden", /id="log-new"[^>]*class="[^"]*hidden/.test(html));
   check("on the transcript page the footer is ordered under the conversation",
-        // the footer is the composer group (presets, prompter row, input bar)
-        /body\[data-page="log"\] #term-composer\s*\{\s*order:\s*1/.test(css));
+        // the footer is the composer group (presets, prompter row, input bar);
+        // order 2, under the split pane (order 1) the HTML view also carries
+        /body\[data-page="log"\] #term-composer\s*\{\s*order:\s*2/.test(css));
   check("the minimap's press and drag are wired",
         /map\.addEventListener\("pointerdown"[\s\S]{0,200}seekTranscriptMinimap/.test(src));
 }

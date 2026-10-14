@@ -2783,7 +2783,12 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 /* The session line follows the reader onto this page (sessionLineOnPage):
    #main is a column and these come before #log-view in the markup, so on
    this page they are ordered after it, under the conversation. */
-body[data-page="log"] #term-composer { order: 1; }
+body[data-page="log"] #term-composer { order: 2; }
+/* The split pane follows the reader here too (syncSplitPane): its bar and
+   pane go under the conversation, above the session line, and the
+   conversation takes the terminal's share of the column. */
+body[data-page="log"] #term-split, body[data-page="log"] #term-wf { order: 1; }
+body.term-split[data-page="log"] #log-view { flex: var(--split-term, 0.6) 1 0; min-height: 80px; }
 .log-err .log-kind { color: #e88; }
 .log-err .log-pre { background: #241b1b; }
 .log-note { color: #8b93a1; padding: 12px 0; }
