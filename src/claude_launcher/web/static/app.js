@@ -22370,6 +22370,17 @@ function mdTable(lines, start) {
   return [table, i];
 }
 
+/* Does a pipe table start at lines[i]? Its header row and the `---|---`
+   rule under it. A table may interrupt a paragraph, as in GFM: agents write
+   a bold caption line and the table straight under it, with no blank line
+   between (claunch-la6sr), and that table used to be read as more
+   paragraph and shown as raw pipes. */
+function mdTableStart(lines, i) {
+  const rule = lines[i + 1];
+  return lines[i].includes("|") && rule !== undefined &&
+    rule.includes("-") && rule.includes("|") && /^\s*\|?[\s:|-]+$/.test(rule);
+}
+
 /* Markdown text -> a list of block nodes. */
 function mdBlocks(src) {
   const lines = String(src == null ? "" : src).replace(/\r\n?/g, "\n").split("\n");
@@ -22417,9 +22428,7 @@ function mdBlocks(src) {
       continue;
     }
 
-    if (line.includes("|") && i + 1 < lines.length &&
-        lines[i + 1].includes("-") && /^\s*\|?[\s:|-]+$/.test(lines[i + 1]) &&
-        lines[i + 1].includes("|")) {
+    if (mdTableStart(lines, i)) {
       const [table, next] = mdTable(lines, i);
       out.push(table);
       i = next;
@@ -22436,7 +22445,7 @@ function mdBlocks(src) {
     const buf = [];
     while (i < lines.length && lines[i].trim() &&
            !MD_BLOCK_START.test(lines[i]) && !MD_BULLET.test(lines[i]) &&
-           !MD_RULE.test(lines[i])) {
+           !MD_RULE.test(lines[i]) && !(buf.length && mdTableStart(lines, i))) {
       buf.push(lines[i].replace(/\s+$/, ""));
       i++;
     }

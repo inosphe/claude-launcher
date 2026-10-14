@@ -54,7 +54,7 @@ const MARKDOWN =
   ["const MD_BULLET", "const MD_RULE", "const MD_FENCE", "const MD_BLOCK_START",
    "const MD_SAFE_HREF", "const mdCells ="].map((d) => sliceTo(d, ";")).join("") +
   sliceTo("const MD_INLINE = [", "\n];") +
-  ["mdWrap", "mdLink", "mdInline", "mdList", "mdTable", "mdBlocks", "mdInto"]
+  ["mdWrap", "mdLink", "mdInline", "mdList", "mdTable", "mdTableStart", "mdBlocks", "mdInto"]
     .map(slice).join("\n");
 
 function sliceConst(decl) {
