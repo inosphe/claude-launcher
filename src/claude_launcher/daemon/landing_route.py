@@ -10,9 +10,12 @@ that can merge. Which session that is, is decided here once:
 * **independent** (v2 ``leader:landing``) -- the mesh leader only.
 
 The mesh leader is a ``leader``-role member of a mesh the worker is in, taken
-only when it is the worker's sibling (the same parent; two sessions with no
-parent count as siblings) or one of its direct ancestors -- never an uncle or
-a child. Not exactly one such leader that can merge is a skip.
+only when it is one of the worker's direct ancestors or a sibling (the same
+parent; two sessions with no parent count as siblings) of the worker or of one
+of those ancestors -- so a leader beside a parent that cannot merge (a
+free-role root with no workflow) takes the request (claunch-g0ttr). Never a
+child, a cousin or a sibling's child. Not exactly one such leader that can
+merge is a skip.
 
 A session *can merge* when it is live, holds the ``merger`` role in a mesh
 the worker is in (a ``leader`` is taken as holding it; roles are mesh
@@ -192,8 +195,9 @@ class Router:
                tried: set) -> Tuple[Optional[str], Optional[Holder], str]:
         """(leader, holder, why) of the one mesh leader that takes the request.
 
-        Only a sibling of ``scope`` or one of its direct ancestors
-        (``chain``); one already asked (``tried``) is not asked again.
+        Only a direct ancestor of ``scope`` (``chain``) or a sibling of
+        ``scope`` or of one of those ancestors (a known session); one
+        already asked (``tried``) is not asked again.
         """
         if self.mesh is None:
             return None, None, "no mesh to look for a leader in"
@@ -214,7 +218,13 @@ class Router:
                     leaders.setdefault(m.session, (mesh, m))
         if not leaders:
             return None, None, f"no leader in mesh {', '.join(repr(n) for n in names)}"
-        own_parent = self.parent_of(scope)
+        # The parent each lead may share to count as a sibling: the worker's,
+        # and each known ancestor's -- a leader beside a parent that cannot
+        # merge (a free-role root, claunch-g0ttr) takes the request too.
+        sibling_of = {scope: self.parent_of(scope)}
+        for name in chain:
+            if self._session(name) is not None:
+                sibling_of[name] = self.parent_of(name)
         eligible: List[Tuple[str, Holder]] = []
         refused: List[str] = []
         for lead, (mesh, member) in sorted(leaders.items()):
@@ -227,9 +237,13 @@ class Router:
             if self._session(lead) is None:
                 refused.append(f"leader {lead!r} is not a session of this daemon")
                 continue
-            if lead not in chain and self.parent_of(lead) != own_parent:
+            lead_parent = self.parent_of(lead)
+            if lead not in chain and not any(
+                lead != name and lead_parent == parent for name, parent in sibling_of.items()
+            ):
                 refused.append(
-                    f"leader {lead!r} is neither a sibling nor a direct ancestor of {scope!r}"
+                    f"leader {lead!r} is neither a sibling nor a direct ancestor of {scope!r} "
+                    "or of one of its ancestors"
                 )
                 continue
             holder, why = self.merger(lead, repo, scope)

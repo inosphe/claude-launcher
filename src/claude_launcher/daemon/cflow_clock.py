@@ -2455,8 +2455,8 @@ class TriggerClock:
 
     async def _enqueue_landing(self, cwd: str, scope: str) -> Tuple[bool, str]:
         """This worker's landing request, onto the landing queue of the
-        nearest direct ancestor that can merge, else of its sibling mesh
-        leader (:meth:`landing_target`). With neither it is an error: the
+        nearest direct ancestor that can merge, else of the mesh leader
+        beside it or one of its ancestors (:meth:`landing_target`). With neither it is an error: the
         reason is journalled and logged, and nothing is filed.
 
         Read, not reported: the tip and branch from the checkout the worker

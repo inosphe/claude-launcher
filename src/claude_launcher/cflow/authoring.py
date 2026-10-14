@@ -456,8 +456,10 @@ work:
   `landing_queue:` -- the request goes to the nearest direct ancestor that
   can (a session that can merge also holds the `merger` role in the worker's
   mesh; a leader always counts), and with none to the session's mesh `leader`, but only a leader that
-  is its sibling (the same parent; two sessions with no parent are
-  siblings), never an uncle or a child. Every target must run in this
+  is a direct ancestor or a sibling of the session or of one of its
+  ancestors (the same parent; two sessions with no parent are siblings) --
+  so a leader beside a free-role root parent takes it -- never a cousin or
+  a child. Every target must run in this
   repository; of several queue runs a main run is taken first, then the
   first in order. With no target, or two leaders that could take it, it is
   skipped, journalled with the reason. Put it where the request has just been made, `at: leave` of the

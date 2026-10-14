@@ -820,14 +820,42 @@ def test_leader_push_goes_to_the_leader_only(tmp_path):
     assert _items(mid, "m1") == {}
 
 
-def test_leader_push_refuses_an_uncle_leader(tmp_path):
+def test_leader_push_takes_an_uncle_leader(tmp_path):
     lead, mid, work, _ = _leader_tree(tmp_path)
-    # lead and m1 are both roots, so lead is w1's uncle.
+    # lead and m1 are both roots, so lead is w1's uncle (claunch-g0ttr).
     mgr = Manager(Session("lead", lead), Session("m1", mid), Session("w1", work, parent="m1"))
+    push = dict(cflow2_triggers.ENQUEUE_LANDING_PUSH, to="leader:landing")
+    ok, detail = _push(mgr, work, push=push, mesh=Mesh(LEADER_MESH))
+    assert ok, detail
+    assert set(_items(lead, "lead")) == {"c-1", "c-2"}
+
+
+def test_leader_push_refuses_a_cousin_leader(tmp_path):
+    lead, mid, work, _ = _leader_tree(tmp_path)
+    # lead sits under another root: it is w1's cousin, beside no ancestor.
+    top = tmp_path / "top"
+    top.mkdir()
+    mgr = Manager(Session("top", top), Session("lead", lead, parent="top"),
+                  Session("m1", mid), Session("w1", work, parent="m1"))
     push = dict(cflow2_triggers.ENQUEUE_LANDING_PUSH, to="leader:landing")
     ok, detail = _push(mgr, work, push=push, mesh=Mesh(LEADER_MESH))
     assert not ok and "neither a sibling nor a direct ancestor" in detail
     assert _items(lead, "lead") == {}
+
+
+def test_parent_push_from_under_a_free_role_root_reaches_the_root_leader(tmp_path):
+    # claunch-g0ttr (s332 under s325): the parent is a root with no merger
+    # role and no landing run; the leader is another root.
+    lead, work = _dirs(tmp_path)
+    mid = tmp_path / "mid"
+    mid.mkdir()
+    _start(lead, LEAD, "lead")
+    mgr = Manager(Session("lead", lead), Session("m1", mid), Session("w1", work, parent="m1"))
+    mesh = Mesh({"lead": ["leader"], "m1": [], "w1": ["worker"]})
+    ok, detail = _push(mgr, work, mesh=mesh)
+    assert ok, detail
+    assert "parent 'm1' holds no 'merger' role" in detail and "fell back to 'lead'" in detail
+    assert set(_items(lead, "lead")) == {"c-1", "c-2"}
 
 
 def test_parent_push_climbs_to_the_grandparent_then_the_sibling_leader(tmp_path):
