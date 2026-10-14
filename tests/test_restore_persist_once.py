@@ -18,6 +18,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+import threading
+import time
 
 from claude_launcher import lineage, profile, store
 from claude_launcher.daemon import __main__ as daemon_main
@@ -222,12 +224,32 @@ def test_a_persist_from_a_worker_thread_leaves_the_pending_one(home, monkeypatch
     monkeypatch.setattr(Session, "start", lambda self, argv, env, cwd: None)
     monkeypatch.setattr(SessionManager, "PERSIST_COALESCE_SECONDS", 0.05)
 
+    class _ThreadTaggingManager(SessionManager):
+        """Records which thread each persist ran on. The timer may fire while
+        the worker-thread persist is still running on a loaded machine, so
+        the two writes are told apart by thread, not by order
+        (claunch-uojc9)."""
+
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.threads: list[int] = []
+
+        def persist(self) -> None:
+            self.threads.append(threading.get_ident())
+            super().persist()
+
     async def run():
-        mgr = _CountingManager(idle_threshold=0.5, scrollback=100, restore_default=True)
+        mgr = _ThreadTaggingManager(
+            idle_threshold=0.5, scrollback=100, restore_default=True
+        )
         mgr.create(SessionDef(name="s9", harness="py", restore=True), restoring=True)
+        loop_thread = threading.get_ident()
         await asyncio.to_thread(mgr.persist)
-        assert mgr.persists == 1
-        await asyncio.sleep(0.2)
-        assert mgr.persists == 2
+        deadline = time.monotonic() + 10
+        while loop_thread not in mgr.threads and time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
+        on_loop = [t for t in mgr.threads if t == loop_thread]
+        assert len(mgr.threads) - len(on_loop) == 1  # the worker-thread one
+        assert len(on_loop) == 1  # the pending write was not cancelled
 
     asyncio.run(run())
