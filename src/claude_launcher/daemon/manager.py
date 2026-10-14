@@ -257,6 +257,10 @@ class SessionManager:
         #: :meth:`wake_soon` scheduled (kept so they are not collected).
         self._wake_locks: Dict[str, asyncio.Lock] = {}
         self._wake_tasks: Set[asyncio.Task] = set()
+        # Notifications belong to a name while its replacement is staged.
+        # A staged Session is registered before launch_async finishes.
+        self._wake_messages: Dict[str, List[str]] = {}
+        self._wake_message_tasks: Dict[str, asyncio.Task] = {}
         #: Names mid-wake. The respawn takes the record out of the registry
         #: while the new child spawns, and a reader in that gap must not
         #: take the session for removed (:meth:`is_waking`).
@@ -347,6 +351,9 @@ class SessionManager:
         session.on_exit = self._session_exited
         session.on_command_submitted = self._session_command_submitted
         session.on_progress = self._session_progress
+        session.wake_on_message = self.wake_async
+        session.queue_on_message = self.queue_message
+        session.message_restore_pending = self.message_restore_pending
         self._sessions[name] = session
         return session
 
@@ -1676,8 +1683,15 @@ class SessionManager:
         lock = self._wake_locks.setdefault(name, asyncio.Lock())
         async with lock:
             session = self.get(name)
-            if not session.exited or not getattr(session, "held_at", None):
+            if not getattr(session, "held_at", None):
                 return session
+            # hold marks the record before the asynchronous process exit.
+            # Messages in that interval must wait rather than enter the dying PTY.
+            if not session.exited:
+                await session.wait_for("exited", timeout=10.0, threshold=self.idle_threshold)
+                session = self.get(name)
+                if not session.exited or not getattr(session, "held_at", None):
+                    return session
             delayed = bool(getattr(session, "delayed_at", None))
             self._waking.add(name)
             try:
@@ -1739,6 +1753,44 @@ class SessionManager:
         """Whether :meth:`wake_async` is relaunching ``name`` right now."""
         return name in self._waking
 
+    def message_restore_pending(self, name: str) -> bool:
+        """Keep staged recipients on the same FIFO as the first wake message."""
+        return self.is_waking(name) or name in self._wake_messages
+
+    def queue_message(self, name: str, text: str, *, by: str = "message") -> bool:
+        """Keep notifications in arrival order across replacement staging."""
+        session = self.get(name)
+        if not getattr(session, "held_at", None) and not self.message_restore_pending(name):
+            return session.queue_delivery(text) if not session.exited else False
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return False
+        self._wake_messages.setdefault(name, []).append(text)
+        if name in self._wake_message_tasks:
+            return True
+
+        async def run() -> None:
+            try:
+                current = await self.wake_async(name, by=by)
+                if current.exited:
+                    return
+                # No await between removing the restore FIFO and transferring
+                # it to the live FIFO: incoming calls cannot overtake it.
+                for message in self._wake_messages.pop(name, []):
+                    current.queue_delivery(message)
+            except Exception:  # noqa: BLE001 -- acceptance is not a delivery receipt
+                log.exception("message wake of held session %r failed", name)
+            finally:
+                self._wake_messages.pop(name, None)
+                self._wake_message_tasks.pop(name, None)
+
+        task = loop.create_task(run())
+        self._wake_message_tasks[name] = task
+        self._wake_tasks.add(task)
+        task.add_done_callback(self._wake_tasks.discard)
+        return True
+
     def wake_soon(self, name: str, *, by: str = "", deliver: str = "") -> bool:
         """Schedule :meth:`wake_async` from synchronous code on the loop, and
         queue ``deliver`` into the woken session. Returns whether a wake was
@@ -1747,7 +1799,11 @@ class SessionManager:
             session = self.get(name)
         except ManagerError:
             return False
-        if not session.exited or not getattr(session, "held_at", None):
+        if deliver:
+            if getattr(session, "held_at", None) or self.message_restore_pending(name):
+                return self.queue_message(name, deliver, by=by)
+            return False
+        if not getattr(session, "held_at", None):
             return False
         try:
             loop = asyncio.get_running_loop()
@@ -1756,12 +1812,10 @@ class SessionManager:
 
         async def run() -> None:
             try:
-                woken = await self.wake_async(name, by=by)
+                await self.wake_async(name, by=by)
             except Exception:  # noqa: BLE001 -- held stays held; delayed is now failed
                 log.exception("wake of held session %r failed", name)
                 return
-            if deliver and not woken.exited:
-                woken.queue_delivery(deliver)
 
         task = loop.create_task(run())
         self._wake_tasks.add(task)
@@ -2950,6 +3004,9 @@ class SessionManager:
             idle_threshold=self.idle_threshold,
         )
         self._sessions[sdef.name] = dead
+        dead.wake_on_message = self.wake_async
+        dead.queue_on_message = self.queue_message
+        dead.message_restore_pending = self.message_restore_pending
         # This ending never reaches the exit hooks (see
         # :attr:`_retired_for_sweep`), so the issue sweep it owes has to be
         # claimed at boot instead — by whoever owns the board.

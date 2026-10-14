@@ -6,7 +6,8 @@ id, so a reconnect can distinguish an accepted line from one that was never
 sent.
 
 A line submitted while the session has exited has no terminal to go to, so
-it is recorded as ``queued`` and nothing else happens.  The journal is the
+it is recorded as ``queued``. A held session is automatically restored;
+other exited sessions wait for an explicit relaunch. The journal is the
 queue: when the session is launched again (respawn, resume, or a daemon
 restore) :func:`flush` types every request whose latest status is still
 ``queued``, oldest first, and records ``sent`` or ``failed`` for each.  Until
@@ -35,6 +36,7 @@ log = logging.getLogger(__name__)
 
 _lock = threading.Lock()
 _flush_locks: Dict[str, asyncio.Lock] = {}
+_active_requests: set = set()
 
 QUEUED = "queued"
 #: Statuses after which nothing more happens to a request.
@@ -193,6 +195,7 @@ async def flush(session) -> int:
             rid = row["request_id"]
             if _transition(name, rid, "input_accepted", "accepted") is None:
                 continue  # cancelled while we waited
+            _active_requests.add((name, rid))
             try:
                 await session.prepare_operator_input()
                 await type_line(session, row["text"])
@@ -201,7 +204,20 @@ async def flush(session) -> int:
                 write(name, "input_failed", request_id=rid, text=row["text"],
                       status="failed", pid=session.pid)
                 break
+            finally:
+                _active_requests.discard((name, rid))
             write(name, "input_sent", request_id=rid, text=row["text"],
                   status="sent", pid=session.pid)
             sent += 1
     return sent
+
+
+def delivering(name: str, request_id: str) -> bool:
+    """Whether this daemon is currently flushing this request (not an old receipt)."""
+    return (name, request_id) in _active_requests
+
+
+def flushing(name: str) -> bool:
+    """New operator lines join the queue until the current flush releases it."""
+    lock = _flush_locks.get(name)
+    return lock is not None and lock.locked()

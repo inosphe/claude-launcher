@@ -84,7 +84,7 @@ def _resolve(cwd: str) -> str:
         return str(cwd)
 
 
-def live_session(manager: Any, name: Optional[str]) -> Any:
+def live_session(manager: Any, name: Optional[str], *, include_held: bool = False) -> Any:
     """The live session called ``name``, or None."""
     if not name:
         return None
@@ -92,7 +92,9 @@ def live_session(manager: Any, name: Optional[str]) -> Any:
         session = manager.get(name)
     except Exception:
         return None
-    return None if getattr(session, "exited", True) else session
+    if getattr(session, "exited", True) and not (include_held and getattr(session, "held_at", None)):
+        return None
+    return session
 
 
 def parent_of(manager: Any, session: Optional[str]) -> Optional[str]:
@@ -572,7 +574,7 @@ async def perform(manager: Any, cwd: str, scope: str, trig: Dict[str, Any], *,
             return await cflow_clock.request_checks(
                 held, cflow_clock.waking_deliver(manager, driver, by="cflow2-checks"))
     if do in (DO_BRIEFING, DO_CHECKS):
-        session = live_session(manager, driver)
+        session = live_session(manager, driver, include_held=do == DO_CHECKS)
         if session is None:
             return False, (f"the driver session {driver!r} is not live" if driver
                            else "the run has no driver session")

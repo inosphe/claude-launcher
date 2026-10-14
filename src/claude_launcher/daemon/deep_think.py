@@ -268,7 +268,7 @@ def _fork_of(manager, origin: str, fork: str):
         raise DeepThinkError(
             403, f"{fork!r} is not a deep_think question {origin!r} asked"
         )
-    if session.exited:
+    if session.exited and not getattr(session, "held_at", None):
         raise DeepThinkError(400, f"{fork!r} has already ended")
     return session
 

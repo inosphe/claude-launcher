@@ -1451,7 +1451,7 @@ class StallPingClock:
             return True  # unreadable status: assume working, never ping blind
 
     async def _deliver(self, cwd: str, scope: str, block: str) -> None:
-        session = session_for(self.manager, cwd, scope)
+        session = session_for(self.manager, cwd, scope, held=True)
         if session is None:
             return
         try:
@@ -1613,7 +1613,7 @@ class WindowClock:
         return released
 
     async def _deliver(self, cwd: str, scope: str, block: str) -> None:
-        session = session_for(self.manager, cwd, scope)
+        session = session_for(self.manager, cwd, scope, held=True)
         if session is None:
             # A CLI-driven run, or a driver that exited: the run has moved
             # regardless, and whoever picks it up reads the new position.
@@ -1734,7 +1734,7 @@ class TimerClock:
 
     async def _deliver(self, cwd: str, scope: str, block: str) -> None:
         """The wake-up after a fire — the run has ALREADY moved."""
-        session = session_for(self.manager, cwd, scope)
+        session = session_for(self.manager, cwd, scope, held=True)
         if session is None:
             # A CLI-driven run, or a driver that exited: the run has moved
             # regardless, and whoever picks it up reads the new position.
@@ -1898,7 +1898,7 @@ class ChecklistClock:
 
     async def _deliver(self, cwd: str, scope: str, frame: str) -> None:
         """The wake-up after a gate opened — the run has ALREADY moved."""
-        session = session_for(self.manager, cwd, scope)
+        session = session_for(self.manager, cwd, scope, held=True)
         if session is None:
             # A CLI-driven run, or a driver that exited: the run has moved
             # regardless, and whoever picks it up reads the new position.
@@ -2153,7 +2153,7 @@ class RestartClock:
             return {"exit_code": None, "output": f"could not run restart command: {exc}"}
 
     async def _deliver(self, cwd: str, scope: str, block: str) -> None:
-        session = session_for(self.manager, cwd, scope)
+        session = session_for(self.manager, cwd, scope, held=True)
         if session is None:
             return
         try:
@@ -2585,7 +2585,7 @@ class TriggerClock:
         clock that awaits one stops ticking for every other run on the
         machine. Queueing defers behind the draft instead and returns now.
         """
-        session = session_for(self.manager, cwd, scope)
+        session = session_for(self.manager, cwd, scope, held=True)
         if session is None:
             return False
         try:
@@ -2733,7 +2733,7 @@ class RoundStartClock:
 
     async def _deliver(self, cwd: str, scope: str, block: str) -> None:
         """The wake-up after a round started — the run has ALREADY moved."""
-        session = session_for(self.manager, cwd, scope)
+        session = session_for(self.manager, cwd, scope, held=True)
         if session is None:
             # A CLI-driven run, or a driver that exited: the new round is
             # running regardless, and whoever picks it up reads its position.
