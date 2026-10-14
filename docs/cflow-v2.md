@@ -125,6 +125,7 @@ nodes:
     done_when: 범위의 구현이 커밋으로 존재한다
     verify: "uv run --no-sync pytest -q tests/test_x.py"
     executor: inline                  # 또는 선호 순서 목록 [session, subagent, inline]
+    session_workflow: oneshot-job-v2  # session 자식이 받아 뜨는 v2 런(7절), executor에 session이 있을 때만
     needs: [tools.restrict]           # 실행 주체에 추가로 요구하는 capability
     returns:
       ok:   {files: list, summary: str}
@@ -2306,6 +2307,18 @@ fallback하게 한다.
   기록(저널, 커밋, 회차 보고서)을 읽거나 쓰는 명령은 그 scope를 명시해야 한다
   (`-t`/`--session <scope>`). 오프닝 태스크(`executors.session_task`)가 이것을
   안내한다.
+- `session` 자식의 수명: 작업의 `session_workflow`가 비어 있으면 자식은 런 없이
+  (`workflow: "-"`) 뜬다. 데몬의 v2 kill-on-end는 세션의 main 런이 `done`일 때만
+  그 세션을 종료하므로, 런이 없는 자식은 제출 뒤에도 누가 kill할 때까지 남는다
+  (claunch-pbh7k). `session_workflow: <v2 워크플로>`를 주면 데몬이 자식을 그
+  워크플로의 런으로 띄운다(`cflow2_exec.spawn_body`의 `workflow`·
+  `workflow_version: 2`). 그 워크플로가 시작 입력 `delegation`·`delegation_scope`·
+  `delegation_cwd`를 선언하면 위임 id, 위임한 런의 scope, 런 디렉터리가 채워진다
+  (선언한 것만 보낸다 — 선언하지 않은 입력은 시작이 거절한다). 이름이 해석되지
+  않거나 컴파일되지 않으면 spawn이 실패하고 위임은 다음 실행 주체로 넘어간다.
+  패키지의 `oneshot-job-v2`가 이 용도의 워크플로다: job 하나(브리프 수행과 제출)
+  뒤에 에이전트의 `finish` 선택이 있고, `done`을 고르면 런이 끝나 데몬이 종결
+  기록을 남기고 세션을 종료한다.
 
 ## 8. 명세(spec)
 

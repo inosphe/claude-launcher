@@ -873,3 +873,37 @@ def test_sides_are_kept_in_meta():
     assert chart.meta["sides"] == {"stack": "stack-v2"}
     assert "sides" not in C("body: a\n").meta
     assert "not a path" in err("body: a\n", "sides: {stack: ../x.yaml}\n")
+
+
+# -- session_workflow (claunch-pbh7k) -----------------------------------------
+
+
+def test_session_workflow_is_kept_on_a_session_task():
+    chart = C("body: r\n", "nodes:\n  r: {prompt: R, executor: [session, inline], "
+                          "session_workflow: oneshot-job-v2}\n")
+    [node] = [n for n in chart.nodes.values() if n.label == "r"]
+    assert node.get("session_workflow") == "oneshot-job-v2"
+
+
+def test_session_workflow_needs_a_session_executor():
+    msg = err("body: r\n", "nodes:\n  r: {prompt: R, executor: [subagent], "
+                           "session_workflow: oneshot-job-v2}\n")
+    assert "executor has no session" in msg
+
+
+def test_session_workflow_must_be_a_name():
+    msg = err("body: r\n", "nodes:\n  r: {prompt: R, executor: [session], "
+                           "session_workflow: [a]}\n")
+    assert "session_workflow must be a workflow name" in msg
+
+
+def test_the_round_report_child_runs_the_oneshot_job():
+    """improv-worker-v2's round-report child gets a run of its own, so the
+    daemon's v2 kill-on-end ends it once it is done (claunch-pbh7k)."""
+    chart = layers.load("improv-worker-v2", None)
+    [node] = [n for n in chart.nodes.values() if n.label == "round-report"]
+    assert node.get("session_workflow") == "oneshot-job-v2"
+    job = layers.load("oneshot-job-v2", None)
+    assert job.kind == "workflow" and not (job.meta or {}).get("recur")
+    assert set((job.meta or {}).get("inputs") or {}) == {
+        "delegation", "delegation_scope", "delegation_cwd"}

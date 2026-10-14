@@ -85,19 +85,47 @@ def delegation_marker(st: RunStore, run_id: Optional[str], did: str) -> str:
 
 def spawn_body(brief: Dict[str, Any], *, cwd: str, scope: str, receipt_path: str,
                mcp: bool = True, marker: Optional[str] = None,
-               receipt_token: Optional[str] = None) -> Dict[str, Any]:
+               receipt_token: Optional[str] = None, workflow: Optional[str] = None,
+               inputs: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     task = executors.session_task(brief, cwd=cwd, scope=scope,
                                   receipt_path=receipt_path, mcp=mcp,
-                                  receipt_token=receipt_token)
+                                  receipt_token=receipt_token, workflow=workflow)
     if marker:
         task = f"{task}\n\n{marker}"
-    return {
+    body: Dict[str, Any] = {
         "task": task,
-        # No v1 run for the child (onboard.NO_WORKFLOW) and no board issue:
-        # the delegation record is the child's whole assignment.
-        "workflow": "-",
+        # No board issue: the delegation record is the child's whole
+        # assignment. No run either (onboard.NO_WORKFLOW) unless the node
+        # names one (``session_workflow``, claunch-pbh7k): a child driving a
+        # v2 run of its own is ended by the daemon when that run is done.
+        "workflow": workflow or "-",
         "beads": False,
     }
+    if workflow:
+        body["workflow_version"] = 2
+        if inputs:
+            body["cflow_inputs"] = dict(inputs)
+    return body
+
+
+#: Start inputs a ``session_workflow`` may declare to learn which delegation
+#: it serves; only the ones its chart declares are sent (an undeclared input
+#: is refused by the start).
+DELEGATION_INPUTS = ("delegation", "delegation_scope", "delegation_cwd")
+
+
+def session_workflow_inputs(workflow: str, cwd: str, values: Dict[str, Any]) -> Dict[str, Any]:
+    """``values`` narrowed to the inputs ``workflow`` declares. A workflow
+    that does not compile gets none: the spawn then fails on the same error
+    and the delegation reroutes, which is where it is reported."""
+    from . import cflow2_web
+
+    try:
+        chart = cflow2_web.load(workflow, cwd)
+    except Exception:  # noqa: BLE001 - reported by the spawn that follows
+        return {}
+    declared = (chart.meta or {}).get("inputs") or {}
+    return {k: v for k, v in values.items() if k in declared}
 
 
 def receipt_key_hash(token: str) -> str:
@@ -145,9 +173,14 @@ def spawn_session(cwd: str, scope: str, did: str, *,
         # Persisted before the spawn, like the claim: a child adopted after
         # a restart still has a key to be checked against.
         runtime.delegate_update(did, cwd=cwd, scope=scope, runner=runner)
+    workflow = None if brief.get("nested") else r.chart.node(rec["node"]).get("session_workflow")
+    inputs = None
+    if workflow:
+        inputs = session_workflow_inputs(workflow, str(st.cwd), {
+            "delegation": did, "delegation_scope": st.scope, "delegation_cwd": str(st.cwd)})
     body = spawn_body(brief, cwd=str(st.cwd), scope=st.scope,
                       receipt_path=str(st.receipt_path(did, ".child.json")), mcp=mcp,
-                      marker=marker, receipt_token=token)
+                      marker=marker, receipt_token=token, workflow=workflow, inputs=inputs)
     # the parent is named as the session manager names it: the slot without
     # its daemon (``s15`` for ``s15@main``, claunch-9jmdz)
     parent = unqualified(st.scope)

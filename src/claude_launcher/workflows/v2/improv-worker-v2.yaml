@@ -2694,6 +2694,10 @@ nodes:
       `claunch report path --session <scope> --issue <이슈 id>`. 드라이버가
       직접 쓰는 경우(subagent·inline)에는 scope가 자기 이름이라 기본값과
       같다. 보고서를 자식 이름으로 쓰면 부모 세션의 Reports 블록에 뜨지 않는다.
+      그 자식은 자기 런으로 `oneshot-job-v2`(아래 `session_workflow`)를 받아
+      뜬다(claunch-pbh7k): 결과를 제출해 받아들여지면 그 런의 finish에서
+      done을 고르고, 데몬이 런의 done을 보고 자식 세션을 끝낸다 — 제출한
+      뒤에도 세션이 남아 슬롯을 쥐는 일이 없도록.
 
       쓸 자리를 네가 정하지 않는다 — `claunch report path --issue <이슈 id>`가
       찍어 주는 경로 그대로 쓴다(배치 회차면 주 이슈 id 하나로 한 장 — 실린
@@ -2781,6 +2785,8 @@ nodes:
       있다** — 커밋 하나나 이슈 하나가 절 하나가 되는 구성은 이 조항을
       만족하지 않는다. 해시와 이슈 id는 증거 절에 모인다.
     executor: [session, subagent, inline]
+    # session 자식의 런(claunch-pbh7k). 런 없이 뜬 자식은 제출 뒤에도 남았다.
+    session_workflow: oneshot-job-v2
     returns:
       ok: {path: str, bytes: int}
     effects: ["fs.write:reports"]

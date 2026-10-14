@@ -217,8 +217,12 @@ def build_prompt(brief: Mapping[str, Any], *, errors: Optional[List[str]] = None
 
 
 def session_task(brief: Mapping[str, Any], *, cwd: str, scope: str, receipt_path: str,
-                 mcp: bool = True, receipt_token: Optional[str] = None) -> str:
-    """The opening task of a child session running a ``session`` delegation."""
+                 mcp: bool = True, receipt_token: Optional[str] = None,
+                 workflow: Optional[str] = None) -> str:
+    """The opening task of a child session running a ``session`` delegation.
+    ``workflow`` is the run the child is started on (the node's
+    ``session_workflow``): the task then says that finishing that run, after
+    the result is in, is what ends the session."""
     did = brief.get("delegation")
     if brief.get("nested"):
         # A nested delegation run is driven with flow_*; its finish is the
@@ -249,4 +253,12 @@ def session_task(brief: Mapping[str, Any], *, cwd: str, scope: str, receipt_path
              f"$CLAUNCH_SESSION is not it. "
              f"The result is {{\"outcome\": ..., \"value\": {{...}}}} matching the declared "
              f"returns: {json.dumps(dict(brief.get('returns') or {}))}. ")
+    if workflow:
+        submit += (
+            f" This session was started on a cflow v2 run of its own, {workflow!r}: its "
+            f"scope is your own session name, so the flow_* calls that drive it take no "
+            f"scope (only flow_delegate above names your parent's run). This delegation is that run's job. Once your "
+            f"result is accepted (or the delegation was ended for you), finish that run: "
+            f"the daemon ends this session when it is done, so nobody has to kill it."
+        )
     return build_prompt(brief, result=shape + submit)

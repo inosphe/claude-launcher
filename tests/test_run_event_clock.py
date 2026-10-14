@@ -997,3 +997,39 @@ def test_v1_end_leaves_reviewers_alone(proj):
 
     asyncio.run(drain())
     assert order == ["w1"]
+
+
+# --------------------------------------------------------------------------- #
+# claunch-pbh7k: a session delegation's child runs oneshot-job-v2; choosing
+# done in its finish is what ends the child (the v2 kill-on-end above)
+# --------------------------------------------------------------------------- #
+def test_oneshot_job_done_ends_its_session(proj):
+    from claude_launcher.cflow2 import layers, runtime as v2
+
+    cwd = str(proj)
+    chart = layers.load("oneshot-job-v2", cwd)
+    st = v2.start(chart, cwd=cwd, scope="kid", caps={}, driver="kid",
+                  inputs={"delegation": "d1", "delegation_scope": "own@main",
+                          "delegation_cwd": cwd})
+    kid = _FakeSession("kid", cwd, parent="own")
+    clock = cflow_clock.RunEventClock(_FakeManager({"kid": kid}))
+
+    st = v2.report(st["tasks"][0]["instance"], "ok",
+                   {"summary": "report written", "result": "accepted"}, cwd=cwd, scope="kid")
+    [choice] = st["choices"]
+    # not done yet: the agent judged there is more to do
+    st = v2.select(choice["instance"], "again", reason="receipt refused", cwd=cwd, scope="kid")
+    assert st["status"] == "running"
+    clock.scan()
+    assert kid.recorded == [] and clock._end_pending == []
+
+    st = v2.report(st["tasks"][0]["instance"], "ok",
+                   {"summary": "resubmitted", "result": "accepted"}, cwd=cwd, scope="kid")
+    st = v2.select(st["choices"][0]["instance"], "done", reason="flow_delegate accepted",
+                   cwd=cwd, scope="kid")
+    assert st["status"] == "done"
+    clock.scan()
+    [(q_cwd, q_scope, q_run, q_wf, _)] = clock._end_pending
+    assert (q_scope, q_wf) == ("kid", "oneshot-job-v2")
+    asyncio.run(clock._finish_end(q_cwd, q_scope, q_run, q_wf))
+    assert kid.killed is True
