@@ -427,6 +427,11 @@ class Session:
     unstarted one.
     """
 
+    #: Set while :meth:`seed_screen_from_log_async` builds the replayed
+    #: screen; :meth:`screen_synced` waits on it. A class default, so a
+    #: session put together without ``__init__`` (tests do) reads None.
+    _seed_done: Optional[asyncio.Event] = None
+
     def __init__(
         self,
         sdef: SessionDef,
@@ -461,9 +466,6 @@ class Session:
         self._focused_subscribers: Set[object] = set()
         self._focused_session_scheduling = focused_session_scheduling
         self._cpu_background: Optional[bool] = None
-        #: Set while :meth:`seed_screen_from_log_async` builds the replayed
-        #: screen; :meth:`screen_synced` waits on it.
-        self._seed_done: Optional[asyncio.Event] = None
         self._feeder = ScreenFeeder(
             self.screen,
             foreground=self.is_focused,
