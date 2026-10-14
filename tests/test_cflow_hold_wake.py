@@ -202,7 +202,7 @@ def test_cflow2_cli_person_commands_nudge_the_driver(tmp_path, monkeypatch, caps
                               visits=False))
 
     assert [s for s, _ in sent] == ["drv"] * 5
-    assert sent[0][1] == cli_cflow2.NUDGE_SELECTED.format(option="yes")
+    assert sent[0][1] == cli_cflow2.NUDGE_SELECTED.format(option="yes", note="")
     assert [m for _, m in sent[1:]] == [cli_cflow2.NUDGE_ABORTED, cli_cflow2.NUDGE_MOVED,
                                          cli_cflow2.NUDGE_REPORTED,
                                          cli_cflow2.NUDGE_EXTENDED]

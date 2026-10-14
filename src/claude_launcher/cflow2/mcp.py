@@ -99,7 +99,9 @@ TOOLS = [
             "allow now. 'waits' are external conditions the engine polls (this "
             "call checks them). 'delegations' with status 'pending' carry a "
             "'brief' to run in a fresh sub-agent. 'loop_limits' mean a loop hit "
-            "its max and a person must extend it. Several tasks can be active at "
+            "its max and a person must extend it. 'person_picks' are choices a "
+            "person took for you, newest last: each 'reason' is their note, an "
+            "instruction to follow. Several tasks can be active at "
             "once under par/foreach/group: each has its own 'instance' id."
         ),
         "inputSchema": {"type": "object",

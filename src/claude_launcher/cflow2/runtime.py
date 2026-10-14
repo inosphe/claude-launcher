@@ -163,6 +163,16 @@ CALLER_USER = "user"
 #: pending until a person answers; a refusal stays until the driver files
 #: another request or the run moves.
 MOVE_REQUEST = "move_request"
+
+#: State key of the choices a person took for the driver (``select`` with
+#: ``caller: user``), newest last, with the note they typed. The nudge that
+#: tells the driver about a pick can be missed or compacted away; this is
+#: where flow_status keeps it (claunch-e437w).
+PERSON_PICKS = "person_picks"
+PERSON_PICKS_KEPT = 5
+#: How much of a person's note a nudge carries; the whole note is in
+#: ``person_picks``.
+NUDGE_NOTE_LIMIT = 1500
 #: The two things a driver may ask a person for (``request_move``): a move
 #: to a ``force_target`` node, or a report of one of its active tasks.
 MOVE_KIND_MOVE = "move"
@@ -3177,10 +3187,29 @@ def _take_option(r: Run, iid: str, n: ir.Node, opt: Dict[str, Any], reason: Opti
         r.state.setdefault("windows", {})[_window_key(n, option)] = r.now
     r.emit("selected", node=n.id, instance=iid, option=option, reason=reason, by=by,
            override=True if override else None)
+    if by == CALLER_USER:
+        picks = r.state.setdefault(PERSON_PICKS, [])
+        picks.append({"instance": iid, "node": n.id, "label": n.label or n.id,
+                      "option": option, "reason": reason, "at": _iso(r.now)})
+        del picks[:-PERSON_PICKS_KEPT]
     if opt.get("child"):
         _enter_child(r, iid, opt["child"], "option")
     else:
         _complete(r, iid, ir.OUTCOME_OK, None)
+
+
+def person_pick_words(payload: Dict[str, Any], option: str) -> Dict[str, str]:
+    """What a nudge says about the pick a person just made, read from the
+    status ``payload`` that :func:`select` returned: ``label`` (the choice)
+    and ``note`` (`` -- their note: ...`` or empty). The note is cut at
+    :data:`NUDGE_NOTE_LIMIT`; flow_status keeps it whole."""
+    picks = payload.get(PERSON_PICKS) or []
+    last = picks[-1] if picks and picks[-1].get("option") == option else {}
+    reason = (last.get("reason") or "").strip()
+    if len(reason) > NUDGE_NOTE_LIMIT:
+        reason = reason[:NUDGE_NOTE_LIMIT] + f" ... (cut; whole note in {PERSON_PICKS})"
+    return {"label": str(last.get("label") or "the open choice"),
+            "note": f" -- their note: {reason}" if reason else ""}
 
 
 def _release_hold(r: Run, iid: str, node: ir.Node) -> bool:
@@ -5118,6 +5147,10 @@ def describe(r: Run) -> Dict[str, Any]:
     if asks:
         out["asks"] = asks
     out["data"] = s.get("data")
+    if s.get(PERSON_PICKS):
+        # the reason a person typed with a pick is their instruction to the
+        # driver; the journal alone never reaches it (claunch-e437w)
+        out[PERSON_PICKS] = s[PERSON_PICKS]
     move_req = s.get(MOVE_REQUEST)
     if isinstance(move_req, dict):
         if move_req.get("kind", MOVE_KIND_MOVE) == MOVE_KIND_MOVE and not move_req.get("decision") \
