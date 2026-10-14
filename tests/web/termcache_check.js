@@ -193,6 +193,10 @@ let snapshotName = null;   // the real removeSnapshot (sliced in) assigns this
 function setLink(s) { linkState = s; __record("link", s); }
 function setStatusBadge(s) { __record("status", s); }
 function markDetailRow() { __record("detail"); }
+/* The session line's repaint (terminputended_check's subject): recorded with
+   the ended state it is painted for, so the return of a parked terminal can
+   be seen to paint the session it brought back. */
+function renderTermInputState() { __record("input-state", sessionEnded); }
 /* The header's mesh-handle chip, repainted on every attach
    (sesshandle_check's subject); here it is only a call that has to
    resolve. */
@@ -459,6 +463,27 @@ return {
         w.api.sessionEnded === true && w.api.linkState === "idle",
         [w.api.sessionEnded, w.api.linkState]);
   check("and no new socket was opened", w.sockets.length === before, w.sockets.length);
+}
+
+/* --- the session line is repainted for the terminal that came back ------
+   attach() paints the field (resetLineSync) before the swap, while the
+   globals still describe the session being left, and a parked terminal gets
+   no init frame to paint it again. Leaving an ended terminal for a live one
+   kept "session ended" on the live session's line (claunch-4lzc5). */
+{
+  const w = build();
+  w.api.attach("a");
+  w.api.ws.opened();
+  w.api.attach("b");
+  w.api.kept("a").exited = true;
+  w.api.attach("a");
+  const onA = w.rec("input-state");
+  check("returning to an ended terminal paints its line as ended",
+        onA[onA.length - 1] === true, onA);
+  w.api.attach("b");
+  const onB = w.rec("input-state");
+  check("and returning from it to a live one paints the line as live",
+        onB.length === onA.length + 1 && onB[onB.length - 1] === false, onB);
 }
 
 /* --- a parked terminal keeps its screen, not its connection ------------- */
