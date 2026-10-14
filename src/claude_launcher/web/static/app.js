@@ -5053,6 +5053,10 @@ async function refreshSessions(options) {
     // next poll), so a stale entry can't flicker the resume/kill controls.
     setStatusBadge(cur.status);
   }
+  // The session line reads this record too: a resume the branches above did
+  // not follow (the terminal is off screen) must not leave it saying "session
+  // ended" over a running session (termInputEnded).
+  if (cur && typeof renderTermInputState === "function") renderTermInputState();
   // The mobile bottom bar carries this session's harness/profile, which only
   // the list knows.
   if (rebuild) syncMobileBars();
@@ -14908,6 +14912,32 @@ function termInputQueueNote(ended) {
   return "";
 }
 
+/* Whether the session line is talking to an ended session. `sessionEnded` is
+   the socket's word for the child it was bound to, and only a reattach clears
+   it — which the poll does only while the terminal is on screen. The line is
+   up on other pages too, so a session that exited and was resumed (a restart
+   step, a respawn, another tab) kept saying "session ended" over a running
+   session until the reader went back to its terminal (claunch-4lzc5). The
+   rail's record decides once it shows a different, running child: a record
+   that is not exited and carries a pid other than the one this socket was
+   bound to (or any running record behind a snapshot, which has no pid). The
+   same pid is the poll lagging behind an exit frame, so that stays ended. */
+function termInputEnded() {
+  if (!sessionEnded) return false;
+  const rec = currentName && sessionsCache.find((s) => s.name === currentName);
+  if (!rec || rec.status === "exited") return true;
+  if (snapshotName && snapshotName === currentName) return false;
+  return !(rec.pid && rec.pid !== attachedPid);
+}
+
+/* Repaint the field for the current session's state, ownership aside: the
+   poll and a parked terminal's return call this, since neither goes through
+   a frame that would run refreshTermInput. */
+function renderTermInputState() {
+  renderTermInputField($("term-input-field"),
+    typeof lineSyncShared === "function" && lineSyncShared(), termInputEnded());
+}
+
 /* The field's placeholder, border and title for the session's state: ended
    (queued, above) over remote-sync (shared) over the plain local line. The
    one writer of the placeholder, called from renderLineSync and
@@ -15238,7 +15268,7 @@ function refreshTermInput() {
   field.disabled = false;
   btn.disabled = false;
   renderTermInputField(field,
-    typeof lineSyncShared === "function" && lineSyncShared(), sessionEnded);
+    typeof lineSyncShared === "function" && lineSyncShared(), termInputEnded());
   if (note) {
     note.classList.add("hidden");
     note.textContent = "";
@@ -16103,7 +16133,7 @@ function renderLineSync() {
       : "local-only: this line stays in this browser. Click to share it with " +
         "every browser on this session";
   }
-  renderTermInputField($("term-input-field"), shared, sessionEnded);
+  renderTermInputField($("term-input-field"), shared, termInputEnded());
   const keep = $("term-local-keep");
   if (keep && keep.classList) {
     keep.classList.toggle("hidden", !(shared && keep.value));
@@ -18320,6 +18350,9 @@ function restoreTerminal(b) {
   if (typeof syncRailKeys === "function") syncRailKeys();
   markDetailRow();
   unpark(b);
+  // attach() painted the field before the swap, with the session it left;
+  // no init frame comes for a parked terminal to paint it again.
+  if (typeof renderTermInputState === "function") renderTermInputState();
   if (ws && ws.readyState === WebSocket.OPEN && !sessionEnded) {
     wireActive(b);
     linkName = b.name;          // resetLive cleared it; a live socket's retries need it
