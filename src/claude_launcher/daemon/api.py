@@ -105,7 +105,25 @@ from . import session as session_mod
 from . import ws as ws_mod
 from . import shadow as shadow_mod
 
-COOKIE_NAME = "claunch_session"
+#: Prefix of the login cookie. The full name carries a digest of this
+#: daemon's token (``cookie_name``): browsers scope cookies by host, not by
+#: port, so two daemons on one machine (``:8378`` and a named instance on
+#: ``:8379``) under one fixed name overwrote each other's login on every
+#: request, and the page fell back to the paste-the-token prompt
+#: (claunch-id6sp).
+COOKIE_PREFIX = "claunch_session"
+
+
+def cookie_name(token: str) -> str:
+    """The login cookie's name for the daemon that holds ``token``.
+
+    Stable across restarts of one daemon (the token file outlives them) and
+    different between daemons, whose tokens are minted independently. A
+    rotated token renames the cookie, which costs nothing: the old cookie's
+    session died with the rotation anyway.
+    """
+    digest = hashlib.sha256(token.encode("utf-8")).hexdigest()[:12]
+    return f"{COOKIE_PREFIX}_{digest}"
 
 _STATIC_DIR = Path(__file__).resolve().parent.parent / "web" / "static"
 
@@ -330,6 +348,8 @@ async def record_middleware(request: web.Request, handler):
 
 
 def build_auth_middleware(token: str, cookie_sessions: set):
+    cookie_key = cookie_name(token)
+
     @web.middleware
     async def auth_middleware(request: web.Request, handler):
         path = request.path
@@ -341,7 +361,7 @@ def build_auth_middleware(token: str, cookie_sessions: set):
         auth = request.headers.get("Authorization", "")
         if auth.startswith("Bearer ") and _token_eq(auth[7:], token):
             return await handler(request)
-        cookie = request.cookies.get(COOKIE_NAME)
+        cookie = request.cookies.get(cookie_key)
         if cookie and cookie in cookie_sessions:
             return await handler(request)
         # Write the refusal down. Nothing else does: the access log is off,
@@ -435,6 +455,7 @@ def build_app(
     app["relay_state"] = relay_state if relay_state is not None else _relay_unconfigured
     app["token"] = token
     app["cookie_sessions"] = cookie_sessions
+    app["cookie_name"] = cookie_name(token)
     app["started_at"] = started_at
     # The same moment as a wall clock, which is what "when did this daemon
     # come up" means to a person. ``started_at`` is monotonic — it can only
@@ -1160,7 +1181,8 @@ async def h_auth_session(request: web.Request) -> web.Response:
     request.app["cookie_sessions"].add(session_id)
     resp = json_response({"ok": True})
     resp.set_cookie(
-        COOKIE_NAME, session_id, httponly=True, samesite="Strict", path="/"
+        request.app["cookie_name"], session_id,
+        httponly=True, samesite="Strict", path="/",
     )
     return resp
 

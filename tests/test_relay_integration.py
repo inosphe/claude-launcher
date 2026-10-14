@@ -185,7 +185,7 @@ def test_two_layer_auth_through_tunnel(home, tmp_path):
             )
             assert status == 200, "daemon auth through tunnel failed"
             daemon_cookie = _set_cookie_value(headers)
-            assert daemon_cookie and daemon_cookie.startswith("claunch_session=")
+            assert daemon_cookie and daemon_cookie.startswith("claunch_session_")
             # the daemon's Set-Cookie Path must be rewritten under the tunnel prefix
             assert any(f"Path=/t/{NAME}/" in sc for sc in headers["set-cookie"]), headers["set-cookie"]
 

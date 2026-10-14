@@ -353,7 +353,7 @@ def test_proxy_end_to_end_with_a_stand_in_server(ws_tree, fake_cs):
             # What reaches the server: no daemon credential, other cookies intact.
             resp = await client.post(
                 "/vscode/proj~wt-a/echo/x?q=1",
-                headers={**BEARER, "Cookie": "claunch_session=abc; relay_session=r; editor=1"},
+                headers={**BEARER, "Cookie": "claunch_session=abc; claunch_session_0123abcd4567=d; relay_session=r; editor=1"},
                 data="hello",
             )
             seen = await resp.json()

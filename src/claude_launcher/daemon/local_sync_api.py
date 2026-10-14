@@ -30,7 +30,7 @@ def _registry(request):
 
 
 def _person(request):
-    if request.cookies.get("claunch_session") not in request.app["cookie_sessions"]:
+    if request.cookies.get(request.app["cookie_name"]) not in request.app["cookie_sessions"]:
         raise web.HTTPForbidden(text="use the authenticated dashboard for policy or provisioning decisions")
 
 
