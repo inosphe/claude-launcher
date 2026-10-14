@@ -3165,6 +3165,48 @@ class MeshManager:
         finally:
             self._brief_deferred.discard(session)
 
+    def _tell_soon(self, mesh: Mesh, handle: str, note: str) -> None:
+        """Type a roster note into a local member's terminal, idle-gated.
+
+        The join briefing's path, not a mesh message: a note about who is
+        here is not mail. Sent as a message it took a slot of the receiver's
+        inbox cap and an entry in every log reader, and a refusal at a full
+        door would have been spent on it (claunch-c8eyt.1).
+        """
+        member = mesh.members.get(handle)
+        if member is None or not member.session or not self._is_local(mesh, member):
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        block = (
+            "---\n"
+            "# claunch mesh: roster update -- machine-generated, not typed by the user\n"
+            f"mesh: {mesh.name}\n"
+            f"you: {handle}\n"
+            f"{note}\n"
+            "---\n"
+        )
+        asyncio.ensure_future(self._tell(mesh, member, block))
+
+    async def _tell(
+        self, mesh: Mesh, member: Member, block: str, *, hold: float = 30.0
+    ) -> None:
+        """:meth:`_brief`'s delivery loop for an arbitrary block."""
+        deadline = time.monotonic() + hold
+        while time.monotonic() < deadline:
+            try:
+                session = self.manager.get(member.session)
+            except ManagerError:
+                return
+            if member.handle not in mesh.members or session.exited:
+                return
+            if session.status() == STATUS_IDLE and not session.keyboard_busy():
+                if await session.deliver(block):
+                    return
+            await asyncio.sleep(0.5)
+
     def _brief_soon(self, mesh: Mesh, member: Member) -> None:
         """Schedule a join briefing injection into the new member's terminal."""
         if member.session in self._brief_deferred:
@@ -4349,9 +4391,11 @@ class MeshManager:
             if not strict:
                 targets = [t for t in targets if t not in set(unknown)]
             else:
+                elsewhere = self._routes_elsewhere(mesh, from_handle, unknown)
                 raise MeshError(
                     f"unknown recipient(s) in mesh {mesh.name!r}: "
                     f"{', '.join(unknown)}"
+                    + (f"\n{wire.elsewhere_note(elsewhere)}" if elsewhere else "")
                 )
         cut = [
             t for t in targets
@@ -4370,12 +4414,58 @@ class MeshManager:
             notes = "\n".join(
                 wire.filed_note(req, mesh.name) for req in filed if req is not None
             )
+            # Last, after the request is on file: the way through goes where
+            # the eye lands, and the request stays recorded for the approver.
+            elsewhere = self._routes_elsewhere(mesh, from_handle, sorted(cut))
             raise MeshError(
                 f"{from_handle!r} has no connection to {', '.join(sorted(cut))} "
                 f"in mesh {mesh.name!r} — it can reach: {reachable}."
                 + (f"\n{notes}" if notes else "")
+                + (f"\n{wire.elsewhere_note(elsewhere)}" if elsewhere else "")
             )
         return targets
+
+    def _routes_elsewhere(
+        self, mesh: Mesh, from_handle: str, names: Sequence[str]
+    ) -> List[tuple]:
+        """Other meshes where the sender's session already reaches each name.
+
+        ``names`` are what the sender typed — a handle in ``mesh``, or for an
+        unknown recipient possibly a session name or a handle it wears
+        elsewhere. Matched by *session*, because that is what is the same
+        thing across meshes. Local members only: a remote member's session
+        name says nothing on this daemon. Returns ``(name, mesh, handle
+        there)`` rows for :func:`wire.elsewhere_note`.
+        """
+        sender = mesh.members.get(from_handle)
+        if sender is None or not self._is_local(mesh, sender) or not sender.session:
+            return []
+        wanted = {}
+        for name in names:
+            member = mesh.members.get(name)
+            if member is not None:
+                if self._is_local(mesh, member) and member.session:
+                    wanted[name] = member.session
+            else:
+                wanted[name] = name
+        rows = []
+        for other_name in sorted(self._meshes):
+            other = self._meshes[other_name]
+            if other is mesh:
+                continue
+            me = self.member_for_session(other, sender.session)
+            if me is None:
+                continue
+            for name, session in wanted.items():
+                target = self.member_for_session(other, session)
+                if target is None and session in other.members:
+                    candidate = other.members[session]
+                    target = candidate if self._is_local(other, candidate) else None
+                if target is None or target.handle == me.handle:
+                    continue
+                if other.connected(me.handle, target.handle):
+                    rows.append((name, other.name, target.handle))
+        return rows
 
     def history(self, name: str, limit: int = 50) -> List[dict]:
         mesh = self.get(name)
@@ -5221,6 +5311,7 @@ class MeshManager:
         *,
         enabled: bool,
         actor: str = "",
+        by: str = "",
     ) -> dict:
         """Connect or disconnect two members of ``name``.
 
@@ -5244,11 +5335,20 @@ class MeshManager:
         separate approve verb: the request asks for an edge, so the edge is
         the answer, and a second state saying "approved" could only ever
         disagree with the graph.
+
+        ``by`` names who made the decision for the record only — the session a
+        CLI call was made from. It is not ``actor``: the CLI stays the
+        unrestricted operator surface (a person's ``! claunch mesh connect``
+        runs in a session shell too), and only the grant's ``decided_by``
+        changes from "an operator" to that name (claunch-c8eyt.3).
         """
         mesh = self.get(name)
         self._validate_member_edge(mesh, a, b)
         if actor:
             self._require_member_authority(mesh, actor, a, b)
+        decider = actor or by
+        was = mesh.connected(a, b)
+        alone = [h for h in (a, b) if self._alone(mesh, h)] if enabled and not was else []
         if mesh.primary:
             await self._peer_call_primary(
                 mesh, "/peer/mesh/member-link", {"a": a, "b": b, "enabled": enabled}
@@ -5256,14 +5356,22 @@ class MeshManager:
             # Optimistic, as with a machine edge: the authority accepted, and
             # the next sync re-sends the whole table anyway.
             self._mark_member_edge(mesh, a, b, enabled)
-            granted = self._grant_wire_request(mesh, a, b, actor) if enabled else None
+            granted = self._grant_wire_request(mesh, a, b, decider) if enabled else None
             self._persist_def(mesh)
             return {
                 "a": a, "b": b, "enabled": bool(enabled),
                 **({"granted": granted} if granted else {}),
             }
         self._mark_member_edge(mesh, a, b, enabled)
-        granted = self._grant_wire_request(mesh, a, b, actor) if enabled else None
+        granted = self._grant_wire_request(mesh, a, b, decider) if enabled else None
+        for h in alone:
+            # A granted requester was just told by the grant note itself.
+            if granted and h == granted["by"]:
+                continue
+            self._tell_soon(
+                mesh, h,
+                wire.edge_opened_note(b if h == a else a, mesh.name, joined=False),
+            )
         self._persist_def(mesh)
         self._roster_changed(mesh)
         self._flush_guests_soon(mesh)
@@ -5365,7 +5473,10 @@ class MeshManager:
         resolver inside a raise path: the refusal must reach the sender now,
         not after a message round-trip to somebody else.
         """
-        body = wire.notice_body(req, mesh.name, kind=kind)
+        body = wire.notice_body(
+            req, mesh.name, kind=kind,
+            states={h: self._member_state(mesh, h) for h in (req.by, req.other)},
+        )
         try:
             asyncio.get_running_loop()
         except RuntimeError:
@@ -5379,6 +5490,29 @@ class MeshManager:
         self, mesh: Mesh, approver: str, body: str
     ) -> None:
         self._say_as_policy(mesh, [approver], body, type="decide")
+
+    def _member_state(self, mesh: Mesh, handle: str) -> str:
+        """The session state behind ``handle`` as this daemon reads it now.
+
+        ``remote`` for a member on another machine (its session is not ours
+        to read), ``missing`` when the record is gone, else ``exited`` or the
+        live status (``idle``, ``busy``, ...).
+        """
+        member = mesh.members.get(handle)
+        if member is None:
+            return ""
+        if not self._is_local(mesh, member):
+            return "remote"
+        try:
+            session = self.manager.get(member.session)
+        except ManagerError:
+            return "missing"
+        if session.exited:
+            return "exited"
+        try:
+            return str(session.status())
+        except Exception:  # noqa: BLE001 - a state line must not sink the notice
+            return "running"
 
     def _say_as_policy(
         self, mesh: Mesh, to: List[str], body: str, *, type: str = "fyi"
@@ -5430,7 +5564,8 @@ class MeshManager:
         return {"by": req.by, "other": req.other, "asks": req.count}
 
     def decline_wire_request(
-        self, name: str, a: str, b: str, *, actor: str = "", reason: str = ""
+        self, name: str, a: str, b: str, *, actor: str = "", reason: str = "",
+        by: str = "",
     ) -> dict:
         """Answer a wire request with no, once and for good.
 
@@ -5445,6 +5580,10 @@ class MeshManager:
         Subject to the same authority as connecting (an agent edits only
         edges touching a session it commands) — saying no to a channel is as
         much a decision about that pair as saying yes.
+
+        ``by`` is recorded as the decider when there is no ``actor`` — the
+        session a CLI call came from, attribution without the authority check
+        (see :meth:`set_member_link`).
         """
         mesh = self.get(name)
         self._validate_member_edge(mesh, a, b)
@@ -5459,7 +5598,7 @@ class MeshManager:
         if req.state != wire.OPEN:
             return {"already": req.state, **req.to_dict()}
         req.state = wire.DECLINED
-        req.decided_by = actor or "an operator"
+        req.decided_by = actor or by or "an operator"
         req.decided_at = wire.now()
         req.reason = str(reason or "").strip()
         self._say_as_policy(mesh, [req.by], wire.declined_note(req, mesh.name))
@@ -5765,12 +5904,16 @@ class MeshManager:
         facts = self._link_facts(mesh, lineage)
         mine = facts[member.handle]
         auto = mesh.roleset.auto_link
-        opened = []
+        opened, alone = [], []
         for other in sorted(mesh.members):
             if other == member.handle:
                 continue
             kin = other == parent or lineage.get(other) == member.handle
             if kin or auto.decide(mine, facts[other]):
+                # Kin knew already: a parent spawned the joiner, a child was
+                # spawned by it. Only a stranger's arrival is news.
+                if not kin and self._alone(mesh, other, besides=member.handle):
+                    alone.append(other)
                 mesh.member_edges[Mesh.member_key(member.handle, other)] = True
                 opened.append(other)
         member.wired = True
@@ -5779,7 +5922,28 @@ class MeshManager:
             mesh.name, member.handle, mine.role, mine.tier,
             ", ".join(opened) or "nobody",
         )
+        for other in alone:
+            self._tell_soon(
+                mesh, other,
+                wire.edge_opened_note(member.handle, mesh.name, joined=True),
+            )
         return {"parent": parent, "connected_to": opened}
+
+    @staticmethod
+    def _alone(mesh: Mesh, handle: str, *, besides: str = "") -> bool:
+        """Can ``handle`` reach nobody (``besides`` not counted)?
+
+        Its join briefing said "(nobody else yet)", and that is the only roster
+        it was shown — so it, and only it, is told when an edge opens to it. A
+        member that already has peers was shown a roster and reads the mesh;
+        telling every one of them about every join would type a line into each
+        of the ~85 sessions a gds6 worker is wired to on arrival.
+        """
+        return not any(
+            mesh.connected(handle, h)
+            for h in mesh.members
+            if h != handle and h != besides
+        )
 
     def peer_member_link_accept(
         self, name: str, machine: str, token: str, a: str, b: str, enabled: bool

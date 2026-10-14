@@ -525,7 +525,7 @@ def _cmd_connect(args: argparse.Namespace) -> int:
     enabled = args.func is _cmd_connect
     result = client.patch(
         f"/api/mesh/{args.mesh}/members/{args.a}/links/{args.b}",
-        {"enabled": enabled},
+        {"enabled": enabled, "by": _own_session(args) or ""},
     )
     verb = "connected" if result.get("enabled") else "disconnected"
     print(f"{verb} {result['a']} <-> {result['b']}")
@@ -559,7 +559,10 @@ def _cmd_wire_requests(args: argparse.Namespace) -> int:
         a, b = args.decline
         row = client.post(
             f"/api/mesh/{args.mesh}/wire-requests/decline",
-            {"a": a, "b": b, "reason": args.reason or ""},
+            # `by`, not `actor`: names who decided without putting the CLI
+            # under an agent's authority check (claunch-c8eyt.3).
+            {"a": a, "b": b, "reason": args.reason or "",
+             "by": _own_session(args) or ""},
         )
         if row.get("already"):
             print(f"already {row['already']}: {row['a']} <-> {row['b']}")

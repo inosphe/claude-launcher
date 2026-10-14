@@ -276,8 +276,21 @@ def approver(
 # the requester's sentence and the approver's have to agree about what was
 # filed and who holds it, and two strings built in two modules drift.
 # --------------------------------------------------------------------------- #
-def notice_body(req: WireRequest, mesh: str, *, kind: str) -> str:
-    """What the approver is told. One decision, and the call that makes it."""
+def notice_body(
+    req: WireRequest,
+    mesh: str,
+    *,
+    kind: str,
+    states: Optional[Dict[str, str]] = None,
+) -> str:
+    """What the approver is told. One decision, and the call that makes it.
+
+    ``states`` maps each end's handle to its session's state as the daemon
+    reads it now (``idle``, ``busy``, ``exited``, ...). It is printed because
+    the approver otherwise decides on what it last heard: s15 declined
+    s15-qf2 <-> s294 as "s15-qf2 has ended" while s15-qf2 was running again
+    (claunch-c8eyt.4).
+    """
     who = (
         "both of them are in your subtree"
         if kind == "common"
@@ -287,10 +300,21 @@ def notice_body(req: WireRequest, mesh: str, *, kind: str) -> str:
         f" It has asked {req.count} times."
         if req.count > 1 else ""
     )
+    now_line = ""
+    if states:
+        ends = ", ".join(
+            f"{h} is {states[h]}" for h in (req.by, req.other) if states.get(h)
+        )
+        if ends:
+            now_line = (
+                f"state now: {ends} — decide on this, not on what you last "
+                "heard about either session.\n"
+            )
     return (
         f"wire request: {req.by} tried to message {req.other} in mesh "
         f"{mesh!r} and was refused — they are not connected, and {who}, so "
         f"this is yours to decide.{repeat}\n"
+        f"{now_line}"
         f"grant: connect them (MCP 'connect' with mesh={mesh!r}, "
         f"a={req.by!r}, b={req.other!r}; or "
         f"`claunch mesh connect {mesh} {req.by} {req.other}`) — the requester "
@@ -363,6 +387,40 @@ def declined_note(req: WireRequest, mesh: str) -> str:
         f"connect you to {req.other} in mesh {mesh!r}{why}. Do not re-file "
         "it; if you still cannot proceed, that is a question about the work "
         f"for {req.decided_by or 'whoever spawned you'}."
+    )
+
+
+def edge_opened_note(other: str, mesh: str, *, joined: bool) -> str:
+    """What a member that was alone is told when somebody becomes reachable.
+
+    Only a member whose join briefing said "(nobody else yet)" gets this: that
+    briefing is the one piece of the roster it was ever shown, and it is now
+    wrong. s15-qf2 read it, concluded it was alone in s15-qf2-temp, and did not
+    look again when s294 joined six seconds later (claunch-c8eyt.1).
+    """
+    how = f"{other} joined mesh {mesh!r}" if joined else (
+        f"you were connected to {other} in mesh {mesh!r}"
+    )
+    return (
+        f"{how} and you can message each other now — you were the only member "
+        f"here, so nothing you were shown on joining lists it. "
+        f"`claunch mesh send {mesh} {other} \"...\"`."
+    )
+
+
+def elsewhere_note(routes: List[Tuple[str, str, str]]) -> str:
+    """The refused sender's way through, when it has one in another mesh.
+
+    ``routes`` is ``(target as named here, mesh, target's handle there)``. A
+    refusal names only the mesh it was sent on, so a sender connected to the
+    same session in a second mesh was told to stop instead of to switch
+    (claunch-c8eyt.2).
+    """
+    return "\n".join(
+        f"{target} is reachable from you in mesh {mesh!r}"
+        + (f" as {handle!r}" if handle != target else "")
+        + f": `claunch mesh send {mesh} {handle} \"...\"`."
+        for target, mesh, handle in routes
     )
 
 
