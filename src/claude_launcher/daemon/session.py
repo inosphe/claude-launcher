@@ -458,6 +458,9 @@ class Session:
         self._focused_subscribers: Set[object] = set()
         self._focused_session_scheduling = focused_session_scheduling
         self._cpu_background: Optional[bool] = None
+        #: Set while :meth:`seed_screen_from_log_async` builds the replayed
+        #: screen; :meth:`screen_synced` waits on it.
+        self._seed_done: Optional[asyncio.Event] = None
         self._feeder = ScreenFeeder(
             self.screen,
             foreground=self.is_focused,
@@ -886,27 +889,77 @@ class Session:
         harness is started, so the first bytes of the new program land on a
         blank grid with the old lines behind it.
         """
+        data = self._replay_tail()
+        if data:
+            self._replay_into(self.screen, data)
+
+    async def seed_screen_from_log_async(self) -> None:
+        """:meth:`seed_screen_from_log` with the replay off the event loop.
+
+        The replay is pure-Python pyte work, a quarter of a second or more
+        per session, and a restart relaunches its sessions one after another
+        on the loop -- every socket waited (claunch-7l7b7). Here it is fed
+        into a screen of its own on a worker thread and handed over with
+        :meth:`ScreenState.adopt`, so the session's screen object, which the
+        feeder and every reader hold, is never touched from the thread.
+
+        Until the hand-over the session's grid is the blank one it would be
+        left with anyway (the replay rolls its grid into history), so the
+        status heuristics read the same thing either way; the readers of the
+        history -- a capture, an attaching viewer's repaint -- go through
+        :meth:`screen_synced`, which waits for this to finish.
+        """
+        done = self._seed_done = asyncio.Event()
+        try:
+            limit = self.screen.history_limit
+            cols, rows = self.screen.cols, self.screen.rows
+            built = await asyncio.to_thread(
+                self._replayed_screen, cols, rows, limit
+            )
+            if built is not None:
+                self.screen.adopt(built)
+        finally:
+            done.set()
+
+    def _replayed_screen(
+        self, cols: int, rows: int, limit: int
+    ) -> Optional[ScreenState]:
+        data = self._replay_tail()
+        if not data:
+            return None
+        screen = ScreenState(cols, rows, history=self._scrollback)
+        screen.set_history_limit(limit)
+        self._replay_into(screen, data)
+        return screen
+
+    def _replay_tail(self) -> bytes:
         path = paths.session_log(self.sdef.name)
         try:
             size = path.stat().st_size
             with open(path, "rb") as fh:
                 if size > REPLAY_TAIL_BYTES:
                     fh.seek(size - REPLAY_TAIL_BYTES)
-                data = fh.read()
+                return fh.read()
         except OSError:
-            return  # no log (or unreadable): an empty screen is honest enough
-        if not data:
-            return
-        self.screen.feed(data)
-        self.screen.scroll_grid_into_history()
-        self.screen.forget_modes()
+            return b""  # no log (or unreadable): an empty screen is honest enough
+
+    @staticmethod
+    def _replay_into(screen: ScreenState, data: bytes) -> None:
+        screen.feed(data)
+        screen.scroll_grid_into_history()
+        screen.forget_modes()
 
     async def screen_synced(self) -> None:
         """Wait for the grid to catch up with the bytes received so far.
 
         For the readers that must be exact rather than merely current — a
-        capture, the repaint an attaching viewer gets.
+        capture, the repaint an attaching viewer gets. That includes a
+        restored session's replayed scrollback still being built off the
+        loop (:meth:`seed_screen_from_log_async`).
         """
+        seeding = self._seed_done
+        if seeding is not None:
+            await seeding.wait()
         self._render_parked_tail()
         await self._feeder.drained()
 

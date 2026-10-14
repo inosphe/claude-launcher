@@ -112,6 +112,9 @@ class SessionManager:
     #: How long the launch-time wait (off the loop) gives Codex to write
     #: its rollout before the listing-poll retries take over.
     _CODEX_CLAIM_LAUNCH_TIMEOUT = 2.0
+    #: How long :meth:`persist_soon` waits, so the relaunches that land
+    #: together after a restart share one registry write (claunch-7l7b7).
+    PERSIST_COALESCE_SECONDS = 1.0
     _CODEX_CLAIM_RETRY_INTERVAL = 1.0
     #: The interval grows (doubling, up to this) while a claim keeps
     #: failing, and the claim is abandoned after ``_CODEX_CLAIM_GIVE_UP``
@@ -285,6 +288,9 @@ class SessionManager:
         #: Background flushes of operator lines queued while a session was
         #: exited (see :meth:`flush_queued_input`); held so none is collected.
         self._input_flush_tasks: Set[asyncio.Task] = set()
+        #: The write :meth:`persist_soon` scheduled and has not run yet;
+        #: any :meth:`persist` takes its place.
+        self._persist_handle: Optional[asyncio.TimerHandle] = None
 
     @property
     def _pending_codex_claims(self) -> Dict[str, "_PendingClaim"]:
@@ -692,6 +698,10 @@ class SessionManager:
         clock = self._restore_clock if restoring and self._loading else None
         t0 = _perf_counter()
         prepared = self._prepare_launch(session, restoring=restoring, opening=opening)
+        if restoring:
+            # Before the spawn: the first bytes of the new program land on
+            # a blank grid with the old lines behind it.
+            session.seed_screen_from_log()
         t1 = _perf_counter()
         session.start(*prepared[:3])
         if clock is not None:
@@ -705,6 +715,9 @@ class SessionManager:
         """:meth:`launch` with the process spawn off the event loop (see
         :meth:`Session.start_async`); what the HTTP handlers call."""
         prepared = self._prepare_launch(session, restoring=restoring, opening=opening)
+        if restoring:
+            # The replay off the loop (claunch-7l7b7), still before the spawn.
+            await session.seed_screen_from_log_async()
         await session.start_async(*prepared[:3])
         return self._launched(session, restoring, *prepared[2:])
 
@@ -756,12 +769,11 @@ class SessionManager:
         argv, env, cwd = harness_mod.build_command(
             session.sdef, restoring=restoring, opening=opening
         )
-        if restoring:
-            # The relaunched program gets a brand-new screen, and the daemon's
-            # pyte history is the only scrollback the web terminal has. Replay
-            # the previous run's log into it before the new child writes a
-            # byte, or the restart silently costs every viewer their wheel.
-            session.seed_screen_from_log()
+        # A restoring launch replays the previous run's log next (launch,
+        # launch_async): the relaunched program gets a brand-new screen, and
+        # the daemon's pyte history is the only scrollback the web terminal
+        # has, so without it the restart silently costs every viewer their
+        # wheel.
         return argv, env, cwd, codex_home, known_codex_sessions
 
     def _launched(
@@ -818,7 +830,13 @@ class SessionManager:
                     functools.partial(self._codex_launch_finished, session.sdef.name)
                 )
         self.flush_queued_input(session)
-        if not (restoring and self._loading):
+        if restoring and not self._loading:
+            # A respawn or a wake: after a restart the restore queue and
+            # every use-wake (a mesh message, a viewer) land here in bursts,
+            # each of which used to write the whole registry on the loop
+            # (claunch-7l7b7). They share one write instead.
+            self.persist_soon()
+        elif not restoring:
             # A restore persists once, after the last relaunch (restore_all).
             # Persisting here as well rewrote the whole registry -- every
             # record, exited ones included -- and re-read every live session's
@@ -2725,7 +2743,33 @@ class SessionManager:
     # ------------------------------------------------------------------ #
     # persistence / restore
     # ------------------------------------------------------------------ #
+    def persist_soon(self) -> None:
+        """:meth:`persist`, :attr:`PERSIST_COALESCE_SECONDS` from now, shared
+        by every call made meanwhile. Without a running loop (the CLI, a
+        synchronous caller) it persists at once. The write is the same
+        :meth:`persist` -- the restore guard (``_loading``) and the
+        empty-snapshot guard apply to it as to any other -- and any
+        :meth:`persist` before it, ``shutdown_all``'s first of all, takes its
+        place."""
+        if self._persist_handle is not None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self.persist()
+            return
+        self._persist_handle = loop.call_later(
+            self.PERSIST_COALESCE_SECONDS, self._persist_due
+        )
+
+    def _persist_due(self) -> None:
+        self._persist_handle = None
+        self.persist()
+
     def persist(self) -> None:
+        handle, self._persist_handle = self._persist_handle, None
+        if handle is not None:
+            handle.cancel()  # this write covers what it was scheduled for
         # The last chance to catch a model switch made since the timer's last
         # pass: at a shutdown this runs before anything is torn down, and what
         # it writes is exactly what restore_all will relaunch from.

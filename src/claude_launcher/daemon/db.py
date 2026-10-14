@@ -31,11 +31,13 @@ erase the fleet, and this store will not act on it.
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import sqlite3
+import uuid
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 from . import paths
 
@@ -59,6 +61,11 @@ CREATE TABLE IF NOT EXISTS meta (
 #: if the table is later emptied by a genuine clear.
 _MIGRATED_KEY = "migrated_sessions_json"
 
+#: Key in ``meta`` naming the store object that wrote the table last (see
+#: :meth:`SessionStore.save`). A save finding someone else's token there
+#: cannot trust what it remembers writing, and writes every row.
+_WRITER_KEY = "last_writer"
+
 
 class SessionStore:
     """The durable session registry, one row per session keyed by name."""
@@ -67,6 +74,16 @@ class SessionStore:
         self._path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
+        #: The blob this object last committed for each name. :meth:`save`
+        #: upserts only the rows whose blob differs: the manager persists the
+        #: whole fleet on every change, and rewriting 574 unchanged rows per
+        #: relaunch held the event loop for seconds after a restart
+        #: (claunch-7l7b7). Valid only while :attr:`_token` is still the
+        #: table's last writer.
+        self._written: Dict[str, str] = {}
+        self._token_base = uuid.uuid4().hex
+        self._token_seq = itertools.count(1)
+        self._token: Optional[str] = None
 
     # -- connection ---------------------------------------------------- #
 
@@ -140,11 +157,18 @@ class SessionStore:
         for. ``prune`` itself is passed False while a restore is still filling
         the set (each per-session persist would otherwise delete the records not
         loaded yet) and left True in steady state.
+
+        Only the rows whose JSON differs from what this object last committed
+        are written (claunch-7l7b7). That memory is trusted only while the
+        ``meta`` writer token is still the one this object wrote; any other
+        writer in between, or a failed save, and every row is written again.
+        Nothing is committed when nothing changed.
         """
         rows = [(self._name_of(e), e) for e in entries]
         rows = [(n, e) for (n, e) in rows if n]
         names = {n for (n, _e) in rows}
         conn = self._connect()
+        written = dict(self._written)
         try:
             existing = int(
                 conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
@@ -156,8 +180,19 @@ class SessionStore:
                     existing,
                 )
                 prune = False
+            row = conn.execute(
+                "SELECT value FROM meta WHERE key=?", (_WRITER_KEY,)
+            ).fetchone()
+            if self._token is None or (row[0] if row else None) != self._token:
+                # Another writer (an overlapping daemon, a second store on
+                # the same file) may have changed rows this object remembers:
+                # nothing remembered is evidence of what is on disk now.
+                written = {}
+            changed = False
             for name, entry in rows:
                 blob = json.dumps(entry, ensure_ascii=False)
+                if written.get(name) == blob:
+                    continue
                 conn.execute(
                     "INSERT INTO sessions(name, data, updated_at) "
                     "VALUES(?,?,datetime('now')) "
@@ -165,12 +200,32 @@ class SessionStore:
                     "data=excluded.data, updated_at=excluded.updated_at",
                     (name, blob),
                 )
+                written[name] = blob
+                changed = True
             if prune:
                 have = [r[0] for r in conn.execute("SELECT name FROM sessions")]
                 for n in have:
                     if n not in names:
                         conn.execute("DELETE FROM sessions WHERE name=?", (n,))
-            conn.commit()
+                        written.pop(n, None)
+                        changed = True
+            if changed:
+                token = f"{self._token_base}:{next(self._token_seq)}"
+                conn.execute(
+                    "INSERT INTO meta(key, value) VALUES(?,?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (_WRITER_KEY, token),
+                )
+                conn.commit()
+                self._token = token
+            else:
+                conn.rollback()
+            self._written = written
+        except BaseException:
+            # What was committed is unknown: the next save writes every row.
+            self._written = {}
+            self._token = None
+            raise
         finally:
             conn.close()
 
@@ -180,8 +235,17 @@ class SessionStore:
         try:
             for name in names:
                 conn.execute("DELETE FROM sessions WHERE name=?", (name,))
+            # Not a save: mark the table as written by nobody, so every
+            # store's next save (this one's too) writes all its rows.
+            conn.execute(
+                "INSERT INTO meta(key, value) VALUES(?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (_WRITER_KEY, uuid.uuid4().hex),
+            )
             conn.commit()
         finally:
+            self._written = {}
+            self._token = None
             conn.close()
 
     # -- migration ----------------------------------------------------- #

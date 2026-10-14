@@ -88,15 +88,72 @@ def test_restore_persists_once_for_the_whole_fleet(home, monkeypatch):
 
 
 def test_a_relaunch_outside_a_restore_still_persists(home, monkeypatch):
-    """Respawn and redefine relaunch with ``restoring=True`` too; only the
-    boot's loop defers the write, everything else keeps persisting at once."""
+    """Respawn, wake and redefine relaunch with ``restoring=True`` too. They
+    still persist, but the ones that land within
+    :attr:`SessionManager.PERSIST_COALESCE_SECONDS` of each other -- the
+    restore queue and the use-wakes after a restart -- share one write
+    (claunch-7l7b7)."""
     _register_py_harness()
     monkeypatch.setattr(Session, "start", lambda self, argv, env, cwd: None)
+    monkeypatch.setattr(SessionManager, "PERSIST_COALESCE_SECONDS", 0.05)
+
+    async def run():
+        mgr = _CountingManager(idle_threshold=0.5, scrollback=100, restore_default=True)
+        for name in ("s7", "s8", "s9"):
+            mgr.create(SessionDef(name=name, harness="py", restore=True), restoring=True)
+        assert mgr.persists == 0
+        await asyncio.sleep(0.2)
+        assert mgr.persists == 1
+        names = {e["def"]["name"] for e in db.open_default().load_all()}
+        assert names == {"s7", "s8", "s9"}
+
+    asyncio.run(run())
+
+
+def test_persist_soon_without_a_loop_persists_at_once(home):
+    mgr = _CountingManager(idle_threshold=0.5, scrollback=100, restore_default=True)
+    mgr.persist_soon()
+    assert mgr.persists == 1
+
+
+def test_any_persist_takes_the_place_of_a_pending_one(home, monkeypatch):
+    """A direct persist (shutdown_all's first of all) writes everything the
+    pending one would have, so the pending one does not run after it."""
+    _register_py_harness()
+    monkeypatch.setattr(Session, "start", lambda self, argv, env, cwd: None)
+    monkeypatch.setattr(SessionManager, "PERSIST_COALESCE_SECONDS", 0.05)
 
     async def run():
         mgr = _CountingManager(idle_threshold=0.5, scrollback=100, restore_default=True)
         mgr.create(SessionDef(name="s9", harness="py", restore=True), restoring=True)
+        mgr.persist()
         assert mgr.persists == 1
+        await asyncio.sleep(0.2)
+        assert mgr.persists == 1
+        assert [e["def"]["name"] for e in db.open_default().load_all()] == ["s9"]
+
+    asyncio.run(run())
+
+
+def test_a_pending_persist_keeps_the_restore_guard(home, monkeypatch):
+    """The coalesced write is the same persist: while a restore is filling
+    the set it must not prune the records not loaded yet."""
+    _register_py_harness()
+    _seed(["s1"], exited=["old1"])
+    monkeypatch.setattr(Session, "start", lambda self, argv, env, cwd: None)
+    monkeypatch.setattr(SessionManager, "PERSIST_COALESCE_SECONDS", 0.05)
+
+    async def run():
+        mgr = _CountingManager(idle_threshold=0.5, scrollback=100, restore_default=True)
+        mgr.persist_soon()
+        mgr._loading = True  # a restore began before the write came due
+        try:
+            await asyncio.sleep(0.2)
+        finally:
+            mgr._loading = False
+        assert mgr.persists == 1
+        names = {e["def"]["name"] for e in db.open_default().load_all()}
+        assert names == {"s1", "old1"}
 
     asyncio.run(run())
 
