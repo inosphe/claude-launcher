@@ -212,6 +212,26 @@ def read(path: Path, *, full: bool = False):
         return result
 
 
+def read_tail(path: Path, limit: int) -> list[dict]:
+    """The last ``limit`` events, oldest first, each checksum-verified. A
+    view's bounded read: unlike ``read(full=True)`` it neither scans the
+    whole journal nor runs quick_check, whose cost grows with the run."""
+    with connect(path) as conn:
+        conn.execute("BEGIN")
+        _version(conn)
+        rows = conn.execute("SELECT body,sha FROM events ORDER BY id DESC LIMIT ?",
+                            (max(int(limit), 0),)).fetchall()
+    result = []
+    for body, sha in reversed(rows):
+        if not isinstance(body, str) or digest(body) != sha:
+            raise CheckpointError("checkpoint event checksum mismatch")
+        event = json.loads(body)
+        if not isinstance(event, dict):
+            raise CheckpointError("checkpoint event is not an object")
+        result.append(event)
+    return result
+
+
 def read_events(path: Path, names: list[str], limit: int) -> list[dict]:
     """Read a bounded selection without loading receipts or the whole journal."""
     with connect(path) as conn:

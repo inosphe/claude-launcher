@@ -140,3 +140,62 @@ def test_archived_checkpoint_ir_failure_isolated_without_json_fallback(tmp_path,
     data = metrics.observations(st, now="2026-10-13T12:00:00Z")
     assert data["unavailable"] == 1
     assert [r["run"] for r in data["runs"]] == ["current"]
+
+
+def aged(st, seconds=60):
+    """Back-date the slot files past the racy window so the cache may keep them."""
+    import os
+    import time
+    then = time.time() - seconds
+    for path in (st.checkpoint_path, st.state_path, st.chart_path, st.journal_path):
+        if path.exists():
+            os.utime(path, (then, then))
+
+
+def counting(monkeypatch):
+    reads = []
+    real = metrics._read_facts
+    monkeypatch.setattr(metrics, "_read_facts", lambda s: (reads.append(s.dir), real(s))[1])
+    return reads
+
+
+def test_saved_runs_read_once_until_their_files_change(tmp_path, monkeypatch):
+    # claunch-02w8s: the run page re-read every archive on each 5 s poll.
+    st = RunStore(str(tmp_path), "s"); saved(st, "current", events=[report()])
+    old = RunStore(str(tmp_path), "s"); old.dir = st.archive_root() / "001"
+    saved(old, "old", start="2026-10-13T09:00:00Z", end="2026-10-13T10:00:00Z",
+          events=[report(sha="c", ts="2026-10-13T09:30:00Z")])
+    aged(st); aged(old)
+    reads = counting(monkeypatch)
+    first = metrics.observations(st, now="2026-10-13T12:00:00Z")
+    assert len(reads) == 2
+    again = metrics.observations(st, now="2026-10-13T12:00:00Z")
+    assert len(reads) == 2 and again == first
+    # Relative to the observation time, not cached with the facts.
+    later = metrics.observations(st, now="2026-10-13T09:45:00Z")
+    assert later["unavailable"] == 2 and len(reads) == 2
+    saved(old, "old", start="2026-10-13T09:00:00Z", end="2026-10-13T10:00:00Z")
+    aged(old, 30)
+    data = metrics.observations(st, now="2026-10-13T12:00:00Z")
+    assert len(reads) == 3 and reads[-1] == old.dir
+    assert [len(r["merges"]) for r in data["runs"]] == [1, 0]
+
+
+def test_fresh_files_and_unreadable_runs(tmp_path, monkeypatch):
+    st = RunStore(str(tmp_path), "s"); saved(st, "current")
+    reads = counting(monkeypatch)
+    metrics.observations(st); metrics.observations(st)
+    assert len(reads) == 2, "a file written within the racy window is not cached"
+    old = RunStore(str(tmp_path), "s"); old.dir = st.archive_root() / "001"
+    old.dir.mkdir(parents=True)
+    old.state_path.write_text("broken")
+    aged(st); aged(old)
+    reads.clear()
+    assert metrics.observations(st)["unavailable"] == 1
+    assert metrics.observations(st)["unavailable"] == 1
+    assert len(reads) == 2, "an unreadable archive is remembered as unreadable"
+    # No exception object is cached: re-raising one per poll grew its
+    # traceback (and the frames it holds) by one entry each time.
+    for _ in range(20):
+        metrics.observations(st)
+    assert not any(isinstance(v, BaseException) for _, v in metrics._facts_cache.values())
