@@ -79,7 +79,8 @@ def user_wrote_text(thread: dict, message: dict, *, opened: bool = False, reopen
             f"with qa_ask(..., thread=\"{tid}\") so the question links back here, then reply in the thread "
             "with the question id. If there is nothing to decide, reply in the thread saying why.")
     lines.append(
-        f"Answer in the thread, not the terminal: thread_reply(thread_id=\"{tid}\", text=...). "
+        f"Answer in the thread, not the terminal: thread_reply(thread_id=\"{tid}\", text=...), "
+        "the text in markdown (the pane renders it). "
         f"thread_read(thread_id=\"{tid}\") has the whole conversation; thread_list shows all your threads. "
         "Keep this sub-topic's discussion in this thread.")
     return "\n".join(lines)

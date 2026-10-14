@@ -24,7 +24,11 @@ thread_read returns a thread's whole conversation (use it to pick a topic
 back up), thread_list shows your threads with unread counts, thread_open
 starts a new topic yourself (a side question to the user, a parallel line of
 work to report on), thread_close settles one. Keep each thread to its topic;
-carry the main task on in the terminal as usual. Threads and QA questions
+carry the main task on in the terminal as usual. Write every thread_reply
+and thread_open text as GitHub-flavored markdown: the pane renders it
+(headings, lists, **bold**, `code`, fenced code blocks, tables, links) and
+keeps single line breaks; it shows raw HTML as text, and a reply wrapped
+whole in one code fence shows as a code block. Threads and QA questions
 link to each other: a thread opened about a question (thread_open qa=, or the
 user's "discuss in a thread" on a QA card) carries it as its subject, and
 when a thread reaches a decision the user must make, file it with qa_ask
@@ -48,16 +52,18 @@ TOOLS = [
          "limit": {"type": "integer", "description": "at most this many messages (default 500)"}},
          "required": ["thread_id"]}},
     {"name": "thread_reply",
-     "description": "Write a message in one of your threads (markdown text). The user reads it in the "
-                    "threads pane. Replying to a closed thread reopens it.",
+     "description": "Write a message in one of your threads. The text is GitHub-flavored markdown, "
+                    "rendered in the threads pane (lists, code fences, tables, links). Replying to a "
+                    "closed thread reopens it.",
      "inputSchema": {"type": "object", "properties": {
-         **_TID, "text": {"type": "string"}}, "required": ["thread_id", "text"]}},
+         **_TID, "text": {"type": "string", "description": "the message, in markdown"}},
+         "required": ["thread_id", "text"]}},
     {"name": "thread_open",
      "description": "Start a new thread with the user on a sub-topic, optionally with its first message. "
                     "Returns the thread (id).",
      "inputSchema": {"type": "object", "properties": {
          "title": {"type": "string", "description": "the topic, one line"},
-         "text": {"type": "string", "description": "first message (markdown text)"},
+         "text": {"type": "string", "description": "first message, in markdown"},
          "qa": {"type": "string", "description": "the QA question (qa-xxxxxxxx) this thread discusses; "
                                                  "it is linked both ways and shown on its QA card"}},
          "required": ["title"]}},

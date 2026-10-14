@@ -8,8 +8,11 @@
                   Shift+Enter and IME composition do not; pick keeps the
                   remembered thread, else the first open one.
      pane      -- mounting lists the session's threads, opens the first open
-                  one, renders user text as text, and a send posts the text to
-                  that thread; a new thread posts {to, title, text}; close
+                  one, renders both authors' text through mdInto (HTML stays
+                  text), and a send posts the text to that thread; Enter
+                  empties the composer at once and shows a pending bubble
+                  until the answer, and a failed send marks the bubble and
+                  puts the text back (claunch-5usj6); a new thread posts {to, title, text}; close
                   posts to /close; reading a thread moves its read position;
                   unmount stops the poll.
      rail      -- 🗪 threads lights while the session has an open thread, and
@@ -75,8 +78,10 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   const store = new Map();
   const localStorage = {getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v))};
   const timers = [];
+  const rendered = [];   // [class of the bubble, text] for each mdInto call
+  const mdInto = (n, text) => { rendered.push(text); n.textContent = text; return n; };
   const ctx = vm.createContext({
-    document, localStorage, console, JSON, Date, Map, Set, Error, Promise,
+    document, localStorage, console, JSON, Date, Map, Set, Error, Promise, mdInto,
     setInterval: (fn, ms) => { timers.push(fn); return timers.length; },
     clearInterval: (id) => { timers[id - 1] = null; },
     setTimeout: () => 0,
@@ -114,9 +119,11 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   const calls = [];
   let failCreate = false;
   let postHold = null;
+  let failPost = false;
   const api = async (p, opts = {}) => {
     calls.push([opts.method || "GET", p, opts.body ? JSON.parse(opts.body) : undefined]);
     if (failCreate && p === "/api/threads") return {ok: false, status: 500, json: async () => ({error: "boom"})};
+    if (failPost && p === "/api/threads/th-1/messages") return {ok: false, status: 500, json: async () => ({error: "lost"})};
     let doc = {};
     if (p.startsWith("/api/threads?session=")) doc = {session: "s1", threads, open: 1, agent_seq: 2};
     else if (/^\/api\/threads\/th-1\?after=/.test(p)) {
@@ -139,6 +146,8 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   const msgs = host.querySelectorAll(".th-msg");
   assert.equal(msgs.length, 2);
   assert.equal(msgs[0].querySelector(".th-msg-body").textContent, "<b>why json?</b>", "user text stays text");
+  assert.deepEqual(rendered, ["<b>why json?</b>", "because tools"], "both authors go through the markdown renderer");
+  assert.ok(msgs.every((m) => m.querySelector(".th-msg-body").classList.contains("md")));
   assert.deepEqual(JSON.parse(store.get("k")), {"th-1": 2}, "showing a thread reads it");
 
   // send: Enter in the composer posts to the thread
@@ -156,10 +165,15 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   box2.value = "twice?";
   box2.fire("keydown", {key: "Enter"});
   assert.ok(host.querySelector(".th-compose .term-btn").disabled, "보내기 is disabled while the post is out");
+  assert.equal(host.querySelector(".th-compose .th-text").value, "", "Enter empties the composer before the answer");
+  const out = host.querySelectorAll(".th-sending");
+  assert.equal(out.length, 1, "the message being sent shows as a pending bubble");
+  assert.equal(out[0].querySelector(".th-msg-body").textContent, "twice?");
   host.querySelector(".th-compose .th-text").fire("keydown", {key: "Enter"});
   host.querySelector(".th-compose .term-btn").fire("click");
   await settle();
   assert.equal(posts(), sent + 1, "one message for a double send");
+  assert.equal(host.querySelectorAll(".th-sending").length, 0, "the pending bubble goes once answered");
   assert.ok(!host.querySelector(".th-compose .term-btn").disabled, "보내기 comes back after the answer");
   assert.equal(host.querySelectorAll(".wf-warning").length, 0, "a message that went straight in says nothing");
 
@@ -174,6 +188,21 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
     assert.ok(warn[0].textContent.includes(words) && warn[0].textContent.includes("s1"), warn[0].textContent);
   }
   postHold = null;
+
+  // a failed send keeps the message: the bubble says so and the text is back in the composer
+  host.querySelector(".th-compose .th-text").value = "lost one";
+  failPost = true;
+  host.querySelector(".th-compose .th-text").fire("keydown", {key: "Enter"});
+  await settle();
+  failPost = false;
+  const failed = host.querySelectorAll(".th-failed");
+  assert.equal(failed.length, 1, "a failed send is marked");
+  assert.match(failed[0].text(), /전송 실패/);
+  assert.equal(host.querySelector(".th-compose .th-text").value, "lost one", "the failed text is back in the composer");
+  assert.match(host.querySelector(".th-head").text(), /lost/);
+  host.querySelector(".th-compose .th-send").fire("click");
+  await settle();
+  assert.equal(host.querySelectorAll(".th-failed").length, 0, "a retry clears the failure");
 
   // close
   const toggle = host.querySelector(".th-convo-head .term-btn");
