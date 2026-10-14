@@ -1,3 +1,4 @@
+import ast
 import asyncio
 import json
 import os
@@ -488,3 +489,112 @@ def test_api_holds_exclusive_window_and_reports_busy(setup, monkeypatch):
             result = await (await post(request)).json()
             assert result["removed"] == 1 and not window.held
     asyncio.run(scenario())
+
+
+def test_scratch_artifacts_are_listed_whatever_their_name(setup, tmp_path):
+    # claunch-30rkn: preview-r2 and bt-preview matched no name rule, so the
+    # plan came back empty while 400MB of them sat in the session's scratch.
+    service, _, sessions, registry = setup
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init")
+    git(repo, "-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "--allow-empty", "-m", "init")
+    git(repo, "update-ref", "refs/claunch/preview/test", "HEAD")
+    registry["s1"].sdef.cwd = str(repo)
+    scratch = sessions / "s1" / "scratch"
+    preview = scratch / "preview-r2"
+    git(repo, "worktree", "add", "--detach", str(preview))
+    (scratch / "bt-preview" / "popen-gw0").mkdir(parents=True)
+    completed(scratch / "runs-1")
+    (scratch / "notes").mkdir()
+    (scratch / "report.md").write_text("kept")
+    (scratch / "linked").symlink_to(preview, target_is_directory=True)
+    plan = service.plan("s1")
+    rows = {Path(row["path"]).name: row for row in plan["items"]}
+    assert set(rows) == {"preview-r2", "bt-preview", "runs-1"}
+    assert rows["preview-r2"]["status"] == "ready" and rows["runs-1"]["status"] == "ready"
+    assert rows["bt-preview"]["status"] == "cleanup_pending"
+    assert ac.basetemp.RUN_SUMMARY in rows["bt-preview"]["reason"]
+    result = service.apply("s1", plan["plan_id"])
+    assert result["removed"] == 2 and not preview.exists()
+    assert (scratch / "bt-preview").exists() and (scratch / "notes").exists()
+    git(repo, "show-ref", "--verify", "refs/claunch/preview/test")
+
+
+def test_scratch_without_a_repository_keeps_the_name_rule(setup):
+    service, _, sessions, _ = setup
+    scratch = sessions / "s1" / "scratch"
+    (scratch / "preview-r3").mkdir()
+    assert service.plan("s1")["items"] == []
+
+
+def test_plan_over_its_time_budget_keeps_the_rest_unmeasured(setup):
+    service, root, _, _ = setup
+    mine = completed(root / "s1c1012000000")
+    plan = service.plan("s1", budget=-1)
+    assert plan["items"][0]["status"] == "cleanup_pending"
+    assert "time budget" in plan["items"][0]["reason"]
+    assert service.apply("s1", plan["plan_id"])["removed"] == 0 and mine.exists()
+
+
+def test_fingerprint_names_entries_as_relative_paths(setup, tmp_path, monkeypatch):
+    service, root, _, _ = setup
+    mine = completed(root / "s1c1012000000")
+    (mine / "a" / "b").mkdir(parents=True)
+    (mine / "a" / "b" / "f").write_text("x")
+    (mine / "a" / "link").symlink_to(tmp_path)
+    nested_gitfile(mine / "a", "gone")
+    fed = []
+    real = ac.hashlib.sha256
+    class Recorder:
+        def __init__(self):
+            self.inner = real()
+        def update(self, data):
+            fed.append(data.decode())
+            self.inner.update(data)
+        def hexdigest(self):
+            return self.inner.hexdigest()
+    monkeypatch.setattr(ac.hashlib, "sha256", Recorder)
+    ac._snapshot(mine)
+    # String slicing replaced Path.relative_to (claunch-30rkn); the names fed
+    # to the fingerprint must be the ones relative_to would have produced.
+    expected = []
+    for walked, dirs, names in os.walk(mine):
+        dirs[:] = [d for d in dirs if not (Path(walked) / d).is_symlink()]
+        expected += [str((Path(walked) / n).relative_to(mine)) for n in dirs + names]
+    expected += [str((mine / "a" / "link").relative_to(mine))]
+    named = {ast.literal_eval(line)[0] for line in fed[:-1]}
+    assert named == set(expected)
+
+
+def test_api_plans_once_per_session_and_never_across_sessions(setup, monkeypatch):
+    import threading
+    service, _, _, _ = setup
+    release = threading.Event()
+    walks = []
+    original = ac.Cleanup.plan
+    def slow_plan(self, session, *args):
+        walks.append(session)
+        if session == "s1":
+            assert release.wait(10)
+        return original(self, session, *args)
+    monkeypatch.setattr(ac.Cleanup, "plan", slow_plan)
+    async def scenario():
+        app = web.Application()
+        app["manager"], app["window"] = service.manager, None
+        artifact_cleanup_api.install(app)
+        async with TestClient(TestServer(app)) as client:
+            async def post(session):
+                return await (await client.post("/api/artifact-cleanup", json={"session": session})).json()
+            first = asyncio.ensure_future(post("s1"))
+            retry = asyncio.ensure_future(post("s1"))
+            # s1's walk is stuck; s10's plan is answered regardless.
+            other = await asyncio.wait_for(post("s10"), 5)
+            assert other["session"] == "s10"
+            assert not first.done() and not retry.done()
+            release.set()
+            a, b = await asyncio.wait_for(asyncio.gather(first, retry), 5)
+            assert a["plan_id"] == b["plan_id"]
+            assert (await client.post("/api/artifact-cleanup", json={"session": []})).status == 400
+    asyncio.run(scenario())
+    assert sorted(walks) == ["s1", "s10"]
