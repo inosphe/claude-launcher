@@ -73,6 +73,7 @@ new Function("document", "exports", `
   ${slice("mdInline")}
   ${slice("mdList")}
   ${slice("mdTable")}
+  ${slice("mdTableStart")}
   ${slice("mdBlocks")}
   ${slice("mdInto")}
   ${slice("mdText")}
@@ -279,6 +280,21 @@ const inline = (s) => mdBlocks(s)[0];
 {
   const [b] = mdBlocks("a | b was not a table");
   eq(b.tag, "p", "a stray pipe with no rule row stays a paragraph");
+}
+{
+  // claunch-la6sr: a caption line with the table straight under it, no blank
+  // line between -- how agents write thread replies. GFM lets the table
+  // interrupt the paragraph; this used to render as raw pipes.
+  const out = mdBlocks("**실패와 원인**\n| 실패 | 원인 |\n|---|---|\n| s472 | 루프 멈춤 |\nafter");
+  eq(out.map((b) => b.tag), ["p", "table", "p"],
+     "a table right under a paragraph line breaks out of the paragraph");
+  eq(textOf(out[0]), "실패와 원인", "…leaving the caption as its own paragraph");
+  eq(walk(out[1]).filter((k) => k.tag === "td").map(textOf), ["s472", "루프 멈춤"],
+     "…and the rows as table cells");
+}
+{
+  const [p] = mdBlocks("one | two\nthree | four");
+  eq(p.tag, "p", "pipes on consecutive lines with no rule row stay one paragraph");
 }
 
 /* ---- 8. a report that was never markdown still reads as typed ---------- */
