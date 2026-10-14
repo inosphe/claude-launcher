@@ -42,8 +42,39 @@ def _regular(path: Path) -> bool:
     return stat.S_ISREG(st.st_mode) and not _is_link(st)
 
 
+def _gitdir_verdict(gitfile: Path, data: bytes, tree: Path) -> str:
+    """Where the gitdir named by a nested ``.git`` file lies: "inside" or "missing".
+
+    A gitdir inside ``tree`` goes with it, and a gitdir that no longer exists
+    belongs to nothing. Anything else -- an existing gitdir outside the tree,
+    reached directly or through a link, or a file that names no gitdir -- may
+    be a real linked worktree of another repository and is preserved.
+    """
+    text = data.decode("utf-8")
+    target = text[len("gitdir: "):].strip() if text.startswith("gitdir: ") else ""
+    if not target or "\n" in target or "\r" in target:
+        raise CleanupError(f"nested linked worktree: {gitfile.parent} (no gitdir line)")
+    # Git resolves a relative gitdir against the directory holding the file.
+    real = os.path.normcase(os.path.realpath(os.path.join(gitfile.parent, target)))
+    root = os.path.normcase(os.path.realpath(tree))
+    if real == root or real.startswith(root.rstrip(os.sep) + os.sep):
+        return "inside"
+    try:
+        os.lstat(real)
+    except (FileNotFoundError, NotADirectoryError):
+        return "missing"
+    except OSError as exc:
+        # A gitdir that cannot be looked at is not a gitdir that is gone.
+        raise CleanupError(f"nested linked worktree: {gitfile.parent} (gitdir {real}: {exc.strerror})")
+    raise CleanupError(f"nested linked worktree: {gitfile.parent} (gitdir {real})")
+
+
 def _snapshot(path: Path) -> dict:
     _plain(path)
+    # A preview worktree (a top-level .git file) keeps the strict rule: its
+    # removal goes through git, and nested worktrees inside it are not ours.
+    top = path / ".git"
+    worktree = os.path.lexists(top) and _regular(top)
     digest = hashlib.sha256()
     size = files = 0
     for root, dirs, names in os.walk(path, followlinks=False, onerror=_walk_error):
@@ -64,7 +95,14 @@ def _snapshot(path: Path) -> dict:
             if not (stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode)):
                 raise CleanupError(f"special file: {item}")
             if name == ".git" and stat.S_ISREG(st.st_mode) and item.parent != path:
-                raise CleanupError(f"nested linked worktree: {item.parent}")
+                if worktree:
+                    raise CleanupError(f"nested linked worktree: {item.parent}")
+                # The verdict and the file's bytes are evidence: a gitdir
+                # rewritten after the plan changes the fingerprint even when
+                # size and mtime are restored, and apply re-judges it.
+                data = item.read_bytes()
+                digest.update(repr((str(item.relative_to(path)), "gitdir",
+                                    _gitdir_verdict(item, data, path), data)).encode())
             digest.update(repr((str(item.relative_to(path)), st.st_mode, st.st_ino,
                                 st.st_size, st.st_mtime_ns)).encode())
             if stat.S_ISREG(st.st_mode):

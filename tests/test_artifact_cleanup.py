@@ -199,17 +199,121 @@ def test_linked_run_receipt_is_not_completion_evidence(setup, tmp_path):
     assert item["reason"] == "test run receipt is not a regular file"
 
 
-def test_scratch_unknown_browser_and_nested_worktree_are_preserved(setup):
+def test_scratch_unknown_browser_is_preserved_and_gone_gitdir_is_removed(setup):
     service, root, sessions, _ = setup
     scratch = sessions / "s1" / "scratch"
     (scratch / "browser").mkdir()
     mine = completed(root / "s1c1012000000")
     nested = mine / "nested"
     nested.mkdir()
+    # "elsewhere" resolves next to the file and does not exist: the gitdir is
+    # gone, so this is no longer anyone's worktree (claunch-f9ene.1.1 DECISION).
     (nested / ".git").write_text("gitdir: elsewhere")
     result = service.apply("s1", service.plan("s1")["plan_id"])
-    assert result["removed"] == 0 and result["cleanup_pending"] == 2
-    assert (scratch / "browser").exists() and nested.exists()
+    assert result["removed"] == 1 and result["cleanup_pending"] == 1
+    assert (scratch / "browser").exists() and not mine.exists()
+
+
+def nested_gitfile(mine, gitdir):
+    nested = mine / "nested"
+    nested.mkdir()
+    (nested / ".git").write_text(f"gitdir: {gitdir}\n")
+    return nested
+
+
+def test_nested_gitfile_pointing_at_an_existing_gitdir_outside_is_preserved(setup, tmp_path):
+    service, root, _, _ = setup
+    outside = tmp_path / "other-repo" / ".git" / "worktrees" / "nested"
+    outside.mkdir(parents=True)
+    mine = completed(root / "s1c1012000000")
+    nested_gitfile(mine, outside)
+    result = service.apply("s1", service.plan("s1")["plan_id"])
+    assert result["removed"] == 0 and mine.exists() and outside.exists()
+    assert result["items"][0]["reason"].startswith("nested linked worktree:")
+
+
+def test_nested_gitdir_reaching_outside_through_a_link_in_the_tree_is_preserved(setup, tmp_path):
+    service, root, _, _ = setup
+    outside = tmp_path / "other-repo"
+    (outside / "gitdir").mkdir(parents=True)
+    mine = completed(root / "s1c1012000000")
+    link(mine / "escape", outside)
+    # Textually inside the tree; really the existing gitdir of another repo.
+    nested_gitfile(mine, "../escape/gitdir")
+    result = service.apply("s1", service.plan("s1")["plan_id"])
+    assert result["removed"] == 0 and mine.exists()
+    assert "nested linked worktree" in result["items"][0]["reason"]
+    assert (outside / "gitdir").exists()
+
+
+@pytest.mark.parametrize("content", [b"", b"not a gitfile", b"gitdir: ", b"gitdir: \xff\xfe",
+                                     b"gitdir: gone\nsecond line\n"])
+def test_nested_gitfile_that_names_no_gitdir_is_preserved(setup, content):
+    service, root, _, _ = setup
+    mine = completed(root / "s1c1012000000")
+    (mine / "nested").mkdir()
+    (mine / "nested" / ".git").write_bytes(content)
+    result = service.apply("s1", service.plan("s1")["plan_id"])
+    assert result["removed"] == 0 and mine.exists()
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="POSIX permissions")
+def test_gitdir_that_cannot_be_looked_at_is_not_taken_for_gone(setup, tmp_path):
+    service, root, _, _ = setup
+    sealed = tmp_path / "sealed"
+    (sealed / "gitdir").mkdir(parents=True)
+    mine = completed(root / "s1c1012000000")
+    nested_gitfile(mine, sealed / "gitdir")
+    sealed.chmod(0)
+    try:
+        result = service.apply("s1", service.plan("s1")["plan_id"])
+    finally:
+        sealed.chmod(0o755)
+    assert result["removed"] == 0 and mine.exists()
+    assert "nested linked worktree" in result["items"][0]["reason"]
+
+
+def test_worktree_fixtures_whose_gitdir_is_in_the_same_tree_are_removed(setup):
+    service, root, _, _ = setup
+    mine = completed(root / "s1c1012000000")
+    repo = mine / "test_registered_preview0" / "repo"
+    repo.mkdir(parents=True)
+    git(repo, "init")
+    git(repo, "-c", "user.name=Test", "-c", "user.email=test@example.test",
+        "commit", "--allow-empty", "-m", "init")
+    git(repo, "worktree", "add", "--detach", str(mine / "test_registered_preview0" / "wt"))
+    assert (mine / "test_registered_preview0" / "wt" / ".git").is_file()
+    plan = service.plan("s1")
+    assert plan["items"][0]["status"] == "ready", plan["items"][0]
+    result = service.apply("s1", plan["plan_id"])
+    assert result["removed"] == 1 and not mine.exists()
+
+
+def test_gitdir_rewritten_after_plan_is_a_change_even_with_size_and_mtime_kept(setup, tmp_path):
+    service, root, _, _ = setup
+    mine = completed(root / "s1c1012000000")
+    gitfile = nested_gitfile(mine, "gone-a") / ".git"
+    before = gitfile.stat()
+    plan = service.plan("s1")
+    assert plan["items"][0]["status"] == "ready"
+    gitfile.write_text("gitdir: gone-b\n")
+    os.utime(gitfile, ns=(before.st_atime_ns, before.st_mtime_ns))
+    result = service.apply("s1", plan["plan_id"])
+    assert result["removed"] == 0 and mine.exists()
+    assert result["items"][0]["reason"] == "artifact changed since plan"
+
+
+def test_gitdir_that_appears_outside_after_plan_is_preserved(setup, tmp_path):
+    service, root, _, _ = setup
+    outside = tmp_path / "late"
+    mine = completed(root / "s1c1012000000")
+    nested_gitfile(mine, outside)
+    plan = service.plan("s1")
+    assert plan["items"][0]["status"] == "ready"
+    outside.mkdir()
+    result = service.apply("s1", plan["plan_id"])
+    assert result["removed"] == 0 and mine.exists()
+    assert "nested linked worktree" in result["items"][0]["reason"]
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows junction")
@@ -274,6 +378,22 @@ def test_registered_preview_removal_preserves_ref_and_dirty_worktree(setup, tmp_
     assert result["removed"] == 1 and not clean.exists()
     assert (dirty / "user.txt").read_text() == "keep me"
     git(repo, "show-ref", "--verify", "refs/claunch/preview/test")
+
+
+def test_preview_worktree_keeps_rejecting_nested_gitfiles(setup, tmp_path):
+    service, _, sessions, registry = setup
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init")
+    git(repo, "-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "--allow-empty", "-m", "init")
+    registry["s1"].sdef.cwd = str(repo)
+    preview = sessions / "s1" / "scratch" / "s1-preview-nested"
+    git(repo, "worktree", "add", "--detach", str(preview))
+    git(repo, "update-ref", "refs/claunch/preview/test", "HEAD")
+    nested_gitfile(preview, "gone")  # would pass the basetemp rule
+    result = service.apply("s1", service.plan("s1")["plan_id"])
+    assert result["removed"] == 0 and preview.exists()
+    assert result["items"][0]["reason"] == f"nested linked worktree: {preview / 'nested'}"
 
 
 @pytest.mark.parametrize("reference", ["absent", "removed_after_plan", "preserved"])
