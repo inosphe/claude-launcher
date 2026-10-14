@@ -413,14 +413,14 @@ const RUN = {
           && !ctx.asked().some((q) => q.includes("required")), [ctx.actions(), ctx.asked()]);
   ctx.reset();
 
-  /* a loop limit: allow one more / reset the count / stop */
+  /* a loop limit: allow 5 more / allow 15 more / stop */
   ctx.setRail({ s16: { ...ROW, status: "waiting_approval", gated: true,
     owed: ["loop_limit: round"], answers: [
     { kind: "loop_limit", instance: "round@3", label: "round", count: 5, max: 5 }] } });
   ctx.renderTermCflow();
   bs = buttons(strip);
   check("v2: loop limit presses",
-        bs.map((b) => b.text).join() === "Allow one more,Reset the count,Stop the loop",
+        bs.map((b) => b.text).join() === "Allow 5 more,Allow 15 more,Stop the loop",
         bs.map((b) => b.text));
   check("v2: loop limit question", texts(strip).includes("loop reached its max (5/5)"));
   await bs[0].fire("click");
@@ -428,21 +428,23 @@ const RUN = {
   await bs[2].fire("click");
   check("v2: limit presses post extend",
         JSON.stringify(ctx.actions()) === JSON.stringify([
-          ["/api/cflow2/extend", { cwd: "/repo", scope: "s16", node: "round@3", by: 1 }, "after"],
-          ["/api/cflow2/extend", { cwd: "/repo", scope: "s16", node: "round@3", reset: true },
+          ["/api/cflow2/extend", { cwd: "/repo", scope: "s16", node: "round@3", by: 5 }, "after"],
+          ["/api/cflow2/extend", { cwd: "/repo", scope: "s16", node: "round@3", by: 15 },
            "after"],
           ["/api/cflow2/extend", { cwd: "/repo", scope: "s16", node: "round@3", stop: true },
            "after"]]), ctx.actions());
+  check("v2: an allow press asks with its own count",
+        ctx.asked().some((q) => q.startsWith("Allow 15 more at ")), ctx.asked());
   ctx.reset();
 
   /* a loop limit that ran no iteration (a parallel foreach over more items
-     than max) offers no reset: it would stop again at once */
+     than max) offers the same presses */
   ctx.setRail({ s16: { ...ROW, status: "waiting_approval", gated: true,
     owed: ["loop_limit: fan"], answers: [
     { kind: "loop_limit", instance: "fan@2", label: "fan", count: 0, max: 3 }] } });
   ctx.renderTermCflow();
-  check("v2: no reset at count 0",
-        buttons(strip).map((b) => b.text).join() === "Allow one more,Stop the loop",
+  check("v2: same presses at count 0",
+        buttons(strip).map((b) => b.text).join() === "Allow 5 more,Allow 15 more,Stop the loop",
         buttons(strip).map((b) => b.text));
   ctx.reset();
 
