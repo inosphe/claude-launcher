@@ -132,6 +132,11 @@ def log_file() -> Path:
     return daemon_dir() / "daemon.log"
 
 
+def ptyhost_dir() -> Path:
+    """The PTY host's socket, token, pid and log (claunch-xnnct)."""
+    return daemon_dir() / "ptyhost"
+
+
 def sessions_json() -> Path:
     """Legacy JSON registry of session definitions.
 

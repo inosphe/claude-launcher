@@ -71,6 +71,18 @@ class PtyHandle:
         raise NotImplementedError
 
 
+#: The PTY host client (``ptyhost.client.HostClient``) when the daemon runs its
+#: sessions in a PTY host (daemon setting ``pty_host``, claunch-xnnct); None
+#: spawns in this process. Set once at daemon start by :func:`use_host`.
+_host = None
+
+
+def use_host(client) -> None:
+    """Route :func:`spawn` through a PTY host client, or back here (None)."""
+    global _host
+    _host = client
+
+
 def spawn(
     argv: Sequence[str],
     *,
@@ -79,7 +91,25 @@ def spawn(
     cols: int,
     rows: int,
 ) -> PtyHandle:
-    """Spawn ``argv`` under a new PTY sized ``cols`` x ``rows``."""
+    """Spawn ``argv`` under a new PTY sized ``cols`` x ``rows``.
+
+    In the PTY host when one is installed (:func:`use_host`) and its
+    connection is open; here otherwise."""
+    host = _host
+    if host is not None and not host.closed.is_set():
+        return host.spawn(argv, env=env, cwd=cwd, cols=cols, rows=rows)
+    return spawn_local(argv, env=env, cwd=cwd, cols=cols, rows=rows)
+
+
+def spawn_local(
+    argv: Sequence[str],
+    *,
+    env: Dict[str, str],
+    cwd: str,
+    cols: int,
+    rows: int,
+) -> PtyHandle:
+    """Spawn ``argv`` under a new PTY in this process (the host uses this)."""
     if sys.platform == "win32":
         return _WinPty(argv, env=env, cwd=cwd, cols=cols, rows=rows)
     return _UnixPty(argv, env=env, cwd=cwd, cols=cols, rows=rows)

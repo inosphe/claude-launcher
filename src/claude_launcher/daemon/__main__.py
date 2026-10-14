@@ -86,8 +86,34 @@ def _quiet_reset_errors(loop: asyncio.AbstractEventLoop) -> None:
     loop.set_exception_handler(handler)
 
 
+def _connect_pty_host(cfg: dict):
+    """The PTY host client when ``pty_host`` is on (claunch-xnnct), else None.
+
+    Installed before the first spawn (restore_all). A host that cannot be
+    reached is logged and the daemon spawns its sessions itself, as it does
+    with the setting off: the setting must not be a way to start no sessions.
+    """
+    if not cfg.get("pty_host"):
+        return None
+    if sys.platform == "win32":
+        log.warning("pty_host is set but the PTY host runs on POSIX only; spawning in the daemon")
+        return None
+    from . import pty_backend
+    from .ptyhost import client as ptyhost_client
+
+    try:
+        client = ptyhost_client.ensure_host(paths.ptyhost_dir())
+    except Exception as exc:
+        log.error("pty_host is set but no PTY host could be reached (%s); spawning in the daemon", exc)
+        return None
+    pty_backend.use_host(client)
+    log.info("sessions run in PTY host pid %s", client.host_pid)
+    return client
+
+
 async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) -> int:
     _quiet_reset_errors(asyncio.get_running_loop())
+    pty_host = _connect_pty_host(cfg)
     manager = SessionManager(
         idle_threshold=float(cfg["idle_threshold"]),
         scrollback=int(cfg["scrollback_lines"]),
@@ -388,6 +414,8 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
         await teardown.step("mesh", mesh_manager.shutdown())
         runtime_state.remove_daemon_json()
         await teardown.step("sessions", manager.shutdown_all())
+        if pty_host is not None:
+            pty_host.close()
         # The app's own on_shutdown/on_cleanup hooks run in here.
         await teardown.step("http runner", runner.cleanup())
         teardown.report()
