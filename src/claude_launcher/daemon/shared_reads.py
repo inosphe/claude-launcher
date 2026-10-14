@@ -46,7 +46,7 @@ from aiohttp import web
 #: one tab sees an answer at most one poll older than it would have.
 DEFAULT_MAX_AGE = 4.0
 
-#: Answers kept at once (one per path + query). The two wrapped routes are
+#: Answers kept at once (one per path + query). The wrapped routes are
 #: read in a handful of query forms; the bound only matters to a client that
 #: makes up queries.
 KEEP = 32
@@ -118,6 +118,15 @@ INVALIDATES: Dict[str, Invalidation] = {
         prefixes=("/api/beads", "/api/cflow", "/api/cflow2"),
         exact=_SESSION_LIFECYCLE,
         excluded=frozenset({"/api/cflow/definition/validate"}),
+    ),
+    # The profile listing reads config and probes every harness. Measured on
+    # the live daemon: 36.5% of the event loop's samples over fifteen seconds
+    # were under it, and a thread pane waiting on the same loop took seconds
+    # to open (claunch-8utpv). The page's own writes to what it shows go
+    # through these routes; an edit of the config file outside this daemon
+    # is bounded by ``max_age``.
+    "profiles": Invalidation(
+        prefixes=("/api/profiles", "/api/harnesses", "/api/install"),
     ),
 }
 

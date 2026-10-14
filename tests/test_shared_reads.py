@@ -236,11 +236,12 @@ def test_off_by_default_every_read_runs_the_route(home):
     asyncio.run(run())
 
 
-def test_the_daemon_turns_it_on_and_wraps_the_two_polled_routes(home):
+def test_the_daemon_turns_it_on_and_wraps_the_polled_routes(home):
     assert store.DAEMON_DEFAULTS["shared_read_max_age"] == shared_reads.DEFAULT_MAX_AGE
     assert api_mod.h_sessions_list.shared_read == "sessions"
     assert api_mod.h_beads_queues.shared_read == "beads-queues"
-    assert set(shared_reads.INVALIDATES) == {"sessions", "beads-queues"}
+    assert api_mod.h_profiles.shared_read == "profiles"
+    assert set(shared_reads.INVALIDATES) == {"sessions", "beads-queues", "profiles"}
 
 
 def test_every_route_a_rule_names_is_a_registered_write(home):
@@ -273,6 +274,13 @@ def test_every_route_a_rule_names_is_a_registered_write(home):
     assert not queues.matches("/api/sessions/{name}/keys")
     assert not queues.matches("/api/window/acquire")
     assert not queues.matches("/api/batch")
+    profiles = shared_reads.INVALIDATES["profiles"]
+    assert profiles.matches("/api/profiles/permission-mode")
+    assert profiles.matches("/api/profiles/pi-tui-mode")
+    assert profiles.matches("/api/harnesses/{name}/models")
+    assert profiles.matches("/api/install/apply")
+    assert not profiles.matches("/api/sessions/{name}/keys")
+    assert not profiles.matches("/api/batch")
 
 
 def test_shared_session_list_reads_equal_the_direct_get_on_every_path(home):
@@ -300,6 +308,30 @@ def test_shared_session_list_reads_equal_the_direct_get_on_every_path(home):
             routes = stats["routes"]["sessions"]
             assert stats["enabled"] is True
             assert routes["computes"] == 1 and routes["hits"] == 2
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_the_profile_listing_is_built_once_and_dropped_by_a_profile_write(home):
+    """Every dashboard that boots or opens the new-session form reads
+    ``/api/profiles``; on the live daemon that read held 36.5% of the event
+    loop (claunch-8utpv). Two reads inside ``max_age`` build it once; an
+    accepted write to a profile route builds it again on the next read."""
+
+    async def run():
+        client, _ = await _serve(max_age=60.0)
+        try:
+            first = await _get(client, "/api/profiles")
+            second = await _get(client, "/api/profiles")
+            assert first == second and first[0] == 200
+            reads = client.server.app["shared_reads"]
+            assert reads.stats()["routes"]["profiles"]["computes"] == 1
+            assert reads.stats()["routes"]["profiles"]["hits"] == 1
+            reads.wrote("POST", "/api/profiles/permission-mode", 200)
+            await _get(client, "/api/profiles")
+            assert reads.stats()["routes"]["profiles"]["computes"] == 2
         finally:
             await client.close()
 
