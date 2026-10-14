@@ -273,6 +273,9 @@ def test_user_leaves_title_and_goal_for_the_owner_to_fill(tmp_path):
         refused = await req("POST", f"/api/sims/{sid}/start", {"session": "s2"}, status=409)
         assert "title and goal" in refused["error"]
         await req("POST", f"/api/sims/{sid}/start", {}, status=409)
+        # A single round is refused the same way.
+        once = await req("POST", f"/api/sims/{sid}/round", {"session": "s2"}, status=409)
+        assert "title and goal" in once["error"]
         # An empty nudge repeats the fill request.
         await req("POST", f"/api/sims/{sid}/nudge", {})
         assert f"sim_configure {sid}" in s2.delivered[-1]

@@ -255,6 +255,7 @@ async function settle() { for (let i = 0; i < 10; i++) await new Promise(resolve
   assert(all().some(n => n.tag === 'h2' && n.textContent === '(세션이 제목을 정하는 중)'));
   assert(all().some(n => n.className === 'sim-warn' && n.textContent.includes('제목·목표')));
   assert.strictEqual(button('실행').disabled, true);
+  assert.strictEqual(button('라운드 한 번').disabled, true);
   Object.assign(sim, {fill_pending: undefined, title: '<b>door</b>'});
   // Leaving the route invalidates an outstanding read.
   ctx.SimPage.open(); await settle();

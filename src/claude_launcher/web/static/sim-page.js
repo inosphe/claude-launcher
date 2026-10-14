@@ -275,7 +275,9 @@ function makeSimView({root: view, session = "", go}) {
     if (s.state === "running") actions.append(button("중지", () => act(() => request(base + "/stop", "POST", {}), r => r.notified ? "중지했고 소유 세션에 알렸습니다" : "중지했습니다")));
     else if (s.fill_pending) { const run = button("실행", () => {}, "sim-primary"); run.disabled = true; run.title = "소유 세션이 제목·목표를 채운 뒤 실행할 수 있습니다"; actions.append(run); }
     else actions.append(button("실행", () => act(() => request(base + "/start", "POST", {}), r => r.runner ? `실행 세션 ${r.runner}을 띄웠습니다` : r.manual ? `실행했습니다 (소유 세션이 해석: ${r.manual})` : "실행했습니다"), "sim-primary"));
-    actions.append(button("라운드 한 번", () => act(() => request(base + "/round", "POST", {}), r => `라운드 ${r.result.round}: 새 ${r.result.new} · 열림 ${r.result.open}`)));
+    const once = button("라운드 한 번", () => act(() => request(base + "/round", "POST", {}), r => `라운드 ${r.result.round}: 새 ${r.result.new} · 열림 ${r.result.open}`));
+    if (s.fill_pending) { once.disabled = true; once.title = "소유 세션이 제목·목표를 채운 뒤 실행할 수 있습니다"; }
+    actions.append(once);
     const say = node("input"); say.placeholder = "소유 세션에 전할 말 (비우면 계속 진행 요청)"; say.disabled = busy || !s.owner;
     say.value = nudgeDraft; say.oninput = () => { nudgeDraft = say.value; };
     actions.append(say, button("소유 세션에 요청", () => act(() => request(base + "/nudge", "POST", {text: nudgeDraft}),
