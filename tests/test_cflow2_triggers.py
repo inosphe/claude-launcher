@@ -918,3 +918,24 @@ body: {seq: [req, after]}
         # the false one is in the journal too (review N5)
         [dropped] = _events(cwd, "w1", "trigger_not_queued")
         assert "is false" in dropped["reason"]
+
+
+def test_landing_holders_reads_each_slot_once_for_every_session_asked(tmp_path, monkeypatch):
+    # The merger grant asks one closure about every live member each minute;
+    # it read every slot once per member (claunch-cb65c).
+    from claude_launcher.cflow2 import store as cstore
+
+    _start(tmp_path, LEAD, "lead1")
+    _start(tmp_path, LEAD, "lead2")
+    manager = Manager(Session("lead1", tmp_path), Session("lead2", tmp_path),
+                      Session("w1", tmp_path))
+    reads = []
+    real = cstore.RunStore.load_state
+    monkeypatch.setattr(cstore.RunStore, "load_state",
+                        lambda self: reads.append(self.scope) or real(self))
+    holders = cflow2_triggers.landing_holders(manager, cflow2_triggers.session_cwds(manager))
+    base = str(tmp_path.resolve())
+    assert [(h.cwd, h.run) for h in holders("lead1", None)] == [(base, "lead1@main")]
+    assert [(h.cwd, h.run) for h in holders("lead2", None)] == [(base, "lead2@main")]
+    assert holders("w1", None) == []
+    assert sorted(reads) == ["lead1@main", "lead2@main"]

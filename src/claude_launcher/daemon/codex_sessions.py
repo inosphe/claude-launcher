@@ -12,10 +12,11 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Iterable, Optional, Set
+from typing import Dict, Iterable, Optional, Set, Tuple
 
 
 def _records(config_dir: Path):
@@ -99,20 +100,63 @@ def snapshot(config_dir: Path) -> Set[str]:
     }
 
 
-def find(config_dir: Path, session_id: str) -> Optional[Path]:
+def find(config_dir: Path, session_id: str, *, max_age: float = 0.0) -> Optional[Path]:
     """Return the active rollout for ``session_id``, if it is present.
 
     The id is read from the rollout's ``session_meta`` record instead of
     inferred from its filename.  Codex currently includes the id in both,
     but the persisted record is the same identity :func:`snapshot`,
     :func:`latest`, and :func:`claim_new` already trust.
+
+    ``max_age`` > 0 answers from one reading of the profile's rollouts that
+    is at most that many seconds old (:func:`_index`), for a caller that
+    looks up many ids at once and already tolerates that staleness.
     """
+    if max_age > 0:
+        return _index(config_dir, max_age).get(str(session_id))
     matches = [
         (mtime, path)
         for found, _cwd, mtime, path in (_records(config_dir) or ())
         if found == str(session_id)
     ]
     return max(matches, key=lambda item: item[0])[1] if matches else None
+
+
+#: config_dir -> (when it was read, {session id: newest rollout})
+_indexes: Dict[str, Tuple[float, Dict[str, Path]]] = {}
+_index_lock = threading.Lock()
+
+
+def _index(config_dir: Path, max_age: float) -> Dict[str, Path]:
+    """Every rollout of a profile by session id, read at most ``max_age`` ago.
+
+    The session list resolves the transcript of every exited codex row, and
+    after a daemon restart none of them is cached: one :func:`find` per row
+    read every rollout's first line once per row -- 104 rows over 119
+    rollouts was 2.3s of GIL per cold pass, paid again by each concurrent
+    reader (claunch-cb65c). Built under a lock, so a reader that arrives
+    while it is being built waits for that reading instead of starting one.
+    """
+    key = str(config_dir)
+    with _index_lock:
+        hit = _indexes.get(key)
+        now = time.monotonic()
+        if hit is not None and now - hit[0] < max_age:
+            return hit[1]
+        newest: Dict[str, Tuple[float, Path]] = {}
+        for session_id, _cwd, mtime, path in (_records(config_dir) or ()):
+            seen = newest.get(session_id)
+            if seen is None or mtime > seen[0]:
+                newest[session_id] = (mtime, path)
+        found = {sid: path for sid, (_mtime, path) in newest.items()}
+        _indexes[key] = (now, found)
+        return found
+
+
+def forget() -> None:
+    """Drop the rollout index. For tests."""
+    with _index_lock:
+        _indexes.clear()
 
 
 def latest(

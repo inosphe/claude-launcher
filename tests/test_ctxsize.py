@@ -504,6 +504,49 @@ def test_a_codex_session_is_read_through_its_profile_rollout(home, tmp_path):
     assert got["model_context_window"] == 258_400
 
 
+def test_many_codex_rows_resolve_from_one_reading_of_the_rollouts(
+    home, tmp_path, monkeypatch
+):
+    """After a daemon restart nothing is cached and the session list asks
+    for every exited codex row at once: one reading of the profile's
+    rollouts answers them all (claunch-cb65c)."""
+    from claude_launcher.daemon import codex_sessions
+
+    first = _codex_session(tmp_path, codex_context(), codex_count())
+    day = (
+        harnesses.get("codex").profile_home(
+            profile_mod.require_selector(first.profile).config_dir
+        )
+        / "sessions" / "2026" / "08" / "27"
+    )
+    others = []
+    for n in range(4):
+        cid = f"cafe0000-0000-0000-0000-00000000010{n}"
+        rollout = day / f"rollout-2026-08-27T08-27-1{n}-{cid}.jsonl"
+        meta = json.dumps({"timestamp": "2026-08-27T08:27:13Z",
+                           "type": "session_meta",
+                           "payload": {"id": cid, "cwd": first.cwd}})
+        rollout.write_text(meta + "\n", encoding="utf-8")
+        others.append((cid, rollout))
+    reads = []
+    real = codex_sessions._records
+    monkeypatch.setattr(
+        codex_sessions, "_records", lambda d: reads.append(d) or real(d)
+    )
+
+    got = [ctxsize.transcript_of(first)] + [
+        ctxsize.transcript_of(SessionDef(
+            name=f"cx{n}", profile=first.profile, harness="codex",
+            cwd=first.cwd, conversation_id=cid,
+        ))
+        for n, (cid, _path) in enumerate(others, 2)
+    ]
+
+    assert got[1:] == [path for _cid, path in others]
+    assert got[0] is not None and CID in got[0].name
+    assert len(reads) == 1
+
+
 def test_a_pi_session_is_read_through_its_pinned_session_file(home, tmp_path):
     sdef = _pi_session(tmp_path, pi_turn(fresh=1_988, read=12_160, out=128))
 

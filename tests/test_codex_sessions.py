@@ -52,6 +52,36 @@ def test_find_returns_the_rollout_whose_metadata_owns_the_id(tmp_path):
     assert codex_sessions.find(profile_home, "missing") is None
 
 
+def test_find_with_max_age_reads_the_rollouts_once_for_many_ids(tmp_path, monkeypatch):
+    # The session list resolves every exited codex row; after a restart each
+    # find() read every rollout again (claunch-cb65c).
+    codex_sessions.forget()
+    profile_home = tmp_path / "codex"
+    cwd = tmp_path / "work"
+    for sid in ("a", "b", "c"):
+        _rollout(profile_home, "2026/08/27", sid, cwd)
+    _rollout(profile_home, "2026/08/28", "b", cwd)  # a newer rollout of b
+    newer_b = next((profile_home / "sessions").glob("2026/08/28/*b.jsonl"))
+    os.utime(newer_b, (2_000_000_000, 2_000_000_000))
+    scans = []
+    real = codex_sessions._records
+    monkeypatch.setattr(codex_sessions, "_records",
+                        lambda config_dir: scans.append(1) or real(config_dir))
+
+    found = {sid: codex_sessions.find(profile_home, sid, max_age=60)
+             for sid in ("a", "b", "c", "missing")}
+    assert len(scans) == 1
+    assert found["b"] == newer_b == codex_sessions.find(profile_home, "b")
+    assert found["a"] == codex_sessions.find(profile_home, "a")
+    assert found["missing"] is None
+    # max_age bounds the reading: an expired one is read again
+    _rollout(profile_home, "2026/08/29", "late", cwd)
+    assert codex_sessions.find(profile_home, "late", max_age=60) is None
+    monkeypatch.setattr(codex_sessions.time, "monotonic", lambda: 10.0 ** 9)
+    assert codex_sessions.find(profile_home, "late", max_age=60) is not None
+    codex_sessions.forget()
+
+
 def test_latest_skips_a_conversation_another_session_holds(tmp_path):
     """A cwd is not an identity: several codex sessions stand in one checkout.
 
