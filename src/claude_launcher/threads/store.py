@@ -11,7 +11,8 @@ MCP tools. Each topic keeps its own history and can be read back whole.
 
 Rows:
   threads   one per topic: owning session, title, open/closed, who opened
-            it, the last message seq, and how far the agent has read
+            it, the last message seq, how far the agent has read, and the
+            QA question it was opened about (``qa``, claunch-78dpm)
   messages  the conversation, globally sequenced (``seq``); ``author`` is
             ``user`` or ``agent``
 
@@ -23,10 +24,20 @@ a closed thread reopens it: a reply is a reason to talk again.
 (it read the thread, or replied in it); user messages past it are what the
 agent's thread_list reports as unread. The browser keeps its own read
 position (threads-pane.js), so nothing here tracks the user's.
+
+Link to QA (claunch-78dpm). A thread opened to discuss one of the session's
+QA questions carries that question's id in ``qa``. It is set once, when the
+thread is opened, and never changes: the conversation that follows is about
+that question, whatever happens to it. This store checks only the id's
+shape; that the question exists and belongs to the same session is the
+route's check (daemon/threads_api.py), which can see the QA store. The other
+direction -- a question filed out of a thread -- lives on the question
+(qa/store.py ``thread``).
 """
 
 from __future__ import annotations
 
+import re
 import secrets
 import sqlite3
 from contextlib import contextmanager
@@ -36,7 +47,7 @@ from typing import Iterator, Optional
 
 USER = "user"
 AGENT = "agent"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 MAX_TITLE = 200
 MAX_BODY = 20_000
@@ -69,6 +80,7 @@ CREATE TABLE IF NOT EXISTS threads (
     opened_by TEXT NOT NULL CHECK (opened_by IN ('user', 'agent')),
     last_seq INTEGER NOT NULL DEFAULT 0,
     agent_read INTEGER NOT NULL DEFAULT 0,
+    qa TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -103,6 +115,14 @@ def _text(value, name: str, cap: int, *, required: bool = True) -> str:
     return value
 
 
+def _qa_id(value) -> Optional[str]:
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str) or not re.fullmatch(r"qa-[0-9a-f]{1,32}", value.strip()):
+        raise ThreadError("qa must be a QA question id (qa-xxxxxxxx)")
+    return value.strip()
+
+
 def _author(actor: str) -> str:
     return USER if actor == USER else AGENT
 
@@ -117,6 +137,7 @@ def _thread(r: sqlite3.Row, unread: int = 0, last: Optional[dict] = None) -> dic
         "last_seq": r["last_seq"],
         "agent_read": r["agent_read"],
         "agent_unread": unread,
+        "qa": r["qa"],
         "last": last,
         "created_at": r["created_at"],
         "updated_at": r["updated_at"],
@@ -137,6 +158,10 @@ class ThreadStore:
             version = db.execute("PRAGMA user_version").fetchone()[0]
             if version > SCHEMA_VERSION:
                 raise ThreadError(f"{self.path} has schema version {version}; this claunch knows {SCHEMA_VERSION}")
+            cols = {r[1] for r in db.execute("PRAGMA table_info(threads)")}
+            if cols and "qa" not in cols:
+                # v2 (claunch-78dpm): the QA question a thread is about.
+                db.execute("ALTER TABLE threads ADD COLUMN qa TEXT")
             db.executescript(_SCHEMA)
             db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
@@ -207,8 +232,9 @@ class ThreadStore:
 
     # -- writes ------------------------------------------------------------
 
-    def open(self, actor: str, session: str, title, text=None) -> dict:
-        """A new thread in ``session``, optionally with its first message."""
+    def open(self, actor: str, session: str, title, text=None, *, qa=None) -> dict:
+        """A new thread in ``session``, optionally with its first message
+        and the QA question it is about (``qa``)."""
         session = str(session or "").strip()
         if not session:
             raise ThreadError("session is required: the session the thread belongs to")
@@ -216,6 +242,7 @@ class ThreadStore:
             raise Forbidden(f"session {actor} may open threads only in its own conversation, not in {session}")
         title = _text(title, "title", MAX_TITLE)
         body = _text(text, "text", MAX_BODY, required=False)
+        qa = _qa_id(qa)
         with self._write() as db:
             live = db.execute(
                 "SELECT COUNT(*) FROM threads WHERE session = ? AND status = 'open'", (session,)
@@ -227,8 +254,9 @@ class ThreadStore:
                 tid = "th-" + secrets.token_hex(3)
             now = _now()
             db.execute(
-                "INSERT INTO threads (id, session, title, opened_by, created_at, updated_at) VALUES (?,?,?,?,?,?)",
-                (tid, session, title, _author(actor), now, now),
+                "INSERT INTO threads (id, session, title, opened_by, qa, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (tid, session, title, _author(actor), qa, now, now),
             )
             message = self._append(db, self._row(db, tid), actor, body) if body else None
             row = self._row(db, tid)
@@ -304,6 +332,19 @@ class ThreadStore:
             "open": sum(1 for t in threads if t["status"] == "open"),
             "agent_seq": int(agent_seq),
         }
+
+    def get(self, tid: str) -> dict:
+        """One thread's row (no messages, read position untouched)."""
+        with self._connect() as db:
+            row = self._row(db, tid)
+            return _thread(row, self._unread(db, row), self._last(db, tid))
+
+    def link_rows(self, session: str) -> list[dict]:
+        """Every thread of ``session``, reduced to what a QA card needs to
+        draw a link to it: id, title, status and the question it is about."""
+        with self._connect() as db:
+            return [dict(r) for r in db.execute(
+                "SELECT id, title, status, qa FROM threads WHERE session = ? ORDER BY created_at, id", (session,))]
 
     def rail(self) -> dict:
         """Per session with threads: how many are open, and the seq of the

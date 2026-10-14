@@ -7370,3 +7370,38 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .th-msg-body > :last-child { margin-bottom: 0; }
 .th-compose { display: flex; gap: 6px; align-items: flex-end; padding-top: 6px; }
 .th-compose .th-text { flex: 1 1 auto; }
+
+/* The session's conversation pane (talk-pane.js, claunch-78dpm): a tab bar
+   over the threads pane, the QA pane, or both in two columns. Each column
+   scrolls on its own, so the slot itself does not. */
+.talk-pane { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.talk-tabs { display: flex; gap: 2px; padding: 8px 0 4px; border-bottom: 1px solid #21262d; }
+.talk-tab { background: transparent; color: #7d8590; border: 1px solid transparent; border-bottom: none;
+  border-radius: 5px 5px 0 0; padding: 3px 12px; font: inherit; font-size: 12px; cursor: pointer; }
+.talk-tab:hover { color: #e6edf3; }
+.talk-tab.on { color: #e6edf3; background: #161b22; border-color: #30363d; }
+.talk-body { flex: 1 1 0; min-height: 0; display: flex; gap: 14px; }
+.talk-col { flex: 1 1 0; min-width: 0; min-height: 0; }
+.talk-col.talk-qa { overflow-y: auto; overscroll-behavior: contain; }
+.talk-body[data-mode="both"] .talk-threads { border-right: 1px solid #21262d; padding-right: 14px; }
+.talk-body[data-mode="both"] .th-side { flex-basis: 170px; }
+.talk-col.talk-qa .qa-head { background: #0d1117; }
+/* Links between the two: chips on a QA card and under a thread's head. */
+.qa-links, .th-links { display: flex; flex-wrap: wrap; gap: 4px 6px; margin: 4px 0; align-items: center; }
+.qa-link-chip, .th-link-chip { font: inherit; font-size: 11px; color: #58a6ff; background: #0d1d33;
+  border: 1px solid #1f3b63; border-radius: 9px; padding: 1px 8px; cursor: pointer; max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qa-link-chip:hover:not(:disabled), .th-link-chip:hover:not(:disabled) { border-color: #58a6ff; }
+.qa-link-chip:disabled, .th-link-chip:disabled { color: #7d8590; background: transparent; border-color: #30363d;
+  cursor: default; }
+.qa-link-chip.th-st-closed, .th-link-chip.qa-st-closed { opacity: 0.7; }
+.qa-discuss { font-size: 11px; }
+.th-chip-qa { color: #58a6ff; border-color: #1f3b63; }
+.th-about { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.th-about-drop { font-size: 11px; }
+.th-ask-qa { font-size: 12px; }
+.qa-card.qa-flash { box-shadow: 0 0 0 2px #58a6ff; transition: box-shadow 0.3s; }
+.th-chip { white-space: nowrap; flex-shrink: 0; }
+.th-convo-head .th-meta { white-space: nowrap; }
+/* In two columns the thread head is narrow: its buttons go under the title. */
+.talk-body[data-mode="both"] .th-convo-head { flex-wrap: wrap; }

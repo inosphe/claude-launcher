@@ -5712,7 +5712,7 @@ async function refreshThreadsRail() {
   threadsRailCache = rows;
   // A pane open on the threads is caught up with them.
   const lay = currentPage === "terminal" && currentName ? sessLayoutFor(currentName) : null;
-  if (lay && lay.split && lay.pane === "threads") markThreadsSeen(currentName);
+  if (lay && lay.split && talkShows(lay.pane, "threads")) markThreadsSeen(currentName);
   syncSessionResourceButtons();
 }
 
@@ -5757,7 +5757,9 @@ function maybeOpenQaPane() {
   if (seen !== undefined && row.agent_seq <= seen) return;
   const lay = sessLayoutFor(name);
   markQaSeen(name);
-  if (!(lay.split && lay.pane === "qa")) setSessLayout(name, { split: true, pane: "qa" });
+  // Over an open threads view it joins it (both) rather than replacing it.
+  if (!(lay.split && talkShows(lay.pane, "qa")))
+    setSessLayout(name, { split: true, pane: lay.split && lay.pane === "threads" ? "both" : "qa" });
 }
 
 async function refreshQaRail() {
@@ -5775,7 +5777,7 @@ async function refreshQaRail() {
     qaRailSig = sig;
     qaRailCache = rows;
     syncSessionResourceButtons();
-    if (splitKind === "qa") globalThis.QaPane?.refresh();
+    if (isTalkPane(splitKind)) globalThis.TalkPane?.refreshQa();
   }
   maybeOpenQaPane();
 }
@@ -18056,6 +18058,15 @@ function loadSessLayouts() {
 /* Always whole and always sane, whatever the key holds: junk falls back
    field by field rather than as a lump, so a broken ratio does not cost the
    radio its choice. */
+/* The split panes drawn by the conversation pane (talk-pane.js,
+   claunch-78dpm): its tabs move between them without closing the pane. */
+function isTalkPane(pane) {
+  return pane === "threads" || pane === "qa" || pane === "both";
+}
+function talkShows(pane, what) {
+  return pane === what || pane === "both";
+}
+
 function sessLayoutFor(name) {
   const raw = (name && loadSessLayouts()[name]) || {};
   return {
@@ -18063,9 +18074,10 @@ function sessLayoutFor(name) {
     sub: DETAIL_SUBTAB_IDS.has(raw.sub) ? raw.sub : "all",
     split: !!raw.split,
     // What the split pane shows: the workflow run (⬒), the simulations (◬),
-    // a pi-durable session's event chart (◇), the session's questions (?)
-    // or its threads (🗪).
-    pane: raw.pane === "sims" || raw.pane === "chart" || raw.pane === "qa" || raw.pane === "threads"
+    // a pi-durable session's event chart (◇), or the conversation pane
+    // (talk-pane.js) on the session's questions (?), its threads (🗪) or
+    // both side by side.
+    pane: ["sims", "chart", "qa", "threads", "both"].includes(raw.pane)
       ? raw.pane : "run",
     ratio: clampSplitRatio(Number(raw.ratio)),
     // The session's view the reader last had up: its terminal (cli) or its
@@ -19937,7 +19949,7 @@ function syncSplitPane() {
     ? "close the chart pane — the terminal takes the column back"
     : "this pi-durable session's run as a flow chart, updated as it logs";
   const qa = $("term-qabtn");
-  const qaOn = !!lay && lay.split && lay.pane === "qa";
+  const qaOn = !!lay && lay.split && talkShows(lay.pane, "qa");
   qa.setAttribute("aria-pressed", String(qaOn));
   qa.title = qaOn
     ? "close the questions pane — it opens again when the session changes a question"
@@ -19945,7 +19957,7 @@ function syncSplitPane() {
   // Showing it is seeing it: a pane open on the questions is caught up.
   if (qaOn && typeof markQaSeen === "function") markQaSeen(name);
   const threads = $("term-threadsbtn");
-  const threadsOn = !!lay && lay.split && lay.pane === "threads";
+  const threadsOn = !!lay && lay.split && talkShows(lay.pane, "threads");
   threads.setAttribute("aria-pressed", String(threadsOn));
   threads.title = threadsOn
     ? "close the threads pane — the terminal takes the column back"
@@ -20434,7 +20446,7 @@ const wfPageUi = {
    pane owns its own slot, poll, selection and last payload — the page's
    globals above belong to the page, and the two must be able to differ. */
 let splitFor = null;           // the session the pane is showing (null = shut)
-let splitKind = null;          // "run", "sims", "chart", "qa" or "threads" (sessLayoutFor().pane)
+let splitKind = null;          // "run", "sims", "chart", "qa", "threads" or "both" (sessLayoutFor().pane)
 let splitCwd = null;           // its slot, resolved once from the meta endpoint
 let splitScope = null;
 let splitPollTimer = null;
@@ -20464,22 +20476,28 @@ function renderSplit(data) {
    overlay is up, the daemon blinked) is simply asked again two seconds on,
    instead of leaving the pane on "loading…" for good. */
 function openSplit(name, kind = "run") {
+  // A tab of the conversation pane: the pane stays, only its view moves.
+  if (splitFor === name && isTalkPane(splitKind) && isTalkPane(kind)) {
+    splitKind = kind;
+    globalThis.TalkPane?.setMode(kind);
+    return;
+  }
   closeSplit();
   splitFor = name;
   splitKind = kind;
   // The simulations view keeps its own poll (sim-page.js).
   if (kind === "sims") { globalThis.SimPane?.mount($("term-wf"), name); return; }
-  // And the session's questions (qa-pane.js): a save moves the header's
-  // light at once rather than at the next dashboard poll.
-  if (kind === "qa") {
-    globalThis.QaPane?.mount($("term-wf"), name, { api, onChange: () => refreshQaRail() });
-    return;
-  }
-  // And the session's threads (threads-pane.js): a send moves the header's
-  // light at once rather than at the next dashboard poll.
-  if (kind === "threads") {
-    globalThis.ThreadsPane?.mount($("term-wf"), name,
-                                  { api, storageKey: threadsReadKey(), onChange: () => refreshThreadsRail() });
+  // And the session's conversation (talk-pane.js): its threads, its
+  // questions, or both. A save or a send moves the header's lights at once
+  // rather than at the next dashboard poll; a tab press is written down as
+  // the session's pane, and syncSplitPane hands it back through openSplit.
+  if (isTalkPane(kind)) {
+    globalThis.TalkPane?.mount($("term-wf"), name, {
+      mode: kind, api, storageKey: threadsReadKey(),
+      onQaChange: () => refreshQaRail(),
+      onThreadsChange: () => { refreshThreadsRail(); },
+      onMode: (m) => setSessLayout(name, { split: true, pane: m }),
+    });
     return;
   }
   // So does a pi-durable session's chart: its run is the event log it
@@ -20496,8 +20514,7 @@ function openSplit(name, kind = "run") {
 function closeSplit() {
   if (splitPollTimer) { clearInterval(splitPollTimer); splitPollTimer = null; }
   if (splitKind === "sims") globalThis.SimPane?.unmount();
-  if (splitKind === "qa") globalThis.QaPane?.unmount();
-  if (splitKind === "threads") globalThis.ThreadsPane?.unmount();
+  if (isTalkPane(splitKind)) globalThis.TalkPane?.unmount();
   if (splitDurable) { splitDurable.unmount(); splitDurable = null; }
   splitKind = null;
   splitFor = null;

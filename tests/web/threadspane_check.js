@@ -248,8 +248,10 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   assert.ok(html.includes('id="term-threadsbtn"'));
   assert.ok(html.indexOf('src="static/threads-pane.js"') > 0
             && html.indexOf('src="static/threads-pane.js"') < html.indexOf('src="static/app.js"'));
-  assert.ok(/kind === "threads"[\s\S]{0,200}ThreadsPane\?\.mount/.test(app), "openSplit mounts the pane");
-  assert.ok(app.includes('if (splitKind === "threads") globalThis.ThreadsPane?.unmount();'));
+  // The threads pane is placed by the conversation pane (talk-pane.js,
+  // claunch-78dpm): openSplit mounts TalkPane for threads, qa and both.
+  assert.ok(/isTalkPane\(kind\)[\s\S]{0,200}TalkPane\?\.mount/.test(app), "openSplit mounts the pane");
+  assert.ok(app.includes('if (isTalkPane(splitKind)) globalThis.TalkPane?.unmount();'));
   assert.ok(app.includes('$("term-threadsbtn").addEventListener("click", () => toggleSplitPane("threads"));'));
   assert.equal(app.split("refreshThreadsRail(),").length - 1, 2, "boot and the poll both read the rail");
   assert.ok(!/innerHTML/.test(src), "threads-pane.js never assigns HTML");

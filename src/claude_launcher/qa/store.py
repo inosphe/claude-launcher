@@ -39,11 +39,19 @@ the session whether it has anything to ask. Each press is a row in
 a note). A newer nudge supersedes a waiting one, so a session has at most
 one waiting nudge (a partial unique index), and a settled nudge never
 changes again (a trigger).
+
+Link to threads (claunch-78dpm). A question the session files out of a
+thread conversation carries that thread's id in ``thread`` (qa_ask
+``thread=``). Like the thread's ``qa`` (threads/store.py) it is set at
+creation and never changes, so it sits outside the revision protocol: no
+edit moves it and no answer depends on it. That the thread exists and is the
+same session's is the route's check (daemon/qa_api.py).
 """
 
 from __future__ import annotations
 
 import json
+import re
 import secrets
 import sqlite3
 from contextlib import contextmanager
@@ -53,7 +61,7 @@ from typing import Iterator, Optional
 
 USER = "user"
 UNRESOLVED = ("open", "stale")
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 MAX_TITLE = 300
 MAX_BODY = 20_000
@@ -99,6 +107,7 @@ CREATE TABLE IF NOT EXISTS questions (
     answer_revision INTEGER,
     answer_saves INTEGER NOT NULL DEFAULT 0 CHECK (answer_saves >= 0),
     answered_at TEXT,
+    thread TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     CHECK (
@@ -194,6 +203,14 @@ def _options(value) -> list[dict]:
     return out
 
 
+def _thread_id(value) -> Optional[str]:
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str) or not re.fullmatch(r"th-[0-9a-f]{1,32}", value.strip()):
+        raise QaError("thread must be a thread id (th-xxxxxx)")
+    return value.strip()
+
+
 def _revision(value) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise QaError("revision is required: the question revision you last read (an integer >= 1)")
@@ -232,6 +249,7 @@ def _row(r: sqlite3.Row) -> dict:
         "revision": r["revision"],
         "status": r["status"],
         "answer": answer,
+        "thread": r["thread"],
         "created_at": r["created_at"],
         "updated_at": r["updated_at"],
     }
@@ -247,6 +265,10 @@ class QaStore:
             version = db.execute("PRAGMA user_version").fetchone()[0]
             if version > SCHEMA_VERSION:
                 raise QaError(f"{self.path} has schema version {version}; this claunch knows {SCHEMA_VERSION}", )
+            cols = {r[1] for r in db.execute("PRAGMA table_info(questions)")}
+            if cols and "thread" not in cols:
+                # v3 (claunch-78dpm): the thread a question was filed from.
+                db.execute("ALTER TABLE questions ADD COLUMN thread TEXT")
             db.executescript(_SCHEMA)
             db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
@@ -380,6 +402,14 @@ class QaStore:
             "nudge": nudge,
         }
 
+    def link_rows(self, session: str) -> list[dict]:
+        """Every question of ``session``, reduced to what a thread needs to
+        draw a link to it: id, title, status and the thread it came from."""
+        with self._connect() as db:
+            return [dict(r) for r in db.execute(
+                "SELECT id, title, status, thread FROM questions WHERE session = ? ORDER BY created_at, id",
+                (session,))]
+
     def rail(self) -> dict:
         """Per session: how many questions wait on the user, and the last
         change the session made (the pane opens itself when that moves)."""
@@ -400,7 +430,7 @@ class QaStore:
 
     # -- the session's writes ---------------------------------------------
 
-    def ask(self, actor: str, *, title, body=None, options=None, multi=False) -> dict:
+    def ask(self, actor: str, *, title, body=None, options=None, multi=False, thread=None) -> dict:
         if not actor or actor == USER:
             raise Forbidden("questions are asked by a session")
         title = _text(title, "title", MAX_TITLE, required=True)
@@ -409,6 +439,7 @@ class QaStore:
         multi = bool(multi)
         if multi and not opts:
             raise QaError("multi needs options to choose from")
+        thread = _thread_id(thread)
         now = _now()
         with self._write() as db:
             live = db.execute(
@@ -418,9 +449,9 @@ class QaStore:
                 raise QaError(f"session {actor} already has {live} questions that are not closed; close some first")
             qid = "qa-" + secrets.token_hex(4)
             db.execute(
-                "INSERT INTO questions (id, session, title, body, options, multi, created_at, updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?)",
-                (qid, actor, title, body, json.dumps(opts, ensure_ascii=False), int(multi), now, now),
+                "INSERT INTO questions (id, session, title, body, options, multi, thread, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (qid, actor, title, body, json.dumps(opts, ensure_ascii=False), int(multi), thread, now, now),
             )
             q = self._load(db, qid)
             self._event(db, q, actor, "ask")

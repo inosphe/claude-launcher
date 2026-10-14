@@ -24,7 +24,13 @@
    says when it was typed. A closed question can still be answered again
    ("답 다시 고치기"), and an answered or closed one can be sent a direction
    check ("방향 점검") with a note; the session settles that by closing the
-   question with a note, shown under the card. */
+   question with a note, shown under the card.
+
+   Thread links (claunch-78dpm, daemon/talk_links.py): each question carries
+   `links` to the threads that touch it (the one it was filed from, the ones
+   opened about it). They are chips on the card calling opts.onThread(id);
+   "쓰레드로 논의" calls opts.onDiscuss(question) to open a new thread about
+   it (talk-pane.js). focus(id) scrolls a card into view and marks it. */
 globalThis.QaPane = (() => {
   const POLL_MS = 3000;
   const STATUS = {
@@ -33,7 +39,8 @@ globalThis.QaPane = (() => {
     stale: ["재확인 필요", "qa-stale"],
     closed: ["닫힘", "qa-closed"],
   };
-  let host = null, name = "", api = null, onChange = null;
+  let host = null, name = "", api = null, onChange = null, onThread = null, onDiscuss = null;
+  let focusWant = "";        // a card to bring into view once it is drawn
   let timer = null, seq = 0, data = null, error = "";
   let nudging = false, nudgeNotice = null;   // {text, bad} after a press
   // Per question id: {text, choices: [labels], base: revision the edit
@@ -156,6 +163,27 @@ globalThis.QaPane = (() => {
       if (!box) { box = node("div", "qa-closed-body"); closedBox.append(box); }
       place(box, closed);
     }
+    if (focusWant) bringIntoView();
+  }
+
+  function bringIntoView() {
+    const c = cards.get(focusWant);
+    if (!c || !c.node) return;
+    focusWant = "";
+    const details = c.node.closest("details");
+    if (details) details.open = true;
+    c.node.scrollIntoView({block: "nearest", behavior: "smooth"});
+    c.node.classList.add("qa-flash");
+    setTimeout(() => c.node.classList.remove("qa-flash"), 1600);
+  }
+
+  /* Bring question `id` into view (a link from a thread). A card not drawn
+     yet is brought in after the next load. */
+  function focus(id) {
+    if (!host || !id) return;
+    focusWant = id;
+    if (cards.has(id)) bringIntoView();
+    else load();
   }
 
   /* Cards in question order, each rebuilt only when what it shows changed
@@ -182,6 +210,28 @@ globalThis.QaPane = (() => {
     }
   }
 
+  function linkRow(q) {
+    const row = node("div", "qa-links");
+    for (const link of q.links || []) {
+      const label = (link.rel === "source" ? "출처 쓰레드 · " : "논의 쓰레드 · ") +
+        `${link.id} ${link.status === "deleted" ? "(삭제됨)" : link.title}`;
+      const chip = node("button", `qa-link-chip th-st-${link.status}`, label);
+      chip.type = "button";
+      chip.disabled = link.status === "deleted" || !onThread;
+      chip.title = link.status === "closed" ? "닫힌 쓰레드로 이동" : "쓰레드로 이동";
+      chip.addEventListener("click", () => onThread && onThread(link.id));
+      row.append(chip);
+    }
+    if (onDiscuss && q.status !== "closed") {
+      const go = node("button", "term-btn qa-discuss", "쓰레드로 논의");
+      go.type = "button";
+      go.title = "이 질문을 주제로 새 쓰레드를 엽니다. 쓰레드와 질문이 서로 연결됩니다.";
+      go.addEventListener("click", () => onDiscuss({id: q.id, title: q.title}));
+      row.append(go);
+    }
+    return row.firstChild ? row : null;
+  }
+
   function card(q) {
     const [label, cls] = STATUS[q.status] || [q.status, ""];
     const box = node("article", `qa-card ${cls}`);
@@ -191,6 +241,8 @@ globalThis.QaPane = (() => {
                node("span", "qa-meta", `${q.id} · r${q.revision}`));
     box.append(top);
     if (q.body) box.append(markdown(node("div", "qa-body"), q.body));
+    const links = linkRow(q);
+    if (links) box.append(links);
 
     const d = drafts.get(q.id);
     const moved = node("p", "qa-moved wf-warning",
@@ -528,6 +580,9 @@ globalThis.QaPane = (() => {
     name = session;
     api = opts.api || globalThis.api;
     onChange = opts.onChange || null;
+    onThread = opts.onThread || null;
+    onDiscuss = opts.onDiscuss || null;
+    focusWant = "";
     data = null;
     error = "";
     nudging = false;
@@ -552,5 +607,5 @@ globalThis.QaPane = (() => {
     data = null;
   }
 
-  return {mount, unmount, refresh: () => { if (host) load(); }};
+  return {mount, unmount, focus, refresh: () => { if (host) load(); }};
 })();

@@ -3,7 +3,7 @@ answered in the session's QA pane.
 
   GET  /api/qa?session=<name>[&closed=0]   one session's questions
   GET  /api/qa/rail                        per session: unresolved, agent_seq
-  POST /api/qa                             ask      {session, title, body?, options?, multi?}
+  POST /api/qa                             ask      {session, title, body?, options?, multi?, thread?}
   POST /api/qa/{id}                        edit     {session, revision, title?, body?, options?, multi?}
   POST /api/qa/{id}/close                  close    {session, revision, note?}
   POST /api/qa/{id}/delete                 delete   {session, revision}
@@ -44,6 +44,13 @@ A nudge ("질문 요청" in the pane, claunch-l8vyi.1) is typed in the same way:
 it asks the session to file whatever it needs from the user with qa_ask,
 or to reply qa_nothing when it has nothing to ask. It is sent whether or
 not the session has questions; the pane shows how it was settled.
+
+Thread links (claunch-78dpm, daemon/talk_links.py). A question may be filed
+out of one of the session's threads (``thread`` on ask); the thread must
+exist and be the same session's. Every question in a list carries
+``links``: the thread it came from and the threads opened about it. The
+answer block names those threads, so the agent can carry the answer back
+into the conversation that led to it.
 """
 
 from __future__ import annotations
@@ -56,7 +63,7 @@ from typing import Callable, Optional
 from aiohttp import web
 
 from ..qa import store as qa_store
-from . import paths
+from . import paths, talk_links
 
 log = logging.getLogger(__name__)
 
@@ -79,6 +86,16 @@ def _answer_lines(answer: Optional[dict]) -> list[str]:
     return lines
 
 
+def _thread_lines(q: dict) -> list[str]:
+    live = [t for t in q.get("links") or [] if t["status"] != "deleted"]
+    if not live:
+        return []
+    named = ", ".join(f"{t['id']} \"{t['title']}\"" + (" (filed from)" if t["rel"] == "source" else "")
+                      for t in live)
+    return [f"Threads on this question: {named}. Where the answer settles what was discussed there, "
+            "say so in the thread (thread_reply)."]
+
+
 def answered_text(q: dict, previous: Optional[dict], *, reopened: bool = False) -> str:
     verb = "changed their answer to" if previous else "answered"
     lines = [
@@ -94,6 +111,7 @@ def answered_text(q: dict, previous: Optional[dict], *, reopened: bool = False) 
             "You had closed this question; the new answer reopens it. Check whether the work you did "
             "on the earlier answer still holds, and change course where it does not."
         )
+    lines += _thread_lines(q)
     lines.append(
         "Act on it. qa_list shows every question of yours; when this one needs nothing more, "
         f"qa_close it (revision {q['revision']}). Editing it marks the answer stale and asks the user again."
@@ -270,12 +288,24 @@ def install(app, store: Optional[qa_store.QaStore] = None):
         outbox.send(key, session, kind, make)
         return outbox.view(key)
 
+    def link(questions: list[dict], session: str) -> None:
+        talk_links.attach_to_questions(questions, app.get("threads"), session)
+
     def known(name: str) -> bool:
         try:
             manager.get(name)
             return True
         except Exception:  # noqa: BLE001 -- no such session
             return False
+
+    def thread_of(tid: str) -> Optional[dict]:
+        threads = app.get("threads")
+        if threads is None:
+            return None
+        try:
+            return threads.get(tid)
+        except Exception:  # noqa: BLE001 -- no such thread
+            return None
 
     async def body_of(request) -> dict:
         try:
@@ -312,6 +342,7 @@ def install(app, store: Optional[qa_store.QaStore] = None):
             q["delivery"] = outbox.view(q["id"])
         if res.get("nudge"):
             res["nudge"]["delivery"] = outbox.view(res["nudge"]["id"])
+        await asyncio.to_thread(link, res["questions"], session)
         return web.json_response(res)
 
     async def h_rail(_request):
@@ -323,9 +354,20 @@ def install(app, store: Optional[qa_store.QaStore] = None):
         actor = actor_of(body)
         if actor != qa_store.USER and not known(actor):
             return web.json_response({"error": f"no session {actor!r} on this daemon"}, status=404)
+        tid = body.get("thread")
+        if tid and actor != qa_store.USER:
+            t = await asyncio.to_thread(thread_of, str(tid))
+            if t is None:
+                return web.json_response({"error": f"no thread {tid!r}"}, status=404)
+            if t["session"] != actor:
+                return web.json_response(
+                    {"error": f"thread {tid} belongs to session {t['session']}, not {actor}"}, status=400)
         res, err = await call(qa.ask, actor, title=body.get("title"), body=body.get("body"),
-                              options=body.get("options"), multi=body.get("multi", False))
-        return err or web.json_response({"question": res})
+                              options=body.get("options"), multi=body.get("multi", False), thread=tid)
+        if err:
+            return err
+        await asyncio.to_thread(link, [res], res["session"])
+        return web.json_response({"question": res})
 
     async def h_update(request):
         body = await body_of(request)
@@ -352,6 +394,7 @@ def install(app, store: Optional[qa_store.QaStore] = None):
         if err:
             return err
         q = res["question"]
+        await asyncio.to_thread(link, [q], q["session"])
         text = answered_text(q, res["previous"], reopened=res["reopened"])
         res["delivery"] = notify(q["id"], q["session"], "answer", lambda: text)
         # Accepted for delivery (queued, or queued for a held session's

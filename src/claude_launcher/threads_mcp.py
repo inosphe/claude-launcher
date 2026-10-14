@@ -24,15 +24,20 @@ thread_read returns a thread's whole conversation (use it to pick a topic
 back up), thread_list shows your threads with unread counts, thread_open
 starts a new topic yourself (a side question to the user, a parallel line of
 work to report on), thread_close settles one. Keep each thread to its topic;
-carry the main task on in the terminal as usual.
+carry the main task on in the terminal as usual. Threads and QA questions
+link to each other: a thread opened about a question (thread_open qa=, or the
+user's "discuss in a thread" on a QA card) carries it as its subject, and
+when a thread reaches a decision the user must make, file it with qa_ask
+thread=<id> so the question links back to the conversation. Each thread's
+'links' lists the questions it touches.
 """
 
 _TID = {"thread_id": {"type": "string", "description": "thread id (th-xxxxxx)"}}
 
 TOOLS = [
     {"name": "thread_list",
-     "description": "Your threads with the user: id, title, status, the last message and how many user "
-                    "messages you have not read (agent_unread).",
+     "description": "Your threads with the user: id, title, status, the last message, how many user "
+                    "messages you have not read (agent_unread) and the QA questions each touches (links).",
      "inputSchema": {"type": "object", "properties": {
          "closed": {"type": "boolean", "description": "include closed threads (default false)"}}}},
     {"name": "thread_read",
@@ -52,7 +57,9 @@ TOOLS = [
                     "Returns the thread (id).",
      "inputSchema": {"type": "object", "properties": {
          "title": {"type": "string", "description": "the topic, one line"},
-         "text": {"type": "string", "description": "first message (markdown text)"}},
+         "text": {"type": "string", "description": "first message (markdown text)"},
+         "qa": {"type": "string", "description": "the QA question (qa-xxxxxxxx) this thread discusses; "
+                                                 "it is linked both ways and shown on its QA card"}},
          "required": ["title"]}},
     {"name": "thread_close",
      "description": "Close one of your threads once its topic is settled (kept for the record; a new "
@@ -102,8 +109,9 @@ def call_tool(name: str, args: dict) -> dict:
         return c.post(f"/api/threads/{_tid(args)}/messages", {"session": me, "text": args.get("text") or ""})
     if name == "thread_open":
         body = {"session": me, "title": args.get("title") or ""}
-        if args.get("text"):
-            body["text"] = args["text"]
+        for k in ("text", "qa"):
+            if args.get(k):
+                body[k] = args[k]
         return c.post("/api/threads", body)
     if name == "thread_close":
         return c.post(f"/api/threads/{_tid(args)}/close", {"session": me})

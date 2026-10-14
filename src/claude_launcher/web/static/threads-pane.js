@@ -13,15 +13,24 @@
    the page's lifetime. Which agent messages this browser has seen is kept
    per thread in localStorage, so a thread with an unseen reply carries a
    dot. User text is rendered as text; agent text through the page's
-   markdown renderer, which builds nodes. */
+   markdown renderer, which builds nodes.
+
+   QA links (claunch-78dpm, daemon/talk_links.py): each thread carries
+   `links` to the QA questions it touches. The conversation head shows them
+   as chips that call opts.onQuestion(id) (talk-pane.js moves to the card);
+   "QA로 정리 요청" posts a message with ask_qa, asking the session to file
+   the thread's open decision as a question linked back here. compose()
+   opens the new-thread form prefilled for a question (QA card's "쓰레드로
+   논의"); the thread is opened with `qa` set. */
 globalThis.ThreadsPane = (() => {
   "use strict";
   const POLL_MS = 3000;
-  let host = null, name = "", api = null, onChange = null, storageKey = "";
+  let host = null, name = "", api = null, onChange = null, onQuestion = null, storageKey = "";
   let timer = null, seq = 0, list = null, error = "";
   let current = "";          // the selected thread id
   let convo = null;          // {id, thread, messages}
   let composing = false;     // the new-thread form is open
+  let composeQa = null;      // {id, title}: the question the new thread is about
   let notice = "";
   const drafts = new Map();  // thread id ("" = new thread) -> text
   const inflight = new Set(); // thread ids ("" = new thread) with a post still out
@@ -66,6 +75,16 @@ globalThis.ThreadsPane = (() => {
     const open = ts.find((t) => t.status === "open");
     return (open || ts[0] || {}).id || "";
   }
+
+  /* What a link chip says: the relation, the question id and its title. */
+  function linkLabel(link) {
+    const rel = link.rel === "subject" ? "다루는 질문" : "여기서 만든 질문";
+    const title = link.status === "deleted" ? "(삭제됨)" : excerpt(link.title, 40);
+    return `${rel} · ${link.id} ${title}`;
+  }
+
+  /* The default text of a "QA로 정리 요청" post when the composer is empty. */
+  const ASK_QA_TEXT = "이 쓰레드에서 내가 결정해야 할 것을 QA 질문으로 올려 주세요.";
 
   /* ---- read positions ---- */
 
@@ -165,9 +184,11 @@ globalThis.ThreadsPane = (() => {
     return "";
   }
 
-  function send(tid, text) {
+  function send(tid, text, askQa = false) {
     return once(tid, () => act(async () => {
-      const res = await request(`/api/threads/${encodeURIComponent(tid)}/messages`, {text});
+      const body = {text};
+      if (askQa) body.ask_qa = true;
+      const res = await request(`/api/threads/${encodeURIComponent(tid)}/messages`, body);
       drafts.delete(tid);
       notice = deliveryNotice(res);
     }));
@@ -177,10 +198,12 @@ globalThis.ThreadsPane = (() => {
     return once("", () => act(async () => {
       const body = {to: name, title};
       if (text) body.text = text;
+      if (composeQa) body.qa = composeQa.id;
       const res = await request("/api/threads", body);
       drafts.delete("");
       drafts.delete("\u0000title");
       composing = false;
+      composeQa = null;
       current = res.thread.id;
       notice = deliveryNotice(res);
     }));
@@ -212,7 +235,7 @@ globalThis.ThreadsPane = (() => {
     side.replaceChildren();
     const add = node("button", "term-btn th-new", composing ? "취소" : "+ 새 쓰레드");
     add.type = "button";
-    add.addEventListener("click", () => { composing = !composing; render(); });
+    add.addEventListener("click", () => { composing = !composing; composeQa = null; render(); });
     side.append(add);
     if (composing) {
       const form = node("div", "th-newform");
@@ -221,6 +244,15 @@ globalThis.ThreadsPane = (() => {
       title.value = drafts.get("\u0000title") || "";
       title.addEventListener("input", () => drafts.set("\u0000title", title.value));
       const first = textBox("th-text", "", "첫 메시지(선택) — 세션에 전달됩니다");
+      let about = null;
+      if (composeQa) {
+        about = node("div", "th-about");
+        about.append(node("span", "th-link-chip", `다루는 질문 · ${composeQa.id} ${excerpt(composeQa.title, 40)}`));
+        const drop = node("button", "term-btn th-about-drop", "연결 해제");
+        drop.type = "button";
+        drop.addEventListener("click", () => { composeQa = null; render(); });
+        about.append(drop);
+      }
       const go = node("button", "term-btn", "시작");
       go.type = "button";
       go.disabled = inflight.has("");
@@ -232,7 +264,7 @@ globalThis.ThreadsPane = (() => {
       };
       go.addEventListener("click", submit);
       title.addEventListener("keydown", (e) => { if (sendKey(e)) { e.preventDefault(); first.focus(); } });
-      form.append(title, first, go);
+      form.append(title, ...(about ? [about] : []), first, go);
       side.append(form);
       if (!title.value) setTimeout(() => title.focus(), 0);
     }
@@ -250,6 +282,11 @@ globalThis.ThreadsPane = (() => {
       const top = node("div", "th-item-top");
       top.append(node("span", "th-item-title", t.title));
       if (t.status === "closed") top.append(node("span", "th-chip", "닫힘"));
+      if ((t.links || []).length) {
+        const q = node("span", "th-chip th-chip-qa", `QA ${t.links.length}`);
+        q.title = t.links.map(linkLabel).join("\n");
+        top.append(q);
+      }
       if (fresh.has(t.id)) top.append(node("span", "th-dot", "●"));
       li.append(top);
       if (t.last) {
@@ -282,7 +319,30 @@ globalThis.ThreadsPane = (() => {
       ? "reopen this thread"
       : "close this thread once its topic is settled — a new message reopens it";
     toggle.addEventListener("click", () => setStatus(t.id, t.status === "closed" ? "reopen" : "close"));
-    head.append(toggle);
+    const askQa = node("button", "term-btn th-ask-qa", "QA로 정리 요청");
+    askQa.type = "button";
+    askQa.title = "세션에게 이 쓰레드에서 결정할 것을 QA 질문으로 올리라고 요청합니다. " +
+      "입력창에 쓴 내용이 있으면 그 내용을 함께 보냅니다.";
+    askQa.disabled = inflight.has(t.id);
+    askQa.addEventListener("click", () => {
+      const box = main.querySelector(".th-compose textarea");
+      const v = ((box && box.value) || "").trim();
+      send(t.id, v || ASK_QA_TEXT, true);
+    });
+    head.append(toggle, askQa);
+
+    let links = null;
+    if ((t.links || []).length) {
+      links = node("div", "th-links");
+      for (const link of t.links) {
+        const chip = node("button", `th-link-chip qa-st-${link.status}`, linkLabel(link));
+        chip.type = "button";
+        chip.disabled = link.status === "deleted" || !onQuestion;
+        chip.title = link.status === "deleted" ? "삭제된 질문" : "QA 카드로 이동";
+        chip.addEventListener("click", () => onQuestion && onQuestion(link.id));
+        links.append(chip);
+      }
+    }
 
     const msgs = node("div", "th-messages");
     for (const m of convo.messages) {
@@ -308,7 +368,7 @@ globalThis.ThreadsPane = (() => {
     go.addEventListener("click", () => { const v = box.value.trim(); if (v) send(t.id, v); });
     compose.append(box, go);
 
-    main.replaceChildren(head, msgs, compose);
+    main.replaceChildren(head, ...(links ? [links] : []), msgs, compose);
     msgs.scrollTop = msgs.scrollHeight;
     const last = convo.messages[convo.messages.length - 1];
     if (last) markRead(t.id, last.seq);
@@ -336,13 +396,13 @@ globalThis.ThreadsPane = (() => {
     // Redraw only what changed, so a poll neither scrolls the reader back
     // to the bottom nor rebuilds what they are typing in.
     const read = loadRead();
-    const sideSig = JSON.stringify([threads, current, composing, [...unseen(threads, read)], inflight.has("")]);
+    const sideSig = JSON.stringify([threads, current, composing, composeQa, [...unseen(threads, read)], inflight.has("")]);
     if (!typingIn(side) && (sideSig !== drawn.side || !side.firstChild)) {
       drawn.side = sideSig;
       renderList(side, threads, read);
     }
     const t = convo && convo.thread;
-    const mainSig = JSON.stringify(convo ? [convo.id, t.title, t.status, convo.messages.length, inflight.has(convo.id)] : null);
+    const mainSig = JSON.stringify(convo ? [convo.id, t.title, t.status, t.links || [], convo.messages.length, inflight.has(convo.id)] : null);
     if (mainSig === drawn.main && main.firstChild) return;
     drawn.main = mainSig;
     const keep = main.querySelector(".th-compose textarea");
@@ -358,6 +418,7 @@ globalThis.ThreadsPane = (() => {
     name = session;
     api = opts.api || globalThis.api;
     onChange = opts.onChange || null;
+    onQuestion = opts.onQuestion || null;
     storageKey = opts.storageKey || "claunch_threadread";
     host.replaceChildren(node("p", "wf-note", "불러오는 중…"));
     load();
@@ -378,10 +439,30 @@ globalThis.ThreadsPane = (() => {
     convo = null;
     current = "";
     composing = false;
+    composeQa = null;
     inflight.clear();
     notice = error = "";
     drawn.side = drawn.main = "";
   }
 
-  return {mount, unmount, refresh: () => host && load(), excerpt, unseen, sendKey, pick};
+  /* Show thread `tid` (a link from a QA card). */
+  function select(tid) {
+    if (!host || !tid) return;
+    composing = false;
+    if (current !== tid) { current = tid; convo = null; }
+    load();
+  }
+
+  /* Open the new-thread form about question `q` ({id, title}), its title
+     prefilled; a title already typed for this question is kept. */
+  function compose(q) {
+    if (!host || !q) return;
+    if (!composeQa || composeQa.id !== q.id) drafts.set("\u0000title", `Q: ${q.title}`);
+    composing = true;
+    composeQa = {id: q.id, title: q.title};
+    drawn.side = "";
+    render();
+  }
+
+  return {mount, unmount, refresh: () => host && load(), select, compose, excerpt, unseen, sendKey, pick, linkLabel};
 })();
