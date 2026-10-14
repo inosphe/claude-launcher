@@ -82,14 +82,71 @@ def test_close_and_delete(qa):
     q = qa.ask("s1", title="Q")
     c = qa.close("s1", q["id"], 1, note="moot")
     assert c["status"] == "closed"
-    with pytest.raises(Q.Conflict):
-        qa.answer(Q.USER, q["id"], 2, text="late")
     assert qa.list("s1", closed=False)["questions"] == []
     reopened = qa.update("s1", q["id"], 2, title="Q again")
     assert reopened["status"] == "open"
     assert qa.delete("s1", q["id"], 3) == {"deleted": q["id"], "session": "s1"}
     with pytest.raises(Q.NotFound):
         qa.answer(Q.USER, q["id"], 3, text="x")
+
+
+def test_a_closed_question_takes_a_rewritten_answer_and_reopens(qa):
+    # claunch-564kn: closing is the session's "acted on it", not the end of
+    # the user's say -- a later answer reopens it for the session to act on.
+    q = qa.ask("s1", title="Q")
+    qa.answer(Q.USER, q["id"], 1, text="first")
+    qa.close("s1", q["id"], 2, note="done")
+    res = qa.answer(Q.USER, q["id"], 3, text="second thoughts")
+    assert res["reopened"] is True and res["previous"]["text"] == "first"
+    after = res["question"]
+    assert (after["status"], after["revision"], after["answer"]["text"]) == ("answered", 4, "second thoughts")
+    assert qa.answer(Q.USER, q["id"], 4, text="again")["reopened"] is False
+    unanswered = qa.ask("s1", title="never answered")
+    qa.close("s1", unanswered["id"], 1)
+    assert qa.answer(Q.USER, unanswered["id"], 2, text="late")["question"]["status"] == "answered"
+
+
+def test_recheck_reopens_a_closed_question_and_the_next_close_is_its_reply(qa):
+    q = qa.ask("s1", title="Which base?")
+    qa.answer(Q.USER, q["id"], 1, text="master")
+    qa.close("s1", q["id"], 2)
+    seq_before = qa.rail()["s1"]["agent_seq"]
+    res = qa.recheck(Q.USER, q["id"], 3, note="you are on the stack branch")
+    assert res["reopened"] is True
+    assert (res["question"]["status"], res["question"]["revision"]) == ("answered", 4)
+    assert res["question"]["answer"]["text"] == "master"
+    assert qa.rail()["s1"]["agent_seq"] == seq_before, "the user's check does not pop the pane open"
+    check = qa.list("s1")["questions"][0]["check"]
+    assert (check["note"], check["settled"], check["reply"]) == ("you are on the stack branch", False, "")
+
+    qa.close("s1", q["id"], 4, note="moved back to master")
+    check = qa.list("s1")["questions"][0]["check"]
+    assert (check["settled"], check["reply"]) == (True, "moved back to master")
+
+    # On an answered (open) question nothing about the row moves.
+    qa.answer(Q.USER, q["id"], 5, text="master, still")
+    again = qa.recheck(Q.USER, q["id"], 6)
+    assert again["reopened"] is False and again["question"]["revision"] == 6
+    check = qa.list("s1")["questions"][0]["check"]
+    assert (check["note"], check["settled"]) == ("", False)
+
+
+def test_recheck_needs_an_answer_for_the_wording_shown(qa):
+    q = qa.ask("s1", title="Q")
+    with pytest.raises(Q.QaError, match="no answer"):
+        qa.recheck(Q.USER, q["id"], 1)
+    qa.answer(Q.USER, q["id"], 1, text="a")
+    with pytest.raises(Q.Forbidden):
+        qa.recheck("s1", q["id"], 2)
+    with pytest.raises(Q.Conflict):
+        qa.recheck(Q.USER, q["id"], 1)
+    qa.update("s1", q["id"], 2, title="Q, reworded")              # stale
+    with pytest.raises(Q.QaError, match="changed after its answer"):
+        qa.recheck(Q.USER, q["id"], 3)
+    qa.close("s1", q["id"], 3)                                    # closed while stale
+    with pytest.raises(Q.QaError, match="changed after its answer"):
+        qa.recheck(Q.USER, q["id"], 4)
+    assert qa.get(q["id"])["status"] == "closed"
 
 
 def test_answer_validation(qa):

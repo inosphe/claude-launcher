@@ -182,6 +182,35 @@ def test_queued_messages_keep_order_and_stop_on_exit(tmp_path):
     asyncio.run(run())
 
 
+def test_a_queued_factory_is_read_at_send_time_and_reports_its_outcome(tmp_path):
+    # claunch-564kn: the QA outbox drops a notification that went out of
+    # date while it waited behind a draft, and records when one was typed.
+    async def run():
+        s = Terminal(tmp_path)
+        s.note_human_input(at_terminal=True, data=b"draft")
+        current = {"text": "answer 1"}
+        outcomes = []
+        assert s.queue_delivery(lambda: current["text"], on_done=outcomes.append)
+        assert s.pending_deliveries()[0]["preview"] == "answer 1"
+        assert s.queue_delivery(lambda: "", on_done=outcomes.append)   # replaced meanwhile
+        current["text"] = "answer 2"
+        await asyncio.sleep(0.04)
+        assert not s.writes and outcomes == []
+        s.note_human_input(at_terminal=True, data=b"\r")
+        await drain(s)
+        assert s.writes == [b"[T]\ranswer 2", b"\r"]
+        assert outcomes == [True, False]
+
+        s.note_human_input(at_terminal=True, data=b"draft")
+        assert s.queue_delivery("never", on_done=outcomes.append)
+        await asyncio.sleep(0.04)
+        s.exited = True
+        await drain(s)
+        assert outcomes[-1] is False
+
+    asyncio.run(run())
+
+
 def test_deferred_http_delivery_reports_acceptance_before_draft_release(tmp_path):
     async def run():
         s = Terminal(tmp_path)
