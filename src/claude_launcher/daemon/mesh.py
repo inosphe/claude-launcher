@@ -506,6 +506,21 @@ _REFUSED_KEEP = 40
 #: pointer instead of trimming anything else (see :func:`rebrief.compose`).
 _INLINE_STANCE = 4000
 
+#: How many reachable peers a join briefing names before it names only the
+#: ones a member has a reason to address — its parent, its children, leaders
+#: and reviewers — and counts the rest (claunch-5x55u). Sessions a human
+#: started are all wired to each other (the packaged ``auto_link`` root rule),
+#: so a worker's ``members:`` line grew with the fleet: 83 handles, about
+#: 1.5KB, in s404's opening on 2026-10-14, typed again into every re-briefing.
+#: Below the cap the whole list is cheap and nothing changes. Only the line
+#: is cut; every counted peer stays connected and messageable.
+_BRIEFING_NAMED_CAP = 12
+
+#: The roles a trimmed briefing still names: who a member reports to and who
+#: audits it. A worker addresses its peers through these, not by scanning the
+#: roster.
+_BRIEFING_NAMED_ROLES = ("leader", "reviewer")
+
 #: Worker rescan cadence while messages are pending (seconds).
 _POLL = 1.0
 
@@ -3369,9 +3384,10 @@ class MeshManager:
             and self._member_category(mesh, peer) in CURRENT_CATEGORIES
         }
         reachable = [h for h in mesh.neighbours(member.handle) if h in available]
+        named, unnamed = self._briefing_named(mesh, member, reachable)
         others = ", ".join(
-            f"{h} ({mesh.members[h].role_label()})" for h in reachable
-        ) or "(nobody else yet)"
+            f"{h} ({mesh.members[h].role_label()})" for h in named
+        ) or ("(nobody else yet)" if not unnamed else "(none by name)")
         hidden = len(available) - len(reachable)
         return (
             "---\n"
@@ -3385,6 +3401,7 @@ class MeshManager:
                 if member.subroles else ""
             ) +
             f"members: {others}\n"
+            + self._unnamed_line(mesh, unnamed)
             + (
                 f"note: {hidden} other member(s) exist that you are not "
                 "connected to and cannot message\n" if hidden > 0 else ""
@@ -3396,6 +3413,53 @@ class MeshManager:
             "'claunch install' first and retry\n"
             f"note: incoming mesh messages will be typed into this terminal\n"
             "---"
+        )
+
+    def _briefing_named(
+        self, mesh: Mesh, member: Member, reachable: List[str]
+    ) -> Tuple[List[str], List[str]]:
+        """Split ``reachable`` into the peers the briefing names and the rest.
+
+        Up to :data:`_BRIEFING_NAMED_CAP` every peer is named. Past it the
+        named ones are the member's spawn kin (its parent and its children,
+        whatever their role) and the holders of :data:`_BRIEFING_NAMED_ROLES`;
+        the rest are only counted, by :meth:`_unnamed_line`.
+        """
+        if len(reachable) <= _BRIEFING_NAMED_CAP:
+            return list(reachable), []
+        lineage = self._lineage_map(mesh)
+        parent = lineage.get(member.handle, "")
+        named: List[str] = []
+        unnamed: List[str] = []
+        for h in reachable:
+            peer = mesh.members[h]
+            kin = h == parent or lineage.get(h) == member.handle
+            if kin or any(peer.holds(r) for r in _BRIEFING_NAMED_ROLES):
+                named.append(h)
+            else:
+                unnamed.append(h)
+        return named, unnamed
+
+    @staticmethod
+    def _unnamed_line(mesh: Mesh, unnamed: List[str]) -> str:
+        """The briefing line that counts the peers it did not name, or ``""``.
+
+        Counted by role so a member can tell what it is missing without the
+        handles, and it says they are connected: a peer left out of the line
+        is still one the member may message, and a reader who took the
+        omission for a cut would route through the leader for nothing.
+        """
+        if not unnamed:
+            return ""
+        counts: Dict[str, int] = {}
+        for h in unnamed:
+            label = mesh.members[h].role_label()
+            counts[label] = counts.get(label, 0) + 1
+        by_role = ", ".join(f"{label} {n}" for label, n in sorted(counts.items()))
+        return (
+            f"also connected: {len(unnamed)} more member(s) ({by_role}), not "
+            "listed by name -- you can message any of them; "
+            f"'claunch mesh members {mesh.name}' lists them\n"
         )
 
     def _project_line(self, mesh: Mesh, member: Member) -> str:
