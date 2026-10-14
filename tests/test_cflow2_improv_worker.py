@@ -740,6 +740,31 @@ def test_landing_review_asks_by_relation(tmp_path, monkeypatch, relation, label,
     assert st["status"] == "done" and st.get("outcome") == "held", st.get("outcome")
 
 
+def test_landing_review_question_reads_for_a_person_too():
+    """claunch-gbw47: with no upper session the question falls through to a
+    person, who asked which worker "너에게 딸린 워커" was and why it came to
+    them. The question names where the session and the reason are read,
+    says both reasons the door opens, and has a paragraph for a person; the
+    landing choice says a quick-fork's merge: line is no escalate reason.
+    v1 carries the same wording."""
+    from claude_launcher.cflow2 import runtime
+
+    chart = runtime.load_definition("improv-worker-v2")
+    prompt = next(n for n in chart.nodes.values()
+                  if n.label == "landing-review").get("ask")["prompt"]
+    landing = next(n for n in chart.nodes.values() if n.label == "landing").props["prompt"]
+    v1 = (WF_DIR / "improv-worker.yaml").read_text(encoding="utf-8")
+    for text in (prompt, v1):
+        assert "너에게 딸린" not in text and "이 질문이 너에게 온 것 자체가 값이다" not in text
+        assert "워커 세션 하나가" in text and "from_session" in text
+        assert "착지 경로를 스스로 정할 수 없다고 판단했다" in text
+        assert "사람에게 온다" in text and "hold다" in text
+    assert "data.claim.issue" in prompt
+    for text in (landing, v1):
+        assert "quick-fork 세션의 개시 블록에 있는 `merge:` 줄" in text
+        assert "escalate 사유가 되지 않는다" in text
+
+
 # -- claunch-0b8dx: no round cap, end on every issue closed ------------------
 
 
