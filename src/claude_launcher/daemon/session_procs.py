@@ -45,7 +45,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, Iterable, List, Optional, Set
 
 from . import paths
 
@@ -75,28 +75,55 @@ Snapshot = Dict[int, Proc]
 # process table
 
 
-def _linux_snapshot(proc_root: str = "/proc") -> Snapshot:
-    out: Snapshot = {}
-    marker = (OWNER_ENV + "=").encode()
-    try:
-        entries = os.listdir(proc_root)
-    except OSError:
-        return out
-    for entry in entries:
-        if not entry.isdigit():
-            continue
-        base = os.path.join(proc_root, entry)
+class _LinuxReader:
+    """Reads the process table from ``/proc``.
+
+    ``stat`` (parent, start time, comm) is read for every process on every
+    snapshot. ``cmdline`` and ``environ`` (where :data:`OWNER_ENV` is found)
+    are read once per process image and remembered under its pid, start time
+    and comm: an ``exec`` replaces both and changes comm, and a recycled pid
+    has another start time. Reading all three files of every process each
+    time cost 36 ms per snapshot on a machine with 360 processes, and the
+    restart clock takes one every second (claunch-b6mnl).
+
+    :meth:`tree` reads only some processes and their descendants, following
+    ``/proc/<pid>/task/<tid>/children``.
+    """
+
+    def __init__(self, proc_root: str = "/proc") -> None:
+        self.proc_root = proc_root
+        self._lock = threading.Lock()
+        #: pid -> (start time, comm, command line, owner tag)
+        self._known: Dict[int, tuple] = {}
+        self._children_ok: Optional[bool] = None
+
+    def _read(self, pid: int) -> Optional[Proc]:
+        base = os.path.join(self.proc_root, str(pid))
         try:
             with open(os.path.join(base, "stat"), "rb") as fh:
                 stat = fh.read().decode("utf-8", "replace")
         except OSError:
-            continue
+            return None
         # comm may contain spaces and parens: split after the last ')'.
         close = stat.rfind(")")
         fields = stat[close + 2:].split()
         if len(fields) < 20:
-            continue
+            return None
         comm = stat[stat.find("(") + 1:close]
+        start = fields[19]
+        with self._lock:
+            known = self._known.get(pid)
+        if known is not None and known[0] == start and known[1] == comm:
+            cmd, owner = known[2], known[3]
+        else:
+            cmd, owner = self._details(base, comm)
+            with self._lock:
+                self._known[pid] = (start, comm, cmd, owner)
+        return Proc(pid=pid, ppid=int(fields[1]), ident=f"start:{start}", cmd=cmd, owner=owner)
+
+    @staticmethod
+    def _details(base: str, comm: str) -> tuple:
+        marker = (OWNER_ENV + "=").encode()
         try:
             with open(os.path.join(base, "cmdline"), "rb") as fh:
                 argv = [a.decode("utf-8", "replace") for a in fh.read().split(b"\0") if a]
@@ -111,10 +138,67 @@ def _linux_snapshot(proc_root: str = "/proc") -> Snapshot:
                         break
         except OSError:
             pass
-        pid = int(entry)
-        out[pid] = Proc(pid=pid, ppid=int(fields[1]), ident=f"start:{fields[19]}",
-                        cmd=" ".join(argv) or f"[{comm}]", owner=owner)
-    return out
+        return " ".join(argv) or f"[{comm}]", owner
+
+    def snapshot(self) -> Snapshot:
+        out: Snapshot = {}
+        try:
+            entries = os.listdir(self.proc_root)
+        except OSError:
+            return out
+        for entry in entries:
+            if not entry.isdigit():
+                continue
+            proc = self._read(int(entry))
+            if proc is not None:
+                out[proc.pid] = proc
+        with self._lock:
+            for pid in [p for p in self._known if p not in out]:
+                del self._known[pid]
+        return out
+
+    def _children(self, pid: int) -> List[int]:
+        task = os.path.join(self.proc_root, str(pid), "task")
+        out: List[int] = []
+        try:
+            tids = os.listdir(task)
+        except OSError:
+            return out
+        for tid in tids:
+            try:
+                with open(os.path.join(task, tid, "children"), "rb") as fh:
+                    out.extend(int(c) for c in fh.read().split())
+            except (OSError, ValueError):
+                continue
+        return out
+
+    def supports_tree(self) -> bool:
+        if self._children_ok is None:
+            pid = os.getpid()
+            self._children_ok = os.path.exists(
+                os.path.join(self.proc_root, str(pid), "task", str(pid), "children"))
+        return self._children_ok
+
+    def tree(self, roots: Iterable[int]) -> Optional[Snapshot]:
+        """``roots`` that are alive and every process under them; None when
+        this kernel does not list children (CONFIG_PROC_CHILDREN)."""
+        if not self.supports_tree():
+            return None
+        out: Snapshot = {}
+        frontier = [int(p) for p in roots]
+        while frontier:
+            pid = frontier.pop()
+            if pid in out:
+                continue
+            proc = self._read(pid)
+            if proc is None:
+                continue
+            out[pid] = proc
+            frontier.extend(c for c in self._children(pid) if c not in out)
+        return out
+
+
+_LINUX = _LinuxReader()
 
 
 def _ps_snapshot() -> Snapshot:  # pragma: no cover - macOS / BSD
@@ -192,11 +276,23 @@ def snapshot() -> Snapshot:
         if sys.platform == "win32":
             return _windows_snapshot()
         if os.path.isdir("/proc/self"):
-            return _linux_snapshot()
+            return _LINUX.snapshot()
         return _ps_snapshot()
     except Exception:
         log.exception("process snapshot failed")
         return {}
+
+
+def tree_snapshot(roots: Iterable[int]) -> Optional[Snapshot]:
+    """``roots`` that are still alive and every process under them, or None
+    when this platform cannot read a subtree without the whole table."""
+    if sys.platform == "win32" or not os.path.isdir("/proc/self"):
+        return None
+    try:
+        return _LINUX.tree(roots)
+    except Exception:
+        log.exception("process subtree snapshot failed")
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -250,11 +346,17 @@ class NotAMember(LookupError):
 class ProcTracker:
     def __init__(self, path: Optional[Path] = None, *,
                  snapshot_fn: Callable[[], Snapshot] = snapshot,
+                 tree_fn: Optional[Callable[[Iterable[int]], Optional[Snapshot]]] = None,
                  kill_fn: Callable[[List[int]], None] = _default_kill,
                  self_pid: Optional[int] = None,
                  clock: Callable[[], float] = time.time) -> None:
         self.path = path
         self.snapshot_fn = snapshot_fn
+        # A subtree read must come from the table snapshot_fn reads; given
+        # another table and no subtree reader, refresh_tree reads it whole.
+        if tree_fn is None:
+            tree_fn = tree_snapshot if snapshot_fn is snapshot else (lambda roots: None)
+        self.tree_fn = tree_fn
         self.kill_fn = kill_fn
         self.self_pid = os.getpid() if self_pid is None else self_pid
         self.clock = clock
@@ -333,39 +435,69 @@ class ProcTracker:
             # started it exited before a snapshot saw the two together).
             tagged_owners = {p.owner for p in snap.values() if p.owner}
             for session in list(self._members) + sorted(tagged_owners - set(self._members)):
-                members = self._members.setdefault(session, {})
-                for pid, rec in list(members.items()):
-                    proc = snap.get(pid)
-                    if proc is None or (rec.get("ident") and proc.ident != rec["ident"]):
-                        del members[pid]
-                        changed = True
-                    elif not rec.get("ident"):
-                        rec["ident"] = proc.ident
-                        changed = True
-                label_of = {pid: rec.get("label", "") for pid, rec in members.items()}
-                grew = True
-                while grew:
-                    grew = False
-                    for proc in snap.values():
-                        if proc.pid in members or proc.pid == self.self_pid:
-                            continue
-                        tagged = proc.owner == session
-                        if proc.ppid in members or tagged:
-                            parent_label = label_of.get(proc.ppid)
-                            members[proc.pid] = {
-                                "pid": proc.pid, "ppid": proc.ppid, "ident": proc.ident,
-                                "cmd": proc.cmd, "since": self.clock(),
-                                "label": parent_label if parent_label is not None else (
-                                    self._labels.get(session, "") if tagged else ""),
-                            }
-                            label_of[proc.pid] = members[proc.pid]["label"]
-                            grew = changed = True
-                if not members:
-                    del self._members[session]
-                    if self._labels.pop(session, None) is not None:
-                        changed = True
+                changed = self._settle(session, snap) or changed
             if changed:
                 self._save()
+
+    def refresh_tree(self, session: str) -> None:
+        """:meth:`refresh` for one session, reading only its members and the
+        processes under them -- the restart clock's once-a-second poll
+        (claunch-b6mnl). A process found only by its owner tag waits for the
+        next full :meth:`refresh` (:class:`RefreshClock`, and the restart
+        clock's own when the command exits). Falls back to a full refresh
+        where the platform cannot read a subtree."""
+        with self._lock:
+            roots = set(self._members.get(session) or ())
+        if not roots:
+            return
+        snap = self.tree_fn(roots)
+        if snap is None:
+            self.refresh()
+            return
+        with self._lock:
+            if session in self._members and self._settle(session, snap, roots):
+                self._save()
+
+    def _settle(self, session: str, snap: Snapshot,
+                read: Optional[Set[int]] = None) -> bool:
+        """Apply ``snap`` to ``session``'s members; True when anything
+        changed. ``read`` names the pids ``snap`` was taken for (a subtree
+        snapshot): a member outside it was not looked at and is kept."""
+        changed = False
+        members = self._members.setdefault(session, {})
+        for pid, rec in list(members.items()):
+            if read is not None and pid not in read:
+                continue
+            proc = snap.get(pid)
+            if proc is None or (rec.get("ident") and proc.ident != rec["ident"]):
+                del members[pid]
+                changed = True
+            elif not rec.get("ident"):
+                rec["ident"] = proc.ident
+                changed = True
+        label_of = {pid: rec.get("label", "") for pid, rec in members.items()}
+        grew = True
+        while grew:
+            grew = False
+            for proc in snap.values():
+                if proc.pid in members or proc.pid == self.self_pid:
+                    continue
+                tagged = proc.owner == session
+                if proc.ppid in members or tagged:
+                    parent_label = label_of.get(proc.ppid)
+                    members[proc.pid] = {
+                        "pid": proc.pid, "ppid": proc.ppid, "ident": proc.ident,
+                        "cmd": proc.cmd, "since": self.clock(),
+                        "label": parent_label if parent_label is not None else (
+                            self._labels.get(session, "") if tagged else ""),
+                    }
+                    label_of[proc.pid] = members[proc.pid]["label"]
+                    grew = changed = True
+        if not members:
+            del self._members[session]
+            if self._labels.pop(session, None) is not None:
+                changed = True
+        return changed
 
     # -- reading -----------------------------------------------------------
 

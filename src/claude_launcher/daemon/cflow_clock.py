@@ -2088,8 +2088,12 @@ class RestartClock:
         # What the command starts and leaves running (a dev server) is the
         # session's to see and to stop (claunch-ihwel): the shell is adopted by
         # :mod:`.session_procs`, the owner tag rides in its environment, and
-        # the process table is re-read every TRACK_POLL seconds while it runs
-        # so a grandchild is recorded before its parent exits.
+        # the command's process tree is re-read every TRACK_POLL seconds while
+        # it runs so a grandchild is recorded before its parent exits. Only
+        # the tree is read then (``refresh_tree``, claunch-b6mnl); the whole
+        # table -- where a detached process is found by its owner tag -- is
+        # read at adoption, when the command exits, and by the tracker's own
+        # RefreshClock.
         #
         # The daemon's own instance identity is not inherited
         # (claunch-7iub9): the command gets the instance of the session it
@@ -2131,7 +2135,7 @@ class RestartClock:
                         break
                     except subprocess.TimeoutExpired:
                         if procs is not None:
-                            _quietly(procs.refresh)
+                            _quietly(procs.refresh_tree, session)
                         if time.monotonic() < deadline:
                             continue
                         if session and holding(session):
