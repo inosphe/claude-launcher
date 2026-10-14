@@ -1868,9 +1868,9 @@ slot 이름에 접미(`runs/s15@main`)와 디렉터리 한 층(`runs/<daemon>/s1
 - 반복 상한: `loop.max`(`retry`·`foreach`의 `max` 포함)는 반복에 한 번 들어갈
   때마다의 회차 상한이다. 반복을 다시 들어가면 다시 0부터 센다. 상한에 닿았는데
   조건이 계속을 요구하면 그 반복 인스턴스가 `waiting_approval`(reason `loop_limit`)로
-  멈춘다(`claunch cflow2 extend`). 사람의 답은 세 가지다. `--by N`(웹 「Allow one
-  more」는 1)은 상한을 N만큼 올린다. `--reset`(웹 「Reset the count」, 본문
-  `reset: true`)은 회차 수를 0으로 되돌려 반복이 선언된 `max`만큼 다시 돌게 하고,
+  멈춘다(`claunch cflow2 extend`). 사람의 답은 세 가지다. `--by N`(웹 「Allow 5
+  more」는 5, 「Allow 15 more」는 15)은 상한을 N만큼 올린다. `--reset`(본문
+  `reset: true`, CLI·API 전용이며 웹 카드에는 버튼이 없다)은 회차 수를 0으로 되돌려 반복이 선언된 `max`만큼 다시 돌게 하고,
   그때까지 올린 상한은 버린다. 반복의 위치는 유지된다: `foreach`는 다음 항목부터
   이어 가고, `retry`의 `attempt`와 모은 값은 그대로다. 한 회차도 돌지 않은 상한
   (항목 수가 `max`보다 많은 병렬 `foreach`)에는 `--reset`을 거절한다. `--stop`은
