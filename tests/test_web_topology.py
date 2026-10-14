@@ -549,6 +549,7 @@ CHECKS = [
         "durableflow_check.js",
         "qapane_check.js",
         "threadspane_check.js",
+        "threadshistory_check.js",
         "talkpane_check.js",
         "specpage_check.js",
         "shadowcard_check.js",
