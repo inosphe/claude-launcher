@@ -726,3 +726,278 @@ def test_rebrief_drops_the_stance_before_it_drops_the_task(home, monkeypatch):
     assert "TASK-MARKER" in block, "the task must survive the squeeze"
     assert "You are a PRODUCER" not in block, "the stance is what yields"
     assert "claunch mesh stance m" in block, "and it is still one command away"
+
+
+# --------------------------------------------------------------------------- #
+# C. a member that could not know (claunch-c8eyt)
+#
+# s15-qf2 joined s15-qf2-temp alone, was briefed "(nobody else yet)", and
+# never heard that s294 arrived six seconds later; its sends to s294 on gds6
+# were refused without a word about the mesh where the two were connected;
+# the decline it got was recorded as "an operator" and gave a reason ("has
+# ended") that the approver could not have checked.
+# --------------------------------------------------------------------------- #
+def _record_notes(mm):
+    """Capture roster notes instead of scheduling terminal pastes."""
+    notes = []
+    mm._tell_soon = lambda mesh, handle, note: notes.append((handle, note))
+    return notes
+
+
+def test_a_member_that_was_alone_is_told_when_a_peer_joins(home):
+    mgr = _Manager()
+    mgr.add("sa")
+    mgr.add("sb")
+    mm, mesh = _mesh(mgr, "tmp")
+    notes = _record_notes(mm)
+    first = _member(mesh, "a", "sa", role="free-role")
+    mm._wire_member(mesh, first, "")
+    assert notes == []
+
+    second = _member(mesh, "b", "sb", role="free-role")
+    out = mm._wire_member(mesh, second, "")
+
+    assert out["connected_to"] == ["a"]
+    assert [h for h, _ in notes] == ["a"]
+    assert "b joined mesh 'tmp'" in notes[0][1]
+    assert "claunch mesh send tmp b" in notes[0][1]
+    # a note about the roster is not mail: nothing went into the log
+    assert mesh.messages == []
+
+
+def test_a_member_with_peers_is_not_told_about_every_join(home):
+    """Only the member whose briefing said nobody: the rest saw a roster."""
+    mgr = _Manager()
+    for s in ("sa", "sb", "sc"):
+        mgr.add(s)
+    mm, mesh = _mesh(mgr, "tmp")
+    notes = _record_notes(mm)
+    for h, s in (("a", "sa"), ("b", "sb"), ("c", "sc")):
+        mm._wire_member(mesh, _member(mesh, h, s, role="free-role"), "")
+
+    assert [h for h, _ in notes] == ["a"]     # at b's join, and only then
+
+
+def test_a_spawn_is_not_announced_to_the_parent(home):
+    """Kin knew already: the parent made the child."""
+    mgr = _Manager()
+    mgr.add("lead")
+    mgr.add("s1", parent="lead")
+    mm, mesh = _mesh(mgr, "tmp")
+    notes = _record_notes(mm)
+    mm._wire_member(mesh, _member(mesh, "lead", "lead", role="leader"), "")
+    out = mm._wire_member(mesh, _member(mesh, "w1", "s1", role="worker"), "lead")
+
+    assert out["connected_to"] == ["lead"]
+    assert notes == []
+
+
+def test_connecting_a_member_that_was_alone_tells_it(home):
+    async def run():
+        mgr = _Manager()
+        mgr.add("sa")
+        mgr.add("sb")
+        mm, mesh = _mesh(mgr, "tmp")
+        notes = _record_notes(mm)
+        _member(mesh, "a", "sa", role="worker")
+        _member(mesh, "b", "sb", role="worker")
+        _connect(mesh, "a", "b", enabled=False)
+
+        await mm.set_member_link("tmp", "a", "b", enabled=True)
+        assert sorted(h for h, _ in notes) == ["a", "b"]
+        assert any("connected to b in mesh 'tmp'" in n for h, n in notes if h == "a")
+
+        # a pair that was already connected is not announced again
+        await mm.set_member_link("tmp", "a", "b", enabled=True)
+        assert len(notes) == 2
+
+    asyncio.run(run())
+
+
+def test_a_roster_note_is_typed_into_the_terminal_once_idle(home):
+    async def run():
+        mgr = _Manager()
+        mgr.add("sa")
+        typed = []
+        sess = mgr.get("sa")
+        sess.status = lambda: mesh_mod.STATUS_IDLE
+        sess.keyboard_busy = lambda: False
+
+        async def deliver(block):
+            typed.append(block)
+            return True
+
+        sess.deliver = deliver
+        mm, mesh = _mesh(mgr, "tmp")
+        _member(mesh, "a", "sa", role="free-role")
+        mm._tell_soon(mesh, "a", "b joined mesh 'tmp'")
+        for _ in range(20):
+            if typed:
+                break
+            await asyncio.sleep(0.01)
+        assert len(typed) == 1
+        assert "# claunch mesh: roster update" in typed[0]
+        assert "you: a" in typed[0] and "b joined mesh 'tmp'" in typed[0]
+
+    asyncio.run(run())
+
+
+def test_a_refusal_names_the_mesh_where_the_pair_is_connected(home):
+    mgr = _Manager()
+    mgr.add("lead")
+    mgr.add("sq", parent="lead")
+    mgr.add("sx")
+    mm, big = _mesh(mgr, "big")
+    _member(big, "lead", "lead", role="leader")
+    _member(big, "q", "sq", role="worker")
+    _member(big, "x", "sx", role="worker")
+    _connect(big, "lead", "q")
+    mm.create("tmp")
+    tmp = mm.get("tmp")
+    _member(tmp, "q", "sq", role="free-role")
+    _member(tmp, "x2", "sx", role="free-role")
+    _connect(tmp, "q", "x2")
+
+    with pytest.raises(MeshError) as exc:
+        mm._send_core(big, "q", "x", "ping")
+    text = str(exc.value)
+    assert "has no connection to x in mesh 'big'" in text
+    assert "x is reachable from you in mesh 'tmp' as 'x2'" in text
+    assert "claunch mesh send tmp x2" in text
+
+    # and a recipient this mesh does not have at all, named by session
+    with pytest.raises(MeshError) as exc:
+        mm._send_core(big, "q", "sx-elsewhere", "ping")
+    assert "unknown recipient" in str(exc.value)
+    assert "reachable" not in str(exc.value)
+    del big.members["x"]
+    with pytest.raises(MeshError) as exc:
+        mm._send_core(big, "q", "sx", "ping")
+    assert "unknown recipient(s) in mesh 'big': sx" in str(exc.value)
+    assert "sx is reachable from you in mesh 'tmp' as 'x2'" in str(exc.value)
+
+
+def test_a_refusal_with_no_other_route_reads_as_before(home):
+    mgr = _Manager()
+    mgr.add("lead")
+    mgr.add("s1", parent="lead")
+    mgr.add("s2", parent="lead")
+    mm, mesh = _mesh(mgr)
+    _member(mesh, "lead", "lead", role="leader")
+    _member(mesh, "w1", "s1", role="worker")
+    _member(mesh, "w2", "s2", role="worker")
+    _connect(mesh, "lead", "w1")
+    _connect(mesh, "lead", "w2")
+    mm.create("other")
+    other = mm.get("other")
+    _member(other, "w1", "s1", role="worker")
+    _member(other, "w2", "s2", role="worker")   # present, but not connected
+
+    with pytest.raises(MeshError) as exc:
+        mm._send_core(mesh, "w1", "w2", "ping")
+    assert "reachable from you" not in str(exc.value)
+
+
+def test_a_cli_decision_is_recorded_under_the_calling_session(home):
+    """``by`` names the decider; it is not ``actor`` and checks nothing."""
+    async def run():
+        mgr = _Manager()
+        mgr.add("lead")
+        mgr.add("s1", parent="lead")
+        mgr.add("s2", parent="lead")
+        mgr.add("s3", parent="lead")
+        mm, mesh = _mesh(mgr)
+        _member(mesh, "lead", "lead", role="leader")
+        for h, s in (("w1", "s1"), ("w2", "s2"), ("w3", "s3")):
+            _member(mesh, h, s, role="worker")
+            _connect(mesh, "lead", h)
+        for pair in (("w1", "w2"), ("w1", "w3")):
+            with pytest.raises(MeshError):
+                mm._send_core(mesh, *pair, "ping")
+
+        mm.decline_wire_request("m", "w1", "w2", by="lead", reason="apart")
+        req = mesh.wire_requests[wire.pair_key("w1", "w2")]
+        assert req.decided_by == "lead"
+        told = [m for m in _sent(mesh, "w1") if m["from"] == "policy"]
+        assert "wire request declined: lead will not" in told[-1]["body"]
+
+        # a session outside the tree still decides through the CLI: `by`
+        # carries no authority check
+        await mm.set_member_link("m", "w1", "w3", enabled=True, by="w2")
+        assert mesh.wire_requests[wire.pair_key("w1", "w3")].decided_by == "w2"
+
+        # nothing named: unchanged
+        mm.create("n")
+        n = mm.get("n")
+        _member(n, "lead", "lead", role="leader")
+        _member(n, "w1", "s1", role="worker")
+        _member(n, "w2", "s2", role="worker")
+        _connect(n, "lead", "w1")
+        _connect(n, "lead", "w2")
+        with pytest.raises(MeshError):
+            mm._send_core(n, "w1", "w2", "ping")
+        mm.decline_wire_request("n", "w1", "w2")
+        assert n.wire_requests[wire.pair_key("w1", "w2")].decided_by == "an operator"
+
+    asyncio.run(run())
+
+
+def test_the_cli_sends_its_session_as_by_and_never_as_actor(home, monkeypatch):
+    from claude_launcher import cli, cli_mesh
+
+    class _Client:
+        def __init__(self):
+            self.calls = []
+
+        def post(self, path, body):
+            self.calls.append((path, body))
+            return {"a": body["a"], "b": body["b"], "by": "w1", "state": "declined"}
+
+        def patch(self, path, body):
+            self.calls.append((path, body))
+            return {"a": "w1", "b": "w2", "enabled": body["enabled"]}
+
+    client = _Client()
+    monkeypatch.setattr(cli_mesh.daemon_client, "ensure_running", lambda *a, **k: client)
+    monkeypatch.setenv("CLAUNCH_SESSION", "lead")
+
+    assert cli.main(["mesh", "wire-requests", "m", "--decline", "w1", "w2"]) == 0
+    assert cli.main(["mesh", "connect", "m", "w1", "w2"]) == 0
+
+    for _path, body in client.calls:
+        assert body["by"] == "lead"
+        assert "actor" not in body
+
+    monkeypatch.delenv("CLAUNCH_SESSION")
+    client.calls.clear()
+    assert cli.main(["mesh", "connect", "m", "w1", "w2"]) == 0
+    assert client.calls[0][1]["by"] == ""
+
+
+def test_the_approver_is_shown_both_sessions_as_they_are_now(home):
+    mgr = _Manager()
+    mgr.add("lead")
+    mgr.add("s1", parent="lead")
+    mgr.add("s2", parent="lead")
+    mm, mesh = _mesh(mgr)
+    _member(mesh, "lead", "lead", role="leader")
+    _member(mesh, "w1", "s1", role="worker")
+    _member(mesh, "w2", "s2", role="worker")
+    _connect(mesh, "lead", "w1")
+    _connect(mesh, "lead", "w2")
+    mgr.get("s1").status = lambda: "busy"
+    mgr.get("s2").exited = True
+
+    with pytest.raises(MeshError):
+        mm._send_core(mesh, "w1", "w2", "ping")
+
+    body = [m for m in _sent(mesh, "lead") if m["from"] == "policy"][0]["body"]
+    assert "state now: w1 is busy, w2 is exited" in body
+
+
+def test_the_state_line_is_left_out_when_nothing_is_known():
+    req = wire.WireRequest(a="w1", b="w2", by="w1", at=0.0)
+    assert "state now" not in wire.notice_body(req, "m", kind="common")
+    assert "state now" not in wire.notice_body(
+        req, "m", kind="common", states={"w1": "", "w2": ""}
+    )

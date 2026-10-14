@@ -6917,6 +6917,7 @@ async def h_mesh_member_link_set(request: web.Request) -> web.Response:
         request.match_info["b"],
         enabled=bool(body.get("enabled")),
         actor=str(body.get("actor") or ""),
+        by=str(body.get("by") or ""),
     )
     return json_response(result)
 
@@ -6936,7 +6937,8 @@ async def h_mesh_wire_requests(request: web.Request) -> web.Response:
 
 
 async def h_mesh_wire_decline(request: web.Request) -> web.Response:
-    """Answer a wire request with no. ``actor`` gates it like a link edit."""
+    """Answer a wire request with no. ``actor`` gates it like a link edit;
+    ``by`` only names the decider (the CLI's calling session)."""
     body = await _json_body(request)
     result = _mesh_mgr(request).decline_wire_request(
         request.match_info["mesh"],
@@ -6944,6 +6946,7 @@ async def h_mesh_wire_decline(request: web.Request) -> web.Response:
         str(body.get("b") or ""),
         actor=str(body.get("actor") or ""),
         reason=str(body.get("reason") or ""),
+        by=str(body.get("by") or ""),
     )
     return json_response(result)
 
