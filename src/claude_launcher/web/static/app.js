@@ -9334,6 +9334,9 @@ function cflow2Card(r) {
   if (r.delegations) {
     li.appendChild(el("p", "wf-note", `${r.delegations} open delegation(s)`));
   }
+  if (r.calls) {
+    li.appendChild(el("p", "wf-note", `${r.calls} open call(s)`));
+  }
   li.addEventListener("click", () => {
     location.hash = "#/wf/" + encodeURIComponent(`${r.scope}|${r.cwd}`);
   });
@@ -34393,6 +34396,37 @@ function renderCflow2Into(box, data, ui, force = false) {
         fr.appendChild(td);
         t.appendChild(fr);
       }
+    }
+    sec.appendChild(t);
+    main.appendChild(sec);
+  }
+
+  // dynamic calls (flow_call, docs/cflow-v2.md 2.12): the callee is a run
+  // of its own; its slot links to that run's page
+  const calls = data.calls || [];
+  if (calls.length) {
+    const sec = cf2Section("Calls", calls.length);
+    const t = el("table", "cf2-col-table");
+    const head = el("tr");
+    for (const h of ["id", "task", "procedure", "status", "callee run"]) head.appendChild(el("th", null, h));
+    t.appendChild(head);
+    for (const c of calls) {
+      const tr = el("tr");
+      tr.appendChild(el("td", "mono", c.id));
+      tr.appendChild(el("td", null, c.label || c.node || ""));
+      tr.appendChild(el("td", "mono", c.procedure || ""));
+      tr.appendChild(el("td", "cf2-col-status " + (c.status || ""),
+                        (c.status || "") + (c.outcome ? ` → ${c.outcome}` : "")));
+      const td = el("td", "mono");
+      if (c.scope && c.cwd) {
+        const a = el("a", null, c.scope);
+        a.href = "#/wf/" + encodeURIComponent(`${c.scope}|${c.cwd}`);
+        td.appendChild(a);
+      } else {
+        td.textContent = c.scope || "";
+      }
+      tr.appendChild(td);
+      t.appendChild(tr);
     }
     sec.appendChild(t);
     main.appendChild(sec);

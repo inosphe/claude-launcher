@@ -281,6 +281,10 @@ def _print_status(payload: Dict[str, Any], as_json: bool) -> None:
         return
     for t in payload.get("tasks") or []:
         print(f"  task {t['instance']}: {t.get('title') or t.get('label')}")
+        res = t.get("call_result") or {}
+        if res:
+            print(f"    call {res.get('call')} {res.get('procedure')} "
+                  f"returned {res.get('outcome')}")
         last = t.get("last_verify") or {}
         if last:
             tail = (last.get("tail") or "").strip().splitlines()
@@ -292,6 +296,11 @@ def _print_status(payload: Dict[str, Any], as_json: bool) -> None:
         print(f"  {w['kind']} {w['instance']}: {w.get('describe') or w.get('probe') or ''}")
     for d in payload.get("delegations") or []:
         print(f"  delegation {d['id']} {d['node']}: {d['executor']} {d['status']}")
+    for c in payload.get("calls") or []:
+        # dynamic calls (docs 2.12): the callee is its own run, at --scope <scope>
+        done = f" -> {c['outcome']}" if c.get("outcome") else ""
+        print(f"  call {c['id']} {c.get('label') or c['node']}: {c['procedure']} "
+              f"{c['status']}{done} (scope {c['scope']})")
     for a in payload.get("asks") or []:
         print(f"  ask {a['instance']} [{a['ask']}] {a.get('resolution')}: "
               f"{(a.get('prompt') or '').strip().splitlines()[0] if a.get('prompt') else ''}")
