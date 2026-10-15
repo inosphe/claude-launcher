@@ -260,7 +260,7 @@ console.log("durableflow_check: sim2 ok");
     DETAIL_SUBTAB_IDS: new Set(), clampSplitRatio: (r) => r || 0.5,
   });
   vm.runInContext(`var splitFor = null, splitKind = null, splitCwd = null, splitScope = null,
-    splitPollTimer = null, splitDurable = null, splitSelectedStep = null, splitLastData = null;
+    splitPollTimer = null, splitDurable = null, splitSelectedStep = null, splitLastData = null, splitGen = 0;
     var globalThis = this;
     ${fn("function isPiDurable(")} ${fn("function sessLayoutFor(")} ${fn("function isTalkPane(")}
     ${fn("async function fetchCflow2Run(")} ${fn("function openSplit(")} ${fn("function closeSplit(")} ${fn("async function refreshSplit(")}`, sandbox);

@@ -18289,6 +18289,10 @@ function sessLayoutFor(name) {
     pane: ["sims", "chart", "qa", "threads", "both"].includes(raw.pane)
       ? raw.pane : "run",
     ratio: clampSplitRatio(Number(raw.ratio)),
+    // The conversation pane enlarged to the whole column (its ⤢ button,
+    // claunch-qkvb1): the terminal and the bar step aside until it is
+    // pressed again or the pane closes. Only a conversation pane enlarges.
+    max: !!raw.max,
     // The session's view the reader last had up: its terminal (cli) or its
     // conversation page (html). route() writes it on every in-session page
     // and reads it back when a link brings the reader in from another
@@ -20246,7 +20250,7 @@ function syncDetailPanel() {
    the same path. Wide screens only: below the breakpoint the terminal is
    already fighting a keyboard for rows, and half of that is no use to
    anybody — the choice is kept, not honoured, until the screen comes back. */
-let splitWasUp = false;
+let splitWasUp = false, splitWasMax = false;
 
 function syncSplitPane() {
   if (typeof syncSessionResourceButtons === "function") syncSessionResourceButtons();
@@ -20259,6 +20263,8 @@ function syncSplitPane() {
   $("term-split").classList.toggle("hidden", !up);
   $("term-wf").classList.toggle("hidden", !up);
   document.body.classList.toggle("term-split", up);
+  const max = up && isTalkPane(lay.pane) && lay.max;
+  document.body.classList.toggle("split-max", max);
   // Pressed is the session's remembered choice, not what fits this screen:
   // the button must read "on" on a narrowed window too, or pressing it there
   // would silently write the opposite of what it appears to do.
@@ -20314,8 +20320,10 @@ function syncSplitPane() {
   }
   // The pane takes height off the terminal and gives it back, and no resize
   // event announces that — same deal as the detail rail docking beside it.
-  if (up !== splitWasUp) refitSoon(60);
+  if (up !== splitWasUp || max !== splitWasMax) refitSoon(60);
   splitWasUp = up;
+  splitWasMax = max;
+  globalThis.TalkPane?.setMax(max);
 }
 
 /* Which row's ⓘ is lit. Rebuilt rows get this from refreshSessions; this is
@@ -20805,6 +20813,12 @@ let splitPollTimer = null;
 let splitSelectedStep = null;
 let splitLastData = null;
 let splitDurable = null;       // the chart pane's event flow (durable-flow.js)
+// Bumped by every open and close. A run read in flight carries the value it
+// started under and drops its reply when the pane has moved on since: the
+// session alone does not tell, because switching the same session's pane
+// from the run to its threads keeps splitFor and would let a late run reply
+// paint over the conversation pane (claunch-qkvb1).
+let splitGen = 0;
 
 const splitUi = {
   host: "split",
@@ -20835,6 +20849,7 @@ function openSplit(name, kind = "run") {
     return;
   }
   closeSplit();
+  splitGen += 1;
   splitFor = name;
   splitKind = kind;
   // The simulations view keeps its own poll (sim-page.js).
@@ -20849,6 +20864,9 @@ function openSplit(name, kind = "run") {
       onQaChange: () => refreshQaRail(),
       onThreadsChange: () => { refreshThreadsRail(); },
       onMode: (m) => setSessLayout(name, { split: true, pane: m }),
+      onClose: () => setSessLayout(name, { split: false, max: false }),
+      onMax: (on) => setSessLayout(name, { max: !!on }),
+      max: sessLayoutFor(name).max,
     });
     return;
   }
@@ -20864,6 +20882,7 @@ function openSplit(name, kind = "run") {
 }
 
 function closeSplit() {
+  splitGen += 1;
   if (splitPollTimer) { clearInterval(splitPollTimer); splitPollTimer = null; }
   if (splitKind === "sims") globalThis.SimPane?.unmount();
   if (isTalkPane(splitKind)) globalThis.TalkPane?.unmount();
@@ -20880,6 +20899,8 @@ function closeSplit() {
 async function refreshSplit() {
   const want = splitFor;
   if (!want || splitKind !== "run") return;
+  const gen = splitGen;
+  const stale = () => gen !== splitGen;
   // A run is keyed by (cwd, scope) and the meta endpoint already answers
   // that resolution for a session — ask it rather than re-deriving the slot
   // rules here. null is "not asked yet"; "" is "asked, and there is none",
@@ -20894,7 +20915,7 @@ async function refreshSplit() {
     } catch {
       return;
     }
-    if (splitFor !== want) return;   // repointed while the reply was in flight
+    if (stale()) return;   // repointed while the reply was in flight
     if (!flow || !flow.cwd) {
       splitCwd = "";
       $("term-wf").innerHTML = "";
@@ -20918,6 +20939,7 @@ async function refreshSplit() {
   try {
     const resp = await v1Read;
     data = await resp.json();
+    if (stale()) return;
     if (!resp.ok) {
       $("term-wf").innerHTML = "";
       $("term-wf").appendChild(
@@ -20927,11 +20949,11 @@ async function refreshSplit() {
   } catch {
     return;
   }
-  if (splitFor !== want) return;   // repointed while the reply was in flight
+  if (stale()) return;   // repointed while the reply was in flight
   // No v1 run, a v2 one: drawn by the v2 renderer (see renderCflow2Into).
   if (data.status === "idle" && data.v2) {
     const v2 = await v2Read;
-    if (!v2 || splitFor !== want) return;
+    if (!v2 || stale()) return;
     if (v2.error) {
       $("term-wf").innerHTML = "";
       $("term-wf").appendChild(el("p", "wf-warning", v2.error));
@@ -20960,7 +20982,7 @@ $("term-threadsbtn").addEventListener("click", () => toggleSplitPane("threads"))
    turns its pane off: alone, the split closes; in the "both" columns only
    its column goes and the other stays (claunch-78dpm). */
 function splitAfterPress(lay, pane) {
-  if (lay.split && lay.pane === pane) return { split: false };
+  if (lay.split && lay.pane === pane) return { split: false, max: false };
   if (lay.split && lay.pane === "both" && (pane === "qa" || pane === "threads")) {
     return { split: true, pane: pane === "qa" ? "threads" : "qa" };
   }

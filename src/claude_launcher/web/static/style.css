@@ -7633,6 +7633,18 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
   border-radius: 5px 5px 0 0; padding: 3px 12px; font: inherit; font-size: 12px; cursor: pointer; }
 .talk-tab:hover { color: #e6edf3; }
 .talk-tab.on { color: #e6edf3; background: #161b22; border-color: #30363d; }
+/* The pane's own controls, pushed to the right end of the tab bar. */
+.talk-ctl { margin-left: auto; display: flex; gap: 2px; align-items: center; }
+.talk-ctl-btn { background: transparent; color: #7d8590; border: 1px solid transparent; border-radius: 5px;
+  font: inherit; font-size: 14px; line-height: 1; padding: 2px 7px; cursor: pointer; }
+.talk-ctl-btn:hover { color: #e6edf3; background: #161b22; border-color: #30363d; }
+.talk-ctl-btn.talk-max[aria-pressed="true"] { color: #58a6ff; }
+/* Enlarged (syncSplitPane's split-max): the conversation pane takes the
+   column; the terminal (or the HTML view's conversation), the drag bar and
+   the terminal's composer step aside until it is shrunk or closed. */
+body.split-max #terminal, body.split-max #term-split, body.split-max #term-composer,
+body.split-max[data-page="log"] #log-view { display: none; }
+body.split-max #term-wf { flex: 1 1 0; }
 .talk-body { flex: 1 1 0; min-height: 0; display: flex; gap: 14px; }
 .talk-col { flex: 1 1 0; min-width: 0; min-height: 0; }
 .talk-col.talk-qa { overflow-y: auto; overscroll-behavior: contain; }
