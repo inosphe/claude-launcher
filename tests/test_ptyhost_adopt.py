@@ -377,6 +377,97 @@ def test_setting_off_ends_a_leftover_host_and_resumes(host, tmp_path, monkeypatc
     asyncio.run(run())
 
 
+def _refuse_us():
+    """Make the running host refuse the next daemon, as a host of another
+    protocol version does: its token no longer matches."""
+    from claude_launcher.daemon.ptyhost import token_path
+    real = token_path(paths.ptyhost_dir()).read_text(encoding="ascii")
+    token_path(paths.ptyhost_dir()).write_text("0" * 64, encoding="ascii")
+    return real
+
+
+def test_a_host_that_refuses_the_daemon_is_ended_before_its_sessions_relaunch(
+        host, tmp_path, monkeypatch):
+    """s430's review (claunch-xnnct.1): a refusing host still runs its
+    sessions, and a daemon that spawned them itself ran each conversation
+    twice. The host is ended by signal, a fresh one started, and each record
+    relaunched once -- with no board sweep (SESSION ENDED): the restart ended
+    it, not the session."""
+    _register()
+    monkeypatch.setattr(pty_backend, "_stranded", None)
+
+    async def run():
+        mgr = _manager()
+        s = mgr.create(SessionDef(name="v1", harness="ph", cwd=str(tmp_path)))
+        await _wait_screen(s, "READY")
+        pid, host_pid = s.pid, host.host_pid
+        await mgr.shutdown_all(mode="keep")
+        host.close()
+        monkeypatch.setattr(pty_backend, "_host", None)
+        _refuse_us()
+
+        c2 = daemon_main._connect_pty_host({"pty_host": True})
+        assert c2 is not None and c2.host_pid != host_pid
+        assert not _pid_alive(host_pid) and _wait(lambda: not _pid_alive(pid))
+        assert pty_backend.stranded_host() is None
+        mgr2 = _manager()
+        mgr2.restore_all()
+        s2 = mgr2.get("v1")
+        assert mgr2.adopted == [] and not s2.exited and s2.pid != pid
+        assert isinstance(s2.pty, hc.RemotePty)
+        assert [r["pid"] for r in c2.list()] == [s2.pid], "the session runs once"
+        assert mgr2.take_retired_for_sweep() == []
+        await _wait_screen(s2, "READY")
+        await mgr2.shutdown_all(mode="stop")
+        daemon_main._close_pty_host(c2, "stop")
+
+    asyncio.run(run())
+
+
+def test_a_host_that_cannot_be_ended_keeps_its_sessions_unrelaunched(
+        host, tmp_path, monkeypatch):
+    _register()
+    monkeypatch.setattr(pty_backend, "_stranded", None)
+    monkeypatch.setattr(hc, "stop_refusing_host", lambda directory, **kw: False)
+
+    async def run():
+        mgr = _manager()
+        s = mgr.create(SessionDef(name="w1", harness="ph", cwd=str(tmp_path)))
+        await _wait_screen(s, "READY")
+        pid, host_pid = s.pid, host.host_pid
+        await mgr.shutdown_all(mode="keep")
+        host.close()
+        monkeypatch.setattr(pty_backend, "_host", None)
+        real = _refuse_us()
+
+        assert daemon_main._connect_pty_host({"pty_host": True}) is None
+        assert pty_backend.stranded_host() == host_pid
+        mgr2 = _manager()
+        mgr2.restore_all()
+        rec = mgr2.get("w1")
+        assert isinstance(rec, DeadSession) and _pid_alive(pid)
+        assert "w1" not in mgr2.restore_queue and mgr2.take_retired_for_sweep() == []
+        assert any(e.get("kind") == "restore" for e in mgr2.events.rows(rec))
+
+        from claude_launcher.daemon.ptyhost import token_path
+        token_path(paths.ptyhost_dir()).write_text(real, encoding="ascii")
+        _reconnect(monkeypatch).shutdown_host()
+        assert _wait(lambda: not _pid_alive(pid))
+
+    asyncio.run(run())
+
+
+def test_stop_refusing_host_signals_only_a_host(tmp_path):
+    """The pid file is all it has to go on; a reused pid must not be shot."""
+    from claude_launcher.daemon.ptyhost import pid_path
+    d = tmp_path / "h"
+    d.mkdir()
+    pid_path(d).write_text(str(os.getpid()), encoding="ascii")
+    assert hc.stop_refusing_host(d, timeout=0.5) is False
+    pid_path(d).unlink()
+    assert hc.stop_refusing_host(d, timeout=0.5) is True
+
+
 def test_cli_shell_never_runs_in_the_host(host, tmp_path):
     from claude_launcher.daemon import clipty
 

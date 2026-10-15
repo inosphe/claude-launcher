@@ -83,6 +83,21 @@ def use_host(client) -> None:
     _host = client
 
 
+#: The pid of a PTY host this daemon could neither use nor end
+#: (claunch-xnnct.1). Its sessions still run there, so restore_all must not
+#: relaunch them: the same conversation would run twice.
+_stranded: Optional[int] = None
+
+
+def mark_stranded(pid: Optional[int]) -> None:
+    global _stranded
+    _stranded = pid
+
+
+def stranded_host() -> Optional[int]:
+    return _stranded
+
+
 def current_host():
     """The installed PTY host client while its connection is open, else None."""
     host = _host

@@ -107,19 +107,40 @@ def _connect_pty_host(cfg: dict):
     from . import pty_backend
     from .ptyhost import client as ptyhost_client
 
+    directory = paths.ptyhost_dir()
     deadline = time.monotonic() + HOST_BUSY_WAIT
+    signalled = False
     while True:
         try:
-            client = ptyhost_client.ensure_host(paths.ptyhost_dir())
+            client = ptyhost_client.ensure_host(directory)
             break
         except Exception as exc:
+            busy = "busy" in str(exc)
             # One client at a time: a predecessor that has not let go yet
             # holds the connection for a moment. Starting without the host
             # would relaunch every session it still runs (claunch-xnnct.1).
-            if "busy" in str(exc) and time.monotonic() < deadline:
+            if busy and time.monotonic() < deadline:
                 time.sleep(0.2)
                 continue
-            log.error("pty_host is set but no PTY host could be reached (%s); spawning in the daemon", exc)
+            # A live host that refused us (another protocol version, a token
+            # that no longer matches) still runs its sessions. It is ended
+            # by signal and a fresh one started, so the records relaunch
+            # once; a busy one is somebody's, and is left alone.
+            if not busy and not signalled and ptyhost_client.host_alive(directory) is not None:
+                signalled = True
+                if ptyhost_client.stop_refusing_host(directory):
+                    continue
+            stranded = ptyhost_client.host_alive(directory)
+            if stranded is not None:
+                pty_backend.mark_stranded(stranded)
+                log.error(
+                    "pty_host is set but PTY host pid %s could not be used or ended (%s); "
+                    "the sessions it runs are not relaunched, and new ones spawn in the daemon",
+                    stranded, exc,
+                )
+            else:
+                log.error("pty_host is set but no PTY host could be reached (%s); "
+                          "spawning in the daemon", exc)
             return None
     pty_backend.use_host(client)
     log.info("sessions run in PTY host pid %s", client.host_pid)
@@ -138,6 +159,8 @@ def _end_leftover_pty_host() -> None:
         return
     from .ptyhost import client as ptyhost_client
 
+    from . import pty_backend
+
     directory = paths.ptyhost_dir()
     if ptyhost_client.host_alive(directory) is None:
         return
@@ -145,18 +168,27 @@ def _end_leftover_pty_host() -> None:
         client = ptyhost_client.HostClient.connect(directory)
     except Exception as exc:
         log.warning("pty_host is off and a PTY host is still running, but it "
-                    "could not be reached to end it (%s)", exc)
-        return
-    try:
-        count = len(client.list())
-        log.warning("pty_host is off: ending the PTY host a previous daemon left "
-                    "running and its %d session(s); they are restored from their "
-                    "records", count)
-        client.end_all()
-        client.shutdown_host()
-    except Exception:
-        log.warning("could not end the leftover PTY host", exc_info=True)
-        client.close()
+                    "could not be reached to end it (%s); ending it by signal", exc)
+        client = None
+    if client is not None:
+        try:
+            count = len(client.list())
+            log.warning("pty_host is off: ending the PTY host a previous daemon left "
+                        "running and its %d session(s); they are restored from their "
+                        "records", count)
+            client.end_all()
+            client.shutdown_host()
+            return
+        except Exception:
+            log.warning("could not end the leftover PTY host", exc_info=True)
+            client.close()
+    # Its sessions are relaunched from their records next; while the host
+    # still runs them, that would run each conversation twice.
+    if not ptyhost_client.stop_refusing_host(directory):
+        pid = ptyhost_client.host_alive(directory)
+        pty_backend.mark_stranded(pid)
+        log.error("pty_host is off and PTY host pid %s could not be ended; the "
+                  "sessions it runs are not relaunched", pid)
 
 
 def _close_pty_host(client, mode: str) -> None:

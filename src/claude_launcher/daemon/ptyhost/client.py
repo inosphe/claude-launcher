@@ -19,6 +19,7 @@ import itertools
 import logging
 import os
 import queue
+import signal
 import socket
 import subprocess
 import sys
@@ -392,6 +393,86 @@ def host_alive(directory: Path) -> Optional[int]:
     return pid
 
 
+#: How long :func:`stop_refusing_host` waits for a signalled host to exit.
+#: Its SIGTERM path force-ends every session at once, so this is ample.
+STOP_TIMEOUT = 10.0
+
+
+def _is_host_process(pid: int, directory: Path) -> bool:
+    """Whether ``pid`` is a PTY host for ``directory``, by its command line.
+    Where there is no /proc to read, the pid file the host wrote is taken
+    at its word."""
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except FileNotFoundError:
+        # No such entry: either no /proc on this system, or the process
+        # just ended (the caller checks again).
+        return not Path("/proc/self").exists()
+    except OSError:
+        return False
+    argv = [a.decode("utf-8", "replace") for a in raw.split(b"\0") if a]
+    return "claude_launcher.daemon.ptyhost" in argv and str(directory) in argv
+
+
+def _gone(pid: int) -> bool:
+    """Whether ``pid`` has exited. A host this process started is its child
+    and lingers as a zombie until reaped, which kill(pid, 0) still finds."""
+    try:
+        if os.waitpid(pid, os.WNOHANG)[0] == pid:
+            return True
+    except ChildProcessError:
+        pass
+    except OSError:
+        pass
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="ascii", errors="replace")
+        return stat.rsplit(")", 1)[1].split()[0] == "Z"
+    except (OSError, IndexError):
+        return False
+
+
+def stop_refusing_host(directory: Path, *, timeout: float = STOP_TIMEOUT) -> bool:
+    """End a live host this client cannot talk to, by signal (claunch-xnnct.1).
+
+    A host that refuses the connection -- another protocol version, a token
+    that no longer matches -- still runs its sessions; a daemon that went on
+    to spawn them itself would run each conversation twice. Its SIGTERM
+    handler ends every session and exits, in every protocol version, so the
+    signal needs no handshake. True when no host is left running for
+    ``directory``; False when one is, or the pid is not a host's.
+    """
+    directory = Path(directory)
+    pid = host_alive(directory)
+    if pid is None:
+        return True
+    if not _is_host_process(pid, directory):
+        if host_alive(directory) is None:
+            return True
+        log.warning("pid %s in %s is not a PTY host; leaving it alone", pid, pid_path(directory))
+        return False
+    log.warning("ending PTY host pid %s, which refused this daemon, and its sessions", pid)
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        log.warning("could not signal PTY host pid %s", pid, exc_info=True)
+        return False
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _gone(pid):
+            return True
+        time.sleep(0.05)
+    log.warning("PTY host pid %s did not exit %.0fs after SIGTERM", pid, timeout)
+    return False
+
+
 #: Every host this process started, newest last. tests/conftest.py checks
 #: that none is still running when a test ends.
 _started: list = []
@@ -445,4 +526,4 @@ def ensure_host(directory: Path, *, idle_exit: float = 30.0,
 
 
 __all__ = ["HostClient", "HostUnavailable", "RemotePty", "ensure_host", "host_alive",
-           "start_host", "OWNER_ENV"]
+           "start_host", "stop_refusing_host", "OWNER_ENV"]

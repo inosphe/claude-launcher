@@ -3033,6 +3033,7 @@ class SessionManager:
             return []
         failed: List[str] = []
         host = pty_backend.current_host()
+        stranded = pty_backend.stranded_host() if host is None else None
         kept: Dict[str, dict] = {}
         if host is not None:
             try:
@@ -3086,6 +3087,24 @@ class SessionManager:
                         )
                         self._sessions.pop(sdef.name, None)
                         self._end_kept(host, row)
+                if stranded is not None and entry.get("pty") and entry.get("was_running"):
+                    # Still running in a PTY host this daemon could neither
+                    # use nor end (claunch-xnnct.1): a relaunch would run
+                    # the same conversation a second time.
+                    dead = self._retire(sdef, entry)
+                    # Nor has it ended, so it owes the board no sweep
+                    # (SESSION ENDED) either.
+                    if dead in self._retired_for_sweep:
+                        self._retired_for_sweep.remove(dead)
+                    log.warning(
+                        "session %r still runs in PTY host pid %s, which this daemon "
+                        "cannot reach; not relaunching it", sdef.name, stranded,
+                    )
+                    self.events.record(
+                        dead, "restore", "연결할 수 없는 PTY 호스트에서 실행 중이라 재실행하지 않음",
+                        host_pid=stranded,
+                    )
+                    continue
                 # A record still delayed when the previous daemon went down
                 # was never started by it: it is owed the restore it did not
                 # get, not left a plain hold.
