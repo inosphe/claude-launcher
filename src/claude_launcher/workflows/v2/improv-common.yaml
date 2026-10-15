@@ -222,7 +222,11 @@ collection_types:
     # pr_url이 있는 행은 PR 후보(gh pr merge --merge --match-head-commit <tip>),
     # 없으면 로컬 --no-ff 후보다.
     item: {issue: str, branch: str, tip: str, requested_by: str, note: "str?",
-           medium: "str?", pr_url: "str?", pr_number: "int?", base: "str?"}
+           medium: "str?", pr_url: "str?", pr_number: "int?", base: "str?",
+           review: "str?"}
+    # review — peer-review를 누가 통과시켰는지(claunch-n74fs.1): 응답자의
+    # 핸들이거나 "unanswered"(심사자 0명의 무응답 통과). 리더의 큐 표가
+    # 심사 없는 통과를 심사 있음으로 읽지 않게 하는 값이다.
     status:
       values: [requested, waiting, deferred, landed, rejected]
       initial: requested

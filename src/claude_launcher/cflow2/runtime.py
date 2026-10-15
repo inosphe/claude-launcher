@@ -5414,6 +5414,13 @@ def describe(r: Run) -> Dict[str, Any]:
     if asks:
         out["asks"] = asks
     out["data"] = s.get("data")
+    # Completed nodes' {outcome, value}, keyed by node label/id. The driver
+    # reads its own status to decide what to do next, and a value can carry
+    # the difference between a decision actually taken and one the run took
+    # alone — an ask answered has the responder's handle in value.by, an ask
+    # passed unanswered has "unanswered" (claunch-n74fs.1: a 0-answer pass
+    # must be readable without spelunking the journal file).
+    out["result"] = s.get("result") or {}
     if s.get(PERSON_PICKS):
         # the reason a person typed with a pick is their instruction to the
         # driver; the journal alone never reaches it (claunch-e437w)
