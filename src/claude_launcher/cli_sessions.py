@@ -2038,7 +2038,7 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
         # A keep restart onto a PTY host whose code changed on disk would
         # leave it running the old code (claunch-xnnct.3): refuse here, with
         # the files and both ways forward, before a gate request is filed.
-        if _stale_keep_refused(with_host, keep_stale):
+        if _stale_keep_refused(with_host, keep_stale, report):
             return 2
         # An agent session's restart goes through the web UI's approval gate
         # instead of this immediate path: the person every restart cuts off
@@ -2122,14 +2122,16 @@ def _pty_host_line(state) -> str:
     return line
 
 
-def _stale_keep_refused(with_pty_host: bool, keep_stale: bool) -> bool:
+def _stale_keep_refused(with_pty_host: bool, keep_stale: bool,
+                        report: Optional[dict] = None) -> bool:
     """Print the refusal and return True when a keep restart would leave the
     PTY host on older code (claunch-xnnct.3). ``--with-pty-host`` replaces
     the host and ``--keep-stale-host`` says keep it anyway, so neither is
-    checked; no answer (no daemon, or one older than the check) goes ahead."""
+    checked; no answer (no daemon, or one older than the check) goes ahead.
+    ``report`` is the caller's diagnosis, reused so the check probes nothing."""
     if with_pty_host or keep_stale:
         return False
-    check = daemon_client.restart_check()
+    check = daemon_client.restart_check(report)
     if not check or not check.get("stale"):
         return False
     print(check.get("message") or "refused: the PTY host runs older code", file=sys.stderr)
@@ -2455,7 +2457,7 @@ def _force_replace(reason: str = "", *, with_pty_host: bool = False,
         # only exists to reach a daemon that cannot be asked, and this one
         # can. The wedged branch below has no daemon to host a gate and stays
         # immediate.
-        if _stale_keep_refused(with_pty_host, keep_stale):
+        if _stale_keep_refused(with_pty_host, keep_stale, report):
             return 2
         if os.environ.get("CLAUNCH_SESSION"):
             return _gated_restart(reason, with_pty_host=with_pty_host,

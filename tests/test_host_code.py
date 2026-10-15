@@ -337,7 +337,7 @@ class _Daemon:
     def diagnose(self, **kw):
         return {"state": self.SERVING}
 
-    def restart_check(self):
+    def restart_check(self, report=None):
         return self.check
 
     def restart(self, **kw):
@@ -400,3 +400,30 @@ def test_status_prints_the_pty_host_line(state, want):
     from claude_launcher import cli_sessions
 
     assert want in cli_sessions._pty_host_line(state)
+
+
+def test_the_client_check_reuses_the_callers_diagnosis(monkeypatch):
+    """The CLI has already diagnosed the daemon; the check must not probe
+    again (a scripted diagnosis in the wedge tests ran out on the extra look)."""
+    from claude_launcher import daemon_client
+
+    def no_probe(**kw):
+        raise AssertionError("probed again")
+
+    monkeypatch.setattr(daemon_client, "diagnose", no_probe)
+    assert daemon_client.restart_check({"state": daemon_client.NOT_RUNNING}) is None
+    assert daemon_client.restart_check({"state": daemon_client.SERVING}) is None  # no url
+    seen = []
+
+    class _C:
+        def __init__(self, url, token):
+            seen.append(url)
+
+        def get(self, path, **kw):
+            seen.append(path)
+            return {"stale": False}
+
+    monkeypatch.setattr(daemon_client, "DaemonClient", _C)
+    report = {"state": daemon_client.SERVING, "base_url": "http://127.0.0.1:1"}
+    assert daemon_client.restart_check(report) == {"stale": False}
+    assert seen == ["http://127.0.0.1:1", "/api/daemon/restart-check"]

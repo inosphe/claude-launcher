@@ -523,13 +523,21 @@ RESTART_BACKOFF_START = 2.0
 RESTART_BACKOFF_CAP = 20.0
 
 
-def restart_check() -> Optional[dict]:
+def restart_check(report: Optional[dict] = None) -> Optional[dict]:
     """Whether a keep restart now would leave the PTY host on older code
     (``GET /api/daemon/restart-check``, claunch-xnnct.3).
 
-    None when there is no answer: no daemon, or one older than the check
-    (it has no host code to compare, and its shutdown does not refuse)."""
-    client = connect()
+    ``report`` is a :func:`diagnose` the caller already made; it is used as
+    it is, so the check adds one request and no probes. Without one this
+    connects. None when there is no answer: no daemon (or a report that
+    found none), or one older than the check (it has no host code to
+    compare, and its shutdown does not refuse)."""
+    if report is not None:
+        if report.get("state") != SERVING or not report.get("base_url"):
+            return None
+        client = DaemonClient(report["base_url"], runtime_state.load_or_create_token())
+    else:
+        client = connect()
     if client is None:
         return None
     try:

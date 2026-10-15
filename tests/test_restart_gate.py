@@ -96,7 +96,7 @@ class _FakeDaemon:
         self.stop_calls += 1
         return True
 
-    def restart_check(self):
+    def restart_check(self, report=None):
         return None
 
     def restart(self, **kw):
