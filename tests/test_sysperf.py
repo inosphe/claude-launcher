@@ -266,4 +266,4 @@ def test_dashboard_wires_badge_page_and_route():
     assert "globalThis.SysPerfPage.open()" in app_js
     assert 'if (r.page !== "sysperf") globalThis.SysPerfPage?.stop();' in app_js
     assert "/api/sysperf" in page_js
-    assert "globalThis.SysPerfPage = { open, stop, startBadge }" in page_js
+    assert "globalThis.SysPerfPage = { open, stop, startBadge, stopBadge }" in page_js

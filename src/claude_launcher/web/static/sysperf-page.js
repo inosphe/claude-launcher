@@ -88,11 +88,20 @@
     }
   }
 
+  function onVisible() { if (!document.hidden) pollBadge(); }
+
   function startBadge() {
     if (badgeTimer) return;
     pollBadge();
     badgeTimer = setInterval(pollBadge, POLL_MS);
-    document.addEventListener("visibilitychange", () => { if (!document.hidden) pollBadge(); });
+    document.addEventListener("visibilitychange", onVisible);
+  }
+
+  // For page harnesses that record every api() call: the badge's poll is a
+  // GET every few seconds that would land in their recording.
+  function stopBadge() {
+    if (badgeTimer) { clearInterval(badgeTimer); badgeTimer = null; }
+    document.removeEventListener("visibilitychange", onVisible);
   }
 
   // ------------------------------------------------------------------ chart
@@ -341,7 +350,7 @@
     page.history = [];
   }
 
-  globalThis.SysPerfPage = { open, stop, startBadge };
+  globalThis.SysPerfPage = { open, stop, startBadge, stopBadge };
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", startBadge);
   else startBadge();
 })();

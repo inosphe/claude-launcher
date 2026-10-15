@@ -1422,8 +1422,8 @@ html[data-theme="light"] .xterm {
 }
 
 /* ---- the pages that live in #main ---- */
-#home-view, #new-view, #meshes-view, #flows-view, #window-view, #beads-view,
-#sysperf-view {
+#home-view, #new-view, #meshes-view, #flows-view, #window-view, #sysperf-view,
+#beads-view {
   flex: 1; overflow-y: auto; padding: 18px 26px; min-height: 0;
 }
 .page-head { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
