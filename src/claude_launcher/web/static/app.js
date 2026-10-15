@@ -46480,7 +46480,7 @@ function noticeFilterOf(value) {
 
 let noticeFilter = noticeFilterOf(noticeLoad(NOTICE_FILTER_KEY, "all"));
 /* The pending requests of each gate as its last poll answered them. */
-const gatePending = { restart: [], goto: [], reposync: [], ask: [] };
+const gatePending = { restart: [], goto: [], reposync: [], resume: [], ask: [] };
 
 function noticeHistorySave() {
   noticeSave(NOTICE_HISTORY_KEY, noticeHistory);
@@ -46632,13 +46632,14 @@ function noticeGateRefresh(type) {
   if (type === "restart") return refreshRestartGate();
   if (type === "goto") return refreshGotoGate();
   if (type === "reposync") return refreshReposyncGate();
+  if (type === "resume") return refreshResumeGate();
   if (type === "ask") return urgentAskSync(urgentAskRows);
   return null;
 }
 
 function gatePendingCount() {
   return gatePending.restart.length + gatePending.goto.length +
-    gatePending.reposync.length + gatePending.ask.length;
+    gatePending.reposync.length + gatePending.resume.length + gatePending.ask.length;
 }
 
 /* The rail's bell (and its phone twin): the number is the requests waiting
@@ -46816,6 +46817,29 @@ function noticePanelGateRow(type, rec) {
         }
       }
     ));
+  } else if (type === "resume") {
+    head.appendChild(el("span", "notice-title", "session resume requested: "));
+    head.appendChild(gateSessionLink(rec.target));
+    row.appendChild(head);
+    row.appendChild(resumeGateSub(rec));
+    row.appendChild(el(
+      "div", "notice-sub gate-reason", `reason: ${rec.reason || "(no reason given)"}`
+    ));
+    row.appendChild(el("div", "notice-sub gate-clock", RESUME_GATE_WAIT));
+    actions.appendChild(noticePanelButton(
+      "Approve", "approve", RESUME_GATE_APPROVE_TITLE,
+      async (btn) => {
+        await resumeGatePost(rec, "approve", btn);
+        refreshResumeGate();
+      }
+    ));
+    actions.appendChild(noticePanelButton(
+      "Reject", "clear", RESUME_GATE_REJECT_TITLE,
+      async (btn) => {
+        await resumeGatePost(rec, "reject", btn);
+        refreshResumeGate();
+      }
+    ));
   } else if (type === "ask") {
     head.appendChild(gateSessionLink(rec.session));
     head.appendChild(el("span", "notice-title", ` waits on your answer: ${rec.label}`));
@@ -46944,7 +46968,7 @@ function noticePanelPaint() {
   if (!body) return;
   body.innerHTML = "";
   const waiting = [];
-  for (const type of ["restart", "goto", "reposync", "ask"]) {
+  for (const type of ["restart", "goto", "reposync", "resume", "ask"]) {
     for (const rec of gatePending[type]) waiting.push([type, rec]);
   }
   body.appendChild(el("h3", "notice-panel-section", `Waiting on you (${waiting.length})`));
@@ -47649,6 +47673,133 @@ async function refreshReposyncGate() {
   }
   for (const key of [...notices.keys()]) {
     if (key.startsWith(REPOSYNC_GATE_PREFIX) && !seen.has(key)) {
+      dismissNotice(key);
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* the resume gate: an agent asks for an exited session back           */
+/* ------------------------------------------------------------------ */
+/* An agent's resume_session tool files a request with daemon/resume_gate.py
+   (claunch-yjhgx); nothing is relaunched until a person answers here. The
+   card has no countdown: the request has no deadline and waits until it is
+   approved or rejected (or the asker withdraws it, or the session comes back
+   some other way). The answer is typed into the asking session's terminal. */
+const RESUME_GATE_PREFIX = "resume-gate-";
+const RESUME_GATE_WAIT = "no deadline: waits until you answer";
+const RESUME_GATE_APPROVE_TITLE =
+  "relaunch the session on its own conversation now, as the Respawn button does";
+const RESUME_GATE_REJECT_TITLE =
+  "nothing is relaunched; the asking session is told no";
+
+function resumeGateSub(rec) {
+  const sub = el("div", "notice-sub");
+  sub.appendChild(gateSessionLink(rec.session));
+  sub.appendChild(el("span", null, " asks to resume "));
+  sub.appendChild(gateSessionLink(rec.target));
+  const when = rec.requested_at ? new Date(rec.requested_at).getTime() : NaN;
+  sub.appendChild(el(
+    "span", null,
+    (isNaN(when) ? "" : ` — asked at ${noticeStamp(when)}`) +
+      (rec.target_archived ? " (archived)" : "")
+  ));
+  return sub;
+}
+
+/* Approve and Reject read the answer: an approval whose respawn failed
+   settles the request as failed, and the reason is worth a card of its own
+   because the request card goes away with it. */
+async function resumeGatePost(rec, verb, btn) {
+  btn.disabled = true;
+  let resp;
+  let doc = {};
+  try {
+    resp = await api(`/api/resume-requests/${rec.id}/${verb}`, { method: "POST" });
+    doc = await resp.json().catch(() => ({}));
+  } catch {
+    btn.disabled = false;
+    return false;
+  }
+  const settled = doc.request || {};
+  if (!resp.ok) {
+    btn.disabled = false;
+    notify(`resume request ${rec.id}: ${verb} refused`, doc.error || `HTTP ${resp.status}`,
+      { kind: "warn" });
+    return false;
+  }
+  if (settled.status === "failed") {
+    notify(`resume of ${rec.target} failed`, settled.error || "unknown error",
+      { kind: "warn", session: rec.target, sticky: true });
+  }
+  return true;
+}
+
+async function refreshResumeGate() {
+  const host = $("notices");
+  if (!host) return;
+  let body;
+  try {
+    body = await (await api("/api/resume-requests")).json();
+  } catch {
+    return;
+  }
+  const pending = (body && body.requests ? body.requests : []).filter(
+    (r) => r.status === "pending"
+  );
+  gateHistorySync("resume", pending, body && body.requests);
+  const seen = new Set();
+  for (const rec of pending) {
+    const key = RESUME_GATE_PREFIX + rec.id;
+    gateHistoryOpen(
+      "resume", String(rec.id),
+      `session resume requested: ${rec.target || "?"}`,
+      `${rec.session || "?"} asks to resume ${rec.target || "?"}: ` +
+        (rec.reason || "(no reason given)"),
+      { session: rec.session }
+    );
+    if (gateIsHidden("resume", rec.id)) continue;
+    seen.add(key);
+    const card = notices.get(key);
+    if (card && card.node.isConnected) continue;   // nothing on it changes
+    dismissNotice(key);
+    const node = el("div", "notice warn gate");
+    const title = el("div", "notice-title");
+    title.appendChild(el("span", null, "session resume requested: "));
+    title.appendChild(gateSessionLink(rec.target));
+    const why = el(
+      "div", "notice-sub gate-reason",
+      `${rec.session || "?"}: ${rec.reason || "(no reason given)"}`
+    );
+    const actions = el("div", "gate-actions");
+    const approve = el("button", "wf-btn approve", "Approve");
+    const reject = el("button", "wf-btn clear", "Reject");
+    approve.title = RESUME_GATE_APPROVE_TITLE;
+    reject.title = RESUME_GATE_REJECT_TITLE;
+    approve.addEventListener("click", async (ev) => {
+      ev.stopPropagation();
+      if (await resumeGatePost(rec, "approve", approve)) dismissNotice(key);
+    });
+    reject.addEventListener("click", async (ev) => {
+      ev.stopPropagation();
+      if (await resumeGatePost(rec, "reject", reject)) dismissNotice(key);
+    });
+    actions.appendChild(approve);
+    actions.appendChild(reject);
+    actions.appendChild(gateHideButton("resume", rec.id, key,
+      "close this card only — the request stays open with no deadline; the " +
+      "bell keeps it in the notification history"));
+    node.appendChild(title);
+    node.appendChild(resumeGateSub(rec));
+    node.appendChild(why);
+    node.appendChild(el("div", "notice-sub gate-clock", RESUME_GATE_WAIT));
+    node.appendChild(actions);
+    host.appendChild(node);
+    notices.set(key, { node, timer: null });
+  }
+  // Settled, withdrawn or moot requests lose their card on this pass.
+  for (const key of [...notices.keys()]) {
+    if (key.startsWith(RESUME_GATE_PREFIX) && !seen.has(key)) {
       dismissNotice(key);
     }
   }
@@ -48603,7 +48754,7 @@ async function pollOnce() {
   // is fed by the same heartbeat as the registry — and the goto gate beside
   // it: a leader files from its own terminal, the person answers here.
   const gateRefresh = refreshRestartGate();
-  refreshes.push(gateRefresh, refreshGotoGate(), refreshReposyncGate());
+  refreshes.push(gateRefresh, refreshGotoGate(), refreshReposyncGate(), refreshResumeGate());
   await Promise.all(refreshes);
 }
 
