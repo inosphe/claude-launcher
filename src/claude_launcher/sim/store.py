@@ -24,8 +24,10 @@ campaign stops.
 
 Campaign state. ``idle`` (nothing running), ``running`` (every model change
 reruns a round; the run stops itself after ``max_rounds`` rounds or when a
-round leaves nothing open) and ``stopped`` (someone stopped it, or the limit
-was reached). ``state_reason`` says why.
+round leaves nothing open), ``stopped`` (someone stopped it, or the limit
+was reached) and ``fault`` (a start was refused because no usable
+interpreter model is set; nothing ran, and the next successful start clears
+it). ``state_reason`` says why.
 """
 
 from __future__ import annotations
@@ -46,7 +48,7 @@ from .. import atomic
 from . import engine, model as M
 
 USER = "user"
-STATES = ("idle", "running", "stopped")
+STATES = ("idle", "running", "stopped", "fault")
 FINDING_STATUS = ("open", "resolved", "dismissed", "question", "answered")
 REASONING = ("none", "low", "medium", "high")
 #: Settings a simulation carries, with defaults (the daemon's
@@ -958,6 +960,19 @@ class SimStore:
             if not round:
                 return {**self.summary(meta), "carry": carried}
         return {**self.run_round(sim_id, actor), "carry": carried}
+
+    def fault(self, sim_id: str, actor: str, reason: str) -> dict:
+        """Record a start that was refused before anything ran (no usable
+        interpreter profile or runtime). The campaign does not run; a later
+        :meth:`start` clears the state."""
+        with self._lock:
+            meta = self._meta(sim_id)
+            self._require_owner(meta, actor, "start")
+            self._require_filled(meta)
+            meta["state"], meta["state_reason"] = "fault", reason
+            self._save_meta(meta)
+            self._journal(sim_id, actor, "fault", reason=reason)
+            return self.summary(meta)
 
     @staticmethod
     def _require_filled(meta: dict) -> None:

@@ -28,6 +28,7 @@ const findings = [
     witness: {steps: [{event: 'close'}]}, question: {text: 'what then?', options: ['nothing', 'error'], by: 's1'}},
 ];
 let delay = null;
+let startFault = null;
 async function api(raw, opts = {}) {
   const url = new URL(raw, 'http://test');
   const method = opts.method || 'GET', body = opts.body ? JSON.parse(opts.body) : null;
@@ -50,6 +51,10 @@ async function api(raw, opts = {}) {
     rules: [{id: 'r.open', on: {event: 'open'}, do: [], source: [{ref: 'spec.md', quote: 'opens'}]}], invariants: [], checkpoints: {}}};
   else if (p.endsWith('/coverage')) result = coverage;
   else if (p === '/api/sims/sim-abc123' && method === 'GET') result = {sim, rounds: [{round: 1, at: 'x', by: 's1', new: 2, open: 2}], journal: [], owner_live: true};
+  else if (p.endsWith('/start') && startFault) {
+    sim.state = 'fault'; sim.state_reason = 'no interpreter profile is set: pick one';
+    return {ok: false, status: 409, json: async () => ({fault: startFault, error: sim.state_reason, sim})};
+  }
   else if (p.endsWith('/start')) result = {result: {round: 2}, sim, notified: false, runner: 'sim-abc123-run1'};
   else if (p.endsWith('/nudge')) result = {nudged: true, to: 's1'};
   else if (p.endsWith('/answer')) result = {ok: true, nudged: true};
@@ -130,6 +135,19 @@ async function settle() { for (let i = 0; i < 10; i++) await new Promise(resolve
   assert(all().some(n => n.tag === 'a' && n.href === '#/s/sim-abc123-run1'));
   button('실행').onclick(); await settle();
   assert(calls.some(c => c.method === 'POST' && c.url.pathname.endsWith('/start')));
+  assert(!all().some(n => n.className === 'sim-warn' && n.textContent.startsWith('해석(B) 프로필이 설정되지 않았습니다')));
+  // No interpreter profile: a note by 「실행」, and the refused start shows the fault in Korean.
+  const savedProfile = sim.settings.interpreter_profile, savedRunner = sim.runner;
+  sim.settings.interpreter_profile = ''; sim.runner = null; startFault = 'no-profile';
+  ctx.SimPage.open('sim-abc123'); await settle();
+  assert(all().some(n => n.className === 'sim-warn' && n.textContent.startsWith('해석(B) 프로필이 설정되지 않았습니다')));
+  button('실행').onclick(); await settle();
+  assert(all().some(n => n.className === 'sim-error' && n.textContent.startsWith('해석(B) 프로필이 설정되지 않아 실행하지 않았습니다')));
+  assert(all().some(n => n.className === 'sim-badge sim-fault' && n.textContent === '오류'));
+  assert(all().some(n => n.className === 'sim-warn' && n.textContent.includes('no interpreter profile is set')));
+  sim.settings.interpreter_profile = savedProfile; sim.runner = savedRunner; startFault = null;
+  sim.state = 'idle'; sim.state_reason = 'created';
+  ctx.SimPage.open('sim-abc123'); await settle();
   const say = all().find(n => n.tag === 'input' && /소유 세션에 전할 말/.test(n.placeholder || ''));
   say.value = 'check the lock'; say.oninput();
   button('소유 세션에 요청').onclick(); await settle();

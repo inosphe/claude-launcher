@@ -56,6 +56,10 @@ Rules:
   with every other machine and variable unknown) and what the last round
   saw there (handled/unhandled counts). A rule whose state test lives only
   in the event's available condition still counts.
+- sim_start needs settings.interpreter_profile (a profile that can launch
+  pi; the Settings tab lists them) and the runtime (claunch sim runtime
+  install). Without either it runs nothing and sets state fault with the
+  reason; fix it and start again. The judge may use the same model.
 - Work gaps in batches (sim_gaps groups them by place). For big models,
   hand each batch to a subagent so this conversation stays small.
 - A gap that is intended or impossible: sim_resolve dismiss with the
@@ -71,8 +75,9 @@ Simulations (sim_* tools): a session builds a formal world model of a feature
 (state machines, events, ECA rules quoting their sources, invariants) and the
 daemon walks it to find gaps, conflicts, broken invariants and dead ends. Any
 session may read any simulation; only its owner (or the user) changes, runs
-or stops it; started with an interpreter profile, a daemon-launched run
-session does the interpreting and a judge model checks its quotes. Call
+or stops it; a start launches a run session that does the interpreting
+while a judge model checks its quotes, and without a usable interpreter
+profile the start is refused and the simulation is marked fault. Call
 sim_guide before writing a model. A "[claunch simulation]"
 line in your terminal is the daemon: a simulation you own finished, or the
 user answered or asked something about it.
@@ -122,12 +127,12 @@ TOOLS = [
                     "While running, a round reruns after every accepted patch.",
      "inputSchema": {"type": "object", "properties": {
          **_ID, "patch": {"type": "object"}, "key": {"type": "string"}}, "required": ["sim", "patch"]}},
-    {"name": "sim_start", "description": "Owner: start the campaign. With an interpreter_profile set (and the runtime "
-                                         "installed) the daemon launches a run session that formalizes, judges and works "
-                                         "the gaps itself -- leave the model to it and wait for the finished line. "
-                                         "Otherwise (or runner: false) round 1 runs now and you work the gaps.",
-     "inputSchema": {"type": "object", "properties": {**_ID, "runner": {"type": "boolean", "description": "false: interpret yourself"}},
-                     "required": ["sim"]}},
+    {"name": "sim_start", "description": "Owner: start the campaign. The daemon launches a run session that "
+                                         "formalizes, judges and works the gaps itself -- leave the model to it and wait "
+                                         "for the finished line. It needs an interpreter_profile that can launch pi and "
+                                         "the installed runtime; without them nothing runs, the simulation goes to state "
+                                         "fault and the error says what to fix. sim_round walks one round yourself.",
+     "inputSchema": {"type": "object", "properties": _ID, "required": ["sim"]}},
     {"name": "sim_round", "description": "Owner: run one round now.",
      "inputSchema": {"type": "object", "properties": _ID, "required": ["sim"]}},
     {"name": "sim_stop", "description": "Owner: stop the campaign.",
@@ -212,8 +217,6 @@ def call_tool(name: str, args: dict) -> dict:
         body = {"session": me}
         if name == "sim_stop" and args.get("reason"):
             body["reason"] = args["reason"]
-        if name == "sim_start" and args.get("runner") is False:
-            body["runner"] = False
         return c.post(f"/api/sims/{_sim(args)}/{verb}", body)
     if name == "sim_resolve":
         return c.post(f"/api/sims/{_sim(args)}/resolve",

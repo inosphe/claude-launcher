@@ -181,20 +181,52 @@ def test_runner_exit_ends_campaign_and_stop_kills_runner(tmp_path):
     assert run2.killed and sims.get(sid)["runner"] is None
 
 
-def test_start_without_runtime_falls_back_to_owner(tmp_path, monkeypatch):
+@pytest.mark.parametrize("settings, profiles, installed, code", [
+    ({"interpreter_profile": "ds4"}, ["ds4"], False, "no-runtime"),
+    ({}, ["ds4"], True, "no-profile"),
+    ({"interpreter_profile": "gone"}, ["ds4"], True, "profile-unusable"),
+])
+def test_start_without_a_usable_interpreter_faults_and_runs_nothing(tmp_path, monkeypatch, settings, profiles,
+                                                                     installed, code):
     app, sims, mgr, owner, run, root = setup(tmp_path)
-    sim = sims.create(title="door", owner="s1", actor="s1", root=str(root),
-                      settings={"interpreter_profile": "ds4"})
-    monkeypatch.setattr(sim_api, "pi_profiles", lambda: ["ds4"])
-    monkeypatch.setattr(runtime, "runner_path", lambda d=None: None)
+    sim = sims.create(title="door", owner="s1", actor="s1", root=str(root), settings=settings)
+    monkeypatch.setattr(sim_api, "pi_profiles", lambda: profiles)
+    monkeypatch.setattr(runtime, "runner_path", lambda d=None: tmp_path / "runner.mjs" if installed else None)
+    created = []
+    monkeypatch.setattr(mgr, "create_async", lambda sdef: created.append(sdef), raising=False)
 
     async def go():
         async with TestClient(TestServer(app)) as c:
             resp = await c.post(f"/api/sims/{sim['id']}/start", json={"session": "s1"})
             data = await resp.json()
-            assert resp.status == 200, data
-            assert "not installed" in data["manual"]
+            assert resp.status == 409, data
+            assert data["fault"] == code and data["error"]
+            assert data["sim"]["state"] == "fault" and data["sim"]["state_reason"] == data["error"]
     asyncio.run(go())
+    after = sims.get(sim["id"])
+    assert after["state"] == "fault" and after["runner"] is None and not created
+    assert not sims.rounds(sim["id"])  # nothing walked
+    assert sims.journal(sim["id"])[-1]["event"] == "fault"
+
+
+def test_runner_false_is_refused_and_a_later_start_clears_fault(tmp_path, monkeypatch):
+    app, sims, mgr, owner, run, root = setup(tmp_path)
+    sim = sims.create(title="door", owner="s1", actor="s1", root=str(root), settings={})
+    monkeypatch.setattr(sim_api, "pi_profiles", lambda: ["ds4"])
+    monkeypatch.setattr(runtime, "runner_path", lambda d=None: None)
+
+    async def go():
+        async with TestClient(TestServer(app)) as c:
+            resp = await c.post(f"/api/sims/{sim['id']}/start", json={"session": "s1", "runner": False})
+            assert resp.status == 400
+            resp = await c.post(f"/api/sims/{sim['id']}/start", json={"session": "s2"})
+            assert resp.status == 403  # only the owner may fault it
+            resp = await c.post(f"/api/sims/{sim['id']}/start", json={"session": "s1"})
+            assert resp.status == 409
+    asyncio.run(go())
+    assert sims.get(sim["id"])["state"] == "fault"
+    sims.start(sim["id"], "s1", round=False)
+    assert sims.get(sim["id"])["state"] == "running"
 
 
 def test_runtime_status_and_install(tmp_path):

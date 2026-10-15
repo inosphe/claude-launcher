@@ -128,6 +128,20 @@ def test_stop_reports_end(env):
     assert st.stop(sim["id"], S.USER)["ended"] is True
 
 
+def test_fault_records_a_refused_start_and_start_clears_it(env):
+    st, root, _ = env
+    sim = st.create(title="door", root=root, owner="s1", actor="s1")
+    assert "fault" in S.STATES
+    with pytest.raises(S.Forbidden):
+        st.fault(sim["id"], "s2", "no interpreter profile")
+    got = st.fault(sim["id"], "s1", "no interpreter profile")
+    assert got["state"] == "fault" and got["state_reason"] == "no interpreter profile"
+    assert got["last_round"] is None and st.journal(sim["id"])[-1]["event"] == "fault"
+    st.patch_model(sim["id"], "s1", base_patch())
+    st.start(sim["id"], "s1", round=False)
+    assert st.get(sim["id"])["state"] == "running"
+
+
 def test_exit_releases_and_claim_transfer(env):
     st, root, live = env
     sim = st.create(title="door", root=root, owner="s1", actor="s1")

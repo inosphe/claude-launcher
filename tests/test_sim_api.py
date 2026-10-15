@@ -87,9 +87,13 @@ def test_session_creates_owns_and_is_told_when_it_ends(tmp_path):
         rejected = await req("POST", f"/api/sims/{sid}/model", {"session": "s1", "patch": {
             "rules": [{**PATCH["rules"][0], "source": [{"ref": "spec.md", "quote": "nope"}]}]}})
         assert rejected["ok"] is False and rejected["rejected"]
-        started = await req("POST", f"/api/sims/{sid}/start", {"session": "s1"})
-        assert started["result"]["ended"]["state"] == "stopped"
-        assert started["notified"] and "finished" in s1.delivered[-1] and sid in s1.delivered[-1]
+        # No interpreter profile: the start faults and nothing runs (claunch-efnbt.8).
+        faulted = await req("POST", f"/api/sims/{sid}/start", {"session": "s1"}, status=409)
+        assert faulted["fault"] == "no-profile" and "interpreter profile" in faulted["error"]
+        assert faulted["sim"]["state"] == "fault" and faulted["sim"]["state_reason"] == faulted["error"]
+        assert not faulted["sim"]["last_round"] and not s1.delivered
+        # A single walk stays available to the owner.
+        await req("POST", f"/api/sims/{sid}/round", {"session": "s1"})
         # Another session reads it.
         shown = await req("GET", f"/api/sims/{sid}")
         assert shown["rounds"][-1]["round"] == 1 and shown["owner_live"]
@@ -117,6 +121,7 @@ def test_user_creates_for_a_session_and_answers(tmp_path):
         made = await req("POST", "/api/sims", {"title": "door", "goal": "find gaps", "owner": "s2"}, status=201)
         sid = made["sim"]["id"]
         assert made["nudged"] and "sim_show " + sid in s2.delivered[-1]
+        assert "no interpreter profile yet" in s2.delivered[-1] and f"before sim_start {sid}" in s2.delivered[-1]
         assert "write them in 한국어" in s2.delivered[-1]
         await req("POST", f"/api/sims/{sid}/model", {"session": "s2", "patch": PATCH})
         await req("POST", f"/api/sims/{sid}/round", {"session": "s2"})
@@ -144,11 +149,11 @@ def test_exit_releases_and_user_transfers(tmp_path):
     async def scenario(req, mgr, s1, s2):
         sid = (await req("POST", "/api/sims", {"title": "door", "session": "s1"}, status=201))["sim"]["id"]
         await req("POST", f"/api/sims/{sid}/model", {"session": "s1", "patch": PATCH})
-        await req("POST", f"/api/sims/{sid}/start", {"session": "s1"})
+        await req("POST", f"/api/sims/{sid}/start", {"session": "s1"}, status=409)
         await req("POST", f"/api/sims/{sid}/claim", {"session": "s2"}, status=409)
         mgr.end("s1")
         got = (await req("GET", f"/api/sims/{sid}"))["sim"]
-        assert got["owner"] == "" and got["state"] == "stopped"
+        assert got["owner"] == "" and got["state"] == "fault"
         await req("POST", f"/api/sims/{sid}/transfer", {"session": "s2", "to": "s2"}, status=403)
         moved = await req("POST", f"/api/sims/{sid}/transfer", {"to": "s2"})
         assert moved["sim"]["owner"] == "s2" and "owner of simulation" in s2.delivered[-1]
@@ -285,8 +290,9 @@ def test_user_leaves_title_and_goal_for_the_owner_to_fill(tmp_path):
         await req("POST", f"/api/sims/{sid}/start", {"session": "s2"}, status=409)
         done = await req("POST", f"/api/sims/{sid}/settings", {"session": "s2", "goal": "find gaps"})
         assert "fill_pending" not in done["sim"]
-        started = await req("POST", f"/api/sims/{sid}/start", {"session": "s2"})
-        assert started["sim"]["state"] in ("running", "done", "idle")
+        # Filled, it gets past the fill check to the interpreter check.
+        faulted = await req("POST", f"/api/sims/{sid}/start", {"session": "s2"}, status=409)
+        assert faulted["fault"] == "no-profile" and faulted["sim"]["state"] == "fault"
     run(tmp_path, scenario)
 
 
@@ -298,7 +304,7 @@ def test_fill_with_a_title_given_asks_only_for_the_goal(tmp_path):
         assert "left its goal for you" in told and "title: door" in told and "as sources" in told
         # Both given: the fill flag has nothing to wait for; the usual create request goes out.
         full = await req("POST", "/api/sims", {"title": "door", "goal": "g", "owner": "s2", "fill": True}, status=201)
-        assert "fill_pending" not in full["sim"] and "sim_configure" not in s2.delivered[-1]
+        assert "fill_pending" not in full["sim"] and "left its" not in s2.delivered[-1]
         # Without an owner nobody would fill it.
         await req("POST", "/api/sims", {"title": "", "fill": True}, status=400)
         # And without the flag a title is still required.

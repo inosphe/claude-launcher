@@ -13,7 +13,13 @@ function makeSimView({root: view, session = "", go}) {
     if (cls) n.className = cls;
     return n;
   };
-  const STATE_LABEL = {idle: "대기", running: "실행 중", stopped: "중지됨"};
+  const STATE_LABEL = {idle: "대기", running: "실행 중", stopped: "중지됨", fault: "오류"};
+  // A start refused for want of a usable interpreter model (409 with fault).
+  const FAULT_TEXT = {
+    "no-profile": () => "해석(B) 프로필이 설정되지 않아 실행하지 않았습니다. 설정 탭에서 해석(B) 프로필을 고른 뒤 다시 실행하세요.",
+    "profile-unusable": s => `해석(B) 프로필 ${s?.settings?.interpreter_profile || ""}(으)로 pi를 실행할 수 없어 실행하지 않았습니다. 설정 탭에서 pi로 실행할 수 있는 프로필을 고른 뒤 다시 실행하세요.`,
+    "no-runtime": () => "시뮬레이션 런타임이 설치되지 않았거나 최신 상태가 아니어서 실행하지 않았습니다. claunch sim runtime install을 실행한 뒤 다시 실행하세요.",
+  };
   const STATUS_LABEL = {open: "열림", question: "질문", answered: "답함", dismissed: "제외", resolved: "해결"};
   const KIND_LABEL = {unhandled: "규칙 없음", conflict: "충돌", invariant: "불변식 위반", stuck: "막힘", loop: "무한 연쇄", "eval-error": "식 오류"};
   const REASONING = ["none", "low", "medium", "high"];
@@ -30,7 +36,7 @@ function makeSimView({root: view, session = "", go}) {
   async function request(path, method = "GET", body) {
     const response = await api(path, {method, ...(body ? {headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)} : {})});
     const result = await response.json().catch(() => ({}));
-    if (!response.ok) throw Error(result.error || `HTTP ${response.status}`);
+    if (!response.ok) throw Object.assign(Error(result.error || `HTTP ${response.status}`), {result});
     return result;
   }
   const enc = encodeURIComponent;
@@ -266,6 +272,8 @@ function makeSimView({root: view, session = "", go}) {
     }
     if ((s.stale_sources || []).length)
       title.append(node("p", `원천이 바뀌어 인용을 잃은 규칙 ${s.stale_sources.length}개: ${s.stale_sources.map(x => x.id).join(", ")}`, "sim-warn"));
+    if (s.state === "fault")
+      title.append(node("p", `실행하지 않았습니다(오류): ${s.state_reason || ""}`, "sim-warn"));
     if (s.goal) title.append(node("p", s.goal, "sim-goal"));
     if (s.fill_pending)
       title.append(node("p", `소유 세션이 정해 채울 항목: ${[!s.title && "제목", !s.goal && "목표"].filter(Boolean).join("·")}. 채우기 전에는 실행할 수 없습니다.`, "sim-warn"));
@@ -274,10 +282,15 @@ function makeSimView({root: view, session = "", go}) {
     const actions = node("div", null, "sim-actions");
     if (s.state === "running") actions.append(button("중지", () => act(() => request(base + "/stop", "POST", {}), r => r.notified ? "중지했고 소유 세션에 알렸습니다" : "중지했습니다")));
     else if (s.fill_pending) { const run = button("실행", () => {}, "sim-primary"); run.disabled = true; run.title = "소유 세션이 제목·목표를 채운 뒤 실행할 수 있습니다"; actions.append(run); }
-    else actions.append(button("실행", () => act(() => request(base + "/start", "POST", {}), r => r.runner ? `실행 세션 ${r.runner}을 띄웠습니다` : r.manual ? `실행했습니다 (소유 세션이 해석: ${r.manual})` : "실행했습니다"), "sim-primary"));
+    else actions.append(button("실행", () => act(() => request(base + "/start", "POST", {}).catch(exc => {
+      const f = FAULT_TEXT[exc.result?.fault];
+      throw f ? Error(f(exc.result.sim)) : exc;
+    }), r => r.runner ? `실행 세션 ${r.runner}을 띄웠습니다` : "실행했습니다"), "sim-primary"));
     const once = button("라운드 한 번", () => act(() => request(base + "/round", "POST", {}), r => `라운드 ${r.result.round}: 새 ${r.result.new} · 열림 ${r.result.open}`));
     if (s.fill_pending) { once.disabled = true; once.title = "소유 세션이 제목·목표를 채운 뒤 실행할 수 있습니다"; }
     actions.append(once);
+    if (!s.fill_pending && s.state !== "running" && !s.settings?.interpreter_profile)
+      actions.append(node("span", "해석(B) 프로필이 설정되지 않았습니다. 설정 탭에서 고르기 전에는 「실행」이 오류로 끝나고 아무것도 실행하지 않습니다.", "sim-warn"));
     const say = node("input"); say.placeholder = "소유 세션에 전할 말 (비우면 계속 진행 요청)"; say.disabled = busy || !s.owner;
     say.value = nudgeDraft; say.oninput = () => { nudgeDraft = say.value; };
     actions.append(say, button("소유 세션에 요청", () => act(() => request(base + "/nudge", "POST", {text: nudgeDraft}),
