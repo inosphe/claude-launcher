@@ -981,14 +981,159 @@ def test_v2_end_records_cflow_as_the_ender_of_driver_and_reviewer(proj):
     assert sessions["w1-kid"].ended_by is None   # not ended, nothing recorded
 
 
-def test_v2_end_keep_alive_keeps_the_reviewer_too(proj):
+def test_v2_end_keep_alive_ends_the_reviewer_but_not_the_driver(proj):
+    # claunch-472wq.1: keep-alive holds off the driver's kill, not the run's
+    # end -- the reviewer was there for that run.
     cwd = str(proj)
     _v2_finish(cwd, "w1")
     clock, sessions, order = _reviewer_tree(cwd, keep_alive=True)
     clock.scan()
     [queued] = clock._end_pending
     asyncio.run(clock._finish_end(*queued[:4], reap_reviewers=queued[4]))
+    assert order == ["w1-rev"]
+    assert sessions["w1-rev"].ended_by == {
+        "kind": "cflow", "name": "w1", "reason": "reviewer-reap"}
+    assert sessions["w1-kid"].exited is False
+    assert sessions["w1-kid-rev"].exited is False
+
+
+def test_v2_end_resumed_by_human_ends_the_reviewer_but_not_the_driver(proj):
+    cwd = str(proj)
+    _v2_finish(cwd, "w1")
+    clock, sessions, order = _reviewer_tree(cwd)
+    sessions["w1"].resumed_by_human = True
+    clock.scan()
+    [queued] = clock._end_pending
+    asyncio.run(clock._finish_end(*queued[:4], reap_reviewers=queued[4]))
+    assert order == ["w1-rev"]
+    assert sessions["w1-kid"].exited is False
+    assert sessions["w1-kid-rev"].exited is False
+
+
+def test_v2_end_keep_alive_without_the_flag_ends_no_reviewer(proj):
+    # The flag is the v2 queue's; a caller that does not pass it (the v1
+    # end-sequence) keeps its reviewers as before.
+    cwd = str(proj)
+    _v2_finish(cwd, "w1")
+    clock, sessions, order = _reviewer_tree(cwd, keep_alive=True)
+    clock.scan()
+    [queued] = clock._end_pending
+    asyncio.run(clock._finish_end(*queued[:4]))
     assert order == []
+
+
+# --------------------------------------------------------------------------- #
+# claunch-472wq.1: any exit of the parent ends its own reviewers
+# --------------------------------------------------------------------------- #
+def _exit(session, *, requested: bool) -> None:
+    session.exited = True
+    session.kill_requested = requested
+
+
+def test_parent_kill_ends_its_own_reviewer_only(proj):
+    clock, sessions, order = _reviewer_tree(str(proj))
+    _exit(sessions["w1"], requested=True)
+    clock.session_exited(sessions["w1"])
+    assert order == ["w1-rev"]
+    assert sessions["w1-rev"].ended_by == {
+        "kind": "cflow", "name": "w1", "reason": "parent-exited"}
+    assert sessions["w1-kid"].exited is False       # a worker child stays
+    assert sessions["w1-kid-rev"].exited is False   # so does a grandchild
+    assert list(clock._exits) == []                 # asked-for: no orphan push
+
+
+def test_parent_crash_ends_its_reviewer_and_is_still_reported(proj):
+    clock, sessions, order = _reviewer_tree(str(proj))
+    sessions["w1"].sdef = SessionDef(name="w1", cwd=str(proj), parent="lead")
+    _exit(sessions["w1"], requested=False)
+    clock.session_exited(sessions["w1"])
+    assert order == ["w1-rev"]
+    assert [e[0] for e in clock._exits] == ["w1"]
+
+
+def test_paused_parent_keeps_its_reviewer(proj):
+    clock, sessions, order = _reviewer_tree(str(proj))
+    _exit(sessions["w1"], requested=True)
+    sessions["w1"].paused_at = "2026-10-15T00:00:00+00:00"
+    clock.session_exited(sessions["w1"])
+    assert order == []
+
+
+def test_reviewer_exit_ends_nothing_above_it(proj):
+    clock, sessions, order = _reviewer_tree(str(proj))
+    _exit(sessions["w1-kid-rev"], requested=True)
+    clock.session_exited(sessions["w1-kid-rev"])
+    assert order == []
+    assert sessions["w1-kid"].exited is False and sessions["w1"].exited is False
+
+
+def test_parent_exit_without_a_mesh_ends_nothing(proj):
+    clock, sessions, order = _reviewer_tree(str(proj))
+    clock.mesh = None
+    _exit(sessions["w1"], requested=True)
+    clock.session_exited(sessions["w1"])
+    assert order == []
+
+
+def test_parent_exit_through_a_real_manager(proj):
+    """End to end on the py harness: a kill of the parent ends its reviewer
+    child; a hold and a redefine (relaunch) of the parent do not reach the
+    exit hook, so the reviewer stays. A daemon shutdown is the manager's
+    own guard (test_basetemp_reaper: a daemon shutdown runs no exit hooks).
+    """
+    import sys
+
+    from claude_launcher import lineage, profile
+    from claude_launcher.daemon.manager import SessionManager
+
+    store.update(lambda doc: doc.update({"harnesses": {"py": {"command": [
+        sys.executable, "-u", "-c", "import sys\nprint('READY')\nsys.stdin.read()\n",
+    ]}}}))
+    if not profile.resolve("py").exists():
+        lineage.set_harness(profile.create("py"), "py")
+    cwd = str(proj)
+    mesh = _FakeMesh(
+        {
+            "lead": [{"mesh": "m", "role": "worker"}],
+            "lead-rev": [{"mesh": "m", "role": "reviewer"}],
+            "lead-kid": [{"mesh": "m", "role": "worker"}],
+        },
+        {},
+    )
+
+    async def exited(session):
+        await session.wait_for("exited", timeout=10.0, threshold=0.5)
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mgr.resumable = lambda s: True
+        clock = cflow_clock.RunEventClock(mgr, mesh)
+        mgr.exit_hooks.append(clock.session_exited)
+        try:
+            mgr.create(SessionDef(name="lead", harness="py", cwd=cwd))
+            mgr.create(SessionDef(name="lead-rev", harness="py", cwd=cwd, parent="lead"))
+            mgr.create(SessionDef(name="lead-kid", harness="py", cwd=cwd, parent="lead"))
+
+            await mgr.redefine("lead", cols=100)
+            assert not mgr.get("lead-rev").exited
+
+            mgr.hold("lead", reason="idle")
+            await exited(mgr.get("lead"))
+            assert mgr.get("lead").held_at
+            await asyncio.sleep(0.3)
+            assert not mgr.get("lead-rev").exited
+
+            await mgr.wake_async("lead")
+            mgr.kill("lead")
+            await exited(mgr.get("lead"))
+            await exited(mgr.get("lead-rev"))
+            assert mgr.get("lead-rev").ended_by == {
+                "kind": "cflow", "name": "lead", "reason": "parent-exited"}
+            assert not mgr.get("lead-kid").exited
+        finally:
+            await mgr.shutdown_all()
+
+    asyncio.run(run())
 
 
 def test_drain_ends_passes_the_reviewer_flag(proj):

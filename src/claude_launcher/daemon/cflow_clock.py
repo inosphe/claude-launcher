@@ -3148,10 +3148,19 @@ class RunEventClock:
         report the overseer got (s773 on claunch-4i1n2: 3 of 69 runs' first
         reports led to any action, all three a worker that crashed mid-work).
         A session with no parent has nobody this push is for.
+
+        Every exit that reaches this hook also ends the session's own
+        reviewer children (claunch-472wq.1), asked-for or not: a reviewer
+        answers its parent's asks, and an exited parent asks nothing. The
+        hook never sees a daemon shutdown, a relaunch, a hold or an exit
+        Windows caused (``SessionManager._session_exited``), so those keep
+        their reviewers; a pause is skipped here for the same reason — it is
+        a stop the session comes back from.
         """
-        if getattr(session, "kill_requested", False):
-            return
         if getattr(session, "paused_at", None):
+            return
+        self._end_reviewers(session.sdef.name, reason="parent-exited")
+        if getattr(session, "kill_requested", False):
             return
         sdef = session.sdef
         if not sdef.parent or not sdef.cwd:
@@ -3342,6 +3351,11 @@ class RunEventClock:
                 "cflow kill-on-end: %r recorded but left running (keep-alive)",
                 scope,
             )
+            # The driver stays, its run does not (claunch-472wq.1): the
+            # reviewer was there for that run's peer-review asks, and a
+            # kept-alive driver that starts new work spawns a new one.
+            if reap_reviewers:
+                self._end_reviewers(scope, run_id)
             return
         if session.resumed_by_human:
             # A person respawned this session, by name, after the run had
@@ -3358,6 +3372,10 @@ class RunEventClock:
                 "run %s finished; leaving it running", scope, run_id,
             )
             session.append_wal(resumed_block(scope, run_id))
+            # The deference is to the driver; the run is still done, so its
+            # reviewer goes as it does under keep-alive (claunch-472wq.1).
+            if reap_reviewers:
+                self._end_reviewers(scope, run_id)
             return
         if reap_reviewers:
             self._end_reviewers(scope, run_id)
@@ -3394,19 +3412,24 @@ class RunEventClock:
             ),
         })
 
-    def _end_reviewers(self, driver: str, run_id: str) -> List[str]:
-        """End the live reviewers ``driver`` spawned itself, before it goes
-        (claunch-du6mx.1). Returns the names ended.
+    def _end_reviewers(
+        self, driver: str, run_id: str = "", *, reason: str = "reviewer-reap",
+    ) -> List[str]:
+        """End the live reviewers ``driver`` spawned itself (claunch-du6mx.1,
+        claunch-472wq.1). Returns the names ended.
 
         A reviewer child exists to answer its parent's peer-review asks
         (improv-worker-v2's reviewer-ensure spawns one and keeps it for the
-        run); once that run is done it has nothing left to review. The
-        workflow's settle-check asks the agent to end it, but that is prose —
-        and a driver killed first leaves the reviewer alive, moved one level
-        up under the grandparent. So the end-sequence ends it right before the
-        driver. Only direct children (``sdef.parent``) holding the ``reviewer``
-        role on some mesh: a worker child is the settle/adopt rules' to
-        dispose of, and a grandchild belongs to its own parent.
+        run); once that run is done, or its parent is gone, it has nothing
+        left to review. The workflow's settle-check asks the agent to end it,
+        but that is prose. So the daemon ends it at three moments: right
+        before the kill-on-end of a done run's driver, when that kill is
+        withheld (keep-alive, respawned by a person) because the run is done
+        all the same, and when the parent exits for any other reason
+        (:meth:`session_exited`). Only direct children (``sdef.parent``)
+        holding the ``reviewer`` role on some mesh: a worker child is the
+        settle/adopt rules' to dispose of, and a grandchild belongs to its
+        own parent.
         """
         if self.mesh is None:
             return []
@@ -3432,18 +3455,18 @@ class RunEventClock:
                 continue
             try:
                 actors.note(child, actors.make(
-                    actors.CFLOW, driver, reason="reviewer-reap"))
+                    actors.CFLOW, driver, reason=reason))
                 child.kill(force=False)
             except Exception as exc:
                 log.warning(
-                    "cflow kill-on-end: ending reviewer %r of %r failed: %s",
-                    name, driver, exc,
+                    "cflow %s: ending reviewer %r of %r failed: %s",
+                    reason, name, driver, exc,
                 )
                 continue
             ended.append(name)
             log.info(
-                "cflow kill-on-end: ended reviewer %r of %r (run %s)",
-                name, driver, run_id,
+                "cflow %s: ended reviewer %r of %r (run %s)",
+                reason, name, driver, run_id or "-",
             )
         if ended:
             with contextlib.suppress(Exception):
