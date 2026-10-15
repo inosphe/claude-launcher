@@ -108,6 +108,11 @@ def test_endpoint_round_trips_the_setting(home):
                          and hasattr(os, "unshare")),
                     reason="needs WSL with Windows reg.exe and Python 3.12+")
 def test_shim_hides_reg_exe_only_inside(home):
+    with open(wsl_reg_stub.REG_EXE, "rb") as f:
+        if f.read(2) == b"#!":
+            pytest.skip("reg.exe is already the stub outside the shim: pytest runs inside a"
+                        " claunch session with wsl_hide_reg_exe on, so 'untouched outside'"
+                        " cannot be observed here (claunch-4xdno)")
     stub = str(wsl_reg_stub.stub_path())
     probe = (
         f"head -c 2 {wsl_reg_stub.REG_EXE}; echo; "
