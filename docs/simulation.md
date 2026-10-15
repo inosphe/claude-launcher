@@ -58,7 +58,9 @@ claunch-efnbt. gds6 시뮬레이션 v2(`~/works/gds6`, `notes/designframe-sim-v2
 
 ## 캠페인과 알림
 
-- 상태는 `idle`, `running`, `stopped`이고 `state_reason`이 이유를 적는다.
+- 상태는 `idle`, `running`, `stopped`, `fault`이고 `state_reason`이 이유를 적는다. `fault`는 쓸 수 있는 해석 모델
+  설정이 없어 시작이 거절된 상태다(아래 「실행 세션」). 그 시작에서는 아무것도 실행하지 않았고, 다음에 시작이 성공하면
+  `running`으로 바뀐다.
 - `running` 동안에는 받아들여진 모델 변경마다 라운드를 다시 돈다.
 - 라운드 뒤 열린 발견이 없으면 `idle`로, `max_rounds`에 닿으면 `stopped`로 끝난다.
 - 캠페인이 끝나면(위 두 경우와 중지) 데몬이 소유 세션 터미널에 `[claunch simulation] ... finished` 한 줄을
@@ -71,8 +73,8 @@ claunch-efnbt. gds6 시뮬레이션 v2(`~/works/gds6`, `notes/designframe-sim-v2
 
 ## 실행 세션
 
-- 설정의 `interpreter_profile`이 pi로 실행할 수 있는 프로필이고 런타임이 설치되어 있으면, 실행(`sim_start`, 화면의
-  「실행」)은 첫 라운드를 바로 돌리지 않고 데몬이 실행 세션을 띄운다. 세션 이름은 `<시뮬레이션 id>-run<n>`, kind는
+- 실행(`sim_start`, 화면의 「실행」)은 첫 라운드를 바로 돌리지 않고 데몬이 실행 세션을 띄운다. 그 조건은 설정의
+  `interpreter_profile`이 pi로 실행할 수 있는 프로필이고 런타임이 설치되어 있는 것이다. 세션 이름은 `<시뮬레이션 id>-run<n>`, kind는
   `pi-durable`, 작업 디렉터리는 시뮬레이션 루트다.
 - 실행 세션은 붙어 있는 동안 소유 세션과 같은 권한으로 모델을 바꾸고 라운드를 돌린다. 실행 세션이 붙어 있으면 모델
   변경마다 라운드를 다시 돌리지 않고, 실행 세션이 라운드를 직접 요청한다.
@@ -127,8 +129,20 @@ claunch-efnbt. gds6 시뮬레이션 v2(`~/works/gds6`, `notes/designframe-sim-v2
   - 세션이 살아 있고 `done`이 없으면 마지막 노드 뒤에 점선 「진행 중」 노드가 진행 API의 단계와 문구를 보여 준다.
   - 2초마다 뒤쪽 사건만 받아 이미 그린 SVG에 새 노드와 선을 덧붙이고, 상태가 바뀐 노드의 글자와 class만 고친다. SVG를
     다시 만들지 않으므로 스크롤 위치와 마우스 올림이 유지된다. 세션이 종료되면 폴링을 멈춘다.
-- 프로필이 없거나, pi로 실행할 수 없거나, 런타임이 없으면 S1 방식으로 돌고 응답의 `manual`에 이유를 적는다.
-  `sim_start`에 `runner: false`를 주면 실행 세션 없이 소유 세션이 해석한다.
+- 조건이 맞지 않으면 시작은 오류다(claunch-efnbt.8). 데몬은 `sims.start`도 라운드도 실행하지 않고, 소유 세션(또는
+  사용자) 권한을 확인한 뒤 상태를 `fault`로, `state_reason`을 이유로 두고 기록에 `fault`를 남긴다. 응답은 409이고
+  바디의 `fault`가 원인 코드, `error`가 이유와 고칠 방법이다.
+
+  | `fault` | 조건 | 고칠 방법 |
+  |---|---|---|
+  | `no-profile` | `interpreter_profile`이 비어 있음 | 설정 탭이나 `sim_configure`의 `settings.interpreter_profile`로 프로필을 고른다 |
+  | `profile-unusable` | 그 프로필이 `GET /api/sims/profiles` 목록에 없음(pi로 실행할 수 없음) | pi로 실행할 수 있는 프로필을 고른다 |
+  | `no-runtime` | 런타임이 없거나 최신이 아님 | `claunch sim runtime install` |
+
+  판정 모델이 해석 모델과 같아도 시작은 허용된다. 제목·목표를 채우기 전(`fill_pending`)이면 이 검사보다 채우기
+  검사가 먼저 409를 낸다. 화면은 상태 배지 「오류」와 `state_reason`을 보이고, 해석 프로필이 비어 있으면 「실행」
+  옆에 안내를 둔다. 예전의 소유 세션 해석 경로(응답의 `manual`, `sim_start`의 `runner: false`)는 없어졌다.
+  바디에 `runner: false`를 주면 400이다. 소유 세션이 직접 한 라운드를 걷는 일은 `sim_round`로 계속 할 수 있다.
 
 ### 런타임 설치
 

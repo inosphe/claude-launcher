@@ -203,8 +203,10 @@ def created_text(sim: dict) -> str:
         + (f"It has an interpreter profile: sim_start {sim['id']} launches a run session that builds the model "
            "and works the gaps; "
            if (sim.get("settings") or {}).get("interpreter_profile") else
-           "Build the world model from the sources with sim_patch (every rule quotes its source file word for "
-           f"word, or is marked provisional with a why), then sim_start {sim['id']} and work the gaps (sim_gaps); ")
+           "It has no interpreter profile yet: set one (sim_configure settings.interpreter_profile, a profile "
+           f"listed by the Settings tab) before sim_start {sim['id']} -- a start without one faults and runs "
+           "nothing. Meanwhile you may build the world model from the sources with sim_patch (every rule quotes "
+           "its source file word for word, or is marked provisional with a why); ")
         + "you will be told when it finishes. "
         f"Questions you raise (sim_resolve ask) and reasons you give go to the user: write them in {_language(sim)}."
     )
@@ -246,8 +248,8 @@ def fill_text(sim: dict) -> str:
         "user chose. Then "
         + ("sim_start launches a run session that builds the model and works the gaps; "
            if (sim.get("settings") or {}).get("interpreter_profile") else
-           "build the world model from the sources with sim_patch (every rule quotes its source file word for "
-           "word, or is marked provisional with a why), sim_start and work the gaps (sim_gaps); ")
+           "set an interpreter profile (sim_configure settings.interpreter_profile) before sim_start -- a start "
+           "without one faults and runs nothing; ")
         + "you will be told when it finishes. "
         f"Write the title, goal, questions and reasons in {_language(sim)}."
     )
@@ -298,21 +300,38 @@ def install(app, store: Optional[sim_store.SimStore] = None):
         except Exception:  # noqa: BLE001 -- the exit funnel must not break
             log.exception("sim: releasing %s failed", name)
 
+    async def runner_fault(sim: dict) -> Optional[dict]:
+        """Why a start of ``sim`` cannot launch a run session, or None.
+        Returns ``{"fault": code, "error": reason and fix}`` with code
+        ``no-profile``, ``profile-unusable`` or ``no-runtime``."""
+        from ..sim import runtime
+        profile = sim["settings"].get("interpreter_profile") or ""
+        if not profile:
+            return {"fault": "no-profile",
+                    "error": "no interpreter profile is set: pick one in the simulation settings "
+                             "(sim_configure settings.interpreter_profile, or the Settings tab) and start again"}
+        if profile not in await asyncio.to_thread(pi_profiles):
+            return {"fault": "profile-unusable",
+                    "error": f"interpreter profile {profile} cannot launch the pi harness here: pick a profile "
+                             "that can (GET /api/sims/profiles lists them) and start again"}
+        if await asyncio.to_thread(runtime.runner_path) is None:
+            return {"fault": "no-runtime",
+                    "error": "the simulation runtime is not installed or is out of date: run "
+                             "`claunch sim runtime install` and start again"}
+        return None
+
     async def launch_runner(sid: str) -> dict:
-        """Launch the run session of a campaign that has just started.
-        Returns ``{"session": name}`` or ``{"manual": why}``."""
+        """Launch the run session of a campaign that has just started
+        (:func:`runner_fault` was None). Returns ``{"session": name}``,
+        ``{"fault": code, "error": why}`` when the profile or runtime went
+        away in between, or ``{"failed": why}``."""
         from . import harness as harness_mod
         from ..sim import runtime
         sim = await asyncio.to_thread(sims.get, sid)
         profile = sim["settings"].get("interpreter_profile") or ""
-        if not profile:
-            return {"manual": "no interpreter profile is set; the owner session interprets"}
-        if profile not in await asyncio.to_thread(pi_profiles):
-            return {"manual": f"profile {profile} cannot launch the pi harness here; the owner session interprets"}
         ext = await asyncio.to_thread(runtime.runner_path)
-        if ext is None:
-            return {"manual": "the simulation runtime is not installed (claunch sim runtime install); "
-                              "the owner session interprets"}
+        if not profile or ext is None:
+            return await runner_fault(sim) or {"fault": "no-runtime", "error": "the simulation runtime went away"}
         n = int(sim.get("runner_count") or 0) + 1
         name = f"{sid}-run{n}"
         while name in getattr(manager, "_sessions", {}) or paths.session_dir(name).is_dir():
@@ -502,7 +521,11 @@ def install(app, store: Optional[sim_store.SimStore] = None):
         running = (sim.get("runner") or {}).get("session")
         if running and _live(manager, running):
             return web.json_response({"error": f"run session {running} is already running {sid}"}, status=409)
-        if body.get("runner", True) and sim["settings"].get("interpreter_profile"):
+        if body.get("runner", True) is False:
+            return web.json_response({"error": "runner: false is no longer accepted: every start launches a run "
+                                               "session; use sim_round to walk one round yourself"}, status=400)
+        fault = await runner_fault(sim)
+        if fault is None:
             res, err = await call(sims.start, sid, actor, False)
             if err:
                 return err
@@ -514,12 +537,12 @@ def install(app, store: Optional[sim_store.SimStore] = None):
                 sim = await asyncio.to_thread(sims.get, sid)
                 return web.json_response({"error": launched["failed"], "sim": sim,
                                           "notified": notify_end(sim, True)}, status=502)
-            # No runner possible: the owner interprets, as without a profile.
-            resp = await run_and_report(sid, sims.run_round, sid, actor)
-            data = json.loads(resp.text)
-            data["manual"] = launched["manual"]
-            return web.json_response(data, status=resp.status)
-        return await run_and_report(sid, sims.start, sid, actor)
+            fault = launched
+        # Nothing runs without a usable interpreter model: the start faults.
+        sim, err = await call(sims.fault, sid, actor, fault["error"])
+        if err:
+            return err
+        return web.json_response({**fault, "sim": sim}, status=409)
 
     async def h_round(request):
         sid = request.match_info["id"]

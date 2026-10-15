@@ -5636,7 +5636,7 @@ async function refreshSessionSims() {
 function applySimulationBadges() {
   const list = $("session-list");
   if (!list) return;
-  const states = {idle: "대기", running: "실행 중", stopped: "중지됨"};
+  const states = {idle: "대기", running: "실행 중", stopped: "중지됨", fault: "오류"};
   for (const li of list.querySelectorAll("li[data-name]")) {
     const sims = sessionSimCache.filter(s => s.owner === li.dataset.name);
     const old = li.querySelector(".sess-sims");

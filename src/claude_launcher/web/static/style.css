@@ -7299,6 +7299,7 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .sim-badge { display: inline-block; border-radius: 5px; background: #28313e; color: #b9c9dd; font-size: 12px; padding: 1px 8px; margin-right: 6px; }
 .sim-badge.sim-running { background: #1f4a2f; color: #a9f0bf; }
 .sim-badge.sim-stopped { background: #4a2f1f; color: #f0c9a9; }
+.sim-badge.sim-fault { background: #4a1f24; color: #f0a9b1; }
 .sim-stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; margin-bottom: 16px; }
 .sim-stat { background: var(--sim-panel); border: 1px solid var(--sim-border); border-radius: 8px; padding: 8px 12px; }
 .sim-stat span { display: block; color: var(--sim-muted); font-size: 11px; }
