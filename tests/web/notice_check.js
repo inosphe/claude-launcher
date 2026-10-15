@@ -143,6 +143,8 @@ function build(opts) {
     // The first boot restores the New tab's draft before it routes
     // (newformdraft_check).
     "restoreNewFormDraft",
+    // The sidebar PTY host badge boot() draws (claunch-xnnct.3).
+    "renderPtyHostBadge",
     code +
     "\nreturn {notify, dismissNotice, noticeClock, setDaemonOnline, boot, pollOnce," +
     " get cards() { return [...notices.keys()]; }," +
@@ -172,6 +174,7 @@ function build(opts) {
     () => {},   // refreshTermTimers (the timer line; termtimers_check)
     () => {},   // refreshTermProcs (the process line; termprocs_check)
     async () => {},   // restoreNewFormDraft (newformdraft_check)
+    () => {},   // renderPtyHostBadge
   );
 
   return { api, nodes, daemon, clock, apiCalls, timers,

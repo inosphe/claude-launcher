@@ -133,20 +133,28 @@ function build(opts) {
     (daemon.up ? { status: "ok", version: daemon.version, boot_id: daemon.boot,
                    started_at: "t-start-1" } : null);
   const apiCalls = [];
+  const apiBodies = [];
   // What the stub daemon would answer on the gate endpoints. The test sets
   // `rec` to a pending/settled record or null, and the failure flags to
   // make a POST refuse.
   const gate = { rec: null, approveFail: false, rejectFail: false,
                  extendFail: false };
-  const apiStub = async (p) => {
+  const apiStub = async (p, opts) => {
     apiCalls.push(p);
+    if (opts && opts.body) apiBodies.push([p, opts.body]);
     if (!daemon.up) throw new Error("down");
     if (p === "/api/daemon/restart-request") {
       return { json: async () => ({ request: gate.rec ? JSON.parse(JSON.stringify(gate.rec)) : null }) };
     }
     if (p === "/api/daemon/restart-request/approve") {
       if (gate.approveFail) throw new Error("refused");
-      return { json: async () => ({ ok: true, restarting: true }) };
+      // A keep restart onto a stale PTY host (claunch-xnnct.3) is a 409.
+      if (gate.approveStale && !(opts && opts.body && /pty_host|keep_stale/.test(opts.body))) {
+        return { ok: false, status: 409,
+                 json: async () => ({ error: "refused: the PTY host (pid 77) runs older code",
+                                      stale: gate.approveStale }) };
+      }
+      return { ok: true, status: 200, json: async () => ({ ok: true, restarting: true }) };
     }
     if (p === "/api/daemon/restart-request/reject") {
       if (gate.rejectFail) throw new Error("refused");
@@ -188,6 +196,8 @@ function build(opts) {
     // The first boot restores the New tab's draft before it routes
     // (newformdraft_check).
     "restoreNewFormDraft",
+    // The sidebar PTY host badge boot() draws (claunch-xnnct.3).
+    "renderPtyHostBadge",
     code +
     "\nreturn {notify, dismissNotice, noticeClock, setDaemonOnline, " +
     "refreshRestartGate, pollOnce, boot," +
@@ -209,9 +219,10 @@ function build(opts) {
     () => {},   // refreshTermWindow (the header's window strip; termwindow_check)
     () => {},   // refreshTermTimers (the timer line; termtimers_check)
     async () => {},   // restoreNewFormDraft (newformdraft_check)
+    () => {},   // renderPtyHostBadge
   );
 
-  return { api, nodes, clock, gate, apiCalls, daemon,
+  return { api, nodes, clock, gate, apiCalls, apiBodies, daemon,
            strip: () => nodes.notices.children,
            said: () => nodes.notices.children.map((c) => c.text()).join(" | ") };
 }
@@ -505,6 +516,52 @@ const clockBase = () => 1700000000000;
     await w.api.refreshRestartGate();
     check("a request without the field keeps the host",
           /PTY host: kept/.test(w.said()), w.said());
+  })();
+}
+
+/* --- a stale PTY host (claunch-xnnct.3) ---------------------------------
+   A keep restart onto a host running older code is refused with 409 and the
+   request stays pending. The card then says why, hides Approve, and offers
+   the two answers: replace the host, or keep it anyway. Each posts its
+   answer in the body, and a successful one settles the card as Approve does. */
+{
+  const shown = (actions) => actions.children
+    .filter((b) => !b.classList.contains("hidden")).map((b) => b.textContent);
+  const stale = { stale: true, pid: 77, changed: ["ptyhost/server.py"], more: 0 };
+  for (const [label, body] of [["Restart with PTY host", { pty_host: "full" }],
+                               ["Keep anyway", { keep_stale: true }]]) {
+    const w = build();
+    w.gate.rec = pending();
+    w.gate.approveStale = stale;
+    (async () => {
+      await w.api.refreshRestartGate();
+      let actions = w.strip()[0].children.find((c) => c.className.includes("gate-actions"));
+      check("before any refusal only Approve answers",
+            !shown(actions).includes(label) && shown(actions).includes("Approve"), shown(actions));
+      await actions.children.find((b) => b.textContent === "Approve").click();
+      check("a stale refusal keeps the card", w.strip().length === 1, w.said());
+      check("and says why", /runs older code/.test(w.said()), w.said());
+      actions = w.strip()[0].children.find((c) => c.className.includes("gate-actions"));
+      check("Approve gives way to the two answers",
+            !shown(actions).includes("Approve") && shown(actions).includes("Restart with PTY host")
+              && shown(actions).includes("Keep anyway"), shown(actions));
+      check("no restart is announced for the refusal", !/restarting the daemon/.test(w.said()), w.said());
+      await actions.children.find((b) => b.textContent === label).click();
+      const sent = w.apiBodies.filter(([p]) => p.endsWith("/approve")).map(([, b]) => JSON.parse(b));
+      check(`${label} posts its answer`, JSON.stringify(sent[sent.length - 1]) === JSON.stringify(body), sent);
+      check(`${label} settles like Approve`, /restarting the daemon/.test(w.said()), w.said());
+    })();
+  }
+}
+{
+  // Another approver was refused: the daemon keeps the check on the record,
+  // so a page that never clicked shows it too.
+  const w = build();
+  w.gate.rec = pending({ stale: { stale: true, pid: 78, changed: ["pty_backend.py"], more: 2 } });
+  (async () => {
+    await w.api.refreshRestartGate();
+    check("a record's stale check is shown on the card",
+          /pid 78/.test(w.said()) && /pty_backend\.py and 2 more/.test(w.said()), w.said());
   })();
 }
 

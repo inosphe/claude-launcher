@@ -21,6 +21,7 @@ host, so changing it does not make a host stale.
 
 from __future__ import annotations
 
+import time
 from typing import Dict, Optional
 
 from . import pty_backend
@@ -71,7 +72,9 @@ def info() -> dict:
     ``connected``, ``stale`` (the host's code id differs from the daemon's)
     and ``unreachable`` (setting on, no host connected: sessions spawn in
     the daemon). ``started_at`` is the host's start time (epoch seconds) so
-    a reader computes its uptime when it shows it.
+    a reader computes its uptime when it shows it; ``now`` is this
+    daemon's clock at the read, so a reader on another machine can take its
+    own clock's offset out of that sum.
     """
     daemon_code = code_id(loaded())
     host = pty_backend.current_host()
@@ -86,6 +89,7 @@ def info() -> dict:
             "stale": False,
             "started_at": None,
             "sessions": 0,
+            "now": time.time(),
         }
     stale = host.host_code != daemon_code
     return {
@@ -98,6 +102,7 @@ def info() -> dict:
         "stale": stale,
         "started_at": host.host_started_at,
         "sessions": host.session_count(),
+        "now": time.time(),
     }
 
 

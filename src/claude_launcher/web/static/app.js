@@ -22823,6 +22823,16 @@ function daemonCard() {
         ? ` · started ${new Date(daemonStartedAt).toLocaleTimeString()}`
         : "")
   ));
+  // A PTY host on older code than this daemon (claunch-xnnct.3): sessions
+  // work, but a keep restart is refused until it is replaced or kept anyway.
+  const host = daemonCache && daemonCache.pty_host;
+  if (host && host.state === "stale") {
+    card.appendChild(el(
+      "p", "home-sub pty-host-stale-line",
+      `PTY host pid ${host.pid} runs older code (${host.code || "no code id"}, ` +
+        `daemon ${host.daemon_code}) — Restart with PTY host replaces it`
+    ));
+  }
   // Two modes (claunch-xnnct.1). "keep", the default: with the daemon
   // setting pty_host on, the sessions keep running in the PTY host and the
   // successor adopts them; without it they are relaunched as always.
@@ -22865,12 +22875,34 @@ async function restartClicked(btn, label, mode, sessionsLine) {
   )) return;
   btn.disabled = true;
   btn.textContent = "Restarting…";
+  const post = (body) => api("/api/daemon/restart", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
   try {
-    await api("/api/daemon/restart", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode }),
-    });
+    let resp = await post({ mode });
+    // A keep restart that would leave the PTY host on older code is refused
+    // (claunch-xnnct.3); the person who clicked decides whether to keep it.
+    if (resp.status === 409) {
+      const refused = await resp.json().catch(() => ({}));
+      if (refused.stale && confirm(
+        `${refused.error || "The PTY host runs older code."}\n\n` +
+        "OK keeps the sessions on the old host anyway. Cancel, then " +
+        "Restart with PTY host, replaces the host (the sessions are relaunched)."
+      )) {
+        resp = await post({ mode, keep_stale: true });
+      } else {
+        btn.disabled = false;
+        btn.textContent = label;
+        return;
+      }
+    }
+    if (!resp.ok) {
+      btn.disabled = false;
+      btn.textContent = label;
+      return;
+    }
   } catch {
     btn.disabled = false;   // down already, or the auth overlay is up
     btn.textContent = label;
@@ -41413,6 +41445,80 @@ function renderRelayBadge(relay) {
   }
 }
 
+/* The PTY host badge (claunch-xnnct.3), from GET /api/daemon's pty_host.
+   Nothing polls it: boot() draws it on every load and every recovery, and
+   the uptime in the title is computed when the pointer enters the badge,
+   from the host's start time and the offset between this browser's clock
+   and the daemon's at the read. */
+let ptyHostState = null;
+let ptyHostSkew = 0;   // browser clock minus daemon clock, seconds
+
+const PTY_HOST_TEXT = {
+  off: "pty host: off",
+  connected: "pty host",
+  stale: "pty host: stale",
+  unreachable: "pty host: unreachable",
+};
+
+const PTY_HOST_MEANING = {
+  off: "pty_host is off: the daemon owns the session PTYs, and a daemon restart relaunches every session",
+  connected: "the PTY host owns the session PTYs: a daemon restart keeps the sessions",
+  stale: "the PTY host runs older code than the daemon -- 'claunch daemon restart --with-pty-host' replaces it (the sessions are relaunched)",
+  unreachable: "pty_host is on, but no host is connected: sessions spawn in the daemon",
+};
+
+function fmtHostUptime(seconds) {
+  if (!(seconds >= 0)) return "";
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  if (d) return `${d}d ${h}h`;
+  if (h) return `${h}h ${m}m`;
+  if (m) return `${m}m`;
+  return `${Math.floor(seconds)}s`;
+}
+
+function ptyHostTitle(state) {
+  const kind = PTY_HOST_TEXT[state.state] ? state.state : "off";
+  const lines = [PTY_HOST_MEANING[kind], "", `state: ${kind}`];
+  if (state.pid) lines.push(`pid: ${state.pid}`);
+  if (state.proto != null) lines.push(`proto: ${state.proto}`);
+  if (state.code || kind === "connected" || kind === "stale") {
+    lines.push(`code: ${state.code || "(none reported)"}`);
+  }
+  if (kind === "stale" && state.daemon_code) lines.push(`daemon code: ${state.daemon_code}`);
+  if (kind === "connected" || kind === "stale") lines.push(`sessions: ${state.sessions || 0}`);
+  if (typeof state.started_at === "number") {
+    const now = Date.now() / 1000 - ptyHostSkew;
+    lines.push(`uptime: ${fmtHostUptime(now - state.started_at)}`);
+  }
+  return lines.join("\n");
+}
+
+function renderPtyHostBadge(state) {
+  const badge = $("pty-host-badge");
+  if (!badge) return;
+  // A daemon older than the field has nothing to say about it.
+  if (!state || typeof state !== "object") {
+    badge.classList.add("hidden");
+    ptyHostState = null;
+    return;
+  }
+  ptyHostState = state;
+  ptyHostSkew = typeof state.now === "number" ? Date.now() / 1000 - state.now : 0;
+  const kind = PTY_HOST_TEXT[state.state] ? state.state : "off";
+  badge.textContent = kind === "connected" && state.pid
+    ? `pty host: ${state.pid}` : PTY_HOST_TEXT[kind];
+  badge.className = `badge pty-host-${kind}`;
+  badge.title = ptyHostTitle(state);
+  if (!badge.dataset.hoverBound) {
+    badge.dataset.hoverBound = "1";
+    badge.addEventListener("mouseenter", () => {
+      if (ptyHostState) badge.title = ptyHostTitle(ptyHostState);
+    });
+  }
+}
+
 async function refreshMeshList(options) {
   // `cached`: redraw from the last answer, with no request -- a project
   // pick, which only changes which of the meshes in hand are drawn.
@@ -46585,19 +46691,39 @@ function noticePanelGateRow(type, rec) {
       "div", "notice-sub gate-clock",
       `auto-approves in ${gateCountdown(rec.deadline)}`
     ));
-    actions.appendChild(noticePanelButton(
-      "Approve", "approve",
-      "the daemon restarts now — every attached terminal goes down with it",
-      async (btn) => {
-        if (await gatePost("/api/daemon/restart-request/approve", btn)) {
-          announceRestartAsked(
-            `approved at ${noticeClock()} — the page reconnects on its own ` +
-              "once the successor is up"
-          );
-          refreshRestartGate();
-        }
+    // A stale refusal (claunch-xnnct.3) replaces Approve with its two answers.
+    const stale = restartGateStale && restartGateStale.rid === rid
+      ? restartGateStale
+      : (rec.stale ? { error: "", check: rec.stale } : null);
+    if (stale) row.appendChild(el("div", "notice-sub gate-stale", restartStaleText(stale)));
+    const approveWith = (body) => async (btn) => {
+      if (await restartGateApprove(btn, body) === "ok") {
+        announceRestartAsked(
+          `approved at ${noticeClock()} — the page reconnects on its own ` +
+            "once the successor is up"
+        );
+        restartGateStale = null;
+        refreshRestartGate();
       }
-    ));
+    };
+    if (stale) {
+      actions.appendChild(noticePanelButton(
+        "Restart with PTY host", "approve",
+        "the sessions end and are relaunched on a new host that runs the current code",
+        approveWith({ pty_host: "full" })
+      ));
+      actions.appendChild(noticePanelButton(
+        "Keep anyway", "force",
+        "a keep restart anyway: the PTY host keeps running its older code",
+        approveWith({ keep_stale: true })
+      ));
+    } else {
+      actions.appendChild(noticePanelButton(
+        "Approve", "approve",
+        "the daemon restarts now — every attached terminal goes down with it",
+        approveWith({})
+      ));
+    }
     actions.appendChild(noticePanelButton(
       "+5 min", "gate-extend",
       "not a decision: the deadline moves out and the request stays open",
@@ -47023,6 +47149,49 @@ async function gatePost(path, btn) {
 /* What a restart request does with the PTY host (claunch-xnnct.1): the
    asker's choice, applied on approval -- by a person or by the timeout. A
    record from a daemon older than the field reads as the default. */
+/* Approve a restart request with the approver's answer in the body
+   (claunch-xnnct.3). A keep restart onto a PTY host running older code is
+   refused with 409 and the request stays pending; the card then shows why
+   and offers the two answers. Returns "ok", "stale" or "failed". */
+async function restartGateApprove(btn, body) {
+  btn.disabled = true;
+  let resp;
+  try {
+    resp = await api("/api/daemon/restart-request/approve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {}),
+    });
+  } catch {
+    btn.disabled = false;
+    return "failed";
+  }
+  if (resp.ok) return "ok";
+  btn.disabled = false;
+  if (resp.status === 409) {
+    const refused = await resp.json().catch(() => ({}));
+    if (refused.stale) {
+      restartGateStale = { rid: restartGateRid, error: refused.error || "", check: refused.stale };
+      refreshRestartGate();
+      return "stale";
+    }
+  }
+  return "failed";
+}
+
+/* The stale refusal for the pending request, kept between repaints. */
+let restartGateStale = null;
+
+/* The card's stale line: why a keep restart was refused. */
+function restartStaleText(stale) {
+  const check = stale.check || {};
+  const files = (check.changed || []).join(", ") +
+    (check.more ? ` and ${check.more} more` : "");
+  return stale.error ||
+    `refused: the PTY host (pid ${check.pid}) runs code that differs from ` +
+      `what the restarted daemon will load (${files || "unknown files"})`;
+}
+
 function restartModeText(rec) {
   return rec && rec.pty_host === "full"
     ? "PTY host: restarted too — sessions end and are relaunched (--with-pty-host)"
@@ -47067,8 +47236,19 @@ async function refreshRestartGate() {
     const sub = el("div", "notice-sub");
     const reasonLine = el("div", "notice-sub gate-reason");
     const modeLine = el("div", "notice-sub gate-mode");
+    const staleLine = el("div", "notice-sub gate-stale hidden");
     const actions = el("div", "gate-actions");
-    const approve = el("button", "wf-btn approve", "Approve");
+    const approve = el("button", "wf-btn approve gate-approve", "Approve");
+    // The two answers to a stale refusal (claunch-xnnct.3), shown only then.
+    const replaceHost = el("button", "wf-btn approve gate-stale-full hidden",
+      "Restart with PTY host");
+    replaceHost.title =
+      "approve with the PTY host replaced: the sessions end and are " +
+      "relaunched on a new host that runs the current code";
+    const keepStale = el("button", "wf-btn force gate-stale-keep hidden", "Keep anyway");
+    keepStale.title =
+      "approve a keep restart anyway: the sessions keep running on the " +
+      "PTY host, which keeps running its older code";
     const reject = el("button", "wf-btn clear", "Reject");
     approve.title =
       "the daemon restarts now — or the timeout counts the request as " +
@@ -47080,9 +47260,9 @@ async function refreshRestartGate() {
       "not a decision: the deadline moves out and the request stays open, " +
       "so the countdown stops answering for you while you read. It can be " +
       "pressed as many times as you need";
-    approve.addEventListener("click", async (ev) => {
+    const approveWith = (btn, body) => async (ev) => {
       ev.stopPropagation();
-      if (await gatePost("/api/daemon/restart-request/approve", approve)) {
+      if (await restartGateApprove(btn, body) === "ok") {
         // The daemon's own door: it finishes the reply, drains, and spawns
         // the successor; label the gap the way the daemon card's button
         // does, so the outage is not read as a mystery.
@@ -47090,9 +47270,13 @@ async function refreshRestartGate() {
           `approved at ${noticeClock()} — the page reconnects on its own ` +
             "once the successor is up"
         );
+        restartGateStale = null;
         dismissNotice(NOTICE_GATE);
       }
-    });
+    };
+    approve.addEventListener("click", approveWith(approve, {}));
+    replaceHost.addEventListener("click", approveWith(replaceHost, { pty_host: "full" }));
+    keepStale.addEventListener("click", approveWith(keepStale, { keep_stale: true }));
     reject.addEventListener("click", async (ev) => {
       ev.stopPropagation();
       if (await gatePost("/api/daemon/restart-request/reject", reject)) {
@@ -47106,6 +47290,8 @@ async function refreshRestartGate() {
       await gatePost("/api/daemon/restart-request/extend", extend);
     });
     actions.appendChild(approve);
+    actions.appendChild(replaceHost);
+    actions.appendChild(keepStale);
     actions.appendChild(extend);
     actions.appendChild(reject);
     actions.appendChild(gateHideButton("restart", () => restartGateRid, NOTICE_GATE,
@@ -47116,6 +47302,7 @@ async function refreshRestartGate() {
     node.appendChild(sub);
     node.appendChild(reasonLine);
     node.appendChild(modeLine);
+    node.appendChild(staleLine);
     node.appendChild(actions);
     host.appendChild(node);
     const entry = { node, timer: null };
@@ -47142,6 +47329,22 @@ async function refreshRestartGate() {
   }
   const modeLine = card.node.querySelector(".gate-mode");
   if (modeLine) modeLine.textContent = restartModeText(rec);
+  // A stale refusal (claunch-xnnct.3): the one this page received, or the
+  // check the daemon kept on the record when another approver was refused.
+  const stale = restartGateStale && restartGateStale.rid === rid
+    ? restartGateStale
+    : (rec.stale ? { error: "", check: rec.stale } : null);
+  const staleLine = card.node.querySelector(".gate-stale");
+  if (staleLine) {
+    staleLine.classList.toggle("hidden", !stale);
+    staleLine.textContent = stale ? restartStaleText(stale) : "";
+  }
+  for (const sel of [".gate-stale-full", ".gate-stale-keep"]) {
+    const b = card.node.querySelector(sel);
+    if (b) b.classList.toggle("hidden", !stale);
+  }
+  const approveBtn = card.node.querySelector(".gate-approve");
+  if (approveBtn) approveBtn.classList.toggle("hidden", !!stale);
   // Extend has no limit (claunch-mm8zv); a click in flight disables it until
   // the post returns, and the repaint here re-enables it.
   const extendBtn = card.node.querySelector(".gate-extend");
@@ -47501,6 +47704,7 @@ async function boot() {
   badge.classList.remove("off");
   if (info.boot_id) daemonBoot = info.boot_id;
   renderRelayBadge(info.relay);
+  renderPtyHostBadge(info.pty_host);
   await Promise.all([
     refreshProfiles(),
     refreshHarnesses(),
