@@ -2305,7 +2305,7 @@ class SessionManager:
                            "일시 중지된 세션 재개" if action == "resume" else "세션 재실행")
         return relaunched
 
-    def archive(self, name: str) -> AnySession:
+    def archive(self, name: str, *, reason: Optional[str] = None) -> AnySession:
         """Move an exited record out of the working fleet while retaining it.
 
         The definition, conversation id, output log and lineage remain in
@@ -2318,6 +2318,10 @@ class SessionManager:
         the verb for a live session, and every operator route reaches for
         that one — this one is what the bulk "archive the exited ones" pass
         calls, where the refusal is the selection working.
+
+        ``reason`` lands on the archive event (``auto-archive`` for the
+        clock in :mod:`.auto_archive`), so the history tells it apart from a
+        person's archive.
         """
         session = self.get(name)
         if not session.exited:
@@ -2332,7 +2336,8 @@ class SessionManager:
                 timespec="seconds"
             )
             self.persist()
-            self.events.record(session, "archive", "세션 보관")
+            self.events.record(session, "archive", "세션 보관",
+                               **({"reason": reason} if reason else {}))
         return session
 
     async def stop_and_archive(
