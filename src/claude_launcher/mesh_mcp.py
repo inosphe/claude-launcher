@@ -650,6 +650,57 @@ TOOLS = [
         },
     },
     {
+        "name": "resume_session",
+        "description": (
+            "Ask the user to bring an EXITED session back (claunch-yjhgx): "
+            "the session is relaunched on its own conversation, as the "
+            "operator's Respawn button does. Nothing is relaunched by this "
+            "call. It files a request that the user answers on the web UI's "
+            "notification card, the same kind of approval a daemon restart "
+            "waits for, and there is no deadline: it waits until a person "
+            "approves or rejects it. Do not wait in a loop or call it again "
+            "to check. When the user answers, a '[claunch resume-request "
+            "<id>]' block is typed into your terminal. 'reason' is the whole "
+            "basis the user decides on: say what you need that session for "
+            "and why a running session cannot do it. Any exited session may "
+            "be named. A running or held session is refused (message it "
+            "instead), and so is a target that already has a pending "
+            "request. With 'request' alone it reads one of your requests; "
+            "add 'withdraw: true' to take it back."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session": {
+                    "type": "string",
+                    "description": (
+                        "the exited session to resume, by session name "
+                        "(not mesh handle)"
+                    ),
+                },
+                "reason": {
+                    "type": "string",
+                    "description": (
+                        "why it should come back, shown to the user on the "
+                        "approval card; required when filing"
+                    ),
+                },
+                "request": {
+                    "type": "string",
+                    "description": (
+                        "an existing request id: read it (or withdraw it "
+                        "with 'withdraw') instead of filing a new one"
+                    ),
+                },
+                "withdraw": {
+                    "type": "boolean",
+                    "description": "with 'request': take your pending request back",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "handoff",
         "description": (
             "Hand what THIS session did to another session, then end this "
@@ -1068,6 +1119,8 @@ def call_tool(name: str, args: dict) -> dict:
         return _client().post(
             f"/api/sessions/{_session()}/children/{child}/kill{q}"
         )
+    if name == "resume_session":
+        return _resume_session(args)
     if name == "handoff":
         text = str(args.get("text") or "")
         if not text.strip():
@@ -1260,6 +1313,39 @@ _SPAWN_RENAMED = {
     "no_issue_auto": ("beads", "none-auto"),
     "no_daemon_prompt": ("daemon_prompt", False),
 }
+
+
+def _resume_session(args: dict) -> dict:
+    """File, read or withdraw a request to resume an exited session. Filing
+    returns at once: the user's answer arrives in the terminal, so the tool
+    never holds a call open on a person (the request has no deadline)."""
+    rid = str(args.get("request") or "").strip()
+    if rid:
+        path = f"/api/resume-requests/{quote(rid, safe='')}"
+        if args.get("withdraw"):
+            return _client().post(f"{path}/withdraw", {"session": _session()})
+        return _client().get(path)
+    if args.get("withdraw"):
+        raise MeshMcpError("'withdraw' needs 'request': the id of your pending request")
+    target = str(args.get("session") or "").strip()
+    if not target:
+        raise MeshMcpError("'session' is required: the exited session to resume")
+    reason = str(args.get("reason") or "").strip()
+    if not reason:
+        raise MeshMcpError(
+            "'reason' is required: the user decides on it alone -- say what you "
+            "need that session for"
+        )
+    reply = _client().post(
+        "/api/resume-requests",
+        {"session": _session(), "target": target, "reason": reason},
+    )
+    reply["next"] = (
+        "filed and waiting on the user, with no deadline. End your turn or "
+        "carry on with other work; the answer is typed into this terminal as "
+        "a '[claunch resume-request <id>]' block."
+    )
+    return reply
 
 
 def _spawn(args: dict) -> dict:
