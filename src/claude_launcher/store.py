@@ -387,6 +387,15 @@ DAEMON_DEFAULTS = {
     # of <daemon dir>/logs/sysperf.log, rotated at 2 MB x 5 (daemon/sysperf.py,
     # claunch-zuk0b). 0 turns the collector off. Read when the daemon starts.
     "sysperf_interval_s": 5.0,
+    # Killed sessions archived by the daemon on its own (daemon/auto_archive.py,
+    # claunch-wz6a5): every auto_archive_interval_s seconds, archive at most
+    # auto_archive_batch records that are killed (not paused/held/failed)
+    # and ended at least auto_archive_killed_days days ago, oldest first, so
+    # an old backlog drains a batch per tick. Days or batch 0 turns it off.
+    # Read LIVE on every tick, no restart needed.
+    "auto_archive_killed_days": 7.0,
+    "auto_archive_interval_s": 600.0,
+    "auto_archive_batch": 20,
     # Run session PTYs in a separate PTY host process (claunch-xnnct, stage
     # 1: POSIX only; a daemon exit still ends its sessions). Read at start.
     "pty_host": False,

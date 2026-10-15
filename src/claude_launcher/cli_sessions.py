@@ -2519,6 +2519,8 @@ _LIVE_KEYS = (
     "qa_nudge_max_chars", "jev_model", "jev_base_url", "jev_api_key_env",
     # read at each session spawn
     "wsl_hide_reg_exe",
+    # read by the auto-archive clock on every tick
+    "auto_archive_killed_days", "auto_archive_interval_s", "auto_archive_batch",
     # read by the reposync CLI itself on every sync, never by the daemon
     "reposync_push",
 )

@@ -635,6 +635,10 @@ def build_app(
     except (TypeError, ValueError):
         sysperf_interval = sysperf_mod.INTERVAL
     sysperf_mod.install(app, interval=sysperf_interval)
+    # Killed sessions archived after auto_archive_killed_days, a batch per
+    # tick (daemon/auto_archive.py, claunch-wz6a5).
+    from . import auto_archive
+    auto_archive.install(app, manager)
     # The Stats page reads transcripts in a child process, off this loop's
     # GIL (claunch-3r94d); started on first use.
     app["stats_worker"] = statsworker.StatsWorker()
