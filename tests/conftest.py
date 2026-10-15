@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import sys
@@ -231,6 +232,34 @@ def ptyhost_leak_check():
             proc.wait(timeout=5)
     if leaked:
         pytest.fail(f"PTY host(s) left running: {[p.pid for p in leaked]}")
+
+
+@contextlib.contextmanager
+def restored_cwd():
+    """Put the process's directory back as it was when the block began.
+
+    The daemon's boot moves the process to ``daemon_client.daemon_cwd()``
+    (claunch-2yiij.1), and a test that runs ``daemon.__main__.main()`` in
+    process takes that move with it. Left in place, every later test on the
+    same worker starts in that directory instead of the one pytest gave it.
+    """
+    before = os.getcwd()
+    try:
+        yield before
+    finally:
+        try:
+            moved = os.getcwd() != before
+        except OSError:  # the directory the test moved to was removed
+            moved = True
+        if moved:
+            os.chdir(before)
+
+
+@pytest.fixture(autouse=True)
+def cwd_restore():
+    """No test leaves the worker in another directory (claunch-2yiij.1)."""
+    with restored_cwd():
+        yield
 
 
 @pytest.fixture(autouse=True)

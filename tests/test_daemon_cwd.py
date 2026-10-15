@@ -153,3 +153,30 @@ def test_a_cwd_less_fallback_answers_the_main_checkout(repo, linked, monkeypatch
     monkeypatch.chdir(linked)
     monkeypatch.chdir(daemon_client.daemon_cwd())
     assert Path(cflow_state.resolve_cwd(None)) == repo
+
+
+def test_a_test_that_boots_the_daemon_in_process_leaves_the_directory_alone(
+        repo, linked, monkeypatch, request):
+    """``main()`` moves the process; in a test that move would outlive the
+    test and every later one on the worker would start in the daemon's
+    directory. The autouse ``cwd_restore`` puts it back -- this boot runs
+    without ``monkeypatch.chdir`` to stand for the callers that have none."""
+    from conftest import restored_cwd
+
+    assert "cwd_restore" in request.fixturenames
+    monkeypatch.setattr(instance_manifest, "apply", lambda: None)
+    monkeypatch.setattr(instance_manifest, "pinned_port", lambda: None)
+
+    def booted(_foreground):
+        raise _Booted
+
+    monkeypatch.setattr(daemon_main, "_setup_logging", booted)
+    os.chdir(linked)
+    try:
+        with restored_cwd() as before:
+            with pytest.raises(_Booted):
+                daemon_main.main([])
+            assert Path(os.getcwd()) == repo
+        assert os.getcwd() == before
+    finally:
+        os.chdir(request.config.invocation_params.dir)
