@@ -8129,6 +8129,18 @@ async def _create_session(request: web.Request, body: dict) -> Tuple[int, dict]:
         choice = body.pop("worktree")
         if choice is True or choice is None:
             choice = ""
+        if not str(choice).strip():
+            # The generated name is the session's, so the session's name is
+            # settled first, as a spawn does for its child (claunch-2yiij.3):
+            # the default would read the pane or session from this daemon's
+            # own environment, which is nobody's. A taken name is refused
+            # here, with the status stage() below would give it, before a
+            # checkout is cut.
+            try:
+                body["name"] = manager.settle_name(str(body.get("name") or ""))
+            except ManagerError as exc:
+                return 409 if "already exists" in str(exc) else 400, {"error": str(exc)}
+            choice = worktree_mod.default_name(token=body["name"])
         try:
             base = cflow_state.resolve_cwd(body.get("cwd") or None)
             tree = worktree_mod.resolve(
@@ -10547,8 +10559,10 @@ async def h_session_migrate(request: web.Request) -> web.Response:
                 "nothing to make a worktree of — pass 'cwd' instead",
             )
         try:
+            # Unnamed, it is named after the session moving into it -- not
+            # after the pane in this daemon's environment (claunch-2yiij.3).
             wt = worktree_mod.create(
-                root, str(wt_name).strip() or worktree_mod.default_name()
+                root, str(wt_name).strip() or worktree_mod.default_name(token=name)
             )
         except worktree_mod.WorktreeError as exc:
             return json_error(400, str(exc))

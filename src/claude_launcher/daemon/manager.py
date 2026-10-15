@@ -1265,8 +1265,7 @@ class SessionManager:
         # the checkout is cut before the record exists. Checked here too: a
         # name already taken must refuse BEFORE a directory is on disk, which
         # is the same rule the worktree's own placement below keeps.
-        name = str(request.get("name") or "").strip() or self._auto_name()
-        self._check_name(name)
+        name = self.settle_name(str(request.get("name") or ""))
         # After the policy and before the record: a checkout is a thing on
         # disk, so it is made only once nothing left can refuse the request.
         child = spawn_mod.make_worktree(child, request, parent=parent, name=name)
@@ -1325,6 +1324,18 @@ class SessionManager:
             # fact about this session, not about the policy.
             parent=session.sdef.to_dict() if session else None,
         )
+
+    def settle_name(self, name: str = "") -> str:
+        """The name a session about to be created will have, checked now.
+
+        For a caller that must name something after the session before its
+        record exists -- the worktree cut for it -- so a name already taken
+        is refused before anything is on disk. Empty means the next free
+        ``sN`` (:meth:`_auto_name`).
+        """
+        name = (name or "").strip() or self._auto_name()
+        self._check_name(name)
+        return name
 
     def _auto_name(self) -> str:
         """The first free ``sN``.
