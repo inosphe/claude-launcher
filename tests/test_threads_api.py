@@ -105,6 +105,21 @@ def test_user_opens_and_writes_and_the_session_is_told(tmp_path):
     run(tmp_path, scenario)
 
 
+def test_an_untitled_empty_thread_is_opened_quietly_and_written_later(tmp_path):
+    """claunch-bvbmi: neither a title nor a first message is required; an
+    empty thread types nothing into the session until its first message."""
+    async def scenario(req, mgr):
+        res = await req("POST", "/api/threads", {"to": "s1", "title": ""})
+        tid = res["thread"]["id"]
+        assert res["thread"]["title"] == "Thread #1" and res["message"] is None
+        assert "delivered" not in res and mgr.sessions["s1"].delivered == []
+        res = await req("POST", f"/api/threads/{tid}/messages", {"text": "now the question"})
+        assert res["delivered"] is True
+        assert mgr.sessions["s1"].delivered[-1].startswith(f'{threads_api.PREFIX} {tid} "Thread #1"]')
+        assert (await req("POST", "/api/threads", {"to": "s1"}))["thread"]["title"] == "Thread #2"
+    run(tmp_path, scenario)
+
+
 def test_identity_rules(tmp_path):
     async def scenario(req, mgr):
         await req("POST", "/api/threads", {"title": "no target"}, status=400)

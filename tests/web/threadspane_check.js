@@ -262,6 +262,8 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   assert.deepEqual(calls.filter((c) => c[1] === "/api/threads").pop(), ["POST", "/api/threads", {to: "s1", title: "Deploy", text: "when?"}]);
   assert.match(host.querySelector(".th-head").text(), /전달하지 못했습니다/);
 
+  assert.ok(!host.querySelector(".th-pane").classList.contains("th-solo"), "a shown thread keeps the two halves");
+
   // unmount stops the poll and empties the host
   P.unmount();
   assert.equal(host.children.length, 0);
@@ -302,6 +304,35 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   P.mount(host, "s1", {api, storageKey: "k"});
   assert.ok(P.focus.length === 2, "focus(session, tid)");
   await settle();
+  P.unmount();
+
+  /* claunch-bvbmi: with no thread the list takes the whole width, and a
+     thread opens with neither a title nor a first message */
+  const none = [];
+  const calls2 = [];
+  const api2 = async (p, opts = {}) => {
+    calls2.push([opts.method || "GET", p, opts.body ? JSON.parse(opts.body) : undefined]);
+    let doc = {};
+    if (p.startsWith("/api/threads?session=")) doc = {session: "s2", threads: none, open: none.length, agent_seq: 0};
+    else if (p === "/api/threads") {
+      none.push({id: "th-7", title: "Thread #1", status: "open", opened_by: "user", last_seq: 0, last: null});
+      doc = {thread: none[0], message: null};
+    } else if (/^\/api\/threads\/th-7\?after=/.test(p)) doc = {thread: none[0], messages: []};
+    return {ok: true, status: 200, json: async () => doc};
+  };
+  const host2 = document.createElement("div");
+  P.mount(host2, "s2", {api: api2, storageKey: "k2"});
+  await settle();
+  assert.ok(host2.querySelector(".th-pane").classList.contains("th-solo"), "no thread: the list fills the pane");
+  host2.querySelector(".th-new").fire("click");
+  await settle();
+  host2.querySelector(".th-newform .term-btn").fire("click");
+  await settle();
+  assert.deepEqual(calls2.filter((c) => c[1] === "/api/threads").pop(), ["POST", "/api/threads", {to: "s2", title: ""}],
+                   "시작 with nothing typed opens an untitled, empty thread");
+  assert.ok(!host2.querySelector(".th-pane").classList.contains("th-solo"), "the new thread takes the right half");
+  assert.equal(host2.querySelector(".th-convo-title").textContent, "Thread #1");
+  assert.equal(document.activeElement, host2.querySelector(".th-compose .th-text"), "its composer has the focus");
   P.unmount();
 
   /* the header button's rail (app.js) */

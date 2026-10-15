@@ -123,7 +123,7 @@ def test_t5b_rail_replies(st):
 
 def test_t6_bad_input(st):
     with pytest.raises(S.ThreadError, match="title"):
-        st.open(S.USER, "s1", "  ")
+        st.open(S.USER, "s1", "x" * (S.MAX_TITLE + 1))
     with pytest.raises(S.ThreadError, match="session"):
         st.open(S.USER, "", "t")
     tid = st.open(S.USER, "s1", "t")["thread"]["id"]
@@ -139,6 +139,22 @@ def test_t6_bad_input(st):
         st.open(S.USER, "s1", f"t{i}")
     with pytest.raises(S.Conflict):
         st.open(S.USER, "s1", "one too many")
+
+
+def test_t6b_blank_title_takes_the_next_default_name(st):
+    """claunch-bvbmi: a thread opened without a title is ``Thread #N``, N
+    counting the session's threads (closed ones too) and skipping a title
+    already taken; the first message stays optional."""
+    first = st.open(S.USER, "s1", "  ")
+    assert first["thread"]["title"] == "Thread #1" and first["message"] is None
+    assert st.read(first["thread"]["id"])["messages"] == []
+    st.set_status(S.USER, first["thread"]["id"], "closed")
+    assert st.open(S.USER, "s1", None)["thread"]["title"] == "Thread #2"
+    st.open(S.USER, "s1", "Thread #4")
+    assert st.open(S.USER, "s1", "")["thread"]["title"] == "Thread #5"   # 4 taken by hand
+    assert st.open(S.USER, "s2", "")["thread"]["title"] == "Thread #1"   # per session
+    named = st.open("s2", "s2", "", "fyi")
+    assert named["thread"]["title"] == "Thread #2" and named["message"]["body"] == "fyi"
 
 
 def test_t7_read_pages(st):

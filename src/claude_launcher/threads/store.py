@@ -134,6 +134,16 @@ def _excerpt(body: str) -> str:
     return line if len(line) <= RAIL_EXCERPT else line[:RAIL_EXCERPT - 1] + "…"
 
 
+def _default_title(db, session: str) -> str:
+    """``Thread #N`` for a thread opened without a title: N counts the
+    session's threads (closed ones too), moved past a title already taken."""
+    n = db.execute("SELECT COUNT(*) FROM threads WHERE session = ?", (session,)).fetchone()[0] + 1
+    while db.execute("SELECT 1 FROM threads WHERE session = ? AND title = ?",
+                     (session, f"Thread #{n}")).fetchone():
+        n += 1
+    return f"Thread #{n}"
+
+
 def _author(actor: str) -> str:
     return USER if actor == USER else AGENT
 
@@ -245,16 +255,19 @@ class ThreadStore:
 
     def open(self, actor: str, session: str, title, text=None, *, qa=None) -> dict:
         """A new thread in ``session``, optionally with its first message
-        and the QA question it is about (``qa``)."""
+        and the QA question it is about (``qa``). A blank title is given the
+        session's next default name (``Thread #N``)."""
         session = str(session or "").strip()
         if not session:
             raise ThreadError("session is required: the session the thread belongs to")
         if actor != USER and actor != session:
             raise Forbidden(f"session {actor} may open threads only in its own conversation, not in {session}")
-        title = _text(title, "title", MAX_TITLE)
+        title = _text(title, "title", MAX_TITLE, required=False)
         body = _text(text, "text", MAX_BODY, required=False)
         qa = _qa_id(qa)
         with self._write() as db:
+            if not title:
+                title = _default_title(db, session)
             live = db.execute(
                 "SELECT COUNT(*) FROM threads WHERE session = ? AND status = 'open'", (session,)
             ).fetchone()[0]

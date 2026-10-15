@@ -7533,6 +7533,10 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .th-chip { font-size: 10px; color: #7d8590; border: 1px solid #30363d; border-radius: 8px; padding: 0 5px; }
 .th-dot { color: #d29922; font-size: 10px; flex-shrink: 0; }
 .th-main { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; min-height: 0; }
+/* No thread on screen (none yet): the list and the new-thread form take the
+   pane's whole width instead of a 220px column beside an empty half. */
+.th-solo .th-side { flex: 1 1 auto; }
+.th-solo .th-main { display: none; }
 .th-convo-head { display: flex; align-items: baseline; gap: 8px; padding-bottom: 4px;
   border-bottom: 1px solid #21262d; }
 .th-convo-title { font-size: 14px; margin: 0; flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
