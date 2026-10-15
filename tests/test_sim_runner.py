@@ -314,12 +314,15 @@ DRIVER = textwrap.dedent("""
 """)
 
 
-def drive(tmp_path, app, sid):
+def drive(tmp_path, app, sid, ask=None):
+    """Run the campaign against ``app``; ``ask`` replaces the scripted
+    answers (and the output) of :data:`DRIVER` with its own."""
     node = shutil.which("node")
     if not node:
         pytest.skip("Node.js is required for the campaign loop")
     driver = tmp_path / "driver.mjs"
-    driver.write_text(DRIVER % {"campaign": json.dumps(CAMPAIGN.as_uri())}, encoding="utf-8")
+    script = DRIVER if ask is None else DRIVER[:DRIVER.index("const model = {")] + textwrap.dedent(ask)
+    driver.write_text(script % {"campaign": json.dumps(CAMPAIGN.as_uri())}, encoding="utf-8")
 
     async def go():
         async with TestClient(TestServer(app)) as c:
@@ -372,7 +375,8 @@ def test_editor_proposes_edits_after_the_campaign(tmp_path):
     sims.patch_model(sim["id"], "s1", {"machines": [{"id": "door", "states": ["closed", "open"], "initial": "closed"}],
                                        "events": [{"name": "open", "kind": "actor"}],
                                        "rules": [{"id": "r.open", "on": {"event": "open"}, "when": {"sm": "door", "is": "closed"},
-                                                  "do": [{"sm": "door", "to": "open"}], "provisional": {"why": "x"}}]})
+                                                  "do": [{"sm": "door", "to": "open"}],
+                                                  "source": [{"ref": "spec.md", "quote": "The door opens when closed."}]}]})
     sims.run_round(sim["id"], "s1")
     key = "unhandled|door|open|open"
     sims.resolve(sim["id"], "s1", [{"key": key, "action": "ask", "question": "and then?"}])
@@ -383,3 +387,67 @@ def test_editor_proposes_edits_after_the_campaign(tmp_path):
     (p,) = sims.proposals(sim["id"]).values()
     assert p["kind"] == "complete" and p["findings"] == [key] and p["by"] == "sim-run"
     assert (root / "spec.md").read_text(encoding="utf-8") == SPEC
+
+
+@pytest.mark.parametrize("sources", [[], ["spec.md"]])
+def test_editor_is_not_asked_for_a_finding_on_provisional_rules_only(tmp_path, sources):
+    # Its path ran on a provisional rule alone: no source text says it. Without
+    # sources there is also no file to edit; with them the finding still has
+    # nothing in the sources to change (claunch-efnbt.10).
+    app, sims, mgr, owner, run, root = setup(tmp_path)
+    sim = sims.create(title="door", owner="s1", actor="s1", root=str(root), sources=sources,
+                      settings={"max_edits": 2, "purpose": "design"})
+    sims.patch_model(sim["id"], "s1", {"machines": [{"id": "door", "states": ["closed", "open"], "initial": "closed"}],
+                                       "events": [{"name": "open", "kind": "actor"}],
+                                       "rules": [{"id": "r.open", "on": {"event": "open"}, "when": {"sm": "door", "is": "closed"},
+                                                  "do": [{"sm": "door", "to": "open"}], "provisional": {"why": "x"}}]})
+    sims.run_round(sim["id"], "s1")
+    key = "unhandled|door|open|open"
+    sims.resolve(sim["id"], "s1", [{"key": key, "action": "ask", "question": "and then?"}])
+    sims.answer(sim["id"], S.USER, key, "it stays open")
+    assert sims.edit_targets(sim["id"]) == []
+    sims.attach_runner(sim["id"], "sim-run")
+    got = drive(tmp_path, app, sim["id"])
+    assert not any(a.startswith("B:edit:") for a in got["asked"]) and sims.proposals(sim["id"]) == {}
+
+
+def test_campaign_triage_sorts_findings_on_provisional_rules_as_design(tmp_path):
+    # A finding reached through a provisional rule takes design|intended|decide;
+    # one through quoted rules only keeps model|spec|intended (claunch-efnbt.10).
+    app, sims, mgr, owner, run, root = setup(tmp_path)
+    sim = sims.create(title="door", owner="s1", actor="s1", root=str(root), sources=["spec.md"])
+    sims.patch_model(sim["id"], "s1", {
+        "machines": [{"id": "door", "states": ["closed", "open", "locked"], "initial": "closed"}],
+        "events": [{"name": "open", "kind": "actor"}, {"name": "lock", "kind": "actor"}],
+        "rules": [{"id": "r.open", "on": {"event": "open"}, "when": {"sm": "door", "is": "closed"},
+                   "do": [{"sm": "door", "to": "open"}],
+                   "source": [{"ref": "spec.md", "quote": "The door opens when closed."}]},
+                  {"id": "r.lock", "on": {"event": "lock"}, "when": {"sm": "door", "is": "closed"},
+                   "do": [{"sm": "door", "to": "locked"}], "provisional": {"why": "x"}}]})
+    sims.start(sim["id"], "s1", round=False)
+    sims.attach_runner(sim["id"], "sim-run")
+    got = drive(tmp_path, app, sim["id"], ask=TRIAGE_ASK)
+    tri = {k: f["triage"]["verdict"] for k, f in sims.findings(sim["id"]).items() if f.get("triage")}
+    assert tri["unhandled|door|open|open"] == "spec"        # passed r.open (quoted) only
+    assert tri["unhandled|door|locked|open"] == "decide"    # passed r.lock (provisional)
+    prompts = got["prompts"]
+    assert any('"provisional"' in p and "design -- the design lacks a rule here" in p for p in prompts)
+    assert any("decide -- the path ran through provisional rules" in p for p in prompts if "interpret gaps" in p)
+
+
+TRIAGE_ASK = r"""
+    const asked = [], prompts = [];
+    const ask = async (role, key, prompt) => {
+      asked.push(`${role}:${key}`);
+      prompts.push(prompt);
+      if (key.startsWith("triage:")) {
+        const items = JSON.parse(prompt.split("Findings at ")[1].split("```json\n")[1].split("\n```")[0]);
+        return JSON.stringify(items.map((f) => ({ key: f.key, verdict: f.provisional ? "decide" : "spec", why: "scripted" })));
+      }
+      if (key.startsWith("judge:")) return JSON.stringify([{ section: "rules", id: "r.open", verdict: "confirmed", why: "quoted" }]);
+      if (key.startsWith("gap:")) return JSON.stringify({ patch: null, resolve: [] });
+      throw new Error("unexpected question " + key);
+    };
+    const res = await runCampaign({ simId, session, api, ask, guide: "GUIDE" });
+    console.log(JSON.stringify({ res, asked, prompts }));
+"""

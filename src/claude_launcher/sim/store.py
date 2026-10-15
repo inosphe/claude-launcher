@@ -67,7 +67,13 @@ DEFAULT_SETTINGS = {
     "triage": True,              # the judge sorts each gap batch before the interpreter answers it
     "max_edits": 0,              # edit proposals to the sources at the end of a run (0 = none)
     "language": "한국어",         # what the user reads: questions, options, reasons, the owner's report
+    "purpose": "spec",           # spec: check the sources; design: review a design the sources do not (yet) hold
 }
+#: What a simulation is for (settings.purpose), as the screen and the
+#: finished notice label it. Only the label and the no-sources warning
+#: depend on it: quote checks, the judge and the walk work rule by rule.
+PURPOSES = {"spec": "원천 확인", "design": "설계 검토 — 원천 확인 아님"}
+NO_SOURCES_WARNING = "원천 확인용인데 원천이 없음 — sources를 지정하거나 purpose를 design으로 바꾸세요"
 _ID_RE = re.compile(r"^sim-[0-9a-f]{6,12}$")
 _SUBMIT_CAP = 5000
 _UNVERIFIED_REF = re.compile(r"^(issue|user|session|url|https?):", re.I)
@@ -79,6 +85,38 @@ def _profile_of(role: str, settings: dict) -> str:
     if role == "judge":
         return settings.get("judge_profile") or settings.get("interpreter_profile") or ""
     return settings.get("interpreter_profile") or ""
+
+
+def purpose_view(meta: dict, stats: dict) -> dict:
+    """The purpose as reported: its label, the provisional-rule count and,
+    for a source check with no sources named, a warning (creating and
+    starting are still allowed)."""
+    purpose = (meta.get("settings") or {}).get("purpose") or DEFAULT_SETTINGS["purpose"]
+    rules, prov = int(stats.get("rules") or 0), int(stats.get("provisional") or 0)
+    warnings = [NO_SOURCES_WARNING] if purpose == "spec" and not meta.get("sources") else []
+    return {"purpose": purpose, "label": PURPOSES.get(purpose, purpose), "rules": rules, "provisional": prov,
+            "provisional_text": f"규칙 {rules}개 중 {prov}개가 원천 없음(provisional)", "warnings": warnings}
+
+
+def provisional_only(walk: dict, f: dict) -> bool:
+    """Did the finding's path run on provisional rules alone? Its witness is
+    replayed on ``walk`` (an :func:`engine.prepare`d model) for the rules
+    it fired; the walk records only the provisional ones. A path with no
+    provisional rule is not; one that cannot be replayed on the current
+    model counts as provisional-only when it passed one (nothing shows a
+    quoted rule on it)."""
+    prov = set(f.get("provisional") or [])
+    if not prov:
+        return False
+    try:
+        fired = set(engine.replay(walk, f.get("witness") or {})["fired"])
+    except (engine.StaleWitness, ValueError, KeyError):
+        return True
+    fired.update(f.get("rules") or [])
+    guessed = {x["id"] for sec in ("rules", "invariants") for x in walk.get(sec) or [] if x.get("provisional")}
+    if f.get("invariant"):
+        fired.add(f["invariant"])
+    return fired <= guessed
 
 
 class SimError(Exception):
@@ -348,10 +386,11 @@ class SimStore:
             counts[x.get("status", "open")] = counts.get(x.get("status", "open"), 0) + 1
         last = self.rounds(meta["id"], 1)
         props = _read_json(self._dir(meta["id"]) / "proposals.json", {})
-        return {**meta, "counts": counts, "last_round": last[0] if last else None,
+        stats = M.stats(self.model(meta["id"]))
+        return {**meta, "counts": counts, "purpose": purpose_view(meta, stats), "last_round": last[0] if last else None,
                 "proposals": {st: sum(1 for p in props.values() if p["status"] == st)
                               for st in ("proposed", "accepted", "rejected")},
-                "model_stats": M.stats(self.model(meta["id"]))}
+                "model_stats": stats}
 
     def get(self, sim_id: str) -> dict:
         with self._lock:
@@ -468,6 +507,10 @@ class SimStore:
                 if not isinstance(v, str):
                     raise SimError(f"{k} must be a {'profile name' if k.endswith('_profile') else 'model id'}")
                 out[k] = v.strip()
+            elif k == "purpose":
+                if v not in PURPOSES:
+                    raise SimError(f"purpose must be one of {', '.join(PURPOSES)}")
+                out[k] = v
             elif k == "language":
                 if not isinstance(v, str) or not v.strip() or len(v.strip()) > 40:
                     raise SimError("language must be a language name of at most 40 characters")
@@ -711,10 +754,31 @@ class SimStore:
     def edit_targets(self, sim_id: str) -> List[dict]:
         """Findings an edit to the sources would settle: questions (the
         sources are silent) and answers (the user decided; the sources do
-        not say so yet), less those a proposal already covers."""
+        not say so yet), less those a proposal already covers, those whose
+        path ran on provisional rules alone (no source text is involved),
+        and all of them when there is no source file to edit."""
+        meta, m = self._meta(sim_id), self.model(sim_id)
+        if not self.source_files(meta, m):
+            return []
         covered = {k for p in self.proposals(sim_id).values() if p["status"] != "rejected" for k in p["findings"]}
+        walk = engine.prepare(m)
         return [f for f in self.findings(sim_id).values()
-                if f.get("status") in ("question", "answered") and f["key"] not in covered]
+                if f.get("status") in ("question", "answered") and f["key"] not in covered
+                and not provisional_only(walk, f)]
+
+    @staticmethod
+    def source_files(meta: dict, m: dict) -> List[str]:
+        """Files an edit could go into: the named sources (globs expanded)
+        and the files the model's quoted rules cite."""
+        root = meta.get("root") or ""
+        if not root:
+            return []
+        files = set(source_digests(root, meta.get("sources") or []))
+        refs = {str(s_.get("ref") or "").split("#", 1)[0] for section in ("rules", "invariants")
+                for item in m.get(section) or [] if item.get("provisional") is None
+                for s_ in item.get("source") or []}
+        files.update(source_digests(root, [r for r in refs if r and not _UNVERIFIED_REF.match(r)]))
+        return sorted(files)
 
     def propose(self, sim_id: str, actor: str, items: List[dict], key: Optional[str] = None) -> dict:
         """Record edit proposals to the source files. The daemon never
@@ -733,6 +797,11 @@ class SimStore:
             ledger, m = self.findings(sim_id), self.model(sim_id)
             stored = self.proposals(sim_id)
             done, errors = [], []
+            walk = engine.prepare(m)
+            guessed = {k for k, f in ledger.items() if provisional_only(walk, f)}
+            if items and not self.source_files(meta, m):
+                errors.append("the simulation has no source file to edit")
+                items = []
             for it in items or []:
                 rel = str(it.get("file") or "")
                 old, new = str(it.get("old") or ""), str(it.get("new") or "")
@@ -763,6 +832,10 @@ class SimStore:
                 missing = [k for k in refs if k not in ledger]
                 if not refs or missing:
                     errors.append(f"{where}: must name the findings it settles" + (f" (unknown: {missing})" if missing else ""))
+                    continue
+                if any(k in guessed for k in refs):
+                    errors.append(f"{where}: {', '.join(k for k in refs if k in guessed)} ran on provisional rules "
+                                  "only; no source text says it, so there is nothing in the sources to edit")
                     continue
                 after = text.replace(old, new, 1) if old else text.rstrip("\n") + "\n" + new.rstrip("\n") + "\n"
                 breaks = []
@@ -803,13 +876,23 @@ class SimStore:
             return {"proposal": p, "owner": meta.get("owner") or ""}
 
     TRIAGE = ("model", "spec", "intended")
+    #: The sort of a finding whose path ran through a provisional rule:
+    #: there is no source text to misread, so ``design`` (the design lacks
+    #: a rule: add one), ``intended`` (an intended exclusion: dismissed),
+    #: ``decide`` (a person decides).
+    TRIAGE_PROVISIONAL = ("design", "intended", "decide")
+
+    @classmethod
+    def triage_verdicts(cls, f: dict) -> tuple:
+        return cls.TRIAGE_PROVISIONAL if f.get("provisional") else cls.TRIAGE
 
     def triage(self, sim_id: str, actor: str, items: List[dict], key: Optional[str] = None) -> dict:
         """The judge's sort of open findings, before the interpreter answers
         them: ``model`` (the model misreads the sources: fix the model),
         ``spec`` (the sources are silent: a person decides, unless a quote
         turns up), ``intended`` (not a defect: dismissed with the judge's
-        reason). Each item is ``{key, verdict, why}``."""
+        reason). A finding that passed a provisional rule is sorted with
+        :attr:`TRIAGE_PROVISIONAL` instead. Each item is ``{key, verdict, why}``."""
         with self._lock:
             meta = self._meta(sim_id)
             self._require_owner(meta, actor, "triage findings")
@@ -826,8 +909,10 @@ class SimStore:
                 if f is None or f.get("status") != "open":
                     errors.append(f"{it.get('key')!r} is not an open finding")
                     continue
-                if verdict not in self.TRIAGE:
-                    errors.append(f"{f['key']}: verdict must be one of {', '.join(self.TRIAGE)}")
+                allowed = self.triage_verdicts(f)
+                if verdict not in allowed:
+                    errors.append(f"{f['key']}: verdict must be one of {', '.join(allowed)}"
+                                  + (" (its path ran through a provisional rule)" if f.get("provisional") else ""))
                     continue
                 if not why:
                     errors.append(f"{f['key']}: a triage verdict needs a why")

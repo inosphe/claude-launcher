@@ -71,6 +71,12 @@ Rules:
   sim_round with "목표 승인 후 실행 가능" and the step name. sim_create,
   sim_patch and every read still work there; a patch to a running campaign
   then skips its round (round_skipped). Run once the goal is approved.
+- settings.purpose: spec (default; the simulation checks its sources) or
+  design (a design review the sources do not hold). spec with no sources
+  is allowed but warned about (sim_show: purpose.warnings). A finding whose
+  path ran through a provisional rule is triaged design | intended |
+  decide instead of model | spec | intended, and gets no edit proposal
+  when its path ran on provisional rules alone.
 - When a running simulation finishes you get a "[claunch simulation]" line:
   read the result and carry the discussion on with the user.
 """
@@ -119,12 +125,14 @@ TOOLS = [
          "sources": {"type": "array", "items": {"type": "string"}, "description": "paths/globs the model is built from"},
          "issue": {"type": "string"},
          "from": {"type": "string", "description": "start from this simulation's model, verdicts and answered questions"},
-         "settings": {"type": "object", "description": "interpreter_profile, judge_profile, *_model, *_reasoning, seed, budget, horizon, max_rounds"}},
+         "settings": {"type": "object", "description": "interpreter_profile, judge_profile, *_model, *_reasoning, seed, budget, horizon, max_rounds, "
+                                                              "purpose (spec|design, default spec)"}},
          "required": ["title"]}},
     {"name": "sim_configure", "description": "Owner: change title, goal, sources or settings.",
      "inputSchema": {"type": "object", "properties": {
          **_ID, "title": {"type": "string"}, "goal": {"type": "string"},
-         "sources": {"type": "array", "items": {"type": "string"}}, "settings": {"type": "object"}},
+         "sources": {"type": "array", "items": {"type": "string"}},
+         "settings": {"type": "object", "description": "as sim_create; purpose: spec|design"}},
          "required": ["sim"]}},
     {"name": "sim_patch",
      "description": "Owner: upsert model items by id/name, remove some ({remove: {rules: [ids]}}). Rejected as a whole "

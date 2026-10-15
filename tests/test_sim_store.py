@@ -401,3 +401,126 @@ def test_coverage_separates_static_text_from_the_last_rounds_observation(env):
     cov = st.coverage(sim["id"])
     assert cov["observed_from"]["current"] is False
     assert all(c["observed"] is None for c in cov["cells"].values())
+
+
+# -- purpose and provisional rules (claunch-efnbt.10) ---------------------------
+
+@pytest.mark.parametrize("purpose,sources,warned", [
+    ("spec", [], True), ("spec", ["spec.md"], False), ("design", [], False), ("design", ["spec.md"], False)])
+def test_purpose_label_count_and_warning(env, purpose, sources, warned):
+    st, root, _ = env
+    sim = st.create(title="door", root=root, owner="s1", actor="s1", sources=sources, settings={"purpose": purpose})
+    p = base_patch()
+    p["rules"].append({"id": "r.close", "on": {"event": "close"}, "do": [{"sm": "door", "to": "closed"}],
+                       "provisional": {"why": "guess"}})
+    st.patch_model(sim["id"], "s1", p)
+    pv = st.get(sim["id"])["purpose"]
+    assert pv["purpose"] == purpose and pv["label"] == S.PURPOSES[purpose]
+    assert (pv["rules"], pv["provisional"]) == (2, 1) and pv["provisional_text"] == "규칙 2개 중 1개가 원천 없음(provisional)"
+    assert pv["warnings"] == ([S.NO_SOURCES_WARNING] if warned else [])
+    assert st.start(sim["id"], "s1")["round"] == 1  # a warning never refuses the start
+
+
+def test_purpose_defaults_to_spec_and_is_checked(env):
+    st, root, _ = env
+    sim = st.create(title="door", root=root, owner="s1", actor="s1")
+    assert sim["settings"]["purpose"] == "spec" and sim["purpose"]["label"] == "원천 확인"
+    assert st.configure(sim["id"], "s1", settings={"purpose": "design"})["purpose"]["warnings"] == []
+    with pytest.raises(S.SimError, match="purpose must be one of spec, design"):
+        st.configure(sim["id"], "s1", settings={"purpose": "audit"})
+
+
+def test_design_purpose_keeps_quote_checks_and_the_judge_per_rule(env):
+    # The purpose changes no per-rule check: a bad quote is still rejected, a
+    # quoted rule still waits for the judge, a provisional one is not judged.
+    st, root, _ = env
+    sim = st.create(title="door", root=root, owner="s1", actor="s1", settings={"purpose": "design"})
+    p = base_patch()
+    p["rules"][0]["source"] = src("The door flies away.")
+    assert not st.patch_model(sim["id"], "s1", p)["ok"]
+    p = base_patch()
+    p["rules"].append({"id": "r.close", "on": {"event": "close"}, "do": [{"sm": "door", "to": "closed"}],
+                       "provisional": {"why": "guess"}})
+    assert st.patch_model(sim["id"], "s1", p)["ok"]
+    assert [u["id"] for u in st.unjudged(sim["id"])] == ["r.open"]
+
+
+def _locks(st, root, sources=("spec.md",)):
+    """closed --open (quoted)--> open; closed --lock (provisional)--> locked."""
+    sim = st.create(title="door", root=root, owner="s1", actor="s1", sources=list(sources))
+    st.patch_model(sim["id"], "s1", {
+        "machines": [{"id": "door", "states": ["closed", "open", "locked"], "initial": "closed"}],
+        "events": [{"name": "open", "kind": "actor"}, {"name": "lock", "kind": "actor"}],
+        "rules": [{"id": "r.open", "on": {"event": "open"}, "when": {"sm": "door", "is": "closed"},
+                   "do": [{"sm": "door", "to": "open"}], "source": src()},
+                  {"id": "r.lock", "on": {"event": "lock"}, "when": {"sm": "door", "is": "closed"},
+                   "do": [{"sm": "door", "to": "locked"}], "provisional": {"why": "guess"}}]})
+    st.run_round(sim["id"], "s1")
+    return sim["id"]
+
+
+QUOTED, GUESSED = "unhandled|door|open|open", "unhandled|door|locked|open"
+
+
+def test_triage_verdicts_depend_on_whether_the_path_passed_a_provisional_rule(env):
+    st, root, _ = env
+    sid = _locks(st, root)
+    f = st.findings(sid)
+    assert f[QUOTED]["provisional"] == [] and f[GUESSED]["provisional"] == ["r.lock"]
+    res = st.triage(sid, "s1", [{"key": QUOTED, "verdict": "design", "why": "x"},
+                                {"key": GUESSED, "verdict": "spec", "why": "x"}])
+    assert res["done"] == [] and "one of model, spec, intended" in res["errors"][0]
+    assert "one of design, intended, decide" in res["errors"][1] and "provisional rule" in res["errors"][1]
+    res = st.triage(sid, "s1", [{"key": QUOTED, "verdict": "spec", "why": "x"},
+                                {"key": GUESSED, "verdict": "design", "why": "the design lacks a rule"}])
+    assert res["ok"] and st.findings(sid)[GUESSED]["triage"]["verdict"] == "design"
+    other = "unhandled|door|locked|lock"
+    st.triage(sid, "s1", [{"key": other, "verdict": "intended", "why": "left out on purpose"}])
+    assert st.findings(sid)[other]["status"] == "dismissed"
+
+
+def test_edit_targets_skip_provisional_only_findings(env):
+    st, root, _ = env
+    sid = _locks(st, root)
+    st.resolve(sid, "s1", [{"key": k, "action": "ask", "question": "and then?"} for k in (QUOTED, GUESSED)])
+    assert [f["key"] for f in st.edit_targets(sid)] == [QUOTED]
+    item = {"file": "spec.md", "old": "", "new": "Open decision.", "kind": "decide", "reason": "silent"}
+    res = st.propose(sid, "s1", [{**item, "findings": [GUESSED]}, {**item, "findings": [QUOTED]}])
+    assert len(res["done"]) == 1 and "provisional rules only" in res["errors"][0]
+
+
+def test_mixed_path_is_an_edit_target(env):
+    # open (quoted) then lock from open is unhandled; a path through both kinds
+    # of rule still involves source text.
+    st, root, _ = env
+    sim = st.create(title="door", root=root, owner="s1", actor="s1", sources=["spec.md"])
+    p = base_patch()
+    p["machines"][0]["states"].append("ajar")
+    p["events"].append({"name": "push", "kind": "actor"})
+    p["rules"].append({"id": "r.push", "on": {"event": "push"}, "when": {"sm": "door", "is": "open"},
+                       "do": [{"sm": "door", "to": "ajar"}], "provisional": {"why": "guess"}})
+    st.patch_model(sim["id"], "s1", p)
+    st.run_round(sim["id"], "s1")
+    key = "unhandled|door|ajar|push"
+    f = st.findings(sim["id"])[key]
+    assert f["provisional"] == ["r.push"]
+    assert not S.provisional_only(S.engine.prepare(st.model(sim["id"])), f)  # r.open is on the path too
+    st.resolve(sim["id"], "s1", [{"key": key, "action": "ask", "question": "and then?"}])
+    assert key in [x["key"] for x in st.edit_targets(sim["id"])]
+
+
+def test_no_source_file_means_no_edit_targets(env):
+    # No sources named and no quoted rule: there is no file to edit.
+    st, root, _ = env
+    sim = st.create(title="door", root=root, owner="s1", actor="s1", settings={"purpose": "design"})
+    p = base_patch()
+    p["rules"][0].pop("source")
+    p["rules"][0]["provisional"] = {"why": "guess"}
+    st.patch_model(sim["id"], "s1", p)
+    st.run_round(sim["id"], "s1")
+    key = "unhandled|-|-|close"
+    st.resolve(sim["id"], "s1", [{"key": key, "action": "ask", "question": "and then?"}])
+    assert st.findings(sim["id"])[key]["status"] == "question" and st.edit_targets(sim["id"]) == []
+    res = st.propose(sim["id"], "s1", [{"file": "spec.md", "old": "", "new": "x", "kind": "decide",
+                                        "reason": "r", "findings": [key]}])
+    assert res["errors"] == ["the simulation has no source file to edit"]
