@@ -361,6 +361,61 @@ def test_self_with_default_option_takes_it_unanswered(tmp_path):
     assert ev["decision"] == "pass" and ev["by"] == "unanswered"
 
 
+def test_unanswered_take_is_distinguishable_in_the_status_payload(tmp_path):
+    """claunch-n74fs.1: a pass taken by nobody (the declared default of an
+    otherwise:self:pass ask whose candidate groups all fell through) must
+    read as such in what the driver actually reads — the status payload —
+    not only deep in the journal file. ``value.by`` is the check."""
+    d = Drv(tmp_path, """
+        nodes:
+          r:
+            prompt: r
+            ask:
+              prompt: review?
+              otherwise: "self:pass"
+              options:
+                pass: {outcome: ok, description: fine}
+                changes: {description: fix}
+            returns: {ok: {}, changes: {}}
+          b: {prompt: b}
+        body: [r, b]
+    """)
+    st = d.status()
+    assert st["result"]["r"]["value"]["by"] == "unanswered"
+    assert st["result"]["r"]["value"]["decision"] == "pass"
+
+
+def test_answered_ask_keeps_the_responder_in_the_status_payload(tmp_path, monkeypatch):
+    """The other side of the same check (claunch-n74fs.1): a real answer
+    keeps the responder's handle in the same field, so the 0-answer pass
+    and the answered pass are mechanically distinguishable by one read of
+    the payload."""
+    d = Drv(tmp_path, """
+        nodes:
+          r:
+            prompt: r
+            ask:
+              prompt: "ship it?"
+              from: [{role: reviewer, scope: sibling}]
+              otherwise: human
+              options:
+                pass: {outcome: ok, description: fine}
+                changes: {description: fix}
+            returns: {ok: {}, changes: {}}
+          b: {prompt: b}
+        body: [r, b]
+    """)
+    assert d.status()["asks"][0]["resolution"] == "routing"
+    _route(d, out=Outbox())
+    monkeypatch.setattr(asks, "default_nudge", lambda *a: None)
+    monkeypatch.setenv("CLAUNCH_SESSION", "s-rev")
+    rec = next(iter(d.state()["asks"].values()))
+    cflow2_mcp.call_tool("flow_answer", {"ask_id": rec["id"], "decision": "pass"})
+    st = d.status()
+    assert st["result"]["r"]["value"]["by"] == "rev"
+    assert st["result"]["r"]["value"]["decision"] == "pass"
+
+
 def test_ask_options_validation():
     with pytest.raises(frontend.FrontendError, match="names no option"):
         _compile("nodes:\n  a: {prompt: a, ask: {prompt: p, otherwise: 'self:x', "

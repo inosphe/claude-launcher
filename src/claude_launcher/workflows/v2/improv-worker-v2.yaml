@@ -2140,6 +2140,15 @@ nodes:
 
 
       증거 묶음은 그 코멘트에 담는다 — 상위가 심사하는 자리가 거기다:
+      - 리뷰 판정이 누구에 의한 것인지 — flow_status의
+        `result['peer-review'].value.by`를 본다. 응답자의 핸들이면 묶음에
+        「리뷰: REVIEWED: pass @ <tip> (<핸들>, peer-review <ask id>)」를
+        싣는다. `unanswered`이면 이 통과는 심사자 0명의 무응답 통과
+        (otherwise:self:pass)이니 「리뷰: 무응답 통과(심사 없음 — 방어선은
+        리더 통합 후 전체 스윕)」라고 적는다. 무응답 통과를 REVIEWED 형태로
+        적으면 상위가 심사 있음으로 읽는다 — 그 구별이 이 줄의 목적이다
+        (claunch-n74fs.1). 어느 쪽이든 이 줄이 없는 묶음은 심사 근거가
+        없는 것이다.
       - 목표·범위, 브랜치 이름, 기능 커밋·머지 커밋 해시, 테스트 수치
         (표적 실행임을 명시하고 돌린 모듈을 적는다 — 전체 스윕은 리더의
         통합 단계에서 배치로 한 번, subagent 안에서 돈다)
@@ -2169,7 +2178,8 @@ nodes:
     done_when: |
       이슈가 in_review로 전이되었고(배치면 실린 이슈 전부) 증거 묶음(목표·
       범위, 브랜치, 해시, 수치, 양방향 diff, 포함 관계 — 자식 브랜치를
-      모았으면 그 트리까지, 배치면 `batch:` id 목록)이
+      모았으면 그 트리까지, 배치면 `batch:` id 목록)에 리뷰 판정의 근거
+      (응답자 핸들이든 무응답 통과든)가 함께 담겨
       `LANDING REQUEST @ <tip>` 코멘트에 담겼다. 요청 nudge는 이 스텝에서
       보내지 않았다(데몬의 라우팅 결과를 본 뒤 landing-nudge가 보낸다 —
       independent의 부모 fyi, 상위 부재의 사용자 안내는 여기서 한다).
@@ -2181,6 +2191,9 @@ nodes:
     # 남는다. 어느 쪽이든 데몬이 결과를 이 세션에 `landing request routed`
     # 블록으로 알리고, landing-nudge가 그것을 읽는다(claunch-g0ttr.1).
     # enqueue-landing과 같은 push에 착지 매체를 더 싣는다(claunch-yq80p.5):
+    # review는 peer-review를 누가 통과시켰는지 — 응답자의 핸들이거나
+    # "unanswered"(심사자 0명의 무응답 통과, claunch-n74fs.1). 리더의 큐 표가
+    # 심사 없는 통과를 심사 있음으로 읽지 않게 하는 값이다.
     # pr이면 pr_url·pr_number·base가 들어가고, 리더는 그 행을 PR 후보로 읽어
     # gh pr merge로 머지한다. local이면 그 필드가 null이고 --no-ff 경로다.
     # $data.landing은 이 노드에 들어온 순간의 값이 trigger 기록에 함께 남는다.
@@ -2201,7 +2214,8 @@ nodes:
           item: {issue: "$each", tip: "$facts.head", branch: "$facts.branch",
                  requested_by: "$facts.session", medium: "$data.landing.medium",
                  pr_url: "$data.landing.pr_url", pr_number: "$data.landing.pr_number",
-                 base: "$data.landing.base"}
+                 base: "$data.landing.base",
+                 review: "$result['peer-review'].value.by"}
       - at: leave
         when: "$data.inputs.relation == 'independent'"
         push:
@@ -2210,7 +2224,8 @@ nodes:
           item: {issue: "$each", tip: "$facts.head", branch: "$facts.branch",
                  requested_by: "$facts.session", medium: "$data.landing.medium",
                  pr_url: "$data.landing.pr_url", pr_number: "$data.landing.pr_number",
-                 base: "$data.landing.base"}
+                 base: "$data.landing.base",
+                 review: "$result['peer-review'].value.by"}
     # stack이 서 있으면 컷을 실은 이 요청을 stack 런에 알린다(v1: frozen 게시).
     do:
       - push: {to: signals, item: {name: "'frozen'", tip: "$result['integration-request'].value.tip"}}

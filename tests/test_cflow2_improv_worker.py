@@ -465,6 +465,22 @@ def test_triggers_mirror_v1_at_the_corresponding_tasks():
     assert seen == set(v1)
 
 
+def test_landing_queue_item_records_who_passed_the_review():
+    """claunch-n74fs.1: the leader's landing queue row must carry whether the
+    peer-review pass was a real review (the responder's handle) or a 0-answer
+    take ("unanswered"), so an unanswered pass is never read as reviewed.
+    The expression is safe when peer-review never ran: it evaluates to None."""
+    chart = _chart()
+    node = next(n for n in chart.nodes.values() if n.label == "integration-request")
+    pushes = [t for t in node.get("triggers") or []
+              if t.get("do") == "push" and (t.get("push") or {}).get("to")
+              in ("parent:landing", "leader:landing")]
+    assert len(pushes) == 2
+    for t in pushes:
+        item = (t.get("push") or {}).get("item") or {}
+        assert item.get("review") == "$result['peer-review'].value.by"
+
+
 def test_landing_queue_and_signals_types():
     from claude_launcher.cflow2.frontend import FrontendError
     import pytest
