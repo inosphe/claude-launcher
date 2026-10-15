@@ -26,7 +26,7 @@ from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import ManagerError
 from claude_launcher.daemon.mesh import MeshManager
 from claude_launcher.daemon.session import DeadSession, Session, STATUS_IDLE
-from test_daemon_e2e import _manager, _register_py_harness, _wait_screen
+from test_daemon_e2e import _manager, _on_screen, _register_py_harness, _wait_screen
 
 HELD_AT = "2026-10-09T12:00:00+00:00"
 
@@ -863,3 +863,14 @@ def test_input_during_restore_flush_keeps_order_without_suppressing_old_retries(
             await client.close()
 
     asyncio.run(run())
+
+
+def test_a_needle_cut_by_a_row_wrap_is_still_on_the_screen():
+    # claunch-jnwbc: the failing sweep's screen held "echo:[claunch status-check re"
+    # at the end of a 120-column row and "fresh]" at the start of the next.
+    rows = ["x" * 94 + "echo:[claunch status-check re", "fresh]", "echo:next"]
+    text = "\n".join(rows)
+    needle = "echo:[claunch status-check refresh]"
+    assert needle not in text
+    assert _on_screen(needle, text)
+    assert not _on_screen("echo:[claunch status-check refresh] gone", text)
