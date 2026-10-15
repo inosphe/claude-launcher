@@ -8,7 +8,7 @@ claunch-doj98. 한 세션과 여러 서브토픽 대화를 터미널과 분리�
 
 | 부분 | 위치 | 내용 |
 |---|---|---|
-| 저장소 | `src/claude_launcher/threads/store.py` | 데몬 SQLite `daemon_dir()/threads.sqlite3`. 표 `threads`(세션, 제목, open/closed, 연 쪽, 마지막 seq, 에이전트가 읽은 seq)와 `messages`(전역 seq, author `user`/`agent`, 본문) |
+| 저장소 | `src/claude_launcher/threads/store.py` | 데몬 SQLite `daemon_dir()/threads.sqlite3`. 표 `threads`(세션, 제목, open/closed, 연 쪽, 마지막 seq, 에이전트가 읽은 seq)와 `messages`(전역 seq, author `user`/`agent`, 본문, 첨부 이미지) |
 | HTTP | `src/claude_launcher/daemon/threads_api.py` | `/api/threads` 라우트. 사용자 메시지를 세션 터미널에 전달 |
 | MCP | `src/claude_launcher/threads_mcp.py` | `thread_list` / `thread_read` / `thread_reply` / `thread_open` / `thread_close` |
 | 웹 | `src/claude_launcher/web/static/threads-pane.js` | 터미널 헤더의 `🗪 threads` 버튼, 분할 영역(`#term-wf`)의 쓰레드 목록·대화·입력창 |
@@ -37,6 +37,20 @@ claunch-doj98. 한 세션과 여러 서브토픽 대화를 터미널과 분리�
 - 세션이 종료되어 전달할 수 없으면 메시지는 쓰레드에 남고, 응답의 `delivered`가 `false`다. 패널이 그 사실을 표시한다.
 - 에이전트의 읽음 위치(`agent_read`)는 소유 세션이 `thread_read`로 읽거나 `thread_reply`로 답할 때 이동한다.
   `thread_list`의 `agent_unread`는 그 뒤의 사용자 메시지 수다. 사용자의 읽음 위치는 브라우저 localStorage에 있다.
+
+## 이미지 첨부 (claunch-shl2r)
+
+사용자 메시지에 이미지를 붙일 수 있다. 텍스트 없이 이미지만 보내도 된다. 에이전트의 `thread_reply`에는 이미지가 없다.
+
+| 단계 | 위치 | 내용 |
+|---|---|---|
+| 첨부 | `threads-pane.js` | 입력창에 붙여넣기(Ctrl+V), 대화 영역·새 쓰레드 폼에 끌어다 놓기, `🖼` 버튼(여러 장 선택). 보내기 전까지 입력창 위에 썸네일로 남고 `×`로 뺀다 |
+| 업로드 | `POST /api/threads/images` | 이미지 한 장을 원본 바디로 올린다. 새 세션 오프닝 이미지와 같은 스테이징(`daemon/opening_images.py`, 24MiB, png/jpeg/gif/webp)이고 id를 돌려준다 |
+| 게시 | `POST /api/threads`, `POST /api/threads/{id}/messages`의 `images` | 스테이징 id 목록(최대 10장). 데몬이 파일을 `daemon_dir()/thread-images/`로 옮기고 메시지의 `messages.images`(스키마 v3)에 `{name, type, bytes}`로 기록한다. 게시가 거절되면 파일을 스테이징으로 되돌린다 |
+| 전달 | `daemon/threads_api.py` | 세션에 보내는 블록에 각 파일의 경로를 적는다. 하네스가 이미지를 받는 살아 있는 세션(`image_paste_keys` 또는 path 전송 선언)에는 블록보다 먼저 이미지를 입력창에 붙여 넣는다 — 'type for this session'의 이미지 붙여넣기와 같은 경로(`api._opening_image_step` → `_deliver_pasted_image`)다. 보류된 세션은 경로만 받는다 |
+| 기록 | `GET /api/threads/{id}/images/{name}` | 그 쓰레드 메시지가 가진 이미지만 내준다. 패널의 말풍선과 쓰레드 페이지(`threads-history.js`)가 이 경로로 이미지를 다시 보여 준다. `thread_read`가 돌려주는 메시지의 `images`에는 파일 `path`가 있다 |
+
+이미지 파일은 세션 디렉터리가 아닌 데몬 디렉터리에 둔다. 쓰레드 기록은 세션이 끝난 뒤에도 남기 때문이다.
 
 ## QA와 연결 (claunch-78dpm)
 
