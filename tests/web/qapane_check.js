@@ -31,6 +31,8 @@ class N {
         if (on) set.add(c); else set.delete(c);
         self.className = [...set].join(" ");
       },
+      add(c) { this.toggle(c, true); },
+      remove(c) { this.toggle(c, false); },
     };
   }
   set textContent(t) { this.children = []; this._text = String(t); }
@@ -84,7 +86,7 @@ function paneHarness() {
     const r = answerReply(body);
     return { ok: r.status === 200, status: r.status, json: async () => r.doc };
   };
-  const ctx = vm.createContext({ document, setInterval: () => 1, clearInterval() {}, console, JSON });
+  const ctx = vm.createContext({ document, setInterval: () => 1, clearInterval() {}, setTimeout: () => 0, console, JSON });
   vm.runInContext(fs.readFileSync(path.join(STATIC, "qa-pane.js"), "utf8"), ctx);
   return {
     pane: ctx.QaPane, api, posts,
@@ -312,6 +314,34 @@ function q(over = {}) {
     await tick();
     assert.ok(host.querySelector(".qa-nudge-state").textContent.includes("전달하지 못함"), "a gone session is said");
     h.pane.unmount();
+  }
+
+  /* --- reveal: a notice names the session and the question (claunch-x76l8) */
+  {
+    N.prototype.closest = function () { return null; };
+    N.prototype.scrollIntoView = function () { this.scrolled = true; };
+    const h = paneHarness();
+    h.setList({ session: "s1", unresolved: 2, agent_seq: 3,
+                questions: [q(), q({ id: "qa-2", title: "Which port?" })] });
+    const shown = (host, id) => host.querySelectorAll(".qa-card")
+      .find((c) => c.scrolled && c.textContent.includes(id === "qa-2" ? "Which port?" : "Which base?"));
+    h.pane.reveal("s1", "qa-2");
+    const other = new N("div");
+    h.pane.mount(other, "s2", { api: h.api });
+    await tick();
+    assert.equal(shown(other, "qa-2"), undefined, "a mount on another session does not take the request");
+    h.pane.unmount();
+    const host = new N("div");
+    h.pane.mount(host, "s1", { api: h.api });
+    await tick();
+    assert.ok(shown(host, "qa-2"), "the next mount on that session brings the question into view");
+    assert.equal(shown(host, "qa-1"), undefined, "and only that one");
+    h.pane.reveal("s1", "qa-1");
+    await tick();
+    assert.ok(shown(host, "qa-1"), "on the session already mounted it is brought in at once");
+    h.pane.unmount();
+    delete N.prototype.closest;
+    delete N.prototype.scrollIntoView;
   }
 
   /* --- app.js: the pane opens itself on the session's change ------------- */
