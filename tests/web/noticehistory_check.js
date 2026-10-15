@@ -32,7 +32,8 @@
    Marks and the All / Marked filter (claunch-knuet): ☆ on a history row marks
    it ★ without reading it or opening its target; Marked shows only those
    rows and All every row again; the filter and the marks survive a reload;
-   Clear and the 100-row cap keep marked rows. */
+   Clear and the 100-row cap keep marked rows; Clear is only in the All view
+   and the cap gives way rather than drop a marked row (claunch-knuet.1). */
 const fs = require("fs");
 const path = require("path");
 const STATIC = path.join(__dirname, "..", "..", "src", "claude_launcher", "web",
@@ -321,6 +322,8 @@ function gotoRec(rec) {
           w.panelRows().length === 1 && rowOf("two") && /History \(1\)/.test(w.panel()) &&
             w.press(head(), "Marked").classList.contains("active"), w.panel());
     check("and the choice is stored", JSON.parse(w.storage.getItem("claunch.noticeFilter")) === "marked");
+    check("Marked offers no Clear, which would forget rows it hides (claunch-knuet.1)",
+          !w.press(head(), "Clear"), head().text());
     check("Mark all read there reads only what it shows", (() => {
       w.press(head(), "Mark all read").click();
       return entry("two").read === true && entry("one").read === false && w.badge() === "2";
@@ -349,6 +352,27 @@ function gotoRec(rec) {
     check("the 100-row cap drops unmarked rows first",
           w.api.noticeHistory.length === 100 && w.api.noticeHistory.some((e) => e.title === "kept") &&
             w.api.noticeHistory[0].title === "n119", w.api.noticeHistory.length);
+  }
+  {
+    /* Every row marked: the cap gives way instead of a ★ row (claunch-knuet.1). */
+    const w = build();
+    for (let i = 0; i < 100; i += 1) {
+      w.api.notify(`m${i}`, "", { key: `m${i}` });
+      w.api.noticeHistory[0].marked = true;
+    }
+    w.api.notify("new1", "", { key: "new1" });
+    check("over the cap with every older row marked, no marked row goes",
+          w.api.noticeHistory.length === 101 && w.api.noticeHistory.filter((e) => e.marked).length === 100 &&
+            w.api.noticeHistory[0].title === "new1", w.api.noticeHistory.length);
+    w.api.notify("new2", "", { key: "new2" });
+    check("the next row pushes out the unmarked one before it",
+          w.api.noticeHistory.length === 101 && w.api.noticeHistory[0].title === "new2" &&
+            !w.api.noticeHistory.some((e) => e.title === "new1"), w.api.noticeHistory.slice(0, 3));
+    const second = build({ storage: w.storage });
+    check("a reload keeps every marked row past the cap",
+          second.api.noticeHistory.length === 101 &&
+            second.api.noticeHistory.filter((e) => e.marked).length === 100,
+          second.api.noticeHistory.length);
   }
 
   /* --- × puts a card away without following it (claunch-x76l8) --------- */
