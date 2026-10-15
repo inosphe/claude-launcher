@@ -605,6 +605,7 @@ BROWSER_CHECKS = [
         "sessionresources_browser.cjs",
         "sessview_browser.cjs",
         "modalonce_browser.cjs",
+        "meshfold_browser.cjs",
 ]
 
 

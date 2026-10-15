@@ -4444,6 +4444,27 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 /* The counts are read as a column down the bar's width, so the digits line up
    and a 12 does not look wider than a 4. */
 .mesh-member-filters .seq-tab { font-variant-numeric: tabular-nums; }
+/* The presets lead the chips and are set apart from them by a gap: a preset
+   replaces the selection, a chip adds to or takes from it. */
+.mesh-member-filters .mesh-member-preset + .mesh-member-chip { margin-left: 8px; }
+/* Sections of the mesh page fold (claunch-qzhea). The heading is the toggle;
+   a closed section is its heading alone, in the same box as an open one so
+   the page keeps its rhythm, plus a hint of what it holds. */
+.mesh-fold-closed {
+  margin: 14px 0; padding: 8px 16px; background: #1b1e24;
+  border: 1px solid #2a2e36; border-radius: 8px; max-width: 760px;
+}
+.mesh-fold-closed h3 {
+  font-size: 12px; text-transform: uppercase; color: #7d8590; margin: 0;
+}
+.mesh-fold-head { cursor: pointer; user-select: none; }
+.mesh-fold-head:hover, .mesh-fold-head:focus-visible { color: #c9d1d9; }
+.mesh-fold-caret { display: inline-block; width: 1.1em; }
+.mesh-fold-hint {
+  margin-left: 8px; text-transform: none; font-weight: normal;
+  font-variant-numeric: tabular-nums;
+}
+.mesh-fold-hint.attention { color: #d29922; }
 /* Role set. A chip is a role in the vocabulary and how many members hold it;
    a role nobody holds stays dim, and one held but no longer DEFINED is called
    out — that is what "an upload is not retroactive" looks like from here. */
@@ -5641,7 +5662,7 @@ body.embed #main { width: 100%; }
   #msg-view { padding: 14px 12px 0; }
   .flow-waiting, .flow-detail,
   .mesh-members, .mesh-send, .mesh-fed, .mesh-policy, .mesh-links,
-  .mesh-roles, .mesh-owed, .wf-start, .mesh-log, .mesh-topo,
+  .mesh-roles, .mesh-owed, .wf-start, .mesh-log, .mesh-topo, .mesh-fold-closed,
   .sess-meta, .sess-meshes, .sess-wf, .sess-send, .sess-queued, .sess-bp,
   .sess-migrate, .sess-reborrow, .sess-perms, .sess-quickjob, .sess-kids,
   .sess-task, .sess-packs, .sess-note, .sess-flags,
