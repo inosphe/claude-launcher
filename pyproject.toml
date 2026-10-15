@@ -19,6 +19,11 @@ dependencies = [
 [project.scripts]
 claunch = "claude_launcher.cli:main"
 
+# Holds the machine test window for pytest in any repository, inside a managed
+# session (claunch-ersj2); claunch's own tests/conftest.py takes it first.
+[project.entry-points.pytest11]
+claunch_window = "claude_launcher.pytest_window_plugin"
+
 [project.optional-dependencies]
 test = ["pytest>=7", "pytest-xdist>=3"]
 # WebRTC DataChannel for relay-tunnelled pages (claunch-mhzt4). Optional:
