@@ -337,6 +337,33 @@ def spawn_record(reason: str) -> str:
     )
 
 
+def daemon_cwd(start: Optional[str] = None) -> str:
+    """The directory the daemon runs in (claunch-2yiij.1).
+
+    The main checkout of the repository ``start`` (default: this process's
+    directory) is in, or the home directory outside any repository. A daemon
+    that took its caller's directory ran in whichever session's worktree
+    started it, and everything it reads through ``os.getcwd()`` -- an API
+    call sent without a ``cwd``, the dashboard's CLI shell, the board pinned
+    at startup -- answered for that checkout, and for a directory gone once
+    the worktree is removed. The main checkout is the one answer every
+    worktree of a repository shares (``worktree.repo_root`` reads the common
+    git dir).
+    """
+    from . import worktree
+
+    if start is None:
+        try:
+            start = os.getcwd()
+        except OSError:  # the caller's directory was removed under it
+            start = ""
+    try:
+        root = worktree.repo_root(start) if start else None
+    except worktree.WorktreeError:  # no git to ask: a spawn must not fail on it
+        root = None
+    return str(root) if root is not None else os.path.expanduser("~")
+
+
 def spawn_daemon(
     env: Optional[dict] = None, *, reason: str = "unspecified"
 ) -> Optional[subprocess.Popen]:
@@ -382,6 +409,7 @@ def spawn_daemon(
             stderr=log,
             close_fds=True,
             env=env,
+            cwd=daemon_cwd(),
             **kwargs,
         )
     finally:
