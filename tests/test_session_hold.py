@@ -874,3 +874,33 @@ def test_a_needle_cut_by_a_row_wrap_is_still_on_the_screen():
     assert needle not in text
     assert _on_screen(needle, text)
     assert not _on_screen("echo:[claunch status-check refresh] gone", text)
+
+
+@pytest.mark.parametrize("by, by_human", [
+    ("mesh", False), ("cflow", False), ("cflow2", False),
+    ("status-checks", False), ("deliver", False), ("restore-queue", False),
+    ("attach", True), ("input", True), ("api", True), ("qa", True),
+    ("thread", True), ("", True),
+])
+def test_only_a_person_s_wake_marks_the_session_resumed_by_human(
+        home, monkeypatch, by, by_human):
+    """claunch-u9m6z: respawn marks every relaunch as a person's, and a held
+    done session woken by a mesh delivery (s122) then had its kill-on-end
+    called off. A wake the daemon starts on its own is nobody asking for
+    this incarnation; an attach, typed input or a QA answer is."""
+    from unittest.mock import AsyncMock
+
+    async def run():
+        mgr = _manager()
+        mgr._sessions["sleepy"] = SimpleNamespace(exited=True, held_at=HELD_AT)
+        live = SimpleNamespace(exited=False, held_at=None, resumed_by_human=True)
+
+        async def respawn(name):
+            mgr._sessions[name] = live
+            return live                      # as _respawned leaves it
+
+        monkeypatch.setattr(mgr, "respawn_async", AsyncMock(side_effect=respawn))
+        assert await mgr.wake_async("sleepy", by=by) is live
+        assert live.resumed_by_human is by_human
+
+    asyncio.run(run())

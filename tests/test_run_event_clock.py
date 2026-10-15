@@ -597,8 +597,11 @@ def test_kill_on_end_judges_again_once_a_held_session_wakes(proj):
     """claunch-u9m6z: right after a boot a done run's session may be held or
     still queued for a delayed restore. The first pass finds no running
     session; that must not exempt the run, or the session -- woken later by
-    a mesh delivery or the restore queue -- stays alive with its run done
-    until the next boot (s122)."""
+    the restore queue or a mesh delivery -- stays alive with its run done
+    until the next boot (s122). The wake here is one nobody asked for
+    (resumed_by_human stays False); that a mesh or restore-queue wake leaves
+    it False is test_session_hold's
+    test_only_a_person_s_wake_marks_the_session_resumed_by_human."""
     cwd = str(proj)
     cflow_engine.start("linear", cwd=cwd, scope="w1")
     _finish_linear(cwd)

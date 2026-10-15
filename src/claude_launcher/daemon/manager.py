@@ -68,6 +68,20 @@ log = logging.getLogger(__name__)
 #: The ``by`` the restore queue wakes a delayed record with.
 RESTORE_QUEUE = "restore-queue"
 
+#: Wakes the daemon starts on its own, with no person asking for this
+#: incarnation: the restore queue running late, a mesh delivery, a cflow
+#: notice or reminder, a status-check refresh, the CLI's cflow nudge
+#: (``/deliver``). A session woken by one of these does not get
+#: :attr:`Session.resumed_by_human`, so a finished one-shot run's kill-on-end
+#: still ends it (claunch-u9m6z: s122 was woken by a mesh delivery and the
+#: kill was called off as if a person had respawned it). Any other ``by`` --
+#: an attach, typed input, the API's wake, a QA answer, a thread message --
+#: is a person and keeps the deference; a ``by`` missing from this set is
+#: read as a person, so a new wake source errs toward keeping a session.
+AUTOMATIC_WAKES = frozenset({
+    RESTORE_QUEUE, "mesh", "cflow", "cflow2", "status-checks", "deliver",
+})
+
 
 def _on_running_loop() -> bool:
     """Whether the caller is on a thread with a running event loop."""
@@ -1855,6 +1869,9 @@ class SessionManager:
                 raise
             finally:
                 self._waking.discard(name)
+            if by in AUTOMATIC_WAKES:
+                # _respawned marked a person's respawn; nobody asked for this.
+                relaunched.resumed_by_human = False
             if delayed:
                 self._delayed_woken(relaunched, by)
             else:
@@ -1865,10 +1882,6 @@ class SessionManager:
         """Book-keeping for a delayed record that just came back."""
         name = session.sdef.name
         self._delayed_busy.discard(name)
-        if by == RESTORE_QUEUE:
-            # The queue is the restore running late, not a person asking for
-            # this incarnation (Session.resumed_by_human).
-            session.resumed_by_human = False
         log.info("delayed session %r started (%s)", name, by or "respawn")
         for hook in list(self.delayed_wake_hooks):
             try:

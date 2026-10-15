@@ -3128,7 +3128,7 @@ class RunEventClock:
             # is not running yet is NOT marked (claunch-u9m6z): right after a
             # boot its session may still be held or queued for a delayed
             # restore, and marking it here exempted it until the next boot —
-            # the session woke (a mesh delivery, the restore queue) and
+            # the session woke (the restore queue, a mesh delivery) and
             # stayed alive with its run done. Left unmarked, the next pass
             # judges it again; the v2 pass gets this by walking live
             # sessions only.
