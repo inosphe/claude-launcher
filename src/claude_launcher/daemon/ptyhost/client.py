@@ -285,6 +285,11 @@ class HostClient:
         """Drop the host's record of an exit the daemon has now recorded."""
         return bool(self.request({"op": "ack_exit", "sid": sid}, timeout=5.0).get("acked"))
 
+    def end(self, sid: str) -> bool:
+        """End one session the host holds, attached or not (the host waits
+        for it to go on a thread of its own)."""
+        return bool(self.request({"op": "end", "sid": sid}, timeout=5.0).get("ended"))
+
     def end_all(self, *, timeout: float = 15.0) -> None:
         """End every session the host holds (attached or not)."""
         self.request({"op": "end_all"}, timeout=timeout)

@@ -2001,10 +2001,12 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
             print("daemon is not running")
         return 0
     if action == "restart":
+        with_host = bool(getattr(args, "with_pty_host", False))
         if getattr(args, "all", False):
-            return _restart_all_instances()
+            return _restart_all_instances(with_pty_host=with_host)
         if getattr(args, "force", False):
-            return _force_replace(getattr(args, "reason", None) or "")
+            return _force_replace(getattr(args, "reason", None) or "",
+                                  with_pty_host=with_host)
         # The ordinary path talks to the daemon, so it only works while the
         # daemon is listening. A wedged one cannot be asked anything -- say so
         # here rather than leaving the operator with "did not come up in 15s",
@@ -2032,15 +2034,16 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
         # to below — and the daemon cannot see it, so only the CLI can draw
         # it (see restart_gate's module docstring).
         if os.environ.get("CLAUNCH_SESSION"):
-            return _gated_restart(getattr(args, "reason", None) or "")
+            return _gated_restart(getattr(args, "reason", None) or "",
+                                  with_pty_host=with_host)
         # Written first, and this order is the whole fix. Everything below
         # this line runs in a turn that is about to die: the daemon takes
         # every terminal attached to it down, so the print at the end reaches
         # a stdout nobody will read. Only what is on disk before the stop can
         # be handed back to the asker once a daemon exists again.
         restart_notice.record_request_from_env()
-        client = daemon_client.restart()
-        print(f"daemon restarted at {client.base_url}")
+        client = daemon_client.restart(with_pty_host=with_host)
+        print(f"daemon restarted at {client.base_url}{_host_suffix(with_host)}")
         return 0
     if action == "status":
         info = daemon_client.status()
@@ -2082,7 +2085,30 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
     raise AssertionError(f"unknown daemon action {action!r}")
 
 
-def _gated_restart(reason: str = "") -> int:
+def _host_suffix(with_pty_host: bool) -> str:
+    """What a restart did with the PTY host, for its one-line report."""
+    return " (with the PTY host: sessions relaunched)" if with_pty_host else ""
+
+
+def _shutdown_pty_host() -> None:
+    """End the PTY host of this daemon instance and its sessions, if one runs
+    (``--force --with-pty-host``: the daemon that would ask it is wedged)."""
+    if sys.platform == "win32":
+        return
+    from .daemon.ptyhost import client as ptyhost_client
+
+    directory = daemon_paths.ptyhost_dir()
+    if ptyhost_client.host_alive(directory) is None:
+        return
+    try:
+        ptyhost_client.HostClient.connect(directory).shutdown_host()
+        print("PTY host ended with its sessions")
+    except Exception as exc:  # busy (the wedged daemon still holds it) or gone
+        print(f"could not end the PTY host ({exc}); it stays running and the "
+              "new daemon adopts its sessions", file=sys.stderr)
+
+
+def _gated_restart(reason: str = "", *, with_pty_host: bool = False) -> int:
     """A managed session's restart request, waited out to its outcome.
 
     The ordinary path above stops the daemon on the spot — and with it the
@@ -2112,7 +2138,9 @@ def _gated_restart(reason: str = "") -> int:
     ``reason`` (``--reason``) travels with the request and is printed in
     full on the web UI's card, so the person deciding can see why the
     restart is wanted. It is sent only when given: a daemon older than the
-    field ignores it and the request is still filed.
+    field ignores it and the request is still filed. ``with_pty_host``
+    (``--with-pty-host``) travels the same way as ``pty_host: "full"``, and
+    the approval -- the person's or the clock's -- restarts in that mode.
     """
     report = daemon_client.diagnose()
     state = report["state"]
@@ -2145,6 +2173,8 @@ def _gated_restart(reason: str = "") -> int:
     reason = (reason or "").strip()
     if reason:
         body["reason"] = reason
+    if with_pty_host:
+        body["pty_host"] = "full"
     try:
         resp = client.post("/api/daemon/restart-request", body)
     except DaemonClientError as exc:
@@ -2181,6 +2211,8 @@ def _gated_restart(reason: str = "") -> int:
         )
     if reason:
         print(f"  reason: {reason}", file=sys.stderr)
+    if record.get("pty_host") == "full":
+        print("  with the PTY host: sessions end and are relaunched", file=sys.stderr)
     poll_secs = 2.0
     try:
         while True:
@@ -2330,7 +2362,7 @@ def _print_wedged(report: dict, confirm: dict) -> None:
     )
 
 
-def _force_replace(reason: str = "") -> int:
+def _force_replace(reason: str = "", *, with_pty_host: bool = False) -> int:
     """Replace a daemon that cannot be asked to leave.
 
     Reserved for the wedged case and never automatic: ending the process
@@ -2362,10 +2394,10 @@ def _force_replace(reason: str = "") -> int:
         # can. The wedged branch below has no daemon to host a gate and stays
         # immediate.
         if os.environ.get("CLAUNCH_SESSION"):
-            return _gated_restart(reason)
+            return _gated_restart(reason, with_pty_host=with_pty_host)
         restart_notice.record_request_from_env(via="cli-force")
-        client = daemon_client.restart()
-        print(f"daemon restarted at {client.base_url}")
+        client = daemon_client.restart(with_pty_host=with_pty_host)
+        print(f"daemon restarted at {client.base_url}{_host_suffix(with_pty_host)}")
         return 0
     if state == daemon_client.NOT_RUNNING:
         client = daemon_client.ensure_running()
@@ -2387,16 +2419,19 @@ def _force_replace(reason: str = "") -> int:
                 file=sys.stderr,
             )
             return 1
-        print(f"pid {pid} ended (its sessions went with it; the new daemon "
-              "restores the ones marked for it)")
+        print(f"pid {pid} ended (sessions on a PTY host keep running and the "
+              "new daemon adopts them; the rest went with it and the new "
+              "daemon restores the ones marked for it)")
     else:  # stale_record: the process is already gone, only the file remains
         print(f"clearing a stale record for pid {pid}")
+    if with_pty_host:
+        _shutdown_pty_host()
     client = daemon_client.ensure_running()
     print(f"daemon restarted at {client.base_url}")
     return 0
 
 
-def _restart_all_instances() -> int:
+def _restart_all_instances(*, with_pty_host: bool = False) -> int:
     """Restart every daemon instance that is currently serving.
 
     The client stack resolves all its paths through ``CLAUNCH_DAEMON``, and a
@@ -2435,7 +2470,7 @@ def _restart_all_instances() -> int:
             # through CLAUNCH_DAEMON -- the record lands in the instance
             # directory whose daemon is about to be stopped.
             restart_notice.record_request_from_env()
-            daemon_client.stop()
+            daemon_client.stop(mode="full" if with_pty_host else "keep")
             time.sleep(0.3)
             client = daemon_client.ensure_running()
             restarted += 1
@@ -3698,6 +3733,15 @@ def register(sub) -> None:
                      "shown in full on the web UI's card, so the operator "
                      "can judge it (e.g. the merges the live daemon does "
                      "not serve yet). Ignored on the immediate path",
+            )
+            p.add_argument(
+                "--with-pty-host", dest="with_pty_host", action="store_true",
+                help="with the daemon setting pty_host on, also end the PTY "
+                     "host and its sessions; the new daemon starts a new host "
+                     "and relaunches them (--resume). Without it the sessions "
+                     "keep running and the new daemon adopts them -- use this "
+                     "when the PTY host's own code changed. Rides the approval "
+                     "request from inside a managed session",
             )
         p.set_defaults(func=_cmd_daemon, action=action)
     p_token = dsub.add_parser("token", help="print the API/web login token")

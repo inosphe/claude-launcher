@@ -364,6 +364,12 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def lost_output_note(gap: int) -> bytes:
+    """The transcript line for output the PTY host's ring no longer had when
+    the next daemon re-attached (claunch-xnnct.1)."""
+    return f"\r\n[claunch: {gap} bytes lost while the daemon was down]\r\n".encode("utf-8")
+
+
 def _typing_lock(session) -> asyncio.Lock:
     """The lock one typed input holds from its text to its submitting Enter.
 
@@ -473,6 +479,10 @@ class Session:
         self.argv: List[str] = []
         self.pty = None
         self.pid: Optional[int] = None
+        self._reader: Optional[threading.Thread] = None
+        #: The PTY host record :meth:`detach` made (claunch-xnnct.1).
+        self.detached_pty: Optional[dict] = None
+        self._detaching = False
         self.idle_threshold = idle_threshold
         self._scrollback = scrollback
         self.screen = ScreenState(sdef.cols, sdef.rows, history=scrollback)
@@ -756,6 +766,99 @@ class Session:
             wsl_reg_stub.spawn_argv(argv),
             env=env, cwd=cwd, cols=self.sdef.cols, rows=self.sdef.rows,
         ))
+
+    def adopt(self, handle, replay: bytes, reply: dict, saved: dict) -> None:
+        """Take over a session the PTY host kept across a daemon restart
+        (claunch-xnnct.1) instead of starting a program.
+
+        ``handle`` is the re-attached :class:`ptyhost.client.RemotePty`,
+        ``replay``/``reply`` what ``attach`` returned, ``saved`` the ``pty``
+        record the previous daemon persisted. With a saved ``seq`` the log
+        ends exactly where the replay begins: the screen is rebuilt from the
+        log's tail as the program left it -- its grid on screen and the modes
+        it asserted, which :meth:`seed_screen_from_log` drops for a program
+        that is gone -- and the replay is appended to the log and fed on top.
+        Without one (the previous daemon did not get to detach, a crash or a
+        kill) where the log ends is not known: the screen is the host's ring
+        alone and the log is left as it is, so it can miss what the program
+        wrote between the crash and now.
+
+        The replay is not fed to the activity or compaction scanners: it is
+        old output, and the clocks those drive must not read it as new.
+        """
+        self.argv = list(saved.get("argv") or [])
+        self._started_mono = time.monotonic()
+        gap = int(reply.get("gap") or 0)
+        if saved.get("seq") is not None:
+            tail = self._replay_tail()
+            if tail:
+                self.screen.feed(tail)
+            self.screen.apply_modes(saved.get("modes") or {})
+            if gap:
+                self._append_log(lost_output_note(gap))
+            if replay:
+                self._append_log(replay)
+        if replay:
+            self.screen.feed(replay)
+        # The program is running and has drawn; it is not STARTING, and it
+        # took input before the restart.
+        self._saw_output = True
+        self._input_ready = True
+        self._last_output_mono = time.monotonic()
+        self._attach(handle)
+
+    async def detach(self, timeout: float = 5.0) -> Optional[dict]:
+        """Let go of a session that runs in the PTY host, leaving it running
+        (a daemon restart that keeps sessions, claunch-xnnct.1).
+
+        Stops the reader once it has logged every chunk routed to it, so the
+        returned record's ``seq`` is exactly where the log ends; the next
+        daemon passes it to :meth:`adopt`. None when the session is not one
+        the host keeps (a local PTY, exited) -- the caller ends it instead.
+        """
+        pty = self.pty
+        if self.exited or pty is None or not callable(getattr(pty, "detach", None)):
+            return None
+        pending = tuple(self._deferred_deliveries)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        self._detaching = True
+        pty.detach()
+        reader = self._reader
+        if reader is not None:
+            await asyncio.to_thread(reader.join, timeout)
+            if reader.is_alive():
+                log.warning("session %r: reader did not stop in %.0fs; its log may "
+                            "repeat some output after the restart", self.sdef.name, timeout)
+        sampler = getattr(self, "_sampler", None)
+        if sampler is not None:
+            sampler.cancel()
+        self._feeder.close()
+        try:
+            self._log.close()
+        except OSError:
+            pass
+        self.detached_pty = {
+            "sid": pty.sid, "pid": pty.pid, "seq": pty.seq,
+            "modes": self.screen.modes(), "argv": list(self.argv),
+        }
+        return self.detached_pty
+
+    def pty_record(self) -> Optional[dict]:
+        """What :meth:`SessionManager.persist` keeps about this session's
+        PTY host session: the detach record once detached; before that the
+        sid and pid alone, so a daemon that dies without detaching still
+        lets the next one find the session (without a ``seq``)."""
+        detached = self.detached_pty
+        if detached is not None:
+            return detached
+        pty = self.pty
+        sid = getattr(pty, "sid", None)
+        if self.exited or sid is None or not callable(getattr(pty, "detach", None)):
+            return None
+        return {"sid": sid, "pid": pty.pid, "argv": list(self.argv)}
 
     def _attach(self, pty) -> None:
         self.pty = pty
@@ -1056,7 +1159,8 @@ class Session:
             return False
 
     def _on_eof(self) -> None:
-        if self.exited:
+        if self.exited or self._detaching:
+            # A detach ends the reader without the program ending.
             return
         self._finish()
 

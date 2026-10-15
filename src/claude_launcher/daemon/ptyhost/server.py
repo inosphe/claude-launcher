@@ -15,7 +15,7 @@ killed) every session is detached and keeps running; its output collects in
 the ring, and an exit is kept until a client acknowledges it (``ack_exit``).
 The next daemon re-attaches with ``attach{sid, from_seq}`` and gets the bytes
 it missed (stage 2, claunch-xnnct.1). Sessions end only when asked:
-``terminate``, ``end_all`` or ``shutdown``. With no sessions and no client
+``terminate``, ``end``, ``end_all`` or ``shutdown``. With no sessions and no client
 for ``idle_exit`` seconds -- or once its directory is gone -- the host exits
 by itself, so a test home that was removed never leaves one behind.
 """
@@ -290,6 +290,15 @@ class Host:
             elif now - s.dead_since >= LATE_EOF_GRACE:
                 s.finish()
 
+    @staticmethod
+    def _end(s: HostSession) -> None:
+        if not s.exited.is_set():
+            s.terminate(force=False)
+            s.exited.wait(timeout=2.0)
+            if not s.exited.is_set():
+                s.terminate(force=True)
+        s.close()
+
     def _end_all(self, *, force: bool) -> None:
         with self._sessions_lock:
             sessions = list(self.sessions.values())
@@ -408,6 +417,15 @@ class Host:
                 s.close()
             if "id" in header:
                 self._reply(conn, header["id"], acked=s is not None)
+        elif op == "end":
+            # One session, attached or not: terminate, wait, drop.
+            with self._sessions_lock:
+                s = self.sessions.pop(str(header.get("sid", "")), None)
+            if s is not None:
+                threading.Thread(target=self._end, args=(s,), daemon=True,
+                                 name=f"ptyhost-end-{s.name}").start()
+            if "id" in header:
+                self._reply(conn, header["id"], ended=s is not None)
         elif op == "end_all":
             # Off the client thread: it waits for the children to go.
             def end_all() -> None:

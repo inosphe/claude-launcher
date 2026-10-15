@@ -112,7 +112,7 @@ def test_cli_shell_does_not_inherit_the_daemons_no_colour_answers(
         seen.update(env)
         return _Fake()
 
-    monkeypatch.setattr(pty_backend, "spawn", fake_spawn)
+    monkeypatch.setattr(pty_backend, "spawn_local", fake_spawn)
 
     async def run():
         shell = clipty.ShellPty(argv=REPL, cwd=str(tmp_path))

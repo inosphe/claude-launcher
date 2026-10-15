@@ -83,6 +83,14 @@ def use_host(client) -> None:
     _host = client
 
 
+def current_host():
+    """The installed PTY host client while its connection is open, else None."""
+    host = _host
+    if host is not None and not host.closed.is_set():
+        return host
+    return None
+
+
 def spawn(
     argv: Sequence[str],
     *,

@@ -39,10 +39,10 @@ from .. import auto_compact as auto_compact_mod
 from .. import codex_mode
 from . import actors, codex_sessions, ctxsize, db, harness as harness_mod, pi_sessions
 from . import progress as progress_mod
-from . import line_sync, paths, search_records, session_events, session_input
+from . import line_sync, paths, pty_backend, search_records, session_events, session_input
 from .harness import SessionDef
 from .screen import BACKGROUND_RENDER_BUDGET, RenderBudget
-from .session import STATUS_BUSY, DeadSession, Session
+from .session import STATUS_BUSY, DeadSession, Session, lost_output_note
 
 #: Either a live session or the record left behind by one that ended.
 AnySession = Union[Session, DeadSession]
@@ -88,6 +88,20 @@ def _known(**details) -> dict:
     event only when there is one (claunch-o6xws), so the events of a path
     that passes none read as they always did."""
     return {k: v for k, v in details.items() if v is not None}
+
+
+def _append_transcript(name: str, data: bytes, gap: int) -> None:
+    """Append output a session made while no daemon was attached to its
+    transcript (claunch-xnnct.1), for a record no live Session writes."""
+    if not data and not gap:
+        return
+    try:
+        with open(paths.session_log(name), "ab") as fh:
+            if gap:
+                fh.write(lost_output_note(gap))
+            fh.write(data)
+    except OSError:
+        log.warning("could not log %r's output from the PTY host", name, exc_info=True)
 
 
 def ended_by_os(exit_code: Optional[int]) -> bool:
@@ -225,6 +239,10 @@ class SessionManager:
         #: or on neither, and an *idle* blank restore still lost everything it
         #: knew — so this list is not filtered by what the session was doing.
         self.resumed_blank: List[str] = []
+        #: Names :meth:`restore_all` took over from the PTY host still
+        #: running (claunch-xnnct.1): same process, nothing resumed, so they
+        #: are on none of the lists above.
+        self.adopted: List[str] = []
         #: Names :meth:`restore_all` filed as *delayed* instead of relaunching
         #: (claunch-0j6gb.2), in registry order; the restore queue
         #: (:mod:`claude_launcher.daemon.restore_queue`) ranks and wakes
@@ -2722,7 +2740,15 @@ class SessionManager:
                            transcript_moved=moved is not None)
         return relaunched, moved is not None
 
-    async def shutdown_all(self) -> None:
+    async def shutdown_all(self, mode: str = "stop") -> None:
+        """End every live session, the daemon going down.
+
+        ``mode`` is the restart mode (claunch-xnnct.1): ``"keep"`` lets go of
+        the sessions that run in the PTY host and leaves them running for
+        the next daemon to adopt (:meth:`restore_all`), ending only the ones
+        on a local PTY; ``"full"`` and ``"stop"`` end them all, as without a
+        host. The host process itself is the caller's to close or shut down.
+        """
         self.shutting_down = True  # these exits are the daemon's, not the sessions'
         # A restart immediately after /new must not persist the superseded
         # UUID while its short filesystem watcher is still in flight.
@@ -2744,6 +2770,23 @@ class SessionManager:
         # bounded by one grace window whatever the session count.
         live = [s for s in self._sessions.values() if not s.exited]
         started = time.monotonic()
+        if mode == "keep":
+            records = await asyncio.gather(
+                *(session.detach() for session in live), return_exceptions=True
+            )
+            detached = [s for s, r in zip(live, records) if isinstance(r, dict)]
+            for s, r in zip(live, records):
+                if isinstance(r, BaseException):
+                    log.warning("session %r could not be detached (%s); ending it",
+                                s.sdef.name, r)
+            if detached:
+                # Again, now with where each log ends: what adopt starts from.
+                self.persist()
+                log.info(
+                    "left %d session(s) running in the PTY host in %.1fs",
+                    len(detached), time.monotonic() - started,
+                )
+            live = [s for s in live if s not in detached]
         await asyncio.gather(
             *(session.shutdown() for session in live), return_exceptions=True
         )
@@ -2933,6 +2976,11 @@ class SessionManager:
                     # session does drop the pin — the record has no terminal
                     # left to hold mail out of.
                     "delivery_hold": session.delivery_held(),
+                    # The PTY host session it runs in (claunch-xnnct.1): what
+                    # the next daemon matches to adopt it instead of
+                    # relaunching it. None for a local PTY or an exited one.
+                    "pty": (session.pty_record()
+                            if callable(getattr(session, "pty_record", None)) else None),
                 }
             )
         try:
@@ -2984,6 +3032,15 @@ class SessionManager:
             log.exception("failed to read the session registry")
             return []
         failed: List[str] = []
+        host = pty_backend.current_host()
+        kept: Dict[str, dict] = {}
+        if host is not None:
+            try:
+                kept = {str(r.get("sid")): r for r in host.list()}
+            except Exception:
+                log.warning("could not list the PTY host's sessions; restoring "
+                            "as without one", exc_info=True)
+                host = None
         # While the set is being filled, a persist would write a partial
         # fleet; pruning on it would delete the records not loaded yet. The
         # relaunches below skip theirs (see _launched), and the flag still
@@ -3014,6 +3071,21 @@ class SessionManager:
                     continue
                 if sdef.name in self._sessions:
                     continue  # a duplicated record must not clobber a live one
+                row = self._kept_row(kept, sdef, entry)
+                if row is not None:
+                    # Still running in the PTY host (claunch-xnnct.1): taken
+                    # over as it is, before the restore queue and the
+                    # relaunch below, which are for programs that ended.
+                    try:
+                        self._adopt(host, sdef, entry, row)
+                        continue
+                    except Exception:
+                        log.exception(
+                            "failed to adopt session %r from the PTY host; "
+                            "ending it there and restoring it", sdef.name,
+                        )
+                        self._sessions.pop(sdef.name, None)
+                        self._end_kept(host, row)
                 # A record still delayed when the previous daemon went down
                 # was never started by it: it is owed the restore it did not
                 # get, not left a plain hold.
@@ -3068,8 +3140,20 @@ class SessionManager:
                         log.exception("failed to restore session %r", sdef.name)
                         failed.append(sdef.name)
                 self._retire(sdef, entry)
+            for row in kept.values():
+                # Running in the host with no record here that owns it: a
+                # session this registry ended or forgot, or one whose record
+                # names another process. Nothing would ever drive it.
+                log.warning(
+                    "PTY host session %s (%r, pid %s) matches no running "
+                    "record; ending it", row.get("sid"), row.get("name"), row.get("pid"),
+                )
+                self._end_kept(host, row)
         finally:
             self._loading = False
+        if self.adopted:
+            log.info("adopted %d session(s) from the PTY host: %s",
+                     len(self.adopted), ", ".join(self.adopted))
         persist_started = _perf_counter()
         self.persist()
         if relaunching:
@@ -3090,6 +3174,89 @@ class SessionManager:
                 (persist_started - started) - clock["prepare"] - clock["spawn"],
             )
         return failed
+
+    @staticmethod
+    def _kept_row(kept: Dict[str, dict], sdef: SessionDef, entry: dict) -> Optional[dict]:
+        """The PTY host session ``entry`` was running in, taken off ``kept``
+        -- or None. Name, sid and pid must all agree, and the record must be
+        one the previous daemon left running; a row that fails that stays in
+        ``kept``, which ends whatever is left there."""
+        rec = entry.get("pty")
+        if not isinstance(rec, dict):
+            return None
+        row = kept.get(str(rec.get("sid")))
+        if row is None:
+            return None
+        if (row.get("name") != sdef.name or row.get("pid") != rec.get("pid")
+                or not entry.get("was_running") or entry.get("held_at")
+                or entry.get("archived_at")):
+            return None
+        return kept.pop(str(rec.get("sid")))
+
+    def _adopt(self, host, sdef: SessionDef, entry: dict, row: dict) -> None:
+        """Take over a session the PTY host kept across the restart.
+
+        Running: a :class:`Session` is staged on it and re-attached
+        (:meth:`Session.adopt`) -- same process, no relaunch, no resume.
+        Exited while no daemon was attached: the output it made since is
+        logged, and it is filed as an ending the way :meth:`_retire` files
+        one that happened across a restart (its board sweep is claimed at
+        boot), with the host's code and time.
+        """
+        rec = entry["pty"]
+        sid = str(rec["sid"])
+        from_seq = int(rec.get("seq") or 0)
+        if row.get("exited"):
+            handle, replay, reply = host.attach(sid, name=sdef.name, from_seq=from_seq)
+            if rec.get("seq") is not None:
+                _append_transcript(sdef.name, replay, int(reply.get("gap") or 0))
+            code = reply.get("code")
+            stamp = row.get("exited_at")
+            exited_at = (
+                datetime.fromtimestamp(float(stamp), timezone.utc).isoformat(timespec="seconds")
+                if stamp else _now_iso()
+            )
+            dead = self._retire(sdef, {
+                **entry, "exit_code": code, "exited_at": exited_at,
+                "pid": row.get("pid"),
+                # A nonzero code nobody asked for is a failure, as
+                # _session_exited files one (claunch-0j6gb.1).
+                "failed_at": exited_at if code not in (None, 0) else None,
+            })
+            handle.close()
+            try:
+                host.ack_exit(sid)
+            except Exception:
+                log.debug("ack_exit for %s failed", sid, exc_info=True)
+            self.events.record(dead, "exit", "데몬이 없는 동안 세션 프로세스 종료",
+                               exit_code=code)
+            return
+        session = self.stage(
+            sdef,
+            restoring=True,
+            created_at=entry.get("created_at"),
+            last_visited_at=entry.get("last_visited_at"),
+            last_input_at=entry.get("last_input_at"),
+            delivery_hold=bool(entry.get("delivery_hold")),
+        )
+        handle, replay, reply = host.attach(sid, name=sdef.name, from_seq=from_seq)
+        try:
+            session.adopt(handle, replay, reply, rec)
+        except Exception:
+            handle.detach()
+            raise
+        self.adopted.append(sdef.name)
+        self.events.record(session, "adopt", "데몬 재시작 후 PTY 호스트의 세션 인수",
+                           pid=session.pid, replayed=len(replay),
+                           gap=int(reply.get("gap") or 0))
+        self.flush_queued_input(session)
+
+    @staticmethod
+    def _end_kept(host, row: dict) -> None:
+        try:
+            host.end(str(row.get("sid")))
+        except Exception:
+            log.warning("could not end PTY host session %s", row.get("sid"), exc_info=True)
 
     def _defer_restore(self, sdef: SessionDef, entry: dict) -> DeadSession:
         """File a session the boot owes a relaunch as *delayed* (a hold the

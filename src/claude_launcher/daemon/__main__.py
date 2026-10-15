@@ -94,6 +94,7 @@ def _connect_pty_host(cfg: dict):
     with the setting off: the setting must not be a way to start no sessions.
     """
     if not cfg.get("pty_host"):
+        _end_leftover_pty_host()
         return None
     if sys.platform == "win32":
         log.warning("pty_host is set but the PTY host runs on POSIX only; spawning in the daemon")
@@ -109,6 +110,52 @@ def _connect_pty_host(cfg: dict):
     pty_backend.use_host(client)
     log.info("sessions run in PTY host pid %s", client.host_pid)
     return client
+
+
+def _end_leftover_pty_host() -> None:
+    """With ``pty_host`` off, end a host a previous daemon left running.
+
+    A restart that kept sessions leaves the host running; when the setting
+    was turned off in between, nothing would adopt them. They are ended here,
+    before restore_all, which then relaunches each from its record (the
+    ``--resume`` path) as it does for any session that ended across a restart.
+    """
+    if sys.platform == "win32":
+        return
+    from .ptyhost import client as ptyhost_client
+
+    directory = paths.ptyhost_dir()
+    if ptyhost_client.host_alive(directory) is None:
+        return
+    try:
+        client = ptyhost_client.HostClient.connect(directory)
+    except Exception as exc:
+        log.warning("pty_host is off and a PTY host is still running, but it "
+                    "could not be reached to end it (%s)", exc)
+        return
+    try:
+        count = len(client.list())
+        log.warning("pty_host is off: ending the PTY host a previous daemon left "
+                    "running and its %d session(s); they are restored from their "
+                    "records", count)
+        client.end_all()
+        client.shutdown_host()
+    except Exception:
+        log.warning("could not end the leftover PTY host", exc_info=True)
+        client.close()
+
+
+def _close_pty_host(client, mode: str) -> None:
+    """Let go of the PTY host at teardown: leave it running ("keep") or shut
+    it down with whatever it still holds ("full", "stop")."""
+    if mode == "keep":
+        client.close()
+        return
+    try:
+        client.shutdown_host()
+    except Exception:
+        log.warning("the PTY host did not confirm its shutdown", exc_info=True)
+        client.close()
 
 
 async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) -> int:
@@ -413,9 +460,15 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
         await teardown.step("ask_clock", ask_clock.shutdown())
         await teardown.step("mesh", mesh_manager.shutdown())
         runtime_state.remove_daemon_json()
-        await teardown.step("sessions", manager.shutdown_all())
+        # The restart mode (claunch-xnnct.1): "keep" leaves the sessions
+        # running in the PTY host for the successor to adopt.
+        mode = app.get("restart_mode") or "stop"
+        if pty_host is None or pty_host.closed.is_set():
+            mode = "stop" if mode == "keep" else mode
+        log.info("teardown mode: %s", mode)
+        await teardown.step("sessions", manager.shutdown_all(mode=mode))
         if pty_host is not None:
-            pty_host.close()
+            await teardown.step("pty_host", asyncio.to_thread(_close_pty_host, pty_host, mode))
         # The app's own on_shutdown/on_cleanup hooks run in here.
         await teardown.step("http runner", runner.cleanup())
         teardown.report()
