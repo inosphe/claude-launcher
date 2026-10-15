@@ -196,8 +196,32 @@
     const meta = node("div", "thh-meta");
     meta.append(node("span", "thh-who", m.author === "user" ? "user" : session),
       node("span", "thh-at", when(m.at)));
-    msg.append(meta, body(node("div", "thh-body"), m.body));
+    if (m.body) msg.append(meta, body(node("div", "thh-body"), m.body));
+    else msg.append(meta);
+    const pics = images(m);
+    if (pics) msg.append(pics);
     return msg;
+  }
+
+  // The images the user attached to a message (claunch-shl2r), each a link
+  // to the full picture. Served by the daemon with the page's own login.
+  function images(m) {
+    if (!(m.images || []).length) return null;
+    const box = node("div", "th-images");
+    for (const img of m.images) {
+      const path = `api/threads/${encodeURIComponent(m.thread)}/images/${encodeURIComponent(img.name)}`;
+      const link = node("a", "th-image");
+      link.href = typeof globalThis.url === "function" ? globalThis.url(path) : path;
+      link.target = "_blank";
+      link.rel = "noopener";
+      const pic = node("img");
+      pic.src = link.href;
+      pic.alt = "첨부 이미지";
+      pic.loading = "lazy";
+      link.append(pic);
+      box.append(link);
+    }
+    return box;
   }
 
   function card(t) {

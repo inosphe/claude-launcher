@@ -171,17 +171,17 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   const box2 = host.querySelector(".th-compose .th-text");
   box2.value = "twice?";
   box2.fire("keydown", {key: "Enter"});
-  assert.ok(host.querySelector(".th-compose .term-btn").disabled, "보내기 is disabled while the post is out");
+  assert.ok(host.querySelector(".th-compose .th-send").disabled, "보내기 is disabled while the post is out");
   assert.equal(host.querySelector(".th-compose .th-text").value, "", "Enter empties the composer before the answer");
   const out = host.querySelectorAll(".th-sending");
   assert.equal(out.length, 1, "the message being sent shows as a pending bubble");
   assert.equal(out[0].querySelector(".th-msg-body").textContent, "twice?");
   host.querySelector(".th-compose .th-text").fire("keydown", {key: "Enter"});
-  host.querySelector(".th-compose .term-btn").fire("click");
+  host.querySelector(".th-compose .th-send").fire("click");
   await settle();
   assert.equal(posts(), sent + 1, "one message for a double send");
   assert.equal(host.querySelectorAll(".th-sending").length, 0, "the pending bubble goes once answered");
-  assert.ok(!host.querySelector(".th-compose .term-btn").disabled, "보내기 comes back after the answer");
+  assert.ok(!host.querySelector(".th-compose .th-send").disabled, "보내기 comes back after the answer");
   assert.equal(host.querySelectorAll(".wf-warning").length, 0, "a message that went straight in says nothing");
 
   // a message the session accepted but is holding says why (claunch-a41i5)
@@ -243,17 +243,17 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   const typed = host.querySelector(".th-newform .th-title-input");
   typed.value = "Deploy";
   typed.fire("input");
-  host.querySelector(".th-newform .term-btn").fire("click");
+  host.querySelector(".th-newform .th-send").fire("click");
   await settle();
   assert.equal(host.querySelector(".th-newform .th-title-input").value, "Deploy", "a failed create keeps the title");
-  assert.ok(!host.querySelector(".th-newform .term-btn").disabled, "시작 comes back after a failure");
+  assert.ok(!host.querySelector(".th-newform .th-send").disabled, "시작 comes back after a failure");
   assert.match(host.querySelector(".th-head").text(), /boom/);
   failCreate = false;
   calls.length = 0;
   const form = host.querySelector(".th-newform");
   form.querySelector(".th-title-input").value = "Deploy";
   form.querySelector(".th-text").value = "when?";
-  const startBtn = form.querySelector(".term-btn");
+  const startBtn = form.querySelector(".th-send");
   startBtn.fire("click");
   startBtn.fire("click");   // a double click before the first answer (claunch-7xp0f)
   assert.ok(startBtn.disabled, "시작 is disabled while the post is out");
@@ -326,13 +326,109 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   assert.ok(host2.querySelector(".th-pane").classList.contains("th-solo"), "no thread: the list fills the pane");
   host2.querySelector(".th-new").fire("click");
   await settle();
-  host2.querySelector(".th-newform .term-btn").fire("click");
+  host2.querySelector(".th-newform .th-send").fire("click");
   await settle();
   assert.deepEqual(calls2.filter((c) => c[1] === "/api/threads").pop(), ["POST", "/api/threads", {to: "s2", title: ""}],
                    "시작 with nothing typed opens an untitled, empty thread");
   assert.ok(!host2.querySelector(".th-pane").classList.contains("th-solo"), "the new thread takes the right half");
   assert.equal(host2.querySelector(".th-convo-title").textContent, "Thread #1");
   assert.equal(document.activeElement, host2.querySelector(".th-compose .th-text"), "its composer has the focus");
+  P.unmount();
+
+  /* images on a message (claunch-shl2r) */
+  assert.equal(P.imageKind({type: "image/png"}), "image/png");
+  assert.equal(P.imageKind({type: "image/svg+xml"}), "", "a type the daemon does not keep is not an image here");
+  assert.equal(P.imageKind({type: "", name: "shot.JPG"}), "image/jpeg");
+  assert.equal(P.imageKind({type: "", name: "notes.txt"}), "");
+  const png = {type: "image/png", name: "a.png"};
+  const txt = {type: "text/plain", name: "a.txt"};
+  assert.deepEqual([...P.imageFiles({items: [{kind: "string", type: "text/plain"}, {kind: "file", type: "image/png", getAsFile: () => png}],
+                                 files: [png]})], [png], "items first, never the same file twice");
+  assert.deepEqual([...P.imageFiles({items: [], files: [txt, png]})], [png], "a drop's files, images only");
+  assert.deepEqual([...P.imageFiles(null)], []);
+  assert.equal(P.imageSrc("th-1", "ab.png"), "api/threads/th-1/images/ab.png");
+  assert.equal(P.lastLine({body: "", images: [{}, {}]}), "🖼 이미지 2장");
+  assert.equal(P.lastLine({body: "look\nmore", images: [{}]}), "look 🖼1");
+  assert.equal(P.lastLine({body: "plain"}), "plain");
+
+  ctx.URL = {createObjectURL: (f) => `blob:${f.name}`, revokeObjectURL: () => {}};
+  const imgThread = {id: "th-5", title: "Pictures", status: "open", opened_by: "user", last_seq: 1,
+                     last: {author: "user", body: "", images: [{name: "aa.png"}]}};
+  const imgMessages = [{seq: 1, author: "user", body: "", images: [{name: "aa.png", type: "image/png"}],
+                        at: "2026-10-13T00:00:00+00:00"}];
+  const calls3 = [];
+  let failStage = false;
+  let staged = 0;
+  const api3 = async (p, opts = {}) => {
+    const isStage = p === "/api/threads/images";
+    calls3.push([opts.method || "GET", p, isStage ? opts.headers["Content-Type"] : (opts.body ? JSON.parse(opts.body) : undefined)]);
+    let doc = {};
+    if (isStage) {
+      if (failStage) return {ok: false, status: 413, json: async () => ({error: "too big"})};
+      doc = {id: `img${++staged}.png`};
+    } else if (p.startsWith("/api/threads?session=")) doc = {session: "s3", threads: [imgThread], open: 1, agent_seq: 0};
+    else if (/^\/api\/threads\/th-5\?after=/.test(p)) {
+      const after = Number(p.split("after=")[1]);
+      doc = {thread: imgThread, messages: imgMessages.filter((m) => m.seq > after)};
+    } else if (p === "/api/threads/th-5/messages") doc = {message: {seq: 2}, delivered: true};
+    else if (p === "/api/threads") doc = {thread: {id: "th-5"}, delivered: true};
+    return {ok: true, status: 200, json: async () => doc};
+  };
+  const host3 = document.createElement("div");
+  P.mount(host3, "s3", {api: api3, storageKey: "k3"});
+  await settle();
+  const pics = host3.querySelectorAll(".th-images img");
+  assert.equal(pics.length, 1, "a message shows its images");
+  assert.equal(pics[0].src, "api/threads/th-5/images/aa.png");
+  assert.equal(host3.querySelectorAll(".th-msg .th-msg-body").length, 0, "an images-only message draws no empty text");
+  assert.match(host3.querySelector(".th-item-last").text(), /🖼 이미지 1장/);
+
+  // paste an image: it waits under the composer; text of the paste is not taken
+  const cbox = host3.querySelector(".th-compose .th-text");
+  cbox.fire("paste", {clipboardData: {items: [{kind: "file", type: "image/png", getAsFile: () => ({type: "image/png", name: "shot.png"})}]}});
+  await settle();
+  let thumbs = host3.querySelectorAll(".th-attach-item img");
+  assert.equal(thumbs.length, 1, "the pasted image waits as a thumbnail");
+  assert.equal(thumbs[0].src, "blob:shot.png");
+  cbox.fire("paste", {clipboardData: {items: [{kind: "string", type: "text/plain"}]}});
+  assert.equal(host3.querySelectorAll(".th-compose .th-attach-item").length, 1, "a text paste attaches nothing");
+
+  // a failed upload keeps the image for the next try and posts nothing
+  failStage = true;
+  host3.querySelector(".th-compose .th-send").fire("click");
+  await settle();
+  assert.ok(!calls3.some((c) => c[1] === "/api/threads/th-5/messages"), "no post when an image did not upload");
+  assert.match(host3.querySelector(".th-head").text(), /too big/);
+  assert.equal(host3.querySelectorAll(".th-compose .th-attach-item").length, 1, "the image stays attached");
+  failStage = false;
+
+  // Enter with no text sends the image alone: staged first, then named in the post
+  calls3.length = 0;
+  host3.querySelector(".th-compose .th-text").fire("keydown", {key: "Enter"});
+  await settle();
+  assert.deepEqual(calls3.filter((c) => c[0] === "POST").map((c) => [c[1], c[2]]),
+                   [["/api/threads/images", "image/png"], ["/api/threads/th-5/messages", {text: "", images: ["img1.png"]}]]);
+  assert.equal(host3.querySelectorAll(".th-compose .th-attach-item").length, 0, "sent images leave the composer");
+
+  // the × takes an attached image back out
+  host3.querySelector(".th-compose .th-text").fire("paste", {clipboardData: {files: [{type: "image/webp", name: "w.webp"}]}});
+  await settle();
+  host3.querySelector(".th-attach-drop").fire("click");
+  await settle();
+  assert.equal(host3.querySelectorAll(".th-compose .th-attach-item").length, 0);
+
+  // a new thread carries the images dropped on its form
+  host3.querySelector(".th-new").fire("click");
+  await settle();
+  const nform = host3.querySelector(".th-newform");
+  nform.fire("drop", {dataTransfer: {files: [{type: "image/png", name: "d.png"}, {type: "text/plain", name: "x.txt"}]}});
+  await settle();
+  assert.equal(nform.querySelectorAll(".th-attach-item").length, 1, "only the image is attached");
+  calls3.length = 0;
+  host3.querySelector(".th-newform .th-send").fire("click");
+  await settle();
+  assert.deepEqual(calls3.filter((c) => c[0] === "POST").map((c) => [c[1], c[2]]),
+                   [["/api/threads/images", "image/png"], ["/api/threads", {to: "s3", title: "", images: ["img2.png"]}]]);
   P.unmount();
 
   /* the header button's rail (app.js) */

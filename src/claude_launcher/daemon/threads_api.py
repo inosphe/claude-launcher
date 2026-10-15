@@ -9,6 +9,17 @@ user and a session, held in the session's threads pane.
   POST /api/threads/{id}/close                   close   {session?}
   POST /api/threads/{id}/reopen                  reopen  {session?}
   POST /api/threads/{id}/title                   rename  {session?, title}
+  POST /api/threads/images                       stage one image (raw body)
+  GET  /api/threads/{id}/images/{name}           an image a message carries
+
+Images (claunch-shl2r). The user may attach images to a message: each is
+staged first (``POST /api/threads/images``, the opening-image upload) and
+the post names the staged ids in ``images``; a message may then have no
+text. The files are kept for the thread's record (daemon/thread_images.py)
+and every message returns its ``images`` with each file's ``path``. The
+block typed into the session lists those paths; on a live session whose
+harness takes images, the images are first pasted into its composer the
+way the session line's image paste does, so the message arrives with them.
 
 A blank title opens the thread under the session's next default name
 (``Thread #N``); without ``text`` the thread starts empty and nothing is
@@ -45,12 +56,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 from typing import Optional
 
 from aiohttp import web
 
 from ..threads import store as thread_store
-from . import paths, talk_links
+from . import paths, talk_links, thread_images
 
 log = logging.getLogger(__name__)
 
@@ -76,6 +88,15 @@ def _mention_lines(mentions: list[dict]) -> list[str]:
             for q in mentions]
 
 
+def _image_lines(message: dict) -> list[str]:
+    images = message.get("images") or []
+    if not images:
+        return []
+    return [f"The user attached {len(images)} image(s) to this message (the files are on this machine; "
+            "open them to see what the user means):",
+            *(f"  - {img['path']}" for img in images)]
+
+
 def user_wrote_text(thread: dict, message: dict, *, opened: bool = False, reopened: bool = False,
                     ask_qa: bool = False, mentions: Optional[list[dict]] = None) -> str:
     tid = thread["id"]
@@ -85,7 +106,9 @@ def user_wrote_text(thread: dict, message: dict, *, opened: bool = False, reopen
         head = "The user reopened this thread and wrote:"
     else:
         head = "The user wrote in this thread:"
-    lines = [f"{PREFIX} {tid} \"{thread['title']}\"] {head}", _quote(message["body"]), *_subject_line(thread),
+    lines = [f"{PREFIX} {tid} \"{thread['title']}\"] {head}",
+             _quote(message["body"]) if message["body"] or not message.get("images") else "  > (images only)",
+             *_image_lines(message), *_subject_line(thread),
              *_mention_lines(mentions or [])]
     if ask_qa:
         lines.append(
@@ -105,11 +128,30 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
     threads = store or thread_store.ThreadStore(paths.threads_db())
     app["threads"] = threads
 
-    def deliver(name: str, text: str) -> bool:
+    def paste_step(session, images: list[dict], text: str):
+        """``(before, text)`` for a message carrying images: the images go
+        into the composer first, the way the session line's image paste does
+        (api._opening_image_step), and the text names any that could not be
+        pasted. ``(None, text)`` when the harness declares no image transport
+        -- the block's paths are then the only way the images arrive."""
+        from .. import harnesses as harness_registry
+        from . import api as api_mod, opening_images
+        entry = harness_registry.registry().get(getattr(session.sdef, "harness", "") or "")
+        if not images or not (entry and entry.takes_images):
+            return None, text
+        files = [opening_images.Image(Path(img["path"]), img["type"]) for img in images]
+        return api_mod._opening_image_step(session, files, text, what="thread images")
+
+    def deliver(name: str, text: str, images: Optional[list[dict]] = None) -> bool:
         """Type ``text`` into session ``name``; a held session is woken for
-        it. False when there is nobody to tell (exited, unknown)."""
+        it. False when there is nobody to tell (exited, unknown). With
+        ``images``, a live session gets them pasted in ahead of the text."""
         try:
-            if manager.get(name).queue_delivery(text):
+            session = manager.get(name)
+            before, body = paste_step(session, images or [], text)
+            # ``before`` only when there is one, so a text-only message makes
+            # exactly the call it made before images existed.
+            if session.queue_delivery(body, **({"before": before} if before else {})):
                 return True
         except Exception:  # noqa: BLE001 -- gone or not deliverable
             pass
@@ -170,7 +212,7 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
                                     skip=[thread["qa"]] if thread.get("qa") else [])
 
     def tell(res: dict, name: str, text: str) -> None:
-        res["delivered"] = deliver(name, text)
+        res["delivered"] = deliver(name, text, (res.get("message") or {}).get("images"))
         res["hold"] = hold_of(name) if res["delivered"] else None
 
     def known(name: str) -> bool:
@@ -196,9 +238,30 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
 
     async def call(fn, *args, **kw):
         try:
-            return await asyncio.to_thread(fn, *args, **kw), None
+            res = await asyncio.to_thread(fn, *args, **kw)
         except thread_store.ThreadError as exc:
             return None, web.json_response({"error": str(exc)}, status=exc.status)
+        if isinstance(res, dict):
+            # Every message leaves with its images' paths on this machine.
+            for m in [res.get("message"), *(res.get("messages") or [])]:
+                if m:
+                    thread_images.attach(m)
+        return res, None
+
+    async def keep_images(body: dict, actor: str):
+        """``body["images"]`` (staged ids) moved into the kept folder, as
+        the store's records; or an error response."""
+        raw = body.get("images")
+        if raw in (None, []):
+            return [], None
+        if actor != thread_store.USER:
+            return None, web.json_response(
+                {"error": "only the user attaches images to a thread message"}, status=400)
+        try:
+            ids = thread_images.check(raw)
+            return await asyncio.to_thread(thread_images.keep, ids), None
+        except thread_images.ThreadImageError as exc:
+            return None, web.json_response({"error": str(exc)}, status=400)
 
     async def h_list(request):
         session = request.query.get("session") or ""
@@ -250,8 +313,13 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
             # questions (claunch-236ei).
             rows = await asyncio.to_thread(qa_rows, target)
             qid = talk_links.subject_in(body.get("title"), body.get("text"), rows)
-        res, err = await call(threads.open, actor, target, body.get("title"), body.get("text"), qa=qid)
+        images, err = await keep_images(body, actor)
         if err:
+            return err
+        res, err = await call(threads.open, actor, target, body.get("title"), body.get("text"), qa=qid,
+                              images=images)
+        if err:
+            await asyncio.to_thread(thread_images.unkeep, images)
             return err
         await asyncio.to_thread(link, [res["thread"]], target)
         if actor == thread_store.USER and res["message"]:
@@ -272,8 +340,12 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
     async def h_post(request):
         body = await body_of(request)
         actor = actor_of(body)
-        res, err = await call(threads.post, actor, request.match_info["id"], body.get("text"))
+        images, err = await keep_images(body, actor)
         if err:
+            return err
+        res, err = await call(threads.post, actor, request.match_info["id"], body.get("text"), images=images)
+        if err:
+            await asyncio.to_thread(thread_images.unkeep, images)
             return err
         t = res["thread"]
         await asyncio.to_thread(link, [t], t["session"])
@@ -301,6 +373,20 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
         await asyncio.to_thread(link, [res["thread"]], res["thread"]["session"])
         return web.json_response(res)
 
+    async def h_image(request):
+        tid, name = request.match_info["id"], request.match_info["name"]
+        try:
+            path = thread_images.path_of(name)
+        except thread_images.ThreadImageError as exc:
+            return web.json_response({"error": str(exc)}, status=404)
+        if not (await asyncio.to_thread(threads.has_image, tid, name)) or not path.is_file():
+            return web.json_response({"error": f"thread {tid} has no image {name}"}, status=404)
+        return web.FileResponse(path, headers={
+            "Content-Type": thread_images.media_type(name),
+            # The name is the file's random id and never names other bytes.
+            "Cache-Control": "private, max-age=31536000, immutable",
+        })
+
     r = app.router
     r.add_get("/api/threads", h_list)
     r.add_get("/api/threads/rail", h_rail)
@@ -312,4 +398,5 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
     r.add_post("/api/threads/{id}/close", status_route("closed"))
     r.add_post("/api/threads/{id}/reopen", status_route("open"))
     r.add_post("/api/threads/{id}/title", h_title)
+    r.add_get("/api/threads/{id}/images/{name}", h_image)
     return threads

@@ -32,6 +32,13 @@
    of the session's question ids is linked by the daemon the same way
    (claunch-236ei).
 
+   Images (claunch-shl2r): a picture pasted (Ctrl+V), dropped or picked
+   (🖼 button) in a composer waits under it as a thumbnail until the message
+   is sent; then each one is uploaded (POST /api/threads/images, the
+   opening-image staging) and the post names the returned ids in `images`.
+   A message may be images alone. Messages show their images from
+   GET /api/threads/<id>/images/<name>, so the conversation keeps them.
+
    Space (claunch-1n081): "◂ 목록" in the head folds the thread list away
    while a conversation is open, so the bubbles take the pane's whole
    width; the fold is kept in localStorage (FOLD_KEY) for every session. */
@@ -50,7 +57,8 @@ globalThis.ThreadsPane = (() => {
   let focusCompose = false;  // a thread was just opened: its composer takes the focus
   const drafts = new Map();  // thread id ("" = new thread) -> text
   const inflight = new Set(); // thread ids ("" = new thread) with a post still out
-  const pending = new Map();  // thread id -> {text, failed?: error}: the message being sent
+  const pending = new Map();  // thread id -> {text, images, failed?: error}: the message being sent
+  const attached = new Map(); // thread id ("" = new thread) -> [{file, src}]: images waiting to be sent
   const drawn = {side: "", main: ""};   // what each half last drew
   const FOLD_KEY = "claunch_threadfold";  // localStorage: the list column is folded away
 
@@ -62,6 +70,47 @@ globalThis.ThreadsPane = (() => {
   };
 
   /* ---- pure helpers (tests/web/threadspane_check.js) ---- */
+
+  /* The media types the daemon keeps (daemon/opening_images.TYPES), by
+     extension for a picked file whose browser left `type` empty. */
+  const IMAGE_KINDS = {png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp"};
+
+  function imageKind(file) {
+    const kind = String((file && file.type) || "").toLowerCase();
+    if (kind) return Object.values(IMAGE_KINDS).includes(kind) ? kind : "";
+    const m = /\.([a-z0-9]+)$/i.exec(String((file && file.name) || ""));
+    return (m && IMAGE_KINDS[m[1].toLowerCase()]) || "";
+  }
+
+  /* The image files of a paste or a drop. `items` is where a screenshot
+     arrives; `files` (a drop, a file manager copy) is read only when `items`
+     had none, because the two can list the same file twice. */
+  function imageFiles(data) {
+    if (!data) return [];
+    const out = [];
+    for (const it of Array.from(data.items || [])) {
+      if (it.kind !== "file" || !imageKind({type: it.type})) continue;
+      const f = it.getAsFile && it.getAsFile();
+      if (f) out.push(f);
+    }
+    if (out.length) return out;
+    return Array.from(data.files || []).filter((f) => imageKind(f));
+  }
+
+  /* Where the daemon serves image `name` of thread `tid`, through the
+     page's base (app.js url()) when it is loaded. */
+  function imageSrc(tid, name) {
+    const path = `api/threads/${encodeURIComponent(tid)}/images/${encodeURIComponent(name)}`;
+    return typeof globalThis.url === "function" ? globalThis.url(path) : path;
+  }
+
+  /* What the list says of a message: its first line, or that it is images. */
+  function lastLine(m) {
+    const text = excerpt(m && m.body);
+    const n = ((m && m.images) || []).length;
+    if (!n) return text;
+    return text ? `${text} 🖼${n}` : `🖼 이미지 ${n}장`;
+  }
 
   /* The first line of a message, shortened for the list. */
   function excerpt(text, max = 80) {
@@ -179,6 +228,48 @@ globalThis.ThreadsPane = (() => {
     return doc;
   }
 
+  /* Upload one image to the staging area; its id names it in the post. */
+  async function stage(file) {
+    const resp = await api("/api/threads/images", {
+      method: "POST", headers: {"Content-Type": imageKind(file)}, body: file,
+    });
+    const doc = await resp.json().catch(() => ({}));
+    if (!resp.ok || !doc.id) throw Error(doc.error || `이미지 업로드 실패 (HTTP ${resp.status})`);
+    return doc.id;
+  }
+
+  /* The ids of the images waiting for `key`, uploaded in order. */
+  async function stageAll(key) {
+    const ids = [];
+    for (const a of attached.get(key) || []) ids.push(await stage(a.file));
+    return ids;
+  }
+
+  function dropAttached(key) {
+    for (const a of attached.get(key) || []) {
+      try { URL.revokeObjectURL(a.src); } catch { /* no object URLs here */ }
+    }
+    attached.delete(key);
+  }
+
+  /* Add image files to what `key`'s composer will send; files that are not
+     images are left out and counted in the notice. */
+  function attach(key, files) {
+    const list = Array.from(files || []);
+    const pics = list.filter((f) => imageKind(f));
+    if (list.length > pics.length) notice = `이미지가 아닌 파일 ${list.length - pics.length}개는 첨부하지 않았습니다.`;
+    if (!pics.length) { render(); return; }
+    const have = attached.get(key) || [];
+    for (const file of pics) {
+      let src = "";
+      try { src = URL.createObjectURL(file); } catch { /* no object URLs here */ }
+      have.push({file, src});
+    }
+    attached.set(key, have);
+    drawStrips();
+    render();
+  }
+
   async function load() {
     const mine = ++seq;
     const want = name;
@@ -264,20 +355,26 @@ globalThis.ThreadsPane = (() => {
     if (inflight.has(tid)) return undefined;
     // The composer empties now, before the answer: what was sent shows as a
     // pending bubble, so nothing is left in the box to send a second time.
+    // Attached images stay attached until the post is in: a failure keeps
+    // them for the next try.
     drafts.delete(tid);
-    pending.set(tid, {text});
+    const pics = (attached.get(tid) || []).map((a) => a.src);
+    pending.set(tid, {text, images: pics});
     return once(tid, () => act(async () => {
       const body = {text};
       if (askQa) body.ask_qa = true;
       let res;
       try {
+        const ids = await stageAll(tid);
+        if (ids.length) body.images = ids;
         res = await request(`/api/threads/${encodeURIComponent(tid)}/messages`, body);
       } catch (e) {
-        pending.set(tid, {text, failed: (e && e.message) || String(e)});
+        pending.set(tid, {text, images: pics, failed: (e && e.message) || String(e)});
         if (!(drafts.get(tid) || "").trim()) drafts.set(tid, text);
         throw e;
       }
       pending.delete(tid);
+      dropAttached(tid);
       notice = deliveryNotice(res);
     }));
   }
@@ -287,7 +384,10 @@ globalThis.ThreadsPane = (() => {
       const body = {to: name, title};
       if (text) body.text = text;
       if (composeQa) body.qa = composeQa.id;
+      const ids = await stageAll("");
+      if (ids.length) body.images = ids;
       const res = await request("/api/threads", body);
+      dropAttached("");
       drafts.delete("");
       drafts.delete("\u0000title");
       composing = false;
@@ -323,7 +423,87 @@ globalThis.ThreadsPane = (() => {
     box.value = drafts.get(key) || "";
     box.addEventListener("input", () => { drafts.set(key, box.value); fit(box); });
     if (onSend) box.addEventListener("keydown", (e) => { if (sendKey(e)) { e.preventDefault(); onSend(); } });
+    // A paste carrying images: the images are attached, the text of a mixed
+    // paste is left to the browser.
+    box.addEventListener("paste", (e) => {
+      const files = imageFiles(e.clipboardData);
+      if (!files.length) return;
+      e.preventDefault();
+      attach(key, files);
+    });
     return box;
+  }
+
+  /* The thumbnails waiting under composer `key`, each with a remove button. */
+  function fillStrip(strip) {
+    const key = strip.dataset.key;
+    const list = attached.get(key) || [];
+    strip.replaceChildren();
+    strip.hidden = !list.length;
+    list.forEach((a, i) => {
+      const item = node("span", "th-attach-item");
+      const pic = node("img");
+      pic.src = a.src;
+      pic.alt = a.file.name || "첨부 이미지";
+      const drop = node("button", "th-attach-drop", "×");
+      drop.type = "button";
+      drop.title = "첨부 취소";
+      drop.addEventListener("click", () => {
+        const rest = (attached.get(key) || []).filter((_, j) => j !== i);
+        try { URL.revokeObjectURL(a.src); } catch { /* no object URLs here */ }
+        if (rest.length) attached.set(key, rest); else attached.delete(key);
+        drawStrips();
+        render();
+      });
+      item.append(pic, drop);
+      strip.append(item);
+    });
+  }
+
+  function strip(key) {
+    const box = node("div", "th-attach");
+    box.dataset.key = key;
+    fillStrip(box);
+    return box;
+  }
+
+  /* Redraw every strip in place: a paste into a focused composer must show
+     at once, and the list half is not redrawn while someone types in it. */
+  function drawStrips() {
+    if (!host || !host.querySelectorAll) return;
+    for (const box of host.querySelectorAll(".th-attach")) fillStrip(box);
+  }
+
+  /* The 🖼 button and its hidden file input: several images at once. */
+  function pickButton(key) {
+    const input = node("input");
+    input.type = "file";
+    input.accept = Object.values(IMAGE_KINDS).join(",");
+    input.multiple = true;
+    input.hidden = true;
+    input.addEventListener("change", () => { attach(key, input.files); input.value = ""; });
+    const pick = node("button", "term-btn th-pick", "🖼");
+    pick.type = "button";
+    pick.title = "이미지 첨부 — 입력창에 붙여넣거나(Ctrl+V) 끌어다 놓아도 됩니다";
+    pick.addEventListener("click", () => input.click());
+    return [pick, input];
+  }
+
+  /* Images dropped anywhere on `area` go to composer `key`. */
+  function dropTarget(area, key) {
+    area.addEventListener("dragover", (e) => {
+      if (!Array.from((e.dataTransfer || {}).types || []).includes("Files")) return;
+      e.preventDefault();
+      area.classList.add("dragover");
+    });
+    area.addEventListener("dragleave", () => area.classList.remove("dragover"));
+    area.addEventListener("drop", (e) => {
+      area.classList.remove("dragover");
+      const files = imageFiles(e.dataTransfer);
+      if (!files.length) return;
+      e.preventDefault();
+      attach(key, files);
+    });
   }
 
   /* A message body: markdown for both authors when the renderer is on the
@@ -340,7 +520,25 @@ globalThis.ThreadsPane = (() => {
     return body;
   }
 
-  function bubble(author, text, when, state) {
+  /* A message's images as thumbnails, each a link to the full picture. */
+  function picturesOf(srcs) {
+    const box = node("div", "th-images");
+    for (const src of srcs) {
+      const link = node("a", "th-image");
+      link.href = src;
+      link.target = "_blank";
+      link.rel = "noopener";
+      const pic = node("img");
+      pic.src = src;
+      pic.alt = "첨부 이미지";
+      pic.loading = "lazy";
+      link.append(pic);
+      box.append(link);
+    }
+    return box;
+  }
+
+  function bubble(author, text, when, state, images = []) {
     const row = node("div", `th-msg th-${author}`);
     if (state) row.classList.add(`th-${state}`);
     const meta = node("div", "th-msg-meta");
@@ -348,7 +546,9 @@ globalThis.ThreadsPane = (() => {
     if (when) meta.append(node("span", "th-msg-at", when));
     if (state === "sending") meta.append(node("span", "th-msg-state", "전송 중…"));
     if (state === "failed") meta.append(node("span", "th-msg-state", "전송 실패 — 입력창에 되돌렸습니다"));
-    row.append(meta, bodyOf(text));
+    row.append(meta);
+    if (text || !images.length) row.append(bodyOf(text));
+    if (images.length) row.append(picturesOf(images));
     return row;
   }
 
@@ -365,7 +565,7 @@ globalThis.ThreadsPane = (() => {
       title.placeholder = "주제(선택) — 비우면 Thread #N, qa-xxxxxxxx를 넣으면 그 QA 질문과 연결";
       title.value = drafts.get("\u0000title") || "";
       title.addEventListener("input", () => drafts.set("\u0000title", title.value));
-      const first = textBox("th-text", "", "첫 메시지(선택) — 세션에 전달됩니다");
+      const first = textBox("th-text", "", "첫 메시지(선택) — 세션에 전달됩니다. 이미지는 붙여넣기·끌어다 놓기");
       let about = null;
       if (composeQa) {
         about = node("div", "th-about");
@@ -385,7 +585,8 @@ globalThis.ThreadsPane = (() => {
       };
       go.addEventListener("click", submit);
       title.addEventListener("keydown", (e) => { if (sendKey(e)) { e.preventDefault(); first.focus(); } });
-      form.append(title, ...(about ? [about] : []), first, go);
+      dropTarget(form, "");
+      form.append(title, ...(about ? [about] : []), first, strip(""), ...pickButton(""), go);
       side.append(form);
       if (!title.value) setTimeout(() => title.focus(), 0);
     }
@@ -412,7 +613,7 @@ globalThis.ThreadsPane = (() => {
       li.append(top);
       if (t.last) {
         const who = t.last.author === "agent" ? `${name}: ` : "나: ";
-        li.append(node("div", "th-item-last", who + excerpt(t.last.body)));
+        li.append(node("div", "th-item-last", who + lastLine(t.last)));
       }
       li.title = `${t.id} · ${t.opened_by === "agent" ? "세션이 연 쓰레드" : "내가 연 쓰레드"}`;
       li.addEventListener("click", () => {
@@ -466,25 +667,31 @@ globalThis.ThreadsPane = (() => {
     }
 
     const msgs = node("div", "th-messages");
-    for (const m of convo.messages) msgs.append(bubble(m.author, m.body, stamp(m.at)));
+    for (const m of convo.messages) {
+      msgs.append(bubble(m.author, m.body, stamp(m.at), "", (m.images || []).map((i) => imageSrc(t.id, i.name))));
+    }
     const out = pending.get(t.id);
-    if (out) msgs.append(bubble("user", out.text, "", out.failed ? "failed" : "sending"));
+    if (out) msgs.append(bubble("user", out.text, "", out.failed ? "failed" : "sending", out.images || []));
     if (!convo.messages.length && !out) {
       msgs.append(node("p", "th-empty", "아직 메시지가 없습니다. 아래 입력창에 첫 메시지를 쓰세요."));
     }
 
     const sending = inflight.has(t.id);
     const compose = node("div", "th-compose");
-    const submit = () => { const v = box.value.trim(); if (v) send(t.id, v); };
+    const submit = () => {
+      const v = box.value.trim();
+      if (v || (attached.get(t.id) || []).length) send(t.id, v);
+    };
     const box = textBox("th-text", t.id, `${name}에게 보내기`, submit, 1);
     const foot = node("div", "th-compose-foot");
-    foot.append(node("span", "th-hint", "Enter 전송 · Shift+Enter 줄바꿈 · markdown 지원"));
+    foot.append(...pickButton(t.id), node("span", "th-hint", "Enter 전송 · Shift+Enter 줄바꿈 · markdown 지원 · 이미지 붙여넣기"));
     const go = node("button", "term-btn th-send", sending ? "전송 중…" : "보내기");
     go.type = "button";
     go.disabled = sending;
     go.addEventListener("click", submit);
     foot.append(go);
-    compose.append(box, foot);
+    dropTarget(compose, t.id);
+    compose.append(strip(t.id), box, foot);
 
     main.replaceChildren(head, ...(links ? [links] : []), msgs, compose);
     msgs.scrollTop = msgs.scrollHeight;
@@ -528,14 +735,16 @@ globalThis.ThreadsPane = (() => {
     // Redraw only what changed, so a poll neither scrolls the reader back
     // to the bottom nor rebuilds what they are typing in.
     const read = loadRead();
-    const sideSig = JSON.stringify([threads, current, composing, composeQa, [...unseen(threads, read)], inflight.has("")]);
+    const sideSig = JSON.stringify([threads, current, composing, composeQa, [...unseen(threads, read)], inflight.has(""),
+                                    (attached.get("") || []).length]);
     if (!typingIn(side) && (sideSig !== drawn.side || !side.firstChild)) {
       drawn.side = sideSig;
       renderList(side, threads, read);
     }
     const t = convo && convo.thread;
     const mainSig = JSON.stringify(convo ? [convo.id, t.title, t.status, t.links || [], convo.messages.length,
-                                            inflight.has(convo.id), pending.get(convo.id) || null] : null);
+                                            inflight.has(convo.id), pending.get(convo.id) || null,
+                                            (attached.get(convo.id) || []).length] : null);
     if (mainSig === drawn.main && main.firstChild) return;
     drawn.main = mainSig;
     const keep = main.querySelector(".th-compose textarea");
@@ -581,6 +790,7 @@ globalThis.ThreadsPane = (() => {
     focusCompose = false;
     inflight.clear();
     pending.clear();
+    for (const key of [...attached.keys()]) dropAttached(key);
     notice = error = "";
     drawn.side = drawn.main = "";
   }
@@ -613,5 +823,5 @@ globalThis.ThreadsPane = (() => {
   }
 
   return {mount, unmount, refresh: () => host && load(), select, focus, compose, excerpt, unseen, sendKey, pick, linkLabel, stamp,
-          FOLD_KEY};
+          imageKind, imageFiles, imageSrc, lastLine, FOLD_KEY};
 })();

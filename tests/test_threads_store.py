@@ -212,3 +212,63 @@ def test_t8_history_keeps_the_last_messages(st, monkeypatch):
     t = st.history()["threads"][0]
     assert [m["body"] for m in t["messages"]] == ["m2", "m3", "m4"] and t["omitted"] == 2
     assert st.history(per_page=10_000)["per_page"] == S.HISTORY_MAX_PAGE
+
+
+# -- T9 images on a message (claunch-shl2r) ---------------------------------
+
+IMG = {"name": "0123456789abcdef0123.png", "type": "image/png", "bytes": 12}
+
+
+def test_t9_a_user_message_carries_images_and_may_have_no_text(st):
+    res = st.open(S.USER, "s1", "Bug", images=[IMG])
+    m = res["message"]
+    assert m["body"] == "" and m["images"] == [IMG]
+    tid = res["thread"]["id"]
+    res = st.post(S.USER, tid, "and this", images=[IMG])
+    assert res["message"]["images"] == [IMG]
+    st.post("s1", tid, "seen")
+    got = st.read(tid)["messages"]
+    assert [m["images"] for m in got] == [[IMG], [IMG], []]
+    assert st.has_image(tid, IMG["name"])
+    assert not st.has_image(tid, "fedcba98765432100000.png")
+    assert not st.has_image(tid, "../threads.sqlite3")
+
+
+def test_t9_bad_images(st):
+    tid = st.open(S.USER, "s1", "Bug")["thread"]["id"]
+    with pytest.raises(S.ThreadError, match="text is required"):
+        st.post(S.USER, tid, "", images=[])
+    with pytest.raises(S.ThreadError, match="only the user"):
+        st.post("s1", tid, "look", images=[IMG])
+    with pytest.raises(S.ThreadError, match="not a stored thread image"):
+        st.post(S.USER, tid, "x", images=[{"name": "../../etc/passwd"}])
+    with pytest.raises(S.ThreadError, match="at most"):
+        st.post(S.USER, tid, "x", images=[IMG] * (S.MAX_IMAGES + 1))
+    assert st.read(tid)["messages"] == []
+
+
+def test_t9_a_v2_database_is_rebuilt_with_its_rows(tmp_path):
+    import sqlite3
+    path = tmp_path / "threads.sqlite3"
+    db = sqlite3.connect(str(path))
+    db.executescript("""
+    CREATE TABLE threads (id TEXT PRIMARY KEY, session TEXT NOT NULL, title TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'open', opened_by TEXT NOT NULL, last_seq INTEGER NOT NULL DEFAULT 0,
+        agent_read INTEGER NOT NULL DEFAULT 0, qa TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+    CREATE TABLE messages (seq INTEGER PRIMARY KEY AUTOINCREMENT, thread TEXT NOT NULL REFERENCES threads (id),
+        session TEXT NOT NULL, author TEXT NOT NULL CHECK (author IN ('user', 'agent')),
+        body TEXT NOT NULL CHECK (length(body) > 0), at TEXT NOT NULL);
+    CREATE INDEX messages_thread ON messages (thread, seq);
+    INSERT INTO threads VALUES ('th-aaaaaa', 's1', 'Old', 'open', 'user', 7, 0, NULL, 't', 't');
+    INSERT INTO messages VALUES (5, 'th-aaaaaa', 's1', 'user', 'hello', 't');
+    INSERT INTO messages VALUES (7, 'th-aaaaaa', 's1', 'agent', 'hi', 't');
+    PRAGMA user_version = 2;
+    """)
+    db.close()
+    st = S.ThreadStore(path)
+    got = st.read("th-aaaaaa")["messages"]
+    assert [(m["seq"], m["body"], m["images"]) for m in got] == [(5, "hello", []), (7, "hi", [])]
+    m = st.post(S.USER, "th-aaaaaa", "", images=[IMG])["message"]
+    assert m["seq"] == 8                                  # the sequence goes on past the old rows
+    S.ThreadStore(path)                                   # a second open is a no-op
+    assert len(st.read("th-aaaaaa")["messages"]) == 3

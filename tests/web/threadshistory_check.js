@@ -249,6 +249,20 @@ const sessions = [{ session: 's1', threads: 2 }, { session: 's2', threads: 1 }];
   assert.strictEqual(view.byClass('thh-split').length, 0);
   assert.deepStrictEqual(view.byClass('thh-thread').map(c => c.dataset.thread), ['th-a']);
 
+  // Images the user attached stay on the record (claunch-shl2r): an images-only
+  // message draws its pictures, each linked to the full one, and no empty body.
+  const pic = thread('th-p', 's1', 'open', [['user', '']]);
+  pic.messages[0].images = [{ name: 'ab.png', type: 'image/png' }];
+  reply = () => ({ threads: [pic], total: 1, page: 1, per_page: 20, pages: 1, sessions });
+  page.open('feed');
+  await settle();
+  const pmsg = view.byClass('thh-msg')[0];
+  assert.strictEqual(pmsg.byClass('thh-body').length, 0);
+  const links = pmsg.byClass('th-image');
+  assert.strictEqual(links.length, 1);
+  assert.strictEqual(links[0].href, 'api/threads/th-p/images/ab.png');
+  assert.strictEqual(links[0].children[0].src, links[0].href);
+
   // An unknown mode falls back to tree.
   page.open('nope');
   assert.strictEqual(page.state.view, 'tree');

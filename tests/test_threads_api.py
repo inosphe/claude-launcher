@@ -222,3 +222,126 @@ def test_a_message_held_behind_the_terminal_says_why(tmp_path):
         assert (await req("POST", f"/api/threads/{tid}/messages", {"text": "clear"}))["hold"] is None
         assert len(s1.delivered) == 5                       # every one was accepted for delivery
     run(tmp_path, scenario)
+
+
+# -- images on a user message (claunch-shl2r) --------------------------------
+
+PNG = bytes.fromhex("89504e470d0a1a0a") + b"a pretend png body"
+
+
+def _stage():
+    from claude_launcher.daemon import opening_images
+    return opening_images.stage([PNG], "image/png")
+
+
+def test_images_are_kept_listed_in_the_block_and_served(tmp_path):
+    from claude_launcher.daemon import opening_images, thread_images
+
+    async def scenario(req, mgr):
+        first, second = _stage(), _stage()
+        res = await req("POST", "/api/threads", {"to": "s1", "title": "Bug", "images": [first]})
+        tid = res["thread"]["id"]
+        img = res["message"]["images"][0]
+        assert res["message"]["body"] == "" and img["name"] == first and img["type"] == "image/png"
+        kept = thread_images.folder() / first
+        assert img["path"] == str(kept) and kept.read_bytes() == PNG
+        assert not (opening_images.stage_dir() / first).exists()
+        block = mgr.sessions["s1"].delivered[-1]
+        assert "  > (images only)" in block and "attached 1 image(s)" in block and f"  - {kept}" in block
+
+        res = await req("POST", f"/api/threads/{tid}/messages", {"text": "and this one", "images": [second]})
+        assert "  > and this one" in mgr.sessions["s1"].delivered[-1]
+        assert str(thread_images.folder() / second) in mgr.sessions["s1"].delivered[-1]
+
+        # the record keeps them: a read (the agent's thread_read too) carries the paths
+        got = await req("GET", f"/api/threads/{tid}?reader=s1")
+        assert [[i["name"] for i in m["images"]] for m in got["messages"]] == [[first], [second]]
+        assert got["messages"][1]["images"][0]["path"] == str(thread_images.folder() / second)
+
+    run(tmp_path, scenario)
+
+
+def test_image_route_serves_only_a_threads_own_images(tmp_path):
+    from aiohttp.test_utils import TestClient, TestServer
+
+    mgr = FakeManager([FakeSession("s1")])
+    app = web.Application()
+    app["manager"] = mgr
+    threads_api.install(app, S.ThreadStore(tmp_path / "threads.sqlite3"))
+
+    async def go():
+        async with TestClient(TestServer(app)) as client:
+            name = _stage()
+            res = await (await client.post("/api/threads", json={"to": "s1", "text": "x", "images": [name]})).json()
+            other = await (await client.post("/api/threads", json={"to": "s1", "text": "y"})).json()
+            tid, oid = res["thread"]["id"], other["thread"]["id"]
+            resp = await client.get(f"/api/threads/{tid}/images/{name}")
+            assert resp.status == 200 and resp.headers["Content-Type"] == "image/png"
+            assert await resp.read() == PNG
+            assert (await client.get(f"/api/threads/{oid}/images/{name}")).status == 404
+            assert (await client.get(f"/api/threads/{tid}/images/..%2Fthreads.sqlite3")).status == 404
+
+    asyncio.run(go())
+
+
+def test_bad_images_are_refused_and_leave_nothing_kept(tmp_path):
+    from claude_launcher.daemon import opening_images, thread_images
+
+    async def scenario(req, mgr):
+        tid = (await req("POST", "/api/threads", {"to": "s1", "text": "hi"}))["thread"]["id"]
+        before = len(mgr.sessions["s1"].delivered)
+        err = await req("POST", f"/api/threads/{tid}/messages",
+                        {"images": ["0123456789abcdef0123.png"]}, status=400)
+        assert "not on this daemon" in err["error"]
+        name = _stage()
+        err = await req("POST", f"/api/threads/{tid}/messages", {"session": "s1", "text": "x", "images": [name]},
+                        status=400)
+        assert "only the user" in err["error"]
+        # refused by the store after the move: the file goes back to staging
+        await req("POST", "/api/threads/th-nope00/messages", {"text": "x", "images": [name]}, status=404)
+        assert (opening_images.stage_dir() / name).is_file()
+        assert not (thread_images.folder() / name).exists()
+        assert len(mgr.sessions["s1"].delivered) == before
+
+    run(tmp_path, scenario)
+
+
+def test_a_live_session_that_takes_images_gets_them_pasted_first(tmp_path, monkeypatch):
+    from claude_launcher import harnesses
+    from claude_launcher.daemon import api as api_mod
+
+    class Registry(dict):
+        def get(self, name, default=None):
+            return SimpleNamespace(takes_images=name == "claude")
+
+    monkeypatch.setattr(harnesses, "registry", lambda: Registry())
+    steps = []
+
+    def fake_step(session, images, text, *, what="opening images"):
+        async def step():
+            pass
+        steps.append(([str(i.path) for i in images], [i.media_type for i in images], what))
+        return step, lambda: text + "\n(pasted)"
+
+    monkeypatch.setattr(api_mod, "_opening_image_step", fake_step)
+    befores = []
+
+    class PasteSession(FakeSession):
+        def queue_delivery(self, text, before=None):
+            befores.append(before)
+            return super().queue_delivery(text() if callable(text) else text)
+
+    async def scenario(req, mgr):
+        mgr.sessions["s1"] = live = PasteSession("s1")
+        live.sdef.harness = "claude"
+        mgr.sessions["s2"].sdef.harness = "other"
+        name = _stage()
+        res = await req("POST", "/api/threads", {"to": "s1", "text": "see", "images": [name]})
+        assert steps == [([res["message"]["images"][0]["path"]], ["image/png"], "thread images")]
+        assert callable(befores[-1]) and live.delivered[-1].endswith("(pasted)")
+        await req("POST", "/api/threads", {"to": "s1", "text": "no picture"})
+        assert befores[-1] is None and len(steps) == 1          # a text-only message pastes nothing
+        await req("POST", "/api/threads", {"to": "s2", "text": "see", "images": [_stage()]})
+        assert len(steps) == 1                                  # a harness without images: paths only
+
+    run(tmp_path, scenario)
