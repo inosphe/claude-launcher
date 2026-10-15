@@ -558,9 +558,16 @@ html[data-theme="light"] .xterm {
 .dot.exited.paused { background: #58a6ff; }
 /* A held record (claunch-5l35i): asleep, wakes when opened. */
 .dot.exited.hold { background: #8b7fd6; }
-/* A delayed record (claunch-0j6gb.2): a hold the boot's restore queue
-   owns — the hold's violet, hollowed, because it starts by itself. */
-.dot.exited.hold.delayed { background: transparent; box-shadow: inset 0 0 0 2px #8b7fd6; }
+/* A delayed record (claunch-0j6gb.2, claunch-v4uyt): waiting in the boot's
+   restore queue. Its own colour and a slow pulse, apart from hold's violet,
+   because it starts by itself — a person read the violet as "failed to come
+   back". */
+.dot.exited.delayed {
+  background: transparent; box-shadow: inset 0 0 0 2px #39c5cf;
+  animation: restore-queue-pulse 2s ease-in-out infinite;
+}
+@keyframes restore-queue-pulse { 50% { opacity: 0.45; } }
+@media (prefers-reduced-motion: reduce) { .dot.exited.delayed { animation: none; } }
 /* A failed record (claunch-0j6gb.1): ended by itself with an error. */
 .dot.exited.failed { background: #f85149; }
 /* The dot's grade (dotGrade in app.js). Busy steps up from a dim amber — a
@@ -2142,6 +2149,12 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 .badge.tps.stale { background: #1c1f24; color: #7d8590; }
 .badge.exited.paused { background: #172947; color: #58a6ff; }
 .badge.exited.hold { background: #231f3d; color: #a99cf0; }
+.badge.exited.delayed { background: #0d2a2e; color: #56d4dd; }
+.restore-queue-banner {
+  margin: 4px 0; padding: 4px 8px; border-radius: 6px;
+  background: #0d2a2e; color: #56d4dd; border: 1px solid #1b4b52;
+  font-size: 12px; font-variant-numeric: tabular-nums;
+}
 .badge.exited.failed { background: #3d1d20; color: #ff7b72; }
 /* The link chip: what this browser's socket is doing, as against the badge
    before it, which is what the session is doing. Filled rather than outlined

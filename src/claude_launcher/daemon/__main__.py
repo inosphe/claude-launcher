@@ -344,6 +344,8 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
         ],
     )
     queue.start()
+    # The dashboard reads its progress off the session list (claunch-v4uyt).
+    app["restore_queue"] = queue
     # Started alongside it, and deliberately not merged into it: the nudge is
     # allowed to give up on a session that is working again, and this is not
     # (see restart_notice's module docstring). Where both are owed, whichever
