@@ -1069,9 +1069,16 @@ def test_a_grant_made_as_its_client_left_is_handed_back(tmp_path):
     asyncio.run(run())
 
 
+def _dead_pid() -> int:
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    return proc.pid
+
+
 def test_waiters_left_by_a_previous_daemon_are_dropped_and_holders_kept(tmp_path):
     async def run():
         w = _make(tmp_path)
+        w._daemon_pid = _dead_pid()           # the previous daemon has exited
         held = await w.acquire("sweep", session="a", pid=os.getpid())
         waiter = asyncio.create_task(
             w.acquire("sweep", session="b", pid=os.getpid(), wait=30))
@@ -1085,6 +1092,41 @@ def test_waiters_left_by_a_previous_daemon_are_dropped_and_holders_kept(tmp_path
         # releasing the holder grants nobody
         assert w2.release(held["grant_id"]) and w2.status()["holders"] == []
         waiter.cancel()
+
+    asyncio.run(run())
+
+
+def test_a_manager_built_while_the_daemon_serves_keeps_its_waiters(tmp_path):
+    """claunch-ersj2.1: a pytest of a tree from before claunch-llmi1, run by the
+    delayed-sweep runner, opened the machine's window file under the default
+    instance while the main daemon served it. Building its manager emptied the
+    daemon's queue, and each waiter came back ``cancelled`` one poll later
+    while the history said ``disconnected``. The waiter must stay queued and
+    end in a grant (or its own timeout)."""
+    script = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from claude_launcher.daemon.window import WindowManager\n"
+        "WindowManager(None, caps=lambda: (1, 5), state_path=Path(sys.argv[1]))\n"
+    )
+
+    async def run():
+        w = _make(tmp_path)
+        held = await w.acquire("sweep", session=None, pid=os.getpid())
+        waiter = asyncio.create_task(
+            w.acquire("targeted", session=None, pid=os.getpid(), wait=10))
+        await asyncio.sleep(0.05)
+        assert len(w.status()["queue"]) == 1
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-c", script, str(tmp_path / "window.json"))
+        assert await proc.wait() == 0
+        await asyncio.sleep(window_mod.SHARED_POLL + 0.2)  # the waiter re-reads
+        assert not waiter.done()
+        assert len(w.status()["queue"]) == 1
+        w.release(held["grant_id"])
+        result = await waiter
+        assert result["granted"], result
+        assert "disconnected" not in [r["end"] for r in w.history()["entries"]]
 
     asyncio.run(run())
 
