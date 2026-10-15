@@ -156,6 +156,12 @@ CONNECTION_PROMPT = "ping"
 #: to aiohttp's default context rather than failing.
 _OS_TRUST_CONTEXT = _truststore.SSLContext(_ssl.PROTOCOL_TLS_CLIENT) if _truststore else None
 
+#: Part of the cache key: bump it when :func:`build_prompt`'s instructions
+#: change, so a briefing written under the old wording is composed again on
+#: its next request instead of being served until the session moves.
+#: 2 — summaries describe the work, never session names or issue ids.
+PROMPT_VERSION = 2
+
 _STATES = frozenset({"working", "blocked", "waiting", "idle", "done", "unknown"})
 
 
@@ -817,9 +823,22 @@ def build_prompt(
         '변경하면 안 되는 기술적 값은 원문을 유지한다.',
         "one-line-job-description은 세션이 맡은 작업 전체를 한 줄에 담는다"
         "(목표와 달라도 좋다 — 리더가 볼 한 줄짜리 설명).",
+        "goal·now·progress·one-line-job-description은 작업 내용 자체를",
+        "기술한다. 이 문장은 이미 그 세션의 이름과 이슈 배지 옆에 표시된다.",
+        "- 세션 이름(이 세션과 다른 세션 모두, 예: s173, s29-rev), 이슈 id",
+        "  (예: claunch-4avda), PR 번호, cflow 런 id를 쓰지 않는다.",
+        '- "이 세션", "~하는 세션", "~하는 리뷰어 세션", "~하는 작업" 같은',
+        "  자기 지칭 없이 무엇을 어떻게 하는지를 바로 적는다.",
+        "- 다른 세션·이슈의 일을 다루면 그 식별자 대신 그 일의 내용을",
+        "  적는다. 자료에 내용이 없으면 지어내지 않고 일반적으로 적는다.",
+        '- 나쁜 예: "s173의 변경을 최신 master 위로 재정렬하고 PR #164를 만드는 작업."',
+        '  좋은 예: "프로시저 정의 UI 변경을 최신 master 위로 재정렬하고 PR을 연다."',
+        '- 나쁜 예: "s173 런의 peer-review에 대해 보드(claunch-4avda)와 브랜치 근거로 판정하는 리뷰어 세션."',
+        '  좋은 예: "프로시저 정의 UI 변경의 동료 리뷰 — 브랜치 diff와 테스트로 판정을 내린다."',
+        "faq 답변에는 이 제한을 적용하지 않는다.",
         "",
         "[세션]",
-        f"이름: {sdef.name}",
+        f"이름: {sdef.name} (자료 식별용 — 요약 문장에 쓰지 않는다)",
         f"작업 디렉터리: {sdef.cwd or '(없음)'}",
     ]
     if getattr(sdef, "task", None):
@@ -1343,6 +1362,7 @@ async def compose(session, cfg: dict, *, refresh: bool = False) -> dict:
             jsonl_path = None
     cache_key = (
         name,
+        PROMPT_VERSION,
         stat_key,
         cflow_info.get("step") if cflow_info else None,
         live_info.get("status") if live_info else None,
