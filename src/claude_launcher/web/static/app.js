@@ -45915,6 +45915,16 @@ function notify(title, sub, opts) {
     o.session && o.target ? { target: o.target } : {}
   ));
   const node = el("div", "notice" + (o.kind ? ` ${o.kind}` : ""));
+  // A click on the card goes where it points; × only puts it away
+  // (claunch-x76l8). The history keeps the row either way.
+  const close = el("button", "notice-close", "×");
+  close.type = "button";
+  close.title = "dismiss (the history keeps it)";
+  close.addEventListener("click", (ev) => {
+    if (ev && ev.stopPropagation) ev.stopPropagation();
+    dismissNotice(key);
+  });
+  node.appendChild(close);
   node.appendChild(el("div", "notice-title", title));
   if (sub) node.appendChild(el("div", "notice-sub", sub));
   // A card about one session (a QA request) opens it: the reader's next
@@ -46181,6 +46191,10 @@ function noticePanelToggle(force) {
   if (!panel) return;
   const open = force === undefined ? !noticePanelOpen() : !!force;
   panel.classList.toggle("hidden", !open);
+  // The corner strip sits above the panel; while the panel is open it moves
+  // down past the panel's head, so its cards do not cover the close button.
+  const strip = $("notices");
+  if (strip) strip.classList.toggle("under-panel-head", open);
   if (open) {
     noticeSeenAt = Date.now();
     noticeSave(NOTICE_SEEN_KEY, noticeSeenAt);

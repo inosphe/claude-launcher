@@ -24,7 +24,10 @@
    Opening from the history (claunch-x76l8): a row about a thread reply or a
    QA request keeps its target, and clicking the row opens that session on
    that thread or that question, as the card did, and closes the panel. A
-   row written before rows kept a target opens nothing. */
+   row written before rows kept a target opens nothing. Every card carries ×,
+   which puts it away without following it; while the panel is open the
+   corner strip moves below the panel's head so it does not cover the
+   panel's own close button. */
 const fs = require("fs");
 const path = require("path");
 const STATIC = path.join(__dirname, "..", "..", "src", "claude_launcher", "web",
@@ -226,6 +229,25 @@ function gotoRec(rec) {
     check("opening the panel shows it", /daemon back/.test(w.panel()), w.panel());
     check("and marks it read", !w.nodes["notice-bell"].classList.contains("unread"),
           w.nodes["notice-bell"].className);
+    check("while it is open the strip moves below the panel's head",
+          w.nodes.notices.classList.contains("under-panel-head"), w.nodes.notices.className);
+    w.api.noticePanelToggle(false);
+    check("and back once it closes", !w.nodes.notices.classList.contains("under-panel-head"),
+          w.nodes.notices.className);
+  }
+
+  /* --- × puts a card away without following it (claunch-x76l8) --------- */
+  {
+    const w = build();
+    let opened = 0;
+    w.api.notify("s1 asks you", "which?", { key: "qa-x", sticky: true, session: "s1",
+                                            open: () => { opened += 1; } });
+    const x = w.press(w.nodes.notices, "×");
+    check("a card carries ×", !!x && x.className === "notice-close", w.said());
+    x.click();
+    check("× takes the card down", w.strip().length === 0, w.said());
+    check("without opening what it points at", opened === 0 && w.loc.hash === "", [opened, w.loc.hash]);
+    check("and the history keeps it", w.api.noticeHistory.length === 1, w.api.noticeHistory);
   }
 
   /* --- the restart card can be hidden without answering ---------------- */
@@ -523,6 +545,9 @@ function gotoRec(rec) {
   check("the panel and its body exist",
         /id="notice-panel"[^>]*class="hidden"/.test(html) && /id="notice-panel-body"/.test(html));
   check("the panel is styled", /#notice-panel\s*\{[^}]*position:\s*fixed/.test(css));
+  check("the panel head has its close button", /id="notice-panel-close"/.test(html));
+  check("the moved strip clears the panel's head", /#notices\.under-panel-head\s*\{[^}]*top:/.test(css));
+  check("the card's × is styled", /\.notice-close\s*\{/.test(css));
   check("the bell opens the panel", /noticePanelToggle\(\)/.test(src));
 })().then(() => {
   if (failures) { console.log(`${failures} check(s) failed`); process.exitCode = 1; }
