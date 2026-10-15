@@ -1422,7 +1422,8 @@ html[data-theme="light"] .xterm {
 }
 
 /* ---- the pages that live in #main ---- */
-#home-view, #new-view, #meshes-view, #flows-view, #window-view, #beads-view {
+#home-view, #new-view, #meshes-view, #flows-view, #window-view, #beads-view,
+#sysperf-view {
   flex: 1; overflow-y: auto; padding: 18px 26px; min-height: 0;
 }
 .page-head { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
@@ -4325,6 +4326,13 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .badge.latency-idle { background: #30363d; color: #8b949e; }
 .badge.latency-slow { background: #46350f; color: #e3b341; }
 .badge.latency-bad { background: #442022; color: #ff7b72; }
+/* The machine's CPU / MEM / IO (claunch-zuk0b): a link to #/sysperf, graded
+   with the latency colours by its busiest number. */
+#sysperf-badge {
+  flex: none; white-space: nowrap; font-variant-numeric: tabular-nums;
+  text-decoration: none;
+}
+#sysperf-badge:hover { text-decoration: underline; }
 /* Which road the control socket is on through the tunnel (claunch-mhzt4). */
 #p2p-badge { flex: none; white-space: nowrap; }
 .badge.p2p-on { background: #1f4428; color: #3fb950; }
@@ -7593,3 +7601,43 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .th-convo-head .th-meta { white-space: nowrap; }
 /* In two columns the thread head is narrow: its buttons go under the title. */
 .talk-body[data-mode="both"] .th-convo-head { flex-wrap: wrap; }
+
+/* System performance page (sysperf-page.js, claunch-zuk0b). One axis per
+   chart; series colours validated against the dark surface (read #388bfd,
+   write #d4691f); grid and axis text stay recessive. */
+.sysperf-card { margin-top: 12px; padding: 10px 12px; }
+.sysperf-card-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.sysperf-card-head h3 { margin: 0; }
+.sysperf-legend { display: flex; gap: 12px; font-size: 12px; color: #9da5b0; }
+.sysperf-legend-item { display: inline-flex; align-items: center; gap: 6px; }
+.sysperf-key { display: inline-block; width: 14px; height: 2px; border-radius: 1px; }
+.sysperf-key.s-a, .sysperf-tip-key.s-a { background: #388bfd; }
+.sysperf-key.s-b, .sysperf-tip-key.s-b { background: #d4691f; }
+.sysperf-chart-wrap { position: relative; margin-top: 6px; }
+.sysperf-chart { display: block; width: 100%; height: auto; max-height: 220px; }
+.sysperf-grid { stroke: #30363d; stroke-width: 1; }
+.sysperf-axis { fill: #7d8590; font-size: 11px; font-variant-numeric: tabular-nums; }
+.sysperf-line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.sysperf-line.s-a { stroke: #388bfd; }
+.sysperf-line.s-b { stroke: #d4691f; }
+.sysperf-hair { stroke: #7d8590; stroke-width: 1; }
+.sysperf-dot { stroke: #14161a; stroke-width: 2; }
+.sysperf-dot.s-a { fill: #388bfd; }
+.sysperf-dot.s-b { fill: #d4691f; }
+.sysperf-hit { fill: transparent; cursor: crosshair; }
+.sysperf-tip {
+  position: absolute; top: 4px; pointer-events: none; z-index: 2;
+  background: #1c2128; border: 1px solid #30363d; border-radius: 6px;
+  padding: 6px 8px; font-size: 12px; color: #d8dbe0; white-space: nowrap;
+}
+.sysperf-tip-time { color: #9da5b0; margin-bottom: 2px; }
+.sysperf-tip-row { display: flex; align-items: center; gap: 6px; }
+.sysperf-tip-row strong { font-variant-numeric: tabular-nums; }
+.sysperf-tip-row span { color: #9da5b0; }
+.sysperf-tip-key { display: inline-block; width: 10px; height: 2px; border-radius: 1px; }
+.sysperf-table { border-collapse: collapse; margin-top: 6px; font-size: 13px; }
+.sysperf-table th, .sysperf-table td {
+  text-align: left; padding: 3px 14px 3px 0; font-variant-numeric: tabular-nums;
+}
+.sysperf-table th { color: #9da5b0; font-weight: normal; }
+.sysperf-disks { margin-top: 10px; }

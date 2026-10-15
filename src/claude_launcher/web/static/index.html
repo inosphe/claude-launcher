@@ -127,6 +127,9 @@
         <span id="relay-badge" class="badge hidden"></span>
         <span id="latency-badge" class="badge hidden"></span>
         <span id="p2p-badge" class="badge hidden" role="button" tabindex="0"></span>
+        <!-- The machine's CPU, memory and disk I/O (claunch-zuk0b), drawn by
+             sysperf-page.js; a link to the System performance page. -->
+        <a id="sysperf-badge" class="badge hidden" href="#/sysperf"></a>
         <div id="p2p-menu" class="hidden"></div>
       </div>
     </header>
@@ -1417,6 +1420,8 @@
     <div id="window-view" class="hidden"></div>
     <div id="stats-view" class="hidden"></div>
     <div id="profile-usage-view" class="hidden"></div>
+    <!-- System performance: CPU, memory and disk I/O history (sysperf-page.js). -->
+    <div id="sysperf-view" class="hidden"></div>
     <div id="threads-view" class="hidden"></div>
     <!-- The board: every beads issue the fleet's repositories hold, each
          tagged with the sessions it belongs to. Data only — the writes stay
@@ -1485,6 +1490,7 @@
 <script src="static/session-tabs.js"></script>
 <script src="static/session-grid.js"></script>
 <script src="static/profile-usage.js"></script>
+<script src="static/sysperf-page.js"></script>
 <script src="static/p2p.js"></script>
 <script src="static/app.js"></script>
 <script src="static/toolbar.js"></script>

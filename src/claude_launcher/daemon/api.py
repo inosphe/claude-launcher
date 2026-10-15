@@ -619,6 +619,16 @@ def build_app(
     app["loop_lag"] = loop_lag_mod.LoopLag(log_threshold=lag_threshold)
     app.on_startup.append(_start_loop_lag)
     app.on_shutdown.append(_stop_loop_lag)
+    # The machine's CPU, memory and disk I/O for the rail header and the
+    # System performance page, with a rotating sample log (claunch-zuk0b).
+    from . import sysperf as sysperf_mod
+    try:
+        sysperf_interval = float(
+            store.daemon_config().get("sysperf_interval_s", sysperf_mod.INTERVAL)
+        )
+    except (TypeError, ValueError):
+        sysperf_interval = sysperf_mod.INTERVAL
+    sysperf_mod.install(app, interval=sysperf_interval)
     # The Stats page reads transcripts in a child process, off this loop's
     # GIL (claunch-3r94d); started on first use.
     app["stats_worker"] = statsworker.StatsWorker()
