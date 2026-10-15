@@ -320,6 +320,9 @@ export default function simRunner(pi) {
   // restart resumes the campaign, and a kill is reported by the daemon's
   // exit hook.
   let harness, release, started = false, closing = false;
+  // The run this session was launched for (sim.run.seq): sent with
+  // runner/done so a late report cannot end a newer run.
+  let runSeq = null;
 
   pi.on("session_start", async (event, ctx) => {
     log("session_start", { reason: event.reason });
@@ -330,7 +333,7 @@ export default function simRunner(pi) {
     const finish = async (reason, failed) => {
       log("done", { reason, failed: !!failed });
       await progress({ stage: failed ? "failed" : "done", text: String(reason).slice(0, 200) });
-      await api("POST", `/api/sims/${cfg.id}/runner/done`, { session: cfg.session, reason, failed: !!failed }).catch((error) => log("done_failed", { error: error.message }));
+      await api("POST", `/api/sims/${cfg.id}/runner/done`, { session: cfg.session, reason, failed: !!failed, ...(runSeq != null ? { run: runSeq } : {}) }).catch((error) => log("done_failed", { error: error.message }));
       ctx.shutdown();
     };
     // The loop runs beside the TUI; session_start returns at once.
@@ -338,6 +341,7 @@ export default function simRunner(pi) {
       try {
         if (!ctx.model) throw new Error("the session has no model selected");
         const conf = await api("GET", `/api/sims/${cfg.id}/runner?session=${encodeURIComponent(cfg.session)}`);
+        runSeq = conf.sim.run?.seq ?? null;
         const root = conf.sim.root;
         const st = conf.sim.settings;
         // B: the session's model, or another model of the same profile. C: the judge

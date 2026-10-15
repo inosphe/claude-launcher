@@ -524,3 +524,45 @@ def test_no_source_file_means_no_edit_targets(env):
     res = st.propose(sim["id"], "s1", [{"file": "spec.md", "old": "", "new": "x", "kind": "decide",
                                         "reason": "r", "findings": [key]}])
     assert res["errors"] == ["the simulation has no source file to edit"]
+
+
+def test_each_start_is_a_run_with_a_recorded_end(env):
+    """What a caller waits on: run.seq from the start, run.ended_at as the
+    end -- a later start is a new seq, so an old end is never read as new."""
+    st, root, _ = env
+    sim = st.create(title="door", root=root, owner="s1", actor="s1", settings={"max_rounds": 1})
+    st.patch_model(sim["id"], "s1", base_patch())
+    first = st.start(sim["id"], "s1")
+    meta = st.get(sim["id"])
+    assert first["ended"]["run"] == 1 and meta["run"]["seq"] == 1
+    assert meta["run"]["ended_at"] and meta["run"]["state"] == meta["state"]
+    assert meta["run"]["model_hash_in"] == meta["run"]["model_hash_out"] == S.model_hash(st.model(sim["id"]))
+    # A run with a run session stays open until the run session is done.
+    st.start(sim["id"], "s1", round=False)
+    st.attach_runner(sim["id"], "sim-run")
+    meta = st.get(sim["id"])
+    assert meta["run"]["seq"] == 2 and meta["run"]["runner"] == "sim-run" and meta["run"]["ended_at"] is None
+    assert st.run_round(sim["id"], "sim-run")["ended"]["deferred"]
+    assert st.get(sim["id"])["run"]["ended_at"] is None
+    st.runner_done(sim["id"], "sim-run", "done", failed=True)
+    run = st.get(sim["id"])["run"]
+    assert run["ended_at"] and run["failed"] and run["seq"] == 2
+    # A late report naming an older run is refused and ends nothing.
+    st.start(sim["id"], "s1", round=False)
+    st.attach_runner(sim["id"], "sim-run2")
+    with pytest.raises(S.Conflict):
+        st.runner_done(sim["id"], "sim-run2", "late", run=2)
+    assert st.get(sim["id"])["run"]["ended_at"] is None
+    st.runner_done(sim["id"], "sim-run2", "done", run=3)
+    assert st.get(sim["id"])["run"]["ended_at"]
+    # Stopping closes the run too.
+    st.start(sim["id"], "s1", round=False)
+    st.stop(sim["id"], "s1", "enough")
+    run = st.get(sim["id"])["run"]
+    assert run["seq"] == 4 and run["state"] == "stopped" and run["reason"] == "enough"
+    # A start that then faults (efnbt.8: the profile or runtime went away
+    # before the run session launched) ends its run as failed.
+    st.start(sim["id"], "s1", round=False)
+    st.fault(sim["id"], "s1", "no interpreter profile is set")
+    run = st.get(sim["id"])["run"]
+    assert run["seq"] == 5 and run["ended_at"] and run["failed"] and run["state"] == "fault"

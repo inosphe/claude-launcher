@@ -584,6 +584,9 @@ class SimStore:
         meta["owner"] = ""
         if meta["state"] == "running":
             meta["state"], meta["state_reason"] = "stopped", f"owner gone: {reason}"
+            # An attached run session is killed next; its exit closes the run.
+            if not (meta.get("runner") or {}).get("session"):
+                self._end_run(meta)
         self._save_meta(meta)
         self._journal(meta["id"], actor, "released", prev=prev, reason=reason)
         return self.summary(meta)
@@ -616,6 +619,15 @@ class SimStore:
 
     # -- run session ---------------------------------------------------------
 
+    def _end_run(self, meta: dict, failed: bool = False) -> None:
+        """Close the open run (if any) with the campaign's end state. The
+        caller saves meta."""
+        run = meta.get("run")
+        if not run or run.get("ended_at"):
+            return
+        run.update(ended_at=_now(), state=meta["state"], reason=meta.get("state_reason"),
+                   model_hash_out=model_hash(self.model(meta["id"])), failed=bool(failed))
+
     def attach_runner(self, sim_id: str, session: str) -> dict:
         """Record the run session the daemon launched for this campaign. It
         acts with the owner's authority while attached."""
@@ -623,6 +635,8 @@ class SimStore:
             meta = self._meta(sim_id)
             meta["runner"] = {"session": session, "started_at": _now()}
             meta["runner_count"] = int(meta.get("runner_count") or 0) + 1
+            if meta.get("run") and not meta["run"].get("ended_at"):
+                meta["run"]["runner"] = session
             self._save_meta(meta)
             self._journal(sim_id, "daemon", "runner", session=session)
             return self.summary(meta)
@@ -630,7 +644,8 @@ class SimStore:
     def runner_of(self, sim_id: str) -> str:
         return ((self._meta(sim_id).get("runner") or {}).get("session")) or ""
 
-    def runner_done(self, sim_id: str, actor: str, reason: str = "", failed: bool = False) -> dict:
+    def runner_done(self, sim_id: str, actor: str, reason: str = "", failed: bool = False,
+                    run: Optional[int] = None) -> dict:
         """The run session finished its loop (or gave up). A campaign still
         running ends here: ``stopped`` with the runner's reason. Returns the
         summary and ``ended``."""
@@ -639,6 +654,9 @@ class SimStore:
             runner = (meta.get("runner") or {}).get("session")
             if actor not in (USER, "daemon") and actor != runner:
                 raise Forbidden(f"runner_done: {actor} is not the run session of {sim_id}")
+            cur = meta.get("run") or {}
+            if run is not None and run != cur.get("seq"):
+                raise Conflict(f"runner_done: run {run} is not the current run {cur.get('seq')} of {sim_id}")
             was = meta["state"]
             if was == "running":
                 meta["state"] = "stopped"
@@ -649,6 +667,9 @@ class SimStore:
                                        "reason": reason, "failed": bool(failed)}
             meta["runner"] = None
             owed = bool(meta.pop("notice_owed", False))
+            # Only the run this run session drove ends here.
+            if not cur.get("runner") or cur.get("runner") == runner:
+                self._end_run(meta, failed)
             self._save_meta(meta)
             self._journal(sim_id, actor, "runner_done", reason=reason, failed=bool(failed))
             if was == "running":
@@ -1040,8 +1061,15 @@ class SimStore:
             carried = self._carry(meta, actor)
             meta = self._meta(sim_id)
             meta["state"], meta["state_reason"], meta["run_rounds"] = "running", f"started by {actor}", 0
+            # One run per start: what a caller waits on. Its end (ended_at)
+            # is the record of completion; a notice only says to look again.
+            seq = int(meta.get("run_seq") or 0) + 1
+            meta["run_seq"] = seq
+            meta["run"] = {"seq": seq, "by": actor, "started_at": _now(), "model_hash_in": model_hash(self.model(sim_id)),
+                           "runner": None, "ended_at": None, "state": None, "reason": None,
+                           "model_hash_out": None, "failed": False}
             self._save_meta(meta)
-            self._journal(sim_id, actor, "started")
+            self._journal(sim_id, actor, "started", run=seq)
             if not round:
                 return {**self.summary(meta), "carry": carried}
         return {**self.run_round(sim_id, actor), "carry": carried}
@@ -1055,6 +1083,8 @@ class SimStore:
             self._require_owner(meta, actor, "start")
             self._require_filled(meta)
             meta["state"], meta["state_reason"] = "fault", reason
+            # A run opened by the start that then faulted ends here, failed.
+            self._end_run(meta, failed=True)
             self._save_meta(meta)
             self._journal(sim_id, actor, "fault", reason=reason)
             return self.summary(meta)
@@ -1133,6 +1163,7 @@ class SimStore:
             was = meta["state"]
             if was == "running":
                 meta["state"], meta["state_reason"] = "stopped", reason or f"stopped by {actor}"
+                self._end_run(meta)
                 self._save_meta(meta)
                 self._journal(sim_id, actor, "stopped", reason=reason)
             return {**self.summary(meta), "ended": was == "running"}
@@ -1230,6 +1261,9 @@ class SimStore:
                     if (meta.get("runner") or {}).get("session"):
                         meta["notice_owed"] = True
                         summary["ended"]["deferred"] = True
+                    else:
+                        self._end_run(meta)
+                    summary["ended"]["run"] = (meta.get("run") or {}).get("seq")
             self._save_meta(meta)
             self._journal(sim_id, actor, "round", round=n, new=new, open=open_now)
             return summary
