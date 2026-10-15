@@ -133,6 +133,10 @@ fragments:
 nodes:
   intake:
     title: 운영 확인
+    # 목표 수립 단계: 이 단계에 서 있는 동안 세션은 시뮬레이션을 실행할 수
+    # 없다(sim_start·sim_round 거절, 모델 작성·조회는 허용). 판정은
+    # sim/run_gate.py, 근거는 claunch-efnbt.9.
+    sims: deny
     prompt: |
       새 회차다(회차 번호는 flow_status의 round). 첫 회차면 운영 조건을 사용자와
       합의하고, 이후 회차면 바뀐 것이 없는지 한 줄로 확인하고 넘어간다.

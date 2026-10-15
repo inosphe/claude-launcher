@@ -140,6 +140,12 @@ nodes:
   형태의 값 참조는 렌더 시점에 런 데이터로 채운다. text id는 전개 후의 템플릿에서
   계산하므로 값 참조가 text id를 바꾸지 않는다.
 - `returns`가 없으면 결과는 `{outcome: ok}` 하나다.
+- `sims: deny`(선택, 값은 `deny` 하나): 이 작업이 활성인 동안 드라이버 세션의
+  `sim_start`·`sim_round`를 sim API가 거절한다(claunch-efnbt.9). 컴파일러는 IR 작업
+  노드의 `props["sims"]`에 싣고, 판정은 `sim/run_gate.py`가 한다. 같은 표시가 있는
+  작업이 `calls`에 시뮬레이션 절차(`sim-run`)를 선언하면 검사기가
+  `sims-deny-call` 오류로 거절한다. 정본 워크플로는 목표 수립 단계에 이 표시를
+  붙인다. v1 단계도 같은 키를 받는다(`cflow/model.py`의 `Step.sims`).
 
 #### verify
 

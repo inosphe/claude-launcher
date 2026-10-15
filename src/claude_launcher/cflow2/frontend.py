@@ -196,7 +196,7 @@ LIBRARY_KEYS = ("cflow", "name", "description", "kind", "include", "fragments", 
 TASK_KEYS = (
     "title", "prompt", "done_when", "verify", "ask", "executor", "needs",
     "returns", "effects", "paths", "budget", "rules", "strict_budget",
-    "do", "triggers", "restart", "force_target", "session_workflow",
+    "do", "triggers", "restart", "force_target", "session_workflow", "sims",
 )
 #: ``$data.inputs`` is the run's start inputs (docs 2.6): written by the start
 #: request and, for an input declared ``set_by: [agent]``, once by the driver
@@ -887,11 +887,26 @@ def _compile_task(ctx: _Ctx, sc: _Scope, name: str, parent: Optional[str], line:
     )
     if session_workflow:
         node.props["session_workflow"] = session_workflow
+    sims = _sims(ctx, tfile, name, raw, tline)
+    if sims:
+        node.props["sims"] = sims
     if _force_target(ctx, tfile, raw, node, tline):
         ctx.task_marks.add(nid)
     _effects_and_triggers(ctx, tfile, raw, node, tline)
     _add(ctx, node)
     return nid
+
+
+def _sims(ctx: _Ctx, file: str, name: str, raw: Dict[str, Any], line: int) -> Optional[str]:
+    """``sims: deny``: no simulation run while this task is active
+    (claunch-efnbt.9, read by :mod:`claude_launcher.sim.run_gate`). The
+    checker also refuses such a task naming a simulation procedure in
+    ``calls`` (``sims-deny-call``)."""
+    value = raw.get("sims")
+    if value is not None and value != "deny":
+        raise ctx.err(file, _key_line(raw, "sims", line),
+                      f"task {name!r}: sims takes one value, 'deny'; got {value!r}")
+    return value
 
 
 def _session_workflow(ctx: _Ctx, file: str, name: str, raw: Dict[str, Any],

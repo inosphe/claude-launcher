@@ -739,6 +739,14 @@ def check(chart: ir.Chart) -> List[Finding]:
                 out.append(Finding(ERROR, "delegated-ask",
                                    f"task {t.id} asks for approval but may run under executor "
                                    f"{', '.join(remote)}; approvals cannot run inside a delegate", t.id))
+        if t.get("sims") == "deny":
+            from ..sim import run_gate
+            for proc in t.get("calls") or []:
+                if proc in run_gate.SIM_PROCEDURES:
+                    out.append(Finding(ERROR, "sims-deny-call",
+                                       f"task {t.id} is marked sims: deny and declares calls: "
+                                       f"{proc!r}; a simulation procedure cannot be called while "
+                                       f"simulation runs are forbidden (claunch-efnbt.9)", t.id))
         if t.get("restart"):
             remote = _delegated_by(chart, t)
             if remote:

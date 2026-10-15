@@ -56,6 +56,28 @@ claunch-efnbt. gds6 시뮬레이션 v2(`~/works/gds6`, `notes/designframe-sim-v2
 - 호출자 구분은 데몬의 다른 게이트와 같은 신뢰 모델이다. 데몬은 토큰 하나를 쓰므로, 규칙은 MCP 도구를 거치는
   에이전트에게 강제된다.
 
+## 목표 수립 단계의 실행 금지
+
+- 워크플로 단계(v1)나 작업(v2)에 `sims: deny`가 있으면, 세션의 cflow 런이 그 단계에
+  서 있는 동안 그 세션의 `sim_start`·`sim_round`를 거절한다(409, claunch-efnbt.9).
+  에러에는 「목표 승인 후 실행 가능」과 현재 단계 이름이 들어 있고, 응답의
+  `sims_denied`가 버전·워크플로·단계를 싣는다.
+- 모델 작성(`sim_create`, `sim_patch`)과 조회는 허용한다. 다만 `running` 캠페인에
+  패치를 넣어도 그 단계에서는 자동 라운드를 돌리지 않고 응답의 `round_skipped`에
+  이유를 적는다.
+- 제한하지 않는 호출자: 사용자(바디에 `session`이 없는 호출), 데몬이 띄운 실행
+  세션(`<시뮬레이션 id>-run<n>`, 또는 시뮬레이션에 붙은 runner), cflow 런이 없는 세션.
+- 판정은 런 자신의 스냅숏(v1 워크플로 스냅숏, v2 차트)에서 표시를 읽는다. 표시가
+  생기기 전에 시작한 런은 제한되지 않는다.
+- 정본 워크플로의 표시 위치: improv-worker(v1)의 intake·issue-check·issue-auto·
+  issue-search·issue-decision·issue-adopt·issue-create, improv-worker-v2의 intake·
+  prior-context·prior-context-fallback·intake-issue·issue-auto·issue-search·
+  issue-adopt·issue-create, improv-leader와 improv-leader-v2의 intake.
+- cflow에서 `sim-run` 절차를 부르는 경로: 정적 `call`은 결국 `sim_start`를 거치므로
+  위 판정을 받는다. 동적 호출(claunch-z17c9)은 작업의 `calls: [...]` 허용 목록에
+  없는 절차를 거절하고, `sims: deny` 작업이 `calls`에 `sim-run`을 선언하면 검사기가
+  `sims-deny-call`로 거절한다.
+
 ## 캠페인과 알림
 
 - 상태는 `idle`, `running`, `stopped`, `fault`이고 `state_reason`이 이유를 적는다. `fault`는 쓸 수 있는 해석 모델

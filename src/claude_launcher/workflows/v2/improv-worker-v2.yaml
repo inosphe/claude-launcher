@@ -324,6 +324,10 @@ nodes:
   # ── 회차 시작 ────────────────────────────────────────────────────────
   intake:
     title: 목표 수립
+    # 목표 수립 단계: 이 단계에 서 있는 동안 세션은 시뮬레이션을 실행할 수
+    # 없다(sim_start·sim_round 거절, 모델 작성·조회는 허용). 판정은
+    # sim/run_gate.py, 근거는 claunch-efnbt.9.
+    sims: deny
     prompt: |
       새 회차다 — 이번 회차의 목표 하나를 확정한다.
 
@@ -372,6 +376,7 @@ nodes:
 
   prior-context:
     title: 선행 맥락 검색
+    sims: deny
     prompt: |
       이번 회차의 목표: ${result.intake.value.goal}
       범위: ${result.intake.value.scope}
@@ -404,6 +409,7 @@ nodes:
 
   prior-context-fallback:
     title: 선행 맥락 검색 (대체)
+    sims: deny
     prompt: |
       선행 맥락 검색(prior-context)이 ok 결과 없이 끝났다 — 결과를 쓸 수
       없다. 실패 사유: ${result['prior-context'].value.reason}
@@ -423,6 +429,7 @@ nodes:
 
   intake-issue:
     title: 일감 등록·큐 확인
+    sims: deny
     prompt: |
       선행 맥락 검색 결과: ${data.prior.summary}
       (중복 후보: ${data.prior.duplicate})
@@ -505,6 +512,7 @@ nodes:
   # ── 일감 귀속 (resolve-issue) ────────────────────────────────────────
   issue-auto:
     title: 보드에서 스스로 일감 잡기 (무이슈 auto)
+    sims: deny
     prompt: |
       오프닝이 「no issue — assign yourself」라고 말한다: 배정된 이슈는
       없고, 보드에서 스스로 골라 잡는 것이 이 세션이 만들어진 이유다.
@@ -547,6 +555,7 @@ nodes:
 
   issue-search:
     title: 연관 일감 탐색 (보드 기록에서)
+    sims: deny
     prompt: |
       이 세션에는 배정된 이슈가 없다. 착수 전에 보드에서 이 목표와 연관된
       기존 일감을 찾는다 — 보드를 읽는 데에는 허락이 필요 없고, 찾은 것을
@@ -570,6 +579,7 @@ nodes:
 
   issue-adopt:
     title: 일감 잡기 (adopt)
+    sims: deny
     prompt: |
       확정된 id를 reason에서 읽는다. 읽어낼 수 없으면 지어내지 않는다 — 그
       사실을 보고에 적고 상위에 한 줄로 묻는다(사람의 확정 reason이 유일한
@@ -597,6 +607,7 @@ nodes:
 
   issue-create:
     title: 일감 민팅 (create)
+    sims: deny
     prompt: |
       intake의 규격 그대로 새 이슈를 만든다 — 제목 한 줄 「무엇을 어떻게」,
       --description은 `## 목표 / ## 범위(포함·제외) / ## 완료 증거 기준 /
