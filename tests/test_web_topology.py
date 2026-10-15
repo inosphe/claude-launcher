@@ -450,6 +450,7 @@ CHECKS = [
         "observercompact_check.js",
         "observerstatus_check.js",
         "observerdrag_check.js",
+        "observerended_check.js",
         "railhold_check.js",
         "railscroll_check.js",
         "railquiet_check.js",

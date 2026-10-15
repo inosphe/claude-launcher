@@ -855,7 +855,10 @@ function wantEnded() {
   const onPage=document.body.classList.contains("observer-active");
   if(onPage&&$("ended").checked)return true;
   const names=[onPage&&routeScope==="session"?routeName:"",panelBox?.isConnected?panelBox.dataset.session:""];
-  return names.some(n=>n&&snapshot.sessions.some(s=>s.name===n&&s.events_omitted));
+  // Asked of the session's state, not of whether its timeline came: a full
+  // answer has no ``events_omitted``, and asking that would send the next
+  // poll light again and the one after full, every ten seconds.
+  return names.some(n=>n&&snapshot.sessions.some(s=>s.name===n&&!s.running));
 }
 /* The rail caches' own signatures, so a QA question, a thread reply or a run
    moving redraws the cards even when the observer's answer did not change. */
