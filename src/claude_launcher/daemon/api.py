@@ -8084,6 +8084,11 @@ async def h_sessions_list(request: web.Request) -> web.Response:
         # The dashboard reads this resource repeatedly. The detail panel has
         # its own /meta request, so an opening task and environment do not
         # belong in every rail response.
+        # ``delayed_at``/``failed_at``/``restore_queue`` are the two partitions
+        # the rail draws apart from hold and killed (claunch-0j6gb): without
+        # them every delayed row reached the page as a plain hold, and a
+        # boot's queue read as sessions that failed to come back
+        # (claunch-v4uyt).
         rail_fields = {
             "name", "harness", "profile", "cwd", "args", "model", "effort",
             "tools", "restore", "conversation_id", "role", "parent", "borrow",
@@ -8095,10 +8100,6 @@ async def h_sessions_list(request: web.Request) -> web.Response:
             "last_visited_at", "last_input_at", "last_activity_at", "viewers",
             "moved_rows", "tool_calls",
             "exited_at", "archived_at", "paused_at", "held_at", "delivery_hold",
-            # The two partitions the rail draws apart from hold and killed
-            # (claunch-0j6gb): without them every delayed row reached the page
-            # as a plain hold, and a boot's queue read as sessions that failed
-            # to come back (claunch-v4uyt).
             "delayed_at", "failed_at", "restore_queue",
             "pending_deliveries", "compacting",
             "context", "branch", "briefing", "winddown", "session_reminder",
