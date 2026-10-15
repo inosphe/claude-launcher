@@ -46,6 +46,8 @@ and loops need no duplicated content::
       test:
         instructions: ...
         done_when: ...      # completion criterion; restated by status/reminders
+        sims: deny          # optional: no sim_start/sim_round while the run
+                            # stands here (sim/run_gate.py, claunch-efnbt.9)
         verify: "pytest -q"
         awaits: verify      # what this step WAITS for: the daemon re-measures
                             # this step's verify and speaks only when its exit
@@ -1170,6 +1172,11 @@ class Step:
     #: ``steps.<id>.skip``. Only a step with a single plain exit may carry
     #: it -- see :attr:`skippable`.
     skip: bool = False
+    #: ``sims: deny``: while the run stands here, the session may not start
+    #: a simulation campaign or run a round (claunch-efnbt.9). The canonical
+    #: workflows mark their goal-setting steps. Read by
+    #: :mod:`claude_launcher.sim.run_gate`; ``None`` places no restriction.
+    sims: Optional[str] = None
 
     @property
     def skippable(self) -> bool:
@@ -2194,6 +2201,12 @@ def _parse_step(step_id: str, raw) -> Step:
     skip = raw.get("skip", False)
     if not isinstance(skip, bool):
         raise WorkflowError(f"step {step_id!r}: 'skip' must be true or false")
+    sims = raw.get("sims")
+    if sims is not None and sims != "deny":
+        raise WorkflowError(
+            f"step {step_id!r}: 'sims' takes one value, 'deny' (no simulation "
+            f"runs while the run stands here); got {sims!r}"
+        )
     step = Step(
         id=step_id,
         title=str(raw["title"]) if raw.get("title") else None,
@@ -2213,6 +2226,7 @@ def _parse_step(step_id: str, raw) -> Step:
         publishes=publishes,
         next=_parse_next(raw.get("next"), step_id),
         skip=skip,
+        sims=sims,
     )
     if skip and not step.skippable:
         raise WorkflowError(

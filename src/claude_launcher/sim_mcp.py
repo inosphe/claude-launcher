@@ -66,6 +66,11 @@ Rules:
   reason, or add an availability rule (kind: available). A gap only a human
   can decide: sim_resolve ask with options -- the user answers in the Sims
   tab and you are told.
+- Goal-setting steps of a cflow run (marked sims: deny; the canonical
+  workflows mark intake and the issue/goal decision) refuse sim_start and
+  sim_round with "목표 승인 후 실행 가능" and the step name. sim_create,
+  sim_patch and every read still work there; a patch to a running campaign
+  then skips its round (round_skipped). Run once the goal is approved.
 - When a running simulation finishes you get a "[claunch simulation]" line:
   read the result and carry the discussion on with the user.
 """
@@ -131,9 +136,12 @@ TOOLS = [
                                          "formalizes, judges and works the gaps itself -- leave the model to it and wait "
                                          "for the finished line. It needs an interpreter_profile that can launch pi and "
                                          "the installed runtime; without them nothing runs, the simulation goes to state "
-                                         "fault and the error says what to fix. sim_round walks one round yourself.",
+                                         "fault and the error says what to fix. sim_round walks one round yourself. "
+                                         "Refused (409) while this session's cflow step is marked sims: deny "
+                                         "(goal-setting): build the model now, run it after the goal is approved.",
      "inputSchema": {"type": "object", "properties": _ID, "required": ["sim"]}},
-    {"name": "sim_round", "description": "Owner: run one round now.",
+    {"name": "sim_round", "description": "Owner: run one round now. Refused (409) while this session's cflow "
+                                         "step is marked sims: deny (goal-setting): run it after the goal is approved.",
      "inputSchema": {"type": "object", "properties": _ID, "required": ["sim"]}},
     {"name": "sim_stop", "description": "Owner: stop the campaign.",
      "inputSchema": {"type": "object", "properties": {**_ID, "reason": {"type": "string"}}, "required": ["sim"]}},

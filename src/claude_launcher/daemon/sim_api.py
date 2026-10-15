@@ -44,7 +44,7 @@ from typing import Optional
 from aiohttp import web
 
 from .. import store as config_store
-from ..sim import store as sim_store
+from ..sim import run_gate, store as sim_store
 from . import actors, paths
 
 log = logging.getLogger(__name__)
@@ -379,6 +379,27 @@ def install(app, store: Optional[sim_store.SimStore] = None):
         s = body.get("session")
         return s if isinstance(s, str) and s else sim_store.USER
 
+    def goal_gate(sid: str, actor: str) -> Optional[run_gate.Blocked]:
+        """The calling session's cflow run stands on a ``sims: deny`` step
+        (claunch-efnbt.9). The user, a simulation's run session and a session
+        with no run are never restricted."""
+        if actor == sim_store.USER or RUN_SESSION_RE.match(actor):
+            return None
+        try:
+            if actor == sims.runner_of(sid):
+                return None
+        except sim_store.SimError:
+            return None  # no such simulation: the store call says so
+        cwd, _project = _session_where(manager, actor)
+        return run_gate.blocked(cwd, actor)
+
+    async def refuse_in_goal_step(sid: str, actor: str, what: str) -> Optional[web.Response]:
+        gate = await asyncio.to_thread(goal_gate, sid, actor)
+        if gate is None:
+            return None
+        return web.json_response({"error": gate.message(what), "sims_denied": gate.to_dict()},
+                                 status=409)
+
     async def call(fn, *args, **kw):
         try:
             return await asyncio.to_thread(fn, *args, **kw), None
@@ -481,6 +502,12 @@ def install(app, store: Optional[sim_store.SimStore] = None):
             return err
         # With a run session attached, it runs the rounds itself.
         auto = body.get("round", True) and not await asyncio.to_thread(sims.runner_of, sid)
+        if auto and res.get("ok") and not res.get("duplicate"):
+            # A patch is allowed in a goal-setting step; its round is not.
+            gate = await asyncio.to_thread(goal_gate, sid, actor)
+            if gate is not None:
+                auto = False
+                res["round_skipped"] = gate.message("round after patch")
         if res.get("ok") and not res.get("duplicate") and auto:
             sim = await asyncio.to_thread(sims.get, sid)
             if sim["state"] == "running":
@@ -518,6 +545,9 @@ def install(app, store: Optional[sim_store.SimStore] = None):
         sim, err = await call(sims.get, sid)
         if err:
             return err
+        denied = await refuse_in_goal_step(sid, actor, "sim_start")
+        if denied:
+            return denied
         running = (sim.get("runner") or {}).get("session")
         if running and _live(manager, running):
             return web.json_response({"error": f"run session {running} is already running {sid}"}, status=409)
@@ -547,7 +577,11 @@ def install(app, store: Optional[sim_store.SimStore] = None):
     async def h_round(request):
         sid = request.match_info["id"]
         body = await body_of(request)
-        return await run_and_report(sid, sims.run_round, sid, actor_of(body))
+        actor = actor_of(body)
+        denied = await refuse_in_goal_step(sid, actor, "sim_round")
+        if denied:
+            return denied
+        return await run_and_report(sid, sims.run_round, sid, actor)
 
     async def h_stop(request):
         sid = request.match_info["id"]

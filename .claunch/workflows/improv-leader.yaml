@@ -81,6 +81,10 @@ landing_queue: {target: master}
 steps:
   intake:
     title: 운영 확인
+    # 목표 수립 단계: 이 단계에 서 있는 동안 세션은 시뮬레이션을 실행할 수
+    # 없다(sim_start·sim_round 거절, 모델 작성·조회는 허용). 판정은
+    # sim/run_gate.py, 근거는 claunch-efnbt.9.
+    sims: deny
     instructions: |
       새 회차다. 첫 회차면 운영 조건을 사용자와 합의하고, 이후 회차면 변경
       사항이 없는지 한 줄로 확인하고 바로 넘어간다. 정할 만한 것:
