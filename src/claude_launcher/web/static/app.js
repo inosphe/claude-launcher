@@ -45907,9 +45907,12 @@ function notify(title, sub, opts) {
   if (!host) return null;
   const key = o.key || `n${(noticeSeq += 1)}`;
   dismissNotice(key);            // one card per key, always the newest
+  // `target` ({thread} or {qa}) is what `open` opens, kept in a form the
+  // history can store, so its row opens the same place (claunch-x76l8).
   noticeRecord(Object.assign(
     { title, sub: sub || "", kind: o.kind || "" },
-    o.session ? { session: o.session } : {}
+    o.session ? { session: o.session } : {},
+    o.session && o.target ? { target: o.target } : {}
   ));
   const node = el("div", "notice" + (o.kind ? ` ${o.kind}` : ""));
   node.appendChild(el("div", "notice-title", title));
@@ -46339,8 +46342,28 @@ function noticePanelGateRow(type, rec) {
   return row;
 }
 
+/* A history row about one thread reply or one QA request opens it, the way
+   its card did; the panel closes so the session is what is on screen. A row
+   written before rows kept their target has only the session link. */
+function noticeTargetOpen(entry) {
+  const t = entry.target || {};
+  if (t.thread) threadNoticeOpen(entry.session, t.thread);
+  else if (t.qa) qaNoticeOpen(entry.session, t.qa);
+  else return;
+  noticePanelToggle(false);
+}
+
 function noticePanelHistoryRow(entry) {
-  const row = el("div", "notice-row" + (entry.kind ? ` ${entry.kind}` : ""));
+  const t = entry.session && entry.target;
+  const openable = !!(t && (t.thread || t.qa));
+  const row = el("div", "notice-row" + (entry.kind ? ` ${entry.kind}` : "") +
+    (openable ? " openable" : ""));
+  if (openable) {
+    row.title = t.thread
+      ? `open ${entry.session} on this thread`
+      : `open ${entry.session} on this question`;
+    row.addEventListener("click", () => noticeTargetOpen(entry));
+  }
   const head = el("div", "notice-row-head");
   head.appendChild(el("span", "notice-title", entry.title || ""));
   if (entry.gate) {
@@ -46440,13 +46463,31 @@ function qaNoticeKey(q) {
     : `${q.id}:open`;
 }
 
+/* The session, with its QA pane on question `qid`. Over an open threads
+   view it joins it (both) rather than replacing it, as maybeOpenQaPane does. */
+function qaNoticeOpen(session, qid) {
+  globalThis.QaPane?.reveal(session, qid);
+  const lay = sessLayoutFor(session);
+  if (!(lay.split && talkShows(lay.pane, "qa"))) {
+    try {
+      setSessLayout(session, {
+        split: true, pane: lay.split && lay.pane === "threads" ? "both" : "qa",
+      });
+    } catch { /* storage off: the session still opens */ }
+  }
+  location.hash = "#/s/" + encodeURIComponent(session);
+}
+
 function qaNoticeCard(session, q) {
   notify(
     q.status === "stale"
       ? `${session} asks again (your answer is stale)`
       : `${session} asks you`,
     q.title,
-    { key: `qa-${q.id}`, sticky: true, session }
+    {
+      key: `qa-${q.id}`, sticky: true, session, target: { qa: q.id },
+      open: () => qaNoticeOpen(session, q.id),
+    }
   );
 }
 
@@ -46511,7 +46552,8 @@ function threadNoticeOpen(session, tid) {
 function threadNoticeCard(session, r) {
   const key = `thread-${r.thread}`;
   notify(`${session} replied in “${r.title}”`, r.excerpt || "", {
-    key, sticky: true, session, open: () => threadNoticeOpen(session, r.thread),
+    key, sticky: true, session, target: { thread: r.thread },
+    open: () => threadNoticeOpen(session, r.thread),
   });
   if (!threadNoticeKeys.has(session)) threadNoticeKeys.set(session, new Set());
   threadNoticeKeys.get(session).add(key);

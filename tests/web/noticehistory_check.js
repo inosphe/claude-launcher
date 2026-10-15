@@ -19,7 +19,12 @@
    one it rewrites (stale), puts up a card that opens the session and writes
    a history row naming it; each request is announced once per browser, the
    first poll of a fresh browser announces nothing, and the card goes when
-   the request stops waiting. */
+   the request stops waiting.
+
+   Opening from the history (claunch-x76l8): a row about a thread reply or a
+   QA request keeps its target, and clicking the row opens that session on
+   that thread or that question, as the card did, and closes the panel. A
+   row written before rows kept a target opens nothing. */
 const fs = require("fs");
 const path = require("path");
 const STATIC = path.join(__dirname, "..", "..", "src", "claude_launcher", "web",
@@ -186,6 +191,7 @@ function build(opts) {
     said: () => nodes.notices.children.map((c) => c.text()).join(" | "),
     panel: () => nodes["notice-panel-body"].text(),
     badge: () => bell.children[0].textContent,
+    panelRows: () => nodes["notice-panel-body"].children.filter((c) => c.classList.contains("notice-row")),
     press: (root, label) => all(root, []).find((n) => n.textContent === label),
   };
 }
@@ -347,6 +353,8 @@ function gotoRec(rec) {
                                          answer_revision: null, ...(extra || {}) });
     const storage = memoryStorage();
     const w = build({ storage });
+    const revealed = [];
+    globalThis.QaPane = { reveal: (s, id) => revealed.push([s, id]) };
     w.api.qaNoticeSync({ s1: { unresolved: 1, waiting: [ask("qa-old", "what was asked before")] } });
     check("a fresh browser's first poll announces nothing", w.strip().length === 0, w.said());
     check("and remembers what it saw",
@@ -359,6 +367,7 @@ function gotoRec(rec) {
     check("and writes a history row naming the session",
           row && row.title === "s1 asks you" && row.sub === "which base branch?" && row.session === "s1",
           row);
+    check("and keeping the question it is about", row && row.target && row.target.qa === "qa-new", row);
     w.api.qaNoticeSync({ s1: { unresolved: 2, waiting: [ask("qa-old", "what was asked before"),
                                                          ask("qa-new", "which base branch? (edited)",
                                                              { revision: 2 })] } });
@@ -368,8 +377,26 @@ function gotoRec(rec) {
     check("the panel shows the row with the session", /s1 asks you/.test(w.panel()) &&
             /session/.test(w.panel()), w.panel());
     w.strip()[0].click();
-    check("clicking the card opens the session", w.loc.hash === "#/s/s1", w.loc.hash);
+    check("clicking the card opens the session on that question",
+          w.loc.hash === "#/s/s1" && JSON.stringify(revealed) === JSON.stringify([["s1", "qa-new"]]) &&
+            w.layouts.s1 && w.layouts.s1.split === true && w.layouts.s1.pane === "qa",
+          { hash: w.loc.hash, revealed, layout: w.layouts.s1 });
     check("and puts the card away", w.strip().length === 0, w.said());
+
+    w.loc.hash = "";
+    revealed.length = 0;
+    w.layouts.s1 = { split: true, pane: "threads" };
+    w.api.noticePanelToggle(true);
+    const qrow = w.panelRows().find((r) => /which base branch/.test(r.text()));
+    check("the history row of a QA request can be opened",
+          qrow && qrow.classList.contains("openable"), qrow && qrow.className);
+    qrow.click();
+    check("clicking it opens the session on that question",
+          w.loc.hash === "#/s/s1" && JSON.stringify(revealed) === JSON.stringify([["s1", "qa-new"]]),
+          { hash: w.loc.hash, revealed });
+    check("over an open threads view the QA pane joins it", w.layouts.s1.pane === "both", w.layouts.s1);
+    check("and closes the panel", w.nodes["notice-panel"].classList.contains("hidden"),
+          w.nodes["notice-panel"].className);
 
     w.api.qaNoticeSync({ s2: { unresolved: 1, waiting: [ask("qa-b", "pick one")] } });
     check("a card per request", w.strip().length === 1, w.said());
@@ -391,6 +418,7 @@ function gotoRec(rec) {
     tab.api.qaNoticeSync(stale(4, 2));
     check("another tab of the same browser does not announce it again",
           tab.strip().length === 0 && tab.api.noticeHistory.length === n, tab.said());
+    delete globalThis.QaPane;
   }
 
   /* --- thread replies become notices (claunch-gfv7l) -------------------- */
@@ -440,12 +468,40 @@ function gotoRec(rec) {
     w.strip()[0].click();
     check("over an open QA pane the threads join it", w.layouts.s2.pane === "both", w.layouts.s2);
 
+    focused.length = 0;
+    w.loc.hash = "";
+    w.api.noticePanelToggle(true);
+    const trow = w.panelRows().find((r) => /it was the clock/.test(r.text()));
+    check("the history row of a thread reply can be opened",
+          trow && trow.classList.contains("openable"), trow && trow.className);
+    trow.click();
+    check("clicking it opens the session on that thread",
+          w.loc.hash === "#/s/s1" && JSON.stringify(focused) === JSON.stringify([["s1", "th-b"]]),
+          { hash: w.loc.hash, focused });
+    check("and closes the panel", w.nodes["notice-panel"].classList.contains("hidden"),
+          w.nodes["notice-panel"].className);
+
     const tab = build({ storage });
     tab.api.threadNoticeSync({ s1: { open: 2, agent_seq: 10, replies: [reply(10, "th-a", "deploy", "and restart it")] },
                                s2: { open: 1, agent_seq: 12, replies: [reply(12, "th-c", "q", "see qa")] } });
     check("another tab of the same browser does not announce them again",
           tab.strip().length === 0, tab.said());
     delete globalThis.ThreadsPane;
+  }
+
+  /* --- a row from before targets were kept opens nothing ---------------- */
+  {
+    const storage = memoryStorage();
+    storage.setItem("claunch.noticeHistory", JSON.stringify([
+      { id: "h1", at: BASE, title: "s1 replied in “old”", sub: "x", kind: "", session: "s1" }]));
+    const w = build({ storage });
+    w.api.noticePanelToggle(true);
+    const old = w.panelRows()[0];
+    check("an old row is shown", old && /replied in/.test(old.text()), w.panel());
+    check("without the openable mark", old && !old.classList.contains("openable"), old && old.className);
+    old.click();
+    check("and a click on it goes nowhere", w.loc.hash === "" &&
+            !w.nodes["notice-panel"].classList.contains("hidden"), w.loc.hash);
   }
 
   /* --- no storage is not an error --------------------------------------- */

@@ -42,6 +42,7 @@ globalThis.QaPane = (() => {
   };
   let host = null, name = "", api = null, onChange = null, onThread = null, onDiscuss = null;
   let focusWant = "";        // a card to bring into view once it is drawn
+  let wanted = null;         // {session, id}: the card to show at the next mount there
   let timer = null, seq = 0, data = null, error = "";
   let nudging = false, nudgeNotice = null;   // {text, bad} after a press
   // Per question id: {text, choices: [labels], base: revision the edit
@@ -185,6 +186,14 @@ globalThis.QaPane = (() => {
     focusWant = id;
     if (cards.has(id)) bringIntoView();
     else load();
+  }
+
+  /* Show question `id` of `session` (a notice about it): now if the pane is
+     on that session, else as soon as it is mounted there. */
+  function reveal(session, id) {
+    if (!session || !id) return;
+    if (host && name === session) { wanted = null; focus(id); return; }
+    wanted = {session, id};
   }
 
   /* Cards in question order, each rebuilt only when what it shows changed
@@ -584,6 +593,7 @@ globalThis.QaPane = (() => {
     onThread = opts.onThread || null;
     onDiscuss = opts.onDiscuss || null;
     focusWant = "";
+    if (wanted && wanted.session === session) { focusWant = wanted.id; wanted = null; }
     data = null;
     error = "";
     nudging = false;
@@ -608,5 +618,5 @@ globalThis.QaPane = (() => {
     data = null;
   }
 
-  return {mount, unmount, focus, refresh: () => { if (host) load(); }};
+  return {mount, unmount, focus, reveal, refresh: () => { if (host) load(); }};
 })();

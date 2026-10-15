@@ -6104,6 +6104,8 @@ body.embed #main { width: 100%; }
 }
 .notice-row.warn, .notice-row.pending { border-left-color: #d29922; }
 .notice-row.bad { border-left-color: #ff7b72; }
+.notice-row.openable { cursor: pointer; }
+.notice-row.openable:hover { background: #20242b; }
 .notice-row-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; }
 .notice-row .notice-title { font-size: 12.5px; color: #e6edf3; }
 .notice-row .gate-clock, .notice-row .notice-when { color: #8b949e; }
