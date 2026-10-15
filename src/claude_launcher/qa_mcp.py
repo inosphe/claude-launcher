@@ -36,7 +36,8 @@ you drifted, and qa_close it again with a note -- the note is your reply.
 
 A question that comes out of a thread conversation takes qa_ask thread=<id>,
 so it links back to that thread; the user can also open a thread about any
-question from its QA card. Each question's 'links' lists those threads, and
+question from its QA card (closed ones too), or by naming its id in a
+thread's title. Each question's 'links' lists those threads, and
 an answer's block names them -- carry the answer back into the thread there.
 """
 
