@@ -507,6 +507,12 @@ unchanged; these are the parts that differ.
    move <node>`, which also supersedes a pending request of yours). After
    any nudge, `flow_status` is the current truth, even if it puts you back
    on a task you already finished.
+7. **A task may call a procedure it lists in `calls`.** `flow_call
+   {procedure, node, with}` starts it as a nested run; drive that run with
+   the flow_* tools under the scope in `called.scope` (`flow_status`
+   `calls`). The calling task waits until the callee ends, then is back in
+   `tasks` with `call_result` — report it as usual. A procedure not in the
+   task's `calls` is refused: do not run its steps by hand instead.
 
 ## Rules
 

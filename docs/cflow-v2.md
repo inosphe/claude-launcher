@@ -1765,6 +1765,60 @@ verify가 사라져 작업이 `verifying`으로 남았다.
   종료한다(`cli_cflow2._after_verify`). verify는 그 명령을 실행한 프로세스의
   스레드에서 돌기 때문이다.
 
+### 2.12 동적 호출: `calls`와 `flow_call` (claunch-z17c9)
+
+`call:`(2.2, 2.3)은 컴파일 시점에 프로시저를 호출 지점에 펼친다. 호출 여부·시점·
+인자를 런 도중에 정해야 하는 프로시저(예: 시뮬레이션 실행 `sim-run`)는 동적 호출로
+부른다. 이력: claunch-4avda(EXPLORATION-1, CALL-CONTRACT-1/2)의 설계 중 caller frame,
+같은 작업 인스턴스로의 복귀, 기본 거절 허용 목록을 구현한다. round call(4avda.1),
+별도 `procedures/v2` 저장소, `subagent`·`session` 실행기는 범위 밖이다.
+
+```yaml
+nodes:
+  design:
+    prompt: ...
+    calls: [sim-run]        # 이 작업이 활성일 때만 부를 수 있는 프로시저
+```
+
+- `calls`는 작업 키다. 정의 이름의 목록(문자열 하나도 받는다)이고 경로는 거절한다.
+  IR 작업 노드의 `props["calls"]`에 들어가며, 선언이 없으면 키도 없다. 선언하지
+  않은 작업은 아무것도 부를 수 없다(기본 거절). 이름은 컴파일 때 해석하지 않고
+  호출할 때 런 디렉터리의 레이어(1장)에서 찾는다.
+- `flow_call {procedure, node?, with?}`(5장, `runtime.call`): 활성 작업
+  (`await == task`)만 부를 수 있다. 거절 조건은 다음과 같고, 거절되면 아무것도 쓰지
+  않는다.
+  - 작업의 `calls`에 없는 이름
+  - `kind: procedure`가 아닌 정의, 컴파일 오류, `type: block` param을 가진 프로시저
+    (동적 호출에는 호출 지점이 없다)
+  - 선언되지 않은 param, 기본값 없는 필수 param 누락(`flow_start`의 params 검사와 같다)
+  - 재귀: 호출 사슬에 이미 있는 프로시저. 사슬은 callee 런의 `parent.chain`에 있다
+  - 깊이: 사슬이 `CALL_DEPTH_MAX`(4)에 닿은 경우
+  - 런이 halt 중이거나 이동 요청이 열려 있는 경우(`flow_fork`와 같다)
+- 호출되면 그 시점의 정의를 컴파일해 중첩 런 `<scope>~c<n>`의 chart로 고정한다.
+  부모 런의 chart는 바뀌지 않는다(체크포인트의 chart 고정 검사가 그대로 유지된다).
+  callee 런은 `with`로 검사한 params와 부모의 `data` 사본으로 시작하고, 드라이버는
+  부모 런의 드라이버다. 드라이버는 `flow_status`의 `calls[].scope`를 `scope`로 주고
+  flow_* 툴로 callee를 진행한다.
+- 부르는 동안 작업은 `calling` 대기다. `flow_status`의 `tasks`에서 빠지고 `active`에는
+  남는다. 그 작업에 대한 `flow_report`는 거절된다. 작업 하나에 열린 호출은 하나다.
+- callee 런이 끝나면 결과가 같은 작업 인스턴스로 돌아온다. 작업은 다시 `tasks`에
+  나타나고 `call_result {call, procedure, outcome, value}`를 싣는다. 드라이버는 그 값을
+  보고 평소대로 보고한다. 같은 작업이 다시 부를 수 있고, 새 호출은 이전
+  `call_result`를 지운다.
+  - callee의 결과는 프로시저의 `returns`로 검사한다. 맞지 않으면 `fail`과 이유로
+    돌아온다. callee가 중단되면 `fail {reason}`으로 돌아온다. 작업의 결과는 엔진이
+    정하지 않고 드라이버가 보고한다.
+- 부르는 작업이 취소되면(런 중단, `try`·`return`의 정리, 강제 이동) 열린 호출은
+  `cancelled`가 되고 callee 런은 중단된다(`_release_holds` → `nested_aborts`).
+- 기록: `state["calls"][c<n>]`(id, instance, node, procedure, with, status
+  `running`/`returned`/`failed`/`cancelled`, nested, returns, outcome, value). 저널
+  `call_started`, `call_returned`. 결과 전달은 중첩 위임 런과 같은 `deliver_nested`
+  경로이고, 부모의 `flow_status`가 전달되지 않은 결과를 다시 전달한다
+  (`_reconcile_nested`). callee 런이 사람을 기다리면 부모의 `waiting_in_nested`에
+  나타난다.
+- 목표 수립 단계의 시뮬레이션 금지(claunch-efnbt.9)는 이 허용 목록 위에 정적 검사로
+  얹는다: `sims: deny`인 작업이 `calls`에 시뮬레이션 프로시저를 두면 컴파일 오류다.
+
 ## 3. IR
 
 IR은 JSON으로 직렬화되는 statechart다. 버전은 `ir_version`(현재 1)으로 표시한다.
@@ -1947,7 +2001,7 @@ slot 이름에 접미(`runs/s15@main`)와 디렉터리 한 층(`runs/<daemon>/s1
 
 `started`(params, inputs, driver), `entered`, `left`(outcome 포함), `selected`,
 `reported`, `bound`, `delegate_started`, `delegate_returned`, `delegate_failed`,
-`delegate_held`, `nested_started`, `fallback`(원인과 경로), `group_fork`,
+`delegate_held`, `nested_started`, `call_started`, `call_returned`, `fallback`(원인과 경로), `group_fork`,
 `group_settled`, `monitor_violation`, `waiting`, `done`, `aborted`, `verify_started`,
 `verify_passed`, `verify_failed`(종료 코드, 출력 끝부분, `lost`), `probe_undecided`(종료 코드, 횟수, 출력 끝부분),
 `ask_routed`(그룹, 응답자), `ask_answered`(결정, 답한 쪽, 경로), `ask_timeout`,
@@ -2039,6 +2093,7 @@ v1 툴과 이름이 겹치지 않도록 `flow_` 접두어를 쓴다.
 | `flow_report` | 작업 결과 보고(`node`, `outcome`, `value`, `text`). verify가 있으면 `verifying`으로 바로 돌아온다 |
 | `flow_select` | `choose` 노드의 옵션 선택(`node`, `option`, `reason`) |
 | `flow_fork` | `group`에 멤버 추가(`group`, `with`) |
+| `flow_call` | 활성 작업이 `calls`에 선언한 프로시저를 중첩 런으로 호출(`procedure`, `node`, `with`). 끝나면 같은 작업이 `call_result`와 함께 다시 활성이 된다(2.12) |
 | `flow_delegate` | 위임 노드의 브리프 조회와 결과 제출(`delegation`, `outcome`, `value`, `receipt_path`, `scope`, `cwd`) |
 | `flow_rule` | 규칙의 `text`·`why` 조회 |
 | `flow_approve` | `self` 단계로 넘어간 자기 런의 ask에 답함(`node`, `option`, `decline`, `reason`). 다른 단계에서는 거절 |

@@ -119,6 +119,9 @@ AW_LIMIT = "limit"
 AW_APPROVAL = "approval"
 #: A task whose ``ok`` report waits on its ``verify`` running in the background.
 AW_VERIFY = "verifying"
+#: A task that called a procedure (``flow_call``, doc 2.12): it is active
+#: again, with the call's result, when the callee's nested run finishes.
+AW_CALL = "calling"
 
 #: Hold kinds (``state["approvals"]``). ``monitor_violation`` holds the whole
 #: run; the others hold one instance.
@@ -1390,6 +1393,11 @@ def _release_holds(r: Run, iid: str) -> None:
             d["finished"] = store_mod.utcnow()
             if d.get("nested"):
                 r.nested_aborts.append(dict(d["nested"]))
+    for c in r.state.get("calls", {}).values():
+        if c.get("instance") == iid and c.get("status") == CALL_OPEN:
+            c["status"] = "cancelled"
+            c["finished"] = store_mod.utcnow()
+            r.nested_aborts.append(dict(c["nested"]))
     r.state["approvals"] = [a for a in r.state.get("approvals", []) if a.get("instance") != iid]
     for rec in (r.state.get("asks") or {}).values():
         if rec.get("instance") == iid and rec.get("status") == "open":
@@ -1887,9 +1895,15 @@ def deliver_nested(cwd: str, scope: str) -> bool:
         return False
 
     def op(r: Run) -> None:
-        rec = (r.state.get("delegations") or {}).get(link["delegation"])
+        if link.get("call"):
+            rec = (r.state.get("calls") or {}).get(link["call"])
+        else:
+            rec = (r.state.get("delegations") or {}).get(link.get("delegation"))
         if r.status not in LIVE_STATUSES or rec is None \
                 or (rec.get("nested") or {}).get("scope") != scope:
+            return
+        if link.get("call"):
+            _call_result(r, rec, state.get("status"), state.get("outcome"), state.get("value"))
             return
         _nested_result(r, rec, state.get("status"), state.get("outcome"), state.get("value"))
     try:
@@ -1914,6 +1928,9 @@ def _reconcile_nested(st: RunStore) -> None:
         nested = rec.get("nested")
         if nested and rec.get("status") in OPEN_DELEGATION:
             deliver_nested(nested["cwd"], nested["scope"])
+    for rec in (state.get("calls") or {}).values():
+        if rec.get("status") == CALL_OPEN:
+            deliver_nested(rec["nested"]["cwd"], rec["nested"]["scope"])
 
 
 # -- accepting a delegation result ----------------------------------------------
@@ -2315,9 +2332,10 @@ def _gate_waits(state: Dict[str, Any], chart: Optional[ir.Chart],
     # A nested delegation run that waits on a person is the parent's wait
     # too: replacing the parent would abort it (G2).
     if _depth < 4:
-        for rec in (state.get("delegations") or {}).values():
+        for rec in [*(state.get("delegations") or {}).values(),
+                    *(state.get("calls") or {}).values()]:
             nested = rec.get("nested")
-            if not nested or rec.get("status") not in OPEN_DELEGATION:
+            if not nested or rec.get("status") not in OPEN_DELEGATION + (CALL_OPEN,):
                 continue
             try:
                 child = Run.load(RunStore(nested["cwd"], nested["scope"]))
@@ -3306,6 +3324,150 @@ def fork(group: Optional[str], with_: Optional[Dict[str, Any]] = None, *,
     payload = status(cwd=cwd, scope=scope, now=now, tick=False)
     payload["forked"] = out
     return payload
+
+
+# -- dynamic calls (doc 2.12) ---------------------------------------------------
+
+#: A call whose callee run has not finished.
+CALL_OPEN = "running"
+#: Calls deep: a callee may call again, up to this many frames below the
+#: run that started the chain.
+CALL_DEPTH_MAX = 4
+
+
+def call_scope(scope: str, cid: str) -> str:
+    return f"{scope}{store_mod.NESTED_SEP}{cid}"
+
+
+def _call_chain(state: Dict[str, Any]) -> List[str]:
+    """The procedures called above this run (outermost first): empty for a
+    run that is not a callee."""
+    link = state.get("parent") or {}
+    return list(link.get("chain") or []) if link.get("call") else []
+
+
+def call(procedure: str, node: Optional[str] = None, with_: Optional[Dict[str, Any]] = None,
+         *, cwd: Optional[str] = None, scope: Optional[str] = None,
+         now: Optional[float] = None) -> Dict[str, Any]:
+    """An active task calls ``procedure`` (doc 2.12): the definition is
+    resolved by name from the run's layers now, compiled, and started as a
+    nested run ``<scope>~c<n>`` that the driver drives with the flow_* tools.
+    The task waits (``calling``) until the callee finishes, then is active
+    again with ``call_result`` (outcome, value) in its status entry; it
+    reports as usual. The task must list the procedure in ``calls``
+    (default deny); one open call per task; no procedure twice in a chain
+    and at most :data:`CALL_DEPTH_MAX` frames."""
+    procedure = str(procedure or "").strip()
+    from . import layers
+    if not layers.is_name(procedure):
+        raise FlowError(f"call {procedure!r}: give a procedure name, not a path")
+    if with_ is not None and not isinstance(with_, dict):
+        raise FlowError("'with' must be an object of parameter -> value")
+    out: Dict[str, Any] = {}
+
+    def op(r: Run) -> None:
+        _require_progress(r)
+        _require_no_move_request(r)
+        iid = _find(r, node, (AW_TASK,), "task")
+        tnode = r.node_of(iid)
+        allowed = tnode.get("calls") or []
+        if procedure not in allowed:
+            raise FlowError(
+                f"refused: task {shown_label(r.chart, tnode)} may not call {procedure!r} "
+                f"(its calls: {', '.join(allowed) or 'none declared'})")
+        chain = _call_chain(r.state)
+        if procedure in chain:
+            raise FlowError(f"refused: recursive call: {' -> '.join(chain + [procedure])}")
+        if len(chain) >= CALL_DEPTH_MAX:
+            raise FlowError(f"refused: call depth {CALL_DEPTH_MAX} reached "
+                            f"({' -> '.join(chain)})")
+        try:
+            chart = layers.load(procedure, str(r.store.cwd))
+        except Exception as exc:  # noqa: BLE001 - compile/lookup errors refuse the call
+            raise FlowError(f"call {procedure!r}: {exc}") from None
+        if chart.kind != ir.KIND_PROCEDURE:
+            raise FlowError(f"call {procedure!r}: {chart.name} is a {chart.kind}, not a "
+                            f"procedure (kind: procedure)")
+        blocks = [k for k, d in (chart.params or {}).items()
+                  if (d or {}).get("type") == "block"]
+        if blocks:
+            raise FlowError(f"call {procedure!r}: block parameter(s) {', '.join(blocks)} "
+                            f"need a call site; a dynamic call has none")
+        params = _validate_params(chart, with_)
+        calls = r.state.setdefault("calls", {})
+        cid = f"c{len(calls) + 1}"
+        sub = call_scope(r.store.scope, cid)
+        returns = json.loads(json.dumps(chart.returns or {ir.OUTCOME_OK: {}}))
+        rec: Dict[str, Any] = {
+            "id": cid, "instance": iid, "node": tnode.id,
+            "label": shown_label(r.chart, tnode), "procedure": procedure,
+            "with": params, "status": CALL_OPEN, "started": store_mod.utcnow(),
+            "finished": None, "nested": {"cwd": str(r.store.cwd), "scope": sub},
+            "returns": returns, "source": chart.source,
+        }
+        calls[cid] = rec
+        frame = r.inst[iid]["frame"]
+        frame.pop("call_result", None)
+        frame["call"] = cid
+        r.inst[iid]["await"] = AW_CALL
+        r.emit("call_started", node=tnode.id, instance=iid, call=cid, procedure=procedure,
+               scope=sub, params=params)
+        link = {"cwd": str(r.store.cwd), "scope": r.store.scope, "call": cid,
+                "run": r.state.get("run_id"), "chain": chain + [procedure]}
+        st = RunStore(str(r.store.cwd), sub)
+        data = json.loads(json.dumps(r.state.get("data") or {}, default=str))
+        with st.lock():
+            if st.exists():
+                _abort_nested({"cwd": str(st.cwd), "scope": sub}, locked=True)
+                st.archive()
+            elif st.chart_path.exists():
+                st.chart_path.unlink()
+            child = _new_run(st, chart, params=params, data=data, caps=r.state.get("caps"),
+                             driver=driver_of(r.state), now=r.now, parent=link)
+            done = child.state.get("status") in FINISHED_STATUSES
+            if done:
+                child.state["delivered"] = True  # applied below, in this lock
+            child.save()
+            child.after = []
+            result = (child.state.get("status"), child.state.get("outcome"),
+                      child.state.get("value"))
+        out.update({"call": cid, "instance": iid, "procedure": procedure, "scope": sub})
+        if done:
+            _call_result(r, rec, *result)
+    _mutate(cwd, scope, now, op)
+    payload = status(cwd=cwd, scope=scope, now=now, tick=False)
+    payload["called"] = out
+    return payload
+
+
+def _call_result(r: Run, rec: Dict[str, Any], status_: Optional[str], outcome: Any,
+                 value: Any) -> None:
+    """A callee run finished: its root outcome/value, checked against the
+    procedure's ``returns``, goes back to the calling task, which is active
+    again. A result that does not match, or an aborted callee, comes back
+    as ``fail`` with the reason; the task decides what to report."""
+    if rec.get("status") != CALL_OPEN:
+        return
+    if status_ == ST_ABORTED:
+        outcome, value = ir.OUTCOME_FAIL, {"reason": "the callee run was aborted"}
+    else:
+        outcome = str(outcome or ir.OUTCOME_FAIL)
+        errors = validate_result(rec.get("returns") or {ir.OUTCOME_OK: {}}, outcome, value)
+        if errors:
+            outcome, value = ir.OUTCOME_FAIL, {
+                "reason": f"procedure {rec['procedure']} returned a result that does not "
+                          f"match its returns: {'; '.join(errors)}"}
+    rec.update({"status": "returned" if status_ == ST_DONE else "failed",
+                "finished": store_mod.utcnow(), "outcome": outcome, "value": value})
+    r.emit("call_returned", call=rec["id"], node=rec["node"], instance=rec["instance"],
+           procedure=rec["procedure"], outcome=outcome)
+    inst = r.inst.get(rec["instance"])
+    if inst is None or inst.get("await") != AW_CALL or inst["frame"].get("call") != rec["id"]:
+        return
+    inst["frame"].pop("call", None)
+    inst["frame"]["call_result"] = {"call": rec["id"], "procedure": rec["procedure"],
+                                    "outcome": outcome, "value": value}
+    inst["await"] = AW_TASK
 
 
 OPEN_DELEGATION = ("pending", "queued", "running")
@@ -5090,6 +5252,10 @@ def describe(r: Run) -> Dict[str, Any]:
                 "ask": node.get("ask"),
                 "item": env.get("item"),
             })
+            if node.get("calls"):
+                tasks[-1]["calls"] = list(node.get("calls"))
+            if inst["frame"].get("call_result"):
+                tasks[-1]["call_result"] = inst["frame"]["call_result"]
             if inst["frame"].get("last_verify"):
                 tasks[-1]["last_verify"] = inst["frame"]["last_verify"]
             if node.get("restart"):
@@ -5178,10 +5344,20 @@ def describe(r: Run) -> Dict[str, Any]:
             if rec.get("errors"):
                 entry["errors"] = rec["errors"][-1]
         dels.append(entry)
+    calls = []
+    for cid, rec in (s.get("calls") or {}).items():
+        entry = {k: rec.get(k) for k in ("id", "instance", "node", "label", "procedure",
+                                         "status", "started", "finished")}
+        entry["scope"] = rec["nested"]["scope"]
+        if rec.get("status") != CALL_OPEN:
+            entry["outcome"] = rec.get("outcome")
+        calls.append(entry)
     out.update({
         "active": sorted(iid for iid, inst in r.inst.items() if inst.get("await")),
         "tasks": tasks, "choices": choices, "waits": waits,
     })
+    if calls:
+        out["calls"] = calls
     if groups:
         out["groups"] = groups
     if dels:

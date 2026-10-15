@@ -172,6 +172,29 @@ TOOLS = [
         },
     },
     {
+        "name": "flow_call",
+        "description": (
+            "Call a procedure from an active task (doc 2.12). The task must list "
+            "it in 'calls' (flow_status task 'calls'; none listed: every call is "
+            "refused). The procedure is resolved by name now and starts as a nested "
+            "run you drive with the flow_* tools under the scope in 'called.scope' "
+            "(flow_status 'calls'). Meanwhile the task waits ('calling'); when the "
+            "callee finishes, the task is active again with 'call_result' (outcome, "
+            "value) and you report it as usual. One open call per task."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "procedure": {"type": "string", "description": "procedure name (from 'calls')"},
+                "node": {"type": "string", "description": "the calling task's instance id "
+                         "or name (omit when one task is active)"},
+                "with": {"type": "object", "description": "the procedure's params"},
+                "scope": _SCOPE, "cwd": _CWD, "side": _SIDE,
+            },
+            "required": ["procedure"],
+        },
+    },
+    {
         "name": "flow_delegate",
         "description": (
             "Delegated subtrees (executor subagent). Without 'outcome'/'value'/"
@@ -411,6 +434,7 @@ def _route(cwd: str, scope: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
 def call_tool(name: str, args: dict) -> Dict[str, Any]:
     out = _call(name, args)
     if name in ("flow_start", "flow_status", "flow_report", "flow_select", "flow_fork",
+                "flow_call",
                 "flow_approve", "flow_delegate", "flow_collection", "flow_input") and isinstance(out, dict) and "run" in out:
         cwd = str(args.get("cwd") or "").strip() or os.getcwd()
         out = _route(cwd, _scope(args), out)
@@ -476,6 +500,11 @@ def _call(name: str, args: dict) -> Dict[str, Any]:
     if name == "flow_fork":
         cwd, scope = _where(args)
         return runtime.fork(str(args.get("group") or "").strip() or None,
+                            args.get("with"), cwd=cwd, scope=scope)
+    if name == "flow_call":
+        cwd, scope = _where(args)
+        return runtime.call(str(args.get("procedure") or ""),
+                            str(args.get("node") or "").strip() or None,
                             args.get("with"), cwd=cwd, scope=scope)
     if name == "flow_delegate":
         # A 'session' delegation is submitted by a child session that stands
