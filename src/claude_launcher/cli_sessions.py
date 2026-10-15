@@ -3466,8 +3466,8 @@ def register(sub) -> None:
     where.add_argument(
         "--worktree", dest="worktree_name", nargs="?", const="", metavar="NAME",
         help="move into this worktree of the session's own repository "
-             "(created under .claude/worktrees/, or reused; omit NAME for a "
-             "generated one)",
+             "(created under .claude/worktrees/, or reused; omit NAME for "
+             "<session>-<time>)",
     )
     where.add_argument(
         "--to", metavar="DIR",
