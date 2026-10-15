@@ -7617,9 +7617,30 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .cf2-throughput-controls { display: flex; flex-wrap: wrap; gap: 8px 12px; }
 .cf2-throughput-controls label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; }
 .cf2-throughput-controls input, .cf2-throughput-controls select { max-width: 100%; color: inherit; background: #161b22; border: 1px solid #30363d; padding: 4px; }
-.cf2-throughput-output svg { width: 100%; max-height: 180px; }
+.cf2-throughput-custom { margin-top: 8px; }
+.cf2-throughput-custom[hidden] { display: none; }
+.cf2-throughput-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; margin: 10px 0 6px; }
+.cf2-throughput-tile { border: 1px solid #30363d; border-radius: 6px; padding: 6px 10px; background: #0d1117; min-width: 0; }
+.cf2-throughput-tile-label { font-size: 11px; color: #8b949e; }
+.cf2-throughput-tile-value { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.cf2-throughput-tile-note { font-size: 11px; color: #8b949e; }
+.cf2-throughput-output svg { width: 100%; max-height: 220px; display: block; }
 .cf2-metric-known { fill: #58a6ff; }
 .cf2-metric-unknown { fill: transparent; stroke: #8b949e; stroke-dasharray: 3 2; }
+.cf2-metric-hit { fill: transparent; }
+.cf2-metric-hit:hover { fill: rgba(139, 148, 158, .12); }
+.cf2-axis-grid { stroke: #30363d; stroke-width: 1; }
+.cf2-axis-label { fill: #8b949e; font-size: 11px; font-variant-numeric: tabular-nums; }
+.cf2-bar-count { fill: #c9d1d9; font-size: 11px; pointer-events: none; }
+.cf2-throughput-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 11px; color: #8b949e; margin: 2px 0 6px; }
+.cf2-legend-known::before, .cf2-legend-unknown::before { content: ""; display: inline-block; width: 10px; height: 10px; margin-right: 5px; vertical-align: -1px; }
+.cf2-legend-known::before { background: #58a6ff; }
+.cf2-legend-unknown::before { border: 1px dashed #8b949e; }
+.cf2-throughput details { margin-top: 6px; }
+.cf2-throughput summary { cursor: pointer; font-size: 12px; color: #9da5b0; }
+.cf2-throughput-compare > .cf2-throughput-controls { margin: 6px 0; }
+.cf2-throughput-change td.up { color: #3fb950; }
+.cf2-throughput-change td.down { color: #ff7b72; }
 .cf2-throughput-table { overflow-x: auto; }
 .cf2-throughput-table table { border-collapse: collapse; font-size: 12px; }
 .cf2-throughput-table th, .cf2-throughput-table td { padding: 5px 8px; border-bottom: 1px solid #30363d; text-align: left; white-space: nowrap; }

@@ -36780,6 +36780,26 @@ function cflow2MetricPeriod(data, metric, start, end) {
     durationN: durations.length};
 }
 
+// Bin widths offered next to Auto. Auto picks the first that keeps the chart
+// at or under 48 bars; a fixed width over the 128-bar limit is disabled.
+const CF2_THROUGHPUT_BINS = [[900000, "15 minutes"], [3600000, "1 hour"], [21600000, "6 hours"], [86400000, "1 day"]];
+const CF2_THROUGHPUT_MAX_BINS = 128;
+
+function cflow2ThroughputAutoBin(ms) {
+  const fit = CF2_THROUGHPUT_BINS.find(([bin]) => ms / bin <= 48);
+  return (fit || CF2_THROUGHPUT_BINS[CF2_THROUGHPUT_BINS.length - 1])[0];
+}
+
+function cflow2Duration(seconds) {
+  if (seconds == null) return "unconfirmed";
+  const s = Math.round(seconds);
+  if (s < 60) return `${s}s`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  return m % 60 ? `${h}h ${m % 60}m` : `${h}h`;
+}
+
 function cflow2Throughput(data, state) {
   const section = cf2Section("Throughput over time");
   section.classList.add("cf2-throughput");
@@ -36790,7 +36810,9 @@ function cflow2Throughput(data, state) {
   const now = Date.parse(data.observed_at);
   if (!Number.isFinite(now)) return section;
   const utcInput = ms => new Date(ms).toISOString().slice(0, 19);
-  if (!state.metric) Object.assign(state, {metric: "runs", span: "6", bin: "3600000"});
+  const hasMerges = data.runs.some(r => r.merge_source);
+  if (!state.metric) Object.assign(state, {metric: "runs", span: "6", bin: "auto"});
+  if (!hasMerges) state.metric = "runs";
   const updatePeriods = () => {
     if (!state.chartManual) Object.assign(state, {
       start: utcInput(now - Number(state.span) * 3600000), end: utcInput(now)});
@@ -36801,8 +36823,20 @@ function cflow2Throughput(data, state) {
     if (!state.afterManual) Object.assign(state, {afterStart: utcInput(mid), afterEnd: utcInput(b)});
   };
   updatePeriods();
+
   const controls = el("div", "cf2-throughput-controls");
+  const custom = el("div", "cf2-throughput-controls cf2-throughput-custom");
   const output = el("div", "cf2-throughput-output");
+  const compare = el("details", "cf2-throughput-compare"); compare.dataset.cf2Key = "throughput-compare";
+  compare.appendChild(el("summary", null, "Compare two periods"));
+  const compareInputs = el("div", "cf2-throughput-controls");
+  const comparison = el("div", "cf2-throughput-comparison");
+  compare.append(el("p", "wf-note", "Defaults to the first and second half of the chart period. Editing a field keeps it fixed."),
+    compareInputs, comparison);
+  const syncInputs = () => {
+    for (const node of section.querySelectorAll("input[data-metric-field]")) node.value = state[node.dataset.metricField];
+    custom.hidden = state.span !== "custom";
+  };
   const select = (label, key, options) => {
     const wrap = el("label", null, label + " ");
     const input = el("select"); input.dataset.metricField = key;
@@ -36812,81 +36846,173 @@ function cflow2Throughput(data, state) {
       state[key] = input.value;
       if (key === "span") {
         state.chartManual = state.span === "custom";
-        updatePeriods();
-        for (const node of controls.querySelectorAll("input")) node.value = state[node.dataset.metricField];
+        updatePeriods(); syncInputs();
       }
       draw();
     });
+    return input;
   };
-  if (!data.runs.some(r => r.merge_source)) state.metric = "runs";
-  select("Metric", "metric", [["runs", "Completed runs / hour"],
-    ...(data.runs.some(r => r.merge_source) ? [["merges", "Reported merges / hour"]] : [])]);
-  select("Period", "span", [["1", "Past 1 hour"], ["6", "Past 6 hours"], ["24", "Past 24 hours"], ["168", "Past 7 days"], ["custom", "Custom chart period"]]);
-  select("Bin", "bin", [["900000", "15 minutes"], ["3600000", "1 hour"], ["21600000", "6 hours"], ["86400000", "1 day"]]);
-  for (const [key, label] of [["start", "Chart start UTC"], ["end", "Chart end UTC"],
-    ["beforeStart", "Before start UTC"], ["beforeEnd", "Before end UTC"],
-    ["afterStart", "After start UTC"], ["afterEnd", "After end UTC"]]) {
+  select("Metric", "metric", [["runs", "Completed runs"], ...(hasMerges ? [["merges", "Reported merges"]] : [])]);
+  select("Period", "span", [["1", "Past 1 hour"], ["6", "Past 6 hours"], ["24", "Past 24 hours"], ["168", "Past 7 days"], ["custom", "Custom…"]]);
+  const binSelect = select("Bin", "bin", [["auto", "Auto"], ...CF2_THROUGHPUT_BINS.map(([v, t]) => [String(v), t])]);
+  const dateInput = (parent, key, label) => {
     const wrap = el("label", null, label + " ");
     const input = el("input"); input.type = "datetime-local"; input.step = "1";
-    input.dataset.metricField = key; input.value = state[key]; wrap.appendChild(input); controls.appendChild(wrap);
+    input.dataset.metricField = key; input.value = state[key]; wrap.appendChild(input); parent.appendChild(wrap);
     input.addEventListener("change", () => {
       state[key] = input.value;
       if (key.startsWith("before")) state.beforeManual = true;
       else if (key.startsWith("after")) state.afterManual = true;
-      else {
-        state.chartManual = true; state.span = "custom";
-        controls.querySelector('[data-metric-field="span"]').value = "custom";
-      }
-      updatePeriods();
-      for (const node of controls.querySelectorAll("input")) node.value = state[node.dataset.metricField];
-      draw();
+      else state.chartManual = true;
+      updatePeriods(); syncInputs(); draw();
     });
-  }
-  section.appendChild(el("p", "wf-note", "UTC · completed runs use saved status done and finished time. Reported merges use structured git.merge task reports and report time. Counts are deduplicated. Coverage includes saved run intervals only; gaps and retention outside those intervals are unknown."));
-  section.appendChild(el("p", "wf-note", `Saved samples: ${data.runs.length} runs · limit ${data.limit} · older records ${data.truncated ? "omitted" : "none omitted by limit"} · unavailable ${data.unavailable} · incomplete merge journals ${data.journal_incomplete}. Journal scan: ${data.event_limit} events / ${data.byte_limit} bytes per run.`));
-  if (!data.runs.some(r => r.merge_source)) section.appendChild(el("p", "wf-note", "Reported merge metric unavailable: no structured merge contract in saved workflows."));
-  section.append(controls, output);
+  };
+  dateInput(custom, "start", "Start (UTC)"); dateInput(custom, "end", "End (UTC)");
+  for (const [key, label] of [["beforeStart", "Before start (UTC)"], ["beforeEnd", "Before end (UTC)"],
+    ["afterStart", "After start (UTC)"], ["afterEnd", "After end (UTC)"]]) dateInput(compareInputs, key, label);
+  custom.hidden = state.span !== "custom";
+
+  const about = el("details", "cf2-throughput-about"); about.dataset.cf2Key = "throughput-about";
+  about.appendChild(el("summary", null, "About these numbers"));
+  about.appendChild(el("p", "wf-note", "UTC · completed runs use saved status done and finished time. Reported merges use structured git.merge task reports and report time. Counts are deduplicated. Coverage includes saved run intervals only; gaps and retention outside those intervals are unknown."));
+  about.appendChild(el("p", "wf-note", `Saved samples: ${data.runs.length} runs · limit ${data.limit} · older records ${data.truncated ? "omitted" : "none omitted by limit"} · unavailable ${data.unavailable} · incomplete merge journals ${data.journal_incomplete}. Journal scan: ${data.event_limit} events / ${data.byte_limit} bytes per run.`));
+  if (!hasMerges) about.appendChild(el("p", "wf-note", "Reported merge metric unavailable: no structured merge contract in saved workflows."));
+  section.append(controls, custom, output, compare, about);
+
   const range = (a, b) => [Date.parse(state[a] + "Z"), Date.parse(state[b] + "Z")];
   const valid = ([a, b]) => Number.isFinite(a) && Number.isFinite(b) && b > a;
   const number = value => value == null ? "unconfirmed" : value.toFixed(2);
-  function draw() {
-    output.innerHTML = "";
-    const period = range("start", "end"), before = range("beforeStart", "beforeEnd"), after = range("afterStart", "afterEnd");
-    const unit = state.metric === "runs" ? "completed runs" : "reported merges";
-    if (!valid(period) || !valid(before) || !valid(after)) {
-      output.appendChild(el("p", "wf-note", "Select valid UTC periods with end after start.")); return;
+  const short = value => value == null ? "—" : String(Number(value.toFixed(2)));
+  const pct = r => number(r.hours > 0 ? r.covered / (r.hours * 3600000) * 100 : null);
+  const tile = (label, value, note) => {
+    const box = el("div", "cf2-throughput-tile");
+    box.append(el("div", "cf2-throughput-tile-label", label), el("div", "cf2-throughput-tile-value", value));
+    if (note) box.appendChild(el("div", "cf2-throughput-tile-note", note));
+    return box;
+  };
+  function drawComparison(unit) {
+    comparison.innerHTML = "";
+    const before = range("beforeStart", "beforeEnd"), after = range("afterStart", "afterEnd");
+    if (!valid(before) || !valid(after)) {
+      comparison.appendChild(el("p", "wf-note", "Select valid UTC periods with end after start.")); return;
     }
-    const bin = Number(state.bin), n = Math.ceil((period[1] - period[0]) / bin);
-    if (n > 128) {output.appendChild(el("p", "wf-note", "Chart limit: 128 bins. Select a larger bin or shorter chart period.")); return;}
-    const comparison = el("div", "cf2-throughput-comparison");
     const x = cflow2MetricPeriod(data, state.metric, ...before), y = cflow2MetricPeriod(data, state.metric, ...after);
-    for (const [label, result] of [["Before", x], ["After", y]]) {
-      comparison.appendChild(el("p", "wf-note", `${label}: ${result.count} observed ${unit} · ${number(result.hours)} hours · ${number(result.rate)} / hour · coverage ${number(result.covered / (result.hours * 3600000) * 100)}%` +
-        (state.metric === "runs" ? ` · mean duration ${number(result.duration)} seconds (n=${result.durationN})` : "")));
+    const wrap = el("div", "cf2-throughput-table"), table = el("table");
+    const heading = el("tr");
+    const cols = ["", `Observed ${unit}`, "Hours", "Rate / hour", "Coverage", ...(state.metric === "runs" ? ["Mean duration"] : [])];
+    for (const label of cols) heading.appendChild(el("th", null, label));
+    table.appendChild(heading);
+    for (const [label, r] of [["Before", x], ["After", y]]) {
+      const row = el("tr"); row.dataset.period = label.toLowerCase();
+      for (const value of [label, String(r.count), number(r.hours), number(r.rate), `${pct(r)}%`,
+        ...(state.metric === "runs" ? [`${cflow2Duration(r.duration)} (n=${r.durationN})`] : [])]) row.appendChild(el("td", null, value));
+      table.appendChild(row);
     }
     const comparable = x.rate != null && y.rate != null;
-    comparison.appendChild(el("p", "wf-note", `Change: ${comparable ? number(y.rate - x.rate) : "unconfirmed"} / hour · improvement: ${comparable && x.rate > 0 ? number((y.rate / x.rate - 1) * 100) + "%" : "not calculable (zero baseline or insufficient coverage)"}`));
-    output.appendChild(comparison);
+    const change = el("tr", "cf2-throughput-change"); change.dataset.period = "change";
+    const delta = comparable ? y.rate - x.rate : null;
+    const improvement = comparable && x.rate > 0 ? number((y.rate / x.rate - 1) * 100) + "%" : null;
+    change.appendChild(el("td", null, "Change"));
+    const cell = el("td", null, comparable ? `${delta >= 0 ? "+" : ""}${number(delta)} / hour` + (improvement ? ` · improvement: ${improvement}` : "") : "unconfirmed");
+    cell.colSpan = cols.length - 1;
+    if (comparable) cell.classList.add(delta > 0 ? "up" : delta < 0 ? "down" : "flat");
+    change.appendChild(cell); table.appendChild(change);
+    wrap.appendChild(table); comparison.appendChild(wrap);
+    if (!improvement) comparison.appendChild(el("p", "wf-note", "Improvement not calculable (zero baseline or insufficient coverage)."));
+  }
+  function draw() {
+    // Read the bin table's disclosure off the element itself: its toggle event
+    // is async, so a control changed right after a click would beat it.
+    const shown = output.querySelector('details[data-cf2-key="throughput-bins"]');
+    if (shown) state.binsOpen = shown.open;
+    output.innerHTML = "";
+    const unit = state.metric === "runs" ? "completed runs" : "reported merges";
+    const period = range("start", "end");
+    drawComparison(unit);
+    if (!valid(period)) {output.appendChild(el("p", "wf-note", "Select valid UTC periods with end after start.")); return;}
+    const span = period[1] - period[0];
+    for (const option of binSelect.options) {
+      option.disabled = option.value !== "auto" && span / Number(option.value) > CF2_THROUGHPUT_MAX_BINS;
+    }
+    if (state.bin !== "auto" && span / Number(state.bin) > CF2_THROUGHPUT_MAX_BINS) {
+      const name = (CF2_THROUGHPUT_BINS.find(([v]) => String(v) === state.bin) || [0, state.bin])[1];
+      state.bin = "auto"; binSelect.value = "auto";
+      output.appendChild(el("p", "wf-note", `${name} bins would exceed ${CF2_THROUGHPUT_MAX_BINS} bars for this period — switched to Auto.`));
+    }
+    const bin = state.bin === "auto" ? cflow2ThroughputAutoBin(span) : Number(state.bin);
+    const n = Math.ceil(span / bin);
+    const binName = (CF2_THROUGHPUT_BINS.find(([v]) => v === bin) || [0, `${bin / 60000} minutes`])[1];
+
+    const total = cflow2MetricPeriod(data, state.metric, ...period);
+    const tiles = el("div", "cf2-throughput-tiles");
+    tiles.append(
+      tile(state.metric === "runs" ? "Completed runs" : "Reported merges", String(total.count), `in ${short(total.hours)} h`),
+      tile("Rate / hour", short(total.rate), total.rate == null ? "coverage incomplete" : null),
+      tile("Coverage", `${short(total.hours > 0 ? total.covered / (total.hours * 3600000) * 100 : null)}%`, "of the period has saved runs"));
+    if (state.metric === "runs") tiles.appendChild(tile("Mean duration", cflow2Duration(total.duration), `n=${total.durationN}`));
+    output.appendChild(tiles);
+
     const bins = Array.from({length: n}, (_, i) => {
       const a = period[0] + i * bin, b = Math.min(a + bin, period[1]);
       return {a, b, ...cflow2MetricPeriod(data, state.metric, a, b)};
     });
     const ns = "http://www.w3.org/2000/svg", svg = document.createElementNS(ns, "svg");
-    svg.setAttribute("viewBox", "0 0 640 160"); svg.setAttribute("role", "img");
-    svg.setAttribute("aria-label", `${unit} per hour in UTC. Outlined bars have incomplete coverage; their height shows observed count per hour only.`);
-    const max = Math.max(1, ...bins.map(b => b.count / b.hours));
+    const W = 640, H = 200, L = 36, R = 6, T = 14, B = 22, plotW = W - L - R, plotH = H - T - B;
+    svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.setAttribute("role", "img");
+    svg.setAttribute("aria-label", `Observed ${unit} per ${binName} bin in UTC. Outlined bars have incomplete coverage; their totals are unknown.`);
+    const node = (tag, attrs, text) => {
+      const e = document.createElementNS(ns, tag);
+      for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, String(v));
+      if (text !== undefined) e.textContent = text;
+      svg.appendChild(e); return e;
+    };
+    // Bars are counts per bin, so the axis, the bar labels and the tiles read
+    // in the same unit. A shorter last bin (custom period) says so in its title.
+    const peak = Math.max(0, ...bins.map(b => b.count));
+    const top = peak <= 1 ? 1 : peak <= 4 ? peak : (() => {
+      const step = Math.pow(10, Math.floor(Math.log10(peak)));
+      return [1, 2, 2.5, 5, 10].map(m => m * step).find(v => v >= peak);
+    })();
+    for (const v of top === 1 ? [0, 1] : [0, top / 2, top]) {
+      const y = T + plotH - v / top * plotH;
+      node("line", {x1: L, x2: W - R, y1: y, y2: y, class: "cf2-axis-grid"});
+      node("text", {x: L - 4, y: y + 3, "text-anchor": "end", class: "cf2-axis-label"}, short(v));
+    }
+    const slot = plotW / n, showCounts = n <= 24;
     bins.forEach((b, i) => {
-      const rect = document.createElementNS(ns, "rect"), height = b.count / b.hours / max * 130;
-      rect.setAttribute("x", String(i * 640 / n + 1)); rect.setAttribute("y", String(140 - height));
-      rect.setAttribute("width", String(Math.max(1, 640 / n - 2))); rect.setAttribute("height", String(Math.max(2, height)));
-      rect.setAttribute("class", b.complete ? "cf2-metric-known" : "cf2-metric-unknown");
+      const height = b.count / top * plotH;
+      const rect = node("rect", {x: L + i * slot + 1, y: T + plotH - height, width: Math.max(1, slot - 2),
+        height: Math.max(b.count ? 2 : 0, height), class: b.complete ? "cf2-metric-known" : "cf2-metric-unknown"});
+      if (!b.count) rect.setAttribute("height", b.complete ? "0" : "2");
       const title = document.createElementNS(ns, "title");
-      title.textContent = `${utcInput(b.a)}Z – ${utcInput(b.b)}Z: ${b.count} observed ${unit}; ${number(b.rate)} / hour`;
-      rect.appendChild(title); svg.appendChild(rect);
+      title.textContent = `${utcInput(b.a)}Z – ${utcInput(b.b)}Z: ${b.count} observed ${unit}; ${number(b.rate)} / hour; coverage ${pct(b)}%` +
+        (b.b - b.a < bin ? " (shorter final bin)" : "");
+      rect.appendChild(title);
+      // A transparent full-height target so a hover over an empty bin still shows its values.
+      const hit = node("rect", {x: L + i * slot, y: T, width: slot, height: plotH, class: "cf2-metric-hit"});
+      hit.appendChild(title.cloneNode(true));
+      if (showCounts && b.count) node("text", {x: L + (i + .5) * slot, y: T + plotH - height - 3, "text-anchor": "middle", class: "cf2-bar-count"}, String(b.count));
     });
+    const multiDay = span > 86400000, daily = bin >= 86400000;
+    const tick = ms => {
+      const iso = new Date(ms).toISOString();
+      return daily ? iso.slice(5, 10) : multiDay ? `${iso.slice(5, 10)} ${iso.slice(11, 16)}` : iso.slice(11, 16);
+    };
+    const every = Math.max(1, Math.ceil(n / (multiDay && !daily ? 4 : 6)));
+    for (let i = 0; i <= n; i += every) {
+      const x = L + Math.min(i, n) * slot;
+      node("text", {x, y: H - 6, "text-anchor": i === 0 ? "start" : i >= n ? "end" : "middle", class: "cf2-axis-label"}, tick(period[0] + i * bin));
+    }
     output.appendChild(svg);
-    output.appendChild(el("p", "wf-note", `Bar height: observed ${unit} / hour · scale maximum ${number(max)} / hour. Outlined bars have unknown total throughput. Exact values and coverage are below.`));
+    const legend = el("div", "cf2-throughput-legend");
+    legend.append(el("span", "cf2-legend-known", "Full coverage"), el("span", "cf2-legend-unknown", "Incomplete coverage (rate unknown)"),
+      el("span", null, `Bar: ${unit} per ${binName} · UTC`));
+    output.appendChild(legend);
+    if (!total.count) output.appendChild(el("p", "wf-note", `No ${unit} observed in this period. Try a longer period.`));
+
+    // draw() rebuilds this table on every control change; keep it open if it was.
     const details = el("details"); details.dataset.cf2Key = "throughput-bins";
+    details.open = !!state.binsOpen;
     details.appendChild(el("summary", null, `UTC bin values · ${n}`));
     const wrap = el("div", "cf2-throughput-table"), table = el("table");
     const heading = el("tr");
@@ -36895,7 +37021,7 @@ function cflow2Throughput(data, state) {
     for (const b of bins) {
       const row = el("tr");
       for (const value of [`${utcInput(b.a)}Z – ${utcInput(b.b)}Z`, String(b.count), number(b.hours),
-        number(b.rate), `${number(b.covered / (b.hours * 3600000) * 100)}%${b.complete ? "" : " · unknown"}`,
+        number(b.rate), `${pct(b)}%${b.complete ? "" : " · unknown"}`,
         state.metric === "runs" ? `${number(b.duration)} (${b.durationN})` : "—"]) row.appendChild(el("td", null, value));
       table.appendChild(row);
     }
