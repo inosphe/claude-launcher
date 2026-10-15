@@ -59,10 +59,23 @@ async def _screen_text(session) -> str:
     return "\n".join(session.capture())
 
 
+def _on_screen(needle: str, text: str) -> bool:
+    """Whether ``needle`` is on the rendered screen, wrapped rows included.
+
+    A line longer than the terminal is split across rows, and where the split
+    lands depends on how much of the typed text the tty had echoed when the
+    program printed its own line. Rows are trimmed and joined with "\n", so a
+    needle cut by a wrap is not a substring of the text; compare with all
+    whitespace removed as well."""
+    if needle in text:
+        return True
+    return "".join(needle.split()) in "".join(text.split())
+
+
 async def _wait_screen(session, needle: str, timeout: float = 15.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if needle in await _screen_text(session):
+        if _on_screen(needle, await _screen_text(session)):
             return
         await asyncio.sleep(0.1)
     raise AssertionError(
