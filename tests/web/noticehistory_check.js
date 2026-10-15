@@ -29,11 +29,14 @@
    corner strip moves below the panel's head so it does not cover the
    panel's own close button.
 
-   Marks and the All / Marked filter (claunch-knuet): ☆ on a history row marks
-   it ★ without reading it or opening its target; Marked shows only those
+   Marks and the All / Kept filter (claunch-knuet; Kept was labelled Marked
+   before claunch-v995u): ☆ on a history row marks
+   it ★ without reading it or opening its target; Kept shows only those
    rows and All every row again; the filter and the marks survive a reload;
    Clear and the 100-row cap keep marked rows; Clear is only in the All view
-   and the cap gives way rather than drop a marked row (claunch-knuet.1). */
+   and the cap gives way rather than drop a marked row (claunch-knuet.1).
+   Not read (claunch-v995u) shows only the unread rows; a row read there
+   leaves the view, a filter stored as "marked" still opens on Kept. */
 const fs = require("fs");
 const path = require("path");
 const STATIC = path.join(__dirname, "..", "..", "src", "claude_launcher", "web",
@@ -295,7 +298,7 @@ function gotoRec(rec) {
             w.api.noticeHistory.find((e) => e.id === "h2").read === false, w.api.noticeHistory);
   }
 
-  /* --- marks and the All / Marked filter (claunch-knuet) --------------- */
+  /* --- marks and the All / Kept filter (claunch-knuet) ----------------- */
   {
     const w = build();
     let opened = 0;
@@ -309,7 +312,9 @@ function gotoRec(rec) {
     const head = () => w.nodes["notice-panel-body"].children
       .find((c) => c.classList.contains("notice-panel-section-row"));
     check("the filter starts at All", w.press(head(), "All").classList.contains("active") &&
-            !w.press(head(), "Marked").classList.contains("active"), head().text());
+            !w.press(head(), "Kept").classList.contains("active") &&
+            !w.press(head(), "Not read").classList.contains("active") &&
+            !w.press(head(), "Marked"), head().text());
     check("each row has an unmarked ☆", w.panelRows().every((r) => r.querySelector(".notice-star").textContent === "☆"),
           w.panel());
     w.press(rowOf("two"), "☆").click();
@@ -320,12 +325,12 @@ function gotoRec(rec) {
             w.loc.hash === "" && w.badge() === "3", [entry("two"), opened, w.badge()]);
     check("and the mark is stored",
           JSON.parse(w.storage.getItem("claunch.noticeHistory")).find((e) => e.title === "two").marked === true);
-    w.press(head(), "Marked").click();
-    check("Marked shows only the marked rows",
+    w.press(head(), "Kept").click();
+    check("Kept shows only the marked rows",
           w.panelRows().length === 1 && rowOf("two") && /History \(1\)/.test(w.panel()) &&
-            w.press(head(), "Marked").classList.contains("active"), w.panel());
+            w.press(head(), "Kept").classList.contains("active"), w.panel());
     check("and the choice is stored", JSON.parse(w.storage.getItem("claunch.noticeFilter")) === "marked");
-    check("Marked offers no Clear, which would forget rows it hides (claunch-knuet.1)",
+    check("Kept offers no Clear, which would forget rows it hides (claunch-knuet.1)",
           !w.press(head(), "Clear"), head().text());
     check("Mark all read there reads only what it shows", (() => {
       w.press(head(), "Mark all read").click();
@@ -336,9 +341,9 @@ function gotoRec(rec) {
     check("a reload keeps the filter and the mark",
           second.panelRows().length === 1 && /two/.test(second.panel()), second.panel());
     w.press(rowOf("two"), "★").click();
-    check("★ unmarks it, and Marked says it is empty",
+    check("★ unmarks it, and Kept says it is empty",
           entry("two").marked === false && w.panelRows().length === 0 &&
-            /no row is marked/.test(w.panel()), w.panel());
+            /no row is kept/.test(w.panel()), w.panel());
     w.press(head(), "All").click();
     check("All shows every row again", w.panelRows().length === 3, w.panel());
     w.press(rowOf("three"), "☆").click();
@@ -346,6 +351,66 @@ function gotoRec(rec) {
     check("Clear keeps the marked row",
           w.api.noticeHistory.length === 1 && entry("three").marked === true, w.api.noticeHistory);
     check("and offers nothing more to clear", !w.press(head(), "Clear"), w.panel());
+  }
+  /* --- the Not read filter (claunch-v995u) ---------------------------- */
+  {
+    const w = build();
+    w.api.notify("one", "a", { key: "k1", sticky: true });
+    w.api.notify("two", "b", { key: "k2", sticky: true });
+    w.api.notify("three", "c", { key: "k3", sticky: true });
+    w.api.noticePanelToggle(true);
+    const rowOf = (t) => w.panelRows().find((r) => r.querySelector(".notice-title").textContent === t);
+    const entry = (t) => w.api.noticeHistory.find((e) => e.title === t);
+    const head = () => w.nodes["notice-panel-body"].children
+      .find((c) => c.classList.contains("notice-panel-section-row"));
+    rowOf("one").click();
+    w.press(rowOf("three"), "☆").click();
+    check("Not read sits after Kept in the filter", (() => {
+      const labels = head().children.find((c) => c.classList.contains("notice-filter"))
+        .children.map((b) => b.textContent);
+      return labels.join(",") === "All,Kept,Not read";
+    })(), head().text());
+    w.press(head(), "Not read").click();
+    check("Not read shows only the unread rows",
+          w.panelRows().length === 2 && rowOf("two") && rowOf("three") && !rowOf("one") &&
+            /History \(2\)/.test(w.panel()) &&
+            w.press(head(), "Not read").classList.contains("active"), w.panel());
+    check("and the choice is stored", JSON.parse(w.storage.getItem("claunch.noticeFilter")) === "unread");
+    check("Not read offers no Clear, which would forget rows it hides",
+          !w.press(head(), "Clear"), head().text());
+    w.press(rowOf("two"), "Mark read").click();
+    check("a row read there leaves the view", entry("two").read === true &&
+            w.panelRows().length === 1 && rowOf("three"), w.panel());
+    const second = build({ storage: w.storage });
+    second.api.noticePanelToggle(true);
+    check("a reload keeps the Not read filter",
+          second.panelRows().length === 1 && /three/.test(second.panel()), second.panel());
+    w.press(head(), "Mark all read").click();
+    check("Mark all read empties it and it says so",
+          entry("three").read === true && w.panelRows().length === 0 &&
+            /every row has been read/.test(w.panel()) && w.badge() === "", [w.panel(), w.badge()]);
+    w.press(head(), "All").click();
+    check("All shows the read rows again", w.panelRows().length === 3, w.panel());
+  }
+  {
+    /* A filter stored before the relabel ("marked") opens on Kept; an
+       unknown value falls back to All. */
+    const storage = build().storage;
+    storage.setItem("claunch.noticeFilter", JSON.stringify("marked"));
+    const w = build({ storage });
+    w.api.notify("one", "a", { key: "k1" });
+    w.api.noticePanelToggle(true);
+    const head = () => w.nodes["notice-panel-body"].children
+      .find((c) => c.classList.contains("notice-panel-section-row"));
+    check("a stored \"marked\" filter opens on Kept",
+          w.press(head(), "Kept").classList.contains("active"), head().text());
+    storage.setItem("claunch.noticeFilter", JSON.stringify("bogus"));
+    const v = build({ storage });
+    v.api.noticePanelToggle(true);
+    const vhead = v.nodes["notice-panel-body"].children
+      .find((c) => c.classList.contains("notice-panel-section-row"));
+    check("an unknown stored filter falls back to All",
+          v.press(vhead, "All").classList.contains("active"), vhead.text());
   }
   {
     const w = build();

@@ -46262,8 +46262,9 @@ function gateSessionLink(name) {
    (claunch-x76l8). Opening the panel no longer reads everything.
 
    A row can also be marked (★, claunch-knuet), apart from read: the History
-   head's All / Marked filter shows every row or only the marked ones, and a
-   marked row outlives the 100-row cap and Clear.
+   head's All / Kept / Not read filter shows every row, only the marked ones
+   or only the unread ones (claunch-v995u; Kept was labelled Marked before),
+   and a marked row outlives the 100-row cap and Clear.
 
    Kept in this browser's localStorage (claunch-l978l): the history with each
    row's read and marked flags, the hidden request ids and the filter. When the panel was last opened
@@ -46337,8 +46338,16 @@ const gateHiddenIds = new Set(
     return Array.isArray(saved) ? saved.filter((k) => typeof k === "string") : [];
   })()
 );
-/* The History filter: "all" or "marked". */
-let noticeFilter = noticeLoad(NOTICE_FILTER_KEY, "all") === "marked" ? "marked" : "all";
+/* The History filter: "all", "marked" (labelled Kept) or "unread" (Not read).
+   The stored values keep their names, so a filter saved before the relabel
+   still applies. */
+const NOTICE_FILTERS = ["all", "marked", "unread"];
+
+function noticeFilterOf(value) {
+  return NOTICE_FILTERS.includes(value) ? value : "all";
+}
+
+let noticeFilter = noticeFilterOf(noticeLoad(NOTICE_FILTER_KEY, "all"));
 /* The pending requests of each gate as its last poll answered them. */
 const gatePending = { restart: [], goto: [], reposync: [], ask: [] };
 
@@ -46387,7 +46396,7 @@ function noticeMarkStar(id, marked) {
 }
 
 function noticeFilterSet(filter) {
-  noticeFilter = filter === "marked" ? "marked" : "all";
+  noticeFilter = noticeFilterOf(filter);
   noticeSave(NOTICE_FILTER_KEY, noticeFilter);
   noticePanelPaint();
 }
@@ -46739,8 +46748,8 @@ function noticePanelHistoryRow(entry) {
   const head = el("div", "notice-row-head");
   head.appendChild(noticePanelButton(
     entry.marked ? "★" : "☆", "notice-star" + (entry.marked ? " on" : ""),
-    entry.marked ? "unmark: it leaves the Marked filter and can be cleared"
-      : "mark: it shows under Marked and survives Clear",
+    entry.marked ? "unmark: it leaves the Kept filter and can be cleared"
+      : "keep: it shows under Kept and survives Clear",
     () => noticeMarkStar(entry.id, !entry.marked)
   ));
   head.appendChild(el("span", "notice-title", entry.title || ""));
@@ -46795,13 +46804,16 @@ function noticePanelPaint() {
 
   const past = noticeHistory.filter((e) => !(e.gate && e.status === "pending"));
   const markedCount = past.filter((e) => e.marked).length;
-  const shown = noticeFilter === "marked" ? past.filter((e) => e.marked) : past;
+  const unreadCount = past.filter(noticeUnread).length;
+  const shown = noticeFilter === "marked" ? past.filter((e) => e.marked)
+    : noticeFilter === "unread" ? past.filter(noticeUnread) : past;
   const sectionHead = el("div", "notice-panel-section-row");
   sectionHead.appendChild(el("h3", "notice-panel-section", `History (${shown.length})`));
   const filters = el("div", "notice-filter");
   for (const [name, label, title] of [
     ["all", "All", `every row (${past.length})`],
-    ["marked", "Marked", `only the ★ rows (${markedCount})`],
+    ["marked", "Kept", `only the ★ rows (${markedCount})`],
+    ["unread", "Not read", `only the unread rows (${unreadCount})`],
   ]) {
     filters.appendChild(noticePanelButton(
       label, noticeFilter === name ? "active" : "", title, () => noticeFilterSet(name)
@@ -46815,8 +46827,8 @@ function noticePanelPaint() {
       () => noticeMarkRead(unreadIds, true)
     ));
   }
-  // Clear only in the All view: in Marked it would forget rows the view
-  // does not show (claunch-knuet.1).
+  // Clear only in the All view: in Kept or Not read it would forget rows
+  // the view does not show (claunch-knuet.1).
   if (noticeFilter === "all" && past.length > markedCount) {
     sectionHead.appendChild(noticePanelButton(
       "Clear", "clear",
@@ -46835,7 +46847,8 @@ function noticePanelPaint() {
   body.appendChild(sectionHead);
   if (!shown.length) {
     body.appendChild(el("p", "wf-note", noticeFilter === "marked"
-      ? "no row is marked — ☆ on a row keeps it here"
+      ? "no row is kept — ☆ on a row keeps it here"
+      : noticeFilter === "unread" ? "every row has been read"
       : "nothing has been shown in this browser yet"));
   }
   for (const entry of shown) body.appendChild(noticePanelHistoryRow(entry));
