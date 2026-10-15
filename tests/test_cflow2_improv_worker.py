@@ -469,7 +469,10 @@ def test_landing_queue_item_records_who_passed_the_review():
     """claunch-n74fs.1: the leader's landing queue row must carry whether the
     peer-review pass was a real review (the responder's handle) or a 0-answer
     take ("unanswered"), so an unanswered pass is never read as reviewed.
-    The expression is safe when peer-review never ran: it evaluates to None."""
+    The expression is safe when peer-review never ran: it evaluates to None.
+    The field must also be declared in the landing-queue item schema —
+    apply_push rejects unknown fields, so a push-side-only change would fail
+    every landing request at the leave trigger."""
     chart = _chart()
     node = next(n for n in chart.nodes.values() if n.label == "integration-request")
     pushes = [t for t in node.get("triggers") or []
@@ -479,6 +482,20 @@ def test_landing_queue_item_records_who_passed_the_review():
     for t in pushes:
         item = (t.get("push") or {}).get("item") or {}
         assert item.get("review") == "$result['peer-review'].value.by"
+    # ...and the declared schema accepts it — apply_push rejects unknown
+    # fields, so a push-side-only change would fail every landing request.
+    from claude_launcher.cflow2 import collections as col_mod
+    head = "cflow: 2\nname: t\ninclude: [improv-common]\nnodes:\n  a: {prompt: a}\nbody: a\n"
+    resolve = layers.resolver(None)
+    chart2 = compile_text(head + "collections:\n  landing: {type: landing-queue, "
+                          "env: {TARGET: master}}\n", source="t.yaml",
+                          resolve_include=resolve)
+    spec = chart2.meta["collections"]["landing"]
+    state = {"kind": "queue", "items": [], "seq": 0}
+    col_mod.apply_push(state, spec, {"issue": "x-1", "branch": "b", "tip": "t" * 40,
+                                     "requested_by": "w", "review": "unanswered"},
+                       principal="child", by="w", now=1.0)
+    assert state["items"][0]["review"] == "unanswered"
 
 
 def test_landing_queue_and_signals_types():
