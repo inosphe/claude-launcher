@@ -156,6 +156,38 @@ def test_history_lists_every_sessions_threads(tmp_path):
     run(tmp_path, scenario)
 
 
+def test_index_lists_threads_without_messages_grouped_by_session(tmp_path, monkeypatch):
+    clock = iter(f"2026-10-15T10:{m:02d}:00+00:00" for m in range(60))
+    monkeypatch.setattr(S, "_now", lambda: next(clock))
+
+    async def scenario(req, mgr):
+        one = (await req("POST", "/api/threads", {"to": "s1", "title": "one", "text": "hi"}))["thread"]["id"]
+        two = (await req("POST", "/api/threads", {"session": "s2", "title": "two", "text": "fyi\nmore"}))["thread"]["id"]
+        three = (await req("POST", "/api/threads", {"to": "s1", "title": "three", "text": "x"}))["thread"]["id"]
+        await req("POST", f"/api/threads/{one}/messages", {"text": "again"})   # one is now the newest
+        ix = await req("GET", "/api/threads/index")
+        assert [t["id"] for t in ix["threads"]] == [one, three, two]
+        assert ix["total"] == 3 and ix["truncated"] is False
+        first = ix["threads"][0]
+        assert first["messages"] == 2 and first["excerpt"] == "again" and "last" not in first
+        assert ix["threads"][2]["excerpt"] == "fyi"
+        assert [(g["session"], g["threads"], g["open"]) for g in ix["sessions"]] == [("s1", 2, 2), ("s2", 1, 1)]
+        await req("POST", f"/api/threads/{three}/close", {})
+        assert [s["session"] for s in ix["all_sessions"]] == ["s1", "s2"]
+        ix = await req("GET", "/api/threads/index?status=open&session=s1")
+        assert [t["id"] for t in ix["threads"]] == [one]
+        # The filter narrows the threads and their groups, never the session list it picks from.
+        assert [g["session"] for g in ix["sessions"]] == ["s1"]
+        assert {s["session"]: s["threads"] for s in ix["all_sessions"]} == {"s1": 2, "s2": 1}
+        closed = await req("GET", "/api/threads/index?status=closed")
+        assert [t["id"] for t in closed["threads"]] == [three]
+        assert [(g["session"], g["threads"], g["open"]) for g in closed["sessions"]] == [("s1", 1, 0)]
+        assert {s["session"] for s in closed["all_sessions"]} == {"s1", "s2"}
+        await req("GET", "/api/threads/index?status=nope", status=400)
+        assert mgr.sessions["s2"].delivered == []
+    run(tmp_path, scenario)
+
+
 def test_a_held_session_is_woken_and_an_exited_one_keeps_the_message(tmp_path):
     async def scenario(req, mgr):
         tid = (await req("POST", "/api/threads", {"to": "s1", "title": "t"}))["thread"]["id"]

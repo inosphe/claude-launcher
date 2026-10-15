@@ -221,6 +221,11 @@ check("the detail query is not part of the page",
       ctx.parseHash("#/operator?detail=coder2").page === "operator" &&
       ctx.parseHash("#/s/coder2?detail=coder3").name === "coder2",
       ctx.parseHash("#/s/coder2?detail=coder3"));
+check("the threads page carries its view mode and thread (claunch-zny1o)",
+      JSON.stringify(ctx.parseHash("#/threads")) === JSON.stringify({ page: "threads", view: "", id: "" }) &&
+      JSON.stringify(ctx.parseHash("#/threads/tree/th-1")) === JSON.stringify({ page: "threads", view: "tree", id: "th-1" }) &&
+      ctx.parseHash("#/threads/newest").view === "newest",
+      ctx.parseHash("#/threads/tree/th-1"));
 check("no session page in the router",
       !["#/s/a/info", "#/s/a", "#/", "#/flows"].some((h) => ctx.parseHash(h).page === "session"));
 

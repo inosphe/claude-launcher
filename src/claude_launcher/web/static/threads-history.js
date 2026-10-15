@@ -1,11 +1,30 @@
 /* All threads page (#/threads, claunch-8k02k): every session's thread
-   conversations on one screen, most recently active first. The threads pane
-   beside a terminal shows one session's threads; this page reads the same
-   store (GET /api/threads/history) across sessions, a page of threads at a
-   time, so older conversations sit behind the pager instead of all loading
-   at once. Read-only: writing stays in the session's threads pane. */
+   conversations on one screen. The threads pane beside a terminal shows one
+   session's threads; this page reads the same store across sessions.
+   Read-only: writing stays in the session's threads pane.
+
+   Three view modes (claunch-zny1o), each its own route:
+   - tree   (#/threads, #/threads/tree/<thread>): a list panel of sessions,
+     each with its threads under it; the thread picked shows on the right.
+   - newest (#/threads/newest): the list panel lists every thread, most
+     recently active first, and the right side shows only the newest one.
+   - feed   (#/threads/feed): every thread with its conversation as cards,
+     a page at a time (GET /api/threads/history).
+   tree and newest read the list from GET /api/threads/index (no message
+   bodies) and one conversation from GET /api/threads/<id>, which reads
+   without moving any read position. */
 (() => {
-  const state = { open: false, page: 1, session: "", status: "", data: null, error: "", seq: 0 };
+  const VIEWS = [
+    ["tree", "Sessions › threads", "Sessions with their threads in a list panel; pick a thread to read it."],
+    ["newest", "Newest thread", "Only the most recently active thread, with the thread list beside it."],
+    ["feed", "Feed", "Every thread with its conversation, most recently active first, a page at a time."],
+  ];
+  const isView = (v) => VIEWS.some(([name]) => name === v);
+  const state = {
+    open: false, view: "tree", selected: "", page: 1, session: "", status: "",
+    data: null, index: null, detail: null, error: "", detailError: "",
+    collapsed: new Set(), seq: 0, detailSeq: 0,
+  };
   const node = (tag, cls, text) => {
     const value = document.createElement(tag);
     if (cls) value.className = cls;
@@ -23,21 +42,60 @@
     box.textContent = text;
     return box;
   };
-
-  async function load() {
-    const seq = ++state.seq;
-    const q = new URLSearchParams({ page: String(state.page) });
+  const route = (view, id) => "#/threads/" + view + (id ? "/" + encodeURIComponent(id) : "");
+  // Moving between modes and threads goes through the address, so Back and a
+  // shared link land on the same view; app.js's router calls open() again.
+  function go(view, id) {
+    const hash = route(view, id);
+    if (globalThis.location && globalThis.location.hash !== hash) globalThis.location.hash = hash;
+    else open(view, id);
+  }
+  const filters = () => {
+    const q = new URLSearchParams();
     if (state.session) q.set("session", state.session);
     if (state.status) q.set("status", state.status);
+    return q;
+  };
+  // The thread the right side shows: the picked one in tree, the newest in newest.
+  const target = () => (state.view === "newest"
+    ? ((state.index && state.index.threads[0]) || {}).id || ""
+    : state.selected);
+
+  async function fetchJson(url) {
+    const resp = await globalThis.api(url);
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    return data;
+  }
+
+  async function load() {
+    if (state.view === "feed") return loadFeed();
+    const seq = ++state.seq;
+    const q = filters();
     try {
-      const resp = await globalThis.api(`/api/threads/history?${q}`);
-      const data = await resp.json();
-      if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+      const data = await fetchJson("/api/threads/index" + (q.toString() ? `?${q}` : ""));
+      if (seq !== state.seq || !state.open) return;
+      state.index = data;
+      state.error = "";
+    } catch (error) {
+      if (seq !== state.seq) return;
+      state.error = error.message || String(error);
+    }
+    if (!state.open) return;
+    render();
+    return loadDetail();
+  }
+
+  async function loadFeed() {
+    const seq = ++state.seq;
+    const q = new URLSearchParams([["page", String(state.page)], ...filters()]);
+    try {
+      const data = await fetchJson(`/api/threads/history?${q}`);
       if (seq !== state.seq || !state.open) return;
       state.data = data;
       state.error = "";
       // A filter can shrink the result under the page we were on.
-      if (data.page > data.pages) { state.page = data.pages; return load(); }
+      if (data.page > data.pages) { state.page = data.pages; return loadFeed(); }
     } catch (error) {
       if (seq !== state.seq) return;
       state.error = error.message || String(error);
@@ -45,27 +103,65 @@
     if (state.open) render();
   }
 
-  function go(page) {
-    state.page = Math.max(1, page);
+  async function loadDetail() {
+    const id = target();
+    const seq = ++state.detailSeq;
+    if (!id) { state.detail = null; state.detailError = ""; if (state.open) render(); return; }
+    if (state.detail && state.detail.thread.id !== id) state.detail = null;
+    try {
+      const data = await fetchJson(`/api/threads/${encodeURIComponent(id)}`);
+      if (seq !== state.detailSeq || !state.open) return;
+      state.detail = data;
+      state.detailError = "";
+    } catch (error) {
+      if (seq !== state.detailSeq) return;
+      state.detail = null;
+      state.detailError = error.message || String(error);
+    }
+    if (state.open) render();
+  }
+
+  function refilter() {
+    state.page = 1;
     load();
   }
 
-  function controls(data) {
+  function modes() {
+    const bar = node("div", "thh-modes");
+    bar.setAttribute?.("role", "tablist");
+    for (const [name, label] of VIEWS) {
+      const tab = node("button", "thh-mode" + (state.view === name ? " active" : ""), label);
+      tab.type = "button";
+      tab.dataset.view = name;
+      tab.setAttribute?.("role", "tab");
+      tab.setAttribute?.("aria-selected", String(state.view === name));
+      tab.addEventListener("click", () => go(name, name === "tree" ? state.selected : ""));
+      bar.append(tab);
+    }
+    return bar;
+  }
+
+  function controls() {
     const bar = node("div", "stats-controls thh-controls");
-    bar.append(node("h2", "", "Threads"));
+    bar.append(node("h2", "", "Threads"), modes());
     const who = node("select", "thh-session");
     who.append(new Option("all sessions", ""));
-    for (const s of (data && data.sessions) || []) {
+    // Every session with threads, whatever the filters keep: picking one
+    // must not take the others out of the list.
+    const all = state.view === "feed"
+      ? state.data && state.data.sessions
+      : state.index && state.index.all_sessions;
+    for (const s of all || []) {
       who.append(new Option(`${s.session} (${s.threads})`, s.session));
     }
     who.value = state.session;
-    who.addEventListener("change", () => { state.session = who.value; go(1); });
+    who.addEventListener("change", () => { state.session = who.value; refilter(); });
     const status = node("select", "thh-status");
     for (const [v, label] of [["", "open + closed"], ["open", "open"], ["closed", "closed"]]) {
       status.append(new Option(label, v));
     }
     status.value = state.status;
-    status.addEventListener("change", () => { state.status = status.value; go(1); });
+    status.addEventListener("change", () => { state.status = status.value; refilter(); });
     const reload = node("button", "wf-btn clear", "Refresh");
     reload.type = "button";
     reload.addEventListener("click", load);
@@ -78,23 +174,37 @@
     const prev = node("button", "wf-btn clear", "← newer");
     prev.type = "button";
     prev.disabled = data.page <= 1;
-    prev.addEventListener("click", () => go(data.page - 1));
+    prev.addEventListener("click", () => { state.page = Math.max(1, data.page - 1); loadFeed(); });
     const next = node("button", "wf-btn clear", "older →");
     next.type = "button";
     next.disabled = data.page >= data.pages;
-    next.addEventListener("click", () => go(data.page + 1));
+    next.addEventListener("click", () => { state.page = data.page + 1; loadFeed(); });
     nav.append(prev, node("span", "wf-note", `page ${data.page} / ${data.pages} · ${data.total} threads`), next);
     return nav;
+  }
+
+  function sessionLink(session) {
+    const sess = node("a", "thh-sess", session);
+    sess.href = "#/s/" + encodeURIComponent(session);
+    sess.title = "open this session";
+    return sess;
+  }
+
+  function message(m, session) {
+    const msg = node("div", `thh-msg thh-${m.author}`);
+    msg.dataset.seq = m.seq;
+    const meta = node("div", "thh-meta");
+    meta.append(node("span", "thh-who", m.author === "user" ? "user" : session),
+      node("span", "thh-at", when(m.at)));
+    msg.append(meta, body(node("div", "thh-body"), m.body));
+    return msg;
   }
 
   function card(t) {
     const box = node("section", "window-section thh-thread");
     box.dataset.thread = t.id;
     const head = node("div", "thh-head");
-    const sess = node("a", "thh-sess", t.session);
-    sess.href = "#/s/" + encodeURIComponent(t.session);
-    sess.title = "open this session";
-    head.append(sess, node("strong", "thh-title", t.title),
+    head.append(sessionLink(t.session), node("strong", "thh-title", t.title),
       node("span", `thh-state thh-${t.status}`, t.status),
       node("span", "wf-note thh-when", when(t.updated_at)));
     box.append(head);
@@ -102,14 +212,92 @@
       box.append(node("p", "wf-note", `${t.omitted} older message(s) not shown — the session's threads pane has the whole thread.`));
     }
     if (!t.messages.length) box.append(node("p", "wf-note", "no messages yet"));
-    for (const m of t.messages) {
-      const msg = node("div", `thh-msg thh-${m.author}`);
-      msg.dataset.seq = m.seq;
-      const meta = node("div", "thh-meta");
-      meta.append(node("span", "thh-who", m.author === "user" ? "user" : t.session),
-        node("span", "thh-at", when(m.at)));
-      msg.append(meta, body(node("div", "thh-body"), m.body));
-      box.append(msg);
+    for (const m of t.messages) box.append(message(m, t.session));
+    return box;
+  }
+
+  // One thread row of the list panel. In tree it picks that thread; in
+  // newest the list is there to read, and a row opens the thread in tree.
+  function threadRow(t, { withSession = false, newest = false } = {}) {
+    const row = node("button", "thh-row thh-trow" + (t.id === target() ? " active" : ""));
+    row.type = "button";
+    row.dataset.thread = t.id;
+    const line = node("div", "thh-rowline");
+    if (newest) line.append(node("span", "thh-badge", "newest"));
+    if (withSession) line.append(node("span", "thh-sess", t.session));
+    line.append(node("span", "thh-title", t.title), node("span", `thh-state thh-${t.status}`, t.status));
+    row.append(line);
+    const sub = node("div", "thh-rowsub wf-note");
+    sub.append(node("span", "thh-excerpt", t.excerpt || "no messages yet"),
+      node("span", "thh-when", when(t.updated_at)));
+    row.append(sub);
+    row.addEventListener("click", () => go("tree", t.id));
+    return row;
+  }
+
+  function treeList(index) {
+    const list = node("nav", "thh-list thh-tree");
+    const bySession = new Map(index.sessions.map(s => [s.session, []]));
+    for (const t of index.threads) bySession.get(t.session)?.push(t);
+    for (const s of index.sessions) {
+      const group = node("div", "thh-group");
+      group.dataset.session = s.session;
+      const shut = state.collapsed.has(s.session);
+      const head = node("button", "thh-row thh-srow" + (shut ? " collapsed" : ""));
+      head.type = "button";
+      head.setAttribute?.("aria-expanded", String(!shut));
+      head.append(node("span", "thh-caret", shut ? "▸" : "▾"), node("span", "thh-sess", s.session),
+        node("span", "wf-note thh-count", `${s.threads} thread(s) · ${s.open} open`));
+      head.addEventListener("click", () => {
+        if (state.collapsed.has(s.session)) state.collapsed.delete(s.session);
+        else state.collapsed.add(s.session);
+        render();
+      });
+      group.append(head);
+      if (!shut) {
+        const kids = node("div", "thh-kids");
+        for (const t of bySession.get(s.session) || []) kids.append(threadRow(t));
+        group.append(kids);
+      }
+      list.append(group);
+    }
+    return list;
+  }
+
+  function flatList(index) {
+    const list = node("nav", "thh-list thh-flat");
+    index.threads.forEach((t, i) => list.append(threadRow(t, { withSession: true, newest: i === 0 })));
+    return list;
+  }
+
+  function detail() {
+    const box = node("section", "thh-detail");
+    const id = target();
+    if (state.detailError) box.append(node("p", "wf-warning", state.detailError));
+    if (!id) {
+      box.append(node("p", "wf-note", state.view === "newest"
+        ? "No threads." : "Pick a thread in the list to read it."));
+      return box;
+    }
+    const d = state.detail;
+    if (!d || d.thread.id !== id) {
+      if (!state.detailError) box.append(node("p", "wf-note", "Loading…"));
+      return box;
+    }
+    const t = d.thread;
+    box.dataset.thread = t.id;
+    const head = node("div", "thh-head");
+    if (state.view === "newest") head.append(node("span", "thh-badge", "newest"));
+    head.append(sessionLink(t.session), node("strong", "thh-title", t.title),
+      node("span", `thh-state thh-${t.status}`, t.status),
+      node("span", "wf-note thh-when", when(t.updated_at)));
+    box.append(head);
+    const msgs = node("div", "thh-msgs");
+    if (!d.messages.length) msgs.append(node("p", "wf-note", "no messages yet"));
+    for (const m of d.messages) msgs.append(message(m, t.session));
+    box.append(msgs);
+    if (d.more) {
+      box.append(node("p", "wf-note", "Later messages not shown — the session's threads pane has the whole thread."));
     }
     return box;
   }
@@ -117,11 +305,25 @@
   function render() {
     const view = document.getElementById("threads-view");
     if (!view) return;
-    const data = state.data;
-    view.replaceChildren(controls(data));
-    view.append(node("p", "wf-note",
-      "Every session's thread conversations, most recently active first. Reply from the session's threads pane."));
+    view.replaceChildren(controls());
+    const [, , note] = VIEWS.find(([name]) => name === state.view);
+    view.append(node("p", "wf-note thh-modenote",
+      note + " Reply from the session's threads pane."));
     if (state.error) view.append(node("p", "wf-warning", state.error));
+    if (state.view === "feed") return renderFeed(view);
+    const index = state.index;
+    if (!index) { view.append(node("p", "wf-note", "Loading…")); return; }
+    if (!index.threads.length) { view.append(node("p", "wf-note", "No threads.")); return; }
+    if (index.truncated) {
+      view.append(node("p", "wf-note", `Showing the ${index.threads.length} most recent of ${index.total} threads.`));
+    }
+    const split = node("div", `thh-split thh-split-${state.view}`);
+    split.append(state.view === "tree" ? treeList(index) : flatList(index), detail());
+    view.append(split);
+  }
+
+  function renderFeed(view) {
+    const data = state.data;
     if (!data) { view.append(node("p", "wf-note", "Loading…")); return; }
     if (!data.threads.length) {
       view.append(node("p", "wf-note", "No threads."));
@@ -132,12 +334,22 @@
     if (data.pages > 1) view.append(pager(data));
   }
 
-  function open() {
+  function open(view, id) {
+    const next = isView(view) ? view : "tree";
+    const listed = state.open && next !== "feed" && state.view !== "feed" && state.index;
+    state.view = next;
+    state.selected = next === "tree" ? (id || state.selected || "") : state.selected;
     state.open = true;
+    if (listed) {
+      // Same list, another thread or mode: only the right side changes.
+      render();
+      loadDetail();
+      return;
+    }
     render();
     load();
   }
 
   function stop() { state.open = false; }
-  globalThis.ThreadsHistoryPage = { open, stop, load, render, state };
+  globalThis.ThreadsHistoryPage = { open, stop, load, render, state, route };
 })();

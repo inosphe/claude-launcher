@@ -56,6 +56,7 @@ PAGE = 500
 HISTORY_PAGE = 20
 HISTORY_MAX_PAGE = 100
 HISTORY_MESSAGES = 200
+INDEX_MAX = 2000
 RAIL_REPLIES = 5
 RAIL_EXCERPT = 160
 
@@ -418,6 +419,53 @@ class ThreadStore:
             "pages": max(1, -(-total // per_page)),
             "sessions": sessions,
         }
+
+    def index(self, *, session=None, status=None) -> dict:
+        """Every session's threads without their conversations, most recently
+        active first, for the threads page's list panel (claunch-zny1o): each
+        thread's row with ``messages`` (its message count) and ``excerpt``
+        (the first line of its last message) instead of the messages.
+        ``sessions`` groups them by session (threads, open, the latest
+        ``updated_at``), most recently active first. ``all_sessions`` is every
+        session that has threads whatever the filters say (as ``history``
+        lists them), for the page's session filter. At most ``INDEX_MAX``
+        threads; ``truncated`` says the rest were left out."""
+        if status not in (None, "", "open", "closed"):
+            raise ThreadError("status is open or closed")
+        where, args = [], []
+        if session:
+            where.append("t.session = ?")
+            args.append(str(session))
+        if status:
+            where.append("t.status = ?")
+            args.append(status)
+        cond = (" WHERE " + " AND ".join(where)) if where else ""
+        with self._connect() as db:
+            total = int(db.execute("SELECT COUNT(*) FROM threads t" + cond, args).fetchone()[0])
+            rows = db.execute(
+                "SELECT t.*,"
+                " (SELECT COUNT(*) FROM messages m WHERE m.thread = t.id) AS n,"
+                " (SELECT COUNT(*) FROM messages m WHERE m.thread = t.id AND m.author = 'user'"
+                "  AND m.seq > t.agent_read) AS unread,"
+                " (SELECT body FROM messages m WHERE m.thread = t.id ORDER BY m.seq DESC LIMIT 1) AS last_body"
+                " FROM threads t" + cond + " ORDER BY t.updated_at DESC, t.id LIMIT ?",
+                (*args, INDEX_MAX),
+            ).fetchall()
+            every = [{"session": r["session"], "threads": int(r["n"])} for r in db.execute(
+                "SELECT session, COUNT(*) AS n FROM threads GROUP BY session ORDER BY MAX(updated_at) DESC, session")]
+        threads, groups = [], {}
+        for r in rows:
+            t = _thread(r, int(r["unread"]))
+            del t["last"]
+            t["messages"] = int(r["n"])
+            t["excerpt"] = _excerpt(r["last_body"]) if r["last_body"] else ""
+            threads.append(t)
+            g = groups.setdefault(t["session"], {"session": t["session"], "threads": 0, "open": 0,
+                                                 "updated_at": t["updated_at"]})
+            g["threads"] += 1
+            g["open"] += t["status"] == "open"
+        return {"threads": threads, "sessions": list(groups.values()), "all_sessions": every,
+                "total": total, "truncated": total > len(threads)}
 
     def rail(self) -> dict:
         """Per session with threads: how many are open, the seq of the

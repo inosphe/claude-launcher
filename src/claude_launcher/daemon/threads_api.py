@@ -222,6 +222,12 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
                               session=q.get("session") or None, status=q.get("status") or None)
         return err or web.json_response(res)
 
+    async def h_index(request):
+        q = request.query
+        res, err = await call(threads.index, session=q.get("session") or None,
+                              status=q.get("status") or None)
+        return err or web.json_response(res)
+
     async def h_open(request):
         body = await body_of(request)
         actor = actor_of(body)
@@ -299,6 +305,7 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
     r.add_get("/api/threads", h_list)
     r.add_get("/api/threads/rail", h_rail)
     r.add_get("/api/threads/history", h_history)
+    r.add_get("/api/threads/index", h_index)
     r.add_post("/api/threads", h_open)
     r.add_get("/api/threads/{id}", h_read)
     r.add_post("/api/threads/{id}/messages", h_post)
