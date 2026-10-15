@@ -21217,7 +21217,7 @@ function parseHash(h) {
     : { page: "beads", id: parts[1] || "" };
   if (parts[0] === "reports") return { page: "beads", section: "reports" };
   if (parts[0] === "worktrees") return { page: "worktrees" };
-  if (parts[0] === "threads") return { page: "threads" };
+  if (parts[0] === "threads") return { page: "threads", view: parts[1] || "", id: parts[2] || "" };
   if (parts[0] === "glossary") return { page: "glossary" };
   if (parts[0] === "sims") return { page: "sims", id: parts[1] || "", section: parts[2] || "" };
   if (parts[0] === "spec") return { page: "spec" };
@@ -21368,7 +21368,7 @@ function route() {
     case "workspaces": openSettings("workspaces"); break;
     case "beads": openBeads(r.id, r.section); break;
     case "worktrees": showView("worktrees"); globalThis.WorktreesPage.open(); break;
-    case "threads": showView("threads"); globalThis.ThreadsHistoryPage.open(); break;
+    case "threads": showView("threads"); globalThis.ThreadsHistoryPage.open(r.view, r.id); break;
     case "glossary": showView("glossary"); globalThis.GlossaryPage.open(); break;
     case "sims": showView("sims"); globalThis.SimPage.open(r.id, r.section); break;
     case "spec": showView("spec"); globalThis.SpecPage.open(); break;
