@@ -98,14 +98,17 @@ def spawn(
     cwd: str,
     cols: int,
     rows: int,
+    name: str = "",
 ) -> PtyHandle:
     """Spawn ``argv`` under a new PTY sized ``cols`` x ``rows``.
 
     In the PTY host when one is installed (:func:`use_host`) and its
-    connection is open; here otherwise."""
+    connection is open; here otherwise. ``name`` is the session's, which the
+    host keeps beside the session: the next daemon matches it to adopt the
+    session after a restart (claunch-xnnct.1)."""
     host = _host
     if host is not None and not host.closed.is_set():
-        return host.spawn(argv, env=env, cwd=cwd, cols=cols, rows=rows)
+        return host.spawn(argv, env=env, cwd=cwd, cols=cols, rows=rows, name=name)
     return spawn_local(argv, env=env, cwd=cwd, cols=cols, rows=rows)
 
 

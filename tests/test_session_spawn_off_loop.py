@@ -75,7 +75,7 @@ def spawns(home, monkeypatch):
     _register_py_harness()
     seen = []
 
-    def fake_spawn(argv, *, env, cwd, cols, rows):
+    def fake_spawn(argv, *, env, cwd, cols, rows, **kw):
         seen.append(threading.get_ident())
         threading.Event().wait(0.3)
         return _Pty()

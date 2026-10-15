@@ -266,7 +266,10 @@ def test_client_going_away_keeps_its_sessions(client, host_dir, tmp_path):
     _read_until(pty, b"echo:one")
     pid = pty.pid
     _detach_all(client)
-    assert pty.read() == b"" and pty.detached and pty.exit_code() is None
+    # The chunks already routed are still read; then EOF, with no exit.
+    while pty.read():
+        pass
+    assert pty.detached and pty.exit_code() is None
     seen = pty.seq
     time.sleep(0.5)
     assert _pid_alive(pid), "the child ended with its client"

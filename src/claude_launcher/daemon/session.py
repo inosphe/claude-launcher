@@ -742,6 +742,7 @@ class Session:
         self._attach(pty_backend.spawn(
             wsl_reg_stub.spawn_argv(argv),
             env=env, cwd=cwd, cols=self.sdef.cols, rows=self.sdef.rows,
+            name=self.sdef.name,
         ))
 
     async def start_async(
@@ -765,6 +766,7 @@ class Session:
             pty_backend.spawn,
             wsl_reg_stub.spawn_argv(argv),
             env=env, cwd=cwd, cols=self.sdef.cols, rows=self.sdef.rows,
+            name=self.sdef.name,
         ))
 
     def adopt(self, handle, replay: bytes, reply: dict, saved: dict) -> None:
