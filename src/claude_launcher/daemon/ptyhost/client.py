@@ -67,6 +67,15 @@ class RemotePty(PtyHandle):
         self.sid = sid
         self.name = name
         self.pid: Optional[int] = None
+        #: The host's count of this session's output up to the last byte
+        #: :meth:`read` returned. Whoever reads also logs (the session's
+        #: reader thread), so after :meth:`detach` it is where the log ends
+        #: and what the next daemon passes to ``attach`` as ``from_seq``.
+        self.seq = 0
+        #: Set by :meth:`detach`: the handle let go of a session that is
+        #: still running in the host. :meth:`read` has returned EOF, and
+        #: nobody may treat that as the child's exit.
+        self.detached = False
         self._out: "queue.Queue[bytes]" = queue.Queue()
         self._exited = threading.Event()
         self._code: Optional[int] = None
@@ -86,7 +95,22 @@ class RemotePty(PtyHandle):
 
     # -- PtyHandle ---------------------------------------------------------
     def read(self) -> bytes:
-        return self._out.get()
+        chunk = self._out.get()
+        self.seq += len(chunk)
+        return chunk
+
+    def detach(self) -> None:
+        """Let go of the session and leave it running in the host.
+
+        No more events are routed here; the chunks already queued are still
+        read, and then :meth:`read` returns EOF. The host keeps what follows
+        in its ring for the next ``attach``.
+        """
+        if self.detached or self._exited.is_set():
+            return
+        self.detached = True
+        self._client._forget(self.sid)
+        self._out.put(b"")
 
     def write(self, data: bytes, writer: object = None) -> None:
         if self._exited.is_set():
@@ -103,7 +127,7 @@ class RemotePty(PtyHandle):
             self._client.send({"op": "resize", "sid": self.sid, "cols": int(cols), "rows": int(rows)})
 
     def isalive(self) -> bool:
-        return not self._exited.is_set()
+        return not self._exited.is_set() and not self.detached
 
     def exit_code(self) -> Optional[int]:
         return self._code if self._exited.is_set() else None
@@ -120,7 +144,9 @@ class RemotePty(PtyHandle):
         if self._closed:
             return
         self._closed = True
-        self._client.send({"op": "close", "sid": self.sid}, quiet=True)
+        if not self.detached:
+            # A detached session is not this handle's to end.
+            self._client.send({"op": "close", "sid": self.sid}, quiet=True)
         self._client._forget(self.sid)
 
 
@@ -188,7 +214,7 @@ class HostClient:
 
     def request(self, header: dict, payload: bytes = b"", *, timeout: float = REQUEST_TIMEOUT) -> dict:
         req_id = next(self._ids)
-        slot = [threading.Event(), None]
+        slot = [threading.Event(), None, b""]
         with self._pending_lock:
             self._pending[req_id] = slot
         try:
@@ -206,6 +232,8 @@ class HostClient:
             raise HostUnavailable("the PTY host connection ended")
         if not reply.get("ok"):
             raise PtyError(str(reply.get("error") or "the PTY host refused the request"))
+        if slot[2]:
+            reply = {**reply, "payload": slot[2]}
         return reply
 
     # -- operations ----------------------------------------------------------
@@ -227,6 +255,39 @@ class HostClient:
             raise
         handle.pid = reply.get("pid")
         return handle
+
+    def attach(self, sid: str, *, name: str = "", from_seq: int = 0) -> "tuple":
+        """Re-attach to a session the host kept: ``(handle, replay, reply)``.
+
+        ``replay`` is the output the host kept from ``from_seq`` on (from the
+        ring's start when ``reply["gap"]`` bytes fell out of it); live output
+        continues in ``handle`` from ``reply["seq"]``. A session that exited
+        while nobody was attached comes back as a handle that has exited,
+        with the host's code.
+        """
+        handle = RemotePty(self, sid, name or sid)
+        # Registered before the request, as in spawn: the host's next output
+        # event for it follows the reply directly.
+        with self._ptys_lock:
+            self._ptys[sid] = handle
+        try:
+            reply = self.request({"op": "attach", "sid": sid, "from_seq": int(from_seq)})
+        except Exception:
+            self._forget(sid)
+            raise
+        handle.pid = reply.get("pid")
+        handle.seq = int(reply.get("seq") or 0)
+        if reply.get("exited"):
+            handle._on_exit(reply.get("code"))
+        return handle, bytes(reply.get("payload") or b""), reply
+
+    def ack_exit(self, sid: str) -> bool:
+        """Drop the host's record of an exit the daemon has now recorded."""
+        return bool(self.request({"op": "ack_exit", "sid": sid}, timeout=5.0).get("acked"))
+
+    def end_all(self, *, timeout: float = 15.0) -> None:
+        """End every session the host holds (attached or not)."""
+        self.request({"op": "end_all"}, timeout=timeout)
 
     def list(self) -> list:
         return list(self.request({"op": "list"}).get("sessions") or [])
@@ -270,6 +331,7 @@ class HostClient:
                         slot = self._pending.get(header.get("id"))
                     if slot is not None:
                         slot[1] = header
+                        slot[2] = payload
                         slot[0].set()
                     continue
                 with self._ptys_lock:

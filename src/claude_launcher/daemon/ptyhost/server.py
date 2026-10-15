@@ -7,12 +7,17 @@ output with its cumulative byte count (``seq``). Sessions are keyed by an
 ``sid`` the client chooses per spawn, so a respawn under the same session
 name can never receive an event of the one it replaced.
 
-One client at a time. While it is connected the host forwards every output
-chunk and the exit as events; a second connection is refused. When the
-client goes away its sessions are ended (stage 1: a daemon exit ends the
-sessions it owned, as it does without a host). With no sessions and no
-client for ``idle_exit`` seconds -- or once its directory is gone -- the host
-exits by itself, so a test home that was removed never leaves one behind.
+One client at a time; a second connection is refused. A session is
+*attached* to the client that spawned it, or that sent ``attach`` for it
+later: the host forwards its output chunks and its exit as events to that
+client only. When the client goes away (a daemon restart, or a daemon that was
+killed) every session is detached and keeps running; its output collects in
+the ring, and an exit is kept until a client acknowledges it (``ack_exit``).
+The next daemon re-attaches with ``attach{sid, from_seq}`` and gets the bytes
+it missed (stage 2, claunch-xnnct.1). Sessions end only when asked:
+``terminate``, ``end_all`` or ``shutdown``. With no sessions and no client
+for ``idle_exit`` seconds -- or once its directory is gone -- the host exits
+by itself, so a test home that was removed never leaves one behind.
 """
 
 from __future__ import annotations
@@ -58,8 +63,13 @@ class HostSession:
         self.pid = pty.pid
         self.ring = bytearray()
         self.seq = 0
+        #: Whether the connected client gets this session's events. Read and
+        #: written under ``_lock``, so an ``attach`` reply and the output
+        #: events around it are ordered by ``seq`` (see :meth:`Host.attach`).
+        self.attached = True
         self.exited = threading.Event()
         self.exit_code: Optional[int] = None
+        self.exited_at: Optional[float] = None
         self.dead_since: Optional[float] = None
         self._lock = threading.Lock()
         self._inbox: "queue.Queue[Optional[tuple]]" = queue.Queue()
@@ -89,9 +99,17 @@ class HostSession:
                 if len(self.ring) > RING_MAX:
                     del self.ring[: len(self.ring) - RING_MAX]
                 self.seq += len(chunk)
-                seq = self.seq
-            self.host.emit({"op": "output", "sid": self.sid, "seq": seq}, chunk)
+                # Sent under the lock: an attach (which takes it too) then
+                # sees every chunk either in its replay or after its reply,
+                # never both and never neither.
+                if self.attached:
+                    self.host.emit({"op": "output", "sid": self.sid, "seq": self.seq}, chunk)
         self.finish()
+
+    @property
+    def ring_start(self) -> int:
+        """The ``seq`` of the first byte still in the ring."""
+        return self.seq - len(self.ring)
 
     def finish(self) -> None:
         """Record the exit once and tell the client."""
@@ -102,9 +120,15 @@ class HostSession:
                 self.exit_code = self.pty.reap()
             except Exception:
                 self.exit_code = None
+            self.exited_at = time.time()
             self.exited.set()
+            attached = self.attached
+            if attached:
+                self.host.emit({"op": "exit", "sid": self.sid, "code": self.exit_code})
         self._inbox.put(None)
-        self.host.emit({"op": "exit", "sid": self.sid, "code": self.exit_code})
+        if not attached:
+            log.info("session %s (%s) exited with %s while detached",
+                     self.name, self.sid, self.exit_code)
 
     # -- input -----------------------------------------------------------
     def submit(self, item: tuple) -> None:
@@ -149,11 +173,13 @@ class HostSession:
             log.debug("close failed for %s", self.name, exc_info=True)
 
     def describe(self) -> dict:
-        return {
-            "sid": self.sid, "name": self.name, "pid": self.pid,
-            "seq": self.seq, "exited": self.exited.is_set(),
-            "code": self.exit_code,
-        }
+        with self._lock:
+            return {
+                "sid": self.sid, "name": self.name, "pid": self.pid,
+                "seq": self.seq, "ring_start": self.ring_start,
+                "attached": self.attached, "exited": self.exited.is_set(),
+                "code": self.exit_code, "exited_at": self.exited_at,
+            }
 
 
 class Host:
@@ -183,11 +209,12 @@ class Host:
             except OSError:
                 pass  # the client loop sees the broken connection and ends it
 
-    def _reply(self, conn: socket.socket, req_id, ok: bool = True, **fields) -> None:
+    def _reply(self, conn: socket.socket, req_id, ok: bool = True, *,
+               payload: bytes = b"", **fields) -> None:
         header = {"op": "reply", "id": req_id, "ok": ok, **fields}
         with self._send_lock:
             try:
-                conn.sendall(encode(header))
+                conn.sendall(encode(header, payload))
             except OSError:
                 pass
 
@@ -305,12 +332,19 @@ class Host:
             with self._sessions_lock:
                 if self._conn is conn:
                     self._conn = None
+                sessions = list(self.sessions.values())
             try:
                 conn.close()
             except OSError:
                 pass
-            # Stage 1: the client's sessions end with it.
-            self._end_all(force=False)
+            # Stage 2: the sessions outlive the client. Whatever happens to
+            # the daemon -- a restart, a crash, a kill -- the next one
+            # attaches to them again; ending them is an explicit request.
+            for s in sessions:
+                with s._lock:
+                    s.attached = False
+            if sessions:
+                log.info("client went away; %d session(s) detached and kept", len(sessions))
 
     def _hello_ok(self, conn: socket.socket, header: dict) -> bool:
         if header.get("op") != "hello":
@@ -360,6 +394,27 @@ class Host:
                 target=self._spawn, args=(conn, header), daemon=True,
                 name=f"ptyhost-spawn-{header.get('name')}",
             ).start()
+        elif op == "attach":
+            self._attach(conn, header)
+        elif op == "ack_exit":
+            # The client has recorded this exit; nothing more is owed for it.
+            with self._sessions_lock:
+                s = self.sessions.get(str(header.get("sid", "")))
+                if s is not None and s.exited.is_set():
+                    del self.sessions[s.sid]
+                else:
+                    s = None
+            if s is not None:
+                s.close()
+            if "id" in header:
+                self._reply(conn, header["id"], acked=s is not None)
+        elif op == "end_all":
+            # Off the client thread: it waits for the children to go.
+            def end_all() -> None:
+                self._end_all(force=False)
+                if "id" in header:
+                    self._reply(conn, header["id"])
+            threading.Thread(target=end_all, daemon=True, name="ptyhost-end-all").start()
         elif op == "list":
             with self._sessions_lock:
                 rows = [s.describe() for s in self.sessions.values()]
@@ -373,6 +428,37 @@ class Host:
         else:
             if "id" in header:
                 self._reply(conn, header["id"], ok=False, error=f"unknown op {op!r}")
+
+    def _attach(self, conn: socket.socket, header: dict) -> None:
+        """Re-attach a session to this client, replaying from ``from_seq``.
+
+        The reply's payload is the ring from ``from_seq`` (or from its start,
+        when ``from_seq`` fell out of it -- ``gap`` is then the number of
+        bytes lost) up to ``seq``; every output event after the reply
+        continues from ``seq``. For a session that exited while detached the
+        reply says so, with its code, and no exit event follows.
+        """
+        req_id = header.get("id")
+        s = self._session(header)
+        if s is None:
+            self._reply(conn, req_id, ok=False, error=f"no session {header.get('sid')!r}")
+            return
+        try:
+            from_seq = max(0, int(header.get("from_seq") or 0))
+        except (TypeError, ValueError):
+            from_seq = 0
+        with s._lock:
+            start = s.ring_start
+            begin = max(from_seq, start)
+            data = bytes(s.ring[begin - start:]) if begin < s.seq else b""
+            fields = {
+                "seq": s.seq, "ring_start": start, "from": begin,
+                "gap": max(0, start - from_seq), "pid": s.pid,
+                "exited": s.exited.is_set(), "code": s.exit_code,
+            }
+            # The reply goes out under the lock, before any later chunk.
+            self._reply(conn, req_id, ok=True, payload=data, **fields)
+            s.attached = not s.exited.is_set()
 
     def _spawn(self, conn: socket.socket, header: dict) -> None:
         req_id = header.get("id")
@@ -406,7 +492,7 @@ def main(argv=None) -> int:
     parser.add_argument("--idle-exit", type=float, default=30.0)
     args = parser.parse_args(argv)
     if sys.platform == "win32":
-        print("the PTY host runs on POSIX only (stage 1)", file=sys.stderr)
+        print("the PTY host runs on POSIX only", file=sys.stderr)
         return 2
     directory = Path(args.dir)
     directory.mkdir(parents=True, exist_ok=True)
