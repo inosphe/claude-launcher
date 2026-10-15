@@ -338,6 +338,7 @@ def test_retries_back_off_and_park_as_stuck_after_the_limit(repo, tmp_path, monk
     monkeypatch.setattr(mod.time, "time", lambda: now[0])
     q = queue(tmp_path)
     job, _ = enqueue(q, repo, "a")
+    now[0] += 1  # claim order is created, then id: a tie would fall to the random id
     later, _ = enqueue(q, repo, "b")
     delays = []
     for attempt in range(1, mod.RETRY_LIMIT):
