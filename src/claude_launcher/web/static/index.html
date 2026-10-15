@@ -537,19 +537,20 @@
                 title="quick-fork: start a copy of this session's conversation as a child, marked 'forked from here'">⑂ fork</button>
         <button id="term-merge" class="term-btn hidden" type="button"
                 title="merge: ask this copy to write a wrap-up of everything since the fork; it goes to the origin and the copy ends">↩ merge</button>
-        <!-- Hold: end the program but keep the session; it wakes with its
-             conversation when opened again or messaged (claunch-5l35i). -->
-        <button id="term-idle-hold" class="term-btn"
-                title="hold this session: the program is ended to free memory, and the session wakes with its conversation when you open it again or a message arrives">hold</button>
         <!-- The session's lifecycle as one radio group (claunch-ndz47):
-             resume, pause, kill and archive answer the same question — what
-             state the session is in — so they are welded into one pill with
-             that state checked. Every segment stays on screen; a move the
-             state does not allow is disabled, not hidden. syncTermLife()
-             owns the checked and disabled state. -->
+             resume, hold, pause, kill and archive answer the same question —
+             what state the session is in — so they are welded into one pill
+             with that state checked (hold joined in claunch-p6me5). Every
+             segment stays on screen; a move the state does not allow is
+             disabled, not hidden. syncTermLife() owns the checked and
+             disabled state. -->
         <span id="term-life" class="term-life" role="radiogroup" aria-label="session lifecycle">
           <button id="term-resume" class="term-btn" type="button" role="radio" aria-checked="false"
                   title="resume: relaunch this session under its own name and conversation — checked while it runs">resume</button>
+          <!-- Hold: end the program but keep the session; it wakes with its
+               conversation when opened again or messaged (claunch-5l35i). -->
+          <button id="term-idle-hold" class="term-btn" type="button" role="radio" aria-checked="false"
+                  title="hold this session: the program is ended to free memory, and the session wakes with its conversation when you open it again or a message arrives">hold</button>
           <!-- Pause: kill with the record filed as paused — the temporary
                stop for a session that is looping or racing another. No
                wind-down. -->

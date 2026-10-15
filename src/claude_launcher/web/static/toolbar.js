@@ -10,7 +10,7 @@
     "term-timer-skip": "⏭", "term-hold": "⇥", "term-link": "↻",
     "term-scroll": "↥", "term-resume": "▶", "term-brief": "▤",
     "term-observer": "◉", "term-blockbar": "☰", "term-rebrief": "↻",
-    "term-fork": "⑂", "term-merge": "↩", "term-pause": "Ⅱ",
+    "term-fork": "⑂", "term-merge": "↩", "term-idle-hold": "☾", "term-pause": "Ⅱ",
     "term-kill": "×", "term-archive": "▣", "term-splitbtn": "⬒", "term-simsbtn": "◬",
     "term-chartbtn": "◇",
     "term-details": "ⓘ", "term-zoom-level": "A",
@@ -89,7 +89,7 @@
   // (claunch-gqp8c). `toggle` stays to settle on the state that took.
   menu.addEventListener("beforetoggle", (e) => more.setAttribute("aria-expanded", String(e.newState === "open")));
   menu.addEventListener("toggle", () => more.setAttribute("aria-expanded", String(menu.matches(":popover-open"))));
-  // The lifecycle group (resume | pause | kill | archive) keeps one Tab stop
+  // The lifecycle group (resume | hold | pause | kill | archive) keeps one Tab stop
   // and moves between its segments with the arrow keys, as a radio group does
   // (claunch-468ec). The stop is the focused segment, else the checked one,
   // else the first that can be pressed — the checked segment is often the one

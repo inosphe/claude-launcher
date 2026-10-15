@@ -177,8 +177,8 @@ const response = (body, ok = true, status = 200) => ({
          buttons["m-kill"].title === buttons["term-kill"].title],
         ["kill", false, true, false, true]);
 
-  /* The header's lifecycle group (claunch-ndz47): resume | pause | kill |
-     archive are one radio group, with the state the session is in checked
+  /* The header's lifecycle group (claunch-ndz47): resume | hold | pause |
+     kill | archive are one radio group (hold joined in claunch-p6me5), with the state the session is in checked
      and a move the state does not allow disabled — never hidden. */
   const hdr = {};
   for (const id of ["term-status", "term-resume", "term-rebrief", "term-retro", "term-kill",
@@ -202,7 +202,7 @@ const response = (body, ok = true, status = 200) => ({
     Object.assign(exports, { setStatusBadge,
       setSessions: (v) => { sessionsCache = v; } });`
   )(badge, (id) => hdr[id]);
-  const LIFE = ["term-resume", "term-pause", "term-kill", "term-archive"];
+  const LIFE = ["term-resume", "term-idle-hold", "term-pause", "term-kill", "term-archive"];
   // [checked segment, enabled segments, hidden segments]
   const life = () => [
     LIFE.filter((id) => hdr[id].attrs["aria-checked"] === "true"),
@@ -210,13 +210,13 @@ const response = (body, ok = true, status = 200) => ({
       ? hdr[id].dataset.lifeOff !== "1" : !hdr[id].disabled),
     LIFE.filter((id) => hdr[id].classes.has("hidden")),
   ];
-  check("the four lifecycle controls are one radio group in the header",
-        /<span id="term-life"[^>]*role="radiogroup"[^>]*>\s*(?:<!--[\s\S]*?-->\s*)?<button id="term-resume"[^>]*role="radio"[\s\S]*?<button id="term-pause"[^>]*role="radio"[\s\S]*?<button id="term-kill"[^>]*role="radio"[\s\S]*?<button id="term-archive"[^>]*role="radio"[^>]*>[^<]*<\/button>\s*<\/span>/.test(html),
+  check("the five lifecycle controls are one radio group in the header",
+        /<span id="term-life"[^>]*role="radiogroup"[^>]*>\s*(?:<!--[\s\S]*?-->\s*)?<button id="term-resume"[^>]*role="radio"[\s\S]*?<button id="term-idle-hold"[^>]*role="radio"[\s\S]*?<button id="term-pause"[^>]*role="radio"[\s\S]*?<button id="term-kill"[^>]*role="radio"[\s\S]*?<button id="term-archive"[^>]*role="radio"[^>]*>[^<]*<\/button>\s*<\/span>/.test(html),
         true);
   badge.setSessions([{ name: "s1", status: "idle" }]);
   badge.setStatusBadge("idle");
-  check("a live session checks resume and offers pause, kill and archive",
-        life(), [["term-resume"], ["term-pause", "term-kill", "term-archive"], []]);
+  check("a live session checks resume and offers hold, pause, kill and archive",
+        life(), [["term-resume"], ["term-idle-hold", "term-pause", "term-kill", "term-archive"], []]);
   badge.setSessions([{ name: "s1", status: "exited", paused_at: "2026-09-01T00:00:00Z" }]);
   badge.setStatusBadge("exited");
   check("a paused header checks pause and offers resume, kill and archive",
@@ -241,8 +241,8 @@ const response = (body, ok = true, status = 200) => ({
         life(), [["term-kill"], ["term-resume", "term-archive"], []]);
   badge.setSessions([{ name: "s1", status: "exited", held_at: "x" }]);
   badge.setStatusBadge("exited");
-  check("a held header checks none and offers resume, kill and archive",
-        life(), [[], ["term-resume", "term-kill", "term-archive"], []]);
+  check("a held header checks hold and offers resume, kill and archive",
+        life(), [["term-idle-hold"], ["term-resume", "term-kill", "term-archive"], []]);
   badge.setSessions([{ name: "s1", status: "exited", paused_at: "x", archived_at: "y" }]);
   badge.setStatusBadge("exited");
   check("an archived paused record checks archive and keeps kill and resume",
