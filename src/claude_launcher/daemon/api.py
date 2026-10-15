@@ -93,6 +93,7 @@ from ..profile import ProfileError
 from . import goto_gate
 from . import mesh_roles
 from . import reposync_gate
+from . import resume_gate
 from . import reposync_agent
 from . import host_code, restart_gate
 from . import restart_notice
@@ -292,7 +293,7 @@ async def error_middleware(request: web.Request, handler):
             resp.headers["Retry-After"] = str(int(exc.retry_after))
         return resp
     except (SessionGone, MeshConflict, LockBusy, KeyboardHeld, restart_gate.GateBusy,
-            goto_gate.GateBusy) as exc:
+            goto_gate.GateBusy, resume_gate.GateBusy) as exc:
         # LockBusy is transient by construction (the other writer is mid-
         # transition), so it gets a retryable status, not a flat 400.
         # KeyboardHeld is transient in the same way, and for the most human
@@ -487,6 +488,13 @@ def build_app(
     #: The approval gate a session's repository sync waits behind; see
     #: reposync_gate. Unanswered expires as a refusal.
     app["reposync_gate"] = reposync_gate.ReposyncGate()
+    #: The approval gate an agent's request to resume an exited session
+    #: waits behind; see resume_gate. No deadline, kept on disk.
+    app["resume_gate"] = resume_gate.ResumeGate(
+        manager=manager,
+        path=resume_gate.path(),
+        notify=functools.partial(_deliver_to_session, manager),
+    )
     # workspace name -> the disk-usage measurement running for it (claunch-2oait)
     app["ws_usage_tasks"] = {}
     app["ws_sync_locks"] = {}
@@ -875,6 +883,15 @@ def build_app(
     r.add_get("/api/reposync/requests/{rid}", h_reposync_request_get)
     r.add_post("/api/reposync/requests/{rid}/approve", h_reposync_request_approve)
     r.add_post("/api/reposync/requests/{rid}/reject", h_reposync_request_reject)
+    # Agents' requests to resume an exited session (claunch-yjhgx,
+    # :mod:`resume_gate`): file, read, and the person's two answers from the
+    # web UI's notification card; the asker may withdraw its own.
+    r.add_get("/api/resume-requests", h_resume_requests_list)
+    r.add_post("/api/resume-requests", h_resume_request_submit)
+    r.add_get("/api/resume-requests/{rid}", h_resume_request_get)
+    r.add_post("/api/resume-requests/{rid}/approve", h_resume_request_approve)
+    r.add_post("/api/resume-requests/{rid}/reject", h_resume_request_reject)
+    r.add_post("/api/resume-requests/{rid}/withdraw", h_resume_request_withdraw)
     # The Workspaces page's Sync panel (claunch-tqm2e). Its pushes wait
     # behind the gate above like a session's do: the button files the card,
     # a person approves it, the panel's next call runs it.
@@ -7202,6 +7219,84 @@ async def h_reposync_request_reject(request: web.Request) -> web.Response:
     if record is None:
         return json_error(409, "no pending reposync request with that id")
     return json_response({"ok": True, "request": record})
+
+
+def _deliver_to_session(manager: SessionManager, name: str, message: str) -> bool:
+    """Type ``message`` into a live session -- waking it first when it is
+    held, the way a cflow nudge does. False when it is gone or exited."""
+    try:
+        session = manager.get(name)
+    except Exception:  # noqa: BLE001 -- the record is gone
+        return False
+    if session.exited:
+        return False
+    if cflow_clock.is_held(session):
+        return _cflow_nudge_held(manager, name, message)
+    return bool(session.queue_delivery(message))
+
+
+def _resume_gate_error(exc: Exception) -> web.Response:
+    return json_error(getattr(exc, "status", 400), str(exc))
+
+
+async def h_resume_request_submit(request: web.Request) -> web.Response:
+    """An agent asks for an exited session back (claunch-yjhgx). Nothing is
+    relaunched here: the request waits, without a deadline, for a person's
+    answer on the web UI's notification card."""
+    body = await _json_body(request)
+    try:
+        record = request.app["resume_gate"].submit(
+            session=str(body.get("session") or ""),
+            target=str(body.get("target") or ""),
+            reason=str(body.get("reason") or ""),
+        )
+    except resume_gate.GateRefused as exc:
+        return _resume_gate_error(exc)
+    return json_response({"ok": True, "request": record})
+
+
+async def h_resume_requests_list(request: web.Request) -> web.Response:
+    return json_response({"requests": request.app["resume_gate"].list()})
+
+
+async def h_resume_request_get(request: web.Request) -> web.Response:
+    record = request.app["resume_gate"].get(request.match_info["rid"])
+    if record is None:
+        return json_error(404, "no resume request with that id")
+    return json_response({"request": record})
+
+
+async def h_resume_request_approve(request: web.Request) -> web.Response:
+    record = await request.app["resume_gate"].approve(
+        request.match_info["rid"], decided_by="web"
+    )
+    if record is None:
+        return json_error(409, "no pending resume request with that id")
+    return json_response({"ok": record["status"] == resume_gate.APPROVED, "request": record})
+
+
+async def h_resume_request_reject(request: web.Request) -> web.Response:
+    record = request.app["resume_gate"].reject(request.match_info["rid"], decided_by="web")
+    if record is None:
+        return json_error(409, "no pending resume request with that id")
+    return json_response({"ok": True, "request": record})
+
+
+async def h_resume_request_withdraw(request: web.Request) -> web.Response:
+    """The asking session takes its request back; only the asker may."""
+    body = await _json_body(request)
+    session = str(body.get("session") or "").strip()
+    if not session:
+        return json_error(400, "session (the withdrawing asker) is required")
+    try:
+        record = request.app["resume_gate"].withdraw(
+            request.match_info["rid"], session=session
+        )
+    except resume_gate.GateRefused as exc:
+        return _resume_gate_error(exc)
+    if record is None:
+        return json_error(409, "no pending resume request with that id")
+    return json_response({"ok": True, "withdrawn": True, "request": record})
 
 
 async def h_relay_meshes(request: web.Request) -> web.Response:
