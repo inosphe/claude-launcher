@@ -45987,8 +45987,12 @@ function gateSessionLink(name) {
    is read once its card or its row is clicked, or marked read in the panel
    (claunch-x76l8). Opening the panel no longer reads everything.
 
+   A row can also be marked (★, claunch-knuet), apart from read: the History
+   head's All / Marked filter shows every row or only the marked ones, and a
+   marked row outlives the 100-row cap and Clear.
+
    Kept in this browser's localStorage (claunch-l978l): the history with each
-   row's read mark and the hidden request ids. When the panel was last opened
+   row's read and marked flags, the hidden request ids and the filter. When the panel was last opened
    (noticeSeen) is only read, to mark rows saved before read marks existed.
    A browser without
    storage still works; it only forgets on reload. Pending requests are never
@@ -45996,6 +46000,7 @@ function gateSessionLink(name) {
 const NOTICE_HISTORY_KEY = "claunch.noticeHistory";
 const NOTICE_HIDDEN_KEY = "claunch.noticeHidden";
 const NOTICE_SEEN_KEY = "claunch.noticeSeen";
+const NOTICE_FILTER_KEY = "claunch.noticeFilter";
 const NOTICE_HISTORY_MAX = 100;
 
 function noticeStore() {
@@ -46047,6 +46052,8 @@ const gateHiddenIds = new Set(
     return Array.isArray(saved) ? saved.filter((k) => typeof k === "string") : [];
   })()
 );
+/* The History filter: "all" or "marked". */
+let noticeFilter = noticeLoad(NOTICE_FILTER_KEY, "all") === "marked" ? "marked" : "all";
 /* The pending requests of each gate as its last poll answered them. */
 const gatePending = { restart: [], goto: [], reposync: [] };
 
@@ -46060,8 +46067,12 @@ function noticeRecord(entry) {
     entry
   );
   noticeHistory.unshift(rec);
-  if (noticeHistory.length > NOTICE_HISTORY_MAX) {
-    noticeHistory.length = NOTICE_HISTORY_MAX;
+  // Over the cap the oldest unmarked row goes; marked rows only when every
+  // row is marked.
+  while (noticeHistory.length > NOTICE_HISTORY_MAX) {
+    let i = noticeHistory.length - 1;
+    while (i > 0 && noticeHistory[i].marked) i -= 1;
+    noticeHistory.splice(i > 0 ? i : noticeHistory.length - 1, 1);
   }
   noticeHistorySave();
   noticeBellPaint();
@@ -46084,6 +46095,21 @@ function noticeMarkRead(ids, read) {
   if (!changed) return;
   noticeHistorySave();
   noticeBellPaint();
+  noticePanelPaint();
+}
+
+/* Sets or clears one row's ★ mark (claunch-knuet). */
+function noticeMarkStar(id, marked) {
+  const entry = noticeHistory.find((e) => e.id === id);
+  if (!entry || !!entry.marked === marked) return;
+  entry.marked = marked;
+  noticeHistorySave();
+  noticePanelPaint();
+}
+
+function noticeFilterSet(filter) {
+  noticeFilter = filter === "marked" ? "marked" : "all";
+  noticeSave(NOTICE_FILTER_KEY, noticeFilter);
   noticePanelPaint();
 }
 
@@ -46413,6 +46439,12 @@ function noticePanelHistoryRow(entry) {
     if (openable) noticeTargetOpen(entry);
   });
   const head = el("div", "notice-row-head");
+  head.appendChild(noticePanelButton(
+    entry.marked ? "★" : "☆", "notice-star" + (entry.marked ? " on" : ""),
+    entry.marked ? "unmark: it leaves the Marked filter and can be cleared"
+      : "mark: it shows under Marked and survives Clear",
+    () => noticeMarkStar(entry.id, !entry.marked)
+  ));
   head.appendChild(el("span", "notice-title", entry.title || ""));
   if (entry.gate) {
     head.appendChild(el(
@@ -46464,22 +46496,35 @@ function noticePanelPaint() {
   for (const [type, rec] of waiting) body.appendChild(noticePanelGateRow(type, rec));
 
   const past = noticeHistory.filter((e) => !(e.gate && e.status === "pending"));
+  const markedCount = past.filter((e) => e.marked).length;
+  const shown = noticeFilter === "marked" ? past.filter((e) => e.marked) : past;
   const sectionHead = el("div", "notice-panel-section-row");
-  sectionHead.appendChild(el("h3", "notice-panel-section", `History (${past.length})`));
-  const unreadIds = past.filter(noticeUnread).map((e) => e.id);
+  sectionHead.appendChild(el("h3", "notice-panel-section", `History (${shown.length})`));
+  const filters = el("div", "notice-filter");
+  for (const [name, label, title] of [
+    ["all", "All", `every row (${past.length})`],
+    ["marked", "Marked", `only the ★ rows (${markedCount})`],
+  ]) {
+    filters.appendChild(noticePanelButton(
+      label, noticeFilter === name ? "active" : "", title, () => noticeFilterSet(name)
+    ));
+  }
+  sectionHead.appendChild(filters);
+  const unreadIds = shown.filter(noticeUnread).map((e) => e.id);
   if (unreadIds.length) {
     sectionHead.appendChild(noticePanelButton(
       "Mark all read", "", `mark the ${unreadIds.length} unread row(s) read`,
       () => noticeMarkRead(unreadIds, true)
     ));
   }
-  if (past.length) {
+  if (past.length > markedCount) {
     sectionHead.appendChild(noticePanelButton(
-      "Clear", "clear", "forget the history in this browser (waiting requests stay)",
+      "Clear", "clear",
+      "forget the history in this browser (waiting requests and ★ rows stay)",
       () => {
         for (let i = noticeHistory.length - 1; i >= 0; i -= 1) {
           const e = noticeHistory[i];
-          if (!(e.gate && e.status === "pending")) noticeHistory.splice(i, 1);
+          if (!(e.gate && e.status === "pending") && !e.marked) noticeHistory.splice(i, 1);
         }
         noticeHistorySave();
         noticePanelPaint();
@@ -46488,10 +46533,12 @@ function noticePanelPaint() {
     ));
   }
   body.appendChild(sectionHead);
-  if (!past.length) {
-    body.appendChild(el("p", "wf-note", "nothing has been shown in this browser yet"));
+  if (!shown.length) {
+    body.appendChild(el("p", "wf-note", noticeFilter === "marked"
+      ? "no row is marked — ☆ on a row keeps it here"
+      : "nothing has been shown in this browser yet"));
   }
-  for (const entry of past) body.appendChild(noticePanelHistoryRow(entry));
+  for (const entry of shown) body.appendChild(noticePanelHistoryRow(entry));
 }
 
 // The bell's dot for what an earlier visit left unread, before any poll.
