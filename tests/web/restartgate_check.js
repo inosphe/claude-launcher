@@ -493,6 +493,21 @@ const clockBase = () => 1700000000000;
   })();
 }
 
+/* --- the PTY host mode the request carries (claunch-xnnct.1) ------------- */
+{
+  const w = build();
+  w.gate.rec = pending({ pty_host: "full" });
+  (async () => {
+    await w.api.refreshRestartGate();
+    check("a full restart says the PTY host goes down too",
+          /PTY host: restarted too/.test(w.said()), w.said());
+    w.gate.rec = pending({ id: "g2" });
+    await w.api.refreshRestartGate();
+    check("a request without the field keeps the host",
+          /PTY host: kept/.test(w.said()), w.said());
+  })();
+}
+
 /* --- no request: nothing to show ---------------------------------------- */
 {
   const w = build();
