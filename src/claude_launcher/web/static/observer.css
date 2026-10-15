@@ -293,3 +293,28 @@
   #observer-view .observer-status-row summary { min-height:36px; line-height:36px; }
   #observer-view #observer-composer.folded { padding-left:12px; padding-right:12px; }
 }
+/* A session's workflow run and what waits on the reader (QA questions, new
+   thread replies), drawn once per session near the top of its column or on
+   its newest post. Colours follow the activity tags above: amber for what
+   waits on a person, blue for a running run. */
+:is(#observer-view, .sess-observer) .observer-runs, :is(#observer-view, .sess-observer) .observer-notices { display:flex; flex-direction:column; gap:4px; margin:8px 0; }
+:is(#observer-view, .sess-observer) .observer-run { display:flex; flex-wrap:wrap; align-items:baseline; gap:6px; padding:4px 8px; border:1px solid #30363d; border-left:3px solid #3d5a80; border-radius:6px; background:#14161a; color:#c9d1d9; text-decoration:none; font-size:12px; }
+:is(#observer-view, .sess-observer) .observer-run:hover { border-color:#58a6ff; }
+:is(#observer-view, .sess-observer) .observer-run.run-yours { border-left-color:#e3b341; }
+:is(#observer-view, .sess-observer) .observer-run.run-done { border-left-color:#3fb950; }
+:is(#observer-view, .sess-observer) .observer-run.run-error { border-left-color:#f85149; }
+:is(#observer-view, .sess-observer) .obs-run-kind, :is(#observer-view, .sess-observer) .obs-notice-kind { flex:none; font-size:11px; padding:0 6px; border-radius:10px; background:#243247; color:#79c0ff; }
+:is(#observer-view, .sess-observer) .obs-run-wf { font-family:ui-monospace, Consolas, monospace; }
+:is(#observer-view, .sess-observer) .obs-run-state { color:#a6aeb8; overflow-wrap:anywhere; }
+:is(#observer-view, .sess-observer) .observer-notice { display:flex; align-items:baseline; gap:6px; width:100%; text-align:left; padding:4px 8px; border:1px solid #493b19; border-radius:6px; background:#211c10; color:#e6d7a8; font:inherit; font-size:12px; cursor:pointer; }
+:is(#observer-view, .sess-observer) .observer-notice:hover { border-color:#e3b341; }
+:is(#observer-view, .sess-observer) .observer-notice .obs-notice-kind { background:#493b19; color:#e3b341; }
+:is(#observer-view, .sess-observer) .observer-notice.notice-thread { border-color:#2b3f5c; background:#121b27; color:#c9d1d9; }
+:is(#observer-view, .sess-observer) .observer-notice.notice-thread .obs-notice-kind { background:#243247; color:#79c0ff; }
+:is(#observer-view, .sess-observer) .obs-notice-text { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+:is(#observer-view, .sess-observer) .observer-notice-more { color:#8b949e; }
+:is(#observer-view, .sess-observer) .observer-more { display:block; width:100%; margin:8px 0; }
+/* While the cards are dragged sideways: the grabbing hand, and no text
+   selection starting under the pointer. */
+#observer-cards.dragging { cursor:grabbing; user-select:none; }
+#observer-cards.dragging * { cursor:grabbing; }
