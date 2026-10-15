@@ -14241,17 +14241,53 @@ $("term-retro").addEventListener("click", async () => {
    the completion is the agent's, from inside its own terminal. */
 
 /* Whether the fork/merge buttons apply to a record: fork on a live Claude/Codex
-   session with a conversation to copy, merge on a live quick-fork. The
-   daemon is the authority (it refuses a fork with no transcript on disk),
-   this only keeps the button off records it would refuse outright. */
+   session with a conversation to copy -- a quick-fork included, so a copy
+   can be forked again -- and merge on a live quick-fork. The daemon is the
+   authority (it refuses a fork with no transcript on disk), this only keeps
+   the button off records it would refuse outright. */
 function forkControlState(session) {
   const s = session || {};
   const live = !!s.name && s.status !== "exited";
   const forkable = ["claude", "codex"].includes(s.harness);
   return {
-    fork: live && forkable && !!s.conversation_id && !s.quick_fork_of,
+    fork: live && forkable && !!s.conversation_id,
     merge: live && !!s.quick_fork_of,
   };
+}
+
+/* Where a merge from this copy would land, read off the session list the
+   way the daemon reads it (daemon/handoff.merge_lineage): the origin while
+   it is live, otherwise the nearest live session above it -- from each
+   session its own origin when it is a copy, else its parent. A name with no
+   record is stepped over to the other pointer. `target` is "" when nothing
+   above is live: the press would be refused, and the page says so before it
+   is made. (A deep_think copy answers only the session that asked; the list
+   does not carry that record, and the daemon's refusal covers it.) */
+function quickForkMergeTarget(session, sessions) {
+  const s = session || {};
+  const origin = s.quick_fork_of || "";
+  const out = { origin, target: "", chain: [] };
+  if (!origin) return out;
+  const byName = new Map((sessions || []).map((r) => [r.name, r]));
+  const seen = new Set([s.name]);
+  let cur = s;
+  while (cur) {
+    let next = null;
+    for (const cand of [cur.quick_fork_of, cur.parent]) {
+      if (!cand || seen.has(cand)) continue;
+      seen.add(cand);
+      const rec = byName.get(cand);
+      if (!rec) { out.chain.push({ name: cand, state: "gone" }); continue; }
+      const live = rec.status !== "exited";
+      out.chain.push({ name: cand, state: live ? "live" : "exited" });
+      if (live && !out.target) out.target = cand;
+      next = rec;
+      break;
+    }
+    if (out.target) break;
+    cur = next;
+  }
+  return out;
 }
 
 /* The merge/hand-off button's face while a request is pending: the daemon
@@ -14268,10 +14304,17 @@ function handoffControlState(session) {
         + `'${s.handoff.target}' and the session ends then — press again to stop it now`,
     };
   }
+  const where = quickForkMergeTarget(s, typeof sessionsCache === "undefined" ? [] : sessionsCache);
   return {
     label: "↩ merge", pending: false,
     title: "merge: ask this copy to write a wrap-up of everything since the fork; "
-      + "it goes to the origin and the copy ends",
+      + (!where.origin || where.target === where.origin
+        ? "it goes to the origin and the copy ends"
+        : where.target
+          ? `the origin '${where.origin}' has ended, so it goes to '${where.target}', `
+            + "the nearest live session above it, and the copy ends"
+          : `the origin '${where.origin}' and every session above it have ended, `
+            + "so there is nowhere to merge — resume one of them, or hand off from the detail panel"),
   };
 }
 
@@ -38482,17 +38525,34 @@ function sessHandoff(data) {
     return box;
   }
   if (s.quick_fork_of) {
-    const row = el("div", "sess-send-row");
-    const merge = el("button", "wf-btn approve", `Merge back to ${s.quick_fork_of}`);
-    merge.title = "ask this copy for a wrap-up of everything since the fork; " +
-      "it goes to the origin and the copy ends";
-    merge.addEventListener("click", async () => {
-      merge.disabled = true;
-      await requestHandoff(s.name, "", "merge");
-      refreshSession();
-    });
-    row.appendChild(merge);
-    box.appendChild(row);
+    // The origin may have ended (a copy of a copy outlives its parent): the
+    // merge then goes to the nearest live session above, and with none the
+    // box says so instead of offering a press the daemon would refuse.
+    const where = quickForkMergeTarget(s, sessionsCache || []);
+    if (where.target) {
+      const row = el("div", "sess-send-row");
+      const merge = el("button", "wf-btn approve", `Merge back to ${where.target}`);
+      merge.title = "ask this copy for a wrap-up of everything since the fork; " +
+        (where.target === where.origin ? "it goes to the origin"
+          : `it goes to '${where.target}', the nearest live session above the origin`) +
+        " and the copy ends";
+      merge.addEventListener("click", async () => {
+        merge.disabled = true;
+        await requestHandoff(s.name, "", "merge");
+        refreshSession();
+      });
+      row.appendChild(merge);
+      box.appendChild(row);
+      if (where.target !== where.origin) {
+        box.appendChild(el("p", "wf-note",
+          `the origin '${where.origin}' has ended — the merge is delegated to '${where.target}'`));
+      }
+    } else {
+      box.appendChild(el("p", "wf-note",
+        `nowhere to merge: the origin '${where.origin}' and every session above it have ended (`
+        + where.chain.map((c) => `${c.name}: ${c.state}`).join(", ")
+        + "). Resume one of them to merge back, or hand the work off to a live session below."));
+    }
   }
   const others = (sessionsCache || [])
     .filter((r) => r.name && r.name !== s.name && r.status !== "exited")

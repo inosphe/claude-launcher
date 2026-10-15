@@ -536,23 +536,252 @@ def test_merge_refuses_a_non_fork_another_target_and_a_gone_origin(home, tmp_pat
             await client.post("/api/sessions/a/quick-fork", headers=BEARER)
             # a fork's merge goes back to its origin, not elsewhere
             resp = await client.post("/api/sessions/a-qf1/handoff", json={"kind": "merge", "to": "c"}, headers=BEARER)
-            assert resp.status == 400 and "goes back there" in (await resp.json())["error"]
+            assert resp.status == 400 and "goes back to 'a'" in (await resp.json())["error"]
             # ...but a handoff from a fork to a third session is allowed
             resp = await client.post("/api/sessions/a-qf1/handoff", json={"to": "c"}, headers=BEARER)
             assert resp.status == 200 and (await resp.json())["kind"] == "handoff"
-            # origin gone: the completion keeps the fork alive and says so
-            # (the handoff request to c above is still pending, so this is
-            # the gone origin's refusal and not the no-request one)
+            # origin gone and nothing above it: the completion keeps the fork
+            # alive, saves the wrap-up and says so (the handoff request to c
+            # above is still pending, so this is the gone origin's answer and
+            # not the no-request refusal)
             mgr.kill("a")
             await _wait_for(lambda: mgr.get("a").exited, "a to exit")
             resp = await client.post("/api/sessions/a-qf1/handoff", json={"text": "x", "kind": "merge"}, headers=BEARER)
-            assert resp.status == 400 and "has exited" in (await resp.json())["error"]
+            doc = await resp.json()
+            assert resp.status == 200, doc
+            assert doc["completed"] is False and doc["undelivered"] is True
+            assert doc["ended"] is False and "no live session to merge into" in doc["note"]
             assert not mgr.get("a-qf1").exited
             await mgr.shutdown_all()
         finally:
             await client.close()
 
     asyncio.run(run())
+
+
+# ---- a copy of a copy, and a merge whose origin has ended --------------- #
+
+def test_a_quick_fork_can_itself_be_quick_forked_and_merges_to_its_own_origin(home, tmp_path, forkable, typed):
+    _register_py_harness()
+
+    async def run():
+        mgr = _mgr()
+        client = await _serve(mgr, MeshManager(mgr, root=tmp_path / "mesh"))
+        try:
+            mgr.create(SessionDef(name="a", harness="py", cwd=str(tmp_path)))
+            assert (await client.post("/api/sessions/a/quick-fork", headers=BEARER)).status == 201
+            resp = await client.post("/api/sessions/a-qf1/quick-fork", headers=BEARER)
+            doc = await resp.json()
+            assert resp.status == 201, doc
+            child = doc["session"]
+            assert child["name"] == "a-qf1-qf1"
+            assert child["parent"] == "a-qf1" and child["quick_fork_of"] == "a-qf1"
+            assert "origin: a-qf1\n" in child["task"]
+            # the copy of the copy merges to the copy, which is live (the
+            # operator presses first: a copy hands in only after that)
+            resp = await client.post("/api/sessions/a-qf1-qf1/handoff", json={}, headers=BEARER)
+            assert resp.status == 200 and (await resp.json())["target"] == "a-qf1"
+            resp = await client.post(
+                "/api/sessions/a-qf1-qf1/handoff", json={"text": "inner wrap-up"}, headers=BEARER,
+            )
+            doc = await resp.json()
+            assert resp.status == 200, doc
+            assert doc["target"] == "a-qf1" and doc["delegated"] is False
+            report = [t for n, t in typed if n == "a-qf1"][-1]
+            assert "delegated:" not in report and report.endswith("inner wrap-up")
+            await _wait_for(lambda: mgr.get("a-qf1-qf1").exited, "the inner copy to end")
+            assert not mgr.get("a-qf1").exited
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_merge_is_delegated_to_the_nearest_live_session_above_an_ended_origin(home, tmp_path, forkable, typed):
+    _register_py_harness()
+
+    async def run():
+        mgr = _mgr()
+        client = await _serve(mgr, MeshManager(mgr, root=tmp_path / "mesh"))
+        try:
+            mgr.create(SessionDef(name="a", harness="py", cwd=str(tmp_path)))
+            await client.post("/api/sessions/a/quick-fork", headers=BEARER)
+            await client.post("/api/sessions/a-qf1/quick-fork", headers=BEARER)
+            mgr.kill("a-qf1")
+            await _wait_for(lambda: mgr.get("a-qf1").exited, "a-qf1 to exit")
+            assert handoff_mod.merge_lineage(mgr, "a-qf1-qf1") == [("a-qf1", "exited"), ("a", "live")]
+            # the operator's press: the request names the grandparent and why
+            resp = await client.post("/api/sessions/a-qf1-qf1/handoff", json={}, headers=BEARER)
+            doc = await resp.json()
+            assert resp.status == 200, doc
+            assert doc["kind"] == "merge" and doc["target"] == "a" and doc["origin"] == "a-qf1"
+            await _wait_for(lambda: any(n == "a-qf1-qf1" for n, _ in typed), "the request block")
+            block = [t for n, t in typed if n == "a-qf1-qf1"][-1]
+            assert "target: a\n" in block and "delegated: your origin a-qf1 has ended" in block
+            # the completion lands in the grandparent, with a header saying so
+            resp = await client.post(
+                "/api/sessions/a-qf1-qf1/handoff", json={"text": "deep wrap-up"}, headers=BEARER,
+            )
+            doc = await resp.json()
+            assert resp.status == 200, doc
+            assert doc["completed"] is True and doc["target"] == "a" and doc["delegated"] is True
+            report = [t for n, t in typed if n == "a"][-1]
+            assert report.startswith("---\n# claunch quick-fork: merged from a-qf1-qf1")
+            assert "delegated: a-qf1, the session this copy was forked from, has ended" in report
+            assert "a copy of a-qf1's conversation" in report
+            assert report.endswith("deep wrap-up")
+            await _wait_for(lambda: mgr.get("a-qf1-qf1").exited, "the inner copy to end")
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_merge_steps_over_a_removed_origin_through_the_escalated_parent(home, tmp_path, forkable, typed):
+    _register_py_harness()
+
+    async def run():
+        mgr = _mgr()
+        client = await _serve(mgr, MeshManager(mgr, root=tmp_path / "mesh"))
+        try:
+            mgr.create(SessionDef(name="a", harness="py", cwd=str(tmp_path)))
+            await client.post("/api/sessions/a/quick-fork", headers=BEARER)
+            await client.post("/api/sessions/a-qf1/quick-fork", headers=BEARER)
+            mgr.kill("a-qf1")
+            await _wait_for(lambda: mgr.get("a-qf1").exited, "a-qf1 to exit")
+            mgr.remove("a-qf1")  # its child moves up to a
+            assert mgr.get("a-qf1-qf1").sdef.parent == "a"
+            assert handoff_mod.merge_lineage(mgr, "a-qf1-qf1") == [("a-qf1", "gone"), ("a", "live")]
+            resp = await client.post("/api/sessions/a-qf1-qf1/handoff", json={}, headers=BEARER)
+            assert resp.status == 200 and (await resp.json())["target"] == "a"
+            resp = await client.post(
+                "/api/sessions/a-qf1-qf1/handoff", json={"text": "w"}, headers=BEARER,
+            )
+            doc = await resp.json()
+            assert resp.status == 200, doc
+            assert doc["target"] == "a" and doc["origin"] == "a-qf1"
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_a_pending_merge_resettles_when_its_target_ends_before_the_wrap_up(home, tmp_path, forkable, typed):
+    _register_py_harness()
+
+    async def run():
+        mgr = _mgr()
+        client = await _serve(mgr, MeshManager(mgr, root=tmp_path / "mesh"))
+        try:
+            mgr.create(SessionDef(name="a", harness="py", cwd=str(tmp_path)))
+            await client.post("/api/sessions/a/quick-fork", headers=BEARER)
+            await client.post("/api/sessions/a-qf1/quick-fork", headers=BEARER)
+            resp = await client.post("/api/sessions/a-qf1-qf1/handoff", json={}, headers=BEARER)
+            assert (await resp.json())["target"] == "a-qf1"
+            mgr.kill("a-qf1")
+            await _wait_for(lambda: mgr.get("a-qf1").exited, "a-qf1 to exit")
+            resp = await client.post(
+                "/api/sessions/a-qf1-qf1/handoff", json={"text": "w"}, headers=BEARER,
+            )
+            doc = await resp.json()
+            assert resp.status == 200, doc
+            assert doc["target"] == "a" and doc["delegated"] is True
+            # a target the caller names itself is still refused as named
+            await client.post("/api/sessions/a/quick-fork", headers=BEARER)
+            mgr.create(SessionDef(name="c", harness="py", cwd=str(tmp_path)))
+            assert (await client.post("/api/sessions/a-qf2/handoff", json={}, headers=BEARER)).status == 200
+            resp = await client.post(
+                "/api/sessions/a-qf2/handoff", json={"text": "w", "kind": "merge", "to": "c"}, headers=BEARER,
+            )
+            assert resp.status == 400 and "goes back to 'a'" in (await resp.json())["error"]
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_no_live_session_above_refuses_the_press_and_saves_the_wrap_up(home, tmp_path, forkable, typed):
+    _register_py_harness()
+
+    async def run():
+        mgr = _mgr()
+        client = await _serve(mgr, MeshManager(mgr, root=tmp_path / "mesh"))
+        try:
+            mgr.create(SessionDef(name="a", harness="py", cwd=str(tmp_path)))
+            await client.post("/api/sessions/a/quick-fork", headers=BEARER)
+            await client.post("/api/sessions/a-qf1/quick-fork", headers=BEARER)
+            await client.post("/api/sessions/a-qf1/quick-fork", headers=BEARER)  # a-qf1-qf2
+            # the operator pressed merge on one copy while its origin was live
+            resp = await client.post("/api/sessions/a-qf1-qf1/handoff", json={}, headers=BEARER)
+            assert resp.status == 200 and (await resp.json())["target"] == "a-qf1"
+            for name in ("a-qf1", "a"):
+                mgr.kill(name)
+                await _wait_for(lambda n=name: mgr.get(n).exited, f"{name} to exit")
+            # a press made now is refused with the chain it checked, so the
+            # operator learns there is nowhere to merge before the copy works
+            # on a wrap-up
+            resp = await client.post("/api/sessions/a-qf1-qf2/handoff", json={}, headers=BEARER)
+            err = (await resp.json())["error"]
+            assert resp.status == 400
+            assert "no live session to merge 'a-qf1-qf2' into" in err
+            assert "a-qf1 (exited), a (exited)" in err
+            # the pressed copy's completion is answered: saved, not delivered, kept
+            resp = await client.post(
+                "/api/sessions/a-qf1-qf1/handoff", json={"text": "## the wrap-up\n- kept"}, headers=BEARER,
+            )
+            doc = await resp.json()
+            assert resp.status == 200, doc
+            assert doc["completed"] is False and doc["undelivered"] is True
+            assert doc["delivered"] is False and doc["ended"] is False
+            assert doc["lineage"] == [
+                {"name": "a-qf1", "state": "exited"}, {"name": "a", "state": "exited"},
+            ]
+            from pathlib import Path
+
+            saved = Path(doc["saved"])
+            assert saved.read_text(encoding="utf-8") == "## the wrap-up\n- kept\n"
+            assert saved.parent.name == "a-qf1-qf1"
+            assert doc["saved"] in doc["note"] and "Tell the user" in doc["note"]
+            assert not mgr.get("a-qf1-qf1").exited
+            assert not [t for n, t in typed if "merged from" in t]
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_a_deep_think_copy_is_never_delegated_past_its_asker(home):
+    class _S:
+        def __init__(self, sdef, exited=False):
+            self.sdef, self.exited = sdef, exited
+
+    class _M:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def get(self, name):
+            from claude_launcher.daemon.manager import ManagerError
+
+            if name not in self.rows:
+                raise ManagerError(name)
+            return self.rows[name]
+
+    rows = {
+        "root": _S(SessionDef(name="root", harness="py")),
+        "a": _S(SessionDef(name="a", harness="py", parent="root"), exited=True),
+        "a-dt1": _S(SessionDef(name="a-dt1", harness="py", parent="a", quick_fork_of="a",
+                               deep_think={"question": "q"})),
+        "a-qf1": _S(SessionDef(name="a-qf1", harness="py", parent="a", quick_fork_of="a")),
+    }
+    mgr = _M(rows)
+    assert handoff_mod.merge_lineage(mgr, "a-dt1") == [("a", "exited")]
+    assert handoff_mod.merge_lineage(mgr, "a-qf1") == [("a", "exited"), ("root", "live")]
+    assert handoff_mod.merge_lineage(mgr, "root") == []
 
 
 # ---- handoff between unrelated sessions --------------------------------- #

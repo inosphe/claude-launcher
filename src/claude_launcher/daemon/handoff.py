@@ -10,7 +10,11 @@ spellings:
   *merges*: it writes a wrap-up of everything since the marker, the daemon
   types that into ``A``, and ``B`` ends. Merge is only offered to a session
   that IS a quick-fork (``SessionDef.quick_fork_of``), and it goes back to
-  that one session.
+  that one session -- while it is live. A copy can itself be quick-forked
+  (``A`` -> ``B`` -> ``C``), so its origin may have ended first: then the
+  merge goes to the nearest live session above it (:func:`merge_lineage`),
+  and with none live the wrap-up is saved beside the copy's record instead
+  of being typed into nobody (:meth:`Handoffs.complete`).
 * **handoff.** Two sessions with no relation at all: ``D`` writes a handoff
   for ``C``, the daemon types it into ``C``, and ``D`` ends. Anyone live can
   be the target, so this one needs a picker and lives in the detail panel.
@@ -223,7 +227,8 @@ def _merge_line(*, origin: str, marker: str, allowed: bool) -> str:
         "changed, files and commits, decisions taken, what is still open -- "
         "and hand it in with the MCP 'handoff' tool ({text: ...}) or "
         f"`claunch quick-fork merge -f <file>`. The daemon types it into "
-        f"{origin} and ends this session."
+        f"{origin} (or, if {origin} has ended by then, into the nearest live "
+        "session above it) and ends this session."
     )
     if allowed:
         return (
@@ -301,9 +306,12 @@ def _workflow_lines(
     ]
 
 
-def compose_request(*, kind: str, source: str, target: str, marker: str = "") -> str:
+def compose_request(
+    *, kind: str, source: str, target: str, marker: str = "", origin: str = "",
+) -> str:
     """What is typed into the source when an operator presses merge/hand off:
-    finish, write it up, hand it in."""
+    finish, write it up, hand it in. ``origin`` differs from ``target`` when
+    the merge was delegated past an origin that has ended."""
     if kind == MERGE:
         since = f" since marker {marker}" if marker else " since the fork marker"
         return "\n".join([
@@ -311,6 +319,7 @@ def compose_request(*, kind: str, source: str, target: str, marker: str = "") ->
             "# claunch quick-fork: MERGE requested (machine-generated, not typed by the user)",
             f"target: {target}",
             f"marker: {marker or '?'}",
+            *_delegated_lines(origin=origin, target=target, reader="source"),
             "protocol: finish the step you are on, then write a wrap-up of "
             f"everything done{since} -- what changed, files and commits, "
             "decisions taken, what is still open -- and hand it in: the MCP "
@@ -339,20 +348,35 @@ def compose_request(*, kind: str, source: str, target: str, marker: str = "") ->
 
 def compose_report(
     *, kind: str, source: str, target: str, text: str,
-    marker: str = "", forked_at: str = "",
+    marker: str = "", forked_at: str = "", origin: str = "",
 ) -> str:
     """What the target receives: a fenced header saying who and from where,
-    then the agent's text as it wrote it."""
+    then the agent's text as it wrote it.
+
+    ``origin`` is the session the copy was made from. When it is not
+    ``target`` the merge was delegated up past an origin that has ended, and
+    the header says so: the conversation the copy started from is then the
+    origin's, not the reader's."""
     if kind == MERGE:
+        delegated = bool(origin) and origin != target
         head = [
             "---",
             f"# claunch quick-fork: merged from {source} (machine-generated, not typed by the user)",
             f"fork: {source}",
-            f"marker: {marker or '?'}" + (f" (forked from this conversation at {forked_at})" if forked_at else ""),
-            f"note: {source} was a copy of this conversation from that point. "
-            "The wrap-up below is everything it did after the marker, in its "
-            f"own words. {source} has been ended; what it reports is now "
-            "yours to carry on.",
+            f"marker: {marker or '?'}" + (
+                f" (forked from {origin}'s conversation at {forked_at})" if delegated and forked_at
+                else f" (forked from this conversation at {forked_at})" if forked_at else ""
+            ),
+            *_delegated_lines(origin=origin, target=target, reader="target"),
+            (f"note: {source} was a copy of {origin}'s conversation from that "
+             "point. The wrap-up below is everything it did after the marker, "
+             f"in its own words. {source} has been ended; what it reports is "
+             "now yours to carry on.")
+            if delegated else
+            (f"note: {source} was a copy of this conversation from that point. "
+             "The wrap-up below is everything it did after the marker, in its "
+             f"own words. {source} has been ended; what it reports is now "
+             "yours to carry on."),
             "---",
         ]
     else:
@@ -379,6 +403,105 @@ def compose_cancel(*, kind: str, target: str) -> str:
         "is not being ended.",
         "---",
     ])
+
+
+def _delegated_lines(*, origin: str, target: str, reader: str) -> list:
+    """The one line a merge block carries when it does not go to the origin."""
+    if not origin or origin == target:
+        return []
+    if reader == "target":
+        return [
+            f"delegated: {origin}, the session this copy was forked from, has "
+            f"ended -- so the wrap-up comes to you, the nearest live session "
+            f"above it.",
+        ]
+    return [
+        f"delegated: your origin {origin} has ended, so the wrap-up goes to "
+        f"{target}, the nearest live session above it. Write it for a reader "
+        f"who did not hold {origin}'s conversation.",
+    ]
+
+
+def compose_undelivered(*, source: str, origin: str, lineage: list, saved: str) -> str:
+    """The answer a merge gets when no session above the copy is live:
+    written for the agent that handed the wrap-up in, which is the one that
+    has to tell the person at its terminal."""
+    checked = ", ".join(f"{name} ({state})" for name, state in lineage) or origin
+    return (
+        f"no live session to merge into: {origin}, the session {source} was "
+        f"forked from, and every session above it have ended (checked: "
+        f"{checked}). The wrap-up was NOT delivered and {source} was NOT ended; "
+        + (f"it is saved at {saved}. " if saved else "it could not be saved. ")
+        + "Tell the user in this terminal, and leave it to them: resume one "
+        "of those sessions (claunch respawn <name>) and merge again, hand "
+        "the work off to a live session (the 'handoff' tool with 'to'), or "
+        "end this session."
+    )
+
+
+def merge_lineage(manager, source: str) -> list:
+    """Where a merge from ``source`` can go, nearest first, as
+    ``(name, state)`` with state ``live``, ``exited`` or ``gone`` (no record).
+
+    The first entry is the copy's origin (``quick_fork_of``). From each
+    session the walk goes to its own origin when it is itself a copy, and
+    otherwise to its spawn parent -- so a copy of a copy reaches the session
+    the chain began from, and past that the tree above it. A name with no
+    record is listed and stepped over: the manager escalates the children of
+    a removed record to its parent, so the session's other pointer
+    (``parent``) already names the next one that survives.
+
+    A ``deep_think`` copy has exactly one entry: its answer belongs to the
+    session that asked, and the deadline sweep ends the copy when that one
+    is gone (daemon/deep_think.py) -- nobody above asked the question.
+    """
+    from .manager import ManagerError  # local: manager imports the api that imports us
+
+    def lookup(name):
+        try:
+            return manager.get(name)
+        except ManagerError:
+            return None
+
+    src = lookup(source)
+    if src is None or not src.sdef.quick_fork_of:
+        return []
+    out: list = []
+    seen = {source}
+    cur = src
+    while cur is not None:
+        nxt = None
+        for cand in (cur.sdef.quick_fork_of, cur.sdef.parent):
+            if not cand or cand in seen:
+                continue
+            seen.add(cand)
+            rec = lookup(cand)
+            if rec is None:
+                out.append((cand, "gone"))
+                continue
+            out.append((cand, "exited" if rec.exited else "live"))
+            nxt = rec
+            break
+        if src.sdef.deep_think:
+            return out[:1]
+        cur = nxt
+    return out
+
+
+class NoLiveAncestor(HandoffError):
+    """A merge whose origin and every session above it have ended."""
+
+    def __init__(self, source: str, origin: str, lineage: list) -> None:
+        self.source = source
+        self.origin = origin
+        self.lineage = lineage
+        checked = ", ".join(f"{n} ({st})" for n, st in lineage) or origin
+        super().__init__(
+            f"no live session to merge {source!r} into: its origin {origin!r} "
+            f"and every session above it have ended (checked: {checked}). "
+            "Resume one of them (claunch respawn <name>) and merge again, or "
+            "hand off to a live session instead."
+        )
 
 
 # ---- the state ------------------------------------------------------------ #
@@ -415,7 +538,9 @@ class Handoffs:
         """Settle ``(kind, target)`` for a request or a completion from
         ``source``, refusing what cannot work with the reason.
 
-        A quick-fork's merge target is fixed to its origin; a plain handoff
+        A quick-fork's merge goes to its origin, or -- when the origin has
+        ended -- to the nearest live session above it (:func:`merge_lineage`);
+        with none live it raises :class:`NoLiveAncestor`. A plain handoff
         needs a live target that is not the source. ``kind`` left empty is
         read from the source: a quick-fork merges, anything else hands off.
         """
@@ -428,8 +553,10 @@ class Handoffs:
         if src.exited:
             raise HandoffError(f"session {source!r} has exited — nothing to hand off")
         origin = src.sdef.quick_fork_of or ""
+        lineage = merge_lineage(manager, source) if origin else []
+        above = [name for name, _ in lineage]
         if not kind:
-            kind = MERGE if origin and (not to or to == origin) else HANDOFF
+            kind = MERGE if origin and (not to or to in above) else HANDOFF
         if kind not in KINDS:
             raise HandoffError(f"unknown kind {kind!r}: one of {', '.join(KINDS)}")
         if kind == MERGE:
@@ -439,13 +566,21 @@ class Handoffs:
                     "to the session a quick-fork was copied from, and this one "
                     "was not. Use a handoff (pick the target) instead."
                 )
-            if to and to != origin:
+            live = next((name for name, state in lineage if state == "live"), "")
+            if not live:
+                raise NoLiveAncestor(source, origin, lineage)
+            # A named target is accepted only when it is where the merge goes
+            # anyway: a pending request settled on the nearest live session
+            # above, and its completion names that one back.
+            if to and to != live:
                 raise HandoffError(
                     f"session {source!r} is a quick-fork of {origin!r}; a merge "
-                    f"goes back there, not to {to!r}. Use a handoff to send it "
-                    "elsewhere."
+                    f"goes back to {live!r}"
+                    + (f" (the nearest live session above {origin!r}, which has ended)"
+                       if live != origin else "")
+                    + f", not to {to!r}. Use a handoff to send it elsewhere."
                 )
-            target = origin
+            target = live
         else:
             target = (to or "").strip()
             if not target:
@@ -464,7 +599,11 @@ class Handoffs:
                 f"session {target!r} has exited — a report typed into an exited "
                 "terminal reaches nobody. Resume it first, or hand off elsewhere."
             )
-        return {"kind": kind, "source": source, "target": target}
+        settled = {"kind": kind, "source": source, "target": target}
+        if kind == MERGE:
+            settled["origin"] = origin
+            settled["delegated"] = target != origin
+        return settled
 
     # ---- the request ------------------------------------------------------ #
     async def request(
@@ -497,8 +636,11 @@ class Handoffs:
             "delivered": None,
         }
         self.pending[source] = row
+        if settled.get("delegated"):
+            row["origin"] = settled["origin"]
         text = compose_request(
             kind=row["kind"], source=source, target=row["target"], marker=marker,
+            origin=settled.get("origin", ""),
         )
         session = manager.get(source)
         task = asyncio.ensure_future(self._deliver_request(session, source, text))
@@ -527,7 +669,9 @@ class Handoffs:
         that fails or times out keeps the source alive and says so — the
         caller (an agent, usually the source itself) retries or picks
         another target. Nothing is ended on the strength of a report nobody
-        received.
+        received. A merge with no live session above the copy is the one
+        completion that does not raise: there is no target to retry, so the
+        wrap-up is saved and the answer says so (:meth:`_undelivered`).
         """
         body = (text or "").strip()
         if not body:
@@ -546,11 +690,24 @@ class Handoffs:
         # target only when the completion did not name a different kind: a
         # fork asked to hand off to C that instead merges goes to its origin.
         inherit = not kind or kind == row.get("kind")
-        settled = self.resolve(
-            manager, source,
-            to=to or (row.get("target", "") if inherit else ""),
-            kind=kind or row.get("kind", ""),
-        )
+        from_row = not to and inherit and bool(row.get("target"))
+        to = to or (row.get("target", "") if inherit else "")
+        kind = kind or row.get("kind", "")
+        try:
+            settled = self.resolve(manager, source, to=to, kind=kind)
+        except NoLiveAncestor as exc:
+            return self._undelivered(manager, source, body, exc)
+        except HandoffError:
+            # The request settled a merge on a session that has ended since;
+            # the completion re-settles on whatever is nearest and live now.
+            # Only a target the request supplied -- one the caller named
+            # itself is refused as named.
+            if not (from_row and kind == MERGE):
+                raise
+            try:
+                settled = self.resolve(manager, source, kind=MERGE)
+            except NoLiveAncestor as exc:
+                return self._undelivered(manager, source, body, exc)
         marker = row.get("marker") or _marker_of(manager, source)
         block = None
         for compose in self.composers:
@@ -561,6 +718,7 @@ class Handoffs:
             block = compose_report(
                 kind=settled["kind"], source=source, target=settled["target"],
                 text=body, marker=marker, forked_at=_forked_at_of(manager, source),
+                origin=settled.get("origin", ""),
             )
         target = manager.get(settled["target"])
         if timeout is None:
@@ -603,6 +761,49 @@ class Handoffs:
         return {
             **settled, "marker": marker, "delivered": True, "ended": ended,
             "completed_at": _utcnow(),
+        }
+
+    def _undelivered(self, manager, source: str, body: str, exc: "NoLiveAncestor") -> dict:
+        """A merge with no live session above the copy: keep the wrap-up
+        and the copy, and say so where the person will see it.
+
+        Typing the report into an exited terminal reaches nobody, and ending
+        the copy would leave the wrap-up nowhere at all. So the text is
+        written beside the copy's record (``<session dir>/merge-undelivered-
+        <stamp>.md``), the copy stays live, and the answer -- read by the
+        agent that handed it in -- tells it to tell the user. A viewer
+        attached to the copy also gets a notice over its terminal.
+        """
+        stamp = _utcnow()
+        saved = ""
+        try:
+            from . import paths
+
+            folder = paths.session_dir(source)
+            folder.mkdir(parents=True, exist_ok=True)
+            path = folder / f"merge-undelivered-{stamp.replace(':', '').replace('+0000', 'Z')}.md"
+            path.write_text(body + "\n", encoding="utf-8")
+            saved = str(path)
+        except Exception as err:  # the answer still carries the reason
+            log.warning("handoff: could not save %r's undelivered wrap-up: %s", source, err)
+        self.pending.pop(source, None)
+        try:
+            manager.get(source).notify(
+                f"merge: no live session above {source} to take the wrap-up "
+                f"({exc.origin} and its ancestors have ended)"
+                + (f" — saved to {saved}" if saved else ""),
+                ttl=30, level="warn",
+            )
+        except Exception:
+            pass
+        return {
+            "kind": MERGE, "source": source, "target": "", "origin": exc.origin,
+            "delivered": False, "ended": False, "undelivered": True,
+            "lineage": [{"name": n, "state": st} for n, st in exc.lineage],
+            "saved": saved,
+            "note": compose_undelivered(
+                source=source, origin=exc.origin, lineage=exc.lineage, saved=saved,
+            ),
         }
 
     # ---- withdrawing ------------------------------------------------------ #

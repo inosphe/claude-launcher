@@ -1746,9 +1746,16 @@ def _cmd_quick_fork(args: argparse.Namespace) -> int:
             # is the operator's press.
             body["actor"] = os.environ["CLAUNCH_SESSION"]
         info = client.post(f"/api/sessions/{target}/handoff", body)
+        if info.get("undelivered"):
+            # No live session above the copy: nothing was typed anywhere and
+            # the copy was kept. The daemon's note says where the text went.
+            print(f"not merged: {info.get('note') or 'no live session to merge into'}")
+            return 1
         if info.get("completed"):
             print(
                 f"merged: the wrap-up was typed into {info['target']!r}"
+                + (f" (origin {info['origin']!r} has ended — delegated to the "
+                   "nearest live session above it)" if info.get("delegated") else "")
                 + (f"; session {target!r} ended" if info.get("ended") else
                    f"; session {target!r} could NOT be ended — kill it yourself")
             )

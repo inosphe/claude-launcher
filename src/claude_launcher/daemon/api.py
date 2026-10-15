@@ -10453,7 +10453,8 @@ async def h_session_handoff(request: web.Request) -> web.Response:
     the request is recorded as pending (the row's ``handoff`` field).
 
     ``to`` names the target for a handoff; a quick-fork's merge needs none
-    (it goes back to the origin) and refuses any other. ``kind`` may force
+    (it goes back to the origin, or to the nearest live session above it
+    when the origin has ended) and refuses any other. ``kind`` may force
     ``handoff`` on a quick-fork that wants to report elsewhere. ``actor`` is
     the session filing a request (the CLI sends ``$CLAUNCH_SESSION``); a
     quick-fork's request is the operator's, so one with an actor is refused
@@ -10470,7 +10471,10 @@ async def h_session_handoff(request: web.Request) -> web.Response:
     try:
         if text is not None and str(text).strip():
             result = await handoffs.complete(manager, name, text=str(text), to=to, kind=kind)
-            return json_response({"completed": True, **result})
+            # A merge with no live session above the copy is answered, not
+            # refused: the wrap-up was saved and the copy kept (``note`` says
+            # where), and ``completed`` is false because nothing landed.
+            return json_response({"completed": not result.get("undelivered"), **result})
         result = await handoffs.request(manager, name, to=to, kind=kind, actor=actor)
         return json_response({"requested": True, "source": name, **result})
     except handoff_mod.HandoffError as exc:
