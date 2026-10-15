@@ -27,7 +27,12 @@
    row written before rows kept a target opens nothing. Every card carries ×,
    which puts it away without following it; while the panel is open the
    corner strip moves below the panel's head so it does not cover the
-   panel's own close button. */
+   panel's own close button.
+
+   Marks and the All / Marked filter (claunch-knuet): ☆ on a history row marks
+   it ★ without reading it or opening its target; Marked shows only those
+   rows and All every row again; the filter and the marks survive a reload;
+   Clear and the 100-row cap keep marked rows. */
 const fs = require("fs");
 const path = require("path");
 const STATIC = path.join(__dirname, "..", "..", "src", "claude_launcher", "web",
@@ -253,7 +258,7 @@ function gotoRec(rec) {
     check("× does not read it", w.api.noticeHistory.find((e) => e.title === "two").read === false &&
             w.badge() === "2", w.badge());
     w.api.noticePanelToggle(true);
-    const rowOf = (t) => w.panelRows().find((r) => r.children[0].children[0].textContent === t);
+    const rowOf = (t) => w.panelRows().find((r) => r.querySelector(".notice-title").textContent === t);
     check("an unread row is marked so", rowOf("two").classList.contains("unread") &&
             rowOf("one").classList.contains("read"), [rowOf("two").className, rowOf("one").className]);
     rowOf("two").click();
@@ -284,6 +289,66 @@ function gotoRec(rec) {
     check("a row saved before read marks is read if the panel was opened after it",
           w.api.noticeHistory.find((e) => e.id === "h1").read === true &&
             w.api.noticeHistory.find((e) => e.id === "h2").read === false, w.api.noticeHistory);
+  }
+
+  /* --- marks and the All / Marked filter (claunch-knuet) --------------- */
+  {
+    const w = build();
+    let opened = 0;
+    w.api.notify("one", "a", { key: "k1", sticky: true });
+    w.api.notify("two", "b", { key: "k2", sticky: true, session: "s1",
+                               target: { thread: "th-1" }, open: () => { opened += 1; } });
+    w.api.notify("three", "c", { key: "k3", sticky: true });
+    w.api.noticePanelToggle(true);
+    const rowOf = (t) => w.panelRows().find((r) => r.querySelector(".notice-title").textContent === t);
+    const entry = (t) => w.api.noticeHistory.find((e) => e.title === t);
+    const head = () => w.nodes["notice-panel-body"].children
+      .find((c) => c.classList.contains("notice-panel-section-row"));
+    check("the filter starts at All", w.press(head(), "All").classList.contains("active") &&
+            !w.press(head(), "Marked").classList.contains("active"), head().text());
+    check("each row has an unmarked ☆", w.panelRows().every((r) => r.querySelector(".notice-star").textContent === "☆"),
+          w.panel());
+    w.press(rowOf("two"), "☆").click();
+    check("☆ marks the row", entry("two").marked === true &&
+            rowOf("two").querySelector(".notice-star").textContent === "★" &&
+            rowOf("two").querySelector(".notice-star").classList.contains("on"), entry("two"));
+    check("without reading it or opening it", entry("two").read === false && opened === 0 &&
+            w.loc.hash === "" && w.badge() === "3", [entry("two"), opened, w.badge()]);
+    check("and the mark is stored",
+          JSON.parse(w.storage.getItem("claunch.noticeHistory")).find((e) => e.title === "two").marked === true);
+    w.press(head(), "Marked").click();
+    check("Marked shows only the marked rows",
+          w.panelRows().length === 1 && rowOf("two") && /History \(1\)/.test(w.panel()) &&
+            w.press(head(), "Marked").classList.contains("active"), w.panel());
+    check("and the choice is stored", JSON.parse(w.storage.getItem("claunch.noticeFilter")) === "marked");
+    check("Mark all read there reads only what it shows", (() => {
+      w.press(head(), "Mark all read").click();
+      return entry("two").read === true && entry("one").read === false && w.badge() === "2";
+    })(), [w.api.noticeHistory, w.badge()]);
+    const second = build({ storage: w.storage });
+    second.api.noticePanelToggle(true);
+    check("a reload keeps the filter and the mark",
+          second.panelRows().length === 1 && /two/.test(second.panel()), second.panel());
+    w.press(rowOf("two"), "★").click();
+    check("★ unmarks it, and Marked says it is empty",
+          entry("two").marked === false && w.panelRows().length === 0 &&
+            /no row is marked/.test(w.panel()), w.panel());
+    w.press(head(), "All").click();
+    check("All shows every row again", w.panelRows().length === 3, w.panel());
+    w.press(rowOf("three"), "☆").click();
+    w.press(head(), "Clear").click();
+    check("Clear keeps the marked row",
+          w.api.noticeHistory.length === 1 && entry("three").marked === true, w.api.noticeHistory);
+    check("and offers nothing more to clear", !w.press(head(), "Clear"), w.panel());
+  }
+  {
+    const w = build();
+    w.api.notify("kept", "", { key: "kept" });
+    w.api.noticeHistory[0].marked = true;
+    for (let i = 0; i < 120; i += 1) w.api.notify(`n${i}`, "", { key: `n${i}` });
+    check("the 100-row cap drops unmarked rows first",
+          w.api.noticeHistory.length === 100 && w.api.noticeHistory.some((e) => e.title === "kept") &&
+            w.api.noticeHistory[0].title === "n119", w.api.noticeHistory.length);
   }
 
   /* --- × puts a card away without following it (claunch-x76l8) --------- */
