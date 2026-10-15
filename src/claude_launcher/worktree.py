@@ -307,14 +307,19 @@ def pane_token() -> str:
     return session or "wt"
 
 
-def default_name(now: Optional[datetime] = None) -> str:
+def default_name(now: Optional[datetime] = None, *, token: Optional[str] = None) -> str:
     """The name used when a human wants a worktree but not to name one.
 
     Pane plus timestamp: unique per pane per second, and legible afterwards --
     ``git worktree list`` then says which pane made each checkout, and when.
+
+    ``token`` replaces the pane: the daemon passes the session the checkout
+    is for, because its own environment names no pane of the asker's -- it
+    named whichever pane had started the daemon (claunch-2yiij.3).
     """
     stamp = (now or datetime.now()).strftime("%Y%m%d-%H%M%S")
-    return f"{pane_token()}-{stamp}"
+    head = herdr.sanitize_fragment(token or "") if token is not None else ""
+    return f"{head or pane_token()}-{stamp}"
 
 
 def child_name(parent: str, child: str, now: Optional[datetime] = None) -> str:

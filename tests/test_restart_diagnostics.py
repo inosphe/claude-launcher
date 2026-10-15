@@ -24,9 +24,15 @@ def test_spawn_daemon_writes_the_record_before_starting(home, monkeypatch):
     class _P:
         pass
 
-    monkeypatch.setattr(
-        daemon_client.subprocess, "Popen", lambda *a, **k: started.append(a) or _P()
-    )
+    real = daemon_client.subprocess.Popen
+
+    def fake_popen(argv, *a, **k):
+        if argv[0] == "git":  # daemon_cwd asking where the checkout is
+            return real(argv, *a, **k)
+        started.append(argv)
+        return _P()
+
+    monkeypatch.setattr(daemon_client.subprocess, "Popen", fake_popen)
     daemon_client.spawn_daemon(reason="unit test reason")
     from claude_launcher.daemon import paths
 

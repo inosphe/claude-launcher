@@ -728,6 +728,13 @@ def main(argv=None) -> int:
     # hand, a predecessor on older code). After the manifest, which can move
     # the launcher home the profile-home check is measured against.
     scrubbed = session_env.scrub_in_place()
+    # Nor its directory (claunch-2yiij.1): spawn_daemon starts the daemon in
+    # daemon_client.daemon_cwd(), and a start that did not go through it is
+    # moved there before anything reads os.getcwd().
+    try:
+        os.chdir(daemon_client.daemon_cwd())
+    except OSError:
+        pass
     _setup_logging(args.foreground)
     if scrubbed:
         log.info("removed session variables from the daemon environment: %s",
