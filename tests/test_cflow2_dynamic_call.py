@@ -379,3 +379,39 @@ def test_slot_migration_requalifies_call_scopes():
     out = slot_migration.requalify(
         {"scope": "w1", "calls": {"c1": {"nested": {"cwd": "/x", "scope": "w1~c1"}}}}, "other")
     assert out["calls"]["c1"]["nested"]["scope"] == "w1@other~c1"
+
+
+# -- display: web run page, run list, CLI status (claunch-z17c9.1) -----------------------
+
+
+def test_the_web_run_page_lists_calls_and_links_the_callee(tmp_path):
+    from claude_launcher.daemon import cflow2_web
+
+    _start(tmp_path)
+    _call(tmp_path, "probe", {"target": "x"})
+    detail = cflow2_web.run_detail(_cwd(tmp_path), "w1")
+    (c,) = detail["calls"]
+    assert c["id"] == "c1" and c["procedure"] == "probe" and c["status"] == "running"
+    assert c["label"] == "work" and c["scope"].endswith("~c1") and c["cwd"] == _cwd(tmp_path)
+    assert c["outcome"] is None
+    # the callee's own page exists under that slot
+    assert cflow2_web.run_detail(_cwd(tmp_path), c["scope"])["run"]["workflow"] == "probe"
+    assert cflow2_web.run_summary(_cwd(tmp_path), "w1")["calls"] == 1
+    _report(tmp_path, "w1~c1", "look", {"found": "bug"})
+    (c,) = cflow2_web.run_detail(_cwd(tmp_path), "w1")["calls"]
+    assert c["status"] == "returned" and c["outcome"] == "ok"
+    assert cflow2_web.run_summary(_cwd(tmp_path), "w1")["calls"] == 0
+
+
+def test_cli_status_prints_calls_and_the_call_result(tmp_path, capsys):
+    from claude_launcher import cli_cflow2
+
+    _start(tmp_path)
+    cli_cflow2._print_status(_call(tmp_path, "probe", {"target": "x"}), False)
+    out = capsys.readouterr().out
+    assert "  call c1 work: probe running (scope w1@main~c1)" in out
+    _report(tmp_path, "w1~c1", "look", {"found": "bug"})
+    cli_cflow2._print_status(_status(tmp_path), False)
+    out = capsys.readouterr().out
+    assert "  call c1 work: probe returned -> ok (scope w1@main~c1)" in out
+    assert "    call c1 probe returned ok" in out

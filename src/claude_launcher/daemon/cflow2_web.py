@@ -591,6 +591,23 @@ def delegations(state: dict, journal: List[dict]) -> List[dict]:
     return out
 
 
+def calls(state: dict) -> List[dict]:
+    """The run's dynamic calls (``flow_call``, docs/cflow-v2.md 2.12): which
+    task called which procedure, how it stands, and the callee run's slot
+    (its own run page) -- the calling task itself only shows ``calling``."""
+    out = []
+    for cid, rec in (state.get("calls") or {}).items():
+        if not isinstance(rec, dict):
+            continue
+        nested = rec.get("nested") if isinstance(rec.get("nested"), dict) else {}
+        entry = {k: rec.get(k) for k in ("instance", "node", "label", "procedure", "status",
+                                         "started", "finished", "outcome")}
+        entry.update({"id": rec.get("id") or cid, "scope": nested.get("scope"),
+                      "cwd": nested.get("cwd")})
+        out.append(entry)
+    return out
+
+
 RUN_HISTORY_LIMIT = 10
 
 
@@ -684,6 +701,7 @@ def run_detail(cwd: str, scope: str, prompts: bool = False) -> dict:
         "visits": state.get("visits") or {},
         "journal": journal,
         "delegations": delegations(state, journal),
+        "calls": calls(state),
     }
 
 
@@ -799,6 +817,9 @@ def run_summary(cwd: str, scope: str) -> Optional[dict]:
         "current": labels,
         "delegations": sum(1 for d in (state.get("delegations") or {}).values()
                            if d.get("status") in ("pending", "queued", "running")),
+        # an open call's status is runtime.CALL_OPEN ("running")
+        "calls": sum(1 for c in (state.get("calls") or {}).values()
+                     if isinstance(c, dict) and c.get("status") == "running"),
     }
 
 
