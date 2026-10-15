@@ -53,12 +53,20 @@ def _operator_only(what: str) -> bool:
     return True
 
 
-def _fmt_holder(entry: dict) -> str:
+def _who(entry: dict) -> str:
     who = entry.get("session") or f"pid {entry.get('pid')}"
     if entry.get("session") and entry.get("instance"):
         # Another daemon instance on this machine shares the window
         # (claunch-afmzw); its session names are its own.
         who = f"{who}@{entry['instance']}"
+    if not entry.get("session") and entry.get("requested_by"):
+        # A sessionless run (a delayed sweep) names who it works for.
+        who = f"{who} for {entry['requested_by']}"
+    return who
+
+
+def _fmt_holder(entry: dict) -> str:
+    who = _who(entry)
     since = entry.get("acquired_at") or entry.get("enqueued_at") or "?"
     label = entry.get("label") or ""
     extra = []
@@ -388,9 +396,7 @@ def _cmd_history(args) -> int:
             f"gave up waiting {st.get('gave_up_waiting', 0)}, forced {st.get('forced', 0)}"
         )
     for entry in answer.get("entries") or []:
-        who = entry.get("session") or f"pid {entry.get('pid')}"
-        if entry.get("session") and entry.get("instance"):
-            who = f"{who}@{entry['instance']}"
+        who = _who(entry)
         print(
             f"  {entry.get('ended_at', '?')} {entry.get('cls', '?')}:{who} "
             f"{entry.get('end', '?')} wait {_fmt_seconds(entry.get('wait_seconds'))} "

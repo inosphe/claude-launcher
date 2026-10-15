@@ -569,6 +569,26 @@ def test_release_by_session_and_by_grant_id(tmp_path):
     asyncio.run(run())
 
 
+def test_requested_by_is_shown_and_recorded_but_never_owns_the_grant(tmp_path):
+    # claunch-ersj2: a delayed sweep runs without CLAUNCH_SESSION, so the
+    # Window page showed only its pid; requested_by names who it is for.
+    async def run():
+        w = _make(tmp_path)
+        a = await w.acquire("sweep", session=None, pid=os.getpid(), requested_by="s29")
+        holder = w.status()["holders"][0]
+        assert holder["session"] is None and holder["requested_by"] == "s29"
+        assert w.release_session("s29") == 0  # display only: not the owner
+        # A session-held grant has its owner already; requested_by is dropped.
+        w.release(a["grant_id"])
+        b = await w.acquire("targeted", session="s1", pid=os.getpid(), requested_by="s29")
+        assert "requested_by" not in w.status()["holders"][0]
+        w.release(b["grant_id"])
+        rows = w.history()["entries"]
+        assert [r.get("requested_by") for r in rows if r["grant_id"] == a["grant_id"]] == ["s29"]
+
+    asyncio.run(run())
+
+
 def test_cancel_by_waiting_id_or_session_leaves_holders_untouched(tmp_path):
     async def run():
         w = _make(tmp_path)

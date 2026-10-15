@@ -72,6 +72,20 @@ def test_the_requested_width_travels_to_the_daemon(monkeypatch):
     assert "workers" not in client.calls[0][1]  # 0 = the class ceiling
 
 
+def test_a_sessionless_run_sends_who_it_works_for(monkeypatch):
+    client = _Client()
+    monkeypatch.setattr(test_window.daemon_client, "connect", lambda: client)
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    monkeypatch.setenv(test_window.WINDOW_REQUESTED_BY_ENV, "s29")
+    test_window.acquire("sweep").release()
+    assert client.calls[0][1]["requested_by"] == "s29"
+    assert client.calls[0][1]["session"] is None
+    client.calls.clear()
+    monkeypatch.setenv("CLAUNCH_SESSION", "s9")
+    test_window.acquire("targeted").release()
+    assert "requested_by" not in client.calls[0][1]  # an owner needs no proxy
+
+
 def test_background_priority_travels_to_the_daemon_and_never_uses_fallback(monkeypatch):
     client = _Client()
     monkeypatch.setattr(test_window.daemon_client, "connect", lambda: client)

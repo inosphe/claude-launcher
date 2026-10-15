@@ -26078,7 +26078,10 @@ function windowHistorySection(history) {
 function windowOwner(entry) {
   if (entry && entry.session) return String(entry.session);
   const pid = Number(entry && entry.pid);
-  return Number.isFinite(pid) && pid > 0 ? `pid ${pid}` : "unknown owner";
+  const proc = Number.isFinite(pid) && pid > 0 ? `pid ${pid}` : "unknown owner";
+  // A sessionless run (a delayed sweep) names the session it works for
+  // (claunch-ersj2); that session does not own the grant.
+  return entry && entry.requested_by ? `${proc} for ${entry.requested_by}` : proc;
 }
 
 function windowAge(entry, now = Date.now()) {
@@ -26094,13 +26097,13 @@ function windowEntry(entry, position = null, queued = false) {
     "span", "window-rank", position === null ? "held" : `#${position}`));
   row.appendChild(el("span", "window-class", entry.cls || "unknown class"));
   const owner = el("span", "window-owner", windowOwner(entry));
-  if (entry.session) {
-    const live = (sessionsCache || []).find((s) => s.name === entry.session);
-    if (live) {
-      const link = el("a", "window-owner", String(entry.session));
-      link.href = `#/s/${encodeURIComponent(entry.session)}`;
-      row.appendChild(link);
-    } else row.appendChild(owner);
+  const named = entry.session || entry.requested_by;
+  const live = named && (sessionsCache || []).find((s) => s.name === named);
+  if (live) {
+    const link = el("a", "window-owner", windowOwner(entry));
+    link.href = `#/s/${encodeURIComponent(named)}`;
+    if (!entry.session) link.title = `runs without a session on behalf of ${named}`;
+    row.appendChild(link);
   } else row.appendChild(owner);
   // The tags ride inside the label cell so the row keeps its grid columns.
   const label = row.appendChild(el("span", "window-label", entry.label || "no label"));
