@@ -29,14 +29,26 @@ subscriptions), they collide. `claunch` gives every profile its own
 ## Install
 
 ```bash
-uv tool install claude-launcher
+uv tool install --python 3.14 claude-launcher
 # or, from a local checkout:
-uv tool install .
+uv tool install --python 3.14 .
 ```
 
 This puts `claunch` on your PATH. The `claude` CLI must already be installed.
 
-Optional: `uv tool install ".[p2p]"` adds aiortc (about 88 MB). With it, a web
+The daemon runs on CPython 3.14 (the regular build, with the GIL; not the
+free-threaded `3.14t`). Keep `--python 3.14` on every install command:
+`uv tool install` does not read the repository's `.python-version`, and without
+the flag uv takes whichever interpreter it finds first, so a reinstall can move
+the daemon to another Python version. With the flag, uv records `python = "3.14"`
+in the tool's receipt and `uv tool upgrade` keeps it. `.python-version` pins the
+same version for `uv run` / `uv sync` in a checkout (tests, the shim below).
+`requires-python` in `pyproject.toml` stays at `>=3.9`: it is the range the
+package installs on, not the version the daemon is run with. An existing
+`.venv` made with another version keeps working under `uv run --no-sync` (uv
+prints a warning); `uv sync --extra test` rebuilds it on 3.14.
+
+Optional: `uv tool install --python 3.14 ".[p2p]"` adds aiortc (about 88 MB). With it, a web
 page reached through the relay tunnel moves its control socket onto a WebRTC
 DataChannel straight to the daemon host when one can be negotiated, and stays
 on the relay when not. Without it nothing changes. `daemon.p2p_enabled: false`
@@ -47,7 +59,7 @@ turns it off; `p2p_stun`, `p2p_probe_stun` and `p2p_predict` are the other keys.
 Install editable so the tool imports straight from this repo instead of a copy:
 
 ```bash
-uv tool install --force --editable .
+uv tool install --force --python 3.14 --editable .
 ```
 
 Or skip uv's tool venv entirely and put a shim on PATH that runs the launcher
