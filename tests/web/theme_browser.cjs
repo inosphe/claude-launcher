@@ -6,7 +6,9 @@
      2. pressing it turns the page light (background light, text dark), keeps
         the choice in localStorage, and flips the switch's glyph;
      3. the terminals are inverted as a picture (.xterm carries the filter),
-        and the vendored xterm.css is not rewritten;
+        and the vendored xterm.css is not rewritten; the picture keeps its
+        tones: no channel of a pale colour is clipped to 0, text is a soft
+        black, dim text stays grey (claunch-bj6ee);
      4. switching back restores every rewritten declaration to the text it
         had: the sheets after light-then-dark equal the sheets before;
      5. a reload comes back light before any app script has run;
@@ -49,6 +51,44 @@ const lum = (css) => {
   const [r, g, b] = css.match(/[\d.]+/g).slice(0, 3).map(Number);
   return (Math.max(r, g, b) + Math.min(r, g, b)) / 2 / 255;
 };
+
+/* The colours a light-theme terminal shows for a few dark-palette colours.
+   A filter's output is only on screen, so the swatches are photographed and
+   the photo read back through a canvas. */
+async function terminalSwatches(page) {
+  const names = { bg: "#14161a", text: "#ffffff", dim: "#999999", lavender: "#b1b9f9" };
+  await page.evaluate((names) => {
+    const x = document.createElement("div");
+    x.className = "xterm";
+    x.id = "swatch-probe";
+    x.style.cssText = "position:fixed;left:0;top:0;z-index:99999;display:flex;background:#14161a";
+    for (const [name, colour] of Object.entries(names)) {
+      const s = document.createElement("div");
+      s.style.cssText = `width:40px;height:40px;background:${colour}`;
+      s.dataset.name = name;
+      x.append(s);
+    }
+    document.body.append(x);
+  }, names);
+  const shot = await page.screenshot({ clip: { x: 0, y: 0, width: 40 * Object.keys(names).length, height: 40 } });
+  await page.evaluate(() => document.getElementById("swatch-probe").remove());
+  return page.evaluate(async ({ png, keys }) => {
+    const img = new Image();
+    img.src = "data:image/png;base64," + png;
+    await img.decode();
+    const c = document.createElement("canvas");
+    c.width = img.width; c.height = img.height;
+    const g = c.getContext("2d");
+    g.drawImage(img, 0, 0);
+    const scale = img.width / (40 * keys.length);
+    const out = {};
+    keys.forEach((k, i) => {
+      const [r, gg, b] = g.getImageData(Math.floor((i * 40 + 20) * scale), Math.floor(20 * scale), 1, 1).data;
+      out[k] = `rgb(${r}, ${gg}, ${b})`;
+    });
+    return out;
+  }, { png: shot.toString("base64"), keys: Object.keys(names) });
+}
 
 (async () => {
   await safeListen(server);
@@ -105,8 +145,16 @@ const lum = (css) => {
     assert.equal(light.glyph, "☾");
     assert.equal(light.pressed, "true");
     // 3. terminals are inverted as a picture; xterm.css is untouched
-    assert.match(light.filter, /invert\(1\)/);
-    assert.match(light.filter, /hue-rotate\(180deg\)/);
+    assert.match(light.filter, /url\("?#claunch-light-term"?\)/);
+    const swatch = await terminalSwatches(page);
+    assert.ok(lum(swatch.bg) > 0.85, `terminal background ${swatch.bg}`);
+    // the dark palette's lavender (inline code) stays a blue, not a clipped navy
+    const lav = swatch.lavender.match(/\d+/g).map(Number);
+    assert.ok(Math.min(...lav) >= 30 && lav[2] === Math.max(...lav), `lavender became ${swatch.lavender}`);
+    const text = swatch.text.match(/\d+/g).map(Number);
+    assert.ok(Math.min(...text) >= 10 && Math.max(...text) <= 60, `white text became ${swatch.text}`);
+    assert.ok(lum(swatch.dim) - lum(swatch.text) > 0.15 && lum(swatch.bg) - lum(swatch.dim) > 0.3,
+      `dim text ${swatch.dim} between text ${swatch.text} and background ${swatch.bg}`);
     const vendorLight = await page.evaluate(() =>
       Array.from(Array.from(document.styleSheets).find((s) => /vendor\/xterm\.css/.test(s.href)).cssRules)
         .map((r) => r.cssText).join("\n"));

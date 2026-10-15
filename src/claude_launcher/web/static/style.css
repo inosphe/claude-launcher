@@ -93,16 +93,23 @@ option:disabled { color: #6b7280; }
 
 /* The light theme's terminals: the picture is inverted rather than the
    palette re-chosen, because a session's program draws in 24-bit colour the
-   xterm palette never sees (theme.js says why). hue-rotate turns the hues
-   back, so red stays red and only lightness flips. Inverting alone leaves
-   coloured text pale -- the dark palette's red is dark, so its inverse is a
-   light pink (255,140,140) on a near-white page -- so a linear stretch
-   follows (brightness 0.8, contrast 1.8: v' = 1.44 v - 0.4), which keeps the
-   background where the inversion put it (231 stays 231, the same as the
-   page around it) and pulls mid tones down: that red becomes (255,100,100),
-   grey text becomes black. */
+   xterm palette never sees (theme.js says why). The filter is the SVG
+   #claunch-light-term in index.html, two steps:
+     1. feColorMatrix inverts luma and keeps hue and chroma: every channel
+        moves by the same amount, c' = c + 1 - 2Y (Y the Rec. 709 luma), so
+        Y' = 1 - Y and the channel differences are unchanged. This is what
+        invert(1) hue-rotate(180deg) computes.
+     2. feComponentTransfer is a tone curve through 11 points: it keeps the
+        terminal background where step 1 put it (0.91 stays 0.91), lowers mid
+        tones so coloured text reads on a near-white page, and lifts 0 to
+        0.10, so text is a soft black.
+   The filter before this (claunch-bj6ee) followed step 1 with brightness(0.8)
+   contrast(1.8), a linear stretch v' = 1.44 v - 0.4. It sends every channel
+   below 0.28 to 0: the dark palette's lavender (177,185,249) became navy
+   (0,0,83), white text became black, dim grey text became near black, and
+   chroma grew by 1.44. A curve with a finite slope at 0 has no such floor. */
 html[data-theme="light"] .xterm {
-  filter: invert(1) hue-rotate(180deg) brightness(0.8) contrast(1.8);
+  filter: url(#claunch-light-term);
 }
 
 /* Keep the filter panel and session list visually continuous. */
