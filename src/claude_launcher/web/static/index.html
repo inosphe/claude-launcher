@@ -188,6 +188,9 @@
       <label><input type="radio" name="session-view" value="list" checked><span>List</span></label>
       <label><input type="radio" name="session-view" value="grid"><span>Grid</span></label>
     </fieldset>
+    <!-- The boot's restore queue (claunch-v4uyt): how many sessions the
+         daemon has started again after a restart, while any still wait. -->
+    <div id="restore-queue-banner" class="restore-queue-banner hidden" role="status" aria-live="polite"></div>
     <div id="session-filters" class="session-filters">
     <div class="session-filter-buttons" role="group"
          aria-label="Filter sessions by state">

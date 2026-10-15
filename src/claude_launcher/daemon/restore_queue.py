@@ -27,8 +27,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 from datetime import datetime
-from typing import Callable, Iterable, List, Optional, Sequence
+from typing import Callable, Dict, Iterable, List, Optional, Sequence
 
 from .manager import RESTORE_QUEUE, ManagerError
 
@@ -121,6 +122,12 @@ class RestoreQueue:
         #: Names this queue started (the rest were woken by use first, or
         #: had gone) — the tests' handle on the outcome.
         self.started: List[str] = []
+        #: Monotonic time of :meth:`start` and of the queue's last relaunch:
+        #: what :meth:`status` paces its estimate by. The configured interval
+        #: is a floor, not the pace -- a relaunch itself takes seconds, and on
+        #: 2026-10-14 84 sessions 3s apart took about 7 minutes.
+        self._began: Optional[float] = None
+        self._last_start: Optional[float] = None
         self._task: Optional[asyncio.Task] = None
 
     def start(self) -> None:
@@ -134,7 +141,69 @@ class RestoreQueue:
             "restore queue: %d session(s) delayed, %.1fs apart: %s",
             len(self.order), self.interval, ", ".join(self.order),
         )
+        self._began = time.monotonic()
         self._task = asyncio.get_running_loop().create_task(self._run())
+
+    # ---- progress, for the dashboard (claunch-v4uyt) ----------------------- #
+
+    def waiting(self) -> List[str]:
+        """The ranked names still delayed, next first."""
+        return [n for n in self.order if _delayed(self.manager, n)]
+
+    def pace(self, now: Optional[float] = None) -> float:
+        """Seconds per relaunch as measured so far; the interval until the
+        first one lands."""
+        now = time.monotonic() if now is None else now
+        if self._began is None or not self.started or self._last_start is None:
+            return self.interval
+        return max(self.interval, (self._last_start - self._began) / len(self.started))
+
+    def status(self, now: Optional[float] = None) -> Optional[dict]:
+        """The queue as a whole: ``None`` once nothing is left in it.
+
+        ``total`` is the boot's count, ``done`` how many have left the queue
+        by any way (started by it, woken by use, killed), ``remaining`` the
+        rest, ``next`` the one it starts next, ``eta_seconds`` an estimate of
+        when the last one starts at the pace measured so far."""
+        if not self.order:
+            return None
+        now = time.monotonic() if now is None else now
+        waiting = self.waiting()
+        if not waiting:
+            return None
+        pace = self.pace(now)
+        return {
+            "total": len(self.order),
+            "done": len(self.order) - len(waiting),
+            "started_by_queue": len(self.started),
+            "remaining": len(waiting),
+            "next": waiting[0],
+            "interval": self.interval,
+            "pace_seconds": round(pace, 1),
+            "eta_seconds": round(self._eta(len(waiting) - 1, pace, now)),
+        }
+
+    def positions(self, now: Optional[float] = None) -> Dict[str, dict]:
+        """Every still-delayed name's place: ``rank`` in the boot's order out
+        of ``total``, how many still wait ``ahead`` of it, and an estimate of
+        when it starts (``eta_seconds``)."""
+        now = time.monotonic() if now is None else now
+        waiting = self.waiting()
+        pace = self.pace(now)
+        rank_of = {n: i + 1 for i, n in enumerate(self.order)}
+        return {
+            name: {
+                "rank": rank_of[name],
+                "total": len(self.order),
+                "ahead": ahead,
+                "eta_seconds": round(self._eta(ahead, pace, now)),
+            }
+            for ahead, name in enumerate(waiting)
+        }
+
+    def _eta(self, ahead: int, pace: float, now: float) -> float:
+        since = now - (self._last_start or self._began or now)
+        return max(0.0, (ahead + 1) * pace - since)
 
     async def stop(self) -> None:
         task, self._task = self._task, None
@@ -163,4 +232,5 @@ class RestoreQueue:
                     self.manager.fail_delayed(name, reason=str(exc))
                 continue
             self.started.append(name)
+            self._last_start = time.monotonic()
         log.info("restore queue: done (%d started by the queue)", len(self.started))

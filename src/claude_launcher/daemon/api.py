@@ -8062,7 +8062,16 @@ async def h_sessions_list(request: web.Request) -> web.Response:
     rag_service = request.app.get("rag")
     rag_ok = bool(rag_service is not None and rag_service.configured())
     published = manager.progress.snapshot(info.get("name") or "" for info in attached)
+    # The boot's restore queue (claunch-v4uyt): each delayed row says where it
+    # stands, and the list says how far the queue has got, so the rail can
+    # tell "starts in a minute" apart from a hold.
+    queue = request.app.get("restore_queue")
+    queue_status = queue.status() if queue is not None else None
+    queue_places = queue.positions() if queue_status else {}
     for info in attached:
+        place = queue_places.get(info.get("name") or "")
+        if place:
+            info["restore_queue"] = place
         checks = check_digests.get(info.get("name") or "")
         if checks:
             info["status_checks"] = checks
@@ -8086,6 +8095,11 @@ async def h_sessions_list(request: web.Request) -> web.Response:
             "last_visited_at", "last_input_at", "last_activity_at", "viewers",
             "moved_rows", "tool_calls",
             "exited_at", "archived_at", "paused_at", "held_at", "delivery_hold",
+            # The two partitions the rail draws apart from hold and killed
+            # (claunch-0j6gb): without them every delayed row reached the page
+            # as a plain hold, and a boot's queue read as sessions that failed
+            # to come back (claunch-v4uyt).
+            "delayed_at", "failed_at", "restore_queue",
             "pending_deliveries", "compacting",
             "context", "branch", "briefing", "winddown", "session_reminder",
             # Whose conversation this session is a copy of, and the merge or
@@ -8112,9 +8126,12 @@ async def h_sessions_list(request: web.Request) -> web.Response:
             {key: value for key, value in info.items() if key in rail_fields}
             for info in attached
         ]
-    return json_response({
+    body = {
         "sessions": attached, "llm_configured": llm_ok, "rag_configured": rag_ok,
-    })
+    }
+    if queue_status:
+        body["restore_queue"] = queue_status
+    return json_response(body)
 
 
 async def h_sessions_create(request: web.Request) -> web.Response:

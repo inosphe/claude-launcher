@@ -101,7 +101,7 @@ function dotClass(record) {
   if (!record) return "dot exited";
   const status = record.status || "exited";
   const held = ["hold", "delayed"].includes(record.category) || (status === "exited" && record.held_at);
-  if (held) return record.category === "delayed" || record.delayed_at ? "dot exited hold delayed" : "dot exited hold";
+  if (held) return record.category === "delayed" || record.delayed_at ? "dot exited delayed" : "dot exited hold";
   if (record.category === "failed" || (status === "exited" && record.failed_at)) return "dot exited failed";
   const paused = record.category === "paused" || (status === "exited" && record.paused_at);
   return `dot ${paused ? "exited paused" : status}`;

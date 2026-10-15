@@ -1609,6 +1609,43 @@ function releaseRail() {
    the UI reads one (status · identity, the pair the header uses at
    app.js:6022): first who it is, then what became of it. The stylesheet
    caps the line and the full text rides the element's title. */
+/* Where a delayed record stands in the boot's restore queue (claunch-v4uyt):
+   "queued 48/84 · 12 ahead · ~2m". A delayed record is not a hold that
+   failed to come back: the daemon starts it by itself, and opening it
+   starts it now. The place rides the session poll (``restore_queue`` on the
+   row, from daemon/restore_queue.py). */
+function restoreEtaText(seconds) {
+  if (!(seconds > 0)) return "";
+  return seconds < 60 ? `~${Math.max(1, Math.round(seconds))}s` : `~${Math.round(seconds / 60)}m`;
+}
+
+function restoreQueueText(s) {
+  const q = s && s.restore_queue;
+  if (!q) return "queued to start";
+  const ahead = q.ahead ? `${q.ahead} ahead` : "next";
+  return [`queued ${q.rank}/${q.total}`, ahead, restoreEtaText(q.eta_seconds)]
+    .filter(Boolean).join(" · ");
+}
+
+/* The boot's restore queue as a whole, above the rail: shown only while
+   sessions are still waiting in it (the list response carries
+   ``restore_queue`` until the last one has started). */
+function renderRestoreQueueBanner(q) {
+  const box = typeof document !== "undefined" && document.getElementById("restore-queue-banner");
+  if (!box) return;
+  box.classList.toggle("hidden", !q);
+  if (!q) { box.textContent = ""; return; }
+  const parts = [`Restoring after restart: ${q.done}/${q.total} started`,
+                 `${q.remaining} queued`];
+  if (q.next) parts.push(`next ${q.next}`);
+  const eta = restoreEtaText(q.eta_seconds);
+  if (eta) parts.push(`${eta} left`);
+  box.textContent = parts.join(" · ");
+  box.title = "Sessions the daemon restarts one at a time after a restart. "
+    + "They are not failed or on hold: each starts by itself in turn, and "
+    + "opening one (or messaging it) starts it now.";
+}
+
 function railMetaText(s) {
   const identity = s.borrow
     ? `${profileHarnessLabel(s.profile, s.harness)} → ${s.borrow}`
@@ -1618,7 +1655,7 @@ function railMetaText(s) {
   // the pause is the operator's. A marker on a still-running row is a pause
   // whose signal has not landed yet — the same window a kill has.
   const state = s.archived_at ? "archived" : s.status === "exited"
-    ? (s.delayed_at ? "delayed" : s.held_at ? "hold" : s.failed_at ? `failed ${s.exit_code ?? "?"}`
+    ? (s.delayed_at ? restoreQueueText(s) : s.held_at ? "hold" : s.failed_at ? `failed ${s.exit_code ?? "?"}`
       : s.paused_at ? "paused" : `exit ${s.exit_code ?? "?"}`)
     : s.paused_at ? "pausing" : s.winddown ? "winding down" : "";
   // The kind the session declared at creation (``pi-durable``) follows the
@@ -4437,6 +4474,7 @@ async function refreshSessions(options) {
     if (typeof reconcileKillUiState === "function") reconcileKillUiState(sessionsCache);
     briefingLLM = data.llm_configured !== false;
     ragConfigured = data.rag_configured === true;
+    if (typeof renderRestoreQueueBanner === "function") renderRestoreQueueBanner(data.restore_queue);
     forgetDeadSessions();
     // A session opened before its record arrived (a reload on its address)
     // moves the rail to its project now that the record is here.
@@ -7805,7 +7843,10 @@ function dotGrade(s) {
    for a caller that holds a fresher one (the mobile bar). */
 function dotClassOf(s, status) {
   const st = status || (s && s.status) || "unknown";
-  const paused = st === "exited" && s && s.held_at ? (s.delayed_at ? " hold delayed" : " hold")
+  // A delayed record carries the hold marker too, but is drawn as its own
+  // state: it starts by itself (claunch-v4uyt).
+  const paused = st === "exited" && s && s.delayed_at ? " delayed"
+    : st === "exited" && s && s.held_at ? " hold"
     : st === "exited" && s && s.failed_at ? " failed"
     : st === "exited" && s && s.paused_at ? " paused" : "";
   return `dot ${st}${paused}${dotGrade(s && { ...s, status: st })}`;
@@ -7814,6 +7855,9 @@ function dotClassOf(s, status) {
 /* What the grade means for this session, in words, for the dot's title. */
 function dotTitle(s) {
   if (!s) return "";
+  if (s.status === "exited" && s.delayed_at) {
+    return `${restoreQueueText(s)} — starts by itself; opening it starts it now`;
+  }
   if (s.status === "busy") {
     const parts = [];
     if (s.moved_rows != null) parts.push(`${s.moved_rows} screen rows moved in the last minute`);
@@ -14700,8 +14744,9 @@ function setStatusBadge(status) {
   const delayed = held && !!record.delayed_at;
   const failed = exited && !held && !!record.failed_at;
   const marker = delayed ? "delayed" : held ? "hold" : failed ? "failed" : paused ? "paused" : "";
-  badge.textContent = marker || status;
-  badge.className = `badge ${status}${held ? " hold" : ""}${marker && marker !== "hold" ? ` ${marker}` : ""}`;
+  const q = delayed && record.restore_queue;
+  badge.textContent = q ? `queued ${q.rank}/${q.total}` : marker || status;
+  badge.className = `badge ${status}${held && !delayed ? " hold" : ""}${marker && marker !== "hold" ? ` ${marker}` : ""}`;
   // The rail dot's grade in words (dotTitle): how many rows a busy session
   // moved in the last minute, how long an idle one has sat. Only when the
   // poll's record agrees with the socket's word, or the two would contradict.
@@ -36780,7 +36825,10 @@ function renderSession(data) {
     if (s.paused_at) {
       metaRow(dl, "paused", localStamp(s.paused_at));
     }
-    if (s.held_at) {
+    if (s.delayed_at) {
+      // In the boot's restore queue (claunch-v4uyt): its place, not a hold.
+      metaRow(dl, "restore queue", restoreQueueText(s));
+    } else if (s.held_at) {
       metaRow(dl, "hold", localStamp(s.held_at));
     }
     view.appendChild(dl);

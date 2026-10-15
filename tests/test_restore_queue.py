@@ -388,3 +388,84 @@ def test_the_queue_does_not_strand_a_record_whose_use_wake_fails_mid_turn(
     record = mgr.get("d")
     assert record.delayed_at is None and record.held_at is None
     assert session_mod.session_category(record) == "failed"
+
+
+# --------------------------------------------------------------------------- #
+# progress for the dashboard (claunch-v4uyt)
+# --------------------------------------------------------------------------- #
+
+
+def test_queue_reports_each_place_and_its_progress(home):
+    mgr = _staggered()
+    for name in ("a", "b", "c", "d"):
+        _owed(mgr, name)
+    queue = restore_queue.RestoreQueue(mgr, interval=2.0)
+    queue.order = ["a", "b", "c", "d"]
+    queue._began = 100.0
+
+    places = queue.positions(now=100.0)
+    assert places["a"] == {"rank": 1, "total": 4, "ahead": 0, "eta_seconds": 2}
+    assert places["d"]["ahead"] == 3 and places["d"]["eta_seconds"] == 8
+    status = queue.status(now=100.0)
+    assert status["total"] == 4 and status["done"] == 0 and status["remaining"] == 4
+    assert status["next"] == "a"
+
+    # "a" started by the queue after 10s, "c" woken by use: both leave it, and
+    # the estimate follows the pace measured (10s), not the configured 2s.
+    for name in ("a", "c"):
+        mgr.get(name).held_at = mgr.get(name).delayed_at = None
+    queue.started.append("a")
+    queue._last_start = 110.0
+    places = queue.positions(now=110.0)
+    assert set(places) == {"b", "d"}
+    assert places["b"] == {"rank": 2, "total": 4, "ahead": 0, "eta_seconds": 10}
+    assert places["d"] == {"rank": 4, "total": 4, "ahead": 1, "eta_seconds": 20}
+    status = queue.status(now=110.0)
+    assert (status["done"], status["remaining"], status["next"]) == (2, 2, "b")
+    assert status["pace_seconds"] == 10.0
+
+    for name in ("b", "d"):
+        mgr.get(name).held_at = mgr.get(name).delayed_at = None
+    assert queue.status() is None
+    assert queue.positions() == {}
+
+
+def test_rail_rows_carry_the_delayed_marker_and_the_queue_place(home):
+    """The rail view keeps only listed fields: delayed_at and failed_at were
+    not among them, so every delayed row reached the page as a plain hold
+    (claunch-v4uyt)."""
+    from aiohttp.test_utils import TestClient, TestServer
+    from claude_launcher.daemon.api import build_app
+
+    async def run():
+        mgr = _staggered()
+        _owed(mgr, "waiting")
+        mgr._sessions["crashed"] = DeadSession(
+            SessionDef(name="crashed", harness="claude", cwd="/w"),
+            exit_code=1, failed_at=STAMP)
+        app = build_app(mgr, "sekrit", started_at=0.0)
+        queue = restore_queue.RestoreQueue(mgr, interval=3.0)
+        queue.order = ["waiting"]
+        queue._began = __import__("time").monotonic()
+        app["restore_queue"] = queue
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            response = await client.get(
+                "/api/sessions?view=rail&state=current",
+                headers={"Authorization": "Bearer sekrit"})
+            assert response.status == 200
+            body = await response.json()
+        finally:
+            await client.close()
+        return body
+
+    body = asyncio.run(run())
+    rows = {row["name"]: row for row in body["sessions"]}
+    assert rows["waiting"]["delayed_at"] == STAMP
+    assert rows["waiting"]["restore_queue"]["rank"] == 1
+    assert rows["waiting"]["restore_queue"]["total"] == 1
+    assert rows["crashed"]["failed_at"] == STAMP
+    assert "restore_queue" not in rows["crashed"]
+    assert body["restore_queue"]["remaining"] == 1
+    assert body["restore_queue"]["next"] == "waiting"
