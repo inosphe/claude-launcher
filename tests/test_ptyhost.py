@@ -248,6 +248,18 @@ def test_bad_token_and_second_client_are_refused(client, host_dir):
     assert client.ping()["pid"] == client.host_pid
 
 
+def test_the_hello_reports_the_hosts_code(client):
+    """The host's code id and file digests ride the hello (claunch-xnnct.3):
+    a host started from this tree reports this tree's id, and its start time."""
+    from claude_launcher.daemon.ptyhost import code_files, code_id
+
+    assert client.host_proto == 2
+    assert client.host_code_files == code_files()
+    assert client.host_code == code_id(code_files())
+    assert abs(client.host_started_at - time.time()) < 120
+    assert client.session_count() == 0
+
+
 def _connect_again(host_dir, timeout: float = 10.0) -> hc.HostClient:
     """Connect after a client let go. The host notices the old connection
     close on its own thread, so a connect right after it can still be

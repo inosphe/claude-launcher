@@ -435,6 +435,7 @@ CHECKS = [
         "snapshot_check.js",
         "notice_check.js",
         "restartgate_check.js",
+        "ptyhostbadge_check.js",
         "noticehistory_check.js",
         "termcache_check.js",
         "gpurender_check.js",
