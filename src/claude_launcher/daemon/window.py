@@ -853,16 +853,29 @@ class WindowManager:
         locks). An entry restored here has nobody behind it, and granting it
         later recorded a holder no one would release (claunch-zawnr).
         Holders are kept -- a grant outlives its request by design.
+
+        Only a waiter whose daemon process is gone is dropped. Building a
+        manager is not proof that the previous daemon exited: a process that
+        opens the machine's file with this instance name while its daemon
+        serves -- a pytest of a tree from before claunch-llmi1, run by the
+        delayed-sweep runner with the real base home -- otherwise emptied the
+        live daemon's queue, and every waiter came back ``cancelled`` within
+        one poll (claunch-ersj2.1).
         """
-        mine = [q for q in self._queue if self._mine(q)]
+        mine = [
+            q for q in self._queue
+            if self._mine(q) and not pid_alive(int(q.get("daemon_pid") or 0))
+        ]
         if not mine:
             return
         for entry in mine:
             self._record(entry, "disconnected")
         log.info("window: dropped %d waiter(s) left by the previous daemon",
                  len(mine))
-        # Another instance's waiters are long-polls on a daemon that lives on.
-        self._queue = [q for q in self._queue if not self._mine(q)]
+        # Another instance's waiters, and this instance's on a daemon that
+        # still runs, are long-polls on a process that lives on.
+        dropped = {q["grant_id"] for q in mine}
+        self._queue = [q for q in self._queue if q["grant_id"] not in dropped]
         self._save()
 
     def _save(self) -> None:
