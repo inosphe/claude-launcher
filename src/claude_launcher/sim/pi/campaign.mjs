@@ -148,7 +148,7 @@ export function gapPrompt(sim, model, batch, guide, rejected) {
     `Findings at ${batch.place}:`,
     "```json\n" + JSON.stringify(batch.findings.map((f) => ({ key: f.key, kind: f.kind, detail: f.detail, machine: f.machine, state: f.state, event: f.event, witness: f.witness?.steps, assumed: f.assumed, provisional: f.provisional, ...(f.triage ? { judge: f.triage } : {}) })), null, 1) + "\n```",
     "For each finding decide, reading the sources with your tools: (a) the sources say what happens -- add or change rules that quote them; (b) it cannot happen or is intended -- dismiss it with a reason; (c) only a person can decide -- ask a question (with options when there are a few clear choices).",
-    batch.findings.some((f) => f.triage) ? "A judge has already sorted these findings (the judge field): model -- the model misreads the sources, so fix the rules it names; spec -- the sources say nothing about this, so ask a question unless you find text that settles it, and do not add a provisional rule for it." : "",
+    batch.findings.some((f) => f.triage) ? "A judge has already sorted these findings (the judge field): model -- the model misreads the sources, so fix the rules it names; spec -- the sources say nothing about this, so ask a question unless you find text that settles it, and do not add a provisional rule for it; design -- the path ran through provisional rules and the design lacks a rule here, so add one (quote a source if you find text, else provisional with a why); decide -- the path ran through provisional rules and only a person can choose, so ask a question." : "",
     QUOTE_RULE,
     "The model format:",
     guide,
@@ -172,6 +172,15 @@ export function editorPrompt(sim, targets, max, rejected) {
   ].filter(Boolean).join("\n\n");
 }
 
+/** Triage verdicts (store.SimStore.TRIAGE / TRIAGE_PROVISIONAL): a finding
+ * whose path ran through a provisional rule is sorted as a design question. */
+export const TRIAGE = ["model", "spec", "intended"];
+export const TRIAGE_PROVISIONAL = ["design", "intended", "decide"];
+const triageVerdicts = (batch) => {
+  const sets = new Set(batch.findings.flatMap((f) => (f.provisional?.length ? TRIAGE_PROVISIONAL : TRIAGE)));
+  return [...sets].map((v) => `"${v}"`).join("|");
+};
+
 export function triagePrompt(sim, model, batch) {
   return [
     "You are the judge. A deterministic simulator walked a formal world model built from the sources and found the gaps below. Before anyone answers them, sort each one. Read the sources with your tools.",
@@ -179,11 +188,12 @@ export function triagePrompt(sim, model, batch) {
     "Current model:",
     "```json\n" + JSON.stringify(model) + "\n```",
     `Findings at ${batch.place}:`,
-    "```json\n" + JSON.stringify(batch.findings.map((f) => ({ key: f.key, kind: f.kind, detail: f.detail, witness: f.witness?.steps })), null, 1) + "\n```",
-    "model -- the sources do say what happens here and the model misreads or omits it (name the text); spec -- the sources say nothing that settles it, so a person must decide; intended -- it is not a defect (the situation cannot arise, or doing nothing is plainly what the sources mean); give the reason.",
+    "```json\n" + JSON.stringify(batch.findings.map((f) => ({ key: f.key, kind: f.kind, detail: f.detail, witness: f.witness?.steps, ...(f.provisional?.length ? { provisional: f.provisional } : {}) })), null, 1) + "\n```",
+    "For a finding without a provisional field: model -- the sources do say what happens here and the model misreads or omits it (name the text); spec -- the sources say nothing that settles it, so a person must decide; intended -- it is not a defect (the situation cannot arise, or doing nothing is plainly what the sources mean); give the reason.",
+    batch.findings.some((f) => f.provisional?.length) ? "A finding with a provisional field reached its place through those provisional rules, which no source text backs, so there is nothing to misread. Sort it with these verdicts instead: design -- the design lacks a rule here, add one; intended -- an intended exclusion (the situation is left out on purpose or cannot arise); decide -- only a person can choose what happens; give the reason." : "",
     langRule(sim, "each why (the user reads it)"),
-    'Answer with a JSON array [{"key": ..., "verdict": "model"|"spec"|"intended", "why": ...}] in a ```json fence at the end.',
-  ].join("\n\n");
+    `Answer with a JSON array [{"key": ..., "verdict": ${triageVerdicts(batch)}, "why": ...}] in a \`\`\`json fence at the end.`,
+  ].filter(Boolean).join("\n\n");
 }
 
 export function requotePrompt(sim, stale, guide, rejected) {

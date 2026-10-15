@@ -18,6 +18,8 @@ const sim = {id: 'sim-abc123', title: '<b>door</b>', goal: 'find gaps', owner: '
   project: 'p', root: '/repo', sources: ['spec.md'], counts: {open: 1, question: 1}, model_stats: {machines: 1, rules: 2},
   last_round: {round: 1, coverage: {reached: 2, cells: 4}}, runner: {session: 'sim-abc123-run1', started_at: 't0'},
   from: 'sim-old999', stale_sources: [{section: 'rules', id: 'r.lock'}],
+  purpose: {purpose: 'design', label: '설계 검토 — 원천 확인 아님', rules: 2, provisional: 1,
+    provisional_text: '규칙 2개 중 1개가 원천 없음(provisional)', warnings: []},
   settings: {interpreter_profile: 'ds4', judge_profile: 'glm', interpreter_reasoning: 'low', judge_reasoning: 'low',
     seed: 1, budget: 2000, horizon: 12, max_rounds: 20}};
 const findings = [
@@ -26,6 +28,9 @@ const findings = [
     reopened: {why: 'x'}, prev_question: {text: 'old q'}, triage: {verdict: 'spec', why: 'nothing about it'}},
   {key: 'unhandled|door|closed|close', kind: 'unhandled', status: 'question', detail: 'no rule', count: 1, first_round: 1, last_round: 1,
     witness: {steps: [{event: 'close'}]}, question: {text: 'what then?', options: ['nothing', 'error'], by: 's1'}},
+  {key: 'unhandled|door|locked|open', kind: 'unhandled', status: 'open', detail: 'no rule', count: 1, first_round: 1, last_round: 1,
+    witness: {steps: [{event: 'lock'}, {event: 'open'}]}, assumed: [], provisional: ['r.lock'],
+    triage: {verdict: 'design', why: 'no rule for a locked door'}},
 ];
 let delay = null;
 let startFault = null;
@@ -104,9 +109,16 @@ async function settle() { for (let i = 0; i < 10; i++) await new Promise(resolve
   assert(all(labelled('해석(B) 프로필')).some(n => n.tag === 'option' && n.value === 'oauth'));
   assert(!all(labelled('판정(C) 프로필')).some(n => n.tag === 'option' && n.value === 'oauth'));
   // Same profile, same model: the page warns; another model of it clears the warning.
-  assert(all().some(n => n.className === 'sim-warn'));
+  const modelBox = () => all().find(n => n.className === 'sim-models');
+  assert(all(modelBox()).some(n => n.className === 'sim-warn'));
   labelled('판정(C) 모델').value = 'glm-flash'; labelled('판정(C) 모델').onchange();
-  assert(!all().some(n => n.className === 'sim-warn'));
+  assert(!all(modelBox()).some(n => n.className === 'sim-warn'));
+  // Purpose: a source check (the default) with no sources warns; a design review does not.
+  const noSources = () => all().some(n => n.className === 'sim-warn' && n.textContent.startsWith('원천 확인용인데 원천이 없음'));
+  assert.strictEqual(labelled('목적').value, 'spec');
+  assert(noSources());
+  labelled('목적').value = 'design'; labelled('목적').onchange();
+  assert(!noSources());
   labelled('판정(C) 프로필').value = 'glm'; labelled('판정(C) 프로필').onchange();
   assert(all(labelled('판정(C) 모델')).some(n => n.tag === 'option' && n.value === 'glm-big'));
   // A poll while typing does not redraw over the draft.
@@ -122,11 +134,17 @@ async function settle() { for (let i = 0; i < 10; i++) await new Promise(resolve
   assert.strictEqual(made.body.settings.judge_profile, 'glm');
   assert.strictEqual(made.body.settings.interpreter_profile, 'ds4');
   assert.strictEqual(made.body.settings.judge_model, '');  // a new judge profile resets the model choice
+  assert.strictEqual(made.body.settings.purpose, 'design');
   assert.strictEqual(loc.hash, '#/sims/sim-new111');
   // Detail.
   ctx.SimPage.open('sim-abc123'); await settle();
   assert(button('실행') && button('소유권 해제'));
   assert(all().some(n => n.className === 'sim-triage' && n.textContent.includes('사람이 결정') && n.textContent.includes('nothing about it')));
+  // A finding through a provisional rule carries the design sort's label.
+  assert(all().some(n => n.className === 'sim-triage' && n.textContent === '판정자 분류: 설계 결함 (규칙 추가 필요) — no rule for a locked door'));
+  // The purpose label and the provisional-rule count; a warning when there is one.
+  assert(all().some(n => n.className === 'sim-purpose' && n.textContent === '목적: 설계 검토 — 원천 확인 아님 · 규칙 2개 중 1개가 원천 없음(provisional)'));
+  assert(!all().some(n => n.textContent.startsWith('원천 확인용인데')));
   // Carry: where it came from, rules that lost their quote, a reopened question.
   assert(all().some(n => n.tag === 'a' && n.href === '#/sims/sim-old999'));
   assert(all().some(n => n.className === 'sim-warn' && n.textContent.includes('r.lock')));
@@ -222,12 +240,15 @@ async function settle() { for (let i = 0; i < 10; i++) await new Promise(resolve
   labelled('해석(B) reasoning').value = 'high'; labelled('해석(B) reasoning').onchange();
   labelled('판정자 분류').checked = false; labelled('판정자 분류').onchange();
   assert.strictEqual(labelled('언어').value, '한국어');
+  assert.strictEqual(labelled('목적').value, 'spec');  // the fixture's settings carry no purpose: the default
+  labelled('목적').value = 'design'; labelled('목적').onchange();
   all().find(n => n.tag === 'form').onsubmit({preventDefault() {}}); await settle();
   const saved = calls.find(c => c.url.pathname.endsWith('/settings'));
   assert.strictEqual(saved.body.settings.interpreter_reasoning, 'high');
   assert.strictEqual(saved.body.settings.triage, false);
   assert.strictEqual(saved.body.settings.max_edits, 0);
   assert.strictEqual(saved.body.settings.language, '한국어');
+  assert.strictEqual(saved.body.settings.purpose, 'design');
   assert.deepStrictEqual(saved.body.sources, ['spec.md']);
   // The terminal's pane: one session's simulations, moving without the hash.
   ctx.SimPage.stop();

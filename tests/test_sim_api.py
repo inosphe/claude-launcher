@@ -350,3 +350,43 @@ def test_defaults_are_saved_checked_and_used_by_new_simulations(tmp_path, monkey
         await req("PUT", "/api/sims/defaults", {})
         assert not any(k.startswith("simulation_") for k in (config_store.load().get("daemon") or {}))
     run(tmp_path, scenario)
+
+
+# -- purpose: spec | design (claunch-efnbt.10) ---------------------------------
+
+def test_purpose_warns_a_source_check_without_sources_and_labels_the_notice(tmp_path):
+    # Four cases: spec/design x sources named/none. Only spec without sources
+    # warns; the purpose never refuses a create or a start (here the start
+    # faults on the missing profile alone, claunch-efnbt.8), and the warning
+    # rides on the create response, the record (start, screen) and the notice.
+    async def scenario(req, mgr, s1, s2):
+        for purpose in ("spec", "design"):
+            for sources in ([], ["spec.md"]):
+                made = await req("POST", "/api/sims", {"title": "door", "session": "s1", "sources": sources,
+                                                       "settings": {"max_rounds": 1, "purpose": purpose}}, status=201)
+                warned = purpose == "spec" and not sources
+                assert bool(made["warnings"]) is warned, (purpose, sources)
+                assert made["sim"]["purpose"]["warnings"] == made["warnings"]
+                sid = made["sim"]["id"]
+                await req("POST", f"/api/sims/{sid}/model", {"session": "s1", "patch": PATCH})
+                started = await req("POST", f"/api/sims/{sid}/start", {"session": "s1"}, status=409)
+                assert started["fault"] == "no-profile"
+                assert started["sim"]["purpose"]["warnings"] == made["warnings"]
+                await req("POST", f"/api/sims/{sid}/round", {"session": "s1"})
+                notice = sim_api.ended_text((await req("GET", f"/api/sims/{sid}"))["sim"])
+                label = "원천 확인" if purpose == "spec" else "설계 검토 — 원천 확인 아님"
+                assert f"Purpose: 「{label}」 ({purpose})" in notice
+                assert "규칙 1개 중 0개가 원천 없음(provisional)" in notice
+                assert ("sources를 지정하거나 purpose를 design으로 바꾸세요" in notice) is warned
+        bad = await req("POST", "/api/sims", {"title": "x", "session": "s1", "settings": {"purpose": "audit"}}, status=400)
+        assert "purpose must be one of spec, design" in bad["error"]
+    run(tmp_path, scenario)
+
+
+def test_user_created_source_check_without_sources_warns_the_owner(tmp_path):
+    async def scenario(req, mgr, s1, s2):
+        await req("POST", "/api/sims", {"title": "door", "owner": "s2"}, status=201)
+        assert "purpose를 design으로 바꾸세요" in s2.delivered[-1]
+        await req("POST", "/api/sims", {"title": "door", "owner": "s2", "settings": {"purpose": "design"}}, status=201)
+        assert "purpose를" not in s2.delivered[-1]
+    run(tmp_path, scenario)

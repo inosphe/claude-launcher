@@ -185,9 +185,20 @@ def ended_text(sim: dict) -> str:
         f"{c.get('answered', 0)} answered, {c.get('dismissed', 0)} dismissed, {c.get('resolved', 0)} resolved. "
         + (f"{waiting} edit proposal(s) to the sources wait for the user's decision (sim_proposals {sim['id']}). "
            if (waiting := (sim.get("proposals") or {}).get("proposed")) else "")
+        + purpose_text(sim)
         + f"Read the result (sim_show {sim['id']}, sim_findings {sim['id']}) and continue the discussion "
         f"with the user from it, in {_language(sim)}."
     )
+
+
+def purpose_text(sim: dict) -> str:
+    """The purpose line of a notice: 「원천 확인」 or 「설계 검토 — 원천 확인
+    아님」, how many rules are provisional, and the no-sources warning."""
+    pv = sim.get("purpose") or {}
+    if not pv:
+        return ""
+    return (f"Purpose: 「{pv['label']}」 ({pv['purpose']}); {pv['provisional_text']}. "
+            + "".join(f"Warning: {w}. " for w in pv.get("warnings") or []))
 
 
 def _language(sim: dict) -> str:
@@ -208,7 +219,8 @@ def created_text(sim: dict) -> str:
            "nothing. Meanwhile you may build the world model from the sources with sim_patch (every rule quotes "
            "its source file word for word, or is marked provisional with a why); ")
         + "you will be told when it finishes. "
-        f"Questions you raise (sim_resolve ask) and reasons you give go to the user: write them in {_language(sim)}."
+        + "".join(f"Warning: {w}. " for w in (sim.get("purpose") or {}).get("warnings") or [])
+        + f"Questions you raise (sim_resolve ask) and reasons you give go to the user: write them in {_language(sim)}."
     )
 
 
@@ -251,7 +263,9 @@ def fill_text(sim: dict) -> str:
            "set an interpreter profile (sim_configure settings.interpreter_profile) before sim_start -- a start "
            "without one faults and runs nothing; ")
         + "you will be told when it finishes. "
-        f"Write the title, goal, questions and reasons in {_language(sim)}."
+        + ("Its purpose is spec (a source check): name the sources, or set settings.purpose to design. "
+           if (sim.get("purpose") or {}).get("warnings") else "")
+        + f"Write the title, goal, questions and reasons in {_language(sim)}."
     )
 
 
@@ -447,7 +461,8 @@ def install(app, store: Optional[sim_store.SimStore] = None):
         nudged = False
         if actor == sim_store.USER and owner and body.get("nudge", True):
             nudged = deliver(owner, fill_text(sim) if sim.get("fill_pending") else created_text(sim))
-        return web.json_response({"sim": sim, "nudged": nudged}, status=201)
+        return web.json_response({"sim": sim, "nudged": nudged,
+                                  "warnings": (sim.get("purpose") or {}).get("warnings") or []}, status=201)
 
     async def h_defaults(request):
         body = await body_of(request)

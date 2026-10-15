@@ -98,6 +98,17 @@ function makeSimView({root: view, session = "", go}) {
   const PROPOSAL_LABEL = {proposed: "검토 대기", accepted: "수락", rejected: "거절"};
   const EDIT_KIND_LABEL = {clarify: "명료화", complete: "보충", decide: "결정 필요"};
   const TRIAGE_LABEL = {model: "모델이 원천을 잘못 읽음", spec: "원천에 정해진 내용 없음 (사람이 결정)", intended: "결함 아님"};
+  // A finding whose path ran through a provisional rule is sorted as a design question (claunch-efnbt.10).
+  const TRIAGE_PROVISIONAL_LABEL = {design: "설계 결함 (규칙 추가 필요)", intended: "의도된 제외", decide: "사람 결정"};
+  const triageLabel = f => ((f.provisional || []).length ? TRIAGE_PROVISIONAL_LABEL : TRIAGE_LABEL)[f.triage.verdict] || f.triage.verdict;
+  const PURPOSE_OPTIONS = [["spec", "원천 확인"], ["design", "설계 검토"]];
+  function purposeField(cur) {
+    const l = node("label", "목적 — 원천 확인: 원천 문서가 정한 동작을 확인 / 설계 검토: 원천에 없는 설계를 검토 (원천 확인 아님)");
+    l.append(select(PURPOSE_OPTIONS, cur.purpose || "spec", v => { cur.purpose = v; render(); }, "목적"));
+    if ((cur.purpose || "spec") === "spec" && !String(cur.sources || "").trim())
+      l.append(node("p", "원천 확인용인데 원천이 없음 — 원천을 지정하거나 목적을 설계 검토로 바꾸세요", "sim-warn"));
+    return l;
+  }
   const MODEL_KEYS = ["interpreter_profile", "judge_profile", "interpreter_model", "judge_model", "interpreter_reasoning", "judge_reasoning"];
   // A simulation created with 「세션에 맡기기」 has no title until its owner fills it.
   const simTitle = s => s.title || (s.fill_pending ? "(세션이 제목을 정하는 중)" : s.id);
@@ -176,7 +187,7 @@ function makeSimView({root: view, session = "", go}) {
     const d = profiles.defaults || {};
     draft = draft || {title: "", goal: "", sources: "", owner: session, interpreter_profile: d.interpreter_profile || "",
       judge_profile: d.judge_profile || "", interpreter_model: d.interpreter_model || "", judge_model: d.judge_model || "",
-      interpreter_reasoning: "low", judge_reasoning: "low"};
+      interpreter_reasoning: "low", judge_reasoning: "low", purpose: "spec"};
     const field = (label, key, multiline) => {
       const l = node("label", label); const i = node(multiline ? "textarea" : "input");
       i.value = draft[key]; i.oninput = () => { draft[key] = i.value; }; i.disabled = busy; l.append(i); form.append(l); return i;
@@ -184,6 +195,7 @@ function makeSimView({root: view, session = "", go}) {
     field("제목", "title").required = true;
     field("목표 — 무엇을 확인하려는가", "goal", true);
     field("원천 — 모델을 세울 파일·glob (한 줄에 하나)", "sources", true);
+    form.append(purposeField(draft));
     if (!session) {
       const o = node("label", "맡길 세션 — 이 세션이 소유자가 되고 요청이 그 세션에 입력됩니다");
       o.append(select(sessionOptions("선택"), draft.owner, v => { draft.owner = v; }, "맡길 세션")); form.append(o);
@@ -204,6 +216,7 @@ function makeSimView({root: view, session = "", go}) {
       if (!draft.owner) { error = "맡길 세션을 고르세요"; render(); return; }
       const settings = {};
       for (const k of MODEL_KEYS) settings[k] = draft[k];
+      settings.purpose = draft.purpose || "spec";
       act(() => request("/api/sims", "POST", {title: draft.title, goal: draft.goal, owner: draft.owner,
         sources: draft.sources.split("\n").map(s => s.trim()).filter(Boolean), settings, ...(draft.from ? {from: draft.from} : {}),
         ...(deferred ? {fill: true} : {})}),
@@ -274,6 +287,10 @@ function makeSimView({root: view, session = "", go}) {
       title.append(node("p", `원천이 바뀌어 인용을 잃은 규칙 ${s.stale_sources.length}개: ${s.stale_sources.map(x => x.id).join(", ")}`, "sim-warn"));
     if (s.state === "fault")
       title.append(node("p", `실행하지 않았습니다(오류): ${s.state_reason || ""}`, "sim-warn"));
+    if (s.purpose) {
+      title.append(node("p", `목적: ${s.purpose.label} · ${s.purpose.provisional_text}`, "sim-purpose"));
+      for (const w of s.purpose.warnings || []) title.append(node("p", w, "sim-warn"));
+    }
     if (s.goal) title.append(node("p", s.goal, "sim-goal"));
     if (s.fill_pending)
       title.append(node("p", `소유 세션이 정해 채울 항목: ${[!s.title && "제목", !s.goal && "목표"].filter(Boolean).join("·")}. 채우기 전에는 실행할 수 없습니다.`, "sim-warn"));
@@ -352,7 +369,7 @@ function makeSimView({root: view, session = "", go}) {
       }
       if (replays[f.key]) card.append(renderReplay(replays[f.key]));
       if (f.resolution) card.append(node("p", `${f.resolution.by}: ${f.resolution.reason || ""}`, "sim-muted"));
-      if (f.triage) card.append(node("p", `판정자 분류: ${TRIAGE_LABEL[f.triage.verdict] || f.triage.verdict} — ${f.triage.why}`, "sim-triage"));
+      if (f.triage) card.append(node("p", `판정자 분류: ${triageLabel(f)} — ${f.triage.why}`, "sim-triage"));
       if (f.stale) card.append(node("p", "지금 모델에서 재현 경로를 재생할 수 없습니다: " + f.stale, "sim-warn"));
       if (f.reopened) card.append(node("p", `다시 열림: 질문 뒤 원천이 바뀌었습니다 (이전 질문: ${f.prev_question?.text || ""})`, "sim-warn"));
       if (f.question) {
@@ -553,8 +570,9 @@ function makeSimView({root: view, session = "", go}) {
     const tri = node("label", null, "sim-check"); const cb = node("input"); cb.type = "checkbox"; cb.checked = cur.triage !== false;
     cb.disabled = busy; cb.setAttribute("aria-label", "판정자 분류");
     cb.onchange = () => { cur.triage = cb.checked; };
-    tri.append(cb, node("span", " 해석 전에 판정자가 빈칸을 분류 (모델 오류 / 원천에 없음 / 결함 아님)")); form.append(tri);
+    tri.append(cb, node("span", " 해석 전에 판정자가 빈칸을 분류 (모델 오류 / 원천에 없음 / 결함 아님; 임시 규칙을 지난 빈칸은 설계 결함 / 의도된 제외 / 사람 결정)")); form.append(tri);
     const src = node("label", "원천 (한 줄에 하나)"); const ta = node("textarea"); ta.value = cur.sources; ta.oninput = () => { cur.sources = ta.value; }; ta.disabled = busy; src.append(ta); form.append(src);
+    form.append(purposeField(cur));
     const submit = node("button", "저장", "wf-btn sim-primary"); submit.disabled = busy; form.append(submit);
     form.append(node("p", "바꾼 설정은 다음 라운드와 다음 실행부터 적용됩니다.", "sim-muted"));
     form.onsubmit = e => {
@@ -563,6 +581,7 @@ function makeSimView({root: view, session = "", go}) {
       for (const k of [...MODEL_KEYS, "max_rounds", "budget", "horizon", "seed", "max_edits"]) settings[k] = cur[k] ?? 0;
       settings.triage = cur.triage !== false;
       settings.language = (cur.language || "").trim() || "한국어";
+      settings.purpose = cur.purpose || "spec";
       act(() => request(base + "/settings", "POST", {settings, sources: cur.sources.split("\n").map(x => x.trim()).filter(Boolean)}),
         () => { settingsDraft = null; return "저장했습니다"; });
     };

@@ -7272,6 +7272,7 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .sim-eyebrow { display: block; color: #92baff; font-size: 11px; font-weight: 650; letter-spacing: .09em; }
 .sim-muted { color: var(--sim-muted); font-size: 12px; }
 .sim-goal { white-space: pre-wrap; color: #ccd5df; max-width: 900px; }
+.sim-purpose { font-size: 12px; color: #c9d4e0; }
 .sim-back { color: #92baff; font-size: 12px; text-decoration: none; }
 .sim-tools, .sim-actions, .sim-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .sim-actions { margin-bottom: 16px; }
