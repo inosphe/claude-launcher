@@ -379,11 +379,22 @@ def check_inputs(chart: ir.Chart, raw: Any) -> Optional[dict]:
 def start_run(chart: ir.Chart, *, inputs: Optional[dict] = None, **kwargs: Any) -> dict:
     """``runtime.start`` with the start inputs folded in. The runtime takes
     ``inputs=`` itself (it calls ``inputs.apply`` before the snapshot); a
-    runtime without that keyword gets a chart already applied here."""
+    runtime without that keyword gets a chart already applied here.
+
+    The run's driver is the session its scope names unless the caller names
+    one. The daemon starts runs for sessions (the run a new session is
+    created with, a delegated session's oneshot run), and left to
+    ``runtime.default_driver`` that would be whichever session's
+    ``CLAUNCH_SESSION`` the daemon's own environment carried -- every such run
+    was recorded as driven by the session whose shell had started the daemon,
+    and its own session was refused (claunch-2yiij, claunch-2whs1)."""
     import inspect
 
-    from ..cflow2 import inputs as inputs_mod, runtime
+    from ..cflow2 import inputs as inputs_mod, runtime, store as store_mod
 
+    if kwargs.get("driver") is None:
+        kwargs["driver"] = runtime.scope_driver(
+            store_mod.normalize_scope(kwargs.get("scope") or store_mod.DEFAULT_SCOPE))
     if inputs is not None:
         if "inputs" in inspect.signature(runtime.start).parameters:
             kwargs["inputs"] = inputs

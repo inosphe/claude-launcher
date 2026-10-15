@@ -353,12 +353,15 @@ def spawn_daemon(
     outlives every CLI that starts it.
     """
     paths.daemon_dir().mkdir(parents=True, exist_ok=True)
-    # A daemon started from a restart command the daemon ran for a session
-    # inherits that session's owner tag; carried on, every process the new
-    # daemon starts would be listed as that session's (claunch-ihwel).
-    from .daemon import session_procs
+    # The daemon acts for every session, so it must not carry any one
+    # session's identity. Spawned from a session's shell (an
+    # ensure_running there, or a successor of a daemon that was), it would
+    # otherwise keep that session's CLAUNCH_SESSION, owner tag
+    # (claunch-ihwel), harness markers and Herdr pane for every later
+    # generation, and act under that name (claunch-2yiij).
+    from . import session_env
 
-    env = session_procs.strip_owner(env)
+    env = session_env.scrub(env)
     log = _open_log_for_child()
     try:
         os.write(log, spawn_record(reason).encode("utf-8", "replace"))
