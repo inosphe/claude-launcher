@@ -20,7 +20,11 @@
                   posts to /close; reading a thread moves its read position;
                   unmount stops the poll; ◂ 목록 folds the list away while a
                   conversation is open and the fold is remembered
-                  (claunch-1n081).
+                  (claunch-1n081); dragging .th-split sets the list's width
+                  (held between its floor and what leaves the conversation
+                  room), the width is kept at release and comes back at the
+                  next mount, a double click forgets it, and the bar is hidden
+                  for a one-half pane and on a phone (claunch-46lbf).
      rail      -- 🗪 threads lights while the session has an open thread, and
                   carries has-news when the session wrote past what this
                   browser saw; a session never seen here starts caught up.
@@ -55,7 +59,9 @@ function makeDoc() {
       get lastChild() { return n.children[n.children.length - 1] || null; },
       append(...kids) { for (const k of kids) { k.parent = n; n.children.push(k); } },
       replaceChildren(...kids) { n.children = []; n.append(...kids); },
-      attrs: {},
+      attrs: {}, rect: {left: 0, width: 0},
+      style: {props: {}, setProperty(k, v) { n.style.props[k] = v; }, removeProperty(k) { delete n.style.props[k]; }},
+      getBoundingClientRect() { return n.rect; },
       setAttribute(k, v) { n.attrs[k] = String(v); },
       addEventListener(k, fn) { (n.handlers[k] ||= []).push(fn); },
       fire(k, e = {}) { (n.handlers[k] || []).forEach((fn) => fn({preventDefault() {}, ...e})); },
@@ -85,7 +91,8 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
 (async () => {
   const document = makeDoc();
   const store = new Map();
-  const localStorage = {getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v))};
+  const localStorage = {getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)),
+                        removeItem: (k) => store.delete(k)};
   const timers = [];
   const rendered = [];   // [class of the bubble, text] for each mdInto call
   const mdInto = (n, text) => { rendered.push(text); n.textContent = text; return n; };
@@ -274,6 +281,48 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   assert.ok(/\.th-pane\.th-folded \.th-side \{ display: none; \}/.test(css), "a folded pane hides the list column");
   assert.ok(!/\.th-msg \{[^}]*760px/.test(css), "a bubble has no fixed width cap");
 
+  // width (claunch-46lbf): the bar between the halves moves the list's edge
+  assert.equal(P.clampSideW(NaN), NaN, "nothing stored: the stylesheet's width");
+  assert.equal(P.clampSideW(50), 140, "the list keeps a floor");
+  assert.equal(P.clampSideW(900, 800), 560, "the conversation keeps 240px of the body");
+  assert.equal(P.clampSideW(300.4, 800), 300);
+  const bar = host.querySelector(".th-body .th-split");
+  assert.ok(bar, "a split bar sits between the halves");
+  const bodyKids = host.querySelector(".th-body").children.map((c) => c.className);
+  assert.deepEqual(bodyKids, ["th-side", "th-split", "th-main"], "list | bar | conversation");
+  assert.equal(pane.style.props["--th-side-w"], undefined, "no width until someone moves it");
+  host.querySelector(".th-side").rect = {left: 100, width: 220};
+  host.querySelector(".th-body").rect = {left: 100, width: 800};
+  bar.fire("pointerdown", {pointerId: 1, clientX: 320});
+  assert.ok(bar.classList.contains("dragging"));
+  bar.fire("pointermove", {clientX: 400});
+  assert.equal(pane.style.props["--th-side-w"], "300px", "the width follows the hand");
+  assert.equal(store.get(P.SIDE_W_KEY), undefined, "nothing is written mid-drag");
+  bar.fire("pointermove", {clientX: 2000});
+  assert.equal(pane.style.props["--th-side-w"], "560px", "the conversation keeps its floor");
+  bar.fire("pointermove", {clientX: 450});
+  bar.fire("pointerup", {});
+  assert.ok(!bar.classList.contains("dragging"));
+  assert.equal(store.get(P.SIDE_W_KEY), "350", "the width is kept at release");
+  bar.fire("pointermove", {clientX: 600});
+  assert.equal(pane.style.props["--th-side-w"], "350px", "a move without a press does nothing");
+  P.refresh();
+  await settle();
+  assert.equal(host.querySelector(".th-pane").style.props["--th-side-w"], "350px", "a redraw keeps the width");
+  bar.fire("dblclick", {});
+  assert.equal(store.get(P.SIDE_W_KEY), undefined, "a double click forgets the width");
+  assert.equal(pane.style.props["--th-side-w"], undefined, "...and the stylesheet's width is back");
+  store.set(P.SIDE_W_KEY, "280");
+  assert.ok(/\.th-side \{ flex: 0 0 var\(--th-side-w, 220px\)/.test(css), "the list reads the width, 220px by default");
+  assert.ok(/\.talk-body\[data-mode="both"\] \.th-side \{ flex-basis: var\(--th-side-w, 170px\); \}/.test(css),
+            "beside the QA column the default stays 170px");
+  assert.ok(/\.th-pane\.th-solo \.th-split, \.th-pane\.th-folded \.th-split \{ display: none; \}/.test(css),
+            "a one-half pane has no bar");
+  const phone = css.slice(css.indexOf(".th-pane.th-solo .th-split"));
+  assert.ok(/@media \(max-width: 820px\) \{\s*\.th-split \{ display: none; \}/.test(phone),
+            "the phone hides the bar, after the rule that shows it");
+  assert.ok(/\.th-split \{[^}]*width: 8px;[^}]*cursor: col-resize/.test(css), "#rail-split's shape");
+
   // close
   const toggle = host.querySelector(".th-convo-head .term-btn");
   assert.equal(toggle.textContent, "닫기");
@@ -350,6 +399,7 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   P.mount(host, "s1", {api, storageKey: "k"});
   assert.ok(P.focus.length === 2, "focus(session, tid)");
   await settle();
+  assert.equal(host.querySelector(".th-pane").style.props["--th-side-w"], "280px", "a kept width comes back at mount");
   P.unmount();
 
   /* claunch-bvbmi: with no thread the list takes the whole width, and a

@@ -7731,8 +7731,33 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .th-pane.th-folded .th-side { display: none; }
 .th-head .wf-warning { flex-basis: 100%; margin: 0; font-size: 12px; }
 .th-meta { color: #7d8590; font-size: 11px; font-family: ui-monospace, monospace; }
-.th-body { display: flex; flex: 1 1 0; min-height: 0; gap: 10px; }
-.th-side { flex: 0 0 220px; min-width: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+.th-body { display: flex; flex: 1 1 0; min-height: 0; }
+/* The list's width is a preference (claunch-46lbf): the bar beside it writes
+   --th-side-w (remembered by the browser), 220px until someone moves it.
+   max-width keeps a remembered width from taking a narrower pane's
+   conversation away. */
+.th-side { flex: 0 0 var(--th-side-w, 220px); max-width: 60%; min-width: 0; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 6px; }
+/* The bar between the list and the conversation: #rail-split's skin inside
+   the pane, with 1px either side for the 10px the two halves used to keep
+   apart. Only a pane with both halves on screen has anything to divide. */
+.th-split {
+  flex: none; width: 8px; margin: 0 1px; cursor: col-resize; touch-action: none;
+  display: flex; align-items: center; justify-content: center;
+}
+.th-split::after {
+  content: ""; height: 44px; width: 2px; border-radius: 2px; background: #4d5566;
+}
+.th-split:hover::after, .th-split.dragging::after { background: #58a6ff; }
+.th-pane.th-solo .th-split, .th-pane.th-folded .th-split { display: none; }
+/* The phone breakpoint (#rail-split's): the bar goes and the list keeps the
+   stylesheet's width, with the 10px the bar used to occupy between the two
+   halves. Here, after the rules it overrides, so it wins at equal weight. */
+@media (max-width: 820px) {
+  .th-split { display: none; }
+  .th-body { gap: 10px; }
+  .th-side { flex-basis: 220px; }
+}
 .th-new { align-self: stretch; text-align: center; }
 .th-newform { display: flex; flex-direction: column; gap: 4px; }
 .th-title-input, .th-text { width: 100%; box-sizing: border-box; font: inherit; font-size: 13px;
@@ -7755,7 +7780,7 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .th-main { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; min-height: 0; }
 /* No thread on screen (none yet): the list and the new-thread form take the
    pane's whole width instead of a 220px column beside an empty half. */
-.th-solo .th-side { flex: 1 1 auto; }
+.th-solo .th-side { flex: 1 1 auto; max-width: none; }
 .th-solo .th-main { display: none; }
 .th-convo-head { display: flex; align-items: baseline; gap: 8px; padding-bottom: 4px;
   border-bottom: 1px solid #21262d; }
@@ -7842,7 +7867,12 @@ body.split-max #term-wf { flex: 1 1 0; }
 .talk-col { flex: 1 1 0; min-width: 0; min-height: 0; }
 .talk-col.talk-qa { overflow-y: auto; overscroll-behavior: contain; }
 .talk-body[data-mode="both"] .talk-threads { border-right: 1px solid #21262d; padding-right: 14px; }
-.talk-body[data-mode="both"] .th-side { flex-basis: 170px; }
+.talk-body[data-mode="both"] .th-side { flex-basis: var(--th-side-w, 170px); }
+.talk-body[data-mode="both"] .th-solo .th-side { flex-basis: auto; }
+@media (max-width: 820px) {
+  .talk-body[data-mode="both"] .th-side { flex-basis: 170px; }
+  .talk-body[data-mode="both"] .th-solo .th-side { flex-basis: auto; }
+}
 .talk-col.talk-qa .qa-head { background: #0d1117; }
 /* Links between the two: chips on a QA card and under a thread's head. */
 .qa-links, .th-links { display: flex; flex-wrap: wrap; gap: 4px 6px; margin: 4px 0; align-items: center; }
