@@ -34,6 +34,7 @@
    be taken up again in a thread (claunch-236ei). focus(id) scrolls a card into view and marks it. */
 globalThis.QaPane = (() => {
   const POLL_MS = 3000;
+  const REDISCUSS = "질문 재논의 (질문 취소)";   // qa/store.py REDISCUSS; rows carry it as q.rediscuss
   const STATUS = {
     open: ["미응답", "qa-open"],
     answered: ["답함", "qa-answered"],
@@ -287,49 +288,58 @@ globalThis.QaPane = (() => {
     }
 
     const cur = d || {text: q.answer ? q.answer.text : "", choices: q.answer ? q.answer.choices : []};
-    if (q.options.length) {
-      const opts = node("div", "qa-options");
-      const group = `qa-${q.id}`;
-      for (const o of q.options) {
-        const row = node("label", "qa-option");
-        const input = node("input");
-        input.type = q.multi ? "checkbox" : "radio";
-        input.name = group;
-        input.value = o.label;
-        input.checked = cur.choices.includes(o.label);
-        input.addEventListener("change", () => {
-          const dd = draftOf(q);
-          dd.touched = true;
-          if (q.multi) {
-            dd.choices = input.checked ? [...new Set([...dd.choices, o.label])]
-                                       : dd.choices.filter((c) => c !== o.label);
-          } else {
-            dd.choices = [o.label];
-          }
-        });
-        const txt = node("span", "qa-option-text");
-        txt.append(node("span", "qa-option-label", o.label));
-        if (o.description) txt.append(node("span", "qa-option-desc", o.description));
-        row.append(input, txt);
-        opts.append(row);
-      }
-      if (!q.multi) {
-        const clear = node("button", "term-btn qa-clear", "선택 해제");
-        clear.type = "button";
-        clear.addEventListener("click", () => {
-          const dd = draftOf(q);
-          dd.touched = true;
-          dd.choices = [];
-          for (const i of opts.querySelectorAll("input")) i.checked = false;
-        });
-        opts.append(clear);
-      }
-      box.append(opts);
-    }
+    /* Every question ends with the daemon's fixed rediscuss choice
+       (claunch-rwcnh): it withdraws the question, so it is chosen on its
+       own and the comment below becomes required. */
+    const fixed = q.rediscuss || {label: REDISCUSS};
+    const opts = node("div", "qa-options");
+    const group = `qa-${q.id}`;
     const ta = node("textarea", "qa-text");
+    const placeholder = (choices) => choices.includes(fixed.label)
+      ? "코멘트 (필수) — 취소하는 이유나 다시 논의할 내용 — Enter 저장, Shift+Enter 줄바꿈"
+      : q.options.length ? "추가 설명 (선택) — Enter 저장, Shift+Enter 줄바꿈"
+                         : "답변 — Enter 저장, Shift+Enter 줄바꿈";
+    for (const o of [...q.options, fixed]) {
+      const isFixed = o === fixed;
+      const row = node("label", isFixed ? "qa-option qa-option-rediscuss" : "qa-option");
+      const input = node("input");
+      input.type = q.multi && !isFixed ? "checkbox" : "radio";
+      input.name = group;
+      input.value = o.label;
+      input.checked = cur.choices.includes(o.label);
+      input.addEventListener("change", () => {
+        const dd = draftOf(q);
+        dd.touched = true;
+        if (isFixed) {
+          dd.choices = [fixed.label];
+        } else if (q.multi) {
+          const rest = dd.choices.filter((c) => c !== fixed.label && c !== o.label);
+          dd.choices = input.checked ? [...rest, o.label] : rest;
+        } else {
+          dd.choices = [o.label];
+        }
+        for (const i of opts.querySelectorAll("input")) i.checked = dd.choices.includes(i.value);
+        ta.placeholder = placeholder(dd.choices);
+      });
+      const txt = node("span", "qa-option-text");
+      txt.append(node("span", "qa-option-label", o.label));
+      if (o.description) txt.append(node("span", "qa-option-desc", o.description));
+      row.append(input, txt);
+      opts.append(row);
+    }
+    const clear = node("button", "term-btn qa-clear", "선택 해제");
+    clear.type = "button";
+    clear.addEventListener("click", () => {
+      const dd = draftOf(q);
+      dd.touched = true;
+      dd.choices = [];
+      for (const i of opts.querySelectorAll("input")) i.checked = false;
+      ta.placeholder = placeholder(dd.choices);
+    });
+    opts.append(clear);
+    box.append(opts);
     ta.rows = 3;
-    ta.placeholder = q.options.length ? "추가 설명 (선택) — Enter 저장, Shift+Enter 줄바꿈"
-                                      : "답변 — Enter 저장, Shift+Enter 줄바꿈";
+    ta.placeholder = placeholder(cur.choices);
     ta.value = cur.text;
     ta.addEventListener("input", () => { const dd = draftOf(q); dd.touched = true; dd.text = ta.value; });
     ta.addEventListener("keydown", (e) => {
