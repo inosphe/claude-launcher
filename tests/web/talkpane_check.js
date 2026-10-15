@@ -281,14 +281,133 @@ function harness() {
     const on = (pane) => ({split: true, pane});
     assert.deepEqual({...press(on("both"), "qa")}, {split: true, pane: "threads"});
     assert.deepEqual({...press(on("both"), "threads")}, {split: true, pane: "qa"});
-    assert.deepEqual({...press(on("qa"), "qa")}, {split: false});
-    assert.deepEqual({...press(on("threads"), "threads")}, {split: false});
+    assert.deepEqual({...press(on("qa"), "qa")}, {split: false, max: false});
+    assert.deepEqual({...press(on("threads"), "threads")}, {split: false, max: false});
     assert.deepEqual({...press(on("threads"), "qa")}, {split: true, pane: "qa"});
     assert.deepEqual({...press(on("both"), "chart")}, {split: true, pane: "chart"});
     assert.deepEqual({...press({split: false, pane: "both"}, "qa")}, {split: true, pane: "qa"});
     assert.ok(app.includes("setSessLayout(currentName, splitAfterPress(sessLayoutFor(currentName), pane));"));
     assert.ok(app.includes('"hide the questions column — the threads keep the pane"'));
     assert.ok(app.includes('"hide the threads column — the questions keep the pane"'));
+  }
+
+  /* --- controls: × closes, ⤢/⤡ enlarges and shrinks (claunch-qkvb1) ------- */
+  {
+    const {ctx, api} = harness();
+    const T = ctx.TalkPane;
+    const host = new N("div");
+    const asked = [];
+    T.mount(host, "s1", {
+      mode: "threads", api, max: false,
+      onClose: () => asked.push("close"),
+      onMax: (on) => { asked.push(on ? "max" : "min"); T.setMax(on); },
+    });
+    await settle();
+    const ctl = host.querySelector(".talk-tabs .talk-ctl");
+    assert.ok(ctl, "the controls sit in the tab bar");
+    const big = ctl.querySelector(".talk-max");
+    const shut = ctl.querySelector(".talk-close");
+    assert.equal(big.textContent, "⤢");
+    assert.equal(big.attrs["aria-pressed"], "false");
+    big.fire("click");
+    assert.deepEqual(asked, ["max"], "⤢ asks the page to enlarge");
+    assert.equal(big.textContent, "⤡", "enlarged, the button shrinks");
+    assert.equal(big.attrs["aria-pressed"], "true");
+    assert.equal(T.max(), true);
+    big.fire("click");
+    assert.deepEqual(asked, ["max", "min"]);
+    assert.equal(big.textContent, "⤢");
+    shut.fire("click");
+    assert.deepEqual(asked, ["max", "min", "close"], "× asks the page to close");
+    // A tab switch keeps the controls and their state.
+    T.setMax(true);
+    T.setMode("both");
+    assert.equal(host.querySelector(".talk-max").textContent, "⤡");
+    T.unmount();
+
+    const app = read("app.js");
+    const css = read("style.css");
+    assert.ok(app.includes("onClose: () => setSessLayout(name, { split: false, max: false }),"));
+    assert.ok(app.includes("onMax: (on) => setSessLayout(name, { max: !!on }),"));
+    assert.ok(app.includes("const max = up && isTalkPane(lay.pane) && lay.max;"),
+              "only an open conversation pane enlarges");
+    assert.ok(app.includes('document.body.classList.toggle("split-max", max);'));
+    assert.ok(/body\.split-max #terminal[^{]*\{ display: none; \}/.test(css), "enlarged, the terminal steps aside");
+  }
+
+  /* --- a run read in flight does not paint over the conversation pane ------
+     The run pane's refreshSplit awaits the meta endpoint and the run; if the
+     same session's pane moves to its threads meanwhile, splitFor is still that
+     session, and the late reply used to render the run into #term-wf under a
+     lit 🗪 threads button (claunch-qkvb1). */
+  {
+    const app = read("app.js");
+    const fn = (name) => {
+      const start = app.search(new RegExp(`^(async )?function ${name}\\(`, "m"));
+      assert.ok(start >= 0, name);
+      let end = app.indexOf("{", app.indexOf(")", start));
+      for (let depth = 0; ; end++) {
+        if (app[end] === "{") depth++;
+        else if (app[end] === "}" && !--depth) break;
+      }
+      return app.slice(start, end + 1);
+    };
+    const wf = new N("div");
+    wf.innerHTML = "";
+    const painted = [];
+    const pending = [];
+    const deferred = () => {
+      let resolve;
+      const p = new Promise((r) => { resolve = r; });
+      pending.push(resolve);
+      return p;
+    };
+    const ctx = {
+      $: (id) => (id === "term-wf" ? wf : new N("div")),
+      el: (tag, cls, text) => { const n = new N(tag); n.className = cls || ""; if (text) n.textContent = text; return n; },
+      api: () => deferred(),
+      fetchCflow2Run: () => Promise.resolve(null),
+      renderSplit: () => painted.push("run v1"),
+      renderCflow2Into: () => painted.push("run v2"),
+      visiblePoll: (f) => f,
+      setInterval: () => 1, clearInterval: () => {},
+      isTalkPane: (k) => k === "threads" || k === "qa" || k === "both",
+      threadsReadKey: () => "k",
+      sessLayoutFor: () => ({max: false}),
+      setSessLayout: () => {}, refreshQaRail: () => {}, refreshThreadsRail: () => {},
+      globalThis: {TalkPane: {mount: () => painted.push("talk"), unmount: () => {}, setMode: () => {}}},
+    };
+    vm.createContext(ctx);
+    vm.runInContext(`
+      let splitFor = null, splitKind = null, splitCwd = null, splitScope = null;
+      let splitPollTimer = null, splitSelectedStep = null, splitLastData = null;
+      let splitDurable = null, splitGen = 0;
+      ${fn("openSplit")}
+      ${fn("closeSplit")}
+      ${fn("refreshSplit")}
+      this.openSplit = openSplit;
+      this.state = () => ({splitFor, splitKind});
+    `, ctx);
+    ctx.openSplit("s1", "run");             // starts a meta read
+    assert.equal(pending.length, 1);
+    ctx.openSplit("s1", "threads");         // same session, the pane moves on
+    assert.deepEqual(painted, ["talk"]);
+    pending[0]({ok: true, json: async () => ({cflow: {cwd: "/w", scope: "s1"}})});
+    await settle();
+    // Had the stale read gone on, it would have asked for the run next.
+    assert.equal(pending.length, 1, "the stale read stops after the meta reply");
+    assert.deepEqual(painted, ["talk"], "the run is not painted over the threads pane");
+    assert.deepEqual({...ctx.state()}, {splitFor: "s1", splitKind: "threads"});
+
+    // And the same after the run read: back on the run, then away again.
+    ctx.openSplit("s1", "run");
+    pending[1]({ok: true, json: async () => ({cflow: {cwd: "/w", scope: "s1"}})});
+    await settle();
+    assert.equal(pending.length, 3, "a live read goes on to the run");
+    ctx.openSplit("s1", "qa");
+    pending[2]({ok: true, json: async () => ({status: "running"})});
+    await settle();
+    assert.deepEqual(painted, ["talk", "talk"], "a run reply that lands after the switch is dropped");
   }
   console.log("talk pane checks passed");
 })().catch((e) => { console.error(e); process.exitCode = 1; });
