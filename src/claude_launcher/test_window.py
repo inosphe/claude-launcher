@@ -43,6 +43,10 @@ WINDOW_WORKERS_ENV = "CLAUNCH_WINDOW_ADVISORY_N"
 #: (``child_env``): that pytest reports its result into the grant, and pops
 #: the variable so a pytest a test spawns does not overwrite it.
 WINDOW_REPORT_ENV = "CLAUNCH_WINDOW_REPORT"
+#: The session a sessionless run works for (a delayed sweep runs without
+#: ``CLAUNCH_SESSION`` so it outlives its leader). Shown on the Window page and
+#: in the run history; the daemon never treats it as the grant's owner.
+WINDOW_REQUESTED_BY_ENV = "CLAUNCH_WINDOW_REQUESTED_BY"
 
 DEFAULT_WAIT = 1800.0
 DEFAULT_SWEEP_WORKERS = 8
@@ -198,6 +202,9 @@ def acquire(
             body["workers"] = max(1, int(workers))
         if priority:
             body["priority"] = priority
+        requested_by = os.environ.get(WINDOW_REQUESTED_BY_ENV, "").strip()
+        if requested_by and not owner:
+            body["requested_by"] = requested_by
         # Said before the POST, which blocks until the grant or the budget runs
         # out. Without it a run that queues on the machine's window and is then
         # killed by its own shell `timeout` leaves no output at all, and

@@ -166,6 +166,11 @@ def main(argv=None):
             p.add_argument("--job", required=True)
         if action == "release":
             p.add_argument("--reason", required=True)
+    p = sub.add_parser("cancel", help="drop a job that will never reach a verdict")
+    p.add_argument("--job", required=True)
+    p.add_argument("--reason", required=True)
+    p = sub.add_parser("requeue", help="give a stuck or cancelled job fresh attempts")
+    p.add_argument("--job", required=True)
     p = sub.add_parser("check-batch")
     p.add_argument("--env", required=True)
     for action in ("check-enqueued", "check-merges"):
@@ -195,6 +200,12 @@ def main(argv=None):
         elif args.action == "release":
             queue.release(args.repo, args.job, args.reason)
             result = {"released": args.job}
+        elif args.action == "cancel":
+            queue.cancel(args.job, args.reason)
+            result = queue.get(args.job)
+        elif args.action == "requeue":
+            queue.requeue(args.job)
+            result = queue.get(args.job)
         elif args.action == "status":
             result = queue.status(args.repo)
         elif args.action == "check-merges":

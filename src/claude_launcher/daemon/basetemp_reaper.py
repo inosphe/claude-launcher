@@ -210,13 +210,19 @@ def _retry_writable(failed: List[str]) -> Callable:
     ``os.open``, ``os.scandir`` or ``os.lstat`` (POSIX fd-based walk), and
     calling those again with a path alone either raises ``TypeError`` --
     which would escape the reap -- or deletes nothing.
+
+    The write bit is added to the mode, never assigned as the mode: a bare
+    ``chmod(path, S_IWRITE)`` on a directory that is still not empty leaves
+    it ``0200`` -- unlistable, so every later rmtree of its parent, pytest's
+    own basetemp cleanup included, fails on it. A delayed sweep with a fixed
+    basetemp then exited 3 on every retry for days (claunch-ersj2).
     """
     def handle(func, path, _exc) -> None:
         if func not in _REMOVALS:
             failed.append(path)
             return
         try:
-            os.chmod(path, stat.S_IWRITE)
+            os.chmod(path, stat.S_IMODE(os.lstat(path).st_mode) | stat.S_IWRITE)
             func(path)
         except OSError:
             failed.append(path)

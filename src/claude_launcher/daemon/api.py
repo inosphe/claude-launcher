@@ -1706,6 +1706,7 @@ async def h_window_acquire(request: web.Request) -> web.Response:
         # A pid is only this machine's to check from a loopback caller.
         bound=bool(body.get("bound")) and request.remote in ("127.0.0.1", "::1"),
         gone=gone,
+        requested_by=body.get("requested_by") or None,
     )
     if result.get("error"):
         return json_response(result, status=400)

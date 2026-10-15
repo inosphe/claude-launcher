@@ -988,6 +988,7 @@ class WindowManager:
             "grant_id": entry.get("grant_id"),
             "cls": entry.get("cls"),
             "session": entry.get("session"),
+            "requested_by": entry.get("requested_by"),
             "instance": entry.get("instance") or "",
             "pid": entry.get("pid"),
             "label": entry.get("label") or "",
@@ -1373,6 +1374,7 @@ class WindowManager:
         force: bool = False,
         bound: bool = False,
         gone: Optional[Callable[[], bool]] = None,
+        requested_by: Optional[str] = None,
     ) -> dict:
         """Grant the window, or queue for it up to ``wait`` seconds.
 
@@ -1389,6 +1391,12 @@ class WindowManager:
         ``workers`` is the xdist width the requester wants (0 = the class
         ceiling); the grant's ``advisory_n`` never exceeds it. ``force`` is the
         operator's immediate grant, and is refused for a session-held request.
+
+        ``requested_by`` names the session a sessionless run works for -- a
+        delayed sweep drops ``CLAUNCH_SESSION`` so it outlives its leader, and
+        without the name the Window page showed only a pid (claunch-ersj2).
+        It is shown and recorded, never used: liveness, the per-session cap
+        and release-by-session still read ``session`` alone.
         """
         if cls not in CLASSES:
             return {"granted": False, "error": f"unknown window class {cls!r}"}
@@ -1413,6 +1421,8 @@ class WindowManager:
             "instance": self._instance,
             "daemon_pid": self._daemon_pid,
         }
+        if requested_by and not session:
+            entry["requested_by"] = str(requested_by)[:64]
         if bound:
             entry["bound"] = True
         if workers:

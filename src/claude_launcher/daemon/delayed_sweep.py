@@ -9,7 +9,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from ..delayed_sweep import Queue
+from ..delayed_sweep import NOTIFIED, Queue
 from .. import config, test_window
 from . import instance_manifest, paths
 
@@ -59,7 +59,7 @@ class Clock:
     async def tick(self):
         queue = self.queue or Queue()
         for job in queue.status()["jobs"]:
-            if job["status"] not in ("passed", "failed") or job["notified"]:
+            if job["status"] not in NOTIFIED or job["notified"]:
                 continue
             origin = json.loads(job["origin"])
             if (origin.get("instance") != paths.instance()
@@ -73,10 +73,15 @@ class Clock:
                           f"job: {job['id']}\nrepo: {job['repo']}\n"
                           f"sha: {job['sha']}\nstatus: {job['status']}\n"
                           f"receipt: {job['receipt']}\n"
-                          "protocol: call flow_status, read tools/delayed_sweep.py status "
+                          + (f"detail: {job['detail']}\n" if job["status"] == "stuck" else "")
+                          + "protocol: call flow_status, read tools/delayed_sweep.py status "
                           "for this repository. A failed active pause requires the "
                           "leader's handle-regression route and a repair child. "
-                          "Live deployment is separate.\n---")
+                          + ("A stuck job ran out of retries without a verdict: fix what "
+                             "the detail names, then 'tools/delayed_sweep.py requeue "
+                             "--job <id>', or 'cancel --job <id> --reason ...'. "
+                             if job["status"] == "stuck" else "")
+                          + "Live deployment is separate.\n---")
                 if await session.deliver(notice):
                     queue.notified(job["id"])
             except KeyError:
@@ -99,6 +104,8 @@ class Clock:
         env = dict(os.environ)
         # A daemon-owned test must outlive its originating leader session.
         env.pop("CLAUNCH_SESSION", None)
+        # ...but the Window page still names who it runs for (claunch-ersj2).
+        env[test_window.WINDOW_REQUESTED_BY_ENV] = job["owner"]
         env.pop(test_window.WINDOW_MODE_ENV, None)
         for name in (test_window.WINDOW_GRANT_ENV, test_window.WINDOW_CLASS_ENV,
                      test_window.WINDOW_WORKERS_ENV, test_window.WINDOW_REPORT_ENV):

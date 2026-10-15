@@ -137,7 +137,7 @@ const snapshot = {
   queue: [
     { grant_id: "q1", cls: "targeted", session: "s2", pid: 22, priority: 2,
       label: "changed tests", enqueued_at: "2026-08-31T06:02:00Z" },
-    { grant_id: "q2", cls: "sweep", session: null, pid: 55,
+    { grant_id: "q2", cls: "sweep", session: null, pid: 55, requested_by: "s1",
       label: "release sweep", enqueued_at: "2026-08-31T06:03:00Z" },
   ],
   caps: { targeted: 5, sweep: 1 }, max_wait: 1800, reminder_interval: 180,
@@ -198,6 +198,12 @@ const snapshot = {
         withClass("window-owner").some((n) => n.tag === "a" && n.href === "#/s/s1"));
   check("a raw pid owner remains visible",
         withClass("window-owner").some((n) => n.text === "pid 44"));
+  check("a sessionless run names and links the session it works for",
+        withClass("window-owner").some((n) => n.tag === "a" && n.href === "#/s/s1"
+          && n.text === "pid 55 for s1"),
+        withClass("window-owner").map((n) => [n.tag, n.text]));
+  check("a requested_by whose session is gone stays plain text",
+        ctx.owner({ pid: 7, requested_by: "s9" }) === "pid 7 for s9");
   check("labels explain what each grant is running",
         view.words().includes("pytest tests/test_one.py") &&
         view.words().includes("release sweep"), view.words());
