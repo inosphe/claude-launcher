@@ -46080,6 +46080,18 @@ const NOTICE_SEEN_KEY = "claunch.noticeSeen";
 const NOTICE_FILTER_KEY = "claunch.noticeFilter";
 const NOTICE_HISTORY_MAX = 100;
 
+/* Over NOTICE_HISTORY_MAX the oldest unmarked rows go, never the newest
+   row (rows[0]). Marked rows are never trimmed (claunch-knuet.1): when every
+   row but the newest is marked the history stays over the cap, at most one
+   row more than the marked count. */
+function noticeTrim(rows) {
+  let i = rows.length - 1;
+  while (rows.length > NOTICE_HISTORY_MAX && i > 0) {
+    if (!rows[i].marked) rows.splice(i, 1);
+    i -= 1;
+  }
+}
+
 function noticeStore() {
   try {
     return typeof localStorage === "undefined" ? null : localStorage;
@@ -46116,9 +46128,8 @@ function noticeSave(key, value) {
 const noticeHistory = (() => {
   const saved = noticeLoad(NOTICE_HISTORY_KEY, []);
   const seen = Number(noticeLoad(NOTICE_SEEN_KEY, 0)) || 0;
-  const rows = Array.isArray(saved)
-    ? saved.filter((e) => e && typeof e === "object").slice(0, NOTICE_HISTORY_MAX)
-    : [];
+  const rows = Array.isArray(saved) ? saved.filter((e) => e && typeof e === "object") : [];
+  noticeTrim(rows);
   for (const e of rows) if (typeof e.read !== "boolean") e.read = (e.at || 0) <= seen;
   return rows;
 })();
@@ -46144,13 +46155,7 @@ function noticeRecord(entry) {
     entry
   );
   noticeHistory.unshift(rec);
-  // Over the cap the oldest unmarked row goes; marked rows only when every
-  // row is marked.
-  while (noticeHistory.length > NOTICE_HISTORY_MAX) {
-    let i = noticeHistory.length - 1;
-    while (i > 0 && noticeHistory[i].marked) i -= 1;
-    noticeHistory.splice(i > 0 ? i : noticeHistory.length - 1, 1);
-  }
+  noticeTrim(noticeHistory);
   noticeHistorySave();
   noticeBellPaint();
   noticePanelPaint();
@@ -46594,7 +46599,9 @@ function noticePanelPaint() {
       () => noticeMarkRead(unreadIds, true)
     ));
   }
-  if (past.length > markedCount) {
+  // Clear only in the All view: in Marked it would forget rows the view
+  // does not show (claunch-knuet.1).
+  if (noticeFilter === "all" && past.length > markedCount) {
     sectionHead.appendChild(noticePanelButton(
       "Clear", "clear",
       "forget the history in this browser (waiting requests and ★ rows stay)",
