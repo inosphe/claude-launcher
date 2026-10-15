@@ -17,6 +17,21 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
+#: Runner-reported retries a job gets before it is parked as ``stuck``. Each
+#: one waits twice as long as the last (60 s, 120 s, ... up to RETRY_MAX_DELAY).
+#: Without a limit a deterministic failure -- a basetemp the sweep cannot clear,
+#: a command the checkout cannot run -- retried every minute for days and, being
+#: the oldest rows, was claimed ahead of every queued job (claunch-ersj2).
+RETRY_LIMIT = 6
+RETRY_BASE_DELAY = 60.0
+RETRY_MAX_DELAY = 3600.0
+#: Results the originating session is told about.
+NOTIFIED = ("passed", "failed", "stuck")
+
+
+def retry_delay(failures):
+    return min(RETRY_BASE_DELAY * 2 ** max(0, failures - 1), RETRY_MAX_DELAY)
+
 
 def git(repo, *args):
     return subprocess.check_output(
@@ -44,7 +59,8 @@ class Queue:
                     created REAL NOT NULL, available REAL NOT NULL DEFAULT 0,
                     pid INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0,
                     receipt TEXT, detail TEXT NOT NULL DEFAULT '',
-                    notified INTEGER NOT NULL DEFAULT 0, UNIQUE(common, sha)
+                    notified INTEGER NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0,
+                    UNIQUE(common, sha)
                 );
                 CREATE TABLE IF NOT EXISTS pauses (
                     common TEXT PRIMARY KEY, job TEXT NOT NULL,
@@ -53,8 +69,11 @@ class Queue:
             """)
             # Preserve pre-release queue files without inventing their origin.
             db.execute("BEGIN IMMEDIATE")
-            if "origin" not in {r["name"] for r in db.execute("PRAGMA table_info(jobs)")}:
+            columns = {r["name"] for r in db.execute("PRAGMA table_info(jobs)")}
+            if "origin" not in columns:
                 db.execute("ALTER TABLE jobs ADD COLUMN origin TEXT NOT NULL DEFAULT '{}'")
+            if "failures" not in columns:
+                db.execute("ALTER TABLE jobs ADD COLUMN failures INTEGER NOT NULL DEFAULT 0")
 
     @contextmanager
     def connect(self):
@@ -188,11 +207,23 @@ class Queue:
     def finish(self, ident, status, receipt=None, detail=""):
         if status not in ("passed", "failed", "retry"):
             raise ValueError("invalid verification result")
-        row = self.get(ident)
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            db.execute("UPDATE jobs SET status=?,receipt=?,detail=?,pid=0,available=?,notified=0 WHERE id=?",
-                       (status, receipt, detail, time.time() + 60 if status == "retry" else 0, ident))
+            row = db.execute("SELECT * FROM jobs WHERE id=?", (ident,)).fetchone()
+            if row is None:
+                raise ValueError("unknown verification job")
+            if row["status"] == "cancelled":
+                return  # a runner finishing after an operator cancel keeps the cancel
+            failures = row["failures"] + (status == "retry")
+            available = 0
+            if status == "retry" and failures >= RETRY_LIMIT:
+                status = "stuck"
+                detail = f"no verdict after {failures} attempts; last: {detail}"
+            elif status == "retry":
+                available = time.time() + retry_delay(failures)
+            db.execute("UPDATE jobs SET status=?,receipt=?,detail=?,pid=0,available=?,notified=0,"
+                       "failures=? WHERE id=?",
+                       (status, receipt, detail, available, failures, ident))
             pause = db.execute("SELECT * FROM pauses WHERE common=?", (row["common"],)).fetchone()
             if status == "failed":
                 # A late verdict about pre-repair history must not pause it again.
@@ -208,6 +239,35 @@ class Queue:
                 if self.contains(row["repo"], failed["sha"], row["sha"]):
                     db.execute("UPDATE pauses SET job='',repair_issue=NULL,cleared_sha=? WHERE common=?",
                                (row["sha"], row["common"]))
+
+    def cancel(self, job, reason):
+        """Operator escape hatch: drop a job that will never reach a verdict.
+
+        A running runner is left to finish (it holds the test window and
+        cleans up its checkout); its result no longer changes the row."""
+        if not reason or not reason.strip():
+            raise ValueError("cancel requires a reason")
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT status FROM jobs WHERE id=?", (job,)).fetchone()
+            if row is None:
+                raise ValueError("unknown verification job")
+            if row["status"] in ("passed", "failed"):
+                raise ValueError(f"job already has a verdict: {row['status']}")
+            db.execute("UPDATE jobs SET status='cancelled',detail=?,available=0 WHERE id=?",
+                       (f"cancelled: {reason.strip()}", job))
+
+    def requeue(self, job):
+        """Give a stuck or cancelled job a fresh set of attempts."""
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT status FROM jobs WHERE id=?", (job,)).fetchone()
+            if row is None:
+                raise ValueError("unknown verification job")
+            if row["status"] not in ("stuck", "cancelled"):
+                raise ValueError(f"only a stuck or cancelled job is requeued, not {row['status']}")
+            db.execute("UPDATE jobs SET status='queued',failures=0,available=0,notified=0,detail='' "
+                       "WHERE id=?", (job,))
 
     def release(self, repo, job, reason):
         """Leader escape hatch: clear a pause whose failed SHA master cannot reach."""

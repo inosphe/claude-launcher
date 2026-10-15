@@ -331,6 +331,113 @@ def test_only_the_originating_instance_delivers_the_result(repo, tmp_path, monke
     assert len(notices) == 1
 
 
+def test_retries_back_off_and_park_as_stuck_after_the_limit(repo, tmp_path, monkeypatch):
+    # claunch-ersj2: a deterministic "no verdict" retried every 60 s for days,
+    # and as the oldest rows those jobs were claimed ahead of every queued one.
+    now = [1000.0]
+    monkeypatch.setattr(mod.time, "time", lambda: now[0])
+    q = queue(tmp_path)
+    job, _ = enqueue(q, repo, "a")
+    later, _ = enqueue(q, repo, "b")
+    delays = []
+    for attempt in range(1, mod.RETRY_LIMIT):
+        assert q.claim()["id"] == job["id"]
+        q.finish(job["id"], "retry", detail="sweep execution exit 3; no regression verdict")
+        row = q.get(job["id"])
+        assert row["status"] == "retry" and row["failures"] == attempt
+        delays.append(row["available"] - now[0])
+        if attempt == 1:
+            # While it backs off, the queued job behind it is served.
+            assert q.claim()["id"] == later["id"]
+            q.finish(later["id"], "passed", "receipt")
+        assert q.claim() is None
+        now[0] = row["available"] + 1
+    assert delays == [mod.retry_delay(n) for n in range(1, mod.RETRY_LIMIT)]
+    assert delays[0] == 60.0 and delays == sorted(delays)
+    assert q.claim()["id"] == job["id"]
+    q.finish(job["id"], "retry", detail="exit 3")
+    row = q.get(job["id"])
+    assert row["status"] == "stuck"
+    assert f"after {mod.RETRY_LIMIT} attempts" in row["detail"] and "exit 3" in row["detail"]
+    now[0] += 10 ** 6
+    assert q.claim() is None  # stuck is terminal until someone requeues it
+    q.requeue(job["id"])
+    assert q.get(job["id"])["failures"] == 0
+    assert q.claim()["id"] == job["id"]
+
+
+def test_the_owner_is_told_when_a_job_is_parked_as_stuck(repo, tmp_path, monkeypatch):
+    q = queue(tmp_path)
+    job, _ = enqueue(q, repo, "a")
+    with q.connect() as db:
+        db.execute("UPDATE jobs SET failures=? WHERE id=?", (mod.RETRY_LIMIT - 1, job["id"]))
+    q.finish(job["id"], "retry", detail="uv sync failed")
+    notices = []
+    async def deliver(notice):
+        notices.append(notice)
+        return True
+    manager = SimpleNamespace(get=lambda owner: SimpleNamespace(exited=False, deliver=deliver))
+    window = SimpleNamespace(status=lambda: {"holders": [{}]})
+    asyncio.run(Clock(manager, q, window=window).tick())
+    assert len(notices) == 1
+    assert "status: stuck" in notices[0] and "uv sync failed" in notices[0]
+    assert "requeue" in notices[0]
+
+
+def test_cancel_drops_a_job_and_a_late_runner_result_keeps_the_cancel(repo, tmp_path):
+    q = queue(tmp_path)
+    job, _ = enqueue(q, repo, "a")
+    done, _ = enqueue(q, repo, "b")
+    assert q.claim()["id"] == job["id"]
+    with pytest.raises(ValueError, match="reason"):
+        q.cancel(job["id"], " ")
+    q.cancel(job["id"], "repository has no pyproject.toml")
+    q.finish(job["id"], "retry", detail="runner finished after the cancel")
+    row = q.get(job["id"])
+    assert row["status"] == "cancelled"
+    assert row["detail"] == "cancelled: repository has no pyproject.toml"
+    assert q.claim()["id"] == done["id"]
+    q.finish(done["id"], "passed", "receipt")
+    with pytest.raises(ValueError, match="verdict"):
+        q.cancel(done["id"], "too late")
+    with pytest.raises(ValueError, match="stuck or cancelled"):
+        q.requeue(done["id"])
+
+
+def test_cancel_and_requeue_from_the_command_line(repo, tmp_path):
+    db = tmp_path / "jobs.sqlite3"
+    q = mod.Queue(db)
+    job, _ = enqueue(q, repo, "a")
+    tool = TOOL.with_name("delayed_sweep.py")
+    run = lambda *a: subprocess.run([sys.executable, str(tool), "--database", str(db), *a],
+                                    capture_output=True, text=True)
+    out = run("cancel", "--job", job["id"], "--reason", "operator")
+    assert out.returncode == 0, out.stderr
+    assert json.loads(out.stdout)["status"] == "cancelled"
+    out = run("requeue", "--job", job["id"])
+    assert out.returncode == 0, out.stderr
+    assert json.loads(out.stdout)["status"] == "queued"
+
+
+def test_a_queue_file_without_the_failures_column_is_upgraded(tmp_path):
+    import sqlite3
+    path = tmp_path / "old.sqlite3"
+    db = sqlite3.connect(path)
+    db.execute("CREATE TABLE jobs (id TEXT PRIMARY KEY, repo TEXT NOT NULL, common TEXT NOT NULL, "
+               "sha TEXT NOT NULL, ref TEXT NOT NULL, issue TEXT NOT NULL, owner TEXT NOT NULL, "
+               "tool TEXT NOT NULL, python TEXT NOT NULL, command TEXT, "
+               "origin TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL, "
+               "priority INTEGER NOT NULL DEFAULT -1, created REAL NOT NULL, "
+               "available REAL NOT NULL DEFAULT 0, pid INTEGER NOT NULL DEFAULT 0, "
+               "attempts INTEGER NOT NULL DEFAULT 0, receipt TEXT, detail TEXT NOT NULL DEFAULT '', "
+               "notified INTEGER NOT NULL DEFAULT 0, UNIQUE(common, sha))")
+    db.commit()
+    db.close()
+    q = mod.Queue(path)
+    with q.connect() as conn:
+        assert "failures" in {r["name"] for r in conn.execute("PRAGMA table_info(jobs)")}
+
+
 def test_another_instance_runs_with_the_recorded_origin_without_duplication(repo, tmp_path, monkeypatch):
     base = tmp_path / "shared-home"
     home = tmp_path / "origin-home"
@@ -383,6 +490,9 @@ def test_runner_env_drops_the_daemons_manifest_bookkeeping(repo, tmp_path, monke
     assert env[paths.INSTANCE_ENV] == "review-a"
     for name in (im.APPLIED_ENV, im.PREV_ENV, im.PORT_ENV):
         assert name not in env
+    # It runs without a session, but the Window page names who it is for.
+    assert "CLAUNCH_SESSION" not in env
+    assert env[test_window.WINDOW_REQUESTED_BY_ENV] == "leader"
 
 
 def test_interrupted_runner_retries_but_live_runner_is_never_duplicated(repo, tmp_path):
