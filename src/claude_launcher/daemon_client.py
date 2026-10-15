@@ -474,12 +474,17 @@ def ensure_running(*, auto_start: bool = True) -> DaemonClient:
     )
 
 
-def stop(*, timeout: float = 10.0) -> bool:
-    """Ask a running daemon to shut down; returns False if none was running."""
+def stop(*, timeout: float = 10.0, mode: Optional[str] = None) -> bool:
+    """Ask a running daemon to shut down; returns False if none was running.
+
+    ``mode`` is what the daemon does with the PTY host and its sessions
+    (claunch-xnnct.1): None or ``"stop"`` ends them, ``"keep"`` leaves them
+    running for the next daemon (the first half of :func:`restart`),
+    ``"full"`` ends them for a restart that brings a new host up."""
     client = connect()
     if client is None:
         return False
-    client.post("/api/daemon/shutdown", timeout=5.0)
+    client.post("/api/daemon/shutdown", {"mode": mode} if mode else None, timeout=5.0)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         # daemon.json disappears early in shutdown; the singleton lock is only
@@ -510,8 +515,12 @@ RESTART_BACKOFF_START = 2.0
 RESTART_BACKOFF_CAP = 20.0
 
 
-def restart(*, stop_timeout: float = 10.0) -> DaemonClient:
+def restart(*, stop_timeout: float = 10.0, with_pty_host: bool = False) -> DaemonClient:
     """Stop the running daemon and bring a successor up, retrying the spawn.
+
+    With the PTY host on, the sessions keep running across it and the
+    successor adopts them; ``with_pty_host`` ends them and the host too, and
+    the successor starts a new host and relaunches them (claunch-xnnct.1).
 
     ``stop()`` waits at most ``stop_timeout`` for the predecessor to actually
     release its singleton lock and gives up rather than hanging forever (see
@@ -536,7 +545,7 @@ def restart(*, stop_timeout: float = 10.0) -> DaemonClient:
     """
     before = runtime_state.read_daemon_json() or {}
     predecessor = int(before.get("pid") or 0)
-    stop(timeout=stop_timeout)
+    stop(timeout=stop_timeout, mode="full" if with_pty_host else "keep")
     delay = RESTART_BACKOFF_START
     last_exc: Optional[DaemonClientError] = None
     attempt = 0

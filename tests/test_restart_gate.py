@@ -935,3 +935,148 @@ def test_the_configured_timeout_reaches_the_gate_deadline(home, monkeypatch):
             await asyncio.wait_for(serve, timeout=15.0)
 
     asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# the PTY host mode (claunch-xnnct.1): asked for, shown, applied
+# --------------------------------------------------------------------------- #
+def test_the_pty_host_mode_rides_the_request_and_the_approval(home, monkeypatch):
+    monkeypatch.setattr(
+        "claude_launcher.daemon.runtime_state.read_daemon_json",
+        lambda: {"pid": 4242, "started_at": "2026-08-26T02:36:00+00:00"},
+    )
+
+    async def run():
+        mgr = _manager()
+        app = build_app(mgr, "sekrit", started_at=time.monotonic(), gate_timeout=600)
+        from aiohttp.test_utils import TestClient, TestServer
+
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            assert app["restart_mode"] == "stop"
+            bad = await client.post("/api/daemon/restart-request",
+                                    json={"session": "s3", "pty_host": "both"}, headers=AUTH)
+            assert bad.status == 400
+            resp = await client.post("/api/daemon/restart-request",
+                                     json={"session": "s3", "pty_host": "full"}, headers=AUTH)
+            assert (await resp.json())["request"]["pty_host"] == "full"
+            got = await client.get("/api/daemon/restart-request", headers=AUTH)
+            assert (await got.json())["request"]["pty_host"] == "full"
+            await client.post("/api/daemon/restart-request/approve", headers=AUTH)
+            assert app["restart_requested"] is True and app["restart_mode"] == "full"
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_a_request_without_a_mode_keeps_the_host(home):
+    async def run():
+        mgr = _manager()
+        app = build_app(mgr, "sekrit", started_at=time.monotonic(), gate_timeout=0.05)
+        rec = app["restart_gate"].submit(session="s5")
+        assert rec["pty_host"] == "keep"
+        try:
+            await asyncio.wait_for(app["shutdown_event"].wait(), timeout=3.0)
+        finally:
+            await mgr.shutdown_all()
+        assert app["restart_mode"] == "keep"
+
+    asyncio.run(run())
+
+
+def test_an_unanswered_full_request_restarts_full(home):
+    async def run():
+        mgr = _manager()
+        app = build_app(mgr, "sekrit", started_at=time.monotonic(), gate_timeout=0.05)
+        app["restart_gate"].submit(session="s5", pty_host="full")
+        try:
+            await asyncio.wait_for(app["shutdown_event"].wait(), timeout=3.0)
+        finally:
+            await mgr.shutdown_all()
+        assert app["restart_gate"].get()["decided_by"] == "timeout"
+        assert app["restart_mode"] == "full"
+
+    asyncio.run(run())
+
+
+def test_the_shutdown_and_restart_endpoints_take_a_mode(home):
+    from aiohttp.test_utils import TestClient, TestServer
+
+    async def one(path, body, field="restart_mode"):
+        mgr = _manager()
+        app = build_app(mgr, "sekrit", started_at=time.monotonic())
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            kw = {"json": body} if body is not None else {}
+            resp = await client.post(path, headers=AUTH, **kw)
+            return resp.status, app[field], app["restart_requested"]
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    async def run():
+        # No body: a stop, as before the field existed.
+        assert await one("/api/daemon/shutdown", None) == (200, "stop", False)
+        assert await one("/api/daemon/shutdown", {"mode": "keep"}) == (200, "keep", False)
+        assert (await one("/api/daemon/shutdown", {"mode": "nope"}))[0] == 400
+        assert await one("/api/daemon/restart", None) == (200, "keep", True)
+        assert await one("/api/daemon/restart", {"mode": "full"}) == (200, "full", True)
+        assert (await one("/api/daemon/restart", {"mode": "stop"}))[0] == 400
+
+    asyncio.run(run())
+
+
+def test_the_cli_sends_with_pty_host_through_the_gate(home, monkeypatch, capsys):
+    from claude_launcher import cli_sessions
+
+    fake = _FakeDaemon(record={"id": "g1", "session": "s9", "deadline": _future(),
+                               "pty_host": "full"})
+    fake.client.record["status"] = "approved"
+    monkeypatch.setattr(cli_sessions, "daemon_client", fake)
+    monkeypatch.setattr(cli_sessions.time, "sleep", lambda s: None)
+    monkeypatch.setenv("CLAUNCH_SESSION", "s9")
+
+    assert cli_sessions._cmd_daemon(_daemon_args(with_pty_host=True)) == 0
+    assert fake.client.posted == [(
+        "/api/daemon/restart-request", {"session": "s9", "pty_host": "full"},
+    )]
+    assert "with the PTY host" in capsys.readouterr().err
+
+
+def test_a_human_shell_restart_passes_the_mode_on(home, monkeypatch, capsys):
+    from claude_launcher import cli_sessions
+
+    fake = _FakeDaemon()
+    seen = []
+    fake.restart = lambda **kw: (seen.append(kw), fake.client)[1]
+    monkeypatch.setattr(cli_sessions, "daemon_client", fake)
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+
+    assert cli_sessions._cmd_daemon(_daemon_args()) == 0
+    assert cli_sessions._cmd_daemon(_daemon_args(with_pty_host=True)) == 0
+    assert seen == [{"with_pty_host": False}, {"with_pty_host": True}]
+    assert "with the PTY host" in capsys.readouterr().out
+
+
+def test_daemon_client_restart_sends_the_mode(monkeypatch):
+    from claude_launcher import daemon_client
+
+    modes = []
+    monkeypatch.setattr(daemon_client, "stop", lambda **kw: modes.append(kw.get("mode")))
+    monkeypatch.setattr(daemon_client, "ensure_running", lambda: "client")
+    monkeypatch.setattr(daemon_client.runtime_state, "read_daemon_json", lambda: {})
+    assert daemon_client.restart() == "client"
+    assert daemon_client.restart(with_pty_host=True) == "client"
+    assert modes == ["keep", "full"]
+
+
+def test_the_with_pty_host_flag_parses():
+    from claude_launcher import cli
+
+    args = cli.build_parser().parse_args(["daemon", "restart", "--with-pty-host"])
+    assert args.with_pty_host is True
+    assert cli.build_parser().parse_args(["daemon", "restart"]).with_pty_host is False

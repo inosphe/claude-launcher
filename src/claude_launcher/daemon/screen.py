@@ -304,6 +304,38 @@ class ScreenState:
         self._mouse_modes.clear()
         self._mode_tail = b""
 
+    def modes(self) -> dict:
+        """The private modes :meth:`_track_modes` follows, as plain values.
+
+        Saved when a daemon lets go of a session the PTY host keeps
+        (claunch-xnnct.1): the program that asserted them is still running,
+        and the next daemon's screen must answer as this one did.
+        """
+        return {
+            "app_cursor_keys": self.app_cursor_keys,
+            "bracketed_paste": self.bracketed_paste,
+            "alt_screen": self.alt_screen,
+            "mouse_modes": sorted(m.decode("ascii") for m in self._mouse_modes),
+            "mouse_encoding": self.mouse_encoding,
+        }
+
+    def apply_modes(self, modes: dict) -> None:
+        """Set the private modes from :meth:`modes`' output. Unknown or
+        missing keys leave a mode as it is."""
+        if not isinstance(modes, dict):
+            return
+        for key in ("app_cursor_keys", "bracketed_paste", "alt_screen"):
+            if key in modes:
+                setattr(self, key, bool(modes[key]))
+        if isinstance(modes.get("mouse_modes"), list):
+            self._mouse_modes = {
+                str(m).encode("ascii") for m in modes["mouse_modes"]
+                if str(m) in ("1000", "1002", "1003")
+            }
+            self.mouse_tracking = bool(self._mouse_modes)
+        if modes.get("mouse_encoding") in ("", "sgr", "urxvt", "utf8"):
+            self.mouse_encoding = modes["mouse_encoding"]
+
     def scroll_grid_into_history(self) -> None:
         """Push the whole visible grid off the top, leaving a blank screen.
 

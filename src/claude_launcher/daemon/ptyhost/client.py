@@ -19,6 +19,7 @@ import itertools
 import logging
 import os
 import queue
+import signal
 import socket
 import subprocess
 import sys
@@ -67,6 +68,15 @@ class RemotePty(PtyHandle):
         self.sid = sid
         self.name = name
         self.pid: Optional[int] = None
+        #: The host's count of this session's output up to the last byte
+        #: :meth:`read` returned. Whoever reads also logs (the session's
+        #: reader thread), so after :meth:`detach` it is where the log ends
+        #: and what the next daemon passes to ``attach`` as ``from_seq``.
+        self.seq = 0
+        #: Set by :meth:`detach`: the handle let go of a session that is
+        #: still running in the host. :meth:`read` has returned EOF, and
+        #: nobody may treat that as the child's exit.
+        self.detached = False
         self._out: "queue.Queue[bytes]" = queue.Queue()
         self._exited = threading.Event()
         self._code: Optional[int] = None
@@ -86,7 +96,22 @@ class RemotePty(PtyHandle):
 
     # -- PtyHandle ---------------------------------------------------------
     def read(self) -> bytes:
-        return self._out.get()
+        chunk = self._out.get()
+        self.seq += len(chunk)
+        return chunk
+
+    def detach(self) -> None:
+        """Let go of the session and leave it running in the host.
+
+        No more events are routed here; the chunks already queued are still
+        read, and then :meth:`read` returns EOF. The host keeps what follows
+        in its ring for the next ``attach``.
+        """
+        if self.detached or self._exited.is_set():
+            return
+        self.detached = True
+        self._client._forget(self.sid)
+        self._out.put(b"")
 
     def write(self, data: bytes, writer: object = None) -> None:
         if self._exited.is_set():
@@ -103,7 +128,7 @@ class RemotePty(PtyHandle):
             self._client.send({"op": "resize", "sid": self.sid, "cols": int(cols), "rows": int(rows)})
 
     def isalive(self) -> bool:
-        return not self._exited.is_set()
+        return not self._exited.is_set() and not self.detached
 
     def exit_code(self) -> Optional[int]:
         return self._code if self._exited.is_set() else None
@@ -120,7 +145,9 @@ class RemotePty(PtyHandle):
         if self._closed:
             return
         self._closed = True
-        self._client.send({"op": "close", "sid": self.sid}, quiet=True)
+        if not self.detached:
+            # A detached session is not this handle's to end.
+            self._client.send({"op": "close", "sid": self.sid}, quiet=True)
         self._client._forget(self.sid)
 
 
@@ -188,7 +215,7 @@ class HostClient:
 
     def request(self, header: dict, payload: bytes = b"", *, timeout: float = REQUEST_TIMEOUT) -> dict:
         req_id = next(self._ids)
-        slot = [threading.Event(), None]
+        slot = [threading.Event(), None, b""]
         with self._pending_lock:
             self._pending[req_id] = slot
         try:
@@ -206,6 +233,8 @@ class HostClient:
             raise HostUnavailable("the PTY host connection ended")
         if not reply.get("ok"):
             raise PtyError(str(reply.get("error") or "the PTY host refused the request"))
+        if slot[2]:
+            reply = {**reply, "payload": slot[2]}
         return reply
 
     # -- operations ----------------------------------------------------------
@@ -227,6 +256,44 @@ class HostClient:
             raise
         handle.pid = reply.get("pid")
         return handle
+
+    def attach(self, sid: str, *, name: str = "", from_seq: int = 0) -> "tuple":
+        """Re-attach to a session the host kept: ``(handle, replay, reply)``.
+
+        ``replay`` is the output the host kept from ``from_seq`` on (from the
+        ring's start when ``reply["gap"]`` bytes fell out of it); live output
+        continues in ``handle`` from ``reply["seq"]``. A session that exited
+        while nobody was attached comes back as a handle that has exited,
+        with the host's code.
+        """
+        handle = RemotePty(self, sid, name or sid)
+        # Registered before the request, as in spawn: the host's next output
+        # event for it follows the reply directly.
+        with self._ptys_lock:
+            self._ptys[sid] = handle
+        try:
+            reply = self.request({"op": "attach", "sid": sid, "from_seq": int(from_seq)})
+        except Exception:
+            self._forget(sid)
+            raise
+        handle.pid = reply.get("pid")
+        handle.seq = int(reply.get("seq") or 0)
+        if reply.get("exited"):
+            handle._on_exit(reply.get("code"))
+        return handle, bytes(reply.get("payload") or b""), reply
+
+    def ack_exit(self, sid: str) -> bool:
+        """Drop the host's record of an exit the daemon has now recorded."""
+        return bool(self.request({"op": "ack_exit", "sid": sid}, timeout=5.0).get("acked"))
+
+    def end(self, sid: str) -> bool:
+        """End one session the host holds, attached or not (the host waits
+        for it to go on a thread of its own)."""
+        return bool(self.request({"op": "end", "sid": sid}, timeout=5.0).get("ended"))
+
+    def end_all(self, *, timeout: float = 15.0) -> None:
+        """End every session the host holds (attached or not)."""
+        self.request({"op": "end_all"}, timeout=timeout)
 
     def list(self) -> list:
         return list(self.request({"op": "list"}).get("sessions") or [])
@@ -270,6 +337,7 @@ class HostClient:
                         slot = self._pending.get(header.get("id"))
                     if slot is not None:
                         slot[1] = header
+                        slot[2] = payload
                         slot[0].set()
                     continue
                 with self._ptys_lock:
@@ -325,6 +393,86 @@ def host_alive(directory: Path) -> Optional[int]:
     return pid
 
 
+#: How long :func:`stop_refusing_host` waits for a signalled host to exit.
+#: Its SIGTERM path force-ends every session at once, so this is ample.
+STOP_TIMEOUT = 10.0
+
+
+def _is_host_process(pid: int, directory: Path) -> bool:
+    """Whether ``pid`` is a PTY host for ``directory``, by its command line.
+    Where there is no /proc to read, the pid file the host wrote is taken
+    at its word."""
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except FileNotFoundError:
+        # No such entry: either no /proc on this system, or the process
+        # just ended (the caller checks again).
+        return not Path("/proc/self").exists()
+    except OSError:
+        return False
+    argv = [a.decode("utf-8", "replace") for a in raw.split(b"\0") if a]
+    return "claude_launcher.daemon.ptyhost" in argv and str(directory) in argv
+
+
+def _gone(pid: int) -> bool:
+    """Whether ``pid`` has exited. A host this process started is its child
+    and lingers as a zombie until reaped, which kill(pid, 0) still finds."""
+    try:
+        if os.waitpid(pid, os.WNOHANG)[0] == pid:
+            return True
+    except ChildProcessError:
+        pass
+    except OSError:
+        pass
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="ascii", errors="replace")
+        return stat.rsplit(")", 1)[1].split()[0] == "Z"
+    except (OSError, IndexError):
+        return False
+
+
+def stop_refusing_host(directory: Path, *, timeout: float = STOP_TIMEOUT) -> bool:
+    """End a live host this client cannot talk to, by signal (claunch-xnnct.1).
+
+    A host that refuses the connection -- another protocol version, a token
+    that no longer matches -- still runs its sessions; a daemon that went on
+    to spawn them itself would run each conversation twice. Its SIGTERM
+    handler ends every session and exits, in every protocol version, so the
+    signal needs no handshake. True when no host is left running for
+    ``directory``; False when one is, or the pid is not a host's.
+    """
+    directory = Path(directory)
+    pid = host_alive(directory)
+    if pid is None:
+        return True
+    if not _is_host_process(pid, directory):
+        if host_alive(directory) is None:
+            return True
+        log.warning("pid %s in %s is not a PTY host; leaving it alone", pid, pid_path(directory))
+        return False
+    log.warning("ending PTY host pid %s, which refused this daemon, and its sessions", pid)
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        log.warning("could not signal PTY host pid %s", pid, exc_info=True)
+        return False
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _gone(pid):
+            return True
+        time.sleep(0.05)
+    log.warning("PTY host pid %s did not exit %.0fs after SIGTERM", pid, timeout)
+    return False
+
+
 #: Every host this process started, newest last. tests/conftest.py checks
 #: that none is still running when a test ends.
 _started: list = []
@@ -378,4 +526,4 @@ def ensure_host(directory: Path, *, idle_exit: float = 30.0,
 
 
 __all__ = ["HostClient", "HostUnavailable", "RemotePty", "ensure_host", "host_alive",
-           "start_host", "OWNER_ENV"]
+           "start_host", "stop_refusing_host", "OWNER_ENV"]

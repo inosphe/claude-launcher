@@ -11,10 +11,13 @@ library and :mod:`claude_launcher.daemon.pty_backend` only, and imports what it
 needs at start: an installed copy can be replaced on disk under a running
 host, and a late import would then mix two versions of the code.
 
-Stage 1 (this module set): the host, its protocol and :class:`client.RemotePty`,
-behind the daemon setting ``pty_host`` (off by default). A client that goes
-away takes its sessions with it, which is what a daemon exit does today --
-surviving a restart is stage 2 (see the design comment on claunch-xnnct).
+Stage 1 added the host, its protocol and :class:`client.RemotePty`, behind
+the daemon setting ``pty_host`` (off by default). Stage 2 (claunch-xnnct.1)
+keeps the sessions when the client goes away: a daemon restart detaches them
+(``SessionManager.shutdown_all(mode="keep")``) and the next daemon adopts them
+(``restore_all``), so the children keep their pids and nothing is resumed. A
+restart with ``--with-pty-host`` (mode ``full``) and ``daemon stop`` end the
+sessions and the host as before.
 
 Files, all under one directory (the daemon's ``ptyhost/``):
 ``ptyhost.sock`` (or a short path under the temp dir, see :func:`socket_path`),
@@ -31,13 +34,17 @@ from pathlib import Path
 
 #: Version of the wire protocol. The hello carries the range a client
 #: speaks; the host refuses a client whose range does not include this.
-PROTO_VERSION = 1
+#: 2: sessions outlive the client; ``attach``, ``ack_exit`` and ``end_all``.
+PROTO_VERSION = 2
 
 #: ``sun_path`` is 108 bytes on Linux and 104 on macOS; leave room.
 _SUN_PATH_MAX = 100
 
-#: Environment variable a host inherits from whoever started it, so a test
-#: run can find (and end) the hosts it started -- see tests/conftest.py.
+#: Environment variable naming who a host belongs to. :func:`client.start_host`
+#: hands it on from the starting process's environment, so a host started by a
+#: daemon subprocess carries it too; tests/conftest.py sets it to the test
+#: run's id and ends (and reports) every host under a test's directories that
+#: carries that id when the test is over.
 OWNER_ENV = "CLAUNCH_PTYHOST_OWNER"
 
 

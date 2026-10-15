@@ -83,6 +83,29 @@ def use_host(client) -> None:
     _host = client
 
 
+#: The pid of a PTY host this daemon could neither use nor end
+#: (claunch-xnnct.1). Its sessions still run there, so restore_all must not
+#: relaunch them: the same conversation would run twice.
+_stranded: Optional[int] = None
+
+
+def mark_stranded(pid: Optional[int]) -> None:
+    global _stranded
+    _stranded = pid
+
+
+def stranded_host() -> Optional[int]:
+    return _stranded
+
+
+def current_host():
+    """The installed PTY host client while its connection is open, else None."""
+    host = _host
+    if host is not None and not host.closed.is_set():
+        return host
+    return None
+
+
 def spawn(
     argv: Sequence[str],
     *,
@@ -90,14 +113,17 @@ def spawn(
     cwd: str,
     cols: int,
     rows: int,
+    name: str = "",
 ) -> PtyHandle:
     """Spawn ``argv`` under a new PTY sized ``cols`` x ``rows``.
 
     In the PTY host when one is installed (:func:`use_host`) and its
-    connection is open; here otherwise."""
+    connection is open; here otherwise. ``name`` is the session's, which the
+    host keeps beside the session: the next daemon matches it to adopt the
+    session after a restart (claunch-xnnct.1)."""
     host = _host
     if host is not None and not host.closed.is_set():
-        return host.spawn(argv, env=env, cwd=cwd, cols=cols, rows=rows)
+        return host.spawn(argv, env=env, cwd=cwd, cols=cols, rows=rows, name=name)
     return spawn_local(argv, env=env, cwd=cwd, cols=cols, rows=rows)
 
 

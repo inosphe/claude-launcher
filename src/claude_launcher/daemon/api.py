@@ -473,6 +473,12 @@ def build_app(
     #: Whether the shutdown now in progress should spawn a successor. Read by
     #: ``__main__`` after the loop drains — the handler only marks intent.
     app["restart_requested"] = False
+    #: How the shutdown now in progress treats the PTY host and its sessions
+    #: (claunch-xnnct.1): "keep" leaves them running for the successor to
+    #: adopt, "full" and "stop" end them and the host. Read by ``__main__``
+    #: at teardown. "stop" until a request says otherwise -- a shutdown
+    #: nobody named (a signal) ends everything, as without a host.
+    app["restart_mode"] = "stop"
     #: The approval gate the agent path waits behind; see restart_gate.
     app["restart_gate"] = restart_gate.RestartGate(app, timeout=gate_timeout)
     #: The approval gate a leader's child-run goto waits behind; see
@@ -1863,9 +1869,20 @@ async def h_daemon_shutdown(request: web.Request) -> web.Response:
     regardless -- the CLI's approval gate (``restart_gate``) is the one door
     a session's restart goes through, and ``stop`` has none.
     """
+    body = await _json_body(request)
+    mode = body.get("mode") or "stop"
+    if mode not in SHUTDOWN_MODES:
+        return json_error(400, f"mode must be one of {', '.join(SHUTDOWN_MODES)}")
+    # A CLI restart is this call followed by a fresh start (daemon_client.
+    # restart): "keep" is how it says so, "stop" (and no body) is a stop.
+    request.app["restart_mode"] = mode
     loop = asyncio.get_running_loop()
     loop.call_later(0.1, request.app["shutdown_event"].set)
-    return json_response({"ok": True})
+    return json_response({"ok": True, "mode": mode})
+
+
+#: What ``/api/daemon/shutdown`` accepts as ``mode`` (claunch-xnnct.1).
+SHUTDOWN_MODES = ("keep", "full", "stop")
 
 
 async def h_daemon_restart(request: web.Request) -> web.Response:
@@ -1876,18 +1893,26 @@ async def h_daemon_restart(request: web.Request) -> web.Response:
     reads once the loop has drained. The successor is spawned there, after
     the singleton lock is released, so it finds the lock free instead of
     spending its grace window waiting this process out. Sessions come back
-    the way they do on any restart: relaunched per their ``restore`` flag.
+    the way they do on any restart: relaunched per their ``restore`` flag --
+    or, with the PTY host on, still running and adopted by the successor
+    (body ``{"mode": "keep"}``, the default); ``"full"`` ends them and the
+    host, and they are relaunched (claunch-xnnct.1).
 
     It records itself first, exactly as the CLI door does. The API cannot
     name a caller -- an HTTP request carries no session -- so this record
     owes nobody a notice; what it does is stop the successor from reporting
     this boot as one that nothing asked for.
     """
+    body = await _json_body(request)
+    mode = body.get("mode") or "keep"
+    if mode not in restart_gate.PTY_HOST_MODES:
+        return json_error(400, "mode must be keep or full")
     request.app["restart_requested"] = True
+    request.app["restart_mode"] = mode
     restart_notice.record_request(via="api")
     loop = asyncio.get_running_loop()
     loop.call_later(0.1, request.app["shutdown_event"].set)
-    return json_response({"ok": True, "restarting": True})
+    return json_response({"ok": True, "restarting": True, "mode": mode})
 
 
 async def h_restart_request_get(request: web.Request) -> web.Response:
@@ -1914,7 +1939,12 @@ async def h_restart_request_submit(request: web.Request) -> web.Response:
     reason = body.get("reason")
     if reason is not None and not isinstance(reason, str):
         return json_error(400, "reason must be a string")
-    record = request.app["restart_gate"].submit(session=session, reason=reason or "")
+    pty_host = body.get("pty_host") or "keep"
+    if pty_host not in restart_gate.PTY_HOST_MODES:
+        return json_error(400, "pty_host must be keep or full")
+    record = request.app["restart_gate"].submit(
+        session=session, reason=reason or "", pty_host=pty_host,
+    )
     return json_response({"ok": True, "request": record})
 
 

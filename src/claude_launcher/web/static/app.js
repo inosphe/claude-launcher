@@ -22823,41 +22823,66 @@ function daemonCard() {
         ? ` · started ${new Date(daemonStartedAt).toLocaleTimeString()}`
         : "")
   ));
-  const btn = el("button", "wf-btn force", "Restart daemon");
-  btn.title = "planned restart of a daemon that is answering - a daemon " +
-    "that has stopped answering cannot be restarted from here " +
-    "(claunch daemon restart --force)";
-  btn.addEventListener("click", async () => {
-    if (!confirm(
-      "Restart the daemon?\n\n" +
-      "Running sessions are stopped and relaunched into their own " +
-      "conversations (per their restore flag). Attached terminals and this " +
-      "page reconnect on their own — and the page will ask for the token " +
-      "again, because login cookies die with the process.\n\n" +
-      "This is a planned restart, and it goes through the daemon " +
-      "itself: if one has stopped answering, this button cannot " +
-      "reach it either - that case is 'claunch daemon restart " +
-      "--force' from a terminal."
-    )) return;
-    btn.disabled = true;
-    btn.textContent = "Restarting…";
-    try {
-      await api("/api/daemon/restart", { method: "POST" });
-    } catch {
-      btn.disabled = false;   // down already, or the auth overlay is up
-      btn.textContent = "Restart daemon";
-      return;
-    }
-    // From here the daemon goes quiet on purpose; label the gap so the rail
-    // does not read as a mystery outage. pollOnce()'s boot_id check does the
-    // actual recovery the moment the successor answers.
-    announceRestartAsked(
-      `asked at ${noticeClock()} — it stops answering while it drains, and ` +
-        "this page reconnects on its own once the successor is up"
-    );
-  });
-  card.appendChild(btn);
+  // Two modes (claunch-xnnct.1). "keep", the default: with the daemon
+  // setting pty_host on, the sessions keep running in the PTY host and the
+  // successor adopts them; without it they are relaunched as always.
+  // "full": the PTY host goes down with its sessions too, and they are
+  // relaunched on a new one -- for when the host's own code changed.
+  const restartButton = (label, mode, sessionsLine) => {
+    const btn = el("button", "wf-btn force", label);
+    btn.title = "planned restart of a daemon that is answering - a daemon " +
+      "that has stopped answering cannot be restarted from here " +
+      "(claunch daemon restart --force)";
+    btn.addEventListener("click", () => restartClicked(btn, label, mode, sessionsLine));
+    return btn;
+  };
+  card.appendChild(restartButton(
+    "Restart daemon", "keep",
+    "With the PTY host on (daemon setting pty_host), running sessions keep " +
+      "running and the new daemon takes them over as they are. Without it " +
+      "they are stopped and relaunched into their own conversations (per " +
+      "their restore flag)."
+  ));
+  card.appendChild(restartButton(
+    "Restart with PTY host", "full",
+    "The PTY host goes down too: running sessions are stopped and " +
+      "relaunched into their own conversations (per their restore flag) on " +
+      "a new host. Use it when the PTY host's own code changed; without the " +
+      "pty_host setting this is the same as Restart daemon."
+  ));
   return card;
+}
+
+async function restartClicked(btn, label, mode, sessionsLine) {
+  if (!confirm(
+    `${label}?\n\n` + sessionsLine + " Attached terminals and this " +
+    "page reconnect on their own — and the page will ask for the token " +
+    "again, because login cookies die with the process.\n\n" +
+    "This is a planned restart, and it goes through the daemon " +
+    "itself: if one has stopped answering, this button cannot " +
+    "reach it either - that case is 'claunch daemon restart " +
+    "--force' from a terminal."
+  )) return;
+  btn.disabled = true;
+  btn.textContent = "Restarting…";
+  try {
+    await api("/api/daemon/restart", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode }),
+    });
+  } catch {
+    btn.disabled = false;   // down already, or the auth overlay is up
+    btn.textContent = label;
+    return;
+  }
+  // From here the daemon goes quiet on purpose; label the gap so the rail
+  // does not read as a mystery outage. pollOnce()'s boot_id check does the
+  // actual recovery the moment the successor answers.
+  announceRestartAsked(
+    `asked at ${noticeClock()} — it stops answering while it drains, and ` +
+      "this page reconnects on its own once the successor is up"
+  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -46555,6 +46580,7 @@ function noticePanelGateRow(type, rec) {
     if ((rec.reason || "").trim()) {
       row.appendChild(el("div", "notice-sub gate-reason", `reason: ${rec.reason.trim()}`));
     }
+    row.appendChild(el("div", "notice-sub gate-mode", restartModeText(rec)));
     row.appendChild(el(
       "div", "notice-sub gate-clock",
       `auto-approves in ${gateCountdown(rec.deadline)}`
@@ -46994,6 +47020,15 @@ async function gatePost(path, btn) {
   return true;
 }
 
+/* What a restart request does with the PTY host (claunch-xnnct.1): the
+   asker's choice, applied on approval -- by a person or by the timeout. A
+   record from a daemon older than the field reads as the default. */
+function restartModeText(rec) {
+  return rec && rec.pty_host === "full"
+    ? "PTY host: restarted too — sessions end and are relaunched (--with-pty-host)"
+    : "PTY host: kept — with pty_host on, sessions keep running and are taken over";
+}
+
 async function refreshRestartGate() {
   const host = $("notices");
   if (!host) return;
@@ -47031,6 +47066,7 @@ async function refreshRestartGate() {
     const title = el("div", "notice-title", "daemon restart requested");
     const sub = el("div", "notice-sub");
     const reasonLine = el("div", "notice-sub gate-reason");
+    const modeLine = el("div", "notice-sub gate-mode");
     const actions = el("div", "gate-actions");
     const approve = el("button", "wf-btn approve", "Approve");
     const reject = el("button", "wf-btn clear", "Reject");
@@ -47079,6 +47115,7 @@ async function refreshRestartGate() {
     node.appendChild(title);
     node.appendChild(sub);
     node.appendChild(reasonLine);
+    node.appendChild(modeLine);
     node.appendChild(actions);
     host.appendChild(node);
     const entry = { node, timer: null };
@@ -47103,6 +47140,8 @@ async function refreshRestartGate() {
       ? `reason: ${reason}`
       : "reason: (the request gave none)";
   }
+  const modeLine = card.node.querySelector(".gate-mode");
+  if (modeLine) modeLine.textContent = restartModeText(rec);
   // Extend has no limit (claunch-mm8zv); a click in flight disables it until
   // the post returns, and the repaint here re-enables it.
   const extendBtn = card.node.querySelector(".gate-extend");

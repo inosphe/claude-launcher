@@ -1,4 +1,8 @@
-"""The PTY host (claunch-xnnct, stage 1): protocol, host process, RemotePty.
+"""The PTY host (claunch-xnnct): protocol, host process, RemotePty.
+
+Stage 2 (claunch-xnnct.1) cases at this level -- sessions outliving the
+client, ``attach``, ``ack_exit``, ``end_all`` -- are here too; the daemon's
+side of a restart is tests/test_ptyhost_adopt.py.
 
 Every test that starts a host ends it; tests/conftest.py fails a test that
 leaves one running (``ptyhost_leak_check``).
@@ -18,7 +22,7 @@ import pytest
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="the PTY host is POSIX only (stage 1)")
 
 from claude_launcher.daemon import pty_backend  # noqa: E402
-from claude_launcher.daemon.ptyhost import client as hc, protocol, socket_path, token_path  # noqa: E402
+from claude_launcher.daemon.ptyhost import OWNER_ENV, client as hc, protocol, socket_path, token_path  # noqa: E402
 
 ECHO = (
     "import sys\n"
@@ -93,6 +97,17 @@ def host_dir(tmp_path):
 def client(host_dir):
     c = hc.ensure_host(host_dir, idle_exit=2.0)
     yield c
+    _end_host(c, host_dir)
+
+
+def _end_host(c, host_dir):
+    """Shut the host down, reconnecting when the test let go of it: since
+    stage 2 a host with sessions outlives its client."""
+    if c.closed.is_set() and hc.host_alive(host_dir) is not None:
+        try:
+            c = hc.HostClient.connect(host_dir)
+        except hc.HostUnavailable:
+            pass
     if not c.closed.is_set():
         c.shutdown_host()
     pid = hc.host_alive(host_dir)
@@ -233,19 +248,153 @@ def test_bad_token_and_second_client_are_refused(client, host_dir):
     assert client.ping()["pid"] == client.host_pid
 
 
-def test_client_going_away_ends_its_sessions(client, host_dir, tmp_path):
-    """Stage 1: a daemon exit still ends the sessions it owned."""
+def _connect_again(host_dir, timeout: float = 10.0) -> hc.HostClient:
+    """Connect after a client let go. The host notices the old connection
+    close on its own thread, so a connect right after it can still be
+    answered busy (as the daemon's HOST_BUSY_WAIT allows for)."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            return hc.HostClient.connect(host_dir)
+        except hc.HostUnavailable as exc:
+            if "busy" not in str(exc) or time.monotonic() > deadline:
+                raise
+            time.sleep(0.05)
+
+
+def _detach_all(c):
+    """What a daemon going down in keep mode does to its handles."""
+    with c._ptys_lock:
+        handles = list(c._ptys.values())
+    for h in handles:
+        h.detach()
+    c.close()
+
+
+def test_client_going_away_keeps_its_sessions(client, host_dir, tmp_path):
+    """Stage 2: the child outlives the client, and the next client gets the
+    output it missed and a live session to type into."""
     pty = _spawn(client, ECHO, tmp_path)
     _read_until(pty, b"READY")
+    pty.write(b"one\n")
+    _read_until(pty, b"echo:one\r\n")  # the whole line, so nothing is in flight
     pid = pty.pid
-    client.close()
-    assert _wait(lambda: not _pid_alive(pid)), "the child outlived its client"
+    _detach_all(client)
+    # The chunks already routed are still read; then EOF, with no exit.
     while pty.read():
         pass
-    assert pty.exit_code() is None
-    host = hc.host_alive(host_dir)
-    # With no sessions and no client the host leaves after idle_exit (2s).
-    assert host is None or _wait(lambda: not _pid_alive(host), timeout=10.0)
+    assert pty.detached and pty.exit_code() is None
+    seen = pty.seq
+    time.sleep(0.5)
+    assert _pid_alive(pid), "the child ended with its client"
+
+    again = _connect_again(host_dir)
+    try:
+        rows = {r["sid"]: r for r in again.list()}
+        assert rows[pty.sid]["attached"] is False and rows[pty.sid]["pid"] == pid
+        assert rows[pty.sid]["seq"] == seen
+        handle, replay, reply = again.attach(pty.sid, from_seq=0)
+        assert reply["gap"] == 0 and reply["from"] == 0 and reply["seq"] == seen
+        assert b"READY" in replay and b"echo:one" in replay
+        assert handle.pid == pid and handle.isalive()
+        handle.write(b"two\n")
+        assert b"echo:two" in _read_until(handle, b"echo:two")
+        assert handle.seq > seen
+    finally:
+        again.shutdown_host()
+    assert _wait(lambda: not _pid_alive(pid)), "shutdown left the child running"
+
+
+def test_attach_replays_only_what_was_missed(client, host_dir, tmp_path):
+    pty = _spawn(client, ECHO, tmp_path)
+    _read_until(pty, b"READY")
+    _detach_all(client)
+    while pty.read():
+        pass
+    seen = pty.seq
+    again = _connect_again(host_dir)
+    try:
+        # Output made while nobody was attached is kept for the next one.
+        first, _, _ = again.attach(pty.sid, from_seq=seen)
+        first.write(b"while-away\n")
+        _read_until(first, b"echo:while-away\r\n")
+        _detach_all(again)
+        while first.read():
+            pass
+    finally:
+        again.close()
+    third = _connect_again(host_dir)
+    try:
+        handle, replay, reply = third.attach(pty.sid, from_seq=seen)
+        assert reply["from"] == seen
+        assert b"READY" not in replay and b"echo:while-away" in replay
+    finally:
+        third.shutdown_host()
+
+
+def test_exit_while_detached_is_kept_until_acknowledged(client, host_dir, tmp_path):
+    pty = _spawn(client, ECHO, tmp_path)
+    _read_until(pty, b"READY")
+    _detach_all(client)
+    while pty.read():
+        pass
+    again = _connect_again(host_dir)
+    try:
+        # Typed through a handle of its own, then let go before the exit.
+        h, _, _ = again.attach(pty.sid, from_seq=pty.seq)
+        h.write(b"quit\n")
+        h.detach()
+        assert _wait(lambda: not _pid_alive(pty.pid))
+        assert _wait(lambda: any(r["exited"] for r in again.list()))
+        row = again.list()[0]
+        assert row["code"] == 3 and row["exited_at"]
+        handle, _, reply = again.attach(pty.sid, from_seq=pty.seq)
+        assert reply["exited"] and reply["code"] == 3
+        assert not handle.isalive() and handle.exit_code() == 3
+        assert again.ack_exit(pty.sid) is True
+        assert again.list() == []
+        assert again.ack_exit(pty.sid) is False
+    finally:
+        again.shutdown_host()
+
+
+def test_ring_overflow_while_detached_reports_the_gap(client, host_dir, tmp_path):
+    flood = (
+        "import sys\n"
+        "print('READY', flush=True)\n"
+        "sys.stdin.readline()\n"
+        "sys.stdout.write('x' * (3 << 19) + '\\nDONE\\n'); sys.stdout.flush()\n"
+        "sys.stdin.readline()\n"
+    )
+    pty = _spawn(client, flood, tmp_path)
+    _read_until(pty, b"READY")
+    pty.write(b"go\n")
+    _detach_all(client)
+    while pty.read():
+        pass
+    seen = pty.seq
+    again = _connect_again(host_dir)
+    try:
+        assert _wait(lambda: again.list()[0]["seq"] >= seen + (3 << 19), timeout=20.0)
+        _, replay, reply = again.attach(pty.sid, from_seq=seen)
+        assert reply["gap"] > 0 and reply["from"] == reply["ring_start"] == seen + reply["gap"]
+        assert len(replay) == reply["seq"] - reply["from"] <= (1 << 20)
+        assert replay.rstrip().endswith(b"DONE")
+    finally:
+        again.shutdown_host()
+
+
+def test_end_all_ends_detached_sessions(client, host_dir, tmp_path):
+    pty = _spawn(client, ECHO, tmp_path)
+    _read_until(pty, b"READY")
+    _detach_all(client)
+    again = _connect_again(host_dir)
+    try:
+        again.end_all()
+        assert _wait(lambda: not _pid_alive(pty.pid))
+        assert again.list() == []
+    finally:
+        again.shutdown_host()
 
 
 def test_spawn_after_the_host_is_gone_raises(client, tmp_path):
@@ -342,3 +491,27 @@ def test_daemon_setting_on_installs_a_host_client(home, monkeypatch):
     finally:
         pty_backend.use_host(None)
         c.shutdown_host()
+
+
+def test_leak_check_finds_a_host_a_subprocess_started(tmp_path):
+    """The conftest leak check sees hosts this process did not start (a
+    daemon subprocess's) by the owner mark they inherit (claunch-xnnct.1)."""
+    import subprocess
+
+    import conftest
+
+    directory = tmp_path / "sub"
+    code = ("import sys; from pathlib import Path; "
+            "from claude_launcher.daemon.ptyhost import client as c; "
+            "c.ensure_host(Path(sys.argv[1]), idle_exit=600.0).close()")
+    subprocess.run([sys.executable, "-c", code, str(directory)], check=True, timeout=30)
+    pid = hc.host_alive(directory)
+    assert pid and pid not in [p.pid for p in hc._started]
+    try:
+        assert conftest._owned_host_pids(tmp_path) == [pid]
+        with open(f"/proc/{pid}/environ", "rb") as fh:
+            assert f"{OWNER_ENV}={conftest.PTYHOST_OWNER}".encode() in fh.read().split(b"\0")
+    finally:
+        conftest._end_pid(pid)
+    assert _wait(lambda: not _pid_alive(pid))
+    assert conftest._owned_host_pids(tmp_path) == []

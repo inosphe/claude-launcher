@@ -138,6 +138,10 @@ def _parse(stamp) -> Optional[datetime]:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
+#: The restart modes a request can carry (``pty_host``); see :meth:`RestartGate.submit`.
+PTY_HOST_MODES = ("keep", "full")
+
+
 class RestartGate:
     """The single pending approval, owned by one daemon process.
 
@@ -162,8 +166,15 @@ class RestartGate:
     # ------------------------------------------------------------------ #
     # the ask
     # ------------------------------------------------------------------ #
-    def submit(self, *, session: str, via: str = "cli", reason: str = "") -> dict:
+    def submit(self, *, session: str, via: str = "cli", reason: str = "",
+               pty_host: str = "keep") -> dict:
         """Open a gate for one session's restart request.
+
+        ``pty_host`` is the restart's mode (claunch-xnnct.1): ``"keep"``
+        leaves the PTY host and its sessions running, ``"full"`` (the CLI's
+        ``--with-pty-host``) takes them down too. It is the asker's choice,
+        shown on the card and applied on approval -- by a person or by the
+        clock; nobody changes it in between (reject and ask again).
 
         Refuses only while one is *pending*: a settled request (rejected — or
         approved, in the instant before the daemon goes down) no longer holds
@@ -186,6 +197,7 @@ class RestartGate:
             ),
             "status": "pending",
             "extensions": 0,
+            "pty_host": pty_host if pty_host in PTY_HOST_MODES else "keep",
         }
         self._timer = asyncio.get_running_loop().call_later(
             self.timeout, self._on_timeout, self.record["id"]
@@ -250,6 +262,7 @@ class RestartGate:
             cwd="",
         )
         self.app["restart_requested"] = True
+        self.app["restart_mode"] = record.get("pty_host") or "keep"
         loop = asyncio.get_running_loop()
         loop.call_later(0.1, self.app["shutdown_event"].set)
         return dict(record)

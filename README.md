@@ -3221,6 +3221,28 @@ different session). If the session's own args already pick a conversation
 output logs survive under `~/.claude-launcher/daemon/sessions/<name>/` either
 way.
 
+**Keeping sessions across a restart (PTY host).** With the daemon setting
+`pty_host` on (`claunch daemon config pty_host true`, POSIX only, off by
+default), the session PTYs and their programs belong to a separate PTY host
+process instead of the daemon. A plain `claunch daemon restart` then keeps
+them: the daemon lets go of each session, the host keeps it running and keeps
+its output in a 1 MiB ring, and the next daemon takes it over as it is -- same
+process, same screen, the output it missed appended to its log, nothing
+resumed and nothing queued. A daemon that crashed or was killed leaves its
+sessions running the same way (their logs can then miss what was written
+while no daemon was attached). `claunch daemon restart --with-pty-host` ends
+the sessions and the host too, and the new daemon relaunches them on a new
+host as described above -- use it when the PTY host's own code changed (a
+kept host goes on running the old code; the workflow `restart:` script
+`tools/restart_live.py` adds the flag by itself in that case). The web UI's
+daemon card has both buttons, and a session's gated restart request carries
+the choice to the approval card. `claunch daemon stop` always ends the
+sessions and the host. A starting daemon that finds a host it cannot talk to
+(another protocol version, or a token that no longer matches) ends that host
+and its sessions with SIGTERM before it relaunches them, so no conversation
+runs twice; if the host cannot be ended, the sessions it runs are left there,
+are not relaunched, and the daemon log says so.
+
 **A restart never loses a session.** Whatever is *not* relaunched — it had
 already exited, it was created `--no-restore`, or its relaunch failed — comes
 back as an **exited record** rather than being forgotten: still listed, still

@@ -200,15 +200,65 @@ def home(tmp_path, monkeypatch):
     return h
 
 
+#: This test process's mark on every PTY host started under it, directly or
+#: by a daemon subprocess (``ptyhost.OWNER_ENV``, inherited through the
+#: environment): the leak check below ends only hosts that carry it.
+PTYHOST_OWNER = f"pytest-{os.getpid()}-{os.urandom(4).hex()}"
+os.environ["CLAUNCH_PTYHOST_OWNER"] = PTYHOST_OWNER
+
+
+def _owned_host_pids(root: Path) -> list:
+    """Live PTY hosts under ``root`` (by their pid files) that this test
+    process owns -- found by the owner mark in their environment, so a host a
+    daemon subprocess started is caught too."""
+    found = []
+    try:
+        pid_files = list(root.rglob("ptyhost.pid"))
+    except OSError:
+        return found
+    for pid_file in pid_files:
+        try:
+            pid = int(pid_file.read_text(encoding="ascii").strip())
+            with open(f"/proc/{pid}/environ", "rb") as fh:
+                env = fh.read().split(b"\0")
+        except (OSError, ValueError):
+            continue
+        if f"CLAUNCH_PTYHOST_OWNER={PTYHOST_OWNER}".encode() in env:
+            found.append(pid)
+    return found
+
+
+def _end_pid(pid: int) -> None:
+    import signal
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return
+        time.sleep(0.05)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        pass
+
+
 @pytest.fixture(autouse=True)
-def ptyhost_leak_check():
+def ptyhost_leak_check(request):
     """Fail a test that leaves a PTY host running (claunch-xnnct).
 
     A host outlives the process that started it by design, and it is the
     parent of the session children; one left behind keeps running children
-    nobody watches. Every host is started through ``ptyhost.client.start_host``,
-    which records it, so the check is the record. A leftover host is ended
-    (SIGTERM ends its sessions first) and the test fails.
+    nobody watches. Two records find them: the hosts this process started
+    (``ptyhost.client.start_host`` keeps them), and the pid files under the
+    test's ``tmp_path`` whose process carries this run's owner mark -- the
+    one that also sees a host a daemon *subprocess* started. A leftover host
+    is ended (SIGTERM ends its sessions first) and the test fails.
     """
     yield
     mod = sys.modules.get("claude_launcher.daemon.ptyhost.client")
@@ -230,8 +280,20 @@ def ptyhost_leak_check():
         except Exception:
             proc.kill()
             proc.wait(timeout=5)
-    if leaked:
-        pytest.fail(f"PTY host(s) left running: {[p.pid for p in leaked]}")
+    leaked_pids = [p.pid for p in leaked]
+    tmp = request.node.funcargs.get("tmp_path") if hasattr(request.node, "funcargs") else None
+    if tmp is not None:
+        owned = _owned_host_pids(Path(tmp))
+        # Same grace as above: a host told to stop removes its pid file last.
+        deadline = time.monotonic() + 3
+        while owned and time.monotonic() < deadline:
+            time.sleep(0.1)
+            owned = _owned_host_pids(Path(tmp))
+        for pid in owned:
+            _end_pid(pid)
+        leaked_pids += [pid for pid in owned if pid not in leaked_pids]
+    if leaked_pids:
+        pytest.fail(f"PTY host(s) left running: {leaked_pids}")
 
 
 @contextlib.contextmanager

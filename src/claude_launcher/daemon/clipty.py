@@ -157,7 +157,10 @@ class ShellPty:
             env.setdefault("TERM", "xterm-256color")
             env.setdefault("COLORTERM", "truecolor")
         try:
-            self._pty = pty_backend.spawn(
+            # In this process even with the PTY host on (claunch-xnnct.1):
+            # the shell has no record for a successor to adopt it by, so it
+            # ends with the daemon, as the module docstring says.
+            self._pty = pty_backend.spawn_local(
                 self._argv,
                 env=env,
                 cwd=self._cwd or os.getcwd(),
