@@ -2497,6 +2497,12 @@ spec:
     `visits: true`면 `visit_limit` 응답이며 `reset`은 400), `POST /api/cflow2/nudge | abort | archive | report | move`
     (사람의 조작, 2.11). v2 런만 있는 슬롯에서 `GET /api/cflow/run`은 `v2: true`를
     싣는다. 런 상세의 `chart.nodes[*].force_target`은 강제 이동 대상 표시다.
+  - 런 상세의 `calls`(`daemon/cflow2_web.calls`)는 동적 호출 목록이다(2.12):
+    호출한 작업, 프로시저, 상태, 결과, callee 런의 `scope`·`cwd`. 런 화면의 Calls
+    표가 callee 열에서 그 런의 화면으로 잇는다. 런 목록 항목(`run_summary`)의
+    `calls`는 열린 호출 수다. `claunch cflow2 status`는 호출마다 한 줄(`call <id>
+    <작업>: <프로시저> <상태>[ -> <결과>] (scope <callee>)`)과, 돌아온 작업 아래에
+    `call_result` 한 줄을 찍는다.
   - `GET /api/cflow2/node?cwd&scope&node=<id>`(`daemon/cflow2_web.node_detail`): 런
     차트의 노드 하나. 정의가 준 필드 전부(작업의 `prompt`, `done_when`, `returns`,
     `rules`(본문 포함), `verify`, `ask`, 선택지의 `options`와 guard 등), 유형별 동작 설명
