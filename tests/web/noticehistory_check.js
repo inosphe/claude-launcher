@@ -227,13 +227,63 @@ function gotoRec(rec) {
           w.nodes["notice-bell"].className);
     w.api.noticePanelToggle(true);
     check("opening the panel shows it", /daemon back/.test(w.panel()), w.panel());
-    check("and marks it read", !w.nodes["notice-bell"].classList.contains("unread"),
-          w.nodes["notice-bell"].className);
+    check("opening it does not read it (claunch-x76l8)",
+          w.nodes["notice-bell"].classList.contains("unread") && w.badge() === "1",
+          [w.nodes["notice-bell"].className, w.badge()]);
     check("while it is open the strip moves below the panel's head",
           w.nodes.notices.classList.contains("under-panel-head"), w.nodes.notices.className);
     w.api.noticePanelToggle(false);
     check("and back once it closes", !w.nodes.notices.classList.contains("under-panel-head"),
           w.nodes.notices.className);
+  }
+
+  /* --- read marks (claunch-x76l8) -------------------------------------- */
+  {
+    const w = build();
+    w.api.notify("one", "a", { key: "k1", sticky: true });
+    w.api.notify("two", "b", { key: "k2", sticky: true });
+    w.api.notify("three", "c", { key: "k3", sticky: true });
+    check("each new row is unread and counted", w.badge() === "3" &&
+            w.api.noticeHistory.every((e) => e.read === false), [w.badge(), w.api.noticeHistory]);
+    w.strip().find((c) => /one/.test(c.text())).click();
+    check("clicking a floating card marks its row read",
+          w.api.noticeHistory.find((e) => e.title === "one").read === true && w.badge() === "2",
+          [w.badge(), w.api.noticeHistory]);
+    w.press(w.strip().find((c) => /two/.test(c.text())), "×").click();
+    check("× does not read it", w.api.noticeHistory.find((e) => e.title === "two").read === false &&
+            w.badge() === "2", w.badge());
+    w.api.noticePanelToggle(true);
+    const rowOf = (t) => w.panelRows().find((r) => r.children[0].children[0].textContent === t);
+    check("an unread row is marked so", rowOf("two").classList.contains("unread") &&
+            rowOf("one").classList.contains("read"), [rowOf("two").className, rowOf("one").className]);
+    rowOf("two").click();
+    check("clicking a history row marks it read",
+          w.api.noticeHistory.find((e) => e.title === "two").read === true && w.badge() === "1",
+          w.badge());
+    w.press(rowOf("two"), "Mark unread").click();
+    check("Mark unread counts it again",
+          w.api.noticeHistory.find((e) => e.title === "two").read === false && w.badge() === "2" &&
+            rowOf("two").classList.contains("unread"), w.badge());
+    check("and stays in this browser",
+          JSON.parse(w.storage.getItem("claunch.noticeHistory")).find((e) => e.title === "two").read === false);
+    w.press(rowOf("three"), "Mark read").click();
+    check("Mark read on a row reads only it", w.badge() === "1" &&
+            w.api.noticeHistory.find((e) => e.title === "three").read === true, w.badge());
+    w.press(w.nodes["notice-panel-body"], "Mark all read").click();
+    check("Mark all read empties the count", w.badge() === "" &&
+            w.api.noticeHistory.every((e) => e.read), [w.badge(), w.api.noticeHistory]);
+    check("and leaves nothing to mark", !w.press(w.nodes["notice-panel-body"], "Mark all read"), w.panel());
+  }
+  {
+    const storage = memoryStorage();
+    storage.setItem("claunch.noticeSeen", JSON.stringify(BASE));
+    storage.setItem("claunch.noticeHistory", JSON.stringify([
+      { id: "h2", at: BASE + 10, title: "after", sub: "", kind: "" },
+      { id: "h1", at: BASE - 10, title: "before", sub: "", kind: "" }]));
+    const w = build({ storage });
+    check("a row saved before read marks is read if the panel was opened after it",
+          w.api.noticeHistory.find((e) => e.id === "h1").read === true &&
+            w.api.noticeHistory.find((e) => e.id === "h2").read === false, w.api.noticeHistory);
   }
 
   /* --- × puts a card away without following it (claunch-x76l8) --------- */

@@ -6078,10 +6078,8 @@ body.embed #main { width: 100%; }
   border-radius: 8px; background: #d29922; color: #0d1117;
   font-size: 10px; font-weight: 600; line-height: 14px; vertical-align: 1px;
 }
-.notice-bell.unread::after {
-  content: ""; position: absolute; top: 1px; right: 2px;
-  width: 6px; height: 6px; border-radius: 50%; background: #58a6ff;
-}
+/* Unread rows only, nothing waiting: the count is blue instead of amber. */
+.notice-bell.unread .notice-bell-count { background: #58a6ff; }
 #notice-panel {
   position: fixed; top: 0; right: 0; bottom: 0; z-index: 25;
   width: min(380px, 100vw);
@@ -6115,6 +6113,18 @@ body.embed #main { width: 100%; }
 .notice-row.bad { border-left-color: #ff7b72; }
 .notice-row.openable { cursor: pointer; }
 .notice-row.openable:hover { background: #20242b; }
+/* Read marks (claunch-x76l8): an unread row has a dot and full colour, a
+   read one is dimmed. */
+.notice-row.unread .notice-title::before {
+  content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 6px;
+  border-radius: 50%; background: #58a6ff; vertical-align: 1px;
+}
+.notice-row.unread .notice-title { font-weight: 600; }
+.notice-row.read { opacity: 0.65; }
+.notice-row.read:hover { opacity: 1; }
+.notice-row-head .notice-mark {
+  margin: 0 0 0 auto; padding: 0 6px; font-size: 10px; line-height: 16px;
+}
 .notice-row-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; }
 .notice-row .notice-title { font-size: 12.5px; color: #e6edf3; }
 .notice-row .gate-clock, .notice-row .notice-when { color: #8b949e; }

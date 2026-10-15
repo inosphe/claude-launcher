@@ -45909,7 +45909,7 @@ function notify(title, sub, opts) {
   dismissNotice(key);            // one card per key, always the newest
   // `target` ({thread} or {qa}) is what `open` opens, kept in a form the
   // history can store, so its row opens the same place (claunch-x76l8).
-  noticeRecord(Object.assign(
+  const rec = noticeRecord(Object.assign(
     { title, sub: sub || "", kind: o.kind || "" },
     o.session ? { session: o.session } : {},
     o.session && o.target ? { target: o.target } : {}
@@ -45932,6 +45932,7 @@ function notify(title, sub, opts) {
   node.title = o.session ? `open ${o.session}` : "click to dismiss";
   node.addEventListener("click", () => {
     dismissNotice(key);
+    noticeMarkRead([rec.id], true);   // a click is a read; × is not
     if (o.open) o.open();
     else if (o.session) location.hash = "#/s/" + encodeURIComponent(o.session);
   });
@@ -45982,8 +45983,14 @@ function gateSessionLink(name) {
    daemon and its deadline keeps running — the restart gate still approves
    itself at its timeout — which is why the bell keeps counting it.
 
-   Kept in this browser's localStorage (claunch-l978l): the history, the
-   hidden request ids and when the panel was last opened. A browser without
+   The bell counts the waiting requests plus the unread history rows; a row
+   is read once its card or its row is clicked, or marked read in the panel
+   (claunch-x76l8). Opening the panel no longer reads everything.
+
+   Kept in this browser's localStorage (claunch-l978l): the history with each
+   row's read mark and the hidden request ids. When the panel was last opened
+   (noticeSeen) is only read, to mark rows saved before read marks existed.
+   A browser without
    storage still works; it only forgets on reload. Pending requests are never
    taken from storage — every poll reads them from the daemon. */
 const NOTICE_HISTORY_KEY = "claunch.noticeHistory";
@@ -46020,11 +46027,18 @@ function noticeSave(key, value) {
   }
 }
 
+/* Each row carries `read` (claunch-x76l8): set by a click on its card or
+   its row, or by Mark read / Mark all read, cleared by Mark unread. A row
+   saved before rows carried it is read when the panel was opened after it
+   arrived — the one record of reading the page kept until then. */
 const noticeHistory = (() => {
   const saved = noticeLoad(NOTICE_HISTORY_KEY, []);
-  return Array.isArray(saved)
+  const seen = Number(noticeLoad(NOTICE_SEEN_KEY, 0)) || 0;
+  const rows = Array.isArray(saved)
     ? saved.filter((e) => e && typeof e === "object").slice(0, NOTICE_HISTORY_MAX)
     : [];
+  for (const e of rows) if (typeof e.read !== "boolean") e.read = (e.at || 0) <= seen;
+  return rows;
 })();
 /* "<type>:<request id>" of gate cards put away by hand. */
 const gateHiddenIds = new Set(
@@ -46033,7 +46047,6 @@ const gateHiddenIds = new Set(
     return Array.isArray(saved) ? saved.filter((k) => typeof k === "string") : [];
   })()
 );
-let noticeSeenAt = Number(noticeLoad(NOTICE_SEEN_KEY, 0)) || 0;
 /* The pending requests of each gate as its last poll answered them. */
 const gatePending = { restart: [], goto: [], reposync: [] };
 
@@ -46043,7 +46056,7 @@ function noticeHistorySave() {
 
 function noticeRecord(entry) {
   const rec = Object.assign(
-    { id: `h${Date.now()}-${(noticeSeq += 1)}`, at: Date.now() },
+    { id: `h${Date.now()}-${(noticeSeq += 1)}`, at: Date.now(), read: false },
     entry
   );
   noticeHistory.unshift(rec);
@@ -46056,6 +46069,24 @@ function noticeRecord(entry) {
   return rec;
 }
 
+/* A pending gate request is counted as waiting, not as unread. */
+function noticeUnread(e) {
+  return !e.read && !(e.gate && e.status === "pending");
+}
+
+/* Sets `read` on the rows with these ids; repaints only when one changed. */
+function noticeMarkRead(ids, read) {
+  const want = new Set(ids);
+  let changed = false;
+  for (const e of noticeHistory) {
+    if (want.has(e.id) && e.read !== read) { e.read = read; changed = true; }
+  }
+  if (!changed) return;
+  noticeHistorySave();
+  noticeBellPaint();
+  noticePanelPaint();
+}
+
 function gateHistoryEntry(type, rid) {
   return noticeHistory.find(
     (e) => e.gate && e.gate.type === type && e.gate.rid === rid
@@ -46065,7 +46096,9 @@ function gateHistoryEntry(type, rid) {
 /* One history row per request, written the first time a poll sees it. */
 function gateHistoryOpen(type, rid, title, sub) {
   if (gateHistoryEntry(type, rid)) return;
-  noticeRecord({ title, sub, kind: "warn", gate: { type, rid }, status: "pending" });
+  // Read from the start: the bell counts it as waiting while it is pending,
+  // and a request just answered should not come back as unread.
+  noticeRecord({ title, sub, kind: "warn", gate: { type, rid }, status: "pending", read: true });
 }
 
 /* A request that left the pending set. `status` is the daemon's word for it
@@ -46163,21 +46196,25 @@ function gatePendingCount() {
    something newer than the last time the panel was opened. */
 function noticeBellPaint() {
   const waiting = gatePendingCount();
-  const unread = noticeHistory.some((e) => (e.at || 0) > noticeSeenAt);
+  const unread = noticeHistory.filter(noticeUnread).length;
   const hidden = [...gateHiddenIds].length > 0;
+  const total = waiting + unread;
   for (const id of ["notice-bell", "m-notice-bell"]) {
     const bell = $(id);
     if (!bell) continue;
     const badge = bell.querySelector(".notice-bell-count");
-    if (badge) badge.textContent = waiting ? String(waiting) : "";
+    if (badge) badge.textContent = total ? String(total) : "";
     bell.classList.toggle("waiting", waiting > 0);
-    bell.classList.toggle("unread", !waiting && unread);
+    bell.classList.toggle("unread", !waiting && unread > 0);
     bell.classList.toggle("has-hidden", hidden);
-    bell.title = waiting
-      ? `${waiting} request(s) waiting on you` +
-        (hidden ? " — some cards are hidden, their deadlines still run" : "") +
-        " · notification history"
-      : "notification history";
+    const parts = [];
+    if (waiting) {
+      parts.push(`${waiting} request(s) waiting on you` +
+        (hidden ? " — some cards are hidden, their deadlines still run" : ""));
+    }
+    if (unread) parts.push(`${unread} unread`);
+    parts.push("notification history");
+    bell.title = parts.join(" · ");
   }
 }
 
@@ -46195,11 +46232,7 @@ function noticePanelToggle(force) {
   // down past the panel's head, so its cards do not cover the close button.
   const strip = $("notices");
   if (strip) strip.classList.toggle("under-panel-head", open);
-  if (open) {
-    noticeSeenAt = Date.now();
-    noticeSave(NOTICE_SEEN_KEY, noticeSeenAt);
-    noticePanelPaint();
-  }
+  if (open) noticePanelPaint();
   noticeBellPaint();
 }
 
@@ -46371,13 +46404,14 @@ function noticePanelHistoryRow(entry) {
   const t = entry.session && entry.target;
   const openable = !!(t && (t.thread || t.qa));
   const row = el("div", "notice-row" + (entry.kind ? ` ${entry.kind}` : "") +
-    (openable ? " openable" : ""));
-  if (openable) {
-    row.title = t.thread
-      ? `open ${entry.session} on this thread`
-      : `open ${entry.session} on this question`;
-    row.addEventListener("click", () => noticeTargetOpen(entry));
-  }
+    (openable ? " openable" : "") + (noticeUnread(entry) ? " unread" : " read"));
+  row.title = openable
+    ? (t.thread ? `open ${entry.session} on this thread` : `open ${entry.session} on this question`)
+    : "click to mark read";
+  row.addEventListener("click", () => {
+    noticeMarkRead([entry.id], true);
+    if (openable) noticeTargetOpen(entry);
+  });
   const head = el("div", "notice-row-head");
   head.appendChild(el("span", "notice-title", entry.title || ""));
   if (entry.gate) {
@@ -46389,6 +46423,12 @@ function noticePanelHistoryRow(entry) {
   if (entry.hidden && entry.status === "pending") {
     head.appendChild(el("span", "notice-chip", "hidden"));
   }
+  const mark = noticePanelButton(
+    entry.read ? "Mark unread" : "Mark read", "notice-mark",
+    entry.read ? "count it in the bell again" : "take it off the bell's count",
+    () => noticeMarkRead([entry.id], !entry.read)
+  );
+  head.appendChild(mark);
   row.appendChild(head);
   if (entry.sub) row.appendChild(el("div", "notice-sub", entry.sub));
   if (entry.session) {
@@ -46426,6 +46466,13 @@ function noticePanelPaint() {
   const past = noticeHistory.filter((e) => !(e.gate && e.status === "pending"));
   const sectionHead = el("div", "notice-panel-section-row");
   sectionHead.appendChild(el("h3", "notice-panel-section", `History (${past.length})`));
+  const unreadIds = past.filter(noticeUnread).map((e) => e.id);
+  if (unreadIds.length) {
+    sectionHead.appendChild(noticePanelButton(
+      "Mark all read", "", `mark the ${unreadIds.length} unread row(s) read`,
+      () => noticeMarkRead(unreadIds, true)
+    ));
+  }
   if (past.length) {
     sectionHead.appendChild(noticePanelButton(
       "Clear", "clear", "forget the history in this browser (waiting requests stay)",
