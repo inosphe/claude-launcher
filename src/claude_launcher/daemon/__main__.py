@@ -86,6 +86,11 @@ def _quiet_reset_errors(loop: asyncio.AbstractEventLoop) -> None:
     loop.set_exception_handler(handler)
 
 
+#: Seconds a starting daemon waits for a PTY host still held by its
+#: predecessor's connection (see :func:`_connect_pty_host`).
+HOST_BUSY_WAIT = 15.0
+
+
 def _connect_pty_host(cfg: dict):
     """The PTY host client when ``pty_host`` is on (claunch-xnnct), else None.
 
@@ -102,11 +107,20 @@ def _connect_pty_host(cfg: dict):
     from . import pty_backend
     from .ptyhost import client as ptyhost_client
 
-    try:
-        client = ptyhost_client.ensure_host(paths.ptyhost_dir())
-    except Exception as exc:
-        log.error("pty_host is set but no PTY host could be reached (%s); spawning in the daemon", exc)
-        return None
+    deadline = time.monotonic() + HOST_BUSY_WAIT
+    while True:
+        try:
+            client = ptyhost_client.ensure_host(paths.ptyhost_dir())
+            break
+        except Exception as exc:
+            # One client at a time: a predecessor that has not let go yet
+            # holds the connection for a moment. Starting without the host
+            # would relaunch every session it still runs (claunch-xnnct.1).
+            if "busy" in str(exc) and time.monotonic() < deadline:
+                time.sleep(0.2)
+                continue
+            log.error("pty_host is set but no PTY host could be reached (%s); spawning in the daemon", exc)
+            return None
     pty_backend.use_host(client)
     log.info("sessions run in PTY host pid %s", client.host_pid)
     return client

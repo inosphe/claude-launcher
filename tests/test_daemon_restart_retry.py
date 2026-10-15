@@ -47,7 +47,7 @@ class _FakeTime:
 def _still_draining(monkeypatch) -> _FakeTime:
     """Common setup: a stop that reports accepted, no real waiting, and a
     lock that stays held (the predecessor has not exited yet)."""
-    monkeypatch.setattr(daemon_client, "stop", lambda timeout=10.0: True)
+    monkeypatch.setattr(daemon_client, "stop", lambda timeout=10.0, mode=None: True)
     monkeypatch.setattr(runtime_state, "lock_is_free", lambda: False)
     fake_time = _FakeTime()
     monkeypatch.setattr(daemon_client, "time", fake_time)
@@ -114,7 +114,7 @@ def test_restart_stops_early_once_the_lock_frees_but_spawning_still_fails(
     fault (a crash, a missing interpreter, ...) — retrying blindly would not
     fix it, so ``restart()`` gives up after the first attempt instead of
     spending the whole backoff budget on a problem it cannot solve."""
-    monkeypatch.setattr(daemon_client, "stop", lambda timeout=10.0: True)
+    monkeypatch.setattr(daemon_client, "stop", lambda timeout=10.0, mode=None: True)
     monkeypatch.setattr(runtime_state, "lock_is_free", lambda: True)
     monkeypatch.setattr(daemon_client, "time", _FakeTime())
 

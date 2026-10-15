@@ -499,3 +499,20 @@ def test_e2e_killed_daemon_leaves_sessions_for_the_next_one(live_daemon, home, t
         paths.log_file()).read_text(encoding="utf-8", errors="replace")
     _type("e2", "after-kill")
     _until(lambda: "echo:after-kill" in _screen("e2"), "input after the kill")
+
+
+def test_a_starting_daemon_waits_for_its_predecessor_to_let_go(host, monkeypatch):
+    """The host serves one client; a successor that connects while the
+    predecessor still holds it waits instead of starting without the host
+    (which would relaunch every session the host still runs)."""
+    import threading
+
+    monkeypatch.setattr(pty_backend, "_host", None)
+    threading.Timer(0.6, host.close).start()
+    c = daemon_main._connect_pty_host({"pty_host": True})
+    try:
+        assert isinstance(c, hc.HostClient) and c.host_pid == host.host_pid
+    finally:
+        pty_backend.use_host(None)
+        if c is not None:
+            c.close()

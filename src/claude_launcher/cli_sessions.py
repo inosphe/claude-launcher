@@ -2419,9 +2419,9 @@ def _force_replace(reason: str = "", *, with_pty_host: bool = False) -> int:
                 file=sys.stderr,
             )
             return 1
-        print(f"pid {pid} ended (sessions on a PTY host keep running and the "
-              "new daemon adopts them; the rest went with it and the new "
-              "daemon restores the ones marked for it)")
+        print(f"pid {pid} ended (its sessions went with it, except ones in a "
+              "PTY host, which keep running for the new daemon to adopt; the "
+              "new daemon restores the ones marked for it)")
     else:  # stale_record: the process is already gone, only the file remains
         print(f"clearing a stale record for pid {pid}")
     if with_pty_host:
