@@ -3214,7 +3214,11 @@ kept host goes on running the old code; the workflow `restart:` script
 `tools/restart_live.py` adds the flag by itself in that case). The web UI's
 daemon card has both buttons, and a session's gated restart request carries
 the choice to the approval card. `claunch daemon stop` always ends the
-sessions and the host.
+sessions and the host. A starting daemon that finds a host it cannot talk to
+(another protocol version, or a token that no longer matches) ends that host
+and its sessions with SIGTERM before it relaunches them, so no conversation
+runs twice; if the host cannot be ended, the sessions it runs are left there,
+are not relaunched, and the daemon log says so.
 
 **A restart never loses a session.** Whatever is *not* relaunched — it had
 already exited, it was created `--no-restore`, or its relaunch failed — comes
