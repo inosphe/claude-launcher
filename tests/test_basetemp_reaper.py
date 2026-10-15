@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 from pathlib import Path
 from types import SimpleNamespace
@@ -148,6 +149,11 @@ def test_a_directory_that_cannot_be_removed_is_skipped_and_recorded(tmp_path, mo
     assert rows["s995c1011010955"]["locked"]
     assert rows["s995c1011020000"]["outcome"] == "removed"
     assert locked.is_dir()
+    # The retry added the write bit; it must not have taken read and search
+    # away -- a 0200 directory is one no later rmtree can list (claunch-ersj2).
+    mode = (locked / "popen-gw0").stat().st_mode
+    assert mode & stat.S_IRUSR and mode & stat.S_IXUSR and mode & stat.S_IWUSR
+    shutil.rmtree(root)
 
 
 def test_read_only_files_are_removed(tmp_path):
