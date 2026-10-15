@@ -17,7 +17,7 @@ from typing import Optional
 
 from aiohttp import web
 
-from .. import daemon_client, providers, store
+from .. import daemon_client, providers, session_env, store
 from . import basetemp_reaper
 from . import cflow2_clock as cflow2_clock_mod
 from . import cflow_clock, paths, restart_notice, resume, runtime_state, window as window_mod
@@ -722,7 +722,16 @@ def main(argv=None) -> int:
     except instance_manifest.InstanceManifestError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    # No session's identity in the daemon's own environment, whatever shell
+    # started it (claunch-2yiij): spawn_daemon removes it on the way, and
+    # this covers every start that did not go through it (a daemon run by
+    # hand, a predecessor on older code). After the manifest, which can move
+    # the launcher home the profile-home check is measured against.
+    scrubbed = session_env.scrub_in_place()
     _setup_logging(args.foreground)
+    if scrubbed:
+        log.info("removed session variables from the daemon environment: %s",
+                 ", ".join(scrubbed))
 
     lock = runtime_state.SingletonLock()
     if not _acquire_with_grace(lock):

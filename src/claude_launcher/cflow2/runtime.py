@@ -2356,10 +2356,19 @@ def _gate_waits(state: Dict[str, Any], chart: Optional[ir.Chart],
 
 def default_driver(scope: Optional[str] = None) -> str:
     """The session a run started now belongs to: the starter's session
-    (``$CLAUNCH_SESSION``), else the session the scope names."""
+    (``$CLAUNCH_SESSION``), else the session the scope names.
+
+    For a starter that is a session (its MCP server, its CLI). A process that
+    starts runs for others -- the daemon -- passes :func:`scope_driver`
+    instead: its environment names no caller (claunch-2yiij)."""
     env = os.environ.get(store_mod.SESSION_ENV, "").strip()
     if env:
         return env
+    return scope_driver(scope)
+
+
+def scope_driver(scope: Optional[str]) -> str:
+    """The session ``scope`` names, or ``""`` for the default slot."""
     scope = (scope or "").strip()
     return "" if scope in ("", store_mod.DEFAULT_SCOPE) else store_mod.session_of(scope)
 
