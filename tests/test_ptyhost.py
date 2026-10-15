@@ -22,7 +22,7 @@ import pytest
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="the PTY host is POSIX only (stage 1)")
 
 from claude_launcher.daemon import pty_backend  # noqa: E402
-from claude_launcher.daemon.ptyhost import client as hc, protocol, socket_path, token_path  # noqa: E402
+from claude_launcher.daemon.ptyhost import OWNER_ENV, client as hc, protocol, socket_path, token_path  # noqa: E402
 
 ECHO = (
     "import sys\n"
@@ -477,3 +477,27 @@ def test_daemon_setting_on_installs_a_host_client(home, monkeypatch):
     finally:
         pty_backend.use_host(None)
         c.shutdown_host()
+
+
+def test_leak_check_finds_a_host_a_subprocess_started(tmp_path):
+    """The conftest leak check sees hosts this process did not start (a
+    daemon subprocess's) by the owner mark they inherit (claunch-xnnct.1)."""
+    import subprocess
+
+    import conftest
+
+    directory = tmp_path / "sub"
+    code = ("import sys; from pathlib import Path; "
+            "from claude_launcher.daemon.ptyhost import client as c; "
+            "c.ensure_host(Path(sys.argv[1]), idle_exit=600.0).close()")
+    subprocess.run([sys.executable, "-c", code, str(directory)], check=True, timeout=30)
+    pid = hc.host_alive(directory)
+    assert pid and pid not in [p.pid for p in hc._started]
+    try:
+        assert conftest._owned_host_pids(tmp_path) == [pid]
+        with open(f"/proc/{pid}/environ", "rb") as fh:
+            assert f"{OWNER_ENV}={conftest.PTYHOST_OWNER}".encode() in fh.read().split(b"\0")
+    finally:
+        conftest._end_pid(pid)
+    assert _wait(lambda: not _pid_alive(pid))
+    assert conftest._owned_host_pids(tmp_path) == []

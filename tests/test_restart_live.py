@@ -55,6 +55,7 @@ def restarts(monkeypatch):
     # The reason's commit list reads the real daemon.json and git; pinned
     # here so these tests see only the decision. Tested on its own below.
     monkeypatch.setattr(restart_live, "_unserved", lambda repo, branch, dj: [])
+    monkeypatch.setattr(restart_live, "host_code_changed", lambda repo, branch, dj: [])
 
     def run(command):
         calls.append(list(command))
@@ -208,3 +209,61 @@ def test_unserved_is_empty_when_it_cannot_tell(monkeypatch):
         lambda dj: (Path("d.json"), {"started_at": "x", "code": {}}),
     )
     assert restart_live._unserved(Path("."), "master", None) == []
+
+
+# -- the PTY host (claunch-xnnct.1) ------------------------------------------------
+
+def test_unchanged_host_code_keeps_the_host(verdict, restarts):
+    verdict(deploy_check.NOT_RESTARTED)
+    calls, run = restarts
+    assert restart_live.main([], run=run) == 0
+    assert "--with-pty-host" not in calls[0]
+    reason = calls[0][calls[0].index("--reason") + 1]
+    assert "PTY host" not in reason  # the ordinary case says nothing extra
+
+
+def test_changed_host_code_restarts_with_the_host(verdict, restarts, monkeypatch, capsys):
+    verdict(deploy_check.NOT_RESTARTED)
+    calls, run = restarts
+    changed = ["src/claude_launcher/daemon/ptyhost/server.py"]
+    monkeypatch.setattr(restart_live, "host_code_changed", lambda repo, branch, dj: changed)
+    assert restart_live.main(["--dry-run"], run=run) == 0
+    assert calls == [] and "--with-pty-host" in capsys.readouterr().out
+    assert restart_live.main([], run=run) == 0
+    assert calls[0][:4] == ["/fake/claunch", "daemon", "restart", "--with-pty-host"]
+    reason = calls[0][calls[0].index("--reason") + 1]
+    assert "with the PTY host: its code changed (src/claude_launcher/daemon/ptyhost/server.py)" in reason
+
+
+def test_unknown_host_code_keeps_the_host_and_says_so(verdict, restarts, monkeypatch):
+    verdict(deploy_check.CANNOT_TELL)
+    calls, run = restarts
+    monkeypatch.setattr(restart_live, "host_code_changed", lambda repo, branch, dj: None)
+    assert restart_live.main([], run=run) == 0
+    assert "--with-pty-host" not in calls[0]
+    assert "cannot be told" in calls[0][calls[0].index("--reason") + 1]
+
+
+def test_host_code_changed_diffs_the_host_paths_from_the_daemons_head(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(
+        deploy_check, "_daemon_doc",
+        lambda dj: (Path("d.json"), {"started_at": "x", "code": {"head": "abc123"}}),
+    )
+
+    def fake_git(repo, *args):
+        seen["args"] = args
+        return "src/claude_launcher/daemon/pty_backend.py\n"
+
+    monkeypatch.setattr(deploy_check, "_git", fake_git)
+    assert restart_live.host_code_changed(Path("."), "master", None) == [
+        "src/claude_launcher/daemon/pty_backend.py"]
+    assert seen["args"][:4] == ("diff", "--name-only", "abc123", "master")
+    assert seen["args"][5:] == restart_live.HOST_CODE
+    monkeypatch.setattr(deploy_check, "_git", lambda repo, *a: "")
+    assert restart_live.host_code_changed(Path("."), "master", None) == []
+    monkeypatch.setattr(
+        deploy_check, "_daemon_doc",
+        lambda dj: (Path("d.json"), {"started_at": "x", "code": {}}),
+    )
+    assert restart_live.host_code_changed(Path("."), "master", None) is None

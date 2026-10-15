@@ -43,11 +43,20 @@ driving session, the restart waits on the web UI's approval gate, and the
 person deciding reads that reason on the card -- "these merges are not
 live" is what makes approving it an informed click.
 
+The restart keeps the sessions that run in the PTY host (claunch-xnnct.1):
+the new daemon adopts them, still running. It adds ``--with-pty-host`` --
+ending them and the host, and relaunching them on a new one -- only when the
+PTY host's own code (:data:`HOST_CODE`) changed between what the live daemon
+serves and ``<branch>``: a kept host would go on running the old code. The
+reason says which of the two it is and why.
+
 This file is the one place in the repository that runs ``claunch daemon
-restart`` on a workflow's behalf. It runs as the daemon's child, in the
-operator's environment (no ``CLAUNCH_SESSION``), which is what makes the
-restart immediate; an agent session must not run it, or the command inside
-it, by hand (see README, "Who may restart or stop the daemon").
+restart`` on a workflow's behalf. It runs as the daemon's child: the v1 and
+v2 RestartClocks set ``CLAUNCH_SESSION`` to the driving run's session
+(``cflow_clock.RestartClock._execute``, ``cflow2_clock.perform_restart``),
+so the restart goes through the web UI's approval gate like any session's.
+An agent session must not run it, or the command inside it, by hand (see
+README, "Who may restart or stop the daemon").
 """
 
 from __future__ import annotations
@@ -81,6 +90,27 @@ _RESTARTING_BECAUSE = {
 }
 
 
+#: The PTY host's code: a change here is what a restart that keeps the host
+#: would leave unserved, so it restarts with ``--with-pty-host`` instead.
+HOST_CODE = ("src/claude_launcher/daemon/ptyhost/", "src/claude_launcher/daemon/pty_backend.py")
+
+
+def host_code_changed(repo: Path, branch: str, daemon_json: Optional[Path]) -> Optional[list]:
+    """The :data:`HOST_CODE` files that differ between what the live daemon
+    serves and ``<branch>`` -- or None when that cannot be told (no recorded
+    HEAD, git refusing). An empty list means the host's code is the same."""
+    try:
+        _path, doc = deploy_check._daemon_doc(daemon_json)
+        code = doc.get("code")
+        head = code.get("head") if isinstance(code, dict) else None
+        if not head:
+            return None
+        out = deploy_check._git(repo, "diff", "--name-only", head, branch, "--", *HOST_CODE)
+    except Exception:  # noqa: BLE001 - best effort, as _unserved
+        return None
+    return [line for line in out.splitlines() if line.strip()]
+
+
 #: How many unserved commits the reason lists by name before it counts the rest.
 UNSERVED_SHOWN = 10
 
@@ -105,9 +135,18 @@ def _unserved(repo: Path, branch: str, daemon_json: Optional[Path]) -> list:
     return [line for line in out.splitlines() if line.strip()]
 
 
-def restart_reason(verdict: int, unserved: list) -> str:
-    """What the approval card shows: why this restart is needed."""
+def restart_reason(verdict: int, unserved: list, host_changed: Optional[list] = None) -> str:
+    """What the approval card shows: why this restart is needed, and what
+    it does with the PTY host (``host_changed``: :func:`host_code_changed`)."""
     lines = [_RESTARTING_BECAUSE[verdict]]
+    if host_changed:
+        lines.append(
+            f"with the PTY host: its code changed ({', '.join(host_changed[:5])}"
+            + (", ..." if len(host_changed) > 5 else "")
+            + "), so the sessions end and are relaunched on a new host"
+        )
+    elif host_changed is None:
+        lines.append("keeping the PTY host (whether its code changed cannot be told)")
     if unserved:
         lines.append(f"commits the live daemon does not serve yet ({len(unserved)}):")
         lines += [f"  {line}" for line in unserved[:UNSERVED_SHOWN]]
@@ -116,11 +155,13 @@ def restart_reason(verdict: int, unserved: list) -> str:
     return "\n".join(lines)
 
 
-def _restart_command(reason: str = "") -> list:
+def _restart_command(reason: str = "", *, with_pty_host: bool = False) -> list:
     exe = shutil.which("claunch")
     if exe is None:
         raise LookupError("claunch is not on PATH; nothing can restart the daemon")
     command = [exe, "daemon", "restart"]
+    if with_pty_host:
+        command.append("--with-pty-host")
     if reason:
         command += ["--reason", reason]
     return command
@@ -151,14 +192,19 @@ def main(argv: Optional[list] = None, *, run=subprocess.call) -> int:
     if verdict == deploy_check.SERVING:
         print("no restart needed: the daemon already serves this code")
         return 0
-    reason = restart_reason(verdict, _unserved(args.repo, args.branch, args.daemon_json))
+    host_changed = host_code_changed(args.repo, args.branch, args.daemon_json)
+    reason = restart_reason(
+        verdict, _unserved(args.repo, args.branch, args.daemon_json), host_changed,
+    )
     print(reason, file=sys.stderr)
+    with_host = bool(host_changed)
     if args.dry_run:
-        print("dry run: would run 'claunch daemon restart' now; not doing it")
+        print("dry run: would run 'claunch daemon restart"
+              + (" --with-pty-host" if with_host else "") + "' now; not doing it")
         return 0
 
     try:
-        command = _restart_command(reason)
+        command = _restart_command(reason, with_pty_host=with_host)
     except LookupError as exc:
         print(f"cannot restart: {exc}", file=sys.stderr)
         return 1
