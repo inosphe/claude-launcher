@@ -17536,7 +17536,9 @@ function renderTermTimers(v) {
   if (v && v.session !== currentName) v = null;   // a previous session's read
   termTimersView = v;
   const rows = termTimerRows(v);
-  const show = rows.length > 0 && currentPage === "terminal" && !!currentName;
+  // Up wherever the session line is: its terminal, and its HTML view (the
+  // transcript page of that same local session, claunch-hjux5).
+  const show = rows.length > 0 && sessionLineOnPage(currentPage) && !!currentName;
   const sig = show ? rows.map((r) => r.key).join(",") : "hidden";
   const changed = box.dataset.sig !== sig;
   box.dataset.sig = sig;
@@ -17571,7 +17573,7 @@ function renderTermTimers(v) {
 
 async function refreshTermTimers() {
   const name = currentName;
-  if (!name || currentPage !== "terminal") { renderTermTimers(null); return; }
+  if (!name || !sessionLineOnPage(currentPage)) { renderTermTimers(null); return; }
   let v = null;
   try {
     const resp = await api(`/api/sessions/${encodeURIComponent(name)}/timers`);
@@ -17580,7 +17582,7 @@ async function refreshTermTimers() {
   } catch {
     return; // offline — the health poll owns saying so; keep the last truth
   }
-  if (name !== currentName || currentPage !== "terminal") return;
+  if (name !== currentName || !sessionLineOnPage(currentPage)) return;
   renderTermTimers(v);
 }
 
@@ -17783,7 +17785,8 @@ function termCflow2Question(a) {
    gate stops the session outright), else the v2 run's first owed answer.
    `null` when neither does. */
 function termCflowView() {
-  if (currentPage !== "terminal" || !currentName) return null;
+  // The terminal and the session's HTML view alike (claunch-hjux5).
+  if (!sessionLineOnPage(currentPage) || !currentName) return null;
   const r = sessCflowRun(currentName);
   if (r && sessCflowGated(r)) {
     return {
@@ -19461,6 +19464,15 @@ function syncTermHeader() {
   }
 }
 
+/* The strips over the session that also belong on its HTML view: the timer
+   line and the cflow answer strip (claunch-hjux5). showView draws them
+   before openTranscript has set the name the page reads, so the page asks
+   again once it has. */
+function syncSessionStrips() {
+  if (typeof renderTermCflow === "function") renderTermCflow();
+  if (typeof refreshTermTimers === "function") refreshTermTimers();
+}
+
 /* Where a session's pages are served: this daemon's route for its own
    sessions, the shadow route (relayed to the host) for another's. */
 function transcriptPath(name, machine) {
@@ -19482,6 +19494,7 @@ function openTranscript(name, machine = null) {
   if (back) back.href = machine ? shadowHash(machine, name) : `#/s/${encodeURIComponent(name)}`;
   if (transcriptName === name && transcriptMachine === machine) {
     if (typeof syncSessionLine === "function") syncSessionLine();
+    if (typeof syncSessionStrips === "function") syncSessionStrips();
     return;
   }
   transcriptGeneration += 1;
@@ -19492,6 +19505,8 @@ function openTranscript(name, machine = null) {
   // this page now reads, and so does the split pane under it.
   if (typeof syncSessionLine === "function") syncSessionLine();
   if (typeof syncSplitPane === "function") syncSplitPane();
+  // And the timer line and cflow answer strip over it (claunch-hjux5).
+  if (typeof syncSessionStrips === "function") syncSessionStrips();
   transcriptCursor = null;
   transcriptSeen = -1;
   transcriptMore = false;
@@ -20629,8 +20644,10 @@ function showView(name) {
   // place in the queue, re-asked-for on the way back in.
   if (!showTerm) renderTermWindow(null);
   else refreshTermWindow();
-  // The timer line, the same way: re-asked-for on the way back in.
-  if (!showTerm) renderTermTimers(null);
+  // The timer line, the same way: re-asked-for on the way back in. It stays
+  // on the session's HTML view too (claunch-hjux5); openTranscript re-asks
+  // once the page knows which session it reads.
+  if (!sessionLineOnPage(name)) renderTermTimers(null);
   else refreshTermTimers();
   // The process line, the same way.
   if (!showTerm) renderTermProcs(null);
