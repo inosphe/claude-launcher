@@ -827,6 +827,12 @@ class Session:
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
         self._detaching = True
+        # The sampler goes first: a detached RemotePty answers isalive()
+        # False, and a sampler tick while the reader is joined below would
+        # file the still-running program as exited (its liveness poll).
+        sampler = getattr(self, "_sampler", None)
+        if sampler is not None:
+            sampler.cancel()
         pty.detach()
         reader = self._reader
         if reader is not None:
@@ -834,9 +840,6 @@ class Session:
             if reader.is_alive():
                 log.warning("session %r: reader did not stop in %.0fs; its log may "
                             "repeat some output after the restart", self.sdef.name, timeout)
-        sampler = getattr(self, "_sampler", None)
-        if sampler is not None:
-            sampler.cancel()
         self._feeder.close()
         try:
             self._log.close()
@@ -1226,7 +1229,7 @@ class Session:
                     self._broadcast(("state", new))
                 # ConPTY can delay reader EOF past child exit; poll liveness
                 # as a safety net.
-                if not self.pty.isalive():
+                if not self._detaching and not self.pty.isalive():
                     self._finish()
                     break
         except asyncio.CancelledError:

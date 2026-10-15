@@ -248,6 +248,20 @@ def test_bad_token_and_second_client_are_refused(client, host_dir):
     assert client.ping()["pid"] == client.host_pid
 
 
+def _connect_again(host_dir, timeout: float = 10.0) -> hc.HostClient:
+    """Connect after a client let go. The host notices the old connection
+    close on its own thread, so a connect right after it can still be
+    answered busy (as the daemon's HOST_BUSY_WAIT allows for)."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            return hc.HostClient.connect(host_dir)
+        except hc.HostUnavailable as exc:
+            if "busy" not in str(exc) or time.monotonic() > deadline:
+                raise
+            time.sleep(0.05)
+
+
 def _detach_all(c):
     """What a daemon going down in keep mode does to its handles."""
     with c._ptys_lock:
@@ -263,7 +277,7 @@ def test_client_going_away_keeps_its_sessions(client, host_dir, tmp_path):
     pty = _spawn(client, ECHO, tmp_path)
     _read_until(pty, b"READY")
     pty.write(b"one\n")
-    _read_until(pty, b"echo:one")
+    _read_until(pty, b"echo:one\r\n")  # the whole line, so nothing is in flight
     pid = pty.pid
     _detach_all(client)
     # The chunks already routed are still read; then EOF, with no exit.
@@ -274,7 +288,7 @@ def test_client_going_away_keeps_its_sessions(client, host_dir, tmp_path):
     time.sleep(0.5)
     assert _pid_alive(pid), "the child ended with its client"
 
-    again = hc.HostClient.connect(host_dir)
+    again = _connect_again(host_dir)
     try:
         rows = {r["sid"]: r for r in again.list()}
         assert rows[pty.sid]["attached"] is False and rows[pty.sid]["pid"] == pid
@@ -298,18 +312,18 @@ def test_attach_replays_only_what_was_missed(client, host_dir, tmp_path):
     while pty.read():
         pass
     seen = pty.seq
-    again = hc.HostClient.connect(host_dir)
+    again = _connect_again(host_dir)
     try:
         # Output made while nobody was attached is kept for the next one.
         first, _, _ = again.attach(pty.sid, from_seq=seen)
         first.write(b"while-away\n")
-        _read_until(first, b"echo:while-away")
+        _read_until(first, b"echo:while-away\r\n")
         _detach_all(again)
         while first.read():
             pass
     finally:
         again.close()
-    third = hc.HostClient.connect(host_dir)
+    third = _connect_again(host_dir)
     try:
         handle, replay, reply = third.attach(pty.sid, from_seq=seen)
         assert reply["from"] == seen
@@ -324,7 +338,7 @@ def test_exit_while_detached_is_kept_until_acknowledged(client, host_dir, tmp_pa
     _detach_all(client)
     while pty.read():
         pass
-    again = hc.HostClient.connect(host_dir)
+    again = _connect_again(host_dir)
     try:
         # Typed through a handle of its own, then let go before the exit.
         h, _, _ = again.attach(pty.sid, from_seq=pty.seq)
@@ -359,7 +373,7 @@ def test_ring_overflow_while_detached_reports_the_gap(client, host_dir, tmp_path
     while pty.read():
         pass
     seen = pty.seq
-    again = hc.HostClient.connect(host_dir)
+    again = _connect_again(host_dir)
     try:
         assert _wait(lambda: again.list()[0]["seq"] >= seen + (3 << 19), timeout=20.0)
         _, replay, reply = again.attach(pty.sid, from_seq=seen)
@@ -374,7 +388,7 @@ def test_end_all_ends_detached_sessions(client, host_dir, tmp_path):
     pty = _spawn(client, ECHO, tmp_path)
     _read_until(pty, b"READY")
     _detach_all(client)
-    again = hc.HostClient.connect(host_dir)
+    again = _connect_again(host_dir)
     try:
         again.end_all()
         assert _wait(lambda: not _pid_alive(pty.pid))

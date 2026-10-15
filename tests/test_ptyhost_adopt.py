@@ -32,19 +32,24 @@ from claude_launcher.daemon import __main__ as daemon_main  # noqa: E402
 from claude_launcher.daemon.harness import SessionDef  # noqa: E402
 from claude_launcher.daemon.manager import SessionManager  # noqa: E402
 from claude_launcher.daemon.ptyhost import client as hc  # noqa: E402
+from claude_launcher.daemon import session as session_mod  # noqa: E402
 from claude_launcher.daemon.session import DeadSession  # noqa: E402
 
 #: Turns bracketed paste on (a mode the next daemon must keep), echoes
-#: lines, prints ``late:X`` a second after ``later:X`` (output made while no
-#: daemon is attached) and exits with 3 a second after ``quit-later``.
+#: lines, and after ``later:X`` prints ``late:X`` (output made while no
+#: daemon is attached), after ``quit-later`` exits with 3 -- each once a
+#: file named ``go`` appears in its cwd, which the test makes after the
+#: daemon let go. A fixed delay raced a slow shutdown on a loaded machine.
 CHILD = (
-    "import sys, threading, time\n"
+    "import os, sys, threading, time\n"
     "sys.stdout.write('\\x1b[?2004hREADY\\n'); sys.stdout.flush()\n"
     "def later(text, code=None):\n"
-    "    time.sleep(1.0)\n"
+    "    deadline = time.time() + 60\n"
+    "    while not os.path.exists('go') and time.time() < deadline:\n"
+    "        time.sleep(0.05)\n"
     "    print('late:' + text, flush=True)\n"
     "    if code is not None:\n"
-    "        import os; os._exit(code)\n"
+    "        os._exit(code)\n"
     "for line in sys.stdin:\n"
     "    line = line.strip()\n"
     "    if line.startswith('later:'):\n"
@@ -129,8 +134,17 @@ def _end_host():
 
 
 def _reconnect(monkeypatch) -> hc.HostClient:
-    """The next daemon's connection (``_connect_pty_host``)."""
-    c = hc.HostClient.connect(paths.ptyhost_dir())
+    """The next daemon's connection (``_connect_pty_host``), which also
+    retries while the host still answers busy for the previous client."""
+    deadline = time.monotonic() + 10.0
+    while True:
+        try:
+            c = hc.HostClient.connect(paths.ptyhost_dir())
+            break
+        except hc.HostUnavailable as exc:
+            if "busy" not in str(exc) or time.monotonic() > deadline:
+                raise
+            time.sleep(0.05)
     monkeypatch.setattr(pty_backend, "_host", c)
     return c
 
@@ -145,9 +159,11 @@ def test_keep_restart_adopts_the_running_session(host, tmp_path, monkeypatch):
         await s.send_keys(["before", "Enter"])
         await _wait_screen(s, "echo:before")
         await s.send_keys(["later:away", "Enter"])
+        await _wait_screen(s, "later:away")  # the line reached the child
         pid = s.pid
         await mgr.shutdown_all(mode="keep")
         host.close()
+        (tmp_path / "go").touch()
         assert not s.exited and s.detached_pty["seq"] > 0
         # A kept session did not end, so nobody is recorded as its ender
         # and no exit event is written (claunch-o6xws).
@@ -155,7 +171,7 @@ def test_keep_restart_adopts_the_running_session(host, tmp_path, monkeypatch):
         assert "exit" not in [e.get("kind") for e in mgr.events.rows(s)]
         assert s.detached_pty["modes"]["bracketed_paste"] is True
         # The child writes while no daemon is attached.
-        await asyncio.sleep(1.5)
+        await asyncio.sleep(1.0)
         assert _pid_alive(pid)
         assert b"late:away" not in paths.session_log("a1").read_bytes()
 
@@ -182,6 +198,43 @@ def test_keep_restart_adopts_the_running_session(host, tmp_path, monkeypatch):
         print(f"restore_all with one adopted session: {took * 1000:.0f} ms")
         await mgr2.shutdown_all(mode="stop")
         assert _wait(lambda: not _pid_alive(pid))
+
+    asyncio.run(run())
+
+
+def test_a_sampler_tick_during_detach_does_not_file_the_session_as_exited(
+        host, tmp_path, monkeypatch):
+    """A detached RemotePty answers isalive() False. The 2026-10-15 targeted
+    run caught the idle sampler ticking while detach() joined the reader:
+    its liveness poll called _finish(), persist wrote was_running False,
+    and the next daemon ended the still-running child as an orphan."""
+    _register()
+    monkeypatch.setattr(session_mod, "SAMPLE_INTERVAL", 0.02)
+
+    async def run():
+        mgr = _manager()
+        s = mgr.create(SessionDef(name="r1", harness="ph", cwd=str(tmp_path)))
+        await _wait_screen(s, "READY")
+        reader = s._reader
+        join = reader.join
+
+        def slow_join(timeout=None):
+            time.sleep(0.5)  # 25 sampler intervals
+            join(timeout)
+
+        monkeypatch.setattr(reader, "join", slow_join)
+        pid = s.pid
+        await mgr.shutdown_all(mode="keep")
+        assert not s.exited and s.exited_at is None
+        assert s.detached_pty is not None
+        host.close()
+        assert _pid_alive(pid)
+
+        _reconnect(monkeypatch)
+        mgr2 = _manager()
+        mgr2.restore_all()
+        assert mgr2.adopted == ["r1"] and mgr2.get("r1").pid == pid
+        await mgr2.shutdown_all(mode="stop")
 
     asyncio.run(run())
 
@@ -220,9 +273,11 @@ def test_exit_while_the_daemon_is_down_is_filed_with_the_host_code(host, tmp_pat
         s = mgr.create(SessionDef(name="x1", harness="ph", cwd=str(tmp_path)))
         await _wait_screen(s, "READY")
         await s.send_keys(["quit-later", "Enter"])
+        await _wait_screen(s, "quit-later")
         pid = s.pid
         await mgr.shutdown_all(mode="keep")
         host.close()
+        (tmp_path / "go").touch()
         assert _wait(lambda: not _pid_alive(pid), timeout=10.0)
 
         c2 = _reconnect(monkeypatch)
