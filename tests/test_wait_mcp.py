@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import types
+
 import pytest
 
 from claude_launcher import wait_mcp
@@ -8,8 +10,15 @@ from claude_launcher import wait_mcp
 def test_wait_mcp_sleeps_for_a_valid_interval(monkeypatch):
     slept = []
     moments = iter((10.0, 40.125))
-    monkeypatch.setattr(wait_mcp.time, "sleep", slept.append)
-    monkeypatch.setattr(wait_mcp.time, "monotonic", lambda: next(moments))
+    # ``wait_mcp.time`` is the process-wide ``time`` module: patching its
+    # ``monotonic`` hands the two-value iterator to every other caller (pytest,
+    # threads) until teardown, and the third call raises StopIteration. Swap the
+    # module's own reference for a stand-in instead.
+    monkeypatch.setattr(
+        wait_mcp,
+        "time",
+        types.SimpleNamespace(sleep=slept.append, monotonic=lambda: next(moments)),
+    )
 
     assert wait_mcp.call_tool("wait", {"seconds": 30}) == {
         "requested_seconds": 30.0,
