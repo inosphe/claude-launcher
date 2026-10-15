@@ -360,7 +360,12 @@ class SysPerf:
         self._task: Optional[asyncio.Task] = None
         # A logger of its own per collector: never propagated into
         # daemon.log, and two collectors (tests) do not share a handler.
-        self._log = logging.getLogger(f"claunch.sysperf.samples.{id(self)}")
+        # Built directly instead of through getLogger so it never enters the
+        # logger registry: a registered name built from id(self) is reused
+        # when a later collector lands on a freed address, and pytest's log
+        # capture attaches to every registered non-propagating logger, so
+        # the reused one carried that handler (claunch-0yxs1).
+        self._log = logging.Logger(f"claunch.sysperf.samples.{id(self)}")
         self._log.propagate = False
         self._log.setLevel(logging.INFO)
         self._handler: Optional[logging.Handler] = None

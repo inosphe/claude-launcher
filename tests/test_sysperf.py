@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 from pathlib import Path
 
@@ -182,6 +183,33 @@ def test_log_does_not_reach_the_daemon_log(tmp_path, caplog):
     finally:
         sp._close_log()
     assert not [r for r in caplog.records if r.name.startswith("claunch.sysperf")]
+
+
+def test_log_is_not_reached_through_the_logger_registry(tmp_path):
+    # claunch-0yxs1: pytest's log capture attaches to every registered
+    # non-propagating logger, and a name built from id(self) comes back when a
+    # collector lands on a freed address. A handler put on the registry's
+    # logger of the same name must not see the collector's samples.
+    sp = sysperf.SysPerf(reader=lambda: _reading(0.0, 0, 1), log_file=tmp_path / "s.log")
+    seen = []
+
+    class Grab(logging.Handler):
+        def emit(self, record):
+            seen.append(record)
+
+    grab = Grab()
+    registered = logging.getLogger(sp._log.name)
+    registered.addHandler(grab)
+    sp._open_log()
+    try:
+        sp.tick(_reading(0.0, 0, 1))
+        sp.tick(_reading(1.0, 1, 2))
+    finally:
+        sp._close_log()
+        registered.removeHandler(grab)
+        logging.root.manager.loggerDict.pop(sp._log.name, None)
+    assert seen == []
+    assert (tmp_path / "s.log").read_text(encoding="utf-8").strip()
 
 
 def test_read_counters_on_this_machine():
