@@ -229,3 +229,68 @@ def test_asking_for_a_qa_question_from_a_thread(tmp_path):
         await req("POST", f"/api/threads/{t['id']}/messages", {"text": "plain"})
         assert "qa_ask" not in mgr.sessions["s1"].delivered[-1]
     run(tmp_path, scenario)
+
+
+# -- ids in text (claunch-236ei) ------------------------------------------
+
+
+def test_qa_ids_reads_each_id_once_in_order():
+    assert talk_links.qa_ids("see qa-78302411 and QA-0000BEEF, again qa-78302411") == [
+        "qa-78302411", "qa-0000beef"]
+    # Not an id: too short, too long, part of a longer word.
+    assert talk_links.qa_ids("qa-1234 qa-123456789 xqa-78302411 qa-78302411x") == []
+    assert talk_links.qa_ids(42) == [] and talk_links.qa_ids(None) == []
+
+
+def test_subject_in_takes_the_one_session_question_named():
+    rows = [{"id": "qa-0000000a", "title": "a", "status": "open", "thread": None},
+            {"id": "qa-0000000b", "title": "b", "status": "closed", "thread": None}]
+    assert talk_links.subject_in("qa-0000000a: a", None, rows) == "qa-0000000a"
+    # An id of no question of the session is not a subject.
+    assert talk_links.subject_in("qa-0000beef", None, rows) is None
+    # The title names none: the first message is read.
+    assert talk_links.subject_in("about b", "re qa-0000000b", rows) == "qa-0000000b"
+    # The title names two: no subject is picked, and the message is not read.
+    assert talk_links.subject_in("qa-0000000a vs qa-0000000b", "qa-0000000a", rows) is None
+    assert talk_links.mentioned("qa-0000000b, qa-0000000a, qa-0000beef", rows, skip=["qa-0000000a"]) == [rows[1]]
+
+
+def test_a_thread_titled_with_a_question_id_is_linked_to_it(tmp_path):
+    async def scenario(req, mgr):
+        q = (await req("POST", "/api/qa", {"session": "s1", "title": "Which base?"}))["question"]
+        await req("POST", f"/api/qa/{q['id']}/answer", {"revision": q["revision"], "text": "master"})
+        await req("POST", f"/api/qa/{q['id']}/close", {"session": "s1", "revision": q["revision"] + 1})
+        res = await req("POST", "/api/threads", {"to": "s1", "title": f"{q['id']}: follow-up", "text": "more"})
+        t = res["thread"]
+        assert t["qa"] == q["id"]
+        assert t["links"] == [{"id": q["id"], "title": "Which base?", "status": "closed", "rel": "subject"}]
+        assert f'This thread is about your QA question {q["id"]} (closed): "Which base?"' in \
+            mgr.sessions["s1"].delivered[-1]
+        listed = (await req("GET", "/api/qa?session=s1&closed=1"))["questions"][0]
+        assert listed["links"] == [{"id": t["id"], "title": f"{q['id']}: follow-up", "status": "open",
+                                    "rel": "discussion"}]
+        # The agent's thread_open goes the same way.
+        t2 = (await req("POST", "/api/threads", {"session": "s1", "title": f"on {q['id'].upper()}"}))["thread"]
+        assert t2["qa"] == q["id"]
+        # Another session's id links nothing and is not refused.
+        theirs = (await req("POST", "/api/qa", {"session": "s2", "title": "theirs"}))["question"]
+        t3 = (await req("POST", "/api/threads", {"to": "s1", "title": f"{theirs['id']}", "text": "x"}))["thread"]
+        assert t3["qa"] is None and t3["links"] == []
+    run(tmp_path, scenario)
+
+
+def test_a_message_naming_questions_lists_them_in_its_block(tmp_path):
+    async def scenario(req, mgr):
+        a = (await req("POST", "/api/qa", {"session": "s1", "title": "Which base?"}))["question"]
+        b = (await req("POST", "/api/qa", {"session": "s1", "title": "Which port?"}))["question"]
+        t = (await req("POST", "/api/threads", {"to": "s1", "title": "about a", "qa": a["id"]}))["thread"]
+        await req("POST", f"/api/threads/{t['id']}/messages",
+                  {"text": f"like {b['id']} and {a['id']}, not qa-0000beef"})
+        block = mgr.sessions["s1"].delivered[-1]
+        assert f'The user\'s message names your QA question {b["id"]} (open): "Which port?".' in block
+        # The subject is said once, by its own line; an unknown id adds nothing.
+        assert f"names your QA question {a['id']}" not in block
+        assert "qa-0000beef (" not in block
+        await req("POST", f"/api/threads/{t['id']}/messages", {"text": "plain"})
+        assert "names your QA question" not in mgr.sessions["s1"].delivered[-1]
+    run(tmp_path, scenario)

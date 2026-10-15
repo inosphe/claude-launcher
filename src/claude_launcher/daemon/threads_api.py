@@ -31,6 +31,10 @@ and be the same session's. Every thread this module returns carries
 user message about a question repeats the question in the delivered block,
 and a post with ``ask_qa: true`` asks the agent to file what the thread
 settled as a QA question linked back to it (qa_ask ``thread=``).
+Opened without ``qa``, a thread whose title (or first message) names
+exactly one of the session's question ids is linked to that question, and a
+user message naming other questions of the session lists them in its
+delivered block (claunch-236ei, talk_links.subject_in / mentioned).
 """
 
 from __future__ import annotations
@@ -63,8 +67,13 @@ def _subject_line(thread: dict) -> list[str]:
     return []
 
 
+def _mention_lines(mentions: list[dict]) -> list[str]:
+    return [f"The user's message names your QA question {q['id']} ({q['status']}): \"{q['title']}\"."
+            for q in mentions]
+
+
 def user_wrote_text(thread: dict, message: dict, *, opened: bool = False, reopened: bool = False,
-                    ask_qa: bool = False) -> str:
+                    ask_qa: bool = False, mentions: Optional[list[dict]] = None) -> str:
     tid = thread["id"]
     if opened:
         head = "The user opened a new thread with you:"
@@ -72,7 +81,8 @@ def user_wrote_text(thread: dict, message: dict, *, opened: bool = False, reopen
         head = "The user reopened this thread and wrote:"
     else:
         head = "The user wrote in this thread:"
-    lines = [f"{PREFIX} {tid} \"{thread['title']}\"] {head}", _quote(message["body"]), *_subject_line(thread)]
+    lines = [f"{PREFIX} {tid} \"{thread['title']}\"] {head}", _quote(message["body"]), *_subject_line(thread),
+             *_mention_lines(mentions or [])]
     if ask_qa:
         lines.append(
             "The user asks you to turn this thread into a QA question: file the decision it needs from them "
@@ -137,6 +147,23 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
             return qa.get(qid)
         except Exception:  # noqa: BLE001 -- no such question
             return None
+
+    def qa_rows(session: str) -> list[dict]:
+        """The session's questions as link rows; empty when QA is not
+        installed or unreadable (no id is then matched, nothing refused)."""
+        qa = app.get("qa")
+        if qa is None:
+            return []
+        try:
+            return qa.link_rows(session)
+        except Exception:  # noqa: BLE001 -- the QA store is unreadable
+            return []
+
+    def mentions_in(thread: dict, message: Optional[dict]) -> list[dict]:
+        if not message:
+            return []
+        return talk_links.mentioned(message["body"], qa_rows(thread["session"]),
+                                    skip=[thread["qa"]] if thread.get("qa") else [])
 
     def tell(res: dict, name: str, text: str) -> None:
         res["delivered"] = deliver(name, text)
@@ -207,12 +234,19 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
             if q["session"] != target:
                 return web.json_response(
                     {"error": f"question {qid} belongs to session {q['session']}, not {target}"}, status=400)
+        else:
+            # No explicit link: a question id in the title (or the first
+            # message) is the subject when it names one of the session's
+            # questions (claunch-236ei).
+            rows = await asyncio.to_thread(qa_rows, target)
+            qid = talk_links.subject_in(body.get("title"), body.get("text"), rows)
         res, err = await call(threads.open, actor, target, body.get("title"), body.get("text"), qa=qid)
         if err:
             return err
         await asyncio.to_thread(link, [res["thread"]], target)
         if actor == thread_store.USER and res["message"]:
-            tell(res, target, user_wrote_text(res["thread"], res["message"], opened=True))
+            mentions = await asyncio.to_thread(mentions_in, res["thread"], res["message"])
+            tell(res, target, user_wrote_text(res["thread"], res["message"], opened=True, mentions=mentions))
         return web.json_response(res)
 
     async def h_read(request):
@@ -234,8 +268,9 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
         t = res["thread"]
         await asyncio.to_thread(link, [t], t["session"])
         if actor == thread_store.USER:
+            mentions = await asyncio.to_thread(mentions_in, t, res["message"])
             tell(res, t["session"], user_wrote_text(t, res["message"], reopened=res["reopened"],
-                                                    ask_qa=body.get("ask_qa") is True))
+                                                    ask_qa=body.get("ask_qa") is True, mentions=mentions))
         return web.json_response(res)
 
     def status_route(status: str):

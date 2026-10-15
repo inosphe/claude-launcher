@@ -27,7 +27,10 @@
    "QA로 정리 요청" posts a message with ask_qa, asking the session to file
    the thread's open decision as a question linked back here. compose()
    opens the new-thread form prefilled for a question (QA card's "쓰레드로
-   논의"); the thread is opened with `qa` set.
+   논의", closed questions too); the title starts with the question id and
+   the thread is opened with `qa` set. A title typed by hand that names one
+   of the session's question ids is linked by the daemon the same way
+   (claunch-236ei).
 
    Space (claunch-1n081): "◂ 목록" in the head folds the thread list away
    while a conversation is open, so the bubbles take the pane's whole
@@ -357,7 +360,7 @@ globalThis.ThreadsPane = (() => {
     if (composing) {
       const form = node("div", "th-newform");
       const title = node("input", "th-title-input");
-      title.placeholder = "주제(한 줄)";
+      title.placeholder = "주제(한 줄) — qa-xxxxxxxx를 넣으면 그 QA 질문과 연결";
       title.value = drafts.get("\u0000title") || "";
       title.addEventListener("input", () => drafts.set("\u0000title", title.value));
       const first = textBox("th-text", "", "첫 메시지(선택) — 세션에 전달됩니다");
@@ -596,7 +599,7 @@ globalThis.ThreadsPane = (() => {
      prefilled; a title already typed for this question is kept. */
   function compose(q) {
     if (!host || !q) return;
-    if (!composeQa || composeQa.id !== q.id) drafts.set("\u0000title", `Q: ${q.title}`);
+    if (!composeQa || composeQa.id !== q.id) drafts.set("\u0000title", `${q.id}: ${q.title}`);
     composing = true;
     composeQa = {id: q.id, title: q.title};
     drawn.side = "";

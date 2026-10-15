@@ -30,10 +30,13 @@ and thread_open text as GitHub-flavored markdown: the pane renders it
 keeps single line breaks; it shows raw HTML as text, and a reply wrapped
 whole in one code fence shows as a code block. Threads and QA questions
 link to each other: a thread opened about a question (thread_open qa=, or the
-user's "discuss in a thread" on a QA card) carries it as its subject, and
-when a thread reaches a decision the user must make, file it with qa_ask
-thread=<id> so the question links back to the conversation. Each thread's
-'links' lists the questions it touches.
+user's "discuss in a thread" on a QA card, or a title naming one of your
+question ids, e.g. "qa-78302411: ...") carries it as its subject; a thread
+block says which question it is about and which of your questions the
+user's message names -- read them with qa_list (closed=true for a settled
+one) before answering. When a thread reaches a decision the user must
+make, file it with qa_ask thread=<id> so the question links back to the
+conversation. Each thread's 'links' lists the questions it touches.
 """
 
 _TID = {"thread_id": {"type": "string", "description": "thread id (th-xxxxxx)"}}
@@ -65,7 +68,8 @@ TOOLS = [
          "title": {"type": "string", "description": "the topic, one line"},
          "text": {"type": "string", "description": "first message, in markdown"},
          "qa": {"type": "string", "description": "the QA question (qa-xxxxxxxx) this thread discusses; "
-                                                 "it is linked both ways and shown on its QA card"}},
+                                                 "it is linked both ways and shown on its QA card. Omitted, "
+                                                 "a single qa-id of yours in the title links it"}},
          "required": ["title"]}},
     {"name": "thread_close",
      "description": "Close one of your threads once its topic is settled (kept for the record; a new "

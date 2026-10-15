@@ -30,7 +30,8 @@
    `links` to the threads that touch it (the one it was filed from, the ones
    opened about it). They are chips on the card calling opts.onThread(id);
    "쓰레드로 논의" calls opts.onDiscuss(question) to open a new thread about
-   it (talk-pane.js). focus(id) scrolls a card into view and marks it. */
+   it (talk-pane.js), closed questions included -- a settled question can
+   be taken up again in a thread (claunch-236ei). focus(id) scrolls a card into view and marks it. */
 globalThis.QaPane = (() => {
   const POLL_MS = 3000;
   const STATUS = {
@@ -222,10 +223,10 @@ globalThis.QaPane = (() => {
       chip.addEventListener("click", () => onThread && onThread(link.id));
       row.append(chip);
     }
-    if (onDiscuss && q.status !== "closed") {
+    if (onDiscuss) {
       const go = node("button", "term-btn qa-discuss", "쓰레드로 논의");
       go.type = "button";
-      go.title = "이 질문을 주제로 새 쓰레드를 엽니다. 쓰레드와 질문이 서로 연결됩니다.";
+      go.title = "이 질문을 주제로 새 쓰레드를 엽니다(닫힌 질문도 가능). 쓰레드 제목에 질문 id가 들어가고, 쓰레드와 질문이 서로 연결됩니다.";
       go.addEventListener("click", () => onDiscuss({id: q.id, title: q.title}));
       row.append(go);
     }
