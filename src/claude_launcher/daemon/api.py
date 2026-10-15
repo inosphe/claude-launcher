@@ -5990,7 +5990,7 @@ async def h_mesh_get(request: web.Request) -> web.Response:
     # the answer is built rather than after it reaches the page. Absent means
     # every member, which is what this route has always sent.
     state = str(request.query.get("state") or "all")
-    if state not in mesh_mod.MEMBER_STATES:
+    if not mesh_mod.valid_member_state(state):
         return json_error(400, f"invalid member state: {state!r}")
     return json_response(
         {**mm.mesh_info(mesh, session=session, state=state),
@@ -6215,7 +6215,7 @@ async def h_mesh_owed(request: web.Request) -> web.Response:
     """
     mm = _mesh_mgr(request)
     state = str(request.query.get("state") or "all")
-    if state not in mesh_mod.MEMBER_STATES:
+    if not mesh_mod.valid_member_state(state):
         return json_error(400, f"invalid member state: {state!r}")
     handle = request.query.get("handle") or None
     return json_response(
@@ -6259,7 +6259,7 @@ async def h_mesh_flows(request: web.Request) -> web.Response:
     mm = _mesh_mgr(request)
     mesh = mm.get(request.match_info["mesh"])
     state = str(request.query.get("state") or "all")
-    if state not in mesh_mod.MEMBER_STATES:
+    if not mesh_mod.valid_member_state(state):
         return json_error(400, f"invalid member state: {state!r}")
     manager: SessionManager = request.app["manager"]
     known = {s.sdef.name: s for s in manager.list()}

@@ -191,13 +191,34 @@ MEMBER_STATES = (
 CURRENT_CATEGORIES = ("running", "remote", "hold", "delayed")
 
 
+def member_state_words(state: str) -> Tuple[str, ...]:
+    """The words of a roster ``state``: one word, or several joined by commas.
+
+    Several words are a union -- ``running,hold,paused`` keeps a member in any
+    of the three -- which is how the roster's filter bar asks for the
+    session rail's multi-state selection in one request. Blanks between
+    commas are dropped; an empty answer means the state named no word.
+    """
+    return tuple(w for w in (p.strip() for p in str(state or "").split(",")) if w)
+
+
+def valid_member_state(state: str) -> bool:
+    """Does ``state`` name at least one word, every one of them known?"""
+    words = member_state_words(state)
+    return bool(words) and all(w in MEMBER_STATES for w in words)
+
+
 def member_in_state(category: str, state: str) -> bool:
     """Is a member of ``category`` in the roster ``state`` asked for?
 
     ``remote`` counts as current: another daemon's member has no local record
     and its death is never reported here, so unknown is not dead. Hiding a
     member that is working is the expensive way to be wrong.
+
+    A comma-joined ``state`` keeps the member when any of its words does.
     """
+    if "," in state:
+        return any(member_in_state(category, w) for w in member_state_words(state))
     if state == "all":
         return True
     if state == "current":

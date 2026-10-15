@@ -41065,19 +41065,40 @@ let meshMessageFilter = "current";
 let meshMessageOffset = 0;
 
 /* Which lifecycle partitions the Members roster shows. A mesh that has been
-   running a while is mostly ended records — the daemon's own gds6 roster is
-   8 dead of 12 — and the roster's first job is to answer "who is here", so
-   ``current`` is the default: the same word, and the same default, the
-   session rail uses. The dead ones are named apart from each other because
-   the verbs differ: a killed record is one that stopped, a paused one is
-   waiting to be resumed, an archived one was put away on purpose.
-   Page-local and reset on entry (openMesh), like the message filter above:
-   this is a question asked of one page, not a reader preference. */
-const MESH_MEMBER_FILTERS = ["current", "killed", "paused", "archived", "all"];
+   running a while is mostly ended records — the claunch mesh held 292 killed
+   of 458 members on 2026-10-15 — and the roster's first job is to answer "who
+   is here". So the roster takes the session rail's own vocabulary and its
+   multi-state selection: one chip per partition, any number on at once, and
+   the rail's two presets over them. The default is the rail's "Running ||
+   Paused": what is alive or will come back (running, held, delayed,
+   paused), leaving the killed, failed and archived records off the page.
+
+   The selection is a list of the daemon's category words. ``remote``
+   travels with ``running``: another daemon's member has no local record and
+   its death is never reported here, so unknown is not dead. ``missing`` (a
+   record that is gone) has a chip only while there is one to show.
+   Remembered per browser, like the rail's (claunch-qzhea). */
 const MESH_MEMBER_CATEGORIES = [
-  "running", "killed", "paused", "archived", "missing", "remote",
+  "running", "hold", "delayed", "failed", "paused", "killed", "archived",
+  "missing", "remote",
 ];
-let meshMemberFilter = "current";
+/* The chips, in the rail's order; each names the categories it switches. */
+const MESH_MEMBER_CHIPS = [
+  ["running", ["running", "remote"]], ["hold", ["hold"]],
+  ["delayed", ["delayed"]], ["failed", ["failed"]], ["paused", ["paused"]],
+  ["killed", ["killed"]], ["archived", ["archived"]], ["missing", ["missing"]],
+];
+const MESH_MEMBER_PRESETS = {
+  "running-paused": ["running", "remote", "hold", "delayed", "paused"],
+  current: MESH_MEMBER_CATEGORIES.filter((c) => c !== "archived"),
+  all: MESH_MEMBER_CATEGORIES.slice(),
+};
+const MESH_MEMBER_DEFAULT = MESH_MEMBER_PRESETS["running-paused"];
+const MESH_MEMBER_FILTER_KEY = "claunch_mesh_member_filter:"
+  + (typeof BASE === "string" ? BASE : "");
+let meshMemberFilter = MESH_MEMBER_DEFAULT.slice();
+// Set when this page's daemon refused a comma-joined ``?state=``.
+let meshStateSingleWord = false;
 
 /* Relay connectivity is surfaced permanently in the header: mesh can only
    span machines while the uplink is registered, so the state must never be
@@ -41335,7 +41356,8 @@ async function openMesh(name) {
   meshName = name;
   meshMessageFilter = "current";
   meshMessageOffset = 0;
-  meshMemberFilter = "current";  // back to "who is here" on every entry
+  meshMemberFilter = meshMemberFilterLoad();
+  meshStateSingleWord = false;
   missingMeshShown = "";   // a different route deserves a fresh verdict
   rolesEditor = "";        // never carry one mesh's open editor into another
   showView("mesh");
@@ -41370,13 +41392,25 @@ async function refreshMeshView(force = false) {
     // member, and on a long-lived mesh almost every member is an ended one
     // this view does not draw. mesh-0826 answered in 4.0s and 1.66MB with
     // every member, 11ms and 4.7KB with the eight running ones (2026-09-20).
-    const [r1, r2, r3] = await Promise.all([
-      api(`/api/mesh/${encodeURIComponent(meshName)}`
-          + `?state=${encodeURIComponent(meshMemberFilter)}`),
+    const ask = (word) => [
+      api(`/api/mesh/${encodeURIComponent(meshName)}?state=${encodeURIComponent(word)}`),
+      api(`/api/mesh/${encodeURIComponent(meshName)}/owed?state=${encodeURIComponent(word)}`),
+    ];
+    let word = meshMemberStateParam(meshMemberFilter);
+    if (meshStateSingleWord && word.includes(",")) word = meshMemberSingleWord(meshMemberFilter);
+    let [r1, r2, r3] = await Promise.all([
+      ask(word)[0],
       api(`/api/mesh/${encodeURIComponent(meshName)}/messages?${historyQuery}`),
-      api(`/api/mesh/${encodeURIComponent(meshName)}/owed`
-          + `?state=${encodeURIComponent(meshMemberFilter)}`),
+      ask(word)[1],
     ]);
+    if (r1.status === 400 && word.includes(",")) {
+      // A daemon older than the comma-joined state (the page's files can be
+      // newer than the daemon serving them until it restarts) refuses it.
+      // Ask that daemon the one word that covers the selection, for the rest
+      // of this page; meshVisibleInfo narrows what it sends.
+      meshStateSingleWord = true;
+      [r1, r3] = await Promise.all(ask(meshMemberSingleWord(meshMemberFilter)));
+    }
     info = await r1.json();
     if (!r1.ok) {
       renderMissingMesh(meshName, info.error || "cannot load mesh");
@@ -42937,38 +42971,108 @@ function meshMemberCategory(m) {
   return MESH_MEMBER_CATEGORIES.includes(category) ? category : "remote";
 }
 
+/* A selection is a list of category words; the two words the daemon also
+   takes ("all", "current") are read as the presets of the same name, so an
+   old caller and a remembered value from before the chips still mean what
+   they meant. Unknown words drop out; a selection left empty is the
+   default, because a roster that shows nobody reads as a dead mesh. */
+function meshMemberSelection(filter) {
+  if (filter === "all" || filter === "current" || filter === "running-paused") {
+    return MESH_MEMBER_PRESETS[filter].slice();
+  }
+  const picked = (Array.isArray(filter) ? filter : [filter])
+    .filter((c) => MESH_MEMBER_CATEGORIES.includes(c));
+  return picked.length ? MESH_MEMBER_CATEGORIES.filter((c) => picked.includes(c))
+    : MESH_MEMBER_DEFAULT.slice();
+}
+
 function meshMemberShown(category, filter) {
-  if (filter === "all") return true;
-  // ``remote`` has no local record — another daemon's member, whose death is
-  // never reported here. Unknown is not dead, so it stays with the living.
-  if (filter === "current") return category === "running" || category === "remote";
-  return category === filter;
+  return meshMemberSelection(filter).includes(category);
 }
 
 function meshMemberVisible(m, filter) {
   return meshMemberShown(meshMemberCategory(m), filter);
 }
 
-/* The buttons' counts, over every member — never over the shown ones, or the
-   bar could not tell you what it is hiding. */
+/* The ``?state=`` the daemon is asked for: the selection's words joined by
+   commas, or "all" when nothing is left out (the cheaper word for the same
+   answer, and the one an older daemon knows). */
+function meshMemberStateParam(filter) {
+  const picked = meshMemberSelection(filter);
+  return picked.length === MESH_MEMBER_CATEGORIES.length ? "all" : picked.join(",");
+}
+
+/* Which preset the selection equals, or "" when it is a hand-made one. */
+function meshMemberPresetOf(filter) {
+  const picked = meshMemberSelection(filter);
+  for (const [name, cats] of Object.entries(MESH_MEMBER_PRESETS)) {
+    if (cats.length === picked.length && cats.every((c) => picked.includes(c))) return name;
+  }
+  return "";
+}
+
+/* One chip pressed: its categories go on if any of them was off, off if all
+   were on. Switching off the last shown chip is refused (the selection would
+   be empty); a preset replaces the selection outright. */
+function meshMemberToggle(filter, chip) {
+  if (MESH_MEMBER_PRESETS[chip]) return MESH_MEMBER_PRESETS[chip].slice();
+  const entry = MESH_MEMBER_CHIPS.find(([name]) => name === chip);
+  if (!entry) return meshMemberSelection(filter);
+  const picked = meshMemberSelection(filter);
+  const cats = entry[1];
+  const on = cats.every((c) => picked.includes(c));
+  const next = on ? picked.filter((c) => !cats.includes(c))
+    : picked.concat(cats.filter((c) => !picked.includes(c)));
+  return next.length ? MESH_MEMBER_CATEGORIES.filter((c) => next.includes(c)) : picked;
+}
+
+/* The one word an older daemon knows that covers the selection: "current"
+   when the selection sits inside it, else "all". */
+function meshMemberSingleWord(filter) {
+  const picked = meshMemberSelection(filter);
+  const current = ["running", "remote", "hold", "delayed"];
+  return picked.every((c) => current.includes(c)) ? "current" : "all";
+}
+
+function meshMemberFilterLoad() {
+  try {
+    const raw = localStorage.getItem(MESH_MEMBER_FILTER_KEY);
+    return raw ? meshMemberSelection(JSON.parse(raw)) : MESH_MEMBER_DEFAULT.slice();
+  } catch {
+    return MESH_MEMBER_DEFAULT.slice();
+  }
+}
+
+function meshMemberFilterSave(filter) {
+  try {
+    localStorage.setItem(MESH_MEMBER_FILTER_KEY, JSON.stringify(filter));
+  } catch { /* a private window: the choice lasts this page */ }
+}
+
+/* The chips' counts, over every member — never over the shown ones, or the
+   bar could not tell you what it is hiding. Keyed by category, plus one
+   entry per chip and per preset. */
 function meshMemberCounts(members, given) {
   // A daemon that filtered the roster sends the counts with it: taken over
   // every member, which is the only list that can say what is hidden. An
   // older one sends every member and no counts, and they are taken here.
+  const byCategory = {};
+  for (const c of MESH_MEMBER_CATEGORIES) byCategory[c] = 0;
+  let total = 0;
   if (given && typeof given.all === "number") {
-    return {
-      current: given.current || 0, killed: given.killed || 0,
-      paused: given.paused || 0, archived: given.archived || 0,
-      all: given.all || 0,
-    };
+    for (const c of MESH_MEMBER_CATEGORIES) byCategory[c] = given[c] || 0;
+    total = given.all;
+  } else {
+    for (const m of members || []) {
+      byCategory[meshMemberCategory(m)] += 1;
+      total += 1;
+    }
   }
-  const counts = { current: 0, killed: 0, paused: 0, archived: 0, all: 0 };
-  for (const m of members || []) {
-    const category = meshMemberCategory(m);
-    counts.all += 1;
-    if (category === "running" || category === "remote") counts.current += 1;
-    if (counts[category] !== undefined) counts[category] += 1;
-  }
+  const counts = { ...byCategory };
+  const sum = (cats) => cats.reduce((n, c) => n + (byCategory[c] || 0), 0);
+  for (const [chip, cats] of MESH_MEMBER_CHIPS) counts[chip] = sum(cats);
+  for (const [name, cats] of Object.entries(MESH_MEMBER_PRESETS)) counts[name] = sum(cats);
+  counts.all = total;
   return counts;
 }
 
@@ -42996,47 +43100,76 @@ function meshVisibleInfo(info, filter) {
 }
 
 /* The state word a member row prints. The daemon's ``reachability`` collapses
-   every ended record into ``exited``; where the daemon knows more, say it —
-   "killed", "paused" and "archived" are three different things to do next. */
+   every ended record into ``exited`` (and a held one into ``held``); where
+   the daemon knows more, say it in the rail's words — each one is a
+   different thing to do next. */
 function meshMemberStateWord(m) {
   const category = meshMemberCategory(m);
-  return ["killed", "paused", "archived", "missing"].includes(category)
-    ? category : m.reachability;
+  return ["hold", "delayed", "failed", "killed", "paused", "archived", "missing"]
+    .includes(category) ? category : m.reachability;
+}
+
+const MESH_MEMBER_LABELS = {
+  "running-paused": "Running || Paused", current: "Current", all: "All",
+  running: "Running", hold: "Hold", delayed: "Delayed", failed: "Failed",
+  paused: "Paused", killed: "Killed", archived: "Archived", missing: "Missing",
+};
+
+/* The words a filtered form or panel uses to name the selection. */
+function meshMemberFilterLabel(filter) {
+  const preset = meshMemberPresetOf(filter);
+  if (preset) return MESH_MEMBER_LABELS[preset];
+  return MESH_MEMBER_CHIPS
+    .filter(([, cats]) => cats.every((c) => meshMemberShown(c, filter)))
+    .map(([chip]) => MESH_MEMBER_LABELS[chip]).join(", ");
 }
 
 function meshMemberFilterBar(members, given) {
   const counts = meshMemberCounts(members, given);
-  const labels = {
-    current: "Current", killed: "Killed", paused: "Paused",
-    archived: "Archived", all: "All",
-  };
   const titles = {
-    current: "members not known to have ended — what the roster shows by default",
-    killed: "records that stopped and were neither paused nor archived",
-    paused: "records stopped with the pause marker, waiting to be resumed",
-    archived: "records put away on purpose; still resumable",
+    "running-paused": "alive or coming back — running, hold, delayed, paused "
+      + "(the default; killed, failed and archived records are left out)",
+    current: "every record but the archived ones — killed included",
     all: "every member on the roster, ended ones included",
+    running: "sessions running now, and other daemons' members",
+    hold: "held: stopped, woken by the next message",
+    delayed: "held and waiting in the restore queue",
+    failed: "stopped by a launch or runtime failure",
+    paused: "stopped with the pause marker, waiting to be resumed",
+    killed: "records that stopped and were neither paused nor archived",
+    archived: "records put away on purpose; still resumable",
+    missing: "members whose session record is gone",
   };
+  const picked = meshMemberSelection(meshMemberFilter);
+  const preset = meshMemberPresetOf(meshMemberFilter);
   const bar = el("div", "seq-tabs mesh-member-filters");
   bar.setAttribute("role", "group");
   bar.setAttribute("aria-label", "Filter members by lifecycle state");
-  for (const filter of MESH_MEMBER_FILTERS) {
-    const button = el(
-      "button",
-      "seq-tab" + (meshMemberFilter === filter ? " on" : ""),
-      `${labels[filter]} (${counts[filter] || 0})`
-    );
-    button.type = "button";
-    button.title = titles[filter];
-    button.setAttribute(
-      "aria-pressed", meshMemberFilter === filter ? "true" : "false"
-    );
-    button.addEventListener("click", () => {
-      if (meshMemberFilter === filter) return;
-      meshMemberFilter = filter;
-      refreshMeshView(true);
-    });
-    bar.appendChild(button);
+  const press = (key) => {
+    const next = meshMemberToggle(meshMemberFilter, key);
+    if (meshMemberStateParam(next) === meshMemberStateParam(meshMemberFilter)) return;
+    meshMemberFilter = next;
+    meshMemberFilterSave(next);
+    refreshMeshView(true);
+  };
+  const button = (key, on, cls) => {
+    const b = el("button", `seq-tab ${cls}` + (on ? " on" : ""),
+      `${MESH_MEMBER_LABELS[key]} (${counts[key] || 0})`);
+    b.type = "button";
+    b.title = titles[key];
+    b.setAttribute("aria-pressed", on ? "true" : "false");
+    b.addEventListener("click", () => press(key));
+    bar.appendChild(b);
+  };
+  for (const name of ["running-paused", "current", "all"]) {
+    button(name, preset === name, "mesh-member-preset");
+  }
+  for (const [chip, cats] of MESH_MEMBER_CHIPS) {
+    // A partition nobody is in is offered only while it is switched on, so
+    // it can still be switched off; otherwise it is a button for nothing.
+    const on = cats.every((c) => picked.includes(c));
+    if (chip === "missing" && !counts[chip] && !on) continue;
+    button(chip, on, "mesh-member-chip");
   }
   return bar;
 }
@@ -43059,6 +43192,90 @@ function meshRosterLink(m, isLocal, machineLabel) {
              title: "view this remote session (read-only)" };
   }
   return null;
+}
+
+/* The mesh page folds. Every panel below the header is a section whose
+   heading opens and closes it, and a closed section is not built at all —
+   the wiring list of a 165-member roster is 13,530 rows (claunch mesh,
+   2026-10-15), and a panel nobody opened should not cost its rows on every
+   poll. What is open by default is what the page is read for (the picture,
+   who is here, what is owed, the send box, the log); the administrative
+   panels start closed. The choice is remembered per browser, per section
+   (claunch-qzhea). */
+const MESH_FOLD_KEY = "claunch_mesh_fold:" + (typeof BASE === "string" ? BASE : "");
+const MESH_FOLD_DEFAULTS = {
+  topology: true, wiring: false, links: false, members: true, owed: true,
+  peers: false, policy: false, roles: false, send: true, log: true,
+};
+let meshFoldState = null;  // read from storage on first use
+
+function meshFoldOpen(key) {
+  if (meshFoldState === null) {
+    meshFoldState = {};
+    try {
+      const raw = localStorage.getItem(MESH_FOLD_KEY);
+      const saved = raw ? JSON.parse(raw) : null;
+      if (saved && typeof saved === "object") meshFoldState = saved;
+    } catch { /* unreadable storage: the defaults */ }
+  }
+  return typeof meshFoldState[key] === "boolean"
+    ? meshFoldState[key] : !!MESH_FOLD_DEFAULTS[key];
+}
+
+function meshFoldSet(key, open) {
+  meshFoldOpen(key);
+  meshFoldState[key] = !!open;
+  try {
+    localStorage.setItem(MESH_FOLD_KEY, JSON.stringify(meshFoldState));
+  } catch { /* a private window: the choice lasts this page */ }
+}
+
+/* One section. ``build`` makes the open panel, whose first <h3> becomes the
+   toggle; closed, the section is that heading alone (``title``), with
+   ``hint`` beside it — a count or a waiting request, so that what a closed
+   section holds is still visible without opening it. ``force`` opens it for
+   this render without touching the remembered choice: a selection made in
+   the diagram is answered in the wiring panel, which must then be there. */
+function meshFold(key, title, build, hint, force = false) {
+  const open = force || meshFoldOpen(key);
+  let box;
+  let head;
+  if (open) {
+    box = build();
+    head = box && typeof box.querySelector === "function" ? box.querySelector("h3") : null;
+  } else {
+    box = el("div", "mesh-fold-closed");
+    head = el("h3", null, title);
+    box.appendChild(head);
+  }
+  box.classList.add("mesh-fold", open ? "open" : "closed");
+  box.dataset.fold = key;
+  if (!head) return box;
+  head.classList.add("mesh-fold-head");
+  head.insertBefore(el("span", "mesh-fold-caret", open ? "▾" : "▸"), head.firstChild);
+  if (!open && hint) {
+    head.appendChild(el("span", "meta mesh-fold-hint" + (hint.attention ? " attention" : ""),
+      hint.text));
+  }
+  head.setAttribute("role", "button");
+  head.setAttribute("tabindex", "0");
+  head.setAttribute("aria-expanded", open ? "true" : "false");
+  head.title = open ? "fold this section" : "open this section";
+  const toggle = () => {
+    // Folding a section the diagram forced open lets go of the selection
+    // too, or the next render would force it open again.
+    if (force && open && key === "wiring") meshFocus = null;
+    meshFoldSet(key, !open);
+    refreshMeshView(true);
+  };
+  head.addEventListener("click", toggle);
+  head.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      toggle();
+    }
+  });
+  return box;
 }
 
 function renderMesh(info, history, force, owed, historyPage) {
@@ -43132,386 +43349,409 @@ function renderMesh(info, history, force, owed, historyPage) {
   }
 
   // the graph leads; the boxes below own the text-level detail and the forms
-  view.appendChild(renderTopology(shown));
+  view.appendChild(meshFold("topology", "Topology", () => renderTopology(shown)));
   // Who may message whom is the mesh's own shape and the thing an operator
   // actually rewires, so it sits directly under the picture of it. The peer
   // links are transport, and follow as a status board.
-  view.appendChild(renderWiring(shown));
-  if ((info.links || []).length) view.appendChild(renderPeerLinks(info));
+  const pairs = shown.member_links.filter((e) => e.enabled).length;
+  view.appendChild(meshFold("wiring", "Connections", () => renderWiring(shown),
+    { text: `${pairs} connected pair${pairs === 1 ? "" : "s"}` }, !!meshFocus));
+  if ((info.links || []).length) {
+    view.appendChild(meshFold("links", "Peer links", () => renderPeerLinks(info),
+      { text: `${info.links.length}` }));
+  }
 
   // members table
   const members = info.members || [];
-  const box = el("div", "mesh-members");
-  const membersHead = el("div", "mesh-members-head");
-  membersHead.appendChild(el("h3", null, "Members"));
-  membersHead.appendChild(meshMemberFilterBar(members, info.member_counts));
-  box.appendChild(membersHead);
-  if (!members.length) {
-    box.appendChild(el("p", "wf-note", "no members yet — enrol a session below"));
-  } else if (!shown.members.length) {
-    // The bar counts what is hidden; this says why the box is empty, so a
-    // filtered roster never reads as a mesh that lost its agents.
-    box.appendChild(el(
-      "p", "wf-note",
-      `all ${members.length} members are hidden by this filter — `
-      + "choose Current or All to see them"
-    ));
-  }
-  for (const m of shown.members) {
-    const row = el("div", "mesh-member");
-    const category = meshMemberCategory(m);
-    const dot = el("span", `dot ${meshDotClass(m.reachability)}`
-      + (category === "paused" ? " paused" : "") + (typeof meshDotGrade === "function" ? meshDotGrade(m) : ""));
-    dot.title = (typeof meshDotTitle === "function" ? meshDotTitle(m) : "") || m.reachability || "";
-    const name = el("span", "mesh-handle", m.handle);
-    const role = el("span", "mesh-role", memberRoleLabel(m));
-    const machineLabel = m.machine || (isMirror ? info.primary : "");
-    const where = el(
-      "span", "mesh-session mono",
-      (machineLabel ? machineLabel + "/" : "") + m.session
-    );
-    const link = meshRosterLink(m, isLocalMember(m), machineLabel);
-    if (link) {
-      where.classList.add("linkish");
-      where.title = link.title;
-      where.addEventListener("click", () => { location.hash = link.hash; });
+  const membersHint = { text: `${shown.members.length} shown of ${shown.members_total}` };
+  view.appendChild(meshFold("members", "Members", () => {
+    const box = el("div", "mesh-members");
+    const membersHead = el("div", "mesh-members-head");
+    membersHead.appendChild(el("h3", null, "Members"));
+    membersHead.appendChild(meshMemberFilterBar(members, info.member_counts));
+    box.appendChild(membersHead);
+    // ``members`` is what the daemon sent, already narrowed by ``?state=``;
+    // the roster's real size is the count taken over every member.
+    if (!shown.members_total) {
+      box.appendChild(el("p", "wf-note", "no members yet — enrol a session below"));
+    } else if (!shown.members.length) {
+      // The bar counts what is hidden; this says why the box is empty, so a
+      // filtered roster never reads as a mesh that lost its agents.
+      box.appendChild(el(
+        "p", "wf-note",
+        `all ${shown.members_total} members are hidden by this filter — `
+        + "choose Current or All to see them"
+      ));
     }
-    // 'pending' is mail the daemon has not managed to deliver; 'owed' is mail
-    // it delivered that the agent never answered. Different faults, so the
-    // row names both rather than one "behind" number.
-    const state = el("span", "meta", meshMemberStateWord(m) +
-      (m.pending ? ` · ${m.pending} pending` : "") +
-      (m.owed ? ` · ${m.owed} unanswered` : ""));
-    if (m.owed) state.classList.add("mesh-owes");
-    row.append(dot, name, role);
-    const autoBadge = memberAutoBadge(m);
-    if (autoBadge) row.appendChild(autoBadge);
-    row.append(where, state);
-    // A mirror may only remove its own members; the primary's roster is the
-    // primary's to edit (and whole guest machines go via 'revoke' below).
-    if (!isMirror || isLocalMember(m)) {
-      const kick = el("button", "mesh-kick", "×");
-      kick.title = `remove '${m.handle}' from the mesh`;
-      kick.addEventListener("click", async () => {
-        if (!confirm(`Remove member '${m.handle}'?`)) return;
-        const resp = await api(
-          `/api/mesh/${encodeURIComponent(info.name)}/members/${encodeURIComponent(m.handle)}`,
-          { method: "DELETE" }
-        );
-        if (!resp.ok) {
-          const doc = await resp.json().catch(() => ({}));
-          alert(doc.error || `HTTP ${resp.status}`);
-          return;
-        }
-        refreshMeshView();
-        refreshMeshList();
-      });
-      row.appendChild(kick);
-    }
-    box.appendChild(row);
-  }
-
-  // enrol form: any live session not already a member
-  const taken = new Set(
-    members.filter((m) => isLocalMember(m)).map((m) => m.session)
-  );
-  const candidates = sessionsCache.filter(
-    (s) => s.status !== "exited" && !taken.has(s.name)
-  );
-  const addRow = el("div", "mesh-add");
-  const sel = document.createElement("select");
-  for (const s of candidates) {
-    const opt = document.createElement("option");
-    opt.value = s.name;
-    opt.textContent = s.name;
-    sel.appendChild(opt);
-  }
-  const handle = document.createElement("input");
-  handle.placeholder = "handle (default: session name)";
-  const addBtn = el("button", "wf-btn option", "Add to mesh");
-  addBtn.disabled = !candidates.length;
-  if (!candidates.length) addBtn.title = "no unenrolled live sessions";
-  addBtn.addEventListener("click", async () => {
-    const resp = await api(`/api/mesh/${encodeURIComponent(info.name)}/members`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session: sel.value, handle: handle.value.trim() }),
-    });
-    if (!resp.ok) {
-      const doc = await resp.json().catch(() => ({}));
-      alert(doc.error || `HTTP ${resp.status}`);
-      return;
-    }
-    handle.value = "";
-    refreshMeshView();
-    refreshMeshList();
-  });
-  addRow.append(sel, handle, addBtn);
-  box.appendChild(addRow);
-  view.appendChild(box);
-
-  view.appendChild(renderMeshOwed(info, owed));
-
-  // membership from other machines: who joined us (guests) or who owns us
-  const fed = el("div", "mesh-fed");
-  fed.appendChild(el("h3", null, "Peer daemons"));
-  const peers = (info.peers || []).filter((p) => !p.self);
-  if (!peers.length) {
-    fed.appendChild(el(
-      "p", "wf-note",
-      "no other machine has joined yet — invite one below, or let it ask with " +
-      `'claunch mesh join ${info.name}@${selfMachine || "<this-machine>"}' ` +
-      `(one session) or 'claunch mesh attach ${info.name}@${selfMachine || "<this-machine>"}' ` +
-      "(its whole daemon) and approve it here (both daemons need a relay uplink)"
-    ));
-  }
-  for (const p of peers) {
-    // Since phase 7 the peer list is the whole rank list, ourselves
-    // included — the diagram wants that, this box does not.
-    if (p.self) continue;
-    const row = el("div", "mesh-member");
-    const ok = p.ok === true;
-    const state = p.ok === false ? `unreachable — ${p.error || "?"}` :
-      (ok ? "ok" : "linked, no traffic yet");
-    row.appendChild(el("span", `dot ${ok ? "idle" : (p.ok === false ? "exited" : "starting")}`));
-    row.appendChild(el("span", "mesh-handle mono", p.machine));
-    row.appendChild(el("span", "mesh-role", `rank ${p.rank} · ${p.role || ""}`));
-    row.appendChild(el("span", "meta", state + (p.queued ? ` · ${p.queued} queued` : "")));
-    row.appendChild(renamePeerButton(info, p.machine));
-    if (!isMirror) {
-      const revoke = el("button", "mesh-kick", "×");
-      revoke.title = `unlink ${p.machine}: drop its members and its mirror`;
-      revoke.addEventListener("click", async () => {
-        if (!confirm(
-          `Unlink guest '${p.machine}'? Its members leave the mesh and its ` +
-          "mirror is dropped."
-        )) return;
-        const resp = await api(
-          `/api/mesh/${encodeURIComponent(info.name)}/guests/${encodeURIComponent(p.machine)}`,
-          { method: "DELETE" }
-        );
-        if (!resp.ok) {
-          const doc = await resp.json().catch(() => ({}));
-          alert(doc.error || `HTTP ${resp.status}`);
-          return;
-        }
-        refreshMeshView();
-        refreshMeshList();
-      });
-      row.appendChild(revoke);
-    }
-    fed.appendChild(row);
-  }
-  if (!isMirror) {
-    // Joins are requests: the owner admits them. A ticket is only a way to
-    // pre-approve one, for automation that cannot wait for a human.
-    for (const r of info.requests || []) {
+    for (const m of shown.members) {
       const row = el("div", "mesh-member");
-      row.appendChild(el("span", "dot starting"));
-      if (r.attach) {
-        // a daemon attach: no member yet — approving links the whole daemon
-        row.appendChild(el("span", "mesh-handle mono", r.machine));
-        row.appendChild(el("span", "mesh-role", "daemon"));
-        row.appendChild(el("span", "meta",
-          "wants to attach — its sessions then join without approval"));
-      } else {
-        row.appendChild(el("span", "mesh-handle", r.handle));
-        row.appendChild(el("span", "mesh-role", r.role || ""));
-        row.appendChild(el("span", "mesh-session mono", `${r.machine}/${r.session}`));
-        row.appendChild(el("span", "meta", "wants to join"));
+      const category = meshMemberCategory(m);
+      const dot = el("span", `dot ${meshDotClass(m.reachability)}`
+        + (category === "paused" ? " paused" : "") + (typeof meshDotGrade === "function" ? meshDotGrade(m) : ""));
+      dot.title = (typeof meshDotTitle === "function" ? meshDotTitle(m) : "") || m.reachability || "";
+      const name = el("span", "mesh-handle", m.handle);
+      const role = el("span", "mesh-role", memberRoleLabel(m));
+      const machineLabel = m.machine || (isMirror ? info.primary : "");
+      const where = el(
+        "span", "mesh-session mono",
+        (machineLabel ? machineLabel + "/" : "") + m.session
+      );
+      const link = meshRosterLink(m, isLocalMember(m), machineLabel);
+      if (link) {
+        where.classList.add("linkish");
+        where.title = link.title;
+        where.addEventListener("click", () => { location.hash = link.hash; });
       }
-      for (const [label, verb, cls] of [
-        ["Approve", "approve", "approve"], ["Deny", "deny", "archive"],
-      ]) {
-        const btn = el("button", `wf-btn ${cls}`, label);
-        btn.addEventListener("click", async () => {
+      // 'pending' is mail the daemon has not managed to deliver; 'owed' is mail
+      // it delivered that the agent never answered. Different faults, so the
+      // row names both rather than one "behind" number.
+      const state = el("span", "meta", meshMemberStateWord(m) +
+        (m.pending ? ` · ${m.pending} pending` : "") +
+        (m.owed ? ` · ${m.owed} unanswered` : ""));
+      if (m.owed) state.classList.add("mesh-owes");
+      row.append(dot, name, role);
+      const autoBadge = memberAutoBadge(m);
+      if (autoBadge) row.appendChild(autoBadge);
+      row.append(where, state);
+      // A mirror may only remove its own members; the primary's roster is the
+      // primary's to edit (and whole guest machines go via 'revoke' below).
+      if (!isMirror || isLocalMember(m)) {
+        const kick = el("button", "mesh-kick", "×");
+        kick.title = `remove '${m.handle}' from the mesh`;
+        kick.addEventListener("click", async () => {
+          if (!confirm(`Remove member '${m.handle}'?`)) return;
           const resp = await api(
-            `/api/mesh/${encodeURIComponent(info.name)}/requests/` +
-            `${encodeURIComponent(r.id)}/${verb}`,
-            { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }
+            `/api/mesh/${encodeURIComponent(info.name)}/members/${encodeURIComponent(m.handle)}`,
+            { method: "DELETE" }
           );
-          const doc = await resp.json().catch(() => ({}));
-          if (!resp.ok) { alert(doc.error || `HTTP ${resp.status}`); return; }
-          if (verb === "approve" && doc.delivered === false) {
-            const who = doc.attach ? `daemon ${doc.machine}` : `'${doc.handle}'`;
-            alert(`admitted ${who} — ${doc.machine} is unreachable, ` +
-                  "the grant is queued and retried");
+          if (!resp.ok) {
+            const doc = await resp.json().catch(() => ({}));
+            alert(doc.error || `HTTP ${resp.status}`);
+            return;
           }
           refreshMeshView();
           refreshMeshList();
         });
-        row.appendChild(btn);
+        row.appendChild(kick);
+      }
+      box.appendChild(row);
+    }
+
+    // enrol form: any live session not already a member
+    const taken = new Set(
+      members.filter((m) => isLocalMember(m)).map((m) => m.session)
+    );
+    const candidates = sessionsCache.filter(
+      (s) => s.status !== "exited" && !taken.has(s.name)
+    );
+    const addRow = el("div", "mesh-add");
+    const sel = document.createElement("select");
+    for (const s of candidates) {
+      const opt = document.createElement("option");
+      opt.value = s.name;
+      opt.textContent = s.name;
+      sel.appendChild(opt);
+    }
+    const handle = document.createElement("input");
+    handle.placeholder = "handle (default: session name)";
+    const addBtn = el("button", "wf-btn option", "Add to mesh");
+    addBtn.disabled = !candidates.length;
+    if (!candidates.length) addBtn.title = "no unenrolled live sessions";
+    addBtn.addEventListener("click", async () => {
+      const resp = await api(`/api/mesh/${encodeURIComponent(info.name)}/members`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session: sel.value, handle: handle.value.trim() }),
+      });
+      if (!resp.ok) {
+        const doc = await resp.json().catch(() => ({}));
+        alert(doc.error || `HTTP ${resp.status}`);
+        return;
+      }
+      handle.value = "";
+      refreshMeshView();
+      refreshMeshList();
+    });
+    addRow.append(sel, handle, addBtn);
+    box.appendChild(addRow);
+    return box;
+  }, membersHint));
+
+  const owedTotal = (owed && owed.owed) || 0;
+  view.appendChild(meshFold("owed", "Unanswered", () => renderMeshOwed(info, owed),
+    owedTotal ? { text: `${owedTotal}`, attention: true } : null));
+
+  // membership from other machines: who joined us (guests) or who owns us
+  const waiting = isMirror ? 0 : (info.requests || []).length;
+  const peersHint = waiting
+    ? { text: `${waiting} join request${waiting === 1 ? "" : "s"} waiting`, attention: true }
+    : { text: `${(info.peers || []).filter((p) => !p.self).length}` };
+  view.appendChild(meshFold("peers", "Peer daemons", () => {
+    const fed = el("div", "mesh-fed");
+    fed.appendChild(el("h3", null, "Peer daemons"));
+    const peers = (info.peers || []).filter((p) => !p.self);
+    if (!peers.length) {
+      fed.appendChild(el(
+        "p", "wf-note",
+        "no other machine has joined yet — invite one below, or let it ask with " +
+        `'claunch mesh join ${info.name}@${selfMachine || "<this-machine>"}' ` +
+        `(one session) or 'claunch mesh attach ${info.name}@${selfMachine || "<this-machine>"}' ` +
+        "(its whole daemon) and approve it here (both daemons need a relay uplink)"
+      ));
+    }
+    for (const p of peers) {
+      // Since phase 7 the peer list is the whole rank list, ourselves
+      // included — the diagram wants that, this box does not.
+      if (p.self) continue;
+      const row = el("div", "mesh-member");
+      const ok = p.ok === true;
+      const state = p.ok === false ? `unreachable — ${p.error || "?"}` :
+        (ok ? "ok" : "linked, no traffic yet");
+      row.appendChild(el("span", `dot ${ok ? "idle" : (p.ok === false ? "exited" : "starting")}`));
+      row.appendChild(el("span", "mesh-handle mono", p.machine));
+      row.appendChild(el("span", "mesh-role", `rank ${p.rank} · ${p.role || ""}`));
+      row.appendChild(el("span", "meta", state + (p.queued ? ` · ${p.queued} queued` : "")));
+      row.appendChild(renamePeerButton(info, p.machine));
+      if (!isMirror) {
+        const revoke = el("button", "mesh-kick", "×");
+        revoke.title = `unlink ${p.machine}: drop its members and its mirror`;
+        revoke.addEventListener("click", async () => {
+          if (!confirm(
+            `Unlink guest '${p.machine}'? Its members leave the mesh and its ` +
+            "mirror is dropped."
+          )) return;
+          const resp = await api(
+            `/api/mesh/${encodeURIComponent(info.name)}/guests/${encodeURIComponent(p.machine)}`,
+            { method: "DELETE" }
+          );
+          if (!resp.ok) {
+            const doc = await resp.json().catch(() => ({}));
+            alert(doc.error || `HTTP ${resp.status}`);
+            return;
+          }
+          refreshMeshView();
+          refreshMeshList();
+        });
+        row.appendChild(revoke);
       }
       fed.appendChild(row);
     }
-    renderInviteWizard(info, fed, members);
-    renderPublishPanel(info, fed);
-    const fedRow = el("div", "mesh-add");
-    const inviteBtn = el("button", "wf-btn option", "Mint invite ticket…");
-    const codeOut = document.createElement("input");
-    codeOut.readOnly = true;
-    codeOut.placeholder =
-      "single-use ticket appears here — pre-approves one unattended join";
-    // The view is rebuilt by the 2s poll, which can detach this input while
-    // the invite request is in flight — so the code lives in meshInviteCodes
-    // (module state) and every rebuild re-renders it from there.
-    codeOut.value = meshInviteCodes[info.name] || "";
-    codeOut.addEventListener("focus", () => codeOut.select());
-    inviteBtn.addEventListener("click", async () => {
-      const resp = await api(`/api/mesh/${encodeURIComponent(info.name)}/invite`, {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
-      });
-      const doc = await resp.json().catch(() => ({}));
-      if (!resp.ok) { alert(doc.error || `HTTP ${resp.status}`); return; }
-      meshInviteCodes[info.name] = doc.code || "";
-      refreshMeshView();
-    });
-    fedRow.append(inviteBtn, codeOut);
-    fed.appendChild(fedRow);
-    const cmdBase =
-      `claunch mesh join ${info.name}@${selfMachine || "<this-machine>"} --code`;
-    if (meshInviteCodes[info.name]) {
-      // the whole redeem command, ticket included — one click to carry over
-      const cmdRow = el("div", "mesh-add");
-      const cmd = document.createElement("input");
-      cmd.readOnly = true;
-      cmd.className = "mono";
-      cmd.value = `${cmdBase} ${meshInviteCodes[info.name]}`;
-      cmd.addEventListener("focus", () => cmd.select());
-      const copyBtn = el("button", "wf-btn option", "Copy command");
-      copyBtn.addEventListener("click", async () => {
-        try {
-          await navigator.clipboard.writeText(cmd.value);
-        } catch {
-          cmd.select();
-          document.execCommand("copy");
+    if (!isMirror) {
+      // Joins are requests: the owner admits them. A ticket is only a way to
+      // pre-approve one, for automation that cannot wait for a human.
+      for (const r of info.requests || []) {
+        const row = el("div", "mesh-member");
+        row.appendChild(el("span", "dot starting"));
+        if (r.attach) {
+          // a daemon attach: no member yet — approving links the whole daemon
+          row.appendChild(el("span", "mesh-handle mono", r.machine));
+          row.appendChild(el("span", "mesh-role", "daemon"));
+          row.appendChild(el("span", "meta",
+            "wants to attach — its sessions then join without approval"));
+        } else {
+          row.appendChild(el("span", "mesh-handle", r.handle));
+          row.appendChild(el("span", "mesh-role", r.role || ""));
+          row.appendChild(el("span", "mesh-session mono", `${r.machine}/${r.session}`));
+          row.appendChild(el("span", "meta", "wants to join"));
         }
-        copyBtn.textContent = "Copied";
+        for (const [label, verb, cls] of [
+          ["Approve", "approve", "approve"], ["Deny", "deny", "archive"],
+        ]) {
+          const btn = el("button", `wf-btn ${cls}`, label);
+          btn.addEventListener("click", async () => {
+            const resp = await api(
+              `/api/mesh/${encodeURIComponent(info.name)}/requests/` +
+              `${encodeURIComponent(r.id)}/${verb}`,
+              { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }
+            );
+            const doc = await resp.json().catch(() => ({}));
+            if (!resp.ok) { alert(doc.error || `HTTP ${resp.status}`); return; }
+            if (verb === "approve" && doc.delivered === false) {
+              const who = doc.attach ? `daemon ${doc.machine}` : `'${doc.handle}'`;
+              alert(`admitted ${who} — ${doc.machine} is unreachable, ` +
+                    "the grant is queued and retried");
+            }
+            refreshMeshView();
+            refreshMeshList();
+          });
+          row.appendChild(btn);
+        }
+        fed.appendChild(row);
+      }
+      renderInviteWizard(info, fed, members);
+      renderPublishPanel(info, fed);
+      const fedRow = el("div", "mesh-add");
+      const inviteBtn = el("button", "wf-btn option", "Mint invite ticket…");
+      const codeOut = document.createElement("input");
+      codeOut.readOnly = true;
+      codeOut.placeholder =
+        "single-use ticket appears here — pre-approves one unattended join";
+      // The view is rebuilt by the 2s poll, which can detach this input while
+      // the invite request is in flight — so the code lives in meshInviteCodes
+      // (module state) and every rebuild re-renders it from there.
+      codeOut.value = meshInviteCodes[info.name] || "";
+      codeOut.addEventListener("focus", () => codeOut.select());
+      inviteBtn.addEventListener("click", async () => {
+        const resp = await api(`/api/mesh/${encodeURIComponent(info.name)}/invite`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+        });
+        const doc = await resp.json().catch(() => ({}));
+        if (!resp.ok) { alert(doc.error || `HTTP ${resp.status}`); return; }
+        meshInviteCodes[info.name] = doc.code || "";
+        refreshMeshView();
       });
-      cmdRow.append(cmd, copyBtn);
-      fed.appendChild(cmdRow);
+      fedRow.append(inviteBtn, codeOut);
+      fed.appendChild(fedRow);
+      const cmdBase =
+        `claunch mesh join ${info.name}@${selfMachine || "<this-machine>"} --code`;
+      if (meshInviteCodes[info.name]) {
+        // the whole redeem command, ticket included — one click to carry over
+        const cmdRow = el("div", "mesh-add");
+        const cmd = document.createElement("input");
+        cmd.readOnly = true;
+        cmd.className = "mono";
+        cmd.value = `${cmdBase} ${meshInviteCodes[info.name]}`;
+        cmd.addEventListener("focus", () => cmd.select());
+        const copyBtn = el("button", "wf-btn option", "Copy command");
+        copyBtn.addEventListener("click", async () => {
+          try {
+            await navigator.clipboard.writeText(cmd.value);
+          } catch {
+            cmd.select();
+            document.execCommand("copy");
+          }
+          copyBtn.textContent = "Copied";
+        });
+        cmdRow.append(cmd, copyBtn);
+        fed.appendChild(cmdRow);
+      } else {
+        fed.appendChild(el(
+          "p", "wf-note", `redeemed there with: ${cmdBase} <ticket>`
+        ));
+      }
     } else {
-      fed.appendChild(el(
-        "p", "wf-note", `redeemed there with: ${cmdBase} <ticket>`
+      renderDetachRow(info, fed);
+    }
+    return fed;
+  }, peersHint));
+  view.appendChild(meshFold("policy", "Delivery policy", () => {
+    const polBox = renderMeshPolicy(info);
+    if (isMirror) {
+      // the policy engine runs on the primary; the mirror's copy is read-only
+      polBox.querySelectorAll("input,select,button").forEach((n) => { n.disabled = true; });
+      polBox.appendChild(el(
+        "p", "wf-note",
+        `policy is owned by the primary daemon (${info.primary}) — edit it there`
       ));
     }
-  } else {
-    renderDetachRow(info, fed);
-  }
-  view.appendChild(fed);
-  const polBox = renderMeshPolicy(info);
-  if (isMirror) {
-    // the policy engine runs on the primary; the mirror's copy is read-only
-    polBox.querySelectorAll("input,select,button").forEach((n) => { n.disabled = true; });
-    polBox.appendChild(el(
-      "p", "wf-note",
-      `policy is owned by the primary daemon (${info.primary}) — edit it there`
-    ));
-  }
-  view.appendChild(polBox);
-  view.appendChild(renderMeshRoles(info));
+    return polBox;
+  }));
+  view.appendChild(meshFold("roles", "Roles", () => renderMeshRoles(info)));
 
   // send box: as the human operator, or on behalf of a member
-  const send = el("div", "mesh-send");
-  send.appendChild(el("h3", null, "Send message"));
-  const from = document.createElement("select");
-  {
-    const opt = document.createElement("option");
-    opt.value = "";
-    opt.textContent = "from: operator (you)";
-    from.appendChild(opt);
-  }
-  // Only sessions this daemon actually hosts: speaking as a member on another
-  // machine is impersonation, and the primary rejects it.
-  for (const m of shown.members.filter((m) => isLocalMember(m))) {
-    const opt = document.createElement("option");
-    opt.value = m.handle;
-    opt.textContent = `from: ${m.handle}`;
-    from.appendChild(opt);
-  }
-  const to = document.createElement("select");
-  {
-    const opt = document.createElement("option");
-    opt.value = "*";
-    opt.textContent = "to: * (everyone)";
-    to.appendChild(opt);
-  }
-  for (const m of shown.members) {
-    const opt = document.createElement("option");
-    opt.value = m.handle;
-    opt.textContent = `to: ${m.handle}`;
-    to.appendChild(opt);
-  }
-  // The member filter narrows these two lists as well, so a form cannot offer
-  // to address a member the roster is not showing. Say so on the controls:
-  // an option that is absent with no explanation reads as a broken form, and
-  // the way back (the filter bar) is above, off the top of this panel.
-  if (meshMemberFilter !== "all") {
-    const why = `the member filter is "${meshMemberFilter}", so this lists only `
-      + "the members the roster shows — pick All in the Members bar to reach "
-      + "the rest";
-    from.title = why;
-    to.title = why;
-  }
-  const intent = document.createElement("select");
-  for (const [v, label] of [
-    ["say", "type: say"], ["ask", "type: ask (expects reply)"],
-    ["fyi", "type: fyi (no reply)"], ["ack", "type: ack (no reply)"],
-  ]) {
-    const opt = document.createElement("option");
-    opt.value = v;
-    opt.textContent = label;
-    intent.appendChild(opt);
-  }
-  const text = document.createElement("textarea");
-  text.placeholder =
-    "message (Ctrl+Enter to send) — delivered by typing into the recipient's terminal";
-  text.rows = 3;
-  const sendBtn = el("button", "wf-btn approve", "Send");
-  const submitMsg = async () => {
-    const body = text.value.trim();
-    if (!body) return;
-    const external = !from.value;
-    const resp = await api(`/api/mesh/${encodeURIComponent(info.name)}/messages`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        from: from.value || "operator",
-        to: to.value === "*" ? "*" : to.value,
-        body,
-        external,
-        type: intent.value,
-      }),
+  view.appendChild(meshFold("send", "Send message", () => {
+    const send = el("div", "mesh-send");
+    send.appendChild(el("h3", null, "Send message"));
+    const from = document.createElement("select");
+    {
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = "from: operator (you)";
+      from.appendChild(opt);
+    }
+    // Only sessions this daemon actually hosts: speaking as a member on another
+    // machine is impersonation, and the primary rejects it.
+    for (const m of shown.members.filter((m) => isLocalMember(m))) {
+      const opt = document.createElement("option");
+      opt.value = m.handle;
+      opt.textContent = `from: ${m.handle}`;
+      from.appendChild(opt);
+    }
+    const to = document.createElement("select");
+    {
+      const opt = document.createElement("option");
+      opt.value = "*";
+      opt.textContent = "to: * (everyone)";
+      to.appendChild(opt);
+    }
+    for (const m of shown.members) {
+      const opt = document.createElement("option");
+      opt.value = m.handle;
+      opt.textContent = `to: ${m.handle}`;
+      to.appendChild(opt);
+    }
+    // The member filter narrows these two lists as well, so a form cannot offer
+    // to address a member the roster is not showing. Say so on the controls:
+    // an option that is absent with no explanation reads as a broken form, and
+    // the way back (the filter bar) is above, off the top of this panel.
+    if (meshMemberPresetOf(meshMemberFilter) !== "all") {
+      const why = `the member filter is "${meshMemberFilterLabel(meshMemberFilter)}", `
+        + "so this lists only the members the roster shows — pick All in the "
+        + "Members bar to reach the rest";
+      from.title = why;
+      to.title = why;
+    }
+    const intent = document.createElement("select");
+    for (const [v, label] of [
+      ["say", "type: say"], ["ask", "type: ask (expects reply)"],
+      ["fyi", "type: fyi (no reply)"], ["ack", "type: ack (no reply)"],
+    ]) {
+      const opt = document.createElement("option");
+      opt.value = v;
+      opt.textContent = label;
+      intent.appendChild(opt);
+    }
+    const text = document.createElement("textarea");
+    text.placeholder =
+      "message (Ctrl+Enter to send) — delivered by typing into the recipient's terminal";
+    text.rows = 3;
+    const sendBtn = el("button", "wf-btn approve", "Send");
+    const submitMsg = async () => {
+      const body = text.value.trim();
+      if (!body) return;
+      const external = !from.value;
+      const resp = await api(`/api/mesh/${encodeURIComponent(info.name)}/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          from: from.value || "operator",
+          to: to.value === "*" ? "*" : to.value,
+          body,
+          external,
+          type: intent.value,
+        }),
+      });
+      const doc = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        alert(doc.error || `HTTP ${resp.status}`);
+        return;
+      }
+      text.value = "";
+      text.blur();
+      if (doc.queued) {
+        // mirror with its primary unreachable: durably queued, not yet in the log
+        alert(`queued ${doc.id} — the primary daemon (${info.primary}) is ` +
+              "unreachable; it will be forwarded, in order, on reconnect");
+      } else if ((doc.queued_remote || []).length) {
+        alert(`sent — queued for unreachable machines: ${doc.queued_remote.join(", ")}`);
+      }
+      refreshMeshView();
+    };
+    sendBtn.addEventListener("click", submitMsg);
+    text.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        submitMsg();
+      }
     });
-    const doc = await resp.json().catch(() => ({}));
-    if (!resp.ok) {
-      alert(doc.error || `HTTP ${resp.status}`);
-      return;
-    }
-    text.value = "";
-    text.blur();
-    if (doc.queued) {
-      // mirror with its primary unreachable: durably queued, not yet in the log
-      alert(`queued ${doc.id} — the primary daemon (${info.primary}) is ` +
-            "unreachable; it will be forwarded, in order, on reconnect");
-    } else if ((doc.queued_remote || []).length) {
-      alert(`sent — queued for unreachable machines: ${doc.queued_remote.join(", ")}`);
-    }
-    refreshMeshView();
-  };
-  sendBtn.addEventListener("click", submitMsg);
-  text.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-      e.preventDefault();
-      submitMsg();
-    }
-  });
-  const row = el("div", "mesh-send-row");
-  row.append(from, to, intent);
-  send.append(row, text, sendBtn);
-  view.appendChild(send);
+    const row = el("div", "mesh-send-row");
+    row.append(from, to, intent);
+    send.append(row, text, sendBtn);
+    return send;
+  }));
 
-  view.appendChild(renderMeshMessageLog(info, history, historyPage));
+  view.appendChild(meshFold("log", "Messages",
+    () => renderMeshMessageLog(info, history, historyPage)));
 }
 
 function renderMeshMessageLog(info, history, page) {
