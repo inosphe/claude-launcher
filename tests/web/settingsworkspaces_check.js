@@ -54,7 +54,7 @@ assert.deepEqual(parseHash("#/workspaces"), { page: "workspaces" });
 const CARDS = [
   "keyHelpCard", "scoreGoalSettingsCard", "roleWorkflowsCard", "railStaleCard", "modelChoicesCard",
   "llmSettingsCard", "simDefaultsCard", "qaNudgeCard", "faqCard", "promptPresetCard", "prompterSettingsCard",
-  "statusCheckCard", "ragCard", "ghCard", "relaySettingsCard",
+  "statusCheckCard", "ragCard", "ghCard", "relaySettingsCard", "wslRegStubCard",
   "wsAddCard", "projectsCard", "beadsBoardsCard",
 ];
 const WORKSPACE_CARDS = ["wsAddCard", "projectsCard", "beadsBoardsCard"];
@@ -154,7 +154,7 @@ const REFRESHERS = [
   "refreshGhStatus", "refreshRelaySettings", "refreshBeadsBoards",
   "refreshProjects", "refreshProfileSettings", "refreshInstallOverview",
   "refreshVscode", "refreshWsGitSummary", "refreshWsUsage",
-  "refreshRoleWorkflowSettings",
+  "refreshRoleWorkflowSettings", "refreshWslRegStub",
 ];
 const octx = {
   wsSection: "", wsOpen: true,
