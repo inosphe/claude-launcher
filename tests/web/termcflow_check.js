@@ -69,6 +69,8 @@ function el(tag, cls, text) {
 const stubs = `
 let currentPage = "terminal";
 let currentName = "s16";
+let transcriptName = null;
+let transcriptMachine = null;
 let cflowCache = [];
 let cflow2RailCache = {};
 function refreshCflow2Rail() {}
@@ -92,7 +94,7 @@ new Function(
   + ["askWho", "answerFellToUs", "answerBranchOptions", "scopeSession", "sessCflowRun",
      "sessCflowGated", "sessCflowLabel", "sessCflowGateStep", "fmtOpensAt",
      "termCflowAnswers", "termCflowQuestion", "cf2LimitPresses", "termCflow2Answers",
-     "termCflow2Question", "termCflowView", "renderTermCflow"]
+     "termCflow2Question", "sessionLineOnPage", "termCflowView", "renderTermCflow"]
     .map(slice).join("\n") + `
 Object.assign(exports, {
   renderTermCflow,
@@ -103,6 +105,7 @@ Object.assign(exports, {
   setRail: (r) => { cflow2RailCache = r; },
   setPage: (p) => { currentPage = p; },
   setName: (n) => { currentName = n; },
+  setTranscript: (n, m = null) => { transcriptName = n; transcriptMachine = m; },
   setConfirm: (v) => { confirmAnswer = v; },
   setPrompt: (v) => { promptAnswer = v; },
   reset: () => { actions = []; asked = []; },
@@ -241,6 +244,19 @@ const RUN = {
   ctx.renderTermCflow();
   check("off the terminal page it hides", strip.classes.has("hidden"));
   check("...and hiding refits", ctx.refits() === r0 + 1);
+  // The session's HTML view (claunch-hjux5): its own transcript page keeps
+  // the strip; another session's transcript, or a remote shadow's, does not.
+  ctx.setPage("log");
+  ctx.setTranscript("s16");
+  ctx.renderTermCflow();
+  check("on the session's HTML view it shows", !strip.classes.has("hidden"));
+  ctx.setTranscript("s99");
+  ctx.renderTermCflow();
+  check("on another session's transcript it hides", strip.classes.has("hidden"));
+  ctx.setTranscript("s16", "box2");
+  ctx.renderTermCflow();
+  check("on a remote shadow's transcript it hides", strip.classes.has("hidden"));
+  ctx.setTranscript(null);
   ctx.setPage("terminal");
   ctx.setName("s99");
   ctx.renderTermCflow();

@@ -75,6 +75,8 @@ function el(tag, cls, text) {
 const stubs = `
 let currentPage = "terminal";
 let currentName = "s16";
+let transcriptName = null;
+let transcriptMachine = null;
 let refits = 0;
 function refitSoon() { refits++; }
 const location = { hash: "" };
@@ -91,13 +93,14 @@ new Function(
   + sliceConst("TERM_TIMER_GLYPH") + sliceConst("TERM_TIMER_GLYPH_DEFAULT")
   + slice("termTimerClock") + slice("termTimerRows")
   + "let termTimersView = null; let termTimersTick = null;\n"
-  + slice("renderTermTimers") + `
+  + slice("sessionLineOnPage") + slice("renderTermTimers") + `
 Object.assign(exports, {
   renderTermTimers, termTimerRows,
   refits: () => refits,
   hash: () => location.hash,
   setPage: (p) => { currentPage = p; },
   setName: (n) => { currentName = n; },
+  setTranscript: (n, m = null) => { transcriptName = n; transcriptMachine = m; },
 });`
 )(ctx, $, el);
 
@@ -180,6 +183,20 @@ ctx.renderTermTimers(VIEW([HOLD()]));
 ctx.setPage("meshes");
 ctx.renderTermTimers(VIEW([HOLD()]));
 check("off the terminal page it hides", strip.classes.has("hidden"));
+// The session's HTML view (claunch-hjux5): the transcript page of the
+// attached local session keeps the line; another session's, or a remote
+// shadow's, does not.
+ctx.setPage("log");
+ctx.setTranscript("s16");
+ctx.renderTermTimers(VIEW([HOLD()]));
+check("on the session's HTML view it shows", !strip.classes.has("hidden"));
+ctx.setTranscript("s99");
+ctx.renderTermTimers(VIEW([HOLD()]));
+check("on another session's transcript it hides", strip.classes.has("hidden"));
+ctx.setTranscript("s16", "box2");
+ctx.renderTermTimers(VIEW([HOLD()]));
+check("on a remote shadow's transcript it hides", strip.classes.has("hidden"));
+ctx.setTranscript(null);
 ctx.setPage("terminal");
 
 /* ---- wiring: markup, style, poll, page switch, route ---- */
@@ -196,7 +213,10 @@ ctx.setPage("terminal");
   check("the dashboard poll refreshes it",
         /const refreshes = \[[^\]]*refreshTermTimers\(\)/.test(src));
   check("the page switch refreshes or hides it",
-        /if \(!showTerm\) renderTermTimers\(null\);\s*else refreshTermTimers\(\);/.test(src));
+        /if \(!sessionLineOnPage\(name\)\) renderTermTimers\(null\);\s*else refreshTermTimers\(\);/.test(src));
+  check("opening the session's HTML view re-asks once the name is set",
+        /transcriptName = name;[\s\S]{0,600}syncSessionStrips\(\);/.test(src)
+        && /function syncSessionStrips\(\) \{[^}]*refreshTermTimers\(\)/.test(src));
   check("it reads the session's own route",
         src.includes("/api/sessions/${encodeURIComponent(name)}/timers"));
 
