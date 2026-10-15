@@ -149,6 +149,10 @@ def test_keep_restart_adopts_the_running_session(host, tmp_path, monkeypatch):
         await mgr.shutdown_all(mode="keep")
         host.close()
         assert not s.exited and s.detached_pty["seq"] > 0
+        # A kept session did not end, so nobody is recorded as its ender
+        # and no exit event is written (claunch-o6xws).
+        assert getattr(s, "ended_by", None) is None
+        assert "exit" not in [e.get("kind") for e in mgr.events.rows(s)]
         assert s.detached_pty["modes"]["bracketed_paste"] is True
         # The child writes while no daemon is attached.
         await asyncio.sleep(1.5)
@@ -172,7 +176,9 @@ def test_keep_restart_adopts_the_running_session(host, tmp_path, monkeypatch):
         assert s2.screen.bracketed_paste is True
         await s2.send_keys(["after", "Enter"])
         await _wait_screen(s2, "echo:after")
-        assert "adopt" in [e.get("kind") for e in mgr2.events.rows(s2)]
+        kinds = [e.get("kind") for e in mgr2.events.rows(s2)]
+        assert "adopt" in kinds and "exit" not in kinds
+        assert getattr(s2, "ended_by", None) is None
         print(f"restore_all with one adopted session: {took * 1000:.0f} ms")
         await mgr2.shutdown_all(mode="stop")
         assert _wait(lambda: not _pid_alive(pid))
@@ -226,6 +232,8 @@ def test_exit_while_the_daemon_is_down_is_filed_with_the_host_code(host, tmp_pat
         rec = mgr2.get("x1")
         assert isinstance(rec, DeadSession) and rec.exited
         assert rec.exit_code == 3 and rec.failed_at
+        # Nothing asked for it, so its own program ended it (claunch-o6xws).
+        assert rec.ended_by["kind"] == "self"
         assert mgr2.adopted == [] and "x1" not in mgr2.restore_queue
         assert c2.list() == [], "the exit was not acknowledged"
         assert b"late:bye" in paths.session_log("x1").read_bytes()

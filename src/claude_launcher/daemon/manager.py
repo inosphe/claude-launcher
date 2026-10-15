@@ -3222,6 +3222,10 @@ class SessionManager:
                 # A nonzero code nobody asked for is a failure, as
                 # _session_exited files one (claunch-0j6gb.1).
                 "failed_at": exited_at if code not in (None, 0) else None,
+                # Nothing asked for it (a kept session had no kill, pause
+                # or hold pending), so the ender is what only the exit can
+                # tell, as _attribute_ending decides it (claunch-o6xws).
+                "ended_by": actors.make(actors.OS if ended_by_os(code) else actors.SELF),
             })
             handle.close()
             try:
@@ -3229,7 +3233,7 @@ class SessionManager:
             except Exception:
                 log.debug("ack_exit for %s failed", sid, exc_info=True)
             self.events.record(dead, "exit", "데몬이 없는 동안 세션 프로세스 종료",
-                               exit_code=code)
+                               exit_code=code, ended_by=dead.ended_by)
             return
         session = self.stage(
             sdef,
