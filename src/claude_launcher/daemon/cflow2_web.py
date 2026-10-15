@@ -873,7 +873,7 @@ def rail_entry(cwd: str, scope: str) -> Optional[dict]:
     except Exception as exc:  # noqa: BLE001 - shown, not raised
         return {"cwd": cwd, "scope": scope, "status": "error", "error": str(exc),
                 "workflow": None, "current": [], "owed": [], "gated": False,
-                "answers": []}
+                "answers": [], "urgent_asks": []}
     inst = state.get("inst") or {}
     current = []
     owed = []
@@ -922,6 +922,7 @@ def rail_entry(cwd: str, scope: str) -> Optional[dict]:
         "owed": owed,
         "gated": bool(owed),
         "answers": answers,
+        "urgent_asks": _rail_urgent(state),
         # The start inputs the run was launched with (runtime.status carries
         # the same under "inputs"). "Spawn same setup" seeds a child's spawn
         # form from this row, so the workflow's variables come over with it.
@@ -937,6 +938,32 @@ RAIL_PROMPT_MAX = 400
 def _rail_prompt(text: Any) -> str:
     flat = " ".join(str(text or "").split())
     return flat if len(flat) <= RAIL_PROMPT_MAX else flat[:RAIL_PROMPT_MAX - 1] + "…"
+
+
+#: How many of a run's urgent asks the rail row lists, newest first.
+RAIL_URGENT_MAX = 20
+
+
+def _rail_urgent(state: dict) -> List[dict]:
+    """The run's ``urgent: true`` asks (claunch-x76l8.1), open and settled,
+    for the dashboard's notification channel: an open one whose resolution
+    is ``human`` is waiting on a person (its card and the bell's count), and
+    a settled one tells the history how it ended (``status`` and, when
+    answered, ``decision`` and ``by``)."""
+    out = []
+    for rec in (state.get("asks") or {}).values():
+        if not isinstance(rec, dict) or not rec.get("urgent"):
+            continue
+        answer = rec.get("answer") or {}
+        out.append({
+            "id": rec.get("id"), "instance": rec.get("instance"),
+            "label": rec.get("label") or rec.get("node"),
+            "status": rec.get("status"), "resolution": rec.get("resolution"),
+            "decision": answer.get("decision"), "by": answer.get("by"),
+            "opened": rec.get("opened"), "closed": rec.get("closed"),
+        })
+    out.sort(key=lambda a: str(a.get("opened") or ""), reverse=True)
+    return out[:RAIL_URGENT_MAX]
 
 
 def _rail_answers(cwd: str, scope: str, state: dict) -> List[dict]:
@@ -992,7 +1019,8 @@ def _rail_answers(cwd: str, scope: str, state: dict) -> List[dict]:
             continue
         q = a.get("question") or {}
         out.append({
-            "kind": "ask", "instance": a.get("instance"),
+            "kind": "ask", "instance": a.get("instance"), "ask": a.get("ask"),
+            "urgent": bool(a.get("urgent")),
             "label": a.get("label") or a.get("node"),
             "prompt": _rail_prompt(a.get("question_text") or a.get("prompt")
                                    or a.get("title")),

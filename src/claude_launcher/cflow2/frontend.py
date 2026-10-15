@@ -979,7 +979,7 @@ def _narrow_task_marks(ctx: _Ctx, chart: ir.Chart) -> None:
 
 VERIFY_KEYS = ("run", "command", "timeout")
 ASK_KEYS = ("prompt", "from", "otherwise", "timeout", "on_decline", "options",
-            "brief", "format", "choices", "require_reason", "on_unroutable")
+            "brief", "format", "choices", "require_reason", "on_unroutable", "urgent")
 #: ``${params.NAME}`` -- the one reference ask.format/choices/from may hold.
 _PARAM_REF = re.compile(r"^\$\{\s*\$?params\.([A-Za-z_][A-Za-z0-9_]*)\s*\}$")
 _PARAM_REF_BARE = re.compile(r"^\$params\.([A-Za-z_][A-Za-z0-9_]*)$")
@@ -1110,6 +1110,17 @@ def _ask_unroutable(ctx: _Ctx, file: str, name: str, ask: Dict[str, Any],
     return out
 
 
+def _ask_urgent(ctx: _Ctx, file: str, name: str, ask: Dict[str, Any], aline: int) -> bool:
+    """``ask.urgent``: the ask wants a person's answer right away, so once it
+    falls to a person the dashboard raises it on its notification channel
+    (corner card, history, the bell's waiting count) like the daemon's own
+    approval gates (claunch-x76l8.1). A literal boolean; default false."""
+    value = ask.get("urgent", False)
+    if not isinstance(value, bool):
+        raise ctx.err(file, aline, f"task {name!r}: ask.urgent must be true or false")
+    return value
+
+
 def _ask(ctx: _Ctx, file: str, name: str, value: Any, line: int) -> Dict[str, Any]:
     """``ask`` normalised: ``{prompt, from: [{role, scope, connect}], otherwise,
     default_option, timeout, on_decline, options}``.
@@ -1208,6 +1219,7 @@ def _ask(ctx: _Ctx, file: str, name: str, value: Any, line: int) -> Dict[str, An
         "timeout": delegate.timeout,
         "on_decline": on_decline,
         "on_unroutable": _ask_unroutable(ctx, file, name, ask, aline),
+        "urgent": _ask_urgent(ctx, file, name, ask, aline),
         "options": options,
     }
 
@@ -1893,7 +1905,7 @@ def _ask_brief(ctx: _Ctx, file: str, name: str, ask: Dict[str, Any], aline: int)
     from_param = param_or(raw.get("from"), "from")
     if from_param is not None:
         raw.pop("from")
-    for key in ("brief", "format", "choices", "prompt", "require_reason"):
+    for key in ("brief", "format", "choices", "prompt", "require_reason", "urgent"):
         raw.pop(key, None)
     try:
         delegate = v1._parse_delegate(raw, f"{what}: ask")
@@ -1921,6 +1933,7 @@ def _ask_brief(ctx: _Ctx, file: str, name: str, ask: Dict[str, Any], aline: int)
         "timeout": delegate.timeout,
         "on_decline": None,
         "on_unroutable": _ask_unroutable(ctx, file, name, ask, aline),
+        "urgent": _ask_urgent(ctx, file, name, ask, aline),
         "options": None,
     }
 

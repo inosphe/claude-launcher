@@ -243,6 +243,38 @@ def test_human_decline_finishes_the_task_declined(tmp_path):
     assert d.state()["result"]["a"]["value"]["reason"] == "no"
 
 
+def test_ask_urgent_is_a_literal_boolean_default_false():
+    """``ask.urgent`` (claunch-x76l8.1) marks an ask the dashboard raises on
+    its notification channel; it is false unless written, on both ask
+    shapes, and takes nothing but true or false."""
+    def ask_of(spec):
+        chart = _compile("nodes:\n  a: {prompt: a, ask: %s}\nbody: a\n" % spec)
+        return next(n for n in chart.nodes.values() if n.label == "a").get("ask")
+
+    assert ask_of("{prompt: p}")["urgent"] is False
+    assert ask_of("{prompt: p, urgent: true}")["urgent"] is True
+    assert ask_of("{prompt: p, urgent: false, options: {x: {}, y: {}}}")["urgent"] is False
+    for bad in ("yes-please", "1", "'true'"):
+        with pytest.raises(frontend.FrontendError, match="ask.urgent must be true or false"):
+            ask_of("{prompt: p, urgent: %s}" % bad)
+
+
+def test_urgent_rides_the_ask_record_and_the_status_payload(tmp_path):
+    d = Drv(tmp_path, """
+        nodes:
+          a: {prompt: a, ask: {prompt: "now?", urgent: true}}
+          b: {prompt: b, ask: {prompt: "later?"}}
+        body: [a, b]
+    """)
+    (a,) = d.status()["asks"]
+    assert a["urgent"] is True and a["resolution"] == "human"
+    assert d.state()["asks"][a["ask"]]["urgent"] is True
+    asks.human_approve("a", nudge_fn=lambda *x: None, **d.kw())
+    d.report("a")
+    (b,) = d.status()["asks"]
+    assert b["urgent"] is False
+
+
 def test_on_decline_names_the_outcome(tmp_path):
     d = Drv(tmp_path, """
         nodes:

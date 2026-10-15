@@ -5603,6 +5603,7 @@ def _ask_spec(node: ir.Node) -> Dict[str, Any]:
         "timeout": float(raw["timeout"]) if raw.get("timeout") else None,
         "on_decline": raw.get("on_decline") or ASK_DECLINED,
         "on_unroutable": raw.get("on_unroutable") or None,
+        "urgent": raw.get("urgent") is True,
         "options": list(options) if options else None,
     }
 
@@ -5723,7 +5724,7 @@ def _open_ask(r: Run, iid: str, node: ir.Node) -> None:
         "from": spec["from"], "otherwise": spec["otherwise"],
         "default_option": spec["default_option"], "timeout": spec["timeout"],
         "on_decline": None if spec["options"] else spec["on_decline"],
-        "on_unroutable": spec.get("on_unroutable"),
+        "on_unroutable": spec.get("on_unroutable"), "urgent": bool(spec.get("urgent")),
         "options": spec["options"], "status": "open",
         "resolution": RES_ROUTING if spec["from"] else None,
         "group": 0, "asked": [], "skipped": [], "deadline": None, "deferrals": 0,
@@ -6039,7 +6040,7 @@ def _describe_ask(r: Run, iid: str, node: ir.Node, rec: Dict[str, Any],
         "prompt": rec.get("prompt"), "task_prompt": render(node.get("prompt"), env),
         "options": [{"name": o["name"], "description": o.get("description") or ""}
                     for o in _ask_choices(rec)],
-        "resolution": rec.get("resolution"),
+        "resolution": rec.get("resolution"), "urgent": bool(rec.get("urgent")),
         "asked": [e.get("handle") for e in rec.get("asked") or []],
         "deadline": rec.get("deadline"),
         "skipped": [s.get("reason") for s in rec.get("skipped") or []],
