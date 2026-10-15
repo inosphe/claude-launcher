@@ -367,3 +367,31 @@ def test_the_rediscuss_label_is_reserved_and_survives_an_edit(qa):
     edited = qa.update("s1", q["id"], 1, options=[])
     assert edited["rediscuss"]["label"] == Q.REDISCUSS
     assert qa.answer(Q.USER, q["id"], 2, choices=[Q.REDISCUSS], text="why")["question"]["answer"]["rediscuss"]
+
+
+def test_questions_filed_before_the_rediscuss_choice_can_be_withdrawn_too(qa):
+    """claunch-rwcnh: the choice is not in the stored row, so a question
+    already in the file -- written by an older daemon, answered, or closed --
+    offers it and takes it like a new one."""
+    db = sqlite3.connect(str(qa.path))
+    try:
+        with db:
+            db.execute("INSERT INTO questions (id, session, title, body, options, multi, thread, created_at, updated_at) "
+                       "VALUES ('qa-0ld', 's1', 'old one', '', '[{\"label\": \"a\"}]', 0, NULL, 't', 't')")
+    finally:
+        db.close()
+    old = qa.get("qa-0ld")
+    assert old["options"] == [{"label": "a"}] and old["rediscuss"]["label"] == Q.REDISCUSS
+    got = qa.answer(Q.USER, "qa-0ld", 1, choices=[Q.REDISCUSS], text="not now")["question"]
+    assert got["answer"]["rediscuss"] is True
+
+    answered = qa.ask("s1", title="answered")
+    qa.answer(Q.USER, answered["id"], 1, choices=[], text="yes")
+    redone = qa.answer(Q.USER, answered["id"], 2, choices=[Q.REDISCUSS], text="on second thought")
+    assert redone["question"]["answer"]["rediscuss"] and redone["previous"]["text"] == "yes"
+
+    closed = qa.ask("s1", title="closed")
+    qa.answer(Q.USER, closed["id"], 1, text="ok")
+    qa.close("s1", closed["id"], 2)
+    reopened = qa.answer(Q.USER, closed["id"], 3, choices=[Q.REDISCUSS], text="reopen and rethink")
+    assert reopened["reopened"] and reopened["question"]["status"] == "answered"
