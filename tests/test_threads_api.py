@@ -158,11 +158,16 @@ def test_index_lists_threads_without_messages_grouped_by_session(tmp_path, monke
         assert ix["threads"][2]["excerpt"] == "fyi"
         assert [(g["session"], g["threads"], g["open"]) for g in ix["sessions"]] == [("s1", 2, 2), ("s2", 1, 1)]
         await req("POST", f"/api/threads/{three}/close", {})
+        assert [s["session"] for s in ix["all_sessions"]] == ["s1", "s2"]
         ix = await req("GET", "/api/threads/index?status=open&session=s1")
         assert [t["id"] for t in ix["threads"]] == [one]
+        # The filter narrows the threads and their groups, never the session list it picks from.
+        assert [g["session"] for g in ix["sessions"]] == ["s1"]
+        assert {s["session"]: s["threads"] for s in ix["all_sessions"]} == {"s1": 2, "s2": 1}
         closed = await req("GET", "/api/threads/index?status=closed")
         assert [t["id"] for t in closed["threads"]] == [three]
         assert [(g["session"], g["threads"], g["open"]) for g in closed["sessions"]] == [("s1", 1, 0)]
+        assert {s["session"] for s in closed["all_sessions"]} == {"s1", "s2"}
         await req("GET", "/api/threads/index?status=nope", status=400)
         assert mgr.sessions["s2"].delivered == []
     run(tmp_path, scenario)

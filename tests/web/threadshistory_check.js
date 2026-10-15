@@ -139,7 +139,15 @@ const sessions = [{ session: 's1', threads: 2 }, { session: 's2', threads: 1 }];
       { session: 's2', threads: 1, open: 1, updated_at: '2026-10-15T10:03:00+00:00' },
       { session: 's1', threads: 2, open: 1, updated_at: '2026-10-15T10:02:00+00:00' },
     ],
+    all_sessions: [{ session: 's2', threads: 1 }, { session: 's1', threads: 2 }],
     total: 3, truncated: false,
+  };
+  // Like the store: a session filter narrows threads and their groups, never all_sessions.
+  const indexFor = url => {
+    const only = new URLSearchParams(url.split('?')[1] || '').get('session');
+    if (!only) return index;
+    return { ...index, threads: index.threads.filter(t => t.session === only),
+      sessions: index.sessions.filter(g => g.session === only) };
   };
   const conversation = id => ({
     thread: { ...index.threads.find(t => t.id === id) },
@@ -149,7 +157,7 @@ const sessions = [{ session: 's1', threads: 2 }, { session: 's2', threads: 1 }];
   ctx.api = async url => {
     calls.push(url);
     const m = url.match(/^\/api\/threads\/(th-[^?]+)$/);
-    const data = url.startsWith('/api/threads/index') ? index : m ? conversation(m[1]) : { error: 'unexpected ' + url };
+    const data = url.startsWith('/api/threads/index') ? indexFor(url) : m ? conversation(m[1]) : { error: 'unexpected ' + url };
     return { ok: !data.error, status: data.error ? 404 : 200, json: async () => data };
   };
   page.state.session = ''; page.state.status = '';
@@ -225,6 +233,10 @@ const sessions = [{ session: 's1', threads: 2 }, { session: 's2', threads: 1 }];
   sel.listeners.change();
   await settle();
   assert.deepStrictEqual(calls, ['/api/threads/index?session=s1', '/api/threads/th-2']);
+  // The other sessions stay pickable after the filter narrowed the list.
+  assert.deepStrictEqual(view.byClass('thh-group').map(g => g.dataset.session), ['s1']);
+  assert.deepStrictEqual(view.byClass('thh-session')[0].children.map(o => o.value), ['', 's2', 's1']);
+  assert.strictEqual(view.byClass('thh-session')[0].value, 's1');
 
   // feed is the card list again, from the history route.
   page.state.session = '';

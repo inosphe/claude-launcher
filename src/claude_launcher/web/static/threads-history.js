@@ -146,8 +146,12 @@
     bar.append(node("h2", "", "Threads"), modes());
     const who = node("select", "thh-session");
     who.append(new Option("all sessions", ""));
-    const source = state.view === "feed" ? state.data : state.index;
-    for (const s of (source && source.sessions) || []) {
+    // Every session with threads, whatever the filters keep: picking one
+    // must not take the others out of the list.
+    const all = state.view === "feed"
+      ? state.data && state.data.sessions
+      : state.index && state.index.all_sessions;
+    for (const s of all || []) {
       who.append(new Option(`${s.session} (${s.threads})`, s.session));
     }
     who.value = state.session;

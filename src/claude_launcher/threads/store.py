@@ -413,7 +413,9 @@ class ThreadStore:
         thread's row with ``messages`` (its message count) and ``excerpt``
         (the first line of its last message) instead of the messages.
         ``sessions`` groups them by session (threads, open, the latest
-        ``updated_at``), most recently active first. At most ``INDEX_MAX``
+        ``updated_at``), most recently active first. ``all_sessions`` is every
+        session that has threads whatever the filters say (as ``history``
+        lists them), for the page's session filter. At most ``INDEX_MAX``
         threads; ``truncated`` says the rest were left out."""
         if status not in (None, "", "open", "closed"):
             raise ThreadError("status is open or closed")
@@ -436,6 +438,8 @@ class ThreadStore:
                 " FROM threads t" + cond + " ORDER BY t.updated_at DESC, t.id LIMIT ?",
                 (*args, INDEX_MAX),
             ).fetchall()
+            every = [{"session": r["session"], "threads": int(r["n"])} for r in db.execute(
+                "SELECT session, COUNT(*) AS n FROM threads GROUP BY session ORDER BY MAX(updated_at) DESC, session")]
         threads, groups = [], {}
         for r in rows:
             t = _thread(r, int(r["unread"]))
@@ -447,8 +451,8 @@ class ThreadStore:
                                                  "updated_at": t["updated_at"]})
             g["threads"] += 1
             g["open"] += t["status"] == "open"
-        return {"threads": threads, "sessions": list(groups.values()), "total": total,
-                "truncated": total > len(threads)}
+        return {"threads": threads, "sessions": list(groups.values()), "all_sessions": every,
+                "total": total, "truncated": total > len(threads)}
 
     def rail(self) -> dict:
         """Per session with threads: how many are open, the seq of the
