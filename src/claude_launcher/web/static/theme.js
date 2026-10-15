@@ -37,8 +37,9 @@
    whatever its program asks for -- 16 ANSI colours, 256-colour indices and
    24-bit RGB alike -- and only the first are xterm options. The light theme
    inverts the terminal's PICTURE instead (style.css, `.xterm` under
-   [data-theme="light"]: invert + hue-rotate), which turns every colour the
-   program chose, whatever its kind, the way the rest of the page turned.
+   [data-theme="light"]: the SVG filter #claunch-light-term in index.html),
+   which turns every colour the program chose, whatever its kind, the way
+   the rest of the page turned.
    For the same reason the vendored xterm.css and any rule aimed inside
    `.xterm` are never rewritten: the filter would invert them a second time.
 
