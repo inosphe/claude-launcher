@@ -730,3 +730,63 @@ def test_the_prompt_asks_for_one_line_chips_and_pivots():
     for phrase in ("ONE line of at most 120 characters", "Wrap identifiers in backticks",
                    "@s123", '"pivot":true', "expected X → observed Y → now Z"):
         assert phrase in observer.SYSTEM
+
+
+def exited_and_running(setup, monkeypatch):
+    """The fixture's running session plus an exited one with a timeline."""
+    service, first = setup
+    gone = SimpleNamespace(sdef=SimpleNamespace(name="old", task="task", cwd="/repo", conversation_id="c9"),
+                           exited=True, info=lambda: {"status": "exited"})
+    service.manager.list = lambda: [first, gone]
+    service.data["sessions"]["old"] = {"summary": "끝난 일", "usage_totals": {"calls": 2, "prompt_tokens": 10}}
+    service.data["sessions"]["s1"] = {"summary": "진행 중"}
+    for name in ("s1", "old"):
+        service.loaded.add(name)
+    timeline = {"id": "e1", "origin": "daemon", "kind": "exit", "text": "끝", "at": "2026-10-15T00:00:00+00:00",
+                "needs_action": False, "source": "session:x"}
+    read = []
+    monkeypatch.setattr(service.session_events, "rows",
+                        lambda session: read.append(session.sdef.name) or [dict(timeline)])
+    monkeypatch.setattr(observer.search_records, "rows", lambda *a, **k: [])
+    service.records_imported = True
+    return service, read
+
+
+def test_the_snapshot_leaves_out_exited_timelines_when_asked(setup, monkeypatch):
+    """An exited session keeps its row (name, meshes, usage) but not its
+    timeline, and its timeline is not read at all: those rows were most of
+    the route's answer (claunch-ozuag)."""
+    service, read = exited_and_running(setup, monkeypatch)
+    light = service.snapshot(ended=False)
+    rows = {row["name"]: row for row in light["sessions"]}
+    assert light["ended"] is False
+    assert rows["s1"]["events"] and "events_omitted" not in rows["s1"]
+    assert rows["old"]["events"] == [] and rows["old"]["events_omitted"] is True
+    assert rows["old"]["running"] is False and rows["old"]["meshes"] == ["team"]
+    assert rows["old"]["usage_totals"] == {"calls": 2, "prompt_tokens": 10}
+    assert rows["old"]["summary"] == "끝난 일"
+    assert read == ["s1"]
+    # The full read (and every in-process caller's default) still has it.
+    full = {row["name"]: row for row in service.snapshot()["sessions"]}
+    assert full["old"]["events"] and "events_omitted" not in full["old"]
+
+
+def test_the_route_sends_exited_timelines_only_on_request(setup, monkeypatch):
+    service, _ = exited_and_running(setup, monkeypatch)
+    # install() makes its own Observer; drive the route against that one.
+    async def routed():
+        app = web.Application(); app["manager"] = service.manager; app["mesh"] = service.mesh
+        observer.install(app)
+        made = app["observer"]
+        made.data["sessions"].update(service.data["sessions"]); made.loaded |= service.loaded
+        made.records_imported = True
+        monkeypatch.setattr(made.session_events, "rows", service.session_events.rows)
+        async with TestClient(TestServer(app)) as client:
+            plain = await (await client.get("/api/observer")).json()
+            asked = await (await client.get("/api/observer?ended=1")).json()
+        return plain, asked
+    plain, asked = asyncio.run(routed())
+    assert plain["ended"] is False and asked["ended"] is True
+    by = lambda d: {row["name"]: row for row in d["sessions"]}
+    assert by(plain)["old"]["events"] == [] and by(plain)["s1"]["events"]
+    assert by(asked)["old"]["events"]

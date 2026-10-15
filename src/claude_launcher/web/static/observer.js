@@ -8,12 +8,26 @@ const drafts = new Map(), answerDrafts = new Map();
 // board is rebuilt on every poll, and a note kept in the card's DOM would go
 // with the card it was typed into.
 const refreshing = new Set(), refreshNotes = new Map();
-let runs = [], gateCache = new Map(), cflowError = false;
+// The v1 runs are the app's own rail cache (refreshCflow, on the dashboard
+// poll): the page used to fetch the same /api/cflow?view=rail again beside it.
+let runs = [], gateCache = new Map();
+const appRuns = () => typeof cflowCache !== "undefined" && Array.isArray(cflowCache) ? cflowCache : [];
+// v2 runs, QA and threads come from the app's rail caches the same way: one
+// row per session, refreshed by the dashboard poll whatever page is shown.
+const appRow = (cache, name) => cache && typeof cache === "object" ? cache[name] || null : null;
+const run2Of = s => appRow(typeof cflow2RailCache !== "undefined" ? cflow2RailCache : null, s.name);
+const qaOf = s => appRow(typeof qaRailCache !== "undefined" ? qaRailCache : null, s.name);
+const threadsOf = s => appRow(typeof threadsRailCache !== "undefined" ? threadsRailCache : null, s.name);
 let draftTarget = "";
 // The composer starts folded at every width and stays where the reader left
 // it for as long as the page is loaded; a reload comes back folded.
 let composerFolded = true;
 let layout = "board", gridLimit = 5;
+/* The timeline draws its newest posts and grows on request: drawn whole it
+   was one card per event of every visible session (3,217 for the 57 running
+   sessions on 2026-10-15), rebuilt on each redraw. */
+const TIMELINE_STEP = 200;
+let timelineLimit = TIMELINE_STEP;
 try {
   const savedLayout = localStorage.getItem("claunch-observer-layout");
   if(["board","grid","timeline"].includes(savedLayout)) layout = savedLayout;
@@ -59,7 +73,7 @@ function sessionRuns(s) {
 }
 function activity(s) {
   const own=sessionRuns(s), pending=own.some(r=>String(r.status).startsWith("waiting"));
-  const question=(s.events||[]).some(e=>e.question&&!e.answer);
+  const question=(s.events||[]).some(e=>e.question&&!e.answer)||qaWaiting(s).length>0||!!run2Of(s)?.gated;
   const stamp=s.last_activity_at, age=stamp?Math.max(0,Date.now()-Date.parse(stamp)):null;
   const duration=Number.isFinite(age)?`${Math.floor(age/60000)}분 전 마지막 활동`:"활동 시각 미확인";
   if(!s.running)return {label:"종료됨",kind:"ended",duration};
@@ -83,7 +97,13 @@ function addGate(card, s, r) {
   get.then(data=>{
     if(!section.isConnected)return;
     section.lastChild.remove();
-    section.append(wfActions(data,{archive:false,reminder:false,host:"observer",after:()=>{gateCache.clear();lastSnapshot="";refresh();}}));
+    section.append(wfActions(data,{archive:false,reminder:false,host:"observer",after:async()=>{
+      // The runs are the app's cache: read them again now rather than at the
+      // dashboard's next poll, so the answered gate goes away with the press.
+      gateCache.clear();lastSnapshot="";
+      if(typeof refreshCflow==="function")await refreshCflow().catch(()=>{});
+      refresh();
+    }}));
   }).catch(err=>{gateCache.delete(key);section.lastChild.textContent=err.message;});
 }
 function addDirect(item, s, e) {
@@ -158,7 +178,15 @@ function visibleSessions() {
   return snapshot.sessions.filter(s=>($("ended").checked||s.running)
     && ($("activity").value==="all"||activity(s).kind===$("activity").value)
     && (scope==="global"||(scope==="session"?s.name===selected:(s.meshes||[]).includes(selected)))
-    && (!$("actions-only").checked||(s.events||[]).some(e=>e.needs_action&&!e.acknowledged)||sessionRuns(s).some(sessCflowGated)));
+    && (!$("actions-only").checked||actionCount(s)>0));
+}
+/* What the reader owes one session: unacknowledged events, v1 runs waiting
+   on a person, a v2 run gated on a person, and QA questions waiting. */
+function actionCount(s) {
+  return (s.events||[]).filter(e=>e.needs_action&&!e.acknowledged).length
+    +sessionRuns(s).filter(sessCflowGated).length
+    +(run2Of(s)?.gated?1:0)
+    +qaWaiting(s).length;
 }
 function syncTargets(visible) {
   const names=visible.filter(s=>s.running).map(s=>s.name);
@@ -218,6 +246,86 @@ function cardActions(card,s) {
   links.append(pin,input,update);
   const note=refreshNotes.get(s.name);
   if(note)links.append(node("small",note,"observer-action-note"));
+}
+/* What else waits on the reader in a session: its QA questions and the
+   thread replies this browser has not shown yet. Both are the app's rail
+   caches (/api/qa/rail, /api/threads/rail), so the card says what the
+   session header and the notice cards say, from the same rows. A press opens
+   the session with that pane, the way the notice cards do. */
+function openTalk(name, pane, thread) {
+  if(pane==="threads"&&typeof threadNoticeOpen==="function") {threadNoticeOpen(name,thread);return;}
+  try {
+    const lay=sessLayoutFor(name);
+    if(!(lay.split&&talkShows(lay.pane,pane)))
+      setSessLayout(name,{split:true,pane:lay.split&&lay.pane==="threads"?"both":pane});
+  } catch { /* storage off: the session still opens */ }
+  location.hash="#/s/"+encodeURIComponent(name);
+}
+const qaWaiting = s => (qaOf(s)?.waiting)||[];
+/* Replies newer than the mark this browser keeps per session (the one the
+   session header's 🗪 reads). A session never marked has no news yet: its
+   history is not announced, as on the header. */
+function newReplies(s) {
+  const row=threadsOf(s);
+  if(!row||!row.agent_seq||typeof loadThreadsSeen!=="function")return [];
+  const seen=loadThreadsSeen()[s.name];
+  if(seen===undefined)return [];
+  return (row.replies||[]).filter(r=>Number(r.seq)>Number(seen));
+}
+const REPLIES_SHOWN = 3;
+function noticesBlock(s) {
+  const questions=qaWaiting(s), replies=newReplies(s);
+  if(!questions.length&&!replies.length)return null;
+  const box=node("div","","observer-notices");
+  for(const q of questions) {
+    const b=node("button","","observer-notice notice-qa");b.type="button";
+    b.append(node("span",q.status==="stale"?"QA 재질문":"QA 질문","obs-notice-kind"),node("span",q.title||q.id,"obs-notice-text"));
+    b.title=`${s.name}의 QA 창에서 답합니다`;
+    b.onclick=()=>openTalk(s.name,"qa");
+    box.append(b);
+  }
+  for(const r of replies.slice(-REPLIES_SHOWN).reverse()) {
+    const b=node("button","","observer-notice notice-thread");b.type="button";
+    b.append(node("span","쓰레드 답장","obs-notice-kind"),node("span",`「${r.title}」 ${r.excerpt||""}`,"obs-notice-text"));
+    b.title=`${s.name}의 쓰레드 창을 엽니다`;
+    b.onclick=()=>openTalk(s.name,"threads",r.thread);
+    box.append(b);
+  }
+  if(replies.length>REPLIES_SHOWN)box.append(node("small",`외 쓰레드 답장 ${replies.length-REPLIES_SHOWN}개`,"observer-notice-more"));
+  return box;
+}
+/* The session's workflow run, where it stands now: the v2 run from the v2
+   rail cache, and a v1 run that is not waiting (a waiting one is drawn as its
+   gate with the answer form) and not finished. Each line opens the run page. */
+function runBlock(s) {
+  const lines=[];
+  const r2=run2Of(s);
+  if(r2) {
+    const mark=typeof cflow2RailMarkState==="function"?cflow2RailMarkState(r2):"running";
+    const label=typeof cflow2RailLabel==="function"?cflow2RailLabel(r2):String(r2.status||"");
+    const a=node("a","",`observer-run run-${mark}`);
+    a.href="#/wf/"+encodeURIComponent(`${r2.scope}|${r2.cwd}`);
+    a.append(node("span","cflow2","obs-run-kind"),node("span",r2.workflow||"","obs-run-wf"),node("span",label,"obs-run-state"));
+    lines.push(a);
+  }
+  for(const r of sessionRuns(s)) {
+    const status=String(r.status||"");
+    if(status.startsWith("waiting")||status==="done")continue;
+    const a=node("a","",`observer-run run-${status==="running"?"running":"error"}`);
+    a.href="#/wf/"+encodeURIComponent(`${r.scope||s.name}|${r.cwd||s.cwd}`);
+    a.append(node("span","cflow","obs-run-kind"),node("span",r.workflow||"","obs-run-wf"),
+      node("span",[status,r.title||r.step_id||""].filter(Boolean).join(" · "),"obs-run-state"));
+    lines.push(a);
+  }
+  if(!lines.length)return null;
+  const box=node("div","","observer-runs");
+  box.append(...lines);
+  return box;
+}
+/* Run state and notices once per session: a board column carries them at
+   its top, and the grid and timeline on the session's newest post only. */
+function sessionStatus(s) {
+  return [runBlock(s),noticesBlock(s)].filter(Boolean);
 }
 /* One observation pass for one session, now. The button is a request, not a
    mode: the daemon runs one pass and answers what it did, and it is served
@@ -549,13 +657,26 @@ function usageBlock(s) {
 function sessionEvents(s) {
   return collapseRoutine([...(s.events||[])].sort((a,b)=>timestamp(a.at)-timestamp(b.at)));
 }
+/* A board column draws its newest events and folds the rest behind a
+   button: the busiest columns carried 200 events each (s29, s15 on
+   2026-10-15) and every one of them was rebuilt on each redraw. */
+const COLUMN_EVENTS = 30;
+const expandedColumns = new Set();
 function fillSession(body,s,actionsOnly=false) {
   body.append(node("p",activity(s).duration,"meta"),node("div",(s.meshes||[]).join(" · ")||"메시 없음","meta"));
+  body.append(...sessionStatus(s));
   for(const r of sessionRuns(s).filter(r=>String(r.status).startsWith("waiting")))addGate(body,s,r);
   body.append(s.summary?richLine(s.summary,"obs-summary"):node("p","아직 관찰 결과가 없습니다."));
   if(s.error)body.append(node("p",s.error));
-  const events=sessionEvents(s).reverse();
-  for(const e of events.filter(e=>!actionsOnly||(e.needs_action&&!e.acknowledged)))body.append(eventItem(s,e));
+  const events=sessionEvents(s).reverse().filter(e=>!actionsOnly||(e.needs_action&&!e.acknowledged));
+  const limit=expandedColumns.has(s.name)?events.length:COLUMN_EVENTS;
+  for(const e of events.slice(0,limit))body.append(eventItem(s,e));
+  if(events.length>limit) {
+    const more=node("button",`이전 항목 ${events.length-limit}개 더 보기`,"observer-more");
+    more.type="button";
+    more.onclick=()=>{expandedColumns.add(s.name);render();};
+    body.append(more);
+  }
   // A session the meter never reached and whose last call was never recorded
   // has nothing to report; the block is omitted rather than shown empty.
   const usage=usageBlock(s);
@@ -597,7 +718,7 @@ function renderPanel() {
   const parts=[title];
   const updated=s&&updatedText(s);
   if(updated)parts.push(node("small",updated,"observer-updated"));
-  const notice=node("p",!panelLoaded?"관찰 정보를 불러오는 중…":cflowError?"cflow 상태 조회 실패 · 마지막 조회 결과 표시":snapshot.error||(snapshot.enabled?"관찰 중":"관찰이 꺼져 있습니다 · 「지금 갱신」은 사용할 수 있습니다."),"meta");
+  const notice=node("p",!panelLoaded?"관찰 정보를 불러오는 중…":snapshot.error||(snapshot.enabled?"관찰 중":"관찰이 꺼져 있습니다 · 「지금 갱신」은 사용할 수 있습니다."),"meta");
   notice.setAttribute("role","status");parts.push(notice);
   const links=node("nav","","observer-links");
   const page=node("a","관찰 결과");page.href="#/observer/session/"+encodeURIComponent(name);
@@ -641,7 +762,8 @@ function render() {
   $("limit").value=String(gridLimit);$("limit-value").value=`${gridLimit}개`;
   syncTargets(visible);
   composerState();
-  $("counts").textContent=`${visible.length}개 세션 · 미확인 요청 ${visible.reduce((n,s)=>n+(s.events||[]).filter(e=>e.needs_action&&!e.acknowledged).length+sessionRuns(s).filter(sessCflowGated).length,0)}개`;
+  const replies=visible.reduce((n,s)=>n+newReplies(s).length,0);
+  $("counts").textContent=`${visible.length}개 세션 · 미확인 요청 ${visible.reduce((n,s)=>n+actionCount(s),0)}개${replies?` · 새 쓰레드 답장 ${replies}개`:""}`;
   const usage=usageText(snapshot.sessions);
   renderTokenSummary();
   $("usage").hidden=!usage;
@@ -653,7 +775,7 @@ function render() {
   const scoped=snapshot.scope==="pinned";
   $("scope-pinned").checked=scoped;
   $("mobile-scope-pinned").checked=scoped;
-  $("notice").textContent=(cflowError?"cflow 상태 조회 실패 · 마지막 조회 결과 표시":snapshot.error)||(snapshot.enabled?"관찰 중 · 세션별 순차 처리 · 최소 60초 간격":"관찰이 꺼져 있습니다. 시작하면 ds4-official/deepseek-flash API로 트랜스크립트를 전송합니다. 「지금 갱신」은 꺼져 있어도 그 세션 하나를 한 번 전송합니다.");
+  $("notice").textContent=snapshot.error||(snapshot.enabled?"관찰 중 · 세션별 순차 처리 · 최소 60초 간격":"관찰이 꺼져 있습니다. 시작하면 ds4-official/deepseek-flash API로 트랜스크립트를 전송합니다. 「지금 갱신」은 꺼져 있어도 그 세션 하나를 한 번 전송합니다.");
   $("sort").hidden=timeline||grid;
   $("layout-hint").textContent=grid?`세션마다 최신 항목 최대 ${gridLimit}개 · 세션 목록은 필터 그대로 · 보고·승인 요청 기준`:timeline?"최신 보고부터 표시하는 타임라인":"세션 보드 · 내용은 자동 갱신되며 세션 순서는 최신순 정렬을 누를 때 바뀝니다.";
   cards.className=grid?"observer-grid":timeline?"observer-timeline":"observer-board";
@@ -680,18 +802,25 @@ function render() {
       if(seen>=gridLimit)return false;
       perSession.set(s.name,seen+1);
       return true;
-    }):entries;
+    }):entries.slice(0,timelineLimit);
     // One meter per session, on that session's newest post: the timeline
     // repeats a busy session for every event, and the same totals under each
     // of them would be noise rather than a measurement.
     const metered=new Set();
     for(const {s,e,r} of shown) {
       const card=sessionHeader(s,"observer-post");
+      if(!metered.has(s.name))card.append(...sessionStatus(s));
       if(e)card.append(eventItem(s,e));
       else if(r)addGate(card,s,r);
       else card.append(s.summary?richLine(s.summary,"obs-summary"):node("p","아직 관찰 결과가 없습니다."),node("small",activity(s).duration));
       if(!metered.has(s.name)) {metered.add(s.name);const usage=usageBlock(s);if(usage)card.append(usage);}
       cardActions(card,s);cards.append(card);
+    }
+    if(!grid&&entries.length>shown.length) {
+      const more=node("button",`이전 항목 ${entries.length-shown.length}개 중 ${Math.min(TIMELINE_STEP,entries.length-shown.length)}개 더 보기`,"observer-more");
+      more.type="button";
+      more.onclick=()=>{timelineLimit+=TIMELINE_STEP;render();};
+      cards.append(more);
     }
   } else {
     if(!boardOrder.length)boardOrder=[...snapshot.sessions].sort((a,b)=>latestActivity(b)-latestActivity(a)||a.name.localeCompare(b.name)).map(s=>s.name);
@@ -717,23 +846,48 @@ function selections() {
   options($("selection"),scope==="mesh"?[...new Set(snapshot.sessions.flatMap(s=>s.meshes))].sort():snapshot.sessions.map(s=>s.name));
   if(scope===routeScope && routeName) $("selection").value=routeName;
 }
+/* Whether this read needs exited sessions' timelines. The daemon leaves them
+   out unless asked (?ended=1): they were most of the answer (9.5 MB of
+   which 1.3 MB was the running sessions, 2026-10-15) and the page hides
+   them until 「종료된 세션 포함」 is on. A direct link to an exited session,
+   or the detail panel open on one, needs that one's timeline as well. */
+function wantEnded() {
+  const onPage=document.body.classList.contains("observer-active");
+  if(onPage&&$("ended").checked)return true;
+  const names=[onPage&&routeScope==="session"?routeName:"",panelBox?.isConnected?panelBox.dataset.session:""];
+  return names.some(n=>n&&snapshot.sessions.some(s=>s.name===n&&s.events_omitted));
+}
+/* The rail caches' own signatures, so a QA question, a thread reply or a run
+   moving redraws the cards even when the observer's answer did not change. */
+const railSignature = () => [typeof cflowCache!=="undefined"?JSON.stringify(cflowCache):"",
+  typeof cflow2RailSig!=="undefined"?cflow2RailSig:"",typeof qaRailSig!=="undefined"?qaRailSig:"",
+  typeof threadsRailSig!=="undefined"?threadsRailSig:""].join("\u0000");
 function refresh() {
   // Route changes share a pending request so direct-link target selection
   // always runs after that response, including on a slow first load.
   if(refreshTask)return refreshTask;
   refreshTask=(async()=>{
     try {
-      const [data,cflow]=await Promise.all([request("api/observer"),request("api/cflow?view=rail").catch(()=>({runs:[],error:true}))]);
-      cflowError=!!cflow.error;
-      if(!cflowError) runs=cflow.runs||[];
-      const signature=JSON.stringify([data,runs,cflowError,Math.floor(Date.now()/60000)]);
+      const ended=wantEnded();
+      const response=await api(ended?"api/observer?ended=1":"api/observer");
+      const text=await response.text();
+      const data=JSON.parse(text);
+      if(!response.ok)throw Error(data.error||`HTTP ${response.status}`);
+      // The response text is the signature: it is already one string, and
+      // stringifying the parsed answer again cost as much as parsing it.
+      const signature=[text,railSignature(),Math.floor(Date.now()/60000)].join("\u0000");
       if(document.activeElement?.matches(".observer-answer textarea,.observer-gate textarea,.observer-gate input,.observer-gate select"))return;
       panelLoaded=true;
       if(signature!==lastSnapshot) {
-        snapshot=data; lastSnapshot=signature;
+        snapshot=data; runs=appRuns(); lastSnapshot=signature;
         selections();
         redraw();
       }
+      // The first answer is what says a linked session has exited; ask again
+      // for its timeline, once (the second answer carries ``ended``).
+      // A daemon without the switch has no ``ended`` key and always answers
+      // in full, so only an explicit false asks again.
+      if(data.ended===false&&wantEnded())setTimeout(()=>{lastSnapshot="";refresh();});
       return true;
     } catch(err) { showError(err.message);lastSnapshot="";return false; }
     finally { refreshTask=null; }
@@ -746,7 +900,8 @@ function navigate() {
 }
 $("scope").onchange=()=>{selections();navigate();};
 $("activity").onchange=render;
-$("selection").onchange=navigate;$("actions-only").onchange=render;$("ended").onchange=render;
+$("selection").onchange=navigate;$("actions-only").onchange=render;
+$("ended").onchange=()=>{render();if($("ended").checked&&snapshot.ended===false){lastSnapshot="";refresh();}};
 $("target").onchange=()=>chooseTarget($("target").value);$("prompt").oninput=controls;
 $("composer-toggle").onclick=()=>{composerFolded=!composerFolded;composerState();if(!composerFolded)$("prompt").focus();};
 $("monitor").onclick=async()=>{try{await request("api/observer/settings",{enabled:!snapshot.enabled});await refresh();}catch(err){showError(err.message);}};
@@ -806,6 +961,60 @@ async function open(scope = "global", name = "") {
   render();
   poll=setInterval(()=>{if(!document.hidden)refresh();},10000);
 }
+/* Drag to scroll sideways. The board lays its columns out in one row that
+   scrolls horizontally, and a mouse without a horizontal wheel had only the
+   scrollbar at the bottom of a tall page to move it. A press on the cards
+   becomes a drag once the pointer has moved past a few pixels mostly
+   sideways; a press on a control, a link, a field or a fold is left alone,
+   and so is any press while the cards do not overflow sideways. A drag that
+   moved swallows the click that ends it, so letting go over a link does not
+   follow it. Touch and pen keep the browser's own panning.
+   app.js has the same gesture for the rail's tab strips
+   (enableTabDragScroll); that one starts on any press, which is right for a
+   strip of tabs and wrong here, where a press lands on forms, folds and text
+   and a mostly vertical move is a column scroll or a selection. */
+const DRAG_START_PX = 5;
+const DRAG_IGNORE = "a,button,input,textarea,select,summary,label,pre,code,img,.observer-answer,.observer-gate";
+let drag = null;
+function dragStart(event) {
+  const cards=$("cards");
+  if(event.pointerType!=="mouse"||event.button!==0||cards.scrollWidth<=cards.clientWidth)return;
+  if(event.target.closest(DRAG_IGNORE))return;
+  drag={x:event.clientX,y:event.clientY,left:cards.scrollLeft,id:event.pointerId,moved:false};
+}
+function dragMove(event) {
+  if(!drag||event.pointerId!==drag.id)return;
+  const cards=$("cards"), dx=event.clientX-drag.x, dy=event.clientY-drag.y;
+  if(!drag.moved) {
+    if(Math.abs(dx)<DRAG_START_PX||Math.abs(dx)<Math.abs(dy)) {
+      // Mostly vertical: a column scroll or a text selection, not a drag.
+      if(Math.abs(dy)>=DRAG_START_PX)drag=null;
+      return;
+    }
+    drag.moved=true;
+    cards.classList.add("dragging");
+    try {cards.setPointerCapture(drag.id);} catch { /* released already */ }
+    getSelection()?.removeAllRanges();
+  }
+  event.preventDefault();
+  cards.scrollLeft=drag.left-dx;
+}
+function dragEnd(event) {
+  if(!drag||event.pointerId!==drag.id)return;
+  const moved=drag.moved;
+  drag=null;
+  $("cards").classList.remove("dragging");
+  if(!moved)return;
+  // The click that ends this drag comes right after pointerup, if at all;
+  // the guard goes away on the next tick so it cannot eat a later click.
+  const cards=$("cards"), swallow=e=>{e.preventDefault();e.stopPropagation();};
+  cards.addEventListener("click",swallow,{capture:true,once:true});
+  setTimeout(()=>cards.removeEventListener("click",swallow,{capture:true}));
+}
+$("cards").addEventListener("pointerdown",dragStart);
+$("cards").addEventListener("pointermove",dragMove);
+$("cards").addEventListener("pointerup",dragEnd);
+$("cards").addEventListener("pointercancel",dragEnd);
 composerState();
 return {open, stop, panelSection};
 })();

@@ -573,10 +573,19 @@ class Observer:
         self.record_usage(usage)
         return {"called": True, "events": added}
 
-    def snapshot(self, names=None):
+    def snapshot(self, names=None, ended=True):
         """Every session's row, or only those in ``names``: a row reads the
         session's records and events off disk, so a reader that wants a few
-        live sessions must not pay for every killed and archived one."""
+        live sessions must not pay for every killed and archived one.
+
+        ``ended=False`` keeps an exited session's row but leaves out its
+        timeline (``events: []``, ``events_omitted: true``) and skips the three
+        readers that build it. The page hides exited sessions until the reader
+        asks for them, and those rows were most of the answer: on 2026-10-15
+        the route sent 9,576,242 bytes for 757 sessions of which 57 were
+        running, and 1,284,269 of them belonged to the running ones. The light
+        row still carries the name, meshes and usage, so the target lists and
+        the fleet's usage total do not change with the switch."""
         if not self.records_imported:
             search_records.import_current()
             self.records_imported = True
@@ -588,6 +597,9 @@ class Observer:
                 continue
             row = self.load_session(name)
             info = session.info()
+            if session.exited and not ended:
+                result.append(self._light_row(session, row, info))
+                continue
             direct = [event for event in self.reports.rows(name) if visible(event)]
             recorded = search_records.rows(name, kinds=("briefing", "checks"), limit=200)
             observed = [on_timeline(event) for event in row.get("events", [])]
@@ -618,7 +630,25 @@ class Observer:
                            "observe_pin": bool(getattr(session.sdef, "observe_pin", False))})
         return {"enabled": self.data.get("enabled", False), "error": self.error,
                 "interval": INTERVAL, "scope": self.data.get("scope", SCOPE_ALL),
+                "ended": bool(ended),
                 "sessions": result, "usage_summary": self.usage_windows()}
+
+    def _light_row(self, session, row, info):
+        """An exited session without its timeline (see :meth:`snapshot`)."""
+        summary = row.get("summary")
+        if communication_only(summary):
+            summary = None
+        return {"name": session.sdef.name, "status": info.get("status"), "running": False,
+                "harness": getattr(session.sdef, "harness", None),
+                "cwd": session.sdef.cwd,
+                "last_activity_at": info.get("last_activity_at"),
+                "last_output_at": info.get("last_output_at"),
+                "meshes": [m["mesh"] for m in self.mesh.meshes_for_session(session.sdef.name)],
+                "events": [], "events_omitted": True,
+                **{k: row.get(k) for k in ("generated_at", "usage", "usage_totals", "usage_daily",
+                                          "error", "rotations")},
+                "summary": summary, "state": row.get("state"),
+                "observe_pin": bool(getattr(session.sdef, "observe_pin", False))}
 
 
 def install(app):
@@ -629,7 +659,12 @@ def install(app):
     app.on_shutdown.append(observer.stop)
 
     async def snapshot(request):
-        return web.json_response(observer.snapshot())
+        # Exited sessions' timelines only when asked (``?ended=1``, the
+        # page's 「종료된 세션 포함」). The rows stay on the loop: they share
+        # dicts (usage meters, event details) with the loop's own writers, so
+        # encoding them on a thread could read one mid-update.
+        ended = request.query.get("ended", "") in ("1", "true", "yes")
+        return web.json_response(observer.snapshot(ended=ended))
 
     async def settings(request):
         body = await request.json()

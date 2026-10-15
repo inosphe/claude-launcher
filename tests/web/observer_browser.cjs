@@ -55,7 +55,8 @@ const server = http.createServer((req, res) => {
       // This fixture serves individual reads. Use the client's supported
       // fallback instead of claiming a batch succeeded without any answers.
       if(req.url === "/api/batch") {res.statusCode=404;return res.end('{}');}
-      if (req.url === "/api/observer") {
+      // ?ended=1 is the same read with exited sessions' timelines.
+      if (req.url.split("?")[0] === "/api/observer") {
         observerReads++;
         if(needsLogin) { needsLogin=false; res.statusCode=401; return res.end('{}'); }
         return res.end(JSON.stringify(data));
