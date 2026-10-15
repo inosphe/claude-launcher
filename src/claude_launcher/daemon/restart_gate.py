@@ -142,6 +142,27 @@ def _parse(stamp) -> Optional[datetime]:
 PTY_HOST_MODES = ("keep", "full")
 
 
+class StaleHost(Exception):
+    """A keep approval would leave the PTY host on code other than what the
+    next daemon loads (claunch-xnnct.3); ``check`` is
+    :func:`host_code.keep_check`'s answer."""
+
+    def __init__(self, message: str, check: dict) -> None:
+        super().__init__(message)
+        self.check = check
+
+
+def _stale_check(record: dict) -> Optional[dict]:
+    """The keep check for a request about to be applied, or None when it
+    does not apply (mode full, or the asker said keep it anyway)."""
+    if (record.get("pty_host") or "keep") != "keep" or record.get("keep_stale"):
+        return None
+    from . import host_code
+
+    check = host_code.keep_check()
+    return check if check["stale"] else None
+
+
 class RestartGate:
     """The single pending approval, owned by one daemon process.
 
@@ -167,14 +188,17 @@ class RestartGate:
     # the ask
     # ------------------------------------------------------------------ #
     def submit(self, *, session: str, via: str = "cli", reason: str = "",
-               pty_host: str = "keep") -> dict:
+               pty_host: str = "keep", keep_stale: bool = False) -> dict:
         """Open a gate for one session's restart request.
 
         ``pty_host`` is the restart's mode (claunch-xnnct.1): ``"keep"``
         leaves the PTY host and its sessions running, ``"full"`` (the CLI's
         ``--with-pty-host``) takes them down too. It is the asker's choice,
         shown on the card and applied on approval -- by a person or by the
-        clock; nobody changes it in between (reject and ask again).
+        clock; nobody changes it in between (reject and ask again). The one
+        exception is a stale PTY host found at approval (claunch-xnnct.3):
+        the approver then picks full or keep-anyway, see :meth:`approve`.
+        ``keep_stale`` is the asker's ``--keep-stale-host``.
 
         Refuses only while one is *pending*: a settled request (rejected — or
         approved, in the instant before the daemon goes down) no longer holds
@@ -198,6 +222,7 @@ class RestartGate:
             "status": "pending",
             "extensions": 0,
             "pty_host": pty_host if pty_host in PTY_HOST_MODES else "keep",
+            "keep_stale": bool(keep_stale),
         }
         self._timer = asyncio.get_running_loop().call_later(
             self.timeout, self._on_timeout, self.record["id"]
@@ -243,7 +268,8 @@ class RestartGate:
         )
         return dict(record)
 
-    def approve(self, *, decided_by: str = "web") -> Optional[dict]:
+    def approve(self, *, decided_by: str = "web", pty_host: Optional[str] = None,
+                keep_stale: bool = False) -> Optional[dict]:
         """Approve and restart. No-op (None) when nothing is pending.
 
         Otherwise this is exactly the web button's restart — record first so
@@ -251,7 +277,23 @@ class RestartGate:
         the intent, trip the ordinary shutdown path — with the one addition
         that the request is attributed to the session that asked, which is
         what makes the successor's notice possible.
+
+        A keep restart onto a stale PTY host (claunch-xnnct.3) raises
+        :class:`StaleHost` and leaves the request pending; the approver
+        answers again with ``pty_host="full"`` or ``keep_stale=True``.
         """
+        record = self.record
+        if record is not None and record["status"] == "pending":
+            if pty_host in PTY_HOST_MODES:
+                record["pty_host"] = pty_host
+            if keep_stale:
+                record["keep_stale"] = True
+            check = _stale_check(record)
+            if check is not None:
+                from . import host_code
+
+                record["stale"] = check
+                raise StaleHost(host_code.refusal(check), check)
         record = self._settle("approved", decided_by)
         if record is None:
             return None
@@ -289,7 +331,15 @@ class RestartGate:
         the handle, so in practice this is the only caller that can arrive
         here)."""
         if self.record is not None and self.record["id"] == request_id:
-            self.approve(decided_by="timeout")
+            try:
+                self.approve(decided_by="timeout")
+            except StaleHost as exc:
+                # The clock cannot pick between ending the sessions and
+                # keeping the old host, so it restarts nothing; the asking
+                # CLI reads the refusal off the record (claunch-xnnct.3).
+                record = self._settle("rejected", "timeout")
+                if record is not None:
+                    record["refused"] = str(exc)
 
     # ------------------------------------------------------------------ #
     # teardown

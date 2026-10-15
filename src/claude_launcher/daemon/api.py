@@ -94,7 +94,7 @@ from . import goto_gate
 from . import mesh_roles
 from . import reposync_gate
 from . import reposync_agent
-from . import restart_gate
+from . import host_code, restart_gate
 from . import restart_notice
 from .harness import PI_HARNESS, HarnessError, SessionDef, check_kind
 from . import score_goal
@@ -679,6 +679,7 @@ def build_app(
     r.add_get("/api/daemon", h_daemon_info)
     r.add_post("/api/daemon/shutdown", h_daemon_shutdown)
     r.add_post("/api/daemon/restart", h_daemon_restart)
+    r.add_get("/api/daemon/restart-check", h_daemon_restart_check)
     # The approval gate for agent-requested restarts (see
     # :mod:`restart_gate`): one request, its state, and the two settlements.
     r.add_get("/api/daemon/restart-request", h_restart_request_get)
@@ -1855,7 +1856,39 @@ async def h_daemon_info(request: web.Request) -> web.Response:
             "running": sum(1 for s in sessions if not s.exited),
             "relay": request.app["relay_state"](),
             "loop": request.app["loop_lag"].snapshot(),
+            # The PTY host and whether it runs the daemon's code
+            # (claunch-xnnct.3; daemon/host_code.py).
+            "pty_host": host_code.info(),
         }
+    )
+
+
+async def h_daemon_restart_check(request: web.Request) -> web.Response:
+    """Whether a keep restart now would leave the PTY host on older code
+    (claunch-xnnct.3). The CLI asks before it restarts or files a gate
+    request, so it can refuse with the files and the two ways forward
+    instead of failing on the 409 below. Read-only."""
+    check = host_code.keep_check()
+    body = dict(check)
+    if check["stale"]:
+        body["message"] = host_code.refusal(check)
+        body["hint"] = host_code.HINT
+    return json_response(body)
+
+
+def _stale_keep_refusal(body: dict) -> Optional[web.Response]:
+    """The 409 for a keep restart onto a stale host, or None to go ahead.
+
+    ``keep_stale: true`` in the body is the explicit "keep it anyway"; the
+    check is skipped for it, and for every mode but keep."""
+    if body.get("keep_stale") is True:
+        return None
+    check = host_code.keep_check()
+    if not check["stale"]:
+        return None
+    return web.json_response(
+        {"error": host_code.refusal(check), "stale": check, "hint": host_code.HINT},
+        status=409,
     )
 
 
@@ -1873,6 +1906,10 @@ async def h_daemon_shutdown(request: web.Request) -> web.Response:
     mode = body.get("mode") or "stop"
     if mode not in SHUTDOWN_MODES:
         return json_error(400, f"mode must be one of {', '.join(SHUTDOWN_MODES)}")
+    if mode == "keep":
+        refused = _stale_keep_refusal(body)
+        if refused is not None:
+            return refused
     # A CLI restart is this call followed by a fresh start (daemon_client.
     # restart): "keep" is how it says so, "stop" (and no body) is a stop.
     request.app["restart_mode"] = mode
@@ -1907,6 +1944,10 @@ async def h_daemon_restart(request: web.Request) -> web.Response:
     mode = body.get("mode") or "keep"
     if mode not in restart_gate.PTY_HOST_MODES:
         return json_error(400, "mode must be keep or full")
+    if mode == "keep":
+        refused = _stale_keep_refusal(body)
+        if refused is not None:
+            return refused
     request.app["restart_requested"] = True
     request.app["restart_mode"] = mode
     restart_notice.record_request(via="api")
@@ -1944,6 +1985,7 @@ async def h_restart_request_submit(request: web.Request) -> web.Response:
         return json_error(400, "pty_host must be keep or full")
     record = request.app["restart_gate"].submit(
         session=session, reason=reason or "", pty_host=pty_host,
+        keep_stale=body.get("keep_stale") is True,
     )
     return json_response({"ok": True, "request": record})
 
@@ -1953,7 +1995,20 @@ async def h_restart_request_approve(request: web.Request) -> web.Response:
     and event as ``/api/daemon/restart``, minus one difference the gate owns:
     the request is recorded with the asking session's name, so the successor
     daemon owes that session the account of the boot."""
-    record = request.app["restart_gate"].approve(decided_by="web")
+    body = await _json_body(request)
+    pty_host = body.get("pty_host")
+    if pty_host is not None and pty_host not in restart_gate.PTY_HOST_MODES:
+        return json_error(400, "pty_host must be keep or full")
+    gate = request.app["restart_gate"]
+    try:
+        record = gate.approve(decided_by="web", pty_host=pty_host,
+                              keep_stale=body.get("keep_stale") is True)
+    except restart_gate.StaleHost as exc:
+        # The card offers both answers: "Restart with PTY host" sends
+        # pty_host full, "Keep anyway" sends keep_stale (claunch-xnnct.3).
+        return web.json_response(
+            {"error": str(exc), "stale": exc.check, "hint": host_code.HINT}, status=409,
+        )
     if record is None:
         return json_error(409, "no pending restart request")
     return json_response({"ok": True, "restarting": True, "request": record})

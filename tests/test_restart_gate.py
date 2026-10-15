@@ -96,6 +96,9 @@ class _FakeDaemon:
         self.stop_calls += 1
         return True
 
+    def restart_check(self):
+        return None
+
     def restart(self, **kw):
         self.stop(**kw)
         return self.ensure_running()
@@ -1058,7 +1061,8 @@ def test_a_human_shell_restart_passes_the_mode_on(home, monkeypatch, capsys):
 
     assert cli_sessions._cmd_daemon(_daemon_args()) == 0
     assert cli_sessions._cmd_daemon(_daemon_args(with_pty_host=True)) == 0
-    assert seen == [{"with_pty_host": False}, {"with_pty_host": True}]
+    assert seen == [{"with_pty_host": False, "keep_stale": False},
+                    {"with_pty_host": True, "keep_stale": False}]
     assert "with the PTY host" in capsys.readouterr().out
 
 

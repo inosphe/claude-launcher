@@ -98,6 +98,9 @@ def _connect_pty_host(cfg: dict):
     reached is logged and the daemon spawns its sessions itself, as it does
     with the setting off: the setting must not be a way to start no sessions.
     """
+    from . import host_code
+
+    host_code.configure(bool(cfg.get("pty_host")) and sys.platform != "win32")
     if not cfg.get("pty_host"):
         _end_leftover_pty_host()
         return None
@@ -143,7 +146,17 @@ def _connect_pty_host(cfg: dict):
                           "spawning in the daemon", exc)
             return None
     pty_backend.use_host(client)
-    log.info("sessions run in PTY host pid %s", client.host_pid)
+    log.info("sessions run in PTY host pid %s (code %s)", client.host_pid, client.host_code)
+    state = host_code.info()
+    if state["stale"]:
+        # Same protocol, other bytes: the host kept running across a keep
+        # restart that changed its files (claunch-xnnct.3). It works; it
+        # just runs the old code until a restart with --with-pty-host.
+        log.warning(
+            "PTY host pid %s runs code %s and this daemon loaded %s; it keeps "
+            "running the older code until 'claunch daemon restart --with-pty-host'",
+            client.host_pid, client.host_code or "(none reported)", state["daemon_code"],
+        )
     return client
 
 

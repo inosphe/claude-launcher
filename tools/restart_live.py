@@ -46,9 +46,13 @@ live" is what makes approving it an informed click.
 The restart keeps the sessions that run in the PTY host (claunch-xnnct.1):
 the new daemon adopts them, still running. It adds ``--with-pty-host`` --
 ending them and the host, and relaunching them on a new one -- only when the
-PTY host's own code (:data:`HOST_CODE`) changed between what the live daemon
-serves and ``<branch>``: a kept host would go on running the old code. The
-reason says which of the two it is and why.
+PTY host would go on running other code than the new daemon loads. That is
+the daemon's own answer (``GET /api/daemon/restart-check``, claunch-xnnct.3):
+the code id the running host reported against the files on disk now. Only
+when the daemon cannot answer (none running, or one older than the check)
+does it fall back to comparing :data:`HOST_CODE` between the live daemon's
+recorded HEAD and ``<branch>`` with git. The reason says which of the two it
+is and why.
 
 This file is the one place in the repository that runs ``claunch daemon
 restart`` on a workflow's behalf. It runs as the daemon's child: the v1 and
@@ -111,6 +115,26 @@ def host_code_changed(repo: Path, branch: str, daemon_json: Optional[Path]) -> O
     return [line for line in out.splitlines() if line.strip()]
 
 
+def host_code_stale(check=None) -> Optional[list]:
+    """The daemon's answer to "would a keep restart leave the PTY host on
+    other code": the changed paths when it would, an empty list when it
+    would not (also when no host is connected), None when the daemon cannot
+    say. ``check`` stands in for :func:`daemon_client.restart_check`."""
+    try:
+        if check is None:
+            from claude_launcher import daemon_client
+
+            check = daemon_client.restart_check
+        doc = check()
+    except Exception:  # noqa: BLE001 - best effort; the git diff is the fallback
+        return None
+    if not isinstance(doc, dict) or "stale" not in doc:
+        return None
+    if not doc.get("stale"):
+        return []
+    return list(doc.get("changed") or []) or ["(the PTY host reports no code id)"]
+
+
 #: How many unserved commits the reason lists by name before it counts the rest.
 UNSERVED_SHOWN = 10
 
@@ -137,7 +161,8 @@ def _unserved(repo: Path, branch: str, daemon_json: Optional[Path]) -> list:
 
 def restart_reason(verdict: int, unserved: list, host_changed: Optional[list] = None) -> str:
     """What the approval card shows: why this restart is needed, and what
-    it does with the PTY host (``host_changed``: :func:`host_code_changed`)."""
+    it does with the PTY host (``host_changed``: :func:`host_code_stale`, or
+    :func:`host_code_changed` when the daemon cannot answer)."""
     lines = [_RESTARTING_BECAUSE[verdict]]
     if host_changed:
         lines.append(
@@ -167,7 +192,7 @@ def _restart_command(reason: str = "", *, with_pty_host: bool = False) -> list:
     return command
 
 
-def main(argv: Optional[list] = None, *, run=subprocess.call) -> int:
+def main(argv: Optional[list] = None, *, run=subprocess.call, check=None) -> int:
     ap = argparse.ArgumentParser(
         prog="restart_live",
         description="restart the live daemon if it is serving older code than <branch>",
@@ -192,7 +217,9 @@ def main(argv: Optional[list] = None, *, run=subprocess.call) -> int:
     if verdict == deploy_check.SERVING:
         print("no restart needed: the daemon already serves this code")
         return 0
-    host_changed = host_code_changed(args.repo, args.branch, args.daemon_json)
+    host_changed = host_code_stale(check)
+    if host_changed is None:
+        host_changed = host_code_changed(args.repo, args.branch, args.daemon_json)
     reason = restart_reason(
         verdict, _unserved(args.repo, args.branch, args.daemon_json), host_changed,
     )
