@@ -337,3 +337,33 @@ def test_a_version_1_file_gains_the_nudge_table(tmp_path):
     db.close()
     qa = Q.QaStore(path)
     assert qa.nudge(Q.USER, "s1")["status"] == "sent"
+
+
+def test_every_question_offers_the_fixed_rediscuss_choice(qa):
+    """claunch-rwcnh: the rediscuss choice is the store's, not the session's --
+    offered on every question (with options or without), alone, with a comment."""
+    plain = qa.ask("s1", title="free text")
+    assert plain["options"] == [] and plain["rediscuss"]["label"] == Q.REDISCUSS
+    with pytest.raises(Q.QaError, match="needs a comment"):
+        qa.answer(Q.USER, plain["id"], 1, choices=[Q.REDISCUSS])
+    got = qa.answer(Q.USER, plain["id"], 1, choices=[Q.REDISCUSS], text="ask about the base first")["question"]
+    assert got["status"] == "answered"
+    assert got["answer"]["choices"] == [Q.REDISCUSS] and got["answer"]["rediscuss"] is True
+
+    many = qa.ask("s1", title="many", options=["a", "b"], multi=True)
+    assert [o["label"] for o in many["options"]] == ["a", "b"]   # not stored with the session's
+    with pytest.raises(Q.QaError, match="on its own"):
+        qa.answer(Q.USER, many["id"], 1, choices=["a", Q.REDISCUSS], text="x")
+    normal = qa.answer(Q.USER, many["id"], 1, choices=["a", "b"])["question"]
+    assert normal["answer"]["rediscuss"] is False
+
+
+def test_the_rediscuss_label_is_reserved_and_survives_an_edit(qa):
+    with pytest.raises(Q.QaError, match="reserved"):
+        qa.ask("s1", title="q", options=["a", Q.REDISCUSS])
+    q = qa.ask("s1", title="q", options=["a"])
+    with pytest.raises(Q.QaError, match="reserved"):
+        qa.update("s1", q["id"], 1, options=[{"label": Q.REDISCUSS}])
+    edited = qa.update("s1", q["id"], 1, options=[])
+    assert edited["rediscuss"]["label"] == Q.REDISCUSS
+    assert qa.answer(Q.USER, q["id"], 2, choices=[Q.REDISCUSS], text="why")["question"]["answer"]["rediscuss"]

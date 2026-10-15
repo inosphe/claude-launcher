@@ -96,7 +96,34 @@ def _thread_lines(q: dict) -> list[str]:
             "say so in the thread (thread_reply)."]
 
 
+def rediscuss_text(q: dict, previous: Optional[dict], *, reopened: bool = False) -> str:
+    """The block for an answer that took the fixed rediscuss choice
+    (claunch-rwcnh): the user withdrew the question as asked."""
+    lines = [
+        f"{PREFIX} The user withdrew your question {q['id']} (revision {q['revision']}) and wants to "
+        f"discuss it again -- they chose \"{qa_store.REDISCUSS}\" instead of answering:",
+        _quote(q["title"]),
+        "their comment:",
+        _quote((q["answer"] or {}).get("text") or ""),
+    ]
+    if previous:
+        lines += ["previous answer (replaced):", *_answer_lines(previous)]
+    if reopened:
+        lines.append("You had closed this question; this reopens it.")
+    lines += _thread_lines(q)
+    lines.append(
+        "Do not act on the question as it was asked, and do not take this as a choice among its options. "
+        "Read the comment and rework the question with the user: if it still needs an answer, qa_update "
+        f"it (revision {q['revision']}) into the question the comment calls for -- that asks the user "
+        f"again; if it no longer applies, qa_close it (revision {q['revision']}) with a note replying to "
+        "the comment -- the note is shown to the user in the QA pane."
+    )
+    return "\n".join(lines)
+
+
 def answered_text(q: dict, previous: Optional[dict], *, reopened: bool = False) -> str:
+    if (q.get("answer") or {}).get("rediscuss"):
+        return rediscuss_text(q, previous, reopened=reopened)
     verb = "changed their answer to" if previous else "answered"
     lines = [
         f"{PREFIX} The user {verb} your question {q['id']} (revision {q['revision']}):",

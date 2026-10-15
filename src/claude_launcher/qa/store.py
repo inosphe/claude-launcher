@@ -46,6 +46,15 @@ thread conversation carries that thread's id in ``thread`` (qa_ask
 creation and never changes, so it sits outside the revision protocol: no
 edit moves it and no answer depends on it. That the thread exists and is the
 same session's is the route's check (daemon/qa_api.py).
+
+The fixed rediscuss choice (claunch-rwcnh). Every question offers the user
+one more choice than the session wrote: :data:`REDISCUSS`, "withdraw this
+question and talk it over again", with a comment saying why. It is not in
+the stored ``options`` -- the session never writes it and an edit cannot
+drop it -- so :meth:`QaStore.answer` accepts it on any question, alone and
+only with a comment, and a session may not use its label for an option of
+its own. Rows carry it as ``rediscuss``, and an answer that took it says so
+with ``answer.rediscuss``.
 """
 
 from __future__ import annotations
@@ -70,6 +79,10 @@ MAX_LABEL = 200
 MAX_DESCRIPTION = 1_000
 MAX_ANSWER = 20_000
 MAX_LIVE_PER_SESSION = 50
+
+REDISCUSS = "질문 재논의 (질문 취소)"
+REDISCUSS_DESCRIPTION = "이 질문에는 답하지 않고 취소합니다. 코멘트에 이유나 다시 논의할 내용을 적어 주세요."
+REDISCUSS_OPTION = {"label": REDISCUSS, "description": REDISCUSS_DESCRIPTION}
 
 
 class QaError(Exception):
@@ -192,6 +205,8 @@ def _options(value) -> list[dict]:
         if not isinstance(item, dict):
             raise QaError("each option is a string or {label, description}")
         label = _text(item.get("label"), "option label", MAX_LABEL, required=True)
+        if label == REDISCUSS:
+            raise QaError(f"option {label!r} is reserved: every question already offers it")
         if label in seen:
             raise QaError(f"option {label!r} is listed twice")
         seen.add(label)
@@ -239,12 +254,14 @@ def _row(r: sqlite3.Row) -> dict:
             "at": r["answered_at"],
             "saves": r["answer_saves"],
         }
+        answer["rediscuss"] = answer["choices"] == [REDISCUSS]
     return {
         "id": r["id"],
         "session": r["session"],
         "title": r["title"],
         "body": r["body"],
         "options": json.loads(r["options"]),
+        "rediscuss": dict(REDISCUSS_OPTION),
         "multi": bool(r["multi"]),
         "revision": r["revision"],
         "status": r["status"],
@@ -550,12 +567,17 @@ class QaStore:
             q = self._load(db, qid)
             self._expect(q, revision, actor)
             reopened = q["status"] == "closed"
-            labels = [o["label"] for o in q["options"]]
+            labels = [o["label"] for o in q["options"]] + [REDISCUSS]
             unknown = [c for c in choices if c not in labels]
             if unknown:
                 raise QaError(f"not an option of this question: {', '.join(unknown)}")
             if len(set(choices)) != len(choices):
                 raise QaError("a choice is listed twice")
+            if REDISCUSS in choices:
+                if len(choices) > 1:
+                    raise QaError(f"{REDISCUSS!r} withdraws the question; it is chosen on its own")
+                if not text:
+                    raise QaError(f"{REDISCUSS!r} needs a comment: say why, or what to discuss")
             if len(choices) > 1 and not q["multi"]:
                 raise QaError("this question takes one choice")
             if not text and not choices:

@@ -46,7 +46,9 @@ _REV = {"revision": {"type": "integer", "description": "the question's revision 
 _OPTIONS = {
     "type": "array",
     "description": "choices offered to the user; each a label string or {label, description}. "
-                   "The user may always add free text.",
+                   "The user may always add free text. Every question also offers the fixed choice "
+                   "\"질문 재논의 (질문 취소)\" (withdraw it, with a comment); do not add it yourself -- "
+                   "that label is reserved.",
     "items": {"anyOf": [
         {"type": "string"},
         {"type": "object", "properties": {"label": {"type": "string"}, "description": {"type": "string"}},

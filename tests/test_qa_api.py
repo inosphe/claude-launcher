@@ -310,3 +310,20 @@ def test_deliver_now_leaves_a_notification_that_is_already_being_typed(tmp_path)
         on_done(True)
         assert (await req("GET", "/api/qa?session=s1"))["questions"][0]["delivery"]["state"] == "delivered"
     run(tmp_path, scenario)
+
+
+def test_a_rediscuss_answer_is_delivered_as_a_withdrawn_question(tmp_path):
+    async def scenario(req, mgr):
+        q = (await req("POST", "/api/qa", {"session": "s1", "title": "Ship it?",
+                                           "options": ["yes", "no"]}))["question"]
+        assert q["rediscuss"]["label"] == Q.REDISCUSS
+        await req("POST", f"/api/qa/{q['id']}/answer", {"revision": 1, "choices": [Q.REDISCUSS]}, status=400)
+        await req("POST", f"/api/qa/{q['id']}/answer",
+                  {"revision": 1, "choices": [Q.REDISCUSS], "text": "split it into two questions"})
+        block = mgr.sessions["s1"].delivered[-1]
+        assert block.startswith(qa_api.PREFIX)
+        assert "withdrew your question" in block and "Ship it?" in block
+        assert "> split it into two questions" in block
+        assert "Do not act on the question as it was asked" in block and "qa_update" in block
+        assert "answered your question" not in block
+    run(tmp_path, scenario)

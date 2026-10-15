@@ -112,7 +112,7 @@ function q(over = {}) {
     const card = host.querySelector(".qa-card");
     assert.ok(card, "a card per question");
     assert.ok(card.textContent.includes("Which base?"));
-    assert.equal(card.querySelectorAll("input").length, 2, "one radio per option");
+    assert.equal(card.querySelectorAll("input").length, 3, "one radio per option, plus the fixed rediscuss one");
     const [master] = card.querySelectorAll("input");
     master.checked = true; master.fire("change");
     const ta = card.querySelector("textarea");
@@ -145,6 +145,42 @@ function q(over = {}) {
     assert.equal(h.posts[1].body.revision, 2);
     assert.ok(host.textContent.includes("세션에 전달됨"));
     assert.equal(changed, 1, "a save refreshes the header's light");
+    h.pane.unmount();
+  }
+
+  /* --- the fixed rediscuss choice (claunch-rwcnh) ------------------------ */
+  {
+    const h = paneHarness();
+    h.setList({ session: "s1", unresolved: 2, agent_seq: 3, questions: [
+      q({ options: [], rediscuss: { label: "질문 재논의 (질문 취소)", description: "d" } }),
+      q({ id: "qa-2", multi: true, options: [{ label: "a" }, { label: "b" }] }),
+    ] });
+    const host = new N("div");
+    h.pane.mount(host, "s1", { api: h.api });
+    await tick();
+    const [plain, multi] = host.querySelectorAll(".qa-card");
+    const only = plain.querySelectorAll("input");
+    assert.equal(only.length, 1, "a question without options still offers the fixed choice");
+    assert.ok(plain.textContent.includes("질문 재논의 (질문 취소)"));
+    only[0].checked = true; only[0].fire("change");
+    const ta = plain.querySelector("textarea");
+    assert.ok(ta.placeholder.includes("코멘트 (필수)"), "choosing it asks for the comment");
+    ta.value = "ask me later"; ta.fire("input");
+    h.reply(() => ({ status: 200, doc: { delivered: true, previous: null, question: q({ options: [] }) } }));
+    plain.querySelector(".qa-save").fire("click");
+    await tick();
+    assert.deepEqual(h.posts[0].body, { revision: 1, text: "ask me later", choices: ["질문 재논의 (질문 취소)"] });
+
+    // On a multi question it is exclusive: it clears the boxes, and a box clears it.
+    const [a, b, fixed] = multi.querySelectorAll("input");
+    assert.equal(fixed.type, "radio");
+    assert.equal(fixed.value, "질문 재논의 (질문 취소)", "the built-in label when the row carries none");
+    a.checked = true; a.fire("change");
+    b.checked = true; b.fire("change");
+    fixed.checked = true; fixed.fire("change");
+    assert.ok(!a.checked && !b.checked && fixed.checked);
+    a.checked = true; a.fire("change");
+    assert.ok(a.checked && !fixed.checked);
     h.pane.unmount();
   }
 
