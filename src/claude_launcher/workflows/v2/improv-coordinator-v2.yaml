@@ -1,0 +1,398 @@
+cflow: 2
+name: improv-coordinator-v2
+description: >-
+  사용자와 요구사항을 지속적으로 조율하고 일감별 담당 세션을 운영한다.
+  일감마다 group 멤버와 beads 이슈를 유지하며 조사·위임·재지시·검토를 병행한다.
+  필요한 구현은 부모가 직접 수행할 수 있고, 구현의 최종 검증·착지는
+  improv-worker-v2에 인계한다. 사용자가 접수를 종료하고 모든 일감이 정산되어야 끝난다.
+include: [ask-common]
+filter_roles: {type: whitelist, roles: [worker]}
+default_child_cflow: improv-worker-v2
+max_visits: 0
+
+inputs:
+  goal:
+    type: text
+    label: 조율할 목표
+    default: ""
+  issue:
+    type: string
+    label: 상위 beads 이슈
+    default: ""
+    set_by: [agent]
+  scope:
+    type: list
+    label: 범위
+  invariants:
+    type: invariants
+    label: 불변식
+  acceptance:
+    type: acceptance
+    label: 완료 기준
+
+# 진행 인덱스다. 목표·범위·담당자·완료 근거의 정본은 각 보드의 이슈다.
+# 같은 id가 다른 보드에 존재할 수 있으므로 정규화된 저장소 경로와 id를 함께 쓴다.
+collections:
+  jobs:
+    kind: queue
+    key: key
+    item: {key: str, board: str, issue: str, owner: "str?", evidence: "str?"}
+    status:
+      values: [active, done, deferred]
+      initial: active
+      settled: [done, deferred]
+    access: {push: [driver], set: [driver], remove: []}
+  registered:
+    kind: log
+    item: {name: str}
+    access: {push: [driver]}
+  direct:
+    kind: queue
+    key: slot
+    item: {slot: str, issue: str, board: str}
+    status: {values: [busy], initial: busy}
+    access: {push: [driver], remove: [driver]}
+
+rules:
+  issue-isolation:
+    text: |
+      각 멤버의 일감은 params.board + params.issue다. 다른 멤버의 이슈나 세션 전체
+      assignee 목록을 그 일감으로 취급하지 않는다. 보드 명령은 해당 저장소를 cwd로
+      한 claunch beads이고 조회는 --json이다. 이슈의 범위·담당자·판정은 보드에,
+      메시지는 이슈와 코멘트 위치를 가리키는 짧은 지시로 남긴다.
+      같은 일감의 변경은 기존 멤버에 반영한다. 독립 후속 작업만 새 이슈와 멤버로
+      추가한다. 종료된 이슈의 후속 요구도 새 이슈로 연결한다.
+      병렬 멤버에서 bind나 공유 data.claim을 쓰지 않는다. 식은 params와 자기
+      작업이 떠나는 순간의 결과만 읽고, 지속 상태는 jobs의 해당 key에 저장한다.
+    deliver: all
+  integration-authority:
+    text: |
+      이 부모 런은 master를 머지하거나 자식의 사용자 게이트를 대신 승인하지 않는다.
+      구현·테스트·리뷰·착지는 improv-worker-v2와 해당 저장소 리더의 절차를 따른다.
+      부모가 직접 구현한 변경도 커밋·증거와 함께 워커에 인계한다. 부모의 작업
+      브랜치를 자동으로 완료·착지 처리하지 않는다. 실행 중인 서비스에 영향을 주는
+      반영·재시작 시점은 사용자와 확인한 운영 조건에 따른다.
+    deliver: all
+    effect: {deny: git.merge, target: master}
+
+nodes:
+  align:
+    title: 목표와 조율 범위 확인
+    prompt: |
+      목표 ${data.inputs.goal}, 상위 이슈 ${data.inputs.issue}, 범위 ${data.inputs.scope}를
+      읽는다. 이슈가 비었으면 오프닝 지시대로 기존 이슈를 확인하거나 사용자와 정하고
+      flow_input으로 채운다. 보드를 임의로 순회해 다른 일감을 시작하지 않는다.
+      사용자와 목표·제외 범위·확인할 결과·위임 가능한 범위를 맞춘다. 이미 승인한
+      내용을 다시 묻지 않는다. 미확정 제품 판단만 질문하고 조사·구체화는 계속한다.
+      상위 이슈에 합의와 미확정 사항을 기록하고 in_progress로 맡는다.
+      부모는 조율·위임을 기본으로 하며 필요하면 직접 조사하거나 구현한다.
+    done_when: 상위 이슈에 합의한 목표·범위·완료 기준과 미확정 사항이 있다.
+    verify: claunch cflow2 coordinator-check --parent
+    effects: [fs.read, board.write]
+  coordinate:
+    title: 사용자 조율과 일감 접수
+    prompt: |
+      대화·보드·자식 보고를 받아 목표와 진행 상황을 사용자 관점에서 설명한다.
+      멤버 작업은 이 작업과 병행한다. 사건이 없으면 턴을 끝내고 입력을 기다린다.
+      새 일감은 중복을 검색하고 이슈를 만든 뒤 flow_fork(group: jobs,
+      with: {board: <저장소의 절대 정규 경로>, issue: <id>, key: <board>#<id>})로 추가한다.
+      같은 저장소의 분할 일감은 상위 이슈의 자식으로 둔다. 다른 보드에는 각 보드의
+      이슈를 만들고 양쪽에 저장소·이슈 참조를 남긴다. 다른 보드 id로 dep를 만들지 않는다.
+      일감당 멤버 하나다. 기존 멤버의 작업 instance를 지정해 보고·선택한다.
+      요구사항이 바뀌면 영향받는 이슈에 변경 내용과 기존 작업 처분을 먼저 기록하고
+      해당 담당자에게 재지시한다. 자식에게 들어온 사용자 직접 지시도 읽어 반영한다.
+      진행 중인 일을 무시한 새 명세나 완료 보고를 내지 않는다.
+      자식 결과를 기다리는 동안 다른 멤버와 사용자 조율을 진행한다. child가 종료되면
+      보드·브랜치·런 상태를 읽고 담당자 재배정 여부를 판단한다. 침묵만으로 실패 판정하지 않는다.
+      사용자 종료 요청이 있을 때만 이 작업을 보고한다. 큐가 잠시 비어도 끝내지 않는다.
+      접수 중 일감은 최대 128개다(완료 멤버 포함). 상한 전에 사용자와 정산하고 새 런으로
+      이어갈 수 있다. 런을 강제로 교체해 진행 중 멤버를 버리지 않는다.
+    done_when: 사용자의 접수 종료 요청과 모든 요청의 이슈·멤버 대응이 기록되어 있다.
+    returns:
+      ok: {stop_request: str}
+    effects: [fs.read, board.write, mesh.send]
+  summary:
+    title: 종료 전 정산 보고
+    prompt: |
+      모든 멤버가 합류했다. jobs의 각 항목을 해당 보드와 대조한다: ${col.jobs}
+      완료 이슈, 사용자가 보류를 승인한 이슈, 담당자·후속 실행 방법을 상위 이슈에
+      기록하고 사용자에게 보고한다. failed 멤버나 active 항목이 있으면 완료로 바꾸지
+      않는다. 보드 장애도 완료로 처리하지 않는다. 사용자에게 미해결 상태와 복구 방법을 알린다.
+      자식 세션은 결과와 남은 일감을 확인한 뒤 mesh 절차에 따라 정리한다.
+      상위 이슈는 구현 착지를 대신하는 이슈가 아니라 조율 작업의 기록이다.
+      종료 확인 전에는 상위 이슈를 닫지 않는다.
+    done_when: 모든 일감의 실제 완료 또는 사용자 승인 보류 근거가 상위 이슈에 기록되었다.
+    verify: claunch cflow2 coordinator-check --settled
+    effects: [fs.read, board.write, mesh.send]
+  finish:
+    title: 조율 종료 기록
+    prompt: |
+      사용자가 정산 결과를 확인하고 종료를 선택했다. 상위 조율 이슈에 종료 결정과
+      결과 위치를 기록하고 그 조율 이슈만 닫는다. 보류한 자식 이슈는 열린 채 유지하고
+      보류 이유·후속 담당자·재개 조건을 남긴다. 다른 세션의 이슈를 대신 닫지 않는다.
+    done_when: 상위 이슈에 사용자 종료 결정과 결과·보류 목록이 있고 조율 작업이 닫혔다.
+    effects: [board.write]
+  wait-finish:
+    title: 종료 판단 보류
+    prompt: 사용자가 종료 판단을 보류했다. 사용자와 남은 판단을 논의하고, 종료를 다시 검토하라는 요청을 받을 때 보고한다.
+    done_when: 사용자가 종료 여부를 다시 검토하도록 요청했다.
+    effects: [fs.read]
+  final-check:
+    title: 종료 직전 상태 재확인
+    prompt: 종료 승인 대기 중 이슈가 재오픈되거나 보드에 접근할 수 없게 되었는지 확인한다. 통과 전에는 상위 이슈를 닫지 않는다.
+    done_when: 승인 뒤에도 모든 일감의 정산 상태가 유지된다.
+    verify: claunch cflow2 coordinator-check --settled
+    effects: [fs.read]
+
+procedures:
+  coordinate-issue:
+    params:
+      key: {type: str, required: true}
+      board: {type: str, required: true}
+      issue: {type: str, required: true}
+    nodes:
+      register:
+        title: 일감 등록과 규격 확인
+        prompt: |
+          ${params.board}에서 claunch beads show ${params.issue} --json으로 읽는다.
+          board는 실제 beads 보드 루트의 절대 정규 경로여야 한다. 워크트리 경로는 쓰지 않는다. 목표·범위·완료 기준과
+          사용자 지시를 확인한다. 기존 assignee가 살아 있으면 소유권을 가져오지 않는다.
+          담당 세션과 질문·완료 보고 채널을 확인하고 결정 근거를 이슈에 기록한다.
+        verify: claunch cflow2 coordinator-check --exists --key "$CFLOW_IN_KEY" --board "$CFLOW_IN_BOARD" --issue "$CFLOW_IN_ISSUE"
+        done_when: 이슈와 작업 범위·완료 기준·기존 담당자가 확인되었다.
+        effects: [fs.read, board.write]
+        do:
+          - at: enter
+            push:
+              to: registered
+              item: {name: "$params.key"}
+          - at: enter
+            push:
+              to: jobs
+              item: {key: "$params.key", board: "$params.board", issue: "$params.issue"}
+      investigate:
+        title: 일감 조사와 요구 구체화
+        prompt: |
+          ${params.board}의 ${params.issue}에 필요한 조사·설계·사용자 조율을 수행한다.
+          근거와 남은 결정을 보드에 적는다. 다른 멤버가 대기 중이어도 이 조사와
+          사용자 대화는 진행할 수 있다. 제품 판단은 사용자에게 묻고 임의로 확정하지 않는다.
+        done_when: 조사 결과·결정 근거·다음 행동이 해당 이슈에 기록되었다.
+        effects: [fs.read, board.write]
+      assign:
+        title: 담당 워커 배정 또는 재지시
+        prompt: |
+          ${params.board}의 ${params.issue}를 담당 워커에게 배정하거나 기존 담당자에게
+          구체적인 다음 작업을 보낸다. 먼저 children과 실제 런 상태를 확인한다.
+          새 구현 자식은 issue를 명시하고 세션 접두사의 별도 worktree를 준다.
+          기본 workflow는 improv-worker-v2다. 같은 영역의 살아 있는 자식은 가능한 한
+          재사용하되, 종료 단계에 들어간 런이 새 큐를 읽는다고 가정하지 않는다.
+          다른 저장소면 spawn이 그 저장소를 선택할 수 있는지 확인하고 올바른 cwd·보드로
+          생성한다. 불가능하면 사용자에게 필요한 세션 생성을 요청한다.
+          통합 대상과 구현 담당은 별도로 정한다. 독립 변경은 relation: independent로
+          해당 저장소 리더에게 착지한다. 아직 착지되지 않은 변경에 의존하면 그 변경을
+          소유한 워커가 stacked 자식을 두도록 요청한다. coordinator를 스택 통합 대상으로
+          지정하지 않는다. 기존 워커의 stack-v2가 그 통합을 처리한다.
+          부모가 직접 만든 커밋이 있으면 이슈의 DIRECT 코멘트에 있는 브랜치·base·tip·
+          테스트를 전달한다. 자식의 새 회차 브랜치에 해당 커밋 범위를 명시적으로 가져와
+          검증·리뷰·착지를 진행하도록 한다. rebase_onto만 주고 커밋이 보존된다고 가정하지
+          않는다. 원본 브랜치는 완료 확인 전까지 유지한다. 직접 작업은 재구현하지 않는다.
+          규격·변경 가능 경로·완료 근거·반영 시점·보고 대상·질문 채널을 보드에 남긴다.
+          부모는 제품 적합성을 검토하며, 자식의 동료 리뷰와 사용자 승인 절차는 유지한다.
+        done_when: 담당자가 이 이슈의 규격과 완료·질문 경로를 받았고 세션 id가 보고에 있다.
+        returns:
+          ok: {owner: str, evidence: str}
+        effects: [session.spawn, board.write, mesh.send]
+        do:
+          - when: "$outcome == 'ok'"
+            set:
+              in: jobs
+              key: "$params.key"
+              fields: {owner: "$result.assign.value.owner", evidence: "$result.assign.value.evidence"}
+      direct-prepare:
+        title: 직접 구현 위치 확인
+        prompt: |
+          ${params.board} / ${params.issue}를 직접 구현하기 전에 현재 체크아웃과
+          같은 저장소인지, 미커밋 변경이 없는지 확인한다. 다른 저장소라면 직접
+          변경하지 않고 fail로 보고해 워커 위임을 선택한다.
+        done_when: 현재 체크아웃이 같은 저장소이고 기존 변경이 없다.
+        verify: claunch cflow2 coordinator-check --direct-ready
+        effects: [fs.read]
+        do:
+          - at: enter
+            push: {to: direct, item: {slot: "'checkout'", issue: "$params.issue", board: "$params.board"}}
+          - when: "$outcome == 'fail'"
+            remove: {in: direct, key: "'checkout'"}
+      direct-work:
+        title: 부모의 직접 구현
+        prompt: |
+          ${params.board}의 ${params.issue} 범위만 직접 구현한다. 부모의 전용 체크아웃에서
+          일감별 세션 접두사 피처 브랜치를 만든다. 이전 일감의 미커밋 변경이 있으면
+          중단하고 소유권을 확인한다. master/main에서 작업하지 않는다.
+          다른 저장소의 직접 구현은 이 옵션으로 하지 않는다. 그 저장소의 워커에 위임한다.
+          적절한 표적 테스트와 커밋을 수행하고 이슈에 DIRECT: base, branch, tip,
+          변경 파일, 테스트 명령·수치·트리, 남은 문제를 기록한다. 커밋은 commit-stamp를 따른다.
+          이 작업은 직접 구현 슬롯을 점유한다. 다른 멤버는 조사·위임·검토를 진행할 수
+          있지만 같은 체크아웃에 쓰지 않는다. 새 자식을 이 브랜치에 동시에 쓰게 하지 않는다.
+          끝나면 assign이 워커에게 이 커밋의 검증·리뷰·착지를 맡긴다.
+        done_when: 변경이 커밋되어 작업 트리가 깨끗하고 DIRECT 코멘트에 인계 증거가 있다.
+        verify: claunch cflow2 coordinator-check --direct-clean
+        effects: [fs.write, git.branch, git.commit, test.run, board.write]
+        do:
+          - when: "$outcome == 'ok'"
+            remove: {in: direct, key: "'checkout'"}
+      direct-recover:
+        title: 직접 작업 실패 정리
+        prompt: |
+          ${params.issue} 직접 작업이 실패했다. 변경과 원인을 보드에 남기고 커밋하거나
+          사용자와 복구 방법을 정한다. 다른 일감이 사용할 수 있도록 전용 체크아웃이
+          깨끗해질 때까지 직접 구현 슬롯을 유지한다. 변경을 버려서 검사를 통과하지 않는다.
+        done_when: 미커밋 변경의 소유권과 보존 위치가 기록되고 체크아웃이 깨끗하다.
+        verify: claunch cflow2 coordinator-check --direct-clean
+        effects: [fs.write, git.commit, board.write]
+        do:
+          - when: "$outcome == 'ok'"
+            remove: {in: direct, key: "'checkout'"}
+      review-result:
+        title: 결과 확인과 재지시
+        prompt: |
+          ${params.board}의 ${params.issue}에서 변경·테스트·착지 근거와 현재 사용자 요구를
+          대조한다. 전달된 요약만으로 완료 판정하지 않는다. 부족한 부분은 구체적으로
+          보드에 기록하고 담당 워커에 재지시한다. 범위 변경은 기존 작업 처분도 명시한다.
+          완료 보고가 와도 실제 보드·Git·제품 동작을 확인한다. 반영 시점이 사용자 운영에
+          영향을 주면 그 조건을 확인한다. 별도 후속 작업은 새 이슈로 coordinate에 전달한다.
+        done_when: 해당 일감의 검토 결과와 재작업 또는 완료 근거가 보드에 있다.
+        effects: [fs.read, board.write, mesh.send]
+      recover:
+        title: 일감 진행 실패 확인
+        prompt: |
+          ${params.board} / ${params.issue}의 직전 작업이 실패했다. 실제 보드·런·
+          브랜치 상태와 오류를 확인해 이슈에 기록한다. 다음 선택에서 조사·재배정·
+          재검토 또는 사용자 승인 보류로 이어간다. 실패를 완료로 바꾸지 않는다.
+          직접 구현 슬롯이 남아 있으면 이 일감의 recover-direct로 먼저 보존·복구한다.
+        done_when: 실패 근거와 복구에 필요한 다음 행동이 해당 이슈에 기록되었다.
+        effects: [fs.read, board.write]
+      closed:
+        title: 이슈 완료 확인
+        prompt: |
+          ${params.board}의 ${params.issue}가 담당자의 절차에 따라 닫혔는지 확인한다.
+          조사 전용 일감은 합의한 산출물과 완료 기준으로 정산한다. 구현 일감은
+          워커의 검증·리뷰·착지 근거를 확인한다. 이 단계에서 남의 이슈를 대신 닫지 않는다.
+        done_when: 이슈가 실제 closed이고 현재 요구의 완료 근거가 보드에 있다.
+        verify: claunch cflow2 coordinator-check --board "$CFLOW_IN_BOARD" --issue "$CFLOW_IN_ISSUE"
+        effects: [fs.read]
+        do:
+          - when: "$outcome == 'ok'"
+            set: {in: jobs, key: "$params.key", fields: {status: "'done'"}}
+      deferred:
+        title: 승인된 보류 기록
+        prompt: |
+          사용자가 ${params.issue}의 보류를 승인했다. 보드에 결정·이유·미완료 범위·
+          담당자·재개 조건을 남기고 담당 세션에 알린다. 이슈를 완료로 닫지 않는다.
+        done_when: 사용자 보류 결정과 재개 조건이 해당 이슈에 기록되었다.
+        effects: [board.write, mesh.send]
+        do:
+          - when: "$outcome == 'ok'"
+            set: {in: jobs, key: "$params.key", fields: {status: "'deferred'"}}
+    body:
+      - cond:
+          - if: "fresh('registered', $params.key)"
+            then: {return: ok}
+          - else: register
+      - id: issue-loop
+        loop:
+          while: "true"
+          max: 500
+          do:
+            try:
+              id: issue-action
+              choose:
+                chooser: agent
+                require_reason: true
+                prompt: |
+                  ${params.board} / ${params.issue}의 다음 행동을 현재 보드와 수신으로 고른다.
+                  사건이 없으면 선택하지 않고 입력을 기다린다. 직접 구현 슬롯이 사용 중이면
+                  다른 멤버의 직접 작업을 진행하지 않는다. 보류는 사용자에게 묻고,
+                  완료는 closed 단계의 보드 검사와 검토 결과를 모두 충족해야 한다.
+                options:
+                  investigate: {description: 조사·설계·요구사항을 구체화한다, then: investigate}
+                  assign: {description: 워커를 배정하거나 기존 담당자에게 재지시한다, then: assign}
+                  direct:
+                    description: 부모 체크아웃에서 직접 구현하고 워커에 검증·착지를 인계한다
+                    when: "count('direct', 'busy') == 0"
+                    then:
+                      - direct-prepare
+                      - try: direct-work
+                        catch:
+                          fail: [direct-recover, {continue: issue-loop}]
+                      - assign
+                  recover-direct:
+                    description: 이 일감이 점유한 직접 구현 체크아웃을 복구한다
+                    when: >-
+                      count('direct', 'busy') > 0
+                      and items('direct')[0].issue == $params.issue
+                      and items('direct')[0].board == $params.board
+                    then: direct-recover
+                  review: {description: 실제 결과를 확인하고 부족한 부분을 재지시한다, then: review-result}
+                  complete:
+                    description: 검토하고 보드의 실제 완료를 확인한다
+                    then: [review-result, closed, {break: issue-loop}]
+                  defer:
+                    description: 사용자에게 이 일감의 보류 여부를 묻는다
+                    then:
+                      call: ask-user
+                      with:
+                        topic: 이 일감을 보류하고 정산할지 결정한다. defer는 미완료 상태와 재개 조건을 보드에 남기고, continue는 계속 진행한다.
+                        context: "$params.key"
+                      cases:
+                        defer: [deferred, {break: issue-loop}]
+                        continue: []
+            catch:
+              fail: recover
+
+body:
+  - align
+  - id: coordination
+    group:
+      name: jobs
+      run: coordinate-issue
+      limit: 128
+      settle: allSettled
+      do:
+        id: intake-loop
+        loop:
+          while: "true"
+          max: 500
+          do:
+            - coordinate
+            - id: stop-intake
+              choose:
+                chooser: user
+                prompt: |
+                  사용자의 접수 종료 요청을 확인한다. 현재 일감은 jobs 목록에서 확인한다.
+                  1. 종료 준비: 새 접수를 멈추고 진행 중인 일감의 완료·승인된 보류를 기다린다.
+                     미해결 일감이 있으면 종료가 지연되며, 이후 새 접수는 새 런에서 한다.
+                  2. 계속 접수: 조율과 새 일감 접수를 계속한다. 추가 실행 시간이 필요하다.
+                options:
+                  drain: {description: 새 접수를 종료하고 일감을 정산한다, then: {break: intake-loop}}
+                  continue: {description: 사용자 조율과 접수를 계속한다, then: []}
+  - summary
+  - id: finish-loop
+    loop:
+      while: "true"
+      max: 500
+      do:
+        id: finish-decision
+        call: ask-user
+        with:
+          topic: 조율 결과를 확인하고 종료할지 결정한다. finish는 정산 결과를 확정하고 종료하며, hold는 종료를 보류한다. 후속 작업은 새 이슈와 런으로 연결한다.
+          context: "$data.inputs.issue"
+        cases:
+          finish: [final-check, finish, {break: finish-loop}]
+          hold: wait-finish
+
+spec:
+  invariants:
+    no-master-merge: {never_effect: git.merge, target: master}
+  paths:
+    settlement-before-finish: {to: finish, must_pass: [summary]}
+    fresh-settlement-before-finish: {to: finish, must_pass: [final-check]}
