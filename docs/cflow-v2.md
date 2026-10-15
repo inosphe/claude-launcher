@@ -628,8 +628,8 @@ v1 `checklist:`의 대응:
 결과를 verify가 읽을 길이 없었다(claunch-6xg).
 wait·모니터의 `probe`는 데몬의 시계가 실행하므로, 엔진이 `CLAUNCH_SESSION`을 런의
 driver로 덮어 싣는다(driver가 없으면 scope, 관리되지 않는 런이면 빈 값). 데몬
-프로세스의 `CLAUNCH_SESSION`은 데몬을 띄운 터미널의 세션 하나이고, 그 이름을
-물려받은 `landed_check`는 남의 체크아웃이나 master 위의 런 cwd를 재서 착지한 tip에
+프로세스의 `CLAUNCH_SESSION`은 데몬을 띄운 터미널의 세션 하나였고(claunch-2yiij
+이후로는 비어 있다), 그 이름을 물려받은 `landed_check`는 남의 체크아웃이나 master 위의 런 cwd를 재서 착지한 tip에
 판정 불가(exit 2)를 냈다(claunch-4zc51.1.4, v1은 claunch-04ru). 판정 불가가 되면
 저널 `probe_undecided`에 프로브 출력의 끝부분이 함께 남는다.
 예: improv-worker-v2의 착지 대기는 값 없는 `--landing`으로 `landed_check`가

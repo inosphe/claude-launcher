@@ -289,7 +289,7 @@ import 가 중간에 멈추면 409 에 그때까지의 `log` 와 `resumable: tru
 
 | 항목 | 동작 |
 |---|---|
-| 보드 위치 | 명세의 `workspace`(등록 워크스페이스 이름)가 가리키는 디렉터리. CLI 는 없으면 현재 디렉터리를 쓴다. 웹 경로는 바디의 `workspace` 를 쓰고, 둘 다 없으면 거절한다(데몬의 현재 디렉터리는 데몬을 띄운 셸의 위치이고 데몬은 모든 프로젝트를 다루므로 기본값으로 쓰지 않는다). `file` 참고 자료도 이 디렉터리 기준이다. 웹 경로에서 고른 `workspace` 는 spawn 되는 세션의 워크스페이스로도 쓰인다 |
+| 보드 위치 | 명세의 `workspace`(등록 워크스페이스 이름)가 가리키는 디렉터리. CLI 는 없으면 현재 디렉터리를 쓴다. 웹 경로는 바디의 `workspace` 를 쓰고, 둘 다 없으면 거절한다(데몬의 현재 디렉터리는 데몬을 띄운 셸이 속한 저장소의 메인 체크아웃, 저장소 밖이면 홈 디렉터리이고(`daemon_client.daemon_cwd`, claunch-2yiij.1) 데몬은 모든 프로젝트를 다루므로 기본값으로 쓰지 않는다). `file` 참고 자료도 이 디렉터리 기준이다. 웹 경로에서 고른 `workspace` 는 spawn 되는 세션의 워크스페이스로도 쓰인다 |
 | 보드 쓰기 | `claunch beads create/dep add/comments add/update` 를 하위 프로세스로 실행한다 |
 | 이슈 본문 | `## 목표 / ## 범위 / ## 완료 증거 기준` 뒤에 참고 자료(epic 은 전부), 계약 doc 이슈 id, gds6 필드(`rule_ids`·`size`·`changes`·`contract`), 사람 몫, 미결 결정, `## 출처` 를 붙인다 |
 | own 리더 | `POST /api/sessions` 로 만드는 최상위 세션이다. 세션에는 profile 이 필요하므로 `--profile` 이 없으면 거절한다. 리더 세션에는 이슈를 만들지 않는다(`beads: false`) |
