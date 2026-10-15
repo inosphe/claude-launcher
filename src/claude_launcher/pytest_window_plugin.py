@@ -30,9 +30,10 @@ from . import test_window
 
 PLUGIN_ENV = "CLAUNCH_WINDOW_PLUGIN"
 
-_grant = None
-_report_id = None
-_started = 0.0
+#: Per-config state. A pytester run inside a test loads this same module for
+#: a second config; module globals would let that inner run release and
+#: report the outer run's grant (claunch-ersj2, found by s737-rev).
+_STATE = pytest.StashKey[dict]()
 
 
 def _switched_off() -> bool:
@@ -48,37 +49,38 @@ def window_class(args) -> str:
 
 
 def pytest_sessionstart(session):
-    global _grant, _report_id, _started
     if _switched_off() or os.environ.get("PYTEST_XDIST_WORKER"):
         return
-    _started = time.monotonic()
     config = session.config
+    state = config.stash[_STATE] = {"grant": None, "report": None,
+                                    "started": time.monotonic()}
     # Only the direct child of a grant owner (``claunch window run``) reports
     # into that grant; a conftest that took the window popped this already.
     reporter = os.environ.pop(test_window.WINDOW_REPORT_ENV, None) == "1"
     inherited = test_window.inherited_grant()
     if inherited is not None:
         test_window.clamp_xdist_width(config.option, inherited.advisory_n)
-        _report_id = inherited.grant_id if reporter else None
+        state["report"] = inherited.grant_id if reporter else None
         return
     if not os.environ.get("CLAUNCH_SESSION"):
         return
     try:
-        _grant = test_window.acquire(
+        grant = test_window.acquire(
             window_class(config.args),
             label="pytest " + " ".join(str(a) for a in config.args),
             workers=test_window.requested_xdist_width(config.option),
         )
     except test_window.WindowUnavailable as exc:
         raise pytest.UsageError(str(exc)) from exc
-    _grant.install_environment()
-    test_window.clamp_xdist_width(config.option, _grant.advisory_n)
-    _report_id = _grant.grant_id
+    grant.install_environment()
+    test_window.clamp_xdist_width(config.option, grant.advisory_n)
+    state["grant"] = grant
+    state["report"] = grant.grant_id
 
 
-def _release() -> None:
-    global _grant
-    grant, _grant = _grant, None
+def _release(config) -> None:
+    state = config.stash.get(_STATE, None)
+    grant = state and state.pop("grant", None)
     if grant is None:
         return
     grant.release()
@@ -89,18 +91,18 @@ def _release() -> None:
 
 
 def pytest_sessionfinish(session, exitstatus):
-    global _report_id
-    grant_id, _report_id = _report_id, None
+    state = session.config.stash.get(_STATE, None)
+    grant_id = state and state.pop("report", None)
     if test_window.reportable(grant_id):
         reporter = session.config.pluginmanager.get_plugin("terminalreporter")
         test_window.report_result(grant_id, test_window.pytest_result(
             exitstatus,
             getattr(reporter, "stats", {}) or {},
             getattr(session, "testscollected", 0),
-            time.monotonic() - _started,
+            time.monotonic() - state["started"],
         ))
-    _release()
+    _release(session.config)
 
 
 def pytest_unconfigure(config):
-    _release()
+    _release(config)

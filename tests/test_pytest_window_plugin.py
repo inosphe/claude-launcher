@@ -24,6 +24,7 @@ class _Config:
         self.args = args
         self.option = argparse.Namespace(numprocesses=None, tx=[], dist="no")
         self.pluginmanager = self
+        self.stash = pytest.Stash()
 
     def get_plugin(self, name):
         return argparse.Namespace(stats={"passed": [1, 2]})
@@ -41,8 +42,6 @@ def window(monkeypatch):
     for name in _GRANT_VARS + (plugin.PLUGIN_ENV, "PYTEST_XDIST_WORKER"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("CLAUNCH_SESSION", "s1")
-    monkeypatch.setattr(plugin, "_grant", None)
-    monkeypatch.setattr(plugin, "_report_id", None)
     calls = {"acquire": [], "release": [], "report": []}
 
     def acquire(cls, label=None, workers=None):
@@ -134,3 +133,21 @@ def test_a_refused_window_stops_the_run(window, monkeypatch):
     monkeypatch.setattr(test_window, "acquire", refuse)
     with pytest.raises(pytest.UsageError, match="not granted"):
         plugin.pytest_sessionstart(_Session(["tests/test_x.py"]))
+
+
+def test_an_in_process_nested_run_leaves_the_outer_grant_alone(window):
+    # s737-rev on claunch-ersj2: pytester.runpytest() in a repository where
+    # this plugin holds the window loads the same module for a second config.
+    outer = _Session(["tests/test_x.py"])
+    plugin.pytest_sessionstart(outer)
+
+    inner = _Session(["test_inner.py"])
+    plugin.pytest_sessionstart(inner)
+    plugin.pytest_sessionfinish(inner, 0)
+    plugin.pytest_unconfigure(inner.config)
+    assert window["release"] == [] and window["report"] == []
+    assert test_window.inherited_grant().grant_id == "g1"
+
+    plugin.pytest_sessionfinish(outer, 0)
+    assert window["release"] == ["g1"]
+    assert [gid for gid, _ in window["report"]] == ["g1"]
