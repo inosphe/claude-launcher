@@ -5015,6 +5015,30 @@ another instance) does not try to bind the port the running instance holds.
 The instance's own daemon started from such a shell reads the port from its
 manifest.
 
+### WSL: hiding reg.exe from sessions
+
+`daemon.wsl_hide_reg_exe` (Settings ▸ General, "Hide reg.exe from new
+sessions"; off by default) is needed only when the daemon runs under WSL.
+Claude Code runs `/mnt/c/Windows/System32/reg.exe` twice on every launch to
+look for a Windows registry policy. WSL 2.7.11's `wslhost.exe` occasionally
+leaves a thread running a host CPU core at 100% after such a call, and those
+threads stay until `wsl --shutdown`; a daemon that starts and restarts many
+sessions collects them.
+
+When on, each new session starts in a private user and mount namespace in
+which `reg.exe` is replaced by a script that exits 1 (what `reg.exe query`
+answers for a missing key), so no Windows process is started. The setting is
+read at each spawn; running sessions are unchanged. In those sessions:
+
+- `sudo` does not work: only the session's own uid is mapped in the
+  namespace, so root-owned files such as `/etc/sudo.conf` appear owned by
+  `nobody`.
+- A Claude Code policy deployed through the Windows registry is not read.
+- Other Windows programs (`cmd.exe`, `powershell.exe`) still run.
+
+If the namespace cannot be created, the session's terminal shows one line
+saying so and the session starts without the stub.
+
 ## License
 
 MIT

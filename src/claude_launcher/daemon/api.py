@@ -54,6 +54,7 @@ from .. import ghcli, prflow, projects, reposync, reposync_flow, spawn as spawn_
 from .. import workspace_usage
 from .. import plugins, prompt_packs, settings
 from .. import worktree as worktree_mod
+from .. import wsl_reg_stub
 from . import actors, beads as beads_mod, channel, clipboard, connections
 from . import p2p
 from . import opening_images
@@ -714,6 +715,8 @@ def build_app(
     r.add_delete("/api/prompt-presets/{preset_id}", h_prompt_presets_remove)
     r.add_get("/api/prompter", h_prompter_get)
     r.add_put("/api/prompter", h_prompter_set)
+    r.add_get("/api/wsl-reg-stub", h_wsl_reg_stub_get)
+    r.add_put("/api/wsl-reg-stub", h_wsl_reg_stub_set)
     r.add_get("/api/prompter/prompts", h_prompter_prompts)
     r.add_get("/api/prompter/contexts", h_prompter_contexts)
     r.add_get("/api/status-checks", h_status_checks)
@@ -3629,6 +3632,37 @@ async def h_prompter_set(request: web.Request) -> web.Response:
         return json_response({"url": url, "status": answer})
     except prompter.PrompterURLError as exc:
         return json_error(400, str(exc))
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+
+
+def _wsl_reg_stub_state() -> dict:
+    return {
+        "enabled": wsl_reg_stub.enabled(store.daemon_config()),
+        "wsl": wsl_reg_stub.is_wsl(),
+    }
+
+
+async def h_wsl_reg_stub_get(request: web.Request) -> web.Response:
+    """``daemon.wsl_hide_reg_exe`` and whether this daemon runs under WSL."""
+    try:
+        return json_response(_wsl_reg_stub_state())
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+
+
+async def h_wsl_reg_stub_set(request: web.Request) -> web.Response:
+    """Turn ``daemon.wsl_hide_reg_exe`` on or off (``{"enabled": bool}``).
+
+    Applies to sessions spawned from now on; running ones are left as they
+    started."""
+    body = await _json_body(request)
+    enabled = body.get("enabled")
+    if not isinstance(enabled, bool):
+        return json_error(400, "'enabled' must be true or false")
+    try:
+        store.set_daemon_field(wsl_reg_stub.SETTING, True if enabled else None)
+        return json_response(_wsl_reg_stub_state())
     except store.StoreError as exc:
         return json_error(500, str(exc))
 

@@ -22834,6 +22834,7 @@ function openSettings(section) {
   refreshRagStatus();
   refreshGhStatus();
   refreshRelaySettings();
+  refreshWslRegStub();
 }
 
 let relaySettingsRows = [];
@@ -28262,6 +28263,7 @@ function renderWorkspaces() {
 
   view.appendChild(ghCard());
   view.appendChild(relaySettingsCard());
+  view.appendChild(wslRegStubCard());
 
   refocusSettingsField(focused);
 }
@@ -29696,6 +29698,81 @@ function prompterSettingsCard() {
   } else if (st) {
     card.appendChild(el("p", "error", `Not connected: ${st.error || "no answer"}`));
   }
+  return card;
+}
+
+/* Hide reg.exe from new sessions (General) — daemon.wsl_hide_reg_exe,
+   read and written with GET/PUT /api/wsl-reg-stub. WSL only: Claude Code
+   runs Windows reg.exe on every launch, and WSL 2.7.11's wslhost.exe can
+   leave a thread spinning a host CPU core after such a call. Applies to
+   sessions spawned after the change. */
+let wslRegStub = { enabled: false, wsl: false, loaded: false, error: "", busy: false, notice: "" };
+
+async function refreshWslRegStub() {
+  try {
+    const resp = await api("/api/wsl-reg-stub");
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    Object.assign(wslRegStub, { enabled: !!data.enabled, wsl: !!data.wsl, loaded: true, error: "" });
+  } catch (err) {
+    wslRegStub.error = String(err);
+  }
+  if (wsOpen) renderWorkspaces();
+}
+
+async function saveWslRegStub(enabled) {
+  wslRegStub.busy = true;
+  wslRegStub.notice = "";
+  renderWorkspaces();
+  try {
+    const resp = await api("/api/wsl-reg-stub", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    Object.assign(wslRegStub, { enabled: !!data.enabled, wsl: !!data.wsl, error: "" });
+    wslRegStub.notice = "Saved. Applies to sessions started from now on; running sessions are unchanged.";
+  } catch (err) {
+    wslRegStub.error = String(err);
+  }
+  wslRegStub.busy = false;
+  renderWorkspaces();
+}
+
+function wslRegStubCard() {
+  const card = el("section", "ws-add wsl-reg-stub-settings");
+  card.appendChild(el("h3", null, "Hide reg.exe from new sessions (WSL only)"));
+  card.appendChild(el("p", "wf-note",
+    "Needed only when the daemon runs under WSL. Claude Code runs Windows " +
+    "reg.exe twice on every launch to look for a registry policy, and WSL " +
+    "2.7.11's wslhost.exe sometimes leaves a thread using a full host CPU core " +
+    "after such a call, until wsl --shutdown. When on, each new session starts " +
+    "in a private namespace where reg.exe is a stub that exits 1, so no Windows " +
+    "process is started."));
+  card.appendChild(el("p", "wf-note",
+    "sudo does not work inside those sessions (root-owned files appear owned by " +
+    "nobody there), and a Claude Code policy deployed through the Windows " +
+    "registry is not read. Other Windows programs still run."));
+  if (wslRegStub.error) card.appendChild(el("p", "error", wslRegStub.error));
+  if (!wslRegStub.loaded) {
+    card.appendChild(el("p", "wf-note", "reading…"));
+    return card;
+  }
+  const toggle = el("label", "qa-nudge-toggle");
+  const box = document.createElement("input");
+  box.type = "checkbox";
+  box.id = "wsl-reg-stub-enabled";
+  box.checked = wslRegStub.enabled;
+  box.disabled = wslRegStub.busy;
+  box.addEventListener("change", () => saveWslRegStub(box.checked));
+  toggle.append(box, " Hide reg.exe from new sessions");
+  card.appendChild(toggle);
+  if (!wslRegStub.wsl) {
+    card.appendChild(el("p", "wf-note", "This daemon is not running under WSL; the setting has no effect here."));
+  }
+  if (wslRegStub.notice) card.appendChild(el("p", "wf-note", wslRegStub.notice));
   return card;
 }
 

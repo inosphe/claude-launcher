@@ -28,6 +28,7 @@ from typing import Awaitable, Callable, Dict, List, Optional, Set, Tuple, Union
 
 from .. import atomic
 from .. import harnesses as harness_registry
+from .. import wsl_reg_stub
 from . import compacting, keys as keys_mod, process_priority, progress
 from . import paths, pty_backend
 from .harness import CLAUDE_HARNESS, SessionDef
@@ -729,7 +730,8 @@ class Session:
         self.argv = argv
         self._started_mono = time.monotonic()
         self._attach(pty_backend.spawn(
-            argv, env=env, cwd=cwd, cols=self.sdef.cols, rows=self.sdef.rows
+            wsl_reg_stub.spawn_argv(argv),
+            env=env, cwd=cwd, cols=self.sdef.cols, rows=self.sdef.rows,
         ))
 
     async def start_async(
@@ -747,9 +749,12 @@ class Session:
         """
         self.argv = argv
         self._started_mono = time.monotonic()
+        # ``self.argv`` stays the command the session asked for; only the
+        # spawn goes through the reg.exe shim (daemon.wsl_hide_reg_exe, WSL).
         self._attach(await asyncio.to_thread(
             pty_backend.spawn,
-            argv, env=env, cwd=cwd, cols=self.sdef.cols, rows=self.sdef.rows,
+            wsl_reg_stub.spawn_argv(argv),
+            env=env, cwd=cwd, cols=self.sdef.cols, rows=self.sdef.rows,
         ))
 
     def _attach(self, pty) -> None:

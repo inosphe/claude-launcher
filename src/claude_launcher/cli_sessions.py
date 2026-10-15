@@ -2475,6 +2475,8 @@ _LIVE_KEYS = (
     "cflow_events", "prompter_url",
     "qa_nudge", "qa_nudge_min_confidence", "qa_nudge_cooldown",
     "qa_nudge_max_chars", "jev_model", "jev_base_url", "jev_api_key_env",
+    # read at each session spawn
+    "wsl_hide_reg_exe",
     # read by the reposync CLI itself on every sync, never by the daemon
     "reposync_push",
 )

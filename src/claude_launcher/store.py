@@ -633,6 +633,15 @@ DAEMON_DEFAULTS = {
     # (default_child_cflow) still decides a child's run. Read LIVE on every
     # workflow listing; the Settings page writes it (PUT /api/role-workflows).
     "role_workflows": {},
+    # WSL only (claude_launcher/wsl_reg_stub.py): start each new session in a
+    # private user + mount namespace where /mnt/c/Windows/System32/reg.exe is
+    # a stub that exits 1. Claude Code runs reg.exe on every launch to look
+    # for a registry policy, and WSL 2.7.11's wslhost.exe sometimes leaves a
+    # thread spinning at 100% after such a call. Costs: sudo does not work in
+    # those sessions, and a registry-deployed Claude Code policy is not read.
+    # Read LIVE at each spawn (running sessions keep how they started); the
+    # Settings page writes it (PUT /api/wsl-reg-stub).
+    "wsl_hide_reg_exe": False,
 }
 
 #: The ``role_workflows`` value that auto-selects no workflow for a role.
