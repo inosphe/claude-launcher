@@ -3661,7 +3661,7 @@ async def h_wsl_reg_stub_set(request: web.Request) -> web.Response:
     if not isinstance(enabled, bool):
         return json_error(400, "'enabled' must be true or false")
     try:
-        store.set_daemon_field(wsl_reg_stub.SETTING, True if enabled else None)
+        store.set_daemon_field(wsl_reg_stub.SETTING, enabled)
         return json_response(_wsl_reg_stub_state())
     except store.StoreError as exc:
         return json_error(500, str(exc))

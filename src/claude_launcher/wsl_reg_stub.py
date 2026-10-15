@@ -22,7 +22,7 @@ session sees the change. ``exit 1`` is what ``reg.exe query`` answers for a key
 that does not exist, so Claude Code reads "no policy", as it does on a machine
 without one, and no Windows process is started.
 
-Costs, which is why the setting is off by default:
+The setting is on by default; off WSL it does nothing. Costs inside WSL:
 
 * ``sudo`` does not work inside such a session. In the user namespace only the
   session's own uid is mapped; files owned by root (``/etc/sudo.conf``,
@@ -72,8 +72,8 @@ def is_wsl(osrelease: str = "/proc/sys/kernel/osrelease") -> bool:
 
 
 def enabled(cfg: Mapping) -> bool:
-    """``daemon.wsl_hide_reg_exe`` as a bool (off unless set true)."""
-    return cfg.get(SETTING) is True
+    """``daemon.wsl_hide_reg_exe`` as a bool (on unless set false)."""
+    return cfg.get(SETTING, True) is not False
 
 
 def stub_path() -> Path:

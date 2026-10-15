@@ -639,9 +639,10 @@ DAEMON_DEFAULTS = {
     # for a registry policy, and WSL 2.7.11's wslhost.exe sometimes leaves a
     # thread spinning at 100% after such a call. Costs: sudo does not work in
     # those sessions, and a registry-deployed Claude Code policy is not read.
-    # Read LIVE at each spawn (running sessions keep how they started); the
-    # Settings page writes it (PUT /api/wsl-reg-stub).
-    "wsl_hide_reg_exe": False,
+    # On by default: off WSL it does nothing. Read LIVE at each spawn
+    # (running sessions keep how they started); the Settings page writes it
+    # (PUT /api/wsl-reg-stub).
+    "wsl_hide_reg_exe": True,
 }
 
 #: The ``role_workflows`` value that auto-selects no workflow for a role.

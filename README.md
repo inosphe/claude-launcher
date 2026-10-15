@@ -5018,7 +5018,8 @@ manifest.
 ### WSL: hiding reg.exe from sessions
 
 `daemon.wsl_hide_reg_exe` (Settings ▸ General, "Hide reg.exe from new
-sessions"; off by default) is needed only when the daemon runs under WSL.
+sessions"; on by default, and it does nothing off WSL) is needed only when the
+daemon runs under WSL.
 Claude Code runs `/mnt/c/Windows/System32/reg.exe` twice on every launch to
 look for a Windows registry policy. WSL 2.7.11's `wslhost.exe` occasionally
 leaves a thread running a host CPU core at 100% after such a call, and those

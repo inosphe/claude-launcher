@@ -1,6 +1,6 @@
 """daemon.wsl_hide_reg_exe (claude_launcher/wsl_reg_stub.py) and its endpoint.
 
-A1 off by default; only ``True`` turns it on
+A1 on by default; only ``False`` turns it off
 A2 argv is unchanged when off, off WSL, or without reg.exe
 A3 on WSL with the setting on, argv goes through the shim and keeps the command
 A4 the stub file holds the ``exit 1`` script and is executable
@@ -29,12 +29,11 @@ from claude_launcher.daemon.mesh import MeshManager
 BEARER = {"Authorization": "Bearer sekrit"}
 
 
-def test_off_by_default_and_only_true_turns_it_on():
-    assert store.DAEMON_DEFAULTS["wsl_hide_reg_exe"] is False
+def test_on_by_default_and_only_false_turns_it_off():
+    assert store.DAEMON_DEFAULTS["wsl_hide_reg_exe"] is True
+    assert wsl_reg_stub.enabled({}) is True
     assert wsl_reg_stub.enabled({"wsl_hide_reg_exe": True}) is True
-    for value in (False, None, "true", 1):
-        assert wsl_reg_stub.enabled({"wsl_hide_reg_exe": value}) is False
-    assert wsl_reg_stub.enabled({}) is False
+    assert wsl_reg_stub.enabled({"wsl_hide_reg_exe": False}) is False
 
 
 def test_argv_unchanged_when_off_or_not_applicable(home, monkeypatch):
@@ -42,7 +41,7 @@ def test_argv_unchanged_when_off_or_not_applicable(home, monkeypatch):
     on = {"wsl_hide_reg_exe": True}
     monkeypatch.setattr(wsl_reg_stub, "is_wsl", lambda: True)
     monkeypatch.setattr(wsl_reg_stub.os.path, "exists", lambda p: True)
-    assert wsl_reg_stub.wrap_argv(argv, {}) == argv
+    assert wsl_reg_stub.wrap_argv(argv, {"wsl_hide_reg_exe": False}) == argv
 
     monkeypatch.setattr(wsl_reg_stub, "is_wsl", lambda: False)
     assert wsl_reg_stub.wrap_argv(argv, on) == argv
@@ -83,21 +82,21 @@ def test_endpoint_round_trips_the_setting(home):
             resp = await client.get("/api/wsl-reg-stub", headers=BEARER)
             assert resp.status == 200
             body = await resp.json()
-            assert body["enabled"] is False
+            assert body["enabled"] is True
             assert body["wsl"] is wsl_reg_stub.is_wsl()
 
-            resp = await client.put("/api/wsl-reg-stub", json={"enabled": True}, headers=BEARER)
+            resp = await client.put("/api/wsl-reg-stub", json={"enabled": False}, headers=BEARER)
             assert resp.status == 200
-            assert (await resp.json())["enabled"] is True
-            assert store.daemon_config()["wsl_hide_reg_exe"] is True
+            assert (await resp.json())["enabled"] is False
+            assert store.daemon_config()["wsl_hide_reg_exe"] is False
 
             resp = await client.put("/api/wsl-reg-stub", json={"enabled": "yes"}, headers=BEARER)
             assert resp.status == 400
-            assert store.daemon_config()["wsl_hide_reg_exe"] is True
+            assert store.daemon_config()["wsl_hide_reg_exe"] is False
 
-            resp = await client.put("/api/wsl-reg-stub", json={"enabled": False}, headers=BEARER)
-            assert (await resp.json())["enabled"] is False
-            assert "wsl_hide_reg_exe" not in (store.load().get("daemon") or {})
+            resp = await client.put("/api/wsl-reg-stub", json={"enabled": True}, headers=BEARER)
+            assert (await resp.json())["enabled"] is True
+            assert store.daemon_config()["wsl_hide_reg_exe"] is True
         finally:
             await mgr.shutdown_all()
             await client.close()
