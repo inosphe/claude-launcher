@@ -168,6 +168,15 @@ def requalify(state: Dict[str, Any], daemon: str) -> Dict[str, Any]:
                 rec = dict(rec, nested=dict(nested, scope=store_mod.qualify(str(nested["scope"]), daemon)))
             fixed[did] = rec
         out["delegations"] = fixed
+    calls = out.get("calls")  # dynamic calls' callee runs (claunch-z17c9)
+    if isinstance(calls, dict):
+        fixed = {}
+        for cid, rec in calls.items():
+            nested = rec.get("nested") if isinstance(rec, dict) else None
+            if isinstance(nested, dict) and nested.get("scope"):
+                rec = dict(rec, nested=dict(nested, scope=store_mod.qualify(str(nested["scope"]), daemon)))
+            fixed[cid] = rec
+        out["calls"] = fixed
     side = out.get("side")
     if isinstance(side, dict) and side.get("main"):
         out["side"] = dict(side, main=store_mod.qualify(str(side["main"]), daemon))

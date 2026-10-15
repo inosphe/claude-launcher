@@ -196,7 +196,7 @@ LIBRARY_KEYS = ("cflow", "name", "description", "kind", "include", "fragments", 
 TASK_KEYS = (
     "title", "prompt", "done_when", "verify", "ask", "executor", "needs",
     "returns", "effects", "paths", "budget", "rules", "strict_budget",
-    "do", "triggers", "restart", "force_target", "session_workflow", "sims",
+    "do", "triggers", "restart", "force_target", "session_workflow", "calls", "sims",
 )
 #: ``$data.inputs`` is the run's start inputs (docs 2.6): written by the start
 #: request and, for an input declared ``set_by: [agent]``, once by the driver
@@ -887,6 +887,9 @@ def _compile_task(ctx: _Ctx, sc: _Scope, name: str, parent: Optional[str], line:
     )
     if session_workflow:
         node.props["session_workflow"] = session_workflow
+    calls = _calls(ctx, tfile, name, raw, tline)
+    if calls:
+        node.props["calls"] = calls
     sims = _sims(ctx, tfile, name, raw, tline)
     if sims:
         node.props["sims"] = sims
@@ -926,6 +929,16 @@ def _session_workflow(ctx: _Ctx, file: str, name: str, raw: Dict[str, Any],
         raise ctx.err(file, where, f"task {name!r}: session_workflow names the run of a "
                                    f"'session' executor's child, and executor has no session")
     return value.strip()
+
+
+def _calls(ctx: _Ctx, file: str, name: str, raw: Dict[str, Any], line: int) -> List[str]:
+    """``calls: [<procedure>, ...]``: the procedures the task may call while
+    it is active (``flow_call``, docs 2.12). Default deny: a task without
+    the key calls nothing. Each entry is a definition name; it is resolved
+    from the run's layers when the call is made, not here."""
+    where = _key_line(raw, "calls", line)
+    names = _str_list(ctx, file, raw.get("calls"), f"task {name!r} calls", where)
+    return list(dict.fromkeys(_definition_name(ctx, n, file, where, "calls") for n in names))
 
 
 def _force_target(ctx: _Ctx, file: str, raw: Dict[str, Any], node: ir.Node, line: int) -> bool:

@@ -10,7 +10,7 @@ import pytest
 from claude_launcher import mcp_server
 from claude_launcher.cflow2 import mcp as cflow2_mcp
 
-FLOW_TOOLS = {"flow_start", "flow_status", "flow_report", "flow_select", "flow_fork",
+FLOW_TOOLS = {"flow_start", "flow_status", "flow_report", "flow_select", "flow_fork", "flow_call",
               "flow_delegate", "flow_rule", "flow_collection", "flow_input",
               "flow_request_move"}
 
