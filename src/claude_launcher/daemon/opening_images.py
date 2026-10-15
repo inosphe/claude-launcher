@@ -99,20 +99,22 @@ def stage(chunks: Iterable[bytes], media_type: str) -> str:
     return image_id
 
 
-def check_ids(raw) -> List[str]:
+def check_ids(raw, *, field: str = "opening_images",
+              what: str = "an opening") -> List[str]:
     """``opening_images`` from a request body, as a list of staged ids.
 
     Refused when the shape is wrong, the count is over :data:`MAX_IMAGES`, or
     an id names no staged file -- before anything is arranged, so a bad
-    request leaves no session behind.
+    request leaves no session behind. A thread message stages its images
+    the same way (daemon/thread_images.py) and names its own ``field``.
     """
     if raw in (None, "", []):
         return []
     if not isinstance(raw, list):
-        raise OpeningImageError("opening_images must be a list of uploaded image ids")
+        raise OpeningImageError(f"{field} must be a list of uploaded image ids")
     if len(raw) > MAX_IMAGES:
         raise OpeningImageError(
-            f"an opening carries at most {MAX_IMAGES} images ({len(raw)} given)"
+            f"{what} carries at most {MAX_IMAGES} images ({len(raw)} given)"
         )
     ids: List[str] = []
     for item in raw:

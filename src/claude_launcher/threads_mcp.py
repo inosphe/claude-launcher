@@ -31,7 +31,8 @@ TOOLS = [
          "closed": {"type": "boolean", "description": "include closed threads (default false)"}}}},
     {"name": "thread_read",
      "description": "One thread's conversation, oldest first. Marks it read. Pass after=<seq> to get only "
-                    "what came after a message you already have.",
+                    "what came after a message you already have. A user message may carry images: each "
+                    "entry of its 'images' has the file's 'path' on this machine -- open it to see the picture.",
      "inputSchema": {"type": "object", "properties": {
          **_TID, "after": {"type": "integer", "description": "only messages with a larger seq"},
          "limit": {"type": "integer", "description": "at most this many messages (default 500)"}},

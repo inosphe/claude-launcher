@@ -1035,6 +1035,8 @@ def build_app(
     r.add_post("/api/sessions/{name}/keys", h_session_keys)
     r.add_post("/api/sessions/{name}/paste-image", h_session_paste_image)
     r.add_post("/api/opening-images", h_opening_image_upload)
+    # A thread message stages its images the same way (claunch-shl2r).
+    r.add_post("/api/threads/images", h_opening_image_upload)
     r.add_post("/api/sessions/{name}/deliver", h_session_deliver)
     # The PR wizard (prflow.py): what the session's directory would push,
     # and the push itself. GET is the preview the form opens on, POST does
@@ -11128,7 +11130,7 @@ def _opening_image_ids(body: dict, harness: str) -> List[str]:
     return ids
 
 
-def _opening_image_step(session, images, opening: str):
+def _opening_image_step(session, images, opening: str, *, what: str = "opening images"):
     """The pre-paste step of an opening that carries images, and its text.
 
     Each image goes into the composer the way the session line's paste does
@@ -11140,8 +11142,9 @@ def _opening_image_step(session, images, opening: str):
     The text is a factory :meth:`Session.deliver` calls after the step. It
     names every image that could not be handed over, with the stored file's
     path, so the agent knows a picture it was meant to see is missing and
-    where it is. An opening with no task text still says that images were
-    attached: an empty text would cancel the delivery.
+    where it is (``what`` names them: a thread message's images use this
+    step too, daemon/threads_api.py). An opening with no task text still
+    says that images were attached: an empty text would cancel the delivery.
     """
     done = {"ran": False}
     failed: List[str] = []
@@ -11182,7 +11185,7 @@ def _opening_image_step(session, images, opening: str):
         ]
         if failed:
             parts.append(
-                "These opening images could not be pasted here; the files "
+                f"These {what} could not be pasted here; the files "
                 "are on this machine:\n" + "\n".join(failed)
             )
         return "\n\n".join(parts)

@@ -1503,6 +1503,7 @@ class Session:
     def queue_delivery(
         self, text: Union[str, Callable[[], str]], *,
         on_done: Optional[Callable[[bool], None]] = None,
+        before: Optional[Callable[[], Awaitable[None]]] = None,
     ) -> bool:
         """Accept a notification for delivery after an input draft is released.
 
@@ -1518,6 +1519,9 @@ class Session:
         ``on_done`` receives the outcome of a send this queue accepted
         (False for a failure, a cancelled task or an empty factory). It is
         not called for a message handed to a held session's wake queue.
+        ``before`` is :meth:`deliver`'s pre-paste step (a thread message's
+        images, claunch-shl2r); a held session's wake queue carries text
+        only, so it is dropped there.
         """
         pending = getattr(self, "message_restore_pending", None)
         restoring = bool(pending and pending(self.sdef.name))
@@ -1550,7 +1554,7 @@ class Session:
             delivered = False
             try:
                 async with self._deferred_delivery_lock:
-                    delivered = await self.deliver(text, wait_for_draft=True)
+                    delivered = await self.deliver(text, wait_for_draft=True, before=before)
                 log.info(
                     "queued notification to %r %s",
                     self.sdef.name, "delivered" if delivered else "failed",
@@ -2633,7 +2637,8 @@ class DeadSession:
         )
 
     def queue_delivery(self, text: Union[str, Callable[[], str]], *,
-                       on_done: Optional[Callable[[bool], None]] = None) -> bool:
+                       on_done: Optional[Callable[[bool], None]] = None,
+                       before=None) -> bool:
         enqueue = getattr(self, "queue_on_message", None)
         if not (enqueue and self.held_at):
             return False

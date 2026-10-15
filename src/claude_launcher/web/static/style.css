@@ -7623,6 +7623,22 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
 .th-send { background: #1f6feb; border-color: #1f6feb; color: #fff; font-weight: 600; padding: 3px 14px; }
 .th-send:hover:not(:disabled) { background: #388bfd; border-color: #388bfd; }
 .th-send:disabled { background: #21262d; border-color: #30363d; color: #7d8590; cursor: default; }
+/* Images on a thread message (claunch-shl2r): thumbnails in a message (and
+   on the threads page), and the ones waiting under a composer. */
+.th-images { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.th-image img { display: block; max-width: 220px; max-height: 160px; border-radius: 6px;
+  border: 1px solid #30363d; background: #0d1117; object-fit: contain; }
+.th-attach { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 10px 0; }
+.th-attach[hidden] { display: none; }
+.th-attach-item { position: relative; }
+.th-attach-item img { display: block; width: 64px; height: 64px; object-fit: cover; border-radius: 6px;
+  border: 1px solid #30363d; }
+.th-attach-drop { position: absolute; top: -6px; right: -6px; width: 18px; height: 18px; padding: 0;
+  border-radius: 50%; border: 1px solid #30363d; background: #21262d; color: #e6edf3; font-size: 12px;
+  line-height: 16px; cursor: pointer; }
+.th-attach-drop:hover { background: #da3633; border-color: #da3633; }
+.th-pick { padding: 2px 8px; }
+.th-compose.dragover, .th-newform.dragover { border-color: #3fb950; box-shadow: 0 0 0 1px #3fb950; }
 
 /* The session's conversation pane (talk-pane.js, claunch-78dpm): a tab bar
    over the threads pane, the QA pane, or both in two columns. Each column

@@ -14,7 +14,8 @@ Rows:
             it, the last message seq, how far the agent has read, and the
             QA question it was opened about (``qa``, claunch-78dpm)
   messages  the conversation, globally sequenced (``seq``); ``author`` is
-            ``user`` or ``agent``
+            ``user`` or ``agent``; ``images`` lists the pictures the user
+            attached to it (claunch-shl2r), NULL when there are none
 
 Who may write. The user (the dashboard) may open, post, close and reopen in
 any session's threads; a session may do the same only in its own. Posting to
@@ -37,6 +38,7 @@ direction -- a question filed out of a thread -- lives on the question
 
 from __future__ import annotations
 
+import json
 import re
 import secrets
 import sqlite3
@@ -47,10 +49,13 @@ from typing import Iterator, Optional
 
 USER = "user"
 AGENT = "agent"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 MAX_TITLE = 200
 MAX_BODY = 20_000
+#: Pictures one message may carry; the same bound an opening task has
+#: (daemon/opening_images.MAX_IMAGES).
+MAX_IMAGES = 10
 MAX_OPEN_PER_SESSION = 50
 PAGE = 500
 HISTORY_PAGE = 20
@@ -96,8 +101,10 @@ CREATE TABLE IF NOT EXISTS messages (
     thread TEXT NOT NULL REFERENCES threads (id),
     session TEXT NOT NULL,
     author TEXT NOT NULL CHECK (author IN ('user', 'agent')),
-    body TEXT NOT NULL CHECK (length(body) > 0),
-    at TEXT NOT NULL
+    body TEXT NOT NULL,
+    at TEXT NOT NULL,
+    images TEXT,
+    CHECK (length(body) > 0 OR images IS NOT NULL)
 );
 CREATE INDEX IF NOT EXISTS messages_thread ON messages (thread, seq);
 CREATE INDEX IF NOT EXISTS messages_session ON messages (session, author, seq);
@@ -127,6 +134,29 @@ def _qa_id(value) -> Optional[str]:
     if not isinstance(value, str) or not re.fullmatch(r"qa-[0-9a-f]{1,32}", value.strip()):
         raise ThreadError("qa must be a QA question id (qa-xxxxxxxx)")
     return value.strip()
+
+
+_IMAGE_NAME = re.compile(r"[0-9a-f]{20}\.(png|jpg|gif|webp)")
+
+
+def _images(value) -> list[dict]:
+    """``images`` of a write: ``[{name, type, bytes}]`` as the route stored
+    them (daemon/thread_images.py). Only the shape is checked here; the
+    files themselves are the route's."""
+    if value in (None, []):
+        return []
+    if not isinstance(value, list):
+        raise ThreadError("images must be a list")
+    if len(value) > MAX_IMAGES:
+        raise ThreadError(f"a message carries at most {MAX_IMAGES} images ({len(value)} given)")
+    out = []
+    for item in value:
+        if not (isinstance(item, dict) and isinstance(item.get("name"), str)
+                and _IMAGE_NAME.fullmatch(item["name"])):
+            raise ThreadError(f"{item!r} is not a stored thread image")
+        out.append({"name": item["name"], "type": str(item.get("type") or ""),
+                    "bytes": int(item.get("bytes") or 0)})
+    return out
 
 
 def _excerpt(body: str) -> str:
@@ -167,7 +197,32 @@ def _thread(r: sqlite3.Row, unread: int = 0, last: Optional[dict] = None) -> dic
 
 
 def _message(r: sqlite3.Row) -> dict:
-    return {"seq": r["seq"], "thread": r["thread"], "author": r["author"], "body": r["body"], "at": r["at"]}
+    raw = r["images"]
+    return {"seq": r["seq"], "thread": r["thread"], "author": r["author"], "body": r["body"], "at": r["at"],
+            "images": json.loads(raw) if raw else []}
+
+
+#: v3 (claunch-shl2r): ``messages`` gains ``images`` and a body may be empty
+#: when a picture is the message. SQLite cannot drop a CHECK, so a v2 table
+#: is rebuilt under the new definition with every row and seq kept.
+_REBUILD_MESSAGES = """
+ALTER TABLE messages RENAME TO messages_v2;
+DROP INDEX IF EXISTS messages_thread;
+DROP INDEX IF EXISTS messages_session;
+CREATE TABLE messages (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    thread TEXT NOT NULL REFERENCES threads (id),
+    session TEXT NOT NULL,
+    author TEXT NOT NULL CHECK (author IN ('user', 'agent')),
+    body TEXT NOT NULL,
+    at TEXT NOT NULL,
+    images TEXT,
+    CHECK (length(body) > 0 OR images IS NOT NULL)
+);
+INSERT INTO messages (seq, thread, session, author, body, at)
+    SELECT seq, thread, session, author, body, at FROM messages_v2 ORDER BY seq;
+DROP TABLE messages_v2;
+"""
 
 
 class ThreadStore:
@@ -184,6 +239,9 @@ class ThreadStore:
             if cols and "qa" not in cols:
                 # v2 (claunch-78dpm): the QA question a thread is about.
                 db.execute("ALTER TABLE threads ADD COLUMN qa TEXT")
+            mcols = {r[1] for r in db.execute("PRAGMA table_info(messages)")}
+            if mcols and "images" not in mcols:
+                db.executescript("BEGIN IMMEDIATE;" + _REBUILD_MESSAGES + "COMMIT;")
             db.executescript(_SCHEMA)
             db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
@@ -236,12 +294,13 @@ class ThreadStore:
         r = db.execute("SELECT * FROM messages WHERE thread = ? ORDER BY seq DESC LIMIT 1", (tid,)).fetchone()
         return _message(r) if r else None
 
-    def _append(self, db, row, actor: str, body: str) -> dict:
+    def _append(self, db, row, actor: str, body: str, images: Optional[list] = None) -> dict:
         now = _now()
         author = _author(actor)
+        images = images or []
         cur = db.execute(
-            "INSERT INTO messages (thread, session, author, body, at) VALUES (?,?,?,?,?)",
-            (row["id"], row["session"], author, body, now),
+            "INSERT INTO messages (thread, session, author, body, at, images) VALUES (?,?,?,?,?,?)",
+            (row["id"], row["session"], author, body, now, json.dumps(images) if images else None),
         )
         seq = int(cur.lastrowid)
         # The agent writing in a thread has seen everything in it so far.
@@ -250,14 +309,15 @@ class ThreadStore:
             + (", agent_read = ?" if author == AGENT else "") + " WHERE id = ?",
             (seq, now, seq, row["id"]) if author == AGENT else (seq, now, row["id"]),
         )
-        return {"seq": seq, "thread": row["id"], "author": author, "body": body, "at": now}
+        return {"seq": seq, "thread": row["id"], "author": author, "body": body, "at": now, "images": images}
 
     # -- writes ------------------------------------------------------------
 
-    def open(self, actor: str, session: str, title, text=None, *, qa=None) -> dict:
+    def open(self, actor: str, session: str, title, text=None, *, qa=None, images=None) -> dict:
         """A new thread in ``session``, optionally with its first message
-        and the QA question it is about (``qa``). A blank title is given the
-        session's next default name (``Thread #N``)."""
+        (text, attached ``images``, or both) and the QA question it is about
+        (``qa``). A blank title is given the session's next default name
+        (``Thread #N``)."""
         session = str(session or "").strip()
         if not session:
             raise ThreadError("session is required: the session the thread belongs to")
@@ -265,6 +325,7 @@ class ThreadStore:
             raise Forbidden(f"session {actor} may open threads only in its own conversation, not in {session}")
         title = _text(title, "title", MAX_TITLE, required=False)
         body = _text(text, "text", MAX_BODY, required=False)
+        images = self._user_images(actor, images)
         qa = _qa_id(qa)
         with self._write() as db:
             if not title:
@@ -283,17 +344,26 @@ class ThreadStore:
                 "VALUES (?,?,?,?,?,?,?)",
                 (tid, session, title, _author(actor), qa, now, now),
             )
-            message = self._append(db, self._row(db, tid), actor, body) if body else None
+            message = self._append(db, self._row(db, tid), actor, body, images) if body or images else None
             row = self._row(db, tid)
             return {"thread": _thread(row, self._unread(db, row), message), "message": message}
 
-    def post(self, actor: str, tid: str, text) -> dict:
-        body = _text(text, "text", MAX_BODY)
+    @staticmethod
+    def _user_images(actor: str, images) -> list[dict]:
+        images = _images(images)
+        if images and actor != USER:
+            raise ThreadError("only the user attaches images to a thread message")
+        return images
+
+    def post(self, actor: str, tid: str, text, *, images=None) -> dict:
+        """A message: text, attached ``images`` (the user's only), or both."""
+        images = self._user_images(actor, images)
+        body = _text(text, "text", MAX_BODY, required=not images)
         with self._write() as db:
             row = self._row(db, tid)
             self._may(row, actor)
             reopened = row["status"] == "closed"
-            message = self._append(db, row, actor, body)
+            message = self._append(db, row, actor, body, images)
             row = self._row(db, tid)
             return {"thread": _thread(row, self._unread(db, row), message), "message": message,
                     "reopened": reopened}
@@ -363,6 +433,16 @@ class ThreadStore:
         with self._connect() as db:
             row = self._row(db, tid)
             return _thread(row, self._unread(db, row), self._last(db, tid))
+
+    def has_image(self, tid: str, name: str) -> bool:
+        """Whether a message of thread ``tid`` carries the image ``name``."""
+        if not _IMAGE_NAME.fullmatch(str(name or "")):
+            return False
+        with self._connect() as db:
+            for r in db.execute("SELECT images FROM messages WHERE thread = ? AND images IS NOT NULL", (str(tid),)):
+                if any(i.get("name") == name for i in json.loads(r["images"])):
+                    return True
+        return False
 
     def link_rows(self, session: str) -> list[dict]:
         """Every thread of ``session``, reduced to what a QA card needs to
