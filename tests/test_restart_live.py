@@ -56,6 +56,9 @@ def restarts(monkeypatch):
     # here so these tests see only the decision. Tested on its own below.
     monkeypatch.setattr(restart_live, "_unserved", lambda repo, branch, dj: [])
     monkeypatch.setattr(restart_live, "host_code_changed", lambda repo, branch, dj: [])
+    # The daemon's own check (claunch-xnnct.3) is pinned to "cannot say", so
+    # the git fallback above decides unless a test says otherwise.
+    monkeypatch.setattr(restart_live, "host_code_stale", lambda check=None: None)
 
     def run(command):
         calls.append(list(command))
@@ -267,3 +270,62 @@ def test_host_code_changed_diffs_the_host_paths_from_the_daemons_head(monkeypatc
         lambda dj: (Path("d.json"), {"started_at": "x", "code": {}}),
     )
     assert restart_live.host_code_changed(Path("."), "master", None) is None
+
+
+# -- the daemon's host code check (claunch-xnnct.3) --------------------------------
+
+def test_a_stale_host_from_the_daemon_restarts_with_the_host(verdict, restarts, monkeypatch):
+    verdict(deploy_check.NOT_RESTARTED)
+    calls, run = restarts
+    monkeypatch.undo()  # the real host_code_stale, with the check below
+    verdict(deploy_check.NOT_RESTARTED)
+    monkeypatch.setattr(restart_live.shutil, "which", lambda name: f"/fake/{name}")
+    monkeypatch.setattr(restart_live, "_unserved", lambda repo, branch, dj: [])
+
+    def git_must_not_decide(repo, branch, dj):
+        raise AssertionError("the daemon answered; the git diff must not run")
+
+    monkeypatch.setattr(restart_live, "host_code_changed", git_must_not_decide)
+    check = lambda: {"stale": True, "changed": ["ptyhost/server.py"], "pid": 7}  # noqa: E731
+    assert restart_live.main([], run=run, check=check) == 0
+    assert "--with-pty-host" in calls[0]
+    assert "its code changed (ptyhost/server.py)" in calls[0][calls[0].index("--reason") + 1]
+
+
+def test_a_current_host_from_the_daemon_keeps_the_host(verdict, restarts, monkeypatch):
+    calls, run = restarts
+    monkeypatch.undo()
+    verdict(deploy_check.NOT_RESTARTED)
+    monkeypatch.setattr(restart_live.shutil, "which", lambda name: f"/fake/{name}")
+    monkeypatch.setattr(restart_live, "_unserved", lambda repo, branch, dj: [])
+    # The git diff would say changed; the daemon's answer wins.
+    monkeypatch.setattr(restart_live, "host_code_changed",
+                        lambda repo, branch, dj: ["src/claude_launcher/daemon/pty_backend.py"])
+    assert restart_live.main([], run=run, check=lambda: {"stale": False, "changed": []}) == 0
+    assert "--with-pty-host" not in calls[0]
+
+
+def test_no_answer_from_the_daemon_falls_back_to_the_git_diff(verdict, restarts, monkeypatch):
+    calls, run = restarts
+    monkeypatch.undo()
+    verdict(deploy_check.NOT_RESTARTED)
+    monkeypatch.setattr(restart_live.shutil, "which", lambda name: f"/fake/{name}")
+    monkeypatch.setattr(restart_live, "_unserved", lambda repo, branch, dj: [])
+    monkeypatch.setattr(restart_live, "host_code_changed",
+                        lambda repo, branch, dj: ["src/claude_launcher/daemon/pty_backend.py"])
+    assert restart_live.main([], run=run, check=lambda: None) == 0
+    assert "--with-pty-host" in calls[0]
+
+
+def test_host_code_stale_reads_the_check():
+    assert restart_live.host_code_stale(lambda: None) is None
+    assert restart_live.host_code_stale(lambda: {"other": 1}) is None
+    assert restart_live.host_code_stale(lambda: {"stale": False}) == []
+    assert restart_live.host_code_stale(lambda: {"stale": True, "changed": ["a"]}) == ["a"]
+    assert restart_live.host_code_stale(lambda: {"stale": True, "changed": []}) == [
+        "(the PTY host reports no code id)"]
+
+    def boom():
+        raise OSError("down")
+
+    assert restart_live.host_code_stale(boom) is None

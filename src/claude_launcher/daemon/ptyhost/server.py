@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from .. import pty_backend
-from . import PROTO_VERSION, log_path, pid_path, socket_path, token_path
+from . import PROTO_VERSION, code_files, code_id, log_path, pid_path, socket_path, token_path
 from .protocol import ProtocolError, encode, read_frame
 
 log = logging.getLogger("claunch.ptyhost")
@@ -193,6 +193,12 @@ class Host:
         self._stop = threading.Event()
         self._token = b""
         self._sock_path = socket_path(self.dir)
+        # What this host runs, read once at start (claunch-xnnct.3): the files
+        # on disk can change under a running host, and the daemon compares
+        # this against what it would load.
+        self.code_files = code_files()
+        self.code = code_id(self.code_files)
+        self.started_at = time.time()
 
     def stop(self) -> None:
         self._stop.set()
@@ -328,7 +334,8 @@ class Host:
                 conn.close()
                 return
             self._conn = conn
-        self._reply(conn, first[0].get("id"), ok=True, proto=PROTO_VERSION, pid=os.getpid())
+        self._reply(conn, first[0].get("id"), ok=True, proto=PROTO_VERSION, pid=os.getpid(),
+                    code=self.code, code_files=self.code_files, started_at=self.started_at)
         try:
             while True:
                 frame = read_frame(conn)

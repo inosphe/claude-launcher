@@ -2009,11 +2009,13 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
         return 0
     if action == "restart":
         with_host = bool(getattr(args, "with_pty_host", False))
+        keep_stale = bool(getattr(args, "keep_stale_host", False))
         if getattr(args, "all", False):
-            return _restart_all_instances(with_pty_host=with_host)
+            return _restart_all_instances(with_pty_host=with_host,
+                                          keep_stale=keep_stale)
         if getattr(args, "force", False):
             return _force_replace(getattr(args, "reason", None) or "",
-                                  with_pty_host=with_host)
+                                  with_pty_host=with_host, keep_stale=keep_stale)
         # The ordinary path talks to the daemon, so it only works while the
         # daemon is listening. A wedged one cannot be asked anything -- say so
         # here rather than leaving the operator with "did not come up in 15s",
@@ -2033,6 +2035,11 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
                 _print_wedged(report, confirm)
                 return 1
             report = confirm  # it moved between looks — busy, not wedged
+        # A keep restart onto a PTY host whose code changed on disk would
+        # leave it running the old code (claunch-xnnct.3): refuse here, with
+        # the files and both ways forward, before a gate request is filed.
+        if _stale_keep_refused(with_host, keep_stale, report):
+            return 2
         # An agent session's restart goes through the web UI's approval gate
         # instead of this immediate path: the person every restart cuts off
         # gets to approve or reject first (five minutes unanswered counts as
@@ -2042,14 +2049,14 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
         # it (see restart_gate's module docstring).
         if os.environ.get("CLAUNCH_SESSION"):
             return _gated_restart(getattr(args, "reason", None) or "",
-                                  with_pty_host=with_host)
+                                  with_pty_host=with_host, keep_stale=keep_stale)
         # Written first, and this order is the whole fix. Everything below
         # this line runs in a turn that is about to die: the daemon takes
         # every terminal attached to it down, so the print at the end reaches
         # a stdout nobody will read. Only what is on disk before the stop can
         # be handed back to the asker once a daemon exists again.
         restart_notice.record_request_from_env()
-        client = daemon_client.restart(with_pty_host=with_host)
+        client = daemon_client.restart(with_pty_host=with_host, keep_stale=keep_stale)
         print(f"daemon restarted at {client.base_url}{_host_suffix(with_host)}")
         return 0
     if action == "status":
@@ -2088,8 +2095,48 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
         )
         print(f"log:      {daemon_paths.log_file()}")
         print(cli_mesh.relay_line(info.get("relay")))
+        line = _pty_host_line(info.get("pty_host"))
+        if line:
+            print(line)
         return 0
     raise AssertionError(f"unknown daemon action {action!r}")
+
+
+def _pty_host_line(state) -> str:
+    """``daemon status``'s PTY host line from ``/api/daemon``'s ``pty_host``
+    (claunch-xnnct.3); empty for a daemon older than the field."""
+    if not isinstance(state, dict):
+        return ""
+    kind = state.get("state")
+    if kind == "off":
+        return "pty host: off (sessions run in the daemon)"
+    if kind == "unreachable":
+        pid = state.get("pid")
+        return ("pty host: unreachable -- pty_host is on, sessions spawn in the daemon"
+                + (f" (pid {pid} could not be used)" if pid else ""))
+    line = (f"pty host: pid {state.get('pid')}, {state.get('sessions', 0)} session(s), "
+            f"code {state.get('code') or '(none reported)'}")
+    if kind == "stale":
+        line += (f"\n  PTY host pid {state.get('pid')} runs older code -- "
+                 "'claunch daemon restart --with-pty-host' to update it")
+    return line
+
+
+def _stale_keep_refused(with_pty_host: bool, keep_stale: bool,
+                        report: Optional[dict] = None) -> bool:
+    """Print the refusal and return True when a keep restart would leave the
+    PTY host on older code (claunch-xnnct.3). ``--with-pty-host`` replaces
+    the host and ``--keep-stale-host`` says keep it anyway, so neither is
+    checked; no answer (no daemon, or one older than the check) goes ahead.
+    ``report`` is the caller's diagnosis, reused so the check probes nothing."""
+    if with_pty_host or keep_stale:
+        return False
+    check = daemon_client.restart_check(report)
+    if not check or not check.get("stale"):
+        return False
+    print(check.get("message") or "refused: the PTY host runs older code", file=sys.stderr)
+    print("  " + (check.get("hint") or "").replace("\n", "\n  "), file=sys.stderr)
+    return True
 
 
 def _host_suffix(with_pty_host: bool) -> str:
@@ -2115,7 +2162,8 @@ def _shutdown_pty_host() -> None:
               "new daemon adopts its sessions", file=sys.stderr)
 
 
-def _gated_restart(reason: str = "", *, with_pty_host: bool = False) -> int:
+def _gated_restart(reason: str = "", *, with_pty_host: bool = False,
+                   keep_stale: bool = False) -> int:
     """A managed session's restart request, waited out to its outcome.
 
     The ordinary path above stops the daemon on the spot — and with it the
@@ -2182,6 +2230,8 @@ def _gated_restart(reason: str = "", *, with_pty_host: bool = False) -> int:
         body["reason"] = reason
     if with_pty_host:
         body["pty_host"] = "full"
+    if keep_stale:
+        body["keep_stale"] = True
     try:
         resp = client.post("/api/daemon/restart-request", body)
     except DaemonClientError as exc:
@@ -2267,6 +2317,12 @@ def _gated_restart(reason: str = "", *, with_pty_host: bool = False) -> int:
                     "the restart request was rejected — nothing was restarted",
                     file=sys.stderr,
                 )
+                if record.get("refused"):
+                    # The clock does not pick for a stale PTY host
+                    # (claunch-xnnct.3); ask again with one of the two.
+                    print(f"  {record['refused']}", file=sys.stderr)
+                    print("  ask again with --with-pty-host or --keep-stale-host",
+                          file=sys.stderr)
                 return 1
             if status == "approved":
                 # The daemon is going down; the outcome travels as a restart
@@ -2369,7 +2425,8 @@ def _print_wedged(report: dict, confirm: dict) -> None:
     )
 
 
-def _force_replace(reason: str = "", *, with_pty_host: bool = False) -> int:
+def _force_replace(reason: str = "", *, with_pty_host: bool = False,
+                   keep_stale: bool = False) -> int:
     """Replace a daemon that cannot be asked to leave.
 
     Reserved for the wedged case and never automatic: ending the process
@@ -2400,10 +2457,13 @@ def _force_replace(reason: str = "", *, with_pty_host: bool = False) -> int:
         # only exists to reach a daemon that cannot be asked, and this one
         # can. The wedged branch below has no daemon to host a gate and stays
         # immediate.
+        if _stale_keep_refused(with_pty_host, keep_stale, report):
+            return 2
         if os.environ.get("CLAUNCH_SESSION"):
-            return _gated_restart(reason, with_pty_host=with_pty_host)
+            return _gated_restart(reason, with_pty_host=with_pty_host,
+                                  keep_stale=keep_stale)
         restart_notice.record_request_from_env(via="cli-force")
-        client = daemon_client.restart(with_pty_host=with_pty_host)
+        client = daemon_client.restart(with_pty_host=with_pty_host, keep_stale=keep_stale)
         print(f"daemon restarted at {client.base_url}{_host_suffix(with_pty_host)}")
         return 0
     if state == daemon_client.NOT_RUNNING:
@@ -2438,7 +2498,8 @@ def _force_replace(reason: str = "", *, with_pty_host: bool = False) -> int:
     return 0
 
 
-def _restart_all_instances(*, with_pty_host: bool = False) -> int:
+def _restart_all_instances(*, with_pty_host: bool = False,
+                           keep_stale: bool = False) -> int:
     """Restart every daemon instance that is currently serving.
 
     The client stack resolves all its paths through ``CLAUNCH_DAEMON``, and a
@@ -2473,11 +2534,15 @@ def _restart_all_instances(*, with_pty_host: bool = False) -> int:
             if daemon_client.connect() is None:
                 print(f"{label}: not running -- skipped")
                 continue
+            if _stale_keep_refused(with_pty_host, keep_stale):
+                print(f"{label}: PTY host runs older code -- skipped")
+                continue
             # Per instance, because every path this module reads resolves
             # through CLAUNCH_DAEMON -- the record lands in the instance
             # directory whose daemon is about to be stopped.
             restart_notice.record_request_from_env()
-            daemon_client.stop(mode="full" if with_pty_host else "keep")
+            daemon_client.stop(mode="full" if with_pty_host else "keep",
+                               keep_stale=keep_stale)
             time.sleep(0.3)
             client = daemon_client.ensure_running()
             restarted += 1
@@ -3751,6 +3816,13 @@ def register(sub) -> None:
                      "keep running and the new daemon adopts them -- use this "
                      "when the PTY host's own code changed. Rides the approval "
                      "request from inside a managed session",
+            )
+            p.add_argument(
+                "--keep-stale-host", dest="keep_stale_host", action="store_true",
+                help="keep the sessions on the PTY host even when its code "
+                     "differs from what the restarted daemon will load; "
+                     "without it such a restart is refused (exit 2) and "
+                     "names the changed files",
             )
         p.set_defaults(func=_cmd_daemon, action=action)
     p_token = dsub.add_parser("token", help="print the API/web login token")

@@ -4358,6 +4358,13 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .badge.p2p-on { background: #1f4428; color: #3fb950; }
 .badge.p2p-connecting { background: #46350f; color: #e3b341; }
 .badge.p2p-relay { background: #30363d; color: #c9d1d9; }
+/* Who owns the session PTYs (claunch-xnnct.3). "stale" is a host running
+   older code than the daemon: sessions work, the next keep restart is refused. */
+#pty-host-badge { flex: none; white-space: nowrap; }
+.badge.pty-host-off { background: #30363d; color: #8b949e; }
+.badge.pty-host-connected { background: #1f4428; color: #3fb950; }
+.badge.pty-host-stale { background: #46350f; color: #e3b341; }
+.badge.pty-host-unreachable { background: #442022; color: #ff7b72; }
 .badge.p2p-off { background: #30363d; color: #8b949e; }
 #p2p-badge { cursor: pointer; }
 /* The badge's controls (claunch-k1z4z): a row of its own under the badges,

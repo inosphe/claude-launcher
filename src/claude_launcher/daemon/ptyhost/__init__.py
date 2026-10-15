@@ -31,6 +31,7 @@ import hashlib
 import os
 import tempfile
 from pathlib import Path
+from typing import Dict, List, Optional
 
 #: Version of the wire protocol. The hello carries the range a client
 #: speaks; the host refuses a client whose range does not include this.
@@ -46,6 +47,45 @@ _SUN_PATH_MAX = 100
 #: run's id and ends (and reports) every host under a test's directories that
 #: carries that id when the test is over.
 OWNER_ENV = "CLAUNCH_PTYHOST_OWNER"
+
+
+def code_files(root: Optional[Path] = None) -> Dict[str, str]:
+    """The SHA-256 of each file the host runs, keyed by its path under
+    ``daemon/`` (claunch-xnnct.3): every ``ptyhost/*.py`` and
+    ``pty_backend.py``.
+
+    ``root`` is the ``daemon`` package directory; the default is the one this
+    module was imported from, which is the code an editable install runs.
+    A file that cannot be read is left out, so the id still changes.
+    """
+    root = Path(root) if root is not None else Path(__file__).resolve().parent.parent
+    names = sorted(p.name for p in (root / "ptyhost").glob("*.py"))
+    paths = [f"ptyhost/{n}" for n in names] + ["pty_backend.py"]
+    out: Dict[str, str] = {}
+    for rel in paths:
+        try:
+            out[rel] = hashlib.sha256((root / rel).read_bytes()).hexdigest()
+        except OSError:
+            continue
+    return out
+
+
+def code_id(files: Dict[str, str]) -> str:
+    """One short id for :func:`code_files`: ``p<PROTO_VERSION>-<16 hex>``.
+
+    Two hosts with the same id run the same bytes; the protocol version is
+    in front so a reader can tell a protocol change from a code change.
+    """
+    h = hashlib.sha256()
+    for rel in sorted(files):
+        h.update(rel.encode("utf-8") + b"\0" + files[rel].encode("ascii") + b"\n")
+    return f"p{PROTO_VERSION}-{h.hexdigest()[:16]}"
+
+
+def changed_files(a: Dict[str, str], b: Dict[str, str]) -> List[str]:
+    """The paths whose digest differs between two :func:`code_files` maps
+    (present in one only counts as differing), sorted."""
+    return sorted(rel for rel in set(a) | set(b) if a.get(rel) != b.get(rel))
 
 
 def socket_path(directory: Path) -> Path:

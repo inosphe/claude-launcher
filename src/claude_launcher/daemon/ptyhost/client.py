@@ -159,6 +159,13 @@ class HostClient:
         self._sock = sock
         self.host_pid = host_pid
         self.directory = directory
+        #: What the host said it runs in its hello reply (claunch-xnnct.3).
+        #: A host older than that sends none of these: code None reads as
+        #: unknown, which callers treat as a mismatch.
+        self.host_proto: Optional[int] = None
+        self.host_code: Optional[str] = None
+        self.host_code_files: Dict[str, str] = {}
+        self.host_started_at: Optional[float] = None
         self._send_lock = threading.Lock()
         self._ids = itertools.count(1)
         self._pending: Dict[int, list] = {}
@@ -193,6 +200,14 @@ class HostClient:
             raise HostUnavailable(f"the PTY host refused the connection: {why}")
         sock.settimeout(None)
         client = cls(sock, host_pid=frame[0].get("pid"), directory=Path(directory))
+        hello = frame[0]
+        client.host_proto = hello.get("proto")
+        code = hello.get("code")
+        client.host_code = code if isinstance(code, str) else None
+        files = hello.get("code_files")
+        client.host_code_files = dict(files) if isinstance(files, dict) else {}
+        started = hello.get("started_at")
+        client.host_started_at = float(started) if isinstance(started, (int, float)) else None
         client._recv.start()
         return client
 
@@ -317,6 +332,11 @@ class HostClient:
 
     def close(self) -> None:
         self._shutdown("closed by the daemon")
+
+    def session_count(self) -> int:
+        """How many sessions this connection holds in the host."""
+        with self._ptys_lock:
+            return len(self._ptys)
 
     # -- receiving -----------------------------------------------------------
     def _forget(self, sid: str) -> None:

@@ -3228,7 +3228,9 @@ process instead of the daemon. A plain `claunch daemon restart` then keeps
 them: the daemon lets go of each session, the host keeps it running and keeps
 its output in a 1 MiB ring, and the next daemon takes it over as it is -- same
 process, same screen, the output it missed appended to its log, nothing
-resumed and nothing queued. A daemon that crashed or was killed leaves its
+resumed and nothing queued. That includes a session created `--no-restore`:
+the flag says whether an ended program is relaunched, and a kept one never
+ended. A daemon that crashed or was killed leaves its
 sessions running the same way (their logs can then miss what was written
 while no daemon was attached). `claunch daemon restart --with-pty-host` ends
 the sessions and the host too, and the new daemon relaunches them on a new
@@ -3242,6 +3244,31 @@ sessions and the host. A starting daemon that finds a host it cannot talk to
 and its sessions with SIGTERM before it relaunches them, so no conversation
 runs twice; if the host cannot be ended, the sessions it runs are left there,
 are not relaunched, and the daemon log says so.
+
+**A PTY host on older code.** A kept host goes on running the code it read at
+its start, so the host reports a code id in its hello -- `p<protocol>-<16 hex>`,
+a hash over `daemon/ptyhost/*.py` and `daemon/pty_backend.py` -- and the
+daemon compares it twice. Against the code the daemon itself loaded: a
+mismatch is a *stale* host, shown by `claunch daemon status` (the `pty host:`
+line), by the yellow badge in the web UI's sidebar header (the badge is grey
+with the setting off, green with a connected host, red when the setting is on
+and no host is reachable; its tooltip gives pid, protocol, code, sessions and
+uptime) and by a line on the daemon card. Against the code on disk now, which
+is what the next daemon will load: a keep restart with a mismatch is
+refused, with the changed files and two ways forward --
+`claunch daemon restart --with-pty-host` replaces the host (the sessions are
+relaunched) and `claunch daemon restart --keep-stale-host` keeps the old host
+anyway. The refusal exits 2; it applies to `--all` instance by instance and to
+`--force` on an answering daemon. The API answers a keep restart or shutdown
+with 409 unless the body says `"keep_stale": true`, and
+`GET /api/daemon/restart-check` gives the same check read-only. On a
+session's gated request the approval card shows the refusal and offers
+"Restart with PTY host" and "Keep anyway" in place of Approve; an unanswered
+stale request is settled as rejected at its deadline (the clock does not
+choose between ending the sessions and keeping old code), and the asking CLI
+prints why. `tools/restart_live.py` asks the daemon the same question before
+it falls back to comparing the git trees. A host from before the code id
+reports none and counts as stale.
 
 **A restart never loses a session.** Whatever is *not* relaunched — it had
 already exited, it was created `--no-restore`, or its relaunch failed — comes

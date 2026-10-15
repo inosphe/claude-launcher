@@ -474,17 +474,25 @@ def ensure_running(*, auto_start: bool = True) -> DaemonClient:
     )
 
 
-def stop(*, timeout: float = 10.0, mode: Optional[str] = None) -> bool:
+def stop(*, timeout: float = 10.0, mode: Optional[str] = None,
+         keep_stale: bool = False) -> bool:
     """Ask a running daemon to shut down; returns False if none was running.
 
     ``mode`` is what the daemon does with the PTY host and its sessions
     (claunch-xnnct.1): None or ``"stop"`` ends them, ``"keep"`` leaves them
     running for the next daemon (the first half of :func:`restart`),
-    ``"full"`` ends them for a restart that brings a new host up."""
+    ``"full"`` ends them for a restart that brings a new host up.
+
+    A keep stop onto a PTY host that runs other code than the files on disk
+    is refused (409, :class:`DaemonClientError`) unless ``keep_stale``
+    (claunch-xnnct.3); see :func:`restart_check`."""
     client = connect()
     if client is None:
         return False
-    client.post("/api/daemon/shutdown", {"mode": mode} if mode else None, timeout=5.0)
+    body: Optional[dict] = {"mode": mode} if mode else None
+    if body is not None and keep_stale:
+        body["keep_stale"] = True
+    client.post("/api/daemon/shutdown", body, timeout=5.0)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         # daemon.json disappears early in shutdown; the singleton lock is only
@@ -515,7 +523,32 @@ RESTART_BACKOFF_START = 2.0
 RESTART_BACKOFF_CAP = 20.0
 
 
-def restart(*, stop_timeout: float = 10.0, with_pty_host: bool = False) -> DaemonClient:
+def restart_check(report: Optional[dict] = None) -> Optional[dict]:
+    """Whether a keep restart now would leave the PTY host on older code
+    (``GET /api/daemon/restart-check``, claunch-xnnct.3).
+
+    ``report`` is a :func:`diagnose` the caller already made; it is used as
+    it is, so the check adds one request and no probes. Without one this
+    connects. None when there is no answer: no daemon (or a report that
+    found none), or one older than the check (it has no host code to
+    compare, and its shutdown does not refuse)."""
+    if report is not None:
+        if report.get("state") != SERVING or not report.get("base_url"):
+            return None
+        client = DaemonClient(report["base_url"], runtime_state.load_or_create_token())
+    else:
+        client = connect()
+    if client is None:
+        return None
+    try:
+        doc = client.get("/api/daemon/restart-check", timeout=10.0)
+    except DaemonClientError:
+        return None
+    return doc if isinstance(doc, dict) and "stale" in doc else None
+
+
+def restart(*, stop_timeout: float = 10.0, with_pty_host: bool = False,
+            keep_stale: bool = False) -> DaemonClient:
     """Stop the running daemon and bring a successor up, retrying the spawn.
 
     With the PTY host on, the sessions keep running across it and the
@@ -545,7 +578,8 @@ def restart(*, stop_timeout: float = 10.0, with_pty_host: bool = False) -> Daemo
     """
     before = runtime_state.read_daemon_json() or {}
     predecessor = int(before.get("pid") or 0)
-    stop(timeout=stop_timeout, mode="full" if with_pty_host else "keep")
+    stop(timeout=stop_timeout, mode="full" if with_pty_host else "keep",
+         keep_stale=keep_stale)
     delay = RESTART_BACKOFF_START
     last_exc: Optional[DaemonClientError] = None
     attempt = 0
