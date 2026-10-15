@@ -593,6 +593,57 @@ def test_kill_on_end_skips_a_session_that_already_exited(proj):
     assert gone.killed is False
 
 
+def test_kill_on_end_judges_again_once_a_held_session_wakes(proj):
+    """claunch-u9m6z: right after a boot a done run's session may be held or
+    still queued for a delayed restore. The first pass finds no running
+    session; that must not exempt the run, or the session -- woken later by
+    a mesh delivery or the restore queue -- stays alive with its run done
+    until the next boot (s122)."""
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    _finish_linear(cwd)
+    worker = _FakeSession("w1", cwd)
+    worker.exited = True                          # held / not restored yet
+    clock = cflow_clock.RunEventClock(_FakeManager({"w1": worker}))
+    assert clock.scan() == []
+    assert worker.recorded == []
+    assert clock._end_pending == []
+    assert clock.scan() == []                     # still asleep: still nothing
+    assert clock._end_pending == []
+
+    worker.exited = False                         # woken
+    assert clock.scan() == []
+    assert len(worker.recorded) == 1
+    assert "session ended" in worker.recorded[0]
+    assert [s[1] for s in clock._end_pending] == ["w1"]
+    asyncio.run(clock._finish_end(cwd, "w1", _run_id(cwd)))
+    assert worker.killed is True
+    clock._end_pending.clear()
+    assert clock.scan() == []                     # judged once, now marked
+    assert clock._end_pending == []
+    assert len(worker.recorded) == 1
+
+
+def test_kill_on_end_after_a_wake_still_defers_to_a_person(proj):
+    """The retry does not override claunch-dgnv.1: a session a person
+    respawned after the run finished is recorded on its first live pass and
+    the kill is called off, exactly as when the clock saw it alive at once."""
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    _finish_linear(cwd)
+    worker = _FakeSession("w1", cwd)
+    worker.exited = True
+    clock = cflow_clock.RunEventClock(_FakeManager({"w1": worker}))
+    clock.scan()
+    worker.exited = False                         # a person respawned it
+    worker.resumed_by_human = True
+    clock.scan()
+    assert [s[1] for s in clock._end_pending] == ["w1"]
+    asyncio.run(clock._finish_end(cwd, "w1", _run_id(cwd)))
+    assert worker.killed is False
+    assert "respawned" in worker.recorded[-1]
+
+
 def test_kill_on_end_keep_alive_records_but_ends_nothing(proj):
     cwd = str(proj)
     cflow_engine.start("linear", cwd=cwd, scope="w1")
