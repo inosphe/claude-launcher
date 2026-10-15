@@ -117,6 +117,8 @@ function harness() {
     {id: "qa-2", session: "s1", title: "Which port?", body: "", options: [], multi: false, revision: 2,
      status: "answered", answer: {text: "8080", choices: [], revision: 2}, thread: "th-2",
      links: [{id: "th-2", title: "Ports", status: "open", rel: "source"}]},
+    {id: "qa-3", session: "s1", title: "Settled?", body: "", options: [], multi: false, revision: 3,
+     status: "closed", answer: {text: "yes", choices: [], revision: 2}, thread: null, links: []},
   ];
   const calls = [];
   const api = async (p, opts = {}) => {
@@ -214,13 +216,16 @@ function harness() {
     await settle();
     const form = host.querySelector(".th-newform");
     assert.ok(form, "the new-thread form opens");
-    assert.equal(form.querySelector(".th-title-input").value, "Q: Which base?");
+    assert.equal(form.querySelector(".th-title-input").value, "qa-1: Which base?");
     assert.ok(form.querySelector(".th-about").textContent.includes("qa-1"), "the form names the question");
     const start = form.querySelectorAll(".term-btn").find((b) => b.textContent === "시작");
     start.fire("click");
     await settle();
     const created = calls.find((c) => c[0] === "POST" && c[1] === "/api/threads");
-    assert.deepEqual(created[2], {to: "s1", title: "Q: Which base?", qa: "qa-1"});
+    assert.deepEqual(created[2], {to: "s1", title: "qa-1: Which base?", qa: "qa-1"});
+    // A closed question can be taken up again in a thread (claunch-236ei).
+    const settled = host.querySelectorAll(".qa-card").find((c) => c.dataset.id === "qa-3");
+    assert.ok(settled && settled.querySelector(".qa-discuss"), "a closed question offers 쓰레드로 논의");
   }
 
   /* --- links: from a thread ----------------------------------------------- */

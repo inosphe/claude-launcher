@@ -20,11 +20,62 @@ A link whose other end is gone (a deleted question) is kept with status
 
 Links never cross sessions: the routes refuse to create one, so the join
 reads only the session's own rows.
+
+Ids in text (claunch-236ei). A question's id (``qa-xxxxxxxx``) written in a
+thread's title stands for the ``qa`` field: a thread opened without ``qa``
+whose title names exactly one of the session's questions is linked to it
+(:func:`subject_in`; the first message is read when the title names none).
+A user message that names other questions of the session gets a line per
+question in its delivered block (:func:`mentioned`), so the agent knows
+which question the user means without looking it up.
 """
 
 from __future__ import annotations
 
-from typing import Optional
+import re
+from typing import Iterable, Optional
+
+#: A QA question id as qa/store.py mints it ("qa-" + 4 random bytes in hex).
+QA_ID = re.compile(r"(?<![\w-])qa-[0-9a-f]{8}(?![\w-])", re.IGNORECASE)
+
+
+def qa_ids(text: Optional[str]) -> list[str]:
+    """The question ids written in ``text``, lowercased, first mention
+    first, each once. Anything but a string names none (the route
+    validates the title after reading it)."""
+    out: list[str] = []
+    if not isinstance(text, str):
+        return out
+    for m in QA_ID.finditer(text):
+        qid = m.group(0).lower()
+        if qid not in out:
+            out.append(qid)
+    return out
+
+
+def _known(ids: Iterable[str], questions: list[dict]) -> list[dict]:
+    by_id = {q["id"]: q for q in questions}
+    return [by_id[i] for i in ids if i in by_id]
+
+
+def subject_in(title: Optional[str], text: Optional[str], questions: list[dict]) -> Optional[str]:
+    """The question a thread opened without ``qa`` is about, read from its
+    title (or, when the title names none of ``questions``, its first
+    message): the one id of ``questions`` written there. ``None`` when
+    there is none, or more than one -- two ids leave the subject open
+    rather than picking one."""
+    for source in (title, text):
+        found = _known(qa_ids(source), questions)
+        if found:
+            return found[0]["id"] if len(found) == 1 else None
+    return None
+
+
+def mentioned(text: Optional[str], questions: list[dict], *, skip: Iterable[str] = ()) -> list[dict]:
+    """The questions of ``questions`` whose ids ``text`` names, in the order
+    named, without those in ``skip`` (the thread's own subject)."""
+    skip = set(skip)
+    return [q for q in _known(qa_ids(text), questions) if q["id"] not in skip]
 
 
 def _link(row: Optional[dict], rid: str, rel: str) -> dict:
