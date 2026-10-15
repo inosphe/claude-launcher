@@ -9,17 +9,23 @@ description: >-
   시험은 아직 claunch에 없으므로 그 필드는 null이고 한계에 적힌다.
 
 # ── 이 파일의 자리 ──────────────────────────────────────────────────────
-# 지금은 정적 `call: sim-run`으로 부른다(컴파일 시 펼침). 실행 중인 작업에서
-# 부르고 같은 작업으로 돌아오는 동적 호출, 독립 procedures 경로, 호출을 허용할
-# 작업 목록은 claunch-4avda(s173)의 범위다. 반환·대기 계약은 claunch-efnbt.6의
+# 두 방식으로 부른다. (1) 정적 `call: sim-run`(컴파일 시 펼침). (2) 동적 호출
+# (claunch-z17c9, docs/cflow-v2.md 2.12): `calls: [sim-run]`을 선언한 작업이
+# flow_call로 부르면 중첩 런 `<scope>~c<n>`으로 돌고, 끝나면 같은 작업이
+# call_result(outcome ok|fail, value)를 받아 다시 활성이 된다. `sims: deny` 작업은
+# calls를 선언할 수 없다(sims-deny-call). 반환·대기 계약은 claunch-efnbt.6의
 # DRAFT-2와 claunch-4avda의 CALL-CONTRACT-1이 정한다.
+#
+# 실행 세션 프로필·모델과 판정 모델은 이 절차가 정하지 않는다. 새 시뮬레이션은
+# Settings의 기본값(데몬 설정 simulation_*)을 받는다. 그 값이 비어 있거나 쓸 수
+# 없으면 sim_start가 409 fault로 거절하고, 이 절차는 그 사유로 fail을 돌려준다.
 #
 # 기다림의 정본은 시뮬레이션의 실행 기록이다: sim_start 응답의 run.seq를 기억하고
 # 같은 seq의 run.ended_at이 찰 때까지 기다린다(끝남 알림은 다시 볼 신호일 뿐).
 # 다른 seq가 보이면 다른 실행이 끼어든 것이다.
 
 params:
-  purpose: {type: str, default: spec, description: "spec(원천 문서를 확인) 또는 design(설계안 검토, 원천 없이 provisional 규칙)"}
+  purpose: {type: str, default: spec, description: "시뮬레이션 설정 purpose로 들어간다. spec(원천 문서를 확인) 또는 design(설계안 검토, 원천 없이 provisional 규칙)"}
   question: {type: str, required: true, description: 이 시뮬레이션으로 확인할 것 한 문장}
   sources: {type: list, default: null, description: spec일 때 모델을 세울 파일·glob}
   sim: {type: str, default: "", description: 이어 받을 시뮬레이션 id(비우면 새로 만든다)}
@@ -56,8 +62,12 @@ nodes:
 
       1. 모델이 대표하는 것과 대표하지 않는 것(동시성, 부분 실패, 사용성 등)을 적는다.
       2. 시뮬레이션을 만든다: sim_create(title, goal=확인할 것, sources, from=이어 받을
-         시뮬레이션). purpose가 spec인데 인용할 원천이 없으면 fail(reason:
-         sources_missing)로 돌아간다.
+         시뮬레이션, settings={purpose: ${params.purpose}}). purpose 외의 설정, 특히
+         interpreter_profile·interpreter_model·judge_profile·judge_model은 넘기지
+         않는다 — Settings의 기본값(simulation_*)이 들어간다. 이어 받는 시뮬레이션의
+         purpose가 다르면 sim_configure(settings.purpose)로 맞춘다.
+         purpose가 spec인데 인용할 원천이 없으면 fail(reason: sources_missing)로
+         돌아간다.
       3. 시뮬레이션 id와 한계 목록을 보고한다.
     returns:
       ok: {sim_id: str, limits: list}
@@ -69,8 +79,8 @@ nodes:
       시뮬레이션 ${result['sim-scope'].value.sim_id}의 모델을 세운다(sim_guide를 먼저 읽는다).
       목적이 spec이면 규칙과 불변식은 원천을 글자 그대로 인용하고, 원천이 정하지 않은
       것만 provisional로 둔다. design이면 provisional로 두되 설계안 이름을 goal에 적는다.
-      실행 세션 프로필이 설정되어 있으면 이 단계를 건너뛴다 — 실행 세션이 원천에서
-      모델을 세운다. sim_patch가 거절하면 이유대로 고쳐 다시 제출한다.
+      모델이 비어 있고 목적이 spec이면 이 단계를 건너뛸 수 있다 — 시작 후 실행 세션이
+      원천에서 첫 모델을 세운다(formalize). sim_patch가 거절하면 이유대로 고쳐 다시 제출한다.
       승인된 모델을 세우지 못하면 fail(reason: model_rejected)로 돌아간다.
     returns:
       ok: {model_hash: str}
@@ -79,15 +89,19 @@ nodes:
   sim-walk:
     title: 시뮬레이션 실행
     prompt: |
-      sim_start ${result['sim-scope'].value.sim_id}를 부르고 응답의 run.seq를 기억한다.
-      - 응답에 runner가 있으면 데몬의 실행 세션이 라운드를 진행한다. 같은 seq의
-        run.ended_at이 찰 때까지 기다린다(sim_show로 확인한다. 끝남 알림은 다시 볼
-        신호이고 판정은 run 기록으로 한다).
-      - runner가 없으면 기다리기만 해서는 진행되지 않는다. 이 작업이 라운드를 진행한다:
-        run.ended_at이 찰 때까지 sim_gaps로 열린 발견을 읽고 sim_patch(원천 인용)나
-        sim_resolve(dismiss·ask)로 답한다. 받아들여진 sim_patch마다 데몬이 라운드를
-        다시 돌리고, 열린 발견 0 또는 max_rounds에서 run이 끝난다. 더 답할 수 없으면
-        sim_stop으로 run을 끝낸다.
+      sim_start ${result['sim-scope'].value.sim_id}를 부른다.
+      - 409로 거절되면 아무것도 실행되지 않은 것이다. 다시 시도하지 않고 fail로 돌아간다.
+        partial에는 {sim_id, run_seq(sim_show의 run.seq, 없으면 null), error(응답의 error)}를 싣는다.
+        - 응답에 fault가 있으면(no-profile | profile-unusable | no-runtime, 시뮬레이션은
+          fault 상태) reason은 그 fault 값이다. 프로필은 사용자가 Settings 또는
+          시뮬레이션 설정에서 고른다 — 이 절차가 임의로 정하지 않는다.
+        - 응답에 sims_denied가 있으면(호출한 런이 sims: deny 단계에 있음) reason은
+          sims_denied이고 partial에 sims_denied 값을 더한다.
+        - 그 밖의 409(이미 실행 중인 실행 세션 등)는 reason: daemon_error.
+      - 502(실행 세션을 띄우지 못함)도 fail이다: reason: runner_failed, partial은 위와 같다.
+      - 시작되면 응답의 runner가 데몬이 띄운 실행 세션이고 sim.run.seq를 기억한다.
+        실행 세션이 라운드를 진행한다. 같은 seq의 run.ended_at이 찰 때까지 기다린다
+        (sim_show로 확인한다. 끝남 알림은 다시 볼 신호이고 판정은 run 기록으로 한다).
       - 다른 seq가 보이면 fail(reason: superseded).
       - ${params.time_budget_s}초 안에 끝나지 않으면 sim_stop 후 timeout(partial에 run).
       run.failed가 참이면 fail(reason: runner_failed, partial에 run과 마지막 라운드).

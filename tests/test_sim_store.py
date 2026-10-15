@@ -560,3 +560,9 @@ def test_each_start_is_a_run_with_a_recorded_end(env):
     st.stop(sim["id"], "s1", "enough")
     run = st.get(sim["id"])["run"]
     assert run["seq"] == 4 and run["state"] == "stopped" and run["reason"] == "enough"
+    # A start that then faults (efnbt.8: the profile or runtime went away
+    # before the run session launched) ends its run as failed.
+    st.start(sim["id"], "s1", round=False)
+    st.fault(sim["id"], "s1", "no interpreter profile is set")
+    run = st.get(sim["id"])["run"]
+    assert run["seq"] == 5 and run["ended_at"] and run["failed"] and run["state"] == "fault"
