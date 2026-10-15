@@ -5,7 +5,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
-from claude_launcher import mcp_server, threads_mcp
+from claude_launcher import prompt_packs, mcp_server, threads_mcp
 
 
 class Client:
@@ -28,9 +28,12 @@ def test_tools_are_registered():
 
 
 def test_the_reply_format_is_markdown():
-    """The agent is told the pane renders markdown, in the server
-    instructions and on both tools that write text (claunch-5usj6)."""
-    assert "GitHub-flavored markdown" in threads_mcp.INSTRUCTIONS
+    """The agent is told the pane renders markdown, in the mcp-threads pack
+    and on both tools that write text (claunch-5usj6); the server
+    instructions point at that pack (claunch-8do04)."""
+    assert "GitHub-flavored markdown" in prompt_packs.shipped("mcp-threads").body
+    assert "markdown" in threads_mcp.INSTRUCTIONS
+    assert "'mcp-threads'" in threads_mcp.INSTRUCTIONS
     tools = {t["name"]: t for t in threads_mcp.TOOLS}
     assert "markdown" in tools["thread_reply"]["description"]
     for name in ("thread_reply", "thread_open"):

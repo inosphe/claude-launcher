@@ -387,6 +387,25 @@ check("with no mesh and nothing installed, any of claunch's packs can be ticked"
   env.offer = OFFER;
 });
 
+check("the mcp- packs are their own MCP group between General and Roles (claunch-8do04)", () => {
+  env.offer = {
+    ...OFFER,
+    default_packs: ["common", "mcp-threads"],
+    shipped: [...OFFER.shipped, { id: "mcp-threads", title: "MCP — session threads" }],
+  };
+  env.closeRoles();
+  env.ticks().clear();
+  env.render();
+  assert.deepEqual(groups().map(([name]) => name), ["General", "MCP", "Roles"]);
+  assert.deepEqual(groups()[0][1], GENERAL);
+  assert.deepEqual(groups()[1], ["MCP", ["prompt_pack_mcp-threads"]]);
+  // A default like any other: ticked untouched, and it goes in.
+  assert.deepEqual(env.packs(form), ["common", "mcp-threads"]);
+  env.offer = OFFER;
+  env.render();
+  assert.deepEqual(groups().map(([name]) => name), ["General", "Roles"]);
+});
+
 check("the daemon's prompt is the first chip, ticked, and can be unticked", () => {
   env.closeRoles();   // a role chip an earlier check showed keeps its place
   env.offer = { ...OFFER, daemon_prompt: { id: "@daemon", title: "Daemon prompt (default)" } };

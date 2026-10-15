@@ -524,7 +524,9 @@ DEFAULT_ROLE_PACKS: Dict[str, List[str]] = {
 #: The default packs of an untouched config (:func:`default_packs`). A
 #: setting's value like :data:`DEFAULT_ROLE_PACKS`, kept here rather than in
 #: the packs' headers: which packs a form ticks is not a property of a pack.
-DEFAULT_PACKS: List[str] = ["asking-the-user", "common", "korean-replies"]
+DEFAULT_PACKS: List[str] = [
+    "asking-the-user", "common", "korean-replies", "mcp-threads", "mcp-qa", "mcp-sim",
+]
 
 _ROLE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 

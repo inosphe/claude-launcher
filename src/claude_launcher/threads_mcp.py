@@ -15,28 +15,10 @@ import urllib.parse
 from . import daemon_client, mcp_rpc
 
 INSTRUCTIONS = """\
-Session threads (thread_* tools): the user can talk to you in several
-sub-topic threads at once from the threads pane beside your terminal. A
-message they write there is typed into your terminal as a
-"[claunch thread th-xxxxxx "title"]" block; answer it with thread_reply on
-that thread_id, not in the terminal, so each topic keeps its own history.
-thread_read returns a thread's whole conversation (use it to pick a topic
-back up), thread_list shows your threads with unread counts, thread_open
-starts a new topic yourself (a side question to the user, a parallel line of
-work to report on), thread_close settles one. Keep each thread to its topic;
-carry the main task on in the terminal as usual. Write every thread_reply
-and thread_open text as GitHub-flavored markdown: the pane renders it
-(headings, lists, **bold**, `code`, fenced code blocks, tables, links) and
-keeps single line breaks; it shows raw HTML as text, and a reply wrapped
-whole in one code fence shows as a code block. Threads and QA questions
-link to each other: a thread opened about a question (thread_open qa=, or the
-user's "discuss in a thread" on a QA card, or a title naming one of your
-question ids, e.g. "qa-78302411: ...") carries it as its subject; a thread
-block says which question it is about and which of your questions the
-user's message names -- read them with qa_list (closed=true for a settled
-one) before answering. When a thread reaches a decision the user must
-make, file it with qa_ask thread=<id> so the question links back to the
-conversation. Each thread's 'links' lists the questions it touches.
+Session threads (thread_* tools): answer a "[claunch thread th-... ]" block
+with thread_reply on that thread, in markdown. When the user must act now,
+alert them in a thread (every message there is a dashboard notice). Full
+guidance: prompt pack 'mcp-threads'.
 """
 
 _TID = {"thread_id": {"type": "string", "description": "thread id (th-xxxxxx)"}}

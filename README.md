@@ -2793,6 +2793,7 @@ header (`title`, `description`). Shipped today:
 | `beads` | Driving the board through `claunch beads`, issue writing rules, and picking work with `bv --robot-*` (never the bare TUI). Agent Mail is not covered. |
 | `unreal-operator` | Handing Unreal editor-only work (assets, Blueprint wiring, Project Settings, PIE checks) to a person as `--assignee operator` issues. |
 | `role-<name>` | One per packaged mesh role (`role-leader`, `role-worker`, `role-reviewer`, `role-pm`, `role-operator`, `role-specialist`, `role-analyst`, `role-free`, `role-merger`): the role's working rules. The role's stance keeps one or two sentences; the rest is here. |
+| `mcp-<family>` | The guidance for one claunch MCP tool family (`mcp-threads`, `mcp-qa`, `mcp-sim`), ticked by default. The MCP server instructions keep one pointer per family because clients cut them short (Claude Code keeps 4096 characters); a session whose opening lacks a pack reads it with the MCP `prompt_pack` tool. `mcp-threads` also says when and how to alert the user in a thread when they must act now. |
 | `retrospective` | **On-demand** (see below): the session reviews its own work from the records (transcript, run journal, board, commits, mesh) and then the cflow definition it followed, ending in change proposals posted as a `RETRO @ <run>` comment on its issue. |
 
 A new pack is a new `.md` file in that directory; nothing else lists them.
@@ -2814,8 +2815,8 @@ The workflow has two steps:
    "workspace"; the badge's tooltip says which workspace, and for claunch's
    copy that installing it in Settings ▸ Install makes it editable there).
    A default pack carries a "default" mark.
-   The chips sit in two groups, **General** and **Roles** (the `role-*`
-   packs); a role pack that is neither ticked nor required is folded behind
+   The chips sit in three groups, **General**, **MCP** (the `mcp-*` packs)
+   and **Roles** (the `role-*` packs); a role pack that is neither ticked nor required is folded behind
    a "+N more" button. Every chip has a **view** button that shows the pack's
    text under the chips, read the same way the opening would read it (the
    workspace's copy with its edits, else claunch's) and saying which it is.
@@ -2842,7 +2843,7 @@ Two settings sit under the matrix, stored in `~/.claunch.yaml` under
   setup" seed that left it out does not untick it; take it off the list to
   stop. Installed or not makes no difference: a session gets the workspace's
   copy, or claunch's when the workspace has not installed it, and the form
-  says which. Until saved, `DEFAULT_PACKS` in `prompt_packs.py` (`asking-the-user`, `common`, `korean-replies`);
+  says which. Until saved, `DEFAULT_PACKS` in `prompt_packs.py` (`asking-the-user`, `common`, `korean-replies`, `mcp-threads`, `mcp-qa`, `mcp-sim`);
   which packs are defaults is this setting's value, not something a pack's
   header declares. Only the web form reads it: `--prompt-pack` on the CLI and
   `prompt_packs` on MCP `spawn` take exactly the packs named.
