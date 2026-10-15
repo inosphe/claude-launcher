@@ -382,6 +382,11 @@ DAEMON_DEFAULTS = {
     # "event loop stalled" line to daemon.log (daemon/loop_lag.py,
     # claunch-9gm02). 0 turns it off. Read when the daemon starts.
     "loop_lag_log_s": 1.0,
+    # Seconds between the machine samples behind the rail header's CPU / MEM
+    # / IO badge and the System performance page; each sample is also a line
+    # of <daemon dir>/logs/sysperf.log, rotated at 2 MB x 5 (daemon/sysperf.py,
+    # claunch-zuk0b). 0 turns the collector off. Read when the daemon starts.
+    "sysperf_interval_s": 5.0,
     # Run session PTYs in a separate PTY host process (claunch-xnnct, stage
     # 1: POSIX only; a daemon exit still ends its sessions). Read at start.
     "pty_host": False,

@@ -39,6 +39,7 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
       showView('settings');
       renderWorkspaces();
       window.batchRequests = [];
+      globalThis.SysPerfPage?.stopBadge();
       api = async (url, options) => {
         window.batchRequests.push([url, JSON.parse(options.body)]);
         await new Promise(resolve => { window.finishBatch = resolve; });

@@ -33,6 +33,7 @@ const root = path.resolve(__dirname, '../../src/claude_launcher/web/static');
    f.mesh.add(new Option('none','')); f.role.add(new Option('none',''));
    f.workflow.add(new Option('none','')); f.cwd.add(new Option('repo','F:/repo'));
    window.posts=[];
+   globalThis.SysPerfPage?.stopBadge();
    api=async(url,opts)=>{ if(opts?.method==='POST') {posts.push({url,body:JSON.parse(opts.body)});return {ok:false,status:400,json:async()=>({error:'test refusal'})};}
      if(url.includes('/children')) return {ok:true,json:async()=>({child_cflow:'worker-flow'})};
      if(url.includes('/roles')) return {ok:true,json:async()=>({default:'free-role',roles:[{name:'leader',exclusive:true},{name:'worker'},{name:'free-role'}]})};

@@ -20583,6 +20583,7 @@ const VIEWS = {
   window: "window-view",
   stats: "stats-view",
   "profile-usage": "profile-usage-view",
+  sysperf: "sysperf-view",
   cli: "cli-view",
   beads: "beads-view",
   worktrees: "worktrees-view",
@@ -21268,6 +21269,7 @@ function parseHash(h) {
   }
   if (parts[0] === "window") return { page: "window" };
   if (parts[0] === "profile-usage") return { page: "profile-usage" };
+  if (parts[0] === "sysperf") return { page: "sysperf" };
   // #/stats opens on a default session; #/stats/<name> names one.
   if (parts[0] === "stats") return { page: "stats", name: parts[1] || "" };
   // #/compare/<a,b,c>: the same page comparing sessions (names hold no comma).
@@ -21351,6 +21353,7 @@ function route() {
   if (r.page !== "window") stopWindowPoll();
   if (r.page !== "stats") stopStatsPoll();
   if (r.page !== "profile-usage") globalThis.ProfileUsagePage?.stop();
+  if (r.page !== "sysperf") globalThis.SysPerfPage?.stop();
   if (r.page !== "beads") { stopBeadsPoll(); stopReportsPoll(); }
   if (r.page !== "worktrees") globalThis.WorktreesPage?.stop();
   if (r.page !== "threads") globalThis.ThreadsHistoryPage?.stop();
@@ -21432,6 +21435,7 @@ function route() {
     case "window": openWindowPage(); break;
     case "stats": openStatsPage(r.name, r.compare); break;
     case "profile-usage": showView("profile-usage"); globalThis.ProfileUsagePage.open(); break;
+    case "sysperf": showView("sysperf"); globalThis.SysPerfPage.open(); break;
     case "cli": openCli(); break;
     case "settings": openSettings(r.section); break;
     case "workspaces": openSettings("workspaces"); break;
