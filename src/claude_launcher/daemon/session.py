@@ -616,7 +616,9 @@ class Session:
         #: Set by :meth:`SessionManager.respawn` right after this instance is
         #: constructed: a person explicitly asked for this incarnation, as
         #: opposed to :meth:`SessionManager.restore_all` starting it back up
-        #: unattended after a daemon restart. In memory only, and
+        #: unattended after a daemon restart. A wake the daemon starts on its
+        #: own (``manager.AUTOMATIC_WAKES``: the restore queue, a mesh
+        #: delivery, a cflow notice) puts it back to False. In memory only, and
         #: deliberately not carried across a respawn's own relaunch or a
         #: restart's — each new incarnation starts False, so the deference
         #: this buys a session (see ``cflow kill-on-end`` in
