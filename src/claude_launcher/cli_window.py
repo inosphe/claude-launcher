@@ -22,6 +22,7 @@ could always put itself first, and the queue would stop meaning anything.
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 
@@ -408,6 +409,70 @@ def _cmd_history(args) -> int:
     return 0
 
 
+def _reported(grant_id: str) -> bool:
+    """True when something already attached a result to this held grant (a
+    pytest under it reports its own, with counts the wrapper does not have)."""
+    client = daemon_client.connect()
+    if client is None:
+        return False
+    try:
+        state = client.get("/api/window", timeout=3.0)
+    except daemon_client.DaemonClientError:
+        return False
+    return any(h.get("grant_id") == grant_id and h.get("result")
+               for h in state.get("holders") or [])
+
+
+def _cmd_run(args) -> int:
+    """Hold the window for one command of any kind (claunch-ersj2).
+
+    pytest in this repository takes the window through tests/conftest.py; a
+    command that does not -- another repository's npm or cargo test, a script
+    -- runs here under a grant instead, so it waits its turn and shows on the
+    Window page. A pytest inside it inherits the grant instead of queueing
+    behind it. Exit status is the command's; 1 when no grant was given.
+    """
+    import shlex
+    import subprocess
+    import time
+
+    from . import test_window
+
+    command = list(args.command or [])
+    if command and command[0] == "--":
+        command = command[1:]
+    if not command:
+        print("window run wants a command: claunch window run [options] -- <command>",
+              file=sys.stderr)
+        return 2
+    try:
+        grant = test_window.acquire(
+            args.cls,
+            label=args.label or shlex.join(command)[:200],
+            wait=args.wait,
+            workers=args.workers or 0,
+        )
+    except test_window.WindowUnavailable as exc:
+        print(f"window run: {exc}", file=sys.stderr)
+        return 1
+    started = time.monotonic()
+    try:
+        try:
+            code = subprocess.run(command, env=grant.child_env()).returncode
+        except FileNotFoundError:
+            print(f"window run: command not found: {command[0]}", file=sys.stderr)
+            code = 127
+        if test_window.reportable(grant.grant_id) and not _reported(grant.grant_id):
+            test_window.report_result(grant.grant_id, {
+                "outcome": "passed" if code == 0 else "failed" if code == 1 else "error",
+                "exit_code": code,
+                "duration": round(time.monotonic() - started, 1),
+            })
+    finally:
+        grant.release()
+    return code
+
+
 def register(sub) -> None:
     p_window = sub.add_parser(
         "window",
@@ -461,6 +526,25 @@ def register(sub) -> None:
         "exclusivity rule (refused inside a managed session)",
     )
     p.set_defaults(func=_cmd_acquire)
+
+    p = wsub.add_parser(
+        "run",
+        help="run one command under a grant: wait for the window, run, release "
+        "(for tests that do not take the window themselves)",
+    )
+    p.add_argument("--class", dest="cls", choices=["sweep", "targeted"],
+                   default="targeted",
+                   help="targeted (default) shares the window up to the cap; "
+                   "sweep runs alone")
+    p.add_argument("--wait", type=float, default=1800.0, metavar="SECONDS",
+                   help="how long to queue for the grant (default 1800)")
+    p.add_argument("--label", help="what runs (default: the command line)")
+    p.add_argument("--workers", type=int, metavar="N",
+                   help="the parallel width the command uses (default: the class "
+                   "ceiling); the grant's width is in $CLAUNCH_WINDOW_ADVISORY_N")
+    p.add_argument("command", nargs=argparse.REMAINDER,
+                   help="-- then the command and its arguments")
+    p.set_defaults(func=_cmd_run)
 
     p = wsub.add_parser("release", help="hand a grant back")
     p.add_argument("--grant-id", help="the grant to release (default: all of "

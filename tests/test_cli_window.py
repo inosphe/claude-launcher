@@ -135,3 +135,81 @@ def test_window_cancel_reports_an_empty_match(monkeypatch, capsys):
 
     assert cli_window._cmd_cancel(argparse.Namespace(grant_id=None, session=None)) == 1
     assert "nothing to cancel" in capsys.readouterr().err
+
+
+def _run_args(*command, cls="targeted"):
+    return argparse.Namespace(cls=cls, wait=5.0, label=None, workers=None,
+                              command=["--", *command])
+
+
+def test_window_run_holds_a_grant_for_any_command_and_reports_its_exit(monkeypatch, tmp_path):
+    # claunch-ersj2: tests that are not this repository's pytest (another
+    # repository's npm test) never took the window and never showed on it.
+    import sys
+    from claude_launcher import test_window
+
+    calls = []
+
+    class _Grant:
+        grant_id = "g-run"
+
+        def child_env(self):
+            import os
+            return {**os.environ, test_window.WINDOW_GRANT_ENV: "g-run"}
+
+        def release(self):
+            calls.append("release")
+
+    def acquire(cls, **kw):
+        calls.append(("acquire", cls, kw["label"]))
+        return _Grant()
+
+    monkeypatch.setattr(test_window, "acquire", acquire)
+    monkeypatch.setattr(test_window, "report_result",
+                        lambda gid, result: calls.append(("report", gid, result["outcome"],
+                                                          result["exit_code"])))
+    monkeypatch.setattr(cli_window, "_reported", lambda gid: False)
+    out = tmp_path / "grant.txt"
+    code = cli_window._cmd_run(_run_args(
+        sys.executable, "-c",
+        f"import os,sys; open({str(out)!r},'w').write(os.environ['CLAUNCH_WINDOW_GRANT_ID']); sys.exit(3)"))
+    assert code == 3
+    assert out.read_text() == "g-run"  # a pytest inside inherits the grant
+    assert calls[0][:2] == ("acquire", "targeted") and sys.executable in calls[0][2]
+    assert calls[1:] == [("report", "g-run", "error", 3), "release"]
+
+
+def test_window_run_keeps_a_nested_pytests_own_report(monkeypatch):
+    import sys
+    from claude_launcher import test_window
+
+    reports = []
+    grant = type("G", (), {"grant_id": "g2", "child_env": lambda self: None,
+                           "release": lambda self: None})()
+    monkeypatch.setattr(test_window, "acquire", lambda cls, **kw: grant)
+    monkeypatch.setattr(test_window, "report_result", lambda *a: reports.append(a))
+    monkeypatch.setattr(cli_window, "_reported", lambda gid: True)
+    assert cli_window._cmd_run(_run_args(sys.executable, "-c", "pass")) == 0
+    assert reports == []
+
+
+def test_window_run_refusal_and_missing_command(monkeypatch, capsys):
+    from claude_launcher import test_window
+
+    def refuse(cls, **kw):
+        raise test_window.WindowUnavailable("test window targeted timed out after 5s")
+
+    monkeypatch.setattr(test_window, "acquire", refuse)
+    assert cli_window._cmd_run(_run_args("true")) == 1
+    assert "timed out" in capsys.readouterr().err
+    assert cli_window._cmd_run(_run_args()) == 2
+
+
+def test_the_parser_takes_window_run_with_its_command():
+    import argparse as ap
+
+    parser = ap.ArgumentParser()
+    cli_window.register(parser.add_subparsers(dest="command"))
+    args = parser.parse_args(["window", "run", "--class", "sweep", "--", "npm", "test", "-w", "x"])
+    assert args.func is cli_window._cmd_run
+    assert (args.cls, args.command) == ("sweep", ["--", "npm", "test", "-w", "x"])
