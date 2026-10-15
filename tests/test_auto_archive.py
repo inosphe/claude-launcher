@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
+
+from aiohttp import web
+from aiohttp.test_utils import TestClient, TestServer
 
 from claude_launcher import store
 from claude_launcher.daemon import auto_archive
@@ -113,3 +117,96 @@ def test_a_bad_config_value_falls_back_to_the_default(home):
          "auto_archive_batch": None}
     )
     assert (days, interval, batch) == (auto_archive.DAYS, 0.0, auto_archive.BATCH)
+
+
+async def _until(cond, *, tries=500) -> bool:
+    for _ in range(tries):
+        if cond():
+            return True
+        await asyncio.sleep(0.01)
+    return cond()
+
+
+def test_the_loop_waits_an_interval_then_archives_on_its_own(home):
+    mgr = manager()
+    add_dead(mgr, "old", exited_days=400)  # well past the cutoff at any real now
+    store.set_daemon_field("auto_archive_interval_s", 0.01)
+    clock = auto_archive.AutoArchiver(mgr)
+
+    async def run():
+        clock.start()
+        try:
+            return await _until(lambda: mgr.get("old").archived_at is not None)
+        finally:
+            await clock.stop()
+
+    assert asyncio.run(run())
+    assert clock.last["archived"] == ["old"]
+    assert clock._task is None
+
+
+def test_a_failing_tick_does_not_end_the_loop(home, monkeypatch):
+    mgr = manager()
+    store.set_daemon_field("auto_archive_interval_s", 0.01)
+    clock = auto_archive.AutoArchiver(mgr)
+    calls = []
+
+    def tick(now=None):
+        calls.append(now)
+        if len(calls) == 1:
+            raise RuntimeError("boom")
+        return {"archived": [], "failed": [], "remaining": 0}
+
+    monkeypatch.setattr(clock, "tick", tick)
+
+    async def run():
+        clock.start()
+        try:
+            return await _until(lambda: len(calls) >= 2)
+        finally:
+            await clock.stop()
+
+    assert asyncio.run(run())
+
+
+def test_interval_zero_idles_and_rereads_the_config(home, monkeypatch):
+    mgr = manager()
+    add_dead(mgr, "old", exited_days=400)
+    store.set_daemon_field("auto_archive_interval_s", 0)
+    monkeypatch.setattr(auto_archive, "IDLE_RECHECK", 0.01)
+    clock = auto_archive.AutoArchiver(mgr)
+
+    async def run():
+        clock.start()
+        try:
+            await asyncio.sleep(0.1)
+            idle = mgr.get("old").archived_at is None
+            store.set_daemon_field("auto_archive_interval_s", 0.01)
+            turned_on = await _until(lambda: mgr.get("old").archived_at is not None)
+            return idle, turned_on
+        finally:
+            await clock.stop()
+
+    assert asyncio.run(run()) == (True, True)
+
+
+def test_install_starts_the_clock_with_the_app_and_stops_it_on_shutdown(home):
+    mgr = manager()
+    store.set_daemon_field("auto_archive_interval_s", 600)
+
+    async def run():
+        app = web.Application()
+        archiver = auto_archive.install(app, mgr)
+        assert app["auto_archive"] is archiver and archiver._task is None
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            task = archiver._task
+            running = task is not None and not task.done()
+        finally:
+            await client.close()
+        return running, task, archiver._task
+
+    running, task, after = asyncio.run(run())
+    assert running
+    assert task.cancelled() and after is None
