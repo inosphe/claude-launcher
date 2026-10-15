@@ -23,7 +23,7 @@ import uuid
 from dataclasses import dataclass, field, replace
 from typing import Dict, Iterable, List, Optional, Tuple
 
-from .. import borrowing, harnesses as harness_registry
+from .. import borrowing, harnesses as harness_registry, session_env
 from .. import lineage, metering, pi_provider, profile as profile_mod, projects, providers, routing, runner
 from .. import store, transcripts
 from .. import config as launcher_config
@@ -33,17 +33,15 @@ log = logging.getLogger("claunch.daemon.harness")
 
 CLAUDE_HARNESS = harness_registry.CLAUDE_HARNESS
 
-#: Nested-session markers a parent Claude Code process leaves in the
-#: environment. The daemon is often started from inside a claude session (the
-#: user runs ``claunch new-session`` there), and a child claude that inherits
-#: these thinks it is a nested/child session — which among other things turns
-#: off transcript persistence and would break ``--continue`` restore.
-_NESTED_SESSION_MARKERS = (
-    "CLAUDECODE",
-    "CLAUDE_CODE_CHILD_SESSION",
-    "CLAUDE_CODE_ENTRYPOINT",
-    "CLAUDE_CODE_SSE_PORT",
-)
+# A session's environment starts from the daemon's minus every variable that
+# belongs to some managed session (:mod:`..session_env`). The daemon is often
+# started from inside a session, and a child that inherits, for instance, a
+# parent claude's nested-session markers thinks it is a nested/child session
+# — which among other things turns off transcript persistence and would break
+# ``--continue`` restore; one that inherits another session's codex thread or
+# Herdr pane names things after it (claunch-2yiij). The daemon removes them
+# from its own environment at boot as well; this keeps the guarantee where
+# the environment is handed on.
 
 #: The daemon's own settings, which a session has no use for and must not
 #: pass on. A named instance's port is the one here: it is in the daemon's
@@ -1075,14 +1073,14 @@ def build_command(
     """
     prof = profile_mod.require_selector(sdef.profile) if sdef.profile else None
     # The daemon's own environment, minus the two families of answer a
-    # parent leaves behind that are wrong for a PTY child: the nested-session
-    # markers above, and the "do not colour your output" ones the daemon
-    # inherits when it is started from an agent's tool shell (see
-    # pty_backend.strip_inherited_color_answers) -- and minus the daemon's
-    # own settings (_DAEMON_ONLY_ENV).
+    # parent leaves behind that are wrong for a PTY child: any session's
+    # identity (session_env, comment above), and the "do not colour your
+    # output" ones the daemon inherits when it is started from an agent's
+    # tool shell (see pty_backend.strip_inherited_color_answers) -- and minus
+    # the daemon's own settings (_DAEMON_ONLY_ENV).
     base = pty_backend.strip_inherited_color_answers({
-        k: v for k, v in os.environ.items()
-        if k not in _NESTED_SESSION_MARKERS and k not in _DAEMON_ONLY_ENV
+        k: v for k, v in session_env.scrub().items()
+        if k not in _DAEMON_ONLY_ENV
     })
     entry = harness_registry.get(sdef.harness)
     borrow_prof = None

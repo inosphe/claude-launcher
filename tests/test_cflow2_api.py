@@ -1060,3 +1060,61 @@ def test_a_dashboard_pick_carries_the_users_note_to_the_driver(proj, monkeypatch
     assert "'left'" in sent[0][1] and "fix the workflow yaml in claunch" in sent[0][1]
     pick = runtime.status(cwd=cwd, scope="s1")["person_picks"][0]
     assert pick["option"] == "left" and pick["reason"] == "fix the workflow yaml in claunch"
+
+
+# --------------------------------------------------------------------------- #
+# claunch-2yiij / claunch-2whs1: a run the daemon starts is driven by the
+# session its scope names, whatever CLAUNCH_SESSION the daemon's own
+# environment carries (it once carried s609's for a day: every run a new
+# session was created with, and every delegated session's oneshot run, was
+# recorded as s609's and refused to its own session).
+# --------------------------------------------------------------------------- #
+def test_the_run_a_session_is_created_with_is_driven_by_that_session(proj, monkeypatch):
+    monkeypatch.setenv("CLAUNCH_SESSION", "s609")
+    plan = _preflight({"workflow": "pick", "task": "go"}, str(proj))
+    report, _opening = asyncio.run(onboard.arrange(plan, name="w1", cwd=str(proj),
+                                                   mesh_mgr=None))
+    assert report["workflow"]["ok"] is True
+    assert RunStore(str(proj), "w1").load_state()["driver"] == "w1"
+
+
+def test_a_delegated_sessions_oneshot_run_is_driven_by_the_child(proj, monkeypatch):
+    """The session executor creates its child with ``workflow`` and
+    ``workflow_version: 2`` (cflow2_exec.spawn_body); the child's run starts
+    through the same onboarding, in the daemon."""
+    monkeypatch.setenv("CLAUNCH_SESSION", "s609")
+    plan = onboard.preflight({"workflow": "kid", "workflow_version": 2, "task": "go"},
+                             mesh_mgr=None, session_name="s610", cwd=str(proj),
+                             harness="claude")
+    started = onboard._start_v2(plan, name="s610", cwd=str(proj))
+    assert started["ok"] is True
+    assert RunStore(str(proj), "s610").load_state()["driver"] == "s610"
+    # ... so the child may operate it, and the session in the env may not.
+    runtime.authorize(cwd=str(proj), scope="s610", session="s610")
+    with pytest.raises(runtime.FlowError):
+        runtime.authorize(cwd=str(proj), scope="s610", session="s609")
+
+
+def test_the_dashboard_start_is_driven_by_the_scopes_session(proj, monkeypatch):
+    monkeypatch.setenv("CLAUNCH_SESSION", "s609")
+    cwd = str(proj)
+
+    async def go(client, bearer):
+        out = []
+        for scope in ("s3", "default"):
+            resp = await client.post("/api/cflow/start", headers=bearer, json={
+                "cwd": cwd, "scope": scope, "workflow": "demo", "workflow_version": 2})
+            out.append(resp.status)
+        return out
+
+    assert _http(go) == [200, 200]
+    assert RunStore(cwd, "s3").load_state()["driver"] == "s3"
+    assert RunStore(cwd, "default").load_state()["driver"] == ""
+
+
+def test_an_explicit_driver_still_wins_in_start_run(proj, monkeypatch):
+    monkeypatch.setenv("CLAUNCH_SESSION", "s609")
+    cwd = str(proj)
+    cflow2_web.start_run(layers.load("demo", cwd), cwd=cwd, scope="s7", caps={},
+                         driver="s8")
+    assert RunStore(cwd, "s7").load_state()["driver"] == "s8"
