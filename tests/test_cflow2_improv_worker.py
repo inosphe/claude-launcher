@@ -182,6 +182,8 @@ def test_coding_approval_requires_user_each_item_visit(tmp_path, monkeypatch):
         [ask] = st["asks"]
         assert ask["label"] == "coding-approval"
         assert brief in ask["prompt"]
+        # urgent: the dashboard raises it on its notification channel (claunch-x76l8.1)
+        assert ask["urgent"] is True and ask["resolution"] == "human"
         with pytest.raises(runtime.FlowError, match="not yours to answer"):
             runtime.approve(None, caller="agent", **kw)
         with pytest.raises(runtime.FlowError):
@@ -213,6 +215,7 @@ def test_coding_approval_is_a_false_by_default_boolean_and_human_only():
     ask = doc["nodes"]["coding-approval"]["ask"]
     assert ask["otherwise"] == "human"
     assert "from" not in ask and "timeout" not in ask
+    assert ask["urgent"] is True
 
 
 # -- compile and check -------------------------------------------------------

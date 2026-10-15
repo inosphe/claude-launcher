@@ -239,6 +239,66 @@ def test_rail_ask_answer_names_the_instance_the_approve_handler_takes(
 
 
 
+URGENT = """\
+cflow: 2
+name: urgent
+description: an urgent ask routed to a reviewer first, then a plain ask
+nodes:
+  a: {title: Step A, prompt: do a,
+      ask: {prompt: "start now?", urgent: true, from: [{role: reviewer}]}}
+  b: {title: Step B, prompt: do b, ask: {prompt: "may I b?"}}
+body: [a, b]
+"""
+
+
+def test_rail_urgent_asks_follow_an_urgent_ask_until_it_is_answered(proj, monkeypatch):
+    """``urgent_asks`` (claunch-x76l8.1): the run's ``urgent: true`` asks,
+    open and settled, so the dashboard puts one on its notification channel
+    only while its resolution is ``human`` and records how it ended. A plain
+    ask never appears there, and its rail answer stays unflagged."""
+    executors.register(None)
+    cwd = str(proj)
+    v2 = proj / ".claunch" / "workflows" / "v2"
+    (v2 / "urgent.yaml").write_text(URGENT, encoding="utf-8")
+    try:
+        runtime.start(layers.load("urgent", cwd), cwd=cwd, scope="s1", caps={})
+        r = _rail(cwd, "s1")["s1"]
+        (u,) = r["urgent_asks"]
+        # still routed to the reviewer role: not the person's yet, and the
+        # rail owes nothing -- the dashboard leaves it alone
+        assert u["status"] == "open" and u["resolution"] != "human"
+        assert u["label"] == "a" and r["answers"] == []
+
+        st = runtime.RunStore(cwd, "s1")
+        state = st.load_state()
+        state["asks"][u["id"]]["resolution"] = runtime.RES_HUMAN
+        for ap in state["approvals"]:
+            ap["resolution"] = runtime.RES_HUMAN
+        state["status"] = runtime.ST_WAITING
+        st.save_state(state)
+        r = _rail(cwd, "s1")["s1"]
+        (u,) = r["urgent_asks"]
+        assert u["resolution"] == "human"
+        (a,) = r["answers"]
+        assert a["kind"] == "ask" and a["ask"] == u["id"] and a["urgent"] is True
+
+        cflow2_approve.approve(r["cwd"], r["scope"],
+                               {"node": a["instance"], "decision": "approve", "reason": ""},
+                               nudge_fn=lambda *x: None)
+        r = _rail(cwd, "s1")["s1"]
+        (u,) = r["urgent_asks"]
+        assert u["status"] == "answered" and u["decision"] == "approve" and u["by"]
+
+        task = runtime.status(cwd=cwd, scope="s1")["tasks"][0]["instance"]
+        runtime.report(task, cwd=cwd, scope="s1")
+        r = _rail(cwd, "s1")["s1"]
+        assert [x["id"] for x in r["urgent_asks"]] == [u["id"]]  # b is not urgent
+        (b,) = r["answers"]
+        assert b["kind"] == "ask" and b["urgent"] is False
+    finally:
+        executors.register(None)
+
+
 def test_rail_ask_answer_carries_the_briefs_options_recommendation_and_reason(proj):
     """The ask answer maps what the question declares (claunch-uebgg review):
     the brief's option names, its recommendation (read from the nested

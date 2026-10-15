@@ -143,10 +143,13 @@ function build(opts) {
   }
 
   const apiCalls = [];
+  const apiBodies = [];
   const gate = { restart: null, goto: [], reposync: [] };
-  const apiStub = async (p) => {
+  const apiStub = async (p, opts) => {
     apiCalls.push(p);
-    const answer = (body) => ({ json: async () => JSON.parse(JSON.stringify(body)) });
+    if (opts && opts.body) apiBodies.push([p, JSON.parse(opts.body)]);
+    const answer = (body) => ({ ok: true, json: async () => JSON.parse(JSON.stringify(body)) });
+    if (p === "/api/cflow2/approve") return answer({ ok: true });
     if (p === "/api/daemon/restart-request") return answer({ request: gate.restart });
     if (p === "/api/cflow/goto-requests") return answer({ requests: gate.goto });
     if (p === "/api/reposync/requests") return answer({ requests: gate.reposync });
@@ -178,7 +181,7 @@ function build(opts) {
     "refreshTermWindow", "refreshTermTimers",
     "sessLayoutFor", "setSessLayout", "talkShows",
     code +
-    "\nreturn {notify, refreshRestartGate, refreshGotoGate, refreshReposyncGate," +
+    "\nreturn {notify, refreshRestartGate, refreshGotoGate, refreshReposyncGate, urgentAskSync," +
     " noticePanelToggle, noticeHistory, qaNoticeSync, threadNoticeSync, threadNoticeClear," +
     " get cards() { return [...notices.keys()]; }};"
   )(
@@ -195,7 +198,7 @@ function build(opts) {
 
   const all = (n, out) => { out.push(n); n.children.forEach((c) => all(c, out)); return out; };
   return {
-    api, nodes, clock, gate, apiCalls, storage, loc, layouts,
+    api, nodes, clock, gate, apiCalls, apiBodies, storage, loc, layouts,
     strip: () => nodes.notices.children,
     said: () => nodes.notices.children.map((c) => c.text()).join(" | "),
     panel: () => nodes["notice-panel-body"].text(),
@@ -663,6 +666,97 @@ function gotoRec(rec) {
     old.click();
     check("and a click on it goes nowhere", w.loc.hash === "" &&
             !w.nodes["notice-panel"].classList.contains("hidden"), w.loc.hash);
+  }
+
+  /* --- urgent asks (claunch-x76l8.1) ------------------------------------ */
+  {
+    const w = build();
+    const urgent = (u) => ({ id: "ask2-aa", instance: "i7", label: "coding-approval",
+                             status: "open", resolution: "human", ...(u || {}) });
+    const row = (u, answers, extra) => ({
+      cwd: "/w/s5", scope: "s5", workflow: "improv-worker-v2", urgent_asks: u,
+      answers: answers === undefined ? [{ kind: "ask", ask: "ask2-aa", instance: "i7",
+        urgent: true, label: "coding-approval", prompt: "start coding?",
+        require_reason: false,
+        options: [{ name: "approve" }, { name: "decline" }] }] : answers,
+      ...(extra || {}) });
+
+    // an ask without urgent never reaches urgent_asks: the rail row has the
+    // human ask in answers only, and nothing changes on the channel
+    w.api.urgentAskSync({ s5: row([], [{ kind: "ask", ask: "ask2-bb", instance: "i8",
+      label: "plain", prompt: "ok?", options: [{ name: "approve" }, { name: "decline" }] }]) });
+    check("an ask without urgent draws no card", w.strip().length === 0 && w.badge() === "" &&
+            w.api.noticeHistory.length === 0, [w.said(), w.api.noticeHistory]);
+
+    // urgent, but still routed to agents: unchanged
+    for (const resolution of ["routing", "asked", "self"]) {
+      w.api.urgentAskSync({ s5: row([urgent({ resolution })], []) });
+      check(`an urgent ask at resolution ${resolution} draws no card`,
+            w.strip().length === 0 && w.badge() === "" && w.api.noticeHistory.length === 0,
+            [w.said(), w.api.noticeHistory]);
+    }
+
+    w.api.urgentAskSync({ s5: row([urgent()]) });
+    check("an urgent ask fallen to a person draws its card",
+          w.strip().length === 1 && /s5/.test(w.said()) && /coding-approval/.test(w.said()) &&
+            /start coding\?/.test(w.said()), w.said());
+    check("the bell counts it as waiting", w.badge() === "1" &&
+            w.nodes["notice-bell"].classList.contains("waiting"), [w.badge()]);
+    const hist = w.api.noticeHistory.filter((e) => e.gate && e.gate.type === "ask");
+    check("one history row, read, pending, naming the session",
+          hist.length === 1 && hist[0].read === true && hist[0].status === "pending" &&
+            hist[0].session === "s5", hist);
+    w.api.urgentAskSync({ s5: row([urgent()]) });
+    check("the next poll keeps one card and one row",
+          w.strip().length === 1 &&
+            w.api.noticeHistory.filter((e) => e.gate && e.gate.type === "ask").length === 1,
+          w.said());
+
+    w.strip()[0].click();
+    check("a click on the card opens the session", w.loc.hash === "#/s/s5", w.loc.hash);
+
+    w.press(w.nodes.notices, "approve").click();
+    await new Promise((r) => setImmediate(r));
+    const posted = w.apiBodies.find(([p]) => p === "/api/cflow2/approve");
+    check("approve posts the run page's own approve with the instance",
+          posted && posted[1].node === "i7" && posted[1].decision === "approve" &&
+            posted[1].cwd === "/w/s5" && posted[1].scope === "s5", w.apiBodies);
+    check("and the card goes", w.strip().length === 0, w.said());
+
+    w.api.urgentAskSync({ s5: row([urgent({ status: "answered", decision: "approve", by: "web" })], []) });
+    check("the answered ask leaves the waiting count", w.badge() === "" &&
+            !w.nodes["notice-bell"].classList.contains("waiting"), w.badge());
+    check("and its history row says how it ended",
+          w.api.noticeHistory.some((e) => e.gate && e.gate.type === "ask" &&
+            e.status === "answered: approve by web"), w.api.noticeHistory);
+  }
+  {
+    // an urgent ask whose answer wants text: no presses, only the way there
+    const w = build();
+    w.api.urgentAskSync({ s6: { cwd: "/w/s6", scope: "s6", urgent_asks: [{ id: "ask2-cc",
+      instance: "i1", label: "plan", status: "open", resolution: "human" }],
+      answers: [{ kind: "ask", ask: "ask2-cc", instance: "i1", prompt: "which plan?",
+                  require_reason: false,
+                  options: [{ name: "a" }, { name: "b" }, { name: "reframe" }] }] } });
+    check("a brief ask's card has no decision presses",
+          w.strip().length === 1 && !w.press(w.nodes.notices, "a") &&
+            !w.press(w.nodes.notices, "reframe") && /needs a reason/.test(w.said()), w.said());
+    w.api.noticePanelToggle(true);
+    check("the panel lists it as waiting with an Open press",
+          /Waiting on you \(1\)/.test(w.panel()) && !!w.press(w.nodes["notice-panel-body"], "Open"),
+          w.panel());
+    w.press(w.nodes["notice-panel-body"], "Open").click();
+    check("Open goes to the session and closes the panel",
+          w.loc.hash === "#/s/s6" && w.nodes["notice-panel"].classList.contains("hidden"), w.loc.hash);
+    w.press(w.nodes.notices, "Hide").click();
+    w.api.urgentAskSync({ s6: { cwd: "/w/s6", scope: "s6", urgent_asks: [{ id: "ask2-cc",
+      instance: "i1", label: "plan", status: "open", resolution: "human" }], answers: [] } });
+    check("Hide keeps it off the corner and in the count", w.strip().length === 0 &&
+            w.badge() === "1", [w.said(), w.badge()]);
+    w.api.urgentAskSync({});
+    check("a session gone from the rail settles it", w.badge() === "" &&
+            w.api.noticeHistory.some((e) => e.gate && e.gate.rid === "ask2-cc" &&
+              e.status === "no longer pending"), w.api.noticeHistory);
   }
 
   /* --- no storage is not an error --------------------------------------- */

@@ -269,6 +269,7 @@ ask:
   timeout: 900            # 그룹마다의 응답 기한(초). 없으면 기한 없음
   on_decline: declined    # 거절 시 작업의 결과 이름(기본 declined)
   on_unroutable: unrouted # 선택. 명단을 읽지 못해 아무도 찾지 못했을 때의 결과 이름
+  urgent: true            # 선택. 사람의 응답을 바로 기다리는 승인(기본 false)
   # options: {pass: {outcome: ok, description: …}, changes: {description: …}}
 ```
 
@@ -310,6 +311,16 @@ ask:
   direct-changes / skip, reason 필수)로 받는다 — 리뷰 없이 지나가는 경우가
   기본값이 아니라 기록된 선택이 된다. 사람의 답은 해소 단계와 관계없이 적용되고,
   질문을 받고 있던 응답자에게는 질문이 닫혔다는 `fyi` 메시지가 간다.
+- `urgent`(claunch-x76l8.1): `true`/`false` 리터럴만 받는다(기본 `false`). 켜진 ask가
+  `human` 해소 단계에 들어가면 웹 대시보드가 그 질문을 알림 채널에 올린다 — 코너
+  카드(답 버튼, 클릭 시 런을 모는 세션의 터미널로 이동), 알림 기록의 「Waiting on
+  you」, 종 배지의 대기 수. 다른 승인 게이트(restart·goto·reposync)와 같은 방식이고
+  다른 세션 화면에서도 뜬다. 답이 어디서 나오든(카드, 터미널 위 스트립, 런 페이지,
+  `claunch cflow2 approve`) 다음 폴링에서 카드가 내려가고 기록 행에 결정이 남는다.
+  런 페이지·터미널 스트립의 표시는 그대로다. 출처는 `/api/cflow2/rail` 행의
+  `urgent_asks`(열림·응답됨, 결정)와 `answers[]`의 `urgent`·`ask`이며,
+  `flow_status`의 `asks` 항목도 `urgent`를 싣는다. 끄면 지금까지와 같다.
+  예: `improv-worker-v2`의 coding-approval.
 - 런의 메시(`state.mesh`, claunch-5itbf): 질문은 이 메시의 명단으로 라우팅된다.
   시작할 때 고정한다 — 데몬이 만드는 세션의 런은 그 세션이 가입한 메시, MCP
   `flow_start`(`mesh` 인자)와 CLI `start`(`--mesh`)는 인자가 없으면 드라이버가

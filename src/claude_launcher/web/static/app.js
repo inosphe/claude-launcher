@@ -5881,6 +5881,8 @@ async function refreshCflow2Rail() {
     return;
   }
   const rows = (data && data.rows) || {};
+  // urgent asks join the notification channel (claunch-x76l8.1)
+  if (typeof urgentAskSync === "function") urgentAskSync(rows);
   const sig = JSON.stringify(rows);
   if (sig === cflow2RailSig) return;
   cflow2RailSig = sig;
@@ -46338,7 +46340,7 @@ const gateHiddenIds = new Set(
 /* The History filter: "all" or "marked". */
 let noticeFilter = noticeLoad(NOTICE_FILTER_KEY, "all") === "marked" ? "marked" : "all";
 /* The pending requests of each gate as its last poll answered them. */
-const gatePending = { restart: [], goto: [], reposync: [] };
+const gatePending = { restart: [], goto: [], reposync: [], ask: [] };
 
 function noticeHistorySave() {
   noticeSave(NOTICE_HISTORY_KEY, noticeHistory);
@@ -46397,11 +46399,15 @@ function gateHistoryEntry(type, rid) {
 }
 
 /* One history row per request, written the first time a poll sees it. */
-function gateHistoryOpen(type, rid, title, sub) {
+function gateHistoryOpen(type, rid, title, sub, extra) {
   if (gateHistoryEntry(type, rid)) return;
   // Read from the start: the bell counts it as waiting while it is pending,
-  // and a request just answered should not come back as unread.
-  noticeRecord({ title, sub, kind: "warn", gate: { type, rid }, status: "pending", read: true });
+  // and a request just answered should not come back as unread. `extra`
+  // carries the session an urgent ask belongs to.
+  noticeRecord(Object.assign(
+    { title, sub, kind: "warn", gate: { type, rid }, status: "pending", read: true },
+    extra || {}
+  ));
 }
 
 /* A request that left the pending set. `status` is the daemon's word for it
@@ -46486,12 +46492,13 @@ function noticeGateRefresh(type) {
   if (type === "restart") return refreshRestartGate();
   if (type === "goto") return refreshGotoGate();
   if (type === "reposync") return refreshReposyncGate();
+  if (type === "ask") return urgentAskSync(urgentAskRows);
   return null;
 }
 
 function gatePendingCount() {
   return gatePending.restart.length + gatePending.goto.length +
-    gatePending.reposync.length;
+    gatePending.reposync.length + gatePending.ask.length;
 }
 
 /* The rail's bell (and its phone twin): the number is the requests waiting
@@ -46649,6 +46656,19 @@ function noticePanelGateRow(type, rec) {
         }
       }
     ));
+  } else if (type === "ask") {
+    head.appendChild(gateSessionLink(rec.session));
+    head.appendChild(el("span", "notice-title", ` waits on your answer: ${rec.label}`));
+    row.appendChild(head);
+    const prompt = (rec.answer && rec.answer.prompt) || "";
+    if (prompt) row.appendChild(el("div", "notice-sub gate-reason", prompt));
+    for (const btn of urgentAskButtons(rec, () => urgentAskSync(urgentAskRows))) {
+      actions.appendChild(btn);
+    }
+    actions.appendChild(noticePanelButton(
+      "Open", "", `open ${rec.session}, where its run's strip answers this`,
+      () => { noticePanelToggle(false); urgentAskOpen(rec); }
+    ));
   } else {
     const plan = rec.plan || {};
     head.appendChild(el(
@@ -46764,7 +46784,7 @@ function noticePanelPaint() {
   if (!body) return;
   body.innerHTML = "";
   const waiting = [];
-  for (const type of ["restart", "goto", "reposync"]) {
+  for (const type of ["restart", "goto", "reposync", "ask"]) {
     for (const rec of gatePending[type]) waiting.push([type, rec]);
   }
   body.appendChild(el("h3", "notice-panel-section", `Waiting on you (${waiting.length})`));
@@ -47390,6 +47410,150 @@ async function refreshReposyncGate() {
     if (key.startsWith(REPOSYNC_GATE_PREFIX) && !seen.has(key)) {
       dismissNotice(key);
     }
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* urgent asks: a cflow v2 ask that wants a person's answer now       */
+/* ------------------------------------------------------------------ */
+/* An ask declared `urgent: true` in its workflow (claunch-x76l8.1; e.g.
+   improv-worker-v2's coding-approval) joins the gates above once it falls to
+   a person (resolution `human`): a card in the corner, a row in the history,
+   a place in the bell's waiting count. Its source is the v2 rail poll
+   (refreshCflow2Rail hands every row here): `urgent_asks` lists the run's
+   urgent asks, open and settled, and `answers` carries the presses.
+
+   The presses are the run page's own: POST /api/cflow2/approve with the
+   instance and the decision. An ask that wants text with the answer -- a
+   brief ask (its `reframe` takes a reason) or one with require_reason --
+   gets no presses here; the card only opens the session, where the strip
+   over its terminal answers it. A click on the card opens that session.
+   An ask without `urgent`, or one still routed to agents, is not shown. */
+const URGENT_ASK_PREFIX = "urgent-ask-";
+/* The rows of the last rail poll, so a card shown again (gateUnhide) is
+   redrawn without waiting for the next poll. */
+let urgentAskRows = {};
+
+function urgentAskWords(u) {
+  if (u.status === "answered") {
+    return `answered: ${u.decision || "?"}` + (u.by ? ` by ${u.by}` : "");
+  }
+  return u.status || null;
+}
+
+/* The answer an urgent ask can take from a card, or null when it needs text. */
+function urgentAskPresses(a) {
+  if (!a || a.require_reason) return null;
+  const opts = (a.options || []).map((o) => o.name || String(o));
+  if (!opts.length || opts.includes("reframe")) return null;
+  return opts;
+}
+
+async function urgentAskPost(rec, decision, btn) {
+  btn.disabled = true;
+  try {
+    const resp = await api("/api/cflow2/approve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: rec.cwd, scope: rec.scope, node: rec.instance,
+                             decision, reason: "" }),
+    });
+    if (resp && resp.ok === false) {
+      btn.disabled = false;
+      return false;
+    }
+  } catch {
+    btn.disabled = false;
+    return false;
+  }
+  return true;
+}
+
+function urgentAskOpen(rec) {
+  location.hash = "#/s/" + encodeURIComponent(rec.session);
+}
+
+function urgentAskButtons(rec, after) {
+  const out = [];
+  for (const name of urgentAskPresses(rec.answer) || []) {
+    const btn = el("button", "wf-btn" + (name === "decline" ? " clear" : " approve"), name);
+    btn.type = "button";
+    btn.title = `answer '${name}' to ${rec.label} in ${rec.session}'s run`;
+    btn.addEventListener("click", async (ev) => {
+      if (ev && ev.stopPropagation) ev.stopPropagation();
+      if (await urgentAskPost(rec, name, btn)) after();
+    });
+    out.push(btn);
+  }
+  return out;
+}
+
+function urgentAskSync(rows) {
+  urgentAskRows = rows || {};
+  const host = $("notices");
+  if (!host) return;
+  const pending = [];
+  const all = [];
+  for (const [session, r] of Object.entries(urgentAskRows)) {
+    if (!r) continue;
+    const answers = new Map((r.answers || [])
+      .filter((a) => a.kind === "ask" && a.ask).map((a) => [a.ask, a]));
+    for (const u of r.urgent_asks || []) {
+      if (!u || !u.id) continue;
+      const rec = {
+        id: u.id, session, cwd: r.cwd, scope: r.scope, workflow: r.workflow,
+        instance: u.instance, label: u.label || u.instance || "?",
+        answer: answers.get(u.id) || null,
+      };
+      if (u.status === "open" && u.resolution === "human") {
+        rec.status = "pending";
+        pending.push(rec);
+      } else if (u.status !== "open") {
+        rec.status = urgentAskWords(u);
+        all.push(rec);
+      }
+    }
+  }
+  gateHistorySync("ask", pending, all.concat(pending));
+  const seen = new Set();
+  for (const rec of pending) {
+    const key = URGENT_ASK_PREFIX + rec.id;
+    const prompt = (rec.answer && rec.answer.prompt) || "";
+    gateHistoryOpen(
+      "ask", String(rec.id),
+      `${rec.session} waits on your answer: ${rec.label}`,
+      prompt, { session: rec.session }
+    );
+    if (gateIsHidden("ask", rec.id)) continue;
+    seen.add(key);
+    const card = notices.get(key);
+    if (card && card.node.isConnected) continue;
+    dismissNotice(key);
+    const node = el("div", "notice warn gate urgent-ask");
+    const title = el("div", "notice-title");
+    title.appendChild(gateSessionLink(rec.session));
+    title.appendChild(el("span", null, ` waits on your answer: ${rec.label}`));
+    node.appendChild(title);
+    if (prompt) node.appendChild(el("div", "notice-sub gate-reason", prompt));
+    if (rec.workflow) node.appendChild(el("div", "notice-sub", `workflow ${rec.workflow}`));
+    const actions = el("div", "gate-actions");
+    const presses = urgentAskButtons(rec, () => dismissNotice(key));
+    for (const btn of presses) actions.appendChild(btn);
+    if (!presses.length) {
+      node.appendChild(el("div", "notice-sub",
+        "this answer needs a reason — open the session to answer it"));
+    }
+    actions.appendChild(gateHideButton("ask", rec.id, key,
+      "close this card only — nothing is answered, the run keeps waiting; the " +
+      "bell keeps it in the notification history"));
+    node.appendChild(actions);
+    node.title = `open ${rec.session}`;
+    node.addEventListener("click", () => urgentAskOpen(rec));
+    host.appendChild(node);
+    notices.set(key, { node, timer: null });
+  }
+  for (const key of [...notices.keys()]) {
+    if (key.startsWith(URGENT_ASK_PREFIX) && !seen.has(key)) dismissNotice(key);
   }
 }
 
