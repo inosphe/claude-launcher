@@ -1791,13 +1791,17 @@ nodes:
   - `kind: procedure`가 아닌 정의, 컴파일 오류, `type: block` param을 가진 프로시저
     (동적 호출에는 호출 지점이 없다)
   - 선언되지 않은 param, 기본값 없는 필수 param 누락(`flow_start`의 params 검사와 같다)
-  - 재귀: 호출 사슬에 이미 있는 프로시저. 사슬은 callee 런의 `parent.chain`에 있다
+  - 재귀: 호출 사슬에 이미 있는 프로시저. 사슬은 callee 런의 `parent.chain`에 있고,
+    중첩 위임 런은 위임한 런의 사슬을 이어받는다(위임을 건너도 재귀와 깊이를 센다)
+  - 세션 위임의 중첩 런에서 아직 자식 세션이 배정되지 않은 경우(callee를 진행할
+    세션이 없다)
   - 깊이: 사슬이 `CALL_DEPTH_MAX`(4)에 닿은 경우
   - 런이 halt 중이거나 이동 요청이 열려 있는 경우(`flow_fork`와 같다)
 - 호출되면 그 시점의 정의를 컴파일해 중첩 런 `<scope>~c<n>`의 chart로 고정한다.
   부모 런의 chart는 바뀌지 않는다(체크포인트의 chart 고정 검사가 그대로 유지된다).
-  callee 런은 `with`로 검사한 params와 부모의 `data` 사본으로 시작하고, 드라이버는
-  부모 런의 드라이버다. 드라이버는 `flow_status`의 `calls[].scope`를 `scope`로 주고
+  callee 런은 `with`로 검사한 params와 부모의 `data` 사본으로 시작한다. 드라이버는
+  부르는 런을 진행하는 세션이다(`acting_session`: 런의 드라이버, 세션 위임의 중첩
+  런이면 배정된 자식 세션). 드라이버는 `flow_status`의 `calls[].scope`를 `scope`로 주고
   flow_* 툴로 callee를 진행한다.
 - 부르는 동안 작업은 `calling` 대기다. `flow_status`의 `tasks`에서 빠지고 `active`에는
   남는다. 그 작업에 대한 `flow_report`는 거절된다. 작업 하나에 열린 호출은 하나다.
@@ -1810,6 +1814,7 @@ nodes:
     정하지 않고 드라이버가 보고한다.
 - 부르는 작업이 취소되면(런 중단, `try`·`return`의 정리, 강제 이동) 열린 호출은
   `cancelled`가 되고 callee 런은 중단된다(`_release_holds` → `nested_aborts`).
+  `_abort_nested`는 중단한 런이 열어 둔 중첩 런(위임과 호출)도 이어서 중단한다.
 - 기록: `state["calls"][c<n>]`(id, instance, node, procedure, with, status
   `running`/`returned`/`failed`/`cancelled`, nested, returns, outcome, value). 저널
   `call_started`, `call_returned`. 결과 전달은 중첩 위임 런과 같은 `deliver_nested`

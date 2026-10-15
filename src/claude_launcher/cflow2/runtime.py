@@ -1837,9 +1837,11 @@ def _open_nested(r: Run, iid: str, rec: Dict[str, Any]) -> None:
         _nested_result(r, rec, child.state.get("status"), outcome, value)
 
 
-def _abort_nested(link: Dict[str, Any], locked: bool = False) -> None:
-    """Abort a nested delegation run (its delegation was cancelled). Marked
-    delivered: nothing goes back to the parent."""
+def _abort_nested(link: Dict[str, Any], locked: bool = False, _depth: int = 0) -> None:
+    """Abort a nested run (its delegation or call was cancelled) and, below
+    it, the nested runs it had open itself. Marked delivered: nothing goes
+    back to the parent."""
+    below: List[Dict[str, Any]] = []
     try:
         st = RunStore(link["cwd"], link["scope"])
         if not st.exists():
@@ -1848,9 +1850,10 @@ def _abort_nested(link: Dict[str, Any], locked: bool = False) -> None:
         def go() -> None:
             child = Run.load(st)
             if child.status in LIVE_STATUSES:
-                _abort(child, "its delegation was cancelled in the delegating run")
+                _abort(child, "its delegation or call was cancelled in the parent run")
             child.state["delivered"] = True
             child.store.commit(child.state, child.events)
+            below.extend(child.nested_aborts)
 
         if locked:
             go()
@@ -1859,6 +1862,9 @@ def _abort_nested(link: Dict[str, Any], locked: bool = False) -> None:
                 go()
     except (StoreError, OSError, KeyError):
         pass
+    if _depth < 16:
+        for sub in below:
+            _abort_nested(sub, _depth=_depth + 1)
 
 
 def _nested_result(r: Run, rec: Dict[str, Any], status_: Optional[str], outcome: Any,
@@ -3339,11 +3345,20 @@ def call_scope(scope: str, cid: str) -> str:
     return f"{scope}{store_mod.NESTED_SEP}{cid}"
 
 
-def _call_chain(state: Dict[str, Any]) -> List[str]:
-    """The procedures called above this run (outermost first): empty for a
-    run that is not a callee."""
+def _call_chain(state: Dict[str, Any], _depth: int = 0) -> List[str]:
+    """The procedures called above this run (outermost first). A callee's
+    link carries its chain; a nested delegation run inherits the chain of
+    the run that delegated it, so recursion and depth are counted across
+    delegations too."""
     link = state.get("parent") or {}
-    return list(link.get("chain") or []) if link.get("call") else []
+    if link.get("call"):
+        return list(link.get("chain") or [])
+    if not link or _depth >= 16:
+        return []
+    try:
+        return _call_chain(RunStore(link["cwd"], link["scope"]).load_state(), _depth + 1)
+    except (StoreError, KeyError, TypeError):
+        return []
 
 
 def call(procedure: str, node: Optional[str] = None, with_: Optional[Dict[str, Any]] = None,
@@ -3394,6 +3409,12 @@ def call(procedure: str, node: Optional[str] = None, with_: Optional[Dict[str, A
             raise FlowError(f"call {procedure!r}: block parameter(s) {', '.join(blocks)} "
                             f"need a call site; a dynamic call has none")
         params = _validate_params(chart, with_)
+        # the session that drives the calling run drives the callee: the
+        # driver, or in a session-delegated nested run its assigned child
+        driver = acting_session(r.state)
+        if not driver and r.state.get("parent"):
+            raise FlowError(f"call {procedure!r}: no session drives this nested run yet, "
+                            f"so nobody could drive the callee")
         calls = r.state.setdefault("calls", {})
         cid = f"c{len(calls) + 1}"
         sub = call_scope(r.store.scope, cid)
@@ -3423,7 +3444,7 @@ def call(procedure: str, node: Optional[str] = None, with_: Optional[Dict[str, A
             elif st.chart_path.exists():
                 st.chart_path.unlink()
             child = _new_run(st, chart, params=params, data=data, caps=r.state.get("caps"),
-                             driver=driver_of(r.state), now=r.now, parent=link)
+                             driver=driver, now=r.now, parent=link)
             done = child.state.get("status") in FINISHED_STATUSES
             if done:
                 child.state["delivered"] = True  # applied below, in this lock

@@ -278,3 +278,104 @@ def test_flow_call_tool(tmp_path):
     _start(tmp_path)
     names = [t["name"] for t in cflow2_mcp.TOOLS]
     assert "flow_call" in names
+
+
+# -- review fixes (REVIEW-1 on claunch-z17c9) ----------------------------------------------
+
+OUTER = """
+cflow: 2
+name: outer
+kind: procedure
+nodes:
+  mid: {prompt: M, calls: [probe]}
+body:
+  - mid
+"""
+
+# a nested delegation inside a procedure that calls itself again from there
+DEEP = """
+cflow: 2
+name: deep
+kind: procedure
+nodes:
+  d1: {prompt: D, calls: [deep]}
+  d2: {prompt: E}
+body:
+  - id: sub
+    executor: [subagent]
+    seq:
+      - d1
+      - cond:
+          - {if: "true", then: d2}
+"""
+
+
+def _write(tmp_path, name, text):
+    v2 = tmp_path / "proj" / ".claunch" / "workflows" / "v2"
+    (v2 / f"{name}.yaml").write_text(textwrap.dedent(text), encoding="utf-8")
+
+
+def test_aborting_the_caller_reaches_the_callees_callee(tmp_path):
+    _write(tmp_path, "outer", OUTER)
+    _start(tmp_path, MAIN.replace("calls: [probe,", "calls: [outer, probe,"))
+    _call(tmp_path, "outer")
+    _call(tmp_path, "probe", {"target": "x"}, scope="w1~c1", node="mid")
+    runtime.abort("stop", cwd=_cwd(tmp_path), scope="w1", now=T0)
+    for sub in ("w1~c1", "w1~c1~c1"):
+        assert RunStore(_cwd(tmp_path), sub).load_state()["status"] == "aborted"
+
+
+def test_a_session_delegated_caller_hands_its_callee_to_the_child(tmp_path, monkeypatch):
+    from claude_launcher.cflow2 import executors
+
+    monkeypatch.setattr(executors, "available", lambda cwd: True)
+    monkeypatch.setattr(executors, "dispatch", lambda rec, run: None)
+    chart = frontend.compile_text(textwrap.dedent("""
+        cflow: 2
+        name: sd
+        nodes:
+          a: {prompt: A, calls: [probe]}
+          b: {prompt: B}
+        body:
+          - id: sub
+            executor: [session]
+            seq:
+              - a
+              - cond:
+                  - {if: "true", then: b}
+    """))
+    caps = {"session.spawn": True, "mcp.claunch": True}
+    st = runtime.start(chart, cwd=_cwd(tmp_path), scope="w1", caps=caps, driver="drv", now=T0)
+    (d,) = st["delegations"]
+    nested = d["nested"]["scope"]
+    # no child yet: nobody could drive a callee
+    with pytest.raises(runtime.FlowError, match="no session drives"):
+        _call(tmp_path, "probe", {"target": "x"}, scope=nested, node="a")
+    runtime.delegate_update(d["id"], cwd=_cwd(tmp_path), scope="w1", now=T0, child="kid",
+                            assignee="kid")
+    out = _call(tmp_path, "probe", {"target": "x"}, scope=nested, node="a")
+    callee = RunStore(_cwd(tmp_path), out["called"]["scope"]).load_state()
+    assert callee["driver"] == "kid" and runtime.may_drive(callee, "kid")
+    assert not runtime.may_drive(callee, "drv")
+
+
+def test_the_chain_crosses_delegation_links(tmp_path):
+    _write(tmp_path, "deep", DEEP)
+    chart = frontend.compile_text(textwrap.dedent(
+        MAIN.replace("calls: [probe,", "calls: [deep, probe,")))
+    # the callee inherits the caps: a subagent may be spawned, so 'sub' nests
+    runtime.start(chart, cwd=_cwd(tmp_path), scope="w1", caps={"subagent.spawn": True, "mcp.claunch": True},
+                  driver="w1", now=T0)
+    out = _call(tmp_path, "deep")
+    callee = out["called"]["scope"]
+    (d,) = _status(tmp_path, callee)["delegations"]
+    with pytest.raises(runtime.FlowError, match="recursive call: deep -> deep"):
+        _call(tmp_path, "deep", scope=d["nested"]["scope"], node="d1")
+
+
+def test_slot_migration_requalifies_call_scopes():
+    from claude_launcher.cflow2 import slot_migration
+
+    out = slot_migration.requalify(
+        {"scope": "w1", "calls": {"c1": {"nested": {"cwd": "/x", "scope": "w1~c1"}}}}, "other")
+    assert out["calls"]["c1"]["nested"]["scope"] == "w1@other~c1"
