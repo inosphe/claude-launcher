@@ -270,6 +270,52 @@ def test_enqueue_landing_pushes_into_the_v2_parents_collection_once(tmp_path):
     assert len(_events(work, "w1", "trigger_done")) == 1
 
 
+def test_the_driver_hears_where_its_landing_request_was_queued(tmp_path):
+    lead, work = _dirs(tmp_path)
+    _start(lead, LEAD, "lead")
+    _start(work, WORKER, "w1")
+    w1 = Session("w1", work, parent="lead")
+    mgr = Manager(Session("lead", lead), w1)
+    runtime.report("req", cwd=str(work), scope="w1", now=T0 + 1)
+    clock = _clock(mgr)
+    clock.scan(now=T0 + 2)
+    [(_, _, _, ok, detail)] = asyncio.run(clock.run_triggers())
+    assert ok, detail
+    [block] = [t for t in w1.delivered if "landing request routed" in t]
+    assert f"result: queued -- {detail}" in block
+    assert "lead" in block and "NOT queued" not in block
+
+
+def test_the_driver_hears_that_its_landing_request_was_skipped(tmp_path):
+    """claunch-g0ttr.1: s332's request was skipped and the driver kept
+    nudging a parent that held no queue -- the skip sat in the journal only."""
+    lead, work = _dirs(tmp_path)
+    _start(work, WORKER, "w1")
+    w1 = Session("w1", work, parent="lead")
+    # the parent is live but drives no run with a landing queue
+    mgr = Manager(Session("lead", lead), w1)
+    runtime.report("req", cwd=str(work), scope="w1", now=T0 + 1)
+    clock = _clock(mgr)
+    clock.scan(now=T0 + 2)
+    [(_, _, _, ok, detail)] = asyncio.run(clock.run_triggers())
+    assert not ok
+    assert [e["reason"] for e in _events(work, "w1", "trigger_skipped")] == [detail]
+    [block] = [t for t in w1.delivered if "landing request routed" in t]
+    assert f"result: NOT queued -- {detail}" in block
+    assert "mesh leader" in block
+
+
+def test_a_trigger_that_files_no_landing_request_sends_no_routing_notice(tmp_path):
+    from claude_launcher.daemon import cflow2_triggers
+
+    assert cflow2_triggers.is_landing({"do": "enqueue-landing"})
+    assert cflow2_triggers.is_landing({"do": "push", "push": {"to": "parent:landing"}})
+    assert cflow2_triggers.is_landing({"do": "push", "push": {"to": "leader:landing"}})
+    assert not cflow2_triggers.is_landing({"do": "push", "push": {"to": "parent:signals"}})
+    assert not cflow2_triggers.is_landing({"do": "push", "push": {"to": "landing"}})
+    assert not cflow2_triggers.is_landing({"do": "briefing"})
+
+
 def test_a_stop_after_the_claim_is_performed_by_the_next_boot(tmp_path):
     lead, work = _dirs(tmp_path)
     _start(lead, LEAD, "lead")

@@ -1580,3 +1580,25 @@ def test_unroutable_review_options(tmp_path, monkeypatch, option, end):
         assert [t["label"] for t in st["tasks"]] == ["after"]
     else:
         assert st["status"] == "done" and st.get("outcome") == "rework"
+
+
+# -- claunch-g0ttr.1: the request nudge waits for the daemon's routing --------
+
+
+def test_the_request_nudge_is_sent_after_the_routing_result():
+    """The landing push is routed when integration-request is left, so a
+    nudge sent inside that step cannot know who holds the queue (s332 nudged
+    its parent 41s before the push was skipped). The first landing-nudge
+    sends it, from the daemon's ``landing request routed`` block."""
+    from claude_launcher.cflow2 import frontend
+
+    doc = yaml.load(V2.read_text(encoding="utf-8"), Loader=frontend._Loader)
+    req = " ".join(doc["nodes"]["integration-request"]["prompt"].split())
+    assert "이 스텝에서는 요청 nudge를 보내지 않는다" in req
+    assert "landing request routed" in req
+    assert "[ask]" not in req, "the request nudge template moved to landing-nudge"
+    nudge = " ".join(doc["nodes"]["landing-nudge"]["prompt"].split())
+    for anchor in ("landing request routed", "NOT queued", "라우팅 대기",
+                   "trigger_skipped", "[ask]", "몇 번째 재촉",
+                   "동결은 그대로다", "보드에 코멘트를 새로 쌓지 않는다"):
+        assert anchor in nudge, f"landing-nudge lost {anchor!r}"
