@@ -11685,9 +11685,10 @@ function renderPromptPackRow() {
   };
 
   // General: this daemon's prompt first (the daemon puts it first), then
-  // every pack that is not a role's own.
+  // every pack that is neither a role's own nor an MCP tool family's.
   const every = [...packs.map((p) => [p, false]), ...fromPackage.map((p) => [p, true])];
   const isRole = (p) => p.id.startsWith("role-");
+  const isMcp = (p) => p.id.startsWith("mcp-");
   const general = [];
   if (own) {
     general.push(chip(own, {
@@ -11698,8 +11699,12 @@ function renderPromptPackRow() {
       onChange: (on) => { newDaemonPromptTick = on; renderPromptPackRow(); },
     }));
   }
-  for (const [p, packaged] of every) if (!isRole(p)) general.push(packChip(p, packaged));
+  for (const [p, packaged] of every) if (!isRole(p) && !isMcp(p)) general.push(packChip(p, packaged));
   group("General", general, null);
+
+  // MCP: the guidance for claunch's tool families (threads, QA, sims), which
+  // the MCP server instructions only point at (claunch-8do04).
+  group("MCP", every.filter(([p]) => isMcp(p)).map(([p, packaged]) => packChip(p, packaged)), null);
 
   // Roles: the ones in play (required or ticked) are shown; the rest of the
   // role packs fold behind one button so the row stays short. A chip once
