@@ -7,7 +7,8 @@
         numbers, is graded by its busiest number and links to #/sysperf;
      2. the badge polls the latest sample only (no ?history);
      3. clicking it opens the page, which reads the history once and draws
-        three line charts (CPU, Memory, Disk I/O with a read/write legend),
+        four line charts (CPU, Memory, Disk I/O with a read/write legend,
+        Sessions with running / hold / ended lines, claunch-cd6s9),
         the detail table, the per-drive capacity table and the log location;
      4. hovering a chart shows one tooltip listing every series;
      5. leaving the page drops it: the view is hidden again.
@@ -39,6 +40,7 @@ const history = Array.from({ length: 60 }, (_, i) => ({
   disk_read_bps: 1024 * 1024 * (1 + Math.cos(i / 5)), disk_write_bps: 300 * 1024,
   disk_busy_pct: 12, disks: { sda: { read_bps: 1048576, write_bps: 307200, busy_pct: 12 } },
   usage,
+  sessions: { running: 10 + (i % 7), hold: 3, ended: 20 + Math.floor(i / 10) },
 }));
 const latest = { ...history[history.length - 1], cpu_pct: 93.4 };
 const requests = [];
@@ -135,11 +137,12 @@ const server = http.createServer((req, res) => {
       };
     });
     assert.equal(view.hidden, false);
-    assert.deepEqual(view.titles, ["CPU", "Memory", "Disk I/O", "Now", "Disk capacity", "Log"]);
-    assert.equal(view.charts, 3);
-    assert.equal(view.lines.length, 4, "CPU, memory, disk read and disk write");
-    assert.deepEqual(view.legend, ["Read", "Write"]);
+    assert.deepEqual(view.titles, ["CPU", "Memory", "Disk I/O", "Sessions", "Now", "Disk capacity", "Log"]);
+    assert.equal(view.charts, 4);
+    assert.equal(view.lines.length, 7, "CPU, memory, disk read and write, three session lines");
+    assert.deepEqual(view.legend, ["Read", "Write", "Running", "Hold", "Ended (paused / killed)"]);
     assert.match(view.table, /of 8 logical CPUs/);
+    assert.match(view.table, /13 running, 3 hold, 25 ended/);
     assert.match(view.capacity, /\/mnt\/d/);
     assert.match(view.capacity, /95%/);
     assert.match(view.capacity, /45%/);
@@ -165,6 +168,21 @@ const server = http.createServer((req, res) => {
       assert.ok(Math.abs(line.x + line.width / 2 - px) < 3,
         `hairline at ${line.x + line.width / 2}, cursor at ${px}`);
     }
+    const sessions = page.locator("#sysperf-view .sysperf-card").nth(3);
+    // Scroll with a plain DOM call: the charts redraw on every badge poll,
+    // and playwright's stability wait races the replacement.
+    await page.evaluate(() => {
+      document.querySelectorAll("#sysperf-view .sysperf-card")[3]?.scrollIntoView();
+    });
+    const sbox = await sessions.locator("rect.sysperf-hit").boundingBox();
+    await page.mouse.move(sbox.x + sbox.width - 2, sbox.y + sbox.height / 2);
+    const stip = sessions.locator(".sysperf-tip");
+    await stip.waitFor({ state: "visible" });
+    assert.deepEqual(await stip.locator(".sysperf-tip-row span").allTextContents(),
+      ["Running", "Hold", "Ended (paused / killed)"]);
+    const counts = await stip.locator(".sysperf-tip-row strong").allTextContents();
+    assert.ok(counts.every((c) => /^\d+$/.test(c)), `counts print as integers: ${counts}`);
+    assert.equal(counts[1], "3");
     if (process.env.SYSPERF_SHOT) await page.screenshot({ path: process.env.SYSPERF_SHOT, fullPage: true });
 
     // 5. leave

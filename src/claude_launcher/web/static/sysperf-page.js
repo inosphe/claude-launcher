@@ -4,6 +4,8 @@
    in-memory history and a rotating log; this module reads GET /api/sysperf.
    Each sample carries `usage`: one entry per drive (the daemon's own root
    plus every workspace's), which the badge summarises and the page tabulates.
+   Each sample also carries the daemon's session counts (claunch-cd6s9):
+   running, hold (hold + delayed) and ended (paused + killed + failed).
 
    The badge asks for the latest sample only (a few hundred bytes) and skips
    its poll while the tab is hidden. The page reads the whole history once on
@@ -40,13 +42,14 @@
   // not scaled the way bytes are.
   const fmtCount = (n) => (typeof n === "number" && Number.isFinite(n) ? n.toLocaleString() : "—");
   const fmtTime = (ts) => new Date(ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-  // The viewBox x under a client x. The chart keeps its aspect ratio
-  // (xMidYMid meet): once max-height caps it the drawing is centred in a
-  // wider box, so a plain width ratio misses the cursor (claunch-cd6s9.1).
   const viewX = (clientX, box, W, H) => {
     const scale = Math.min(box.width / W, box.height / H);
     return (clientX - box.left - (box.width - W * scale) / 2) / scale;
   };
+  const sessionCount = (key) => (p) => (p.sessions && typeof p.sessions[key] === "number" ? p.sessions[key] : null);
+  // Session counts are small integers drawn as counts, not the inode-style
+  // thousands grouping fmtCount applies.
+  const fmtSession = (v) => (Number.isInteger(v) ? String(v) : v.toFixed(1));
   const ioTotal = (s) => (typeof s.disk_read_bps === "number" ? s.disk_read_bps + (s.disk_write_bps || 0) : null);
 
   // Bytes and inodes are two ways one drive can be full: WSL ran out of
@@ -315,6 +318,7 @@
     add("Disk read", fmtBytes(s.disk_read_bps, "/s"));
     add("Disk write", fmtBytes(s.disk_write_bps, "/s"));
     if (s.disk_busy_pct != null) add("Busiest disk", `${fmtPct(s.disk_busy_pct)} busy`);
+    if (s.sessions) add("Sessions", `${s.sessions.running} running, ${s.sessions.hold} hold, ${s.sessions.ended} ended`);
     add("Sampled", `${new Date(s.ts * 1000).toLocaleString()} (every ${s.interval_s}s)`);
     return table;
   }
@@ -408,6 +412,18 @@
         yMax: null,
         nice: niceBytes,
         fmt: (v) => fmtBytes(v, "/s"),
+      }),
+      lineChart({
+        title: "Sessions",
+        series: [
+          { label: "Running", cls: "s-a", get: sessionCount("running") },
+          { label: "Hold", cls: "s-b", get: sessionCount("hold") },
+          { label: "Ended (paused / killed)", cls: "s-c", get: sessionCount("ended") },
+        ],
+        points: pts,
+        yMax: null,
+        nice: (v) => Math.max(niceMax(v), 2),
+        fmt: fmtSession,
       }),
     );
     if (latest) {

@@ -10119,7 +10119,8 @@ body.split-max #term-wf { flex: 1 1 0; }
 
 /* System performance page (sysperf-page.js, claunch-zuk0b). One axis per
    chart; series colours validated against the dark surface (read #388bfd,
-   write #d4691f); grid and axis text stay recessive. */
+   write #d4691f); the sessions chart's third line, ended sessions, takes the
+   neutral grey #8b949e (claunch-cd6s9); grid and axis text stay recessive. */
 .sysperf-card { margin-top: 12px; padding: 10px 12px; }
 .sysperf-card-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .sysperf-card-head h3 { margin: 0; }
@@ -10128,6 +10129,7 @@ body.split-max #term-wf { flex: 1 1 0; }
 .sysperf-key { display: inline-block; width: 14px; height: 2px; border-radius: 1px; }
 .sysperf-key.s-a, .sysperf-tip-key.s-a { background: #388bfd; }
 .sysperf-key.s-b, .sysperf-tip-key.s-b { background: #d4691f; }
+.sysperf-key.s-c, .sysperf-tip-key.s-c { background: #8b949e; }
 .sysperf-chart-wrap { position: relative; margin-top: 6px; }
 .sysperf-chart { display: block; width: 100%; height: auto; max-height: 220px; }
 .sysperf-grid { stroke: #30363d; stroke-width: 1; }
@@ -10135,10 +10137,12 @@ body.split-max #term-wf { flex: 1 1 0; }
 .sysperf-line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
 .sysperf-line.s-a { stroke: #388bfd; }
 .sysperf-line.s-b { stroke: #d4691f; }
+.sysperf-line.s-c { stroke: #8b949e; }
 .sysperf-hair { stroke: #7d8590; stroke-width: 1; }
 .sysperf-dot { stroke: #14161a; stroke-width: 2; }
 .sysperf-dot.s-a { fill: #388bfd; }
 .sysperf-dot.s-b { fill: #d4691f; }
+.sysperf-dot.s-c { fill: #8b949e; }
 .sysperf-hit { fill: transparent; cursor: crosshair; }
 .sysperf-tip {
   position: absolute; top: 4px; pointer-events: none; z-index: 2;
