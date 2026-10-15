@@ -757,6 +757,61 @@ def test_a_verify_gets_no_map_past_the_probe_size_cap(tmp_path):
     assert env["CFLOW_DATA_LONG"] == big      # a scalar whatever its size
 
 
+def test_a_verify_run_by_the_daemon_runs_as_the_run_driver(tmp_path, monkeypatch):
+    # The daemon runs a verify for a person's report, a resolved move and a
+    # delegation's submit, and its environment has no CLAUNCH_SESSION since
+    # claunch-2yiij (s609's before it). The gates under tools/ find "my
+    # checkout" and "my report" from that name: it is the run's driver, as
+    # for a probe (claunch-2yiij.2).
+    chart = _compile("""
+        nodes:
+          a: {prompt: A}
+          b: {prompt: B}
+        body: [a, b]
+    """)
+    check = ("import os, sys; "
+             "sys.exit(0 if os.environ.get('CLAUNCH_SESSION') == 'w1' else 2)")
+    chart.by_label("a").props["verify"] = {"run": [sys.executable, "-c", check],
+                                           "timeout": 30}
+    d = Drv(tmp_path, "", chart=chart)
+    d.report(d.inst("a"))
+    assert d.events("verify_passed") and not d.events("verify_failed")
+    assert d.tasks() == ["b"]
+
+
+def test_a_verify_names_the_driver_over_the_process_session(tmp_path, monkeypatch):
+    d = Drv(tmp_path, """
+        nodes:
+          a: {prompt: A}
+        body: [a]
+    """, driver="s995")
+    monkeypatch.setenv("CLAUNCH_SESSION", "s127")
+    run = runtime.Run.load(runtime.RunStore(d.cwd, d.scope))
+    assert runtime.verify_env(run, d.inst("a"))["CLAUNCH_SESSION"] == "s995"
+
+
+def test_a_verify_without_a_driver_names_the_scopes_session(tmp_path, monkeypatch):
+    d = Drv(tmp_path, """
+        nodes:
+          a: {prompt: A}
+        body: [a]
+    """, scope="w9@main", driver="")
+    monkeypatch.setenv("CLAUNCH_SESSION", "s127")
+    run = runtime.Run.load(runtime.RunStore(d.cwd, d.scope))
+    assert runtime.verify_env(run, d.inst("a"))["CLAUNCH_SESSION"] == "w9"
+
+
+def test_an_unmanaged_run_verify_names_no_session(tmp_path, monkeypatch):
+    d = Drv(tmp_path, """
+        nodes:
+          a: {prompt: A}
+        body: [a]
+    """, scope="default")
+    monkeypatch.setenv("CLAUNCH_SESSION", "s127")
+    run = runtime.Run.load(runtime.RunStore(d.cwd, d.scope))
+    assert runtime.verify_env(run, d.inst("a"))["CLAUNCH_SESSION"] == ""
+
+
 # ---------------------------------------------------------------------------
 # E2: ask options without case
 

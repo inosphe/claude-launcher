@@ -2690,7 +2690,16 @@ def verify_env(r: Run, iid: str, node: Optional[ir.Node] = None,
 
     Non-scalars used to be left out, which left a verify no way to read a
     result a node had bound -- improv-leader-v2's sweep gate needs the
-    repository its integrate step merged into (claunch-6xg)."""
+    repository its integrate step merged into (claunch-6xg).
+
+    ``CLAUNCH_SESSION`` is the run's driver (else the session its scope
+    names; blank for an unmanaged run), never the process's own. The daemon
+    runs a verify for a person's report, a resolved move and a delegation's
+    submit, and its environment names nobody (claunch-2yiij; before that, the
+    terminal that started it): the gates under ``tools/`` that resolve "my
+    checkout" and "my report" from that name answered about no session, or
+    the wrong one (claunch-2yiij.2). A probe has the same rule
+    (:func:`_probe_session`)."""
     node = node or r.node_of(iid)
     env = dict(os.environ)
     env.update({
@@ -2698,6 +2707,8 @@ def verify_env(r: Run, iid: str, node: Optional[ir.Node] = None,
         "CFLOW2_NODE": node.label or node.id,
         "CFLOW2_INSTANCE": iid,
         "CFLOW2_SCOPE": str(r.state.get("scope") or ""),
+        store_mod.SESSION_ENV: (str(r.state.get("driver") or "").strip()
+                                or scope_driver(r.state.get("scope"))),
     })
     params: Dict[str, Any] = dict(r.state.get("params") or {})
     params.update((r.env(iid) if iid in r.inst else {}).get("params") or {})
