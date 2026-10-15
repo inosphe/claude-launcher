@@ -34,6 +34,8 @@ whose driver ended, is not touched), that does what no agent call does:
   after it on the event loop, one at a time and each bounded
   (:func:`.cflow2_triggers.perform_bounded`), then journalled
   (:func:`..cflow2.runtime.complete_trigger`, which removes the record).
+  A landing request (:func:`.cflow2_triggers.is_landing`) also tells the
+  driver where it was queued or why it was skipped (:func:`landing_block`).
   Delivery is at least once: a claim is marked with this clock's boot, and
   one left by an earlier boot (a restart or a stop between claim and
   completion) or older than :data:`..cflow2.runtime.TRIGGER_CLAIM_STALE` is
@@ -724,6 +726,12 @@ class Cflow2Clock:
                 log.exception("cflow2 trigger completion %s/%s/%s failed", cwd, scope, tid)
             with self._lock:
                 self._pending_triggers.discard((cwd, scope, tid))
+            if cflow2_triggers.is_landing(trig):
+                # The request is routed only now, after the node was left: the
+                # driver hears where it went, or that nobody holds it
+                # (claunch-g0ttr.1 -- a skip used to sit in the journal unseen).
+                self._deliver(cwd, driver or _name(scope),
+                              landing_block(scope, trig, performed, detail))
             done.append((cwd, scope, tid, performed, detail))
         return done
 
@@ -1046,6 +1054,29 @@ def round_block(started: Dict[str, Any]) -> str:
         "protocol: the definition declares recur {auto: true}, so the daemon started this "
         "round. Call flow_status and continue. A person stops the loop with "
         "'claunch cflow2 recur --cancel' once a round has finished.",
+        "---"])
+
+
+def landing_block(scope: str, trig: Dict[str, Any], performed: bool, detail: str) -> str:
+    """What the driver hears once its landing request trigger was performed:
+    the queue that took it (the session to nudge), or why none did."""
+    where = f"{trig.get('label') or trig.get('node')} ({trig.get('instance')}, trigger {trig.get('id')})"
+    if performed:
+        result = f"queued -- {detail}"
+        protocol = ("the queue named above holds the request; its owner session is the one "
+                    "to nudge (a 'fell back to' clause names it when it is not the parent).")
+    else:
+        result = f"NOT queued -- {detail}"
+        protocol = ("no session holds this landing request, so nudging the parent reaches "
+                    "nobody who can merge it. Tell the terminal user the reason and ask the "
+                    "mesh leader (issue id, tip, this reason) to take or route it.")
+    return "\n".join([
+        "---",
+        "# claunch cflow2: landing request routed -- machine-generated, not typed by the user",
+        f"run: {scope}",
+        f"from: {where}",
+        f"result: {result}",
+        f"protocol: {protocol} Call flow_status and continue.",
         "---"])
 
 

@@ -324,6 +324,18 @@ def split_addr(to: Any) -> Tuple[str, str]:
     return target, name
 
 
+def is_landing(trig: Dict[str, Any]) -> bool:
+    """The trigger files a landing request: ``enqueue-landing``, or a push to
+    ``parent:landing`` / ``leader:landing`` (routed by :func:`push_landing`)."""
+    do = str(trig.get("do") or "")
+    if do == DO_ENQUEUE_LANDING:
+        return True
+    if do != DO_PUSH:
+        return False
+    target, name = split_addr((trig.get("push") or {}).get("to"))
+    return name == LANDING and target in ("parent", "leader")
+
+
 # -- pushing -------------------------------------------------------------------
 
 

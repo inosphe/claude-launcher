@@ -1091,6 +1091,11 @@ nodes:
   - 대상이 없으면 `trigger_skipped`(지나간 세션과 사유)를 남기고 데몬 로그에 경고를
     쓴다. 대체 대상으로 넣었으면 `trigger_done`의 사유가 지나간 세션과 대상
     (`fell back to '<세션>' at <cwd>`)을 적는다.
+  - 어느 쪽이든 데몬은 결과를 런의 드라이버 터미널에 `landing request routed` 블록으로
+    타이핑한다(`daemon/cflow2_clock.landing_block`, claunch-g0ttr.1): `result: queued --
+    <trigger_done 사유>` 또는 `result: NOT queued -- <trigger_skipped 사유>`. 라우팅은
+    노드를 떠난 뒤에 일어나므로 그 노드 안에서 보낸 nudge는 대상을 알 수 없다 —
+    improv-worker-v2는 요청 nudge를 이 블록을 읽은 뒤의 landing-nudge에서 보낸다.
 - `when`(push trigger, claunch-yq80p.9): 엔진이 trigger를 기록하는 순간 런의 환경으로
   평가하는 식이다(at leave면 `$outcome`도 읽는다. `$facts`·`$each`는 없다). 거짓이면
   기록하지 않고 `trigger_not_queued`(사유 `when (…) is false`)를 저널에 남긴다. 평가가
