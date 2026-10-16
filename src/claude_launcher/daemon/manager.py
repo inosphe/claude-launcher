@@ -2825,8 +2825,8 @@ class SessionManager:
                 )
             live = [s for s in live if s not in detached]
         by = actors.make(actors.DAEMON, reason=reason)
-        for session in live:
-            if self._ended_by_shutdown.get(session.sdef.name) is session:
+        for session in self._ended_by_shutdown.values():
+            if session in live:
                 actors.note(session, by)
         await asyncio.gather(
             *(session.shutdown() for session in live), return_exceptions=True
