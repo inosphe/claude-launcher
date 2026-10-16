@@ -144,6 +144,9 @@ function build(opts) {
     if (opts && opts.body) apiBodies.push([p, opts.body]);
     if (!daemon.up) throw new Error("down");
     if (p === "/api/daemon/restart-request") {
+      // A restart kills the login cookie: every authed read answers 401,
+      // which api() turns into a throw (claunch-hdp4j).
+      if (gate.authFail) throw new Error("unauthorized");
       return { json: async () => ({ request: gate.rec ? JSON.parse(JSON.stringify(gate.rec)) : null }) };
     }
     if (p === "/api/daemon/restart-request/approve") {
@@ -198,11 +201,16 @@ function build(opts) {
     "restoreNewFormDraft",
     // The sidebar PTY host badge boot() draws (claunch-xnnct.3).
     "renderPtyHostBadge",
+    // A steady poll (same boot, no restart) runs the whole batch; the
+    // retirement checks below reach it (claunch-hdp4j).
+    "refreshTermProcs", "refreshShadows",
     code +
     "\nreturn {notify, dismissNotice, noticeClock, setDaemonOnline, " +
     "refreshRestartGate, pollOnce, boot," +
     " get cards() { return [...notices.keys()]; }," +
     " get gateKey() { return NOTICE_GATE; }," +
+    " get history() { return noticeHistory; }," +
+    " get waiting() { return gatePending.restart.length; }," +
     " get online() { return daemonOnline; }};"
   )(
     (id) => nodes[id],
@@ -220,6 +228,8 @@ function build(opts) {
     () => {},   // refreshTermTimers (the timer line; termtimers_check)
     async () => {},   // restoreNewFormDraft (newformdraft_check)
     () => {},   // renderPtyHostBadge
+    () => {},   // refreshTermProcs
+    () => {},   // refreshShadows
   );
 
   return { api, nodes, clock, gate, apiCalls, apiBodies, daemon,
@@ -562,6 +572,67 @@ const clockBase = () => 1700000000000;
     await w.api.refreshRestartGate();
     check("a record's stale check is shown on the card",
           /pid 78/.test(w.said()) && /pty_backend\.py and 2 more/.test(w.said()), w.said());
+  })();
+}
+
+/* --- a restart retires the card, even when the read cannot be made -----
+   The request lives in the old daemon's memory, so the successor has none.
+   But the read that would say so needs the login cookie the restart just
+   killed: it answers 401, refreshRestartGate returns early, and the card
+   used to stay up with a frozen countdown while the bell kept counting it
+   (claunch-hdp4j). /api/health needs no cookie, and its boot id is what
+   retires the card and settles the history row. */
+{
+  const w = build();
+  (async () => {
+    await w.api.pollOnce();               // boot b1, the page is seeded
+    w.gate.rec = pending();
+    await w.api.refreshRestartGate();
+    check("the request is up on boot b1", w.said().includes("restart requested"), w.said());
+    const row = w.api.history.find((e) => e.gate && e.gate.type === "restart");
+    check("its history row is pending", row && row.status === "pending", row);
+    check("and records the boot that holds it", row && row.boot === "b1", row);
+    check("the bell counts it as waiting", w.api.waiting === 1, w.api.waiting);
+
+    w.gate.authFail = true;               // same daemon, a read that fails
+    await w.api.pollOnce();
+    check("a failed read on the same boot leaves the card up",
+          w.said().includes("restart requested"), w.said());
+    check("and the row pending", row.status === "pending", row.status);
+
+    w.daemon.boot = "b2";                 // a restart; the cookie died with it
+    await w.api.pollOnce();
+    check("a new boot retires the card although the read is refused",
+          !w.said().includes("restart requested"), w.said());
+    check("the history row is settled as a restart",
+          row.status === "daemon restarted", row.status);
+    check("and the bell no longer counts it", w.api.waiting === 0, w.api.waiting);
+
+    w.gate.authFail = false;              // logged in again; a fresh request on b2
+    w.gate.rec = pending({ id: "g2" });
+    await w.api.pollOnce();
+    check("a request filed on the successor draws its own card",
+          w.said().includes("restart requested"), w.said());
+    const row2 = w.api.history.find((e) => e.gate && e.gate.rid === "g2");
+    check("with a row of its own on b2", row2 && row2.boot === "b2" && row2.status === "pending", row2);
+    check("the old row stays settled", row.status === "daemon restarted", row.status);
+  })();
+}
+
+/* --- a row another page load left pending is settled by the boot id ----- */
+{
+  const w = build();
+  (async () => {
+    // What a closed tab left in localStorage: a pending row from boot b0.
+    w.api.history.unshift({ id: "h-old", at: 1, read: true, kind: "warn",
+                            title: "daemon restart requested", sub: "session s9",
+                            gate: { type: "restart", rid: "g0" }, status: "pending",
+                            boot: "b0" });
+    w.gate.authFail = true;
+    await w.api.pollOnce();               // first poll of the new page, boot b1
+    const row = w.api.history.find((e) => e.id === "h-old");
+    check("a reopened page settles a row from another boot without the read",
+          row.status === "daemon restarted", row.status);
   })();
 }
 

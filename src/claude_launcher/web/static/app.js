@@ -47651,6 +47651,41 @@ function restartModeText(rec) {
     : "PTY host: kept — with pty_host on, sessions keep running and are taken over";
 }
 
+/* A daemon restart ends every restart request: the gate is held in the old
+   process's memory (daemon/restart_gate.py) and the successor starts with
+   none. refreshRestartGate learns that only through a read the restart
+   itself breaks -- the login cookie dies with the old process, the read
+   answers 401, and the card used to stay up with a frozen countdown while
+   the bell kept counting it as waiting (claunch-hdp4j). So the retirement
+   rests on /api/health instead, which needs no cookie: the card and every
+   pending history row that recorded another boot id are settled here. A row
+   from before the field (no `boot`) is settled when this page saw the
+   restart itself (`restarted`). */
+function restartGateRetire(bootId, restarted) {
+  if (!bootId) return;
+  const stale = (boot) => (boot ? boot !== bootId : !!restarted);
+  let changed = false;
+  for (const entry of noticeHistory) {
+    if (!entry.gate || entry.gate.type !== "restart" || entry.status !== "pending") continue;
+    if (!stale(entry.boot)) continue;
+    entry.status = "daemon restarted";
+    entry.settledAt = Date.now();
+    changed = true;
+  }
+  if (changed) noticeHistorySave();
+  const card = notices.get(NOTICE_GATE);
+  if (card && stale(card.boot)) dismissNotice(NOTICE_GATE);
+  if (gatePending.restart.length && (changed || restarted)) {
+    gatePending.restart = [];
+    restartGateStale = null;
+    changed = true;
+  }
+  if (changed) {
+    noticeBellPaint();
+    noticePanelPaint();
+  }
+}
+
 async function refreshRestartGate() {
   const host = $("notices");
   if (!host) return;
@@ -47665,10 +47700,14 @@ async function refreshRestartGate() {
   // The record has no id on an older daemon; its filing time stands in.
   const rid = rec ? String(rec.id || rec.requested_at || "restart") : null;
   if (pending) {
+    // `boot`: the daemon that holds the request. The gate lives in that
+    // process's memory, so a different boot id is proof the request is gone
+    // (restartGateRetire) -- even when this read cannot be made.
     gateHistoryOpen(
       "restart", rid, "daemon restart requested",
       `session ${rec.session || "?"}` +
-        ((rec.reason || "").trim() ? ` — reason: ${rec.reason.trim()}` : "")
+        ((rec.reason || "").trim() ? ` — reason: ${rec.reason.trim()}` : ""),
+      { boot: daemonBoot }
     );
   }
   gateHistorySync(
@@ -47758,7 +47797,7 @@ async function refreshRestartGate() {
     node.appendChild(staleLine);
     node.appendChild(actions);
     host.appendChild(node);
-    const entry = { node, timer: null };
+    const entry = { node, timer: null, boot: daemonBoot };
     notices.set(NOTICE_GATE, entry);
     card = entry;   // the freshly built card carries this poll's countdown too
   }
@@ -49218,6 +49257,8 @@ async function pollOnce() {
   const restarted = !!(health.boot_id && daemonBoot && health.boot_id !== daemonBoot);
   const returned = !daemonOnline || !booted;
   const wasDown = !daemonOnline;   // setDaemonOnline is about to forget this
+  // Before anything that needs the cookie the restart just killed.
+  restartGateRetire(health.boot_id, restarted);
   setDaemonOnline(true);
   if (restarted || returned) {
     daemonBoot = health.boot_id || null;
