@@ -34,6 +34,21 @@ CHILD = (
 BEARER = {"Authorization": "Bearer sekrit"}
 
 
+async def _approved_child_kill(client, parent: str, child: str):
+    """An agent's kill of its child waits for a person (claunch-5aysr): the
+    route files a request (202) and ends nothing until it is approved. Press
+    Approve the way the notification card does and return that answer."""
+    resp = await client.post(
+        f"/api/sessions/{parent}/children/{child}/kill", headers=BEARER
+    )
+    assert resp.status == 202, await resp.text()
+    body = await resp.json()
+    assert body["pending"] is True and body["target"] == child
+    return await client.post(
+        f"/api/kill-requests/{body['kill_request']}/approve", headers=BEARER
+    )
+
+
 def _register_py_harness(child=CHILD):
     store.update(
         lambda doc: doc.update(
@@ -553,9 +568,7 @@ def test_ending_a_child_at_the_cap_makes_room_for_the_next(home, tmp_path):
             )
             assert resp.status == 201
 
-            resp = await client.post(
-                "/api/sessions/lead/children/w1/kill", headers=BEARER
-            )
+            resp = await _approved_child_kill(client, "lead", "w1")
             assert resp.status == 200
             await _wait_for(lambda: mgr.get("w1").exited, "w1 to exit")
 
@@ -1280,11 +1293,9 @@ def test_an_agent_ends_the_child_it_spawned(home, tmp_path):
                 "/api/sessions/lead/children", headers=BEARER)).json()
             assert caps["children_used"] == 1
 
-            resp = await client.post(
-                "/api/sessions/lead/children/w1/kill", headers=BEARER
-            )
+            resp = await _approved_child_kill(client, "lead", "w1")
             assert resp.status == 200
-            assert (await resp.json())["name"] == "w1"
+            assert (await resp.json())["request"]["target"] == "w1"
             await _wait_for(lambda: mgr.get("w1").exited, "w1 to exit")
 
             # the mesh row stays, saying what it is rather than vanishing:
@@ -1412,9 +1423,7 @@ def test_a_grandchild_is_reachable_but_a_stranger_is_not(home, tmp_path):
             assert not mgr.get("rogue").exited
 
             # its worker's worker
-            resp = await client.post(
-                "/api/sessions/lead/children/gc/kill", headers=BEARER
-            )
+            resp = await _approved_child_kill(client, "lead", "gc")
             assert resp.status == 200
             await _wait_for(lambda: mgr.get("gc").exited, "gc to exit")
             assert not mgr.get("w1").exited

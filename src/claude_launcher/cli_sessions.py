@@ -1674,7 +1674,18 @@ def _cmd_kill_session(args: argparse.Namespace) -> int:
     remove button), never this one."""
     client = daemon_client.ensure_running()
     suffix = "?force=1" if args.force else ""
-    info = client.post(f"/api/sessions/{args.session}/kill{suffix}")
+    info = client.post(f"/api/sessions/{args.session}/kill{suffix}",
+                       {"reason": getattr(args, "reason", "") or ""})
+    if info.get("pending"):
+        # Run from a managed session's shell: an agent's kill of another
+        # session waits for a person (claunch-5aysr).
+        print(
+            f"session {args.session!r} was not killed: kill request "
+            f"{info.get('kill_request')} waits for the user's approval on the "
+            "web UI's notification card. The answer is typed into this "
+            "session's terminal; do not run this again."
+        )
+        return 0
     if info.get("unpaused"):
         print(
             f"session {args.session!r} was paused — it is now filed as "
@@ -3642,6 +3653,11 @@ def register(sub) -> None:
     p_kill.add_argument("-t", dest="session_t", help=argparse.SUPPRESS)
     p_kill.add_argument("session", nargs="?")
     p_kill.add_argument("--force", action="store_true", help="skip graceful terminate")
+    p_kill.add_argument(
+        "--reason", default="",
+        help="from inside a managed session: why the target should end, shown "
+             "on the approval card an agent's kill waits behind",
+    )
     p_kill.set_defaults(func=_cmd_kill_session_dispatch)
 
     p_qf = sub.add_parser(

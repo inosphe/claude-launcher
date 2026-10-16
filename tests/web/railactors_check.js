@@ -151,28 +151,28 @@ const ex = (extra) => ({ ...base, status: "exited", exit_code: 0, ...extra });
 /* ---- the ender, one kind per case -------------------------------------- */
 check("a person's kill",
       ctx.text(ex({ ended_by: { kind: "user", via: "web" } })),
-      "nc/claude · exit 0 · killed by user");
+      "killed by user · exit 0 · nc/claude");
 check("an agent's kill names the agent",
       ctx.text(ex({ ended_by: { kind: "agent", name: "s12" } })),
-      "nc/claude · exit 0 · killed by s12");
+      "killed by s12 · exit 0 · nc/claude");
 check("a workflow run's kill",
       ctx.text(ex({ ended_by: { kind: "cflow", name: "s12", reason: "kill-on-end" } })),
-      "nc/claude · exit 0 · killed by cflow");
+      "killed by cflow · exit 0 · nc/claude");
 check("the session's own exit",
       ctx.text(ex({ ended_by: { kind: "self" } })),
-      "nc/claude · exit 0 · self-exit");
+      "self-exit · exit 0 · nc/claude");
 check("a handoff is the session's own ending, said as one",
       ctx.text(ex({ ended_by: { kind: "self", reason: "handoff" } })),
-      "nc/claude · exit 0 · handed off");
+      "handed off · exit 0 · nc/claude");
 check("the machine going down",
       ctx.text(ex({ exit_code: 1073807364, ended_by: { kind: "os" } })),
-      "nc/claude · exit 1073807364 · OS shutdown");
+      "OS shutdown · exit 1073807364 · nc/claude");
 check("a pause says paused by",
       ctx.text(ex({ paused_at: "t", ended_by: { kind: "user", via: "cli" } })),
-      "nc/claude · paused · paused by user");
+      "paused by user · paused · nc/claude");
 check("an idle hold says held by the daemon",
       ctx.text(ex({ held_at: "t", ended_by: { kind: "daemon", reason: "idle" } })),
-      "nc/claude · hold · held by daemon");
+      "held by daemon · hold · nc/claude");
 check("an archived row says archived, and no ender",
       ctx.text(ex({ archived_at: "t", ended_by: { kind: "user" } })),
       "nc/claude · archived");
@@ -189,10 +189,10 @@ check("a session a person created",
 check("a session an agent spawned names the agent",
       ctx.text({ ...base, status: "idle", created_by: { kind: "agent", name: "lead" } }),
       "nc/claude · spawned by lead");
-check("both, in order: state, ender, creator",
+check("both, in order: ender first (claunch-5aysr), state, identity, creator",
       ctx.text(ex({ ended_by: { kind: "cflow", name: "lead" },
                     created_by: { kind: "agent", name: "lead" } })),
-      "nc/claude · exit 0 · killed by cflow · spawned by lead");
+      "killed by cflow · exit 0 · nc/claude · spawned by lead");
 
 /* ---- the long form ------------------------------------------------------- */
 check("the hover label carries every part",
@@ -219,7 +219,7 @@ served = { sessions: [
   const metaOf = (name) => descendants(row(name)).find((k) => k.classes.has("meta"));
 
   check("the killed row's line says who",
-        metaOf("k1").text, "nc/claude · exit 143 · killed by user · spawned by user");
+        metaOf("k1").text, "killed by user · exit 143 · nc/claude · spawned by user");
   check("its hover text says it in full",
         row("k1").title.split("\n").slice(1),
         ["ended by: user (web)", "created by: user (cli)"]);

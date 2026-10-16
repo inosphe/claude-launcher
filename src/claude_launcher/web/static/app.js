@@ -1659,14 +1659,18 @@ function railMetaText(s) {
       : s.paused_at ? "paused" : `exit ${s.exit_code ?? "?"}`)
     : s.paused_at ? "pausing" : s.winddown ? "winding down" : "";
   // The kind the session declared at creation (``pi-durable``) follows the
-  // harness it qualifies: same CLI, run for that purpose. Who ended it sits
-  // right after the state it qualifies, and who created it closes the line
-  // (claunch-o6xws); the full actors ride the row's title (actorLabel).
+  // harness it qualifies: same CLI, run for that purpose. Who created it
+  // closes the line (claunch-o6xws); the full actors ride the row's title
+  // (actorLabel). Who ended it LEADS an ended row, before its state
+  // (claunch-5aysr): the line is capped at 42% of the row and ellipsed, and
+  // placed after the identity and the exit code it was the part cut off --
+  // "codex/codex · exit -15 · k…" -- on nearly every row it was written for.
   // Guarded like the other late-defined helpers: a check that lifts only
   // this function out of app.js still gets the line it always got.
   const ended = typeof railEndedText === "function" ? railEndedText(s) : "";
   const created = typeof railCreatedText === "function" ? railCreatedText(s) : "";
-  return [identity, s.kind, state, ended, created].filter(Boolean).join(" · ");
+  if (ended) return [ended, state, identity, s.kind, created].filter(Boolean).join(" · ");
+  return [identity, s.kind, state, created].filter(Boolean).join(" · ");
 }
 
 /* Who did it, in the fewest words a rail row can spare (claunch-o6xws).
@@ -37021,6 +37025,14 @@ function renderSession(data) {
     metaRow(dl, "last output", localStamp(s.last_output_at));
     if (s.status === "exited") {
       metaRow(dl, "exited", `${localStamp(s.exited_at)} (code ${s.exit_code ?? "?"})`);
+      // Who ended it, in full (claunch-5aysr): the rail's line is a capped
+      // summary; this is where the answer is not cut off.
+      if (s.ended_by && s.ended_by.kind && typeof actorLabel === "function") {
+        metaRow(dl, "ended by", actorLabel(s.ended_by));
+      }
+    }
+    if (s.created_by && s.created_by.kind && typeof actorLabel === "function") {
+      metaRow(dl, "created by", actorLabel(s.created_by));
     }
     if (s.paused_at) {
       metaRow(dl, "paused", localStamp(s.paused_at));
@@ -46591,7 +46603,7 @@ function noticeFilterOf(value) {
 
 let noticeFilter = noticeFilterOf(noticeLoad(NOTICE_FILTER_KEY, "all"));
 /* The pending requests of each gate as its last poll answered them. */
-const gatePending = { restart: [], goto: [], reposync: [], resume: [], ask: [] };
+const gatePending = { restart: [], goto: [], reposync: [], resume: [], kill: [], ask: [] };
 
 function noticeHistorySave() {
   noticeSave(NOTICE_HISTORY_KEY, noticeHistory);
@@ -46744,13 +46756,15 @@ function noticeGateRefresh(type) {
   if (type === "goto") return refreshGotoGate();
   if (type === "reposync") return refreshReposyncGate();
   if (type === "resume") return refreshResumeGate();
+  if (type === "kill") return refreshKillGate();
   if (type === "ask") return urgentAskSync(urgentAskRows);
   return null;
 }
 
 function gatePendingCount() {
   return gatePending.restart.length + gatePending.goto.length +
-    gatePending.reposync.length + gatePending.resume.length + gatePending.ask.length;
+    gatePending.reposync.length + gatePending.resume.length + gatePending.kill.length +
+    gatePending.ask.length;
 }
 
 /* The rail's bell (and its phone twin): the number is the requests waiting
@@ -46951,6 +46965,29 @@ function noticePanelGateRow(type, rec) {
         refreshResumeGate();
       }
     ));
+  } else if (type === "kill") {
+    head.appendChild(el("span", "notice-title", "session kill requested: "));
+    head.appendChild(gateSessionLink(rec.target));
+    row.appendChild(head);
+    row.appendChild(killGateSub(rec));
+    row.appendChild(el(
+      "div", "notice-sub gate-reason", `reason: ${rec.reason || "(no reason given)"}`
+    ));
+    row.appendChild(el("div", "notice-sub gate-clock", KILL_GATE_WAIT));
+    actions.appendChild(noticePanelButton(
+      "Approve", "approve", KILL_GATE_APPROVE_TITLE,
+      async (btn) => {
+        await killGatePost(rec, "approve", btn);
+        refreshKillGate();
+      }
+    ));
+    actions.appendChild(noticePanelButton(
+      "Reject", "clear", KILL_GATE_REJECT_TITLE,
+      async (btn) => {
+        await killGatePost(rec, "reject", btn);
+        refreshKillGate();
+      }
+    ));
   } else if (type === "ask") {
     head.appendChild(gateSessionLink(rec.session));
     head.appendChild(el("span", "notice-title", ` waits on your answer: ${rec.label}`));
@@ -47079,7 +47116,7 @@ function noticePanelPaint() {
   if (!body) return;
   body.innerHTML = "";
   const waiting = [];
-  for (const type of ["restart", "goto", "reposync", "resume", "ask"]) {
+  for (const type of ["restart", "goto", "reposync", "resume", "kill", "ask"]) {
     for (const rec of gatePending[type]) waiting.push([type, rec]);
   }
   body.appendChild(el("h3", "notice-panel-section", `Waiting on you (${waiting.length})`));
@@ -47911,6 +47948,164 @@ async function refreshResumeGate() {
   // Settled, withdrawn or moot requests lose their card on this pass.
   for (const key of [...notices.keys()]) {
     if (key.startsWith(RESUME_GATE_PREFIX) && !seen.has(key)) {
+      dismissNotice(key);
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* the kill gate: an agent asks to end another session                */
+/* ------------------------------------------------------------------ */
+/* An agent's kill (the MCP kill tool, or `claunch kill-session` from its
+   shell) files a request with daemon/kill_gate.py (claunch-5aysr); nothing
+   is ended until a person answers here, and there is no deadline. The
+   answer is typed into the asking session's terminal. A reviewer the
+   workflow ends on its own is filed `reaped`: it is told here once as a
+   notice, never asked. */
+const KILL_GATE_PREFIX = "kill-gate-";
+const KILL_GATE_WAIT = "no deadline: waits until you answer";
+const KILL_GATE_APPROVE_TITLE =
+  "end the session now, as the agent asked (a wind-down first when it holds board issues)";
+const KILL_GATE_REJECT_TITLE =
+  "nothing is ended; the asking session is told no";
+/* `reaped` notices already shown, by id, so a reload does not repeat them. */
+const KILL_REAPED_KEY = "claunch.killReapedSeen";
+let killReapedSeen = null;
+
+function killGateSub(rec) {
+  const sub = el("div", "notice-sub");
+  sub.appendChild(gateSessionLink(rec.session));
+  sub.appendChild(el("span", null, " asks to end "));
+  sub.appendChild(gateSessionLink(rec.target));
+  const when = rec.requested_at ? new Date(rec.requested_at).getTime() : NaN;
+  sub.appendChild(el(
+    "span", null,
+    (isNaN(when) ? "" : ` — asked at ${noticeStamp(when)}`) +
+      (rec.target_role ? ` (${rec.target_role})` : "")
+  ));
+  return sub;
+}
+
+async function killGatePost(rec, verb, btn) {
+  btn.disabled = true;
+  let resp;
+  let doc = {};
+  try {
+    resp = await api(`/api/kill-requests/${rec.id}/${verb}`, { method: "POST" });
+    doc = await resp.json().catch(() => ({}));
+  } catch {
+    btn.disabled = false;
+    return false;
+  }
+  const settled = doc.request || {};
+  if (!resp.ok) {
+    btn.disabled = false;
+    notify(`kill request ${rec.id}: ${verb} refused`, doc.error || `HTTP ${resp.status}`,
+      { kind: "warn" });
+    return false;
+  }
+  if (settled.status === "failed") {
+    notify(`ending ${rec.target} failed`, settled.error || "unknown error",
+      { kind: "warn", session: rec.target, sticky: true });
+  }
+  return true;
+}
+
+/* The reviewers a workflow ended by itself: one notice each, the first time
+   this browser sees it. The first poll in a browser that has never kept the
+   list only remembers what is there -- an old reap is not news. */
+function killReapedNotify(all) {
+  const reaped = (all || []).filter((r) => r.status === "reaped");
+  let first = false;
+  if (killReapedSeen === null) {
+    let stored = null;
+    try { stored = JSON.parse(localStorage.getItem(KILL_REAPED_KEY) || "null"); } catch { stored = null; }
+    first = !Array.isArray(stored);
+    killReapedSeen = new Set(Array.isArray(stored) ? stored : []);
+  }
+  let changed = false;
+  for (const rec of reaped) {
+    if (killReapedSeen.has(rec.id)) continue;
+    killReapedSeen.add(rec.id);
+    changed = true;
+    if (first) continue;
+    notify(
+      `reviewer ended by its workflow: ${rec.target || "?"}`,
+      `${rec.session || "?"}'s run ended it (${rec.reason || "cflow"}) — no approval needed`,
+      { kind: "info", session: rec.session }
+    );
+  }
+  if (changed) {
+    const keep = new Set(reaped.map((r) => r.id));
+    killReapedSeen = new Set([...killReapedSeen].filter((id) => keep.has(id)));
+    try { localStorage.setItem(KILL_REAPED_KEY, JSON.stringify([...killReapedSeen])); } catch { /* private window */ }
+  }
+}
+
+async function refreshKillGate() {
+  const host = $("notices");
+  if (!host) return;
+  let body;
+  try {
+    body = await (await api("/api/kill-requests")).json();
+  } catch {
+    return;
+  }
+  const all = body && body.requests ? body.requests : [];
+  killReapedNotify(all);
+  const pending = all.filter((r) => r.status === "pending");
+  gateHistorySync("kill", pending, all);
+  const seen = new Set();
+  for (const rec of pending) {
+    const key = KILL_GATE_PREFIX + rec.id;
+    gateHistoryOpen(
+      "kill", String(rec.id),
+      `session kill requested: ${rec.target || "?"}`,
+      `${rec.session || "?"} asks to end ${rec.target || "?"}: ` +
+        (rec.reason || "(no reason given)"),
+      { session: rec.session }
+    );
+    if (gateIsHidden("kill", rec.id)) continue;
+    seen.add(key);
+    const card = notices.get(key);
+    if (card && card.node.isConnected) continue;   // nothing on it changes
+    dismissNotice(key);
+    const node = el("div", "notice warn gate");
+    const title = el("div", "notice-title");
+    title.appendChild(el("span", null, "session kill requested: "));
+    title.appendChild(gateSessionLink(rec.target));
+    const why = el(
+      "div", "notice-sub gate-reason",
+      `${rec.session || "?"}: ${rec.reason || "(no reason given)"}`
+    );
+    const actions = el("div", "gate-actions");
+    const approve = el("button", "wf-btn approve", "Approve");
+    const reject = el("button", "wf-btn clear", "Reject");
+    approve.title = KILL_GATE_APPROVE_TITLE;
+    reject.title = KILL_GATE_REJECT_TITLE;
+    approve.addEventListener("click", async (ev) => {
+      ev.stopPropagation();
+      if (await killGatePost(rec, "approve", approve)) dismissNotice(key);
+    });
+    reject.addEventListener("click", async (ev) => {
+      ev.stopPropagation();
+      if (await killGatePost(rec, "reject", reject)) dismissNotice(key);
+    });
+    actions.appendChild(approve);
+    actions.appendChild(reject);
+    actions.appendChild(gateHideButton("kill", rec.id, key,
+      "close this card only — the request stays open with no deadline; the " +
+      "bell keeps it in the notification history"));
+    node.appendChild(title);
+    node.appendChild(killGateSub(rec));
+    node.appendChild(why);
+    node.appendChild(el("div", "notice-sub gate-clock", KILL_GATE_WAIT));
+    node.appendChild(actions);
+    host.appendChild(node);
+    notices.set(key, { node, timer: null });
+  }
+  for (const key of [...notices.keys()]) {
+    if (key.startsWith(KILL_GATE_PREFIX) && !seen.has(key)) {
       dismissNotice(key);
     }
   }
@@ -48865,7 +49060,8 @@ async function pollOnce() {
   // is fed by the same heartbeat as the registry — and the goto gate beside
   // it: a leader files from its own terminal, the person answers here.
   const gateRefresh = refreshRestartGate();
-  refreshes.push(gateRefresh, refreshGotoGate(), refreshReposyncGate(), refreshResumeGate());
+  refreshes.push(gateRefresh, refreshGotoGate(), refreshReposyncGate(), refreshResumeGate(),
+    refreshKillGate());
   await Promise.all(refreshes);
 }
 
