@@ -282,6 +282,17 @@ class SessionManager:
         #: not called while the daemon is shutting down.
         self.change_hooks: List[Callable[[], None]] = []
         self.shutting_down = False
+        #: The sessions :meth:`shutdown_all` found running and is ending,
+        #: by name, with no ending already asked for. Their exit is the
+        #: daemon's, so :meth:`persist` keeps them ``was_running`` after it:
+        #: a persist that lands mid-shutdown -- a board sweep finishing, a
+        #: kill request still being served -- otherwise read ``exited`` off
+        #: the live objects and filed them as plain kills, and the next boot
+        #: retired every one of them (claunch-5aysr.1: 52 of 92 sessions at
+        #: the 2026-10-15T12:00:46Z restart). A verb that asks for one of
+        #: them to end meanwhile takes it out (:meth:`_asked_to_end`), and an
+        #: archive files it away for good (an archived record never restores).
+        self._ended_by_shutdown: Dict[str, AnySession] = {}
         #: Records :meth:`restore_all` retired because they did not come back
         #: at a restart — the ``--no-restore`` sessions that were running when
         #: the previous daemon went down, and the relaunches that failed. Their
@@ -708,6 +719,13 @@ class SessionManager:
             self._restarting[id(session)] = True
         else:
             self._run_exit_hooks(session)
+
+    def _asked_to_end(self, session: AnySession) -> None:
+        """A verb asked for ``session`` to end: if a shutdown in progress
+        counted it among its own endings, that ending is this verb's now, and
+        the record reads as it does (see :attr:`_ended_by_shutdown`)."""
+        if self._ended_by_shutdown.get(session.sdef.name) is session:
+            del self._ended_by_shutdown[session.sdef.name]
 
     def _attribute_ending(self, session: Session) -> None:
         """Fill in who ended ``session`` when no verb said so (claunch-o6xws).
@@ -1638,6 +1656,7 @@ class SessionManager:
         session = self.get(name)
         if not session.exited:
             actors.note(session, by)
+            self._asked_to_end(session)
             session.kill(force=force)
             self.events.record(session, "kill", "세션 종료 요청", force=force,
                                **_known(by=by))
@@ -1659,6 +1678,7 @@ class SessionManager:
         session = self.get(name)
         if not session.exited:
             actors.note(session, by)
+            self._asked_to_end(session)
             session.pause(force=force)
             self.events.record(session, "pause", "세션 일시 중지 요청", force=force,
                                **_known(by=by))
@@ -1732,6 +1752,7 @@ class SessionManager:
                 "its conversation"
             )
         actors.note(session, actors.with_reason(by, reason))
+        self._asked_to_end(session)
         session.hold(force=force)
         self.events.record(session, "hold", "세션 hold 요청", force=force,
                            reason=reason, **_known(by=by))
@@ -2745,7 +2766,7 @@ class SessionManager:
                            transcript_moved=moved is not None)
         return relaunched, moved is not None
 
-    async def shutdown_all(self, mode: str = "stop") -> None:
+    async def shutdown_all(self, mode: str = "stop", *, reason: str = "stop") -> None:
         """End every live session, the daemon going down.
 
         ``mode`` is the restart mode (claunch-xnnct.1): ``"keep"`` lets go of
@@ -2753,8 +2774,19 @@ class SessionManager:
         the next daemon to adopt (:meth:`restore_all`), ending only the ones
         on a local PTY; ``"full"`` and ``"stop"`` end them all, as without a
         host. The host process itself is the caller's to close or shut down.
+
+        ``reason`` (``"restart"`` or ``"stop"``) is what the sessions this
+        ends are filed as having been ended for: their ``ended_by`` is the
+        daemon with that reason. A session the next boot restores starts a
+        new incarnation and does not show it; one it does not restore (a
+        ``--no-restore`` session, a relaunch that failed) keeps it, and so
+        says who ended it (claunch-5aysr.1).
         """
         self.shutting_down = True  # these exits are the daemon's, not the sessions'
+        self._ended_by_shutdown = {
+            name: s for name, s in self._sessions.items()
+            if not s.exited and not getattr(s, "kill_requested", False)
+        }
         # A restart immediately after /new must not persist the superseded
         # UUID while its short filesystem watcher is still in flight.
         pending = list(self._codex_switch_tasks.values())
@@ -2792,9 +2824,17 @@ class SessionManager:
                     len(detached), time.monotonic() - started,
                 )
             live = [s for s in live if s not in detached]
+        by = actors.make(actors.DAEMON, reason=reason)
+        for session in live:
+            if self._ended_by_shutdown.get(session.sdef.name) is session:
+                actors.note(session, by)
         await asyncio.gather(
             *(session.shutdown() for session in live), return_exceptions=True
         )
+        if live:
+            # What the endings are filed as (ended_by); was_running stays as
+            # the first persist wrote it (_ended_by_shutdown).
+            self.persist()
         log.info(
             "shut down %d live session(s) in %.1fs",
             len(live),
@@ -2919,7 +2959,10 @@ class SessionManager:
                     # next boot is what brings it back (see ended_by_os).
                     # The flag, not the exit code: a record retired at an
                     # earlier boot keeps its code and must stay retired.
-                    "was_running": not session.exited or (
+                    "was_running": not session.exited
+                    or (self._ended_by_shutdown.get(session.sdef.name) is session
+                        and not session.archived_at)
+                    or (
                         getattr(session, "ended_by_os", False)
                         and not session.archived_at
                     ),
