@@ -363,3 +363,43 @@ def test_an_old_record_without_the_field_restores_as_unknown(home):
     assert mgr.get("old").ended_by is None
     assert mgr.get("old").sdef.created_by is None
     assert mgr.get("old").info()["ended_by"] is None
+
+
+def test_a_persist_during_the_shutdown_keeps_its_endings_restorable(home, tmp_path):
+    """claunch-5aysr.1: at the 2026-10-15T12:00:46Z restart a board sweep
+    for a session killed just before it finished mid-shutdown, and its
+    persist read ``exited`` off every session the shutdown had already
+    ended: the next boot retired 52 of 92 with no ender. A persist after the
+    shutdown's endings (a stand-in for that sweep) must leave them running
+    on disk, and what the next boot does not restore says the daemon ended
+    it, and why."""
+    _register("w", WAIT)
+
+    async def run():
+        mgr = _manager()
+        try:
+            mgr.create(SessionDef(name="kept", harness="w", profile="w", cwd=str(tmp_path)))
+            mgr.create(SessionDef(name="once", harness="w", profile="w", cwd=str(tmp_path),
+                                  restore=False))
+            mgr.create(SessionDef(name="asked", harness="w", profile="w", cwd=str(tmp_path)))
+            # Killed just before the restart, still on its way out when the
+            # shutdown begins: its ending is the asker's, not the daemon's.
+            mgr.kill("asked", by=actors.make(actors.USER, via=actors.VIA_WEB))
+            await mgr.shutdown_all(reason="restart")
+            assert all(mgr.get(n).exited for n in ("kept", "once", "asked"))
+            mgr.persist()  # the sweep's persist, landing after the endings
+
+            again = _manager()
+            again.restore_all()
+            try:
+                assert not again.get("kept").exited
+                assert again.get("once").exited
+                assert again.get("once").ended_by == {"kind": "daemon", "reason": "restart"}
+                assert again.get("asked").exited
+                assert again.get("asked").ended_by == {"kind": "user", "via": "web"}
+            finally:
+                await again.shutdown_all()
+        finally:
+            await mgr.shutdown_all()
+
+    asyncio.run(run())

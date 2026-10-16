@@ -533,7 +533,8 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
         if pty_host is None or pty_host.closed.is_set():
             mode = "stop" if mode == "keep" else mode
         log.info("teardown mode: %s", mode)
-        await teardown.step("sessions", manager.shutdown_all(mode=mode))
+        await teardown.step("sessions", manager.shutdown_all(
+            mode=mode, reason="restart" if app["restart_requested"] else "stop"))
         if pty_host is not None:
             await teardown.step("pty_host", asyncio.to_thread(_close_pty_host, pty_host, mode))
         # The app's own on_shutdown/on_cleanup hooks run in here.
