@@ -841,8 +841,9 @@ def test_v2_kill_on_end_records_then_ends(proj):
     assert "session ended" in worker.recorded[0]
     assert run_id in worker.recorded[0]
     assert "v2one" in worker.recorded[0]
-    [(q_cwd, q_scope, q_run, q_wf, q_reap)] = clock._end_pending
+    [(q_cwd, q_scope, q_run, q_wf, q_reap, q_slot)] = clock._end_pending
     assert (q_scope, q_run, q_wf, q_reap) == ("w1", run_id, "v2one", True)
+    assert q_slot[1] == "w1@main"
     asyncio.run(clock._finish_end(q_cwd, q_scope, q_run, q_wf))
     assert worker.killed is True
     clock._end_pending.clear()
@@ -958,7 +959,9 @@ def test_v2_end_ends_the_drivers_own_reviewer_first(proj):
     clock, sessions, order = _reviewer_tree(cwd)
     clock.scan()
     [queued] = clock._end_pending
-    asyncio.run(clock._finish_end(*queued[:4], reap_reviewers=queued[4]))
+    # the slot re-read beside the kill finds the same run: the end goes on
+    asyncio.run(clock._finish_end(*queued[:4], reap_reviewers=queued[4],
+                                  v2_slot=queued[5]))
     assert order == ["w1-rev", "w1"]            # reviewer before its driver
     assert sessions["w1-kid"].exited is False   # a worker child is not ours
     assert sessions["w1-kid-rev"].exited is False  # nor a grandchild reviewer
@@ -1008,6 +1011,80 @@ def test_v2_end_resumed_by_human_ends_the_reviewer_but_not_the_driver(proj):
     assert order == ["w1-rev"]
     assert sessions["w1-kid"].exited is False
     assert sessions["w1-kid-rev"].exited is False
+
+
+def test_v2_end_is_called_off_when_a_new_run_took_the_slot(proj):
+    """claunch-5aysr (s712, 2026-10-16 04:36): the run finished, the scan
+    recorded the end, settle's new-task started the next run in the same
+    slot -- and the kill, after its idle wait, ended the session under the
+    new run. The slot is read again beside the kill: a new run there calls
+    the end off, reviewers included (they may be the new run's), and the
+    session's record gets the correction."""
+    from claude_launcher.cflow2 import frontend, runtime as v2
+
+    cwd = str(proj)
+    old = _v2_finish(cwd, "w1")
+    clock, sessions, order = _reviewer_tree(cwd)
+    clock.scan()
+    [queued] = clock._end_pending
+    new = v2.start(frontend.compile_text(V2_ONE), cwd=cwd, scope="w1", caps={},
+                   driver="w1")["run"]
+    assert new != old
+    asyncio.run(clock._finish_end(*queued[:4], reap_reviewers=queued[4],
+                                  v2_slot=queued[5]))
+    assert order == []
+    assert sessions["w1"].ended_by is None
+    recorded = sessions["w1"].recorded
+    assert len(recorded) == 2 and "session ended" in recorded[0]
+    assert "superseded" in recorded[1]
+    assert f"run: {old}" in recorded[1] and f"next run: {new}" in recorded[1]
+
+
+V2_SETTLE = """\
+cflow: 2
+name: v2settle
+collections:
+  signals: {kind: log, item: {name: str}, lifecycle: {inherit: true}}
+nodes:
+  work: {prompt: W}
+  settle:
+    prompt: S
+    do:
+      - {push: {to: signals, item: {name: "'settle'"}}, at: enter}
+body: [work, settle]
+"""
+
+
+def test_settle_reap_skips_the_record_the_next_run_inherited(proj, monkeypatch):
+    """claunch-5aysr: ``signals`` is inherited, so a run settle's new-task
+    starts in the same slot begins holding the previous run's ``settle``
+    record. Through the scan, that record must not end the reviewer the new
+    run spawned; the run's own record does."""
+    from datetime import datetime, timedelta, timezone
+
+    from claude_launcher.cflow2 import asks, frontend, runtime as v2, store as v2_store
+
+    monkeypatch.setattr(asks, "pending_for", lambda name: [])
+    cwd = str(proj)
+    chart = frontend.compile_text(V2_SETTLE)
+    st = v2.start(chart, cwd=cwd, scope="w1", caps={}, driver="w1")
+    st = v2.report(st["tasks"][0]["instance"], cwd=cwd, scope="w1")
+    clock, sessions, order = _reviewer_tree(cwd)
+    clock.scan()                                # control: this run's record
+    assert [(d, keep) for d, _run, keep in clock._settle_pending] == [("w1", frozenset())]
+    st = v2.report(st["tasks"][0]["instance"], cwd=cwd, scope="w1")
+    assert st["status"] == "done"
+    # The next run starts later than the record was written, as it does
+    # after a person's end-decision; stamps are whole seconds.
+    later = (datetime.now(timezone.utc) + timedelta(seconds=5)).isoformat(timespec="seconds")
+    monkeypatch.setattr(v2_store, "utcnow", lambda: later)
+    st = v2.start(chart, cwd=cwd, scope="w1", caps={}, driver="w1")
+    inherited = st["collections"]["signals"]["items"]
+    assert [r["name"] for r in inherited] == ["settle"]
+    clock, sessions, order = _reviewer_tree(cwd)
+    clock.scan()
+    assert clock._settle_pending == []
+    assert order == [] and sessions["w1-rev"].exited is False
 
 
 def test_v2_end_keep_alive_without_the_flag_ends_no_reviewer(proj):
@@ -1198,7 +1275,7 @@ def test_oneshot_job_done_ends_its_session(proj):
                    cwd=cwd, scope="kid")
     assert st["status"] == "done"
     clock.scan()
-    [(q_cwd, q_scope, q_run, q_wf, _)] = clock._end_pending
+    [(q_cwd, q_scope, q_run, q_wf, *_)] = clock._end_pending
     assert (q_scope, q_wf) == ("kid", "oneshot-job-v2")
     asyncio.run(clock._finish_end(q_cwd, q_scope, q_run, q_wf))
     assert kid.killed is True

@@ -94,6 +94,7 @@ from . import goto_gate
 from . import mesh_roles
 from . import reposync_gate
 from . import resume_gate
+from . import kill_gate
 from . import reposync_agent
 from . import host_code, restart_gate
 from . import restart_notice
@@ -543,6 +544,14 @@ def build_app(
         path=resume_gate.path(),
         notify=functools.partial(_deliver_to_session, manager),
     )
+    #: The approval gate an agent's kill of another session waits behind
+    #: (claunch-5aysr); see kill_gate. No deadline, kept on disk.
+    app["kill_gate"] = kill_gate.KillGate(
+        manager=manager,
+        path=kill_gate.path(),
+        notify=functools.partial(_deliver_to_session, manager),
+        end=functools.partial(_kill_gate_end, app),
+    )
     # workspace name -> the disk-usage measurement running for it (claunch-2oait)
     app["ws_usage_tasks"] = {}
     app["ws_sync_locks"] = {}
@@ -945,6 +954,14 @@ def build_app(
     r.add_post("/api/resume-requests/{rid}/approve", h_resume_request_approve)
     r.add_post("/api/resume-requests/{rid}/reject", h_resume_request_reject)
     r.add_post("/api/resume-requests/{rid}/withdraw", h_resume_request_withdraw)
+    # Agents' kills of other sessions (claunch-5aysr, :mod:`kill_gate`):
+    # filed by the kill routes themselves, read and answered from the web
+    # UI's notification card; the asker may withdraw its own.
+    r.add_get("/api/kill-requests", h_kill_requests_list)
+    r.add_get("/api/kill-requests/{rid}", h_kill_request_get)
+    r.add_post("/api/kill-requests/{rid}/approve", h_kill_request_approve)
+    r.add_post("/api/kill-requests/{rid}/reject", h_kill_request_reject)
+    r.add_post("/api/kill-requests/{rid}/withdraw", h_kill_request_withdraw)
     # The Workspaces page's Sync panel (claunch-tqm2e). Its pushes wait
     # behind the gate above like a session's do: the button files the card,
     # a person approves it, the panel's next call runs it.
@@ -7354,6 +7371,89 @@ async def h_resume_request_withdraw(request: web.Request) -> web.Response:
     return json_response({"ok": True, "withdrawn": True, "request": record})
 
 
+async def _kill_gate_end(app, target: str, by: dict, force: bool) -> dict:
+    """End ``target`` for an approved kill request (:mod:`kill_gate`): what
+    the agent's own kill call would have done, wind-down included."""
+    manager: SessionManager = app["manager"]
+    session = manager.get(target)
+    if session.exited:
+        if getattr(session, "held_at", None):
+            manager.unhold(target, by=by)
+            return {**session.info(), "unheld": True}
+        return {**session.info(), "already_exited": True}
+    if await _winding_down_app(app, session, force=force, by=by):
+        return {**session.info(), "winding_down": True}
+    return manager.kill(target, force=force, by=by).info()
+
+
+async def _gated_kill(request: web.Request, target, by: dict, *,
+                      force: bool, route: str, reason: str = "") -> Optional[web.Response]:
+    """File an agent's kill of another session instead of doing it
+    (claunch-5aysr). None when ``by`` is not gated (a person, a run, the
+    daemon, a session ending itself): the caller ends the target as before."""
+    name = target.sdef.name
+    if not kill_gate.is_gated(by, name):
+        return None
+    if target.exited and not getattr(target, "held_at", None):
+        return None
+    try:
+        record = request.app["kill_gate"].submit(
+            session=str(by.get("name") or ""), target=name, reason=reason,
+            force=force, route=route,
+        )
+    except kill_gate.GateRefused as exc:
+        return json_error(exc.status, str(exc))
+    return json_response({**target.info(), **kill_gate.pending_reply(record)},
+                         status=202)
+
+
+async def h_kill_requests_list(request: web.Request) -> web.Response:
+    return json_response({"requests": request.app["kill_gate"].list()})
+
+
+async def h_kill_request_get(request: web.Request) -> web.Response:
+    record = request.app["kill_gate"].get(request.match_info["rid"])
+    if record is None:
+        return json_error(404, "no kill request with that id")
+    return json_response({"request": record})
+
+
+async def h_kill_request_approve(request: web.Request) -> web.Response:
+    try:
+        record = await request.app["kill_gate"].approve(
+            request.match_info["rid"], decided_by="web"
+        )
+    except kill_gate.GateRefused as exc:
+        return json_error(exc.status, str(exc))
+    if record is None:
+        return json_error(409, "no pending kill request with that id")
+    return json_response({"ok": record["status"] == kill_gate.APPROVED, "request": record})
+
+
+async def h_kill_request_reject(request: web.Request) -> web.Response:
+    record = request.app["kill_gate"].reject(request.match_info["rid"], decided_by="web")
+    if record is None:
+        return json_error(409, "no pending kill request with that id")
+    return json_response({"ok": True, "request": record})
+
+
+async def h_kill_request_withdraw(request: web.Request) -> web.Response:
+    """The asking session takes its request back; only the asker may."""
+    body = await _json_body(request)
+    session = str(body.get("session") or "").strip()
+    if not session:
+        return json_error(400, "session (the withdrawing asker) is required")
+    try:
+        record = request.app["kill_gate"].withdraw(
+            request.match_info["rid"], session=session
+        )
+    except kill_gate.GateRefused as exc:
+        return json_error(exc.status, str(exc))
+    if record is None:
+        return json_error(409, "no pending kill request with that id")
+    return json_response({"ok": True, "withdrawn": True, "request": record})
+
+
 async def h_relay_meshes(request: web.Request) -> web.Response:
     """Meshes this daemon could attach: public ones owned by any daemon on
     any connected relay, plus offers pushed here (one hop, deduplicated)."""
@@ -8979,6 +9079,11 @@ async def h_session_children(request: web.Request) -> web.Response:
             # No run because the child's user said no (claunch-val3l.2).
             if sess.sdef.cflow_declined:
                 entry["cflow_declined"] = dict(sess.sdef.cflow_declined)
+            # A quick-fork is the person's, not a child the parent disposes
+            # of: its kill is refused and settle does not count it
+            # (claunch-5aysr).
+            if sess.sdef.quick_fork_of:
+                entry["quick_fork_of"] = sess.sdef.quick_fork_of
             children.append(entry)
         parent_cwd = manager.get(name).sdef.cwd or ""
         return {
@@ -9201,6 +9306,14 @@ async def h_sessions_kill_all(request: web.Request) -> web.Response:
     winding: List[str] = []
     failed: List[dict] = []
     by = actors.from_request(request)
+    if by.get("kind") == actors.AGENT:
+        # Every session at once is the one kill no card can stand for: an
+        # agent's kills wait for a person one target at a time (claunch-5aysr).
+        return json_error(
+            403,
+            "an agent does not end every session at once: kill one session "
+            "at a time (each waits for a person's approval), or ask the user.",
+        )
     for session in list(manager.list()):
         if session.exited:
             continue
@@ -10018,6 +10131,16 @@ async def h_session_kill(request: web.Request) -> web.Response:
     force = request.query.get("force") in ("1", "true")
     session = manager.get(name)  # ManagerError -> 400, as it always did
     by = actors.from_request(request)
+    # An agent's kill of another session waits for a person (claunch-5aysr).
+    if kill_gate.is_gated(by, name):
+        refusal = kill_gate.quick_fork_refusal(session)
+        if refusal:
+            return json_error(403, refusal)
+        reason = str((await _json_body(request)).get("reason") or "")
+        gated = await _gated_kill(request, session, by, force=force,
+                                  route="kill", reason=reason)
+        if gated is not None:
+            return gated
     if session.exited:
         unpaused = manager.unpause(name, by=by)
         # A held record is filed as killed the same way, and the exit hooks
@@ -10345,19 +10468,29 @@ async def _winding_down(request: web.Request, session, *, force: bool,
     wants it gone now) and by ``?winddown=0`` (the same, without SIGKILL);
     a second kill of a session already winding down goes straight through,
     which is what the button turns into while one is running."""
+    return await _winding_down_app(
+        request.app, session, force=force,
+        skip=request.query.get("winddown") in ("0", "false"), by=by)
+
+
+async def _winding_down_app(app, session, *, force: bool, skip: bool = False,
+                            by: Optional[dict] = None) -> bool:
+    """:func:`_winding_down` without the request: the kill gate's approval
+    (:mod:`kill_gate`) ends the target the way the agent's own call would
+    have, long after that call returned."""
     # Any kill, wind-down or not, ends a pending merge/handoff request: the
     # operator pressed past it, and a row that kept saying `merging…` on a
     # session being terminated would be describing a request nobody holds.
-    request.app["handoff"].forget(session.sdef.name)
-    if force or request.query.get("winddown") in ("0", "false"):
-        board = request.app["beads"]
+    app["handoff"].forget(session.sdef.name)
+    if force or skip:
+        board = app["beads"]
         board.winddowns.pop(session.sdef.name, None)
         return False
-    if session.sdef.name in request.app["beads"].winddowns:
-        request.app["beads"].winddowns.pop(session.sdef.name, None)
+    if session.sdef.name in app["beads"].winddowns:
+        app["beads"].winddowns.pop(session.sdef.name, None)
         return False
-    return await request.app["beads"].begin_winddown(
-        session, request.app["manager"], by=by)
+    return await app["beads"].begin_winddown(
+        session, app["manager"], by=by)
 
 
 def _quick_fork_joined(reported, inherited: bool, asked: str) -> str:
@@ -10812,6 +10945,17 @@ async def h_session_child_kill(request: web.Request) -> web.Response:
     # run did it (the cflow2 orphan reap sends ``cflow:<parent>``).
     by = actors.parse_header(request.headers.get(actors.HEADER)) or actors.make(
         actors.AGENT, parent)
+    # An agent's kill waits for a person (claunch-5aysr); a quick-fork is
+    # the person's and is refused. The run's own reaps (``cflow:``) pass.
+    if kill_gate.is_gated(by, child):
+        refusal = kill_gate.quick_fork_refusal(target)
+        if refusal:
+            return json_error(403, refusal)
+        reason = str((await _json_body(request)).get("reason") or "")
+        gated = await _gated_kill(request, target, by, force=force,
+                                  route="child-kill", reason=reason)
+        if gated is not None:
+            return gated
     if await _winding_down(request, target, force=force, by=by):
         return json_response({**target.info(), "winding_down": True})
     session = manager.kill(child, force=force, by=by)

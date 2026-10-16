@@ -238,8 +238,14 @@ def test_each_way_of_ending_names_its_ender(home, tmp_path):
             assert resp.status == 200
             resp = await client.post("/api/sessions/bycli/kill?winddown=0", headers=BEARER)
             assert resp.status == 200
+            # An agent's kill waits for a person (claunch-5aysr); the
+            # approved request ends it as that agent's kill.
             resp = await client.post("/api/sessions/lead/children/child/kill",
                                      headers={**BEARER, actors.HEADER: "agent:lead"})
+            assert resp.status == 202
+            rid = (await resp.json())["kill_request"]
+            resp = await client.post(f"/api/kill-requests/{rid}/approve",
+                                     headers=BEARER)
             assert resp.status == 200
             resp = await client.post("/api/sessions/lead/children/reaped/kill",
                                      headers={**BEARER, actors.HEADER: "cflow:lead"})
@@ -252,7 +258,7 @@ def test_each_way_of_ending_names_its_ender(home, tmp_path):
             want = {
                 "bycookie": {"kind": "user", "via": "web"},
                 "bycli": {"kind": "user", "via": "cli"},
-                "child": {"kind": "agent", "name": "lead"},
+                "child": {"kind": "agent", "name": "lead", "reason": "kill-approved"},
                 "reaped": {"kind": "cflow", "name": "lead"},
                 "quitter": {"kind": "self"},
             }

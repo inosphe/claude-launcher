@@ -610,8 +610,18 @@ TOOLS = [
     {
         "name": "kill",
         "description": (
-            "End a session you spawned (or one of its descendants) and give "
-            "its slot back — the counterpart of 'spawn'. A peer is refused "
+            "Ask to end a session you spawned (or one of its descendants) "
+            "and give its slot back — the counterpart of 'spawn'. Nothing is "
+            "ended by this call: it files a request the user answers on the "
+            "web UI's notification card (claunch-5aysr), with no deadline. "
+            "The reply says pending with the request id; do not wait in a "
+            "loop or call it again — when the user answers, a '[claunch "
+            "kill-request <id>]' block is typed into your terminal. 'reason' "
+            "is what the user decides on: say why the child is finished. A "
+            "quick-fork (opened by the user from a session) is refused: it "
+            "is the user's and ends when they merge it. Reviewers a workflow "
+            "spawned are ended by the workflow itself, not by this tool. A "
+            "peer is refused "
             "and so are you: authority runs down the tree only. Use it when "
             "a child's work is done, not to silence one you have stopped "
             "reading — a child you never message is cost either way, but "
@@ -643,6 +653,13 @@ TOOLS = [
                         "skip the graceful terminate. Default false, which "
                         "lets the harness shut itself down; force only after "
                         "a graceful end has visibly failed to take"
+                    ),
+                },
+                "reason": {
+                    "type": "string",
+                    "description": (
+                        "why the child should end (its work is reported, "
+                        "where), shown to the user on the approval card"
                     ),
                 },
             },
@@ -1117,7 +1134,8 @@ def call_tool(name: str, args: dict) -> dict:
             raise MeshMcpError("'session' is required")
         q = "?force=1" if args.get("force") else ""
         return _client().post(
-            f"/api/sessions/{_session()}/children/{child}/kill{q}"
+            f"/api/sessions/{_session()}/children/{child}/kill{q}",
+            {"reason": str(args.get("reason") or "")},
         )
     if name == "resume_session":
         return _resume_session(args)

@@ -2879,6 +2879,48 @@ def run_orphaned(manager, cwd: str, scope: str, payload: dict) -> bool:
     )
 
 
+#: The ``signals`` record a workflow pushes when its run enters the settle
+#: phase (improv-worker-v2's ``settle`` node, on enter), and the reason the
+#: reviewer reap it triggers is filed under (claunch-5aysr).
+SETTLE_SIGNAL = "settle"
+SETTLE_REAP = "settle-reap"
+
+
+def _iso_ts(value) -> Optional[float]:
+    """Seconds since the epoch from a run stamp: a collection record's
+    ``at`` is already a number, the run's ``started`` an ISO string."""
+    from datetime import datetime
+
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def settle_signalled(state: dict) -> bool:
+    """Whether a v2 run has entered its settle phase: a ``settle`` record in
+    its ``signals`` log written by *this* run (claunch-5aysr).
+
+    The log is declared ``lifecycle: {inherit: true}``, so a run started in
+    the same slot (settle's ``new-task``) begins with the previous run's
+    records -- including its ``settle``. A record counts only when it was
+    written at or after this run started; an unreadable stamp does not count.
+    """
+    started = _iso_ts(state.get("started"))
+    if started is None:
+        return False
+    signals = ((state.get("collections") or {}).get("signals") or {})
+    for rec in signals.get("items") or []:
+        if not isinstance(rec, dict) or rec.get("name") != SETTLE_SIGNAL:
+            continue
+        at = _iso_ts(rec.get("at"))
+        if at is not None and at >= started:
+            return True
+    return False
+
+
 class RunEventClock:
     """Tells a run's overseer when the run stops being its own agent's.
 
@@ -2995,6 +3037,16 @@ class RunEventClock:
         self._end_tasks: Set[asyncio.Task] = set()
         #: Events found but not yet delivered — retried every poll.
         self._debt: List[dict] = []
+        #: Drivers whose running v2 run has entered its settle phase (a
+        #: ``settle`` record in its ``signals`` log, claunch-5aysr), as
+        #: (driver, run, reviewers to keep for now): scan() fills it, the loop
+        #: ends their reviewers.
+        self._settle_pending: List[Tuple[str, str, frozenset]] = []
+        #: ``(driver, reviewer, reason) -> None``: told of every reviewer this
+        #: clock ends, so the person hears of it on the dashboard's
+        #: notification channel (kill_gate.KillGate.note_auto). Set by the
+        #: daemon's main; None in tests that do not care.
+        self.on_reviewer_ended: Optional[Callable[[str, str, str], None]] = None
 
     def start(self) -> None:
         if self._task is None:
@@ -3248,6 +3300,14 @@ class RunEventClock:
                     continue
                 run_id = str(state.get("run_id") or "")
                 if (
+                    run_id
+                    and state.get("status") != v2_runtime.ST_DONE
+                    and not state.get("parent")
+                    and v2_runtime.driver_of(state) == name
+                    and settle_signalled(state)
+                ):
+                    self._queue_settle_reap(name, run_id)
+                if (
                     not run_id
                     or state.get("status") != v2_runtime.ST_DONE
                     or state.get("parent")
@@ -3288,7 +3348,9 @@ class RunEventClock:
                     "cflow kill-on-end: recorded the ending of %r (v2 run %s)",
                     name, run_id,
                 )
-                self._end_pending.append((v1_cwd, name, run_id, workflow, True))
+                self._end_pending.append(
+                    (v1_cwd, name, run_id, workflow, True, (str(st.cwd), scope))
+                )
 
     def _drain_ends(self) -> None:
         """Hand the queued end-sequences to the loop as tasks.
@@ -3297,12 +3359,16 @@ class RunEventClock:
         sequence is detached (a kill can wait out a turn, seconds); failures
         are caught inside :meth:`_finish_end`.
         """
+        while self._settle_pending:
+            driver, run_id, keep = self._settle_pending.pop(0)
+            self._end_reviewers(driver, run_id, reason=SETTLE_REAP, keep=keep)
         while self._end_pending:
             cwd, scope, run_id, workflow, *rest = self._end_pending.pop(0)
             task = asyncio.get_running_loop().create_task(
                 self._finish_end(
                     cwd, scope, run_id, workflow,
                     reap_reviewers=bool(rest and rest[0]),
+                    v2_slot=rest[1] if len(rest) > 1 else None,
                 )
             )
             self._end_tasks.add(task)
@@ -3311,6 +3377,7 @@ class RunEventClock:
     async def _finish_end(
         self, cwd: str, scope: str, run_id: str, workflow: str = "?",
         *, reap_reviewers: bool = False,
+        v2_slot: Optional[Tuple[str, str]] = None,
     ) -> None:
         """End a finished one-shot run's session: wait out its current turn
         (bounded), then kill unless it was kept alive or a person respawned
@@ -3324,6 +3391,13 @@ class RunEventClock:
         so one set while the wait ran still protects the session. An exited
         session is left alone at every step — the kill verbs are idempotent,
         but nothing here needs to call one twice.
+
+        ``v2_slot`` is the finished v2 run's ``(run cwd, slot scope)``. The
+        slot is re-read beside the kill as the flag is (claunch-5aysr): a run
+        started in that slot since the scan (settle's ``new-task``, a few
+        seconds after done) holds the session now, so the end is called off
+        -- reviewers included, they may be the new run's -- and the end
+        record gets its correction.
         """
         session = session_for(self.manager, cwd, scope)
         if session is None:
@@ -3345,6 +3419,14 @@ class RunEventClock:
             ):
                 await asyncio.sleep(0.5)
         if session.exited:
+            return
+        successor = _v2_successor(v2_slot, run_id) if v2_slot else None
+        if successor:
+            log.info(
+                "cflow kill-on-end: %r started run %s in slot %s after run %s "
+                "finished; leaving it running", scope, successor, v2_slot[1], run_id,
+            )
+            session.append_wal(superseded_block(scope, run_id, successor))
             return
         if session.sdef.keep_alive:
             log.info(
@@ -3412,32 +3494,38 @@ class RunEventClock:
             ),
         })
 
-    def _end_reviewers(
-        self, driver: str, run_id: str = "", *, reason: str = "reviewer-reap",
-    ) -> List[str]:
-        """End the live reviewers ``driver`` spawned itself (claunch-du6mx.1,
-        claunch-472wq.1). Returns the names ended.
+    def _queue_settle_reap(self, driver: str, run_id: str) -> None:
+        """Queue the settle-phase reap of ``driver``'s reviewers
+        (claunch-5aysr). Runs in scan()'s thread: it only reads. Nothing is
+        queued while no reviewer child is alive, so a run that waits an hour
+        in settle costs one children read per pass after its reviewer is
+        gone. A reviewer with an open ask addressed to it is kept for this
+        pass -- it is mid-answer, and the next pass looks again."""
+        reviewers = self._reviewer_children(driver)
+        if not reviewers:
+            return
+        keep = set()
+        try:
+            from ..cflow2 import asks as cflow2_asks
+            for name in reviewers:
+                if cflow2_asks.pending_for(name):
+                    keep.add(name)
+        except Exception:  # noqa: BLE001 -- unreadable asks: keep them all
+            keep = set(reviewers)
+        if keep == set(reviewers):
+            return
+        self._settle_pending.append((driver, run_id, frozenset(keep)))
 
-        A reviewer child exists to answer its parent's peer-review asks
-        (improv-worker-v2's reviewer-ensure spawns one and keeps it for the
-        run); once that run is done, or its parent is gone, it has nothing
-        left to review. The workflow's settle-check asks the agent to end it,
-        but that is prose. So the daemon ends it at three moments: right
-        before the kill-on-end of a done run's driver, when that kill is
-        withheld (keep-alive, respawned by a person) because the run is done
-        all the same, and when the parent exits for any other reason
-        (:meth:`session_exited`). Only direct children (``sdef.parent``)
-        holding the ``reviewer`` role on some mesh: a worker child is the
-        settle/adopt rules' to dispose of, and a grandchild belongs to its
-        own parent.
-        """
+    def _reviewer_children(self, driver: str) -> List[str]:
+        """The live direct children of ``driver`` holding the ``reviewer``
+        role on some mesh -- the sessions :meth:`_end_reviewers` ends."""
         if self.mesh is None:
             return []
         try:
             children = list(self.manager.children(driver))
         except Exception:
             return []
-        ended: List[str] = []
+        out: List[str] = []
         for name in children:
             child = self._live(name)
             if child is None or child.sdef.parent != driver:
@@ -3451,7 +3539,38 @@ class RunEventClock:
                 }
             except Exception:
                 continue
-            if "reviewer" not in roles:
+            if "reviewer" in roles:
+                out.append(name)
+        return out
+
+    def _end_reviewers(
+        self, driver: str, run_id: str = "", *, reason: str = "reviewer-reap",
+        keep: frozenset = frozenset(),
+    ) -> List[str]:
+        """End the live reviewers ``driver`` spawned itself (claunch-du6mx.1,
+        claunch-472wq.1). Returns the names ended.
+
+        A reviewer child exists to answer its parent's peer-review asks
+        (improv-worker-v2's reviewer-ensure spawns one and keeps it for the
+        run); once that run is done, or its parent is gone, it has nothing
+        left to review. The daemon ends it -- the agent does not (its kill
+        waits for a person, claunch-5aysr) -- at four moments: when the run
+        enters its settle phase (:func:`settle_signalled`, the reviewer kept
+        while an ask is still addressed to it), right
+        before the kill-on-end of a done run's driver, when that kill is
+        withheld (keep-alive, respawned by a person) because the run is done
+        all the same, and when the parent exits for any other reason
+        (:meth:`session_exited`). Only direct children (``sdef.parent``)
+        holding the ``reviewer`` role on some mesh: a worker child is the
+        settle/adopt rules' to dispose of, and a grandchild belongs to its
+        own parent.
+        """
+        ended: List[str] = []
+        for name in self._reviewer_children(driver):
+            if name in keep:
+                continue
+            child = self._live(name)
+            if child is None:
                 continue
             try:
                 actors.note(child, actors.make(
@@ -3468,6 +3587,9 @@ class RunEventClock:
                 "cflow %s: ended reviewer %r of %r (run %s)",
                 reason, name, driver, run_id or "-",
             )
+            if self.on_reviewer_ended is not None:
+                with contextlib.suppress(Exception):
+                    self.on_reviewer_ended(driver, name, reason)
         if ended:
             with contextlib.suppress(Exception):
                 self.manager.persist()
@@ -3629,6 +3751,38 @@ def resumed_block(scope: str, run_id: str) -> str:
         "was written, so the pending end was called off",
         "note: this holds only until the daemon that saw the respawn goes "
         "down -- the next restart judges the session fresh, same as before",
+        "---",
+    ]
+    return "\n".join(lines)
+
+
+def _v2_successor(slot: Tuple[str, str], run_id: str) -> Optional[str]:
+    """The id of the run now in v2 ``slot`` when it is not ``run_id`` --
+    a later run took the slot -- else None. An unreadable slot is None: the
+    end goes ahead as it did before this check (claunch-5aysr)."""
+    from ..cflow2 import runtime as v2_runtime
+
+    try:
+        current = str(v2_runtime.RunStore(*slot).load_state().get("run_id") or "")
+    except Exception:  # noqa: BLE001 -- no slot state: nothing to compare
+        return None
+    return current if current and current != run_id else None
+
+
+def superseded_block(scope: str, run_id: str, successor: str) -> str:
+    """Correction to a session's own :func:`end_block`: a new run started
+    in the same slot before the end landed (claunch-5aysr), so the session
+    keeps running for it. Appended the same durable way as
+    :func:`resumed_block`."""
+    lines = [
+        "---",
+        "# claunch: session ended notice superseded -- machine-generated, "
+        "not typed by the user",
+        f"session: {scope}",
+        f"run: {run_id}",
+        f"next run: {successor}",
+        "outcome: a new run started in this session's slot after the notice "
+        "above was written, so the pending end was called off",
         "---",
     ]
     return "\n".join(lines)

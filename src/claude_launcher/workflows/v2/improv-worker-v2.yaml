@@ -3018,9 +3018,10 @@ nodes:
       여기서 done으로 마감되고, 새 작업은 같은 세션의 **새 런**이 목표 수립부터
       맡는다. 이 런의 회차(브랜치·보고서·이슈)는 그대로 이 런의 기록으로 남는다.
 
-      1. 세션이 종료되지 않게 먼저 `claunch keep-alive $CLAUNCH_SESSION`을
-         실행한다 — 이 런이 done이 되는 순간 데몬이 세션을 끝낼 수 있다.
-      2. 새 작업의 이슈를 정한다. 선택의 reason과 사용자의 말(`claunch cflow2
+      keep-alive는 건드리지 않는다: 데몬은 끝난 런의 세션을 종료하기 직전에
+      슬롯을 다시 읽고, 그 사이 새 런이 섰으면 종료를 취소한다(claunch-5aysr).
+
+      1. 새 작업의 이슈를 정한다. 선택의 reason과 사용자의 말(`claunch cflow2
          journal`, 터미널 지시)에서 작업을 읽는다. 기존 이슈 id를 받았으면 그
          id다. 그 id가 이 런의 self-improve가 등록한 이슈(label `self-improve`,
          assignee 없음)면 `claunch beads update <id> --assignee $CLAUNCH_SESSION`
@@ -3031,17 +3032,14 @@ nodes:
          후속(같은 기능에 대한 추가 요청)이면 `--parent <이 회차 이슈 id>`를
          붙인다. 상태는 open으로 둔다 — in_progress 전이는 새 런의 intake가
          한다. 작업 내용을 읽을 수 없으면 지어내지 않고 사용자에게 묻는다.
-      3. 이 작업을 보고한다(value에 issue). 런이 done이 된 뒤 **같은 턴에서**
+      2. 이 작업을 보고한다(value에 issue). 런이 done이 된 뒤 **같은 턴에서**
          `flow_start`로 새 런을 시작한다: `workflow`는 이 런과 같은 정의,
          `inputs: {issue: <그 id>}`. 끝난 런은 시작이 보관한다.
-      4. 새 런이 선 것을 확인한 뒤 `claunch keep-alive $CLAUNCH_SESSION off`로
-         플래그를 내린다 — 남겨 두면 새 런의 end-notice가 세션을 끝내지 못한다.
       상위에게는 fyi 한 줄로 이 세션이 새 이슈로 다음 런을 시작한다는 사실과
       그 id를 알린다.
     done_when: |
-      keep-alive 플래그가 섰고(명령 출력을 보고에 붙인다), 새 작업의 이슈 id가
-      정해졌으며(기존 id 또는 새로 만든 id), 상위 fyi의 메시지 id가 보고에
-      있다(상위가 없으면 그 사실). 새 런 시작과 플래그 해제는 이 보고 뒤
+      새 작업의 이슈 id가 정해졌고(기존 id 또는 새로 만든 id), 상위 fyi의
+      메시지 id가 보고에 있다(상위가 없으면 그 사실). 새 런 시작은 이 보고 뒤
       같은 턴에서 한다.
     returns:
       ok: {issue: str}
@@ -4186,17 +4184,21 @@ procedures:
                       위 두 ask를 보내지 않으면 settle-wait는 재요청을 하지 않으므로
                       아무도 처분을 요청받지 못한 채 settle-stall까지 간다. 한 일을
                       reason에 적는다.
-                      판정 전에 reviewer-ensure가 이 런에서 세운 자식 리뷰어부터
-                      정리한다: 이 자리는 queue-recheck가 done을 낸 뒤라 이 런에 남은
-                      리뷰가 없다. 그 리뷰어가 답하지 않은 질문을 들고 있지 않은지
-                      `claunch cflow asks --session <리뷰어>`로 보고, MCP `kill`로
-                      끝낸다 — 남겨 두면 아래 판정이 그것을 adopt 안 된 자식으로 센다.
-                      데몬도 직속 리뷰어를 종료한다: 런이 done이 된 뒤(이 세션을
-                      끝내기 직전, 또는 keep-alive·사람의 재기동으로 이 세션이 남을
-                      때 — claunch-du6mx.1, claunch-472wq.1)와 이 세션이 끝날 때다.
-                      그것은 놓친 리뷰어의 뒷정리다 — 이 판정은 여기서 끝낸 결과로
-                      한다. 리뷰어가 아닌 자식에게는 세션의 종료가 번지지 않는다(한
-                      단계 위로 올라가 살아남는다). 한 일을
+                      reviewer-ensure가 이 런에서 세운 자식 리뷰어는 너가 끝내지
+                      않는다 — 데몬이 끝낸다(claunch-5aysr): 이 런이 settle에 들어설 때
+                      signals에 `settle` 레코드가 쌓이고, 데몬은 그것을 보고 직속
+                      리뷰어(메시 role reviewer)를 종료한 뒤 사용자에게 알림만 보낸다.
+                      그 리뷰어 앞으로 열린 질문이 있으면 그 질문이 닫힐 때까지 남긴다.
+                      데몬은 런이 done이 된 뒤와 이 세션이 끝날 때도 남은 리뷰어를
+                      종료한다(claunch-du6mx.1, claunch-472wq.1). 그러니 아래 자식
+                      판정에서 리뷰어는 세지 않는다 — 아직 살아 있어도 미정산이
+                      아니다. **퀵포크(사용자가 웹 UI에서 이 세션으로부터 연 사본,
+                      `children`의 quick_fork_of가 있는 것)도 세지 않는다** — 그것은
+                      사용자의 것이고 사용자가 merge할 때 끝난다. 다른 자식을 MCP
+                      `kill`로 끝내는 것은 사용자 승인을 기다리는 요청이다(답은
+                      `[claunch kill-request]` 블록으로 온다) — 답을 기다리는 동안 그
+                      자식은 살아 있다. 리뷰어가 아닌 자식에게는 세션의 종료가 번지지
+                      않는다(한 단계 위로 올라가 살아남는다). 한 일을
                       reason에 적는다.
                       stack side 런이 아직 서 있으면(flow_status의 `sides.stack.live`가 true)
                       미정산이다 — 살아 있는 스택 자식이 있으면 queue-recheck가 stack-round를
@@ -4349,6 +4351,12 @@ body:
   finally:
     id: settle
     call: settle
+    # 정산 국면에 들어섰다는 표시(claunch-5aysr): 데몬이 이 레코드를 보고
+    # 이 세션의 직속 리뷰어를 종료한다 — 에이전트의 kill은 사용자 승인을
+    # 기다리므로 리뷰어 정리는 런의 기계가 한다. 새 키를 쓰지 않는 것은 구
+    # 데몬의 컴파일러도 이 정의를 받아야 하기 때문이다.
+    do:
+      - {push: {to: signals, item: {name: "'settle'"}}, at: enter}
 
 spec:
   invariants:
