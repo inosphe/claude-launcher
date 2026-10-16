@@ -1638,3 +1638,81 @@ def test_the_request_nudge_is_sent_after_the_routing_result():
                    "trigger_skipped", "[ask]", "몇 번째 재촉",
                    "동결은 그대로다", "보드에 코멘트를 새로 쌓지 않는다"):
         assert anchor in nudge, f"landing-nudge lost {anchor!r}"
+
+
+# -- claunch-77cu6: the targeted-test self-gate and a skip that reaches the request
+
+
+def _flat(text) -> str:
+    return " ".join(str(text).split())
+
+
+def test_the_test_decision_is_a_self_gate_with_measured_skip_conditions():
+    """``skip`` is the agent's own call, made on command output: every file is
+    non-behavioural, no test names it, and no full-sweep reason applies.
+    Anything unclear is ``run``."""
+    from claude_launcher.cflow2 import frontend
+
+    doc = yaml.load(V2.read_text(encoding="utf-8"), Loader=frontend._Loader)
+    decision = _find_id(doc, "test-decision")["choose"]
+    assert decision["chooser"] == "agent" and decision["require_reason"] is True
+    assert set(decision["options"]) == {"run", "skip"}
+    assert decision["options"]["skip"]["then"] == "test-skipped"
+    prompt = _flat(decision["prompt"])
+    for anchor in ("셀프 게이트", "**전부** 참일 때만", "git diff --name-only",
+                   "tools/changed_tests.py --list", 'grep -rl "<파일 이름>" tests/',
+                   "src/claude_launcher/workflows/", "판단이 서지 않으면 `run`",
+                   "통합 후 전체 스윕"):
+        assert anchor in prompt, f"test-decision lost {anchor!r}"
+
+
+def test_a_skipped_test_leaves_a_board_marker_the_landing_steps_read():
+    """The skip is recorded once, as ``TESTS SKIPPED @ <hash>:`` on the issue,
+    and every later step that used to ask for targeted numbers reads that
+    marker instead of escalating or re-measuring."""
+    from claude_launcher.cflow2 import frontend
+
+    doc = yaml.load(V2.read_text(encoding="utf-8"), Loader=frontend._Loader)
+    nodes = doc["nodes"]
+    skipped = _flat(nodes["test-skipped"]["prompt"])
+    assert "TESTS SKIPPED @ <HEAD 해시>:" in skipped
+    assert "0/0 green" in skipped  # named as the forbidden stand-in
+    assert "TESTS SKIPPED @" in nodes["test-skipped"]["done_when"]
+    assert "board.write" in nodes["test-skipped"]["effects"]
+
+    landing = _flat(_find_id(doc, "landing")["choose"]["prompt"])
+    assert "<TESTS SKIPPED 마커의 해시> HEAD" in landing
+    assert "수치가 없다는 이유로 escalate하지 않는다" in landing
+
+    rebase = _flat(nodes["rebase"]["prompt"])
+    assert "표적 테스트를 생략한 일감 (TESTS SKIPPED 마커)" in rebase
+    assert "머지와 `git update-ref` 줄만 실행한다" in rebase
+
+    review_ask = _flat(nodes["peer-review"]["ask"]["prompt"])
+    assert "TESTS SKIPPED @" in review_ask and "표적 테스트 필요" in review_ask
+
+    request = _flat(nodes["integration-request"]["prompt"])
+    assert "tests: skipped — TESTS SKIPPED @ <해시>: <사유>" in request
+    assert "tests: skipped (TESTS SKIPPED @ <해시>)" in _flat(nodes["commit"]["prompt"])
+
+
+def test_a_skip_goes_from_the_choice_to_commit_without_a_test_task(tmp_path, monkeypatch):
+    """Routing: ``skip`` -> test-skipped -> commit; review and targeted-test
+    are never entered."""
+    from claude_launcher.cflow2 import runtime
+
+    st, kw = _coding_item(tmp_path, monkeypatch, None)
+    [work] = st["tasks"]
+    st = runtime.report(work["instance"], "ok", {}, **kw)
+    [choice] = st["choices"]
+    assert choice["label"] == "test-decision"
+    st = runtime.select(choice["instance"], "skip", reason="css only, no test names it", **kw)
+    seen = []
+    while st["tasks"]:
+        [task] = st["tasks"]
+        seen.append(task["label"])
+        if task["label"] == "work":
+            break
+        st = runtime.report(task["instance"], "ok", {}, **kw)
+    assert seen[:2] == ["test-skipped", "commit"]
+    assert "review" not in seen and "targeted-test" not in seen
