@@ -1,8 +1,9 @@
 /* The Details panel's sub-tabs: All, or one group of the panel's sections.
 
-   The panel used to be one column of some twenty sections. It is now four
-   groups (Overview, Messages, Work, Settings) under a second radio, with All
-   drawing the four in order under their names. This harness drives the real
+   The panel used to be one column of some twenty sections. It is now five
+   groups (Overview, Messages, Mesh, Work, Settings) under a second radio, with
+   All drawing the five in order under their names. Mesh is the memberships'
+   own tab (claunch-8x20z): it used to be the tail of Messages. This harness drives the real
    renderSession with every section stubbed to a named box, plus the real
    sub-tab bar, the real group head and the real per-session layout store,
    and checks:
@@ -85,7 +86,7 @@ let refreshed = 0;
 const sections = [
   "sessFlags", "sessNote", "sessReminderNote", "sessTask", "sessPromptPacks",
   "sessBriefSection", "sessInputJournal",
-  "sessHandoff", "sessSend", "sessMeshJoin", "sessBeads", "sessCommits",
+  "sessHandoff", "sessSend", "sessMeshesSection", "sessBeads", "sessCommits",
   "sessReborrow", "sessPerms", "sessSandbox", "sessCompact", "sessMigrate",
 ];
 const stubs = `
@@ -155,9 +156,9 @@ function renderWith(sub) {
 }
 
 /* ---- the bar ------------------------------------------------------------ */
-check("five sub-tabs, All first",
+check("six sub-tabs, All first",
       ctx.SUBTABS.map(([, label]) => label),
-      ["All", "Overview", "Messages", "Work", "Settings"]);
+      ["All", "Overview", "Messages", "Mesh", "Work", "Settings"]);
 {
   store.clear();
   const bar = ctx.tabs("coder1");
@@ -171,7 +172,7 @@ check("five sub-tabs, All first",
         [true, "true", false]);
   check("...the rest live",
         tabs.slice(1).map((t) => !!t.handlers.click && !t.classes.has("on")),
-        [true, true, true, true]);
+        [true, true, true, true, true]);
   tabs[2].fire("click");
   check("picking one writes it down for this session", ctx.layout("coder1").sub,
         "messages");
@@ -180,7 +181,7 @@ check("five sub-tabs, All first",
   check("...or this one's panel radio", ctx.layout("coder1").rail, "detail");
   const again = ctx.tabs("coder1").kids;
   check("the rebuild lights the new choice alone",
-        again.map((t) => t.classes.has("on")), [false, false, true, false, false]);
+        again.map((t) => t.classes.has("on")), [false, false, true, false, false, false]);
 }
 {
   store.set("claunch_sesslayout:/", JSON.stringify({ coder1: { sub: "banana" } }));
@@ -190,8 +191,8 @@ check("five sub-tabs, All first",
 /* ---- what each sub-tab draws -------------------------------------------- */
 const OVERVIEW = ["sess-meta", "sessFlags", "sessNote", "sessReminderNote", "sessTask",
                   "sessPromptPacks", "sessBriefSection"];
-const MESSAGES = ["sessInputJournal", "sessHandoff", "sessSend", "sessQueued",
-                  "sess-meshes"];
+const MESSAGES = ["sessInputJournal", "sessHandoff", "sessSend", "sessQueued"];
+const MESH = ["sessMeshesSection"];
 const WORK = ["sessBeads", "sessCommits", "roleQuickJob"];
 const SETTINGS = ["sessReborrow", "sessPerms", "sessSandbox", "sessCompact", "sessMigrate"];
 const TOP = ["sess-head", "sess-tabs", "sess-subtabs"];
@@ -199,7 +200,7 @@ const TOP = ["sess-head", "sess-tabs", "sess-subtabs"];
 check("All draws every group, in order, each under its name",
       renderWith("all"),
       [...TOP, "#Overview", ...OVERVIEW, "#Messages", ...MESSAGES,
-       "#Work", ...WORK, "#Settings", ...SETTINGS]);
+       "#Mesh", ...MESH, "#Work", ...WORK, "#Settings", ...SETTINGS]);
 check("no stored choice is All", renderWith(undefined)[3], "#Overview");
 check("Overview draws its group alone, with no head",
       renderWith("overview"), [...TOP, ...OVERVIEW]);
@@ -208,6 +209,11 @@ check("...and builds nothing else",
                             "sessPromptPacks", "sessBriefSection"].includes(b)), []);
 check("Messages draws its group alone", renderWith("messages"),
       [...TOP, ...MESSAGES]);
+check("...and no longer builds the memberships",
+      built.includes("sessMeshesSection"), false);
+check("Mesh draws the memberships alone", renderWith("mesh"),
+      [...TOP, ...MESH]);
+check("...and builds nothing else", built, ["sessMeshesSection"]);
 check("Work draws its group alone", renderWith("work"), [...TOP, ...WORK]);
 check("Settings draws its group alone", renderWith("settings"),
       [...TOP, ...SETTINGS]);

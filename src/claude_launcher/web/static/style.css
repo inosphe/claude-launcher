@@ -3187,6 +3187,17 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
   font-size: 12px; text-decoration: none;
 }
 .sess-mesh:hover { background: #1f3660; }
+/* the Mesh sub-tab (claunch-8x20z): one row per membership with its Leave,
+   one per pending join request with its Withdraw */
+.sess-mesh-row {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin: 0 0 6px;
+}
+.sess-mesh-row .sess-mesh { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.sess-mesh-row .wf-btn { margin: 0; padding: 2px 10px; font-size: 12px; }
+.sess-mesh-req { font-size: 12px; color: #c6cdd5; overflow-wrap: anywhere; }
+.sess-meshes h4 { margin: 14px 0 6px; font-size: 13px; opacity: 0.85; }
+.sess-mesh-pending { margin-top: 10px; }
 
 /* ---- beads: the board, on the page and in the rail ---- */
 .sess-beads > .wf-note, .sess-beads > .wf-warning { margin: 0 0 8px; line-height: 1.5; }
