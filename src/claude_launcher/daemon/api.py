@@ -349,6 +349,36 @@ async def record_middleware(request: web.Request, handler):
             log.debug("could not record a request", exc_info=True)
 
 
+#: Sec-Fetch-Site values a cookie-authenticated request may carry: the
+#: dashboard's own fetches (same-origin) and what the user typed or
+#: bookmarked (none).
+_OWN_FETCH_SITES = frozenset({"same-origin", "none"})
+
+
+def _foreign_origin(request: web.Request) -> Optional[str]:
+    """Why a cookie-carrying request came from a page other than the dashboard, or None.
+
+    The login cookie is SameSite=Strict, but a cookie's site ignores the port:
+    every port of the dashboard's host is the same site, so a page served on
+    one of them -- the web debug proxy frames arbitrary pages there
+    (daemon/webdebug.py) -- gets the cookie attached to a POST or a WebSocket
+    it opens to the daemon. CORS hides the response, not the effect, and a
+    WebSocket is not covered by CORS at all (claunch-dsb28). The browser says
+    where a request came from: Sec-Fetch-Site in every current browser,
+    Origin where that is missing. Both are computed against the URL the
+    browser is on, so a relay in front of the daemon does not change them.
+    """
+    site = request.headers.get("Sec-Fetch-Site")
+    if site is not None:
+        return None if site in _OWN_FETCH_SITES else f"Sec-Fetch-Site: {site}"
+    origin = request.headers.get("Origin")
+    if not origin:
+        return None
+    if urlsplit(origin).netloc.lower() != request.host.lower():
+        return f"Origin: {origin}"
+    return None
+
+
 def build_auth_middleware(token: str, cookie_sessions: set):
     cookie_key = cookie_name(token)
 
@@ -366,6 +396,24 @@ def build_auth_middleware(token: str, cookie_sessions: set):
             return await handler(request)
         cookie = request.cookies.get(cookie_key)
         if cookie and cookie in cookie_sessions:
+            # The browser attached the cookie; whether the dashboard sent the
+            # request is a separate question. Under /vscode/ only what can
+            # change something is asked: the editor's webviews load their
+            # resources from sandboxed frames, which count as another site.
+            checked = path.startswith("/api/") or (
+                request.method not in ("GET", "HEAD", "OPTIONS")
+                or request.headers.get("Upgrade", "").lower() == "websocket"
+            )
+            foreign = _foreign_origin(request) if checked else None
+            if foreign:
+                try:
+                    connections.install(request.app).refused(request, "foreign origin")
+                    log.info("refused %s %s: cookie from another page (%s)",
+                             request.method, path, foreign)
+                except Exception:  # noqa: BLE001 -- diagnosis must not fail a request
+                    log.debug("could not record a refusal", exc_info=True)
+                return json_error(403, "cross-origin request refused: the login cookie "
+                                       "only works for the dashboard's own pages")
             # How it authenticated is the one thing that tells the dashboard
             # from a shell: actors.from_request reads it (claunch-o6xws).
             request[actors.AUTH_VIA_KEY] = actors.AUTH_COOKIE

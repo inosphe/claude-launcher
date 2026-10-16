@@ -321,6 +321,63 @@ def test_the_proxy_route_opens_one_listener_per_origin():
 
 
 # --------------------------------------------------------------------------- #
+# the daemon refuses the login cookie from a proxied page
+# --------------------------------------------------------------------------- #
+def test_the_login_cookie_does_not_work_from_another_port_of_the_host(home):
+    """A proxied page is on the dashboard's host at another port: the same
+    site, so the browser attaches the SameSite=Strict login cookie to what it
+    sends the daemon. The daemon must refuse it there (claunch-dsb28 review)."""
+    import time
+
+    from claude_launcher.daemon.api import build_app, cookie_name
+    from claude_launcher.daemon.manager import SessionManager
+
+    token = "token-x"
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        client = TestClient(TestServer(build_app(mgr, token, started_at=time.monotonic())))
+        await client.start_server()
+        try:
+            login = await client.post("/api/auth/session", json={"token": token})
+            assert login.status == 200
+            jar = {cookie_name(token): login.cookies[cookie_name(token)].value}
+            client.session.cookie_jar.clear()
+            own = f"http://{client.host}:{client.port}"
+            proxy = f"http://{client.host}:{client.port + 1}"
+
+            async def status(method, path, headers, cookies=jar, **kw):
+                async with client.request(method, path, headers=headers, cookies=cookies, **kw) as r:
+                    return r.status
+
+            # A write from the proxied page: no-cors text/plain POST, cookie attached.
+            body = {"data": '{"url": "localhost:1"}'}
+            assert await status("POST", "/api/webdebug/proxy", {"Origin": proxy}, **body) == 403
+            assert await status("POST", "/api/webdebug/proxy",
+                                {"Sec-Fetch-Site": "same-site", "Origin": proxy}, **body) == 403
+            assert await status("GET", "/api/sessions", {"Sec-Fetch-Site": "cross-site"}) == 403
+            # A WebSocket is outside CORS altogether; the upgrade is refused before it opens.
+            ws_headers = {"Origin": proxy, "Sec-Fetch-Site": "same-site", "Connection": "Upgrade",
+                          "Upgrade": "websocket", "Sec-WebSocket-Version": "13",
+                          "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ=="}
+            assert await status("GET", "/api/webdebug/ws?window=w-1", ws_headers) == 403
+            # What can change something under /vscode/ is refused too.
+            assert await status("POST", "/vscode/x", {"Sec-Fetch-Site": "same-site"}) == 403
+
+            # The dashboard's own requests, a typed address and shells still pass.
+            assert await status("GET", "/api/sessions", {"Sec-Fetch-Site": "same-origin"}) == 200
+            assert await status("GET", "/api/sessions", {"Sec-Fetch-Site": "none"}) == 200
+            assert await status("GET", "/api/sessions", {"Origin": own}) == 200
+            assert await status("GET", "/api/sessions", {}) == 200
+            bearer = {"Authorization": f"Bearer {token}", "Origin": proxy, "Sec-Fetch-Site": "same-site"}
+            assert await status("GET", "/api/sessions", bearer, cookies=None) == 200
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
 # the MCP tools
 # --------------------------------------------------------------------------- #
 class _Client:

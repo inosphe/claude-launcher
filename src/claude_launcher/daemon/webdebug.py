@@ -21,6 +21,13 @@ Three parts, all in this module:
     proxy would hand every script on the page under test -- its CDN and
     analytics tags included -- the daemon's authority.
 
+  That origin is still the dashboard's *site* (same host, another port), and
+  the login cookie's SameSite=Strict does not tell ports apart: a POST or a
+  WebSocket the proxied page opens to the daemon carries the cookie, and CORS
+  hides only the response. What refuses it is the daemon's auth middleware,
+  which turns away a cookie-authenticated request whose Sec-Fetch-Site (or,
+  without that, Origin) names another page (api._foreign_origin).
+
   The listener is not open to whoever reaches the port: a request needs the
   proxy's cookie, which only ``/__claunch/enter?k=<secret>`` sets, and the
   secret is only handed out by an authenticated ``/api/webdebug/proxy``
