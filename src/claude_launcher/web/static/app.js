@@ -23166,6 +23166,7 @@ function openSettings(section) {
   refreshGhStatus();
   refreshRelaySettings();
   refreshWslRegStub();
+  refreshPtyHostSetting();
 }
 
 let relaySettingsRows = [];
@@ -28598,6 +28599,7 @@ function renderWorkspaces() {
   view.appendChild(ghCard());
   view.appendChild(relaySettingsCard());
   view.appendChild(wslRegStubCard());
+  view.appendChild(ptyHostSettingCard());
 
   refocusSettingsField(focused);
 }
@@ -30107,6 +30109,111 @@ function wslRegStubCard() {
     card.appendChild(el("p", "wf-note", "This daemon is not running under WSL; the setting has no effect here."));
   }
   if (wslRegStub.notice) card.appendChild(el("p", "wf-note", wslRegStub.notice));
+  return card;
+}
+
+/* Keep sessions across a daemon restart (claunch-xnnct.5) -- daemon.pty_host,
+   read and written with GET/PUT /api/pty-host-setting. The daemon decides at
+   start whether it runs a PTY host, so a change applies from the next
+   restart; the card says so and points at the Daemon card's two restart
+   buttons. It never restarts anything itself. host is host_code.info(): what
+   this daemon runs now, the same record the sidebar badge draws. */
+let ptyHostSetting = { enabled: false, supported: true, host: null, loaded: false, error: "", busy: false };
+
+async function refreshPtyHostSetting() {
+  try {
+    const resp = await api("/api/pty-host-setting");
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    Object.assign(ptyHostSetting, {
+      enabled: !!data.enabled, supported: data.supported !== false,
+      host: data.host || null, loaded: true, error: "",
+    });
+  } catch (err) {
+    ptyHostSetting.error = String(err);
+  }
+  if (wsOpen) renderWorkspaces();
+}
+
+async function savePtyHostSetting(enabled) {
+  ptyHostSetting.busy = true;
+  renderWorkspaces();
+  try {
+    const resp = await api("/api/pty-host-setting", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    Object.assign(ptyHostSetting, {
+      enabled: !!data.enabled, supported: data.supported !== false,
+      host: data.host || null, error: "",
+    });
+  } catch (err) {
+    ptyHostSetting.error = String(err);
+  }
+  ptyHostSetting.busy = false;
+  renderWorkspaces();
+}
+
+/* One line for what this daemon runs now, from host_code.info(). */
+function ptyHostNowLine(host) {
+  if (!host) return "Now: unknown.";
+  if (host.state === "connected" || host.state === "stale") {
+    const n = host.sessions || 0;
+    return `Now: on. PTY host pid ${host.pid} holds ${n} session${n === 1 ? "" : "s"}` +
+      (host.state === "stale" ? "; it runs older code than this daemon." : ".");
+  }
+  if (host.state === "unreachable") {
+    return "Now: on, but no PTY host is connected; sessions run in the daemon.";
+  }
+  return "Now: off. Sessions run in the daemon, and a daemon restart relaunches every session.";
+}
+
+/* What the saved value will do at the next restart, or "" when it is what
+   this daemon already started with. */
+function ptyHostPendingLine(st) {
+  const host = st.host;
+  if (!host || !!host.configured === st.enabled) return "";
+  return st.enabled
+    ? "Saved. Applies at the next daemon restart (either restart button on the " +
+      "home page's Daemon card): that restart still relaunches the running " +
+      "sessions once, and later restarts keep them."
+    : "Saved. Applies at the next daemon restart: the PTY host ends with its " +
+      "sessions, and they are relaunched in the daemon.";
+}
+
+function ptyHostSettingCard() {
+  const st = ptyHostSetting;
+  const card = el("section", "ws-add pty-host-settings");
+  card.appendChild(el("h3", null, "Keep sessions across a daemon restart (PTY host)"));
+  card.appendChild(el("p", "wf-note",
+    "When on, session terminals and their programs run in a separate PTY host " +
+    "process instead of the daemon. A plain daemon restart then keeps them " +
+    "running and the new daemon takes them over; \"Restart with PTY host\" " +
+    "ends the host too and relaunches them on a new one. Same setting as " +
+    "claunch daemon config pty_host."));
+  if (st.error) card.appendChild(el("p", "error", st.error));
+  if (!st.loaded) {
+    card.appendChild(el("p", "wf-note", "reading…"));
+    return card;
+  }
+  const toggle = el("label", "qa-nudge-toggle");
+  const box = document.createElement("input");
+  box.type = "checkbox";
+  box.id = "pty-host-enabled";
+  box.checked = st.enabled;
+  box.disabled = st.busy || !st.supported;
+  box.addEventListener("change", () => savePtyHostSetting(box.checked));
+  toggle.append(box, " Run sessions in a PTY host");
+  card.appendChild(toggle);
+  if (!st.supported) {
+    card.appendChild(el("p", "wf-note", "The PTY host runs on POSIX only; on Windows sessions always run in the daemon."));
+  }
+  card.appendChild(el("p", "wf-note", ptyHostNowLine(st.host)));
+  const pending = ptyHostPendingLine(st);
+  if (pending) card.appendChild(el("p", "wf-note", pending));
   return card;
 }
 

@@ -3222,8 +3222,9 @@ output logs survive under `~/.claude-launcher/daemon/sessions/<name>/` either
 way.
 
 **Keeping sessions across a restart (PTY host).** With the daemon setting
-`pty_host` on (`claunch daemon config pty_host true`, POSIX only, off by
-default), the session PTYs and their programs belong to a separate PTY host
+`pty_host` on (`claunch daemon config pty_host true`, or the "Keep sessions
+across a daemon restart (PTY host)" card on the web UI's Settings page; POSIX
+only, off by default, read when the daemon starts), the session PTYs and their programs belong to a separate PTY host
 process instead of the daemon. A plain `claunch daemon restart` then keeps
 them: the daemon lets go of each session, the host keeps it running and keeps
 its output in a 1 MiB ring, and the next daemon takes it over as it is -- same

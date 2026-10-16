@@ -54,7 +54,7 @@ assert.deepEqual(parseHash("#/workspaces"), { page: "workspaces" });
 const CARDS = [
   "keyHelpCard", "scoreGoalSettingsCard", "roleWorkflowsCard", "railStaleCard", "modelChoicesCard",
   "llmSettingsCard", "simDefaultsCard", "qaNudgeCard", "faqCard", "promptPresetCard", "prompterSettingsCard",
-  "statusCheckCard", "ragCard", "ghCard", "relaySettingsCard", "wslRegStubCard",
+  "statusCheckCard", "ragCard", "ghCard", "relaySettingsCard", "wslRegStubCard", "ptyHostSettingCard",
   "wsAddCard", "projectsCard", "beadsBoardsCard",
 ];
 const WORKSPACE_CARDS = ["wsAddCard", "projectsCard", "beadsBoardsCard"];
@@ -154,7 +154,7 @@ const REFRESHERS = [
   "refreshGhStatus", "refreshRelaySettings", "refreshBeadsBoards",
   "refreshProjects", "refreshProfileSettings", "refreshInstallOverview",
   "refreshVscode", "refreshWsGitSummary", "refreshWsUsage",
-  "refreshRoleWorkflowSettings", "refreshWslRegStub",
+  "refreshRoleWorkflowSettings", "refreshWslRegStub", "refreshPtyHostSetting",
 ];
 const octx = {
   wsSection: "", wsOpen: true,
@@ -189,5 +189,7 @@ assert.equal(called.includes("refreshSimDefaults"), true,
              "General fetches the Simulation models card's data");
 assert.equal(called.includes("refreshRoleWorkflowSettings"), true,
              "General fetches the Role workflows card's data");
+assert.equal(called.includes("refreshPtyHostSetting"), true,
+             "General fetches the PTY host card's data (claunch-xnnct.5)");
 
 console.log("settingsworkspaces_check ok");

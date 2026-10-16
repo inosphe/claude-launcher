@@ -19,6 +19,7 @@ import os
 import re
 import secrets
 import socket
+import sys
 import time
 from datetime import datetime, timezone
 from dataclasses import replace
@@ -808,6 +809,8 @@ def build_app(
     r.add_put("/api/prompter", h_prompter_set)
     r.add_get("/api/wsl-reg-stub", h_wsl_reg_stub_get)
     r.add_put("/api/wsl-reg-stub", h_wsl_reg_stub_set)
+    r.add_get("/api/pty-host-setting", h_pty_host_setting_get)
+    r.add_put("/api/pty-host-setting", h_pty_host_setting_set)
     r.add_get("/api/prompter/prompts", h_prompter_prompts)
     r.add_get("/api/prompter/contexts", h_prompter_contexts)
     r.add_get("/api/status-checks", h_status_checks)
@@ -3852,6 +3855,44 @@ async def h_wsl_reg_stub_set(request: web.Request) -> web.Response:
     try:
         store.set_daemon_field(wsl_reg_stub.SETTING, enabled)
         return json_response(_wsl_reg_stub_state())
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+
+
+def _pty_host_setting_state() -> dict:
+    return {
+        "enabled": bool(store.daemon_config().get("pty_host")),
+        "supported": sys.platform != "win32",
+        "host": host_code.info(),
+    }
+
+
+async def h_pty_host_setting_get(request: web.Request) -> web.Response:
+    """``daemon.pty_host``, whether this platform has a PTY host, and the
+    host as this daemon runs it (``host_code.info()``, what the badge shows).
+
+    ``host.configured`` is the setting this daemon started with; the two
+    differ until the next restart."""
+    try:
+        return json_response(_pty_host_setting_state())
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+
+
+async def h_pty_host_setting_set(request: web.Request) -> web.Response:
+    """Turn ``daemon.pty_host`` on or off (``{"enabled": bool}``)
+    (claunch-xnnct.5).
+
+    Only the config file changes: the daemon decides at start whether it
+    runs a PTY host, so the new value applies from the next restart, which
+    is the user's to run. This handler never restarts anything."""
+    body = await _json_body(request)
+    enabled = body.get("enabled")
+    if not isinstance(enabled, bool):
+        return json_error(400, "'enabled' must be true or false")
+    try:
+        store.set_daemon_field("pty_host", enabled)
+        return json_response(_pty_host_setting_state())
     except store.StoreError as exc:
         return json_error(500, str(exc))
 
