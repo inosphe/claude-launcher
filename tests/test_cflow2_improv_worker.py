@@ -1695,6 +1695,10 @@ def test_a_skipped_test_leaves_a_board_marker_the_landing_steps_read():
     assert "tests: skipped — TESTS SKIPPED @ <해시>: <사유>" in request
     assert "tests: skipped (TESTS SKIPPED @ <해시>)" in _flat(nodes["commit"]["prompt"])
 
+    # a stacked child lands on its parent's stack, whose review reads the same marker
+    stack = _flat((WF_DIR / "v2" / "stack-v2.yaml").read_text(encoding="utf-8"))
+    assert "`TESTS SKIPPED @ <해시>:` 코멘트와 그 판정이 diff에 맞는지" in stack
+
 
 def test_a_skip_goes_from_the_choice_to_commit_without_a_test_task(tmp_path, monkeypatch):
     """Routing: ``skip`` -> test-skipped -> commit; review and targeted-test
