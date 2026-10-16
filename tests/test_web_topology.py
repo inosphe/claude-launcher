@@ -487,6 +487,7 @@ CHECKS = [
         "leak_check.js",
         "pingbox_check.js",
         "newform_check.js",
+        "decisionstack_check.js",
         "pollselect_check.js",
         "beads_check.js",
         "beadsstream_check.js",

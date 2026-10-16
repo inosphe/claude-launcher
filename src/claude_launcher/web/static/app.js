@@ -12464,6 +12464,10 @@ function borrowIsOwnToken(f, parent) {
 function renderRuntimeSummary() {
   const out = $("new-runtime-sum");
   if (!out) return;  // the fold is markup; a page that predates it still runs
+  // Every path that moves a value on this form (typing, the poll's re-seed,
+  // a parent pick) ends here, so the decision stack follows from one call.
+  // Guarded: the checks slice this function out without its neighbours.
+  if (typeof scheduleDecisionStack === "function") scheduleDecisionStack();
   const f = $("new-session");
   const parent = spawnParent();
   const speaks = (key) => !parent || !!(f[key] && !f[key].disabled);
@@ -12518,6 +12522,245 @@ function renderRuntimeSummary() {
   // all, and a bare "—" is a label pointing at nothing.
   out.textContent = bits.length ? `— ${bits.join(" · ")}` : "";
 }
+
+/* The decision stack (claunch-ymjp8): the form asks eight groups of
+   questions, and by the time the reader is at the opening task the answers
+   that shape it — which checkout, whose child, which profile, which mesh and
+   run — are a screen or two above. Each group's header that has scrolled
+   past the top is repeated in #new-decisions, in form order, with the
+   group's answers on the same line; a row jumps back to its group.
+
+   The legends cannot stick on their own: a sticky element is held only
+   inside its containing block, which for a legend is its own fieldset, so it
+   leaves with the fieldset. The stack is one zero-height sticky box at the
+   top of the form instead; its list is absolutely placed, so a row being
+   added never pushes the form down under the reader's scroll position. */
+const DECISION_SECTIONS = [
+  "new-where", "new-identity", "new-runs-on", "new-onboard",
+  "new-runtime", "new-worktree", "new-task", "new-beads",
+];
+const DECISION_ROW_PX = 24;  // .new-decision-row's height in style.css
+
+function decisionOptionText(sel) {
+  if (!sel) return "";
+  const opt = sel.selectedOptions && sel.selectedOptions[0];
+  return ((opt ? opt.textContent : sel.value) || "").trim();
+}
+
+function decisionFirstLine(text) {
+  return (String(text || "").split("\n").map((l) => l.trim())
+    .find(Boolean)) || "";
+}
+
+/* What a group answers, as one line. Reads the form only; `get` and
+   `images` are the page's own lookups, passed in so the checks can stub
+   them. A row the form hides (model, effort, handle) does not speak. */
+function decisionSummary(id, f, opts = {}) {
+  const get = opts.get || $;
+  const shown = (rowId) => {
+    const row = get(rowId);
+    return !!row && !row.classList.contains("hidden");
+  };
+  const bits = [];
+  const add = (text) => { if (text) bits.push(text); };
+  switch (id) {
+    case "new-where":
+      add(decisionOptionText(f.project));
+      add(decisionOptionText(f.cwd));
+      break;
+    case "new-identity":
+      if (f.parent && f.parent.value) {
+        add(`child of ${f.parent.value}` +
+          (f.fork_parent && f.fork_parent.checked ? " (--fork)" : ""));
+      } else add("top-level");
+      add(f.name && f.name.value.trim() ? f.name.value.trim() : "name auto");
+      break;
+    case "new-runs-on":
+      add(decisionOptionText(f.profile));
+      add(decisionOptionText(f.harness));
+      if (shown("new-model-row") && f.model && f.model.value) {
+        add(decisionOptionText(f.model));
+      }
+      if (shown("new-effort-row") && f.effort && f.effort.value) {
+        add(`effort ${decisionOptionText(f.effort)}`);
+      }
+      break;
+    case "new-onboard":
+      add(f.mesh && f.mesh.value ? `mesh ${f.mesh.value}` : "no mesh");
+      if (shown("new-handle-row") && f.handle && f.handle.value.trim()) {
+        add(`as ${f.handle.value.trim()}`);
+      }
+      add(f.role && f.role.value ? `role ${decisionOptionText(f.role)}` : "no role");
+      add(f.workflow && f.workflow.value
+        ? `workflow ${decisionOptionText(f.workflow)}` : "no workflow");
+      break;
+    case "new-runtime": {
+      const sum = get("new-runtime-sum");
+      add((sum ? sum.textContent : "").replace(/^—\s*/, "").trim() || "defaults");
+      break;
+    }
+    case "new-worktree": {
+      const mode = f.worktree_mode ? f.worktree_mode.value : "";
+      if (mode === "new") {
+        add(`new ${f.worktree_name && f.worktree_name.value.trim() || "(auto)"}`);
+        if (f.worktree_from && f.worktree_from.value) {
+          add(`from ${decisionOptionText(f.worktree_from)}`);
+        }
+      } else if (mode === "existing") {
+        add(f.worktree_existing && f.worktree_existing.value
+          ? `reuse ${decisionOptionText(f.worktree_existing)}` : "reuse (none picked)");
+        if (f.worktree_rebase && f.worktree_rebase.value.trim()) {
+          add(`rebase onto ${f.worktree_rebase.value.trim()}`);
+        }
+      } else add("no worktree");
+      break;
+    }
+    case "new-task": {
+      add(decisionFirstLine(f.task && f.task.value) || "empty");
+      const n = opts.images || 0;
+      if (n) add(`+${n} image${n === 1 ? "" : "s"}`);
+      break;
+    }
+    case "new-beads": {
+      const mode = f.beads ? f.beads.value : "";
+      if (mode === "existing") {
+        add(f.issue && f.issue.value ? `issue ${f.issue.value}` : "existing (none picked)");
+      } else if (mode === "none") add("no issue — waits for instructions");
+      else if (mode === "none-auto") add("no issue — picks its own");
+      else {
+        const text = decisionFirstLine(f.issue_text && f.issue_text.value);
+        add(text ? `new issue: ${text}` : "new issue from the task");
+      }
+      break;
+    }
+  }
+  return bits.join(" · ");
+}
+
+/* The group's own header: its legend, or the fold's summary. */
+function decisionHead(section) {
+  for (const child of section.children) {
+    if (child.tagName === "LEGEND" || child.tagName === "SUMMARY") return child;
+  }
+  return null;
+}
+
+/* The header's words without the step badge or the fold's summary line. */
+function decisionTitle(head) {
+  const copy = head.cloneNode(true);
+  copy.querySelectorAll(".sess-spawn-step, #new-runtime-sum")
+    .forEach((n) => n.remove());
+  return copy.textContent.replace(/\s+/g, " ").trim();
+}
+
+function decisionScroller(el) {
+  for (let n = el.parentElement; n; n = n.parentElement) {
+    const y = getComputedStyle(n).overflowY;
+    if (y === "auto" || y === "scroll") return n;
+  }
+  return document.scrollingElement;
+}
+
+/* Which groups have their header above the stack's lower edge. The edge
+   moves down a row with every group taken, so the test is made in form
+   order against the height the stack will have once it holds the earlier
+   ones. Hidden groups (a quick fork's form) never stack. */
+function decisionRowsPassed(sections, stackTop, rowPx) {
+  const rows = [];
+  for (const section of sections) {
+    if (!section || section.classList.contains("session-field-hidden") ||
+        section.classList.contains("hidden")) continue;
+    const head = decisionHead(section);
+    if (!head) continue;
+    if (head.getBoundingClientRect().top < stackTop + rows.length * rowPx) {
+      rows.push({ section, head });
+    }
+  }
+  return rows;
+}
+
+function renderDecisionStack() {
+  scheduleDecisionStack.pending = false;
+  const box = $("new-decisions");
+  const f = $("new-session");
+  if (!box || !f) return;
+  const list = box.firstElementChild || box.appendChild(document.createElement("div"));
+  list.id = "new-decisions-list";
+  const scroller = decisionScroller(box);
+  const visible = f.offsetParent !== null || f.getClientRects().length > 0;
+  const top = box.getBoundingClientRect().top;
+  const rows = visible
+    ? decisionRowsPassed(DECISION_SECTIONS.map((id) => $(id)), top, DECISION_ROW_PX)
+    : [];
+  const items = rows.map(({ section, head }) => {
+    const step = head.querySelector(".sess-spawn-step");
+    return {
+      id: section.id,
+      step: step ? step.textContent.trim() : "",
+      title: decisionTitle(head),
+      sum: decisionSummary(section.id, f, { images: openingImages.length }),
+    };
+  });
+  // Keep the scroller's focus margin clear of the stack, so tabbing to a
+  // field scrolls it out from under the rows rather than behind them.
+  if (box._scroller && box._scroller !== scroller) box._scroller.style.scrollPaddingTop = "";
+  box._scroller = scroller;
+  if (scroller && scroller.style) {
+    scroller.style.scrollPaddingTop = items.length
+      ? `${items.length * DECISION_ROW_PX + 8}px` : "";
+  }
+  const key = JSON.stringify(items);
+  if (key === box._key) return;
+  box._key = key;
+  list.textContent = "";
+  items.forEach((item, i) => {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "new-decision-row";
+    row.dataset.section = item.id;
+    row.title = `${item.title}: ${item.sum} — click to go back to it`;
+    const badge = document.createElement("span");
+    badge.className = "sess-spawn-step";
+    badge.textContent = item.step;
+    const title = document.createElement("span");
+    title.className = "new-decision-title";
+    title.textContent = item.title;
+    const sum = document.createElement("span");
+    sum.className = "new-decision-sum";
+    sum.textContent = item.sum;
+    row.append(badge, title, sum);
+    row.addEventListener("click", () => {
+      const section = $(item.id);
+      const head = section && decisionHead(section);
+      if (!head || !scroller) return;
+      // The rows above this one stay; the group's header lands under them.
+      const target = box.getBoundingClientRect().top + i * DECISION_ROW_PX;
+      scroller.scrollBy({ top: head.getBoundingClientRect().top - target - 4 });
+      if (section.tagName === "DETAILS") section.open = true;
+    });
+    list.appendChild(row);
+  });
+}
+
+function scheduleDecisionStack() {
+  if (scheduleDecisionStack.pending) return;
+  scheduleDecisionStack.pending = true;
+  requestAnimationFrame(renderDecisionStack);
+}
+
+(() => {
+  const f = $("new-session");
+  if (!f || !$("new-decisions")) return;
+  f.addEventListener("input", scheduleDecisionStack);
+  f.addEventListener("change", scheduleDecisionStack);
+  // Scroll does not bubble; captured at the document it reaches us from
+  // whichever box holds the form — the page view or the spawn dialog.
+  document.addEventListener("scroll", (event) => {
+    const t = event.target;
+    if (t && t.contains && t.contains(f)) scheduleDecisionStack();
+  }, true);
+  window.addEventListener("resize", scheduleDecisionStack);
+})();
 
 /* The one line the promoted Profile row cannot say for itself.
 
