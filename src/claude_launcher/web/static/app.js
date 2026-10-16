@@ -5276,6 +5276,8 @@ async function refreshSessions(options) {
   // The grid keeps its own signature, so it follows every poll whether or
   // not the list above was rebuilt.
   if (typeof renderSessionGrid === "function") renderSessionGrid();
+  // A page opened on a session whose card was not drawn yet (armBootGoto).
+  if (!cached && typeof revealBootSessionCard === "function") revealBootSessionCard();
 }
 
 /* Every role a roster row holds — the primary first, then its subroles —
@@ -20466,6 +20468,35 @@ function revealSessionCard(name) {
 function gotoSessionCard() {
   if (!currentName) return false;
   return revealSessionCard(currentName);
+}
+
+/* The same move once on arrival (claunch-wyrsh). A reload, a bookmark or a
+   shared #/s/<name> link attaches the session but left the rail at its top,
+   so the card for the terminal on screen was as likely out of sight as
+   after any scroll. boot() arms this after its one route(); the card may not
+   exist yet (the record lands with a later poll, or the rail is still
+   moving to the session's project), so each full poll tries again, a few
+   times at most. Walking to another session disarms it: the reveal is for
+   the address the page was opened on, never a later pick. */
+const BOOT_GOTO_POLLS = 3;
+let bootGotoName = null;
+let bootGotoTries = 0;
+
+function armBootGoto() {
+  bootGotoName = currentName || null;
+  bootGotoTries = 0;
+  revealBootSessionCard();
+}
+
+function revealBootSessionCard() {
+  const name = bootGotoName;
+  if (!name) return;
+  // Cleared before the reveal: revealSessionListRow redraws the rail through
+  // refreshSessions, which calls back in here.
+  bootGotoName = null;
+  if (name !== currentName) return;
+  if (revealSessionCard(name)) return;
+  if (++bootGotoTries < BOOT_GOTO_POLLS) bootGotoName = name;
 }
 
 /* What the top bar calls the thing on screen. Pages live in the same slot as
@@ -48193,6 +48224,9 @@ async function boot() {
     // last gave rather than on the defaults (claunch-9em4k).
     await Promise.resolve(restoreNewFormDraft()).catch(() => {});
     route();
+    // The rail to the attached session's card, as ⇱ card would. Guarded:
+    // reduced harnesses slice boot() alone.
+    if (typeof armBootGoto === "function") armBootGoto();
   }
 }
 

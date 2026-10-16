@@ -66,6 +66,7 @@ let rail = [];
 let tabs = [];
 let opened = [];
 let redraws = [];
+let onRedraw = null;   // what the real refreshSessions calls at its end
 const tab = (group, value, names) => ({
   dataset: { group, value },
   _groupRows: names.map((name) => ({ type: "session", session: { name } })),
@@ -80,6 +81,7 @@ const refreshSessions = (opts) => {
   const [group, value] = opened.at(-1);
   const open = tabs.find((t) => t.dataset.group === group && t.dataset.value === value);
   rail = open._groupRows.map((r) => row(r.session.name));
+  if (onRedraw) onRedraw(opts);
 };
 
 /* ---- stub grid ----
@@ -148,11 +150,16 @@ new Function(
   /const GOTO_FLASH_MS = \d+;/.exec(src)[0] + "\n" +
   "let gotoFlashName = null;\nlet gotoFlashTimer = null;\n" +
   [slice("applyGotoFlash"), slice("revealSessionListRow"), slice("revealSessionGridCell"),
-   slice("revealSessionCard"), slice("gotoSessionCard")].join("\n")
+   slice("revealSessionCard"), slice("gotoSessionCard"),
+   /const BOOT_GOTO_POLLS = \d+;/.exec(src)[0],
+   "let bootGotoName = null;\nlet bootGotoTries = 0;",
+   slice("armBootGoto"), slice("revealBootSessionCard")].join("\n")
     .replace(/\bsessionView\b/g, "getView()") +
   `
 Object.assign(exports, {
   applyGotoFlash, revealSessionCard, gotoSessionCard,
+  armBootGoto, revealBootSessionCard, bootPending: () => bootGotoName,
+  bootPolls: () => BOOT_GOTO_POLLS,
   flashMs: () => ${/const GOTO_FLASH_MS = (\d+);/.exec(src)[1]},
   setCur: (n) => { currentName = n; },
 });`
@@ -292,6 +299,80 @@ check("a row that cannot scroll is still marked rather than throwing",
   sessionView = "list";
 }
 
+/* ---- arrival: the page opened on #/s/<name> goes to that card once ----
+   (claunch-wyrsh) boot() arms it after its route(); a full poll retries while
+   the card is not drawn yet, a bounded number of times, and only for the
+   session the address named. */
+{
+  sessionView = "list";
+  tabs = [];
+  rail = [row("s127"), row("s193")];
+  ctx.setCur("s193");
+  ctx.armBootGoto();
+  check("arrival: the card already drawn is scrolled to at once",
+        JSON.stringify(scrolledTo()) === JSON.stringify(["s193"]), scrolledTo());
+  check("arrival: centred, as the button does",
+        rail[1].scrolls[0] && rail[1].scrolls[0].block === "center", rail[1].scrolls[0]);
+  check("arrival: marked, as the button does",
+        JSON.stringify(flashed()) === JSON.stringify(["s193"]), flashed());
+  check("arrival: done, nothing left armed", ctx.bootPending() === null, ctx.bootPending());
+  fire(only());
+  rail = [row("s127"), row("s193")];
+  ctx.revealBootSessionCard();
+  check("arrival: a later poll does not scroll again", scrolledTo().length === 0, scrolledTo());
+
+  // The record is a poll behind: armed, then found by the poll that draws it.
+  rail = [row("s127")];
+  ctx.armBootGoto();
+  check("arrival: no card yet, nothing scrolled", scrolledTo().length === 0, scrolledTo());
+  check("arrival: and it stays armed for the next poll", ctx.bootPending() === "s193");
+  rail = [row("s127"), row("s193")];
+  ctx.revealBootSessionCard();
+  check("arrival: the poll that draws the card scrolls to it",
+        JSON.stringify(scrolledTo()) === JSON.stringify(["s193"]), scrolledTo());
+  check("arrival: then disarmed", ctx.bootPending() === null);
+  fire(only());
+
+  // Never drawn: gives up after a few polls, no timer left behind.
+  rail = [row("s127")];
+  ctx.armBootGoto();
+  for (let i = 0; i < 10; i++) ctx.revealBootSessionCard();
+  check("arrival: gives up on a card that never comes", ctx.bootPending() === null);
+  check("arrival: the limit is a few polls", ctx.bootPolls() >= 2 && ctx.bootPolls() <= 10,
+        ctx.bootPolls());
+  check("arrival: and leaves no mark or timer", timers.size === 0 && flashed().length === 0);
+
+  // The reader walks to another session before the card arrives: not chased.
+  rail = [row("s127")];
+  ctx.armBootGoto();
+  ctx.setCur("s127");
+  ctx.revealBootSessionCard();
+  check("arrival: walking elsewhere first disarms it",
+        scrolledTo().length === 0 && ctx.bootPending() === null, scrolledTo());
+
+  // No session on the address (home, another page): nothing armed.
+  ctx.setCur(null);
+  ctx.armBootGoto();
+  check("arrival: a page with no session arms nothing", ctx.bootPending() === null);
+
+  // The card is in a closed tab: opening it redraws through refreshSessions,
+  // which calls back in. That re-entry must not reveal twice.
+  tabs = [tab("mesh", "mesh-1", ["s127"]), tab("mesh", "mesh-2", ["s193"])];
+  opened = [["mesh", "mesh-1"]];
+  redraws = [];
+  rail = [row("s127")];
+  let reentered = 0;
+  onRedraw = () => { reentered++; ctx.revealBootSessionCard(); };
+  ctx.setCur("s193");
+  ctx.armBootGoto();
+  onRedraw = null;
+  check("arrival: the redraw's call back in happened", reentered === 1, reentered);
+  check("arrival: and the card was scrolled exactly once",
+        rail.length === 1 && rail[0].scrolls.length === 1, rail.map((r) => r.scrolls.length));
+  fire(only());
+  tabs = [];
+}
+
 /* ---- the markup and the stylesheet ---- */
 const headStart = html.indexOf('id="term-header"');
 const headEnd = html.indexOf('id="term-queued"');
@@ -316,6 +397,11 @@ check("a grid redraw repaints the mark on the cell",
 check("the mark's state is declared before the load-time grid draw reads it",
       src.indexOf("let gotoFlashName") >= 0
       && src.indexOf("let gotoFlashName") < src.indexOf("\nsyncSessionView();"));
+check("boot arms the arrival reveal right after its one route()",
+      /\n    route\(\);\s*(\/\/[^\n]*\n\s*)*if \(typeof armBootGoto === "function"\) armBootGoto\(\);/.test(slice("boot")));
+check("every full poll gives the arrival reveal its retry, a cached redraw does not",
+      /if \(!cached && typeof revealBootSessionCard === "function"\) revealBootSessionCard\(\);/
+        .test(slice("refreshSessions")));
 check("the chip has a rest and a hover state", /\.goto-chip:hover\s*\{/.test(css));
 
 if (failures) {
