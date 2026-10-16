@@ -14159,6 +14159,15 @@ $("term-observer").addEventListener("click", () => {
   if (currentName) go("#/observer/session/" + encodeURIComponent(currentName));
 });
 
+/* The web debug page (webdebug.html, claunch-dsb28) opens in a window of
+   its own, already showing this session; the user may switch it to another
+   session in its top bar. A new window per press: several can be up at once,
+   one per session or several for one. */
+$("term-webdebug").addEventListener("click", () => {
+  if (!currentName) return;
+  window.open(url("webdebug") + "?session=" + encodeURIComponent(currentName), "_blank");
+});
+
 /* The view radios: CLI walks to this session's terminal, HTML to its
    conversation page. Routes, not toggles — see the transcript page's own
    block for why the fourth reading of a session deserves the same standing
@@ -14812,6 +14821,7 @@ function setStatusBadge(status) {
   // read it, so the button yields its spot to resume.
   $("term-rebrief").classList.toggle("hidden", exited);
   $("term-retro").classList.toggle("hidden", exited);
+  $("term-webdebug")?.classList.toggle("hidden", exited);
   syncTermLife({ exited, paused, held, failed, archived });
   if (typeof syncSessionPinUi === "function") syncSessionPinUi();
   syncSessionKillControls();

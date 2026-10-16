@@ -9,7 +9,7 @@
     "term-note": "note",
     "term-timer-skip": "⏭", "term-hold": "⇥", "term-link": "↻",
     "term-scroll": "↥", "term-resume": "▶", "term-brief": "▤",
-    "term-observer": "◉", "term-blockbar": "☰", "term-rebrief": "↻",
+    "term-observer": "◉", "term-webdebug": "⧉", "term-blockbar": "☰", "term-rebrief": "↻",
     "term-fork": "⑂", "term-merge": "↩", "term-idle-hold": "☾", "term-pause": "Ⅱ",
     "term-kill": "×", "term-archive": "▣", "term-splitbtn": "⬒", "term-simsbtn": "◬",
     "term-chartbtn": "◇",
