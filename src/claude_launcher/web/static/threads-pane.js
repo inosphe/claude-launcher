@@ -58,6 +58,7 @@ globalThis.ThreadsPane = (() => {
   const drafts = new Map();  // thread id ("" = new thread) -> text
   const inflight = new Set(); // thread ids ("" = new thread) with a post still out
   const pending = new Map();  // thread id -> {text, images, failed?: error}: the message being sent
+  const composers = new WeakMap(); // composer textarea -> its draft key
   const attached = new Map(); // thread id ("" = new thread) -> [{file, src}]: images waiting to be sent
   const drawn = {side: "", main: ""};   // what each half last drew
   const FOLD_KEY = "claunch_threadfold";  // localStorage: the list column is folded away
@@ -133,6 +134,41 @@ globalThis.ThreadsPane = (() => {
   function sendKey(e) {
     return e.key === "Enter" && !e.shiftKey && !e.isComposing && e.keyCode !== 229;
   }
+
+  /* Ctrl+J is a new line too, as in the session's own composer (app.js
+     isCtrlJ, claunch-e7z8z): "j" or "J", keyCode 74 for a layout that labels
+     the key otherwise, "\n" from a terminal-style keymap. */
+  function newlineKey(e) {
+    if (!e.ctrlKey || e.altKey || e.metaKey || e.isComposing || e.keyCode === 229) return false;
+    return e.key === "j" || e.key === "J" || e.key === "\n" || e.keyCode === 74;
+  }
+
+  /* Put a line break at the caret of composer `box` (draft `key`), the
+     caret after it. A box that reports no selection is appended to. */
+  function breakLine(box, key) {
+    const start = Number.isInteger(box.selectionStart) ? box.selectionStart : box.value.length;
+    const end = Number.isInteger(box.selectionEnd) ? box.selectionEnd : start;
+    box.value = box.value.slice(0, start) + "\n" + box.value.slice(end);
+    if (typeof box.setSelectionRange === "function") box.setSelectionRange(start + 1, start + 1);
+    drafts.set(key, box.value);
+    fit(box);
+  }
+
+  /* Ctrl+J, taken before the browser gets to it. Chrome and Firefox open
+     the downloads panel on Ctrl+J, and a listener on the box alone does not
+     stop that in Firefox (see onWindowCtrlJ in app.js), so the key is
+     claimed in the capture phase at the window -- only while one of this
+     pane's composers holds the focus; anywhere else it stays the
+     browser's. */
+  function onWindowCtrlJ(e) {
+    if (!newlineKey(e) || !host) return;
+    const box = typeof document !== "undefined" ? document.activeElement : null;
+    if (!box || !composers.has(box) || !host.contains(box)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    breakLine(box, composers.get(box));
+  }
+  if (typeof globalThis.addEventListener === "function") globalThis.addEventListener("keydown", onWindowCtrlJ, true);
 
   /* The thread to show: the remembered one if it still exists, else the
      first open one, else the first. */
@@ -422,6 +458,8 @@ globalThis.ThreadsPane = (() => {
     box.placeholder = placeholder;
     box.value = drafts.get(key) || "";
     box.addEventListener("input", () => { drafts.set(key, box.value); fit(box); });
+    composers.set(box, key);
+    box.addEventListener("keydown", (e) => { if (newlineKey(e)) { e.preventDefault(); breakLine(box, key); } });
     if (onSend) box.addEventListener("keydown", (e) => { if (sendKey(e)) { e.preventDefault(); onSend(); } });
     // A paste carrying images: the images are attached, the text of a mixed
     // paste is left to the browser.
@@ -684,7 +722,7 @@ globalThis.ThreadsPane = (() => {
     };
     const box = textBox("th-text", t.id, `${name}에게 보내기`, submit, 1);
     const foot = node("div", "th-compose-foot");
-    foot.append(...pickButton(t.id), node("span", "th-hint", "Enter 전송 · Shift+Enter 줄바꿈 · markdown 지원 · 이미지 붙여넣기"));
+    foot.append(...pickButton(t.id), node("span", "th-hint", "Enter 전송 · Shift+Enter/Ctrl+J 줄바꿈 · markdown 지원 · 이미지 붙여넣기"));
     const go = node("button", "term-btn th-send", sending ? "전송 중…" : "보내기");
     go.type = "button";
     go.disabled = sending;
@@ -822,6 +860,6 @@ globalThis.ThreadsPane = (() => {
     render();
   }
 
-  return {mount, unmount, refresh: () => host && load(), select, focus, compose, excerpt, unseen, sendKey, pick, linkLabel, stamp,
+  return {mount, unmount, refresh: () => host && load(), select, focus, compose, excerpt, unseen, sendKey, newlineKey, pick, linkLabel, stamp,
           imageKind, imageFiles, imageSrc, lastLine, FOLD_KEY};
 })();

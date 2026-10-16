@@ -5,8 +5,12 @@
      helpers   -- excerpt takes the first non-empty line and shortens it;
                   unseen marks threads whose last message is the agent's and
                   newer than this browser's read position; Enter sends,
-                  Shift+Enter and IME composition do not; pick keeps the
+                  Shift+Enter and IME composition do not; Ctrl+J is a new
+                  line (claunch-e7z8z); pick keeps the
                   remembered thread, else the first open one.
+     ctrl+j    -- Ctrl+J in a composer puts a newline at the caret and
+                  posts nothing; the window capture listener claims the key
+                  only while a pane composer holds the focus (claunch-e7z8z).
      pane      -- mounting lists the session's threads, opens the first open
                   one, renders both authors' text through mdInto (HTML stays
                   text), and a send posts the text to that thread; Enter
@@ -85,7 +89,9 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   const timers = [];
   const rendered = [];   // [class of the bubble, text] for each mdInto call
   const mdInto = (n, text) => { rendered.push(text); n.textContent = text; return n; };
+  const winKeys = [];    // [type, listener, capture] mounted on the window
   const ctx = vm.createContext({
+    addEventListener: (type, fn, capture) => winKeys.push([type, fn, capture]),
     document, localStorage, console, JSON, Date, Map, Set, Error, Promise, mdInto,
     setInterval: (fn, ms) => { timers.push(fn); return timers.length; },
     clearInterval: (id) => { timers[id - 1] = null; },
@@ -107,6 +113,15 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   assert.equal(P.sendKey({key: "Enter", shiftKey: true}), false);
   assert.equal(P.sendKey({key: "Enter", isComposing: true}), false);
   assert.equal(P.sendKey({key: "Enter", keyCode: 229}), false);
+  assert.equal(P.newlineKey({key: "j", ctrlKey: true}), true);
+  assert.equal(P.newlineKey({key: "J", ctrlKey: true, shiftKey: true}), true);
+  assert.equal(P.newlineKey({key: "\n", ctrlKey: true}), true);
+  assert.equal(P.newlineKey({key: "ㅓ", ctrlKey: true, keyCode: 74}), true, "the physical J key on another layout");
+  assert.equal(P.newlineKey({key: "j"}), false);
+  assert.equal(P.newlineKey({key: "j", ctrlKey: true, altKey: true}), false);
+  assert.equal(P.newlineKey({key: "j", ctrlKey: true, metaKey: true}), false);
+  assert.equal(P.newlineKey({key: "j", ctrlKey: true, isComposing: true}), false);
+  assert.equal(P.sendKey({key: "j", ctrlKey: true}), false, "Ctrl+J never sends");
   assert.equal(P.pick(ts, "th-c"), "th-c");
   assert.equal(P.pick(ts, "th-gone"), "th-b");
   assert.equal(P.pick([], ""), "");
@@ -157,10 +172,41 @@ const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) 
   assert.ok(msgs.every((m) => m.querySelector(".th-msg-body").classList.contains("md")));
   assert.deepEqual(JSON.parse(store.get("k")), {"th-1": 2}, "showing a thread reads it");
 
-  // send: Enter in the composer posts to the thread
+  // ctrl+j: a newline at the caret, nothing posted (claunch-e7z8z)
   const box = host.querySelector(".th-compose .th-text");
-  box.value = "and yaml?";
-  box.fire("keydown", {key: "Enter"});
+  const postsBefore = calls.filter((c) => c[0] === "POST").length;
+  box.value = "ab";
+  box.selectionStart = box.selectionEnd = 1;
+  let stopped = 0, prevented = 0;
+  const chord = (extra = {}) => ({key: "j", ctrlKey: true, preventDefault() { prevented++; }, stopPropagation() { stopped++; }, ...extra});
+  box.fire("keydown", chord());
+  assert.equal(box.value, "a\nb", "Ctrl+J breaks the line at the caret");
+  assert.equal(prevented, 1, "the browser's Ctrl+J is cancelled");
+  await settle();
+  assert.equal(calls.filter((c) => c[0] === "POST").length, postsBefore, "Ctrl+J posts nothing");
+  const capture = winKeys.filter(([type, , cap]) => type === "keydown" && cap === true);
+  assert.equal(capture.length, 1, "one capture-phase keydown listener on the window");
+  const fresh = host.querySelector(".th-compose .th-text");
+  fresh.value = "x";
+  document.activeElement = null;
+  prevented = stopped = 0;
+  capture[0][1](chord());
+  assert.equal(fresh.value, "x", "a Ctrl+J outside the pane's composers stays the browser's");
+  assert.equal(prevented, 0);
+  fresh.focus();
+  capture[0][1](chord());
+  assert.equal(fresh.value, "x\n", "the window listener claims Ctrl+J in a focused composer");
+  assert.equal(prevented, 1);
+  assert.equal(stopped, 1, "the key goes no further, so the box's own listener does not add a second newline");
+  capture[0][1](chord({ctrlKey: false}));
+  assert.equal(fresh.value, "x\n", "a bare J is typed by the browser");
+  fresh.value = "";
+  document.activeElement = null;
+
+  // send: Enter in the composer posts to the thread
+  const box1 = host.querySelector(".th-compose .th-text");
+  box1.value = "and yaml?";
+  box1.fire("keydown", {key: "Enter"});
   await settle();
   assert.deepEqual(calls.find((c) => c[0] === "POST"), ["POST", "/api/threads/th-1/messages", {text: "and yaml?"}]);
   assert.ok(changed >= 1, "a send refreshes the header light");
