@@ -1002,14 +1002,16 @@ def test_the_end_question_can_be_posed(tmp_path, monkeypatch):
 
 
 def test_end_new_task_starts_the_next_run_and_keeps_the_session():
-    """claunch-kgfr5: the new-task branch keeps the session alive across the
-    run's end, records the task as an issue the next run's intake takes, and
-    starts that run in the same turn -- then lowers the flag again."""
+    """claunch-kgfr5: the new-task branch records the task as an issue the
+    next run's intake takes and starts that run in the same turn. It no
+    longer raises keep-alive around the run's end (claunch-5aysr): lowering
+    it again was the step that let a pending kill-on-end land on the new
+    run; the daemon re-reads the slot beside the kill instead."""
     doc = yaml.safe_load(V2.read_text(encoding="utf-8"))
     node = doc["nodes"]["end-new-task"]
     text = node["prompt"]
-    assert "claunch keep-alive $CLAUNCH_SESSION" in text
-    assert "keep-alive $CLAUNCH_SESSION off" in text
+    assert "claunch keep-alive" not in text
+    assert "keep-alive는 건드리지 않는다" in text
     assert "flow_start" in text and "inputs: {issue: <그 id>}" in text
     assert "--labels user-direct" in text and "--parent" in text
     assert node["returns"] == {"ok": {"issue": "str"}}

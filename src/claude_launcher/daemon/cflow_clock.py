@@ -2887,8 +2887,12 @@ SETTLE_REAP = "settle-reap"
 
 
 def _iso_ts(value) -> Optional[float]:
+    """Seconds since the epoch from a run stamp: a collection record's
+    ``at`` is already a number, the run's ``started`` an ISO string."""
     from datetime import datetime
 
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
     try:
         return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
     except (TypeError, ValueError):
@@ -3344,7 +3348,9 @@ class RunEventClock:
                     "cflow kill-on-end: recorded the ending of %r (v2 run %s)",
                     name, run_id,
                 )
-                self._end_pending.append((v1_cwd, name, run_id, workflow, True))
+                self._end_pending.append(
+                    (v1_cwd, name, run_id, workflow, True, (str(st.cwd), scope))
+                )
 
     def _drain_ends(self) -> None:
         """Hand the queued end-sequences to the loop as tasks.
@@ -3362,6 +3368,7 @@ class RunEventClock:
                 self._finish_end(
                     cwd, scope, run_id, workflow,
                     reap_reviewers=bool(rest and rest[0]),
+                    v2_slot=rest[1] if len(rest) > 1 else None,
                 )
             )
             self._end_tasks.add(task)
@@ -3370,6 +3377,7 @@ class RunEventClock:
     async def _finish_end(
         self, cwd: str, scope: str, run_id: str, workflow: str = "?",
         *, reap_reviewers: bool = False,
+        v2_slot: Optional[Tuple[str, str]] = None,
     ) -> None:
         """End a finished one-shot run's session: wait out its current turn
         (bounded), then kill unless it was kept alive or a person respawned
@@ -3383,6 +3391,13 @@ class RunEventClock:
         so one set while the wait ran still protects the session. An exited
         session is left alone at every step — the kill verbs are idempotent,
         but nothing here needs to call one twice.
+
+        ``v2_slot`` is the finished v2 run's ``(run cwd, slot scope)``. The
+        slot is re-read beside the kill as the flag is (claunch-5aysr): a run
+        started in that slot since the scan (settle's ``new-task``, a few
+        seconds after done) holds the session now, so the end is called off
+        -- reviewers included, they may be the new run's -- and the end
+        record gets its correction.
         """
         session = session_for(self.manager, cwd, scope)
         if session is None:
@@ -3404,6 +3419,14 @@ class RunEventClock:
             ):
                 await asyncio.sleep(0.5)
         if session.exited:
+            return
+        successor = _v2_successor(v2_slot, run_id) if v2_slot else None
+        if successor:
+            log.info(
+                "cflow kill-on-end: %r started run %s in slot %s after run %s "
+                "finished; leaving it running", scope, successor, v2_slot[1], run_id,
+            )
+            session.append_wal(superseded_block(scope, run_id, successor))
             return
         if session.sdef.keep_alive:
             log.info(
@@ -3728,6 +3751,38 @@ def resumed_block(scope: str, run_id: str) -> str:
         "was written, so the pending end was called off",
         "note: this holds only until the daemon that saw the respawn goes "
         "down -- the next restart judges the session fresh, same as before",
+        "---",
+    ]
+    return "\n".join(lines)
+
+
+def _v2_successor(slot: Tuple[str, str], run_id: str) -> Optional[str]:
+    """The id of the run now in v2 ``slot`` when it is not ``run_id`` --
+    a later run took the slot -- else None. An unreadable slot is None: the
+    end goes ahead as it did before this check (claunch-5aysr)."""
+    from ..cflow2 import runtime as v2_runtime
+
+    try:
+        current = str(v2_runtime.RunStore(*slot).load_state().get("run_id") or "")
+    except Exception:  # noqa: BLE001 -- no slot state: nothing to compare
+        return None
+    return current if current and current != run_id else None
+
+
+def superseded_block(scope: str, run_id: str, successor: str) -> str:
+    """Correction to a session's own :func:`end_block`: a new run started
+    in the same slot before the end landed (claunch-5aysr), so the session
+    keeps running for it. Appended the same durable way as
+    :func:`resumed_block`."""
+    lines = [
+        "---",
+        "# claunch: session ended notice superseded -- machine-generated, "
+        "not typed by the user",
+        f"session: {scope}",
+        f"run: {run_id}",
+        f"next run: {successor}",
+        "outcome: a new run started in this session's slot after the notice "
+        "above was written, so the pending end was called off",
         "---",
     ]
     return "\n".join(lines)

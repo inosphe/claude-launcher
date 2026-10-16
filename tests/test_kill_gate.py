@@ -371,6 +371,11 @@ def _state(*items) -> dict:
 
 def test_settle_counts_only_this_runs_record():
     assert cflow_clock.settle_signalled(_state({"name": "settle", "at": _at(5)}))
+    # a collection record stamps ``at`` as epoch seconds (collections.apply_push)
+    epoch = datetime.fromisoformat(_at(5)).timestamp()
+    assert cflow_clock.settle_signalled(_state({"name": "settle", "at": epoch}))
+    assert not cflow_clock.settle_signalled(
+        _state({"name": "settle", "at": epoch - 65}))
     # the inherited log carries the previous run's settle: not this run's
     assert not cflow_clock.settle_signalled(
         _state({"name": "settle", "at": _at(-60)}))
