@@ -18237,13 +18237,14 @@ const SPLIT_MIN = 0.2;       // past either end the loser is too short to read
 const SPLIT_MAX = 0.8;
 
 /* The Details panel's sub-tabs: `all` draws every section in one column,
-   grouped under the other four's names; each of the four draws its group
+   grouped under the other five's names; each of the five draws its group
    alone. Order here is the order of the bar and of the groups under `all`.
    Which sections belong to which group is renderSession's to say. */
 const DETAIL_SUBTABS = [
   ["all", "All", "every section, grouped"],
   ["overview", "Overview", "what this session is: metadata, flags, note, task, briefing"],
-  ["messages", "Messages", "speaking to it: input journal, hand off, send, queue, meshes"],
+  ["messages", "Messages", "speaking to it: input journal, hand off, send, queue"],
+  ["mesh", "Mesh", "its rooms: memberships and roles, leave, join, pending join requests"],
   ["work", "Work", "what it did: beads, commits, and its role's panels"],
   ["settings", "Settings", "changing how it runs: auth, permissions, worktree"],
 ];
@@ -36869,8 +36870,8 @@ function renderSession(data) {
     return;
   }
 
-  // The Details panel is four groups of sections under one more radio: All
-  // draws the four in order, each under its name; any other sub-tab draws its
+  // The Details panel is five groups of sections under one more radio: All
+  // draws the five in order, each under its name; any other sub-tab draws its
   // group alone. A group not on screen is not built at all — its sections'
   // fetches are for a reader who is looking at them.
   view.appendChild(sessDetailTabs(name));
@@ -36932,7 +36933,7 @@ function renderSession(data) {
       heldIn.length ? heldIn.join(", ")
         : (data.role ? data.role.name : (s.role || "free-role")),
       heldIn.length
-        ? "change these under Meshes → Roles"
+        ? "change these under the Mesh tab"
         : (data.role ? data.role.stance : "")
     );
     // Beside the role, because the two are one fact between them: what this
@@ -37086,47 +37087,14 @@ function renderSession(data) {
     // empty panel is exactly the wrong answer to "why has nobody written".
     const bpBox = sessBackpressure(data);
     if (bpBox) view.appendChild(bpBox);
+  }
 
-    const meshes = data.meshes || [];
-    const meshBox = el("div", "sess-meshes");
-    meshBox.appendChild(el("h3", null, `Meshes (${meshes.length})`));
-    if (!meshes.length) {
-      meshBox.appendChild(el("p", "wf-note", "not a member of any mesh"));
-    }
-    for (const m of meshes) {
-      const auto = memberAutoRoles(m);
-      const chip = el("a", "sess-mesh", `${m.mesh} · ${m.handle} (${memberRoleLabel(m)})` +
-        (auto.length ? ` · auto: ${auto.map((a) => a.role).join(", ")}` : ""));
-      chip.href = "#/mesh/" + encodeURIComponent(m.mesh);
-      chip.title = `${m.members} member(s); joined ${localStamp(m.joined_at)}` +
-        auto.map((a) => `\n${a.role}: granted by the daemon — ${a.why}`).join("");
-      meshBox.appendChild(chip);
-    }
-    // One role editor per membership, under the chips that name them: the
-    // roles are a property of each membership, and a session in two meshes
-    // may hold different ones in each.
-    for (const m of meshes) meshBox.appendChild(sessRoleEditor(data, m));
-    // The chips above say which rooms this session is in; this reads what was
-    // actually said in them, as a sequence. Only offered when there is a room:
-    // a session in no mesh has no traffic to draw, and the note above already
-    // says why. Not a chip, because it is not another membership — it is the
-    // way out of this panel into a page, like the run's button below.
-    if (meshes.length) {
-      const trace = el("button", "wf-btn option", "Message trace");
-      trace.title =
-        "who this session has spoken to, and been asked by, in order — " +
-        "with what has not been answered";
-      trace.addEventListener(
-        "click", () => go("#/msg/" + encodeURIComponent(s.name))
-      );
-      meshBox.appendChild(trace);
-    }
-    // The chips above are read; this is the one write the section offers —
-    // putting this session into another mesh without leaving the panel that
-    // names it. Under the chips because it answers what the list cannot: a
-    // membership that does not exist yet.
-    meshBox.appendChild(sessMeshJoin(data));
-    view.appendChild(meshBox);
+  // The memberships have a tab of their own (claunch-8x20z): joining,
+  // leaving and the requests still waiting on another machine's owner are
+  // all one question, "which rooms is it in", and they no longer have to be
+  // scrolled to under the message boxes.
+  if (show("mesh")) {
+    view.appendChild(sessMeshesSection(data));
   }
 
   if (show("work")) {
@@ -37157,6 +37125,137 @@ function renderSession(data) {
     view.appendChild(sessMigrate(data));
   }
   keepScroll();
+}
+
+/* The Mesh sub-tab: every room this session is in, and the three writes on
+   that list (claunch-8x20z).
+
+   - Leave sits on the membership it ends, so the press names its room and
+     handle without a second pick. It is the same DELETE the mesh page's ×
+     sends, and it asks first: a session that leaves stops receiving that
+     room's messages.
+   - A join to another machine's mesh is a request until that mesh's owner
+     approves it (the join answers 202). The request is not a membership, so
+     the chips cannot show it; it is listed here, under the session that
+     asked, with the same withdraw the sidebar's outgoing list offers.
+   - The join form itself is sessMeshJoin, unchanged.
+
+   The outcome of the last leave or withdraw is kept per session across the
+   5s rebuild, so the line saying what happened is not erased before it is
+   read. */
+let sessMeshNote = null;   // {session, text, cls} of the last leave/withdraw
+
+function sessMeshesSection(data) {
+  const s = data.session || {};
+  const name = s.name || "";
+  const meshes = data.meshes || [];
+  const box = el("div", "sess-meshes");
+  box.appendChild(el("h3", null, `Meshes (${meshes.length})`));
+  const say = (text, cls) => {
+    sessMeshNote = { session: name, text, cls: cls || "wf-note" };
+    refreshMeshList();
+    refreshSession();
+  };
+  if (sessMeshNote && sessMeshNote.session === name) {
+    box.appendChild(el("p", sessMeshNote.cls, sessMeshNote.text));
+  }
+  if (!meshes.length) {
+    box.appendChild(el("p", "wf-note", "not a member of any mesh"));
+  }
+  for (const m of meshes) {
+    const row = el("div", "sess-mesh-row");
+    const auto = memberAutoRoles(m);
+    const chip = el("a", "sess-mesh", `${m.mesh} · ${m.handle} (${memberRoleLabel(m)})` +
+      (auto.length ? ` · auto: ${auto.map((a) => a.role).join(", ")}` : ""));
+    chip.href = "#/mesh/" + encodeURIComponent(m.mesh);
+    chip.title = `${m.members} member(s); joined ${localStamp(m.joined_at)}` +
+      auto.map((a) => `\n${a.role}: granted by the daemon — ${a.why}`).join("");
+    row.appendChild(chip);
+    const leave = el("button", "wf-btn sess-mesh-leave", "Leave");
+    leave.type = "button";
+    leave.title = `remove '${m.handle}' from ${m.mesh}: this session stops ` +
+      "receiving that mesh's messages";
+    leave.addEventListener("click", async () => {
+      if (leave.disabled) return;
+      if (!confirm(`Leave mesh '${m.mesh}' (handle '${m.handle}')?`)) return;
+      leave.disabled = true;
+      let resp;
+      let doc = {};
+      try {
+        resp = await api(
+          `/api/mesh/${encodeURIComponent(m.mesh)}/members/${encodeURIComponent(m.handle)}`,
+          { method: "DELETE" }
+        );
+        doc = await resp.json().catch(() => ({}));
+      } catch {
+        leave.disabled = false;
+        say("could not reach the daemon — nothing was left", "wf-warning");
+        return;
+      }
+      leave.disabled = false;
+      say(resp.ok ? `left ${m.mesh} ('${m.handle}')`
+        : (doc.error || `HTTP ${resp.status}`), resp.ok ? "wf-note" : "wf-warning");
+    });
+    row.appendChild(leave);
+    box.appendChild(row);
+  }
+  // One role editor per membership, under the rows that name them: the
+  // roles are a property of each membership, and a session in two meshes
+  // may hold different ones in each.
+  for (const m of meshes) box.appendChild(sessRoleEditor(data, m));
+  // The rows above say which rooms this session is in; this reads what was
+  // actually said in them, as a sequence. Only offered when there is a room.
+  if (meshes.length) {
+    const trace = el("button", "wf-btn option", "Message trace");
+    trace.title =
+      "who this session has spoken to, and been asked by, in order — " +
+      "with what has not been answered";
+    trace.addEventListener(
+      "click", () => go("#/msg/" + encodeURIComponent(name))
+    );
+    box.appendChild(trace);
+  }
+
+  const pending = (meshOutgoing || []).filter((r) => r && !r.attach && r.session === name);
+  if (pending.length) {
+    const wait = el("div", "sess-mesh-pending");
+    wait.appendChild(el("h4", null, `Join requests awaiting approval (${pending.length})`));
+    for (const r of pending) {
+      const row = el("div", "sess-mesh-row");
+      const label = el("span", "sess-mesh-req",
+        `${r.mesh}@${r.primary} · as '${r.handle}'` + (r.role ? ` (${r.role})` : ""));
+      label.title = r.requested_at ? `asked ${localStamp(r.requested_at)}` : "";
+      row.appendChild(label);
+      const cancel = el("button", "wf-btn sess-mesh-withdraw", "Withdraw");
+      cancel.type = "button";
+      cancel.title = "forget this request locally (the owner still sees it)";
+      cancel.addEventListener("click", async () => {
+        if (cancel.disabled) return;
+        cancel.disabled = true;
+        let resp;
+        try {
+          resp = await api(`/api/mesh/outgoing/${encodeURIComponent(r.request_id)}`,
+                           { method: "DELETE" });
+        } catch {
+          cancel.disabled = false;
+          say("could not reach the daemon — the request still stands", "wf-warning");
+          return;
+        }
+        cancel.disabled = false;
+        say(resp.ok ? `withdrew the request to join ${r.mesh}@${r.primary}`
+          : `HTTP ${resp.status}`, resp.ok ? "wf-note" : "wf-warning");
+      });
+      row.appendChild(cancel);
+      wait.appendChild(row);
+    }
+    box.appendChild(wait);
+  }
+
+  // The one write that adds a room: put this session into another mesh (a
+  // remote one pends as a request above until its owner approves).
+  box.appendChild(el("h4", null, "Join a mesh"));
+  box.appendChild(sessMeshJoin(data));
+  return box;
 }
 
 /* Enrol THIS session in a mesh, from the panel that names it.
@@ -41384,6 +41483,7 @@ let meshName = null;      // mesh open in the detail view
 let meshPollTimer = null;
 let meshCache = [];       // sidebar list payload
 let meshPollData = null;  // the last /api/mesh?view=rail answer, every project
+let meshOutgoing = [];    // our join requests still waiting on a remote owner
 // The last daemon-attach discovery answer (/api/relay/meshes) and when it
 // was asked; a session-form mesh value with this prefix attaches first.
 let remoteMeshes = null;
@@ -41569,6 +41669,7 @@ async function refreshMeshList(options) {
     refreshSessions(options && options.cached ? { cached: true } : undefined);
   }
   const outgoing = data.outgoing || [];
+  meshOutgoing = outgoing;
   const signature = JSON.stringify([meshName, meshCache, outgoing]);
   if (signature === meshListRendered) return;
   meshListRendered = signature;

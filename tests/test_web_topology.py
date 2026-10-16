@@ -36,7 +36,10 @@ terminal, or the page slot on a phone) and what closing it leaves behind,
 handle it lands on and what it does with a refusal — ``meshjoin_check`` on the
 other write that section carries: enrolling the session in a mesh it is not
 yet in — which rooms are offered, where the role list comes from, and a
-remote mesh's pended request, which is not a membership — ``sessrun_check`` on the
+remote mesh's pended request, which is not a membership — ``meshleave_check``
+on the Mesh sub-tab that section now lives in: Leave on each membership row
+(confirmed, for that row's mesh and handle), this session's join requests still
+waiting on a remote owner with their Withdraw — ``sessrun_check`` on the
 run it can fold open in place of a trip to the run page, ``wfstart_check`` on
 the workflow picker's option line — clipped so a paragraph-length description
 cannot drag the native popup past the viewport edge — ``sesslayout_check``
@@ -312,8 +315,8 @@ produces, and the journal node's reuse, its reread on reopen and its
 background refresh while shut.
 
 ``sessdetailtabs_check`` holds the Details panel's sub-tabs. The panel's
-sections are four groups (Overview, Messages, Work, Settings) under a second
-radio, and All draws the four in order under their names. The harness drives
+sections are five groups (Overview, Messages, Mesh, Work, Settings) under a
+second radio, and All draws the five in order under their names. The harness drives
 the real ``renderSession`` with every section stubbed to a named box and checks
 what each sub-tab draws and in which order, that a group off screen is not
 built, that the choice is stored per session and junk falls back to All, and
@@ -389,6 +392,7 @@ CHECKS = [
         "panel_check.js",
         "sesssend_check.js",
         "meshjoin_check.js",
+        "meshleave_check.js",
         "createonboard_check.js",
         "openingimages_check.js",
         "meshattach_check.js",

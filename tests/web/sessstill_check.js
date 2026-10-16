@@ -122,6 +122,7 @@ function sessBriefSection() { return el("div", "sess-brief"); }
 function sessSend() { return el("div", "sess-send"); }
 function sessHandoff() { return el("div", "sess-handoff"); }
 function sessMeshJoin() { return el("div", "sess-mesh-join"); }
+function sessMeshesSection() { return el("div", "sess-meshes"); }
 function sessQueued() { return null; }
 function sessBackpressure() { return null; }
 function sessReborrow() { return el("div", "sess-reborrow"); }
