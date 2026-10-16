@@ -1,0 +1,155 @@
+"""Operator v2's tools, exposed by the shared claunch MCP server.
+
+Every tool acts as the calling session ($CLAUNCH_SESSION), and the daemon
+refuses all of them unless that session is the bound session of an operator
+v2 (see :mod:`claude_launcher.daemon.operators_v2`); every session, issue,
+transcript and commit they read is checked against that operator's project
+scope. The ``opv2_`` prefix keeps them apart from v1's ``operator_*`` tools,
+which still run beside them until v1 is removed.
+"""
+from __future__ import annotations
+
+import os
+from urllib.parse import quote, urlencode
+
+from . import daemon_client, mcp_rpc
+
+REFS = {"type": "array", "items": {"type": "string"}, "maxItems": 20,
+        "description": "Session names this item is about (must be sessions in your scope). The UI links them."}
+LEVEL = {"type": "string", "enum": ["info", "attention", "urgent"],
+         "description": "info = worth knowing; attention = the user should look soon; urgent = the user must act now."}
+REPLY_TO = {"type": "string", "description": "Feed id of your earlier post or ask this one follows up."}
+REQUEST_ID = {"type": "string", "description": "Stable unique id. Reuse it on retry to avoid a duplicate."}
+SESSION = {"type": "string", "description": "a session in your scope"}
+NONE = {"type": "object", "properties": {}}
+
+TOOLS = [
+    {"name": "opv2_poll",
+     "description": "Read what happened in the sessions of your scope since `since` (the `cursor` of your previous "
+                    "poll): Observer events, plus `attention` (open observer_ask questions, blocked sessions, cflow "
+                    "gates waiting on a person) whatever the cursor. `watch` is the user's switch: when false, do not "
+                    "keep a polling loop; answer the user's input only. `progress` lists status-check and issue "
+                    "changes once; `ended` names sessions that left your watch since the last poll.",
+     "inputSchema": {"type": "object", "properties": {"since": {"type": "string", "description": "cursor from the previous poll; omit on the first"}}}},
+    {"name": "opv2_post",
+     "description": "Post one item to your feed in the Observer page. This is your only output channel — terminal "
+                    "text is never shown to the user.",
+     "inputSchema": {"type": "object", "properties": {
+         "text": {"type": "string", "description": "Markdown, <=4000 chars. Lead with the point; cite session names, ids, hashes."},
+         "level": LEVEL, "refs": REFS, "reply_to": REPLY_TO, "request_id": REQUEST_ID}, "required": ["text", "request_id"]}},
+    {"name": "opv2_ask",
+     "description": "Ask the user for a decision in your feed. type=approve shows approve/deny, type=choice shows "
+                    "`choices`, type=text a text box. Returns at once; the answer arrives through opv2_inbox. A "
+                    "missing answer never means yes.",
+     "inputSchema": {"type": "object", "properties": {
+         "text": {"type": "string", "description": "The question with the facts needed to answer it, <=4000 chars."},
+         "type": {"type": "string", "enum": ["approve", "choice", "text"]},
+         "choices": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 10},
+         "level": LEVEL, "refs": REFS, "reply_to": REPLY_TO, "request_id": REQUEST_ID}, "required": ["text", "type", "request_id"]}},
+    {"name": "opv2_inbox",
+     "description": "Read the user's new input: messages typed to you and answers to your asks. Each item is "
+                    "returned once; call it whenever you are nudged.",
+     "inputSchema": NONE},
+    {"name": "opv2_dispatch",
+     "description": "Type an instruction into a running session of your scope on the user's behalf. `on_behalf_of` "
+                    "must be the id of the user message (or answered, not denied, ask) that instructs it.",
+     "inputSchema": {"type": "object", "properties": {
+         "target": SESSION,
+         "text": {"type": "string", "description": "the instruction, faithful to what the user said"},
+         "on_behalf_of": {"type": "string", "description": "id from opv2_inbox"}},
+         "required": ["target", "text", "on_behalf_of"]}},
+    {"name": "opv2_history",
+     "description": "Your own record, newest first: what you posted, asked and dispatched, and what the user told "
+                    "you. Use it to answer 'what did you do about X'.",
+     "inputSchema": {"type": "object", "properties": {
+         "kind": {"type": "string", "description": "comma list of post, ask, dispatch, user, system, update"},
+         "session": {"type": "string", "description": "only entries naming this session"},
+         "q": {"type": "string", "description": "substring to find in the text"},
+         "limit": {"type": "integer", "minimum": 1, "maximum": 200}}}},
+    {"name": "opv2_sessions",
+     "description": "The sessions in your scope with project, state, board issue and status-check answers. "
+                    "`state`: live (default: running, paused, hold, delayed, failed), ended, or all.",
+     "inputSchema": {"type": "object", "properties": {
+         "state": {"type": "string", "enum": ["live", "ended", "all"]},
+         "project": {"type": "string"},
+         "limit": {"type": "integer", "minimum": 1, "maximum": 200}}}},
+    {"name": "opv2_session",
+     "description": "One session of your scope in detail, running or ended: its task, Observer state and summary, "
+                    "last events, board issue, status checks and latest commits.",
+     "inputSchema": {"type": "object", "properties": {"session": SESSION}, "required": ["session"]}},
+    {"name": "opv2_commits",
+     "description": "The commits a session of your scope made, newest first.",
+     "inputSchema": {"type": "object", "properties": {
+         "session": SESSION, "limit": {"type": "integer", "minimum": 1, "maximum": 200}}, "required": ["session"]}},
+    {"name": "opv2_transcript_search",
+     "description": "Where something was said in a conversation: in one session (`session`) or across the sessions "
+                    "of your scope (at most 40 read; `skipped_sessions` says how many were not). Newest first.",
+     "inputSchema": {"type": "object", "properties": {
+         "q": {"type": "string", "description": "literal text, or a pattern with regex=true"},
+         "session": SESSION, "regex": {"type": "boolean"},
+         "prose": {"type": "boolean", "description": "match what was said, not tool calls"},
+         "limit": {"type": "integer", "minimum": 1, "maximum": 100}}, "required": ["q"]}},
+    {"name": "opv2_issue",
+     "description": "One board issue with its comments, if it is on a board of your scope (the boards your "
+                    "sessions stand on, and your projects' default workspaces), and which sessions in scope it "
+                    "belongs to.",
+     "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}},
+]
+
+
+class OperatorV2McpError(Exception):
+    pass
+
+
+def _query(args, keys):
+    out = {}
+    for key in keys:
+        value = args.get(key)
+        if value is None or value == "":
+            continue
+        out[key] = ("1" if value else "0") if isinstance(value, bool) else str(value)
+    return ("?" + urlencode(out)) if out else ""
+
+
+def call_tool(name, args):
+    session = os.environ.get("CLAUNCH_SESSION")
+    if not session:
+        raise OperatorV2McpError("Operator v2 tools require a managed CLAUNCH_SESSION")
+    client, why = daemon_client.connect_with_diagnosis()
+    if client is None:
+        raise OperatorV2McpError(daemon_client.unreachable_reason(why))
+    base = "/api/operators/agent/" + quote(session, safe="")
+
+    def pick(*keys):
+        return {k: args.get(k) for k in keys if k in args}
+
+    if name == "opv2_poll":
+        return client.get(base + "/poll" + _query(args, ("since",)))
+    if name == "opv2_post":
+        return client.post(base + "/post", pick("text", "level", "refs", "reply_to", "request_id"))
+    if name == "opv2_ask":
+        return client.post(base + "/ask", pick("text", "type", "choices", "level", "refs", "reply_to", "request_id"))
+    if name == "opv2_inbox":
+        return client.get(base + "/inbox")
+    if name == "opv2_dispatch":
+        return client.post(base + "/dispatch", pick("target", "text", "on_behalf_of"))
+    if name == "opv2_history":
+        return client.get(base + "/history" + _query(args, ("kind", "session", "q", "limit")))
+    if name == "opv2_sessions":
+        return client.get(base + "/sessions" + _query(args, ("state", "project", "limit")))
+    if name in ("opv2_session", "opv2_commits") and not args.get("session"):
+        raise OperatorV2McpError("session is required")
+    target = quote(str(args.get("session") or ""), safe="")
+    if name == "opv2_session":
+        return client.get(base + "/sessions/" + target)
+    if name == "opv2_commits":
+        return client.get(base + "/sessions/" + target + "/commits" + _query(args, ("limit",)))
+    if name == "opv2_transcript_search":
+        return client.get(base + "/transcript-search" + _query(args, ("q", "session", "regex", "prose", "limit")))
+    if name == "opv2_issue":
+        return client.get(base + "/issues/" + quote(str(args.get("id") or ""), safe=""))
+    raise OperatorV2McpError("unknown Operator v2 tool")
+
+
+SERVER = mcp_rpc.Server(name="claunch-operator-v2", tools=tuple(TOOLS), dispatch=call_tool,
+                        errors=(OperatorV2McpError, daemon_client.DaemonClientError, OSError, ValueError))
