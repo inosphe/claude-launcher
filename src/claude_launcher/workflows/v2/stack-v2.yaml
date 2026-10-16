@@ -183,7 +183,10 @@ nodes:
 
       - 심사(기준 브랜치 대비 — master 대비가 아니다): (a) 기준 대비 양방향
         diff, (b) 요청이 선 기준 tip이 지금 스택 tip(또는 기준 자식의 tip)과
-        같다, (c) 표적 테스트 수치(트리 해시 포함), (d) `git merge-tree
+        같다, (c) 표적 테스트 수치(트리 해시 포함) — 자식이 셀프 게이트로
+        표적 테스트를 생략했으면 수치 대신 그 이슈의 `TESTS SKIPPED @ <해시>:`
+        코멘트와 그 판정이 diff에 맞는지(동작을 바꾸지 않는 파일뿐인가)를
+        본다(claunch-77cu6), (d) `git merge-tree
         $(git merge-base <세션>-stack <자식>) <세션>-stack <자식>` 프리뷰가
         깨끗하다 — 하나라도 비면 머지하지 않고 되돌려 보충을 요청한다
         (`flow_collection` set status deferred, 결과 skipped).
@@ -222,7 +225,8 @@ nodes:
         한다. ff가 거절되면(로컬 스택이 그 사이 움직였다) 멈추고 사유를 적는다
         (결과 skipped — PR은 원격에서 이미 머지됐으므로 사유에 그 사실을 적는다).
       - 확인: 착지 결과 트리에서 바꾼 영역의 표적 테스트를 한 번 돌린다
-        (창 확보와 수치 표기는 improv-worker-v2 review와 같다). 수치는
+        (창 확보와 수치 표기는 improv-worker-v2 review와 같다; TESTS SKIPPED
+        마커로 온 자식이면 돌리지 않고 「tests: skipped」로 적는다). 수치는
         「스택 브랜치 기준」으로 적는다. landing 레코드의 landed 표시는
         데몬의 watch가 한다(자식 tip이 스택 브랜치의 조상인가) — 손으로
         landed를 쓰지 않는다.
