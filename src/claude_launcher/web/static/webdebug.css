@@ -1,0 +1,95 @@
+/* The web debug page (webdebug.html). Written for the dark page like the
+   rest of the app; theme.js derives the light theme from it. */
+:root {
+  --wd-bg: #121417;
+  --wd-bar: #1b1e23;
+  --wd-line: #2c3038;
+  --wd-text: #d7dbe0;
+  --wd-muted: #8b929c;
+  --wd-accent: #e8590c;
+  --wd-ok: #3fb950;
+  --wd-bad: #f85149;
+  --wd-btn: #262a31;
+  --wd-btn-hover: #31363f;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  display: flex; flex-direction: column; overflow: hidden;
+  background: var(--wd-bg); color: var(--wd-text);
+  font: 13px/1.3 system-ui, -apple-system, "Segoe UI", "Malgun Gothic", sans-serif;
+}
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.hidden { display: none !important; }
+button, select, input, textarea { font: inherit; color: inherit; }
+button, select {
+  height: 24px; padding: 0 8px; border: 1px solid var(--wd-line); border-radius: 4px;
+  background: var(--wd-btn); cursor: pointer; white-space: nowrap;
+}
+button:hover:not(:disabled) { background: var(--wd-btn-hover); }
+button:disabled { opacity: .5; cursor: default; }
+button[aria-pressed="true"] { border-color: var(--wd-accent); color: var(--wd-accent); }
+.wd-primary { border-color: var(--wd-accent); background: var(--wd-accent); color: #fff; }
+.wd-primary:hover:not(:disabled) { background: #f76707; }
+
+#wd-bar, #wd-address {
+  display: flex; align-items: center; gap: 6px; flex: none;
+  height: 32px; padding: 0 8px; background: var(--wd-bar); border-bottom: 1px solid var(--wd-line);
+}
+.wd-brand { font-weight: 600; color: var(--wd-accent); margin-right: 2px; white-space: nowrap; }
+#wd-session { max-width: 220px; }
+.wd-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--wd-bad); flex: none; }
+.wd-dot.up { background: var(--wd-ok); }
+.wd-sep { width: 1px; height: 18px; background: var(--wd-line); flex: none; }
+.wd-activity { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--wd-muted); }
+.wd-activity.agent { color: var(--wd-accent); }
+.wd-activity.error { color: var(--wd-bad); }
+.wd-chip { color: var(--wd-muted); font: 11px ui-monospace, monospace; white-space: nowrap; }
+#wd-url {
+  flex: 1; min-width: 0; height: 24px; padding: 0 8px;
+  border: 1px solid var(--wd-line); border-radius: 4px; background: var(--wd-bg);
+  font-family: ui-monospace, "Cascadia Mono", monospace; font-size: 12px;
+}
+#wd-url:focus { outline: none; border-color: var(--wd-accent); }
+
+#wd-stage { position: relative; flex: 1; min-height: 0; }
+#wd-frame { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: #fff; }
+#wd-frame:not([src]) { visibility: hidden; }
+.wd-empty { position: absolute; inset: 0; padding: 32px; color: var(--wd-muted); }
+.wd-muted { color: var(--wd-muted); }
+.wd-empty code { color: var(--wd-text); }
+
+.wd-region { position: absolute; inset: 0; cursor: crosshair; background: rgba(0, 0, 0, .15); z-index: 5; }
+#wd-region-box { position: absolute; border: 2px dashed var(--wd-accent); background: rgba(232, 89, 12, .1); display: none; }
+.wd-region-hint {
+  position: absolute; left: 50%; top: 8px; transform: translateX(-50%); margin: 0;
+  padding: 4px 10px; border-radius: 4px; background: var(--wd-bar); color: var(--wd-text);
+}
+
+.wd-composer {
+  position: fixed; right: 12px; top: 72px; z-index: 10; width: min(440px, calc(100vw - 24px));
+  max-height: calc(100vh - 90px); display: flex; flex-direction: column; gap: 8px; padding: 10px;
+  background: var(--wd-bar); border: 1px solid var(--wd-line); border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .45);
+}
+.wd-composer-head { display: flex; align-items: center; gap: 8px; }
+.wd-composer-head strong { flex: 1; }
+.wd-composer-head button { height: 22px; padding: 0 6px; }
+#wd-composer-body { overflow: auto; min-height: 0; display: flex; flex-direction: column; gap: 6px; }
+#wd-composer-body img { max-width: 100%; max-height: 240px; object-fit: contain; align-self: flex-start;
+  border: 1px solid var(--wd-line); }
+#wd-composer-body dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 2px 8px; }
+#wd-composer-body dt { color: var(--wd-muted); }
+#wd-composer-body dd { margin: 0; word-break: break-all; font-family: ui-monospace, monospace; font-size: 12px; }
+#wd-composer-body pre { margin: 0; max-height: 120px; overflow: auto; padding: 6px; background: var(--wd-bg);
+  border: 1px solid var(--wd-line); border-radius: 4px; font-size: 11px; white-space: pre-wrap; word-break: break-all; }
+#wd-composer-note { width: 100%; resize: vertical; padding: 6px; border: 1px solid var(--wd-line);
+  border-radius: 4px; background: var(--wd-bg); }
+.wd-composer-foot { display: flex; align-items: center; gap: 8px; }
+.wd-composer-foot #wd-composer-status { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+@media (max-width: 640px) {
+  .wd-brand, .wd-chip { display: none; }
+  #wd-bar button { padding: 0 5px; }
+}

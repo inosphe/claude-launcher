@@ -615,6 +615,11 @@ def build_app(
     # conversations beside the terminal, typed into the session by id.
     from . import threads_api
     threads_api.install(app)
+    # The web debug page (daemon/webdebug.py, claunch-dsb28): a page under
+    # development framed through a per-origin proxy, driven by the user and
+    # by the session the user picked for it.
+    from . import webdebug
+    webdebug.install(app)
     # deep_think (daemon/deep_think.py): a session asks itself a question and
     # a quick-fork of it answers. Needs app["handoff"] (set above): the answer
     # is a merge, and the module hooks how that merge is written and kept.
