@@ -1662,6 +1662,40 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 #new-session-footer #new-session-actions button { margin-top: 0; }
 #new-session-footer :is(.submit-status, .error) { overflow-wrap: anywhere; }
 #new-view { scroll-padding-bottom: 90px; }
+/* The decision stack (claunch-ymjp8, renderDecisionStack). The box is
+   sticky and has no height, so a row added under the reader's scroll does
+   not move the form; the list hangs from it, absolutely placed. The negative
+   margin gives back the grid gap the empty box would otherwise add. Rows are
+   one line at a fixed height: DECISION_ROW_PX in app.js reads the same 24. */
+#new-session > #new-decisions {
+  position: sticky; top: 0; z-index: 3; height: 0; margin-bottom: -16px;
+}
+#new-decisions-list {
+  position: absolute; top: 0; left: 0; right: 0;
+  display: flex; flex-direction: column;
+  background: #14161a; border-bottom: 1px solid #30363d;
+  /* The first shadow fills the scroller's top padding, which the sticky box
+     stops below: without it the form shows through above the rows. */
+  box-shadow: 0 -24px 0 #14161a, 0 8px 14px #14161a;
+}
+#new-decisions-list:empty { display: none; }
+#modal-overlay.spawn-open #new-decisions-list {
+  background: #1b1e24; box-shadow: 0 -24px 0 #1b1e24, 0 8px 14px #1b1e24;
+}
+#new-session .new-decision-row {
+  display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0;
+  height: 24px; margin: 0; padding: 0 8px; border: 0; border-radius: 0;
+  background: none; color: #d8dbe0; font-size: 12px; text-align: left;
+  cursor: pointer;
+}
+#new-session .new-decision-row:hover { background: #1f242c; }
+.new-decision-title {
+  flex: none; font-size: 11px; text-transform: uppercase; color: #7d8590;
+}
+.new-decision-sum {
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 #modal-overlay.spawn-open #new-session-footer {
   background: #1b1e24; box-shadow: 0 -8px 14px #1b1e24;
 }

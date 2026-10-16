@@ -801,6 +801,12 @@
                   role="tab" aria-selected="false">Spawn child</button>
         </div>
         <div id="new-page-head" class="page-head"><h2>New session</h2></div>
+        <!-- The decision stack (claunch-ymjp8): each group below whose header
+             has scrolled past the top is repeated here, in form order, with
+             its answers on the same line, and a row jumps back to the group.
+             Zero-height and sticky, so its rows overlay the form instead of
+             pushing it; drawn by renderDecisionStack. -->
+        <div id="new-decisions" aria-label="Decisions so far"></div>
         <fieldset id="new-quick-fork" class="session-field-hidden" disabled>
           <legend>Quick fork</legend>
           <p id="new-quick-fork-source"></p>
