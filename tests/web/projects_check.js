@@ -460,6 +460,71 @@ const fns = new Function(...Object.keys(ctx), code)(...Object.values(ctx));
   check("a rail moved by anything but the press keeps its tab", fns.groupTab(), tabsBefore);
   fns.setGroupOrder([]);
 
+  /* the fill default button beside the Project row (claunch-rqzey): marked
+     and enabled only while Directory or Mesh differs from the project's
+     default, and a press puts exactly those rows back */
+  check("the button stands beside the Project picker, before the Directory row",
+        (() => {
+          const at = html.indexOf('id="new-project-defaults"', formStart);
+          return at > formProject && at < formCwd;
+        })(), true);
+  check("...with a look for each state",
+        [/#new-project-defaults \{/.test(css), /#new-project-defaults\.drift \{/.test(css)],
+        [true, true]);
+  const btn = { disabled: true, title: "", classes: new Set(),
+    classList: { toggle(c, on) { on ? btn.classes.add(c) : btn.classes.delete(c); } } };
+  const fillForm = { project: form, cwd: form.form.cwd, mesh: meshRow };
+  const fillIds = { "new-project-defaults": btn, "new-session": fillForm };
+  const fill = new Function(
+    "$", "projectsCache", "spawnParent", "applySessionCwdChange",
+    slice("projectDefaultsDrift") + slice("syncProjectDefaultsButton") +
+    slice("fillProjectDefaults") +
+    "return { sync: syncProjectDefaultsButton, fill: fillProjectDefaults };")(
+    (id) => fillIds[id] || null, fns.cache(), spawnParent, applySessionCwdChange);
+  const state = () => [btn.disabled, btn.classes.has("drift")];
+  form.value = "hq";
+  form.form.cwd.value = "D:\\hq";
+  meshRow.value = "room";
+  fill.sync();
+  check("rows on the project's defaults leave the button off", state(), [true, false]);
+  form.form.cwd.value = "E:\\other";
+  fill.sync();
+  check("a directory off the default turns it on, naming the row",
+        [...state(), btn.title], [false, true, "set Directory to project hq's default"]);
+  meshRow.value = "other";
+  fill.sync();
+  check("...and the mesh too", btn.title, "set Directory and Mesh to project hq's default");
+  cwdChanges = 0;
+  meshChanges = 0;
+  fill.fill();
+  check("a press puts both defaults back and runs each row's follow-up",
+        [form.form.cwd.value, meshRow.value, cwdChanges, meshChanges, ...state()],
+        ["D:\\hq", "room", 1, 1, true, false]);
+  form.value = "default";
+  form.form.cwd.value = "E:\\other";
+  meshRow.value = "other";
+  fill.sync();
+  check("a project with no defaults has nothing to fill", state(), [true, false]);
+  form.value = "solo";
+  fill.sync();
+  check("a default mesh of none asks for the empty Mesh row",
+        [...state(), btn.title], [false, true, "set Mesh to project solo's default"]);
+  spawnChild = { name: "p" };
+  fill.sync();
+  check("...but not on a child, where the empty row is the parent's mesh",
+        state(), [true, false]);
+  spawnChild = null;
+  form.value = "hq";
+  form.form.cwd.disabled = true;
+  meshRow.value = "room";
+  fill.sync();
+  check("a directory the spawn policy keeps shut is not counted", state(), [true, false]);
+  form.form.cwd.disabled = false;
+  form.form.cwd.value = "";
+  meshRow.value = "";
+  form.value = "default";
+  fns.applyProjectDefaultCwd(form);
+
   /* the three states on the Projects card */
   const meshFns = new Function(
     src.slice(src.indexOf("const PROJECT_MESH_UNSET = "),

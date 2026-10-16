@@ -872,7 +872,15 @@
                the rail's selector when one project is picked there. -->
           <label class="with-link">
             <span>Project <a href="#/workspaces">manage</a></span>
-            <select name="project"></select>
+            <!-- fill default (claunch-rqzey): puts the project's default
+                 Directory and Mesh back when a draft, a recall or a hand
+                 pick left either elsewhere. Enabled and marked only while a
+                 row differs from the default (syncProjectDefaultsButton). -->
+            <span class="new-project-row">
+              <select name="project"></select>
+              <button type="button" id="new-project-defaults"
+                disabled>fill default</button>
+            </span>
           </label>
           <label class="with-link">
             <span>Directory <a href="#/workspaces">manage</a></span>
