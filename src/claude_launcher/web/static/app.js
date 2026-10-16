@@ -10515,6 +10515,7 @@ function setCurrentProject(name) {
     form.value = next;
     applyProjectDefaultCwd(form);
   }
+  if (typeof syncProjectDefaultsButton === "function") syncProjectDefaultsButton();
   // Both lists hold every project already: redraw them from the cache now,
   // with no request, so the pick shows the moment it is made.
   refreshSessions({ cached: true });
@@ -10617,6 +10618,76 @@ function applyProjectDefaultMesh(f, picked, previous, force = false) {
   if (typeof mesh.dispatchEvent === "function") {
     mesh.dispatchEvent(new Event("change"));
   }
+}
+
+/* The rows of the create form that do not hold the picked project's default
+   (claunch-rqzey), as [{ row, label, want }]. Only a default the project
+   states and the row can take counts: a project with no default workspace
+   says nothing about the Directory row, and a default the picker does not
+   offer cannot be filled. A default mesh of none (null) asks for the empty
+   row, but only on a session of its own: for a child "" is the parent's
+   mesh, so there is nothing to compare. A child's inherit entry on the
+   Project row ("") names no project and so no defaults. */
+function projectDefaultsDrift(f) {
+  const sel = f && f.project;
+  const picked = sel && sel.value
+    ? projectsCache.find((p) => p.name === sel.value) : null;
+  if (!picked) return [];
+  const drift = [];
+  const offers = (row, value) => [...row.options].some((o) => o.value === value);
+  const cwd = f.cwd;
+  if (cwd && !cwd.disabled && picked.default_cwd &&
+      offers(cwd, picked.default_cwd) && cwd.value !== picked.default_cwd) {
+    drift.push({ row: cwd, label: "Directory", want: picked.default_cwd });
+  }
+  const mesh = f.mesh;
+  const child = typeof spawnParent === "function" && !!spawnParent();
+  if (mesh && !mesh.disabled) {
+    let want;
+    if (picked.default_mesh) {
+      if (offers(mesh, picked.default_mesh)) want = picked.default_mesh;
+    } else if (picked.default_mesh === null && !child) {
+      want = "";
+    }
+    if (want !== undefined && mesh.value !== want) {
+      drift.push({ row: mesh, label: "Mesh", want });
+    }
+  }
+  return drift;
+}
+
+/* The fill default button beside the Project row: enabled and marked
+   (`drift`) only while a row differs from the project's default, and its
+   tooltip names which rows a press would change. */
+function syncProjectDefaultsButton() {
+  const btn = $("new-project-defaults");
+  const f = $("new-session");
+  if (!btn || !f) return;
+  const drift = projectDefaultsDrift(f);
+  btn.disabled = !drift.length;
+  btn.classList.toggle("drift", drift.length > 0);
+  const picked = f.project && f.project.value;
+  btn.title = drift.length
+    ? `set ${drift.map((d) => d.label).join(" and ")} to project ${picked}'s default`
+    : picked
+      ? `Directory and Mesh already hold project ${picked}'s defaults`
+      : "no project picked";
+}
+
+/* A press: each drifted row takes the project's default, followed by the
+   same work the row's own change does (the directory's worktree, workflow
+   and board rows; the mesh's roles, handle and peers). */
+function fillProjectDefaults() {
+  const f = $("new-session");
+  for (const d of projectDefaultsDrift(f)) {
+    d.row.value = d.want;
+    if (d.row === f.cwd) {
+      if (typeof applySessionCwdChange === "function") applySessionCwdChange();
+    } else if (typeof d.row.dispatchEvent === "function") {
+      d.row.dispatchEvent(new Event("change"));
+    }
+  }
+  syncProjectDefaultsButton();
 }
 
 /* The rail's project picker: one tab per project behind "All projects",
@@ -10758,6 +10829,7 @@ async function refreshProjects(opts) {
     // between the two the form would submit a project nobody chose.
     if (spawnParent()) syncSpawnMode();
   }
+  if (typeof syncProjectDefaultsButton === "function") syncProjectDefaultsButton();
 }
 
 /* The same guard for the two create-form pickers built out of the session
@@ -13023,6 +13095,8 @@ function syncSpawnMode() {
   row.title = forkable
     ? "the child opens a copy of the parent's conversation and diverges from there"
     : "the parent has no Claude or Codex conversation to copy";
+  // The Project row may have just gained or lost the inherit entry.
+  if (typeof syncProjectDefaultsButton === "function") syncProjectDefaultsButton();
 }
 
 /* The profile row means different things in the two modes: a session of its
@@ -14044,6 +14118,13 @@ if (projectHeader) {
     formProject.addEventListener("change",
       () => applyProjectDefaultCwd(formProject, { force: true }));
   }
+  const fillDefaults = $("new-project-defaults");
+  if (fillDefaults) fillDefaults.addEventListener("click", fillProjectDefaults);
+  // Every row the button compares fires a change that bubbles to the form;
+  // the rows set by code (seed, recall, rebuilt pickers) call the sync where
+  // they are set.
+  const newForm = $("new-session");
+  if (newForm) newForm.addEventListener("change", syncProjectDefaultsButton);
 }
 // Off, Mesh or Workspace: the grouping whose groups become the tabs.
 document.querySelectorAll('input[name="session-group-mode"]').forEach((input) =>
@@ -21712,6 +21793,7 @@ function syncOnboardPickers() {
   }
   // Guarded: harnesses that slice this function alone do not carry it.
   if (typeof syncCflowInputs === "function") syncCflowInputs();
+  if (typeof syncProjectDefaultsButton === "function") syncProjectDefaultsButton();
 }
 
 /* The start inputs of the picked v2 workflow (docs/cflow-v2.md 2.6): the
@@ -22342,6 +22424,8 @@ if (sessionSearchBox) {
 }
 
 $("new-session").mesh.addEventListener("change", async () => {
+  // A dispatched change does not bubble to the form's listener.
+  syncProjectDefaultsButton();
   // The peers on offer are the picked mesh's, not the parent's: moving the
   // child to another room changes who it could be wired to.
   refreshSessionConnect();
@@ -22380,6 +22464,7 @@ function applySessionCwdChange() {
   // something on the old one means nothing here.
   issueFilter = "";
   if (beadsMode() === "existing") refreshIssueChoices();
+  if (typeof syncProjectDefaultsButton === "function") syncProjectDefaultsButton();
 }
 
 document

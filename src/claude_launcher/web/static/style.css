@@ -1714,6 +1714,20 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 }
 #new-session label.with-link a { color: #58a6ff; text-decoration: none; font-size: 11px; }
 #new-session label.with-link a:hover { text-decoration: underline; }
+/* The Project picker and its fill default button (claunch-rqzey). The button
+   is dim and disabled while Directory and Mesh already hold the project's
+   defaults, and outlined in the accent colour while either differs. */
+#new-session .new-project-row { display: flex; align-items: stretch; gap: 6px; }
+#new-session .new-project-row select { flex: 1 1 auto; min-width: 0; }
+#new-session #new-project-defaults {
+  flex: none; margin-top: 6px; padding: 4px 10px; font-size: 12px;
+  white-space: nowrap; background: #14161a; color: #6e7681;
+  border: 1px solid #30363d; border-radius: 4px; cursor: default;
+}
+#new-session #new-project-defaults.drift {
+  color: #58a6ff; border-color: #58a6ff; cursor: pointer;
+}
+#new-session #new-project-defaults.drift:hover { background: #1c2a3d; }
 /* checkbox rows sit inline; the label's text must not stretch like a field */
 #new-session label.check {
   display: flex; align-items: flex-start; gap: 6px; margin-bottom: 8px;
