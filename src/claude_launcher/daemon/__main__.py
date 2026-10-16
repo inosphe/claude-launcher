@@ -379,6 +379,12 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
     round_clock = cflow_clock.RoundStartClock(manager)
     round_clock.start()
     event_clock = cflow_clock.RunEventClock(manager, mesh_manager)
+    # A reviewer the workflow ends on its own is told to the person on the
+    # notification channel, not asked (claunch-5aysr).
+    event_clock.on_reviewer_ended = (
+        lambda driver, reviewer, reason:
+        app["kill_gate"].note_auto(driver, reviewer, reason)
+    )
     # A crashed driver is reported to its parent from the exit itself, once
     # -- never re-read off state, which re-sent every dead run at each boot.
     manager.exit_hooks.append(event_clock.session_exited)

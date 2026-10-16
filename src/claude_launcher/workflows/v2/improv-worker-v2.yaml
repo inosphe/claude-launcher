@@ -4186,17 +4186,21 @@ procedures:
                       위 두 ask를 보내지 않으면 settle-wait는 재요청을 하지 않으므로
                       아무도 처분을 요청받지 못한 채 settle-stall까지 간다. 한 일을
                       reason에 적는다.
-                      판정 전에 reviewer-ensure가 이 런에서 세운 자식 리뷰어부터
-                      정리한다: 이 자리는 queue-recheck가 done을 낸 뒤라 이 런에 남은
-                      리뷰가 없다. 그 리뷰어가 답하지 않은 질문을 들고 있지 않은지
-                      `claunch cflow asks --session <리뷰어>`로 보고, MCP `kill`로
-                      끝낸다 — 남겨 두면 아래 판정이 그것을 adopt 안 된 자식으로 센다.
-                      데몬도 직속 리뷰어를 종료한다: 런이 done이 된 뒤(이 세션을
-                      끝내기 직전, 또는 keep-alive·사람의 재기동으로 이 세션이 남을
-                      때 — claunch-du6mx.1, claunch-472wq.1)와 이 세션이 끝날 때다.
-                      그것은 놓친 리뷰어의 뒷정리다 — 이 판정은 여기서 끝낸 결과로
-                      한다. 리뷰어가 아닌 자식에게는 세션의 종료가 번지지 않는다(한
-                      단계 위로 올라가 살아남는다). 한 일을
+                      reviewer-ensure가 이 런에서 세운 자식 리뷰어는 너가 끝내지
+                      않는다 — 데몬이 끝낸다(claunch-5aysr): 이 런이 settle에 들어설 때
+                      signals에 `settle` 레코드가 쌓이고, 데몬은 그것을 보고 직속
+                      리뷰어(메시 role reviewer)를 종료한 뒤 사용자에게 알림만 보낸다.
+                      그 리뷰어 앞으로 열린 질문이 있으면 그 질문이 닫힐 때까지 남긴다.
+                      데몬은 런이 done이 된 뒤와 이 세션이 끝날 때도 남은 리뷰어를
+                      종료한다(claunch-du6mx.1, claunch-472wq.1). 그러니 아래 자식
+                      판정에서 리뷰어는 세지 않는다 — 아직 살아 있어도 미정산이
+                      아니다. **퀵포크(사용자가 웹 UI에서 이 세션으로부터 연 사본,
+                      `children`의 quick_fork_of가 있는 것)도 세지 않는다** — 그것은
+                      사용자의 것이고 사용자가 merge할 때 끝난다. 다른 자식을 MCP
+                      `kill`로 끝내는 것은 사용자 승인을 기다리는 요청이다(답은
+                      `[claunch kill-request]` 블록으로 온다) — 답을 기다리는 동안 그
+                      자식은 살아 있다. 리뷰어가 아닌 자식에게는 세션의 종료가 번지지
+                      않는다(한 단계 위로 올라가 살아남는다). 한 일을
                       reason에 적는다.
                       stack side 런이 아직 서 있으면(flow_status의 `sides.stack.live`가 true)
                       미정산이다 — 살아 있는 스택 자식이 있으면 queue-recheck가 stack-round를
@@ -4349,6 +4353,12 @@ body:
   finally:
     id: settle
     call: settle
+    # 정산 국면에 들어섰다는 표시(claunch-5aysr): 데몬이 이 레코드를 보고
+    # 이 세션의 직속 리뷰어를 종료한다 — 에이전트의 kill은 사용자 승인을
+    # 기다리므로 리뷰어 정리는 런의 기계가 한다. 새 키를 쓰지 않는 것은 구
+    # 데몬의 컴파일러도 이 정의를 받아야 하기 때문이다.
+    do:
+      - {push: {to: signals, item: {name: "'settle'"}}, at: enter}
 
 spec:
   invariants:
