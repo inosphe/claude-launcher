@@ -63,6 +63,7 @@ function chooseTarget(name) {
   controls();
 }
 function controls() {
+  autosize();
   const s=snapshot.sessions.find(s=>s.name===$("target").value);
   $("send").disabled=pending || !s?.running || !$("prompt").value.trim();
   $("interrupt").disabled=pending || !s?.running;
@@ -657,10 +658,11 @@ function usageBlock(s) {
 function sessionEvents(s) {
   return collapseRoutine([...(s.events||[])].sort((a,b)=>timestamp(a.at)-timestamp(b.at)));
 }
-/* A board column draws its newest events and folds the rest behind a
-   button: the busiest columns carried 200 events each (s29, s15 on
-   2026-10-15) and every one of them was rebuilt on each redraw. */
-const COLUMN_EVENTS = 30;
+/* A session card draws its newest events — as many as the slider says, the
+   same count the latest grid uses — and folds the rest behind a button that
+   opens them in place: the busiest sessions carried 200 events each (s29,
+   s15 on 2026-10-15), and a card no longer scrolls inside itself, so every
+   event it draws is page height (claunch-iw5i8.1). */
 const expandedColumns = new Set();
 function fillSession(body,s,actionsOnly=false) {
   body.append(node("p",activity(s).duration,"meta"),node("div",(s.meshes||[]).join(" · ")||"메시 없음","meta"));
@@ -669,7 +671,7 @@ function fillSession(body,s,actionsOnly=false) {
   body.append(s.summary?richLine(s.summary,"obs-summary"):node("p","아직 관찰 결과가 없습니다."));
   if(s.error)body.append(node("p",s.error));
   const events=sessionEvents(s).reverse().filter(e=>!actionsOnly||(e.needs_action&&!e.acknowledged));
-  const limit=expandedColumns.has(s.name)?events.length:COLUMN_EVENTS;
+  const limit=expandedColumns.has(s.name)?events.length:gridLimit;
   for(const e of events.slice(0,limit))body.append(eventItem(s,e));
   if(events.length>limit) {
     const more=node("button",`이전 항목 ${events.length-limit}개 더 보기`,"observer-more");
@@ -758,7 +760,7 @@ function render() {
   const visible=visibleSessions(), cards=$("cards"), mobile=mobileView.matches;
   const view=mobile?"timeline":layout, grid=view==="grid", timeline=view==="timeline";
   for(const mode of ["board","grid","timeline"]) $("layout-"+mode).checked=view===mode;
-  $("limit-control").hidden=!grid;
+  $("limit-control").hidden=timeline;
   $("limit").value=String(gridLimit);$("limit-value").value=`${gridLimit}개`;
   syncTargets(visible);
   composerState();
@@ -777,10 +779,11 @@ function render() {
   $("mobile-scope-pinned").checked=scoped;
   $("notice").textContent=snapshot.error||(snapshot.enabled?"관찰 중 · 세션별 순차 처리 · 최소 60초 간격":"관찰이 꺼져 있습니다. 시작하면 ds4-official/deepseek-flash API로 트랜스크립트를 전송합니다. 「지금 갱신」은 꺼져 있어도 그 세션 하나를 한 번 전송합니다.");
   $("sort").hidden=timeline||grid;
-  $("layout-hint").textContent=grid?`세션마다 최신 항목 최대 ${gridLimit}개 · 세션 목록은 필터 그대로 · 보고·승인 요청 기준`:timeline?"최신 보고부터 표시하는 타임라인":"세션 보드 · 내용은 자동 갱신되며 세션 순서는 최신순 정렬을 누를 때 바뀝니다.";
+  $("layout-hint").textContent=grid?`세션마다 최신 항목 최대 ${gridLimit}개 · 세션 목록은 필터 그대로 · 보고·승인 요청 기준`:timeline?"최신 보고부터 표시하는 타임라인":`세션 카드 · 카드마다 최신 항목 ${gridLimit}개, 나머지는 카드의 「더 보기」로 펼칩니다 · 내용은 자동 갱신되며 세션 순서는 최신순 정렬을 누를 때 바뀝니다.`;
   cards.className=grid?"observer-grid":timeline?"observer-timeline":"observer-board";
-  const horizontal=cards.scrollLeft;
-  const scrolls=new Map([...cards.querySelectorAll(".observer-column-body")].map(e=>[e.parentElement.dataset.session,e.scrollTop]));
+  // The page is the one scroller: keep where the reader is across the
+  // rebuild, which empties the cards for a moment and would clamp it.
+  const page=$("view"), top=page.scrollTop;
   cards.replaceChildren();
   if(timeline||grid) {
     const entries=[];
@@ -829,11 +832,11 @@ function render() {
     for(const s of visible) {
       const card=sessionHeader(s,"observer-column"), body=node("div","","observer-column-body");
       fillSession(body,s,$("actions-only").checked);
-      card.append(body);cardActions(card,s);cards.append(card);body.scrollTop=scrolls.get(s.name)||0;
+      card.append(body);cardActions(card,s);cards.append(card);
     }
   }
   if(!cards.children.length)cards.append(node("p","선택한 조건에 해당하는 세션이 없습니다."));
-  cards.scrollLeft=horizontal;
+  page.scrollTop=top;
   controls();
 }
 for(const mode of ["board","grid","timeline"]) $("layout-"+mode).onchange=()=>{layout=mode;saveView();render();};
@@ -905,6 +908,17 @@ $("scope").onchange=()=>{selections();navigate();};
 $("activity").onchange=render;
 $("selection").onchange=navigate;$("actions-only").onchange=render;
 $("ended").onchange=()=>{render();if($("ended").checked&&snapshot.ended===false){lastSnapshot="";refresh();}};
+/* The draft box grows with its text instead of scrolling inside itself;
+   field-sizing does this where supported, and this is the fallback. Every
+   change of the draft (typing, switching target, clearing on send) ends in
+   controls(), so that is where it runs. */
+function autosize() {
+  const box=$("prompt");
+  if(CSS.supports?.("field-sizing","content"))return;
+  box.style.height="auto";
+  // Folded, the box has no layout; leave it to its CSS height until shown.
+  if(box.scrollHeight)box.style.height=box.scrollHeight+"px";
+}
 $("target").onchange=()=>chooseTarget($("target").value);$("prompt").oninput=controls;
 $("composer-toggle").onclick=()=>{composerFolded=!composerFolded;composerState();if(!composerFolded)$("prompt").focus();};
 $("monitor").onclick=async()=>{try{await request("api/observer/settings",{enabled:!snapshot.enabled});await refresh();}catch(err){showError(err.message);}};
@@ -964,60 +978,6 @@ async function open(scope = "global", name = "") {
   render();
   poll=setInterval(()=>{if(!document.hidden)refresh();},10000);
 }
-/* Drag to scroll sideways. The board lays its columns out in one row that
-   scrolls horizontally, and a mouse without a horizontal wheel had only the
-   scrollbar at the bottom of a tall page to move it. A press on the cards
-   becomes a drag once the pointer has moved past a few pixels mostly
-   sideways; a press on a control, a link, a field or a fold is left alone,
-   and so is any press while the cards do not overflow sideways. A drag that
-   moved swallows the click that ends it, so letting go over a link does not
-   follow it. Touch and pen keep the browser's own panning.
-   app.js has the same gesture for the rail's tab strips
-   (enableTabDragScroll); that one starts on any press, which is right for a
-   strip of tabs and wrong here, where a press lands on forms, folds and text
-   and a mostly vertical move is a column scroll or a selection. */
-const DRAG_START_PX = 5;
-const DRAG_IGNORE = "a,button,input,textarea,select,summary,label,pre,code,img,.observer-answer,.observer-gate";
-let drag = null;
-function dragStart(event) {
-  const cards=$("cards");
-  if(event.pointerType!=="mouse"||event.button!==0||cards.scrollWidth<=cards.clientWidth)return;
-  if(event.target.closest(DRAG_IGNORE))return;
-  drag={x:event.clientX,y:event.clientY,left:cards.scrollLeft,id:event.pointerId,moved:false};
-}
-function dragMove(event) {
-  if(!drag||event.pointerId!==drag.id)return;
-  const cards=$("cards"), dx=event.clientX-drag.x, dy=event.clientY-drag.y;
-  if(!drag.moved) {
-    if(Math.abs(dx)<DRAG_START_PX||Math.abs(dx)<Math.abs(dy)) {
-      // Mostly vertical: a column scroll or a text selection, not a drag.
-      if(Math.abs(dy)>=DRAG_START_PX)drag=null;
-      return;
-    }
-    drag.moved=true;
-    cards.classList.add("dragging");
-    try {cards.setPointerCapture(drag.id);} catch { /* released already */ }
-    getSelection()?.removeAllRanges();
-  }
-  event.preventDefault();
-  cards.scrollLeft=drag.left-dx;
-}
-function dragEnd(event) {
-  if(!drag||event.pointerId!==drag.id)return;
-  const moved=drag.moved;
-  drag=null;
-  $("cards").classList.remove("dragging");
-  if(!moved)return;
-  // The click that ends this drag comes right after pointerup, if at all;
-  // the guard goes away on the next tick so it cannot eat a later click.
-  const cards=$("cards"), swallow=e=>{e.preventDefault();e.stopPropagation();};
-  cards.addEventListener("click",swallow,{capture:true,once:true});
-  setTimeout(()=>cards.removeEventListener("click",swallow,{capture:true}));
-}
-$("cards").addEventListener("pointerdown",dragStart);
-$("cards").addEventListener("pointermove",dragMove);
-$("cards").addEventListener("pointerup",dragEnd);
-$("cards").addEventListener("pointercancel",dragEnd);
 composerState();
 return {open, stop, panelSection};
 })();

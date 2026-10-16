@@ -145,6 +145,25 @@ const server = http.createServer((req, res) => {
    background collapses toward a single value. This exists because a check on
    `filter: grayscale(1)` passed green while the live rail showed a grey
    smudge — the rule had been applied and the eye was gone. */
+/* The page has one scrollbar (claunch-iw5i8.1): #observer-view scrolls, and
+   nothing inside it does — no element below it that is set to scroll and has
+   more content than room, on either axis — and the document has no sideways
+   overflow. Returns the offenders so a failure names them. */
+async function innerScrollers(page) {
+  return page.evaluate(() => {
+    const view = document.getElementById("observer-view");
+    const out = [];
+    for (const e of view.querySelectorAll("*")) {
+      const cs = getComputedStyle(e);
+      const y = /auto|scroll/.test(cs.overflowY) && e.scrollHeight > e.clientHeight + 1;
+      const x = /auto|scroll/.test(cs.overflowX) && e.scrollWidth > e.clientWidth + 1;
+      if (y || x) out.push(`${e.tagName.toLowerCase()}#${e.id}.${e.className}`);
+    }
+    if (document.documentElement.scrollWidth > innerWidth) out.push("document: sideways overflow");
+    if (view.scrollWidth > view.clientWidth + 1) out.push("#observer-view: sideways overflow");
+    return out;
+  });
+}
 async function glyphContrast(page, selector) {
   const shot = (await page.locator(selector).screenshot()).toString("base64");
   return page.evaluate(async (b64) => {
@@ -520,7 +539,8 @@ async function fadeCost(page, selector, fade) {
     await page.getByText("newest timeline event",{exact:true}).waitFor();
     assert.equal(await page.locator(".observer-post .event").first().getAttribute("data-event"),"mobile-new");
     assert.equal(await page.locator("#observer-sort").isVisible(),false);
-    await page.locator(".observer-content").evaluate(e=>e.scrollTop=0);
+    await page.locator("#observer-view").evaluate(e=>e.scrollTop=0);
+    assert.deepEqual(await innerScrollers(page),[],"mobile timeline: the page is the only scroller");
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
     if(process.env.CLAUNCH_SCREENSHOT) await page.screenshot({path:process.env.CLAUNCH_SCREENSHOT,fullPage:true});
     // The grid limits each session's own posts, after filters, and persists its
@@ -578,9 +598,21 @@ async function fadeCost(page, selector, fade) {
     assert.equal(await page.locator('.observer-card').count(),1);
     assert.equal(await page.locator('.observer-card').getAttribute('data-session'),'s3');
     await page.selectOption('#observer-activity','all');
+    assert.deepEqual(await innerScrollers(page),[],"grid: the page is the only scroller");
     await page.locator('label:has(#observer-layout-board)').click();
     assert.equal(await page.locator('.observer-column').count(),3);
-    assert.equal(await page.locator('#observer-limit-control').isVisible(),false);
+    // The session cards wrap into rows rather than one row that scrolls
+    // sideways, take the slider's count per card, and open the rest in place.
+    assert.equal(await page.locator('#observer-limit-control').isVisible(),true);
+    assert.deepEqual(await innerScrollers(page),[],"session cards: the page is the only scroller");
+    const s2Card = page.locator('.observer-column[data-session="s2"]');
+    assert.equal(await s2Card.locator('.event').count(),10);
+    await s2Card.getByRole('button',{name:'이전 항목 2개 더 보기',exact:true}).click();
+    assert.equal(await s2Card.locator('.event').count(),12);
+    assert.deepEqual(await innerScrollers(page),[],"an opened card grows the page");
+    await page.locator('#observer-limit').fill('3');
+    await page.waitForFunction(()=>document.querySelectorAll('.observer-column[data-session="s3"] .event').length<=3);
+    await page.locator('#observer-limit').fill('10');
     await page.setViewportSize({width:320,height:740});
     await page.waitForSelector('.observer-timeline .observer-card');
     assert.equal(await page.locator('.observer-timeline .observer-card').count(),16);
@@ -592,7 +624,13 @@ async function fadeCost(page, selector, fade) {
     assert.equal(await page.locator('#observer-sort').isVisible(),false);
     assert.equal(await page.locator('#observer-limit-control').isVisible(),false);
     await page.locator('.observer-timeline .observer-card').last().scrollIntoViewIfNeeded();
-    assert.equal(await page.locator('.observer-timeline').evaluate(e=>e.scrollTop>0),true);
+    assert.equal(await page.locator('#observer-view').evaluate(e=>e.scrollTop>0),true,"the page scrolls, not the timeline");
+    assert.equal(await page.locator('.observer-timeline').evaluate(e=>e.scrollHeight<=e.clientHeight+1),true);
+    assert.deepEqual(await innerScrollers(page),[],"timeline: the page is the only scroller");
+    // A redraw keeps the reader where they are on the page.
+    const before = await page.locator('#observer-view').evaluate(e=>e.scrollTop);
+    await page.locator('#observer-actions-only').evaluate(e=>e.dispatchEvent(new Event('change')));
+    assert.equal(await page.locator('#observer-view').evaluate(e=>e.scrollTop),before);
     await page.reload();
     await page.waitForSelector('.observer-timeline .observer-card');
     assert.equal(await page.locator('#observer-layout-timeline').isChecked(),true);
