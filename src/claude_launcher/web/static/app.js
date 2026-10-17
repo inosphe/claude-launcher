@@ -47037,6 +47037,9 @@ function notify(title, sub, opts) {
     o.session ? { session: o.session } : {},
     o.session && o.target ? { target: o.target } : {}
   ));
+  // With the history panel open the notice goes to the panel only: no card
+  // now, and none left behind to pop up once the panel closes (claunch-k2khb).
+  if (noticePanelOpen()) return null;
   const node = el("div", "notice" + (o.kind ? ` ${o.kind}` : ""));
   // A click on the card goes where it points; × only puts it away
   // (claunch-x76l8). The history keeps the row either way.
@@ -47399,10 +47402,12 @@ function noticePanelToggle(force) {
   if (!panel) return;
   const open = force === undefined ? !noticePanelOpen() : !!force;
   panel.classList.toggle("hidden", !open);
-  // The corner strip sits above the panel; while the panel is open it moves
-  // down past the panel's head, so its cards do not cover the close button.
+  // While the panel is open the corner strip is hidden: the panel already
+  // lists every notice and every waiting request with its buttons, so a card
+  // over it says the same thing twice (claunch-k2khb). Cards that were up
+  // before it opened, gate cards above all, come back when it closes.
   const strip = $("notices");
-  if (strip) strip.classList.toggle("under-panel-head", open);
+  if (strip) strip.classList.toggle("panel-open", open);
   if (open) noticePanelPaint();
   noticeBellPaint();
 }
