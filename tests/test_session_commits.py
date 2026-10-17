@@ -290,6 +290,52 @@ def test_rail_shows_the_newest_and_counts_the_rest(repo, fresh_rail, monkeypatch
     assert found["more"] == 2
 
 
+def test_rail_gives_the_selected_card_every_commit_with_its_state(repo, fresh_rail, monkeypatch):
+    """The selected card unfolds its +N (claunch-7myrv): every commit comes
+    back, each with a state, and nothing is left to count."""
+    monkeypatch.setattr(session_commits, "RAIL_LIMIT", 2)
+    oldest = commit(repo, "feat: 0", session="s1")
+    for n in range(1, 3):
+        commit(repo, f"feat: {n}", session="s1")
+    git("checkout", "-qb", "s1-feature", cwd=repo)
+    newest = commit(repo, "feat: 3", session="s1")
+    assert session_commits.rail(str(repo), "s1")["more"] == 2
+    found = session_commits.rail(str(repo), "s1", everything=True)
+    assert [c["subject"] for c in found["commits"]] == ["feat: 3", "feat: 2", "feat: 1", "feat: 0"]
+    assert found["more"] == 0
+    assert found["commits"][0]["short"] == newest and found["commits"][0]["state"] == "local"
+    assert found["commits"][-1]["short"] == oldest and found["commits"][-1]["state"] == "merged"
+    # The list poll after it still carries the newest few.
+    assert len(session_commits.rail(str(repo), "s1")["commits"]) == 2
+
+
+def test_the_selected_card_reads_every_commit_from_its_own_route(repo, fresh_rail, monkeypatch):
+    from claude_launcher.daemon import api, session_prs, work_checkout
+
+    monkeypatch.setattr(session_commits, "RAIL_LIMIT", 1)
+    # A session that moved into a worktree: the commits come off that
+    # worktree, the PRs off the directory it was started in -- each where
+    # the list poll reads it, so selecting the card changes no PR frame.
+    started = repo.parent / "started-here"
+    started.mkdir()
+    monkeypatch.setattr(work_checkout, "of", lambda sdef: str(repo))
+    pr_reads = []
+    monkeypatch.setattr(session_prs, "for_session",
+                        lambda cwd, name: pr_reads.append(cwd) or [])
+    for n in range(3):
+        commit(repo, f"feat: {n}", session="s1")
+    session = type("S", (), {"sdef": type("D", (), {"name": "s1", "cwd": str(started)})()})()
+    manager = type("M", (), {"get": lambda self, name: session})()
+    request = type("R", (), {"app": {"manager": manager}, "match_info": {"name": "s1"}})()
+    body = json.loads(asyncio.run(api.h_session_rail_commits(request)).text)
+    assert body["session"] == "s1"
+    assert [c["subject"] for c in body["rail_commits"]["commits"]] == ["feat: 2", "feat: 1", "feat: 0"]
+    assert body["rail_commits"]["more"] == 0
+    assert pr_reads == [api._session_cwd(session)]
+    src = (Path(__file__).resolve().parent.parent / "src/claude_launcher/daemon/api.py").read_text(encoding="utf-8")
+    assert 'r.add_get("/api/sessions/{name}/rail-commits", h_session_rail_commits)' in src
+
+
 def test_rail_is_none_when_nothing_was_found(repo, tmp_path, fresh_rail):
     """None, never an empty list: an empty reading is not evidence of no
     commits, and the card draws no line for it."""

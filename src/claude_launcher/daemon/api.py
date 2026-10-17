@@ -1059,6 +1059,7 @@ def build_app(
     r.add_get("/api/sessions/{name}/window", h_session_window)
     r.add_get("/api/sessions/{name}/timers", h_session_timers)
     r.add_get("/api/sessions/{name}/procs", h_session_procs)
+    r.add_get("/api/sessions/{name}/rail-commits", h_session_rail_commits)
     r.add_post("/api/sessions/{name}/procs/{pid}/kill", h_session_proc_kill)
     r.add_post("/api/sessions/{name}/queued/flush", h_session_queued_flush)
     r.add_post("/api/sessions/{name}/queued/hold", h_session_hold)
@@ -10041,6 +10042,30 @@ async def h_session_procs(request: web.Request) -> web.Response:
     await asyncio.to_thread(found.refresh)
     return json_response({"session": session.sdef.name,
                           "procs": found.listing(session.sdef.name)})
+
+
+async def h_session_rail_commits(request: web.Request) -> web.Response:
+    """Every stamped commit of this session, in the shape of the list's
+    ``rail_commits`` (session_commits.rail) with nothing left over: the card
+    the reader selected unfolds its ``+N`` with it (claunch-7myrv). The list
+    poll keeps carrying the newest few, so its size does not grow with the
+    session's history. ``rail_commits`` is ``None`` when nothing was found,
+    for the reason the list leaves the field out."""
+    session = _session(request)
+    name = session.sdef.name
+
+    def read():
+        # Each from where the list reads it, so a chip's PR frame does not
+        # change when the card is selected: the PRs off the run store of the
+        # directory the session was started in, the commits off the worktree
+        # it moved into, else that same directory.
+        home = _session_cwd(session)
+        cwd = work_checkout.of(session.sdef) or home
+        return session_commits.rail(
+            cwd, name, session_prs.for_session(home, name), everything=True)
+
+    chips = await asyncio.to_thread(read)
+    return json_response({"session": name, "rail_commits": chips})
 
 
 async def h_session_proc_kill(request: web.Request) -> web.Response:

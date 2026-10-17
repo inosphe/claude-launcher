@@ -30,8 +30,17 @@ function railNotePlace(li, node) {
   if (cwd) li.insertBefore(node, cwd);
   else li.appendChild(node);
 }
-const api = new Function("el", "railNotePlace", src.slice(start, end)
-  + "return {sessionPrPanel, decorateCommitsRow, railCommitChip};")(el, railNotePlace);
+// The selected card's read of every commit (claunch-7myrv): each call is
+// recorded and answered by whatever `railAnswer` holds.
+const railCalls = [];
+let railAnswer = null;
+function fetchStub(path) {
+  railCalls.push(path);
+  const body = railAnswer;
+  return Promise.resolve({ok: !!body, json: () => Promise.resolve(body)});
+}
+const api = new Function("el", "railNotePlace", "api", src.slice(start, end)
+  + "return {sessionPrPanel, decorateCommitsRow, railCommitChip};")(el, railNotePlace, fetchStub);
 assert.equal(api.sessionPrPanel({prs: []}), null);
 const pr = {url: "https://ghe.example.com/o/r/pull/7", number: 7,
   repo: "ghe.example.com/o/r", title: "<script>literal title</script>",
@@ -101,6 +110,57 @@ assert.equal(li.querySelector(".rail-commits"), line);
 assert.equal(line.children.length, 1);
 api.decorateCommitsRow(li, {prs: []});
 assert.equal(li.querySelector(".rail-commits"), null, "cleared commits remove the line");
+
+// The selected card unfolds its +N: one read of every commit, drawn in place
+// of the newest few, and no second read while the key has not moved.
+(async () => {
+  const selected = () => {
+    const c = card();
+    c.classList = {on: true, contains: (k) => k === "active" && c.classList.on};
+    c.isConnected = true;
+    return c;
+  };
+  const few = {commits: [commits[0]], more: 2};
+  const every = {commits: [commits[0],
+    {sha: "e", short: "eeeeeee5", subject: "older", state: "merged"},
+    {sha: "f", short: "fffffff6", subject: "oldest", state: "merged"}], more: 0};
+  const s = {name: "s 1", prs: [], rail_commits: few};
+
+  let li = card();
+  api.decorateCommitsRow(li, s);
+  assert.equal(railCalls.length, 0, "an unselected card reads nothing");
+  assert.equal(li.querySelector(".rail-commits").children.at(-1).textContent, "+2");
+
+  li = selected();
+  railAnswer = {session: "s 1", rail_commits: every};
+  api.decorateCommitsRow(li, s);
+  assert.deepEqual(railCalls, ["/api/sessions/s%201/rail-commits"]);
+  await new Promise((r) => setTimeout(r, 0));
+  let line = li.querySelector(".rail-commits");
+  assert.deepEqual(line.children.map((c) => c.children[1] && c.children[1].textContent),
+    ["aaaaaaa", "eeeeeee", "fffffff"], "every commit, and no +N");
+
+  api.decorateCommitsRow(li, s);
+  assert.equal(railCalls.length, 1, "a poll redraw reuses what was read");
+  assert.equal(li.querySelector(".rail-commits").children.length, 3);
+
+  li.classList.on = false;
+  api.decorateCommitsRow(li, s);
+  assert.equal(li.querySelector(".rail-commits").children.at(-1).textContent, "+2", "folded again");
+
+  // A failed read keeps the +N and is not retried until the key moves.
+  const t = {name: "s2", prs: [], rail_commits: few};
+  li = selected();
+  railAnswer = null;
+  api.decorateCommitsRow(li, t);
+  await new Promise((r) => setTimeout(r, 0));
+  api.decorateCommitsRow(li, t);
+  assert.equal(railCalls.filter((p) => p.includes("/s2/")).length, 1);
+  assert.equal(li.querySelector(".rail-commits").children.at(-1).textContent, "+2");
+  api.decorateCommitsRow(li, {...t, rail_commits: {commits: [commits[1]], more: 2}});
+  assert.equal(railCalls.filter((p) => p.includes("/s2/")).length, 2, "a new commit reads again");
+  console.log("selected card unfolds its commits: passed");
+})().catch((e) => { console.error(e); process.exit(1); });
 
 assert(!src.includes("sessionPrBadge"), "the name-line PR badge is gone");
 assert(src.includes('if (typeof decorateCommitsRow === "function") decorateCommitsRow(li, s);'));
