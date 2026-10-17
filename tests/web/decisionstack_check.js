@@ -211,6 +211,10 @@ check("renderRuntimeSummary schedules the stack, guarded for sliced checks",
       /typeof scheduleDecisionStack === "function"\) scheduleDecisionStack\(\)/
         .test(sliceFn("renderRuntimeSummary")),
       true);
+check("renderOpeningImages schedules the stack, so +N images follows add/remove/clear",
+      /typeof scheduleDecisionStack === "function"\) scheduleDecisionStack\(\)/
+        .test(sliceFn("renderOpeningImages")),
+      true);
 check("the stack follows scrolling of whichever box holds the form",
       /document\.addEventListener\("scroll"[\s\S]{0,200}contains\(f\)/.test(src), true);
 
