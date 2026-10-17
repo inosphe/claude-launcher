@@ -1750,9 +1750,14 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 #new-session label.with-link a:hover { text-decoration: underline; }
 /* The Project picker and its fill default button (claunch-rqzey). The button
    is dim and disabled while Directory and Mesh already hold the project's
-   defaults, and outlined in the accent colour while either differs. */
-#new-session .new-project-row { display: flex; align-items: stretch; gap: 6px; }
-#new-session .new-project-row select { flex: 1 1 auto; min-width: 0; }
+   defaults, and outlined in the accent colour while either differs. It sits
+   on its own line under the picker (claunch-4l94e): the group has height to
+   spare beside the Directory column, and the picker keeps the full width
+   for long project names. */
+#new-session .new-project-row {
+  display: flex; flex-direction: column; align-items: flex-start;
+}
+#new-session .new-project-row select { align-self: stretch; }
 #new-session #new-project-defaults {
   flex: none; margin-top: 6px; padding: 4px 10px; font-size: 12px;
   white-space: nowrap; background: #14161a; color: #6e7681;
