@@ -234,6 +234,11 @@ class Queue:
                 if not covered and (not pause or not pause["job"]):
                     db.execute("INSERT INTO pauses(common,job) VALUES (?,?) ON CONFLICT(common) "
                                "DO UPDATE SET job=excluded.job,repair_issue=NULL", (row["common"], ident))
+                elif not covered and pause["repair_issue"] and pause["repair_issue"] == row["issue"]:
+                    # The repair's own merge sweep failed: the pause follows the new
+                    # failure and the slot empties so the next repair can be assigned.
+                    db.execute("UPDATE pauses SET job=?,repair_issue=NULL WHERE common=?",
+                               (ident, row["common"]))
             elif status == "passed" and pause and pause["job"] and pause["repair_issue"] == row["issue"]:
                 failed = self.get(pause["job"])
                 if self.contains(row["repo"], failed["sha"], row["sha"]):

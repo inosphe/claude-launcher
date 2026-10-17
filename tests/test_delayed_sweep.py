@@ -240,6 +240,34 @@ def test_a_failure_pauses_only_its_repository_and_only_green_repair_resumes(repo
     q.admit(repo, "new-work")
 
 
+def test_a_failed_repair_sweep_moves_the_pause_and_empties_the_repair_slot(repo, tmp_path):
+    q = queue(tmp_path)
+    bad, _ = enqueue(q, repo, "bad")
+    q.finish(bad["id"], "failed", "receipt", "x")
+    q.repair(repo, bad["id"], "fix")
+    q.admit(repo, "fix")
+    repair, _ = enqueue(q, repo, "fix-merge", "fix")
+    cleared = q.status(repo)["pauses"][0]["cleared_sha"]
+    q.finish(repair["id"], "failed", "receipt", "still red")
+    pause = q.status(repo)["pauses"][0]
+    assert pause["job"] == repair["id"]
+    assert not pause["repair_issue"]
+    assert pause["cleared_sha"] == cleared
+    q.repair(repo, repair["id"], "fix-2")  # the slot is free for the next repair
+
+
+def test_an_ordinary_failure_leaves_an_active_pause_unchanged(repo, tmp_path):
+    q = queue(tmp_path)
+    bad, _ = enqueue(q, repo, "bad")
+    other, _ = enqueue(q, repo, "other")
+    q.finish(bad["id"], "failed", "receipt", "x")
+    q.repair(repo, bad["id"], "fix")
+    before = q.status(repo)["pauses"][0]
+    q.finish(other["id"], "failed", "receipt", "unrelated")
+    assert q.status(repo)["pauses"][0] == before
+    assert before["job"] == bad["id"] and before["repair_issue"] == "fix"
+
+
 def test_a_failure_of_a_sha_master_cannot_reach_creates_no_pause(repo, tmp_path):
     q = queue(tmp_path)
     gone, _ = enqueue(q, repo, "gone")
