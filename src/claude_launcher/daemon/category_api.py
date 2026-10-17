@@ -11,7 +11,7 @@ import json
 
 from aiohttp import web
 
-from .. import category
+from .. import category, workspaces
 from . import actors
 from . import category_assign as assign_mod
 
@@ -94,7 +94,19 @@ def install(app):
     async def tree(request, body):
         ws = ws_of(request, body)
         out = await asyncio.to_thread(category.tree, ws)
-        out["details"] = await _details(request.app, ws, out["items"])
+        placed = {i["ref"] for i in out["items"] if i["kind"] == "session"}
+        # Live sessions of this workspace that are in no node yet: what the
+        # page offers to select alongside the placed ones.
+        manager = request.app.get("manager")
+        loose = []
+        for s in (manager.list() if manager is not None and hasattr(manager, "list") else []):
+            if s.exited or s.sdef.name in placed:
+                continue
+            owner = workspaces.owning(s.sdef.cwd or "")
+            if owner is not None and owner.path == ws.path:
+                loose.append({"kind": "session", "ref": s.sdef.name})
+        out["unassigned"] = loose
+        out["details"] = await _details(request.app, ws, out["items"] + loose)
         return {"workspace": ws.name, **out}
 
     async def search(request, body):

@@ -218,3 +218,33 @@ def test_tree_routes_edit_extract_merge_and_review(home, tmp_path):
             assert (await client.post("/api/category/nodes?workspace=alpha", json=[])).status == 400
 
     asyncio.run(scenario())
+
+
+def test_tree_lists_the_workspace_sessions_not_yet_placed(home, tmp_path):
+    from types import SimpleNamespace
+
+    (tmp_path / "repo").mkdir()
+    (tmp_path / "other").mkdir()
+    workspaces.add(str(tmp_path / "repo"), "alpha")
+
+    def sess(name, cwd, exited=False):
+        return SimpleNamespace(sdef=SimpleNamespace(name=name, cwd=str(cwd), note="", role="", issue=""),
+                               exited=exited, status=lambda: "idle")
+
+    sessions = [sess("placed", tmp_path / "repo"), sess("loose", tmp_path / "repo"),
+                sess("dead", tmp_path / "repo", exited=True), sess("elsewhere", tmp_path / "other")]
+    by_name = {s.sdef.name: s for s in sessions}
+
+    async def scenario():
+        app = web.Application()
+        app["manager"] = SimpleNamespace(get=lambda n: by_name[n], list=lambda: sessions)
+        category_api.install(app)
+        ws = category.workspace("alpha")
+        node = category.create_node(ws, {"label": "web"}, "user")
+        category.assign(ws, [{"kind": "session", "ref": "placed"}], node["id"], "user")
+        async with TestClient(TestServer(app)) as client:
+            doc = await (await client.get("/api/category?workspace=alpha")).json()
+        assert doc["unassigned"] == [{"kind": "session", "ref": "loose"}]
+        assert doc["details"]["session:loose"]["status"] == "idle"
+
+    asyncio.run(scenario())
