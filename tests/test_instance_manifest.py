@@ -398,16 +398,11 @@ def test_real_daemon_process_runs_under_its_manifest(home, tmp_path):
     import claude_launcher
     from claude_launcher.daemon_client import DaemonClient
 
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
     team_home = tmp_path / "team-home"
     (team_home / "profiles" / "teamonly").mkdir(parents=True)
     (home / "profiles" / "baseonly").mkdir(parents=True)
     team_cfg = tmp_path / "team.yaml"
     team_cfg.write_text("version: 1\n", encoding="utf-8")
-    _manifest(home, "team", {"home": str(team_home), "config": str(team_cfg), "port": port})
 
     env = os.environ.copy()
     for var in (paths.INSTANCE_ENV, *im.ENV_VARS):
@@ -416,16 +411,45 @@ def test_real_daemon_process_runs_under_its_manifest(home, tmp_path):
     src = str(Path(claude_launcher.__file__).resolve().parents[1])
     env["PYTHONPATH"] = src + os.pathsep + env.get("PYTHONPATH", "")
     log_path = tmp_path / "daemon.out"
-    with open(log_path, "wb") as log:
-        proc = subprocess.Popen(
-            [sys.executable, "-m", "claude_launcher.daemon", "--name", "team"],
-            env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-        )
     inst_dir = home / "daemons" / "team"
+
+    def start():
+        # The port is probed free and released before the daemon binds it, so
+        # another process can take it in between (claunch-nh42j). The daemon
+        # then exits 1 with "cannot bind" -- in its own daemon.log, not on
+        # stderr -- and the caller retries on a fresh port.
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        _manifest(home, "team", {"home": str(team_home), "config": str(team_cfg), "port": port})
+        with open(log_path, "wb") as log:
+            return port, subprocess.Popen(
+                [sys.executable, "-m", "claude_launcher.daemon", "--name", "team"],
+                env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+            )
+
+    def died_report():
+        parts = [log_path.read_text(errors="replace")]
+        inst_log = inst_dir / "daemon.log"
+        if inst_log.is_file():
+            parts.append(inst_log.read_text(errors="replace"))
+        return "\n".join(parts)
+
+    port, proc = start()
+    for _ in range(4):
+        deadline = time.monotonic() + 30
+        while proc.poll() is None and not (inst_dir / "daemon.json").is_file():
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.2)
+        if proc.poll() is None or "cannot bind" not in died_report():
+            break
+        port, proc = start()
     try:
         deadline = time.monotonic() + 30
         while not (inst_dir / "daemon.json").is_file():
-            assert proc.poll() is None, log_path.read_text(errors="replace")
+            assert proc.poll() is None, died_report()
             assert time.monotonic() < deadline, "daemon did not come up"
             time.sleep(0.2)
         doc = json.loads((inst_dir / "daemon.json").read_text(encoding="utf-8"))
