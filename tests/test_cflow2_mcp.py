@@ -280,3 +280,18 @@ def test_brief_files_a_record_under_its_label():
         "round/land/peer-review-loop.do.0.try": rec, "peer-review": rec}})
     assert out["result"] == {"peer-review": {**rec, "same": [
         "round/land/peer-review-loop.do.0.try"]}}
+
+
+def test_brief_keeps_a_non_ok_record_whole():
+    """improv-leader-v2's reflect-pregate reads deployed-wait's checks (exit
+    and output) from flow_status after the wait timed out: a record whose
+    outcome is not ok is what the next prompt acts on and stays whole."""
+    checks = [{"id": "deployed", "verdict": "fail", "exit": 1, "output": "o" * 300}]
+    timeout = {"outcome": "timeout", "value": {"seconds": 600, "polls": 20, "checks": checks}}
+    fail = {"outcome": "fail", "value": {"reason": "r" * 200}}
+    out = cflow2_mcp.brief({"run": "r", "result": {
+        "deployed-wait": timeout, "unit": fail,
+        "work": {"outcome": "ok", "value": {"summary": "s" * 200}}}})
+    assert out["result"]["deployed-wait"] == timeout
+    assert out["result"]["unit"] == fail
+    assert out["result"]["work"]["value"] == {"summary": "<elided: 202 chars>"}

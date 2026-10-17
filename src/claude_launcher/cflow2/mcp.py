@@ -478,7 +478,10 @@ def brief(payload: Dict[str, Any], keep: Any = ()) -> Dict[str, Any]:
     ``prior-search``). Here each distinct record appears once, under its
     first label key (else its first key), with ``same`` naming the others; a value field over
     :data:`BRIEF_LIMIT` is elided (``by``/``decision`` of an answered ask stay
-    readable). Keys in ``keep`` stay whole. A rule whose text the task prompt
+    readable). Keys in ``keep`` stay whole, and so does a record whose outcome
+    is not ``ok``: a wait's timeout carries the checks the next prompt reads
+    (improv-leader-v2 reflect-pregate reads ``deployed-wait``'s exit and
+    output from flow_status), a failure its reason. A rule whose text the task prompt
     already carries (the compiler appends it under ``── 규칙 ──``) keeps only
     its id. ``data.inputs`` is dropped when it equals the top-level
     ``inputs``. :func:`runtime.status` itself is unchanged: the web UI, CLI
@@ -497,7 +500,8 @@ def brief(payload: Dict[str, Any], keep: Any = ()) -> Dict[str, Any]:
             # prompts name results by label
             keys.sort(key=lambda k: "/" in k or "." in k)
             rec = result[keys[0]]
-            if keep.intersection(keys) or not isinstance(rec, dict):
+            if (keep.intersection(keys) or not isinstance(rec, dict)
+                    or rec.get("outcome", ir.OUTCOME_OK) != ir.OUTCOME_OK):
                 entry = dict(rec) if isinstance(rec, dict) else {"value": rec}
             else:
                 entry = {k: v for k, v in rec.items() if k != "value"}
