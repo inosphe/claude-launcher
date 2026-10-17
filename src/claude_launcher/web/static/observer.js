@@ -40,6 +40,9 @@ function saveView() {
     localStorage.setItem("claunch-observer-grid-limit",String(gridLimit));
   } catch { /* Keep the in-memory preference. */ }
 }
+/* The operators section (observer_operator.js). Read through this so a page
+   or harness that loads observer.js without it draws no operator controls. */
+const operators = () => globalThis.ObserverOperators || null;
 const node = (tag, text, cls) => { const e = document.createElement(tag); e.textContent = text; if(cls)e.className=cls; return e; };
 async function request(path, body) {
   const options = body === undefined ? {} : {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)};
@@ -64,9 +67,12 @@ function chooseTarget(name) {
 }
 function controls() {
   autosize();
-  const s=snapshot.sessions.find(s=>s.name===$("target").value);
-  $("send").disabled=pending || !s?.running || !$("prompt").value.trim();
-  $("interrupt").disabled=pending || !s?.running;
+  const target=$("target").value, s=snapshot.sessions.find(s=>s.name===target);
+  // An operator reads its messages when it next runs, so a stopped one takes
+  // them too; there is nothing to interrupt in it from here.
+  const operator=!!operators()?.isTarget(target);
+  $("send").disabled=pending || !(operator||s?.running) || !$("prompt").value.trim();
+  $("interrupt").disabled=pending || operator || !s?.running;
   $("target").disabled=pending;
 }
 function sessionRuns(s) {
@@ -189,11 +195,23 @@ function actionCount(s) {
     +(run2Of(s)?.gated?1:0)
     +qaWaiting(s).length;
 }
+/* Sessions first, as before, then the operators in their own group. With no
+   target picked yet the selected operator is the default: the composer is
+   where the reader talks to it. */
 function syncTargets(visible) {
   const names=visible.filter(s=>s.running).map(s=>s.name);
+  const bots=operators()?.targets()||[];
   drafts.set(draftTarget,$("prompt").value);
   options($("target"),names,"세션 선택");
-  if(!names.includes(draftTarget)) chooseTarget("");
+  if(bots.length) {
+    const group=document.createElement("optgroup");group.label="Operator";
+    for(const b of bots){const o=node("option",b.label);o.value=b.value;group.append(o);}
+    $("target").append(group);
+    if(bots.some(b=>b.value===draftTarget))$("target").value=draftTarget;
+  }
+  const valid=[...names,...bots.map(b=>b.value)];
+  if(!valid.includes(draftTarget)) chooseTarget(operators()?.defaultTarget()||"");
+  else if(!draftTarget&&bots.length) chooseTarget(operators().defaultTarget());
 }
 function sessionHeader(s, cls="") {
   const card=node("article","",`observer-card ${cls}`);card.dataset.session=s.name;
@@ -212,7 +230,7 @@ function composerState() {
   const toggle=$("composer-toggle");
   $("composer").classList.toggle("folded",composerFolded);
   toggle.setAttribute("aria-expanded",String(!composerFolded));
-  toggle.textContent=`입력 대상 세션 ${composerFolded?"▸":"▾"}`;
+  toggle.textContent=`입력 대상 세션·operator ${composerFolded?"▸":"▾"}`;
 }
 /* Destinations and actions share a compact two-row toolbar. */
 function cardActions(card,s) {
@@ -245,6 +263,23 @@ function cardActions(card,s) {
   pin.title=observePinTitle(s.name,!!s.observe_pin);
   pin.onclick=()=>setObservePin(s.name,!s.observe_pin);
   links.append(pin,input,update);
+  // Asking an operator about this session: drawn only while there are
+  // operators, and pressable only when one has the session's project in scope.
+  if(operators()?.targets().length) {
+    const ask=node("button","operator에게 묻기","observer-action observer-ask-operator");
+    ask.type="button";
+    const owner=operators().askAbout(s.name,true);
+    ask.disabled=!owner.target;
+    ask.title=owner.target?`operator ${owner.name}에게 ${s.name}에 대해 묻습니다`:owner.reason;
+    ask.onclick=()=>{
+      const chosen=operators().askAbout(s.name);
+      if(!chosen.target)return;
+      syncTargets(visibleSessions());chooseTarget(chosen.target);
+      if(!$("prompt").value.trim())$("prompt").value=`${s.name}에 대해: `;
+      composerFolded=false;composerState();controls();$("prompt").focus();
+    };
+    links.append(ask);
+  }
   const note=refreshNotes.get(s.name);
   if(note)links.append(node("small",note,"observer-action-note"));
 }
@@ -908,16 +943,19 @@ $("scope").onchange=()=>{selections();navigate();};
 $("activity").onchange=render;
 $("selection").onchange=navigate;$("actions-only").onchange=render;
 $("ended").onchange=()=>{render();if($("ended").checked&&snapshot.ended===false){lastSnapshot="";refresh();}};
-/* The draft box grows with its text instead of scrolling inside itself;
-   field-sizing does this where supported, and this is the fallback. Every
-   change of the draft (typing, switching target, clearing on send) ends in
-   controls(), so that is where it runs. */
+/* The draft box grows with its text up to 40% of the viewport and scrolls
+   inside itself past that (observer.css): the composer is pinned to the
+   bottom of the screen, and a box that kept growing would cover the page it
+   sits on. It is the page's one inner scroller, and only while a draft is
+   that long. field-sizing does the growing where supported, and this is the
+   fallback. Every change of the draft (typing, switching target, clearing on
+   send) ends in controls(), so that is where it runs. */
 function autosize() {
   const box=$("prompt");
   if(CSS.supports?.("field-sizing","content"))return;
   box.style.height="auto";
   // Folded, the box has no layout; leave it to its CSS height until shown.
-  if(box.scrollHeight)box.style.height=box.scrollHeight+"px";
+  if(box.scrollHeight)box.style.height=Math.min(box.scrollHeight,innerHeight*0.4)+"px";
 }
 $("target").onchange=()=>chooseTarget($("target").value);$("prompt").oninput=controls;
 $("composer-toggle").onclick=()=>{composerFolded=!composerFolded;composerState();if(!composerFolded)$("prompt").focus();};
@@ -947,6 +985,14 @@ async function send(interrupt) {
   const target=$("target").value, text=$("prompt").value;
   if(pending||!target||(!interrupt&&!text.trim()))return;
   pending=true;controls();
+  if(operators()?.isTarget(target)) {
+    try {
+      if(interrupt)return;
+      $("input-status").textContent=await operators().send(target,text);
+      if($("target").value===target&&$("prompt").value===text){$("prompt").value="";drafts.delete(target);}
+    } catch(err){$("input-status").textContent=err.message;} finally{pending=false;controls();}
+    return;
+  }
   try {
     const inputId = typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `observer-${Date.now()}-${Array.from(crypto.getRandomValues(new Uint32Array(3))).join("-")}`;
     const sent=await request(`api/sessions/${encodeURIComponent(target)}/keys`, interrupt?{keys:["Escape"]}:{keys:[text,"Enter"],input_id:inputId});
@@ -976,8 +1022,12 @@ async function open(scope = "global", name = "") {
     chooseTarget(session?.running && visibleSessions().some(s=>s.name===name) ? name : "");
   }
   render();
-  poll=setInterval(()=>{if(!document.hidden)refresh();},10000);
+  operators()?.refresh();
+  poll=setInterval(()=>{if(!document.hidden){refresh();operators()?.refresh();}},10000);
 }
 composerState();
+/* A change in the operator list changes the composer's targets and which
+   cards can ask about their session. */
+operators()?.mount($("operators"),()=>{if(document.body.classList.contains("observer-active"))render();});
 return {open, stop, panelSection};
 })();

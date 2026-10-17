@@ -94,13 +94,13 @@ const cardCtx = {};
 new Function(
   "exports", "node", "observePinTitle", "setObservePin", "refreshing",
   "refreshNotes", "chooseTarget", "composerFolded", "composerState", "$",
-  "oneShot",
+  "oneShot", "operators",
   slice(observer, "cardActions") + "\nexports.cardActions = cardActions;"
 )(
   cardCtx, makeNode, observePinTitle,
   (name, on) => { pinWrites.push([name, on]); },
   new Set(), new Map(), () => {}, true, () => {}, () => makeNode("div"),
-  () => {}
+  () => {}, () => null
 );
 const cardActions = cardCtx.cardActions;
 

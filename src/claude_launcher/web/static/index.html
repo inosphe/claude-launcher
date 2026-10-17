@@ -341,6 +341,9 @@
         </div>
       </section>
       <div class="observer-content">
+      <!-- Operator v2: tabs, the selected operator's conversation and its
+           form (observer_operator.js). The composer below talks to it. -->
+      <section id="observer-operators" aria-label="Operator"></section>
       <div class="observer-toolbar">
       <div class="observer-view-controls">
       <fieldset class="observer-view-tabs"><legend class="sr-only">결과 표시 방식</legend>
@@ -381,11 +384,11 @@
            thing left when folded, at every width. Folded is where it starts.
            The select keeps its own accessible name because on a phone the
            <label> that names it is hidden. -->
-      <button id="observer-composer-toggle" type="button" aria-expanded="false">입력 대상 세션 ▸</button>
-      <label for="observer-target">입력 대상 세션</label><select id="observer-target" aria-label="입력 대상 세션"><option value="">세션 선택</option></select>
+      <button id="observer-composer-toggle" type="button" aria-expanded="false">입력 대상 세션·operator ▸</button>
+      <label for="observer-target">입력 대상</label><select id="observer-target" aria-label="입력 대상 세션 또는 operator"><option value="">세션 선택</option></select>
       <button id="observer-interrupt" disabled>현재 응답 중단 (Esc)</button>
-      <label for="observer-prompt" class="sr-only">세션에 보낼 지시</label>
-      <textarea id="observer-prompt" rows="3" placeholder="선택한 세션에 보낼 지시를 입력하십시오."></textarea>
+      <label for="observer-prompt" class="sr-only">세션 또는 operator에 보낼 내용</label>
+      <textarea id="observer-prompt" rows="3" placeholder="선택한 세션에 보낼 지시나 operator에게 할 질문을 입력하십시오."></textarea>
       <button id="observer-send" disabled>전송</button>
       <p id="observer-input-status" role="status">중단은 Esc 키를 전송합니다. 실제 중단 상태를 확인한 후 새 지시를 보내십시오.</p>
       </footer>
@@ -1512,6 +1515,7 @@
 <script src="static/vendor/xterm.js"></script>
 <script src="static/vendor/addon-fit.js"></script>
 <script src="static/vendor/addon-webgl.js"></script>
+<script src="static/observer_operator.js"></script>
 <script src="static/observer.js"></script>
 <script src="static/diagram-viewport.js"></script>
 <script src="static/search-anything.js"></script>
