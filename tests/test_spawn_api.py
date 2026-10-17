@@ -2146,3 +2146,26 @@ def test_an_unnamed_child_gets_a_worktree_named_after_both_sessions(home, tmp_pa
     asyncio.run(run())
 
 
+
+
+def test_children_stay_in_creation_order_when_the_clock_steps_back(home, tmp_path, monkeypatch):
+    """A later child lists after an earlier one even if the wall clock stepped
+    back between their creations (the listing orders by ``created_at``)."""
+    from claude_launcher.daemon import session as session_mod
+
+    _register_py_harness()
+    stamps = iter(["2026-10-18T00:00:05+00:00", "2026-10-18T00:00:04+00:00",
+                   "2026-10-18T00:00:03+00:00"])
+    monkeypatch.setattr(session_mod, "_utcnow", lambda: next(stamps))
+
+    async def run():
+        mgr = _manager()
+        try:
+            mgr.create(SessionDef(name="lead", harness="py", cwd=str(tmp_path)))
+            mgr.create(SessionDef(name="w1", harness="py", cwd=str(tmp_path), parent="lead"))
+            mgr.create(SessionDef(name="w2", harness="py", cwd=str(tmp_path), parent="lead"))
+            assert mgr.children("lead") == ["w1", "w2"]
+        finally:
+            await mgr.shutdown_all()
+
+    asyncio.run(run())

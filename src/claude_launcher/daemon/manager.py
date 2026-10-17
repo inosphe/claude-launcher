@@ -42,7 +42,7 @@ from . import progress as progress_mod
 from . import line_sync, paths, pty_backend, search_records, session_events, session_input
 from .harness import SessionDef
 from .screen import BACKGROUND_RENDER_BUDGET, RenderBudget
-from .session import STATUS_BUSY, DeadSession, Session, lost_output_note
+from .session import STATUS_BUSY, DeadSession, Session, _utcnow, lost_output_note
 
 #: Either a live session or the record left behind by one that ended.
 AnySession = Union[Session, DeadSession]
@@ -387,6 +387,8 @@ class SessionManager:
         sdef = self._resolve_resume(
             SessionDef.from_dict({**sdef.to_dict(), "name": name})
         )
+        if created_at is None:
+            created_at = self._fresh_created_at()
         session = Session(
             harness_mod.normalize(sdef, restoring=restoring),
             idle_threshold=self.idle_threshold,
@@ -1392,6 +1394,18 @@ class SessionManager:
             return self._sessions[name]
         except KeyError:
             raise ManagerError(f"no session named {name!r}") from None
+
+    def _fresh_created_at(self) -> str:
+        """The creation stamp for a session made now, never older than the
+        newest one already in the registry.
+
+        The wall clock can step back (a time sync, a VM resuming), and
+        :meth:`_by_creation` orders by the stamp, so a session made after
+        another would otherwise list ahead of it. Clamping keeps the stamp
+        non-decreasing, which leaves registry insertion order to settle ties.
+        """
+        newest = max((s.created_at or "" for s in self._sessions.values()), default="")
+        return max(_utcnow(), newest)
 
     def _by_creation(self) -> List[Tuple[str, AnySession]]:
         """The registry, oldest session first.
