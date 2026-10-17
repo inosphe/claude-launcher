@@ -12913,6 +12913,9 @@ function renderOpeningImages() {
     li.appendChild(drop);
     list.appendChild(li);
   });
+  // Paste, drop and × fire no input/change on the form, so the stack's
+  // Opening task row would keep the old image count until the next scroll.
+  if (typeof scheduleDecisionStack === "function") scheduleDecisionStack();
 }
 
 /* The harness row can change under attached images (another profile, another
