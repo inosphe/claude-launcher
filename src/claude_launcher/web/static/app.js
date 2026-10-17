@@ -19049,6 +19049,8 @@ function restoreTerminal(b) {
   );
   // Which row the `⌨ session` chip belongs on has just changed.
   if (typeof syncRailKeys === "function") syncRailKeys();
+  // And which card unfolds its commits (claunch-7myrv).
+  if (typeof syncRailCommits === "function") syncRailCommits();
   markDetailRow();
   unpark(b);
   // attach() painted the field before the swap, with the session it left;
@@ -19314,6 +19316,8 @@ async function snapshotAttach(name) {
   );
   // Which row the `⌨ session` chip belongs on has just changed.
   if (typeof syncRailKeys === "function") syncRailKeys();
+  // And which card unfolds its commits (claunch-7myrv).
+  if (typeof syncRailCommits === "function") syncRailCommits();
   markDetailRow();
   refreshTermInput();
   updateScrollChip();
@@ -19402,6 +19406,8 @@ function freshAttach(name) {
   );
   // Which row the `⌨ session` chip belongs on has just changed.
   if (typeof syncRailKeys === "function") syncRailKeys();
+  // And which card unfolds its commits (claunch-7myrv).
+  if (typeof syncRailCommits === "function") syncRailCommits();
   // The panel may already have been pointing here (opened from the rail's ⓘ
   // while another terminal was up); walking into that terminal is what makes
   // the header's `details` its close button, so it has to light now.
@@ -36940,9 +36946,59 @@ function railPrFrame(pr, commits, session) {
   return box;
 }
 
+/* The selected card unfolds its `+N` (claunch-7myrv): the list poll carries
+   only the newest few commits, so the card the reader clicked reads all of
+   them once from /rail-commits and draws those instead. Kept per session
+   under a key that moves when the session commits again, so a poll redraw
+   costs no request and a new commit costs one. A failed read leaves the
+   `+N` in place until the key moves. */
+const railCommitsAll = new Map();
+
+function railCommitsKey(rc) {
+  const top = rc.commits[0] || {};
+  return `${top.sha || top.short || ""}:${rc.commits.length + rc.more}`;
+}
+
+function railCommitsUnfolded(li, s, rc) {
+  const open = !!(li.classList && li.classList.contains("active"));
+  li._railCommitsOpen = open;
+  if (!open || !rc || !(rc.more > 0)) return rc;
+  const key = railCommitsKey(rc);
+  const got = railCommitsAll.get(s.name);
+  if (got && got.key === key) return got.rc || rc;
+  railCommitsAll.set(s.name, { key, rc: null });
+  api(`/api/sessions/${encodeURIComponent(s.name)}/rail-commits`)
+    .then((r) => (r.ok ? r.json() : null))
+    .catch(() => null)
+    .then((body) => {
+      const entry = railCommitsAll.get(s.name);
+      const all = body && body.rail_commits;
+      if (!entry || entry.key !== key || !all || !Array.isArray(all.commits)) return;
+      entry.rc = all;
+      if (li.isConnected && li.classList.contains("active")) {
+        const now = (typeof sessionsCache !== "undefined" && sessionsCache.find((x) => x.name === s.name)) || s;
+        decorateCommitsRow(li, now);
+      }
+    });
+  return rc;
+}
+
+/* After the selection moved: unfold the card that is now selected and fold
+   the one that no longer is, without waiting for the next poll. */
+function syncRailCommits() {
+  const list = $("session-list");
+  if (!list || !list.querySelectorAll) return;
+  for (const li of list.querySelectorAll("li.sess-card[data-name]")) {
+    if (li._railCommitsOpen === li.classList.contains("active")) continue;
+    const s = sessionsCache.find((x) => x.name === li.dataset.name);
+    if (s) decorateCommitsRow(li, s);
+  }
+}
+
 function decorateCommitsRow(li, s) {
   const prs = sessionPrRows(s);
-  const rc = s.rail_commits && Array.isArray(s.rail_commits.commits) ? s.rail_commits : null;
+  const listed = s.rail_commits && Array.isArray(s.rail_commits.commits) ? s.rail_commits : null;
+  const rc = railCommitsUnfolded(li, s, listed);
   const commits = rc ? rc.commits : [];
   const line = li.querySelector(".rail-commits");
   if (!prs.length && !commits.length) {
@@ -36960,7 +37016,7 @@ function decorateCommitsRow(li, s) {
   }
   if (rc && rc.more > 0) {
     const more = el("span", "rail-commit-more", `+${rc.more}`);
-    more.title = `${rc.more} older commit(s) not shown; the Details panel lists them`;
+    more.title = `${rc.more} older commit(s) not shown; select the card to show them all`;
     node.appendChild(more);
   }
   if (!line) railNotePlace(li, node);

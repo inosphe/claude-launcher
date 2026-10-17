@@ -201,7 +201,8 @@ def summary(commits: List[Dict[str, str]]) -> Dict[str, object]:
 # commit, push, fetch or merge all move a ref), so a quiet repository costs
 # one ``for-each-ref`` per poll.
 
-#: Commits a card shows; the rest are counted, not drawn.
+#: Commits a card shows; the rest are counted, and drawn only on the selected
+#: card (:func:`rail` with ``everything``).
 RAIL_LIMIT = 6
 
 #: Seconds a snapshot is trusted even when the refs did not move (a commit on
@@ -344,6 +345,25 @@ def _pr_commits(cwd: str, refs: Dict[str, str], head: str, base: str) -> frozens
     return frozenset((out or "").split())
 
 
+def _mark_states(cwd: str, refs: Dict[str, str], rows: List[Dict[str, str]]) -> bool:
+    """Set ``state`` on each of ``rows`` that has none; False when git failed."""
+    rows = [c for c in rows if "state" not in c]
+    if not rows:
+        return True
+    shas = [c["sha"] for c in rows]
+    unpushed = _not_reachable(
+        cwd, shas, sorted(r for r in refs if r.startswith("refs/remotes/")))
+    unmerged = _not_reachable(cwd, shas, _base_refs(refs))
+    if unpushed is None or unmerged is None:
+        return False
+    with _rail_lock:
+        for c in rows:
+            # master first: a local landing is merged before anyone pushes.
+            c["state"] = ("merged" if c["sha"] not in unmerged
+                          else "local" if c["sha"] in unpushed else "pushed")
+    return True
+
+
 def _snapshot(cwd: str, common: str) -> Optional[Dict[str, object]]:
     refs = _refs(cwd)
     if refs is None:
@@ -373,20 +393,13 @@ def _snapshot(cwd: str, common: str) -> Optional[Dict[str, object]]:
         if not who:
             continue
         counts[who] = counts.get(who, 0) + 1
-        rows = by_session.setdefault(who, [])
-        if len(rows) < RAIL_LIMIT:
-            rows.append({"sha": sha, "short": short, "subject": subject})
-    shas = [c["sha"] for rows in by_session.values() for c in rows]
-    unpushed = _not_reachable(
-        cwd, shas, sorted(r for r in refs if r.startswith("refs/remotes/")))
-    unmerged = _not_reachable(cwd, shas, _base_refs(refs))
-    if unpushed is None or unmerged is None:
+        # Every row is kept (a selected card shows them all, claunch-7myrv);
+        # only the ones a card shows by default get their state now.
+        by_session.setdefault(who, []).append(
+            {"sha": sha, "short": short, "subject": subject})
+    if not _mark_states(cwd, refs, [c for rows in by_session.values()
+                                    for c in rows[:RAIL_LIMIT]]):
         return None
-    for rows in by_session.values():
-        for c in rows:
-            # master first: a local landing is merged before anyone pushes.
-            c["state"] = ("merged" if c["sha"] not in unmerged
-                          else "local" if c["sha"] in unpushed else "pushed")
     snap = {"stamp": stamp, "expires": now + RAIL_TTL, "refs": refs,
             "sessions": by_session, "counts": counts, "members": {}}
     with _rail_lock:
@@ -400,8 +413,13 @@ def rail(
     cwd: Optional[str],
     session: str,
     prs: Optional[List[Dict[str, object]]] = None,
+    everything: bool = False,
 ) -> Optional[Dict[str, object]]:
     """The session's newest commits for its rail card, or ``None``.
+
+    The newest ``RAIL_LIMIT`` rows, as the list poll wants them; with
+    ``everything`` all of them, for the selected card that unfolds its ``+N``
+    (claunch-7myrv).
 
     Each row is ``{short, subject, state, pr?}``: ``state`` is ``merged``
     (``master`` or a remote's ``master`` reaches it), ``pushed`` (some
@@ -427,6 +445,9 @@ def rail(
         return None
     rows = snap["sessions"].get(session) or []
     if not rows:
+        return None
+    rows = rows if everything else rows[:RAIL_LIMIT]
+    if not _mark_states(str(cwd), snap["refs"], rows):
         return None
     prs = [p for p in (prs or []) if isinstance(p, dict) and p.get("number")]
     shas = {c["sha"] for c in rows}
