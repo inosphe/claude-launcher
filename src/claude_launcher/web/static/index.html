@@ -305,6 +305,7 @@
       <a href="#/stats" data-page="stats"><span>▤</span>Stats</a>
       <a href="#/profile-usage" data-page="profile-usage"><span>◷</span>Usage</a>
       <a href="#/beads" data-page="beads"><span>◈</span>Beads</a>
+      <a href="#/category" data-page="category"><span>⌘</span>Category</a>
       <a href="#/workspaces" data-page="workspaces"><span>▣</span>Workspaces</a>
       <a href="#/worktrees" data-page="worktrees"><span>⑂</span>Worktrees</a>
       <a href="#/glossary" data-page="glossary"><span>≡</span>Glossary</a>
@@ -614,6 +615,11 @@
            (sim-page.js SimPane); one of the two at a time. -->
       <button id="term-simsbtn" class="term-btn" type="button" aria-pressed="false"
               title="this session's simulations under the terminal">◬ sims</button>
+      <!-- The same pane, showing where this session sits in its workspace's
+           category tree and the "Assign to tree" press (category-page.js
+           CategoryPane, daemon/category_api.py). -->
+      <button id="term-categorybtn" class="term-btn" type="button" aria-pressed="false"
+              title="this session's place in the category tree">⌘ category</button>
       <!-- A pi-durable session's run as a flow chart of the events it logs
            (durable-flow.js); shown only on such a session. -->
       <button id="term-chartbtn" class="term-btn hidden" type="button" aria-pressed="false"
@@ -1466,6 +1472,8 @@
          tagged with the sessions it belongs to. Data only — the writes stay
          with `claunch beads`, except the one the rail offers. -->
     <div id="beads-view" class="hidden"></div>
+    <!-- The workspace category trees (category-page.js, claunch-p2v4m). -->
+    <div id="category-view" class="hidden"></div>
     <!-- The launcher worktrees (<repo>/.claude/worktrees/*), grouped by age,
          with the sessions in them; drawn by worktrees-page.js. -->
     <div id="worktrees-view" class="hidden"></div>
@@ -1523,6 +1531,7 @@
 <script src="static/glossary-page.js"></script>
 <script src="static/spec-page.js"></script>
 <script src="static/sim-page.js"></script>
+<script src="static/category-page.js"></script>
 <script src="static/durable-flow.js"></script>
 <script src="static/qa-pane.js"></script>
 <script src="static/threads-pane.js"></script>
