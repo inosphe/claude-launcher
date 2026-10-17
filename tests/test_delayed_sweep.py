@@ -467,6 +467,106 @@ def test_a_queue_file_without_the_failures_column_is_upgraded(tmp_path):
         assert "failures" in {r["name"] for r in conn.execute("PRAGMA table_info(jobs)")}
 
 
+def test_a_queue_file_without_the_remeasure_columns_is_upgraded(tmp_path):
+    import sqlite3
+    path = tmp_path / "old.sqlite3"
+    db = sqlite3.connect(path)
+    db.execute("CREATE TABLE jobs (id TEXT PRIMARY KEY, repo TEXT NOT NULL, common TEXT NOT NULL, "
+               "sha TEXT NOT NULL, ref TEXT NOT NULL, issue TEXT NOT NULL, owner TEXT NOT NULL, "
+               "tool TEXT NOT NULL, python TEXT NOT NULL, command TEXT, "
+               "origin TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL, "
+               "priority INTEGER NOT NULL DEFAULT -1, created REAL NOT NULL, "
+               "available REAL NOT NULL DEFAULT 0, pid INTEGER NOT NULL DEFAULT 0, "
+               "attempts INTEGER NOT NULL DEFAULT 0, receipt TEXT, detail TEXT NOT NULL DEFAULT '', "
+               "notified INTEGER NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0, "
+               "UNIQUE(common, sha))")
+    db.commit()
+    db.close()
+    q = mod.Queue(path)
+    with q.connect() as conn:
+        columns = {r["name"] for r in conn.execute("PRAGMA table_info(jobs)")}
+    assert {"remeasures", "history"} <= columns
+
+
+def paused_on(q, repo, name="bad"):
+    bad, _ = enqueue(q, repo, name)
+    q.finish(bad["id"], "failed", "first receipt", "test_x failed")
+    return bad
+
+
+def test_remeasure_keeps_the_pause_and_claims_the_failed_job(repo, tmp_path):
+    q = queue(tmp_path)
+    bad = paused_on(q, repo)
+    other, _ = enqueue(q, repo, "other")
+    q.remeasure(repo, bad["id"], "looks intermittent")
+    job = q.get(bad["id"])
+    assert job["status"] == "queued" and job["remeasures"] == 1 and job["priority"] == 0
+    assert json.loads(job["history"])[0]["receipt"] == "first receipt"
+    with pytest.raises(ValueError, match="paused"):
+        q.admit(repo, "normal")
+    assert q.claim()["id"] == bad["id"]  # ahead of the already-merged backlog
+    assert q.status(repo)["pauses"][0]["job"] == bad["id"]
+    assert q.get(other["id"])["status"] == "queued"
+
+
+def test_a_passing_remeasure_clears_the_pause_as_intermittent(repo, tmp_path):
+    q = queue(tmp_path)
+    bad = paused_on(q, repo)
+    q.remeasure(repo, bad["id"], "looks intermittent")
+    q.claim()
+    q.finish(bad["id"], "passed", "green receipt")
+    pause = q.status(repo)["pauses"][0]
+    assert not pause["job"] and not pause["repair_issue"] and pause["cleared_sha"] == bad["sha"]
+    assert "remeasure passed; intermittent" in q.get(bad["id"])["detail"]
+    assert "open a follow-up issue" in q.get(bad["id"])["detail"]
+    q.admit(repo, "normal")
+
+
+def test_a_failing_second_measurement_keeps_the_pause_for_the_repair_path(repo, tmp_path):
+    q = queue(tmp_path)
+    bad = paused_on(q, repo)
+    q.remeasure(repo, bad["id"], "looks intermittent")
+    q.claim()
+    q.finish(bad["id"], "failed", "second receipt", "test_x failed again")
+    assert q.status(repo)["pauses"][0]["job"] == bad["id"]
+    with pytest.raises(ValueError, match="limit"):
+        q.remeasure(repo, bad["id"], "once more")
+    with pytest.raises(ValueError, match="stuck or cancelled"):
+        q.requeue(bad["id"])
+    q.repair(repo, bad["id"], "fix")
+    q.admit(repo, "fix")
+
+
+def test_remeasure_refuses_what_is_not_the_failed_pause_job(repo, tmp_path):
+    q = queue(tmp_path)
+    bad = paused_on(q, repo)
+    other, _ = enqueue(q, repo, "other")
+    with pytest.raises(ValueError, match="reason"):
+        q.remeasure(repo, bad["id"], " ")
+    with pytest.raises(ValueError, match="active failed job"):
+        q.remeasure(repo, other["id"], "why")
+    q.repair(repo, bad["id"], "fix")
+    with pytest.raises(ValueError, match="repair issue fix"):
+        q.remeasure(repo, bad["id"], "why")
+    q2 = queue(tmp_path / "second")
+    still = paused_on(q2, repo, "again")
+    q2.remeasure(repo, still["id"], "why")
+    with pytest.raises(ValueError, match="only a failed job"):
+        q2.remeasure(repo, still["id"], "twice while queued")
+
+
+def test_remeasure_from_the_command_line(repo, tmp_path):
+    db = tmp_path / "jobs.sqlite3"
+    q = mod.Queue(db)
+    bad = paused_on(q, repo)
+    tool = TOOL.with_name("delayed_sweep.py")
+    out = subprocess.run([sys.executable, str(tool), "--database", str(db), "remeasure",
+                          "--repo", str(repo), "--job", bad["id"], "--reason", "intermittent"],
+                         capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    assert json.loads(out.stdout)["status"] == "queued"
+
+
 def test_another_instance_runs_with_the_recorded_origin_without_duplication(repo, tmp_path, monkeypatch):
     base = tmp_path / "shared-home"
     home = tmp_path / "origin-home"

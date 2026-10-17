@@ -171,6 +171,10 @@ def main(argv=None):
     p.add_argument("--reason", required=True)
     p = sub.add_parser("requeue", help="give a stuck or cancelled job fresh attempts")
     p.add_argument("--job", required=True)
+    p = sub.add_parser("remeasure", help="measure the active pause job's SHA again (leader action, once)")
+    p.add_argument("--repo", type=Path, required=True)
+    p.add_argument("--job", required=True)
+    p.add_argument("--reason", required=True)
     p = sub.add_parser("check-batch")
     p.add_argument("--env", required=True)
     for action in ("check-enqueued", "check-merges"):
@@ -205,6 +209,9 @@ def main(argv=None):
             result = queue.get(args.job)
         elif args.action == "requeue":
             queue.requeue(args.job)
+            result = queue.get(args.job)
+        elif args.action == "remeasure":
+            queue.remeasure(args.repo, args.job, args.reason)
             result = queue.get(args.job)
         elif args.action == "status":
             result = queue.status(args.repo)

@@ -25,6 +25,9 @@ from pathlib import Path
 RETRY_LIMIT = 6
 RETRY_BASE_DELAY = 60.0
 RETRY_MAX_DELAY = 3600.0
+#: Same-SHA remeasures a failed pause job gets: a pass clears the pause as an
+#: intermittent failure, a second failure is a real regression for the repair path.
+REMEASURE_LIMIT = 1
 #: Results the originating session is told about.
 NOTIFIED = ("passed", "failed", "stuck")
 
@@ -60,6 +63,7 @@ class Queue:
                     pid INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0,
                     receipt TEXT, detail TEXT NOT NULL DEFAULT '',
                     notified INTEGER NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0,
+                    remeasures INTEGER NOT NULL DEFAULT 0, history TEXT NOT NULL DEFAULT '[]',
                     UNIQUE(common, sha)
                 );
                 CREATE TABLE IF NOT EXISTS pauses (
@@ -74,6 +78,10 @@ class Queue:
                 db.execute("ALTER TABLE jobs ADD COLUMN origin TEXT NOT NULL DEFAULT '{}'")
             if "failures" not in columns:
                 db.execute("ALTER TABLE jobs ADD COLUMN failures INTEGER NOT NULL DEFAULT 0")
+            if "remeasures" not in columns:
+                db.execute("ALTER TABLE jobs ADD COLUMN remeasures INTEGER NOT NULL DEFAULT 0")
+            if "history" not in columns:
+                db.execute("ALTER TABLE jobs ADD COLUMN history TEXT NOT NULL DEFAULT '[]'")
 
     @contextmanager
     def connect(self):
@@ -191,7 +199,7 @@ class Queue:
             row = db.execute("""SELECT j.* FROM jobs j LEFT JOIN pauses p ON p.common=j.common
                 WHERE j.status IN ('queued','retry') AND j.available<=?
                 AND (j.priority>=0 OR ?)
-                AND (p.job IS NULL OR p.job='' OR p.repair_issue=j.issue)
+                AND (p.job IS NULL OR p.job='' OR p.repair_issue=j.issue OR p.job=j.id)
                 ORDER BY j.priority DESC,j.created,j.id LIMIT 1""",
                 (time.time(), background and not background_running)).fetchone()
             if row is None:
@@ -239,6 +247,13 @@ class Queue:
                     # failure and the slot empties so the next repair can be assigned.
                     db.execute("UPDATE pauses SET job=?,repair_issue=NULL WHERE common=?",
                                (ident, row["common"]))
+            elif (status == "passed" and pause and pause["job"] == ident and row["remeasures"]
+                  and not pause["repair_issue"]):
+                # The pause job passed on its same-SHA remeasure: an intermittent failure.
+                db.execute("UPDATE pauses SET job='',repair_issue=NULL,cleared_sha=? WHERE common=?",
+                           (row["sha"], row["common"]))
+                db.execute("UPDATE jobs SET detail=? WHERE id=?",
+                           ("remeasure passed; intermittent \u2014 open a follow-up issue", ident))
             elif status == "passed" and pause and pause["job"] and pause["repair_issue"] == row["issue"]:
                 failed = self.get(pause["job"])
                 if self.contains(row["repo"], failed["sha"], row["sha"]):
@@ -273,6 +288,32 @@ class Queue:
                 raise ValueError(f"only a stuck or cancelled job is requeued, not {row['status']}")
             db.execute("UPDATE jobs SET status='queued',failures=0,available=0,notified=0,detail='' "
                        "WHERE id=?", (job,))
+
+    def remeasure(self, repo, job, reason):
+        """Leader action: measure the active pause job's SHA again, at most REMEASURE_LIMIT times.
+
+        The pause stays active meanwhile. A pass clears it (intermittent failure);
+        a failure keeps it and the job goes the repair path."""
+        if not reason or not reason.strip():
+            raise ValueError("remeasure requires a reason")
+        common = self.common(repo)
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            pause = db.execute("SELECT * FROM pauses WHERE common=?", (common,)).fetchone()
+            if not pause or pause["job"] != job:
+                raise ValueError("remeasure must name the active failed job")
+            if pause["repair_issue"]:
+                raise ValueError(f"repair issue {pause['repair_issue']} is assigned; only a repair releases the pause")
+            row = db.execute("SELECT * FROM jobs WHERE id=?", (job,)).fetchone()
+            if row["status"] != "failed":
+                raise ValueError(f"only a failed job is remeasured, not {row['status']}")
+            if row["remeasures"] >= REMEASURE_LIMIT:
+                raise ValueError("remeasure limit reached; a second failure is a regression, assign a repair")
+            history = json.loads(row["history"]) + [{"status": row["status"], "receipt": row["receipt"],
+                                                     "detail": row["detail"], "at": time.time()}]
+            db.execute("UPDATE jobs SET status='queued',priority=0,failures=0,available=0,pid=0,notified=0,"
+                       "remeasures=remeasures+1,history=?,detail=? WHERE id=?",
+                       (json.dumps(history), f"remeasure {row['remeasures'] + 1}: {reason.strip()}", job))
 
     def release(self, repo, job, reason):
         """Leader escape hatch: clear a pause whose failed SHA master cannot reach."""
