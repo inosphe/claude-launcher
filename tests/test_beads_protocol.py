@@ -750,3 +750,22 @@ def test_the_delegation_label_is_the_one_the_daemon_releases_by():
     wrapup = " ".join(model.load(_bundled("improv-worker")).steps["wrapup"].instructions.split())
     assert f"--add-label {daemon_beads.DELEGATED_LABEL}" in wrapup
 
+
+
+@pytest.mark.parametrize("layer", ["bundled", "project"])
+def test_the_v1_peer_review_question_takes_the_issue_from_the_nudge(layer):
+    """v1 does not render ``${...}`` in a select prompt, so the reviewer
+    learns the issue from the worker's nudge. Picking it off the board's
+    in_progress list judged a HOLD-ed earlier issue instead, and missed a
+    re-asked round whose issue is already in_review (claunch-etrow, the v1
+    side of claunch-106mn)."""
+    path = (
+        _bundled("improv-worker") if layer == "bundled"
+        else PROJECT_OVERRIDES / "improv-worker.yaml"
+    )
+    wf = model.load(path)
+    prompt = " ".join(wf.steps["peer-review"].select.prompt.split())
+    assert "`<id> 리뷰 요청 — <브랜치> @ <tip>`" in prompt
+    assert "--status in_progress --status in_review --json" in prompt
+    assert "후보가 둘 이상이면 추측하지 말고 abstain한다" in prompt
+    assert "그대로 in_progress(재요청 회차면 in_review)" in prompt
