@@ -25,9 +25,11 @@
    QA request keeps its target, and clicking the row opens that session on
    that thread or that question, as the card did, and closes the panel. A
    row written before rows kept a target opens nothing. Every card carries ×,
-   which puts it away without following it; while the panel is open the
-   corner strip moves below the panel's head so it does not cover the
-   panel's own close button.
+   which puts it away without following it.
+
+   An open panel hides the corner strip (claunch-k2khb): a notice that
+   arrives while it is open is written to the history only and puts up no
+   card, now or after the panel closes; cards already up come back on close.
 
    Marks and the All / Kept filter (claunch-knuet; Kept was labelled Marked
    before claunch-v995u): ☆ on a history row marks
@@ -244,11 +246,31 @@ function gotoRec(rec) {
     check("opening it does not read it (claunch-x76l8)",
           w.nodes["notice-bell"].classList.contains("unread") && w.badge() === "1",
           [w.nodes["notice-bell"].className, w.badge()]);
-    check("while it is open the strip moves below the panel's head",
-          w.nodes.notices.classList.contains("under-panel-head"), w.nodes.notices.className);
+    check("while it is open the strip is hidden (claunch-k2khb)",
+          w.nodes.notices.classList.contains("panel-open"), w.nodes.notices.className);
     w.api.noticePanelToggle(false);
-    check("and back once it closes", !w.nodes.notices.classList.contains("under-panel-head"),
+    check("and shown again once it closes", !w.nodes.notices.classList.contains("panel-open"),
           w.nodes.notices.className);
+  }
+
+  /* --- an open panel takes the notice, no card (claunch-k2khb) ---------- */
+  {
+    const w = build();
+    w.api.notify("before", "a", { key: "k0", sticky: true });
+    w.api.noticePanelToggle(true);
+    const node = w.api.notify("while open", "b", { key: "k1", sticky: true });
+    check("a notice while the panel is open puts up no card",
+          node === null && w.strip().length === 1 && !/while open/.test(w.said()),
+          w.said());
+    check("it is still written to the history and shown in the panel",
+          w.api.noticeHistory[0].title === "while open" && /while open/.test(w.panel()),
+          w.panel());
+    check("and still counts as unread", w.badge() === "2", w.badge());
+    w.api.noticePanelToggle(false);
+    check("closing the panel does not pop its card up later",
+          !/while open/.test(w.said()) && /before/.test(w.said()), w.said());
+    w.api.notify("after", "c", { key: "k2", sticky: true });
+    check("a notice after it closes puts up a card again", /after/.test(w.said()), w.said());
   }
 
   /* --- read marks (claunch-x76l8) -------------------------------------- */
@@ -846,7 +868,7 @@ function gotoRec(rec) {
         /id="notice-panel"[^>]*class="hidden"/.test(html) && /id="notice-panel-body"/.test(html));
   check("the panel is styled", /#notice-panel\s*\{[^}]*position:\s*fixed/.test(css));
   check("the panel head has its close button", /id="notice-panel-close"/.test(html));
-  check("the moved strip clears the panel's head", /#notices\.under-panel-head\s*\{[^}]*top:/.test(css));
+  check("the open panel hides the strip", /#notices\.panel-open\s*\{[^}]*display:\s*none/.test(css));
   check("the card's × is styled", /\.notice-close\s*\{/.test(css));
   check("the bell opens the panel", /noticePanelToggle\(\)/.test(src));
 })().then(() => {

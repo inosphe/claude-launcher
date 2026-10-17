@@ -6159,8 +6159,9 @@ body.embed #main { width: 100%; }
   font-size: 15px; line-height: 1;
 }
 .notice-close:hover { color: #e6edf3; }
-/* While the history panel is open, below its head and its close button. */
-#notices.under-panel-head { top: 52px; }
+/* While the history panel is open the strip is hidden; the panel shows the
+   same notices (claunch-k2khb). */
+#notices.panel-open { display: none; }
 .notice.warn { border-left-color: #d29922; }
 .notice.bad { border-left-color: #ff7b72; }
 .notice-title { font-size: 12.5px; color: #e6edf3; }
