@@ -2953,6 +2953,16 @@ restart 명령이 실패(exit≠0)·중단·미지원이면 `reflect`를 `restar
 이미 걸린 pause의 실패 SHA가 도달 불가이면 `release`가 사유를 job 기록에 남기고
 해제한다. 도달 가능한 SHA의 pause는 `release`가 거절하며 green repair만 해제한다.
 
+간헐 실패로 걸린 pause는 리더가 `remeasure`로 같은 SHA를 한 번 다시 측정할 수 있다
+(호출자 검사는 없고 리더의 행위다). 대상은 활성 pause의 failed job이며 repair 이슈가
+배정되지 않았고 사유를 준 경우만이다. 재측정 동안 pause는 유지되어 일반 머지는 계속
+거절되고, job은 우선순위 0으로 대기 중인 일반 작업보다 먼저 실행된다. 이전 판정은
+job의 `history`에, 횟수는 `remeasures`에 남는다. 통과하면 pause가 풀리고(`cleared_sha`는
+그 SHA) job의 `detail`에 「remeasure passed; intermittent — open a follow-up issue」가
+남으므로, 리더는 통과 뒤 간헐 실패의 후속 이슈를 연다. 다시 실패하면 pause가 유지되고
+한도(`REMEASURE_LIMIT`=1)에 걸려 추가 재측정이 거절되며, 이를 실제 회귀로 보아 `repair`
+경로로 간다. `requeue`는 failed job을 계속 거절한다.
+
 `restart_live=false`이면 배치 뒤 재기동과 반영 확인을 모두 생략한다.
 착지 통지는 머지/사후 검증 상태와 라이브 반영 완료·생략·실패 상태를 구분한다.
 입력은 새 run에서 정하고 자동 recur 시 유지된다. 이미 실행 중인 run의
@@ -2973,6 +2983,7 @@ uv run --no-sync python tools/delayed_sweep.py status --repo <repo>
 uv run --no-sync python tools/delayed_sweep.py admit --repo <repo> --issue <issue>
 uv run --no-sync python tools/delayed_sweep.py enqueue --repo <repo> --merge <sha> --issue <issue> --owner <leader>
 uv run --no-sync python tools/delayed_sweep.py repair --repo <repo> --job <failed-job> --issue <repair-issue>
+uv run --no-sync python tools/delayed_sweep.py remeasure --repo <repo> --job <failed-job> --reason <why>
 uv run --no-sync python tools/delayed_sweep.py release --repo <repo> --job <failed-job> --reason <사유>
 ```
 
