@@ -471,6 +471,10 @@ const fns = new Function(...Object.keys(ctx), code)(...Object.values(ctx));
   check("...with a look for each state",
         [/#new-project-defaults \{/.test(css), /#new-project-defaults\.drift \{/.test(css)],
         [true, true]);
+  /* ...on its own line under the picker, which keeps the column's full
+     width (claunch-4l94e) */
+  check("the picker row stacks the button under the select",
+        /\.new-project-row \{[^}]*flex-direction: column/.test(css), true);
   const btn = { disabled: true, title: "", classes: new Set(),
     classList: { toggle(c, on) { on ? btn.classes.add(c) : btn.classes.delete(c); } } };
   const fillForm = { project: form, cwd: form.form.cwd, mesh: meshRow };
