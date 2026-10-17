@@ -58,10 +58,9 @@ LEVELS = ("info", "attention", "urgent")
 ASK_TYPES = ("approve", "choice", "text")
 #: The categories an operator watches: what still runs or may run again.
 LIVE = (CATEGORY_RUNNING, CATEGORY_PAUSED, CATEGORY_HOLD, CATEGORY_DELAYED, CATEGORY_FAILED)
-#: The workflow an operator v2 session runs. Unset until the operator-v2
-#: workflow exists (claunch-iw5i8.3): a create naming a workflow that is not
-#: there would be refused.
-WORKFLOW = None
+#: The cflow v2 workflow an operator v2 session runs
+#: (``workflows/v2/operator-v2.yaml``); its start input ``operator`` is the id.
+WORKFLOW = "operator-v2"
 #: Seconds a poll waits for the board or the run states before answering
 #: without them (the MCP client gives up after 30s).
 READ_TIMEOUT = 5.0
@@ -107,6 +106,37 @@ def progress_changes(before, after):
         stage = ISSUE_STAGES.get(now_issue.get("status"), now_issue.get("status"))
         lines.append(f"이슈 {now_issue['id']}: {stage}")
     return lines
+
+
+def watch_state(root, op_id=None, session=None):
+    """``(watch, why)`` of one operator, read from its record under ``root``
+    (the daemon directory) without the daemon: the operator-v2 workflow's
+    probe runs this while the daemon may be busy or restarting. The record is
+    ``op_id``'s, or else the one bound to ``session``. ``watch`` is ``None``
+    when no record answers; ``why`` then says what was missing."""
+    folder = root / "operators"
+    if op_id:
+        if not ID_RE.match(str(op_id)):
+            return None, f"not an operator id: {op_id!r}"
+        candidates = [folder / f"{op_id}.json"]
+    elif session:
+        candidates = sorted(folder.glob("*.json")) if folder.is_dir() else []
+    else:
+        return None, "no operator id and no session to look it up by"
+    for path in candidates:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError) as exc:
+            if op_id:
+                return None, f"unreadable record {path}: {exc}"
+            continue
+        if not isinstance(data, dict) or data.get("id") != path.stem:
+            continue
+        if op_id or data.get("session") == session:
+            return bool(data.get("watch", True)), f"operator {data.get('name') or path.stem} ({path.stem})"
+    return None, (f"no operator record {op_id}" if op_id else f"no operator bound to session {session}")
 
 
 def _text(value, limit, what="text"):
@@ -943,6 +973,7 @@ def install(app, *, create=None, gates=None, work=None):
                          "지시는 사용자의 메시지나 승인된 ask를 근거로 opv2_dispatch로만 전달한다.")}
         if WORKFLOW:
             spec["workflow"] = WORKFLOW
+            spec["cflow_inputs"] = {"operator": rec["id"]}
         for key in ("model", "effort"):
             value = str(body.get(key) or rec.get(key) or "").strip()
             if value:

@@ -26,6 +26,7 @@ from . import (
     cli_connections,
     cli_loops,
     cli_mesh,
+    cli_operators,
     cli_plugins,
     cli_report,
     cli_search,
@@ -1687,6 +1688,7 @@ def build_parser() -> argparse.ArgumentParser:
     cli_window.register(sub)
     cli_connections.register(sub)
     cli_loops.register(sub)
+    cli_operators.register(sub)
 
     return parser
 

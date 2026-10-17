@@ -321,7 +321,7 @@ def _app(world, created):
 
 
 def test_routes_crud_start_stop_and_agent_scope(world, monkeypatch):
-    created = []
+    created, made = [], []
 
     async def go():
         client = TestClient(TestServer(_app(world, created)))
@@ -330,6 +330,7 @@ def test_routes_crud_start_stop_and_agent_scope(world, monkeypatch):
             resp = await client.post("/api/operators", json={"name": "Beta", "projects": ["beta"]})
             assert resp.status == 201
             beta = await resp.json()
+            made.append(beta)
             assert (await client.post("/api/operators", json={"name": "beta", "all": True})).status == 409
             assert (await client.post("/api/operators", json={"name": "x", "projects": ["nope"]})).status == 400
             names = {r["name"] for r in (await (await client.get("/api/operators")).json())["operators"]}
@@ -360,7 +361,10 @@ def test_routes_crud_start_stop_and_agent_scope(world, monkeypatch):
     run(go())
     spec = created[0]
     assert spec["project"] == "beta" and spec["beads"] is False and spec["model"] == "m"
-    assert "workflow" not in spec and "mesh" not in spec and "opv2_inbox" in spec["task"]
+    assert "mesh" not in spec and "opv2_inbox" in spec["task"]
+    # the session runs the operator-v2 workflow with this operator's id as its input
+    assert spec["workflow"] == "operator-v2" == operators_v2.WORKFLOW
+    assert spec["cflow_inputs"] == {"operator": made[0]["id"]}
 
 
 def test_the_v2_tools_are_merged_beside_v1_without_a_clash():
