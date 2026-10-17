@@ -803,6 +803,61 @@ def test_landing_review_question_reads_for_a_person_too():
         assert "escalate 사유가 되지 않는다" in text
 
 
+# -- claunch-106mn: the peer-review question names the round's issue --------
+
+
+def _peer_review_ask(tmp_path, issue):
+    """The peer-review node as it is in the definition, after a stub
+    branch-setup, with data.claim set to ``issue``; returns the rendered
+    question."""
+    import json
+
+    from claude_launcher.cflow2 import frontend, runtime
+
+    doc = yaml.load(V2.read_text(encoding="utf-8"), Loader=frontend._Loader)
+    setup = {k: v for k, v in doc["nodes"]["branch-setup"].items() if k in ("title", "returns")}
+    flow = {"cflow": 2, "name": "peer-review-ask",
+            "data": {"claim": {"issue": issue, "how": "claimed" if issue else "no-issue-wait"}},
+            "nodes": {"branch-setup": {**setup, "prompt": "branch-setup"},
+                      "peer-review": doc["nodes"]["peer-review"],
+                      "after": {"prompt": "after"}},
+            "body": ["branch-setup", "peer-review", "after"]}
+    chart = frontend.compile_text(json.dumps(flow, ensure_ascii=False))
+    kw = dict(cwd=str(tmp_path), scope="m")
+    st = runtime.start(chart, caps={}, now=1.0, **kw)
+    st = runtime.report(st["tasks"][0]["instance"], "ok",
+                        {"branch": "s1-gist", "base": "master", "base_hash": "0" * 40,
+                         "shared": False}, now=2.0, **kw)
+    [ask] = st["asks"]
+    assert ask["label"] == "peer-review"
+    return ask["prompt"]
+
+
+def test_peer_review_question_names_the_round_issue_and_branch(tmp_path, monkeypatch):
+    """claunch-106mn: the reviewer read "the in_progress item the asker is
+    assignee of" off the board. On a re-request after a re-measure the round's
+    issue was already in_review and the reviewer judged the session's HOLD
+    issue instead (ask2-93b0effa). The question now carries data.claim.issue
+    and the branch, and tells the reader not to pick from the board list."""
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    prompt = _peer_review_ask(tmp_path, "claunch-zzz")
+    assert "이슈: claunch-zzz" in prompt
+    assert "브랜치: s1-gist" in prompt
+    assert "보드 목록에서 고르지 않는다" in prompt
+    assert "${data.claim.issue}" not in prompt
+
+
+def test_peer_review_question_without_an_issue_falls_back_to_both_statuses(tmp_path, monkeypatch):
+    """A round with no issue leaves the reference as written; the question
+    then says to look in in_progress and in_review and to abstain on two
+    candidates."""
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    prompt = _peer_review_ask(tmp_path, None)
+    assert "이슈: ${data.claim.issue}" in prompt
+    assert "--status in_progress --status in_review" in prompt
+    assert "후보가 둘 이상이면 추측하지 말고 abstain한다" in prompt
+
+
 # -- claunch-0b8dx: no round cap, end on every issue closed ------------------
 
 
