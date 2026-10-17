@@ -2207,6 +2207,19 @@ v1 툴과 이름이 겹치지 않도록 `flow_` 접두어를 쓴다.
 | `flow_input` | 시작 뒤에 채우는 입력 쓰기(`name`, `value`). `set_by: [agent]`로 선언되고 비어 있는 입력만, 드라이버만(2.6) |
 | `flow_request_move` | `force_target` 노드로의 이동(`node`, `reason`) 또는 활성 작업의 결과 보고(`outcome`, `value`)를 사람에게 요청, 또는 철회(`cancel`). 아무것도 옮기지 않고, 답이 올 때까지 드라이버의 진행을 막는다(2.11) |
 
+상태를 돌려주는 `flow_*` 툴은 상태를 요약판으로 돌려준다(`mcp.brief`, claunch-ejvoy.1).
+`runtime.status`는 바뀌지 않으므로 웹 UI·CLI·데몬은 전체 payload를 읽는다.
+
+- `result`: 같은 `{outcome, value}` 레코드는 처음 기록된 키 하나에만 싣고, 같은 레코드를
+  가진 다른 키는 `same`에 적는다. value의 필드 중 JSON 길이가 80자를 넘는 것은
+  `<elided: N chars>`로 바꾸고 `result_elided`에 그 사실을 적는다.
+- `tasks[].rules`: 규칙 본문이 그 작업의 `prompt`에 이미 들어 있으면 `{id, in_prompt: true}`만
+  싣는다. 본문은 `flow_rule`로 읽는다.
+- `data.inputs`: 최상위 `inputs`와 같으면 뺀다.
+- 작업의 `prompt`·`done_when`·`returns`, `collections`, `choices`, `asks`는 줄이지 않는다.
+- `flow_status(results=[키])`는 그 키의 레코드를 전문으로, `flow_status(full=true)`는
+  전체 payload를 돌려준다.
+
 런 중단(abort), 보관(archive), 강제 이동(move), 이동 요청에 대한 답, 사람의 강제 결과
 보고는 MCP 툴이 없다. 사람이 CLI나 웹 UI로 한다(2.11). 드라이버는 이동과 결과 보고를
 요청만 할 수 있다(`flow_request_move`).
