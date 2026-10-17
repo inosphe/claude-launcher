@@ -104,7 +104,8 @@ def _block(text: str) -> str:
 
 #: claunch-0b8dx (user decision 2026-10-07, v2 only): the v2 copy of the
 #: beads block drops v1's self cap and settles on "every issue closed, or a
-#: leader HOLD". Everything else stays the v1 block word for word.
+#: leader HOLD". Apart from DIVERGENCES below, the v2 copy stays the v1
+#: block word for word.
 V1_ONLY = """묻는다. self에는 런 단위 상한이 있다: 이 런의 intake 방문 수
 (`claunch cflow status --json`의 `visits.intake`)가 10 이상이면 self
 대신 pool로 보낸다 — 엔진의 loop guard(max_visits 25)는 26번째
@@ -122,15 +123,31 @@ V2_INSTEAD = """묻는다. self에는 회차 수 상한이 없다(claunch-0b8dx)
 세션이 닫을 때까지 기다린다(claunch-0b8dx) — 워커의 settle-check가"""
 
 
+#: claunch-7r1qr (v2 only): a series of related issues (siblings under one
+#: parent, children and follow-ups, issues that depend on one already in the
+#: batch) lands as one batch -- one PR -- and the batch cap is 10.
+V1_ONLY_BATCH = """상한 5개에 닿으면) 배치의 이슈 전부를 in_review로 올려 착지 요청은 한
+번이다."""
+V2_INSTEAD_BATCH = """상한 10개에 닿으면) 배치의 이슈 전부를 in_review로 올려 착지 요청은 한
+번이다. 같은 연속 작업(같은 parent의 형제, 자식·후속, 배치 안 일감에
+의존하는 것)은 영역이 달라도 한 배치에 싣고, 배치 안 일감에만 막힌
+의존은 blocked로 세지 않는다 — 연속 작업 하나는 PR(착지 요청) 하나다."""
+
+#: Every declared v2 divergence from the v1 block, as (v1 text, v2 text).
+DIVERGENCES = [(V1_ONLY, V2_INSTEAD), (V1_ONLY_BATCH, V2_INSTEAD_BATCH)]
+
+
 def _words(text: str) -> str:
     return " ".join(text.split())
 
 
 def _as_v2(v1_block: str) -> str:
-    """The v1 block with the one claunch-0b8dx divergence applied, in words."""
+    """The v1 block with the declared v2 divergences applied, in words."""
     words = _words(v1_block)
-    assert words.count(_words(V1_ONLY)) == 1
-    return words.replace(_words(V1_ONLY), _words(V2_INSTEAD))
+    for v1_only, v2_instead in DIVERGENCES:
+        assert words.count(_words(v1_only)) == 1
+        words = words.replace(_words(v1_only), _words(v2_instead))
+    return words
 
 
 def _chart():
@@ -1777,3 +1794,32 @@ def test_a_skip_goes_from_the_choice_to_commit_without_a_test_task(tmp_path, mon
         st = runtime.report(task["instance"], "ok", {}, **kw)
     assert seen[:2] == ["test-skipped", "commit"]
     assert "review" not in seen and "targeted-test" not in seen
+
+
+# -- series batching (claunch-7r1qr) -------------------------------------------
+
+
+def test_a_series_of_related_issues_lands_as_one_batch():
+    """s791 landed claunch-iw5i8.1-.5 as five one-commit PRs: each queue-next
+    read the next sibling as blocked (it depended on the issue just committed,
+    still in_progress) or as another area, and drained. A series -- siblings
+    under one parent, children and follow-ups, issues depending on one already
+    in the batch -- now stays on one branch and lands as one PR."""
+    chart = _chart()
+    labelled = {n.label: n for n in chart.nodes.values() if n.label}
+    gate = _words(labelled["queue-next"].get("prompt"))
+    assert "같은 연속 작업(series)" in gate
+    assert "달라도 next다" in gate                      # area does not cut a series
+    assert "blocked 판정은 배치 밖 의존만 센다" in gate  # in-batch deps are met
+    assert "연속 작업의 일감이면 모호해도 next다" in gate
+    assert "모호하면 drained다" in gate                 # the tie-break for the rest
+    # a follow-up the user gives before the landing request joins the batch
+    assert "--parent <주 이슈> --labels user-direct --assignee $CLAUNCH_SESSION" in gate
+    # the cap the prompt counts is the cap the loop enforces
+    assert "10개 미만" in gate and labelled["items"].get("max") == 10
+    intake = _words(labelled["intake-issue"].get("prompt"))
+    assert "영역(daemon·web UI·워크플로)이 달라도 이 배치의 후보다" in intake
+    assert "배치 안 일감에만 막힌 의존은 blocked로 세지 않는다" in intake
+    pr = _words(labelled["pr-open"].get("prompt"))
+    assert "PR 하나가 연속 작업 전체다" in pr
+    assert "공통 parent(없으면 주 이슈)" in pr
