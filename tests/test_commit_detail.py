@@ -43,6 +43,11 @@ def _build_repo(r: Path) -> None:
 @pytest.fixture
 def repo(tmp_path, monkeypatch, repo_template):
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    # Identity env outranks the repository's config, and a sweep runner sets
+    # it; pin it so the author and committer the tests read are the ones set.
+    for role in ("AUTHOR", "COMMITTER"):
+        monkeypatch.setenv(f"GIT_{role}_NAME", "t")
+        monkeypatch.setenv(f"GIT_{role}_EMAIL", "t@example.com")
     return repo_template("commit-detail", _build_repo, tmp_path / "repo")
 
 
@@ -77,6 +82,7 @@ def test_metadata_message_and_trailers(repo):
     assert d["subject"] == "change everything"
     assert d["body"].startswith("Why it changed.")
     assert d["author"]["name"] == "t" and d["author"]["email"] == "t@example.com"
+    assert d["committer"]["name"] == "t" and d["committer"]["email"] == "t@example.com"
     assert d["parents"] == [git("rev-parse", "HEAD^", cwd=repo).strip()]
     assert d["merge"] is False
     assert {"key": "Claunch-Session", "value": "s833"} in d["trailers"]
