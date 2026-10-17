@@ -1,0 +1,183 @@
+# operator-v2 — the service loop of one Operator v2 session.
+#
+# The session is started from the operators API (POST /api/operators/{id}/start,
+# daemon/operators_v2.py), which binds it to the operator and starts this
+# workflow with the start input `operator` = the operator's id. The daemon
+# refuses the opv2_* tools to any session that is not bound to an operator,
+# and scopes every read and dispatch to that operator's projects.
+#
+# Answering the user is the default and does not follow the run: every message
+# the user sends (and every answer to an ask) types a one-line
+# `[Operator v2]` nudge into this terminal, and handling it is standing work in
+# every node and in every wait (rule `inbox-anytime`). The run only paces
+# the watching:
+#
+#   greet -> service loop { watch-gate -> observe -> rest }
+#
+# - watch-gate waits on `claunch operators watch` (exit 0 = the operator's
+#   watch is on, 1 = off). With watch off the loop stays here, so an operator
+#   that is not watching only answers. The probe reads the record file, not
+#   the daemon.
+# - observe is one poll-judge-post pass; rest is the 180s timer between passes
+#   (v1 operator.yaml's `every: 180`).
+#
+# The loop has no round boundary, so node visits pile up for the session's
+# life: max_visits: 0 (check warning unbounded-visits, as in stack-v2). The
+# loop's `max` still bounds it; reaching it ends the run without a wrap-up,
+# and the user restarts the operator.
+cflow: 2
+name: operator-v2
+description: >-
+  Operator v2 세션의 서비스 루프. 사용자 입력(opv2_inbox)에 답하는 것이 기본이고,
+  감시(watch)가 켜진 동안 180초마다 범위 안 세션을 opv2_poll로 관찰해 사용자가
+  알아야 할 것만 opv2_post로 올린다.
+max_visits: 0
+
+inputs:
+  operator:
+    type: string
+    required: true
+    label: Operator id
+    help: 이 세션이 맡은 operator v2의 id(POST /api/operators/{id}/start가 채운다)
+
+fragments:
+  inbox: |
+    사용자 입력 처리: `opv2_inbox`를 부른다. 메시지마다 답을 `opv2_post`로
+    게시한다(참조한 세션은 `refs`에). 처리할 입력이 없으면 아무것도 게시하지 않는다.
+    - 지시 전달: 사용자가 다른 세션에 무엇을 하라고 지시했으면 `opv2_dispatch`에 그
+      메시지의 id를 `on_behalf_of`로 실어 대상 세션에 전달하고, 사용자가 한 말을
+      옮긴다. 대상이나 내용이 모호하면 전달하기 전에 `opv2_ask`(choice 또는 text)로
+      묻는다. ask의 답(승인·거절·선택·텍스트)도 inbox로 온다. 거절된 것은 전달하지
+      않는다.
+    - 작업 질문: 처리 중이거나 처리했던 일감·작업을 물으면 근거를 찾아 답한다 —
+      `opv2_sessions`(진행 중·종료 세션 목록), `opv2_session`(세션의 task·상태·이슈·
+      체크·커밋), `opv2_issue`(보드 이슈와 코멘트), `opv2_commits`,
+      `opv2_transcript_search`(세션 하나 또는 범위 전체의 대화 검색), `opv2_history`
+      (이 operator가 전에 게시·질문·전달한 기록). 답에는 근거가 된 세션 이름, 이슈 id,
+      커밋 해시를 적는다. 찾지 못했으면 찾지 못했다고 쓰고 추측으로 채우지 않는다.
+    - 범위: 도구가 403으로 거절한 세션·이슈는 이 operator의 범위 밖이다. 범위 밖이라고
+      답하고 다른 경로로 읽으려 하지 않는다.
+
+rules:
+  opv2-channel:
+    text: |
+      사용자와의 대화는 터미널이 아니라 opv2_* 도구로만 한다 — 터미널에 쓴 글은
+      사용자에게 보이지 않는다. v1 operator_* 도구는 쓰지 않는다.
+    why: >-
+      Operator v2의 화면은 Observer의 operator 피드다(daemon/operators_v2.py).
+      operator_* 도구는 v1의 프로젝트당 bot에 묶여 있어 v2 세션은 거절된다.
+    deliver: all
+  inbox-anytime:
+    text: |
+      어느 작업에 있든, 런이 대기(watch-gate·rest)에 있든 `[Operator v2]` 넛지가
+      오면 사용자 입력 처리(opv2_inbox)를 즉시 한다. 그 처리는 런을 움직이지 않는다 —
+      작업 중이면 처리 뒤 그 작업을 이어 하고, 대기 중이면 처리 뒤 턴을 끝낸다.
+      대기 중에 손으로 폴링하지 않는다. 데몬의 시계가 런을 깨운다.
+    why: >-
+      사용자 입력은 감시 주기와 무관하게 바로 답해야 한다. 감시가 꺼진 operator는
+      watch-gate에 계속 머물며 답만 한다.
+    deliver: all
+  dispatch-on-behalf:
+    text: |
+      다른 세션에 대한 지시는 사용자의 메시지나 승인된 ask를 `on_behalf_of`로 둘 때만
+      `opv2_dispatch`로 전달한다. 네가 해석한 새 작업을 만들지 않는다. cflow 게이트
+      승인과 다른 세션의 질문에 대한 답은 사용자의 것이다 — 대신 답하지 않는다.
+    why: v1 operator와 같은 권한 범위(operators_v2.dispatch가 on_behalf_of 없는 전달을 403으로 거절).
+    deliver: all
+
+nodes:
+  greet:
+    title: 시작 — 대기 중인 사용자 입력 처리
+    prompt: |
+      너는 Operator v2(id `${data.inputs.operator}`)다. 담당 범위와 이름은 세션의
+      오프닝 task에 있다.
+      ${frag:inbox}
+      시작할 때 쌓여 있던 입력을 모두 처리하고 처리 건수를 보고한다. 입력이 없으면 0건이다.
+      관찰(opv2_poll)은 이 작업에서 하지 않는다 — 감시가 켜져 있으면 다음 단계가 한다.
+    done_when: opv2_inbox의 입력을 모두 읽고 각각에 답(또는 전달·질문)했으며 처리 건수가 보고에 있다.
+    returns:
+      ok: {handled: int}
+    effects: [fs.read, mesh.send]
+
+  observe:
+    title: 관찰·판단·게시
+    prompt: |
+      감시가 켜져 있다. 범위 안 세션을 한 번 관찰하고, 사용자가 알아야 할 것만 게시한다.
+
+      1. ${frag:inbox}
+      2. 관찰: `opv2_poll`을 부른다. 첫 호출은 `since` 없이, 이후에는 직전 응답의
+         `cursor`를 넘긴다. 커서는 세션 스크래치 `$CLAUNCH_SCRATCH/opv2-cursor.txt`에
+         적어 두고 읽는다(`/tmp`나 저장소에 쓰지 않는다). `more: true`면 같은 판단 안에서
+         다시 부른다. 응답의 `watch`가 false면 감시가 방금 꺼진 것이다 — 게시하지 않고
+         커서만 적어 두고 이 작업을 끝낸다.
+         poll이 실패하면(연결 timeout, 데몬 무응답) 커서는 그대로 두고, 감시가 끊겼다는
+         카드를 `level: attention`으로 한 번 올리고 그 카드 id를
+         `$CLAUNCH_SCRATCH/opv2-outage-card.txt`에 적는다. 실패가 이어지는 동안 같은
+         카드를 다시 올리지 않는다. 다음 poll이 성공하면 그 카드 id를 `reply_to`로 해서
+         복구를 `level: info`로 게시하고 파일을 지운다.
+         `degraded`에 항목이 있으면 이번 응답에 그 부분이 빠졌다. 게시하지 않고 다음
+         관찰에서 다시 본다.
+      3. 판단: 새 이벤트와 `attention`에서 사용자가 다음에 할 일을 바꾸는 것만 고른다 —
+         결과(머지·테스트 수치·산출물), 실패·차단, 사용자를 기다리는 cflow 게이트나 질문,
+         두 세션의 충돌·중복. 일상 진행과 메시지 송수신·확인·재촉은 게시하지 않는다.
+         이미 게시한 것은 되풀이하지 않는다(`opv2_history`로 확인할 수 있다).
+         `progress`는 세션마다 바뀐 작업 상태(상태 점검 답, 이슈 상태)다. 결과이므로
+         세션 이름과 이슈 id를 붙여 한 다이제스트로 묶어 `level: info`로 올린다.
+         `paused`(사용자가 일시정지한 세션)와 `ended`(이번에 종료된 세션)의 게이트·질문은
+         `urgent`·`attention`으로 올리지 않는다.
+      4. 게시: 고른 것을 `opv2_post`로 올린다. 여러 건이면 한 다이제스트로 묶는다.
+         사용자의 조치를 기다리는 것(게이트·질문·충돌 판정)은 `level: urgent`로 하고 그
+         세션을 `refs`에 넣는다. 사용자의 결정이 필요하고 그 결정을 네가 전달할 수 있는
+         것이면 `opv2_ask`로 묻는다. 기존 카드에 덧붙일 말은 `reply_to`로 답글을 단다.
+      5. 보고: 게시·질문·전달 건수와 커서를 보고한다. 새 것이 없으면 0건이다.
+    done_when: >-
+      opv2_inbox의 입력에 모두 답했고, opv2_poll을 커서로 불러 새 이벤트를 판단했으며,
+      게시·질문·전달 건수와 커서가 보고에 있다.
+    returns:
+      ok: {posted: int, asked: int, dispatched: int, cursor: "str?"}
+    effects: [fs.read, fs.write, mesh.send]
+
+  probe-failed:
+    title: 감시 상태를 읽지 못함
+    prompt: |
+      감시 상태 probe(`claunch operators watch`)가 연속으로 판정 불가(종료 코드 2)를
+      냈다. 이 operator의 레코드(`<데몬 디렉터리>/operators/${data.inputs.operator}.json`)를
+      찾지 못했거나 읽지 못한 것이다. 직접 `claunch operators watch`를 한 번 실행해
+      stderr의 사유를 확인한다.
+      사용자에게 `opv2_post`(`level: attention`)로 한 번 알린다: 감시 상태를 읽지
+      못해 감시를 쉬고 있고, 10분 뒤 다시 확인한다는 것과 사유. operator가 삭제됐으면
+      (레코드 없음) 그렇게 적는다. 같은 사유로 이미 올린 카드가 있으면(`opv2_history`)
+      다시 올리지 않는다. 사용자 입력 처리는 이 동안에도 계속한다.
+    done_when: probe 사유를 확인했고, 사용자에게 알렸거나 이미 알린 카드 id가 보고에 있다.
+    returns:
+      ok: {reason: str}
+    effects: [fs.read, mesh.send]
+
+body:
+  seq:
+    - greet
+    - id: service
+      loop:
+        while: "true"
+        max: 100000
+        do:
+          seq:
+            - id: watch-gate
+              wait:
+                probe: [claunch, operators, watch]
+                poll: 30
+                seconds: 3600
+                undecided_max: 5
+                describe: 이 operator의 감시(watch)가 켜져 있다
+              on:
+                # 감시가 꺼진 채 한 시간이 지났다: 같은 대기를 새로 시작한다.
+                timeout: {continue: null}
+                undecidable:
+                  seq:
+                    - probe-failed
+                    - id: probe-backoff
+                      wait: {seconds: 600}
+                    - {continue: null}
+            - observe
+            - id: rest
+              wait: {seconds: 180}
