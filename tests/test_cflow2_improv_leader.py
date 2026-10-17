@@ -316,6 +316,35 @@ def test_a_pause_between_preflight_and_merge_returns_to_standby(tmp_path):
     assert [c["label"] for c in ld.st["choices"]] == ["standby"]
 
 
+def _regression_standby(tmp_path):
+    ld = Leader(tmp_path)
+    ld.report("intake")
+    ld.select("handle-regression")
+    assert ld.tasks() == ["handle-regression"]
+    return ld
+
+
+def test_a_blocked_regression_without_a_user_notice_thread_is_refused(tmp_path):
+    ld = _regression_standby(tmp_path)
+    with pytest.raises(Exception, match="missing field 'thread'"):
+        ld.report("handle-regression", "blocked", {"kind": "admit_denied", "reason": "admit refused"})
+    ld.status()
+    assert ld.tasks() == ["handle-regression"]
+
+
+def test_a_blocked_regression_with_a_notice_thread_returns_to_standby(tmp_path):
+    ld = _regression_standby(tmp_path)
+    ld.report("handle-regression", "blocked",
+              {"kind": "admit_denied", "thread": "th-4acf1b", "reason": "admit refused"})
+    assert [c["label"] for c in ld.st["choices"]] == ["standby"]
+
+
+def test_a_regression_with_nothing_blocked_still_reports_ok(tmp_path):
+    ld = _regression_standby(tmp_path)
+    ld.report("handle-regression")
+    assert [c["label"] for c in ld.st["choices"]] == ["standby"]
+
+
 def test_an_empty_preflight_or_dropped_batch_returns_to_standby(tmp_path):
     ld = Leader(tmp_path)
     ld.report("intake")
