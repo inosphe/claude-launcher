@@ -73,7 +73,7 @@ const server = http.createServer((req, res) => {
     await railIs(false);
 
     // ---- wide: every page link closes it, Back brings it back ----
-    for (const nav of ["#/operator", "#/observer", "#/beads", "#/flows", "#/mesh", "#/"]) {
+    for (const nav of ["#/observer", "#/beads", "#/flows", "#/mesh", "#/"]) {
       // Back on s1's terminal with the rail closed, the way a person gets
       // there: the header's `details` is the toggle.
       if (await railUp()) await page.locator("#term-details").click();
@@ -110,11 +110,11 @@ const server = http.createServer((req, res) => {
     checks++;
 
     // ---- a reload shows exactly what the address says ----
-    await page.goto(`${origin}/#/operator?detail=s3`);
+    await page.goto(`${origin}/#/beads?detail=s3`);
     await railIs(true); checks++;
     await page.reload();
     await railIs(true); checks++;
-    await page.goto(`${origin}/#/operator`);
+    await page.goto(`${origin}/#/beads`);
     await page.reload();
     await railIs(false); checks++;
 
@@ -129,10 +129,10 @@ const server = http.createServer((req, res) => {
     await railIs(false); checks++;
     // narrowing with a rail open closes it and takes it out of the address
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.goto(`${origin}/#/operator?detail=s1`);
+    await page.goto(`${origin}/#/beads?detail=s1`);
     await railIs(true);
     await page.setViewportSize({ width: 390, height: 800 });
-    await until(() => location.hash === "#/operator");
+    await until(() => location.hash === "#/beads");
     await railIs(false); checks++;
 
     assert(!(await railUp()));

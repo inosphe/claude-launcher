@@ -166,7 +166,7 @@ function sessVscodeButton() { return el("button", "wf-btn", "VS Code"); }
 
 // The two pages that are objects rather than functions; route() calls them.
 globalThis.ObserverPage = { open() {}, stop() {} };
-globalThis.OperatorPanel = { open() {}, stop() {} };
+globalThis.ChatPanel = { open() {}, stop() {} };
 const ctx = {};
 new Function(
   "exports", "$", "document", "MOBILE_MQ", "setInterval", "clearInterval",
@@ -218,7 +218,7 @@ check("info link lands on the terminal",
 check("plain session link still attaches",
       ctx.parseHash("#/s/coder2").page === "terminal");
 check("the detail query is not part of the page",
-      ctx.parseHash("#/operator?detail=coder2").page === "operator" &&
+      ctx.parseHash("#/chat?detail=coder2").page === "chat" &&
       ctx.parseHash("#/s/coder2?detail=coder3").name === "coder2",
       ctx.parseHash("#/s/coder2?detail=coder3"));
 check("the threads page carries its view mode and thread (claunch-zny1o)",
@@ -266,7 +266,7 @@ check("wide: the handle goes down with it", !handleUp());
    same address then showed no rail at all. Every page link carries no
    `detail`, so following one closes it; an address that carries one opens
    it, reload or not. */
-for (const page of ["#/operator", "#/observer", "#/beads", "#/flows",
+for (const page of ["#/chat", "#/observer", "#/beads", "#/flows",
                     "#/settings", "#/", "#/wf/default|C:/w", "#/mesh/m1"]) {
   ctx.goto("#/s/coder2");
   ctx.openDetail("coder2");
@@ -276,15 +276,15 @@ for (const page of ["#/operator", "#/observer", "#/beads", "#/flows",
         { open: ctx.open(), up: up() });
   check(`wide: ...and gives ${page} the width back`, ctx.fits() === fitsAt + 1);
 }
-for (const page of ["#/operator", "#/observer", "#/beads", "#/"]) {
+for (const page of ["#/chat", "#/observer", "#/beads", "#/"]) {
   ctx.dropDetail();                            // a fresh load: nothing in memory
   ctx.goto(page + "?detail=coder3");
   check(`wide: ${page}?detail= opens the rail beside that page`,
         up() && ctx.open() === "coder3" && where() === "layout",
         { open: ctx.open(), up: up(), where: where() });
 }
-ctx.goto("#/operator?detail=coder3");
-ctx.goBack("#/operator");                      // Back, from the ⓘ that opened it
+ctx.goto("#/chat?detail=coder3");
+ctx.goBack("#/chat");                      // Back, from the ⓘ that opened it
 check("wide: Back past the ⓘ closes it again", !up() && ctx.open() === null);
 ctx.goto("#/s/coder2");
 ctx.openDetail("coder2");

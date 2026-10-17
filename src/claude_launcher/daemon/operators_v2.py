@@ -1,7 +1,6 @@
 """Operator v2: independent operator bots, each with its own project scope.
 
-Operator v1 (:mod:`.operator_bot`) is one bot per project. v2 drops that
-coupling: a person creates as many operators as they like, names each one,
+A person creates as many operators as they like, names each one,
 and ticks the projects it may see — one project, several, or every project
 (``all``). Each operator has its own feed, its own bound session and its own
 watch switch, so two operators over overlapping projects never share a

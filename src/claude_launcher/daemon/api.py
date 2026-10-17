@@ -499,11 +499,9 @@ def build_app(
     # daemon/shared_reads.py.
     app["shared_reads"] = shared_reads.SharedReads(shared_read_max_age)
     app["mesh"] = mesh if mesh is not None else MeshManager(manager)
-    from . import mesh_chat, observer, operator_bot, operators_v2
+    from . import mesh_chat, observer, operators_v2
     observer.install(app)
     mesh_chat.install(app)
-    operator_bot.install(app, create=_create_session, gates=_operator_gates,
-                         work=lambda sessions: _operator_work(app, sessions))
     operators_v2.install(app, create=_create_session, gates=_operator_gates,
                          work=lambda sessions: _operator_work(app, sessions))
     from . import local_sync_api

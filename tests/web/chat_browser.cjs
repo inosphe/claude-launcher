@@ -54,7 +54,6 @@ const server = http.createServer((req, res) => {
     let data = {};
     if (url.pathname === "/api/daemon") data = { version: "fixture", boot_id: "test" };
     else if (url.pathname === "/api/sessions") data = { sessions: [], llm_configured: true };
-    else if (url.pathname === "/api/operator/pending") data = { total: 0 };
     else if (url.pathname === "/api/operators") data = { operators: [] };
     else if (/^\/api\/(profiles|workspaces|mesh|cflow|harnesses|roles)$/.test(url.pathname)) data = [];
     res.end(JSON.stringify(data));

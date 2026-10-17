@@ -26,7 +26,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from claude_launcher import cli_beads, mcp_server, operator_mcp, operator_v2_mcp, session_commits
+from claude_launcher import cli_beads, mcp_server, operator_v2_mcp, session_commits
 from claude_launcher.daemon import operators_v2, transcript_view
 
 
@@ -367,11 +367,11 @@ def test_routes_crud_start_stop_and_agent_scope(world, monkeypatch):
     assert spec["cflow_inputs"] == {"operator": made[0]["id"]}
 
 
-def test_the_v2_tools_are_merged_beside_v1_without_a_clash():
+def test_the_v2_tools_are_merged_and_v1_is_gone():
     names = [t["name"] for t in mcp_server.TOOLS]
     v2 = [t["name"] for t in operator_v2_mcp.TOOLS]
     assert all(n.startswith("opv2_") for n in v2) and set(v2) <= set(names)
-    assert {t["name"] for t in operator_mcp.TOOLS} <= set(names)
+    assert not [n for n in names if n.startswith("operator_")]
     assert len(set(names)) == len(names)
 
 

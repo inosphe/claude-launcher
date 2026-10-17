@@ -7,7 +7,6 @@
 <link rel="stylesheet" href="static/vendor/xterm.css">
 <link rel="stylesheet" href="static/style.css">
 <link rel="stylesheet" href="static/observer.css">
-<link rel="stylesheet" href="static/operator.css">
 <link rel="stylesheet" href="static/operator_fab.css">
 <link rel="stylesheet" href="static/chat.css">
 <!-- After the sheets: it rewrites their colours for the light theme before
@@ -295,7 +294,6 @@
     <div id="rail-nav-dock">
     <nav id="rail-nav">
       <a href="#/observer" data-page="observer"><span>◎</span>Observer</a>
-      <a href="#/operator" data-page="operator"><span>◍</span>Operator<span id="operator-nav-badge" class="operator-badge-count" hidden></span></a>
       <a href="#/" data-page="home"><span>⌂</span>Home</a>
       <a href="#/new" data-page="new"><span>+</span>New</a>
       <a href="#/mesh" data-page="meshes"><span>◉</span>Mesh</a>
@@ -325,9 +323,6 @@
 
   <main id="main">
     <nav id="session-tabs" class="hidden" aria-label="Recent and pinned sessions"></nav>
-    <!-- The project Operator bot's conversation (operator.js builds it; the
-         same view also opens as a modal over any page). -->
-    <section id="operator-view" class="hidden" aria-label="Operator"></section>
     <!-- The people's room of each mesh (chat.js builds it; the same view
          also opens as a modal over any page). -->
     <section id="chat-view" class="hidden" aria-label="Chat"></section>
@@ -1534,7 +1529,6 @@
 <script src="static/threads-history.js"></script>
 <script src="static/talk-pane.js"></script>
 <script src="static/glossary-composer.js"></script>
-<script src="static/operator.js"></script>
 <script src="static/operator_fab.js"></script>
 <script src="static/chat.js"></script>
 <script src="static/session-tabs.js"></script>
