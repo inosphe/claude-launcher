@@ -1,0 +1,55 @@
+/* The floating dock: one control in the corner holding a segment per panel —
+   the Operator's (operator_fab.js) and Chat's (chat.js). Each script appends its
+   button to #fab-dock; the dock's 1px gap over its own background draws the
+   divider, so a segment hidden on its own page leaves no stray line. */
+.fab-dock { position: fixed; right: 16px; bottom: 16px; z-index: 50; display: inline-flex; gap: 1px; border: 1px solid #3b424e; border-radius: 16px; background: #3b424e; overflow: hidden; box-shadow: 0 3px 10px rgba(0, 0, 0, .4); }
+.fab-dock > button { display: inline-flex; align-items: center; gap: 5px; height: 30px; padding: 0 11px; border: none; border-radius: 0; background: #161a20; color: #d8dbe0; font: inherit; font-size: 12px; cursor: pointer; }
+.fab-dock > button:hover { background: #1f242c; }
+/* A session page's input bar (#term-input) runs along the bottom with its
+   send button at the right end; stand the dock above the bar's resting
+   height. The bar grows upward and the button stays at its bottom edge. */
+body:has(#term-input:not(.hidden)) .fab-dock { bottom: 60px; }
+.fab-dock > button:focus-visible { outline: 2px solid #58a6ff; outline-offset: -2px; }
+.operator-fab-count { display: inline-block; min-width: 16px; padding: 0 5px; border-radius: 8px; background: #6e7681; color: #fff; font-size: 11px; line-height: 16px; text-align: center; }
+.operator-fab-count[hidden] { display: none; }
+.operator-fab-alert .operator-fab-count { background: #da3633; }
+.fab-dock .operator-fab-count, .fab-dock .chat-badge-count { margin-left: 2px; }
+/* Icon and badge only, which keeps the dock narrower than the single
+   Operator button it replaces; the names are in each button's title and
+   aria-label. */
+.fab-dock .operator-fab-label, .fab-dock .chat-fab-label { display: none; }
+.operator-fab { order: 2; }
+/* On the Observer page the operators are on the page itself; the button
+   would only open a second copy of them. */
+body.observer-active .operator-fab { display: none; }
+.fab-dock > .operator-fab-alert { box-shadow: inset 0 -2px 0 #da3633; }
+.operator-fab-icon { color: #58a6ff; }
+
+/* The floating Operator (operator_fab.js): a dialog over any page holding
+   the operator tabs and conversation that the Observer page draws
+   (observer.css's #opfab-view rules), with an input row of its own. A dialog
+   cannot use the page's scrollbar, so the conversation is its one scroller. */
+.opfab-modal { width: min(560px, calc(100vw - 32px)); height: min(720px, calc(100vh - 48px)); margin: auto; padding: 0; border: 1px solid #3b424e; border-radius: 10px; background: #14171c; color: #d8dbe0; font-size: 13px; }
+.opfab-modal[open] { display: flex; flex-direction: column; }
+.opfab-modal::backdrop { background: rgba(0, 0, 0, .55); }
+.opfab-close { position: absolute; top: 8px; right: 8px; z-index: 1; width: 28px; height: 28px; font-size: 18px; color: #8b949e; background: none; border: none; cursor: pointer; }
+#opfab-view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+#opfab-view .op-area { flex: 1; min-height: 0; overflow-y: auto; padding: 10px 16px; }
+#opfab-view .op-bar { padding-right: 32px; }
+#opfab-view :is(button, select, textarea) { font: inherit; color: #d8dbe0; background: #1b1e24; border: 1px solid #3b424e; border-radius: 6px; padding: 4px 12px; min-height: 32px; min-width: 0; }
+#opfab-view button { cursor: pointer; touch-action: manipulation; }
+#opfab-view button:disabled { opacity: .5; cursor: default; }
+#opfab-view .hint, #opfab-view .op-scope { color: #8b949e; }
+#opfab-view a { color: #79c0ff; }
+#opfab-view .op-composer { flex: none; display: flex; flex-direction: column; gap: 4px; padding: 10px 16px; border-top: 1px solid #2a2e36; }
+#opfab-view .op-composer-row { display: flex; gap: 8px; }
+#opfab-view .op-composer textarea { flex: 1; resize: vertical; min-height: 60px; max-height: 30vh; padding: 8px 12px; line-height: 1.45; box-sizing: border-box; }
+#opfab-view .op-composer small { color: #8b949e; min-height: 1em; }
+
+@media (max-width: 820px) {
+  .fab-dock { bottom: 72px; }
+  body:has(#term-input:not(.hidden)) .fab-dock { bottom: 84px; }
+  .fab-dock > button { height: 34px; padding: 0 12px; }
+  .opfab-modal { width: 100%; height: 100%; max-width: none; max-height: none; margin: 0; border: none; border-radius: 0; }
+  #opfab-view :is(button, select) { min-height: 36px; }
+}

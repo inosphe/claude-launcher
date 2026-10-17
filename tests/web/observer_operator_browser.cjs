@@ -2,7 +2,8 @@
    tabs, creation with a project multi-check or all projects, scope and watch
    edits, the conversation (send from the page composer, answers to asks,
    older entries opened in place), 「operator에게 묻기」 on a session card, the
-   composer's height cap, and the page staying the one scroller.
+   composer's height cap, an empty target the reader picked staying empty,
+   and the page staying the one scroller.
    CLAUNCH_PLAYWRIGHT may name an installed playwright-core.
    Run: node tests/web/observer_operator_browser.cjs. No live daemon. */
 const assert = require("node:assert/strict");
@@ -199,6 +200,15 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     assert.equal(await page.inputValue("#observer-prompt"), "s1에 대해: ");
     assert.equal(await page.locator("#observer-prompt").evaluate(e => document.activeElement === e), true);
     await page.fill("#observer-prompt", "");
+    // Picking 「세션 선택」 keeps it: later polls do not put the operator back
+    // (claunch-iw5i8.5).
+    await page.selectOption("#observer-target", "");
+    // A tab press redraws the page, which re-syncs the composer's targets.
+    await tab("ops-a").click();
+    await page.waitForTimeout(400);
+    assert.equal(await page.inputValue("#observer-target"), "", "an empty target the reader picked stays empty");
+    // The floating Operator's segment is hidden here: the operators are on the page.
+    assert.equal(await page.isVisible(".operator-fab"), false);
 
     // Create: all projects.
     await page.click("text=+ 새 operator");
@@ -286,6 +296,6 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     assert.equal(await page.locator("#observer-operators .op-tab").first().isVisible(), true);
 
     assert.deepEqual(errors, []);
-    console.log("PASS: operator tabs, seen badge, feed folding and kinds, approve/choice answers, composer target and send, card ask-about scope, create all/projects, validation and 409, scope edit, watch toggle, start/stop/delete, 40vh draft cap, single page scroller desktop and mobile");
+    console.log("PASS: operator tabs, seen badge, feed folding and kinds, approve/choice answers, composer target and send, card ask-about scope, picked empty target kept, fab hidden, create all/projects, validation and 409, scope edit, watch toggle, start/stop/delete, 40vh draft cap, single page scroller desktop and mobile");
   } finally { await browser.close(); server.close(); server.closeAllConnections(); }
 })().catch(error => { console.error(error); server.close(); server.closeAllConnections(); process.exitCode = 1; });

@@ -1,5 +1,6 @@
-/* Operator: the project bot's conversation, as a page (#/operator) and as a
-   modal that opens over any page (the floating button, or Alt+O).
+/* Operator v1: the project bot's conversation, as a page (#/operator). The
+   floating button and its Alt+O modal are operator v2's now (operator_fab.js,
+   claunch-iw5i8.5); this page goes with the rest of v1 (claunch-iw5i8.6).
 
    Layout follows the agent consoles people already know (Devin): the
    conversation on the left — the bot's posts, the user's messages, asks with
@@ -656,20 +657,17 @@ function announce(feed) {
   try { new Notification("Operator", {body: fresh[0].text.slice(0, 160), tag: "claunch-operator"}); } catch {}
 }
 function setBadge(total) {
-  for (const id of ["operator-nav-badge", "operator-fab-badge"]) {
-    const badge = document.getElementById(id);
-    if (!badge) continue;
-    badge.textContent = total ? String(total) : "";
-    badge.hidden = !total;
-  }
-  fab.classList.toggle("operator-fab-alert", !!total);
+  const badge = document.getElementById("operator-nav-badge");
+  if (!badge) return;
+  badge.textContent = total ? String(total) : "";
+  badge.hidden = !total;
 }
 /* While the Operator is on screen everything in it is in front of the user,
    so each badge poll marks it seen again: a seen that failed once (a daemon
    without the route, a stale cookie) is retried, and an ask that arrives
    while the page is open does not pile up on the badge. */
 async function refreshBadge() {
-  if (pageOpen || modal.open) return markSeen();
+  if (pageOpen) return markSeen();
   try { setBadge((await request("api/operator/pending")).total); } catch {}
 }
 /* Opening (and leaving) the Operator is taking notice of what waits there:
@@ -722,7 +720,7 @@ function attach(root) {
 /* Hosts are kept for reuse; only the poll stops once neither is on screen.
    The badge keeps its own slower poll either way. */
 function detachIdle() {
-  if (!pageOpen && !modal.open) { clearInterval(timer); timer = null; }
+  if (!pageOpen) { clearInterval(timer); timer = null; }
 }
 
 /* ---- the page ---- */
@@ -741,57 +739,10 @@ function stop() {
   pageOpen = false; document.body.classList.remove("operator-page"); detachIdle();
 }
 
-/* ---- the modal ---- */
-const modal = document.createElement("dialog");
-modal.className = "operator-modal"; modal.setAttribute("aria-label", "Operator");
-const modalClose = node("button", "×", "operator-modal-close"); modalClose.type = "button";
-modalClose.setAttribute("aria-label", "닫기"); modalClose.title = "닫기 (Esc)";
-modalClose.onclick = () => modal.close();
-const modalRoot = node("div", null, "operator-modal-root");
-modal.append(modalClose, modalRoot);
-modal.addEventListener("close", () => { markSeen(); detachIdle(); });
-// A session link inside the modal goes to that session's page; the modal
-// would otherwise stay over the terminal it just opened.
-modalRoot.addEventListener("click", event => {
-  if (event.target.closest?.('a[href^="#/"]')) modal.close();
-});
-document.body.append(modal);
-function openModal() {
-  if (!modal.open) modal.showModal();
-  attach(modalRoot);
-  refresh(); poll(); markSeen();
-  modalRoot.querySelector(".operator-composer textarea")?.focus();
-}
-
-/* The floating button: always there, whatever page is on screen. It is one
-   segment of the shared dock (#fab-dock) that Chat (chat.js) joins too, so
-   the two sit in one control instead of two stacked buttons. */
-function fabDock() {
-  let dock = document.getElementById("fab-dock");
-  if (!dock) {
-    dock = node("div", null, "fab-dock"); dock.id = "fab-dock";
-    dock.setAttribute("role", "group"); dock.setAttribute("aria-label", "빠른 열기");
-    document.body.append(dock);
-  }
-  return dock;
-}
-const fab = node("button", null, "operator-fab"); fab.type = "button";
-fab.title = "Operator 열기 (Alt+O)"; fab.setAttribute("aria-label", "Operator 열기 (Alt+O)");
-fab.append(node("span", "◍", "operator-fab-icon"), node("span", "Operator", "operator-fab-label"));
-const fabBadge = node("span", "", "operator-badge-count"); fabBadge.id = "operator-fab-badge"; fabBadge.hidden = true;
-fab.append(fabBadge);
-fab.onclick = () => modal.open ? modal.close() : openModal();
-fabDock().append(fab);
-document.addEventListener("keydown", event => {
-  if (event.altKey && !event.ctrlKey && !event.metaKey && (event.key === "o" || event.key === "O")) {
-    event.preventDefault();
-    modal.open ? modal.close() : openModal();
-  }
-});
 refreshBadge();
 badgeTimer = setInterval(() => { if (document.visibilityState === "visible") refreshBadge(); }, 15000);
 
-return {open, stop, openModal, refresh,
+return {open, stop, refresh,
         _test: {openAsks, freshUrgent, answerLine, deliveryLabel, sessionBadge, startChoices, startBody, dotClass, progressChips,
                 threadsOf, cardLine, sameUpdate, gateActions, sessionWords}};
 })();
