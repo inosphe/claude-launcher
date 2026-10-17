@@ -144,12 +144,18 @@ def _fork_alive(manager, name: Optional[str]) -> bool:
 
 
 def refresh(manager, ws, name: str) -> Optional[dict]:
-    """The session's job, with a fork that ended without merging marked failed."""
+    """The session's job, with a fork that ended without merging, or an
+    in-place session that ended before assigning, marked failed."""
     job = category.job(ws, name)
-    if (job and job["state"] in (category.RUNNING, category.ASSIGNED)
-            and job["mode"] == "fork" and not _fork_alive(manager, job["fork"])):
+    if not job or job["state"] not in (category.RUNNING, category.ASSIGNED):
+        return job
+    if job["mode"] == "fork" and not _fork_alive(manager, job["fork"]):
         job = category.job_update(ws, name, category.FAILED,
                                   f"{job['fork']} ended without handing in")
+    elif job["mode"] == "inplace" and job["state"] == category.RUNNING \
+            and not _fork_alive(manager, name):
+        job = category.job_update(ws, name, category.FAILED,
+                                  f"{name} ended before assigning")
     return job
 
 
@@ -189,7 +195,9 @@ async def start(request: web.Request, name: str) -> dict:
         return {"mode": "fork", "fork": fork, "workspace": ws.name, "items": items,
                 "job": category.job(ws, name)}
     try:
-        category.job_start(ws, name, "inplace")
+        # A request the session never acted on does not block the next press:
+        # the new request replaces it and the block is typed again.
+        category.job_start(ws, name, "inplace", replace_inplace=True)
     except category.CategoryError as exc:
         raise AssignError(exc.status, str(exc)) from None
     block = compose_task(origin=name, workspace=ws.name, items=items, fork=None)

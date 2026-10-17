@@ -188,5 +188,13 @@ const last = () => calls[calls.length - 1];
   assert(all(host).some(n => n.textContent === '진행 중'));
   ctx.CategoryPane.unmount();
   assert.strictEqual(host.children.length, 0);
+
+  // An in-place job the session has not acted on can be requested again.
+  sessionView = {...sessionView, mode: 'inplace', job: {mode: 'inplace', state: 'running', fork: null, started_at: '2026-10-18T01:02:03', note: ''}};
+  const host2 = new Element('div');
+  ctx.CategoryPane.mount(host2, 's1'); await settle();
+  const again = button('다시 요청', host2);
+  assert(again && !again.disabled);
+  ctx.CategoryPane.unmount();
   console.log('ok');
 })().catch(error => { console.error(error); process.exit(1); });

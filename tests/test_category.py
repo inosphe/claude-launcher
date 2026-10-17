@@ -271,3 +271,16 @@ def test_events_record_each_change(ws):
     ops = [e["op"] for e in c.events(ws)]
     assert ops[:2] == ["assign", "create"]
     assert c.events(ws)[0]["detail"]["reason"] == "why"
+
+
+def test_only_an_unfinished_in_place_job_is_replaced(ws):
+    c.job_start(ws, "a", "inplace")
+    with pytest.raises(c.CategoryError) as exc:
+        c.job_start(ws, "a", "inplace")
+    assert exc.value.status == 409
+    assert c.job_start(ws, "a", "inplace", replace_inplace=True)["state"] == c.RUNNING
+    # a running fork is not the session's own to abandon
+    c.job_update(ws, "a", c.DONE)
+    c.job_start(ws, "a", "fork", "a-cat1")
+    with pytest.raises(c.CategoryError):
+        c.job_start(ws, "a", "inplace", replace_inplace=True)

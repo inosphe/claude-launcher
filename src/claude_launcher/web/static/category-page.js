@@ -438,9 +438,13 @@ function makeCategoryPane({root, session}) {
     const how = view.mode === "fork"
       ? "이 세션을 quick-fork해서 배정하고, 결과를 이 세션에 merge합니다."
       : "이 하네스는 quick-fork를 지원하지 않아 이 세션에서 직접 배정합니다.";
-    const press = node("button", running() ? "배정 진행 중…" : "Assign to tree", "wf-btn category-primary");
-    press.type = "button"; press.disabled = busy || running(); press.onclick = assign;
+    // An in-place request the session has not acted on can be sent again:
+    // the daemon replaces that job and types the block once more.
+    const resend = job?.mode === "inplace" && job.state === "running";
+    const press = node("button", resend ? "다시 요청" : running() ? "배정 진행 중…" : "Assign to tree", "wf-btn category-primary");
+    press.type = "button"; press.disabled = busy || (running() && !resend); press.onclick = assign;
     shell.append(press, node("p", how, "category-muted"));
+    if (resend) shell.append(node("p", "이 세션이 아직 배정하지 않았습니다. 요청을 무시했다면 다시 요청할 수 있습니다.", "category-muted"));
     if (job) {
       const labels = {running: "진행 중", assigned: "배정됨 · merge 대기", done: "완료", failed: "실패"};
       const line = node("p", null, "category-job category-job-" + job.state);

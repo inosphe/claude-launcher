@@ -138,6 +138,24 @@ def test_without_a_conversation_to_copy_the_job_runs_in_place(home, tmp_path, ty
     _run(scenario, tmp_path)
 
 
+def test_an_in_place_request_never_acted_on_does_not_block_the_next(home, tmp_path, typed):
+    async def scenario(mgr, client):
+        ws = category.workspace("alpha")
+        await _call(client, "POST", "/api/sessions/a/category/assign")
+        # the session ignores the block; a second press replaces the job
+        doc = await _call(client, "POST", "/api/sessions/a/category/assign")
+        assert doc["mode"] == "inplace" and doc["job"]["state"] == "running"
+        blocks = [b for b in _typed_to(typed, "a") if "# claunch category: ASSIGN TO TREE" in b]
+        assert len(blocks) == 2
+        # and a session that ends with the job still open fails it
+        mgr.get("a").exited = True
+        view = await _call(client, "GET", "/api/sessions/a/category")
+        assert view["job"]["state"] == "failed" and "ended before assigning" in view["job"]["note"]
+        assert category.job(ws, "a")["state"] == category.FAILED
+
+    _run(scenario, tmp_path)
+
+
 def test_agent_assign_refusals_carry_the_owning_node(home, tmp_path, typed):
     async def scenario(mgr, client):
         ws = category.workspace("alpha")

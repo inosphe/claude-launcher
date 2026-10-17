@@ -723,12 +723,16 @@ def job_for_fork(ws, fork):
                                (fork, RUNNING, ASSIGNED)).fetchone())
 
 
-def job_start(ws, session, mode, fork=None):
-    """Open a job; 409 while the session already has one running."""
+def job_start(ws, session, mode, fork=None, replace_inplace=False):
+    """Open a job; 409 while the session already has one running.
+    ``replace_inplace`` lets a new request replace a RUNNING in-place job
+    (one the session itself was asked to do and has not done yet)."""
     with connection(ws) as db:
         db.execute("BEGIN IMMEDIATE")
         row = db.execute("SELECT * FROM jobs WHERE session=?", (session,)).fetchone()
-        if row is not None and row["state"] in (RUNNING, ASSIGNED):
+        stale = (replace_inplace and row is not None and row["mode"] == "inplace"
+                 and row["state"] == RUNNING)
+        if row is not None and row["state"] in (RUNNING, ASSIGNED) and not stale:
             raise CategoryError(f"{session} already has a category assignment running"
                                 + (f" ({row['fork']})" if row["fork"] else ""), 409,
                                 job=_job(row))
