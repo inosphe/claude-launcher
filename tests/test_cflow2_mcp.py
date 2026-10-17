@@ -183,3 +183,90 @@ def test_flow_request_move_with_outcome_asks_for_a_report(project):
     assert err and "give 'outcome' too" in err
     st, err = _call("flow_request_move", {"cancel": True})
     assert err is None and "move_request" not in st
+
+
+BRIEF_DEF = textwrap.dedent("""
+    cflow: 2
+    name: brief2
+    description: brief payloads
+    rules:
+      careful: {text: be careful with the shared branch, why: it broke once, deliver: all}
+    collections:
+      prs:
+        kind: queue
+        key: number
+        item: {number: int}
+    nodes:
+      first:
+        prompt: first
+        done_when: noted
+        returns: {ok: {note: str, by: str}}
+      second:
+        prompt: second
+        done_when: done
+        returns: {ok: {n: int}}
+    body:
+      seq:
+        - try: {seq: [first], id: wrap}
+          catch: {fail: second}
+        - second
+""")
+
+
+@pytest.fixture
+def brief_project(project):
+    (project / ".claunch" / "workflows" / "v2" / "brief2.yaml").write_text(BRIEF_DEF,
+                                                                         encoding="utf-8")
+    return project
+
+
+def test_brief_payload_folds_aliases_and_elides_long_values(brief_project):
+    """claunch-ejvoy.1: a flow_* call returns completed results once each, long
+    value fields elided, and rule text the prompt carries by id only; the
+    task's prompt, done_when, returns and the collections stay whole."""
+    long_note = "x" * 500
+    st, err = _call("flow_start", {"workflow": "brief2"})
+    assert err is None, err
+    st, err = _call("flow_report", {"node": "first", "value": {"note": long_note, "by": "rev"}})
+    assert err is None, err
+    keys = [k for k in st["result"]]
+    holders = [k for k, v in st["result"].items() if "same" in v]
+    assert len(holders) == 1  # first, the try body and wrap hold one record
+    rec = st["result"][holders[0]]
+    assert len(rec["same"]) >= 1 and not set(rec["same"]) & set(keys)
+    assert rec["outcome"] == "ok"
+    assert rec["value"] == {"note": "<elided: 502 chars>", "by": "rev"}
+    assert "results=[key]" in st["result_elided"]
+    task = st["tasks"][0]
+    assert task["label"] == "second"
+    assert "be careful with the shared branch" in task["prompt"]
+    assert task["rules"] == [{"id": "careful", "in_prompt": True}]
+    assert task["done_when"] == "done" and task["returns"] == {"ok": {"n": "int"}}
+    assert st["collections"]["prs"]["kind"] == "queue"
+    assert "inputs" not in st["data"] or st.get("inputs") is None
+
+    one, _ = _call("flow_status", {"results": ["first"]})
+    whole = one["result"][holders[0]]["value"]
+    assert whole == {"note": long_note, "by": "rev"}
+
+    full, _ = _call("flow_status", {"full": True})
+    assert "result_elided" not in full
+    assert all("same" not in v for v in full["result"].values())
+    assert len(full["result"]) == len(keys) + len(rec["same"])
+    assert full["result"]["first"]["value"]["note"] == long_note
+    assert full["tasks"][0]["rules"][0]["text"].startswith("be careful")
+
+
+def test_brief_keeps_rule_text_the_prompt_lacks():
+    payload = {"run": "r", "tasks": [{"prompt": "p", "rules": [{"id": "a", "text": "t"}]}],
+               "result": {}, "inputs": {"x": 1}, "data": {"inputs": {"x": 2}}}
+    out = cflow2_mcp.brief(payload)
+    assert out["tasks"][0]["rules"] == [{"id": "a", "text": "t"}]
+    assert out["data"] == {"inputs": {"x": 2}}  # differs from inputs: kept
+    assert payload["tasks"][0]["rules"][0]["text"] == "t"  # input untouched
+
+
+def test_brief_drops_data_inputs_equal_to_inputs():
+    out = cflow2_mcp.brief({"run": "r", "inputs": {"x": 1},
+                            "data": {"inputs": {"x": 1}, "landing": {"medium": "pr"}}})
+    assert out["data"] == {"landing": {"medium": "pr"}} and out["inputs"] == {"x": 1}

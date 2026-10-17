@@ -19,6 +19,7 @@ and has no tool.
 
 from __future__ import annotations
 
+import json
 import os
 from typing import Any, Dict
 
@@ -105,10 +106,23 @@ TOOLS = [
             "its max and a person must extend it. 'person_picks' are choices a "
             "person took for you, newest last: each 'reason' is their note, an "
             "instruction to follow. Several tasks can be active at "
-            "once under par/foreach/group: each has its own 'instance' id."
+            "once under par/foreach/group: each has its own 'instance' id. "
+            "'result' holds completed nodes' {outcome, value} in brief: one entry per "
+            "distinct record ('same' lists the other keys holding it), a value field "
+            "over 80 characters elided as '<elided: N chars>'; 'results' or 'full' "
+            "reads them whole. A rule whose text the task's prompt already carries is "
+            "listed by id with 'in_prompt' (flow_rule reads it). Every flow_* call "
+            "that returns this payload returns it in brief."
         ),
         "inputSchema": {"type": "object",
-                        "properties": {"scope": _SCOPE, "cwd": _CWD, "side": _SIDE}},
+                        "properties": {
+                            "results": {"type": "array", "items": {"type": "string"},
+                                        "description": "result keys (node label or id) "
+                                        "to return whole"},
+                            "full": {"type": "boolean", "description": "return the "
+                                     "whole payload: every result value, rule text "
+                                     "and data.inputs"},
+                            "scope": _SCOPE, "cwd": _CWD, "side": _SIDE}},
     },
     {
         "name": "flow_report",
@@ -438,7 +452,86 @@ def call_tool(name: str, args: dict) -> Dict[str, Any]:
                 "flow_approve", "flow_delegate", "flow_collection", "flow_input") and isinstance(out, dict) and "run" in out:
         cwd = str(args.get("cwd") or "").strip() or os.getcwd()
         out = _route(cwd, _scope(args), out)
+        if not args.get("full"):
+            keep = args.get("results") if name == "flow_status" else None
+            out = brief(out, keep=keep if isinstance(keep, list) else ())
     return out
+
+
+# A value field longer than this (as JSON) is elided in brief payloads.
+BRIEF_LIMIT = 80
+
+
+def _brief_field(v: Any) -> Any:
+    text = json.dumps(v, ensure_ascii=False, sort_keys=True)
+    return v if len(text) <= BRIEF_LIMIT else f"<elided: {len(text)} chars>"
+
+
+def brief(payload: Dict[str, Any], keep: Any = ()) -> Dict[str, Any]:
+    """The status payload an agent tool returns (claunch-ejvoy.1): the run's
+    status with completed results in brief and nothing carried twice.
+
+    The driver gets this payload after every flow_* call, and on a long run
+    ``result`` re-sent each completed node's whole value, several times over:
+    a node's record is stored under its label and again under each enclosing
+    node it completes (``prior-context``, ``round/prior-search.try``,
+    ``prior-search``). Here each distinct record appears once, under its
+    first key, with ``same`` naming the others; a value field over
+    :data:`BRIEF_LIMIT` is elided (``by``/``decision`` of an answered ask stay
+    readable). Keys in ``keep`` stay whole. A rule whose text the task prompt
+    already carries (the compiler appends it under ``── 규칙 ──``) keeps only
+    its id. ``data.inputs`` is dropped when it equals the top-level
+    ``inputs``. :func:`runtime.status` itself is unchanged: the web UI, CLI
+    and daemon read the whole payload."""
+    out = dict(payload)
+    keep = {str(k) for k in keep or ()}
+    result = out.get("result")
+    if isinstance(result, dict) and result:
+        groups: Dict[str, list] = {}
+        for key, rec in result.items():
+            groups.setdefault(json.dumps(rec, ensure_ascii=False, sort_keys=True), []).append(key)
+        slim: Dict[str, Any] = {}
+        elided = False
+        for keys in groups.values():
+            rec = result[keys[0]]
+            if keep.intersection(keys) or not isinstance(rec, dict):
+                entry = dict(rec) if isinstance(rec, dict) else {"value": rec}
+            else:
+                entry = {k: v for k, v in rec.items() if k != "value"}
+                value = rec.get("value")
+                if isinstance(value, dict):
+                    entry["value"] = {k: _brief_field(v) for k, v in value.items()}
+                else:
+                    entry["value"] = _brief_field(value)
+                elided = elided or entry["value"] != value
+            if len(keys) > 1:
+                entry["same"] = keys[1:]
+            slim[keys[0]] = entry
+        out["result"] = slim
+        if elided:
+            out["result_elided"] = ("values marked '<elided: N chars>' are cut; "
+                                    "flow_status(results=[key]) or full=true returns them")
+    tasks = out.get("tasks")
+    if isinstance(tasks, list):
+        out["tasks"] = [_brief_task(t) for t in tasks]
+    data = out.get("data")
+    if isinstance(data, dict) and "inputs" in data and data.get("inputs") == out.get("inputs"):
+        out["data"] = {k: v for k, v in data.items() if k != "inputs"}
+    return out
+
+
+def _brief_task(task: Any) -> Any:
+    if not isinstance(task, dict) or not task.get("rules"):
+        return task
+    prompt = str(task.get("prompt") or "")
+    rules = []
+    for rule in task["rules"]:
+        text = (rule or {}).get("text") if isinstance(rule, dict) else None
+        if text and text.strip() and text.strip() in prompt:
+            rules.append({"id": rule.get("id"), "in_prompt": True})
+        else:
+            rules.append(rule)
+    return {**task, "rules": rules}
 
 
 def _call(name: str, args: dict) -> Dict[str, Any]:
