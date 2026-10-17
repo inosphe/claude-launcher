@@ -4140,62 +4140,36 @@ form can override it. A child starts at zero independently of its parent's count
 Periodic goal reminders use the machine's `cflow_reminder_interval` (600 seconds
 when unset or zero) and the session reminder pause/skip controls.
 
-**Operator** is a bot session per project that watches the project's other
-sessions for you. Start it from the **Operator** tab next to Observer (pick a
-profile — and, when that profile's harness declares model or effort choices,
-the model and effort, the same choices the new-session form offers — then
-press **Operator 시작**); the daemon creates one session with role
-`operator` on mesh `operator-<project>`, running the bundled `operator`
-workflow (declare it where the session works — `claunch cflow update`
-refreshes the global layer). The same conversation opens as a modal over any
-page from the Operator button (◍) in the floating dock at the bottom right,
-or **Alt+O**. The bot is an
-ordinary claunch session: it is listed with the others, and its name in the
-Operator header links to its terminal (a link followed from the modal closes
-the modal). The bot polls with
-`operator_poll` (Observer events plus cflow gates waiting on a person, open
-`observer_ask` questions and blocked sessions — no LLM call needed for those),
-posts only what changes what you do next with `operator_post`, and asks for
-decisions with `operator_ask` (approve/deny, choices or text; the badge and a
-browser notification say when one waits — opening the Operator clears the
-badge, answered or not, and so does every badge poll while it stays open; it
-counts again only what is asked after it is closed). What you type in the tab reaches the
-bot through `operator_inbox`, never its terminal, which only gets a one-line
-nudge. It may type into another session of its project with
-`operator_dispatch` only to relay an instruction of yours: the call names the
-message or answered ask it carries, and the relay is recorded in the feed.
-It never approves gates or answers other sessions' questions. When a
-session a card names moves by some other path — a gate approved on the
-dashboard, the session paused, a commit, a landing request, a merge — the
-daemon adds the change under that card: it appears in time order in the feed
-and again in the card's thread. The bot follows up on a card the same way
-(`reply_to` on `operator_post`/`operator_ask`). A cflow gate waiting on you
-in one of the project's sessions — an approval, a branch to choose, a goto
-request — gets its buttons in the Operator panel and under the newest card
-that names that session; they press the same `/api/cflow/approve`, `select`
-and `goto/resolve` the run page does. When the daemon restarts, it writes the
-restart into every operator's feed itself (previous and new start, who asked
-and when, or that nothing did), and the bot's next poll carries it once. A
-poll never waits more than a few seconds for the board or the run states: it
-answers without them and names them in `degraded`. A poll that failed is
-remembered by the bot's MCP client, and the first one to succeed carries
-`recovered` (first failure, recovery time, count), which the bot reports as
-a reply to its outage card. The bot observes in one of two modes, chosen in
-the Operator header (or at start) and switched while it runs — the daemon
-records the switch in the feed and nudges the bot, no restart: `events` (the
-default, above) and `transcript`, a trial in which the bot reads the
-project's running sessions' conversations itself with `operator_transcripts`
-(new records since a cursor the daemon keeps per session, starting from each
-one's last few; prose clipped at 1500 characters, tool calls and results to
-one line, thinking left out). Those records replace the poll's routine events;
-its attention, progress and restart fields still count. HTTP:
-`GET /api/operator?project=P` (feed, bound session, watched sessions, mode),
-`GET /api/operator/pending`, `POST /api/operator/start {project, profile, model?, effort?, mode?}`,
-`POST /api/operator/mode {project, mode}`,
-`POST /api/operator/message?project=P {text}`,
-`POST /api/operator/asks/{id}/answer?project=P {decision?, text?}`; the bot's
-own calls live under `/api/operator/agent/{session}/…` and are refused to any
-session that is not its project's bound operator.
+**Operators** are bot sessions that watch other sessions for you. Create as
+many as you like in the **Operators** section of the Observer page: each has
+a name and a project scope — tick one project, several, or *all projects* —
+and its own feed, bound session and watch switch, so two operators over
+overlapping projects never share a conversation. **Start** picks a profile
+(and the model and effort when its harness declares them) and creates one
+session running the bundled `operator-v2` workflow with the operator's id as
+its input; **Stop** ends it (an agent may not stop an operator — that is the
+user's). The same conversation opens as a dialog over any page from the
+Operator segment of the floating dock at the bottom right, or **Alt+O**; the
+dialog preselects an operator whose scope covers the session on screen, and
+its management lives on the Observer page. The scope is enforced by the
+daemon on every read and write the bot makes: a session outside it is not
+in its poll and answers 403. The bot polls with `opv2_poll`, posts only what
+changes what you do next with `opv2_post`, and asks for decisions with
+`opv2_ask` (approve/deny, a choice, or text; the badge counts what you have
+not seen). With the watch switch off it only answers what you ask. Ask it
+about work — what a session in its scope is doing or did, its issue, its
+commits, where something was said — and it answers from the record with
+`opv2_sessions`, `opv2_session`, `opv2_issue`, `opv2_commits`,
+`opv2_transcript_search` and `opv2_history`. What you type reaches the bot
+through `opv2_inbox`, never its terminal, which only gets a one-line nudge;
+it may type into another session of its scope with `opv2_dispatch` only to
+relay an instruction of yours (the call names the message or answered ask it
+carries). HTTP: `GET/POST /api/operators`, `GET/PATCH/DELETE
+/api/operators/{id}`, `POST /api/operators/{id}/start`, `…/stop`,
+`…/message {text}`, `…/asks/{entry}/answer`, `…/seen`; the bot's own calls
+live under `/api/operators/agent/{session}/…` and are refused to any session
+that is not that operator's bound session. (Operator v1 — one bot per
+project on its own page — was removed in claunch-iw5i8.6.)
 
 **Chat** is where the *people* on a mesh's daemons talk to each other. The
 **Chat** tab next to Mesh (`#/chat`, `#/chat/<mesh>`) and the Chat button (✉)

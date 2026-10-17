@@ -127,7 +127,7 @@ def notice_kind(header: str) -> str:
         return "cflow nudge"
     if head.startswith("[claunch status-check refresh]"):
         return "status-check refresh"
-    if head.startswith("[Operator]"):
+    if head.startswith("[Operator"):
         return "operator"
     return "other"
 

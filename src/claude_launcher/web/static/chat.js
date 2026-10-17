@@ -459,7 +459,7 @@ function openModal(mesh) {
 }
 
 /* The floating button: Chat's segment of the dock the Operator's button sits
-   in (operator.js fabDock; made here too when this file runs alone). */
+   in (operator_fab.js fabDock; made here too when this file runs alone). */
 function fabDock() {
   let dock = document.getElementById("fab-dock");
   if (!dock) {

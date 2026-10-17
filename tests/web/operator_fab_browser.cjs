@@ -72,7 +72,6 @@ const server = http.createServer((req, res) => {
       const one = route.match(/^\/api\/sessions\/([^/]+)$/);
       if (one) return res.end(JSON.stringify(sessions.find(x => x.name === decodeURIComponent(one[1])) || {}));
       if (route === "/api/observer") return res.end(JSON.stringify({ enabled: false, scope: "all", sessions: sessions.map(s => ({ ...s, meshes: [], summary: "", events: [] })) }));
-      if (route === "/api/operator/pending") return res.end('{"total":0}');
       if (route === "/api/chat/rooms") return res.end('{"machine":"pcA","rooms":[]}');
       if (route === "/api/daemon") return res.end('{"version":"test","boot_id":"test"}');
       if (req.method === "GET") {

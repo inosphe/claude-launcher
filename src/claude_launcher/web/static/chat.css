@@ -1,6 +1,5 @@
 /* Chat (chat.js): the mesh rooms as a page (#chat-view) and as a modal, the
-   floating button above the Operator's, and the toasts. Colours follow
-   operator.css. */
+   floating button above the Operator's, and the toasts. */
 #chat-view { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; overflow: hidden; font-size: 13px; }
 .chat-modal, .chat-host, .chat-host *, .chat-toast, .chat-toast * { box-sizing: border-box; }
 .chat-host { display: flex; flex-direction: column; min-height: 0; min-width: 0; flex: 1; color: #d8dbe0; font-size: 13px; }

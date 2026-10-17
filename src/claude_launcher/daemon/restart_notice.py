@@ -281,7 +281,7 @@ def note_boot(
         "requested": bool(requests),
         "requested_by": [r.get("requested_by") for r in requests if r.get("requested_by")],
         # When the first request was written is the closest record there is
-        # of when the previous daemon stopped; the Operator feed says it.
+        # of when the previous daemon stopped.
         "requested_at": min((r["requested_at"] for r in requests if r.get("requested_at")), default=None),
         "requested_via": next((r.get("via") for r in requests if r.get("via")), None),
     }

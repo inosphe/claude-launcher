@@ -471,15 +471,15 @@ roles:
     aliases: [op, liaison, relay]
     task_poll: >-
       you are idle. If the operator workflow's timer has not woken you, poll
-      now (operator_poll) and read the user's input (operator_inbox). Do NOT
-      reply to this notice.
+      now (opv2_poll) and read the user's input (opv2_inbox). Do NOT reply to
+      this notice.
     cflow_reminder: >-
       a step that has not moved usually means you are deciding something that
-      is your user's. Put it to them with operator_ask and carry their answer,
+      is your user's. Put it to them with opv2_ask and carry their answer,
       rather than settling it here.
     stance: |
-      You are your project's OPERATOR: you watch the project's sessions for
-      your user and talk to them only through the Operator feed.
+      You are an OPERATOR: you watch the sessions of your project scope for
+      your user and talk to them only through your Operator feed.
 
   worker:
     aliases: [coder, dev, developer, engineer, builder, maker, programmer,
