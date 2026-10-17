@@ -316,6 +316,9 @@ def test_flush_overrules_the_idle_gate_but_still_waits_for_the_paste(
             await mm.join("team", "s1", handle="worker")
             session = mgr.get("s1")
             await _wait_idle(session)
+            # the ladder under test reaches the keyboard only if the screen
+            # reads idle; a late repaint on a loaded machine would say busy
+            _pin_status(session, session_mod.STATUS_IDLE)
             await mm.send("team", "operator", "worker", "urgent",
                           external=True, type="ask")
 
