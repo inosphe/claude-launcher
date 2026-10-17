@@ -1820,6 +1820,8 @@ def test_a_series_of_related_issues_lands_as_one_batch():
     intake = _words(labelled["intake-issue"].get("prompt"))
     assert "영역(daemon·web UI·워크플로)이 달라도 이 배치의 후보다" in intake
     assert "배치 안 일감에만 막힌 의존은 blocked로 세지 않는다" in intake
-    pr = _words(labelled["pr-open"].get("prompt"))
+    # step children carry the same provenance label as a follow-up (claunch-dr9cu)
+    assert "--parent <주 이슈> --labels user-direct --assignee $CLAUNCH_SESSION" in intake
+    pr =_words(labelled["pr-open"].get("prompt"))
     assert "PR 하나가 연속 작업 전체다" in pr
     assert "공통 parent(없으면 주 이슈)" in pr
