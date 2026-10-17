@@ -2151,12 +2151,17 @@ def test_an_unnamed_child_gets_a_worktree_named_after_both_sessions(home, tmp_pa
 def test_children_stay_in_creation_order_when_the_clock_steps_back(home, tmp_path, monkeypatch):
     """A later child lists after an earlier one even if the wall clock stepped
     back between their creations (the listing orders by ``created_at``)."""
+    from claude_launcher.daemon import manager as manager_mod
     from claude_launcher.daemon import session as session_mod
 
     _register_py_harness()
     stamps = iter(["2026-10-18T00:00:05+00:00", "2026-10-18T00:00:04+00:00",
                    "2026-10-18T00:00:03+00:00"])
-    monkeypatch.setattr(session_mod, "_utcnow", lambda: next(stamps))
+    # manager.py binds its own _utcnow (from .session import), so both names
+    # are patched, drawing from the one sequence.
+    clock = lambda: next(stamps)
+    monkeypatch.setattr(session_mod, "_utcnow", clock)
+    monkeypatch.setattr(manager_mod, "_utcnow", clock, raising=False)
 
     async def run():
         mgr = _manager()
