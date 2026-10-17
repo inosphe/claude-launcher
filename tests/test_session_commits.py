@@ -313,17 +313,25 @@ def test_the_selected_card_reads_every_commit_from_its_own_route(repo, fresh_rai
     from claude_launcher.daemon import api, session_prs, work_checkout
 
     monkeypatch.setattr(session_commits, "RAIL_LIMIT", 1)
-    monkeypatch.setattr(work_checkout, "of", lambda sdef: None)
-    monkeypatch.setattr(session_prs, "for_session", lambda cwd, name: [])
+    # A session that moved into a worktree: the commits come off that
+    # worktree, the PRs off the directory it was started in -- each where
+    # the list poll reads it, so selecting the card changes no PR frame.
+    started = repo.parent / "started-here"
+    started.mkdir()
+    monkeypatch.setattr(work_checkout, "of", lambda sdef: str(repo))
+    pr_reads = []
+    monkeypatch.setattr(session_prs, "for_session",
+                        lambda cwd, name: pr_reads.append(cwd) or [])
     for n in range(3):
         commit(repo, f"feat: {n}", session="s1")
-    session = type("S", (), {"sdef": type("D", (), {"name": "s1", "cwd": str(repo)})()})()
+    session = type("S", (), {"sdef": type("D", (), {"name": "s1", "cwd": str(started)})()})()
     manager = type("M", (), {"get": lambda self, name: session})()
     request = type("R", (), {"app": {"manager": manager}, "match_info": {"name": "s1"}})()
     body = json.loads(asyncio.run(api.h_session_rail_commits(request)).text)
     assert body["session"] == "s1"
     assert [c["subject"] for c in body["rail_commits"]["commits"]] == ["feat: 2", "feat: 1", "feat: 0"]
     assert body["rail_commits"]["more"] == 0
+    assert pr_reads == [api._session_cwd(session)]
     src = (Path(__file__).resolve().parent.parent / "src/claude_launcher/daemon/api.py").read_text(encoding="utf-8")
     assert 'r.add_get("/api/sessions/{name}/rail-commits", h_session_rail_commits)' in src
 

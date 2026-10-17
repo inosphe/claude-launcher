@@ -10057,11 +10057,14 @@ async def h_session_rail_commits(request: web.Request) -> web.Response:
     name = session.sdef.name
 
     def read():
-        # Where the list reads them from: the worktree the session moved
-        # into, else where it was started.
-        cwd = work_checkout.of(session.sdef) or _session_cwd(session)
+        # Each from where the list reads it, so a chip's PR frame does not
+        # change when the card is selected: the PRs off the run store of the
+        # directory the session was started in, the commits off the worktree
+        # it moved into, else that same directory.
+        home = _session_cwd(session)
+        cwd = work_checkout.of(session.sdef) or home
         return session_commits.rail(
-            cwd, name, session_prs.for_session(cwd, name), everything=True)
+            cwd, name, session_prs.for_session(home, name), everything=True)
 
     chips = await asyncio.to_thread(read)
     return json_response({"session": name, "rail_commits": chips})
