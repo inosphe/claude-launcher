@@ -29208,13 +29208,17 @@ function workspacesPanel(view) {
 }
 
 /* A re-render replaces every input, so the one that had focus gets it back,
-   caret at the end — a poll landing mid-typing must not steal the field. */
+   caret at the end — a poll landing mid-typing must not steal the field.
+   Only a field with a caret gets one: every <input> has setSelectionRange,
+   and on a checkbox it throws, which left the PTY host card's save half
+   done with its box disabled (claunch-xnnct.5.1). selectionStart is null
+   there instead of throwing. */
 function refocusSettingsField(focused) {
   if (!focused) return;
   const again = $(focused);
   if (!again) return;
   again.focus();
-  if (again.setSelectionRange) {
+  if (typeof again.selectionStart === "number") {
     const end = again.value.length;
     again.setSelectionRange(end, end);
   }

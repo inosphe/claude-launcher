@@ -617,6 +617,7 @@ BROWSER_CHECKS = [
         "modalonce_browser.cjs",
         "meshfold_browser.cjs",
         "sysperf_browser.cjs",
+        "ptyhostsetting_browser.cjs",
 ]
 
 
