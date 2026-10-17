@@ -676,6 +676,57 @@ def test_group_fork_limit_and_settle(tmp_path):
     assert st["forked"]["member"]
 
 
+def test_group_member_reads_its_own_result_under_a_shared_label(tmp_path):
+    # claunch-vmv24: both members report 'file' before either returns; each
+    # member's return reads the 'file' it reported, not the last one reported
+    d = Drv(tmp_path, TASKS + """
+        procedures:
+          sub:
+            params: {n: {}}
+            nodes:
+              file: {prompt: "file ${params.n}", returns: {ok: {issue: str}}}
+              pick: {prompt: "pick ${params.n}"}
+            body: [file, pick, {return: ok, value: {issue: "$result['file'].value.issue"}}]
+        body:
+          group: {name: g, run: sub, do: a}
+    """)
+    runtime.fork("g", {"n": 1}, **d.kw())
+    runtime.fork("g", {"n": 2}, **d.kw())
+    d.status()
+    files = {t["prompt"]: t["instance"] for t in d.st["tasks"] if t["label"] == "file"}
+    d.report(files["file 1"], "ok", {"issue": "x-1"})
+    d.report(files["file 2"], "ok", {"issue": "x-2"})
+    for t in [t for t in d.st["tasks"] if t["label"] == "pick"]:
+        d.report(t["instance"])
+    d.do("a")
+    assert d.st["status"] == "done"
+    assert [m["value"]["issue"] for m in d.st["value"]["members"]] == ["x-1", "x-2"]
+    # the run-wide table still keeps the last report under the label
+    assert d.state()["result"]["file"]["value"] == {"issue": "x-2"}
+
+
+def test_parallel_foreach_item_reads_its_own_result(tmp_path):
+    d = Drv(tmp_path, """
+        data: {xs: [1, 2]}
+        procedures:
+          sub:
+            params: {n: {}}
+            nodes:
+              s: {prompt: "s=${params.n}", returns: {ok: {sq: int}}}
+              t: {prompt: "t=${params.n}"}
+            body: [s, t, {return: ok, value: {sq: "$result.s.value.sq"}}]
+        body:
+          foreach: {in: "$data.xs", par: true, do: {call: sub, with: {n: "$item"}}}
+    """)
+    for t in [t for t in d.st["tasks"] if t["label"] == "s"]:
+        n = int(t["prompt"].split("=")[1])
+        d.report(t["instance"], "ok", {"sq": n * n})
+    for t in [t for t in d.st["tasks"] if t["label"] == "t"]:
+        d.report(t["instance"])
+    assert d.st["status"] == "done"
+    assert d.st["value"] == [{"sq": 1}, {"sq": 4}]
+
+
 SUBAGENT_CAPS = {"subagent.spawn": True, "mcp.claunch": True}
 
 

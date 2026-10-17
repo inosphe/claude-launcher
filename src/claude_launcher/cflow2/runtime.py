@@ -296,7 +296,7 @@ class Run:
             "data": self.state.get("data", {}),
             "prev": local.get("prev"),
             "item": local.get("item"),
-            "result": self.state.get("result", {}),
+            "result": _scoped_results(self, iid),
             "visits": self.state.get("visits", {}),
             "caps": {k: _cap_on(v) for k, v in self.caps.items()},
             "probe": self.state.get("probe", {}),
@@ -391,6 +391,36 @@ def _caps_from_json(raw: Any) -> Dict[str, Any]:
 def node_key(node: ir.Node) -> str:
     """The name a node's result and visits are kept under."""
     return node.label or node.id
+
+
+def _result_scopes(r: "Run", iid: Optional[str]) -> List[str]:
+    """``iid`` and its ancestors, innermost first, that run beside siblings of
+    the same chart: a group member, a parallel foreach item, a par branch.
+
+    Their nodes share labels (:func:`node_key`), so the run-wide ``result``
+    table holds whichever sibling reported last; each of these instances also
+    keeps the results of the nodes finished under it (claunch-vmv24)."""
+    out: List[str] = []
+    cur = iid
+    while cur and cur in r.inst:
+        role = str(r.inst[cur].get("role") or "")
+        if role == "member" or role.startswith(("item:", "branch:")):
+            out.append(cur)
+        cur = r.inst[cur].get("parent")
+    return out
+
+
+def _scoped_results(r: "Run", iid: Optional[str]) -> Dict[str, Any]:
+    """``$result`` as ``iid`` sees it: the run-wide table, with each enclosing
+    sibling instance's own results over it (the innermost last)."""
+    table = r.state.get("result", {})
+    scopes = _result_scopes(r, iid)
+    if not scopes:
+        return table
+    out = dict(table)
+    for sid in reversed(scopes):
+        out.update(r.inst[sid].get("results") or {})
+    return out
 
 
 def shown_label(chart: ir.Chart, node: ir.Node) -> Optional[str]:
@@ -1202,6 +1232,8 @@ def _complete(r: Run, iid: str, outcome: str, value: Any, handled: bool = False)
         own = value
         outcome, value = _ensures(r, iid, node, outcome, value)
         r.state["result"][key] = {"outcome": outcome, "value": value}
+        for sid in _result_scopes(r, inst.get("parent")):
+            r.inst[sid].setdefault("results", {})[key] = {"outcome": outcome, "value": value}
         if node.bind:
             # the node's own value, before ensures (doc 4.2): the variable
             # keeps the shape the node returns
