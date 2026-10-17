@@ -623,10 +623,6 @@ html[data-theme="light"] .xterm {
   display: flex; align-items: center; gap: 4px; flex-wrap: nowrap;
   flex: 1 1 0; min-width: 0; overflow: hidden;
 }
-#session-list .rail-pr {
-  flex: none; font-size: 10px; padding: 1px 5px; border-radius: 4px;
-  border: 1px solid #3b4655; color: #a5c9f5; white-space: nowrap;
-}
 .sess-prs { margin: 10px 0; }
 .sess-prs h3 { margin: 0 0 6px; font-size: 13px; }
 .sess-pr { padding: 8px 0; border-bottom: 1px solid #2a2e36; overflow-wrap: anywhere; }
@@ -910,6 +906,38 @@ html[data-theme="light"] .xterm {
   background: transparent; color: #f0a0a0; font: inherit; font-size: 10px; cursor: pointer;
 }
 #session-list .rail-proc-x:hover { background: #3a1a1a; }
+/* The session's commits (decorateCommitsRow): one chip per commit, its mark
+   saying where the commit has got to, and each PR a bordered frame around the
+   chips of the commits it carries, its number on the frame's left edge. */
+#session-list .rail-commits {
+  flex-basis: 100%; order: 2; min-width: 0; margin-left: 12px;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 3px 4px;
+  font-family: ui-monospace, monospace; font-size: 10px;
+}
+#session-list .rail-commit {
+  display: inline-flex; align-items: center; gap: 2px; white-space: nowrap;
+  color: #c9d1d9;
+}
+#session-list .rail-commit-mark { font-weight: 700; }
+#session-list .rail-commit-merged .rail-commit-mark { color: #7ee2a8; }
+#session-list .rail-commit-pushed .rail-commit-mark { color: #79c0ff; }
+#session-list .rail-commit-local .rail-commit-mark { color: #e3b341; }
+#session-list .rail-commit-unknown .rail-commit-mark { color: #8b949e; }
+#session-list .rail-prgroup {
+  display: inline-flex; align-items: center; gap: 4px; max-width: 100%;
+  flex-wrap: wrap; padding: 0 5px 0 0; border: 1px solid #3b6ea8; border-radius: 4px;
+}
+#session-list .rail-prgroup-label {
+  padding: 0 4px; background: #1d2d42;
+  border-radius: 3px 0 0 3px; color: #a5c9f5; text-decoration: none;
+  font-family: inherit; white-space: nowrap;
+}
+#session-list .rail-prgroup-label:hover { text-decoration: underline; }
+#session-list .rail-prgroup-merged { border-color: #8957e5; }
+#session-list .rail-prgroup-merged .rail-prgroup-label { background: #2a1f42; color: #d2a8ff; }
+#session-list .rail-prgroup-closed { border-color: #6e7681; border-style: dashed; }
+#session-list .rail-prgroup-closed .rail-prgroup-label { background: #22262d; color: #8b949e; }
+#session-list .rail-commit-more { color: #8b949e; }
 #session-list .rail-note {
   flex-basis: 100%; order: 2; min-width: 0; margin-left: 12px;
   padding-left: 8px; border-left: 2px solid #2f4a63;
