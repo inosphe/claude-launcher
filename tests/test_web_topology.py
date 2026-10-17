@@ -596,6 +596,7 @@ BROWSER_CHECKS = [
         "sessiontabs_browser.cjs",
         "toolbar_browser.cjs",
         "observer_browser.cjs",
+        "observer_operator_browser.cjs",
         "search_anything_browser.cjs",
         "detailroute_browser.cjs",
         "sessiongridtip_browser.cjs",

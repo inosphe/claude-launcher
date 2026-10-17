@@ -93,8 +93,11 @@
    it; sticky keeps it out of the flow's way without making it a scroller. */
 #observer-composer { position: sticky; bottom: 0; z-index: 2; flex: none; border-top: 1px solid #2a2e36; background: #1b1e24; padding: 12px 20px max(12px,env(safe-area-inset-bottom)); display: grid; grid-template-columns: auto 1fr auto; gap: 8px; }
 /* The draft grows with its text (field-sizing, and observer.js autosize where
-   that is unsupported) rather than scrolling inside the box. */
-#observer-prompt { grid-column: 1/3; resize: none; min-height: 64px; width: 100%; overflow: hidden; field-sizing: content; }
+   that is unsupported) up to 40% of the viewport, and scrolls inside the box
+   past that: the composer is pinned over the page, and a box that kept
+   growing would cover it. This box is the one exception to the page's single
+   scroller, and only while a draft is that long (claunch-iw5i8.4). */
+#observer-prompt { grid-column: 1/3; resize: none; min-height: 64px; max-height: 40vh; width: 100%; overflow-y: auto; field-sizing: content; }
 :is(#observer-view, .sess-observer) #observer-send { background: #243247; border-color: #385273; }
 #observer-input-status { grid-column: 1/-1; font-size: 12px; color: #8b949e; margin: 0 !important; }
 :is(#observer-view, .sess-observer) .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); }
@@ -322,3 +325,40 @@
 :is(#observer-view, .sess-observer) .obs-notice-text { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 :is(#observer-view, .sess-observer) .observer-notice-more { color:#8b949e; }
 :is(#observer-view, .sess-observer) .observer-more { display:block; width:100%; margin:8px 0; }
+/* Operator v2 (observer_operator.js): tabs, the selected operator's head and
+   conversation, and its form. The feed opens older entries in place and never
+   scrolls inside itself. */
+#observer-operators { margin: 0 0 12px; padding: 8px 12px; background: #161b22; border: 1px solid #2a2e36; border-radius: 8px; min-width: 0; }
+#observer-operators .op-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+#observer-operators .op-title { font-size: 14px; margin: 0; }
+#observer-operators .op-tabs { display: flex; flex-wrap: wrap; gap: 6px; }
+#observer-operators .op-tab { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 2px 12px; border-radius: 16px; }
+#observer-operators .op-tab[aria-selected="true"] { color: #f0f7ff; background: #245d87; border-color: #3b7cb0; }
+#observer-operators .op-new { color: #96a6b8; border-style: dashed; }
+#observer-operators .op-dot { width: 8px; height: 8px; border-radius: 50%; background: #6e7681; }
+#observer-operators .op-dot.on { background: #3fb950; }
+#observer-operators .op-badge { min-width: 18px; padding: 0 5px; border-radius: 9px; font-size: 11px; line-height: 18px; text-align: center; background: #30343b; color: #c9d1d9; }
+#observer-operators .op-badge.unseen { background: #9e6a03; color: #fff; }
+#observer-operators .op-head { margin: 12px 0 6px; }
+#observer-operators .op-head h3 { font-size: 14px; margin: 0 0 4px; overflow-wrap: anywhere; }
+#observer-operators .op-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
+#observer-operators .op-actions button { min-height: 36px; padding: 4px 12px; }
+#observer-operators .op-feed { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+#observer-operators .op-entry { padding: 8px 12px; border-radius: 8px; background: #1b1e24; border: 1px solid #2a2e36; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; max-width: 100%; box-sizing: border-box; }
+#observer-operators .op-user { align-self: flex-end; background: #1c2d42; border-color: #2d4a6b; max-width: min(100%, 720px); }
+#observer-operators .op-system { background: transparent; border-style: dashed; color: #8b949e; }
+#observer-operators .op-dispatch { border-left: 3px solid #58a6ff; }
+#observer-operators .op-reply { margin-left: 16px; }
+#observer-operators .level-attention { border-left: 3px solid #d29922; }
+#observer-operators .level-urgent { border-left: 3px solid #f85149; }
+#observer-operators .op-refs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+#observer-operators .op-ask-answer textarea { width: 100%; min-height: 44px; box-sizing: border-box; resize: vertical; margin-top: 6px; }
+#observer-operators .op-ask-buttons { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+#observer-operators .op-ask-buttons button { min-height: 36px; padding: 4px 12px; }
+#observer-operators .op-form { display: grid; gap: 10px; margin: 12px 0; padding: 12px; border: 1px solid #3b424e; border-radius: 8px; }
+#observer-operators .op-form h3 { font-size: 14px; margin: 0; }
+#observer-operators .op-form input:not([type=checkbox]) { font: inherit; color: #d8dbe0; background: #1b1e24; border: 1px solid #3b424e; border-radius: 6px; padding: 8px 12px; min-height: 36px; min-width: 0; flex: 1; }
+#observer-operators .op-projects { display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 0; padding: 8px 12px; border: 1px solid #2a2e36; border-radius: 6px; min-width: 0; }
+#observer-operators .op-form-actions { display: flex; gap: 8px; }
+#observer-operators .op-error { color: #f85149; }
+:is(#observer-view, .sess-observer) .observer-links .observer-ask-operator { grid-column: 1/-1; }
