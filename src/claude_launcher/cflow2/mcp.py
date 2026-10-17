@@ -476,7 +476,7 @@ def brief(payload: Dict[str, Any], keep: Any = ()) -> Dict[str, Any]:
     a node's record is stored under its label and again under each enclosing
     node it completes (``prior-context``, ``round/prior-search.try``,
     ``prior-search``). Here each distinct record appears once, under its
-    first key, with ``same`` naming the others; a value field over
+    first label key (else its first key), with ``same`` naming the others; a value field over
     :data:`BRIEF_LIMIT` is elided (``by``/``decision`` of an answered ask stay
     readable). Keys in ``keep`` stay whole. A rule whose text the task prompt
     already carries (the compiler appends it under ``── 규칙 ──``) keeps only
@@ -493,6 +493,9 @@ def brief(payload: Dict[str, Any], keep: Any = ()) -> Dict[str, Any]:
         slim: Dict[str, Any] = {}
         elided = False
         for keys in groups.values():
+            # a label (`peer-review`) before an id path (`round/land/...`):
+            # prompts name results by label
+            keys.sort(key=lambda k: "/" in k or "." in k)
             rec = result[keys[0]]
             if keep.intersection(keys) or not isinstance(rec, dict):
                 entry = dict(rec) if isinstance(rec, dict) else {"value": rec}

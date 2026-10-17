@@ -270,3 +270,13 @@ def test_brief_drops_data_inputs_equal_to_inputs():
     out = cflow2_mcp.brief({"run": "r", "inputs": {"x": 1},
                             "data": {"inputs": {"x": 1}, "landing": {"medium": "pr"}}})
     assert out["data"] == {"landing": {"medium": "pr"}} and out["inputs"] == {"x": 1}
+
+
+def test_brief_files_a_record_under_its_label():
+    """A workflow prompt reads result['peer-review'].value.by: the record sits
+    under the label even when an id path was recorded first."""
+    rec = {"outcome": "ok", "value": {"by": "unanswered", "decision": "pass"}}
+    out = cflow2_mcp.brief({"run": "r", "result": {
+        "round/land/peer-review-loop.do.0.try": rec, "peer-review": rec}})
+    assert out["result"] == {"peer-review": {**rec, "same": [
+        "round/land/peer-review-loop.do.0.try"]}}

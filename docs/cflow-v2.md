@@ -2210,8 +2210,8 @@ v1 툴과 이름이 겹치지 않도록 `flow_` 접두어를 쓴다.
 상태를 돌려주는 `flow_*` 툴은 상태를 요약판으로 돌려준다(`mcp.brief`, claunch-ejvoy.1).
 `runtime.status`는 바뀌지 않으므로 웹 UI·CLI·데몬은 전체 payload를 읽는다.
 
-- `result`: 같은 `{outcome, value}` 레코드는 처음 기록된 키 하나에만 싣고, 같은 레코드를
-  가진 다른 키는 `same`에 적는다. value의 필드 중 JSON 길이가 80자를 넘는 것은
+- `result`: 같은 `{outcome, value}` 레코드는 키 하나(라벨 키가 있으면 처음 기록된 라벨
+  키, 없으면 처음 기록된 키)에만 싣고, 같은 레코드를 가진 다른 키는 `same`에 적는다. value의 필드 중 JSON 길이가 80자를 넘는 것은
   `<elided: N chars>`로 바꾸고 `result_elided`에 그 사실을 적는다.
 - `tasks[].rules`: 규칙 본문이 그 작업의 `prompt`에 이미 들어 있으면 `{id, in_prompt: true}`만
   싣는다. 본문은 `flow_rule`로 읽는다.
