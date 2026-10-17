@@ -386,31 +386,38 @@ function chipKind(groups, text) {
   if(groups.digits!==undefined) return "commit";
   return Object.keys(groups).find(k=>groups[k]!==undefined);
 }
-function chip(kind,text) {
+/* A commit chip in a session's text links to the commit's page in that
+   session's repository (commit-page.js, claunch-tb145) where the dashboard
+   has that page; observer.html alone does not, and keeps a plain chip. */
+function chip(kind,text,session) {
   const c=node("span",kind==="session"&&!text.startsWith("@")?"@"+text:text,`obs-chip obs-chip-${kind}`);
   c.title=CHIP_TITLES[kind]||kind;
+  if(kind==="commit"&&session&&globalThis.CommitPage) {
+    globalThis.CommitPage.link(c,text,{session});
+    c.title+=" · 클릭: 커밋과 diff 보기";
+  }
   return c;
 }
-function chipsInto(parent,text) {
+function chipsInto(parent,text,session) {
   let last=0;
   for(const m of text.matchAll(new RegExp(CHIP_PATTERN,"g"))) {
     if(!m[0])continue;
     if(m.index>last)parent.append(node("span",text.slice(last,m.index)));
-    parent.append(chip(chipKind(m.groups,m[0]),m[0]));
+    parent.append(chip(chipKind(m.groups,m[0]),m[0],session));
     last=m.index+m[0].length;
   }
   if(last<text.length)parent.append(node("span",text.slice(last)));
 }
-function richLine(text,cls="obs-line") {
+function richLine(text,cls="obs-line",session="") {
   const line=node("div","",cls), source=String(text??"");
   let last=0;
   for(const m of source.matchAll(/`([^`\n]+)`/g)) {
-    if(m.index>last)chipsInto(line,source.slice(last,m.index));
+    if(m.index>last)chipsInto(line,source.slice(last,m.index),session);
     const whole=m[1].match(new RegExp(`^(?:${CHIP_PATTERN})$`));
-    line.append(whole?chip(chipKind(whole.groups,m[1]),m[1]):node("code",m[1],"obs-code"));
+    line.append(whole?chip(chipKind(whole.groups,m[1]),m[1],session):node("code",m[1],"obs-code"));
     last=m.index+m[0].length;
   }
-  if(last<source.length)chipsInto(line,source.slice(last));
+  if(last<source.length)chipsInto(line,source.slice(last),session);
   return line;
 }
 /* Runs of the same routine daemon event — a restore after every daemon
@@ -520,7 +527,7 @@ function eventItem(s,e) {
   if(e.kind==="briefing"&&isRecord) item.append(briefingSnapshot(snapshot));
   else if(e.kind==="checks"&&isRecord) item.append(checksSnapshot(snapshot));
   else {
-    head.append(richLine(e.text));
+    head.append(richLine(e.text,"obs-line",s.name));
     if(e.run) head.append(node("span",`×${e.run.count}`,"obs-count"));
   }
   if(e.origin==="daemon") {
@@ -668,7 +675,7 @@ function fillSession(body,s,actionsOnly=false) {
   body.append(node("p",activity(s).duration,"meta"),node("div",(s.meshes||[]).join(" · ")||"메시 없음","meta"));
   body.append(...sessionStatus(s));
   for(const r of sessionRuns(s).filter(r=>String(r.status).startsWith("waiting")))addGate(body,s,r);
-  body.append(s.summary?richLine(s.summary,"obs-summary"):node("p","아직 관찰 결과가 없습니다."));
+  body.append(s.summary?richLine(s.summary,"obs-summary",s.name):node("p","아직 관찰 결과가 없습니다."));
   if(s.error)body.append(node("p",s.error));
   const events=sessionEvents(s).reverse().filter(e=>!actionsOnly||(e.needs_action&&!e.acknowledged));
   const limit=expandedColumns.has(s.name)?events.length:gridLimit;
@@ -734,7 +741,7 @@ function renderPanel() {
   parts.push(links);
   if(panelLoaded&&!s)parts.push(node("p","아직 이 세션의 관찰 정보가 없습니다."));
   if(s) {
-    parts.push(s.summary?richLine(s.summary,"obs-summary"):node("p","아직 관찰 결과가 없습니다."));
+    parts.push(s.summary?richLine(s.summary,"obs-summary",s.name):node("p","아직 관찰 결과가 없습니다."));
     if(s.error)parts.push(node("p",s.error));
     for(const e of sessionEvents(s).reverse())parts.push(eventItem(s,e));
     // A session the meter never reached and whose last call was never recorded
@@ -815,7 +822,7 @@ function render() {
       if(!metered.has(s.name))card.append(...sessionStatus(s));
       if(e)card.append(eventItem(s,e));
       else if(r)addGate(card,s,r);
-      else card.append(s.summary?richLine(s.summary,"obs-summary"):node("p","아직 관찰 결과가 없습니다."),node("small",activity(s).duration));
+      else card.append(s.summary?richLine(s.summary,"obs-summary",s.name):node("p","아직 관찰 결과가 없습니다."),node("small",activity(s).duration));
       if(!metered.has(s.name)) {metered.add(s.name);const usage=usageBlock(s);if(usage)card.append(usage);}
       cardActions(card,s);cards.append(card);
     }

@@ -1470,6 +1470,9 @@
     <!-- The launcher worktrees (<repo>/.claude/worktrees/*), grouped by age,
          with the sessions in them; drawn by worktrees-page.js. -->
     <div id="worktrees-view" class="hidden"></div>
+    <!-- One commit and its diff (#/commit/<sha>), reached from every commit
+         the dashboard shows; drawn by commit-page.js. -->
+    <div id="commit-view" class="hidden"></div>
     <!-- The CLI tab: a raw, unmanaged shell on the daemon machine. Not a
          session — nothing to name, arrange or restore, just a terminal you
          can stand in. One per daemon, so its xterm (like the session
@@ -1516,6 +1519,7 @@
 <script src="static/diagram-viewport.js"></script>
 <script src="static/search-anything.js"></script>
 <script src="static/worktrees-page.js"></script>
+<script src="static/commit-page.js"></script>
 <script src="static/glossary-page.js"></script>
 <script src="static/spec-page.js"></script>
 <script src="static/sim-page.js"></script>

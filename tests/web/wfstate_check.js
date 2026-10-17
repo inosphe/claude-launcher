@@ -32,6 +32,8 @@ function slice(from, to) {
 }
 
 const code = slice("function localStamp(", "/* The clock time a turn landed at") +
+  // commitRef / commitText (claunch-tb145): the landing queue's tip uses them.
+  slice("/* A commit hash drawn as a link", "function wsWorktreeList(") +
   slice("let wfStateBoxes = {};",
         "/* Idle (cwd, scope): offer to start a new run. */");
 
@@ -200,7 +202,9 @@ check("every entry is a row with issue, status, branch @ tip and requester", () 
   ] }));
   const rows = byClass(box, "wf-landing-row");
   eq(rows.length, 2, "rows");
-  const t = texts(box);
+  // A cell's whole text: the tip is a link node inside it (claunch-tb145).
+  const deep = (n) => n.text + (n.kids || []).map(deep).join("");
+  const t = texts(box) + " | " + all(box, () => true).map(deep).join(" | ");
   for (const want of ["claunch-a1", "waiting", "s1-x @ 7faf432c",
                       "s1 · 2026-09-23 19:00", "this round", "claunch-b2",
                       "deferred"]) {

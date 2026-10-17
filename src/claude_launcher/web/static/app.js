@@ -20848,6 +20848,7 @@ function mobileTitle() {
     case "beads": return beadsSection === "reports" ? "reports"
       : beadsSection === "queues" ? "queues" : "beads";
     case "worktrees": return "worktrees";
+    case "commit": return "commit";
     case "threads": return "threads";
     case "glossary": return "용어집";
     case "sims": return "simulations";
@@ -21015,6 +21016,7 @@ const VIEWS = {
   cli: "cli-view",
   beads: "beads-view",
   worktrees: "worktrees-view",
+  commit: "commit-view",
   threads: "threads-view",
   glossary: "glossary-view",
   sims: "sims-view",
@@ -21730,6 +21732,14 @@ function parseHash(h) {
     : { page: "beads", id: parts[1] || "" };
   if (parts[0] === "reports") return { page: "beads", section: "reports" };
   if (parts[0] === "worktrees") return { page: "worktrees" };
+  // #/commit/<sha>?session=<name> (or ?cwd=<dir>): one commit and its diff
+  // (commit-page.js). The repository rides in the query, like `detail`,
+  // because a directory is full of the separators a segment is split on.
+  if (parts[0] === "commit" && parts[1]) {
+    const q = hashQuery(h);
+    return { page: "commit", sha: parts[1], session: q.get("session") || "",
+      cwd: q.get("cwd") || "" };
+  }
   if (parts[0] === "threads") return { page: "threads", view: parts[1] || "", id: parts[2] || "" };
   if (parts[0] === "glossary") return { page: "glossary" };
   if (parts[0] === "sims") return { page: "sims", id: parts[1] || "", section: parts[2] || "" };
@@ -21798,6 +21808,7 @@ function route() {
   if (r.page !== "sysperf") globalThis.SysPerfPage?.stop();
   if (r.page !== "beads") { stopBeadsPoll(); stopReportsPoll(); }
   if (r.page !== "worktrees") globalThis.WorktreesPage?.stop();
+  if (r.page !== "commit") globalThis.CommitPage?.stop();
   if (r.page !== "threads") globalThis.ThreadsHistoryPage?.stop();
   if (r.page !== "glossary") globalThis.GlossaryPage?.stop();
   if (r.page !== "sims") globalThis.SimPage?.stop();
@@ -21883,6 +21894,8 @@ function route() {
     case "workspaces": openSettings("workspaces"); break;
     case "beads": openBeads(r.id, r.section); break;
     case "worktrees": showView("worktrees"); globalThis.WorktreesPage.open(); break;
+    case "commit": showView("commit");
+      globalThis.CommitPage.open(r.sha, { session: r.session, cwd: r.cwd }); break;
     case "threads": showView("threads"); globalThis.ThreadsHistoryPage.open(r.view, r.id); break;
     case "glossary": showView("glossary"); globalThis.GlossaryPage.open(); break;
     case "sims": showView("sims"); globalThis.SimPage.open(r.id, r.section); break;
@@ -26315,6 +26328,12 @@ function sessCommits(data) {
     if (r.worktree) bits.push(r.worktree);
     row.appendChild(el("span", "sess-commit-bits", bits.join("  ·  ")));
     row.title = r.sha || "";
+    // The row opens the commit's page (commit-page.js, claunch-tb145).
+    const name = data.session && data.session.name;
+    if (name && r.sha && globalThis.CommitPage) {
+      globalThis.CommitPage.link(row, r.sha, { session: name });
+      row.title = `${r.sha}\nclick: open the commit and its diff`;
+    }
     box.appendChild(row);
   }
   return box;
@@ -31269,6 +31288,31 @@ function wsPathKey(p) {
   return String(p || "").replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
 }
 
+/* A commit hash drawn as a link to its page (commit-page.js, claunch-tb145)
+   when the repository it lives in is known -- `where` is {session} or {cwd}
+   -- and as plain text when it is not. */
+function commitRef(sha, where, cls = "mono", len = 8) {
+  const full = String(sha || "");
+  const known = !!(full && where && (where.session || where.cwd) && globalThis.CommitPage);
+  const ref = el(known ? "a" : "span", cls, full.slice(0, len));
+  if (known) {
+    globalThis.CommitPage.link(ref, full, where);
+    ref.title = `${full}\nclick: open the commit and its diff`;
+  }
+  return ref;
+}
+
+/* One line of text with commit links in it: strings become spans, nodes are
+   appended as they are. */
+function commitText(tag, cls, ...parts) {
+  const box = el(tag, cls);
+  for (const p of parts) {
+    if (p === null || p === undefined || p === "") continue;
+    box.appendChild(typeof p === "string" ? el("span", null, p) : p);
+  }
+  return box;
+}
+
 function wsWorktreeList(w) {
   const box = el("div", "ws-worktrees");
   const trees = (wsGitSummary[w.name] || {}).worktrees || [];
@@ -31277,8 +31321,10 @@ function wsWorktreeList(w) {
     const where = el("span", "mono ws-worktree-path", t.path);
     where.title = t.head ? `HEAD ${t.head}` : "";
     line.appendChild(where);
-    line.appendChild(el("span", "badge " + (t.detached ? "exited" : "idle"),
-      t.detached ? `detached ${String(t.head || "").slice(0, 8)}` : (t.branch || "?")));
+    line.appendChild(t.detached && t.head
+      ? commitText("span", "badge exited", "detached ", commitRef(t.head, { cwd: t.path }, "commit-ref"))
+      : el("span", "badge " + (t.detached ? "exited" : "idle"),
+        t.detached ? "detached" : (t.branch || "?")));
     // listed when the workspace itself is a linked worktree (claunch-k9ddh)
     if (t.main) line.appendChild(el("span", "badge idle", "main checkout"));
     if (t.prunable) line.appendChild(el("span", "badge exited", "directory gone"));
@@ -31652,8 +31698,9 @@ function wsSyncShared(name, doc, st) {
   const line = (r) => {
     const row = el("div", "ws-sync-shared-row");
     row.appendChild(el("span", "mono", r.ref));
-    const sha = el("span", "mono wf-note", r.sha.slice(0, 8));
-    sha.title = [r.subject, r.date].filter(Boolean).join(" · ");
+    const sha = commitRef(r.sha, { cwd: doc.repo }, "mono wf-note");
+    sha.title = [r.subject, r.date].filter(Boolean).join(" · ") +
+      (sha.tagName === "A" ? "\nclick: open the commit and its diff" : "");
     row.appendChild(sha);
     row.appendChild(el("span", "badge " + (r.state === "behind" || r.state === "new" ? "busy" : "idle"),
       WS_SHARED_STATE[r.state] || r.state));
@@ -31677,9 +31724,10 @@ function wsSyncShared(name, doc, st) {
 
 function wsSyncPlanLine(plan) {
   const line = el("div", "ws-sync-plan");
-  line.appendChild(el("span", "mono",
-    `${plan.branch} ${plan.local.slice(0, 8)} · ${plan.remote}/${plan.branch} ` +
-    `${plan.upstream.slice(0, 8)} · +${plan.ahead} −${plan.behind}`));
+  const where = { cwd: plan.repo };
+  line.appendChild(commitText("span", "mono",
+    `${plan.branch} `, commitRef(plan.local, where), ` · ${plan.remote}/${plan.branch} `,
+    commitRef(plan.upstream, where), ` · +${plan.ahead} −${plan.behind}`));
   line.appendChild(el("span", "badge " + (plan.action === "up-to-date" ? "idle" : "busy"),
     plan.action));
   return line;
@@ -31730,12 +31778,17 @@ function wsSyncPeers(doc) {
       let note = "";
       if (tip && tip.sha) {
         const track = (tip.tracking || []).find((t) => t.key === r.key) || {};
-        note = `${branch} ${tip.sha.slice(0, 8)}`;
         if (upstream && tip.sha === upstream) note += " = remote";
         if (track.ahead) note += ` · ${track.ahead} unpushed`;
         if (track.behind) note += ` · ${track.behind} behind (as last fetched)`;
+        // Linked only when this clone has the tip: a peer's commit that never
+        // reached the shared remote has no page here.
+        const here = r.distance && r.distance.state && r.distance.state !== "unknown";
+        tr.appendChild(commitText("td", "mono", `${branch} `,
+          commitRef(tip.sha, here ? { cwd: doc.repo } : null), note));
+      } else {
+        tr.appendChild(el("td", "mono", "no " + branch));
       }
-      tr.appendChild(el("td", "mono", note || "no " + branch));
       const d = r.distance;
       tr.appendChild(el("td", "ws-peer-distance" + (d ? ` ws-peer-${d.state}` : ""), wsPeerDistanceText(d)));
       table.appendChild(tr);
@@ -31754,8 +31807,9 @@ function wsSyncPeers(doc) {
   return box;
 }
 
-function wsSyncResult(result) {
+function wsSyncResult(result, repo) {
   const d = result.doc;
+  const where = { cwd: (d && (d.repo || (d.plan && d.plan.repo))) || repo };
   const box = el("div", "ws-sync-result" + (d.status === "delegated" ? " ws-sync-delegated" : ""));
   if (d.status === "delegated") {
     const link = el("a", "ws-sync-agent-link", `Assigned to agent ${d.agent.session}`);
@@ -31768,21 +31822,23 @@ function wsSyncResult(result) {
     return box;
   }
   if (result.kind === "sync") {
-    box.appendChild(el("div", "mono",
-      `done: ${d.plan.branch} = ${String(d.new || "").slice(0, 8)}` + (d.pushed ? " (pushed)" : "")));
+    box.appendChild(commitText("div", "mono",
+      `done: ${d.plan.branch} = `, commitRef(d.new, where), d.pushed ? " (pushed)" : ""));
     for (const r of d.restack || []) {
       box.appendChild(el("div", "mono",
         `restack ${r.branch}` + (r.worktree ? ` in ${r.worktree}` : "") + `: ${r.command}`));
     }
     for (const b of d.board || []) {
-      box.appendChild(el("div", "mono",
-        `board ${b.issue}: REBASED ${b.old.slice(0, 8)} -> ${b.new.slice(0, 8)}` +
-        (b.ok ? "" : " (comment failed)")));
+      box.appendChild(commitText("div", "mono",
+        `board ${b.issue}: REBASED `, commitRef(b.old, where), " -> ", commitRef(b.new, where),
+        b.ok ? "" : " (comment failed)"));
     }
   } else if (result.kind === "push") {
-    box.appendChild(el("div", "mono", `pushed ${d.sha.slice(0, 8)} -> ${d.remote}/${d.ref}`));
+    box.appendChild(commitText("div", "mono", "pushed ", commitRef(d.sha, where),
+      ` -> ${d.remote}/${d.ref}`));
   } else {
-    box.appendChild(el("div", "mono", `${d.branch} = ${d.sha.slice(0, 8)} (from ${d.remote})`));
+    box.appendChild(commitText("div", "mono", `${d.branch} = `, commitRef(d.sha, where),
+      ` (from ${d.remote})`));
   }
   return box;
 }
@@ -31900,8 +31956,10 @@ function wsSyncHistory(doc) {
       : `${r.remote}/${r.branch}`;
     line.appendChild(el("span", "mono", what));
     if (r.after) {
-      const tips = el("span", "mono wf-note",
-        (r.before && r.before !== r.after ? `${r.before.slice(0, 8)} → ` : "") + r.after.slice(0, 8));
+      const where = { cwd: doc.repo };
+      const tips = r.before && r.before !== r.after
+        ? commitText("span", "mono wf-note", commitRef(r.before, where), " → ", commitRef(r.after, where))
+        : commitText("span", "mono wf-note", commitRef(r.after, where));
       tips.title = r.action ? `action: ${r.action}` : "";
       line.appendChild(tips);
     }
@@ -32145,7 +32203,7 @@ function wsSyncPanel(w) {
       `Waiting for approval: answer the "repository sync wants to push" card ` +
       `at the top of the page${until}. Nothing is pushed until it is approved.`));
   }
-  if (st.result) panel.appendChild(wsSyncResult(st.result));
+  if (st.result) panel.appendChild(wsSyncResult(st.result, w.path));
   if (!doc) return panel;
   if (doc.error) {
     panel.appendChild(el("p", "wf-note wf-warning", doc.error));
@@ -33207,10 +33265,9 @@ function wfLandingBlock(data) {
       const tr = el("tr", `wf-landing-row st-${e.status || "unknown"}`);
       tr.appendChild(el("td", "mono", e.issue || "?"));
       tr.appendChild(el("td", `wf-landing-status st-${e.status || "unknown"}`, e.status || "?"));
-      tr.appendChild(el(
-        "td", "mono",
-        `${e.branch || "?"} @ ${String(e.tip || "").slice(0, 8) || "?"}`
-      ));
+      tr.appendChild(e.tip
+        ? commitText("td", "mono", `${e.branch || "?"} @ `, commitRef(e.tip, { cwd: data.cwd }))
+        : el("td", "mono", `${e.branch || "?"} @ ?`));
       const asked = e.requested_by || "?";
       const at = e.requested_at ? ` · ${localStamp(e.requested_at)}` : "";
       tr.appendChild(el("td", null, asked + at));
@@ -36854,16 +36911,20 @@ const RAIL_COMMIT_MARKS = {
   local: ["○", "local: no remote has it"],
 };
 
-function railCommitChip(c) {
+/* Each chip links to its commit's page (commit-page.js, claunch-tb145); the
+   card's own click, which attaches the session, is stopped there. */
+function railCommitChip(c, session) {
   const [mark, what] = RAIL_COMMIT_MARKS[c.state] || ["?", "state unknown"];
-  const chip = el("span", "rail-commit rail-commit-" + (RAIL_COMMIT_MARKS[c.state] ? c.state : "unknown"));
+  const chip = el("a", "rail-commit rail-commit-" + (RAIL_COMMIT_MARKS[c.state] ? c.state : "unknown"));
   chip.appendChild(el("span", "rail-commit-mark", mark));
   chip.appendChild(el("span", "rail-commit-sha", String(c.short || "").slice(0, 7)));
-  chip.title = `${c.short || ""} ${c.subject || ""}\n${mark} ${what}`;
+  chip.title = `${c.short || ""} ${c.subject || ""}\n${mark} ${what}` +
+    (session ? "\nclick: open the commit and its diff" : "");
+  if (session && globalThis.CommitPage) globalThis.CommitPage.link(chip, c.sha || c.short, { session });
   return chip;
 }
 
-function railPrFrame(pr, commits) {
+function railPrFrame(pr, commits, session) {
   const box = el("span", "rail-prgroup" + (pr.status ? " rail-prgroup-" + pr.status : ""));
   const label = el("a", "rail-prgroup-label", `#${pr.number}`);
   label.href = pr.url;
@@ -36875,7 +36936,7 @@ function railPrFrame(pr, commits) {
   // The card's own click attaches to the session; this one opens the PR.
   label.addEventListener("click", (e) => e.stopPropagation());
   box.appendChild(label);
-  for (const c of commits) box.appendChild(railCommitChip(c));
+  for (const c of commits) box.appendChild(railCommitChip(c, session));
   return box;
 }
 
@@ -36892,10 +36953,10 @@ function decorateCommitsRow(li, s) {
   node.innerHTML = "";
   const framed = new Set(prs.map((pr) => pr.number));
   for (const pr of prs) {
-    node.appendChild(railPrFrame(pr, commits.filter((c) => c.pr === pr.number)));
+    node.appendChild(railPrFrame(pr, commits.filter((c) => c.pr === pr.number), s.name));
   }
   for (const c of commits) {
-    if (!framed.has(c.pr)) node.appendChild(railCommitChip(c));
+    if (!framed.has(c.pr)) node.appendChild(railCommitChip(c, s.name));
   }
   if (rc && rc.more > 0) {
     const more = el("span", "rail-commit-more", `+${rc.more}`);
@@ -41574,7 +41635,7 @@ async function prModalLoad(st) {
    that went through before gh refused is a green row above a red one), and
    the PR link when there is one. The form is gone because the thing it was
    for has happened; a second PR is a second press of the head's button. */
-function prResultView(res) {
+function prResultView(res, session) {
   const wrap = el("div", "sess-pr-result");
   const steps = el("ul", "sess-pr-steps");
   for (const s of (res.steps || [])) {
@@ -41590,8 +41651,9 @@ function prResultView(res) {
     wrap.appendChild(a);
   }
   if (res.ok) {
-    wrap.appendChild(el("p", "sess-pr-note",
-      `${res.remote}/${res.branch} @ ${(res.tip || "").slice(0, 8)} — the session's checkout was not changed.`));
+    wrap.appendChild(commitText("p", "sess-pr-note", `${res.remote}/${res.branch} @ `,
+      commitRef(res.tip, session ? { session } : null),
+      " — the session's checkout was not changed."));
   } else {
     wrap.appendChild(el("p", "wf-warning", `failed at ${res.failed}: ${res.error || ""}`));
   }
@@ -41635,7 +41697,7 @@ async function prModalGo(st) {
   st.result = res;
   const modalBody = $("modal-body");
   modalBody.innerText = "";
-  modalBody.appendChild(prResultView(res));
+  modalBody.appendChild(prResultView(res, st.session));
   const actions = $("modal-actions");
   actions.innerHTML = "";
   const close = el("button", "wf-btn approve", "Close");
@@ -48335,13 +48397,13 @@ async function refreshReposyncGate() {
         sub.appendChild(el("span", null, " asks: "));
       }
       sub.appendChild(el("span", null, plan.summary || plan.action || "?"));
-      const tips = el(
+      const where = { cwd: plan.repo };
+      const tips = commitText(
         "div",
         "notice-sub",
-        `${plan.branch || "?"} ${(plan.local || "").slice(0, 8)} → ` +
-          `${plan.remote || "?"}` +
-          (plan.remote_key ? ` (${plan.remote_key})` : "") +
-          (plan.upstream ? ` @ ${plan.upstream.slice(0, 8)}` : "")
+        `${plan.branch || "?"} `, commitRef(plan.local, where), " → ",
+        `${plan.remote || "?"}` + (plan.remote_key ? ` (${plan.remote_key})` : ""),
+        plan.upstream ? " @ " : "", plan.upstream ? commitRef(plan.upstream, where) : ""
       );
       const clock = el("div", "notice-sub gate-clock");
       node.appendChild(title);

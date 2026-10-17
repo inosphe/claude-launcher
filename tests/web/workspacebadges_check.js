@@ -87,7 +87,7 @@ vm.createContext(ctx);
 vm.runInContext(
   "let wsGitSummary = {};\nconst wsTreesOpen = new Set();\n" +
   [slice("refreshWsGitSummary"), slice("wsGitBadges"), slice("wsRow"),
-   slice("wsPathKey"), slice("wsWorktreeList")].join("\n") +
+   slice("wsPathKey"), slice("wsWorktreeList"), slice("commitRef"), slice("commitText")].join("\n") +
   "\nthis.refresh = refreshWsGitSummary; this.badges = wsGitBadges; this.row = wsRow;" +
   "\nthis.trees = wsWorktreeList; this.treesOpen = wsTreesOpen;" +
   "\nthis.summary = () => wsGitSummary;",
@@ -96,7 +96,9 @@ vm.runInContext(
 
 // Spread first: an array made inside the vm context has that realm's
 // Array.prototype, which deepStrictEqual tells apart from this one's.
-const texts = (nodes) => [...nodes].map((n) => n.text);
+// A node's whole text: a detached head is a link inside its badge (claunch-tb145).
+const deepText = (n) => n.text + (n.children || []).map(deepText).join("");
+const texts = (nodes) => [...nodes].map(deepText);
 
 // Ahead, behind and changed together.
 let b = ctx.badges({ branch: "master", detached: false, upstream: "origin/master",

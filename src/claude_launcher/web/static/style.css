@@ -6744,6 +6744,74 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 .sess-input-cancelled { color: #6e7681; text-decoration: line-through; }
 .sess-input-cancel { margin-left: 8px; padding: 0 6px; font-size: 11px; }
 
+/* ---- Commit page (commit-page.js, #/commit/<sha>) ---- */
+#commit-view { flex: 1; overflow-y: auto; padding: 18px 26px; min-height: 0; }
+.commit-link { cursor: pointer; }
+a.commit-link { color: inherit; text-decoration: none; }
+.commit-link:hover .rail-commit-sha, .commit-link:hover .sess-commit-sha,
+.commit-link.rail-commit:hover, .sess-commit.commit-link:hover { text-decoration: underline; }
+.sess-commit.commit-link:hover { background: #1c2129; }
+.cd-head { margin-bottom: 14px; }
+.cd-top { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.cd-kicker { color: #8b949e; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+.cd-sha { font-family: ui-monospace, Consolas, monospace; font-size: 12px; color: #c9d1d9; overflow-wrap: anywhere; }
+.cd-subject { font-size: 18px; margin: 10px 0 6px; overflow-wrap: anywhere; }
+.cd-body { white-space: pre-wrap; font-family: ui-monospace, Consolas, monospace; font-size: 12px; color: #c9d1d9; background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 8px 10px; margin: 6px 0 10px; overflow-wrap: anywhere; }
+.cd-meta { display: grid; gap: 3px; font-size: 13px; }
+.cd-meta-row { display: grid; grid-template-columns: minmax(90px, max-content) 1fr; gap: 10px; }
+.cd-meta-key { color: #8b949e; }
+.cd-meta-val { overflow-wrap: anywhere; }
+.cd-meta a.cd-parent, .cd-meta a.cd-session { font-family: ui-monospace, Consolas, monospace; color: #58a6ff; }
+.cd-muted { color: #8b949e; font-size: 13px; }
+.cd-warn { color: #d29922; font-size: 13px; }
+.cd-error { color: #ff7b72; font-size: 13px; }
+.cd-files { border: 1px solid #30363d; border-radius: 6px; padding: 8px 10px; margin-bottom: 14px; }
+.cd-stats { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; font-size: 13px; }
+.cd-tools { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; }
+.cd-tools .cd-on { border-color: #58a6ff; color: #58a6ff; }
+.cd-plus { color: #3fb950; font-family: ui-monospace, Consolas, monospace; }
+.cd-minus { color: #f85149; font-family: ui-monospace, Consolas, monospace; }
+.cd-bin { color: #8b949e; font-size: 12px; }
+.cd-counts { display: inline-flex; gap: 6px; font-size: 12px; }
+.cd-file-list { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 2px; }
+.cd-file-item { display: flex; gap: 8px; align-items: center; font-size: 12px; }
+.cd-file-jump { background: none; border: 0; padding: 0; color: #c9d1d9; cursor: pointer; text-align: left; font: inherit; min-width: 0; flex: 1; overflow-wrap: anywhere; }
+.cd-file-jump:hover { color: #58a6ff; text-decoration: underline; }
+.cd-path { font-family: ui-monospace, Consolas, monospace; }
+.cd-path-old { color: #8b949e; }
+.cd-status { display: inline-block; min-width: 16px; text-align: center; font-size: 11px; font-weight: 600; border-radius: 3px; padding: 0 3px; border: 1px solid #30363d; }
+.cd-status-added { color: #3fb950; border-color: #238636; }
+.cd-status-deleted { color: #f85149; border-color: #da3633; }
+.cd-status-modified { color: #d29922; border-color: #9e6a03; }
+.cd-status-renamed, .cd-status-copied { color: #58a6ff; border-color: #1f6feb; }
+.cd-file { border: 1px solid #30363d; border-radius: 6px; margin-bottom: 12px; overflow: hidden; }
+.cd-file-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 6px 10px; background: #161b22; border-bottom: 1px solid #30363d; font-size: 13px; position: sticky; top: 0; z-index: 1; }
+.cd-file-head .cd-path { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.cd-fold { background: none; border: 0; color: #8b949e; cursor: pointer; font-size: 13px; padding: 0 2px; }
+.cd-copy { font-size: 11px; }
+.cd-file > .cd-muted, .cd-file > .cd-warn { margin: 8px 10px; }
+.cd-scroll { overflow-x: auto; }
+.cd-table { border-collapse: collapse; width: 100%; font-family: ui-monospace, Consolas, monospace; font-size: 12px; line-height: 1.45; }
+.cd-split { table-layout: fixed; }
+.cd-split .cd-col-num { width: 52px; }
+.cd-num { width: 1%; min-width: 40px; padding: 0 8px; text-align: right; color: #6e7681; user-select: none; vertical-align: top; white-space: nowrap; }
+.cd-code { padding: 0 8px; white-space: pre-wrap; overflow-wrap: anywhere; vertical-align: top; }
+.cd-unified .cd-code { white-space: pre; }
+.cd-sign { user-select: none; display: inline-block; width: 1ch; margin-right: 6px; color: #8b949e; }
+.cd-add { background: rgba(46, 160, 67, .15); }
+.cd-add .cd-sign { color: #3fb950; }
+.cd-del { background: rgba(248, 81, 73, .15); }
+.cd-del .cd-sign { color: #f85149; }
+.cd-empty { background: #161b22; }
+tr.cd-row:has(.cd-add) .cd-num, tr.cd-row:has(.cd-del) .cd-num { color: #8b949e; }
+.cd-hunk-head { background: rgba(56, 139, 253, .1); color: #8b949e; padding: 3px 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.cd-note-text { color: #8b949e; font-style: italic; padding: 0 10px; }
+@media (max-width: 700px) {
+  #commit-view { padding: 12px 16px; }
+  .cd-tools { margin-left: 0; }
+  .cd-num { min-width: 28px; padding: 0 4px; }
+  .cd-split .cd-col-num { width: 36px; }
+}
 /* ---- Worktrees page (worktrees-page.js) ---- */
 #worktrees-view { flex: 1; overflow-y: auto; padding: 18px 26px; min-height: 0; }
 #spec-view { flex: 1; overflow-y: auto; padding: 18px 26px; min-height: 0; }

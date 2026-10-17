@@ -304,8 +304,15 @@ globalThis.WorktreesPage = (() => {
     box.appendChild(top);
     box.appendChild(pathRow(w));
     const branchLine = node("div", "wt-line");
-    branchLine.appendChild(node("span", "wt-branch",
-      w.branch || `detached @ ${w.head || "?"}`));
+    const branch = node("span", "wt-branch",
+      w.branch || `detached @ ${w.head && globalThis.CommitPage ? "" : w.head || "?"}`);
+    // A detached head links to its commit's page (commit-page.js).
+    if (!w.branch && w.head && globalThis.CommitPage) {
+      const head = globalThis.CommitPage.link(node("a", "mono", w.head), w.head, { cwd: w.path });
+      head.title = `${w.head}\nclick: open the commit and its diff`;
+      branch.appendChild(head);
+    }
+    branchLine.appendChild(branch);
     const [cls, text, title] = mergeLabel(w);
     const merged = node("span", `wt-chip merge-${cls}`, text);
     merged.title = title;

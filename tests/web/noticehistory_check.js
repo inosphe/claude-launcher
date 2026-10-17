@@ -172,7 +172,9 @@ function build(opts) {
   const loc = { hash: "" };
   const layouts = {};   // session -> split layout, as setSessLayout left it
   const code = slice("/* notices — the page's own voice",
-                     "pollTimer = setInterval(pollTick, DASHBOARD_POLL_MS);");
+                     "pollTimer = setInterval(pollTick, DASHBOARD_POLL_MS);") +
+    // commitRef / commitText (claunch-tb145): the gate's tips line uses them.
+    "\n" + slice("/* A commit hash drawn as a link", "function wsWorktreeList(");
   const noop = () => {};
   const api = new Function(
     "$", "el", "setTimeout", "clearTimeout", "Date", "api", "location",
