@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+import types
 
 import pytest
 import yaml
@@ -295,13 +296,23 @@ def test_load_disk_ttl_collapses_a_same_instant_burst(config_file, monkeypatch):
 
 def test_load_disk_ttl_expires(config_file, monkeypatch):
     """Past the TTL window, load() re-opens the file and sees a change made
-    without going through save() (e.g. a hand edit)."""
+    without going through save() (e.g. a hand edit).
+
+    The clock is fixed: store reads time only through ``monotonic``, so a
+    stand-in lets the test place "now" inside and past the window without
+    depending on how long the file I/O took under load.
+    """
+    now = [1000.0]
+    monkeypatch.setattr(
+        store, "time", types.SimpleNamespace(monotonic=lambda: now[0])
+    )
     store.save({"profiles": {"a": {"env": {"X": "1"}}}})
     store.load()
     text = config_file.read_text(encoding="utf-8")
     config_file.write_text(text.replace("X: '1'", "X: '2'"), encoding="utf-8")
+    now[0] += store._DISK_TTL / 2
     assert store.load()["profiles"]["a"]["env"] == {"X": "1"}  # still within TTL
-    monkeypatch.setattr(store, "_disk_read_at", store._disk_read_at - store._DISK_TTL)
+    now[0] += store._DISK_TTL
     assert store.load()["profiles"]["a"]["env"] == {"X": "2"}
 
 
