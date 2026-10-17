@@ -131,6 +131,7 @@ new Function(
   + slice("prCheck") + slice("buildPrForm") + slice("syncPrGates") + slice("prPayload")
   + slice("prApplyPreview") + slice("prModalKey") + slice("prModalClose")
   + slice("openPrModal") + slice("prModalLoad") + slice("prResultView") + slice("prModalGo")
+  + slice("commitRef") + slice("commitText")
   + slice("sessHead")
   + `
 Object.assign(exports, {

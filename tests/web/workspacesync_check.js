@@ -66,6 +66,9 @@ function el(tag, cls, text) {
   };
 }
 
+// A node's whole text: commit hashes are link nodes inside a line
+// (claunch-tb145), so a line's words are its own text and its children's.
+function deep(n) { return (n.text || "") + (n.children || []).map(deep).join(""); }
 function walk(node, out = []) {
   out.push(node);
   for (const c of node.children || []) walk(c, out);
@@ -123,7 +126,7 @@ vm.runInContext(
        "wsSyncBranch", "wsSyncPlanLine", "wsSyncPeers", "wsSyncResult",
        "wsSyncRemoteComparisons", "wsSyncPanel", "wsSyncPullBody", "wsSyncShared", "wsSyncUnmerged",
        "wsPeerDistanceText", "wsSyncHistory", "wsHistoryApproval", "wsAgo", "wsSyncUnmergedRow",
-       "wsSyncWhyDisabled", "wsSyncButtonRow"].map(slice),
+       "wsSyncWhyDisabled", "wsSyncButtonRow", "commitRef", "commitText"].map(slice),
    ...["wsSyncAgentBody", "wsSyncAgentBlocked", "wsSyncAgentControls", "wsSyncParentLabel", "wsSyncPromptText",
        "wsSyncPromptBody", "wsSyncPreviewPrompt", "wsSyncOperationPreview", "wsLocalSyncControls"].map(slice),
    "globalThis.__st = wsSyncSt;"].join("\n"),
@@ -145,7 +148,7 @@ async function tick() {
   const st = ctx.__st("proj");
   assert.equal(st.pushBranch, "s1-x", "the push picker defaults to a work branch");
   let nodes = walk(ctx.wsSyncPanel(W));
-  const texts = nodes.map((n) => n.text);
+  const texts = nodes.map(deep);
   assert.ok(texts.includes("Rebase & push"), "the button names the plan's action");
   assert.ok(texts.includes("rebase"), "the action badge");
   assert.ok(texts.some((t) => t.startsWith("left on the old commits: s1-x")));
@@ -198,7 +201,7 @@ async function tick() {
     remote: "origin", branch: "master", local: PLAN.local, upstream: PLAN.upstream });
   assert.equal(st.waiting.request, "r1");
   assert.equal(gateRefreshed, 1, "the card is fetched at once");
-  nodes = walk(ctx.wsSyncPanel(W)).map((n) => n.text);
+  nodes = walk(ctx.wsSyncPanel(W)).map(deep);
   assert.ok(nodes.includes("Waiting for approval…"), "the button says it waits");
   assert.ok(nodes.some((t) => t.startsWith("Waiting for approval: answer the")));
   // the card is still pending: read again later, send nothing
@@ -223,7 +226,7 @@ async function tick() {
   assert.deepEqual(sent[1].body, {
     remote: "origin", branch: "master", local: PLAN.local, upstream: PLAN.upstream, request: "r1" });
   assert.equal(st.waiting, null);
-  nodes = walk(ctx.wsSyncResult(st.result)).map((n) => n.text);
+  nodes = walk(ctx.wsSyncResult(st.result)).map(deep);
   assert.ok(nodes.includes("done: master = dddddddd (pushed)"));
   assert.ok(nodes.includes("restack s1-x: git rebase --onto d a s1-x"));
   assert.equal(calls[calls.length - 1].url, "/api/reposync/workspaces/proj/status?fetch=0",
@@ -332,11 +335,11 @@ async function tick() {
   nodes = walk(ctx.wsSyncPanel(W));
   const land = nodes.find((n) => (n.cls || "").includes("ws-sync-unmerged"));
   assert.ok(land, "the section sits in the panel");
-  const landTexts = walk(land).map((n) => n.text);
+  const landTexts = walk(land).map(deep);
   assert.ok(landTexts.includes("Waiting to land (2)"));
   const landRows = walk(land).filter((n) => n.cls === "ws-sync-unmerged-row");
   assert.equal(landRows.length, 2);
-  assert.deepEqual(landRows[0].children.map((n) => n.text),
+  assert.deepEqual(landRows[0].children.map(deep),
                    ["s1-open", "+3", ctx.wsAgo("2026-10-08T17:01:02+09:00"), "s43"]);
   assert.equal(landRows[0].children[2].title, "2026-10-08 17:01", "the full time on hover");
   assert.ok(landTexts.some((t) => /1 made by a session, 1 unstamped/.test(t)), "one line of counts");
@@ -364,7 +367,7 @@ async function tick() {
   assert.equal(ctx.wsAgo("2026-10-04T12:00:00Z", now), "4d");
   assert.equal(ctx.wsAgo("", now), "");
   st.doc = { ...DOC, plan: PLAN, unmerged: [] };
-  nodes = walk(ctx.wsSyncPanel(W)).map((n) => n.text);
+  nodes = walk(ctx.wsSyncPanel(W)).map(deep);
   assert.ok(nodes.includes("Waiting to land (0)"));
   assert.ok(nodes.includes("Every local branch is already on origin/master."));
 
@@ -375,10 +378,10 @@ async function tick() {
   nodes = walk(ctx.wsSyncPanel(W));
   const table = nodes.find((n) => n.cls === "ws-sync-peers-table");
   assert.ok(table, "peers are a table");
-  assert.deepEqual(table.children[0].children.map((n) => n.text),
+  assert.deepEqual(table.children[0].children.map(deep),
                    ["Machine", "Workspace", "Master tip", "Against ours"]);
   const peerRow = table.children[1];
-  assert.deepEqual(peerRow.children.map((n) => n.text),
+  assert.deepEqual(peerRow.children.map(deep),
                    ["pc-b", "proj · up", "master bbbbbbbb = remote · 3 unpushed", "2 ahead of ours"]);
   assert.match(peerRow.children[3].cls, /ws-peer-ahead/);
   const dead = table.children[2];
@@ -422,16 +425,16 @@ async function tick() {
   const [sync, push, pull] = hist.children.filter((n) => n.cls === "ws-sync-history-row");
   assert.equal(h.tag, "summary");
   assert.equal(h.text, "History (3)");
-  assert.ok(hist.children.some((n) => /plain git push is not recorded/.test(n.text)),
+  assert.ok(hist.children.some((n) => /plain git push is not recorded/.test(deep(n))),
             "says what the record leaves out");
-  assert.deepEqual(sync.children.map((n) => n.text), [
+  assert.deepEqual(sync.children.map(deep), [
     "2026-10-08 10:05", "sync · pushed", "origin/master", "aaaaaaaa → bbbbbbbb", "s9",
     "approved on card r1 (web 10:04 UTC)"]);
   assert.equal(sync.children[4].href, "#/s/s9");
-  assert.deepEqual(push.children.map((n) => n.text), [
+  assert.deepEqual(push.children.map(deep), [
     "2026-10-08 09:00", "push · pushed", "s1-work → origin/pc-a/s1-work", "cccccccc",
     "Sync panel", "no card (reposync_push: auto)"]);
-  assert.deepEqual(pull.children.map((n) => n.text), [
+  assert.deepEqual(pull.children.map(deep), [
     "2026-10-08 08:00", "pull failed", "nope ← origin/pc-b/nope", "terminal",
     "nothing pushed, no approval needed", "no such branch"]);
   assert.match(pull.children[1].cls, /exited/);
@@ -527,7 +530,7 @@ async function tick() {
     {remote: "origin", branch: "master", state: "behind", ahead: 0, behind: 3, fetched: true},
     {remote: "other", branch: "master", state: "diverged", ahead: 2, behind: 4, fetched: false, error: "fetch failed"},
     {remote: "empty", branch: "master", state: "missing-tracking", ahead: null, behind: null, fetched: true},
-  ]})).map(n => n.text).join("\n");
+  ]})).map(deep).join("\n");
   for (const text of ["origin/master", "local can fast-forward", "ahead 0 · behind 3", "Diverged", "fetch failed", "freshness unverified", "No remote-tracking branch", "ahead — · behind —"]) assert.ok(remoteText.includes(text), text);
   console.log("workspacesync_check ok");
 })().catch((err) => { console.error(err); process.exit(1); });

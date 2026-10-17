@@ -556,6 +556,7 @@ CHECKS = [
         "operator_check.js",
         "chat_check.js",
         "worktreespage_check.js",
+        "commitpage_check.js",
         "glossarypage_check.js",
         "simpage_check.js",
         "durableflow_check.js",

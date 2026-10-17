@@ -445,7 +445,10 @@ def rail(
                 owner[sha] = (len(inside), int(pr["number"]))
     out = []
     for c in rows:
-        row = {"short": c["short"], "subject": c["subject"], "state": c["state"]}
+        # ``sha`` is what the chip's link to the commit page names: a short
+        # hash unique today can stop being unique as the repository grows.
+        row = {"sha": c["sha"], "short": c["short"], "subject": c["subject"],
+               "state": c["state"]}
         if c["sha"] in owner:
             row["pr"] = owner[c["sha"]][1]
         out.append(row)

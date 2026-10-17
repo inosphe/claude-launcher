@@ -49,7 +49,7 @@ from .. import (
 from .. import auto_compact as auto_compact_mod
 from .. import install
 from .. import install_plan
-from .. import session_commits
+from .. import commit_detail, session_commits
 from .. import beads_db, beads_meta
 from .. import ghcli, prflow, projects, reposync, reposync_flow, spawn as spawn_mod, store, workspaces
 from .. import workspace_usage
@@ -783,6 +783,7 @@ def build_app(
     r.add_get("/api/workspaces/usage", h_workspace_usage)
     r.add_post("/api/workspaces/{name}/usage", h_workspace_usage_measure)
     r.add_get("/api/git", h_git)
+    r.add_get("/api/commit", h_commit)
     r.add_get("/api/worktrees", h_worktrees)
     r.add_get("/api/worktrees/changes", h_worktree_changes)
     r.add_post("/api/worktrees/remove", h_worktrees_remove)
@@ -3147,6 +3148,45 @@ async def h_git(request: web.Request) -> web.Response:
     # at 450-800ms of loop stall per call on a busy checkout).
     info = await asyncio.to_thread(worktree_mod.info, cwd)
     return json_response({"cwd": cwd, **info})
+
+
+async def h_commit(request: web.Request) -> web.Response:
+    """One commit with its diff, for the dashboard's commit page.
+
+    Query: ``sha`` and the repository it lives in, named one of two ways --
+    ``session`` (the session whose directory's repository it is: every list
+    of a session's commits has that name to hand) or ``cwd`` (a directory,
+    for the surfaces that know a repository but no session). A ``cwd`` must
+    belong to a repository the fleet already works in (a workspace's or a
+    session's), so this endpoint cannot be pointed at an arbitrary directory
+    on the daemon's machine. See :mod:`claude_launcher.commit_detail`.
+    """
+    sha = request.query.get("sha", "")
+    name = request.query.get("session", "")
+    manager: SessionManager = request.app["manager"]
+    if name:
+        try:
+            cwd = _session_cwd(manager.get(name))
+        except (ManagerError, KeyError):
+            return json_error(404, f"no session named {name}")
+        if not cwd:
+            return json_error(400, f"session {name} has no directory")
+    else:
+        cwd = request.query.get("cwd", "")
+        if not cwd:
+            return json_error(400, "session or cwd is required")
+        sessions = _worktree_sessions(manager)
+        known = await asyncio.to_thread(
+            lambda: {worktree_inventory._key(r) for r in _worktree_roots(sessions)}
+        )
+        root = await asyncio.to_thread(worktree_inventory.repo_roots, [cwd])
+        if not root or worktree_inventory._key(root[0]) not in known:
+            return json_error(404, "not a repository any workspace or session uses")
+    try:
+        detail = await asyncio.to_thread(commit_detail.read, cwd, sha)
+    except commit_detail.CommitError as exc:
+        return json_error(exc.status, str(exc))
+    return json_response({"cwd": cwd, "session": name or None, **detail})
 
 
 def _worktree_sessions(manager: "SessionManager") -> List[dict]:
