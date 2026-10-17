@@ -1,8 +1,8 @@
-/* Operator: conversation on the left, watched sessions on the right. The same
-   host is built into #operator-view and into the modal (operator.js). Colours
+/* Operator v1 page (#/operator): conversation on the left, watched sessions
+   on the right (operator.js). The floating dock is operator_fab.css. Colours
    follow observer.css. */
 #operator-view { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; overflow: hidden; font-size: 13px; }
-.operator-modal, .operator-host, .operator-host * { box-sizing: border-box; }
+.operator-host, .operator-host * { box-sizing: border-box; }
 .operator-host { display: flex; flex-direction: column; min-height: 0; min-width: 0; flex: 1; color: #d8dbe0; font-size: 13px; }
 .operator-host button, .operator-host select, .operator-host textarea {
   font: inherit; color: #d8dbe0; background: #1b1e24; border: 1px solid #3b424e;
@@ -64,37 +64,6 @@
 .operator-badge-count { display: inline-block; min-width: 16px; margin-left: 6px; padding: 0 5px; border-radius: 8px; background: #da3633; color: #fff; font-size: 11px; line-height: 16px; text-align: center; }
 .operator-badge-count[hidden] { display: none; }
 
-/* The modal: the same host, over any page. */
-.operator-modal { width: min(1100px, calc(100vw - 32px)); height: min(760px, calc(100vh - 48px)); margin: auto; padding: 0; border: 1px solid #3b424e; border-radius: 10px; background: #14171c; color: #d8dbe0; }
-.operator-modal[open] { display: flex; flex-direction: column; }
-.operator-modal::backdrop { background: rgba(0, 0, 0, .55); }
-.operator-modal-root { flex: 1; min-height: 0; display: flex; }
-.operator-modal-close { position: absolute; top: 8px; right: 8px; z-index: 1; width: 28px; height: 28px; font-size: 18px; color: #8b949e; background: none; border: none; cursor: pointer; }
-.operator-modal .operator-head { padding-right: 44px; }
-
-/* The floating dock: one control in the corner holding a segment per panel —
-   the Operator's (operator.js) and Chat's (chat.js). Each script appends its
-   button to #fab-dock; the dock's 1px gap over its own background draws the
-   divider, so a segment hidden on its own page leaves no stray line. */
-.fab-dock { position: fixed; right: 16px; bottom: 16px; z-index: 50; display: inline-flex; gap: 1px; border: 1px solid #3b424e; border-radius: 16px; background: #3b424e; overflow: hidden; box-shadow: 0 3px 10px rgba(0, 0, 0, .4); }
-.fab-dock > button { display: inline-flex; align-items: center; gap: 5px; height: 30px; padding: 0 11px; border: none; border-radius: 0; background: #161a20; color: #d8dbe0; font: inherit; font-size: 12px; cursor: pointer; }
-.fab-dock > button:hover { background: #1f242c; }
-/* A session page's input bar (#term-input) runs along the bottom with its
-   send button at the right end; stand the dock above the bar's resting
-   height. The bar grows upward and the button stays at its bottom edge. */
-body:has(#term-input:not(.hidden)) .fab-dock { bottom: 60px; }
-.fab-dock > button:focus-visible { outline: 2px solid #58a6ff; outline-offset: -2px; }
-.fab-dock .operator-badge-count, .fab-dock .chat-badge-count { margin-left: 2px; }
-/* Icon and badge only, which keeps the dock narrower than the single
-   Operator button it replaces; the names are in each button's title and
-   aria-label. */
-.fab-dock .operator-fab-label, .fab-dock .chat-fab-label { display: none; }
-.operator-fab { order: 2; }
-/* On the Operator page itself the page is the conversation; the button
-   would only open a second copy of it. */
-body.operator-page .operator-fab { display: none; }
-.fab-dock > .operator-fab-alert { box-shadow: inset 0 -2px 0 #da3633; }
-.operator-fab-icon { color: #58a6ff; }
 /* Keep the composer's send button clear of the dock's remaining segment. */
 body.operator-page #operator-view .operator-composer { padding-right: 72px; }
 
@@ -104,13 +73,9 @@ body.operator-page #operator-view .operator-composer { padding-right: 72px; }
   .operator-side { max-height: 30vh; border-top: 1px solid #2a2e36; }
   .operator-feed, .operator-composer, .operator-head { padding-left: 16px; padding-right: 16px; }
   .operator-item { max-width: 100%; }
-  .fab-dock { bottom: 72px; }
-  body:has(#term-input:not(.hidden)) .fab-dock { bottom: 84px; }
-  .fab-dock > button { height: 34px; padding: 0 12px; }
   .operator-host button, .operator-host select, .operator-host textarea { min-height: 36px; }
   /* Here the dock floats above the rail and the composer; nothing to clear. */
   body.operator-page #operator-view .operator-composer { padding-right: 16px; }
-  .operator-modal { width: 100%; height: 100%; max-width: none; max-height: none; margin: 0; border: none; border-radius: 0; }
 }
 
 /* Session labels carry the session list's status dot; the colours are the

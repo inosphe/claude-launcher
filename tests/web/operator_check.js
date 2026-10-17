@@ -1,4 +1,5 @@
-/* The Operator panel (operator.js), its page and its modal.
+/* The Operator v1 panel (operator.js) and its page. The floating button and
+   its modal are operator v2's now (operator_fab.js, claunch-iw5i8.5).
 
    What has to hold:
      helpers       -- the open asks are the unanswered ones; a notification is
@@ -12,9 +13,9 @@
      text only     -- operator.js never assigns HTML: every string in the feed
                       came from an agent or a user.
      wired         -- the page has a route, a view, a nav entry with the badge,
-                      and the script and stylesheet are loaded; the modal is
-                      reachable from any page through the floating button and
-                      Alt+O. */
+                      and the script and stylesheet are loaded; the floating
+                      button, its modal and Alt+O are operator_fab.js's, and
+                      nothing of them is left here. */
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
@@ -22,6 +23,7 @@ const root = path.join(__dirname, "..", "..", "src", "claude_launcher", "web", "
 const src = fs.readFileSync(path.join(root, "operator.js"), "utf8");
 const app = fs.readFileSync(path.join(root, "app.js"), "utf8");
 const html = fs.readFileSync(path.join(root, "index.html"), "utf8");
+const fab = fs.readFileSync(path.join(root, "operator_fab.js"), "utf8");
 
 function slice(source, name) {
   const start = source.indexOf(`function ${name}(`);
@@ -150,10 +152,10 @@ check("every text the feed draws goes through the session linker",
       (src.match(/linkSessions\(/g) || []).length, 7);
 
 check("a daemon restart entry gets its own look", src.includes("operator-event-${e.event}"), true);
-check("opening or leaving the page or the modal marks the badge seen",
+check("opening or leaving the page marks the badge seen",
       [src.includes('request("api/operator/seen", {})'),
-       src.includes("if (pageOpen) markSeen();"), src.includes('modal.addEventListener("close", () => { markSeen(); detachIdle(); });'),
-       (src.match(/refresh\(\); poll\(\); markSeen\(\);/g) || []).length], [true, true, true, 2]);
+       src.includes("if (pageOpen) markSeen();"),
+       (src.match(/refresh\(\); poll\(\); markSeen\(\);/g) || []).length], [true, true, 1]);
 
 const options = [{value: "a:claude", harness: "claude"}, {value: "a:pi", harness: "pi"}];
 const caps = {claude: {models: ["sonnet", "opus"], efforts: ["high"]}, pi: {models: [], efforts: []}};
@@ -176,8 +178,8 @@ check("a running operator's header offers the mode switch, which posts to api/op
       [true, true]);
 check("the operator's own session links to its terminal",
       [src.includes('sessionLink(op.name, "operator-self")'), src.includes('a.href = "#/s/" + encodeURIComponent(name)')], [true, true]);
-check("a session link in the modal closes the modal",
-      /modalRoot\.addEventListener\("click"[^\n]*\n[^\n]*a\[href\^="#\/"\][^\n]*modal\.close\(\)/.test(src), true);
+check("a session link in the floating Operator closes it",
+      /root\.addEventListener\("click"[^\n]*\n[^\n]*a\[href\^="#\/"\][^\n]*modal\.close\(\)/.test(fab), true);
 
 check("operator.js never assigns HTML", /innerHTML|outerHTML|insertAdjacentHTML/.test(src), false);
 check("the route parses", app.includes('if (parts[0] === "operator") return { page: "operator" };'), true);
@@ -185,14 +187,20 @@ check("the route opens the page", app.includes('case "operator": showView("opera
 check("leaving the page stops its poll", app.includes('if (r.page !== "operator") globalThis.OperatorPanel?.stop();'), true);
 check("the view is registered", app.includes('operator: "operator-view",'), true);
 check("the view exists", html.includes('<section id="operator-view"'), true);
-check("while the page or the modal is open, every badge poll marks it seen again",
-      src.includes("if (pageOpen || modal.open) return markSeen();"), true);
+check("while the page is open, every badge poll marks it seen again",
+      src.includes("if (pageOpen) return markSeen();"), true);
 check("the nav entry sits next to Observer and carries the badge",
       /data-page="observer">[^\n]*\n\s*<a href="#\/operator" data-page="operator">[^\n]*id="operator-nav-badge"/.test(html), true);
 check("script and stylesheet are loaded",
       [html.includes('<script src="static/operator.js"></script>'), html.includes('href="static/operator.css"')], [true, true]);
-check("the modal opens from anywhere: floating button (a segment of the shared dock) and Alt+O",
-      [src.includes('fabDock().append(fab)'), src.includes('dock.id = "fab-dock"'), /event\.altKey[^\n]*event\.key === "o"/.test(src)], [true, true, true]);
+check("the floating Operator opens from anywhere: a segment of the shared dock and Alt+O, both v2 (operator_fab.js)",
+      [fab.includes('fabDock().append(fab)'), fab.includes('dock.id = "fab-dock"'), /event\.altKey[^\n]*event\.key === "o"/.test(fab),
+       fab.includes("OperatorView.create("), html.includes('<script src="static/operator_fab.js"></script>'), html.includes('href="static/operator_fab.css"')],
+      [true, true, true, true, true, true]);
+check("nothing of the floating button, its modal or Alt+O is left in v1",
+      [/operator-fab|fabDock|showModal|event\.altKey/.test(src), /\.operator-fab|\.fab-dock|\.operator-modal/.test(fs.readFileSync(path.join(root, "operator.css"), "utf8"))],
+      [false, false]);
+check("operator_fab.js never assigns HTML", /innerHTML|outerHTML|insertAdjacentHTML/.test(fab), false);
 check("user input goes to the daemon, not a terminal",
       [src.includes("api/operator/message"), /api\/sessions\/[^"`]*\/(deliver|keys)/.test(src)], [true, false]);
 

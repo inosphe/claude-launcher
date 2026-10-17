@@ -6,18 +6,34 @@
    answers. There is no live channel: observer.js polls refresh() with its own
    ten-second tick, and every write here reads again at once.
    The section never scrolls inside itself: the feed draws its newest entries
-   and opens the rest in place, the way a session card does. */
-globalThis.ObserverOperators = (() => {
+   and opens the rest in place, the way a session card does.
+   The floating Operator (operator_fab.js, claunch-iw5i8.5) draws the same
+   tabs and conversation in its dialog: OperatorView.create makes one view per
+   host, each with its own list, selection and feed. Options:
+     key      the localStorage key that keeps the selection
+     active() whether the conversation is in front of the reader now (an
+              unseen ask shown then is marked seen)
+     scroller() the element whose scroll a redraw keeps
+     manage   the 「+ 새 operator」 tab, the form, start/stop, watch, edit
+              and delete (the page); off, the head links to the page instead
+     composer an input row of the view's own (the page uses its composer) */
+globalThis.OperatorView = {create: options => operatorView(options || {})};
+globalThis.ObserverOperators = OperatorView.create({
+  key: "claunch-observer-operator", manage: true,
+  active: () => document.body.classList.contains("observer-active"),
+  scroller: () => document.getElementById("observer-view"),
+});
+function operatorView(opts) {
 "use strict";
 const FEED_SHOWN = 20;
 const LEVELS = {info:"알림",attention:"확인 필요",urgent:"긴급"};
 const node = (tag, text, cls) => { const e = document.createElement(tag); e.textContent = text; if(cls)e.className=cls; return e; };
-let root = null, onChange = () => {};
+let root = null, area = null, onChange = () => {};
 let list = [], detail = null, selected = "", loaded = false, listError = "";
 let projects = [], profiles = [], form = null, formError = "", busy = false, expanded = false;
 let listSignature = "", task = null;
 const askDrafts = new Map();
-try { selected = localStorage.getItem("claunch-observer-operator") || ""; } catch { /* this visit only */ }
+try { selected = localStorage.getItem(opts.key) || ""; } catch { /* this visit only */ }
 /* api() is app.js's (cookie session, relogin). The daemon answers a refusal
    either as {"error": ...} or, for a 409 it raises, as plain text. */
 async function call(path, method = "GET", body) {
@@ -33,19 +49,25 @@ async function call(path, method = "GET", body) {
 const opPath = (id, rest = "") => `api/operators/${encodeURIComponent(id)}${rest}`;
 const current = () => list.find(o => o.id === selected) || null;
 function choose(id) {
+  const moved = id !== selected;
   selected = id; expanded = false; detail = detail?.id === id ? detail : null;
-  try { localStorage.setItem("claunch-observer-operator", id); } catch { /* this visit only */ }
+  if(moved) syncDraft();
+  try { localStorage.setItem(opts.key, id); } catch { /* this visit only */ }
 }
 /* Whose scope a session is in: an all-projects operator covers every session,
    a scoped one the sessions filed under its projects. The session's project is
    the app's session list (sessionsCache), the same record the rail reads; a
    session the list has not reached yet reads as the default project, the way
-   the daemon's projects.normalize reads a record without one. */
+   the daemon's projects.normalize reads a record without one. A session
+   read on its own (focusSession, before the list's first poll lands) fills in
+   for a list that has not reached it. */
+const sessionRows = new Map();
 function projectOf(name) {
   const rows = typeof sessionsCache !== "undefined" && Array.isArray(sessionsCache) ? sessionsCache : [];
-  const row = rows.find(s => s.name === name);
+  const row = rows.find(s => s.name === name) || sessionRows.get(name);
   return String(row?.project || "").trim() || "default";
 }
+const listed = name => typeof sessionsCache !== "undefined" && Array.isArray(sessionsCache) && sessionsCache.some(s => s.name === name);
 const covers = (op, name) => op.all || (op.projects || []).includes(projectOf(name));
 /* The operator to ask about one session: the selected one when it covers the
    session, else the first that does; null when none does. */
@@ -76,7 +98,7 @@ function refresh() {
     if(selected) {
       try {
         detail = await call(opPath(selected));
-        if(detail.unseen > 0 && !document.hidden && document.body.classList.contains("observer-active")) {
+        if(detail.unseen > 0 && !document.hidden && opts.active?.()) {
           const seen = await call(opPath(selected, "/seen"), "POST", {});
           list = list.map(o => o.id === seen.id ? {...o, ...seen} : o);
         }
@@ -85,7 +107,7 @@ function refresh() {
     const signature = JSON.stringify(list.map(o => [o.id, o.name, o.all, o.projects]));
     if(signature !== listSignature) { listSignature = signature; onChange(); }
     // An ask answer being typed survives a poll that would redraw it away.
-    if(!root?.contains(document.activeElement) || !document.activeElement.matches("textarea,input,select")) render();
+    if(!area?.contains(document.activeElement) || !document.activeElement.matches("textarea,input,select")) render();
   })().finally(() => { task = null; });
   return task;
 }
@@ -239,6 +261,12 @@ function head(op) {
   const title = node("h3", op.name + " ");
   title.append(node("span", running(op) ? "실행 중" : "정지됨", `state ${running(op) ? "working" : "idle"}`));
   box.append(title, node("small", `범위: ${scopeText(op)} · ${stateText(op)}`, "op-scope"));
+  if(!opts.manage) {
+    const page = node("a", "Observer에서 관리", "op-manage");page.href = "#/observer";
+    page.title = "시작·정지, 감시, 범위 설정은 Observer 페이지의 Operator 영역에 있습니다";
+    box.append(" ", page);
+    return box;
+  }
   const row = node("div", "", "op-actions");
   const start = node("button", running(op) ? "정지" : "시작");start.type = "button";start.disabled = busy;
   start.title = running(op) ? "operator 세션을 정지합니다" : op.profile ? `${op.profile}로 operator 세션을 시작합니다` : "시작하려면 설정에서 프로필을 고르십시오";
@@ -276,10 +304,12 @@ function render() {
     tab.onclick = () => { choose(op.id); form = null; render(); onChange(); refresh(); };
     tabs.append(tab);
   }
-  const add = node("button", "+ 새 operator", "op-tab op-new");add.type = "button";
-  add.title = "범위(프로젝트 또는 전체 프로젝트)를 정해 operator를 만듭니다";
-  add.onclick = () => openForm(null);
-  tabs.append(add);
+  if(opts.manage) {
+    const add = node("button", "+ 새 operator", "op-tab op-new");add.type = "button";
+    add.title = "범위(프로젝트 또는 전체 프로젝트)를 정해 operator를 만듭니다";
+    add.onclick = () => openForm(null);
+    tabs.append(add);
+  }
   // Title and tabs share one row, so a page with no operator spends one line
   // on this section and the session board keeps its height.
   const bar = node("div", "", "op-bar");
@@ -290,16 +320,67 @@ function render() {
   if(form) parts.push(formBox());
   const op = current();
   if(op) parts.push(head(op), feedBox(op));
-  // The page is the one scroller; a rebuild here must not move it.
-  const page = document.getElementById("observer-view"), top = page?.scrollTop;
-  root.replaceChildren(...parts);
-  if(page) page.scrollTop = top;
+  else if(!opts.manage && loaded && !list.length && !listError) {
+    const empty = node("p", "operator가 없습니다. ", "hint");
+    const page = node("a", "Observer에서 만들기");page.href = "#/observer";
+    empty.append(page);parts.push(empty);
+  }
+  // A rebuild must not move the scroller it sits in. One that was at the end
+  // stays at the end, so a new entry in the view's own conversation shows.
+  const page = opts.scroller?.(), top = page?.scrollTop;
+  const atEnd = !!page && page.scrollHeight - page.scrollTop - page.clientHeight < 24;
+  area.replaceChildren(...parts);
+  if(page) page.scrollTop = opts.composer && atEnd ? page.scrollHeight : top;
+  if(input) input.send.disabled = busy || !op;
 }
 /* -- what observer.js uses --------------------------------------------- */
 const TARGET = "operator:";
+let input = null;
 function mount(element, changed) {
   root = element; onChange = changed || onChange;
+  area = root;
+  if(opts.composer) {
+    area = node("div", "", "op-area");
+    input = composerBox();
+    root.replaceChildren(area, input.box);
+  }
   render();
+}
+/* The view's own input row: Enter sends to the selected operator, Shift+Enter
+   breaks the line. A draft is kept per operator while the page is loaded. */
+const drafts = new Map();
+function composerBox() {
+  const box = node("form", "", "op-composer");
+  const text = document.createElement("textarea");
+  text.rows = 2; text.placeholder = "operator에게 메시지 (Enter 전송, Shift+Enter 줄바꿈)";
+  text.setAttribute("aria-label", "operator에게 보낼 메시지");
+  const send = node("button", "보내기");send.type = "submit";
+  const status = node("small", "", "op-composer-status");status.setAttribute("aria-live", "polite");
+  const row = node("div", "", "op-composer-row");row.append(text, send);
+  box.append(row, status);
+  text.oninput = () => drafts.set(selected, text.value);
+  text.addEventListener("keydown", event => {
+    if(event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); box.requestSubmit(); }
+  });
+  box.onsubmit = async event => {
+    event.preventDefault();
+    const id = selected, body = text.value;
+    if(!id || !body.trim() || send.disabled) return;
+    send.disabled = true;
+    try {
+      status.textContent = await sendTo(id, body);
+      drafts.delete(id);
+      if(selected === id) text.value = "";
+    } catch(err) { status.textContent = `전송하지 못했습니다: ${err.message}`; }
+    finally { send.disabled = busy || !current(); text.focus(); }
+  };
+  return {box, text, send, status};
+}
+/* The selection changed under the input row: show that operator's draft. */
+function syncDraft() {
+  if(!input) return;
+  input.text.value = drafts.get(selected) || "";
+  input.status.textContent = "";
 }
 /* The composer's operator destinations, selected one first. */
 function targets() {
@@ -308,8 +389,9 @@ function targets() {
 }
 const isTarget = value => String(value || "").startsWith(TARGET);
 const defaultTarget = () => current() ? TARGET + current().id : "";
-async function send(value, text) {
-  const id = value.slice(TARGET.length), op = list.find(o => o.id === id);
+const send = (value, text) => sendTo(value.slice(TARGET.length), text);
+async function sendTo(id, text) {
+  const op = list.find(o => o.id === id);
   const result = await call(opPath(id, "/message"), "POST", {text});
   if(id !== selected) choose(id);
   expanded = false;
@@ -327,5 +409,20 @@ function askAbout(name, peek = false) {
   if(!peek && op.id !== selected) { choose(op.id); render(); refresh(); }
   return {target: TARGET + op.id, name: op.name, reason: ""};
 }
-return {mount, refresh, targets, isTarget, defaultTarget, send, askAbout, _covers: covers};
-})();
+/* Open on a session: the operator whose scope holds it, unless the selected
+   one already does. Nothing changes when no operator covers it. */
+async function focusSession(name) {
+  if(name && !listed(name) && !sessionRows.has(name)) {
+    try { sessionRows.set(name, await call(`api/sessions/${encodeURIComponent(name)}`)); } catch { /* read as the default project */ }
+  }
+  await refresh();
+  const op = name ? ownerOf(name) : null;
+  if(op && op.id !== selected) { choose(op.id); await refresh(); }
+}
+/* What waits across every operator, for a badge: unanswered asks, and of
+   those the ones not shown yet. */
+const summary = () => list.reduce((sum, o) => ({pending: sum.pending + (o.pending || 0), unseen: sum.unseen + (o.unseen || 0)}), {pending: 0, unseen: 0});
+const focusInput = () => input?.text.focus();
+return {mount, refresh, targets, isTarget, defaultTarget, send, askAbout, focusSession, summary, focusInput,
+        selected: () => selected, _covers: covers};
+}

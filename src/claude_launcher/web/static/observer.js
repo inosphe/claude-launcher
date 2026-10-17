@@ -19,6 +19,9 @@ const run2Of = s => appRow(typeof cflow2RailCache !== "undefined" ? cflow2RailCa
 const qaOf = s => appRow(typeof qaRailCache !== "undefined" ? qaRailCache : null, s.name);
 const threadsOf = s => appRow(typeof threadsRailCache !== "undefined" ? threadsRailCache : null, s.name);
 let draftTarget = "";
+// Set once the reader picks a destination in the select: from then on an empty
+// one (「세션 선택」) is their choice, and the operator default stays out of it.
+let targetPicked = false;
 // The composer starts folded at every width and stays where the reader left
 // it for as long as the page is loaded; a reload comes back folded.
 let composerFolded = true;
@@ -197,7 +200,8 @@ function actionCount(s) {
 }
 /* Sessions first, as before, then the operators in their own group. With no
    target picked yet the selected operator is the default: the composer is
-   where the reader talks to it. */
+   where the reader talks to it. An empty target the reader picked
+   (「세션 선택」) stays empty; a target that went away falls back to it. */
 function syncTargets(visible) {
   const names=visible.filter(s=>s.running).map(s=>s.name);
   const bots=operators()?.targets()||[];
@@ -210,8 +214,8 @@ function syncTargets(visible) {
     if(bots.some(b=>b.value===draftTarget))$("target").value=draftTarget;
   }
   const valid=[...names,...bots.map(b=>b.value)];
-  if(!valid.includes(draftTarget)) chooseTarget(operators()?.defaultTarget()||"");
-  else if(!draftTarget&&bots.length) chooseTarget(operators().defaultTarget());
+  if(draftTarget&&!valid.includes(draftTarget)) chooseTarget(operators()?.defaultTarget()||"");
+  else if(!draftTarget&&bots.length&&!targetPicked) chooseTarget(operators().defaultTarget());
 }
 function sessionHeader(s, cls="") {
   const card=node("article","",`observer-card ${cls}`);card.dataset.session=s.name;
@@ -964,7 +968,7 @@ function autosize() {
   // Folded, the box has no layout; leave it to its CSS height until shown.
   if(box.scrollHeight)box.style.height=Math.min(box.scrollHeight,innerHeight*0.4)+"px";
 }
-$("target").onchange=()=>chooseTarget($("target").value);$("prompt").oninput=controls;
+$("target").onchange=()=>{targetPicked=true;chooseTarget($("target").value);};$("prompt").oninput=controls;
 $("composer-toggle").onclick=()=>{composerFolded=!composerFolded;composerState();if(!composerFolded)$("prompt").focus();};
 $("monitor").onclick=async()=>{try{await request("api/observer/settings",{enabled:!snapshot.enabled});await refresh();}catch(err){showError(err.message);}};
 /* The scope rides the same settings call as the monitor switch, and both
