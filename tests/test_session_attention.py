@@ -202,6 +202,36 @@ def test_viewers_counts_the_terminal_sockets(home, tmp_path):
     asyncio.run(run())
 
 
+def test_activity_stamp_holds_when_the_wall_clock_steps_back(home, tmp_path, monkeypatch):
+    """An unchanged screen keeps one ``last_activity_at`` across wall-clock steps.
+
+    The stamp is derived from a monotonic reading and truncated to seconds, so
+    a wall clock that moves between two asks (NTP slew, WSL clock sync) used to
+    show up as the same change reading one second earlier.
+    """
+    import time as _time
+
+    from claude_launcher.daemon import session as session_mod
+
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        try:
+            s = mgr.create(SessionDef(name="steady", harness="py", cwd=str(tmp_path)))
+            await _wait_screen(s, "READY")
+            await asyncio.sleep(1.0)
+            first = s.info()["last_activity_at"]
+            assert first is not None
+            real = _time.time
+            monkeypatch.setattr(session_mod.time, "time", lambda: real() - 1.0)
+            assert s.info()["last_activity_at"] == first
+        finally:
+            await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
 # --------------------------------------------------------------------------- #
 # moved: the tracker's answer, not the byte stream's
 # --------------------------------------------------------------------------- #
