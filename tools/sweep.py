@@ -245,19 +245,34 @@ def suite_env(grant, home: Path) -> dict:
     return env
 
 
-def _report_window(grant, code: int, counts: dict, seconds: float) -> None:
-    """Attach the suite's result to the grant, as its conftest would have."""
-    if not test_window.reportable(grant.grant_id):
-        return
-    test_window.report_result(grant.grant_id, {
+def window_result(code: int, output: str, seconds: float) -> dict:
+    """The suite's result in the fields its conftest reported
+    (test_window.pytest_result), read back from its output.
+
+    ``timeouts`` is what the daemon's adaptive worker budget acts on
+    (daemon/window.py ``_adapt``, claunch-afmzw), so it must not go missing
+    with the move: counted on the short-summary lines, which carry each
+    failure's exception line, with the conftest's own TIMEOUT_PATTERN.
+    """
+    counts = parse_counts(output)
+    failures = _failure_lines(output, limit=None)
+    return {
         "outcome": {0: "passed", 1: "failed", 2: "interrupted", 5: "no_tests"}.get(code, "error"),
         "exit_code": code,
         "passed": counts.get("passed", 0),
         "failed": counts.get("failed", 0),
         "errors": counts.get("error", 0),
         "skipped": counts.get("skipped", 0),
+        "collected": sum(counts.values()),
         "duration": round(seconds, 1),
-    })
+        "timeouts": sum(1 for line in failures if test_window.TIMEOUT_PATTERN.search(line)),
+    }
+
+
+def _report_window(grant, code: int, output: str, seconds: float) -> None:
+    """Attach the suite's result to the grant, as its conftest would have."""
+    if test_window.reportable(grant.grant_id):
+        test_window.report_result(grant.grant_id, window_result(code, output, seconds))
 
 
 def default_command(session: str, workers: int = 8) -> str:
@@ -620,14 +635,14 @@ def parse_counts(output: str) -> dict:
     return counts
 
 
-def _failure_lines(output: str, limit: int = 40) -> list:
+def _failure_lines(output: str, limit: Optional[int] = 40) -> list:
     """The ``FAILED``/``ERROR`` short-summary lines, so a red gate can name names."""
     lines = [
         ln.strip()
         for ln in output.splitlines()
         if ln.startswith("FAILED ") or ln.startswith("ERROR ")
     ]
-    return lines[:limit]
+    return lines if limit is None else lines[:limit]
 
 
 #: The cap on the suite output a red run parks beside its receipt, and how
@@ -773,8 +788,7 @@ def cmd_run(args) -> int:
             errors="replace",
             env=suite_env(grant, suite_home),
         )
-        _report_window(grant, proc.returncode,
-                       parse_counts((proc.stdout or "") + (proc.stderr or "")),
+        _report_window(grant, proc.returncode, (proc.stdout or "") + (proc.stderr or ""),
                        time.monotonic() - clock)
     finally:
         grant.release()

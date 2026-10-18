@@ -1797,3 +1797,39 @@ def test_the_suite_env_keeps_the_grant_and_drops_the_report(monkeypatch, tmp_pat
     assert env[sweep.test_window.WINDOW_GRANT_ENV] == "g-1"
     assert sweep.test_window.WINDOW_REPORT_ENV not in env
     assert not set(sweep._SUITE_DROPPED_VARS) & set(env)
+
+
+#: A red suite with one timeout among its failures, shaped like pytest -q.
+TIMED_OUT = (
+    f'"{sys.executable}" -c "'
+    "print('FAILED tests/test_x.py::test_a - subprocess.TimeoutExpired: "
+    "Command [python] timed out after 30 seconds'); "
+    "print('FAILED tests/test_x.py::test_b - AssertionError'); "
+    "print('2 failed, 10 passed, 1 skipped in 3.4s'); "
+    'raise SystemExit(1)"'
+)
+
+
+def test_the_sweep_reports_the_window_result_with_its_timeouts(
+    repo, receipts, monkeypatch
+):
+    """The suite cannot reach the daemon from its throwaway home, so the sweep
+    reports for it -- with the fields the conftest sent, timeouts first: the
+    daemon's adaptive worker budget halves on them (claunch-afmzw)."""
+    sent = []
+    monkeypatch.setattr(sweep.test_window, "reportable", lambda grant_id: True)
+    monkeypatch.setattr(sweep.test_window, "report_result",
+                        lambda grant_id, result: sent.append(result) or True)
+    assert _run(repo, receipts, "--command", TIMED_OUT) == 1
+
+    (result,) = sent
+    assert result["timeouts"] == 1
+    assert result["outcome"] == "failed" and result["exit_code"] == 1
+    assert (result["passed"], result["failed"], result["skipped"]) == (10, 2, 1)
+    assert result["collected"] == 13
+
+
+def test_a_green_suite_reports_no_timeouts():
+    result = sweep.window_result(0, "12 passed, 1 skipped in 3.4s", 3.4)
+    assert result["outcome"] == "passed" and result["timeouts"] == 0
+    assert result["collected"] == 13 and result["duration"] == 3.4
