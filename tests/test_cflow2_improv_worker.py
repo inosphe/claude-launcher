@@ -1822,6 +1822,25 @@ def test_a_series_of_related_issues_lands_as_one_batch():
     assert "배치 안 일감에만 막힌 의존은 blocked로 세지 않는다" in intake
     # step children carry the same provenance label as a follow-up (claunch-dr9cu)
     assert "--parent <주 이슈> --labels user-direct --assignee $CLAUNCH_SESSION" in intake
-    pr =_words(labelled["pr-open"].get("prompt"))
+    pr = _words(labelled["pr-open"].get("prompt"))
     assert "PR 하나가 연속 작업 전체다" in pr
     assert "공통 parent(없으면 주 이슈)" in pr
+
+
+def test_every_issue_a_run_starts_gets_its_own_external_ref():
+    """The board keeps external-ref unique per issue, and one run starts
+    several issues -- a revisit round, the second item of a batch. With the
+    bare run id the second `update --external-ref` was refused (run
+    20261017-185520-cfc785, claunch-dr9cu) and the session made up a suffix.
+    Every start command now writes `<run id>/<id>` (claunch-7r1qr.1)."""
+    for path in (V2, COMMON, V1):
+        text = path.read_text(encoding="utf-8")
+        assert "--external-ref <run id>`" not in text, path.name
+        assert "external-ref에 run id" not in text, path.name
+    chart = _chart()
+    labelled = {n.label: n for n in chart.nodes.values() if n.label}
+    for label in ("intake-issue", "issue-adopt", "issue-create", "item-intake"):
+        prompt = _words(labelled[label].get("prompt"))
+        assert "--external-ref <run id>/<id>`" in prompt, label
+    intake = _words(labelled["intake-issue"].get("prompt"))
+    assert "run id만 쓰면 같은 런의 둘째 이슈에서 보드가 거절한다" in intake
