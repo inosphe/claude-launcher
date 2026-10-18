@@ -78,7 +78,7 @@ function world() {
   vm.runInContext(`
     let wfCwd = "/repo", wfScope = "s1", wfRefreshRequest = 0, wfLastData = null;
     let splitFor = "s1", splitKind = "run", splitCwd = "/repo", splitScope = "s1",
-        splitLastData = null, splitGen = 0;
+        splitLastData = null, splitGen = 0, splitBody = { innerHTML: "", appendChild() {} };
     let sessRunFold = fold;
     ${code}
     this.refreshWf = refreshWf;

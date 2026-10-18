@@ -1995,13 +1995,14 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   background: none; color: #7d8590;
   border: 1px solid #30363d; border-radius: 5px;
 }
-#term-simsbtn.has-resource, #term-splitbtn.has-resource, #term-chartbtn.has-resource,
-#term-qabtn.has-resource, #term-threadsbtn.has-resource {
+/* The split pane's toggles (⬒ run, ◬ sims, ⌘ category, ◇ chart, ? qa,
+   🗪 threads) share one class, so a toggle added later is lit and pressed
+   like the rest without being listed here (claunch-039we: ⌘ category was
+   missing from the id list and never showed it was on). */
+.term-btn.split-btn.has-resource {
   background: #10203a; color: #58a6ff; border-color: #1f6feb;
 }
-#term-simsbtn[aria-pressed="true"], #term-splitbtn[aria-pressed="true"],
-#term-chartbtn[aria-pressed="true"], #term-qabtn[aria-pressed="true"],
-#term-threadsbtn[aria-pressed="true"] {
+.term-btn.split-btn[aria-pressed="true"] {
   box-shadow: inset 0 -2px #58a6ff;
 }
 /* The session wrote in a thread since this browser last showed them. */
@@ -2945,6 +2946,25 @@ body.term-split[data-page="log"] #log-view { flex: var(--split-term, 0.6) 1 0; m
 body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; }
 #term-wf {
   flex: var(--split-wf, 0.4) 1 0; min-height: 0;
+  display: flex; flex-direction: column; overflow: hidden;
+}
+/* The frame every pane in the slot sits in (split-frame.js): one head row
+   with the pane's name (or the conversation pane's tabs) and the ⤢ and ×
+   they all share, over the body the pane draws into. */
+.split-frame { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; }
+.split-frame-head {
+  flex: none; display: flex; align-items: center; gap: 8px;
+  padding: 3px 10px 0 16px; border-bottom: 1px solid #21262d;
+}
+.split-frame-lead { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; }
+.split-frame-title { color: #7d8590; font-size: 12px; padding: 3px 0 4px; }
+.split-frame-ctl { flex: none; display: flex; gap: 2px; align-items: center; }
+.split-frame-btn { background: transparent; color: #7d8590; border: 1px solid transparent; border-radius: 5px;
+  font: inherit; font-size: 14px; line-height: 1; padding: 2px 7px; cursor: pointer; }
+.split-frame-btn:hover { color: #e6edf3; background: #161b22; border-color: #30363d; }
+.split-frame-max[aria-pressed="true"] { color: #58a6ff; }
+.split-frame-body {
+  flex: 1 1 0; min-height: 0;
   /* Its own scroller, apart from the terminal's scrollback above it: a wheel
      over the run must never fight the session for the same flick. */
   overflow-y: auto; overscroll-behavior: contain;
@@ -4142,7 +4162,7 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
    height-bound container would render below the fold with no way down to
    it, so a too-narrow container scrolls sideways instead (phones opt out of
    the whole mode — see the 820px block). */
-#wf-view.wf-scroll-split, #term-wf.wf-scroll-split {
+#wf-view.wf-scroll-split, #term-wf .split-frame-body.wf-scroll-split {
   display: flex; flex-direction: column; overflow-y: hidden;
 }
 .wf-scroll-split .wf-cols {
@@ -5806,7 +5826,7 @@ body.embed #main { width: 100%; }
   .wf-diagram, .wf-side { flex: 1 1 100%; min-width: 0; }
   /* ...and one flow: two pinned regions plus two scrollers have no room on
      a phone, so the split-scroll mode gives the page its scrollbar back */
-  #wf-view.wf-scroll-split, #term-wf.wf-scroll-split {
+  #wf-view.wf-scroll-split, #term-wf .split-frame-body.wf-scroll-split {
     display: block; overflow-y: auto;
   }
   .wf-scroll-split .wf-cols { flex-wrap: wrap; overflow-x: visible; }
@@ -7806,17 +7826,13 @@ div.shadow-card .shadow-line { white-space: normal; overflow-wrap: anywhere; }
    scrolls on its own, so the slot itself does not. */
 .talk-pane { display: flex; flex-direction: column; height: 100%; min-height: 0; }
 .talk-tabs { display: flex; gap: 2px; padding: 4px 0 2px; border-bottom: 1px solid #21262d; }
+/* In the split frame's head the frame draws the rule under the row. */
+.split-frame-lead .talk-tabs { padding: 1px 0 0; border-bottom: none; }
 .talk-tab { background: transparent; color: #7d8590; border: 1px solid transparent; border-bottom: none;
   border-radius: 5px 5px 0 0; padding: 3px 12px; font: inherit; font-size: 12px; cursor: pointer; }
 .talk-tab:hover { color: #e6edf3; }
 .talk-tab.on { color: #e6edf3; background: #161b22; border-color: #30363d; }
-/* The pane's own controls, pushed to the right end of the tab bar. */
-.talk-ctl { margin-left: auto; display: flex; gap: 2px; align-items: center; }
-.talk-ctl-btn { background: transparent; color: #7d8590; border: 1px solid transparent; border-radius: 5px;
-  font: inherit; font-size: 14px; line-height: 1; padding: 2px 7px; cursor: pointer; }
-.talk-ctl-btn:hover { color: #e6edf3; background: #161b22; border-color: #30363d; }
-.talk-ctl-btn.talk-max[aria-pressed="true"] { color: #58a6ff; }
-/* Enlarged (syncSplitPane's split-max): the conversation pane takes the
+/* Enlarged (syncSplitPane's split-max, the frame's ⤢): the pane takes the
    column; the terminal (or the HTML view's conversation), the drag bar and
    the terminal's composer step aside until it is shrunk or closed. */
 body.split-max #terminal, body.split-max #term-split, body.split-max #term-composer,

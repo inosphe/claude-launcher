@@ -24,7 +24,7 @@ globalThis.TalkPane = (() => {
     ["qa", "QA"],
     ["both", "둘 다"],
   ];
-  let host = null, name = "", mode = "threads", opts = {}, max = false;
+  let host = null, name = "", mode = "threads", opts = {}, tabs = null;
 
   const node = (tag, cls, text) => {
     const n = document.createElement(tag);
@@ -56,7 +56,7 @@ globalThis.TalkPane = (() => {
     let r = host && host.querySelector(".talk-pane");
     if (r) return r;
     r = node("div", "talk-pane");
-    const tabs = node("div", "talk-tabs");
+    tabs = node("div", "talk-tabs");
     tabs.setAttribute("role", "tablist");
     for (const [key, label] of MODES) {
       const b = node("button", "talk-tab", label);
@@ -66,48 +66,21 @@ globalThis.TalkPane = (() => {
       b.addEventListener("click", () => want(key));
       tabs.append(b);
     }
-    // Right of the tabs (claunch-qkvb1): ⤢ enlarges the pane to the whole
-    // column and ⤡ gives the terminal back; × closes the pane. Both ask the
-    // page, which remembers them per session and calls setMax back.
-    const ctl = node("div", "talk-ctl");
-    const big = node("button", "talk-ctl-btn talk-max");
-    big.type = "button";
-    big.addEventListener("click", () => {
-      if (opts.onMax) opts.onMax(!max);
-      else setMax(!max);
-    });
-    const shut = node("button", "talk-ctl-btn talk-close", "×");
-    shut.type = "button";
-    shut.title = "close this pane — the terminal takes the column back";
-    shut.setAttribute("aria-label", "close");
-    shut.addEventListener("click", () => {
-      if (opts.onClose) opts.onClose();
-      else unmount();
-    });
-    ctl.append(big, shut);
-    tabs.append(ctl);
+    // The tabs are this pane's name in the split frame's head
+    // (split-frame.js, claunch-039we), beside the ⤢ and × every pane there
+    // shares; without a frame they head the pane itself.
+    if (opts.lead) opts.lead.replaceChildren(tabs);
+    else r.append(tabs);
     const body = node("div", "talk-body");
     body.append(node("div", "talk-col talk-threads"), node("div", "talk-col talk-qa"));
-    r.append(tabs, body);
+    r.append(body);
     host.replaceChildren(r);
     return r;
   }
 
-  function drawMax(r) {
-    const b = r.querySelector(".talk-max");
-    if (!b) return;
-    b.textContent = max ? "⤡" : "⤢";
-    b.title = max
-      ? "shrink this pane — the terminal comes back above it"
-      : "enlarge this pane to the whole column";
-    b.setAttribute("aria-label", max ? "shrink" : "enlarge");
-    b.setAttribute("aria-pressed", String(max));
-  }
-
   function draw() {
     const r = root();
-    drawMax(r);
-    for (const b of r.querySelectorAll(".talk-tab")) {
+    for (const b of tabs.querySelectorAll(".talk-tab")) {
       const on = b.dataset.mode === mode;
       b.classList.toggle("on", on);
       b.setAttribute("aria-selected", String(on));
@@ -159,16 +132,7 @@ globalThis.TalkPane = (() => {
     draw();
   }
 
-  /* Whether the pane fills the column: the page owns the layout, this only
-     shows which way the button goes. */
-  function setMax(on) {
-    max = !!on;
-    const r = host && host.querySelector(".talk-pane");
-    if (r) drawMax(r);
-  }
-
   function mount(target, session, o = {}) {
-    if ("max" in o) max = !!o.max;
     if (host === target && name === session && target.querySelector(".talk-pane")) {
       opts = o;
       setMode(o.mode || mode);
@@ -186,14 +150,15 @@ globalThis.TalkPane = (() => {
     globalThis.ThreadsPane?.unmount();
     globalThis.QaPane?.unmount();
     if (host) host.replaceChildren();
+    if (tabs) tabs.remove();
     host = null;
+    tabs = null;
     name = "";
   }
 
   return {
-    mount, unmount, setMode, setMax, isMode, shows, modeFor,
+    mount, unmount, setMode, isMode, shows, modeFor,
     mode: () => mode,
-    max: () => max,
     refreshQa: () => { if (host && shows(mode).qa) globalThis.QaPane?.refresh(); },
   };
 })();

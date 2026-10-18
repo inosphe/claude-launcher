@@ -139,7 +139,7 @@ function harness() {
     setInterval: () => 1, clearInterval() {}, setTimeout: () => 0,
     localStorage: {getItem: () => null, setItem() {}},
   });
-  for (const f of ["threads-pane.js", "qa-pane.js", "talk-pane.js"]) vm.runInContext(read(f), ctx);
+  for (const f of ["threads-pane.js", "qa-pane.js", "talk-pane.js", "split-frame.js"]) vm.runInContext(read(f), ctx);
   return {ctx, api, calls};
 }
 
@@ -291,46 +291,59 @@ function harness() {
     assert.ok(app.includes('"hide the threads column — the questions keep the pane"'));
   }
 
-  /* --- controls: × closes, ⤢/⤡ enlarges and shrinks (claunch-qkvb1) ------- */
+  /* --- controls: × closes, ⤢/⤡ enlarges and shrinks (claunch-qkvb1) -------
+     They belong to the split frame every pane shares (split-frame.js,
+     claunch-039we); the conversation pane puts its tabs in the frame's lead,
+     beside them, and draws no controls of its own. */
   {
     const {ctx, api} = harness();
     const T = ctx.TalkPane;
+    const F = ctx.SplitFrame;
     const host = new N("div");
     const asked = [];
-    T.mount(host, "s1", {
-      mode: "threads", api, max: false,
+    const frame = F.mount(host, {
+      kind: "threads", max: false,
       onClose: () => asked.push("close"),
-      onMax: (on) => { asked.push(on ? "max" : "min"); T.setMax(on); },
+      onMax: (on) => { asked.push(on ? "max" : "min"); F.setMax(host, on); },
     });
+    T.mount(frame.body, "s1", {mode: "threads", api, lead: frame.lead});
     await settle();
-    const ctl = host.querySelector(".talk-tabs .talk-ctl");
-    assert.ok(ctl, "the controls sit in the tab bar");
-    const big = ctl.querySelector(".talk-max");
-    const shut = ctl.querySelector(".talk-close");
+    const head = host.querySelector(".split-frame-head");
+    assert.ok(head.querySelector(".split-frame-lead .talk-tabs"), "the tabs sit in the frame's head");
+    assert.ok(!frame.body.querySelector(".talk-tabs"), "...and not again in the body");
+    const ctl = head.querySelector(".split-frame-ctl");
+    const big = ctl.querySelector(".split-frame-max");
+    const shut = ctl.querySelector(".split-frame-close");
     assert.equal(big.textContent, "⤢");
     assert.equal(big.attrs["aria-pressed"], "false");
     big.fire("click");
     assert.deepEqual(asked, ["max"], "⤢ asks the page to enlarge");
     assert.equal(big.textContent, "⤡", "enlarged, the button shrinks");
     assert.equal(big.attrs["aria-pressed"], "true");
-    assert.equal(T.max(), true);
+    assert.equal(F.of(host).max(), true);
     big.fire("click");
     assert.deepEqual(asked, ["max", "min"]);
     assert.equal(big.textContent, "⤢");
     shut.fire("click");
     assert.deepEqual(asked, ["max", "min", "close"], "× asks the page to close");
     // A tab switch keeps the controls and their state.
-    T.setMax(true);
+    F.setMax(host, true);
     T.setMode("both");
-    assert.equal(host.querySelector(".talk-max").textContent, "⤡");
+    assert.equal(host.querySelector(".split-frame-max").textContent, "⤡");
+    assert.equal(head.querySelectorAll(".talk-tabs").length, 1, "a tab switch does not add a second tab bar");
     T.unmount();
+    assert.ok(!head.querySelector(".talk-tabs"), "unmounted, the tabs leave the head");
+    F.unmount(host);
+    assert.equal(F.of(host), null);
 
     const app = read("app.js");
     const css = read("style.css");
+    const src = read("talk-pane.js");
+    assert.ok(!/"⤢"|talk-max|talk-close/.test(src), "the conversation pane draws no ⤢ or × of its own");
     assert.ok(app.includes("onClose: () => setSessLayout(name, { split: false, max: false }),"));
     assert.ok(app.includes("onMax: (on) => setSessLayout(name, { max: !!on }),"));
-    assert.ok(app.includes("const max = up && isTalkPane(lay.pane) && lay.max;"),
-              "only an open conversation pane enlarges");
+    assert.ok(app.includes("const max = up && lay.max;"), "every kind of pane enlarges");
+    assert.ok(app.includes('globalThis.SplitFrame?.setMax($("term-wf"), max);'));
     assert.ok(app.includes('document.body.classList.toggle("split-max", max);'));
     assert.ok(/body\.split-max #terminal[^{]*\{ display: none; \}/.test(css), "enlarged, the terminal steps aside");
   }
@@ -375,13 +388,15 @@ function harness() {
       threadsReadKey: () => "k",
       sessLayoutFor: () => ({max: false}),
       setSessLayout: () => {}, refreshQaRail: () => {}, refreshThreadsRail: () => {},
+      SPLIT_PANES: {},
       globalThis: {TalkPane: {mount: () => painted.push("talk"), unmount: () => {}, setMode: () => {}}},
     };
     vm.createContext(ctx);
     vm.runInContext(`
       let splitFor = null, splitKind = null, splitCwd = null, splitScope = null;
       let splitPollTimer = null, splitSelectedStep = null, splitLastData = null;
-      let splitDurable = null, splitGen = 0;
+      let splitDurable = null, splitGen = 0, splitBody = null;
+      ${fn("mountSplitFrame")}
       ${fn("openSplit")}
       ${fn("closeSplit")}
       ${fn("refreshSplit")}
