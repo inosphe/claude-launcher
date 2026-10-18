@@ -2884,6 +2884,9 @@ def run_orphaned(manager, cwd: str, scope: str, payload: dict) -> bool:
 #: reviewer reap it triggers is filed under (claunch-5aysr).
 SETTLE_SIGNAL = "settle"
 SETTLE_REAP = "settle-reap"
+#: The workflow node whose subtree is the settle phase -- the node that
+#: pushes :data:`SETTLE_SIGNAL` (claunch-numgz).
+SETTLE_SCOPE = "settle"
 
 
 def _iso_ts(value) -> Optional[float]:
@@ -2899,15 +2902,34 @@ def _iso_ts(value) -> Optional[float]:
         return None
 
 
+def _in_settle_scope(instance) -> bool:
+    """Whether an ``active`` instance id (``<node>@<n>``) is the settle node
+    or one of the nodes below it."""
+    node = str(instance).split("@", 1)[0]
+    return (node == SETTLE_SCOPE
+            or node.startswith(SETTLE_SCOPE + ".")
+            or node.startswith(SETTLE_SCOPE + "/"))
+
+
 def settle_signalled(state: dict) -> bool:
-    """Whether a v2 run has entered its settle phase: a ``settle`` record in
-    its ``signals`` log written by *this* run (claunch-5aysr).
+    """Whether a v2 run is in its settle phase: a ``settle`` record in its
+    ``signals`` log written by *this* run (claunch-5aysr), while the run is
+    still positioned inside the settle node (claunch-numgz).
 
     The log is declared ``lifecycle: {inherit: true}``, so a run started in
     the same slot (settle's ``new-task``) begins with the previous run's
     records -- including its ``settle``. A record counts only when it was
     written at or after this run started; an unreadable stamp does not count.
+
+    The record is never removed, so a run a person moved out of settle back
+    into its rounds still carries it; without the position check every poll
+    ended the reviewer the next round spawned. A state with no ``active``
+    list (an older run state) keeps the record-only answer.
     """
+    active = state.get("active")
+    if isinstance(active, list) and not any(
+            _in_settle_scope(a) for a in active):
+        return False
     started = _iso_ts(state.get("started"))
     if started is None:
         return False
@@ -3566,7 +3588,8 @@ class RunEventClock:
         run); once that run is done, or its parent is gone, it has nothing
         left to review. The daemon ends it -- the agent does not (its kill
         waits for a person, claunch-5aysr) -- at four moments: when the run
-        enters its settle phase (:func:`settle_signalled`, the reviewer kept
+        is in its settle phase (:func:`settle_signalled` -- not once it has
+        moved back into its rounds -- the reviewer kept
         while an ask is still addressed to it), right
         before the kill-on-end of a done run's driver, when that kill is
         withheld (keep-alive, respawned by a person) because the run is done
