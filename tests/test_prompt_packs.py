@@ -47,6 +47,24 @@ def test_the_catalog_ships_the_packs_and_the_default_packs():
         assert pack.title and pack.body and not pack.body.startswith("---")
 
 
+def test_the_non_pytest_pack_is_opt_in_and_only_pointed_at(home):
+    # claunch-ersj2.2: the `claunch window run` guidance ships as its own
+    # pack, chosen at creation, never a default; common.md and the worker
+    # canonical name it without carrying its body.
+    pack = prompt_packs.shipped("non-pytest-project")
+    assert "claunch window run" in pack.body
+    assert not prompt_packs.is_on_demand("non-pytest-project")
+    assert "non-pytest-project" not in prompt_packs.default_packs()
+    assert all("non-pytest-project" not in packs
+               for packs in prompt_packs.DEFAULT_ROLE_PACKS.values())
+    pkg = Path(prompt_packs.__file__).parent
+    for nudge in (pkg / "prompt_packs" / "common.md",
+                  pkg / "workflows" / "v2" / "improv-worker-v2.yaml"):
+        text = nudge.read_text(encoding="utf-8")
+        assert "`non-pytest-project`" in text
+        assert "claunch window run" not in text
+
+
 def test_install_status_edit_and_remove(tmp_path):
     ws = tmp_path / "ws"
     ws.mkdir()
