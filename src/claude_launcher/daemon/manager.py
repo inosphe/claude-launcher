@@ -72,18 +72,20 @@ RESTORE_QUEUE = "restore-queue"
 #: incarnation: the restore queue running late, a mesh delivery, a cflow
 #: notice or reminder, a status-check refresh (and the cflow and cflow2
 #: clocks' ``-checks`` requests to a held driver), the CLI's cflow nudge
-#: (``/deliver``), any :meth:`Session.deliver` that reaches a held session
-#: (``message``). A session woken by one of these does not get
+#: (``/deliver``). A session woken by one of these does not get
 #: :attr:`Session.resumed_by_human`, so a finished one-shot run's kill-on-end
 #: still ends it (claunch-u9m6z: s122 was woken by a mesh delivery and the
 #: kill was called off as if a person had respawned it). Any other ``by`` --
 #: an attach, typed input, a peer's typed line, the API's wake, a QA
 #: answer, a thread message -- is a person and keeps the deference; a
 #: ``by`` missing from this set is read as a person, so a new wake source
-#: errs toward keeping a session.
+#: errs toward keeping a session. ``message`` (any :meth:`Session.deliver`
+#: that reaches a held session) stays out: that one path carries the
+#: daemon's own notices and a person's doors alike (a forced QA answer, a
+#: rebrief, a retrospective), and it cannot tell them apart.
 AUTOMATIC_WAKES = frozenset({
     RESTORE_QUEUE, "mesh", "cflow", "cflow2", "status-checks", "deliver",
-    "cflow-checks", "cflow2-checks", "message",
+    "cflow-checks", "cflow2-checks",
 })
 
 

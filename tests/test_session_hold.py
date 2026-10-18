@@ -879,8 +879,9 @@ def test_a_needle_cut_by_a_row_wrap_is_still_on_the_screen():
 @pytest.mark.parametrize("by, by_human", [
     ("mesh", False), ("cflow", False), ("cflow2", False),
     ("status-checks", False), ("deliver", False), ("restore-queue", False),
-    ("cflow-checks", False), ("cflow2-checks", False), ("message", False),
+    ("cflow-checks", False), ("cflow2-checks", False),
     ("attach", True), ("input", True), ("peer-input", True), ("api", True),
+    ("message", True),         # Session.deliver to a held one: person or not
     ("qa", True), ("thread", True), ("", True),
 ])
 def test_only_a_person_s_wake_marks_the_session_resumed_by_human(
