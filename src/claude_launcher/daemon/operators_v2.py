@@ -1107,7 +1107,9 @@ def install(app, *, create=None, gates=None, work=None):
                          "세션을 관찰하고, 사용자 입력은 opv2_inbox로 읽고, opv2_post/opv2_ask로 답한다. "
                          "작업 내용 질문에는 opv2_sessions, opv2_session, opv2_issue, opv2_commits, "
                          "opv2_transcript_search, opv2_history로 근거를 찾아 답한다. 다른 세션에 대한 "
-                         "지시는 사용자의 메시지나 승인된 ask를 근거로 opv2_dispatch로만 전달한다.")}
+                         "지시는 사용자의 메시지나 승인된 ask를 근거로 opv2_dispatch로만 전달한다. "
+                         "맡길 일은 그 일을 하던 실행 중 세션에 먼저 전달하고, 그 세션이 종료됐으면 "
+                         "opv2_resume, 없을 때만 opv2_spawn으로 세션을 요청한다.")}
         if WORKFLOW:
             spec["workflow"] = WORKFLOW
             spec["cflow_inputs"] = {"operator": rec["id"]}

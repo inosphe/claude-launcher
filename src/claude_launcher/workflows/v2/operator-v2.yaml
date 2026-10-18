@@ -44,11 +44,27 @@ fragments:
   inbox: |
     사용자 입력 처리: `opv2_inbox`를 부른다. 메시지마다 답을 `opv2_post`로
     게시한다(참조한 세션은 `refs`에). 처리할 입력이 없으면 아무것도 게시하지 않는다.
+    `opv2_post`·`opv2_ask`의 본문은 markdown으로 쓴다(rule `markdown-body`).
     - 지시 전달: 사용자가 다른 세션에 무엇을 하라고 지시했으면 `opv2_dispatch`에 그
       메시지의 id를 `on_behalf_of`로 실어 대상 세션에 전달하고, 사용자가 한 말을
       옮긴다. 대상이나 내용이 모호하면 전달하기 전에 `opv2_ask`(choice 또는 text)로
       묻는다. ask의 답(승인·거절·선택·텍스트)도 inbox로 온다. 거절된 것은 전달하지
       않는다.
+    - 일감 배정: 사용자가 일을 맡기면 그 일을 이미 하고 있는 세션을 먼저 찾는다 —
+      `opv2_sessions`로 진행 중 세션을, `opv2_session`·`opv2_issue`로 그 세션의
+      task·이슈가 이 일과 같은지 확인한다. 같은 일감(같은 이슈, 또는 같은 기능의
+      후속)을 하는 실행 중 세션이 있으면 그 세션에 `opv2_dispatch`로 전달한다.
+      그 일을 하던 세션이 종료됐으면(`opv2_sessions` state `ended`) `opv2_resume`으로
+      재개를 요청하고, 재개되지 않을 때 만들 새 세션을 `fallback`(task, project,
+      issue)으로 함께 싣는다. 하던 세션이 없을 때만 `opv2_spawn`으로 새 세션을
+      요청한다. 두 요청 모두 사용자의 메시지 id를 `on_behalf_of`로 싣고, 카드에 보일
+      `reason`(왜 이 세션인가, 왜 새 세션인가)을 적는다.
+      요청은 사용자 알림 카드로 5분 기다린다. 새 세션 요청은 무응답이면 승인되고,
+      재개 요청은 무응답이면 재개하지 않고 `fallback`을 새 세션 요청으로 올린다.
+      결과(승인·거절·manual·실패)는 터미널에 `[claunch spawn-request <id>]`로 오고
+      피드에도 남는다. 대기 중인 요청은 `opv2_poll`의 `requests`에 있다. 같은 일로
+      요청을 다시 올리지 않는다. 거절되면 그 사실을 사용자에게 게시하고 지시를
+      기다린다. 새 세션이 만들어지면 그 이름을 사용자에게 알린다.
     - 작업 질문: 처리 중이거나 처리했던 일감·작업을 물으면 근거를 찾아 답한다 —
       `opv2_sessions`(진행 중·종료 세션 목록), `opv2_session`(세션의 task·상태·이슈·
       체크·커밋), `opv2_issue`(보드 이슈와 코멘트), `opv2_commits`,
@@ -80,9 +96,30 @@ rules:
   dispatch-on-behalf:
     text: |
       다른 세션에 대한 지시는 사용자의 메시지나 승인된 ask를 `on_behalf_of`로 둘 때만
-      `opv2_dispatch`로 전달한다. 네가 해석한 새 작업을 만들지 않는다. cflow 게이트
+      `opv2_dispatch`로 전달한다. 세션 생성·재개 요청(`opv2_spawn`·`opv2_resume`)도
+      같은 근거가 있을 때만 올린다. 네가 해석한 새 작업을 만들지 않는다. cflow 게이트
       승인과 다른 세션의 질문에 대한 답은 사용자의 것이다 — 대신 답하지 않는다.
-    why: v1 operator와 같은 권한 범위(operators_v2.dispatch가 on_behalf_of 없는 전달을 403으로 거절).
+    why: >-
+      v1 operator와 같은 권한 범위. operators_v2.dispatch·spawn·resume이 on_behalf_of
+      없는 요청을 403으로 거절한다.
+    deliver: all
+  existing-session-first:
+    text: |
+      일을 받으면 그 일을 이미 하고 있는 실행 중 세션에 맡기는 것이 먼저다
+      (`opv2_dispatch`). 그 세션이 종료됐으면 `opv2_resume`, 그런 세션이 없을 때만
+      `opv2_spawn`이다. `claunch new-session`이나 spawn 같은 다른 생성 경로는 쓰지 않는다.
+    why: >-
+      사용자 결정(claunch-iw5i8.15, thread th-d9e343): 실행 중 세션 우선, 종료된 연결
+      세션은 재개 승인 알림, 새 세션은 5분 승인 알림을 거친다(daemon/spawn_gate.py).
+    deliver: all
+  markdown-body:
+    text: |
+      `opv2_post`·`opv2_ask`의 `text`는 markdown으로 쓴다. 결론을 첫 줄에 두고, 세션
+      이름·이슈 id·커밋 해시는 `코드`로, 여러 항목은 목록으로, 표가 필요하면 markdown
+      표로 쓴다. 제목(#)은 쓰지 않는다. 터미널용 정렬 공백이나 ANSI 문자를 넣지 않는다.
+    why: >-
+      Observer의 operator 피드와 Operator 대화창이 본문을 markdown으로 렌더링한다
+      (claunch-iw5i8.10, 사용자 지시 2026-10-18).
     deliver: all
 
 nodes:

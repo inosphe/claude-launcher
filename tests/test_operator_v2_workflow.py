@@ -84,6 +84,24 @@ def test_every_task_answers_the_user_first(tmp_path):
         "opv2-channel", "inbox-anytime", "dispatch-on-behalf"}
 
 
+def test_work_goes_to_the_session_already_doing_it(tmp_path):
+    """claunch-iw5i8.15: a running session first, a resume for an exited
+    one, a new session only when none did the work -- every task carries it,
+    with the tools that make each move; claunch-iw5i8.10: bodies in
+    markdown."""
+    from claude_launcher import operator_v2_mcp
+
+    run = Run(tmp_path)
+    task = run.st["tasks"][0]
+    prompt = task["prompt"]
+    for tool in ("opv2_dispatch", "opv2_resume", "opv2_spawn", "fallback", "on_behalf_of"):
+        assert tool in prompt
+    assert prompt.index("opv2_dispatch") < prompt.index("opv2_resume") < prompt.index("opv2_spawn")
+    assert {r["id"] for r in task["rules"]} >= {"existing-session-first", "markdown-body"}
+    tools = {t["name"] for t in operator_v2_mcp.TOOLS}
+    assert {"opv2_spawn", "opv2_resume"} <= tools
+
+
 def test_watch_off_holds_the_gate_and_watch_on_observes(tmp_path):
     run = Run(tmp_path)
     run.report("greet", {"handled": 0}, T0 + 1)
