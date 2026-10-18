@@ -18732,6 +18732,33 @@ function isTalkPane(pane) {
 function talkShows(pane, what) {
   return pane === what || pane === "both";
 }
+/* The split panes that are one view each, keyed by sessLayoutFor().pane:
+   the header button that toggles it, the name the split frame's head
+   shows (split-frame.js -- the conversation pane shows its tabs there
+   instead), and the button's title either way. ? qa and 🗪 threads share
+   one pane with three modes, so syncSplitPane titles them on its own. */
+const SPLIT_PANES = {
+  run: {
+    btn: "term-splitbtn", title: "⬒ run",
+    on: "close the run pane — the terminal takes the column back",
+    off: "this session's workflow run under the terminal — drag the bar between them to resize",
+  },
+  sims: {
+    btn: "term-simsbtn", title: "◬ sims",
+    on: "close the simulations pane — the terminal takes the column back",
+    off: "this session's simulations under the terminal — run, answer, decide edit proposals",
+  },
+  category: {
+    btn: "term-categorybtn", title: "⌘ category",
+    on: "close the category pane — the terminal takes the column back",
+    off: "this session's place in its workspace's category tree — assign it to the tree",
+  },
+  chart: {
+    btn: "term-chartbtn", title: "◇ chart",
+    on: "close the chart pane — the terminal takes the column back",
+    off: "this pi-durable session's run as a flow chart, updated as it logs",
+  },
+};
 
 function sessLayoutFor(name) {
   const raw = (name && loadSessLayouts()[name]) || {};
@@ -20726,36 +20753,18 @@ function syncSplitPane() {
   $("term-split").classList.toggle("hidden", !up);
   $("term-wf").classList.toggle("hidden", !up);
   document.body.classList.toggle("term-split", up);
-  const max = up && isTalkPane(lay.pane) && lay.max;
+  // Every kind of pane enlarges: ⤢ sits in the frame they all share.
+  const max = up && lay.max;
   document.body.classList.toggle("split-max", max);
   // Pressed is the session's remembered choice, not what fits this screen:
   // the button must read "on" on a narrowed window too, or pressing it there
   // would silently write the opposite of what it appears to do.
-  const btn = $("term-splitbtn");
-  const runOn = !!lay && lay.split && lay.pane === "run";
-  btn.setAttribute("aria-pressed", String(runOn));
-  btn.title = runOn
-    ? "close the run pane — the terminal takes the column back"
-    : "this session's workflow run under the terminal — " +
-      "drag the bar between them to resize";
-  const sims = $("term-simsbtn");
-  const simsOn = !!lay && lay.split && lay.pane === "sims";
-  sims.setAttribute("aria-pressed", String(simsOn));
-  sims.title = simsOn
-    ? "close the simulations pane — the terminal takes the column back"
-    : "this session's simulations under the terminal — run, answer, decide edit proposals";
-  const cat = $("term-categorybtn");
-  const catOn = !!lay && lay.split && lay.pane === "category";
-  cat.setAttribute("aria-pressed", String(catOn));
-  cat.title = catOn
-    ? "close the category pane — the terminal takes the column back"
-    : "this session's place in its workspace's category tree — assign it to the tree";
-  const chart = $("term-chartbtn");
-  const chartOn = !!lay && lay.split && lay.pane === "chart";
-  chart.setAttribute("aria-pressed", String(chartOn));
-  chart.title = chartOn
-    ? "close the chart pane — the terminal takes the column back"
-    : "this pi-durable session's run as a flow chart, updated as it logs";
+  for (const [pane, spec] of Object.entries(SPLIT_PANES)) {
+    const btn = $(spec.btn);
+    const on = !!lay && lay.split && lay.pane === pane;
+    btn.setAttribute("aria-pressed", String(on));
+    btn.title = on ? spec.on : spec.off;
+  }
   const qa = $("term-qabtn");
   const qaOn = !!lay && lay.split && talkShows(lay.pane, "qa");
   qa.setAttribute("aria-pressed", String(qaOn));
@@ -20792,7 +20801,7 @@ function syncSplitPane() {
   if (up !== splitWasUp || max !== splitWasMax) refitSoon(60);
   splitWasUp = up;
   splitWasMax = max;
-  globalThis.TalkPane?.setMax(max);
+  globalThis.SplitFrame?.setMax($("term-wf"), max);
 }
 
 /* Which row's ⓘ is lit. Rebuilt rows get this from refreshSessions; this is
@@ -21313,6 +21322,7 @@ let splitPollTimer = null;
 let splitSelectedStep = null;
 let splitLastData = null;
 let splitDurable = null;       // the chart pane's event flow (durable-flow.js)
+let splitBody = null;          // the split frame's body the pane draws into (split-frame.js)
 // Bumped by every open and close. A run read in flight carries the value it
 // started under and drops its reply when the pane has moved on since: the
 // session alone does not tell, because switching the same session's pane
@@ -21334,7 +21344,21 @@ const splitUi = {
 };
 
 function renderSplit(data) {
-  renderWfInto($("term-wf"), data, splitUi);
+  renderWfInto(splitBody, data, splitUi);
+}
+
+/* The frame every kind of pane sits in (split-frame.js): the head row with
+   the pane's name and the ⤢ and × all of them share, and the body the pane
+   draws into. ⤢ and × only ask; the session's layout remembers them and
+   syncSplitPane draws them back. */
+function mountSplitFrame(name, kind) {
+  const host = $("term-wf");
+  return globalThis.SplitFrame?.mount(host, {
+    kind, title: SPLIT_PANES[kind]?.title,
+    max: sessLayoutFor(name).max,
+    onMax: (on) => setSessLayout(name, { max: !!on }),
+    onClose: () => setSessLayout(name, { split: false, max: false }),
+  }) || { body: host, lead: null };
 }
 
 /* Point the pane at a session. Everything else is the poll's: resolving the
@@ -21352,33 +21376,32 @@ function openSplit(name, kind = "run") {
   splitGen += 1;
   splitFor = name;
   splitKind = kind;
+  const frame = mountSplitFrame(name, kind);
+  splitBody = frame.body;
   // The simulations view keeps its own poll (sim-page.js).
-  if (kind === "sims") { globalThis.SimPane?.mount($("term-wf"), name); return; }
+  if (kind === "sims") { globalThis.SimPane?.mount(splitBody, name); return; }
   // So does the category pane (category-page.js).
-  if (kind === "category") { globalThis.CategoryPane?.mount($("term-wf"), name); return; }
+  if (kind === "category") { globalThis.CategoryPane?.mount(splitBody, name); return; }
   // And the session's conversation (talk-pane.js): its threads, its
   // questions, or both. A save or a send moves the header's lights at once
   // rather than at the next dashboard poll; a tab press is written down as
   // the session's pane, and syncSplitPane hands it back through openSplit.
   if (isTalkPane(kind)) {
-    globalThis.TalkPane?.mount($("term-wf"), name, {
-      mode: kind, api, storageKey: threadsReadKey(),
+    globalThis.TalkPane?.mount(splitBody, name, {
+      mode: kind, api, storageKey: threadsReadKey(), lead: frame.lead,
       onQaChange: () => refreshQaRail(),
       onThreadsChange: () => { refreshThreadsRail(); },
       onMode: (m) => setSessLayout(name, { split: true, pane: m }),
-      onClose: () => setSessLayout(name, { split: false, max: false }),
-      onMax: (on) => setSessLayout(name, { max: !!on }),
-      max: sessLayoutFor(name).max,
     });
     return;
   }
   // So does a pi-durable session's chart: its run is the event log it
   // writes, drawn as a flow diagram that updates in place.
   if (kind === "chart") {
-    splitDurable = globalThis.DurableFlow?.mount($("term-wf"), name, { api }) || null;
+    splitDurable = globalThis.DurableFlow?.mount(splitBody, name, { api }) || null;
     return;
   }
-  $("term-wf").innerHTML = "<p class='wf-note'>loading…</p>";
+  splitBody.innerHTML = "<p class='wf-note'>loading…</p>";
   refreshSplit();
   splitPollTimer = setInterval(visiblePoll(refreshSplit, () => splitPollTimer), 5000);
 }
@@ -21396,13 +21419,16 @@ function closeSplit() {
   splitScope = null;
   splitSelectedStep = null;
   splitLastData = null;
-  $("term-wf").innerHTML = "";
+  splitBody = null;
+  if (globalThis.SplitFrame) globalThis.SplitFrame.unmount($("term-wf"));
+  else $("term-wf").innerHTML = "";
 }
 
 async function refreshSplit() {
   const want = splitFor;
   if (!want || splitKind !== "run") return;
   const gen = splitGen;
+  const view = splitBody;
   const stale = () => gen !== splitGen;
   // A run is keyed by (cwd, scope) and the meta endpoint already answers
   // that resolution for a session — ask it rather than re-deriving the slot
@@ -21421,8 +21447,8 @@ async function refreshSplit() {
     if (stale()) return;   // repointed while the reply was in flight
     if (!flow || !flow.cwd) {
       splitCwd = "";
-      $("term-wf").innerHTML = "";
-      $("term-wf").appendChild(el(
+      view.innerHTML = "";
+      view.appendChild(el(
         "p", "wf-note",
         "this session has no working directory — there is no run slot to show"
       ));
@@ -21444,8 +21470,8 @@ async function refreshSplit() {
     data = await resp.json();
     if (stale()) return;
     if (!resp.ok) {
-      $("term-wf").innerHTML = "";
-      $("term-wf").appendChild(
+      view.innerHTML = "";
+      view.appendChild(
         el("p", "wf-warning", data.error || "cannot load run"));
       return;
     }
@@ -21458,12 +21484,12 @@ async function refreshSplit() {
     const v2 = await v2Read;
     if (!v2 || stale()) return;
     if (v2.error) {
-      $("term-wf").innerHTML = "";
-      $("term-wf").appendChild(el("p", "wf-warning", v2.error));
+      view.innerHTML = "";
+      view.appendChild(el("p", "wf-warning", v2.error));
       return;
     }
     splitLastData = null;
-    renderCflow2Into($("term-wf"), v2,
+    renderCflow2Into(view, v2,
                      { after: () => refreshSplit(), host: "split", fullLink: true });
     return;
   }

@@ -241,7 +241,7 @@ console.log("durableflow_check: sim2 ok");
     }
     throw new Error(name);
   };
-  assert.match(html, /<button id="term-chartbtn" class="term-btn hidden"[^>]*>◇ chart<\/button>/);
+  assert.match(html, /<button id="term-chartbtn" class="term-btn split-btn hidden"[^>]*>◇ chart<\/button>/);
   assert.match(src, /\$\("term-chartbtn"\)\.addEventListener\("click", \(\) => toggleSplitPane\("chart"\)\)/);
   const pane = new El("div");
   const mounted = [];
@@ -260,9 +260,10 @@ console.log("durableflow_check: sim2 ok");
     DETAIL_SUBTAB_IDS: new Set(), clampSplitRatio: (r) => r || 0.5,
   });
   vm.runInContext(`var splitFor = null, splitKind = null, splitCwd = null, splitScope = null,
-    splitPollTimer = null, splitDurable = null, splitSelectedStep = null, splitLastData = null, splitGen = 0;
+    splitPollTimer = null, splitDurable = null, splitSelectedStep = null, splitLastData = null, splitGen = 0, splitBody = null;
     var globalThis = this;
     ${fn("function isPiDurable(")} ${fn("function sessLayoutFor(")} ${fn("function isTalkPane(")}
+    ${fn("function mountSplitFrame(")} var SPLIT_PANES = {}; function setSessLayout() {}
     ${fn("async function fetchCflow2Run(")} ${fn("function openSplit(")} ${fn("function closeSplit(")} ${fn("async function refreshSplit(")}`, sandbox);
   assert.strictEqual(vm.runInContext(`isPiDurable("sim-20261013-040416-simulation")`, sandbox), true);
   assert.strictEqual(vm.runInContext(`isPiDurable("s1")`, sandbox), false);

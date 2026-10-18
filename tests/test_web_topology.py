@@ -565,6 +565,7 @@ CHECKS = [
         "threadspane_check.js",
         "threadshistory_check.js",
         "talkpane_check.js",
+        "splitframe_check.js",
         "specpage_check.js",
         "shadowcard_check.js",
         "railshadowmix_check.js",
