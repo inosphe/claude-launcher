@@ -384,6 +384,27 @@ def test_settle_counts_only_this_runs_record():
     assert not cflow_clock.settle_signalled({"collections": {}})
 
 
+def test_settle_counts_only_while_the_run_is_in_settle():
+    """A run moved out of settle back into its rounds keeps the record, but
+    no longer reaps the reviewer its next round spawns (claunch-numgz)."""
+    rec = {"name": "settle", "at": _at(5)}
+
+    def at(*active):
+        return {**_state(rec), "active": list(active)}
+
+    assert cflow_clock.settle_signalled(at("settle/settle-check@830"))
+    assert cflow_clock.settle_signalled(at("settle@825"))
+    assert cflow_clock.settle_signalled(at("settle.body@826"))
+    assert cflow_clock.settle_signalled(
+        at("round/item/work@1109", "settle/end-decision/ask-pose@900"))
+    assert not cflow_clock.settle_signalled(at("round/item/coding-plan@1105"))
+    assert not cflow_clock.settle_signalled(at("settlement/x@1"))
+    assert not cflow_clock.settle_signalled(at())
+    # no record: the position alone is not a signal
+    assert not cflow_clock.settle_signalled(
+        {**_state(), "active": ["settle/settle-check@830"]})
+
+
 class _TreeManager:
     def __init__(self, sessions):
         self._sessions = sessions
