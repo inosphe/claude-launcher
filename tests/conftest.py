@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from claude_launcher import pytest_venv, test_window
+from claude_launcher import config, pytest_venv, test_window
 
 
 #: The daemon instance variables a runner or session exports. Cleared once,
@@ -27,6 +27,24 @@ _DAEMON_INSTANCE_VARS = (
     "CLAUNCH_INSTANCE_BASE", "CLAUNCH_INSTANCE", "CLAUNCH_DAEMON",
     "CLAUNCH_INSTANCE_APPLIED", "CLAUNCH_INSTANCE_PREV", "CLAUNCH_DAEMON_PORT",
 )
+#: The homes this pytest was started with -- the machine's real ones, unless
+#: a runner already handed it throwaway ones -- plus the built-in default and
+#: the user's home directory (where ~/.claunch*.yaml live). Read before the
+#: instance variables are cleared below. The ``home`` fixture exports them as
+#: config.TEST_REAL_HOMES_ENV, so a test (or a process it starts) that
+#: resolves one of them fails instead of writing there (claunch-gziru).
+_REAL_HOMES = os.pathsep.join(dict.fromkeys(
+    str(Path(p).expanduser())
+    for p in (
+        str(config._DEFAULT_HOME),
+        str(Path.home()),
+        os.environ.get(config.LAUNCHER_HOME_ENV, ""),
+        os.environ.get("CLAUNCH_INSTANCE_BASE", "").strip(),
+        os.path.dirname(os.environ.get(config.LAUNCHER_SYNC_ENV, "")),
+    )
+    if p
+))
+
 for _name in _DAEMON_INSTANCE_VARS:
     os.environ.pop(_name, None)
 
@@ -163,6 +181,8 @@ def home(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUDE_LAUNCHER_HOME", str(h))
     monkeypatch.setenv("CLAUDE_LAUNCHER_SYNC_FILE", str(h / ".claunch.yaml"))
     monkeypatch.setenv("CLAUDE_LAUNCHER_SEED", str(seed))
+    # From here on, resolving a real home is an error (claunch-gziru).
+    monkeypatch.setenv(config.TEST_REAL_HOMES_ENV, _REAL_HOMES)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude-config"))
     # Devin is the one harness whose install target is not under any of the
     # paths above: its config home is machine-wide (see install.devin_home).

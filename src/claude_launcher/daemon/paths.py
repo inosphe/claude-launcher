@@ -81,7 +81,7 @@ def base_home() -> Path:
     place however many homes the instances use.
     """
     base = os.environ.get(INSTANCE_BASE_ENV, "").strip()
-    return Path(base) if base else config.launcher_home()
+    return config.guard_home(Path(base)) if base else config.launcher_home()
 
 
 def known_instances() -> list:

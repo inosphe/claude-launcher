@@ -38,13 +38,53 @@ SYNC_URL_ENV = "CLAUNCH_SYNC_URL"
 SYNC_TOKEN_ENV = "CLAUNCH_SYNC_TOKEN"
 SYNC_NAMESPACE_ENV = "CLAUNCH_SYNC_NAMESPACE"
 
+#: The machine's real launcher homes and the user's home directory, as
+#: ``os.pathsep``-separated paths. Set only by the test suite (tests/conftest.py
+#: ``home`` fixture) and inherited by every process a test starts. While it is
+#: set, a launcher home equal to one of them, or a config file directly inside
+#: one, is refused: a test that lost its throwaway home fails instead of
+#: writing profiles, daemons/<name> or ~/.claunch.yaml on the developer's
+#: machine and passing (claunch-gziru).
+TEST_REAL_HOMES_ENV = "CLAUNCH_TEST_REAL_HOMES"
+
 _DEFAULT_HOME = Path.home() / ".claude-launcher"
+
+
+class RealHomeInTest(RuntimeError):
+    """A test resolved the machine's real launcher home or config file."""
+
+
+def _real_homes() -> tuple:
+    raw = os.environ.get(TEST_REAL_HOMES_ENV, "")
+    return tuple(os.path.normcase(os.path.abspath(p)) for p in raw.split(os.pathsep) if p)
+
+
+def guard_home(path: Path) -> Path:
+    """``path``, unless the test suite marked it as the machine's real home."""
+    real = _real_homes()
+    if real and os.path.normcase(os.path.abspath(path)) in real:
+        raise RealHomeInTest(
+            f"a test resolved the real launcher home {path}; the suite's home "
+            f"fixture lost its isolation ({TEST_REAL_HOMES_ENV}, claunch-gziru)"
+        )
+    return path
+
+
+def guard_config(path: Path) -> Path:
+    """``path``, unless it is a config file in a home the suite marked as real."""
+    real = _real_homes()
+    if real and {os.path.normcase(os.path.abspath(p)) for p in (path, path.parent)} & set(real):
+        raise RealHomeInTest(
+            f"a test resolved the real config file {path}; the suite's home "
+            f"fixture lost its isolation ({TEST_REAL_HOMES_ENV}, claunch-gziru)"
+        )
+    return path
 
 
 def launcher_home() -> Path:
     """Base directory holding launcher state (profiles, metadata)."""
     override = os.environ.get(LAUNCHER_HOME_ENV)
-    return Path(override).expanduser() if override else _DEFAULT_HOME
+    return guard_home(Path(override).expanduser() if override else _DEFAULT_HOME)
 
 
 def profiles_dir() -> Path:
@@ -100,7 +140,7 @@ def seed_source_dir() -> Path:
 def sync_file() -> Path:
     """YAML file that ``export``/``import`` read and write (default ``~/.claunch.yaml``)."""
     override = os.environ.get(LAUNCHER_SYNC_ENV)
-    return Path(override).expanduser() if override else Path.home() / ".claunch.yaml"
+    return guard_config(Path(override).expanduser() if override else Path.home() / ".claunch.yaml")
 
 
 def sync_base_file() -> Path:

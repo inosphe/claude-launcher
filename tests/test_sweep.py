@@ -1731,3 +1731,69 @@ def test_the_master_must_be_a_full_sha(repo, leader, receipts, monkeypatch, caps
     # and the same record with the full sha does pass: the format is the gate
     _merged(monkeypatch, json.dumps({"repo": str(leader), "master": tip}))
     assert _check_merged(receipts) == 0
+
+
+# --------------------------------------------------------------------------- #
+# The suite runs in a throwaway launcher home (claunch-gziru).
+#
+# The delayed-sweep runner hands sweep.py the live daemon's home, instance base
+# and config file. A snapshot whose conftest left one of them standing ran its
+# tests against the real ~/.claude-launcher -- sha 326083f9, re-run 499 times,
+# left daemons/a, b, ... there -- so the suite process gets none of them.
+# --------------------------------------------------------------------------- #
+
+#: A suite that writes into whatever launcher home it was handed and prints
+#: the three home variables it saw.
+LEAKY = (
+    f'"{sys.executable}" -c "'
+    "import os, pathlib; "
+    "h = pathlib.Path(os.environ['CLAUDE_LAUNCHER_HOME']); "
+    "(h / 'daemons').mkdir(parents=True); "
+    "print('HOME=' + str(h)); "
+    "print('BASE=' + os.environ['CLAUNCH_INSTANCE_BASE']); "
+    "print('SYNC=' + os.environ['CLAUDE_LAUNCHER_SYNC_FILE']); "
+    "print('INSTANCE=' + os.environ.get('CLAUNCH_INSTANCE', '-')); "
+    "print('12 passed in 3.4s')\""
+)
+
+
+def test_the_suite_gets_a_throwaway_home_and_the_receipt_names_its_writes(
+    repo, receipts, home, tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setenv("CLAUNCH_SCRATCH", str(tmp_path / "scratch"))
+    (tmp_path / "scratch").mkdir()
+    monkeypatch.setenv("CLAUNCH_INSTANCE", "kimyori")
+    assert _run(repo, receipts, "--command", LEAKY) == 0
+
+    out = capsys.readouterr()
+    seen = dict(line.split("=", 1) for line in out.out.splitlines()
+                if line.split("=", 1)[0] in ("HOME", "BASE", "SYNC", "INSTANCE"))
+    suite_home = Path(seen["HOME"])
+    assert suite_home != home and suite_home.parent == tmp_path / "scratch"
+    assert seen["BASE"] == seen["HOME"]
+    assert Path(seen["SYNC"]) == suite_home / ".claunch.yaml"
+    assert seen["INSTANCE"] == "-"
+    assert not (home / "daemons").exists()
+    assert not suite_home.exists()
+
+    tip = _git(repo, "rev-parse", "HEAD").strip()
+    receipt = json.loads(sweep.receipt_path(repo, tip, receipts).read_text("utf-8"))
+    assert receipt["suite_home_writes"] == ["daemons"]
+    assert "wrote into the launcher home" in out.err
+
+
+def test_a_clean_suite_leaves_no_home_writes_in_the_receipt(repo, receipts):
+    assert _run(repo, receipts, "--command", GREEN) == 0
+    tip = _git(repo, "rev-parse", "HEAD").strip()
+    receipt = json.loads(sweep.receipt_path(repo, tip, receipts).read_text("utf-8"))
+    assert "suite_home_writes" not in receipt
+
+
+def test_the_suite_env_keeps_the_grant_and_drops_the_report(monkeypatch, tmp_path):
+    grant = sweep.test_window.WindowGrant("sweep", "g-1", 4, "daemon", 0.0, "s1")
+    for name in sweep._SUITE_DROPPED_VARS:
+        monkeypatch.setenv(name, "x")
+    env = sweep.suite_env(grant, tmp_path)
+    assert env[sweep.test_window.WINDOW_GRANT_ENV] == "g-1"
+    assert sweep.test_window.WINDOW_REPORT_ENV not in env
+    assert not set(sweep._SUITE_DROPPED_VARS) & set(env)

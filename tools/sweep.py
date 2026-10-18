@@ -142,8 +142,11 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -209,6 +212,52 @@ DEFAULT_COMMAND = (
     'uv run --no-sync pytest tests -q -n 8 --basetemp="{root}/{session}w" '
     "--deselect tests/test_federation_integration.py::test_mesh_federation_over_real_relay"
 )
+
+
+#: Launcher variables the suite process does not inherit from the sweep's
+#: caller. The delayed-sweep runner exports the live daemon's instance; a
+#: snapshot whose conftest predates clearing one of them sent its tests into
+#: the real ~/.claude-launcher (claunch-gziru: daemons/a, b, ... from sha
+#: 326083f9, re-run 499 times; profiles/play, work).
+_SUITE_DROPPED_VARS = (
+    "CLAUNCH_INSTANCE", "CLAUNCH_DAEMON", "CLAUNCH_INSTANCE_APPLIED",
+    "CLAUNCH_INSTANCE_PREV", "CLAUNCH_DAEMON_PORT",
+)
+
+
+def suite_env(grant, home: Path) -> dict:
+    """The suite's environment: the grant, and ``home`` as every launcher home.
+
+    The suite needs nothing from the caller's launcher home -- the grant
+    travels in the environment -- so it gets a throwaway one. Whatever a test
+    of any snapshot does with a home it failed to isolate then lands in
+    ``home``, never in the operator's. The window result is reported by the
+    caller (:func:`_report_window`): the suite cannot reach the daemon from a
+    throwaway home.
+    """
+    env = grant.child_env()
+    env.pop(test_window.WINDOW_REPORT_ENV, None)
+    for name in _SUITE_DROPPED_VARS:
+        env.pop(name, None)
+    env["CLAUDE_LAUNCHER_HOME"] = str(home)
+    env["CLAUNCH_INSTANCE_BASE"] = str(home)
+    env["CLAUDE_LAUNCHER_SYNC_FILE"] = str(home / ".claunch.yaml")
+    return env
+
+
+def _report_window(grant, code: int, counts: dict, seconds: float) -> None:
+    """Attach the suite's result to the grant, as its conftest would have."""
+    if not test_window.reportable(grant.grant_id):
+        return
+    test_window.report_result(grant.grant_id, {
+        "outcome": {0: "passed", 1: "failed", 2: "interrupted", 5: "no_tests"}.get(code, "error"),
+        "exit_code": code,
+        "passed": counts.get("passed", 0),
+        "failed": counts.get("failed", 0),
+        "errors": counts.get("error", 0),
+        "skipped": counts.get("skipped", 0),
+        "duration": round(seconds, 1),
+    })
 
 
 def default_command(session: str, workers: int = 8) -> str:
@@ -710,6 +759,9 @@ def cmd_run(args) -> int:
     # ``PYTHONIOENCODING``/``PYTHONUTF8`` would make the sweep judge a process
     # the operator's own ``pytest`` never runs, which is how a sweep goes green
     # over a tip that is red in the default environment.
+    suite_home = Path(tempfile.mkdtemp(
+        prefix="sweep-home-", dir=os.environ.get("CLAUNCH_SCRATCH") or None))
+    clock = time.monotonic()
     try:
         proc = subprocess.run(
             command,
@@ -719,10 +771,17 @@ def cmd_run(args) -> int:
             text=True,
             encoding="utf-8",
             errors="replace",
-            env=grant.child_env(),
+            env=suite_env(grant, suite_home),
         )
+        _report_window(grant, proc.returncode,
+                       parse_counts((proc.stdout or "") + (proc.stderr or "")),
+                       time.monotonic() - clock)
     finally:
         grant.release()
+        # Anything left here is a test that wrote to the launcher home it was
+        # handed instead of its own; the receipt names it.
+        home_writes = sorted(p.name for p in suite_home.iterdir())
+        shutil.rmtree(suite_home, ignore_errors=True)
     finished = datetime.now(timezone.utc)
     # A stream that came back as ``None`` is not an empty stream: the reader
     # died and took the output with it. Both states parse to ``counts {}``, and
@@ -750,6 +809,11 @@ def cmd_run(args) -> int:
         "finished_at": finished.isoformat(),
         "seconds": round((finished - started).total_seconds(), 1),
     }
+    if home_writes:
+        receipt["suite_home_writes"] = home_writes[:40]
+        print(f"WARNING: the suite wrote into the launcher home it was handed "
+              f"(a test without an isolated home): {', '.join(home_writes[:40])}",
+              file=sys.stderr)
     if lost:
         receipt["stream_error"] = (
             f"{' and '.join(lost)} could not be read back from the suite "

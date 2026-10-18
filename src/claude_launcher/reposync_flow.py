@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, Iterable, Iterator, List, Optional, Tuple, TypeVar
 
-from . import atomic, daemon_client, reposync, store, workspaces
+from . import atomic, config, daemon_client, reposync, store, workspaces
 from .daemon.paths import daemon_dir, session_scratch_dir
 
 ASK = "ask"
@@ -67,7 +67,9 @@ def scratch() -> str:
     session = os.environ.get("CLAUNCH_SESSION")
     if session:
         return str(session_scratch_dir(session))
-    return os.path.join(os.path.expanduser("~"), ".claude-launcher", "reposync-scratch")
+    # The launcher home, not a hard-coded ~/.claude-launcher: that bypassed
+    # every home override, the test suite's included (claunch-gziru).
+    return str(config.launcher_home() / "reposync-scratch")
 
 
 # --------------------------------------------------------------------------- #
