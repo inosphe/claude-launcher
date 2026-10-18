@@ -494,6 +494,22 @@ def test_kept_rail_reads_nothing_when_not_allowed(repo, fresh_kept, monkeypatch)
     assert calls == []
 
 
+def test_kept_rail_asks_its_budget_only_for_a_repository_found(repo, tmp_path, fresh_kept):
+    commit(repo, "feat: a", session="s1")
+    asked = []
+
+    def budget():
+        asked.append(1)
+        return True
+
+    assert kept(None, [tmp_path / "gone", None], read=budget) == (None, False)
+    assert asked == []
+    record, changed = kept(None, [tmp_path / "gone", repo], read=budget)
+    assert changed and kept_rows(record) and asked == [1]
+    # Refused once a repository is found: nothing read, nothing kept.
+    assert kept(None, [repo], read=lambda: False) == (None, False)
+
+
 def test_kept_rail_shows_the_newest_and_counts_the_rest(repo, fresh_kept, monkeypatch):
     monkeypatch.setattr(session_commits, "RAIL_LIMIT", 2)
     for n in range(4):

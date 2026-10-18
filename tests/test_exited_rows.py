@@ -543,3 +543,17 @@ def test_first_readings_are_spread_over_polls(home, chips_repo, monkeypatch):
     assert _kept(two, str(chips_repo)).get("rail_commits")
     # A kept record is no first reading: it spends nothing.
     assert _kept(one, str(chips_repo)).get("rail_commits")
+
+
+def test_rows_with_nothing_to_read_do_not_spend_the_first_reading_budget(
+        home, chips_repo, tmp_path, monkeypatch):
+    """A session whose directories are gone has no repository to read; it
+    must not take the poll's slots, or every readable row listed after
+    enough of those never gets its chips (s917-rev's starvation repro)."""
+    monkeypatch.setattr(exited_rows, "FILL_LIMIT", 1)
+    _stamped(chips_repo, "feat-a", session="real")
+    gone = [_chips_session(tmp_path / f"gone-{n}", name=f"gone{n}") for n in range(2)]
+    real = _chips_session(chips_repo, name="real")
+    for session in gone:
+        assert "rail_commits" not in _kept(session, str(tmp_path / "gone"))
+    assert _kept(real, str(chips_repo)).get("rail_commits")

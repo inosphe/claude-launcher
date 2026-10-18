@@ -36,7 +36,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 #: Trailer keys, spelled as ``commit-stamp`` teaches them. Changing either
 #: spelling here without changing it there silently empties every list.
@@ -569,13 +569,19 @@ def kept_view(record: Optional[dict]) -> Optional[Dict[str, object]]:
 
 
 def _read_kept(session: str, cwds: List[Optional[str]], prs, created_at,
-               exited_at, prior: Optional[dict]) -> Optional[dict]:
+               exited_at, prior: Optional[dict],
+               allow: Callable[[], bool]) -> Optional[dict]:
     for cwd in cwds:
         if not cwd:
             continue
         common = _common_dir(str(cwd))
         if not common:
             continue
+        # The budget is spent on a repository found, never on a directory
+        # that is gone: a row with nothing to read would otherwise take a
+        # slot on every poll and starve the readable rows behind it.
+        if not allow():
+            return None
         found = rail(str(cwd), session, prs, everything=True)
         with _rail_lock:
             snap = _rail_snaps.get(common)
@@ -646,7 +652,7 @@ def kept_rail(
     exited_at: Optional[str],
     cwds: List[Optional[str]],
     prs: Optional[List[Dict[str, object]]] = None,
-    read: bool = True,
+    read: Union[bool, Callable[[], bool]] = True,
 ) -> Tuple[Optional[dict], bool]:
     """An exited session's kept chips: ``(record, changed)``.
 
@@ -658,7 +664,8 @@ def kept_rail(
     again since (``exited_at`` moved) -- the commits are read from the first
     of ``cwds`` that answers, and an earlier record's commits are kept beside
     them. ``read=False`` forbids that reading (the caller's budget); the old
-    record, or ``None``, comes back unchanged. A reading that failed gives
+    record, or ``None``, comes back unchanged; a callable is asked only once
+    a repository is found to read. A reading that failed gives
     no record: an unreadable repository is not "no commits" (claunch-j5kp).
     ``changed`` says the caller should keep the new record.
     """
@@ -671,9 +678,10 @@ def kept_rail(
         record = None
     if kept_current(record, session, created_at, exited_at):
         return _settle(record, prs)
-    if not read:
+    if read is False:
         return record, False
-    fresh = _read_kept(session, cwds, prs, created_at, exited_at, record)
+    allow = read if callable(read) else (lambda: True)
+    fresh = _read_kept(session, cwds, prs, created_at, exited_at, record, allow)
     if fresh is None:
         return record, False
     return fresh, True

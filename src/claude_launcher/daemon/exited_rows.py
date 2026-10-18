@@ -225,7 +225,8 @@ def _attach_rail(session: Any, info: dict, cwd: str) -> None:
     record, changed = session_commits.kept_rail(
         record, name, created_at=created_at, exited_at=exited_at,
         cwds=[info.get(work_checkout.FIELD), cwd], prs=info.get("prs"),
-        read=current or _take_fill(),
+        # Spent only once a repository is found (session_commits.kept_rail).
+        read=True if current else _take_fill,
     )
     if changed:
         _save_rail(name, record)
