@@ -25,6 +25,9 @@ const projectOf = { s1: "alpha", s2: "beta" };
    kind the feed has, and two open asks the tab counts as unseen. */
 const feed = [];
 for (let i = 0; i < 19; i++) feed.push({ id: `p${i}`, at: at(i), kind: "post", role: "bot", text: `관찰 보고 ${i}`, level: "info", refs: [] });
+/* One report written the way an operator writes them: markdown, with a line
+   of raw HTML that must stay text. */
+feed[17].text = "## 진행 요약\n\n- **s1**: `pytest` 실행 중\n- s2: 대기\n\n```\nFAILED tests/test_a.py::test_b - AssertionError: a very long line that would otherwise run past the narrow dock column\n```\n\n<img src=x onerror=\"window.__pwned=1\">";
 feed.push({ id: "u1", at: at(19), kind: "user", role: "user", text: "s1은 무엇을 하고 있습니까?" });
 feed.push({ id: "p19", at: at(20), kind: "post", role: "bot", text: "s1은 테스트를 돌리고 있습니다.", level: "attention", refs: ["s1"], parent: "p18" });
 feed.push({ id: "d1", at: at(21), kind: "dispatch", role: "bot", target: "s1", text: "테스트 결과를 보고하십시오", on_behalf_of: "u1", delivery: "sent" });
@@ -182,13 +185,25 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     assert.equal(await page.locator('.op-entry[data-entry="p19"]').evaluate(e => e.classList.contains("op-reply")), true);
     assert.equal(await page.locator('.op-entry[data-entry="p19"] a.op-ref').getAttribute("href"), "#/observer/session/s1");
 
+    // Bodies are markdown: structure from the renderer, raw HTML left as text,
+    // and a code block wraps in the column instead of scrolling sideways.
+    const md = await page.locator('.op-entry[data-entry="p17"] .op-text').evaluate(e => ({
+      md: e.classList.contains("md"), h: e.querySelectorAll(".md-h").length, li: e.querySelectorAll("li").length,
+      strong: e.querySelectorAll("strong, .md-strong").length, code: e.querySelectorAll("code").length,
+      pre: e.querySelectorAll("pre").length, img: e.querySelectorAll("img").length, raw: /<img src=x/.test(e.textContent),
+      pwned: !!window.__pwned, preFits: [...e.querySelectorAll("pre")].every(p => p.scrollWidth <= p.clientWidth + 1) }));
+    assert.deepEqual(md, { md: true, h: 1, li: 2, strong: 1, code: 2, pre: 1, img: 0, raw: true, pwned: false, preFits: true });
+
     // Asks: approve/deny and a choice, each one press.
     await page.locator('.op-entry[data-entry="a1"] button', { hasText: "승인" }).click();
     await page.waitForFunction(() => /사용자 답변 · 승인/.test(document.querySelector('.op-entry[data-entry="a1"]')?.textContent || ""));
     assert.deepEqual(lastSent("POST", "/asks/a1/answer").body, { decision: "approve" });
+    await page.fill('.op-entry[data-entry="a2"] textarea', "**dev**로 갑니다");
     await page.locator('.op-entry[data-entry="a2"] button', { hasText: "dev" }).click();
     await page.waitForFunction(() => /사용자 답변 · dev/.test(document.querySelector('.op-entry[data-entry="a2"]')?.textContent || ""));
-    assert.deepEqual(lastSent("POST", "/asks/a2/answer").body, { decision: "dev" });
+    assert.deepEqual(lastSent("POST", "/asks/a2/answer").body, { decision: "dev", text: "**dev**로 갑니다" });
+    // The answer's own words are markdown too, under the decision line.
+    assert.equal(await page.locator('.op-entry[data-entry="a2"] .op-answer-text.md strong, .op-entry[data-entry="a2"] .op-answer-text.md .md-strong').first().innerText(), "dev");
 
     if (process.env.CLAUNCH_SCREENSHOT) await page.screenshot({ path: process.env.CLAUNCH_SCREENSHOT });
     // The page composer talks to the operator: it is offered as a target and,
@@ -348,6 +363,6 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     assert.equal(await page.locator("#observer-operators .op-tab").first().isVisible(), true);
 
     assert.deepEqual(errors, []);
-    console.log("PASS: operator tabs, seen badge, feed folding and kinds, approve/choice answers, composer target and send, card ask-about scope, picked empty target kept, fab hidden, create all/projects, validation and 409, scope edit, watch toggle, start/stop/delete, 40vh draft cap, dock closed by default, toggle kept in localStorage across reload, two columns with a held dock and its own input row, ask opens the dock, inner scrollers only the draft and the dock conversation on desktop and none on mobile");
+    console.log("PASS: operator tabs, seen badge, feed folding and kinds, markdown bodies and answers with raw HTML kept as text, approve/choice answers, composer target and send, card ask-about scope, picked empty target kept, fab hidden, create all/projects, validation and 409, scope edit, watch toggle, start/stop/delete, 40vh draft cap, dock closed by default, toggle kept in localStorage across reload, two columns with a held dock and its own input row, ask opens the dock, inner scrollers only the draft and the dock conversation on desktop and none on mobile");
   } finally { await browser.close(); server.close(); server.closeAllConnections(); }
 })().catch(error => { console.error(error); server.close(); server.closeAllConnections(); process.exitCode = 1; });

@@ -25,7 +25,7 @@ const ops = {
   opA: { id: "opA", name: "alpha-ops", all: false, projects: ["alpha"], watch: true, session: null, seen: [],
          feed: [{ id: "p1", at: at(1), kind: "post", role: "bot", text: "alpha 보고", level: "info", refs: [] }] },
   opB: { id: "opB", name: "beta-ops", all: false, projects: ["beta"], watch: true, session: "s900", seen: [],
-         feed: [{ id: "p2", at: at(2), kind: "post", role: "bot", text: "beta 보고", level: "info", refs: ["s2"] },
+         feed: [{ id: "p2", at: at(2), kind: "post", role: "bot", text: "beta 보고\n\n- **s2**: `pytest` 대기", level: "info", refs: ["s2"] },
                 { id: "a1", at: at(3), kind: "ask", role: "bot", type: "approve", text: "s2를 재시작할까요?", choices: [], level: "urgent", refs: ["s2"], answer: null }] },
 };
 function summary(o) {
@@ -135,6 +135,11 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     // The input row has the focus.
     assert.equal(await page.locator("#opfab-view .op-composer textarea").evaluate(e => document.activeElement === e), true);
 
+    // The floating view renders bodies as markdown, like the Observer page.
+    assert.deepEqual(await page.locator('#opfab-view .op-entry[data-entry="p2"] .op-text').evaluate(e => ({
+      md: e.classList.contains("md"), li: e.querySelectorAll("li").length, code: e.querySelectorAll("code").length })),
+      { md: true, li: 1, code: 1 });
+
     // Answer the ask.
     await page.locator('#opfab-view .op-entry[data-entry="a1"] button', { hasText: "승인" }).click();
     await page.waitForFunction(() => /사용자 답변 · 승인/.test(document.querySelector('#opfab-view .op-entry[data-entry="a1"]')?.textContent || ""));
@@ -205,6 +210,6 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     assert.equal(await page.isVisible(".chat-fab"), true);
 
     assert.deepEqual(errors, []);
-    console.log("PASS: one dock with both segments, badge sum and alert, session-scoped default operator, seen on show, no management in the dialog, ask answer, Enter send, per-operator drafts, Alt+O toggle, link closes dialog, phone full-screen with one scroller, hidden on Observer");
+    console.log("PASS: one dock with both segments, markdown bodies, badge sum and alert, session-scoped default operator, seen on show, no management in the dialog, ask answer, Enter send, per-operator drafts, Alt+O toggle, link closes dialog, phone full-screen with one scroller, hidden on Observer");
   } finally { await browser.close(); server.close(); server.closeAllConnections(); }
 })().catch(error => { console.error(error); server.close(); server.closeAllConnections(); process.exitCode = 1; });

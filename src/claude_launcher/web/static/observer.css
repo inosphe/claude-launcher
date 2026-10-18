@@ -360,6 +360,15 @@
 :is(#observer-operators, #opfab-view) .op-reply { margin-left: 16px; }
 :is(#observer-operators, #opfab-view) .level-attention { border-left: 3px solid #d29922; }
 :is(#observer-operators, #opfab-view) .level-urgent { border-left: 3px solid #f85149; }
+/* Message bodies are markdown (style.css .md-*). The column is narrow and the
+   page keeps a single scrollbar, so code blocks and tables wrap here instead
+   of growing a horizontal scroller of their own. */
+:is(#observer-operators, #opfab-view) .op-text { margin-top: 2px; }
+:is(#observer-operators, #opfab-view) .op-text.md { white-space: normal; }
+:is(#observer-operators, #opfab-view) .op-text .md-pre { white-space: pre-wrap; overflow-wrap: anywhere; overflow: visible; }
+:is(#observer-operators, #opfab-view) .op-text .md-table { display: table; table-layout: fixed; width: 100%; overflow: visible; }
+:is(#observer-operators, #opfab-view) .op-text .md-table :is(th, td) { overflow-wrap: anywhere; }
+:is(#observer-operators, #opfab-view) .op-answer-text { margin-top: 4px; padding-left: 8px; border-left: 2px solid #3d4451; }
 :is(#observer-operators, #opfab-view) .op-refs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
 :is(#observer-operators, #opfab-view) .op-ask-answer textarea { width: 100%; min-height: 44px; box-sizing: border-box; resize: vertical; margin-top: 6px; }
 :is(#observer-operators, #opfab-view) .op-ask-buttons { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
