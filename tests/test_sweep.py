@@ -50,6 +50,7 @@ import pytest
 from claude_launcher.cflow import checkout
 
 SWEEP = Path(__file__).resolve().parents[1] / "tools" / "sweep.py"
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture(autouse=True)
@@ -1731,3 +1732,175 @@ def test_the_master_must_be_a_full_sha(repo, leader, receipts, monkeypatch, caps
     # and the same record with the full sha does pass: the format is the gate
     _merged(monkeypatch, json.dumps({"repo": str(leader), "master": tip}))
     assert _check_merged(receipts) == 0
+
+
+# --------------------------------------------------------------------------- #
+# The suite runs in a throwaway launcher home (claunch-gziru).
+#
+# The delayed-sweep runner hands sweep.py the live daemon's home, instance base
+# and config file. A snapshot whose conftest left one of them standing ran its
+# tests against the real ~/.claude-launcher -- sha 326083f9, re-run 499 times,
+# left daemons/a, b, ... there -- so the suite process gets none of them.
+# --------------------------------------------------------------------------- #
+
+#: A suite that writes into whatever launcher home it was handed and prints
+#: the three home variables it saw.
+LEAKY = (
+    f'"{sys.executable}" -c "'
+    "import os, pathlib; "
+    "h = pathlib.Path(os.environ['CLAUDE_LAUNCHER_HOME']); "
+    "(h / 'daemons').mkdir(parents=True); "
+    "print('HOME=' + str(h)); "
+    "print('BASE=' + os.environ['CLAUNCH_INSTANCE_BASE']); "
+    "print('SYNC=' + os.environ['CLAUDE_LAUNCHER_SYNC_FILE']); "
+    "print('INSTANCE=' + os.environ.get('CLAUNCH_INSTANCE', '-')); "
+    "print('12 passed in 3.4s')\""
+)
+
+
+def test_the_suite_gets_a_throwaway_home_and_the_receipt_names_its_writes(
+    repo, receipts, home, tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setenv("CLAUNCH_SCRATCH", str(tmp_path / "scratch"))
+    (tmp_path / "scratch").mkdir()
+    monkeypatch.setenv("CLAUNCH_INSTANCE", "kimyori")
+    assert _run(repo, receipts, "--command", LEAKY) == 0
+
+    out = capsys.readouterr()
+    seen = dict(line.split("=", 1) for line in out.out.splitlines()
+                if line.split("=", 1)[0] in ("HOME", "BASE", "SYNC", "INSTANCE"))
+    suite_home = Path(seen["HOME"])
+    assert suite_home != home and suite_home.parent == tmp_path / "scratch"
+    assert seen["BASE"] == seen["HOME"]
+    assert Path(seen["SYNC"]) == suite_home / ".claunch.yaml"
+    assert seen["INSTANCE"] == "-"
+    assert not (home / "daemons").exists()
+    assert not suite_home.exists()
+
+    tip = _git(repo, "rev-parse", "HEAD").strip()
+    receipt = json.loads(sweep.receipt_path(repo, tip, receipts).read_text("utf-8"))
+    assert receipt["suite_home_writes"] == ["daemons"]
+    assert "wrote into the launcher home" in out.err
+
+
+def test_a_clean_suite_leaves_no_home_writes_in_the_receipt(repo, receipts):
+    assert _run(repo, receipts, "--command", GREEN) == 0
+    tip = _git(repo, "rev-parse", "HEAD").strip()
+    receipt = json.loads(sweep.receipt_path(repo, tip, receipts).read_text("utf-8"))
+    assert "suite_home_writes" not in receipt
+
+
+def test_the_suite_env_keeps_the_grant_and_sends_the_result_to_a_file(
+    monkeypatch, tmp_path
+):
+    grant = sweep.test_window.WindowGrant("sweep", "g-1", 4, "daemon", 0.0, "s1")
+    for name in sweep._SUITE_DROPPED_VARS:
+        monkeypatch.setenv(name, "x")
+    env = sweep.suite_env(grant, tmp_path, tmp_path / "r.json")
+    assert env[sweep.test_window.WINDOW_GRANT_ENV] == "g-1"
+    assert env[sweep.test_window.WINDOW_REPORT_ENV] == "1"
+    assert env[sweep.test_window.WINDOW_RESULT_FILE_ENV] == str(tmp_path / "r.json")
+    assert not set(sweep._SUITE_DROPPED_VARS) & set(env)
+
+
+#: A red suite with one timeout among its failures, shaped like pytest -q.
+TIMED_OUT = (
+    f'"{sys.executable}" -c "'
+    "print('FAILED tests/test_x.py::test_a - subprocess.TimeoutExpired: "
+    "Command [python] timed out after 30 seconds'); "
+    "print('FAILED tests/test_x.py::test_b - AssertionError'); "
+    "print('2 failed, 10 passed, 1 skipped in 3.4s'); "
+    'raise SystemExit(1)"'
+)
+
+
+#: A suite that writes the result file its conftest would, and prints a
+#: short summary that says nothing about timeouts.
+WRITES_RESULT = (
+    f'"{sys.executable}" -c "'
+    "import json, os; "
+    "open(os.environ['CLAUNCH_WINDOW_RESULT_FILE'], 'w').write("
+    "json.dumps({'outcome': 'failed', 'exit_code': 1, 'timeouts': 3, 'collected': 7})); "
+    "print('FAILED tests/test_x.py::test_with_a_long_name_the_message_was_cut_from'); "
+    "print('1 failed, 6 passed in 3.4s'); "
+    'raise SystemExit(1)"'
+)
+
+
+@pytest.fixture
+def window_reports(monkeypatch):
+    sent = []
+    monkeypatch.setattr(sweep.test_window, "reportable", lambda grant_id: True)
+    monkeypatch.setattr(sweep.test_window, "report_result",
+                        lambda grant_id, result: sent.append(result) or True)
+    return sent
+
+
+def test_the_sweep_posts_the_result_the_suite_wrote(repo, receipts, window_reports):
+    """The suite cannot reach the daemon from its throwaway home, so its
+    conftest writes the result and the sweep posts it unchanged -- timeouts
+    included, which the daemon's adaptive worker budget halves on
+    (claunch-afmzw)."""
+    assert _run(repo, receipts, "--command", WRITES_RESULT) == 1
+    assert window_reports == [
+        {"outcome": "failed", "exit_code": 1, "timeouts": 3, "collected": 7}]
+
+
+def test_without_a_result_file_the_sweep_reads_the_output(
+    repo, receipts, window_reports
+):
+    """A snapshot whose conftest predates the result file still reports."""
+    sent = window_reports
+    assert _run(repo, receipts, "--command", TIMED_OUT) == 1
+
+    (result,) = sent
+    assert result["timeouts"] == 1
+    assert result["outcome"] == "failed" and result["exit_code"] == 1
+    assert (result["passed"], result["failed"], result["skipped"]) == (10, 2, 1)
+    assert result["collected"] == 13
+
+
+def test_a_green_suite_reports_no_timeouts():
+    result = sweep.window_result(0, "12 passed, 1 skipped in 3.4s", 3.4)
+    assert result["outcome"] == "passed" and result["timeouts"] == 0
+    assert result["collected"] == 13 and result["duration"] == 3.4
+
+
+#: A test whose node id is far wider than 80 columns and that times out.
+_LONG_TIMEOUT_TEST = """
+def test_a_node_id_long_enough_that_pytest_cuts_the_short_summary_message_off_the_line():
+    raise TimeoutError("timed out waiting for the daemon")
+"""
+
+
+def test_the_conftest_writes_the_result_with_timeouts_pytest_cut_from_the_summary(
+    tmp_path,
+):
+    """The real conftest, a real pytest, a node id too long for the summary
+    line to keep its message: the result file still counts the timeout."""
+    project = tmp_path / "proj"
+    (project / "tests").mkdir(parents=True)
+    (project / "tests" / "conftest.py").write_text(
+        (REPO_ROOT / "tests" / "conftest.py").read_text("utf-8"), "utf-8")
+    (project / "tests" / "_repo_history_guard.py").write_text(
+        (REPO_ROOT / "tests" / "_repo_history_guard.py").read_text("utf-8"), "utf-8")
+    (project / "tests" / "test_long.py").write_text(_LONG_TIMEOUT_TEST, "utf-8")
+    result_file = tmp_path / "result.json"
+    env = dict(os.environ)
+    for name in ("COLUMNS", "CI", "PYTEST_XDIST_WORKER", "PYTEST_ADDOPTS"):
+        env.pop(name, None)
+    grant = sweep.test_window.WindowGrant("sweep", "g-long", 1, "daemon", 0.0, "s1")
+    env = grant.child_env(env)
+    env[sweep.test_window.WINDOW_RESULT_FILE_ENV] = str(result_file)
+    env["PYTHONPATH"] = str(REPO_ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+         "-p", "no:claunch_window", "tests"],
+        cwd=project, env=env, capture_output=True, text=True,
+    )
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    summary = [ln for ln in proc.stdout.splitlines() if ln.startswith("FAILED ")]
+    assert summary and not sweep.test_window.TIMEOUT_PATTERN.search(summary[0]), proc.stdout
+    result = json.loads(result_file.read_text("utf-8"))
+    assert result["timeouts"] == 1 and result["failed"] == 1
+    assert result["collected"] == 1

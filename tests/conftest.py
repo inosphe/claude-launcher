@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import shutil
 import sys
@@ -11,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from claude_launcher import pytest_venv, test_window
+from claude_launcher import config, pytest_venv, test_window
 
 
 #: The daemon instance variables a runner or session exports. Cleared once,
@@ -27,6 +28,24 @@ _DAEMON_INSTANCE_VARS = (
     "CLAUNCH_INSTANCE_BASE", "CLAUNCH_INSTANCE", "CLAUNCH_DAEMON",
     "CLAUNCH_INSTANCE_APPLIED", "CLAUNCH_INSTANCE_PREV", "CLAUNCH_DAEMON_PORT",
 )
+#: The homes this pytest was started with -- the machine's real ones, unless
+#: a runner already handed it throwaway ones -- plus the built-in default and
+#: the user's home directory (where ~/.claunch*.yaml live). Read before the
+#: instance variables are cleared below. The ``home`` fixture exports them as
+#: config.TEST_REAL_HOMES_ENV, so a test (or a process it starts) that
+#: resolves one of them fails instead of writing there (claunch-gziru).
+_REAL_HOMES = os.pathsep.join(dict.fromkeys(
+    str(Path(p).expanduser())
+    for p in (
+        str(config._DEFAULT_HOME),
+        str(Path.home()),
+        os.environ.get(config.LAUNCHER_HOME_ENV, ""),
+        os.environ.get("CLAUNCH_INSTANCE_BASE", "").strip(),
+        os.path.dirname(os.environ.get(config.LAUNCHER_SYNC_ENV, "")),
+    )
+    if p
+))
+
 for _name in _DAEMON_INSTANCE_VARS:
     os.environ.pop(_name, None)
 
@@ -35,6 +54,9 @@ _test_window_grant = None
 #: (claunch-8kald: the window's run history).
 _report_grant_id = None
 _session_started = 0.0
+#: Where the result goes instead of the daemon, when the grant owner said so
+#: (test_window.WINDOW_RESULT_FILE_ENV).
+_result_file = None
 
 
 def _pytest_window_class(args) -> str:
@@ -63,7 +85,7 @@ def _spend_only_the_grant(config, grant) -> None:
 
 def pytest_sessionstart(session):
     """Guard every direct pytest entry point, including unwrapped commands."""
-    global _test_window_grant, _report_grant_id, _session_started
+    global _test_window_grant, _report_grant_id, _session_started, _result_file
     if os.environ.get("PYTEST_XDIST_WORKER"):
         return
     _session_started = time.monotonic()
@@ -75,6 +97,7 @@ def pytest_sessionstart(session):
     # Only the direct child of a grant owner reports into that grant; a
     # pytest started by a test inside this run must not overwrite it.
     reporter = os.environ.pop(test_window.WINDOW_REPORT_ENV, None) == "1"
+    _result_file = os.environ.pop(test_window.WINDOW_RESULT_FILE_ENV, None)
     cls = _pytest_window_class(session.config.args)
     inherited = test_window.inherited_grant()
     if inherited is not None:
@@ -111,6 +134,9 @@ def _report_to_the_window(session, exitstatus) -> None:
         getattr(session, "testscollected", 0),
         time.monotonic() - _session_started,
     )
+    if _result_file:
+        Path(_result_file).write_text(json.dumps(result), encoding="utf-8")
+        return
     test_window.report_result(grant_id, result)
 
 
@@ -163,6 +189,8 @@ def home(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUDE_LAUNCHER_HOME", str(h))
     monkeypatch.setenv("CLAUDE_LAUNCHER_SYNC_FILE", str(h / ".claunch.yaml"))
     monkeypatch.setenv("CLAUDE_LAUNCHER_SEED", str(seed))
+    # From here on, resolving a real home is an error (claunch-gziru).
+    monkeypatch.setenv(config.TEST_REAL_HOMES_ENV, _REAL_HOMES)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude-config"))
     # Devin is the one harness whose install target is not under any of the
     # paths above: its config home is machine-wide (see install.devin_home).
