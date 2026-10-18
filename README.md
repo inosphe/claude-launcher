@@ -4161,7 +4161,11 @@ daemon on every read and write the bot makes: a session outside it is not
 in its poll and answers 403. The bot polls with `opv2_poll`, posts only what
 changes what you do next with `opv2_post`, and asks for decisions with
 `opv2_ask` (approve/deny, a choice, or text; the badge counts what you have
-not seen). With the watch switch off it only answers what you ask. Ask it
+not seen). Message bodies — the bot's posts and asks, what you type, and the
+text of your answers — are rendered as markdown by the page's renderer, which
+builds elements and never parses HTML, so raw HTML in a message shows as
+text; code blocks and tables wrap inside the conversation column. With the
+watch switch off it only answers what you ask. Ask it
 about work — what a session in its scope is doing or did, its issue, its
 commits, where something was said — and it answers from the record with
 `opv2_sessions`, `opv2_session`, `opv2_issue`, `opv2_commits`,

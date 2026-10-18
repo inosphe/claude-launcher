@@ -197,11 +197,20 @@ function formBox() {
 function sessionLink(name) {
   const a = node("a", name, "op-ref");a.href = "#/observer/session/" + encodeURIComponent(name);return a;
 }
+/* A message body: markdown through the page's renderer (app.js mdInto, which
+   builds nodes and never parses HTML), plain text when the page has none. */
+function bodyOf(text, cls) {
+  const body = node("div", "", cls);
+  if(typeof globalThis.mdInto === "function") { body.classList.add("md"); globalThis.mdInto(body, text || ""); }
+  else { body.classList.add("plain"); body.textContent = text || ""; }
+  return body;
+}
 function askAnswer(op, e) {
   const box = node("div", "", "op-ask-answer");
   if(e.answer) {
     const said = e.type === "approve" ? (e.answer.decision === "approve" ? "승인" : "거절") : e.answer.decision;
-    box.append(node("small", ["사용자 답변", said, e.answer.text].filter(Boolean).join(" · ")));
+    box.append(node("small", ["사용자 답변", said].filter(Boolean).join(" · ")));
+    if(e.answer.text) box.append(bodyOf(e.answer.text, "op-text op-answer-text"));
     return box;
   }
   const field = document.createElement("textarea");
@@ -239,7 +248,7 @@ function entryItem(op, e) {
     line.append(node("span", "→ "), sessionLink(e.target || ""), node("span", `: ${e.text || ""}`));
     item.append(line);
     item.append(node("small", [e.on_behalf_of ? `근거 ${e.on_behalf_of}` : "", e.delivery ? `전달 ${e.delivery}` : ""].filter(Boolean).join(" · ")));
-  } else item.append(node("div", e.text || "", "op-text"));
+  } else item.append(bodyOf(e.text, "op-text"));
   if((e.refs || []).length) {
     const refs = node("div", "", "op-refs");
     for(const r of e.refs) refs.append(sessionLink(r));
