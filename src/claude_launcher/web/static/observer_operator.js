@@ -1,12 +1,12 @@
 /* Operator v2 on the Observer page (claunch-iw5i8.4): the operators as tabs
    above the session cards, the selected one's conversation, and the form that
-   creates or edits one. The page's composer is where the reader talks to an
-   operator — observer.js asks this module for the targets it offers and hands
-   it the text — so this section has no input box of its own beyond the ask
-   answers. There is no live channel: observer.js polls refresh() with its own
+   creates or edits one. The section has an input row of its own, and the
+   page's composer can also talk to an operator — observer.js asks this module
+   for the targets it offers and hands it the text. There is no live channel: observer.js polls refresh() with its own
    ten-second tick, and every write here reads again at once.
-   The section never scrolls inside itself: the feed draws its newest entries
-   and opens the rest in place, the way a session card does.
+   The feed draws its newest entries and opens the rest in place, the way a
+   session card does. On the page the section sits in the Operator dock, whose
+   conversation scrolls inside the dock on a wide screen (observer.css).
    The floating Operator (operator_fab.js, claunch-iw5i8.5) draws the same
    tabs and conversation in its dialog: OperatorView.create makes one view per
    host, each with its own list, selection and feed. Options:
@@ -18,10 +18,19 @@
               and delete (the page); off, the head links to the page instead
      composer an input row of the view's own (the page uses its composer) */
 globalThis.OperatorView = {create: options => operatorView(options || {})};
+/* On the page the view lives in the Operator dock (claunch-iw5i8.8), the
+   right-hand column observer.js opens and closes, with an input row of its
+   own. Its conversation is in front of the reader only while the dock is
+   open. On a wide screen the dock is held on screen and its conversation
+   scrolls inside it; on a phone it is part of the page, which scrolls. */
+const dockOpen = () => document.getElementById("observer-view")?.classList.contains("dock-open");
 globalThis.ObserverOperators = OperatorView.create({
-  key: "claunch-observer-operator", manage: true,
-  active: () => document.body.classList.contains("observer-active"),
-  scroller: () => document.getElementById("observer-view"),
+  key: "claunch-observer-operator", manage: true, composer: true,
+  active: () => document.body.classList.contains("observer-active") && dockOpen(),
+  scroller: () => {
+    const area = document.querySelector("#observer-operators .op-area");
+    return area && /auto|scroll/.test(getComputedStyle(area).overflowY) ? area : document.getElementById("observer-view");
+  },
 });
 function operatorView(opts) {
 "use strict";
@@ -251,7 +260,7 @@ function feedBox(op) {
     more.onclick = () => { expanded = true; render(); };
     box.append(more);
   }
-  if(!feed.length && !detail?.error) box.append(node("p", "아직 대화가 없습니다. 아래 입력창에서 이 operator를 대상으로 골라 질문하십시오.", "hint"));
+  if(!feed.length && !detail?.error) box.append(node("p", "아직 대화가 없습니다. 아래 입력란에 질문을 입력하십시오.", "hint"));
   for(const e of shown) box.append(entryItem(op, e));
   return box;
 }

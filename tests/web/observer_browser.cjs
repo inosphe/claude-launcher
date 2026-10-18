@@ -234,7 +234,7 @@ async function fadeCost(page, selector, fade) {
     await page.waitForTimeout(250);
     assert.equal(await tokenToggle.getAttribute("aria-expanded"),"true","refresh preserves expansion");
     await tokenToggle.click();
-    assert.equal(await page.locator("#observer-view > header").isVisible(), false);
+    assert.equal(await page.locator("#observer-view .observer-main > header").isVisible(), false);
     assert.equal(await page.locator("#observer-mobile-monitor").isVisible(), true);
     assert.equal(await page.locator(".observer-card").first().evaluate(e=>getComputedStyle(e).fontSize), "13px");
     // The composer is most of this screen, so it arrives folded with its own
@@ -280,7 +280,7 @@ async function fadeCost(page, selector, fade) {
     await page.setViewportSize({width:1280,height:900});
     assert.equal(await tokenToggle.isVisible(),false);
     assert.equal(await page.locator("#observer-token-detail").isVisible(),true);
-    assert.equal(await page.locator("#observer-view > header").isVisible(), true);
+    assert.equal(await page.locator("#observer-view .observer-main > header").isVisible(), true);
     assert.equal(await page.locator("#observer-mobile-monitor").isVisible(), false);
     await page.setViewportSize({width:390,height:844});
     assert(sent.some(r=>r.url==="/api/auth/session" && r.body.token==="fixture-token"));

@@ -4141,7 +4141,12 @@ Periodic goal reminders use the machine's `cflow_reminder_interval` (600 seconds
 when unset or zero) and the session reminder pause/skip controls.
 
 **Operators** are bot sessions that watch other sessions for you. Create as
-many as you like in the **Operators** section of the Observer page: each has
+many as you like in the Observer page's **Operator** dock — the header's
+**Operator ▸** button (the top bar's **Operator** on a phone) opens it as a
+right-hand column held on screen while the page scrolls, with tabs, the
+conversation and an input row; closed, the cards take the full width. The
+choice is kept per browser (`localStorage` key
+`claunch-observer-operator-dock`) and starts closed. Each operator has
 a name and a project scope — tick one project, several, or *all projects* —
 and its own feed, bound session and watch switch, so two operators over
 overlapping projects never share a conversation. **Start** picks a profile

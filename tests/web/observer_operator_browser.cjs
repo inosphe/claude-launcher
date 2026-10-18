@@ -123,7 +123,7 @@ async function innerScrollers(page) {
       const cs = getComputedStyle(e);
       const y = /auto|scroll/.test(cs.overflowY) && e.scrollHeight > e.clientHeight + 1;
       const x = /auto|scroll/.test(cs.overflowX) && e.scrollWidth > e.clientWidth + 1;
-      if (y || x) out.push(`${e.tagName.toLowerCase()}#${e.id}`);
+      if (y || x) out.push(`${e.tagName.toLowerCase()}${e.id ? "#" + e.id : "." + e.classList[0]}`);
     }
     if (document.documentElement.scrollWidth > innerWidth) out.push("document: sideways overflow");
     if (view.scrollWidth > view.clientWidth + 1) out.push("#observer-view: sideways overflow");
@@ -147,7 +147,23 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     await page.goto(`http://127.0.0.1:${server.address().port}/#/observer`);
     await page.waitForSelector(".observer-card");
     const tab = name => page.locator("#observer-operators .op-tab", { hasText: name });
+    // The Operator dock starts closed: no operator section over the cards.
+    const stored = () => page.evaluate(() => localStorage.getItem("claunch-observer-operator-dock"));
+    assert.equal(await page.isVisible("#observer-dock"), false);
+    assert.equal(await stored(), null);
+    assert.equal(await page.getAttribute("#observer-operator-toggle", "aria-pressed"), "false");
+    await page.click("#observer-operator-toggle");
+    assert.equal(await stored(), "open");
+    assert.equal(await page.getAttribute("#observer-operator-toggle", "aria-pressed"), "true");
     await tab("ops-a").waitFor();
+    // Two columns: the dock is right of the cards and as tall as the page's
+    // viewport, and it stays put while the page scrolls under it.
+    const columns = await page.evaluate(() => {
+      const view = document.getElementById("observer-view"), dock = document.getElementById("observer-dock").getBoundingClientRect();
+      return {dockLeft: dock.left, cardsRight: document.getElementById("observer-cards").getBoundingClientRect().right, dockHeight: dock.height, viewHeight: view.clientHeight};
+    });
+    assert(columns.dockLeft >= columns.cardsRight, `dock right of the cards (${columns.dockLeft} < ${columns.cardsRight})`);
+    assert(Math.abs(columns.dockHeight - columns.viewHeight) <= 1, `dock as tall as the viewport (${columns.dockHeight} vs ${columns.viewHeight})`);
     assert.equal(await tab("ops-a").getAttribute("aria-selected"), "true", "the only operator is selected");
 
     // Viewing the operator marks its open asks seen.
@@ -161,7 +177,7 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     assert.equal(await page.locator("#observer-operators .op-entry").count(), 20);
     await page.click("text=이전 대화 5건 펼치기");
     assert.equal(await page.locator("#observer-operators .op-entry").count(), 25);
-    assert.deepEqual(await innerScrollers(page), [], "the expanded conversation makes the page longer, not a scroller");
+    assert.deepEqual(await innerScrollers(page), ["div.op-area"], "the expanded conversation scrolls inside the dock, nothing else does");
     assert.match(await page.locator('.op-entry[data-entry="d1"]').innerText(), /→ s1: 테스트 결과를 보고하십시오/);
     assert.equal(await page.locator('.op-entry[data-entry="p19"]').evaluate(e => e.classList.contains("op-reply")), true);
     assert.equal(await page.locator('.op-entry[data-entry="p19"] a.op-ref').getAttribute("href"), "#/observer/session/s1");
@@ -188,6 +204,25 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     assert.equal(await page.inputValue("#observer-prompt"), "");
     await page.waitForFunction(() => [...document.querySelectorAll("#observer-operators .op-user")].some(e => e.textContent.includes("지금 막힌 세션이 있습니까?")));
     assert.equal(sent.filter(r => r.url.endsWith("/keys")).length, 0, "no keys went to any session");
+    // The dock's own input row: Enter sends to the selected operator.
+    await page.fill("#observer-operators .op-composer textarea", "dock에서 묻습니다");
+    await page.press("#observer-operators .op-composer textarea", "Enter");
+    await page.waitForFunction(() => /operator ops-a:/.test(document.querySelector("#observer-operators .op-composer-status")?.textContent || ""));
+    assert.deepEqual(lastSent("POST", "/api/operators/op1/message").body, { text: "dock에서 묻습니다" });
+    assert.equal(await page.inputValue("#observer-operators .op-composer textarea"), "");
+    // Kept per browser: a reload comes back with the dock open.
+    await page.reload();
+    await tab("ops-a").waitFor();
+    assert.equal(await page.evaluate(() => document.getElementById("observer-view").classList.contains("dock-open")), true);
+    await page.waitForSelector(".observer-card");
+    await page.click("#observer-composer-toggle"); // a reload folds the composer again
+    // Closed, the section goes and the cards take the width; a card's
+    // 「operator에게 묻기」 opens it again, since the answer shows there.
+    await page.click("#observer-operator-toggle");
+    assert.equal(await stored(), "closed");
+    assert.equal(await page.isVisible("#observer-operators"), false);
+    const wide = await page.evaluate(() => document.getElementById("observer-cards").getBoundingClientRect().right / document.getElementById("observer-view").clientWidth);
+    assert(wide > 0.95, `cards take the width when closed (${wide})`);
 
     // 「operator에게 묻기」 on a card: s1 (alpha) is in scope, s2 (beta) is not.
     const askOn = name => page.locator(`.observer-card[data-session="${name}"] .observer-ask-operator`);
@@ -196,6 +231,8 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     assert.match(await askOn("s2").getAttribute("title"), /s2\(beta\)을 범위에 둔 operator가 없습니다/);
     await page.selectOption("#observer-target", "s1");
     await askOn("s1").click();
+    assert.equal(await page.isVisible("#observer-operators"), true, "asking opens the dock");
+    assert.equal(await stored(), "open");
     assert.equal(await page.inputValue("#observer-target"), "operator:op1");
     assert.equal(await page.inputValue("#observer-prompt"), "s1에 대해: ");
     assert.equal(await page.locator("#observer-prompt").evaluate(e => document.activeElement === e), true);
@@ -282,20 +319,35 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     assert(lastSent("DELETE", "/api/operators/op3"));
 
     // The composer's draft grows to 40% of the window and scrolls inside
-    // itself past that: the one inner scroller the page has.
+    // itself past that; beside it the dock's conversation scrolls inside the
+    // dock (the reader's choice for that column). Nothing else scrolls.
     await page.fill("#observer-prompt", Array.from({ length: 120 }, (_, i) => `줄 ${i}`).join("\n"));
     const box = await page.locator("#observer-prompt").evaluate(e => ({ h: e.getBoundingClientRect().height, cap: innerHeight * 0.4 }));
     assert(box.h <= box.cap + 1, `the draft stops at 40vh (${box.h} > ${box.cap})`);
-    assert.deepEqual(await innerScrollers(page), ["textarea#observer-prompt"]);
+    const scrollers = await innerScrollers(page);
+    assert(scrollers.includes("textarea#observer-prompt"), scrollers.join());
+    assert.deepEqual(scrollers.filter(s => !["textarea#observer-prompt", "div.op-area"].includes(s)), [], "no other inner scroller");
     await page.fill("#observer-prompt", "");
+    // The dock stays on screen while the page scrolls.
+    const dockTop = async () => page.evaluate(() => document.getElementById("observer-dock").getBoundingClientRect().top);
+    await page.setViewportSize({ width: 1280, height: 500 });
+    await page.waitForTimeout(200);
+    const before = await dockTop();
+    const scrolled = await page.evaluate(() => { const v = document.getElementById("observer-view"); v.scrollTop = 300; return v.scrollTop; });
+    assert(scrolled > 0, "the page scrolls at 500px high");
+    assert.equal(await dockTop(), before, "the dock is held on screen");
+    await page.setViewportSize({ width: 1280, height: 900 });
 
-    // On a phone the section fits the width and adds no scroller.
+    // On a phone the dock sits above the page in its flow, fits the width and
+    // adds no scroller; the top bar carries the toggle.
     await page.setViewportSize({ width: 390, height: 844 });
     await page.waitForTimeout(300);
     assert.deepEqual(await innerScrollers(page), []);
+    assert.equal(await page.isVisible("#observer-mobile-operator"), true);
+    assert.equal(await page.getAttribute("#observer-mobile-operator", "aria-pressed"), "true");
     assert.equal(await page.locator("#observer-operators .op-tab").first().isVisible(), true);
 
     assert.deepEqual(errors, []);
-    console.log("PASS: operator tabs, seen badge, feed folding and kinds, approve/choice answers, composer target and send, card ask-about scope, picked empty target kept, fab hidden, create all/projects, validation and 409, scope edit, watch toggle, start/stop/delete, 40vh draft cap, single page scroller desktop and mobile");
+    console.log("PASS: operator tabs, seen badge, feed folding and kinds, approve/choice answers, composer target and send, card ask-about scope, picked empty target kept, fab hidden, create all/projects, validation and 409, scope edit, watch toggle, start/stop/delete, 40vh draft cap, dock closed by default, toggle kept in localStorage across reload, two columns with a held dock and its own input row, ask opens the dock, inner scrollers only the draft and the dock conversation on desktop and none on mobile");
   } finally { await browser.close(); server.close(); server.closeAllConnections(); }
 })().catch(error => { console.error(error); server.close(); server.closeAllConnections(); process.exitCode = 1; });

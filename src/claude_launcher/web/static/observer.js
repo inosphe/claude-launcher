@@ -43,6 +43,32 @@ function saveView() {
     localStorage.setItem("claunch-observer-grid-limit",String(gridLimit));
   } catch { /* Keep the in-memory preference. */ }
 }
+/* The Operator dock (claunch-iw5i8.8): the operators' column to the right of
+   the page, opened and closed from the header (or the phone's top bar) and
+   kept per browser. It starts closed. Its height is the page viewport's, set
+   here because the dock is held on screen inside #observer-view, the
+   element that scrolls. */
+const DOCK_KEY="claunch-observer-operator-dock";
+let dockOpen=false;
+try { dockOpen=localStorage.getItem(DOCK_KEY)==="open"; } catch { /* closed for this visit */ }
+function dockState() {
+  $("view").classList.toggle("dock-open",dockOpen);
+  $("dock").hidden=!dockOpen;
+  for(const button of [$("operator-toggle"),$("mobile-operator")]) {
+    if(!button)continue;
+    button.setAttribute("aria-pressed",String(dockOpen));
+    button.title=dockOpen?"Operator 대화창을 닫습니다":"Operator 대화창을 오른쪽 열에 엽니다";
+  }
+  $("operator-toggle").textContent=dockOpen?"Operator ◂":"Operator ▸";
+}
+function setDock(open) {
+  dockOpen=open;
+  try { localStorage.setItem(DOCK_KEY,open?"open":"closed"); } catch { /* keep it for this visit */ }
+  dockState();
+  if(open)operators()?.refresh();
+}
+if(typeof ResizeObserver==="function")
+  new ResizeObserver(()=>$("view").style.setProperty("--observer-viewport",`${$("view").clientHeight}px`)).observe($("view"));
 /* The operators section (observer_operator.js). Read through this so a page
    or harness that loads observer.js without it draws no operator controls. */
 const operators = () => globalThis.ObserverOperators || null;
@@ -278,6 +304,8 @@ function cardActions(card,s) {
     ask.onclick=()=>{
       const chosen=operators().askAbout(s.name);
       if(!chosen.target)return;
+      // The answer shows in the dock, so a closed one opens.
+      if(!dockOpen)setDock(true);
       syncTargets(visibleSessions());chooseTarget(chosen.target);
       if(!$("prompt").value.trim())$("prompt").value=`${s.name}에 대해: `;
       composerFolded=false;composerState();controls();$("prompt").focus();
@@ -992,6 +1020,8 @@ $("token-toggle").onclick=()=>{
   $("token-chevron").textContent=expanded?"⌃":"⌄";
 };
 $("mobile-monitor").onclick=()=>$("monitor").click();
+$("operator-toggle").onclick=()=>setDock(!dockOpen);
+$("mobile-operator").onclick=()=>setDock(!dockOpen);
 async function send(interrupt) {
   const target=$("target").value, text=$("prompt").value;
   if(pending||!target||(!interrupt&&!text.trim()))return;
@@ -1037,6 +1067,7 @@ async function open(scope = "global", name = "") {
   poll=setInterval(()=>{if(!document.hidden){refresh();operators()?.refresh();}},10000);
 }
 composerState();
+dockState();
 /* A change in the operator list changes the composer's targets and which
    cards can ask about their session. */
 operators()?.mount($("operators"),()=>{if(document.body.classList.contains("observer-active"))render();});
