@@ -30,6 +30,8 @@ the dashboard and the terminal cannot drift apart.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import subprocess
 import threading
 import time
@@ -364,6 +366,37 @@ def _mark_states(cwd: str, refs: Dict[str, str], rows: List[Dict[str, str]]) -> 
     return True
 
 
+def _owners(
+    cwd: str,
+    refs: Dict[str, str],
+    prs: Optional[List[Dict[str, object]]],
+    shas: set,
+    members: Optional[Dict[Tuple[str, str], frozenset]] = None,
+) -> Dict[str, Tuple[int, int]]:
+    """sha -> (size, number) of the recorded PR that carries it.
+
+    A commit two stacked PRs both carry belongs to the one whose branch
+    carries fewer commits — the lower layer of the stack. ``members`` caches
+    each PR's commits for as long as the refs it was read against hold.
+    """
+    owner: Dict[str, Tuple[int, int]] = {}
+    for pr in prs or []:
+        if not isinstance(pr, dict) or not pr.get("number"):
+            continue
+        key = (str(pr.get("branch") or ""), str(pr.get("base") or ""))
+        with _rail_lock:
+            inside = members.get(key) if members is not None else None
+        if inside is None:
+            inside = _pr_commits(cwd, refs, *key)
+            if members is not None:
+                with _rail_lock:
+                    members[key] = inside
+        for sha in inside & shas:
+            if sha not in owner or len(inside) < owner[sha][0]:
+                owner[sha] = (len(inside), int(pr["number"]))
+    return owner
+
+
 def _snapshot(cwd: str, common: str) -> Optional[Dict[str, object]]:
     refs = _refs(cwd)
     if refs is None:
@@ -449,21 +482,8 @@ def rail(
     rows = rows if everything else rows[:RAIL_LIMIT]
     if not _mark_states(str(cwd), snap["refs"], rows):
         return None
-    prs = [p for p in (prs or []) if isinstance(p, dict) and p.get("number")]
-    shas = {c["sha"] for c in rows}
-    owner: Dict[str, Tuple[int, int]] = {}
-    for pr in prs:
-        key = (str(pr.get("branch") or ""), str(pr.get("base") or ""))
-        with _rail_lock:
-            inside = snap["members"].get(key)
-        if inside is None:
-            inside = _pr_commits(str(cwd), snap["refs"], *key)
-            with _rail_lock:
-                snap["members"][key] = inside
-        mine = inside & shas
-        for sha in mine:
-            if sha not in owner or len(inside) < owner[sha][0]:
-                owner[sha] = (len(inside), int(pr["number"]))
+    owner = _owners(str(cwd), snap["refs"], prs, {c["sha"] for c in rows},
+                    snap["members"])
     out = []
     for c in rows:
         # ``sha`` is what the chip's link to the commit page names: a short
@@ -474,3 +494,186 @@ def rail(
             row["pr"] = owner[c["sha"]][1]
         out.append(row)
     return {"commits": out, "more": max(0, snap["counts"].get(session, 0) - len(out))}
+
+
+# ---- an exited session's chips, kept (claunch-ork3b) ------------------------
+#
+# An exited session commits nothing more, so the commits one reading found are
+# its commits for good: the caller keeps the record :func:`kept_rail` returns
+# (the daemon writes it beside the session's meta.json) and this never walks
+# for them again. What can still move is where each commit has got to and
+# which PR carries it -- and only for a commit that is not merged yet, since
+# master having it is final. So a record whose commits are all merged costs
+# no git at all; one with a local or pushed commit costs one ``for-each-ref``
+# per repository per ``RAIL_TTL`` (shared by every record in it) and a re-mark
+# only when those refs moved. The git runs in the repository's common
+# directory, which outlives the session's worktree.
+
+#: The record's shape; a record of another version is read again.
+KEPT_VERSION = 1
+
+#: common dir -> (expires, refs or None)
+_kept_refs: Dict[str, Tuple[float, Optional[Dict[str, str]]]] = {}
+
+
+def _refs_of(common: str) -> Optional[Dict[str, str]]:
+    now = time.monotonic()
+    with _rail_lock:
+        hit = _kept_refs.get(common)
+        if hit and hit[0] > now:
+            return hit[1]
+    refs = _refs(common) if Path(common).is_dir() else None
+    with _rail_lock:
+        if len(_kept_refs) >= 256:
+            _kept_refs.clear()
+        _kept_refs[common] = (now + RAIL_TTL, refs)
+    return refs
+
+
+def _refs_stamp(refs: Dict[str, str]) -> str:
+    # Written to disk and compared after a restart, so not ``hash()``: that
+    # is salted per process.
+    text = "\n".join(f"{sha} {name}" for name, sha in sorted(refs.items()))
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()
+
+
+def _prs_key(prs: Optional[List[Dict[str, object]]]) -> str:
+    keys = sorted(
+        [int(p["number"]), str(p.get("branch") or ""), str(p.get("base") or "")]
+        for p in prs or [] if isinstance(p, dict) and p.get("number")
+    )
+    return json.dumps(keys)
+
+
+def kept_current(record: Optional[dict], session: str, created_at: Optional[str],
+                 exited_at: Optional[str]) -> bool:
+    """Whether ``record`` is this session's for this exit, so that settling
+    it reads no commits (it may still re-mark states)."""
+    return (
+        isinstance(record, dict)
+        and record.get("v") == KEPT_VERSION
+        and record.get("session") == session
+        and record.get("created_at") == created_at
+        and record.get("exited_at") == exited_at
+    )
+
+
+def kept_view(record: Optional[dict]) -> Optional[Dict[str, object]]:
+    """The chips a kept record shows, in :func:`rail`'s shape; ``None`` when
+    it holds no commits."""
+    rows = (record or {}).get("rows") or []
+    if not rows:
+        return None
+    shown = [dict(r) for r in rows[:RAIL_LIMIT]]
+    return {"commits": shown, "more": max(0, len(rows) - len(shown))}
+
+
+def _read_kept(session: str, cwds: List[Optional[str]], prs, created_at,
+               exited_at, prior: Optional[dict]) -> Optional[dict]:
+    for cwd in cwds:
+        if not cwd:
+            continue
+        common = _common_dir(str(cwd))
+        if not common:
+            continue
+        found = rail(str(cwd), session, prs, everything=True)
+        with _rail_lock:
+            snap = _rail_snaps.get(common)
+        if snap is None:
+            continue
+        if found is None:
+            if session in snap["sessions"]:
+                continue  # found, but git failed to mark them: not a reading
+            rows: List[Dict[str, object]] = []
+        else:
+            rows = found["commits"]
+        if prior:
+            # Only added to: what an earlier exit kept stays, and a commit
+            # it saw merged stays merged.
+            old = {r["sha"]: r for r in prior.get("rows") or []}
+            for r in rows:
+                was = old.get(r["sha"])
+                if was and was.get("state") == "merged":
+                    r["state"] = "merged"
+                if was and "pr" in was and "pr" not in r:
+                    r["pr"] = was["pr"]
+            seen = {r["sha"] for r in rows}
+            rows = rows + [dict(r) for r in prior.get("rows") or [] if r["sha"] not in seen]
+        return {
+            "v": KEPT_VERSION, "session": session, "created_at": created_at,
+            "exited_at": exited_at, "common": common,
+            "stamp": _refs_stamp(snap["refs"]), "prs": _prs_key(prs), "rows": rows,
+        }
+    return None
+
+
+def _settle(record: dict, prs) -> Tuple[dict, bool]:
+    rows = record.get("rows") or []
+    key = _prs_key(prs)
+    prs_moved = record.get("prs") != key
+    if not prs_moved and all(r.get("state") == "merged" for r in rows):
+        return record, False
+    common = record.get("common")
+    refs = _refs_of(common) if common else None
+    if refs is None:
+        return record, False
+    stamp = _refs_stamp(refs)
+    if stamp == record.get("stamp") and not prs_moved:
+        return record, False
+    new = [dict(r) for r in rows]
+    redo = [r for r in new if r.get("state") != "merged"]
+    probe: List[Dict[str, str]] = [{"sha": r["sha"]} for r in redo]
+    if not _mark_states(common, refs, probe):
+        return record, False
+    for r, p in zip(redo, probe):
+        r["state"] = p["state"]
+    ask = {r["sha"] for r in new
+           if prs_moved or r.get("state") != "merged" or "pr" not in r}
+    ask |= {r["sha"] for r in redo}
+    owner = _owners(common, refs, prs, ask)
+    for r in new:
+        # A PR once found stays: a deleted head branch must not empty a frame.
+        if r["sha"] in owner:
+            r["pr"] = owner[r["sha"]][1]
+    return dict(record, rows=new, stamp=stamp, prs=key), True
+
+
+def kept_rail(
+    record: Optional[dict],
+    session: str,
+    *,
+    created_at: Optional[str],
+    exited_at: Optional[str],
+    cwds: List[Optional[str]],
+    prs: Optional[List[Dict[str, object]]] = None,
+    read: bool = True,
+) -> Tuple[Optional[dict], bool]:
+    """An exited session's kept chips: ``(record, changed)``.
+
+    ``record`` is what an earlier call returned (or ``None``). It is used as
+    it is while it belongs to this session, this creation (``created_at`` --
+    a reused name is another session) and this exit; then only the states of
+    its unmerged commits and its PR numbers are brought up to date, as the
+    module comment above says. Otherwise -- no record, or the session ran
+    again since (``exited_at`` moved) -- the commits are read from the first
+    of ``cwds`` that answers, and an earlier record's commits are kept beside
+    them. ``read=False`` forbids that reading (the caller's budget); the old
+    record, or ``None``, comes back unchanged. A reading that failed gives
+    no record: an unreadable repository is not "no commits" (claunch-j5kp).
+    ``changed`` says the caller should keep the new record.
+    """
+    session = (session or "").strip()
+    if not session:
+        return None, False
+    if not (isinstance(record, dict) and record.get("v") == KEPT_VERSION
+            and record.get("session") == session
+            and record.get("created_at") == created_at):
+        record = None
+    if kept_current(record, session, created_at, exited_at):
+        return _settle(record, prs)
+    if not read:
+        return record, False
+    fresh = _read_kept(session, cwds, prs, created_at, exited_at, record)
+    if fresh is None:
+        return record, False
+    return fresh, True

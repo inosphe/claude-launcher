@@ -461,3 +461,85 @@ def test_a_pr_the_wizard_records_shows_on_the_next_list_poll(home, tmp_path, mon
             await client.close()
 
     asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# the card's commit chips, kept on disk (claunch-ork3b)
+# --------------------------------------------------------------------------- #
+def _git(*args, cwd):
+    import subprocess
+    return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True,
+                          text=True, check=True).stdout.strip()
+
+
+@pytest.fixture
+def chips_repo(tmp_path, monkeypatch, repo_template):
+    from claude_launcher import session_commits
+
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    monkeypatch.setattr(session_commits, "_rail_dirs", {})
+    monkeypatch.setattr(session_commits, "_rail_snaps", {})
+    monkeypatch.setattr(session_commits, "_kept_refs", {})
+
+    def build(r):
+        _git("init", "-q", "-b", "master", cwd=r)
+        _git("config", "user.email", "t@example.com", cwd=r)
+        _git("config", "user.name", "t", cwd=r)
+
+    return repo_template("exited-rows-chips", build, tmp_path / "work")
+
+
+def _stamped(repo, subject, session="old"):
+    (repo / f"{subject}.txt").write_text(subject, encoding="utf-8")
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-q", "-m", f"{subject}\n\nClaunch-Session: {session}", cwd=repo)
+    return _git("rev-parse", "--short", "HEAD", cwd=repo)
+
+
+def _chips_session(cwd, name="old", created_at="2026-10-14T05:00:00+00:00"):
+    session = _Session(SessionDef(name=name, harness="claude", cwd=str(cwd)))
+    session.created_at = created_at
+    return session
+
+
+def test_an_exited_row_carries_its_commit_chips_and_keeps_them_on_disk(
+        home, chips_repo, monkeypatch):
+    from claude_launcher import session_commits
+    from claude_launcher.daemon import paths
+
+    a = _stamped(chips_repo, "feat-a")
+    session = _chips_session(chips_repo)
+    info = _kept(session, str(chips_repo))
+    assert [(c["short"], c["state"]) for c in info["rail_commits"]["commits"]] == [(a, "merged")]
+    assert (paths.session_dir("old") / exited_rows.RAIL_FILE).is_file()
+    # A later poll, and a restarted daemon (nothing in memory), answer from
+    # the record without asking git: every commit in it is merged.
+    monkeypatch.setattr(session_commits, "_git", lambda *a, **k: pytest.fail("git ran"))
+    assert _kept(session, str(chips_repo))["rail_commits"] == info["rail_commits"]
+    exited_rows.forget()
+    assert _kept(session, str(chips_repo))["rail_commits"] == info["rail_commits"]
+
+
+def test_a_reused_name_does_not_show_the_old_sessions_record(home, chips_repo, monkeypatch):
+    _stamped(chips_repo, "feat-a")
+    assert _kept(_chips_session(chips_repo), str(chips_repo)).get("rail_commits")
+    exited_rows.forget()
+    monkeypatch.setattr(exited_rows, "FILL_LIMIT", 0)
+    again = _chips_session(chips_repo, created_at="2026-10-15T05:00:00+00:00")
+    assert "rail_commits" not in _kept(again, str(chips_repo))
+
+
+def test_first_readings_are_spread_over_polls(home, chips_repo, monkeypatch):
+    """Hundreds of exited rows have no record the first time a daemon with
+    this code lists them; one poll reads at most FILL_LIMIT of them."""
+    monkeypatch.setattr(exited_rows, "FILL_LIMIT", 1)
+    _stamped(chips_repo, "feat-a", session="one")
+    _stamped(chips_repo, "feat-b", session="two")
+    one = _chips_session(chips_repo, name="one")
+    two = _chips_session(chips_repo, name="two")
+    assert _kept(one, str(chips_repo)).get("rail_commits")
+    assert "rail_commits" not in _kept(two, str(chips_repo))
+    monkeypatch.setattr(exited_rows, "_now", lambda: time.monotonic() + exited_rows.FILL_WINDOW + 1)
+    assert _kept(two, str(chips_repo)).get("rail_commits")
+    # A kept record is no first reading: it spends nothing.
+    assert _kept(one, str(chips_repo)).get("rail_commits")

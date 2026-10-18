@@ -369,6 +369,141 @@ def test_rail_reuses_one_walk_until_the_refs_move(repo, fresh_rail, monkeypatch)
     assert len(walks) == 2
 
 
+# --------------------------------------------------------------------------- #
+# an exited session's chips, kept (claunch-ork3b)
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def fresh_kept(fresh_rail, monkeypatch):
+    monkeypatch.setattr(session_commits, "_kept_refs", {})
+
+
+def kept(record, cwds, *, exited_at="e1", created_at="c1", prs=None, read=True):
+    return session_commits.kept_rail(
+        record, "s1", created_at=created_at, exited_at=exited_at,
+        cwds=[str(c) for c in cwds], prs=prs, read=read)
+
+
+def kept_rows(record):
+    view = session_commits.kept_view(record)
+    return view and [(c["short"], c["state"], c.get("pr")) for c in view["commits"]]
+
+
+def count_git(monkeypatch):
+    calls = []
+    real = session_commits._git
+
+    def counting(cwd, *args, **kw):
+        calls.append(args[0])
+        return real(cwd, *args, **kw)
+
+    monkeypatch.setattr(session_commits, "_git", counting)
+    return calls
+
+
+def test_kept_rail_reads_once_and_an_all_merged_record_runs_no_git(repo, fresh_kept, monkeypatch):
+    a = commit(repo, "feat: a", session="s1")
+    record, changed = kept(None, [repo])
+    assert changed and kept_rows(record) == [(a, "merged", None)]
+    calls = count_git(monkeypatch)
+    again, changed = kept(record, [repo])
+    assert (again, changed) == (record, False)
+    assert calls == []
+
+
+def test_kept_rail_does_not_look_again_while_the_refs_hold(repo, fresh_kept, monkeypatch):
+    commit(repo, "chore: base")
+    git("checkout", "-qb", "s1-feature", cwd=repo)
+    b = commit(repo, "feat: b", session="s1")
+    record, _ = kept(None, [repo])
+    assert kept_rows(record) == [(b, "local", None)]
+    monkeypatch.setattr(session_commits, "_kept_refs", {})
+    calls = count_git(monkeypatch)
+    assert kept(record, [repo]) == (record, False)
+    # One for-each-ref to see the refs held; no walk, no re-mark.
+    assert calls == ["for-each-ref"]
+    calls.clear()
+    assert kept(record, [repo]) == (record, False)
+    assert calls == []  # the refs themselves are shared for RAIL_TTL
+
+
+def test_kept_rail_marks_a_commit_merged_after_its_worktree_is_gone(
+        repo, tmp_path, fresh_kept, monkeypatch):
+    commit(repo, "chore: base")
+    wt = tmp_path / "wt"
+    git("worktree", "add", "-q", "-b", "s1-feature", str(wt), cwd=repo)
+    b = commit(wt, "feat: b", session="s1")
+    pr = {"number": 7, "branch": "s1-feature", "base": "master"}
+    record, _ = kept(None, [wt], prs=[pr])
+    assert kept_rows(record) == [(b, "local", 7)]
+    git("worktree", "remove", "--force", str(wt), cwd=repo)
+    git("merge", "-q", "--no-ff", "-m", "Merge pull request #7", "s1-feature", cwd=repo)
+    monkeypatch.setattr(session_commits, "RAIL_TTL", 0)
+    settled, changed = kept(record, [wt], prs=[pr])
+    assert changed and kept_rows(settled) == [(b, "merged", 7)]
+    # Merged is final: nothing is asked of git again, even as refs move.
+    commit(repo, "chore: later")
+    calls = count_git(monkeypatch)
+    assert kept(settled, [wt], prs=[pr]) == (settled, False)
+    assert calls == []
+
+
+def test_kept_rail_finds_a_pr_recorded_after_the_exit(repo, fresh_kept):
+    commit(repo, "chore: base")
+    git("checkout", "-qb", "s1-feature", cwd=repo)
+    b = commit(repo, "feat: b", session="s1")
+    record, _ = kept(None, [repo])
+    pr = {"number": 9, "branch": "s1-feature", "base": "master"}
+    settled, changed = kept(record, [repo], prs=[pr])
+    assert changed and kept_rows(settled) == [(b, "local", 9)]
+
+
+def test_kept_rail_only_adds_when_the_session_ran_again(repo, fresh_kept):
+    a = commit(repo, "feat: a", session="s1")
+    record, _ = kept(None, [repo])
+    gone = {"sha": "f" * 40, "short": "fffffff", "subject": "rewritten away",
+            "state": "merged"}
+    record = dict(record, rows=record["rows"] + [gone])
+    b = commit(repo, "feat: b", session="s1")
+    again, changed = kept(record, [repo], exited_at="e2")
+    assert changed and again["exited_at"] == "e2"
+    assert kept_rows(again) == [(b, "merged", None), (a, "merged", None),
+                                ("fffffff", "merged", None)]
+
+
+def test_kept_rail_reads_a_reused_name_again(repo, fresh_kept):
+    commit(repo, "feat: a", session="s1")
+    record, _ = kept(None, [repo], created_at="c1")
+    assert kept(record, [repo], created_at="c2", read=False) == (None, False)
+
+
+def test_kept_rail_keeps_nothing_it_could_not_read(repo, tmp_path, fresh_kept):
+    """An unreadable repository is not "no commits" (claunch-j5kp); a
+    readable one with none of this session's is, and is kept as such."""
+    assert kept(None, [tmp_path / "gone"]) == (None, False)
+    assert kept(None, [None]) == (None, False)
+    commit(repo, "feat: theirs", session="s191")
+    record, changed = kept(None, [tmp_path / "gone", repo])
+    assert changed and record["rows"] == [] and kept_rows(record) is None
+    assert kept(record, [repo]) == (record, False)
+
+
+def test_kept_rail_reads_nothing_when_not_allowed(repo, fresh_kept, monkeypatch):
+    commit(repo, "feat: a", session="s1")
+    calls = count_git(monkeypatch)
+    assert kept(None, [repo], read=False) == (None, False)
+    assert calls == []
+
+
+def test_kept_rail_shows_the_newest_and_counts_the_rest(repo, fresh_kept, monkeypatch):
+    monkeypatch.setattr(session_commits, "RAIL_LIMIT", 2)
+    for n in range(4):
+        commit(repo, f"feat: {n}", session="s1")
+    record, _ = kept(None, [repo])
+    view = session_commits.kept_view(record)
+    assert [c["subject"] for c in view["commits"]] == ["feat: 3", "feat: 2"]
+    assert view["more"] == 2 and len(record["rows"]) == 4
+
+
 def test_the_session_list_carries_rail_commits_for_the_card():
     """The rail view filters fields by name; a field left out of that list
     never reaches the card (the same trap the comment there records)."""
