@@ -14,6 +14,11 @@ Any other harness gets the same job typed into the session itself
 (in-place); it calls ``category_assign`` and carries on with what it was
 doing.
 
+An ended session is not refused (claunch-p2v4m.1): a held one is woken as
+opening its terminal would, and any other ended record (killed, paused, ...)
+answers 409 ``needs_wake`` until the person confirms with ``wake: true``,
+then it is relaunched. Ending it again afterwards is the person's call.
+
 The job's state lives in the workspace's category file
 (:func:`category.job_start`), so a merge that arrives after a daemon restart
 is still recognised.
@@ -38,9 +43,11 @@ DEFAULT_DELIVER_TIMEOUT = 120.0
 
 
 class AssignError(Exception):
-    def __init__(self, status: int, message: str) -> None:
+    def __init__(self, status: int, message: str, extra: Optional[dict] = None) -> None:
         super().__init__(message)
         self.status = status
+        if extra:
+            self.extra = extra
 
 
 def _deliver_timeout() -> float:
@@ -159,7 +166,34 @@ def refresh(manager, ws, name: str) -> Optional[dict]:
     return job
 
 
-async def start(request: web.Request, name: str) -> dict:
+async def _awake(manager, session, wake: bool):
+    """The live session to assign. A held one is woken, as opening its
+    terminal would; any other ended record (killed, paused, failed,
+    archived) is relaunched only when the person said so (``wake``) --
+    the pane asks first. Ending it again afterwards is the person's call."""
+    from .session import session_category
+
+    name = session.sdef.name
+    if not session.exited:
+        return session
+    held = bool(getattr(session, "held_at", None))
+    if not held and not wake:
+        life = session_category(session)
+        raise AssignError(409, f"session {name!r} has ended ({life}); wake it to assign it",
+                          extra={"needs_wake": True, "life": life})
+    try:
+        if held:
+            session = await manager.wake_async(name, by="category-assign")
+        else:
+            session = await manager.respawn_async(name)
+    except Exception as exc:
+        raise AssignError(503, f"could not wake {name!r}: {exc}") from None
+    if session.exited:
+        raise AssignError(503, f"session {name!r} did not come back up; try again")
+    return session
+
+
+async def start(request: web.Request, name: str, body: Optional[dict] = None) -> dict:
     from . import api  # local: api imports this module
 
     manager = request.app["manager"]
@@ -167,11 +201,10 @@ async def start(request: web.Request, name: str) -> dict:
         session = manager.get(name)
     except Exception:
         raise AssignError(404, f"no session named {name!r}") from None
-    if session.exited:
-        raise AssignError(400, f"session {name!r} has exited")
     ws = _workspace(session)
     if category.job_for_fork(ws, name):
         raise AssignError(400, f"{name!r} is itself a category fork")
+    session = await _awake(manager, session, bool((body or {}).get("wake")))
     refresh(manager, ws, name)
     items = items_for(session)
     if spawn_mod.can_fork(session.sdef.to_dict()):

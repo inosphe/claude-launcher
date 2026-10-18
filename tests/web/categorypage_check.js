@@ -36,7 +36,11 @@ let tree = {
 };
 let sessionView = {workspace: 'alpha', session: 's1', mode: 'fork', job: null,
   places: [{kind: 'session', ref: 's1', node: {path: ['web']}, proposals: []}]};
+let killedView = {workspace: 'alpha', session: 's2', mode: 'fork', job: null, life: 'killed',
+  places: [{kind: 'session', ref: 's2', node: null, proposals: []}]};
 let delay = null;
+const confirms = [];
+let confirmAnswer = true;
 
 async function api(raw, opts = {}) {
   const url = new URL(raw, 'http://test');
@@ -51,6 +55,11 @@ async function api(raw, opts = {}) {
   else if (url.pathname === '/api/sessions/s1/category/assign') {
     sessionView = {...sessionView, job: {state: 'running', fork: 's1-cat1', started_at: '2026-10-18T01:02:03', note: ''}};
     result = {mode: 'fork', fork: 's1-cat1'};
+  } else if (url.pathname === '/api/sessions/s2/category') result = killedView;
+  else if (url.pathname === '/api/sessions/s2/category/assign') {
+    if (!body?.wake) return {ok: false, status: 409, json: async () => ({error: "session 's2' has ended (killed); wake it to assign it", needs_wake: true, life: 'killed'})};
+    killedView = {...killedView, life: 'running', job: {state: 'running', fork: 's2-cat1', started_at: '2026-10-18T01:02:03', note: ''}};
+    result = {mode: 'fork', fork: 's2-cat1'};
   }
   return {ok: true, json: async () => result};
 }
@@ -58,7 +67,7 @@ async function api(raw, opts = {}) {
 const timers = [];
 const ctx = vm.createContext({
   document: {createElement: tag => new Element(tag), getElementById: () => root},
-  api, URLSearchParams, URL, console, confirm: () => true,
+  api, URLSearchParams, URL, console, confirm: (m) => { confirms.push(m); return confirmAnswer; },
   setTimeout: (fn) => { timers.push(fn); return timers.length; }, clearTimeout: () => {},
 });
 vm.runInContext(fs.readFileSync(path.join(__dirname, '../../src/claude_launcher/web/static/category-page.js'), 'utf8'), ctx);
@@ -195,6 +204,25 @@ const last = () => calls[calls.length - 1];
   ctx.CategoryPane.mount(host2, 's1'); await settle();
   const again = button('다시 요청', host2);
   assert(again && !again.disabled);
+  ctx.CategoryPane.unmount();
+
+  // A killed session: the press asks before waking it; "no" sends nothing more,
+  // "yes" sends the request again with wake.
+  const host3 = new Element('div');
+  ctx.CategoryPane.mount(host3, 's2'); await settle();
+  assert(all(host3).some(n => String(n.textContent).includes('종료된(killed) 세션입니다')));
+  const s2posts = () => calls.filter(c => c.url.pathname === '/api/sessions/s2/category/assign');
+  confirmAnswer = false; confirms.length = 0;
+  button('Assign to tree', host3).onclick(); await settle();
+  assert.strictEqual(confirms.length, 1);
+  assert(confirms[0].includes('killed') && confirms[0].includes('깨워서'));
+  assert.strictEqual(s2posts().length, 1);
+  assert(!all(host3).some(n => n.attributes && n.attributes.role === 'alert'));
+  confirmAnswer = true;
+  button('Assign to tree', host3).onclick(); await settle();
+  assert.strictEqual(s2posts().length, 3);
+  assert.deepStrictEqual(s2posts()[2].body, {wake: true});
+  assert(button('배정 진행 중…', host3));
   ctx.CategoryPane.unmount();
   console.log('ok');
 })().catch(error => { console.error(error); process.exit(1); });

@@ -156,6 +156,52 @@ def test_an_in_place_request_never_acted_on_does_not_block_the_next(home, tmp_pa
     _run(scenario, tmp_path)
 
 
+def test_a_held_session_is_woken_and_assigned(home, tmp_path, typed):
+    async def scenario(mgr, client):
+        session = mgr.get("a")
+        session.exited, session.held_at = True, "2026-10-18T00:00:00"
+        woken = []
+
+        async def wake_async(name, *, by=""):
+            woken.append((name, by))
+            session.exited, session.held_at = False, None
+            return session
+
+        mgr.wake_async = wake_async
+        view = await _call(client, "GET", "/api/sessions/a/category")
+        assert view["life"] == "hold"
+        doc = await _call(client, "POST", "/api/sessions/a/category/assign")
+        assert woken == [("a", "category-assign")]
+        assert doc["mode"] == "inplace" and doc["job"]["state"] == "running"
+        assert _typed_to(typed, "a")[-1].startswith("---\n# claunch category: ASSIGN TO TREE")
+
+    _run(scenario, tmp_path)
+
+
+def test_a_killed_session_is_woken_only_when_asked(home, tmp_path, typed):
+    async def scenario(mgr, client):
+        ws = category.workspace("alpha")
+        mgr.kill("a", force=True)
+        for _ in range(100):
+            if mgr.get("a").exited:
+                break
+            await asyncio.sleep(0.05)
+        assert mgr.get("a").exited
+        view = await _call(client, "GET", "/api/sessions/a/category")
+        assert view["life"] == "killed"
+        refused = await _call(client, "POST", "/api/sessions/a/category/assign", status=409)
+        assert refused["needs_wake"] is True and refused["life"] == "killed"
+        assert category.job(ws, "a") is None and mgr.get("a").exited
+        doc = await _call(client, "POST", "/api/sessions/a/category/assign", {"wake": True})
+        assert not mgr.get("a").exited
+        assert doc["mode"] == "inplace" and doc["job"]["state"] == "running"
+        assert _typed_to(typed, "a")[-1].startswith("---\n# claunch category: ASSIGN TO TREE")
+        view = await _call(client, "GET", "/api/sessions/a/category")
+        assert view["life"] == "running"
+
+    _run(scenario, tmp_path)
+
+
 def test_agent_assign_refusals_carry_the_owning_node(home, tmp_path, typed):
     async def scenario(mgr, client):
         ws = category.workspace("alpha")
