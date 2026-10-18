@@ -7,7 +7,12 @@
    shown yet when there are any (and the segment turns red), else all that
    are unanswered. Creating, scoping, starting and stopping operators stay on
    the Observer page, which also hides this segment: its operators are there
-   already. */
+   already.
+   The dialog's size is the reader's (claunch-iw5i8.14): handles on its edges
+   and corners resize it about its centre, so it stays in the middle of the
+   screen, and the size is kept in localStorage for the next time it opens.
+   A double click on a handle returns it to the default size. On a phone the
+   dialog takes the screen and has no handles. */
 globalThis.OperatorFab = (() => {
 "use strict";
 const node = (tag, text, cls) => { const e = document.createElement(tag); if (text != null) e.textContent = text; if (cls) e.className = cls; return e; };
@@ -20,6 +25,71 @@ close.onclick = () => modal.close();
 const root = node("div"); root.id = "opfab-view";
 modal.append(close, root);
 document.body.append(modal);
+
+/* -- the size ------------------------------------------------------------ */
+const SIZE_KEY = "claunch-fab-operator-size";
+const MIN_W = 360, MIN_H = 320;
+// The room a modal dialog gets: the CSS keeps it 32px narrower and 48px
+// shorter than the screen, and the browser's own rule 2em + 6px.
+const room = () => ({w: Math.max(0, innerWidth - 40), h: Math.max(0, innerHeight - 48)});
+const clamp = (v, lo, hi) => Math.round(Math.min(Math.max(v, Math.min(lo, hi)), hi));
+function readSize() {
+  try {
+    const v = JSON.parse(localStorage.getItem(SIZE_KEY) || "null");
+    if(v && Number.isFinite(v.w) && Number.isFinite(v.h) && v.w > 0 && v.h > 0) return {w: v.w, h: v.h};
+  } catch { /* blocked or damaged: the default size */ }
+  return null;
+}
+function writeSize(value) {
+  try { value ? localStorage.setItem(SIZE_KEY, JSON.stringify(value)) : localStorage.removeItem(SIZE_KEY); }
+  catch { /* the size lasts until the page reloads */ }
+}
+// The CSS caps the size at the screen, so a stored size wider than this
+// screen shows as wide as it can and is kept for a larger one.
+function applySize(value) {
+  if(!value) { modal.style.removeProperty("--opfab-w"); modal.style.removeProperty("--opfab-h"); return; }
+  modal.style.setProperty("--opfab-w", `${Math.max(value.w, MIN_W)}px`);
+  modal.style.setProperty("--opfab-h", `${Math.max(value.h, MIN_H)}px`);
+}
+applySize(readSize());
+// Edge handles: the side moves by the pointer's travel and the opposite side
+// by the same amount the other way, which keeps the dialog centred.
+for(const edge of ["n", "s", "e", "w", "ne", "nw", "se", "sw"]) {
+  const grip = node("div", null, `opfab-grip opfab-grip-${edge}`);
+  grip.dataset.edge = edge;
+  grip.title = "끌어서 크기 조절 · 두 번 눌러 기본 크기";
+  grip.setAttribute("aria-hidden", "true");
+  const sx = edge.includes("e") ? 1 : edge.includes("w") ? -1 : 0;
+  const sy = edge.includes("s") ? 1 : edge.includes("n") ? -1 : 0;
+  let start = null;
+  grip.addEventListener("pointerdown", event => {
+    if(event.button !== 0) return;
+    event.preventDefault();
+    const box = modal.getBoundingClientRect();
+    start = {x: event.clientX, y: event.clientY, w: box.width, h: box.height};
+    grip.setPointerCapture(event.pointerId);
+    modal.classList.add("opfab-resizing");
+  });
+  grip.addEventListener("pointermove", event => {
+    if(!start) return;
+    const r = room();
+    applySize({
+      w: clamp(start.w + sx * 2 * (event.clientX - start.x), MIN_W, r.w),
+      h: clamp(start.h + sy * 2 * (event.clientY - start.y), MIN_H, r.h),
+    });
+  });
+  const end = () => {
+    if(!start) return;
+    start = null;
+    modal.classList.remove("opfab-resizing");
+    const box = modal.getBoundingClientRect();
+    writeSize({w: Math.round(box.width), h: Math.round(box.height)});
+  };
+  grip.addEventListener("pointerup", end);
+  grip.addEventListener("pointercancel", end);
+  grip.addEventListener("dblclick", () => { writeSize(null); applySize(null); });
+  modal.append(grip);
+}
 const view = OperatorView.create({
   key: "claunch-fab-operator", composer: true,
   active: () => modal.open,
@@ -104,5 +174,5 @@ const start = () => { if (!timer) { refreshBadge(); timer = setInterval(tick, PO
 if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start, {once: true});
 else setTimeout(start, 0);
 
-return {openModal, refreshBadge, _test: {sessionOnScreen, setBadge}};
+return {openModal, refreshBadge, _test: {sessionOnScreen, setBadge, readSize, SIZE_KEY}};
 })();

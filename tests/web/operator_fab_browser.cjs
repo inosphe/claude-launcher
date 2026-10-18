@@ -6,6 +6,10 @@
    the dialog; each operator keeps its own draft; Alt+O opens and closes it;
    management stays on the Observer page, which hides the segment; on a phone
    the dialog takes the screen and its conversation is its one scroller.
+   Above the conversation a session line names the operator, its session and
+   that session's state and links to the session's page (claunch-iw5i8.13);
+   the dialog is resized from its edges about its centre and the size is kept
+   in localStorage (claunch-iw5i8.14).
    CLAUNCH_PLAYWRIGHT may name an installed playwright-core.
    Run: node tests/web/operator_fab_browser.cjs. No live daemon. */
 const assert = require("node:assert/strict");
@@ -128,6 +132,15 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     await page.waitForFunction(() => !document.querySelector(".operator-fab").classList.contains("operator-fab-alert"));
     assert(lastSent("POST", "/api/operators/opB/seen"));
     assert.equal(await page.textContent("#operator-fab-badge"), "1");
+    // The session line: outside the scroller, the operator, its session and
+    // state, and the session's page.
+    const sessionLine = () => page.evaluate(() => {
+      const bar = document.querySelector("#opfab-view > .op-sessionbar");
+      const link = bar?.querySelector("a.op-bar-open");
+      return bar && { hidden: bar.hidden, who: bar.querySelector(".op-bar-who").textContent,
+        session: bar.querySelector(".op-bar-session").textContent, href: link ? link.getAttribute("href") : null };
+    });
+    assert.deepEqual(await sessionLine(), { hidden: false, who: "beta-ops", session: "s900 · 실행 중 (idle)", href: "#/s/s900" });
     // Management is the Observer page's.
     assert.equal(await page.locator("#opfab-view .op-new").count(), 0);
     assert.equal(await page.locator("#opfab-view .op-actions").count(), 0);
@@ -161,6 +174,8 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     await page.locator("#opfab-view .op-tab", { hasText: "alpha-ops" }).click();
     await page.waitForFunction(() => document.querySelector('#opfab-view .op-tab[aria-selected="true"]')?.textContent.includes("alpha-ops"));
     assert.equal(await page.inputValue(text), "");
+    // An operator with no session says so and has no link.
+    assert.deepEqual(await sessionLine(), { hidden: false, who: "alpha-ops", session: "세션 없음", href: null });
     await page.locator("#opfab-view .op-tab", { hasText: "beta-ops" }).click();
     assert.equal(await page.inputValue(text), "beta 초안");
     await page.fill(text, "");
@@ -180,6 +195,67 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     assert.equal(await page.evaluate(() => location.hash), "#/observer/session/s2");
     await page.evaluate(() => { location.hash = "#/"; });
     await page.waitForFunction(() => !document.body.classList.contains("observer-active"));
+    // The session line's link opens the operator's session and closes the dialog.
+    await page.click(".operator-fab");
+    await page.locator("#opfab-view .op-tab", { hasText: "beta-ops" }).click();
+    await page.waitForSelector("#opfab-view .op-sessionbar a.op-bar-open");
+    await page.click("#opfab-view .op-sessionbar a.op-bar-open");
+    await page.waitForFunction(() => !document.querySelector(".opfab-modal").open);
+    assert.equal(await page.evaluate(() => location.hash), "#/s/s900");
+    await page.evaluate(() => { location.hash = "#/"; });
+
+    // The size: dragged from an edge it grows on both sides and stays centred,
+    // the screen caps it, the next opening and a reload keep it, a double
+    // click returns to the default, and a damaged value reads as the default.
+    const box = () => page.evaluate(() => {
+      const r = document.querySelector(".opfab-modal").getBoundingClientRect();
+      return { w: Math.round(r.width), h: Math.round(r.height), cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
+    });
+    const stored = () => page.evaluate(() => localStorage.getItem("claunch-fab-operator-size"));
+    const drag = async (edge, dx, dy) => {
+      const g = await page.locator(`.opfab-grip-${edge}`).boundingBox();
+      const x = g.x + g.width / 2, y = g.y + g.height / 2;
+      await page.mouse.move(x, y); await page.mouse.down();
+      await page.mouse.move(x + dx / 2, y + dy / 2); await page.mouse.move(x + dx, y + dy);
+      await page.mouse.up();
+    };
+    await page.click(".operator-fab");
+    await page.waitForSelector(".opfab-modal[open]");
+    assert.deepEqual(await box(), { w: 560, h: 720, cx: 640, cy: 450 });
+    assert.equal(await stored(), null);
+    await drag("e", 100, 0);
+    assert.deepEqual(await box(), { w: 760, h: 720, cx: 640, cy: 450 });
+    await drag("n", 0, -40);
+    assert.deepEqual(await box(), { w: 760, h: 800, cx: 640, cy: 450 });
+    assert.deepEqual(JSON.parse(await stored()), { w: 760, h: 800 });
+    await drag("se", 2000, 2000);
+    assert.deepEqual(await box(), { w: 1240, h: 852, cx: 640, cy: 450 }, "capped at the screen");
+    await drag("nw", 2000, 2000);
+    assert.deepEqual(await box(), { w: 360, h: 320, cx: 640, cy: 450 }, "held at the smallest size");
+    await drag("w", -300, 0);
+    assert.deepEqual(await box(), { w: 960, h: 320, cx: 640, cy: 450 });
+    await page.keyboard.press("Escape");
+    await page.click(".operator-fab");
+    assert.deepEqual(await box(), { w: 960, h: 320, cx: 640, cy: 450 }, "kept for the next opening");
+    await page.reload();
+    await page.waitForSelector("#fab-dock .operator-fab");
+    await page.click(".operator-fab");
+    await page.waitForSelector(".opfab-modal[open]");
+    assert.deepEqual(await box(), { w: 960, h: 320, cx: 640, cy: 450 }, "kept across a reload");
+    await page.locator(".opfab-grip-e").dblclick();
+    assert.deepEqual(await box(), { w: 560, h: 720, cx: 640, cy: 450 });
+    assert.equal(await stored(), null);
+    await page.evaluate(() => localStorage.setItem("claunch-fab-operator-size", "{not json"));
+    await page.reload();
+    await page.waitForSelector("#fab-dock .operator-fab");
+    await page.click(".operator-fab");
+    await page.waitForSelector(".opfab-modal[open]");
+    assert.deepEqual(await box(), { w: 560, h: 720, cx: 640, cy: 450 }, "a damaged value reads as the default");
+    // A stored size still applies on a phone only as the full screen.
+    await page.evaluate(() => localStorage.setItem("claunch-fab-operator-size", JSON.stringify({ w: 900, h: 400 })));
+    await page.keyboard.press("Escape");
+    await page.reload();
+    await page.waitForSelector("#fab-dock .operator-fab");
 
     // On a phone the dialog takes the screen; its conversation is the one
     // scroller and nothing runs sideways.
@@ -194,10 +270,12 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
         const cs = getComputedStyle(e);
         return (/auto|scroll/.test(cs.overflowY) && e.scrollHeight > e.clientHeight + 1) || (/auto|scroll/.test(cs.overflowX) && e.scrollWidth > e.clientWidth + 1);
       }).map(e => e.className || e.tagName.toLowerCase());
+      const bar = document.querySelector("#opfab-view > .op-sessionbar").getBoundingClientRect();
       return { width: Math.round(dialog.width), height: Math.round(dialog.height), scrollers, atEnd: area.scrollHeight - area.scrollTop - area.clientHeight < 24,
-        sideways: area.scrollWidth > area.clientWidth + 1 };
+        sideways: area.scrollWidth > area.clientWidth + 1, barShown: bar.height > 0 && bar.top >= 0 && bar.bottom <= area.getBoundingClientRect().top + 1,
+        grips: [...document.querySelectorAll(".opfab-grip")].filter(g => g.getBoundingClientRect().width > 0).length };
     });
-    assert.deepEqual(fit, { width: 390, height: 844, scrollers: ["op-area"], atEnd: true, sideways: false });
+    assert.deepEqual(fit, { width: 390, height: 844, scrollers: ["op-area"], atEnd: true, sideways: false, barShown: true, grips: 0 });
     if (process.env.CLAUNCH_SCREENSHOT) await page.screenshot({ path: process.env.CLAUNCH_SCREENSHOT });
     await page.keyboard.press("Escape");
     await page.waitForFunction(() => !document.querySelector(".opfab-modal").open);
@@ -210,6 +288,6 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     assert.equal(await page.isVisible(".chat-fab"), true);
 
     assert.deepEqual(errors, []);
-    console.log("PASS: one dock with both segments, markdown bodies, badge sum and alert, session-scoped default operator, seen on show, no management in the dialog, ask answer, Enter send, per-operator drafts, Alt+O toggle, link closes dialog, phone full-screen with one scroller, hidden on Observer");
+    console.log("PASS: one dock with both segments, markdown bodies, badge sum and alert, session-scoped default operator, seen on show, no management in the dialog, ask answer, Enter send, per-operator drafts, Alt+O toggle, link closes dialog, session line with link, centred resize kept in localStorage, phone full-screen with one scroller, hidden on Observer");
   } finally { await browser.close(); server.close(); server.closeAllConnections(); }
 })().catch(error => { console.error(error); server.close(); server.closeAllConnections(); process.exitCode = 1; });

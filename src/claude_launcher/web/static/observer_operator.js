@@ -16,7 +16,12 @@
      scroller() the element whose scroll a redraw keeps
      manage   the 「+ 새 operator」 tab, the form, start/stop, watch, edit
               and delete (the page); off, the head links to the page instead
-     composer an input row of the view's own (the page uses its composer) */
+     composer an input row of the view's own (the page uses its composer)
+   A view with its own input row also holds a session line above the
+   conversation (claunch-iw5i8.13): the selected operator, its session and
+   that session's state, and a link to the session's page. It sits outside
+   the conversation's scroller, so it stays on screen however far the reader
+   has scrolled. */
 globalThis.OperatorView = {create: options => operatorView(options || {})};
 /* On the page the view lives in the Operator dock (claunch-iw5i8.8), the
    right-hand column observer.js opens and closes, with an input row of its
@@ -37,7 +42,7 @@ function operatorView(opts) {
 const FEED_SHOWN = 20;
 const LEVELS = {info:"알림",attention:"확인 필요",urgent:"긴급"};
 const node = (tag, text, cls) => { const e = document.createElement(tag); e.textContent = text; if(cls)e.className=cls; return e; };
-let root = null, area = null, onChange = () => {};
+let root = null, area = null, bar = null, onChange = () => {};
 let list = [], detail = null, selected = "", loaded = false, listError = "";
 let projects = [], profiles = [], form = null, formError = "", busy = false, expanded = false;
 let listSignature = "", task = null;
@@ -274,6 +279,26 @@ function feedBox(op) {
   return box;
 }
 /* -- the section ------------------------------------------------------- */
+/* The session line: which operator this conversation is with, the session
+   it runs in and that session's state, and the way to that session's page.
+   A stopped session keeps its link: its page shows an ended session too. */
+function sessionBar(op) {
+  if(!bar) return;
+  bar.hidden = !op;
+  if(!op) { bar.replaceChildren(); return; }
+  const who = node("span", "", "op-bar-who");
+  who.append(node("span", "", `op-dot${running(op) ? " on" : ""}`), node("strong", op.name));
+  const parts = [who];
+  if(op.operator) {
+    const state = running(op) ? `실행 중${op.operator.status ? ` (${op.operator.status})` : ""}` : "정지됨";
+    parts.push(node("span", `${op.operator.name} · ${state}`, "op-bar-session"));
+    const link = node("a", "세션 열기", "op-bar-open");
+    link.href = "#/s/" + encodeURIComponent(op.operator.name);
+    link.title = `세션 ${op.operator.name}의 화면으로 이동합니다`;
+    parts.push(link);
+  } else parts.push(node("span", "세션 없음", "op-bar-session"));
+  bar.replaceChildren(...parts);
+}
 function head(op) {
   const box = node("div", "", "op-head");
   const title = node("h3", op.name + " ");
@@ -348,6 +373,7 @@ function render() {
   const page = opts.scroller?.(), top = page?.scrollTop;
   const atEnd = !!page && page.scrollHeight - page.scrollTop - page.clientHeight < 24;
   area.replaceChildren(...parts);
+  sessionBar(op);
   if(page) page.scrollTop = opts.composer && atEnd ? page.scrollHeight : top;
   if(input) input.send.disabled = busy || !op;
 }
@@ -358,9 +384,10 @@ function mount(element, changed) {
   root = element; onChange = changed || onChange;
   area = root;
   if(opts.composer) {
+    bar = node("div", "", "op-sessionbar"); bar.hidden = true;
     area = node("div", "", "op-area");
     input = composerBox();
-    root.replaceChildren(area, input.box);
+    root.replaceChildren(bar, area, input.box);
   }
   render();
 }

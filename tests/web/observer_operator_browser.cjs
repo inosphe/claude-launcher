@@ -175,6 +175,15 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     assert(lastSent("POST", "/api/operators/op1/seen"), "the open operator is marked seen");
     assert.equal(await page.locator("#observer-operators .op-badge").innerText(), "2", "two asks still wait");
     assert.match(await page.locator("#observer-operators .op-scope").innerText(), /범위: alpha · 정지됨/);
+    // The session line above the conversation (claunch-iw5i8.13): outside the
+    // dock's scroller, naming the operator; it has no session yet.
+    const sessionLine = () => page.evaluate(() => {
+      const bar = document.querySelector("#observer-operators > .op-sessionbar");
+      const link = bar?.querySelector("a.op-bar-open");
+      return bar && { hidden: bar.hidden, who: bar.querySelector(".op-bar-who")?.textContent, session: bar.querySelector(".op-bar-session")?.textContent,
+        href: link ? link.getAttribute("href") : null, outside: !bar.closest(".op-area") };
+    });
+    assert.deepEqual(await sessionLine(), { hidden: false, who: "ops-a", session: "세션 없음", href: null, outside: true });
 
     // The newest 20 entries, the rest opened in place.
     assert.equal(await page.locator("#observer-operators .op-entry").count(), 20);
@@ -326,9 +335,12 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     await page.waitForFunction(() => /범위: alpha, beta/.test(document.querySelector("#observer-operators .op-scope")?.textContent || "") && document.querySelector('#observer-operators .op-tab[aria-selected="true"]')?.textContent.includes("two"));
     await page.click("#observer-operators .op-actions button:has-text('시작')");
     await page.waitForFunction(() => /실행 중 · s900/.test(document.querySelector("#observer-operators .op-scope")?.textContent || ""));
+    // Started, the session line names its session and links to its page.
+    assert.deepEqual(await sessionLine(), { hidden: false, who: "two", session: "s900 · 실행 중 (idle)", href: "#/s/s900", outside: true });
     assert.equal(await page.locator("#observer-operators .op-actions button:has-text('삭제')").isDisabled(), true);
     await page.click("#observer-operators .op-actions button:has-text('정지')");
     await page.waitForFunction(() => /정지됨/.test(document.querySelector("#observer-operators .op-scope")?.textContent || ""));
+    assert.equal((await sessionLine()).session, "세션 없음");
     await page.click("#observer-operators .op-actions button:has-text('삭제')");
     await page.waitForFunction(() => ![...document.querySelectorAll("#observer-operators .op-tab")].some(t => t.textContent.includes("two")));
     assert(lastSent("DELETE", "/api/operators/op3"));
@@ -363,6 +375,6 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     assert.equal(await page.locator("#observer-operators .op-tab").first().isVisible(), true);
 
     assert.deepEqual(errors, []);
-    console.log("PASS: operator tabs, seen badge, feed folding and kinds, markdown bodies and answers with raw HTML kept as text, approve/choice answers, composer target and send, card ask-about scope, picked empty target kept, fab hidden, create all/projects, validation and 409, scope edit, watch toggle, start/stop/delete, 40vh draft cap, dock closed by default, toggle kept in localStorage across reload, two columns with a held dock and its own input row, ask opens the dock, inner scrollers only the draft and the dock conversation on desktop and none on mobile");
+    console.log("PASS: operator tabs, seen badge, feed folding and kinds, markdown bodies and answers with raw HTML kept as text, approve/choice answers, composer target and send, card ask-about scope, picked empty target kept, fab hidden, session line outside the scroller with the session's state and link, create all/projects, validation and 409, scope edit, watch toggle, start/stop/delete, 40vh draft cap, dock closed by default, toggle kept in localStorage across reload, two columns with a held dock and its own input row, ask opens the dock, inner scrollers only the draft and the dock conversation on desktop and none on mobile");
   } finally { await browser.close(); server.close(); server.closeAllConnections(); }
 })().catch(error => { console.error(error); server.close(); server.closeAllConnections(); process.exitCode = 1; });

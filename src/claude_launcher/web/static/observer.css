@@ -348,6 +348,16 @@
 :is(#observer-operators, #opfab-view) .op-dot.on { background: #3fb950; }
 :is(#observer-operators, #opfab-view) .op-badge { min-width: 18px; padding: 0 5px; border-radius: 9px; font-size: 11px; line-height: 18px; text-align: center; background: #30343b; color: #c9d1d9; }
 :is(#observer-operators, #opfab-view) .op-badge.unseen { background: #9e6a03; color: #fff; }
+/* The session line above the conversation (claunch-iw5i8.13): one row that
+   stays put while the conversation scrolls. On a phone the dock is part of
+   the page, so the row holds to the top of the screen instead. */
+:is(#observer-operators, #opfab-view) .op-sessionbar { flex: none; display: flex; align-items: center; gap: 8px; min-width: 0; padding: 6px 12px; border-bottom: 1px solid #2a2e36; background: inherit; font-size: 12px; }
+:is(#observer-operators, #opfab-view) .op-sessionbar[hidden] { display: none; }
+:is(#observer-operators, #opfab-view) .op-bar-who { display: inline-flex; align-items: center; gap: 6px; flex: none; max-width: 40%; }
+:is(#observer-operators, #opfab-view) .op-bar-who strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+:is(#observer-operators, #opfab-view) .op-bar-session { flex: 1; min-width: 0; color: #8b949e; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+:is(#observer-operators, #opfab-view) .op-bar-open { flex: none; }
+#observer-operators .op-sessionbar { position: sticky; top: 0; z-index: 1; background: #161b22; }
 :is(#observer-operators, #opfab-view) .op-head { margin: 12px 0 6px; }
 :is(#observer-operators, #opfab-view) .op-head h3 { font-size: 14px; margin: 0 0 4px; overflow-wrap: anywhere; }
 :is(#observer-operators, #opfab-view) .op-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
