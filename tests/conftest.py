@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import shutil
 import sys
@@ -53,6 +54,9 @@ _test_window_grant = None
 #: (claunch-8kald: the window's run history).
 _report_grant_id = None
 _session_started = 0.0
+#: Where the result goes instead of the daemon, when the grant owner said so
+#: (test_window.WINDOW_RESULT_FILE_ENV).
+_result_file = None
 
 
 def _pytest_window_class(args) -> str:
@@ -81,7 +85,7 @@ def _spend_only_the_grant(config, grant) -> None:
 
 def pytest_sessionstart(session):
     """Guard every direct pytest entry point, including unwrapped commands."""
-    global _test_window_grant, _report_grant_id, _session_started
+    global _test_window_grant, _report_grant_id, _session_started, _result_file
     if os.environ.get("PYTEST_XDIST_WORKER"):
         return
     _session_started = time.monotonic()
@@ -93,6 +97,7 @@ def pytest_sessionstart(session):
     # Only the direct child of a grant owner reports into that grant; a
     # pytest started by a test inside this run must not overwrite it.
     reporter = os.environ.pop(test_window.WINDOW_REPORT_ENV, None) == "1"
+    _result_file = os.environ.pop(test_window.WINDOW_RESULT_FILE_ENV, None)
     cls = _pytest_window_class(session.config.args)
     inherited = test_window.inherited_grant()
     if inherited is not None:
@@ -129,6 +134,9 @@ def _report_to_the_window(session, exitstatus) -> None:
         getattr(session, "testscollected", 0),
         time.monotonic() - _session_started,
     )
+    if _result_file:
+        Path(_result_file).write_text(json.dumps(result), encoding="utf-8")
+        return
     test_window.report_result(grant_id, result)
 
 

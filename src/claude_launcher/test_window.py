@@ -43,6 +43,11 @@ WINDOW_WORKERS_ENV = "CLAUNCH_WINDOW_ADVISORY_N"
 #: (``child_env``): that pytest reports its result into the grant, and pops
 #: the variable so a pytest a test spawns does not overwrite it.
 WINDOW_REPORT_ENV = "CLAUNCH_WINDOW_REPORT"
+#: Beside ``WINDOW_REPORT_ENV``: a file the reporting pytest writes its
+#: :func:`pytest_result` to instead of posting it, for an owner that runs the
+#: suite where the daemon is out of reach (tools/sweep.py hands the suite a
+#: throwaway launcher home, claunch-gziru) and posts the result itself.
+WINDOW_RESULT_FILE_ENV = "CLAUNCH_WINDOW_RESULT_FILE"
 #: The session a sessionless run works for (a delayed sweep runs without
 #: ``CLAUNCH_SESSION`` so it outlives its leader). Shown on the Window page and
 #: in the run history; the daemon never treats it as the grant's owner.

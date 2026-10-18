@@ -225,18 +225,18 @@ _SUITE_DROPPED_VARS = (
 )
 
 
-def suite_env(grant, home: Path) -> dict:
+def suite_env(grant, home: Path, result_file: Path) -> dict:
     """The suite's environment: the grant, and ``home`` as every launcher home.
 
     The suite needs nothing from the caller's launcher home -- the grant
     travels in the environment -- so it gets a throwaway one. Whatever a test
     of any snapshot does with a home it failed to isolate then lands in
-    ``home``, never in the operator's. The window result is reported by the
-    caller (:func:`_report_window`): the suite cannot reach the daemon from a
-    throwaway home.
+    ``home``, never in the operator's. The suite cannot reach the daemon from
+    a throwaway home, so its conftest writes the window result to
+    ``result_file`` and the caller posts it (:func:`_report_window`).
     """
     env = grant.child_env()
-    env.pop(test_window.WINDOW_REPORT_ENV, None)
+    env[test_window.WINDOW_RESULT_FILE_ENV] = str(result_file)
     for name in _SUITE_DROPPED_VARS:
         env.pop(name, None)
     env["CLAUDE_LAUNCHER_HOME"] = str(home)
@@ -246,13 +246,12 @@ def suite_env(grant, home: Path) -> dict:
 
 
 def window_result(code: int, output: str, seconds: float) -> dict:
-    """The suite's result in the fields its conftest reported
-    (test_window.pytest_result), read back from its output.
+    """The suite's result read back from its output, for a snapshot whose
+    conftest predates test_window.WINDOW_RESULT_FILE_ENV and wrote no file.
 
-    ``timeouts`` is what the daemon's adaptive worker budget acts on
-    (daemon/window.py ``_adapt``, claunch-afmzw), so it must not go missing
-    with the move: counted on the short-summary lines, which carry each
-    failure's exception line, with the conftest's own TIMEOUT_PATTERN.
+    A lower bound on ``timeouts`` (what daemon/window.py ``_adapt`` acts on,
+    claunch-afmzw): pytest cuts the short-summary line's message to the
+    terminal width, and drops it for a long node id.
     """
     counts = parse_counts(output)
     failures = _failure_lines(output, limit=None)
@@ -269,10 +268,16 @@ def window_result(code: int, output: str, seconds: float) -> dict:
     }
 
 
-def _report_window(grant, code: int, output: str, seconds: float) -> None:
-    """Attach the suite's result to the grant, as its conftest would have."""
-    if test_window.reportable(grant.grant_id):
-        test_window.report_result(grant.grant_id, window_result(code, output, seconds))
+def _report_window(grant, result_file: Path, code: int, output: str, seconds: float) -> None:
+    """Attach the suite's result to the grant: the one its conftest wrote to
+    ``result_file``, else what its output says."""
+    if not test_window.reportable(grant.grant_id):
+        return
+    try:
+        result = json.loads(result_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        result = window_result(code, output, seconds)
+    test_window.report_result(grant.grant_id, result)
 
 
 def default_command(session: str, workers: int = 8) -> str:
@@ -776,6 +781,7 @@ def cmd_run(args) -> int:
     # over a tip that is red in the default environment.
     suite_home = Path(tempfile.mkdtemp(
         prefix="sweep-home-", dir=os.environ.get("CLAUNCH_SCRATCH") or None))
+    result_file = suite_home.with_name(suite_home.name + ".result.json")
     clock = time.monotonic()
     try:
         proc = subprocess.run(
@@ -786,16 +792,17 @@ def cmd_run(args) -> int:
             text=True,
             encoding="utf-8",
             errors="replace",
-            env=suite_env(grant, suite_home),
+            env=suite_env(grant, suite_home, result_file),
         )
-        _report_window(grant, proc.returncode, (proc.stdout or "") + (proc.stderr or ""),
-                       time.monotonic() - clock)
+        _report_window(grant, result_file, proc.returncode,
+                       (proc.stdout or "") + (proc.stderr or ""), time.monotonic() - clock)
     finally:
         grant.release()
         # Anything left here is a test that wrote to the launcher home it was
         # handed instead of its own; the receipt names it.
         home_writes = sorted(p.name for p in suite_home.iterdir())
         shutil.rmtree(suite_home, ignore_errors=True)
+        result_file.unlink(missing_ok=True)
     finished = datetime.now(timezone.utc)
     # A stream that came back as ``None`` is not an empty stream: the reader
     # died and took the output with it. Both states parse to ``counts {}``, and
