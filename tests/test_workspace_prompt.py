@@ -215,7 +215,7 @@ def test_every_session_created_in_the_workspace_gets_it(env, tmp_path):
             assert "house-rules" not in ids, ids
             assert RULE not in seen["c3"]
 
-            # The create form's offer marks it, so the chip is drawn locked.
+            # The create form's offer marks it, so the form draws its own box (ticked by default).
             offer = await (await client.get(
                 "/api/prompt-packs/offer", params={"cwd": str(ws)}, headers=BEARER,
             )).json()
