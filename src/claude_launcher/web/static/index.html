@@ -84,6 +84,7 @@
          that reads them. Both boxes drive one setting. -->
     <label id="observer-mobile-scope" class="m-act" title="켜면 observe-pin 한 세션만 관찰합니다"><input type="checkbox" id="observer-mobile-scope-pinned"> 고정만</label>
     <button id="observer-mobile-monitor" class="m-act" type="button">관찰 시작</button>
+    <button id="observer-mobile-operator" class="m-act" type="button" aria-pressed="false" aria-controls="observer-dock">Operator</button>
     <span id="m-status" class="badge"></span>
     <!-- Mirror of the header's link chip. It says what the *socket* is doing,
          which the badge beside it cannot: that one reports the session, and
@@ -328,7 +329,13 @@
          also opens as a modal over any page). -->
     <section id="chat-view" class="hidden" aria-label="Chat"></section>
     <section id="observer-view" class="hidden">
-      <header class="wf-head"><h1>관찰 대시보드</h1><label id="observer-scope-control" title="켜면 observe-pin 한 세션만 관찰합니다. 관찰 API 호출이 그 수에 비례해 줄어듭니다. 세션 레일의 체크박스와 카드의 「관찰 고정」이 같은 표시입니다."><input type="checkbox" id="observer-scope-pinned"> 고정만 관찰</label><button id="observer-monitor">관찰 시작</button></header>
+      <!-- Two columns while the Operator dock is open (claunch-iw5i8.8): the
+           page on the left, the operators on the right, held on screen while
+           the page scrolls. Closed, the dock is gone and the page is one
+           column. observer.js keeps the choice in localStorage. -->
+      <div class="observer-layout">
+      <div class="observer-main">
+      <header class="wf-head"><h1>관찰 대시보드</h1><label id="observer-scope-control" title="켜면 observe-pin 한 세션만 관찰합니다. 관찰 API 호출이 그 수에 비례해 줄어듭니다. 세션 레일의 체크박스와 카드의 「관찰 고정」이 같은 표시입니다."><input type="checkbox" id="observer-scope-pinned"> 고정만 관찰</label><button id="observer-monitor">관찰 시작</button><button id="observer-operator-toggle" type="button" aria-pressed="false" aria-controls="observer-dock" title="Operator 대화창을 오른쪽 열에 엽니다">Operator ▸</button></header>
       <section id="observer-token-summary" aria-label="관찰 API 토큰 사용량">
         <button id="observer-token-toggle" aria-expanded="false" aria-controls="observer-token-detail"><span>토큰</span><span id="observer-token-compact">조회 중…</span><span id="observer-token-chevron" aria-hidden="true">⌄</span></button>
         <div id="observer-token-detail">
@@ -338,9 +345,6 @@
         </div>
       </section>
       <div class="observer-content">
-      <!-- Operator v2: tabs, the selected operator's conversation and its
-           form (observer_operator.js). The composer below talks to it. -->
-      <section id="observer-operators" aria-label="Operator"></section>
       <div class="observer-toolbar">
       <div class="observer-view-controls">
       <fieldset class="observer-view-tabs"><legend class="sr-only">결과 표시 방식</legend>
@@ -389,6 +393,13 @@
       <button id="observer-send" disabled>전송</button>
       <p id="observer-input-status" role="status">중단은 Esc 키를 전송합니다. 실제 중단 상태를 확인한 후 새 지시를 보내십시오.</p>
       </footer>
+      </div>
+      <!-- Operator v2: tabs, the selected operator's conversation and its
+           form, with an input row of its own (observer_operator.js). -->
+      <aside id="observer-dock" aria-label="Operator 대화창" hidden>
+      <section id="observer-operators" aria-label="Operator"></section>
+      </aside>
+      </div>
     </section>
     <!-- The terminal is never rebuilt by navigation: it holds a live PTY
          socket and 5000 lines of scrollback, so pages are laid over it. -->

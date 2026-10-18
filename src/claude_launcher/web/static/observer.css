@@ -5,20 +5,28 @@
    long piece of evidence and a long draft make the page longer instead. */
 #observer-view { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; overflow-x: hidden; overflow-y: auto; font-size: 13px; }
 #observer-view > * { flex: none; }
+/* The page and the Operator dock (claunch-iw5i8.8). The layout fills the
+   viewport at least, so the composer still sits at its bottom on a short
+   page; .observer-main is the page column, one column while the dock is
+   closed. */
+#observer-view > .observer-layout { flex: 1 0 auto; display: flex; flex-direction: column; min-width: 0; }
+.observer-main { flex: 1 0 auto; display: flex; flex-direction: column; min-width: 0; }
+.observer-main > * { flex: none; }
 /* The detail panel's Observation section (ObserverPage.panelSection) draws
    the page's own nodes, so it takes the page's rules below as well. */
 .sess-observer { font-size: 13px; }
 #observer-mobile-monitor { display: none; }
 #observer-mobile-scope { display: none; }
+#observer-mobile-operator { display: none; }
 @media(max-width:820px) {
-  body.observer-active :is(#observer-view, .sess-observer) > header { display: none; }
-  body.observer-active #observer-mobile-monitor { display: inline-flex; align-items: center; flex: none; min-height: 44px; font-size: 12px; }
+  body.observer-active :is(#observer-view .observer-main, .sess-observer) > header { display: none; }
+  body.observer-active :is(#observer-mobile-monitor, #observer-mobile-operator) { display: inline-flex; align-items: center; flex: none; min-height: 44px; font-size: 12px; }
   /* Shown with the monitor button it belongs to, and only while the observer
      page is on screen — the pin is only meaningful there. */
   body.observer-active #observer-mobile-scope { display: inline-flex; align-items: center; gap: 5px; flex: none; min-height: 44px; font-size: 12px; color: #96a6b8; }
   body.observer-active #observer-mobile-scope input { width: 16px; height: 16px; accent-color: #58a6ff; }
 }
-:is(#observer-view, .sess-observer) > header { flex: none; margin: 0; padding: 16px 20px; border-bottom: 1px solid #2a2e36; gap: 12px; }
+:is(#observer-view .observer-main, .sess-observer) > header { flex: none; margin: 0; padding: 16px 20px; border-bottom: 1px solid #2a2e36; gap: 12px; }
 :is(#observer-view, .sess-observer) h1 { flex: 1; font-size: 18px; }
 :is(#observer-view, .sess-observer) .observer-content { flex: 1 0 auto; min-width: 0; padding: 16px 20px; }
 :is(#observer-view, .sess-observer) .filters { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
@@ -115,7 +123,7 @@
 :is(#observer-view, .sess-observer) .observer-grid .observer-post { background:#161e28; border:1px solid #303b4b; border-radius:16px; }
 :is(#observer-view, .sess-observer) :focus-visible { outline: 2px solid #58a6ff; outline-offset: 2px; }
 @media(max-width:600px) {
-  :is(#observer-view, .sess-observer) > header { padding: 10px 12px; }
+  :is(#observer-view .observer-main, .sess-observer) > header { padding: 10px 12px; }
   :is(#observer-view, .sess-observer) h1 { font-size: 16px; }
   :is(#observer-view, .sess-observer) .observer-content { padding: 12px; }
   :is(#observer-view, .sess-observer) .observer-card { padding: 14px; }
@@ -255,8 +263,8 @@
 :is(#observer-view, .sess-observer) .sess-brief-more > summary { cursor: pointer; color: #8b96a5; font-size: 12px; }
 
 /* Keep controls together and reserve the remaining height for results. */
-#observer-view > header { padding:8px 16px; }
-#observer-view > header h1 { font-size:16px; }
+#observer-view .observer-main > header { padding:8px 16px; }
+#observer-view .observer-main > header h1 { font-size:16px; }
 #observer-view .observer-toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:8px 16px; flex:none; }
 #observer-view .observer-view-controls { margin:0; gap:8px; }
 #observer-view .observer-view-tabs { border-radius:8px; padding:3px; gap:2px; }
@@ -280,7 +288,7 @@
 #observer-view #observer-composer.folded { padding:6px 16px max(6px,env(safe-area-inset-bottom)); }
 @media(min-width:821px) {
   #observer-view .observer-content { padding:8px 16px; }
-  #observer-view > header button { min-height:34px; padding:6px 12px; }
+  #observer-view .observer-main > header button { min-height:34px; padding:6px 12px; }
   #observer-view #observer-token-detail { display:grid; grid-template-columns:minmax(130px,.65fr) minmax(0,3fr); align-items:center; gap:6px 20px; padding:10px 12px; }
   #observer-view .observer-token-heading span { display:block; margin:4px 0 0; }
   #observer-view #observer-token-windows { margin:0; gap:12px; }
@@ -363,3 +371,26 @@
 :is(#observer-operators, #opfab-view) .op-form-actions { display: flex; gap: 8px; }
 :is(#observer-operators, #opfab-view) .op-error { color: #f85149; }
 :is(#observer-view, .sess-observer) .observer-links .observer-ask-operator { grid-column: 1/-1; }
+/* The Operator dock (claunch-iw5i8.8). Open on a wide screen it is the right
+   column, held on screen while the page scrolls (sticky inside #observer-view,
+   as tall as its viewport, which observer.js keeps in --observer-viewport).
+   Its conversation scrolls inside it and the input row stays at its foot:
+   the reader chose that over the page's single scroller for this column.
+   On a phone the dock sits above the page in the flow and adds no scroller. */
+#observer-dock[hidden] { display: none; }
+#observer-view #observer-operators .op-composer { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border-top: 1px solid #2a2e36; }
+#observer-view #observer-operators .op-composer-row { display: flex; gap: 8px; }
+#observer-view #observer-operators .op-composer textarea { flex: 1; resize: none; min-height: 60px; max-height: 30vh; padding: 8px 12px; line-height: 1.45; box-sizing: border-box; }
+#observer-view #observer-operators .op-composer small { color: #8b949e; min-height: 1em; }
+#observer-view #observer-operator-toggle[aria-pressed="true"] { color: #f0f7ff; background: #245d87; border-color: #3b7cb0; }
+@media(min-width:821px) {
+  #observer-view.dock-open > .observer-layout { display: grid; grid-template-columns: minmax(0,1fr) clamp(320px,34%,560px); }
+  #observer-view.dock-open #observer-dock { align-self: start; position: sticky; top: 0; height: var(--observer-viewport,100vh); display: flex; flex-direction: column; min-width: 0; box-sizing: border-box; border-left: 1px solid #2a2e36; background: #161b22; }
+  #observer-view.dock-open #observer-operators { flex: 1; min-height: 0; display: flex; flex-direction: column; margin: 0; padding: 0; border: 0; border-radius: 0; }
+  #observer-view.dock-open #observer-operators .op-area { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 10px 12px; }
+}
+@media(max-width:820px) {
+  #observer-view.dock-open #observer-dock { order: -1; margin: 8px 12px 0; }
+  #observer-view.dock-open #observer-operators { margin: 0; }
+  body.observer-active #observer-mobile-operator[aria-pressed="true"] { color: #f0f7ff; background: #245d87; }
+}
