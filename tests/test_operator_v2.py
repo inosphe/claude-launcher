@@ -303,6 +303,90 @@ def test_history_answers_what_the_operator_did(world):
     assert ops.history("opall", {})["entries"][0]["kind"] == "system"  # its own feed only
 
 
+# -- asking for a session (claunch-iw5i8.15) -------------------------------
+def _gated(world, monkeypatch):
+    from claude_launcher.daemon import spawn_gate
+
+    monkeypatch.setattr(operators_v2.projects, "default_cwd", lambda name, doc=None: f"/repo/{name}")
+    manager = SimpleNamespace(get=lambda name: world.sessions[name])
+    gate = spawn_gate.SpawnGate(manager=manager, path=None,
+                                on_settle=world.ops.spawn_settled)
+    world.ops.spawn_gate = lambda: gate
+    return gate
+
+
+def test_spawn_files_a_gated_request_for_a_top_level_worker(world, monkeypatch):
+    gate = _gated(world, monkeypatch)
+    ops = world.ops
+    msg = run(ops.message(world.alpha["id"], {"text": "로그인 버그 고쳐줘"}))
+    out = run(ops.spawn("opa", {"task": "로그인 버그 수정", "reason": "맡은 세션 없음",
+                                "on_behalf_of": msg["id"]}))
+    record = out["request"]
+    assert record["kind"] == "spawn" and record["status"] == "pending" and record["session"] == "opa"
+    # top-level: no parent; the project's workspace on a fresh worktree; the worker workflow
+    assert record["spec"] == {"profile": "p", "project": "alpha", "cwd": "/repo/alpha",
+                              "task": "로그인 버그 수정", "workflow": "improv-worker-v2", "worktree": ""}
+    assert "parent" not in record["spec"]
+    assert record["basis"]["operator"] == world.alpha["id"] and record["basis"]["on_behalf_of"] == msg["id"]
+    assert "세션 생성 요청" in ops.get(world.alpha["id"])["feed"][-1]["text"]
+    assert [r["id"] for r in run(ops.poll("opa"))["requests"]] == [record["id"]]
+    # the settlement lands in the operator's feed
+    gate.reject(record["id"])
+    assert "rejected" in ops.get(world.alpha["id"])["feed"][-1]["text"]
+
+
+def test_spawn_needs_the_users_word_and_a_project_in_scope(world, monkeypatch):
+    _gated(world, monkeypatch)
+    ops = world.ops
+    post = ops.post("opa", {"text": "self", "request_id": "own"})
+    with pytest.raises(web.HTTPForbidden):
+        run(ops.spawn("opa", {"task": "t", "reason": "r", "on_behalf_of": post["id"]}))
+    msg = run(ops.message(world.alpha["id"], {"text": "go"}))
+    with pytest.raises(web.HTTPForbidden):
+        run(ops.spawn("opa", {"task": "t", "reason": "r", "on_behalf_of": msg["id"], "project": "beta"}))
+    with pytest.raises(ValueError):
+        run(ops.spawn("opa", {"task": "t", "on_behalf_of": msg["id"]}))  # no reason
+    every = run(ops.message(world.every["id"], {"text": "go"}))
+    with pytest.raises(ValueError):  # an all-projects operator must name one
+        run(ops.spawn("opall", {"task": "t", "reason": "r", "on_behalf_of": every["id"]}))
+    with pytest.raises(web.HTTPForbidden):  # only an operator's bound session
+        run(ops.spawn("a1", {"task": "t", "reason": "r", "on_behalf_of": msg["id"]}))
+
+
+def test_spawn_takes_an_issue_only_from_a_board_in_scope(world, monkeypatch):
+    _gated(world, monkeypatch)
+    world.ops.board = lambda: FakeBoard({("/repo/alpha", "alpha-1"): {"id": "alpha-1", "comments": []},
+                                         ("/repo/beta", "beta-1"): {"id": "beta-1", "comments": []}})
+    msg = run(world.ops.message(world.alpha["id"], {"text": "alpha-1 해줘"}))
+    out = run(world.ops.spawn("opa", {"task": "t", "reason": "r", "issue": "alpha-1",
+                                      "on_behalf_of": msg["id"]}))
+    assert out["request"]["spec"]["issue"] == "alpha-1"
+    with pytest.raises(web.HTTPForbidden):
+        run(world.ops.spawn("opa", {"task": "t", "reason": "r", "issue": "beta-1",
+                                    "on_behalf_of": msg["id"]}))
+
+
+def test_resume_asks_for_an_ended_session_with_a_fallback(world, monkeypatch):
+    gate = _gated(world, monkeypatch)
+    ops = world.ops
+    msg = run(ops.message(world.alpha["id"], {"text": "a-old가 하던 거 이어서"}))
+    with pytest.raises(ValueError):  # running: dispatch instead
+        run(ops.resume("opa", {"target": "a1", "reason": "r", "on_behalf_of": msg["id"],
+                               "fallback": {"task": "t"}}))
+    with pytest.raises(ValueError):  # the fallback is required
+        run(ops.resume("opa", {"target": "a-old", "reason": "r", "on_behalf_of": msg["id"]}))
+    with pytest.raises(web.HTTPForbidden):
+        run(ops.resume("opa", {"target": "b1", "reason": "r", "on_behalf_of": msg["id"],
+                               "fallback": {"task": "t"}}))
+    out = run(ops.resume("opa", {"target": "a-old", "reason": "그 작업의 세션", "on_behalf_of": msg["id"],
+                                 "fallback": {"task": "이어서 작업"}}))
+    record = out["request"]
+    assert record["kind"] == "resume" and record["target"] == "a-old"
+    assert record["fallback"]["project"] == "alpha" and record["fallback"]["task"] == "이어서 작업"
+    follow = gate.spawn_instead(record["id"])["followup"]
+    assert gate.get(follow)["spec"] == record["fallback"]
+
+
 # -- routes -----------------------------------------------------------------
 def _app(world, created):
     app = web.Application()

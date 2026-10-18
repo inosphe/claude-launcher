@@ -14084,6 +14084,10 @@ $("new-session").addEventListener("submit", async (e) => {
     // The spawn endpoint wraps the child (it also reports the parent and what
     // the onboarding did); the create one answers with the session itself.
     const made = info.session || info;
+    // A Manual answer to an operator's spawn request (claunch-iw5i8.15): the
+    // request learns which session the person made from it.
+    const spawnRid = sessionModal && sessionModal.spawnRequest;
+    if (spawnRid && !parent && made.name) spawnGateLink(spawnRid, made.name);
     // A leg that failed beside the session (a refused mesh join is the usual
     // one) is said now, as a card: the box that would have shown it is closed
     // on the next line and the page leaves for the new terminal.
@@ -41097,6 +41101,17 @@ function applySessionModalSeed(f, seed) {
     f.worktree_mode.value = seed.worktree ? "new" : "";
     syncNewWorktree();
   }
+  // The project and profile a request named (an operator's spawn request,
+  // claunch-iw5i8.15): picked only when the form offers them, through the
+  // row's own change so the rows that follow from it are redone. Before the
+  // directory, which a project change may re-point.
+  for (const key of ["project", "profile"]) {
+    const select = f[key];
+    if (seed[key] === undefined || !select || select.value === seed[key]) continue;
+    if (![...(select.options || [])].some((o) => o.value === seed[key])) continue;
+    select.value = seed[key];
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+  }
   // Where it works, from either spelling: a registry NAME (what an issue
   // records) or the path the picker's values actually are. The name is
   // resolved against the workspace list, so a seed that arrives before that
@@ -41432,7 +41447,8 @@ async function openSessionModal(opts = {}) {
   const previousView = sessionFormView();
   const previousFields = Array.from(f.querySelectorAll("input[name], select[name], textarea[name]"))
     .map((control) => ({ control, value: control.value, checked: control.checked }));
-  const st = { busy: false, previousView, previousFields };
+  const st = { busy: false, previousView, previousFields,
+               spawnRequest: opts.spawnRequest || null };
   f._sessionView = createSessionFormView(tab, "dialog", {
     parent, source: opts.source, newSeed: opts.newSeed,
     modes: tab === "fork" ? null : opts.modes,
@@ -47449,7 +47465,7 @@ function noticeFilterOf(value) {
 
 let noticeFilter = noticeFilterOf(noticeLoad(NOTICE_FILTER_KEY, "all"));
 /* The pending requests of each gate as its last poll answered them. */
-const gatePending = { restart: [], goto: [], reposync: [], resume: [], kill: [], ask: [] };
+const gatePending = { restart: [], goto: [], reposync: [], resume: [], kill: [], spawn: [], ask: [] };
 
 function noticeHistorySave() {
   noticeSave(NOTICE_HISTORY_KEY, noticeHistory);
@@ -47604,6 +47620,7 @@ function noticeGateRefresh(type) {
   if (type === "reposync") return refreshReposyncGate();
   if (type === "resume") return refreshResumeGate();
   if (type === "kill") return refreshKillGate();
+  if (type === "spawn") return refreshSpawnGate();
   if (type === "ask") return urgentAskSync(urgentAskRows);
   return null;
 }
@@ -47611,7 +47628,7 @@ function noticeGateRefresh(type) {
 function gatePendingCount() {
   return gatePending.restart.length + gatePending.goto.length +
     gatePending.reposync.length + gatePending.resume.length + gatePending.kill.length +
-    gatePending.ask.length;
+    gatePending.spawn.length + gatePending.ask.length;
 }
 
 /* The rail's bell (and its phone twin): the number is the requests waiting
@@ -47865,6 +47882,9 @@ function noticePanelGateRow(type, rec) {
         refreshKillGate();
       }
     ));
+  } else if (type === "spawn") {
+    spawnGateBody(row, rec, head);
+    for (const btn of spawnGateButtons(rec, () => refreshSpawnGate())) actions.appendChild(btn);
   } else if (type === "ask") {
     head.appendChild(gateSessionLink(rec.session));
     head.appendChild(el("span", "notice-title", ` waits on your answer: ${rec.label}`));
@@ -48866,6 +48886,214 @@ async function refreshResumeGate() {
     if (key.startsWith(RESUME_GATE_PREFIX) && !seen.has(key)) {
       dismissNotice(key);
     }
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* the spawn gate: an operator asks for a session                      */
+/* ------------------------------------------------------------------ */
+/* An operator v2 files a request with daemon/spawn_gate.py
+   (claunch-iw5i8.15) when no running session does the work the user gave
+   it: a new session (opv2_spawn), or an exited one back (opv2_resume). The
+   card counts down five minutes. A new-session request is approved by the
+   clock; a resume request is not resumed by it -- its fallback is filed as
+   a new-session request instead. Manual settles the request and opens the
+   New session form filled with what was asked; the form's create tells the
+   request which session it made. */
+const SPAWN_GATE_PREFIX = "spawn-gate-";
+
+function spawnGateTitle(rec) {
+  return rec.kind === "resume" ? "session resume requested: " : "new session requested";
+}
+
+function spawnGateClock(rec) {
+  const left = gateCountdown(rec.deadline);
+  const more = (rec.extensions || 0) ? ` (extended ${rec.extensions}×)` : "";
+  return rec.kind === "resume"
+    ? `not resumed — a new session is asked for instead — in ${left}${more}`
+    : `auto-approves in ${left}${more}`;
+}
+
+/* What the session would be: project, issue, the first line of its task. */
+function spawnGateSpecText(spec) {
+  if (!spec) return "";
+  const task = String(spec.task || "").trim().split("\n")[0];
+  return [
+    spec.project ? `project ${spec.project}` : "",
+    spec.issue ? `issue ${spec.issue}` : "",
+    spec.workflow ? spec.workflow : "",
+    spec.name ? `name ${spec.name}` : "",
+  ].filter(Boolean).join(" · ") + (task ? ` — ${task}` : "");
+}
+
+/* The rows a card and a panel row share: title, who asked on whose word,
+   why, what would be made, and the clock. */
+function spawnGateBody(node, rec, head) {
+  const title = head || el("div", "notice-title");
+  title.appendChild(el("span", head ? "notice-title" : null, spawnGateTitle(rec)));
+  if (rec.kind === "resume") title.appendChild(gateSessionLink(rec.target));
+  if (!head) node.appendChild(title);
+  else node.appendChild(head);
+  const basis = rec.basis || {};
+  const sub = el("div", "notice-sub");
+  sub.appendChild(gateSessionLink(rec.session));
+  sub.appendChild(el("span", null,
+    (basis.operator_name ? ` (operator ${basis.operator_name})` : "") +
+      (basis.user_text ? ` on your message: “${basis.user_text}”` : "")));
+  node.appendChild(sub);
+  node.appendChild(el("div", "notice-sub gate-reason", `reason: ${rec.reason || "(no reason given)"}`));
+  const spec = rec.kind === "resume" ? rec.fallback : rec.spec;
+  if (spec) {
+    node.appendChild(el("div", "notice-sub gate-spec",
+      (rec.kind === "resume" ? "otherwise a new session: " : "") + spawnGateSpecText(spec)));
+  }
+  node.appendChild(el("div", "notice-sub gate-clock", spawnGateClock(rec)));
+}
+
+async function spawnGatePost(rec, verb, btn, body) {
+  btn.disabled = true;
+  let resp;
+  let doc = {};
+  try {
+    resp = await api(`/api/spawn-requests/${rec.id}/${verb}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {}),
+    });
+    doc = await resp.json().catch(() => ({}));
+  } catch {
+    btn.disabled = false;
+    return null;
+  }
+  if (!resp.ok) {
+    btn.disabled = false;
+    notify(`spawn request ${rec.id}: ${verb} refused`, doc.error || `HTTP ${resp.status}`,
+      { kind: "warn" });
+    return null;
+  }
+  const settled = doc.request || {};
+  if (settled.status === "failed") {
+    notify(rec.kind === "resume" ? `resume of ${rec.target} failed` : "session create failed",
+      settled.error || "unknown error", { kind: "warn", sticky: true });
+  }
+  return settled;
+}
+
+/* Manual: the New session form, filled with the request's spec. The
+   session is top-level, so it is the New session tab, never a child. */
+async function spawnGateManual(rec) {
+  const spec = rec.spec || {};
+  const seed = { name: spec.name || "", task: spec.task || "" };
+  if (spec.project) seed.project = spec.project;
+  if (spec.profile) seed.profile = spec.profile;
+  if (spec.workflow) Object.assign(seed, { workflow: spec.workflow, workflow_version: 2 });
+  if (spec.worktree !== undefined) seed.worktree = "new";
+  if (spec.cwd) seed.cwd = spec.cwd;
+  if (spec.issue) seed.issue = spec.issue;
+  await openSessionModal({
+    tab: "new", seed, newSeed: spec.cwd ? { cwd: spec.cwd } : null,
+    spawnRequest: rec.id,
+  });
+}
+
+/* The form's create, reported back to the request it was made for. */
+async function spawnGateLink(rid, name) {
+  try {
+    await api(`/api/spawn-requests/${rid}/created`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session: name }),
+    });
+  } catch {
+    // The session stands; only the asker's note about it is lost.
+  }
+}
+
+/* The answers, for a card and a panel row alike; `done` runs after one
+   settled the request. */
+function spawnGateButtons(rec, done) {
+  const out = [];
+  const add = (label, cls, title, run) => {
+    const btn = el("button", "wf-btn" + (cls ? ` ${cls}` : ""), label);
+    btn.type = "button";
+    btn.title = title;
+    btn.addEventListener("click", async (ev) => {
+      ev.stopPropagation();
+      if (await run(btn)) done();
+    });
+    out.push(btn);
+  };
+  if (rec.kind === "resume") {
+    add("Resume", "approve", "relaunch the session on its own conversation now",
+      (btn) => spawnGatePost(rec, "approve", btn));
+    add("New session", "", "leave it exited and ask for a new session from the fallback instead",
+      (btn) => spawnGatePost(rec, "spawn", btn));
+  } else {
+    add("Approve", "approve", "create the session now, as asked",
+      (btn) => spawnGatePost(rec, "approve", btn));
+    add("Manual", "", "open the New session form filled with this request, and create it yourself",
+      async (btn) => {
+        const settled = await spawnGatePost(rec, "manual", btn);
+        if (settled) {
+          noticePanelToggle(false);
+          await spawnGateManual(settled);
+        }
+        return settled;
+      });
+  }
+  add("Reject", "clear",
+    rec.kind === "resume" ? "nothing is resumed and nothing is created" : "nothing is created",
+    (btn) => spawnGatePost(rec, "reject", btn));
+  add("+5 min", "gate-extend",
+    "not a decision: the deadline moves out and the request stays open",
+    (btn) => spawnGatePost(rec, "extend", btn));
+  return out;
+}
+
+async function refreshSpawnGate() {
+  const host = $("notices");
+  if (!host) return;
+  let body;
+  try {
+    body = await (await api("/api/spawn-requests")).json();
+  } catch {
+    return;
+  }
+  const pending = (body && body.requests ? body.requests : []).filter(
+    (r) => r.status === "pending"
+  );
+  gateHistorySync("spawn", pending, body && body.requests);
+  const seen = new Set();
+  for (const rec of pending) {
+    const key = SPAWN_GATE_PREFIX + rec.id;
+    gateHistoryOpen(
+      "spawn", String(rec.id),
+      spawnGateTitle(rec) + (rec.kind === "resume" ? rec.target || "?" : ""),
+      `${rec.session || "?"}: ${rec.reason || "(no reason given)"}`,
+      { session: rec.session }
+    );
+    if (gateIsHidden("spawn", rec.id)) continue;
+    seen.add(key);
+    let card = notices.get(key);
+    if (!card || !card.node.isConnected) {
+      dismissNotice(key);
+      const node = el("div", "notice warn gate spawn-gate");
+      spawnGateBody(node, rec);
+      const actions = el("div", "gate-actions");
+      for (const btn of spawnGateButtons(rec, () => refreshSpawnGate())) actions.appendChild(btn);
+      actions.appendChild(gateHideButton("spawn", rec.id, key,
+        "close this card only — the request stays open and its deadline runs; " +
+        "the bell keeps it in the notification history"));
+      node.appendChild(actions);
+      host.appendChild(node);
+      notices.set(key, { node, timer: null });
+      card = notices.get(key);
+    }
+    const clock = card.node.querySelector(".gate-clock");
+    if (clock) clock.textContent = spawnGateClock(rec);
+  }
+  for (const key of [...notices.keys()]) {
+    if (key.startsWith(SPAWN_GATE_PREFIX) && !seen.has(key)) dismissNotice(key);
   }
 }
 
@@ -49982,7 +50210,7 @@ async function pollOnce() {
   // it: a leader files from its own terminal, the person answers here.
   const gateRefresh = refreshRestartGate();
   refreshes.push(gateRefresh, refreshGotoGate(), refreshReposyncGate(), refreshResumeGate(),
-    refreshKillGate());
+    refreshKillGate(), refreshSpawnGate());
   await Promise.all(refreshes);
 }
 

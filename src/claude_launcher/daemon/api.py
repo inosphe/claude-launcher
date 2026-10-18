@@ -96,6 +96,7 @@ from . import mesh_roles
 from . import reposync_gate
 from . import resume_gate
 from . import kill_gate
+from . import spawn_gate
 from . import reposync_agent
 from . import host_code, restart_gate
 from . import restart_notice
@@ -553,6 +554,19 @@ def build_app(
         notify=functools.partial(_deliver_to_session, manager),
         end=functools.partial(_kill_gate_end, app),
     )
+    #: The approval gate an operator's request for a session waits behind
+    #: (claunch-iw5i8.15); see spawn_gate. Five minutes, unanswered counts
+    #: as approved (a resume expires into a new session); kept on disk.
+    gate = spawn_gate.SpawnGate(
+        manager=manager,
+        path=spawn_gate.path(),
+        create=functools.partial(_spawn_gate_create, app),
+        notify=functools.partial(_deliver_to_session, manager),
+        on_settle=lambda row: app["operators_v2"].spawn_settled(row),
+    )
+    app["spawn_gate"] = gate
+    app.on_startup.append(gate.start)
+    app.on_shutdown.append(gate.cancel)
     # workspace name -> the disk-usage measurement running for it (claunch-2oait)
     app["ws_usage_tasks"] = {}
     app["ws_sync_locks"] = {}
@@ -971,6 +985,14 @@ def build_app(
     r.add_post("/api/kill-requests/{rid}/approve", h_kill_request_approve)
     r.add_post("/api/kill-requests/{rid}/reject", h_kill_request_reject)
     r.add_post("/api/kill-requests/{rid}/withdraw", h_kill_request_withdraw)
+    # Requests for a session (claunch-iw5i8.15, :mod:`spawn_gate`): filed by
+    # the operator v2 agent routes, read and answered from the web UI's
+    # notification card -- approve, reject, +5 min, manual (spawn) or a new
+    # session instead (resume); the manual form links what it created.
+    r.add_get("/api/spawn-requests", h_spawn_requests_list)
+    r.add_get("/api/spawn-requests/{rid}", h_spawn_request_get)
+    for verb in spawn_gate_verbs():
+        r.add_post("/api/spawn-requests/{rid}/" + verb, h_spawn_request_settle)
     # The Workspaces page's Sync panel (claunch-tqm2e). Its pushes wait
     # behind the gate above like a session's do: the button files the card,
     # a person approves it, the panel's next call runs it.
@@ -7539,6 +7561,75 @@ async def h_kill_request_withdraw(request: web.Request) -> web.Response:
     if record is None:
         return json_error(409, "no pending kill request with that id")
     return json_response({"ok": True, "withdrawn": True, "request": record})
+
+
+def spawn_gate_verbs() -> Tuple[str, ...]:
+    """The answers ``POST /api/spawn-requests/{rid}/<verb>`` takes."""
+    return ("approve", "reject", "extend", "manual", "spawn", "created", "withdraw")
+
+
+class _GateRequest:
+    """What :func:`_create_session` reads off a request, for a create the
+    spawn gate makes with no HTTP request in hand (an approval by the clock,
+    or by a person's press on a different route): the app, and the actor --
+    the asking agent, which is who the session was created for."""
+
+    def __init__(self, app, asker: str) -> None:
+        self.app = app
+        self.headers = {actors.HEADER: actors.header_value(actors.AGENT, asker)}
+        self.match_info: dict = {}
+
+    def get(self, key, default=None):
+        return default
+
+
+async def _spawn_gate_create(app, spec: dict, asker: str, record: dict) -> Tuple[int, dict]:
+    """Create the session an approved spawn request asks for, through the
+    same path as the dashboard's New session form."""
+    return await _create_session(_GateRequest(app, asker), dict(spec))
+
+
+async def h_spawn_requests_list(request: web.Request) -> web.Response:
+    return json_response({"requests": request.app["spawn_gate"].list()})
+
+
+async def h_spawn_request_get(request: web.Request) -> web.Response:
+    record = request.app["spawn_gate"].get(request.match_info["rid"])
+    if record is None:
+        return json_error(404, "no spawn request with that id")
+    return json_response({"request": record})
+
+
+async def h_spawn_request_settle(request: web.Request) -> web.Response:
+    """One answer to a spawn request; the verb is the path's last part."""
+    gate: spawn_gate.SpawnGate = request.app["spawn_gate"]
+    rid = request.match_info["rid"]
+    verb = request.path.rsplit("/", 1)[-1]
+    # The answer is the person's: an agent (the asker or any other) that
+    # could approve, extend or reject would make the card decoration. Only
+    # the asker's withdrawal comes from an agent.
+    if verb != "withdraw" and actors.from_request(request).get("kind") == actors.AGENT:
+        return json_error(403, "a spawn request is answered by the person, not by an agent")
+    body = await _json_body(request)
+    try:
+        if verb == "approve":
+            record = await gate.approve(rid, decided_by="web")
+        elif verb == "reject":
+            record = gate.reject(rid, decided_by="web")
+        elif verb == "extend":
+            record = gate.extend(rid, decided_by="web")
+        elif verb == "manual":
+            record = gate.manual(rid, decided_by="web")
+        elif verb == "spawn":
+            record = gate.spawn_instead(rid, decided_by="web")
+        elif verb == "created":
+            record = gate.link(rid, str(body.get("session") or ""))
+        else:
+            record = gate.withdraw(rid, session=str(body.get("session") or ""))
+    except spawn_gate.GateRefused as exc:
+        return json_error(exc.status, str(exc))
+    ok = record.get("status") != spawn_gate.FAILED
+    return json_response({"ok": ok, "request": record})
 
 
 async def h_relay_meshes(request: web.Request) -> web.Response:

@@ -58,6 +58,36 @@ TOOLS = [
          "text": {"type": "string", "description": "the instruction, faithful to what the user said"},
          "on_behalf_of": {"type": "string", "description": "id from opv2_inbox"}},
          "required": ["target", "text", "on_behalf_of"]}},
+    {"name": "opv2_spawn",
+     "description": "Ask the user for a NEW session to do work that no running session in your scope is doing "
+                    "(check opv2_sessions first; a running session doing it gets opv2_dispatch instead). The "
+                    "request waits on a notification card for 5 minutes: the user approves, rejects, extends it or "
+                    "creates the session by hand; no answer counts as approval. The new session is top-level, in "
+                    "the project's default workspace on a fresh worktree, running improv-worker-v2. Returns at "
+                    "once; the outcome is typed into your terminal and posted to your feed.",
+     "inputSchema": {"type": "object", "properties": {
+         "project": {"type": "string", "description": "a project in your scope (omit when your scope is one project)"},
+         "task": {"type": "string", "description": "the new session's opening task, faithful to what the user said"},
+         "issue": {"type": "string", "description": "board issue the session takes (must be on a board in your scope)"},
+         "name": {"type": "string", "description": "session name; omit for a generated one"},
+         "reason": {"type": "string", "description": "why a new session: the user reads this on the card"},
+         "on_behalf_of": {"type": "string", "description": "id from opv2_inbox of the user message that asks for the work"}},
+         "required": ["task", "reason", "on_behalf_of"]}},
+    {"name": "opv2_resume",
+     "description": "Ask the user to resume an EXITED session of your scope that was doing this work. The request "
+                    "waits on a notification card for 5 minutes: the user resumes it, asks for a new session "
+                    "instead, rejects, or extends it. No answer means the session is NOT resumed and `fallback` is "
+                    "filed as an opv2_spawn request. Returns at once; the outcome is typed into your terminal.",
+     "inputSchema": {"type": "object", "properties": {
+         "target": {"type": "string", "description": "the exited session in your scope"},
+         "reason": {"type": "string", "description": "why this session: the user reads this on the card"},
+         "on_behalf_of": {"type": "string", "description": "id from opv2_inbox"},
+         "fallback": {"type": "object", "description": "the new session to ask for if the resume is not approved: "
+                                                       "task (required), project, issue, name as in opv2_spawn",
+                      "properties": {"task": {"type": "string"}, "project": {"type": "string"},
+                                     "issue": {"type": "string"}, "name": {"type": "string"}},
+                      "required": ["task"]}},
+         "required": ["target", "reason", "on_behalf_of", "fallback"]}},
     {"name": "opv2_history",
      "description": "Your own record, newest first: what you posted, asked and dispatched, and what the user told "
                     "you. Use it to answer 'what did you do about X'.",
@@ -133,6 +163,10 @@ def call_tool(name, args):
         return client.get(base + "/inbox")
     if name == "opv2_dispatch":
         return client.post(base + "/dispatch", pick("target", "text", "on_behalf_of"))
+    if name == "opv2_spawn":
+        return client.post(base + "/spawn", pick("project", "task", "issue", "name", "reason", "on_behalf_of"))
+    if name == "opv2_resume":
+        return client.post(base + "/resume", pick("target", "reason", "on_behalf_of", "fallback"))
     if name == "opv2_history":
         return client.get(base + "/history" + _query(args, ("kind", "session", "q", "limit")))
     if name == "opv2_sessions":
