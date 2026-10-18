@@ -9,8 +9,8 @@ delivery: always
 (`~/.claunch.yaml`)에 프로필·데몬 상태를 만든 사고가 반복됐다
 (claunch-49bod, claunch-edy0w, claunch-gziru). 남은 산출물은
 `profiles/play`, `profiles/work`, `profiles/codex2`, `daemons/{a,alpha,b,inst,other,x}`
-같은 디렉터리였고, 테스트는 그 상태에서도 통과했다. 테스트 실패로는 드러나지
-않으므로 아래 규칙을 테스트를 쓰고 돌리고 재현하는 모든 작업에 적용한다.
+같은 디렉터리였고, 테스트는 그 상태에서도 통과했다. 아래 규칙을 테스트를 쓰고
+돌리고 재현하는 모든 작업에 적용한다.
 
 ### 격리의 정본: `tests/conftest.py`
 - autouse fixture `home`이 테스트마다 `CLAUDE_LAUNCHER_HOME`,
@@ -21,6 +21,13 @@ delivery: always
 - `CLAUNCH_INSTANCE_BASE`가 남아 있으면 `paths.base_home()`이 런처 홈보다 그
   값을 먼저 쓰므로, 홈을 격리해도 `daemons/<name>`이 실제 홈에 생긴다
   (claunch-llmi1).
+- 같은 fixture가 실제 홈 목록(기본 런처 홈, 사용자 홈, pytest 시작 시점의
+  `CLAUDE_LAUNCHER_HOME`·`CLAUNCH_INSTANCE_BASE`·설정 파일 디렉터리)을
+  `CLAUNCH_TEST_REAL_HOMES`(`config.TEST_REAL_HOMES_ENV`)로 내보낸다. 이 값이
+  있는 동안 런처 홈이나 설정 파일이 그 경로로 해석되면 `config.RealHomeInTest`가 난다
+  (claunch-gziru, `tests/test_real_home_guard.py`). 이 오류는 격리가 풀렸다는
+  신호이므로 변수를 지우거나 예외를 삼켜 통과시키지 않고, 격리가 풀린 원인을
+  고친다. 이 가드는 런처 홈과 설정 파일 경로의 해석만 검사하므로, 아래 규칙은 가드와 별도로 지킨다.
 
 ### 규칙
 1. 테스트 파일에 `home`이라는 이름의 fixture를 새로 만들지 않는다. 같은 이름의
