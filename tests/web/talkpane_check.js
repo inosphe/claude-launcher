@@ -34,6 +34,7 @@ class N {
     this.dataset = {};
     this.handlers = {};
     this.attrs = {};
+    this.style = {setProperty() {}, removeProperty() {}};   // threads-pane.js sets --th-side-w
     this.value = "";
     this.disabled = false;
     this.open = false;

@@ -41,7 +41,15 @@
 
    Space (claunch-1n081): "◂ 목록" in the head folds the thread list away
    while a conversation is open, so the bubbles take the pane's whole
-   width; the fold is kept in localStorage (FOLD_KEY) for every session. */
+   width; the fold is kept in localStorage (FOLD_KEY) for every session.
+
+   Width (claunch-46lbf): the bar between the two halves (.th-split) is
+   #rail-split's mirror inside the pane. Dragging it sets the list column's
+   width (--th-side-w on .th-pane), applied live while the hand moves and
+   written down once at release (SIDE_W_KEY, every session); a double click
+   forgets it. With nothing stored the stylesheet's width holds (220px, 170px
+   beside the QA column). The bar is hidden while the pane has one half
+   (.th-solo, .th-folded) and on a phone. */
 globalThis.ThreadsPane = (() => {
   "use strict";
   const POLL_MS = 3000;
@@ -62,6 +70,9 @@ globalThis.ThreadsPane = (() => {
   const attached = new Map(); // thread id ("" = new thread) -> [{file, src}]: images waiting to be sent
   const drawn = {side: "", main: ""};   // what each half last drew
   const FOLD_KEY = "claunch_threadfold";  // localStorage: the list column is folded away
+  const SIDE_W_KEY = "claunch_threadsidew"; // localStorage: the list column's width in px
+  const SIDE_W_MIN = 140;    // narrower and every title is ellipsis
+  const MAIN_W_MIN = 240;    // the conversation keeps at least this much
 
   const node = (tag, cls, text) => {
     const n = document.createElement(tag);
@@ -250,6 +261,60 @@ globalThis.ThreadsPane = (() => {
 
   function saveFold(on) {
     try { localStorage.setItem(FOLD_KEY, on ? "1" : "0"); } catch { /* private mode */ }
+  }
+
+  /* ---- the list column's width (claunch-46lbf) ---- */
+
+  /* The list column's width, held between SIDE_W_MIN and what leaves the
+     conversation MAIN_W_MIN of a `room`px body (no ceiling while the body's
+     width is unknown). NaN in, NaN out: nothing stored means the stylesheet's. */
+  function clampSideW(px, room = 0) {
+    if (!Number.isFinite(px) || px <= 0) return NaN;
+    const max = room > 0 ? Math.max(SIDE_W_MIN, room - MAIN_W_MIN) : Infinity;
+    return Math.min(max, Math.max(SIDE_W_MIN, Math.round(px)));
+  }
+
+  function loadSideW() {
+    try { return clampSideW(Number(localStorage.getItem(SIDE_W_KEY))); } catch { return NaN; }
+  }
+
+  function saveSideW(px) {
+    try {
+      if (Number.isFinite(px)) localStorage.setItem(SIDE_W_KEY, String(px));
+      else localStorage.removeItem(SIDE_W_KEY);
+    } catch { /* private mode */ }
+  }
+
+  function applySideW(root, px) {
+    if (Number.isFinite(px)) root.style.setProperty("--th-side-w", `${px}px`);
+    else root.style.removeProperty("--th-side-w");
+  }
+
+  /* The bar's drag: the list's left edge stays put, the bar follows the hand. */
+  function wireSplit(root, bar) {
+    let dragW = null;   // non-null only mid-drag
+    bar.addEventListener("pointerdown", (e) => {
+      e.preventDefault();   // a drag must not start selecting list text
+      bar.setPointerCapture?.(e.pointerId);
+      bar.classList.add("dragging");
+      dragW = root.querySelector(".th-side").getBoundingClientRect().width;
+    });
+    bar.addEventListener("pointermove", (e) => {
+      if (dragW === null) return;
+      const side = root.querySelector(".th-side").getBoundingClientRect();
+      const room = root.querySelector(".th-body").getBoundingClientRect().width;
+      dragW = clampSideW(e.clientX - side.left, room);
+      applySideW(root, dragW);
+    });
+    const end = () => {
+      if (dragW === null) return;
+      bar.classList.remove("dragging");
+      saveSideW(dragW);
+      dragW = null;
+    };
+    bar.addEventListener("pointerup", end);
+    bar.addEventListener("pointercancel", end);
+    bar.addEventListener("dblclick", () => { saveSideW(NaN); applySideW(root, NaN); });
   }
 
   /* ---- talking to the daemon ---- */
@@ -743,9 +808,13 @@ globalThis.ThreadsPane = (() => {
     if (!root) {
       root = node("div", "th-pane");
       root.append(node("div", "th-head"), node("div", "th-body"));
-      root.lastChild.append(node("div", "th-side"), node("div", "th-main"));
+      const bar = node("div", "th-split");
+      bar.title = "끌어서 목록 폭을 바꿉니다 · 두 번 누르면 기본 폭";
+      root.lastChild.append(node("div", "th-side"), bar, node("div", "th-main"));
+      wireSplit(root, bar);
       host.replaceChildren(root);
     }
+    applySideW(root, loadSideW());
     // With no thread on screen there is no conversation to hold the right
     // half for: the list (and the new-thread form) takes the whole width.
     root.classList.toggle("th-solo", !convo);
@@ -861,5 +930,5 @@ globalThis.ThreadsPane = (() => {
   }
 
   return {mount, unmount, refresh: () => host && load(), select, focus, compose, excerpt, unseen, sendKey, newlineKey, pick, linkLabel, stamp,
-          imageKind, imageFiles, imageSrc, lastLine, FOLD_KEY};
+          imageKind, imageFiles, imageSrc, lastLine, clampSideW, FOLD_KEY, SIDE_W_KEY};
 })();
