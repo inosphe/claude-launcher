@@ -19,6 +19,11 @@
      - the daemon's event loop lag rides the pong and is named in the
        tooltip, so a busy daemon is told apart from a slow network
        (claunch-y9ax9);
+     - a socket that has echoed a ping and then leaves one unanswered past
+       CONTROL_PONG_DEADLINE_MS is taken for dead; one that never echoed
+       (a daemon older than the echo) is not; a wall-clock gap between two
+       ticks (the PC slept) asks at once and gives the answer
+       CONTROL_PROBE_MS (claunch-fm3ud);
      - the tooltip splits the last round trip: the time the ping spent in
        the daemon (the pong's `daemon_ms`), and through the tunnel the
        relay's round trip and what is left for browser <-> relay
@@ -69,6 +74,8 @@ function build({ base = "/" } = {}) {
     up: true,
     said: [],
     relayBadges: [],
+    recycled: [],
+    wall: 5000000,
     badge,
   };
   const code = [
@@ -84,7 +91,19 @@ function build({ base = "/" } = {}) {
     "let latencyRelay = null;",
     "let latencyLoop = null;",
     "let latencyDaemon = null;",
+    "let latencyVia = null;",
+    constOf("CONTROL_PONG_DEADLINE_MS"),
+    constOf("CONTROL_PROBE_MS"),
+    constOf("CONTROL_WAKE_GAP_MS"),
+    "let latencyEchoed = false;",
+    "let controlProbeBy = null;",
+    "let latencyWallAt = null;",
     "function latencyNow() { return S.clock; }",
+    // Closing the socket is the control socket's machine
+    // (controlsocket_check.js); here it is the verdict that counts.
+    "function controlRecycle(why) { S.recycled.push(why); }",
+    slice("controlOverdue"),
+    slice("controlProbeArm"),
     slice("latencyStart"),
     slice("latencyStop"),
     slice("latencyTick"),
@@ -101,7 +120,7 @@ function build({ base = "/" } = {}) {
   ].join("\n");
   const make = new Function(
     "S", "$", "BASE", "controlUp", "controlSay", "renderRelayBadge",
-    "setInterval", "clearInterval", code
+    "setInterval", "clearInterval", "Date", code
   );
   Object.assign(scope, make(
     scope,
@@ -111,7 +130,8 @@ function build({ base = "/" } = {}) {
     (frame) => { if (!scope.up) return false; scope.said.push(frame); return true; },
     (relay) => scope.relayBadges.push(relay),
     () => 1,
-    () => {}
+    () => {},
+    { now: () => scope.wall }
   ));
   return scope;
 }
@@ -337,6 +357,77 @@ function tunnelSides() {
   assert.doesNotMatch(direct.badge.title, /badge: web =/);
 }
 
+/* ---- a socket open with nothing behind it (claunch-fm3ud) -------------- */
+function deadSocketIsRecycled() {
+  const app = build();
+  app.latencyStart();
+  app.latencyPong({ type: "pong", t: 1000 });          // it echoes: a new daemon
+  app.clock += 5000; app.wall += 5000;
+  app.latencyTick();                                    // the next ping goes
+  assert.strictEqual(pings(app).length, 2);
+  for (let i = 0; i < 19; i++) { app.clock += 1000; app.wall += 1000; app.latencyTick(); }
+  assert.deepStrictEqual(app.recycled, [], "19s unanswered: not yet");
+  app.clock += 1000; app.wall += 1000;
+  app.latencyTick();
+  assert.strictEqual(app.recycled.length, 1, "20s unanswered: taken for dead");
+  assert.match(app.recycled[0], /ping unanswered for 20s/);
+}
+
+function oldDaemonIsNotRecycled() {
+  const app = build();
+  app.latencyStart();
+  app.latencyPong({ type: "pong" });                    // bare: predates the echo
+  for (let i = 0; i < 120; i++) { app.clock += 1000; app.wall += 1000; app.latencyTick(); }
+  assert.deepStrictEqual(app.recycled, [], "a daemon that never echoes is not judged");
+  // A wall-clock gap arms nothing either.
+  app.wall += 60000;
+  app.latencyTick();
+  app.clock += 10000;
+  app.latencyTick();
+  assert.deepStrictEqual(app.recycled, []);
+}
+
+function wakeGapProbes() {
+  const app = build();
+  app.latencyStart();
+  app.latencyPong({ type: "pong", t: 1000 });
+  app.clock += 1000; app.wall += 1000;
+  app.latencyTick();
+  assert.strictEqual(pings(app).length, 1, "within the interval: no ping");
+  // The machine slept: the wall clock jumped, the page clock barely moved.
+  app.wall += 3600 * 1000;
+  app.clock += 1000;
+  app.latencyTick();
+  assert.strictEqual(pings(app).length, 2, "a gap sends a ping at once");
+  app.clock += 4000; app.wall += 4000;
+  app.latencyTick();
+  assert.deepStrictEqual(app.recycled, [], "4s: still waiting");
+  app.clock += 1000; app.wall += 1000;
+  app.latencyTick();
+  assert.strictEqual(app.recycled.length, 1, "5s with no pong after waking: dead");
+  assert.match(app.recycled[0], /of waking/);
+
+  // The same gap on a socket that answers keeps it.
+  const ok = build();
+  ok.latencyStart();
+  ok.latencyPong({ type: "pong", t: 1000 });
+  ok.wall += 3600 * 1000;
+  ok.clock += 1000;
+  ok.latencyTick();
+  ok.clock += 200;
+  ok.latencyPong({ type: "pong", t: pings(ok)[1].t });
+  for (let i = 0; i < 10; i++) { ok.clock += 1000; ok.wall += 1000; ok.latencyTick(); }
+  assert.deepStrictEqual(ok.recycled, [], "answered: the probe is spent");
+
+  // A short gap -- the browser's own throttling of a busy page -- is not one.
+  const short = build();
+  short.latencyStart();
+  short.latencyPong({ type: "pong", t: 1000 });
+  short.wall += 3000; short.clock += 1000;
+  short.latencyTick();
+  assert.strictEqual(pings(short).length, 1, "a 3s gap asks nothing");
+}
+
 function formats() {
   const app = build();
   assert.strictEqual(app.fmtLatency(null), "—");
@@ -353,5 +444,8 @@ socketDown();
 loopLag();
 splitOfTheRoundTrip();
 tunnelSides();
+deadSocketIsRecycled();
+oldDaemonIsNotRecycled();
+wakeGapProbes();
 formats();
 console.log("latency_check ok");

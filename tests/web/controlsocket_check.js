@@ -24,7 +24,11 @@
      - the retry never gives up, because nobody is looking at this connection
        and the whole tick rides it;
      - a read that is never answered times out rather than stalling the tick;
-     - liveness is answered from the socket only while it is open.
+     - liveness is answered from the socket only while it is open, and the
+       HTTP probe that answers otherwise gives up after HEALTH_TIMEOUT_MS;
+     - a socket taken for dead (its ping deadline, claunch-fm3ud) is closed
+       from this side and handled as if it had closed itself; a wake-up
+       reopens a closed socket at once instead of after its backoff.
 
    The real functions are sliced out of the shipped app.js and driven against
    a stub WebSocket, so what is tested is the page's own machine. */
@@ -149,7 +153,14 @@ function build() {
     slice("channelBinary"),
     slice("channelFrame"),
     slice("channelsCarrierGone"),
+    `const HEALTH_TIMEOUT_MS = ${constOf("HEALTH_TIMEOUT_MS")};`,
     slice("daemonHealth"),
+    slice("controlRecycle"),
+    slice("controlProbe"),
+    // The ping half (the deadline, the probe's ping) is latency_check.js's.
+    "let probesArmed = 0;",
+    "function controlProbeArm() { probesArmed++; }",
+    "function latencyTick() {}",
     // The socket's open/close/pong also drive the latency badge
     // (claunch-8ufey). Stubbed so the frames counted here are the reads';
     // latency_check.js exercises that machine.
@@ -157,7 +168,8 @@ function build() {
     "function latencyStop() {}",
     "function latencyPong() {}",
     "return { controlUp, openControlSocket, ensureControlSocket, controlRead,"
-    + " controlSay, daemonHealth, waiting: () => controlWaiting.size,"
+    + " controlSay, daemonHealth, controlRecycle, controlProbe,"
+    + " armed: () => probesArmed, waiting: () => controlWaiting.size,"
     + " get sock() { return controlSock; } };",
   ].join("\n");
 
@@ -166,7 +178,11 @@ function build() {
   );
   Object.assign(scope, make(
     FakeWebSocket, scope.url, scope.location, scope.setTimeout, scope.clearTimeout,
-    async () => { scope.probed = (scope.probed || 0) + 1; throw new Error("no http"); }
+    async (u, opts) => {
+      scope.probed = (scope.probed || 0) + 1;
+      if (scope.fetch) return scope.fetch(u, opts);
+      throw new Error("no http");
+    }
   ));
   return scope;
 }
@@ -519,6 +535,88 @@ async function readsInParts() {
   assert.strictEqual(app.waiting(), 0);
 }
 
+/* ---- 10. a socket open with nothing behind it (claunch-fm3ud) ---------- */
+async function deadSocketIsRecycled() {
+  const app = build();
+  app.ensureControlSocket();
+  const sock = app.sockets[0];
+  sock.opened();
+  const reading = app.controlRead(["/api/sessions"]);
+  // A dead socket's close() never reaches onclose: the page must not wait
+  // for it.
+  sock.close = function () { this.closedByPage = true; };
+  app.controlRecycle("ping unanswered for 20s");
+  await assert.rejects(reading, /control socket closed/, "its read is handed back");
+  assert.strictEqual(sock.closedByPage, true, "closed from this side");
+  assert.strictEqual(sock.onclose, null, "and its late close is not heard");
+  assert.strictEqual(sock.onmessage, null);
+  assert.strictEqual(app.controlUp(), false);
+  assert.strictEqual(app.sock, null);
+  const backoff = JSON.parse(constOf("CONTROL_BACKOFF").replace(/\s+/g, ""));
+  assert.deepStrictEqual(app.pending().map((t) => t.ms), [backoff[0]],
+    "the reopen is scheduled like any close");
+  app.run();
+  assert.strictEqual(app.sockets.length, 2, "a new socket");
+  // Recycling with nothing open does nothing.
+  const none = build();
+  none.controlRecycle("x");
+  assert.strictEqual(none.sockets.length, 0);
+}
+
+async function wakeReopensAtOnce() {
+  const app = build();
+  app.ensureControlSocket();
+  app.sockets[0].opened();
+  // Several failures deep: the next try is seconds away.
+  for (let i = 0; i < 4; i++) {
+    app.sockets.at(-1).died();
+    app.run();
+  }
+  app.sockets.at(-1).died();
+  const before = app.sockets.length;
+  assert.ok(app.pending().length === 1 && app.pending()[0].ms > 1000, "waiting out a backoff");
+  app.controlProbe();
+  assert.strictEqual(app.sockets.length, before + 1, "woken: opened now");
+  assert.strictEqual(app.pending().length, 0, "the backoff wait is dropped");
+
+  // Still opening: its own open or close decides.
+  app.controlProbe();
+  assert.strictEqual(app.sockets.length, before + 1);
+  assert.strictEqual(app.armed(), 0);
+
+  // Open: the probe ping is armed instead.
+  app.sockets.at(-1).opened();
+  app.controlProbe();
+  assert.strictEqual(app.armed(), 1);
+  assert.strictEqual(app.sockets.length, before + 1, "an open socket is not replaced");
+
+  // Before boot ever opened one, a wake-up opens nothing.
+  const fresh = build();
+  fresh.controlProbe();
+  assert.strictEqual(fresh.sockets.length, 0);
+}
+
+async function healthProbeIsBounded() {
+  const app = build();
+  let signal = null;
+  app.fetch = (u, opts) => new Promise((resolve, reject) => {
+    signal = opts && opts.signal;
+    if (signal) signal.addEventListener("abort", () => reject(new Error("aborted")));
+  });
+  const asking = app.daemonHealth();
+  assert.ok(signal, "the probe carries an abort signal");
+  const limit = app.pending().find((t) => t.ms === Number(constOf("HEALTH_TIMEOUT_MS")));
+  assert.ok(limit, "and a timer to fire it");
+  app.run();
+  assert.strictEqual(await asking, null, "a hung probe answers 'down'");
+
+  // An answered probe clears its timer.
+  const ok = build();
+  ok.fetch = async () => ({ ok: true, json: async () => ({ ok: true, boot_id: "b" }) });
+  assert.deepStrictEqual(await ok.daemonHealth(), { ok: true, boot_id: "b" });
+  assert.strictEqual(ok.pending().length, 0, "nothing left armed");
+}
+
 (async () => {
   await readsRideTheSocket();
   await readsInParts();
@@ -529,6 +627,9 @@ async function readsInParts() {
   await reportsAndPings();
   await livenessComesFromTheSocket();
   await flushPrefersSocketThenFallsBack();
+  await deadSocketIsRecycled();
+  await wakeReopensAtOnce();
+  await healthProbeIsBounded();
   console.log("controlsocket_check ok");
 })().catch((err) => {
   console.error(err && err.stack ? err.stack : err);
