@@ -156,9 +156,12 @@ steps:
         beads comments add <그 id> "DECLINED: user-direct <새 id> took
         precedence"`를 남긴다(리더가 재배정한다) — 판단 없이 기계적으로.
         어느 쪽이든 마지막에 `claunch beads update <id> --status in_progress
-        --external-ref <run id>` — 이 전이가 회차의 시작이고, id는 intake
+        --external-ref <run id>/<id>` — 이 전이가 회차의 시작이고, id는 intake
         fyi에 함께 실린다. 전이하는 것은 주 이슈 하나다 — 큐의 나머지는
-        아래 큐 항목이 다룬다.
+        아래 큐 항목이 다룬다. external-ref는 보드에서 이슈마다 유일해야
+        하고 한 런은 이슈를 여럿 잡으므로(회차 재진입, 배치의 둘째 이후
+        일감) run id만 쓰지 않고 `<run id>/<id>`로 쓴다 — run id만 쓰면
+        같은 런의 둘째 이슈에서 보드가 거절한다(claunch-7r1qr.1).
         어느 경로에도 해당하지 않아 이슈가 서지 않았으면 여기서
         지어내지 않는다 — 그 사실과 사유만 보고에 적고, 판정과 처리는
         다음 단계(일감 확인)가 맡는다. 사유는 추측이 아니라
@@ -260,7 +263,7 @@ steps:
       않는다). staged 순서: description이 먼저, --assignee가 마지막.
       상태 전이의 주인: open→in_ready는 리더(규격·우선순위 검토 완료) /
       open 또는 in_ready→in_progress는 assignee 워커(intake 끝,
-      --external-ref에 run id; 터미널 사용자 직접 지시는 open에서 시작할 수 있음) /
+      --external-ref에 `<run id>/<이슈 id>`; 터미널 사용자 직접 지시는 open에서 시작할 수 있음) /
       in_ready→open은 리더(규격·우선순위 재검토 필요) /
       in_progress→in_review는 assignee 워커
       (landing request) / in_review→in_progress는 리더(rebase·재측정 재요청)
@@ -283,7 +286,7 @@ steps:
       assignee·첫 라벨·코멘트 마커를 센 뒤 말한다(기본 행 제한 50은 판정
       근거가 아니다).
       살아 있는 일감: assignee가 살아 있는 세션이고 intake에서 in_progress
-      전이(external-ref에 run id)를 한 것 / 리더가 배정·보류를 코멘트로
+      전이(external-ref에 `<run id>/<이슈 id>`)를 한 것 / 리더가 배정·보류를 코멘트로
       남긴 것 / 위 우선순위 절의 P1에 맞는 것.
       정리 대상은 셋이고 판정은 개별이다 — 여럿을 한 번에 닫는 일괄 변경은
       없다:
@@ -445,7 +448,7 @@ steps:
       고른 이슈는 여기서 바로 잡는다 — 판정은 데몬 adoption과 같은
       규칙이다: assignee가 비었거나 그 세션이 종료됐으면 `claunch beads
       update <id> --assignee $CLAUNCH_SESSION`으로 잡고 이어서 `claunch
-      beads update <id> --status in_progress --external-ref <run id>`,
+      beads update <id> --status in_progress --external-ref <run id>/<id>`,
       살아 있는 세션이 붙잡고 있으면 assignee와 상태를 손대지 않고
       `claunch beads comments add <id> "JOINED: $CLAUNCH_SESSION — <이번
       목표 요지>"`로 참가만 한다.
@@ -547,7 +550,7 @@ steps:
 
       assignee가 비었거나 그 세션이 종료됐으면 `claunch beads update <id>
       --assignee $CLAUNCH_SESSION`으로 잡고, 이어서 `claunch beads update
-      <id> --status in_progress --external-ref <run id>` — intake가 말하는
+      <id> --status in_progress --external-ref <run id>/<id>` — intake가 말하는
       회차 시작 전이가 이 자리로 미뤄진 것이다.
       살아 있는 세션이 붙잡고 있으면 assignee를 손대지 않고 참가만 한다:
       `claunch beads comments add <id> "JOINED: $CLAUNCH_SESSION — <이번 목표
@@ -573,7 +576,7 @@ steps:
       leader). staged 순서는 description이 먼저, --assignee
       $CLAUNCH_SESSION이 마지막.
       만든 뒤 `claunch beads update <id> --status in_progress --external-ref
-      <run id>`로 회차를 시작 상태로 만든다.
+      <run id>/<id>`로 회차를 시작 상태로 만든다.
       메시에 속해 있으면 목표 요지를 이슈 id와 함께 상위 세션(부모, 부모가
       없으면 리더)에게 fyi로 남긴다(intake에서 미뤄 둔 그 fyi다).
     done_when: |
@@ -1496,7 +1499,7 @@ steps:
       순서(priority 오름차순 → created_at)이고, 그 첫 것을 `claunch beads
       show <id> --json`으로 읽는다 — 본문이 목표이고, 비었거나 자리표시
       절뿐이면 intake의 규칙대로 규격을 채운다. 그리고 `claunch beads
-      update <id> --status in_progress --external-ref <run id>` — 이
+      update <id> --status in_progress --external-ref <run id>/<id>` — 이
       전이가 이 일감의 시작이다.
       보고에 남길 것: 일감 id·제목, 이 배치에서의 순번(n번째 / 지금까지
       실린 id 목록), 범위, 완료 증거 기준. 브랜치는 그대로다 — 새 브랜치를
@@ -1504,7 +1507,7 @@ steps:
       같은 파일·같은 규칙에 닿는 일감이 앞 일감과 충돌하는 결정을
       요구하면 혼자 정하지 말고 리더에게 묻는다(work의 규칙 그대로).
     done_when: |
-      다음 일감의 id가 in_progress로 전이됐고(--external-ref에 run id),
+      다음 일감의 id가 in_progress로 전이됐고(--external-ref에 `<run id>/<id>`),
       배치 순번·범위·완료 증거 기준이 보고에 있다.
     next: work
 
@@ -3179,7 +3182,7 @@ steps:
         (1) 회차 이슈: `claunch beads create "stack round: <자식 이슈
             id들>" --priority 2 --labels handoff --parent <스택을 연 회차
             이슈> --description "<규격>"` 후 `update <id> --assignee
-            $CLAUNCH_SESSION --status in_progress --external-ref <run id>`.
+            $CLAUNCH_SESSION --status in_progress --external-ref <run id>/<id>`.
             이 이슈가 착지 요청의 주 이슈이고 `CUT` 코멘트가 붙는 자리다.
         (2) 회차 브랜치: master에서 `<세션>-stack-round-<n>`을 자른다
             (intake의 branch-setup과 같은 규칙).

@@ -595,7 +595,7 @@ def test_the_worker_loops_over_its_queue_before_it_lands(layer):
     item = wf.steps["item-intake"]
     assert item.next == "work"
     text = " ".join(item.instructions.split())
-    assert "--status in_progress --external-ref <run id>" in text
+    assert "--status in_progress --external-ref <run id>/<id>`" in text
     assert "새 브랜치를 만들지 않고" in text            # one branch per batch
     # intake reads the queue but transitions only the primary issue
     intake = " ".join(wf.steps["intake"].instructions.split())

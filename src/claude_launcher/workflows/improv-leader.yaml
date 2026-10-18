@@ -205,7 +205,7 @@ steps:
       않는다). staged 순서: description이 먼저, --assignee가 마지막.
       상태 전이의 주인: open→in_ready는 리더(규격·우선순위 검토 완료) /
       open 또는 in_ready→in_progress는 assignee 워커(intake 끝,
-      --external-ref에 run id; 터미널 사용자 직접 지시는 open에서 시작할 수 있음) /
+      --external-ref에 `<run id>/<이슈 id>`; 터미널 사용자 직접 지시는 open에서 시작할 수 있음) /
       in_ready→open은 리더(규격·우선순위 재검토 필요) /
       in_progress→in_review는 assignee 워커
       (landing request) / in_review→in_progress는 리더(rebase·재측정 재요청)
@@ -228,7 +228,7 @@ steps:
       assignee·첫 라벨·코멘트 마커를 센 뒤 말한다(기본 행 제한 50은 판정
       근거가 아니다).
       살아 있는 일감: assignee가 살아 있는 세션이고 intake에서 in_progress
-      전이(external-ref에 run id)를 한 것 / 리더가 배정·보류를 코멘트로
+      전이(external-ref에 `<run id>/<이슈 id>`)를 한 것 / 리더가 배정·보류를 코멘트로
       남긴 것 / 위 우선순위 절의 P1에 맞는 것.
       정리 대상은 셋이고 판정은 개별이다 — 여럿을 한 번에 닫는 일괄 변경은
       없다:
