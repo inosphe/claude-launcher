@@ -47378,6 +47378,7 @@ function gateHide(type, rid) {
 
 function gateUnhide(type, rid) {
   gateHiddenIds.delete(`${type}:${rid}`);
+  if (noticePanelOpen()) gateShownInPanel.add(`${type}:${rid}`);
   noticeSave(NOTICE_HIDDEN_KEY, [...gateHiddenIds]);
   const entry = gateHistoryEntry(type, String(rid));
   if (entry) {
@@ -47457,12 +47458,40 @@ function noticePanelToggle(force) {
   panel.classList.toggle("hidden", !open);
   // While the panel is open the corner strip is hidden: the panel already
   // lists every notice and every waiting request with its buttons, so a card
-  // over it says the same thing twice (claunch-k2khb). Cards that were up
-  // before it opened, gate cards above all, come back when it closes.
+  // over it says the same thing twice (claunch-k2khb). Opening and closing it
+  // also put every card away for good (claunch-paqfs): the panel is where
+  // they were read, so closing it does not bring them back.
   const strip = $("notices");
   if (strip) strip.classList.toggle("panel-open", open);
+  if (open) gateShownInPanel.clear();
+  noticeHideAll(open);
   if (open) noticePanelPaint();
   noticeBellPaint();
+}
+
+/* Requests whose card was put back with the panel's "Show card" while the
+   panel was open: closing the panel leaves those cards up. */
+const gateShownInPanel = new Set();
+
+/* Puts the cards in the corner away (claunch-paqfs). A waiting request is
+   hidden the way its Hide press hides it: the request stays open on the
+   daemon with its deadline running, the bell keeps counting it and the
+   panel's "Show card" puts it back. On opening, every card goes, notices
+   too (their history rows stay). On closing, the requests that came in
+   while the panel was open are hidden as well, since their cards were drawn
+   into the hidden strip; a card put back with "Show card" stays. */
+function noticeHideAll(opening) {
+  for (const type of Object.keys(gatePending)) {
+    let hid = false;
+    for (const rec of gatePending[type]) {
+      const rid = String(rec.id);
+      if (gateIsHidden(type, rid) || gateShownInPanel.has(`${type}:${rid}`)) continue;
+      gateHide(type, rid);
+      hid = true;
+    }
+    if (hid) noticeGateRefresh(type);
+  }
+  if (opening) for (const key of [...notices.keys()]) dismissNotice(key);
 }
 
 function noticeStamp(ms) {
