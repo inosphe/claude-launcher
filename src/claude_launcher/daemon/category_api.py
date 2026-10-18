@@ -199,11 +199,13 @@ def install(app):
 
         job, places = await asyncio.to_thread(read)
         from .. import spawn as spawn_mod
+        from .session import session_category
         return {"workspace": ws.name, "session": name, "places": places, "job": job,
-                "mode": "fork" if spawn_mod.can_fork(session.sdef.to_dict()) else "inplace"}
+                "mode": "fork" if spawn_mod.can_fork(session.sdef.to_dict()) else "inplace",
+                "life": session_category(session)}
 
     async def session_assign(request, body):
-        return await assign_mod.start(request, request.match_info["name"])
+        return await assign_mod.start(request, request.match_info["name"], body)
 
     r = app.router
     r.add_get("/api/sessions/{name}/category", route(session_view))

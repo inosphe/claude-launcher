@@ -18,7 +18,7 @@ function categoryNode(tag, text, cls) {
 async function categoryRequest(path, method = "GET", body) {
   const response = await api(path, {method, ...(body ? {headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)} : {})});
   const result = await response.json().catch(() => ({}));
-  if (!response.ok) throw Error(result.error || `HTTP ${response.status}`);
+  if (!response.ok) throw Object.assign(Error(result.error || `HTTP ${response.status}`), {status: response.status, body: result});
   return result;
 }
 
@@ -404,10 +404,21 @@ function makeCategoryPane({root, session}) {
     clearTimeout(timer);
     timer = setTimeout(load, running() ? 3000 : 15000);
   }
+  // A held session is woken by the daemon on its own; any other ended one
+  // (killed, paused, ...) comes back only after the person says yes here.
+  // Ending it again afterwards is the person's call.
   async function assign() {
     if (busy) return;
     busy = true; error = ""; render();
-    try { await categoryRequest(base + "/assign", "POST"); }
+    try {
+      try { await categoryRequest(base + "/assign", "POST"); }
+      catch (exc) {
+        if (!exc.body?.needs_wake) throw exc;
+        const life = exc.body.life || "killed";
+        if (!globalThis.confirm(`${session}은(는) 종료된(${life}) 세션입니다. 깨워서 트리에 배정할까요?\n배정이 끝난 뒤 세션을 다시 종료하는 것은 직접 해야 합니다.`)) return;
+        await categoryRequest(base + "/assign", "POST", {wake: true});
+      }
+    }
     catch (exc) { error = exc.message; }
     finally { busy = false; await load(); }
   }
@@ -435,6 +446,10 @@ function makeCategoryPane({root, session}) {
     }
     shell.append(list);
     const job = view.job;
+    const ended = view.life && view.life !== "running";
+    if (ended) shell.append(node("p", view.life === "hold"
+      ? "hold 상태의 세션입니다. 배정을 누르면 세션을 깨워서 진행합니다."
+      : `종료된(${view.life}) 세션입니다. 배정을 누르면 세션을 다시 깨울지 먼저 묻습니다.`, "category-muted"));
     const how = view.mode === "fork"
       ? "이 세션을 quick-fork해서 배정하고, 결과를 이 세션에 merge합니다."
       : "이 하네스는 quick-fork를 지원하지 않아 이 세션에서 직접 배정합니다.";
