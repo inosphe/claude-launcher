@@ -667,6 +667,34 @@ let latencyLoop = null;       // the daemon event loop's lag, same pong (claunch
 let latencyDaemon = null;     // ms the last ping spent inside the daemon (claunch-iss86)
 let latencyVia = null;        // "p2p" when the last pong came over a DataChannel (claunch-mhzt4)
 
+/* ---- a socket that is open and carries nothing (claunch-fm3ud) ----
+
+   After the PC sleeps the control socket can come back OPEN with nothing on
+   the other end: the daemon's heartbeat closed its side while the machine
+   was asleep, or a hop on the way (the WSL localhost relay, the tunnel)
+   dropped the connection without telling the browser. No close event ever
+   arrives, so everything that waits for one waits forever: daemonHealth
+   reads the open socket as "up", every read sits out its timeout before
+   falling back to HTTP, and the terminals riding it as channels never get
+   the 1006 that would reattach them. Only a reload got the page back.
+
+   The ping above is the evidence. A socket that has echoed a ping before
+   and now leaves one unanswered past CONTROL_PONG_DEADLINE_MS is closed
+   here, as if it had closed itself (controlClosed: reads to HTTP, terminals
+   reattach, the socket reopens). The moments a sleep ends -- the page shown
+   again, focus, the network back, a page restored, or this ticker finding a
+   wall-clock gap no one-second interval leaves -- send a ping at once and
+   give it CONTROL_PROBE_MS, so the page moves on within seconds of waking
+   instead of a deadline later. A daemon that predates the echo never
+   answers a ping, so neither rule applies to a socket that has not echoed
+   one. */
+const CONTROL_PONG_DEADLINE_MS = 20000;
+const CONTROL_PROBE_MS = 5000;
+const CONTROL_WAKE_GAP_MS = 15000;
+let latencyEchoed = false;    // this socket has answered a ping with its echo
+let controlProbeBy = null;    // latencyNow() by which a wake probe must be answered
+let latencyWallAt = null;     // Date.now() of the last tick, for the gap check
+
 function latencyNow() {
   return (typeof performance !== "undefined" && performance.now)
     ? performance.now() : Date.now();
@@ -678,6 +706,9 @@ function latencyStart() {
   latencyLastPing = -Infinity;
   latencySamples = [];
   latencyVia = null;
+  latencyEchoed = false;
+  controlProbeBy = null;
+  latencyWallAt = null;
   latencyTick();
   latencyTimer = setInterval(latencyTick, LATENCY_TICK_MS);
 }
@@ -693,6 +724,14 @@ function latencyStop() {
    and repaint, so an unanswered ping's age climbs on screen. */
 function latencyTick() {
   const now = latencyNow();
+  const why = controlOverdue(now);
+  if (why) { controlRecycle(why); return; }
+  // A gap no one-second interval leaves: the machine slept, or the tab was
+  // frozen. Ask the socket whether it is still there.
+  const wall = Date.now();
+  const gap = latencyWallAt !== null && wall - latencyWallAt >= CONTROL_WAKE_GAP_MS;
+  latencyWallAt = wall;
+  if (gap) controlProbeArm();
   if (latencySentAt === null && now - latencyLastPing >= LATENCY_PING_MS) {
     if (controlSay({ type: "ping", t: now })) {
       latencySentAt = now;
@@ -708,6 +747,8 @@ function latencyPong(msg) {
   // replaced.
   if (typeof msg.t !== "number" || msg.t !== latencySentAt) return;
   latencySentAt = null;
+  latencyEchoed = true;
+  controlProbeBy = null;
   latencySamples.push(latencyNow() - msg.t);
   if (latencySamples.length > LATENCY_KEEP) latencySamples.shift();
   if (msg.relay) {
@@ -718,6 +759,69 @@ function latencyPong(msg) {
   latencyDaemon = typeof msg.daemon_ms === "number" ? msg.daemon_ms : null;
   latencyVia = msg.via === "p2p" ? "p2p" : null;
   renderLatencyBadge();
+}
+
+/* Why the open socket is to be taken for dead, or null while it is not. */
+function controlOverdue(now) {
+  if (!latencyEchoed) return null;
+  if (controlProbeBy !== null && now >= controlProbeBy) {
+    return "no pong within " + CONTROL_PROBE_MS / 1000 + "s of waking";
+  }
+  if (latencySentAt !== null && now - latencySentAt >= CONTROL_PONG_DEADLINE_MS) {
+    return "ping unanswered for " + CONTROL_PONG_DEADLINE_MS / 1000 + "s";
+  }
+  return null;
+}
+
+/* Close the control socket from this side and run what its own close would
+   have run. Its handlers come off first: a dead socket's close handshake
+   may end in a close event much later, or never, and the page has moved on
+   by then. */
+function controlRecycle(why) {
+  const sock = controlSock;
+  if (!sock) return;
+  console.info("claunch: control socket taken for dead (" + why + "); reopening");
+  sock.onopen = null;
+  sock.onmessage = null;
+  sock.onclose = null;
+  try { sock.close(); } catch { /* already closed */ }
+  controlClosed(sock);
+}
+
+/* Arm the wake probe: a ping goes out now (or the one in flight counts) and
+   has CONTROL_PROBE_MS to come back. */
+function controlProbeArm() {
+  if (!latencyEchoed || controlProbeBy !== null) return;
+  controlProbeBy = latencyNow() + CONTROL_PROBE_MS;
+  latencyLastPing = -Infinity;
+}
+
+/* A moment a sleep may just have ended. An open socket is asked at once;
+   a closed one waiting out its backoff is reopened now, since what it was
+   waiting for -- the network, the machine -- is likeliest back at this
+   moment. A socket still opening is left to its own open or close. */
+function controlProbe() {
+  if (!controlSock) {
+    if (controlTimer) {
+      controlTry = 0;
+      openControlSocket();
+    }
+    return;
+  }
+  if (!controlUp()) return;
+  controlProbeArm();
+  latencyTick();
+}
+
+if (typeof window !== "undefined" && typeof document !== "undefined") {
+  window.addEventListener("focus", () => controlProbe());
+  window.addEventListener("online", () => controlProbe());
+  window.addEventListener("pageshow", () => controlProbe());
+  // Page Lifecycle: a frozen tab thawing (Chrome).
+  document.addEventListener("resume", () => controlProbe());
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) controlProbe();
+  });
 }
 
 /* Where the last round trip went (claunch-iss86). The daemon says how long
@@ -15273,22 +15377,32 @@ function syncLinkChip() {
    from "back, and it does not know me any more". A refused WebSocket upgrade
    cannot tell them apart either — the browser reports a 401 upgrade as a
    plain close with no status at all. */
+const HEALTH_TIMEOUT_MS = 10000;
 async function daemonHealth() {
   // An open control socket has already answered this. It was opened against
-  // this daemon, the daemon has not closed it, and its heartbeat is what
-  // notices when the daemon stops -- so probing over HTTP would spend a
+  // this daemon, the daemon has not closed it, and its ping deadline
+  // (controlOverdue) closes it when it stops answering -- so probing over
+  // HTTP would spend a
   // connection to learn what the page is already holding.
   if (controlUp()) return { ok: true, via: "control" };
+  // Bounded: pollTick runs one of these at a time, so a request that hangs
+  // -- one sent as the machine went to sleep, say -- would hold every later
+  // tick behind it (claunch-fm3ud).
+  const abort = typeof AbortController === "function" ? new AbortController() : null;
+  const timer = abort ? setTimeout(() => abort.abort(), HEALTH_TIMEOUT_MS) : null;
   try {
     // Deliberately outside the budget below. It is the probe the recovery
     // path leans on, and one of it is in flight at a time: putting it behind
     // a queue of ordinary reads would make "is the daemon back" wait for
     // requests that are failing because it is not.
-    const resp = await fetch(url("/api/health"), { cache: "no-store" });
+    const resp = await fetch(url("/api/health"),
+      { cache: "no-store", signal: abort ? abort.signal : undefined });
     if (!resp.ok) return null;
     return await resp.json();
   } catch {
     return null;
+  } finally {
+    if (timer !== null) clearTimeout(timer);
   }
 }
 
