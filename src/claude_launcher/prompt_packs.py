@@ -47,7 +47,9 @@ any pack, so a workspace can edit its text.
 A workspace copy whose header says ``delivery: always`` (:data:`ALWAYS`) is
 the workspace's own prompt: every session created in that workspace gets it,
 on every creation path (the create form, ``claunch new-session``, a spawn),
-whatever was ticked and whatever the role (:func:`always_packs`). Only the
+whatever was ticked and whatever the role (:func:`always_packs`), unless
+the request turns it off (``workspace_prompt: false``, :func:`always_wanted`;
+the create form's box starts ticked). Only the
 workspace's copy counts -- claunch's own copy of a pack never makes it
 always, because "every session here" is a decision a workspace makes about
 itself. An on-demand pack is never in an opening, so on-demand wins over
@@ -95,6 +97,8 @@ OPENING = "opening"
 ON_DEMAND = "on-demand"
 ALWAYS = "always"
 _DELIVERIES = (OPENING, ON_DEMAND, ALWAYS)
+#: The create/spawn request key that leaves the workspace's own prompt out.
+WORKSPACE_PROMPT_KEY = "workspace_prompt"
 
 #: A pack id is its file name without ``.md``: lower-case words and dashes,
 #: so it is safe in a path, a URL and a checkbox value alike.
@@ -388,6 +392,19 @@ def always_packs(workspace: Optional[Path]) -> List[Pack]:
         return []
     return [p for p in installed(workspace)
             if p.always and not is_on_demand(p.id, workspace)]
+
+
+def request_switch(body: dict, key: str) -> bool:
+    """Whether a create/spawn request leaves ``key`` on: yes unless it says no."""
+    raw = body.get(key, True)
+    if isinstance(raw, str):
+        return raw.strip().lower() not in ("0", "false", "no", "off", "")
+    return raw is not False and raw is not None and raw != 0
+
+
+def always_wanted(body: dict) -> bool:
+    """Whether a create/spawn request takes the workspace's own prompt."""
+    return request_switch(body, WORKSPACE_PROMPT_KEY)
 
 
 def workspace_rows(workspace: Path) -> List[dict]:
@@ -713,7 +730,7 @@ def required_for(
 
 def choose(
     workspace: Optional[Path], chosen, roles, *,
-    mapping: Optional[Dict[str, List[str]]] = None,
+    mapping: Optional[Dict[str, List[str]]] = None, always: bool = True,
 ) -> tuple:
     """The packs a session gets: the workspace's own prompt, what was ticked,
     and what its roles require.
@@ -726,6 +743,8 @@ def choose(
     (:func:`always_packs`) first, then the ticked ones, then the required
     ones, each once. An on-demand pack is refused when ticked and skipped
     when a role names it (:func:`offerable`): it is never part of an opening.
+    With ``always`` false (the request turned the workspace's prompt off) an
+    always copy goes in only when ticked or required, as an ordinary pack.
     """
     required = required_for(roles, mapping)
     required = {k: v for k, v in required.items()
@@ -734,7 +753,7 @@ def choose(
     bad = [i for i in asked if is_on_demand(i, workspace)]
     if bad:
         raise PackError(_on_demand_refusal(bad, "ticked at session creation"))
-    packs = always_packs(workspace)
+    packs = always_packs(workspace) if always else []
     given = {p.id for p in packs}
     for pack_id in dict.fromkeys([*asked, *required]):
         if pack_id in given:
@@ -747,7 +766,11 @@ def choose(
             raise PackError(
                 f"{exc} (required by role {', '.join(required[pack_id])})"
             ) from None
-    return records(packs, required=required, asked=asked), required
+    recs = records(packs, required=required, asked=asked)
+    if not always:
+        for rec in recs:
+            rec.pop("always", None)
+    return recs, required
 
 
 def preview(workspace: Optional[Path], pack_id: str) -> dict:

@@ -147,6 +147,9 @@ check("...and the name, the reuse pick and the rebase base stay out of it",
           config(mode).payload.includes("daemon_prompt"), true);
     check(`the ${mode} form leaves the daemon prompt box editable`,
           config(mode).editable.includes("daemon_prompt"), true);
+    // Same for the workspace's own prompt: its box is a prompt_pack_ chip.
+    check(`the ${mode} payload carries workspace_prompt`,
+          config(mode).payload.includes("workspace_prompt"), true);
   }
 }
 

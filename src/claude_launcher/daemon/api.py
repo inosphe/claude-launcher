@@ -8731,7 +8731,8 @@ def _session_prompt_packs(
     an alias the roleset knows brings the same packs as the role itself.
     Read from the workspace that owns ``cwd``; see :func:`prompt_packs.choose`.
     Every creation path comes through here (create, spawn, the web form), so
-    a workspace's ``delivery: always`` packs reach each of them.
+    a workspace's ``delivery: always`` packs reach each of them unless the
+    request turned them off (``workspace_prompt: false``).
     """
     roles = [r for r in (plan.role, *plan.subroles) if r]
     roleset = _plan_roleset(request, plan)
@@ -8746,9 +8747,10 @@ def _session_prompt_packs(
     head = prompt_packs.records([own]) if own is not None else []
     owner = workspaces.owning(str(cflow_state.resolve_cwd(cwd or None)))
     root = Path(owner.path) if owner is not None else None
-    if not asked and not required and not prompt_packs.always_packs(root):
+    always = prompt_packs.always_wanted(body)
+    if not asked and not required and not (always and prompt_packs.always_packs(root)):
         return head, {}
-    recs, required = prompt_packs.choose(root, asked, roles)
+    recs, required = prompt_packs.choose(root, asked, roles, always=always)
     return head + recs, required
 
 

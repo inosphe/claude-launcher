@@ -2909,8 +2909,13 @@ right after the daemon's prompt and before the ticked packs. A worktree under
 the workspace (`.claude/worktrees/<name>`) counts as the workspace. Put a
 Markdown file in `<workspace>/.claunch/prompts/` with that header; nothing
 needs installing or ticking. Only the workspace's copy decides — claunch's own
-copy of a pack is never always — and a shipped on-demand id stays out. The
-form shows it locked on with "required by workspace …", the opening header
+copy of a pack is never always — and a shipped on-demand id stays out. It is
+on by default and one session can leave it out: untick its chip on the form
+(the box starts ticked on every opening), `--no-workspace-prompt` on
+`claunch new-session`/`claunch spawn`, `no_workspace_prompt` on the MCP spawn,
+or `workspace_prompt: false` in the request body. Turning it off leaves out
+every `delivery: always` pack of that workspace; one ticked anyway goes in as
+an ordinary pack. The opening header
 says "this workspace's own prompt", and the session record keeps `always`
 through reminders, rebriefs and daemon restarts. A session created before the
 file appeared does not get it. This repository's is

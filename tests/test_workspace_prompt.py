@@ -2,8 +2,8 @@
 
 Every session created in the workspace gets them, on every creation path
 (``POST /api/sessions`` -- the create form and ``claunch new-session`` --
-and a spawn), whatever was ticked and whatever the role; a session in
-another workspace does not. The record keeps ``always`` through a reminder's
+and a spawn), whatever was ticked and whatever the role, unless the request
+says ``workspace_prompt: false``; a session in another workspace does not. The record keeps ``always`` through a reminder's
 refresh and a daemon restart, so the opening header keeps saying why the
 pack is there.
 """
@@ -16,7 +16,7 @@ import time
 
 import pytest
 
-from claude_launcher import lineage, profile, prompt_packs, store, workspaces
+from claude_launcher import lineage, mesh_mcp, profile, prompt_packs, store, workspaces
 from claude_launcher.daemon import daemon_prompt, harness as harness_mod, session_reminder
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.harness import SessionDef
@@ -98,6 +98,20 @@ def test_choose_puts_it_first_and_once(env):
     assert [r["id"] for r in recs] == ["house-rules"]
 
 
+def test_the_request_can_turn_it_off(env):
+    for off in (False, "false", "no", 0):
+        assert prompt_packs.always_wanted({"workspace_prompt": off}) is False
+    assert prompt_packs.always_wanted({}) is True
+    assert prompt_packs.always_wanted({"workspace_prompt": True}) is True
+    recs, _ = prompt_packs.choose(env["ws"], [], [], always=False)
+    assert recs == []
+    # Ticked anyway: an ordinary pack, whose header does not claim "every session".
+    recs, _ = prompt_packs.choose(env["ws"], ["plain", "house-rules"], [], always=False)
+    assert recs == [{"id": "plain", "text": "PLAIN NOTES"},
+                    {"id": "house-rules", "text": RULE}]
+    assert HEAD not in prompt_packs.opening(recs)
+
+
 # --------------------------------------------------------------------------- #
 # every creation path
 # --------------------------------------------------------------------------- #
@@ -171,6 +185,10 @@ def test_every_session_created_in_the_workspace_gets_it(env, tmp_path):
             assert await create("a2", ws, prompt_packs=["plain", "house-rules"],
                                 daemon_prompt=False) == ["house-rules", "plain"]
             assert await create("a3", tree, daemon_prompt=False) == ["house-rules"]
+            # Turned off by the request (the form's untick, --no-workspace-prompt).
+            assert await create("a4", ws, daemon_prompt=False,
+                                workspace_prompt=False) == []
+            assert RULE not in seen["a4"]
             # Another workspace has its own (none).
             assert await create("b1", other, daemon_prompt=False) == []
             assert RULE not in seen["b1"]
@@ -189,6 +207,13 @@ def test_every_session_created_in_the_workspace_gets_it(env, tmp_path):
             assert resp.status == 201, await resp.json()
             ids = [r["id"] for r in mgr.get("c2").sdef.prompt_packs]
             assert ids[:3] == [daemon_prompt.PACK_ID, "house-rules", "plain"], ids
+            resp = await client.post("/api/sessions/a1/children", headers=BEARER,
+                                     json={"name": "c3", "task": "help",
+                                           "workspace_prompt": False})
+            assert resp.status == 201, await resp.json()
+            ids = [r["id"] for r in mgr.get("c3").sdef.prompt_packs]
+            assert "house-rules" not in ids, ids
+            assert RULE not in seen["c3"]
 
             # The create form's offer marks it, so the chip is drawn locked.
             offer = await (await client.get(
@@ -225,3 +250,30 @@ def test_the_record_keeps_always_through_a_refresh_and_a_restart(env):
     assert new == ({"id": "house-rules", "text": RULE + " (edited)", "always": True},)
     assert len(notices) == 1
     assert HEAD in prompt_packs.opening(new)
+
+
+# --------------------------------------------------------------------------- #
+# the agents' and the CLI's switch
+# --------------------------------------------------------------------------- #
+
+def test_spawn_and_the_cli_send_the_switch_only_to_say_no(monkeypatch):
+    calls = []
+
+    class FakeClient:
+        def post(self, path, body):
+            calls.append(body)
+            return {}
+
+    monkeypatch.setattr(mesh_mcp, "_client", lambda: FakeClient())
+    monkeypatch.setattr(mesh_mcp, "_session", lambda: "s9")
+    mesh_mcp._spawn({"task": "go"})
+    assert "workspace_prompt" not in calls[-1]
+    mesh_mcp._spawn({"task": "go", "no_workspace_prompt": True})
+    assert calls[-1]["workspace_prompt"] is False
+
+    from claude_launcher import cli
+
+    parser = cli.build_parser()
+    for cmd in (["new-session"], ["spawn"]):
+        assert parser.parse_args(cmd).no_workspace_prompt is False
+        assert parser.parse_args(cmd + ["--no-workspace-prompt"]).no_workspace_prompt is True

@@ -11631,6 +11631,10 @@ let newTaskPrompterRequest = 0;
 // The daemon's own prompt (offer.daemon_prompt): one per daemon, so a tick
 // outlives a change of workspace. null = untouched = ticked.
 let newDaemonPromptTick = null;
+// The workspace's own prompt (its `delivery: always` packs): one box for all
+// of them, since the request turns them off together (workspace_prompt).
+// null = untouched = ticked; every opening of the form starts it ticked.
+let newWorkspacePromptTick = null;
 let newPackRolesOpen = false;  // the folded role packs are shown
 // Role packs shown while folded stay shown until the fold button is pressed
 // again: an untick does not pull its chip out from under the pointer.
@@ -11655,6 +11659,7 @@ function newPackDefaults() {
 function promptPackFormOpened() {
   newPackDefaultsPending = true;
   newPackOfferFor = null;
+  newWorkspacePromptTick = null;
   Promise.resolve(refreshPromptPackOffer()).catch(() => {});
   newPrompterTicks = new Set();
   newPrompterOffer = null;
@@ -11818,11 +11823,16 @@ function newRequiredPacks(f) {
 
 /* The workspace's own prompt: its installed packs headed `delivery: always`
    (prompt_packs.ALWAYS). The daemon puts them into every session created in
-   the workspace whatever is ticked, so the form shows them locked on and
-   does not send them. */
+   the workspace whatever is ticked, so the form does not send their ids: an
+   untick sends workspace_prompt: false instead. */
 function newWorkspaceAlwaysIds() {
   return ((newPackOffer && newPackOffer.packs) || [])
     .filter((p) => p && p.delivery === "always").map((p) => p.id);
+}
+
+/* Whether the opening takes the workspace's own prompt: unless unticked. */
+function newWorkspacePromptWanted() {
+  return newWorkspacePromptTick !== false;
 }
 
 /* The operator's own tick in this opening, else whether Settings lists it
@@ -11899,8 +11909,17 @@ function renderPromptPackRow() {
   };
   const always = new Set(newWorkspaceAlwaysIds());
   const packChip = (p, packaged) => {
-    const by = required[p.id] ||
-      (!packaged && always.has(p.id) ? [`workspace ${wsName} (every session)`] : null);
+    const by = required[p.id] || null;
+    if (!by && !packaged && always.has(p.id)) {
+      return chip(p, {
+        name: `prompt_pack_${p.id}`, value: p.id,
+        checked: newWorkspacePromptWanted(),
+        source: "workspace", sourceLabel: "workspace",
+        sourceTitle: `${wsName}'s own prompt, given to every session created there ` +
+          "unless unticked (unticking one leaves out every such pack)",
+        onChange: (on) => { newWorkspacePromptTick = on; renderPromptPackRow(); },
+      });
+    }
     return chip(p, {
       name: `prompt_pack_${p.id}`, value: p.id,
       checked: by ? true : newPackTicked(p.id), locked: by,
@@ -12000,7 +12019,8 @@ function renderPromptPackRow() {
   // alone do not say which role a locked one came from when the Role row
   // was left blank. Its own block right under the chips, above the text
   // preview, so opening a preview never moves it.
-  const chosen = [...always, ...newPromptPacks(f),
+  const given = newWorkspacePromptWanted() ? [...always] : [];
+  const chosen = [...given, ...newPromptPacks(f),
     ...Object.keys(required).filter((id) => shippedIds.has(id))]
     .filter((id, i, a) => a.indexOf(id) === i);
   const primary = newPrimaryRole(f);
@@ -12008,7 +12028,7 @@ function renderPromptPackRow() {
   // and moves what is under it (claunch-5gbqg): only claunch's copy is
   // marked, and where the copy comes from is the pill's tooltip.
   const parts = chosen.map((id) => {
-    const why = always.has(id) ? "workspace, every session"
+    const why = always.has(id) && !required[id] ? "workspace, every session"
       : required[id] ? `role ${required[id].join(", ")}`
       : (newPackDefaults().includes(id) ? "default" : "ticked");
     const packaged = shippedIds.has(id);
@@ -13886,6 +13906,9 @@ $("new-session").addEventListener("submit", async (e) => {
   // Sent only to say no: the daemon gives its prompt unless told otherwise.
   if (newPackOffer && newPackOffer.daemon_prompt && !newDaemonPromptWanted()) {
     body.daemon_prompt = false;
+  }
+  if (newWorkspaceAlwaysIds().length && !newWorkspacePromptWanted()) {
+    body.workspace_prompt = false;
   }
   if (!parent && f.borrow.value) body.borrow = f.borrow.value;
   if (!parent && f.null_token.checked) body.null_token = true;
@@ -40938,7 +40961,7 @@ function sessionFormConfig(mode) {
         "rebase_onto", "branch_from", "role", "subroles", "borrow", "null_token", "mesh", "handle", "workflow",
         "workflow_version", "cflow_inputs",
         "context", "task", "note", "opening_images", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
-        "daemon_prompt", "prompter_contexts",
+        "daemon_prompt", "workspace_prompt", "prompter_contexts",
         "resume", "fork_session"] },
     spawn: { title: "Spawn child", submit: "Spawn child", sections,
       editable: [...editable, "parent", "fork_parent", "over_limit"],
@@ -40946,7 +40969,7 @@ function sessionFormConfig(mode) {
         "rebase_onto", "branch_from", "role", "subroles", "borrow", "null_token", "mesh", "handle", "workflow",
         "workflow_version", "cflow_inputs",
         "context", "task", "note", "opening_images", "score_goal", "beads", "issue", "issue_text", "prompt_packs",
-        "daemon_prompt", "prompter_contexts",
+        "daemon_prompt", "workspace_prompt", "prompter_contexts",
         "fork", "connect", "over_limit", "auto_compact"] },
     fork: { title: "Quick fork", submit: "Fork", sections: ["new-quick-fork"],
       editable: ["quick_fork_place", "quick_fork_mesh", "quick_fork_role",

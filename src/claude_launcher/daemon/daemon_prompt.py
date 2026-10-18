@@ -148,7 +148,4 @@ def offer(base: Optional[Path] = None) -> Optional[dict]:
 
 def wanted(body: dict) -> bool:
     """Whether a create/spawn request takes the prompt: yes unless it says no."""
-    raw = body.get("daemon_prompt", True)
-    if isinstance(raw, str):
-        return raw.strip().lower() not in ("0", "false", "no", "off", "")
-    return raw is not False and raw is not None and raw != 0
+    return prompt_packs.request_switch(body, "daemon_prompt")
