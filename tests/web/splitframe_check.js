@@ -11,7 +11,8 @@
      buttons  -- every split toggle in the header carries .split-btn, and the
                  lit / pressed styles select that class rather than a list of
                  ids (the list once missed ⌘ category); every kind in
-                 SPLIT_PANES names a button that exists. */
+                 SPLIT_PANES names a button that exists; each toggle has a
+                 glyph for the compact header (toolbar.js). */
 const assert = require("assert/strict");
 const fs = require("fs");
 const path = require("path");
@@ -53,6 +54,7 @@ class N {
 const app = read("app.js");
 const html = read("index.html");
 const css = read("style.css");
+const toolbar = read("toolbar.js");
 
 function frameModule() {
   const ctx = vm.createContext({document: {createElement: (t) => new N(t)}, WeakMap});
@@ -195,6 +197,7 @@ function frameModule() {
   for (const id of toggles) {
     assert.match(html, new RegExp(`<button id="${id}" class="term-btn split-btn[ "]`), `${id} carries .split-btn`);
     assert.ok(app.includes(`$("${id}").addEventListener("click", () => toggleSplitPane(`), `${id} toggles the pane`);
+    assert.ok(new RegExp(`"${id}": "[^"]+"`).test(toolbar), `${id} has a compact-header glyph (toolbar.js)`);
   }
   for (const [kind, spec] of Object.entries(ctx.SPLIT_PANES)) {
     assert.ok(toggles.includes(spec.btn), `${kind}: ${spec.btn} is a split toggle`);

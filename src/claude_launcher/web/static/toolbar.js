@@ -12,7 +12,7 @@
     "term-observer": "◉", "term-webdebug": "⧉", "term-blockbar": "☰", "term-rebrief": "↻",
     "term-fork": "⑂", "term-merge": "↩", "term-idle-hold": "☾", "term-pause": "Ⅱ",
     "term-kill": "×", "term-archive": "▣", "term-splitbtn": "⬒", "term-simsbtn": "◬",
-    "term-chartbtn": "◇",
+    "term-chartbtn": "◇", "term-categorybtn": "⌘", "term-qabtn": "?", "term-threadsbtn": "🗪",
     "term-details": "ⓘ", "term-zoom-level": "A",
     "term-zoom-out": "−", "term-zoom-in": "+",
   };
