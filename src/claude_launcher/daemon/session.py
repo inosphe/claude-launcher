@@ -508,6 +508,10 @@ class Session:
             background_render=self.background_render,
         )
         self.tracker = IdleTracker()
+        #: (monotonic change time, rendered stamp) of the last
+        #: :meth:`last_activity_at` answer, so an unchanged screen keeps one
+        #: stamp instead of being re-derived against a drifting wall clock.
+        self._activity_stamp: Optional[Tuple[float, str]] = None
         #: Compaction-notice scanner (see :mod:`compacting`): fed every pty
         #: chunk in :meth:`_on_output`, read by the dashboard row as the
         #: session's ``compacting`` flag.
@@ -2424,10 +2428,18 @@ class Session:
         mono = self.tracker.last_meaningful_change()
         if mono is None:
             return None
+        cached = self._activity_stamp
+        if cached is not None and cached[0] == mono:
+            # Same change as the last ask: the two clocks drift (NTP slew,
+            # WSL clock sync) and the stamp is truncated to seconds, so
+            # re-deriving it can step it back a second. Keep the first answer.
+            return cached[1]
         ago = max(0.0, time.monotonic() - mono)
-        return datetime.fromtimestamp(time.time() - ago, timezone.utc).isoformat(
+        stamp = datetime.fromtimestamp(time.time() - ago, timezone.utc).isoformat(
             timespec="seconds"
         )
+        self._activity_stamp = (mono, stamp)
+        return stamp
 
     def _broadcast(self, item: Tuple[str, object]) -> None:
         dead = []
