@@ -47563,13 +47563,12 @@ const noticeSync = {
   busy: false, off: false, soon: null,
 };
 
+/* `base` is taken when the change is sent (noticeSyncTick), not here: a
+   change queued while this page's own request is in flight would otherwise
+   carry a base older than that request's write and be refused against it. */
 function noticeSyncQueue(sync, change) {
   if (!sync || noticeSync.off) return;
-  const held = noticeSync.out.get(sync) || {};
-  const r = noticeSync.remote.get(sync);
-  const next = Object.assign(held, change);
-  if (next.base === undefined) next.base = (r && r.read_seq) || 0;
-  noticeSync.out.set(sync, next);
+  noticeSync.out.set(sync, Object.assign(noticeSync.out.get(sync) || {}, change));
   if (noticeSync.soon) return;
   noticeSync.soon = setTimeout(() => {
     noticeSync.soon = null;
@@ -47623,7 +47622,10 @@ async function noticeSyncTick() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         epoch: noticeSync.epoch, since: noticeSync.seq,
-        changes: [...sent].map(([id, c]) => Object.assign({ id }, c)),
+        changes: [...sent].map(([id, c]) => {
+          const r = noticeSync.remote.get(id);
+          return Object.assign({ id }, c, { base: (r && r.read_seq) || 0 });
+        }),
       }),
     });
     // A daemon from before this route: stay local, as the page always was.
@@ -48343,12 +48345,16 @@ function threadNoticeCard(session, r) {
 }
 
 /* The threads pane shown on `session` has the replies in view: their cards
-   go down (the history keeps them). */
+   go down (the history keeps them). This runs from the threads poll and the
+   header's repaint, not from a press, so only a page someone can see tells
+   the other browsers (claunch-mfzlv): a hidden tab left on a threads pane
+   would otherwise take every browser's cards down as replies arrive. */
 function threadNoticeClear(session) {
   const keys = threadNoticeKeys.get(session);
   if (!keys) return;
+  const seen = typeof document === "undefined" || !document.hidden;
   for (const key of keys) {
-    noticeSyncDismiss(key);
+    if (seen) noticeSyncDismiss(key);
     dismissNotice(key);
   }
   threadNoticeKeys.delete(session);

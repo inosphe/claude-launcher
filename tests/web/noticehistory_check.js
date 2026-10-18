@@ -993,6 +993,33 @@ function gotoRec(rec) {
     check("the threads pane shown in one browser takes the other's card down",
           b.strip().length === 0, b.said());
 
+    // A hidden tab left on a threads pane is not someone reading it: the
+    // poll still takes its own card down, but tells no other browser.
+    a.api.threadNoticeSync({ s1: { open: 1, agent_seq: 6, replies: [reply(6, "th-a", "deploy", "again")] } });
+    b.api.threadNoticeSync({ s1: { open: 1, agent_seq: 6, replies: [reply(6, "th-a", "deploy", "again")] } });
+    globalThis.document = { hidden: true };
+    a.api.threadNoticeClear("s1");
+    delete globalThis.document;
+    await tickAll(a, b);
+    check("a hidden browser's threads pane takes only its own card down",
+          a.strip().length === 0 && b.strip().length === 1, [a.said(), b.said()]);
+    if (b.strip()[0]) b.strip()[0].click();
+    await tickAll(a, b);
+
+    // A change made while this page's own request is in flight is sent with
+    // the base that request's answer brought, so it is not refused against
+    // this page's own write.
+    const four = { s1: { unresolved: 1, waiting: [ask("qa-4", "fourth question")] } };
+    a.api.qaNoticeSync(four);
+    a.strip()[0].click();
+    const flight = a.api.noticeSyncTick();
+    a.api.noticeMarkRead([rowOf(a, "fourth question").id], false);
+    await flight;
+    await a.api.noticeSyncTick();
+    check("Mark unread made during the page's own request is kept",
+          daemon.records.get("qa:qa-4:open").read === false && rowOf(a, "fourth question").read === false,
+          [daemon.records.get("qa:qa-4:open"), rowOf(a, "fourth question")]);
+
     const three = { s1: { unresolved: 1, waiting: [ask("qa-3", "third question")] } };
     a.api.qaNoticeSync(three);
     a.strip()[0].click();
