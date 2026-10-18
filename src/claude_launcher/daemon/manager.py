@@ -68,6 +68,26 @@ log = logging.getLogger(__name__)
 #: The ``by`` the restore queue wakes a delayed record with.
 RESTORE_QUEUE = "restore-queue"
 
+#: Wakes the daemon starts on its own, with no person asking for this
+#: incarnation: the restore queue running late, a mesh delivery, a cflow
+#: notice or reminder, a status-check refresh (and the cflow and cflow2
+#: clocks' ``-checks`` requests to a held driver), the CLI's cflow nudge
+#: (``/deliver``). A session woken by one of these does not get
+#: :attr:`Session.resumed_by_human`, so a finished one-shot run's kill-on-end
+#: still ends it (claunch-u9m6z: s122 was woken by a mesh delivery and the
+#: kill was called off as if a person had respawned it). Any other ``by`` --
+#: an attach, typed input, a peer's typed line, the API's wake, a QA
+#: answer, a thread message -- is a person and keeps the deference; a
+#: ``by`` missing from this set is read as a person, so a new wake source
+#: errs toward keeping a session. ``message`` (any :meth:`Session.deliver`
+#: that reaches a held session) stays out: that one path carries the
+#: daemon's own notices and a person's doors alike (a forced QA answer, a
+#: rebrief, a retrospective), and it cannot tell them apart.
+AUTOMATIC_WAKES = frozenset({
+    RESTORE_QUEUE, "mesh", "cflow", "cflow2", "status-checks", "deliver",
+    "cflow-checks", "cflow2-checks",
+})
+
 
 def _on_running_loop() -> bool:
     """Whether the caller is on a thread with a running event loop."""
@@ -1855,6 +1875,9 @@ class SessionManager:
                 raise
             finally:
                 self._waking.discard(name)
+            if by in AUTOMATIC_WAKES:
+                # _respawned marked a person's respawn; nobody asked for this.
+                relaunched.resumed_by_human = False
             if delayed:
                 self._delayed_woken(relaunched, by)
             else:
@@ -1865,10 +1888,6 @@ class SessionManager:
         """Book-keeping for a delayed record that just came back."""
         name = session.sdef.name
         self._delayed_busy.discard(name)
-        if by == RESTORE_QUEUE:
-            # The queue is the restore running late, not a person asking for
-            # this incarnation (Session.resumed_by_human).
-            session.resumed_by_human = False
         log.info("delayed session %r started (%s)", name, by or "respawn")
         for hook in list(self.delayed_wake_hooks):
             try:

@@ -3124,16 +3124,27 @@ class RunEventClock:
             # the kill stands behind it, and a record that did not land must
             # not end a session. Only the idle-wait and the kill are handed
             # to the loop as a task. Recurring workflows and runs done with a
-            # pending next start both keep their driver.
+            # pending next start both keep their driver. A run whose session
+            # is not running yet is NOT marked (claunch-u9m6z): right after a
+            # boot its session may still be held or queued for a delayed
+            # restore, and marking it here exempted it until the next boot —
+            # the session woke (the restore queue, a mesh delivery) and
+            # stayed alive with its run done. Left unmarked, the next pass
+            # judges it again; the v2 pass gets this by walking live
+            # sessions only.
             if (
                 run_id and status == "done"
                 and not payload.get("recur")
                 and not pending_by
                 and (cwd, scope, run_id) not in self._end_done
             ):
-                self._end_done.add((cwd, scope, run_id))
+                session = None
                 if kill_on_end:
                     session = session_for(self.manager, cwd, scope)
+                    if session is None:
+                        continue                # not running: ask again next pass
+                self._end_done.add((cwd, scope, run_id))
+                if kill_on_end:
                     if session is not None:
                         block = end_block(
                             scope, run_id,
