@@ -29,7 +29,10 @@
 
    An open panel hides the corner strip (claunch-k2khb): a notice that
    arrives while it is open is written to the history only and puts up no
-   card, now or after the panel closes; cards already up come back on close.
+   card, now or after the panel closes. Opening the panel puts every card
+   away for good (claunch-paqfs): notices are dismissed and waiting requests
+   hidden, so closing it brings none back; a request that came in while it
+   was open is hidden on close, unless "Show card" put it back in the panel.
 
    Marks and the All / Kept filter (claunch-knuet; Kept was labelled Marked
    before claunch-v995u): ☆ on a history row marks
@@ -258,17 +261,20 @@ function gotoRec(rec) {
     const w = build();
     w.api.notify("before", "a", { key: "k0", sticky: true });
     w.api.noticePanelToggle(true);
+    check("opening the panel puts the card up before it away (claunch-paqfs)",
+          w.strip().length === 0 && w.api.cards.length === 0, w.said());
+    check("its row stays in the history, unread",
+          w.api.noticeHistory.some((e) => e.title === "before" && e.read === false), w.api.noticeHistory);
     const node = w.api.notify("while open", "b", { key: "k1", sticky: true });
     check("a notice while the panel is open puts up no card",
-          node === null && w.strip().length === 1 && !/while open/.test(w.said()),
-          w.said());
+          node === null && w.strip().length === 0, w.said());
     check("it is still written to the history and shown in the panel",
           w.api.noticeHistory[0].title === "while open" && /while open/.test(w.panel()),
           w.panel());
     check("and still counts as unread", w.badge() === "2", w.badge());
     w.api.noticePanelToggle(false);
-    check("closing the panel does not pop its card up later",
-          !/while open/.test(w.said()) && /before/.test(w.said()), w.said());
+    check("closing the panel brings no card back, before or while open",
+          w.strip().length === 0, w.said());
     w.api.notify("after", "c", { key: "k2", sticky: true });
     check("a notice after it closes puts up a card again", /after/.test(w.said()), w.said());
   }
@@ -600,6 +606,38 @@ function gotoRec(rec) {
           w.apiCalls.includes("/api/cflow/goto-requests/g1/deny"), w.apiCalls);
   }
 
+  /* --- opening the panel hides the request cards too (claunch-paqfs) ---- */
+  {
+    const w = build();
+    w.gate.goto = [gotoRec()];
+    await w.api.refreshGotoGate();
+    check("a request card is up", w.strip().length === 1, w.said());
+    w.api.noticePanelToggle(true);
+    await new Promise((r) => setImmediate(r));
+    check("opening the panel hides it", w.strip().length === 0, w.said());
+    check("the request is still counted", w.badge() === "1", w.badge());
+    w.gate.reposync = [{ id: "p1", session: "s4", status: "pending",
+                         deadline: new Date(BASE + 120000).toISOString(),
+                         plan: { workspace: "claude-launcher", summary: "push master" } }];
+    await w.api.refreshReposyncGate();
+    w.api.noticePanelToggle(false);
+    await new Promise((r) => setImmediate(r));
+    check("closing it hides a request that came in while it was open",
+          w.strip().length === 0, w.said());
+    await w.api.refreshGotoGate();
+    await w.api.refreshReposyncGate();
+    check("and neither comes back on the next poll", w.strip().length === 0 && w.badge() === "2",
+          [w.said(), w.badge()]);
+    w.api.noticePanelToggle(true);
+    w.press(w.panelRows().find((r) => /run move requested/.test(r.text())), "Show card").click();
+    await new Promise((r) => setImmediate(r));
+    w.api.noticePanelToggle(false);
+    await new Promise((r) => setImmediate(r));
+    await w.api.refreshGotoGate();
+    check("a card put back with Show card while the panel is open stays up after it closes",
+          w.strip().length === 1 && /run move requested/.test(w.said()), w.said());
+  }
+
   /* --- QA requests become notices (claunch-k7c32) ---------------------- */
   {
     const ask = (id, title, extra) => ({ id, title, status: "open", revision: 1,
@@ -626,15 +664,16 @@ function gotoRec(rec) {
                                                              { revision: 2 })] } });
     check("editing a question nobody answered is not a second request",
           w.api.noticeHistory.length === 1, w.api.noticeHistory);
-    w.api.noticePanelToggle(true);
-    check("the panel shows the row with the session", /s1 asks you/.test(w.panel()) &&
-            /session/.test(w.panel()), w.panel());
     w.strip()[0].click();
     check("clicking the card opens the session on that question",
           w.loc.hash === "#/s/s1" && JSON.stringify(revealed) === JSON.stringify([["s1", "qa-new"]]) &&
             w.layouts.s1 && w.layouts.s1.split === true && w.layouts.s1.pane === "qa",
           { hash: w.loc.hash, revealed, layout: w.layouts.s1 });
     check("and puts the card away", w.strip().length === 0, w.said());
+    w.api.noticePanelToggle(true);
+    check("the panel shows the row with the session", /s1 asks you/.test(w.panel()) &&
+            /session/.test(w.panel()), w.panel());
+    w.api.noticePanelToggle(false);
 
     w.loc.hash = "";
     revealed.length = 0;
@@ -837,10 +876,10 @@ function gotoRec(rec) {
     w.press(w.nodes["notice-panel-body"], "Open").click();
     check("Open goes to the session and closes the panel",
           w.loc.hash === "#/s/s6" && w.nodes["notice-panel"].classList.contains("hidden"), w.loc.hash);
-    w.press(w.nodes.notices, "Hide").click();
     w.api.urgentAskSync({ s6: { cwd: "/w/s6", scope: "s6", urgent_asks: [{ id: "ask2-cc",
       instance: "i1", label: "plan", status: "open", resolution: "human" }], answers: [] } });
-    check("Hide keeps it off the corner and in the count", w.strip().length === 0 &&
+    check("opening the panel hid it: off the corner and in the count (claunch-paqfs)",
+          w.strip().length === 0 &&
             w.badge() === "1", [w.said(), w.badge()]);
     w.api.urgentAskSync({});
     check("a session gone from the rail settles it", w.badge() === "" &&
