@@ -36,11 +36,21 @@ hung on it at every poll (:func:`ctxsize.context_of`), so a profile or
 provider change reaches an exited row as fast as a live one. ``tps`` (:mod:`metering`) is not here: the list reads it off one shared
 snapshot, with no per-row file read, and its ``idle`` answer moves with the
 clock.
+
+The card's commit chips (``rail_commits``) are kept apart from the row, in
+the session's own directory (``rail-commits.json`` beside ``meta.json``), so
+they outlive a daemon restart and the session's worktree (claunch-ork3b).
+They are read once per exit and then only brought up to date
+(:func:`session_commits.kept_rail`): a record whose commits are all merged
+costs no git. A first reading walks the repository, so a poll makes at most
+:data:`FILL_LIMIT` of them per :data:`FILL_WINDOW` seconds -- the hundreds of
+exited sessions a daemon has before its first poll fill in over a few polls.
 """
 
 from __future__ import annotations
 
 import copy
+import json
 import os
 import random
 import threading
@@ -49,7 +59,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
-from . import ctxsize, session_prs, tokenusage, work_checkout
+from .. import atomic, session_commits
+from . import ctxsize, paths, session_prs, tokenusage, work_checkout
 from .harness import CLAUDE_HARNESS
 
 #: The row keys this module keeps as they were read. ``context`` is kept as
@@ -69,6 +80,15 @@ CHECK_TTL = 30.0
 #: per check.
 CHECK_SPREAD = 0.5
 
+#: First readings of an exited session's commits allowed per
+#: :data:`FILL_WINDOW` seconds; past it a row shows no chips until a later
+#: poll.
+FILL_LIMIT = 16
+FILL_WINDOW = 5.0
+
+#: The name of the file a session's kept chips live in, in its directory.
+RAIL_FILE = "rail-commits.json"
+
 _now = time.monotonic
 
 
@@ -87,12 +107,17 @@ class _Row:
 
 _rows: dict = {}
 _lock = threading.Lock()
+#: name -> kept commit record (or None), read off disk once.
+_rails: dict = {}
+_fills: List[float] = []
 
 
 def forget() -> None:
     """Drop every kept row. For tests."""
     with _lock:
         _rows.clear()
+        _rails.clear()
+        _fills.clear()
 
 
 def _due() -> float:
@@ -149,7 +174,72 @@ def _fresh(row: _Row, sdef: Any) -> bool:
     return _stamps(row.transcript, row.watch, row.work_cwd) == row.stamps
 
 
-def _answer(session: Any, row: _Row) -> dict:
+def _take_fill() -> bool:
+    now = _now()
+    with _lock:
+        _fills[:] = [t for t in _fills if now - t < FILL_WINDOW]
+        if len(_fills) >= FILL_LIMIT:
+            return False
+        _fills.append(now)
+        return True
+
+
+def _rail_path(name: str) -> Path:
+    return paths.session_dir(name) / RAIL_FILE
+
+
+def _load_rail(name: str) -> Optional[dict]:
+    try:
+        record = json.loads(_rail_path(name).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return record if isinstance(record, dict) else None
+
+
+def _save_rail(name: str, record: dict) -> None:
+    path = _rail_path(name)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with atomic.scratch(path) as tmp:
+            tmp.write_text(json.dumps(record), encoding="utf-8")
+            atomic.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def _attach_rail(session: Any, info: dict, cwd: str) -> None:
+    """Hang the kept commit chips on ``info``: the commits come off the
+    worktree the session moved into, else ``cwd``, as the live path reads
+    them; the PR frames off the row's ``prs``."""
+    name = str(info.get("name") or "")
+    if not name:
+        return
+    with _lock:
+        known = name in _rails
+        record = _rails.get(name)
+    if not known:
+        record = _load_rail(name)
+    created_at = getattr(session, "created_at", None)
+    exited_at = getattr(session, "exited_at", None)
+    current = session_commits.kept_current(record, name, created_at, exited_at)
+    record, changed = session_commits.kept_rail(
+        record, name, created_at=created_at, exited_at=exited_at,
+        cwds=[info.get(work_checkout.FIELD), cwd], prs=info.get("prs"),
+        # Spent only once a repository is found (session_commits.kept_rail).
+        read=True if current else _take_fill,
+    )
+    if changed:
+        _save_rail(name, record)
+    with _lock:
+        if len(_rails) >= MAX_ROWS:
+            _rails.clear()
+        _rails[name] = record
+    chips = session_commits.kept_view(record)
+    if chips:
+        info["rail_commits"] = chips
+
+
+def _answer(session: Any, row: _Row, cwd: str) -> dict:
     info = session.info()
     calls = ctxsize.count_tool_calls(row.tool_times)
     if calls is not None:
@@ -162,6 +252,7 @@ def _answer(session: Any, row: _Row) -> dict:
         info["context"] = context
     # Copied: the kept row outlives this response and its readers.
     info.update(copy.deepcopy(row.fields))
+    _attach_rail(session, info, cwd)
     return info
 
 
@@ -170,7 +261,7 @@ def attach(session: Any, spend: tokenusage.Budget, cwd: str) -> dict:
 
     The same keys the live path attaches (``context``, ``tool_calls``,
     ``token_usage``, ``work_cwd``, ``prs``), read once and kept while their
-    files are unchanged. ``spend`` is the request's read budget, ``cwd`` the
+    files are unchanged, and the card's ``rail_commits`` kept on disk. ``spend`` is the request's read budget, ``cwd`` the
     directory whose cflow2 run holds the session's PRs.
     """
     sdef = getattr(session, "sdef", None)
@@ -181,13 +272,13 @@ def attach(session: Any, spend: tokenusage.Budget, cwd: str) -> dict:
     if row is not None and row.ident == ident:
         due = row.due
         if _now() < due:
-            return _answer(session, row)
+            return _answer(session, row, cwd)
         if _fresh(row, sdef):
             with _lock:
                 # Unless :func:`expire` ran while the files were looked at.
                 if row.due == due:
                     row.due = _due()
-            return _answer(session, row)
+            return _answer(session, row, cwd)
     # Stamped before reading: a write that lands during the read is a change
     # the next poll sees.
     transcript = ctxsize.transcript_of(sdef)
@@ -202,6 +293,7 @@ def attach(session: Any, spend: tokenusage.Budget, cwd: str) -> dict:
     tokenusage.attach(info, sdef, spend)
     work_checkout.attach(info, sdef)
     info["prs"] = session_prs.for_session(cwd, name)
+    _attach_rail(session, info, cwd)
     if (info.get(tokenusage.INFO_KEY) or {}).get("partial"):
         return info
     work_cwd = info.get(work_checkout.FIELD)

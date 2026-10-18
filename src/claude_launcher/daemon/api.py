@@ -8547,8 +8547,10 @@ async def h_sessions_list(request: web.Request) -> web.Response:
             # master or a remote has each, and which recorded PR carries it.
             # One walk per repository, kept until its refs move
             # (session_commits.rail), so the rows of a fleet share it. An
-            # exited session's card does not get them: its checkout is often
-            # pruned, and the list carries hundreds of those (claunch-0gysk).
+            # exited session's row got its chips from exited_rows above:
+            # kept on disk and brought up to date only while a commit is
+            # unmerged, since the list carries hundreds of those
+            # (claunch-0gysk, claunch-ork3b).
             if not s.exited:
                 chips = session_commits.rail(
                     info.get(work_checkout.FIELD) or _session_cwd(s),
