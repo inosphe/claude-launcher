@@ -60,6 +60,8 @@ LIVE = (CATEGORY_RUNNING, CATEGORY_PAUSED, CATEGORY_HOLD, CATEGORY_DELAYED, CATE
 #: The cflow v2 workflow an operator v2 session runs
 #: (``workflows/v2/operator-v2.yaml``); its start input ``operator`` is the id.
 WORKFLOW = "operator-v2"
+#: The workflow a session the operator asks for runs (claunch-iw5i8.15).
+SPAWN_WORKFLOW = "improv-worker-v2"
 #: Seconds a poll waits for the board or the run states before answering
 #: without them (the MCP client gives up after 30s).
 READ_TIMEOUT = 5.0
@@ -157,12 +159,16 @@ def _int(value, default, low, high, what):
 class OperatorsV2:
     """Every operator's definition, feed and binding."""
 
-    def __init__(self, root, manager, observer=None, gates=None, work=None, board=None):
+    def __init__(self, root, manager, observer=None, gates=None, work=None, board=None,
+                 spawn_gate=None):
         self.root = root / "operators"
         self.manager, self.observer, self.gates, self.work = manager, observer, gates, work
         #: ``() -> Beads | None``: the board facade, read late because the
         #: API module installs it after the routes.
         self.board = board or (lambda: None)
+        #: ``() -> SpawnGate | None``: the session-request gate, read late
+        #: for the same reason.
+        self.spawn_gate = spawn_gate or (lambda: None)
         self.cache = None
         self.nudging = set()
 
@@ -635,15 +641,21 @@ class OperatorsV2:
             for e in rows]}
 
     # -- relaying the user's instruction ------------------------------------
+    def basis(self, rec, entry_id):
+        """The feed entry an act on the user's behalf stands on: a user
+        message, or an answered, not denied, ask -- or 403."""
+        basis = self.find(rec, entry_id or "")
+        if not (basis.get("kind") == "user" or (basis.get("kind") == "ask" and basis.get("answer")
+                                               and basis["answer"].get("decision") != "deny")):
+            raise web.HTTPForbidden(text="on_behalf_of must name a user message or an answered, not denied, ask")
+        return basis
+
     async def dispatch(self, name, body):
         rec = self.bound(name)
         if not isinstance(body, dict):
             raise ValueError("object required")
         text = _text(body.get("text"), 12000)
-        basis = self.find(rec, body.get("on_behalf_of") or "")
-        if not (basis.get("kind") == "user" or (basis.get("kind") == "ask" and basis.get("answer")
-                                               and basis["answer"].get("decision") != "deny")):
-            raise web.HTTPForbidden(text="on_behalf_of must name a user message or an answered, not denied, ask")
+        basis = self.basis(rec, body.get("on_behalf_of"))
         session = self.member(rec, body.get("target"))
         if session.exited:
             raise ValueError(f"{session.sdef.name} is not running")
@@ -655,6 +667,131 @@ class OperatorsV2:
             delivery = "unknown"
         return self.append(rec, {"kind": "dispatch", "role": "bot", "target": session.sdef.name,
                                  "text": text, "on_behalf_of": basis["id"], "delivery": delivery})
+
+    # -- asking for a session (claunch-iw5i8.15) ----------------------------
+    def _gate(self):
+        gate = self.spawn_gate()
+        if gate is None:
+            raise web.HTTPServiceUnavailable(text="this daemon has no spawn-request gate")
+        return gate
+
+    @staticmethod
+    def _gate_call(call, **kwargs):
+        from . import spawn_gate as gate_mod
+
+        try:
+            return call(**kwargs)
+        except gate_mod.GateRefused as exc:
+            kind = {403: web.HTTPForbidden, 409: web.HTTPConflict}.get(exc.status, web.HTTPBadRequest)
+            raise kind(text=str(exc)) from None
+
+    def _scope_project(self, rec, value, fallback=None):
+        """The project a requested session is filed under: named, or the
+        fallback, or the operator's only project -- and in scope."""
+        name = value if value not in (None, "") else fallback
+        if name in (None, "") and not rec["all"] and len(rec["projects"]) == 1:
+            name = rec["projects"][0]
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("project is required: name one of the projects in your scope")
+        try:
+            name = projects.require(name.strip()).name
+        except projects.ProjectError as exc:
+            raise ValueError(str(exc)) from None
+        if not rec["all"] and name not in rec["projects"]:
+            raise web.HTTPForbidden(text=f"project {name!r} is outside operator {rec['name']!r}'s scope")
+        return name
+
+    async def spawn_spec(self, name, rec, body, project_fallback=None):
+        """The ``POST /api/sessions`` body of a session the operator asks for:
+        top-level (no parent), the project's default workspace on a fresh
+        worktree, the worker workflow, the operator's profile."""
+        if not isinstance(body, dict):
+            raise ValueError("object required")
+        project = self._scope_project(rec, body.get("project"), project_fallback)
+        cwd = projects.default_cwd(project)
+        if not cwd:
+            raise ValueError(f"project {project!r} has no default workspace to start a session in")
+        profile = rec.get("profile")
+        if not profile:
+            own = self.operator_session(rec)
+            profile = getattr(getattr(own, "sdef", None), "profile", None)
+        if not profile:
+            raise ValueError(f"operator {rec['name']!r} has no profile to start a session with")
+        spec = {"profile": profile, "project": project, "cwd": cwd,
+                "task": _text(body.get("task"), 12000, "task"),
+                "workflow": SPAWN_WORKFLOW, "worktree": ""}
+        session_name = body.get("name")
+        if session_name not in (None, ""):
+            spec["name"] = _text(session_name, 80, "name")
+        issue_id = body.get("issue")
+        if issue_id not in (None, ""):
+            found = await self.issue(name, issue_id)
+            spec["issue"] = found["issue"].get("id") if isinstance(found.get("issue"), dict) else issue_id
+        return spec
+
+    def _request_basis(self, rec, basis):
+        return {"operator": rec["id"], "operator_name": rec["name"], "on_behalf_of": basis["id"],
+                "user_text": str(basis.get("text") or "")[:400]}
+
+    async def spawn(self, name, body):
+        """Ask the person, through the spawn-request gate, for a new session
+        to do work no running session is doing."""
+        rec = self.bound(name)
+        if not isinstance(body, dict):
+            raise ValueError("object required")
+        basis = self.basis(rec, body.get("on_behalf_of"))
+        reason = _text(body.get("reason"), 4000, "reason")
+        spec = await self.spawn_spec(name, rec, body)
+        record = self._gate_call(self._gate().submit_spawn, session=name, spec=spec, reason=reason,
+                                 basis=self._request_basis(rec, basis))
+        self.append(rec, {"kind": "system", "role": "system", "on_behalf_of": basis["id"],
+                          "text": f"세션 생성 요청 {record['id']}: {spec['project']} — {reason}"})
+        return {"operator": rec["id"], "request": record}
+
+    async def resume(self, name, body):
+        """Ask the person to resume an exited session of the scope; when they
+        decline or do not answer, ``fallback`` is filed as a spawn request."""
+        rec = self.bound(name)
+        if not isinstance(body, dict):
+            raise ValueError("object required")
+        basis = self.basis(rec, body.get("on_behalf_of"))
+        reason = _text(body.get("reason"), 4000, "reason")
+        target = self.member(rec, body.get("target"))
+        if not target.exited:
+            raise ValueError(f"{target.sdef.name} is running: dispatch to it instead")
+        fallback = body.get("fallback")
+        if not isinstance(fallback, dict):
+            raise ValueError("fallback is required: the new session to ask for if the resume is not approved")
+        spec = await self.spawn_spec(name, rec, fallback, project_fallback=project_of(target))
+        record = self._gate_call(self._gate().submit_resume, session=name, target=target.sdef.name,
+                                 reason=reason, fallback=spec, basis=self._request_basis(rec, basis))
+        self.append(rec, {"kind": "system", "role": "system", "on_behalf_of": basis["id"],
+                          "refs": [target.sdef.name],
+                          "text": f"세션 재개 요청 {record['id']}: {target.sdef.name} — {reason}"})
+        return {"operator": rec["id"], "request": record}
+
+    def spawn_settled(self, row):
+        """A spawn or resume request this operator filed was settled: one
+        line in its feed, so the user sees the outcome where they asked."""
+        from . import spawn_gate as gate_mod
+
+        op_id = (row.get("basis") or {}).get("operator")
+        rec = self.records().get(op_id) if isinstance(op_id, str) else None
+        if rec is None:
+            return
+        refs = [n for n in (row.get("target"), row.get("created")) if n and self.session(n) is not None]
+        self.append(rec, {"kind": "system", "role": "system", "refs": refs,
+                          "text": gate_mod.outcome_message(row)})
+
+    def open_requests(self, name):
+        """The spawn and resume requests this session filed that still wait."""
+        from . import spawn_gate as gate_mod
+
+        gate = self.spawn_gate()
+        if gate is None:
+            return []
+        return [{k: r.get(k) for k in ("id", "kind", "status", "target", "deadline", "reason")}
+                for r in gate.list() if r.get("session") == name and r.get("status") in gate_mod.OPEN]
 
     # -- what the operator polls -------------------------------------------
     async def poll(self, name, since=None):
@@ -728,7 +865,8 @@ class OperatorsV2:
                 "scope": {"all": rec["all"], "projects": rec["projects"]},
                 "cursor": cursor, "more": more, "events": events, "attention": attention,
                 "paused": paused, "progress": progress, "degraded": degraded, "ended": ended,
-                "sessions": sessions, "unread_user_input": len(self.unread(rec))}
+                "sessions": sessions, "unread_user_input": len(self.unread(rec)),
+                "requests": self.open_requests(name)}
 
     # -- questions about work ----------------------------------------------
     def history(self, name, query):
@@ -904,7 +1042,7 @@ def install(app, *, create=None, gates=None, work=None):
     cflow gates waiting on sessions and ``work`` reads their status checks and
     board issues; the API module passes all three."""
     ops = OperatorsV2(paths.daemon_dir(), app["manager"], app.get("observer"), gates, work,
-                      board=lambda: app.get("beads"))
+                      board=lambda: app.get("beads"), spawn_gate=lambda: app.get("spawn_gate"))
     app["operators_v2"] = ops
 
     def fail(exc):
@@ -1030,6 +1168,14 @@ def install(app, *, create=None, gates=None, work=None):
         return await ops.dispatch(request.match_info["name"], await body_of(request))
 
     @guarded
+    async def agent_spawn(request):
+        return await ops.spawn(request.match_info["name"], await body_of(request))
+
+    @guarded
+    async def agent_resume(request):
+        return await ops.resume(request.match_info["name"], await body_of(request))
+
+    @guarded
     async def agent_history(request):
         return ops.history(request.match_info["name"], request.query)
 
@@ -1063,6 +1209,8 @@ def install(app, *, create=None, gates=None, work=None):
     r.add_get(agent + "/inbox", agent_inbox)
     r.add_get(agent + "/poll", agent_poll)
     r.add_post(agent + "/dispatch", agent_dispatch)
+    r.add_post(agent + "/spawn", agent_spawn)
+    r.add_post(agent + "/resume", agent_resume)
     r.add_get(agent + "/history", agent_history)
     r.add_get(agent + "/sessions", agent_sessions)
     r.add_get(agent + "/sessions/{target}", agent_session)
