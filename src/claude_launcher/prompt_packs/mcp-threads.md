@@ -47,7 +47,9 @@ Being the thread you used last, or the one the user is reading now, does not
 make a thread the right place. When the new subject follows from the old
 one, name the old thread id in one line of the new thread's first message;
 do not copy the old conversation over. Close the old thread with
-`thread_close` once its own subject is settled.
+`thread_close` once its own subject is settled. A session keeps at most 50
+open threads; when `thread_open` is refused for that, close settled threads
+and open again rather than writing into an unrelated one.
 
 `thread_reply` stays the answer for anything on the thread's subject: the
 user's message there, a follow-up on the same issue or decision, the result
