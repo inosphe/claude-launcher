@@ -7,7 +7,7 @@ guidance never reached the agent."""
 
 import pytest
 
-from claude_launcher import mcp_server, prompt_packs, prompt_packs_mcp
+from claude_launcher import mcp_server, prompt_packs, prompt_packs_mcp, threads_mcp
 
 #: What a client is measured to keep (Claude Code: 4096); the budget leaves
 #: room under it so one more pointer does not tip the tail off again.
@@ -34,6 +34,20 @@ def test_the_threads_pack_says_how_to_alert_the_user():
     assert "thread_list" in body and "thread_reply" in body and "thread_open" in body
     assert "notice card" in body
     assert "qa_ask thread=<id>" in body
+
+
+def test_the_threads_pack_says_a_diverged_topic_gets_a_new_thread():
+    """A thread is one topic: content that left the thread's title goes to a
+    new thread, and the alert procedure no longer reuses any open thread
+    (claunch-6kns6, s791's th-6ccd3d carried seven other subjects)."""
+    body = prompt_packs.shipped("mcp-threads").body
+    assert "### One thread, one topic" in body
+    assert "diverged" in body and "`thread_open` a new thread" in body
+    assert "Use an existing thread only when it is about this subject" in body
+    assert "Use an existing thread first" not in body
+    tools = {t["name"]: t for t in threads_mcp.TOOLS}
+    assert "thread_open" in tools["thread_reply"]["description"]
+    assert "diverged" in tools["thread_open"]["description"]
 
 
 def test_prompt_pack_reads_a_pack_and_lists_them(tmp_path, monkeypatch):

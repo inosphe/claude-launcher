@@ -40,13 +40,15 @@ TOOLS = [
     {"name": "thread_reply",
      "description": "Write a message in one of your threads. The text is GitHub-flavored markdown, "
                     "rendered in the threads pane (lists, code fences, tables, links). Replying to a "
-                    "closed thread reopens it.",
+                    "closed thread reopens it. Only for the thread's own topic: when the text is about "
+                    "another subject than the thread's title, use thread_open for a new thread instead.",
      "inputSchema": {"type": "object", "properties": {
          **_TID, "text": {"type": "string", "description": "the message, in markdown"}},
          "required": ["thread_id", "text"]}},
     {"name": "thread_open",
      "description": "Start a new thread with the user on a sub-topic, optionally with its first message. "
-                    "Returns the thread (id).",
+                    "Open one whenever what you have to say has diverged from an existing thread's "
+                    "topic. Returns the thread (id).",
      "inputSchema": {"type": "object", "properties": {
          "title": {"type": "string", "description": "the topic, one line"},
          "text": {"type": "string", "description": "first message, in markdown"},
