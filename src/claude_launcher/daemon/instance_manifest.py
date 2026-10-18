@@ -243,6 +243,59 @@ def check_conflicts(m: Manifest) -> None:
             )
 
 
+def check_pairing() -> None:
+    """Refuse a launcher home and config file that belong to different instances.
+
+    Run after :func:`apply`, before anything reads or writes the store. A
+    manifest that declares ``config:`` pairs that file with its ``home:`` (or
+    the base home when it declares none). A process holding that config file
+    under another home would reconcile the instance's profiles into the wrong
+    home and rewrite the file from there (claunch-edy0w: kimyori's profiles
+    created under the default home by a delayed-sweep runner). Likewise a
+    process on an instance's declared home must hold that instance's declared
+    config file.
+
+    Manifests that cannot be read are skipped here: :func:`apply` reports the
+    active instance's own, and an unrelated broken one must not stop every
+    command.
+    """
+    home = config.launcher_home()
+    cfg = config.sync_file()
+    for m in _readable_manifests():
+        if m.config is not None and _same(m.config, cfg):
+            want = m.home if m.home is not None else paths.base_home()
+            if not _same(want, home):
+                raise InstanceManifestError(
+                    f"config file {cfg} belongs to instance {m.name!r} "
+                    f"(home {want}, {m.path}) but the launcher home is {home}; "
+                    f"use 'claunch -L {m.name}' or unset "
+                    f"{config.LAUNCHER_SYNC_ENV}/{config.LAUNCHER_HOME_ENV}"
+                )
+        if (m.home is not None and m.config is not None
+                and _same(m.home, home) and not _same(m.config, cfg)):
+            raise InstanceManifestError(
+                f"launcher home {home} belongs to instance {m.name!r} "
+                f"(config {m.config}, {m.path}) but the config file is {cfg}; "
+                f"use 'claunch -L {m.name}' or unset "
+                f"{config.LAUNCHER_SYNC_ENV}/{config.LAUNCHER_HOME_ENV}"
+            )
+
+
+def _readable_manifests() -> List[Manifest]:
+    out = []
+    root = paths.base_home() / "daemons"
+    if not root.is_dir():
+        return out
+    for d in sorted(root.iterdir()):
+        try:
+            m = load(paths.validate_instance(d.name))
+        except (ValueError, InstanceManifestError):
+            continue
+        if m is not None:
+            out.append(m)
+    return out
+
+
 def _undo() -> None:
     """Restore the variables a previously applied manifest replaced."""
     raw = os.environ.pop(PREV_ENV, None)

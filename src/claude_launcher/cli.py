@@ -1716,6 +1716,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         # Before anything resolves a path: an instance manifest may move the
         # launcher home, the config file and the port for this process tree.
         instance_manifest.apply()
+        # ...and a home and config file of two different instances would
+        # reconcile one instance's profiles into the other's home.
+        instance_manifest.check_pairing()
     except (ValueError, instance_manifest.InstanceManifestError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

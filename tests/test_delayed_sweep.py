@@ -851,3 +851,28 @@ def test_runner_path_starts_with_the_interpreters_directory(repo, tmp_path, monk
     first, rest = seen[0]["PATH"].split(os.pathsep, 1)
     assert first == str(Path(job["python"]).parent)
     assert rest == "/usr/bin"
+
+
+def test_runner_gets_the_origins_config_file_with_its_home(repo, tmp_path, monkeypatch):
+    # Another instance's daemon ran a default-instance job with the origin's
+    # home and its own config file; the suite's cli.main created that
+    # instance's profiles under the default home (claunch-edy0w).
+    home = tmp_path / "origin-home"
+    origin_cfg = tmp_path / "origin.yaml"
+    monkeypatch.setenv("CLAUDE_LAUNCHER_HOME", str(home))
+    monkeypatch.setenv("CLAUDE_LAUNCHER_SYNC_FILE", str(origin_cfg))
+    q = mod.Queue()
+    job, _ = enqueue(q, repo, "a")
+    assert json.loads(job["origin"])["config"] == str(origin_cfg.resolve())
+    monkeypatch.setenv("CLAUDE_LAUNCHER_HOME", str(tmp_path / "other-home"))
+    monkeypatch.setenv("CLAUDE_LAUNCHER_SYNC_FILE", str(tmp_path / "other.yaml"))
+    monkeypatch.setenv(paths.INSTANCE_ENV, "review-b")
+    seen = []
+    async def launch(*args, **kwargs):
+        seen.append(kwargs)
+        return SimpleNamespace(pid=os.getpid(), returncode=None)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", launch)
+    asyncio.run(Clock(SimpleNamespace(), q).tick())
+    env = seen[0]["env"]
+    assert env["CLAUDE_LAUNCHER_HOME"] == str(home.resolve())
+    assert env["CLAUDE_LAUNCHER_SYNC_FILE"] == str(origin_cfg.resolve())
