@@ -170,6 +170,11 @@ function build(opts) {
       return answer({ ok: true });
     }
     if (/\/(approve|deny|reject)$/.test(p)) return answer({ ok: true });
+    if (p === "/api/notices/sync" && o.daemon) {
+      if (o.daemon.down) throw new Error("offline");
+      if (o.daemon.missing) return { ok: false, status: 404, json: async () => ({}) };
+      return answer(o.daemon.sync(JSON.parse(opts.body)));
+    }
     throw new Error(`unexpected api call ${p}`);
   };
 
@@ -193,6 +198,7 @@ function build(opts) {
     code +
     "\nreturn {notify, refreshRestartGate, refreshGotoGate, refreshReposyncGate, urgentAskSync," +
     " noticePanelToggle, noticeHistory, qaNoticeSync, threadNoticeSync, threadNoticeClear," +
+    " noticeSyncTick, noticeSync, noticeMarkRead," +
     " get cards() { return [...notices.keys()]; }};"
   )(
     (id) => nodes[id],
@@ -216,6 +222,38 @@ function build(opts) {
     panelRows: () => nodes["notice-panel-body"].children.filter((c) => c.classList.contains("notice-row")),
     press: (root, label) => all(root, []).find((n) => n.textContent === label),
   };
+}
+
+/* The daemon's notice store (daemon/notice_sync.py), its rules only:
+   dismissed goes one way, a read change made against an older base than
+   the stored read is refused and the stored record comes back. */
+function fakeNoticeDaemon() {
+  const d = { epoch: "e1", seq: 0, records: new Map(), bodies: [], down: false, missing: false };
+  d.sync = (body) => {
+    d.bodies.push(body);
+    const conflicts = [];
+    for (const ch of body.changes || []) {
+      const rec = d.records.get(ch.id) ||
+        { id: ch.id, read: null, read_seq: 0, dismissed: false, seq: 0 };
+      let moved = false;
+      let readMoved = false;
+      if (ch.dismissed && !rec.dismissed) { rec.dismissed = true; moved = true; }
+      if ("read" in ch && rec.read !== ch.read) {
+        if (rec.read !== null && rec.read_seq > (ch.base || 0)) conflicts.push({ ...rec });
+        else { rec.read = ch.read; moved = readMoved = true; }
+      }
+      if (!moved) continue;
+      d.seq += 1;
+      if (readMoved) rec.read_seq = d.seq;
+      rec.seq = d.seq;
+      d.records.set(ch.id, rec);
+    }
+    const since = body.epoch === d.epoch ? body.since : 0;
+    const changes = [...d.records.values()].filter((r) => r.seq > since)
+      .sort((a, b) => a.seq - b.seq).map((r) => ({ ...r }));
+    return { epoch: d.epoch, seq: d.seq, changes, conflicts };
+  };
+  return d;
 }
 
 function restartRec(rec) {
@@ -898,6 +936,128 @@ function gotoRec(rec) {
     check("without storage the page still keeps the history in memory",
           w.api.noticeHistory.length === 2 && !/restart requested/.test(w.said()),
           [w.api.noticeHistory.length, w.said()]);
+  }
+
+  /* --- what one browser did with a card, the others learn (claunch-mfzlv) */
+  {
+    const ask = (id, title) => ({ id, title, status: "open", revision: 1, answer_revision: null });
+    const reply = (seq, thread, title, excerpt) => ({ seq, thread, title, excerpt, at: "t" });
+    const daemon = fakeNoticeDaemon();
+    const browsers = () => {
+      const made = [build({ daemon }), build({ daemon })];
+      for (const w of made) {
+        // Each browser has polled before, so the next request is announced.
+        w.api.qaNoticeSync({});
+        w.api.threadNoticeSync({ s1: { open: 0, agent_seq: 1, replies: [] } });
+      }
+      return made;
+    };
+    const tickAll = async (...ws) => { for (const w of ws) await w.api.noticeSyncTick(); };
+    const rowOf = (w, sub) => w.api.noticeHistory.find((e) => e.sub === sub);
+    globalThis.QaPane = { reveal: () => {} };
+    globalThis.ThreadsPane = { focus: () => {} };
+
+    const [a, b] = browsers();
+    const one = { s1: { unresolved: 1, waiting: [ask("qa-1", "first question")] } };
+    a.api.qaNoticeSync(one);
+    b.api.qaNoticeSync(one);
+    check("both browsers put up the card", a.strip().length === 1 && b.strip().length === 1,
+          [a.said(), b.said()]);
+    check("the card's row carries the event's sync id",
+          rowOf(a, "first question").sync === "qa:qa-1:open" &&
+            rowOf(b, "first question").sync === "qa:qa-1:open", rowOf(a, "first question"));
+    a.strip()[0].click();
+    await tickAll(a, b);
+    check("a click in one browser sends dismissed and read",
+          daemon.bodies.some((x) => (x.changes || []).some((c) => c.id === "qa:qa-1:open" &&
+            c.dismissed === true && c.read === true)), daemon.bodies);
+    check("the other browser's card goes down", b.strip().length === 0, b.said());
+    check("and its row reads as read", rowOf(b, "first question").read === true, rowOf(b, "first question"));
+
+    const two = { s1: { unresolved: 1, waiting: [ask("qa-2", "second question")] } };
+    a.api.qaNoticeSync(two);
+    b.api.qaNoticeSync(two);
+    const close = a.strip()[0].children.find((c) => c.className === "notice-close");
+    close.click();
+    await tickAll(a, b);
+    check("× in one browser takes the other's card down", b.strip().length === 0, b.said());
+    check("without reading it there", rowOf(b, "second question").read === false &&
+            rowOf(a, "second question").read === false, [rowOf(a, "second question"), rowOf(b, "second question")]);
+
+    a.api.threadNoticeSync({ s1: { open: 1, agent_seq: 5, replies: [reply(5, "th-a", "deploy", "done")] } });
+    b.api.threadNoticeSync({ s1: { open: 1, agent_seq: 5, replies: [reply(5, "th-a", "deploy", "done")] } });
+    check("a thread reply's card is up in both", a.strip().length === 1 && b.strip().length === 1,
+          [a.said(), b.said()]);
+    a.api.threadNoticeClear("s1");
+    await tickAll(a, b);
+    check("the threads pane shown in one browser takes the other's card down",
+          b.strip().length === 0, b.said());
+
+    const three = { s1: { unresolved: 1, waiting: [ask("qa-3", "third question")] } };
+    a.api.qaNoticeSync(three);
+    a.strip()[0].click();
+    await tickAll(a, b);
+    b.api.qaNoticeSync(three);
+    check("a notice that reaches a browser after another dealt with it puts up no card",
+          b.strip().length === 0, b.said());
+    check("and is written to the history as read", rowOf(b, "third question") &&
+            rowOf(b, "third question").read === true, rowOf(b, "third question"));
+
+    // Mark unread in one browser reaches the other's row.
+    a.api.noticeMarkRead([rowOf(a, "first question").id], false);
+    await tickAll(a, b);
+    check("Mark unread in one browser reaches the other",
+          rowOf(b, "first question").read === false, rowOf(b, "first question"));
+
+    // Conflict: c has not heard of the unread above and marks the row read
+    // against an older base; the daemon's value stands and c takes it.
+    const c = build({ daemon });
+    c.api.qaNoticeSync({});
+    c.api.noticeHistory.unshift({ id: "hc", at: BASE, title: "s1 asks you", sub: "first question",
+                                  sync: "qa:qa-1:open", read: false });
+    c.api.noticeSync.remote.set("qa:qa-1:open", { id: "qa:qa-1:open", read: true, read_seq: 1, seq: 1 });
+    c.api.noticeSync.epoch = daemon.epoch;
+    c.api.noticeSync.seq = daemon.seq;
+    c.api.noticeMarkRead(["hc"], true);
+    await c.api.noticeSyncTick();
+    check("a read change against an older base is refused",
+          daemon.records.get("qa:qa-1:open").read === false, daemon.records.get("qa:qa-1:open"));
+    check("and the browser that sent it takes the daemon's value",
+          c.api.noticeHistory.find((e) => e.id === "hc").read === false,
+          c.api.noticeHistory.find((e) => e.id === "hc"));
+    check("the refused change is not sent again", c.api.noticeSync.out.size === 0,
+          [...c.api.noticeSync.out]);
+
+    // Offline: what was queued goes out with the next request.
+    daemon.down = true;
+    a.api.noticeMarkRead([rowOf(a, "second question").id], true);
+    await a.api.noticeSyncTick();
+    check("a failed request keeps the change", a.api.noticeSync.out.has("qa:qa-2:open"),
+          [...a.api.noticeSync.out]);
+    daemon.down = false;
+    await tickAll(a, b);
+    check("and sends it once the daemon answers", a.api.noticeSync.out.size === 0 &&
+            rowOf(b, "second question").read === true, rowOf(b, "second question"));
+
+    // A new store (another epoch) is read from the start.
+    daemon.epoch = "e2";
+    const before = b.api.noticeSync.seq;
+    await b.api.noticeSyncTick();
+    check("a new epoch reads from seq 0", daemon.bodies[daemon.bodies.length - 1].since === before &&
+            b.api.noticeSync.epoch === "e2", b.api.noticeSync.epoch);
+
+    // A daemon without the route: the page stays local and stops asking.
+    const old = fakeNoticeDaemon();
+    old.missing = true;
+    const lone = build({ daemon: old });
+    await lone.api.noticeSyncTick();
+    check("a daemon without the route turns sync off", lone.api.noticeSync.off === true,
+          lone.api.noticeSync.off);
+    const n = lone.apiCalls.length;
+    await lone.api.noticeSyncTick();
+    check("and it is not asked again", lone.apiCalls.length === n, lone.apiCalls);
+    delete globalThis.QaPane;
+    delete globalThis.ThreadsPane;
   }
 
   /* --- the markup and the stylesheet the code reaches for --------------- */

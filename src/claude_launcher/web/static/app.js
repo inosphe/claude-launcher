@@ -47296,11 +47296,17 @@ function notify(title, sub, opts) {
   dismissNotice(key);            // one card per key, always the newest
   // `target` ({thread} or {qa}) is what `open` opens, kept in a form the
   // history can store, so its row opens the same place (claunch-x76l8).
+  // `sync` names the event for the other browsers (claunch-mfzlv): one that
+  // was already read or put away there is written as such and puts up no card.
+  const remote = o.sync ? noticeSync.remote.get(o.sync) : null;
   const rec = noticeRecord(Object.assign(
     { title, sub: sub || "", kind: o.kind || "" },
     o.session ? { session: o.session } : {},
-    o.session && o.target ? { target: o.target } : {}
+    o.session && o.target ? { target: o.target } : {},
+    o.sync ? { sync: o.sync } : {},
+    remote && typeof remote.read === "boolean" ? { read: remote.read } : {}
   ));
+  if (remote && (remote.dismissed || remote.read === true)) return null;
   // With the history panel open the notice goes to the panel only: no card
   // now, and none left behind to pop up once the panel closes (claunch-k2khb).
   if (noticePanelOpen()) return null;
@@ -47312,6 +47318,7 @@ function notify(title, sub, opts) {
   close.title = "dismiss (the history keeps it)";
   close.addEventListener("click", (ev) => {
     if (ev && ev.stopPropagation) ev.stopPropagation();
+    noticeSyncDismiss(key);
     dismissNotice(key);
   });
   node.appendChild(close);
@@ -47321,6 +47328,7 @@ function notify(title, sub, opts) {
   // move is that session's pane, and the click puts the card away as well.
   node.title = o.session ? `open ${o.session}` : "click to dismiss";
   node.addEventListener("click", () => {
+    noticeSyncDismiss(key);
     dismissNotice(key);
     noticeMarkRead([rec.id], true);   // a click is a read; × is not
     if (o.open) o.open();
@@ -47330,7 +47338,7 @@ function notify(title, sub, opts) {
   const timer = o.sticky
     ? null
     : setTimeout(() => dismissNotice(key), o.ms || NOTICE_MS);
-  notices.set(key, { node, timer });
+  notices.set(key, { node, timer, sync: o.sync || "" });
   return node;
 }
 
@@ -47494,7 +47502,11 @@ function noticeMarkRead(ids, read) {
   const want = new Set(ids);
   let changed = false;
   for (const e of noticeHistory) {
-    if (want.has(e.id) && e.read !== read) { e.read = read; changed = true; }
+    if (want.has(e.id) && e.read !== read) {
+      e.read = read;
+      changed = true;
+      if (e.sync) noticeSyncQueue(e.sync, { read });
+    }
   }
   if (!changed) return;
   noticeHistorySave();
@@ -47515,6 +47527,129 @@ function noticeFilterSet(filter) {
   noticeFilter = noticeFilterOf(filter);
   noticeSave(NOTICE_FILTER_KEY, noticeFilter);
   noticePanelPaint();
+}
+
+/* ------------------------------------------------------------------ */
+/* notice sync — what the other browsers did with a card (claunch-mfzlv) */
+/* ------------------------------------------------------------------ */
+/* Every browser on this daemon puts up the same QA and thread-reply cards,
+   and each keeps its own history. A card read or put away in one browser
+   now goes down in the others, and its row reads the same, through the
+   daemon's notice store (daemon/notice_sync.py) — loosely: one request
+   every NOTICE_SYNC_MS, sooner after a change made here.
+
+   A notice takes part when it carries `sync`, an id derived from the event
+   (`qa:<id>:open`, `thread:<thread>:<seq>`) so every browser names it the
+   same way. Notices that only this page has (a copy that failed, the
+   daemon's link) carry none and stay local; gate requests settle through
+   their own polls.
+
+   What is shared: `dismissed` (×, a click on the card, the threads pane
+   shown, the history panel opened) and `read` (a click on the card or the
+   row, Mark read / unread). Dismissed only goes one way. For `read` the
+   daemon refuses a change made without knowing a newer one from another
+   browser (the `base` it sends is the last daemon seq it saw for that id)
+   and answers with the stored value, which this page then takes: of two
+   browsers flipping the same row, the first to reach the daemon wins and
+   the other row turns to match. A notice that arrives here after another
+   browser dealt with it is written to the history as that browser left it
+   and puts up no card. */
+const NOTICE_SYNC_MS = 15000;      // the loose pace of the poll
+const NOTICE_SYNC_SOON_MS = 1500;  // after a change made here
+const noticeSync = {
+  epoch: "", seq: 0,
+  remote: new Map(),     // sync id -> the daemon's record
+  out: new Map(),        // sync id -> {read?, dismissed?, base} not yet sent
+  busy: false, off: false, soon: null,
+};
+
+function noticeSyncQueue(sync, change) {
+  if (!sync || noticeSync.off) return;
+  const held = noticeSync.out.get(sync) || {};
+  const r = noticeSync.remote.get(sync);
+  const next = Object.assign(held, change);
+  if (next.base === undefined) next.base = (r && r.read_seq) || 0;
+  noticeSync.out.set(sync, next);
+  if (noticeSync.soon) return;
+  noticeSync.soon = setTimeout(() => {
+    noticeSync.soon = null;
+    noticeSyncTick();
+  }, NOTICE_SYNC_SOON_MS);
+}
+
+/* The sync id of the card up under `key`, if it has one. */
+function noticeSyncOf(key) {
+  const card = notices.get(key);
+  return card ? card.sync || "" : "";
+}
+
+/* A person put the card under `key` away (or looked at what it pointed to). */
+function noticeSyncDismiss(key) {
+  const sync = noticeSyncOf(key);
+  if (sync) noticeSyncQueue(sync, { dismissed: true });
+}
+
+/* The daemon's word on one record: its card goes when dismissed, its rows
+   take its read state. Writes the history once for a batch. */
+function noticeSyncApply(rows) {
+  let changed = false;
+  for (const r of rows || []) {
+    if (!r || typeof r.id !== "string") continue;
+    noticeSync.remote.set(r.id, r);
+    if (r.dismissed || r.read === true) {
+      for (const [key, card] of [...notices]) if (card.sync === r.id) dismissNotice(key);
+    }
+    // A change still waiting to go out is newer than what the daemon said.
+    const pending = noticeSync.out.get(r.id);
+    if (typeof r.read !== "boolean" || (pending && "read" in pending)) continue;
+    for (const e of noticeHistory) {
+      if (e.sync === r.id && e.read !== r.read) { e.read = r.read; changed = true; }
+    }
+  }
+  if (!changed) return;
+  noticeHistorySave();
+  noticeBellPaint();
+  noticePanelPaint();
+}
+
+async function noticeSyncTick() {
+  if (noticeSync.busy || noticeSync.off) return;
+  noticeSync.busy = true;
+  const sent = new Map(noticeSync.out);
+  noticeSync.out.clear();
+  try {
+    const resp = await api("/api/notices/sync", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        epoch: noticeSync.epoch, since: noticeSync.seq,
+        changes: [...sent].map(([id, c]) => Object.assign({ id }, c)),
+      }),
+    });
+    // A daemon from before this route: stay local, as the page always was.
+    if (resp.status === 404) { noticeSync.off = true; return; }
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const doc = await resp.json();
+    if (doc.epoch !== noticeSync.epoch) noticeSync.remote.clear();
+    noticeSync.epoch = doc.epoch || "";
+    noticeSync.seq = Number(doc.seq) || 0;
+    // Refused changes: the daemon's value stands, so drop ours before
+    // applying it (a later local change starts from that value).
+    for (const r of doc.conflicts || []) {
+      const c = sent.get(r.id);
+      if (c) delete c.read;
+    }
+    noticeSyncApply(doc.conflicts);
+    noticeSyncApply(doc.changes);
+  } catch {
+    // Offline or refused: what was not sent goes out with the next request,
+    // behind anything changed here since.
+    for (const [id, c] of sent) {
+      noticeSync.out.set(id, Object.assign(c, noticeSync.out.get(id) || {}));
+    }
+  } finally {
+    noticeSync.busy = false;
+  }
 }
 
 function gateHistoryEntry(type, rid) {
@@ -47703,7 +47838,12 @@ function noticeHideAll(opening) {
     }
     if (hid) noticeGateRefresh(type);
   }
-  if (opening) for (const key of [...notices.keys()]) dismissNotice(key);
+  if (opening) {
+    for (const key of [...notices.keys()]) {
+      noticeSyncDismiss(key);
+      dismissNotice(key);
+    }
+  }
 }
 
 function noticeStamp(ms) {
@@ -48127,6 +48267,7 @@ function qaNoticeCard(session, q) {
     q.title,
     {
       key: `qa-${q.id}`, sticky: true, session, target: { qa: q.id },
+      sync: `qa:${qaNoticeKey(q)}`,
       open: () => qaNoticeOpen(session, q.id),
     }
   );
@@ -48194,6 +48335,7 @@ function threadNoticeCard(session, r) {
   const key = `thread-${r.thread}`;
   notify(`${session} replied in “${r.title}”`, r.excerpt || "", {
     key, sticky: true, session, target: { thread: r.thread },
+    sync: `thread:${r.thread}:${r.seq}`,
     open: () => threadNoticeOpen(session, r.thread),
   });
   if (!threadNoticeKeys.has(session)) threadNoticeKeys.set(session, new Set());
@@ -48205,7 +48347,10 @@ function threadNoticeCard(session, r) {
 function threadNoticeClear(session) {
   const keys = threadNoticeKeys.get(session);
   if (!keys) return;
-  for (const key of keys) dismissNotice(key);
+  for (const key of keys) {
+    noticeSyncDismiss(key);
+    dismissNotice(key);
+  }
   threadNoticeKeys.delete(session);
 }
 
@@ -50217,8 +50362,12 @@ async function pollOnce() {
 pollTimer = setInterval(pollTick, DASHBOARD_POLL_MS);
 // Back in view: poll now rather than at the hidden rate's next slot.
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) { hiddenPolledAt = 0; pollTick(); }
+  if (!document.hidden) { hiddenPolledAt = 0; pollTick(); noticeSyncTick(); }
 });
+// What the other browsers did with their cards (claunch-mfzlv): at its own
+// loose pace, and once now so a card dealt with elsewhere goes down soon.
+setInterval(noticeSyncTick, NOTICE_SYNC_MS);
+noticeSyncTick();
 
 /* What the rail hold listens to (its state and functions live beside
    refreshSessions, which consults them). pointerdown covers mouse, pen and

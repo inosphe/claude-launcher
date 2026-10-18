@@ -238,6 +238,12 @@ def threads_db() -> Path:
     return daemon_dir() / "threads.sqlite3"
 
 
+def notice_sync_json() -> Path:
+    """What the dashboard's browsers did with each notice, shared between
+    them (daemon/notice_sync.py, claunch-mfzlv)."""
+    return daemon_dir() / "notice-sync.json"
+
+
 def mesh_root() -> Path:
     """Root for mesh state (definitions, message logs, delivery cursors)."""
     return daemon_dir() / "mesh"
