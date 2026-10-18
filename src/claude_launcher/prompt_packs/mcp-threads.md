@@ -8,8 +8,8 @@ The user can talk to you in several sub-topic threads at once from the
 threads pane beside your terminal. A message they write there is typed into
 your terminal as a `[claunch thread th-xxxxxx "title"]` block; answer it with
 `thread_reply` on that thread_id, not in the terminal, so each topic keeps its
-own history. Keep each thread to its topic; carry the main task on in the
-terminal as usual.
+own history. Keep each thread to its topic (below); carry the main task on
+in the terminal as usual.
 
 - `thread_read` returns a thread's whole conversation (use it to pick a topic
   back up).
@@ -23,6 +23,39 @@ GitHub-flavored markdown: the pane renders it (headings, lists, **bold**,
 `code`, fenced code blocks, tables, links) and keeps single line breaks; it
 shows raw HTML as text, and a reply wrapped whole in one code fence shows as
 a code block.
+
+### One thread, one topic
+
+A thread's title names its topic, and the user finds a conversation by that
+title in the threads pane and the notice history. A thread that carries
+messages about other subjects hides them under a title that no longer
+describes them. So before every `thread_reply`, compare what you are about
+to write with the thread's title and subject. When the content has diverged
+from them, do not write it into that thread: `thread_open` a new thread
+whose title names the new subject, and write it there.
+
+The content has diverged when, for example:
+
+- it is a new task, instruction or issue that arrived after the thread was
+  opened about something else;
+- it asks for an approval, an answer or a decision about a different issue,
+  step or run than the one the thread is about;
+- the thread's subject is settled (approved, answered, done) and you have
+  something else to tell the user.
+
+Being the thread you used last, or the one the user is reading now, does not
+make a thread the right place. When the new subject follows from the old
+one, name the old thread id in one line of the new thread's first message;
+do not copy the old conversation over. Close the old thread with
+`thread_close` once its own subject is settled. A session keeps at most 50
+open threads; when `thread_open` is refused for that, close settled threads
+and open again rather than writing into an unrelated one.
+
+`thread_reply` stays the answer for anything on the thread's subject: the
+user's message there, a follow-up on the same issue or decision, the result
+of the action the thread asked for. When the user raises a new subject in a
+thread, answer that message in the thread, and carry any further work on it
+in a new thread named in that answer.
 
 ### Threads and QA questions
 
@@ -55,9 +88,12 @@ for example:
 
 How:
 
-1. Use an existing thread first. `thread_list` (add `closed=true` when an
-   older topic may match); if a thread is already about this subject,
-   `thread_reply` there — a reply to a closed thread reopens it.
+1. Use an existing thread only when it is about this subject.
+   `thread_list` (add `closed=true` when an older topic may match); if a
+   thread's title and subject are this same matter (the same issue, the
+   same decision), `thread_reply` there — a reply to a closed thread reopens
+   it. A thread about another matter is not reused for the alert (see
+   "One thread, one topic").
 2. Otherwise `thread_open` with a title you choose: one line naming the
    subject (e.g. `Daemon restart needed to apply claunch-xxxx`), and the
    message as `text`.
