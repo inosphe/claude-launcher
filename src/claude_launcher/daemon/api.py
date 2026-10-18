@@ -683,6 +683,11 @@ def build_app(
     # is a merge, and the module hooks how that merge is written and kept.
     from . import deep_think
     deep_think.install(app)
+    # Category trees (daemon/category_api.py, claunch-p2v4m): the workspace
+    # keyword index of sessions and issues. After app["handoff"]: assign to
+    # tree is a quick-fork whose merge the module writes and settles.
+    from . import category_api
+    category_api.install(app)
     app.on_startup.append(_start_rag)
     app.on_shutdown.append(_stop_rag)
     # How late the loop runs its callbacks: the part of the page's round

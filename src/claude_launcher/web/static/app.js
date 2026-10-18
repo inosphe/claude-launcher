@@ -18629,7 +18629,7 @@ function sessLayoutFor(name) {
     // a pi-durable session's event chart (◇), or the conversation pane
     // (talk-pane.js) on the session's questions (?), its threads (🗪) or
     // both side by side.
-    pane: ["sims", "chart", "qa", "threads", "both"].includes(raw.pane)
+    pane: ["sims", "category", "chart", "qa", "threads", "both"].includes(raw.pane)
       ? raw.pane : "run",
     ratio: clampSplitRatio(Number(raw.ratio)),
     // The conversation pane enlarged to the whole column (its ⤢ button,
@@ -20630,6 +20630,12 @@ function syncSplitPane() {
   sims.title = simsOn
     ? "close the simulations pane — the terminal takes the column back"
     : "this session's simulations under the terminal — run, answer, decide edit proposals";
+  const cat = $("term-categorybtn");
+  const catOn = !!lay && lay.split && lay.pane === "category";
+  cat.setAttribute("aria-pressed", String(catOn));
+  cat.title = catOn
+    ? "close the category pane — the terminal takes the column back"
+    : "this session's place in its workspace's category tree — assign it to the tree";
   const chart = $("term-chartbtn");
   const chartOn = !!lay && lay.split && lay.pane === "chart";
   chart.setAttribute("aria-pressed", String(chartOn));
@@ -20856,6 +20862,7 @@ function mobileTitle() {
     case "commit": return "commit";
     case "threads": return "threads";
     case "glossary": return "용어집";
+    case "category": return "category";
     case "sims": return "simulations";
     case "spec": return "work spec";
     case "mesh": return `mesh · ${meshName}`;
@@ -21019,6 +21026,7 @@ const VIEWS = {
   sysperf: "sysperf-view",
   cli: "cli-view",
   beads: "beads-view",
+  category: "category-view",
   worktrees: "worktrees-view",
   commit: "commit-view",
   threads: "threads-view",
@@ -21232,6 +21240,8 @@ function openSplit(name, kind = "run") {
   splitKind = kind;
   // The simulations view keeps its own poll (sim-page.js).
   if (kind === "sims") { globalThis.SimPane?.mount($("term-wf"), name); return; }
+  // So does the category pane (category-page.js).
+  if (kind === "category") { globalThis.CategoryPane?.mount($("term-wf"), name); return; }
   // And the session's conversation (talk-pane.js): its threads, its
   // questions, or both. A save or a send moves the header's lights at once
   // rather than at the next dashboard poll; a tab press is written down as
@@ -21263,6 +21273,7 @@ function closeSplit() {
   splitGen += 1;
   if (splitPollTimer) { clearInterval(splitPollTimer); splitPollTimer = null; }
   if (splitKind === "sims") globalThis.SimPane?.unmount();
+  if (splitKind === "category") globalThis.CategoryPane?.unmount();
   if (isTalkPane(splitKind)) globalThis.TalkPane?.unmount();
   if (splitDurable) { splitDurable.unmount(); splitDurable = null; }
   splitKind = null;
@@ -21350,6 +21361,7 @@ async function refreshSplit() {
    what actually opens and closes the pane, so a press and a reload agree. */
 $("term-splitbtn").addEventListener("click", () => toggleSplitPane("run"));
 $("term-simsbtn").addEventListener("click", () => toggleSplitPane("sims"));
+$("term-categorybtn").addEventListener("click", () => toggleSplitPane("category"));
 $("term-chartbtn").addEventListener("click", () => toggleSplitPane("chart"));
 $("term-qabtn").addEventListener("click", () => toggleSplitPane("qa"));
 $("term-threadsbtn").addEventListener("click", () => toggleSplitPane("threads"));
@@ -21747,6 +21759,10 @@ function parseHash(h) {
   }
   if (parts[0] === "threads") return { page: "threads", view: parts[1] || "", id: parts[2] || "" };
   if (parts[0] === "glossary") return { page: "glossary" };
+  // #/category is the tree of the last workspace; #/category/<workspace> names one.
+  if (parts[0] === "category") {
+    return { page: "category", workspace: parts[1] ? decodeURIComponent(parts[1]) : "" };
+  }
   if (parts[0] === "sims") return { page: "sims", id: parts[1] || "", section: parts[2] || "" };
   if (parts[0] === "spec") return { page: "spec" };
   // #/settings is the machine's own settings; #/settings/profiles the profile
@@ -21815,6 +21831,7 @@ function route() {
   if (r.page !== "commit") globalThis.CommitPage?.stop();
   if (r.page !== "threads") globalThis.ThreadsHistoryPage?.stop();
   if (r.page !== "glossary") globalThis.GlossaryPage?.stop();
+  if (r.page !== "category") globalThis.CategoryPage?.stop();
   if (r.page !== "sims") globalThis.SimPage?.stop();
   if (r.page !== "spec") globalThis.SpecPage?.stop();
   if (r.page !== "log") closeTranscript();
@@ -21901,6 +21918,7 @@ function route() {
       globalThis.CommitPage.open(r.sha, { session: r.session, cwd: r.cwd }); break;
     case "threads": showView("threads"); globalThis.ThreadsHistoryPage.open(r.view, r.id); break;
     case "glossary": showView("glossary"); globalThis.GlossaryPage.open(); break;
+    case "category": showView("category"); globalThis.CategoryPage.open(r.workspace); break;
     case "sims": showView("sims"); globalThis.SimPage.open(r.id, r.section); break;
     case "spec": showView("spec"); globalThis.SpecPage.open(); break;
     default: openHome();

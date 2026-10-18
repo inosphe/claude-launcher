@@ -558,6 +558,7 @@ CHECKS = [
         "worktreespage_check.js",
         "commitpage_check.js",
         "glossarypage_check.js",
+        "categorypage_check.js",
         "simpage_check.js",
         "durableflow_check.js",
         "qapane_check.js",
