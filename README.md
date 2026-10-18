@@ -2900,6 +2900,22 @@ that is neither installed nor shipped),
 `PUT /api/prompt-packs/role-packs` (`{role_packs?, default_packs?}`; `null`
 restores a default; a bad id in either saves neither).
 
+#### Workspace prompt (every session created in a workspace)
+
+A workspace copy whose header says `delivery: always` is that workspace's own
+prompt: every session created there gets it — the create form, `claunch
+new-session` and a spawn alike, whatever was ticked and whatever the role,
+right after the daemon's prompt and before the ticked packs. A worktree under
+the workspace (`.claude/worktrees/<name>`) counts as the workspace. Put a
+Markdown file in `<workspace>/.claunch/prompts/` with that header; nothing
+needs installing or ticking. Only the workspace's copy decides — claunch's own
+copy of a pack is never always — and a shipped on-demand id stays out. The
+form shows it locked on with "required by workspace …", the opening header
+says "this workspace's own prompt", and the session record keeps `always`
+through reminders, rebriefs and daemon restarts. A session created before the
+file appeared does not get it. This repository's is
+`.claunch/prompts/test-isolation.md`.
+
 #### On-demand packs (sent to a running session, never in an opening)
 
 A pack whose header says `delivery: on-demand` is not chosen at creation: it

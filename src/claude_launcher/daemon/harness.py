@@ -497,6 +497,9 @@ def _prompt_packs_field(raw) -> Tuple[dict, ...]:
                 rec["required_by"] = [str(r) for r in item["required_by"]]
             if item.get("ticked") is True:
                 rec["ticked"] = True
+            # A workspace's own prompt (prompt_packs.ALWAYS).
+            if item.get("always") is True:
+                rec["always"] = True
             out.append(rec)
     return tuple(out)
 

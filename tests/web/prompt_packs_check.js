@@ -89,7 +89,7 @@ const env = new Function(
    slice("newDaemonPromptWanted"),
    slice("newSubrolesMeshless"), slice("newImpliedSubrole"), slice("newSubroles"),
    slice("newPrimaryRole"),
-   slice("newRequiredPacks"), slice("newPackTicked"),
+   slice("newRequiredPacks"), slice("newWorkspaceAlwaysIds"), slice("newPackTicked"),
    slice("renderPromptPackRow"), slice("newPromptPacks"),
    slice("togglePackPreview"), slice("packPreviewOrigin"), slice("packPreviewPanel"),
    `return {
@@ -558,6 +558,24 @@ check("the default packs are ticked again each time the form opens", async () =>
   assert.deepEqual(env.packs(form), []);
   delete answers["/api/prompt-packs/offer"];
   env.ticks().clear();
+  env.offer = OFFER;
+  env.render();
+});
+
+check("the workspace's own prompt is locked on, first, and left to the daemon", () => {
+  env.ticks().clear();
+  env.offer = { ...OFFER, packs: [...OFFER.packs,
+    { id: "house-rules", title: "House rules", delivery: "always" }] };
+  env.render();
+  const box = boxes().find((b) => b.value === "house-rules");
+  assert.equal(box.checked, true);
+  assert.equal(box.disabled, true);
+  const lock = all(row, (n) => n.className === "pack-chip-lock" && n.textContent === "🔒");
+  assert.equal(lock.length, 1);
+  assert.equal(lock[0].title, "required by workspace proj (every session)");
+  // The daemon adds it on every path, so the form does not send it.
+  assert.deepEqual(env.packs(form), ["common"]);
+  assert.match(summary(), /^The opening will include: house-rules \(workspace, every session\) · common \(default\)\./);
   env.offer = OFFER;
   env.render();
 });

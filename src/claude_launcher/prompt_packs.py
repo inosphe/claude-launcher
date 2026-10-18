@@ -13,8 +13,10 @@ Two steps, on purpose:
    A workspace opts in; a profile never does, because a pack describes a
    repository's working rules and a profile spans repositories.
 2. **Choose it at session creation.** The create form offers every pack
-   installed in the chosen workspace as a checkbox, checked by default; the
-   ones left checked are put into the session's opening
+   installed in the chosen workspace as a checkbox, checked when Settings
+   lists it as a default pack (:func:`default_packs`); a CLI create or a
+   spawn names its packs itself (``--prompt-pack``, ``prompt_packs``). The
+   ones chosen are put into the session's opening
    (:func:`opening_block`). The copy in the workspace is what is read, so a
    workspace that edited its copy gets its edit.
 
@@ -41,6 +43,15 @@ place: the create form does not offer it, it cannot be ticked, saved as a
 default pack, or required by a role, and a saved setting that names one is
 read without it (:func:`offerable`). It still installs into a workspace like
 any pack, so a workspace can edit its text.
+
+A workspace copy whose header says ``delivery: always`` (:data:`ALWAYS`) is
+the workspace's own prompt: every session created in that workspace gets it,
+on every creation path (the create form, ``claunch new-session``, a spawn),
+whatever was ticked and whatever the role (:func:`always_packs`). Only the
+workspace's copy counts -- claunch's own copy of a pack never makes it
+always, because "every session here" is a decision a workspace makes about
+itself. An on-demand pack is never in an opening, so on-demand wins over
+always for a shipped id.
 """
 
 from __future__ import annotations
@@ -78,9 +89,12 @@ PACKAGE = "package"
 DAEMON = "daemon"
 
 #: ``delivery`` header values. :data:`OPENING` (the default) is a pack an
-#: opening may carry; :data:`ON_DEMAND` is one only ever sent later.
+#: opening may carry; :data:`ON_DEMAND` is one only ever sent later;
+#: :data:`ALWAYS` is a workspace copy every session created there gets.
 OPENING = "opening"
 ON_DEMAND = "on-demand"
+ALWAYS = "always"
+_DELIVERIES = (OPENING, ON_DEMAND, ALWAYS)
 
 #: A pack id is its file name without ``.md``: lower-case words and dashes,
 #: so it is safe in a path, a URL and a checkbox value alike.
@@ -102,12 +116,16 @@ class Pack:
     #: :data:`WORKSPACE`, :data:`PACKAGE` (see :func:`pack_copy`) or
     #: :data:`DAEMON`.
     source: str = WORKSPACE
-    #: :data:`OPENING` or :data:`ON_DEMAND`, from the header.
+    #: :data:`OPENING`, :data:`ON_DEMAND` or :data:`ALWAYS`, from the header.
     delivery: str = OPENING
 
     @property
     def on_demand(self) -> bool:
         return self.delivery == ON_DEMAND
+
+    @property
+    def always(self) -> bool:
+        return self.delivery == ALWAYS
 
     def to_dict(self) -> dict:
         out = {
@@ -116,8 +134,8 @@ class Pack:
         }
         # Only the exception is spelled out, so an opening pack's row reads
         # as it did before the header existed.
-        if self.on_demand:
-            out["delivery"] = ON_DEMAND
+        if self.delivery != OPENING:
+            out["delivery"] = self.delivery
         return out
 
 
@@ -153,7 +171,7 @@ def parse(pack_id: str, raw: str) -> Pack:
         description=str(meta.get("description") or "").strip(),
         body=body.strip(),
         raw=raw,
-        delivery=ON_DEMAND if delivery == ON_DEMAND else OPENING,
+        delivery=delivery if delivery in _DELIVERIES else OPENING,
     )
 
 
@@ -360,6 +378,18 @@ def installed(workspace: Path) -> List[Pack]:
     return out
 
 
+def always_packs(workspace: Optional[Path]) -> List[Pack]:
+    """The workspace's own prompt: its copies headed ``delivery: always``.
+
+    Read from the workspace's directory only (:data:`ALWAYS`); an id claunch
+    ships as on-demand stays out, as it does from every opening.
+    """
+    if workspace is None:
+        return []
+    return [p for p in installed(workspace)
+            if p.always and not is_on_demand(p.id, workspace)]
+
+
 def workspace_rows(workspace: Path) -> List[dict]:
     """One row per pack a workspace could hold: shipped ones, then local."""
     rows = []
@@ -380,7 +410,7 @@ def text_id(body: str) -> str:
 
 def opening_block(
     pack_id: str, body: str, source: str = WORKSPACE, *,
-    required_by=None, ticked: bool = False,
+    required_by=None, ticked: bool = False, always: bool = False,
 ) -> str:
     """One pack as it goes into an opening, with its id beside it.
 
@@ -390,7 +420,8 @@ def opening_block(
     where the text came from, because a package copy has no file in the
     workspace to point at -- and, for that copy, why it is there: the roles
     that require it (``required_by``), else that it was ticked at creation.
-    A record from before the reason was kept says neither.
+    A record from before the reason was kept says neither. A workspace copy
+    that is the workspace's own prompt (``always``) says so.
     """
     if source == PACKAGE:
         if required_by:
@@ -408,6 +439,9 @@ def opening_block(
     elif source == "prompter":
         origin = "from the configured prompter server, selected at session creation"
         where = "file: (server prompt; snapshot saved with this session)"
+    elif always:
+        origin = "this workspace's own prompt, given to every session created in it"
+        where = f"file: {(INSTALL_DIR / (pack_id + '.md')).as_posix()}"
     else:
         origin = "installed in this workspace, chosen at session creation"
         where = f"file: {(INSTALL_DIR / (pack_id + '.md')).as_posix()}"
@@ -467,7 +501,9 @@ def records(
     existed. A package copy also keeps why it went in -- ``required_by`` (the
     roles, from :func:`required_for`) and ``ticked`` -- because it has no
     workspace file to explain its presence and its opening header says which
-    (:func:`opening_block`).
+    (:func:`opening_block`). A workspace copy headed ``delivery: always``
+    keeps ``always`` -- the one key such a record adds -- so its header still
+    says why it is there after a reminder or a rebrief rewrites it.
     """
     required = required or {}
     asked = set(asked or ())
@@ -476,6 +512,8 @@ def records(
         rec: Dict[str, object] = {"id": p.id, "text": p.body}
         if p.source in (PACKAGE, DAEMON):
             rec["source"] = p.source
+        elif p.always:
+            rec["always"] = True
         if p.source == PACKAGE:
             if required.get(p.id):
                 rec["required_by"] = list(required[p.id])
@@ -491,6 +529,7 @@ def opening(recorded) -> str:
         opening_block(
             r["id"], r["text"], r.get("source") or WORKSPACE,
             required_by=r.get("required_by"), ticked=bool(r.get("ticked")),
+            always=bool(r.get("always")),
         )
         for r in recorded or ()
     )
@@ -676,15 +715,17 @@ def choose(
     workspace: Optional[Path], chosen, roles, *,
     mapping: Optional[Dict[str, List[str]]] = None,
 ) -> tuple:
-    """The packs a session gets: what was ticked, plus what its roles require.
+    """The packs a session gets: the workspace's own prompt, what was ticked,
+    and what its roles require.
 
     Returns ``(records, required)``, where ``required`` is
     :func:`required_for`'s answer. Every pack is read through
     :func:`pack_copy`, so a ticked one needs no install either: the form
     offers claunch's own packs beside the workspace's, picked freely whatever
-    the role. The order is the ticked ones first, then the required ones,
-    each once. An on-demand pack is refused when ticked and skipped when a
-    role names it (:func:`offerable`): it is never part of an opening.
+    the role. The order is the workspace's ``delivery: always`` copies
+    (:func:`always_packs`) first, then the ticked ones, then the required
+    ones, each once. An on-demand pack is refused when ticked and skipped
+    when a role names it (:func:`offerable`): it is never part of an opening.
     """
     required = required_for(roles, mapping)
     required = {k: v for k, v in required.items()
@@ -693,8 +734,11 @@ def choose(
     bad = [i for i in asked if is_on_demand(i, workspace)]
     if bad:
         raise PackError(_on_demand_refusal(bad, "ticked at session creation"))
-    packs = []
+    packs = always_packs(workspace)
+    given = {p.id for p in packs}
     for pack_id in dict.fromkeys([*asked, *required]):
+        if pack_id in given:
+            continue
         try:
             packs.append(pack_copy(workspace, pack_id))
         except PackError as exc:

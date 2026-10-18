@@ -11816,6 +11816,15 @@ function newRequiredPacks(f) {
   return out;
 }
 
+/* The workspace's own prompt: its installed packs headed `delivery: always`
+   (prompt_packs.ALWAYS). The daemon puts them into every session created in
+   the workspace whatever is ticked, so the form shows them locked on and
+   does not send them. */
+function newWorkspaceAlwaysIds() {
+  return ((newPackOffer && newPackOffer.packs) || [])
+    .filter((p) => p && p.delivery === "always").map((p) => p.id);
+}
+
 /* The operator's own tick in this opening, else whether Settings lists it
    as a default pack. Installed or not makes no difference: one the workspace
    has not installed goes in as claunch's copy, and the chip says so. */
@@ -11888,8 +11897,10 @@ function renderPromptPackRow() {
     wrap.appendChild(view);
     return wrap;
   };
+  const always = new Set(newWorkspaceAlwaysIds());
   const packChip = (p, packaged) => {
-    const by = required[p.id];
+    const by = required[p.id] ||
+      (!packaged && always.has(p.id) ? [`workspace ${wsName} (every session)`] : null);
     return chip(p, {
       name: `prompt_pack_${p.id}`, value: p.id,
       checked: by ? true : newPackTicked(p.id), locked: by,
@@ -11989,14 +12000,16 @@ function renderPromptPackRow() {
   // alone do not say which role a locked one came from when the Role row
   // was left blank. Its own block right under the chips, above the text
   // preview, so opening a preview never moves it.
-  const chosen = [...newPromptPacks(f), ...Object.keys(required).filter((id) => shippedIds.has(id))]
+  const chosen = [...always, ...newPromptPacks(f),
+    ...Object.keys(required).filter((id) => shippedIds.has(id))]
     .filter((id, i, a) => a.indexOf(id) === i);
   const primary = newPrimaryRole(f);
   // A pill stays short -- a long one wraps the summary onto another line
   // and moves what is under it (claunch-5gbqg): only claunch's copy is
   // marked, and where the copy comes from is the pill's tooltip.
   const parts = chosen.map((id) => {
-    const why = required[id] ? `role ${required[id].join(", ")}`
+    const why = always.has(id) ? "workspace, every session"
+      : required[id] ? `role ${required[id].join(", ")}`
       : (newPackDefaults().includes(id) ? "default" : "ticked");
     const packaged = shippedIds.has(id);
     const title = !packaged ? `${wsName}'s copy, installed there`
@@ -12114,8 +12127,9 @@ function newPromptPacks(f) {
   const others = ((newPackOffer && newPackOffer.shipped) || [])
     .map((p) => p.id).filter((id) => !have.has(id));
   const required = newRequiredPacks(f);
+  const always = new Set(newWorkspaceAlwaysIds());
   return [
-    ...installed.filter((id) => required[id] || newPackTicked(id)),
+    ...installed.filter((id) => !always.has(id) && (required[id] || newPackTicked(id))),
     ...others.filter((id) => !required[id] && newPackTicked(id)),
   ];
 }
