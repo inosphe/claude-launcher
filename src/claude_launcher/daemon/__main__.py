@@ -839,6 +839,7 @@ def main(argv=None) -> int:
     # the port, so the manifest's port is read again for the bind below.
     try:
         instance_manifest.apply()
+        instance_manifest.check_pairing()
         manifest_port = instance_manifest.pinned_port()
     except instance_manifest.InstanceManifestError as exc:
         print(f"error: {exc}", file=sys.stderr)

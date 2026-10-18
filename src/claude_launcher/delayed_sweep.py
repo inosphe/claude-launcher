@@ -113,6 +113,7 @@ class Queue:
         ref = f"refs/heads/delayed-sweep/{owner}/{sha}"
         origin = json.dumps({"instance": paths.instance(),
                              "home": str(config.launcher_home().resolve()),
+                             "config": str(config.sync_file().resolve()),
                              "base": str(paths.base_home().resolve()),
                              "scratch": str(paths.session_scratch_dir(owner).resolve())})
         with self.connect() as db:

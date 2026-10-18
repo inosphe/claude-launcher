@@ -467,3 +467,78 @@ def test_real_daemon_process_runs_under_its_manifest(home, tmp_path):
             proc.kill()
             proc.wait(timeout=10)
 
+
+
+# -- home and config file of two different instances (claunch-edy0w) ----------
+def _team(base, tmp_path, **doc):
+    team_home = tmp_path / "team-home"
+    team_cfg = tmp_path / "team.yaml"
+    team_cfg.write_text(yaml.safe_dump({"version": 1, "profiles": {"teamonly": {}}}),
+                        encoding="utf-8")
+    full = {"home": str(team_home), "config": str(team_cfg)}
+    full.update(doc)
+    _manifest(base, "team", {k: v for k, v in full.items() if v is not None})
+    return team_home, team_cfg
+
+
+def test_cli_refuses_an_instances_config_under_the_base_home(home, tmp_path, monkeypatch, capsys):
+    """The delayed-sweep runner of 2026-10-18: the default instance's home
+    with kimyori's config file. bootstrap would create kimyori's profiles
+    under the default home and rewrite kimyori's config from there."""
+    _, team_cfg = _team(home, tmp_path)
+    before = team_cfg.read_bytes()
+    monkeypatch.setenv(config.LAUNCHER_SYNC_ENV, str(team_cfg))
+    monkeypatch.setenv(paths.INSTANCE_BASE_ENV, str(home))
+
+    assert cli.main(["list"]) == 2
+    err = capsys.readouterr().err
+    assert "belongs to instance 'team'" in err and str(home) in err
+    assert not (home / "profiles" / "teamonly").exists()
+    assert team_cfg.read_bytes() == before
+
+
+def test_cli_refuses_an_instances_home_with_another_config(home, tmp_path, monkeypatch, capsys):
+    team_home, _ = _team(home, tmp_path)
+    monkeypatch.setenv(config.LAUNCHER_HOME_ENV, str(team_home))
+    monkeypatch.setenv(paths.INSTANCE_BASE_ENV, str(home))
+
+    assert cli.main(["list"]) == 2
+    assert "launcher home" in capsys.readouterr().err
+    assert not (team_home / "profiles").exists()
+
+
+def test_config_only_manifest_pairs_its_config_with_the_base_home(home, tmp_path, monkeypatch):
+    _, team_cfg = _team(home, tmp_path, home=None)
+    monkeypatch.setenv(config.LAUNCHER_SYNC_ENV, str(team_cfg))
+    im.check_pairing()  # shares the base home: this is that instance
+    monkeypatch.setenv(paths.INSTANCE_BASE_ENV, str(home))
+    monkeypatch.setenv(config.LAUNCHER_HOME_ENV, str(tmp_path / "elsewhere"))
+    with pytest.raises(im.InstanceManifestError, match="belongs to instance 'team'"):
+        im.check_pairing()
+
+
+def test_matching_pairs_run(home, tmp_path, monkeypatch, capsys):
+    team_home, _ = _team(home, tmp_path)
+    # The default instance, next to a named one with its own home and config.
+    assert cli.main(["list"]) == 0
+    assert not (home / "profiles" / "teamonly").exists()
+    # The named instance through its manifest.
+    assert cli.main(["-L", "team", "list"]) == 0
+    assert (team_home / "profiles" / "teamonly").is_dir()
+    assert "teamonly" in capsys.readouterr().out
+
+
+def test_an_unreadable_manifest_of_another_instance_does_not_block(home, tmp_path):
+    _manifest(home, "broken", {"home": "relative"})
+    _team(home, tmp_path)
+    im.check_pairing()
+
+
+def test_daemon_refuses_a_mismatched_pair_before_starting(home, tmp_path, monkeypatch):
+    from claude_launcher.daemon import __main__ as daemon_main
+
+    _, team_cfg = _team(home, tmp_path)
+    monkeypatch.setenv(config.LAUNCHER_SYNC_ENV, str(team_cfg))
+    monkeypatch.setenv(paths.INSTANCE_BASE_ENV, str(home))
+    assert daemon_main.main([]) == 2
+    assert not (home / "daemon").exists()
