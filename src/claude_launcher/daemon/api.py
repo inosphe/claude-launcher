@@ -687,6 +687,10 @@ def build_app(
     # conversations beside the terminal, typed into the session by id.
     from . import threads_api
     threads_api.install(app)
+    # Notice sync (daemon/notice_sync.py, claunch-mfzlv): a card read or put
+    # away in one browser goes down in the others on their next poll.
+    from . import notice_sync
+    notice_sync.install(app)
     # The web debug page (daemon/webdebug.py, claunch-dsb28): a page under
     # development framed through a per-origin proxy, driven by the user and
     # by the session the user picked for it.
