@@ -431,6 +431,14 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
         # Idle at the shutdown but writing shortly before it: a restart may
         # have killed the background command its agent was waiting on.
         recent=resume.recent_idle(manager.resumed_idle),
+        # Operator sessions hear of every restart, whatever they were doing
+        # (claunch-gi7g4): their runs park on purpose, so neither list above
+        # reaches them.
+        operators=resume.operator_sessions(
+            [*manager.resumed_busy, *manager.resumed_idle, *manager.resumed_blank],
+            operators=app.get("operators_v2"),
+            mesh_mgr=mesh_manager,
+        ),
         mesh_mgr=mesh_manager,
     )
     resume_nudge.start()

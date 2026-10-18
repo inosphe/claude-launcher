@@ -4621,7 +4621,11 @@ user's selection or somebody else's answer (the run is stopped exactly where
 the workflow wants it, and the agent cannot open that guardrail anyway). A run
 on a `step` or `select` — and a session with no run at all — is nudged. The
 nudge also waits for the TUI to be able to take it, and is dropped if the
-session starts working on its own first. `claunch daemon config resume_nudge
+session starts working on its own first. Operator sessions (bound to an
+Operator v2, or holding the mesh `operator` role) are the exception: their
+runs park on purpose, so every restored operator hears a restart notice of
+its own whatever it was doing and wherever its run stands, and one already
+working is waited for rather than dropped. `claunch daemon config resume_nudge
 true|false` (read at restore, so an edit applies to the next restart).
 
 **QA nudges (Jev).** A session that ends its turn by asking the user

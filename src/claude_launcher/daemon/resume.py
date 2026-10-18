@@ -77,6 +77,21 @@ and it is not held by the cflow gate, because telling an agent who it is does
 not walk it through any guardrail. It does answer to the same ``resume_nudge``
 switch, though: one knob decides whether a restart types into anything here,
 and a second one for this message would be a setting nobody knows they have.
+
+**A third audience: operator sessions, always (claunch-gi7g4).** An operator
+-- a session bound to an Operator v2 record, or a mesh member holding the
+``operator`` role -- spends most of its life parked on purpose: its run sits on
+``watch-gate`` or on the ``rest`` timer, so it is idle at the shutdown and its
+run reads as parked, and both rules above leave it silent. But its job is to
+watch and to relay, and a restart is exactly what it is there to notice: its
+polls failed while the daemon was down, user input may have queued behind the
+gap, and the timer that would have woken it died with the old daemon. So every
+restored operator hears :func:`operator_block`, whatever it was doing and
+wherever its run stands. A blank restore still hears :func:`blank_block`
+instead, which already says more. And one that is working when it comes back
+is not dropped as driven: the turn it is in was started by somebody else's
+line, not by this notice, so the notice waits for that turn to end. The
+``resume_nudge`` switch still decides for operators too.
 """
 
 from __future__ import annotations
@@ -199,6 +214,36 @@ def recent_idle(idle: Dict[str, Optional[str]], now: Optional[float] = None,
     return out
 
 
+def operator_sessions(
+    names: Iterable[str], *, operators=None, mesh_mgr=None
+) -> List[str]:
+    """The ``names`` that are operator sessions: bound to an Operator v2
+    record (``operators`` is :class:`operators_v2.OperatorsV2`), or holding
+    the ``operator`` role on a mesh ``mesh_mgr`` knows. Either reader may be
+    missing or fail; it then answers nothing, never raises."""
+    bound: set = set()
+    if operators is not None:
+        try:
+            bound = set(operators.operator_names())
+        except Exception:  # noqa: BLE001 — an unreadable record is not fatal
+            log.exception("resume nudge: operator v2 records unreadable")
+    out = []
+    for name in dict.fromkeys(names):
+        if name in bound:
+            out.append(name)
+            continue
+        if mesh_mgr is None:
+            continue
+        try:
+            meshes = mesh_mgr.meshes_for_session(name)
+        except Exception:  # noqa: BLE001 — MeshError, OSError
+            log.exception("resume nudge: mesh roles of %r unreadable", name)
+            continue
+        if any("operator" in (m.get("roles") or [m.get("role")]) for m in meshes):
+            out.append(name)
+    return out
+
+
 def _turn_began(session, since: float) -> bool:
     """Whether a turn started in ``session`` at or after monotonic ``since``.
 
@@ -224,6 +269,7 @@ class ResumeNudge:
         *,
         blank: Iterable[str] = (),
         recent: Iterable[str] = (),
+        operators: Iterable[str] = (),
         mesh_mgr=None,
         poll: float = POLL,
         window: float = WINDOW,
@@ -257,6 +303,14 @@ class ResumeNudge:
         #: hears the blank block whatever it was doing.
         self._recent = {n for n in recent if n not in self.pending}
         self.pending.extend(sorted(self._recent))
+        #: Operator sessions (:func:`operator_sessions`): told of the restart
+        #: whatever they were doing and wherever their run stands, with
+        #: :func:`operator_block` -- unless blank, which says more.
+        self._operators = set(operators) - self._blank
+        self._recent -= self._operators
+        for name in sorted(self._operators):
+            if name not in self.pending:
+                self.pending.append(name)
         #: name -> monotonic time the session first read "ready". A session
         #: seen ready and then working again is being driven by somebody, and
         #: is dropped rather than nudged.
@@ -293,6 +347,7 @@ class ResumeNudge:
         built) found no rollout of its own (claunch-0j6gb.2)."""
         self._blank.add(name)
         self._recent.discard(name)
+        self._operators.discard(name)
         if name not in self.pending:
             self.pending.append(name)
         if self.enabled and (self._task is None or self._task.done()):
@@ -301,8 +356,8 @@ class ResumeNudge:
 
     async def _run(self) -> None:
         log.info(
-            "resume nudge: %d restored session(s) were working or recently "
-            "active: %s",
+            "resume nudge: %d restored session(s) were working, recently "
+            "active or operators: %s",
             len(self.pending),
             ", ".join(self.pending),
         )
@@ -353,6 +408,12 @@ class ResumeNudge:
         if state == "wait":
             return False
         if state == "driven":
+            if name in self._operators:
+                # Somebody else's line started this turn; the restart is
+                # still news to it. Wait for the turn to end and arm again.
+                self._ready_since.pop(name, None)
+                self._waiting[name] = WAIT_WORKING
+                return False
             log.info("resume nudge for %r dropped: it is working again", name)
             return True
 
@@ -369,6 +430,11 @@ class ResumeNudge:
                 briefing=await self._briefing(name),
                 harness=session.sdef.harness,
             )
+        elif name in self._operators:
+            # Not gated either: an operator's run is parked by design (its
+            # watch gate, its rest timer), and this tells it of the restart
+            # rather than asking it through any guardrail.
+            block = operator_block(name)
         else:
             recent = name in self._recent
             if recent:
@@ -531,6 +597,36 @@ def nudge_block(name: str) -> str:
             "cflow run, call its 'status' tool first -- it is the current "
             "truth, and it may have moved while you were down. This is not a "
             "new task and nobody typed it.",
+            "---",
+        ]
+    )
+
+
+def operator_block(name: str) -> str:
+    """What a restored operator session hears, every restart (claunch-gi7g4).
+
+    It cannot reuse :func:`nudge_block` (an operator was usually not in a
+    turn) or :func:`idle_block` (which assumes a run waiting on it). What is
+    true of every operator is that the daemon was gone for a while: the polls
+    and timers that pace its loop stopped, and what the user sent may be
+    waiting in its inbox.
+    """
+    return "\n".join(
+        [
+            "---",
+            "# claunch: session resume (operator) -- machine-generated, not "
+            "typed by the user",
+            f"session: {name}",
+            "what happened: the daemon restarted. This terminal was relaunched "
+            "with --resume, so the conversation above is intact. While the "
+            "daemon was down your polls and the timer that wakes your run "
+            "stopped, any turn or background command you had running was "
+            "stopped with it, and user input may have queued up meanwhile.",
+            "protocol: read and handle pending user input first (opv2_inbox), "
+            "then call your cflow run's 'status' tool and continue your "
+            "service loop from where it stands. If you posted an outage card "
+            "while the daemon was unreachable, post the recovery as the "
+            "observe step says. This is not a new task and nobody typed it.",
             "---",
         ]
     )

@@ -977,3 +977,113 @@ def test_blank_block_without_a_briefing_says_only_what_it_knows(home):
     block = resume.blank_block("w1")
     assert "session: w1" in block
     assert block.rstrip().endswith("---")
+
+
+# --------------------------------------------------------------------------- #
+# operators: told of every restart (claunch-gi7g4)
+# --------------------------------------------------------------------------- #
+def test_an_idle_operator_with_a_parked_run_hears_the_restart(
+        home, tmp_path, monkeypatch, instant):
+    """Neither busy nor recent, and its run parked on its rest timer: the
+    rules for everyone else leave it silent, an operator still hears it."""
+    gate, calls = _recorded_gate(False)
+    monkeypatch.setattr(resume, "gate", gate)
+    op = _Session("op1", str(tmp_path))
+    nudge = resume.ResumeNudge(
+        _Manager({"op1": op}), [], operators=["op1"], poll=0.01, window=5.0
+    )
+    asyncio.run(_drain(nudge))
+
+    assert nudge.delivered == ["op1"]
+    assert calls == []  # not gated on the run's position
+    assert len(op.delivered) == 1
+    block = op.delivered[0]
+    assert "session resume (operator)" in block and "machine-generated" in block
+    assert "session: op1" in block and "opv2_inbox" in block
+
+
+def test_a_busy_or_recent_operator_hears_the_operator_block(
+        home, tmp_path, monkeypatch, instant):
+    monkeypatch.setattr(resume, "gate", lambda *a, **kw: False)
+    busy, recent = _Session("op1", str(tmp_path)), _Session("op2", str(tmp_path))
+    nudge = resume.ResumeNudge(
+        _Manager({"op1": busy, "op2": recent}), ["op1"], recent=["op2"],
+        operators=["op1", "op2"], poll=0.01, window=5.0,
+    )
+    asyncio.run(_drain(nudge))
+
+    assert sorted(nudge.delivered) == ["op1", "op2"]
+    for session in (busy, recent):
+        assert len(session.delivered) == 1
+        assert "session resume (operator)" in session.delivered[0]
+
+
+def test_a_driven_operator_is_waited_for_not_dropped(
+        home, tmp_path, monkeypatch, instant):
+    op = _Session("op1", str(tmp_path))
+    op.statuses = ["idle", "busy", "busy", "idle"]
+    nudge = resume.ResumeNudge(
+        _Manager({"op1": op}), [], operators=["op1"], poll=0.01, window=5.0
+    )
+    asyncio.run(_drain(nudge))
+
+    assert nudge.delivered == ["op1"]
+    assert len(op.delivered) == 1
+
+
+def test_a_blank_operator_hears_the_blank_block(home, tmp_path, instant):
+    op = _Session("op1", str(tmp_path))
+    nudge = resume.ResumeNudge(
+        _Manager({"op1": op}), [], blank=["op1"], operators=["op1"],
+        poll=0.01, window=5.0,
+    )
+    asyncio.run(_drain(nudge))
+
+    assert len(op.delivered) == 1
+    assert "session resume (empty)" in op.delivered[0]
+
+
+def test_the_switch_still_decides_for_operators(home, tmp_path, instant):
+    op = _Session("op1", str(tmp_path))
+    nudge = resume.ResumeNudge(
+        _Manager({"op1": op}), [], operators=["op1"], enabled=False,
+        poll=0.01, window=5.0,
+    )
+    asyncio.run(_drain(nudge))
+    assert op.delivered == []
+
+
+class _Operators:
+    def __init__(self, names):
+        self.names = names
+
+    def operator_names(self):
+        if self.names is None:
+            raise OSError("records unreadable")
+        return set(self.names)
+
+
+class _Meshes:
+    def __init__(self, roles):
+        self.roles = roles
+
+    def meshes_for_session(self, name):
+        if name == "broken":
+            raise RuntimeError("mesh state unreadable")
+        return [{"role": r, "roles": [r]} for r in self.roles.get(name, [])]
+
+
+def test_operator_sessions_are_bound_records_and_operator_role_members():
+    names = ["bot", "relay", "worker", "plain", "broken"]
+    picked = resume.operator_sessions(
+        names,
+        operators=_Operators({"bot"}),
+        mesh_mgr=_Meshes({"relay": ["operator"], "worker": ["worker"]}),
+    )
+    assert picked == ["bot", "relay"]
+
+
+def test_operator_sessions_survive_unreadable_sources():
+    assert resume.operator_sessions(["a"], operators=_Operators(None)) == []
+    assert resume.operator_sessions(["broken"], mesh_mgr=_Meshes({})) == []
+    assert resume.operator_sessions(["a"]) == []
