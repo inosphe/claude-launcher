@@ -4177,7 +4177,14 @@ its input; **Stop** ends it (an agent may not stop an operator — that is the
 user's). The same conversation opens as a dialog over any page from the
 Operator segment of the floating dock at the bottom right, or **Alt+O**; the
 dialog preselects an operator whose scope covers the session on screen, and
-its management lives on the Observer page. The scope is enforced by the
+its management lives on the Observer page. Above the conversation, in the
+dock and the dialog alike, a session line that does not scroll names the
+selected operator, the session it runs in with that session's state, and
+links to that session's page. Drag the dialog's edges or corners to resize
+it: it grows on both sides and stays centred, and the size is kept in the
+browser's localStorage (`claunch-fab-operator-size`) for the next time; a
+double click on an edge returns it to the default size, and on a phone the
+dialog takes the whole screen. The scope is enforced by the
 daemon on every read and write the bot makes: a session outside it is not
 in its poll and answers 403. The bot polls with `opv2_poll`, posts only what
 changes what you do next with `opv2_post`, and asks for decisions with
