@@ -7605,6 +7605,11 @@ async def h_spawn_request_settle(request: web.Request) -> web.Response:
     gate: spawn_gate.SpawnGate = request.app["spawn_gate"]
     rid = request.match_info["rid"]
     verb = request.path.rsplit("/", 1)[-1]
+    # The answer is the person's: an agent (the asker or any other) that
+    # could approve, extend or reject would make the card decoration. Only
+    # the asker's withdrawal comes from an agent.
+    if verb != "withdraw" and actors.from_request(request).get("kind") == actors.AGENT:
+        return json_error(403, "a spawn request is answered by the person, not by an agent")
     body = await _json_body(request)
     try:
         if verb == "approve":

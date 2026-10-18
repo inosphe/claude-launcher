@@ -374,6 +374,15 @@ def test_the_routes_list_extend_and_settle(home, tmp_path):
 
             assert (await client.post(f"/api/spawn-requests/{one}/reject",
                                       headers=AUTH)).status == 409
+            # an agent cannot answer, not even the asker; it may withdraw its own
+            three = gate.submit_spawn(session="op", spec=dict(SPEC), reason="r")["id"]
+            agent = {**AUTH, "X-Claunch-Actor": "agent:op"}
+            for verb in ("approve", "extend", "manual", "reject"):
+                assert (await client.post(f"/api/spawn-requests/{three}/{verb}",
+                                          headers=agent)).status == 403
+            resp = await client.post(f"/api/spawn-requests/{three}/withdraw",
+                                     json={"session": "op"}, headers=agent)
+            assert (await resp.json())["request"]["status"] == "withdrawn"
             assert (await client.get("/api/spawn-requests/nope", headers=AUTH)).status == 404
         finally:
             await gate.cancel()
