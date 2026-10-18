@@ -398,8 +398,9 @@ TOOLS = [
                         "prompt pack ids to put into the child's opening: "
                         "the copy installed in the workspace it will run in "
                         "(Settings > Install), else claunch's own. Packs its "
-                        "role or subroles require are added whether listed "
-                        "or not; a listed pack that exists in neither place "
+                        "role or subroles require, and the workspace's own "
+                        "prompt (its packs headed 'delivery: always', unless "
+                        "no_workspace_prompt), are added whether listed or not; a listed pack that exists in neither place "
                         "refuses the spawn, and so does an on-demand pack "
                         "(retrospective), which is sent later with "
                         "'claunch retro', never in an opening"
@@ -411,6 +412,15 @@ TOOLS = [
                         "leave this daemon's own prompt (see 'daemon_prompt') "
                         "out of the child's opening. Without it every child "
                         "gets that prompt, whatever its role"
+                    ),
+                },
+                "no_workspace_prompt": {
+                    "type": "boolean",
+                    "description": (
+                        "leave the workspace's own prompt (its packs headed "
+                        "'delivery: always') out of the child's opening. "
+                        "Without it every child created in that workspace "
+                        "gets it"
                     ),
                 },
                 "issue_text": {
@@ -1330,6 +1340,7 @@ _SPAWN_RENAMED = {
     "no_issue": ("beads", False),
     "no_issue_auto": ("beads", "none-auto"),
     "no_daemon_prompt": ("daemon_prompt", False),
+    "no_workspace_prompt": ("workspace_prompt", False),
 }
 
 

@@ -290,6 +290,8 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
         body["prompt_packs"] = list(args.prompt_packs)
     if getattr(args, "no_daemon_prompt", False):
         body["daemon_prompt"] = False
+    if getattr(args, "no_workspace_prompt", False):
+        body["workspace_prompt"] = False
     if args.borrow:
         body["borrow"] = args.borrow
     if args.null_token:
@@ -722,6 +724,8 @@ def _cmd_spawn(args: argparse.Namespace) -> int:
     # --no-daemon-prompt sets is ever sent.
     if getattr(args, "no_daemon_prompt", False):
         payload["daemon_prompt"] = False
+    if getattr(args, "no_workspace_prompt", False):
+        payload["workspace_prompt"] = False
     # The wizard uses an explicit empty model to remove the parent's pin and
     # return to the selected harness default.  Keep that distinct from an
     # omitted value, which inherits the parent.
@@ -3096,6 +3100,12 @@ def register(sub) -> None:
         "the opening; every session gets it otherwise",
     )
     p_new.add_argument(
+        "--no-workspace-prompt", dest="no_workspace_prompt", action="store_true",
+        help="leave the workspace's own prompt (its packs headed 'delivery: "
+        "always') out of the opening; every session created there gets it "
+        "otherwise",
+    )
+    p_new.add_argument(
         "--resume", nargs="?", const="", metavar="SESSION|UUID",
         help="open an existing conversation instead of a new one: another "
         "session's name, a conversation uuid, or bare for claude's picker",
@@ -3244,6 +3254,12 @@ def register(sub) -> None:
         "--no-daemon-prompt", dest="no_daemon_prompt", action="store_true",
         help="leave this daemon's own prompt (Settings > Daemon prompt) out of "
         "the opening; every session gets it otherwise",
+    )
+    p_spawn.add_argument(
+        "--no-workspace-prompt", dest="no_workspace_prompt", action="store_true",
+        help="leave the workspace's own prompt (its packs headed 'delivery: "
+        "always') out of the opening; every session created there gets it "
+        "otherwise",
     )
     p_spawn.add_argument(
         "--connect", action="append", metavar="HANDLE",

@@ -78,7 +78,7 @@ const env = new Function(
   [`let newSubroleTicks = new Set();`,
    `let rolesDefault = "";`,
    `let newPackOffer = null, newPackOfferFor = null, newPackTicks = new Map();`,
-   `let newDaemonPromptTick = null, newPackRolesOpen = false, newPackPreview = null;`,
+   `let newDaemonPromptTick = null, newWorkspacePromptTick = null, newPackRolesOpen = false, newPackPreview = null;`,
    `let newPackRolesShown = new Set();`,
    `let newPackDefaultsPending = false, pendingSeedPacks = null;`,
    `let newPrompterOffer = null, newPrompterTicks = new Set(), newPrompterRequest = 0;`,
@@ -86,10 +86,10 @@ const env = new Function(
    slice("refreshNewPrompterOffer"), slice("newPrompterSelection"),
    slice("newPackDefaults"), slice("promptPackFormOpened"),
    slice("refreshPromptPackOffer"), slice("applyPendingPackSeed"),
-   slice("newDaemonPromptWanted"),
+   slice("newDaemonPromptWanted"), slice("newWorkspacePromptWanted"),
    slice("newSubrolesMeshless"), slice("newImpliedSubrole"), slice("newSubroles"),
    slice("newPrimaryRole"),
-   slice("newRequiredPacks"), slice("newPackTicked"),
+   slice("newRequiredPacks"), slice("newWorkspaceAlwaysIds"), slice("newPackTicked"),
    slice("renderPromptPackRow"), slice("newPromptPacks"),
    slice("togglePackPreview"), slice("packPreviewOrigin"), slice("packPreviewPanel"),
    `return {
@@ -101,6 +101,7 @@ const env = new Function(
       ticks: () => newPackTicks, subTicks: () => newSubroleTicks,
       render: renderPromptPackRow, packs: newPromptPacks,
       daemonWanted: newDaemonPromptWanted,
+      workspaceWanted: newWorkspacePromptWanted,
       resetDaemonTick: () => { newDaemonPromptTick = null; },
       rolesOpen: () => newPackRolesOpen,
       closeRoles: () => { newPackRolesOpen = false; newPackRolesShown = new Set(); },
@@ -556,6 +557,40 @@ check("the default packs are ticked again each time the form opens", async () =>
   env.opened();
   await flush();
   assert.deepEqual(env.packs(form), []);
+  delete answers["/api/prompt-packs/offer"];
+  env.ticks().clear();
+  env.offer = OFFER;
+  env.render();
+});
+
+check("the workspace's own prompt starts ticked, first, and is left to the daemon", async () => {
+  env.ticks().clear();
+  env.offer = { ...OFFER, packs: [...OFFER.packs,
+    { id: "house-rules", title: "House rules", delivery: "always" }] };
+  env.opened();
+  await flush();
+  env.offer = { ...OFFER, packs: [...OFFER.packs,
+    { id: "house-rules", title: "House rules", delivery: "always" }] };
+  env.render();
+  let box = boxes().find((b) => b.value === "house-rules");
+  assert.equal(box.checked, true);
+  assert.equal(box.disabled, false);
+  assert.equal(env.workspaceWanted(), true);
+  // The daemon adds it on every path, so the form does not send it.
+  assert.deepEqual(env.packs(form), ["common"]);
+  assert.match(summary(), /^The opening will include: house-rules \(workspace, every session\) · common \(default\)\./);
+  // Unticked: out of the summary, still not sent as an id (the submit says
+  // workspace_prompt: false instead).
+  newTick("house-rules", false);
+  box = boxes().find((b) => b.value === "house-rules");
+  assert.equal(box.checked, false);
+  assert.equal(env.workspaceWanted(), false);
+  assert.deepEqual(env.packs(form), ["common"]);
+  assert.match(summary(), /^The opening will include: common \(default\)\./);
+  // The next opening of the form starts it ticked again.
+  env.opened();
+  await flush();
+  assert.equal(env.workspaceWanted(), true);
   delete answers["/api/prompt-packs/offer"];
   env.ticks().clear();
   env.offer = OFFER;

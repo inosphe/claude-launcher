@@ -128,8 +128,13 @@ def _current_record(
         return None
     if pack.source == prompt_packs.WORKSPACE:
         # A workspace copy's record carries no origin keys
-        # (prompt_packs.records): its file explains why it is there.
-        return {"id": rec["id"], "text": pack.body}
+        # (prompt_packs.records): its file explains why it is there. The
+        # one exception is ``always`` -- it was given because the workspace
+        # gives it to every session, and its header keeps saying so.
+        out = {"id": rec["id"], "text": pack.body}
+        if rec.get("always"):
+            out["always"] = True
+        return out
     return {**rec, "text": pack.body, "source": pack.source}
 
 

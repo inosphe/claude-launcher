@@ -8724,11 +8724,15 @@ def _asked_prompt_packs(body: dict) -> List[str]:
 def _session_prompt_packs(
     request: web.Request, body: dict, plan, *, name: str, cwd: str
 ):
-    """The packs a session is given: ticked ones plus role-required ones.
+    """The packs a session is given: the workspace's own prompt, ticked ones
+    and role-required ones.
 
     Roles are matched by their canonical names on the mesh being joined, so
     an alias the roleset knows brings the same packs as the role itself.
     Read from the workspace that owns ``cwd``; see :func:`prompt_packs.choose`.
+    Every creation path comes through here (create, spawn, the web form), so
+    a workspace's ``delivery: always`` packs reach each of them unless the
+    request turned them off (``workspace_prompt: false``).
     """
     roles = [r for r in (plan.role, *plan.subroles) if r]
     roleset = _plan_roleset(request, plan)
@@ -8741,12 +8745,12 @@ def _session_prompt_packs(
     # request turned it off (daemon_prompt.wanted).
     own = daemon_prompt.pack() if daemon_prompt.wanted(body) else None
     head = prompt_packs.records([own]) if own is not None else []
-    if not asked and not required:
-        return head, {}
     owner = workspaces.owning(str(cflow_state.resolve_cwd(cwd or None)))
-    recs, required = prompt_packs.choose(
-        Path(owner.path) if owner is not None else None, asked, roles
-    )
+    root = Path(owner.path) if owner is not None else None
+    always = prompt_packs.always_wanted(body)
+    if not asked and not required and not (always and prompt_packs.always_packs(root)):
+        return head, {}
+    recs, required = prompt_packs.choose(root, asked, roles, always=always)
     return head + recs, required
 
 
