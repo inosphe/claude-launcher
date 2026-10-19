@@ -492,6 +492,22 @@ def check(
         else:
             child[key] = str(value)
 
+    # ``:HARNESS`` keeps the parent's profile and changes only the harness
+    # (claunch-gqgcz): a caller that knows which program it wants -- a
+    # workflow's reviewer_harness -- need not know which profile it runs on.
+    # It rode the allow_profile gate above like any other selector.
+    requested = str(request.get("profile") or "").strip()
+    if requested.startswith(":"):
+        inherited = str(parent.get("profile") or "").strip()
+        if not inherited:
+            raise SpawnDenied(
+                f"profile {requested!r} keeps the parent's profile, and this "
+                "session runs without one; name it as PROFILE:HARNESS"
+            )
+        child["profile"] = (
+            f"{profile_mod.split_selector(inherited)[0]}{requested}"
+        )
+
     # A profile override can legitimately change the harness; that is now the
     # only route. Re-resolve it before fork validation and discard inherited
     # command/auth fields that belonged to the parent's different program.

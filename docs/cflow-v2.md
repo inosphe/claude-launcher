@@ -2863,6 +2863,31 @@ PR은 닫고 브랜치는 지웠다.
 남기고 판정의 정본을 보드 코멘트로 둔다. leader-v2의 실제 첫 사용에서 확인해 이
 표에 행을 더한다.
 
+## 10b. 리뷰어의 profile·harness (improv-worker-v2, claunch-gqgcz)
+
+`reviewer-ensure`가 세우는 자식 리뷰어는 기본으로 워커 세션의 profile과 harness를
+물려받는다. 시작 입력 두 개가 그것을 바꾼다.
+
+| 입력 | 값 | 비었을 때 |
+|---|---|---|
+| `reviewer_profile` | profile 이름(`claunch ls`) | 워커의 profile |
+| `reviewer_harness` | harness 이름(`claunch harnesses`) | 리뷰어 profile의 기본 harness |
+
+- 전달: 워커는 두 값을 spawn의 `profile` selector 하나로 합친다 — 둘 다 있으면
+  `PROFILE:HARNESS`, profile만 있으면 `PROFILE`, harness만 있으면 `:HARNESS`, 둘 다
+  비었으면 `profile`을 보내지 않는다. `:HARNESS`는 데몬(`spawn.check`)이 부모
+  세션의 profile 이름에 붙여 푼다. 부모에게 profile이 없으면 거절한다.
+- 게이트: selector는 모두 `spawn.allow_profile`의 몫이다(`:HARNESS` 포함). 꺼져
+  있으면 spawn이 403으로 거절하고, 워커는 profile 없이 다시 세우지 않는다 —
+  이슈에 `REVIEWER PROFILE REFUSED: <selector> — <거절 문구>`를 남기고 넘어가며
+  peer-review는 형제·조상 리뷰어나 리더에게 간다. `harness` 필드는 spawn이 항상
+  거절하므로 쓰지 않는다.
+- 기존 리뷰어: 응답자 판정이 0이어도 자식 리뷰어 그룹이 비었고 두 입력 중 하나가
+  있으면 자식 리뷰어를 세운다. 형제·조상 리뷰어는 사람이 고른 profile로 서 있지
+  않고, peer-review는 자식 리뷰어를 먼저 묻는다.
+- 시작 뒤 변경: 두 입력에는 `set_by`가 없다. 런 중에 사람이 바꾸는 경로는
+  `set_by: [user]`(claunch-umq1f)가 착지한 뒤 붙인다.
+
 ## 11. 단계
 
 | 단계 | 내용 |

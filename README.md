@@ -3894,7 +3894,9 @@ with a `stack` sub run beside it).
   Harness itself has no spawn unlock: it is derived from the inherited or
   allowed replacement profile. If that profile changes the harness, inherited
   args, model selection and Claude-only auth choices are dropped because they
-  belonged to the parent's program.
+  belonged to the parent's program. The selector is `PROFILE[:HARNESS]`;
+  `:HARNESS` alone keeps the parent's profile and changes only the harness
+  (it is still a profile choice, so it needs `allow_profile` too).
 - **A child may be sent to another directory — by name, not by path.**
   `allow_workspace` lets the agent pass a `workspace` from your
   [registry](#workspaces-where-a-session-may-be-spawned); `allow_cwd` lets it
