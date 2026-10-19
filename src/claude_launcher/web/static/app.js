@@ -23873,6 +23873,7 @@ function openSettings(section) {
   refreshRelaySettings();
   refreshWslRegStub();
   refreshPtyHostSetting();
+  refreshDelegateSetting();
 }
 
 let relaySettingsRows = [];
@@ -29312,6 +29313,7 @@ function renderWorkspaces() {
   view.appendChild(relaySettingsCard());
   view.appendChild(wslRegStubCard());
   view.appendChild(ptyHostSettingCard());
+  view.appendChild(delegateSettingCard());
 
   refocusSettingsField(focused);
 }
@@ -30930,6 +30932,94 @@ function ptyHostSettingCard() {
   card.appendChild(el("p", "wf-note", ptyHostNowLine(st.host)));
   const pending = ptyHostPendingLine(st);
   if (pending) card.appendChild(el("p", "wf-note", pending));
+  return card;
+}
+
+/* Delegated child session (claunch-yl0to) -- daemon.delegate_profile and
+   daemon.delegate_model, read and written with GET/PUT /api/delegate-setting.
+   improv-worker-v2 with session_routing on hands an easy task to a forked
+   child on this profile and model preset; a run's start inputs of the same
+   names take precedence. Empty selection restores the built-in default. */
+let delegateSetting = {
+  profile: "", model: "", defaults: {}, profiles: [], presets: [],
+  loaded: false, error: "", busy: false,
+};
+
+function takeDelegateSetting(data) {
+  Object.assign(delegateSetting, {
+    profile: data.profile || "", model: data.model || "",
+    defaults: data.defaults || {}, profiles: data.profiles || [],
+    presets: data.presets || [], loaded: true, error: "",
+  });
+}
+
+async function refreshDelegateSetting() {
+  try {
+    const resp = await api("/api/delegate-setting");
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    takeDelegateSetting(data);
+  } catch (err) {
+    delegateSetting.error = String(err);
+  }
+  if (wsOpen) renderWorkspaces();
+}
+
+async function saveDelegateSetting(field, value) {
+  delegateSetting.busy = true;
+  renderWorkspaces();
+  try {
+    const resp = await api("/api/delegate-setting", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ [field]: value || null }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    takeDelegateSetting(data);
+  } catch (err) {
+    delegateSetting.error = String(err);
+  }
+  delegateSetting.busy = false;
+  renderWorkspaces();
+}
+
+function delegateSelect(id, field, current, choices, fallback) {
+  const select = document.createElement("select");
+  select.id = id;
+  select.disabled = delegateSetting.busy;
+  const options = [["", `default (${fallback || "none"})`], ...choices.map((c) => [c, c])];
+  if (current && !choices.includes(current)) options.push([current, `${current} (missing)`]);
+  for (const [value, label] of options) {
+    const opt = document.createElement("option");
+    opt.value = value;
+    opt.textContent = label;
+    select.appendChild(opt);
+  }
+  select.value = current === fallback ? "" : current;
+  select.addEventListener("change", () => saveDelegateSetting(field, select.value));
+  return select;
+}
+
+function delegateSettingCard() {
+  const st = delegateSetting;
+  const card = el("section", "ws-add delegate-settings");
+  card.appendChild(el("h3", null, "Delegated child session (session routing)"));
+  card.appendChild(el("p", "wf-note",
+    "improv-worker-v2 with session_routing on hands an easy task to a forked " +
+    "child session on this profile and model preset. A run's delegate_profile " +
+    "and delegate_model inputs take precedence. Same settings as claunch daemon " +
+    "config delegate_profile / delegate_model."));
+  if (st.error) card.appendChild(el("p", "error", st.error));
+  if (!st.loaded) {
+    card.appendChild(el("p", "wf-note", "reading…"));
+    return card;
+  }
+  const profile = el("label", "delegate-field", "Profile ");
+  profile.appendChild(delegateSelect("delegate-profile", "profile", st.profile, st.profiles, st.defaults.profile));
+  const model = el("label", "delegate-field", " Model preset ");
+  model.appendChild(delegateSelect("delegate-model", "model", st.model, st.presets, st.defaults.model));
+  card.append(profile, model);
   return card;
 }
 

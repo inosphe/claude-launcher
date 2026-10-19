@@ -442,6 +442,7 @@ CHECKS = [
         "restartgate_check.js",
         "ptyhostbadge_check.js",
         "ptyhostsetting_check.js",
+        "delegatesetting_check.js",
         "noticehistory_check.js",
         "termcache_check.js",
         "gpurender_check.js",

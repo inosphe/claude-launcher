@@ -1327,6 +1327,10 @@ class SessionManager:
         # After the policy and before the record: a checkout is a thing on
         # disk, so it is made only once nothing left can refuse the request.
         child = spawn_mod.make_worktree(child, request, parent=parent, name=name)
+        # Same moment, same reason: a fork onto another profile needs the
+        # parent's conversation copied into that profile, and only once
+        # nothing can refuse the request (claunch-yl0to).
+        spawn_mod.carry_forked_conversation(child, request, parent=session.sdef.to_dict())
         return self.stage(
             SessionDef.from_dict(
                 {

@@ -55,6 +55,7 @@ const CARDS = [
   "keyHelpCard", "scoreGoalSettingsCard", "roleWorkflowsCard", "railStaleCard", "modelChoicesCard",
   "llmSettingsCard", "simDefaultsCard", "qaNudgeCard", "faqCard", "promptPresetCard", "prompterSettingsCard",
   "statusCheckCard", "ragCard", "ghCard", "relaySettingsCard", "wslRegStubCard", "ptyHostSettingCard",
+  "delegateSettingCard",
   "wsAddCard", "projectsCard", "beadsBoardsCard",
 ];
 const WORKSPACE_CARDS = ["wsAddCard", "projectsCard", "beadsBoardsCard"];
@@ -155,6 +156,7 @@ const REFRESHERS = [
   "refreshProjects", "refreshProfileSettings", "refreshInstallOverview",
   "refreshVscode", "refreshWsGitSummary", "refreshWsUsage",
   "refreshRoleWorkflowSettings", "refreshWslRegStub", "refreshPtyHostSetting",
+  "refreshDelegateSetting",
 ];
 const octx = {
   wsSection: "", wsOpen: true,

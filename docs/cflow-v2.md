@@ -2918,6 +2918,52 @@ PR은 닫고 브랜치는 지웠다.
   리뷰어는 응답자 판정이 0으로 닿아 그대로 다시 쓰이고, 다른 profile로 바꿔
   세우지 않는다.
 
+## 10c. 난이도에 따른 세션 라우팅 (improv-worker-v2, claunch-yl0to)
+
+시작 입력 `session_routing`(bool, 기본 false, `set_by: [user]`)이 켜지면 각 일감의
+구현을 이 세션이 직접 할지, fork한 자식 세션에 맡길지를 정한다. 꺼져 있으면 흐름은
+이전과 같고, 추가된 동작은 하나다 — `coding-approval`의 거절(reject)이 `coding-plan`으로
+돌아가 계획을 다시 쓴다.
+
+| 입력 | 값 | 비었을 때 |
+|---|---|---|
+| `session_routing` | true/false | false |
+| `delegate_profile` | profile 이름 | 데몬 설정 `delegate_profile`, 그다음 내장값 `ds4` |
+| `delegate_model` | 모델 프리셋(`default`/`small`/`large`/`xlarge`/`subagent`) 또는 모델 이름 | 데몬 설정 `delegate_model`, 그다음 내장값 `small` |
+
+- 판정: `session_routing`이 켜지면 `coding-plan`은 `require_coding_approval`과 무관하게
+  돌고 `difficulty`(easy/hard), `recommend`(direct/delegate), `why`를 반환한다.
+- 게이트: `require_coding_approval`도 켜져 있으면 `coding-approval-routing`이
+  `approve-as-planned`/`approve-no-delegate`/`approve-down-delegate`/`reject`를 묻는다.
+  `approve`는 질문 옵션의 예약어(`cflow2/question.RESERVED_NAMES`)라서
+  `approve-as-planned`로 쓴다. 게이트가 꺼져 있으면 계획의 `recommend`대로 간다.
+- 기록: 경로가 정해질 때마다 이슈에 `ROUTED: <easy|hard> → <direct|PROFILE:model> — <근거>`
+  코멘트를 남긴다.
+- 위임(`delegate-work`): 부모의 대화를 fork한 자식을 부모의 워크트리에 세운다
+  (`fork: true`, `worktree`·`cwd` 없음, `workflow: oneshot-job-v2`). 자식은 구현, 표적
+  테스트, 부모의 회차 브랜치에 직접 커밋까지 하고 mesh로 `DELEGATE DONE` 또는
+  `DELEGATE ESCALATE`를 보낸다. 부모는 그동안 파일을 고치지 않고 기다리며, 리뷰와
+  착지는 부모가 한다. 살아 있는 stack side 런이 있으면 기존 stacked 경로를 쓴다.
+- `delegated-rework-approval`: 입력 변수 없이 항상 사용자 게이트다. 자식이
+  escalate하거나 실패했을 때, 부모의 표적 테스트가 실패했을 때, 리뷰가 위임 작업에
+  재작업을 요구했을 때 열리고 `rework-direct`/`rework-delegate`/`reject`를 묻는다.
+  `reject`는 `coding-plan`으로 돌아간다. `rework-direct` 뒤에는 경로가 direct가 되어
+  같은 일감에서 이 게이트가 다시 열리지 않는다.
+- 데몬 설정: `claunch daemon config delegate_profile|delegate_model`, 또는 웹
+  Settings의 "Delegated child session" 카드(`GET/PUT /api/delegate-setting`). 카드는
+  존재하는 profile과 모델 프리셋만 받는다.
+- 모델 프리셋 해석(`spawn._resolve_model_preset`, 자식 profile 기준):
+  - claude: `default`는 `--model`을 붙이지 않는다(profile의 `ANTHROPIC_MODEL`).
+    `small`/`large`/`xlarge`는 `haiku`/`opus`/`fable` 별칭이 되어 profile 환경변수로
+    풀린다. `subagent`는 profile이 선언한 id, 없으면 `haiku`.
+  - codex: codex는 `spec.models`를 읽지 않으므로 profile 공급자가 선언한
+    `models.<role>` id를 넣는다. 선언이 없으면 `-c model=small`로 띄우는 대신 거절한다.
+- 다른 profile로의 fork: 자식의 config dir에는 부모의 대화가 없으므로 데몬이 spawn
+  직전(`manager`의 `make_worktree` 다음)에 `spawn.carry_forked_conversation`으로
+  복사한다. claude는 `projects/<cwd>/<id>.jsonl`, codex는 `<CODEX_HOME>/sessions/**`의
+  rollout이다. 원본은 그대로 둔다. MCP `spawn` 툴은 이제 `model`·`effort`를
+  전달한다(`spawn.allow_args` 게이트).
+
 ## 11. 단계
 
 | 단계 | 내용 |
