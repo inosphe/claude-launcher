@@ -682,7 +682,8 @@ TOOLS = [
             "not filed as a kill: the user is asked on the dashboard to "
             "answer 'end', which ends it through its workflow; the reply "
             "says end_requested (claunch-g08xz.1). 'skip_end_decision: "
-            "true' files the plain kill request instead."
+            "true' files the plain kill request instead, and so does "
+            "'force: true'."
         ),
         "inputSchema": {
             "type": "object",
@@ -699,7 +700,8 @@ TOOLS = [
                     "description": (
                         "skip the graceful terminate. Default false, which "
                         "lets the harness shut itself down; force only after "
-                        "a graceful end has visibly failed to take"
+                        "a graceful end has visibly failed to take. A forced "
+                        "kill also skips the end decision and the wind-down"
                     ),
                 },
                 "reason": {

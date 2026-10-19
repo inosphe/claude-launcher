@@ -1685,8 +1685,21 @@ def _cmd_kill_session(args: argparse.Namespace) -> int:
     remove button), never this one."""
     client = daemon_client.ensure_running()
     suffix = "?force=1" if args.force else ""
-    info = client.post(f"/api/sessions/{args.session}/kill{suffix}",
-                       {"reason": getattr(args, "reason", "") or ""})
+    body = {"reason": getattr(args, "reason", "") or ""}
+    if getattr(args, "skip_end_decision", False):
+        body["skip_end_decision"] = True
+    info = client.post(f"/api/sessions/{args.session}/kill{suffix}", body)
+    if info.get("end_requested"):
+        # The target's run stands on its end decision: the person is asked to
+        # answer 'end' there instead of a kill request (claunch-g08xz.1).
+        print(
+            f"session {args.session!r} was not killed: its run stands on its "
+            f"end decision ({info.get('decision')}), so the user is asked on the "
+            f"web UI (nudge {info.get('nudge')}) to answer 'end' there, which "
+            "ends it through its workflow. Its exit is the answer; do not run "
+            "this again. --skip-end-decision files a plain kill request instead."
+        )
+        return 0
     if info.get("pending"):
         # Run from a managed session's shell: an agent's kill of another
         # session waits for a person (claunch-5aysr).
@@ -3680,6 +3693,12 @@ def register(sub) -> None:
         "--reason", default="",
         help="from inside a managed session: why the target should end, shown "
              "on the approval card an agent's kill waits behind",
+    )
+    p_kill.add_argument(
+        "--skip-end-decision", action="store_true",
+        help="from inside a managed session: file the kill request even when "
+             "the target's run stands on its end decision (by default the user "
+             "is asked to answer 'end' there instead)",
     )
     p_kill.set_defaults(func=_cmd_kill_session_dispatch)
 

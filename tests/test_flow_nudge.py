@@ -357,3 +357,66 @@ def test_the_kill_tool_passes_skip_end_decision(monkeypatch):
                                 "skip_end_decision": True})
     assert client.posts[-1] == ("/api/sessions/lead/children/kid/kill",
                                 {"reason": "done", "skip_end_decision": True})
+
+
+class FakeGate:
+    def __init__(self):
+        self.filed = []
+
+    def submit(self, **kw):
+        self.filed.append(kw)
+        return {"id": "kr-1", "target": kw["target"]}
+
+
+def test_a_forced_kill_files_the_kill_request_even_on_the_end_decision(ending):
+    # claunch-g08xz.2: force skips the end decision as it skips the wind-down.
+    import json
+
+    cwd = str(ending)
+    runtime.start(layers.load("ending", cwd), cwd=cwd, scope="w1", caps={})
+    app = {"flow_nudge": flow_nudge.NudgeBoard(), "kill_gate": FakeGate()}
+    by = {"kind": "agent", "name": "lead"}
+
+    forced = asyncio.run(api_mod._gated_kill(
+        FakeRequest(app, {}), _target("w1", cwd), by, force=True, route="kill",
+        reason="stuck"))
+    body = json.loads(forced.text)
+    assert forced.status == 202 and body["kill_request"] == "kr-1"
+    assert "end_requested" not in body and app["flow_nudge"].list() == []
+    assert app["kill_gate"].filed[0]["force"] is True
+
+    plain = asyncio.run(api_mod._gated_kill(
+        FakeRequest(app, {}), _target("w1", cwd), by, force=False, route="kill"))
+    assert json.loads(plain.text)["end_requested"] is True
+    assert len(app["kill_gate"].filed) == 1
+
+
+def _kill_session(monkeypatch, answer, *argv):
+    import argparse
+
+    from claude_launcher import cli_sessions, daemon_client
+
+    client = FakeClient(answer)
+    monkeypatch.setattr(daemon_client, "ensure_running", lambda: client)
+    parser = argparse.ArgumentParser()
+    cli_sessions.register(parser.add_subparsers())
+    args = parser.parse_args(["kill-session", "w1", *argv])
+    assert cli_sessions._cmd_kill_session(args) == 0
+    return client
+
+
+def test_kill_session_cli_skips_the_end_decision_and_reports_the_end_request(
+        monkeypatch, capsys):
+    client = _kill_session(monkeypatch, {"pending": True}, "--skip-end-decision")
+    assert client.posts[-1] == ("/api/sessions/w1/kill",
+                                {"reason": "", "skip_end_decision": True})
+    client = _kill_session(monkeypatch, {"pending": True})
+    assert client.posts[-1] == ("/api/sessions/w1/kill", {"reason": ""})
+    capsys.readouterr()
+
+    _kill_session(monkeypatch, {"pending": True, "kill_request": None,
+                                "end_requested": True, "decision": "end-decision",
+                                "nudge": "nudge-7"})
+    out = capsys.readouterr().out
+    assert "end-decision" in out and "nudge-7" in out and "None" not in out
+    assert "--skip-end-decision" in out
