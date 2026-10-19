@@ -4223,7 +4223,10 @@ watch switch off it only answers what you ask. Ask it
 about work — what a session in its scope is doing or did, its issue, its
 commits, where something was said — and it answers from the record with
 `opv2_sessions`, `opv2_session`, `opv2_issue`, `opv2_commits`,
-`opv2_transcript_search` and `opv2_history`. What you type reaches the bot
+`opv2_transcript_search` and `opv2_history`; `opv2_landing` answers in one
+call where each session's work stands — issue status, branch, recorded PRs
+and a `landed` verdict read off the PR state, since a squash merge leaves the
+branch's commits off master. What you type reaches the bot
 through `opv2_inbox`, never its terminal, which only gets a one-line nudge;
 it may type into another session of its scope with `opv2_dispatch` only to
 relay an instruction of yours (the call names the message or answered ask it

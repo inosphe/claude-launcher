@@ -4231,13 +4231,28 @@ async def _operator_work(app, sessions) -> dict:
     closed one: a session that closed its opening issue and took the next
     keeps the old link, so the link alone would report a finished round. The
     board read is the rail's own (cached, one listing per board), so an
-    operator poll costs no more than a rail refresh."""
+    operator poll costs no more than a rail refresh.
+
+    The answers come from the status-check store, not ``session.info()``:
+    the info carries none, the session-list handler attaches them to its own
+    rows, so reading the info answered every operator with no checks at all
+    (claunch-iw5i8.11). Each entry also carries the branch and the recorded
+    PRs (``session_prs``, no network) — what the operator's landing lookup
+    reads, since a squash merge leaves a branch's commits off master."""
     board = app.get("beads")
+    names = [session.sdef.name for session in sessions]
+
+    def recorded():
+        return (status_checks.digests(names),
+                {s.sdef.name: session_prs.for_session(_session_cwd(s), s.sdef.name) for s in sessions})
+
+    digests, prs = await asyncio.to_thread(recorded)
     out = {}
     for session in sessions:
         name = session.sdef.name
-        checks = session.info().get("status_checks") or []
-        out[name] = {"checks": [c for c in checks if isinstance(c, dict)], "issue": None}
+        checkout = session.info().get(work_checkout.FIELD) or _session_cwd(session)
+        out[name] = {"checks": [c for c in digests.get(name) or [] if isinstance(c, dict)], "issue": None,
+                     "branch": _branch_of(checkout), "prs": prs.get(name) or []}
         if board is None or not board.available() or not session.sdef.cwd:
             continue
         try:
