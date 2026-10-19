@@ -936,6 +936,8 @@ def build_app(
     r.add_patch("/api/mesh/{mesh}/links/{a}/{b}", h_mesh_link_set)
     r.add_patch("/api/mesh/{mesh}/members/{a}/links/{b}", h_mesh_member_link_set)
     r.add_get("/api/mesh/{mesh}/wire-requests", h_mesh_wire_requests)
+    r.add_post("/api/mesh/{mesh}/wire-requests", h_mesh_wire_file)
+    r.add_get("/api/mesh/{mesh}/connect-status", h_mesh_connect_status)
     r.add_post("/api/mesh/{mesh}/wire-requests/decline", h_mesh_wire_decline)
     r.add_post("/api/mesh/{mesh}/rewire", h_mesh_rewire)
     r.add_get("/api/mesh/{mesh}/policy", h_mesh_policy_get)
@@ -7768,6 +7770,33 @@ async def h_mesh_wire_requests(request: web.Request) -> web.Response:
         request.match_info["mesh"], state=request.query.get("state") or ""
     )
     return json_response({"requests": rows})
+
+
+async def h_mesh_wire_file(request: web.Request) -> web.Response:
+    """Ask for an edge on purpose: ``requester`` wants ``target``.
+
+    The explicit form of the request a refused send files by itself. Answered
+    with the pair's standing, so the asker sees at once whether it is already
+    connected or was declined before.
+    """
+    body = await _json_body(request)
+    result = _mesh_mgr(request).request_connect(
+        request.match_info["mesh"],
+        str(body.get("requester") or ""),
+        str(body.get("target") or ""),
+    )
+    return json_response(result, status=201)
+
+
+async def h_mesh_connect_status(request: web.Request) -> web.Response:
+    """Whether the pair ``a``/``b`` may message each other, and the request
+    between them: what a waiting asker polls."""
+    result = _mesh_mgr(request).connect_status(
+        request.match_info["mesh"],
+        str(request.query.get("a") or ""),
+        str(request.query.get("b") or ""),
+    )
+    return json_response(result)
 
 
 async def h_mesh_wire_decline(request: web.Request) -> web.Response:
