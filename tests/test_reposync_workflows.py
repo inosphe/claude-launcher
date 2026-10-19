@@ -19,7 +19,7 @@ def test_onboarding_starts_selected_workflow(home, tmp_path, mode, name):
     definitions = project / ".claunch" / "workflows" / "v2"
     definitions.mkdir(parents=True)
     source = Path(__file__).parents[1] / "src/claude_launcher/workflows/v2" / (name + ".yaml")
-    (definitions / source.name).write_text(source.read_text())
+    (definitions / source.name).write_text(source.read_text("utf-8"), "utf-8")
     card = {"repo": str(project), "workspace": "proj", "remote": "origin", "branch": "master",
             "local": "a" * 40, "upstream": "b" * 40, "action": "rebase"}
     assignment = reposync_agent.assignment(card, mode=mode, error="conflict in x" if mode == "on_failure" else "")
