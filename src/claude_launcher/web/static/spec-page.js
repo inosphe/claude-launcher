@@ -31,6 +31,10 @@ globalThis.SpecPage = (() => {
   let leaderKind = "", leaderSession = "", profile = "", workspace = "";
   let notice = "", error = "", leaderError = "", busy = false;
   let sequence = 0;
+  // importing: an import is in flight. It is not cancelled by an edit the
+  // way a check or plan is: its answer is the log of what it already did,
+  // and dropping it would also free the button for a second import.
+  let importing = false;
   // auto: check after a pause in typing; timer: the pending one.
   let auto = true, timer = null;
   const AUTO_DELAY = 600;
@@ -62,6 +66,7 @@ globalThis.SpecPage = (() => {
   async function run(verb, extra, apply) {
     if (busy) return;
     const seq = ++sequence;
+    importing = verb === "import";
     busy = true; error = ""; leaderError = ""; notice = ""; render();
     try {
       const answer = await post(verb, extra);
@@ -70,7 +75,7 @@ globalThis.SpecPage = (() => {
     } catch (exc) {
       if (seq === sequence) error = String(exc.message || exc);
     } finally {
-      if (seq === sequence) { busy = false; render(); }
+      if (seq === sequence) { busy = false; importing = false; render(); }
     }
   }
 
@@ -115,6 +120,9 @@ globalThis.SpecPage = (() => {
   }
 
   function onText(value) {
+    // The text an import is running stays put until it answers (the editor
+    // is read-only then; this is the guard for any other way in).
+    if (importing) { render(); return; }
     text = value;
     // A changed spec is an unchecked spec: nothing below it describes it any
     // more, the workspace chosen for the old text included -- nor does an
@@ -137,6 +145,7 @@ globalThis.SpecPage = (() => {
   }
 
   async function insertTemplate() {
+    if (importing) return;
     if (text.trim() && !confirm("지금 입력한 명세를 예시 템플릿으로 바꾼다.")) return;
     try {
       const response = await api("/api/spec/template");
@@ -314,7 +323,8 @@ globalThis.SpecPage = (() => {
       if (f) onText(await f.text());
     };
     source.appendChild(file);
-    source.appendChild(button("예시 템플릿", insertTemplate));
+    const templateButton = button("예시 템플릿", insertTemplate);
+    source.appendChild(templateButton);
     const toggle = node("label", "spec-auto");
     const box = node("input");
     box.type = "checkbox"; box.checked = auto;
@@ -338,7 +348,7 @@ globalThis.SpecPage = (() => {
 
     const body = node("div", "spec-body");
     root.replaceChildren(head, intro, source, editor, actions, body);
-    return { root, editor, checkButton, status, body };
+    return { root, file, templateButton, editor, checkButton, status, body };
   }
 
   function render() {
@@ -346,9 +356,12 @@ globalThis.SpecPage = (() => {
     if (!root) return;
     if (!frame || frame.root !== root) frame = build(root);
     if (frame.editor.value !== text) frame.editor.value = text;
+    frame.editor.readOnly = importing;
+    frame.file.disabled = importing;
+    frame.templateButton.disabled = importing;
     frame.checkButton.textContent = busy ? "처리 중…" : "검증";
     frame.checkButton.disabled = busy || !text.trim();
-    frame.status.textContent = !text.trim() ? "" : busy ? "검증 중…"
+    frame.status.textContent = !text.trim() ? "" : importing ? "import 실행 중…" : busy ? "검증 중…"
       : spec ? "형식 오류 없음" : errors.length ? `오류 ${errors.length}건` : "";
 
     const parts = [];
@@ -387,7 +400,7 @@ globalThis.SpecPage = (() => {
 
   /* Leaving the route: an answer still in flight no longer draws. */
   function stop() {
-    sequence++; busy = false;
+    sequence++; busy = false; importing = false;
     if (timer !== null && typeof clearTimeout === "function") clearTimeout(timer);
     timer = null;
   }

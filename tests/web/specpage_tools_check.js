@@ -114,6 +114,25 @@ const PREVIEW = {
   confirmed = true; button('예시 템플릿').onclick(); await settle();
   assert.strictEqual(editor.value, 'spec: 1\nname: my-feature\n');
   assert.strictEqual(calls.at(-1).verb, 'template');
+  // An import in flight is not cancelled by typing: the editor is read-only,
+  // the buttons stay off until it answers, and its log is drawn.
+  answers.check = () => [200, {errors: [], spec: SPEC, preview: PREVIEW}];
+  answers.plan = () => [200, {actions: [{do: 'issue'}], lines: ['issue epic']}];
+  answers.import = () => [200, {log: [{do: 'issue', what: 'epic', result: 'created', detail: 'claunch-x1'}]}];
+  type('spec: 1\nname: demo4\n'); fire(); await settle();
+  button('plan 미리보기').onclick(); await settle();
+  let finish; delay = new Promise(resolve => { finish = resolve; });
+  confirmed = true; button('import 실행').onclick(); await settle();
+  assert(editor.readOnly, 'the editor is read-only while the import runs');
+  type('spec: 1\nname: edited\n');
+  assert.strictEqual(editor.value, 'spec: 1\nname: demo4\n', 'an edit during the import is refused');
+  assert.strictEqual(fire(), 0, 'and schedules no check');
+  assert(button('처리 중…').disabled && button('import 실행').disabled, 'no second import while the first runs');
+  assert(button('예시 템플릿').disabled);
+  finish(); await settle();
+  assert(texts('h3').includes('import 결과') && texts('td').includes('claunch-x1'), 'the import log is drawn');
+  assert(!editor.readOnly && !button('검증').disabled);
+  assert.strictEqual(calls.filter(c => c.verb === 'import').length, 1);
   // Leaving the route cancels the pending pause.
   ctx.SpecPage.stop();
   assert.strictEqual(fire(), 0);
