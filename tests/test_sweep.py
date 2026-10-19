@@ -1895,7 +1895,8 @@ def test_the_conftest_writes_the_result_with_timeouts_pytest_cut_from_the_summar
     env["PYTHONPATH"] = str(REPO_ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
     proc = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
-         "-p", "no:claunch_window", "tests"],
+         "-p", "no:claunch_window", "--basetemp", str(tmp_path / "inner-basetemp"),
+         "tests"],
         cwd=project, env=env, capture_output=True, text=True,
     )
     assert proc.returncode == 1, proc.stdout + proc.stderr
