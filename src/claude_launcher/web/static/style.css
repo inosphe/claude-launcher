@@ -5508,6 +5508,16 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .new-check-row .new-check-label { min-width: 90px; }
 .new-check-list { display: flex; flex-wrap: wrap; gap: 4px 14px; }
 .new-check-list label.check { display: inline-flex; gap: 4px; align-items: baseline; margin: 0; }
+/* The Workflow row's recent picks (renderWorkflowRecent), styled as the
+   prompt-pack chips; the one the row holds now is lit. */
+.wf-recent-list.new-check-list { gap: 6px; }
+.wf-recent {
+  padding: 3px 8px; border: 1px solid #30363d; border-radius: 4px;
+  background: #14161a; color: #9aa4b0; font-size: 12px; cursor: pointer;
+  max-width: 100%; overflow-wrap: anywhere;
+}
+.wf-recent:hover { border-color: #8b949e; color: #d8dbe0; }
+.wf-recent[aria-pressed="true"] { border-color: #2f81f7; background: #10233d; color: #d8dbe0; }
 /* Prompt packs as chips (renderPromptPackRow): grouped, the box hidden
    inside the chip, which is lit when on; badges say why a chip is locked and
    where its text comes from; "view" opens the text below the chips.

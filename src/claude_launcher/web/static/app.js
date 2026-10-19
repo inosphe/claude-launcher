@@ -14175,6 +14175,8 @@ $("new-session").addEventListener("submit", async (e) => {
       if (doc.errors && $("new-inputs")) cflowInputsErrors($("new-inputs"), doc.errors);
       return;
     }
+    // A launch is a use: its workflow moves to the front of the recent row.
+    workflowRecentRecord(f.workflow.value);
     f.name.value = "";
     // A resume choice is spent: leaving it selected would point the next
     // Create at the same conversation and quietly open it twice. The role is
@@ -22381,6 +22383,7 @@ function syncOnboardPickers() {
                               o.value || o.name));
   }
   wf.value = [...wf.options].some((o) => o.value === keptWf) ? keptWf : "";
+  if (typeof renderWorkflowRecent === "function") renderWorkflowRecent();
   $("new-context-row").classList.toggle("hidden", !wf.value);
   renderSubroles();
   // One line under the row when the pick is a v1 workflow: the format is
@@ -22712,6 +22715,60 @@ let workflowsFor = null;
 /* Whether the Workflow row has been touched by hand. Until it has, the
    picked role decides it (see syncOnboardPickers). */
 let newWfPicked = false;
+
+/* The Workflow row's recent picks (claunch-pmw8u): the workflows this browser
+   launched a session or child with, least recently used dropped first, kept
+   in localStorage and drawn as buttons under the row. A value is the
+   select's own (a name, or "v2:<name>"), so a click is an assignment. */
+const WORKFLOW_RECENT_KEY = `claunch_workflow_recent:${BASE}`;
+const WORKFLOW_RECENT_MAX = 5;
+function workflowRecentPush(list, value, max) {
+  const kept = (Array.isArray(list) ? list : [])
+    .filter((v) => typeof v === "string" && v && v !== value);
+  return value ? [value, ...kept].slice(0, max) : kept.slice(0, max);
+}
+function workflowRecentLoad() {
+  try {
+    const list = JSON.parse(localStorage.getItem(WORKFLOW_RECENT_KEY) || "[]");
+    return workflowRecentPush(list, "", WORKFLOW_RECENT_MAX);
+  } catch { return []; }
+}
+function workflowRecentRecord(value) {
+  if (!value || value === "-") return;
+  const list = workflowRecentPush(workflowRecentLoad(), value, WORKFLOW_RECENT_MAX);
+  try { localStorage.setItem(WORKFLOW_RECENT_KEY, JSON.stringify(list)); } catch {}
+}
+/* Only the recent picks the row offers right now get a button: one the
+   picked role's filter_roles refuses, or one not declared in this
+   directory, would set a value the select cannot hold. */
+function renderWorkflowRecent() {
+  const row = $("new-workflow-recent");
+  const form = $("new-session");
+  if (!row || !form) return;
+  const wf = form.workflow;
+  const offered = new Map([...wf.options].filter((o) => o.value)
+    .map((o) => [o.value, o]));
+  const recent = workflowRecentLoad().filter((v) => offered.has(v));
+  row.innerHTML = "";
+  row.classList.toggle("hidden", !recent.length);
+  if (!recent.length) return;
+  row.appendChild(el("span", "new-check-label", "Recent"));
+  const list = el("div", "new-check-list wf-recent-list");
+  for (const value of recent) {
+    // The option's label without its " — detail" tail.
+    const label = String(offered.get(value).textContent || value).split(" — ")[0];
+    const btn = el("button", "wf-recent", label);
+    btn.type = "button";
+    btn.title = `set Workflow to ${label}`;
+    btn.setAttribute("aria-pressed", String(wf.value === value));
+    btn.addEventListener("click", () => {
+      wf.value = value;
+      wf.dispatchEvent(new Event("change"));
+    });
+    list.appendChild(btn);
+  }
+  row.appendChild(list);
+}
 
 /* Where the session being created will actually stand: its own directory, or
    its parent's when it is a child that may not be moved. Asking for the

@@ -1009,6 +1009,10 @@
           <div id="new-subroles-row" class="new-check-row hidden"></div>
           <div id="new-packs-row" class="new-check-row hidden"></div>
           <label>Workflow <select name="workflow"></select></label>
+          <!-- The workflows this browser launched most recently, newest first
+               (at most WORKFLOW_RECENT_MAX); a click sets the row above.
+               Drawn by renderWorkflowRecent from localStorage. -->
+          <div id="new-workflow-recent" class="new-check-row hidden"></div>
           <p id="new-workflow-note" class="wf-note hidden">cflow v1 format is deprecated; v2 runs beside it (docs/cflow-v2.md). The run still starts and works as before.</p>
           <label id="new-context-row" class="hidden">
             Context <input name="context" placeholder="context for the run (optional)">
