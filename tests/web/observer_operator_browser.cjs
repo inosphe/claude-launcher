@@ -43,7 +43,7 @@ function summary(o) {
   const open = o.feed.filter(e => e.kind === "ask" && !e.answer).map(e => e.id);
   return { id: o.id, name: o.name, all: o.all, projects: o.projects, profile: o.profile, model: o.model,
     effort: o.effort, watch: o.watch, created_at: o.created_at,
-    operator: o.session ? { name: o.session, running: true, status: "idle" } : null,
+    operator: o.session ? { name: o.session, running: true, status: o.status || "idle" } : null,
     pending: open.length, unseen: open.filter(id => !o.seen.includes(id)).length };
 }
 function operatorsApi(req, res, body) {
@@ -338,6 +338,18 @@ const lastSent = (method, suffix) => sent.filter(r => r.method === method && r.u
     // Started, the session line names its session and links to its page.
     assert.deepEqual(await sessionLine(), { hidden: false, who: "two", session: "s900 · 실행 중 (idle)", href: "#/s/s900", outside: true });
     assert.equal(await page.locator("#observer-operators .op-actions button:has-text('삭제')").isDisabled(), true);
+    // The dot draws the session's state the way the rail's dot does
+    // (claunch-zko8f): green idle, amber busy, on the tab and the session line.
+    const dots = () => page.evaluate(() => [
+      document.querySelector('#observer-operators .op-tab[aria-selected="true"] .op-dot'),
+      document.querySelector("#observer-operators > .op-sessionbar .op-dot"),
+    ].map(d => d && { cls: d.className, bg: getComputedStyle(d).backgroundColor }));
+    assert.deepEqual(await dots(), Array(2).fill({ cls: "op-dot on idle", bg: "rgb(63, 185, 80)" }));
+    ops.op3.status = "busy";
+    await tab("two").click();
+    await page.waitForFunction(() => /실행 중 \(busy\)/.test(document.querySelector("#observer-operators > .op-sessionbar")?.textContent || ""));
+    assert.deepEqual(await dots(), Array(2).fill({ cls: "op-dot on busy", bg: "rgb(210, 153, 34)" }));
+    delete ops.op3.status;
     await page.click("#observer-operators .op-actions button:has-text('정지')");
     await page.waitForFunction(() => /정지됨/.test(document.querySelector("#observer-operators .op-scope")?.textContent || ""));
     assert.equal((await sessionLine()).session, "세션 없음");
