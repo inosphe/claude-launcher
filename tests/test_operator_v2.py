@@ -516,7 +516,7 @@ def test_routes_crud_start_stop_and_agent_scope(world, monkeypatch):
     run(go())
     spec = created[0]
     assert spec["project"] == "beta" and spec["beads"] is False and spec["model"] == "m"
-    assert "mesh" not in spec and "opv2_inbox" in spec["task"]
+    assert "mesh" not in spec and "opv2_inbox" in spec["task"] and "opv2_landing" in spec["task"]
     # the session runs the operator-v2 workflow with this operator's id as its input
     assert spec["workflow"] == "operator-v2" == operators_v2.WORKFLOW
     assert spec["cflow_inputs"] == {"operator": made[0]["id"]}
