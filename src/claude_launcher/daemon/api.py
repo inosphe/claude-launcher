@@ -998,8 +998,8 @@ def build_app(
     # A driver asking its person to act on its cflow run (claunch-g08xz,
     # :mod:`flow_nudge`): filed by the flow_nudge MCP tool, read by the web
     # UI's notification card; settles itself when the run stops waiting.
-    r.add_post("/api/cflow/nudge", h_cflow_nudge)
-    r.add_get("/api/cflow/nudges", h_cflow_nudges)
+    r.add_post("/api/flow-nudges", h_flow_nudge_file)
+    r.add_get("/api/flow-nudges", h_flow_nudges_list)
     # Requests for a session (claunch-iw5i8.15, :mod:`spawn_gate`): filed by
     # the operator v2 agent routes, read and answered from the web UI's
     # notification card -- approve, reject, +5 min, manual (spawn) or a new
@@ -7525,8 +7525,8 @@ def _nudge_alive(manager, name: str) -> bool:
         return False
 
 
-async def h_cflow_nudge(request: web.Request) -> web.Response:
-    """``POST /api/cflow/nudge`` ``{session, message, scope?, cwd?}``: raise
+async def h_flow_nudge_file(request: web.Request) -> web.Response:
+    """``POST /api/flow-nudges`` ``{session, message, scope?, cwd?}``: raise
     ``session``'s run on the dashboard's notification channel
     (:mod:`flow_nudge`). The run is the session's own -- its directory, and
     its own slot or one of its side runs -- so a session nudges for nothing
@@ -7560,7 +7560,7 @@ async def h_cflow_nudge(request: web.Request) -> web.Response:
     return json_response(result)
 
 
-async def h_cflow_nudges(request: web.Request) -> web.Response:
+async def h_flow_nudges_list(request: web.Request) -> web.Response:
     rows = await asyncio.to_thread(request.app["flow_nudge"].list)
     return json_response({"requests": rows})
 

@@ -743,7 +743,7 @@ def _nudge(args: dict, session: str) -> Dict[str, Any]:
         raise runtime.FlowError(f"cannot reach the claunch daemon: "
                                 f"{daemon_client.unreachable_reason(why)}")
     try:
-        result = client.post("/api/cflow/nudge", {
+        result = client.post("/api/flow-nudges", {
             "session": session, "cwd": os.getcwd(), "scope": scope, "message": message,
         })
     except daemon_client.DaemonClientError as exc:

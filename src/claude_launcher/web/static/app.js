@@ -49793,7 +49793,7 @@ function urgentAskSync(rows) {
    waiting_selection/approval -- calls the flow_nudge MCP tool
    (claunch-g08xz). The daemon keeps one request per run slot and settles it
    itself once none of what it names is owed any more
-   (GET /api/cflow/nudges, daemon/flow_nudge.py). The card answers nothing:
+   (GET /api/flow-nudges, daemon/flow_nudge.py). The card answers nothing:
    the session's terminal strip and its run page carry the presses, so a
    click opens the session. */
 const NUDGE_PREFIX = "nudge-";
@@ -49811,7 +49811,7 @@ async function refreshNudgeGate() {
   if (!host) return;
   let body;
   try {
-    body = await (await api("/api/cflow/nudges")).json();
+    body = await (await api("/api/flow-nudges")).json();
   } catch {
     return;
   }

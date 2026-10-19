@@ -223,7 +223,7 @@ def test_the_tool_posts_this_sessions_own_run(proj, monkeypatch):
     assert out == {"raised": True, "request": "nudge-1", "owed": ["choose: x"],
                    "note": "raised"}
     path, body = client.posts[0]
-    assert path == "/api/cflow/nudge"
+    assert path == "/api/flow-nudges"
     assert body == {"session": "s7", "cwd": str(proj), "scope": "s7", "message": "pick right"}
 
     cflow2_mcp.call_tool("flow_nudge", {"message": "m", "side": "stack"})
@@ -249,10 +249,10 @@ def test_the_routes(proj):
         await client.start_server()
         bearer = {"Authorization": "Bearer sekrit"}
         try:
-            unknown = await client.post("/api/cflow/nudge", headers=bearer,
+            unknown = await client.post("/api/flow-nudges", headers=bearer,
                                         json={"session": "ghost", "message": "m"})
-            unauth = await client.get("/api/cflow/nudges")
-            listed = await (await client.get("/api/cflow/nudges", headers=bearer)).json()
+            unauth = await client.get("/api/flow-nudges")
+            listed = await (await client.get("/api/flow-nudges", headers=bearer)).json()
             return unknown.status, unauth.status, listed
         finally:
             await client.close()
