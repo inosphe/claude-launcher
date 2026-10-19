@@ -2737,8 +2737,11 @@ v2 워커의 착지 요청은 기본으로 pull request를 거친다. 로컬 착
   `landing-queue` 타입이 이 필드를 선언한다. `pr_url`이 있는 행은 리더의 PR 후보
   (`gh pr merge --merge --match-head-commit <tip>`, claunch-yq80p.6)이고 없으면 로컬
   후보다. 마커는 `LANDING REQUEST @ <sha> @ <remote>/<브랜치> pr: <url>`이다.
-- 착지 판정: 착지 대기 프로브는 `tools/landed_check.py --landing`이다(값 없이 주면
-  `CFLOW_DATA_LANDING`을 읽는다).
+- 착지 판정: 착지 대기 프로브는 `claunch gate landed-check --landing`이다(값 없이
+  주면 `CFLOW_DATA_LANDING`을 읽는다). 판정 코드는 패키지의
+  `claude_launcher.gates.landed_check`에 있어서 어느 저장소에서나 답한다.
+  claude-launcher 체크아웃 안에서는 `claunch gate`가 그 체크아웃의
+  `tools/landed_check.py`를 실행한다(claunch-bxxji.1).
   기록의 `medium`이 `pr`이면 `--target <remote>/<base> --fetch`와 같은 질문이 된다 —
   리더가 원격 base에서 `gh pr merge`로 만든 머지는 fetch 전에는 이 저장소에 없다.
   `pr`인데 `remote`·`base`가 없으면 판정 불가(2)다. 그 밖의 매체와 기록이 없을 때는
