@@ -1690,7 +1690,43 @@ let railRedrawPending = false;
    lost -- leaving the box is itself the release. */
 function railHeld() {
   return Date.now() < railHeldUntil
-    || (typeof railNoteFocused === "function" && railNoteFocused());
+    || (typeof railNoteFocused === "function" && railNoteFocused())
+    || (typeof railTyping === "function" && railTyping());
+}
+
+/* Typing in any text box -- a thread's composer, the terminal, a form --
+   holds the rail until the keys go quiet (claunch-oo8au). A poll that
+   changes a session redraws its rows, and in a trace taken while typing in a
+   thread on a ~200-row rail that redraw cost ~200 ms of script and then a
+   ~430 ms Commit on the main thread, every ~5 s: the keys pressed in that
+   window waited up to 370 ms to be handled, while the handlers themselves
+   took under 5 ms. The redraw runs in the first pause instead. The burst has
+   a ceiling so a reader who never pauses still sees the rail move; past it
+   the polls redraw as before until the next pause starts a new burst. */
+const RAIL_TYPING_QUIET_MS = 1500;
+const RAIL_TYPING_MAX_MS = 15000;
+let railTypedAt = 0;
+let railTypingSince = 0;
+let railTypingTimer = 0;
+
+function railTyping() {
+  if (!railTypedAt) return false;
+  const now = Date.now();
+  return now - railTypedAt < RAIL_TYPING_QUIET_MS
+    && now - railTypingSince < RAIL_TYPING_MAX_MS;
+}
+
+function noteRailTyping(ev) {
+  const t = ev && ev.target;
+  if (!t || !(t.tagName === "TEXTAREA" || t.tagName === "INPUT" || t.isContentEditable)) return;
+  const now = Date.now();
+  if (now - railTypedAt >= RAIL_TYPING_QUIET_MS) railTypingSince = now;
+  railTypedAt = now;
+  clearTimeout(railTypingTimer);
+  railTypingTimer = setTimeout(() => {
+    railTypingTimer = 0;
+    if (railRedrawPending && !railHeld()) refreshSessions();
+  }, RAIL_TYPING_QUIET_MS);
 }
 
 function holdRail() { railHeldUntil = Date.now() + RAIL_HOLD_MS; }
@@ -50383,6 +50419,8 @@ noticeSyncTick();
 $("session-list").addEventListener("pointerdown", holdRail);
 document.addEventListener("pointerup", releaseRail, true);
 document.addEventListener("pointercancel", releaseRail, true);
+document.addEventListener("keydown", noteRailTyping, true);
+document.addEventListener("input", noteRailTyping, true);
 
 // The countdown, between polls. It fetches nothing — it ages the last
 // /api/cflow reading — so it is a second's worth of arithmetic, and it is
