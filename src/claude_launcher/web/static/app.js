@@ -37318,6 +37318,9 @@ function sessionPrRows(s) {
      ✓  master has it (merged)
      ↑  a remote has it, master does not (pushed)
      ○  only this machine has it (local)
+   -- a commit whose change master already has under another hash (a
+   rebase left the old one on the pushed branch) struck through, its tooltip
+   naming that hash (`superseded`, session_commits.supersede, claunch-rqtpe)
    -- and every recorded PR as a bordered frame, its number on the frame,
    around the chips of the commits that PR carries. A PR whose commits the
    daemon could not tell apart (a deleted head branch, a squash merge) is a
@@ -37334,10 +37337,13 @@ const RAIL_COMMIT_MARKS = {
    card's own click, which attaches the session, is stopped there. */
 function railCommitChip(c, session) {
   const [mark, what] = RAIL_COMMIT_MARKS[c.state] || ["?", "state unknown"];
-  const chip = el("a", "rail-commit rail-commit-" + (RAIL_COMMIT_MARKS[c.state] ? c.state : "unknown"));
+  const by = c.superseded && c.state !== "merged" ? c.superseded : null;
+  const chip = el("a", "rail-commit rail-commit-" + (RAIL_COMMIT_MARKS[c.state] ? c.state : "unknown") +
+    (by ? " rail-commit-superseded" : ""));
   chip.appendChild(el("span", "rail-commit-mark", mark));
   chip.appendChild(el("span", "rail-commit-sha", String(c.short || "").slice(0, 7)));
   chip.title = `${c.short || ""} ${c.subject || ""}\n${mark} ${what}` +
+    (by ? `\nsuperseded: master has the same change as ${String(by.short || by.sha || "").slice(0, 7)} (rebased); nothing left to merge` : "") +
     (session ? "\nclick: open the commit and its diff" : "");
   if (session && globalThis.CommitPage) globalThis.CommitPage.link(chip, c.sha || c.short, { session });
   return chip;

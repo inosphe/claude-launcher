@@ -520,6 +520,157 @@ def test_kept_rail_shows_the_newest_and_counts_the_rest(repo, fresh_kept, monkey
     assert view["more"] == 2 and len(record["rows"]) == 4
 
 
+# --------------------------------------------------------------------------- #
+# a rebased-away commit is superseded (claunch-rqtpe)
+# --------------------------------------------------------------------------- #
+def rebased(repo):
+    """s623's shape: the old hash pushed on the feature branch, the same
+    change landed on master under a new one (a cherry-pick stands in for the
+    rebase; both keep the subject and the trailer)."""
+    commit(repo, "chore: base")
+    git("checkout", "-qb", "s1-feature", cwd=repo)
+    old = commit(repo, "fix: soften the filter", session="s1")
+    git("push", "-q", "origin", "s1-feature", cwd=repo)
+    git("checkout", "-q", "master", cwd=repo)
+    (repo / "other.txt").write_text("master moved on", encoding="utf-8")
+    git("add", "-A", cwd=repo)
+    git("commit", "-qm", "chore: master moved on", cwd=repo)
+    git("cherry-pick", old, cwd=repo)
+    git("push", "-q", "origin", "master", cwd=repo)
+    new = git("rev-parse", "--short", "HEAD", cwd=repo).stdout.strip()
+    return old, new
+
+
+def superseded_rows(repo, record=None, session="s1"):
+    chips = session_commits.rail(str(repo), session)
+    record, changed = session_commits.rail_superseded(str(repo), session, chips, record)
+    rows = [(c["short"], c["state"], (c.get("superseded") or {}).get("short"))
+            for c in chips["commits"]]
+    return rows, record, changed
+
+
+def test_a_rebased_away_commit_is_superseded_by_its_landed_copy(repo, remote, fresh_rail):
+    old, new = rebased(repo)
+    rows, record, changed = superseded_rows(repo)
+    assert rows == [(new, "merged", None), (old, "pushed", new)]
+    assert changed and record["by"][git("rev-parse", old, cwd=repo).stdout.strip()]["short"] == new
+
+
+def test_a_kept_verdict_is_reused_without_reading_a_diff(repo, remote, fresh_rail, monkeypatch):
+    old, new = rebased(repo)
+    _, record, _ = superseded_rows(repo)
+    calls = count_git(monkeypatch)
+    rows, again, changed = superseded_rows(repo, json.loads(json.dumps(record)))
+    assert rows == [(new, "merged", None), (old, "pushed", new)]
+    assert not changed and again == record
+    assert "diff-tree" not in calls
+
+
+def test_the_same_subject_with_another_change_is_not_superseded_and_read_once(
+        repo, remote, fresh_rail, monkeypatch):
+    commit(repo, "chore: base")
+    git("checkout", "-qb", "s1-feature", cwd=repo)
+    old = commit(repo, "fix: x", session="s1")
+    git("push", "-q", "origin", "s1-feature", cwd=repo)
+    git("checkout", "-q", "master", cwd=repo)
+    (repo / "f2.txt").write_text("another change", encoding="utf-8")
+    git("add", "-A", cwd=repo)
+    git("commit", "-qm", "fix: x\n\nClaunch-Session: s1", cwd=repo)
+    new = git("rev-parse", "--short", "HEAD", cwd=repo).stdout.strip()
+    rows, record, changed = superseded_rows(repo)
+    assert rows == [(new, "merged", None), (old, "pushed", None)]
+    # The fingerprints are kept: the "no" costs no diff the next time.
+    assert changed and record["by"] == {} and len(record["fp"]) == 2
+    calls = count_git(monkeypatch)
+    _, _, changed = superseded_rows(repo, record)
+    assert not changed and "diff-tree" not in calls
+
+
+def test_another_sessions_landed_copy_does_not_supersede(repo, remote, fresh_rail):
+    commit(repo, "chore: base")
+    git("checkout", "-qb", "s1-feature", cwd=repo)
+    old = commit(repo, "fix: y", session="s1")
+    git("push", "-q", "origin", "s1-feature", cwd=repo)
+    git("checkout", "-q", "master", cwd=repo)
+    (repo / "f2.txt").write_text("fix: y", encoding="utf-8")
+    git("add", "-A", cwd=repo)
+    git("commit", "-qm", "fix: y\n\nClaunch-Session: s2", cwd=repo)
+    rows, _, changed = superseded_rows(repo)
+    assert rows == [(old, "pushed", None)] and not changed
+
+
+def test_context_drift_on_master_still_reads_as_the_same_change(repo, remote, fresh_rail):
+    """The case git's patch-id gets wrong (claunch-patchid-context-drift-68mu):
+    master changed a line beside the change, so the rebased copy's hunk has
+    other context and another patch-id, yet it changes the same lines."""
+    lines = [f"line {n}" for n in range(1, 11)]
+    (repo / "a.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    git("add", "-A", cwd=repo)
+    git("commit", "-qm", "chore: base", cwd=repo)
+    git("checkout", "-qb", "s1-feature", cwd=repo)
+    changed_lines = list(lines)
+    changed_lines[5] = "line 6 fixed"
+    (repo / "a.txt").write_text("\n".join(changed_lines) + "\n", encoding="utf-8")
+    git("add", "-A", cwd=repo)
+    git("commit", "-qm", "fix: line 6\n\nClaunch-Session: s1", cwd=repo)
+    old = git("rev-parse", "--short", "HEAD", cwd=repo).stdout.strip()
+    git("push", "-q", "origin", "s1-feature", cwd=repo)
+    git("checkout", "-q", "master", cwd=repo)
+    drift = list(lines)
+    drift[3] = "line 4 renamed"
+    (repo / "a.txt").write_text("\n".join(drift) + "\n", encoding="utf-8")
+    git("commit", "-qam", "chore: rename beside it", cwd=repo)
+    git("cherry-pick", old, cwd=repo)
+    new = git("rev-parse", "--short", "HEAD", cwd=repo).stdout.strip()
+
+    def patch_id(sha):
+        show = git("show", sha, cwd=repo).stdout
+        return subprocess.run(["git", "patch-id", "--stable"], cwd=str(repo), input=show,
+                              capture_output=True, text=True, check=True).stdout.split()[0]
+
+    assert patch_id(old) != patch_id(new)
+    rows, _, _ = superseded_rows(repo)
+    assert (old, "pushed", new) in rows
+
+
+def test_a_merged_commit_is_never_struck(repo, remote, fresh_rail):
+    old, new = rebased(repo)
+    git("checkout", "-q", "master", cwd=repo)
+    git("merge", "-q", "--no-ff", "-m", "merge the old one too", "s1-feature", cwd=repo)
+    rows, _, _ = superseded_rows(repo)
+    assert (old, "merged", None) in rows
+
+
+def test_the_verdicts_are_kept_in_the_sessions_directory(home, repo, remote, fresh_rail, monkeypatch):
+    from claude_launcher.daemon import paths, rail_superseded
+    rail_superseded.forget()
+    old, new = rebased(repo)
+    chips = session_commits.rail(str(repo), "s1")
+    rail_superseded.mark("s1", lambda r: session_commits.rail_superseded(
+        str(repo), "s1", chips, r))
+    kept_file = paths.session_dir("s1") / rail_superseded.FILE
+    assert kept_file.is_file()
+    # A daemon restart: nothing held in memory, the file answers.
+    rail_superseded.forget()
+    calls = count_git(monkeypatch)
+    chips = session_commits.rail(str(repo), "s1")
+    rail_superseded.mark("s1", lambda r: session_commits.rail_superseded(
+        str(repo), "s1", chips, r))
+    assert "diff-tree" not in calls
+    assert chips["commits"][1]["superseded"]["short"] == new
+
+
+def test_an_exited_sessions_kept_chips_are_struck_too(repo, remote, fresh_kept):
+    old, new = rebased(repo)
+    record, _ = kept(None, [repo])
+    view = session_commits.kept_view(record)
+    verdicts, changed = session_commits.supersede(
+        record["common"], view["commits"], record["rows"], None)
+    assert changed
+    assert [(c["short"], (c.get("superseded") or {}).get("short")) for c in view["commits"]] \
+        == [(new, None), (old, new)]
+
+
 def test_the_session_list_carries_rail_commits_for_the_card():
     """The rail view filters fields by name; a field left out of that list
     never reaches the card (the same trap the comment there records)."""

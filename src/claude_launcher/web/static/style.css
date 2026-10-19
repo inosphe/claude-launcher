@@ -923,6 +923,10 @@ html[data-theme="light"] .xterm {
 #session-list .rail-commit-pushed .rail-commit-mark { color: #79c0ff; }
 #session-list .rail-commit-local .rail-commit-mark { color: #e3b341; }
 #session-list .rail-commit-unknown .rail-commit-mark { color: #8b949e; }
+/* A rebased-away commit (claunch-rqtpe): master has its change under the
+   hash its tooltip names, so it is struck through and dimmed. */
+#session-list .rail-commit-superseded { opacity: 0.55; }
+#session-list .rail-commit-superseded .rail-commit-sha { text-decoration: line-through; }
 #session-list .rail-prgroup {
   display: inline-flex; align-items: center; gap: 4px; max-width: 100%;
   flex-wrap: wrap; padding: 0 5px 0 0; border: 1px solid #3b6ea8; border-radius: 4px;
