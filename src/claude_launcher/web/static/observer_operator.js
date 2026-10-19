@@ -92,6 +92,17 @@ function ownerOf(name) {
 }
 const scopeText = op => op.all ? "전체 프로젝트" : (op.projects || []).join(", ") || "범위 없음";
 const running = op => !!op?.operator?.running;
+/* The operator's dot draws its session's state the way the rail's dot does
+   (claunch-zko8f): amber while busy, blue while starting, green when idle,
+   grey when stopped. Another status word keeps the plain running green. */
+const DOT_STATES = ["busy", "idle", "starting"];
+function dot(op) {
+  const status = op?.operator?.status;
+  const state = running(op) && DOT_STATES.includes(status) ? ` ${status}` : "";
+  const d = node("span", "", `op-dot${running(op) ? " on" : ""}${state}`);
+  d.title = running(op) ? `실행 중${status ? ` (${status})` : ""}` : "정지됨";
+  return d;
+}
 function stateText(op) {
   if(!op.operator) return "정지됨 · 세션 없음";
   if(!op.operator.running) return `정지됨 · ${op.operator.name}`;
@@ -287,7 +298,7 @@ function sessionBar(op) {
   bar.hidden = !op;
   if(!op) { bar.replaceChildren(); return; }
   const who = node("span", "", "op-bar-who");
-  who.append(node("span", "", `op-dot${running(op) ? " on" : ""}`), node("strong", op.name));
+  who.append(dot(op), node("strong", op.name));
   const parts = [who];
   if(op.operator) {
     const state = running(op) ? `실행 중${op.operator.status ? ` (${op.operator.status})` : ""}` : "정지됨";
@@ -338,7 +349,7 @@ function render() {
     const tab = node("button", "", "op-tab");tab.type = "button";
     tab.setAttribute("role", "tab");tab.setAttribute("aria-selected", String(op.id === selected));
     tab.dataset.operator = op.id;
-    tab.append(node("span", "", `op-dot${running(op) ? " on" : ""}`), node("span", op.name));
+    tab.append(dot(op), node("span", op.name));
     if(op.unseen > 0 || op.pending > 0) {
       const badge = node("span", String(op.unseen || op.pending), `op-badge${op.unseen ? " unseen" : ""}`);
       badge.title = `답변을 기다리는 질문 ${op.pending}개${op.unseen ? ` · 새 질문 ${op.unseen}개` : ""}`;

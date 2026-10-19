@@ -346,6 +346,8 @@
 :is(#observer-operators, #opfab-view) .op-new { color: #96a6b8; border-style: dashed; }
 :is(#observer-operators, #opfab-view) .op-dot { width: 8px; height: 8px; border-radius: 50%; background: #6e7681; }
 :is(#observer-operators, #opfab-view) .op-dot.on { background: #3fb950; }
+:is(#observer-operators, #opfab-view) .op-dot.on.busy { background: #d29922; }
+:is(#observer-operators, #opfab-view) .op-dot.on.starting { background: #58a6ff; }
 :is(#observer-operators, #opfab-view) .op-badge { min-width: 18px; padding: 0 5px; border-radius: 9px; font-size: 11px; line-height: 18px; text-align: center; background: #30343b; color: #c9d1d9; }
 :is(#observer-operators, #opfab-view) .op-badge.unseen { background: #9e6a03; color: #fff; }
 /* The session line above the conversation (claunch-iw5i8.13): one row that
