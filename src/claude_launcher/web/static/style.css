@@ -523,6 +523,19 @@ html[data-theme="light"] .xterm {
   display: flex; align-items: center; gap: 5px; font-size: 13px;
   flex-wrap: wrap;  /* the cflow badge is a full-width second line */
 }
+/* A row scrolled out of the rail is not laid out or painted (claunch-oo8au.1).
+   A trace of a ~200-row rail showed ~16,800 layout objects on the page and a
+   65-436 ms Commit after each poll that redrew rows; most of those rows were
+   off screen. The row stays in the document -- its node, listeners, focus and
+   the poll's in-place diff are untouched -- only its rendering is skipped.
+   `auto` keeps the height the row last rendered at, so the scrollbar holds
+   still once a row has been seen; 64px is the estimate for a row that has
+   not. Only session rows: a group container holds the sticky heading, which
+   would stop sticking inside a contained box. */
+#session-list li[data-name] {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 64px;
+}
 #session-list li:hover { background: #22262d; }
 #session-list li.active { background: #2b313b; }
 /* Where the header's `⇱ card` just landed. The scroll alone puts the row

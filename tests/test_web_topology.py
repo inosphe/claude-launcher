@@ -458,6 +458,8 @@ CHECKS = [
         "observerstatus_check.js",
         "observerended_check.js",
         "railhold_check.js",
+        "railtyping_check.js",
+        "railcontain_check.js",
         "railscroll_check.js",
         "railquiet_check.js",
         "spawnform_check.js",
