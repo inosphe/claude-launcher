@@ -846,8 +846,8 @@ nodes:
         올린다. 값을 보고에 적는다.
       · `git fetch <remote>` 뒤 `git branch --set-upstream-to=<remote>/<base>`
         (스택 자식이면 base는 `--base`로 준 기준 브랜치다).
-        정렬 게이트(tools/merge_ready.py)와 착지 게이트(tools/landed_check.py
-        --target @{upstream})가 이 upstream을 통합 대상으로 읽는다. 원격 편성의
+        정렬 게이트(tools/merge_ready.py)와 착지 게이트(`claunch gate landed-check
+        --target @{upstream}`)가 이 upstream을 통합 대상으로 읽는다. 원격 편성의
         rebase 기준도 이것이다 — 로컬 master가 아니라 `<remote>/<base>`.
       · 원격 base가 로컬 통합 브랜치보다 뒤처졌는지 잰다: `git rev-list --count
         <remote>/<base>..master`(스택 자식이면 master 대신 부모가 알린 스택 tip). 0이 아니면 그 수와 두 tip을 상위에 알리고
@@ -2404,7 +2404,7 @@ nodes:
       착지 요청을 스스로 거둔다. 상위가 이미 머지를 시작했을 수 있으므로
       순서가 중요하다:
       1. 상위의 표를 먼저 본다 — `claunch beads comments <id>`에 `merged
-         <해시>`가 있거나 landed 판정(`tools/landed_check.py`)이 0이면
+         <해시>`가 있거나 landed 판정(`claunch gate landed-check`)이 0이면
          철회할 것이 없다. 그 사실과 머지 해시를 보고에 적고 결과를
          `merged`로 낸다 — 착지 확인(confirm-landed)이 그것을 받는다.
       2. 이슈(배치면 실린 이슈 전부)를 `claunch beads update <id> --status
@@ -2521,7 +2521,7 @@ nodes:
   landed:
     title: 착지 확인 (기계가 재고 기계가 넘긴다)
     prompt: |
-      착지 판정은 프로브(landed-wait: `tools/landed_check.py`와 깨끗한
+      착지 판정은 프로브(landed-wait: `claunch gate landed-check`와 깨끗한
       트리)가 낸다. 이 스텝에서 할 일은 기록이다 — 통과 판정은 네가
       내리지 않는다.
 
@@ -3463,7 +3463,14 @@ procedures:
               # (claunch-yq80p.4). 로컬 착지와 기록이 없을 때는 이전과 같은 질문이다.
               # 값 없는 --landing은 그 변수를 직접 읽는다 — cmd.exe는 "$VAR"를
               # 전개하지 않는다(claunch-yq80p.13).
-              probe: 'uv run --no-sync python tools/landed_check.py --landing && git diff --quiet && git diff --cached --quiet'
+              # 판정 코드는 패키지(claude_launcher.gates.landed_check)에 있고
+              # `claunch gate`로 부른다. 이 정의는 모든 저장소로 배포되므로,
+              # claude-launcher에만 있는 tools/landed_check.py를 상대 경로로 부르면
+              # 다른 저장소에서 python이 exit 2(판정 불가와 같은 값)를 내고 회차마다
+              # landed-unclear 질문이 뜬다(claunch-eyajw). claude-launcher 체크아웃
+              # 안에서는 claunch gate가 그 체크아웃의 tools/landed_check.py를 실행한다
+              # (cli_gate).
+              probe: 'claunch gate landed-check --landing && git diff --quiet && git diff --cached --quiet'
               poll: 60
               seconds: 86400
               undecided_max: 3
@@ -3526,7 +3533,7 @@ procedures:
           context: "$params.why"
           require_reason: true
           topic: |
-            착지 프로브(`tools/landed_check.py` + 깨끗한 트리)가 답을 내지 못했다(사유는
+            착지 프로브(`claunch gate landed-check` + 깨끗한 트리)가 답을 내지 못했다(사유는
             근거 칸의 값). undecidable은 판정 불가(종료 코드 2: 저장소·브랜치를 읽지
             못했다)가 세 번 이어졌다는 뜻이고, timeout은 하루 동안 「아직」이었다는 뜻이다.
             `git log --merges --format='%H %P' <대상>`에서 동결된 tip을 부모로 갖는 머지

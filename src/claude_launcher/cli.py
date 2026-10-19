@@ -24,6 +24,7 @@ from . import (
     cli_cflow,
     cli_cflow2,
     cli_connections,
+    cli_gate,
     cli_loops,
     cli_mesh,
     cli_operators,
@@ -1682,6 +1683,7 @@ def build_parser() -> argparse.ArgumentParser:
     cli_transcript.register(sub)
     cli_plugins.register(sub)
     cli_report.register(sub)
+    cli_gate.register(sub)
     cli_spec.register(sub)
     cli_sim.register(sub)
     cli_commits.register(sub)
