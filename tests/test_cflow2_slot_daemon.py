@@ -17,6 +17,7 @@ import types
 
 import pytest
 
+from claude_launcher import atomic
 from claude_launcher.cflow2 import frontend, runtime, slot_migration
 from claude_launcher.cflow2 import store as cstore
 from claude_launcher.cflow2.store import RunStore
@@ -56,7 +57,9 @@ def _legacy(cwd, scope):
     qualifier: renamed to its bare name, no daemon recorded."""
     runs = cwd / ".cflow2" / "runs"
     old = runs / cstore.unqualified(scope)
-    os.rename(runs / scope, old)
+    # the slot was written a moment ago, and a scanner or indexer may still hold
+    # a handle to it: rename through the retry that absorbs that WinError 5
+    atomic.replace(runs / scope, old)
     st = RunStore.at(old)
     with st.lock():
         state = st.load_state()
