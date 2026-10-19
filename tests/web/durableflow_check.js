@@ -321,6 +321,45 @@ stable(U, "units");
 // A unit drawn before its start event (an ask_start came first) stays at depth 0.
 const early = DF.model([{ event: "ask_start", key: "k", unit: "u1" }, { event: "unit", unit: "u1", state: "start", after: ["zz"] }], true);
 assert.deepStrictEqual([early.nodes[0].id, early.nodes[0].col, early.nodes[0].status], ["unit:u1", 0, "run"]);
+// A question that threw logs its ask with an error and no usage: the pair
+// closes, the node turns warn and its tip carries the error.
+const thrown = DF.model([
+  { event: "unit", unit: "d", state: "start", label: "doc" },
+  { event: "ask_start", key: "B:d:1", askRole: "B", unit: "d" },
+  { event: "ask", askRole: "B", key: "B:d:1", error: "cost cap reached\nstack", stop: "error" },
+  { event: "unit", unit: "d", state: "done" },
+  { event: "ask_start", key: "B:g|x", askRole: "B" },
+  { event: "ask", askRole: "B", key: "B:g|x", error: "harness closed" },
+  { event: "ask_start", key: "formalize:1" },
+  { event: "ask", role: "B", key: "formalize:1", error: "aborted" },
+], true);
+const byt = Object.fromEntries(thrown.nodes.map((n) => [n.id, n]));
+assert.deepStrictEqual([byt["unit:d"].status, byt["unit:d"].count, byt["unit:d"].running], ["warn", 1, 0]);
+assert.ok(byt["unit:d"].tip.some((t) => / B:d:1: cost cap reached$/.test(t)), byt["unit:d"].tip.join("|"));
+assert.deepStrictEqual([byt["grp:B:g"].status, byt["ask:formalize:1"].status], ["warn", "warn"]);
+assert.ok(byt["grp:B:g"].tip.some((t) => /harness closed/.test(t)));
+assert.ok(byt["ask:formalize:1"].tip.includes("aborted"));
+assert.deepStrictEqual([thrown.running, thrown.peak], [0, 1]);
+// An ask_start left without its ask is closed by its unit's end, and every
+// one still open by the run's end (the process died before the ask).
+const dead = [
+  { event: "unit", unit: "a", state: "start" }, { event: "unit", unit: "b", state: "start" },
+  { event: "ask_start", key: "ka", unit: "a" }, { event: "ask_start", key: "kb", unit: "b" },
+  { event: "ask_start", key: "kb2", unit: "b" }, { event: "ask_start", key: "kn" },
+];
+const dm = (tail) => DF.model([...dead, ...tail], true);
+assert.deepStrictEqual([dm([]).running, dm([]).peak], [4, 4]);
+const da = dm([{ event: "unit", unit: "a", state: "interrupted" }]);
+assert.deepStrictEqual([da.running, da.nodes[0].running, da.nodes[1].running, da.nodes[0].status], [3, 0, 2, "warn"]);
+for (const end of ["run_end", "done", "error", "interrupted", "session_shutdown"]) {
+  const e = dm([{ event: end, state: "failed" }]);
+  assert.deepStrictEqual([e.running, e.nodes[1].running, e.peak], [0, 0, 4], end);
+  assert.strictEqual(e.nodes[1].sub, "물음 0 · 0 tok", end);
+}
+// The ask that comes after its start was closed counts into the start's unit and changes nothing else.
+const late = dm([{ event: "unit", unit: "b", state: "done" }, { event: "ask", key: "kb", usage: u(7) }]);
+assert.deepStrictEqual([late.running, late.nodes[1].count, late.nodes[1].running], [2, 1, 0]);
+stable([...dead, { event: "unit", unit: "a", state: "done" }, { event: "run_end", state: "done" }], "dead");
 console.log("durableflow_check: units ok");
 
 // (d) mount: the pending edge goes once a unit is the last node, and the

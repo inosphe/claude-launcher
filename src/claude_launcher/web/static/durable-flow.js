@@ -29,6 +29,9 @@
      question really went out (past the producer's concurrency semaphore).
      It ends at the ``ask`` with the same key, which may also carry
      ``"unit"?``: the id of the unit the question belongs to.
+   - A question that throws (cost cap, stop, harness error) still logs its
+     ``ask`` -- without usage, with ``"error":"<one line>"`` -- so the pair
+     closes. Its node turns warn and shows the error in its tip.
    - ``{"event":"unit","at","unit":"<id>","state":"start"|"done"|"failed"|
      "skipped"|"interrupted","label"?,"phase"?,"after"?:["<unit id>"...],
      "note"?}`` -- a unit of work. Its start carries the label, a phase (a
@@ -47,7 +50,10 @@
    - Ungrouped questions (a claunch simulation, which asks one at a time)
      keep their chain.
    - The headline counts the questions in flight and the most that were in
-     flight at once, from ask_start/ask pairs.
+     flight at once, from ask_start/ask pairs. An ask_start left without its
+     ask counts as closed at its unit's end event, and at run_end, done,
+     error, interrupted and session_shutdown (the process died before it
+     could log the ask).
 
    ``model(events, live, progress)`` is the pure half (tests/web/durableflow_check.js);
    ``mount(host, session)`` owns the poll and the SVG. */
@@ -160,6 +166,7 @@
     let tokensTotal = 0, asks = 0, ended = null, first = null, lastAt = null;
     const units = new Map(); // unit id -> its node
     const open = new Map();  // ask key -> [unit id | null] of starts not yet answered
+    const keyUnit = new Map(); // ask key -> the unit its last ask_start named
     let running = 0, peak = 0, starts = 0;
 
     // A phase entered again gets a new column -- except a grouped (sim2)
@@ -214,6 +221,18 @@
       units.set(id, node);
       return node;
     }
+    // Close the starts left without their ask (all, or one unit's).
+    function closeOpen(unit) {
+      for (const [key, pend] of open) {
+        const keep = [];
+        for (const u of pend) {
+          if (unit !== undefined && u !== unit) { keep.push(u); continue; }
+          running -= 1;
+          if (u !== null) { units.get(u).running -= 1; unitSub(units.get(u)); }
+        }
+        if (keep.length) open.set(key, keep); else open.delete(key);
+      }
+    }
     const UNIT_STATUS = { start: "run", done: "ok", failed: "fail", skipped: "skip", interrupted: "warn" };
     const UNIT_STATE = { skipped: "건너뜀", interrupted: "중단", failed: "실패" };
     function unitSub(node) {
@@ -253,6 +272,7 @@
           const state = UNIT_STATUS[ev.state] ? ev.state : "start";
           node.state = state;
           node.status = node.cut && state === "done" ? "warn" : UNIT_STATUS[state];
+          if (state !== "start") closeOpen(id);
           if (ev.label) node.label = String(ev.label);
           if (ev.note) node.note = String(ev.note);
           if (state === "start" && ev.phase) {
@@ -277,6 +297,7 @@
           const unit = ev.unit != null ? String(ev.unit) : null;
           if (!open.has(key)) open.set(key, []);
           open.get(key).push(unit);
+          if (unit !== null) keyUnit.set(key, unit);
           starts += 1;
           running += 1;
           peak = Math.max(peak, running);
@@ -290,8 +311,11 @@
         case "ask": {
           const pend = open.get(String(ev.key || ""));
           let unit = ev.unit != null ? String(ev.unit) : null;
+          const failed = ev.error ? String(ev.error).split("\n")[0] : "";
+          if (unit === null && keyUnit.has(String(ev.key || ""))) unit = keyUnit.get(String(ev.key || ""));
           if (pend && pend.length) {
             const from = pend.shift();
+            if (!pend.length) open.delete(String(ev.key || ""));
             running -= 1;
             if (from !== null) {
               const node = units.get(from);
@@ -307,10 +331,11 @@
             asks += 1;
             node.count += 1;
             node.tok += Number(u.totalTokens) || 0;
-            if (ev.stop && ev.stop !== "stop") {
+            if ((ev.stop && ev.stop !== "stop") || failed) {
               node.cut = true;
               if (node.status === "ok") node.status = "warn";
             }
+            if (failed) node.tip.push(when + " " + String(ev.key || "") + ": " + failed);
             unitSub(node);
             break;
           }
@@ -328,8 +353,9 @@
             node.tok += Number(u.totalTokens) || 0;
             node.label = g.label + " ×" + node.count;
             node.sub = ev.askRole + " · " + tokens(node.tok) + " tok";
-            if (ev.stop && ev.stop !== "stop") node.status = "warn";
-            node.tip = [when + " 마지막 " + String(ev.key || ""), "stop " + (ev.stop || "?")];
+            if ((ev.stop && ev.stop !== "stop") || failed) node.status = "warn";
+            if (failed) node.errors = [...(node.errors || []), when + " " + String(ev.key || "") + ": " + failed];
+            node.tip = [when + " 마지막 " + String(ev.key || ""), "stop " + (ev.stop || "?"), ...(node.errors || [])];
             break;
           }
           asks += 1;
@@ -341,10 +367,10 @@
           add(keyPhase(key), "ask:" + key, {
             key, label: askLabel(key),
             sub: (ev.role || "?") + " · " + tokens(u.totalTokens) + " tok",
-            status: ev.stop && ev.stop !== "stop" ? "warn" : "done",
+            status: (ev.stop && ev.stop !== "stop") || failed ? "warn" : "done",
             tip: [when, key, "role " + (ev.role || "?"),
                   `in ${u.input || 0} · cache ${u.cacheRead || 0} · out ${u.output || 0} · gen ${u.generations || 0}`,
-                  "stop " + (ev.stop || "?")],
+                  "stop " + (ev.stop || "?"), failed].filter(Boolean),
           });
           break;
         }
@@ -397,6 +423,7 @@
           });
           break;
         case "done":
+          closeOpen();
           ended = { failed: !!ev.failed, reason: ev.reason || "" };
           add("end", "done", { label: ev.failed ? "실패" : "끝", sub: String(ev.reason || "").slice(0, 40),
                                status: ev.failed ? "fail" : "ok", tip: [when, String(ev.reason || "")] });
@@ -405,15 +432,18 @@
           settle(byId.get("done") || null, "warn", "데몬 보고 실패", "end", "끝");
           break;
         case "error":
+          closeOpen();
           ended = ended || { failed: true, reason: String(ev.error || "").split("\n")[0] };
           add("end", "error", { label: "오류", sub: String(ev.error || "").split("\n")[0].slice(0, 40),
                                 status: "fail", tip: [when, String(ev.error || "").slice(0, 400)] });
           break;
         case "interrupted":
+          closeOpen();
           add("end", "interrupted", { label: "중단", sub: String(ev.error || "").slice(0, 40), status: "warn",
                                       tip: [when, String(ev.error || "")] });
           break;
         case "run_end": {
+          closeOpen();
           // done, stopped (asked to stop), or anything else (it broke).
           const stopped = ev.state === "stopped" && !ev.error;
           const failed = !stopped && (ev.state !== "done" || !!ev.error);
@@ -433,6 +463,7 @@
           break;
         }
         case "session_shutdown": {
+          closeOpen();
           const tail = nodes[nodes.length - 1];
           if (tail && cols[tail.col].phase === "end") {
             tail.tip.push(when + " session_shutdown " + (ev.reason || ""));
