@@ -7127,7 +7127,10 @@ function tpsLatencyText(t) {
 function tpsText(t) {
   if (!t) return "";
   const live = typeof tpsLiveText === "function" ? tpsLiveText(t.live) : "";
-  if (live) return live;
+  if (live) {
+    const par = typeof tpsParallelText === "function" ? tpsParallelText(t.live.parallel, true) : "";
+    return par ? `${live} · ${par}` : live;
+  }
   if (t.idle) return "idle";
   if (!t.counted || !Number.isFinite(t.tps)) {
     return t.status && t.status !== 200 ? `HTTP ${t.status}` : "tps ?";
@@ -7150,6 +7153,18 @@ function tpsLiveText(l) {
   return "";
 }
 
+/* Parallel sessions on one shim (claunch-b28pp). One shim serves every
+   session on the same upstream, so sessions running at once share its
+   throughput; `live.parallel` is there only when this session and at least
+   one other are active on it now: `sessions` (this one included), `total`
+   (their summed estimated tokens/s) and `mean` (total over sessions).
+   `compact` is the rail and badge form: "×3 Σ≈120 avg≈40". */
+function tpsParallelText(p, compact) {
+  if (!p || !(p.sessions > 1)) return "";
+  if (compact) return `×${p.sessions} Σ≈${tpsFmt(p.total)} avg≈${tpsFmt(p.mean)}`;
+  return `${p.sessions} sessions · total ≈${tpsFmt(p.total)} tok/s · avg ≈${tpsFmt(p.mean)} tok/s`;
+}
+
 function tpsSecs(v) {
   return v < 10 ? `${v.toFixed(1)}s` : `${Math.round(v)}s`;
 }
@@ -7164,6 +7179,10 @@ function tpsTooltip(t) {
       : l.state === "waiting" ? `waiting for the first token (${l.inflight} call${l.inflight === 1 ? "" : "s"} in flight)`
       : `streaming: ≈${tpsFmt(l.rate)} tokens/s over the last ${l.window_s}s` +
         ` (${l.inflight} call${l.inflight === 1 ? "" : "s"} in flight; estimated from the characters streamed)`);
+    if (l.parallel && l.parallel.sessions > 1) {
+      lines.push(`shared proxy: ${l.parallel.sessions} sessions active now, total ≈${tpsFmt(l.parallel.total)}` +
+                 ` tokens/s, avg ≈${tpsFmt(l.parallel.mean)} tokens/s per session (last ${l.parallel.window_s}s)`);
+    }
   }
   const age = tpsAgeSecs(t);
   if (t.ts) {
@@ -7335,9 +7354,11 @@ function renderTermTps() {
       const l = t.live;
       const model = l.model || t.model;
       overlay.className = "term-tps-overlay" + tpsStaleClass(t);
+      const par = typeof tpsParallelText === "function" ? tpsParallelText(l.parallel, false) : "";
       overlay.replaceChildren(
         el("span", "term-tps-big", tpsLiveText(l)),
         tpsSparkline(l.series),
+        ...(par ? [el("span", "term-tps-small term-tps-parallel", par)] : []),
         el("span", "term-tps-small",
           [model ? modelShort(model) : "",
            t.counted && Number.isFinite(t.tps) ? `last ${tpsFmt(t.tps)} tok/s` : "",

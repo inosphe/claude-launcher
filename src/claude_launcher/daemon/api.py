@@ -2921,7 +2921,12 @@ async def h_metering_live(request: web.Request) -> web.Response:
     session = str(request.query.get("session") or "").strip()
     if not session:
         return json_error(400, "session is required")
-    live = await asyncio.to_thread(metering.live_summary, session)
+    # Every session's live files, not only this one's: ``parallel`` needs the
+    # other sessions on the same shim (claunch-b28pp). The listing re-reads
+    # only the files that changed since the last poll.
+    live = await asyncio.to_thread(
+        lambda: metering.live_summary(session, peers=metering.live_index())
+    )
     return json_response({"session": session, "live": live})
 
 
@@ -8518,6 +8523,8 @@ async def h_sessions_list(request: web.Request) -> web.Response:
         meter = metering.snapshot()
         # And one listing of the live files: whether a call is in flight now.
         meter_live = metering.live_index()
+        # Which sessions share a shim right now, once for every row.
+        meter_groups = metering.live_groups(meter_live)
         # What the daemon's restart commands left running for each session
         # (claunch-ihwel): the tracker's memory, kept current by its own
         # clock, so a list poll reads no process table.
@@ -8548,13 +8555,13 @@ async def h_sessions_list(request: web.Request) -> web.Response:
                 info = s.info()
             elif kept:
                 info = exited_rows.attach(s, usage_budget, _session_cwd(s))
-                metering.attach(info, meter, meter_age, meter_live)
+                metering.attach(info, meter, meter_age, meter_live, meter_groups)
             else:
                 info = ctxsize.attach(s)
                 # The session's latest throughput through the metering shim
                 # (``tps``), read off the record file tails; absent when the
                 # session never went through a shim (the OAuth routes).
-                metering.attach(info, meter, meter_age, meter_live)
+                metering.attach(info, meter, meter_age, meter_live, meter_groups)
                 # What the conversation has spent so far (``token_usage``),
                 # read incrementally off the same transcript; absent where the
                 # harness has no reader.
