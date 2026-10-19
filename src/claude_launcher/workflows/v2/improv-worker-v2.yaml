@@ -192,6 +192,28 @@ inputs:
       착지 요청을 부모에게 낸다(부모 착지에 실린다, PR이면 base = 부모 스택 브랜치).
       independent — 대상 브랜치(master) 위에서 작업하고 리더 착지 큐에 직접 요청한다
       (부모는 상태만 본다). 아직 master에 없는 부모 쪽 코드가 필요하면 stacked다
+  # reviewer-ensure가 자식 리뷰어를 세울 때 쓰는 profile/harness(claunch-gqgcz).
+  # 둘 다 비우면 지금처럼 리뷰어가 이 세션의 profile과 harness를 물려받는다.
+  # spawn의 profile selector(PROFILE[:HARNESS], harness만이면 :HARNESS)로
+  # 합쳐 넘기므로 데몬의 spawn.allow_profile 게이트가 그대로 적용된다.
+  reviewer_profile:
+    type: string
+    label: 리뷰어 profile
+    help: >-
+      reviewer-ensure가 세우는 자식 리뷰어의 profile(claunch ls의 이름). 비우면 이 세션의
+      profile을 물려받는다. 다른 profile로 세우려면 ~/.claunch.yaml의 spawn.allow_profile이
+      켜져 있어야 한다
+    placeholder: 예) work
+    default: ""
+  reviewer_harness:
+    type: string
+    label: 리뷰어 harness
+    help: >-
+      자식 리뷰어의 harness(claunch harnesses의 이름). 비우면 리뷰어 profile의 기본
+      harness다. profile만 비우고 이것만 주면 이 세션의 profile에서 harness만 바꾼다.
+      그 profile이 허용하는 harness여야 한다
+    placeholder: 예) codex
+    default: ""
 
 collections:
   # 이 런이 stack side 런에 보내는 신호(cut-wanted, frozen, landed, rebased). stack 런은
@@ -2025,6 +2047,10 @@ nodes:
       · 0 — 할 일이 없다. 출력(어느 그룹이 누구에게 닿는지와 그 관계)을
         보고에 옮기고 넘어간다. 이 런이 앞 회차에 세운 자식 리뷰어가
         살아 있으면 여기서 0이 나오고, 그 리뷰어를 그대로 다시 쓴다.
+        예외: 시작 입력 reviewer_profile·reviewer_harness 중 하나라도
+        있는데 0이 형제·조상 리뷰어로만 닿으면(자식 리뷰어 그룹이 비어
+        있으면) 그 리뷰어는 사람이 고른 profile로 서 있지 않다 — 1과 같이
+        자식 리뷰어를 세운다. peer-review는 자식 리뷰어를 먼저 묻는다.
       · 1 — 자식 리뷰어를 세운다. `children`으로 남은 슬롯을 본 뒤
         MCP `spawn`(또는 `claunch spawn`)에:
           handle: <내 세션>-rev  (이미 있으면 -rev2처럼 순번)
@@ -2035,6 +2061,15 @@ nodes:
                           만들지 않는 세션이다)
           fork 없음, worktree 없음 (내 대화를 물려받은 리뷰어는 독립된
                           눈이 아니다; 읽기만 하므로 체크아웃도 필요 없다)
+          profile: 시작 입력 두 개로 정한다 — reviewer_profile
+                   「${data.inputs.reviewer_profile}」, reviewer_harness
+                   「${data.inputs.reviewer_harness}」(claunch-gqgcz).
+                   둘 다 있으면 `<profile>:<harness>`, profile만 있으면
+                   `<profile>`, harness만 있으면 `:<harness>`(데몬이 내
+                   profile에 그 harness를 붙인다), 둘 다 비었으면 이 필드를
+                   넣지 않는다(내 profile·harness를 물려받는다). 그 밖의
+                   이유로 profile을 고르지 않는다. `harness` 필드는 쓰지
+                   않는다 — 데몬이 거절한다.
           task: 아래 문안
         task 문안(그대로 쓰되 <> 안을 채운다):
           너는 <내 세션>의 리뷰어다 — 이 세션이 너를 세운 이유는 리뷰
@@ -2051,6 +2086,15 @@ nodes:
         채 태어나므로 배선할 것이 없다). 스폰이 정책으로 거절되면
         (`spawn.<키>`) 재시도하지 않는다 — 거절 문구를 보고에 옮기고
         넘어간다: peer-review는 리더에게 가거나 리뷰 없이 통과한다.
+        profile을 넣은 스폰이 `spawn.allow_profile`로 거절됐을 때도
+        같다: profile 없이 다시 세우지 않는다(시작 입력은 사람이 고른
+        리뷰어다 — 다른 리뷰어로 바꾸는 것은 사람의 몫이다). 이슈에
+        `REVIEWER PROFILE REFUSED: <selector> — <거절 문구>`를 남기고,
+        보고에 그 문구와 「~/.claunch.yaml의 spawn.allow_profile을 켜거나
+        시작 입력을 비우면 선다」를 적는다. profile·harness 이름이 틀려
+        400으로 거절되면 그 문구도 같은 방식으로 남긴다.
+        스폰한 리뷰어의 profile·harness(`children` 출력의 그 행)를 보고에
+        적는다 — 시작 입력이 실제로 적용됐는지 되짚을 근거다.
       · 2 — 재지 못한 것은 없는 것이 아니다. 출력이 `several meshes`면
         리뷰어가 있는(또는 세울) 메시를 런에 지정한다 — `claunch cflow2 mesh
         <메시>` — 그리고 다시 잰다(claunch-5itbf; 런의 질문은 그 메시로
@@ -2073,8 +2117,10 @@ nodes:
       `claunch cflow2 responders peer-review --role reviewer`의 출력과 종료
       코드가 보고에 있다. 1이었으면 스폰한 자식 리뷰어의 세션·핸들과
       스폰 뒤 다시 잰 출력(0)이, 또는 스폰 거절 문구가 함께 있다.
+      시작 입력 reviewer_profile·reviewer_harness가 있었으면 넘긴 selector와
+      스폰된 리뷰어의 profile·harness(또는 거절 문구)가 있다.
     returns:
-      ok: {code: int, reviewer: "str?"}
+      ok: {code: int, reviewer: "str?", profile: "str?"}
     effects: [session.spawn]
 
   peer-review:

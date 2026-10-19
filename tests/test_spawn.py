@@ -772,6 +772,44 @@ def test_qualified_profile_changes_harness_without_a_second_profile():
     assert child["args"] == []
 
 
+def test_a_bare_harness_selector_keeps_the_parents_profile():
+    """``:HARNESS`` (claunch-gqgcz): a workflow names the reviewer's program
+    without knowing which profile its driver runs on."""
+    policy = _policy(allow_profile=True)
+    child = spawn.check(
+        policy, {"profile": ":codex"}, parent=PARENT, depth=0, children=0
+    )
+    assert child["profile"] == "work:codex"
+    assert child["harness"] == "codex"
+    assert child["args"] == []
+
+
+def test_a_bare_harness_selector_drops_the_parents_own_harness_qualifier():
+    policy = _policy(allow_profile=True)
+    parent = {**PARENT, "profile": "work:codex", "harness": "codex"}
+    child = spawn.check(
+        policy, {"profile": ":py"}, parent=parent, depth=0, children=0
+    )
+    assert child["profile"] == "work:py"
+    assert child["harness"] == "py"
+
+
+def test_a_bare_harness_selector_rides_the_profile_gate():
+    with pytest.raises(spawn.SpawnDenied, match="allow_profile"):
+        spawn.check(
+            _policy(), {"profile": ":codex"}, parent=PARENT, depth=0, children=0
+        )
+
+
+def test_a_bare_harness_selector_needs_a_parent_profile():
+    parent = {**PARENT, "profile": None}
+    with pytest.raises(spawn.SpawnDenied, match="PROFILE:HARNESS"):
+        spawn.check(
+            _policy(allow_profile=True), {"profile": ":codex"},
+            parent=parent, depth=0, children=0,
+        )
+
+
 def test_even_naming_the_inherited_harness_is_refused():
     with pytest.raises(spawn.SpawnDenied, match="read-only"):
         spawn.check(
