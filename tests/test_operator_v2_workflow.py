@@ -102,6 +102,27 @@ def test_work_goes_to_the_session_already_doing_it(tmp_path):
     assert {"opv2_spawn", "opv2_resume"} <= tools
 
 
+def test_answers_go_to_the_thread_the_input_came_from(tmp_path):
+    """claunch-iw5i8.12: a post with neither thread nor reply_to lands in the
+    most recently active thread, so the task and the role pack tell the
+    operator to pass the inbox item's thread -- and no longer speak of a
+    single feed."""
+    from importlib import resources
+
+    from claude_launcher import operator_v2_mcp
+
+    prompt = Run(tmp_path).st["tasks"][0]["prompt"]
+    assert "`thread`" in prompt and "reply_to" in prompt and "opv2_thread_open" in prompt
+    assert "피드" not in prompt
+    pack = resources.files("claude_launcher").joinpath("prompt_packs/role-operator.md").read_text("utf-8")
+    assert "the thread it came from" in pack and "opv2_thread_open" in pack
+    assert "feed" not in pack
+    tools = {t["name"]: t for t in operator_v2_mcp.TOOLS}
+    assert "opv2_thread_open" in tools
+    for name in ("opv2_post", "opv2_ask", "opv2_dispatch"):
+        assert "thread" in tools[name]["inputSchema"]["properties"]
+
+
 def test_watch_off_holds_the_gate_and_watch_on_observes(tmp_path):
     run = Run(tmp_path)
     run.report("greet", {"handled": 0}, T0 + 1)
