@@ -252,6 +252,20 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
                     thread_images.attach(m)
         return res, None
 
+    def operator_thread(tid: str):
+        """A refusal when ``tid`` is an operator's thread: its writes go
+        through the operator routes (daemon/operators_v2.py), which nudge
+        the operator instead of typing into a session."""
+        try:
+            row = threads.get(tid)
+        except thread_store.ThreadError:
+            return None
+        if str(row["session"]).startswith(thread_store.OPERATOR_PREFIX):
+            return web.json_response(
+                {"error": f"thread {tid} is an operator's conversation; write to it in the Operator view"},
+                status=400)
+        return None
+
     async def keep_images(body: dict):
         """``body["images"]`` (staged ids) moved into the kept folder, as
         the store's records; or an error response."""
@@ -341,6 +355,9 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
     async def h_post(request):
         body = await body_of(request)
         actor = actor_of(body)
+        err = await asyncio.to_thread(operator_thread, request.match_info["id"])
+        if err:
+            return err
         images, err = await keep_images(body)
         if err:
             return err
@@ -359,6 +376,9 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
     def status_route(status: str):
         async def handler(request):
             body = await body_of(request)
+            err = await asyncio.to_thread(operator_thread, request.match_info["id"])
+            if err:
+                return err
             res, err = await call(threads.set_status, actor_of(body), request.match_info["id"], status)
             if err:
                 return err
@@ -368,6 +388,9 @@ def install(app, store: Optional[thread_store.ThreadStore] = None):
 
     async def h_title(request):
         body = await body_of(request)
+        err = await asyncio.to_thread(operator_thread, request.match_info["id"])
+        if err:
+            return err
         res, err = await call(threads.rename, actor_of(body), request.match_info["id"], body.get("title"))
         if err:
             return err

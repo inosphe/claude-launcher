@@ -21,7 +21,16 @@
    conversation (claunch-iw5i8.13): the selected operator, its session and
    that session's state, and a link to the session's page. It sits outside
    the conversation's scroller, so it stays on screen however far the reader
-   has scrolled. */
+   has scrolled.
+   The conversation is a set of threads (claunch-iw5i8.12.1), the way a
+   session's threads pane is: the list of the operator's threads and the
+   selected thread's entries. Where the view is wide enough the two sit side
+   by side; narrower (the dock, the floating dialog, a phone) one shows at a
+   time, and 「← 목록」 and a row press move between them. 「+ 새 thread」 turns
+   the input row into the first message of a new thread, with a title field
+   above the conversation. The input row takes images too (🖼, paste, drop):
+   each is uploaded to the threads' staging area (POST /api/threads/images)
+   when the message is sent, and the message names their ids. */
 globalThis.OperatorView = {create: options => operatorView(options || {})};
 /* On the page the view lives in the Operator dock (claunch-iw5i8.8), the
    right-hand column observer.js opens and closes, with an input row of its
@@ -47,6 +56,10 @@ let list = [], detail = null, selected = "", loaded = false, listError = "";
 let projects = [], profiles = [], form = null, formError = "", busy = false, expanded = false;
 let listSignature = "", task = null;
 const askDrafts = new Map();
+/* The thread on screen per operator, the list showing (in the narrow
+   layout), and a new thread being written. */
+const threadOf = new Map();
+let showList = false, composing = null;
 try { selected = localStorage.getItem(opts.key) || ""; } catch { /* this visit only */ }
 /* api() is app.js's (cookie session, relogin). The daemon answers a refusal
    either as {"error": ...} or, for a 409 it raises, as plain text. */
@@ -65,7 +78,7 @@ const current = () => list.find(o => o.id === selected) || null;
 function choose(id) {
   const moved = id !== selected;
   selected = id; expanded = false; detail = detail?.id === id ? detail : null;
-  if(moved) syncDraft();
+  if(moved) { composing = null; showList = false; syncDraft(); }
   try { localStorage.setItem(opts.key, id); } catch { /* this visit only */ }
 }
 /* Whose scope a session is in: an all-projects operator covers every session,
@@ -122,12 +135,17 @@ function refresh() {
     if(!list.some(o => o.id === selected)) choose(list[0]?.id || "");
     if(selected) {
       try {
-        detail = await call(opPath(selected));
+        const id = selected, tid = threadOf.get(id);
+        const read = t => call(opPath(id, t ? `?thread=${encodeURIComponent(t)}` : ""));
+        // A thread that went away (its operator deleted it) gives way to
+        // the most recently active one.
+        detail = await read(tid).catch(err => { if(!tid) throw err; threadOf.delete(id); return read(""); });
+        if(detail.thread && !threadOf.has(id)) threadOf.set(id, detail.thread);
         if(detail.unseen > 0 && !document.hidden && opts.active?.()) {
           const seen = await call(opPath(selected, "/seen"), "POST", {});
           list = list.map(o => o.id === seen.id ? {...o, ...seen} : o);
         }
-      } catch(err) { detail = {id: selected, error: err.message, feed: []}; }
+      } catch(err) { detail = {id: selected, error: err.message, feed: [], threads: []}; }
     } else detail = null;
     const signature = JSON.stringify(list.map(o => [o.id, o.name, o.all, o.projects]));
     if(signature !== listSignature) { listSignature = signature; onChange(); }
@@ -213,6 +231,23 @@ function formBox() {
 function sessionLink(name) {
   const a = node("a", name, "op-ref");a.href = "#/observer/session/" + encodeURIComponent(name);return a;
 }
+/* Where the daemon serves image `name` of thread `tid` (the threads
+   route serves an operator's thread too), through the page's base. */
+function imageSrc(tid, name) {
+  const p = `api/threads/${encodeURIComponent(tid)}/images/${encodeURIComponent(name)}`;
+  return typeof globalThis.url === "function" ? globalThis.url(p) : p;
+}
+function pictures(e) {
+  const box = node("div", "", "op-images");
+  for(const img of e.images || []) {
+    const link = node("a", "", "op-image");
+    link.href = imageSrc(e.thread, img.name); link.target = "_blank"; link.rel = "noopener";
+    const pic = document.createElement("img");
+    pic.src = link.href; pic.alt = "첨부 이미지"; pic.loading = "lazy";
+    link.append(pic); box.append(link);
+  }
+  return box;
+}
 /* A message body: markdown through the page's renderer (app.js mdInto, which
    builds nodes and never parses HTML), plain text when the page has none. */
 function bodyOf(text, cls) {
@@ -264,7 +299,8 @@ function entryItem(op, e) {
     line.append(node("span", "→ "), sessionLink(e.target || ""), node("span", `: ${e.text || ""}`));
     item.append(line);
     item.append(node("small", [e.on_behalf_of ? `근거 ${e.on_behalf_of}` : "", e.delivery ? `전달 ${e.delivery}` : ""].filter(Boolean).join(" · ")));
-  } else item.append(bodyOf(e.text, "op-text"));
+  } else if(e.text) item.append(bodyOf(e.text, "op-text"));
+  if((e.images || []).length) item.append(pictures(e));
   if((e.refs || []).length) {
     const refs = node("div", "", "op-refs");
     for(const r of e.refs) refs.append(sessionLink(r));
@@ -276,17 +312,100 @@ function entryItem(op, e) {
 function feedBox(op) {
   const box = node("div", "", "op-feed");
   box.setAttribute("aria-label", `${op.name} 대화`);
-  const feed = detail?.id === op.id ? detail.feed || [] : [];
+  const feed = detail?.id === op.id && !composing ? detail.feed || [] : [];
   if(detail?.error) box.append(node("p", detail.error, "op-error"));
   const shown = expanded ? feed : feed.slice(-FEED_SHOWN);
+  const folded = feed.length - shown.length + (detail?.omitted || 0);
   if(feed.length > shown.length) {
     const more = node("button", `이전 대화 ${feed.length - shown.length}건 펼치기`, "observer-more");
     more.type = "button";
     more.onclick = () => { expanded = true; render(); };
     box.append(more);
-  }
-  if(!feed.length && !detail?.error) box.append(node("p", "아직 대화가 없습니다. 아래 입력란에 질문을 입력하십시오.", "hint"));
+  } else if(folded > 0) box.append(node("p", `이전 기록 ${folded}건은 이 화면에 싣지 않았습니다.`, "hint"));
+  if(composing) box.append(node("p", "첫 메시지를 보내면 이 thread가 열립니다.", "hint"));
+  else if(!feed.length && !detail?.error) box.append(node("p", "아직 대화가 없습니다. 아래 입력란에 질문을 입력하십시오.", "hint"));
   for(const e of shown) box.append(entryItem(op, e));
+  return box;
+}
+const shortTime = at => { const d = new Date(at); return isNaN(d) ? "" : d.toLocaleString("ko-KR", {month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit"}); };
+function lastLine(t) {
+  const e = t.last;
+  if(!e) return "메시지 없음";
+  const who = e.kind === "user" ? "나: " : e.kind === "dispatch" ? `전달 → ${e.target || ""}: ` : "";
+  const text = String(e.text || "").split("\n").map(x => x.trim()).find(Boolean) || "";
+  const n = (e.images || []).length;
+  return who + (text || (n ? `이미지 ${n}장` : ""));
+}
+function selectThread(op, tid) {
+  threadOf.set(op.id, tid);
+  composing = null; showList = false; expanded = false;
+  if(detail?.id === op.id && detail.thread !== tid) detail = {...detail, thread: tid, feed: []};
+  render(); refresh();
+}
+function newThread() {
+  composing = {title: ""}; showList = false; expanded = false;
+  render(); focusInput();
+}
+function threadList(op, threads) {
+  const box = node("div", "", "op-thread-list");
+  box.setAttribute("aria-label", `${op.name}의 thread 목록`);
+  const top = node("div", "", "op-thread-list-head");
+  const add = node("button", "+ 새 thread", "op-thread-new");add.type = "button";
+  add.title = "새 주제로 대화를 엽니다";
+  add.onclick = newThread;
+  top.append(node("strong", `Threads ${threads.length}`), add);
+  box.append(top);
+  if(!threads.length) box.append(node("p", "thread가 없습니다. 메시지를 보내면 첫 thread가 열립니다.", "hint"));
+  const on = composing ? "" : detail?.thread;
+  for(const t of threads) {
+    const row = node("button", "", `op-thread-row${t.status === "closed" ? " closed" : ""}`);row.type = "button";
+    row.dataset.thread = t.id;
+    if(t.id === on) row.setAttribute("aria-current", "true");
+    const line = node("span", "", "op-thread-row-top");
+    line.append(node("span", t.title, "op-thread-name"));
+    if(t.pending) { const b = node("span", String(t.pending), "op-thread-pending"); b.title = `답변을 기다리는 질문 ${t.pending}개`; line.append(b); }
+    if(t.status === "closed") line.append(node("span", "닫힘", "op-thread-closed"));
+    line.append(node("small", shortTime(t.updated_at), "op-thread-time"));
+    row.append(line, node("small", lastLine(t), "op-thread-last"));
+    row.onclick = () => selectThread(op, t.id);
+    box.append(row);
+  }
+  return box;
+}
+function threadHead(op, threads) {
+  const box = node("div", "", "op-thread-head");
+  const back = node("button", "← 목록", "op-thread-back");back.type = "button";
+  back.onclick = () => { showList = true; render(); };
+  box.append(back);
+  if(composing) {
+    const title = document.createElement("input");
+    title.className = "op-thread-title-input"; title.maxLength = 200; title.value = composing.title;
+    title.placeholder = "새 thread 제목 (비우면 Thread #N)";
+    title.setAttribute("aria-label", "새 thread 제목");
+    title.oninput = () => { composing.title = title.value; };
+    const cancel = node("button", "취소");cancel.type = "button";
+    cancel.onclick = () => { composing = null; render(); };
+    box.append(title, cancel);
+    return box;
+  }
+  const t = threads.find(x => x.id === detail?.thread);
+  if(!t) { box.append(node("strong", "새 대화", "op-thread-title")); return box; }
+  box.append(node("strong", t.title, "op-thread-title"));
+  const toggle = node("button", t.status === "closed" ? "다시 열기" : "닫기", "op-thread-close");toggle.type = "button";
+  toggle.disabled = busy;
+  toggle.title = t.status === "closed" ? "이 thread를 다시 엽니다" : "이 thread를 닫습니다 (새 메시지가 오면 다시 열립니다)";
+  toggle.onclick = () => act(() => call(opPath(op.id, `/threads/${encodeURIComponent(t.id)}/${t.status === "closed" ? "reopen" : "close"}`), "POST", {}));
+  box.append(toggle);
+  return box;
+}
+function threadsBox(op) {
+  const threads = detail?.id === op.id ? detail.threads || [] : [];
+  const box = node("div", "", "op-threads");
+  const grid = node("div", "", `op-threads-grid${showList ? " op-show-list" : ""}`);
+  const talk = node("div", "", "op-thread-view");
+  talk.append(threadHead(op, threads), feedBox(op));
+  grid.append(threadList(op, threads), talk);
+  box.append(grid);
   return box;
 }
 /* -- the section ------------------------------------------------------- */
@@ -373,7 +492,7 @@ function render() {
   if(noticeText) { parts.push(node("p", noticeText, "op-error")); noticeText = ""; }
   if(form) parts.push(formBox());
   const op = current();
-  if(op) parts.push(head(op), feedBox(op));
+  if(op) parts.push(head(op), threadsBox(op));
   else if(!opts.manage && loaded && !list.length && !listError) {
     const empty = node("p", "operator가 없습니다. ", "hint");
     const page = node("a", "Observer에서 만들기");page.href = "#/observer";
@@ -403,40 +522,109 @@ function mount(element, changed) {
   render();
 }
 /* The view's own input row: Enter sends to the selected operator, Shift+Enter
-   breaks the line. A draft is kept per operator while the page is loaded. */
-const drafts = new Map();
+   breaks the line. A draft -- text and images -- is kept per operator while
+   the page is loaded. */
+const drafts = new Map(), pictureDrafts = new Map();
+const IMAGE_KINDS = {png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp"};
+function imageKind(file) {
+  if(Object.values(IMAGE_KINDS).includes(file?.type)) return file.type;
+  const m = /\.([a-z0-9]+)$/i.exec(String(file?.name || ""));
+  return (m && IMAGE_KINDS[m[1].toLowerCase()]) || "";
+}
+function imageFiles(data) {
+  if(!data) return [];
+  const out = [];
+  for(const it of Array.from(data.items || [])) {
+    if(it.kind !== "file" || !imageKind({type: it.type})) continue;
+    const f = it.getAsFile?.();
+    if(f) out.push(f);
+  }
+  return out.length ? out : Array.from(data.files || []).filter(f => imageKind(f));
+}
+function attach(files) {
+  if(!selected || !files.length) return;
+  const list = pictureDrafts.get(selected) || [];
+  for(const file of files) {
+    let src = "";
+    try { src = URL.createObjectURL(file); } catch { /* no preview */ }
+    list.push({file, src});
+  }
+  pictureDrafts.set(selected, list.slice(0, 10));
+  drawStrip();
+}
+function drawStrip() {
+  if(!input) return;
+  const list = pictureDrafts.get(selected) || [];
+  input.strip.hidden = !list.length;
+  input.strip.replaceChildren(...list.map((a, i) => {
+    const cell = node("span", "", "op-attach");
+    const pic = document.createElement("img"); pic.src = a.src; pic.alt = a.file.name || "첨부 이미지";
+    const drop = node("button", "×", "op-attach-remove");drop.type = "button";drop.title = "첨부 빼기";
+    drop.setAttribute("aria-label", "첨부 빼기");
+    drop.onclick = () => { list.splice(i, 1); try { URL.revokeObjectURL(a.src); } catch { /* none */ } drawStrip(); };
+    cell.append(pic, drop);
+    return cell;
+  }));
+}
+/* Upload one image to the staging area; its id names it in the message. */
+async function stage(file) {
+  const response = await api("api/threads/images", {method: "POST", headers: {"Content-Type": imageKind(file)}, body: file});
+  const doc = await response.json().catch(() => ({}));
+  if(!response.ok || !doc.id) throw Error(doc.error || `이미지 업로드 실패 (HTTP ${response.status})`);
+  return doc.id;
+}
 function composerBox() {
   const box = node("form", "", "op-composer");
   const text = document.createElement("textarea");
   text.rows = 2; text.placeholder = "operator에게 메시지 (Enter 전송, Shift+Enter 줄바꿈)";
   text.setAttribute("aria-label", "operator에게 보낼 메시지");
+  const pick = document.createElement("input");
+  pick.type = "file"; pick.accept = "image/png,image/jpeg,image/gif,image/webp"; pick.multiple = true; pick.hidden = true;
+  pick.className = "op-attach-input";
+  pick.onchange = () => { attach(Array.from(pick.files || [])); pick.value = ""; };
+  const add = node("button", "🖼", "op-attach-button");add.type = "button";
+  add.title = "이미지 첨부 (붙여넣기·끌어 놓기도 됩니다)"; add.setAttribute("aria-label", "이미지 첨부");
+  add.onclick = () => pick.click();
   const send = node("button", "보내기");send.type = "submit";
   const status = node("small", "", "op-composer-status");status.setAttribute("aria-live", "polite");
-  const row = node("div", "", "op-composer-row");row.append(text, send);
-  box.append(row, status);
+  const strip = node("div", "", "op-attach-strip");strip.hidden = true;
+  const row = node("div", "", "op-composer-row");row.append(add, text, send, pick);
+  box.append(strip, row, status);
   text.oninput = () => drafts.set(selected, text.value);
   text.addEventListener("keydown", event => {
     if(event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); box.requestSubmit(); }
   });
+  text.addEventListener("paste", event => {
+    const files = imageFiles(event.clipboardData);
+    if(files.length) { event.preventDefault(); attach(files); }
+  });
+  box.addEventListener("dragover", event => { if(Array.from(event.dataTransfer?.types || []).includes("Files")) event.preventDefault(); });
+  box.addEventListener("drop", event => {
+    const files = imageFiles(event.dataTransfer);
+    if(files.length) { event.preventDefault(); attach(files); }
+  });
   box.onsubmit = async event => {
     event.preventDefault();
-    const id = selected, body = text.value;
-    if(!id || !body.trim() || send.disabled) return;
+    const id = selected, body = text.value, pictures = pictureDrafts.get(id) || [];
+    if(!id || (!body.trim() && !pictures.length) || send.disabled) return;
     send.disabled = true;
     try {
-      status.textContent = await sendTo(id, body);
+      status.textContent = await sendTo(id, body, pictures.map(a => a.file));
       drafts.delete(id);
-      if(selected === id) text.value = "";
+      for(const a of pictures) { try { URL.revokeObjectURL(a.src); } catch { /* none */ } }
+      pictureDrafts.delete(id);
+      if(selected === id) { text.value = ""; drawStrip(); }
     } catch(err) { status.textContent = `전송하지 못했습니다: ${err.message}`; }
     finally { send.disabled = busy || !current(); text.focus(); }
   };
-  return {box, text, send, status};
+  return {box, text, send, status, strip};
 }
 /* The selection changed under the input row: show that operator's draft. */
 function syncDraft() {
   if(!input) return;
   input.text.value = drafts.get(selected) || "";
   input.status.textContent = "";
+  drawStrip();
 }
 /* The composer's operator destinations, selected one first. */
 function targets() {
@@ -446,11 +634,27 @@ function targets() {
 const isTarget = value => String(value || "").startsWith(TARGET);
 const defaultTarget = () => current() ? TARGET + current().id : "";
 const send = (value, text) => sendTo(value.slice(TARGET.length), text);
-async function sendTo(id, text) {
+/* A message to operator `id`: into the thread on screen for it, or -- while
+   a new thread is being written there -- as that thread's first message. */
+async function sendTo(id, text, files = []) {
   const op = list.find(o => o.id === id);
-  const result = await call(opPath(id, "/message"), "POST", {text});
+  const images = [];
+  for(const file of files) images.push(await stage(file));
+  const extra = images.length ? {images} : {};
+  let result;
+  if(composing && id === selected) {
+    const title = composing.title.trim();
+    const opened = await call(opPath(id, "/threads"), "POST", {...(title ? {title} : {}), text, ...extra});
+    threadOf.set(id, opened.thread.id);
+    composing = null;
+    result = {nudge: opened.nudge};
+  } else {
+    const tid = threadOf.get(id);
+    result = await call(opPath(id, "/message"), "POST", {text, ...(tid ? {thread: tid} : {}), ...extra});
+    if(result.thread) threadOf.set(id, result.thread);
+  }
   if(id !== selected) choose(id);
-  expanded = false;
+  expanded = false; showList = false;
   refresh();
   const name = op?.name || id;
   return result.nudge === "no-operator" ? `operator ${name}: 메시지 저장됨 · 세션이 정지되어 있어 시작하면 읽습니다`

@@ -23,7 +23,19 @@ Authority stays as narrow as v1's: a dispatch must name the user message (or
 the answered, not denied, ask) it relays, and an operator never answers cflow
 gates or other sessions' questions.
 
-State lives under ``<daemon_dir>/operators/<id>.json``, never in a repository.
+The conversation with the user is a set of threads (claunch-iw5i8.12.1):
+the daemon's threads store (threads/store.py) keeps them under the owner
+``operator:<id>``, so they outlive the sessions the operator runs in. Every
+entry -- the user's message, a post, an ask and its answer, a dispatch
+report, a daemon notice -- belongs to one thread; a write that names none
+goes to the most recently active one. The user opens threads in the Operator
+view and the operator opens its own (``opv2_thread_open``). A feed kept by an
+older daemon in the record is moved into one thread 「이전 대화」 the first
+time the record is read, once: the record as it was is kept beside it as
+``<id>.feed-backup.json``.
+
+State lives under ``<daemon_dir>/operators/<id>.json`` (the definition,
+binding and read position) and in the threads store, never in a repository.
 """
 from __future__ import annotations
 
@@ -37,7 +49,8 @@ from datetime import datetime, timezone
 from aiohttp import web
 
 from .. import atomic, projects
-from . import paths, session_events
+from ..threads import store as thread_store
+from . import paths, session_events, thread_images
 from .session import (
     CATEGORY_DELAYED, CATEGORY_FAILED, CATEGORY_HOLD, CATEGORY_PAUSED, CATEGORY_RUNNING,
     session_category,
@@ -45,8 +58,16 @@ from .session import (
 
 log = logging.getLogger(__name__)
 
-#: Feed entries kept per operator. Unanswered asks survive the trim.
-FEED_LIMIT = 500
+#: Entries a view of one thread carries (its newest).
+VIEW_ENTRIES = 200
+#: The thread an older daemon's single feed is moved into.
+LEGACY_TITLE = "이전 대화"
+#: Who wrote a message, as a feed entry's ``role``.
+ROLES = {"user": "user", "agent": "bot", "system": "system"}
+#: An older feed entry's kind as the threads store files it:
+#: ``(message kind, author)``.
+FEED_KINDS = {"user": ("message", "user"), "post": ("message", "agent"), "update": ("message", "agent"),
+              "ask": ("ask", "agent"), "dispatch": ("dispatch", "agent"), "system": ("system", "system")}
 #: Events one poll returns at most; the cursor lets the next poll continue.
 POLL_LIMIT = 80
 #: Rows ``sessions`` returns at most.
@@ -146,6 +167,35 @@ def _text(value, limit, what="text"):
     return value.strip()
 
 
+def entry_of(message):
+    """A threads-store message of an operator as the feed entry the UI and
+    the tools read: ``id`` (the message's ref), ``kind`` (``user``,
+    ``post``, ``ask``, ``dispatch``, ``system``), ``role``, ``text``,
+    ``thread`` and the structure fields kept in ``data``."""
+    data = dict(message.get("data") or {})
+    data.pop("answer_read", None)
+    legacy = data.pop("feed_kind", None)
+    kind = message["kind"]
+    if kind == "message":
+        kind = "user" if message["author"] == "user" else (legacy or "post")
+    entry = {**data, "id": message.get("ref") or f"m{message['seq']}", "seq": message["seq"],
+             "thread": message["thread"], "at": message["at"], "kind": kind,
+             "role": ROLES.get(message["author"], "bot"), "text": message["body"]}
+    if message.get("images"):
+        entry["images"] = message["images"]
+    return entry
+
+
+def feed_row(entry):
+    """An older feed entry as a row of :meth:`ThreadStore.import_thread`."""
+    kind, author = FEED_KINDS.get(entry.get("kind"), ("message", "agent"))
+    data = {k: v for k, v in entry.items() if k not in ("id", "at", "kind", "role", "text")}
+    if kind == "message" and author == "agent" and entry.get("kind") != "post":
+        data["feed_kind"] = entry.get("kind") or "post"
+    return {"author": author, "kind": kind, "ref": entry.get("id"), "at": entry.get("at"),
+            "body": str(entry.get("text") or ""), "data": data}
+
+
 def _int(value, default, low, high, what):
     if value in (None, ""):
         return default
@@ -160,8 +210,12 @@ class OperatorsV2:
     """Every operator's definition, feed and binding."""
 
     def __init__(self, root, manager, observer=None, gates=None, work=None, board=None,
-                 spawn_gate=None):
+                 spawn_gate=None, threads=None):
         self.root = root / "operators"
+        #: The threads store, or ``() -> ThreadStore | None`` read late (the
+        #: API module installs it after these routes); without one, the
+        #: daemon's file beside ``operators/``.
+        self._threads = threads
         self.manager, self.observer, self.gates, self.work = manager, observer, gates, work
         #: ``() -> Beads | None``: the board facade, read late because the
         #: API module installs it after the routes.
@@ -176,17 +230,36 @@ class OperatorsV2:
     def path(self, op_id):
         return self.root / f"{op_id}.json"
 
+    def threads(self):
+        store = self._threads() if callable(self._threads) else self._threads
+        if store is None:
+            store = thread_store.ThreadStore(self.root.parent / "threads.sqlite3")
+            self._threads = store
+        return store
+
+    @staticmethod
+    def owner(rec):
+        return thread_store.operator_owner(rec["id"])
+
     def records(self):
         if self.cache is None:
             self.cache = {}
             for path in sorted(self.root.glob("*.json")) if self.root.is_dir() else []:
+                if path.name.endswith(".feed-backup.json"):
+                    continue
                 try:
-                    data = json.loads(path.read_text(encoding="utf-8"))
+                    raw = path.read_text(encoding="utf-8")
+                    data = json.loads(raw)
                 except (OSError, ValueError):
                     log.warning("operator v2: unreadable record %s", path)
                     continue
                 if isinstance(data, dict) and data.get("id") == path.stem:
-                    self.cache[data["id"]] = self._defaults(data)
+                    rec = self._defaults(data)
+                    try:
+                        self.migrate(rec, raw)
+                    except Exception:  # noqa: BLE001 -- the file keeps its feed; the next daemon start tries again
+                        log.exception("operator v2: moving the feed of %s into threads failed", rec["id"])
+                    self.cache[data["id"]] = rec
         return self.cache
 
     @staticmethod
@@ -195,10 +268,9 @@ class OperatorsV2:
         data.setdefault("all", False)
         data.setdefault("watch", True)
         data.setdefault("session", None)
-        data.setdefault("feed", [])
-        #: Keys of the user's inputs the operator has read (message id, or
-        #: ``<ask id>:answer``).
-        data.setdefault("read", [])
+        #: The seq of the last user message the operator has read
+        #: (opv2_inbox); an ask's answer carries its own ``answer_read``.
+        data.setdefault("read_seq", 0)
         #: Open asks the user had in front of them when they last looked.
         data.setdefault("badge_seen", [])
         #: Last progress reading per session, for the poll's change lines.
@@ -212,28 +284,137 @@ class OperatorsV2:
             scratch.write_text(json.dumps(rec, ensure_ascii=False), encoding="utf-8")
             atomic.replace(scratch, path)
 
+    def backup_path(self, op_id):
+        return self.root / f"{op_id}.feed-backup.json"
+
+    def migrate(self, rec, raw=None):
+        """Move an older daemon's single feed (``rec["feed"]``) into one
+        thread 「이전 대화」, once (claunch-iw5i8.12.1). The record as it
+        was (``raw``, the file's text, when the caller read it) is written
+        to ``<id>.feed-backup.json`` first and never
+        overwritten. Repeating it is safe: an entry's id is its message's
+        ref, unique per owner, so a feed whose first entry is already in the
+        store is not imported again. The read position moves over: user
+        messages up to the first one the operator had not read count as
+        read, and an answered ask it had read keeps ``answer_read``. True
+        when the record changed."""
+        if "feed" not in rec:
+            return False
+        feed = rec["feed"] if isinstance(rec["feed"], list) else []
+        backup = self.backup_path(rec["id"])
+        if not backup.exists():
+            with atomic.scratch(backup) as scratch:
+                scratch.write_text(raw if raw is not None else json.dumps(rec, ensure_ascii=False),
+                                   encoding="utf-8")
+                atomic.replace(scratch, backup)
+        feed = [e for e in feed if isinstance(e, dict)]
+        read = set(rec.get("read") or ())
+        store, owner = self.threads(), self.owner(rec)
+        tid = None
+        if feed:
+            known = store.by_ref(owner, feed[0].get("id")) if feed[0].get("id") else None
+            if known is not None:
+                tid = known["thread"]
+            else:
+                rows, refs = [], set()
+                for entry in feed:
+                    row = feed_row(entry)
+                    if not row["ref"] or row["ref"] in refs:
+                        row["ref"] = None
+                    refs.add(row["ref"])
+                    if entry.get("kind") == "ask" and entry.get("answer") and f"{entry.get('id')}:answer" in read:
+                        row["data"]["answer_read"] = True
+                    rows.append(row)
+                tid = store.import_thread(owner, LEGACY_TITLE, rows)
+        read_seq = 0
+        if tid:
+            for m in store.scan(owner, thread=tid, kinds=["message"], author="user"):
+                if m.get("ref") not in read:
+                    break
+                read_seq = m["seq"]
+        rec.pop("feed", None)
+        rec.pop("read", None)
+        rec["read_seq"] = max(int(rec.get("read_seq") or 0), read_seq)
+        rec["legacy_thread"] = tid
+        self.save(rec)
+        log.info("operator v2: moved %d feed entries of %s into thread %s", len(feed), rec["id"], tid)
+        return True
+
     def get(self, op_id):
         rec = self.records().get(op_id) if isinstance(op_id, str) and ID_RE.match(op_id) else None
         if rec is None:
             raise web.HTTPNotFound(text="operator not found")
         return rec
 
-    def append(self, rec, entry):
-        entry = {"id": uuid.uuid4().hex, "at": now(), **entry}
-        rec["feed"].append(entry)
-        feed = rec["feed"]
-        if len(feed) > FEED_LIMIT:
-            open_asks = {e["id"] for e in feed if e.get("kind") == "ask" and not e.get("answer")}
-            keep = {e["id"] for e in feed[-FEED_LIMIT:]} | open_asks
-            rec["feed"] = [e for e in feed if e["id"] in keep]
-        self.save(rec)
-        return entry
+    # -- the conversation ----------------------------------------------------
+    def _threads_by_activity(self, rec):
+        """``rec``'s threads, open before closed, most recently active first:
+        the store's ``updated_at`` is to the second, so its last message's
+        seq breaks a tie."""
+        rows = self.threads().list(self.owner(rec))["threads"]
+        return sorted(rows, key=lambda t: (t["status"] != "closed", t["updated_at"], t["last_seq"]), reverse=True)
+
+    def thread_of(self, rec, tid=None, *, create=True):
+        """The thread a write goes to: ``tid`` when it is one of ``rec``'s
+        (404 otherwise), else the most recently active one -- open before
+        closed --, else a new one (None when ``create`` is false)."""
+        store, owner = self.threads(), self.owner(rec)
+        if tid not in (None, ""):
+            try:
+                row = store.get(str(tid))
+            except thread_store.NotFound:
+                row = None
+            if row is None or row["session"] != owner:
+                raise web.HTTPNotFound(text=f"operator {rec['name']!r} has no thread {tid!r}")
+            return row["id"]
+        rows = self._threads_by_activity(rec)
+        if rows:
+            return rows[0]["id"]
+        if not create:
+            return None
+        return store.open(owner, owner, None)["thread"]["id"]
+
+    def write(self, rec, tid, text, *, kind="message", author="agent", data=None, images=None):
+        """One entry in thread ``tid`` of ``rec``, written as ``author``."""
+        store, owner = self.threads(), self.owner(rec)
+        actor = thread_store.USER if author == "user" else owner
+        res = store.post(actor, tid, text, images=images, kind=kind, ref=uuid.uuid4().hex,
+                         data=data, system=author == "system")
+        return entry_of(res["message"])
+
+    def system(self, rec, text, *, thread=None, **data):
+        """A daemon notice in ``thread`` (or the most recently active one)."""
+        return self.write(rec, self.thread_of(rec, thread), text, kind="system", author="system",
+                          data=data or None)
 
     def find(self, rec, entry_id):
-        for entry in rec["feed"]:
-            if entry["id"] == entry_id:
-                return entry
-        raise web.HTTPNotFound(text="feed entry not found")
+        message = self.threads().by_ref(self.owner(rec), entry_id) if isinstance(entry_id, str) and entry_id else None
+        if message is None:
+            raise web.HTTPNotFound(text="feed entry not found")
+        return entry_of(message)
+
+    def feed(self, rec, thread=None):
+        """Every entry of ``rec`` (or of one thread), oldest first."""
+        return [entry_of(m) for m in self.threads().scan(self.owner(rec), thread=thread)]
+
+    def thread_rows(self, rec):
+        """``rec``'s threads, most recently active first (open before
+        closed): id, title, status, who opened it, dates, how many entries
+        and unanswered asks it holds, and its last entry."""
+        store, owner = self.threads(), self.owner(rec)
+        counts = store.counts(owner)
+        pending = {}
+        for m in store.scan(owner, kinds=["ask"]):
+            if not (m.get("data") or {}).get("answer"):
+                pending[m["thread"]] = pending.get(m["thread"], 0) + 1
+        rows = []
+        for t in self._threads_by_activity(rec):
+            last = t.get("last")
+            rows.append({"id": t["id"], "title": t["title"], "status": t["status"], "opened_by": t["opened_by"],
+                         "created_at": t["created_at"], "updated_at": t["updated_at"],
+                         "messages": counts.get(t["id"], 0), "pending": pending.get(t["id"], 0),
+                         "last": entry_of(last) if last else None})
+        return rows
 
     # -- definitions -------------------------------------------------------
     def _scope_fields(self, body, rec=None):
@@ -319,7 +500,7 @@ class OperatorsV2:
                     rec, WATCH_NUDGE.format(state="켜짐" if rec["watch"] else "꺼짐"))
         self.save(rec)
         if changed:
-            self.append(rec, {"kind": "system", "role": "system", "text": "설정 변경 — " + "; ".join(changed)})
+            self.system(rec, "설정 변경 — " + "; ".join(changed))
         return {**self.summary(rec), **result}
 
     def delete(self, op_id):
@@ -331,6 +512,7 @@ class OperatorsV2:
             self.path(op_id).unlink()
         except FileNotFoundError:
             pass
+        self.threads().delete_owner(self.owner(rec))
         self.records().pop(op_id, None)
         return {"deleted": op_id}
 
@@ -414,7 +596,8 @@ class OperatorsV2:
 
     # -- views for the UI --------------------------------------------------
     def open_asks(self, rec):
-        return [e["id"] for e in rec["feed"] if e.get("kind") == "ask" and not e.get("answer")]
+        return [m.get("ref") or f"m{m['seq']}" for m in self.threads().scan(self.owner(rec), kinds=["ask"])
+                if not (m.get("data") or {}).get("answer")]
 
     def summary(self, rec):
         session = self.operator_session(rec)
@@ -438,8 +621,11 @@ class OperatorsV2:
         rows.sort(key=lambda r: (r["name"].casefold(), r["id"]))
         return {"operators": rows, "unseen": sum(r["unseen"] for r in rows)}
 
-    async def view(self, op_id):
+    async def view(self, op_id, thread=None):
+        """The operator for its view: its threads, and the entries of
+        ``thread`` (default: the most recently active one)."""
         rec = self.get(op_id)
+        tid = self.thread_of(rec, thread, create=False)
         shown = self.watched(rec)
         running = [s for s in shown if session_category(s) == CATEGORY_RUNNING]
         work, _ = await self.work_read(shown)
@@ -458,8 +644,10 @@ class OperatorsV2:
                           "last_activity_at": row.get("last_activity_at"), "questions": questions,
                           **progress_of(work.get(session.sdef.name))})
         panel.sort(key=lambda r: (r["category"] == CATEGORY_PAUSED, -r["questions"], r["name"]))
-        return {**self.summary(rec), "feed": rec["feed"][-200:], "sessions": panel,
-                "gates": list(gates or [])}
+        feed = self.feed(rec, tid) if tid else []
+        return {**self.summary(rec), "threads": self.thread_rows(rec), "thread": tid,
+                "feed": feed[-VIEW_ENTRIES:], "omitted": max(0, len(feed) - VIEW_ENTRIES),
+                "sessions": panel, "gates": list(gates or [])}
 
     def mark_seen(self, op_id):
         rec = self.get(op_id)
@@ -472,7 +660,7 @@ class OperatorsV2:
     def bind(self, rec, name):
         rec["session"] = name
         self.save(rec)
-        self.append(rec, {"kind": "system", "role": "system", "text": f"Operator 세션 {name}이 시작되었습니다."})
+        self.system(rec, f"Operator 세션 {name}이 시작되었습니다.")
 
     # -- the bot's output --------------------------------------------------
     def _idempotent(self, rec, token, payload):
@@ -480,12 +668,13 @@ class OperatorsV2:
             return None
         if not isinstance(token, str) or not token or len(token) > 128:
             raise ValueError("request_id must contain 1..128 characters")
-        for entry in rec["feed"]:
-            if entry.get("request_id") == token:
-                if any(entry.get(k) != v for k, v in payload.items()):
-                    raise web.HTTPConflict(text="request_id reused with different content")
-                return entry
-        return None
+        found = self.threads().by_request(self.owner(rec), token)
+        if found is None:
+            return None
+        entry = entry_of(found)
+        if any(entry.get(k) != v for k, v in payload.items()):
+            raise web.HTTPConflict(text="request_id reused with different content")
+        return entry
 
     def _refs(self, rec, refs):
         if refs is None:
@@ -499,16 +688,36 @@ class OperatorsV2:
         return refs
 
     def _parent(self, rec, reply_to):
+        """``(parent id, its thread)`` of a follow-up, or ``(None, None)``."""
         if reply_to is None:
-            return None
+            return None, None
         if not isinstance(reply_to, str) or not reply_to:
             raise ValueError("reply_to must be a feed entry id")
-        for entry in rec["feed"]:
-            if entry["id"] == reply_to:
-                if entry.get("kind") not in ("post", "ask", "update"):
-                    raise ValueError("reply_to must name one of the operator's posts or asks")
-                return entry.get("parent") or entry["id"]
-        raise ValueError("reply_to names no entry of this feed")
+        message = self.threads().by_ref(self.owner(rec), reply_to)
+        if message is None:
+            raise ValueError("reply_to names no entry of this feed")
+        entry = entry_of(message)
+        if entry.get("kind") not in ("post", "ask", "update"):
+            raise ValueError("reply_to must name one of the operator's posts or asks")
+        return entry.get("parent") or entry["id"], entry["thread"]
+
+    def _target_thread(self, rec, body, fallback=None):
+        """The thread an agent write names (``thread``), else ``fallback``
+        (the thread of what it answers), else the most recently active."""
+        return self.thread_of(rec, body.get("thread") or fallback)
+
+    def _bot_write(self, rec, body, kind, payload, data):
+        parent, parent_thread = self._parent(rec, body.get("reply_to"))
+        if parent:
+            payload["parent"] = parent
+            data["parent"] = parent
+        found = self._idempotent(rec, body.get("request_id"), payload)
+        if found:
+            return found
+        tid = self._target_thread(rec, body, parent_thread)
+        if body.get("request_id") is not None:
+            data["request_id"] = body["request_id"]
+        return self.write(rec, tid, payload["text"], kind=kind, data=data)
 
     def post(self, name, body):
         rec = self.bound(name)
@@ -519,13 +728,8 @@ class OperatorsV2:
             raise ValueError("level must be one of " + ", ".join(LEVELS))
         payload = {"kind": "post", "role": "bot", "text": _text(body.get("text"), 4000),
                    "level": level, "refs": self._refs(rec, body.get("refs"))}
-        parent = self._parent(rec, body.get("reply_to"))
-        if parent:
-            payload["parent"] = parent
-        found = self._idempotent(rec, body.get("request_id"), payload)
-        if found:
-            return found
-        return self.append(rec, {**payload, "request_id": body.get("request_id")})
+        return self._bot_write(rec, body, "message", payload,
+                               {"level": level, "refs": payload["refs"]})
 
     def ask(self, name, body):
         rec = self.bound(name)
@@ -546,26 +750,110 @@ class OperatorsV2:
             raise ValueError("level must be one of " + ", ".join(LEVELS))
         payload = {"kind": "ask", "role": "bot", "type": kind, "text": _text(body.get("text"), 4000),
                    "choices": choices, "level": level, "refs": self._refs(rec, body.get("refs"))}
-        parent = self._parent(rec, body.get("reply_to"))
-        if parent:
-            payload["parent"] = parent
-        found = self._idempotent(rec, body.get("request_id"), payload)
+        if body.get("request_id") is None or self.threads().by_request(self.owner(rec), body["request_id"]) is None:
+            if len(self.open_asks(rec)) >= 50:
+                raise ValueError("50 unanswered asks; wait for the user before asking more")
+        return self._bot_write(rec, body, "ask", payload,
+                               {"type": kind, "choices": choices, "level": level, "refs": payload["refs"],
+                                "answer": None})
+
+    def open_thread(self, name, body):
+        """The operator opens a thread of its own (opv2_thread_open): a
+        title and its first post."""
+        rec = self.bound(name)
+        if not isinstance(body, dict):
+            raise ValueError("object required")
+        title = _text(body.get("title"), thread_store.MAX_TITLE, "title")
+        text = _text(body.get("text"), 4000)
+        level = body.get("level", "info")
+        if level not in LEVELS:
+            raise ValueError("level must be one of " + ", ".join(LEVELS))
+        refs = self._refs(rec, body.get("refs"))
+        store, owner = self.threads(), self.owner(rec)
+        token = body.get("request_id")
+        found = self._idempotent(rec, token, {"kind": "post", "text": text, "level": level, "refs": refs})
         if found:
-            return found
-        if len(self.open_asks(rec)) >= 50:
-            raise ValueError("50 unanswered asks; wait for the user before asking more")
-        return self.append(rec, {**payload, "request_id": body.get("request_id"), "answer": None})
+            # a retry: the thread its first post opened, when the title agrees
+            thread = next(t for t in store.list(owner)["threads"] if t["id"] == found["thread"])
+            if thread["title"] != title:
+                raise web.HTTPConflict(text="request_id reused with different content")
+            return {"operator": rec["id"], "thread": {"id": thread["id"], "title": thread["title"]}, "entry": found}
+        data = {"level": level, "refs": refs}
+        if token is not None:
+            data["request_id"] = token
+        thread = store.open(owner, owner, title)["thread"]
+        entry = self.write(rec, thread["id"], text, data=data)
+        return {"operator": rec["id"], "thread": {"id": thread["id"], "title": thread["title"]}, "entry": entry}
+
+    def agent_threads(self, name):
+        rec = self.bound(name)
+        return {"operator": rec["id"], "threads": self.thread_rows(rec)}
 
     # -- the user's input --------------------------------------------------
+    def _user_images(self, body):
+        """``body["images"]`` (staged upload ids, POST /api/threads/images)
+        moved into the kept folder, as the store's records."""
+        raw = body.get("images")
+        if raw in (None, []):
+            return []
+        try:
+            return thread_images.keep(thread_images.check(raw))
+        except (thread_images.ThreadImageError, OSError) as exc:
+            raise ValueError(str(exc)) from None
+
+    def _user_write(self, rec, tid, body):
+        images = self._user_images(body)
+        raw = body.get("text")
+        try:
+            text = _text(raw, 12000) if not images or (isinstance(raw, str) and raw.strip()) else ""
+            return self.write(rec, tid, text, author="user", images=images)
+        except BaseException:
+            thread_images.unkeep(images)
+            raise
+
     async def message(self, op_id, body):
+        """The user's message in ``body["thread"]`` (default: the most
+        recently active thread): text, attached images, or both."""
         rec = self.get(op_id)
-        text = _text(body.get("text") if isinstance(body, dict) else None, 12000)
-        entry = self.append(rec, {"kind": "user", "role": "user", "text": text})
+        body = body if isinstance(body, dict) else {}
+        entry = self._user_write(rec, self.thread_of(rec, body.get("thread")), body)
         return {**entry, "nudge": await self.nudge(rec)}
+
+    async def open_user_thread(self, op_id, body):
+        """The user opens a thread (the view's 「새 thread」), optionally
+        with its first message."""
+        rec = self.get(op_id)
+        body = body if isinstance(body, dict) else {}
+        store, owner = self.threads(), self.owner(rec)
+        title = body.get("title")
+        if title is not None and not isinstance(title, str):
+            raise ValueError("title must be a string")
+        has_first = (isinstance(body.get("text"), str) and body["text"].strip()) or body.get("images")
+        thread = store.open(thread_store.USER, owner, title)["thread"]
+        out = {"thread": {"id": thread["id"], "title": thread["title"]}}
+        if has_first:
+            out["entry"] = self._user_write(rec, thread["id"], body)
+            out["nudge"] = await self.nudge(rec)
+        return out
+
+    def thread_status(self, op_id, tid, status):
+        rec = self.get(op_id)
+        tid = self.thread_of(rec, tid)
+        self.threads().set_status(thread_store.USER, tid, status)
+        return {"threads": self.thread_rows(rec)}
+
+    def thread_title(self, op_id, tid, body):
+        rec = self.get(op_id)
+        tid = self.thread_of(rec, tid)
+        self.threads().rename(thread_store.USER, tid, (body or {}).get("title") if isinstance(body, dict) else None)
+        return {"threads": self.thread_rows(rec)}
 
     async def answer(self, op_id, entry_id, body):
         rec = self.get(op_id)
-        entry = self.find(rec, entry_id)
+        message = self.threads().by_ref(self.owner(rec), entry_id)
+        if message is None:
+            raise web.HTTPNotFound(text="feed entry not found")
+        entry = entry_of(message)
         if entry.get("kind") != "ask":
             raise ValueError("feed entry is not an ask")
         if not isinstance(body, dict):
@@ -589,19 +877,19 @@ class OperatorsV2:
             if {k: entry["answer"].get(k) for k in answer} != answer:
                 raise web.HTTPConflict(text="ask already answered")
             return entry
-        entry["answer"] = {**answer, "at": now()}
-        self.save(rec)
+        data = dict(message.get("data") or {})
+        data["answer"] = {**answer, "at": now()}
+        entry = entry_of(self.threads().update_data(self.owner(rec), message["seq"], data))
         return {**entry, "nudge": await self.nudge(rec)}
 
-    @staticmethod
-    def input_key(entry):
-        return entry["id"] if entry.get("kind") == "user" else entry["id"] + ":answer"
-
     def unread(self, rec):
-        read = set(rec["read"])
-        return [e for e in rec["feed"]
-                if (e.get("kind") == "user" or (e.get("kind") == "ask" and e.get("answer")))
-                and self.input_key(e) not in read]
+        """The user's input the operator has not read, oldest first: user
+        messages past ``read_seq`` and answers it has not seen."""
+        store, owner = self.threads(), self.owner(rec)
+        rows = store.scan(owner, kinds=["message"], author="user", after=rec.get("read_seq") or 0)
+        rows += [m for m in store.scan(owner, kinds=["ask"])
+                 if (m.get("data") or {}).get("answer") and not m["data"].get("answer_read")]
+        return sorted(rows, key=lambda m: m["seq"])
 
     async def _deliver(self, rec, text):
         session = self.operator_session(rec)
@@ -630,15 +918,27 @@ class OperatorsV2:
 
     def inbox(self, name):
         rec = self.bound(name)
+        store, owner = self.threads(), self.owner(rec)
         rows = self.unread(rec)
-        if rows:
-            rec["read"] = (rec["read"] + [self.input_key(e) for e in rows])[-FEED_LIMIT:]
+        titles = {t["id"]: t["title"] for t in store.list(owner)["threads"]} if rows else {}
+        users = [m["seq"] for m in rows if m["kind"] == "message"]
+        if users:
+            rec["read_seq"] = max(users)
             self.save(rec)
-        return {"operator": rec["id"], "watch": rec["watch"], "messages": [
-            {"id": e["id"], "kind": e["kind"], "at": e["at"], "text": e["text"],
-             **({"type": e["type"], "choices": e.get("choices") or [], "answer": e["answer"]}
-                if e["kind"] == "ask" else {})}
-            for e in rows]}
+        for m in rows:
+            if m["kind"] == "ask":
+                store.update_data(owner, m["seq"], {**m["data"], "answer_read": True}, touch=False)
+        out = []
+        for m in rows:
+            e = entry_of(thread_images.attach(m))
+            item = {"id": e["id"], "kind": e["kind"], "at": e["at"], "text": e["text"],
+                    "thread": e["thread"], "thread_title": titles.get(e["thread"])}
+            if e.get("images"):
+                item["images"] = e["images"]
+            if e["kind"] == "ask":
+                item.update({"type": e["type"], "choices": e.get("choices") or [], "answer": e["answer"]})
+            out.append(item)
+        return {"operator": rec["id"], "watch": rec["watch"], "messages": out}
 
     # -- relaying the user's instruction ------------------------------------
     def basis(self, rec, entry_id):
@@ -656,6 +956,7 @@ class OperatorsV2:
             raise ValueError("object required")
         text = _text(body.get("text"), 12000)
         basis = self.basis(rec, body.get("on_behalf_of"))
+        tid = self._target_thread(rec, body, basis["thread"])
         session = self.member(rec, body.get("target"))
         if session.exited:
             raise ValueError(f"{session.sdef.name} is not running")
@@ -665,8 +966,10 @@ class OperatorsV2:
             delivery = "sent" if sent else "pending"
         except Exception:
             delivery = "unknown"
-        return self.append(rec, {"kind": "dispatch", "role": "bot", "target": session.sdef.name,
-                                 "text": text, "on_behalf_of": basis["id"], "delivery": delivery})
+        # The report stays in the thread the instruction came from, unless
+        # the operator names another.
+        return self.write(rec, tid, text, kind="dispatch",
+                          data={"target": session.sdef.name, "on_behalf_of": basis["id"], "delivery": delivery})
 
     # -- asking for a session (claunch-iw5i8.15) ----------------------------
     def _gate(self):
@@ -744,8 +1047,8 @@ class OperatorsV2:
         spec = await self.spawn_spec(name, rec, body)
         record = self._gate_call(self._gate().submit_spawn, session=name, spec=spec, reason=reason,
                                  basis=self._request_basis(rec, basis))
-        self.append(rec, {"kind": "system", "role": "system", "on_behalf_of": basis["id"],
-                          "text": f"세션 생성 요청 {record['id']}: {spec['project']} — {reason}"})
+        self.system(rec, f"세션 생성 요청 {record['id']}: {spec['project']} — {reason}",
+                    thread=basis["thread"], on_behalf_of=basis["id"])
         return {"operator": rec["id"], "request": record}
 
     async def resume(self, name, body):
@@ -765,9 +1068,8 @@ class OperatorsV2:
         spec = await self.spawn_spec(name, rec, fallback, project_fallback=project_of(target))
         record = self._gate_call(self._gate().submit_resume, session=name, target=target.sdef.name,
                                  reason=reason, fallback=spec, basis=self._request_basis(rec, basis))
-        self.append(rec, {"kind": "system", "role": "system", "on_behalf_of": basis["id"],
-                          "refs": [target.sdef.name],
-                          "text": f"세션 재개 요청 {record['id']}: {target.sdef.name} — {reason}"})
+        self.system(rec, f"세션 재개 요청 {record['id']}: {target.sdef.name} — {reason}",
+                    thread=basis["thread"], on_behalf_of=basis["id"], refs=[target.sdef.name])
         return {"operator": rec["id"], "request": record}
 
     def spawn_settled(self, row):
@@ -780,8 +1082,8 @@ class OperatorsV2:
         if rec is None:
             return
         refs = [n for n in (row.get("target"), row.get("created")) if n and self.session(n) is not None]
-        self.append(rec, {"kind": "system", "role": "system", "refs": refs,
-                          "text": gate_mod.outcome_message(row)})
+        basis = self.threads().by_ref(self.owner(rec), (row.get("basis") or {}).get("on_behalf_of") or "")
+        self.system(rec, gate_mod.outcome_message(row), thread=basis["thread"] if basis else None, refs=refs)
 
     def open_requests(self, name):
         """The spawn and resume requests this session filed that still wait."""
@@ -857,6 +1159,7 @@ class OperatorsV2:
             dirty = True
         if dirty:
             self.save(rec)
+        unread = self.unread(rec)
         sessions = [{"name": n, "project": project_of(s), "running": not s.exited,
                      "category": category[n], "status": s.info().get("status"),
                      **progress_of(work.get(n))}
@@ -865,7 +1168,8 @@ class OperatorsV2:
                 "scope": {"all": rec["all"], "projects": rec["projects"]},
                 "cursor": cursor, "more": more, "events": events, "attention": attention,
                 "paused": paused, "progress": progress, "degraded": degraded, "ended": ended,
-                "sessions": sessions, "unread_user_input": len(self.unread(rec)),
+                "sessions": sessions, "unread_user_input": len(unread),
+                "unread_threads": sorted({m["thread"] for m in unread}),
                 "requests": self.open_requests(name)}
 
     # -- questions about work ----------------------------------------------
@@ -876,9 +1180,12 @@ class OperatorsV2:
         kinds = [k for k in (query.get("kind") or "").split(",") if k]
         needle = (query.get("q") or "").casefold()
         target = query.get("session") or ""
+        thread = query.get("thread") or None
+        if thread:
+            thread = self.thread_of(rec, thread)
         limit = _int(query.get("limit"), 50, 1, 200, "limit")
         rows = []
-        for entry in reversed(rec["feed"]):
+        for entry in map(entry_of, self.threads().scan(self.owner(rec), thread=thread, newest=True)):
             if kinds and entry.get("kind") not in kinds:
                 continue
             if target and target != entry.get("target") and target not in (entry.get("refs") or ()):
@@ -1042,11 +1349,20 @@ def install(app, *, create=None, gates=None, work=None):
     cflow gates waiting on sessions and ``work`` reads their status checks and
     board issues; the API module passes all three."""
     ops = OperatorsV2(paths.daemon_dir(), app["manager"], app.get("observer"), gates, work,
-                      board=lambda: app.get("beads"), spawn_gate=lambda: app.get("spawn_gate"))
+                      board=lambda: app.get("beads"), spawn_gate=lambda: app.get("spawn_gate"),
+                      threads=lambda: app.get("threads"))
     app["operators_v2"] = ops
 
-    def fail(exc):
-        return web.json_response({"error": str(exc)}, status=400)
+    async def migrate(_app):
+        # Reading the records moves an older feed into threads, once per
+        # operator (OperatorsV2.migrate); doing it at start keeps it off the
+        # first request.
+        await asyncio.to_thread(ops.records)
+
+    app.on_startup.append(migrate)
+
+    def fail(exc, status=400):
+        return web.json_response({"error": str(exc)}, status=status)
 
     async def body_of(request):
         try:
@@ -1060,6 +1376,8 @@ def install(app, *, create=None, gates=None, work=None):
                 return web.json_response(await handler(request))
             except ValueError as exc:
                 return fail(exc)
+            except thread_store.ThreadError as exc:
+                return fail(exc, exc.status)
         return run
 
     @guarded
@@ -1074,7 +1392,7 @@ def install(app, *, create=None, gates=None, work=None):
 
     @guarded
     async def view(request):
-        return await ops.view(request.match_info["id"])
+        return await ops.view(request.match_info["id"], request.query.get("thread") or None)
 
     @guarded
     async def update(request):
@@ -1141,12 +1459,26 @@ def install(app, *, create=None, gates=None, work=None):
         if kill_gate.is_gated(by, session.sdef.name):
             return web.json_response({"error": "an agent may not stop an operator; ask the user"}, status=403)
         request.app["manager"].kill(session.sdef.name, by=by)
-        ops.append(rec, {"kind": "system", "role": "system", "text": f"Operator 세션 {session.sdef.name}을 정지했습니다."})
+        ops.system(rec, f"Operator 세션 {session.sdef.name}을 정지했습니다.")
         return web.json_response({"id": rec["id"], "stopped": True, "session": session.sdef.name})
 
     @guarded
     async def message(request):
         return await ops.message(request.match_info["id"], await body_of(request))
+
+    @guarded
+    async def open_thread(request):
+        return await ops.open_user_thread(request.match_info["id"], await body_of(request))
+
+    def thread_status(status):
+        @guarded
+        async def handler(request):
+            return ops.thread_status(request.match_info["id"], request.match_info["thread"], status)
+        return handler
+
+    @guarded
+    async def thread_title(request):
+        return ops.thread_title(request.match_info["id"], request.match_info["thread"], await body_of(request))
 
     @guarded
     async def answer(request):
@@ -1163,6 +1495,14 @@ def install(app, *, create=None, gates=None, work=None):
     @guarded
     async def agent_ask(request):
         return ops.ask(request.match_info["name"], await body_of(request))
+
+    @guarded
+    async def agent_thread_open(request):
+        return ops.open_thread(request.match_info["name"], await body_of(request))
+
+    @guarded
+    async def agent_threads(request):
+        return ops.agent_threads(request.match_info["name"])
 
     @guarded
     async def agent_inbox(request):
@@ -1216,6 +1556,8 @@ def install(app, *, create=None, gates=None, work=None):
     r.add_post(agent + "/post", agent_post)
     r.add_post(agent + "/ask", agent_ask)
     r.add_get(agent + "/inbox", agent_inbox)
+    r.add_get(agent + "/threads", agent_threads)
+    r.add_post(agent + "/threads", agent_thread_open)
     r.add_get(agent + "/poll", agent_poll)
     r.add_post(agent + "/dispatch", agent_dispatch)
     r.add_post(agent + "/spawn", agent_spawn)
@@ -1232,6 +1574,10 @@ def install(app, *, create=None, gates=None, work=None):
     r.add_post("/api/operators/{id}/start", start)
     r.add_post("/api/operators/{id}/stop", stop)
     r.add_post("/api/operators/{id}/message", message)
+    r.add_post("/api/operators/{id}/threads", open_thread)
+    r.add_post("/api/operators/{id}/threads/{thread}/close", thread_status("closed"))
+    r.add_post("/api/operators/{id}/threads/{thread}/reopen", thread_status("open"))
+    r.add_post("/api/operators/{id}/threads/{thread}/title", thread_title)
     r.add_post("/api/operators/{id}/asks/{entry}/answer", answer)
     r.add_post("/api/operators/{id}/seen", seen)
     return ops
