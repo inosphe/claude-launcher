@@ -6920,6 +6920,11 @@ a.chart-name:hover .chart-name-text { text-decoration: underline; }
 .spec-table { border-collapse: collapse; font-size: 12px; width: 100%; }
 .spec-table th, .spec-table td { border: 1px solid #30363d; padding: 4px 6px; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
 #spec-view .wf-btn:disabled { opacity: .5; cursor: default; }
+.spec-errors li { margin: 2px 0; }
+.spec-line { font: inherit; font-size: 11px; margin-right: 6px; padding: 0 5px; border: 1px solid #30363d; border-radius: 3px; background: transparent; color: #79c0ff; cursor: pointer; }
+.spec-auto { display: inline-flex; gap: 4px; align-items: center; font-size: 12px; }
+.spec-preview h3 { margin: 14px 0 6px; }
+.spec-preview .spec-table td:first-child { white-space: pre; }
 /* Glossary: scoped design tokens keep controls consistent with the dark shell. */
 #glossary-view {
   --gl-border: #303843; --gl-muted: #a4afbd; --gl-panel: #1b2028;

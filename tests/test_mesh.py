@@ -1598,9 +1598,9 @@ def test_mesh_install_project(tmp_path, home):
     from claude_launcher import install
 
     done = install.install_into_project(tmp_path)
-    # one server, eight skills — and nothing outside the project: workflow
+    # one server, nine skills — and nothing outside the project: workflow
     # seeding is the global/profile installs' business
-    assert len([line for line in done if line.startswith("skill ->")]) == 8
+    assert len([line for line in done if line.startswith("skill ->")]) == 9
     # the topology skills (wire peers, delegate a domain, re-draw the tree)
     # land beside mesh
     for name in ("mesh-wire", "mesh-delegate", "mesh-retopology"):
@@ -1665,6 +1665,13 @@ def test_mesh_install_project(tmp_path, home):
     assert art.startswith("---\nname: claunch-artifact\n")
     assert "claunch report path --name" in art  # the one place to write
     assert "no beads board" in art             # the board-less answer
+    # ...and work-spec, teaching an agent to write a spec that imports
+    spec = (tmp_path / ".claude" / "skills" / "work-spec" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    assert spec.startswith("---\nname: work-spec\n")
+    assert "claunch spec check" in spec        # the validation loop
+    assert "claunch spec preview" in spec      # the session/work preview
     # installing again is idempotent and keeps other servers
     doc["mcpServers"]["other"] = {"command": "x"}
     (tmp_path / ".mcp.json").write_text(json.dumps(doc), encoding="utf-8")
@@ -1685,7 +1692,7 @@ def test_global_install_targets_the_user_scope(tmp_path, home, monkeypatch):
 
     cfg = Path(os.environ["CLAUDE_CONFIG_DIR"])
     done = install.install_into_user()
-    assert len([line for line in done if line.startswith("skill ->")]) == 8
+    assert len([line for line in done if line.startswith("skill ->")]) == 9
     assert [line for line in done if line.startswith("workflow ->")]
     assert (cfg / "skills" / "mesh" / "SKILL.md").is_file()
     doc = json.loads((cfg / ".claude.json").read_text(encoding="utf-8"))

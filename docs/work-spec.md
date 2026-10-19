@@ -272,7 +272,8 @@ shared 를 고를 때 감수하는 충돌은 다음과 같다.
 ### 실행기와 CLI
 
 ```
-claunch spec check  <file>                         # 검증 오류 목록, 없으면 ok
+claunch spec check  <file>                         # 검증 오류 목록(<file>:<줄>: <오류>), 없으면 ok
+claunch spec preview <file> [--json]               # 띄울 세션 트리와 이슈의 착수 단계(쓰기 없음)
 claunch spec plan   <file> --leader shared:s29     # action 목록(쓰기 없음)
 claunch spec import <file> --leader own --profile <p>
 ```
@@ -286,6 +287,12 @@ claunch spec import <file> --leader own --profile <p>
 정할 수 없는 import(명세와 바디 어디에도 `workspace` 가 없거나 등록되지 않은 이름)는 400 과
 `workspace_error: true` 로 답하며 아무것도 쓰지 않는다.
 import 가 중간에 멈추면 409 에 그때까지의 `log` 와 `resumable: true` 를 싣는다.
+check 는 오류마다 그 오류가 가리키는 YAML 줄(`lines`, `errors` 와 같은 순서, 모르면 null,
+`workspec.locate`)을, 통과한 명세에는 세션·작업 미리보기(`preview`, `workspec.preview`)를
+함께 싣는다. 페이지는 입력이 멈추면 check 를 스스로 부르고, 오류의 「줄 N」 버튼으로 그 줄을
+선택하며, 리더를 고르기 전에 미리보기를 보여 준다. `GET /api/spec/template` 은 검증을 통과하는
+예시 템플릿(`workspec.TEMPLATE`)을 돌려준다. 같은 템플릿과 작성 규칙이 `claunch install` 이
+설치하는 `work-spec` skill 에 실린다(`workspec_skill.py`).
 
 | 항목 | 동작 |
 |---|---|

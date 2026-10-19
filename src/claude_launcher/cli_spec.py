@@ -1,7 +1,8 @@
 """``claunch spec ...`` — check, plan and import a work spec.
 
-``check`` and ``plan`` have no side effects: they print the validator's errors
-or the ordered actions an import would take. ``import`` runs them
+``check``, ``preview`` and ``plan`` have no side effects: they print the
+validator's errors (with the YAML line each is about), the sessions and work
+the spec describes, or the ordered actions an import would take. ``import`` runs them
 (:mod:`claude_launcher.workspec_import`). The format is ``docs/work-spec.md``.
 """
 
@@ -15,24 +16,67 @@ from pathlib import Path
 from . import workspec, workspec_import
 
 
-def _load(path: str) -> dict:
+def _read(path: str) -> str:
     try:
-        text = Path(path).read_text(encoding="utf-8")
+        return Path(path).read_text(encoding="utf-8")
     except OSError as exc:
         raise workspec.SpecError(f"cannot read {path}: {exc}") from None
-    return workspec.load(text)
+
+
+def _load(path: str) -> dict:
+    return workspec.load(_read(path))
 
 
 def _cmd_check(args: argparse.Namespace) -> int:
+    """Each error as ``<file>:<line>: <error>`` (the line the error is
+    about, :func:`workspec.locate`), so an editor or an agent jumps to it."""
+    text = ""
     try:
-        errs = workspec.validate(_load(args.file))
+        text = _read(args.file)
+        errs = workspec.validate(workspec.load(text))
     except workspec.SpecError as exc:
         errs = [str(exc)]
-    for e in errs:
-        print(e)
+    for e, line in zip(errs, workspec.locate(text, errs) if text else
+                       [None] * len(errs)):
+        print(f"{args.file}:{line}: {e}" if line else e)
     if not errs:
         print("ok")
     return 1 if errs else 0
+
+
+def _cmd_preview(args: argparse.Namespace) -> int:
+    """The sessions and the work a valid spec describes (no writes, no
+    leader choice): :func:`workspec.preview`."""
+    try:
+        doc = _load(args.file)
+    except workspec.SpecError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    errs = workspec.validate(doc)
+    if errs:
+        print(f"error: {len(errs)} problem(s); run claunch spec check "
+              f"{args.file}", file=sys.stderr)
+        return 2
+    view = workspec.preview(doc)
+    if args.json:
+        print(json.dumps(view, ensure_ascii=False, indent=2))
+        return 0
+    print("sessions:")
+    for s in view["sessions"]:
+        role = " + ".join([s["role"], *s["subroles"]])
+        extra = (f" queue={','.join(s['queue'])}" if s["queue"] else "") + \
+                (f" reviews={','.join(s['reviews'])}" if s["reviews"] else "")
+        name = s["id"] + (f" ({s['mode']})" if s["kind"] == "leader" else "")
+        print(f"  {'  ' * s['depth']}{name:24} {s['kind']:9} {role:16} "
+              f"{s['workflow'] or '-'}{extra}")
+    print("tasks (wave = start order by blocked_by):")
+    for t in sorted(view["tasks"], key=lambda t: (t["wave"], t["priority"])):
+        extra = (f" after={','.join(t['blocked_by'])}" if t["blocked_by"]
+                 else "") + \
+                (f" waits={','.join(t['gated_by'])}" if t["gated_by"] else "")
+        print(f"  {t['wave']}  {t['key']:16} {t['type']:7} P{t['priority']} "
+              f"{t['assignee'] or '-':12} {t['title']}{extra}")
+    return 0
 
 
 def _cmd_plan(args: argparse.Namespace) -> int:
@@ -89,6 +133,12 @@ def register(sub) -> None:
     c = ssub.add_parser("check", help="validate a work spec; exit 1 on errors")
     c.add_argument("file")
     c.set_defaults(func=_cmd_check)
+
+    v = ssub.add_parser(
+        "preview", help="show the sessions and work a valid spec describes")
+    v.add_argument("file")
+    v.add_argument("--json", action="store_true")
+    v.set_defaults(func=_cmd_preview)
 
     for name, func, helptext in (
         ("plan", _cmd_plan, "print the actions an import would take (no writes)"),

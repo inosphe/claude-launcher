@@ -148,3 +148,31 @@ def test_the_board_is_a_registered_workspace_never_the_daemons_cwd(home, tmp_pat
         clash = await post("check", {"yaml": TEXT, "workspace": "night-ws"}, 400)
         assert clash["workspace_error"] is True
     _run(scenario, backend=fb, built=built)
+
+
+def test_check_answers_the_preview_and_the_line_of_each_error(home):
+    """What the page draws while the text is edited: a valid spec's
+    sessions and work, and for a bad one the YAML line of every error."""
+    async def scenario(post, client):
+        out = await post("check", {"yaml": TEXT})
+        ids = [s["id"] for s in out["preview"]["sessions"]]
+        assert ids == ["leader", "lead2", "ue1", "sys1", "rv1"]
+        assert {t["key"] for t in out["preview"]["tasks"]} == \
+            {i["key"] for i in yaml.safe_load(TEXT)["issues"]}
+
+        bad = TEXT.replace("    kind: reviewer", "    kind: reviewr")
+        out = await post("check", {"yaml": bad}, 400)
+        assert len(out["lines"]) == len(out["errors"])
+        row = next(i for i, l in enumerate(bad.splitlines(), 1)
+                   if "kind: reviewr" in l)
+        assert out["lines"][out["errors"].index(
+            "agents.rv1.kind: one of sub-lead, worker, reviewer")] == row
+        out = await post("check", {"yaml": "spec: 1\nagents: [\n"}, 400)
+        assert out["lines"][0] and "preview" not in out
+
+        template = await client.get("/api/spec/template")
+        assert template.status == 200
+        text = (await template.json())["yaml"]
+        out = await post("check", {"yaml": text})
+        assert out["errors"] == [] and out["preview"]["tasks"]
+    _run(scenario)

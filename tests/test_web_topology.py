@@ -590,6 +590,7 @@ CHECKS = [
         "talkpane_check.js",
         "splitframe_check.js",
         "specpage_check.js",
+        "specpage_tools_check.js",
         "shadowcard_check.js",
         "railshadowmix_check.js",
         "cflow2view_check.js",

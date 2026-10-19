@@ -342,3 +342,100 @@ def test_subrole_prompt_must_be_a_string(doc, value):
     """A list prompt used to pass: str(['a']) is non-empty (claunch-nc6dg)."""
     doc["subroles"]["shader"]["prompt"] = value
     assert ws.validate(doc) == ["subroles.shader.prompt: must be a string"]
+
+
+# G ------------------------------------------------------------------------
+# The editing tools: the template is valid, and each error line points at the
+# YAML line it is about (the #/spec page's 줄 N button, `claunch spec check`).
+
+def test_template_is_valid_and_plans():
+    doc = ws.load(ws.TEMPLATE)
+    assert ws.validate(doc) == []
+    assert ws.plan(doc, "own")
+
+
+def _line_of(text: str, needle: str) -> int:
+    return next(i for i, row in enumerate(text.splitlines(), 1) if needle in row)
+
+
+def test_locate_points_each_error_at_its_line():
+    text = (ws.TEMPLATE
+            .replace("    kind: reviewer", "    kind: reviewr")
+            .replace("    blocked_by: [handler]",
+                     "    blocked_by: [nope]\n    colour: red"))
+    errs = ws.validate(ws.load(text))
+    where = dict(zip(errs, ws.locate(text, errs)))
+    assert where["agents.rev.kind: one of sub-lead, worker, reviewer"] == \
+        _line_of(text, "kind: reviewr")
+    # an unknown key: the key itself, not the item
+    assert where["issues.client: unknown key(s) colour"] == \
+        _line_of(text, "colour: red")
+    assert where["issues.client.blocked_by: unknown issue 'nope'"] == \
+        _line_of(text, "blocked_by: [nope]")
+
+
+def test_locate_walks_indexes_dotted_ids_and_stops_at_the_parent():
+    text = EXAMPLE.read_text(encoding="utf-8")
+    contract = _line_of(text, "- id: C.store.night-multiplier")
+    lines = ws.locate(text, [
+        "agents[1].kind: must be a string",          # an index
+        "contracts.C.store.night-multiplier.text: required",  # dots in an id
+        "leader.own.profile: missing",              # a key that is not there
+        "spec: unknown key(s) extra",               # the document itself
+        "issues: blocked_by cycle W1 -> W2 -> W1",  # a block
+    ])
+    assert lines[0] == _line_of(text, "  - id: ue1") + 1
+    assert contract <= lines[1] <= contract + 6
+    assert lines[2] == _line_of(text, "    name: lead-night-sense")
+    assert lines[3] == _line_of(text, "spec: 1")  # the mapping, after comments
+    assert lines[4] == _line_of(text, "issues:") + 1
+
+
+def test_locate_reads_the_line_of_a_yaml_error():
+    text = "spec: 1\nname: x\nagents: [\n"
+    with pytest.raises(ws.SpecError) as exc:
+        ws.load(text)
+    [line] = ws.locate(text, [str(exc.value)])
+    assert line and line >= 3
+    assert ws.locate(text, ["name: lowercase slug [a-z0-9-] required"]) == [None]
+
+
+# H ------------------------------------------------------------------------
+# The preview: the sessions an import starts and the order the work begins.
+
+def test_preview_lays_out_the_agent_tree_under_the_leader(doc):
+    view = ws.preview(doc)
+    tree = [(s["id"], s["depth"], s["parent"]) for s in view["sessions"]]
+    assert tree == [("leader", 0, None), ("lead2", 1, "leader"),
+                    ("ue1", 2, "lead2"), ("sys1", 2, "lead2"),
+                    ("rv1", 1, "leader")]
+    by_id = {s["id"]: s for s in view["sessions"]}
+    assert by_id["leader"]["mode"] == "ask"
+    assert by_id["ue1"]["role"] == "worker"
+    assert by_id["ue1"]["subroles"] == ["shader"]
+    assert by_id["rv1"]["workflow"] == ""
+    assert by_id["sys1"]["connect"] == ["ue1"]
+    # the queue is plan()'s: the first is the issue its spawn takes
+    spawns = {a["agent"]: a["issue"] for a in ws.plan(doc, "own")
+              if a["do"] == "spawn" and a["agent"] != "leader"}
+    for aid, first in spawns.items():
+        assert (by_id[aid]["queue"] or [None])[0] == first
+
+
+def test_preview_orders_the_work_in_waves_and_marks_decision_gates():
+    view = ws.preview(ws.load(ws.TEMPLATE))
+    tasks = {t["key"]: t for t in view["tasks"]}
+    assert (tasks["api"]["wave"], tasks["handler"]["wave"],
+            tasks["client"]["wave"]) == (0, 0, 1)
+    assert tasks["client"]["gated_by"] == ["auth"]
+    assert tasks["handler"]["review"] == "rev"
+    rev = next(s for s in view["sessions"] if s["id"] == "rev")
+    assert rev["reviews"] == ["handler"] and rev["queue"] == []
+    assert [c["id"] for c in view["contracts"]] == ["api-shape"]
+    assert view["decisions"][0]["gates"] == ["client"]
+
+
+def test_preview_of_an_attach_spec_names_the_existing_leader(doc):
+    doc["mesh"] = {"mode": "attach", "name": "team"}
+    doc["leader"]["mode"] = "shared"
+    assert ws.preview(doc)["sessions"][0]["mode"] == "existing"

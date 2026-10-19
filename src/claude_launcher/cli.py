@@ -1671,7 +1671,8 @@ def build_parser() -> argparse.ArgumentParser:
         "install",
         help="give an agent the claunch toolkit: register the MCP server "
         "(workflow + mesh + team-building tools) and write the /cflow, "
-        "/mesh, commit-stamp and claunch-artifact skills (--project, "
+        "/mesh, commit-stamp, claunch-artifact and work-spec skills "
+        "(--project, "
         "--global, --profile, "
         "or --all-profile)",
     )
