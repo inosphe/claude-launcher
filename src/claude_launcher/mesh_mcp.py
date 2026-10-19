@@ -572,6 +572,19 @@ TOOLS = [
                         "updates a REUSED one"
                     ),
                 },
+                "model": {
+                    "type": "string",
+                    "description": (
+                        "the child's model: a claunch model preset (default, "
+                        "small, large, xlarge, subagent), resolved against "
+                        "the child's profile and harness, or a model name. "
+                        "Gated by spawn.allow_args"
+                    ),
+                },
+                "effort": {
+                    "type": "string",
+                    "description": "the child's reasoning effort. Gated by spawn.allow_args",
+                },
             },
             "required": [],
         },
