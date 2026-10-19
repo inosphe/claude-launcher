@@ -91,25 +91,37 @@ option:disabled { color: #6b7280; }
 }
 #theme-toggle:hover { color: #58a6ff; }
 
-/* The light theme's terminals: the picture is inverted rather than the
-   palette re-chosen, because a session's program draws in 24-bit colour the
-   xterm palette never sees (theme.js says why). The filter is the SVG
-   #claunch-light-term in index.html, two steps:
-     1. feColorMatrix inverts luma and keeps hue and chroma: every channel
-        moves by the same amount, c' = c + 1 - 2Y (Y the Rec. 709 luma), so
-        Y' = 1 - Y and the channel differences are unchanged. This is what
-        invert(1) hue-rotate(180deg) computes.
-     2. feComponentTransfer is a tone curve through 11 points: it keeps the
-        terminal background where step 1 put it (0.91 stays 0.91), lowers mid
-        tones so coloured text reads on a near-white page, and lifts 0 to
-        0.10, so text is a soft black.
-   The filter before this (claunch-bj6ee) followed step 1 with brightness(0.8)
-   contrast(1.8), a linear stretch v' = 1.44 v - 0.4. It sends every channel
-   below 0.28 to 0: the dark palette's lavender (177,185,249) became navy
-   (0,0,83), white text became black, dim grey text became near black, and
-   chroma grew by 1.44. A curve with a finite slope at 0 has no such floor. */
+/* The light theme's terminals keep the dark page's palette instead of
+   inverting the picture. A session draws with whatever its program asks
+   for -- 16 ANSI colours, 256-colour indices and 24-bit RGB alike -- and
+   the inverted picture turned bold and coloured text into saturated
+   pastels on near-white: the complaint this answers (claunch-bj6ee.1).
+   The panel reads as a dark card on the light page, so every colour a
+   program chose for a dark background stays as readable as it was.
+
+   The card's colours are the dashboard dark theme's own, as custom
+   properties. The theme switcher (theme.js) rewrites every colour it
+   finds for the light theme, but skips a rule whose selector names
+   .xterm, so the properties are defined under `#terminal, .xterm` and
+   keep their dark values; the light-only rules below reach them with
+   var(), which the rewrite leaves alone (no colour token in a var()
+   reference). */
+#terminal, .xterm {
+  --term-page: #14161a;   /* the dark page background (body) */
+  --term-border: #30363d; /* hairline borders */
+}
+html[data-theme="light"] #terminal { background: var(--term-page); }
 html[data-theme="light"] .xterm {
-  filter: url(#claunch-light-term);
+  background: var(--term-page);
+  /* the card's edge against the light page (outline: no layout change) */
+  outline: 1px solid var(--term-border);
+}
+/* The throughput overlay floats on the terminal picture; its translucent
+   dark wash is rewritten for the light page like anything else's, so pin
+   the wash to the same dark palette. Its state colours (yellow/green,
+   set by .live/.stale) stay readable on the dark wash as rewritten. */
+html[data-theme="light"] #term-tps-overlay {
+  background: color-mix(in srgb, var(--term-page) 78%, transparent);
 }
 
 /* Keep the filter panel and session list visually continuous. */

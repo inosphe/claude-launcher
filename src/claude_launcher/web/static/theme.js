@@ -35,13 +35,17 @@
 
    The terminals are not themed through their colours. A session draws with
    whatever its program asks for -- 16 ANSI colours, 256-colour indices and
-   24-bit RGB alike -- and only the first are xterm options. The light theme
-   inverts the terminal's PICTURE instead (style.css, `.xterm` under
-   [data-theme="light"]: the SVG filter #claunch-light-term in index.html),
-   which turns every colour the program chose, whatever its kind, the way
-   the rest of the page turned.
+   24-bit RGB alike -- and only the first are xterm options. So the light
+   theme does not touch the terminal picture at all: the terminal keeps the
+   dark page's own palette (the --term-* custom properties, style.css) and
+   reads as a dark card on the light page. Bold and coloured text stay the
+   colours the program chose for a dark background (claunch-bj6ee.1); the
+   earlier design inverted the picture through an SVG filter, which turned
+   them into saturated pastels on near-white.
+
    For the same reason the vendored xterm.css and any rule aimed inside
-   `.xterm` are never rewritten: the filter would invert them a second time.
+   `.xterm` are never rewritten: the terminal keeps the dark palette in both
+   themes.
 
    A sheet copied at run time from the themed sheets (the session grid's
    hover card copies the list's card rules, sessionGridTipStyles) is marked
